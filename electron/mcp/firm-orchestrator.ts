@@ -34,7 +34,7 @@ type EventSink = (ev: McpInvocationEvent) => void;
 const MAX_DIVISIONS_PARALLEL = 4;
 const MAX_SPECIALISTS_PARALLEL = 4;
 /** 노드 1턴 안전 타임아웃 — 멈춘 CLI 1개가 전체를 무한 대기시키지 않게. */
-const NODE_TIMEOUT_MS = 180_000;
+const NODE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface FirmRunParams {
   req: McpInvocationRequest;
@@ -43,6 +43,10 @@ export interface FirmRunParams {
   ceoAgent: InstalledAgent;
   active: RuntimeStatus;
   picked: { runner: Runner; label: string };
+  workingFolder?: string | null;
+  mcpConfigPath?: string;
+  mcpAllowedTools?: string[];
+  mcpCodexConfigArgs?: string[];
   locale: RuntimeLocale;
   sink: EventSink;
   signal?: AbortSignal;
@@ -89,12 +93,23 @@ async function runNodeTurnSafe(
   turn: NodeTurn,
 ): Promise<{ text: string; delegations: Delegation[]; ok: boolean }> {
   const link = linkAbort(p.signal);
-  const timer = setTimeout(() => link.abort(), NODE_TIMEOUT_MS);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    link.abort();
+  }, NODE_TIMEOUT_MS);
   try {
     const r = await runNodeTurn(p, { ...turn, signal: link.signal });
     return { ...r, ok: true };
   } catch (err) {
     if (p.signal?.aborted) throw err; // 사용자 취소는 전파
+    if (timedOut) {
+      return {
+        text: `(${turn.node.name} 응답 실패: ${Math.round(NODE_TIMEOUT_MS / 1000)}초 동안 응답이 없어 자동 중단했습니다.)`,
+        delegations: [],
+        ok: false,
+      };
+    }
     const msg = err instanceof Error ? err.message : String(err);
     return { text: `(${turn.node.name} 응답 실패: ${msg})`, delegations: [], ok: false };
   } finally {
@@ -155,9 +170,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
     tier,
     phase,
   });
+  const emit = (ev: McpInvocationEvent) => p.sink(tag(ev));
 
   // 워킹 폴더(활성 시 프로젝트 메모리)
-  const workingFolder = getChatWorkingFolder(p.chat.id);
+  const workingFolder = p.workingFolder ?? getChatWorkingFolder(p.chat.id);
   let activePath: string | null = null;
   if (workingFolder) {
     try {
@@ -181,7 +197,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
   }
   systemPrompt += `\n\n${MEMORY_EMITTER_BLOCK}`;
 
-  tag({ kind: "thinking", status: phaseStatus(p.locale, phase, node.name) });
+  emit({ kind: "thinking", status: phaseStatus(p.locale, phase, node.name) });
 
   const result = await p.picked.runner(
     {
@@ -196,19 +212,22 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
       signal: turn.signal ?? p.signal,
       permission: p.req.permissions,
       cwd: workingFolder ?? undefined,
+      mcpConfigPath: p.mcpConfigPath,
+      mcpAllowedTools: p.mcpAllowedTools,
+      mcpCodexConfigArgs: p.mcpCodexConfigArgs,
       locale: p.locale,
     },
     {
       onStatus: (status) => {
-        tag({ kind: "tool-use", status });
+        emit({ kind: "tool-use", status });
         if (turn.toMainBubble) p.sink({ kind: "tool-use", status });
       },
       onPartial: (text) => {
-        tag({ kind: "partial", text });
+        emit({ kind: "partial", text });
         if (turn.toMainBubble) p.sink({ kind: "partial", text });
       },
       onTool: (name, args) => {
-        tag({ kind: "tool-use", tool: { name, args } });
+        emit({ kind: "tool-use", tool: { name, args } });
         if (turn.toMainBubble) p.sink({ kind: "tool-use", tool: { name, args } });
       },
     },
@@ -354,7 +373,28 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
     withImages: true,
   });
   if (!plan.ok) {
-    sink({ kind: "error", error: { code: "ceo-failed", message: plan.text } });
+    mainStatus(
+      ko
+        ? "CEO 위임 계획이 지연되어 단독 실행으로 자동 재시도합니다…"
+        : "CEO planning stalled — retrying as a direct execution…",
+    );
+    const solo = await runNodeTurnSafe(p, {
+      node: org.ceo,
+      tier: 1,
+      phase: "synthesize",
+      userPrompt: req.userPrompt,
+      history,
+      chatId: chat.id,
+      toMainBubble: true,
+      withImages: true,
+    });
+    if (!solo.ok) {
+      appendChatMessage(chat.id, "assistant", solo.text);
+      sink({ kind: "error", error: { code: "ceo-failed", message: solo.text } });
+      return;
+    }
+    appendChatMessage(chat.id, "assistant", solo.text);
+    sink({ kind: "final", text: solo.text });
     return;
   }
 

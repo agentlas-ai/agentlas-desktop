@@ -1,14 +1,23 @@
 // 활성 백엔드 → 실제 러너로 라우팅하는 invocation runner.
 // PRD §3.1 6단계 BYOC: 사용자 머신에서 사용자의 구독/키로 직접 호출.
 // chatId 기반 — chat에서 agent + project 컨텍스트 lookup.
+import fs from "node:fs";
+import path from "node:path";
 import { detectRuntimes } from "../runtime/detect";
-import { getAgentById } from "./registry";
+import { getAgentById, listInstalledAgents } from "./registry";
+import {
+  autoRouteStatus,
+  autoRouteSystemPreamble,
+  isGlobalOrchestrator,
+  selectAutoRoutedAgent,
+} from "../agents/auto-router";
 import {
   appendChatMessage,
   autoTitleFromFirstMessage,
   getChat,
   getChatWorkingFolder,
   listChatMessages,
+  setChatWorkingFolder,
 } from "../store/chats";
 import { getProject } from "../store/projects";
 import { getFirm } from "../store/firms";
@@ -28,6 +37,7 @@ import {
   runAnthropicByok,
   runGoogleByok,
   runOpenAIByok,
+  runUpstageByok,
 } from "../runtime/byok";
 import { runOllama } from "../runtime/ollama";
 import type { Runner } from "../runtime/runner";
@@ -47,6 +57,7 @@ const RUNNER_LABEL: Record<string, string> = {
   "byok:anthropic": "Anthropic API",
   "byok:openai": "OpenAI API",
   "byok:google": "Google API",
+  "byok:upstage": "Upstage Solar API",
 };
 
 function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | null {
@@ -62,12 +73,35 @@ function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | 
       return { runner: runOpenAIByok, label: RUNNER_LABEL["byok:openai"] };
     if (active.backend === "google")
       return { runner: runGoogleByok, label: RUNNER_LABEL["byok:google"] };
+    if (active.backend === "upstage")
+      return { runner: runUpstageByok, label: RUNNER_LABEL["byok:upstage"] };
   }
   return null;
 }
 
 function pickActive(list: RuntimeStatus[]): RuntimeStatus | null {
   return list.find((r) => r.active) ?? list[0] ?? null;
+}
+
+function cleanPathCandidate(raw: string | undefined): string | null {
+  const cleaned = raw?.trim().replace(/^`|`$/g, "").replace(/[),.;]+$/g, "");
+  if (!cleaned || !path.isAbsolute(cleaned)) return null;
+  return cleaned;
+}
+
+function inferWorkingFolderFromPrompt(prompt: string): string | null {
+  const explicit = prompt.match(
+    /(?:project|working|workspace|target|output)?\s*(?:folder|directory|dir)\s*(?:only)?[^/]*(\/(?:Volumes|Users|tmp|private\/tmp)\/[^\s`"'<>]+)/i,
+  );
+  const candidate = cleanPathCandidate(explicit?.[1]);
+  if (!candidate) return null;
+  try {
+    fs.mkdirSync(candidate, { recursive: true });
+    return candidate;
+  } catch (err) {
+    console.error("[workspace] failed to create inferred working folder:", err);
+    return null;
+  }
 }
 
 /** 활성 런타임 + 러너를 한 번에 선택 (오케스트레이터/리졸버 공용). */
@@ -103,10 +137,17 @@ export async function runMcpInvocation(
     sink({ kind: "error", error: { code: "no-chat", message: tStatus(locale, "errChatNotFound") } });
     return;
   }
-  const agent = getAgentById(chat.agentId);
+  let agent = getAgentById(chat.agentId);
   if (!agent) {
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
     return;
+  }
+  const autoRoute = isGlobalOrchestrator(agent)
+    ? selectAutoRoutedAgent(req.userPrompt, listInstalledAgents(), locale)
+    : null;
+  if (autoRoute) {
+    sink({ kind: "tool-use", status: autoRouteStatus(autoRoute, locale) });
+    agent = autoRoute.agent;
   }
 
   const runtimes = await detectRuntimes();
@@ -134,6 +175,35 @@ export async function runMcpInvocation(
     return;
   }
 
+  // 사용자가 프롬프트 안에 "project folder: /abs/path"처럼 명시하면, 채팅 워킹 폴더로
+  // 자동 고정한다. firm 경로도 단일 에이전트 경로와 같은 cwd/MCP 구성을 받아야 한다.
+  const existingWorkingFolder = getChatWorkingFolder(chat.id);
+  const projectWorkingFolder = chat.projectId ? getProject(chat.projectId)?.folderPath ?? null : null;
+  const inferredWorkingFolder =
+    existingWorkingFolder || projectWorkingFolder ? null : inferWorkingFolderFromPrompt(req.userPrompt);
+  if (inferredWorkingFolder) setChatWorkingFolder(chat.id, inferredWorkingFolder);
+  const workingFolder = existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
+
+  // ── MCP 툴 브리지 ──────────────────────────────────────────
+  // Claude Code/Codex 러너 + write/full 권한일 때만, 설치·활성 MCP 서버(브라우저 Playwright 포함)를
+  // 런타임별 설정으로 직렬화해 넘긴다. read 권한이나 다른 런타임에서는 생략.
+  let mcpConfigPath: string | undefined;
+  let mcpAllowedTools: string[] | undefined;
+  let mcpCodexConfigArgs: string[] | undefined;
+  const runtimeCanUseMcp = active.kind === "claude-code" || active.kind === "codex";
+  if (runtimeCanUseMcp && (req.permissions === "write" || req.permissions === "full")) {
+    try {
+      const cfg = await buildMcpConfigFile();
+      if (cfg) {
+        mcpConfigPath = cfg.configPath;
+        mcpAllowedTools = cfg.allowedTools;
+        mcpCodexConfigArgs = cfg.codexConfigArgs;
+      }
+    } catch (err) {
+      console.error("[mcp] buildMcpConfigFile failed:", err);
+    }
+  }
+
   // ── 멀티 에이전트 firm 오케스트레이션 ──
   // 회사 채팅이고 정규화된 조직에 본부/전문가가 있으면 3-tier 오케스트레이터로 분기.
   // (본부가 없는 firm은 아래 단일 CEO 경로 — 기존 동작 유지)
@@ -150,6 +220,10 @@ export async function runMcpInvocation(
             ceoAgent: agent,
             active,
             picked,
+            workingFolder,
+            mcpConfigPath,
+            mcpAllowedTools,
+            mcpCodexConfigArgs,
             locale,
             sink,
             signal,
@@ -166,6 +240,9 @@ export async function runMcpInvocation(
 
   // 프로젝트 컨텍스트 노트가 있으면 system prompt 뒤에 append
   let systemPrompt = agent.systemPrompt;
+  if (autoRoute) {
+    systemPrompt = `${autoRouteSystemPreamble(autoRoute, locale)}\n\n${systemPrompt}`;
+  }
   if (chat.projectId) {
     const project = getProject(chat.projectId);
     if (project?.contextNote) {
@@ -199,9 +276,6 @@ export async function runMcpInvocation(
   // 워킹 폴더에서 반복 작업하면 그 폴더가 활성화되고, 그때부터 프로젝트 메모리(.agentlas)를
   // 시스템 프롬프트에 주입한다. 폴더가 없거나 아직 활성 전이면 전역 메모리를 주입.
   // 채팅별 폴더가 없으면 프로젝트의 작업 폴더(folderPath)를 기본 cwd로 사용한다.
-  const workingFolder =
-    getChatWorkingFolder(chat.id) ??
-    (chat.projectId ? getProject(chat.projectId)?.folderPath ?? null : null);
   let activePath: string | null = null;
   if (workingFolder) {
     try {
@@ -227,26 +301,6 @@ export async function runMcpInvocation(
   // 사용자 메시지 영구화 + 첫 메시지면 제목 자동 생성
   appendChatMessage(chat.id, "user", req.userPrompt);
   if (history.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
-
-  // ── MCP 툴 브리지 ──────────────────────────────────────────
-  // Claude Code/Codex 러너 + write/full 권한일 때만, 설치·활성 MCP 서버(브라우저 Playwright 포함)를
-  // 런타임별 설정으로 직렬화해 넘긴다. read 권한이나 다른 런타임에서는 생략.
-  let mcpConfigPath: string | undefined;
-  let mcpAllowedTools: string[] | undefined;
-  let mcpCodexConfigArgs: string[] | undefined;
-  const runtimeCanUseMcp = active.kind === "claude-code" || active.kind === "codex";
-  if (runtimeCanUseMcp && (req.permissions === "write" || req.permissions === "full")) {
-    try {
-      const cfg = await buildMcpConfigFile();
-      if (cfg) {
-        mcpConfigPath = cfg.configPath;
-        mcpAllowedTools = cfg.allowedTools;
-        mcpCodexConfigArgs = cfg.codexConfigArgs;
-      }
-    } catch (err) {
-      console.error("[mcp] buildMcpConfigFile failed:", err);
-    }
-  }
 
   sink({ kind: "thinking", status: tStatus(locale, "thinking", { agent: agent.name }) });
 

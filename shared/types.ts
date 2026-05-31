@@ -4,7 +4,7 @@
 export type RuntimeKind = "claude-code" | "codex" | "gemini" | "byok" | "ollama";
 
 /** LLM 제공자. "ollama"는 로컬 머신에서 도는 오픈 모델(gemma/deepseek 등). */
-export type RuntimeBackend = "anthropic" | "openai" | "google" | "ollama";
+export type RuntimeBackend = "anthropic" | "openai" | "google" | "ollama" | "upstage";
 
 export interface RuntimeSelection {
   kind: RuntimeKind;

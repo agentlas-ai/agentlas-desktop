@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Agentlas Desktop — AI 에이전트의 런처 (Steam for AI agents). BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",

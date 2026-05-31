@@ -90,6 +90,12 @@ export function createChat(input: {
     resolvedAgentId = firm.ceoAgentId;
   }
   if (!resolvedAgentId) {
+    const fallback = getDb()
+      .prepare("SELECT id FROM installed_agents WHERE slug = 'agentlas-orchestrator' LIMIT 1")
+      .get() as { id: string } | undefined;
+    resolvedAgentId = fallback?.id;
+  }
+  if (!resolvedAgentId) {
     throw new Error("새 채팅에는 agentId 또는 firmId가 필요합니다");
   }
 

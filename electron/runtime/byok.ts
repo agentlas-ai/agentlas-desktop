@@ -241,6 +241,61 @@ export const runOpenAIByok: Runner = async (
   return { text: acc.trim() };
 };
 
+// ── Upstage Solar (OpenAI-compatible; Korean sovereign LLM) ──────
+export const runUpstageByok: Runner = async (
+  req: RunnerRequest,
+  events: RunnerEvents,
+): Promise<RunnerResult> => {
+  const key = await readApiKey("upstage");
+  if (!key) throw new Error("Upstage Solar API key missing (Settings → BYOK)");
+
+  events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
+
+  const { model, recent, system } = prepareContext("upstage", req, events);
+
+  const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+    { role: "system", content: system },
+  ];
+  for (const m of recent) {
+    if (m.role === "user" || m.role === "assistant") messages.push({ role: m.role, content: m.text });
+  }
+  messages.push({ role: "user", content: req.userPrompt });
+
+  const resp = await fetch("https://api.upstage.ai/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+    signal: req.signal,
+    body: JSON.stringify({ model, stream: true, messages }),
+  });
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => "");
+    throw new Error(`Upstage API ${resp.status}: ${errText.slice(0, 300)}`);
+  }
+
+  let acc = "";
+  let lastEmit = 0;
+  for await (const line of iterSseLines(resp)) {
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice(5).trim();
+    if (payload === "[DONE]") break;
+    try {
+      const event = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
+      const delta = event.choices?.[0]?.delta?.content;
+      if (delta) {
+        acc += delta;
+        const now = Date.now();
+        if (now - lastEmit > 80) {
+          events.onPartial(acc);
+          lastEmit = now;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return { text: acc.trim() };
+};
+
 // ── Google Generative (Gemini) ───────────────────────────
 // SSE는 :streamGenerateContent?alt=sse 엔드포인트.
 export const runGoogleByok: Runner = async (

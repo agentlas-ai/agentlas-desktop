@@ -70,7 +70,7 @@ const DICT = {
       "(CEO로서 어느 본부에 무엇을 맡길지 위임 계획을 정리해 응답하세요.)",
     compacted: "컨텍스트 압축 — 이전 대화 {n}개 메시지를 요약으로 접었습니다",
     compactedDigestHeader: "[압축된 이전 대화 요약 — 오래된 맥락을 간추렸습니다]",
-    aborted: "사용자가 실행을 중지했습니다.",
+    aborted: "사용자가 정지 버튼으로 실행을 중지했습니다.",
   },
   en: {
     thinking: "{agent} is thinking...",
@@ -118,7 +118,7 @@ const DICT = {
       "(As CEO, lay out which head you'd task with what in your reply.)",
     compacted: "Context compacted — folded {n} earlier messages into a summary",
     compactedDigestHeader: "[Summary of compacted earlier conversation — older context condensed]",
-    aborted: "Run stopped by the user.",
+    aborted: "Run stopped from the stop button.",
   },
 } as const;
 

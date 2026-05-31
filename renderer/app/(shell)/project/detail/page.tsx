@@ -52,7 +52,10 @@ function ProjectPage() {
   async function startNewChat() {
     const api = ipc();
     if (!api || !project) return;
-    const agentId = project.defaultAgentId ?? agents[0]?.id;
+    const agentId =
+      project.defaultAgentId ??
+      agents.find((agent) => agent.slug === "agentlas-orchestrator")?.id ??
+      agents[0]?.id;
     if (!agentId) {
       navigate("/marketplace");
       return;

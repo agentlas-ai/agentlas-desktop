@@ -291,7 +291,7 @@ function Highlight({
 }
 
 // BYOK는 클라우드 키 3종 (Ollama는 로컬이라 키 입력 없음 — 감지된 LLM 목록에 자동 표시).
-type ByokBackend = "anthropic" | "openai" | "google";
+type ByokBackend = "anthropic" | "openai" | "google" | "upstage";
 
 // ── Step 2: LLM 연결 ───────────────────────────────────────
 function StepBackend() {
@@ -302,11 +302,13 @@ function StepBackend() {
     anthropic: "",
     openai: "",
     google: "",
+    upstage: "",
   });
   const [savedKey, setSavedKey] = useState<Record<ByokBackend, boolean>>({
     anthropic: false,
     openai: false,
     google: false,
+    upstage: false,
   });
   const [saving, setSaving] = useState<ByokBackend | null>(null);
 
@@ -316,14 +318,15 @@ function StepBackend() {
       setLoading(false);
       return;
     }
-    const [s, a, o, g] = await Promise.all([
+    const [s, a, o, g, u] = await Promise.all([
       api.runtime.detect(),
       api.secrets.hasApiKey("anthropic"),
       api.secrets.hasApiKey("openai"),
       api.secrets.hasApiKey("google"),
+      api.secrets.hasApiKey("upstage"),
     ]);
     setStatuses(s);
-    setSavedKey({ anthropic: a, openai: o, google: g });
+    setSavedKey({ anthropic: a, openai: o, google: g, upstage: u });
     setLoading(false);
   }
   useEffect(() => {
@@ -344,7 +347,7 @@ function StepBackend() {
   }
 
   const hasAnyBackend =
-    statuses.length > 0 || savedKey.anthropic || savedKey.openai || savedKey.google;
+    statuses.length > 0 || savedKey.anthropic || savedKey.openai || savedKey.google || savedKey.upstage;
 
   return (
     <div>
@@ -471,7 +474,7 @@ function StepBackend() {
           >
             {t("onb.backend.byok_title")}
           </h3>
-          {(["anthropic", "openai", "google"] as ByokBackend[]).map((b) => (
+          {(["anthropic", "openai", "google", "upstage"] as ByokBackend[]).map((b) => (
             <div
               key={b}
               style={{
@@ -564,6 +567,7 @@ function backendLabel(b: RuntimeBackend) {
     openai: "OpenAI",
     google: "Google",
     ollama: "로컬 모델",
+    upstage: "Upstage Solar",
   }[b];
 }
 

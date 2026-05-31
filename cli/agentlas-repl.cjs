@@ -13,6 +13,7 @@ const banner = require("./agentlas-banner.cjs");
 const { runNativeTurn } = require("./agentlas-native-host.cjs");
 const { runApiTurn } = require("./agentlas-api-agent.cjs");
 const caps = require("./agentlas-capabilities.cjs");
+const input = require("./agentlas-input.cjs");
 
 function runtimeLabel(rt) {
   if (!rt) return "(none)";
@@ -93,6 +94,8 @@ function startRepl(opts) {
     history: [],
     native: {}, // kind → { id }
     projectPath: opts.projectPath || null,
+    routePreambleOnce: null,
+    cost: {}, // runtimeLabel → { turns, in, out, cost, ms } — session usage ledger
   };
 
   function showBanner() {
@@ -106,7 +109,13 @@ function startRepl(opts) {
     });
   }
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: !!process.stdin.isTTY });
+  const completer = input.makeCompleter({
+    getAgentSlugs: () => { try { return H.listAgents(db).map((a) => a.slug); } catch { return []; } },
+    getFirmSlugs: () => { try { return H.listFirms(db).map((f) => f.slug); } catch { return []; } },
+    getCwd: () => state.cwd,
+  });
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: !!process.stdin.isTTY, completer, historySize: input.HISTORY_MAX });
+  input.attachHistory(rl);
   let busy = false;
   let closed = false;
   let currentAbort = null;
@@ -130,6 +139,18 @@ function startRepl(opts) {
     return { projectPath: state.projectPath, agentId: state.subject && state.subject.id, permission: state.permission, cwd: state.cwd, lang: ui.lang };
   }
 
+  // Session usage ledger — accumulate per runtime label (host advantage: no single-model CLI can show this).
+  function recordCost(label, usage) {
+    const e = state.cost[label] || (state.cost[label] = { turns: 0, in: 0, out: 0, cost: 0, ms: 0 });
+    e.turns += 1;
+    if (usage) {
+      if (usage.input_tokens) e.in += usage.input_tokens;
+      if (usage.output_tokens) e.out += usage.output_tokens;
+      if (usage.cost_usd) e.cost += usage.cost_usd;
+      if (usage.duration_ms) e.ms += usage.duration_ms;
+    }
+  }
+
   // ── run one turn ──
   async function runTurn(prompt) {
     busy = true;
@@ -137,11 +158,17 @@ function startRepl(opts) {
     const signal = currentAbort.signal;
     const ctx = ctxNow();
     const rt = state.runtime;
+    const costLabel = runtimeLabel(rt);
+    ui._lastUsage = null;
     try {
       if (rt.mode === "cli") {
         const bin = H.which(H.RUNTIME_BIN[rt.kind]) || H.RUNTIME_BIN[rt.kind];
         const session = state.native[rt.kind] || (state.native[rt.kind] = {});
-        const sys = H.augmentSystem(db, state.subject.system, ctx, false);
+        const subjectSystem = state.routePreambleOnce
+          ? `${state.routePreambleOnce}\n\n${state.subject.system}`
+          : state.subject.system;
+        state.routePreambleOnce = null;
+        const sys = H.augmentSystem(db, subjectSystem, ctx, false);
         const res = await runNativeTurn({
           kind: rt.kind,
           bin,
@@ -155,8 +182,13 @@ function startRepl(opts) {
         });
         const at = (res.text || "").trim();
         if (at && !res.error) state.history.push({ role: "user", text: prompt }, { role: "assistant", text: at });
+        recordCost(costLabel, res.usage);
       } else {
-        const sys = H.augmentSystem(db, state.subject.system, ctx, true);
+        const subjectSystem = state.routePreambleOnce
+          ? `${state.routePreambleOnce}\n\n${state.subject.system}`
+          : state.subject.system;
+        state.routePreambleOnce = null;
+        const sys = H.augmentSystem(db, subjectSystem, ctx, true);
         let apiKey = null;
         if (rt.backend !== "ollama") {
           apiKey = await H.apiKey(rt.backend);
@@ -182,6 +214,7 @@ function startRepl(opts) {
         });
         const cleaned = (H.curateCliReply(db, res.text || "", ctx) || "").trim();
         if (cleaned) state.history.push({ role: "user", text: prompt }, { role: "assistant", text: cleaned });
+        recordCost(costLabel, ui._lastUsage);
       }
     } catch (e) {
       ui.stopSpinner();
@@ -201,7 +234,7 @@ function startRepl(opts) {
   // ── slash commands ──
   function setRuntime(arg) {
     const cliKinds = { "claude-code": 1, claude: 1, codex: 1, gemini: 1 };
-    const apiBackends = { anthropic: 1, openai: 1, google: 1, ollama: 1 };
+    const apiBackends = { anthropic: 1, openai: 1, google: 1, ollama: 1, upstage: 1 };
     let a = (arg || "").trim();
     if (a === "claude") a = "claude-code";
     if (cliKinds[a]) {
@@ -263,6 +296,7 @@ function startRepl(opts) {
       capAgent: agent,
     };
     state.history = [];
+    state.routePreambleOnce = null;
     applyRuntimeFor(state.subject);
   }
   function setSubjectFirm(firm) {
@@ -276,6 +310,7 @@ function startRepl(opts) {
       capAgent: { name: firm.name, name_en: firm.name_en || firm.name, tagline: firm.tagline, system_prompt: sys },
     };
     state.history = [];
+    state.routePreambleOnce = null;
     applyRuntimeFor(state.subject);
   }
   function switchSubject(kind, query) {
@@ -346,7 +381,7 @@ function startRepl(opts) {
     const slug = agent ? agent.slug : firm ? firm.slug : null;
     if (!slug) return ui.error(ui.t("noAgent", who));
     if (!spec) return printTeam();
-    const valid = ["auto", "claude-code", "codex", "gemini", "anthropic", "openai", "google", "ollama"];
+    const valid = ["auto", "claude-code", "codex", "gemini", "anthropic", "openai", "google", "ollama", "upstage"];
     if (!valid.includes(spec)) return ui.warn(ui.t("team.usage"));
     prefs.agentRuntime[slug] = spec;
     if (opts.savePrefs) opts.savePrefs(prefs);
@@ -355,6 +390,82 @@ function startRepl(opts) {
       applyRuntimeFor(state.subject);
       routingNote(state.subject);
     }
+  }
+
+  function printCost() {
+    const labels = Object.keys(state.cost);
+    ui.line("");
+    if (!labels.length) return ui.info(ui.t("noCost"));
+    ui.line(ui.c.dim("  " + ui.t("cost.title")));
+    let tIn = 0, tOut = 0, tCost = 0, tMs = 0, tTurns = 0;
+    const fmt = (e) => {
+      const bits = [e.turns + (e.turns === 1 ? " turn" : " turns")];
+      if (e.in || e.out) bits.push(e.in + "→" + e.out + " tok");
+      if (e.cost) bits.push("$" + e.cost.toFixed(4));
+      if (e.ms) bits.push((e.ms / 1000).toFixed(1) + "s");
+      return bits.join("  ·  ");
+    };
+    for (const label of labels) {
+      const e = state.cost[label];
+      tIn += e.in; tOut += e.out; tCost += e.cost; tMs += e.ms; tTurns += e.turns;
+      ui.line("   " + ui.c.blue(label.padEnd(22)) + ui.c.faint(fmt(e)));
+    }
+    ui.line("   " + ui.c.emerald(ui.t("cost.total").padEnd(22)) + ui.c.text(fmt({ turns: tTurns, in: tIn, out: tOut, cost: tCost, ms: tMs })));
+  }
+
+  function showDiff() {
+    const { spawnSync } = require("node:child_process");
+    const opt = { cwd: state.cwd, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 };
+    const stat = spawnSync("git", ["-C", state.cwd, "--no-pager", "diff", "--stat"], opt);
+    if (stat.status !== 0 && /not a git repository/i.test(stat.stderr || "")) return ui.warn(ui.t("diffNoGit"));
+    const body = spawnSync("git", ["-C", state.cwd, "--no-pager", "diff"], opt);
+    const statTxt = (stat.stdout || "").trim();
+    const bodyTxt = (body.stdout || "").trim();
+    ui.line("");
+    if (!statTxt && !bodyTxt) return ui.info(ui.t("diffClean"));
+    if (statTxt) ui.markdown(statTxt);
+    if (bodyTxt) {
+      ui.line("");
+      for (const ln of bodyTxt.split("\n").slice(0, 500)) {
+        if (ln.startsWith("+") && !ln.startsWith("+++")) ui.line(ui.c.green(ln));
+        else if (ln.startsWith("-") && !ln.startsWith("---")) ui.line(ui.c.paw(ln));
+        else if (ln.startsWith("@@")) ui.line(ui.c.blue(ln));
+        else ui.line(ui.c.dim(ln));
+      }
+    }
+  }
+
+  // !cmd — run a shell command in the working folder and show its output (display-only).
+  function runShell(cmd) {
+    if (!cmd) return;
+    const { spawnSync } = require("node:child_process");
+    ui.tool("$ " + cmd);
+    const r = spawnSync("bash", ["-lc", cmd], { cwd: state.cwd, encoding: "utf8", timeout: 120000, maxBuffer: 8 * 1024 * 1024 });
+    const out = ((r.stdout || "") + (r.stderr || "")).trim();
+    ui.toolResult(out || ("exit " + (r.status == null ? "?" : r.status)), r.status === 0 || r.status == null);
+  }
+
+  // @path — inline the contents of mentioned files into the prompt as fenced context.
+  function expandMentions(text) {
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const seen = new Set();
+    const blocks = [];
+    const re = /(^|\s)@([^\s]+)/g;
+    let m;
+    while ((m = re.exec(text))) {
+      const p = m[2];
+      if (seen.has(p)) continue;
+      seen.add(p);
+      try {
+        const abs = path.isAbsolute(p) ? p : path.resolve(state.cwd, p);
+        const st = fs.statSync(abs);
+        if (st.isFile() && st.size <= 256 * 1024) {
+          blocks.push("File: " + p + "\n```\n" + fs.readFileSync(abs, "utf8").slice(0, 20000) + "\n```");
+        }
+      } catch { /* not a readable file — leave the @token as plain text */ }
+    }
+    return blocks.length ? text + "\n\n" + blocks.join("\n\n") : text;
   }
 
   async function handleSlash(line) {
@@ -442,6 +553,19 @@ function startRepl(opts) {
       case "status":
         banner.renderStatus({ ui, runtimeLabel: runtimeLabel(state.runtime), subjectLabel: state.subject && state.subject.label, permission: state.permission, cwd: state.cwd });
         return true;
+      case "cost":
+        printCost();
+        return true;
+      case "diff":
+        showDiff();
+        return true;
+      case "history": {
+        const items = (rl.history || []).slice(0, 30);
+        ui.line("");
+        if (!items.length) { ui.info(ui.t("noHistory")); return true; }
+        for (let i = 0; i < items.length; i++) ui.line("   " + ui.c.faint(String(i + 1).padStart(3)) + "  " + ui.c.text(items[i]));
+        return true;
+      }
       case "exit":
       case "quit":
       case "q":
@@ -465,7 +589,7 @@ function startRepl(opts) {
   function pick() {
     if (closed) return process.exit(0);
     printRoster();
-    rl.question("\n   " + ui.c.emerald(ui.t("picker.prompt")), (line) => {
+    rl.question("\n   " + ui.c.emerald(ui.t("picker.prompt")), async (line) => {
       const t = (line || "").trim();
       if (!t) return pick();
       if (t === "/exit" || t === "/quit" || t === "/q") {
@@ -503,23 +627,45 @@ function startRepl(opts) {
       if (a) return chooseAndStart(setSubjectAgent, a);
       const f = H.resolveFirm(db, t);
       if (f) return chooseAndStart(setSubjectFirm, f);
+      if (H.autoRouteAgent) {
+        const choice = H.autoRouteAgent(db, t, ui.lang);
+        if (choice) {
+          setSubjectAgent(choice.agent);
+          state.routePreambleOnce = H.autoRoutePreamble ? H.autoRoutePreamble(choice, ui.lang) : null;
+          ui.info(H.autoRouteNote ? H.autoRouteNote(choice, ui.lang) : `auto-routed to ${choice.agent.name}`);
+          routingNote(state.subject);
+          await runTurn(t);
+          return ask();
+        }
+      }
       ui.warn(ui.t("picker.noMatch", t));
       return pick();
     });
   }
 
-  // ── main loop ──
-  function ask() {
+  // ── main loop ── (multiline: a trailing "\\" continues the input)
+  function ask(buffer) {
     if (closed) return process.exit(0);
-    rl.question("\n" + ui.promptLabel(), async (line) => {
-      const t = (line || "").trim();
+    const cont = buffer != null;
+    rl.question(cont ? ui.c.dim("   … ") : "\n" + ui.promptLabel(), async (line) => {
+      if (input.isContinuation(line)) {
+        return ask((cont ? buffer + "\n" : "") + input.stripContinuation(line));
+      }
+      const full = (cont ? buffer + "\n" : "") + (line || "");
+      const t = full.trim();
       if (!t) return ask();
-      if (t.startsWith("/")) {
-        const cont = await handleSlash(t);
-        if (cont === false) return;
+      if (rl.terminal && rl.history && rl.history[0] !== t) rl.history.unshift(t);
+      input.persistHistory(rl);
+      if (t.startsWith("!")) {
+        runShell(t.slice(1).trim());
         return ask();
       }
-      await runTurn(t);
+      if (t.startsWith("/")) {
+        const c2 = await handleSlash(t);
+        if (c2 === false) return;
+        return ask();
+      }
+      await runTurn(expandMentions(t));
       ask();
     });
   }
@@ -572,6 +718,9 @@ function printHelp(ui) {
     ["/permission <lvl>", ui.t("help.permission")],
     ["/cwd [path]", ui.t("help.cwd")],
     ["/memory", ui.t("help.memory")],
+    ["/cost", ui.t("help.cost")],
+    ["/diff", ui.t("help.diff")],
+    ["/history", ui.t("help.history")],
     ["/import <path>", ui.t("help.import")],
     ["/clear", ui.t("help.clear")],
     ["/doctor", ui.t("help.doctor")],
@@ -579,6 +728,15 @@ function printHelp(ui) {
   ];
   ui.line("");
   for (const [k, v] of rows) ui.line("  " + c.emerald(k.padEnd(24)) + c.dim(v));
+  ui.line("");
+  ui.line("  " + c.faint(ui.t("help.tipsTitle")));
+  const tips = [
+    ["@path", ui.t("help.atfile")],
+    ["!cmd", ui.t("help.bang")],
+    ["\\ + Enter", ui.t("help.multiline")],
+    ["Tab", ui.t("help.tab")],
+  ];
+  for (const [k, v] of tips) ui.line("  " + c.emerald(k.padEnd(24)) + c.dim(v));
 }
 
 module.exports = { startRepl, runtimeLabel };

@@ -15,20 +15,22 @@ import { IconCheck, IconLock, IconRefresh } from "@/components/Icon";
 import { MigrationPanel } from "@/components/MigrationPanel";
 
 // BYOK는 API 키를 직접 넣는 클라우드 3종 (Ollama는 로컬이라 키 없음).
-type ByokBackend = "anthropic" | "openai" | "google";
-const BYOK_BACKENDS: ByokBackend[] = ["anthropic", "openai", "google"];
+type ByokBackend = "anthropic" | "openai" | "google" | "upstage";
+const BYOK_BACKENDS: ByokBackend[] = ["anthropic", "openai", "google", "upstage"];
 
 const BACKEND_LABEL: Record<RuntimeBackend, string> = {
   anthropic: "Anthropic (Claude)",
   openai: "OpenAI (ChatGPT)",
   google: "Google (Gemini)",
   ollama: "Ollama (로컬)",
+  upstage: "Upstage Solar (🇰🇷 한국 소버린)",
 };
 
 const BACKEND_KEY_HINT: Record<ByokBackend, string> = {
   anthropic: "console.anthropic.com → API Keys",
   openai: "platform.openai.com/api-keys",
   google: "aistudio.google.com/app/apikey",
+  upstage: "console.upstage.ai/api-keys",
 };
 
 const RUNTIME_LABEL: Record<string, string> = {
@@ -46,24 +48,27 @@ export default function SettingsPage() {
     anthropic: "",
     openai: "",
     google: "",
+    upstage: "",
   });
   const [hasKey, setHasKey] = useState<Record<ByokBackend, boolean>>({
     anthropic: false,
     openai: false,
     google: false,
+    upstage: false,
   });
 
   const refresh = useCallback(async () => {
     const api = ipc();
     if (!api) return;
-    const [s, a, o, g] = await Promise.all([
+    const [s, a, o, g, u] = await Promise.all([
       api.runtime.detect(),
       api.secrets.hasApiKey("anthropic"),
       api.secrets.hasApiKey("openai"),
       api.secrets.hasApiKey("google"),
+      api.secrets.hasApiKey("upstage"),
     ]);
     setStatuses(s);
-    setHasKey({ anthropic: a, openai: o, google: g });
+    setHasKey({ anthropic: a, openai: o, google: g, upstage: u });
   }, []);
 
   useEffect(() => {

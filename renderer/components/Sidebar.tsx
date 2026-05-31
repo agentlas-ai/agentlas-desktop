@@ -185,7 +185,10 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       navigate("/onboarding");
       return;
     }
-    const agentId = data.chats[0]?.agentId ?? data.agents[0].id;
+    const agentId =
+      data.agents.find((a) => a.slug === "agentlas-orchestrator")?.id ??
+      data.chats[0]?.agentId ??
+      data.agents[0].id;
     const chat = await api.chats.create({ agentId });
     navigate(`/chat?id=${chat.id}`);
   }
@@ -841,6 +844,7 @@ function labelOfRuntime(s: RuntimeStatus): string {
     openai: "OpenAI",
     google: "Google",
     ollama: "Ollama",
+    upstage: "Solar",
   }[s.backend];
   return `${kind} · ${backend}`;
 }

@@ -19,6 +19,7 @@ const RUNTIME_CAPS = {
   openai: { code: true, image: true, label: "openai" }, // gpt-image
   google: { code: true, image: true, label: "google" }, // imagen
   ollama: { code: true, image: false, label: "ollama" },
+  upstage: { code: true, image: false, label: "solar" }, // Upstage Solar — Korean sovereign LLM (OpenAI-compatible)
 };
 
 const CLI_KINDS = ["claude-code", "codex", "gemini"];

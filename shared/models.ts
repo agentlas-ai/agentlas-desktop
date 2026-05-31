@@ -8,7 +8,7 @@
 //                 모델 선택·1M 컨텍스트·히스토리 압축을 Agentlas가 구현/적용한다.
 import type { RuntimeKind } from "./types";
 
-export type ByokBackend = "anthropic" | "openai" | "google";
+export type ByokBackend = "anthropic" | "openai" | "google" | "upstage";
 
 export interface ModelOption {
   /** vendor API에 그대로 전달되는 모델 ID */
@@ -93,6 +93,18 @@ export const BYOK_MODELS: Record<ByokBackend, ModelOption[]> = {
       longContext: { tokens: 1_000_000, mode: "auto" },
     },
   ],
+  // Upstage Solar — Korean sovereign LLM (OpenAI-compatible API). Text-only (no multimodal).
+  upstage: [
+    { id: "solar-pro2", label: "Solar Pro 2 (한국 소버린)", contextWindow: 65_536, multimodal: false },
+    {
+      id: "solar-pro3",
+      label: "Solar Pro 3",
+      contextWindow: 131_072,
+      multimodal: false,
+      longContext: { tokens: 131_072, mode: "auto" },
+    },
+    { id: "solar-mini", label: "Solar Mini", contextWindow: 32_768, multimodal: false },
+  ],
 };
 
 /** 백엔드별 기본 모델 — 사용자가 명시 선택 전 fallback. */
@@ -100,10 +112,11 @@ export const DEFAULT_BYOK_MODEL: Record<ByokBackend, string> = {
   anthropic: "claude-sonnet-4-6",
   openai: "gpt-4o-mini",
   google: "gemini-1.5-flash",
+  upstage: "solar-pro2",
 };
 
 function isByokBackend(backend: string): backend is ByokBackend {
-  return backend === "anthropic" || backend === "openai" || backend === "google";
+  return backend === "anthropic" || backend === "openai" || backend === "google" || backend === "upstage";
 }
 
 export function byokModels(backend: string): ModelOption[] {

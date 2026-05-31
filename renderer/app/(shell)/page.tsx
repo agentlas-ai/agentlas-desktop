@@ -1,5 +1,5 @@
 // 홈 = 새 채팅 composer.
-// Codex / Claude Code 데스크톱 스타일 — 중앙 큰 입력창 + 에이전트 셀렉터 + 제안 프롬프트.
+// Codex / Claude Code 데스크톱 스타일 — 중앙 큰 입력창 + 에이전트 셀렉터.
 // 입력 → 채팅 생성 → /chat?id=... 으로 이동하고 첫 메시지 자동 전송.
 //
 // 분기:
@@ -17,25 +17,11 @@ import { AgentPicker } from "@/components/AgentPicker";
 import { PawLogo } from "@/components/PawLogo";
 import { IconBuilding, IconSparkles, IconStore } from "@/components/Icon";
 
-const SUGGESTIONS_KO = [
-  "오늘 인스타 캡션 3개 만들어줘",
-  "신상 제품 설명을 5개 변형으로 써줘",
-  "이번 주 콘텐츠 일정 정리해줘",
-  "고객 환불 문의 답변 초안",
-];
-const SUGGESTIONS_EN = [
-  "Draft 3 Instagram captions for today",
-  "Write 5 product description variants for a new item",
-  "Plan this week's content schedule",
-  "Draft a refund inquiry reply",
-];
-
 type TargetMode = "agent" | "firm";
 
 export default function HomePage() {
   const router = useRouter();
   const { t, locale } = useT();
-  const SUGGESTIONS = locale === "en" ? SUGGESTIONS_EN : SUGGESTIONS_KO;
   const [agents, setAgents] = useState<InstalledAgent[] | null>(null);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
   const [mode, setMode] = useState<TargetMode>("agent");
@@ -82,7 +68,7 @@ export default function HomePage() {
       setFirms(installedFirms);
       // 마지막 사용한 에이전트 = 가장 최근 채팅의 에이전트
       const chats = await api.chats.listRecent(1);
-      setActiveAgentId(chats[0]?.agentId ?? list[0].id);
+      setActiveAgentId(list.find((a) => a.slug === "agentlas-orchestrator")?.id ?? chats[0]?.agentId ?? list[0].id);
       if (installedFirms[0]) setActiveFirmId(installedFirms[0].id);
       // 가장 최근 채팅이 회사 채팅이면 firm 모드로 기본 진입
       if (chats[0]?.firmId) {
@@ -109,7 +95,7 @@ export default function HomePage() {
         mode === "firm"
           ? await api.chats.create({ firmId: activeFirmId })
           : await api.chats.create({ agentId: activeAgentId });
-      navigate(`/chat?id=${chat.id}&prompt=${encodeURIComponent(text)}`);
+      navigate(`/chat?id=${chat.id}&prompt=${encodeURIComponent(text)}&permission=write`);
     } finally {
       setBusy(false);
     }
@@ -333,36 +319,6 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* 제안 프롬프트 */}
-        <div
-          style={{
-            marginTop: 16,
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 8,
-            justifyContent: "center",
-          }}
-          className="titlebar-nodrag"
-        >
-          {SUGGESTIONS.map((s) => (
-            <button
-              key={s}
-              onClick={() => void send(s)}
-              disabled={busy}
-              style={{
-                padding: "6px 12px",
-                borderRadius: 999,
-                background: "var(--paper-2)",
-                border: "1px solid var(--paper-edge)",
-                fontSize: 12,
-                color: "var(--ink-soft)",
-                cursor: "pointer",
-              }}
-            >
-              {s}
-            </button>
-          ))}
-        </div>
       </div>
     </section>
   );

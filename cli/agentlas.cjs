@@ -91,6 +91,7 @@ function routesMap() {
   }
 }
 function resolveAgent(db, query) {
+  if (!String(query || "").trim()) return null;
   const agents = listAgents(db);
   const q = (query || "").toLowerCase();
   return (
@@ -99,6 +100,123 @@ function resolveAgent(db, query) {
     agents.find((a) => (a.slug || "").toLowerCase().includes(q) || (a.name || "").toLowerCase().includes(q) || (a.name_en || "").toLowerCase().includes(q)) ||
     null
   );
+}
+const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
+const META_AGENT_SLUG = "agentlas-meta-agent";
+const ROUTE_STOP_WORDS = new Set(["the", "and", "for", "with", "this", "that", "from", "into", "make", "build", "create", "agent", "agents", "please", "좀", "해주세요", "해줘", "만들어", "붙여", "연결", "작업", "요청"]);
+const ROUTE_HINTS = [
+  {
+    slug: META_AGENT_SLUG,
+    terms: ["meta-agent", "metaagent", "agent package", "agent repo", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "SKILL.md", "codex", "skill", "에이전트", "메타에이전트", "스킬", "코덱스", "라우팅", "오케스트레이터"],
+    reasonKo: "에이전트/스킬 패키징과 Codex 호환 라우팅 요청입니다",
+    reasonEn: "the request is about agent/skill packaging and Codex-compatible routing",
+  },
+  {
+    slug: "agentlas-memory-curator",
+    terms: ["memory", "remember", "recall", "request_context", "context_json", "메모리", "기억", "회상", "저장"],
+    reasonKo: "기억 저장/검색/스코프 품질을 다루는 요청입니다",
+    reasonEn: "the request concerns memory storage, recall, or scope quality",
+  },
+  {
+    slug: "agentlas-task-bias",
+    terms: ["bias", "sitemap", "evidence", "completion", "coverage", "편향", "사이트맵", "증거", "검증"],
+    reasonKo: "작업 편향, 사이트맵, 검증 증거를 다루는 요청입니다",
+    reasonEn: "the request concerns task bias, sitemap, or validation evidence",
+  },
+  {
+    slug: "agentlas-pm-soul",
+    terms: ["project", "plan", "decision", "handoff", "continuity", "프로젝트", "계획", "결정", "연속성", "핸드오프"],
+    reasonKo: "프로젝트 연속성/결정/조율이 중심인 요청입니다",
+    reasonEn: "the request is centered on project continuity, decisions, or coordination",
+  },
+];
+function routeNormalize(value) {
+  return String(value || "").toLowerCase().replace(/[_/]+/g, "-");
+}
+function routeTokenize(value) {
+  const matches = routeNormalize(value).match(/[a-z0-9][a-z0-9-]{1,}|[가-힣]{2,}/g) || [];
+  const expanded = matches.flatMap((term) => term.split("-").filter(Boolean).concat(term));
+  return [...new Set(expanded.filter((term) => term.length >= 2 && !ROUTE_STOP_WORDS.has(term)))];
+}
+function routeHaystack(agent) {
+  return routeNormalize([
+    agent.slug,
+    agent.name,
+    agent.name_en,
+    agent.tagline,
+    agent.tagline_en,
+    String(agent.system_prompt || "").slice(0, 3500),
+  ].join("\n"));
+}
+function routeHint(promptText, agent, lang) {
+  const hint = ROUTE_HINTS.find((item) => item.slug === agent.slug);
+  if (!hint) return { score: 0, terms: [], reason: "" };
+  const terms = hint.terms.filter((term) => promptText.includes(routeNormalize(term)));
+  if (!terms.length) return { score: 0, terms: [], reason: "" };
+  return { score: 12 + terms.length * 3, terms, reason: lang === "ko" ? hint.reasonKo : hint.reasonEn };
+}
+function scoreRouteAgent(prompt, promptTerms, agent, lang) {
+  const promptText = routeNormalize(prompt);
+  const haystack = routeHaystack(agent);
+  let score = 0;
+  const terms = [];
+  for (const name of [agent.slug, agent.name, agent.name_en].filter(Boolean)) {
+    const n = routeNormalize(name);
+    if (n && promptText.includes(n)) {
+      score += 20;
+      terms.push(name);
+    }
+  }
+  for (const term of promptTerms) {
+    if (haystack.includes(term)) {
+      score += term.length >= 5 ? 3 : 2;
+      terms.push(term);
+    }
+  }
+  const hint = routeHint(promptText, agent, lang);
+  score += hint.score;
+  terms.push(...hint.terms);
+  const unique = [...new Set(terms)].slice(0, 6);
+  const reason = hint.reason || (lang === "ko"
+    ? unique.length
+      ? `요청어 ${unique.map((term) => `"${term}"`).join(", ")}가 이 에이전트의 역할/트리거와 가장 가깝습니다`
+      : "명확한 전문 라우트가 없어 기본 프로젝트 조율 에이전트가 가장 안전합니다"
+    : unique.length
+      ? `request terms ${unique.map((term) => `"${term}"`).join(", ")} best match this agent's role/triggers`
+      : "no specialist matched clearly, so the default project coordinator is safest");
+  return { agent, score, reason, terms: unique };
+}
+function autoRouteAgent(db, prompt, lang) {
+  const agents = listAgents(db).filter((agent) => agent.slug !== GLOBAL_ORCHESTRATOR_SLUG);
+  if (!agents.length) return null;
+  const terms = routeTokenize(prompt);
+  const ranked = agents.map((agent) => scoreRouteAgent(prompt, terms, agent, lang || prefsLang())).sort((a, b) => b.score - a.score);
+  if (ranked[0] && ranked[0].score > 0) return ranked[0];
+  const fallback = agents.find((agent) => agent.slug === "agentlas-pm-soul") || agents.find((agent) => agent.slug === META_AGENT_SLUG) || agents[0];
+  return {
+    agent: fallback,
+    score: 0,
+    reason: (lang || prefsLang()) === "ko"
+      ? "명확한 전문 에이전트가 없어 기본 프로젝트 조율 경로를 선택했습니다"
+      : "no specialist matched clearly, so Agentlas chose the default coordination route",
+    terms: [],
+  };
+}
+function autoRouteNote(choice, lang) {
+  const name = (lang || prefsLang()) === "ko" ? choice.agent.name : choice.agent.name_en || choice.agent.name;
+  return (lang || prefsLang()) === "ko"
+    ? `사용 에이전트: ${name}. 이유: ${choice.reason}.`
+    : `Selected agent: ${name}. Reason: ${choice.reason}.`;
+}
+function autoRoutePreamble(choice, lang) {
+  return [
+    "## Agentlas automatic routing",
+    "",
+    autoRouteNote(choice, lang),
+    (lang || prefsLang()) === "ko"
+      ? "사용자는 에이전트를 직접 지정하지 않았습니다. 위 라우팅 결정을 첫 줄에 짧게 밝힌 뒤, 선택된 에이전트로 바로 작업하세요."
+      : "The user did not explicitly choose an agent. Briefly state the route above in the first line, then work as the selected agent.",
+  ].join("\n");
 }
 function agentFolder(agent) {
   const routes = routesMap();
@@ -586,6 +704,7 @@ const DEFAULT_API_MODEL = {
   openai: "gpt-4o-mini",
   google: "gemini-1.5-flash",
   ollama: "llama3.1",
+  upstage: "solar-pro2",
 };
 async function apiKey(backend) {
   const keytar = readKeytar();
@@ -617,8 +736,9 @@ async function runApi(backend, model, system, prompt) {
     const j = await resp.json();
     return (j.content && j.content[0] && j.content[0].text) || "";
   }
-  if (backend === "openai") {
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+  if (backend === "openai" || backend === "upstage") {
+    const base = backend === "upstage" ? "https://api.upstage.ai/v1" : "https://api.openai.com/v1";
+    const resp = await fetch(`${base}/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer " + key },
       body: JSON.stringify({ model, messages: [{ role: "system", content: system }, { role: "user", content: prompt }] }),
@@ -821,6 +941,9 @@ function buildHelpers(db) {
     listAgents,
     listFirms,
     firmSystemPrompt,
+    autoRouteAgent: (db_, prompt, lang) => autoRouteAgent(db_, prompt, lang),
+    autoRouteNote: (choice, lang) => autoRouteNote(choice, lang),
+    autoRoutePreamble: (choice, lang) => autoRoutePreamble(choice, lang),
     cliMemoryContext: (db_, pp) => cliMemoryContext(db_, pp),
     importLocal: (db_, p) => importLocalFolderCli(db_, p),
     // /cwd 로 작업 폴더를 바꿀 때 그 폴더의 활성 프로젝트 경로(또는 null)를 재계산 — activeProjectPath의 명시-dir 버전.
@@ -949,12 +1072,31 @@ function cmdCd(db, query) {
 
 async function cmdRun(db, query, prompt, runtimeOverride) {
   const agent = resolveAgent(db, query);
-  if (!agent) fail(`에이전트를 찾을 수 없습니다: ${query}`);
+  if (!agent) {
+    const routedPrompt = [query, prompt].filter(Boolean).join(" ").trim() || (await readStdin());
+    if (!routedPrompt || !routedPrompt.trim()) fail("프롬프트가 비어 있습니다. agentlas run <agent> \"...\" 또는 agentlas run \"...\" 형식으로 입력하세요.");
+    return cmdAutoRun(db, routedPrompt.trim(), runtimeOverride);
+  }
   let userPrompt = prompt;
   if (!userPrompt) userPrompt = await readStdin();
   if (!userPrompt || !userPrompt.trim()) fail("프롬프트가 비어 있습니다. agentlas run <agent> \"...\" 또는 stdin으로 전달하세요.");
   process.stderr.write(`▸ ${agent.name}\n`);
   const code = await executeOnce(db, agent.system_prompt || "", userPrompt.trim(), runtimeOverride, { projectPath: activeProjectPath(db), agentId: agent.id, permission: PERMISSION });
+  process.exit(code);
+}
+
+async function cmdAutoRun(db, prompt, runtimeOverride) {
+  const lang = prefsLang();
+  const choice = autoRouteAgent(db, prompt, lang);
+  if (!choice) fail("자동 라우팅할 에이전트가 없습니다. agentlas list로 설치 상태를 확인하세요.");
+  process.stderr.write(`▸ ${choice.agent.name} (auto)\n`);
+  process.stderr.write(`  ${autoRouteNote(choice, lang)}\n`);
+  const sys = `${autoRoutePreamble(choice, lang)}\n\n${choice.agent.system_prompt || ""}`;
+  const code = await executeOnce(db, sys, prompt.trim(), runtimeOverride, {
+    projectPath: activeProjectPath(db),
+    agentId: choice.agent.id,
+    permission: PERMISSION,
+  });
   process.exit(code);
 }
 
@@ -974,6 +1116,7 @@ function listFirms(db) {
   }
 }
 function resolveFirm(db, query) {
+  if (!String(query || "").trim()) return null;
   const firms = listFirms(db);
   const q = (query || "").toLowerCase();
   return (
@@ -1118,10 +1261,11 @@ function cmdHelp() {
       "agentlas — the Boston Terrier terminal",
       "",
       "  agentlas              open the terminal (mascot splash, then pick an agent)",
+      "  agentlas \"prompt\"     auto-route to the best agent, then run once",
       "  agentlas <agent>      jump straight into a chat with one agent",
       "  open <agent>          same as above (explicit)",
       "  firm <firm> [cmd]     delegate to a company's CEO (interactive if no cmd)",
-      "  run <agent> [prompt]  one-shot — for scripts/pipes (reads stdin if no prompt)",
+      "  run [agent] [prompt]  one-shot — omit agent to auto-route (reads stdin if no prompt)",
       "  import <path>         import a local folder (agent or team)",
       "  cd <agent>            print the agent folder — cd \"$(agentlas cd seo)\" && claude",
       "  list                  agents/companies + active runtime",
@@ -1220,6 +1364,8 @@ async function main() {
       if (agent) return launchInteractive(db, agent, runtimeOverride);
       const firm = resolveFirm(db, cmd);
       if (firm) return cmdFirm(db, cmd, "", runtimeOverride);
+      const prompt = rest.join(" ").trim();
+      if (prompt) return cmdAutoRun(db, prompt, runtimeOverride);
       fail(`에이전트/회사를 찾을 수 없습니다: ${cmd}  (agentlas list 로 확인)`);
     }
   }

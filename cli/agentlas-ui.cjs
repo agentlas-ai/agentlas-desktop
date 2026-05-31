@@ -78,6 +78,7 @@ class Ui {
     this._spinFrame = 0;
     this._streaming = false;
     this._atLineStart = true;
+    this._lastUsage = null; // last per-turn usage (for session /cost ledger)
   }
 
   write(s) {
@@ -230,6 +231,7 @@ class Ui {
   }
 
   cost(usage) {
+    this._lastUsage = usage || null;
     if (!usage) return;
     const bits = [];
     if (usage.input_tokens != null || usage.output_tokens != null) {

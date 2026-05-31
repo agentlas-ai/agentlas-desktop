@@ -180,13 +180,13 @@ async function runAnthropicLoop(req) {
 }
 
 // ── OpenAI ───────────────────────────────────────────────
-async function streamOpenAI({ apiKey, model, messages, permission, ui, signal }) {
+async function streamOpenAI({ apiKey, model, messages, permission, ui, signal, baseUrl }) {
   const body = { model, stream: true, messages };
   const toolDefs = tools.openaiTools(permission);
   if (toolDefs.length) body.tools = toolDefs;
 
   const idle = idleAbort(signal, IDLE_MS);
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+  const resp = await fetch(`${baseUrl || "https://api.openai.com/v1"}/chat/completions`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
     signal: idle.signal,
@@ -260,6 +260,7 @@ async function runOpenAILoop(req) {
       permission: ctx.permission,
       ui,
       signal: req.signal,
+      baseUrl: req.baseUrl,
     });
     finalText = r.text || finalText;
     if (!r.toolCalls.length) break;
@@ -405,6 +406,8 @@ async function runApiTurn(req) {
       return runAnthropicLoop(req);
     case "openai":
       return runOpenAILoop(req);
+    case "upstage":
+      return runOpenAILoop({ ...req, baseUrl: "https://api.upstage.ai/v1" });
     case "ollama":
       return runOllamaLoop(req);
     case "google":

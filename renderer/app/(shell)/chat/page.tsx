@@ -38,6 +38,21 @@ const NETWORK_OPEN_KEY = "agentlas.network.open";
 
 /** picker 모델 옵션 — runtime.listModels가 실시간 조회해 채워준다. */
 type ModelOption = { id: string; label: string; tag?: string };
+type PermissionLevel = "read" | "write" | "full";
+
+const DEFAULT_PERMISSION: PermissionLevel = "write";
+
+function parsePermission(raw: string | null): PermissionLevel | undefined {
+  return raw === "read" || raw === "write" || raw === "full" ? raw : undefined;
+}
+
+function inferPermissionFromAnswer(answers: string[]): PermissionLevel | undefined {
+  const joined = answers.join(" ").toLowerCase();
+  if (/\bfull\b|전체 권한/.test(joined)) return "full";
+  if (/\bwrite\b|쓰기|편집/.test(joined)) return "write";
+  if (/\bread\b|읽기만/.test(joined)) return "read";
+  return undefined;
+}
 
 export default function ChatPageWrapper() {
   // useSearchParams는 Suspense boundary를 요구함 (Next 15)
@@ -53,6 +68,9 @@ function ChatPage() {
   const chatId = searchParams.get("id") ?? "";
   // 홈 composer가 ?prompt=...로 첫 메시지를 실어서 보내면 자동 전송 (한 번만)
   const seedPrompt = searchParams.get("prompt") ?? "";
+  const seedPermission = parsePermission(
+    searchParams.get("permission") ?? searchParams.get("permissions"),
+  );
   const router = useRouter();
   const { t, locale } = useT();
   const [chat, setChat] = useState<Chat | null>(null);
@@ -469,7 +487,7 @@ function ChatPage() {
   const send = useCallback(
     async (
       userPrompt: string,
-      opts?: { images?: ImageAttachment[]; permissions?: "read" | "write" | "full" },
+      opts?: { images?: ImageAttachment[]; permissions?: PermissionLevel },
     ) => {
       const api = ipc();
       const events = ipcEvents();
@@ -505,7 +523,7 @@ function ChatPage() {
         userPrompt,
         images,
         locale,
-        permissions: opts?.permissions,
+        permissions: opts?.permissions ?? DEFAULT_PERMISSION,
       });
       runIdRef.current = runId;
       // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
@@ -572,7 +590,9 @@ function ChatPage() {
       );
       // 사용자의 선택을 자연어로 묶어 user 메시지로 보냄
       const reply = answers.length === 1 ? answers[0] : answers.map((a) => `• ${a}`).join("\n");
-      void send(reply);
+      void send(reply, {
+        permissions: inferPermissionFromAnswer(answers) ?? DEFAULT_PERMISSION,
+      });
     },
     // send는 동일 useCallback에 의존
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -585,7 +605,7 @@ function ChatPage() {
     if (seededRef.current === chatId) return;
     if (messages.length > 0) return; // 이미 히스토리 있으면 무시
     seededRef.current = chatId;
-    void send(seedPrompt);
+    void send(seedPrompt, { permissions: seedPermission ?? DEFAULT_PERMISSION });
     // URL에서 prompt 파라미터 제거 — 새로고침에서 중복 전송 안 되도록
     router.replace(`/chat?id=${chatId}`);
   }, [seedPrompt, chat, agent, chatId, messages.length, send, router]);
