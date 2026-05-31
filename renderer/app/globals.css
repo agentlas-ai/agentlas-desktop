@@ -354,3 +354,77 @@ a:hover {
   border-top-color: #ffffff;
   animation: agentlas-spin 0.7s linear infinite;
 }
+
+/* Chat composer toolbar: keep action chips and the stop button inside the composer
+   when a right-side panel leaves the chat column narrow. */
+.chat-input-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chat-input-tools-left,
+.chat-input-tools-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chat-input-tools-left {
+  flex: 1 1 240px;
+  flex-wrap: wrap;
+}
+
+.chat-input-tools-right {
+  flex: 0 1 auto;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+.chat-input-chip {
+  min-width: 0;
+  max-width: min(220px, 100%);
+}
+
+.chat-input-model-chip {
+  max-width: min(220px, 46vw);
+}
+
+.chat-input-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-input-send-button {
+  flex: 0 0 32px;
+}
+
+@media (max-width: 920px) {
+  .chat-input-action-label {
+    display: none;
+  }
+  .chat-input-mode-chip {
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+  }
+}
+
+@media (max-width: 760px) {
+  .chat-input-tools-right {
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
+  .chat-input-mode-chip {
+    flex: 0 1 auto;
+  }
+  .chat-input-send-button {
+    margin-left: auto;
+  }
+}

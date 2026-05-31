@@ -289,7 +289,7 @@ function ChatPage() {
   // Esc로 artifact 패널 닫기
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      // 입력창의 Esc 핸들러(자동완성 닫기 / 실행 정지)가 이미 처리했으면 중복 동작 안 함.
+      // 입력창의 Esc 핸들러(자동완성/메뉴 닫기, Cmd/Ctrl+Esc 실행 정지)가 이미 처리했으면 중복 동작 안 함.
       if (e.defaultPrevented) return;
       if (e.key === "Escape" && artifact) setArtifact(null);
     }
@@ -519,7 +519,7 @@ function ChatPage() {
     [chat, busy, locale, t, subscribeRun],
   );
 
-  // 진행 중 실행 취소 — 입력창의 정지 버튼(전송 버튼이 busy일 때 변신) / Esc.
+  // 진행 중 실행 취소 — 입력창의 정지 버튼(전송 버튼이 busy일 때 변신) / Cmd/Ctrl+Esc.
   const stop = useCallback(() => {
     const api = ipc();
     if (!api) return;
@@ -772,6 +772,9 @@ function ChatPage() {
                 fontWeight: 600,
                 color: "var(--ink)",
                 cursor: "text",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
               }}
               title={t("chat.rename_hint")}
             >

@@ -101,6 +101,7 @@ export function AgentNetworkPanel({ firm, org, agent, agents, busy, liveAgents, 
     <aside
       style={{
         width: 340,
+        minWidth: 260,
         maxWidth: "45vw",
         flexShrink: 1, // 좁은 창에서 줄어들어 화면 안에 맞춤(고정폭이면 우측으로 오버플로우)
         height: "100%",
@@ -108,7 +109,6 @@ export function AgentNetworkPanel({ firm, org, agent, agents, busy, liveAgents, 
         borderLeft: "1px solid var(--paper-edge)",
         display: "flex",
         flexDirection: "column",
-        minWidth: 0,
       }}
     >
       <style>{`
@@ -219,7 +219,9 @@ export function AgentNetworkPanel({ firm, org, agent, agents, busy, liveAgents, 
           padding: "8px 12px",
           background: "var(--paper-2)",
           display: "flex",
+          flexWrap: "wrap",
           gap: 14,
+          minWidth: 0,
         }}
       >
         <LegendItem swatch="cmd" label={`${t("network.legend.command")} ↓`} />
@@ -296,7 +298,7 @@ function RosterRow({
       <span
         style={{
           minWidth: 0,
-          flex: "0 1 auto",
+          flex: "1 1 0",
           fontSize: indent ? 11.5 : 12,
           fontWeight: active ? 700 : node.tier === 1 ? 600 : 500,
           color: active ? "var(--ink)" : "var(--muted-deep)",
@@ -310,7 +312,9 @@ function RosterRow({
       {node.role && node.name !== node.role && (
         <span
           style={{
-            flexShrink: 0,
+            flex: "0 1 auto",
+            minWidth: 0,
+            maxWidth: "48%",
             fontSize: 9.5,
             fontWeight: 600,
             color: "var(--muted-deep)",
@@ -318,6 +322,9 @@ function RosterRow({
             border: "1px solid var(--paper-edge)",
             borderRadius: 999,
             padding: "1px 7px",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
           }}
         >
           {node.role}
@@ -395,7 +402,19 @@ function TimelineEntry({
             {item.name}
           </span>
           {item.role && (
-            <span style={{ flexShrink: 0, fontSize: 9, color: "var(--muted)", fontWeight: 600 }}>
+            <span
+              style={{
+                flex: "0 1 42%",
+                minWidth: 0,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                fontSize: 9,
+                color: "var(--muted)",
+                fontWeight: 600,
+                textAlign: "right",
+              }}
+            >
               {item.role}
             </span>
           )}
@@ -448,7 +467,7 @@ function TimelineEntry({
 
 function LegendItem({ swatch, label }: { swatch: "cmd" | "res"; label: string }) {
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
       <span
         style={{
           width: 16,
@@ -457,7 +476,19 @@ function LegendItem({ swatch, label }: { swatch: "cmd" | "res"; label: string })
           flexShrink: 0,
         }}
       />
-      <span style={{ fontSize: 10, color: "var(--muted-deep)", fontWeight: 600 }}>{label}</span>
+      <span
+        style={{
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          fontSize: 10,
+          color: "var(--muted-deep)",
+          fontWeight: 600,
+        }}
+      >
+        {label}
+      </span>
     </span>
   );
 }

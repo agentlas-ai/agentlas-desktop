@@ -479,8 +479,15 @@ export function ChatInput({
               e.preventDefault();
               return;
             }
-            // 실행 중 Esc = 정지 (자동완성 popover가 닫힌 뒤, Claude Code식 인터럽트)
-            if (busy && onStop && e.key === "Escape") {
+            if (e.key === "Escape" && (plusOpen || permOpen || modelOpen)) {
+              setPlusOpen(false);
+              setPermOpen(false);
+              setModelOpen(false);
+              e.preventDefault();
+              return;
+            }
+            // 실행 중 Cmd/Ctrl+Esc = 정지. 일반 Esc는 입력/IME 취소와 겹쳐 오발동하기 쉽다.
+            if (busy && onStop && e.key === "Escape" && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
               onStop();
               return;
@@ -528,186 +535,198 @@ export function ChatInput({
         />
 
         {/* 하단 툴바 */}
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {/* + 메뉴 */}
-          <button
-            onClick={() => {
-              setPlusOpen((v) => !v);
-              setPlusSubmenu(null);
-            }}
-            aria-label={t("chatinput.plus")}
-            title={t("chatinput.plus")}
-            disabled={disabled}
-            style={toolBtnStyle(plusOpen)}
-          >
-            <IconPlus size={15} />
-          </button>
+        <div className="chat-input-toolbar">
+          <div className="chat-input-tools-left">
+            {/* + 메뉴 */}
+            <button
+              onClick={() => {
+                setPlusOpen((v) => !v);
+                setPlusSubmenu(null);
+              }}
+              aria-label={t("chatinput.plus")}
+              title={t("chatinput.plus")}
+              disabled={disabled}
+              style={toolBtnStyle(plusOpen)}
+            >
+              <IconPlus size={15} />
+            </button>
 
-          {/* 슬래시 힌트 */}
-          <button
-            onClick={() => {
-              setInput((s) => `${s}${s.endsWith(" ") || s === "" ? "" : " "}/`);
-              setTimeout(() => textareaRef.current?.focus(), 0);
-            }}
-            aria-label={t("chatinput.slash")}
-            title={t("chatinput.slash")}
-            disabled={disabled}
-            style={toolBtnStyle(false)}
-          >
-            <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 700 }}>/</span>
-          </button>
+            {/* 슬래시 힌트 */}
+            <button
+              onClick={() => {
+                setInput((s) => `${s}${s.endsWith(" ") || s === "" ? "" : " "}/`);
+                setTimeout(() => textareaRef.current?.focus(), 0);
+              }}
+              aria-label={t("chatinput.slash")}
+              title={t("chatinput.slash")}
+              disabled={disabled}
+              style={toolBtnStyle(false)}
+            >
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 700 }}>/</span>
+            </button>
 
-          {/* @ 멘션 힌트 */}
-          <button
-            onClick={() => {
-              setInput((s) => `${s}${s.endsWith(" ") || s === "" ? "" : " "}@`);
-              setTimeout(() => textareaRef.current?.focus(), 0);
-            }}
-            aria-label={t("chatinput.mention")}
-            title={t("chatinput.mention")}
-            disabled={disabled}
-            style={toolBtnStyle(false)}
-          >
-            <IconAtSign size={14} />
-          </button>
+            {/* @ 멘션 힌트 */}
+            <button
+              onClick={() => {
+                setInput((s) => `${s}${s.endsWith(" ") || s === "" ? "" : " "}@`);
+                setTimeout(() => textareaRef.current?.focus(), 0);
+              }}
+              aria-label={t("chatinput.mention")}
+              title={t("chatinput.mention")}
+              disabled={disabled}
+              style={toolBtnStyle(false)}
+            >
+              <IconAtSign size={14} />
+            </button>
 
-          {/* 권한 칩 */}
-          <button
-            onClick={() => setPermOpen((v) => !v)}
-            disabled={disabled}
-            style={{
-              ...toolBtnStyle(permOpen),
-              width: "auto",
-              padding: "0 10px",
-              gap: 6,
-              fontSize: 11,
-              fontWeight: 600,
-              color:
-                permissions === "full"
-                  ? "var(--red-deep)"
-                  : permissions === "write"
-                    ? "var(--amber-deep)"
-                    : "var(--green-deep)",
-            }}
-          >
-            <IconShield size={13} />
-            {t(`chatinput.perm.${permissions}` as `chatinput.perm.${PermissionLevel}`)}
-            <IconChevronDown size={11} style={{ opacity: 0.6 }} />
-          </button>
-
-          {/* 모델·작업량 칩 — 활성 런타임이 모델 선택 또는 작업량을 지원할 때만 */}
-          {runtime &&
-            ((modelOptions?.length ?? 0) > 0 || (runtime.efforts?.length ?? 0) > 0) && (
-              <button
-                onClick={() => setModelOpen((v) => !v)}
-                disabled={disabled}
-                title={t("chatinput.model")}
-                style={{
-                  ...toolBtnStyle(modelOpen),
-                  width: "auto",
-                  padding: "0 10px",
-                  gap: 6,
-                  fontSize: 11,
-                  fontWeight: 600,
-                  color: "var(--ink-soft)",
-                  maxWidth: 220,
-                }}
-              >
-                <IconSparkles size={13} style={{ color: "var(--accent)" }} />
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {modelChipLabel(runtime, modelOptions ?? [])}
-                </span>
-                <IconChevronDown size={11} style={{ opacity: 0.6 }} />
-              </button>
-            )}
-
-          <div style={{ flex: 1 }} />
-
-          {/* 모드 칩 — Plan */}
-          <button
-            onClick={() => setPlanMode((v) => !v)}
-            disabled={disabled}
-            title={t("chatinput.plan_mode")}
-            style={{
-              ...toolBtnStyle(planMode),
-              width: "auto",
-              padding: "0 10px",
-              gap: 6,
-              fontSize: 11,
-              fontWeight: 600,
-              color: planMode ? "var(--accent)" : "var(--muted-deep)",
-            }}
-          >
-            <IconRoute size={13} />
-            {t("chatinput.plan_mode")}
-          </button>
-
-          {/* 모드 칩 — Goal */}
-          <button
-            onClick={() => setGoalMode((v) => !v)}
-            disabled={disabled}
-            title={t("chatinput.goal_mode")}
-            style={{
-              ...toolBtnStyle(goalMode),
-              width: "auto",
-              padding: "0 10px",
-              gap: 6,
-              fontSize: 11,
-              fontWeight: 600,
-              color: goalMode ? "var(--accent)" : "var(--muted-deep)",
-            }}
-          >
-            <IconTarget size={13} />
-            {t("chatinput.goal_mode")}
-          </button>
-
-          {/* 보내기 / 정지 — 실행 중(busy)이고 onStop이 있으면 정지 버튼으로 변신 */}
-          {(() => {
-            const showStop = busy && !!onStop;
-            return (
-              <button
-                onClick={showStop ? onStop : submit}
-                disabled={showStop ? false : submitDisabled}
-                aria-label={showStop ? t("chat.stop") : t("chatinput.send")}
-                title={showStop ? t("chat.stop") : undefined}
-                style={{
-                  width: 32,
-                  height: 32,
-                  flexShrink: 0,
-                  borderRadius: "50%",
-                  background: showStop || !submitDisabled ? "var(--paper)" : "var(--paper-2)",
-                  color: showStop
+            {/* 권한 칩 */}
+            <button
+              className="chat-input-chip"
+              onClick={() => setPermOpen((v) => !v)}
+              disabled={disabled}
+              style={{
+                ...toolBtnStyle(permOpen),
+                width: "auto",
+                padding: "0 10px",
+                gap: 6,
+                fontSize: 11,
+                fontWeight: 600,
+                color:
+                  permissions === "full"
                     ? "var(--red-deep)"
-                    : submitDisabled
-                      ? "var(--muted-deep)"
-                      : "var(--ink)",
-                  border: "1px solid var(--paper-edge)",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  boxShadow: showStop || !submitDisabled ? "var(--neu-raised)" : "none",
-                  cursor: showStop ? "pointer" : undefined,
-                }}
-              >
-                {showStop ? (
-                  <span
-                    style={{
-                      width: 10,
-                      height: 10,
-                      background: "currentColor",
-                      borderRadius: 2,
-                      display: "inline-block",
-                    }}
-                    aria-hidden
-                  />
-                ) : busy ? (
-                  <span className="agentlas-spinner" aria-hidden />
-                ) : (
-                  <IconArrowUp size={15} />
-                )}
-              </button>
-            );
-          })()}
+                    : permissions === "write"
+                      ? "var(--amber-deep)"
+                      : "var(--green-deep)",
+              }}
+            >
+              <IconShield size={13} />
+              <span className="chat-input-chip-label">
+                {t(`chatinput.perm.${permissions}` as `chatinput.perm.${PermissionLevel}`)}
+              </span>
+              <IconChevronDown size={11} style={{ opacity: 0.6, flexShrink: 0 }} />
+            </button>
+
+            {/* 모델·작업량 칩 — 활성 런타임이 모델 선택 또는 작업량을 지원할 때만 */}
+            {runtime &&
+              ((modelOptions?.length ?? 0) > 0 || (runtime.efforts?.length ?? 0) > 0) && (
+                <button
+                  className="chat-input-chip chat-input-model-chip"
+                  onClick={() => setModelOpen((v) => !v)}
+                  disabled={disabled}
+                  title={t("chatinput.model")}
+                  style={{
+                    ...toolBtnStyle(modelOpen),
+                    width: "auto",
+                    padding: "0 10px",
+                    gap: 6,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: "var(--ink-soft)",
+                  }}
+                >
+                  <IconSparkles size={13} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                  <span className="chat-input-chip-label">
+                    {modelChipLabel(runtime, modelOptions ?? [])}
+                  </span>
+                  <IconChevronDown size={11} style={{ opacity: 0.6, flexShrink: 0 }} />
+                </button>
+              )}
+          </div>
+
+          <div className="chat-input-tools-right">
+            {/* 모드 칩 — Plan */}
+            <button
+              className="chat-input-chip chat-input-mode-chip"
+              onClick={() => setPlanMode((v) => !v)}
+              disabled={disabled}
+              title={t("chatinput.plan_mode")}
+              style={{
+                ...toolBtnStyle(planMode),
+                width: "auto",
+                padding: "0 10px",
+                gap: 6,
+                fontSize: 11,
+                fontWeight: 600,
+                color: planMode ? "var(--accent)" : "var(--muted-deep)",
+              }}
+            >
+              <IconRoute size={13} />
+              <span className="chat-input-chip-label chat-input-action-label">
+                {t("chatinput.plan_mode")}
+              </span>
+            </button>
+
+            {/* 모드 칩 — Goal */}
+            <button
+              className="chat-input-chip chat-input-mode-chip"
+              onClick={() => setGoalMode((v) => !v)}
+              disabled={disabled}
+              title={t("chatinput.goal_mode")}
+              style={{
+                ...toolBtnStyle(goalMode),
+                width: "auto",
+                padding: "0 10px",
+                gap: 6,
+                fontSize: 11,
+                fontWeight: 600,
+                color: goalMode ? "var(--accent)" : "var(--muted-deep)",
+              }}
+            >
+              <IconTarget size={13} />
+              <span className="chat-input-chip-label chat-input-action-label">
+                {t("chatinput.goal_mode")}
+              </span>
+            </button>
+
+            {/* 보내기 / 정지 — 실행 중(busy)이고 onStop이 있으면 정지 버튼으로 변신 */}
+            {(() => {
+              const showStop = busy && !!onStop;
+              return (
+                <button
+                  className="chat-input-send-button"
+                  onClick={showStop ? onStop : submit}
+                  disabled={showStop ? false : submitDisabled}
+                  aria-label={showStop ? t("chat.stop") : t("chatinput.send")}
+                  title={showStop ? t("chat.stop") : undefined}
+                  style={{
+                    width: 32,
+                    height: 32,
+                    flexShrink: 0,
+                    borderRadius: "50%",
+                    background: showStop || !submitDisabled ? "var(--paper)" : "var(--paper-2)",
+                    color: showStop
+                      ? "var(--red-deep)"
+                      : submitDisabled
+                        ? "var(--muted-deep)"
+                        : "var(--ink)",
+                    border: "1px solid var(--paper-edge)",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    boxShadow: showStop || !submitDisabled ? "var(--neu-raised)" : "none",
+                    cursor: showStop ? "pointer" : undefined,
+                  }}
+                >
+                  {showStop ? (
+                    <span
+                      style={{
+                        width: 10,
+                        height: 10,
+                        background: "currentColor",
+                        borderRadius: 2,
+                        display: "inline-block",
+                      }}
+                      aria-hidden
+                    />
+                  ) : busy ? (
+                    <span className="agentlas-spinner" aria-hidden />
+                  ) : (
+                    <IconArrowUp size={15} />
+                  )}
+                </button>
+              );
+            })()}
+          </div>
         </div>
       </div>
     </footer>
