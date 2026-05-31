@@ -23,9 +23,9 @@ import { ArtifactPanel } from "@/components/ArtifactPanel";
 import { WorkspacePanel } from "@/components/WorkspacePanel";
 import { AgentNetworkPanel, type LiveAgent, type NetTimelineItem } from "@/components/AgentNetworkPanel";
 import { ProjectFolderBar } from "@/components/ProjectFolderBar";
-import { AgentAvatar } from "@/components/AgentAvatar";
+import { AgentPicker } from "@/components/AgentPicker";
 import type { CodeArtifact } from "@/components/Markdown";
-import { IconBuilding, IconChevronRight, IconFolder, IconNetwork, IconSparkles, IconTrash } from "@/components/Icon";
+import { IconBuilding, IconFolder, IconNetwork, IconSparkles, IconTrash } from "@/components/Icon";
 import { pickLocalized, useT } from "@/lib/i18n";
 
 function uid(): string {
@@ -663,24 +663,14 @@ function ChatPage() {
         }}
       >
         {agent && (
-          <div
-            className="titlebar-nodrag"
-            style={{ position: "relative", display: "inline-flex", alignItems: "center" }}
-          >
-            <span
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "4px 10px 4px 4px",
-                borderRadius: 999,
-                background: firm ? "var(--fill-1)" : "var(--paper-2)",
-                border: firm ? "1px solid var(--accent-soft)" : "1px solid var(--paper-edge)",
-                cursor: "pointer",
-              }}
-              title={t("chat.switch_agent")}
-            >
-              {firm ? (
+          <AgentPicker
+            agents={allAgents}
+            activeId={agent.id}
+            onChange={(id) => void switchAgent(id)}
+            ariaLabel={t("chat.switch_agent")}
+            maxButtonWidth={firm ? 420 : 232}
+            activePrefix={
+              firm ? (
                 <span
                   style={{
                     width: 26,
@@ -691,71 +681,41 @@ function ChatPage() {
                     display: "inline-flex",
                     alignItems: "center",
                     justifyContent: "center",
+                    flexShrink: 0,
                   }}
                 >
                   <IconBuilding size={14} />
                 </span>
-              ) : (
-                <AgentAvatar name={pickLocalized(agent, locale).name} tone={agent.tone} size={26} />
-              )}
-              <span
-                style={{
-                  fontSize: 12,
-                  fontWeight: 600,
-                  color: "var(--ink)",
-                  maxWidth: 180,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {pickLocalized(agent, locale).name}
-              </span>
-              {firm && (
+              ) : undefined
+            }
+            activeBadge={
+              firm ? (
                 <span
                   style={{
                     fontSize: 10,
                     padding: "2px 6px",
                     borderRadius: 999,
-                    background: "var(--paper-2)",
+                    background: "var(--paper)",
                     color: "var(--ink-soft)",
                     border: "1px solid var(--paper-edge)",
                     fontWeight: 700,
-                    maxWidth: 200,
+                    maxWidth: 160,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
+                    flexShrink: 0,
                   }}
                 >
                   CEO · {pickLocalized(firm, locale).name}
                 </span>
-              )}
-              <IconChevronRight
-                size={11}
-                style={{ color: "var(--muted)", transform: "rotate(90deg)" }}
-              />
-            </span>
-            <select
-              value={agent.id}
-              onChange={(e) => void switchAgent(e.target.value)}
-              aria-label={t("chat.switch_agent")}
-              style={{
-                position: "absolute",
-                inset: 0,
-                opacity: 0,
-                cursor: "pointer",
-              }}
-            >
-              {allAgents.map((a) => {
-                const loc = pickLocalized(a, locale);
-                return (
-                  <option key={a.id} value={a.id}>
-                    {loc.name} — {loc.tagline}
-                  </option>
-                );
-              })}
-            </select>
-          </div>
+              ) : undefined
+            }
+            buttonStyle={
+              firm
+                ? { background: "var(--fill-1)", border: "1px solid var(--accent-soft)" }
+                : undefined
+            }
+          />
         )}
         <div style={{ flex: 1, minWidth: 0, marginLeft: 12 }}>
           {project && (

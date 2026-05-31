@@ -13,8 +13,9 @@ import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import type { InstalledAgent, InstalledFirm } from "@/lib/types";
+import { AgentPicker } from "@/components/AgentPicker";
 import { PawLogo } from "@/components/PawLogo";
-import { IconBuilding, IconChat, IconSparkles, IconStore } from "@/components/Icon";
+import { IconBuilding, IconSparkles, IconStore } from "@/components/Icon";
 
 const SUGGESTIONS_KO = [
   "오늘 인스타 캡션 3개 만들어줘",
@@ -267,10 +268,18 @@ export default function HomePage() {
                 onChange={setActiveFirmId}
               />
             ) : (
-              <AgentSelector
+              <AgentPicker
                 agents={agents}
                 activeId={activeAgentId}
                 onChange={setActiveAgentId}
+                ariaLabel={locale === "en" ? "Agent" : "에이전트"}
+                placement="top"
+                maxButtonWidth={240}
+                buttonStyle={{
+                  padding: "6px 10px",
+                  borderRadius: 999,
+                  boxShadow: "none",
+                }}
               />
             )}
             <Link
@@ -402,63 +411,6 @@ function FirmSelector({
           const loc = pickLocalized(f, locale);
           return (
             <option key={f.id} value={f.id}>
-              {loc.name} — {loc.tagline}
-            </option>
-          );
-        })}
-      </select>
-    </label>
-  );
-}
-
-function AgentSelector({
-  agents,
-  activeId,
-  onChange,
-}: {
-  agents: InstalledAgent[];
-  activeId: string;
-  onChange: (id: string) => void;
-}) {
-  const { locale } = useT();
-  const active = agents.find((a) => a.id === activeId);
-  const activeLoc = active ? pickLocalized(active, locale) : null;
-  return (
-    <label
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        padding: "6px 10px",
-        borderRadius: 999,
-        border: "1px solid var(--paper-edge)",
-        background: "var(--paper-2)",
-        fontSize: 12,
-        cursor: "pointer",
-        position: "relative",
-      }}
-      title={activeLoc?.tagline}
-    >
-      <IconSparkles size={12} style={{ color: "var(--accent)" }} />
-      <span style={{ fontWeight: 600, color: "var(--ink)" }}>
-        {activeLoc?.name ?? (locale === "en" ? "Pick an agent" : "에이전트 선택")}
-      </span>
-      <IconChat size={11} style={{ color: "var(--muted-deep)" }} />
-      <select
-        value={activeId}
-        onChange={(e) => onChange(e.target.value)}
-        style={{
-          position: "absolute",
-          inset: 0,
-          opacity: 0,
-          cursor: "pointer",
-        }}
-        aria-label="Agent"
-      >
-        {agents.map((a) => {
-          const loc = pickLocalized(a, locale);
-          return (
-            <option key={a.id} value={a.id}>
               {loc.name} — {loc.tagline}
             </option>
           );
