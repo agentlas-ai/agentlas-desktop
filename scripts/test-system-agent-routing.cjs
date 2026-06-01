@@ -87,4 +87,26 @@ for (const c of realCases) {
   else console.log(`   EXPECTED=[${c.expect.join(", ")}]  scores=${r.scores.map((s) => `${s.id}:${s.score.toFixed(2)}`).join(", ")}`);
 }
 console.log(`\n${rpass}/${realCases.length} real-spec routing cases passed`);
-process.exit(pass === cases.length && rpass === realCases.length ? 0 : 1);
+
+// ── 메모리 시스템 에이전트 spec ──
+const { MEMORY_SYSTEM_AGENT, MEMORY_CORE } = require("../dist/electron/system-agents/memory/index.js");
+const memCases = [
+  { q: "remember that I prefer dark mode", expect: ["memory-schema"] },
+  { q: "이 결정을 기억해줘", expect: ["memory-schema"] },
+  { q: "what's the weather like?", expect: [] }, // 단순 질문 → 스키마 미로드(코어 트리거만)
+];
+let mpass = 0;
+console.log("\n=== memory system agent spec ===");
+for (const c of memCases) {
+  const r = assembleSystemPrompt(MEMORY_SYSTEM_AGENT, c.q, { threshold: 0.4, maxModules: 1 });
+  const got = r.loadedModuleIds.slice().sort();
+  const ok = JSON.stringify(got) === JSON.stringify(c.expect.slice().sort());
+  console.log(`${ok ? "✓" : "✗"} "${c.q}" → [${r.loadedModuleIds.join(", ") || "core-only"}]  chars=${r.chars}`);
+  if (ok) mpass++;
+}
+// 코어가 emit에 필요한 enum을 항상 포함(capability 보존)
+const coreOk = MEMORY_CORE.includes("memory_kind") && MEMORY_CORE.includes("suggested_scope") && MEMORY_CORE.includes("Never record secrets");
+console.log(`core always carries kinds/scopes + safety: ${coreOk ? "✓" : "✗"}`);
+console.log(`\n${mpass}/${memCases.length} memory routing cases passed`);
+
+process.exit(pass === cases.length && rpass === realCases.length && mpass === memCases.length && coreOk ? 0 : 1);

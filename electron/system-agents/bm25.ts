@@ -12,7 +12,15 @@ const STOP = new Set([
 
 export function tokenize(text: string): string[] {
   const raw = text.toLowerCase().match(/[a-z0-9]+|[가-힣]+/g) ?? [];
-  return raw.filter((t) => t.length > 1 && !STOP.has(t));
+  const out: string[] = [];
+  for (const t of raw) {
+    if (t.length <= 1 || STOP.has(t)) continue;
+    out.push(t);
+    // 한국어 교착어 근사 stem: 형태소 분석 없이, 3음절+ 토큰은 앞 2음절도 토큰으로 추가한다.
+    // 예: "기억해줘"→["기억해줘","기억"], "연결해줘"→[...,"연결"] → 키워드 "기억"/"연결"과 매칭.
+    if (t.length >= 3 && /^[가-힣]+$/.test(t)) out.push(t.slice(0, 2));
+  }
+  return out;
 }
 
 export interface Bm25Doc {
