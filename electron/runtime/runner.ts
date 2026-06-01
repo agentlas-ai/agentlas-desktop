@@ -4,6 +4,8 @@ import type { ChatHistoryEntry, ImageAttachment } from "../../shared/types";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { GLOBAL_CONNECTION_SKILL } from "./global-skill";
 import { SURFACE_PROTOCOL } from "../surface-emitter";
+import { selectModules } from "../system-agents";
+import { SURFACE_MODULE } from "../system-agents/desktop-chat/modules";
 
 export interface RunnerRequest {
   systemPrompt: string;
@@ -89,13 +91,23 @@ export function wrapSystemPrompt(
   agentSystemPrompt: string,
   locale: RuntimeLocale,
   permission?: "read" | "write" | "full",
+  /** 이번 턴의 사용자 입력 — 온디맨드 디스커버리(SURFACE 게이트)에 사용. 미제공 시 회귀 방지로 모두 포함. */
+  userPrompt?: string,
 ): string {
   // write/full 권한이면 도구 사용 허용 안내(Claude Code식 tool-use). read/기본이면 도구 끔.
   const toolsLine =
     permission === "write" || permission === "full"
       ? "You have tools available (file read/write, shell, web search, MCP). Use them when they help complete the task, and say what you're doing."
       : tStatus(locale, "sysToolsOff");
-  return [
+
+  // 온디맨드: SURFACE_PROTOCOL(~16KB)은 요청이 surface(대시보드/앱/운영OS)에 해당할 때만 주입한다.
+  // 단순 Q&A·대화 턴에서 16KB를 통째로 절약(코어 최소화). userPrompt 미제공(레거시 경로)이면 포함.
+  // CONNECTION_SKILL은 코어 유지 — 외부연결 미스가 dead-end가 되는 걸 막기 위함(안전한 under-trigger).
+  const includeSurface =
+    userPrompt === undefined ||
+    selectModules(userPrompt, [SURFACE_MODULE], { threshold: 0.8 }).selected.length > 0;
+
+  const parts: string[] = [
     tStatus(locale, "sysHeader"),
     tStatus(locale, "sysGuide"),
     toolsLine,
@@ -106,9 +118,10 @@ export function wrapSystemPrompt(
     // 발급을 손잡고 안내한 뒤 저장하게 한다. 사용자에게는 보이지 않는다(시스템 프롬프트 내부).
     GLOBAL_CONNECTION_SKILL,
     "",
-    SURFACE_PROTOCOL,
-    "",
-    tStatus(locale, "sysAgentDef"),
-    agentSystemPrompt,
-  ].join("\n");
+  ];
+  if (includeSurface) {
+    parts.push(SURFACE_PROTOCOL, "");
+  }
+  parts.push(tStatus(locale, "sysAgentDef"), agentSystemPrompt);
+  return parts.join("\n");
 }

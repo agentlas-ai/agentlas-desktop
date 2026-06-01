@@ -103,7 +103,7 @@ export const runOllama: Runner = async (
   const messages: Array<{
     role: "system" | "user" | "assistant";
     content: string | OllamaContent[];
-  }> = [{ role: "system", content: wrapSystemPrompt(systemText, req.locale, req.permission) }];
+  }> = [{ role: "system", content: wrapSystemPrompt(systemText, req.locale, req.permission, req.userPrompt) }];
   for (const m of recent) {
     if (m.role === "user" || m.role === "assistant") {
       messages.push({ role: m.role, content: m.text });

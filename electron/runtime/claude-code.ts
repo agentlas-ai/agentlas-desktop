@@ -150,7 +150,7 @@ export const runClaudeCode: Runner = async (
     events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
   }
 
-  const systemPrompt = wrapSystemPrompt(req.systemPrompt, req.locale, req.permission);
+  const systemPrompt = wrapSystemPrompt(req.systemPrompt, req.locale, req.permission, req.userPrompt);
   const flatUser = flattenHistory(req);
 
   // 권한 칩 → claude 권한 모드. read=기본(헤드리스에서 위험 툴 자동 거부), write=편집 허용, full=전체.

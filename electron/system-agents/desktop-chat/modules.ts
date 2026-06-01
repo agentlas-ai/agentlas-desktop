@@ -10,10 +10,15 @@ import { AUTOMATION_PROTOCOL } from "../../automation-emitter";
 export const SURFACE_MODULE: OnDemandModule = {
   id: "surface",
   title: "Interactive surface / dashboard builder",
+  // 명사·도메인 중심 강신호(generic verb 제외로 over-trigger 억제). under-trigger(와우모먼트 미스)를
+  // 줄이려 surface-worthy 명사를 폭넓게: dashboard/app/board/workflow/crm/inventory/orders/track/manage...
   keywords: [
-    "dashboard", "app", "interactive", "chart", "storefront", "operating", "operate",
-    "service-app", "mini-app", "build", "scaffold", "deploy",
-    "대시보드", "앱", "차트", "스토어", "운영", "자동화 대시보드", "만들어",
+    "dashboard", "app", "mini-app", "service-app", "tool", "board", "workflow",
+    "pipeline", "crm", "inventory", "catalog", "orders", "storefront", "store",
+    "shop", "operating", "operate", "monitor", "track", "manage", "organize",
+    "interactive", "chart", "studio",
+    "대시보드", "앱", "도구", "보드", "차트", "스토어", "쇼핑몰", "운영", "관리",
+    "추적", "정리", "주문", "재고", "워크플로우",
   ],
   description:
     "Emit an interactive surface manifest (dashboard / service-app / operating OS) when the result is better as a reusable mini-app than plain text. Carries widgets, actions, capabilities, delegation, budget.",
