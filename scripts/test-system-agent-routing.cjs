@@ -64,5 +64,27 @@ const simple = assembleSystemPrompt(agent, "안녕", { threshold: 0.8 });
 const full = CORE.length + modules.reduce((n, m) => n + m.load().length, 0);
 console.log(`\nsimple-chat assembled chars=${simple.chars}  vs  always-on-all≈${full}  → 단순 대화에서 무거운 모듈 0개 로드`);
 
-console.log(`\n${pass}/${cases.length} routing cases passed`);
-process.exit(pass === cases.length ? 0 : 1);
+console.log(`\n${pass}/${cases.length} synthetic routing cases passed`);
+
+// ── 실제 desktop-chat 시스템 에이전트 spec으로 라우팅 검증 ──
+const { DESKTOP_CHAT_AGENT } = require("../dist/electron/system-agents/desktop-chat/index.js");
+const realCases = [
+  { q: "build me an interactive sales dashboard with charts", expect: ["surface"] },
+  { q: "connect my stripe account please", expect: ["connection"] },
+  { q: "run this report every monday morning", expect: ["automation"] },
+  { q: "what is 2 + 2?", expect: [] }, // 단순 질문 → 코어만(무거운 모듈 0)
+  { q: "내 쇼핑몰 운영 대시보드 만들어줘", expect: ["surface"] },
+  { q: "내 슬랙 계정 연결해줘", expect: ["connection"] },
+];
+let rpass = 0;
+console.log("\n=== real desktop-chat spec ===");
+for (const c of realCases) {
+  const r = assembleSystemPrompt(DESKTOP_CHAT_AGENT, c.q, { threshold: 0.8, maxModules: 3 });
+  const got = r.loadedModuleIds.slice().sort();
+  const ok = JSON.stringify(got) === JSON.stringify(c.expect.slice().sort());
+  console.log(`${ok ? "✓" : "✗"} "${c.q}" → [${r.loadedModuleIds.join(", ") || "core-only"}]`);
+  if (ok) rpass++;
+  else console.log(`   EXPECTED=[${c.expect.join(", ")}]  scores=${r.scores.map((s) => `${s.id}:${s.score.toFixed(2)}`).join(", ")}`);
+}
+console.log(`\n${rpass}/${realCases.length} real-spec routing cases passed`);
+process.exit(pass === cases.length && rpass === realCases.length ? 0 : 1);
