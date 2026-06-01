@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type { Automation, InstalledAgent, InstalledFirm } from "@/lib/types";
 import { IconBolt, IconBuilding, IconTrash } from "@/components/Icon";
@@ -41,7 +42,7 @@ function AutomationDetailPage() {
       });
     } else {
       const agents: InstalledAgent[] = await api.team.list();
-      const a = agents.find((x) => x.id === found.targetId);
+      const a = visibleAgents(agents).find((x) => x.id === found.targetId);
       setTarget({
         kind: "agent",
         name: a ? pickLocalized(a, locale).name : locale === "en" ? "(removed agent)" : "(삭제된 에이전트)",

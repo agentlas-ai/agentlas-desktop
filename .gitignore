@@ -52,3 +52,8 @@ release-signing/
 # Agentlas architecture: ignore volatile runtime memory, keep curated soul/sitemap
 .agentlas/memory-log.jsonl
 ._*
+
+# local packaging output (large)
+release-local/
+# large demo/verification outputs
+artifacts/

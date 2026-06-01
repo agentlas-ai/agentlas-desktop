@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { InstalledAgent } from "@/lib/types";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { AgentAvatar } from "./AgentAvatar";
 import { IconCheck, IconChevronDown, IconSearch } from "./Icon";
@@ -37,17 +38,18 @@ export function AgentPicker({
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
-  const active = agents.find((agent) => agent.id === activeId) ?? agents[0] ?? null;
+  const displayAgents = useMemo(() => visibleAgents(agents), [agents]);
+  const active = displayAgents.find((agent) => agent.id === activeId) ?? displayAgents[0] ?? null;
   const activeLoc = active ? pickLocalized(active, locale) : null;
 
   const filteredAgents = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return agents;
-    return agents.filter((agent) => {
+    if (!q) return displayAgents;
+    return displayAgents.filter((agent) => {
       const loc = pickLocalized(agent, locale);
       return `${loc.name} ${loc.tagline} ${agent.slug}`.toLowerCase().includes(q);
     });
-  }, [agents, locale, query]);
+  }, [displayAgents, locale, query]);
 
   useEffect(() => {
     if (!open) return;

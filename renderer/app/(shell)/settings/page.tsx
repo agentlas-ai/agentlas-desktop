@@ -1,17 +1,25 @@
 // 설정 — BYOC 연결 관리. PRD 3.1 FRE 6단계 + 10번 리스크 "키 저장 위치 명시".
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { ipc, updaterEvents } from "@/lib/ipc";
 import { useT, type LocalePref } from "@/lib/i18n";
 import { useTheme, type ThemePref } from "@/lib/theme";
-import type { RuntimeBackend, RuntimeStatus, UpdaterState } from "@/lib/types";
+import type {
+  MultimodalModality,
+  MultimodalProvider,
+  MultimodalProviderStatus,
+  MultimodalSettings,
+  RuntimeBackend,
+  RuntimeStatus,
+  UpdaterState,
+} from "@/lib/types";
 import {
   BYOK_MODELS,
   CONTEXT_MANAGED_BY,
   findByokModel,
   needsLongContextToggle,
 } from "@shared/models";
-import { IconCheck, IconLock, IconRefresh } from "@/components/Icon";
+import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconRefresh, IconWand } from "@/components/Icon";
 import { MigrationPanel } from "@/components/MigrationPanel";
 
 // BYOK는 API 키를 직접 넣는 클라우드 3종 (Ollama는 로컬이라 키 없음).
@@ -56,19 +64,29 @@ export default function SettingsPage() {
     google: false,
     upstage: false,
   });
+  const [multimodalProviders, setMultimodalProviders] = useState<MultimodalProvider[]>([]);
+  const [multimodalSettings, setMultimodalSettings] = useState<MultimodalSettings | null>(null);
+  const [multimodalStatus, setMultimodalStatus] = useState<MultimodalProviderStatus[]>([]);
+  const [multimodalDraft, setMultimodalDraft] = useState<Record<string, string>>({});
 
   const refresh = useCallback(async () => {
     const api = ipc();
     if (!api) return;
-    const [s, a, o, g, u] = await Promise.all([
+    const [s, a, o, g, u, providers, mmSettings, mmStatus] = await Promise.all([
       api.runtime.detect(),
       api.secrets.hasApiKey("anthropic"),
       api.secrets.hasApiKey("openai"),
       api.secrets.hasApiKey("google"),
       api.secrets.hasApiKey("upstage"),
+      api.multimodal.listProviders(),
+      api.multimodal.getSettings(),
+      api.multimodal.status(),
     ]);
     setStatuses(s);
     setHasKey({ anthropic: a, openai: o, google: g, upstage: u });
+    setMultimodalProviders(providers);
+    setMultimodalSettings(mmSettings);
+    setMultimodalStatus(mmStatus);
   }, []);
 
   useEffect(() => {
@@ -126,6 +144,29 @@ export default function SettingsPage() {
     const api = ipc();
     if (!api) return;
     await api.secrets.deleteApiKey(backend);
+    await refresh();
+  }
+
+  async function saveMultimodalProvider(modality: MultimodalModality, providerId: string) {
+    const api = ipc();
+    if (!api || !multimodalSettings) return;
+    const patch =
+      modality === "image"
+        ? { imageProvider: providerId }
+        : modality === "video"
+        ? { videoProvider: providerId }
+        : { audioProvider: providerId };
+    const next = await api.multimodal.saveSettings({ ...multimodalSettings, ...patch });
+    setMultimodalSettings(next);
+    setMultimodalStatus(await api.multimodal.status());
+  }
+
+  async function saveMultimodalEnv(key: string) {
+    const api = ipc();
+    const value = multimodalDraft[key]?.trim();
+    if (!api || !value) return;
+    await api.env.set(key, value);
+    setMultimodalDraft((draft) => ({ ...draft, [key]: "" }));
     await refresh();
   }
 
@@ -323,6 +364,16 @@ export default function SettingsPage() {
         {/* Agentlas 터미널 CLI */}
         <AgentlasCliPanel />
 
+        <MultimodalFallbackPanel
+          providers={multimodalProviders}
+          settings={multimodalSettings}
+          status={multimodalStatus}
+          drafts={multimodalDraft}
+          onDraftChange={(key, value) => setMultimodalDraft((draft) => ({ ...draft, [key]: value }))}
+          onSelect={(modality, providerId) => void saveMultimodalProvider(modality, providerId)}
+          onSaveEnv={(key) => void saveMultimodalEnv(key)}
+        />
+
         {/* 로컬 모델 (Ollama) */}
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "32px 0 12px" }}>
           {t("settings.ollama.title")}
@@ -502,6 +553,129 @@ export default function SettingsPage() {
         <MigrationPanel />
       </section>
     </div>
+  );
+}
+
+function MultimodalFallbackPanel({
+  providers,
+  settings,
+  status,
+  drafts,
+  onDraftChange,
+  onSelect,
+  onSaveEnv,
+}: {
+  providers: MultimodalProvider[];
+  settings: MultimodalSettings | null;
+  status: MultimodalProviderStatus[];
+  drafts: Record<string, string>;
+  onDraftChange: (key: string, value: string) => void;
+  onSelect: (modality: MultimodalModality, providerId: string) => void;
+  onSaveEnv: (key: string) => void;
+}) {
+  const { t, locale } = useT();
+  const selected = {
+    image: settings?.imageProvider ?? "",
+    video: settings?.videoProvider ?? "",
+    audio: settings?.audioProvider ?? "",
+  };
+  const statusByProvider = new Map(status.map((item) => [item.provider.id, item]));
+  const modalities: Array<{ id: MultimodalModality; icon: JSX.Element; label: string }> = [
+    { id: "image", icon: <IconImage size={15} />, label: t("settings.multimodal.image") },
+    { id: "video", icon: <IconFilm size={15} />, label: t("settings.multimodal.video") },
+    { id: "audio", icon: <IconWand size={15} />, label: t("settings.multimodal.audio") },
+  ];
+
+  return (
+    <>
+      <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "32px 0 12px" }}>
+        {t("settings.multimodal.title")}
+      </h2>
+      <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 12px", lineHeight: 1.55 }}>
+        {t("settings.multimodal.note")}
+      </p>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {modalities.map((modality) => {
+          const items = providers.filter((provider) => provider.modality === modality.id);
+          return (
+            <div key={modality.id} style={multimodalGroupStyle}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                <span style={{ color: "var(--accent)", display: "inline-flex" }}>{modality.icon}</span>
+                <strong style={{ fontSize: 13 }}>{modality.label}</strong>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 8 }}>
+                {items.map((provider) => {
+                  const active = selected[modality.id] === provider.id;
+                  const providerStatus = statusByProvider.get(provider.id);
+                  const providerName = locale === "en" ? provider.label : provider.labelKo;
+                  return (
+                    <button
+                      key={provider.id}
+                      onClick={() => onSelect(modality.id, provider.id)}
+                      style={{
+                        ...multimodalProviderStyle,
+                        borderColor: active ? "var(--accent)" : "var(--paper-edge)",
+                        boxShadow: active ? "var(--neu-raised)" : "none",
+                      }}
+                    >
+                      <span style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
+                        <span style={{ fontWeight: 700, color: "var(--ink)", lineHeight: 1.25 }}>{providerName}</span>
+                        {active && <IconCheck size={14} style={{ color: "var(--green-deep)", flexShrink: 0 }} />}
+                      </span>
+                      <span style={{ color: "var(--muted-deep)", fontSize: 11, lineHeight: 1.45 }}>
+                        {locale === "en" ? provider.summary : provider.summaryKo}
+                      </span>
+                      <span style={{ color: "var(--muted)", fontSize: 10.5, fontFamily: "var(--font-mono)" }}>
+                        {provider.defaultModel ?? provider.mode}
+                      </span>
+                      {active && providerStatus && providerStatus.env.length > 0 && (
+                        <span style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 2 }}>
+                          {providerStatus.env.map((env) => (
+                            <span key={env.key} style={multimodalEnvRowStyle}>
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 5, minWidth: 0 }}>
+                                <IconKey size={11} />
+                                <code style={{ overflowWrap: "anywhere" }}>{env.key}</code>
+                              </span>
+                              <span style={{ color: env.hasValue ? "var(--green-deep)" : "var(--peach-ink)", fontWeight: 700 }}>
+                                {env.hasValue ? t("settings.multimodal.key_saved") : t("settings.multimodal.key_missing")}
+                              </span>
+                            </span>
+                          ))}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+              {items
+                .filter((provider) => selected[modality.id] === provider.id)
+                .flatMap((provider) => provider.envKeys)
+                .map((key) => (
+                  <div key={key} style={multimodalSecretRowStyle}>
+                    <input
+                      type="password"
+                      value={drafts[key] ?? ""}
+                      onChange={(event) => onDraftChange(key, event.target.value)}
+                      placeholder={t("settings.multimodal.key_placeholder", { key })}
+                      style={multimodalSecretInputStyle}
+                    />
+                    <button
+                      onClick={() => onSaveEnv(key)}
+                      disabled={!(drafts[key] ?? "").trim()}
+                      style={{
+                        ...multimodalSecretButtonStyle,
+                        opacity: (drafts[key] ?? "").trim() ? 1 : 0.45,
+                      }}
+                    >
+                      {t("settings.save")}
+                    </button>
+                  </div>
+                ))}
+            </div>
+          );
+        })}
+      </div>
+    </>
   );
 }
 
@@ -1066,3 +1240,61 @@ function CliInstallPanel({
     </>
   );
 }
+
+const multimodalGroupStyle: CSSProperties = {
+  padding: 14,
+  border: "1px solid var(--paper-edge)",
+  borderRadius: "var(--radius-md)",
+  background: "var(--paper)",
+};
+
+const multimodalProviderStyle: CSSProperties = {
+  textAlign: "left",
+  padding: 12,
+  border: "1px solid var(--paper-edge)",
+  borderRadius: "var(--radius-md)",
+  background: "var(--paper-2)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 7,
+  minHeight: 128,
+};
+
+const multimodalEnvRowStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 8,
+  padding: "5px 7px",
+  borderRadius: "var(--radius-sm)",
+  background: "var(--paper)",
+  fontSize: 10.5,
+};
+
+const multimodalSecretRowStyle: CSSProperties = {
+  display: "flex",
+  gap: 8,
+  marginTop: 10,
+};
+
+const multimodalSecretInputStyle: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  padding: "8px 12px",
+  border: "1px solid var(--paper-edge)",
+  borderRadius: "var(--radius-md)",
+  background: "var(--paper-2)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 12,
+};
+
+const multimodalSecretButtonStyle: CSSProperties = {
+  padding: "8px 14px",
+  borderRadius: "var(--radius-md)",
+  background: "var(--paper)",
+  color: "var(--ink)",
+  fontWeight: 700,
+  fontSize: 12,
+  border: "1px solid var(--paper-edge)",
+  boxShadow: "var(--neu-raised)",
+};

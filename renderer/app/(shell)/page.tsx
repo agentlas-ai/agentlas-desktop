@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import type { InstalledAgent, InstalledFirm } from "@/lib/types";
@@ -55,12 +56,13 @@ export default function HomePage() {
         return;
       }
 
-      // 3) 에이전트 0개면 → /marketplace
+      // 3) 에이전트가 전혀 없으면 → /marketplace. Background router만 있는 경우는 홈 composer를 유지한다.
       const list = await api.team.list();
       if (list.length === 0) {
         router.replace("/marketplace");
         return;
       }
+      const visible = visibleAgents(list);
 
       setAgents(list);
       // 회사도 함께 로드
@@ -68,7 +70,13 @@ export default function HomePage() {
       setFirms(installedFirms);
       // 마지막 사용한 에이전트 = 가장 최근 채팅의 에이전트
       const chats = await api.chats.listRecent(1);
-      setActiveAgentId(list.find((a) => a.slug === "agentlas-orchestrator")?.id ?? chats[0]?.agentId ?? list[0].id);
+      setActiveAgentId(
+        visible.find((a) => a.id === chats[0]?.agentId)?.id ??
+          visible[0]?.id ??
+          list.find((a) => a.slug === "agentlas-orchestrator")?.id ??
+          chats[0]?.agentId ??
+          list[0].id,
+      );
       if (installedFirms[0]) setActiveFirmId(installedFirms[0].id);
       // 가장 최근 채팅이 회사 채팅이면 firm 모드로 기본 진입
       if (chats[0]?.firmId) {
@@ -102,7 +110,8 @@ export default function HomePage() {
   }
 
   if (agents === null) return null;
-  const activeAgent = agents.find((a) => a.id === activeAgentId);
+  const displayAgents = visibleAgents(agents);
+  const activeAgent = displayAgents.find((a) => a.id === activeAgentId);
   const activeFirm = firms.find((f) => f.id === activeFirmId);
 
   return (
@@ -254,19 +263,21 @@ export default function HomePage() {
                 onChange={setActiveFirmId}
               />
             ) : (
-              <AgentPicker
-                agents={agents}
-                activeId={activeAgentId}
-                onChange={setActiveAgentId}
-                ariaLabel={locale === "en" ? "Agent" : "에이전트"}
-                placement="top"
-                maxButtonWidth={240}
-                buttonStyle={{
-                  padding: "6px 10px",
-                  borderRadius: 999,
-                  boxShadow: "none",
-                }}
-              />
+              displayAgents.length > 0 && (
+                <AgentPicker
+                  agents={displayAgents}
+                  activeId={activeAgentId}
+                  onChange={setActiveAgentId}
+                  ariaLabel={locale === "en" ? "Agent" : "에이전트"}
+                  placement="top"
+                  maxButtonWidth={240}
+                  buttonStyle={{
+                    padding: "6px 10px",
+                    borderRadius: 999,
+                    boxShadow: "none",
+                  }}
+                />
+              )
             )}
             <Link
               href={mode === "firm" ? "/marketplace?tab=firms" : "/marketplace"}

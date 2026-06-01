@@ -2,14 +2,13 @@
 // agent architecture that ships with the app AND the terminal CLI.
 //
 // Why this file exists (read before editing):
-//   The Agentlas *web* product runs a hosted meta-agent. The Agentlas *desktop app*
+//   The Agentlas *web* product runs hosted builder/orchestration services. The Agentlas *desktop app*
 //   and *terminal CLI* instead run a local "architecture agent" (Hermes-style):
 //   a small, always-present set of governance agents + a memory substrate that turn
 //   ordinary folders and chats into a continuity-preserving, bias-resistant workspace.
 //
-//   Five research architectures are baked in here:
+//   Four background architecture agents are baked in here:
 //     - Agentlas Orchestrator (agentlas-orchestrator)      — default front door + auto routing
-//     - Agentlas Meta-Agent   (agentlas-meta-agent)        — designs Agentlas agents/teams
 //     - Project PM Soul        (agent_project_pm_soul)      — per-project continuity + memory
 //     - Memory Curator         (agent_memory_curator_agent) — global curated memory writes
 //     - Task Bias Curator      (agentlas_task_bias)         — sitemap governance + bias audit
@@ -26,7 +25,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.3.0";
+export const ARCHITECTURE_VERSION = "1.4.0";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 
 // ── Memory contract ────────────────────────────────────────────────────────
@@ -131,7 +130,7 @@ ${MEMORY_EVENTS_HEADING}
 
 // ── Built-in agents ──────────────────────────────────────────────────────────
 
-export type BuiltinRole = "orchestrator" | "meta" | "pm" | "curator" | "governance";
+export type BuiltinRole = "orchestrator" | "pm" | "curator" | "governance";
 
 export interface BuiltinAgentDef {
   slug: string;
@@ -141,6 +140,8 @@ export interface BuiltinAgentDef {
   taglineEn: string;
   /** Architecture role — drives auto-activation + UI grouping. */
   role: BuiltinRole;
+  /** Built-ins are background control agents, not user-facing installed assistants. */
+  visibility: "background";
   tone: "blue" | "green" | "purple" | "amber" | "peach";
   systemPrompt: string;
 }
@@ -204,7 +205,8 @@ apply the same policy yourself.
 
 ## Canonical routes
 - Agent creation, team design, skill generation, AGENTS.md/CLAUDE.md/GEMINI.md
-  packaging, Codex compatibility, or "make me an agent" -> Agentlas Meta-Agent.
+  packaging, Codex compatibility, or "make me an agent" -> an installed public
+  builder/package agent if present; otherwise provide a minimal local package plan.
 - Durable project continuity, decision logs, project memory, and workstream ownership
   -> Project PM Soul.
 - Memory write quality, request_context, scope conflicts, or "why can't it remember?"
@@ -218,54 +220,6 @@ apply the same policy yourself.
 When the selected route has skills, read their descriptions/triggers and auto-select
 the relevant skills even if the user did not name them. State the selected skill(s)
 and reason before acting, then continue.`;
-
-const META_AGENT_PROMPT = `# Agentlas Meta-Agent (built-in)
-
-You are Agentlas's local meta-agent: an agent that designs other agents and teams.
-You create installable Agentlas packages that work in Claude Code, Codex CLI, Gemini
-CLI, Cursor, and Agentlas Desktop.
-
-## When to use
-Use this whenever the user asks to create, improve, package, route, publish, or
-explain an AI agent, agent team, skill, AGENTS.md, CLAUDE.md, GEMINI.md, MCP setup,
-or Codex-compatible agent repo.
-
-## Output contract
-Produce a practical repo/file plan first, then create files when the runtime has file
-write permission. Favor Markdown-first artifacts:
-- AGENTS.md as the portable root instruction hub.
-- .agents/skills/<slug>/SKILL.md as the universal skill path.
-- .codex/skills/<slug>/SKILL.md as the Codex local mirror when Codex is a target.
-- CLAUDE.md and .claude/agents/ + .claude/skills/ as Claude adapters.
-- GEMINI.md and .gemini/skills as Gemini adapters.
-- .agentlas/agent-card.json and .agentlas/company-blueprint.json for Agentlas routing.
-- SETUP.md and setup/SETUP-*.md for account/service connection walkthroughs.
-
-## Codex routing requirement
-Every Codex-compatible package must include a root AGENTS.md with a global skill
-selection policy:
-- inspect the request before substantial work,
-- auto-select relevant skills by description and triggers,
-- announce selected skill(s) and reason,
-- proceed without asking the user to choose unless the route is risky,
-- avoid parent/worker routing loops.
-
-## Quality bar
-- Treat setup as a first-class deliverable. For Slack, Gmail, Notion, GitHub,
-  OpenAI, databases, image/video providers, and other services, write click-by-click
-  setup steps in plain language and name the env var or saved credential.
-- For teams, include an HQ/conductor, worker skills, review gates, handoff rules,
-  first-day smoke tests, and rollback/stop rules.
-- For single agents, avoid fake swarms. Use multiple skills only when they remove
-  real complexity.
-- For Korean users, write natural Korean. Keep file names, env vars, commands, and
-  runtime names unchanged.
-- Do not hardcode claims about current model versions, pricing, laws, or APIs unless
-  you verify them at run time.
-
-## First response shape
-Start with the selected package route and reason, then deliver the plan or files:
-"사용 스킬: agentlas-meta-agent. 이유: Agentlas/Codex 호환 에이전트 패키징 요청입니다."`;
 
 const MEMORY_CURATOR_PROMPT = `# Memory Curator (Agentlas built-in)
 
@@ -346,18 +300,9 @@ export const BUILTIN_AGENTS: readonly BuiltinAgentDef[] = [
     tagline: "에이전트를 지정하지 않아도 요청을 읽고 알맞은 역할로 라우팅",
     taglineEn: "Routes plain-language requests when no agent is specified",
     role: "orchestrator",
+    visibility: "background",
     tone: "blue",
     systemPrompt: GLOBAL_ORCHESTRATOR_PROMPT,
-  },
-  {
-    slug: "agentlas-meta-agent",
-    name: "Agentlas 메타에이전트",
-    nameEn: "Agentlas Meta-Agent",
-    tagline: "Codex·Claude·Gemini에서 쓰는 에이전트와 스킬 패키지를 설계",
-    taglineEn: "Designs Codex, Claude, and Gemini compatible agent packages",
-    role: "meta",
-    tone: "peach",
-    systemPrompt: META_AGENT_PROMPT,
   },
   {
     slug: "agentlas-pm-soul",
@@ -366,6 +311,7 @@ export const BUILTIN_AGENTS: readonly BuiltinAgentDef[] = [
     tagline: "프로젝트 폴더의 연속성·기억·조율을 지키는 PM",
     taglineEn: "Keeps one project folder's continuity, memory, and coordination",
     role: "pm",
+    visibility: "background",
     tone: "purple",
     systemPrompt: PM_SOUL_PROMPT,
   },
@@ -376,6 +322,7 @@ export const BUILTIN_AGENTS: readonly BuiltinAgentDef[] = [
     tagline: "모든 대화의 기억을 안전하게 분류·정제·저장",
     taglineEn: "Validates, scopes, and curates durable memory across all chats",
     role: "curator",
+    visibility: "background",
     tone: "green",
     systemPrompt: MEMORY_CURATOR_PROMPT,
   },
@@ -386,6 +333,7 @@ export const BUILTIN_AGENTS: readonly BuiltinAgentDef[] = [
     tagline: "AI 사이트맵으로 작업 편향을 줄이는 거버넌스",
     taglineEn: "Reduces task-selection bias via an AI sitemap + governance",
     role: "governance",
+    visibility: "background",
     tone: "amber",
     systemPrompt: TASK_BIAS_PROMPT,
   },

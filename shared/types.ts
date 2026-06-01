@@ -1,5 +1,17 @@
 // Main 프로세스 ↔ Renderer 간 공유 타입.
 // renderer/lib/types.ts에서 re-export.
+import type {
+  MultimodalProvider,
+  MultimodalProviderStatus,
+  MultimodalSettings,
+} from "./multimodal";
+export type {
+  MultimodalModality,
+  MultimodalProvider,
+  MultimodalProviderMode,
+  MultimodalProviderStatus,
+  MultimodalSettings,
+} from "./multimodal";
 
 export type RuntimeKind = "claude-code" | "codex" | "gemini" | "byok" | "ollama";
 
@@ -66,6 +78,8 @@ export interface AgentEnvRequirement {
   hintEn?: string;
 }
 
+export type AgentVisibility = "visible" | "background" | "private";
+
 export interface InstalledAgent {
   id: string;
   slug: string;
@@ -92,6 +106,8 @@ export interface InstalledAgent {
   localPath?: string;
   /** 단일 에이전트 / 팀 */
   kind?: "agent" | "team";
+  /** UI/routing contract: visible user agent, background control agent, or private web-only agent. */
+  visibility?: AgentVisibility;
 }
 
 /**
@@ -121,7 +137,7 @@ export interface TeamBundle {
   tagline: string;
   taglineEn: string;
   persona: string;
-  agents: Array<Pick<InstalledAgent, "slug" | "name" | "nameEn" | "tagline" | "taglineEn" | "tone">>;
+  agents: Array<Pick<InstalledAgent, "slug" | "name" | "nameEn" | "tagline" | "taglineEn" | "tone" | "visibility">>;
 }
 
 export interface MarketplaceListing {
@@ -133,6 +149,7 @@ export interface MarketplaceListing {
   trustGrade: "A" | "B" | "C" | "unknown";
   installCount: number;
   manifestUrl: string;
+  visibility?: AgentVisibility;
 }
 
 export interface MarketplaceSourceStatus {
@@ -363,6 +380,1181 @@ export interface ImageAttachment {
   data: string;
 }
 
+// ── Agent OS interactive surfaces ─────────────────────────
+// Safe, declarative UI artifacts emitted by agents. The model declares data,
+// widgets, actions, and provenance; Agentlas renders them through trusted
+// components instead of executing arbitrary model-generated code.
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
+export interface JsonObject {
+  [key: string]: JsonValue;
+}
+
+export type AgentlasSurfaceLayout =
+  | "report"
+  | "table"
+  | "dashboard"
+  | "map-list"
+  | "timeline"
+  | "workflow"
+  | "form"
+  | "creative-studio"
+  | "service-app"
+  | string;
+
+export type AgentlasSurfaceDataType =
+  | "table"
+  | "timeline"
+  | "cards"
+  | "metrics"
+  | "markdown"
+  | "media"
+  | "routes"
+  | "connectors"
+  | "launch-checklist"
+  | "pricing"
+  | "artifacts"
+  | "json"
+  | string;
+
+export interface AgentlasSurfaceDataSet {
+  type: AgentlasSurfaceDataType;
+  columns?: string[];
+  rows?: JsonObject[];
+  items?: JsonObject[];
+  value?: JsonValue;
+  summary?: string;
+  [key: string]: unknown;
+}
+
+export type AgentlasSurfaceWidgetType =
+  | "map"
+  | "cards"
+  | "table"
+  | "chart"
+  | "timeline"
+  | "workflow"
+  | "form"
+  | "report"
+  | "brief-panel"
+  | "storyboard"
+  | "shot-list"
+  | "asset-board"
+  | "model-router"
+  | "rights-provenance"
+  | "export-pack"
+  | "cost-summary"
+  | "source-matrix"
+  | "issue-tree"
+  | "app-shell"
+  | "service-blueprint"
+  | "mcp-builder"
+  | "tool-builder"
+  | "connector-matrix"
+  | "launch-checklist"
+  | "pricing-model"
+  | "deployment-plan"
+  | string;
+
+export interface AgentlasSurfaceWidget {
+  type: AgentlasSurfaceWidgetType;
+  data?: string;
+  title?: string;
+  [key: string]: unknown;
+}
+
+export type AgentlasSurfaceActionType =
+  | "external-link"
+  | "agent-followup"
+  | "generate"
+  | "retry"
+  | "copy"
+  | "export"
+  | "open-file"
+  | "scaffold-agent-team"
+  | "scaffold-app"
+  | "install-mcp"
+  | "operate-app"
+  | "deploy-preview"
+  | "scaffold-tool"
+  | "run-tool-smoke"
+  | "install-tool-mcp"
+  | "materialize-asset-pack"
+  | "connect-service"
+  | "delegate-browser"
+  | "request-credential"
+  | "request-payment-approval"
+  | "save-as-product"
+  | "run-smoke-test"
+  | "publish-as-tool"
+  | string;
+
+export interface AgentlasSurfaceAction {
+  id: string;
+  label: string;
+  type: AgentlasSurfaceActionType;
+  url?: string;
+  prompt?: string;
+  permission?: "read" | "write" | "full";
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceProvenance {
+  source: string;
+  retrievedAt?: string;
+  url?: string;
+  note?: string;
+  [key: string]: unknown;
+}
+
+export type AgentlasSurfaceEvidenceKind =
+  | "verified"
+  | "claimed"
+  | "estimated"
+  | "unverified"
+  | string;
+
+export interface AgentlasSurfaceEvidence {
+  id: string;
+  kind: AgentlasSurfaceEvidenceKind;
+  label?: string;
+  source?: string;
+  url?: string;
+  retrievedAt?: string;
+  confidence?: number;
+  note?: string;
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceClaim {
+  id: string;
+  text: string;
+  kind?: AgentlasSurfaceEvidenceKind;
+  evidenceIds?: string[];
+  status?: "unchecked" | "passed" | "failed" | "needs-review" | string;
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceCapability {
+  id: string;
+  type:
+    | "network"
+    | "filesystem"
+    | "pii"
+    | "payment"
+    | "payment-method"
+    | "credential"
+    | "browser-session"
+    | "external-api"
+    | "model-generation"
+    | "human-approval"
+    | string;
+  purpose: string;
+  scope?: string;
+  approval?: "none" | "once" | "per-run" | "per-action" | string;
+  allowlist?: string[];
+  dataClasses?: string[];
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceBudget {
+  currency?: string;
+  limit?: number;
+  spent?: number;
+  approvalThreshold?: number;
+  unit?: "surface" | "job" | "session" | string;
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceStateField {
+  path: string;
+  owner: "agent" | "user" | "derived" | string;
+  description?: string;
+  merge?: "preserve-user" | "replace" | "append" | "derive" | string;
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceJob {
+  id: string;
+  label: string;
+  status: "queued" | "running" | "paused" | "succeeded" | "failed" | "cancelled" | string;
+  costEstimate?: number;
+  costSpent?: number;
+  currency?: string;
+  resumable?: boolean;
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceDelegationSpec {
+  mode?: "agent-operated" | string;
+  autonomy?: {
+    mode?: "agent-first" | "supervised" | string;
+    allowedWithoutPrompt?: string[];
+    checkpoints?: string[];
+    noDeadEndReasons?: string[];
+    destructiveActions?: string[];
+    [key: string]: unknown;
+  };
+  credentials?: JsonObject[];
+  payments?: JsonObject[];
+  fallbackLadder?: string[];
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceAppRoute {
+  path: string;
+  label: string;
+  purpose?: string;
+  status?: "planned" | "generated" | "wired" | "verified" | string;
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceConnectorSpec {
+  id: string;
+  name: string;
+  type: "mcp" | "api" | "oauth" | "database" | "storage" | "payment" | "model" | string;
+  purpose?: string;
+  auth?: "none" | "api-key" | "oauth" | "user-approval" | string;
+  status?: "proposed" | "configured" | "missing-credential" | "verified" | string;
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceDeploymentSpec {
+  target?: string;
+  repoPath?: string;
+  command?: string;
+  previewUrl?: string;
+  readiness?: "concept" | "prototype" | "launch-candidate" | "production" | string;
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceBusinessSpec {
+  audience?: string;
+  offer?: string;
+  pricing?: string;
+  moat?: string;
+  launchMetric?: string;
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceToolParameterSpec {
+  name: string;
+  type: "string" | "number" | "boolean" | "object" | "array" | string;
+  label?: string;
+  description?: string;
+  required?: boolean;
+  default?: JsonValue;
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceToolSpec {
+  id: string;
+  name: string;
+  description: string;
+  domain?: string;
+  kind?: "calculator" | "normalizer" | "scorer" | "extractor" | "validator" | "router" | string;
+  purpose?: string;
+  inputSchema?: JsonObject;
+  parameters?: AgentlasSurfaceToolParameterSpec[];
+  outputs?: JsonObject[];
+  examples?: JsonObject[];
+  safety?: {
+    externalCalls?: boolean;
+    fileWrites?: boolean;
+    requiresApproval?: boolean;
+    notes?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceAppSpec {
+  name: string;
+  tagline?: string;
+  appType?: "saas" | "internal-tool" | "marketplace-agent" | "automation" | "creative-tool" | string;
+  audience?: string;
+  valueProp?: string;
+  routes?: AgentlasSurfaceAppRoute[];
+  connectors?: AgentlasSurfaceConnectorSpec[];
+  tools?: AgentlasSurfaceToolSpec[];
+  deployment?: AgentlasSurfaceDeploymentSpec;
+  business?: AgentlasSurfaceBusinessSpec;
+  generatedArtifacts?: string[];
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceManifest {
+  version: "0.1" | string;
+  kind: "surface";
+  title: string;
+  domain: string;
+  layout: AgentlasSurfaceLayout;
+  /** Launch-ready app/product blueprint when an agent builds a tool it can operate or ship. */
+  app?: AgentlasSurfaceAppSpec;
+  data: Record<string, AgentlasSurfaceDataSet>;
+  widgets: AgentlasSurfaceWidget[];
+  actions?: AgentlasSurfaceAction[];
+  provenance?: AgentlasSurfaceProvenance[];
+  evidence?: AgentlasSurfaceEvidence[];
+  claims?: AgentlasSurfaceClaim[];
+  capabilities?: AgentlasSurfaceCapability[];
+  delegation?: AgentlasSurfaceDelegationSpec;
+  budget?: AgentlasSurfaceBudget;
+  stateSchema?: { fields?: AgentlasSurfaceStateField[]; [key: string]: unknown };
+  jobs?: AgentlasSurfaceJob[];
+  [key: string]: unknown;
+}
+
+export interface AgentlasSurfaceRecord {
+  id: string;
+  chatId: string;
+  projectId: string | null;
+  agentId: string;
+  title: string;
+  domain: string;
+  layout: string;
+  manifest: AgentlasSurfaceManifest;
+  state: JsonObject;
+  provenance: AgentlasSurfaceProvenance[];
+  jobSummary?: SurfaceJobCostSummary;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SurfaceJobRecord {
+  id: string;
+  chatId: string;
+  projectId: string | null;
+  agentId: string;
+  surfaceId: string;
+  jobId: string;
+  label: string;
+  status: string;
+  costEstimate: number | null;
+  costSpent: number | null;
+  currency: string | null;
+  resumable: boolean;
+  manifestJob: AgentlasSurfaceJob;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SurfaceJobCostSummary {
+  currency: string;
+  jobCount: number;
+  queuedCount: number;
+  runningCount: number;
+  pausedCount: number;
+  succeededCount: number;
+  failedCount: number;
+  resumableCount: number;
+  costEstimate: number;
+  costSpent: number;
+  budgetLimit?: number;
+  approvalThreshold?: number;
+  overLimit: boolean;
+  needsApproval: boolean;
+}
+
+export interface SurfaceJobUpdateRequest {
+  surfaceId: string;
+  jobId: string;
+  status?: string;
+  costSpent?: number;
+  note?: string;
+}
+
+export interface SurfaceStatePatchRequest {
+  surfaceId: string;
+  /** JSON Pointer path inside the surface state overlay, e.g. /data/shots/rows/0/status. */
+  path: string;
+  value: JsonValue;
+  actor?: "user" | "agent" | "system" | string;
+  label?: string;
+}
+
+export interface SurfaceStateEventRecord {
+  id: string;
+  chatId: string;
+  projectId: string | null;
+  agentId: string;
+  surfaceId: string;
+  actor: string;
+  eventType: "state-patch" | string;
+  path: string;
+  value: JsonValue;
+  previousValue: JsonValue | null;
+  label: string | null;
+  createdAt: string;
+}
+
+export type SurfaceApprovalKind =
+  | "capability"
+  | "budget"
+  | "payment"
+  | "credential"
+  | "browser-session"
+  | "full-permission"
+  | string;
+
+export interface SurfaceApprovalRecord {
+  id: string;
+  chatId: string;
+  projectId: string | null;
+  agentId: string;
+  surfaceId: string;
+  actionId: string | null;
+  actionType: string;
+  kind: SurfaceApprovalKind;
+  scopeKey: string;
+  title: string;
+  summary: string;
+  metadata: JsonObject;
+  revokedAt: string | null;
+  createdAt: string;
+}
+
+export interface SurfaceApprovalGrantRequest {
+  surfaceId: string;
+  actionId?: string | null;
+  actionType: string;
+  kind: SurfaceApprovalKind;
+  scopeKey: string;
+  title: string;
+  summary: string;
+  metadata?: JsonObject;
+}
+
+export interface SurfaceApprovalCheckRequest {
+  surfaceId: string;
+  scopeKey: string;
+}
+
+export interface SurfaceAssetPackRequest {
+  chatId: string;
+  surfaceId: string;
+  actionId?: string;
+  manifest: AgentlasSurfaceManifest;
+}
+
+export interface SurfaceAssetPackGeneratedFile {
+  path: string;
+  kind: "doc" | "manifest" | "html" | "metadata" | "prompt" | "media";
+  bytes: number;
+}
+
+export interface SurfaceAssetPackRemoteAsset {
+  id: string;
+  label: string;
+  url: string;
+  evidenceIds?: string[];
+  sourceData?: string;
+  status?: "referenced" | "downloaded" | "skipped";
+  downloadedPath?: string;
+  mediaType?: string;
+  bytes?: number;
+  reason?: string;
+}
+
+export interface SurfaceAssetPackSnapshot {
+  packId: string;
+  packName: string;
+  rootPath: string;
+  manifestPath: string;
+  indexPath: string;
+  assetsPath: string;
+  fileUrl?: string;
+  createdAt: string;
+  files: SurfaceAssetPackGeneratedFile[];
+  remoteAssets: SurfaceAssetPackRemoteAsset[];
+  summary: string;
+}
+
+export type SurfaceAssetPackStatus = "materialized" | "restored" | "archived";
+
+export type SurfaceAssetPackOperationKind = "materialize" | "archive" | "restore";
+
+export interface SurfaceAssetPackRecord {
+  id: string;
+  chatId: string;
+  projectId: string | null;
+  agentId: string;
+  surfaceId: string;
+  actionId: string | null;
+  packName: string;
+  domain: string;
+  layout: string;
+  rootPath: string;
+  manifestPath: string;
+  indexPath: string;
+  assetsPath: string;
+  manifest: AgentlasSurfaceManifest;
+  snapshot: SurfaceAssetPackSnapshot;
+  status: SurfaceAssetPackStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SurfaceAssetPackOperationRecord {
+  id: string;
+  packId: string;
+  operation: SurfaceAssetPackOperationKind;
+  ok: boolean;
+  result: JsonValue;
+  createdAt: string;
+}
+
+export interface SurfaceAssetPackMaterializeResult extends SurfaceAssetPackSnapshot {
+  fileUrl: string;
+  record?: SurfaceAssetPackRecord;
+}
+
+export interface SurfaceAssetPackRootRequest {
+  rootPath: string;
+}
+
+export interface AppFactoryScaffoldRequest {
+  chatId: string;
+  surfaceId: string;
+  actionId?: string;
+  manifest: AgentlasSurfaceManifest;
+}
+
+export interface AppFactoryGeneratedFile {
+  path: string;
+  kind: "doc" | "source" | "config" | "test" | "data";
+  bytes: number;
+}
+
+export interface AppFactoryScaffoldSnapshot {
+  appId: string;
+  appName: string;
+  rootPath: string;
+  previewPath: string;
+  setupPath: string;
+  smokePath: string;
+  createdAt: string;
+  files: AppFactoryGeneratedFile[];
+  summary: string;
+}
+
+export type AppFactoryAppStatus =
+  | "scaffolded"
+  | "mcp-ready"
+  | "operations-ready"
+  | "smoke-passed"
+  | "smoke-failed"
+  | "preview-ready"
+  | "tool-published"
+  | "restored"
+  | "archived";
+
+export type AppFactoryOperationKind =
+  | "scaffold"
+  | "run-autopilot"
+  | "install-mcp"
+  | "run-provider-tasks"
+  | "materialize-assets"
+  | "activate-local-commerce-stack"
+  | "capture-provider-browser-sessions"
+  | "launch-provider-session"
+  | "sync-provider-browser-results"
+  | "resolve-provider-credentials"
+  | "approve-provider-payment"
+  | "open-provider-browser"
+  | "run-smoke-test"
+  | "deploy-preview"
+  | "publish-as-tool"
+  | "archive"
+  | "restore";
+
+export interface AppFactoryAppRecord {
+  id: string;
+  chatId: string;
+  projectId: string | null;
+  agentId: string;
+  surfaceId: string;
+  actionId: string | null;
+  appName: string;
+  domain: string;
+  layout: string;
+  rootPath: string;
+  previewPath: string;
+  setupPath: string;
+  smokePath: string;
+  manifest: AgentlasSurfaceManifest;
+  scaffold: AppFactoryScaffoldSnapshot;
+  status: AppFactoryAppStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AppFactoryOperationRecord {
+  id: string;
+  appId: string;
+  operation: AppFactoryOperationKind;
+  ok: boolean;
+  result: JsonValue;
+  createdAt: string;
+}
+
+export interface AppFactoryScaffoldResult extends AppFactoryScaffoldSnapshot {
+  record?: AppFactoryAppRecord;
+}
+
+export interface AppFactoryRootRequest {
+  rootPath: string;
+}
+
+export interface MetaAgentTeamFactoryFile {
+  path: string;
+  kind: "doc" | "prompt" | "config";
+  bytes: number;
+}
+
+export interface MetaAgentTeamFactoryRequest {
+  chatId: string;
+  surfaceId?: string;
+  manifest: AgentlasSurfaceManifest;
+  baseDir?: string;
+}
+
+export interface MetaAgentTeamFactoryResult {
+  rootPath: string;
+  agent: InstalledAgent;
+  firm: InstalledFirm;
+  org: ResolvedOrg;
+  files: MetaAgentTeamFactoryFile[];
+  createdAt: string;
+}
+
+export interface AppFactorySmokeResult {
+  rootPath: string;
+  command: string;
+  ok: boolean;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  testedAt: string;
+}
+
+export interface AppFactoryMcpInstallResult {
+  rootPath: string;
+  configPath: string;
+  envPath: string;
+  adapters: Array<{
+    id: string;
+    name: string;
+    type: string;
+    path: string;
+    envKey?: string;
+    status: string;
+  }>;
+  missingCredentials: string[];
+  createdAt: string;
+}
+
+export interface AppFactoryProviderTaskRunRequest extends AppFactoryRootRequest {
+  taskId?: string;
+}
+
+export interface AppFactoryProviderBrowserPlan {
+  connectorId: string;
+  connectorName: string;
+  type: string;
+  startUrl: string;
+  purpose?: string;
+  auth?: string;
+  envKey?: string;
+}
+
+export interface AppFactoryProviderCredentialGate {
+  envKey: string;
+  label: string;
+  connectorId?: string;
+  inputMode: "agentlas-vault" | "provider-page" | "oauth-browser" | string;
+  saveTarget: "agentlas-env-vault" | string;
+  hasValue?: boolean;
+}
+
+export interface AppFactoryProviderPaymentGate {
+  merchant: string;
+  quoteRequired: boolean;
+  amount?: number | null;
+  currency?: string | null;
+  recurrence: string;
+  approvalMode: string;
+  cardHandling: string;
+  actionId?: string;
+}
+
+export interface AppFactoryProviderPaymentApproveRequest extends AppFactoryRootRequest {
+  merchant: string;
+  quoteRequired?: boolean;
+  amount?: number | null;
+  currency?: string | null;
+  recurrence?: string;
+  approvalMode?: string;
+  cardHandling?: string;
+  actionId?: string;
+  scopeKey?: string;
+  approvedBy?: string;
+  purpose?: string;
+}
+
+export interface AppFactoryProviderPaymentApproval extends AppFactoryProviderPaymentGate {
+  status: "approved";
+  scopeKey: string;
+  approvedBy: string;
+  approvedAt: string;
+  purpose: string;
+}
+
+export interface AppFactoryProviderPaymentApproveResult {
+  rootPath: string;
+  approvalPath: string;
+  approval: AppFactoryProviderPaymentApproval;
+  createdAt: string;
+  summary: string;
+}
+
+export interface AppFactoryProviderActionRecipe {
+  id: string;
+  connectorId: string;
+  connectorName: string;
+  type: string;
+  mode: "api-or-browser" | "browser-first" | "local-fallback" | string;
+  status: "planned" | "credential-ready" | "secure-checkpoint-required" | string;
+  requiredEnvKeys: string[];
+  browserStartUrl?: string;
+  nextActions: string[];
+  checkpoints: string[];
+  fallbackProviders: string[];
+  resolutionLadder?: string[];
+  localFallback?: string;
+  humanInputPolicy?: string;
+  deadEndPolicy?: string;
+  liveGuard: string;
+}
+
+export interface AppFactoryProviderResolutionAttempt {
+  id: string;
+  label: string;
+  status: "ready" | "planned" | "needs-secure-input" | "needs-payment-approval" | "not-needed" | "unavailable" | string;
+  detail: string;
+  artifact?: string;
+}
+
+export interface AppFactoryProviderResolutionPlan {
+  connectorId: string;
+  connectorName: string;
+  type: string;
+  status: "ready" | "recoverable" | "needs-secure-input" | "contract-violation" | string;
+  canProceedWithoutMcp: boolean;
+  currentBestPath: string;
+  attempts: AppFactoryProviderResolutionAttempt[];
+  fallbackProviders: string[];
+  deadEndReasonsCovered: string[];
+  humanCheckpoints: string[];
+  localFallback?: string;
+}
+
+export interface AppFactoryProviderNoDeadEndStrategy {
+  version: "0.1" | string;
+  status: "recoverable" | "contract-violation" | string;
+  generatedAt: string;
+  fallbackLadder: string[];
+  plans: AppFactoryProviderResolutionPlan[];
+  violations: string[];
+  policy: string[];
+  summary: string;
+}
+
+export interface AppFactoryProviderTaskResult {
+  id: string;
+  label: string;
+  type: string;
+  beforeStatus: string;
+  afterStatus: string;
+  secureInputRequired: boolean;
+  summary: string;
+  browserStartUrl?: string;
+  vaultEnvKeys?: string[];
+  paymentApproval?: AppFactoryProviderPaymentGate;
+  humanCheckpoints?: string[];
+}
+
+export interface AppFactoryProviderTaskRunResult {
+  rootPath: string;
+  operationsPath: string;
+  providerTasksPath: string;
+  resultsPath: string;
+  recipesPath: string;
+  runbookPath: string;
+  tasks: AppFactoryProviderTaskResult[];
+  browserPlans: AppFactoryProviderBrowserPlan[];
+  credentialGates: AppFactoryProviderCredentialGate[];
+  paymentGates: AppFactoryProviderPaymentGate[];
+  providerRecipes: AppFactoryProviderActionRecipe[];
+  noDeadEndStrategy: AppFactoryProviderNoDeadEndStrategy;
+  noDeadEndStrategyPath: string;
+  readyCount: number;
+  secureInputRequiredCount: number;
+  createdAt: string;
+  summary: string;
+}
+
+export interface AppFactoryAssetMaterializeRequest extends AppFactoryRootRequest {
+  budgetApproved?: boolean;
+  approvedBy?: string;
+  approvalReason?: string;
+}
+
+export interface AppFactoryMaterializedAsset {
+  name: string;
+  path: string;
+  sourcePath: string;
+  productName?: string;
+  kind: string;
+  status: string;
+  evidenceKind: string;
+}
+
+export interface AppFactoryAssetMaterializeResult {
+  rootPath: string;
+  operationsPath: string;
+  assetsDir: string;
+  assets: AppFactoryMaterializedAsset[];
+  budget: JsonObject;
+  createdAt: string;
+  summary: string;
+}
+
+export interface AppFactoryLocalCommerceActivationRequest extends AppFactoryRootRequest {
+  mode?: "sandbox" | "local-first";
+  activatedBy?: string;
+}
+
+export interface AppFactoryLocalCommerceActivationResult {
+  rootPath: string;
+  operationsPath: string;
+  localDatabasePath: string;
+  runtimePath: string;
+  checkoutPath: string;
+  products: number;
+  orders: number;
+  createdAt: string;
+  summary: string;
+}
+
+export interface AppFactoryProviderBrowserOpenRequest extends AppFactoryRootRequest {
+  connectorId?: string;
+}
+
+export interface AppFactoryProviderBrowserOpenResult {
+  rootPath: string;
+  opened: AppFactoryProviderBrowserPlan[];
+  createdAt: string;
+  summary: string;
+}
+
+export interface AppFactoryProviderBrowserSessionRequest extends AppFactoryRootRequest {
+  connectorId?: string;
+  mode?: "plan-only" | "headless";
+  timeoutMs?: number;
+  screenshot?: boolean;
+}
+
+export interface AppFactoryProviderBrowserSession {
+  connectorId: string;
+  connectorName: string;
+  type: string;
+  startUrl: string;
+  status: string;
+  checkpoints: string[];
+  capturedAt: string;
+  finalUrl?: string;
+  title?: string;
+  screenshotPath?: string;
+  blockerKind?: string;
+  nextAction?: string;
+  evidenceKind?: string;
+  agentCanContinue?: boolean;
+  safeStorage?: string[];
+  resumeProfileDir?: string;
+  resumeLauncherPath?: string;
+  resumeCommand?: string;
+  handoffPath?: string;
+  actionQueuePath?: string;
+  checkpointManifestPath?: string;
+  resultPath?: string;
+  resultStatus?: string;
+  resultSyncedAt?: string;
+  resultObservedAt?: string;
+  resultSummary?: string;
+  credentialContainer?: string;
+  error?: string;
+}
+
+export interface AppFactoryProviderBrowserSessionResult {
+  rootPath: string;
+  sessionsPath: string;
+  screenshotsDir: string;
+  mode: "plan-only" | "headless";
+  sessions: AppFactoryProviderBrowserSession[];
+  createdAt: string;
+  summary: string;
+}
+
+export interface AppFactoryProviderBrowserLaunchRequest extends AppFactoryRootRequest {
+  connectorId?: string;
+  approved?: boolean;
+  dryRun?: boolean;
+}
+
+export interface AppFactoryProviderBrowserLaunchResult {
+  rootPath: string;
+  ok: boolean;
+  connectorId: string;
+  connectorName: string;
+  status: "dry-run" | "approval-required" | "launched";
+  dryRun: boolean;
+  launched: boolean;
+  approved: boolean;
+  pid?: number;
+  launcherPath: string;
+  resumeCommand: string;
+  actionQueuePath?: string;
+  handoffPath?: string;
+  checkpointManifestPath?: string;
+  resultPath?: string;
+  actionQueue?: JsonObject | null;
+  createdAt: string;
+  summary: string;
+  safety: string;
+}
+
+export interface AppFactoryProviderBrowserResultSyncRequest extends AppFactoryRootRequest {
+  connectorId?: string;
+}
+
+export interface AppFactoryProviderBrowserResultSyncItem {
+  connectorId: string;
+  connectorName: string;
+  status: "synced" | "pending";
+  resultStatus?: string;
+  resultPath?: string;
+  finalUrl?: string;
+  title?: string;
+  error?: string;
+  observedAt?: string;
+  agentCanContinue: boolean;
+  summary: string;
+}
+
+export interface AppFactoryProviderBrowserResultSyncResult {
+  rootPath: string;
+  operationsPath: string;
+  synced: number;
+  pending: number;
+  results: AppFactoryProviderBrowserResultSyncItem[];
+  createdAt: string;
+  summary: string;
+}
+
+export interface AppFactoryProviderCredentialResolveRequest extends AppFactoryRootRequest {
+  source?: "env" | "agentlas-env-vault" | "auto";
+}
+
+export interface AppFactoryProviderCredentialResolution {
+  envKey: string;
+  label: string;
+  connectorId?: string;
+  status: "live-credential-ready" | "secure-input-required";
+  source: string;
+  saveTarget: string;
+  inputMode: string;
+  fingerprint?: string;
+}
+
+export interface AppFactoryProviderCredentialResolveResult {
+  rootPath: string;
+  resolutionPath: string;
+  runbookPath: string;
+  credentials: AppFactoryProviderCredentialResolution[];
+  resolvedCount: number;
+  missingCount: number;
+  createdAt: string;
+  summary: string;
+}
+
+export type AppFactoryAutopilotStepStatus = "completed" | "skipped" | "waiting" | "failed";
+
+export interface AppFactoryAutopilotStep {
+  id: string;
+  label: string;
+  status: AppFactoryAutopilotStepStatus;
+  summary: string;
+}
+
+export interface AppFactoryAutopilotRequest extends AppFactoryRootRequest {
+  budgetApproved?: boolean;
+  approvedBy?: string;
+  approvalReason?: string;
+  credentialSource?: "env" | "agentlas-env-vault" | "auto";
+  captureProviderSessions?: boolean;
+  browserMode?: "plan-only" | "headless";
+  timeoutMs?: number;
+}
+
+export interface AppFactoryAutopilotResult {
+  rootPath: string;
+  appName: string;
+  domain: string;
+  status: "operated" | "waiting-for-secure-input" | "needs-review";
+  steps: AppFactoryAutopilotStep[];
+  waitingOn: string[];
+  providerRun?: AppFactoryProviderTaskRunResult;
+  materializedAssets?: AppFactoryAssetMaterializeResult;
+  localStack?: AppFactoryLocalCommerceActivationResult;
+  providerBrowser?: AppFactoryProviderBrowserOpenResult;
+  providerBrowserSessions?: AppFactoryProviderBrowserSessionResult;
+  credentialResolution?: AppFactoryProviderCredentialResolveResult;
+  mcp?: AppFactoryMcpInstallResult;
+  smoke?: AppFactorySmokeResult;
+  preview?: AppFactoryPreviewResult;
+  appTool?: AppFactoryAppToolPublishResult;
+  createdAt: string;
+  summary: string;
+}
+
+export interface AppFactoryPreviewResult {
+  rootPath: string;
+  previewPath: string;
+  deployPath: string;
+  manifestPath: string;
+  fileUrl: string;
+  serveCommand: string;
+  createdAt: string;
+}
+
+export interface AppFactoryAppToolPublishResult {
+  rootPath: string;
+  toolName: string;
+  toolDir: string;
+  configPath: string;
+  mcpPath: string;
+  server: InstalledMcpServer;
+  publishedAt: string;
+  summary: string;
+}
+
+export interface ToolFactoryScaffoldRequest {
+  chatId: string;
+  surfaceId: string;
+  actionId?: string;
+  toolId?: string;
+  manifest: AgentlasSurfaceManifest;
+}
+
+export interface ToolFactoryGeneratedFile {
+  path: string;
+  kind: "doc" | "source" | "config" | "test" | "data";
+  bytes: number;
+}
+
+export type ToolFactoryToolStatus =
+  | "scaffolded"
+  | "smoke-passed"
+  | "smoke-failed"
+  | "mcp-installed"
+  | "restored"
+  | "archived";
+
+export type ToolFactoryOperationKind =
+  | "scaffold"
+  | "run-smoke-test"
+  | "install-mcp"
+  | "archive"
+  | "restore";
+
+export interface ToolFactoryScaffoldSnapshot {
+  toolId: string;
+  requestedToolId: string;
+  toolName: string;
+  domain: string;
+  kind: string;
+  rootPath: string;
+  configPath: string;
+  toolPath: string;
+  mcpPath: string;
+  smokePath: string;
+  createdAt: string;
+  files: ToolFactoryGeneratedFile[];
+  summary: string;
+}
+
+export interface ToolFactoryToolRecord {
+  id: string;
+  chatId: string;
+  projectId: string | null;
+  agentId: string;
+  surfaceId: string;
+  actionId: string | null;
+  requestedToolId: string;
+  toolId: string;
+  toolName: string;
+  domain: string;
+  kind: string;
+  rootPath: string;
+  configPath: string;
+  toolPath: string;
+  mcpPath: string;
+  smokePath: string;
+  scaffold: ToolFactoryScaffoldSnapshot;
+  status: ToolFactoryToolStatus;
+  installedServerId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ToolFactoryOperationRecord {
+  id: string;
+  toolId: string;
+  operation: ToolFactoryOperationKind;
+  ok: boolean;
+  result: JsonValue;
+  createdAt: string;
+}
+
+export interface ToolFactoryScaffoldResult extends ToolFactoryScaffoldSnapshot {
+  record?: ToolFactoryToolRecord;
+}
+
+export interface ToolFactoryRootRequest {
+  rootPath: string;
+}
+
+export interface ToolFactorySmokeResult {
+  rootPath: string;
+  command: string;
+  ok: boolean;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  testedAt: string;
+}
+
+export interface ToolFactoryMcpInstallResult {
+  rootPath: string;
+  configPath: string;
+  mcpPath: string;
+  command: string;
+  args: string[];
+  server: InstalledMcpServer;
+  installedAt: string;
+}
+
 export interface McpInvocationRequest {
   /** 새 모델: chatId 기반. 에이전트는 chat에서 lookup */
   chatId: string;
@@ -377,10 +1569,13 @@ export interface McpInvocationRequest {
 }
 
 export interface McpInvocationEvent {
-  kind: "thinking" | "tool-use" | "partial" | "final" | "error";
+  kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface";
   status?: string;
   text?: string;
   error?: { code: string; message: string };
+  /** Agent OS surface manifest, emitted when an agent produces a safe interactive surface. */
+  surfaceId?: string;
+  surface?: AgentlasSurfaceManifest;
   /** 도구 호출 이벤트 — Claude Code식 접기/펴기 블록용 (이름 + 인자 JSON) */
   tool?: { name: string; args?: string };
   /** 생성 토큰 수 (final에 동봉) — "N tokens" 표시용 */
@@ -588,6 +1783,13 @@ export interface AgentlasIpc {
     has: (key: string) => Promise<boolean>;
     remove: (key: string) => Promise<void>;
   };
+  /** 멀티모달 전역 fallback — 에이전트/프로젝트 env가 없을 때 이미지·영상·음성 provider를 고른다. */
+  multimodal: {
+    listProviders: () => Promise<MultimodalProvider[]>;
+    getSettings: () => Promise<MultimodalSettings>;
+    saveSettings: (settings: Partial<MultimodalSettings>) => Promise<MultimodalSettings>;
+    status: () => Promise<MultimodalProviderStatus[]>;
+  };
   team: {
     list: () => Promise<InstalledAgent[]>;
     install: (slug: string) => Promise<InstalledAgent>;
@@ -687,6 +1889,74 @@ export interface AgentlasIpc {
     create: (input: Omit<Automation, "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy">) => Promise<Automation>;
     toggle: (id: string, enabled: boolean) => Promise<Automation>;
     remove: (id: string) => Promise<void>;
+  };
+  /** Agent-made interactive work surfaces emitted by agents. */
+  surfaces: {
+    listSurfaces: (chatId?: string) => Promise<AgentlasSurfaceRecord[]>;
+    getSurface: (id: string) => Promise<AgentlasSurfaceRecord | null>;
+    listJobs: (surfaceId: string) => Promise<SurfaceJobRecord[]>;
+    getJobSummary: (surfaceId: string) => Promise<SurfaceJobCostSummary | null>;
+    updateJob: (input: SurfaceJobUpdateRequest) => Promise<SurfaceJobRecord>;
+    updateState: (input: SurfaceStatePatchRequest) => Promise<AgentlasSurfaceRecord>;
+    listEvents: (surfaceId: string) => Promise<SurfaceStateEventRecord[]>;
+    approve: (input: SurfaceApprovalGrantRequest) => Promise<SurfaceApprovalRecord>;
+    hasApproval: (input: SurfaceApprovalCheckRequest) => Promise<boolean>;
+    listApprovals: (surfaceId: string) => Promise<SurfaceApprovalRecord[]>;
+    revokeApproval: (id: string) => Promise<SurfaceApprovalRecord>;
+  };
+  /** Reusable asset packs materialized from declarative surface media/storyboard/export data. */
+  surfaceAssets: {
+    materialize: (input: SurfaceAssetPackRequest) => Promise<SurfaceAssetPackMaterializeResult>;
+    archive: (input: SurfaceAssetPackRootRequest) => Promise<SurfaceAssetPackOperationRecord>;
+    restore: (input: SurfaceAssetPackRootRequest) => Promise<SurfaceAssetPackOperationRecord>;
+    listPacks: (chatId?: string) => Promise<SurfaceAssetPackRecord[]>;
+    getPack: (id: string) => Promise<SurfaceAssetPackRecord | null>;
+    getPackBySurface: (chatId: string, surfaceId: string) => Promise<SurfaceAssetPackRecord | null>;
+    listOperations: (packId: string) => Promise<SurfaceAssetPackOperationRecord[]>;
+  };
+  /** Agent-made service apps generated from safe Agentlas Surface manifests. */
+  appFactory: {
+    scaffold: (input: AppFactoryScaffoldRequest) => Promise<AppFactoryScaffoldResult>;
+    runAutopilot: (input: AppFactoryAutopilotRequest) => Promise<AppFactoryAutopilotResult>;
+    installMcpPlan: (input: AppFactoryRootRequest) => Promise<AppFactoryMcpInstallResult>;
+    runProviderTasks: (input: AppFactoryProviderTaskRunRequest) => Promise<AppFactoryProviderTaskRunResult>;
+    materializeAssets: (input: AppFactoryAssetMaterializeRequest) => Promise<AppFactoryAssetMaterializeResult>;
+    activateLocalCommerceStack: (input: AppFactoryLocalCommerceActivationRequest) => Promise<AppFactoryLocalCommerceActivationResult>;
+    openProviderBrowser: (input: AppFactoryProviderBrowserOpenRequest) => Promise<AppFactoryProviderBrowserOpenResult>;
+    captureProviderBrowserSessions: (input: AppFactoryProviderBrowserSessionRequest) => Promise<AppFactoryProviderBrowserSessionResult>;
+    launchProviderBrowserSession: (input: AppFactoryProviderBrowserLaunchRequest) => Promise<AppFactoryProviderBrowserLaunchResult>;
+    syncProviderBrowserResults: (input: AppFactoryProviderBrowserResultSyncRequest) => Promise<AppFactoryProviderBrowserResultSyncResult>;
+    resolveProviderCredentials: (input: AppFactoryProviderCredentialResolveRequest) => Promise<AppFactoryProviderCredentialResolveResult>;
+    approveProviderPayment: (input: AppFactoryProviderPaymentApproveRequest) => Promise<AppFactoryProviderPaymentApproveResult>;
+    runSmoke: (input: AppFactoryRootRequest) => Promise<AppFactorySmokeResult>;
+    preparePreview: (input: AppFactoryRootRequest) => Promise<AppFactoryPreviewResult>;
+    publishAsTool: (input: AppFactoryRootRequest) => Promise<AppFactoryAppToolPublishResult>;
+    archive: (input: AppFactoryRootRequest) => Promise<AppFactoryOperationRecord>;
+    restore: (input: AppFactoryRootRequest) => Promise<AppFactoryOperationRecord>;
+    listApps: (chatId?: string) => Promise<AppFactoryAppRecord[]>;
+    getApp: (id: string) => Promise<AppFactoryAppRecord | null>;
+    getAppBySurface: (chatId: string, surfaceId: string) => Promise<AppFactoryAppRecord | null>;
+    listOperations: (appId: string) => Promise<AppFactoryOperationRecord[]>;
+  };
+  /** Local meta-agent factory that materializes domain teams for Agentlas OS. */
+  metaAgent: {
+    createCommerceTeam: (input: MetaAgentTeamFactoryRequest) => Promise<MetaAgentTeamFactoryResult>;
+  };
+  /** Agent-made local tools generated from safe tool specs in Agentlas Surface manifests. */
+  toolFactory: {
+    scaffold: (input: ToolFactoryScaffoldRequest) => Promise<ToolFactoryScaffoldResult>;
+    runSmoke: (input: ToolFactoryRootRequest) => Promise<ToolFactorySmokeResult>;
+    installMcp: (input: ToolFactoryRootRequest) => Promise<ToolFactoryMcpInstallResult>;
+    archive: (input: ToolFactoryRootRequest) => Promise<ToolFactoryOperationRecord>;
+    restore: (input: ToolFactoryRootRequest) => Promise<ToolFactoryOperationRecord>;
+    listTools: (chatId?: string) => Promise<ToolFactoryToolRecord[]>;
+    getTool: (id: string) => Promise<ToolFactoryToolRecord | null>;
+    getToolBySurface: (
+      chatId: string,
+      surfaceId: string,
+      requestedToolId?: string,
+    ) => Promise<ToolFactoryToolRecord | null>;
+    listOperations: (toolRecordId: string) => Promise<ToolFactoryOperationRecord[]>;
   };
   /** OpenClaw / Hermes에서 페르소나·키·자동화·메모리를 가져온다.
    *  scan은 디스크를 읽어 preview(이름/개수만) 반환, import는 실제 적용. */

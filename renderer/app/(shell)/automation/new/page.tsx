@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import type { InstalledAgent, InstalledFirm } from "@/lib/types";
@@ -33,15 +34,16 @@ export default function NewAutomationPage() {
     if (!api) return;
     void (async () => {
       const [ag, fm] = await Promise.all([api.team.list(), api.firms.list()]);
-      setAgents(ag);
+      const visible = visibleAgents(ag);
+      setAgents(visible);
       setFirms(fm);
       // 회사가 있으면 첫 회사 선택, 없으면 첫 에이전트
       if (fm[0]) {
         setTargetType("firm");
         setTargetId(fm[0].id);
-      } else if (ag[0]) {
+      } else if (visible[0]) {
         setTargetType("agent");
-        setTargetId(ag[0].id);
+        setTargetId(visible[0].id);
       }
     })();
   }, []);

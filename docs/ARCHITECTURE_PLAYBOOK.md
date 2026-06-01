@@ -10,7 +10,7 @@ Agentlas runs the same *research architectures* in two places, with different ho
 
 | Surface | Host | What runs |
 |---|---|---|
-| **agentlas.cloud (web)** | Hosted | A **meta-agent** that orchestrates agents/teams server-side. |
+| **agentlas.cloud (web)** | Hosted | Builder and orchestration services that run server-side. |
 | **Desktop app + `agentlas` CLI** | The user's machine (BYOC) | A local **architecture agent** (Hermes-style): always-present built-in agents + a memory substrate, running on the user's own Claude/Codex/Gemini/BYOK runtime. |
 
 Both consume the **same source-of-truth agent repos**:
@@ -24,7 +24,7 @@ install. The canonical research lives in the repos; the app ships a runtime dist
 
 ## 2. What ships on install (app + terminal)
 
-On first launch (and on every CLI run), the app seeds three **built-in agents**
+On first launch (and on every CLI run), the app seeds four background **built-in agents**
 (`installed_agents.builtin = 1`) and a **memory substrate**:
 
 ```
@@ -108,6 +108,11 @@ in `electron/store/db.ts` (additive, guarded with column/`IF NOT EXISTS` checks 
 existing ones) and bump `SCHEMA_VERSION`. The CLI does **not** migrate — it guards on
 schema readiness and waits for one app launch. Keep migrations backward-compatible.
 
+To create, upload, sync, import, or seed an **agent**, apply the visibility contract in
+`docs/AGENT_VISIBILITY_CONTRACT.md`: every agent row must persist exactly one of
+`visible`, `background`, or `private` in `installed_agents.visibility`. Renderer hiding is
+not enough; main-process install/search/list paths must enforce the contract first.
+
 To change the **memory event contract**: update `MEMORY_EMITTER_BLOCK`, `MEMORY_KINDS`,
 `MEMORY_SCOPES` in the manifest (+ bump version). `events.ts` / `curator.ts` coerce
 unknown kinds/scopes to safe defaults, so older replies never crash the curator.
@@ -118,6 +123,8 @@ unknown kinds/scopes to safe defaults, so older replies never crash the curator.
 - `dist/shared/**` **must** stay in `electron-builder*.yml` `files` (runtime values in
   `shared/models.ts` are required at launch).
 - Seeding is **idempotent and version-gated**; never delete/recreate user rows.
+- Agent visibility is a **DB contract** (`visible` | `background` | `private`), not just
+  a UI concern. Private web-only agents must never ship in desktop package artifacts.
 - The curator must **never persist secrets** (see `SECRET_PATTERNS`) and must run with
   **zero extra LLM calls** on the always-on path.
 

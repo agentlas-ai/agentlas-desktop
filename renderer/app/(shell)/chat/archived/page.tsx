@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { ipc } from "@/lib/ipc";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { useT } from "@/lib/i18n";
 import type { Chat, InstalledAgent } from "@/lib/types";
 import { ChatRow } from "@/components/ChatRow";
@@ -19,7 +20,7 @@ export default function ArchivedChatsPage() {
     if (!api) return;
     const [c, a] = await Promise.all([api.chats.listArchived(), api.team.list()]);
     setChats(c);
-    setAgents(a);
+    setAgents(visibleAgents(a));
   }, []);
 
   useEffect(() => {

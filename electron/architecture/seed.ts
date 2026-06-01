@@ -1,7 +1,7 @@
-// Seeds the built-in architecture agents (PM Soul, Memory Curator, Task Bias) into the
+// Seeds the built-in background architecture agents into the
 // installed_agents table on app boot / CLI run. Idempotent + version-gated:
 //
-//   - First run: inserts all three with stable ids (builtinAgentId).
+//   - First run: inserts all background agents with stable ids (builtinAgentId).
 //   - ARCHITECTURE_VERSION bumped: re-syncs name/prompt/role of the built-ins ONLY.
 //   - Steady state (version unchanged + all present): no-op, cheap.
 //
@@ -10,6 +10,7 @@
 import { getDb } from "../store/db";
 import { getMeta, setMeta } from "../store/meta";
 import { materializeAgentFiles } from "../agents/files";
+import { publicAgentVisibility } from "../agents/policy";
 import {
   ARCHITECTURE_VERSION,
   BUILTIN_AGENTS,
@@ -22,6 +23,7 @@ const META_KEY = "architecture_version";
 function upsertBuiltin(def: BuiltinAgentDef, now: string): void {
   const db = getDb();
   const id = builtinAgentId(def.slug);
+  const visibility = publicAgentVisibility({ ...def, builtin: true });
   const existing = db
     .prepare("SELECT id, installed_at FROM installed_agents WHERE id = ? OR slug = ?")
     .get(id, def.slug) as { id: string; installed_at: string } | undefined;
@@ -31,7 +33,7 @@ function upsertBuiltin(def: BuiltinAgentDef, now: string): void {
     db.prepare(
       `UPDATE installed_agents
        SET name = ?, name_en = ?, tagline = ?, tagline_en = ?, system_prompt = ?,
-           tone = ?, role = ?, builtin = 1, trust_grade = 'A'
+           tone = ?, role = ?, builtin = 1, trust_grade = 'A', visibility = ?
        WHERE id = ?`,
     ).run(
       def.name,
@@ -41,6 +43,7 @@ function upsertBuiltin(def: BuiltinAgentDef, now: string): void {
       def.systemPrompt,
       def.tone,
       def.role,
+      visibility,
       existing.id,
     );
     materializeAgentFiles(existing.id);
@@ -50,8 +53,8 @@ function upsertBuiltin(def: BuiltinAgentDef, now: string): void {
   db.prepare(
     `INSERT INTO installed_agents
      (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
-      env_requirements_json, preferred_backend, trust_grade, installed_at, tone, builtin, role)
-     VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '[]', NULL, 'A', ?, ?, 1, ?)`,
+      env_requirements_json, preferred_backend, trust_grade, installed_at, tone, builtin, role, visibility)
+     VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '[]', NULL, 'A', ?, ?, 1, ?, ?)`,
   ).run(
     id,
     def.slug,
@@ -63,6 +66,7 @@ function upsertBuiltin(def: BuiltinAgentDef, now: string): void {
     now,
     def.tone,
     def.role,
+    visibility,
   );
   materializeAgentFiles(id);
 }

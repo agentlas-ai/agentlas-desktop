@@ -13,6 +13,7 @@
  *   agentlas run <agent> [prompt]  활성(또는 --runtime) CLI로 1회 실행. prompt 없으면 stdin.
  *   agentlas chat <agent>          대화형 REPL
  *   agentlas env [list]            공유 env 키 목록 (이름만)
+ *   agentlas multimodal            이미지/영상/음성 전역 fallback provider
  *   agentlas doctor                런타임/데이터 점검
  *   agentlas help
  *
@@ -24,6 +25,7 @@ const path = require("node:path");
 const os = require("node:os");
 const fs = require("node:fs");
 const { spawn } = require("node:child_process");
+const crypto = require("node:crypto");
 
 // ── 앱과 동일한 userData 경로 (electron app.getPath('userData')와 일치) ──
 function userDataDir() {
@@ -37,6 +39,7 @@ function userDataDir() {
 
 const SERVICE = "com.agentlas.desktop";
 const ENV_PREFIX = "env:";
+const MULTIMODAL_META_KEY = "multimodal_settings";
 // 도구 사용 권한 (read|write|full). 빌드/파일 생성이 기본 동작이므로 기본값 write.
 // `--permission full` 로 셸 명령 포함 전체 자동(npm/mkdir 등) 허용. main()에서 설정.
 let PERMISSION = "write";
@@ -47,21 +50,68 @@ function dbPath() {
 }
 
 function openDb() {
-  let Database;
-  try {
-    Database = require("better-sqlite3");
-  } catch (e) {
-    fail(
-      "better-sqlite3 모듈을 불러올 수 없습니다. agentlas CLI는 Agentlas 앱의 런타임으로 실행돼야 합니다.\n" +
-        "(설정 → CLI 설치로 래퍼를 만들거나, 앱을 한 번 실행해 주세요.)\n" +
-        String(e && e.message),
-    );
-  }
   const p = dbPath();
   if (!fs.existsSync(p)) {
     fail(`데이터를 찾을 수 없습니다: ${p}\nAgentlas 앱을 한 번 실행해 에이전트를 설치하세요.`);
   }
-  return new Database(p, { readonly: false, fileMustExist: true });
+  try {
+    const Database = require("better-sqlite3");
+    return new Database(p, { readonly: false, fileMustExist: true });
+  } catch (e) {
+    try {
+      return openNodeSqliteDb(p);
+    } catch (fallbackError) {
+      fail(
+        "SQLite 런타임을 불러올 수 없습니다. Agentlas 앱을 한 번 실행한 뒤 다시 시도하세요.\n" +
+          String((fallbackError && fallbackError.message) || (e && e.message) || fallbackError),
+      );
+    }
+  }
+}
+
+function openNodeSqliteDb(p) {
+  installNodeSqliteWarningFilter();
+  const { DatabaseSync } = require("node:sqlite");
+  const db = new DatabaseSync(p);
+  return {
+    prepare(sql) {
+      const stmt = db.prepare(sql);
+      return {
+        get: (...args) => stmt.get(...args),
+        all: (...args) => stmt.all(...args),
+        run: (...args) => stmt.run(...args),
+      };
+    },
+    transaction(fn) {
+      return (...args) => {
+        db.exec("BEGIN");
+        try {
+          const result = fn(...args);
+          db.exec("COMMIT");
+          return result;
+        } catch (err) {
+          try {
+            db.exec("ROLLBACK");
+          } catch {
+            /* ignore rollback failure */
+          }
+          throw err;
+        }
+      };
+    },
+    close: () => db.close(),
+  };
+}
+
+function installNodeSqliteWarningFilter() {
+  if (process.__agentlasSqliteWarningFilter) return;
+  Object.defineProperty(process, "__agentlasSqliteWarningFilter", { value: true });
+  const originalEmitWarning = process.emitWarning.bind(process);
+  process.emitWarning = (warning, ...args) => {
+    const message = typeof warning === "string" ? warning : String((warning && warning.message) || warning || "");
+    if (/SQLite is an experimental feature/i.test(message)) return;
+    return originalEmitWarning(warning, ...args);
+  };
 }
 
 function readKeytar() {
@@ -72,9 +122,82 @@ function readKeytar() {
   }
 }
 
+function loadMultimodalCatalog() {
+  try {
+    return require("../dist/shared/multimodal.js");
+  } catch {
+    const providers = [
+      { id: "codex-cli-image", modality: "image", label: "Codex CLI image", labelKo: "Codex CLI 이미지", envKeys: [], billing: "subscription", defaultModel: "runtime-default" },
+      { id: "openai-image", modality: "image", label: "OpenAI Images API", labelKo: "OpenAI 이미지 API", envKeys: ["OPENAI_API_KEY"], billing: "paid-api", defaultModel: "gpt-image-2" },
+      { id: "google-image", modality: "image", label: "Google Gemini Image", labelKo: "Google Gemini 이미지", envKeys: ["GOOGLE_API_KEY"], billing: "paid-api", defaultModel: "gemini-image" },
+      { id: "runway-video", modality: "video", label: "Runway API", labelKo: "Runway API", envKeys: ["RUNWAY_API_KEY"], billing: "paid-api", defaultModel: "gen4.5" },
+      { id: "google-veo", modality: "video", label: "Google Veo", labelKo: "Google Veo", envKeys: ["GOOGLE_CLOUD_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS"], billing: "provider-billing", defaultModel: "veo" },
+      { id: "openai-sora", modality: "video", label: "OpenAI Sora API", labelKo: "OpenAI Sora API", envKeys: ["OPENAI_API_KEY"], billing: "paid-api", defaultModel: "sora" },
+      { id: "openai-audio", modality: "audio", label: "OpenAI Audio", labelKo: "OpenAI 오디오", envKeys: ["OPENAI_API_KEY"], billing: "paid-api", defaultModel: "gpt-4o-mini-tts" },
+      { id: "elevenlabs-audio", modality: "audio", label: "ElevenLabs", labelKo: "ElevenLabs", envKeys: ["ELEVENLABS_API_KEY"], billing: "paid-api", defaultModel: "eleven_multilingual_v2" },
+      { id: "deepgram-audio", modality: "audio", label: "Deepgram", labelKo: "Deepgram", envKeys: ["DEEPGRAM_API_KEY"], billing: "paid-api", defaultModel: "nova-3" },
+      { id: "replicate-video", modality: "video", label: "Replicate", labelKo: "Replicate", envKeys: ["REPLICATE_API_TOKEN"], billing: "paid-api", defaultModel: "provider-model" },
+    ];
+    const defaults = { imageProvider: "codex-cli-image", videoProvider: "runway-video", audioProvider: "openai-audio" };
+    return {
+      MULTIMODAL_PROVIDERS: providers,
+      DEFAULT_MULTIMODAL_SETTINGS: defaults,
+      normalizeMultimodalSettings: (input) => ({ ...defaults, ...(input || {}) }),
+      selectedMultimodalEnvKeys: (settings) => {
+        const ids = new Set([settings.imageProvider, settings.videoProvider, settings.audioProvider]);
+        return [...new Set(providers.filter((p) => ids.has(p.id)).flatMap((p) => p.envKeys || []))].sort();
+      },
+    };
+  }
+}
+
 // ── 데이터 접근 ────────────────────────────────────────────
+const PRIVATE_WEB_AGENT_FINGERPRINTS = new Set([
+  "880db20e11cd945e5777b5aaf73c10f24de3e2e190d13631b5f3ed0e4796821c",
+  "a0dba10416f15dac84202902284780ee23f31eda9dc068ccf6a28276b585ea36",
+  "479d879189166bf9bde1b0cd939db746bf8c1b94f2aad553d08cf7b4a2204f9e",
+  "79c16e0347312aceb57c0ec7ee6bb6ebd0118984cc716f9cd56db63d18679183",
+  "56ff55fcc909461b5fc449fdb3d685c6cceeb10d59836d9a91faf3ceb41896a4",
+  "978dd8a262d86397bbdaca13bbec5be313a68fb2d5c609330888818641af8079",
+]);
+const BACKGROUND_AGENT_FINGERPRINTS = new Set([
+  "9011fb75e638676e23a36f86ea689b6e4de17cb5b5954b36810b5239ab077f0b",
+  "0331d654916d648797d31598e3e18eb7fd49166e91783ab9d731648b6e855b90",
+]);
+const BACKGROUND_ROLES = new Set(["orchestrator", "pm", "curator", "governance"]);
+function policyNormalize(value) {
+  return String(value || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+function policyFingerprint(value) {
+  const normalized = policyNormalize(value);
+  return normalized ? crypto.createHash("sha256").update(normalized).digest("hex") : null;
+}
+function agentFingerprints(agent) {
+  return [agent.slug, agent.name, agent.name_en, agent.tagline, agent.tagline_en]
+    .map(policyFingerprint)
+    .filter(Boolean);
+}
+function isPrivateWebOnlyAgentCli(agent) {
+  if (policyNormalize(agent.visibility) === "private") return true;
+  if (policyNormalize(agent.role) === "meta") return true;
+  return agentFingerprints(agent).some((value) => PRIVATE_WEB_AGENT_FINGERPRINTS.has(value));
+}
+function isBackgroundAgentCli(agent) {
+  if (isPrivateWebOnlyAgentCli(agent)) return false;
+  if (policyNormalize(agent.visibility) === "background") return true;
+  if (agent.builtin && BACKGROUND_ROLES.has(policyNormalize(agent.role))) return true;
+  return agentFingerprints(agent).some((value) => BACKGROUND_AGENT_FINGERPRINTS.has(value));
+}
+function listPublicAgents(db) {
+  return db.prepare("SELECT * FROM installed_agents ORDER BY installed_at DESC").all()
+    .filter((agent) => !isPrivateWebOnlyAgentCli(agent))
+    .map((agent) => ({ ...agent, visibility: isBackgroundAgentCli(agent) ? "background" : "visible" }));
+}
 function listAgents(db) {
-  return db.prepare("SELECT * FROM installed_agents ORDER BY installed_at DESC").all();
+  return listPublicAgents(db).filter((agent) => agent.visibility !== "background");
+}
+function listRoutableAgents(db) {
+  return listPublicAgents(db);
 }
 function activeRuntime(db) {
   try {
@@ -82,6 +205,32 @@ function activeRuntime(db) {
   } catch {
     return null;
   }
+}
+function getMultimodalSettingsCli(db) {
+  const mm = loadMultimodalCatalog();
+  let raw = null;
+  try {
+    const row = db.prepare("SELECT value FROM meta WHERE key=?").get(MULTIMODAL_META_KEY);
+    raw = row && row.value;
+  } catch {
+    raw = null;
+  }
+  try {
+    return mm.normalizeMultimodalSettings(raw ? JSON.parse(raw) : null);
+  } catch {
+    return mm.normalizeMultimodalSettings(null);
+  }
+}
+function saveMultimodalSettingsCli(db, patch) {
+  const mm = loadMultimodalCatalog();
+  const next = mm.normalizeMultimodalSettings({ ...getMultimodalSettingsCli(db), ...patch, updatedAt: new Date().toISOString() });
+  try {
+    db.prepare("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(MULTIMODAL_META_KEY, JSON.stringify(next));
+  } catch (e) {
+    fail("multimodal settings 저장 실패: " + e.message);
+  }
+  return next;
 }
 function routesMap() {
   try {
@@ -102,15 +251,8 @@ function resolveAgent(db, query) {
   );
 }
 const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
-const META_AGENT_SLUG = "agentlas-meta-agent";
 const ROUTE_STOP_WORDS = new Set(["the", "and", "for", "with", "this", "that", "from", "into", "make", "build", "create", "agent", "agents", "please", "좀", "해주세요", "해줘", "만들어", "붙여", "연결", "작업", "요청"]);
 const ROUTE_HINTS = [
-  {
-    slug: META_AGENT_SLUG,
-    terms: ["meta-agent", "metaagent", "agent package", "agent repo", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "SKILL.md", "codex", "skill", "에이전트", "메타에이전트", "스킬", "코덱스", "라우팅", "오케스트레이터"],
-    reasonKo: "에이전트/스킬 패키징과 Codex 호환 라우팅 요청입니다",
-    reasonEn: "the request is about agent/skill packaging and Codex-compatible routing",
-  },
   {
     slug: "agentlas-memory-curator",
     terms: ["memory", "remember", "recall", "request_context", "context_json", "메모리", "기억", "회상", "저장"],
@@ -187,12 +329,12 @@ function scoreRouteAgent(prompt, promptTerms, agent, lang) {
   return { agent, score, reason, terms: unique };
 }
 function autoRouteAgent(db, prompt, lang) {
-  const agents = listAgents(db).filter((agent) => agent.slug !== GLOBAL_ORCHESTRATOR_SLUG);
+  const agents = listRoutableAgents(db).filter((agent) => agent.slug !== GLOBAL_ORCHESTRATOR_SLUG);
   if (!agents.length) return null;
   const terms = routeTokenize(prompt);
   const ranked = agents.map((agent) => scoreRouteAgent(prompt, terms, agent, lang || prefsLang())).sort((a, b) => b.score - a.score);
   if (ranked[0] && ranked[0].score > 0) return ranked[0];
-  const fallback = agents.find((agent) => agent.slug === "agentlas-pm-soul") || agents.find((agent) => agent.slug === META_AGENT_SLUG) || agents[0];
+  const fallback = agents.find((agent) => agent.slug === "agentlas-pm-soul") || agents[0];
   return {
     agent: fallback,
     score: 0,
@@ -274,6 +416,37 @@ function readImportTagline(dir) {
   if (mm) return mm[1].trim().slice(0, 140);
   return "";
 }
+const IMPORT_ENV_RE = /\b[A-Z][A-Z0-9_]{2,}(?:API_KEY|TOKEN|SECRET|PASSWORD|CLIENT_ID|CLIENT_SECRET|ACCESS_TOKEN|REFRESH_TOKEN|PRIVATE_KEY|SERVICE_ACCOUNT|WEBHOOK_SECRET|CREDENTIALS|KEY)\b/g;
+const IMPORT_PROCESS_ENV_RE = /process\.env\.([A-Z][A-Z0-9_]{2,})/g;
+const IMPORT_DOTENV_LINE_RE = /^(?:export\s+)?([A-Z][A-Z0-9_]{2,})\s*=/gm;
+const IMPORT_ENV_IGNORES = new Set(["CI", "HOME", "LANG", "NODE_ENV", "PATH", "PORT", "PWD", "SHELL", "TERM", "TMPDIR", "USER"]);
+function detectImportEnvRequirements(dir, extraText) {
+  const files = [".env", ".env.local", ".env.example", ".env.sample", ".env.template", "env.example", "README.md", "AGENT.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "manifest.md", "package.json", ".mcp.json"];
+  const found = new Map();
+  const add = (key, source, required) => {
+    if (!key || IMPORT_ENV_IGNORES.has(key) || key.length < 4 || key.length > 96 || !/^[A-Z][A-Z0-9_]+$/.test(key)) return;
+    const entry = found.get(key) || { sources: new Set(), required: false };
+    entry.sources.add(source);
+    entry.required = entry.required || required;
+    found.set(key, entry);
+  };
+  const collect = (text, source) => {
+    if (!text) return;
+    for (const m of text.matchAll(IMPORT_DOTENV_LINE_RE)) add(m[1], source, true);
+    for (const m of text.matchAll(IMPORT_PROCESS_ENV_RE)) add(m[1], source, true);
+    for (const m of text.matchAll(IMPORT_ENV_RE)) add(m[0], source, source.includes(".env"));
+  };
+  for (const name of files) collect(readFileSafe(path.join(dir, name), 256 * 1024), name);
+  collect(extraText || "", "system prompt");
+  return [...found.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, info]) => ({
+    key,
+    label: key.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (ch) => ch.toUpperCase()),
+    labelEn: key.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (ch) => ch.toUpperCase()),
+    required: info.required,
+    hint: "Detected in " + [...info.sources].slice(0, 3).join(", "),
+    hintEn: "Detected in " + [...info.sources].slice(0, 3).join(", "),
+  }));
+}
 // 팀이면 CEO 두뇌를 시스템 프롬프트로 잡고, 임의 cwd에서도 동작하도록 절대경로 헤더를 붙인다.
 function buildImportSystemPrompt(dir, name, kind) {
   if (kind === "team") {
@@ -304,6 +477,8 @@ function importLocalFolderCli(db, absPath) {
   const name = readImportName(dir);
   const tagline = readImportTagline(dir) || (kind === "team" ? "Imported local team" : "Imported local agent");
   const systemPrompt = buildImportSystemPrompt(dir, name, kind);
+  const envRequirements = detectImportEnvRequirements(dir, systemPrompt);
+  const envReqsJson = JSON.stringify(envRequirements);
 
   // 같은 경로가 이미 임포트돼 있으면 그 에이전트를 갱신(멱등).
   const routes = routesMap();
@@ -319,8 +494,13 @@ function importLocalFolderCli(db, absPath) {
     const row = db.prepare("SELECT slug FROM installed_agents WHERE id=?").get(id);
     slug = row ? row.slug : null;
     if (slug) {
-      db.prepare("UPDATE installed_agents SET name=?, name_en=?, tagline=?, tagline_en=?, system_prompt=? WHERE id=?")
-        .run(name, name, tagline, tagline, systemPrompt, id);
+      if (columnExists(db, "installed_agents", "visibility")) {
+        db.prepare("UPDATE installed_agents SET name=?, name_en=?, tagline=?, tagline_en=?, system_prompt=?, env_requirements_json=?, visibility='visible' WHERE id=?")
+          .run(name, name, tagline, tagline, systemPrompt, envReqsJson, id);
+      } else {
+        db.prepare("UPDATE installed_agents SET name=?, name_en=?, tagline=?, tagline_en=?, system_prompt=?, env_requirements_json=? WHERE id=?")
+          .run(name, name, tagline, tagline, systemPrompt, envReqsJson, id);
+      }
     } else { existingId = null; }
   }
   if (!existingId) {
@@ -330,9 +510,15 @@ function importLocalFolderCli(db, absPath) {
     id = require("node:crypto").randomUUID();
     let h = 0; for (let i = 0; i < slug.length; i++) h = (h << 5) - h + slug.charCodeAt(i);
     const tone = TONES[Math.abs(h) % TONES.length];
-    db.prepare(
-      "INSERT INTO installed_agents (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json, env_requirements_json, preferred_backend, trust_grade, installed_at, tone, builtin) VALUES (?,?,?,?,?,?,?,'[]','[]',NULL,'A',?,?,0)",
-    ).run(id, slug, name, name, tagline, tagline, systemPrompt, now, tone);
+    if (columnExists(db, "installed_agents", "visibility")) {
+      db.prepare(
+        "INSERT INTO installed_agents (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json, env_requirements_json, preferred_backend, trust_grade, installed_at, tone, builtin, visibility) VALUES (?,?,?,?,?,?,?,'[]',?,NULL,'A',?,?,0,'visible')",
+      ).run(id, slug, name, name, tagline, tagline, systemPrompt, envReqsJson, now, tone);
+    } else {
+      db.prepare(
+        "INSERT INTO installed_agents (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json, env_requirements_json, preferred_backend, trust_grade, installed_at, tone, builtin) VALUES (?,?,?,?,?,?,?,'[]',?,NULL,'A',?,?,0)",
+      ).run(id, slug, name, name, tagline, tagline, systemPrompt, envReqsJson, now, tone);
+    }
   }
   // 라우트 저장
   routes[id] = { agentId: id, path: dir, runtime, labels, kind, importedAt: now };
@@ -440,16 +626,30 @@ function seedBuiltins(db) {
   const now = new Date().toISOString();
   try {
     const tx = db.transaction(() => {
+      const hasVisibility = columnExists(db, "installed_agents", "visibility");
       for (const def of arch.agents) {
+        const visibility = def.visibility || "background";
         const existing = db.prepare("SELECT id FROM installed_agents WHERE id=? OR slug=?").get(def.id, def.slug);
         if (existing) {
-          db.prepare(
-            "UPDATE installed_agents SET name=?, name_en=?, tagline=?, tagline_en=?, system_prompt=?, tone=?, role=?, builtin=1, trust_grade='A' WHERE id=?",
-          ).run(def.name, def.nameEn, def.tagline, def.taglineEn, def.systemPrompt, def.tone, def.role, existing.id);
+          if (hasVisibility) {
+            db.prepare(
+              "UPDATE installed_agents SET name=?, name_en=?, tagline=?, tagline_en=?, system_prompt=?, tone=?, role=?, builtin=1, trust_grade='A', visibility=? WHERE id=?",
+            ).run(def.name, def.nameEn, def.tagline, def.taglineEn, def.systemPrompt, def.tone, def.role, visibility, existing.id);
+          } else {
+            db.prepare(
+              "UPDATE installed_agents SET name=?, name_en=?, tagline=?, tagline_en=?, system_prompt=?, tone=?, role=?, builtin=1, trust_grade='A' WHERE id=?",
+            ).run(def.name, def.nameEn, def.tagline, def.taglineEn, def.systemPrompt, def.tone, def.role, existing.id);
+          }
         } else {
-          db.prepare(
-            "INSERT INTO installed_agents (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json, env_requirements_json, preferred_backend, trust_grade, installed_at, tone, builtin, role) VALUES (?,?,?,?,?,?,?,'[]','[]',NULL,'A',?,?,1,?)",
-          ).run(def.id, def.slug, def.name, def.nameEn, def.tagline, def.taglineEn, def.systemPrompt, now, def.tone, def.role);
+          if (hasVisibility) {
+            db.prepare(
+              "INSERT INTO installed_agents (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json, env_requirements_json, preferred_backend, trust_grade, installed_at, tone, builtin, role, visibility) VALUES (?,?,?,?,?,?,?,'[]','[]',NULL,'A',?,?,1,?,?)",
+            ).run(def.id, def.slug, def.name, def.nameEn, def.tagline, def.taglineEn, def.systemPrompt, now, def.tone, def.role, visibility);
+          } else {
+            db.prepare(
+              "INSERT INTO installed_agents (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json, env_requirements_json, preferred_backend, trust_grade, installed_at, tone, builtin, role) VALUES (?,?,?,?,?,?,?,'[]','[]',NULL,'A',?,?,1,?)",
+            ).run(def.id, def.slug, def.name, def.nameEn, def.tagline, def.taglineEn, def.systemPrompt, now, def.tone, def.role);
+          }
         }
       }
       db.prepare("INSERT INTO meta(key,value) VALUES('architecture_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(arch.version);
@@ -773,11 +973,14 @@ async function executeOnce(db, system, prompt, override, ctx) {
     const sys = augmentSystem(db, system, ctx, false);
     const cwd = ctx.projectPath || projectCwd();
     const permission = ctx.permission || "write";
+    const env = await buildChildEnvCli(db, { ...ctx, cwd });
     process.stderr.write(`▸ ${rt.kind} · ${permission} · ${cwd}\n`);
-    return spawnRuntime(rt.kind, sys, prompt, { cwd, permission });
+    return spawnRuntime(rt.kind, sys, prompt, { cwd, permission, env });
   }
   // API 경로 — emitter 동봉 → 답변에서 메모리 이벤트를 파싱·큐레이션하고 블록은 제거.
   const sys = augmentSystem(db, system, ctx, true);
+  const env = await buildChildEnvCli(db, { ...ctx, cwd: ctx.cwd || projectCwd() });
+  Object.assign(process.env, env);
   process.stderr.write(`▸ ${rt.backend}${rt.model ? " · " + rt.model : ""}\n`);
   const text = await runApi(rt.backend, rt.model, sys, prompt);
   const cleaned = curateCliReply(db, text || "", ctx);
@@ -878,6 +1081,93 @@ function projectCwd() {
   }
 }
 
+function parseDotEnvCli(text) {
+  const out = {};
+  for (const raw of String(text || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const m = line.match(/^(?:export\s+)?([A-Z][A-Z0-9_]{2,})\s*=\s*(.*)$/);
+    if (!m) continue;
+    let value = m[2].trim();
+    const q = value[0];
+    if ((q === '"' || q === "'") && value.endsWith(q)) value = value.slice(1, -1);
+    out[m[1]] = value;
+  }
+  return out;
+}
+function readDotEnvFileCli(file) {
+  try {
+    const st = fs.statSync(file);
+    if (!st.isFile() || st.size > 512 * 1024) return {};
+    return parseDotEnvCli(fs.readFileSync(file, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function readDotEnvDirCli(dir) {
+  return { ...readDotEnvFileCli(path.join(dir, ".env")), ...readDotEnvFileCli(path.join(dir, ".env.local")) };
+}
+function agentEnvRequirementsCli(db, agentId) {
+  if (!agentId) return [];
+  try {
+    const row = db.prepare("SELECT env_requirements_json FROM installed_agents WHERE id=?").get(agentId);
+    const parsed = JSON.parse((row && row.env_requirements_json) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+function agentEnvDirCli(agentId) {
+  if (!agentId) return null;
+  const route = routesMap()[agentId];
+  if (route && route.path) return route.path;
+  return null;
+}
+function readVaultEnvValuesCli(keys) {
+  const keytar = readKeytar();
+  const result = {};
+  if (!keytar || !keys.length) return Promise.resolve(result);
+  return Promise.all(
+    keys.map((key) =>
+      keytar
+        .getPassword(SERVICE, ENV_PREFIX + key)
+        .then((value) => {
+          if (value) result[key] = value;
+        })
+        .catch(() => {}),
+    ),
+  ).then(() => result);
+}
+async function buildChildEnvCli(db, ctx) {
+  const env = { ...process.env };
+  const apply = (values, overwrite) => {
+    for (const [key, value] of Object.entries(values || {})) {
+      if (!value) continue;
+      if (!overwrite && env[key]) continue;
+      env[key] = value;
+    }
+  };
+  apply(readDotEnvFileCli(path.join(userDataDir(), "credentials.env")), false);
+  apply(readDotEnvFileCli(path.join(os.homedir(), ".agentlas", "credentials.env")), false);
+  if (ctx && ctx.cwd) apply(readDotEnvDirCli(ctx.cwd), true);
+  if (ctx && ctx.projectPath) apply(readDotEnvDirCli(ctx.projectPath), true);
+  const agentDir = agentEnvDirCli(ctx && ctx.agentId);
+  if (agentDir) apply(readDotEnvDirCli(agentDir), true);
+
+  const mm = loadMultimodalCatalog();
+  const settings = getMultimodalSettingsCli(db);
+  const keys = new Set(mm.selectedMultimodalEnvKeys(settings));
+  for (const req of agentEnvRequirementsCli(db, ctx && ctx.agentId)) {
+    if (req && req.key) keys.add(req.key);
+  }
+  const vaultValues = await readVaultEnvValuesCli([...keys].filter((key) => !env[key]));
+  apply(vaultValues, false);
+  env.AGENTLAS_MULTIMODAL_IMAGE_PROVIDER = settings.imageProvider;
+  env.AGENTLAS_MULTIMODAL_VIDEO_PROVIDER = settings.videoProvider;
+  env.AGENTLAS_MULTIMODAL_AUDIO_PROVIDER = settings.audioProvider;
+  return env;
+}
+
 // 권한 → 네이티브 CLI 권한 모드 매핑 (앱의 claude-code.ts 와 동일 의미).
 //   read=기본(헤드리스에서 위험 툴 자동 거부) · write=편집 허용 · full=셸 포함 전체 자동.
 function buildArgs(kind, systemPrompt, prompt, permission) {
@@ -936,6 +1226,9 @@ function buildHelpers(db) {
     apiKey: (backend) => apiKey(backend),
     eventsHeading: () => loadArch().eventsHeading,
     defaultApiModel: (backend) => DEFAULT_API_MODEL[backend],
+    buildChildEnv: (db_, ctx) => buildChildEnvCli(db_, ctx),
+    multimodalStatus: (db_) => multimodalStatusCli(db_),
+    setMultimodal: (db_, modality, providerId) => setMultimodalCli(db_, modality, providerId),
     resolveAgent,
     resolveFirm,
     listAgents,
@@ -1009,7 +1302,7 @@ function spawnRuntime(kind, systemPrompt, prompt, opts) {
     const child = spawn(bin, buildArgs(kind, systemPrompt, prompt, opts.permission), {
       cwd,
       stdio: ["ignore", "inherit", "inherit"],
-      env: process.env,
+      env: opts.env || process.env,
     });
     child.on("error", (err) => {
       process.stderr.write(`\n실행 실패(${kind}): ${err.message}\n`);
@@ -1244,6 +1537,63 @@ function cmdEnv(db) {
     .catch((e) => fail("env 조회 실패: " + e.message));
 }
 
+async function multimodalStatusCli(db) {
+  const mm = loadMultimodalCatalog();
+  const settings = getMultimodalSettingsCli(db);
+  const ids = { image: settings.imageProvider, video: settings.videoProvider, audio: settings.audioProvider };
+  const keytar = readKeytar();
+  const rows = [];
+  for (const modality of ["image", "video", "audio"]) {
+    const provider = mm.MULTIMODAL_PROVIDERS.find((p) => p.id === ids[modality]);
+    if (!provider) continue;
+    const env = [];
+    for (const key of provider.envKeys || []) {
+      let hasValue = Boolean(process.env[key]);
+      if (!hasValue && keytar) {
+        try { hasValue = Boolean(await keytar.getPassword(SERVICE, ENV_PREFIX + key)); } catch { hasValue = false; }
+      }
+      env.push({ key, hasValue });
+    }
+    rows.push({ modality, provider, env, ready: env.every((e) => e.hasValue) });
+  }
+  return rows;
+}
+function setMultimodalCli(db, modality, providerId) {
+  const mm = loadMultimodalCatalog();
+  if (!["image", "video", "audio"].includes(modality)) fail("usage: agentlas multimodal set <image|video|audio> <provider-id>");
+  const provider = mm.MULTIMODAL_PROVIDERS.find((p) => p.id === providerId && p.modality === modality);
+  if (!provider) fail(`provider를 찾을 수 없습니다: ${providerId} (${modality})`);
+  const key = modality === "image" ? "imageProvider" : modality === "video" ? "videoProvider" : "audioProvider";
+  return saveMultimodalSettingsCli(db, { [key]: providerId });
+}
+async function cmdMultimodal(db, args) {
+  const sub = args[0] || "status";
+  const mm = loadMultimodalCatalog();
+  if (sub === "set") {
+    const settings = setMultimodalCli(db, args[1], args[2]);
+    out(`✓ multimodal ${args[1]} provider → ${args[2]}`);
+    out(`  image=${settings.imageProvider}  video=${settings.videoProvider}  audio=${settings.audioProvider}`);
+    return;
+  }
+  if (sub === "providers") {
+    for (const modality of ["image", "video", "audio"]) {
+      out(`${modality}:`);
+      for (const p of mm.MULTIMODAL_PROVIDERS.filter((x) => x.modality === modality)) {
+        out(`  ${p.id.padEnd(22)} ${p.label}${p.envKeys && p.envKeys.length ? "  env: " + p.envKeys.join(",") : "  env: none"}`);
+      }
+    }
+    out("\nSet: agentlas multimodal set <image|video|audio> <provider-id>");
+    return;
+  }
+  const rows = await multimodalStatusCli(db);
+  out("Multimodal fallback:");
+  for (const row of rows) {
+    const env = row.env.length ? row.env.map((e) => `${e.key}:${e.hasValue ? "set" : "missing"}`).join(" ") : "no key";
+    out(`  ${row.modality.padEnd(5)} ${row.provider.id.padEnd(20)} ${row.provider.label}  ${env}`);
+  }
+  out("\nCommands: agentlas multimodal providers  ·  agentlas multimodal set image openai-image");
+}
+
 function cmdDoctor(db) {
   out(`userData: ${userDataDir()}`);
   out(`db: ${fs.existsSync(dbPath()) ? "OK" : "없음"}`);
@@ -1270,6 +1620,7 @@ function cmdHelp() {
       "  cd <agent>            print the agent folder — cd \"$(agentlas cd seo)\" && claude",
       "  list                  agents/companies + active runtime",
       "  env                   shared env key names",
+      "  multimodal            image/video/audio fallback providers",
       "  creds save ...        save an issued key (vault + project .env + global memory)",
       "  doctor                check runtimes and data",
       "  setup                 re-run first-launch setup (language · runtime · permission)",
@@ -1345,6 +1696,8 @@ async function main() {
       return cmdFirm(db, rest[1], rest.slice(2).join(" "), runtimeOverride);
     case "env":
       return cmdEnv(db);
+    case "multimodal":
+      return cmdMultimodal(db, rest.slice(1));
     case "creds":
       return cmdCreds(db, rest.slice(1));
     case "doctor":

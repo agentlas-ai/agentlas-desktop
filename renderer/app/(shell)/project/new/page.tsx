@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import type { InstalledAgent } from "@/lib/types";
@@ -20,7 +21,7 @@ export default function NewProjectPage() {
   useEffect(() => {
     const api = ipc();
     if (!api) return;
-    void api.team.list().then(setAgents);
+    void api.team.list().then((list) => setAgents(visibleAgents(list)));
   }, []);
 
   async function submit() {

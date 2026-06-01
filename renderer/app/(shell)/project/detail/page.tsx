@@ -4,6 +4,7 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import type { Chat, InstalledAgent, Project } from "@/lib/types";
@@ -81,7 +82,7 @@ function ProjectPage() {
   }
 
   if (!project) return null;
-  const agentById = new Map(agents.map((a) => [a.id, a]));
+  const agentById = new Map(visibleAgents(agents).map((a) => [a.id, a]));
 
   return (
     <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
@@ -269,7 +270,7 @@ function ProjectPage() {
                       </span>
                     )}
                     <span style={{ fontSize: 10, color: "var(--muted)", flexShrink: 0 }}>
-                      {new Date(c.updatedAt).toLocaleString("ko-KR", {
+                      {new Date(c.updatedAt).toLocaleString(locale === "en" ? "en-US" : "ko-KR", {
                         month: "numeric",
                         day: "numeric",
                         hour: "numeric",

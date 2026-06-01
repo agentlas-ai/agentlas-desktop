@@ -38,6 +38,7 @@ const data = {
     tagline: a.tagline,
     taglineEn: a.taglineEn,
     role: a.role,
+    visibility: a.visibility,
     tone: a.tone,
     systemPrompt: a.systemPrompt,
   })),

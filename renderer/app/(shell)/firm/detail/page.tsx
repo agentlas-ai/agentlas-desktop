@@ -267,7 +267,7 @@ function FirmDetailPage() {
                     {c.title.trim() || t("chat.untitled")}
                   </span>
                   <span style={{ fontSize: 10, color: "var(--muted)", flexShrink: 0 }}>
-                    {new Date(c.updatedAt).toLocaleString("ko-KR", {
+                    {new Date(c.updatedAt).toLocaleString(locale === "en" ? "en-US" : "ko-KR", {
                       month: "numeric",
                       day: "numeric",
                       hour: "numeric",

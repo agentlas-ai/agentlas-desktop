@@ -12,6 +12,7 @@ import { setRoute, listRoutes, type RuntimeLabel } from "./routes";
 import { upsertLocalTeamFirm } from "../store/firms";
 import { analyzeFolder } from "./org-resolver";
 import { saveResolvedOrg } from "../store/org-spec";
+import { detectEnvRequirementsFromFolder } from "./env-detect";
 import type { FirmOrgNode, InstalledAgent, InstalledFirm, ResolvedOrg } from "../../shared/types";
 
 const TONES: InstalledAgent["tone"][] = ["blue", "green", "purple", "amber", "peach"];
@@ -318,6 +319,8 @@ export async function importLocalFolder(absPath: string): Promise<LocalImportRes
       ? buildTeamSystemPrompt(dir, name)
       : readFirst(dir, ["system-prompt.md", "soul.md", "AGENT.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md"]) ||
         `You are ${name}, a locally imported agent.`;
+  const envRequirements = detectEnvRequirementsFromFolder(dir, systemPrompt);
+  const envReqsJson = JSON.stringify(envRequirements);
 
   const now = new Date().toISOString();
 
@@ -345,9 +348,9 @@ export async function importLocalFolder(absPath: string): Promise<LocalImportRes
     tone = row.tone;
     getDb()
       .prepare(
-        "UPDATE installed_agents SET name = ?, name_en = ?, tagline = ?, tagline_en = ?, system_prompt = ? WHERE id = ?",
+        "UPDATE installed_agents SET name = ?, name_en = ?, tagline = ?, tagline_en = ?, system_prompt = ?, env_requirements_json = ?, visibility = 'visible' WHERE id = ?",
       )
-      .run(name, name, tagline, tagline, systemPrompt, id);
+      .run(name, name, tagline, tagline, systemPrompt, envReqsJson, id);
   } else {
     const baseSlug =
       "local-" +
@@ -364,10 +367,10 @@ export async function importLocalFolder(absPath: string): Promise<LocalImportRes
       .prepare(
         `INSERT INTO installed_agents
          (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
-          env_requirements_json, preferred_backend, trust_grade, installed_at, tone)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          env_requirements_json, preferred_backend, trust_grade, installed_at, tone, visibility)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'visible')`,
       )
-      .run(id, slug, name, name, tagline, tagline, systemPrompt, "[]", "[]", null, "A", now, tone);
+      .run(id, slug, name, name, tagline, tagline, systemPrompt, "[]", envReqsJson, null, "A", now, tone);
   }
 
   setRoute({ agentId: id, path: dir, runtime, labels, kind, importedAt: now });
@@ -398,7 +401,7 @@ export async function importLocalFolder(absPath: string): Promise<LocalImportRes
     taglineEn: tagline,
     systemPrompt,
     mcpServers: [],
-    envRequirements: [],
+    envRequirements,
     preferredBackend: null,
     trustGrade: "A",
     installedAt: now,

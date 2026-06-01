@@ -3,6 +3,7 @@
 import type { ChatHistoryEntry, ImageAttachment } from "../../shared/types";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { GLOBAL_CONNECTION_SKILL } from "./global-skill";
+import { SURFACE_PROTOCOL } from "../surface-emitter";
 
 export interface RunnerRequest {
   systemPrompt: string;
@@ -35,6 +36,13 @@ export interface RunnerRequest {
   mcpAllowedTools?: string[];
   /** Codex CLI `exec`에 붙이는 MCP config override args (`-c mcp_servers...`). */
   mcpCodexConfigArgs?: string[];
+  /** Agentlas-resolved environment: agent .env first, then global multimodal fallback/vault. */
+  env?: NodeJS.ProcessEnv;
+  /**
+   * 현재 chat 식별자 — 세션 resume를 지원하는 러너(codex)가 (chatId, kind)별 CLI 세션을
+   * 재사용해 시스템 프롬프트/히스토리를 매 턴 재전송하지 않도록 한다. 미설정이면 매번 full-context.
+   */
+  chatId?: string;
   /** 상태/오류 메시지 i18n에 사용. renderer가 동봉, fallback "en" */
   locale: RuntimeLocale;
 }
@@ -97,6 +105,8 @@ export function wrapSystemPrompt(
     // 항상-켜진 백그라운드 스킬 — 사용자가 "API/MCP"를 몰라도 에이전트가 브라우저로 가입·로그인·키
     // 발급을 손잡고 안내한 뒤 저장하게 한다. 사용자에게는 보이지 않는다(시스템 프롬프트 내부).
     GLOBAL_CONNECTION_SKILL,
+    "",
+    SURFACE_PROTOCOL,
     "",
     tStatus(locale, "sysAgentDef"),
     agentSystemPrompt,

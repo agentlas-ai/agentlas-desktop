@@ -1,12 +1,19 @@
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { detectRuntimes, setActiveRuntime } from "./runtime/detect";
 import { listRuntimeModels } from "./runtime/providers";
 import { installCli, openCliLogin, type InstallableCli } from "./runtime/install-cli";
 import { listRuntimeCommands } from "./runtime/commands";
 import { installAgentlasCli } from "./runtime/install-agentlas-cli";
+import {
+  getMultimodalSettings,
+  getMultimodalStatus,
+  listMultimodalProviders,
+  saveMultimodalSettings,
+} from "./multimodal/settings";
 import { runMigration, scanMigrationSources } from "./migrate";
 import {
   deleteApiKey,
@@ -47,6 +54,7 @@ import { listAgentFiles, readAgentFile, writeAgentFile } from "./agents/files";
 import { importLocalFolder } from "./agents/import-local";
 import { getResolvedOrg } from "./store/org-spec";
 import { resolveTeamOrg } from "./agents/org-resolver";
+import { isPublicDesktopAgent } from "./agents/policy";
 import { runMcpInvocation } from "./mcp/client";
 import { checkSafely as updaterCheck, getUpdaterState, quitAndInstall as updaterInstall } from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
@@ -81,16 +89,108 @@ import {
   removeAutomation,
   toggleAutomation,
 } from "./store/automations";
+import {
+  getAgentSurface,
+  listAgentSurfaceEvents,
+  listAgentSurfaces,
+  patchAgentSurfaceState,
+} from "./store/agent-surfaces";
+import {
+  approveAgentSurface,
+  hasAgentSurfaceApproval,
+  listAgentSurfaceApprovals,
+  revokeAgentSurfaceApproval,
+} from "./store/agent-surface-approvals";
+import {
+  getSurfaceJobSummary,
+  listSurfaceJobs,
+  updateSurfaceJob,
+} from "./store/agent-surface-jobs";
+import {
+  getSurfaceAssetPack,
+  getSurfaceAssetPackByRoot,
+  getSurfaceAssetPackBySurface,
+  listSurfaceAssetPackOperations,
+  listSurfaceAssetPacks,
+  recordMaterializedSurfaceAssetPack,
+  recordSurfaceAssetPackOperation,
+} from "./store/agent-surface-assets";
+import {
+  getAgentApp,
+  getAgentAppByRoot,
+  getAgentAppBySurface,
+  listAgentAppOperations,
+  listAgentApps,
+  recordAgentAppOperation,
+  recordScaffoldedApp,
+} from "./store/agent-apps";
+import {
+  getAgentTool,
+  getAgentToolByRoot,
+  getAgentToolBySurface,
+  listAgentToolOperations,
+  listAgentTools,
+  recordAgentToolOperation,
+  recordScaffoldedTool,
+} from "./store/agent-tools";
+import {
+  archiveAppPackage,
+  activateLocalCommerceStack,
+  approveProviderPayment,
+  captureProviderBrowserSessions,
+  installMcpPlan,
+  launchProviderBrowserSession,
+  materializeCatalogAssets,
+  prepareProviderBrowserOpen,
+  preparePreviewDeploy,
+  publishAppAsTool,
+  resolveProviderCredentials,
+  runAppFactoryAutopilot,
+  restoreAppPackage,
+  runAppFactorySmoke,
+  runProviderTasks,
+  syncProviderBrowserResults,
+} from "./app-factory/operations";
+import { scaffoldServiceApp } from "./app-factory/scaffold";
+import { archiveSurfaceAssetPack, materializeSurfaceAssetPack, restoreSurfaceAssetPack } from "./surface-assets/materialize";
+import { archiveToolPackage, installToolMcp, restoreToolPackage } from "./tool-factory/operations";
+import { runToolFactorySmoke, scaffoldAgentTool } from "./tool-factory/scaffold";
+import { createCommerceAgentTeam } from "./meta-agent/commerce-team";
+import { selectedMultimodalEnvRequirements } from "../shared/multimodal";
 import type {
+  AppFactoryAppStatus,
+  AppFactoryAssetMaterializeRequest,
+  AppFactoryAutopilotRequest,
+  AppFactoryLocalCommerceActivationRequest,
+  AppFactoryOperationKind,
+  AppFactoryProviderCredentialResolveRequest,
+  AppFactoryProviderBrowserLaunchRequest,
+  AppFactoryProviderBrowserResultSyncRequest,
+  AppFactoryProviderBrowserSessionRequest,
+  AppFactoryProviderPaymentApproveRequest,
+  AppFactoryRootRequest,
+  AppFactoryScaffoldRequest,
   Automation,
   McpInvocationEvent,
   McpInvocationRequest,
+  MetaAgentTeamFactoryRequest,
   McpTransport,
   MigrationOptions,
+  MultimodalSettings,
   Project,
   RuntimeBackend,
   RuntimeKind,
   RuntimeSelection,
+  SurfaceAssetPackRequest,
+  SurfaceAssetPackRootRequest,
+  SurfaceApprovalCheckRequest,
+  SurfaceApprovalGrantRequest,
+  SurfaceStatePatchRequest,
+  SurfaceJobUpdateRequest,
+  ToolFactoryOperationKind,
+  ToolFactoryRootRequest,
+  ToolFactoryScaffoldRequest,
+  ToolFactoryToolStatus,
 } from "../shared/types";
 
 // 진행 중인 실행 레지스트리 — runId → { 취소 컨트롤러, 대상 chatId, 방출 이벤트 버퍼 }.
@@ -109,6 +209,37 @@ const MAX_BUFFERED_EVENTS = 4000;
 /** 현재 실행 중인 chatId 목록(중복 제거). */
 function activeChatIds(): string[] {
   return [...new Set([...activeRuns.values()].map((r) => r.chatId))];
+}
+
+function recordAppFactoryOperation(
+  rootPath: string,
+  operation: AppFactoryOperationKind,
+  ok: boolean,
+  result: unknown,
+  status: AppFactoryAppStatus,
+): void {
+  const appRecord = getAgentAppByRoot(rootPath);
+  if (!appRecord) return;
+  const preservedStatus =
+    appRecord.status === "tool-published" && status === "operations-ready"
+      ? "tool-published"
+      : appRecord.status === "preview-ready" && status === "operations-ready"
+        ? "preview-ready"
+        : status;
+  recordAgentAppOperation(appRecord.id, operation, ok, result, preservedStatus);
+}
+
+function recordToolFactoryOperation(
+  rootPath: string,
+  operation: ToolFactoryOperationKind,
+  ok: boolean,
+  result: unknown,
+  status: ToolFactoryToolStatus,
+  installedServerId?: string | null,
+): void {
+  const toolRecord = getAgentToolByRoot(rootPath);
+  if (!toolRecord) return;
+  recordAgentToolOperation(toolRecord.id, operation, ok, result, status, installedServerId);
 }
 
 /** 사이드바 "실행 중" 인디케이터용 — 실행 시작/종료/취소 때마다 모든 창에 방송. */
@@ -238,6 +369,20 @@ export function registerIpcHandlers(): void {
         map.set(key, entry);
       }
     }
+    // 멀티모달 전역 fallback provider가 요구하는 키도 환경변수 화면에 노출.
+    for (const req of selectedMultimodalEnvRequirements(getMultimodalSettings())) {
+      const entry = map.get(req.key) ?? { hasValue: false, requiredBy: [] };
+      entry.requiredBy.push({
+        agentId: `multimodal:${req.key}`,
+        agentName: "Agentlas Multimodal Fallback",
+        agentNameEn: "Agentlas Multimodal Fallback",
+        label: req.label,
+        labelEn: req.labelEn,
+        hint: req.hint,
+        hintEn: req.hintEn,
+      });
+      map.set(req.key, entry);
+    }
     // 사용자가 직접 추가한 키도 포함 (요구하는 에이전트 없음)
     for (const k of stored) {
       if (!map.has(k)) map.set(k, { hasValue: true, requiredBy: [] });
@@ -254,6 +399,14 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("env:set", (_e, key: string, value: string) => setEnvVar(key, value));
   ipcMain.handle("env:has", (_e, key: string) => hasEnvVar(key));
   ipcMain.handle("env:remove", (_e, key: string) => deleteEnvVar(key));
+
+  // ── multimodal global fallback ─────────────────────────
+  ipcMain.handle("multimodal:listProviders", () => listMultimodalProviders());
+  ipcMain.handle("multimodal:getSettings", () => getMultimodalSettings());
+  ipcMain.handle("multimodal:saveSettings", (_e, settings: Partial<MultimodalSettings>) =>
+    saveMultimodalSettings(settings),
+  );
+  ipcMain.handle("multimodal:status", () => getMultimodalStatus());
 
   // ── team (설치된 에이전트) ─────────────────────────────
   ipcMain.handle("team:list", () => listInstalledAgents());
@@ -307,7 +460,7 @@ export function registerIpcHandlers(): void {
     const source = getCargoSource();
     if (!source) return [];
     try {
-      return await source.listMyAgents();
+      return (await source.listMyAgents()).filter((agent) => isPublicDesktopAgent(agent));
     } catch {
       return [];
     }
@@ -383,6 +536,282 @@ export function registerIpcHandlers(): void {
     toggleAutomation(id, enabled),
   );
   ipcMain.handle("automations:remove", (_e, id: string) => removeAutomation(id));
+
+  // ── Surfaces (agent-made Workbench outputs) ─────────────
+  ipcMain.handle("surfaces:list", (_e, chatId?: string) => listAgentSurfaces(chatId));
+  ipcMain.handle("surfaces:get", (_e, id: string) => getAgentSurface(id));
+  ipcMain.handle("surfaces:listJobs", (_e, surfaceId: string) => listSurfaceJobs(surfaceId));
+  ipcMain.handle("surfaces:getJobSummary", (_e, surfaceId: string) => {
+    const surface = getAgentSurface(surfaceId);
+    if (!surface) return null;
+    return getSurfaceJobSummary(surfaceId, surface.manifest.budget);
+  });
+  ipcMain.handle("surfaces:updateJob", (_e, input: SurfaceJobUpdateRequest) =>
+    updateSurfaceJob(input),
+  );
+  ipcMain.handle("surfaces:updateState", (_e, input: SurfaceStatePatchRequest) =>
+    patchAgentSurfaceState(input),
+  );
+  ipcMain.handle("surfaces:listEvents", (_e, surfaceId: string) =>
+    listAgentSurfaceEvents(surfaceId),
+  );
+  ipcMain.handle("surfaces:approve", (_e, input: SurfaceApprovalGrantRequest) =>
+    approveAgentSurface(input),
+  );
+  ipcMain.handle("surfaces:hasApproval", (_e, input: SurfaceApprovalCheckRequest) =>
+    hasAgentSurfaceApproval(input),
+  );
+  ipcMain.handle("surfaces:listApprovals", (_e, surfaceId: string) =>
+    listAgentSurfaceApprovals(surfaceId),
+  );
+  ipcMain.handle("surfaces:revokeApproval", (_e, id: string) => revokeAgentSurfaceApproval(id));
+
+  // ── Surface Assets (reusable packs from declarative manifests) ─
+  ipcMain.handle("surfaceAssets:materialize", async (_e, input: SurfaceAssetPackRequest) => {
+    const chat = getChat(input.chatId);
+    if (!chat) throw new Error(`Chat not found: ${input.chatId}`);
+    const project = chat.projectId ? getProject(chat.projectId) : null;
+    const baseDir =
+      getChatWorkingFolder(chat.id) ??
+      project?.folderPath ??
+      path.join(app.getPath("userData"), "generated-assets");
+    const result = await materializeSurfaceAssetPack(input, { baseDir, downloadRemoteAssets: true });
+    const record = recordMaterializedSurfaceAssetPack({
+      chatId: chat.id,
+      projectId: chat.projectId,
+      agentId: chat.agentId,
+      surfaceId: input.surfaceId,
+      actionId: input.actionId,
+      manifest: input.manifest,
+      snapshot: result,
+    });
+    return { ...result, record };
+  });
+  ipcMain.handle("surfaceAssets:archive", async (_e, input: SurfaceAssetPackRootRequest) => {
+    const pack = getSurfaceAssetPackByRoot(path.resolve(input.rootPath));
+    if (!pack) throw new Error(`Surface asset pack not found: ${input.rootPath}`);
+    const result = await archiveSurfaceAssetPack(input);
+    return recordSurfaceAssetPackOperation(pack.id, "archive", true, result, "archived");
+  });
+  ipcMain.handle("surfaceAssets:restore", async (_e, input: SurfaceAssetPackRootRequest) => {
+    const pack = getSurfaceAssetPackByRoot(path.resolve(input.rootPath));
+    if (!pack) throw new Error(`Surface asset pack not found: ${input.rootPath}`);
+    const result = await restoreSurfaceAssetPack(input);
+    return recordSurfaceAssetPackOperation(pack.id, "restore", true, result, "restored");
+  });
+  ipcMain.handle("surfaceAssets:listPacks", (_e, chatId?: string) => listSurfaceAssetPacks(chatId));
+  ipcMain.handle("surfaceAssets:getPack", (_e, id: string) => getSurfaceAssetPack(id));
+  ipcMain.handle("surfaceAssets:getPackBySurface", (_e, chatId: string, surfaceId: string) =>
+    getSurfaceAssetPackBySurface(chatId, surfaceId),
+  );
+  ipcMain.handle("surfaceAssets:listOperations", (_e, packId: string) =>
+    listSurfaceAssetPackOperations(packId),
+  );
+
+  // ── App Factory (agent-made service apps) ───────────────
+  ipcMain.handle("appFactory:scaffold", async (_e, input: AppFactoryScaffoldRequest) => {
+    const chat = getChat(input.chatId);
+    if (!chat) throw new Error(`Chat not found: ${input.chatId}`);
+    const project = chat.projectId ? getProject(chat.projectId) : null;
+    const baseDir =
+      getChatWorkingFolder(chat.id) ??
+      project?.folderPath ??
+      path.join(app.getPath("userData"), "generated-apps");
+    const result = await scaffoldServiceApp(input, { baseDir });
+    const record = recordScaffoldedApp({
+      chatId: chat.id,
+      projectId: chat.projectId,
+      agentId: chat.agentId,
+      surfaceId: input.surfaceId,
+      actionId: input.actionId,
+      manifest: input.manifest,
+      scaffold: result,
+    });
+    return { ...result, record };
+  });
+  ipcMain.handle("appFactory:runAutopilot", async (_e, input: AppFactoryAutopilotRequest) => {
+    const result = await runAppFactoryAutopilot(input);
+    recordAppFactoryOperation(
+      result.rootPath,
+      "run-autopilot",
+      result.status === "operated",
+      result,
+      result.status === "operated" ? "tool-published" : result.smoke?.ok === false ? "smoke-failed" : "operations-ready",
+    );
+    return result;
+  });
+  ipcMain.handle("appFactory:installMcpPlan", async (_e, input: AppFactoryRootRequest) => {
+    const result = await installMcpPlan(input);
+    recordAppFactoryOperation(result.rootPath, "install-mcp", true, result, "mcp-ready");
+    return result;
+  });
+  ipcMain.handle("appFactory:runProviderTasks", async (_e, input: AppFactoryRootRequest) => {
+    const result = await runProviderTasks(input);
+    recordAppFactoryOperation(result.rootPath, "run-provider-tasks", true, result, "operations-ready");
+    return result;
+  });
+  ipcMain.handle("appFactory:materializeAssets", async (_e, input: AppFactoryAssetMaterializeRequest) => {
+    const result = await materializeCatalogAssets(input);
+    recordAppFactoryOperation(result.rootPath, "materialize-assets", true, result, "operations-ready");
+    return result;
+  });
+  ipcMain.handle("appFactory:activateLocalCommerceStack", async (_e, input: AppFactoryLocalCommerceActivationRequest) => {
+    const result = await activateLocalCommerceStack(input);
+    recordAppFactoryOperation(result.rootPath, "activate-local-commerce-stack", true, result, "operations-ready");
+    return result;
+  });
+  ipcMain.handle("appFactory:openProviderBrowser", async (_e, input: AppFactoryRootRequest) => {
+    const result = await prepareProviderBrowserOpen(input);
+    for (const plan of result.opened) {
+      await shell.openExternal(plan.startUrl);
+    }
+    recordAppFactoryOperation(result.rootPath, "open-provider-browser", true, result, "operations-ready");
+    return result;
+  });
+  ipcMain.handle("appFactory:captureProviderBrowserSessions", async (_e, input: AppFactoryProviderBrowserSessionRequest) => {
+    const result = await captureProviderBrowserSessions(input);
+    recordAppFactoryOperation(result.rootPath, "capture-provider-browser-sessions", true, result, "operations-ready");
+    return result;
+  });
+  ipcMain.handle("appFactory:launchProviderBrowserSession", async (_e, input: AppFactoryProviderBrowserLaunchRequest) => {
+    const result = await launchProviderBrowserSession(input);
+    recordAppFactoryOperation(result.rootPath, "launch-provider-session", result.ok, result, "operations-ready");
+    return result;
+  });
+  ipcMain.handle("appFactory:syncProviderBrowserResults", async (_e, input: AppFactoryProviderBrowserResultSyncRequest) => {
+    const result = await syncProviderBrowserResults(input);
+    recordAppFactoryOperation(result.rootPath, "sync-provider-browser-results", true, result, "operations-ready");
+    return result;
+  });
+  ipcMain.handle("appFactory:resolveProviderCredentials", async (_e, input: AppFactoryProviderCredentialResolveRequest) => {
+    const result = await resolveProviderCredentials(input);
+    recordAppFactoryOperation(result.rootPath, "resolve-provider-credentials", true, result, "operations-ready");
+    return result;
+  });
+  ipcMain.handle("appFactory:approveProviderPayment", async (_e, input: AppFactoryProviderPaymentApproveRequest) => {
+    const result = await approveProviderPayment(input);
+    recordAppFactoryOperation(result.rootPath, "approve-provider-payment", true, result, "operations-ready");
+    return result;
+  });
+  ipcMain.handle("appFactory:runSmoke", async (_e, input: AppFactoryRootRequest) => {
+    const result = await runAppFactorySmoke(input);
+    recordAppFactoryOperation(
+      result.rootPath,
+      "run-smoke-test",
+      result.ok,
+      result,
+      result.ok ? "smoke-passed" : "smoke-failed",
+    );
+    return result;
+  });
+  ipcMain.handle("appFactory:preparePreview", async (_e, input: AppFactoryRootRequest) => {
+    const result = await preparePreviewDeploy(input);
+    recordAppFactoryOperation(result.rootPath, "deploy-preview", true, result, "preview-ready");
+    return result;
+  });
+  ipcMain.handle("appFactory:publishAsTool", async (_e, input: AppFactoryRootRequest) => {
+    const result = await publishAppAsTool(input);
+    recordAppFactoryOperation(result.rootPath, "publish-as-tool", true, result, "tool-published");
+    return result;
+  });
+  ipcMain.handle("appFactory:archive", async (_e, input: AppFactoryRootRequest) => {
+    const appRecord = getAgentAppByRoot(path.resolve(input.rootPath));
+    if (!appRecord) throw new Error(`Generated app not found: ${input.rootPath}`);
+    const result = await archiveAppPackage(input);
+    return recordAgentAppOperation(appRecord.id, "archive", true, result, "archived");
+  });
+  ipcMain.handle("appFactory:restore", async (_e, input: AppFactoryRootRequest) => {
+    const appRecord = getAgentAppByRoot(path.resolve(input.rootPath));
+    if (!appRecord) throw new Error(`Generated app not found: ${input.rootPath}`);
+    const result = await restoreAppPackage(input);
+    return recordAgentAppOperation(appRecord.id, "restore", true, result, "restored");
+  });
+  ipcMain.handle("appFactory:listApps", (_e, chatId?: string) => listAgentApps(chatId));
+  ipcMain.handle("appFactory:getApp", (_e, id: string) => getAgentApp(id));
+  ipcMain.handle("appFactory:getAppBySurface", (_e, chatId: string, surfaceId: string) =>
+    getAgentAppBySurface(chatId, surfaceId),
+  );
+  ipcMain.handle("appFactory:listOperations", (_e, appId: string) =>
+    listAgentAppOperations(appId),
+  );
+
+  // ── Meta Agent Factory (local team materialization) ─────
+  ipcMain.handle("metaAgent:createCommerceTeam", (_e, input: MetaAgentTeamFactoryRequest) =>
+    createCommerceAgentTeam(input),
+  );
+
+  // ── Tool Factory (agent-made local tools) ───────────────
+  ipcMain.handle("toolFactory:scaffold", async (_e, input: ToolFactoryScaffoldRequest) => {
+    const chat = getChat(input.chatId);
+    if (!chat) throw new Error(`Chat not found: ${input.chatId}`);
+    const project = chat.projectId ? getProject(chat.projectId) : null;
+    const baseDir =
+      getChatWorkingFolder(chat.id) ??
+      project?.folderPath ??
+      path.join(app.getPath("userData"), "generated-tools");
+    const result = await scaffoldAgentTool(input, { baseDir });
+    const record = recordScaffoldedTool({
+      chatId: chat.id,
+      projectId: chat.projectId,
+      agentId: chat.agentId,
+      surfaceId: input.surfaceId,
+      actionId: input.actionId,
+      scaffold: result,
+    });
+    return { ...result, record };
+  });
+  ipcMain.handle("toolFactory:runSmoke", async (_e, input: ToolFactoryRootRequest) => {
+    const result = await runToolFactorySmoke(input);
+    recordToolFactoryOperation(
+      result.rootPath,
+      "run-smoke-test",
+      result.ok,
+      result,
+      result.ok ? "smoke-passed" : "smoke-failed",
+    );
+    return result;
+  });
+  ipcMain.handle("toolFactory:installMcp", async (_e, input: ToolFactoryRootRequest) => {
+    const result = await installToolMcp(input);
+    recordToolFactoryOperation(
+      result.rootPath,
+      "install-mcp",
+      true,
+      result,
+      "mcp-installed",
+      result.server.id,
+    );
+    return result;
+  });
+  ipcMain.handle("toolFactory:archive", async (_e, input: ToolFactoryRootRequest) => {
+    const toolRecord = getAgentToolByRoot(path.resolve(input.rootPath));
+    if (!toolRecord) throw new Error(`Generated tool not found: ${input.rootPath}`);
+    const result = await archiveToolPackage(input);
+    return recordAgentToolOperation(toolRecord.id, "archive", true, result, "archived", null);
+  });
+  ipcMain.handle("toolFactory:restore", async (_e, input: ToolFactoryRootRequest) => {
+    const toolRecord = getAgentToolByRoot(path.resolve(input.rootPath));
+    if (!toolRecord) throw new Error(`Generated tool not found: ${input.rootPath}`);
+    const result = await restoreToolPackage(input);
+    return recordAgentToolOperation(
+      toolRecord.id,
+      "restore",
+      true,
+      result,
+      "restored",
+      result.restoredServerId,
+    );
+  });
+  ipcMain.handle("toolFactory:listTools", (_e, chatId?: string) => listAgentTools(chatId));
+  ipcMain.handle("toolFactory:getTool", (_e, id: string) => getAgentTool(id));
+  ipcMain.handle(
+    "toolFactory:getToolBySurface",
+    (_e, chatId: string, surfaceId: string, requestedToolId?: string) =>
+      getAgentToolBySurface(chatId, surfaceId, requestedToolId),
+  );
+  ipcMain.handle("toolFactory:listOperations", (_e, toolRecordId: string) =>
+    listAgentToolOperations(toolRecordId),
+  );
 
   // ── migration (OpenClaw / Hermes → Agentlas) ────────────
   ipcMain.handle("migration:scan", () => scanMigrationSources());
