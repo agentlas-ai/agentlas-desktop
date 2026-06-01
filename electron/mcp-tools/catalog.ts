@@ -209,7 +209,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     category: "web",
     transport: "stdio",
     command: "npx",
-    args: ["-y", "@playwright/mcp@latest"],
+    // --user-data-dir: 영속 프로파일(persistent context). 매번 새 임시 브라우저(쿠키·로그인 날아감)
+    // 대신 디스크의 프로파일로 띄워, 한 번 로그인하면 다음 실행에도 세션이 유지된다(expandHome가 ~ 확장).
+    args: ["-y", "@playwright/mcp@latest", "--user-data-dir", "~/.agentlas/browser-profile"],
     trust: "official",
     docsUrl: "https://github.com/microsoft/playwright-mcp",
     brandColor: "#2EAD33",
