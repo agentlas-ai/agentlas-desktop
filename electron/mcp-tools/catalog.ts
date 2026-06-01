@@ -243,6 +243,53 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
       },
     ],
   },
+  // ── 디자인 (AI 티 안 나는 production-grade 산출물) ──────────
+  {
+    id: "lazyweb",
+    name: "Lazyweb 디자인",
+    nameEn: "Lazyweb Design",
+    description:
+      "257k+ 실제 앱 화면 기반 디자인 리서치 — 레퍼런스·경쟁분석·웹사이트 디자인 토큰 추출. 'evidence, not vibes'로 AI 티 안 나는 디자인.",
+    descriptionEn:
+      "Design research over 257k+ real app screens — references, competitive analysis, design-token extraction. Evidence, not vibes.",
+    category: "web",
+    transport: "stdio",
+    command: "npx",
+    // 원격 streamable-HTTP MCP(https://www.lazyweb.com/mcp)를 mcp-remote로 stdio 브리지.
+    args: ["-y", "mcp-remote", "https://www.lazyweb.com/mcp"],
+    trust: "community",
+    docsUrl: "https://github.com/aboul3ata/lazyweb-skill",
+    setupUrl: "https://www.lazyweb.com/mcp-install",
+    brandColor: "#0B0B0B",
+    mark: "Lz",
+    envRequirements: [
+      {
+        key: "LAZYWEB_MCP_TOKEN",
+        label: "Lazyweb 토큰",
+        labelEn: "Lazyweb token",
+        required: true,
+        hint: "lazyweb.com/mcp-install에서 무료 발급(가입 불필요)",
+        hintEn: "Free token at lazyweb.com/mcp-install",
+      },
+    ],
+  },
+  {
+    id: "shadcn",
+    name: "shadcn/ui 컴포넌트",
+    nameEn: "shadcn/ui Components",
+    description: "6,000+ 프로덕션급 UI 컴포넌트/블록을 자연어로 검색·설치 (Radix + Tailwind).",
+    descriptionEn: "Search & install 6,000+ production-grade UI components/blocks (Radix + Tailwind).",
+    category: "dev",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "shadcn@latest", "mcp"],
+    trust: "official",
+    docsUrl: "https://ui.shadcn.com/docs/mcp",
+    setupUrl: "https://ui.shadcn.com/",
+    brandColor: "#000000",
+    mark: "sh",
+    envRequirements: [],
+  },
 ];
 
 export function getCatalogEntry(id: string): McpToolCatalogEntry | null {

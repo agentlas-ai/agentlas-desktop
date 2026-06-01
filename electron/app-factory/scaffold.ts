@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { buildDesignCss } from "../surface-design";
 import type {
   AgentlasSurfaceAppRoute,
   AgentlasSurfaceConnectorSpec,
@@ -568,9 +569,7 @@ function htmlPreview(
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>${html(ctx.appName)}</title>
     <style>
-      :root { color-scheme: light; --ink:#151513; --muted:#626963; --paper:#f7f8f5; --panel:#fffefa; --line:#dfe3dc; --accent:#2957ff; --teal:#0f766e; --coral:#d85c4a; --mint:#dff8e8; --sky:#e7f0ff; --soft:#eef5ff; --ok:#0f766e; --warn:#a16207; --risk:#be123c; --dark:#141414; }
-      * { box-sizing: border-box; }
-      body { margin: 0; font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--paper); color: var(--ink); }
+      ${buildDesignCss()}
       .cockpit { min-height: 680px; display: grid; grid-template-columns:minmax(0,0.95fr) minmax(420px,1.05fr); gap: clamp(22px, 4vw, 56px); align-items: center; padding: clamp(28px, 5vw, 64px); background: radial-gradient(circle at 82% 18%, rgba(41,87,255,0.28), transparent 28%), radial-gradient(circle at 18% 86%, rgba(216,92,74,0.22), transparent 32%), linear-gradient(135deg, #101010, #17231d 56%, #10222a); color: white; }
       .hero-copy { display:grid; gap:18px; min-width:0; }
       .eyebrow { width:max-content; max-width:100%; color:#a7f3d0; background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.18); border-radius:999px; padding:7px 10px; font-size:12px; font-weight:900; text-transform:uppercase; }
@@ -978,9 +977,7 @@ function routePageHtml(
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>${html(pageTitle)} - ${html(ctx.appName)}</title>
     <style>
-      :root { color-scheme: light; --ink:#171715; --muted:#606963; --paper:#f7f8f5; --white:#fffefa; --line:#dfe3dc; --field:#eef3ed; --green:#167052; --blue:#2957ff; --rose:#c04463; --gold:#94630c; --risk:#be123c; }
-      * { box-sizing: border-box; }
-      body { margin:0; font:14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--paper); color:var(--ink); }
+      ${buildDesignCss()}
       .top { display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:24px; align-items:end; padding:30px clamp(18px, 4vw, 48px) 24px; border-bottom:1px solid var(--line); background:linear-gradient(115deg, #fffefa 0%, #fffefa 52%, #e7f0ff 52.2%, #e6f7ee 100%); }
       .eyebrow { margin:0 0 8px; width:max-content; max-width:100%; border-radius:999px; padding:5px 9px; background:#e7f6ed; color:var(--green); font-size:11px; font-weight:950; text-transform:uppercase; }
       h1 { margin:0; font-size:clamp(34px, 5vw, 72px); line-height:0.92; letter-spacing:0; }
