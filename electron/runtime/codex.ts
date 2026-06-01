@@ -9,10 +9,11 @@ import fs from "node:fs/promises";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
-import { agentRunCwd, probeCliVersion, spawnCli } from "./exec";
+import { agentRunCwd, probeCliVersion, spawnCli, writeStdin } from "./exec";
 
 const CANDIDATES = [
   "codex",
+  path.join(os.homedir(), ".local/bin/codex"), // 네이티브 인스톨러 기본 위치
   path.join(os.homedir(), ".codex/bin/codex"),
   "/opt/homebrew/bin/codex",
   "/usr/local/bin/codex",
@@ -85,7 +86,10 @@ function permissionArgs(permission?: RunnerRequest["permission"]): string[] {
     // setup flows, confirmation prompts break the "do it for me" contract.
     return ["--dangerously-bypass-approvals-and-sandbox"];
   }
-  return ["--sandbox", "read-only", "--ask-for-approval", "never"];
+  // `codex exec`는 비대화형이라 approval loop가 없다 — 승인 플래그를 받지 않는다.
+  // (`--ask-for-approval`은 대화형 `codex` 전용. exec에 넘기면 0.133+에서
+  //  `unexpected argument` 로 exit 2.) read 권한은 read-only 샌드박스로 충분.
+  return ["--sandbox", "read-only"];
 }
 
 export const runCodex: Runner = async (
@@ -113,12 +117,15 @@ export const runCodex: Runner = async (
   return new Promise<RunnerResult>((resolve, reject) => {
     // codex CLI의 비대화형 실행 모드 — exec 서브명령.
     // --skip-git-repo-check: cwd가 git 레포가 아니어도 실행 ("not inside a trusted directory" 방지).
-    const child = spawnCli(bin, ["exec", "--skip-git-repo-check", ...permArgs, ...mcpArgs, prompt], {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+    // 프롬프트는 argv가 아니라 stdin으로 전달 — `-`는 "stdin에서 읽어라" sentinel.
+    // (Windows cmd.exe 8191자 한계로 큰 프롬프트가 잘려 exit 1 나는 것 방지. writeStdin 참고.)
+    const child = spawnCli(bin, ["exec", "--skip-git-repo-check", ...permArgs, ...mcpArgs, "-"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: req.env ?? process.env,
       // 사용자가 지정한 프로젝트 폴더에서 실행 — 미지정이면 전용 폴더.
       cwd: req.cwd ?? agentRunCwd(),
     });
+    writeStdin(child, prompt);
 
     // 취소 — Stop 누르면 자식 프로세스 종료.
     const onAbort = () => child.kill();

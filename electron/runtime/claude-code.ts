@@ -9,10 +9,11 @@ import fs from "node:fs/promises";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
-import { agentRunCwd, probeCliVersion, spawnCli } from "./exec";
+import { agentRunCwd, probeCliVersion, spawnCli, writeStdin } from "./exec";
 
 const CANDIDATES = [
   "claude",
+  path.join(os.homedir(), ".local/bin/claude"), // 네이티브 인스톨러 기본 위치
   path.join(os.homedir(), ".claude/local/claude"),
   "/opt/homebrew/bin/claude",
   "/usr/local/bin/claude",
@@ -177,14 +178,26 @@ export const runClaudeCode: Runner = async (
       ? ["--allowedTools", req.mcpAllowedTools.join(",")]
       : [];
 
+  // 시스템 프롬프트(Agentlas 헤더+스킬+프로토콜만 ~24KB)는 argv가 아니라 파일로 전달한다.
+  // Windows에서 claude는 `.cmd` 심 → cmd.exe로 실행되고 커맨드라인은 ~8191자 한계라,
+  // `--append-system-prompt`에 24KB를 실으면 잘려서 exit 1. `--append-system-prompt-file`은
+  // 경로만 넘기므로 안전. 사용자 프롬프트(+히스토리)는 stdin으로 보낸다(`-p`는 stdin을 읽음).
+  const sysPromptFile = path.join(
+    os.tmpdir(),
+    `agentlas-claude-sys-${process.pid}-${Date.now()}.txt`,
+  );
+  await fs.writeFile(sysPromptFile, systemPrompt, "utf8");
+  const cleanupSysFile = () => {
+    void fs.unlink(sysPromptFile).catch(() => {});
+  };
+
   return new Promise<RunnerResult>((resolve, reject) => {
     // stream-json + verbose: tool_use / 텍스트 / 토큰(usage) 이벤트를 NDJSON으로 받아
     // Claude Code식 tool-use 블록 + 토큰 표시를 가능하게 한다.
     const args = [
       "-p",
-      flatUser,
-      "--append-system-prompt",
-      systemPrompt,
+      "--append-system-prompt-file",
+      sysPromptFile,
       "--output-format",
       "stream-json",
       "--verbose",
@@ -195,12 +208,13 @@ export const runClaudeCode: Runner = async (
       ...allowedToolArgs,
     ];
     const child = spawnCli(bin, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: req.env ?? process.env,
       // 사용자가 워킹 폴더(프로젝트)를 지정했으면 거기서 실행 — 빌드/파일 생성이 프로젝트에 일어난다.
       // 미지정이면 쓰기 가능한 전용 폴더(packaged 앱은 cwd가 비쓰기/루트라 claude가 exit 1).
       cwd: req.cwd ?? agentRunCwd(),
     });
+    writeStdin(child, flatUser);
 
     // 취소 — 사용자가 Stop을 누르면 자식 프로세스 종료. 병렬 세션 각각 독립 취소.
     const onAbort = () => child.kill();
@@ -266,8 +280,12 @@ export const runClaudeCode: Runner = async (
       stderr += chunk.toString("utf8");
     });
 
-    child.on("error", (err) => reject(err));
+    child.on("error", (err) => {
+      cleanupSysFile();
+      reject(err);
+    });
     child.on("close", (code) => {
+      cleanupSysFile();
       req.signal?.removeEventListener("abort", onAbort);
       if (req.signal?.aborted) {
         reject(new Error(tStatus(req.locale, "aborted")));

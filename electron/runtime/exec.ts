@@ -7,16 +7,79 @@
 import crossSpawn from "cross-spawn";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { app } from "electron";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 
-/** child_process.spawn 대체 — Windows `.cmd`/`.bat` 심을 해석한다. */
+/**
+ * 패키지된 GUI 앱(Finder/Dock 실행)은 로그인 셸의 PATH를 상속받지 못해 PATH가
+ * 최소(`/usr/bin:/bin:/usr/sbin:/sbin`)다. 그 결과 (1) bare 커맨드(claude/codex/gemini)
+ * 감지가 실패하고, (2) node 기반 CLI(codex.js/gemini.js)가 셰뱅의 `env node`로 node를
+ * 못 찾아 죽는다. 흔한 CLI/런타임 bin 디렉터리를 PATH 뒤에 덧붙여 둘 다 해결한다.
+ * 기존 PATH 항목이 우선순위를 유지하도록 append(prepend 아님).
+ */
+function cliSearchDirs(): string[] {
+  if (process.platform === "win32") {
+    return [
+      path.join(process.env.APPDATA ?? "", "npm"),
+      path.join(process.env.LOCALAPPDATA ?? "", "npm"),
+    ].filter(Boolean);
+  }
+  const home = os.homedir();
+  return [
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/bin",
+    path.join(home, ".local/bin"), // 네이티브 인스톨러: claude/codex/gemini
+    path.join(home, ".codex/bin"),
+    path.join(home, ".claude/local"),
+    path.join(home, ".gemini/bin"),
+    path.join(home, ".bun/bin"),
+    path.join(home, ".volta/bin"),
+    path.join(home, ".nvm/current/bin"),
+  ];
+}
+
+/** base 환경의 PATH 뒤에 흔한 CLI/node bin 디렉터리를 덧붙인 새 env 반환. */
+export function withCliPath(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const sep = path.delimiter;
+  // Windows는 환경변수 키가 대소문자 무관 — 실제 키 이름을 찾아 그대로 갱신한다.
+  const pathKey =
+    Object.keys(base).find((k) => k.toLowerCase() === "path") ?? "PATH";
+  const existing = (base[pathKey] ?? "").split(sep).filter(Boolean);
+  const have = new Set(existing);
+  const extras = cliSearchDirs().filter((d) => d && !have.has(d));
+  if (extras.length === 0) return base;
+  return { ...base, [pathKey]: [...existing, ...extras].join(sep) };
+}
+
+/** child_process.spawn 대체 — Windows `.cmd`/`.bat` 심 해석 + GUI용 PATH 보강. */
 export function spawnCli(
   command: string,
   args: string[],
   options: SpawnOptions,
 ): ChildProcess {
-  return crossSpawn(command, args, options);
+  return crossSpawn(command, args, {
+    ...options,
+    env: withCliPath(options.env ?? process.env),
+  });
+}
+
+/**
+ * 큰 프롬프트를 커맨드라인 인자가 아니라 자식 stdin으로 전달한다.
+ * Windows에서 CLI는 `.cmd` 심 → cmd.exe로 실행되는데, cmd.exe 커맨드라인은
+ * ~8191자 한계 + 인자 내 개행 불가다. Agentlas 시스템 프롬프트만 ~24KB라
+ * 큰 프롬프트를 argv로 넘기면 잘려서 CLI가 exit 1로 죽는다(= "Windows에서만 안 됨").
+ * stdin은 이 한계를 받지 않는다(macOS/Linux도 동일하게 안전).
+ * 자식이 stdin을 다 읽기 전에 종료하면 EPIPE가 나는데 무시한다.
+ */
+export function writeStdin(child: ChildProcess, payload: string): void {
+  const stdin = child.stdin;
+  if (!stdin) return;
+  stdin.on("error", () => {});
+  stdin.write(payload);
+  stdin.end();
 }
 
 /**
@@ -54,6 +117,7 @@ export function probeCliVersion(command: string, timeoutMs = 3000): Promise<stri
 
     const child = crossSpawn(command, ["--version"], {
       stdio: ["ignore", "pipe", "pipe"],
+      env: withCliPath(process.env),
     });
 
     const timer = setTimeout(() => {
