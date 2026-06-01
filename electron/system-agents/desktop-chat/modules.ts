@@ -1,13 +1,11 @@
 // 데스크톱 chat 에이전트의 온디맨드 모듈 — surface / connection / automation.
 // 키워드/description = 디스커버리 신호(트리거 신뢰도를 좌우하므로 강신호만, ko+en).
-// load(): consolidation 후 실제 상수로 1줄 연결(아래 WIRE 주석). 지금은 다른 세션 WIP가
-// 해당 파일(surface-emitter.ts 등)을 점유 중이라 placeholder로 둔다(충돌 0, 라우팅은 완전 동작).
+// load(): 실제 무거운 블록 상수를 지연 반환(선택됐을 때만). 이게 (b) 온디맨드의 핵심 —
+// 평소엔 컨텍스트를 안 먹고, 의도가 잡힐 때만 16KB/7KB 블록이 들어간다.
 import type { OnDemandModule } from "../types";
-
-function pending(name: string, source: string): string {
-  // WIRE: consolidation 후 `return SOURCE_CONST;` 로 교체.
-  return `[on-demand module "${name}" — wire to ${source} on consolidation]`;
-}
+import { SURFACE_PROTOCOL } from "../../surface-emitter";
+import { GLOBAL_CONNECTION_SKILL } from "../../runtime/global-skill";
+import { AUTOMATION_PROTOCOL } from "../../automation-emitter";
 
 export const SURFACE_MODULE: OnDemandModule = {
   id: "surface",
@@ -19,8 +17,7 @@ export const SURFACE_MODULE: OnDemandModule = {
   ],
   description:
     "Emit an interactive surface manifest (dashboard / service-app / operating OS) when the result is better as a reusable mini-app than plain text. Carries widgets, actions, capabilities, delegation, budget.",
-  // WIRE: return SURFACE_PROTOCOL from electron/surface-emitter.ts
-  load: () => pending("surface", "SURFACE_PROTOCOL (surface-emitter.ts)"),
+  load: () => SURFACE_PROTOCOL,
 };
 
 export const CONNECTION_MODULE: OnDemandModule = {
@@ -33,8 +30,7 @@ export const CONNECTION_MODULE: OnDemandModule = {
   ],
   description:
     "Hand-hold a non-technical user through signing up / logging in / creating API keys for a third-party provider via the browser, then store credentials in the vault.",
-  // WIRE: return GLOBAL_CONNECTION_SKILL from electron/runtime/global-skill.ts
-  load: () => pending("connection", "GLOBAL_CONNECTION_SKILL (runtime/global-skill.ts)"),
+  load: () => GLOBAL_CONNECTION_SKILL,
 };
 
 export const AUTOMATION_MODULE: OnDemandModule = {
@@ -47,8 +43,7 @@ export const AUTOMATION_MODULE: OnDemandModule = {
   ],
   description:
     "Register a recurring scheduled automation (## Automation block) that re-runs this agent on a cadence.",
-  // WIRE: return AUTOMATION_PROTOCOL from electron/automation-emitter.ts
-  load: () => pending("automation", "AUTOMATION_PROTOCOL (automation-emitter.ts)"),
+  load: () => AUTOMATION_PROTOCOL,
 };
 
 export const DESKTOP_CHAT_MODULES: OnDemandModule[] = [
