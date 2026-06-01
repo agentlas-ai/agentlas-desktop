@@ -61,6 +61,24 @@ chat agent these are the heavy blocks: `SURFACE_PROTOCOL` (~16KB),
 5. **Measure miss-rate** (loaded vs expected) as the operating KPI; retune
    descriptions when under/over-trigger appears.
 
+## Two-pass model-judged gating (for capabilities users don't name)
+
+Keyword/BM25 gating fails for capabilities the user never says explicitly — e.g.
+nobody types "make a dashboard", yet a surface is often the better output. For those,
+don't gate on user words; gate on the **model's judgment**:
+
+1. Core always carries a tiny intent HINT (e.g. `SURFACE_INTENT_HINT` in `runner.ts`):
+   "if this is better as an interactive surface AND recurring/operational, reply with
+   exactly `<<surface-intent>>`; for one-offs, just answer."
+2. The dispatch (`mcp/client.ts`) detects the marker and re-invokes **once** with a force
+   flag (`forceSurface`) that makes `wrapSystemPrompt` inject the full heavy block.
+3. A generous keyword fast-path (threshold ~0.4) still short-circuits obvious requests
+   to a single pass.
+
+This is the confidence-gated fallback: plain chat stays minimal, the wow-moment fires on
+model judgment (not wording), and the one-off vs recurring decision is the model's.
+Use this for any capability whose under-trigger is costly but whose trigger isn't a keyword.
+
 ## Provider portability
 
 - **claude**: may additionally use native Tool Search (`defer_loading: true`) for MCP tools.
@@ -69,18 +87,21 @@ chat agent these are the heavy blocks: `SURFACE_PROTOCOL` (~16KB),
   (claude prefix cache, codex input cache + session resume) is a bonus on top, never
   the foundation — because it is not uniform across providers.
 
-## Inventory (to be migrated onto the backbone)
+## Inventory & status
 
-- **Web** (`AgentsAtlas/app`): one system agent — the meta-agent
-  (`src/lib/draft/meta-agent.ts`); `knowledge.md` (20 sections) is the prime
-  on-demand candidate.
-- **App + Terminal** (this repo): memory system agents (`architecture/manifest.ts`:
-  memory-curator / pm-soul / task-bias + `MEMORY_EMITTER_BLOCK`) and the
-  **Surface Builder** (`surface-emitter.ts` + `app-factory/` + `tool-factory/` +
-  `agent-os/` + packs). Current always-on injection is ~26KB/turn; target is core-only
-  for plain chat with heavy blocks loaded on intent.
-
-> Status: backbone (`electron/system-agents/`) is implemented and routing-tested
-> (`scripts/test-system-agent-routing.cjs`, 5/5). Wiring the existing agents onto it
-> is pending consolidation of in-flight work in `surface-emitter.ts` / `runner.ts` /
-> `client.ts` / `architecture/`.
+- **desktop-chat** (`electron/system-agents/desktop-chat/`) — DONE & live. Core (identity,
+  safety, ASK contract, capability hints) + on-demand `surface` / `connection` / `automation`
+  modules. `wrapSystemPrompt` gates `SURFACE_PROTOCOL` (~16KB) via keyword fast-path + the
+  two-pass marker above. Result: plain chat ~9.8KB vs ~24.6KB always-on (live, 5 runners),
+  surface turns load the full spec on demand. `CONNECTION_SKILL` stays in core (under-trigger
+  on it is a dead-end). Routing/gating tested: `scripts/test-system-agent-routing.cjs`.
+- **Surface Builder** (`surface-emitter.ts` + `app-factory/` + `tool-factory/` + `agent-os/`
+  + packs + `electron/surface-design/`) — design layer added: `buildDesignCss()` (production
+  tokens + `ds-*` components, light/dark/brand) replaces ad-hoc inline CSS; `lazyweb` +
+  `shadcn` MCP registered in the catalog; persistent browser profile + captcha human-in-the-
+  loop baked into core. Remaining: generated-tool auto-registration to the active runtime.
+- **Pending migration onto the backbone** (same pattern, lower urgency — small prompts):
+  memory system agents (`architecture/manifest.ts`: memory-curator / pm-soul / task-bias)
+  and the **web meta-agent** (`AgentsAtlas/app/src/lib/draft/meta-agent.ts`; `knowledge.md`
+  20 sections → on-demand modules). The connection provider catalog (`CONNECTION_PROVIDER_HINTS`,
+  ~3KB) is a good next on-demand split (load per provider named).
