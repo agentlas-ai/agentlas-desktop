@@ -769,6 +769,24 @@ export function registerIpcHandlers(): void {
       result,
       result.ok ? "smoke-passed" : "smoke-failed",
     );
+    // 자동등록(REQ2): smoke가 통과하면 생성된 툴의 MCP 어댑터를 즉시 등록한다 → 에이전트가
+    // 다음 턴부터 사용자 추가 클릭 없이 바로 호출 가능(buildMcpConfigFile이 .mcp.json으로 직렬화).
+    // installToolMcp는 멱등(이미 설치돼 있으면 재사용)이라 중복 호출도 안전.
+    if (result.ok) {
+      try {
+        const installed = await installToolMcp({ rootPath: result.rootPath });
+        recordToolFactoryOperation(
+          result.rootPath,
+          "install-mcp",
+          true,
+          installed,
+          "mcp-installed",
+          installed.server.id,
+        );
+      } catch (err) {
+        console.error("[tool-factory] auto-install after smoke failed:", err);
+      }
+    }
     return result;
   });
   ipcMain.handle("toolFactory:installMcp", async (_e, input: ToolFactoryRootRequest) => {
