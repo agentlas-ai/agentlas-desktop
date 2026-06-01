@@ -63,7 +63,7 @@ async function getBin(): Promise<string | null> {
 }
 
 function buildPrompt(req: RunnerRequest): string {
-  const sys = wrapSystemPrompt(req.systemPrompt, req.locale, req.permission, req.userPrompt);
+  const sys = wrapSystemPrompt(req.systemPrompt, req.locale, req.permission, req.userPrompt, req.forceSurface);
   const user = tStatus(req.locale, "speakerUser");
   const assistant = tStatus(req.locale, "speakerAssistant");
   const parts: string[] = [`[SYSTEM]\n${sys}`, ""];

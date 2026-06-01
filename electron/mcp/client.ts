@@ -47,7 +47,7 @@ import {
   runUpstageByok,
 } from "../runtime/byok";
 import { runOllama } from "../runtime/ollama";
-import type { Runner } from "../runtime/runner";
+import { type Runner, SURFACE_INTENT_MARKER } from "../runtime/runner";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
 import type {
   Chat,
@@ -459,41 +459,48 @@ export async function runMcpInvocation(
   sink({ kind: "thinking", status: tStatus(locale, "thinking", { agent: agent.name }) });
 
   try {
-    const result = await picked.runner(
-      {
-        systemPrompt,
-        history,
-        userPrompt: req.userPrompt,
-        images: req.images,
-        backendLabel: picked.label,
-        model: active.model ?? undefined,
-        longContext: active.longContextEnabled ?? false,
-        effort: active.effort ?? undefined,
-        signal,
-        permission: req.permissions,
-        // 세션 resume 키 — codex가 (chatId, kind)별 CLI 세션을 재사용해
-        // 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
-        chatId: chat.id,
-        mcpConfigPath,
-        mcpAllowedTools,
-        mcpCodexConfigArgs,
-        env: runnerEnv.env,
-        // 사용자가 지정한 워킹 폴더(프로젝트)에서 에이전트를 실행 — 빌드/파일 생성이 거기서 일어난다.
-        // 활성화(2회 방문) 게이팅과 무관하게, 폴더가 지정돼 있으면 즉시 cwd로 사용한다.
-        cwd: workingFolder ?? undefined,
-        locale,
-      },
-      {
-        onStatus: (status) => sink({ kind: "tool-use", status }),
-        onPartial: (text) => sink({ kind: "partial", text }),
-        // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
-        onTool: (name, args) => sink({ kind: "tool-use", tool: { name, args } }),
-      },
-    );
+    const runnerReq = {
+      systemPrompt,
+      history,
+      userPrompt: req.userPrompt,
+      images: req.images,
+      backendLabel: picked.label,
+      model: active.model ?? undefined,
+      longContext: active.longContextEnabled ?? false,
+      effort: active.effort ?? undefined,
+      signal,
+      permission: req.permissions,
+      // 세션 resume 키 — codex가 (chatId, kind)별 CLI 세션을 재사용해
+      // 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
+      chatId: chat.id,
+      mcpConfigPath,
+      mcpAllowedTools,
+      mcpCodexConfigArgs,
+      env: runnerEnv.env,
+      // 사용자가 지정한 워킹 폴더(프로젝트)에서 에이전트를 실행 — 빌드/파일 생성이 거기서 일어난다.
+      // 활성화(2회 방문) 게이팅과 무관하게, 폴더가 지정돼 있으면 즉시 cwd로 사용한다.
+      cwd: workingFolder ?? undefined,
+      locale,
+    };
+    const runnerEvents = {
+      onStatus: (status: string) => sink({ kind: "tool-use", status }),
+      onPartial: (text: string) => sink({ kind: "partial", text }),
+      // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
+      onTool: (name: string, args?: string) => sink({ kind: "tool-use", tool: { name, args } }),
+    };
+    let result = await picked.runner(runnerReq, runnerEvents);
+
+    // 2차 패스(모델 판단 surface 게이트): 1차에서 무거운 SURFACE_PROTOCOL을 안 줬는데 모델이
+    // "이건 surface가 낫다"고 판단해 마커만 냈으면 → 풀 프로토콜을 강제 주입(forceSurface)하고 재호출.
+    // 사용자가 "대시보드"라 말 안 해도 와우모먼트가 뜬다(키워드 의존 X). 단순/일회성은 마커가 안 와 1패스로 끝.
+    if (chat.kind !== "division" && result.text.trim().includes(SURFACE_INTENT_MARKER)) {
+      sink({ kind: "thinking", status: tStatus(locale, "thinking", { agent: agent.name }) });
+      result = await picked.runner({ ...runnerReq, forceSurface: true }, runnerEvents);
+    }
 
     // 항상-켜진 큐레이터: 답변 끝의 "## Memory Events" 블록을 파싱해 안전·스코프·중복 처리 후
     // 내구 메모리에 기록하고, 사용자에게 보이는 텍스트에서는 그 블록을 제거한다(추가 LLM 호출 없음).
-    let displayText = result.text;
+    let displayText = result.text.split(SURFACE_INTENT_MARKER).join("").trim();
     // 에이전트가 "## Automation" 블록을 넣었으면 → 현재 chat의 타깃(firm/agent)으로 자동화 등록 + 블록 제거.
     // (백그라운드 automation 실행 세션은 제외 → 자동화가 자동화를 만드는 재귀 방지)
     if (chat.kind !== "division") {
