@@ -206,7 +206,7 @@ export default function LibraryAgentsPage() {
               <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
                 {t("library.agents.drop_hint")}
               </div>
-              <Link href="/marketplace" style={{ color: "var(--accent)", fontWeight: 600 }}>
+              <Link href="/apps" style={{ color: "var(--accent)", fontWeight: 600 }}>
                 {t("sidebar.marketplace")} →
               </Link>
             </div>

@@ -374,6 +374,10 @@ export interface McpInvocationRequest {
   locale?: "ko" | "en";
   /** 도구 사용 권한 수준 (ChatInput 권한 칩) — 런타임 권한 모드로 매핑 */
   permissions?: "read" | "write" | "full";
+  /** 목표 추진 모드 — 사용자의 요청을 지속 가능한 목표로 구조화한다. */
+  goalMode?: boolean;
+  /** 채팅 목표를 Agentlas 안에서 실행되는 Apps 패키지로 생성하도록 요청한다. */
+  appsGenerateMode?: boolean;
 }
 
 export interface McpInvocationEvent {

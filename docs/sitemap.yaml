@@ -1,0 +1,39 @@
+version: 1
+project: agentlas-desktop
+updated_at: 2026-06-02
+nodes:
+  apps:
+    label: Apps
+    route: /apps
+    priority: high
+    owner: Agentlas Desktop
+    status: active
+    children:
+      - apps.document_studio
+      - apps.store
+      - apps.vault
+      - apps.engines
+  apps.document_studio:
+    label: Document Studio
+    route: /apps/document-studio
+    priority: high
+    owner: Agentlas Desktop
+    status: active
+  apps.store:
+    label: Apps Store
+    route: /marketplace
+    priority: medium
+    owner: Agentlas Desktop
+    status: active
+  apps.vault:
+    label: Apps Vault
+    route: /library/env
+    priority: medium
+    owner: Agentlas Desktop
+    status: active
+  apps.engines:
+    label: Apps Engines
+    route: /library/mcps
+    priority: medium
+    owner: Agentlas Desktop
+    status: active

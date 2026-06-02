@@ -26,6 +26,7 @@ import { ProjectFolderBar } from "@/components/ProjectFolderBar";
 import { AgentPicker } from "@/components/AgentPicker";
 import type { CodeArtifact } from "@/components/Markdown";
 import { IconBuilding, IconFolder, IconNetwork, IconSparkles, IconTrash } from "@/components/Icon";
+import { buildAppRoutePrompt, INSTALLED_APPS, parseAppSlashRoute } from "@/lib/apps";
 import { pickLocalized, useT } from "@/lib/i18n";
 
 function uid(): string {
@@ -52,6 +53,12 @@ function inferPermissionFromAnswer(answers: string[]): PermissionLevel | undefin
   if (/\bwrite\b|쓰기|편집/.test(joined)) return "write";
   if (/\bread\b|읽기만/.test(joined)) return "read";
   return undefined;
+}
+
+function parseGoalSlash(input: string): string | null {
+  const match = input.trim().match(/^\/goal\s+([\s\S]+)$/i);
+  const goal = match?.[1]?.trim();
+  return goal || null;
 }
 
 export default function ChatPageWrapper() {
@@ -487,11 +494,25 @@ function ChatPage() {
   const send = useCallback(
     async (
       userPrompt: string,
-      opts?: { images?: ImageAttachment[]; permissions?: PermissionLevel },
+      opts?: {
+        images?: ImageAttachment[];
+        permissions?: PermissionLevel;
+        goalMode?: boolean;
+        appsGenerateMode?: boolean;
+      },
     ) => {
       const api = ipc();
       const events = ipcEvents();
       if (!api || !events || !chat || busy) return;
+      const goalPrompt = parseGoalSlash(userPrompt);
+      const routeInput = goalPrompt ?? userPrompt;
+      const appRoute = parseAppSlashRoute(routeInput);
+      if (appRoute && !appRoute.request) {
+        router.push(appRoute.app.route);
+        return;
+      }
+      const invocationPrompt = appRoute ? buildAppRoutePrompt(appRoute, locale) : routeInput;
+      const visiblePrompt = appRoute ? `${appRoute.command} ${appRoute.request}`.trim() : userPrompt;
       const images = opts?.images;
       const placeholderId = uid();
       const imageDataUrls = images?.map(
@@ -500,7 +521,7 @@ function ChatPage() {
       const startedAt = Date.now();
       setMessages((m) => [
         ...m,
-        { id: uid(), role: "user", text: userPrompt, imageDataUrls },
+        { id: uid(), role: "user", text: visiblePrompt, imageDataUrls },
         {
           id: placeholderId,
           role: "agent",
@@ -520,10 +541,12 @@ function ChatPage() {
       // locale을 동봉 — main이 emit하는 상태/오류 메시지가 사용자 언어로 나오도록.
       const { runId } = await api.invoke.run({
         chatId: chat.id,
-        userPrompt,
+        userPrompt: invocationPrompt,
         images,
         locale,
         permissions: opts?.permissions ?? DEFAULT_PERMISSION,
+        goalMode: opts?.goalMode || Boolean(goalPrompt),
+        appsGenerateMode: opts?.appsGenerateMode || Boolean(appRoute),
       });
       runIdRef.current = runId;
       // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
@@ -534,7 +557,7 @@ function ChatPage() {
         void api.invoke.cancel(runId);
       }
     },
-    [chat, busy, locale, t, subscribeRun],
+    [chat, busy, locale, router, t, subscribeRun],
   );
 
   // 진행 중 실행 취소 — 입력창의 정지 버튼(전송 버튼이 busy일 때 변신) / Cmd/Ctrl+Esc.
@@ -610,9 +633,17 @@ function ChatPage() {
     router.replace(`/chat?id=${chatId}`);
   }, [seedPrompt, chat, agent, chatId, messages.length, send, router]);
 
-  // 슬래시 커맨드 실행 — /new(새 채팅) /clear(기록 지우기) /help(단축키)
+  // 슬래시 커맨드 실행 — /new /clear /apps /docstudio /help
   const handleCommand = useCallback(
     (cmd: string) => {
+      if (cmd === "/apps") {
+        router.push("/apps");
+        return;
+      }
+      if (cmd === "/docstudio") {
+        router.push("/apps/document-studio");
+        return;
+      }
       const api = ipc();
       if (!api || !chat) return;
       if (cmd === "/clear") {
@@ -853,8 +884,14 @@ function ChatPage() {
         messages={messages}
         agentName={agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback")}
         agentTone={agent?.tone ?? "blue"}
-        agentTagline={agent ? pickLocalized(agent, locale).tagline : undefined}
-        firmName={firm ? pickLocalized(firm, locale).name : undefined}
+        emptyDirectory={{
+          apps: INSTALLED_APPS,
+          agents: allAgents,
+          firms: allFirms,
+          projects: allProjects,
+          envKeys: allEnvKeys,
+          commands: cliCommands,
+        }}
         onOpenArtifact={setArtifact}
         onAnswerQuestion={answerQuestion}
       />
@@ -871,7 +908,12 @@ function ChatPage() {
       </div>
       <ChatInput
         onSend={(text, opts) => {
-          void send(text, { images: opts?.images, permissions: opts?.permissions });
+          void send(text, {
+            images: opts?.images,
+            permissions: opts?.permissions,
+            goalMode: opts?.goalMode,
+            appsGenerateMode: opts?.appsGenerateMode,
+          });
         }}
         onCommand={handleCommand}
         onCallAgent={(agentId) => void switchAgent(agentId)}
@@ -882,6 +924,7 @@ function ChatPage() {
           agents: allAgents,
           projects: allProjects,
           firms: allFirms,
+          apps: INSTALLED_APPS,
           envKeys: allEnvKeys,
           commands: cliCommands,
         }}

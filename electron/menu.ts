@@ -128,18 +128,22 @@ export function buildAppMenu(getWindow: () => BrowserWindow | null): Menu {
         },
         { type: "separator" },
         {
-          label: "Marketplace",
+          label: "Apps Store",
           accelerator: "CmdOrCtrl+Shift+M",
           click: () => send(getWindow(), "/marketplace"),
         },
         {
-          label: "Library",
+          label: "Installed Apps",
           accelerator: "CmdOrCtrl+Shift+L",
-          click: () => send(getWindow(), "/library/agents"),
+          click: () => send(getWindow(), "/apps"),
         },
         {
-          label: "Environment Variables",
+          label: "Apps Vault",
           click: () => send(getWindow(), "/library/env"),
+        },
+        {
+          label: "Apps Engines",
+          click: () => send(getWindow(), "/library/mcps"),
         },
         {
           label: "Automations",

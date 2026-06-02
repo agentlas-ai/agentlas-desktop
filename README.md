@@ -5,12 +5,12 @@
 <h1 align="center">Agentlas Desktop</h1>
 
 <p align="center">
-  <strong>Run whole AI agent teams on the Claude, ChatGPT, or Gemini plan you already pay for — locally.</strong>
+  <strong>Run AI-native Apps and agent teams on the Claude, ChatGPT, or Gemini plan you already pay for — locally.</strong>
 </p>
 
 <p align="center">
-  The only local AI agent launcher that <strong>never hands your API keys or chat history to a hosting platform.</strong><br>
-  Bring your own Claude Code, Codex, or Gemini CLI (or any API key), import agents over MCP, and run them on your own machine.
+  A local Apps OS for AI work that <strong>never hands your API keys or chat history to a hosting platform.</strong><br>
+  Bring your own Claude Code, Codex, or Gemini CLI (or any API key), install Apps over MCP, and run them on your own machine.
 </p>
 
 <!-- ── Download (primary action) ───────────────────────────────────────── -->
@@ -66,19 +66,24 @@
 | **+$0 to your model bill** | Agentlas runs no model and never proxies a call |
 | **100% local** | keys in the OS keychain, chats & agents in local SQLite |
 | **Agent teams, visible** | every firm renders as an org chart, not a black box |
-| **MCP marketplace** | install single agents or whole teams over the Model Context Protocol |
+| **Apps Store** | install Apps, agent firms, and supporting engines over the Model Context Protocol |
 | **3 platforms** | macOS (Apple Silicon + Intel) · Windows · Linux, self-updating |
 | **Apache-2.0** | audit it, fork it, ship your own variant |
 
-Connect the AI models you already pay for, import agents over MCP, and run whole
-agent teams from one local window — with the org chart and the repo behind every
-run in plain view. Your keys and your chat history stay on your machine, never on
-someone else's agent platform.
+Connect the AI models you already pay for, install Apps over MCP, and run AI-native
+apps or whole agent teams from one local window — with the UI, org chart, and repo
+behind every run in plain view. Your keys and your chat history stay on your
+machine, never on someone else's agent platform.
 
 - **Bring your own models.** Claude Code, Codex, and Gemini CLI, or
   OpenAI / Anthropic / Google API keys directly. Agentlas never proxies the model call.
-- **Import agents over MCP.** Drop in an agent or a whole team — for example a
-  package you built on [agentlas.cloud](https://agentlas.cloud) — and run it.
+- **Install Apps over MCP.** Drop in an App, an agent, or a whole team — for example
+  a package you built on [agentlas.cloud](https://agentlas.cloud) — and run it.
+- **Apps are first-class.** An App opens inside Agentlas Desktop like a small
+  macOS/Windows/Linux window: it can have its own UI, UX, backend adapters,
+  generated assets, credential requirements, MCP tools, and sub-engines. Assets,
+  vault keys, and MCP servers are support devices for Apps, not separate top-level
+  products.
 - **See the team, not a black box.** Every agent team renders as an org chart and
   a file tree, so you can see who does what and which repo each run touches.
 - **Run and orchestrate locally.** The app supervises the agent processes and
@@ -90,7 +95,7 @@ someone else's agent platform.
 
 - **Power users** who already pay for Claude, ChatGPT, or Gemini and want to run
   agents on that subscription instead of paying a second AI bill to an agent SaaS.
-- **Builders** who package agents on [agentlas.cloud](https://agentlas.cloud) and
+- **Builders** who package Apps or agents on [agentlas.cloud](https://agentlas.cloud) and
   want to run them locally over MCP.
 - **Privacy-minded teams** who refuse to hand their API keys and chat history to a
   third-party agent platform.
@@ -132,21 +137,33 @@ A complete tour of what ships today.
 - **Working-folder panel** pins a folder to a chat with a read-only file tree and
   text preview, so you can see the repo an agent is helping with.
 
-### Install agents over MCP — a real marketplace
+### Apps Store — install and generate Apps
 
-- **MCP-native installs.** Browse and install agents and whole firms from the
-  `agentlas.cloud` marketplace; they run through local runtime adapters over the
+- **MCP-native installs.** Browse and install Apps, agents, and whole firms from the
+  `agentlas.cloud` Apps Store; they run through local runtime adapters over the
   Model Context Protocol.
+- **Operator-published Apps.** Agentlas operators publish App source/bundles to a
+  private GitHub repo, GitHub Release, or object storage; `agentlas.cloud` keeps the
+  MongoDB marketplace index, permissions, manifest, and version metadata. MongoDB is
+  not the blob store for full app bundles.
+- **Chat-generated Apps.** Turn on **Apps Generate** beside the Goal control in chat
+  and describe the tool you want. The hidden apps-generator route treats the result
+  as an App package, not as loose generated assets, and leaves a stable Apps CTA
+  when the model does not.
+- **First proof App.** **Document Studio** opens at `/apps/document-studio` as a
+  Liner/Genspark-style document generator with tabs, an editable generated draft,
+  figure planning, and an "Open in Apps" CTA.
 - **Trust grades.** Listings carry a trust grade; sideloading unvetted agents is
   gated.
 - **Works offline.** An in-memory fallback source keeps the marketplace usable when
   the network or cloud is down.
 
-### Library — manage the whole toolbox
+### Apps — manage the whole toolbox
 
-- **Agents, Skills, MCP servers, and a shared env-var vault** in one place. The
-  vault tracks which environment variables each agent needs and which are set —
-  values live in the keychain, the UI only shows whether a key exists.
+- **Installed Apps, Apps Store, Apps Vault, and Apps Engines** live under one sidebar
+  section. The vault tracks which credentials each App needs and which are set;
+  values live in the keychain, the UI only shows whether a key exists. MCP servers
+  and generated assets are engines/artifacts that help Apps run.
 
 ### Automations
 
@@ -183,7 +200,7 @@ Three common ways to run AI agents today — and where Agentlas lands.
 | Who pays for tokens | **Your existing sub / key** | Platform fee **+** tokens | Your sub / key | Your sub / key |
 | Where keys & history live | **Your keychain + local SQLite** | Their cloud | Local (varies) | Local |
 | Multi-agent firms + org chart | **Yes** | Sometimes | No | No (manual) |
-| Install 3rd-party agents over MCP | **Yes, marketplace** | Varies | No | Manual |
+| Install 3rd-party Apps over MCP | **Yes, Apps Store** | Varies | No | Manual |
 | Use local CLIs (Claude Code / Codex / Gemini) | **Yes** | Rarely | No | One at a time |
 | Mix CLIs **and** cloud keys in one window | **Yes** | No | No | No |
 | Open source (Apache-2.0) | **Yes** | Usually no | Varies | Varies |
@@ -210,11 +227,10 @@ Three common ways to run AI agents today — and where Agentlas lands.
 | **Projects** | Create and open projects; each carries a default agent and a shared context note. |
 | **Firm detail** | The agent company's org chart — CEO → department heads → workers, plus the firm persona. |
 | **Automations** | List, create, and toggle scheduled runs targeting an agent or a firm. |
-| **Library · Agents** | Installed agents, their tone/persona, and trust grade. |
-| **Library · Skills** | Skills available to your installed agents. |
-| **Library · MCPs** | Installed MCP servers and their manifests. |
-| **Library · Env** | The shared environment-variable vault — which keys are set and which agents require them. |
-| **Marketplace** | Browse and install agents and firms from `agentlas.cloud` (with an offline in-memory fallback). |
+| **Apps · Installed** | Installed Apps launcher. Includes Document Studio, a local editable document generator. |
+| **Apps · Store** | Browse and install Apps, agents, and firms from `agentlas.cloud` (with an offline in-memory fallback). |
+| **Apps · Engines** | Installed MCP servers, backend connectors, and sub-engines used by Apps. |
+| **Apps · Vault** | The shared credential vault — which keys are set and which Apps require them. |
 | **Settings** | Backend connections, BYOK API keys, language, and migration from OpenClaw / Hermes. |
 | **Onboarding** | First-run wizard: welcome → connect a backend → menu tour → install your first team. |
 
@@ -336,11 +352,13 @@ flow:
 2. **Connect a backend.** Agentlas auto-detects any installed `claude-code`,
    `codex`, or `gemini` CLI. No CLI? Paste an Anthropic / OpenAI / Google API key —
    it goes straight into the OS keychain.
-3. **Install a team or an agent** from the **Marketplace**. Try a firm (a CEO plus
-   its departments) or a single specialist.
-4. **Start a chat** from the sidebar. Pick the agent (or the firm's CEO) and type.
+3. **Install an App, team, or agent** from **Apps Store**. Try a firm (a CEO plus
+   its departments), a single specialist, or a generated App.
+4. **Open Apps** from the sidebar and try **Document Studio**, or start a chat and
+   use `/apps` or `/docstudio`.
 5. **Pin a working folder** (optional) so the agent can see the repo it's helping with.
-6. **Add automations** for recurring runs, and manage everything from **Library**.
+6. **Add automations** for recurring runs, and manage App engines and credentials
+   from **Apps**.
 7. **Coming from OpenClaw or Hermes?** Jump to
    [Migrating from OpenClaw](#migrating-from-openclaw) to bring your SOUL, keys,
    and automations across.
@@ -434,7 +452,7 @@ Agentlas Desktop
 ├─ electron/          privileged main process
 │  ├─ runtime/        Claude Code, Codex, Gemini, BYOK adapters
 │  ├─ mcp/            MCP client and installer
-│  ├─ marketplace/    agentlas.cloud marketplace source
+│  ├─ marketplace/    agentlas.cloud Apps Store source
 │  ├─ migrate/        OpenClaw / Hermes importer
 │  ├─ secrets/        OS keychain vault
 │  ├─ store/          SQLite-backed local state

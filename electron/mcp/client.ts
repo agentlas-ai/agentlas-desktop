@@ -104,6 +104,57 @@ function inferWorkingFolderFromPrompt(prompt: string): string | null {
   }
 }
 
+function buildAppsGenerateUserPrompt(prompt: string, locale: "ko" | "en"): string {
+  const guide =
+    locale === "ko"
+      ? [
+          "Agentlas Apps Generate 모드가 켜져 있다.",
+          "사용자의 목표를 Agentlas Desktop 안에서 실행되는 하나의 Apps 패키지로 만들어라.",
+          "Apps는 Electron/Next renderer 안에서 열리는 앱스토어형 앱이며, 필요하면 자체 UI, UX, 백엔드 어댑터, MCP 도구, credential vault 요구사항, 생성 자산, 서브 엔진을 가진다.",
+          "자산, vault 자격증명, MCP 서버, 로컬 파일, 생성물은 Apps 자체가 아니라 Apps를 구동하기 위한 장치이자 부산물로 취급한다.",
+          "사용자가 이미 쓰는 Agentlas 채팅의 어떤 AI와 대화하더라도 설치된 Apps를 호출할 수 있게 설계하라.",
+          "가능하면 실제 파일을 생성/수정하고, 구현 범위가 크면 최소 실행 가능한 Apps 구조와 다음 단계만 명확히 남겨라.",
+        ].join("\n")
+      : [
+          "Agentlas Apps Generate mode is enabled.",
+          "Turn the user's goal into one Apps package that runs inside Agentlas Desktop.",
+          "An App is an app-store-style application opened inside the Electron/Next renderer, with its own UI, UX, backend adapters, MCP tools, credential-vault requirements, generated assets, and sub-engines when needed.",
+          "Assets, vault credentials, MCP servers, local files, and generated artifacts are support devices or byproducts for running the App, not separate top-level products.",
+          "Design it so any AI used in Agentlas Desktop chat can call installed Apps.",
+          "Create or edit real files when possible; if the scope is large, leave a minimal runnable Apps structure plus clear next steps.",
+        ].join("\n");
+  return `${guide}\n\nUser goal:\n${prompt}`;
+}
+
+function buildGoalUserPrompt(prompt: string, locale: "ko" | "en"): string {
+  const guide =
+    locale === "ko"
+      ? [
+          "Agentlas Goal mode가 켜져 있다.",
+          "사용자의 문장을 단발 요청이 아니라 달성할 목표로 다뤄라.",
+          "목표를 명확히 재정의하고, 바로 실행할 다음 행동과 검증 기준을 포함해 진행하라.",
+        ].join("\n")
+      : [
+          "Agentlas Goal mode is enabled.",
+          "Treat the user's message as a goal to pursue, not as a one-off request.",
+          "Restate the goal clearly, proceed with the next concrete action, and include verification criteria.",
+        ].join("\n");
+  return `${guide}\n\nUser goal:\n${prompt}`;
+}
+
+function appendAppsGenerateCta(text: string, prompt: string, locale: "ko" | "en"): string {
+  if (/\/apps\/[a-z0-9-]+/i.test(text)) return text;
+  const wantsDocumentApp =
+    /document|docstudio|report|paper|writer|text|liner|genspark|문서|리포트|논문|글쓰기|라이너|젠스파크/i.test(prompt);
+  const appPath = wantsDocumentApp ? "/apps/document-studio" : "/apps";
+  const label = locale === "ko" ? "Apps에서 확인하기" : "Open in Apps";
+  const note =
+    locale === "ko"
+      ? "생성된 App은 Agentlas Desktop의 Apps 표면에서 열 수 있습니다."
+      : "The generated App can be opened from the Agentlas Desktop Apps surface.";
+  return `${text.trim()}\n\n---\n${note}\n\n[${label}](${appPath})`;
+}
+
 /** 활성 런타임 + 러너를 한 번에 선택 (오케스트레이터/리졸버 공용). */
 export async function pickActiveRunner(): Promise<
   { runner: Runner; label: string; active: RuntimeStatus } | null
@@ -142,8 +193,14 @@ export async function runMcpInvocation(
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
     return;
   }
+  const effectiveUserPrompt = req.appsGenerateMode
+    ? buildAppsGenerateUserPrompt(req.userPrompt, locale)
+    : req.goalMode
+      ? buildGoalUserPrompt(req.userPrompt, locale)
+      : req.userPrompt;
+
   const autoRoute = isGlobalOrchestrator(agent)
-    ? selectAutoRoutedAgent(req.userPrompt, listInstalledAgents(), locale)
+    ? selectAutoRoutedAgent(effectiveUserPrompt, listInstalledAgents(), locale)
     : null;
   if (autoRoute) {
     sink({ kind: "tool-use", status: autoRouteStatus(autoRoute, locale) });
@@ -180,7 +237,7 @@ export async function runMcpInvocation(
   const existingWorkingFolder = getChatWorkingFolder(chat.id);
   const projectWorkingFolder = chat.projectId ? getProject(chat.projectId)?.folderPath ?? null : null;
   const inferredWorkingFolder =
-    existingWorkingFolder || projectWorkingFolder ? null : inferWorkingFolderFromPrompt(req.userPrompt);
+    existingWorkingFolder || projectWorkingFolder ? null : inferWorkingFolderFromPrompt(effectiveUserPrompt);
   if (inferredWorkingFolder) setChatWorkingFolder(chat.id, inferredWorkingFolder);
   const workingFolder = existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
 
@@ -214,7 +271,7 @@ export async function runMcpInvocation(
       if (org.divisions.length > 0) {
         try {
           await runFirmInvocation({
-            req,
+            req: { ...req, userPrompt: effectiveUserPrompt },
             chat: { id: chat.id, projectId: chat.projectId, firmId: chat.firmId },
             org,
             ceoAgent: agent,
@@ -309,7 +366,7 @@ export async function runMcpInvocation(
       {
         systemPrompt,
         history,
-        userPrompt: req.userPrompt,
+        userPrompt: effectiveUserPrompt,
         images: req.images,
         backendLabel: picked.label,
         model: active.model ?? undefined,
@@ -367,6 +424,9 @@ export async function runMcpInvocation(
       displayText = cleanedText || displayText;
     } catch (err) {
       console.error("[architecture] curateReply failed:", err);
+    }
+    if (req.appsGenerateMode) {
+      displayText = appendAppsGenerateCta(displayText, req.userPrompt, locale);
     }
 
     appendChatMessage(chat.id, "assistant", displayText);

@@ -1,8 +1,10 @@
 // 메시지 스트림 렌더 — agent 메시지는 Markdown으로, 사용자 메시지는 plain.
 // 작업 중 메시지는 Codex/Claude 데스크톱처럼 step log + 경과 시간을 실시간으로 보여준다.
 "use client";
-import { useEffect, useRef, useState } from "react";
-import type { InstalledAgent } from "@/lib/types";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import type { InstalledAgent, InstalledFirm, Project, RuntimeCommand } from "@/lib/types";
+import type { AgentlasAppDefinition } from "@/lib/apps";
+import { appDisplayName, appSlashCommands } from "@/lib/apps";
 import { AgentAvatar } from "./AgentAvatar";
 import { Markdown, type CodeArtifact } from "./Markdown";
 import { useT } from "@/lib/i18n";
@@ -55,20 +57,27 @@ export interface StreamMessage {
   tokens?: number;
 }
 
+export interface ChatEmptyDirectory {
+  apps: AgentlasAppDefinition[];
+  agents: InstalledAgent[];
+  firms: InstalledFirm[];
+  projects: Project[];
+  envKeys: string[];
+  commands: RuntimeCommand[];
+}
+
 export function ChatStream({
   messages,
   agentName,
   agentTone,
-  agentTagline,
-  firmName,
+  emptyDirectory,
   onOpenArtifact,
   onAnswerQuestion,
 }: {
   messages: StreamMessage[];
   agentName: string;
   agentTone: InstalledAgent["tone"];
-  agentTagline?: string;
-  firmName?: string;
+  emptyDirectory?: ChatEmptyDirectory;
   onOpenArtifact?: (a: CodeArtifact) => void;
   /** 사용자가 질문에 답함 — 부모가 user 메시지로 전송 */
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
@@ -85,87 +94,17 @@ export function ChatStream({
       ref={scrollRef}
       style={{
         flex: 1,
-        overflowY: "auto",
-        padding: "24px 32px",
+        overflowY: messages.length === 0 ? "hidden" : "auto",
+        padding: messages.length === 0 ? "20px 28px" : "24px 32px",
         display: "flex",
         flexDirection: "column",
         gap: 16,
       }}
     >
       {messages.length === 0 && (
-        <div
-          style={{
-            margin: "auto",
-            maxWidth: 420,
-            textAlign: "center",
-            padding: 24,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: 12,
-          }}
-        >
-          <div
-            style={{
-              transform: "scale(1.6)",
-              marginBottom: 8,
-            }}
-          >
-            <AgentAvatar name={agentName} tone={agentTone} size={36} />
-          </div>
-          <div>
-            <h2
-              style={{
-                margin: 0,
-                fontFamily: "var(--font-head)",
-                fontSize: 18,
-                fontWeight: 700,
-                color: "var(--ink)",
-              }}
-            >
-              {t("chatstream.empty_title", { name: agentName })}
-            </h2>
-            {firmName && (
-              <div
-                style={{
-                  marginTop: 4,
-                  fontSize: 11,
-                  color: "var(--accent)",
-                  fontWeight: 700,
-                  fontFamily: "var(--font-mono)",
-                  letterSpacing: 0.6,
-                  textTransform: "uppercase",
-                }}
-              >
-                {t("chatstream.firm_mode", { name: firmName })}
-              </div>
-            )}
-            {agentTagline && (
-              <p
-                style={{
-                  margin: "8px 0 0",
-                  color: "var(--muted-deep)",
-                  fontSize: 13,
-                  lineHeight: 1.5,
-                }}
-              >
-                {agentTagline}
-              </p>
-            )}
-          </div>
-          <div
-            style={{
-              marginTop: 8,
-              padding: "8px 12px",
-              fontSize: 11,
-              color: "var(--muted-deep)",
-              background: "var(--paper-2)",
-              borderRadius: 8,
-            }}
-          >
-            {t("chatstream.empty_hint")}
-          </div>
-        </div>
+        <EmptyCommandDirectory
+          directory={emptyDirectory}
+        />
       )}
       {messages.map((m) => (
         <Bubble
@@ -179,6 +118,163 @@ export function ChatStream({
       ))}
     </div>
   );
+}
+
+function EmptyCommandDirectory({
+  directory,
+}: {
+  directory?: ChatEmptyDirectory;
+}) {
+  const { t, locale } = useT();
+  const apps = directory?.apps ?? [];
+  const slashRows = [
+    { key: "/goal", title: t("chatcmd.goal"), tone: "goal" as const },
+    { key: "/apps", title: t("chatcmd.apps"), tone: "app" as const },
+    { key: "/new", title: t("chatcmd.new"), tone: "base" as const },
+    { key: "/folder", title: t("chatcmd.folder"), tone: "base" as const },
+    { key: "/global", title: t("chatcmd.global"), tone: "base" as const },
+    { key: "/rename", title: t("chatcmd.rename"), tone: "base" as const },
+    { key: "/clear", title: t("chatcmd.clear"), tone: "base" as const },
+    { key: "/help", title: t("chatcmd.help"), tone: "base" as const },
+  ];
+  const appRows = apps.flatMap((app) =>
+    appSlashCommands(app).map((command) => ({
+      key: command,
+      title: appDisplayName(app, locale),
+      tone: "app" as const,
+    })),
+  ).slice(0, 10);
+  const mentionRows = [
+    { key: "@", title: t("chatcmd.mention"), tone: "mention" as const },
+    { key: "@agent", title: t("chatcmd.agent"), tone: "mention" as const },
+    { key: "@project", title: t("chatcmd.project"), tone: "mention" as const },
+    { key: "@env", title: t("chatcmd.env"), tone: "mention" as const },
+  ];
+  const rows = [...slashRows, ...appRows, ...mentionRows];
+
+  return (
+    <div style={emptyShell}>
+      <div style={commandCanvas} aria-label={t("chatstream.empty_commands_title")}>
+        <div style={commandCloud}>
+          {rows.map((row) => (
+            <CommandChip key={`${row.key}-${row.title}`} token={row.key} label={row.title} tone={row.tone} />
+          ))}
+          {rows.length === 0 && <div style={emptyRow}>{t("chatinput.no_match")}</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CommandChip({
+  token,
+  label,
+  tone,
+}: {
+  token: string;
+  label: string;
+  tone: "goal" | "app" | "mention" | "runtime" | "base";
+}) {
+  return (
+    <div style={{ ...commandChip, ...chipTone(tone) }} title={`${token} ${label}`}>
+      <code style={chipToken}>{token}</code>
+      <span style={chipLabel}>{label}</span>
+    </div>
+  );
+}
+
+const emptyShell: CSSProperties = {
+  width: "100%",
+  maxWidth: 760,
+  margin: "auto",
+  display: "flex",
+  justifyContent: "center",
+};
+
+const commandCanvas: CSSProperties = {
+  width: "min(100%, 740px)",
+  minHeight: 188,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: 26,
+  borderRadius: 8,
+  background: "color-mix(in srgb, var(--paper-2) 92%, var(--accent) 8%)",
+};
+
+const commandCloud: CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  justifyContent: "center",
+  alignContent: "center",
+  gap: 8,
+  overflow: "hidden",
+};
+
+const commandChip: CSSProperties = {
+  minWidth: 0,
+  maxWidth: 210,
+  height: 30,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 7,
+  padding: "0 10px",
+  borderRadius: 7,
+  border: "1px solid color-mix(in srgb, var(--paper-edge) 78%, transparent)",
+  background: "color-mix(in srgb, var(--paper) 88%, white 12%)",
+  color: "var(--ink-soft)",
+};
+
+const chipToken: CSSProperties = {
+  flexShrink: 0,
+  fontFamily: "var(--font-mono)",
+  fontSize: 11.5,
+  fontWeight: 750,
+  color: "inherit",
+  letterSpacing: 0,
+  whiteSpace: "nowrap",
+};
+
+const chipLabel: CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontSize: 12,
+  fontWeight: 650,
+  lineHeight: 1,
+};
+
+const emptyRow: CSSProperties = {
+  color: "var(--muted)",
+  fontSize: 12,
+};
+
+function chipTone(tone: "goal" | "app" | "mention" | "runtime" | "base"): CSSProperties {
+  if (tone === "goal") {
+    return {
+      color: "var(--accent)",
+      background: "color-mix(in srgb, var(--paper) 82%, var(--accent) 18%)",
+      borderColor: "color-mix(in srgb, var(--accent) 32%, var(--paper-edge))",
+    };
+  }
+  if (tone === "app") {
+    return {
+      color: "var(--ink)",
+      background: "color-mix(in srgb, var(--paper) 84%, #dbeafe 16%)",
+    };
+  }
+  if (tone === "mention") {
+    return {
+      background: "color-mix(in srgb, var(--paper) 84%, #e8f5ef 16%)",
+    };
+  }
+  if (tone === "runtime") {
+    return {
+      background: "color-mix(in srgb, var(--paper) 86%, #f5eadb 14%)",
+    };
+  }
+  return {};
 }
 
 function Bubble({

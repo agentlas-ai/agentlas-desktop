@@ -17,6 +17,8 @@ import type {
   RuntimeStatus,
 } from "@/lib/types";
 import { CONTEXT_MANAGED_BY } from "@shared/models";
+import type { AgentlasAppDefinition } from "@/lib/apps";
+import { appDisplayName, appSlashCommands, appTagline } from "@/lib/apps";
 import { pickLocalized, useT } from "@/lib/i18n";
 
 type ModelOption = { id: string; label: string; tag?: string };
@@ -36,6 +38,7 @@ function modelChipLabel(s: RuntimeStatus, opts: ModelOption[]): string {
   return label ? `${base} · ${label}` : base;
 }
 import {
+  IconApps,
   IconArrowUp,
   IconAtSign,
   IconBuilding,
@@ -65,6 +68,7 @@ interface MentionContext {
   agents: InstalledAgent[];
   projects: Project[];
   firms: InstalledFirm[];
+  apps: AgentlasAppDefinition[];
   envKeys: string[]; // 등록된 env 키 (Library > Environment에서 add한)
   /** CLI(Claude/Codex/Gemini)에서 스캔한 슬래시 명령 — / 자동완성에 노출 */
   commands?: RuntimeCommand[];
@@ -76,6 +80,7 @@ interface SendOptions {
   planMode?: boolean;
   goalMode?: boolean;
   permissions?: PermissionLevel;
+  appsGenerateMode?: boolean;
 }
 
 /** popover에 그릴 한 행 + 평탄화 인덱스용 메타. group은 같은 헤더 아래로 그룹핑되지만 인덱스는 flat. */
@@ -87,7 +92,7 @@ interface AutocompleteOption {
   title: string;
   subtitle?: string;
   /** 아이콘은 popover에서 일괄 매핑 (group으로 결정) */
-  kind: "cmd" | "agent" | "firm" | "project" | "env";
+  kind: "cmd" | "app" | "agent" | "firm" | "project" | "env";
   /** 선택 시 입력창에 치환할 토큰 */
   replacement: string;
   /** true면 앱 액션 실행(/new·/clear·/help). false/undefined면 텍스트 삽입(멘션·CLI 슬래시). */
@@ -137,6 +142,7 @@ export function ChatInput({
   const [plusSubmenu, setPlusSubmenu] = useState<"plugins" | null>(null);
   const [planMode, setPlanMode] = useState(false);
   const [goalMode, setGoalMode] = useState(false);
+  const [appsGenerateMode, setAppsGenerateMode] = useState(false);
   // 기본값을 write로 — 바이브코딩 앱에서 read-only 기본은 첫 "만들어줘"가 파일을 못 써 조용히 실패한다.
   // write는 cwd 파일 편집만 허용(셸·외부 자동호출은 차단)이라 안전한 기본값.
   const [permissions, setPermissions] = useState<PermissionLevel>("write");
@@ -263,6 +269,7 @@ export function ChatInput({
       planMode: planMode || undefined,
       goalMode: goalMode || undefined,
       permissions,
+      appsGenerateMode: appsGenerateMode || undefined,
     });
     setInput("");
     setImages([]);
@@ -338,6 +345,8 @@ export function ChatInput({
           setPlanMode={setPlanMode}
           goalMode={goalMode}
           setGoalMode={setGoalMode}
+          appsGenerateMode={appsGenerateMode}
+          setAppsGenerateMode={setAppsGenerateMode}
           t={t}
         />
       )}
@@ -678,6 +687,28 @@ export function ChatInput({
               </span>
             </button>
 
+            {/* 모드 칩 — Apps Generate */}
+            <button
+              className="chat-input-chip chat-input-mode-chip"
+              onClick={() => setAppsGenerateMode((v) => !v)}
+              disabled={disabled}
+              title={t("chatinput.apps_generate_hint")}
+              style={{
+                ...toolBtnStyle(appsGenerateMode),
+                width: "auto",
+                padding: "0 10px",
+                gap: 6,
+                fontSize: 11,
+                fontWeight: 600,
+                color: appsGenerateMode ? "var(--accent)" : "var(--muted-deep)",
+              }}
+            >
+              <IconApps size={13} />
+              <span className="chat-input-chip-label chat-input-action-label">
+                {t("chatinput.apps_generate_mode")}
+              </span>
+            </button>
+
             {/* 보내기 / 정지 — 실행 중(busy)이고 onStop이 있으면 정지 버튼으로 변신 */}
             {(() => {
               const showStop = busy && !!onStop;
@@ -748,7 +779,9 @@ function buildAutocompleteOptions(
   if (trigger.kind === "slash") {
     // 앱 명령 — 실행(appAction)
     const cmds = [
+      { key: "/goal", desc: t("chatinput.cmd.goal"), appAction: false },
       { key: "/new", desc: t("chatinput.cmd.new") },
+      { key: "/apps", desc: t("chatinput.cmd.apps") },
       { key: "/folder", desc: t("chatinput.cmd.folder") },
       { key: "/global", desc: t("chatinput.cmd.global") },
       { key: "/rename", desc: t("chatinput.cmd.rename") },
@@ -763,8 +796,25 @@ function buildAutocompleteOptions(
         title: c.key,
         subtitle: c.desc,
         replacement: c.key,
-        appAction: true,
+        appAction: c.appAction ?? true,
       });
+    }
+    for (const app of context.apps) {
+      const name = appDisplayName(app, locale);
+      const tagline = appTagline(app, locale);
+      for (const command of appSlashCommands(app)) {
+        const haystack = `${command} ${name} ${tagline}`.toLowerCase();
+        if (q && !haystack.includes(q)) continue;
+        out.push({
+          key: `app-${app.id}-${command}`,
+          group: t("chatinput.slash.apps"),
+          kind: "app",
+          title: command,
+          subtitle: t("chatinput.app_cmd_hint", { name }),
+          replacement: command,
+          appAction: false,
+        });
+      }
     }
     // CLI 슬래시 명령 — 텍스트 삽입(전송 시 CLI가 확장). source별 그룹.
     const srcLabel: Record<RuntimeCommand["source"], string> = {
@@ -910,6 +960,8 @@ function kindIcon(kind: AutocompleteOption["kind"]) {
       return (
         <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 11 }}>/</span>
       );
+    case "app":
+      return <IconApps size={13} style={{ color: "var(--accent)" }} />;
     case "agent":
       return <IconSparkles size={13} style={{ color: "var(--accent)" }} />;
     case "firm":
@@ -931,6 +983,8 @@ function PlusMenu({
   setPlanMode,
   goalMode,
   setGoalMode,
+  appsGenerateMode,
+  setAppsGenerateMode,
   t,
 }: {
   submenu: "plugins" | null;
@@ -941,6 +995,8 @@ function PlusMenu({
   setPlanMode: (v: boolean) => void;
   goalMode: boolean;
   setGoalMode: (v: boolean) => void;
+  appsGenerateMode: boolean;
+  setAppsGenerateMode: (v: boolean) => void;
   t: TFunction;
 }) {
   if (submenu === "plugins") {
@@ -1002,6 +1058,13 @@ function PlusMenu({
         title={t("chatinput.goal_mode")}
         on={goalMode}
         onChange={setGoalMode}
+      />
+      <ToggleRow
+        icon={<IconApps size={14} />}
+        title={t("chatinput.apps_generate_mode")}
+        subtitle={t("chatinput.apps_generate_hint")}
+        on={appsGenerateMode}
+        onChange={setAppsGenerateMode}
       />
     </Popover>
   );
@@ -1277,11 +1340,13 @@ function Row({
 function ToggleRow({
   icon,
   title,
+  subtitle,
   on,
   onChange,
 }: {
   icon: React.ReactNode;
   title: string;
+  subtitle?: string;
   on: boolean;
   onChange: (v: boolean) => void;
 }) {
@@ -1306,8 +1371,15 @@ function ToggleRow({
       }}
     >
       <span style={{ flexShrink: 0, color: on ? "var(--accent)" : "var(--ink-soft)" }}>{icon}</span>
-      <span style={{ flex: 1, fontSize: 12.5, fontWeight: 600, color: "var(--ink)", textAlign: "left" }}>
-        {title}
+      <span style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
+        <span style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "var(--ink)" }}>
+          {title}
+        </span>
+        {subtitle && (
+          <span style={{ display: "block", marginTop: 2, fontSize: 11, lineHeight: 1.35, color: "var(--muted-deep)" }}>
+            {subtitle}
+          </span>
+        )}
       </span>
       <span
         style={{

@@ -15,13 +15,13 @@ import type {
   RuntimeStatus,
 } from "@/lib/types";
 import {
+  IconApps,
   IconBolt,
   IconBuilding,
   IconChat,
   IconChevronRight,
   IconFolder,
   IconKey,
-  IconLibrary,
   IconMoon,
   IconPlus,
   IconSettings,
@@ -582,24 +582,24 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           )}
         </SidebarSection>
 
-        <SidebarSection title={t("sidebar.library")} icon={<IconLibrary size={12} />}>
-          <SidebarLink href="/library/agents" active={pathname.startsWith("/library/agents")}>
+        <SidebarSection title={t("sidebar.apps")} icon={<IconApps size={12} />}>
+          <SidebarLink href="/apps" active={pathname.startsWith("/apps")}>
             <IconSparkles size={13} style={{ color: "var(--accent)" }} />
-            <span style={{ flex: 1 }}>{t("sidebar.agents")}</span>
+            <span style={{ flex: 1 }}>{t("sidebar.apps_installed")}</span>
             <span style={{ fontSize: 10, color: "var(--muted)" }}>{data.agents.length}</span>
-          </SidebarLink>
-          <SidebarLink href="/library/env" active={pathname.startsWith("/library/env")}>
-            <IconKey size={13} style={{ color: "var(--peach-ink)" }} />
-            <span style={{ flex: 1 }}>{t("env.title")}</span>
-          </SidebarLink>
-          <SidebarLink href="/library/mcps" active={pathname.startsWith("/library/mcps")}>
-            <IconSparkles size={13} style={{ color: "var(--purple-deep)" }} />
-            <span style={{ flex: 1 }}>{t("sidebar.mcps")}</span>
           </SidebarLink>
           <SidebarLink href="/marketplace" active={pathname === "/marketplace"}>
             <IconStore size={13} style={{ color: "var(--peach-ink)" }} />
-            <span style={{ flex: 1 }}>{t("sidebar.marketplace")}</span>
+            <span style={{ flex: 1 }}>{t("sidebar.apps_store")}</span>
             <IconChevronRight size={11} style={{ color: "var(--muted)" }} />
+          </SidebarLink>
+          <SidebarLink href="/library/env" active={pathname.startsWith("/library/env")}>
+            <IconKey size={13} style={{ color: "var(--peach-ink)" }} />
+            <span style={{ flex: 1 }}>{t("sidebar.apps_vault")}</span>
+          </SidebarLink>
+          <SidebarLink href="/library/mcps" active={pathname.startsWith("/library/mcps")}>
+            <IconSparkles size={13} style={{ color: "var(--purple-deep)" }} />
+            <span style={{ flex: 1 }}>{t("sidebar.apps_engines")}</span>
           </SidebarLink>
         </SidebarSection>
       </nav>
@@ -905,17 +905,11 @@ function CollapsedNav({
       isActive: pathname.startsWith("/automation"),
     },
     {
-      href: "/library/agents",
-      label: t("sidebar.library"),
-      icon: <IconLibrary size={16} />,
-      isActive: pathname.startsWith("/library"),
+      href: "/apps",
+      label: t("sidebar.apps"),
+      icon: <IconApps size={16} />,
+      isActive: pathname.startsWith("/apps") || pathname.startsWith("/library") || pathname === "/marketplace",
       badge: agentCount > 0 ? agentCount : undefined,
-    },
-    {
-      href: "/marketplace",
-      label: t("sidebar.marketplace"),
-      icon: <IconStore size={16} />,
-      isActive: pathname === "/marketplace",
     },
   ];
   return (

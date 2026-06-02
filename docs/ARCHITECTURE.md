@@ -44,6 +44,38 @@ User prompt → invoke:run → mcp/client.ts.runMcpInvocation
 
 M0는 mock invocation으로 IPC 채널/타입을 검증한다. M1에서 `@modelcontextprotocol/sdk`의 `StdioClientTransport`로 실제 MCP 서버 spawn.
 
+## Apps 제품 모델
+
+Agentlas Desktop의 상위 사용 단위는 **Apps**다. App은 Electron 안에서 열리는
+작은 데스크톱/웹 앱이며, 단순 계산기일 수도 있고 자체 UI, UX, 백엔드 어댑터,
+MCP 도구, credential vault 요구사항, 생성 자산, 서브 엔진을 가진 AI-native 앱일
+수도 있다.
+
+- **Installed Apps**: 사용자가 설치했거나 채팅에서 생성한 App. Agentlas Desktop
+  채팅에서 어떤 AI를 쓰더라도 호출 가능해야 한다.
+- **Apps Store**: `agentlas.cloud`와 MCP API가 동기화하는 설치 소스. 운영자가 만든
+  App은 private GitHub/GitHub Release/object storage 같은 bundle source에 두고,
+  MongoDB에는 marketplace index, manifest URL, 권한, 버전, trust metadata를 둔다.
+  MongoDB를 app bundle blob 저장소로 쓰지 않는다.
+- **Apps Vault**: App 실행에 필요한 credential/env를 keychain-backed vault로 저장한다.
+  vault 자체는 제품이 아니라 App 구동 장치다.
+- **Apps Engines**: MCP 서버, backend adapter, browser bridge, generated asset builder처럼
+  App을 돌리는 하위 엔진이다.
+- **Generated assets**: 문서, 이미지, 리포트, 로컬 파일 등 App 실행 결과물이다. 이들은
+  Apps의 부산물이지 별도 top-level 메뉴가 아니다.
+
+현재 concrete proof surface는 `/apps`와 `/apps/document-studio`다. Document Studio는
+renderer-only first-party App으로, 라이너식 텍스트 편집과 Genspark식 문서 생성을
+Agentlas 안에서 직접 열어 검증할 수 있게 한다. 채팅에서는 `/apps`, `/docstudio`
+slash command로 Apps 표면을 열 수 있다.
+
+채팅 입력창의 **Apps Generate** 토글은 숨은 apps-generator 경로를 켜는 신호다. 현재
+`McpInvocationRequest.appsGenerateMode`가 main runner로 전달되며, runner는 사용자 목표를
+Apps package 생성 지시로 감싸서 실행한다. 응답에 App 링크가 없으면 runner가 안정 CTA를
+추가하며, 문서/텍스트/라이너/젠스파크 계열 프롬프트는 `/apps/document-studio`로 연결한다.
+향후 실제 App runtime/manifest가 추가되면 이 플래그가 App scaffold, renderer route,
+vault requirements, MCP engine wiring으로 확장된다.
+
 ## 데이터 영구성
 
 - **SQLite** (`userData/agentlas.sqlite`) — 설치 에이전트, 활성 백엔드 선택, 채팅 런(로컬 only).
@@ -83,6 +115,8 @@ Notarization은 `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID` env
 
 ## Renderer ↔ Web Portal 분리
 
-- 데스크톱은 **빌드 안 함**. "에이전트 만들기" → `https://agentlas.cloud/build` 외부 링크.
-- 마켓플레이스 검색 결과는 같은 데이터 모델을 미러 — 웹과 데스크톱 모두 `MarketplaceListing` 타입 사용.
+- 데스크톱은 **Apps를 실행**하고, 웹은 hosted build/publish/marketplace sync를 맡는다.
+- 사용자가 채팅에서 만드는 Apps는 Desktop에서 local-first로 생성하고, 운영자/웹 publish
+  경로는 `agentlas.cloud/build`와 Apps Store manifest sync로 이어진다.
+- Apps Store 검색 결과는 같은 데이터 모델을 미러 — 웹과 데스크톱 모두 `MarketplaceListing` 타입 사용.
 - 로그인은 매직 링크 (M1). 데스크톱은 OAuth deep link `agentlas://auth/callback?...` 처리.

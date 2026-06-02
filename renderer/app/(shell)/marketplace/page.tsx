@@ -318,7 +318,7 @@ function MarketplacePage() {
             {importing ? t("import.importing") : t("library.agents.import_local")}
           </button>
           <Link
-            href="/library/agents"
+            href="/apps"
             style={{
               display: "inline-flex",
               alignItems: "center",

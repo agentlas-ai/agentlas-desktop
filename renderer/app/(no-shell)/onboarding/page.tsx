@@ -2,7 +2,7 @@
 // 1) 환영        — Agentlas 소개, BYOC 메시지
 // 2) 백엔드 연결  — 감지된 CLI 표시 + BYOK 키 입력
 // 3) 메뉴 투어    — 사이드바 5섹션 다이어그램 + 짧은 설명
-// 4) 시작        — 마켓플레이스로 이동해 첫 에이전트 설치
+// 4) 시작        — Apps Store로 이동해 첫 App 설치
 "use client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -10,6 +10,7 @@ import { ipc } from "@/lib/ipc";
 import type { RuntimeBackend, RuntimeStatus } from "@/lib/types";
 import { PawLogo } from "@/components/PawLogo";
 import {
+  IconApps,
   IconBolt,
   IconBrain,
   IconBuilding,
@@ -18,7 +19,6 @@ import {
   IconChevronRight,
   IconFolder,
   IconLayers,
-  IconLibrary,
   IconSettings,
   IconSparkles,
 } from "@/components/Icon";
@@ -591,7 +591,7 @@ function StepTour() {
       desc: t("onb.tour.automations.desc"),
     },
     {
-      icon: <IconLibrary size={18} />,
+      icon: <IconApps size={18} />,
       title: t("onb.tour.library.title"),
       desc: t("onb.tour.library.desc"),
     },

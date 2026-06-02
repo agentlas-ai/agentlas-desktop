@@ -1,4 +1,4 @@
-// 라이브러리 공용 레이아웃 — 탭 네비.
+// Apps 공용 레이아웃 — 설치된 앱/자격증명/엔진을 한 화면 계열로 묶는다.
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -8,9 +8,10 @@ export default function LibraryLayout({ children }: { children: React.ReactNode 
   const pathname = usePathname() ?? "";
   const { t } = useT();
   const TABS = [
-    { href: "/library/agents", label: t("sidebar.agents") },
-    { href: "/library/env", label: t("env.title") },
-    { href: "/library/mcps", label: t("sidebar.mcps") },
+    { href: "/apps", label: t("sidebar.apps_installed") },
+    { href: "/marketplace", label: t("sidebar.apps_store") },
+    { href: "/library/env", label: t("sidebar.apps_vault") },
+    { href: "/library/mcps", label: t("sidebar.apps_engines") },
   ];
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "transparent", overflow: "hidden" }}>
@@ -23,7 +24,7 @@ export default function LibraryLayout({ children }: { children: React.ReactNode 
         }}
       >
         <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 17, fontWeight: 700, marginBottom: 10 }}>
-          {t("sidebar.library")}
+          {t("sidebar.apps")}
         </h1>
         <nav className="titlebar-nodrag" style={{ display: "flex", gap: 4 }}>
           {TABS.map((tab) => {
