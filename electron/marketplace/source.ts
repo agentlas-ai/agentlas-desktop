@@ -10,6 +10,7 @@
 // MCP 호출 실패 시 마지막 성공 응답 캐시 → InMemory fallback 순으로 내려간다.
 import type {
   AgentEnvRequirement,
+  AgentVisibility,
   FirmListing,
   MarketplaceListing,
   TeamBundle,
@@ -20,6 +21,7 @@ export interface SeedListingFull extends Omit<MarketplaceListing, "manifestUrl">
   tone: "blue" | "green" | "purple" | "amber" | "peach";
   systemPrompt: string;
   envRequirements?: AgentEnvRequirement[];
+  visibility?: AgentVisibility;
 }
 
 export interface MarketplaceSource {

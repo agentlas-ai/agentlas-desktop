@@ -159,6 +159,8 @@ function startRepl(opts) {
     const ctx = ctxNow();
     const rt = state.runtime;
     const costLabel = runtimeLabel(rt);
+    const runEnv = H.buildChildEnv ? await H.buildChildEnv(db, { ...ctx, cwd: state.cwd }) : process.env;
+    Object.assign(process.env, runEnv);
     ui._lastUsage = null;
     try {
       if (rt.mode === "cli") {
@@ -177,6 +179,7 @@ function startRepl(opts) {
           cwd: state.cwd,
           permission: state.permission,
           session,
+          env: runEnv,
           ui,
           signal,
         });
@@ -556,6 +559,31 @@ function startRepl(opts) {
       case "cost":
         printCost();
         return true;
+      case "multimodal": {
+        const [sub, modality, providerId] = arg.trim().split(/\s+/);
+        if (sub === "set") {
+          if (!H.setMultimodal) return ui.warn("multimodal settings unavailable"), true;
+          try {
+            H.setMultimodal(db, modality, providerId);
+            ui.ok(ui.t("multimodal.set", modality || "", providerId || ""));
+          } catch (e) {
+            ui.error((e && e.message) || String(e));
+          }
+        }
+        if (H.multimodalStatus) {
+          const rows = await H.multimodalStatus(db);
+          ui.line("");
+          ui.line(ui.c.dim("  " + ui.t("multimodal.title")));
+          for (const row of rows) {
+            const env = row.env.length
+              ? row.env.map((e) => `${e.key}:${e.hasValue ? "set" : "missing"}`).join(" ")
+              : "no key";
+            ui.line("   " + ui.c.blue(row.modality.padEnd(7)) + ui.c.text(row.provider.id.padEnd(22)) + ui.c.dim(env));
+          }
+          ui.line("   " + ui.c.faint(ui.t("multimodal.usage")));
+        }
+        return true;
+      }
       case "diff":
         showDiff();
         return true;
@@ -719,6 +747,7 @@ function printHelp(ui) {
     ["/cwd [path]", ui.t("help.cwd")],
     ["/memory", ui.t("help.memory")],
     ["/cost", ui.t("help.cost")],
+    ["/multimodal", ui.t("help.multimodal")],
     ["/diff", ui.t("help.diff")],
     ["/history", ui.t("help.history")],
     ["/import <path>", ui.t("help.import")],

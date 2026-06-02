@@ -4,11 +4,13 @@ import { getDb } from "../store/db";
 import { getSource as getMarketSource, getCargoSource } from "../marketplace";
 import { materializeAgentFiles } from "../agents/files";
 import { getRoute, removeRoute } from "../agents/routes";
+import { isPrivateWebOnlyAgent, publicAgentVisibility } from "../agents/policy";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { installFromCatalog } from "../mcp-tools/registry";
 import type { SeedListingFull } from "../marketplace/source";
 import type {
   AgentEnvRequirement,
+  AgentVisibility,
   InstalledAgent,
   MarketplaceListing,
   RuntimeBackend,
@@ -30,6 +32,9 @@ interface AgentRow {
   trust_grade: "A" | "B" | "C" | "unknown";
   installed_at: string;
   tone: string;
+  builtin: number;
+  role: string | null;
+  visibility: AgentVisibility;
 }
 
 function toAgent(row: AgentRow): InstalledAgent {
@@ -55,6 +60,7 @@ function toAgent(row: AgentRow): InstalledAgent {
     trustGrade: row.trust_grade,
     installedAt: row.installed_at,
     tone: row.tone as InstalledAgent["tone"],
+    visibility: publicAgentVisibility(row),
     ...(route
       ? { runtimeLabel: route.runtime, localPath: route.path, kind: route.kind }
       : {}),
@@ -65,19 +71,26 @@ export function listInstalledAgents(): InstalledAgent[] {
   const rows = getDb()
     .prepare("SELECT * FROM installed_agents ORDER BY installed_at DESC")
     .all() as AgentRow[];
-  return rows.map(toAgent);
+  return rows.filter((row) => !isPrivateWebOnlyAgent(row)).map(toAgent);
 }
 
 export function getAgentById(id: string): InstalledAgent | null {
   const row = getDb()
     .prepare("SELECT * FROM installed_agents WHERE id = ?")
     .get(id) as AgentRow | undefined;
-  return row ? toAgent(row) : null;
+  if (!row || isPrivateWebOnlyAgent(row)) return null;
+  return toAgent(row);
 }
 
 export async function installAgent(slug: string): Promise<InstalledAgent> {
+  if (isPrivateWebOnlyAgent({ slug })) {
+    throw new Error("This web-only agent is not available in Agentlas Desktop.");
+  }
   const listing = await getMarketSource().getListingBySlug(slug);
   if (!listing) throw new Error(`Unknown marketplace slug: ${slug}`);
+  if (isPrivateWebOnlyAgent(listing)) {
+    throw new Error("This web-only agent is not available in Agentlas Desktop.");
+  }
 
   if (listing.trustGrade !== "A" && listing.trustGrade !== "B") {
     throw new Error(
@@ -97,6 +110,9 @@ export async function installMyAgent(id: string): Promise<InstalledAgent> {
   if (!source) throw new Error("Agentlas marketplace is not connected (memory mode).");
   const listing = await source.getMyAgentManifest(id);
   if (!listing) throw new Error(`Your agent was not found: ${id}`);
+  if (isPrivateWebOnlyAgent(listing)) {
+    throw new Error("This web-only agent is not available in Agentlas Desktop.");
+  }
   return persistListing(listing.slug, listing);
 }
 
@@ -129,6 +145,7 @@ function autoRegisterAgentTools(listing: FullListing): void {
 
 function persistListing(slug: string, listing: FullListing): InstalledAgent {
   const envReqsJson = JSON.stringify(listing.envRequirements ?? []);
+  const visibility = publicAgentVisibility(listing);
 
   // 이 에이전트가 호출하는 외부 MCP/API를 external tools에 자동 등록.
   autoRegisterAgentTools(listing);
@@ -141,7 +158,7 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
     db.prepare(
       `UPDATE installed_agents
        SET system_prompt = ?, name = ?, name_en = ?, tagline = ?, tagline_en = ?,
-           env_requirements_json = ?
+           env_requirements_json = ?, visibility = ?
        WHERE slug = ?`,
     ).run(
       listing.systemPrompt,
@@ -150,6 +167,7 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
       listing.tagline,
       listing.taglineEn,
       envReqsJson,
+      visibility,
       slug,
     );
     materializeAgentFiles(existing.id);
@@ -161,6 +179,9 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
       tagline: listing.tagline,
       tagline_en: listing.taglineEn,
       env_requirements_json: envReqsJson,
+      builtin: existing.builtin ?? 0,
+      role: existing.role ?? null,
+      visibility,
     });
   }
 
@@ -169,8 +190,8 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
   db.prepare(
     `INSERT INTO installed_agents
      (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
-      env_requirements_json, preferred_backend, trust_grade, installed_at, tone)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      env_requirements_json, preferred_backend, trust_grade, installed_at, tone, visibility)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     slug,
@@ -185,6 +206,7 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
     listing.trustGrade,
     now,
     listing.tone,
+    visibility,
   );
 
   materializeAgentFiles(id);
@@ -203,6 +225,7 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
     trustGrade: listing.trustGrade,
     installedAt: now,
     tone: listing.tone,
+    visibility,
   };
 }
 

@@ -1,4 +1,4 @@
-// Apps 공용 레이아웃 — 설치된 앱/자격증명/엔진을 한 화면 계열로 묶는다.
+// Apps 공용 레이아웃 — 설치된 앱/생성 산출물/자격증명/엔진을 한 화면 계열로 묶는다.
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -10,6 +10,10 @@ export default function LibraryLayout({ children }: { children: React.ReactNode 
   const TABS = [
     { href: "/apps", label: t("sidebar.apps_installed") },
     { href: "/marketplace", label: t("sidebar.apps_store") },
+    { href: "/library/surfaces", label: t("sidebar.surfaces") },
+    { href: "/library/apps", label: t("sidebar.generated_apps") },
+    { href: "/library/assets", label: t("sidebar.assets") },
+    { href: "/library/tools", label: t("sidebar.tools") },
     { href: "/library/env", label: t("sidebar.apps_vault") },
     { href: "/library/mcps", label: t("sidebar.apps_engines") },
   ];

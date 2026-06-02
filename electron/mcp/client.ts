@@ -3,6 +3,7 @@
 // chatId 기반 — chat에서 agent + project 컨텍스트 lookup.
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
 import { getAgentById, listInstalledAgents } from "./registry";
 import {
@@ -28,9 +29,15 @@ import { buildMemoryContext } from "../memory/context";
 import { curateReply } from "../memory/curator";
 import { MEMORY_EMITTER_BLOCK } from "../architecture/manifest";
 import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
+import { SURFACE_PROTOCOL, parseSurfaces, type SurfaceManifestDiagnostic } from "../surface-emitter";
+import { runHandsFreeAgentOs, shouldRunHandsFreeAgentOs } from "../agent-os/hands-free";
+import { prepareCreativeAdPackManifest } from "../creative-pack/surface";
+import { prepareEcommerceOpsManifest } from "../ecommerce-pack/surface";
 import { createAutomation } from "../store/automations";
+import { recordAgentSurface } from "../store/agent-surfaces";
 import { runClaudeCode } from "../runtime/claude-code";
 import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
+import { buildRunnerEnv } from "../runtime/env-resolver";
 import { runCodex } from "../runtime/codex";
 import { runGemini } from "../runtime/gemini";
 import {
@@ -40,9 +47,11 @@ import {
   runUpstageByok,
 } from "../runtime/byok";
 import { runOllama } from "../runtime/ollama";
-import type { Runner } from "../runtime/runner";
+import { type Runner, SURFACE_INTENT_MARKER } from "../runtime/runner";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
 import type {
+  Chat,
+  InstalledAgent,
   McpInvocationEvent,
   McpInvocationRequest,
   RuntimeStatus,
@@ -155,6 +164,126 @@ function appendAppsGenerateCta(text: string, prompt: string, locale: "ko" | "en"
   return `${text.trim()}\n\n---\n${note}\n\n[${label}](${appPath})`;
 }
 
+function buildSurfaceRepairPrompt(
+  invalidText: string,
+  errors: string[],
+  diagnostics: SurfaceManifestDiagnostic[] = [],
+): string {
+  return [
+    "Repair the Agentlas Surface Manifest in the prior assistant output.",
+    "Return a short natural-language sentence plus exactly one corrected <<agentlas-surface>> JSON block.",
+    "Do not add new facts, prices, citations, credentials, code, HTML, JavaScript, CSS, or scripts.",
+    "Preserve the user's visible answer intent, but fix only the manifest structure.",
+    "",
+    "Validation errors:",
+    ...errors.map((error) => `- ${error}`),
+    ...(diagnostics.length > 0
+      ? [
+          "",
+          "Structured diagnostics JSON:",
+          JSON.stringify(
+            diagnostics.map((diagnostic) => ({
+              code: diagnostic.code,
+              severity: diagnostic.severity,
+              path: diagnostic.path,
+              message: diagnostic.message,
+              repairHint: diagnostic.repairHint,
+            })),
+            null,
+            2,
+          ),
+        ]
+      : []),
+    "",
+    SURFACE_PROTOCOL,
+    "",
+    "Invalid assistant output:",
+    invalidText,
+  ].join("\n");
+}
+
+async function runLocalAgentOsIntent(
+  input: {
+    req: McpInvocationRequest;
+    chat: Chat;
+    agent: InstalledAgent;
+    workingFolder?: string | null;
+    reason: string;
+  },
+  sink: EventSink,
+): Promise<boolean> {
+  if (input.chat.kind === "division") return false;
+  const ecommerceManifest = prepareEcommerceOpsManifest({
+    prompt: input.req.userPrompt,
+  });
+  const manifest =
+    ecommerceManifest ??
+    (await prepareCreativeAdPackManifest({
+      prompt: input.req.userPrompt,
+      images: input.req.images,
+    }));
+  if (!manifest || !shouldRunHandsFreeAgentOs(manifest)) return false;
+
+  const history = listChatMessages(input.chat.id, 80);
+  appendChatMessage(input.chat.id, "user", input.req.userPrompt);
+  if (history.length === 0) autoTitleFromFirstMessage(input.chat.id, input.req.userPrompt);
+
+  sink({
+    kind: "thinking",
+    status: `Local Agentlas OS meta-agent is preparing a ${manifest.domain} surface`,
+  });
+  const surfaceId = randomUUID();
+  recordAgentSurface({
+    id: surfaceId,
+    chatId: input.chat.id,
+    projectId: input.chat.projectId,
+    agentId: input.agent.id,
+    manifest,
+  });
+  sink({ kind: "surface", surfaceId, surface: manifest });
+
+  try {
+    const osResult = await runHandsFreeAgentOs({
+      chat: input.chat,
+      surfaceId,
+      manifest,
+      workingFolder: input.workingFolder,
+      sink,
+    });
+    const lifecycleLabel =
+      manifest.domain === "ecommerce"
+        ? "created the commerce agent team/app lifecycle"
+        : manifest.domain === "creative"
+          ? "materialized the creative asset pack/app lifecycle"
+          : "materialized the domain app lifecycle";
+    let displayText = [
+      "Agentlas local meta-agent handled this without a hosted model runtime.",
+      `Reason: ${input.reason}`,
+      `It created the declarative ${manifest.domain} Agentlas OS surface, ${lifecycleLabel}, and operated the generated app through reversible OS actions.`,
+      `Agentlas OS: ${osResult.summary}`,
+    ].join("\n\n");
+    try {
+      const { cleanedText } = curateReply(displayText, {
+        projectPath: null,
+        projectId: input.chat.projectId ?? null,
+        agentId: input.agent.id,
+        chatId: input.chat.id,
+        cwdAtRequest: input.workingFolder,
+      });
+      displayText = cleanedText || displayText;
+    } catch (err) {
+      console.error("[architecture] curateReply failed for local Agent OS:", err);
+    }
+    appendChatMessage(input.chat.id, "assistant", displayText);
+    sink({ kind: "final", text: displayText });
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    sink({ kind: "error", error: { code: "local-agent-os-failed", message } });
+    return true;
+  }
+}
+
 /** 활성 런타임 + 러너를 한 번에 선택 (오케스트레이터/리졸버 공용). */
 export async function pickActiveRunner(): Promise<
   { runner: Runner; label: string; active: RuntimeStatus } | null
@@ -207,9 +336,29 @@ export async function runMcpInvocation(
     agent = autoRoute.agent;
   }
 
+  // 사용자가 프롬프트 안에 "project folder: /abs/path"처럼 명시하면, 채팅 워킹 폴더로
+  // 자동 고정한다. firm 경로도 단일 에이전트 경로와 같은 cwd/MCP 구성을 받아야 한다.
+  const existingWorkingFolder = getChatWorkingFolder(chat.id);
+  const projectWorkingFolder = chat.projectId ? getProject(chat.projectId)?.folderPath ?? null : null;
+  const inferredWorkingFolder =
+    existingWorkingFolder || projectWorkingFolder ? null : inferWorkingFolderFromPrompt(req.userPrompt);
+  if (inferredWorkingFolder) setChatWorkingFolder(chat.id, inferredWorkingFolder);
+  const workingFolder = existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
+
   const runtimes = await detectRuntimes();
   const active = pickActive(runtimes);
   if (!active) {
+    const handled = await runLocalAgentOsIntent(
+      {
+        req,
+        chat,
+        agent,
+        workingFolder,
+        reason: "No local CLI/BYOK runtime is active, so the built-in Agentlas OS meta-agent took over.",
+      },
+      sink,
+    );
+    if (handled) return;
     sink({
       kind: "error",
       error: { code: "no-runtime", message: tStatus(locale, "errNoRuntime") },
@@ -219,6 +368,17 @@ export async function runMcpInvocation(
 
   const picked = pickRunner(active);
   if (!picked) {
+    const handled = await runLocalAgentOsIntent(
+      {
+        req,
+        chat,
+        agent,
+        workingFolder,
+        reason: `Runtime ${active.kind} is available but has no supported runner, so the built-in Agentlas OS meta-agent took over.`,
+      },
+      sink,
+    );
+    if (handled) return;
     sink({
       kind: "error",
       error: {
@@ -231,15 +391,6 @@ export async function runMcpInvocation(
     });
     return;
   }
-
-  // 사용자가 프롬프트 안에 "project folder: /abs/path"처럼 명시하면, 채팅 워킹 폴더로
-  // 자동 고정한다. firm 경로도 단일 에이전트 경로와 같은 cwd/MCP 구성을 받아야 한다.
-  const existingWorkingFolder = getChatWorkingFolder(chat.id);
-  const projectWorkingFolder = chat.projectId ? getProject(chat.projectId)?.folderPath ?? null : null;
-  const inferredWorkingFolder =
-    existingWorkingFolder || projectWorkingFolder ? null : inferWorkingFolderFromPrompt(effectiveUserPrompt);
-  if (inferredWorkingFolder) setChatWorkingFolder(chat.id, inferredWorkingFolder);
-  const workingFolder = existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
 
   // ── MCP 툴 브리지 ──────────────────────────────────────────
   // Claude Code/Codex 러너 + write/full 권한일 때만, 설치·활성 MCP 서버(브라우저 Playwright 포함)를
@@ -261,6 +412,8 @@ export async function runMcpInvocation(
     }
   }
 
+  const runnerEnv = await buildRunnerEnv(agent, workingFolder ?? undefined);
+
   // ── 멀티 에이전트 firm 오케스트레이션 ──
   // 회사 채팅이고 정규화된 조직에 본부/전문가가 있으면 3-tier 오케스트레이터로 분기.
   // (본부가 없는 firm은 아래 단일 CEO 경로 — 기존 동작 유지)
@@ -281,6 +434,7 @@ export async function runMcpInvocation(
             mcpConfigPath,
             mcpAllowedTools,
             mcpCodexConfigArgs,
+            runnerEnv: runnerEnv.env,
             locale,
             sink,
             signal,
@@ -362,37 +516,48 @@ export async function runMcpInvocation(
   sink({ kind: "thinking", status: tStatus(locale, "thinking", { agent: agent.name }) });
 
   try {
-    const result = await picked.runner(
-      {
-        systemPrompt,
-        history,
-        userPrompt: effectiveUserPrompt,
-        images: req.images,
-        backendLabel: picked.label,
-        model: active.model ?? undefined,
-        longContext: active.longContextEnabled ?? false,
-        effort: active.effort ?? undefined,
-        signal,
-        permission: req.permissions,
-        mcpConfigPath,
-        mcpAllowedTools,
-        mcpCodexConfigArgs,
-        // 사용자가 지정한 워킹 폴더(프로젝트)에서 에이전트를 실행 — 빌드/파일 생성이 거기서 일어난다.
-        // 활성화(2회 방문) 게이팅과 무관하게, 폴더가 지정돼 있으면 즉시 cwd로 사용한다.
-        cwd: workingFolder ?? undefined,
-        locale,
-      },
-      {
-        onStatus: (status) => sink({ kind: "tool-use", status }),
-        onPartial: (text) => sink({ kind: "partial", text }),
-        // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
-        onTool: (name, args) => sink({ kind: "tool-use", tool: { name, args } }),
-      },
-    );
+    const runnerReq = {
+      systemPrompt,
+      history,
+      userPrompt: effectiveUserPrompt,
+      images: req.images,
+      backendLabel: picked.label,
+      model: active.model ?? undefined,
+      longContext: active.longContextEnabled ?? false,
+      effort: active.effort ?? undefined,
+      signal,
+      permission: req.permissions,
+      // 세션 resume 키 — codex가 (chatId, kind)별 CLI 세션을 재사용해
+      // 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
+      chatId: chat.id,
+      mcpConfigPath,
+      mcpAllowedTools,
+      mcpCodexConfigArgs,
+      env: runnerEnv.env,
+      // 사용자가 지정한 워킹 폴더(프로젝트)에서 에이전트를 실행 — 빌드/파일 생성이 거기서 일어난다.
+      // 활성화(2회 방문) 게이팅과 무관하게, 폴더가 지정돼 있으면 즉시 cwd로 사용한다.
+      cwd: workingFolder ?? undefined,
+      locale,
+    };
+    const runnerEvents = {
+      onStatus: (status: string) => sink({ kind: "tool-use", status }),
+      onPartial: (text: string) => sink({ kind: "partial", text }),
+      // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
+      onTool: (name: string, args?: string) => sink({ kind: "tool-use", tool: { name, args } }),
+    };
+    let result = await picked.runner(runnerReq, runnerEvents);
+
+    // 2차 패스(모델 판단 surface 게이트): 1차에서 무거운 SURFACE_PROTOCOL을 안 줬는데 모델이
+    // "이건 surface가 낫다"고 판단해 마커만 냈으면 → 풀 프로토콜을 강제 주입(forceSurface)하고 재호출.
+    // 사용자가 "대시보드"라 말 안 해도 와우모먼트가 뜬다(키워드 의존 X). 단순/일회성은 마커가 안 와 1패스로 끝.
+    if (chat.kind !== "division" && result.text.trim().includes(SURFACE_INTENT_MARKER)) {
+      sink({ kind: "thinking", status: tStatus(locale, "thinking", { agent: agent.name }) });
+      result = await picked.runner({ ...runnerReq, forceSurface: true }, runnerEvents);
+    }
 
     // 항상-켜진 큐레이터: 답변 끝의 "## Memory Events" 블록을 파싱해 안전·스코프·중복 처리 후
     // 내구 메모리에 기록하고, 사용자에게 보이는 텍스트에서는 그 블록을 제거한다(추가 LLM 호출 없음).
-    let displayText = result.text;
+    let displayText = result.text.split(SURFACE_INTENT_MARKER).join("").trim();
     // 에이전트가 "## Automation" 블록을 넣었으면 → 현재 chat의 타깃(firm/agent)으로 자동화 등록 + 블록 제거.
     // (백그라운드 automation 실행 세션은 제외 → 자동화가 자동화를 만드는 재귀 방지)
     if (chat.kind !== "division") {
@@ -414,6 +579,132 @@ export async function runMcpInvocation(
       }
     }
     try {
+      let surfaceParse = parseSurfaces(displayText);
+      const originalSurfaceCleanedText = surfaceParse.cleanedText || displayText;
+      if (
+        surfaceParse.surfaces.length === 0 &&
+        surfaceParse.errors.length > 0 &&
+        displayText.includes("<<agentlas-surface>>")
+      ) {
+        try {
+          sink({ kind: "tool-use", status: "Repairing Agentlas surface manifest" });
+          const repaired = await picked.runner(
+            {
+              systemPrompt,
+              history,
+              userPrompt: buildSurfaceRepairPrompt(displayText, surfaceParse.errors, surfaceParse.diagnostics),
+              images: undefined,
+              backendLabel: picked.label,
+              model: active.model ?? undefined,
+              longContext: active.longContextEnabled ?? false,
+              effort: active.effort ?? undefined,
+              signal,
+              permission: "read",
+              mcpConfigPath,
+              mcpAllowedTools,
+              mcpCodexConfigArgs,
+              env: runnerEnv.env,
+              cwd: workingFolder ?? undefined,
+              locale,
+            },
+            {
+              onStatus: (status) => sink({ kind: "tool-use", status }),
+              onPartial: () => {},
+              onTool: (name, args) => sink({ kind: "tool-use", tool: { name, args } }),
+            },
+          );
+          const repairedParse = parseSurfaces(repaired.text);
+          if (repairedParse.surfaces.length > 0) {
+            surfaceParse = repairedParse;
+          }
+        } catch (err) {
+          console.error("[surface] repair failed:", err);
+        }
+      }
+      displayText = originalSurfaceCleanedText;
+      if (surfaceParse.surfaces.length === 0) {
+        const seededEcommerceSurface = prepareEcommerceOpsManifest({
+          prompt: req.userPrompt,
+        });
+        if (seededEcommerceSurface) {
+          sink({ kind: "tool-use", status: "Preparing Ecommerce OS surface from business intent" });
+          surfaceParse = {
+            surfaces: [{ manifest: seededEcommerceSurface }],
+            cleanedText: displayText,
+            errors: [],
+            diagnostics: [],
+          };
+          displayText = [
+            displayText.trim(),
+            "Prepared an Ecommerce OS surface from the business intent. Review the storefront, payment/database delegation, image budget, and operating dashboard in the Workbench.",
+          ]
+            .filter(Boolean)
+            .join("\n\n");
+        }
+      }
+      if (surfaceParse.surfaces.length === 0) {
+        const seededCreativeSurface = await prepareCreativeAdPackManifest({
+          prompt: req.userPrompt,
+          images: req.images,
+        });
+        if (seededCreativeSurface) {
+          sink({ kind: "tool-use", status: "Preparing Creative Studio surface from product input" });
+          surfaceParse = {
+            surfaces: [{ manifest: seededCreativeSurface }],
+            cleanedText: displayText,
+            errors: [],
+            diagnostics: [],
+          };
+          displayText = [
+            displayText.trim(),
+            "Prepared a Creative Studio surface from the product input. Review the storyboard, trust labels, assets, and export pack in the Workbench.",
+          ]
+            .filter(Boolean)
+            .join("\n\n");
+        }
+      }
+      const handsFreeSummaries: string[] = [];
+      for (const s of surfaceParse.surfaces) {
+        const surfaceId = randomUUID();
+        recordAgentSurface({
+          id: surfaceId,
+          chatId: chat.id,
+          projectId: chat.projectId,
+          agentId: agent.id,
+          manifest: s.manifest,
+        });
+        sink({
+          kind: "surface",
+          surfaceId,
+          surface: s.manifest,
+        });
+        if (shouldRunHandsFreeAgentOs(s.manifest)) {
+          try {
+            const osResult = await runHandsFreeAgentOs({
+              chat,
+              surfaceId,
+              manifest: s.manifest,
+              workingFolder,
+              sink,
+            });
+            if (osResult.ran) handsFreeSummaries.push(osResult.summary);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            console.error("[agent-os] hands-free run failed:", err);
+            sink({ kind: "tool-use", status: `Agentlas OS paused for review: ${message}` });
+            handsFreeSummaries.push(`Agentlas OS prepared the surface, but app operation needs review: ${message}`);
+          }
+        }
+      }
+      if (handsFreeSummaries.length > 0) {
+        displayText = [displayText.trim(), ...handsFreeSummaries.map((summary) => `Agentlas OS: ${summary}`)]
+          .filter(Boolean)
+          .join("\n\n");
+      }
+    } catch (err) {
+      console.error("[surface] parseSurfaces failed:", err);
+    }
+    try {
       const { cleanedText } = curateReply(displayText, {
         projectPath: activePath,
         projectId: chat.projectId ?? null,
@@ -425,6 +716,7 @@ export async function runMcpInvocation(
     } catch (err) {
       console.error("[architecture] curateReply failed:", err);
     }
+
     if (req.appsGenerateMode) {
       displayText = appendAppsGenerateCta(displayText, req.userPrompt, locale);
     }

@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ipc, pathForDroppedFile } from "@/lib/ipc";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type { InstalledAgent, RuntimeStatus } from "@/lib/types";
 import { AgentAvatar } from "@/components/AgentAvatar";
@@ -48,7 +49,8 @@ export default function LibraryAgentsPage() {
     // 에이전트는 즉시 표시 (빠른 SQLite). 런타임 감지는 느릴 수 있어 분리 — 배너가 먼저 깜빡이지 않게.
     const list = await api.team.list();
     setAgents(list);
-    setSelectedId((cur) => cur ?? list[0]?.id ?? null);
+    const visible = visibleAgents(list);
+    setSelectedId((cur) => (cur && visible.some((agent) => agent.id === cur) ? cur : visible[0]?.id ?? null));
     void api.runtime
       .detect()
       .then((rs) => setRuntimes(rs))
@@ -126,7 +128,8 @@ export default function LibraryAgentsPage() {
 
   // 런타임 감지가 끝났고(runtimeChecked) 0개일 때만 배너 — 초기 깜빡임 방지.
   const showNoRuntime = runtimeChecked && runtimes.length === 0;
-  const selectedAgent = agents.find((a) => a.id === selectedId) ?? null;
+  const displayAgents = visibleAgents(agents);
+  const selectedAgent = displayAgents.find((a) => a.id === selectedId) ?? null;
 
   return (
     <div style={{ height: "100%", display: "flex", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
@@ -188,7 +191,7 @@ export default function LibraryAgentsPage() {
           )}
 
           {/* 드래그 힌트 / 빈 상태 */}
-          {agents.length === 0 ? (
+          {displayAgents.length === 0 ? (
             <div
               style={{
                 padding: 40,
@@ -212,7 +215,7 @@ export default function LibraryAgentsPage() {
             </div>
           ) : (
             <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 6 }}>
-              {agents.map((a) => {
+              {displayAgents.map((a) => {
                 const loc = pickLocalized(a, locale);
                 const active = a.id === selectedId;
                 const rt = a.runtimeLabel ? RUNTIME_META[a.runtimeLabel] : null;
@@ -293,7 +296,7 @@ export default function LibraryAgentsPage() {
         </section>
 
         {/* 드래그 오버레이 */}
-        {dragOver && agents.length > 0 && (
+        {dragOver && displayAgents.length > 0 && (
           <div
             style={{
               position: "absolute",

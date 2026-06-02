@@ -6,14 +6,15 @@
 import Database from "better-sqlite3";
 import path from "node:path";
 import { app } from "electron";
+import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 16;
+const SCHEMA_VERSION = 25;
 
 export function initStore(): void {
   if (_db) return;
-  const dbPath = path.join(app.getPath("userData"), "agentlas.sqlite");
+  const dbPath = process.env.AGENTLAS_STORE_PATH || path.join(app.getPath("userData"), "agentlas.sqlite");
   _db = new Database(dbPath);
   _db.pragma("journal_mode = WAL");
   _db.pragma("foreign_keys = ON");
@@ -245,7 +246,7 @@ export function initStore(): void {
   }
 
   // ── v11 → v12: Agentlas Architecture — built-in agents + curated memory ──
-  //   installed_agents.builtin/role : marks the 3 baked-in architecture agents.
+  //   installed_agents.builtin/role : marks baked-in background architecture agents.
   //   meta                          : key/value (e.g. architecture_version) for upgrade gating.
   //   memory_entries                : the Memory Curator's durable store.
   //   folder_activity               : repeated-work detection → auto-activates PM Soul + sitemap.
@@ -354,6 +355,325 @@ export function initStore(): void {
     if (memoryCols.length > 0 && !memoryCols.some((c) => c.name === "context_json")) {
       _db.exec("ALTER TABLE memory_entries ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'");
     }
+  }
+
+  // ── v16 → v17: Agent-made service-app registry + operation history ─
+  if (userVersion < 17) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_apps (
+        id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        project_id TEXT,
+        agent_id TEXT NOT NULL,
+        surface_id TEXT NOT NULL,
+        action_id TEXT,
+        app_name TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        layout TEXT NOT NULL,
+        root_path TEXT NOT NULL,
+        preview_path TEXT NOT NULL,
+        setup_path TEXT NOT NULL,
+        smoke_path TEXT NOT NULL,
+        manifest_json TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'scaffolded',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE,
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_apps_chat_updated
+        ON agent_apps(chat_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_agent_apps_surface
+        ON agent_apps(chat_id, surface_id, updated_at DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_apps_root
+        ON agent_apps(root_path);
+
+      CREATE TABLE IF NOT EXISTS agent_app_operations (
+        id TEXT PRIMARY KEY,
+        app_id TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        ok INTEGER NOT NULL DEFAULT 1,
+        result_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(app_id) REFERENCES agent_apps(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_app_ops_app_created
+        ON agent_app_operations(app_id, created_at DESC);
+    `);
+  }
+
+  // ── v17 → v18: Agent-made local-tool registry + MCP install history ─
+  if (userVersion < 18) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_tools (
+        id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        project_id TEXT,
+        agent_id TEXT NOT NULL,
+        surface_id TEXT NOT NULL,
+        action_id TEXT,
+        requested_tool_id TEXT NOT NULL,
+        generated_tool_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        root_path TEXT NOT NULL,
+        config_path TEXT NOT NULL,
+        tool_path TEXT NOT NULL,
+        mcp_path TEXT NOT NULL,
+        smoke_path TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'scaffolded',
+        installed_server_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE,
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL,
+        FOREIGN KEY(installed_server_id) REFERENCES mcp_servers(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_tools_chat_updated
+        ON agent_tools(chat_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_agent_tools_surface
+        ON agent_tools(chat_id, surface_id, requested_tool_id, updated_at DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_tools_root
+        ON agent_tools(root_path);
+
+      CREATE TABLE IF NOT EXISTS agent_tool_operations (
+        id TEXT PRIMARY KEY,
+        tool_id TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        ok INTEGER NOT NULL DEFAULT 1,
+        result_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(tool_id) REFERENCES agent_tools(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_tool_ops_tool_created
+        ON agent_tool_operations(tool_id, created_at DESC);
+    `);
+  }
+
+  // ── v18 → v19: Agent-made interactive surface registry ─
+  if (userVersion < 19) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_surfaces (
+        id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        project_id TEXT,
+        agent_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        layout TEXT NOT NULL,
+        manifest_json TEXT NOT NULL,
+        state_json TEXT NOT NULL DEFAULT '{}',
+        provenance_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE,
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_surfaces_chat_updated
+        ON agent_surfaces(chat_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_agent_surfaces_domain_updated
+        ON agent_surfaces(domain, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_agent_surfaces_project_updated
+        ON agent_surfaces(project_id, updated_at DESC);
+    `);
+  }
+
+  // ── v19 → v20: Surface asset packs materialized from agent manifests ─
+  if (userVersion < 20) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_surface_asset_packs (
+        id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        project_id TEXT,
+        agent_id TEXT NOT NULL,
+        surface_id TEXT NOT NULL,
+        action_id TEXT,
+        pack_name TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        layout TEXT NOT NULL,
+        root_path TEXT NOT NULL,
+        manifest_path TEXT NOT NULL,
+        index_path TEXT NOT NULL,
+        assets_path TEXT NOT NULL,
+        manifest_json TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'materialized',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE,
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL,
+        FOREIGN KEY(surface_id) REFERENCES agent_surfaces(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_surface_asset_packs_chat_updated
+        ON agent_surface_asset_packs(chat_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_agent_surface_asset_packs_surface_updated
+        ON agent_surface_asset_packs(chat_id, surface_id, updated_at DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_surface_asset_packs_root
+        ON agent_surface_asset_packs(root_path);
+
+      CREATE TABLE IF NOT EXISTS agent_surface_asset_pack_operations (
+        id TEXT PRIMARY KEY,
+        pack_id TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        ok INTEGER NOT NULL DEFAULT 1,
+        result_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(pack_id) REFERENCES agent_surface_asset_packs(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_surface_asset_pack_ops_pack_created
+        ON agent_surface_asset_pack_operations(pack_id, created_at DESC);
+    `);
+  }
+
+  // ── v20 → v21: Durable surface job/cost ledger ─────────
+  if (userVersion < 21) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_surface_jobs (
+        id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        project_id TEXT,
+        agent_id TEXT NOT NULL,
+        surface_id TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        label TEXT NOT NULL,
+        status TEXT NOT NULL,
+        cost_estimate REAL,
+        cost_spent REAL,
+        currency TEXT,
+        resumable INTEGER NOT NULL DEFAULT 0,
+        manifest_job_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE,
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL,
+        FOREIGN KEY(surface_id) REFERENCES agent_surfaces(id) ON DELETE CASCADE,
+        UNIQUE(surface_id, job_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_surface_jobs_chat_updated
+        ON agent_surface_jobs(chat_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_agent_surface_jobs_surface_updated
+        ON agent_surface_jobs(surface_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_agent_surface_jobs_status_updated
+        ON agent_surface_jobs(status, updated_at DESC);
+    `);
+  }
+
+  // ── v21 → v22: Surface state event log ─────────────────
+  if (userVersion < 22) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_surface_events (
+        id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        project_id TEXT,
+        agent_id TEXT NOT NULL,
+        surface_id TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        path TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        previous_value_json TEXT,
+        label TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE,
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL,
+        FOREIGN KEY(surface_id) REFERENCES agent_surfaces(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_surface_events_surface_created
+        ON agent_surface_events(surface_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_agent_surface_events_chat_created
+        ON agent_surface_events(chat_id, created_at DESC);
+    `);
+  }
+
+  // ── v22 → v23: installed_agents.visibility contract ─────
+  // Every agent row must classify as visible | background | private. Renderer lists
+  // hide background agents from user-facing pickers and main-process policy blocks
+  // private web-only agents from desktop install/list surfaces.
+  if (userVersion < 23) {
+    const agentCols = _db
+      .prepare("PRAGMA table_info(installed_agents)")
+      .all() as Array<{ name: string }>;
+    if (!agentCols.some((c) => c.name === "visibility")) {
+      _db.exec(
+        "ALTER TABLE installed_agents ADD COLUMN visibility TEXT NOT NULL DEFAULT 'visible' CHECK(visibility IN ('visible','background','private'))",
+      );
+    }
+    const rows = _db
+      .prepare(
+        "SELECT id, slug, name, name_en, tagline, tagline_en, builtin, role, visibility FROM installed_agents",
+      )
+      .all() as Array<{
+        id: string;
+        slug: string;
+        name: string;
+        name_en: string;
+        tagline: string;
+        tagline_en: string;
+        builtin: number;
+        role: string | null;
+        visibility: string | null;
+      }>;
+    const update = _db.prepare("UPDATE installed_agents SET visibility = ? WHERE id = ?");
+    const tx = _db.transaction(() => {
+      for (const row of rows) update.run(publicAgentVisibility(row), row.id);
+    });
+    tx();
+    _db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_installed_agents_visibility ON installed_agents(visibility, installed_at DESC)",
+    );
+  }
+
+  // ── v23 → v24: Durable surface approval ledger ─────────
+  // Approval is an OS event, not renderer-local state. Capability, budget,
+  // credential, browser, and payment approvals are auditable and survive
+  // reopening the same generated app/surface. Secret values and card details
+  // are never stored here; only the explicit user-approved scope is recorded.
+  if (userVersion < 24) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_surface_approvals (
+        id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        project_id TEXT,
+        agent_id TEXT NOT NULL,
+        surface_id TEXT NOT NULL,
+        action_id TEXT,
+        action_type TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        revoked_at TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE,
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL,
+        FOREIGN KEY(surface_id) REFERENCES agent_surfaces(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_surface_approvals_surface_created
+        ON agent_surface_approvals(surface_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_agent_surface_approvals_scope_active
+        ON agent_surface_approvals(surface_id, scope_key, revoked_at, created_at DESC);
+    `);
+  }
+
+  // ── v24 → v25: CLI 런타임 세션 매핑 (chat × backend별 세션 id) ──
+  //   세션 resume(codex 등)로 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
+  //   fingerprint: 시스템 프롬프트/모델/effort가 바뀌면 새 세션을 시작하기 위한 해시.
+  if (userVersion < 25) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS chat_runtime_sessions (
+        chat_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (chat_id, kind),
+        FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
+      );
+    `);
   }
 
   _db.pragma(`user_version = ${SCHEMA_VERSION}`);

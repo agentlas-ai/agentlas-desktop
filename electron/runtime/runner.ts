@@ -3,6 +3,9 @@
 import type { ChatHistoryEntry, ImageAttachment } from "../../shared/types";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { GLOBAL_CONNECTION_SKILL } from "./global-skill";
+import { SURFACE_PROTOCOL } from "../surface-emitter";
+import { selectModules } from "../system-agents";
+import { SURFACE_MODULE } from "../system-agents/desktop-chat/modules";
 
 export interface RunnerRequest {
   systemPrompt: string;
@@ -35,6 +38,15 @@ export interface RunnerRequest {
   mcpAllowedTools?: string[];
   /** Codex CLI `exec`에 붙이는 MCP config override args (`-c mcp_servers...`). */
   mcpCodexConfigArgs?: string[];
+  /** Agentlas-resolved environment: agent .env first, then global multimodal fallback/vault. */
+  env?: NodeJS.ProcessEnv;
+  /**
+   * 현재 chat 식별자 — 세션 resume를 지원하는 러너(codex)가 (chatId, kind)별 CLI 세션을
+   * 재사용해 시스템 프롬프트/히스토리를 매 턴 재전송하지 않도록 한다. 미설정이면 매번 full-context.
+   */
+  chatId?: string;
+  /** 2차 패스 플래그 — 모델이 surface-intent 마커를 emit해 dispatch가 재호출할 때 SURFACE_PROTOCOL 강제 로드. */
+  forceSurface?: boolean;
   /** 상태/오류 메시지 i18n에 사용. renderer가 동봉, fallback "en" */
   locale: RuntimeLocale;
 }
@@ -75,19 +87,47 @@ Rules:
 - Skip this when the user's answer wouldn't change what you do, or when a sensible default is obvious — pick it and proceed.
 - After the fence, do NOT also answer. The user's selection arrives as their next message.`;
 
+/** 모델이 surface가 낫다고 판단했을 때 emit하는 마커. dispatch가 감지해 2차 패스에서 풀 프로토콜을 로드. */
+export const SURFACE_INTENT_MARKER = "<<surface-intent>>";
+
+/** 코어에 항상 있는 짧은 surface 발견 힌트(모델 판단 게이트). 무거운 SURFACE_PROTOCOL(~16KB)은
+ *  사용자가 "대시보드"라고 말해서가 아니라, 모델이 운영/반복 작업이라 판단해 마커를 emit할 때 로드된다.
+ *  일회성/단순 질문이면 마커를 안 내고 그냥 답한다(목표: 일회성은 surface builder 불필요). */
+const SURFACE_INTENT_HINT = `## Interactive surface (load on request)
+If your answer would be materially more useful as an INTERACTIVE SURFACE — a tracker, dashboard, operating console, board, catalog, or a structured view the user will return to and act on — AND the work is recurring or operational (not a throwaway one-off), reply with EXACTLY one line and nothing else:
+${SURFACE_INTENT_MARKER}
+You will then be handed the full surface spec to fill in. For one-off questions or ordinary chat, do NOT emit it — just answer normally.`;
+
 /** 표준 시스템 프롬프트 — 에이전트 프롬프트 앞에 붙는 안전 헤더.
  *  locale에 따라 LLM에게 답변 언어 가이드를 다르게 준다 (영어 사용자에게는 영어 가이드). */
 export function wrapSystemPrompt(
   agentSystemPrompt: string,
   locale: RuntimeLocale,
   permission?: "read" | "write" | "full",
+  /** 이번 턴의 사용자 입력 — 온디맨드 디스커버리(SURFACE 게이트)에 사용. 미제공 시 회귀 방지로 모두 포함. */
+  userPrompt?: string,
+  /** 2차 패스: 모델이 surface-intent 마커를 emit해서 dispatch가 풀 프로토콜을 강제 로드할 때 true. */
+  forceSurface?: boolean,
 ): string {
   // write/full 권한이면 도구 사용 허용 안내(Claude Code식 tool-use). read/기본이면 도구 끔.
   const toolsLine =
     permission === "write" || permission === "full"
       ? "You have tools available (file read/write, shell, web search, MCP). Use them when they help complete the task, and say what you're doing."
       : tStatus(locale, "sysToolsOff");
-  return [
+
+  // SURFACE_PROTOCOL(~16KB)은 (1) 모델이 마커로 요청했거나(forceSurface, 2차 패스),
+  // (2) 명백한 build 키워드가 잡혔거나(빠른 경로), (3) 레거시 호출(userPrompt 미제공)일 때만 주입.
+  // 그 외엔 짧은 surface-intent 힌트만 코어에 둬, 사용자가 "대시보드"라 말 안 해도 모델 판단으로
+  // surface를 띄울 수 있게 한다(키워드 의존 X). 단순/일회성 질문은 힌트만 보고 그냥 답한다.
+  // CONNECTION_SKILL은 코어 유지 — 외부연결 미스가 dead-end가 되는 걸 막기 위함.
+  // fast-path 임계값은 관대하게(0.4): 명백한 build 요청은 1패스로 바로 풀 프로토콜.
+  // 놓쳐도 two-pass(모델 판단)가 잡고, 헛발동해도 모델이 surface를 안 내면 그만이라 다운사이드 작음.
+  const includeSurface =
+    forceSurface === true ||
+    userPrompt === undefined ||
+    selectModules(userPrompt, [SURFACE_MODULE], { threshold: 0.4 }).selected.length > 0;
+
+  const parts: string[] = [
     tStatus(locale, "sysHeader"),
     tStatus(locale, "sysGuide"),
     toolsLine,
@@ -98,7 +138,13 @@ export function wrapSystemPrompt(
     // 발급을 손잡고 안내한 뒤 저장하게 한다. 사용자에게는 보이지 않는다(시스템 프롬프트 내부).
     GLOBAL_CONNECTION_SKILL,
     "",
-    tStatus(locale, "sysAgentDef"),
-    agentSystemPrompt,
-  ].join("\n");
+  ];
+  if (includeSurface) {
+    parts.push(SURFACE_PROTOCOL, "");
+  } else {
+    // 풀 프로토콜 대신 짧은 발견 힌트(모델이 필요시 마커로 요청).
+    parts.push(SURFACE_INTENT_HINT, "");
+  }
+  parts.push(tStatus(locale, "sysAgentDef"), agentSystemPrompt);
+  return parts.join("\n");
 }

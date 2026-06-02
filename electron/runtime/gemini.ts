@@ -8,10 +8,11 @@ import fs from "node:fs/promises";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
-import { agentRunCwd, probeCliVersion, spawnCli } from "./exec";
+import { agentRunCwd, probeCliVersion, spawnCli, writeStdin } from "./exec";
 
 const CANDIDATES = [
   "gemini",
+  path.join(os.homedir(), ".local/bin/gemini"), // 네이티브 인스톨러 기본 위치
   path.join(os.homedir(), ".gemini/bin/gemini"),
   "/opt/homebrew/bin/gemini",
   "/usr/local/bin/gemini",
@@ -62,7 +63,7 @@ async function getBin(): Promise<string | null> {
 }
 
 function buildPrompt(req: RunnerRequest): string {
-  const sys = wrapSystemPrompt(req.systemPrompt, req.locale);
+  const sys = wrapSystemPrompt(req.systemPrompt, req.locale, req.permission, req.userPrompt, req.forceSurface);
   const user = tStatus(req.locale, "speakerUser");
   const assistant = tStatus(req.locale, "speakerAssistant");
   const parts: string[] = [`[SYSTEM]\n${sys}`, ""];
@@ -96,13 +97,17 @@ export const runGemini: Runner = async (
   const prompt = buildPrompt(req);
 
   return new Promise<RunnerResult>((resolve, reject) => {
-    // Gemini CLI 비대화형 모드 — --prompt 플래그.
-    const child = spawnCli(bin, ["--prompt", prompt], {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+    // Gemini CLI 비대화형(헤드리스) 모드 — `-p ""`로 헤드리스를 트리거하고 실제 프롬프트는
+    // stdin으로 싣는다(`-p`는 stdin 입력 뒤에 append됨). argv로 큰 프롬프트를 넘기면 Windows
+    // cmd.exe 8191자 한계로 잘려 exit 1. GEMINI_CLI_TRUST_WORKSPACE: 비대화형은 신뢰-폴더
+    // 프롬프트를 띄울 수 없어, 미설정 시 "not running in a trusted directory"로 죽는다(exit 55).
+    const child = spawnCli(bin, ["--prompt", ""], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...(req.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" },
       // 사용자가 지정한 프로젝트 폴더에서 실행 — 미지정이면 전용 폴더.
       cwd: req.cwd ?? agentRunCwd(),
     });
+    writeStdin(child, prompt);
 
     // 취소 — Stop 누르면 자식 프로세스 종료.
     const onAbort = () => child.kill();

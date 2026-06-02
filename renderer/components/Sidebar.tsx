@@ -5,14 +5,18 @@ import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { navigate } from "@/lib/navigation";
 import type {
   Automation,
+  AgentlasSurfaceRecord,
+  AppFactoryAppRecord,
   Chat,
   InstalledAgent,
   InstalledFirm,
   Project,
   RuntimeStatus,
+  ToolFactoryToolRecord,
 } from "@/lib/types";
 import {
   IconApps,
@@ -22,12 +26,14 @@ import {
   IconChevronRight,
   IconFolder,
   IconKey,
+  IconLayers,
   IconMoon,
   IconPlus,
   IconSettings,
   IconSparkles,
   IconStore,
   IconSun,
+  IconWand,
 } from "./Icon";
 import { PawLogo } from "./PawLogo";
 import { ChatRow } from "./ChatRow";
@@ -45,6 +51,9 @@ interface SidebarData {
   projects: Project[];
   firms: InstalledFirm[];
   automations: Automation[];
+  surfaces: AgentlasSurfaceRecord[];
+  apps: AppFactoryAppRecord[];
+  tools: ToolFactoryToolRecord[];
   agents: InstalledAgent[];
   runtime: RuntimeStatus | null;
 }
@@ -54,6 +63,9 @@ const EMPTY: SidebarData = {
   projects: [],
   firms: [],
   automations: [],
+  surfaces: [],
+  apps: [],
+  tools: [],
   agents: [],
   runtime: null,
 };
@@ -166,17 +178,22 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       api.projects.list(),
       api.firms.list(),
       api.automations.list(),
+      api.surfaces.listSurfaces(),
+      api.appFactory.listApps(),
+      api.toolFactory.listTools(),
       api.team.list(),
       api.runtime.detect(),
-    ]).then(([chats, projects, firms, automations, agents, runtimes]) => {
+    ]).then(([chats, projects, firms, automations, surfaces, apps, tools, agents, runtimes]) => {
       if (cancelled) return;
       const active = runtimes.find((r) => r.active) ?? runtimes[0] ?? null;
-      setData({ chats, projects, firms, automations, agents, runtime: active });
+      setData({ chats, projects, firms, automations, surfaces, apps, tools, agents, runtime: active });
     });
     return () => {
       cancelled = true;
     };
   }, [refreshKey, pathname]);
+
+  const displayAgents = visibleAgents(data.agents);
 
   async function handleNewChat() {
     const api = ipc();
@@ -286,7 +303,13 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
             gap: 4,
           }}
         >
-          <CollapsedNav pathname={pathname} agentCount={data.agents.length} />
+          <CollapsedNav
+            pathname={pathname}
+            agentCount={displayAgents.length}
+            surfaceCount={data.surfaces.length}
+            appCount={data.apps.length}
+            toolCount={data.tools.length}
+          />
         </nav>
         <footer
           className="titlebar-nodrag"
@@ -430,7 +453,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
             <EmptyHint>{t("sidebar.empty_chats")}</EmptyHint>
           ) : (
             data.chats.slice(0, 12).map((c) => {
-              const agent = data.agents.find((a) => a.id === c.agentId);
+              const agent = displayAgents.find((a) => a.id === c.agentId);
               const active = pathname === "/chat" && currentChatId === c.id;
               return (
                 <ChatRow
@@ -586,20 +609,35 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           <SidebarLink href="/apps" active={pathname.startsWith("/apps")}>
             <IconSparkles size={13} style={{ color: "var(--accent)" }} />
             <span style={{ flex: 1 }}>{t("sidebar.apps_installed")}</span>
-            <span style={{ fontSize: 10, color: "var(--muted)" }}>{data.agents.length}</span>
+            <span style={{ fontSize: 10, color: "var(--muted)" }}>{data.apps.length}</span>
+          </SidebarLink>
+          <SidebarLink href="/library/surfaces" active={pathname.startsWith("/library/surfaces")}>
+            <IconSparkles size={13} style={{ color: "var(--accent)" }} />
+            <span style={{ flex: 1 }}>{t("sidebar.surfaces")}</span>
+            <span style={{ fontSize: 10, color: "var(--muted)" }}>{data.surfaces.length}</span>
+          </SidebarLink>
+          <SidebarLink href="/library/apps" active={pathname.startsWith("/library/apps")}>
+            <IconLayers size={13} style={{ color: "var(--green-deep)" }} />
+            <span style={{ flex: 1 }}>{t("sidebar.generated_apps")}</span>
+            <span style={{ fontSize: 10, color: "var(--muted)" }}>{data.apps.length}</span>
+          </SidebarLink>
+          <SidebarLink href="/library/tools" active={pathname.startsWith("/library/tools")}>
+            <IconWand size={13} style={{ color: "var(--blue-deep)" }} />
+            <span style={{ flex: 1 }}>{t("sidebar.tools")}</span>
+            <span style={{ fontSize: 10, color: "var(--muted)" }}>{data.tools.length}</span>
+          </SidebarLink>
+          <SidebarLink href="/library/env" active={pathname.startsWith("/library/env")}>
+            <IconKey size={13} style={{ color: "var(--peach-ink)" }} />
+            <span style={{ flex: 1 }}>{t("env.title")}</span>
+          </SidebarLink>
+          <SidebarLink href="/library/mcps" active={pathname.startsWith("/library/mcps")}>
+            <IconSparkles size={13} style={{ color: "var(--purple-deep)" }} />
+            <span style={{ flex: 1 }}>{t("sidebar.apps_engines")}</span>
           </SidebarLink>
           <SidebarLink href="/marketplace" active={pathname === "/marketplace"}>
             <IconStore size={13} style={{ color: "var(--peach-ink)" }} />
             <span style={{ flex: 1 }}>{t("sidebar.apps_store")}</span>
             <IconChevronRight size={11} style={{ color: "var(--muted)" }} />
-          </SidebarLink>
-          <SidebarLink href="/library/env" active={pathname.startsWith("/library/env")}>
-            <IconKey size={13} style={{ color: "var(--peach-ink)" }} />
-            <span style={{ flex: 1 }}>{t("sidebar.apps_vault")}</span>
-          </SidebarLink>
-          <SidebarLink href="/library/mcps" active={pathname.startsWith("/library/mcps")}>
-            <IconSparkles size={13} style={{ color: "var(--purple-deep)" }} />
-            <span style={{ flex: 1 }}>{t("sidebar.apps_engines")}</span>
           </SidebarLink>
         </SidebarSection>
       </nav>
@@ -868,9 +906,15 @@ function iconBtnStyle(active: boolean): React.CSSProperties {
 function CollapsedNav({
   pathname,
   agentCount,
+  surfaceCount,
+  appCount,
+  toolCount,
 }: {
   pathname: string;
   agentCount: number;
+  surfaceCount: number;
+  appCount: number;
+  toolCount: number;
 }) {
   const { t } = useT();
   const items: Array<{
@@ -909,7 +953,16 @@ function CollapsedNav({
       label: t("sidebar.apps"),
       icon: <IconApps size={16} />,
       isActive: pathname.startsWith("/apps") || pathname.startsWith("/library") || pathname === "/marketplace",
-      badge: agentCount > 0 ? agentCount : undefined,
+      badge:
+        agentCount + surfaceCount + appCount + toolCount > 0
+          ? agentCount + surfaceCount + appCount + toolCount
+          : undefined,
+    },
+    {
+      href: "/marketplace",
+      label: t("sidebar.marketplace"),
+      icon: <IconStore size={16} />,
+      isActive: pathname === "/marketplace",
     },
   ];
   return (

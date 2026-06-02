@@ -47,6 +47,7 @@ export interface FirmRunParams {
   mcpConfigPath?: string;
   mcpAllowedTools?: string[];
   mcpCodexConfigArgs?: string[];
+  runnerEnv?: NodeJS.ProcessEnv;
   locale: RuntimeLocale;
   sink: EventSink;
   signal?: AbortSignal;
@@ -215,6 +216,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
       mcpConfigPath: p.mcpConfigPath,
       mcpAllowedTools: p.mcpAllowedTools,
       mcpCodexConfigArgs: p.mcpCodexConfigArgs,
+      env: p.runnerEnv,
       locale: p.locale,
     },
     {

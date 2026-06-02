@@ -7,6 +7,9 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type {
   Chat,
+  AgentlasSurfaceAction,
+  AppFactoryAppRecord,
+  AppFactoryScaffoldResult,
   ImageAttachment,
   InstalledAgent,
   InstalledFirm,
@@ -15,11 +18,13 @@ import type {
   Project,
   RuntimeCommand,
   RuntimeStatus,
+  ToolFactoryScaffoldResult,
+  ToolFactoryToolRecord,
 } from "@/lib/types";
 import { ChatStream, type StreamMessage } from "@/components/ChatStream";
 import { extractQuestions } from "@/lib/ask-question";
 import { ChatInput } from "@/components/ChatInput";
-import { ArtifactPanel } from "@/components/ArtifactPanel";
+import { WorkbenchPanel, type SurfaceStatePatchHandler, type WorkbenchSurface } from "@/components/WorkbenchPanel";
 import { WorkspacePanel } from "@/components/WorkspacePanel";
 import { AgentNetworkPanel, type LiveAgent, type NetTimelineItem } from "@/components/AgentNetworkPanel";
 import { ProjectFolderBar } from "@/components/ProjectFolderBar";
@@ -27,10 +32,57 @@ import { AgentPicker } from "@/components/AgentPicker";
 import type { CodeArtifact } from "@/components/Markdown";
 import { IconBuilding, IconFolder, IconNetwork, IconSparkles, IconTrash } from "@/components/Icon";
 import { buildAppRoutePrompt, INSTALLED_APPS, parseAppSlashRoute } from "@/lib/apps";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
+import { surfaceApprovalRequirement, type SurfaceApprovalRequirement } from "@/lib/surface-approval";
 
 function uid(): string {
   return Math.random().toString(36).slice(2);
+}
+
+function scaffoldResultFromRecord(record: AppFactoryAppRecord): AppFactoryScaffoldResult {
+  return { ...record.scaffold, record };
+}
+
+function toolResultFromRecord(record: ToolFactoryToolRecord): ToolFactoryScaffoldResult {
+  return { ...record.scaffold, record };
+}
+
+function surfaceToolKey(surfaceId: string, action: AgentlasSurfaceAction): string {
+  return `${surfaceId}:${typeof action.toolId === "string" ? action.toolId : action.id}`;
+}
+
+async function ensureSurfaceApproval(
+  api: NonNullable<ReturnType<typeof ipc>>,
+  surfaceId: string,
+  action: AgentlasSurfaceAction,
+  approval: SurfaceApprovalRequirement,
+): Promise<boolean> {
+  if (approval.persist) {
+    try {
+      if (await api.surfaces.hasApproval({ surfaceId, scopeKey: approval.scopeKey })) return true;
+    } catch {
+      // Continue to explicit confirmation if the ledger is temporarily unavailable.
+    }
+  }
+  const ok = window.confirm(approval.message);
+  if (!ok) return false;
+  try {
+    await api.surfaces.approve({
+      surfaceId,
+      actionId: action.id,
+      actionType: action.type,
+      kind: approval.kind,
+      scopeKey: approval.scopeKey,
+      title: approval.title,
+      summary: approval.summary,
+      metadata: approval.metadata,
+    });
+  } catch (err) {
+    window.alert(err instanceof Error ? err.message : String(err));
+    return false;
+  }
+  return true;
 }
 
 // 우측 워크스페이스 패널 열림/접힘 선호값 — 채팅 간 이동에도 유지.
@@ -73,6 +125,7 @@ export default function ChatPageWrapper() {
 function ChatPage() {
   const searchParams = useSearchParams();
   const chatId = searchParams.get("id") ?? "";
+  const surfaceParam = searchParams.get("surface") ?? "";
   // 홈 composer가 ?prompt=...로 첫 메시지를 실어서 보내면 자동 전송 (한 번만)
   const seedPrompt = searchParams.get("prompt") ?? "";
   const seedPermission = parsePermission(
@@ -107,6 +160,9 @@ function ChatPage() {
   // runId가 도착하기 전(invoke:run 왕복 중)에 Stop을 누른 경우를 기억 — 도착 즉시 취소한다.
   const cancelRequestedRef = useRef(false);
   const [artifact, setArtifact] = useState<CodeArtifact | null>(null);
+  const [surface, setSurface] = useState<WorkbenchSurface | null>(null);
+  const [scaffoldedApps, setScaffoldedApps] = useState<Record<string, AppFactoryScaffoldResult>>({});
+  const [scaffoldedTools, setScaffoldedTools] = useState<Record<string, ToolFactoryScaffoldResult>>({});
   // 우측 워크스페이스 패널 — 채팅 진입 시 working_folder가 저장돼 있으면 자동 노출
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   // 우측 팀 네트워크 패널 — 에이전트 명령/응답 흐름 비주얼
@@ -217,6 +273,33 @@ function ChatPage() {
                   steps: [
                     ...(msg.steps ?? []),
                     { id: uid(), kind: "tool", text: ev.tool!.name, tool: ev.tool!.name, args: ev.tool!.args },
+                  ],
+                }
+              : msg,
+          ),
+        );
+      } else if (ev.kind === "surface" && ev.surface) {
+        const surfaceId = ev.surfaceId ?? uid();
+        setArtifact(null);
+        setSurface({ id: surfaceId, manifest: ev.surface });
+        setMessages((m) =>
+          m.map((msg) =>
+            msg.id === placeholderId
+              ? {
+                  ...msg,
+                  steps: [
+                    ...(msg.steps ?? []),
+                    {
+                      id: uid(),
+                      kind: "tool",
+                      text: `Surface ready · ${ev.surface!.title}`,
+                      tool: "agentlas_surface",
+                      args: JSON.stringify({
+                        id: surfaceId,
+                        domain: ev.surface!.domain,
+                        layout: ev.surface!.layout,
+                      }),
+                    },
                   ],
                 }
               : msg,
@@ -334,6 +417,8 @@ function ChatPage() {
     cancelRequestedRef.current = false;
     setLiveAgents({});
     setNetTimeline([]);
+    setScaffoldedApps({});
+    setScaffoldedTools({});
     void (async () => {
       const c = await api.chats.get(chatId);
       if (cancelled || !c) {
@@ -438,6 +523,22 @@ function ChatPage() {
       subRef.current = null;
     };
   }, [chatId, router, consumeEvent, subscribeRun, t]);
+
+  // Library > Generated surfaces can deep-link back to the originating chat and
+  // reopen the durable Workbench surface without requiring a live invocation.
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !chatId || !surfaceParam) return;
+    let cancelled = false;
+    void api.surfaces.getSurface(surfaceParam).then((record) => {
+      if (cancelled || !record || record.chatId !== chatId) return;
+      setArtifact(null);
+      setSurface({ id: record.id, manifest: record.manifest, state: record.state, jobSummary: record.jobSummary });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [chatId, surfaceParam]);
 
   // 재접속 안전망 — 진행 중이라 여겼는데(runIdRef) main의 실행 목록에서 이 채팅이 빠졌으면
   // (attach 스냅샷↔구독 틈에 final 이벤트를 놓친 경우) 히스토리를 다시 읽어 최종 답변으로 화해.
@@ -622,6 +723,336 @@ function ChatPage() {
     [send],
   );
 
+  const handleSurfaceAction = useCallback(
+    async (activeSurface: WorkbenchSurface, action: AgentlasSurfaceAction) => {
+      const api = ipc();
+      const manifest = activeSurface.manifest;
+      if (action.type === "external-link" && action.url) {
+        window.open(action.url, "_blank", "noopener,noreferrer");
+        return;
+      }
+      if (action.type === "copy") {
+        void navigator.clipboard.writeText(action.prompt || JSON.stringify(manifest, null, 2));
+        return;
+      }
+      if (
+        action.type === "scaffold-agent-team" ||
+        action.type === "scaffold-app" ||
+        action.type === "operate-app" ||
+        action.type === "install-mcp" ||
+        action.type === "run-smoke-test" ||
+        action.type === "deploy-preview" ||
+        action.type === "scaffold-tool" ||
+        action.type === "run-tool-smoke" ||
+        action.type === "install-tool-mcp" ||
+        action.type === "materialize-asset-pack"
+      ) {
+        if (!api) return;
+        const approval = surfaceApprovalRequirement(activeSurface, action);
+        if (approval && !(await ensureSurfaceApproval(api, activeSurface.id, action, approval))) return;
+        const pendingId = uid();
+        const label = manifest.app?.name || manifest.title;
+        setMessages((m) => [
+          ...m,
+          {
+            id: pendingId,
+            role: "system",
+            text: `${action.label} started for ${label}...`,
+          },
+        ]);
+        const update = (text: string) => {
+          setMessages((m) =>
+            m.map((msg) => (msg.id === pendingId ? { ...msg, text } : msg)),
+          );
+        };
+        const ensureTool = async () => {
+          const key = surfaceToolKey(activeSurface.id, action);
+          const existing = scaffoldedTools[key];
+          if (existing) return existing;
+          if (!chatId) throw new Error("Chat id is required to scaffold an Agentlas tool.");
+          const requestedToolId = typeof action.toolId === "string" ? action.toolId : undefined;
+          const persisted = await api.toolFactory.getToolBySurface(
+            chatId,
+            activeSurface.id,
+            requestedToolId,
+          );
+          if (persisted) {
+            const restored = toolResultFromRecord(persisted);
+            setScaffoldedTools((prev) => ({ ...prev, [key]: restored }));
+            return restored;
+          }
+          const result = await api.toolFactory.scaffold({
+            chatId,
+            surfaceId: activeSurface.id,
+            actionId: action.id,
+            toolId: requestedToolId,
+            manifest,
+          });
+          setScaffoldedTools((prev) => ({ ...prev, [key]: result }));
+          return result;
+        };
+        const ensureScaffold = async () => {
+          const existing = scaffoldedApps[activeSurface.id];
+          if (existing) return existing;
+          if (!chatId) throw new Error("Chat id is required to register an Agentlas app.");
+          const persisted = await api.appFactory.getAppBySurface(chatId, activeSurface.id);
+          if (persisted) {
+            const restored = scaffoldResultFromRecord(persisted);
+            setScaffoldedApps((prev) => ({ ...prev, [activeSurface.id]: restored }));
+            return restored;
+          }
+          const result = await api.appFactory.scaffold({
+            chatId,
+            surfaceId: activeSurface.id,
+            actionId: action.id,
+            manifest,
+          });
+          setScaffoldedApps((prev) => ({ ...prev, [activeSurface.id]: result }));
+          return result;
+        };
+        void (async () => {
+          try {
+            if (action.type === "scaffold-agent-team") {
+              if (!chatId) throw new Error("Chat id is required to create an Agentlas agent team.");
+              const result = await api.metaAgent.createCommerceTeam({
+                chatId,
+                surfaceId: activeSurface.id,
+                manifest,
+              });
+              update(
+                [
+                  `Agent team ready: ${result.firm.name}`,
+                  "",
+                  `Root: ${result.rootPath}`,
+                  `Agent: ${result.agent.slug}`,
+                  `Firm: ${result.firm.slug}`,
+                  `Divisions: ${result.org.divisions.length}`,
+                  `Files: ${result.files.length}`,
+                ].join("\n"),
+              );
+              setWorkspaceOpenPersisted(true);
+              setFolderReload((n) => n + 1);
+              return;
+            }
+            if (action.type === "materialize-asset-pack") {
+              if (!chatId) throw new Error("Chat id is required to materialize an Agentlas asset pack.");
+              const result = await api.surfaceAssets.materialize({
+                chatId,
+                surfaceId: activeSurface.id,
+                actionId: action.id,
+                manifest,
+              });
+              update(
+                [
+                  `Asset pack ready: ${result.packName}`,
+                  "",
+                  `Root: ${result.rootPath}`,
+                  `Index: ${result.indexPath}`,
+                  `Manifest: ${result.manifestPath}`,
+                  `Assets: ${result.assetsPath}`,
+                  `Open: ${result.fileUrl}`,
+                  "",
+                  result.summary,
+                ].join("\n"),
+              );
+              window.open(result.fileUrl, "_blank", "noopener,noreferrer");
+              setWorkspaceOpenPersisted(true);
+              setFolderReload((n) => n + 1);
+              return;
+            }
+            if (
+              action.type === "scaffold-tool" ||
+              action.type === "run-tool-smoke" ||
+              action.type === "install-tool-mcp"
+            ) {
+              const tool = await ensureTool();
+              if (action.type === "scaffold-tool") {
+                update(
+                  [
+                    `Tool scaffold ready: ${tool.toolName}`,
+                    "",
+                    `Root: ${tool.rootPath}`,
+                    `Runtime: ${tool.toolPath}`,
+                    `MCP: ${tool.mcpPath}`,
+                    `Smoke: ${tool.smokePath}`,
+                    "",
+                    tool.summary,
+                  ].join("\n"),
+                );
+              } else if (action.type === "run-tool-smoke") {
+                const result = await api.toolFactory.runSmoke({ rootPath: tool.rootPath });
+                update(
+                  [
+                    result.ok ? `Tool smoke passed: ${tool.toolName}` : `Tool smoke failed: ${tool.toolName}`,
+                    "",
+                    `Command: ${result.command}`,
+                    `Exit: ${result.exitCode ?? "unknown"}`,
+                    result.stdout.trim() ? `Stdout:\n${result.stdout.trim()}` : "",
+                    result.stderr.trim() ? `Stderr:\n${result.stderr.trim()}` : "",
+                  ]
+                    .filter(Boolean)
+                    .join("\n"),
+                );
+              } else {
+                const result = await api.toolFactory.installMcp({ rootPath: tool.rootPath });
+                update(
+                  [
+                    `Tool MCP installed: ${tool.toolName}`,
+                    "",
+                    `Server: ${result.server.name}`,
+                    `Command: ${result.command}`,
+                    `Args: ${result.args.join(" ")}`,
+                    `MCP: ${result.mcpPath}`,
+                  ].join("\n"),
+                );
+              }
+              setWorkspaceOpenPersisted(true);
+              setFolderReload((n) => n + 1);
+              return;
+            }
+            const scaffold = await ensureScaffold();
+            if (action.type === "scaffold-app") {
+              update(
+                [
+                  `App scaffold ready: ${scaffold.appName}`,
+                  "",
+                  `Root: ${scaffold.rootPath}`,
+                  `Preview: ${scaffold.previewPath}`,
+                  `Setup: ${scaffold.setupPath}`,
+                  `Smoke: ${scaffold.smokePath}`,
+                  "",
+                  scaffold.summary,
+                ].join("\n"),
+              );
+            } else if (action.type === "operate-app") {
+              const result = await api.appFactory.runAutopilot({
+                rootPath: scaffold.rootPath,
+                budgetApproved: true,
+                approvedBy: "agentlas-chat-user",
+                approvalReason: `Approved surface action: ${action.label}`,
+                credentialSource: "agentlas-env-vault",
+                captureProviderSessions: false,
+                browserMode: "plan-only",
+              });
+              update(
+                [
+                  `Agentlas OS operated: ${scaffold.appName}`,
+                  "",
+                  result.summary,
+                  `Status: ${result.status}`,
+                  `Steps: ${result.steps.filter((step) => step.status === "completed").length}/${result.steps.length}`,
+                  result.waitingOn.length ? `Waiting: ${result.waitingOn.join(", ")}` : "Waiting: none",
+                  result.preview ? `Preview: ${result.preview.fileUrl}` : "",
+                  result.appTool ? `Tool: ${result.appTool.toolName}` : "",
+                ]
+                  .filter(Boolean)
+                  .join("\n"),
+              );
+              if (result.preview?.fileUrl) window.open(result.preview.fileUrl, "_blank", "noopener,noreferrer");
+            } else if (action.type === "install-mcp") {
+              const result = await api.appFactory.installMcpPlan({ rootPath: scaffold.rootPath });
+              update(
+                [
+                  `MCP adapter plan ready: ${scaffold.appName}`,
+                  "",
+                  `Config: ${result.configPath}`,
+                  `Env: ${result.envPath}`,
+                  `Adapters: ${result.adapters.length}`,
+                  result.missingCredentials.length
+                    ? `Missing credentials: ${result.missingCredentials.join(", ")}`
+                    : "Missing credentials: none",
+                ].join("\n"),
+              );
+            } else if (action.type === "run-smoke-test") {
+              const result = await api.appFactory.runSmoke({ rootPath: scaffold.rootPath });
+              update(
+                [
+                  result.ok ? `Smoke passed: ${scaffold.appName}` : `Smoke failed: ${scaffold.appName}`,
+                  "",
+                  `Command: ${result.command}`,
+                  `Exit: ${result.exitCode ?? "unknown"}`,
+                  result.stdout.trim() ? `Stdout:\n${result.stdout.trim()}` : "",
+                  result.stderr.trim() ? `Stderr:\n${result.stderr.trim()}` : "",
+                ]
+                  .filter(Boolean)
+                  .join("\n"),
+              );
+            } else if (action.type === "deploy-preview") {
+              const result = await api.appFactory.preparePreview({ rootPath: scaffold.rootPath });
+              update(
+                [
+                  `Preview deploy package ready: ${scaffold.appName}`,
+                  "",
+                  `Dist: ${result.deployPath}`,
+                  `Preview: ${result.previewPath}`,
+                  `Manifest: ${result.manifestPath}`,
+                  `Open: ${result.fileUrl}`,
+                  `Serve: ${result.serveCommand}`,
+                ].join("\n"),
+              );
+            }
+            setWorkspaceOpenPersisted(true);
+            setFolderReload((n) => n + 1);
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            update(`${action.label} failed: ${message}`);
+          }
+        })();
+        return;
+      }
+
+      const launchPrompt =
+        action.prompt ||
+        [
+          `Continue building the Agentlas app surface "${manifest.title}".`,
+          `Action: ${action.label} (${action.type}).`,
+          "Turn this into the next concrete product artifact: screens, connectors, files, tests, and launch proof.",
+        ].join("\n");
+
+      const approval = api ? surfaceApprovalRequirement(activeSurface, action) : null;
+      if (api && approval && !(await ensureSurfaceApproval(api, activeSurface.id, action, approval))) return;
+
+      void send(launchPrompt, {
+        permissions: action.permission === "full" ? "full" : action.permission === "read" ? "read" : "write",
+      });
+    },
+    [chatId, scaffoldedApps, scaffoldedTools, send, setWorkspaceOpenPersisted],
+  );
+
+  const handleSurfaceStatePatch = useCallback<SurfaceStatePatchHandler>((activeSurface, patch) => {
+    const api = ipc();
+    if (!api) return;
+    void api.surfaces
+      .updateState({
+        surfaceId: activeSurface.id,
+        ...patch,
+        actor: patch.actor || "user",
+      })
+      .then((record) => {
+        setSurface((cur) =>
+          cur?.id === record.id
+            ? {
+                id: record.id,
+                manifest: record.manifest,
+                state: record.state,
+                jobSummary: record.jobSummary,
+              }
+            : cur,
+        );
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        setMessages((m) => [
+          ...m,
+          {
+            id: uid(),
+            role: "system",
+            text: `Surface state was not saved: ${message}`,
+          },
+        ]);
+      });
+  }, []);
+
   // 홈 composer에서 ?prompt=...로 넘어왔으면 chat + agent 로드 직후 자동 전송
   useEffect(() => {
     if (!seedPrompt || !chat || !agent) return;
@@ -633,14 +1064,14 @@ function ChatPage() {
     router.replace(`/chat?id=${chatId}`);
   }, [seedPrompt, chat, agent, chatId, messages.length, send, router]);
 
-  // 슬래시 커맨드 실행 — /new /clear /apps /docstudio /help
+  // 슬래시 커맨드 실행 — /new(새 채팅) /clear(기록 지우기) /help(단축키)
   const handleCommand = useCallback(
     (cmd: string) => {
       if (cmd === "/apps") {
         router.push("/apps");
         return;
       }
-      if (cmd === "/docstudio") {
+      if (cmd === "/docstudio" || cmd === "/document-studio" || cmd === "/문서스튜디오") {
         router.push("/apps/document-studio");
         return;
       }
@@ -697,6 +1128,8 @@ function ChatPage() {
   }
 
   if (!chat) return null;
+  const displayAgents = visibleAgents(allAgents);
+  const displayAgent = agent?.visibility === "background" ? null : agent;
 
   return (
     <div style={{ display: "flex", height: "100%", width: "100%", minWidth: 0, overflow: "hidden" }}>
@@ -713,10 +1146,10 @@ function ChatPage() {
           minHeight: 56,
         }}
       >
-        {agent && (
+        {displayAgent && displayAgents.length > 0 && (
           <AgentPicker
-            agents={allAgents}
-            activeId={agent.id}
+            agents={displayAgents}
+            activeId={displayAgent.id}
             onChange={(id) => void switchAgent(id)}
             ariaLabel={t("chat.switch_agent")}
             maxButtonWidth={firm ? 420 : 232}
@@ -882,17 +1315,20 @@ function ChatPage() {
 
       <ChatStream
         messages={messages}
-        agentName={agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback")}
-        agentTone={agent?.tone ?? "blue"}
+        agentName={displayAgent ? pickLocalized(displayAgent, locale).name : t("chat.assistant_fallback")}
+        agentTone={displayAgent?.tone ?? "blue"}
         emptyDirectory={{
           apps: INSTALLED_APPS,
-          agents: allAgents,
+          agents: displayAgents,
           firms: allFirms,
           projects: allProjects,
           envKeys: allEnvKeys,
           commands: cliCommands,
         }}
-        onOpenArtifact={setArtifact}
+        onOpenArtifact={(a) => {
+          setSurface(null);
+          setArtifact(a);
+        }}
         onAnswerQuestion={answerQuestion}
       />
       {/* Codex식: 이 대화가 폴더(프로젝트)에서 작업하는지 / 전역 대화인지 선택 */}
@@ -921,7 +1357,7 @@ function ChatPage() {
         busy={busy}
         disabled={!agent}
         context={{
-          agents: allAgents,
+          agents: displayAgents,
           projects: allProjects,
           firms: allFirms,
           apps: INSTALLED_APPS,
@@ -934,7 +1370,16 @@ function ChatPage() {
         onSelectEffort={switchEffort}
       />
       </div>
-      <ArtifactPanel artifact={artifact} onClose={() => setArtifact(null)} />
+      <WorkbenchPanel
+        artifact={artifact}
+        surface={surface}
+        onSurfaceAction={handleSurfaceAction}
+        onSurfaceStatePatch={handleSurfaceStatePatch}
+        onClose={() => {
+          setArtifact(null);
+          setSurface(null);
+        }}
+      />
       {workspaceOpen && (
         <WorkspacePanel chatId={chatId || null} onClose={() => setWorkspaceOpenPersisted(false)} />
       )}
@@ -942,8 +1387,8 @@ function ChatPage() {
         <AgentNetworkPanel
           firm={firm}
           org={resolvedOrg}
-          agent={agent}
-          agents={allAgents}
+          agent={displayAgent}
+          agents={displayAgents}
           busy={busy}
           liveAgents={liveAgents}
           timeline={netTimeline}

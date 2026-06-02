@@ -8,8 +8,6 @@ export interface AutoRouteChoice {
   matchedTerms: string[];
 }
 
-const META_AGENT_SLUG = "agentlas-meta-agent";
-
 const STOP_WORDS = new Set([
   "the",
   "and",
@@ -36,29 +34,6 @@ const STOP_WORDS = new Set([
 ]);
 
 const ROUTE_HINTS: Array<{ slug: string; terms: string[]; reasonKo: string; reasonEn: string }> = [
-  {
-    slug: META_AGENT_SLUG,
-    terms: [
-      "meta-agent",
-      "metaagent",
-      "agent package",
-      "agent repo",
-      "AGENTS.md",
-      "CLAUDE.md",
-      "GEMINI.md",
-      "SKILL.md",
-      "codex",
-      "skill",
-      "에이전트",
-      "메타에이전트",
-      "스킬",
-      "코덱스",
-      "라우팅",
-      "오케스트레이터",
-    ],
-    reasonKo: "에이전트/스킬 패키징과 Codex 호환 라우팅 요청입니다",
-    reasonEn: "the request is about agent/skill packaging and Codex-compatible routing",
-  },
   {
     slug: "agentlas-memory-curator",
     terms: ["memory", "remember", "recall", "request_context", "context_json", "메모리", "기억", "회상", "저장"],
@@ -185,7 +160,6 @@ export function selectAutoRoutedAgent(
 
   const fallback =
     candidates.find((agent) => agent.slug === "agentlas-pm-soul") ??
-    candidates.find((agent) => agent.slug === META_AGENT_SLUG) ??
     candidates[0];
   return {
     agent: fallback,

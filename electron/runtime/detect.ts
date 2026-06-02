@@ -112,6 +112,7 @@ function saveActiveRuntime(status: RuntimeStatus | RuntimeSelection): void {
  * - 로컬 CLI 3종 + BYOK API 키 3종 = 최대 6개 후보 반환
  */
 export async function detectRuntimes(): Promise<RuntimeStatus[]> {
+  if (process.env.AGENTLAS_DISABLE_RUNTIME_PROBES === "1") return [];
   const db = getDb();
   const activeRow = db
     .prepare("SELECT kind, backend, source, model, long_context FROM active_runtime WHERE id = 1")

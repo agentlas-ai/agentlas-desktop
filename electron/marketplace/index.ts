@@ -6,6 +6,7 @@ import { InMemorySource } from "./in-memory-source";
 import { McpSource } from "./mcp-source";
 import type { MarketplaceSource, SeedListingFull } from "./source";
 import { getSessionCookieHeader } from "../auth";
+import { isPublicDesktopAgent } from "../agents/policy";
 import type {
   FirmListing,
   MarketplaceListing,
@@ -30,6 +31,19 @@ function setStatus(patch: Partial<MarketplaceSourceStatus>) {
     ...patch,
     lastCheckedAt: new Date().toISOString(),
   };
+}
+
+function publicListings<T extends MarketplaceListing>(listings: T[]): T[] {
+  return listings.filter((listing) => isPublicDesktopAgent(listing));
+}
+
+function publicBundles(bundles: TeamBundle[]): TeamBundle[] {
+  return bundles
+    .map((bundle) => ({
+      ...bundle,
+      agents: bundle.agents.filter((agent) => isPublicDesktopAgent(agent)),
+    }))
+    .filter((bundle) => bundle.agents.length > 0);
 }
 
 class FallbackSource implements MarketplaceSource {
@@ -97,9 +111,9 @@ class FallbackSource implements MarketplaceSource {
       "listBundles",
       () => this.bundleListCache ?? undefined,
       (bundles) => {
-        this.bundleListCache = bundles;
+        this.bundleListCache = publicBundles(bundles);
       },
-    );
+    ).then(publicBundles);
   }
   searchAgents(q: string): Promise<MarketplaceListing[]> {
     const key = q.trim().toLowerCase();
@@ -108,19 +122,20 @@ class FallbackSource implements MarketplaceSource {
       "searchAgents",
       () => this.searchCache.get(key),
       (listings) => {
-        this.searchCache.set(key, listings);
+        this.searchCache.set(key, publicListings(listings));
       },
-    );
+    ).then(publicListings);
   }
   getListingBySlug(slug: string): Promise<(SeedListingFull & MarketplaceListing) | null> {
+    if (!isPublicDesktopAgent({ slug })) return Promise.resolve(null);
     return this.tryPrimary(
       (s) => s.getListingBySlug(slug),
       "getListingBySlug",
       () => (this.agentManifestCache.has(slug) ? this.agentManifestCache.get(slug)! : undefined),
       (listing) => {
-        this.agentManifestCache.set(slug, listing);
+        this.agentManifestCache.set(slug, listing && isPublicDesktopAgent(listing) ? listing : null);
       },
-    );
+    ).then((listing) => (listing && isPublicDesktopAgent(listing) ? listing : null));
   }
   getFirmBySlug(slug: string): Promise<FirmListing | null> {
     return this.tryPrimary(

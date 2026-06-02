@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ipc } from "@/lib/ipc";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type { Automation, InstalledAgent, InstalledFirm } from "@/lib/types";
 import { IconBolt, IconBuilding, IconPlus, IconTrash } from "@/components/Icon";
@@ -22,7 +23,7 @@ export default function AutomationListPage() {
       api.firms.list(),
     ]);
     setItems(list);
-    setAgents(ag);
+    setAgents(visibleAgents(ag));
     setFirms(fm);
   }
   useEffect(() => {
