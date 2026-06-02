@@ -240,7 +240,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
   let display = cleanedText;
   try {
     const { cleanedText: c2 } = curateReply(display, {
-      projectPath: activePath,
+      projectPath: activePath ?? workingFolder ?? null,
       projectId: p.chat.projectId ?? null,
       agentId: node.id,
       chatId: turn.chatId,

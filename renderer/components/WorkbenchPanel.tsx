@@ -3,7 +3,7 @@
 // right-side workspace. Surface manifests are declarative; this component never
 // executes model-generated HTML/JS.
 "use client";
-import { useMemo, useState } from "react";
+import { Children, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { buildSurfaceDelegationPlan } from "@shared/surface-delegation";
 import type { AgentlasSurfaceCredentialRequest, AgentlasSurfacePaymentRequest } from "@shared/surface-delegation";
@@ -68,6 +68,76 @@ export function WorkbenchPanel({
   onSurfaceStatePatch?: SurfaceStatePatchHandler;
 }) {
   const { t } = useT();
+  const [panelWidth, setPanelWidth] = useState(DEFAULT_PANEL_WIDTH);
+  const panelWidthRef = useRef(DEFAULT_PANEL_WIDTH);
+
+  const clampPanelWidth = useCallback((value: number) => {
+    const viewportMax =
+      typeof window === "undefined"
+        ? MAX_PANEL_WIDTH
+        : Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, window.innerWidth - 360));
+    return Math.max(MIN_PANEL_WIDTH, Math.min(viewportMax, value));
+  }, []);
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(PANEL_WIDTH_STORAGE_KEY);
+      const parsed = saved ? Number.parseInt(saved, 10) : NaN;
+      if (Number.isFinite(parsed)) setPanelWidth(clampPanelWidth(parsed));
+    } catch {
+      // ignore
+    }
+  }, [clampPanelWidth]);
+
+  useEffect(() => {
+    const next = clampPanelWidth(panelWidth);
+    panelWidthRef.current = next;
+    if (next !== panelWidth) {
+      setPanelWidth(next);
+      return;
+    }
+    try {
+      window.localStorage.setItem(PANEL_WIDTH_STORAGE_KEY, String(next));
+    } catch {
+      // ignore
+    }
+  }, [clampPanelWidth, panelWidth]);
+
+  const startPanelResize = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const startX = event.clientX;
+      const startWidth = panelWidthRef.current;
+      const previousCursor = document.body.style.cursor;
+      const previousSelect = document.body.style.userSelect;
+      document.body.style.cursor = "ew-resize";
+      document.body.style.userSelect = "none";
+
+      const onMove = (moveEvent: PointerEvent) => {
+        const next = clampPanelWidth(startWidth + startX - moveEvent.clientX);
+        panelWidthRef.current = next;
+        setPanelWidth(next);
+      };
+      const onUp = () => {
+        document.body.style.cursor = previousCursor;
+        document.body.style.userSelect = previousSelect;
+        try {
+          window.localStorage.setItem(PANEL_WIDTH_STORAGE_KEY, String(panelWidthRef.current));
+        } catch {
+          // ignore
+        }
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+      };
+
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+      event.preventDefault();
+    },
+    [clampPanelWidth],
+  );
+
   if (!artifact && !surface) return null;
 
   const isSurface = surface !== null;
@@ -79,7 +149,7 @@ export function WorkbenchPanel({
       : "";
 
   return (
-    <aside className="agentlas-workbench-panel" style={shell}>
+    <aside className="agentlas-workbench-panel" style={{ ...shell, width: panelWidth }}>
       <style>{`
         @keyframes workbench-in {
           from { transform: translateX(20px); opacity: 0; }
@@ -103,6 +173,9 @@ export function WorkbenchPanel({
           .agentlas-generic-content {
             grid-template-columns: 1fr !important;
           }
+          .agentlas-workbench-resizer {
+            display: none !important;
+          }
           .agentlas-app-preview-body,
           .agentlas-app-lower-grid,
           .agentlas-app-metric-grid {
@@ -110,6 +183,14 @@ export function WorkbenchPanel({
           }
         }
       `}</style>
+      <div
+        role="separator"
+        aria-label={t("workspace.resize")}
+        aria-orientation="vertical"
+        onPointerDown={startPanelResize}
+        title={t("workspace.resize")}
+        style={panelResizeHandle}
+      />
       <header style={header}>
         <div style={mark}>
           {isSurface ? <IconSparkles size={15} /> : <IconLayers size={15} />}
@@ -207,13 +288,22 @@ function AppFactorySurface({
   const launchRows = rowsOf(dataByName(manifest, "launch") ?? firstData(manifest, "launch-checklist"));
   const artifactRows = rowsOf(dataByName(manifest, "artifacts") ?? firstData(manifest, "artifacts"));
   const metricsRows = rowsOf(dataByName(manifest, "metrics") ?? firstData(manifest, "metrics"));
+  const storyboardRows = rowsOf(dataByName(manifest, "shots") ?? firstData(manifest, "storyboard"));
   const appName = app?.name || manifest.title;
   const tagline = app?.tagline || app?.valueProp || "Agent-made app blueprint";
   const business = app?.business ?? objectValue(dataByName(manifest, "business"));
 
   return (
     <div style={surfaceBody}>
-      <div className="agentlas-creative-grid" style={appFactoryGrid}>
+      <ResizableSurfaceGrid
+        className="agentlas-creative-grid"
+        storageKey="agentlas.workbench.appFactoryGrid"
+        defaultLeft={220}
+        defaultRight={240}
+        minLeft={180}
+        minCenter={320}
+        minRight={190}
+      >
         <section style={leftRail}>
           <SectionTitle icon={<IconTarget size={14} />} label="Product Thesis" />
           <div style={appThesis}>
@@ -256,6 +346,17 @@ function AppFactorySurface({
               <span style={darkPill}>{routes.length} screens</span>
             </div>
           </div>
+
+          {storyboardRows.length > 0 && (
+            <section style={timelineSection}>
+              <SectionTitle icon={<IconFilm size={14} />} label="Storyboard" />
+              <div style={shotStrip}>
+                {storyboardRows.slice(0, 8).map((row, idx) => (
+                  <ShotCard key={idx} index={idx + 1} row={row} manifest={manifest} />
+                ))}
+              </div>
+            </section>
+          )}
 
           <section style={appPreviewShell}>
             <div style={appPreviewTopbar}>
@@ -395,7 +496,7 @@ function AppFactorySurface({
             fallback="No deployment plan yet."
           />
         </section>
-      </div>
+      </ResizableSurfaceGrid>
     </div>
   );
 }
@@ -431,7 +532,15 @@ function CreativeStudioSurface({
 
   return (
     <div style={surfaceBody}>
-      <div className="agentlas-creative-grid" style={creativeGrid}>
+      <ResizableSurfaceGrid
+        className="agentlas-creative-grid"
+        storageKey="agentlas.workbench.creativeGrid"
+        defaultLeft={210}
+        defaultRight={220}
+        minLeft={170}
+        minCenter={280}
+        minRight={180}
+      >
         <section style={leftRail}>
           <SectionTitle icon={<IconWand size={14} />} label="Brief" />
           <KeyValueList value={brief?.value} fallback={brief?.summary ?? "No brief data yet."} />
@@ -465,10 +574,11 @@ function CreativeStudioSurface({
             <div style={shotStrip}>
               {shotRows.length > 0 ? (
                 shotRows.slice(0, 8).map((row, idx) => (
-                  <ShotCard
+                    <ShotCard
                     key={idx}
                     index={idx + 1}
                     row={row}
+                    manifest={manifest}
                     editable={canPatchShots}
                     onStatusChange={(status) =>
                       onStatePatch?.(surface, {
@@ -528,7 +638,7 @@ function CreativeStudioSurface({
             {provenanceRows.length === 0 && <div style={mutedSmall}>No sources attached.</div>}
           </div>
         </section>
-      </div>
+      </ResizableSurfaceGrid>
     </div>
   );
 }
@@ -587,6 +697,161 @@ function GenericSurface({
           <DelegationPanel surface={surface} onAction={onAction} />
         </div>
       </section>
+    </div>
+  );
+}
+
+function ResizableSurfaceGrid({
+  children,
+  className,
+  storageKey,
+  defaultLeft,
+  defaultRight,
+  minLeft,
+  minCenter,
+  minRight,
+}: {
+  children: ReactNode;
+  className?: string;
+  storageKey: string;
+  defaultLeft: number;
+  defaultRight: number;
+  minLeft: number;
+  minCenter: number;
+  minRight: number;
+}) {
+  const { t } = useT();
+  const panes = Children.toArray(children).slice(0, 3);
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const [left, setLeft] = useState(defaultLeft);
+  const [right, setRight] = useState(defaultRight);
+  const leftRef = useRef(defaultLeft);
+  const rightRef = useRef(defaultRight);
+
+  const clampLeft = useCallback(
+    (value: number, currentRight = rightRef.current) => {
+      const total = gridRef.current?.clientWidth ?? defaultLeft + defaultRight + minCenter + RESIZER_COLUMN_WIDTH * 2;
+      const maxLeft = Math.max(minLeft, total - currentRight - minCenter - RESIZER_COLUMN_WIDTH * 2);
+      return Math.max(minLeft, Math.min(maxLeft, value));
+    },
+    [defaultLeft, defaultRight, minCenter, minLeft],
+  );
+
+  const clampRight = useCallback(
+    (value: number, currentLeft = leftRef.current) => {
+      const total = gridRef.current?.clientWidth ?? defaultLeft + defaultRight + minCenter + RESIZER_COLUMN_WIDTH * 2;
+      const maxRight = Math.max(minRight, total - currentLeft - minCenter - RESIZER_COLUMN_WIDTH * 2);
+      return Math.max(minRight, Math.min(maxRight, value));
+    },
+    [defaultLeft, defaultRight, minCenter, minRight],
+  );
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(storageKey);
+      const parsed = saved ? (JSON.parse(saved) as { left?: unknown; right?: unknown }) : null;
+      const nextLeft = typeof parsed?.left === "number" ? parsed.left : defaultLeft;
+      const nextRight = typeof parsed?.right === "number" ? parsed.right : defaultRight;
+      const safeLeft = clampLeft(nextLeft, nextRight);
+      const safeRight = clampRight(nextRight, safeLeft);
+      setLeft(safeLeft);
+      setRight(safeRight);
+    } catch {
+      // ignore
+    }
+  }, [clampLeft, clampRight, defaultLeft, defaultRight, storageKey]);
+
+  useEffect(() => {
+    const safeLeft = clampLeft(left, right);
+    const safeRight = clampRight(right, safeLeft);
+    leftRef.current = safeLeft;
+    rightRef.current = safeRight;
+    if (safeLeft !== left) setLeft(safeLeft);
+    if (safeRight !== right) setRight(safeRight);
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify({ left: safeLeft, right: safeRight }));
+    } catch {
+      // ignore
+    }
+  }, [clampLeft, clampRight, left, right, storageKey]);
+
+  useEffect(() => {
+    const onResize = () => {
+      setLeft((value) => clampLeft(value));
+      setRight((value) => clampRight(value));
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [clampLeft, clampRight]);
+
+  const startResize = useCallback(
+    (side: "left" | "right", event: React.PointerEvent<HTMLDivElement>) => {
+      const startX = event.clientX;
+      const startLeft = leftRef.current;
+      const startRight = rightRef.current;
+      const previousCursor = document.body.style.cursor;
+      const previousSelect = document.body.style.userSelect;
+      document.body.style.cursor = "ew-resize";
+      document.body.style.userSelect = "none";
+
+      const onMove = (moveEvent: PointerEvent) => {
+        const dx = moveEvent.clientX - startX;
+        if (side === "left") {
+          const nextLeft = clampLeft(startLeft + dx, startRight);
+          leftRef.current = nextLeft;
+          setLeft(nextLeft);
+        } else {
+          const nextRight = clampRight(startRight - dx, startLeft);
+          rightRef.current = nextRight;
+          setRight(nextRight);
+        }
+      };
+      const onUp = () => {
+        document.body.style.cursor = previousCursor;
+        document.body.style.userSelect = previousSelect;
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+      };
+
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+      event.preventDefault();
+    },
+    [clampLeft, clampRight],
+  );
+
+  return (
+    <div
+      ref={gridRef}
+      className={className}
+      style={{
+        ...surfaceGridShell,
+        gridTemplateColumns: `${left}px ${RESIZER_COLUMN_WIDTH}px minmax(${minCenter}px, 1fr) ${RESIZER_COLUMN_WIDTH}px ${right}px`,
+      }}
+    >
+      {panes[0]}
+      <div
+        className="agentlas-workbench-resizer"
+        role="separator"
+        aria-label={t("workspace.resize")}
+        aria-orientation="vertical"
+        title={t("workspace.resize")}
+        onPointerDown={(event) => startResize("left", event)}
+        style={surfaceGridResizeHandle}
+      />
+      {panes[1]}
+      <div
+        className="agentlas-workbench-resizer"
+        role="separator"
+        aria-label={t("workspace.resize")}
+        aria-orientation="vertical"
+        title={t("workspace.resize")}
+        onPointerDown={(event) => startResize("right", event)}
+        style={surfaceGridResizeHandle}
+      />
+      {panes[2]}
     </div>
   );
 }
@@ -982,30 +1247,45 @@ function SectionTitle({ icon, label }: { icon: ReactNode; label: string }) {
 function ShotCard({
   index,
   row,
+  manifest,
   editable,
   onStatusChange,
 }: {
   index: number;
   row: JsonObject;
+  manifest?: AgentlasSurfaceManifest;
   editable?: boolean;
   onStatusChange?: (status: "approved" | "rejected") => void;
 }) {
   const scene = stringField(row, "scene") || stringField(row, "title") || `Shot ${index}`;
   const duration = stringField(row, "duration") || stringField(row, "time") || "";
-  const prompt = stringField(row, "prompt") || stringField(row, "description") || "No prompt yet.";
+  const prompt = stringField(row, "imagePrompt") || stringField(row, "prompt") || stringField(row, "description") || "";
+  const caption = stringField(row, "caption");
+  const camera = stringField(row, "camera");
   const status = stringField(row, "status") || "planned";
+  const source = assetMediaSource(row);
+  const sourceText = source ?? "";
+  const isRemote = /^https?:\/\//i.test(sourceText);
+  const canRenderRemote = manifest ? !isRemote || manifestAllowsRemoteMedia(manifest, sourceText) : !isRemote;
   return (
     <article style={shotCard}>
-      <div style={shotPreview}>
-        <IconFilm size={18} />
-        <span>{index}</span>
-      </div>
+      {source && canRenderRemote ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={source} alt={caption || scene} style={shotPreviewImage} />
+      ) : (
+        <div style={shotPreview}>
+          <IconFilm size={18} />
+          <span>{index}</span>
+        </div>
+      )}
       <div style={shotMeta}>
         <div style={shotTitle}>
           <span>{scene}</span>
           {duration && <small>{duration}</small>}
         </div>
-        <p style={shotPrompt}>{prompt}</p>
+        {camera && <p style={shotPrompt}>{camera}</p>}
+        {caption && <p style={shotCaption}>{caption}</p>}
+        {prompt && <p style={shotPrompt}>{prompt}</p>}
         <div style={shotStatusRow}>
           <span style={statusPill}>{status}</span>
           {editable && (
@@ -1198,16 +1478,22 @@ function evidenceKindForRow(row: JsonObject, manifest: AgentlasSurfaceManifest):
 }
 
 function assetMediaSource(row: JsonObject): string | undefined {
-  return (
+  const raw =
     stringField(row, "dataUrl") ||
     stringField(row, "src") ||
     stringField(row, "previewUrl") ||
     stringField(row, "thumbnail") ||
+    stringField(row, "imagePath") ||
+    stringField(row, "path") ||
     stringField(row, "imageUrl") ||
     stringField(row, "videoUrl") ||
     stringField(row, "fileUrl") ||
-    stringField(row, "url")
-  );
+    stringField(row, "url");
+  if (!raw) return undefined;
+  if (/^\/(?:Users|Volumes|tmp|private\/tmp)\//.test(raw) && /\.(png|jpe?g|webp|gif|svg|avif|bmp)$/i.test(raw)) {
+    return `agentlas://localfile/?p=${encodeURIComponent(raw)}`;
+  }
+  return raw;
 }
 
 function isVideoSource(source: string, mediaType: string): boolean {
@@ -1262,6 +1548,12 @@ function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const PANEL_WIDTH_STORAGE_KEY = "agentlas.workbench.panel.width";
+const MIN_PANEL_WIDTH = 520;
+const DEFAULT_PANEL_WIDTH = 900;
+const MAX_PANEL_WIDTH = 1180;
+const RESIZER_COLUMN_WIDTH = 6;
+
 const shell: CSSProperties = {
   width: "min(900px, 62vw)",
   minWidth: 520,
@@ -1272,7 +1564,19 @@ const shell: CSSProperties = {
   display: "flex",
   flexDirection: "column",
   overflow: "hidden",
+  position: "relative",
   animation: "workbench-in 0.18s ease",
+};
+
+const panelResizeHandle: CSSProperties = {
+  position: "absolute",
+  left: -3,
+  top: 0,
+  bottom: 0,
+  width: 6,
+  cursor: "ew-resize",
+  zIndex: 5,
+  touchAction: "none",
 };
 
 const header: CSSProperties = {
@@ -1355,20 +1659,19 @@ const surfaceBody: CSSProperties = {
   background: "var(--paper-2)",
 };
 
-const creativeGrid: CSSProperties = {
+const surfaceGridShell: CSSProperties = {
   minHeight: "100%",
   display: "grid",
-  gridTemplateColumns: "210px minmax(280px, 1fr) 220px",
   gap: 1,
   background: "var(--paper-edge)",
 };
 
-const appFactoryGrid: CSSProperties = {
-  minHeight: "100%",
-  display: "grid",
-  gridTemplateColumns: "220px minmax(320px, 1fr) 240px",
-  gap: 1,
+const surfaceGridResizeHandle: CSSProperties = {
+  minWidth: RESIZER_COLUMN_WIDTH,
+  height: "100%",
   background: "var(--paper-edge)",
+  cursor: "ew-resize",
+  touchAction: "none",
 };
 
 const leftRail: CSSProperties = {
@@ -1721,6 +2024,14 @@ const shotPreview: CSSProperties = {
   fontWeight: 800,
 };
 
+const shotPreviewImage: CSSProperties = {
+  width: "100%",
+  height: 112,
+  objectFit: "cover",
+  background: "var(--paper-2)",
+  borderBottom: "1px solid var(--paper-edge)",
+};
+
 const shotMeta: CSSProperties = {
   padding: 10,
   display: "flex",
@@ -1747,6 +2058,14 @@ const shotPrompt: CSSProperties = {
   WebkitLineClamp: 3,
   WebkitBoxOrient: "vertical",
   overflow: "hidden",
+};
+
+const shotCaption: CSSProperties = {
+  margin: 0,
+  color: "var(--ink)",
+  fontSize: 12,
+  fontWeight: 800,
+  lineHeight: 1.35,
 };
 
 const statusPill: CSSProperties = {

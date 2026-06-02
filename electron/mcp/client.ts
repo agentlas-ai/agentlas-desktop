@@ -33,6 +33,7 @@ import { SURFACE_PROTOCOL, parseSurfaces, type SurfaceManifestDiagnostic } from 
 import { runHandsFreeAgentOs, shouldRunHandsFreeAgentOs } from "../agent-os/hands-free";
 import { prepareCreativeAdPackManifest } from "../creative-pack/surface";
 import { prepareEcommerceOpsManifest } from "../ecommerce-pack/surface";
+import { importGeneratedLocalApp } from "../app-factory/import-existing";
 import { createAutomation } from "../store/automations";
 import { recordAgentSurface } from "../store/agent-surfaces";
 import { runClaudeCode } from "../runtime/claude-code";
@@ -48,6 +49,7 @@ import {
 } from "../runtime/byok";
 import { runOllama } from "../runtime/ollama";
 import { type Runner, SURFACE_INTENT_MARKER } from "../runtime/runner";
+import { agentRunCwd } from "../runtime/exec";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
 import type {
   Chat,
@@ -213,7 +215,7 @@ async function runLocalAgentOsIntent(
     ].join("\n\n");
     try {
       const { cleanedText } = curateReply(displayText, {
-        projectPath: null,
+        projectPath: input.workingFolder ?? null,
         projectId: input.chat.projectId ?? null,
         agentId: input.agent.id,
         chatId: input.chat.id,
@@ -523,6 +525,7 @@ export async function runMcpInvocation(
     }
     try {
       let surfaceParse = parseSurfaces(displayText);
+      let importedLocalAppHandled = false;
       const originalSurfaceCleanedText = surfaceParse.cleanedText || displayText;
       if (
         surfaceParse.surfaces.length === 0 &&
@@ -566,6 +569,35 @@ export async function runMcpInvocation(
       }
       displayText = originalSurfaceCleanedText;
       if (surfaceParse.surfaces.length === 0) {
+        const importedLocalApp = importGeneratedLocalApp({
+          chat,
+          agent,
+          prompt: req.userPrompt,
+          responseText: displayText,
+          baseDir: workingFolder ?? agentRunCwd(),
+        });
+        if (importedLocalApp) {
+          sink({
+            kind: "tool-use",
+            status: importedLocalApp.imported
+              ? "Registered generated local app in Agentlas Library"
+              : "Generated local app is already registered in Agentlas Library",
+          });
+          sink({
+            kind: "surface",
+            surfaceId: importedLocalApp.surfaceId,
+            surface: importedLocalApp.manifest,
+          });
+          displayText = [
+            displayText.trim(),
+            `Agentlas Library: ${importedLocalApp.summary}`,
+          ]
+            .filter(Boolean)
+            .join("\n\n");
+          importedLocalAppHandled = true;
+        }
+      }
+      if (surfaceParse.surfaces.length === 0 && !importedLocalAppHandled) {
         const seededEcommerceSurface = prepareEcommerceOpsManifest({
           prompt: req.userPrompt,
         });
@@ -585,7 +617,7 @@ export async function runMcpInvocation(
             .join("\n\n");
         }
       }
-      if (surfaceParse.surfaces.length === 0) {
+      if (surfaceParse.surfaces.length === 0 && !importedLocalAppHandled) {
         const seededCreativeSurface = await prepareCreativeAdPackManifest({
           prompt: req.userPrompt,
           images: req.images,
@@ -649,7 +681,7 @@ export async function runMcpInvocation(
     }
     try {
       const { cleanedText } = curateReply(displayText, {
-        projectPath: activePath,
+        projectPath: activePath ?? workingFolder ?? null,
         projectId: chat.projectId ?? null,
         agentId: chat.agentId,
         chatId: chat.id,

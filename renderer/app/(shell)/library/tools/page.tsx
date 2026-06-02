@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState, type CSSProperties, type Rea
 import Link from "next/link";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
+import { ResizableDetailPane } from "@/components/ResizableDetailPane";
 import type {
   InstalledAgent,
   Project,
@@ -183,7 +184,13 @@ export default function LibraryToolsPage() {
         )}
       </section>
 
-      <aside style={detailPane}>
+      <ResizableDetailPane
+        storageKey="agentlas.library.tools.detail.width"
+        defaultWidth={440}
+        minWidth={340}
+        maxWidth={760}
+        maxWidthCss="46vw"
+      >
         {selected ? (
           <ToolDetail
             tool={selected}
@@ -200,9 +207,11 @@ export default function LibraryToolsPage() {
             onClearMessage={() => setMessage("")}
           />
         ) : (
-          <div style={{ color: "var(--muted-deep)", fontSize: 13 }}>{t("library.tools.empty")}</div>
+          <div style={{ color: "var(--muted-deep)", fontSize: 13, padding: "24px 22px", lineHeight: 1.5 }}>
+            {t("library.tools.empty")}
+          </div>
         )}
-      </aside>
+      </ResizableDetailPane>
     </div>
   );
 }
@@ -563,16 +572,6 @@ const metricPill: CSSProperties = {
   color: "var(--muted-deep)",
   fontSize: 11,
   fontWeight: 700,
-};
-
-const detailPane: CSSProperties = {
-  width: 440,
-  maxWidth: "46vw",
-  minWidth: 340,
-  borderLeft: "var(--hairline)",
-  background: "var(--paper)",
-  minHeight: 0,
-  overflow: "hidden",
 };
 
 const miniStat: CSSProperties = {

@@ -4,7 +4,7 @@
 //   - 타임라인: 오케스트레이터가 흘리는 실제 per-agent 활동/위임(handoff)을 위→아래 피드로.
 //   데이터는 orchestrator가 agentId/role/tier/phase로 태깅한 이벤트 = 진짜 텔레메트리.
 "use client";
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { InstalledAgent, InstalledFirm, ResolvedOrg } from "@/lib/types";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { IconClose, IconNetwork } from "./Icon";
@@ -45,8 +45,82 @@ interface Props {
 type RosterNode = { key: string; name: string; role: string; tier: 1 | 2 | 3 };
 type RosterDivision = RosterNode & { specialists: RosterNode[] };
 
+const WIDTH_STORAGE_KEY = "agentlas.network.width";
+const MIN_WIDTH = 260;
+const DEFAULT_WIDTH = 340;
+const MAX_WIDTH = 620;
+
 export function AgentNetworkPanel({ firm, org, agent, agents, busy, liveAgents, timeline, onClose }: Props) {
   const { t, locale } = useT();
+  const [width, setWidth] = useState(DEFAULT_WIDTH);
+  const widthRef = useRef(DEFAULT_WIDTH);
+
+  const clampWidth = useCallback((value: number) => {
+    const viewportMax =
+      typeof window === "undefined"
+        ? MAX_WIDTH
+        : Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, window.innerWidth - 360));
+    return Math.max(MIN_WIDTH, Math.min(viewportMax, value));
+  }, []);
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(WIDTH_STORAGE_KEY);
+      const parsed = saved ? Number.parseInt(saved, 10) : NaN;
+      if (Number.isFinite(parsed)) setWidth(clampWidth(parsed));
+    } catch {
+      // ignore
+    }
+  }, [clampWidth]);
+
+  useEffect(() => {
+    const next = clampWidth(width);
+    widthRef.current = next;
+    if (next !== width) {
+      setWidth(next);
+      return;
+    }
+    try {
+      window.localStorage.setItem(WIDTH_STORAGE_KEY, String(next));
+    } catch {
+      // ignore
+    }
+  }, [clampWidth, width]);
+
+  const startResize = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const startX = event.clientX;
+      const startWidth = widthRef.current;
+      const previousCursor = document.body.style.cursor;
+      const previousSelect = document.body.style.userSelect;
+      document.body.style.cursor = "ew-resize";
+      document.body.style.userSelect = "none";
+
+      const onMove = (moveEvent: PointerEvent) => {
+        const next = clampWidth(startWidth + startX - moveEvent.clientX);
+        widthRef.current = next;
+        setWidth(next);
+      };
+      const onUp = () => {
+        document.body.style.cursor = previousCursor;
+        document.body.style.userSelect = previousSelect;
+        try {
+          window.localStorage.setItem(WIDTH_STORAGE_KEY, String(widthRef.current));
+        } catch {
+          // ignore
+        }
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+      };
+
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+      event.preventDefault();
+    },
+    [clampWidth],
+  );
 
   const roster = useMemo(() => {
     // ResolvedOrg가 있으면 그걸로 명단 (노드 id = 이벤트 agentId와 정확히 일치)
@@ -100,8 +174,9 @@ export function AgentNetworkPanel({ firm, org, agent, agents, busy, liveAgents, 
   return (
     <aside
       style={{
-        width: 340,
-        minWidth: 260,
+        position: "relative",
+        width,
+        minWidth: MIN_WIDTH,
         maxWidth: "45vw",
         flexShrink: 1, // 좁은 창에서 줄어들어 화면 안에 맞춤(고정폭이면 우측으로 오버플로우)
         height: "100%",
@@ -111,6 +186,23 @@ export function AgentNetworkPanel({ firm, org, agent, agents, busy, liveAgents, 
         flexDirection: "column",
       }}
     >
+      <div
+        role="separator"
+        aria-label={t("workspace.resize")}
+        aria-orientation="vertical"
+        onPointerDown={startResize}
+        title={t("workspace.resize")}
+        style={{
+          position: "absolute",
+          left: -3,
+          top: 0,
+          bottom: 0,
+          width: 6,
+          cursor: "ew-resize",
+          zIndex: 5,
+          touchAction: "none",
+        }}
+      />
       <style>{`
         @keyframes net-blink { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
         @keyframes net-bar { 0% { transform: translateX(-100%); } 100% { transform: translateX(320%); } }

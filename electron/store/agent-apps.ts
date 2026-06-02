@@ -278,6 +278,8 @@ function isOperationKind(value: string): value is AppFactoryOperationKind {
     value === "resolve-provider-credentials" ||
     value === "approve-provider-payment" ||
     value === "open-provider-browser" ||
+    value === "start-local-app" ||
+    value === "stop-local-app" ||
     value === "run-smoke-test" ||
     value === "deploy-preview" ||
     value === "publish-as-tool" ||

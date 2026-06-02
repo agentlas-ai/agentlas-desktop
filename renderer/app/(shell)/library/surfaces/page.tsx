@@ -15,6 +15,7 @@ import type {
   ToolFactoryScaffoldResult,
 } from "@/lib/types";
 import { surfaceApprovalRequirement, type SurfaceApprovalRequirement } from "@/lib/surface-approval";
+import { ResizableDetailPane } from "@/components/ResizableDetailPane";
 import { SurfaceWorkbench, type SurfaceStatePatchHandler, type WorkbenchSurface } from "@/components/WorkbenchPanel";
 import {
   IconCheck,
@@ -340,7 +341,13 @@ export default function LibrarySurfacesPage() {
         )}
       </section>
 
-      <aside style={detailPane}>
+      <ResizableDetailPane
+        storageKey="agentlas.library.surfaces.detail.width"
+        defaultWidth={520}
+        minWidth={360}
+        maxWidth={880}
+        maxWidthCss="52vw"
+      >
         {selected ? (
           <SurfaceDetail
             surface={selected}
@@ -354,9 +361,11 @@ export default function LibrarySurfacesPage() {
             onStatePatch={handleSurfaceStatePatch}
           />
         ) : (
-          <div style={{ color: "var(--muted-deep)", fontSize: 13 }}>{t("library.surfaces.empty")}</div>
+          <div style={{ color: "var(--muted-deep)", fontSize: 13, padding: "24px 22px", lineHeight: 1.5 }}>
+            {t("library.surfaces.empty")}
+          </div>
         )}
-      </aside>
+      </ResizableDetailPane>
     </div>
   );
 }
@@ -581,16 +590,6 @@ const metricPill: CSSProperties = {
   color: "var(--muted-deep)",
   fontSize: 11,
   fontWeight: 700,
-};
-
-const detailPane: CSSProperties = {
-  width: 520,
-  maxWidth: "52vw",
-  minWidth: 360,
-  borderLeft: "var(--hairline)",
-  background: "var(--paper)",
-  minHeight: 0,
-  overflow: "hidden",
 };
 
 const statusPill: CSSProperties = {

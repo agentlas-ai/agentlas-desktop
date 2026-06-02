@@ -492,8 +492,8 @@ function MarketplacePage() {
             >
               <span style={{ minWidth: 0 }}>
                 {locale === "ko"
-                  ? "Agentlas MCP에 연결하지 못해 오프라인 캐시를 보여주고 있어요."
-                  : "Showing offline cache because Agentlas MCP is unreachable."}
+                  ? "Agentlas 마켓플레이스에 연결하지 못해 오프라인 캐시를 보여주고 있어요."
+                  : "Showing offline cache because Agentlas marketplace is unreachable."}
               </span>
               <button
                 onClick={() => void refresh()}

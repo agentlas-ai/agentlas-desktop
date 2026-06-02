@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { buildDesignCss } from "../surface-design";
 import type {
   AgentlasSurfaceAppRoute,
@@ -58,6 +60,7 @@ export async function scaffoldServiceApp(
       bytes: Buffer.byteLength(file.content, "utf8"),
     });
   }
+  ensureGitRepository(rootPath);
 
   return {
     appId,
@@ -99,6 +102,7 @@ export function buildServiceAppFiles(
 
   return [
     { path: "README.md", kind: "doc", content: readme(manifest, routes, connectors, ctx) },
+    { path: ".gitignore", kind: "config", content: gitignore() },
     { path: "SETUP.md", kind: "doc", content: setupGuide(manifest, connectors, ctx) },
     { path: "LAUNCH.md", kind: "doc", content: launchGuide(manifest, business, launch, ctx) },
     { path: "agentlas.app.json", kind: "config", content: prettyJson(appData) },
@@ -119,6 +123,29 @@ export function buildServiceAppFiles(
       content: scaffoldReport(manifest, routes, connectors, artifacts, deployment, ctx),
     },
   ];
+}
+
+function ensureGitRepository(rootPath: string): void {
+  try {
+    void spawnSync("git", ["init"], {
+      cwd: rootPath,
+      stdio: "ignore",
+      timeout: 5000,
+    });
+  } catch {
+    // Git is a convenience for generated-app portability, not a scaffold blocker.
+  }
+}
+
+function gitignore(): string {
+  return `node_modules/
+dist/
+.DS_Store
+*.log
+.env
+ops/provider-browser-workspace/
+ops/provider-browser-screenshots/
+`;
 }
 
 export async function refreshServiceAppViews(rootPath: string, now = new Date().toISOString()): Promise<{
@@ -559,7 +586,10 @@ function htmlPreview(
   const app = manifest.app;
   const op = normalizeOperationsForHtml(operations);
   const labels = appUiLabels(manifest);
+  const storyboardRows = rowsOf(manifest, "shots", "media");
+  const previewUrl = localPreviewUrl(manifest, operations);
   const primaryItems = labels.primaryCollection === "assets" ? op.assets : op.products;
+  const visibleItems = storyboardRows.length ? storyboardRows : primaryItems;
   const firstRoute = routes[0]?.path || "/";
   const serviceCount = Math.max(op.connectors.length, connectors.length);
   return `<!doctype html>
@@ -624,7 +654,11 @@ function htmlPreview(
       .impact-cell strong { font-size:26px; line-height:1; overflow-wrap:anywhere; }
       .impact-cell span { color:var(--muted); font-size:12px; }
       .impact-cell.lead span { color:#d8ded7; }
-      .workbench { display:grid; grid-template-columns:minmax(0,1fr) minmax(360px,0.55fr); gap:16px; }
+      .workbench { display:grid; grid-template-columns:minmax(280px,1fr) 6px minmax(320px,0.55fr); gap:0; border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--line); align-items:stretch; }
+      .workbench-pane { background:var(--paper); padding:16px; min-width:0; overflow:auto; }
+      .workbench-pane.secondary { background:var(--panel); }
+      .workbench-resizer { cursor:ew-resize; background:var(--line); touch-action:none; min-width:6px; }
+      .workbench-resizer:hover, .workbench-resizer.active { background:#b8c0cc; }
       nav, .screen-grid, .grid, .delegation-grid, .runtime-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); gap:12px; }
       nav a, .screen-card { color:var(--ink); text-decoration:none; display:grid; gap:8px; padding:13px; min-height:110px; }
       nav a strong, .screen-card strong { font-size:16px; overflow-wrap:anywhere; }
@@ -657,6 +691,16 @@ function htmlPreview(
       .micro-card { border: 1px solid var(--line); border-radius: 8px; background: white; padding: 10px; display: grid; gap: 4px; }
       .micro-card strong, .micro-card code { overflow-wrap: anywhere; }
       .micro-card code { font-size: 11px; color: var(--accent); background: var(--soft); padding: 2px 5px; border-radius: 5px; width: fit-content; }
+      .storyboard-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(230px, 1fr)); gap:12px; }
+      .shot-card { border:1px solid var(--line); border-radius:8px; background:var(--panel); overflow:hidden; display:grid; min-width:0; }
+      .shot-card img { width:100%; height:170px; object-fit:cover; display:block; background:var(--field); border-bottom:1px solid var(--line); }
+      .shot-card .shot-body { display:grid; gap:6px; padding:12px; min-width:0; }
+      .shot-card strong { overflow-wrap:anywhere; }
+      .shot-card .camera { color:var(--accent); font-size:12px; }
+      .shot-card .scene { color:var(--muted); font-size:12px; line-height:1.45; }
+      .web-studio { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--panel); }
+      .web-studio .bar { display:flex; align-items:center; gap:8px; min-height:38px; padding:8px 10px; border-bottom:1px solid var(--line); }
+      .web-studio iframe { width:100%; height:min(720px, 72vh); border:0; display:block; background:white; }
       .operator-panel { border: 1px solid rgba(41,87,255,0.22); border-radius: 8px; background: linear-gradient(180deg, #f9fbff, #fffefa); padding: 14px; display:grid; gap:12px; }
       .operator-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap:10px; }
       .operator-card { border:1px solid var(--line); border-radius:8px; background:white; padding:10px; display:grid; gap:4px; }
@@ -667,7 +711,7 @@ function htmlPreview(
       .pill.approval, .pill.queued, .pill.missing, .pill.required { background:#fff7ed; color:var(--warn); }
       .pill.ready, .pill.verified { background:#ecfdf5; color:var(--ok); }
       .pill.risk { background:#fff1f2; color:var(--risk); }
-      @media (max-width: 1180px) { .cockpit, .launch-canvas, .workbench, .pipeline, .impact-band { grid-template-columns:1fr; } .delegation-grid { grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); } }
+      @media (max-width: 1180px) { .cockpit, .launch-canvas, .workbench, .pipeline, .impact-band { grid-template-columns:1fr !important; } .workbench-resizer { display:none; } .delegation-grid { grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); } }
       @media (max-width: 720px) { .cockpit { padding:24px; min-height:auto; } .store-body { grid-template-columns:1fr; } h1 { font-size:42px; } section, details { padding:20px 16px; } }
     </style>
   </head>
@@ -679,21 +723,23 @@ function htmlPreview(
         <p>${html(app?.valueProp || app?.tagline || manifest.title)}</p>
         <p>Agentlas turns a plain request into an operating app: it can create provider accounts, operate consoles, request secure credentials, ask for payment approval, and fall back to browser or local helpers when no API/MCP exists.</p>
         <div class="hero-actions">
-          <a href="${html(firstRoute)}">Open the live app</a>
+          <a href="${html(previewUrl || firstRoute)}">${html(previewUrl ? "Open web studio" : "Open the live app")}</a>
           <span>No API? browser + alternate provider + local helper</span>
           <span>${html(op.reuse.status ? "Reusable tool published" : "Persistent OS object")}</span>
         </div>
       </div>
-      ${launchCanvasHtml(manifest, routes, op, primaryItems, labels, firstRoute)}
+      ${launchCanvasHtml(manifest, routes, op, visibleItems, labels, previewUrl || firstRoute)}
     </header>
     <main>
       <section class="impact-band" aria-label="Agentlas generated app summary">
         <div class="impact-cell lead"><span>Agentlas output</span><strong>${html(app?.name || manifest.title)}</strong><span>not a chat transcript, a durable OS object</span></div>
-        <div class="impact-cell"><span>${html(labels.metricLabel)}</span><strong data-stat="products">${html(primaryItems.length)}</strong><span>rendered in the app</span></div>
+        <div class="impact-cell"><span>${html(storyboardRows.length ? "storyboard shots" : labels.metricLabel)}</span><strong data-stat="products">${html(visibleItems.length)}</strong><span>rendered in the app</span></div>
         <div class="impact-cell"><span>Provider tasks</span><strong data-stat="providerTasks">${html(op.providerTasks.length)}</strong><span>operated by the agent</span></div>
         <div class="impact-cell"><span>Services</span><strong data-stat="connectors">${html(serviceCount)}</strong><span>API, browser, or fallback</span></div>
         <div class="impact-cell"><span>Jobs</span><strong data-stat="jobs">${html(op.jobs.length)}</strong><span>budgeted and resumable</span></div>
       </section>
+      ${storyboardRows.length ? storyboardSectionHtml(storyboardRows) : ""}
+      ${previewUrl ? webStudioSectionHtml(previewUrl) : ""}
       <section>
         <div class="section-head">
           <div>
@@ -702,19 +748,22 @@ function htmlPreview(
           </div>
           <span class="pill ready">launchable app package</span>
         </div>
-        <div class="workbench">
-          <div>
+        <div class="workbench" data-resizable-split="generated-workbench">
+          <div class="workbench-pane">
             <nav aria-label="Generated app screens">
               ${routes.map((route) => `<a class="screen-card" href="${html(route.path)}"><strong>${html(route.label)}</strong><small>${html(route.purpose || route.status || "Generated app route")}</small><span class="pill ${statusClass(route.status)}">${html(route.status || "ready")}</span></a>`).join("\n              ")}
             </nav>
             <div class="lane">
-              <h3>${html(labels.primaryHeading)}</h3>
+              <h3>${html(storyboardRows.length ? "Storyboard" : labels.primaryHeading)}</h3>
               <div data-list="products">
-                ${productRowsHtml(primaryItems, labels)}
+                ${productRowsHtml(visibleItems, storyboardRows.length ? storyboardLabels() : labels)}
               </div>
             </div>
           </div>
-          ${operatorConsoleHtml(op)}
+          <div class="workbench-resizer" role="separator" aria-label="Resize workbench split" aria-orientation="vertical"></div>
+          <div class="workbench-pane secondary">
+            ${operatorConsoleHtml(op)}
+          </div>
         </div>
       </section>
       <section>
@@ -825,6 +874,7 @@ function htmlPreview(
       </details>
     </main>
     <script type="module">
+${generatedWorkbenchSplitScript()}
 ${operationsHydrationScript()}
     </script>
   </body>
@@ -854,7 +904,7 @@ function launchCanvasHtml(
             <div class="visual-stack">
               ${rows
                 .map((row) => {
-                  const src = assetSrc(row.assetPath || row.path || row.imageUrl);
+                  const src = assetSrc(row.assetPath || row.imagePath || row.path || row.imageUrl || row.thumbnail || row.url);
                   return `<div class="visual-card ${src ? "has-image" : ""}">${src ? `<img src="${html(src)}" alt="${html(row.name || row.label || labels.itemFallback)}" loading="lazy" />` : ""}<strong>${html(row.name || row.label || labels.itemFallback)}</strong><span>${html(row.status || row.imageStatus || "planned")} · ${html(row.trust || "estimated")}</span></div>`;
                 })
                 .join("\n              ")}
@@ -877,6 +927,53 @@ function launchCanvasHtml(
           <div class="mini-frame"><strong>Human stays high leverage</strong><small>Only secure credential input, identity/terms liability, CAPTCHA, or paid checkout approval interrupts the agent.</small></div>
         </aside>
       </div>`;
+}
+
+function storyboardSectionHtml(rows: JsonObject[]): string {
+  return `<section>
+        <div class="section-head">
+          <div>
+            <h2>Storyboard</h2>
+            <p>The generated app keeps the actual shot plan visible inside Agentlas, even when video generation is not available.</p>
+          </div>
+          <span class="pill ready">${html(String(rows.length))} shots</span>
+        </div>
+        <div class="storyboard-grid">
+          ${rows.map((row, index) => shotCardHtml(row, index + 1)).join("\n          ")}
+        </div>
+      </section>`;
+}
+
+function shotCardHtml(row: JsonObject, index: number): string {
+  const src = assetSrc(row.imagePath || row.path || row.imageUrl || row.thumbnail || row.url);
+  const title = stringValue(row.caption) || stringValue(row.title) || `Shot ${index}`;
+  const scene = stringValue(row.scene) || stringValue(row.description) || stringValue(row.imagePrompt);
+  const camera = stringValue(row.camera);
+  return `<article class="shot-card">
+            ${src ? `<img src="${html(src)}" alt="${html(title)}" loading="lazy" />` : ""}
+            <div class="shot-body">
+              <span class="pill ready">SHOT ${html(String(index))}</span>
+              <strong>${html(title)}</strong>
+              ${camera ? `<span class="camera">${html(camera)}</span>` : ""}
+              ${scene ? `<span class="scene">${html(scene)}</span>` : ""}
+            </div>
+          </article>`;
+}
+
+function webStudioSectionHtml(previewUrl: string): string {
+  return `<section>
+        <div class="section-head">
+          <div>
+            <h2>Web Studio</h2>
+            <p>This generated app also opens as a local web workspace, so the storyboard can be edited and regenerated outside the chat transcript.</p>
+          </div>
+          <a class="pill ready" href="${html(previewUrl)}">Open web</a>
+        </div>
+        <div class="web-studio">
+          <div class="bar"><span class="pill ready">live</span><a href="${html(previewUrl)}">${html(previewUrl)}</a></div>
+          <iframe src="${html(previewUrl)}" title="Generated app web studio"></iframe>
+        </div>
+      </section>`;
 }
 
 function delegatedOperationsCardsHtml(): string {
@@ -1007,6 +1104,16 @@ function routePageHtml(
       .media-slot.has-image strong, .media-slot.has-image span { z-index:1; color:white; text-shadow:0 1px 8px rgba(0,0,0,0.35); }
       .media-slot strong { font-size:15px; }
       .media-slot span { color:#54564f; font-size:12px; }
+      .storyboard-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(230px, 1fr)); gap:12px; }
+      .shot-card { border:1px solid var(--line); border-radius:8px; background:var(--white); overflow:hidden; display:grid; min-width:0; }
+      .shot-card img { width:100%; height:170px; object-fit:cover; display:block; background:var(--field); border-bottom:1px solid var(--line); }
+      .shot-card .shot-body { display:grid; gap:6px; padding:12px; min-width:0; }
+      .shot-card strong { overflow-wrap:anywhere; }
+      .shot-card .camera { color:var(--blue); font-size:12px; }
+      .shot-card .scene { color:var(--muted); font-size:12px; line-height:1.45; }
+      .web-studio { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--white); }
+      .web-studio .bar { display:flex; align-items:center; gap:8px; min-height:38px; padding:8px 10px; border-bottom:1px solid var(--line); }
+      .web-studio iframe { width:100%; height:min(720px, 72vh); border:0; display:block; background:white; }
       .stack { display:grid; gap:12px; }
       .section { display:grid; gap:12px; }
       .section h2, .section h3 { margin:0; }
@@ -1348,13 +1455,33 @@ function assetSrc(value: unknown): string | undefined {
   const raw = stringValue(value)?.trim();
   if (!raw) return undefined;
   if (/^https?:\/\//i.test(raw)) return raw;
+  if (/^\/(?:Users|Volumes|tmp|private\/tmp)\//.test(raw) && /\.(png|jpe?g|webp|gif|svg|avif|bmp)$/i.test(raw)) {
+    return pathToFileURL(raw).href;
+  }
   const clean = raw.replace(/^\/+/, "");
   if (!/^[a-z0-9._/-]+$/i.test(clean) || clean.includes("..")) return undefined;
   return `/${clean}`;
 }
 
 function productRowsHtml(products: JsonObject[], labels: ReturnType<typeof appUiLabels> = appUiLabels()): string {
-  return products.map((row) => `<div class="row"><strong>${html(row.name || row.label || row.title || row.id || labels.itemFallback)}</strong><span class="pill ${statusClass(row.status || row.trust)}">${html(row.status || row.trust || "planned")}</span></div>`).join("\n          ") || `<div class="card"><strong>${html(labels.emptyTitle)}</strong><small>${html(labels.emptyDetail)}</small></div>`;
+  return products.map((row) => `<div class="row"><strong>${html(row.caption || row.scene || row.name || row.label || row.title || row.id || labels.itemFallback)}</strong><span class="pill ${statusClass(row.status || row.trust)}">${html(row.status || row.trust || "planned")}</span></div>`).join("\n          ") || `<div class="card"><strong>${html(labels.emptyTitle)}</strong><small>${html(labels.emptyDetail)}</small></div>`;
+}
+
+function localPreviewUrl(manifest: AgentlasSurfaceManifest, operations: JsonObject): string | null {
+  const runtime = isObject(operations.localRuntime) ? operations.localRuntime : {};
+  const url = stringValue(runtime.previewUrl) || stringValue(manifest.app?.deployment?.previewUrl);
+  return url && /^https?:\/\//i.test(url) ? url : null;
+}
+
+function storyboardLabels(): ReturnType<typeof appUiLabels> {
+  return {
+    primaryCollection: "assets",
+    metricLabel: "storyboard shots",
+    primaryHeading: "Storyboard",
+    itemFallback: "Shot",
+    emptyTitle: "No storyboard shots declared",
+    emptyDetail: "The generated app should write shot rows before it is considered ready.",
+  };
 }
 
 function appUiLabels(manifest?: AgentlasSurfaceManifest): {
@@ -1522,6 +1649,61 @@ function statusClass(value: unknown): string {
   if (raw.includes("approval") || raw.includes("queued") || raw.includes("missing") || raw.includes("required")) return "approval";
   if (raw.includes("fail") || raw.includes("risk") || raw.includes("blocked")) return "risk";
   return "";
+}
+
+function generatedWorkbenchSplitScript(): string {
+  return `(() => {
+  const split = document.querySelector('[data-resizable-split="generated-workbench"]');
+  if (!split) return;
+  const handle = split.querySelector('.workbench-resizer');
+  if (!handle) return;
+  const storageKey = 'agentlas.generated-workbench.left';
+  const minLeft = 280;
+  const minRight = 320;
+  const handleWidth = 6;
+  let left = 0;
+  try {
+    const saved = Number.parseInt(localStorage.getItem(storageKey) || '', 10);
+    if (Number.isFinite(saved)) left = saved;
+  } catch {}
+  const apply = () => {
+    if (window.matchMedia('(max-width: 1180px)').matches) {
+      split.style.gridTemplateColumns = '';
+      return;
+    }
+    const total = split.clientWidth || 1000;
+    if (!left) left = Math.max(minLeft, Math.round(total * 0.62));
+    const maxLeft = Math.max(minLeft, total - minRight - handleWidth);
+    left = Math.max(minLeft, Math.min(maxLeft, left));
+    split.style.gridTemplateColumns = left + 'px ' + handleWidth + 'px minmax(' + minRight + 'px, 1fr)';
+  };
+  apply();
+  window.addEventListener('resize', apply);
+  handle.addEventListener('pointerdown', (event) => {
+    const startX = event.clientX;
+    const startLeft = left || Math.round((split.clientWidth || 1000) * 0.62);
+    handle.classList.add('active');
+    document.body.style.cursor = 'ew-resize';
+    document.body.style.userSelect = 'none';
+    const move = (moveEvent) => {
+      left = startLeft + moveEvent.clientX - startX;
+      apply();
+    };
+    const up = () => {
+      handle.classList.remove('active');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      try { localStorage.setItem(storageKey, String(left)); } catch {}
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    event.preventDefault();
+  });
+})();`;
 }
 
 function operationsHydrationScript(): string {
@@ -1797,6 +1979,8 @@ const operations = JSON.parse(await fs.readFile(path.join(root, "data", "operati
 const html = await fs.readFile(path.join(root, "src", "index.html"), "utf8");
 const collections = operations.collections && typeof operations.collections === "object" ? operations.collections : {};
 const assets = Array.isArray(collections.assets) ? collections.assets : [];
+const shotData = manifest.manifest?.data?.shots;
+const shots = shotData && typeof shotData === "object" && Array.isArray(shotData.rows) ? shotData.rows : [];
 const forbiddenFileChars = /[^a-z0-9._-]+/g;
 const slugify = (value) => {
   const slug = String(value ?? "")
@@ -1833,6 +2017,10 @@ assert.match(html, /data-list="browserSessions"/, "preview must expose provider 
 assert.match(html, /data-list="credentialResolution"/, "preview must expose credential resolution status");
 assert.match(html, /data-list="lifecycle"/, "preview must expose reversible OS object lifecycle");
 assert.match(html, /data-list="reusableTool"/, "preview must expose app-as-tool reuse state");
+if (shots.length) {
+  assert.match(html, /Storyboard/, "preview must render storyboard section when shot rows exist");
+  assert.match(html, /shot-card/, "preview must render storyboard shot cards");
+}
 await fs.access(path.join(root, "src", "index.html"));
 await fs.access(path.join(root, "src", "data", "operations.json"));
 await fs.access(path.join(root, "src", "runtime", "commerce-store.mjs"));

@@ -36,7 +36,7 @@ electron/memory/
   events.ts       ← parses the "## Memory Events" block from an agent reply
   curator.ts      ← deterministic always-on curator (safety, scope, dedup, persist)
   store.ts        ← memory_entries CRUD
-  project-files.ts← .agentlas/ materialization (soul memory, sitemap, log)
+  project-files.ts← .agentlas/ materialization (soul, sitemap, source map, tickets, log)
   context.ts      ← builds the memory injected into each system prompt
 cli/
   agentlas.cjs            ← terminal CLI (mirrors seeding + memory, CommonJS)
@@ -50,20 +50,37 @@ cli/
 2. **Inject memory context** (`context.buildMemoryContext`) — project soul + sitemap
    summary + recent curated memory (or global memory when there's no active folder).
 3. **Append the emitter block** (`MEMORY_EMITTER_BLOCK`) to every system prompt so any
-   agent can emit Memory Events.
+   agent can emit Memory Events. The runtime wraps those events into queueable
+   Memory Tickets.
 4. Run the agent.
 5. **Curate the reply** (`curator.curateReply`) — parse the `## Memory Events` block,
    apply safety/scope/dedup **in code (no extra LLM call)**, persist durable items to
-   `memory_entries` + `.agentlas/`, and **strip the block** from the visible answer.
+   `memory_entries` + `.agentlas/`, append an ACK to
+   `.agentlas/memory-tickets.jsonl`, and **strip the block** from the visible answer.
 
-The CLI mirrors this for its API path (BYOK/Ollama); native CLI sessions (claude/codex/
-gemini) get memory context injected but keep their own session loop.
+The CLI mirrors this for BYOK/Ollama and native hosted CLI paths (claude/codex/
+gemini). The terminal hides the trailing Memory Events block while preserving it for
+curation.
 
 ### Auto-activation
-One-off folders stay untouched. A folder a user **works in repeatedly** (≥2 chats with
+One-off folders stay untouched unless an agent emits a durable memory candidate. A
+folder a user **works in repeatedly** (≥2 chats with
 that working folder) auto-activates: PM Soul memory + AI Sitemap start living in
 `<folder>/.agentlas/`. This is the "프로젝트에서 작업 반복 → 자동으로 PM 메모리/사이트맵/
 task-bias가 작동" behavior.
+
+### Memory Ticket handoff
+
+Worker agents do not write durable memory directly. They emit `## Memory Events`;
+the app/terminal wraps the batch in `.agentlas/memory-tickets.jsonl` with a ticket
+id, idempotency key, source agent, source map ref, candidates, and ACK-style counts.
+This prevents four practical failures: useful candidates never reaching the curator,
+one bad candidate dropping a whole batch, curator backlog blocking the user response,
+and duplicate writes on retry.
+
+Local import is also part of this contract. App import and `/import` both materialize
+the imported folder's `.agentlas/memory-map.json`, `.agentlas/vault-references.json`,
+and a bootstrap Memory Ticket so the route registration is visible to the curator.
 
 ### Always-on curator
 Every conversation — even basic chat with no explicit agent — carries the emitter block
@@ -77,6 +94,8 @@ The production contract is five-scope: `user_identity`, `team_memory`, `project`
 legacy alias for `team_memory`. The active project should also carry
 `.agentlas/memory-map.json` so Desktop, terminal, AppBridge, and llm-wiki can
 agree on where memory lives, who can write it, and how corrections are promoted.
+`.agentlas/vault-references.json` is project-local and stores references only, never
+credential values.
 
 ### Request-context recall
 Each durable memory entry can also carry a compact `request_context` capsule:

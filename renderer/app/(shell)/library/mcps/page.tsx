@@ -184,8 +184,8 @@ export default function LibraryMcpsPage() {
           alignItems: "flex-start",
         }}
       >
-        <IconShield size={13} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 2 }} />
-        <span>{t("mcps.shared_note")}</span>
+        <IconShield size={13} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 1 }} />
+        <span style={{ minWidth: 0, lineHeight: 1.5, textWrap: "pretty" }}>{t("mcps.shared_note")}</span>
       </div>
 
       {/* 탭 */}

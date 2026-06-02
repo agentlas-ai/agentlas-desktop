@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState, type CSSProperties, type Rea
 import Link from "next/link";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
+import { ResizableDetailPane } from "@/components/ResizableDetailPane";
 import type {
   InstalledAgent,
   Project,
@@ -183,7 +184,13 @@ export default function LibraryAssetsPage() {
         )}
       </section>
 
-      <aside style={detailPane}>
+      <ResizableDetailPane
+        storageKey="agentlas.library.assets.detail.width"
+        defaultWidth={560}
+        minWidth={420}
+        maxWidth={880}
+        maxWidthCss="48vw"
+      >
         {selected ? (
           <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
             <div style={{ padding: "22px 22px 16px", borderBottom: "var(--hairline)", display: "grid", gap: 12 }}>
@@ -277,7 +284,7 @@ export default function LibraryAssetsPage() {
         ) : (
           <div style={{ color: "var(--muted-deep)", fontSize: 13 }}>No generated asset packs yet</div>
         )}
-      </aside>
+      </ResizableDetailPane>
     </div>
   );
 }
@@ -412,14 +419,6 @@ const metricPill: CSSProperties = {
   color: "var(--muted-deep)",
   fontSize: 11,
   fontWeight: 700,
-};
-
-const detailPane: CSSProperties = {
-  width: "min(560px, 48vw)",
-  minWidth: 420,
-  borderLeft: "var(--hairline)",
-  background: "var(--paper)",
-  overflow: "hidden",
 };
 
 const statusPill: CSSProperties = {

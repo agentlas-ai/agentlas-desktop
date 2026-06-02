@@ -170,7 +170,8 @@ function startRepl(opts) {
           ? `${state.routePreambleOnce}\n\n${state.subject.system}`
           : state.subject.system;
         state.routePreambleOnce = null;
-        const sys = H.augmentSystem(db, subjectSystem, ctx, false);
+        const sys = H.augmentSystem(db, subjectSystem, ctx, true);
+        const guard = makeMemoryGuard(ui, H.eventsHeading());
         const res = await runNativeTurn({
           kind: rt.kind,
           bin,
@@ -180,10 +181,10 @@ function startRepl(opts) {
           permission: state.permission,
           session,
           env: runEnv,
-          ui,
+          ui: guard,
           signal,
         });
-        const at = (res.text || "").trim();
+        const at = (H.curateCliReply(db, res.text || "", ctx) || "").trim();
         if (at && !res.error) state.history.push({ role: "user", text: prompt }, { role: "assistant", text: at });
         recordCost(costLabel, res.usage);
       } else {

@@ -3,7 +3,8 @@
 //   - 어떤 CLI 런타임 전용인지 라벨 (CLAUDE.md→claude-code, AGENTS.md→codex, GEMINI.md→gemini, .cursor→cursor)
 //   - 단일 에이전트인지 팀인지 (TEAM.md / ceo / hr-departments)
 //   - 이름·태그라인·시스템 프롬프트
-// 원본은 그대로 두고, 위치를 routes.json에 라우팅 저장한다 (앱이 그 폴더를 그대로 사용).
+// 원본 에이전트 파일은 그대로 두고, 위치를 routes.json에 라우팅 저장한다.
+// 단, Agentlas 운영 sidecar인 .agentlas/는 materialize할 수 있다.
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -13,6 +14,8 @@ import { upsertLocalTeamFirm } from "../store/firms";
 import { analyzeFolder } from "./org-resolver";
 import { saveResolvedOrg } from "../store/org-spec";
 import { detectEnvRequirementsFromFolder } from "./env-detect";
+import { appendMemoryTicket, ensureProjectMemory } from "../memory/project-files";
+import { MEMORY_LOG_FILE, MEMORY_MAP_FILE } from "../architecture/manifest";
 import type { FirmOrgNode, InstalledAgent, InstalledFirm, ResolvedOrg } from "../../shared/types";
 
 const TONES: InstalledAgent["tone"][] = ["blue", "green", "purple", "amber", "peach"];
@@ -301,7 +304,77 @@ function registerTeamAsFirm(
   }
 }
 
-/** 로컬 폴더를 분석·등록하고 라우팅 저장. 원본 파일은 건드리지 않는다. */
+function appendImportMemoryTicket(input: {
+  dir: string;
+  id: string;
+  slug: string;
+  name: string;
+  kind: "agent" | "team";
+  runtime: RuntimeLabel;
+  labels: RuntimeLabel[];
+  importedAt: string;
+}): void {
+  ensureProjectMemory(input.dir, input.name);
+  appendMemoryTicket(input.dir, {
+    ticket_id: `memtkt_${randomUUID().replace(/-/g, "")}`,
+    created_at: input.importedAt,
+    source_agent: "agentlas-importer",
+    task_id: `import_${input.slug}`,
+    project_id: input.slug,
+    project_root: input.dir,
+    source_map_ref: `.agentlas/${MEMORY_MAP_FILE}`,
+    target_agent: "memory-curator",
+    return_channel: {
+      kind: "file_inbox",
+      ref: `.agentlas/${MEMORY_LOG_FILE}`,
+    },
+    status: "acked",
+    idempotency_key: `agentlas-import:${input.id}:${input.dir}`,
+    priority: "normal",
+    queue_policy: {
+      ack_required: true,
+      max_batch_size: 20,
+      overflow_action: "split_ticket",
+      retry_after_seconds: 300,
+    },
+    candidates: [
+      {
+        event_id: `memevt_import_${input.id.replace(/[^A-Za-z0-9_-]/g, "")}`,
+        timestamp: input.importedAt,
+        source_agent: "agentlas-importer",
+        task_id: `import_${input.slug}`,
+        project_id: input.slug,
+        memory_kind: "fact",
+        content: `Imported local ${input.kind} "${input.name}" is registered in Agentlas with runtime ${input.runtime}.`,
+        suggested_scope: "agent_repo",
+        sensitivity: "internal",
+        confidence: "high",
+        retrieval_policy: "balanced",
+        evidence_refs: [".agentlas/memory-map.json", "agent-routes.json"],
+        ttl: "durable",
+        request_context: {
+          user_intent: "Import a local Agentlas agent or team and make it routable.",
+          trigger_terms: ["import", "local agent", input.kind, input.runtime],
+          cwd_at_request: input.dir,
+          target_project: input.slug,
+          target_path: input.dir,
+          cross_context: false,
+          outcome: "Agent route registered and Memory Curator ticket path materialized.",
+        },
+      },
+    ],
+    diagnostics: {
+      legacy_shape_detected: false,
+      normalization_notes: [
+        "import route materialized .agentlas memory-map/vault references",
+        `labels=${input.labels.join(",")}`,
+      ],
+      failure_mode: null,
+    },
+  });
+}
+
+  /** 로컬 폴더를 분석·등록하고 라우팅 저장. .agentlas sidecar may be written for routing metadata. */
 export async function importLocalFolder(absPath: string): Promise<LocalImportResult> {
   const dir = path.resolve(absPath);
   if (!isDir(dir)) throw new Error(`Not a folder: ${absPath}`);
@@ -370,10 +443,11 @@ export async function importLocalFolder(absPath: string): Promise<LocalImportRes
           env_requirements_json, preferred_backend, trust_grade, installed_at, tone, visibility)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'visible')`,
       )
-      .run(id, slug, name, name, tagline, tagline, systemPrompt, "[]", envReqsJson, null, "A", now, tone);
+      .run(id, slug, name, name, tagline, tagline, systemPrompt, "[]", envReqsJson, null, "C", now, tone);
   }
 
   setRoute({ agentId: id, path: dir, runtime, labels, kind, importedAt: now });
+  appendImportMemoryTicket({ dir, id, slug, name, kind, runtime, labels, importedAt: now });
 
   // 팀이면 FIRMS에도 등록 → 사이드바 FIRMS 목록에 뜨고 "Command CEO" 가능.
   if (kind === "team") {
@@ -403,7 +477,7 @@ export async function importLocalFolder(absPath: string): Promise<LocalImportRes
     mcpServers: [],
     envRequirements,
     preferredBackend: null,
-    trustGrade: "A",
+    trustGrade: "C",
     installedAt: now,
     tone,
     runtimeLabel: runtime,

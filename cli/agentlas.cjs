@@ -468,6 +468,57 @@ function buildImportSystemPrompt(dir, name, kind) {
   const sys = readFirst(dir, ["system-prompt.md", "soul.md", "AGENT.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md"]);
   return sys || `You are ${name}, a locally imported agent.`;
 }
+function appendImportMemoryTicketCli(input) {
+  ensureProjectMemoryCli(input.dir, input.name);
+  const arch = loadArch();
+  appendMemoryTicketCli(input.dir, {
+    ticket_id: `memtkt_${crypto.randomUUID().replace(/-/g, "")}`,
+    created_at: input.importedAt,
+    source_agent: "agentlas-importer",
+    task_id: `import_${input.slug}`,
+    project_id: input.slug,
+    project_root: input.dir,
+    source_map_ref: path.join(arch.memoryDir, arch.memoryMapFile || "memory-map.json"),
+    target_agent: "memory-curator",
+    return_channel: { kind: "file_inbox", ref: path.join(arch.memoryDir, arch.logFile) },
+    status: "acked",
+    idempotency_key: `agentlas-import:${input.id}:${input.dir}`,
+    priority: "normal",
+    queue_policy: { ack_required: true, max_batch_size: 20, overflow_action: "split_ticket", retry_after_seconds: 300 },
+    candidates: [{
+      event_id: `memevt_import_${String(input.id).replace(/[^A-Za-z0-9_-]/g, "")}`,
+      timestamp: input.importedAt,
+      source_agent: "agentlas-importer",
+      task_id: `import_${input.slug}`,
+      project_id: input.slug,
+      memory_kind: "fact",
+      content: `Imported local ${input.kind} "${input.name}" is registered in Agentlas with runtime ${input.runtime}.`,
+      suggested_scope: "agent_repo",
+      sensitivity: "internal",
+      confidence: "high",
+      retrieval_policy: "balanced",
+      evidence_refs: [path.join(arch.memoryDir, arch.memoryMapFile || "memory-map.json"), "agent-routes.json"],
+      ttl: "durable",
+      request_context: {
+        user_intent: "Import a local Agentlas agent or team and make it routable.",
+        trigger_terms: ["import", "local agent", input.kind, input.runtime],
+        cwd_at_request: input.dir,
+        target_project: input.slug,
+        target_path: input.dir,
+        cross_context: false,
+        outcome: "Agent route registered and Memory Curator ticket path materialized.",
+      },
+    }],
+    diagnostics: {
+      legacy_shape_detected: false,
+      normalization_notes: [
+        "import route materialized .agentlas memory-map/vault references",
+        `labels=${input.labels.join(",")}`,
+      ],
+      failure_mode: null,
+    },
+  });
+}
 function importLocalFolderCli(db, absPath) {
   const dir = path.resolve(absPath);
   if (!isDir(dir)) fail(`폴더가 아닙니다: ${absPath}`);
@@ -523,6 +574,7 @@ function importLocalFolderCli(db, absPath) {
   // 라우트 저장
   routes[id] = { agentId: id, path: dir, runtime, labels, kind, importedAt: now };
   fs.writeFileSync(path.join(userDataDir(), "agent-routes.json"), JSON.stringify(routes, null, 2), "utf8");
+  appendImportMemoryTicketCli({ dir, id, slug, name, kind, runtime, labels, importedAt: now });
 
   // 팀이면 회사(firm)로도 등록 → 앱 FIRMS 목록 + `agentlas firm <slug>` 사용 가능. slug 기준 멱등.
   let firm = null;
@@ -589,7 +641,21 @@ function loadArch() {
   try {
     _arch = require("./architecture.data.json");
   } catch {
-    _arch = { version: "0", agents: [], emitterBlock: "", eventsHeading: "## Memory Events", memoryDir: ".agentlas", soulFile: "project-soul-memory.md", sitemapFile: "sitemap.json", logFile: "memory-log.jsonl", kinds: [], scopes: [] };
+    _arch = {
+      version: "0",
+      agents: [],
+      emitterBlock: "",
+      eventsHeading: "## Memory Events",
+      memoryDir: ".agentlas",
+      soulFile: "project-soul-memory.md",
+      sitemapFile: "sitemap.json",
+      logFile: "memory-log.jsonl",
+      ticketFile: "memory-tickets.jsonl",
+      memoryMapFile: "memory-map.json",
+      vaultReferencesFile: "vault-references.json",
+      kinds: [],
+      scopes: [],
+    };
   }
   return _arch;
 }
@@ -660,6 +726,61 @@ function seedBuiltins(db) {
 
 const SECRET_RE = [/\b(?:sk|pk|rk)-[A-Za-z0-9]{16,}/, /AKIA[0-9A-Z]{16}/, /ghp_[A-Za-z0-9]{20,}/, /xox[baprs]-[A-Za-z0-9-]{10,}/, /-----BEGIN [A-Z ]*PRIVATE KEY-----/, /\b(?:password|passwd|secret|api[_-]?key|access[_-]?token|bearer)\b\s*[:=]\s*\S+/i];
 
+function memoryMapSkeletonCli(projectPath, projectName, now) {
+  const arch = loadArch();
+  return {
+    version: 1,
+    project_id: projectName,
+    project_root: projectPath,
+    surface: ["desktop", "terminal"],
+    updated_at: now,
+    scope_roots: {
+      user_identity: { owner: "user", paths: ["~/.agentlas/user/profile.md"], indexed_by: [], write_policy: "user_only" },
+      team_memory: { owner: "memory-curator", paths: ["agentlas.sqlite:memory_entries(scope=team_memory)"], indexed_by: ["Agentlas runtime memory context"], write_policy: "curator_gate" },
+      project: { owner: "project-pm-soul", paths: [path.join(arch.memoryDir, arch.soulFile), path.join(arch.memoryDir, arch.logFile)], indexed_by: ["Agentlas runtime memory context"], write_policy: "curator_gate" },
+      agent_repo: { owner: "imported-agent-owner", paths: ["agentlas.sqlite:memory_entries(scope=agent_repo)"], indexed_by: ["Agentlas runtime memory context"], write_policy: "curator_gate" },
+      session: { owner: "runtime", paths: [path.join(arch.memoryDir, arch.logFile), path.join(arch.memoryDir, arch.ticketFile || "memory-tickets.jsonl")], indexed_by: [], write_policy: "append_only" },
+    },
+    scope_aliases: { agent_team: "team_memory" },
+    memory_ticket_flow: [
+      "worker emits ## Memory Events",
+      `runtime wraps events in ${path.join(arch.memoryDir, arch.ticketFile || "memory-tickets.jsonl")}`,
+      "memory-curator validates each candidate independently",
+      "curator writes, rejects, defers, or proposes approval",
+      `ACK and scoped writes are recorded in ${path.join(arch.memoryDir, arch.logFile)}`,
+    ],
+    request_context_capsule: {
+      purpose: "Recall similar future requests without storing raw prompts.",
+      fields: ["user_intent", "trigger_terms", "cwd_at_request", "target_project", "target_path", "cross_context", "outcome"],
+      raw_prompt_policy: "never store raw user messages or full transcripts",
+    },
+    vault_reference_roots: [{
+      scope: "project",
+      owner: "project-pm-soul",
+      paths: [path.join(arch.memoryDir, arch.vaultReferencesFile || "vault-references.json")],
+      write_policy: "curator_gate",
+      value_policy: "references_only_never_values",
+    }],
+    exclude_patterns: ["._*", ".DS_Store", ".env*", "node_modules/**", ".git/**", "*.p8", "*.p12", "*.key", "*service-account*.json"],
+    last_verified_at: null,
+  };
+}
+function vaultReferencesSkeletonCli(projectName) {
+  const arch = loadArch();
+  return {
+    version: 1,
+    project_id: projectName,
+    owner: "project-pm-soul",
+    source_map_ref: path.join(arch.memoryDir, arch.memoryMapFile || "memory-map.json"),
+    value_policy: {
+      stores_secret_values: false,
+      allowed_content: ["credential label", "non-secret location reference", "owner", "allowed accessor roles", "last verified timestamp", "stale-check rule", "rotation owner", "evidence references"],
+      forbidden_content: ["token value", "private key contents", "service-account JSON body", ".env value", "JWS/JWT/Auth header value", "app-specific password value"],
+    },
+    references: [],
+    last_audited_at: null,
+  };
+}
 function ensureProjectMemoryCli(projectPath, projectName) {
   const arch = loadArch();
   try {
@@ -675,6 +796,15 @@ function ensureProjectMemoryCli(projectPath, projectName) {
       const now = new Date().toISOString();
       fs.writeFileSync(sitemap, JSON.stringify({ project: name, created_at: now, updated_at: now, nodes: [] }, null, 2), "utf8");
     }
+    const now = new Date().toISOString();
+    const memoryMap = path.join(dir, arch.memoryMapFile || "memory-map.json");
+    if (!fs.existsSync(memoryMap)) {
+      fs.writeFileSync(memoryMap, JSON.stringify(memoryMapSkeletonCli(projectPath, name, now), null, 2) + "\n", "utf8");
+    }
+    const vaultReferences = path.join(dir, arch.vaultReferencesFile || "vault-references.json");
+    if (!fs.existsSync(vaultReferences)) {
+      fs.writeFileSync(vaultReferences, JSON.stringify(vaultReferencesSkeletonCli(name), null, 2) + "\n", "utf8");
+    }
     return dir;
   } catch { return null; }
 }
@@ -685,6 +815,81 @@ function logCli(projectPath, rec) {
     if (!dir) return;
     fs.appendFileSync(path.join(dir, loadArch().logFile), JSON.stringify(rec) + "\n", "utf8");
   } catch { /* ignore */ }
+}
+function appendMemoryTicketCli(projectPath, ticket) {
+  if (!projectPath) return;
+  try {
+    const dir = ensureProjectMemoryCli(projectPath);
+    if (!dir) return;
+    const file = loadArch().ticketFile || "memory-tickets.jsonl";
+    fs.appendFileSync(path.join(dir, file), JSON.stringify(ticket) + "\n", "utf8");
+  } catch { /* ignore */ }
+}
+function shortHashCli(input) {
+  return crypto.createHash("sha256").update(String(input || "")).digest("hex").slice(0, 16);
+}
+function projectIdForTicketCli(ctx, projectPath) {
+  if (ctx && ctx.projectId) return ctx.projectId;
+  if (projectPath) return path.basename(projectPath) || "local-project";
+  return "global";
+}
+function sourceAgentForTicketCli(ctx) {
+  return (ctx && ctx.agentId) || "agentlas-runtime";
+}
+function appendTicketAuditCli(events, ctx, report) {
+  const projectPath = (ctx && (ctx.projectPath || ctx.cwd)) || null;
+  if (!projectPath || !events.length) return;
+  const arch = loadArch();
+  const now = new Date().toISOString();
+  const sourceAgent = sourceAgentForTicketCli(ctx);
+  const taskId = (ctx && ctx.chatId) || `turn_${shortHashCli(`${sourceAgent}:${now}`)}`;
+  const projectId = projectIdForTicketCli(ctx, projectPath);
+  for (let start = 0; start < events.length; start += 20) {
+    const chunk = events.slice(start, start + 20);
+    const chunkHash = shortHashCli(JSON.stringify(chunk.map((ev) => ({ k: ev.memory_kind, s: ev.suggested_scope, c: ev.content, e: ev.evidence_refs }))));
+    appendMemoryTicketCli(projectPath, {
+      ticket_id: `memtkt_${crypto.randomUUID().replace(/-/g, "")}`,
+      created_at: now,
+      source_agent: sourceAgent,
+      task_id: taskId,
+      project_id: projectId,
+      project_root: projectPath,
+      source_map_ref: path.join(arch.memoryDir, arch.memoryMapFile || "memory-map.json"),
+      target_agent: "memory-curator",
+      return_channel: { kind: "file_inbox", ref: path.join(arch.memoryDir, arch.logFile) },
+      status: "acked",
+      idempotency_key: `${sourceAgent}:${taskId}:${chunkHash}`,
+      priority: "normal",
+      queue_policy: { ack_required: true, max_batch_size: 20, overflow_action: "split_ticket", retry_after_seconds: 300 },
+      candidates: chunk.map((ev, index) => ({
+        event_id: `memevt_${shortHashCli(`${sourceAgent}:${taskId}:${start + index}:${ev.content || ""}`)}`,
+        timestamp: now,
+        source_agent: sourceAgent,
+        task_id: taskId,
+        project_id: projectId,
+        memory_kind: ev.memory_kind || "fact",
+        content: ev.content || "",
+        suggested_scope: ev.suggested_scope || "session",
+        sensitivity: ev.sensitivity || "internal",
+        confidence: ev.confidence || "medium",
+        retrieval_policy: "balanced",
+        evidence_refs: Array.isArray(ev.evidence_refs) ? ev.evidence_refs : [],
+        ttl: ev.suggested_scope === "session" || ev.suggested_scope === "discard" ? "session" : "durable",
+        request_context: normalizeRequestContext(ev, ctx || {}, ev.suggested_scope === "project" ? projectPath : null),
+      })),
+      diagnostics: {
+        legacy_shape_detected: false,
+        normalization_notes: [
+          `ack written=${report.written}`,
+          `deduped=${report.deduped}`,
+          `session=${report.sessionOnly}`,
+          `redacted=${report.redacted}`,
+          `discarded=${report.discarded}`,
+        ],
+        failure_mode: report.redacted > 0 ? "secret_detected" : null,
+      },
+    });
+  }
 }
 function coerceText(v, max) {
   if (typeof v !== "string") return undefined;
@@ -809,27 +1014,47 @@ function curateCliReply(db, text, ctx) {
   const arch = loadArch();
   const { randomUUID } = require("node:crypto");
   const now = new Date().toISOString();
+  const projectPath = (ctx && (ctx.projectPath || ctx.cwd)) || null;
+  const report = { written: 0, deduped: 0, redacted: 0, sessionOnly: 0, discarded: 0 };
   for (const ev of events) {
     const content = ev && typeof ev.content === "string" ? ev.content.trim() : "";
     if (!content) continue;
-    if (ev.sensitivity === "secret" || SECRET_RE.some((re) => re.test(content))) continue;
+    if (ev.sensitivity === "secret" || SECRET_RE.some((re) => re.test(content))) {
+      report.redacted += 1;
+      logCli(projectPath, { action: "redacted", reason: "secret", kind: ev.memory_kind || "fact", at: now });
+      continue;
+    }
     const kind = arch.kinds.includes(ev.memory_kind) ? ev.memory_kind : "fact";
     let scope = ev.suggested_scope === "agent_team"
       ? "team_memory"
       : arch.scopes.includes(ev.suggested_scope) ? ev.suggested_scope : "session";
     const kindAllowsUserIdentity = ["fact", "decision", "preference", "procedure"].includes(kind);
     if (scope === "user_identity" && (ev.confidence !== "high" || !kindAllowsUserIdentity)) scope = "session";
-    if (scope === "discard" || scope === "session") { logCli(ctx.projectPath, { action: scope, kind, content, at: now }); continue; }
-    if (scope === "project" && !ctx.projectPath) scope = "team_memory";
-    const ppath = scope === "project" ? ctx.projectPath : null;
+    if (scope === "discard") {
+      report.discarded += 1;
+      logCli(projectPath, { action: scope, kind, content, at: now });
+      continue;
+    }
+    if (scope === "session") {
+      report.sessionOnly += 1;
+      logCli(projectPath, { action: scope, kind, content, at: now });
+      continue;
+    }
+    if (scope === "project" && !projectPath) scope = "team_memory";
+    const ppath = scope === "project" ? projectPath : null;
     const requestContext = normalizeRequestContext(ev, ctx, ppath);
     try {
       const dup = db.prepare("SELECT 1 FROM memory_entries WHERE scope=? AND kind=? AND lower(trim(content))=? AND superseded_at IS NULL AND (project_path IS ? OR project_path=?) LIMIT 1").get(scope, kind, content.toLowerCase(), ppath, ppath);
-      if (dup) continue;
+      if (dup) {
+        report.deduped += 1;
+        continue;
+      }
       db.prepare("INSERT INTO memory_entries (id,scope,kind,content,project_id,project_path,agent_id,chat_id,confidence,sensitivity,evidence_json,context_json,superseded_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)").run(randomUUID(), scope, kind, content, ctx.projectId || null, ppath, ctx.agentId || null, null, ev.confidence || "medium", ev.sensitivity || "internal", JSON.stringify(Array.isArray(ev.evidence_refs) ? ev.evidence_refs : []), JSON.stringify(requestContext), now);
-      logCli(ctx.projectPath, { action: "written", scope, kind, content, request_context: requestContext, at: now });
+      report.written += 1;
+      logCli(projectPath, { action: "written", scope, kind, content, request_context: requestContext, at: now });
     } catch { /* ignore */ }
   }
+  appendTicketAuditCli(events, { ...(ctx || {}), projectPath }, report);
   return cleaned;
 }
 // 선택된 인터페이스 언어를 권위적으로 못박는 지시. 입력 언어 미러링을 막아
@@ -969,13 +1194,19 @@ async function executeOnce(db, system, prompt, override, ctx) {
   if (!ctx.cwdAtRequest) ctx.cwdAtRequest = projectCwd();
   const rt = resolveRuntime(db, override);
   if (rt.mode === "cli") {
-    // 네이티브 CLI는 자체 세션을 가지므로 emitter는 넣지 않고(노이즈 방지) 메모리 컨텍스트만 주입.
-    const sys = augmentSystem(db, system, ctx, false);
+    // 네이티브 CLI도 Agentlas가 stdout을 가드하면서 host하므로 emitter를 켜고 큐레이션한다.
+    const sys = augmentSystem(db, system, ctx, true);
     const cwd = ctx.projectPath || projectCwd();
     const permission = ctx.permission || "write";
     const env = await buildChildEnvCli(db, { ...ctx, cwd });
     process.stderr.write(`▸ ${rt.kind} · ${permission} · ${cwd}\n`);
-    return spawnRuntime(rt.kind, sys, prompt, { cwd, permission, env });
+    return spawnRuntime(rt.kind, sys, prompt, {
+      cwd,
+      permission,
+      env,
+      memoryHeading: loadArch().eventsHeading,
+      onCompleteText: (text) => curateCliReply(db, text || "", { ...ctx, cwd }),
+    });
   }
   // API 경로 — emitter 동봉 → 답변에서 메모리 이벤트를 파싱·큐레이션하고 블록은 제거.
   const sys = augmentSystem(db, system, ctx, true);
@@ -1294,21 +1525,79 @@ function launchTui(db, subject, runtimeOverride) {
   });
 }
 
+function makePlainMemoryGuard(heading) {
+  const N = heading.length;
+  let acc = "";
+  let printed = 0;
+  let cut = false;
+  const flush = () => {
+    if (cut) return;
+    const idx = acc.indexOf(heading);
+    if (idx >= 0) {
+      if (idx > printed) process.stdout.write(acc.slice(printed, idx));
+      printed = idx;
+      cut = true;
+    } else if (acc.length > printed) {
+      process.stdout.write(acc.slice(printed));
+      printed = acc.length;
+    }
+  };
+  return {
+    push(chunk) {
+      if (cut) {
+        acc += chunk;
+        return;
+      }
+      acc += chunk;
+      const idx = acc.indexOf(heading);
+      if (idx >= 0) {
+        if (idx > printed) process.stdout.write(acc.slice(printed, idx));
+        printed = idx;
+        cut = true;
+        return;
+      }
+      const safe = acc.length - N;
+      if (safe > printed) {
+        process.stdout.write(acc.slice(printed, safe));
+        printed = safe;
+      }
+    },
+    end() {
+      flush();
+      return acc;
+    },
+  };
+}
+
 function spawnRuntime(kind, systemPrompt, prompt, opts) {
   opts = opts || {};
   const cwd = opts.cwd || runCwd();
   return new Promise((resolve) => {
     const bin = which(RUNTIME_BIN[kind]) || RUNTIME_BIN[kind];
+    const guard = opts.memoryHeading ? makePlainMemoryGuard(opts.memoryHeading) : null;
+    let fullText = "";
     const child = spawn(bin, buildArgs(kind, systemPrompt, prompt, opts.permission), {
       cwd,
-      stdio: ["ignore", "inherit", "inherit"],
+      stdio: ["ignore", "pipe", "inherit"],
       env: opts.env || process.env,
+    });
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      fullText += chunk;
+      if (guard) guard.push(chunk);
+      else process.stdout.write(chunk);
     });
     child.on("error", (err) => {
       process.stderr.write(`\n실행 실패(${kind}): ${err.message}\n`);
       resolve(1);
     });
-    child.on("close", (code) => resolve(code ?? 0));
+    child.on("close", (code) => {
+      if (guard) fullText = guard.end();
+      if (opts.onCompleteText) {
+        try { opts.onCompleteText(fullText); } catch { /* ignore */ }
+      }
+      resolve(code ?? 0);
+    });
   });
 }
 

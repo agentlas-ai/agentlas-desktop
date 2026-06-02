@@ -42,6 +42,7 @@ export function WorkspacePanel({ chatId, onClose, persistence }: Props) {
   const persistRef = useRef(persistence);
   persistRef.current = persistence;
   const [width, setWidth] = useState<number>(DEFAULT_WIDTH);
+  const widthRef = useRef<number>(DEFAULT_WIDTH);
   const [rootPath, setRootPath] = useState<string | null>(null);
   const [rootListing, setRootListing] = useState<DirListing | null>(null);
   const [expanded, setExpanded] = useState<Map<string, DirListing>>(new Map());
@@ -166,12 +167,13 @@ export function WorkspacePanel({ chatId, onClose, persistence }: Props) {
         // 우측 패널이라 왼쪽으로 드래그하면 폭이 늘어남
         const dx = dragStateRef.current.startX - ev.clientX;
         const next = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dragStateRef.current.startWidth + dx));
+        widthRef.current = next;
         setWidth(next);
       }
       function onUp() {
         if (dragStateRef.current) {
           try {
-            window.localStorage.setItem(WIDTH_STORAGE_KEY, String(width));
+            window.localStorage.setItem(WIDTH_STORAGE_KEY, String(widthRef.current));
           } catch {
             // ignore
           }
@@ -188,6 +190,7 @@ export function WorkspacePanel({ chatId, onClose, persistence }: Props) {
   );
   // width 변경 시 localStorage 동기화는 디바운스 — 드래그 종료 시점에만 저장하면 충분
   useEffect(() => {
+    widthRef.current = width;
     if (dragStateRef.current) return; // 드래그 중에는 저장 X
     try {
       window.localStorage.setItem(WIDTH_STORAGE_KEY, String(width));

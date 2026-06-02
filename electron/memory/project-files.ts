@@ -7,10 +7,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import {
+  MEMORY_MAP_FILE,
   MEMORY_LOG_FILE,
+  MEMORY_TICKETS_FILE,
   PROJECT_MEMORY_DIR,
   PROJECT_SOUL_FILE,
   SITEMAP_FILE,
+  VAULT_REFERENCES_FILE,
 } from "../architecture/manifest";
 
 export function projectMemoryDir(projectPath: string): string {
@@ -67,6 +70,145 @@ function sitemapSkeleton(projectName: string, now: string): string {
   );
 }
 
+function memoryMapSkeleton(projectPath: string, projectName: string, now: string): string {
+  return JSON.stringify(
+    {
+      version: 1,
+      project_id: projectName,
+      project_root: projectPath,
+      surface: ["desktop", "terminal"],
+      updated_at: now,
+      scope_roots: {
+        user_identity: {
+          owner: "user",
+          paths: ["~/.agentlas/user/profile.md"],
+          indexed_by: [],
+          write_policy: "user_only",
+          notes: "Agents only receive the subset explicitly injected by Agentlas.",
+        },
+        team_memory: {
+          owner: "memory-curator",
+          paths: ["agentlas.sqlite:memory_entries(scope=team_memory)"],
+          indexed_by: ["Agentlas runtime memory context"],
+          write_policy: "curator_gate",
+          notes: "Shared cross-agent procedures, handoff conventions, and safety policy.",
+        },
+        project: {
+          owner: "project-pm-soul",
+          paths: [
+            `${PROJECT_MEMORY_DIR}/${PROJECT_SOUL_FILE}`,
+            `${PROJECT_MEMORY_DIR}/${MEMORY_LOG_FILE}`,
+          ],
+          indexed_by: ["Agentlas runtime memory context"],
+          write_policy: "curator_gate",
+          notes: "Project decisions, risks, open loops, evidence, and preferences.",
+        },
+        agent_repo: {
+          owner: "imported-agent-owner",
+          paths: ["agentlas.sqlite:memory_entries(scope=agent_repo)"],
+          indexed_by: ["Agentlas runtime memory context"],
+          write_policy: "curator_gate",
+          notes: "Agent-specific durable procedures and failure modes.",
+        },
+        session: {
+          owner: "runtime",
+          paths: [
+            `${PROJECT_MEMORY_DIR}/${MEMORY_LOG_FILE}`,
+            `${PROJECT_MEMORY_DIR}/${MEMORY_TICKETS_FILE}`,
+          ],
+          indexed_by: [],
+          write_policy: "append_only",
+          notes: "Ephemeral findings and worker-to-curator ticket audit trail.",
+        },
+      },
+      scope_aliases: {
+        agent_team: "team_memory",
+      },
+      memory_ticket_flow: [
+        "worker emits ## Memory Events",
+        `runtime wraps events in ${PROJECT_MEMORY_DIR}/${MEMORY_TICKETS_FILE}`,
+        "memory-curator validates each candidate independently",
+        "curator writes, rejects, defers, or proposes approval",
+        `ACK and scoped writes are recorded in ${PROJECT_MEMORY_DIR}/${MEMORY_LOG_FILE}`,
+      ],
+      request_context_capsule: {
+        purpose: "Recall similar future requests without storing raw prompts.",
+        fields: [
+          "user_intent",
+          "trigger_terms",
+          "cwd_at_request",
+          "target_project",
+          "target_path",
+          "cross_context",
+          "outcome",
+        ],
+        raw_prompt_policy: "never store raw user messages or full transcripts",
+      },
+      vault_reference_roots: [
+        {
+          scope: "project",
+          owner: "project-pm-soul",
+          paths: [`${PROJECT_MEMORY_DIR}/${VAULT_REFERENCES_FILE}`],
+          write_policy: "curator_gate",
+          value_policy: "references_only_never_values",
+          notes:
+            "Credential references live with the project. This file may name locations, never secret values.",
+        },
+      ],
+      exclude_patterns: [
+        "._*",
+        ".DS_Store",
+        ".env*",
+        "node_modules/**",
+        ".git/**",
+        "*.p8",
+        "*.p12",
+        "*.key",
+        "*service-account*.json",
+      ],
+      last_verified_at: null,
+    },
+    null,
+    2,
+  );
+}
+
+function vaultReferencesSkeleton(projectName: string): string {
+  return JSON.stringify(
+    {
+      version: 1,
+      project_id: projectName,
+      owner: "project-pm-soul",
+      source_map_ref: `${PROJECT_MEMORY_DIR}/${MEMORY_MAP_FILE}`,
+      value_policy: {
+        stores_secret_values: false,
+        allowed_content: [
+          "credential label",
+          "non-secret location reference",
+          "owner",
+          "allowed accessor roles",
+          "last verified timestamp",
+          "stale-check rule",
+          "rotation owner",
+          "evidence references",
+        ],
+        forbidden_content: [
+          "token value",
+          "private key contents",
+          "service-account JSON body",
+          ".env value",
+          "JWS/JWT/Auth header value",
+          "app-specific password value",
+        ],
+      },
+      references: [],
+      last_audited_at: null,
+    },
+    null,
+    2,
+  );
+}
+
 /** Create .agentlas/ + skeleton files if missing. Returns the dir, or null on failure. */
 export function ensureProjectMemory(
   projectPath: string,
@@ -84,9 +226,33 @@ export function ensureProjectMemory(
     const sitemap = path.join(dir, SITEMAP_FILE);
     if (!fs.existsSync(sitemap)) fs.writeFileSync(sitemap, sitemapSkeleton(name, now), "utf8");
 
+    const memoryMap = path.join(dir, MEMORY_MAP_FILE);
+    if (!fs.existsSync(memoryMap)) {
+      fs.writeFileSync(memoryMap, memoryMapSkeleton(projectPath, name, now), "utf8");
+    }
+
+    const vaultReferences = path.join(dir, VAULT_REFERENCES_FILE);
+    if (!fs.existsSync(vaultReferences)) {
+      fs.writeFileSync(vaultReferences, vaultReferencesSkeleton(name), "utf8");
+    }
+
     return dir;
   } catch {
     return null;
+  }
+}
+
+export function appendMemoryTicket(projectPath: string, ticket: unknown): void {
+  try {
+    const dir = ensureProjectMemory(projectPath);
+    if (!dir) return;
+    fs.appendFileSync(
+      path.join(dir, MEMORY_TICKETS_FILE),
+      JSON.stringify(ticket) + "\n",
+      "utf8",
+    );
+  } catch {
+    // best-effort
   }
 }
 

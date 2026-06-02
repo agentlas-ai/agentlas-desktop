@@ -195,8 +195,8 @@ export default function HomePage() {
             disabled={firms.length === 0}
             title={
               firms.length === 0
-                ? locale === "en" ? "Install a firm first" : "회사를 먼저 설치하세요"
-                : locale === "en" ? "Command the firm's CEO" : "회사 CEO에게 명령"
+                ? locale === "en" ? "Install a team first" : "팀을 먼저 설치하세요"
+                : locale === "en" ? "Assign work to the team's CEO" : "팀 CEO에게 업무 맡기기"
             }
             style={{
               padding: "6px 14px",
@@ -294,7 +294,7 @@ export default function HomePage() {
               }}
               title={
                 mode === "firm"
-                  ? locale === "en" ? "More firms" : "더 많은 회사"
+                  ? locale === "en" ? "More teams" : "더 많은 팀"
                   : locale === "en" ? "More agents" : "더 많은 에이전트"
               }
             >
@@ -365,14 +365,14 @@ function FirmSelector({
     >
       <IconBuilding size={12} style={{ color: "var(--accent)" }} />
       <span style={{ fontWeight: 700, color: "var(--accent)" }}>
-        {activeLoc?.name ?? (locale === "en" ? "Pick a firm" : "회사 선택")}
+        {activeLoc?.name ?? (locale === "en" ? "Pick a team" : "팀 선택")}
       </span>
       <span style={{ fontSize: 10, color: "var(--muted-deep)" }}>CEO</span>
       <select
         value={activeId}
         onChange={(e) => onChange(e.target.value)}
         style={{ position: "absolute", inset: 0, opacity: 0, cursor: "pointer" }}
-        aria-label="Firm"
+        aria-label="Agent team"
       >
         {firms.map((f) => {
           const loc = pickLocalized(f, locale);

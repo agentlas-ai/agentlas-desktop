@@ -28,6 +28,9 @@ const data = {
   soulFile: m.PROJECT_SOUL_FILE,
   sitemapFile: m.SITEMAP_FILE,
   logFile: m.MEMORY_LOG_FILE,
+  ticketFile: m.MEMORY_TICKETS_FILE,
+  memoryMapFile: m.MEMORY_MAP_FILE,
+  vaultReferencesFile: m.VAULT_REFERENCES_FILE,
   kinds: m.MEMORY_KINDS,
   scopes: m.MEMORY_SCOPES,
   agents: m.BUILTIN_AGENTS.map((a) => ({

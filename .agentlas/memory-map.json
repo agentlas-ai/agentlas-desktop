@@ -17,6 +17,12 @@
       "indexed_by": "not indexed by git; runtime append-only log"
     },
     {
+      "scope": "session",
+      "path": ".agentlas/memory-tickets.jsonl",
+      "owner": "Memory Curator",
+      "indexed_by": "append-only worker-to-curator handoff audit"
+    },
+    {
       "scope": "project",
       "path": "~/Library/Application Support/Agentlas/agentlas.sqlite:memory_entries",
       "owner": "Memory Curator",
@@ -61,6 +67,20 @@
     ],
     "raw_prompt_policy": "never store raw user messages or full transcripts"
   },
+  "memory_ticket_flow": [
+    "worker emits ## Memory Events",
+    "runtime wraps candidates in .agentlas/memory-tickets.jsonl",
+    "Memory Curator validates candidates independently",
+    "curator writes/rejects/defers and records ACK counts"
+  ],
+  "vault_reference_roots": [
+    {
+      "scope": "project",
+      "path": ".agentlas/vault-references.json",
+      "owner": "Project PM Soul",
+      "value_policy": "references_only_never_values"
+    }
+  ],
   "promotion_path": [
     "session memory-log.jsonl",
     "project .agentlas or Claude project memory",

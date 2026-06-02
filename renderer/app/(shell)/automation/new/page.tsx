@@ -64,7 +64,7 @@ export default function NewAutomationPage() {
         scheduleHuman: schedule,
         targetType,
         targetId,
-        promptTemplate: prompt.trim() || "오늘 할 일 요약해줘",
+        promptTemplate: prompt.trim() || t("auto.default_prompt"),
       });
       navigate("/automation", "replace");
     } finally {

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState, type CSSProperties, type Rea
 import Link from "next/link";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
+import { ResizableDetailPane } from "@/components/ResizableDetailPane";
 import type {
   AppFactoryAppRecord,
   AppFactoryAppStatus,
@@ -16,6 +17,7 @@ import type {
   AppFactoryProviderResolutionPlan,
   AppFactoryProviderTaskRunResult,
   InstalledAgent,
+  JsonObject,
   Project,
 } from "@/lib/types";
 import {
@@ -138,6 +140,13 @@ export default function LibraryAppsPage() {
           setMessage(result.summary);
         } else if (kind === "open-provider-browser") {
           const result = await api.appFactory.openProviderBrowser({ rootPath: selected.rootPath });
+          setMessage(result.summary);
+        } else if (kind === "start-local-app") {
+          const result = await api.appFactory.startLocalApp({ rootPath: selected.rootPath });
+          setMessage(result.summary);
+          if (result.previewUrl) window.open(result.previewUrl, "_blank", "noopener,noreferrer");
+        } else if (kind === "stop-local-app") {
+          const result = await api.appFactory.stopLocalApp({ rootPath: selected.rootPath });
           setMessage(result.summary);
         } else if (kind === "run-smoke-test") {
           const result = await api.appFactory.runSmoke({ rootPath: selected.rootPath });
@@ -404,7 +413,13 @@ export default function LibraryAppsPage() {
         )}
       </section>
 
-      <aside style={detailPane}>
+      <ResizableDetailPane
+        storageKey="agentlas.library.apps.detail.width"
+        defaultWidth={440}
+        minWidth={340}
+        maxWidth={760}
+        maxWidthCss="46vw"
+      >
         {selected ? (
           <AppDetail
             app={selected}
@@ -424,6 +439,8 @@ export default function LibraryAppsPage() {
             onCaptureProviderSessions={() => void runAction("capture-provider-browser-sessions")}
             onResolveCredentials={() => void runAction("resolve-provider-credentials")}
             onOpenProviderBrowser={() => void runAction("open-provider-browser")}
+            onStartLocalApp={() => void runAction("start-local-app")}
+            onStopLocalApp={() => void runAction("stop-local-app")}
             onResumeProviderSession={(session) => void resumeProviderSession(session)}
             onSyncProviderResult={(session) => void syncProviderResult(session)}
             onRunSmoke={() => void runAction("run-smoke-test")}
@@ -437,9 +454,11 @@ export default function LibraryAppsPage() {
             onClearMessage={() => setMessage("")}
           />
         ) : (
-          <div style={{ color: "var(--muted-deep)", fontSize: 13 }}>{t("library.apps.empty")}</div>
+          <div style={{ color: "var(--muted-deep)", fontSize: 13, padding: "24px 22px", lineHeight: 1.5 }}>
+            {t("library.apps.empty")}
+          </div>
         )}
-      </aside>
+      </ResizableDetailPane>
     </div>
   );
 }
@@ -462,6 +481,8 @@ function AppDetail({
   onCaptureProviderSessions,
   onResolveCredentials,
   onOpenProviderBrowser,
+  onStartLocalApp,
+  onStopLocalApp,
   onResumeProviderSession,
   onSyncProviderResult,
   onRunSmoke,
@@ -491,6 +512,8 @@ function AppDetail({
   onCaptureProviderSessions: () => void;
   onResolveCredentials: () => void;
   onOpenProviderBrowser: () => void;
+  onStartLocalApp: () => void;
+  onStopLocalApp: () => void;
   onResumeProviderSession: (session: AppFactoryProviderBrowserSession) => void;
   onSyncProviderResult: (session: AppFactoryProviderBrowserSession) => void;
   onRunSmoke: () => void;
@@ -506,6 +529,8 @@ function AppDetail({
   const { t, locale } = useT();
   const routes = app.manifest.app?.routes ?? [];
   const connectors = app.manifest.app?.connectors ?? [];
+  const storyboardRows = surfaceRows(app.manifest.data?.shots).slice(0, 8);
+  const webPreviewUrl = localPreviewUrl(app);
   const files = [
     app.rootPath,
     app.previewPath,
@@ -535,6 +560,8 @@ function AppDetail({
           <ActionButton onClick={onInstallMcp} label={t("library.apps.install_mcp")} icon={<IconKey size={12} />} busy={busyAction === "install-mcp"} disabled={app.status === "archived"} />
           <ActionButton onClick={onRunProviderTasks} label={t("library.apps.run_provider_tasks")} icon={<IconBolt size={12} />} busy={busyAction === "run-provider-tasks"} disabled={app.status === "archived"} />
           <ActionButton onClick={onOpenProviderBrowser} label={t("library.apps.open_provider_browser")} icon={<IconRoute size={12} />} busy={busyAction === "open-provider-browser"} disabled={app.status === "archived"} />
+          <ActionButton onClick={onStartLocalApp} label="앱 실행" icon={<IconBolt size={12} />} busy={busyAction === "start-local-app"} disabled={app.status === "archived"} />
+          <ActionButton onClick={onStopLocalApp} label="앱 중지" icon={<IconClose size={12} />} busy={busyAction === "stop-local-app"} disabled={app.status === "archived"} />
           <ActionButton onClick={onCaptureProviderSessions} label={t("library.apps.capture_provider_sessions")} icon={<IconRoute size={12} />} busy={busyAction === "capture-provider-browser-sessions"} disabled={app.status === "archived"} />
           <ActionButton onClick={onResolveCredentials} label={t("library.apps.resolve_credentials")} icon={<IconKey size={12} />} busy={busyAction === "resolve-provider-credentials"} disabled={app.status === "archived"} />
           {app.domain === "ecommerce" && (
@@ -571,6 +598,30 @@ function AppDetail({
           providerSessions={providerSessions}
           operations={operations}
         />
+
+        {storyboardRows.length > 0 && (
+          <DetailSection title="Storyboard">
+            <div style={storyboardGrid}>
+              {storyboardRows.map((row, index) => (
+                <StoryboardCard key={index} row={row} index={index + 1} />
+              ))}
+            </div>
+          </DetailSection>
+        )}
+
+        {webPreviewUrl && (
+          <DetailSection title="Web Studio">
+            <div style={webPreviewShell}>
+              <div style={webPreviewTopbar}>
+                <span style={tinyPill}>live web</span>
+                <a href={webPreviewUrl} target="_blank" rel="noreferrer" style={webPreviewLink}>
+                  {webPreviewUrl}
+                </a>
+              </div>
+              <iframe src={webPreviewUrl} title={`${app.appName} web preview`} style={webPreviewFrame} />
+            </div>
+          </DetailSection>
+        )}
 
         <DetailSection title={t("library.apps.routes")}>
           {routes.length ? (
@@ -788,6 +839,31 @@ function AppDetail({
   );
 }
 
+function StoryboardCard({ row, index }: { row: JsonObject; index: number }) {
+  const title = stringField(row, "caption") || stringField(row, "title") || `Shot ${index}`;
+  const scene = stringField(row, "scene") || stringField(row, "description") || "";
+  const camera = stringField(row, "camera") || "";
+  const source = mediaSource(row);
+  return (
+    <article style={storyboardCard}>
+      {source ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={source} alt={title} style={storyboardImage} />
+      ) : (
+        <div style={storyboardPlaceholder}>
+          <IconRoute size={16} />
+          Shot {index}
+        </div>
+      )}
+      <div style={storyboardBody}>
+        <strong style={storyboardTitle}>{title}</strong>
+        {camera && <span style={storyboardMeta}>{camera}</span>}
+        {scene && <span style={storyboardScene}>{scene}</span>}
+      </div>
+    </article>
+  );
+}
+
 function AgentOperatorConsole({
   app,
   providerRun,
@@ -877,6 +953,44 @@ function AgentOperatorConsole({
       </div>
     </DetailSection>
   );
+}
+
+function surfaceRows(data: unknown): JsonObject[] {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return [];
+  const rows = (data as { rows?: unknown }).rows;
+  return Array.isArray(rows) ? rows.filter(isJsonObject) : [];
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringField(row: JsonObject, key: string): string | undefined {
+  const value = row[key];
+  return typeof value === "string" || typeof value === "number" ? String(value) : undefined;
+}
+
+function mediaSource(row: JsonObject): string | undefined {
+  const raw =
+    stringField(row, "dataUrl") ||
+    stringField(row, "src") ||
+    stringField(row, "previewUrl") ||
+    stringField(row, "thumbnail") ||
+    stringField(row, "imagePath") ||
+    stringField(row, "path") ||
+    stringField(row, "imageUrl") ||
+    stringField(row, "fileUrl") ||
+    stringField(row, "url");
+  if (!raw) return undefined;
+  if (/^\/(?:Users|Volumes|tmp|private\/tmp)\//.test(raw) && /\.(png|jpe?g|webp|gif|svg|avif|bmp)$/i.test(raw)) {
+    return `agentlas://localfile/?p=${encodeURIComponent(raw)}`;
+  }
+  return raw;
+}
+
+function localPreviewUrl(app: AppFactoryAppRecord): string | null {
+  const url = app.manifest.app?.deployment?.previewUrl?.trim();
+  return url && /^https?:\/\//i.test(url) ? url : null;
 }
 
 function AppShowcaseHero({
@@ -1166,6 +1280,8 @@ function operationLabel(operation: AppFactoryOperationKind): string {
   if (operation === "resolve-provider-credentials") return "Credential resolution";
   if (operation === "approve-provider-payment") return "Payment approval";
   if (operation === "open-provider-browser") return "Provider browser";
+  if (operation === "start-local-app") return "Start local app";
+  if (operation === "stop-local-app") return "Stop local app";
   if (operation === "run-smoke-test") return "Smoke test";
   if (operation === "deploy-preview") return "Preview package";
   if (operation === "publish-as-tool") return "Publish as tool";
@@ -1219,6 +1335,9 @@ function operationSummary(op: AppFactoryOperationRecord): string {
   if (op.operation === "open-provider-browser") {
     const opened = Array.isArray(result.opened) ? result.opened.length : 0;
     return `${opened} provider page${opened === 1 ? "" : "s"} opened`;
+  }
+  if (op.operation === "start-local-app" || op.operation === "stop-local-app") {
+    return String(result.summary ?? (op.operation === "start-local-app" ? "Local app started" : "Local app stopped"));
   }
   if (op.operation === "run-smoke-test") {
     return `exit ${String(result.exitCode ?? "unknown")}`;
@@ -1459,16 +1578,6 @@ const metricPill: CSSProperties = {
   fontWeight: 700,
 };
 
-const detailPane: CSSProperties = {
-  width: 440,
-  maxWidth: "46vw",
-  minWidth: 340,
-  borderLeft: "var(--hairline)",
-  background: "var(--paper)",
-  minHeight: 0,
-  overflow: "hidden",
-};
-
 const miniStat: CSSProperties = {
   display: "grid",
   gap: 3,
@@ -1477,6 +1586,108 @@ const miniStat: CSSProperties = {
   borderRadius: "var(--radius-md)",
   border: "1px solid var(--paper-edge)",
   background: "var(--paper-2)",
+};
+
+const storyboardGrid: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+  gap: 10,
+};
+
+const storyboardCard: CSSProperties = {
+  border: "1px solid var(--paper-edge)",
+  borderRadius: "var(--radius-md)",
+  background: "var(--paper-2)",
+  overflow: "hidden",
+  minWidth: 0,
+};
+
+const storyboardImage: CSSProperties = {
+  width: "100%",
+  height: 116,
+  objectFit: "cover",
+  display: "block",
+  background: "var(--paper)",
+  borderBottom: "1px solid var(--paper-edge)",
+};
+
+const storyboardPlaceholder: CSSProperties = {
+  height: 116,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 6,
+  color: "var(--muted-deep)",
+  background: "linear-gradient(135deg, var(--paper), var(--fill-1))",
+  borderBottom: "1px solid var(--paper-edge)",
+  fontSize: 12,
+  fontWeight: 800,
+};
+
+const storyboardBody: CSSProperties = {
+  display: "grid",
+  gap: 5,
+  padding: 10,
+  minWidth: 0,
+};
+
+const storyboardTitle: CSSProperties = {
+  color: "var(--ink)",
+  fontSize: 12,
+  lineHeight: 1.3,
+  overflowWrap: "anywhere",
+};
+
+const storyboardMeta: CSSProperties = {
+  color: "var(--accent)",
+  fontSize: 11,
+  lineHeight: 1.35,
+  overflowWrap: "anywhere",
+};
+
+const storyboardScene: CSSProperties = {
+  color: "var(--muted-deep)",
+  fontSize: 11,
+  lineHeight: 1.45,
+  display: "-webkit-box",
+  WebkitLineClamp: 4,
+  WebkitBoxOrient: "vertical",
+  overflow: "hidden",
+};
+
+const webPreviewShell: CSSProperties = {
+  border: "1px solid var(--paper-edge)",
+  borderRadius: "var(--radius-md)",
+  overflow: "hidden",
+  background: "var(--paper-2)",
+};
+
+const webPreviewTopbar: CSSProperties = {
+  minHeight: 34,
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "7px 9px",
+  borderBottom: "1px solid var(--paper-edge)",
+};
+
+const webPreviewLink: CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "var(--accent)",
+  fontSize: 11,
+  fontWeight: 800,
+  textDecoration: "none",
+};
+
+const webPreviewFrame: CSSProperties = {
+  width: "100%",
+  height: 520,
+  display: "block",
+  border: "none",
+  background: "var(--paper)",
 };
 
 const actionButton: CSSProperties = {

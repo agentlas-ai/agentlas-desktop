@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "project_id": "agentlas_desktop_public",
+  "owner": "Project PM Soul",
+  "source_map_ref": ".agentlas/memory-map.json",
+  "value_policy": {
+    "stores_secret_values": false,
+    "allowed_content": [
+      "credential label",
+      "non-secret location reference",
+      "owner",
+      "allowed accessor roles",
+      "last verified timestamp",
+      "stale-check rule",
+      "rotation owner",
+      "evidence references"
+    ],
+    "forbidden_content": [
+      "token value",
+      "private key contents",
+      "service-account JSON body",
+      ".env value",
+      "JWS/JWT/Auth header value",
+      "app-specific password value"
+    ]
+  },
+  "references": [],
+  "last_audited_at": null
+}

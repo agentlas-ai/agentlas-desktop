@@ -93,6 +93,8 @@ export default function LibraryAgentsPage() {
   async function importPaths(paths: string[]) {
     const api = ipc();
     if (!api || paths.length === 0) return;
+    const ok = window.confirm(t("library.agents.import_local_confirm"));
+    if (!ok) return;
     setImporting(true);
     try {
       let last: InstalledAgent | null = null;

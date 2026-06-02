@@ -962,11 +962,37 @@ export type AppFactoryOperationKind =
   | "resolve-provider-credentials"
   | "approve-provider-payment"
   | "open-provider-browser"
+  | "start-local-app"
+  | "stop-local-app"
   | "run-smoke-test"
   | "deploy-preview"
   | "publish-as-tool"
   | "archive"
   | "restore";
+
+export interface AppFactoryLocalAppStatus {
+  rootPath: string;
+  command: string;
+  args: string[];
+  previewUrl: string | null;
+  running: boolean;
+  owned: boolean;
+  reachable: boolean;
+  pid: number | null;
+  startedAt: string | null;
+  checkedAt: string;
+  exitCode?: number | null;
+  error?: string | null;
+  summary: string;
+}
+
+export interface AppFactoryLocalAppRunResult extends AppFactoryLocalAppStatus {
+  started: boolean;
+}
+
+export interface AppFactoryLocalAppStopResult extends AppFactoryLocalAppStatus {
+  stopped: boolean;
+}
 
 export interface AppFactoryAppRecord {
   id: string;
@@ -1928,6 +1954,9 @@ export interface AgentlasIpc {
     syncProviderBrowserResults: (input: AppFactoryProviderBrowserResultSyncRequest) => Promise<AppFactoryProviderBrowserResultSyncResult>;
     resolveProviderCredentials: (input: AppFactoryProviderCredentialResolveRequest) => Promise<AppFactoryProviderCredentialResolveResult>;
     approveProviderPayment: (input: AppFactoryProviderPaymentApproveRequest) => Promise<AppFactoryProviderPaymentApproveResult>;
+    startLocalApp: (input: AppFactoryRootRequest) => Promise<AppFactoryLocalAppRunResult>;
+    stopLocalApp: (input: AppFactoryRootRequest) => Promise<AppFactoryLocalAppStopResult>;
+    getLocalAppStatus: (input: AppFactoryRootRequest) => Promise<AppFactoryLocalAppStatus>;
     runSmoke: (input: AppFactoryRootRequest) => Promise<AppFactorySmokeResult>;
     preparePreview: (input: AppFactoryRootRequest) => Promise<AppFactoryPreviewResult>;
     publishAsTool: (input: AppFactoryRootRequest) => Promise<AppFactoryAppToolPublishResult>;

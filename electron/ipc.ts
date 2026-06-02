@@ -149,6 +149,9 @@ import {
   restoreAppPackage,
   runAppFactorySmoke,
   runProviderTasks,
+  getLocalAppStatus,
+  startLocalApp,
+  stopLocalApp,
   syncProviderBrowserResults,
 } from "./app-factory/operations";
 import { scaffoldServiceApp } from "./app-factory/scaffold";
@@ -693,6 +696,19 @@ export function registerIpcHandlers(): void {
     recordAppFactoryOperation(result.rootPath, "approve-provider-payment", true, result, "operations-ready");
     return result;
   });
+  ipcMain.handle("appFactory:startLocalApp", async (_e, input: AppFactoryRootRequest) => {
+    const result = await startLocalApp(input);
+    recordAppFactoryOperation(result.rootPath, "start-local-app", true, result, "operations-ready");
+    return result;
+  });
+  ipcMain.handle("appFactory:stopLocalApp", async (_e, input: AppFactoryRootRequest) => {
+    const result = await stopLocalApp(input);
+    recordAppFactoryOperation(result.rootPath, "stop-local-app", result.stopped, result, "operations-ready");
+    return result;
+  });
+  ipcMain.handle("appFactory:getLocalAppStatus", (_e, input: AppFactoryRootRequest) =>
+    getLocalAppStatus(input),
+  );
   ipcMain.handle("appFactory:runSmoke", async (_e, input: AppFactoryRootRequest) => {
     const result = await runAppFactorySmoke(input);
     recordAppFactoryOperation(

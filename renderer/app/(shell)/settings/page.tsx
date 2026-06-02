@@ -22,23 +22,22 @@ import {
 import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconRefresh, IconWand } from "@/components/Icon";
 import { MigrationPanel } from "@/components/MigrationPanel";
 
-// BYOK는 API 키를 직접 넣는 클라우드 3종 (Ollama는 로컬이라 키 없음).
-type ByokBackend = "anthropic" | "openai" | "google" | "upstage";
-const BYOK_BACKENDS: ByokBackend[] = ["anthropic", "openai", "google", "upstage"];
+// API-key cloud backends that are actually selectable by runtime detection.
+type ByokBackend = "anthropic" | "openai" | "google";
+const BYOK_BACKENDS: ByokBackend[] = ["anthropic", "openai", "google"];
 
 const BACKEND_LABEL: Record<RuntimeBackend, string> = {
   anthropic: "Anthropic (Claude)",
   openai: "OpenAI (ChatGPT)",
   google: "Google (Gemini)",
   ollama: "Ollama (로컬)",
-  upstage: "Upstage Solar (🇰🇷 한국 소버린)",
+  upstage: "Unsupported API provider",
 };
 
 const BACKEND_KEY_HINT: Record<ByokBackend, string> = {
   anthropic: "console.anthropic.com → API Keys",
   openai: "platform.openai.com/api-keys",
   google: "aistudio.google.com/app/apikey",
-  upstage: "console.upstage.ai/api-keys",
 };
 
 const RUNTIME_LABEL: Record<string, string> = {
@@ -56,13 +55,11 @@ export default function SettingsPage() {
     anthropic: "",
     openai: "",
     google: "",
-    upstage: "",
   });
   const [hasKey, setHasKey] = useState<Record<ByokBackend, boolean>>({
     anthropic: false,
     openai: false,
     google: false,
-    upstage: false,
   });
   const [multimodalProviders, setMultimodalProviders] = useState<MultimodalProvider[]>([]);
   const [multimodalSettings, setMultimodalSettings] = useState<MultimodalSettings | null>(null);
@@ -72,18 +69,17 @@ export default function SettingsPage() {
   const refresh = useCallback(async () => {
     const api = ipc();
     if (!api) return;
-    const [s, a, o, g, u, providers, mmSettings, mmStatus] = await Promise.all([
+    const [s, a, o, g, providers, mmSettings, mmStatus] = await Promise.all([
       api.runtime.detect(),
       api.secrets.hasApiKey("anthropic"),
       api.secrets.hasApiKey("openai"),
       api.secrets.hasApiKey("google"),
-      api.secrets.hasApiKey("upstage"),
       api.multimodal.listProviders(),
       api.multimodal.getSettings(),
       api.multimodal.status(),
     ]);
     setStatuses(s);
-    setHasKey({ anthropic: a, openai: o, google: g, upstage: u });
+    setHasKey({ anthropic: a, openai: o, google: g });
     setMultimodalProviders(providers);
     setMultimodalSettings(mmSettings);
     setMultimodalStatus(mmStatus);
@@ -820,14 +816,12 @@ function AgentlasCliPanel() {
           ["agentlas", "설치된 에이전트 목록 보기"],
           ["agentlas <이름>", "claude처럼 바로 대화형 세션 시작"],
           ['agentlas run <이름> "질문"', "1회 실행 (스크립트·파이프용)"],
-          ["agentlas firm <회사>", "회사(CEO)에게 위임 실행"],
           ["agentlas doctor", "런타임·데이터 점검"],
         ]
       : [
           ["agentlas", "list installed agents"],
           ["agentlas <name>", "start an interactive session (like claude)"],
           ['agentlas run <name> "prompt"', "one-shot run (scripts / pipes)"],
-          ["agentlas firm <firm>", "delegate to a firm's CEO"],
           ["agentlas doctor", "check runtime & data"],
         ];
 

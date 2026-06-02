@@ -14,6 +14,9 @@ import type {
   AppFactoryAutopilotStep,
   AppFactoryLocalCommerceActivationRequest,
   AppFactoryLocalCommerceActivationResult,
+  AppFactoryLocalAppRunResult,
+  AppFactoryLocalAppStatus,
+  AppFactoryLocalAppStopResult,
   AppFactoryAppToolPublishResult,
   AppFactoryMcpInstallResult,
   AppFactoryMaterializedAsset,
@@ -61,6 +64,18 @@ interface AppPackage {
 }
 
 const LOCAL_ASSET_GENERATOR = "agentlas-local-catalog-asset-generator";
+
+const LOCAL_APP_PROCESSES = new Map<
+  string,
+  {
+    child: ReturnType<typeof spawn>;
+    command: string;
+    args: string[];
+    previewUrl: string | null;
+    startedAt: string;
+    exitCode: number | null;
+  }
+>();
 
 export async function installMcpPlan(
   input: AppFactoryRootRequest,
@@ -160,7 +175,7 @@ export async function runAppFactorySmoke(
   assertInside(rootPath, smokePath);
   await fs.access(smokePath);
   const testedAt = new Date().toISOString();
-  const result = await execNode([smokePath], rootPath, 10_000);
+  const result = await execNode([smokePath], rootPath, 60_000);
   return {
     rootPath,
     command: `node ${path.relative(rootPath, smokePath)}`,
@@ -169,6 +184,87 @@ export async function runAppFactorySmoke(
     stdout: result.stdout,
     stderr: result.stderr,
     testedAt,
+  };
+}
+
+export async function getLocalAppStatus(input: AppFactoryRootRequest): Promise<AppFactoryLocalAppStatus> {
+  const rootPath = await assertAppRoot(input.rootPath);
+  return localAppStatus(rootPath);
+}
+
+export async function startLocalApp(input: AppFactoryRootRequest): Promise<AppFactoryLocalAppRunResult> {
+  const rootPath = await assertAppRoot(input.rootPath);
+  const before = await localAppStatus(rootPath);
+  if (before.running || before.reachable) {
+    return {
+      ...before,
+      started: false,
+      running: before.running || before.reachable,
+      summary: before.owned
+        ? `Generated app is already running: ${before.previewUrl ?? before.command}`
+        : `Generated app preview is already reachable: ${before.previewUrl ?? before.command}`,
+    };
+  }
+
+  const plan = await localAppRunPlan(rootPath);
+  const startedAt = new Date().toISOString();
+  const child = spawn(plan.command, plan.args, {
+    cwd: rootPath,
+    env: { ...process.env, AGENTLAS_GENERATED_APP: "1" },
+    stdio: "ignore",
+    shell: process.platform === "win32",
+    detached: false,
+  });
+  const entry = {
+    child,
+    command: plan.command,
+    args: plan.args,
+    previewUrl: plan.previewUrl,
+    startedAt,
+    exitCode: null as number | null,
+  };
+  LOCAL_APP_PROCESSES.set(rootPath, entry);
+  child.once("exit", (code) => {
+    entry.exitCode = code;
+    LOCAL_APP_PROCESSES.delete(rootPath);
+  });
+  child.unref();
+
+  const reachable = plan.previewUrl ? await waitForReachable(plan.previewUrl, 8000) : false;
+  const status = await localAppStatus(rootPath, { reachableOverride: reachable });
+  return {
+    ...status,
+    started: true,
+    running: true,
+    owned: true,
+    summary: reachable && plan.previewUrl
+      ? `Started generated app and preview is reachable: ${plan.previewUrl}`
+      : `Started generated app with ${plan.command} ${plan.args.join(" ")}`.trim(),
+  };
+}
+
+export async function stopLocalApp(input: AppFactoryRootRequest): Promise<AppFactoryLocalAppStopResult> {
+  const rootPath = await assertAppRoot(input.rootPath);
+  const entry = LOCAL_APP_PROCESSES.get(rootPath);
+  if (!entry) {
+    const status = await localAppStatus(rootPath);
+    return {
+      ...status,
+      stopped: false,
+      summary: status.reachable
+        ? "The preview is reachable, but it was not started by this Agentlas session."
+        : "No Agentlas-owned local app process is running.",
+    };
+  }
+  entry.child.kill();
+  LOCAL_APP_PROCESSES.delete(rootPath);
+  const status = await localAppStatus(rootPath, { reachableOverride: false });
+  return {
+    ...status,
+    stopped: true,
+    running: false,
+    owned: false,
+    summary: "Stopped the Agentlas-owned generated app process.",
   };
 }
 
@@ -3714,6 +3810,110 @@ async function restoreReusableAppToolRegistration(rootPath: string, restoredAt: 
   await writeOperationsFiles(rootPath, operations, arrayOfObjects(operations.providerTasks));
   await refreshServiceAppViews(rootPath, restoredAt);
   return server.id;
+}
+
+async function localAppStatus(
+  rootPath: string,
+  opts: { reachableOverride?: boolean } = {},
+): Promise<AppFactoryLocalAppStatus> {
+  const checkedAt = new Date().toISOString();
+  const plan = await localAppRunPlan(rootPath);
+  const entry = LOCAL_APP_PROCESSES.get(rootPath);
+  const owned = Boolean(entry && entry.exitCode === null && !entry.child.killed);
+  const reachable =
+    opts.reachableOverride !== undefined
+      ? opts.reachableOverride
+      : plan.previewUrl
+        ? await isReachable(plan.previewUrl, 1200)
+        : false;
+  const running = owned || reachable;
+  const command = entry?.command ?? plan.command;
+  const args = entry?.args ?? plan.args;
+  const previewUrl = entry?.previewUrl ?? plan.previewUrl;
+  return {
+    rootPath,
+    command,
+    args,
+    previewUrl,
+    running,
+    owned,
+    reachable,
+    pid: owned ? entry?.child.pid ?? null : null,
+    startedAt: owned ? entry?.startedAt ?? null : null,
+    checkedAt,
+    exitCode: entry?.exitCode ?? null,
+    summary: running
+      ? reachable && previewUrl
+        ? `Generated app is reachable at ${previewUrl}.`
+        : `Generated app process is running: ${command} ${args.join(" ")}`.trim()
+      : `Generated app is not running. Start with ${plan.command} ${plan.args.join(" ")}`.trim(),
+  };
+}
+
+async function localAppRunPlan(rootPath: string): Promise<{
+  command: string;
+  args: string[];
+  previewUrl: string | null;
+}> {
+  const pkg = await readAppPackage(rootPath);
+  const operationsPath = path.join(rootPath, "data", "operations.json");
+  const operations = (await exists(operationsPath)) ? await readOperations(operationsPath) : {};
+  const localRuntime = objectValue(operations.localRuntime);
+  const packageJson = await readNodePackageJson(rootPath);
+  const previewUrl =
+    stringValue(localRuntime.previewUrl) ??
+    stringValue(pkg.manifest.app?.deployment?.previewUrl) ??
+    null;
+  const commandText = stringValue(localRuntime.command);
+  if (commandText) {
+    const parsed = parseShellCommand(commandText);
+    if (parsed) return { ...parsed, previewUrl };
+  }
+  const scripts = isObject(packageJson.scripts) ? packageJson.scripts : {};
+  if (typeof scripts.start === "string") return { command: "npm", args: ["run", "start"], previewUrl };
+  if (typeof scripts.dev === "string") return { command: "npm", args: ["run", "dev"], previewUrl };
+  if (await exists(path.join(rootPath, "scripts", "serve.mjs"))) {
+    return { command: nodeExecPath(), args: ["scripts/serve.mjs"], previewUrl };
+  }
+  throw new Error("Generated app has no local start command.");
+}
+
+async function readNodePackageJson(rootPath: string): Promise<JsonObject> {
+  const pkgPath = path.join(rootPath, "package.json");
+  if (!(await exists(pkgPath))) return {};
+  const parsed = JSON.parse(await fs.readFile(pkgPath, "utf8")) as unknown;
+  return isObject(parsed) ? parsed : {};
+}
+
+function parseShellCommand(commandText: string): { command: string; args: string[] } | null {
+  const parts = commandText.match(/(?:[^\s"]+|"[^"]*")+/g)?.map((part) => part.replace(/^"|"$/g, "")) ?? [];
+  if (parts.length === 0) return null;
+  const [command, ...args] = parts;
+  if (!command) return null;
+  if (command === "npm" && args[0] === "start") return { command: "npm", args: ["run", "start"] };
+  return { command, args };
+}
+
+async function isReachable(url: string, timeoutMs: number): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { method: "GET", signal: controller.signal });
+    return response.status < 500;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function waitForReachable(url: string, timeoutMs: number): Promise<boolean> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await isReachable(url, 800)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  }
+  return false;
 }
 
 async function assertAppRoot(rootPath: string): Promise<string> {

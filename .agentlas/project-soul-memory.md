@@ -38,13 +38,14 @@ Soul, Memory Curator, and Task Bias Curator — plus a curated memory substrate.
 | 2026-05-29 | Auto-activate a folder on the 2nd visit | "repeated work in a folder" = continuity should start early | electron/architecture/activation.ts |
 | 2026-05-29 | CLI seeds from generated JSON, guarded on schema | CLI is CommonJS + doesn't migrate; waits for one app launch on old DBs | cli/agentlas.cjs seedBuiltins |
 | 2026-05-31 | Every created/uploaded/installed agent must persist one visibility class: `visible`, `background`, or `private` | Public desktop must hide background control agents and block private web-only IP before renderer surfaces | docs/AGENT_VISIBILITY_CONTRACT.md; electron/store/db.ts; electron/agents/policy.ts |
+| 2026-06-02 | Worker memory candidates travel through queueable Memory Tickets | Direct Memory Events parsing worked, but lacked an auditable worker-to-curator handoff and could miss terminal native paths/import routes | electron/memory/curator.ts; cli/agentlas.cjs; docs/ARCHITECTURE_PLAYBOOK.md |
 
 ## Risks
 
 | Risk | Impact | Mitigation | Status |
 |------|--------|------------|--------|
 | Emitter block adds tokens to every prompt | Minor cost on every turn | Block is short; only durable items are emitted | accepted |
-| Native CLI sessions (claude/codex) bypass curation | Memory not captured for native loops | Inject context; GUI + API path carry curation | accepted v1 |
+| Native CLI sessions (claude/codex/gemini) bypass curation | Memory not captured for terminal hosted loops | Terminal native paths now inject emitter, hide Memory Events, and curate into Memory Tickets | mitigated |
 | Schema drift between app (migrates) and CLI (doesn't) | CLI no-op on stale DB | CLI guards on table/column existence | mitigated |
 | New agent-building flows forget visibility classification | Background/private agents leak into user-facing desktop or public package surfaces | Require `installed_agents.visibility`; enforce in main-process policy before renderer filtering | active guard |
 

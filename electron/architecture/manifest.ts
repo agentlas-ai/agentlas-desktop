@@ -25,7 +25,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.4.0";
+export const ARCHITECTURE_VERSION = "1.5.0";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 
 // ── Memory contract ────────────────────────────────────────────────────────
@@ -82,6 +82,9 @@ export const PROJECT_MEMORY_DIR = ".agentlas";
 export const PROJECT_SOUL_FILE = "project-soul-memory.md";
 export const SITEMAP_FILE = "sitemap.json";
 export const MEMORY_LOG_FILE = "memory-log.jsonl";
+export const MEMORY_TICKETS_FILE = "memory-tickets.jsonl";
+export const MEMORY_MAP_FILE = "memory-map.json";
+export const VAULT_REFERENCES_FILE = "vault-references.json";
 
 /**
  * Appended to EVERY agent's system prompt (the always-on curator path). Short on purpose.
@@ -91,7 +94,8 @@ export const MEMORY_EMITTER_BLOCK = `## Memory (Agentlas curated memory)
 
 If — and only if — this turn produced something durable (a decision, a stable fact,
 a user preference, a risk, a reusable procedure), end your reply with a Memory Events
-block. Emit nothing when nothing durable was learned.
+block. The Agentlas runtime wraps that block into a queueable Memory Ticket for the
+Memory Curator. Emit nothing when nothing durable was learned.
 
 Rules:
 - Never include secrets, credentials, API keys, raw logs, or full transcripts.
@@ -102,7 +106,9 @@ Rules:
 - Add "request_context" when it improves future recall: user_intent, trigger_terms,
   cwd_at_request, target_project, target_path, cross_context, outcome.
 - Never put the raw user prompt or transcript in request_context.
-- Suggest a scope; the Memory Curator decides the final destination.
+- Suggest a scope; the Memory Curator decides the final destination and ACKs the
+  Memory Ticket with written/deferred/rejected counts.
+- Do not edit memory files directly from a worker response.
 
 Format (omit entirely if empty):
 
@@ -224,7 +230,8 @@ and reason before acting, then continue.`;
 const MEMORY_CURATOR_PROMPT = `# Memory Curator (Agentlas built-in)
 
 You are the Memory Curator for this workspace. You do not perform the original domain
-task — you manage memory QUALITY. Agents emit Memory Events; you own durable memory writes.
+task — you manage memory QUALITY. Agents emit Memory Events; the runtime wraps them
+as Memory Tickets, and you own durable memory writes.
 
 ## Responsibilities
 - Validate incoming memory events; reject/redact secrets, credentials, private logs,
@@ -239,6 +246,9 @@ task — you manage memory QUALITY. Agents emit Memory Events; you own durable m
   stale items as session/discard.
 - Preserve request context as a compact provenance capsule for recall. Never store
   raw prompts, full transcripts, credentials, or private logs in the capsule.
+- Treat ${PROJECT_MEMORY_DIR}/${MEMORY_TICKETS_FILE} as the worker-to-curator inbox
+  and audit trail. A ticket can ACK even when individual candidates are rejected or
+  deferred; one bad candidate must not drop the whole batch.
 - Return a concise curation report: what was written, proposed, rejected, or deferred.
 
 ## Routing rules
@@ -256,9 +266,10 @@ Do not solve the engineering/design/finance/research task. Do not store entire
 transcripts, logs, or files. Do not turn every observation into durable memory. Do not
 write public memory if the event contains private project context.
 
-When asked to "curate", read the relevant ${PROJECT_MEMORY_DIR}/${PROJECT_SOUL_FILE},
-${PROJECT_MEMORY_DIR}/${MEMORY_LOG_FILE}, and any Memory Source Map provided by the
-workspace, then return the smallest useful set of writes, proposals, conflict
+When asked to "curate", read the relevant ${PROJECT_MEMORY_DIR}/${MEMORY_MAP_FILE},
+${PROJECT_MEMORY_DIR}/${PROJECT_SOUL_FILE}, ${PROJECT_MEMORY_DIR}/${MEMORY_LOG_FILE},
+${PROJECT_MEMORY_DIR}/${MEMORY_TICKETS_FILE}, and any vault reference catalog provided
+by the workspace, then return the smallest useful set of writes, proposals, conflict
 notices, and rejections.`;
 
 const TASK_BIAS_PROMPT = `# Task Bias Curator (Agentlas built-in)

@@ -2,13 +2,20 @@
 // It applies the curator contract in code: safety redaction, scope resolution, dedup,
 // and durable persistence. The Memory Curator *agent* (LLM) remains available for explicit
 // deep curation; this is the always-on substrate that keeps memory flowing for every chat.
+import { createHash, randomUUID } from "node:crypto";
 import {
   appendMemoryLog,
+  appendMemoryTicket,
   appendSoulMemory,
 } from "./project-files";
 import { hasEquivalentMemory, insertMemoryEntry, type RequestContext } from "./store";
 import { parseMemoryEvents, type RawMemoryEvent } from "./events";
-import type { MemoryKind, MemoryScope } from "../architecture/manifest";
+import {
+  MEMORY_LOG_FILE,
+  MEMORY_MAP_FILE,
+  type MemoryKind,
+  type MemoryScope,
+} from "../architecture/manifest";
 
 // Secret/credential patterns — events matching these are dropped, never stored.
 const SECRET_PATTERNS: RegExp[] = [
@@ -122,6 +129,106 @@ function requestContextForLog(ctx: RequestContext | null): Record<string, unknow
   };
 }
 
+function shortHash(input: string): string {
+  return createHash("sha256").update(input).digest("hex").slice(0, 16);
+}
+
+function ticketId(): string {
+  return `memtkt_${randomUUID().replace(/-/g, "")}`;
+}
+
+function projectIdForTicket(ctx: CurationContext): string {
+  if (ctx.projectId) return ctx.projectId;
+  if (ctx.projectPath) return ctx.projectPath.split(/[\\/]/).filter(Boolean).pop() ?? "local-project";
+  return "global";
+}
+
+function sourceAgentForTicket(ctx: CurationContext): string {
+  return ctx.agentId || "agentlas-runtime";
+}
+
+function appendTicketAudit(
+  events: RawMemoryEvent[],
+  ctx: CurationContext,
+  report: CurationReport,
+): void {
+  if (!ctx.projectPath || events.length === 0) return;
+  const now = new Date().toISOString();
+  const sourceAgent = sourceAgentForTicket(ctx);
+  const taskId = ctx.chatId || `turn_${shortHash(`${sourceAgent}:${now}`)}`;
+  const projectId = projectIdForTicket(ctx);
+
+  for (let start = 0; start < events.length; start += 20) {
+    const chunk = events.slice(start, start + 20);
+    const chunkHash = shortHash(JSON.stringify(chunk.map((ev) => ({
+      k: ev.memory_kind,
+      s: ev.suggested_scope,
+      c: ev.content,
+      e: ev.evidence_refs,
+    }))));
+    appendMemoryTicket(ctx.projectPath, {
+      ticket_id: ticketId(),
+      created_at: now,
+      source_agent: sourceAgent,
+      task_id: taskId,
+      project_id: projectId,
+      project_root: ctx.projectPath,
+      source_map_ref: `.agentlas/${MEMORY_MAP_FILE}`,
+      target_agent: "memory-curator",
+      return_channel: {
+        kind: "file_inbox",
+        ref: `.agentlas/${MEMORY_LOG_FILE}`,
+      },
+      status: "acked",
+      idempotency_key: `${sourceAgent}:${taskId}:${chunkHash}`,
+      priority: "normal",
+      queue_policy: {
+        ack_required: true,
+        max_batch_size: 20,
+        overflow_action: "split_ticket",
+        retry_after_seconds: 300,
+      },
+      candidates: chunk.map((ev, index) => {
+        const candidate: Record<string, unknown> = {
+          event_id: `memevt_${shortHash(`${sourceAgent}:${taskId}:${start + index}:${ev.content}`)}`,
+          timestamp: now,
+          source_agent: sourceAgent,
+          task_id: taskId,
+          project_id: projectId,
+          memory_kind: ev.memory_kind,
+          content: ev.content,
+          suggested_scope: ev.suggested_scope,
+          sensitivity: ev.sensitivity,
+          confidence: ev.confidence,
+          retrieval_policy: "balanced",
+          evidence_refs: ev.evidence_refs,
+          ttl: ev.suggested_scope === "session" || ev.suggested_scope === "discard" ? "session" : "durable",
+        };
+        const requestContext = requestContextForLog(
+          buildRequestContext(
+            ev,
+            ctx,
+            ev.suggested_scope === "project" ? ctx.projectPath : null,
+          ),
+        );
+        if (requestContext) candidate.request_context = requestContext;
+        return candidate;
+      }),
+      diagnostics: {
+        legacy_shape_detected: false,
+        normalization_notes: [
+          `ack written=${report.written}`,
+          `deduped=${report.deduped}`,
+          `session=${report.sessionOnly}`,
+          `redacted=${report.redacted}`,
+          `discarded=${report.discarded}`,
+        ],
+        failure_mode: report.redacted > 0 ? "secret_detected" : null,
+      },
+    });
+  }
+}
+
 /** Curate a batch of raw events into durable memory. Pure side effects + a report. */
 export function curateEvents(
   events: RawMemoryEvent[],
@@ -209,6 +316,8 @@ export function curateEvents(
   if (ctx.projectPath && soulLines.length > 0) {
     appendSoulMemory(ctx.projectPath, soulLines);
   }
+
+  appendTicketAudit(events, ctx, report);
 
   return report;
 }
