@@ -13,6 +13,7 @@ import type {
   ImageAttachment,
   InstalledAgent,
   InstalledFirm,
+  InstalledMcpServer,
   ResolvedOrg,
   McpInvocationEvent,
   Project,
@@ -203,6 +204,7 @@ function ChatPage() {
   const [allProjects, setAllProjects] = useState<Project[]>([]);
   const [allEnvKeys, setAllEnvKeys] = useState<string[]>([]);
   const [cliCommands, setCliCommands] = useState<RuntimeCommand[]>([]);
+  const [installedPlugins, setInstalledPlugins] = useState<InstalledMcpServer[]>([]);
   const [firm, setFirm] = useState<InstalledFirm | null>(null);
   const [resolvedOrg, setResolvedOrg] = useState<ResolvedOrg | null>(null);
   const [project, setProject] = useState<Project | null>(null);
@@ -504,6 +506,7 @@ function ChatPage() {
     setNetTimeline([]);
     setScaffoldedApps({});
     setScaffoldedTools({});
+    setInstalledPlugins([]);
     void (async () => {
       const c = await api.chats.get(chatId);
       if (cancelled || !c) {
@@ -512,17 +515,19 @@ function ChatPage() {
       }
       setChat(c);
       setTitleDraft(c.title);
-      const [agents, history, projectsAll, firmsAll, envVars] = await Promise.all([
+      const [agents, history, projectsAll, firmsAll, envVars, plugins] = await Promise.all([
         api.team.list(),
         api.invoke.history(chatId),
         api.projects.list(),
         api.firms.list(),
         api.env.list(),
+        api.mcpTools.listInstalled(),
       ]);
       if (cancelled) return;
       setAllAgents(agents);
       setAllProjects(projectsAll);
       setAllFirms(firmsAll);
+      setInstalledPlugins(plugins);
       // @ 멘션 popover에는 실제로 값이 저장된 키만 노출 — 비어있는 키를 멘션하면 invocation에서 빈 값이 주입돼 혼란.
       setAllEnvKeys(envVars.filter((e) => e.hasValue).map((e) => e.key));
       // CLI 슬래시 명령 스캔 (매 진입 시 최신) — 느려도 채팅 표시를 막지 않게 후속 로드.
@@ -571,13 +576,15 @@ function ChatPage() {
         setFirm(null);
         setResolvedOrg(null);
       }
-      setMessages(
-        history.map((e) => ({
+      const historyMessages: StreamMessage[] = history.map((e) => ({
           id: e.id,
           role: e.role === "assistant" ? "agent" : e.role === "user" ? "user" : "system",
           text: e.text,
-        })),
-      );
+        }));
+      setMessages((current) => {
+        const hasLiveDraft = current.some((msg) => msg.busy || msg.streaming);
+        return hasLiveDraft ? current : historyMessages;
+      });
       // 진행 중 실행 재접속 — 이 채팅이 백그라운드로 돌고 있으면(다른 채팅 갔다 옴) 스트림·정지버튼 복구.
       // 버퍼된 이벤트를 리플레이해 진행 중 버블을 재구성하고, runId 채널을 구독해 이후 스트림을 받는다.
       const attached = await api.invoke.attach(chatId);
@@ -705,6 +712,9 @@ function ChatPage() {
         (img) => `data:${img.mediaType};base64,${img.data}`,
       );
       const startedAt = Date.now();
+      const initialStatus = t("chat.status.sending");
+      const activeAgentId = agent?.id ?? chat.agentId ?? "active-agent";
+      const activeAgentName = agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback");
       setMessages((m) => [
         ...m,
         { id: uid(), role: "user", text: visiblePrompt, imageDataUrls },
@@ -715,36 +725,74 @@ function ChatPage() {
           busy: true,
           startedAt,
           steps: [
-            { id: uid(), kind: "thinking", text: t("chat.status.sending") },
+            { id: uid(), kind: "thinking", text: initialStatus },
           ],
         },
       ]);
       setBusy(true);
       setNetworkOpen(true);
       cancelRequestedRef.current = false;
-      setLiveAgents({});
-      setNetTimeline([]);
-
-      // locale을 동봉 — main이 emit하는 상태/오류 메시지가 사용자 언어로 나오도록.
-      const { runId } = await api.invoke.run({
-        chatId: chat.id,
-        userPrompt: invocationPrompt,
-        images,
-        locale,
-        permissions: opts?.permissions ?? DEFAULT_PERMISSION,
-        goalMode: opts?.goalMode || Boolean(goalPrompt),
-        appsGenerateMode: opts?.appsGenerateMode || Boolean(appRoute),
+      setLiveAgents({
+        [activeAgentId]: {
+          name: activeAgentName,
+          role: "",
+          tier: 1,
+          active: true,
+          status: initialStatus,
+        },
       });
-      runIdRef.current = runId;
-      // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
-      subscribeRun(runId, placeholderId);
-      // runId 도착 전에 Stop을 눌렀다면(레이스) 구독을 건 직후 즉시 취소 — abort 종료 이벤트를 수신해 busy 해제.
-      if (cancelRequestedRef.current) {
-        cancelRequestedRef.current = false;
-        void api.invoke.cancel(runId);
+      setNetTimeline([
+        {
+          key: uid(),
+          agentId: activeAgentId,
+          name: activeAgentName,
+          role: "",
+          tier: 1,
+          kind: "status",
+          text: initialStatus,
+        },
+      ]);
+
+      try {
+        // locale을 동봉 — main이 emit하는 상태/오류 메시지가 사용자 언어로 나오도록.
+        const { runId } = await api.invoke.run({
+          chatId: chat.id,
+          userPrompt: invocationPrompt,
+          images,
+          locale,
+          permissions: opts?.permissions ?? DEFAULT_PERMISSION,
+          goalMode: opts?.goalMode || Boolean(goalPrompt),
+          appsGenerateMode: opts?.appsGenerateMode || Boolean(appRoute),
+        });
+        runIdRef.current = runId;
+        // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
+        subscribeRun(runId, placeholderId);
+        // runId 도착 전에 Stop을 눌렀다면(레이스) 구독을 건 직후 즉시 취소 — abort 종료 이벤트를 수신해 busy 해제.
+        if (cancelRequestedRef.current) {
+          cancelRequestedRef.current = false;
+          void api.invoke.cancel(runId);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setMessages((m) =>
+          m.map((msg) =>
+            msg.id === placeholderId
+              ? {
+                  id: msg.id,
+                  role: "system",
+                  text: `⚠️ ${message || t("chat.err.unknown")}`,
+                }
+              : msg,
+          ),
+        );
+        setBusy(false);
+        setLiveAgents((prev) =>
+          Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
+        );
+        runIdRef.current = null;
       }
     },
-    [chat, busy, locale, router, t, subscribeRun],
+    [agent, chat, busy, locale, router, t, subscribeRun],
   );
 
   // 진행 중 실행 취소 — 입력창의 정지 버튼(전송 버튼이 busy일 때 변신) / Cmd/Ctrl+Esc.
@@ -1208,6 +1256,10 @@ function ChatPage() {
     const api = ipc();
     if (!api || !chat) return;
     if (!confirm(t("chat.confirm_delete"))) return;
+    const removedId = chat.id;
+    setChat(null);
+    setMessages([]);
+    window.dispatchEvent(new CustomEvent("agentlas:chat-removed", { detail: { id: removedId } }));
     await api.chats.remove(chat.id);
     router.replace("/");
   }
@@ -1409,6 +1461,7 @@ function ChatPage() {
           projects: allProjects,
           envKeys: allEnvKeys,
           commands: cliCommands,
+          plugins: installedPlugins,
         }}
         onOpenArtifact={(a) => {
           setSurface(null);

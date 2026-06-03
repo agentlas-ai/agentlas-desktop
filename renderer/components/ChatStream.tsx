@@ -2,12 +2,12 @@
 // 작업 중 메시지는 Codex/Claude 데스크톱처럼 step log + 경과 시간을 실시간으로 보여준다.
 "use client";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import type { InstalledAgent, InstalledFirm, Project, RuntimeCommand } from "@/lib/types";
+import type { InstalledAgent, InstalledFirm, InstalledMcpServer, Project, RuntimeCommand } from "@/lib/types";
 import type { AgentlasAppDefinition } from "@/lib/apps";
 import { appDisplayName, appSlashCommands } from "@/lib/apps";
 import { AgentAvatar } from "./AgentAvatar";
 import { Markdown, type CodeArtifact } from "./Markdown";
-import { useT } from "@/lib/i18n";
+import { pickLocalized, useT } from "@/lib/i18n";
 
 /** 작업 중 패널에 누적되는 단일 단계. 새 이벤트마다 push (replace 아님). */
 export interface StreamStep {
@@ -70,6 +70,7 @@ export interface ChatEmptyDirectory {
   projects: Project[];
   envKeys: string[];
   commands: RuntimeCommand[];
+  plugins: InstalledMcpServer[];
 }
 
 export function ChatStream({
@@ -90,14 +91,28 @@ export function ChatStream({
 }) {
   const { t } = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    const el = scrollRef.current;
+    if (!el || !stickToBottomRef.current) return;
+    const handle = window.setTimeout(() => {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    }, 0);
+    return () => window.clearTimeout(handle);
   }, [messages]);
+
+  function handleScroll() {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distanceFromBottom < 96;
+  }
 
   return (
     <div
       ref={scrollRef}
+      onScroll={handleScroll}
       style={{
         flex: 1,
         overflowY: messages.length === 0 ? "hidden" : "auto",
@@ -133,155 +148,171 @@ function EmptyCommandDirectory({
 }) {
   const { t, locale } = useT();
   const apps = directory?.apps ?? [];
+  const agents = directory?.agents ?? [];
+  const projects = directory?.projects ?? [];
+  const envKeys = directory?.envKeys ?? [];
+  const commands = directory?.commands ?? [];
+  const plugins = directory?.plugins ?? [];
   const slashRows = [
-    { key: "/goal", title: t("chatcmd.goal"), tone: "goal" as const },
-    { key: "/apps", title: t("chatcmd.apps"), tone: "app" as const },
-    { key: "/new", title: t("chatcmd.new"), tone: "base" as const },
-    { key: "/folder", title: t("chatcmd.folder"), tone: "base" as const },
-    { key: "/global", title: t("chatcmd.global"), tone: "base" as const },
-    { key: "/rename", title: t("chatcmd.rename"), tone: "base" as const },
-    { key: "/clear", title: t("chatcmd.clear"), tone: "base" as const },
-    { key: "/help", title: t("chatcmd.help"), tone: "base" as const },
+    { token: "/goal", label: t("chatcmd.goal") },
+    { token: "/apps", label: t("chatcmd.apps") },
+    { token: "/new", label: t("chatcmd.new") },
+    { token: "/folder", label: t("chatcmd.folder") },
+    { token: "/global", label: t("chatcmd.global") },
+    { token: "/rename", label: t("chatcmd.rename") },
+    { token: "/clear", label: t("chatcmd.clear") },
+    { token: "/help", label: t("chatcmd.help") },
   ];
   const appRows = apps.flatMap((app) =>
     appSlashCommands(app).map((command) => ({
-      key: command,
-      title: appDisplayName(app, locale),
-      tone: "app" as const,
+      token: command,
+      label: appDisplayName(app, locale),
     })),
-  ).slice(0, 10);
-  const mentionRows = [
-    { key: "@", title: t("chatcmd.mention"), tone: "mention" as const },
-    { key: "@agent", title: t("chatcmd.agent"), tone: "mention" as const },
-    { key: "@project", title: t("chatcmd.project"), tone: "mention" as const },
-    { key: "@env", title: t("chatcmd.env"), tone: "mention" as const },
-  ];
-  const rows = [...slashRows, ...appRows, ...mentionRows];
+  ).slice(0, 8);
+  const agentRows = agents.slice(0, 8).map((agent) => {
+    const loc = pickLocalized(agent, locale);
+    return { token: `@${loc.name}`, label: agent.slug };
+  });
+  const pluginRows = plugins.slice(0, 8).map((plugin) => ({
+    token: plugin.catalogId ? `mcp:${plugin.catalogId}` : "mcp:custom",
+    label: locale === "en" ? plugin.nameEn || plugin.name : plugin.name,
+    muted: plugin.enabled ? t("mcps.on") : t("mcps.off"),
+  }));
+  const projectRows = projects.slice(0, 6).map((project) => ({
+    token: `@${project.name}`,
+    label: t("sidebar.projects"),
+  }));
+  const envRows = envKeys.slice(0, 6).map((key) => ({ token: `@${key}`, label: t("env.title") }));
+  const runtimeRows = commands.slice(0, 6).map((command) => ({
+    token: command.name,
+    label: command.description || command.source,
+  }));
+  type DirectoryRow = { token: string; label: string; muted?: string };
+  const sections: Array<{ title: string; rows: DirectoryRow[] }> = [
+    { title: t("chatstream.empty_section.commands"), rows: slashRows },
+    { title: t("chatstream.empty_section.apps"), rows: appRows },
+    { title: t("chatstream.empty_section.agents"), rows: agentRows },
+    { title: t("chatstream.empty_section.plugins"), rows: pluginRows },
+    { title: t("chatstream.empty_section.context"), rows: [...projectRows, ...envRows, ...runtimeRows].slice(0, 10) },
+  ].filter((section) => section.rows.length > 0);
 
   return (
     <div style={emptyShell}>
-      <div style={commandCanvas} aria-label={t("chatstream.empty_commands_title")}>
-        <div style={commandCloud}>
-          {rows.map((row) => (
-            <CommandChip key={`${row.key}-${row.title}`} token={row.key} label={row.title} tone={row.tone} />
-          ))}
-          {rows.length === 0 && <div style={emptyRow}>{t("chatinput.no_match")}</div>}
-        </div>
+      <div style={commandDirectory} aria-label={t("chatstream.empty_commands_title")}>
+        {sections.length === 0 ? (
+          <div style={emptyRow}>{t("chatinput.no_match")}</div>
+        ) : (
+          sections.map((section) => (
+            <section key={section.title} style={commandSection}>
+              <h2 style={commandSectionTitle}>{section.title}</h2>
+              <div style={commandList}>
+                {section.rows.map((row) => (
+                  <CommandRow key={`${section.title}-${row.token}-${row.label}`} token={row.token} label={row.label} muted={row.muted} />
+                ))}
+              </div>
+            </section>
+          ))
+        )}
       </div>
     </div>
   );
 }
 
-function CommandChip({
+function CommandRow({
   token,
   label,
-  tone,
+  muted,
 }: {
   token: string;
   label: string;
-  tone: "goal" | "app" | "mention" | "runtime" | "base";
+  muted?: string;
 }) {
   return (
-    <div style={{ ...commandChip, ...chipTone(tone) }} title={`${token} ${label}`}>
-      <code style={chipToken}>{token}</code>
-      <span style={chipLabel}>{label}</span>
+    <div style={commandRow} title={`${token} ${label}`}>
+      <code style={commandToken}>{token}</code>
+      <span style={commandLabel}>{label}</span>
+      {muted && <span style={commandMuted}>{muted}</span>}
     </div>
   );
 }
 
 const emptyShell: CSSProperties = {
   width: "100%",
-  maxWidth: 760,
-  margin: "auto",
-  display: "flex",
-  justifyContent: "center",
+  maxWidth: 980,
+  margin: "160px auto auto",
 };
 
-const commandCanvas: CSSProperties = {
-  width: "min(100%, 740px)",
-  minHeight: 188,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  padding: 26,
-  borderRadius: 8,
-  background: "color-mix(in srgb, var(--paper-2) 92%, var(--accent) 8%)",
+const commandDirectory: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))",
+  gap: "24px 30px",
+  alignItems: "start",
+  justifyContent: "start",
+  color: "var(--muted-deep)",
 };
 
-const commandCloud: CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
-  justifyContent: "center",
-  alignContent: "center",
-  gap: 8,
-  overflow: "hidden",
-};
-
-const commandChip: CSSProperties = {
+const commandSection: CSSProperties = {
   minWidth: 0,
-  maxWidth: 210,
-  height: 30,
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 7,
-  padding: "0 10px",
-  borderRadius: 7,
-  border: "1px solid color-mix(in srgb, var(--paper-edge) 78%, transparent)",
-  background: "color-mix(in srgb, var(--paper) 88%, white 12%)",
-  color: "var(--ink-soft)",
 };
 
-const chipToken: CSSProperties = {
-  flexShrink: 0,
-  fontFamily: "var(--font-mono)",
-  fontSize: 11.5,
+const commandSectionTitle: CSSProperties = {
+  margin: "0 0 8px",
+  fontSize: 10.5,
   fontWeight: 750,
-  color: "inherit",
+  textTransform: "uppercase",
   letterSpacing: 0,
-  whiteSpace: "nowrap",
+  color: "var(--muted)",
 };
 
-const chipLabel: CSSProperties = {
+const commandList: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 5,
+  minWidth: 0,
+};
+
+const commandRow: CSSProperties = {
+  minWidth: 0,
+  display: "flex",
+  alignItems: "baseline",
+  gap: 7,
+  color: "var(--muted-deep)",
+  fontSize: 12.5,
+  lineHeight: 1.45,
+};
+
+const commandToken: CSSProperties = {
+  minWidth: 0,
+  flexShrink: 0,
+  maxWidth: 128,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontFamily: "var(--font-mono)",
+  fontSize: 12,
+  fontWeight: 760,
+  color: "var(--accent)",
+  letterSpacing: 0,
+};
+
+const commandLabel: CSSProperties = {
   minWidth: 0,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
-  fontSize: 12,
-  fontWeight: 650,
-  lineHeight: 1,
+  color: "color-mix(in srgb, var(--muted-deep) 76%, var(--paper) 24%)",
+};
+
+const commandMuted: CSSProperties = {
+  flexShrink: 0,
+  color: "var(--muted)",
+  fontSize: 11,
 };
 
 const emptyRow: CSSProperties = {
   color: "var(--muted)",
   fontSize: 12,
 };
-
-function chipTone(tone: "goal" | "app" | "mention" | "runtime" | "base"): CSSProperties {
-  if (tone === "goal") {
-    return {
-      color: "var(--accent)",
-      background: "color-mix(in srgb, var(--paper) 82%, var(--accent) 18%)",
-      borderColor: "color-mix(in srgb, var(--accent) 32%, var(--paper-edge))",
-    };
-  }
-  if (tone === "app") {
-    return {
-      color: "var(--ink)",
-      background: "color-mix(in srgb, var(--paper) 84%, #dbeafe 16%)",
-    };
-  }
-  if (tone === "mention") {
-    return {
-      background: "color-mix(in srgb, var(--paper) 84%, #e8f5ef 16%)",
-    };
-  }
-  if (tone === "runtime") {
-    return {
-      background: "color-mix(in srgb, var(--paper) 86%, #f5eadb 14%)",
-    };
-  }
-  return {};
-}
 
 function Bubble({
   message,
@@ -338,15 +369,21 @@ function Bubble({
     );
   }
   if (message.role === "system") {
+    if (isInternalSystemNote(message.text)) return null;
+    const isError = message.text.trim().startsWith("⚠️");
     return (
       <div
         style={{
           alignSelf: "stretch",
-          fontSize: 13,
-          color: "var(--red-deep)",
-          background: "rgba(255,138,138,0.10)",
-          padding: "10px 14px",
-          borderRadius: "var(--radius-md)",
+          maxWidth: 760,
+          fontSize: 12.5,
+          lineHeight: 1.55,
+          color: isError ? "var(--red-deep)" : "var(--muted-deep)",
+          background: isError ? "rgba(255,138,138,0.10)" : "transparent",
+          padding: isError ? "9px 12px" : "2px 0",
+          borderRadius: isError ? "var(--radius-sm)" : 0,
+          whiteSpace: "pre-wrap",
+          overflowWrap: "anywhere",
         }}
       >
         {message.text}
@@ -356,11 +393,11 @@ function Bubble({
   // agent — Markdown 렌더링. 작업 중이거나 step/tool 기록이 있으면 워킹 패널(완료 후엔 시간·토큰·툴블록).
   const showWorking = message.busy || (message.steps && message.steps.length > 0);
   return (
-    <div style={{ display: "flex", gap: 10, alignSelf: "flex-start", maxWidth: "85%" }}>
+    <div style={{ display: "flex", gap: 10, alignSelf: "stretch", maxWidth: 820 }}>
       <div style={{ position: "relative", flexShrink: 0 }}>
         <AgentAvatar name={agentName} tone={agentTone} size={28} />
       </div>
-      <div style={{ minWidth: 0, flex: 1 }}>
+      <div style={{ minWidth: 0, flex: 1, paddingTop: 1 }}>
         {showWorking && (
           <WorkingPanel
             steps={message.steps ?? []}
@@ -381,11 +418,10 @@ function Bubble({
         {message.text && !message.busy && (
           <div
             style={{
-              background: "var(--paper-2)",
-              border: "1px solid var(--paper-edge)",
-              padding: "12px 16px",
-              borderRadius: "var(--radius-md)",
-              marginTop: showWorking ? 8 : 0,
+              color: "var(--ink)",
+              fontSize: 14,
+              lineHeight: 1.65,
+              marginTop: showWorking ? 10 : 0,
             }}
           >
             <Markdown
@@ -440,58 +476,27 @@ function LiveOutputPanel({
   messageId: string;
   onOpenArtifact?: (a: CodeArtifact) => void;
 }) {
-  const { t } = useT();
-  const [open, setOpen] = useState(false);
-  const lines = Math.max(1, text.split(/\r?\n/).filter((line) => line.trim()).length);
   return (
     <div
       style={{
-        background: "var(--paper-2)",
-        border: "1px solid var(--paper-edge)",
-        borderRadius: "var(--radius-md)",
+        color: "var(--ink-soft)",
+        fontSize: 13.5,
+        lineHeight: 1.6,
         marginTop: 8,
-        overflow: "hidden",
+        opacity: 0.92,
       }}
     >
-      <button
-        onClick={() => setOpen((v) => !v)}
-        style={{
-          width: "100%",
-          border: "none",
-          background: "transparent",
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "9px 12px",
-          color: "var(--ink-soft)",
-          fontSize: 12.5,
-          fontWeight: 650,
-          cursor: "pointer",
-          textAlign: "left",
-        }}
-      >
-        {streaming && <PulsingDot />}
-        <span style={{ flex: 1, minWidth: 0 }}>{t("chatstream.live_output", { count: lines })}</span>
-        <span
-          aria-hidden
-          style={{
-            color: "var(--muted)",
-            transform: open ? "rotate(180deg)" : "none",
-            transition: "transform .12s",
-            display: "inline-flex",
-            flexShrink: 0,
-          }}
-        >
-          <ChevronDown />
-        </span>
-      </button>
-      {open && (
-        <div style={{ borderTop: "1px solid var(--paper-edge)", padding: "12px 16px" }}>
-          <Markdown text={text} messageId={messageId} onOpenArtifact={onOpenArtifact} />
-          {streaming && <BlinkingCursor />}
-        </div>
-      )}
+      <Markdown text={text} messageId={messageId} onOpenArtifact={onOpenArtifact} />
+      {streaming && <BlinkingCursor />}
     </div>
+  );
+}
+
+function isInternalSystemNote(text: string) {
+  const trimmed = text.trim();
+  return (
+    trimmed.startsWith("Agentlas OS operated this surface hands-free.") ||
+    trimmed.startsWith("Agentlas OS prepared this surface hands-free.")
   );
 }
 
@@ -750,8 +755,8 @@ function WorkingPanel({
   for (const s of toolSteps) counts[toolView(s.tool!, s.args, locale).group] += 1;
   const summary = buildToolSummary(counts, locale);
 
-  // 기본은 접힘. 사용자가 필요할 때만 작업 로그를 펼친다.
-  const expanded = override ?? false;
+  // 실행 중에는 실시간 로그를 바로 보여주고, 완료 뒤에는 요약만 남긴다.
+  const expanded = override ?? !done;
   const activitySummary =
     toolSteps.length > 0
       ? summary
@@ -762,13 +767,11 @@ function WorkingPanel({
   return (
     <div
       style={{
-        background: "var(--paper-2)",
-        border: "1px solid var(--paper-edge)",
-        borderRadius: "var(--radius-md)",
-        padding: "10px 14px",
+        color: "var(--muted-deep)",
+        padding: "1px 0 4px",
         display: "flex",
         flexDirection: "column",
-        gap: 8,
+        gap: 7,
       }}
     >
       {/* 메트릭 줄 — 실행 상태 + "2분 58초 · 94.5k tokens" */}
@@ -781,6 +784,7 @@ function WorkingPanel({
           fontSize: 12,
           fontWeight: 500,
           flexWrap: "wrap",
+          color: "var(--muted-deep)",
         }}
       >
         <span style={statusBadge(done)}>
@@ -837,7 +841,7 @@ function WorkingPanel({
                 flexDirection: "column",
                 gap: 4,
                 paddingLeft: 14,
-                borderLeft: "1px solid var(--paper-edge)",
+                borderLeft: "1px solid color-mix(in srgb, var(--muted) 28%, transparent)",
                 marginLeft: 3,
                 minWidth: 0,
               }}
@@ -1049,13 +1053,7 @@ function statusBadge(done: boolean): CSSProperties {
     display: "inline-flex",
     alignItems: "center",
     gap: 6,
-    borderRadius: 999,
-    padding: "3px 8px",
-    color: done ? "#15803d" : "var(--accent-strong)",
-    background: done
-      ? "color-mix(in srgb, #dcfce7 78%, var(--paper) 22%)"
-      : "color-mix(in srgb, var(--accent-soft) 56%, var(--paper) 44%)",
-    border: `1px solid ${done ? "#bbf7d0" : "var(--accent-faint)"}`,
+    color: done ? "#15803d" : "var(--muted-deep)",
     fontWeight: 700,
   };
 }

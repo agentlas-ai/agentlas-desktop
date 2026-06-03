@@ -68,31 +68,32 @@ export default function AppsPage() {
         </div>
       </header>
 
-      <main style={{ padding: 32, display: "grid", gap: 28 }}>
+      <main style={pageMain}>
         <section>
           <h2 style={sectionTitle}>{locale === "en" ? "Installed Apps" : "설치된 Apps"}</h2>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12 }}>
+          <div style={appList}>
             {INSTALLED_APPS.map((app) => {
               const loc = pickLocalized(app, locale);
               return (
                 <Link key={app.id} href={app.route} className="glass-strong" style={appTile}>
-                  <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-                    <div style={appIcon}>
-                      <IconApps size={22} />
-                    </div>
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <strong style={{ display: "block", color: "var(--ink)", fontSize: 15 }}>{loc.name}</strong>
-                      <span style={{ display: "block", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.45, marginTop: 3 }}>
-                        {loc.tagline}
-                      </span>
-                    </div>
-                    <IconChevronRight size={14} style={{ color: "var(--muted-deep)", flexShrink: 0, marginTop: 3 }} />
+                  <div style={appIcon}>
+                    <IconApps size={20} />
                   </div>
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 14 }}>
-                    {app.artifacts.map((artifact) => (
-                      <span key={artifact} style={pill}>{artifact}</span>
-                    ))}
+                  <div style={appBody}>
+                    <div style={appTitleLine}>
+                      <strong style={appName}>{loc.name}</strong>
+                      <span style={appKind}>{locale === "en" ? "Installed" : "설치됨"}</span>
+                    </div>
+                    <span style={appDescription} title={loc.tagline}>
+                      {loc.tagline}
+                    </span>
+                    <div style={pillRow}>
+                      {app.artifacts.map((artifact) => (
+                        <span key={artifact} style={pill}>{artifact}</span>
+                      ))}
+                    </div>
                   </div>
+                  <IconChevronRight size={14} style={chevronStyle} />
                 </Link>
               );
             })}
@@ -102,7 +103,7 @@ export default function AppsPage() {
         {generatedApps.length > 0 && (
           <section>
             <h2 style={sectionTitle}>{locale === "en" ? "Generated Apps" : "생성된 Apps"}</h2>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12 }}>
+            <div style={appList}>
               {generatedApps.map((app) => {
                 const title = app.appName || app.manifest.app?.name || app.manifest.title;
                 const description = app.manifest.description;
@@ -117,23 +118,24 @@ export default function AppsPage() {
                 ].filter(Boolean);
                 return (
                   <Link key={app.id} href={`/apps/generated?id=${app.id}`} className="glass-strong" style={appTile}>
-                    <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-                      <div style={{ ...appIcon, background: "linear-gradient(135deg, var(--green), var(--accent))" }}>
-                        <IconWand size={22} />
-                      </div>
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <strong style={{ display: "block", color: "var(--ink)", fontSize: 15 }}>{title}</strong>
-                        <span style={{ display: "block", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.45, marginTop: 3 }}>
-                          {tagline}
-                        </span>
-                      </div>
-                      <IconChevronRight size={14} style={{ color: "var(--muted-deep)", flexShrink: 0, marginTop: 3 }} />
+                    <div style={{ ...appIcon, background: "linear-gradient(135deg, var(--green), var(--accent))" }}>
+                      <IconWand size={20} />
                     </div>
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 14 }}>
-                      {artifacts.map((artifact) => (
-                        <span key={artifact} style={pill}>{artifact}</span>
-                      ))}
+                    <div style={appBody}>
+                      <div style={appTitleLine}>
+                        <strong style={appName}>{title}</strong>
+                        <span style={appKind}>{locale === "en" ? "Generated" : "생성됨"}</span>
+                      </div>
+                      <span style={appDescription} title={tagline}>
+                        {tagline}
+                      </span>
+                      <div style={pillRow}>
+                        {artifacts.map((artifact) => (
+                          <span key={artifact} style={pill}>{artifact}</span>
+                        ))}
+                      </div>
                     </div>
+                    <IconChevronRight size={14} style={chevronStyle} />
                   </Link>
                 );
               })}
@@ -143,7 +145,7 @@ export default function AppsPage() {
 
         <section>
           <h2 style={sectionTitle}>{locale === "en" ? "App Controls" : "Apps 관리"}</h2>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))", gap: 10 }}>
+          <div style={supportGrid}>
             {SUPPORT_LINKS.map((item) => (
               <Link key={item.href} href={item.href} className="neu" style={supportTile}>
                 {item.icon === "store" ? <IconStore size={16} /> : item.icon === "vault" ? <IconKey size={16} /> : <IconWand size={16} />}
@@ -163,6 +165,14 @@ export default function AppsPage() {
   );
 }
 
+const pageMain: React.CSSProperties = {
+  width: "100%",
+  maxWidth: 1040,
+  padding: "30px 32px 44px",
+  display: "grid",
+  gap: 26,
+};
+
 const sectionTitle: React.CSSProperties = {
   margin: "0 0 10px",
   fontFamily: "var(--font-head)",
@@ -170,21 +180,28 @@ const sectionTitle: React.CSSProperties = {
   color: "var(--ink)",
 };
 
+const appList: React.CSSProperties = {
+  width: "100%",
+  display: "grid",
+  gap: 10,
+};
+
 const appTile: React.CSSProperties = {
-  minHeight: 162,
-  borderRadius: 10,
-  padding: 16,
+  width: "100%",
+  minHeight: 92,
+  borderRadius: 8,
+  padding: 14,
   textDecoration: "none",
   color: "inherit",
   display: "flex",
-  flexDirection: "column",
-  justifyContent: "space-between",
+  alignItems: "flex-start",
+  gap: 13,
 };
 
 const appIcon: React.CSSProperties = {
-  width: 46,
-  height: 46,
-  borderRadius: 10,
+  width: 42,
+  height: 42,
+  borderRadius: 8,
   background: "linear-gradient(135deg, var(--accent), var(--peach))",
   color: "white",
   display: "inline-flex",
@@ -194,6 +211,57 @@ const appIcon: React.CSSProperties = {
   flexShrink: 0,
 };
 
+const appBody: React.CSSProperties = {
+  minWidth: 0,
+  flex: 1,
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+};
+
+const appTitleLine: React.CSSProperties = {
+  minWidth: 0,
+  display: "flex",
+  alignItems: "baseline",
+  gap: 8,
+};
+
+const appName: React.CSSProperties = {
+  minWidth: 0,
+  display: "block",
+  color: "var(--ink)",
+  fontSize: 14.5,
+  lineHeight: 1.25,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const appKind: React.CSSProperties = {
+  flexShrink: 0,
+  color: "var(--muted)",
+  fontSize: 11,
+  fontWeight: 700,
+};
+
+const appDescription: React.CSSProperties = {
+  display: "-webkit-box",
+  WebkitBoxOrient: "vertical",
+  WebkitLineClamp: 2,
+  overflow: "hidden",
+  color: "var(--muted-deep)",
+  fontSize: 12.2,
+  lineHeight: 1.45,
+  maxWidth: 720,
+};
+
+const pillRow: React.CSSProperties = {
+  display: "flex",
+  gap: 6,
+  flexWrap: "wrap",
+  marginTop: 5,
+};
+
 const pill: React.CSSProperties = {
   padding: "3px 7px",
   borderRadius: 999,
@@ -201,6 +269,18 @@ const pill: React.CSSProperties = {
   color: "var(--accent)",
   fontSize: 10.5,
   fontWeight: 700,
+};
+
+const chevronStyle: React.CSSProperties = {
+  color: "var(--muted-deep)",
+  flexShrink: 0,
+  marginTop: 14,
+};
+
+const supportGrid: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+  gap: 10,
 };
 
 const supportTile: React.CSSProperties = {

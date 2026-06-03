@@ -79,6 +79,7 @@ export function ChatRow({
     if (!api) return;
     setMenuOpen(false);
     if (!confirm(t("chat.confirm_delete"))) return;
+    window.dispatchEvent(new CustomEvent("agentlas:chat-removed", { detail: { id: chat.id } }));
     await api.chats.remove(chat.id);
     onChanged();
     // 현재 보고 있던 채팅이 삭제됐으면 홈으로

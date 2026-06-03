@@ -41,6 +41,7 @@ import { pickLocalized, useT } from "@/lib/i18n";
 import { useTheme } from "@/lib/theme";
 
 const COLLAPSE_KEY = "agentlas.sidebar.collapsed";
+const CHATS_SECTION_COLLAPSE_KEY = "agentlas.sidebar.section.chats.collapsed";
 const COLLAPSED_WIDTH = 60;
 const EXPANDED_WIDTH = 248;
 
@@ -100,6 +101,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   const currentAutomationId = searchParams.get("id");
   const [data, setData] = useState<SidebarData>(EMPTY);
   const [collapsed, setCollapsed] = useState(false);
+  const [chatsCollapsed, setChatsCollapsed] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
   const refreshKey = refreshKeyProp + refreshTick;
   const triggerRefresh = () => setRefreshTick((n) => n + 1);
@@ -121,6 +123,33 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       off();
     };
   }, []);
+
+  useEffect(() => {
+    try {
+      setChatsCollapsed(window.localStorage.getItem(CHATS_SECTION_COLLAPSE_KEY) === "1");
+    } catch {
+      // ignore
+    }
+    function onRemoved(e: Event) {
+      const id = (e as CustomEvent<{ id?: string }>).detail?.id;
+      if (!id) return;
+      setData((prev) => ({ ...prev, chats: prev.chats.filter((chat) => chat.id !== id) }));
+    }
+    window.addEventListener("agentlas:chat-removed", onRemoved);
+    return () => window.removeEventListener("agentlas:chat-removed", onRemoved);
+  }, []);
+
+  function toggleChatsCollapsed() {
+    setChatsCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(CHATS_SECTION_COLLAPSE_KEY, next ? "1" : "0");
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }
 
   // 사용자 선호 영구화 — localStorage. SSR 안전.
   useEffect(() => {
@@ -421,6 +450,9 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         <SidebarSection
           title={t("sidebar.chats")}
           icon={<IconChat size={12} />}
+          collapsible
+          collapsed={chatsCollapsed}
+          onToggle={toggleChatsCollapsed}
           action={
             <Link
               href="/chat/archived"
@@ -737,11 +769,17 @@ function SidebarSection({
   icon,
   children,
   action,
+  collapsible,
+  collapsed,
+  onToggle,
 }: {
   title: string;
   icon?: React.ReactNode;
   children: React.ReactNode;
   action?: React.ReactNode;
+  collapsible?: boolean;
+  collapsed?: boolean;
+  onToggle?: () => void;
 }) {
   return (
     <section style={{ marginTop: 8 }}>
@@ -758,11 +796,47 @@ function SidebarSection({
           color: "var(--muted-deep)",
         }}
       >
-        {icon}
-        <span style={{ flex: 1 }}>{title}</span>
+        {collapsible ? (
+          <button
+            onClick={onToggle}
+            aria-expanded={!collapsed}
+            title={title}
+            style={{
+              minWidth: 0,
+              flex: 1,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              padding: 0,
+              background: "transparent",
+              border: "none",
+              color: "inherit",
+              font: "inherit",
+              letterSpacing: "inherit",
+              textTransform: "inherit",
+              cursor: "pointer",
+            }}
+          >
+            {icon}
+            <span style={{ flex: 1, textAlign: "left" }}>{title}</span>
+            <IconChevronRight
+              size={10}
+              style={{
+                color: "var(--muted)",
+                transform: collapsed ? "rotate(0deg)" : "rotate(90deg)",
+                transition: "transform 0.12s ease",
+              }}
+            />
+          </button>
+        ) : (
+          <>
+            {icon}
+            <span style={{ flex: 1 }}>{title}</span>
+          </>
+        )}
         {action}
       </header>
-      <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>{children}</div>
+      {!collapsed && <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>{children}</div>}
     </section>
   );
 }
