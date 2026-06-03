@@ -11,7 +11,7 @@ const PROMPT =
   "여자옷 쇼핑몰 사업하고 싶어. 결제, 디비, 이미지 생성, 운영 대시보드까지 알아서 만들어줘.";
 const PROOF_ROOT =
   process.env.AGENTLAS_PROOF_DIR ||
-  path.join("/Volumes/X31/temp", `agentlas-ecommerce-os-proof-${stampForPath(new Date())}`);
+  path.join(require("os").tmpdir(), `agentlas-ecommerce-os-proof-${stampForPath(new Date())}`);
 const DB_PATH = path.join(PROOF_ROOT, "agentlas-proof.sqlite");
 const SCREENSHOT_DIR = path.join(PROOF_ROOT, "screenshots");
 const PORT = Number(process.env.AGENTLAS_PROOF_PORT || 4327);
@@ -412,7 +412,7 @@ function seedMetaAgent() {
       "generated commerce app was published as a reusable MCP tool for later agents",
       "generated app archive is reversible and restore was verified from the archived OS object",
       "generated package smoke test passed",
-      "promotional screenshots were saved under /Volumes/X31/temp",
+      "promotional screenshots were saved under the system temp directory",
       "secret/card/token leak scan found no raw secret values",
     ],
   };

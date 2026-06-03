@@ -509,6 +509,11 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
             <span style={{ flex: 1 }}>{t("sidebar.manage_agents")}</span>
             <span style={{ fontSize: 10, color: "var(--muted)" }}>{displayAgents.length}</span>
           </SidebarLink>
+          <SidebarLink href="/marketplace?tab=agents" active={pathname === "/marketplace"}>
+            <IconStore size={13} style={{ color: "var(--peach-ink)" }} />
+            <span style={{ flex: 1 }}>{t("sidebar.marketplace")}</span>
+            <IconChevronRight size={11} style={{ color: "var(--muted)" }} />
+          </SidebarLink>
         </SidebarSection>
 
         <SidebarSection
@@ -662,11 +667,6 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           <SidebarLink href="/library/mcps" active={pathname.startsWith("/library/mcps")}>
             <IconSparkles size={13} style={{ color: "var(--purple-deep)" }} />
             <span style={{ flex: 1 }}>{t("sidebar.apps_engines")}</span>
-          </SidebarLink>
-          <SidebarLink href="/marketplace" active={pathname === "/marketplace"}>
-            <IconStore size={13} style={{ color: "var(--peach-ink)" }} />
-            <span style={{ flex: 1 }}>{t("sidebar.apps_store")}</span>
-            <IconChevronRight size={11} style={{ color: "var(--muted)" }} />
           </SidebarLink>
         </SidebarSection>
       </nav>
@@ -1016,6 +1016,12 @@ function CollapsedNav({
       isActive: pathname.startsWith("/automation"),
     },
     {
+      href: "/marketplace?tab=agents",
+      label: t("sidebar.marketplace"),
+      icon: <IconStore size={16} />,
+      isActive: pathname === "/marketplace",
+    },
+    {
       href: "/library/agents",
       label: t("sidebar.agents"),
       icon: <IconWand size={16} />,
@@ -1031,12 +1037,6 @@ function CollapsedNav({
         pathname.startsWith("/library/env") ||
         pathname.startsWith("/library/mcps"),
       badge: appCount > 0 ? appCount : undefined,
-    },
-    {
-      href: "/marketplace",
-      label: t("sidebar.marketplace"),
-      icon: <IconStore size={16} />,
-      isActive: pathname === "/marketplace",
     },
   ];
   return (

@@ -2,7 +2,7 @@
 // 1) 환영        — Agentlas 소개, BYOC 메시지
 // 2) 백엔드 연결  — 감지된 CLI 표시 + BYOK 키 입력
 // 3) 메뉴 투어    — 사이드바 5섹션 다이어그램 + 짧은 설명
-// 4) 시작        — Apps Store로 이동해 첫 App 설치
+// 4) 시작        — Marketplace로 이동해 첫 에이전트/회사 설치
 "use client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";

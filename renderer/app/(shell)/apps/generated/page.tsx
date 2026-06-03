@@ -1,8 +1,10 @@
 "use client";
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { sanitizePublicAppCopy } from "@shared/brand-safety";
 import {
   buildGeneratedAppBlueprint,
   createGeneratedOutputs,
@@ -24,6 +26,7 @@ import {
   IconEdit,
   IconFileUp,
   IconImage,
+  IconTrash,
   IconWand,
 } from "@/components/Icon";
 
@@ -91,9 +94,11 @@ function queryAppId(): string | null {
 
 export default function GeneratedAppPage() {
   const { locale } = useT();
+  const router = useRouter();
   const [appId, setAppId] = useState<string | null>(null);
   const [app, setApp] = useState<AppFactoryAppRecord | null>(null);
   const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     const id = queryAppId();
@@ -116,7 +121,7 @@ export default function GeneratedAppPage() {
     };
   }, [locale]);
 
-  const appName = app?.appName || app?.manifest.app?.name || app?.manifest.title || "Generated App";
+  const appName = sanitizePublicAppCopy(app?.appName || app?.manifest.app?.name || app?.manifest.title, "Generated App");
 
   if (loading) {
     return (
@@ -136,8 +141,54 @@ export default function GeneratedAppPage() {
     );
   }
 
+  async function deleteCurrentApp() {
+    const api = ipc();
+    if (!api || !app || deleting) return;
+    const ok = window.confirm(
+      locale === "en"
+        ? `Delete ${appName} from Apps? It will be kept as a reversible archive.`
+        : `${appName}을 Apps에서 삭제할까요? 복원 가능한 archive로 보관됩니다.`,
+    );
+    if (!ok) return;
+    setDeleting(true);
+    try {
+      await api.appFactory.archive({ rootPath: app.rootPath });
+      router.push("/apps");
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err));
+      setDeleting(false);
+    }
+  }
+
+  const editPrompt = encodeURIComponent(`@${appName} ${locale === "en" ? "edit this App" : "이 App 수정해줘"}`);
+
   return (
-    <GeneratedShell title={appName} subtitle={app.manifest.domain || app.manifest.layout}>
+    <GeneratedShell
+      title={appName}
+      subtitle={sanitizePublicAppCopy(app.manifest.domain || app.manifest.layout, app.manifest.layout)}
+      actions={
+        <>
+          <Link
+            href={`/chat?id=${app.chatId}&prompt=${editPrompt}&permission=write`}
+            className="titlebar-nodrag"
+            style={headerAction}
+          >
+            <IconEdit size={13} />
+            {locale === "en" ? "Edit" : "수정"}
+          </Link>
+          <button
+            type="button"
+            className="titlebar-nodrag"
+            onClick={() => void deleteCurrentApp()}
+            disabled={deleting}
+            style={headerAction}
+          >
+            <IconTrash size={13} />
+            {locale === "en" ? "Delete" : "삭제"}
+          </button>
+        </>
+      }
+    >
       <GeneratedAppRunner app={app} />
     </GeneratedShell>
   );
@@ -146,10 +197,12 @@ export default function GeneratedAppPage() {
 function GeneratedShell({
   title,
   subtitle,
+  actions,
   children,
 }: {
   title: string;
   subtitle: string;
+  actions?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -168,6 +221,7 @@ function GeneratedShell({
           <span style={liveDot} />
           Internal App
         </div>
+        {actions ? <div style={headerActions}>{actions}</div> : null}
       </header>
       {children}
     </div>
@@ -1094,6 +1148,28 @@ const livePill: CSSProperties = {
   padding: "5px 9px",
   fontSize: 11,
   fontWeight: 700,
+};
+
+const headerActions: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  flexShrink: 0,
+};
+
+const headerAction: CSSProperties = {
+  height: 30,
+  padding: "0 10px",
+  borderRadius: 6,
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+  color: "var(--ink-soft)",
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  fontSize: 12,
+  fontWeight: 700,
+  textDecoration: "none",
 };
 
 const liveDot: CSSProperties = {

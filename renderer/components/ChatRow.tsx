@@ -153,7 +153,7 @@ export function ChatRow({
                 height: 7,
                 borderRadius: "50%",
                 background: "var(--green-deep)",
-                animation: "agentlas-pulse 1.4s ease-in-out infinite",
+                boxShadow: "0 0 0 3px color-mix(in srgb, var(--green-deep) 12%, transparent)",
               }}
             />
           )}

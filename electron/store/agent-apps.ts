@@ -12,6 +12,7 @@ import type {
   AppFactoryScaffoldSnapshot,
   JsonValue,
 } from "../../shared/types";
+import { sanitizePublicAppCopy, sanitizePublicAppManifestCopy } from "../../shared/brand-safety";
 
 interface AgentAppRow {
   id: string;
@@ -55,6 +56,9 @@ export function recordScaffoldedApp(input: {
   const id = randomUUID();
   const now = new Date().toISOString();
   const db = getDb();
+  const manifest = sanitizePublicAppManifestCopy(input.manifest);
+  const appName = sanitizePublicAppCopy(input.scaffold.appName, input.scaffold.appName);
+  const scaffold = { ...input.scaffold, appName };
   db.prepare(
     `INSERT INTO agent_apps (
        id, chat_id, project_id, agent_id, surface_id, action_id, app_name,
@@ -85,22 +89,22 @@ export function recordScaffoldedApp(input: {
     input.agentId,
     input.surfaceId,
     input.actionId ?? null,
-    input.scaffold.appName,
-    input.manifest.domain,
-    input.manifest.layout,
-    input.scaffold.rootPath,
-    input.scaffold.previewPath,
-    input.scaffold.setupPath,
-    input.scaffold.smokePath,
-    encodeJson(input.manifest),
-    encodeJson(input.scaffold),
+    appName,
+    manifest.domain,
+    manifest.layout,
+    scaffold.rootPath,
+    scaffold.previewPath,
+    scaffold.setupPath,
+    scaffold.smokePath,
+    encodeJson(manifest),
+    encodeJson(scaffold),
     now,
     now,
   );
 
   const app = getAgentAppByRoot(input.scaffold.rootPath);
   if (!app) throw new Error(`Agent app registry write failed: ${input.scaffold.rootPath}`);
-  recordAgentAppOperation(app.id, "scaffold", true, input.scaffold, "scaffolded");
+  recordAgentAppOperation(app.id, "scaffold", true, scaffold, "scaffolded");
   return getAgentApp(app.id) ?? app;
 }
 

@@ -521,7 +521,7 @@ function ceoPrompt(profile: TeamProfile, rootPath: string): string {
     "- Before paid checkout, show merchant, amount/currency, recurrence, and purpose, then require explicit approval.",
     "- Mark facts and numbers as verified, claimed, estimated, or unverified. Do not present unsourced revenue, margin, tax, or legal claims as KPI truth.",
     "- Every file/tool/MCP/deploy mutation must be reversible and leave launch proof.",
-    "- Capture useful progress screenshots under /Volumes/X31/temp when running visual tests.",
+    "- Capture useful progress screenshots under the system temp directory when running visual tests.",
   ].join("\n");
 }
 

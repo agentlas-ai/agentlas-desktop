@@ -69,12 +69,13 @@ renderer-only first-party App으로, AI 리포트 작성과 근거 정리, 편�
 Agentlas 안에서 직접 열어 검증할 수 있게 한다. 채팅에서는 `/apps`, `/docstudio`
 slash command로 Apps 표면을 열 수 있다.
 
-채팅 입력창의 **Apps Generate** 토글은 숨은 apps-generator 경로를 켜는 신호다. 현재
-`McpInvocationRequest.appsGenerateMode`가 main runner로 전달되며, runner는 사용자 목표를
-Apps package 생성 지시로 감싸서 실행한다. 응답에 App 링크가 없으면 runner가 안정 CTA를
-추가하며, 문서/텍스트/리포트/논문 계열 프롬프트는 `/apps/document-studio`로 연결한다.
-향후 실제 App runtime/manifest가 추가되면 이 플래그가 App scaffold, renderer route,
-vault requirements, MCP engine wiring으로 확장된다.
+채팅 입력창의 **Apps Generate** 토글은 내장 **Agentlas App Builder** 라우트를 켜는
+신호다. `McpInvocationRequest.appsGenerateMode`가 main runner로 전달되면 현재 선택된
+채팅 에이전트가 무엇이든 `agentlas-app-builder`로 자동 라우팅하고, runner는 사용자
+목표를 내부 App 생성 지시로 감싼다. App Builder는 `<<agentlas-surface>>` manifest,
+`scaffold-app`, `operate-app` 액션을 통해 App Factory가 `/apps/generated?id=<appId>`에서
+열 수 있는 전용 App을 만들게 한다. 응답에 App 링크가 없으면 runner가 안정 CTA를
+추가한다.
 
 ## 데이터 영구성
 

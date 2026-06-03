@@ -972,7 +972,7 @@ resolves provider credentials through a redacted vault/env check,
 prepares MCP adapters, runs smoke/deploy checks, serves the app locally,
 captures dashboard/storefront/catalog/orders/finance/checkout screenshots,
 writes `PROOF.md` and `proof-report.json`, and stores the whole proof bundle under
-`/Volumes/X31/temp/agentlas-ecommerce-os-proof-*`.
+`the system temp directory/agentlas-ecommerce-os-proof-*`.
 
 ### M3.75: Surface Asset Pack Materializer
 

@@ -8,7 +8,7 @@ const { pathToFileURL } = require("node:url");
 
 const NODE_BIN = process.env.npm_node_execpath || process.env.NODE || "node";
 const STAMP = new Date().toISOString().replace(/[:.]/g, "-").replace(/\-\d{3}Z$/, "Z");
-const PROOF_ROOT = path.join("/Volumes/X31/temp", `agentlas-chat-local-creative-os-proof-${STAMP}`);
+const PROOF_ROOT = path.join(require("os").tmpdir(), `agentlas-chat-local-creative-os-proof-${STAMP}`);
 const SCREENSHOT_DIR = path.join(PROOF_ROOT, "screenshots");
 const DB_PATH = path.join(PROOF_ROOT, "agentlas-proof.sqlite");
 
@@ -224,11 +224,11 @@ function startProductServer() {
         "runtime probes were disabled, proving local Agentlas OS fallback works without hosted model/API runtime",
         "product URL plus product image produced one durable creative-studio surface",
         "surface created resumable image and short-form video generation jobs with budget gates",
-        "asset pack materialized local and remote product media under /Volumes/X31/temp",
+        "asset pack materialized local and remote product media under the system temp directory",
         "Adobe Firefly, Higgsfield, and OpenAI Images became provider browser/action recipes",
         "missing API/MCP is represented as browser delegation, vault credential, payment approval, alternate provider, or local helper",
         "generated creative app was operated hands-free and published as a reusable MCP tool",
-        "studio/claims/exports/asset-pack screenshots were saved under /Volumes/X31/temp",
+        "studio/claims/exports/asset-pack screenshots were saved under the system temp directory",
         "secret/card/token leak scan found no raw secret values",
       ],
     };

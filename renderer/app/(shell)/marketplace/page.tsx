@@ -31,7 +31,6 @@ import {
   IconMoreHorizontal,
   IconPlus,
   IconSearch,
-  IconSettings,
   IconShoppingBag,
   IconSparkles,
   IconUsers,
@@ -326,48 +325,6 @@ function MarketplacePage() {
             <IconFolder size={12} />
             {importing ? t("import.importing") : t("library.agents.import_local")}
           </button>
-          <Link
-            href="/apps"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 5,
-              padding: "5px 11px",
-              borderRadius: 6,
-              fontSize: 12,
-              fontWeight: 600,
-              color: "var(--ink-soft)",
-              background: "var(--paper)",
-              border: "1px solid var(--paper-edge)",
-              boxShadow: "0 1px 0 rgba(11,11,15,0.04)",
-              textDecoration: "none",
-            }}
-          >
-            <IconSettings size={12} />
-            {t("market.btn.manage")}
-          </Link>
-          <Link
-            href="https://agentlas.cloud/build"
-            target="_blank"
-            rel="noreferrer"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 5,
-              padding: "5px 11px",
-              borderRadius: 6,
-              fontSize: 12,
-              fontWeight: 600,
-              color: "var(--ink-soft)",
-              background: "var(--paper)",
-              border: "1px solid var(--paper-edge)",
-              boxShadow: "0 1px 0 rgba(11,11,15,0.04)",
-              textDecoration: "none",
-            }}
-          >
-            {t("market.btn.create")}
-            <IconChevronRight size={11} />
-          </Link>
           <button
             aria-label={t("generic.more")}
             style={{

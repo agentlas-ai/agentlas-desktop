@@ -100,6 +100,11 @@ Use this for any capability whose under-trigger is costly but whose trigger isn'
   tokens + `ds-*` components, light/dark/brand) replaces ad-hoc inline CSS; `lazyweb` +
   `shadcn` MCP registered in the catalog; persistent browser profile + captcha human-in-the-
   loop baked into core. Remaining: generated-tool auto-registration to the active runtime.
+- **Agentlas App Builder** (`architecture/manifest.ts`, slug `agentlas-app-builder`) —
+  background built-in route for app-worthy Apps Generate requests. It turns repeatable
+  workflow goals into an Agentlas internal App manifest, keeps generated surfaces/tools as
+  support evidence, and uses design-reference patterns without publishing third-party
+  service names as product copy.
 - **Pending migration onto the backbone** (same pattern, lower urgency — small prompts):
   memory system agents (`architecture/manifest.ts`: memory-curator / pm-soul / task-bias)
   and the **web meta-agent** (`AgentsAtlas/app/src/lib/draft/meta-agent.ts`; `knowledge.md`

@@ -8,7 +8,7 @@ const { spawn, spawnSync } = require("node:child_process");
 
 const PROOF_ROOT =
   process.env.AGENTLAS_CREATIVE_PROOF_DIR ||
-  path.join("/Volumes/X31/temp", `agentlas-creative-os-proof-${stampForPath(new Date())}`);
+  path.join(require("os").tmpdir(), `agentlas-creative-os-proof-${stampForPath(new Date())}`);
 const DB_PATH = path.join(PROOF_ROOT, "agentlas-proof.sqlite");
 const SCREENSHOT_DIR = path.join(PROOF_ROOT, "screenshots");
 const PORT = Number(process.env.AGENTLAS_CREATIVE_PROOF_PORT || 4337);
@@ -437,7 +437,7 @@ function startProductServer() {
         "generated creative app scaffolded routes and provider ledgers",
         "generated creative app published as a reusable MCP tool for later agents",
         "generated creative app archive is reversible and restore was verified",
-        "promotional screenshots were saved under /Volumes/X31/temp",
+        "promotional screenshots were saved under the system temp directory",
         "secret/card/token leak scan found no raw secret values",
       ],
     };

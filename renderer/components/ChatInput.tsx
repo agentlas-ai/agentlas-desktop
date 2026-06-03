@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ImageAttachment,
+  AppFactoryAppRecord,
   InstalledAgent,
   InstalledFirm,
   Project,
@@ -69,6 +70,7 @@ interface MentionContext {
   projects: Project[];
   firms: InstalledFirm[];
   apps: AgentlasAppDefinition[];
+  generatedApps?: AppFactoryAppRecord[];
   envKeys: string[]; // 등록된 env 키 (Library > Environment에서 add한)
   /** CLI(Claude/Codex/Gemini)에서 스캔한 슬래시 명령 — / 자동완성에 노출 */
   commands?: RuntimeCommand[];
@@ -102,6 +104,13 @@ interface AutocompleteOption {
 }
 
 type PermissionLevel = "read" | "write" | "full";
+type AppGenerateChoice = "dedicated" | "chat";
+interface BottomQuestionOption {
+  id: AppGenerateChoice;
+  title: string;
+  description: string;
+  shortcut: string;
+}
 
 export function ChatInput({
   onSend,
@@ -143,6 +152,8 @@ export function ChatInput({
   const [planMode, setPlanMode] = useState(false);
   const [goalMode, setGoalMode] = useState(false);
   const [appsGenerateMode, setAppsGenerateMode] = useState(false);
+  const [appsGenerateQuestionOpen, setAppsGenerateQuestionOpen] = useState(false);
+  const [appsGenerateChoice, setAppsGenerateChoice] = useState<AppGenerateChoice>("dedicated");
   // 기본값을 write로 — 바이브코딩 앱에서 read-only 기본은 첫 "만들어줘"가 파일을 못 써 조용히 실패한다.
   // write는 cwd 파일 편집만 허용(셸·외부 자동호출은 차단)이라 안전한 기본값.
   const [permissions, setPermissions] = useState<PermissionLevel>("write");
@@ -276,6 +287,26 @@ export function ChatInput({
     setTrigger(null);
   }
 
+  function requestAppsGenerateMode(next: boolean) {
+    if (!next) {
+      setAppsGenerateQuestionOpen(false);
+      setAppsGenerateMode(false);
+      return;
+    }
+    setPlusOpen(false);
+    setPlusSubmenu(null);
+    setPermOpen(false);
+    setModelOpen(false);
+    setAppsGenerateChoice("dedicated");
+    setAppsGenerateQuestionOpen(true);
+  }
+
+  function applyAppsGenerateQuestion() {
+    setAppsGenerateMode(appsGenerateChoice === "dedicated");
+    setAppsGenerateQuestionOpen(false);
+    setTimeout(() => textareaRef.current?.focus(), 0);
+  }
+
   // 클릭 외부 — 메뉴 닫기
   useEffect(() => {
     if (!plusOpen && !permOpen && !modelOpen) return;
@@ -346,7 +377,7 @@ export function ChatInput({
           goalMode={goalMode}
           setGoalMode={setGoalMode}
           appsGenerateMode={appsGenerateMode}
-          setAppsGenerateMode={setAppsGenerateMode}
+          setAppsGenerateMode={requestAppsGenerateMode}
           t={t}
         />
       )}
@@ -371,9 +402,41 @@ export function ChatInput({
         />
       )}
 
+      {appsGenerateQuestionOpen && (
+        <BottomQuestionSheet
+          progress={t("chatinput.apps_generate_sheet_progress")}
+          title={t("chatinput.apps_generate_confirm")}
+          options={[
+            {
+              id: "dedicated",
+              title: t("chatinput.apps_generate_sheet_dedicated_title"),
+              description: t("chatinput.apps_generate_sheet_dedicated_desc"),
+              shortcut: "1",
+            },
+            {
+              id: "chat",
+              title: t("chatinput.apps_generate_sheet_chat_title"),
+              description: t("chatinput.apps_generate_sheet_chat_desc"),
+              shortcut: "2",
+            },
+          ]}
+          value={appsGenerateChoice}
+          onChange={setAppsGenerateChoice}
+          onClose={() => setAppsGenerateQuestionOpen(false)}
+          onSkip={() => {
+            setAppsGenerateQuestionOpen(false);
+            setAppsGenerateMode(false);
+          }}
+          onNext={applyAppsGenerateQuestion}
+          t={t}
+        />
+      )}
+
       <div
         className="glass-lift"
         style={{
+          width: "min(100%, 980px)",
+          margin: "0 auto",
           borderRadius: 18,
           padding: "10px 12px",
           display: "flex",
@@ -687,10 +750,10 @@ export function ChatInput({
               </span>
             </button>
 
-            {/* 모드 칩 — Apps Generate */}
+            {/* 모드 칩 — 전용 App 생성 */}
             <button
               className="chat-input-chip chat-input-mode-chip"
-              onClick={() => setAppsGenerateMode((v) => !v)}
+              onClick={() => requestAppsGenerateMode(!appsGenerateMode)}
               disabled={disabled}
               title={t("chatinput.apps_generate_hint")}
               style={{
@@ -761,6 +824,210 @@ export function ChatInput({
         </div>
       </div>
     </footer>
+  );
+}
+
+function BottomQuestionSheet({
+  progress,
+  title,
+  options,
+  value,
+  onChange,
+  onClose,
+  onSkip,
+  onNext,
+  t,
+}: {
+  progress: string;
+  title: string;
+  options: BottomQuestionOption[];
+  value: AppGenerateChoice;
+  onChange: (value: AppGenerateChoice) => void;
+  onClose: () => void;
+  onSkip: () => void;
+  onNext: () => void;
+  t: TFunction;
+}) {
+  return (
+    <section
+      role="dialog"
+      aria-modal="false"
+      aria-label={title}
+      style={{
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: "calc(100% + 8px)",
+        width: "calc(100% - 32px)",
+        maxWidth: 980,
+        margin: "0 auto",
+        zIndex: 40,
+        borderRadius: 0,
+        border: "1px solid var(--paper-edge)",
+        background: "#fff",
+        boxShadow: "none",
+        padding: 12,
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          onClose();
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          onNext();
+        }
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <span
+          style={{
+            flexShrink: 0,
+            borderRadius: 999,
+            background: "var(--fill-1)",
+            color: "var(--amber-deep)",
+            fontSize: 11,
+            fontWeight: 700,
+            padding: "2px 7px",
+          }}
+        >
+          {progress}
+        </span>
+        <h2
+          style={{
+            margin: 0,
+            minWidth: 0,
+            flex: 1,
+            fontSize: 14,
+            lineHeight: 1.35,
+            color: "var(--ink)",
+            fontWeight: 750,
+          }}
+        >
+          {title}
+        </h2>
+        <button
+          onClick={onClose}
+          aria-label={t("workspace.close_panel")}
+          title={t("workspace.close_panel")}
+          style={{
+            width: 24,
+            height: 24,
+            borderRadius: 6,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "var(--muted-deep)",
+            background: "transparent",
+            border: "none",
+            flexShrink: 0,
+          }}
+        >
+          <IconClose size={13} />
+        </button>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {options.map((option) => {
+          const picked = value === option.id;
+          return (
+            <button
+              key={option.id}
+              onClick={() => onChange(option.id)}
+              style={{
+                width: "100%",
+                minHeight: 50,
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                textAlign: "left",
+                padding: "9px 10px",
+                borderRadius: 8,
+                background: picked ? "var(--fill-1)" : "var(--paper-2)",
+                border: picked ? "1px solid color-mix(in srgb, var(--accent) 34%, var(--paper-edge))" : "1px solid transparent",
+                color: "var(--ink)",
+              }}
+            >
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <strong
+                  style={{
+                    display: "block",
+                    fontSize: 12.5,
+                    lineHeight: 1.25,
+                    fontWeight: 750,
+                    color: "var(--ink)",
+                  }}
+                >
+                  {option.title}
+                </strong>
+                <span
+                  style={{
+                    display: "block",
+                    marginTop: 2,
+                    fontSize: 11.5,
+                    lineHeight: 1.35,
+                    color: "var(--muted-deep)",
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {option.description}
+                </span>
+              </span>
+              <span
+                aria-hidden
+                style={{
+                  flexShrink: 0,
+                  minWidth: 22,
+                  height: 22,
+                  borderRadius: 6,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: picked ? "var(--accent)" : "var(--muted-deep)",
+                  background: "var(--paper)",
+                  border: "1px solid var(--paper-edge)",
+                }}
+              >
+                {option.shortcut}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
+        <button
+          onClick={onSkip}
+          style={{
+            borderRadius: 8,
+            border: "1px solid var(--paper-edge)",
+            background: "var(--paper)",
+            color: "var(--muted-deep)",
+            padding: "6px 11px",
+            fontSize: 12,
+            fontWeight: 650,
+          }}
+        >
+          {t("chatinput.question_skip")}
+        </button>
+        <button
+          onClick={onNext}
+          style={{
+            borderRadius: 8,
+            border: "1px solid color-mix(in srgb, var(--accent) 28%, var(--paper-edge))",
+            background: "var(--fill-1)",
+            color: "var(--accent)",
+            padding: "6px 11px",
+            fontSize: 12,
+            fontWeight: 750,
+          }}
+        >
+          {t("chatinput.question_next")}
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -839,7 +1106,13 @@ function buildAutocompleteOptions(
     return out;
   }
 
-  // mention — 그룹: agents → firms → projects → env, 각 최대 5개
+  // mention — 그룹: generated apps → agents → firms → projects → env, 각 최대 5개
+  const generatedApps = (context.generatedApps ?? [])
+    .filter((app) => {
+      const name = generatedAppMentionName(app).toLowerCase();
+      return app.status !== "archived" && (!q || name.includes(q) || app.id.toLowerCase().includes(q));
+    })
+    .slice(0, 5);
   const agents = context.agents
     .filter((a) => {
       const loc = pickLocalized(a, locale);
@@ -859,6 +1132,17 @@ function buildAutocompleteOptions(
     .filter((k) => !q || k.toLowerCase().includes(q))
     .slice(0, 5);
 
+  for (const app of generatedApps) {
+    const name = generatedAppMentionName(app);
+    out.push({
+      key: `ga-${app.id}`,
+      group: locale === "en" ? "Generated Apps" : "생성된 Apps",
+      kind: "app",
+      title: name,
+      subtitle: locale === "en" ? "Edit or delete with a chat request" : "수정/삭제 요청으로 연결",
+      replacement: `@${name}`,
+    });
+  }
   for (const a of agents) {
     const loc = pickLocalized(a, locale);
     out.push({
@@ -902,6 +1186,10 @@ function buildAutocompleteOptions(
     });
   }
   return out;
+}
+
+function generatedAppMentionName(app: AppFactoryAppRecord): string {
+  return app.appName || app.manifest.app?.name || app.manifest.title || "Generated App";
 }
 
 // ── 자동완성 popover (/ 또는 @) ──────────────────────────

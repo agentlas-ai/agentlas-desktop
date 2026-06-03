@@ -254,6 +254,40 @@ const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 const ROUTE_STOP_WORDS = new Set(["the", "and", "for", "with", "this", "that", "from", "into", "make", "build", "create", "agent", "agents", "please", "좀", "해주세요", "해줘", "만들어", "붙여", "연결", "작업", "요청"]);
 const ROUTE_HINTS = [
   {
+    slug: "agentlas-app-builder",
+    terms: [
+      "apps generate",
+      "app builder",
+      "make an app",
+      "build an app",
+      "create an app",
+      "generated app",
+      "generate app",
+      "internal app",
+      "dedicated app",
+      "workflow app",
+      "dashboard app",
+      "studio app",
+      "service-app",
+      "creative-studio",
+      "scaffold-app",
+      "operate-app",
+      "앱빌더",
+      "앱 빌더",
+      "앱 만들어",
+      "앱 만들",
+      "전용 앱",
+      "내장 앱",
+      "내부 앱",
+      "생성 앱",
+      "워크플로우 앱",
+      "대시보드 앱",
+      "스튜디오 앱",
+    ],
+    reasonKo: "Agentlas 안에서 열리는 내부 App 생성/설계 요청입니다",
+    reasonEn: "the request is to create or design an internal Agentlas App",
+  },
+  {
     slug: "agentlas-memory-curator",
     terms: ["memory", "remember", "recall", "request_context", "context_json", "메모리", "기억", "회상", "저장"],
     reasonKo: "기억 저장/검색/스코프 품질을 다루는 요청입니다",
@@ -290,15 +324,81 @@ function routeHaystack(agent) {
     String(agent.system_prompt || "").slice(0, 3500),
   ].join("\n"));
 }
+const APP_BUILDER_EXPLICIT_TERMS = [
+  "apps generate", "app builder", "make an app", "build an app", "create an app",
+  "generate app", "generated app", "internal app", "dedicated app", "workflow app",
+  "dashboard app", "studio app", "service-app", "creative-studio", "scaffold-app",
+  "operate-app", "앱빌더", "앱 빌더", "앱 만들어", "앱 만들", "전용 앱", "내장 앱",
+  "내부 앱", "생성 앱", "워크플로우 앱", "대시보드 앱", "스튜디오 앱",
+];
+const APP_BUILDER_REPEAT_TERMS = [
+  "automation", "automate", "automatic", "recurring", "repeat", "scheduled",
+  "scheduler", "every day", "every week", "workflow", "pipeline", "cron",
+  "자동화", "자동", "반복", "정기", "매일", "매주", "스케줄", "예약",
+  "워크플로우", "파이프라인",
+];
+const APP_BUILDER_SURFACE_TERMS = [
+  "dashboard", "studio", "editor", "settings", "state", "save", "saved",
+  "export", "import", "approve", "approval", "review", "queue", "table",
+  "filter", "template", "memory", "profile", "대시보드", "스튜디오", "편집",
+  "수정", "설정", "상태", "저장", "내보내기", "불러오기", "승인", "검토",
+  "큐", "목록", "테이블", "필터", "템플릿", "학습", "메모리", "프로필",
+];
+const APP_BUILDER_ACTION_TERMS = [
+  "build", "create", "generate", "compose", "manage", "track", "research",
+  "analyze", "monitor", "render", "convert", "만들", "생성", "작성", "관리",
+  "추적", "리서치", "조사", "분석", "모니터", "렌더", "변환",
+];
+const TRIVIAL_ROUTE_PROMPTS = new Set(["hi", "hello", "hey", "thanks", "thankyou", "안녕", "안녕하세요", "고마워", "감사", "뭐해"]);
+function routeIncludesTerm(haystack, term) {
+  return haystack.includes(routeNormalize(term));
+}
+function routeMatchedTerms(promptText, terms) {
+  return [...new Set(terms.filter((term) => routeIncludesTerm(promptText, term)))];
+}
+function isTrivialRoutePrompt(promptText) {
+  const compact = String(promptText || "").replace(/\s+/g, " ").trim();
+  const stripped = compact.replace(/[.!?~。！？,，ㅋㅎ\s]/g, "");
+  if (!stripped) return true;
+  if (stripped.length <= 18 && TRIVIAL_ROUTE_PROMPTS.has(stripped)) return true;
+  const words = compact.split(/\s+/).filter(Boolean);
+  return words.length <= 3 && TRIVIAL_ROUTE_PROMPTS.has(stripped);
+}
+function isAppBuilderWorthyRoutePrompt(prompt) {
+  const promptText = routeNormalize(prompt);
+  if (!promptText.trim() || isTrivialRoutePrompt(promptText)) return false;
+  const explicit = routeMatchedTerms(promptText, APP_BUILDER_EXPLICIT_TERMS);
+  if (explicit.length) return true;
+  const repeat = routeMatchedTerms(promptText, APP_BUILDER_REPEAT_TERMS);
+  const surface = routeMatchedTerms(promptText, APP_BUILDER_SURFACE_TERMS);
+  const action = routeMatchedTerms(promptText, APP_BUILDER_ACTION_TERMS);
+  const signalCount = new Set([...repeat, ...surface, ...action]).size;
+  if (repeat.length && (surface.length || action.length)) return true;
+  if (surface.length >= 2 && action.length) return true;
+  return signalCount >= 4;
+}
 function routeHint(promptText, agent, lang) {
   const hint = ROUTE_HINTS.find((item) => item.slug === agent.slug);
   if (!hint) return { score: 0, terms: [], reason: "" };
+  if (hint.slug === "agentlas-app-builder" && !isAppBuilderWorthyRoutePrompt(promptText)) {
+    return { score: 0, terms: [], reason: "" };
+  }
   const terms = hint.terms.filter((term) => promptText.includes(routeNormalize(term)));
   if (!terms.length) return { score: 0, terms: [], reason: "" };
   return { score: 12 + terms.length * 3, terms, reason: lang === "ko" ? hint.reasonKo : hint.reasonEn };
 }
 function scoreRouteAgent(prompt, promptTerms, agent, lang) {
   const promptText = routeNormalize(prompt);
+  if (agent.slug === "agentlas-app-builder" && !isAppBuilderWorthyRoutePrompt(promptText)) {
+    return {
+      agent,
+      score: 0,
+      reason: lang === "ko"
+        ? "전용 App을 만들 만큼 반복·상태·편집·자동화가 뚜렷하지 않아 App Builder 라우트를 보류했습니다"
+        : "the request does not clearly need a dedicated App with durable workflow, state, editing, or automation",
+      terms: [],
+    };
+  }
   const haystack = routeHaystack(agent);
   let score = 0;
   const terms = [];
@@ -351,13 +451,30 @@ function autoRouteNote(choice, lang) {
     : `Selected agent: ${name}. Reason: ${choice.reason}.`;
 }
 function autoRoutePreamble(choice, lang) {
+  const resolvedLang = lang || prefsLang();
+  const appBuilderNeedsConsent = choice.agent && choice.agent.slug === "agentlas-app-builder";
+  const instruction = appBuilderNeedsConsent
+    ? resolvedLang === "ko"
+      ? [
+          "이 요청은 Agentlas 안에서 열리는 전용 App으로 만드는 것이 적합할 수 있지만, 사용자가 아직 전용 App 생성을 명시적으로 승인하지 않았습니다.",
+          "실제 App 파일 생성, Agentlas Surface Manifest emit, scaffold-app/operate-app 액션 선언을 하지 마세요.",
+          "대신 먼저 한 문장으로 확인 질문만 하세요: \"이 요청은 Agentlas 안에서 열리는 전용 App으로 만들면 더 편합니다. 전용 App으로 만들어 진행할까요?\"",
+          "사용자가 동의하면 다음 메시지에서 App Builder 작업을 진행하세요.",
+        ].join("\n")
+      : [
+          "This request may be a good fit for a dedicated Agentlas App, but the user has not explicitly approved dedicated App creation yet.",
+          "Do not create App files, emit an Agentlas Surface Manifest, or declare scaffold-app/operate-app actions.",
+          "Ask one confirmation question first: \"This would work better as a dedicated App inside Agentlas. Should I create that App for you?\"",
+          "If the user agrees, proceed with the App Builder flow on the next message.",
+        ].join("\n")
+    : resolvedLang === "ko"
+      ? "사용자는 에이전트를 직접 지정하지 않았습니다. 위 라우팅 결정을 첫 줄에 짧게 밝힌 뒤, 선택된 에이전트로 바로 작업하세요."
+      : "The user did not explicitly choose an agent. Briefly state the route above in the first line, then work as the selected agent.";
   return [
     "## Agentlas automatic routing",
     "",
     autoRouteNote(choice, lang),
-    (lang || prefsLang()) === "ko"
-      ? "사용자는 에이전트를 직접 지정하지 않았습니다. 위 라우팅 결정을 첫 줄에 짧게 밝힌 뒤, 선택된 에이전트로 바로 작업하세요."
-      : "The user did not explicitly choose an agent. Briefly state the route above in the first line, then work as the selected agent.",
+    instruction,
   ].join("\n");
 }
 function agentFolder(agent) {

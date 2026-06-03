@@ -1570,6 +1570,9 @@ export interface McpInvocationRequest {
   goalMode?: boolean;
   /** 채팅 목표를 Agentlas 안에서 실행되는 Apps 패키지로 생성하도록 요청한다. */
   appsGenerateMode?: boolean;
+  /** 기존 생성 App을 채팅에서 수정/보관할 때 지정하는 대상. */
+  targetAppId?: string;
+  targetAppAction?: "edit" | "archive";
 }
 
 export interface McpInvocationEvent {

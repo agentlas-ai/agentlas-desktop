@@ -151,14 +151,8 @@ body {
   letter-spacing: -0.01em;
 }
 
-/* 앱 전체 배경 — 부드러운 indigo/peach radial로 글래스 위에 색감 비춤 */
 body {
-  background:
-    radial-gradient(900px 600px at 12% -10%, rgba(90, 86, 220, 0.10), transparent 65%),
-    radial-gradient(700px 500px at 100% 110%, rgba(255, 122, 85, 0.07), transparent 65%),
-    radial-gradient(500px 360px at 50% 50%, rgba(168, 217, 155, 0.05), transparent 70%),
-    var(--paper);
-  background-attachment: fixed;
+  background: var(--paper);
 }
 
 button,
@@ -313,11 +307,7 @@ a:hover {
 
 /* ── Dark theme surface tweaks ───────────────────────────── */
 :root[data-theme="dark"] body {
-  background:
-    radial-gradient(900px 600px at 12% -10%, rgba(123, 119, 238, 0.12), transparent 65%),
-    radial-gradient(700px 500px at 100% 110%, rgba(255, 122, 85, 0.06), transparent 65%),
-    var(--paper);
-  background-attachment: fixed;
+  background: var(--paper);
 }
 :root[data-theme="dark"] ::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.16);
@@ -329,18 +319,6 @@ a:hover {
 }
 
 /* ── 채팅 워킹 패널 애니메이션 — Codex/Claude 데스크톱 톤 ────────── */
-@keyframes agentlas-pulse {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.5); opacity: 0.45; }
-}
-@keyframes agentlas-halo {
-  0%, 100% { transform: scale(1); opacity: 0.55; }
-  50% { transform: scale(1.18); opacity: 0; }
-}
-@keyframes agentlas-blink {
-  0% { opacity: 1; }
-  50% { opacity: 0; }
-}
 @keyframes agentlas-spin {
   to { transform: rotate(360deg); }
 }

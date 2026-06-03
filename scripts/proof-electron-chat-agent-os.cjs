@@ -10,7 +10,7 @@ const { _electron: electron, chromium } = require("playwright");
 const NODE_BIN = process.env.npm_node_execpath || process.env.NODE || "node";
 const DESKTOP_ROOT = path.resolve(__dirname, "..");
 const STAMP = new Date().toISOString().replace(/[:.]/g, "-").replace(/\-\d{3}Z$/, "Z");
-const PROOF_ROOT = path.join("/Volumes/X31/temp", `agentlas-electron-chat-agent-os-proof-${STAMP}`);
+const PROOF_ROOT = path.join(require("os").tmpdir(), `agentlas-electron-chat-agent-os-proof-${STAMP}`);
 const SCREENSHOT_DIR = path.join(PROOF_ROOT, "screenshots");
 const USER_DATA_DIR = path.join(PROOF_ROOT, "electron-user-data");
 const DB_PATH = path.join(PROOF_ROOT, "agentlas-electron-proof.sqlite");
@@ -183,7 +183,7 @@ async function main() {
         "Generated app MCP tool synced provider browser result metadata for other agents without Electron IPC",
         "Generated app MCP tool exposed the same capability manifest to downstream agents",
         "Provider browser sanitized result metadata synced back into Agentlas OS state",
-        "Generated dashboard/storefront/catalog/orders/finance/checkout routes rendered and were captured under /Volumes/X31/temp",
+        "Generated dashboard/storefront/catalog/orders/finance/checkout routes rendered and were captured under the system temp directory",
         "Generated app MCP tool returned provider session queues and visible browser launch dry-run without reading secrets",
         "Generated app MCP tool exposed the no-dead-end provider strategy to downstream agents",
         "Electron was restarted with the same DB/userData and the generated team, app, reusable MCP tool, provider results, and routes still worked",

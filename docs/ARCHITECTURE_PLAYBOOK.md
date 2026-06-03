@@ -24,8 +24,10 @@ install. The canonical research lives in the repos; the app ships a runtime dist
 
 ## 2. What ships on install (app + terminal)
 
-On first launch (and on every CLI run), the app seeds four background **built-in agents**
-(`installed_agents.builtin = 1`) and a **memory substrate**:
+On first launch (and on every CLI run), the app seeds the local **built-in agents**
+(`installed_agents.builtin = 1`) and a **memory substrate**. Built-in agents are
+runtime control routes, so they ship as `background` and stay out of user-facing
+agent lists:
 
 ```
 electron/architecture/
@@ -100,8 +102,10 @@ To change agent prompts or the memory contract:
    built-in agents' name/prompt/role**. It never touches user chats, marketplace agents,
    local imports, or project memory.
 
-To add a **new** built-in agent: add an entry to `BUILTIN_AGENTS` (stable `slug`), bump
-the version, rebuild. `builtinAgentId(slug)` keeps the row id stable across app + CLI.
+To add a **new** built-in agent: add an entry to `BUILTIN_AGENTS` (stable `slug`) with
+`visibility: "background"`, bump the version, rebuild. `builtinAgentId(slug)` keeps the
+row id stable across app + CLI. User-facing agents should come from installed agent repos
+or firms, not desktop built-ins.
 
 To change the **DB schema** (new memory field, new table): add a `userVersion < N` block
 in `electron/store/db.ts` (additive, guarded with column/`IF NOT EXISTS` checks like the

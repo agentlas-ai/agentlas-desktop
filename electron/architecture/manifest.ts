@@ -7,8 +7,9 @@
 //   a small, always-present set of governance agents + a memory substrate that turn
 //   ordinary folders and chats into a continuity-preserving, bias-resistant workspace.
 //
-//   Four background architecture agents are baked in here:
+//   Built-in architecture agents are baked in here:
 //     - Agentlas Orchestrator (agentlas-orchestrator)      — default front door + auto routing
+//     - Agentlas App Builder  (agentlas-app-builder)       — Apps Generate + internal app factory route
 //     - Project PM Soul        (agent_project_pm_soul)      — per-project continuity + memory
 //     - Memory Curator         (agent_memory_curator_agent) — global curated memory writes
 //     - Task Bias Curator      (agentlas_task_bias)         — sitemap governance + bias audit
@@ -25,8 +26,9 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.4.0";
+export const ARCHITECTURE_VERSION = "1.5.2";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
+export const APP_BUILDER_SLUG = "agentlas-app-builder";
 
 // ── Memory contract ────────────────────────────────────────────────────────
 // Mirrors agent_memory_curator_agent/docs/integration-contract.md + memory-taxonomy.md.
@@ -130,7 +132,7 @@ ${MEMORY_EVENTS_HEADING}
 
 // ── Built-in agents ──────────────────────────────────────────────────────────
 
-export type BuiltinRole = "orchestrator" | "pm" | "curator" | "governance";
+export type BuiltinRole = "orchestrator" | "builder" | "pm" | "curator" | "governance";
 
 export interface BuiltinAgentDef {
   slug: string;
@@ -140,8 +142,8 @@ export interface BuiltinAgentDef {
   taglineEn: string;
   /** Architecture role — drives auto-activation + UI grouping. */
   role: BuiltinRole;
-  /** Built-ins are background control agents, not user-facing installed assistants. */
-  visibility: "background";
+  /** Mirrors the DB contract. Desktop-shipped built-ins must stay background-only. */
+  visibility: "background" | "visible";
   tone: "blue" | "green" | "purple" | "amber" | "peach";
   systemPrompt: string;
 }
@@ -199,11 +201,19 @@ apply the same policy yourself.
   Use English instead when the interface/user language is English.
 - Then proceed immediately. Do not ask the user to choose an agent unless the choice
   changes money movement, destructive actions, public publishing, legal/medical risk,
-  or access to private data.
+  access to private data, or whether Agentlas should create a dedicated internal App.
 - For multi-step work, route top-down only. Do not create a loop where a worker calls
   back into you.
 
 ## Canonical routes
+- App creation, Apps Generate, "generate app", "make an app", "앱 만들어줘",
+  "내부 앱", "앱 빌더", or generated app factory work -> Agentlas App Builder.
+  Use this route only for explicit app requests or app-worthy workflows with durable
+  state, editing, export, automation, scheduling, approvals, or repeated runs.
+  Do not ask about making an App for greetings, one-off answers, simple chat,
+  or lightweight content requests. If Apps Generate mode was not explicitly selected,
+  ask the user whether they want a dedicated Agentlas App before emitting manifests
+  or creating files.
 - Agent creation, team design, skill generation, AGENTS.md/CLAUDE.md/GEMINI.md
   packaging, Codex compatibility, or "make me an agent" -> an installed public
   builder/package agent if present; otherwise provide a minimal local package plan.
@@ -220,6 +230,76 @@ apply the same policy yourself.
 When the selected route has skills, read their descriptions/triggers and auto-select
 the relevant skills even if the user did not name them. State the selected skill(s)
 and reason before acting, then continue.`;
+
+const APP_BUILDER_PROMPT = `# Agentlas App Builder (built-in)
+
+You are the built-in App Builder Agent for Agentlas Desktop. You own Apps Generate
+and requests such as "generate app", "make an app", "build an internal tool",
+"앱 만들어줘", "내장 앱", "앱 빌더", and domain-specific app requests.
+
+Your job is to turn a user's plain-language goal into a dedicated Agentlas App that
+opens inside Agentlas Desktop. You do NOT make generic one-size-fits-all wizards,
+external localhost prototypes, or browser-only demos. If the user asks for a
+Cardnews app, a trading app, a research app, or a client-ops app, create a
+purpose-built internal app experience for that domain.
+
+## Non-negotiables
+- You are a background-only built-in agent. Do not make yourself visible in user
+  agent menus or public rosters.
+- Only propose a dedicated App for explicit app requests or workflows that justify
+  an App: durable state, settings, editing, export, automation, scheduling,
+  approval steps, dashboards, or repeated runs. Never turn greetings or simple
+  one-off chats into "Should I make an App?" questions.
+- The output is an Agentlas internal App. It runs in the Electron/Next renderer via
+  the Apps surface and the generated app runner, not in Chrome, localhost, Vite,
+  Next dev server, Express preview, or a separate web site.
+- Emit an Agentlas Surface Manifest in a <<agentlas-surface>> JSON block. Use layout
+  "service-app" or "creative-studio" and declare app.routes, app.connectors,
+  app.tools, widgets/data, launch checklist, scaffold-app action, and operate-app
+  action when relevant.
+- Treat Apps as the user-facing product. Generated surfaces, generated tools, MCP
+  installs, asset packs, vault keys, and local helper files are support evidence or
+  runtime devices, not top-level navigation that normal users must see.
+- Preserve user edits and app state. Prefer merge behavior such as
+  "preserve-user" for generated drafts, learned style profiles, and future runs.
+- Match the user's language in visible replies. Keep the reply concise and do not
+  expose hidden chain-of-thought or long implementation logs.
+
+## Build flow
+1. Classify the app type: creative studio, service console, dashboard, automation
+   cockpit, editor, research workbench, commerce ops, or another app-specific shape.
+2. Extract the product thesis: audience, job-to-be-done, main workflow, inputs,
+   outputs, state ownership, credential needs, risk gates, and success proof.
+3. Design the first screen as the usable app, not a landing page. Prefer dense,
+   calm operational layouts with left navigation, input/workbench/result regions,
+   progress/status, history, and export/share controls when useful.
+4. Use design-reference research when available (Lazyweb or equivalent). Extract
+   reusable patterns only: app inventory grids, prompt-to-preview flows, setup
+   checklists, workflow/block editors, status ledgers, and split workbench panes.
+   Never publish third-party product or service names as product copy, tagline,
+   comparison language, or "X-style" claims in generated cloud/deployed apps.
+5. Declare the app manifest and actions so Agentlas App Factory can scaffold and
+   operate it. If credentials, payments, destructive writes, cookies, raw tokens,
+   or OTPs are needed, pause at the secure boundary and request explicit approval.
+6. Provide a short user-facing summary plus an Apps CTA. Do not claim launch proof
+   unless the manifest/action path or runtime evidence actually proves it.
+
+## App quality bar
+- Build a complete workflow, not a static page: settings, inputs, preview/editing,
+  export/save, error/empty/loading states, and automation hooks when requested.
+- Use domain-specific controls. For example, card/news apps need slide settings,
+  template counseling, editable copy/media, export sizes, and brand/style memory;
+  ops dashboards need filters, tables, status queues, detail panels, and actions.
+- Minimize product confusion. Installed Apps are for users; generated surfaces/tools
+  are internal evidence unless the app explicitly exposes them as a user workflow.
+- Do not use competitor names or third-party service names in deployed copy except
+  where a real connector/account permission screen must identify the service being
+  connected.
+
+## Completion contract
+An answer is complete only when it gives Agentlas enough structured manifest data to
+create or update the internal app, names remaining secure inputs/approvals, and
+leaves the user with a clear "Open in Apps" path or an explicit blocker.`;
 
 const MEMORY_CURATOR_PROMPT = `# Memory Curator (Agentlas built-in)
 
@@ -303,6 +383,17 @@ export const BUILTIN_AGENTS: readonly BuiltinAgentDef[] = [
     visibility: "background",
     tone: "blue",
     systemPrompt: GLOBAL_ORCHESTRATOR_PROMPT,
+  },
+  {
+    slug: APP_BUILDER_SLUG,
+    name: "Agentlas 앱 빌더",
+    nameEn: "Agentlas App Builder",
+    tagline: "사용자 목표를 Agentlas 안에서 열리는 전용 App으로 설계·생성",
+    taglineEn: "Turns user goals into dedicated internal Apps that open inside Agentlas",
+    role: "builder",
+    visibility: "background",
+    tone: "peach",
+    systemPrompt: APP_BUILDER_PROMPT,
   },
   {
     slug: "agentlas-pm-soul",

@@ -7,6 +7,7 @@ import { useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { buildSurfaceDelegationPlan } from "@shared/surface-delegation";
 import type { AgentlasSurfaceCredentialRequest, AgentlasSurfacePaymentRequest } from "@shared/surface-delegation";
+import { sanitizePublicAppCopy } from "@shared/brand-safety";
 import type {
   AgentlasSurfaceAction,
   AgentlasSurfaceDataSet,
@@ -207,8 +208,8 @@ function AppFactorySurface({
   const launchRows = rowsOf(dataByName(manifest, "launch") ?? firstData(manifest, "launch-checklist"));
   const artifactRows = rowsOf(dataByName(manifest, "artifacts") ?? firstData(manifest, "artifacts"));
   const metricsRows = rowsOf(dataByName(manifest, "metrics") ?? firstData(manifest, "metrics"));
-  const appName = app?.name || manifest.title;
-  const tagline = app?.tagline || app?.valueProp || "Agent-made app blueprint";
+  const appName = sanitizePublicAppCopy(app?.name || manifest.title, manifest.title);
+  const tagline = sanitizePublicAppCopy(app?.tagline || app?.valueProp, "Agent-made app blueprint");
   const business = app?.business ?? objectValue(dataByName(manifest, "business"));
 
   return (
@@ -222,10 +223,10 @@ function AppFactorySurface({
           </div>
           <KeyValueList
             value={{
-              audience: app?.audience || business?.audience || "Not declared",
-              offer: business?.offer || app?.valueProp || "Not declared",
-              pricing: business?.pricing || "Not declared",
-              moat: business?.moat || "Not declared",
+              audience: sanitizePublicAppCopy(app?.audience || business?.audience, "Not declared"),
+              offer: sanitizePublicAppCopy(business?.offer || app?.valueProp, "Not declared"),
+              pricing: sanitizePublicAppCopy(business?.pricing, "Not declared"),
+              moat: sanitizePublicAppCopy(business?.moat, "Not declared"),
             }}
             fallback="No product thesis yet."
           />
@@ -233,11 +234,11 @@ function AppFactorySurface({
           <SectionTitle icon={<IconCircleDollar size={14} />} label="Business Pack" />
           <div style={miniStack}>
             <div style={businessRow}>
-              <strong>{stringifyValue(business?.launchMetric || "Not declared")}</strong>
+              <strong>{sanitizePublicAppCopy(business?.launchMetric, "Not declared")}</strong>
               <span>launch metric</span>
             </div>
             <div style={businessRow}>
-              <strong>{app?.appType || "service-app"}</strong>
+              <strong>{sanitizePublicAppCopy(app?.appType, "service-app")}</strong>
               <span>product type</span>
             </div>
           </div>
@@ -263,7 +264,7 @@ function AppFactorySurface({
               <strong>{appName}</strong>
               <nav style={appPreviewNav}>
                 {routes.slice(0, 4).map((route) => (
-                  <span key={route.path}>{route.label}</span>
+                  <span key={route.path}>{sanitizePublicAppCopy(route.label, route.label)}</span>
                 ))}
                 {routes.length === 0 && <span>No screens declared</span>}
               </nav>
@@ -272,7 +273,7 @@ function AppFactorySurface({
               <div style={appPreviewMain}>
                 <div style={appPreviewHeadline}>
                   <span>Live workflow</span>
-                  <strong>{routes[0]?.purpose || "No primary route declared."}</strong>
+                  <strong>{sanitizePublicAppCopy(routes[0]?.purpose, "No primary route declared.")}</strong>
                 </div>
                 <div className="agentlas-app-metric-grid" style={metricGrid}>
                   {metricsRows.length > 0 ? (
@@ -321,7 +322,7 @@ function AppFactorySurface({
               <div style={miniStack}>
                 {routes.slice(0, 6).map((route) => (
                   <div key={route.path} style={routeRow}>
-                    <strong>{route.label}</strong>
+                    <strong>{sanitizePublicAppCopy(route.label, route.label)}</strong>
                     <span>{route.path}</span>
                   </div>
                 ))}

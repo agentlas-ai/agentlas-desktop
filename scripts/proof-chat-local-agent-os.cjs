@@ -9,7 +9,7 @@ const { pathToFileURL } = require("node:url");
 
 const NODE_BIN = process.env.npm_node_execpath || process.env.NODE || "node";
 const STAMP = new Date().toISOString().replace(/[:.]/g, "-").replace(/\-\d{3}Z$/, "Z");
-const PROOF_ROOT = path.join("/Volumes/X31/temp", `agentlas-chat-local-agent-os-proof-${STAMP}`);
+const PROOF_ROOT = path.join(require("os").tmpdir(), `agentlas-chat-local-agent-os-proof-${STAMP}`);
 const SCREENSHOT_DIR = path.join(PROOF_ROOT, "screenshots");
 const DB_PATH = path.join(PROOF_ROOT, "agentlas-proof.sqlite");
 const PROMPT =
@@ -180,7 +180,7 @@ function seedAgent() {
       "provider browser checkpoints, vault credential resolution, and scoped payment approval were exercised through the same operation backends exposed to the app UI",
       "reusable app MCP tool returned summary, providers, ledger, and reuse views from persisted app files",
       "hands-free app operation published a reusable MCP tool",
-      "dashboard/storefront/catalog/orders/finance/checkout screenshots were saved under /Volumes/X31/temp",
+      "dashboard/storefront/catalog/orders/finance/checkout screenshots were saved under the system temp directory",
       "secret/card/token leak scan found no raw secret values",
     ],
   };

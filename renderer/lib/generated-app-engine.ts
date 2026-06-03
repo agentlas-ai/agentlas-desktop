@@ -8,6 +8,7 @@ import type {
   JsonObject,
   JsonValue,
 } from "@/lib/types";
+import { sanitizePublicAppCopy } from "@shared/brand-safety";
 
 export type GeneratedAppLocale = "ko" | "en";
 export type GeneratedAppFieldKind = "text" | "textarea" | "select" | "number" | "range";
@@ -59,17 +60,17 @@ export type GeneratedAppFieldValues = Record<string, string>;
 export function buildGeneratedAppBlueprint(app: AppFactoryAppRecord, locale: GeneratedAppLocale): GeneratedAppBlueprint {
   const manifest = app.manifest;
   const appSpec = manifest.app;
-  const title = app.appName || appSpec?.name || manifest.title || "Generated App";
-  const appType = stringValue(appSpec?.appType) || stringValue(manifest.layout) || "service-app";
+  const title = safeStringValue(app.appName || appSpec?.name || manifest.title, "Generated App");
+  const appType = safeStringValue(appSpec?.appType || manifest.layout, "service-app");
   const haystack = [
     title,
     manifest.title,
     manifest.domain,
     manifest.layout,
     appType,
-    appSpec?.tagline,
-    appSpec?.valueProp,
-    appSpec?.audience,
+    safeStringValue(appSpec?.tagline),
+    safeStringValue(appSpec?.valueProp),
+    safeStringValue(appSpec?.audience),
   ].filter(Boolean).join(" ").toLowerCase();
   const isVisualOutput = /card|carousel|instagram|image|creative|asset|poster|storyboard|video|design|카드|인스타|이미지|디자인|스토리/.test(haystack);
   const routes = routesOf(manifest);
@@ -83,14 +84,17 @@ export function buildGeneratedAppBlueprint(app: AppFactoryAppRecord, locale: Gen
   return {
     id: app.id,
     title,
-    subtitle: stringValue(appSpec?.valueProp) || stringValue(appSpec?.tagline) || stringValue(manifest.domain) || "Agentlas internal app",
+    subtitle: safeStringValue(appSpec?.valueProp || appSpec?.tagline || manifest.domain, "Agentlas internal app"),
     appType,
     isVisualOutput,
     fields,
     recommendations,
     outputsLabel: isVisualOutput ? (locale === "en" ? "Generated outputs" : "생성 결과물") : (locale === "en" ? "Workbench result" : "작업 결과"),
     exportFormats: isVisualOutput ? ["png", "jpg", "json", "markdown"] : ["json", "markdown", "csv"],
-    routeSummaries: routes.map((route) => ({ label: route.label || route.path, detail: stringValue(route.purpose) || stringValue(route.status) || route.path })),
+    routeSummaries: routes.map((route) => ({
+      label: safeStringValue(route.label || route.path, route.path),
+      detail: safeStringValue(route.purpose || route.status || route.path, route.path),
+    })),
     dataSummaries,
     actionSummaries,
   };
@@ -208,20 +212,20 @@ export function demoGeneratedApp(id: string | null, locale: GeneratedAppLocale):
 }
 
 function domainFields(manifest: AgentlasSurfaceManifest, locale: GeneratedAppLocale, visual: boolean): GeneratedAppField[] {
-  const title = manifest.app?.name || manifest.title || "Generated App";
+  const title = safeStringValue(manifest.app?.name || manifest.title, "Generated App");
   const fields: GeneratedAppField[] = [
     {
       id: visual ? "topic" : "goal",
       label: visual ? (locale === "en" ? "Topic" : "주제") : (locale === "en" ? "Goal" : "목표"),
       kind: "textarea",
-      defaultValue: visual ? title : stringValue(manifest.app?.valueProp) || title,
+      defaultValue: visual ? title : safeStringValue(manifest.app?.valueProp) || title,
       helper: locale === "en" ? "The app will shape its workflow around this." : "앱이 이 내용을 기준으로 전용 흐름을 구성합니다.",
     },
     {
       id: "audience",
       label: locale === "en" ? "Audience" : "대상 사용자",
       kind: "text",
-      defaultValue: stringValue(manifest.app?.audience) || stringValue(manifest.app?.business?.audience) || (locale === "en" ? "target users" : "대상 사용자"),
+      defaultValue: safeStringValue(manifest.app?.audience || manifest.app?.business?.audience, locale === "en" ? "target users" : "대상 사용자"),
     },
   ];
   if (visual) {
@@ -285,15 +289,15 @@ function toolParameterFields(manifest: AgentlasSurfaceManifest, locale: Generate
 }
 
 function parameterToField(param: AgentlasSurfaceToolParameterSpec, locale: GeneratedAppLocale): GeneratedAppField {
-  const name = sanitizeId(param.name || stringValue(param.label) || "input");
+  const name = sanitizeId(param.name || safeStringValue(param.label) || "input");
   const type = String(param.type || "string").toLowerCase();
   const optionValues = Array.isArray(param.options) ? param.options : Array.isArray(param.enum) ? param.enum : [];
   return {
     id: name,
-    label: stringValue(param.label) || humanize(name),
+    label: safeStringValue(param.label) || humanize(name),
     kind: optionValues.length ? "select" : type.includes("number") ? "number" : type.includes("boolean") ? "select" : longTextParam(name, param) ? "textarea" : "text",
-    defaultValue: stringValue(param.default) || "",
-    helper: stringValue(param.description) || (locale === "en" ? "Generated from the app tool schema." : "앱 도구 스키마에서 생성된 입력입니다."),
+    defaultValue: safeStringValue(param.default) || "",
+    helper: safeStringValue(param.description) || (locale === "en" ? "Generated from the app tool schema." : "앱 도구 스키마에서 생성된 입력입니다."),
     options: optionValues.length
       ? optionValues.map((value) => ({ id: String(value), label: String(value) }))
       : type.includes("boolean")
@@ -309,15 +313,15 @@ function recommendationsOf(manifest: AgentlasSurfaceManifest, locale: GeneratedA
   const routes = routesOf(manifest);
   const routeRecs = routes.map((route, index) => ({
     id: `route-${index}`,
-    label: route.label || route.path,
-    description: stringValue(route.purpose) || stringValue(route.status) || route.path,
+    label: safeStringValue(route.label || route.path, route.path),
+    description: safeStringValue(route.purpose || route.status || route.path, route.path),
     reason: locale === "en" ? "Declared by the generated app manifest." : "생성 앱 매니페스트가 선언한 화면입니다.",
-    tags: [route.status || "route", manifest.layout].filter(Boolean).map(String),
+    tags: [route.status || "route", manifest.layout].filter(Boolean).map((tag) => safeStringValue(tag)),
   }));
   const widgetRecs = (manifest.widgets ?? []).slice(0, 4).map((widget, index) => ({
     id: `widget-${index}`,
-    label: widget.title || humanize(String(widget.type || "widget")),
-    description: widget.data ? `Data: ${widget.data}` : String(widget.type || "widget"),
+    label: safeStringValue(widget.title, humanize(String(widget.type || "widget"))),
+    description: safeStringValue(widget.data ? `Data: ${widget.data}` : String(widget.type || "widget")),
     reason: locale === "en" ? "Widget declared by the agent." : "에이전트가 선언한 UI 위젯입니다.",
     tags: [String(widget.type || "widget")],
   }));
@@ -344,14 +348,14 @@ function recommendationsOf(manifest: AgentlasSurfaceManifest, locale: GeneratedA
 
 function dataSummariesOf(manifest: AgentlasSurfaceManifest): Array<{ label: string; detail: string }> {
   return Object.entries(manifest.data ?? {}).slice(0, 8).map(([id, data]) => ({
-    label: stringValue(data.title) || humanize(id),
-    detail: data.summary || stringValue(data.description) || `${Array.isArray(data.rows) ? data.rows.length : Array.isArray(data.items) ? data.items.length : 0} rows`,
+    label: safeStringValue(data.title) || humanize(id),
+    detail: safeStringValue(data.summary || data.description, `${Array.isArray(data.rows) ? data.rows.length : Array.isArray(data.items) ? data.items.length : 0} rows`),
   }));
 }
 
 function actionSummariesOf(actions: AgentlasSurfaceAction[]): Array<{ label: string; detail: string }> {
   return actions.slice(0, 8).map((action) => ({
-    label: action.label || humanize(action.id),
+    label: safeStringValue(action.label, humanize(action.id)),
     detail: `${action.type}${action.permission ? ` · ${action.permission}` : ""}`,
   }));
 }
@@ -362,10 +366,10 @@ function routesOf(manifest: AgentlasSurfaceManifest): AgentlasSurfaceAppRoute[] 
   const routeData = manifest.data?.routes;
   const rows = Array.isArray(routeData?.rows) ? routeData.rows : Array.isArray(routeData?.items) ? routeData.items : [];
   return rows.map((row) => ({
-    path: stringValue(row.path) || `/${sanitizeId(stringValue(row.label) || "screen")}`,
-    label: stringValue(row.label) || stringValue(row.name) || "Screen",
-    purpose: stringValue(row.purpose) || stringValue(row.description),
-    status: stringValue(row.status),
+    path: stringValue(row.path) || `/${sanitizeId(safeStringValue(row.label) || "screen")}`,
+    label: safeStringValue(row.label || row.name, "Screen"),
+    purpose: safeStringValue(row.purpose || row.description),
+    status: safeStringValue(row.status),
   }));
 }
 
@@ -517,4 +521,8 @@ function stringValue(value: unknown): string {
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return "";
+}
+
+function safeStringValue(value: unknown, fallback = ""): string {
+  return sanitizePublicAppCopy(stringValue(value), fallback);
 }

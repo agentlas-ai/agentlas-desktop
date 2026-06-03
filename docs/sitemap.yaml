@@ -10,12 +10,19 @@ nodes:
     status: active
     children:
       - apps.document_studio
+      - apps.app_builder
       - apps.store
       - apps.vault
       - apps.engines
   apps.document_studio:
     label: Document Studio
     route: /apps/document-studio
+    priority: high
+    owner: Agentlas Desktop
+    status: active
+  apps.app_builder:
+    label: Agentlas App Builder
+    route: chat:apps-generate
     priority: high
     owner: Agentlas Desktop
     status: active

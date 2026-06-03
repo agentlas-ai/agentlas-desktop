@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
+import { sanitizePublicAppCopy } from "@shared/brand-safety";
 import type {
   AppFactoryAppRecord,
   AppFactoryAppStatus,
@@ -363,6 +364,8 @@ export default function LibraryAppsPage() {
               const active = app.id === selected?.id;
               const agent = agentById.get(app.agentId);
               const project = app.projectId ? projectById.get(app.projectId) : null;
+              const appName = sanitizePublicAppCopy(app.appName, app.appName);
+              const appDomain = sanitizePublicAppCopy(app.domain, app.domain);
               const routes = app.manifest.app?.routes?.length ?? 0;
               const connectors = app.manifest.app?.connectors?.length ?? 0;
               return (
@@ -380,11 +383,11 @@ export default function LibraryAppsPage() {
                     </span>
                     <span style={{ minWidth: 0, flex: 1, display: "grid", gap: 4, textAlign: "left" }}>
                       <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                        <strong style={ellipsis}>{app.appName}</strong>
+                        <strong style={ellipsis}>{appName}</strong>
                         <StatusPill status={app.status} />
                       </span>
                       <span style={{ display: "flex", gap: 8, color: "var(--muted-deep)", fontSize: 11, minWidth: 0, flexWrap: "wrap" }}>
-                        <span>{app.domain}</span>
+                        <span>{appDomain}</span>
                         {agent && <span>{pickLocalized(agent, locale).name}</span>}
                         {project && <span>{project.name}</span>}
                       </span>
@@ -580,7 +583,9 @@ function AppDetail({
                 <div key={`${route.path}:${route.label}`} style={lineItem}>
                   <IconRoute size={13} style={{ color: "var(--accent)" }} />
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ fontWeight: 700, fontSize: 12 }}>{route.label}</div>
+                    <div style={{ fontWeight: 700, fontSize: 12 }}>
+                      {sanitizePublicAppCopy(route.label, route.label)}
+                    </div>
                     <div style={{ color: "var(--muted-deep)", fontSize: 11, overflowWrap: "anywhere" }}>{route.path}</div>
                   </div>
                 </div>
@@ -899,11 +904,18 @@ function AppShowcaseHero({
 }) {
   const { t, locale } = useT();
   const agentName = agent ? pickLocalized(agent, locale).name : app.agentId;
+  const appName = sanitizePublicAppCopy(app.appName, app.appName);
+  const appDomain = sanitizePublicAppCopy(app.domain, app.domain);
+  const appType = sanitizePublicAppCopy(app.manifest.app?.appType || app.layout, app.layout);
+  const showcaseDescription = sanitizePublicAppCopy(
+    app.manifest.app?.valueProp || app.manifest.app?.tagline || app.manifest.title,
+    app.manifest.title,
+  );
   const successfulOps = operations.filter((op) => op.ok).length;
   const providerResults = providerSessions.filter((session) => session.agentCanContinue || session.resultStatus).length;
   const published = app.status === "tool-published";
   const flow = [
-    { label: "Intent", value: app.domain, tone: "claimed" },
+    { label: "Intent", value: appDomain, tone: "claimed" },
     { label: "App", value: `${routes.length} screens`, tone: routes.length ? "ready" : "planned" },
     { label: "Services", value: `${connectors.length} providers`, tone: connectors.length ? "ready" : "planned" },
     { label: "Results", value: `${providerResults} synced`, tone: providerResults ? "ready" : "planned" },
@@ -918,10 +930,8 @@ function AppShowcaseHero({
             {t("library.apps.updated", { date: shortDate(app.updatedAt, locale) })}
           </span>
         </div>
-        <h2 style={showcaseTitle}>{app.appName}</h2>
-        <p style={showcaseCopy}>
-          {app.manifest.app?.valueProp || app.manifest.app?.tagline || app.manifest.title}
-        </p>
+        <h2 style={showcaseTitle}>{appName}</h2>
+        <p style={showcaseCopy}>{showcaseDescription}</p>
       </div>
       <div style={showcaseFlow}>
         {flow.map((item, index) => (
@@ -939,7 +949,7 @@ function AppShowcaseHero({
         <MiniStat label="Agent" value={agentName} />
         <MiniStat label="Project" value={project?.name || "Local"} />
         <MiniStat label="Ops done" value={String(successfulOps)} />
-        <MiniStat label="Type" value={app.manifest.app?.appType || app.layout} />
+        <MiniStat label="Type" value={appType} />
       </div>
     </div>
   );

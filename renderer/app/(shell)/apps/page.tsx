@@ -5,10 +5,10 @@ import { INSTALLED_APPS } from "@/lib/apps";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type { AppFactoryAppRecord } from "@/lib/types";
-import { IconApps, IconChevronRight, IconKey, IconStore, IconWand } from "@/components/Icon";
+import { sanitizePublicAppCopy } from "@shared/brand-safety";
+import { IconApps, IconChevronRight, IconKey, IconTrash, IconWand } from "@/components/Icon";
 
 const SUPPORT_LINKS = [
-  { href: "/marketplace", labelKo: "Apps Store", labelEn: "Apps Store", descKo: "운영자/클라우드에서 동기화되는 설치 소스", descEn: "Install source synced from operator and cloud manifests", icon: "store" },
   { href: "/library/env", labelKo: "전역 Env", labelEn: "Global Env", descKo: "모든 에이전트와 앱이 공유하는 자격증명과 환경변수", descEn: "Credentials and environment keys shared by every agent and app", icon: "vault" },
   { href: "/library/mcps", labelKo: "Plugins", labelEn: "Plugins", descKo: "MCP, 브라우저, 백엔드 커넥터", descEn: "MCP, browser, and backend connectors", icon: "engine" },
 ];
@@ -16,6 +16,7 @@ const SUPPORT_LINKS = [
 export default function AppsPage() {
   const { locale } = useT();
   const [generatedApps, setGeneratedApps] = useState<AppFactoryAppRecord[]>([]);
+  const [deletingAppId, setDeletingAppId] = useState<string | null>(null);
 
   useEffect(() => {
     const api = ipc();
@@ -28,6 +29,27 @@ export default function AppsPage() {
       cancelled = true;
     };
   }, []);
+
+  async function deleteGeneratedApp(app: AppFactoryAppRecord) {
+    const api = ipc();
+    if (!api || deletingAppId) return;
+    const title = sanitizePublicAppCopy(app.appName || app.manifest.app?.name || app.manifest.title, "Generated App");
+    const ok = window.confirm(
+      locale === "en"
+        ? `Delete ${title} from Apps? It will be kept as a reversible archive.`
+        : `${title}을 Apps에서 삭제할까요? 복원 가능한 archive로 보관됩니다.`,
+    );
+    if (!ok) return;
+    setDeletingAppId(app.id);
+    try {
+      await api.appFactory.archive({ rootPath: app.rootPath });
+      setGeneratedApps((apps) => apps.filter((item) => item.id !== app.id));
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeletingAppId(null);
+    }
+  }
 
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", background: "var(--paper)" }}>
@@ -62,8 +84,8 @@ export default function AppsPage() {
           <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 20, lineHeight: 1.15 }}>Apps</h1>
           <p style={{ margin: "3px 0 0", color: "var(--muted-deep)", fontSize: 12.5 }}>
             {locale === "en"
-              ? "Apps open inside Agentlas; Store, Global Env, and Plugins support them."
-              : "Apps는 Agentlas 안에서 열리고, Store·전역 Env·Plugins가 실행을 보조합니다."}
+              ? "Apps open inside Agentlas; Global Env and Plugins support them."
+              : "Apps는 Agentlas 안에서 열리고, 전역 Env·Plugins가 실행을 보조합니다."}
           </p>
         </div>
       </header>
@@ -105,38 +127,52 @@ export default function AppsPage() {
             <h2 style={sectionTitle}>{locale === "en" ? "Generated Apps" : "생성된 Apps"}</h2>
             <div style={appList}>
               {generatedApps.map((app) => {
-                const title = app.appName || app.manifest.app?.name || app.manifest.title;
+                const title = sanitizePublicAppCopy(app.appName || app.manifest.app?.name || app.manifest.title, "Generated App");
                 const description = app.manifest.description;
-                const tagline =
+                const tagline = sanitizePublicAppCopy(
                   app.manifest.app?.valueProp ||
                   (typeof description === "string" ? description : "") ||
-                  (locale === "en" ? "Agent-made App inside Agentlas" : "Agentlas 안에서 실행되는 에이전트 생성 App");
+                  (locale === "en" ? "Agent-made App inside Agentlas" : "Agentlas 안에서 실행되는 에이전트 생성 App"),
+                  locale === "en" ? "Agent-made App inside Agentlas" : "Agentlas 안에서 실행되는 에이전트 생성 App",
+                );
                 const artifacts = [
-                  app.status,
+                  sanitizePublicAppCopy(app.status, app.status),
                   `${app.scaffold.files.length} files`,
-                  app.manifest.domain || app.manifest.layout,
+                  sanitizePublicAppCopy(app.manifest.domain || app.manifest.layout, app.manifest.layout),
                 ].filter(Boolean);
                 return (
-                  <Link key={app.id} href={`/apps/generated?id=${app.id}`} className="glass-strong" style={appTile}>
-                    <div style={{ ...appIcon, background: "linear-gradient(135deg, var(--green), var(--accent))" }}>
-                      <IconWand size={20} />
-                    </div>
-                    <div style={appBody}>
-                      <div style={appTitleLine}>
-                        <strong style={appName}>{title}</strong>
-                        <span style={appKind}>{locale === "en" ? "Generated" : "생성됨"}</span>
+                  <div key={app.id} className="glass-strong" style={{ ...appTile, position: "relative", paddingRight: 58 }}>
+                    <Link href={`/apps/generated?id=${app.id}`} style={appTileLink}>
+                      <div style={{ ...appIcon, background: "linear-gradient(135deg, var(--green), var(--accent))" }}>
+                        <IconWand size={20} />
                       </div>
-                      <span style={appDescription} title={tagline}>
-                        {tagline}
-                      </span>
-                      <div style={pillRow}>
-                        {artifacts.map((artifact) => (
-                          <span key={artifact} style={pill}>{artifact}</span>
-                        ))}
+                      <div style={appBody}>
+                        <div style={appTitleLine}>
+                          <strong style={appName}>{title}</strong>
+                          <span style={appKind}>{locale === "en" ? "Generated" : "생성됨"}</span>
+                        </div>
+                        <span style={appDescription} title={tagline}>
+                          {tagline}
+                        </span>
+                        <div style={pillRow}>
+                          {artifacts.map((artifact) => (
+                            <span key={artifact} style={pill}>{artifact}</span>
+                          ))}
+                        </div>
                       </div>
-                    </div>
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => void deleteGeneratedApp(app)}
+                      disabled={deletingAppId === app.id}
+                      aria-label={locale === "en" ? `Delete ${title}` : `${title} 삭제`}
+                      title={locale === "en" ? "Delete App" : "App 삭제"}
+                      style={deleteButton}
+                    >
+                      <IconTrash size={14} />
+                    </button>
                     <IconChevronRight size={14} style={chevronStyle} />
-                  </Link>
+                  </div>
                 );
               })}
             </div>
@@ -144,11 +180,11 @@ export default function AppsPage() {
         )}
 
         <section>
-          <h2 style={sectionTitle}>{locale === "en" ? "App Controls" : "Apps 관리"}</h2>
+          <h2 style={sectionTitle}>{locale === "en" ? "Runtime Support" : "실행 보조"}</h2>
           <div style={supportGrid}>
             {SUPPORT_LINKS.map((item) => (
               <Link key={item.href} href={item.href} className="neu" style={supportTile}>
-                {item.icon === "store" ? <IconStore size={16} /> : item.icon === "vault" ? <IconKey size={16} /> : <IconWand size={16} />}
+                {item.icon === "vault" ? <IconKey size={16} /> : <IconWand size={16} />}
                 <span style={{ minWidth: 0, flex: 1 }}>
                   <strong style={{ display: "block", color: "var(--ink)", fontSize: 13 }}>{locale === "en" ? item.labelEn : item.labelKo}</strong>
                   <span style={{ display: "block", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.4 }}>
@@ -183,12 +219,14 @@ const sectionTitle: React.CSSProperties = {
 const appList: React.CSSProperties = {
   width: "100%",
   display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(340px, 100%), 1fr))",
   gap: 10,
 };
 
 const appTile: React.CSSProperties = {
   width: "100%",
   minHeight: 92,
+  height: "100%",
   borderRadius: 8,
   padding: 14,
   textDecoration: "none",
@@ -196,6 +234,16 @@ const appTile: React.CSSProperties = {
   display: "flex",
   alignItems: "flex-start",
   gap: 13,
+};
+
+const appTileLink: React.CSSProperties = {
+  minWidth: 0,
+  flex: 1,
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 13,
+  color: "inherit",
+  textDecoration: "none",
 };
 
 const appIcon: React.CSSProperties = {
@@ -275,6 +323,21 @@ const chevronStyle: React.CSSProperties = {
   color: "var(--muted-deep)",
   flexShrink: 0,
   marginTop: 14,
+};
+
+const deleteButton: React.CSSProperties = {
+  position: "absolute",
+  top: 12,
+  right: 28,
+  width: 28,
+  height: 28,
+  borderRadius: 6,
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+  color: "var(--muted-deep)",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
 };
 
 const supportGrid: React.CSSProperties = {

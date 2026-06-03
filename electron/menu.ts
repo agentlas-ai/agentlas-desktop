@@ -128,7 +128,7 @@ export function buildAppMenu(getWindow: () => BrowserWindow | null): Menu {
         },
         { type: "separator" },
         {
-          label: "Apps Store",
+          label: "Marketplace",
           accelerator: "CmdOrCtrl+Shift+M",
           click: () => send(getWindow(), "/marketplace"),
         },

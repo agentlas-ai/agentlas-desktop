@@ -160,9 +160,9 @@ A complete tour of what ships today.
   MongoDB marketplace index, permissions, manifest, and version metadata. MongoDB is
   not the blob store for full app bundles.
 - **Chat-generated Apps.** Turn on **Apps Generate** beside the Goal control in chat
-  and describe the tool you want. The hidden apps-generator route treats the result
-  as an App package, not as loose generated assets, and leaves a stable Apps CTA
-  when the model does not.
+  and describe the tool you want. The built-in Agentlas App Builder routes the task
+  into an internal App manifest, not a standalone localhost web app or loose assets,
+  and leaves a stable Apps CTA when the model does not.
 - **First proof App.** **Document Studio** opens at `/apps/document-studio` as an
   AI document workspace with tabs, an editable generated draft, figure planning,
   and an "Open in Apps" CTA.
@@ -240,7 +240,7 @@ Three common ways to run AI agents today — and where Agentlas lands.
 | **Projects** | Create and open projects; each carries a default agent and a shared context note. |
 | **Firm detail** | The agent company's org chart — CEO → department heads → workers, plus the firm persona. |
 | **Automations** | List, create, and toggle scheduled runs targeting an agent or a firm. |
-| **Apps · Installed** | Installed Apps launcher. Includes Document Studio, a local editable document generator. |
+| **Apps · Installed** | Installed Apps launcher. Includes Document Studio and App Builder generated Apps. |
 | **Apps · Store** | Browse and install Apps, agents, and firms from `agentlas.cloud` (with an offline in-memory fallback). |
 | **Apps · Engines** | Installed MCP servers, backend connectors, and sub-engines used by Apps. |
 | **Apps · Vault** | The shared credential vault — which keys are set and which Apps require them. |

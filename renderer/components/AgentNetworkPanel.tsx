@@ -113,11 +113,6 @@ export function AgentNetworkPanel({ firm, org, agent, agents, busy, liveAgents, 
         flexDirection: "column",
       }}
     >
-      <style>{`
-        @keyframes net-blink { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
-        @keyframes net-bar { 0% { transform: translateX(-100%); } 100% { transform: translateX(320%); } }
-      `}</style>
-
       {/* 헤더 */}
       <div
         style={{
@@ -256,7 +251,7 @@ function LiveBadge({ label }: { label: string }) {
           height: 6,
           borderRadius: "50%",
           background: "var(--green-deep)",
-          animation: "net-blink 1s ease-in-out infinite",
+          boxShadow: "0 0 0 3px color-mix(in srgb, var(--green-deep) 14%, transparent)",
         }}
       />
       {label}
@@ -294,7 +289,7 @@ function RosterRow({
           flexShrink: 0,
           background: active ? "var(--green-deep)" : "transparent",
           border: active ? "none" : "1.5px solid var(--paper-edge)",
-          animation: active ? "net-blink 1.1s ease-in-out infinite" : undefined,
+          boxShadow: active ? "0 0 0 3px color-mix(in srgb, var(--green-deep) 12%, transparent)" : undefined,
         }}
       />
       <span
@@ -371,7 +366,7 @@ function TimelineEntry({
             height: 9,
             borderRadius: isHandoff ? 2 : "50%",
             background: live ? "var(--green-deep)" : "var(--ink-soft)",
-            animation: live ? "net-blink 1s ease-in-out infinite" : undefined,
+            boxShadow: live ? "0 0 0 3px color-mix(in srgb, var(--green-deep) 12%, transparent)" : undefined,
           }}
         />
         {!last && <span style={{ flex: 1, width: 2, background: "var(--paper-edge)", minHeight: 16 }} />}
@@ -443,24 +438,9 @@ function TimelineEntry({
               marginTop: 6,
               height: 3,
               borderRadius: 999,
-              background: "var(--paper-2)",
-              overflow: "hidden",
-              position: "relative",
+              background: "color-mix(in srgb, var(--green-deep) 18%, var(--paper-2))",
             }}
-          >
-            <span
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                height: "100%",
-                width: "30%",
-                borderRadius: 999,
-                background: "var(--ink-soft)",
-                animation: "net-bar 1.1s ease-in-out infinite",
-              }}
-            />
-          </div>
+          />
         )}
       </div>
     </div>

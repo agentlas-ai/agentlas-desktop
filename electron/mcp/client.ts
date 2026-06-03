@@ -11,6 +11,7 @@ import {
   autoRouteSystemPreamble,
   isGlobalOrchestrator,
   selectAutoRoutedAgent,
+  type AutoRouteChoice,
 } from "../agents/auto-router";
 import {
   appendChatMessage,
@@ -28,6 +29,7 @@ import { recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
 import { curateReply } from "../memory/curator";
 import { MEMORY_EMITTER_BLOCK } from "../architecture/manifest";
+import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
 import { SURFACE_PROTOCOL, parseSurfaces, type SurfaceManifestDiagnostic } from "../surface-emitter";
 import { runHandsFreeAgentOs, shouldRunHandsFreeAgentOs } from "../agent-os/hands-free";
@@ -35,6 +37,7 @@ import { prepareCreativeAdPackManifest } from "../creative-pack/surface";
 import { prepareEcommerceOpsManifest } from "../ecommerce-pack/surface";
 import { createAutomation } from "../store/automations";
 import { recordAgentSurface } from "../store/agent-surfaces";
+import { getAgentApp } from "../store/agent-apps";
 import { runClaudeCode } from "../runtime/claude-code";
 import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
 import { buildRunnerEnv } from "../runtime/env-resolver";
@@ -51,6 +54,7 @@ import { type Runner, SURFACE_INTENT_MARKER } from "../runtime/runner";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
 import type {
   Chat,
+  AppFactoryAppRecord,
   InstalledAgent,
   McpInvocationEvent,
   McpInvocationRequest,
@@ -139,6 +143,44 @@ function buildAppsGenerateUserPrompt(prompt: string, locale: "ko" | "en"): strin
   return `${guide}\n\nUser goal:\n${prompt}`;
 }
 
+function buildAppEditUserPrompt(prompt: string, appRecord: AppFactoryAppRecord, locale: "ko" | "en"): string {
+  const appRoute = `/apps/generated?id=${appRecord.id}`;
+  const manifestJson = JSON.stringify(appRecord.manifest, null, 2).slice(0, 7000);
+  const guide =
+    locale === "ko"
+      ? [
+          "기존 Agentlas 생성 App 수정 요청이다.",
+          "새 App이나 새 Surface를 만들지 말고, 아래 App rootPath의 기존 구현 파일을 수정하라.",
+          "사용자 저장 상태, 편집본, 데이터 파일은 보존하고 필요한 변경만 적용하라.",
+          "수정 뒤 가능하면 타입체크/스모크/렌더 검증을 실행하고 결과를 짧게 한국어로 보고하라.",
+        ].join("\n")
+      : [
+          "This is an edit request for an existing generated Agentlas App.",
+          "Do not create a new App or new Surface. Modify the existing implementation under the App rootPath below.",
+          "Preserve saved state, user edits, and data files; apply only the requested changes.",
+          "After editing, run a focused typecheck/smoke/render verification when practical and report briefly.",
+        ].join("\n");
+  return [
+    guide,
+    "",
+    `App id: ${appRecord.id}`,
+    `App name: ${appRecord.appName}`,
+    `App route: ${appRoute}`,
+    `Root path: ${appRecord.rootPath}`,
+    `Preview path: ${appRecord.previewPath}`,
+    `Status: ${appRecord.status}`,
+    "",
+    "Current manifest:",
+    manifestJson,
+    "",
+    `User edit request:\n${prompt}`,
+    "",
+    locale === "ko"
+      ? `완료 후 CTA: [Apps에서 확인하기](${appRoute})`
+      : `Finish with CTA: [Open in Apps](${appRoute})`,
+  ].join("\n");
+}
+
 function buildGoalUserPrompt(prompt: string, locale: "ko" | "en"): string {
   const guide =
     locale === "ko"
@@ -153,6 +195,22 @@ function buildGoalUserPrompt(prompt: string, locale: "ko" | "en"): string {
           "Restate the goal clearly, proceed with the next concrete action, and include verification criteria.",
         ].join("\n");
   return `${guide}\n\nUser goal:\n${prompt}`;
+}
+
+function selectAppBuilderForExistingAppEdit(
+  agents: InstalledAgent[],
+  locale: "ko" | "en",
+): AutoRouteChoice | null {
+  const agent = agents.find((candidate) => candidate.slug === APP_BUILDER_SLUG);
+  if (!agent) return null;
+  return {
+    agent,
+    reason:
+      locale === "ko"
+        ? "기존 Agentlas App 수정 요청이라 숨은 App Builder 라우트를 선택했습니다"
+        : "the request edits an existing Agentlas App, so Agentlas selected the hidden App Builder route",
+    matchedTerms: ["existing-app-edit"],
+  };
 }
 
 function appendAppsGenerateCta(text: string, prompt: string, locale: "ko" | "en"): string {
@@ -326,15 +384,35 @@ export async function runMcpInvocation(
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
     return;
   }
-  const effectiveUserPrompt = req.appsGenerateMode
+  const targetApp = req.targetAppId ? getAgentApp(req.targetAppId) : null;
+  const isTargetAppEdit = Boolean(targetApp && req.targetAppAction === "edit");
+  if (req.targetAppId && !targetApp) {
+    sink({
+      kind: "error",
+      error: {
+        code: "app-not-found",
+        message:
+          locale === "ko"
+            ? `수정할 App을 찾을 수 없습니다: ${req.targetAppId}`
+            : `Could not find the App to edit: ${req.targetAppId}`,
+      },
+    });
+    return;
+  }
+  const effectiveUserPrompt = isTargetAppEdit && targetApp
+    ? buildAppEditUserPrompt(req.userPrompt, targetApp, locale)
+    : req.appsGenerateMode
     ? buildAppsGenerateUserPrompt(req.userPrompt, locale)
     : req.goalMode
       ? buildGoalUserPrompt(req.userPrompt, locale)
       : req.userPrompt;
 
-  const autoRoute = isGlobalOrchestrator(agent)
-    ? selectAutoRoutedAgent(effectiveUserPrompt, listInstalledAgents(), locale)
-    : null;
+  const installedAgents = listInstalledAgents();
+  const autoRoute = isTargetAppEdit
+    ? selectAppBuilderForExistingAppEdit(installedAgents, locale)
+    : req.appsGenerateMode || isGlobalOrchestrator(agent)
+      ? selectAutoRoutedAgent(effectiveUserPrompt, installedAgents, locale)
+      : null;
   if (autoRoute) {
     sink({ kind: "tool-use", status: autoRouteStatus(autoRoute, locale) });
     agent = autoRoute.agent;
@@ -347,7 +425,8 @@ export async function runMcpInvocation(
   const inferredWorkingFolder =
     existingWorkingFolder || projectWorkingFolder ? null : inferWorkingFolderFromPrompt(req.userPrompt);
   if (inferredWorkingFolder) setChatWorkingFolder(chat.id, inferredWorkingFolder);
-  const workingFolder = existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
+  const targetAppWorkingFolder = targetApp ? path.resolve(targetApp.rootPath) : null;
+  const workingFolder = targetAppWorkingFolder ?? existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
 
   const runtimes = await detectRuntimes();
   const active = pickActive(runtimes);
@@ -456,7 +535,11 @@ export async function runMcpInvocation(
   // 프로젝트 컨텍스트 노트가 있으면 system prompt 뒤에 append
   let systemPrompt = agent.systemPrompt;
   if (autoRoute) {
-    systemPrompt = `${autoRouteSystemPreamble(autoRoute, locale)}\n\n${systemPrompt}`;
+    systemPrompt = `${autoRouteSystemPreamble(
+      autoRoute,
+      locale,
+      isTargetAppEdit ? "app-edit" : req.appsGenerateMode ? "apps-generate" : "default",
+    )}\n\n${systemPrompt}`;
   }
   if (chat.projectId) {
     const project = getProject(chat.projectId);

@@ -177,6 +177,106 @@ function parseGoalSlash(input: string): string | null {
   return goal || null;
 }
 
+type GeneratedAppChatRoute = {
+  action: "edit" | "archive";
+  app: AppFactoryAppRecord;
+  request: string;
+};
+
+const GENERATED_APP_EDIT_TERMS = [
+  "edit",
+  "modify",
+  "change",
+  "update",
+  "improve",
+  "fix",
+  "수정",
+  "고쳐",
+  "바꿔",
+  "변경",
+  "개선",
+  "업데이트",
+  "고도화",
+];
+
+const GENERATED_APP_ARCHIVE_TERMS = [
+  "delete",
+  "remove",
+  "archive",
+  "uninstall",
+  "삭제",
+  "지워",
+  "없애",
+  "보관",
+  "아카이브",
+  "제거",
+];
+
+function normalizeGeneratedAppText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[_/]+/g, " ")
+    .replace(/[^a-z0-9가-힣@\s-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function generatedAppDisplayName(app: AppFactoryAppRecord): string {
+  return app.appName || app.manifest.app?.name || app.manifest.title || "Generated App";
+}
+
+function generatedAppAliases(app: AppFactoryAppRecord): string[] {
+  const values = [
+    generatedAppDisplayName(app),
+    app.manifest.app?.name,
+    app.manifest.title,
+    app.manifest.app?.appType,
+    app.rootPath.split(/[\\/]/).pop(),
+  ];
+  return [...new Set(values.map((value) => normalizeGeneratedAppText(value ?? "")).filter((value) => value.length >= 3))];
+}
+
+function detectGeneratedAppAction(input: string): GeneratedAppChatRoute["action"] | null {
+  const normalized = normalizeGeneratedAppText(input);
+  if (GENERATED_APP_ARCHIVE_TERMS.some((term) => normalized.includes(normalizeGeneratedAppText(term)))) {
+    return "archive";
+  }
+  if (GENERATED_APP_EDIT_TERMS.some((term) => normalized.includes(normalizeGeneratedAppText(term)))) {
+    return "edit";
+  }
+  return null;
+}
+
+function parseGeneratedAppChatRoute(input: string, apps: AppFactoryAppRecord[]): GeneratedAppChatRoute | null {
+  const action = detectGeneratedAppAction(input);
+  if (!action) return null;
+  const activeApps = apps.filter((app) => app.status !== "archived");
+  if (activeApps.length === 0) return null;
+  const normalized = normalizeGeneratedAppText(input);
+  const matches = activeApps
+    .map((app) => {
+      const aliases = generatedAppAliases(app);
+      const bestAlias = aliases
+        .filter((alias) => normalized.includes(alias) || normalized.includes(`@${alias}`))
+        .sort((a, b) => b.length - a.length)[0];
+      return bestAlias ? { app, score: bestAlias.length } : null;
+    })
+    .filter((item): item is { app: AppFactoryAppRecord; score: number } => Boolean(item))
+    .sort((a, b) => b.score - a.score);
+
+  const fallbackSingleApp =
+    matches.length === 0 && activeApps.length === 1 && /\bapp\b|앱/.test(normalized)
+      ? activeApps[0]
+      : null;
+  const app = matches[0]?.app ?? fallbackSingleApp;
+  if (!app) return null;
+  return {
+    action,
+    app,
+    request: input.trim(),
+  };
+}
+
 export default function ChatPageWrapper() {
   // useSearchParams는 Suspense boundary를 요구함 (Next 15)
   return (
@@ -203,6 +303,7 @@ function ChatPage() {
   const [allFirms, setAllFirms] = useState<InstalledFirm[]>([]);
   const [allProjects, setAllProjects] = useState<Project[]>([]);
   const [allEnvKeys, setAllEnvKeys] = useState<string[]>([]);
+  const [allGeneratedApps, setAllGeneratedApps] = useState<AppFactoryAppRecord[]>([]);
   const [cliCommands, setCliCommands] = useState<RuntimeCommand[]>([]);
   const [installedPlugins, setInstalledPlugins] = useState<InstalledMcpServer[]>([]);
   const [firm, setFirm] = useState<InstalledFirm | null>(null);
@@ -504,10 +605,11 @@ function ChatPage() {
     cancelRequestedRef.current = false;
     setLiveAgents({});
     setNetTimeline([]);
-    setScaffoldedApps({});
-    setScaffoldedTools({});
-    setInstalledPlugins([]);
-    void (async () => {
+      setScaffoldedApps({});
+      setScaffoldedTools({});
+      setInstalledPlugins([]);
+      setAllGeneratedApps([]);
+      void (async () => {
       const c = await api.chats.get(chatId);
       if (cancelled || !c) {
         if (!c) router.replace("/");
@@ -515,19 +617,21 @@ function ChatPage() {
       }
       setChat(c);
       setTitleDraft(c.title);
-      const [agents, history, projectsAll, firmsAll, envVars, plugins] = await Promise.all([
+      const [agents, history, projectsAll, firmsAll, envVars, plugins, generatedApps] = await Promise.all([
         api.team.list(),
         api.invoke.history(chatId),
         api.projects.list(),
         api.firms.list(),
         api.env.list(),
         api.mcpTools.listInstalled(),
+        api.appFactory.listApps(),
       ]);
       if (cancelled) return;
       setAllAgents(agents);
       setAllProjects(projectsAll);
       setAllFirms(firmsAll);
       setInstalledPlugins(plugins);
+      setAllGeneratedApps(generatedApps.filter((app) => app.status !== "archived"));
       // @ 멘션 popover에는 실제로 값이 저장된 키만 노출 — 비어있는 키를 멘션하면 invocation에서 빈 값이 주입돼 혼란.
       setAllEnvKeys(envVars.filter((e) => e.hasValue).map((e) => e.key));
       // CLI 슬래시 명령 스캔 (매 진입 시 최신) — 느려도 채팅 표시를 막지 않게 후속 로드.
@@ -704,6 +808,53 @@ function ChatPage() {
         router.push(appRoute.app.route);
         return;
       }
+      const generatedAppRoute = appRoute ? null : parseGeneratedAppChatRoute(routeInput, allGeneratedApps);
+      if (generatedAppRoute?.action === "archive") {
+        const appName = generatedAppDisplayName(generatedAppRoute.app);
+        const placeholderId = uid();
+        setMessages((m) => [
+          ...m,
+          { id: uid(), role: "user", text: userPrompt },
+          {
+            id: placeholderId,
+            role: "agent",
+            text: locale === "ko" ? `${appName} 삭제 중...` : `Deleting ${appName}...`,
+            busy: true,
+            startedAt: Date.now(),
+          },
+        ]);
+        setBusy(true);
+        try {
+          await api.appFactory.archive({ rootPath: generatedAppRoute.app.rootPath });
+          setAllGeneratedApps((apps) => apps.filter((app) => app.id !== generatedAppRoute.app.id));
+          setMessages((m) =>
+            m.map((msg) =>
+              msg.id === placeholderId
+                ? {
+                    ...msg,
+                    busy: false,
+                    text:
+                      locale === "ko"
+                        ? `${appName}을 삭제했습니다. 복원이 가능한 archive 상태로 보관했고 Apps 목록에서는 바로 숨겼습니다.`
+                        : `${appName} was deleted from Apps and kept as a reversible archive.`,
+                  }
+                : msg,
+            ),
+          );
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          setMessages((m) =>
+            m.map((msg) =>
+              msg.id === placeholderId
+                ? { ...msg, role: "system", busy: false, text: `⚠️ ${message || t("chat.err.unknown")}` }
+                : msg,
+            ),
+          );
+        } finally {
+          setBusy(false);
+        }
+        return;
+      }
       const invocationPrompt = appRoute ? buildAppRoutePrompt(appRoute, locale) : routeInput;
       const visiblePrompt = appRoute ? `${appRoute.command} ${appRoute.request}`.trim() : userPrompt;
       const images = opts?.images;
@@ -763,6 +914,8 @@ function ChatPage() {
           permissions: opts?.permissions ?? DEFAULT_PERMISSION,
           goalMode: opts?.goalMode || Boolean(goalPrompt),
           appsGenerateMode: opts?.appsGenerateMode || Boolean(appRoute),
+          targetAppId: generatedAppRoute?.action === "edit" ? generatedAppRoute.app.id : undefined,
+          targetAppAction: generatedAppRoute?.action === "edit" ? "edit" : undefined,
         });
         runIdRef.current = runId;
         // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
@@ -792,7 +945,7 @@ function ChatPage() {
         runIdRef.current = null;
       }
     },
-    [agent, chat, busy, locale, router, t, subscribeRun],
+    [agent, allGeneratedApps, chat, busy, locale, router, t, subscribeRun],
   );
 
   // 진행 중 실행 취소 — 입력창의 정지 버튼(전송 버튼이 busy일 때 변신) / Cmd/Ctrl+Esc.
@@ -1499,6 +1652,7 @@ function ChatPage() {
           projects: allProjects,
           firms: allFirms,
           apps: INSTALLED_APPS,
+          generatedApps: allGeneratedApps,
           envKeys: allEnvKeys,
           commands: cliCommands,
         }}

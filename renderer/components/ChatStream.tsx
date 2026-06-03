@@ -4,10 +4,9 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { InstalledAgent, InstalledFirm, InstalledMcpServer, Project, RuntimeCommand } from "@/lib/types";
 import type { AgentlasAppDefinition } from "@/lib/apps";
-import { appDisplayName, appSlashCommands } from "@/lib/apps";
 import { AgentAvatar } from "./AgentAvatar";
 import { Markdown, type CodeArtifact } from "./Markdown";
-import { pickLocalized, useT } from "@/lib/i18n";
+import { useT } from "@/lib/i18n";
 
 /** 작업 중 패널에 누적되는 단일 단계. 새 이벤트마다 push (replace 아님). */
 export interface StreamStep {
@@ -117,16 +116,12 @@ export function ChatStream({
         flex: 1,
         overflowY: messages.length === 0 ? "hidden" : "auto",
         padding: messages.length === 0 ? "20px 28px" : "24px 32px",
+        background: "var(--paper)",
         display: "flex",
         flexDirection: "column",
         gap: 16,
       }}
     >
-      {messages.length === 0 && (
-        <EmptyCommandDirectory
-          directory={emptyDirectory}
-        />
-      )}
       {messages.map((m) => (
         <Bubble
           key={m.id}
@@ -140,179 +135,6 @@ export function ChatStream({
     </div>
   );
 }
-
-function EmptyCommandDirectory({
-  directory,
-}: {
-  directory?: ChatEmptyDirectory;
-}) {
-  const { t, locale } = useT();
-  const apps = directory?.apps ?? [];
-  const agents = directory?.agents ?? [];
-  const projects = directory?.projects ?? [];
-  const envKeys = directory?.envKeys ?? [];
-  const commands = directory?.commands ?? [];
-  const plugins = directory?.plugins ?? [];
-  const slashRows = [
-    { token: "/goal", label: t("chatcmd.goal") },
-    { token: "/apps", label: t("chatcmd.apps") },
-    { token: "/new", label: t("chatcmd.new") },
-    { token: "/folder", label: t("chatcmd.folder") },
-    { token: "/global", label: t("chatcmd.global") },
-    { token: "/rename", label: t("chatcmd.rename") },
-    { token: "/clear", label: t("chatcmd.clear") },
-    { token: "/help", label: t("chatcmd.help") },
-  ];
-  const appRows = apps.flatMap((app) =>
-    appSlashCommands(app).map((command) => ({
-      token: command,
-      label: appDisplayName(app, locale),
-    })),
-  ).slice(0, 8);
-  const agentRows = agents.slice(0, 8).map((agent) => {
-    const loc = pickLocalized(agent, locale);
-    return { token: `@${loc.name}`, label: agent.slug };
-  });
-  const pluginRows = plugins.slice(0, 8).map((plugin) => ({
-    token: plugin.catalogId ? `mcp:${plugin.catalogId}` : "mcp:custom",
-    label: locale === "en" ? plugin.nameEn || plugin.name : plugin.name,
-    muted: plugin.enabled ? t("mcps.on") : t("mcps.off"),
-  }));
-  const projectRows = projects.slice(0, 6).map((project) => ({
-    token: `@${project.name}`,
-    label: t("sidebar.projects"),
-  }));
-  const envRows = envKeys.slice(0, 6).map((key) => ({ token: `@${key}`, label: t("env.title") }));
-  const runtimeRows = commands.slice(0, 6).map((command) => ({
-    token: command.name,
-    label: command.description || command.source,
-  }));
-  type DirectoryRow = { token: string; label: string; muted?: string };
-  const sections: Array<{ title: string; rows: DirectoryRow[] }> = [
-    { title: t("chatstream.empty_section.commands"), rows: slashRows },
-    { title: t("chatstream.empty_section.apps"), rows: appRows },
-    { title: t("chatstream.empty_section.agents"), rows: agentRows },
-    { title: t("chatstream.empty_section.plugins"), rows: pluginRows },
-    { title: t("chatstream.empty_section.context"), rows: [...projectRows, ...envRows, ...runtimeRows].slice(0, 10) },
-  ].filter((section) => section.rows.length > 0);
-
-  return (
-    <div style={emptyShell}>
-      <div style={commandDirectory} aria-label={t("chatstream.empty_commands_title")}>
-        {sections.length === 0 ? (
-          <div style={emptyRow}>{t("chatinput.no_match")}</div>
-        ) : (
-          sections.map((section) => (
-            <section key={section.title} style={commandSection}>
-              <h2 style={commandSectionTitle}>{section.title}</h2>
-              <div style={commandList}>
-                {section.rows.map((row) => (
-                  <CommandRow key={`${section.title}-${row.token}-${row.label}`} token={row.token} label={row.label} muted={row.muted} />
-                ))}
-              </div>
-            </section>
-          ))
-        )}
-      </div>
-    </div>
-  );
-}
-
-function CommandRow({
-  token,
-  label,
-  muted,
-}: {
-  token: string;
-  label: string;
-  muted?: string;
-}) {
-  return (
-    <div style={commandRow} title={`${token} ${label}`}>
-      <code style={commandToken}>{token}</code>
-      <span style={commandLabel}>{label}</span>
-      {muted && <span style={commandMuted}>{muted}</span>}
-    </div>
-  );
-}
-
-const emptyShell: CSSProperties = {
-  width: "100%",
-  maxWidth: 980,
-  margin: "160px auto auto",
-};
-
-const commandDirectory: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))",
-  gap: "24px 30px",
-  alignItems: "start",
-  justifyContent: "start",
-  color: "var(--muted-deep)",
-};
-
-const commandSection: CSSProperties = {
-  minWidth: 0,
-};
-
-const commandSectionTitle: CSSProperties = {
-  margin: "0 0 8px",
-  fontSize: 10.5,
-  fontWeight: 750,
-  textTransform: "uppercase",
-  letterSpacing: 0,
-  color: "var(--muted)",
-};
-
-const commandList: CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 5,
-  minWidth: 0,
-};
-
-const commandRow: CSSProperties = {
-  minWidth: 0,
-  display: "flex",
-  alignItems: "baseline",
-  gap: 7,
-  color: "var(--muted-deep)",
-  fontSize: 12.5,
-  lineHeight: 1.45,
-};
-
-const commandToken: CSSProperties = {
-  minWidth: 0,
-  flexShrink: 0,
-  maxWidth: 128,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  fontFamily: "var(--font-mono)",
-  fontSize: 12,
-  fontWeight: 760,
-  color: "var(--accent)",
-  letterSpacing: 0,
-};
-
-const commandLabel: CSSProperties = {
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  color: "color-mix(in srgb, var(--muted-deep) 76%, var(--paper) 24%)",
-};
-
-const commandMuted: CSSProperties = {
-  flexShrink: 0,
-  color: "var(--muted)",
-  fontSize: 11,
-};
-
-const emptyRow: CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 12,
-};
 
 function Bubble({
   message,
@@ -545,38 +367,36 @@ function QuestionBlock({
     <div
       style={{
         border: "1px solid var(--paper-edge)",
-        borderRadius: "var(--radius-md)",
-        background: "var(--paper)",
+        borderRadius: 0,
+        background: "#fff",
         padding: 12,
         display: "flex",
         flexDirection: "column",
-        gap: 8,
+        gap: 7,
+        boxShadow: "none",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        {question.header && (
-          <span
-            style={{
-              fontSize: 10,
-              fontFamily: "var(--font-mono)",
-              textTransform: "uppercase",
-              letterSpacing: 0.6,
-              color: "var(--accent)",
-              background: "var(--fill-1)",
-              padding: "2px 8px",
-              borderRadius: 999,
-              fontWeight: 700,
-            }}
-          >
-            {question.header}
-          </span>
-        )}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+        <span
+          style={{
+            flexShrink: 0,
+            fontSize: 11,
+            fontFamily: "var(--font-mono)",
+            color: "var(--amber-deep)",
+            background: "var(--fill-1)",
+            padding: "2px 7px",
+            borderRadius: 999,
+            fontWeight: 750,
+          }}
+        >
+          {question.header || "1/1"}
+        </span>
         <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ink)" }}>
           {question.question}
         </span>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {question.options.map((opt) => {
+      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+        {question.options.map((opt, index) => {
           const isPicked = picked.has(opt.label);
           const isAnswered = answered && (question.answer ?? []).includes(opt.label);
           const dim = answered && !isAnswered;
@@ -590,30 +410,16 @@ function QuestionBlock({
                 alignItems: "flex-start",
                 gap: 10,
                 textAlign: "left",
-                padding: "10px 12px",
-                borderRadius: 10,
+                padding: "9px 10px",
+                borderRadius: 8,
                 border: isAnswered || isPicked
-                  ? "1px solid var(--accent)"
-                  : "1px solid var(--paper-edge)",
+                  ? "1px solid color-mix(in srgb, var(--accent) 34%, var(--paper-edge))"
+                  : "1px solid transparent",
                 background: isAnswered || isPicked ? "var(--fill-1)" : "var(--paper-2)",
                 opacity: dim ? 0.45 : 1,
                 cursor: answered || disabled ? "default" : "pointer",
               }}
             >
-              <span
-                aria-hidden
-                style={{
-                  marginTop: 2,
-                  width: 14,
-                  height: 14,
-                  flexShrink: 0,
-                  borderRadius: question.multiSelect ? 4 : "50%",
-                  border: isAnswered || isPicked
-                    ? "4px solid var(--accent)"
-                    : "1.5px solid var(--paper-edge)",
-                  background: isAnswered || isPicked ? "var(--accent)" : "var(--paper)",
-                }}
-              />
               <span style={{ flex: 1, minWidth: 0 }}>
                 <span
                   style={{
@@ -638,6 +444,25 @@ function QuestionBlock({
                     {opt.description}
                   </span>
                 )}
+              </span>
+              <span
+                aria-hidden
+                style={{
+                  minWidth: 22,
+                  height: 22,
+                  flexShrink: 0,
+                  borderRadius: 6,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  border: "1px solid var(--paper-edge)",
+                  background: "var(--paper)",
+                  color: isAnswered || isPicked ? "var(--accent)" : "var(--muted-deep)",
+                  fontSize: 11,
+                  fontWeight: 700,
+                }}
+              >
+                {index + 1}
               </span>
             </button>
           );
@@ -674,9 +499,9 @@ function QuestionBlock({
                 flex: 1,
                 minWidth: 0,
                 padding: "8px 12px",
-                borderRadius: 10,
+                borderRadius: 8,
                 border: "1px solid var(--paper-edge)",
-                background: "var(--paper-2)",
+                background: "var(--paper)",
                 color: "var(--ink)",
                 fontSize: 12.5,
               }}
@@ -1225,7 +1050,7 @@ function PulsingDot() {
         height: 7,
         borderRadius: "50%",
         background: "var(--accent)",
-        animation: "agentlas-pulse 1.2s ease-in-out infinite",
+        boxShadow: "0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent)",
         flexShrink: 0,
       }}
     />
@@ -1243,7 +1068,7 @@ function BlinkingCursor() {
         marginLeft: 2,
         verticalAlign: "text-bottom",
         background: "var(--accent)",
-        animation: "agentlas-blink 1s steps(2) infinite",
+        opacity: 0.55,
         borderRadius: 1,
       }}
     />
