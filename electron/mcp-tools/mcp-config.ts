@@ -9,7 +9,8 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
 import { app } from "electron";
-import { listInstalledServers, installFromCatalog } from "./registry";
+import { ensureDefaultMcpPluginsInstalled } from "./defaults";
+import { listInstalledServers } from "./registry";
 import { readEnvVar } from "../secrets/vault";
 import type { InstalledMcpServer } from "../../shared/types";
 
@@ -41,17 +42,6 @@ function pushCodexConfig(args: string[], key: string, prop: string, value: strin
   args.push("-c", `mcp_servers.${key}.${prop}=${value}`);
 }
 
-/** Playwright(브라우저, 키 불필요) MCP가 항상 설치돼 있도록 보장 — 멱등.
- *  "API/MCP를 모르는 사용자도 브라우저로 가입까지" 시나리오의 필수 도구. */
-export function ensurePlaywrightInstalled(): void {
-  try {
-    const already = listInstalledServers().some((s) => s.catalogId === "playwright");
-    if (!already) installFromCatalog("playwright");
-  } catch (err) {
-    console.error("[mcp-config] ensurePlaywrightInstalled failed:", err);
-  }
-}
-
 export interface McpConfigResult {
   configPath: string;
   /** ["mcp__playwright", ...] — write/full 권한에서 --allowedTools 자동 승인용. */
@@ -65,7 +55,7 @@ export interface McpConfigResult {
  * stdio 서버는 command/args/env, sse·http 서버는 type/url 형태로 직렬화한다.
  */
 export async function buildMcpConfigFile(): Promise<McpConfigResult | null> {
-  ensurePlaywrightInstalled();
+  ensureDefaultMcpPluginsInstalled();
   const servers = listInstalledServers().filter((s) => s.enabled);
   if (servers.length === 0) return null;
 

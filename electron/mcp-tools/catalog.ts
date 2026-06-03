@@ -201,6 +201,26 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
 
   // ── 웹 / 컴퓨터 유즈 ──────────────────────────────────────
   {
+    id: "cua-driver",
+    name: "CUA Driver",
+    nameEn: "CUA Driver",
+    description:
+      "로컬 데스크톱 앱을 조작·검증하는 Computer Use Driver (MCP, 키 불필요)",
+    descriptionEn:
+      "Drive and verify local desktop apps with CUA Driver (MCP, no key)",
+    category: "web",
+    transport: "stdio",
+    command: "cua-driver",
+    args: ["mcp"],
+    trust: "official",
+    docsUrl: "https://cua.ai/docs/cua-driver/guide/getting-started/installation",
+    setupUrl: "https://cua.ai/docs/cua-driver/guide/getting-started/installation",
+    brandColor: "#F97316",
+    mark: "CU",
+    // 키 없음 — 드라이버 설치와 OS Accessibility/Screen Recording 권한이 필요.
+    envRequirements: [],
+  },
+  {
     id: "playwright",
     name: "Playwright (브라우저)",
     nameEn: "Playwright (browser)",

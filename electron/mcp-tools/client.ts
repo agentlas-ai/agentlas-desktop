@@ -10,6 +10,7 @@ import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotoc
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { readEnvVar } from "../secrets/vault";
 import { listInstalledServers, getServer } from "./registry";
+import { withCliPath } from "../runtime/exec";
 import type { InstalledMcpServer, McpServerStatus } from "../../shared/types";
 
 /** npx 첫 다운로드까지 고려한 넉넉한 연결 타임아웃. */
@@ -67,11 +68,15 @@ export async function testServerConnection(server: InstalledMcpServer): Promise<
   try {
     if (server.transport === "stdio") {
       if (!server.command) throw new Error("stdio server has no command");
+      const baseEnv = withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" });
+      const stdioEnv = Object.fromEntries(
+        Object.entries(baseEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+      );
       transport = new StdioClientTransport({
         command: server.command,
         args: (server.args ?? []).map(expandHome),
         // getDefaultEnvironment()는 PATH/HOME 등 안전한 기본값 — 거기에 시크릿을 얹는다.
-        env: { ...getDefaultEnvironment(), PATH: process.env.PATH ?? "", ...resolved },
+        env: { ...stdioEnv, ...resolved },
         stderr: "ignore",
       });
     } else {
