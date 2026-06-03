@@ -230,9 +230,47 @@ export const runClaudeCode: Runner = async (
     let stderr = "";
     let lastEmit = 0;
 
+    const toolNameById = new Map<string, string>();
+
+    const truncateUi = (s: string, max = 12000): string =>
+      s.length > max ? `${s.slice(0, max)}…` : s;
+    const stringifyToolPayload = (payload: unknown): string => {
+      if (typeof payload === "string") return payload;
+      if (Array.isArray(payload)) {
+        const text = payload
+          .map((item) => {
+            if (typeof item === "string") return item;
+            if (item && typeof item === "object" && "text" in item) {
+              const text = (item as { text?: unknown }).text;
+              return typeof text === "string" ? text : "";
+            }
+            return "";
+          })
+          .filter(Boolean)
+          .join("\n");
+        if (text) return text;
+      }
+      try {
+        return JSON.stringify(payload ?? "", null, 2);
+      } catch {
+        return String(payload ?? "");
+      }
+    };
+
     function handleEvent(ev: {
       type?: string;
-      message?: { content?: Array<{ type?: string; text?: string; name?: string; input?: unknown }> };
+      message?: {
+        content?: Array<{
+          type?: string;
+          text?: string;
+          name?: string;
+          input?: unknown;
+          id?: string;
+          tool_use_id?: string;
+          content?: unknown;
+          is_error?: boolean;
+        }>;
+      };
       result?: unknown;
       usage?: { output_tokens?: number };
     }): void {
@@ -252,8 +290,28 @@ export const runClaudeCode: Runner = async (
             } catch {
               argStr = "";
             }
-            events.onTool?.(block.name, argStr.length > 2000 ? argStr.slice(0, 2000) + "…" : argStr);
+            if (block.id) toolNameById.set(block.id, block.name);
+            events.onTool?.(
+              block.name,
+              argStr.length > 2000 ? argStr.slice(0, 2000) + "…" : argStr,
+              undefined,
+              block.id,
+              false,
+            );
+          } else if (block.type === "tool_result") {
+            const toolId = block.tool_use_id;
+            const toolName = toolId ? toolNameById.get(toolId) ?? "tool_result" : "tool_result";
+            const result = truncateUi(stringifyToolPayload(block.content));
+            events.onTool?.(toolName, undefined, result, toolId, block.is_error === true);
           }
+        }
+      } else if (ev.type === "user" && ev.message?.content) {
+        for (const block of ev.message.content) {
+          if (block.type !== "tool_result") continue;
+          const toolId = block.tool_use_id;
+          const toolName = toolId ? toolNameById.get(toolId) ?? "tool_result" : "tool_result";
+          const result = truncateUi(stringifyToolPayload(block.content));
+          events.onTool?.(toolName, undefined, result, toolId, block.is_error === true);
         }
       } else if (ev.type === "result") {
         if (typeof ev.result === "string") finalText = ev.result;

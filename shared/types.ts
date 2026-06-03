@@ -1580,8 +1580,8 @@ export interface McpInvocationEvent {
   /** Agent OS surface manifest, emitted when an agent produces a safe interactive surface. */
   surfaceId?: string;
   surface?: AgentlasSurfaceManifest;
-  /** 도구 호출 이벤트 — Claude Code식 접기/펴기 블록용 (이름 + 인자 JSON) */
-  tool?: { name: string; args?: string };
+  /** 도구 호출/결과 이벤트 — Claude Code식 접기/펴기 블록용 (이름 + 인자 JSON + 결과) */
+  tool?: { name: string; args?: string; result?: string; id?: string; isError?: boolean };
   /** 생성 토큰 수 (final에 동봉) — "N tokens" 표시용 */
   tokens?: number;
   // ── 멀티 에이전트 속성 (firm 오케스트레이션) — 없으면 단일 CEO/에이전트 ──

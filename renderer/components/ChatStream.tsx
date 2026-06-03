@@ -19,6 +19,12 @@ export interface StreamStep {
   tool?: string;
   /** tool 인자 JSON 문자열 — 펼쳤을 때 표시 */
   args?: string;
+  /** tool_use id — 호출과 결과를 같은 행으로 병합하기 위한 런타임 id */
+  toolUseId?: string;
+  /** tool 결과 문자열 — 펼쳤을 때 표시 */
+  result?: string;
+  /** 결과가 오류인지 여부 */
+  resultIsError?: boolean;
 }
 
 /** 에이전트가 사용자에게 옵션을 묻는 질문. Markdown에서 fence를 파싱해 채워진다. */
@@ -364,7 +370,15 @@ function Bubble({
             tokens={message.tokens}
           />
         )}
-        {message.text && (
+        {message.text && message.busy && (
+          <LiveOutputPanel
+            text={message.text}
+            streaming={message.streaming}
+            onOpenArtifact={onOpenArtifact}
+            messageId={message.id}
+          />
+        )}
+        {message.text && !message.busy && (
           <div
             style={{
               background: "var(--paper-2)",
@@ -411,6 +425,72 @@ function Bubble({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function LiveOutputPanel({
+  text,
+  streaming,
+  messageId,
+  onOpenArtifact,
+}: {
+  text: string;
+  streaming?: boolean;
+  messageId: string;
+  onOpenArtifact?: (a: CodeArtifact) => void;
+}) {
+  const { t } = useT();
+  const [open, setOpen] = useState(false);
+  const lines = Math.max(1, text.split(/\r?\n/).filter((line) => line.trim()).length);
+  return (
+    <div
+      style={{
+        background: "var(--paper-2)",
+        border: "1px solid var(--paper-edge)",
+        borderRadius: "var(--radius-md)",
+        marginTop: 8,
+        overflow: "hidden",
+      }}
+    >
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: "100%",
+          border: "none",
+          background: "transparent",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "9px 12px",
+          color: "var(--ink-soft)",
+          fontSize: 12.5,
+          fontWeight: 650,
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+      >
+        {streaming && <PulsingDot />}
+        <span style={{ flex: 1, minWidth: 0 }}>{t("chatstream.live_output", { count: lines })}</span>
+        <span
+          aria-hidden
+          style={{
+            color: "var(--muted)",
+            transform: open ? "rotate(180deg)" : "none",
+            transition: "transform .12s",
+            display: "inline-flex",
+            flexShrink: 0,
+          }}
+        >
+          <ChevronDown />
+        </span>
+      </button>
+      {open && (
+        <div style={{ borderTop: "1px solid var(--paper-edge)", padding: "12px 16px" }}>
+          <Markdown text={text} messageId={messageId} onOpenArtifact={onOpenArtifact} />
+          {streaming && <BlinkingCursor />}
+        </div>
+      )}
     </div>
   );
 }
@@ -670,10 +750,14 @@ function WorkingPanel({
   for (const s of toolSteps) counts[toolView(s.tool!, s.args, locale).group] += 1;
   const summary = buildToolSummary(counts, locale);
 
-  // 기본: 진행 중엔 목록 펼침, 완료되면 접힘. 사용자가 누르면 그 상태로 고정.
-  const expanded = override ?? !done;
-  const latestThinking =
-    thinkingSteps.length > 0 ? thinkingSteps[thinkingSteps.length - 1].text : "";
+  // 기본은 접힘. 사용자가 필요할 때만 작업 로그를 펼친다.
+  const expanded = override ?? false;
+  const activitySummary =
+    toolSteps.length > 0
+      ? summary
+      : locale === "ko"
+        ? `진행 로그 ${thinkingSteps.length}개`
+        : `${thinkingSteps.length} progress update${thinkingSteps.length > 1 ? "s" : ""}`;
 
   return (
     <div
@@ -687,19 +771,24 @@ function WorkingPanel({
         gap: 8,
       }}
     >
-      {/* 메트릭 줄 — "2분 58초 · 94.5k tokens" */}
+      {/* 메트릭 줄 — 실행 상태 + "2분 58초 · 94.5k tokens" */}
       <div
         style={{
           display: "flex",
           alignItems: "center",
+          justifyContent: "space-between",
           gap: 8,
           fontSize: 12,
-          color: "var(--muted-deep)",
           fontWeight: 500,
+          flexWrap: "wrap",
         }}
       >
-        {!done && <PulsingDot />}
-        <span>
+        <span style={statusBadge(done)}>
+          {!done && <PulsingDot />}
+          {done && <span aria-hidden style={doneDot} />}
+          <span>{done ? t("chatstream.done") : t("chatstream.running")}</span>
+        </span>
+        <span style={{ color: "var(--muted-deep)" }}>
           {done
             ? t("chatstream.took", { sec: formatElapsed(elapsed, locale) })
             : t("chatstream.working_for", { sec: formatElapsed(elapsed, locale) })}
@@ -707,37 +796,8 @@ function WorkingPanel({
         </span>
       </div>
 
-      {/* 진행 중 라이브 narration (도구 외 사고 단계 — 가장 최근 1줄) */}
-      {!done && latestThinking && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            fontSize: 12.5,
-            color: "var(--ink-soft)",
-            minWidth: 0,
-          }}
-        >
-          <span aria-hidden style={{ flexShrink: 0, color: "var(--accent)", display: "inline-flex" }}>
-            <ThinkingGlyph />
-          </span>
-          <span
-            style={{
-              minWidth: 0,
-              flex: 1,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {latestThinking}
-          </span>
-        </div>
-      )}
-
-      {/* 도구 사용 그룹 — 접기/펴기 요약 + 목록 (Claude Code/FleetView 형식) */}
-      {toolSteps.length > 0 && (
+      {/* 작업 로그 — 접기/펴기 요약 + 목록 (Claude Code/FleetView 형식) */}
+      {allRows.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <button
             onClick={() => setOverride(!expanded)}
@@ -756,7 +816,7 @@ function WorkingPanel({
               color: "var(--ink-soft)",
             }}
           >
-            <span style={{ minWidth: 0, flex: 1 }}>{summary}</span>
+            <span style={{ minWidth: 0, flex: 1 }}>{activitySummary}</span>
             <span
               aria-hidden
               style={{
@@ -782,8 +842,12 @@ function WorkingPanel({
                 minWidth: 0,
               }}
             >
-              {toolSteps.map((s, idx) => (
-                <ToolRow key={s.id} step={s} current={!done && idx === toolSteps.length - 1} />
+              {allRows.map((s, idx) => (
+                s.tool ? (
+                  <ToolRow key={s.id} step={s} current={!done && idx === allRows.length - 1} />
+                ) : (
+                  <ThinkingRow key={s.id} step={s} current={!done && idx === allRows.length - 1} />
+                )
               ))}
             </div>
           )}
@@ -793,35 +857,92 @@ function WorkingPanel({
   );
 }
 
-// 단일 도구 행 — "실행됨 <명령>" / "읽기 <파일>" 형식. 클릭하면 인자(JSON) 펼침.
-function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
-  const { locale } = useT();
-  const [open, setOpen] = useState(false);
-  const view = toolView(step.tool!, step.args, locale);
-  const hasArgs = !!(step.args && step.args !== "{}" && step.args !== "");
+function ThinkingRow({ step, current }: { step: StreamStep; current?: boolean }) {
   return (
-    <div style={{ minWidth: 0 }}>
+    <div
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 7,
+        minWidth: 0,
+        fontSize: 12.5,
+        color: "var(--ink-soft)",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          flexShrink: 0,
+          marginTop: 2,
+          color: current ? "var(--accent)" : "var(--muted-deep)",
+          display: "inline-flex",
+        }}
+      >
+        <ThinkingGlyph />
+      </span>
+      <span
+        style={{
+          minWidth: 0,
+          overflowWrap: "anywhere",
+          lineHeight: 1.45,
+          fontWeight: current ? 600 : 400,
+        }}
+      >
+        {step.text}
+      </span>
+    </div>
+  );
+}
+
+// 단일 도구 행 — "실행됨 <명령>" / "읽기 <파일>" 형식. 입력과 결과를 각각 접고 펼침.
+function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
+  const { t, locale } = useT();
+  const [argsOpen, setArgsOpen] = useState(false);
+  const [resultOpen, setResultOpen] = useState(false);
+  const view = toolView(step.tool!, step.args, locale);
+  const tone = toolTone(view.group, step.resultIsError === true);
+  const hasArgs = !!(step.args && step.args !== "{}" && step.args !== "");
+  const hasResult = !!(step.result && step.result.trim());
+  const hasDisclosure = hasArgs || hasResult;
+  return (
+    <div
+      style={{
+        minWidth: 0,
+        borderRadius: 8,
+        padding: "4px 6px",
+        background: current ? "color-mix(in srgb, var(--paper) 70%, var(--accent) 7%)" : "transparent",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
       <button
-        onClick={() => hasArgs && setOpen((v) => !v)}
+        onClick={() => {
+          if (hasResult) setResultOpen((v) => !v);
+          else if (hasArgs) setArgsOpen((v) => !v);
+        }}
         style={{
           display: "flex",
           alignItems: "center",
           gap: 7,
-          width: "100%",
+          minWidth: 0,
+          flex: 1,
           textAlign: "left",
           background: "transparent",
           border: "none",
           padding: 0,
           fontSize: 12.5,
           color: "var(--ink-soft)",
-          cursor: hasArgs ? "pointer" : "default",
+          cursor: hasDisclosure ? "pointer" : "default",
         }}
       >
         <span
           style={{
             flexShrink: 0,
             fontSize: 11,
-            color: "var(--muted-deep)",
+            color: tone.accent,
+            background: tone.bg,
+            border: `1px solid ${tone.border}`,
+            borderRadius: 999,
+            padding: "1px 6px",
             fontWeight: current ? 700 : 500,
           }}
         >
@@ -831,7 +952,7 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
           style={{
             fontFamily: "var(--font-mono)",
             fontSize: 12,
-            color: "var(--ink)",
+            color: current ? "var(--ink)" : "var(--ink-soft)",
             fontWeight: current ? 600 : 400,
             minWidth: 0,
             overflow: "hidden",
@@ -841,40 +962,66 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
         >
           {view.label || step.tool}
         </span>
-        {hasArgs && (
+        {hasResult && (
           <span
-            aria-hidden
             style={{
-              marginLeft: "auto",
-              color: "var(--muted)",
-              transform: open ? "rotate(90deg)" : "none",
-              transition: "transform .12s",
-              display: "inline-flex",
+              color: step.resultIsError ? "#b42318" : "#15803d",
+              fontSize: 11,
+              fontWeight: 700,
               flexShrink: 0,
             }}
           >
-            ›
+            {step.resultIsError ? t("chatstream.tool_error") : t("chatstream.tool_result")}
           </span>
         )}
       </button>
-      {open && hasArgs && (
+        {hasArgs && (
+          <button
+            onClick={() => setArgsOpen((v) => !v)}
+            style={{
+              ...toolMiniButton,
+              color: argsOpen ? tone.accent : "var(--muted-deep)",
+              borderColor: argsOpen ? tone.border : "var(--paper-edge)",
+            }}
+          >
+            {t("chatstream.tool_args")}
+          </button>
+        )}
+        {hasResult && (
+          <button
+            onClick={() => setResultOpen((v) => !v)}
+            style={{
+              ...toolMiniButton,
+              color: resultOpen ? (step.resultIsError ? "#b42318" : "#15803d") : "var(--muted-deep)",
+              borderColor: resultOpen ? (step.resultIsError ? "#fecdca" : "#bbf7d0") : "var(--paper-edge)",
+            }}
+          >
+            {step.resultIsError ? t("chatstream.tool_error") : t("chatstream.tool_result")}
+          </button>
+        )}
+      </div>
+      {argsOpen && hasArgs && (
         <pre
           style={{
-            margin: "4px 0 2px 0",
-            padding: "8px 10px",
-            background: "var(--paper)",
-            border: "1px solid var(--paper-edge)",
-            borderRadius: 8,
-            fontSize: 11,
-            fontFamily: "var(--font-mono)",
-            color: "var(--ink-soft)",
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            maxHeight: 220,
-            overflow: "auto",
+            ...toolPre,
+            borderColor: tone.border,
           }}
         >
           {prettyJson(step.args!)}
+        </pre>
+      )}
+      {resultOpen && hasResult && (
+        <pre
+          style={{
+            ...toolPre,
+            background: step.resultIsError
+              ? "color-mix(in srgb, #fef3f2 78%, var(--paper) 22%)"
+              : "color-mix(in srgb, #f0fdf4 72%, var(--paper) 28%)",
+            borderColor: step.resultIsError ? "#fecdca" : "#bbf7d0",
+            color: step.resultIsError ? "#7a271a" : "#14532d",
+          }}
+        >
+          {step.result}
         </pre>
       )}
     </div>
@@ -887,6 +1034,70 @@ interface ToolViewModel {
   group: ToolGroup;
   verb: string;
   label: string;
+}
+
+const doneDot: CSSProperties = {
+  width: 7,
+  height: 7,
+  borderRadius: "50%",
+  background: "#16a34a",
+  flexShrink: 0,
+};
+
+function statusBadge(done: boolean): CSSProperties {
+  return {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: 999,
+    padding: "3px 8px",
+    color: done ? "#15803d" : "var(--accent-strong)",
+    background: done
+      ? "color-mix(in srgb, #dcfce7 78%, var(--paper) 22%)"
+      : "color-mix(in srgb, var(--accent-soft) 56%, var(--paper) 44%)",
+    border: `1px solid ${done ? "#bbf7d0" : "var(--accent-faint)"}`,
+    fontWeight: 700,
+  };
+}
+
+const toolMiniButton: CSSProperties = {
+  flexShrink: 0,
+  border: "1px solid var(--paper-edge)",
+  borderRadius: 999,
+  background: "var(--paper)",
+  padding: "2px 7px",
+  fontSize: 11,
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
+const toolPre: CSSProperties = {
+  margin: "5px 0 2px 0",
+  padding: "8px 10px",
+  background: "var(--paper)",
+  border: "1px solid var(--paper-edge)",
+  borderRadius: 8,
+  fontSize: 11,
+  fontFamily: "var(--font-mono)",
+  color: "var(--ink-soft)",
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word",
+  maxHeight: 220,
+  overflow: "auto",
+};
+
+function toolTone(group: ToolGroup, isError: boolean): { accent: string; bg: string; border: string } {
+  if (isError) {
+    return { accent: "#b42318", bg: "#fef3f2", border: "#fecdca" };
+  }
+  const tones: Record<ToolGroup, { accent: string; bg: string; border: string }> = {
+    command: { accent: "#2563eb", bg: "#eff6ff", border: "#bfdbfe" },
+    read: { accent: "#0f766e", bg: "#ecfdf5", border: "#99f6e4" },
+    edit: { accent: "#b45309", bg: "#fffbeb", border: "#fde68a" },
+    search: { accent: "#7c3aed", bg: "#f5f3ff", border: "#ddd6fe" },
+    other: { accent: "#475569", bg: "#f8fafc", border: "#cbd5e1" },
+  };
+  return tones[group];
 }
 
 const VERB: Record<ToolGroup, { ko: string; en: string }> = {

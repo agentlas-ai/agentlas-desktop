@@ -1,10 +1,10 @@
 // 마켓플레이스 — Codex 데스크톱의 플러그인/스킬 마켓 디자인을 따른다.
 // 구조:
-//   상단 탭 좌측: 회사 / 번들 / 에이전트   |   우측: 관리 · 만들기
+//   상단 탭 좌측: 회사 / 에이전트   |   우측: 관리 · 만들기
 //   가운데 큰 타이틀: "원하는 방식으로 Agentlas를 활용하세요"
 //   검색바 + 페르소나 필터
 //   추천 히어로 카드 (회전, 글래스)
-//   Featured: 2-col 카드 그리드 (왼쪽: 아이콘+이름+설명, 우측: 설치 상태)
+//   Featured: 회사와 추천 팀 구성을 한 화면에 묶은 2-col 카드 그리드
 "use client";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
@@ -38,7 +38,7 @@ import {
   IconWand,
 } from "@/components/Icon";
 
-type Tab = "firms" | "bundles" | "agents";
+type Tab = "firms" | "agents";
 type Persona = "all" | "쇼핑몰" | "마케터" | "부동산" | "크리에이터";
 
 const PERSONA_ICONS: Record<Persona, React.ReactNode> = {
@@ -77,12 +77,12 @@ function MarketplacePage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { t, locale } = useT();
-  const initialTab = (searchParams.get("tab") as Tab) || "firms";
+  const requestedTab = searchParams.get("tab");
+  const initialTab: Tab = requestedTab === "agents" ? "agents" : "firms";
   const [tab, setTab] = useState<Tab>(initialTab);
 
   const TABS: { id: Tab; label: string }[] = [
     { id: "firms", label: t("market.tab.firms") },
-    { id: "bundles", label: t("market.tab.bundles") },
     { id: "agents", label: t("market.tab.agents") },
   ];
   const [bundles, setBundles] = useState<TeamBundle[]>([]);
@@ -224,18 +224,27 @@ function MarketplacePage() {
     }
   }
 
-  const filteredFirms = persona === "all" ? firms : firms.filter((f) => f.persona === persona);
-  const filteredBundles = persona === "all" ? bundles : bundles.filter((b) => b.persona === persona);
+  const normalizedQuery = q.trim().toLowerCase();
+  const matchesQuery = (item: FirmListing | TeamBundle | MarketplaceListing) => {
+    if (!normalizedQuery) return true;
+    const loc = pickLocalized(item, locale);
+    return (
+      loc.name.toLowerCase().includes(normalizedQuery) ||
+      loc.tagline.toLowerCase().includes(normalizedQuery)
+    );
+  };
+  const filteredFirms = (persona === "all" ? firms : firms.filter((f) => f.persona === persona)).filter(matchesQuery);
+  const filteredBundles = (persona === "all" ? bundles : bundles.filter((b) => b.persona === persona)).filter(matchesQuery);
   const filteredListings = useMemo(() => {
     const base = persona === "all"
       ? listings
       : listings.filter((l) => l.slug.startsWith(PERSONA_PREFIX[persona]));
-    if (!q.trim()) return base;
-    const needle = q.toLowerCase();
+    if (!normalizedQuery) return base;
+    const needle = normalizedQuery;
     return base.filter(
       (l) => l.name.toLowerCase().includes(needle) || l.tagline.toLowerCase().includes(needle),
     );
-  }, [listings, persona, q]);
+  }, [listings, normalizedQuery, persona]);
 
   return (
     <div
@@ -455,8 +464,6 @@ function MarketplacePage() {
                 placeholder={
                   tab === "firms"
                     ? t("market.search.firms")
-                    : tab === "bundles"
-                    ? t("market.search.bundles")
                     : t("market.search.agents")
                 }
                 style={{
@@ -532,42 +539,41 @@ function MarketplacePage() {
 
         <div style={{ maxWidth: 840, margin: "0 auto", padding: "0 32px" }}>
           {tab === "firms" && (
-            <Section
-              title={t("market.section.recommended_firms")}
-              empty={filteredFirms.length === 0 ? t("market.empty_firms") : undefined}
-            >
-              {filteredFirms.map((firm) => (
-                <FirmRow
-                  key={firm.slug}
-                  firm={firm}
-                  locale={locale}
-                  installed={installedFirmSlugs.has(firm.slug)}
-                  installing={installing === firm.slug}
-                  onInstall={() => void installFirm(firm)}
-                  onOpen={() => {
-                    const inst = installedFirms.find((f) => f.slug === firm.slug);
-                    if (inst) navigate(`/firm/detail?id=${inst.id}`);
-                  }}
-                />
-              ))}
-            </Section>
-          )}
+            <>
+              <Section
+                title={t("market.section.recommended_firms")}
+                empty={filteredFirms.length === 0 ? t("market.empty_firms") : undefined}
+              >
+                {filteredFirms.map((firm) => (
+                  <FirmRow
+                    key={firm.slug}
+                    firm={firm}
+                    locale={locale}
+                    installed={installedFirmSlugs.has(firm.slug)}
+                    installing={installing === firm.slug}
+                    onInstall={() => void installFirm(firm)}
+                    onOpen={() => {
+                      const inst = installedFirms.find((f) => f.slug === firm.slug);
+                      if (inst) navigate(`/firm/detail?id=${inst.id}`);
+                    }}
+                  />
+                ))}
+              </Section>
 
-          {tab === "bundles" && (
-            <Section
-              title={t("market.section.recommended_bundles")}
-              empty={filteredBundles.length === 0 ? t("market.empty_bundles") : undefined}
-            >
-              {filteredBundles.map((b) => (
-                <BundleRow
-                  key={b.id}
-                  bundle={b}
-                  locale={locale}
-                  installing={installing === b.id}
-                  onInstall={() => void installBundle(b)}
-                />
-              ))}
-            </Section>
+              {filteredBundles.length > 0 && (
+                <Section title={t("market.section.recommended_bundles")}>
+                  {filteredBundles.map((b) => (
+                    <BundleRow
+                      key={b.id}
+                      bundle={b}
+                      locale={locale}
+                      installing={installing === b.id}
+                      onInstall={() => void installBundle(b)}
+                    />
+                  ))}
+                </Section>
+              )}
+            </>
           )}
 
           {tab === "agents" && (

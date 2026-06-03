@@ -118,19 +118,23 @@ function buildAppsGenerateUserPrompt(prompt: string, locale: "ko" | "en"): strin
     locale === "ko"
       ? [
           "Agentlas Apps Generate 모드가 켜져 있다.",
-          "사용자의 목표를 Agentlas Desktop 안에서 실행되는 하나의 Apps 패키지로 만들어라.",
-          "Apps는 Electron/Next renderer 안에서 열리는 앱스토어형 앱이며, 필요하면 자체 UI, UX, 백엔드 어댑터, MCP 도구, credential vault 요구사항, 생성 자산, 서브 엔진을 가진다.",
+          "사용자의 목표를 Agentlas Desktop 안에서 실행되는 하나의 내부 App으로 만들어라.",
+          "반드시 Agentlas Surface Manifest를 emit하라: <<agentlas-surface>> JSON 블록을 포함하고, layout은 service-app 또는 creative-studio, app.routes/connectors/tools, launch 체크리스트, scaffold-app action, operate-app action을 선언한다.",
+          "외부 웹앱을 직접 만들거나 localhost/Vite/Next/Express 서버를 시작하지 마라. Chrome이나 외부 브라우저를 열지 마라. 구현 파일 생성은 Agentlas App Factory가 surface manifest를 받아 처리한다.",
+          "Apps는 Electron/Next renderer 안에서 열리는 앱스토어형 내부 앱이며, 필요하면 자체 UI, UX, 백엔드 어댑터, MCP 도구, credential vault 요구사항, 생성 자산, 서브 엔진을 가진다.",
           "자산, vault 자격증명, MCP 서버, 로컬 파일, 생성물은 Apps 자체가 아니라 Apps를 구동하기 위한 장치이자 부산물로 취급한다.",
           "사용자가 이미 쓰는 Agentlas 채팅의 어떤 AI와 대화하더라도 설치된 Apps를 호출할 수 있게 설계하라.",
-          "가능하면 실제 파일을 생성/수정하고, 구현 범위가 크면 최소 실행 가능한 Apps 구조와 다음 단계만 명확히 남겨라.",
+          "응답은 사용자의 언어로 짧게 요약하고, 숨은 사고 과정은 노출하지 않는다.",
         ].join("\n")
       : [
           "Agentlas Apps Generate mode is enabled.",
-          "Turn the user's goal into one Apps package that runs inside Agentlas Desktop.",
-          "An App is an app-store-style application opened inside the Electron/Next renderer, with its own UI, UX, backend adapters, MCP tools, credential-vault requirements, generated assets, and sub-engines when needed.",
+          "Turn the user's goal into one internal App that runs inside Agentlas Desktop.",
+          "You MUST emit an Agentlas Surface Manifest: include a <<agentlas-surface>> JSON block, use layout service-app or creative-studio, and declare app.routes/connectors/tools, a launch checklist, a scaffold-app action, and an operate-app action.",
+          "Do not create a standalone external web app, do not start localhost/Vite/Next/Express servers, and do not open Chrome or an external browser. Agentlas App Factory creates implementation files from the surface manifest.",
+          "An App is an internal app-store-style application opened inside the Electron/Next renderer, with its own UI, UX, backend adapters, MCP tools, credential-vault requirements, generated assets, and sub-engines when needed.",
           "Assets, vault credentials, MCP servers, local files, and generated artifacts are support devices or byproducts for running the App, not separate top-level products.",
           "Design it so any AI used in Agentlas Desktop chat can call installed Apps.",
-          "Create or edit real files when possible; if the scope is large, leave a minimal runnable Apps structure plus clear next steps.",
+          "Keep the visible reply concise, match the user's language, and do not expose hidden chain-of-thought.",
         ].join("\n");
   return `${guide}\n\nUser goal:\n${prompt}`;
 }
@@ -526,7 +530,7 @@ export async function runMcpInvocation(
       longContext: active.longContextEnabled ?? false,
       effort: active.effort ?? undefined,
       signal,
-      permission: req.permissions,
+      permission: req.appsGenerateMode ? "read" : req.permissions,
       // 세션 resume 키 — codex가 (chatId, kind)별 CLI 세션을 재사용해
       // 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
       chatId: chat.id,
@@ -538,12 +542,14 @@ export async function runMcpInvocation(
       // 활성화(2회 방문) 게이팅과 무관하게, 폴더가 지정돼 있으면 즉시 cwd로 사용한다.
       cwd: workingFolder ?? undefined,
       locale,
+      forceSurface: req.appsGenerateMode || undefined,
     };
     const runnerEvents = {
       onStatus: (status: string) => sink({ kind: "tool-use", status }),
       onPartial: (text: string) => sink({ kind: "partial", text }),
       // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
-      onTool: (name: string, args?: string) => sink({ kind: "tool-use", tool: { name, args } }),
+      onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean) =>
+        sink({ kind: "tool-use", tool: { name, args, result, id, isError } }),
     };
     let result = await picked.runner(runnerReq, runnerEvents);
 
@@ -610,7 +616,8 @@ export async function runMcpInvocation(
             {
               onStatus: (status) => sink({ kind: "tool-use", status }),
               onPartial: () => {},
-              onTool: (name, args) => sink({ kind: "tool-use", tool: { name, args } }),
+              onTool: (name, args, result, id, isError) =>
+                sink({ kind: "tool-use", tool: { name, args, result, id, isError } }),
             },
           );
           const repairedParse = parseSurfaces(repaired.text);

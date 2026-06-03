@@ -164,7 +164,7 @@ export function buildDocument(goal: string, mode: "report" | "paper" | "brief"):
     "## 5. References",
     "- Agentlas Desktop Apps architecture note.",
     "- Local user prompt and generated App state.",
-    "- Future source connectors attached through Apps Engines.",
+    "- Future source connectors attached through Plugins.",
     "",
     "## 6. Next Revision",
     "Ask an Agentlas AI to expand a section, add citations, or convert the draft into a presentation. The same installed App remains callable from chat.",

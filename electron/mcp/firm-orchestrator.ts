@@ -228,9 +228,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
         emit({ kind: "partial", text });
         if (turn.toMainBubble) p.sink({ kind: "partial", text });
       },
-      onTool: (name, args) => {
-        emit({ kind: "tool-use", tool: { name, args } });
-        if (turn.toMainBubble) p.sink({ kind: "tool-use", tool: { name, args } });
+      onTool: (name, args, result, id, isError) => {
+        const tool = { name, args, result, id, isError };
+        emit({ kind: "tool-use", tool });
+        if (turn.toMainBubble) p.sink({ kind: "tool-use", tool });
       },
     },
   );

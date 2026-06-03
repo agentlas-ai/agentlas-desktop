@@ -2,7 +2,7 @@
 // 헤더: 채팅 제목(인라인 편집), 에이전트 정보, 삭제 버튼.
 // 본문: ChatStream + 입력창.
 "use client";
-import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type {
@@ -21,7 +21,7 @@ import type {
   ToolFactoryScaffoldResult,
   ToolFactoryToolRecord,
 } from "@/lib/types";
-import { ChatStream, type StreamMessage } from "@/components/ChatStream";
+import { ChatStream, type StreamMessage, type StreamStep } from "@/components/ChatStream";
 import { extractQuestions } from "@/lib/ask-question";
 import { ChatInput } from "@/components/ChatInput";
 import { WorkbenchPanel, type SurfaceStatePatchHandler, type WorkbenchSurface } from "@/components/WorkbenchPanel";
@@ -105,6 +105,69 @@ function inferPermissionFromAnswer(answers: string[]): PermissionLevel | undefin
   if (/\bwrite\b|쓰기|편집/.test(joined)) return "write";
   if (/\bread\b|읽기만/.test(joined)) return "read";
   return undefined;
+}
+
+function appendTimeline(
+  setNetTimeline: Dispatch<SetStateAction<NetTimelineItem[]>>,
+  item: NetTimelineItem,
+) {
+  setNetTimeline((tl) => [...tl, item].slice(-80));
+}
+
+type ToolEvent = NonNullable<McpInvocationEvent["tool"]>;
+
+function toolStepFromEvent(tool: ToolEvent): StreamStep {
+  return {
+    id: uid(),
+    kind: "tool",
+    text: tool.name,
+    tool: tool.name,
+    args: tool.args,
+    toolUseId: tool.id,
+    result: tool.result,
+    resultIsError: tool.isError,
+  };
+}
+
+function mergeToolStep(steps: StreamStep[], tool: ToolEvent): StreamStep[] {
+  const result = tool.result;
+  const hasResult = result != null;
+  if (!hasResult) return [...steps, toolStepFromEvent(tool)];
+
+  let match = -1;
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    const s = steps[i];
+    if (!s.tool) continue;
+    if (tool.id && s.toolUseId === tool.id) {
+      match = i;
+      break;
+    }
+    if (!tool.id && s.tool === tool.name && s.result == null) {
+      match = i;
+      break;
+    }
+  }
+  if (match < 0) return [...steps, toolStepFromEvent(tool)];
+
+  return steps.map((s, i) =>
+    i === match
+      ? {
+          ...s,
+          args: s.args ?? tool.args,
+          toolUseId: s.toolUseId ?? tool.id,
+          result,
+          resultIsError: tool.isError,
+        }
+      : s,
+  );
+}
+
+function toolWorkflowText(tool: ToolEvent, locale: "ko" | "en"): string {
+  if (tool.result != null) {
+    if (tool.isError) return locale === "ko" ? `오류 · ${tool.name}` : `Error · ${tool.name}`;
+    return locale === "ko" ? `결과 · ${tool.name}` : `Result · ${tool.name}`;
+  }
+  return tool.name;
 }
 
 function parseGoalSlash(input: string): string | null {
@@ -192,6 +255,35 @@ function ChatPage() {
   // send()의 인라인 핸들러를 추출해 재접속 경로와 공유 — lastStatusRef는 중복 status 억제용(공유).
   const consumeEvent = useCallback(
     (ev: McpInvocationEvent, placeholderId: string, lastStatusRef: { text: string }) => {
+      const fallbackAgentId = agent?.id ?? "active-agent";
+      const fallbackAgentName = agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback");
+      const markWorkflowActive = (status?: string) => {
+        setLiveAgents((prev) => ({
+          ...prev,
+          [fallbackAgentId]: {
+            name: fallbackAgentName,
+            role: "",
+            tier: 1,
+            active: true,
+            status: status ?? prev[fallbackAgentId]?.status,
+          },
+        }));
+      };
+      const pushWorkflow = (kind: NetTimelineItem["kind"], text: string) => {
+        const trimmed = text.trim();
+        if (!trimmed) return;
+        markWorkflowActive(trimmed);
+        appendTimeline(setNetTimeline, {
+          key: uid(),
+          agentId: fallbackAgentId,
+          name: fallbackAgentName,
+          role: "",
+          tier: 1,
+          kind,
+          text: trimmed,
+        });
+      };
+
       // ── 속성(agentId) 이벤트 → 네트워크 패널 (메인 버블 안 건드림) ──
       if (ev.agentId) {
         const aid = ev.agentId;
@@ -207,11 +299,9 @@ function ChatPage() {
           },
         }));
         if (ev.kind === "tool-use") {
-          const label = ev.tool ? ev.tool.name : ev.status?.trim() ?? "";
+          const label = ev.tool ? toolWorkflowText(ev.tool, locale) : ev.status?.trim() ?? "";
           if (label) {
-            setNetTimeline((tl) => [
-              ...tl,
-              {
+            appendTimeline(setNetTimeline, {
                 key: uid(),
                 agentId: aid,
                 name: ev.agentName ?? aid,
@@ -219,13 +309,10 @@ function ChatPage() {
                 tier: ev.tier,
                 kind: ev.delegateTo ? "handoff" : ev.tool ? "tool" : "status",
                 text: ev.status?.trim() || label,
-              },
-            ]);
+            });
           }
         } else if (ev.kind === "thinking" && ev.status?.trim()) {
-          setNetTimeline((tl) => [
-            ...tl,
-            {
+          appendTimeline(setNetTimeline, {
               key: uid(),
               agentId: aid,
               name: ev.agentName ?? aid,
@@ -233,8 +320,7 @@ function ChatPage() {
               tier: ev.tier,
               kind: "status",
               text: ev.status!.trim(),
-            },
-          ]);
+          });
         }
         // 메인 버블에도 활동 반영 — 접기요약(WorkingPanel)이 "돌아가는 중 + 도구 N개"를
         // 보여줘 긴 멀티에이전트 실행 중 불안을 줄인다 (per-agent 상세는 네트워크 패널).
@@ -245,10 +331,7 @@ function ChatPage() {
             if (ev.kind === "tool-use" && ev.tool) {
               return {
                 ...msg,
-                steps: [
-                  ...steps,
-                  { id: uid(), kind: "tool", text: ev.tool.name, tool: ev.tool.name, args: ev.tool.args },
-                ],
+                steps: mergeToolStep(steps, ev.tool),
               };
             }
             const st = ev.status?.trim();
@@ -265,20 +348,19 @@ function ChatPage() {
         return;
       }
       if (ev.kind === "tool-use" && ev.tool) {
+        pushWorkflow("tool", ev.status?.trim() || toolWorkflowText(ev.tool, locale));
         setMessages((m) =>
           m.map((msg) =>
             msg.id === placeholderId
               ? {
                   ...msg,
-                  steps: [
-                    ...(msg.steps ?? []),
-                    { id: uid(), kind: "tool", text: ev.tool!.name, tool: ev.tool!.name, args: ev.tool!.args },
-                  ],
+                  steps: mergeToolStep(msg.steps ?? [], ev.tool!),
                 }
               : msg,
           ),
         );
       } else if (ev.kind === "surface" && ev.surface) {
+        pushWorkflow("tool", `Surface ready · ${ev.surface.title}`);
         const surfaceId = ev.surfaceId ?? uid();
         setArtifact(null);
         setSurface({ id: surfaceId, manifest: ev.surface });
@@ -309,6 +391,7 @@ function ChatPage() {
         const status = ev.status?.trim();
         if (!status || status === lastStatusRef.text) return;
         lastStatusRef.text = status;
+        pushWorkflow("status", status);
         setMessages((m) =>
           m.map((msg) =>
             msg.id === placeholderId
@@ -337,6 +420,7 @@ function ChatPage() {
           }),
         );
       } else if (ev.kind === "final") {
+        pushWorkflow("status", locale === "ko" ? "완료" : "Done");
         setMessages((m) =>
           m.map((msg) => {
             if (msg.id !== placeholderId) return msg;
@@ -363,6 +447,7 @@ function ChatPage() {
         const api = ipc();
         void api?.chats.get(chatId).then((c) => c && setChat(c));
       } else if (ev.kind === "error") {
+        pushWorkflow("status", ev.error?.message ?? t("chat.err.unknown"));
         setMessages((m) => [
           ...m.filter((msg) => msg.id !== placeholderId),
           { id: uid(), role: "system", text: `⚠️ ${ev.error?.message ?? t("chat.err.unknown")}` },
@@ -376,7 +461,7 @@ function ChatPage() {
         subRef.current = null;
       }
     },
-    [chatId, t],
+    [agent, chatId, locale, t],
   );
 
   // runId 채널 구독 — send()와 재접속 경로 공용. lastStatusRef를 받으면(리플레이 후) 이어서 쓴다.
@@ -635,6 +720,7 @@ function ChatPage() {
         },
       ]);
       setBusy(true);
+      setNetworkOpen(true);
       cancelRequestedRef.current = false;
       setLiveAgents({});
       setNetTimeline([]);
@@ -911,13 +997,13 @@ function ChatPage() {
               return;
             }
             const scaffold = await ensureScaffold();
+            const internalAppPath = scaffold.record?.id ? `/apps/generated?id=${scaffold.record.id}` : "/apps";
             if (action.type === "scaffold-app") {
               update(
                 [
                   `App scaffold ready: ${scaffold.appName}`,
                   "",
-                  `Root: ${scaffold.rootPath}`,
-                  `Preview: ${scaffold.previewPath}`,
+                  `Open in Agentlas: ${internalAppPath}`,
                   `Setup: ${scaffold.setupPath}`,
                   `Smoke: ${scaffold.smokePath}`,
                   "",
@@ -942,13 +1028,12 @@ function ChatPage() {
                   `Status: ${result.status}`,
                   `Steps: ${result.steps.filter((step) => step.status === "completed").length}/${result.steps.length}`,
                   result.waitingOn.length ? `Waiting: ${result.waitingOn.join(", ")}` : "Waiting: none",
-                  result.preview ? `Preview: ${result.preview.fileUrl}` : "",
+                  `Open in Agentlas: ${internalAppPath}`,
                   result.appTool ? `Tool: ${result.appTool.toolName}` : "",
                 ]
                   .filter(Boolean)
                   .join("\n"),
               );
-              if (result.preview?.fileUrl) window.open(result.preview.fileUrl, "_blank", "noopener,noreferrer");
             } else if (action.type === "install-mcp") {
               const result = await api.appFactory.installMcpPlan({ rootPath: scaffold.rootPath });
               update(

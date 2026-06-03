@@ -138,11 +138,11 @@ export function buildAppMenu(getWindow: () => BrowserWindow | null): Menu {
           click: () => send(getWindow(), "/apps"),
         },
         {
-          label: "Apps Vault",
+          label: "Global Env",
           click: () => send(getWindow(), "/library/env"),
         },
         {
-          label: "Apps Engines",
+          label: "Plugins",
           click: () => send(getWindow(), "/library/mcps"),
         },
         {

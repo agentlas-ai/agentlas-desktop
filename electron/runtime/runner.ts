@@ -56,8 +56,8 @@ export interface RunnerEvents {
   onPartial: (chunk: string) => void;
   /** 사용자에게 보일 상태 줄 — locale 적용된 완성 문자열 */
   onStatus: (status: string) => void;
-  /** 도구 호출 — Claude Code식 tool-use 블록 (이름 + 인자 JSON). 선택. */
-  onTool?: (name: string, args?: string) => void;
+  /** 도구 호출/결과 — Claude Code식 tool-use/tool-result 블록 (이름 + 인자 JSON + 결과). 선택. */
+  onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean) => void;
 }
 
 export interface RunnerResult {
@@ -98,8 +98,25 @@ If your answer would be materially more useful as an INTERACTIVE SURFACE — a t
 ${SURFACE_INTENT_MARKER}
 You will then be handed the full surface spec to fill in. For one-off questions or ordinary chat, do NOT emit it — just answer normally.`;
 
+function responseLanguageGuide(locale: RuntimeLocale, userPrompt?: string): string {
+  const prompt = userPrompt ?? "";
+  if (/[가-힣]/.test(prompt)) {
+    return [
+      "The user's current message is Korean. Reply in Korean, including brief progress updates and the final answer.",
+      "Do not expose hidden chain-of-thought. If you need to narrate progress, summarize only observable actions and results.",
+    ].join(" ");
+  }
+  if (/[A-Za-z]{3,}/.test(prompt)) {
+    return [
+      "The user's current message is English or mostly English. Reply in English, including brief progress updates and the final answer.",
+      "Do not expose hidden chain-of-thought. If you need to narrate progress, summarize only observable actions and results.",
+    ].join(" ");
+  }
+  return tStatus(locale, "sysGuide");
+}
+
 /** 표준 시스템 프롬프트 — 에이전트 프롬프트 앞에 붙는 안전 헤더.
- *  locale에 따라 LLM에게 답변 언어 가이드를 다르게 준다 (영어 사용자에게는 영어 가이드). */
+ *  이번 사용자 입력 언어를 우선하고, 애매할 때만 UI locale을 따른다. */
 export function wrapSystemPrompt(
   agentSystemPrompt: string,
   locale: RuntimeLocale,
@@ -129,7 +146,7 @@ export function wrapSystemPrompt(
 
   const parts: string[] = [
     tStatus(locale, "sysHeader"),
-    tStatus(locale, "sysGuide"),
+    responseLanguageGuide(locale, userPrompt),
     toolsLine,
     "",
     ASK_PROTOCOL,

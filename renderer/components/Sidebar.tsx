@@ -7,16 +7,15 @@ import { usePathname, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { navigate } from "@/lib/navigation";
+import { INSTALLED_APPS } from "@/lib/apps";
 import type {
-  Automation,
-  AgentlasSurfaceRecord,
   AppFactoryAppRecord,
+  Automation,
   Chat,
   InstalledAgent,
   InstalledFirm,
   Project,
   RuntimeStatus,
-  ToolFactoryToolRecord,
 } from "@/lib/types";
 import {
   IconApps,
@@ -26,7 +25,6 @@ import {
   IconChevronRight,
   IconFolder,
   IconKey,
-  IconLayers,
   IconMoon,
   IconPlus,
   IconSettings,
@@ -51,10 +49,8 @@ interface SidebarData {
   projects: Project[];
   firms: InstalledFirm[];
   automations: Automation[];
-  surfaces: AgentlasSurfaceRecord[];
-  apps: AppFactoryAppRecord[];
-  tools: ToolFactoryToolRecord[];
   agents: InstalledAgent[];
+  generatedApps: AppFactoryAppRecord[];
   runtime: RuntimeStatus | null;
 }
 
@@ -63,10 +59,8 @@ const EMPTY: SidebarData = {
   projects: [],
   firms: [],
   automations: [],
-  surfaces: [],
-  apps: [],
-  tools: [],
   agents: [],
+  generatedApps: [],
   runtime: null,
 };
 
@@ -178,15 +172,13 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       api.projects.list(),
       api.firms.list(),
       api.automations.list(),
-      api.surfaces.listSurfaces(),
-      api.appFactory.listApps(),
-      api.toolFactory.listTools(),
       api.team.list(),
+      api.appFactory.listApps(),
       api.runtime.detect(),
-    ]).then(([chats, projects, firms, automations, surfaces, apps, tools, agents, runtimes]) => {
+    ]).then(([chats, projects, firms, automations, agents, generatedApps, runtimes]) => {
       if (cancelled) return;
       const active = runtimes.find((r) => r.active) ?? runtimes[0] ?? null;
-      setData({ chats, projects, firms, automations, surfaces, apps, tools, agents, runtime: active });
+      setData({ chats, projects, firms, automations, agents, generatedApps, runtime: active });
     });
     return () => {
       cancelled = true;
@@ -306,9 +298,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           <CollapsedNav
             pathname={pathname}
             agentCount={displayAgents.length}
-            surfaceCount={data.surfaces.length}
-            appCount={data.apps.length}
-            toolCount={data.tools.length}
+            appCount={INSTALLED_APPS.length + data.generatedApps.filter((app) => app.status !== "archived").length}
           />
         </nav>
         <footer
@@ -470,6 +460,26 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         </SidebarSection>
 
         <SidebarSection
+          title={t("sidebar.agents")}
+          icon={<IconWand size={12} />}
+          action={
+            <Link
+              href="/marketplace?tab=agents"
+              style={{ color: "var(--muted-deep)", display: "inline-flex" }}
+              title={t("library.agents.add")}
+            >
+              <IconPlus size={12} />
+            </Link>
+          }
+        >
+          <SidebarLink href="/library/agents" active={pathname.startsWith("/library/agents")}>
+            <IconWand size={13} style={{ color: "var(--accent)" }} />
+            <span style={{ flex: 1 }}>{t("sidebar.manage_agents")}</span>
+            <span style={{ fontSize: 10, color: "var(--muted)" }}>{displayAgents.length}</span>
+          </SidebarLink>
+        </SidebarSection>
+
+        <SidebarSection
           title={t("sidebar.firms")}
           icon={<IconBuilding size={12} />}
           action={
@@ -607,24 +617,11 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
 
         <SidebarSection title={t("sidebar.apps")} icon={<IconApps size={12} />}>
           <SidebarLink href="/apps" active={pathname.startsWith("/apps")}>
-            <IconSparkles size={13} style={{ color: "var(--accent)" }} />
+            <IconApps size={13} style={{ color: "var(--accent)" }} />
             <span style={{ flex: 1 }}>{t("sidebar.apps_installed")}</span>
-            <span style={{ fontSize: 10, color: "var(--muted)" }}>{data.apps.length}</span>
-          </SidebarLink>
-          <SidebarLink href="/library/surfaces" active={pathname.startsWith("/library/surfaces")}>
-            <IconSparkles size={13} style={{ color: "var(--accent)" }} />
-            <span style={{ flex: 1 }}>{t("sidebar.surfaces")}</span>
-            <span style={{ fontSize: 10, color: "var(--muted)" }}>{data.surfaces.length}</span>
-          </SidebarLink>
-          <SidebarLink href="/library/apps" active={pathname.startsWith("/library/apps")}>
-            <IconLayers size={13} style={{ color: "var(--green-deep)" }} />
-            <span style={{ flex: 1 }}>{t("sidebar.generated_apps")}</span>
-            <span style={{ fontSize: 10, color: "var(--muted)" }}>{data.apps.length}</span>
-          </SidebarLink>
-          <SidebarLink href="/library/tools" active={pathname.startsWith("/library/tools")}>
-            <IconWand size={13} style={{ color: "var(--blue-deep)" }} />
-            <span style={{ flex: 1 }}>{t("sidebar.tools")}</span>
-            <span style={{ fontSize: 10, color: "var(--muted)" }}>{data.tools.length}</span>
+            <span style={{ fontSize: 10, color: "var(--muted)" }}>
+              {INSTALLED_APPS.length + data.generatedApps.filter((app) => app.status !== "archived").length}
+            </span>
           </SidebarLink>
           <SidebarLink href="/library/env" active={pathname.startsWith("/library/env")}>
             <IconKey size={13} style={{ color: "var(--peach-ink)" }} />
@@ -906,15 +903,11 @@ function iconBtnStyle(active: boolean): React.CSSProperties {
 function CollapsedNav({
   pathname,
   agentCount,
-  surfaceCount,
   appCount,
-  toolCount,
 }: {
   pathname: string;
   agentCount: number;
-  surfaceCount: number;
   appCount: number;
-  toolCount: number;
 }) {
   const { t } = useT();
   const items: Array<{
@@ -949,14 +942,21 @@ function CollapsedNav({
       isActive: pathname.startsWith("/automation"),
     },
     {
+      href: "/library/agents",
+      label: t("sidebar.agents"),
+      icon: <IconWand size={16} />,
+      isActive: pathname.startsWith("/library/agents"),
+      badge: agentCount > 0 ? agentCount : undefined,
+    },
+    {
       href: "/apps",
       label: t("sidebar.apps"),
       icon: <IconApps size={16} />,
-      isActive: pathname.startsWith("/apps") || pathname.startsWith("/library") || pathname === "/marketplace",
-      badge:
-        agentCount + surfaceCount + appCount + toolCount > 0
-          ? agentCount + surfaceCount + appCount + toolCount
-          : undefined,
+      isActive:
+        pathname.startsWith("/apps") ||
+        pathname.startsWith("/library/env") ||
+        pathname.startsWith("/library/mcps"),
+      badge: appCount > 0 ? appCount : undefined,
     },
     {
       href: "/marketplace",

@@ -126,7 +126,7 @@ export default function DocumentStudioPage() {
             <div style={{ padding: 22, overflowY: "auto", display: "grid", gap: 14 }}>
               <SourceBlock title="Agentlas Apps Architecture" text="Apps are top-level runnable surfaces; vault credentials, MCP engines, and generated files support them." />
               <SourceBlock title="Local Prompt" text={goal} />
-              <SourceBlock title="Future Connectors" text="Attach web, PDF, academic database, and browser sources through Apps Engines." />
+              <SourceBlock title="Future Connectors" text="Attach web, PDF, academic database, and browser sources through Plugins." />
             </div>
           )}
         </section>

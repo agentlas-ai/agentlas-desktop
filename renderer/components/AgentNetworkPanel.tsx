@@ -1,8 +1,7 @@
-// 우측 팀 네트워크 패널 — 레퍼런스(세로 활동 타임라인 + 3-tier 명단/Standby) 스타일.
+// 우측 Workflow 패널 — 세로 활동 타임라인 + 에이전트/팀 명단.
 //   - 명단: firm.orgChart에서 CEO → 본부 → 전문가 3계층을 그리고, 실행 중인 노드는
 //     실시간 속성 이벤트(liveAgents)로 활성(녹색)·대기(빈 점) 표시.
-//   - 타임라인: 오케스트레이터가 흘리는 실제 per-agent 활동/위임(handoff)을 위→아래 피드로.
-//   데이터는 orchestrator가 agentId/role/tier/phase로 태깅한 이벤트 = 진짜 텔레메트리.
+//   - 타임라인: 단일 에이전트/팀 오케스트레이터의 상태, 도구, 위임(handoff)을 위→아래 피드로.
 "use client";
 import { useMemo } from "react";
 import type { InstalledAgent, InstalledFirm, ResolvedOrg } from "@/lib/types";
@@ -96,6 +95,9 @@ export function AgentNetworkPanel({ firm, org, agent, agents, busy, liveAgents, 
       : "";
 
   const anyActive = Object.values(liveAgents).some((a) => a.active);
+  const singleAgentLive = agent
+    ? liveAgents[agent.id] ?? liveAgents["active-agent"]
+    : liveAgents["active-agent"];
 
   return (
     <aside
@@ -185,7 +187,7 @@ export function AgentNetworkPanel({ firm, org, agent, agents, busy, liveAgents, 
           <div style={{ padding: "10px 12px", borderBottom: "var(--hairline)" }}>
             <RosterRow
               node={{ key: agent.id, name: pickLocalized(agent, locale).name, role: "", tier: 1 }}
-              live={busy ? { name: "", role: "", active: true } : undefined}
+              live={singleAgentLive ?? (busy ? { name: "", role: "", active: true } : undefined)}
             />
           </div>
         ) : null}

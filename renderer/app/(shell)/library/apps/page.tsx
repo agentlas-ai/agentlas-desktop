@@ -3,6 +3,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type {
@@ -30,8 +31,14 @@ import {
   IconSparkles,
 } from "@/components/Icon";
 
+function selectedAppIdFromUrl(): string | null {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("id");
+}
+
 export default function LibraryAppsPage() {
   const { t, locale } = useT();
+  const router = useRouter();
   const [apps, setApps] = useState<AppFactoryAppRecord[]>([]);
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -54,7 +61,12 @@ export default function LibraryAppsPage() {
     setApps(nextApps);
     setAgents(nextAgents);
     setProjects(nextProjects);
-    setSelectedId((cur) => (cur && nextApps.some((app) => app.id === cur) ? cur : nextApps[0]?.id ?? null));
+    setSelectedId((cur) => {
+      if (cur && nextApps.some((app) => app.id === cur)) return cur;
+      const requested = selectedAppIdFromUrl();
+      if (requested && nextApps.some((app) => app.id === requested)) return requested;
+      return nextApps[0]?.id ?? null;
+    });
   }, []);
 
   useEffect(() => {
@@ -298,20 +310,9 @@ export default function LibraryAppsPage() {
   }, [selected]);
 
   const prepareAndOpenPreview = useCallback(async () => {
-    const api = ipc();
-    if (!api || !selected) return;
-    setBusyAction("deploy-preview");
-    try {
-      const result = await api.appFactory.preparePreview({ rootPath: selected.rootPath });
-      window.open(result.fileUrl, "_blank", "noopener,noreferrer");
-      await refresh();
-      setMessage(`Opened preview: ${result.previewPath}`);
-    } catch (err: unknown) {
-      setMessage(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusyAction(null);
-    }
-  }, [refresh, selected]);
+    if (!selected) return;
+    router.push(`/apps/generated?id=${selected.id}`);
+  }, [router, selected]);
 
   const saveVaultGate = useCallback(
     async (envKey: string) => {
