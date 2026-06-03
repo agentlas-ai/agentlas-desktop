@@ -81,7 +81,7 @@ Vertical AI products win because their result surface matches the job:
 
 | Domain | Existing expectation | Agentlas opportunity |
 | --- | --- | --- |
-| Research reports | Liner, SciSpace, HTML reports, Genspark-style evidence pages | Agent builds cited report views with source cards, claims, tables, and exportable sections. |
+| Research reports | Cited reports, literature review workspaces, evidence pages | Agent builds cited report views with source cards, claims, tables, and exportable sections. |
 | Travel | Tripplanner.ai, Mindtrip, booking widgets, itinerary maps | Agent builds itinerary boards with hotel/flight cards, map pins, filters, and price comparison. |
 | Finance | Perplexity Finance, AWS financial-services gen AI patterns | Agent builds dashboards with charts, filings, KPIs, watchlists, and scenario panels. |
 | Multimodal creative | Higgsfield, Adobe Firefly, Runway, Sora, Veo, Kling | Agent builds storyboards, shot plans, image/video/audio generation queues, review boards, and export packs. |

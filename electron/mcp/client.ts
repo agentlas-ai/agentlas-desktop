@@ -158,7 +158,7 @@ function buildGoalUserPrompt(prompt: string, locale: "ko" | "en"): string {
 function appendAppsGenerateCta(text: string, prompt: string, locale: "ko" | "en"): string {
   if (/\/apps\/[a-z0-9-]+/i.test(text)) return text;
   const wantsDocumentApp =
-    /document|docstudio|report|paper|writer|text|liner|genspark|문서|리포트|논문|글쓰기|라이너|젠스파크/i.test(prompt);
+    /document|docstudio|report|paper|writer|text|문서|리포트|논문|글쓰기/i.test(prompt);
   const appPath = wantsDocumentApp ? "/apps/document-studio" : "/apps";
   const label = locale === "ko" ? "Apps에서 확인하기" : "Open in Apps";
   const note =

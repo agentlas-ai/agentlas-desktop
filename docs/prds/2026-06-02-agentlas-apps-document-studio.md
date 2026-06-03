@@ -9,7 +9,7 @@ Status: active
 The current Apps work only proves that Agentlas can label marketplace/library
 surfaces as Apps and pass an `appsGenerateMode` flag into the runner. It does not
 prove that a user can open a real App inside Agentlas Desktop or create a
-Liner/Genspark-like document generator from the desktop surface.
+AI document generator and editable report workspace from the desktop surface.
 
 ## Decision
 

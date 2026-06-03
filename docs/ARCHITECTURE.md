@@ -65,14 +65,14 @@ MCP 도구, credential vault 요구사항, 생성 자산, 서브 엔진을 가�
   Apps의 부산물이지 별도 top-level 메뉴가 아니다.
 
 현재 concrete proof surface는 `/apps`와 `/apps/document-studio`다. Document Studio는
-renderer-only first-party App으로, 라이너식 텍스트 편집과 Genspark식 문서 생성을
+renderer-only first-party App으로, AI 리포트 작성과 근거 정리, 편집 가능한 문서 생성을
 Agentlas 안에서 직접 열어 검증할 수 있게 한다. 채팅에서는 `/apps`, `/docstudio`
 slash command로 Apps 표면을 열 수 있다.
 
 채팅 입력창의 **Apps Generate** 토글은 숨은 apps-generator 경로를 켜는 신호다. 현재
 `McpInvocationRequest.appsGenerateMode`가 main runner로 전달되며, runner는 사용자 목표를
 Apps package 생성 지시로 감싸서 실행한다. 응답에 App 링크가 없으면 runner가 안정 CTA를
-추가하며, 문서/텍스트/라이너/젠스파크 계열 프롬프트는 `/apps/document-studio`로 연결한다.
+추가하며, 문서/텍스트/리포트/논문 계열 프롬프트는 `/apps/document-studio`로 연결한다.
 향후 실제 App runtime/manifest가 추가되면 이 플래그가 App scaffold, renderer route,
 vault requirements, MCP engine wiring으로 확장된다.
 

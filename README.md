@@ -163,9 +163,9 @@ A complete tour of what ships today.
   and describe the tool you want. The hidden apps-generator route treats the result
   as an App package, not as loose generated assets, and leaves a stable Apps CTA
   when the model does not.
-- **First proof App.** **Document Studio** opens at `/apps/document-studio` as a
-  Liner/Genspark-style document generator with tabs, an editable generated draft,
-  figure planning, and an "Open in Apps" CTA.
+- **First proof App.** **Document Studio** opens at `/apps/document-studio` as an
+  AI document workspace with tabs, an editable generated draft, figure planning,
+  and an "Open in Apps" CTA.
 - **Trust grades.** Listings carry a trust grade; sideloading unvetted agents is
   gated.
 - **Works offline.** An in-memory fallback source keeps the marketplace usable when
