@@ -143,6 +143,7 @@ cleaner_pid=$!
 COPYFILE_DISABLE=1 electron-builder \
   --mac --arm64 --x64 \
   --config electron-builder.mac-stable.yml \
+  --config.mac.notarize=false \
   --config.directories.output="$local_release"
 
 rm -rf "$project_dir/release"
