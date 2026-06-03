@@ -18,7 +18,7 @@ npm run dev
 1. **Typecheck**: `npm run typecheck` must be clean (electron + renderer both).
 2. **Test the change in `npm run dev`**: at minimum, exercise the screen you modified.
 3. **Update `i18n.tsx`** if you added user-facing strings — `ko` and `en` both. Never hard-code Korean or English in `aria-label` / `title` / button text.
-4. **Don't touch `release-signing/`, `build-resources/notarize-creds.json`, or anything under `.env*`.** These are local-only and `.gitignore`'d for a reason.
+4. **Don't touch local signing secrets under `signing/`, `build-resources/notarize-creds.json`, or anything under `.env*`.** These are local-only and `.gitignore`'d for a reason.
 
 ## Code style
 

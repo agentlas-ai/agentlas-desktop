@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 
 const desktopRoot = resolve(new URL("..", import.meta.url).pathname);
 const repoRoot = resolve(desktopRoot, "..");
+const signingDir = resolve(desktopRoot, process.env.AGENTLAS_SIGNING_DIR || "signing");
 
 const desktopPkg = JSON.parse(readFileSync(join(desktopRoot, "package.json"), "utf8"));
 const currentVersion = String(desktopPkg.version || "0.0.0");
@@ -27,6 +28,10 @@ function hasEnv(name) {
   return Boolean(String(process.env[name] || "").trim());
 }
 
+function hasFile(relativePath) {
+  return existsSync(join(signingDir, relativePath));
+}
+
 function ghSecrets(repo) {
   const result = run("gh", ["secret", "list", "-R", repo], { cwd: repoRoot });
   if (!result.ok) return { ok: false, names: [], error: result.output };
@@ -44,6 +49,8 @@ const developerIdIdentities = identities.output
   .split(/\r?\n/)
   .filter((line) => /Developer ID Application:/i.test(line));
 const ghAuth = run("gh", ["auth", "status", "-h", "github.com"], { cwd: repoRoot });
+const notaryProfileName = process.env.AGENTLAS_NOTARY_PROFILE || "agentlas-notary";
+const notaryProfile = run("xcrun", ["notarytool", "history", "--keychain-profile", notaryProfileName]);
 
 const env = {
   APPLE_ID: hasEnv("APPLE_ID"),
@@ -54,6 +61,16 @@ const env = {
   GH_TOKEN: hasEnv("GH_TOKEN") || hasEnv("GITHUB_TOKEN"),
   GH_AUTH_LOGIN: ghAuth.ok,
 };
+const localSigningFiles = {
+  signingDir,
+  developerIdP12: hasFile("agentlas-developer-id.p12"),
+  developerIdP12Password: hasFile("agentlas-developer-id.p12.password"),
+  appleAppSpecificPassword: hasFile("apple-app-specific-password"),
+};
+const localSigningFileReady = localSigningFiles.developerIdP12 && localSigningFiles.developerIdP12Password;
+const notarizationReady =
+  notaryProfile.ok ||
+  (env.APPLE_ID && env.APPLE_APP_SPECIFIC_PASSWORD && env.APPLE_TEAM_ID);
 
 const agentlasSecrets = ghSecrets("jeongmk522-netizen/agentlas-desktop");
 const requiredWorkflowSecrets = [
@@ -77,10 +94,8 @@ const missingWorkflowSecrets = agentlasSecrets.ok
   : requiredWorkflowSecrets;
 
 const localReady =
-  (developerIdIdentities.length > 0 || (env.CSC_LINK && env.CSC_KEY_PASSWORD)) &&
-  env.APPLE_ID &&
-  env.APPLE_APP_SPECIFIC_PASSWORD &&
-  env.APPLE_TEAM_ID &&
+  (developerIdIdentities.length > 0 || (env.CSC_LINK && env.CSC_KEY_PASSWORD) || localSigningFileReady) &&
+  notarizationReady &&
   (env.GH_TOKEN || env.GH_AUTH_LOGIN);
 const workflowReady = agentlasSecrets.ok && missingWorkflowSecrets.length === 0;
 
@@ -88,17 +103,22 @@ console.log(JSON.stringify({
   local: {
     ready: localReady,
     developerIdApplicationIdentities: developerIdIdentities.map((line) => line.replace(/^\s*\d+\)\s*/, "")),
+    localSigningFiles,
+    notaryProfile: {
+      name: notaryProfileName,
+      ready: notaryProfile.ok,
+    },
     env,
     nextCommand: localReady
       ? "AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac && npm run release:mac:publish && npm run release:web-env -- --apply"
-      : "Create/import a Developer ID Application certificate, then export APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, and APPLE_TEAM_ID.",
+      : "Put Developer ID files in signing/ and configure agentlas-notary, or export APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID.",
   },
   githubActions: {
     ready: workflowReady,
     repo: "jeongmk522-netizen/agentlas-desktop",
     missingSecrets: missingWorkflowSecrets,
     nextCommand: workflowReady
-      ? `gh workflow run release.yml -R jeongmk522-netizen/agentlas-desktop -f version=${currentVersion} -f tag=v${currentVersion} -f draft=false -f apply_web_env=true`
+      ? `gh workflow run release-signed-mac.yml -R jeongmk522-netizen/agentlas-desktop -f version=${currentVersion} -f tag=v${currentVersion} -f draft=false -f apply_web_env=true`
       : "Set the missing GitHub Actions secrets, then run the desktop release workflow.",
   },
   currentReleaseVerification: verification

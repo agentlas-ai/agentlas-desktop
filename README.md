@@ -57,6 +57,19 @@
   <img alt="Agentlas Desktop running a CEO agent over a live org chart" src="docs/screenshot.png" width="960">
 </p>
 
+## Release log
+
+Canonical release history lives in
+[GitHub Releases](https://github.com/jeongmk522-netizen/agentlas-desktop/releases).
+This README keeps the latest public deploy note so humans and agents can verify
+the current channel quickly.
+
+- **2026-06-03 · v0.2.8 public desktop release** — Apps-first navigation,
+  Document Studio, and chat Apps commands shipped. Windows/Linux were published
+  by the default release workflow; macOS arm64/x64 DMGs were added afterward from
+  the signed/notarized local pipeline. `/api/desktop/latest` reports
+  `version: 0.2.8`, `ready: true`.
+
 ### What you get
 
 | | |

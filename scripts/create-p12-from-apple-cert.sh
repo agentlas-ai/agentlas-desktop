@@ -2,8 +2,9 @@
 set -euo pipefail
 
 cer_path=""
-key_path="release-signing/agentlas-developer-id.key"
-out_path="release-signing/agentlas-developer-id.p12"
+signing_dir="${AGENTLAS_SIGNING_DIR:-signing}"
+key_path="$signing_dir/agentlas-developer-id.key"
+out_path="$signing_dir/agentlas-developer-id.p12"
 password="${P12_PASSWORD:-}"
 set_github_secrets="0"
 repo="jeongmk522-netizen/agentlas-desktop"

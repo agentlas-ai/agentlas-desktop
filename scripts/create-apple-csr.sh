@@ -3,7 +3,7 @@ set -euo pipefail
 
 email="${APPLE_ID:-}"
 common_name="Agentlas Developer ID"
-out_dir="release-signing"
+out_dir="${AGENTLAS_SIGNING_DIR:-signing}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

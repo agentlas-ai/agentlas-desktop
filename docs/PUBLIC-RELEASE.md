@@ -17,7 +17,7 @@ npm run release:csr -- --email=you@example.com
 2. Open Apple Developer > Certificates, Identifiers & Profiles > Certificates.
 3. Create a new certificate.
 4. Choose `Developer ID Application`.
-5. Upload `release-signing/agentlas-developer-id.csr`.
+5. Upload `signing/agentlas-developer-id.csr`.
 6. Download the `.cer` file.
 7. Convert it to a `.p12` for electron-builder:
 
@@ -25,7 +25,9 @@ npm run release:csr -- --email=you@example.com
 npm run release:p12 -- --cer=/path/to/developerID_application.cer
 ```
 
-The `.p12` and private key stay in ignored `release-signing/`.
+The `.p12`, private key, app-specific password, and local signing notes stay in
+ignored `signing/`. Only `signing/README.md` is committed so future agents know
+where release signing material lives.
 
 If you prefer Keychain Access:
 
@@ -40,7 +42,9 @@ security find-identity -v -p codesigning | grep "Developer ID Application"
 
 ## 2. Create Notarization Credentials
 
-Create an app-specific password for the Apple ID used by the developer team, then set these environment variables in your shell:
+Create an app-specific password for the Apple ID used by the developer team.
+For local releases, either store a `notarytool` keychain profile named
+`agentlas-notary`, or set these environment variables in your shell:
 
 ```bash
 APPLE_ID
@@ -48,6 +52,9 @@ APPLE_APP_SPECIFIC_PASSWORD
 APPLE_TEAM_ID
 GH_TOKEN
 ```
+
+The release scripts automatically read local certificate defaults from
+`signing/`. Override the folder with `AGENTLAS_SIGNING_DIR=/path/to/signing`.
 
 ## 3. Local End-To-End Release
 
@@ -68,25 +75,25 @@ The last command writes the verified release metadata to Railway production so:
 
 There are two release workflows, by design:
 
-1. **`.github/workflows/release.yml` (active, default).** Cross-platform matrix
-   (macOS + Windows + Linux), **unsigned**, uses only the built-in `GITHUB_TOKEN`.
-   This is what populates the public Releases page — no Apple/Windows certificates
-   or org secrets required. Trigger it by pushing a tag:
+1. **`.github/workflows/release.yml` (active, default).** Windows/Linux preview
+   release, **unsigned**, uses only the built-in `GITHUB_TOKEN`. macOS is
+   intentionally excluded from this workflow so an unsigned DMG cannot replace
+   the signed/notarized public Mac channel. Trigger it by pushing a tag:
 
    ```bash
    # bump package.json "version" to match, then:
    git tag v0.0.3 && git push origin v0.0.3
    ```
 
-   Artifacts uploaded to the release: `Agentlas-<v>-arm64.dmg`, `Agentlas-<v>-x64.dmg`,
-   `Agentlas-Setup-<v>.exe`, `Agentlas-<v>-portable.exe`, `Agentlas-<v>.AppImage`,
-   `Agentlas-<v>.deb`, plus the `latest*.yml` auto-update feeds.
+   Artifacts uploaded to the release: Windows installers/portable executable,
+   Linux AppImage/deb, plus the Windows/Linux auto-update feeds.
 
-2. **Signed + notarized macOS (optional upgrade).** The template is
-   `docs/release.workflow.yml`. Install it as `.github/workflows/release-signed-mac.yml`
-   only from an account or token with GitHub `workflow` permission, once the Apple
-   certificate secrets below are configured. Until then, the unsigned workflow above
-   is the public path and macOS users follow the one-time Gatekeeper step in the README.
+2. **Signed + notarized macOS.** Use the local `signing/` folder with
+   `AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac`, then
+   `npm run release:mac:publish`. For CI, install `docs/release.workflow.yml` as
+   `.github/workflows/release-signed-mac.yml` only from an account or token with
+   GitHub `workflow` permission, once the Apple certificate secrets below are
+   configured.
 
 Required GitHub secrets for the **signed macOS** workflow on `jeongmk522-netizen/agentlas-desktop`:
 
@@ -126,7 +133,7 @@ rm -f /tmp/agentlas-developer-id.p12
 Then set the remaining secrets and run:
 
 ```bash
-gh workflow run release.yml \
+gh workflow run release-signed-mac.yml \
   -R jeongmk522-netizen/agentlas-desktop \
   -f version=0.0.3 \
   -f tag=v0.0.3 \

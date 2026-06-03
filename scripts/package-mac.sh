@@ -2,12 +2,31 @@
 set -euo pipefail
 
 project_dir="$(pwd)"
+signing_dir="${AGENTLAS_SIGNING_DIR:-signing}"
 local_release="${TMPDIR:-/tmp}/agentlas-desktop-release-$$"
 cleaner_pid=""
 dmg_signing_keychain=""
 dmg_signing_identity=""
 original_keychains=()
 stable_repo="${AGENTLAS_DESKTOP_GITHUB_REPO:-jeongmk522-netizen/agentlas-desktop}"
+
+load_local_signing_defaults() {
+  local p12_path="$signing_dir/agentlas-developer-id.p12"
+  local p12_password_path="$signing_dir/agentlas-developer-id.p12.password"
+  local app_password_path="$signing_dir/apple-app-specific-password"
+
+  if [[ -z "${CSC_LINK:-}" && -f "$p12_path" ]]; then
+    export CSC_LINK="$p12_path"
+  fi
+  if [[ -z "${CSC_KEY_PASSWORD:-}" && -f "$p12_password_path" ]]; then
+    export CSC_KEY_PASSWORD
+    CSC_KEY_PASSWORD="$(<"$p12_password_path")"
+  fi
+  if [[ -z "${APPLE_APP_SPECIFIC_PASSWORD:-}" && -f "$app_password_path" ]]; then
+    export APPLE_APP_SPECIFIC_PASSWORD
+    APPLE_APP_SPECIFIC_PASSWORD="$(<"$app_password_path")"
+  fi
+}
 
 cleanup_appledouble() {
   for target in "$@"; do
@@ -109,6 +128,7 @@ notarize_dmg() {
 }
 
 cleanup_appledouble "$project_dir/dist" "$project_dir/release"
+load_local_signing_defaults
 npm run build
 rm -rf "$project_dir/release" "$local_release"
 mkdir -p "$local_release"

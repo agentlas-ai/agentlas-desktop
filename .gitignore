@@ -44,10 +44,14 @@ yarn-error.log*
 
 # code-sign secrets
 build-resources/notarize-creds.json
+signing/*
+!signing/
+!signing/README.md
 release-signing/
 *.p12
 *.key
 *.csr
+*.pem
 
 # Agentlas architecture: ignore volatile runtime memory, keep curated soul/sitemap
 .agentlas/memory-log.jsonl
