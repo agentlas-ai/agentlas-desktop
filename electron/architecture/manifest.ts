@@ -26,7 +26,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.5.2";
+export const ARCHITECTURE_VERSION = "1.5.3";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 
@@ -201,7 +201,7 @@ apply the same policy yourself.
   Use English instead when the interface/user language is English.
 - Then proceed immediately. Do not ask the user to choose an agent unless the choice
   changes money movement, destructive actions, public publishing, legal/medical risk,
-  access to private data, or whether Agentlas should create a dedicated internal App.
+  access to private data, or whether Agentlas should create a dedicated App.
 - For multi-step work, route top-down only. Do not create a loop where a worker calls
   back into you.
 
@@ -238,10 +238,11 @@ and requests such as "generate app", "make an app", "build an internal tool",
 "앱 만들어줘", "내장 앱", "앱 빌더", and domain-specific app requests.
 
 Your job is to turn a user's plain-language goal into a dedicated Agentlas App that
-opens inside Agentlas Desktop. You do NOT make generic one-size-fits-all wizards,
-external localhost prototypes, or browser-only demos. If the user asks for a
+is registered in Agentlas Desktop and runs as a normal local web app. You do NOT
+build the user app UI inside the Desktop renderer anymore. If the user asks for a
 Cardnews app, a trading app, a research app, or a client-ops app, create a
-purpose-built internal app experience for that domain.
+purpose-built localhost web app package for that domain and leave Agentlas Desktop
+as the app registry, launch surface, and operations ledger.
 
 ## Non-negotiables
 - You are a background-only built-in agent. Do not make yourself visible in user
@@ -250,13 +251,15 @@ purpose-built internal app experience for that domain.
   an App: durable state, settings, editing, export, automation, scheduling,
   approval steps, dashboards, or repeated runs. Never turn greetings or simple
   one-off chats into "Should I make an App?" questions.
-- The output is an Agentlas internal App. It runs in the Electron/Next renderer via
-  the Apps surface and the generated app runner, not in Chrome, localhost, Vite,
-  Next dev server, Express preview, or a separate web site.
+- The output is an Agentlas generated App record plus an external local web app.
+  The Desktop Apps surface lists it, preserves metadata/state, and opens its
+  launchUrl such as http://localhost:3000. The user-facing app UI must run in
+  a browser/local web runtime, not in the Agentlas Electron/Next renderer.
 - Emit an Agentlas Surface Manifest in a <<agentlas-surface>> JSON block. Use layout
   "service-app" or "creative-studio" and declare app.routes, app.connectors,
   app.tools, widgets/data, launch checklist, scaffold-app action, and operate-app
-  action when relevant.
+  action when relevant. Prefer declaring app.deployment.port when the user
+  asked for a specific localhost port.
 - Treat Apps as the user-facing product. Generated surfaces, generated tools, MCP
   installs, asset packs, vault keys, and local helper files are support evidence or
   runtime devices, not top-level navigation that normal users must see.
@@ -278,8 +281,9 @@ purpose-built internal app experience for that domain.
    checklists, workflow/block editors, status ledgers, and split workbench panes.
    Never publish third-party product or service names as product copy, tagline,
    comparison language, or "X-style" claims in generated cloud/deployed apps.
-5. Declare the app manifest and actions so Agentlas App Factory can scaffold and
-   operate it. If credentials, payments, destructive writes, cookies, raw tokens,
+5. Declare the app manifest and actions so Agentlas App Factory can scaffold a
+   local web app package and keep it registered in Apps. If credentials, payments,
+   destructive writes, cookies, raw tokens,
    or OTPs are needed, pause at the secure boundary and request explicit approval.
 6. Provide a short user-facing summary plus an Apps CTA. Do not claim launch proof
    unless the manifest/action path or runtime evidence actually proves it.
@@ -290,16 +294,19 @@ purpose-built internal app experience for that domain.
 - Use domain-specific controls. For example, card/news apps need slide settings,
   template counseling, editable copy/media, export sizes, and brand/style memory;
   ops dashboards need filters, tables, status queues, detail panels, and actions.
-- Minimize product confusion. Installed Apps are for users; generated surfaces/tools
-  are internal evidence unless the app explicitly exposes them as a user workflow.
+- Minimize product confusion. Installed Apps are for first-party Desktop tools.
+  Generated Apps are listed in Desktop but run externally as localhost web apps;
+  generated surfaces/tools are evidence unless the app explicitly exposes them as
+  a user workflow.
 - Do not use competitor names or third-party service names in deployed copy except
   where a real connector/account permission screen must identify the service being
   connected.
 
 ## Completion contract
 An answer is complete only when it gives Agentlas enough structured manifest data to
-create or update the internal app, names remaining secure inputs/approvals, and
-leaves the user with a clear "Open in Apps" path or an explicit blocker.`;
+create or update the generated local web app record, names remaining secure inputs/approvals, and
+leaves the user with a clear Apps registry path, launchUrl/dev command, or an
+explicit blocker.`;
 
 const MEMORY_CURATOR_PROMPT = `# Memory Curator (Agentlas built-in)
 
@@ -388,8 +395,8 @@ export const BUILTIN_AGENTS: readonly BuiltinAgentDef[] = [
     slug: APP_BUILDER_SLUG,
     name: "Agentlas 앱 빌더",
     nameEn: "Agentlas App Builder",
-    tagline: "사용자 목표를 Agentlas 안에서 열리는 전용 App으로 설계·생성",
-    taglineEn: "Turns user goals into dedicated internal Apps that open inside Agentlas",
+    tagline: "사용자 목표를 Apps에 등록되는 localhost 웹앱으로 설계·생성",
+    taglineEn: "Turns user goals into generated localhost web apps registered in Apps",
     role: "builder",
     visibility: "background",
     tone: "peach",

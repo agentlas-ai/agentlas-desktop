@@ -1114,6 +1114,7 @@ export async function resolveProviderCredentials(
 ): Promise<AppFactoryProviderCredentialResolveResult> {
   const rootPath = await assertAppRoot(input.rootPath);
   const pkg = await readAppPackage(rootPath);
+  const appData = await readAppData(rootPath);
   const now = new Date().toISOString();
   const operationsPath = path.join(rootPath, "data", "operations.json");
   const operations = await readOperations(operationsPath);
@@ -1356,6 +1357,7 @@ export async function preparePreviewDeploy(
 ): Promise<AppFactoryPreviewResult> {
   const rootPath = await assertAppRoot(input.rootPath);
   const pkg = await readAppPackage(rootPath);
+  const appData = await readAppData(rootPath);
   const now = new Date().toISOString();
   const sourceDir = path.join(rootPath, "src");
   const previewSource = path.join(sourceDir, "index.html");
@@ -1404,6 +1406,8 @@ export async function preparePreviewDeploy(
     manifestPath,
     fileUrl: pathToFileURL(previewPath).href,
     serveCommand: "node scripts/serve.mjs",
+    launchUrl: stringValue(appData.launchUrl) || undefined,
+    devCommand: stringValue(appData.devCommand) || "node scripts/serve.mjs",
     createdAt: now,
   };
 }
@@ -3802,8 +3806,7 @@ async function exists(target: string): Promise<boolean> {
 }
 
 async function readAppPackage(rootPath: string): Promise<AppPackage> {
-  const manifestPath = path.join(rootPath, "agentlas.app.json");
-  const raw = JSON.parse(await fs.readFile(manifestPath, "utf8")) as unknown;
+  const raw = await readAppData(rootPath);
   if (!isObject(raw)) throw new Error("Invalid agentlas.app.json.");
   const manifest = isObject(raw.manifest)
     ? (raw.manifest as unknown as AgentlasSurfaceManifest)
@@ -3832,6 +3835,13 @@ async function readAppPackage(rootPath: string): Promise<AppPackage> {
     manifest,
     connectors,
   };
+}
+
+async function readAppData(rootPath: string): Promise<JsonObject> {
+  const manifestPath = path.join(rootPath, "agentlas.app.json");
+  const raw = JSON.parse(await fs.readFile(manifestPath, "utf8")) as unknown;
+  if (!isObject(raw)) throw new Error("Invalid agentlas.app.json.");
+  return raw;
 }
 
 function mcpAdapterStub(adapter: {

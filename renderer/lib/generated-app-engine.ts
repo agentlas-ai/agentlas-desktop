@@ -118,7 +118,7 @@ export function createGeneratedOutputs(
     : [
         { label: "Input", detail: "Collect the user's goal and constraints." },
         { label: "Plan", detail: "Rank the best workflow and prepare app-specific options." },
-        { label: "Output", detail: "Generate the usable artifact inside Agentlas." },
+        { label: "Output", detail: "Generate the usable artifact in the local web app." },
         { label: "Export", detail: "Save or reuse the result." },
       ];
   return Array.from({ length: count }, (_, index) => {
@@ -201,6 +201,10 @@ export function demoGeneratedApp(id: string | null, locale: GeneratedAppLocale):
       previewPath: "/tmp/agentlas-demo-app/src/index.html",
       setupPath: "/tmp/agentlas-demo-app/README.md",
       smokePath: "/tmp/agentlas-demo-app/tests/smoke.mjs",
+      runtimeMode: "external-local-webapp",
+      launchUrl: "http://localhost:3000",
+      devCommand: "PORT=3000 node scripts/serve.mjs",
+      localPort: 3000,
       createdAt: now,
       files: [],
       summary: "Demo generated app.",

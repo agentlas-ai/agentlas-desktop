@@ -84,8 +84,8 @@ export default function AppsPage() {
           <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 20, lineHeight: 1.15 }}>Apps</h1>
           <p style={{ margin: "3px 0 0", color: "var(--muted-deep)", fontSize: 12.5 }}>
             {locale === "en"
-              ? "Apps open inside Agentlas; Global Env and Plugins support them."
-              : "Apps는 Agentlas 안에서 열리고, 전역 Env·Plugins가 실행을 보조합니다."}
+              ? "First-party Apps open here; Generated Apps stay listed here and run as local web apps."
+              : "1st-party Apps는 여기서 열리고, Generated Apps는 목록에 남긴 뒤 로컬 웹앱으로 실행합니다."}
           </p>
         </div>
       </header>
@@ -129,17 +129,31 @@ export default function AppsPage() {
               {generatedApps.map((app) => {
                 const title = sanitizePublicAppCopy(app.appName || app.manifest.app?.name || app.manifest.title, "Generated App");
                 const description = app.manifest.description;
+                const scaffoldMeta = app.scaffold as typeof app.scaffold & {
+                  runtimeEngine?: string;
+                  version?: string;
+                  fileCount?: number;
+                  launchUrl?: string;
+                  runtimeMode?: string;
+                };
+                const isCloudApp = app.rootPath.startsWith("agentlas-cloud://");
                 const tagline = sanitizePublicAppCopy(
                   app.manifest.app?.valueProp ||
                   (typeof description === "string" ? description : "") ||
-                  (locale === "en" ? "Agent-made App inside Agentlas" : "Agentlas 안에서 실행되는 에이전트 생성 App"),
-                  locale === "en" ? "Agent-made App inside Agentlas" : "Agentlas 안에서 실행되는 에이전트 생성 App",
+                  (locale === "en" ? "Agent-made local web app registered in Apps" : "Apps에 등록된 에이전트 생성 로컬 웹앱"),
+                  locale === "en" ? "Agent-made local web app registered in Apps" : "Apps에 등록된 에이전트 생성 로컬 웹앱",
                 );
-                const artifacts = [
-                  sanitizePublicAppCopy(app.status, app.status),
-                  `${app.scaffold.files.length} files`,
-                  sanitizePublicAppCopy(app.manifest.domain || app.manifest.layout, app.manifest.layout),
-                ].filter(Boolean);
+                const artifacts = isCloudApp
+                  ? [
+                      locale === "en" ? "cloud" : "클라우드",
+                      scaffoldMeta.version ? `v${scaffoldMeta.version}` : "",
+                      sanitizePublicAppCopy(scaffoldMeta.launchUrl || scaffoldMeta.runtimeEngine || "launch URL", "launch URL"),
+                    ].filter(Boolean)
+                  : [
+                      sanitizePublicAppCopy(scaffoldMeta.runtimeMode || "local web app", "local web app"),
+                      scaffoldMeta.launchUrl || "localhost",
+                      sanitizePublicAppCopy(app.manifest.domain || app.manifest.layout, app.manifest.layout),
+                    ].filter(Boolean);
                 return (
                   <div key={app.id} className="glass-strong" style={{ ...appTile, position: "relative", paddingRight: 58 }}>
                     <Link href={`/apps/generated?id=${app.id}`} style={appTileLink}>
@@ -149,7 +163,9 @@ export default function AppsPage() {
                       <div style={appBody}>
                         <div style={appTitleLine}>
                           <strong style={appName}>{title}</strong>
-                          <span style={appKind}>{locale === "en" ? "Generated" : "생성됨"}</span>
+                          <span style={appKind}>
+                            {isCloudApp ? (locale === "en" ? "Cloud" : "클라우드") : (locale === "en" ? "Generated" : "생성됨")}
+                          </span>
                         </div>
                         <span style={appDescription} title={tagline}>
                           {tagline}
@@ -311,6 +327,11 @@ const pillRow: React.CSSProperties = {
 };
 
 const pill: React.CSSProperties = {
+  maxWidth: "100%",
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
   padding: "3px 7px",
   borderRadius: 999,
   background: "var(--fill-1)",

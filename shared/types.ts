@@ -933,13 +933,46 @@ export interface AppFactoryScaffoldSnapshot {
   previewPath: string;
   setupPath: string;
   smokePath: string;
+  runtimeMode?: "external-local-webapp" | "cloud-manifest" | "legacy-internal-runner" | string;
+  launchUrl?: string;
+  devCommand?: string;
+  localPort?: number;
   createdAt: string;
   files: AppFactoryGeneratedFile[];
   summary: string;
 }
 
+export type AppFactoryRuntimeEngine =
+  | "generated-app"
+  | "cardnews"
+  | "document-studio"
+  | string;
+
+export interface AppFactoryCloudAppManifestRequest {
+  cloudId: string;
+  slug: string;
+  version: string;
+  runtimeEngine: AppFactoryRuntimeEngine;
+  minDesktopVersion?: string;
+  sourceUrl?: string;
+  launchUrl?: string;
+  devCommand?: string;
+  manifest: AgentlasSurfaceManifest;
+  chatId?: string;
+  projectId?: string | null;
+  agentId?: string;
+  surfaceId?: string;
+  actionId?: string | null;
+  fileCount?: number;
+  publishedAt?: string;
+  updatedAt?: string;
+  metadata?: JsonObject;
+}
+
 export type AppFactoryAppStatus =
   | "scaffolded"
+  | "cloud-installed"
+  | "cloud-synced"
   | "mcp-ready"
   | "operations-ready"
   | "smoke-passed"
@@ -951,6 +984,9 @@ export type AppFactoryAppStatus =
 
 export type AppFactoryOperationKind =
   | "scaffold"
+  | "install-cloud-app"
+  | "sync-cloud-manifest"
+  | "open-launch-target"
   | "run-autopilot"
   | "install-mcp"
   | "run-provider-tasks"
@@ -1002,8 +1038,23 @@ export interface AppFactoryScaffoldResult extends AppFactoryScaffoldSnapshot {
   record?: AppFactoryAppRecord;
 }
 
+export interface AppFactoryCloudAppInstallResult {
+  app: AppFactoryAppRecord;
+  operation: AppFactoryOperationRecord;
+  rootPath: string;
+  installed: boolean;
+}
+
 export interface AppFactoryRootRequest {
   rootPath: string;
+}
+
+export interface AppFactoryLaunchTargetResult {
+  rootPath: string;
+  target: string;
+  mode: "external-url" | "local-file" | "local-folder";
+  opened: boolean;
+  summary: string;
 }
 
 export interface MetaAgentTeamFactoryFile {
@@ -1435,6 +1486,8 @@ export interface AppFactoryPreviewResult {
   manifestPath: string;
   fileUrl: string;
   serveCommand: string;
+  launchUrl?: string;
+  devCommand?: string;
   createdAt: string;
 }
 
@@ -1924,6 +1977,7 @@ export interface AgentlasIpc {
   /** Agent-made service apps generated from safe Agentlas Surface manifests. */
   appFactory: {
     scaffold: (input: AppFactoryScaffoldRequest) => Promise<AppFactoryScaffoldResult>;
+    syncCloudManifest: (input: AppFactoryCloudAppManifestRequest) => Promise<AppFactoryCloudAppInstallResult>;
     runAutopilot: (input: AppFactoryAutopilotRequest) => Promise<AppFactoryAutopilotResult>;
     installMcpPlan: (input: AppFactoryRootRequest) => Promise<AppFactoryMcpInstallResult>;
     runProviderTasks: (input: AppFactoryProviderTaskRunRequest) => Promise<AppFactoryProviderTaskRunResult>;
@@ -1937,6 +1991,7 @@ export interface AgentlasIpc {
     approveProviderPayment: (input: AppFactoryProviderPaymentApproveRequest) => Promise<AppFactoryProviderPaymentApproveResult>;
     runSmoke: (input: AppFactoryRootRequest) => Promise<AppFactorySmokeResult>;
     preparePreview: (input: AppFactoryRootRequest) => Promise<AppFactoryPreviewResult>;
+    openLaunchTarget: (input: AppFactoryRootRequest) => Promise<AppFactoryLaunchTargetResult>;
     publishAsTool: (input: AppFactoryRootRequest) => Promise<AppFactoryAppToolPublishResult>;
     archive: (input: AppFactoryRootRequest) => Promise<AppFactoryOperationRecord>;
     restore: (input: AppFactoryRootRequest) => Promise<AppFactoryOperationRecord>;

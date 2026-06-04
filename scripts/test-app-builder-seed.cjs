@@ -46,7 +46,7 @@ try {
   assert.ok(hiddenBackgrounds.every((agent) => agent.visibility === "background"), "all built-ins stay hidden/background");
 
   const choice = selectAutoRoutedAgent(
-    "Apps Generate mode is enabled. Create an internal analytics dashboard app.",
+    "Apps Generate mode is enabled. Create a local analytics dashboard web app.",
     installed,
     "en",
   );

@@ -1198,13 +1198,17 @@ function ChatPage() {
               return;
             }
             const scaffold = await ensureScaffold();
-            const internalAppPath = scaffold.record?.id ? `/apps/generated?id=${scaffold.record.id}` : "/apps";
+            const appRegistryPath = scaffold.record?.id ? `/apps/generated?id=${scaffold.record.id}` : "/apps";
+            const launchUrl = scaffold.launchUrl || scaffold.previewPath;
+            const devCommand = scaffold.devCommand || "node scripts/serve.mjs";
             if (action.type === "scaffold-app") {
               update(
                 [
                   `App scaffold ready: ${scaffold.appName}`,
                   "",
-                  `Open in Agentlas: ${internalAppPath}`,
+                  `Apps registry: ${appRegistryPath}`,
+                  `Run: ${devCommand}`,
+                  `Open local app: ${launchUrl}`,
                   `Setup: ${scaffold.setupPath}`,
                   `Smoke: ${scaffold.smokePath}`,
                   "",
@@ -1229,7 +1233,8 @@ function ChatPage() {
                   `Status: ${result.status}`,
                   `Steps: ${result.steps.filter((step) => step.status === "completed").length}/${result.steps.length}`,
                   result.waitingOn.length ? `Waiting: ${result.waitingOn.join(", ")}` : "Waiting: none",
-                  `Open in Agentlas: ${internalAppPath}`,
+                  `Apps registry: ${appRegistryPath}`,
+                  `Open local app: ${launchUrl}`,
                   result.appTool ? `Tool: ${result.appTool.toolName}` : "",
                 ]
                   .filter(Boolean)

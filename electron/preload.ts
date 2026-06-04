@@ -170,6 +170,7 @@ const api: AgentlasIpc = {
   },
   appFactory: {
     scaffold: (input) => ipcRenderer.invoke("appFactory:scaffold", input),
+    syncCloudManifest: (input) => ipcRenderer.invoke("appFactory:syncCloudManifest", input),
     runAutopilot: (input) => ipcRenderer.invoke("appFactory:runAutopilot", input),
     installMcpPlan: (input) => ipcRenderer.invoke("appFactory:installMcpPlan", input),
     runProviderTasks: (input) => ipcRenderer.invoke("appFactory:runProviderTasks", input),
@@ -183,6 +184,7 @@ const api: AgentlasIpc = {
     approveProviderPayment: (input) => ipcRenderer.invoke("appFactory:approveProviderPayment", input),
     runSmoke: (input) => ipcRenderer.invoke("appFactory:runSmoke", input),
     preparePreview: (input) => ipcRenderer.invoke("appFactory:preparePreview", input),
+    openLaunchTarget: (input) => ipcRenderer.invoke("appFactory:openLaunchTarget", input),
     publishAsTool: (input) => ipcRenderer.invoke("appFactory:publishAsTool", input),
     archive: (input) => ipcRenderer.invoke("appFactory:archive", input),
     restore: (input) => ipcRenderer.invoke("appFactory:restore", input),

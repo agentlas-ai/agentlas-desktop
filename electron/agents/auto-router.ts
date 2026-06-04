@@ -65,8 +65,8 @@ const ROUTE_HINTS: Array<{ slug: string; terms: string[]; reasonKo: string; reas
       "대시보드 앱",
       "스튜디오 앱",
     ],
-    reasonKo: "Agentlas 안에서 열리는 내부 App 생성/설계 요청입니다",
-    reasonEn: "the request is to create or design an internal Agentlas App",
+    reasonKo: "Apps에 등록되는 로컬 웹앱 생성/설계 요청입니다",
+    reasonEn: "the request is to create or design a generated local web app registered in Apps",
   },
   {
     slug: "agentlas-memory-curator",
@@ -409,15 +409,15 @@ export function autoRouteSystemPreamble(
     : appBuilderNeedsConsent
     ? locale === "ko"
       ? [
-          "이 요청은 Agentlas 안에서 열리는 전용 App으로 만드는 것이 적합할 수 있지만, 사용자가 아직 전용 App 생성을 명시적으로 승인하지 않았습니다.",
+          "이 요청은 Agentlas Apps에 등록되는 전용 로컬 웹앱으로 만드는 것이 적합할 수 있지만, 사용자가 아직 전용 App 생성을 명시적으로 승인하지 않았습니다.",
           "실제 App 파일 생성, Agentlas Surface Manifest emit, scaffold-app/operate-app 액션 선언을 하지 마세요.",
-          "대신 먼저 한 문장으로 확인 질문만 하세요: \"이 요청은 Agentlas 안에서 열리는 전용 App으로 만들면 더 편합니다. 전용 App으로 만들어 진행할까요?\"",
+          "대신 먼저 한 문장으로 확인 질문만 하세요: \"이 요청은 Apps에 등록되는 로컬 웹앱으로 만들면 더 편합니다. 전용 App으로 만들어 진행할까요?\"",
           "사용자가 동의하면 다음 메시지에서 App Builder 작업을 진행하세요.",
         ].join("\n")
       : [
           "This request may be a good fit for a dedicated Agentlas App, but the user has not explicitly approved dedicated App creation yet.",
           "Do not create App files, emit an Agentlas Surface Manifest, or declare scaffold-app/operate-app actions.",
-          "Ask one confirmation question first: \"This would work better as a dedicated App inside Agentlas. Should I create that App for you?\"",
+          "Ask one confirmation question first: \"This would work better as a local web app registered in Apps. Should I create that App for you?\"",
           "If the user agrees, proceed with the App Builder flow on the next message.",
         ].join("\n")
     : mode === "apps-generate"

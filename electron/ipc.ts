@@ -3,6 +3,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { detectRuntimes, setActiveRuntime } from "./runtime/detect";
 import { listRuntimeModels } from "./runtime/providers";
 import { installCli, openCliLogin, type InstallableCli } from "./runtime/install-cli";
@@ -116,11 +117,14 @@ import {
   recordSurfaceAssetPackOperation,
 } from "./store/agent-surface-assets";
 import {
+  cloudAppRootPath,
   getAgentApp,
   getAgentAppByRoot,
   getAgentAppBySurface,
+  isCloudAppRoot,
   listAgentAppOperations,
   listAgentApps,
+  recordCloudAppManifest,
   recordAgentAppOperation,
   recordScaffoldedApp,
 } from "./store/agent-apps";
@@ -158,10 +162,13 @@ import { runToolFactorySmoke, scaffoldAgentTool } from "./tool-factory/scaffold"
 import { createCommerceAgentTeam } from "./meta-agent/commerce-team";
 import { selectedMultimodalEnvRequirements } from "../shared/multimodal";
 import type {
+  AppFactoryAppRecord,
   AppFactoryAppStatus,
   AppFactoryAssetMaterializeRequest,
   AppFactoryAutopilotRequest,
+  AppFactoryCloudAppManifestRequest,
   AppFactoryLocalCommerceActivationRequest,
+  AppFactoryLaunchTargetResult,
   AppFactoryOperationKind,
   AppFactoryProviderCredentialResolveRequest,
   AppFactoryProviderBrowserLaunchRequest,
@@ -170,6 +177,7 @@ import type {
   AppFactoryProviderPaymentApproveRequest,
   AppFactoryRootRequest,
   AppFactoryScaffoldRequest,
+  AppFactoryScaffoldSnapshot,
   Automation,
   McpInvocationEvent,
   McpInvocationRequest,
@@ -247,6 +255,68 @@ function broadcastActiveChats(): void {
   const chatIds = activeChatIds();
   for (const w of BrowserWindow.getAllWindows()) {
     if (!w.isDestroyed()) w.webContents.send("invoke:activeChats", chatIds);
+  }
+}
+
+async function openAppLaunchTarget(appRecord: AppFactoryAppRecord): Promise<AppFactoryLaunchTargetResult> {
+  const target = appLaunchTarget(appRecord);
+  if (!target) {
+    throw new Error(`No launch target is available for generated app: ${appRecord.appName}`);
+  }
+  if (target.mode === "external-url") {
+    await shell.openExternal(target.target);
+  } else if (target.mode === "local-file") {
+    const localPath = target.target.startsWith("file://") ? fileURLToPath(target.target) : target.target;
+    await shell.openPath(localPath);
+  } else {
+    shell.showItemInFolder(target.target);
+  }
+  return {
+    rootPath: appRecord.rootPath,
+    target: target.target,
+    mode: target.mode,
+    opened: true,
+    summary: target.mode === "external-url"
+      ? `Opened generated app at ${target.target}.`
+      : `Opened generated app package at ${target.target}.`,
+  };
+}
+
+function appLaunchTarget(appRecord: AppFactoryAppRecord): Pick<AppFactoryLaunchTargetResult, "target" | "mode"> | null {
+  const scaffold = appRecord.scaffold as AppFactoryScaffoldSnapshot & { sourceUrl?: string };
+  const candidates = [
+    scaffold.launchUrl,
+    appRecord.previewPath,
+    scaffold.sourceUrl,
+    appRecord.setupPath,
+  ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+  for (const candidate of candidates) {
+    const target = normalizeLaunchTarget(candidate);
+    if (target) return target;
+  }
+  if (!isCloudAppRoot(appRecord.rootPath)) {
+    return { target: appRecord.rootPath, mode: "local-folder" };
+  }
+  return null;
+}
+
+function normalizeLaunchTarget(value: string): Pick<AppFactoryLaunchTargetResult, "target" | "mode"> | null {
+  const raw = value.trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      return { target: url.toString(), mode: "external-url" };
+    }
+    if (url.protocol === "file:") {
+      return { target: url.toString(), mode: "local-file" };
+    }
+    return null;
+  } catch {
+    if (path.isAbsolute(raw)) {
+      return { target: pathToFileURL(raw).toString(), mode: "local-file" };
+    }
+    return null;
   }
 }
 
@@ -629,6 +699,28 @@ export function registerIpcHandlers(): void {
     });
     return { ...result, record };
   });
+  ipcMain.handle("appFactory:syncCloudManifest", async (_e, input: AppFactoryCloudAppManifestRequest) => {
+    const existingCloudApp = input.chatId
+      ? null
+      : getAgentAppByRoot(cloudAppRootPath(input.slug || input.cloudId));
+    const chat = input.chatId
+      ? getChat(input.chatId)
+      : existingCloudApp
+        ? getChat(existingCloudApp.chatId)
+      : createChat({
+          agentId: input.agentId,
+          projectId: input.projectId ?? null,
+          title: "Cloud Apps",
+          kind: "division",
+        });
+    if (!chat) throw new Error(`Chat not found: ${input.chatId}`);
+    return recordCloudAppManifest({
+      ...input,
+      chatId: chat.id,
+      projectId: input.projectId ?? chat.projectId,
+      agentId: input.agentId ?? chat.agentId,
+    });
+  });
   ipcMain.handle("appFactory:runAutopilot", async (_e, input: AppFactoryAutopilotRequest) => {
     const result = await runAppFactoryAutopilot(input);
     recordAppFactoryOperation(
@@ -709,20 +801,59 @@ export function registerIpcHandlers(): void {
     recordAppFactoryOperation(result.rootPath, "deploy-preview", true, result, "preview-ready");
     return result;
   });
+  ipcMain.handle("appFactory:openLaunchTarget", async (_e, input: AppFactoryRootRequest) => {
+    const rootPath = isCloudAppRoot(input.rootPath) ? input.rootPath : path.resolve(input.rootPath);
+    const appRecord = getAgentAppByRoot(rootPath);
+    if (!appRecord) throw new Error(`Generated app not found: ${input.rootPath}`);
+    const result = await openAppLaunchTarget(appRecord);
+    recordAgentAppOperation(appRecord.id, "open-launch-target", result.opened, result);
+    return result;
+  });
   ipcMain.handle("appFactory:publishAsTool", async (_e, input: AppFactoryRootRequest) => {
     const result = await publishAppAsTool(input);
     recordAppFactoryOperation(result.rootPath, "publish-as-tool", true, result, "tool-published");
     return result;
   });
   ipcMain.handle("appFactory:archive", async (_e, input: AppFactoryRootRequest) => {
-    const appRecord = getAgentAppByRoot(path.resolve(input.rootPath));
+    const rootPath = isCloudAppRoot(input.rootPath) ? input.rootPath : path.resolve(input.rootPath);
+    const appRecord = getAgentAppByRoot(rootPath);
     if (!appRecord) throw new Error(`Generated app not found: ${input.rootPath}`);
+    if (isCloudAppRoot(rootPath)) {
+      return recordAgentAppOperation(
+        appRecord.id,
+        "archive",
+        true,
+        {
+          rootPath,
+          archived: true,
+          reversible: true,
+          storage: "cloud-manifest",
+          summary: "Cloud App hidden from local Apps list; manifest can be synced again from Agentlas Cloud.",
+        },
+        "archived",
+      );
+    }
     const result = await archiveAppPackage(input);
     return recordAgentAppOperation(appRecord.id, "archive", true, result, "archived");
   });
   ipcMain.handle("appFactory:restore", async (_e, input: AppFactoryRootRequest) => {
-    const appRecord = getAgentAppByRoot(path.resolve(input.rootPath));
+    const rootPath = isCloudAppRoot(input.rootPath) ? input.rootPath : path.resolve(input.rootPath);
+    const appRecord = getAgentAppByRoot(rootPath);
     if (!appRecord) throw new Error(`Generated app not found: ${input.rootPath}`);
+    if (isCloudAppRoot(rootPath)) {
+      return recordAgentAppOperation(
+        appRecord.id,
+        "restore",
+        true,
+        {
+          rootPath,
+          restored: true,
+          storage: "cloud-manifest",
+          summary: "Cloud App restored locally from the cached manifest registry.",
+        },
+        "restored",
+      );
+    }
     const result = await restoreAppPackage(input);
     return recordAgentAppOperation(appRecord.id, "restore", true, result, "restored");
   });

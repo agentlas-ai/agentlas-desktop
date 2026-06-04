@@ -3,7 +3,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { sanitizePublicAppCopy } from "@shared/brand-safety";
@@ -39,7 +38,6 @@ function selectedAppIdFromUrl(): string | null {
 
 export default function LibraryAppsPage() {
   const { t, locale } = useT();
-  const router = useRouter();
   const [apps, setApps] = useState<AppFactoryAppRecord[]>([]);
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -310,10 +308,21 @@ export default function LibraryAppsPage() {
     setMessage("Copied root path");
   }, [selected]);
 
-  const prepareAndOpenPreview = useCallback(async () => {
+  const openLaunchTarget = useCallback(async () => {
     if (!selected) return;
-    router.push(`/apps/generated?id=${selected.id}`);
-  }, [router, selected]);
+    const api = ipc();
+    if (!api) return;
+    setBusyAction("open-launch-target");
+    try {
+      const result = await api.appFactory.openLaunchTarget({ rootPath: selected.rootPath });
+      setMessage(result.summary);
+      setOperations(await api.appFactory.listOperations(selected.id));
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyAction(null);
+    }
+  }, [selected]);
 
   const saveVaultGate = useCallback(
     async (envKey: string) => {
@@ -420,7 +429,7 @@ export default function LibraryAppsPage() {
             onCopyRoot={copyRoot}
             onRunAutopilot={() => void runAction("run-autopilot")}
             onPreparePreview={() => void runAction("deploy-preview")}
-            onOpenPreview={() => void prepareAndOpenPreview()}
+            onOpenPreview={() => void openLaunchTarget()}
             onInstallMcp={() => void runAction("install-mcp")}
             onRunProviderTasks={() => void runAction("run-provider-tasks")}
             onMaterializeAssets={() => void runAction("materialize-assets")}
@@ -549,7 +558,7 @@ function AppDetail({
           )}
           <ActionButton onClick={onRunSmoke} label={t("library.apps.run_smoke")} icon={<IconBolt size={12} />} busy={busyAction === "run-smoke-test"} disabled={app.status === "archived"} />
           <ActionButton onClick={onPreparePreview} label={t("library.apps.deploy_preview")} icon={<IconCircleDollar size={12} />} busy={busyAction === "deploy-preview"} disabled={app.status === "archived"} />
-          <ActionButton onClick={onOpenPreview} label={t("library.apps.open_preview")} icon={<IconRoute size={12} />} busy={busyAction === "deploy-preview"} disabled={app.status === "archived"} />
+          <ActionButton onClick={onOpenPreview} label={t("library.apps.open_preview")} icon={<IconRoute size={12} />} busy={busyAction === "open-launch-target"} disabled={app.status === "archived"} />
           <ActionButton onClick={onPublishAsTool} label={t("library.apps.publish_tool")} icon={<IconKey size={12} />} busy={busyAction === "publish-as-tool"} disabled={app.status === "archived"} />
           {app.status === "archived" ? (
             <ActionButton onClick={onRestore} label={t("library.apps.restore")} icon={<IconCheck size={12} />} busy={busyAction === "restore"} />
@@ -1179,6 +1188,7 @@ function operationLabel(operation: AppFactoryOperationKind): string {
   if (operation === "open-provider-browser") return "Provider browser";
   if (operation === "run-smoke-test") return "Smoke test";
   if (operation === "deploy-preview") return "Preview package";
+  if (operation === "open-launch-target") return "Open local app";
   if (operation === "publish-as-tool") return "Publish as tool";
   if (operation === "archive") return "Archive";
   if (operation === "restore") return "Restore";
@@ -1190,6 +1200,9 @@ function operationSummary(op: AppFactoryOperationRecord): string {
     return op.ok ? "Completed" : "Failed";
   }
   const result = op.result as Record<string, unknown>;
+  if (op.operation === "open-launch-target") {
+    return String(result.summary ?? result.target ?? "Opened local app");
+  }
   if (op.operation === "run-autopilot") {
     const steps = Array.isArray(result.steps) ? result.steps.length : 0;
     const waiting = Array.isArray(result.waitingOn) ? result.waitingOn.length : 0;

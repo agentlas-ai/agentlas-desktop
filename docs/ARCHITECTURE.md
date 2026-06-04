@@ -57,6 +57,9 @@ MCP 도구, credential vault 요구사항, 생성 자산, 서브 엔진을 가�
   App은 private GitHub/GitHub Release/object storage 같은 bundle source에 두고,
   MongoDB에는 marketplace index, manifest URL, 권한, 버전, trust metadata를 둔다.
   MongoDB를 app bundle blob 저장소로 쓰지 않는다.
+  Desktop에 이미 들어간 runtime engine(`generated-app`, `cardnews`,
+  `document-studio` 등) 위의 App은 MongoDB/API manifest 배포만으로 갱신한다.
+  새 엔진, 새 IPC 권한, 새 native capability는 Desktop 릴리즈가 필요하다.
 - **Apps Vault**: App 실행에 필요한 credential/env를 keychain-backed vault로 저장한다.
   vault 자체는 제품이 아니라 App 구동 장치다.
 - **Apps Engines**: MCP 서버, backend adapter, browser bridge, generated asset builder처럼
@@ -72,10 +75,11 @@ slash command로 Apps 표면을 열 수 있다.
 채팅 입력창의 **Apps Generate** 토글은 내장 **Agentlas App Builder** 라우트를 켜는
 신호다. `McpInvocationRequest.appsGenerateMode`가 main runner로 전달되면 현재 선택된
 채팅 에이전트가 무엇이든 `agentlas-app-builder`로 자동 라우팅하고, runner는 사용자
-목표를 내부 App 생성 지시로 감싼다. App Builder는 `<<agentlas-surface>>` manifest,
-`scaffold-app`, `operate-app` 액션을 통해 App Factory가 `/apps/generated?id=<appId>`에서
-열 수 있는 전용 App을 만들게 한다. 응답에 App 링크가 없으면 runner가 안정 CTA를
-추가한다.
+목표를 Apps에 등록되는 로컬 웹앱 생성 지시로 감싼다. App Builder는
+`<<agentlas-surface>>` manifest, `scaffold-app`, `operate-app` 액션을 통해 App Factory가
+`agentlas-apps/<appId>/` 패키지와 `launchUrl`(`http://localhost:<port>`)을 만들게 한다.
+`/apps/generated?id=<appId>`는 실행 runner가 아니라 목록/상태/경로/실행 링크 관리
+화면이다. 응답에 App 링크나 실행 URL이 없으면 runner가 안정 CTA를 추가한다.
 
 ## 데이터 영구성
 

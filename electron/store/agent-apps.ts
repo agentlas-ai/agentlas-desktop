@@ -7,12 +7,17 @@ import type {
   AgentlasSurfaceManifest,
   AppFactoryAppRecord,
   AppFactoryAppStatus,
+  AppFactoryCloudAppInstallResult,
+  AppFactoryCloudAppManifestRequest,
   AppFactoryOperationKind,
   AppFactoryOperationRecord,
   AppFactoryScaffoldSnapshot,
+  JsonObject,
   JsonValue,
 } from "../../shared/types";
 import { sanitizePublicAppCopy, sanitizePublicAppManifestCopy } from "../../shared/brand-safety";
+
+const CLOUD_APP_ROOT_PREFIX = "agentlas-cloud://apps/";
 
 interface AgentAppRow {
   id: string;
@@ -106,6 +111,125 @@ export function recordScaffoldedApp(input: {
   if (!app) throw new Error(`Agent app registry write failed: ${input.scaffold.rootPath}`);
   recordAgentAppOperation(app.id, "scaffold", true, scaffold, "scaffolded");
   return getAgentApp(app.id) ?? app;
+}
+
+export function cloudAppRootPath(slugOrId: string): string {
+  const slug = sanitizeCloudSlug(slugOrId);
+  return `${CLOUD_APP_ROOT_PREFIX}${slug}`;
+}
+
+export function isCloudAppRoot(rootPath: string): boolean {
+  return rootPath.startsWith(CLOUD_APP_ROOT_PREFIX);
+}
+
+export function recordCloudAppManifest(
+  input: AppFactoryCloudAppManifestRequest & {
+    chatId: string;
+    agentId: string;
+  },
+): AppFactoryCloudAppInstallResult {
+  const existingRoot = cloudAppRootPath(input.slug || input.cloudId);
+  const existing = getAgentAppByRoot(existingRoot);
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const manifest = sanitizePublicAppManifestCopy(input.manifest);
+  const appName = sanitizePublicAppCopy(
+    manifest.app?.name || manifest.title || input.slug,
+    input.slug || "Cloud App",
+  );
+  const version = String(input.version || "0.0.0");
+  const runtimeEngine = String(input.runtimeEngine || "generated-app");
+  const launchUrl = sanitizeLaunchUrl(input.launchUrl || stringFromMetadata(input.metadata, "launchUrl"));
+  const localPort = launchUrl ? localPortFromLaunchUrl(launchUrl) : null;
+  const status: AppFactoryAppStatus = existing ? "cloud-synced" : "cloud-installed";
+  const operation: AppFactoryOperationKind = existing ? "sync-cloud-manifest" : "install-cloud-app";
+  const cloudSnapshot = {
+    appId: input.cloudId,
+    appName,
+    rootPath: existingRoot,
+    previewPath: `/apps/generated?id=${existing?.id ?? id}`,
+    setupPath: input.sourceUrl || "",
+    smokePath: "",
+    runtimeMode: "cloud-manifest",
+    launchUrl: launchUrl ?? input.sourceUrl ?? "",
+    devCommand: input.devCommand || stringFromMetadata(input.metadata, "devCommand") || "",
+    localPort: localPort ?? undefined,
+    createdAt: input.publishedAt || input.updatedAt || now,
+    files: [
+      {
+        path: `${sanitizeCloudSlug(input.slug || input.cloudId)}.manifest.json`,
+        kind: "config",
+        bytes: JSON.stringify(manifest).length,
+      },
+    ],
+    summary: `Cloud App ${input.slug}@${version} runs on the ${runtimeEngine} Desktop engine.`,
+    cloudId: input.cloudId,
+    slug: input.slug,
+    version,
+    runtimeEngine,
+    minDesktopVersion: input.minDesktopVersion ?? null,
+    sourceUrl: input.sourceUrl ?? null,
+    fileCount: input.fileCount ?? 1,
+    publishedAt: input.publishedAt ?? null,
+    updatedAt: input.updatedAt ?? now,
+    metadata: (input.metadata ?? {}) as JsonObject,
+  };
+
+  getDb()
+    .prepare(
+      `INSERT INTO agent_apps (
+         id, chat_id, project_id, agent_id, surface_id, action_id, app_name,
+         domain, layout, root_path, preview_path, setup_path, smoke_path,
+         manifest_json, result_json, status, created_at, updated_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(root_path) DO UPDATE SET
+         chat_id = excluded.chat_id,
+         project_id = excluded.project_id,
+         agent_id = excluded.agent_id,
+         surface_id = excluded.surface_id,
+         action_id = excluded.action_id,
+         app_name = excluded.app_name,
+         domain = excluded.domain,
+         layout = excluded.layout,
+         preview_path = excluded.preview_path,
+         setup_path = excluded.setup_path,
+         smoke_path = excluded.smoke_path,
+         manifest_json = excluded.manifest_json,
+         result_json = excluded.result_json,
+         status = excluded.status,
+         updated_at = excluded.updated_at`,
+    )
+    .run(
+      id,
+      input.chatId,
+      input.projectId ?? null,
+      input.agentId,
+      input.surfaceId || `cloud:${sanitizeCloudSlug(input.slug || input.cloudId)}`,
+      input.actionId ?? null,
+      appName,
+      manifest.domain,
+      manifest.layout,
+      existingRoot,
+      cloudSnapshot.previewPath,
+      cloudSnapshot.setupPath,
+      cloudSnapshot.smokePath,
+      encodeJson(manifest),
+      encodeJson(cloudSnapshot),
+      status,
+      now,
+      now,
+    );
+
+  const app = getAgentAppByRoot(existingRoot);
+  if (!app) throw new Error(`Cloud app registry write failed: ${existingRoot}`);
+  const op = recordAgentAppOperation(app.id, operation, true, cloudSnapshot, status);
+  return {
+    app: getAgentApp(app.id) ?? app,
+    operation: op,
+    rootPath: existingRoot,
+    installed: !existing,
+  };
 }
 
 export function recordAgentAppOperation(
@@ -257,6 +381,8 @@ function fallbackScaffold(row: AgentAppRow): AppFactoryScaffoldSnapshot {
 function isAppStatus(value: string): value is AppFactoryAppStatus {
   return (
     value === "scaffolded" ||
+    value === "cloud-installed" ||
+    value === "cloud-synced" ||
     value === "mcp-ready" ||
     value === "operations-ready" ||
     value === "smoke-passed" ||
@@ -271,6 +397,9 @@ function isAppStatus(value: string): value is AppFactoryAppStatus {
 function isOperationKind(value: string): value is AppFactoryOperationKind {
   return (
     value === "scaffold" ||
+    value === "install-cloud-app" ||
+    value === "sync-cloud-manifest" ||
+    value === "open-launch-target" ||
     value === "run-autopilot" ||
     value === "install-mcp" ||
     value === "run-provider-tasks" ||
@@ -288,4 +417,36 @@ function isOperationKind(value: string): value is AppFactoryOperationKind {
     value === "archive" ||
     value === "restore"
   );
+}
+
+function sanitizeCloudSlug(value: string): string {
+  const trimmed = String(value || "").trim().toLowerCase();
+  return trimmed.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "cloud-app";
+}
+
+function sanitizeLaunchUrl(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    const parsed = new URL(value.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function localPortFromLaunchUrl(value: string): number | null {
+  try {
+    const parsed = new URL(value);
+    const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+    return Number.isFinite(port) ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+function stringFromMetadata(metadata: unknown, key: string): string | undefined {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
+  const value = (metadata as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : undefined;
 }

@@ -25,6 +25,7 @@ interface ScaffoldFile {
 }
 
 const FORBIDDEN_FILE_CHARS = /[^a-z0-9._-]+/g;
+const DEFAULT_LOCAL_WEB_APP_PORT = 3000;
 
 export async function scaffoldServiceApp(
   request: AppFactoryScaffoldRequest,
@@ -43,7 +44,10 @@ export async function scaffoldServiceApp(
   const slug = slugify(appName);
   const appId = `${slug}-${shortId(request.surfaceId || `${appName}:${now}`)}`;
   const rootPath = path.join(options.baseDir, "agentlas-apps", appId);
-  const files = buildServiceAppFiles(manifest, { appId, appName, now });
+  const localPort = localWebAppPort(manifest);
+  const launchUrl = localLaunchUrl(localPort);
+  const devCommand = localDevCommand(localPort);
+  const files = buildServiceAppFiles(manifest, { appId, appName, now, localPort, launchUrl, devCommand });
 
   await fs.mkdir(rootPath, { recursive: true });
   const written: AppFactoryGeneratedFile[] = [];
@@ -66,15 +70,19 @@ export async function scaffoldServiceApp(
     previewPath: path.join(rootPath, "src", "index.html"),
     setupPath: path.join(rootPath, "SETUP.md"),
     smokePath: path.join(rootPath, "tests", "smoke.mjs"),
+    runtimeMode: "external-local-webapp",
+    launchUrl,
+    devCommand,
+    localPort,
     createdAt: now,
     files: written,
-    summary: `${appName} scaffolded with ${written.length} files, ${connectorsOf(manifest).length} connectors, and ${routesOf(manifest).length} routes.`,
+    summary: `${appName} registered in Apps and scaffolded as an external local web app at ${launchUrl}.`,
   };
 }
 
 export function buildServiceAppFiles(
   manifest: AgentlasSurfaceManifest,
-  ctx: { appId: string; appName: string; now: string },
+  ctx: { appId: string; appName: string; now: string; localPort?: number; launchUrl?: string; devCommand?: string },
 ): ScaffoldFile[] {
   const routes = routesOf(manifest);
   const connectors = connectorsOf(manifest);
@@ -88,6 +96,9 @@ export function buildServiceAppFiles(
   const appData = {
     id: ctx.appId,
     generatedAt: ctx.now,
+    runtimeMode: "external-local-webapp",
+    launchUrl: ctx.launchUrl ?? localLaunchUrl(ctx.localPort),
+    devCommand: ctx.devCommand ?? localDevCommand(ctx.localPort),
     manifest,
     routes,
     connectors,
@@ -426,9 +437,11 @@ function readme(
   manifest: AgentlasSurfaceManifest,
   routes: AgentlasSurfaceAppRoute[],
   connectors: AgentlasSurfaceConnectorSpec[],
-  ctx: { appName: string; now: string },
+  ctx: { appName: string; now: string; launchUrl?: string; devCommand?: string },
 ): string {
   const app = manifest.app;
+  const launchUrl = ctx.launchUrl ?? localLaunchUrl();
+  const devCommand = ctx.devCommand ?? localDevCommand();
   return `# ${md(ctx.appName)}
 
 > ${md(app?.tagline || app?.valueProp || manifest.title)}
@@ -443,10 +456,12 @@ ${md(app?.valueProp || "This is an agent-made service app scaffold. It turns a o
 
 \`\`\`bash
 node tests/smoke.mjs
-node scripts/serve.mjs
+${devCommand}
 \`\`\`
 
-Then open the printed local URL and inspect \`src/index.html\`.
+Then open ${launchUrl}. Agentlas Desktop keeps this app in the Apps list, but
+the user-facing app UI runs as a local web app instead of inside the Desktop
+renderer.
 
 ## Screens
 
@@ -477,14 +492,25 @@ Run the smoke test before sharing this app with anyone.
 function setupGuide(
   manifest: AgentlasSurfaceManifest,
   connectors: AgentlasSurfaceConnectorSpec[],
-  ctx: { appName: string },
+  ctx: { appName: string; launchUrl?: string; devCommand?: string },
 ): string {
   const rows = connectors.length ? connectors : [];
+  const launchUrl = ctx.launchUrl ?? localLaunchUrl();
+  const devCommand = ctx.devCommand ?? localDevCommand();
   return `# ${md(ctx.appName)} Setup
 
-This file is generated for the operator who will make the agent-made app real.
-It keeps credentials out of the manifest and records exactly which services are
-needed before launch.
+This file is generated for the operator who will run the agent-made web app.
+Agentlas Desktop stores the app record, metadata, and operations ledger; the
+actual UI should run in a normal browser from a localhost URL.
+
+## Local Run
+
+\`\`\`bash
+${devCommand}
+\`\`\`
+
+Open ${launchUrl}. Override the port with \`PORT=<port>\` when another app is
+already using it.
 
 ## Required Connectors
 
@@ -512,7 +538,7 @@ ${rows
 ## Launch Gate
 
 1. Run \`node tests/smoke.mjs\`.
-2. Open the preview with \`node scripts/serve.mjs\`.
+2. Open the local web app with \`${devCommand}\`.
 3. Verify every connector marked \`verified\` has live evidence.
 4. Move any \`missing-credential\` connector to verified or remove the feature.
 `;
@@ -1708,7 +1734,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src");
-const port = Number(process.env.PORT || 4177);
+const port = Number(process.env.PORT || ${DEFAULT_LOCAL_WEB_APP_PORT});
 const mime = {
   ".html": "text/html; charset=utf-8",
   ".json": "application/json; charset=utf-8",
@@ -1997,6 +2023,32 @@ function routeSourcePath(routePath: string): string | null {
     .filter(Boolean)
     .map((segment) => slugify(segment.replace(/^:/, "")));
   return segments.length ? `src/${segments.join("/")}/index.html` : null;
+}
+
+function localWebAppPort(manifest: AgentlasSurfaceManifest): number {
+  const deployment = isObject(manifest.app?.deployment) ? manifest.app?.deployment : undefined;
+  const appPort = numberValue((deployment as JsonObject | undefined)?.port);
+  const manifestPort = numberValue((manifest as unknown as JsonObject).localPort);
+  const port = appPort ?? manifestPort ?? DEFAULT_LOCAL_WEB_APP_PORT;
+  if (!Number.isFinite(port) || port < 1 || port > 65535) return DEFAULT_LOCAL_WEB_APP_PORT;
+  return Math.floor(port);
+}
+
+function localLaunchUrl(port = DEFAULT_LOCAL_WEB_APP_PORT): string {
+  return `http://localhost:${port}`;
+}
+
+function localDevCommand(port = DEFAULT_LOCAL_WEB_APP_PORT): string {
+  return `PORT=${port} node scripts/serve.mjs`;
+}
+
+function numberValue(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
 }
 
 function slugify(value: string): string {

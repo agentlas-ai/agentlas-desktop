@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -43,6 +43,7 @@
     "smoke:app-factory": "npm run build:electron && electron scripts/smoke-app-factory.cjs",
     "test:app-builder-routing": "npm run build:electron && node scripts/test-app-builder-routing.cjs",
     "test:app-builder-seed": "npm run build:electron && electron scripts/test-app-builder-seed.cjs",
+    "test:cloud-app-manifest": "npm run build:electron && electron scripts/test-cloud-app-manifest.cjs",
     "smoke:app-autopilot": "npm run build:electron && electron scripts/smoke-app-autopilot.cjs",
     "smoke:agent-os-handsfree": "npm run build:electron && electron scripts/smoke-agent-os-handsfree.cjs",
     "smoke:chat-local-agent-os": "npm run build:electron && electron scripts/smoke-chat-local-agent-os.cjs",
