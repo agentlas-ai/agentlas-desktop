@@ -103,17 +103,45 @@ async function overflowInfo(page) {
   return page.evaluate(() => {
     const doc = document.documentElement;
     const body = document.body;
-    const maxRight = Math.max(
-      doc.scrollWidth,
-      body?.scrollWidth ?? 0,
-      ...Array.from(document.querySelectorAll("body *"))
-        .slice(0, 1800)
-        .map((el) => Math.ceil(el.getBoundingClientRect().right)),
-    );
+    const viewportWidth = window.innerWidth;
+    const horizontallyClipped = new Set(["auto", "scroll", "hidden", "clip"]);
+    const hasHorizontalClipAncestor = (el) => {
+      for (
+        let parent = el.parentElement;
+        parent && parent !== body && parent !== doc;
+        parent = parent.parentElement
+      ) {
+        const style = getComputedStyle(parent);
+        if (!horizontallyClipped.has(style.overflowX)) continue;
+        const rect = parent.getBoundingClientRect();
+        if (rect.right <= viewportWidth + 2 && rect.left >= -2) return true;
+      }
+      return false;
+    };
+    const candidates = Array.from(document.querySelectorAll("body *"))
+      .slice(0, 1800)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        return { el, rect, style: getComputedStyle(el) };
+      })
+      .filter(
+        ({ el, rect, style }) =>
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          !hasHorizontalClipAncestor(el),
+      );
+    const maxUnclippedRight = Math.max(0, ...candidates.map(({ rect }) => Math.ceil(rect.right)));
+    const rootScrollWidth = Math.max(doc.scrollWidth, body?.scrollWidth ?? 0);
+    const rootOverflowX = Math.max(0, rootScrollWidth - viewportWidth);
+    const elementOverflowX = Math.max(0, maxUnclippedRight - viewportWidth);
     return {
-      viewportWidth: window.innerWidth,
+      viewportWidth,
       scrollWidth: doc.scrollWidth,
-      overflowX: Math.max(0, maxRight - window.innerWidth),
+      rootOverflowX,
+      elementOverflowX,
+      overflowX: Math.max(rootOverflowX, elementOverflowX),
       dialogs: document.querySelectorAll('[role="dialog"], dialog[open]').length,
     };
   });
@@ -130,6 +158,12 @@ async function clickIfVisible(locator, timeout = 1200) {
   } catch {
     return false;
   }
+}
+
+async function clickWithoutNavigationWait(locator, timeout = 15_000) {
+  const first = locator.first();
+  await first.waitFor({ state: "visible", timeout });
+  await first.evaluate((element) => element.click());
 }
 
 async function exerciseDesktopPage(page) {
@@ -193,8 +227,24 @@ async function waitForNoOverflow(page, steps, label) {
   assertStep(steps, `${label} horizontal overflow`, overflow.overflowX <= 2, overflow);
 }
 
+async function dismissOnboardingIfVisible(page) {
+  await page.waitForLoadState("domcontentloaded", { timeout: 30_000 }).catch(() => {});
+  const isOnboarding = await page
+    .evaluate(() => location.pathname.includes("/onboarding"))
+    .catch(() => false);
+  if (!isOnboarding) return false;
+  const skipped = await clickIfVisible(page.getByRole("button", { name: /Skip|건너뛰기/i }), 15_000);
+  if (!skipped) return false;
+  await page
+    .waitForFunction(() => !location.pathname.includes("/onboarding"), null, { timeout: 30_000 })
+    .catch(() => {});
+  await page.waitForLoadState("domcontentloaded", { timeout: 30_000 }).catch(() => {});
+  return true;
+}
+
 async function ensureMarketplacePage(page) {
   await page.waitForLoadState("domcontentloaded", { timeout: 30_000 });
+  await dismissOnboardingIfVisible(page);
   await page.waitForFunction(
     () =>
       location.pathname.includes("/onboarding") ||
@@ -204,7 +254,7 @@ async function ensureMarketplacePage(page) {
     { timeout: 30_000 },
   );
   if (new URL(page.url()).pathname.includes("/onboarding")) {
-    await page.getByRole("button", { name: /Skip|건너뛰기/i }).click({ timeout: 15_000 });
+    await dismissOnboardingIfVisible(page);
     await page.waitForFunction(() => location.pathname.includes("/marketplace"), null, { timeout: 30_000 });
   }
   if (!new URL(page.url()).pathname.includes("/marketplace")) {
@@ -235,6 +285,7 @@ async function runDesktopPersona(persona, dir) {
   const steps = [];
   try {
     await page.waitForLoadState("domcontentloaded", { timeout: 30_000 });
+    await dismissOnboardingIfVisible(page);
     await page.waitForFunction(() => Boolean(window.agentlas), null, { timeout: 30_000 });
     assertStep(steps, "desktop IPC bridge is exposed", true);
     await waitForNoOverflow(page, steps, "desktop home");
@@ -260,8 +311,8 @@ async function runDesktopPersona(persona, dir) {
     });
     await waitForNoOverflow(page, steps, "desktop firm detail");
 
-    await page.getByRole("button", { name: /CEO에게 명령|Command CEO/i }).click({ timeout: 15_000 });
-    await page.waitForFunction(() => location.href.includes("/chat"), null, { timeout: 20_000 });
+    await clickWithoutNavigationWait(page.getByRole("button", { name: /CEO에게 명령|Command CEO/i }));
+    await page.locator("textarea").first().waitFor({ state: "visible", timeout: 20_000 });
     await page.locator("textarea").fill(`${persona.role}: summarize the launch checklist without running external tools.`);
     await clickIfVisible(page.getByRole("button", { name: /추가|Add|More|plus/i }).first());
     await page.keyboard.press("Escape").catch(() => {});
@@ -358,7 +409,10 @@ async function main() {
   fs.mkdirSync(outputRoot, { recursive: true });
   const selected = selectedPersonas();
   const release = await fetch(`${webBase}/api/desktop/latest`).then((res) => res.json());
-  const results = await Promise.all(selected.map((persona) => runPersona(persona, release)));
+  const results = [];
+  for (const persona of selected) {
+    results.push(await runPersona(persona, release));
+  }
   const summary = {
     generatedAt: now.toISOString(),
     webBase,
