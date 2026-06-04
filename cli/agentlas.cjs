@@ -792,6 +792,57 @@ function ensureProjectMemoryCli(projectPath, projectName) {
       const now = new Date().toISOString();
       fs.writeFileSync(sitemap, JSON.stringify({ project: name, created_at: now, updated_at: now, nodes: [] }, null, 2), "utf8");
     }
+    const skillRegistryFile = arch.skillRegistryFile || "skill-registry.json";
+    const skillTrialsFile = arch.skillTrialsFile || "skill-trials.jsonl";
+    const curatorDecisionsFile = arch.curatorDecisionsFile || "curator-decisions.jsonl";
+    const skillRegistry = path.join(dir, skillRegistryFile);
+    if (!fs.existsSync(skillRegistry)) {
+      fs.writeFileSync(skillRegistry, JSON.stringify({
+        schemaVersion: "1.0",
+        kind: "agentlas-skill-lifecycle-registry",
+        state: "local_candidate",
+        projectId: name,
+        draftId: null,
+        defaultTier: "candidate",
+        runtimeFirstClassRecallEnabled: false,
+        predicatesRequired: true,
+        curatorQuarantineRequired: true,
+        evidenceLedgers: {
+          trials: `.agentlas/${skillTrialsFile}`,
+          curatorDecisions: `.agentlas/${curatorDecisionsFile}`,
+          memoryEvents: `.agentlas/${arch.logFile}`,
+        },
+        hardStops: [
+          "permission_change",
+          "credential_change",
+          "payment_or_billing_effect",
+          "regulated_or_irreversible_side_effect",
+          "same_authority_patch_and_validator",
+          "holdout_contamination",
+          "missing_rollback_snapshot",
+        ],
+        effectiveErrorBudgetTerms: [
+          "first_class_error_mass",
+          "quarantine_false_accept_estimate",
+          "blind_spot_estimate",
+          "drift_estimate",
+        ],
+        niches: [],
+        skills: [],
+        rolloutPolicy: {
+          staticOnlyCanApprove: false,
+          sandboxRequired: true,
+          holdoutRequired: true,
+          shadowRequiredForFastPathChanges: true,
+          lowRiskCanaryOnly: true,
+          severeFailureTolerance: 0,
+        },
+      }, null, 2), "utf8");
+    }
+    for (const fileName of [skillTrialsFile, curatorDecisionsFile]) {
+      const filePath = path.join(dir, fileName);
+      if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, "", "utf8");
+    }
     return dir;
   } catch { return null; }
 }

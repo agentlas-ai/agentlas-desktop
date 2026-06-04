@@ -23,28 +23,10 @@
       "indexed_by": "runtime SQLite context injection"
     },
     {
-      "scope": "team_memory",
-      "path": "/Volumes/X31/claude/appbridge/.claude/memory/",
-      "owner": "AppBridge Policy Office + Memory Curator",
-      "indexed_by": "llm-wiki:appbridge memory"
-    },
-    {
-      "scope": "team_memory",
-      "path": "/Volumes/X31/llm-wiki/domains/agentlas-architecture.md",
-      "owner": "Agentlas architecture maintainer",
-      "indexed_by": "llm-wiki domains"
-    },
-    {
       "scope": "project",
       "path": "signing/README.md",
       "owner": "Release maintainer",
       "indexed_by": "git-visible signing map; secret files under signing/ are local-only ignored"
-    },
-    {
-      "scope": "project",
-      "path": "/Users/mason/.claude/projects/-Volumes-X31-github-Agentlas-public-repo-output-agentlas-desktop/memory/",
-      "owner": "Claude project memory",
-      "indexed_by": "llm-wiki:agentlas_desktop_claude_memory claude_project_memory"
     }
   ],
   "scope_aliases": {

@@ -28,6 +28,9 @@ const data = {
   soulFile: m.PROJECT_SOUL_FILE,
   sitemapFile: m.SITEMAP_FILE,
   logFile: m.MEMORY_LOG_FILE,
+  skillRegistryFile: m.SKILL_REGISTRY_FILE,
+  skillTrialsFile: m.SKILL_TRIALS_FILE,
+  curatorDecisionsFile: m.CURATOR_DECISIONS_FILE,
   kinds: m.MEMORY_KINDS,
   scopes: m.MEMORY_SCOPES,
   agents: m.BUILTIN_AGENTS.map((a) => ({
