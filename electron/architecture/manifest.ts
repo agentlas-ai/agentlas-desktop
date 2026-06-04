@@ -10,9 +10,19 @@
 //   Built-in architecture agents are baked in here:
 //     - Agentlas Orchestrator (agentlas-orchestrator)      — default front door + auto routing
 //     - Agentlas App Builder  (agentlas-app-builder)       — Apps Generate + internal app factory route
+//     - Core Engine Meta-Agent (agentlas-core-engine-meta-agent-builtin)
+//                                                            — local single/team/packager builder route
 //     - Project PM Soul        (agent_project_pm_soul)      — per-project continuity + memory
 //     - Memory Curator         (agent_memory_curator_agent) — global curated memory writes
 //     - Task Bias Curator      (agentlas_task_bias)         — sitemap governance + bias audit
+//
+//   Agent/team creation itself routes to the built-in Agentlas Core Engine Meta-Agent.
+//   If the full public package is installed too, treat that package as the file-rich
+//   contract source. The public architecture/foldering origin is:
+//   agent_agentlas_core_engine_meta_agent with modes:
+//     - single-agent-creator
+//     - team-builder
+//     - agentlas-packager
 //
 // UPGRADE CONTRACT (so research changes never corrupt installs):
 //   1. Edit the agent prompts / contract below.
@@ -26,9 +36,10 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.5.3";
+export const ARCHITECTURE_VERSION = "1.5.5";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
+export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
 
 // ── Memory contract ────────────────────────────────────────────────────────
 // Mirrors agent_memory_curator_agent/docs/integration-contract.md + memory-taxonomy.md.
@@ -215,8 +226,13 @@ apply the same policy yourself.
   ask the user whether they want a dedicated Agentlas App before emitting manifests
   or creating files.
 - Agent creation, team design, skill generation, AGENTS.md/CLAUDE.md/GEMINI.md
-  packaging, Codex compatibility, or "make me an agent" -> an installed public
-  builder/package agent if present; otherwise provide a minimal local package plan.
+  packaging, Codex compatibility, or "make me an agent" -> Agentlas Core Engine
+  Meta-Agent (built-in). If the full public core package is also installed, use it
+  as the file-rich contract source; otherwise use the embedded contract. Route by mode:
+  single-agent-creator for one worker, team-builder for multi-role teams, and
+  agentlas-packager for existing agents/teams/repos/ZIPs that need Agentlas
+  architecture, public/private cleanup, runtime adapters, and verification.
+  Do not require Web-only SaaS billing/account/session code for local packaging.
 - Durable project continuity, decision logs, project memory, and workstream ownership
   -> Project PM Soul.
 - Memory write quality, request_context, scope conflicts, or "why can't it remember?"
@@ -230,6 +246,59 @@ apply the same policy yourself.
 When the selected route has skills, read their descriptions/triggers and auto-select
 the relevant skills even if the user did not name them. State the selected skill(s)
 and reason before acting, then continue.`;
+
+const CORE_META_AGENT_PROMPT = `# Agentlas Core Engine Meta-Agent (built-in)
+
+You are the local Agentlas Core Engine Meta-Agent for Agentlas Desktop and the
+Agentlas terminal. You create or package agent systems in the Agentlas architecture
+while staying compatible with local runtimes such as Codex, Claude, Gemini, OpenCode,
+Hermes, and other folder-based agent hosts.
+
+## Source contract
+Mirror the public core architecture and foldering contract from
+agent_agentlas_core_engine_meta_agent. This built-in prompt is the local runtime
+distillation, not a forked original. If the full public core package is installed
+or available in the workspace, read and follow that package first.
+
+## Modes
+Auto-classify each request:
+- single-agent-creator: create one installable, self-evolving worker.
+- team-builder: create a multi-role team with HQ/orchestrator, builders, PM Soul,
+  Memory Curator, Policy Gate, QA/evidence gate, handoffs, eval, memory, and runtime
+  adapters.
+- agentlas-packager: inspect an existing prompt, agent, team, repo, or ZIP and
+  repair/package it into Agentlas architecture.
+
+Ask at most the missing questions needed to avoid a wrong package. If the user gave
+enough context, proceed without an interview.
+
+## Required Agentlas architecture
+Every package you design should include the pieces that make it Agentlas, scaled to
+the task size:
+- visible role/folder architecture, not a paper-only description;
+- .agentlas activation metadata, memory-map, sitemap, memory tickets, and evidence;
+- PM Soul or project owner loop for continuity;
+- Memory Curator rules for durable memory, dedup, scope, and redaction;
+- task-bias / sitemap governance so stale or risky surfaces are revisited;
+- self-evolution rules with changelog, eval, rollback, and promotion criteria;
+- hierarchy when useful: HQ/orchestrator -> builders/workers -> QA/evidence gate;
+- runtime adapters for AGENTS.md plus Claude/Codex/Gemini/OpenCode-style hosts when
+  requested or detectable.
+
+## Local runtime boundaries
+- Do not copy Web-only SaaS implementation into local packages: billing, credits,
+  accounts, workspace sessions, OAuth token storage, provider-cost telemetry, hosted
+  rate limits, or database-backed SaaS routes.
+- Do not assume .claude is required. Prefer .agentlas as the shared architecture
+  substrate, then add thin runtime adapters such as AGENTS.md, CLAUDE.md, GEMINI.md,
+  .agents/skills, or .claude only when that host needs them.
+- Avoid slug collisions with installed public packages; built-in desktop agents are
+  background runtime control routes.
+
+## Output contract
+Return concrete files, folder layout, prompts, memory rules, verification steps, and
+sync notes. For package work, name what was inspected, what was added or rejected,
+what remains private, and how to verify the result.`;
 
 const APP_BUILDER_PROMPT = `# Agentlas App Builder (built-in)
 
@@ -401,6 +470,17 @@ export const BUILTIN_AGENTS: readonly BuiltinAgentDef[] = [
     visibility: "background",
     tone: "peach",
     systemPrompt: APP_BUILDER_PROMPT,
+  },
+  {
+    slug: CORE_META_AGENT_SLUG,
+    name: "Agentlas 코어 메타에이전트",
+    nameEn: "Agentlas Core Engine Meta-Agent",
+    tagline: "싱글 에이전트·팀·기존 에이전트 패키징을 Agentlas 구조로 생성",
+    taglineEn: "Builds single agents, teams, and Agentlas packages from existing agents",
+    role: "builder",
+    visibility: "background",
+    tone: "purple",
+    systemPrompt: CORE_META_AGENT_PROMPT,
   },
   {
     slug: "agentlas-pm-soul",

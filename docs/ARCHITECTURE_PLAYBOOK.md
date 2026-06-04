@@ -15,6 +15,7 @@ Agentlas runs the same *research architectures* in two places, with different ho
 
 Both consume the **same source-of-truth agent repos**:
 
+- `agent_agentlas_core_engine_meta_agent` — single-agent/team/package meta-agent contract
 - `agent_project_pm_soul` — per-project continuity + memory (PM Soul)
 - `agent_memory_curator_agent` — curated durable memory (Memory Curator)
 - `agentlas_task_bias` — AI Sitemap governance to reduce task-selection bias
@@ -28,6 +29,13 @@ On first launch (and on every CLI run), the app seeds the local **built-in agent
 (`installed_agents.builtin = 1`) and a **memory substrate**. Built-in agents are
 runtime control routes, so they ship as `background` and stay out of user-facing
 agent lists:
+
+- Agentlas Orchestrator
+- Agentlas App Builder
+- Agentlas Core Engine Meta-Agent
+- Project PM Soul
+- Memory Curator
+- Task Bias Curator
 
 ```
 electron/architecture/
