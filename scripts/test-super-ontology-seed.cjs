@@ -12,6 +12,7 @@ const {
   SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE,
   SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE,
   SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE,
+  SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
   SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
@@ -40,6 +41,7 @@ try {
   const adversarialProvenancePath = path.join(memoryDir, SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE);
   const epistemicCalibrationPath = path.join(memoryDir, SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE);
   const semanticAlignmentPath = path.join(memoryDir, SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE);
+  const resilienceControlPath = path.join(memoryDir, SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE);
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(taskCoveragePath), "super ontology task coverage should be seeded");
@@ -50,6 +52,7 @@ try {
   assert.ok(fs.existsSync(adversarialProvenancePath), "super ontology adversarial provenance should be seeded");
   assert.ok(fs.existsSync(epistemicCalibrationPath), "super ontology epistemic calibration should be seeded");
   assert.ok(fs.existsSync(semanticAlignmentPath), "super ontology semantic alignment should be seeded");
+  assert.ok(fs.existsSync(resilienceControlPath), "super ontology resilience control should be seeded");
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
   assert.ok(fs.existsSync(memoryBridgePath), "super ontology memory bridge ledger should be seeded");
@@ -76,6 +79,9 @@ try {
   assert.equal(contract.promotionPolicy.semanticAlignmentRequired, true);
   assert.equal(contract.promotionPolicy.highAuthorityAlignmentReviewRequired, true);
   assert.equal(contract.promotionPolicy.unreviewedSemanticRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.resilienceControlRequired, true);
+  assert.equal(contract.promotionPolicy.degradedRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.emergencyStopBypassBlocked, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
@@ -97,6 +103,10 @@ try {
     contract.layers.includes("semantic_alignment_contract"),
     "contract should include semantic alignment gate",
   );
+  assert.ok(
+    contract.layers.includes("resilience_control_contract"),
+    "contract should include resilience control gate",
+  );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(contract.evidenceLedgers.taskCoverage, `.agentlas/${SUPER_ONTOLOGY_TASK_COVERAGE_FILE}`);
   assert.equal(contract.evidenceLedgers.contextualFlow, `.agentlas/${SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE}`);
@@ -117,6 +127,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.semanticAlignment,
     `.agentlas/${SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.resilienceControl,
+    `.agentlas/${SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE}`,
   );
   const taskCoverage = JSON.parse(fs.readFileSync(taskCoveragePath, "utf8"));
   assert.equal(taskCoverage.kind, "agentlas-super-ontology-task-coverage");
@@ -308,6 +322,45 @@ try {
   assert.ok(
     semanticAlignment.hardStops.includes("same_individual_without_stable_identifier"),
     "semantic alignment should require stable identity evidence",
+  );
+  const resilienceControl = JSON.parse(fs.readFileSync(resilienceControlPath, "utf8"));
+  assert.equal(resilienceControl.kind, "agentlas-super-ontology-resilience-control");
+  assert.equal(resilienceControl.runtimePromotionAllowed, false);
+  assert.equal(
+    resilienceControl.defaultDecision,
+    "degrade_authority_before_runtime_graph_memory_tool_or_sync_write",
+  );
+  assert.ok(
+    resilienceControl.controlLoopPhases.includes("monitor"),
+    "resilience control should include monitor phase",
+  );
+  assert.ok(
+    resilienceControl.controlLoopPhases.includes("sync"),
+    "resilience control should include sync phase",
+  );
+  assert.ok(
+    resilienceControl.operatingModes.includes("read_only"),
+    "resilience control should include read-only mode",
+  );
+  assert.ok(
+    resilienceControl.operatingModes.includes("emergency_stop"),
+    "resilience control should include emergency stop mode",
+  );
+  assert.ok(
+    resilienceControl.degradationSignals.includes("validator_disagreement"),
+    "resilience control should include validator disagreement",
+  );
+  assert.ok(
+    resilienceControl.degradationSignals.includes("memory_curator_backlog"),
+    "resilience control should include curator backlog",
+  );
+  assert.ok(
+    resilienceControl.hardStops.includes("validator_disagreement_to_graph_write"),
+    "resilience control should block validator disagreement to graph write",
+  );
+  assert.ok(
+    resilienceControl.hardStops.includes("emergency_stop_bypass_by_route"),
+    "resilience control should block emergency stop route bypass",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");
