@@ -11,6 +11,7 @@ const {
   SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE,
   SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE,
   SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE,
+  SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
   SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
@@ -38,6 +39,7 @@ try {
   const knowledgeHomeostasisPath = path.join(memoryDir, SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE);
   const adversarialProvenancePath = path.join(memoryDir, SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE);
   const epistemicCalibrationPath = path.join(memoryDir, SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE);
+  const semanticAlignmentPath = path.join(memoryDir, SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE);
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(taskCoveragePath), "super ontology task coverage should be seeded");
@@ -47,6 +49,7 @@ try {
   assert.ok(fs.existsSync(knowledgeHomeostasisPath), "super ontology knowledge homeostasis should be seeded");
   assert.ok(fs.existsSync(adversarialProvenancePath), "super ontology adversarial provenance should be seeded");
   assert.ok(fs.existsSync(epistemicCalibrationPath), "super ontology epistemic calibration should be seeded");
+  assert.ok(fs.existsSync(semanticAlignmentPath), "super ontology semantic alignment should be seeded");
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
   assert.ok(fs.existsSync(memoryBridgePath), "super ontology memory bridge ledger should be seeded");
@@ -70,6 +73,9 @@ try {
   assert.equal(contract.promotionPolicy.untrustedSourceRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.epistemicCalibrationRequired, true);
   assert.equal(contract.promotionPolicy.uncalibratedRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.semanticAlignmentRequired, true);
+  assert.equal(contract.promotionPolicy.highAuthorityAlignmentReviewRequired, true);
+  assert.equal(contract.promotionPolicy.unreviewedSemanticRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
@@ -87,6 +93,10 @@ try {
     contract.layers.includes("epistemic_calibration_contract"),
     "contract should include epistemic calibration gate",
   );
+  assert.ok(
+    contract.layers.includes("semantic_alignment_contract"),
+    "contract should include semantic alignment gate",
+  );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(contract.evidenceLedgers.taskCoverage, `.agentlas/${SUPER_ONTOLOGY_TASK_COVERAGE_FILE}`);
   assert.equal(contract.evidenceLedgers.contextualFlow, `.agentlas/${SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE}`);
@@ -103,6 +113,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.epistemicCalibration,
     `.agentlas/${SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.semanticAlignment,
+    `.agentlas/${SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE}`,
   );
   const taskCoverage = JSON.parse(fs.readFileSync(taskCoveragePath, "utf8"));
   assert.equal(taskCoverage.kind, "agentlas-super-ontology-task-coverage");
@@ -251,6 +265,49 @@ try {
   assert.ok(
     epistemicCalibration.hardStops.includes("uncalibrated_route_sync"),
     "epistemic calibration should block uncalibrated route sync",
+  );
+  const semanticAlignment = JSON.parse(fs.readFileSync(semanticAlignmentPath, "utf8"));
+  assert.equal(semanticAlignment.kind, "agentlas-super-ontology-semantic-alignment");
+  assert.equal(semanticAlignment.runtimePromotionAllowed, false);
+  assert.equal(
+    semanticAlignment.defaultDecision,
+    "scoped_candidate_alignment_required_before_graph_memory_or_public_seed",
+  );
+  assert.ok(
+    semanticAlignment.candidateRelations.includes("exact_match"),
+    "semantic alignment should include exact match",
+  );
+  assert.ok(
+    semanticAlignment.candidateRelations.includes("same_individual"),
+    "semantic alignment should include same-individual relation",
+  );
+  assert.ok(
+    semanticAlignment.candidateRelations.includes("conflict"),
+    "semantic alignment should include conflict relation",
+  );
+  assert.ok(
+    semanticAlignment.validationChecks.includes("disjointness_check"),
+    "semantic alignment should include disjointness check",
+  );
+  assert.ok(
+    semanticAlignment.validationChecks.includes("transitivity_check"),
+    "semantic alignment should include transitivity check",
+  );
+  assert.ok(
+    semanticAlignment.validationChecks.includes("human_owner_review"),
+    "semantic alignment should include human owner review",
+  );
+  assert.ok(
+    semanticAlignment.hardStops.includes("same_label_as_same_meaning"),
+    "semantic alignment should block same label as same meaning",
+  );
+  assert.ok(
+    semanticAlignment.hardStops.includes("embedding_similarity_as_exact_match"),
+    "semantic alignment should block embedding similarity as exact match",
+  );
+  assert.ok(
+    semanticAlignment.hardStops.includes("same_individual_without_stable_identifier"),
+    "semantic alignment should require stable identity evidence",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");
