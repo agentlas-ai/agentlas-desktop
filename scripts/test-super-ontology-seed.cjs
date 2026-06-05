@@ -9,6 +9,7 @@ const {
   SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE,
   SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE,
   SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE,
+  SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
   SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
@@ -34,6 +35,7 @@ try {
   const contextualFlowPath = path.join(memoryDir, SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE);
   const causalImpactPath = path.join(memoryDir, SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE);
   const knowledgeHomeostasisPath = path.join(memoryDir, SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE);
+  const adversarialProvenancePath = path.join(memoryDir, SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE);
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(taskCoveragePath), "super ontology task coverage should be seeded");
@@ -41,6 +43,7 @@ try {
   assert.ok(fs.existsSync(contextualFlowPath), "super ontology contextual flow should be seeded");
   assert.ok(fs.existsSync(causalImpactPath), "super ontology causal impact should be seeded");
   assert.ok(fs.existsSync(knowledgeHomeostasisPath), "super ontology knowledge homeostasis should be seeded");
+  assert.ok(fs.existsSync(adversarialProvenancePath), "super ontology adversarial provenance should be seeded");
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
   assert.ok(fs.existsSync(memoryBridgePath), "super ontology memory bridge ledger should be seeded");
@@ -60,6 +63,8 @@ try {
   assert.equal(contract.promotionPolicy.causalImpactRequired, true);
   assert.equal(contract.promotionPolicy.assuranceCaseRequired, true);
   assert.equal(contract.promotionPolicy.knowledgeHomeostasisRequired, true);
+  assert.equal(contract.promotionPolicy.adversarialProvenanceRequired, true);
+  assert.equal(contract.promotionPolicy.untrustedSourceRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
@@ -69,6 +74,10 @@ try {
   assert.ok(contract.layers.includes("causal_impact_contract"), "contract should include causal impact gate");
   assert.ok(contract.layers.includes("assurance_case_contract"), "contract should include assurance case gate");
   assert.ok(contract.layers.includes("knowledge_homeostasis_contract"), "contract should include knowledge homeostasis gate");
+  assert.ok(
+    contract.layers.includes("adversarial_provenance_contract"),
+    "contract should include adversarial provenance gate",
+  );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(contract.evidenceLedgers.taskCoverage, `.agentlas/${SUPER_ONTOLOGY_TASK_COVERAGE_FILE}`);
   assert.equal(contract.evidenceLedgers.contextualFlow, `.agentlas/${SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE}`);
@@ -77,6 +86,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.knowledgeHomeostasis,
     `.agentlas/${SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.adversarialProvenance,
+    `.agentlas/${SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE}`,
   );
   const taskCoverage = JSON.parse(fs.readFileSync(taskCoveragePath, "utf8"));
   assert.equal(taskCoverage.kind, "agentlas-super-ontology-task-coverage");
@@ -159,6 +172,33 @@ try {
   assert.ok(
     knowledgeHomeostasis.hardStops.includes("critical_homeostasis_runtime_write"),
     "knowledge homeostasis should block critical runtime writes",
+  );
+  const adversarialProvenance = JSON.parse(fs.readFileSync(adversarialProvenancePath, "utf8"));
+  assert.equal(adversarialProvenance.kind, "agentlas-super-ontology-adversarial-provenance");
+  assert.equal(adversarialProvenance.runtimePromotionAllowed, false);
+  assert.equal(
+    adversarialProvenance.defaultDecision,
+    "zero_trust_provenance_required_before_retrieval_memory_tool_or_public_seed",
+  );
+  assert.ok(
+    adversarialProvenance.sourceChannels.includes("upload"),
+    "adversarial provenance should include upload channel",
+  );
+  assert.ok(
+    adversarialProvenance.sourceChannels.includes("appbridge_route"),
+    "adversarial provenance should include AppBridge route channel",
+  );
+  assert.ok(
+    adversarialProvenance.attackVectors.includes("prompt_injection"),
+    "adversarial provenance should include prompt injection",
+  );
+  assert.ok(
+    adversarialProvenance.attackVectors.includes("tool_output_tampering"),
+    "adversarial provenance should include tool-output tampering",
+  );
+  assert.ok(
+    adversarialProvenance.hardStops.includes("poisoned_source_to_memory"),
+    "adversarial provenance should block poisoned source to memory",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");

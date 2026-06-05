@@ -19,6 +19,7 @@ import {
   SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE,
   SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE,
   SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE,
+  SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
   SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
   SUPER_ONTOLOGY_REPLAYS_FILE,
@@ -150,6 +151,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         "causal_impact_contract",
         "assurance_case_contract",
         "knowledge_homeostasis_contract",
+        "adversarial_provenance_contract",
         "promotion_readiness",
         "promotion_replay_drill",
         "architecture_sync_review",
@@ -164,6 +166,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         causalImpact: `.agentlas/${SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE}`,
         assuranceCase: `.agentlas/${SUPER_ONTOLOGY_ASSURANCE_CASE_FILE}`,
         knowledgeHomeostasis: `.agentlas/${SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE}`,
+        adversarialProvenance: `.agentlas/${SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE}`,
       },
       hardStops: [
         "zero_error_claim",
@@ -184,6 +187,12 @@ function superOntologyContractSkeleton(projectName: string): string {
         "error_budget_overrun_continues",
         "critical_homeostasis_runtime_write",
         "privacy_incident_public_export",
+        "missing_adversarial_provenance_contract",
+        "prompt_injection_as_instruction",
+        "forged_provenance_as_trusted_source",
+        "poisoned_source_to_memory",
+        "tool_output_tampering_to_action",
+        "stale_trusted_source_replay_as_current_truth",
         "correlation_as_causation",
         "unsupported_claim",
         "direct_durable_memory_write",
@@ -201,6 +210,8 @@ function superOntologyContractSkeleton(projectName: string): string {
         causalImpactRequired: true,
         assuranceCaseRequired: true,
         knowledgeHomeostasisRequired: true,
+        adversarialProvenanceRequired: true,
+        untrustedSourceRuntimeWritesBlocked: true,
         directDurableMemoryWritesBlocked: true,
       },
       surfacePolicy: {
@@ -517,6 +528,146 @@ function superOntologyKnowledgeHomeostasisSkeleton(projectName: string): string 
   );
 }
 
+function superOntologyAdversarialProvenanceSkeleton(projectName: string): string {
+  return JSON.stringify(
+    {
+      schemaVersion: "1.0",
+      kind: "agentlas-super-ontology-adversarial-provenance",
+      state: "local_candidate",
+      projectId: projectName,
+      draftId: null,
+      runtimePromotionAllowed: false,
+      defaultDecision: "zero_trust_provenance_required_before_retrieval_memory_tool_or_public_seed",
+      sourceChannels: [
+        "upload",
+        "web",
+        "email",
+        "chat",
+        "tool_response",
+        "connector",
+        "memory_recall",
+        "public_repo",
+        "media_asset",
+        "appbridge_route",
+        "generated_artifact",
+        "dataset",
+      ],
+      attackVectors: [
+        "prompt_injection",
+        "instruction_smuggling",
+        "data_poisoning",
+        "provenance_forgery",
+        "citation_spoofing",
+        "tool_output_tampering",
+        "ocr_hidden_text",
+        "cross_context_exfiltration",
+        "supply_chain_tampering",
+        "memory_poisoning",
+        "social_engineering",
+        "model_policy_bypass",
+        "media_provenance_conflict",
+        "stale_trusted_source_replay",
+      ],
+      trustBoundaries: [
+        "untrusted_external",
+        "user_private",
+        "company_internal",
+        "customer_confidential",
+        "public_web",
+        "runtime_tool",
+        "agent_internal",
+        "memory_store",
+        "release_artifact",
+      ],
+      instructionPolicies: [
+        "treat_as_data_only",
+        "strip_instructions",
+        "quote_only",
+        "sandbox_tool_output",
+        "require_signature",
+        "require_human_review",
+        "block",
+      ],
+      retrievalPolicies: [
+        "exclude_from_retrieval",
+        "metadata_only",
+        "citation_only",
+        "quarantined_candidate",
+        "low_trust_retrieval",
+        "allow_after_verification",
+      ],
+      memoryPolicies: [
+        "no_memory",
+        "quarantine_ticket",
+        "redact_then_ticket",
+        "supersede_after_review",
+        "discard",
+      ],
+      toolPolicies: [
+        "no_tool_use",
+        "dry_run_only",
+        "allowlisted_read_only",
+        "require_human_approval",
+        "block_external_effect",
+      ],
+      promotionDecisions: [
+        "allow_read",
+        "quarantine",
+        "review_required",
+        "shadow_required",
+        "block",
+        "retire_source",
+      ],
+      requiredParameters: [
+        "source_channel",
+        "attack_vector",
+        "trust_boundary",
+        "claimed_authority",
+        "observed_artifact",
+        "provenance_evidence",
+        "integrity_checks",
+        "instruction_policy",
+        "retrieval_policy",
+        "memory_policy",
+        "tool_policy",
+        "promotion_decision",
+        "required_controls",
+        "must_not_do",
+        "evidence_refs",
+        "rollback_plan",
+      ],
+      researchBasis: [
+        "owasp_llm_top10",
+        "mitre_atlas",
+        "nist_adversarial_ml",
+        "slsa_provenance",
+        "in_toto_attestation",
+        "c2pa_content_credentials",
+        "zero_trust_architecture",
+        "information_flow_control",
+        "adversarial_rag",
+        "secure_rag_prompt_injection",
+      ],
+      hardStops: [
+        "prompt_injection_as_instruction",
+        "instruction_smuggling_as_policy",
+        "poisoned_source_to_memory",
+        "forged_provenance_as_trusted_source",
+        "spoofed_citation_as_grounded_fact",
+        "tool_output_tampering_to_action",
+        "hidden_ocr_instruction_as_user_intent",
+        "cross_context_exfiltration",
+        "unsigned_release_artifact",
+        "route_output_as_source_write_authority",
+        "stale_trusted_source_replay_as_current_truth",
+        "missing_adversarial_provenance_evidence",
+      ],
+    },
+    null,
+    2,
+  );
+}
+
 function superOntologyTaskCoverageSkeleton(projectName: string): string {
   return JSON.stringify(
     {
@@ -631,6 +782,15 @@ export function ensureProjectMemory(
     const superOntologyKnowledgeHomeostasis = path.join(dir, SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE);
     if (!fs.existsSync(superOntologyKnowledgeHomeostasis)) {
       fs.writeFileSync(superOntologyKnowledgeHomeostasis, superOntologyKnowledgeHomeostasisSkeleton(name), "utf8");
+    }
+
+    const superOntologyAdversarialProvenance = path.join(dir, SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE);
+    if (!fs.existsSync(superOntologyAdversarialProvenance)) {
+      fs.writeFileSync(
+        superOntologyAdversarialProvenance,
+        superOntologyAdversarialProvenanceSkeleton(name),
+        "utf8",
+      );
     }
 
     for (const fileName of [
