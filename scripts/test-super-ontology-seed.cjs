@@ -13,6 +13,7 @@ const {
   SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE,
   SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE,
   SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE,
+  SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
   SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
@@ -42,6 +43,7 @@ try {
   const epistemicCalibrationPath = path.join(memoryDir, SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE);
   const semanticAlignmentPath = path.join(memoryDir, SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE);
   const resilienceControlPath = path.join(memoryDir, SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE);
+  const invariantVerificationPath = path.join(memoryDir, SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE);
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(taskCoveragePath), "super ontology task coverage should be seeded");
@@ -53,6 +55,7 @@ try {
   assert.ok(fs.existsSync(epistemicCalibrationPath), "super ontology epistemic calibration should be seeded");
   assert.ok(fs.existsSync(semanticAlignmentPath), "super ontology semantic alignment should be seeded");
   assert.ok(fs.existsSync(resilienceControlPath), "super ontology resilience control should be seeded");
+  assert.ok(fs.existsSync(invariantVerificationPath), "super ontology invariant verification should be seeded");
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
   assert.ok(fs.existsSync(memoryBridgePath), "super ontology memory bridge ledger should be seeded");
@@ -82,6 +85,9 @@ try {
   assert.equal(contract.promotionPolicy.resilienceControlRequired, true);
   assert.equal(contract.promotionPolicy.degradedRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.emergencyStopBypassBlocked, true);
+  assert.equal(contract.promotionPolicy.invariantVerificationRequired, true);
+  assert.equal(contract.promotionPolicy.runtimeInvariantWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.forbiddenTransitionBlocked, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
@@ -107,6 +113,10 @@ try {
     contract.layers.includes("resilience_control_contract"),
     "contract should include resilience control gate",
   );
+  assert.ok(
+    contract.layers.includes("invariant_verification_contract"),
+    "contract should include invariant verification gate",
+  );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(contract.evidenceLedgers.taskCoverage, `.agentlas/${SUPER_ONTOLOGY_TASK_COVERAGE_FILE}`);
   assert.equal(contract.evidenceLedgers.contextualFlow, `.agentlas/${SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE}`);
@@ -131,6 +141,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.resilienceControl,
     `.agentlas/${SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.invariantVerification,
+    `.agentlas/${SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE}`,
   );
   const taskCoverage = JSON.parse(fs.readFileSync(taskCoveragePath, "utf8"));
   assert.equal(taskCoverage.kind, "agentlas-super-ontology-task-coverage");
@@ -361,6 +375,45 @@ try {
   assert.ok(
     resilienceControl.hardStops.includes("emergency_stop_bypass_by_route"),
     "resilience control should block emergency stop route bypass",
+  );
+  const invariantVerification = JSON.parse(fs.readFileSync(invariantVerificationPath, "utf8"));
+  assert.equal(invariantVerification.kind, "agentlas-super-ontology-invariant-verification");
+  assert.equal(invariantVerification.runtimePromotionAllowed, false);
+  assert.equal(
+    invariantVerification.defaultDecision,
+    "runtime_monitor_required_before_graph_memory_tool_route_release_or_public_write",
+  );
+  assert.ok(
+    invariantVerification.eventStreams.includes("memory_ticket"),
+    "invariant verification should include memory ticket stream",
+  );
+  assert.ok(
+    invariantVerification.eventStreams.includes("graph_write"),
+    "invariant verification should include graph write stream",
+  );
+  assert.ok(
+    invariantVerification.eventStreams.includes("public_export"),
+    "invariant verification should include public export stream",
+  );
+  assert.ok(
+    invariantVerification.eventStreams.includes("route_sync"),
+    "invariant verification should include route sync stream",
+  );
+  assert.ok(
+    invariantVerification.monitors.includes("temporal_logic"),
+    "invariant verification should include temporal logic monitor",
+  );
+  assert.ok(
+    invariantVerification.monitors.includes("curator_ticket_audit"),
+    "invariant verification should include curator ticket audit monitor",
+  );
+  assert.ok(
+    invariantVerification.hardStops.includes("graph_write_without_evidence_invariant"),
+    "invariant verification should block graph write without evidence invariant",
+  );
+  assert.ok(
+    invariantVerification.hardStops.includes("emergency_stop_transition_bypassed"),
+    "invariant verification should block emergency stop transition bypass",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");

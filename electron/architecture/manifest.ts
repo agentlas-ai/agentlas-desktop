@@ -36,7 +36,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.5.17";
+export const ARCHITECTURE_VERSION = "1.5.18";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -108,6 +108,7 @@ export const SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE = "super-ontology-advers
 export const SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE = "super-ontology-epistemic-calibration.json";
 export const SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE = "super-ontology-semantic-alignment.json";
 export const SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE = "super-ontology-resilience-control.json";
+export const SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE = "super-ontology-invariant-verification.json";
 export const SUPER_ONTOLOGY_REPLAYS_FILE = "super-ontology-replays.jsonl";
 export const SUPER_ONTOLOGY_EVIDENCE_FILE = "super-ontology-evidence.jsonl";
 export const SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE = "super-ontology-memory-bridge.jsonl";

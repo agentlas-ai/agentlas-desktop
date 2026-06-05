@@ -23,6 +23,7 @@ import {
   SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE,
   SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE,
   SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE,
+  SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
   SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
   SUPER_ONTOLOGY_REPLAYS_FILE,
@@ -158,6 +159,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         "epistemic_calibration_contract",
         "semantic_alignment_contract",
         "resilience_control_contract",
+        "invariant_verification_contract",
         "promotion_readiness",
         "promotion_replay_drill",
         "architecture_sync_review",
@@ -176,6 +178,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         epistemicCalibration: `.agentlas/${SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE}`,
         semanticAlignment: `.agentlas/${SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE}`,
         resilienceControl: `.agentlas/${SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE}`,
+        invariantVerification: `.agentlas/${SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE}`,
       },
       hardStops: [
         "zero_error_claim",
@@ -227,6 +230,16 @@ function superOntologyContractSkeleton(projectName: string): string {
         "sync_drift_to_release_surface",
         "degraded_parser_to_ontology_class",
         "emergency_stop_bypass_by_route",
+        "missing_invariant_verification_contract",
+        "memory_write_without_ticket_invariant",
+        "graph_write_without_evidence_invariant",
+        "tool_action_without_authority_invariant",
+        "public_export_without_flow_invariant",
+        "route_sync_without_source_contract_invariant",
+        "rollback_not_observed_after_violation",
+        "emergency_stop_transition_bypassed",
+        "unordered_multi_agent_write",
+        "non_idempotent_replay_mutation",
         "correlation_as_causation",
         "unsupported_claim",
         "direct_durable_memory_write",
@@ -254,6 +267,9 @@ function superOntologyContractSkeleton(projectName: string): string {
         resilienceControlRequired: true,
         degradedRuntimeWritesBlocked: true,
         emergencyStopBypassBlocked: true,
+        invariantVerificationRequired: true,
+        runtimeInvariantWritesBlocked: true,
+        forbiddenTransitionBlocked: true,
         directDurableMemoryWritesBlocked: true,
       },
       surfacePolicy: {
@@ -1145,6 +1161,99 @@ function superOntologyResilienceControlSkeleton(projectName: string): string {
   );
 }
 
+function superOntologyInvariantVerificationSkeleton(projectName: string): string {
+  return JSON.stringify(
+    {
+      schemaVersion: "1.0",
+      kind: "agentlas-super-ontology-invariant-verification",
+      state: "local_candidate",
+      projectId: projectName,
+      draftId: null,
+      runtimePromotionAllowed: false,
+      defaultDecision: "runtime_monitor_required_before_graph_memory_tool_route_release_or_public_write",
+      eventStreams: [
+        "source_intake",
+        "evidence_packet",
+        "belief_update",
+        "semantic_alignment",
+        "resilience_mode",
+        "memory_ticket",
+        "graph_write",
+        "tool_call",
+        "public_export",
+        "route_sync",
+        "release_seed",
+        "rollback",
+        "emergency_stop",
+      ],
+      invariantTypes: [
+        "safety",
+        "liveness",
+        "ordering",
+        "separation",
+        "cardinality",
+        "idempotency",
+        "provenance",
+        "authority",
+        "consent",
+        "rollback",
+        "audit",
+        "determinism",
+      ],
+      temporalOperators: ["always", "never", "eventually", "until", "before", "after", "within", "once"],
+      monitors: [
+        "json_schema",
+        "event_sequence",
+        "state_machine",
+        "temporal_logic",
+        "property_test",
+        "shadow_replay",
+        "model_check",
+        "sync_check",
+        "curator_ticket_audit",
+        "human_owner_review",
+      ],
+      violationActions: [
+        "block",
+        "reject",
+        "quarantine",
+        "rollback",
+        "emergency_stop",
+        "ask_clarify",
+        "review_required",
+        "shadow_only",
+      ],
+      researchBasis: [
+        "runtime_verification",
+        "temporal_logic",
+        "model_checking",
+        "contract_based_design",
+        "assume_guarantee_contracts",
+        "finite_state_monitor",
+        "agent_runtime_monitoring",
+        "formal_methods_for_planning",
+        "formal_skill_verification",
+        "multi_agent_safety_invariants",
+        "memory_safety_invariants",
+        "audit_log_invariants",
+      ],
+      hardStops: [
+        "memory_write_without_ticket_invariant",
+        "graph_write_without_evidence_invariant",
+        "tool_action_without_authority_invariant",
+        "public_export_without_flow_invariant",
+        "route_sync_without_source_contract_invariant",
+        "rollback_not_observed_after_violation",
+        "emergency_stop_transition_bypassed",
+        "unordered_multi_agent_write",
+        "non_idempotent_replay_mutation",
+      ],
+    },
+    null,
+    2,
+  );
+}
+
 function superOntologyTaskCoverageSkeleton(projectName: string): string {
   return JSON.stringify(
     {
@@ -1293,6 +1402,15 @@ export function ensureProjectMemory(
       fs.writeFileSync(
         superOntologyResilienceControl,
         superOntologyResilienceControlSkeleton(name),
+        "utf8",
+      );
+    }
+
+    const superOntologyInvariantVerification = path.join(dir, SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE);
+    if (!fs.existsSync(superOntologyInvariantVerification)) {
+      fs.writeFileSync(
+        superOntologyInvariantVerification,
+        superOntologyInvariantVerificationSkeleton(name),
         "utf8",
       );
     }
