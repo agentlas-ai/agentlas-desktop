@@ -36,7 +36,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.5.14";
+export const ARCHITECTURE_VERSION = "1.5.15";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -105,6 +105,7 @@ export const SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE = "super-ontology-contextual-fl
 export const SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE = "super-ontology-causal-impact.json";
 export const SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE = "super-ontology-knowledge-homeostasis.json";
 export const SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE = "super-ontology-adversarial-provenance.json";
+export const SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE = "super-ontology-epistemic-calibration.json";
 export const SUPER_ONTOLOGY_REPLAYS_FILE = "super-ontology-replays.jsonl";
 export const SUPER_ONTOLOGY_EVIDENCE_FILE = "super-ontology-evidence.jsonl";
 export const SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE = "super-ontology-memory-bridge.jsonl";
@@ -297,6 +298,7 @@ the task size:
   super-ontology-causal-impact,
   super-ontology-knowledge-homeostasis,
   super-ontology-adversarial-provenance,
+  super-ontology-epistemic-calibration,
   super-ontology-replays,
   super-ontology-evidence, and super-ontology-memory-bridge files as
   candidate-only adaptive knowledge governance metadata. Task coverage must
@@ -319,10 +321,14 @@ the task size:
   credentials prove they can be read. They must block prompt injection, poisoned
   sources, forged provenance, spoofed citations, hidden OCR instructions,
   tool-output tampering, stale trusted-source replay, and unsigned release
-  artifacts from becoming retrieval, memory, tool, or public seed authority. Keep
+  artifacts from becoming retrieval, memory, tool, or public seed authority.
+  Epistemic calibration contracts must block missing evidence, source conflict,
+  stale evidence, low retrieval relevance, model disagreement, and uncalibrated
+  confidence from becoming answers, memory writes, tool actions, route sync, or
+  public artifacts. Keep
   graph writes and direct durable memory writes disabled until
   shadow/canary/rollback evidence, homeostasis review, adversarial provenance
-  review, and Memory Curator review exist;
+  review, epistemic calibration review, and Memory Curator review exist;
 - PM Soul or project owner loop for continuity;
 - Memory Curator rules for durable memory, dedup, scope, and redaction;
 - task-bias / sitemap governance so stale or risky surfaces are revisited;
@@ -332,8 +338,8 @@ the task size:
 - Super Ontology graph writes stay disabled until source intake, evidence
   packets, belief ledger, knowledge capsules, affordance binding,
   contextual flow review, causal impact review, knowledge homeostasis review,
-  adversarial provenance review, shadow/canary replay, rollback, and sync review
-  approve a later phase;
+  adversarial provenance review, epistemic calibration review, shadow/canary
+  replay, rollback, and sync review approve a later phase;
 - hierarchy when useful: HQ/orchestrator -> builders/workers -> QA/evidence gate;
 - runtime adapters for AGENTS.md plus Claude/Codex/Gemini/OpenCode-style hosts when
   requested or detectable.

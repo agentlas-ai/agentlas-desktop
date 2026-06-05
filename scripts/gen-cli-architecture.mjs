@@ -38,6 +38,7 @@ const data = {
   superOntologyCausalImpactFile: m.SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE,
   superOntologyKnowledgeHomeostasisFile: m.SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE,
   superOntologyAdversarialProvenanceFile: m.SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE,
+  superOntologyEpistemicCalibrationFile: m.SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE,
   superOntologyReplaysFile: m.SUPER_ONTOLOGY_REPLAYS_FILE,
   superOntologyEvidenceFile: m.SUPER_ONTOLOGY_EVIDENCE_FILE,
   superOntologyMemoryBridgeFile: m.SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,

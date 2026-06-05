@@ -10,6 +10,7 @@ const {
   SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE,
   SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE,
   SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE,
+  SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
   SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
@@ -36,6 +37,7 @@ try {
   const causalImpactPath = path.join(memoryDir, SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE);
   const knowledgeHomeostasisPath = path.join(memoryDir, SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE);
   const adversarialProvenancePath = path.join(memoryDir, SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE);
+  const epistemicCalibrationPath = path.join(memoryDir, SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE);
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(taskCoveragePath), "super ontology task coverage should be seeded");
@@ -44,6 +46,7 @@ try {
   assert.ok(fs.existsSync(causalImpactPath), "super ontology causal impact should be seeded");
   assert.ok(fs.existsSync(knowledgeHomeostasisPath), "super ontology knowledge homeostasis should be seeded");
   assert.ok(fs.existsSync(adversarialProvenancePath), "super ontology adversarial provenance should be seeded");
+  assert.ok(fs.existsSync(epistemicCalibrationPath), "super ontology epistemic calibration should be seeded");
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
   assert.ok(fs.existsSync(memoryBridgePath), "super ontology memory bridge ledger should be seeded");
@@ -65,6 +68,8 @@ try {
   assert.equal(contract.promotionPolicy.knowledgeHomeostasisRequired, true);
   assert.equal(contract.promotionPolicy.adversarialProvenanceRequired, true);
   assert.equal(contract.promotionPolicy.untrustedSourceRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.epistemicCalibrationRequired, true);
+  assert.equal(contract.promotionPolicy.uncalibratedRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
@@ -78,6 +83,10 @@ try {
     contract.layers.includes("adversarial_provenance_contract"),
     "contract should include adversarial provenance gate",
   );
+  assert.ok(
+    contract.layers.includes("epistemic_calibration_contract"),
+    "contract should include epistemic calibration gate",
+  );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(contract.evidenceLedgers.taskCoverage, `.agentlas/${SUPER_ONTOLOGY_TASK_COVERAGE_FILE}`);
   assert.equal(contract.evidenceLedgers.contextualFlow, `.agentlas/${SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE}`);
@@ -90,6 +99,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.adversarialProvenance,
     `.agentlas/${SUPER_ONTOLOGY_ADVERSARIAL_PROVENANCE_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.epistemicCalibration,
+    `.agentlas/${SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE}`,
   );
   const taskCoverage = JSON.parse(fs.readFileSync(taskCoveragePath, "utf8"));
   assert.equal(taskCoverage.kind, "agentlas-super-ontology-task-coverage");
@@ -199,6 +212,45 @@ try {
   assert.ok(
     adversarialProvenance.hardStops.includes("poisoned_source_to_memory"),
     "adversarial provenance should block poisoned source to memory",
+  );
+  const epistemicCalibration = JSON.parse(fs.readFileSync(epistemicCalibrationPath, "utf8"));
+  assert.equal(epistemicCalibration.kind, "agentlas-super-ontology-epistemic-calibration");
+  assert.equal(epistemicCalibration.runtimePromotionAllowed, false);
+  assert.equal(
+    epistemicCalibration.defaultDecision,
+    "calibrated_uncertainty_required_before_answer_memory_tool_or_public_seed",
+  );
+  assert.ok(
+    epistemicCalibration.contextTypes.includes("company_internal"),
+    "epistemic calibration should include company context",
+  );
+  assert.ok(
+    epistemicCalibration.contextTypes.includes("appbridge_route"),
+    "epistemic calibration should include AppBridge route context",
+  );
+  assert.ok(
+    epistemicCalibration.claimTypes.includes("tool_action"),
+    "epistemic calibration should include tool actions",
+  );
+  assert.ok(
+    epistemicCalibration.uncertaintySources.includes("conflicting_sources"),
+    "epistemic calibration should include conflicting sources",
+  );
+  assert.ok(
+    epistemicCalibration.uncertaintySources.includes("low_retrieval_relevance"),
+    "epistemic calibration should include low retrieval relevance",
+  );
+  assert.ok(
+    epistemicCalibration.calibrationSignals.includes("judge_interval"),
+    "epistemic calibration should include judge intervals",
+  );
+  assert.ok(
+    epistemicCalibration.hardStops.includes("missing_evidence_as_complete_answer"),
+    "epistemic calibration should block missing evidence as complete answer",
+  );
+  assert.ok(
+    epistemicCalibration.hardStops.includes("uncalibrated_route_sync"),
+    "epistemic calibration should block uncalibrated route sync",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");
