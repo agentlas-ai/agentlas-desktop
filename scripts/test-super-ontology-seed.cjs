@@ -6,6 +6,7 @@ const path = require("node:path");
 
 const {
   SUPER_ONTOLOGY_ASSURANCE_CASE_FILE,
+  SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
   SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
@@ -28,10 +29,12 @@ try {
   const memoryBridgePath = path.join(memoryDir, SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE);
   const taskCoveragePath = path.join(memoryDir, SUPER_ONTOLOGY_TASK_COVERAGE_FILE);
   const assuranceCasePath = path.join(memoryDir, SUPER_ONTOLOGY_ASSURANCE_CASE_FILE);
+  const causalImpactPath = path.join(memoryDir, SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE);
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(taskCoveragePath), "super ontology task coverage should be seeded");
   assert.ok(fs.existsSync(assuranceCasePath), "super ontology assurance case should be seeded");
+  assert.ok(fs.existsSync(causalImpactPath), "super ontology causal impact should be seeded");
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
   assert.ok(fs.existsSync(memoryBridgePath), "super ontology memory bridge ledger should be seeded");
@@ -47,15 +50,18 @@ try {
   assert.equal(contract.promotionPolicy.appbridgeSourceWritesBlocked, true);
   assert.equal(contract.promotionPolicy.memoryCuratorBridgeRequired, true);
   assert.equal(contract.promotionPolicy.taskCoverageRequired, true);
+  assert.equal(contract.promotionPolicy.causalImpactRequired, true);
   assert.equal(contract.promotionPolicy.assuranceCaseRequired, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
   assert.ok(contract.layers.includes("memory_curator_bridge"), "contract should include memory curator bridge gate");
   assert.ok(contract.layers.includes("task_coverage_contract"), "contract should include task coverage gate");
+  assert.ok(contract.layers.includes("causal_impact_contract"), "contract should include causal impact gate");
   assert.ok(contract.layers.includes("assurance_case_contract"), "contract should include assurance case gate");
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(contract.evidenceLedgers.taskCoverage, `.agentlas/${SUPER_ONTOLOGY_TASK_COVERAGE_FILE}`);
+  assert.equal(contract.evidenceLedgers.causalImpact, `.agentlas/${SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE}`);
   assert.equal(contract.evidenceLedgers.assuranceCase, `.agentlas/${SUPER_ONTOLOGY_ASSURANCE_CASE_FILE}`);
   const taskCoverage = JSON.parse(fs.readFileSync(taskCoveragePath, "utf8"));
   assert.equal(taskCoverage.kind, "agentlas-super-ontology-task-coverage");
@@ -64,6 +70,21 @@ try {
   assert.ok(taskCoverage.taskFamilies.includes("execute_tool"), "task coverage should include tool execution");
   assert.ok(taskCoverage.taskFamilies.includes("physical_or_sensor"), "task coverage should include physical/sensor work");
   assert.ok(taskCoverage.affordanceTypes.includes("train"), "task coverage should include training affordances");
+  const causalImpact = JSON.parse(fs.readFileSync(causalImpactPath, "utf8"));
+  assert.equal(causalImpact.kind, "agentlas-super-ontology-causal-impact");
+  assert.equal(causalImpact.runtimePromotionAllowed, false);
+  assert.equal(causalImpact.defaultDecision, "counterfactual_required_before_state_change");
+  assert.ok(causalImpact.causalClaimTypes.includes("correlation_only"), "causal impact should separate correlation");
+  assert.ok(causalImpact.causalClaimTypes.includes("memory_intervention"), "causal impact should include memory intervention");
+  assert.ok(causalImpact.causalClaimTypes.includes("physical_or_train"), "causal impact should include physical/train work");
+  assert.ok(
+    causalImpact.hardStops.includes("correlation_as_causation"),
+    "causal impact should block correlation as causation",
+  );
+  assert.ok(
+    causalImpact.hardStops.includes("missing_counterfactual_check"),
+    "causal impact should require counterfactual checks",
+  );
   const assuranceCase = JSON.parse(fs.readFileSync(assuranceCasePath, "utf8"));
   assert.equal(assuranceCase.kind, "agentlas-super-ontology-assurance-case");
   assert.equal(assuranceCase.runtimePromotionAllowed, false);

@@ -36,7 +36,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.5.10";
+export const ARCHITECTURE_VERSION = "1.5.11";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -101,6 +101,7 @@ export const CURATOR_DECISIONS_FILE = "curator-decisions.jsonl";
 export const SUPER_ONTOLOGY_CONTRACT_FILE = "super-ontology-contract.json";
 export const SUPER_ONTOLOGY_TASK_COVERAGE_FILE = "super-ontology-task-coverage.json";
 export const SUPER_ONTOLOGY_ASSURANCE_CASE_FILE = "super-ontology-assurance-case.json";
+export const SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE = "super-ontology-causal-impact.json";
 export const SUPER_ONTOLOGY_REPLAYS_FILE = "super-ontology-replays.jsonl";
 export const SUPER_ONTOLOGY_EVIDENCE_FILE = "super-ontology-evidence.jsonl";
 export const SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE = "super-ontology-memory-bridge.jsonl";
@@ -289,14 +290,17 @@ the task size:
 - .agentlas skill-registry, skill-trials, and curator-decisions files as
   candidate-only lifecycle metadata;
 - .agentlas super-ontology-contract, super-ontology-task-coverage,
-  super-ontology-assurance-case, super-ontology-replays,
+  super-ontology-assurance-case, super-ontology-causal-impact,
+  super-ontology-replays,
   super-ontology-evidence, and super-ontology-memory-bridge files as
   candidate-only adaptive knowledge governance metadata. Task coverage must
   classify requested work beyond proposal/deck generation before action, and
   assurance cases must link broad safety/coverage claims to evidence,
-  validators, residual risk, and rollback. Keep graph writes and direct durable
-  memory writes disabled until shadow/canary/rollback evidence and Memory
-  Curator review exist;
+  validators, residual risk, and rollback. Causal impact contracts must link
+  relation/action claims to intervention targets, counterfactuals, blast
+  radius, observability, and rollback before write/publish/execute/physical/train
+  behavior. Keep graph writes and direct durable memory writes disabled until
+  shadow/canary/rollback evidence and Memory Curator review exist;
 - PM Soul or project owner loop for continuity;
 - Memory Curator rules for durable memory, dedup, scope, and redaction;
 - task-bias / sitemap governance so stale or risky surfaces are revisited;
@@ -305,7 +309,8 @@ the task size:
   sealed holdouts, rollback, and workspace policy approve a later phase;
 - Super Ontology graph writes stay disabled until source intake, evidence
   packets, belief ledger, knowledge capsules, affordance binding,
-  shadow/canary replay, rollback, and sync review approve a later phase;
+  causal impact review, shadow/canary replay, rollback, and sync review approve
+  a later phase;
 - hierarchy when useful: HQ/orchestrator -> builders/workers -> QA/evidence gate;
 - runtime adapters for AGENTS.md plus Claude/Codex/Gemini/OpenCode-style hosts when
   requested or detectable.

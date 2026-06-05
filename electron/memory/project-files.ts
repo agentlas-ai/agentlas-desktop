@@ -16,6 +16,7 @@ import {
   SKILL_TRIALS_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
   SUPER_ONTOLOGY_ASSURANCE_CASE_FILE,
+  SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
   SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
   SUPER_ONTOLOGY_REPLAYS_FILE,
@@ -143,6 +144,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         "agentlas_integration_contract",
         "memory_curator_bridge",
         "task_coverage_contract",
+        "causal_impact_contract",
         "assurance_case_contract",
         "promotion_readiness",
         "promotion_replay_drill",
@@ -154,6 +156,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         memoryTickets: `.agentlas/${MEMORY_LOG_FILE}`,
         memoryCuratorBridge: `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`,
         taskCoverage: `.agentlas/${SUPER_ONTOLOGY_TASK_COVERAGE_FILE}`,
+        causalImpact: `.agentlas/${SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE}`,
         assuranceCase: `.agentlas/${SUPER_ONTOLOGY_ASSURANCE_CASE_FILE}`,
       },
       hardStops: [
@@ -167,7 +170,9 @@ function superOntologyContractSkeleton(projectName: string): string {
         "missing_shadow_or_canary_evidence",
         "missing_memory_curator_bridge",
         "missing_task_coverage_contract",
+        "missing_causal_impact_contract",
         "missing_assurance_case_contract",
+        "correlation_as_causation",
         "unsupported_claim",
         "direct_durable_memory_write",
         "raw_prompt_or_secret_memory_capture",
@@ -180,6 +185,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         appbridgeSourceWritesBlocked: true,
         memoryCuratorBridgeRequired: true,
         taskCoverageRequired: true,
+        causalImpactRequired: true,
         assuranceCaseRequired: true,
         directDurableMemoryWritesBlocked: true,
       },
@@ -193,6 +199,73 @@ function superOntologyContractSkeleton(projectName: string): string {
           notes: "AppBridge remains a route adapter, never the source of truth.",
         },
       },
+    },
+    null,
+    2,
+  );
+}
+
+function superOntologyCausalImpactSkeleton(projectName: string): string {
+  return JSON.stringify(
+    {
+      schemaVersion: "1.0",
+      kind: "agentlas-super-ontology-causal-impact",
+      state: "local_candidate",
+      projectId: projectName,
+      draftId: null,
+      runtimePromotionAllowed: false,
+      defaultDecision: "counterfactual_required_before_state_change",
+      causalClaimTypes: [
+        "correlation_only",
+        "causal_hypothesis",
+        "intervention",
+        "counterfactual",
+        "temporal_causal",
+        "memory_intervention",
+        "multi_agent_plan",
+        "external_side_effect",
+        "physical_or_train",
+      ],
+      requiredChecks: [
+        "intervention_target",
+        "expected_outcomes",
+        "adverse_outcomes",
+        "counterfactual_checks",
+        "observability",
+        "reversibility",
+        "blast_radius",
+        "blocked_write_surfaces",
+        "rollback_plan",
+      ],
+      decisions: [
+        "allow_read",
+        "draft_only",
+        "review_required",
+        "shadow_required",
+        "block",
+      ],
+      researchBasis: [
+        "causal_rag",
+        "causal_counterfactual_rag",
+        "counterfactual_benchmark",
+        "causal_planning",
+        "causal_memory_intervention",
+        "structural_causal_model",
+        "resilience_engineering",
+        "systems_theory",
+      ],
+      hardStops: [
+        "correlation_as_causation",
+        "retrieved_relation_as_action_permission",
+        "missing_counterfactual_check",
+        "missing_adverse_outcome",
+        "missing_blast_radius",
+        "missing_observability",
+        "state_change_without_rollback",
+        "physical_action_without_human_protocol",
+        "training_without_consent_or_delete_path",
+        "multi_agent_write_without_ordered_handoff",
+      ],
     },
     null,
     2,
@@ -376,6 +449,11 @@ export function ensureProjectMemory(
     const superOntologyTaskCoverage = path.join(dir, SUPER_ONTOLOGY_TASK_COVERAGE_FILE);
     if (!fs.existsSync(superOntologyTaskCoverage)) {
       fs.writeFileSync(superOntologyTaskCoverage, superOntologyTaskCoverageSkeleton(name), "utf8");
+    }
+
+    const superOntologyCausalImpact = path.join(dir, SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE);
+    if (!fs.existsSync(superOntologyCausalImpact)) {
+      fs.writeFileSync(superOntologyCausalImpact, superOntologyCausalImpactSkeleton(name), "utf8");
     }
 
     const superOntologyAssuranceCase = path.join(dir, SUPER_ONTOLOGY_ASSURANCE_CASE_FILE);
