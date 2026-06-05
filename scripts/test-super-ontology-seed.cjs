@@ -15,6 +15,7 @@ const {
   SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE,
   SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE,
   SUPER_ONTOLOGY_OBSERVABILITY_TELEMETRY_FILE,
+  SUPER_ONTOLOGY_OBJECTIVE_PROXY_VALIDITY_FILE,
   SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
@@ -50,6 +51,7 @@ try {
   const resilienceControlPath = path.join(memoryDir, SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE);
   const invariantVerificationPath = path.join(memoryDir, SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE);
   const observabilityTelemetryPath = path.join(memoryDir, SUPER_ONTOLOGY_OBSERVABILITY_TELEMETRY_FILE);
+  const objectiveProxyValidityPath = path.join(memoryDir, SUPER_ONTOLOGY_OBJECTIVE_PROXY_VALIDITY_FILE);
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(openWorldCoveragePath), "super ontology open-world coverage should be seeded");
@@ -65,6 +67,7 @@ try {
   assert.ok(fs.existsSync(resilienceControlPath), "super ontology resilience control should be seeded");
   assert.ok(fs.existsSync(invariantVerificationPath), "super ontology invariant verification should be seeded");
   assert.ok(fs.existsSync(observabilityTelemetryPath), "super ontology observability telemetry should be seeded");
+  assert.ok(fs.existsSync(objectiveProxyValidityPath), "super ontology objective proxy validity should be seeded");
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
   assert.ok(fs.existsSync(memoryBridgePath), "super ontology memory bridge ledger should be seeded");
@@ -108,6 +111,10 @@ try {
   assert.equal(contract.promotionPolicy.unobservableRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.auditSinkRequired, true);
   assert.equal(contract.promotionPolicy.crossSurfaceCorrelationRequired, true);
+  assert.equal(contract.promotionPolicy.objectiveProxyValidityRequired, true);
+  assert.equal(contract.promotionPolicy.proxyOptimizationRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.countermetricRequired, true);
+  assert.equal(contract.promotionPolicy.metricGamingProbeRequired, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
@@ -149,6 +156,10 @@ try {
     contract.layers.includes("observability_telemetry_contract"),
     "contract should include observability telemetry gate",
   );
+  assert.ok(
+    contract.layers.includes("objective_proxy_validity_contract"),
+    "contract should include objective proxy validity gate",
+  );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(
     contract.evidenceLedgers.openWorldCoverage,
@@ -189,6 +200,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.observabilityTelemetry,
     `.agentlas/${SUPER_ONTOLOGY_OBSERVABILITY_TELEMETRY_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.objectiveProxyValidity,
+    `.agentlas/${SUPER_ONTOLOGY_OBJECTIVE_PROXY_VALIDITY_FILE}`,
   );
   const openWorldCoverage = JSON.parse(fs.readFileSync(openWorldCoveragePath, "utf8"));
   assert.equal(openWorldCoverage.kind, "agentlas-super-ontology-open-world-coverage");
@@ -561,6 +576,64 @@ try {
   assert.ok(
     observabilityTelemetry.hardStops.includes("unobservable_runtime_write"),
     "observability telemetry should block unobservable runtime writes",
+  );
+  const objectiveProxyValidity = JSON.parse(fs.readFileSync(objectiveProxyValidityPath, "utf8"));
+  assert.equal(objectiveProxyValidity.kind, "agentlas-super-ontology-objective-proxy-validity");
+  assert.equal(objectiveProxyValidity.runtimePromotionAllowed, false);
+  assert.equal(
+    objectiveProxyValidity.defaultDecision,
+    "construct_validity_required_before_metric_driven_runtime_graph_memory_tool_route_release_or_public_write",
+  );
+  assert.ok(
+    objectiveProxyValidity.constructs.includes("trust") &&
+      objectiveProxyValidity.constructs.includes("learning") &&
+      objectiveProxyValidity.constructs.includes("reliability") &&
+      objectiveProxyValidity.constructs.includes("maintainability") &&
+      objectiveProxyValidity.constructs.includes("environmental_impact"),
+    "objective proxy validity should include broad constructs",
+  );
+  assert.ok(
+    objectiveProxyValidity.proxyMetrics.includes("benchmark_score") &&
+      objectiveProxyValidity.proxyMetrics.includes("test_pass_rate") &&
+      objectiveProxyValidity.proxyMetrics.includes("open_rate") &&
+      objectiveProxyValidity.proxyMetrics.includes("ontology_edge_count"),
+    "objective proxy validity should include benchmark, test, open-rate, and edge-count proxies",
+  );
+  assert.ok(
+    objectiveProxyValidity.validityGaps.includes("reward_tampering") &&
+      objectiveProxyValidity.validityGaps.includes("metric_gaming") &&
+      objectiveProxyValidity.validityGaps.includes("label_leakage") &&
+      objectiveProxyValidity.validityGaps.includes("evaluator_conflict"),
+    "objective proxy validity should include reward, gaming, leakage, and evaluator gaps",
+  );
+  assert.ok(
+    objectiveProxyValidity.goodhartModes.includes("campbell_law") &&
+      objectiveProxyValidity.goodhartModes.includes("reward_hacking") &&
+      objectiveProxyValidity.goodhartModes.includes("proxy_gaming") &&
+      objectiveProxyValidity.goodhartModes.includes("benchmark_gaming"),
+    "objective proxy validity should include Goodhart and gaming modes",
+  );
+  assert.ok(
+    objectiveProxyValidity.requiredValidityEvidence.includes("construct_definition") &&
+      objectiveProxyValidity.requiredValidityEvidence.includes("stakeholder_map") &&
+      objectiveProxyValidity.requiredValidityEvidence.includes("countermetric") &&
+      objectiveProxyValidity.requiredValidityEvidence.includes("gaming_probe") &&
+      objectiveProxyValidity.requiredValidityEvidence.includes("rollback_plan"),
+    "objective proxy validity should require construct, stakeholder, countermetric, gaming, and rollback evidence",
+  );
+  assert.ok(
+    objectiveProxyValidity.countermetrics.includes("harm_rate") &&
+      objectiveProxyValidity.countermetrics.includes("fairness_delta") &&
+      objectiveProxyValidity.countermetrics.includes("source_grounding_rate") &&
+      objectiveProxyValidity.countermetrics.includes("reversal_rate") &&
+      objectiveProxyValidity.countermetrics.includes("denominator"),
+    "objective proxy validity should include harm, fairness, grounding, reversal, and denominator countermetrics",
+  );
+  assert.ok(
+    objectiveProxyValidity.hardStops.includes("metric_improvement_as_goal_completion") &&
+      objectiveProxyValidity.hardStops.includes("reward_tampering_to_promotion") &&
+      objectiveProxyValidity.hardStops.includes("unvalidated_proxy_to_public_release"),
+    "objective proxy validity should block metric, reward-tampering, and public-release shortcuts",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");

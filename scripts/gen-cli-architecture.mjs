@@ -45,6 +45,7 @@ const data = {
   superOntologyResilienceControlFile: m.SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE,
   superOntologyInvariantVerificationFile: m.SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE,
   superOntologyObservabilityTelemetryFile: m.SUPER_ONTOLOGY_OBSERVABILITY_TELEMETRY_FILE,
+  superOntologyObjectiveProxyValidityFile: m.SUPER_ONTOLOGY_OBJECTIVE_PROXY_VALIDITY_FILE,
   superOntologyReplaysFile: m.SUPER_ONTOLOGY_REPLAYS_FILE,
   superOntologyEvidenceFile: m.SUPER_ONTOLOGY_EVIDENCE_FILE,
   superOntologyMemoryBridgeFile: m.SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
