@@ -14,6 +14,9 @@ import {
   SITEMAP_FILE,
   SKILL_REGISTRY_FILE,
   SKILL_TRIALS_FILE,
+  SUPER_ONTOLOGY_CONTRACT_FILE,
+  SUPER_ONTOLOGY_EVIDENCE_FILE,
+  SUPER_ONTOLOGY_REPLAYS_FILE,
 } from "../architecture/manifest";
 
 export function projectMemoryDir(projectPath: string): string {
@@ -118,6 +121,65 @@ function skillRegistrySkeleton(projectName: string): string {
   );
 }
 
+function superOntologyContractSkeleton(projectName: string): string {
+  return JSON.stringify(
+    {
+      schemaVersion: "1.0",
+      kind: "agentlas-super-ontology-contract",
+      state: "local_candidate",
+      projectId: projectName,
+      draftId: null,
+      runtimeGraphWriteEnabled: false,
+      zeroErrorClaim: false,
+      layers: [
+        "source_intake",
+        "evidence_packet",
+        "belief_ledger",
+        "knowledge_capsule",
+        "affordance_action_binding",
+        "agentlas_integration_contract",
+        "promotion_readiness",
+        "promotion_replay_drill",
+        "architecture_sync_review",
+      ],
+      evidenceLedgers: {
+        replays: `.agentlas/${SUPER_ONTOLOGY_REPLAYS_FILE}`,
+        promotionEvidence: `.agentlas/${SUPER_ONTOLOGY_EVIDENCE_FILE}`,
+        memoryTickets: `.agentlas/${MEMORY_LOG_FILE}`,
+      },
+      hardStops: [
+        "zero_error_claim",
+        "raw_source_to_graph_write",
+        "forbidden_context_join",
+        "whole_graph_exposure",
+        "tool_authority_without_provenance",
+        "appbridge_source_of_truth_write",
+        "missing_rollback",
+        "missing_shadow_or_canary_evidence",
+      ],
+      promotionPolicy: {
+        shadowRequired: true,
+        canaryRequiredForMixedContext: true,
+        rollbackRequired: true,
+        syncReviewRequired: true,
+        appbridgeSourceWritesBlocked: true,
+      },
+      surfacePolicy: {
+        desktopTerminal: {
+          defaultDecision: "shadow_required",
+          notes: "Local graph-write behavior needs permission audit and replay.",
+        },
+        appbridge: {
+          defaultDecision: "blocked",
+          notes: "AppBridge remains a route adapter, never the source of truth.",
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
 /** Create .agentlas/ + skeleton files if missing. Returns the dir, or null on failure. */
 export function ensureProjectMemory(
   projectPath: string,
@@ -143,6 +205,16 @@ export function ensureProjectMemory(
 
     const curatorDecisions = path.join(dir, CURATOR_DECISIONS_FILE);
     if (!fs.existsSync(curatorDecisions)) fs.writeFileSync(curatorDecisions, "", "utf8");
+
+    const superOntologyContract = path.join(dir, SUPER_ONTOLOGY_CONTRACT_FILE);
+    if (!fs.existsSync(superOntologyContract)) {
+      fs.writeFileSync(superOntologyContract, superOntologyContractSkeleton(name), "utf8");
+    }
+
+    for (const fileName of [SUPER_ONTOLOGY_REPLAYS_FILE, SUPER_ONTOLOGY_EVIDENCE_FILE]) {
+      const filePath = path.join(dir, fileName);
+      if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, "", "utf8");
+    }
 
     return dir;
   } catch {

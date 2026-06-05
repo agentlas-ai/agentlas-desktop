@@ -31,6 +31,9 @@ const data = {
   skillRegistryFile: m.SKILL_REGISTRY_FILE,
   skillTrialsFile: m.SKILL_TRIALS_FILE,
   curatorDecisionsFile: m.CURATOR_DECISIONS_FILE,
+  superOntologyContractFile: m.SUPER_ONTOLOGY_CONTRACT_FILE,
+  superOntologyReplaysFile: m.SUPER_ONTOLOGY_REPLAYS_FILE,
+  superOntologyEvidenceFile: m.SUPER_ONTOLOGY_EVIDENCE_FILE,
   kinds: m.MEMORY_KINDS,
   scopes: m.MEMORY_SCOPES,
   agents: m.BUILTIN_AGENTS.map((a) => ({

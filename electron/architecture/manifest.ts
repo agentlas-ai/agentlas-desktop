@@ -36,7 +36,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.5.6";
+export const ARCHITECTURE_VERSION = "1.5.7";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -98,6 +98,9 @@ export const MEMORY_LOG_FILE = "memory-log.jsonl";
 export const SKILL_REGISTRY_FILE = "skill-registry.json";
 export const SKILL_TRIALS_FILE = "skill-trials.jsonl";
 export const CURATOR_DECISIONS_FILE = "curator-decisions.jsonl";
+export const SUPER_ONTOLOGY_CONTRACT_FILE = "super-ontology-contract.json";
+export const SUPER_ONTOLOGY_REPLAYS_FILE = "super-ontology-replays.jsonl";
+export const SUPER_ONTOLOGY_EVIDENCE_FILE = "super-ontology-evidence.jsonl";
 
 /**
  * Appended to EVERY agent's system prompt (the always-on curator path). Short on purpose.
@@ -282,12 +285,18 @@ the task size:
 - .agentlas activation metadata, memory-map, sitemap, memory tickets, and evidence;
 - .agentlas skill-registry, skill-trials, and curator-decisions files as
   candidate-only lifecycle metadata;
+- .agentlas super-ontology-contract, super-ontology-replays, and
+  super-ontology-evidence files as candidate-only adaptive knowledge governance
+  metadata;
 - PM Soul or project owner loop for continuity;
 - Memory Curator rules for durable memory, dedup, scope, and redaction;
 - task-bias / sitemap governance so stale or risky surfaces are revisited;
 - self-evolution rules with changelog, eval, rollback, and promotion criteria;
 - skill promotion stays export/local-candidate only until Curator quarantine,
   sealed holdouts, rollback, and workspace policy approve a later phase;
+- Super Ontology graph writes stay disabled until source intake, evidence
+  packets, belief ledger, knowledge capsules, affordance binding,
+  shadow/canary replay, rollback, and sync review approve a later phase;
 - hierarchy when useful: HQ/orchestrator -> builders/workers -> QA/evidence gate;
 - runtime adapters for AGENTS.md plus Claude/Codex/Gemini/OpenCode-style hosts when
   requested or detectable.

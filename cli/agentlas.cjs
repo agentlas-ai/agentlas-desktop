@@ -1274,6 +1274,9 @@ function ensureProjectMemoryCli(projectPath, projectName) {
     const skillRegistryFile = arch.skillRegistryFile || "skill-registry.json";
     const skillTrialsFile = arch.skillTrialsFile || "skill-trials.jsonl";
     const curatorDecisionsFile = arch.curatorDecisionsFile || "curator-decisions.jsonl";
+    const superOntologyContractFile = arch.superOntologyContractFile || "super-ontology-contract.json";
+    const superOntologyReplaysFile = arch.superOntologyReplaysFile || "super-ontology-replays.jsonl";
+    const superOntologyEvidenceFile = arch.superOntologyEvidenceFile || "super-ontology-evidence.jsonl";
     const skillRegistry = path.join(dir, skillRegistryFile);
     if (!fs.existsSync(skillRegistry)) {
       fs.writeFileSync(skillRegistry, JSON.stringify({
@@ -1319,6 +1322,65 @@ function ensureProjectMemoryCli(projectPath, projectName) {
       }, null, 2), "utf8");
     }
     for (const fileName of [skillTrialsFile, curatorDecisionsFile]) {
+      const filePath = path.join(dir, fileName);
+      if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, "", "utf8");
+    }
+    const superOntologyContract = path.join(dir, superOntologyContractFile);
+    if (!fs.existsSync(superOntologyContract)) {
+      fs.writeFileSync(superOntologyContract, JSON.stringify({
+        schemaVersion: "1.0",
+        kind: "agentlas-super-ontology-contract",
+        state: "local_candidate",
+        projectId: name,
+        draftId: null,
+        runtimeGraphWriteEnabled: false,
+        zeroErrorClaim: false,
+        layers: [
+          "source_intake",
+          "evidence_packet",
+          "belief_ledger",
+          "knowledge_capsule",
+          "affordance_action_binding",
+          "agentlas_integration_contract",
+          "promotion_readiness",
+          "promotion_replay_drill",
+          "architecture_sync_review",
+        ],
+        evidenceLedgers: {
+          replays: `.agentlas/${superOntologyReplaysFile}`,
+          promotionEvidence: `.agentlas/${superOntologyEvidenceFile}`,
+          memoryTickets: `.agentlas/${arch.logFile}`,
+        },
+        hardStops: [
+          "zero_error_claim",
+          "raw_source_to_graph_write",
+          "forbidden_context_join",
+          "whole_graph_exposure",
+          "tool_authority_without_provenance",
+          "appbridge_source_of_truth_write",
+          "missing_rollback",
+          "missing_shadow_or_canary_evidence",
+        ],
+        promotionPolicy: {
+          shadowRequired: true,
+          canaryRequiredForMixedContext: true,
+          rollbackRequired: true,
+          syncReviewRequired: true,
+          appbridgeSourceWritesBlocked: true,
+        },
+        surfacePolicy: {
+          desktopTerminal: {
+            defaultDecision: "shadow_required",
+            notes: "Local graph-write behavior needs permission audit and replay.",
+          },
+          appbridge: {
+            defaultDecision: "blocked",
+            notes: "AppBridge remains a route adapter, never the source of truth.",
+          },
+        },
+      }, null, 2), "utf8");
+    }
+    for (const fileName of [superOntologyReplaysFile, superOntologyEvidenceFile]) {
       const filePath = path.join(dir, fileName);
       if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, "", "utf8");
     }
