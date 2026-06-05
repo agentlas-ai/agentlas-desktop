@@ -19,6 +19,7 @@ const {
   SUPER_ONTOLOGY_STAKEHOLDER_PREFERENCE_GOVERNANCE_FILE,
   SUPER_ONTOLOGY_NORMATIVE_AUTHORITY_DRIFT_FILE,
   SUPER_ONTOLOGY_SIDE_EFFECT_CONTAINMENT_FILE,
+  SUPER_ONTOLOGY_SOURCE_LINEAGE_VERSION_FILE,
   SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
@@ -67,6 +68,10 @@ try {
     memoryDir,
     SUPER_ONTOLOGY_SIDE_EFFECT_CONTAINMENT_FILE,
   );
+  const sourceLineageVersionPath = path.join(
+    memoryDir,
+    SUPER_ONTOLOGY_SOURCE_LINEAGE_VERSION_FILE,
+  );
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(openWorldCoveragePath), "super ontology open-world coverage should be seeded");
@@ -94,6 +99,10 @@ try {
   assert.ok(
     fs.existsSync(sideEffectContainmentPath),
     "super ontology side-effect containment should be seeded",
+  );
+  assert.ok(
+    fs.existsSync(sourceLineageVersionPath),
+    "super ontology source lineage version should be seeded",
   );
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
@@ -154,6 +163,10 @@ try {
   assert.equal(contract.promotionPolicy.irreversibleRuntimeActionsBlocked, true);
   assert.equal(contract.promotionPolicy.idempotencyKeyRequired, true);
   assert.equal(contract.promotionPolicy.compensationPlanRequired, true);
+  assert.equal(contract.promotionPolicy.sourceLineageVersionRequired, true);
+  assert.equal(contract.promotionPolicy.unversionedSourceRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.derivedArtifactPromotionBlocked, true);
+  assert.equal(contract.promotionPolicy.lineageRepairRequired, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
@@ -211,6 +224,10 @@ try {
     contract.layers.includes("side_effect_containment_contract"),
     "contract should include side-effect containment gate",
   );
+  assert.ok(
+    contract.layers.includes("source_lineage_version_contract"),
+    "contract should include source lineage version gate",
+  );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(
     contract.evidenceLedgers.openWorldCoverage,
@@ -267,6 +284,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.sideEffectContainment,
     `.agentlas/${SUPER_ONTOLOGY_SIDE_EFFECT_CONTAINMENT_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.sourceLineageVersion,
+    `.agentlas/${SUPER_ONTOLOGY_SOURCE_LINEAGE_VERSION_FILE}`,
   );
   const openWorldCoverage = JSON.parse(fs.readFileSync(openWorldCoveragePath, "utf8"));
   assert.equal(openWorldCoverage.kind, "agentlas-super-ontology-open-world-coverage");
@@ -834,6 +855,45 @@ try {
       sideEffectContainment.hardStops.includes("physical_action_without_safety_interlock") &&
       sideEffectContainment.hardStops.includes("scheduled_action_without_cancellation"),
     "side-effect containment should block preview/send, payment idempotency, physical safety, and scheduled cancellation shortcuts",
+  );
+  const sourceLineageVersion = JSON.parse(fs.readFileSync(sourceLineageVersionPath, "utf8"));
+  assert.equal(
+    sourceLineageVersion.kind,
+    "agentlas-super-ontology-source-lineage-version",
+  );
+  assert.equal(sourceLineageVersion.runtimePromotionAllowed, false);
+  assert.equal(
+    sourceLineageVersion.defaultDecision,
+    "lineage_required_before_graph_memory_public_training_tool_or_route_authority",
+  );
+  assert.ok(
+    sourceLineageVersion.documentFamilies.includes("policy") &&
+      sourceLineageVersion.documentFamilies.includes("spreadsheet") &&
+      sourceLineageVersion.documentFamilies.includes("hwp_doc") &&
+      sourceLineageVersion.documentFamilies.includes("crm_record"),
+    "source lineage version should include policy, spreadsheet, HWP, and CRM document families",
+  );
+  assert.ok(
+    sourceLineageVersion.sourceArtifactTypes.includes("exported_pdf") &&
+      sourceLineageVersion.sourceArtifactTypes.includes("sheet_tab") &&
+      sourceLineageVersion.sourceArtifactTypes.includes("chunk") &&
+      sourceLineageVersion.sourceArtifactTypes.includes("embedding_vector"),
+    "source lineage version should include PDF, sheet, chunk, and embedding artifact types",
+  );
+  assert.ok(
+    sourceLineageVersion.requiredLineageEvidence.includes("source_uri") &&
+      sourceLineageVersion.requiredLineageEvidence.includes("version_id") &&
+      sourceLineageVersion.requiredLineageEvidence.includes("derivation_chain") &&
+      sourceLineageVersion.requiredLineageEvidence.includes("chunk_span") &&
+      sourceLineageVersion.requiredLineageEvidence.includes("rollback_snapshot"),
+    "source lineage version should require source, version, derivation, span, and rollback evidence",
+  );
+  assert.ok(
+    sourceLineageVersion.hardStops.includes("pdf_export_as_primary_source") &&
+      sourceLineageVersion.hardStops.includes("summary_as_primary_source") &&
+      sourceLineageVersion.hardStops.includes("embedding_hit_without_artifact_version") &&
+      sourceLineageVersion.hardStops.includes("superseded_source_to_runtime_write"),
+    "source lineage version should block PDF, summary, embedding-version, and superseded-source shortcuts",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");
