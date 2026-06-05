@@ -95,7 +95,7 @@ There are two release workflows, by design:
    GitHub `workflow` permission, once the Apple certificate secrets below are
    configured.
 
-Required GitHub secrets for the **signed macOS** workflow on `jeongmk522-netizen/agentlas-desktop`:
+Required GitHub secrets for the **signed macOS** workflow on `agentlas-ai/agentlas-desktop`:
 
 - `APPLE_ID`
 - `APPLE_APP_SPECIFIC_PASSWORD`
@@ -125,8 +125,8 @@ security export \
   -o /tmp/agentlas-developer-id.p12 \
   -P "$P12_PASSWORD" \
   -c "Developer ID Application"
-base64 -i /tmp/agentlas-developer-id.p12 | gh secret set MAC_DEVELOPER_ID_CERTIFICATE -R jeongmk522-netizen/agentlas-desktop -b-
-printf "%s" "$P12_PASSWORD" | gh secret set MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD -R jeongmk522-netizen/agentlas-desktop -b-
+base64 -i /tmp/agentlas-developer-id.p12 | gh secret set MAC_DEVELOPER_ID_CERTIFICATE -R agentlas-ai/agentlas-desktop -b-
+printf "%s" "$P12_PASSWORD" | gh secret set MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD -R agentlas-ai/agentlas-desktop -b-
 rm -f /tmp/agentlas-developer-id.p12
 ```
 
@@ -134,7 +134,7 @@ Then set the remaining secrets and run:
 
 ```bash
 gh workflow run release-signed-mac.yml \
-  -R jeongmk522-netizen/agentlas-desktop \
+  -R agentlas-ai/agentlas-desktop \
   -f version=0.0.3 \
   -f tag=v0.0.3 \
   -f draft=false \

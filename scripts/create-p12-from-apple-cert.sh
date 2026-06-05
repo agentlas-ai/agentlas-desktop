@@ -7,7 +7,7 @@ key_path="$signing_dir/agentlas-developer-id.key"
 out_path="$signing_dir/agentlas-developer-id.p12"
 password="${P12_PASSWORD:-}"
 set_github_secrets="0"
-repo="jeongmk522-netizen/agentlas-desktop"
+repo="agentlas-ai/agentlas-desktop"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

@@ -5,7 +5,7 @@ Thanks for considering a contribution! This project is small and pragmatic — w
 ## Quick start
 
 ```bash
-git clone https://github.com/jeongmk522-netizen/agentlas-desktop.git
+git clone https://github.com/agentlas-ai/agentlas-desktop.git
 cd agentlas-desktop
 npm install
 npm run dev

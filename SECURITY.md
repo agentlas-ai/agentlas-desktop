@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-We ship security fixes for the latest stable release only. There's no LTS branch — please upgrade to the most recent version listed on the [Releases page](https://github.com/jeongmk522-netizen/agentlas-desktop/releases/latest) before reporting.
+We ship security fixes for the latest stable release only. There's no LTS branch — please upgrade to the most recent version listed on the [Releases page](https://github.com/agentlas-ai/agentlas-desktop/releases/latest) before reporting.
 
 The in-app "Check for Updates…" menu item (under the **Agentlas** application menu on macOS) verifies whether you're current.
 

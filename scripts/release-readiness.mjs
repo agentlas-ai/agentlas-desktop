@@ -72,7 +72,7 @@ const notarizationReady =
   notaryProfile.ok ||
   (env.APPLE_ID && env.APPLE_APP_SPECIFIC_PASSWORD && env.APPLE_TEAM_ID);
 
-const agentlasSecrets = ghSecrets("jeongmk522-netizen/agentlas-desktop");
+const agentlasSecrets = ghSecrets("agentlas-ai/agentlas-desktop");
 const requiredWorkflowSecrets = [
   "APPLE_ID",
   "APPLE_APP_SPECIFIC_PASSWORD",
@@ -115,10 +115,10 @@ console.log(JSON.stringify({
   },
   githubActions: {
     ready: workflowReady,
-    repo: "jeongmk522-netizen/agentlas-desktop",
+    repo: "agentlas-ai/agentlas-desktop",
     missingSecrets: missingWorkflowSecrets,
     nextCommand: workflowReady
-      ? `gh workflow run release-signed-mac.yml -R jeongmk522-netizen/agentlas-desktop -f version=${currentVersion} -f tag=v${currentVersion} -f draft=false -f apply_web_env=true`
+      ? `gh workflow run release-signed-mac.yml -R agentlas-ai/agentlas-desktop -f version=${currentVersion} -f tag=v${currentVersion} -f draft=false -f apply_web_env=true`
       : "Set the missing GitHub Actions secrets, then run the desktop release workflow.",
   },
   currentReleaseVerification: verification

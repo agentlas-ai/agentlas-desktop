@@ -99,7 +99,7 @@ linux:
 
 publish:
   - provider: github
-    owner: jeongmk522-netizen
+    owner: agentlas-ai
     repo: agentlas-desktop
     private: false
     releaseType: release

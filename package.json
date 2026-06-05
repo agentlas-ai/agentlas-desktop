@@ -11,10 +11,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jeongmk522-netizen/agentlas-desktop.git"
+    "url": "git+https://github.com/agentlas-ai/agentlas-desktop.git"
   },
   "bugs": {
-    "url": "https://github.com/jeongmk522-netizen/agentlas-desktop/issues"
+    "url": "https://github.com/agentlas-ai/agentlas-desktop/issues"
   },
   "homepage": "https://agentlas.cloud/desktop",
   "scripts": {

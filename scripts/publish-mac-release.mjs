@@ -13,7 +13,7 @@ const args = new Map(
 
 const pkg = JSON.parse(readFileSync(join(desktopRoot, "package.json"), "utf8"));
 const version = String(args.get("--version") || pkg.version);
-const repo = String(args.get("--repo") || process.env.AGENTLAS_DESKTOP_GITHUB_REPO || "jeongmk522-netizen/agentlas-desktop");
+const repo = String(args.get("--repo") || process.env.AGENTLAS_DESKTOP_GITHUB_REPO || "agentlas-ai/agentlas-desktop");
 const tag = String(args.get("--tag") || process.env.AGENTLAS_DESKTOP_RELEASE_TAG || `v${version}`);
 const releaseDir = resolve(desktopRoot, String(args.get("--release-dir") || "release"));
 const draft = args.has("--draft");
