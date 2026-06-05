@@ -1276,6 +1276,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
     const curatorDecisionsFile = arch.curatorDecisionsFile || "curator-decisions.jsonl";
     const superOntologyContractFile = arch.superOntologyContractFile || "super-ontology-contract.json";
     const superOntologyTaskCoverageFile = arch.superOntologyTaskCoverageFile || "super-ontology-task-coverage.json";
+    const superOntologyAssuranceCaseFile = arch.superOntologyAssuranceCaseFile || "super-ontology-assurance-case.json";
     const superOntologyReplaysFile = arch.superOntologyReplaysFile || "super-ontology-replays.jsonl";
     const superOntologyEvidenceFile = arch.superOntologyEvidenceFile || "super-ontology-evidence.jsonl";
     const superOntologyMemoryBridgeFile = arch.superOntologyMemoryBridgeFile || "super-ontology-memory-bridge.jsonl";
@@ -1346,6 +1347,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           "agentlas_integration_contract",
           "memory_curator_bridge",
           "task_coverage_contract",
+          "assurance_case_contract",
           "promotion_readiness",
           "promotion_replay_drill",
           "architecture_sync_review",
@@ -1356,6 +1358,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           memoryTickets: `.agentlas/${arch.logFile}`,
           memoryCuratorBridge: `.agentlas/${superOntologyMemoryBridgeFile}`,
           taskCoverage: `.agentlas/${superOntologyTaskCoverageFile}`,
+          assuranceCase: `.agentlas/${superOntologyAssuranceCaseFile}`,
         },
         hardStops: [
           "zero_error_claim",
@@ -1368,6 +1371,8 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           "missing_shadow_or_canary_evidence",
           "missing_memory_curator_bridge",
           "missing_task_coverage_contract",
+          "missing_assurance_case_contract",
+          "unsupported_claim",
           "direct_durable_memory_write",
           "raw_prompt_or_secret_memory_capture",
         ],
@@ -1379,6 +1384,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           appbridgeSourceWritesBlocked: true,
           memoryCuratorBridgeRequired: true,
           taskCoverageRequired: true,
+          assuranceCaseRequired: true,
           directDurableMemoryWritesBlocked: true,
         },
         surfacePolicy: {
@@ -1391,6 +1397,85 @@ function ensureProjectMemoryCli(projectPath, projectName) {
             notes: "AppBridge remains a route adapter, never the source of truth.",
           },
         },
+      }, null, 2), "utf8");
+    }
+    const superOntologyAssuranceCase = path.join(dir, superOntologyAssuranceCaseFile);
+    if (!fs.existsSync(superOntologyAssuranceCase)) {
+      fs.writeFileSync(superOntologyAssuranceCase, JSON.stringify({
+        schemaVersion: "1.0",
+        kind: "agentlas-super-ontology-assurance-case",
+        state: "local_candidate",
+        projectId: name,
+        draftId: null,
+        runtimePromotionAllowed: false,
+        defaultDecision: "evidence_linked_claim_required",
+        claimTypes: [
+          "scope_boundary",
+          "source_provenance",
+          "knowledge_integrity",
+          "memory_safety",
+          "action_safety",
+          "task_coverage",
+          "world_coverage",
+          "promotion_safety",
+          "sync_integrity",
+          "red_team_reporting",
+          "rejected_overclaim",
+        ],
+        evidenceKinds: [
+          "schema_check",
+          "fixture_check",
+          "public_safety_check",
+          "typecheck",
+          "build",
+          "sync_check",
+          "shadow_replay",
+          "canary_replay",
+          "rollback_drill",
+          "constraint_validation",
+          "provenance_standard",
+          "official_standard",
+          "red_team_report",
+          "human_review",
+          "rejected_claim",
+        ],
+        validators: [
+          "json_schema",
+          "jsonl_fixture_checker",
+          "public_safety_scan",
+          "typecheck",
+          "sync_gate",
+          "shadow_canary_replay",
+          "rollback_drill",
+          "provenance_ledger",
+          "constraint_shape",
+          "red_team_question_bank",
+          "human_review_queue",
+        ],
+        researchBasis: [
+          "assurance_case",
+          "argument_graph",
+          "compliance_by_construction",
+          "w3c_prov",
+          "w3c_shacl",
+          "nist_ai_rmf_gai_profile",
+          "genai_red_team_reporting",
+          "llm_kg_construction",
+          "ontology_validation",
+          "no_free_lunch",
+        ],
+        hardStops: [
+          "unsupported_claim",
+          "missing_required_evidence",
+          "hidden_missing_evidence",
+          "missing_validator",
+          "missing_residual_risk",
+          "missing_rollback_plan",
+          "perfect_or_zero_error_claim",
+          "red_team_without_followup",
+          "runtime_claim_without_shadow_or_canary",
+          "appbridge_source_of_truth_claim",
+        ],
       }, null, 2), "utf8");
     }
     const superOntologyTaskCoverage = path.join(dir, superOntologyTaskCoverageFile);
