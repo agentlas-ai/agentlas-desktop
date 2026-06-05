@@ -16,6 +16,7 @@ const {
   SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE,
   SUPER_ONTOLOGY_OBSERVABILITY_TELEMETRY_FILE,
   SUPER_ONTOLOGY_OBJECTIVE_PROXY_VALIDITY_FILE,
+  SUPER_ONTOLOGY_STAKEHOLDER_PREFERENCE_GOVERNANCE_FILE,
   SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
@@ -52,6 +53,10 @@ try {
   const invariantVerificationPath = path.join(memoryDir, SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE);
   const observabilityTelemetryPath = path.join(memoryDir, SUPER_ONTOLOGY_OBSERVABILITY_TELEMETRY_FILE);
   const objectiveProxyValidityPath = path.join(memoryDir, SUPER_ONTOLOGY_OBJECTIVE_PROXY_VALIDITY_FILE);
+  const stakeholderPreferenceGovernancePath = path.join(
+    memoryDir,
+    SUPER_ONTOLOGY_STAKEHOLDER_PREFERENCE_GOVERNANCE_FILE,
+  );
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(openWorldCoveragePath), "super ontology open-world coverage should be seeded");
@@ -68,6 +73,10 @@ try {
   assert.ok(fs.existsSync(invariantVerificationPath), "super ontology invariant verification should be seeded");
   assert.ok(fs.existsSync(observabilityTelemetryPath), "super ontology observability telemetry should be seeded");
   assert.ok(fs.existsSync(objectiveProxyValidityPath), "super ontology objective proxy validity should be seeded");
+  assert.ok(
+    fs.existsSync(stakeholderPreferenceGovernancePath),
+    "super ontology stakeholder preference governance should be seeded",
+  );
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
   assert.ok(fs.existsSync(memoryBridgePath), "super ontology memory bridge ledger should be seeded");
@@ -115,6 +124,10 @@ try {
   assert.equal(contract.promotionPolicy.proxyOptimizationRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.countermetricRequired, true);
   assert.equal(contract.promotionPolicy.metricGamingProbeRequired, true);
+  assert.equal(contract.promotionPolicy.stakeholderPreferenceGovernanceRequired, true);
+  assert.equal(contract.promotionPolicy.singleStakeholderRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.aggregationRuleRequired, true);
+  assert.equal(contract.promotionPolicy.appealPathRequired, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
@@ -160,6 +173,10 @@ try {
     contract.layers.includes("objective_proxy_validity_contract"),
     "contract should include objective proxy validity gate",
   );
+  assert.ok(
+    contract.layers.includes("stakeholder_preference_governance_contract"),
+    "contract should include stakeholder preference governance gate",
+  );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(
     contract.evidenceLedgers.openWorldCoverage,
@@ -204,6 +221,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.objectiveProxyValidity,
     `.agentlas/${SUPER_ONTOLOGY_OBJECTIVE_PROXY_VALIDITY_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.stakeholderPreferenceGovernance,
+    `.agentlas/${SUPER_ONTOLOGY_STAKEHOLDER_PREFERENCE_GOVERNANCE_FILE}`,
   );
   const openWorldCoverage = JSON.parse(fs.readFileSync(openWorldCoveragePath, "utf8"));
   assert.equal(openWorldCoverage.kind, "agentlas-super-ontology-open-world-coverage");
@@ -634,6 +655,63 @@ try {
       objectiveProxyValidity.hardStops.includes("reward_tampering_to_promotion") &&
       objectiveProxyValidity.hardStops.includes("unvalidated_proxy_to_public_release"),
     "objective proxy validity should block metric, reward-tampering, and public-release shortcuts",
+  );
+  const stakeholderPreferenceGovernance = JSON.parse(
+    fs.readFileSync(stakeholderPreferenceGovernancePath, "utf8"),
+  );
+  assert.equal(
+    stakeholderPreferenceGovernance.kind,
+    "agentlas-super-ontology-stakeholder-preference-governance",
+  );
+  assert.equal(stakeholderPreferenceGovernance.runtimePromotionAllowed, false);
+  assert.equal(
+    stakeholderPreferenceGovernance.defaultDecision,
+    "stakeholder_preference_governance_required_before_multi_party_runtime_graph_memory_tool_route_release_or_public_write",
+  );
+  assert.ok(
+    stakeholderPreferenceGovernance.stakeholderRoles.includes("individual_user") &&
+      stakeholderPreferenceGovernance.stakeholderRoles.includes("customer") &&
+      stakeholderPreferenceGovernance.stakeholderRoles.includes("legal_compliance") &&
+      stakeholderPreferenceGovernance.stakeholderRoles.includes("minority_or_vulnerable_group") &&
+      stakeholderPreferenceGovernance.stakeholderRoles.includes("future_maintainer"),
+    "stakeholder preference governance should include broad stakeholder roles",
+  );
+  assert.ok(
+    stakeholderPreferenceGovernance.preferenceSignals.includes("privacy_preference") &&
+      stakeholderPreferenceGovernance.preferenceSignals.includes("safety_objection") &&
+      stakeholderPreferenceGovernance.preferenceSignals.includes("minority_report") &&
+      stakeholderPreferenceGovernance.preferenceSignals.includes("recency_check"),
+    "stakeholder preference governance should include privacy, safety, minority, and recency signals",
+  );
+  assert.ok(
+    stakeholderPreferenceGovernance.conflictTypes.includes("consent_boundary") &&
+      stakeholderPreferenceGovernance.conflictTypes.includes("minority_harm") &&
+      stakeholderPreferenceGovernance.conflictTypes.includes("strategic_misreporting") &&
+      stakeholderPreferenceGovernance.conflictTypes.includes("unrepresented_party"),
+    "stakeholder preference governance should include consent, minority, strategic, and unrepresented conflicts",
+  );
+  assert.ok(
+    stakeholderPreferenceGovernance.aggregationRules.includes("consent_required") &&
+      stakeholderPreferenceGovernance.aggregationRules.includes("veto_for_rights") &&
+      stakeholderPreferenceGovernance.aggregationRules.includes("majority_with_veto") &&
+      stakeholderPreferenceGovernance.aggregationRules.includes("no_aggregation_allowed"),
+    "stakeholder preference governance should include consent, veto, vote, and no-aggregation rules",
+  );
+  assert.ok(
+    stakeholderPreferenceGovernance.requiredGovernanceEvidence.includes("stakeholder_map") &&
+      stakeholderPreferenceGovernance.requiredGovernanceEvidence.includes("scope_of_authority") &&
+      stakeholderPreferenceGovernance.requiredGovernanceEvidence.includes("aggregation_rule") &&
+      stakeholderPreferenceGovernance.requiredGovernanceEvidence.includes("dissent_capture") &&
+      stakeholderPreferenceGovernance.requiredGovernanceEvidence.includes("appeal_path") &&
+      stakeholderPreferenceGovernance.requiredGovernanceEvidence.includes("rollback_plan"),
+    "stakeholder preference governance should require stakeholder, authority, aggregation, dissent, appeal, and rollback evidence",
+  );
+  assert.ok(
+    stakeholderPreferenceGovernance.hardStops.includes("owner_preference_as_all_stakeholders") &&
+      stakeholderPreferenceGovernance.hardStops.includes("majority_preference_as_rights_clearance") &&
+      stakeholderPreferenceGovernance.hardStops.includes("consent_absent_to_personalization") &&
+      stakeholderPreferenceGovernance.hardStops.includes("stakeholder_map_missing_for_release"),
+    "stakeholder preference governance should block owner, majority, consent, and stakeholder-map shortcuts",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");
