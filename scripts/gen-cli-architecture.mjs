@@ -36,6 +36,7 @@ const data = {
   superOntologyAssuranceCaseFile: m.SUPER_ONTOLOGY_ASSURANCE_CASE_FILE,
   superOntologyContextualFlowFile: m.SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE,
   superOntologyCausalImpactFile: m.SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE,
+  superOntologyKnowledgeHomeostasisFile: m.SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE,
   superOntologyReplaysFile: m.SUPER_ONTOLOGY_REPLAYS_FILE,
   superOntologyEvidenceFile: m.SUPER_ONTOLOGY_EVIDENCE_FILE,
   superOntologyMemoryBridgeFile: m.SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,

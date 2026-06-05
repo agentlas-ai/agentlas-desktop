@@ -18,6 +18,7 @@ import {
   SUPER_ONTOLOGY_ASSURANCE_CASE_FILE,
   SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE,
   SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE,
+  SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
   SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
   SUPER_ONTOLOGY_REPLAYS_FILE,
@@ -148,6 +149,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         "contextual_flow_contract",
         "causal_impact_contract",
         "assurance_case_contract",
+        "knowledge_homeostasis_contract",
         "promotion_readiness",
         "promotion_replay_drill",
         "architecture_sync_review",
@@ -161,6 +163,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         contextualFlow: `.agentlas/${SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE}`,
         causalImpact: `.agentlas/${SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE}`,
         assuranceCase: `.agentlas/${SUPER_ONTOLOGY_ASSURANCE_CASE_FILE}`,
+        knowledgeHomeostasis: `.agentlas/${SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE}`,
       },
       hardStops: [
         "zero_error_claim",
@@ -177,6 +180,10 @@ function superOntologyContractSkeleton(projectName: string): string {
         "forbidden_context_flow",
         "missing_causal_impact_contract",
         "missing_assurance_case_contract",
+        "missing_knowledge_homeostasis_contract",
+        "error_budget_overrun_continues",
+        "critical_homeostasis_runtime_write",
+        "privacy_incident_public_export",
         "correlation_as_causation",
         "unsupported_claim",
         "direct_durable_memory_write",
@@ -193,6 +200,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         contextualFlowRequired: true,
         causalImpactRequired: true,
         assuranceCaseRequired: true,
+        knowledgeHomeostasisRequired: true,
         directDurableMemoryWritesBlocked: true,
       },
       surfacePolicy: {
@@ -422,6 +430,93 @@ function superOntologyAssuranceCaseSkeleton(projectName: string): string {
   );
 }
 
+function superOntologyKnowledgeHomeostasisSkeleton(projectName: string): string {
+  return JSON.stringify(
+    {
+      schemaVersion: "1.0",
+      kind: "agentlas-super-ontology-knowledge-homeostasis",
+      state: "local_candidate",
+      projectId: projectName,
+      draftId: null,
+      runtimePromotionAllowed: false,
+      defaultDecision: "homeostasis_required_before_runtime_or_memory_write",
+      signals: [
+        "contradiction_rate",
+        "stale_claim_age",
+        "schema_violation_rate",
+        "parser_error_rate",
+        "unsupported_claim_rate",
+        "repair_backlog",
+        "replay_failure_rate",
+        "drift_rate",
+        "source_freshness",
+        "authority_expiry",
+        "privacy_incident",
+        "promotion_evidence_gap",
+        "user_correction_rate",
+        "runtime_desync_rate",
+      ],
+      decisions: [
+        "continue",
+        "quarantine",
+        "degrade_to_read_only",
+        "require_review",
+        "replay",
+        "repair",
+        "rollback",
+        "block_promotion",
+        "retire",
+      ],
+      requiredParameters: [
+        "monitored_artifact",
+        "scope_id",
+        "surface",
+        "signal_type",
+        "measurement",
+        "severity",
+        "affected_contexts",
+        "affected_lenses",
+        "affected_claims",
+        "affected_surfaces",
+        "error_budget",
+        "control_decision",
+        "automation_level",
+        "escalation",
+        "evidence_refs",
+        "rollback_plan",
+        "memory_curator_policy",
+        "public_export_policy",
+      ],
+      researchBasis: [
+        "shacl_validation",
+        "kg_repair_evaluation",
+        "ontology_change_propagation",
+        "truth_maintenance",
+        "data_observability",
+        "resilience_engineering",
+        "homeostatic_control",
+        "w3c_prov",
+        "nist_ai_rmf",
+        "ai_agent_index",
+      ],
+      hardStops: [
+        "error_budget_overrun_continues",
+        "critical_homeostasis_runtime_write",
+        "privacy_incident_public_export",
+        "appbridge_route_as_source_authority",
+        "stale_claim_as_current_truth",
+        "parser_error_as_complete_source",
+        "missing_homeostasis_evidence",
+        "memory_write_without_ticket_or_quarantine",
+        "runtime_desync_ignored",
+        "literal_perfection_claim",
+      ],
+    },
+    null,
+    2,
+  );
+}
+
 function superOntologyTaskCoverageSkeleton(projectName: string): string {
   return JSON.stringify(
     {
@@ -531,6 +626,11 @@ export function ensureProjectMemory(
     const superOntologyAssuranceCase = path.join(dir, SUPER_ONTOLOGY_ASSURANCE_CASE_FILE);
     if (!fs.existsSync(superOntologyAssuranceCase)) {
       fs.writeFileSync(superOntologyAssuranceCase, superOntologyAssuranceCaseSkeleton(name), "utf8");
+    }
+
+    const superOntologyKnowledgeHomeostasis = path.join(dir, SUPER_ONTOLOGY_KNOWLEDGE_HOMEOSTASIS_FILE);
+    if (!fs.existsSync(superOntologyKnowledgeHomeostasis)) {
+      fs.writeFileSync(superOntologyKnowledgeHomeostasis, superOntologyKnowledgeHomeostasisSkeleton(name), "utf8");
     }
 
     for (const fileName of [
