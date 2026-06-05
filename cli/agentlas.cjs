@@ -698,6 +698,485 @@ function cmdImport(db, absPath) {
   out(`실행: agentlas ${r.slug} "..."   ·   agentlas run ${r.slug} "..."   (대상 프로젝트 폴더에서 실행)`);
 }
 
+// ── Agentlas Cloud packaging / marketplace ────────────────────────────────
+// Packaging/security review runs locally. Agentlas Cloud gets only package data,
+// hashes, and local-review evidence; no platform-owned LLM call is used.
+const CLOUD_MAX_TOTAL_BYTES = 3 * 1024 * 1024;
+const CLOUD_MAX_FILE_BYTES = 512 * 1024;
+const CLOUD_MAX_FILES = 400;
+const CLOUD_TEXT_EXTS = new Set([".cjs", ".css", ".csv", ".js", ".json", ".jsonl", ".md", ".mjs", ".py", ".sh", ".toml", ".ts", ".tsx", ".txt", ".yaml", ".yml"]);
+const CLOUD_AGENT_FILES = new Set(["AGENT.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "README.md", "agent.md", "manifest.md", "system-prompt.md"]);
+const CLOUD_SKIP_DIRS = new Set([".git", ".next", ".turbo", "build", "coverage", "dist", "node_modules", "out", "release"]);
+const CLOUD_BLOCKED_FILE_RE = [/^\.env(?:\..*)?$/i, /^id_rsa(?:\.pub)?$/i, /^credentials(?:\..*)?$/i, /^secrets?(?:\..*)?$/i, /(?:^|[._-])service-account(?:[._-]|$)/i, /\.(?:key|pem|p12|pfx|mobileprovision)$/i];
+const CLOUD_SECRET_RE = [
+  ["private-key", /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/i, "private key material"],
+  ["openai-key", /\bsk-[A-Za-z0-9_-]{20,}\b/, "OpenAI-style API key"],
+  ["github-token", /\bgh[pousr]_[A-Za-z0-9_]{30,}\b/, "GitHub token"],
+  ["slack-token", /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/, "Slack token"],
+  ["aws-key", /\bAKIA[0-9A-Z]{16}\b/, "AWS access key"],
+  ["generic-secret", /\b(?:api[_-]?key|secret|token|password)\s*[:=]\s*['"][^'"]{8,}['"]/i, "hard-coded credential"],
+];
+
+function parseCloudFlags(args) {
+  const flags = { _: [] };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a && a.startsWith("--")) {
+      const key = a.slice(2);
+      const next = args[i + 1];
+      if (next !== undefined && !String(next).startsWith("--")) {
+        flags[key] = next;
+        i++;
+      } else {
+        flags[key] = true;
+      }
+    } else {
+      flags._.push(a);
+    }
+  }
+  return flags;
+}
+
+async function cmdCloud(db, args, runtimeOverride) {
+  const sub = args[0] || "help";
+  if (sub === "help" || sub === "--help" || sub === "-h") {
+    out([
+      "agentlas cloud",
+      "",
+      "  package <path> [--json]             package + static security review",
+      "  publish <path> [--dry-run] [--llm-review] [--slug name]",
+      "                                      register with submitter-paid local review",
+      "  install <slug>                      download/install from Agentlas Cloud marketplace",
+      "",
+      "Model cost rule: Agentlas Cloud does not run a platform-owned LLM here.",
+      "--llm-review uses only this machine's active CLI/BYOK/Ollama runtime.",
+    ].join("\n"));
+    return;
+  }
+  if (sub === "install") return cmdCloudInstall(db, args[1]);
+  if (sub !== "package" && sub !== "publish") fail("usage: agentlas cloud <package|publish|install> ...");
+  const flags = parseCloudFlags(args.slice(1));
+  const root = flags._[0];
+  if (!root) fail(`usage: agentlas cloud ${sub} <path>`);
+  const dryRun = sub === "package" || Boolean(flags["dry-run"]);
+  const result = await packageCloudAgentCli(db, root, {
+    slug: typeof flags.slug === "string" ? flags.slug : undefined,
+    visibility: flags.visibility === "private-link" ? "private-link" : "marketplace",
+    llmReview: Boolean(flags["llm-review"]),
+    dryRun,
+    runtimeOverride,
+  });
+  if (flags.json) {
+    out(JSON.stringify(result, null, 2));
+    return;
+  }
+  printCloudPackageResult(result);
+  if (sub === "publish" && result.status === "blocked") process.exit(1);
+}
+
+async function packageCloudAgentCli(db, root, opts) {
+  const rootPath = path.resolve(root);
+  let st;
+  try { st = fs.statSync(rootPath); } catch { fail(`폴더를 찾을 수 없습니다: ${root}`); }
+  if (!st.isDirectory()) fail(`폴더가 아닙니다: ${root}`);
+  const scan = scanCloudFolderCli(rootPath);
+  const name = cloudReadName(rootPath);
+  const slug = cloudSlug(opts.slug || name || path.basename(rootPath));
+  const packageHash = cloudHashPackage(scan.included);
+  const manifest = {
+    version: "0.1",
+    kind: "agentlas-cloud-agent",
+    slug,
+    name,
+    tagline: cloudReadTagline(rootPath),
+    agentKind: cloudInferKind(rootPath),
+    runtimeLabels: detectRuntimeLabels(rootPath),
+    visibility: opts.visibility || "marketplace",
+    rootFingerprint: sha(rootPath),
+    packageHash,
+    fileCount: scan.files.length,
+    includedFileCount: scan.included.length,
+    totalBytes: scan.totalBytes,
+    createdAt: new Date().toISOString(),
+    billingMode: opts.llmReview ? "submitter-local-runtime" : "static-only",
+    costOwner: opts.llmReview ? "submitter" : "none",
+    security: cloudSecuritySummary(scan.findings),
+  };
+  const packageDir = cloudPackageDir(slug);
+  fs.mkdirSync(packageDir, { recursive: true });
+  const manifestPath = path.join(packageDir, "package.manifest.json");
+  const bundlePath = path.join(packageDir, "package.bundle.json");
+  const bundle = { manifest, files: scan.included, source: { packagedBy: "agentlas-cli", packagedAt: manifest.createdAt, costOwner: manifest.costOwner } };
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+  fs.writeFileSync(bundlePath, JSON.stringify(bundle, null, 2) + "\n", "utf8");
+  const review = opts.llmReview
+    ? await runCloudLocalReviewCli(db, rootPath, manifest, scan.findings, opts.runtimeOverride)
+    : cloudStaticReview(scan.findings);
+  const allFindings = [...scan.findings, ...review.findings.filter((f) => !scan.findings.some((s) => s.id === f.id))];
+  manifest.security = cloudSecuritySummary(allFindings);
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+  fs.writeFileSync(bundlePath, JSON.stringify({ ...bundle, manifest }, null, 2) + "\n", "utf8");
+  const blocked = review.verdict === "fail" || allFindings.some((f) => f.severity === "blocker");
+  let registration = null;
+  let status = blocked ? "blocked" : opts.dryRun ? "dry-run" : "ready";
+  if (!blocked && !opts.dryRun) {
+    registration = await registerCloudAgentCli(manifest, bundlePath, review, opts.visibility || "marketplace");
+    status = "registered";
+  }
+  return {
+    status,
+    rootPath,
+    packageDir,
+    manifestPath,
+    bundlePath,
+    manifest,
+    files: scan.files,
+    review,
+    registration,
+    summary: status === "registered" ? `Registered ${slug}.` : status === "blocked" ? `Blocked: ${review.summary}` : `Ready: ${slug}.`,
+  };
+}
+
+function scanCloudFolderCli(rootPath) {
+  const files = [];
+  const included = [];
+  const findings = [];
+  let totalBytes = 0;
+  let count = 0;
+  let hasDefinition = false;
+  function addFinding(kind, severity, category, message, file, remediation) {
+    findings.push({ id: `${kind}-${sha(file || message).slice(0, 10)}`, severity, category, message, ...(file ? { file } : {}), ...(remediation ? { remediation } : {}) });
+  }
+  function walk(dir) {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.startsWith("._")) continue;
+      const abs = path.join(dir, entry.name);
+      const rel = path.relative(rootPath, abs).split(path.sep).join("/");
+      if (entry.isSymbolicLink()) {
+        addFinding("symlink", "blocker", "policy", "Symbolic links are not allowed in cloud agent packages.", rel, "Replace the symlink with an ordinary file or remove it.");
+        files.push({ path: rel, bytes: 0, sha256: "", kind: "binary", included: false, reason: "symlink-blocked" });
+        continue;
+      }
+      if (entry.isDirectory()) {
+        if (!CLOUD_SKIP_DIRS.has(entry.name)) walk(abs);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      count++;
+      if (count > CLOUD_MAX_FILES) {
+        addFinding("file-count-limit", "blocker", "size", `Package has more than ${CLOUD_MAX_FILES} files.`, "", "Publish a focused agent/team folder.");
+        continue;
+      }
+      if (CLOUD_AGENT_FILES.has(entry.name)) hasDefinition = true;
+      const stat = fs.statSync(abs);
+      totalBytes += stat.size;
+      const digest = sha(fs.readFileSync(abs));
+      if (CLOUD_BLOCKED_FILE_RE.some((re) => re.test(entry.name))) {
+        addFinding("blocked-file", "blocker", "secret", "Secret-bearing file names are not allowed in cloud packages.", rel, "Remove credentials and publish only env key names.");
+        files.push({ path: rel, bytes: stat.size, sha256: digest, kind: "binary", included: false, reason: "secret-file-blocked" });
+        continue;
+      }
+      if (stat.size > CLOUD_MAX_FILE_BYTES) {
+        addFinding("large-file", "high", "size", `File exceeds ${CLOUD_MAX_FILE_BYTES} bytes.`, rel, "Move large assets out of the package.");
+        files.push({ path: rel, bytes: stat.size, sha256: digest, kind: "binary", included: false, reason: "file-too-large" });
+        continue;
+      }
+      const ext = path.extname(entry.name).toLowerCase();
+      const isText = CLOUD_TEXT_EXTS.has(ext) || CLOUD_AGENT_FILES.has(entry.name);
+      if (!isText) {
+        files.push({ path: rel, bytes: stat.size, sha256: digest, kind: "binary", included: false, reason: "binary-skipped" });
+        continue;
+      }
+      const text = fs.readFileSync(abs, "utf8");
+      for (const [id, re, label] of CLOUD_SECRET_RE) {
+        if (re.test(text)) addFinding(id, "blocker", "secret", `Possible ${label} found in package content.`, rel, "Remove the value and require users to configure their own key.");
+      }
+      if (/(?:curl|wget)[^\n|&;]+[|]\s*(?:sh|bash)/i.test(text)) {
+        addFinding("curl-pipe-shell", "high", "network", "Remote shell install pattern detected.", rel, "Use explicit, reviewable install steps.");
+      }
+      files.push({ path: rel, bytes: stat.size, sha256: digest, kind: "text", included: true });
+      included.push({ path: rel, bytes: stat.size, sha256: digest, contentBase64: Buffer.from(text, "utf8").toString("base64") });
+    }
+  }
+  walk(rootPath);
+  if (!hasDefinition) addFinding("missing-agent-definition", "blocker", "structure", "No agent definition file was found.", "", "Add AGENTS.md, CLAUDE.md, GEMINI.md, AGENT.md, or README.md at the package root.");
+  if (totalBytes > CLOUD_MAX_TOTAL_BYTES) addFinding("package-size-limit", "blocker", "size", `Package exceeds ${CLOUD_MAX_TOTAL_BYTES} bytes.`, "", "Publish a smaller agent folder.");
+  files.sort((a, b) => a.path.localeCompare(b.path));
+  included.sort((a, b) => a.path.localeCompare(b.path));
+  return { files, included, findings, totalBytes };
+}
+
+function cloudStaticReview(findings) {
+  const blockers = findings.filter((f) => f.severity === "blocker").length;
+  const high = findings.filter((f) => f.severity === "high").length;
+  return {
+    mode: "static-only",
+    verdict: blockers ? "fail" : high ? "needs-review" : "pass",
+    costOwner: "none",
+    summary: blockers || high ? `${blockers} blocker(s), ${high} high-risk finding(s).` : "Static package review passed.",
+    findings,
+    reviewedAt: new Date().toISOString(),
+  };
+}
+
+async function runCloudLocalReviewCli(db, rootPath, manifest, staticFindings, runtimeOverride) {
+  let text = "";
+  const system = [
+    "You are the Agentlas Cloud package security reviewer.",
+    "This review runs locally on the submitter machine using the submitter's own CLI/BYOK/local runtime.",
+    "Agentlas Cloud and the platform owner must not pay for this model call.",
+    "Return strict JSON only: {\"verdict\":\"pass|fail|needs-review\",\"summary\":\"...\",\"findings\":[{\"severity\":\"blocker|high|medium|low|info\",\"category\":\"secret|policy|size|structure|runtime|network|review\",\"message\":\"...\",\"file\":\"optional\",\"remediation\":\"optional\"}]}",
+  ].join("\n");
+  const prompt = `Review this package manifest and static scan.\n\n${JSON.stringify({ manifest, staticFindings }, null, 2)}`;
+  const rt = resolveRuntime(db, runtimeOverride);
+  if (rt.mode === "api") {
+    text = await runApi(rt.backend, rt.model, system, prompt);
+  } else {
+    const env = await buildChildEnvCli(db, { cwd: rootPath });
+    text = await captureRuntime(rt.kind, system, prompt, { cwd: rootPath, permission: "read", env });
+  }
+  const parsed = parseCloudReviewJson(text);
+  const llmFindings = parsed.findings.map((f, i) => ({
+    id: f.id || `local-runtime-review-${i + 1}`,
+    severity: normalizeCloudSeverity(f.severity),
+    category: normalizeCloudCategory(f.category),
+    message: String(f.message || "Reviewer finding"),
+    ...(typeof f.file === "string" ? { file: f.file } : {}),
+    ...(typeof f.remediation === "string" ? { remediation: f.remediation } : {}),
+  }));
+  const findings = [...staticFindings, ...llmFindings];
+  return {
+    mode: "local-runtime",
+    verdict: parsed.verdict === "pass" || parsed.verdict === "fail" || parsed.verdict === "needs-review"
+      ? parsed.verdict
+      : findings.some((f) => f.severity === "blocker") ? "fail" : "needs-review",
+    costOwner: "submitter",
+    runtimeLabel: rt.mode === "api" ? `${rt.backend}${rt.model ? " · " + rt.model : ""}` : rt.kind,
+    summary: parsed.summary || "Local runtime review completed.",
+    findings,
+    reviewedAt: new Date().toISOString(),
+    rawText: String(text || "").slice(0, 4000),
+  };
+}
+
+async function registerCloudAgentCli(manifest, bundlePath, review, visibility) {
+  const cookie = await cloudSessionCookieCli();
+  if (!cookie) fail("agentlas.cloud 로그인이 필요합니다. 데스크톱 앱에서 로그인하거나 AGENTLAS_SESSION을 설정하세요.");
+  if (typeof fetch !== "function") fail("이 런타임에 fetch가 없습니다(앱 런타임으로 실행 필요).");
+  const base = (process.env.AGENTLAS_WEB_BASE_URL || "https://agentlas.cloud").replace(/\/$/, "");
+  const bundle = JSON.parse(fs.readFileSync(bundlePath, "utf8"));
+  const resp = await fetch(`${base}/api/cloud-agents/v1/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ manifest, bundle, review, visibility, billing: { modelCallsPaidBy: review.costOwner, localRuntime: review.runtimeLabel || null } }),
+  });
+  if (!resp.ok) fail(`Agentlas Cloud 등록 실패 ${resp.status}: ${(await resp.text().catch(() => "")).slice(0, 300)}`);
+  const json = await resp.json();
+  return {
+    cloudId: json.cloudId || crypto.randomUUID(),
+    slug: json.slug || manifest.slug,
+    url: json.url,
+    marketplaceUrl: json.marketplaceUrl,
+    registeredAt: json.registeredAt || new Date().toISOString(),
+    dryRun: false,
+  };
+}
+
+async function cloudSessionCookieCli() {
+  if (process.env.AGENTLAS_SESSION) return `agentlas_session=${process.env.AGENTLAS_SESSION}`;
+  const keytar = readKeytar();
+  if (!keytar) return null;
+  try {
+    const value = await keytar.getPassword("Agentlas Session", "default");
+    return value ? `agentlas_session=${value}` : null;
+  } catch {
+    return null;
+  }
+}
+
+async function cmdCloudInstall(db, slug) {
+  if (!slug) fail("usage: agentlas cloud install <slug>");
+  const listing = await fetchCloudManifestCli(slug);
+  if (!listing) fail(`cloud agent를 찾을 수 없습니다: ${slug}`);
+  const agent = persistCloudListingCli(db, listing);
+  out(`✓ installed ${agent.slug} — ${agent.name}`);
+  if (agent.localPath) out(`  files: ${agent.localPath}`);
+}
+
+async function fetchCloudManifestCli(slug) {
+  if (typeof fetch !== "function") fail("이 런타임에 fetch가 없습니다(앱 런타임으로 실행 필요).");
+  const base = process.env.AGENTLAS_MCP_BASE_URL || "https://agentlas.cloud/api/mcp/v1";
+  const headers = { "content-type": "application/json" };
+  const cookie = await cloudSessionCookieCli();
+  if (cookie) headers.cookie = cookie;
+  const resp = await fetch(`${base.replace(/\/$/, "")}/tools/call`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ method: "marketplace.get_manifest", params: { name: "marketplace.get_manifest", arguments: { kind: "agent", slug } } }),
+  });
+  if (!resp.ok) fail(`marketplace.get_manifest 실패 ${resp.status}`);
+  const json = await resp.json();
+  if (json.error) fail(`marketplace.get_manifest: ${json.error.message || "unknown error"}`);
+  return json.result || null;
+}
+
+function persistCloudListingCli(db, listing) {
+  const slug = cloudSlug(listing.slug || listing.name || "cloud-agent");
+  const existing = db.prepare("SELECT * FROM installed_agents WHERE slug=?").get(slug);
+  const now = new Date().toISOString();
+  const envReqs = JSON.stringify(listing.envRequirements || []);
+  const mcpServers = JSON.stringify(listing.mcpServers || []);
+  if (existing) {
+    db.prepare("UPDATE installed_agents SET name=?, name_en=?, tagline=?, tagline_en=?, system_prompt=?, mcp_servers_json=?, env_requirements_json=?, trust_grade=?, visibility=? WHERE slug=?")
+      .run(listing.name || slug, listing.nameEn || listing.name || slug, listing.tagline || "", listing.taglineEn || listing.tagline || "", listing.systemPrompt || "", mcpServers, envReqs, listing.trustGrade || "unknown", listing.visibility || "visible", slug);
+    const localPath = materializeCloudListingCli(existing.id, slug, listing);
+    return { ...existing, slug, name: listing.name || slug, ...(localPath ? { localPath } : {}) };
+  }
+  const id = crypto.randomUUID();
+  const hasVisibility = columnExists(db, "installed_agents", "visibility");
+  if (hasVisibility) {
+    db.prepare("INSERT INTO installed_agents (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json, env_requirements_json, preferred_backend, trust_grade, installed_at, tone, visibility) VALUES (?,?,?,?,?,?,?,?,?,NULL,?,?,?,?)")
+      .run(id, slug, listing.name || slug, listing.nameEn || listing.name || slug, listing.tagline || "", listing.taglineEn || listing.tagline || "", listing.systemPrompt || "", mcpServers, envReqs, listing.trustGrade || "unknown", now, listing.tone || "blue", listing.visibility || "visible");
+  } else {
+    db.prepare("INSERT INTO installed_agents (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json, env_requirements_json, preferred_backend, trust_grade, installed_at, tone) VALUES (?,?,?,?,?,?,?,?,?,NULL,?,?,?)")
+      .run(id, slug, listing.name || slug, listing.nameEn || listing.name || slug, listing.tagline || "", listing.taglineEn || listing.tagline || "", listing.systemPrompt || "", mcpServers, envReqs, listing.trustGrade || "unknown", now, listing.tone || "blue");
+  }
+  const localPath = materializeCloudListingCli(id, slug, listing);
+  return { id, slug, name: listing.name || slug, ...(localPath ? { localPath } : {}) };
+}
+
+function materializeCloudListingCli(agentId, slug, listing) {
+  const pkg = listing.cloudPackage;
+  if (!pkg || !Array.isArray(pkg.files) || pkg.files.length === 0) return null;
+  const dir = path.join(userDataDir(), "cloud-agent-installs", slug);
+  fs.mkdirSync(dir, { recursive: true });
+  const markerPath = path.join(dir, ".agentlas-cloud-package.json");
+  let currentHash = null;
+  try {
+    currentHash = JSON.parse(fs.readFileSync(markerPath, "utf8")).packageHash || null;
+  } catch {}
+  const overwrite = currentHash !== pkg.packageHash;
+  for (const file of pkg.files) {
+    const target = resolveCloudInstallPathCli(dir, file.path);
+    const bytes = Buffer.from(String(file.contentBase64 || ""), "base64");
+    if (bytes.length !== Number(file.bytes) || sha(bytes) !== String(file.sha256 || "").toLowerCase()) {
+      fail(`cloud package file integrity failed: ${file.path}`);
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    if (overwrite || !fs.existsSync(target)) fs.writeFileSync(target, bytes);
+  }
+  fs.writeFileSync(
+    markerPath,
+    JSON.stringify({ agentId, packageHash: pkg.packageHash, installedAt: new Date().toISOString() }, null, 2) + "\n",
+    "utf8",
+  );
+  return dir;
+}
+
+function resolveCloudInstallPathCli(root, relPath) {
+  const normalized = String(relPath || "").replace(/\\/g, "/");
+  if (!normalized || normalized.startsWith("/") || normalized.includes("\0")) {
+    fail(`unsafe cloud package path: ${relPath}`);
+  }
+  const parts = normalized.split("/").filter((part) => part && part !== ".");
+  if (parts.length === 0 || parts.some((part) => part === "..")) {
+    fail(`unsafe cloud package path: ${relPath}`);
+  }
+  const target = path.resolve(root, ...parts);
+  const relative = path.relative(root, target);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    fail(`cloud package path escapes install folder: ${relPath}`);
+  }
+  return target;
+}
+
+function printCloudPackageResult(result) {
+  out(`${result.status === "blocked" ? "✖" : "✓"} ${result.summary}`);
+  out(`  slug:    ${result.manifest.slug}`);
+  out(`  files:   ${result.manifest.includedFileCount}/${result.manifest.fileCount}`);
+  out(`  hash:    ${result.manifest.packageHash}`);
+  out(`  bundle:  ${result.bundlePath}`);
+  out(`  review:  ${result.review.mode} · cost=${result.review.costOwner}${result.review.runtimeLabel ? " · " + result.review.runtimeLabel : ""}`);
+  const findings = result.review.findings || [];
+  if (findings.length) {
+    out("  findings:");
+    for (const f of findings.slice(0, 20)) out(`    - ${f.severity} ${f.file ? f.file + ": " : ""}${f.message}`);
+  }
+  if (result.registration) out(`  cloud:   ${result.registration.marketplaceUrl || result.registration.url || result.registration.cloudId}`);
+}
+
+function cloudReadName(rootPath) {
+  const text = cloudReadFirst(rootPath, ["agent.md", "AGENT.md", "README.md", "CLAUDE.md", "AGENTS.md"], 2000);
+  const heading = text.match(/^#\s+(.+)$/m);
+  return (heading ? heading[1] : path.basename(rootPath)).replace(/\s+/g, " ").trim().slice(0, 80);
+}
+function cloudReadTagline(rootPath) {
+  const text = cloudReadFirst(rootPath, ["README.md", "agent.md", "AGENT.md"], 3000);
+  for (const line of text.split(/\r?\n/)) {
+    const t = line.trim();
+    if (t && !t.startsWith("#") && !t.startsWith(">")) return t.slice(0, 160);
+  }
+  return "Portable Agentlas cloud agent package.";
+}
+function cloudReadFirst(rootPath, names, maxChars) {
+  for (const name of names) {
+    const file = path.join(rootPath, name);
+    try {
+      const stat = fs.statSync(file);
+      if (stat.isFile() && stat.size <= CLOUD_MAX_FILE_BYTES) return fs.readFileSync(file, "utf8").slice(0, maxChars);
+    } catch { /* continue */ }
+  }
+  return "";
+}
+function cloudInferKind(rootPath) {
+  for (const name of ["TEAM.md", "team.json", "agents", "team", "departments", "hr-departments"]) {
+    if (fs.existsSync(path.join(rootPath, name))) return "team";
+  }
+  return "agent";
+}
+function cloudPackageDir(slug) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return path.join(userDataDir(), "cloud-agent-packages", `${slug}-${stamp}`);
+}
+function cloudHashPackage(files) {
+  const h = crypto.createHash("sha256");
+  for (const file of files) {
+    h.update(file.path);
+    h.update("\0");
+    h.update(file.sha256);
+    h.update("\0");
+  }
+  return h.digest("hex");
+}
+function cloudSecuritySummary(findings) {
+  const blockerCount = findings.filter((f) => f.severity === "blocker").length;
+  const highCount = findings.filter((f) => f.severity === "high").length;
+  return { verdict: blockerCount ? "fail" : highCount ? "needs-review" : "pass", blockerCount, highCount, findingCount: findings.length };
+}
+function parseCloudReviewJson(text) {
+  const candidate = String(text || "").match(/\{[\s\S]*\}/);
+  if (!candidate) return { verdict: "needs-review", summary: "Local runtime returned non-JSON review output.", findings: [{ severity: "medium", category: "review", message: "Review output could not be parsed as strict JSON." }] };
+  try {
+    const parsed = JSON.parse(candidate[0]);
+    return { verdict: parsed.verdict, summary: parsed.summary, findings: Array.isArray(parsed.findings) ? parsed.findings : [] };
+  } catch {
+    return { verdict: "needs-review", summary: "Local runtime returned invalid JSON.", findings: [{ severity: "medium", category: "review", message: "Review output could not be parsed as strict JSON." }] };
+  }
+}
+function normalizeCloudSeverity(value) {
+  return ["blocker", "high", "medium", "low", "info"].includes(value) ? value : "medium";
+}
+function normalizeCloudCategory(value) {
+  return ["secret", "policy", "size", "structure", "runtime", "network", "review"].includes(value) ? value : "review";
+}
+function cloudSlug(value) {
+  return (String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "agentlas-cloud-agent");
+}
+function sha(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
 // ── Agentlas 아키텍처 (앱과 동일한 빌트인 에이전트 + 메모리) ────────────
 // cli/architecture.data.json은 컴파일된 manifest에서 생성됨(scripts/gen-cli-architecture.mjs).
 let _arch = null;
@@ -1480,6 +1959,35 @@ function spawnRuntime(kind, systemPrompt, prompt, opts) {
   });
 }
 
+function captureRuntime(kind, systemPrompt, prompt, opts) {
+  opts = opts || {};
+  const cwd = opts.cwd || runCwd();
+  return new Promise((resolve, reject) => {
+    const bin = which(RUNTIME_BIN[kind]) || RUNTIME_BIN[kind];
+    const child = spawn(bin, buildArgs(kind, systemPrompt, prompt, opts.permission), {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: opts.env || process.env,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code && code !== 0) {
+        reject(new Error(`${kind} exited ${code}: ${stderr.slice(0, 500)}`));
+        return;
+      }
+      resolve(stdout.trim() || stderr.trim());
+    });
+  });
+}
+
 // ── 명령 구현 ──────────────────────────────────────────────
 function cmdList(db) {
   const agents = listAgents(db);
@@ -1789,6 +2297,9 @@ function cmdHelp() {
       "  list                  agents/companies + active runtime",
       "  env                   shared env key names",
       "  multimodal            image/video/audio fallback providers",
+      "  cloud package <path>  package + static security review for Agentlas Cloud",
+      "  cloud publish <path>  register after local review (submitter runtime only)",
+      "  cloud install <slug>  download/install a cloud marketplace agent",
       "  creds save ...        save an issued key (vault + project .env + global memory)",
       "  doctor                check runtimes and data",
       "  setup                 re-run first-launch setup (language · runtime · permission)",
@@ -1866,6 +2377,8 @@ async function main() {
       return cmdEnv(db);
     case "multimodal":
       return cmdMultimodal(db, rest.slice(1));
+    case "cloud":
+      return cmdCloud(db, rest.slice(1), runtimeOverride);
     case "creds":
       return cmdCreds(db, rest.slice(1));
     case "doctor":

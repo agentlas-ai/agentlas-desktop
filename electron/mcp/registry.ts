@@ -1,9 +1,11 @@
 // 설치된 에이전트 레지스트리 — SQLite-backed. 다국어 + envRequirements 지원.
-import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { getSource as getMarketSource, getCargoSource } from "../marketplace";
-import { materializeAgentFiles } from "../agents/files";
-import { getRoute, removeRoute } from "../agents/routes";
+import { agentFolderPath, materializeAgentFiles } from "../agents/files";
+import { getRoute, removeRoute, setRoute, type RuntimeLabel } from "../agents/routes";
 import { isPrivateWebOnlyAgent, publicAgentVisibility } from "../agents/policy";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { installFromCatalog } from "../mcp-tools/registry";
@@ -170,7 +172,9 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
       visibility,
       slug,
     );
-    materializeAgentFiles(existing.id);
+    if (!materializeCloudPackageFiles(existing.id, slug, listing)) {
+      materializeAgentFiles(existing.id);
+    }
     return toAgent({
       ...existing,
       system_prompt: listing.systemPrompt,
@@ -209,7 +213,8 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
     visibility,
   );
 
-  materializeAgentFiles(id);
+  const cloudRoute = materializeCloudPackageFiles(id, slug, listing);
+  if (!cloudRoute) materializeAgentFiles(id);
 
   return {
     id,
@@ -226,7 +231,106 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
     installedAt: now,
     tone: listing.tone,
     visibility,
+    ...(cloudRoute
+      ? {
+          runtimeLabel: cloudRoute.labels[0],
+          localPath: cloudRoute.path,
+          kind: cloudRoute.kind,
+        }
+      : {}),
   };
+}
+
+function materializeCloudPackageFiles(
+  agentId: string,
+  slug: string,
+  listing: FullListing,
+): { path: string; labels: RuntimeLabel[]; kind: "agent" | "team" } | null {
+  const pkg = listing.cloudPackage;
+  if (!pkg?.files?.length) return null;
+  const dir = agentFolderPath(slug);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const markerPath = path.join(dir, ".agentlas-cloud-package.json");
+  const currentHash = readPackageMarkerHash(markerPath);
+  const overwrite = currentHash !== pkg.packageHash;
+  for (const file of pkg.files) {
+    const target = resolvePackageFile(dir, file.path);
+    const bytes = Buffer.from(file.contentBase64, "base64");
+    if (bytes.length !== file.bytes || sha256(bytes) !== file.sha256.toLowerCase()) {
+      throw new Error(`Cloud package file failed integrity check: ${file.path}`);
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    if (overwrite || !fs.existsSync(target)) {
+      fs.writeFileSync(target, bytes);
+    }
+  }
+  fs.writeFileSync(
+    markerPath,
+    JSON.stringify(
+      {
+        packageHash: pkg.packageHash,
+        installedAt: new Date().toISOString(),
+        source: "agentlas-cloud",
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+
+  const labels = detectCloudRuntimeLabels(pkg.files.map((file) => file.path));
+  const kind = pkg.agentKind === "team" ? "team" : "agent";
+  setRoute({
+    agentId,
+    path: dir,
+    runtime: labels[0],
+    labels,
+    kind,
+    importedAt: new Date().toISOString(),
+  });
+  return { path: dir, labels, kind };
+}
+
+function readPackageMarkerHash(markerPath: string): string | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(markerPath, "utf8")) as { packageHash?: string };
+    return typeof parsed.packageHash === "string" ? parsed.packageHash : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolvePackageFile(root: string, relPath: string): string {
+  const normalized = relPath.replace(/\\/g, "/");
+  if (!normalized || normalized.startsWith("/") || normalized.includes("\0")) {
+    throw new Error(`Unsafe cloud package path: ${relPath}`);
+  }
+  const parts = normalized.split("/").filter((part) => part && part !== ".");
+  if (parts.length === 0 || parts.some((part) => part === "..")) {
+    throw new Error(`Unsafe cloud package path: ${relPath}`);
+  }
+  const target = path.resolve(root, ...parts);
+  const relative = path.relative(root, target);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`Cloud package path escapes agent folder: ${relPath}`);
+  }
+  return target;
+}
+
+function detectCloudRuntimeLabels(paths: string[]): RuntimeLabel[] {
+  const labels: RuntimeLabel[] = [];
+  const normalized = paths.map((file) => file.replace(/\\/g, "/"));
+  if (normalized.some((file) => file === "CLAUDE.md" || file.startsWith(".claude/"))) labels.push("claude-code");
+  if (normalized.some((file) => file === "AGENTS.md")) labels.push("codex");
+  if (normalized.some((file) => file === "GEMINI.md")) labels.push("gemini");
+  if (normalized.some((file) => file.startsWith(".cursor/") || file === ".cursorrules")) labels.push("cursor");
+  if (labels.length === 0) labels.push("generic");
+  return labels;
+}
+
+function sha256(value: Buffer | string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 export function uninstallAgent(id: string): void {

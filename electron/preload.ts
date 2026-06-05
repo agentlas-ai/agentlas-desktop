@@ -106,6 +106,9 @@ const api: AgentlasIpc = {
     status: () => ipcRenderer.invoke("marketplace:status"),
     listMine: () => ipcRenderer.invoke("marketplace:listMine"),
   },
+  cloudAgents: {
+    publish: (input) => ipcRenderer.invoke("cloudAgents:publish", input),
+  },
   firms: {
     list: () => ipcRenderer.invoke("firms:list"),
     get: (id: string) => ipcRenderer.invoke("firms:get", id),

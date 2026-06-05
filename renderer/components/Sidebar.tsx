@@ -23,6 +23,7 @@ import {
   IconBuilding,
   IconChat,
   IconChevronRight,
+  IconFileUp,
   IconFolder,
   IconKey,
   IconMoon,
@@ -513,6 +514,10 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
             <IconStore size={13} style={{ color: "var(--peach-ink)" }} />
             <span style={{ flex: 1 }}>{t("sidebar.marketplace")}</span>
             <IconChevronRight size={11} style={{ color: "var(--muted)" }} />
+          </SidebarLink>
+          <SidebarLink href="/cloud" active={pathname.startsWith("/cloud")}>
+            <IconFileUp size={13} style={{ color: "var(--green-deep)" }} />
+            <span style={{ flex: 1 }}>{t("sidebar.cloud_publish")}</span>
           </SidebarLink>
         </SidebarSection>
 
@@ -1027,6 +1032,12 @@ function CollapsedNav({
       icon: <IconWand size={16} />,
       isActive: pathname.startsWith("/library/agents"),
       badge: agentCount > 0 ? agentCount : undefined,
+    },
+    {
+      href: "/cloud",
+      label: t("sidebar.cloud_publish"),
+      icon: <IconFileUp size={16} />,
+      isActive: pathname.startsWith("/cloud"),
     },
     {
       href: "/apps",

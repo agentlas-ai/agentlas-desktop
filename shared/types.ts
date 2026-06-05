@@ -150,6 +150,7 @@ export interface MarketplaceListing {
   installCount: number;
   manifestUrl: string;
   visibility?: AgentVisibility;
+  cloudPackage?: CloudAgentPackageDownload;
 }
 
 export interface MarketplaceSourceStatus {
@@ -1502,6 +1503,121 @@ export interface AppFactoryAppToolPublishResult {
   summary: string;
 }
 
+// ── Agentlas Cloud agent packaging / marketplace registration ─────────────
+// Packaging and security review run on the submitter's machine. Agentlas Cloud
+// receives package hashes, manifests, and review evidence; it must not call a
+// platform-owned LLM for this flow.
+export type CloudAgentReviewMode = "static-only" | "local-runtime";
+export type CloudAgentVisibility = "private-link" | "marketplace";
+export type CloudAgentPackageStatus = "ready" | "blocked" | "registered" | "dry-run";
+
+export interface CloudAgentPublishRequest {
+  /** Local agent/team/repo folder to package. */
+  rootPath: string;
+  /** Optional public slug. If omitted, derived from the folder/name. */
+  slug?: string;
+  /** Default marketplace; private-link creates an unlisted package once server supports it. */
+  visibility?: CloudAgentVisibility;
+  /** true packages and reviews locally but does not call agentlas.cloud. */
+  dryRun?: boolean;
+  /** static-only is free; local-runtime uses the submitter's active CLI/BYOK/local runtime. */
+  reviewMode?: CloudAgentReviewMode;
+  /** Optional operator note stored with the registration request. */
+  notes?: string;
+}
+
+export interface CloudAgentSecurityFinding {
+  id: string;
+  severity: "blocker" | "high" | "medium" | "low" | "info";
+  category: "secret" | "policy" | "size" | "structure" | "runtime" | "network" | "review";
+  message: string;
+  file?: string;
+  remediation?: string;
+}
+
+export interface CloudAgentPackageFile {
+  path: string;
+  bytes: number;
+  sha256: string;
+  kind: "text" | "binary";
+  included: boolean;
+  reason?: string;
+}
+
+export interface CloudAgentPackageDownloadFile {
+  path: string;
+  bytes: number;
+  sha256: string;
+  contentBase64: string;
+}
+
+export interface CloudAgentPackageDownload {
+  packageHash: string;
+  fileCount: number;
+  totalBytes: number;
+  agentKind: "agent" | "team" | "repo";
+  runtimeLabels: string[];
+  files: CloudAgentPackageDownloadFile[];
+}
+
+export interface CloudAgentPackageManifest {
+  version: "0.1";
+  kind: "agentlas-cloud-agent";
+  slug: string;
+  name: string;
+  tagline: string;
+  agentKind: "agent" | "team" | "repo";
+  runtimeLabels: string[];
+  visibility: CloudAgentVisibility;
+  rootFingerprint: string;
+  packageHash: string;
+  fileCount: number;
+  includedFileCount: number;
+  totalBytes: number;
+  createdAt: string;
+  billingMode: "submitter-local-runtime" | "static-only";
+  costOwner: "submitter" | "none";
+  security: {
+    verdict: "pass" | "fail" | "needs-review";
+    blockerCount: number;
+    highCount: number;
+    findingCount: number;
+  };
+}
+
+export interface CloudAgentReviewResult {
+  mode: CloudAgentReviewMode;
+  verdict: "pass" | "fail" | "needs-review";
+  costOwner: "submitter" | "none";
+  runtimeLabel?: string;
+  summary: string;
+  findings: CloudAgentSecurityFinding[];
+  reviewedAt: string;
+  rawText?: string;
+}
+
+export interface CloudAgentRegistrationResult {
+  cloudId: string;
+  slug: string;
+  url?: string;
+  marketplaceUrl?: string;
+  registeredAt: string;
+  dryRun: boolean;
+}
+
+export interface CloudAgentPackageResult {
+  status: CloudAgentPackageStatus;
+  rootPath: string;
+  packageDir: string;
+  bundlePath: string;
+  manifestPath: string;
+  manifest: CloudAgentPackageManifest;
+  files: CloudAgentPackageFile[];
+  review: CloudAgentReviewResult;
+  registration?: CloudAgentRegistrationResult;
+  summary: string;
+}
+
 export interface ToolFactoryScaffoldRequest {
   chatId: string;
   surfaceId: string;
@@ -1901,6 +2017,10 @@ export interface AgentlasIpc {
     status: () => Promise<MarketplaceSourceStatus>;
     /** 로그인 사용자가 agentlas.cloud에서 만든 내 에이전트 목록. 미로그인/오프라인이면 [] */
     listMine: () => Promise<MarketplaceListing[]>;
+  };
+  /** Publish local agent/team packages to Agentlas Cloud. Review runs locally on the submitter machine. */
+  cloudAgents: {
+    publish: (input: CloudAgentPublishRequest) => Promise<CloudAgentPackageResult>;
   };
   firms: {
     list: () => Promise<InstalledFirm[]>;

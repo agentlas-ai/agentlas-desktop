@@ -160,6 +160,7 @@ import { archiveSurfaceAssetPack, materializeSurfaceAssetPack, restoreSurfaceAss
 import { archiveToolPackage, installToolMcp, restoreToolPackage } from "./tool-factory/operations";
 import { runToolFactorySmoke, scaffoldAgentTool } from "./tool-factory/scaffold";
 import { createCommerceAgentTeam } from "./meta-agent/commerce-team";
+import { packageAndReviewCloudAgent } from "./cloud-agents/package";
 import { selectedMultimodalEnvRequirements } from "../shared/multimodal";
 import type {
   AppFactoryAppRecord,
@@ -179,6 +180,7 @@ import type {
   AppFactoryScaffoldRequest,
   AppFactoryScaffoldSnapshot,
   Automation,
+  CloudAgentPublishRequest,
   McpInvocationEvent,
   McpInvocationRequest,
   MetaAgentTeamFactoryRequest,
@@ -535,6 +537,11 @@ export function registerIpcHandlers(): void {
       return [];
     }
   });
+
+  // ── cloud agents (local package/review, then cloud registration) ─
+  ipcMain.handle("cloudAgents:publish", async (_e, input: CloudAgentPublishRequest) =>
+    packageAndReviewCloudAgent(input),
+  );
 
   // ── firms (설치된 회사) ────────────────────────────────
   ipcMain.handle("firms:list", () => listFirms());
