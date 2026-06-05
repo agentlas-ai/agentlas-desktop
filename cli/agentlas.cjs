@@ -1275,6 +1275,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
     const skillTrialsFile = arch.skillTrialsFile || "skill-trials.jsonl";
     const curatorDecisionsFile = arch.curatorDecisionsFile || "curator-decisions.jsonl";
     const superOntologyContractFile = arch.superOntologyContractFile || "super-ontology-contract.json";
+    const superOntologyTaskCoverageFile = arch.superOntologyTaskCoverageFile || "super-ontology-task-coverage.json";
     const superOntologyReplaysFile = arch.superOntologyReplaysFile || "super-ontology-replays.jsonl";
     const superOntologyEvidenceFile = arch.superOntologyEvidenceFile || "super-ontology-evidence.jsonl";
     const superOntologyMemoryBridgeFile = arch.superOntologyMemoryBridgeFile || "super-ontology-memory-bridge.jsonl";
@@ -1344,6 +1345,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           "affordance_action_binding",
           "agentlas_integration_contract",
           "memory_curator_bridge",
+          "task_coverage_contract",
           "promotion_readiness",
           "promotion_replay_drill",
           "architecture_sync_review",
@@ -1353,6 +1355,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           promotionEvidence: `.agentlas/${superOntologyEvidenceFile}`,
           memoryTickets: `.agentlas/${arch.logFile}`,
           memoryCuratorBridge: `.agentlas/${superOntologyMemoryBridgeFile}`,
+          taskCoverage: `.agentlas/${superOntologyTaskCoverageFile}`,
         },
         hardStops: [
           "zero_error_claim",
@@ -1364,6 +1367,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           "missing_rollback",
           "missing_shadow_or_canary_evidence",
           "missing_memory_curator_bridge",
+          "missing_task_coverage_contract",
           "direct_durable_memory_write",
           "raw_prompt_or_secret_memory_capture",
         ],
@@ -1374,6 +1378,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           syncReviewRequired: true,
           appbridgeSourceWritesBlocked: true,
           memoryCuratorBridgeRequired: true,
+          taskCoverageRequired: true,
           directDurableMemoryWritesBlocked: true,
         },
         surfacePolicy: {
@@ -1386,6 +1391,62 @@ function ensureProjectMemoryCli(projectPath, projectName) {
             notes: "AppBridge remains a route adapter, never the source of truth.",
           },
         },
+      }, null, 2), "utf8");
+    }
+    const superOntologyTaskCoverage = path.join(dir, superOntologyTaskCoverageFile);
+    if (!fs.existsSync(superOntologyTaskCoverage)) {
+      fs.writeFileSync(superOntologyTaskCoverage, JSON.stringify({
+        schemaVersion: "1.0",
+        kind: "agentlas-super-ontology-task-coverage",
+        state: "local_candidate",
+        projectId: name,
+        draftId: null,
+        runtimePromotionAllowed: false,
+        taskFamilies: [
+          "retrieve_answer",
+          "summarize_synthesize",
+          "draft_artifact",
+          "transform_format",
+          "analyze_decide",
+          "plan_sequence",
+          "coordinate_social",
+          "execute_tool",
+          "monitor_repair",
+          "personalize_memory",
+          "regulated_boundary",
+          "multimodal_generate",
+          "physical_or_sensor",
+          "software_change",
+          "financial_or_compliance",
+          "education_or_coaching",
+        ],
+        affordanceTypes: [
+          "read",
+          "draft",
+          "write",
+          "publish",
+          "execute",
+          "physical",
+          "train",
+        ],
+        evidenceModes: [
+          "citation",
+          "current_approved_source",
+          "owner_authority",
+          "policy_or_law",
+          "measurement_or_dataset",
+          "license_or_consent",
+          "runtime_test",
+          "rollback_plan",
+        ],
+        defaultDecision: "classify_before_action",
+        hardStops: [
+          "missing_task_family",
+          "missing_affordance_type",
+          "missing_evidence_mode",
+          "write_without_rollback",
+          "publish_execute_physical_or_train_without_authority",
+        ],
       }, null, 2), "utf8");
     }
     for (const fileName of [
