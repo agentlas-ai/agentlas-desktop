@@ -34,6 +34,7 @@ const data = {
   superOntologyContractFile: m.SUPER_ONTOLOGY_CONTRACT_FILE,
   superOntologyReplaysFile: m.SUPER_ONTOLOGY_REPLAYS_FILE,
   superOntologyEvidenceFile: m.SUPER_ONTOLOGY_EVIDENCE_FILE,
+  superOntologyMemoryBridgeFile: m.SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
   kinds: m.MEMORY_KINDS,
   scopes: m.MEMORY_SCOPES,
   agents: m.BUILTIN_AGENTS.map((a) => ({

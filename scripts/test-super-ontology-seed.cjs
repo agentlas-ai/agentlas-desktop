@@ -7,6 +7,7 @@ const path = require("node:path");
 const {
   SUPER_ONTOLOGY_CONTRACT_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
+  SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
   SUPER_ONTOLOGY_REPLAYS_FILE,
 } = require("../dist/electron/architecture/manifest.js");
 const { ensureProjectMemory } = require("../dist/electron/memory/project-files.js");
@@ -22,10 +23,12 @@ try {
   const contractPath = path.join(memoryDir, SUPER_ONTOLOGY_CONTRACT_FILE);
   const replaysPath = path.join(memoryDir, SUPER_ONTOLOGY_REPLAYS_FILE);
   const evidencePath = path.join(memoryDir, SUPER_ONTOLOGY_EVIDENCE_FILE);
+  const memoryBridgePath = path.join(memoryDir, SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE);
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
+  assert.ok(fs.existsSync(memoryBridgePath), "super ontology memory bridge ledger should be seeded");
 
   const contract = JSON.parse(fs.readFileSync(contractPath, "utf8"));
   assert.equal(contract.kind, "agentlas-super-ontology-contract");
@@ -36,10 +39,15 @@ try {
   assert.equal(contract.promotionPolicy.canaryRequiredForMixedContext, true);
   assert.equal(contract.promotionPolicy.rollbackRequired, true);
   assert.equal(contract.promotionPolicy.appbridgeSourceWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.memoryCuratorBridgeRequired, true);
+  assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
+  assert.ok(contract.layers.includes("memory_curator_bridge"), "contract should include memory curator bridge gate");
+  assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");
+  assert.equal(fs.readFileSync(memoryBridgePath, "utf8"), "");
 
   console.log(`super ontology seed smoke passed (${path.basename(memoryDir)})`);
 } finally {

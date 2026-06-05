@@ -1277,6 +1277,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
     const superOntologyContractFile = arch.superOntologyContractFile || "super-ontology-contract.json";
     const superOntologyReplaysFile = arch.superOntologyReplaysFile || "super-ontology-replays.jsonl";
     const superOntologyEvidenceFile = arch.superOntologyEvidenceFile || "super-ontology-evidence.jsonl";
+    const superOntologyMemoryBridgeFile = arch.superOntologyMemoryBridgeFile || "super-ontology-memory-bridge.jsonl";
     const skillRegistry = path.join(dir, skillRegistryFile);
     if (!fs.existsSync(skillRegistry)) {
       fs.writeFileSync(skillRegistry, JSON.stringify({
@@ -1342,6 +1343,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           "knowledge_capsule",
           "affordance_action_binding",
           "agentlas_integration_contract",
+          "memory_curator_bridge",
           "promotion_readiness",
           "promotion_replay_drill",
           "architecture_sync_review",
@@ -1350,6 +1352,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           replays: `.agentlas/${superOntologyReplaysFile}`,
           promotionEvidence: `.agentlas/${superOntologyEvidenceFile}`,
           memoryTickets: `.agentlas/${arch.logFile}`,
+          memoryCuratorBridge: `.agentlas/${superOntologyMemoryBridgeFile}`,
         },
         hardStops: [
           "zero_error_claim",
@@ -1360,6 +1363,9 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           "appbridge_source_of_truth_write",
           "missing_rollback",
           "missing_shadow_or_canary_evidence",
+          "missing_memory_curator_bridge",
+          "direct_durable_memory_write",
+          "raw_prompt_or_secret_memory_capture",
         ],
         promotionPolicy: {
           shadowRequired: true,
@@ -1367,6 +1373,8 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           rollbackRequired: true,
           syncReviewRequired: true,
           appbridgeSourceWritesBlocked: true,
+          memoryCuratorBridgeRequired: true,
+          directDurableMemoryWritesBlocked: true,
         },
         surfacePolicy: {
           desktopTerminal: {
@@ -1380,7 +1388,11 @@ function ensureProjectMemoryCli(projectPath, projectName) {
         },
       }, null, 2), "utf8");
     }
-    for (const fileName of [superOntologyReplaysFile, superOntologyEvidenceFile]) {
+    for (const fileName of [
+      superOntologyReplaysFile,
+      superOntologyEvidenceFile,
+      superOntologyMemoryBridgeFile,
+    ]) {
       const filePath = path.join(dir, fileName);
       if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, "", "utf8");
     }

@@ -16,6 +16,7 @@ import {
   SKILL_TRIALS_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
+  SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
   SUPER_ONTOLOGY_REPLAYS_FILE,
 } from "../architecture/manifest";
 
@@ -138,6 +139,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         "knowledge_capsule",
         "affordance_action_binding",
         "agentlas_integration_contract",
+        "memory_curator_bridge",
         "promotion_readiness",
         "promotion_replay_drill",
         "architecture_sync_review",
@@ -146,6 +148,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         replays: `.agentlas/${SUPER_ONTOLOGY_REPLAYS_FILE}`,
         promotionEvidence: `.agentlas/${SUPER_ONTOLOGY_EVIDENCE_FILE}`,
         memoryTickets: `.agentlas/${MEMORY_LOG_FILE}`,
+        memoryCuratorBridge: `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`,
       },
       hardStops: [
         "zero_error_claim",
@@ -156,6 +159,9 @@ function superOntologyContractSkeleton(projectName: string): string {
         "appbridge_source_of_truth_write",
         "missing_rollback",
         "missing_shadow_or_canary_evidence",
+        "missing_memory_curator_bridge",
+        "direct_durable_memory_write",
+        "raw_prompt_or_secret_memory_capture",
       ],
       promotionPolicy: {
         shadowRequired: true,
@@ -163,6 +169,8 @@ function superOntologyContractSkeleton(projectName: string): string {
         rollbackRequired: true,
         syncReviewRequired: true,
         appbridgeSourceWritesBlocked: true,
+        memoryCuratorBridgeRequired: true,
+        directDurableMemoryWritesBlocked: true,
       },
       surfacePolicy: {
         desktopTerminal: {
@@ -211,7 +219,11 @@ export function ensureProjectMemory(
       fs.writeFileSync(superOntologyContract, superOntologyContractSkeleton(name), "utf8");
     }
 
-    for (const fileName of [SUPER_ONTOLOGY_REPLAYS_FILE, SUPER_ONTOLOGY_EVIDENCE_FILE]) {
+    for (const fileName of [
+      SUPER_ONTOLOGY_REPLAYS_FILE,
+      SUPER_ONTOLOGY_EVIDENCE_FILE,
+      SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
+    ]) {
       const filePath = path.join(dir, fileName);
       if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, "", "utf8");
     }
