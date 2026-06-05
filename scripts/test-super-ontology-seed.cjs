@@ -14,6 +14,7 @@ const {
   SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE,
   SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE,
   SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE,
+  SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
   SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
@@ -34,6 +35,7 @@ try {
   const replaysPath = path.join(memoryDir, SUPER_ONTOLOGY_REPLAYS_FILE);
   const evidencePath = path.join(memoryDir, SUPER_ONTOLOGY_EVIDENCE_FILE);
   const memoryBridgePath = path.join(memoryDir, SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE);
+  const openWorldCoveragePath = path.join(memoryDir, SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE);
   const taskCoveragePath = path.join(memoryDir, SUPER_ONTOLOGY_TASK_COVERAGE_FILE);
   const assuranceCasePath = path.join(memoryDir, SUPER_ONTOLOGY_ASSURANCE_CASE_FILE);
   const contextualFlowPath = path.join(memoryDir, SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE);
@@ -46,6 +48,7 @@ try {
   const invariantVerificationPath = path.join(memoryDir, SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE);
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
+  assert.ok(fs.existsSync(openWorldCoveragePath), "super ontology open-world coverage should be seeded");
   assert.ok(fs.existsSync(taskCoveragePath), "super ontology task coverage should be seeded");
   assert.ok(fs.existsSync(assuranceCasePath), "super ontology assurance case should be seeded");
   assert.ok(fs.existsSync(contextualFlowPath), "super ontology contextual flow should be seeded");
@@ -70,6 +73,9 @@ try {
   assert.equal(contract.promotionPolicy.rollbackRequired, true);
   assert.equal(contract.promotionPolicy.appbridgeSourceWritesBlocked, true);
   assert.equal(contract.promotionPolicy.memoryCuratorBridgeRequired, true);
+  assert.equal(contract.promotionPolicy.openWorldCoverageRequired, true);
+  assert.equal(contract.promotionPolicy.unknownCombinationRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.uncoveredModalityRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.taskCoverageRequired, true);
   assert.equal(contract.promotionPolicy.contextualFlowRequired, true);
   assert.equal(contract.promotionPolicy.causalImpactRequired, true);
@@ -114,10 +120,18 @@ try {
     "contract should include resilience control gate",
   );
   assert.ok(
+    contract.layers.includes("open_world_coverage_contract"),
+    "contract should include open-world coverage gate",
+  );
+  assert.ok(
     contract.layers.includes("invariant_verification_contract"),
     "contract should include invariant verification gate",
   );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
+  assert.equal(
+    contract.evidenceLedgers.openWorldCoverage,
+    `.agentlas/${SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE}`,
+  );
   assert.equal(contract.evidenceLedgers.taskCoverage, `.agentlas/${SUPER_ONTOLOGY_TASK_COVERAGE_FILE}`);
   assert.equal(contract.evidenceLedgers.contextualFlow, `.agentlas/${SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE}`);
   assert.equal(contract.evidenceLedgers.causalImpact, `.agentlas/${SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE}`);
@@ -145,6 +159,30 @@ try {
   assert.equal(
     contract.evidenceLedgers.invariantVerification,
     `.agentlas/${SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE}`,
+  );
+  const openWorldCoverage = JSON.parse(fs.readFileSync(openWorldCoveragePath, "utf8"));
+  assert.equal(openWorldCoverage.kind, "agentlas-super-ontology-open-world-coverage");
+  assert.equal(openWorldCoverage.runtimePromotionAllowed, false);
+  assert.equal(openWorldCoverage.defaultDecision, "lower_authority_before_unknown_combination_write");
+  assert.ok(
+    openWorldCoverage.worldFamilies.includes("company_operations"),
+    "open-world coverage should include company operations",
+  );
+  assert.ok(
+    openWorldCoverage.worldFamilies.includes("industrial_physical"),
+    "open-world coverage should include industrial physical work",
+  );
+  assert.ok(
+    openWorldCoverage.worldFamilies.includes("unknown_mixed"),
+    "open-world coverage should include unknown mixed context",
+  );
+  assert.ok(openWorldCoverage.modalities.includes("hwp"), "open-world coverage should include HWP");
+  assert.ok(openWorldCoverage.modalities.includes("sensor"), "open-world coverage should include sensor data");
+  assert.ok(openWorldCoverage.faultModels.includes("implicit_degradation"), "open-world coverage should include implicit degradation");
+  assert.ok(openWorldCoverage.faultModels.includes("adversarial_source"), "open-world coverage should include adversarial sources");
+  assert.ok(
+    openWorldCoverage.hardStops.includes("proposal_example_equals_all_tasks"),
+    "open-world coverage should block proposal fixture overgeneralization",
   );
   const taskCoverage = JSON.parse(fs.readFileSync(taskCoveragePath, "utf8"));
   assert.equal(taskCoverage.kind, "agentlas-super-ontology-task-coverage");

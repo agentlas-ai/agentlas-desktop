@@ -36,7 +36,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.5.18";
+export const ARCHITECTURE_VERSION = "1.5.19";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -99,6 +99,7 @@ export const SKILL_REGISTRY_FILE = "skill-registry.json";
 export const SKILL_TRIALS_FILE = "skill-trials.jsonl";
 export const CURATOR_DECISIONS_FILE = "curator-decisions.jsonl";
 export const SUPER_ONTOLOGY_CONTRACT_FILE = "super-ontology-contract.json";
+export const SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE = "super-ontology-open-world-coverage.json";
 export const SUPER_ONTOLOGY_TASK_COVERAGE_FILE = "super-ontology-task-coverage.json";
 export const SUPER_ONTOLOGY_ASSURANCE_CASE_FILE = "super-ontology-assurance-case.json";
 export const SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE = "super-ontology-contextual-flow.json";
@@ -296,7 +297,8 @@ the task size:
 - .agentlas activation metadata, memory-map, sitemap, memory tickets, and evidence;
 - .agentlas skill-registry, skill-trials, and curator-decisions files as
   candidate-only lifecycle metadata;
-- .agentlas super-ontology-contract, super-ontology-task-coverage,
+- .agentlas super-ontology-contract, super-ontology-open-world-coverage,
+  super-ontology-task-coverage,
   super-ontology-contextual-flow, super-ontology-assurance-case,
   super-ontology-causal-impact,
   super-ontology-knowledge-homeostasis,
@@ -305,8 +307,10 @@ the task size:
   super-ontology-semantic-alignment,
   super-ontology-replays,
   super-ontology-evidence, and super-ontology-memory-bridge files as
-  candidate-only adaptive knowledge governance metadata. Task coverage must
-  classify requested work beyond proposal/deck generation before action, and
+  candidate-only adaptive knowledge governance metadata. Open-world coverage
+  must lower authority for new world/task/modality/fault/authority/write
+  combinations before action. Task coverage must classify requested work beyond
+  proposal/deck generation before action, and
   contextual flow contracts must check sender, recipient, subject, purpose,
   authority, transmission principle, and retention before information crosses
   personal/company/customer/public/regulated/agent-internal boundaries.

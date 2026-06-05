@@ -15,6 +15,7 @@ import {
   SKILL_REGISTRY_FILE,
   SKILL_TRIALS_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
+  SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   SUPER_ONTOLOGY_ASSURANCE_CASE_FILE,
   SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE,
   SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE,
@@ -150,6 +151,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         "affordance_action_binding",
         "agentlas_integration_contract",
         "memory_curator_bridge",
+        "open_world_coverage_contract",
         "task_coverage_contract",
         "contextual_flow_contract",
         "causal_impact_contract",
@@ -169,6 +171,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         promotionEvidence: `.agentlas/${SUPER_ONTOLOGY_EVIDENCE_FILE}`,
         memoryTickets: `.agentlas/${MEMORY_LOG_FILE}`,
         memoryCuratorBridge: `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`,
+        openWorldCoverage: `.agentlas/${SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE}`,
         taskCoverage: `.agentlas/${SUPER_ONTOLOGY_TASK_COVERAGE_FILE}`,
         contextualFlow: `.agentlas/${SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE}`,
         causalImpact: `.agentlas/${SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE}`,
@@ -186,6 +189,13 @@ function superOntologyContractSkeleton(projectName: string): string {
         "forbidden_context_join",
         "whole_graph_exposure",
         "tool_authority_without_provenance",
+        "missing_open_world_coverage_contract",
+        "proposal_example_equals_all_tasks",
+        "unknown_combination_to_runtime_write",
+        "untested_modality_to_memory_write",
+        "implicit_degradation_as_complete_data",
+        "adversarial_source_as_authority",
+        "forbidden_authority_to_action",
         "appbridge_source_of_truth_write",
         "missing_rollback",
         "missing_shadow_or_canary_evidence",
@@ -252,6 +262,9 @@ function superOntologyContractSkeleton(projectName: string): string {
         syncReviewRequired: true,
         appbridgeSourceWritesBlocked: true,
         memoryCuratorBridgeRequired: true,
+        openWorldCoverageRequired: true,
+        unknownCombinationRuntimeWritesBlocked: true,
+        uncoveredModalityRuntimeWritesBlocked: true,
         taskCoverageRequired: true,
         contextualFlowRequired: true,
         causalImpactRequired: true,
@@ -1254,6 +1267,133 @@ function superOntologyInvariantVerificationSkeleton(projectName: string): string
   );
 }
 
+function superOntologyOpenWorldCoverageSkeleton(projectName: string): string {
+  return JSON.stringify(
+    {
+      schemaVersion: "1.0",
+      kind: "agentlas-super-ontology-open-world-coverage",
+      state: "local_candidate",
+      projectId: projectName,
+      draftId: null,
+      runtimePromotionAllowed: false,
+      defaultDecision: "lower_authority_before_unknown_combination_write",
+      worldFamilies: [
+        "personal_life",
+        "company_operations",
+        "public_research",
+        "scientific_observation",
+        "social_institutional",
+        "creative_media",
+        "regulated_health",
+        "legal_compliance",
+        "industrial_physical",
+        "environmental_geospatial",
+        "software_enterprise",
+        "education",
+        "finance_compliance",
+        "multimodal_brand",
+        "unknown_mixed",
+      ],
+      modalities: [
+        "text",
+        "table",
+        "slide",
+        "pdf",
+        "hwp",
+        "image",
+        "video",
+        "audio",
+        "sensor",
+        "code",
+        "database",
+        "email",
+        "calendar",
+        "web",
+        "geospatial",
+      ],
+      faultModels: [
+        "none",
+        "explicit_error",
+        "implicit_degradation",
+        "mixed_fault",
+        "missing_field",
+        "stale_source",
+        "adversarial_source",
+        "permission_gap",
+        "semantic_ambiguity",
+        "causal_gap",
+      ],
+      authorityStates: [
+        "public_allowed",
+        "owner_authority_present",
+        "authority_unknown",
+        "regulated_requires_review",
+        "forbidden",
+      ],
+      coverageGaps: [
+        "covered",
+        "new_combination",
+        "underrepresented_world",
+        "missing_fault_fixture",
+        "missing_modality_fixture",
+        "missing_authority_fixture",
+      ],
+      requiredGates: [
+        "task_coverage",
+        "contextual_flow",
+        "epistemic_calibration",
+        "semantic_alignment",
+        "adversarial_provenance",
+        "causal_impact",
+        "knowledge_homeostasis",
+        "resilience_control",
+        "invariant_verification",
+        "memory_curator_bridge",
+        "assurance_case",
+        "shadow_canary_replay",
+        "owner_review",
+      ],
+      samplingActions: [
+        "allow_as_research_fixture",
+        "add_fixture",
+        "ask_clarify",
+        "shadow_replay",
+        "quarantine",
+        "block",
+        "require_owner_review",
+      ],
+      promotionDecisions: [
+        "candidate_only",
+        "shadow_required",
+        "sync_review_required",
+        "blocked",
+      ],
+      researchBasis: [
+        "open_world_evaluation",
+        "professional_agent_benchmarks",
+        "real_computer_environment_benchmarks",
+        "ontology_oriented_kg_construction",
+        "enterprise_ontology_scope_limits",
+        "no_free_lunch",
+        "zero_trust_architecture",
+      ],
+      hardStops: [
+        "missing_open_world_coverage_contract",
+        "proposal_example_equals_all_tasks",
+        "unknown_combination_to_runtime_write",
+        "untested_modality_to_memory_write",
+        "implicit_degradation_as_complete_data",
+        "adversarial_source_as_authority",
+        "forbidden_authority_to_action",
+        "open_world_case_without_shadow_replay",
+        "open_world_case_without_owner_or_sync_review",
+      ],
+    },
+    null,
+    2,
+  );
+}
+
 function superOntologyTaskCoverageSkeleton(projectName: string): string {
   return JSON.stringify(
     {
@@ -1343,6 +1483,15 @@ export function ensureProjectMemory(
     const superOntologyContract = path.join(dir, SUPER_ONTOLOGY_CONTRACT_FILE);
     if (!fs.existsSync(superOntologyContract)) {
       fs.writeFileSync(superOntologyContract, superOntologyContractSkeleton(name), "utf8");
+    }
+
+    const superOntologyOpenWorldCoverage = path.join(dir, SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE);
+    if (!fs.existsSync(superOntologyOpenWorldCoverage)) {
+      fs.writeFileSync(
+        superOntologyOpenWorldCoverage,
+        superOntologyOpenWorldCoverageSkeleton(name),
+        "utf8",
+      );
     }
 
     const superOntologyTaskCoverage = path.join(dir, SUPER_ONTOLOGY_TASK_COVERAGE_FILE);

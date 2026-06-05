@@ -32,6 +32,7 @@ const data = {
   skillTrialsFile: m.SKILL_TRIALS_FILE,
   curatorDecisionsFile: m.CURATOR_DECISIONS_FILE,
   superOntologyContractFile: m.SUPER_ONTOLOGY_CONTRACT_FILE,
+  superOntologyOpenWorldCoverageFile: m.SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   superOntologyTaskCoverageFile: m.SUPER_ONTOLOGY_TASK_COVERAGE_FILE,
   superOntologyAssuranceCaseFile: m.SUPER_ONTOLOGY_ASSURANCE_CASE_FILE,
   superOntologyContextualFlowFile: m.SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE,
