@@ -36,7 +36,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.5.22";
+export const ARCHITECTURE_VERSION = "1.5.23";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -118,6 +118,8 @@ export const SUPER_ONTOLOGY_OBSERVABILITY_TELEMETRY_FILE = "super-ontology-obser
 export const SUPER_ONTOLOGY_OBJECTIVE_PROXY_VALIDITY_FILE = "super-ontology-objective-proxy-validity.json";
 export const SUPER_ONTOLOGY_STAKEHOLDER_PREFERENCE_GOVERNANCE_FILE =
   "super-ontology-stakeholder-preference-governance.json";
+export const SUPER_ONTOLOGY_NORMATIVE_AUTHORITY_DRIFT_FILE =
+  "super-ontology-normative-authority-drift.json";
 export const SUPER_ONTOLOGY_REPLAYS_FILE = "super-ontology-replays.jsonl";
 export const SUPER_ONTOLOGY_EVIDENCE_FILE = "super-ontology-evidence.jsonl";
 export const SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE = "super-ontology-memory-bridge.jsonl";
@@ -318,11 +320,12 @@ the task size:
   super-ontology-observability-telemetry,
   super-ontology-objective-proxy-validity,
   super-ontology-stakeholder-preference-governance,
+  super-ontology-normative-authority-drift,
   super-ontology-replays,
   super-ontology-evidence, and super-ontology-memory-bridge files as
   candidate-only adaptive knowledge governance metadata. Open-world coverage
   ledger keys include objectiveProxyValidity, stakeholderPreferenceGovernance,
-  and memoryCuratorBridge for cross-surface sync checks. Open-world coverage
+  normativeAuthorityDrift, and memoryCuratorBridge for cross-surface sync checks. Open-world coverage
   must lower authority for new world/task/modality/fault/authority/write
   combinations before action. Consensus coordination must treat agent agreement,
   majority vote, debate, model-judge approval, distributed replica merge, and
@@ -369,12 +372,18 @@ the task size:
   majority vote, behavior signals, role power, stale preference records, and
   strategic preference reports from becoming write authority without stakeholder
   maps, authority scope, aggregation rules, consent or rights vetoes, dissent,
-  appeal paths, review owners, and rollback. Keep
+  appeal paths, review owners, and rollback. Normative authority drift contracts
+  must block stale policies, wrong jurisdictions, draft contracts, superseded
+  rules, expired consent, translation/summary shortcuts, license conflicts,
+  cross-border transfer gaps, and emergency exceptions without expiry from
+  becoming authority without primary source, effective date, scope, precedence,
+  review owner, audit trail, and rollback. Keep
   graph writes and direct durable memory writes disabled until
   shadow/canary/rollback evidence, homeostasis review, adversarial provenance
   review, epistemic calibration review, semantic alignment review, resilience
   control review, invariant verification, observability telemetry review,
-  objective proxy validity review, stakeholder preference governance review, and Memory
+  objective proxy validity review, stakeholder preference governance review,
+  normative authority drift review, and Memory
   Curator review exist;
 - PM Soul or project owner loop for continuity;
 - Memory Curator rules for durable memory, dedup, scope, and redaction;
@@ -389,6 +398,7 @@ the task size:
   replay, semantic alignment review, resilience control review, invariant
   verification, observability telemetry review, objective proxy validity review,
   stakeholder preference governance review,
+  normative authority drift review,
   rollback, and sync review
   approve a later phase;
 - hierarchy when useful: HQ/orchestrator -> builders/workers -> QA/evidence gate;

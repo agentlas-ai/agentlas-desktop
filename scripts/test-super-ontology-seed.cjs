@@ -17,6 +17,7 @@ const {
   SUPER_ONTOLOGY_OBSERVABILITY_TELEMETRY_FILE,
   SUPER_ONTOLOGY_OBJECTIVE_PROXY_VALIDITY_FILE,
   SUPER_ONTOLOGY_STAKEHOLDER_PREFERENCE_GOVERNANCE_FILE,
+  SUPER_ONTOLOGY_NORMATIVE_AUTHORITY_DRIFT_FILE,
   SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
@@ -57,6 +58,10 @@ try {
     memoryDir,
     SUPER_ONTOLOGY_STAKEHOLDER_PREFERENCE_GOVERNANCE_FILE,
   );
+  const normativeAuthorityDriftPath = path.join(
+    memoryDir,
+    SUPER_ONTOLOGY_NORMATIVE_AUTHORITY_DRIFT_FILE,
+  );
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(openWorldCoveragePath), "super ontology open-world coverage should be seeded");
@@ -76,6 +81,10 @@ try {
   assert.ok(
     fs.existsSync(stakeholderPreferenceGovernancePath),
     "super ontology stakeholder preference governance should be seeded",
+  );
+  assert.ok(
+    fs.existsSync(normativeAuthorityDriftPath),
+    "super ontology normative authority drift should be seeded",
   );
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
@@ -128,6 +137,10 @@ try {
   assert.equal(contract.promotionPolicy.singleStakeholderRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.aggregationRuleRequired, true);
   assert.equal(contract.promotionPolicy.appealPathRequired, true);
+  assert.equal(contract.promotionPolicy.normativeAuthorityDriftRequired, true);
+  assert.equal(contract.promotionPolicy.stalePolicyRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.jurisdictionScopeRequired, true);
+  assert.equal(contract.promotionPolicy.authorityHierarchyRequired, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
@@ -177,6 +190,10 @@ try {
     contract.layers.includes("stakeholder_preference_governance_contract"),
     "contract should include stakeholder preference governance gate",
   );
+  assert.ok(
+    contract.layers.includes("normative_authority_drift_contract"),
+    "contract should include normative authority drift gate",
+  );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(
     contract.evidenceLedgers.openWorldCoverage,
@@ -225,6 +242,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.stakeholderPreferenceGovernance,
     `.agentlas/${SUPER_ONTOLOGY_STAKEHOLDER_PREFERENCE_GOVERNANCE_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.normativeAuthorityDrift,
+    `.agentlas/${SUPER_ONTOLOGY_NORMATIVE_AUTHORITY_DRIFT_FILE}`,
   );
   const openWorldCoverage = JSON.parse(fs.readFileSync(openWorldCoveragePath, "utf8"));
   assert.equal(openWorldCoverage.kind, "agentlas-super-ontology-open-world-coverage");
@@ -712,6 +733,55 @@ try {
       stakeholderPreferenceGovernance.hardStops.includes("consent_absent_to_personalization") &&
       stakeholderPreferenceGovernance.hardStops.includes("stakeholder_map_missing_for_release"),
     "stakeholder preference governance should block owner, majority, consent, and stakeholder-map shortcuts",
+  );
+  const normativeAuthorityDrift = JSON.parse(fs.readFileSync(normativeAuthorityDriftPath, "utf8"));
+  assert.equal(
+    normativeAuthorityDrift.kind,
+    "agentlas-super-ontology-normative-authority-drift",
+  );
+  assert.equal(normativeAuthorityDrift.runtimePromotionAllowed, false);
+  assert.equal(
+    normativeAuthorityDrift.defaultDecision,
+    "normative_authority_required_before_policy_legal_compliance_contract_license_consent_or_runtime_write",
+  );
+  assert.ok(
+    normativeAuthorityDrift.authorityTypes.includes("law") &&
+      normativeAuthorityDrift.authorityTypes.includes("contract") &&
+      normativeAuthorityDrift.authorityTypes.includes("privacy_policy") &&
+      normativeAuthorityDrift.authorityTypes.includes("license") &&
+      normativeAuthorityDrift.authorityTypes.includes("emergency_exception"),
+    "normative authority drift should include law, contract, privacy, license, and exception types",
+  );
+  assert.ok(
+    normativeAuthorityDrift.scopeDimensions.includes("jurisdiction") &&
+      normativeAuthorityDrift.scopeDimensions.includes("effective_date") &&
+      normativeAuthorityDrift.scopeDimensions.includes("retention_period") &&
+      normativeAuthorityDrift.scopeDimensions.includes("transfer_region") &&
+      normativeAuthorityDrift.scopeDimensions.includes("exception_scope"),
+    "normative authority drift should include jurisdiction, date, retention, transfer, and exception scopes",
+  );
+  assert.ok(
+    normativeAuthorityDrift.conflictTypes.includes("stale_authority") &&
+      normativeAuthorityDrift.conflictTypes.includes("wrong_jurisdiction") &&
+      normativeAuthorityDrift.conflictTypes.includes("draft_vs_enforced") &&
+      normativeAuthorityDrift.conflictTypes.includes("license_conflict") &&
+      normativeAuthorityDrift.conflictTypes.includes("cross_border_conflict"),
+    "normative authority drift should include stale, jurisdiction, draft, license, and cross-border conflicts",
+  );
+  assert.ok(
+    normativeAuthorityDrift.requiredAuthorityEvidence.includes("primary_source_ref") &&
+      normativeAuthorityDrift.requiredAuthorityEvidence.includes("effective_date") &&
+      normativeAuthorityDrift.requiredAuthorityEvidence.includes("jurisdiction_scope") &&
+      normativeAuthorityDrift.requiredAuthorityEvidence.includes("precedence_rule") &&
+      normativeAuthorityDrift.requiredAuthorityEvidence.includes("rollback_plan"),
+    "normative authority drift should require primary source, date, scope, precedence, and rollback evidence",
+  );
+  assert.ok(
+    normativeAuthorityDrift.hardStops.includes("stale_policy_as_current_rule") &&
+      normativeAuthorityDrift.hardStops.includes("wrong_jurisdiction_as_valid_policy") &&
+      normativeAuthorityDrift.hardStops.includes("expired_consent_as_current_permission") &&
+      normativeAuthorityDrift.hardStops.includes("emergency_exception_without_expiry"),
+    "normative authority drift should block stale policy, wrong jurisdiction, expired consent, and exception shortcuts",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");
