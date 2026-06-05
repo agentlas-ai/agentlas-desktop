@@ -14,6 +14,7 @@ const {
   SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE,
   SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE,
   SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE,
+  SUPER_ONTOLOGY_OBSERVABILITY_TELEMETRY_FILE,
   SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
@@ -48,6 +49,7 @@ try {
   const semanticAlignmentPath = path.join(memoryDir, SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE);
   const resilienceControlPath = path.join(memoryDir, SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE);
   const invariantVerificationPath = path.join(memoryDir, SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE);
+  const observabilityTelemetryPath = path.join(memoryDir, SUPER_ONTOLOGY_OBSERVABILITY_TELEMETRY_FILE);
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(openWorldCoveragePath), "super ontology open-world coverage should be seeded");
@@ -62,6 +64,7 @@ try {
   assert.ok(fs.existsSync(semanticAlignmentPath), "super ontology semantic alignment should be seeded");
   assert.ok(fs.existsSync(resilienceControlPath), "super ontology resilience control should be seeded");
   assert.ok(fs.existsSync(invariantVerificationPath), "super ontology invariant verification should be seeded");
+  assert.ok(fs.existsSync(observabilityTelemetryPath), "super ontology observability telemetry should be seeded");
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
   assert.ok(fs.existsSync(memoryBridgePath), "super ontology memory bridge ledger should be seeded");
@@ -101,6 +104,10 @@ try {
   assert.equal(contract.promotionPolicy.invariantVerificationRequired, true);
   assert.equal(contract.promotionPolicy.runtimeInvariantWritesBlocked, true);
   assert.equal(contract.promotionPolicy.forbiddenTransitionBlocked, true);
+  assert.equal(contract.promotionPolicy.observabilityTelemetryRequired, true);
+  assert.equal(contract.promotionPolicy.unobservableRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.auditSinkRequired, true);
+  assert.equal(contract.promotionPolicy.crossSurfaceCorrelationRequired, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
@@ -138,6 +145,10 @@ try {
     contract.layers.includes("invariant_verification_contract"),
     "contract should include invariant verification gate",
   );
+  assert.ok(
+    contract.layers.includes("observability_telemetry_contract"),
+    "contract should include observability telemetry gate",
+  );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(
     contract.evidenceLedgers.openWorldCoverage,
@@ -174,6 +185,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.invariantVerification,
     `.agentlas/${SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.observabilityTelemetry,
+    `.agentlas/${SUPER_ONTOLOGY_OBSERVABILITY_TELEMETRY_FILE}`,
   );
   const openWorldCoverage = JSON.parse(fs.readFileSync(openWorldCoveragePath, "utf8"));
   assert.equal(openWorldCoverage.kind, "agentlas-super-ontology-open-world-coverage");
@@ -494,6 +509,58 @@ try {
   assert.ok(
     invariantVerification.hardStops.includes("emergency_stop_transition_bypassed"),
     "invariant verification should block emergency stop transition bypass",
+  );
+  const observabilityTelemetry = JSON.parse(fs.readFileSync(observabilityTelemetryPath, "utf8"));
+  assert.equal(observabilityTelemetry.kind, "agentlas-super-ontology-observability-telemetry");
+  assert.equal(observabilityTelemetry.runtimePromotionAllowed, false);
+  assert.equal(
+    observabilityTelemetry.defaultDecision,
+    "observability_required_before_runtime_graph_memory_tool_route_release_or_public_write",
+  );
+  assert.ok(
+    observabilityTelemetry.eventTypes.includes("graph_write"),
+    "observability telemetry should include graph write events",
+  );
+  assert.ok(
+    observabilityTelemetry.eventTypes.includes("memory_ticket"),
+    "observability telemetry should include memory ticket events",
+  );
+  assert.ok(
+    observabilityTelemetry.eventTypes.includes("route_sync"),
+    "observability telemetry should include route sync events",
+  );
+  assert.ok(
+    observabilityTelemetry.failureModes.includes("missing_trace_id"),
+    "observability telemetry should include missing trace failures",
+  );
+  assert.ok(
+    observabilityTelemetry.failureModes.includes("audit_sink_down"),
+    "observability telemetry should include audit sink failures",
+  );
+  assert.ok(
+    observabilityTelemetry.failureModes.includes("cross_surface_correlation_missing"),
+    "observability telemetry should include cross-surface correlation failures",
+  );
+  assert.ok(
+    observabilityTelemetry.requiredTelemetry.includes("trace_id") &&
+      observabilityTelemetry.requiredTelemetry.includes("span_id") &&
+      observabilityTelemetry.requiredTelemetry.includes("correlation_id") &&
+      observabilityTelemetry.requiredTelemetry.includes("audit_sink_ref") &&
+      observabilityTelemetry.requiredTelemetry.includes("before_snapshot_ref") &&
+      observabilityTelemetry.requiredTelemetry.includes("rollback_ref"),
+    "observability telemetry should require trace/span/correlation/audit/snapshot/rollback fields",
+  );
+  assert.ok(
+    observabilityTelemetry.hardStops.includes("write_without_trace_id"),
+    "observability telemetry should block writes without trace id",
+  );
+  assert.ok(
+    observabilityTelemetry.hardStops.includes("route_sync_without_correlation_id"),
+    "observability telemetry should block route sync without correlation id",
+  );
+  assert.ok(
+    observabilityTelemetry.hardStops.includes("unobservable_runtime_write"),
+    "observability telemetry should block unobservable runtime writes",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");

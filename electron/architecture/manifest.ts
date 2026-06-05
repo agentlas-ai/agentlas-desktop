@@ -36,7 +36,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.5.19";
+export const ARCHITECTURE_VERSION = "1.5.20";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -111,6 +111,7 @@ export const SUPER_ONTOLOGY_EPISTEMIC_CALIBRATION_FILE = "super-ontology-epistem
 export const SUPER_ONTOLOGY_SEMANTIC_ALIGNMENT_FILE = "super-ontology-semantic-alignment.json";
 export const SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE = "super-ontology-resilience-control.json";
 export const SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE = "super-ontology-invariant-verification.json";
+export const SUPER_ONTOLOGY_OBSERVABILITY_TELEMETRY_FILE = "super-ontology-observability-telemetry.json";
 export const SUPER_ONTOLOGY_REPLAYS_FILE = "super-ontology-replays.jsonl";
 export const SUPER_ONTOLOGY_EVIDENCE_FILE = "super-ontology-evidence.jsonl";
 export const SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE = "super-ontology-memory-bridge.jsonl";
@@ -306,6 +307,9 @@ the task size:
   super-ontology-adversarial-provenance,
   super-ontology-epistemic-calibration,
   super-ontology-semantic-alignment,
+  super-ontology-resilience-control,
+  super-ontology-invariant-verification,
+  super-ontology-observability-telemetry,
   super-ontology-replays,
   super-ontology-evidence, and super-ontology-memory-bridge files as
   candidate-only adaptive knowledge governance metadata. Open-world coverage
@@ -341,11 +345,16 @@ the task size:
   embedding-similarity, abbreviation, OCR, generated-label, route-label,
   source-conflict, and missing-unit shortcuts from becoming exact/equivalent
   mappings, same-individual assertions, graph edges, memory merges, or public
-  artifacts without scope, validation, owner review, diff, and rollback. Keep
+  artifacts without scope, validation, owner review, diff, and rollback.
+  Observability telemetry contracts must block graph, memory, tool, public,
+  route, release, repair, rollback, and emergency-stop writes when trace id,
+  span id, correlation id, source/evidence refs, audit sink, redaction/retention
+  policy, before/after snapshots, rollback refs, alert refs, or sample-size
+  evidence are missing. Keep
   graph writes and direct durable memory writes disabled until
   shadow/canary/rollback evidence, homeostasis review, adversarial provenance
   review, epistemic calibration review, semantic alignment review, resilience
-  control review, and Memory
+  control review, invariant verification, observability telemetry review, and Memory
   Curator review exist;
 - PM Soul or project owner loop for continuity;
 - Memory Curator rules for durable memory, dedup, scope, and redaction;
@@ -357,8 +366,9 @@ the task size:
   packets, belief ledger, knowledge capsules, affordance binding,
   contextual flow review, causal impact review, knowledge homeostasis review,
   adversarial provenance review, epistemic calibration review, shadow/canary
-  replay, semantic alignment review, resilience control review, rollback, and sync review approve a later
-  phase;
+  replay, semantic alignment review, resilience control review, invariant
+  verification, observability telemetry review, rollback, and sync review
+  approve a later phase;
 - hierarchy when useful: HQ/orchestrator -> builders/workers -> QA/evidence gate;
 - runtime adapters for AGENTS.md plus Claude/Codex/Gemini/OpenCode-style hosts when
   requested or detectable.
