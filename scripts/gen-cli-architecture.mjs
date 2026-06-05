@@ -34,6 +34,7 @@ const data = {
   superOntologyContractFile: m.SUPER_ONTOLOGY_CONTRACT_FILE,
   superOntologyTaskCoverageFile: m.SUPER_ONTOLOGY_TASK_COVERAGE_FILE,
   superOntologyAssuranceCaseFile: m.SUPER_ONTOLOGY_ASSURANCE_CASE_FILE,
+  superOntologyContextualFlowFile: m.SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE,
   superOntologyCausalImpactFile: m.SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE,
   superOntologyReplaysFile: m.SUPER_ONTOLOGY_REPLAYS_FILE,
   superOntologyEvidenceFile: m.SUPER_ONTOLOGY_EVIDENCE_FILE,

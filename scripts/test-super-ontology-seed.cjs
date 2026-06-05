@@ -6,6 +6,7 @@ const path = require("node:path");
 
 const {
   SUPER_ONTOLOGY_ASSURANCE_CASE_FILE,
+  SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE,
   SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
@@ -29,11 +30,13 @@ try {
   const memoryBridgePath = path.join(memoryDir, SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE);
   const taskCoveragePath = path.join(memoryDir, SUPER_ONTOLOGY_TASK_COVERAGE_FILE);
   const assuranceCasePath = path.join(memoryDir, SUPER_ONTOLOGY_ASSURANCE_CASE_FILE);
+  const contextualFlowPath = path.join(memoryDir, SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE);
   const causalImpactPath = path.join(memoryDir, SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE);
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(taskCoveragePath), "super ontology task coverage should be seeded");
   assert.ok(fs.existsSync(assuranceCasePath), "super ontology assurance case should be seeded");
+  assert.ok(fs.existsSync(contextualFlowPath), "super ontology contextual flow should be seeded");
   assert.ok(fs.existsSync(causalImpactPath), "super ontology causal impact should be seeded");
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
@@ -50,6 +53,7 @@ try {
   assert.equal(contract.promotionPolicy.appbridgeSourceWritesBlocked, true);
   assert.equal(contract.promotionPolicy.memoryCuratorBridgeRequired, true);
   assert.equal(contract.promotionPolicy.taskCoverageRequired, true);
+  assert.equal(contract.promotionPolicy.contextualFlowRequired, true);
   assert.equal(contract.promotionPolicy.causalImpactRequired, true);
   assert.equal(contract.promotionPolicy.assuranceCaseRequired, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
@@ -57,10 +61,12 @@ try {
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
   assert.ok(contract.layers.includes("memory_curator_bridge"), "contract should include memory curator bridge gate");
   assert.ok(contract.layers.includes("task_coverage_contract"), "contract should include task coverage gate");
+  assert.ok(contract.layers.includes("contextual_flow_contract"), "contract should include contextual flow gate");
   assert.ok(contract.layers.includes("causal_impact_contract"), "contract should include causal impact gate");
   assert.ok(contract.layers.includes("assurance_case_contract"), "contract should include assurance case gate");
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(contract.evidenceLedgers.taskCoverage, `.agentlas/${SUPER_ONTOLOGY_TASK_COVERAGE_FILE}`);
+  assert.equal(contract.evidenceLedgers.contextualFlow, `.agentlas/${SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE}`);
   assert.equal(contract.evidenceLedgers.causalImpact, `.agentlas/${SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE}`);
   assert.equal(contract.evidenceLedgers.assuranceCase, `.agentlas/${SUPER_ONTOLOGY_ASSURANCE_CASE_FILE}`);
   const taskCoverage = JSON.parse(fs.readFileSync(taskCoveragePath, "utf8"));
@@ -70,6 +76,24 @@ try {
   assert.ok(taskCoverage.taskFamilies.includes("execute_tool"), "task coverage should include tool execution");
   assert.ok(taskCoverage.taskFamilies.includes("physical_or_sensor"), "task coverage should include physical/sensor work");
   assert.ok(taskCoverage.affordanceTypes.includes("train"), "task coverage should include training affordances");
+  const contextualFlow = JSON.parse(fs.readFileSync(contextualFlowPath, "utf8"));
+  assert.equal(contextualFlow.kind, "agentlas-super-ontology-contextual-flow");
+  assert.equal(contextualFlow.runtimePromotionAllowed, false);
+  assert.equal(contextualFlow.defaultDecision, "contextual_flow_required_before_boundary_crossing");
+  assert.ok(contextualFlow.flowStages.includes("tool_to_agent"), "contextual flow should include tool responses");
+  assert.ok(contextualFlow.flowStages.includes("agent_to_memory"), "contextual flow should include memory handoffs");
+  assert.ok(contextualFlow.flowStages.includes("agent_to_public_surface"), "contextual flow should include public surfaces");
+  assert.ok(contextualFlow.contexts.includes("personal"), "contextual flow should include personal context");
+  assert.ok(contextualFlow.contexts.includes("customer"), "contextual flow should include customer context");
+  assert.ok(contextualFlow.contexts.includes("regulated"), "contextual flow should include regulated context");
+  assert.ok(
+    contextualFlow.hardStops.includes("same_user_means_all_contexts_joinable"),
+    "contextual flow should block same-user context joins",
+  );
+  assert.ok(
+    contextualFlow.hardStops.includes("tool_response_as_need_to_know"),
+    "contextual flow should block tool-response oversharing",
+  );
   const causalImpact = JSON.parse(fs.readFileSync(causalImpactPath, "utf8"));
   assert.equal(causalImpact.kind, "agentlas-super-ontology-causal-impact");
   assert.equal(causalImpact.runtimePromotionAllowed, false);

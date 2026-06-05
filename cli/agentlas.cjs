@@ -1277,6 +1277,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
     const superOntologyContractFile = arch.superOntologyContractFile || "super-ontology-contract.json";
     const superOntologyTaskCoverageFile = arch.superOntologyTaskCoverageFile || "super-ontology-task-coverage.json";
     const superOntologyAssuranceCaseFile = arch.superOntologyAssuranceCaseFile || "super-ontology-assurance-case.json";
+    const superOntologyContextualFlowFile = arch.superOntologyContextualFlowFile || "super-ontology-contextual-flow.json";
     const superOntologyCausalImpactFile = arch.superOntologyCausalImpactFile || "super-ontology-causal-impact.json";
     const superOntologyReplaysFile = arch.superOntologyReplaysFile || "super-ontology-replays.jsonl";
     const superOntologyEvidenceFile = arch.superOntologyEvidenceFile || "super-ontology-evidence.jsonl";
@@ -1348,6 +1349,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           "agentlas_integration_contract",
           "memory_curator_bridge",
           "task_coverage_contract",
+          "contextual_flow_contract",
           "causal_impact_contract",
           "assurance_case_contract",
           "promotion_readiness",
@@ -1360,6 +1362,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           memoryTickets: `.agentlas/${arch.logFile}`,
           memoryCuratorBridge: `.agentlas/${superOntologyMemoryBridgeFile}`,
           taskCoverage: `.agentlas/${superOntologyTaskCoverageFile}`,
+          contextualFlow: `.agentlas/${superOntologyContextualFlowFile}`,
           causalImpact: `.agentlas/${superOntologyCausalImpactFile}`,
           assuranceCase: `.agentlas/${superOntologyAssuranceCaseFile}`,
         },
@@ -1374,6 +1377,8 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           "missing_shadow_or_canary_evidence",
           "missing_memory_curator_bridge",
           "missing_task_coverage_contract",
+          "missing_contextual_flow_contract",
+          "forbidden_context_flow",
           "missing_causal_impact_contract",
           "missing_assurance_case_contract",
           "correlation_as_causation",
@@ -1389,6 +1394,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           appbridgeSourceWritesBlocked: true,
           memoryCuratorBridgeRequired: true,
           taskCoverageRequired: true,
+          contextualFlowRequired: true,
           causalImpactRequired: true,
           assuranceCaseRequired: true,
           directDurableMemoryWritesBlocked: true,
@@ -1403,6 +1409,63 @@ function ensureProjectMemoryCli(projectPath, projectName) {
             notes: "AppBridge remains a route adapter, never the source of truth.",
           },
         },
+      }, null, 2), "utf8");
+    }
+    const superOntologyContextualFlow = path.join(dir, superOntologyContextualFlowFile);
+    if (!fs.existsSync(superOntologyContextualFlow)) {
+      fs.writeFileSync(superOntologyContextualFlow, JSON.stringify({
+        schemaVersion: "1.0",
+        kind: "agentlas-super-ontology-contextual-flow",
+        state: "local_candidate",
+        projectId: name,
+        draftId: null,
+        runtimePromotionAllowed: false,
+        defaultDecision: "contextual_flow_required_before_boundary_crossing",
+        flowStages: [
+          "user_to_agent",
+          "agent_to_tool",
+          "tool_to_agent",
+          "agent_to_agent",
+          "agent_to_memory",
+          "agent_to_output",
+          "agent_to_public_surface",
+        ],
+        contexts: ["personal", "company", "customer", "public", "regulated", "agent_internal"],
+        requiredParameters: [
+          "source_context",
+          "target_context",
+          "sender_role",
+          "recipient_role",
+          "subject_role",
+          "attribute_type",
+          "transmission_principle",
+          "purpose",
+          "authority_basis",
+          "sensitivity",
+          "retention_policy",
+          "audit_refs",
+        ],
+        decisions: ["allow", "redact", "aggregate_only", "review_required", "block"],
+        researchBasis: [
+          "contextual_integrity",
+          "privacy_flow_graph",
+          "multi_agent_contextual_privacy",
+          "compositional_privacy",
+          "information_flow_control",
+          "nist_ai_rmf_gai_profile",
+          "w3c_prov",
+          "stpa_mode_confusion",
+        ],
+        hardStops: [
+          "same_user_means_all_contexts_joinable",
+          "tool_response_as_need_to_know",
+          "public_output_after_private_handoff",
+          "raw_prompt_or_transcript_to_memory",
+          "customer_data_to_public_surface_without_consent",
+          "regulated_data_to_training_without_consent_delete_path",
+          "agent_internal_trace_to_user_output",
+          "cross_project_join_without_scope_review",
+        ],
       }, null, 2), "utf8");
     }
     const superOntologyCausalImpact = path.join(dir, superOntologyCausalImpactFile);
