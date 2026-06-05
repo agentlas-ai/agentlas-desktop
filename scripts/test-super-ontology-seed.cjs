@@ -15,6 +15,7 @@ const {
   SUPER_ONTOLOGY_RESILIENCE_CONTROL_FILE,
   SUPER_ONTOLOGY_INVARIANT_VERIFICATION_FILE,
   SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
+  SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
   SUPER_ONTOLOGY_EVIDENCE_FILE,
   SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
@@ -36,6 +37,7 @@ try {
   const evidencePath = path.join(memoryDir, SUPER_ONTOLOGY_EVIDENCE_FILE);
   const memoryBridgePath = path.join(memoryDir, SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE);
   const openWorldCoveragePath = path.join(memoryDir, SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE);
+  const consensusCoordinationPath = path.join(memoryDir, SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE);
   const taskCoveragePath = path.join(memoryDir, SUPER_ONTOLOGY_TASK_COVERAGE_FILE);
   const assuranceCasePath = path.join(memoryDir, SUPER_ONTOLOGY_ASSURANCE_CASE_FILE);
   const contextualFlowPath = path.join(memoryDir, SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE);
@@ -49,6 +51,7 @@ try {
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(openWorldCoveragePath), "super ontology open-world coverage should be seeded");
+  assert.ok(fs.existsSync(consensusCoordinationPath), "super ontology consensus coordination should be seeded");
   assert.ok(fs.existsSync(taskCoveragePath), "super ontology task coverage should be seeded");
   assert.ok(fs.existsSync(assuranceCasePath), "super ontology assurance case should be seeded");
   assert.ok(fs.existsSync(contextualFlowPath), "super ontology contextual flow should be seeded");
@@ -76,6 +79,10 @@ try {
   assert.equal(contract.promotionPolicy.openWorldCoverageRequired, true);
   assert.equal(contract.promotionPolicy.unknownCombinationRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.uncoveredModalityRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.consensusCoordinationRequired, true);
+  assert.equal(contract.promotionPolicy.agentAgreementRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.majorityVoteRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.splitBrainRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.taskCoverageRequired, true);
   assert.equal(contract.promotionPolicy.contextualFlowRequired, true);
   assert.equal(contract.promotionPolicy.causalImpactRequired, true);
@@ -124,6 +131,10 @@ try {
     "contract should include open-world coverage gate",
   );
   assert.ok(
+    contract.layers.includes("consensus_coordination_contract"),
+    "contract should include consensus coordination gate",
+  );
+  assert.ok(
     contract.layers.includes("invariant_verification_contract"),
     "contract should include invariant verification gate",
   );
@@ -131,6 +142,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.openWorldCoverage,
     `.agentlas/${SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.consensusCoordination,
+    `.agentlas/${SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE}`,
   );
   assert.equal(contract.evidenceLedgers.taskCoverage, `.agentlas/${SUPER_ONTOLOGY_TASK_COVERAGE_FILE}`);
   assert.equal(contract.evidenceLedgers.contextualFlow, `.agentlas/${SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE}`);
@@ -183,6 +198,33 @@ try {
   assert.ok(
     openWorldCoverage.hardStops.includes("proposal_example_equals_all_tasks"),
     "open-world coverage should block proposal fixture overgeneralization",
+  );
+  const consensusCoordination = JSON.parse(fs.readFileSync(consensusCoordinationPath, "utf8"));
+  assert.equal(consensusCoordination.kind, "agentlas-super-ontology-consensus-coordination");
+  assert.equal(consensusCoordination.runtimePromotionAllowed, false);
+  assert.equal(
+    consensusCoordination.defaultDecision,
+    "treat_agent_agreement_as_candidate_signal_not_write_authority",
+  );
+  assert.ok(
+    consensusCoordination.coordinationTopologies.includes("majority_vote"),
+    "consensus coordination should include majority vote",
+  );
+  assert.ok(
+    consensusCoordination.coordinationTopologies.includes("cross_runtime_sync"),
+    "consensus coordination should include cross-runtime sync",
+  );
+  assert.ok(
+    consensusCoordination.failureModes.includes("peer_pressure"),
+    "consensus coordination should include peer pressure",
+  );
+  assert.ok(
+    consensusCoordination.failureModes.includes("split_brain"),
+    "consensus coordination should include split brain",
+  );
+  assert.ok(
+    consensusCoordination.hardStops.includes("majority_vote_as_write_authority"),
+    "consensus coordination should block majority vote as write authority",
   );
   const taskCoverage = JSON.parse(fs.readFileSync(taskCoveragePath, "utf8"));
   assert.equal(taskCoverage.kind, "agentlas-super-ontology-task-coverage");

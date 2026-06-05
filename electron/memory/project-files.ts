@@ -16,6 +16,7 @@ import {
   SKILL_TRIALS_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
   SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
+  SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE,
   SUPER_ONTOLOGY_ASSURANCE_CASE_FILE,
   SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE,
   SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE,
@@ -152,6 +153,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         "agentlas_integration_contract",
         "memory_curator_bridge",
         "open_world_coverage_contract",
+        "consensus_coordination_contract",
         "task_coverage_contract",
         "contextual_flow_contract",
         "causal_impact_contract",
@@ -172,6 +174,7 @@ function superOntologyContractSkeleton(projectName: string): string {
         memoryTickets: `.agentlas/${MEMORY_LOG_FILE}`,
         memoryCuratorBridge: `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`,
         openWorldCoverage: `.agentlas/${SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE}`,
+        consensusCoordination: `.agentlas/${SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE}`,
         taskCoverage: `.agentlas/${SUPER_ONTOLOGY_TASK_COVERAGE_FILE}`,
         contextualFlow: `.agentlas/${SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE}`,
         causalImpact: `.agentlas/${SUPER_ONTOLOGY_CAUSAL_IMPACT_FILE}`,
@@ -196,6 +199,16 @@ function superOntologyContractSkeleton(projectName: string): string {
         "implicit_degradation_as_complete_data",
         "adversarial_source_as_authority",
         "forbidden_authority_to_action",
+        "missing_consensus_coordination_contract",
+        "agent_agreement_as_truth",
+        "majority_vote_as_write_authority",
+        "debate_stability_as_proof",
+        "model_judge_as_final_evidence",
+        "distributed_replica_merge_without_review",
+        "route_sync_without_quorum",
+        "last_writer_wins_architecture_update",
+        "peer_pressure_to_memory_write",
+        "validator_disagreement_to_release",
         "appbridge_source_of_truth_write",
         "missing_rollback",
         "missing_shadow_or_canary_evidence",
@@ -265,6 +278,10 @@ function superOntologyContractSkeleton(projectName: string): string {
         openWorldCoverageRequired: true,
         unknownCombinationRuntimeWritesBlocked: true,
         uncoveredModalityRuntimeWritesBlocked: true,
+        consensusCoordinationRequired: true,
+        agentAgreementRuntimeWritesBlocked: true,
+        majorityVoteRuntimeWritesBlocked: true,
+        splitBrainRuntimeWritesBlocked: true,
         taskCoverageRequired: true,
         contextualFlowRequired: true,
         causalImpactRequired: true,
@@ -1394,6 +1411,104 @@ function superOntologyOpenWorldCoverageSkeleton(projectName: string): string {
   );
 }
 
+function superOntologyConsensusCoordinationSkeleton(projectName: string): string {
+  return JSON.stringify(
+    {
+      schemaVersion: "1.0",
+      kind: "agentlas-super-ontology-consensus-coordination",
+      state: "local_candidate",
+      projectId: projectName,
+      draftId: null,
+      runtimePromotionAllowed: false,
+      defaultDecision: "treat_agent_agreement_as_candidate_signal_not_write_authority",
+      coordinationTopologies: [
+        "independent_parallel",
+        "star_orchestrator",
+        "round_robin",
+        "majority_vote",
+        "weighted_vote",
+        "debate",
+        "owner_review_board",
+        "distributed_replicas",
+        "cross_runtime_sync",
+      ],
+      failureModes: [
+        "majority_corruption",
+        "peer_pressure",
+        "sycophancy",
+        "split_brain",
+        "stale_replica",
+        "double_write",
+        "authority_escalation",
+        "validator_disagreement",
+        "collusion",
+        "unreliable_judge",
+        "network_partition",
+        "race_condition",
+      ],
+      requiredGates: [
+        "adversarial_provenance",
+        "epistemic_calibration",
+        "semantic_alignment",
+        "knowledge_homeostasis",
+        "resilience_control",
+        "invariant_verification",
+        "memory_curator_bridge",
+        "assurance_case",
+        "shadow_canary_replay",
+        "owner_review",
+        "sync_gate",
+      ],
+      consensusPolicies: [
+        "independent_verification",
+        "stability_detection",
+        "evidence_weighted",
+        "unanimity_for_high_risk",
+        "owner_tiebreak",
+        "quorum_plus_veto",
+        "read_only_shadow",
+        "two_phase_commit",
+        "crdt_merge_with_review",
+        "block",
+      ],
+      conflictResolutions: [
+        "ask_clarify",
+        "quarantine",
+        "shadow_replay",
+        "owner_review",
+        "sync_review",
+        "rollback",
+        "emergency_stop",
+        "merge_as_contested",
+        "reject",
+        "read_only_mode",
+      ],
+      researchBasis: [
+        "multi_agent_consensus_risk",
+        "peer_pressure_research",
+        "distributed_systems_consensus",
+        "ontology_conflict_resolution",
+        "assurance_case",
+        "zero_trust_architecture",
+      ],
+      hardStops: [
+        "missing_consensus_coordination_contract",
+        "agent_agreement_as_truth",
+        "majority_vote_as_write_authority",
+        "debate_stability_as_proof",
+        "model_judge_as_final_evidence",
+        "distributed_replica_merge_without_review",
+        "route_sync_without_quorum",
+        "last_writer_wins_architecture_update",
+        "peer_pressure_to_memory_write",
+        "validator_disagreement_to_release",
+      ],
+    },
+    null,
+    2,
+  );
+}
+
 function superOntologyTaskCoverageSkeleton(projectName: string): string {
   return JSON.stringify(
     {
@@ -1490,6 +1605,15 @@ export function ensureProjectMemory(
       fs.writeFileSync(
         superOntologyOpenWorldCoverage,
         superOntologyOpenWorldCoverageSkeleton(name),
+        "utf8",
+      );
+    }
+
+    const superOntologyConsensusCoordination = path.join(dir, SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE);
+    if (!fs.existsSync(superOntologyConsensusCoordination)) {
+      fs.writeFileSync(
+        superOntologyConsensusCoordination,
+        superOntologyConsensusCoordinationSkeleton(name),
         "utf8",
       );
     }

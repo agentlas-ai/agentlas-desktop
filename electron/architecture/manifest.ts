@@ -100,6 +100,7 @@ export const SKILL_TRIALS_FILE = "skill-trials.jsonl";
 export const CURATOR_DECISIONS_FILE = "curator-decisions.jsonl";
 export const SUPER_ONTOLOGY_CONTRACT_FILE = "super-ontology-contract.json";
 export const SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE = "super-ontology-open-world-coverage.json";
+export const SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE = "super-ontology-consensus-coordination.json";
 export const SUPER_ONTOLOGY_TASK_COVERAGE_FILE = "super-ontology-task-coverage.json";
 export const SUPER_ONTOLOGY_ASSURANCE_CASE_FILE = "super-ontology-assurance-case.json";
 export const SUPER_ONTOLOGY_CONTEXTUAL_FLOW_FILE = "super-ontology-contextual-flow.json";
@@ -298,7 +299,7 @@ the task size:
 - .agentlas skill-registry, skill-trials, and curator-decisions files as
   candidate-only lifecycle metadata;
 - .agentlas super-ontology-contract, super-ontology-open-world-coverage,
-  super-ontology-task-coverage,
+  super-ontology-consensus-coordination, super-ontology-task-coverage,
   super-ontology-contextual-flow, super-ontology-assurance-case,
   super-ontology-causal-impact,
   super-ontology-knowledge-homeostasis,
@@ -309,7 +310,10 @@ the task size:
   super-ontology-evidence, and super-ontology-memory-bridge files as
   candidate-only adaptive knowledge governance metadata. Open-world coverage
   must lower authority for new world/task/modality/fault/authority/write
-  combinations before action. Task coverage must classify requested work beyond
+  combinations before action. Consensus coordination must treat agent agreement,
+  majority vote, debate, model-judge approval, distributed replica merge, and
+  cross-runtime sync as candidate signals rather than write authority. Task
+  coverage must classify requested work beyond
   proposal/deck generation before action, and
   contextual flow contracts must check sender, recipient, subject, purpose,
   authority, transmission principle, and retention before information crosses
