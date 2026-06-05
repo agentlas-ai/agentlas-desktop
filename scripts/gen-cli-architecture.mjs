@@ -49,6 +49,7 @@ const data = {
   superOntologyStakeholderPreferenceGovernanceFile:
     m.SUPER_ONTOLOGY_STAKEHOLDER_PREFERENCE_GOVERNANCE_FILE,
   superOntologyNormativeAuthorityDriftFile: m.SUPER_ONTOLOGY_NORMATIVE_AUTHORITY_DRIFT_FILE,
+  superOntologySideEffectContainmentFile: m.SUPER_ONTOLOGY_SIDE_EFFECT_CONTAINMENT_FILE,
   superOntologyReplaysFile: m.SUPER_ONTOLOGY_REPLAYS_FILE,
   superOntologyEvidenceFile: m.SUPER_ONTOLOGY_EVIDENCE_FILE,
   superOntologyMemoryBridgeFile: m.SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,

@@ -18,6 +18,7 @@ const {
   SUPER_ONTOLOGY_OBJECTIVE_PROXY_VALIDITY_FILE,
   SUPER_ONTOLOGY_STAKEHOLDER_PREFERENCE_GOVERNANCE_FILE,
   SUPER_ONTOLOGY_NORMATIVE_AUTHORITY_DRIFT_FILE,
+  SUPER_ONTOLOGY_SIDE_EFFECT_CONTAINMENT_FILE,
   SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
@@ -62,6 +63,10 @@ try {
     memoryDir,
     SUPER_ONTOLOGY_NORMATIVE_AUTHORITY_DRIFT_FILE,
   );
+  const sideEffectContainmentPath = path.join(
+    memoryDir,
+    SUPER_ONTOLOGY_SIDE_EFFECT_CONTAINMENT_FILE,
+  );
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(openWorldCoveragePath), "super ontology open-world coverage should be seeded");
@@ -85,6 +90,10 @@ try {
   assert.ok(
     fs.existsSync(normativeAuthorityDriftPath),
     "super ontology normative authority drift should be seeded",
+  );
+  assert.ok(
+    fs.existsSync(sideEffectContainmentPath),
+    "super ontology side-effect containment should be seeded",
   );
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
@@ -141,6 +150,10 @@ try {
   assert.equal(contract.promotionPolicy.stalePolicyRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.jurisdictionScopeRequired, true);
   assert.equal(contract.promotionPolicy.authorityHierarchyRequired, true);
+  assert.equal(contract.promotionPolicy.sideEffectContainmentRequired, true);
+  assert.equal(contract.promotionPolicy.irreversibleRuntimeActionsBlocked, true);
+  assert.equal(contract.promotionPolicy.idempotencyKeyRequired, true);
+  assert.equal(contract.promotionPolicy.compensationPlanRequired, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
@@ -194,6 +207,10 @@ try {
     contract.layers.includes("normative_authority_drift_contract"),
     "contract should include normative authority drift gate",
   );
+  assert.ok(
+    contract.layers.includes("side_effect_containment_contract"),
+    "contract should include side-effect containment gate",
+  );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(
     contract.evidenceLedgers.openWorldCoverage,
@@ -246,6 +263,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.normativeAuthorityDrift,
     `.agentlas/${SUPER_ONTOLOGY_NORMATIVE_AUTHORITY_DRIFT_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.sideEffectContainment,
+    `.agentlas/${SUPER_ONTOLOGY_SIDE_EFFECT_CONTAINMENT_FILE}`,
   );
   const openWorldCoverage = JSON.parse(fs.readFileSync(openWorldCoveragePath, "utf8"));
   assert.equal(openWorldCoverage.kind, "agentlas-super-ontology-open-world-coverage");
@@ -782,6 +803,37 @@ try {
       normativeAuthorityDrift.hardStops.includes("expired_consent_as_current_permission") &&
       normativeAuthorityDrift.hardStops.includes("emergency_exception_without_expiry"),
     "normative authority drift should block stale policy, wrong jurisdiction, expired consent, and exception shortcuts",
+  );
+  const sideEffectContainment = JSON.parse(fs.readFileSync(sideEffectContainmentPath, "utf8"));
+  assert.equal(
+    sideEffectContainment.kind,
+    "agentlas-super-ontology-side-effect-containment",
+  );
+  assert.equal(sideEffectContainment.runtimePromotionAllowed, false);
+  assert.equal(
+    sideEffectContainment.defaultDecision,
+    "containment_required_before_external_file_finance_release_message_route_memory_training_or_physical_action",
+  );
+  assert.ok(
+    sideEffectContainment.sideEffectClasses.includes("external_message") &&
+      sideEffectContainment.sideEffectClasses.includes("payment_or_finance") &&
+      sideEffectContainment.sideEffectClasses.includes("public_release") &&
+      sideEffectContainment.sideEffectClasses.includes("physical_actuation"),
+    "side-effect containment should include message, finance, release, and physical action classes",
+  );
+  assert.ok(
+    sideEffectContainment.requiredContainmentEvidence.includes("idempotency_key") &&
+      sideEffectContainment.requiredContainmentEvidence.includes("dry_run_receipt") &&
+      sideEffectContainment.requiredContainmentEvidence.includes("rollback_snapshot") &&
+      sideEffectContainment.requiredContainmentEvidence.includes("post_action_verification"),
+    "side-effect containment should require idempotency, dry-run, rollback, and post-action evidence",
+  );
+  assert.ok(
+    sideEffectContainment.hardStops.includes("preview_as_send") &&
+      sideEffectContainment.hardStops.includes("payment_without_idempotency_key") &&
+      sideEffectContainment.hardStops.includes("physical_action_without_safety_interlock") &&
+      sideEffectContainment.hardStops.includes("scheduled_action_without_cancellation"),
+    "side-effect containment should block preview/send, payment idempotency, physical safety, and scheduled cancellation shortcuts",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");
