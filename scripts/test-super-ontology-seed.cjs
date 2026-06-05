@@ -20,6 +20,7 @@ const {
   SUPER_ONTOLOGY_NORMATIVE_AUTHORITY_DRIFT_FILE,
   SUPER_ONTOLOGY_SIDE_EFFECT_CONTAINMENT_FILE,
   SUPER_ONTOLOGY_SOURCE_LINEAGE_VERSION_FILE,
+  SUPER_ONTOLOGY_ENTITY_IDENTITY_RESOLUTION_FILE,
   SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
@@ -72,6 +73,10 @@ try {
     memoryDir,
     SUPER_ONTOLOGY_SOURCE_LINEAGE_VERSION_FILE,
   );
+  const entityIdentityResolutionPath = path.join(
+    memoryDir,
+    SUPER_ONTOLOGY_ENTITY_IDENTITY_RESOLUTION_FILE,
+  );
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(openWorldCoveragePath), "super ontology open-world coverage should be seeded");
@@ -103,6 +108,10 @@ try {
   assert.ok(
     fs.existsSync(sourceLineageVersionPath),
     "super ontology source lineage version should be seeded",
+  );
+  assert.ok(
+    fs.existsSync(entityIdentityResolutionPath),
+    "super ontology entity identity resolution should be seeded",
   );
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
@@ -167,6 +176,10 @@ try {
   assert.equal(contract.promotionPolicy.unversionedSourceRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.derivedArtifactPromotionBlocked, true);
   assert.equal(contract.promotionPolicy.lineageRepairRequired, true);
+  assert.equal(contract.promotionPolicy.entityIdentityResolutionRequired, true);
+  assert.equal(contract.promotionPolicy.ambiguousIdentityRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.identityMergeReviewRequired, true);
+  assert.equal(contract.promotionPolicy.identityRollbackRequired, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
@@ -228,6 +241,10 @@ try {
     contract.layers.includes("source_lineage_version_contract"),
     "contract should include source lineage version gate",
   );
+  assert.ok(
+    contract.layers.includes("entity_identity_resolution_contract"),
+    "contract should include entity identity resolution gate",
+  );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(
     contract.evidenceLedgers.openWorldCoverage,
@@ -288,6 +305,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.sourceLineageVersion,
     `.agentlas/${SUPER_ONTOLOGY_SOURCE_LINEAGE_VERSION_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.entityIdentityResolution,
+    `.agentlas/${SUPER_ONTOLOGY_ENTITY_IDENTITY_RESOLUTION_FILE}`,
   );
   const openWorldCoverage = JSON.parse(fs.readFileSync(openWorldCoveragePath, "utf8"));
   assert.equal(openWorldCoverage.kind, "agentlas-super-ontology-open-world-coverage");
@@ -894,6 +915,45 @@ try {
       sourceLineageVersion.hardStops.includes("embedding_hit_without_artifact_version") &&
       sourceLineageVersion.hardStops.includes("superseded_source_to_runtime_write"),
     "source lineage version should block PDF, summary, embedding-version, and superseded-source shortcuts",
+  );
+  const entityIdentityResolution = JSON.parse(fs.readFileSync(entityIdentityResolutionPath, "utf8"));
+  assert.equal(
+    entityIdentityResolution.kind,
+    "agentlas-super-ontology-entity-identity-resolution",
+  );
+  assert.equal(entityIdentityResolution.runtimePromotionAllowed, false);
+  assert.equal(
+    entityIdentityResolution.defaultDecision,
+    "identity_evidence_required_before_canonical_graph_memory_public_training_tool_or_route_authority",
+  );
+  assert.ok(
+    entityIdentityResolution.entityFamilies.includes("person") &&
+      entityIdentityResolution.entityFamilies.includes("company") &&
+      entityIdentityResolution.entityFamilies.includes("customer_account") &&
+      entityIdentityResolution.entityFamilies.includes("device"),
+    "entity identity resolution should include person, company, account, and device families",
+  );
+  assert.ok(
+    entityIdentityResolution.mentionArtifactTypes.includes("name_string") &&
+      entityIdentityResolution.mentionArtifactTypes.includes("crm_id") &&
+      entityIdentityResolution.mentionArtifactTypes.includes("embedding_cluster") &&
+      entityIdentityResolution.mentionArtifactTypes.includes("llm_generated_canonical"),
+    "entity identity resolution should include name, CRM id, embedding cluster, and LLM canonical mention types",
+  );
+  assert.ok(
+    entityIdentityResolution.requiredIdentityEvidence.includes("canonical_entity_id") &&
+      entityIdentityResolution.requiredIdentityEvidence.includes("tenant_or_context_id") &&
+      entityIdentityResolution.requiredIdentityEvidence.includes("negative_evidence") &&
+      entityIdentityResolution.requiredIdentityEvidence.includes("temporal_validity") &&
+      entityIdentityResolution.requiredIdentityEvidence.includes("rollback_snapshot"),
+    "entity identity resolution should require canonical, context, negative, temporal, and rollback evidence",
+  );
+  assert.ok(
+    entityIdentityResolution.hardStops.includes("name_as_identity") &&
+      entityIdentityResolution.hardStops.includes("embedding_cluster_as_identity") &&
+      entityIdentityResolution.hardStops.includes("crm_id_cross_tenant_merge") &&
+      entityIdentityResolution.hardStops.includes("memory_note_as_identity_authority"),
+    "entity identity resolution should block name, embedding, cross-tenant id, and memory-note shortcuts",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");

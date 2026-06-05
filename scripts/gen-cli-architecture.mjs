@@ -51,6 +51,7 @@ const data = {
   superOntologyNormativeAuthorityDriftFile: m.SUPER_ONTOLOGY_NORMATIVE_AUTHORITY_DRIFT_FILE,
   superOntologySideEffectContainmentFile: m.SUPER_ONTOLOGY_SIDE_EFFECT_CONTAINMENT_FILE,
   superOntologySourceLineageVersionFile: m.SUPER_ONTOLOGY_SOURCE_LINEAGE_VERSION_FILE,
+  superOntologyEntityIdentityResolutionFile: m.SUPER_ONTOLOGY_ENTITY_IDENTITY_RESOLUTION_FILE,
   superOntologyReplaysFile: m.SUPER_ONTOLOGY_REPLAYS_FILE,
   superOntologyEvidenceFile: m.SUPER_ONTOLOGY_EVIDENCE_FILE,
   superOntologyMemoryBridgeFile: m.SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,

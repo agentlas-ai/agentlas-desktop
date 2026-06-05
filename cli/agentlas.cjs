@@ -1311,6 +1311,9 @@ function ensureProjectMemoryCli(projectPath, projectName) {
     const superOntologySourceLineageVersionFile =
       arch.superOntologySourceLineageVersionFile ||
       "super-ontology-source-lineage-version.json";
+    const superOntologyEntityIdentityResolutionFile =
+      arch.superOntologyEntityIdentityResolutionFile ||
+      "super-ontology-entity-identity-resolution.json";
     const superOntologyReplaysFile = arch.superOntologyReplaysFile || "super-ontology-replays.jsonl";
     const superOntologyEvidenceFile = arch.superOntologyEvidenceFile || "super-ontology-evidence.jsonl";
     const superOntologyMemoryBridgeFile = arch.superOntologyMemoryBridgeFile || "super-ontology-memory-bridge.jsonl";
@@ -1398,6 +1401,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           "normative_authority_drift_contract",
           "side_effect_containment_contract",
           "source_lineage_version_contract",
+          "entity_identity_resolution_contract",
           "promotion_readiness",
           "promotion_replay_drill",
           "architecture_sync_review",
@@ -1425,6 +1429,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           normativeAuthorityDrift: `.agentlas/${superOntologyNormativeAuthorityDriftFile}`,
           sideEffectContainment: `.agentlas/${superOntologySideEffectContainmentFile}`,
           sourceLineageVersion: `.agentlas/${superOntologySourceLineageVersionFile}`,
+          entityIdentityResolution: `.agentlas/${superOntologyEntityIdentityResolutionFile}`,
         },
         hardStops: [
           "zero_error_claim",
@@ -1621,6 +1626,18 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           "graph_edge_without_derivation_chain",
           "superseded_source_to_runtime_write",
           "lineage_cycle_unresolved",
+          "missing_entity_identity_resolution_contract",
+          "name_as_identity",
+          "email_domain_as_company",
+          "fuzzy_match_as_merge",
+          "embedding_cluster_as_identity",
+          "llm_canonical_name_as_id",
+          "crm_id_cross_tenant_merge",
+          "recycled_employee_id_as_same_person",
+          "redacted_name_as_public_identity",
+          "stale_alias_as_current_entity",
+          "relationship_edge_without_identity_evidence",
+          "memory_note_as_identity_authority",
           "correlation_as_causation",
           "unsupported_claim",
           "direct_durable_memory_write",
@@ -1682,6 +1699,10 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           unversionedSourceRuntimeWritesBlocked: true,
           derivedArtifactPromotionBlocked: true,
           lineageRepairRequired: true,
+          entityIdentityResolutionRequired: true,
+          ambiguousIdentityRuntimeWritesBlocked: true,
+          identityMergeReviewRequired: true,
+          identityRollbackRequired: true,
           directDurableMemoryWritesBlocked: true,
         },
         surfacePolicy: {
@@ -3708,6 +3729,81 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           "graph_edge_without_derivation_chain",
           "superseded_source_to_runtime_write",
           "lineage_cycle_unresolved",
+        ],
+      }, null, 2), "utf8");
+    }
+    const superOntologyEntityIdentityResolution = path.join(
+      dir,
+      superOntologyEntityIdentityResolutionFile,
+    );
+    if (!fs.existsSync(superOntologyEntityIdentityResolution)) {
+      fs.writeFileSync(superOntologyEntityIdentityResolution, JSON.stringify({
+        schemaVersion: "1.0",
+        kind: "agentlas-super-ontology-entity-identity-resolution",
+        state: "local_candidate",
+        projectId: name,
+        draftId: null,
+        runtimePromotionAllowed: false,
+        defaultDecision: "identity_evidence_required_before_canonical_graph_memory_public_training_tool_or_route_authority",
+        entityFamilies: [
+          "person",
+          "company",
+          "customer_account",
+          "vendor",
+          "product",
+          "project",
+          "model",
+          "location",
+          "team",
+          "patient_or_user",
+          "device",
+          "document",
+        ],
+        mentionArtifactTypes: [
+          "name_string",
+          "alias",
+          "email_address",
+          "phone_number",
+          "domain",
+          "crm_id",
+          "employee_id",
+          "spreadsheet_row",
+          "external_uri",
+          "embedding_cluster",
+          "llm_generated_canonical",
+          "redacted_identifier",
+        ],
+        requiredIdentityEvidence: [
+          "canonical_entity_id",
+          "source_system_id",
+          "entity_type",
+          "source_uri",
+          "source_span",
+          "negative_evidence",
+          "disambiguating_attributes",
+          "temporal_validity",
+          "tenant_or_context_id",
+          "privacy_basis",
+          "owner_review",
+          "merge_policy",
+          "split_policy",
+          "tombstone_record",
+          "audit_trace",
+          "rollback_snapshot",
+        ],
+        hardStops: [
+          "missing_entity_identity_resolution_contract",
+          "name_as_identity",
+          "email_domain_as_company",
+          "fuzzy_match_as_merge",
+          "embedding_cluster_as_identity",
+          "llm_canonical_name_as_id",
+          "crm_id_cross_tenant_merge",
+          "recycled_employee_id_as_same_person",
+          "redacted_name_as_public_identity",
+          "stale_alias_as_current_entity",
+          "relationship_edge_without_identity_evidence",
+          "memory_note_as_identity_authority",
         ],
       }, null, 2), "utf8");
     }
