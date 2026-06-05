@@ -968,7 +968,7 @@ async function registerCloudAgentCli(manifest, bundlePath, review, visibility) {
   const bundle = JSON.parse(fs.readFileSync(bundlePath, "utf8"));
   const resp = await fetch(`${base}/api/cloud-agents/v1/register`, {
     method: "POST",
-    headers: { "content-type": "application/json", cookie },
+    headers: { "content-type": "application/json", cookie, origin: base },
     body: JSON.stringify({ manifest, bundle, review, visibility, billing: { modelCallsPaidBy: review.costOwner, localRuntime: review.runtimeLabel || null } }),
   });
   if (!resp.ok) fail(`Agentlas Cloud 등록 실패 ${resp.status}: ${(await resp.text().catch(() => "")).slice(0, 300)}`);

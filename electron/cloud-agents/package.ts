@@ -441,6 +441,7 @@ async function registerCloudAgent(input: {
     headers: {
       "content-type": "application/json",
       cookie,
+      origin: base,
     },
     body: JSON.stringify({
       manifest: input.manifest,
