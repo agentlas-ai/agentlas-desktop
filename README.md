@@ -64,11 +64,11 @@ Canonical release history lives in
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
 
-- **2026-06-03 · v0.2.8 public desktop release** — Apps-first navigation,
-  Document Studio, and chat Apps commands shipped. Windows/Linux were published
-  by the default release workflow; macOS arm64/x64 DMGs were added afterward from
-  the signed/notarized local pipeline. `/api/desktop/latest` reports
-  `version: 0.2.8`, `ready: true`.
+- **2026-06-06 · v0.2.17 public desktop release** — Project Ontology panel and
+  `agentlas ontology` terminal status/add/open flow shipped. Each project gets a
+  separate `.agentlas/ontology-inbox/`, `.agentlas/ontology-sources.json`, and
+  `.agentlas/ontology-runtime.sqlite`; home folders and sibling projects are not
+  scanned automatically.
 
 ### What you get
 
