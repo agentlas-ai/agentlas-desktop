@@ -36,7 +36,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.5.26";
+export const ARCHITECTURE_VERSION = "1.5.27";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -49,6 +49,7 @@ export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
 // superOntologySideEffectContainmentSkeleton.
 // superOntologySourceLineageVersionSkeleton.
 // superOntologyEntityIdentityResolutionSkeleton.
+// superOntologyTemporalStateTransitionSkeleton.
 
 export type MemoryScope =
   | "user_identity"
@@ -129,6 +130,8 @@ export const SUPER_ONTOLOGY_SOURCE_LINEAGE_VERSION_FILE =
   "super-ontology-source-lineage-version.json";
 export const SUPER_ONTOLOGY_ENTITY_IDENTITY_RESOLUTION_FILE =
   "super-ontology-entity-identity-resolution.json";
+export const SUPER_ONTOLOGY_TEMPORAL_STATE_TRANSITION_FILE =
+  "super-ontology-temporal-state-transition.json";
 export const SUPER_ONTOLOGY_REPLAYS_FILE = "super-ontology-replays.jsonl";
 export const SUPER_ONTOLOGY_EVIDENCE_FILE = "super-ontology-evidence.jsonl";
 export const SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE = "super-ontology-memory-bridge.jsonl";
@@ -333,11 +336,12 @@ the task size:
 	  super-ontology-side-effect-containment,
 	  super-ontology-source-lineage-version,
 	  super-ontology-entity-identity-resolution,
+	  super-ontology-temporal-state-transition,
 	  super-ontology-replays,
   super-ontology-evidence, and super-ontology-memory-bridge files as
   candidate-only adaptive knowledge governance metadata. Open-world coverage
 	  ledger keys include objectiveProxyValidity, stakeholderPreferenceGovernance,
-	  normativeAuthorityDrift, sideEffectContainment, sourceLineageVersion, entityIdentityResolution, and memoryCuratorBridge
+	  normativeAuthorityDrift, sideEffectContainment, sourceLineageVersion, entityIdentityResolution, temporalStateTransition, and memoryCuratorBridge
 	  for cross-surface sync checks. Open-world coverage
   must lower authority for new world/task/modality/fault/authority/write
   combinations before action. Consensus coordination must treat agent agreement,

@@ -21,6 +21,7 @@ const {
   SUPER_ONTOLOGY_SIDE_EFFECT_CONTAINMENT_FILE,
   SUPER_ONTOLOGY_SOURCE_LINEAGE_VERSION_FILE,
   SUPER_ONTOLOGY_ENTITY_IDENTITY_RESOLUTION_FILE,
+  SUPER_ONTOLOGY_TEMPORAL_STATE_TRANSITION_FILE,
   SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
@@ -77,6 +78,10 @@ try {
     memoryDir,
     SUPER_ONTOLOGY_ENTITY_IDENTITY_RESOLUTION_FILE,
   );
+  const temporalStateTransitionPath = path.join(
+    memoryDir,
+    SUPER_ONTOLOGY_TEMPORAL_STATE_TRANSITION_FILE,
+  );
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(openWorldCoveragePath), "super ontology open-world coverage should be seeded");
@@ -112,6 +117,10 @@ try {
   assert.ok(
     fs.existsSync(entityIdentityResolutionPath),
     "super ontology entity identity resolution should be seeded",
+  );
+  assert.ok(
+    fs.existsSync(temporalStateTransitionPath),
+    "super ontology temporal state transition should be seeded",
   );
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
@@ -180,6 +189,10 @@ try {
   assert.equal(contract.promotionPolicy.ambiguousIdentityRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.identityMergeReviewRequired, true);
   assert.equal(contract.promotionPolicy.identityRollbackRequired, true);
+  assert.equal(contract.promotionPolicy.temporalStateTransitionRequired, true);
+  assert.equal(contract.promotionPolicy.timelessStateRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.eventReplayRequired, true);
+  assert.equal(contract.promotionPolicy.projectionVersionRequired, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
@@ -245,6 +258,10 @@ try {
     contract.layers.includes("entity_identity_resolution_contract"),
     "contract should include entity identity resolution gate",
   );
+  assert.ok(
+    contract.layers.includes("temporal_state_transition_contract"),
+    "contract should include temporal state transition gate",
+  );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(
     contract.evidenceLedgers.openWorldCoverage,
@@ -309,6 +326,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.entityIdentityResolution,
     `.agentlas/${SUPER_ONTOLOGY_ENTITY_IDENTITY_RESOLUTION_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.temporalStateTransition,
+    `.agentlas/${SUPER_ONTOLOGY_TEMPORAL_STATE_TRANSITION_FILE}`,
   );
   const openWorldCoverage = JSON.parse(fs.readFileSync(openWorldCoveragePath, "utf8"));
   assert.equal(openWorldCoverage.kind, "agentlas-super-ontology-open-world-coverage");
@@ -954,6 +975,45 @@ try {
       entityIdentityResolution.hardStops.includes("crm_id_cross_tenant_merge") &&
       entityIdentityResolution.hardStops.includes("memory_note_as_identity_authority"),
     "entity identity resolution should block name, embedding, cross-tenant id, and memory-note shortcuts",
+  );
+  const temporalStateTransition = JSON.parse(fs.readFileSync(temporalStateTransitionPath, "utf8"));
+  assert.equal(
+    temporalStateTransition.kind,
+    "agentlas-super-ontology-temporal-state-transition",
+  );
+  assert.equal(temporalStateTransition.runtimePromotionAllowed, false);
+  assert.equal(
+    temporalStateTransition.defaultDecision,
+    "temporal_state_evidence_required_before_graph_memory_public_training_tool_route_scheduled_permission_financial_release_or_customer_authority",
+  );
+  assert.ok(
+    temporalStateTransition.stateSubjectFamilies.includes("customer_account") &&
+      temporalStateTransition.stateSubjectFamilies.includes("memory_fact") &&
+      temporalStateTransition.stateSubjectFamilies.includes("permission") &&
+      temporalStateTransition.stateSubjectFamilies.includes("graph_edge"),
+    "temporal state transition should include account, memory, permission, and graph-edge subjects",
+  );
+  assert.ok(
+    temporalStateTransition.eventArtifactTypes.includes("state_snapshot") &&
+      temporalStateTransition.eventArtifactTypes.includes("webhook_event") &&
+      temporalStateTransition.eventArtifactTypes.includes("scheduled_job") &&
+      temporalStateTransition.eventArtifactTypes.includes("llm_summary"),
+    "temporal state transition should include snapshot, webhook, scheduled job, and LLM summary artifacts",
+  );
+  assert.ok(
+    temporalStateTransition.requiredTemporalEvidence.includes("valid_time") &&
+      temporalStateTransition.requiredTemporalEvidence.includes("transaction_time") &&
+      temporalStateTransition.requiredTemporalEvidence.includes("event_sequence") &&
+      temporalStateTransition.requiredTemporalEvidence.includes("pre_state") &&
+      temporalStateTransition.requiredTemporalEvidence.includes("rollback_snapshot"),
+    "temporal state transition should require valid, transaction, order, pre-state, and rollback evidence",
+  );
+  assert.ok(
+    temporalStateTransition.hardStops.includes("current_snapshot_as_truth") &&
+      temporalStateTransition.hardStops.includes("llm_summary_as_event_log") &&
+      temporalStateTransition.hardStops.includes("materialized_view_as_source_of_truth") &&
+      temporalStateTransition.hardStops.includes("graph_edge_without_temporal_bounds"),
+    "temporal state transition should block snapshot, LLM summary, materialized view, and unbounded-edge shortcuts",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");
