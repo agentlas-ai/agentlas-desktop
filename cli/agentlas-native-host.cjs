@@ -26,26 +26,40 @@ function userDataDir() {
   return path.join(process.env.XDG_CONFIG_HOME || path.join(home, ".config"), "Agentlas");
 }
 
-function cliMcpConfigPath() {
+// MCP 서버 이름 → TOML/JSON 안전 키 (하이픈/공백 → _).
+function mcpKey(s) {
+  return String((s && (s.name || s.id)) || "mcp").toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "") || "mcp";
+}
+function mcpStdioArgs(s) {
+  try { return JSON.parse((s && s.args_json) || "[]"); } catch { return []; }
+}
+// claude --mcp-config 파일을 쓴다. playwright(항상) + DB에 enabled 된 stdio MCP 서버들.
+function cliMcpConfigPath(servers) {
   const dir = path.join(userDataDir(), "mcp");
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, "agentlas-cli-mcp.json");
-  fs.writeFileSync(
-    file,
-    JSON.stringify({
-      mcpServers: {
-        playwright: { command: "npx", args: ["-y", "@playwright/mcp@latest"] },
-      },
-    }, null, 2),
-    "utf8",
-  );
-  return file;
+  const mcpServers = { playwright: { command: "npx", args: ["-y", "@playwright/mcp@latest"] } };
+  for (const s of servers || []) {
+    if (!s || s.enabled === 0 || s.transport !== "stdio" || !s.command) continue;
+    mcpServers[mcpKey(s)] = { command: s.command, args: mcpStdioArgs(s) };
+  }
+  fs.writeFileSync(file, JSON.stringify({ mcpServers }, null, 2), "utf8");
+  return { file, names: Object.keys(mcpServers) };
 }
-
-const CODEX_PLAYWRIGHT_MCP_ARGS = [
-  "-c", 'mcp_servers.playwright.command="npx"',
-  "-c", 'mcp_servers.playwright.args=["-y","@playwright/mcp@latest"]',
-];
+// codex -c mcp_servers.<key>.command/args — playwright(항상) + DB stdio 서버들.
+function codexMcpArgs(servers) {
+  const out = [
+    "-c", 'mcp_servers.playwright.command="npx"',
+    "-c", 'mcp_servers.playwright.args=["-y","@playwright/mcp@latest"]',
+  ];
+  for (const s of servers || []) {
+    if (!s || s.enabled === 0 || s.transport !== "stdio" || !s.command) continue;
+    const k = mcpKey(s);
+    out.push("-c", `mcp_servers.${k}.command=${JSON.stringify(s.command)}`);
+    out.push("-c", `mcp_servers.${k}.args=${JSON.stringify(mcpStdioArgs(s))}`);
+  }
+  return out;
+}
 
 // 툴 input(JSON)에서 사람이 읽을 대표 인자 한 줄 추출.
 function summarizeToolInput(name, input) {
@@ -83,16 +97,19 @@ function lineReader(stream, onLine) {
 }
 
 // ── claude-code ──────────────────────────────────────────
-function claudeArgs({ prompt, systemPrompt, permission, session }) {
+function claudeArgs({ prompt, systemPrompt, permission, session, model, effort, mcpServers }) {
   const perm =
     permission === "full"
       ? ["--permission-mode", "bypassPermissions"]
       : permission === "write"
         ? ["--permission-mode", "acceptEdits"]
         : [];
+  // /effort → Claude Code는 think 키워드로 reasoning 예산을 올린다(전용 CLI 플래그 없음).
+  const thinkKw =
+    effort === "max" ? "Ultrathink. " : effort === "high" ? "Think hard. " : effort === "medium" ? "Think. " : "";
   const args = [
     "-p",
-    prompt,
+    thinkKw + prompt,
     "--output-format",
     "stream-json",
     "--include-partial-messages",
@@ -100,14 +117,22 @@ function claudeArgs({ prompt, systemPrompt, permission, session }) {
     ...perm,
   ];
   if (permission === "write" || permission === "full") {
-    args.push("--mcp-config", cliMcpConfigPath(), "--allowedTools", "mcp__playwright");
+    const mcpCfg = cliMcpConfigPath(mcpServers);
+    args.push("--mcp-config", mcpCfg.file, "--allowedTools", mcpCfg.names.map((n) => "mcp__" + n).join(","));
   }
+  if (model) args.push("--model", model); // alias (sonnet/opus) or full id — /model parity
   if (session && session.id) {
     args.push("--resume", session.id);
   } else if (systemPrompt) {
     args.push("--append-system-prompt", systemPrompt);
   }
   return args;
+}
+
+// ANSI 제거 (에러 stderr 정리용) — 외부 의존성 없이.
+function stripAnsi(s) {
+  // eslint-disable-next-line no-control-regex
+  return String(s).replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 function handleClaudeLine(line, st, ui) {
@@ -128,7 +153,10 @@ function handleClaudeLine(line, st, ui) {
         const cb = ev.content_block || {};
         if (cb.type === "tool_use") {
           st.tools[ev.index] = { name: cb.name || "tool", input: "" };
-          ui.tool(prettyToolName(cb.name), "");
+          // 인자가 다 모이는 content_block_stop에서 한 줄로(⏺ Name(arg)) 출력 — Claude Code 스타일
+        } else if (cb.type === "thinking") {
+          st.think[ev.index] = "";
+          ui.status("✻ thinking…");
         } else if (cb.type === "text") {
           ui.streamStart();
         }
@@ -139,6 +167,8 @@ function handleClaudeLine(line, st, ui) {
           st.text += d.text;
         } else if (d.type === "input_json_delta" && st.tools[ev.index]) {
           st.tools[ev.index].input += d.partial_json || "";
+        } else if (d.type === "thinking_delta" && st.think[ev.index] != null) {
+          st.think[ev.index] += d.thinking || "";
         }
       } else if (ev.type === "content_block_stop") {
         const t = st.tools[ev.index];
@@ -149,8 +179,11 @@ function handleClaudeLine(line, st, ui) {
           } catch {
             parsed = null;
           }
-          const arg = summarizeToolInput(t.name, parsed);
-          if (arg) ui.info(ui.c.dim("  " + arg));
+          ui.tool(prettyToolName(t.name), summarizeToolInput(t.name, parsed));
+        } else if (st.think[ev.index] != null) {
+          const th = String(st.think[ev.index] || "").trim();
+          if (th) ui.line(ui.c.faint("  " + ui.c.italic(truncateLines(th, 3))));
+          st.think[ev.index] = null;
         } else {
           ui.streamEnd();
         }
@@ -199,16 +232,20 @@ function prettyToolName(name) {
 }
 
 // ── codex ────────────────────────────────────────────────
-function codexArgs({ prompt, systemPrompt, permission, session, cwd }) {
+function codexArgs({ prompt, systemPrompt, permission, session, cwd, model, effort, mcpServers }) {
   const sandbox =
     permission === "full" || permission === "write"
       ? ["--dangerously-bypass-approvals-and-sandbox"]
-      : ["--sandbox", "read-only", "--ask-for-approval", "never"];
-  const mcp = permission === "write" || permission === "full" ? CODEX_PLAYWRIGHT_MCP_ARGS : [];
+      : // `codex exec` 는 --ask-for-approval 플래그가 없다(그건 top-level codex 옵션). config 오버라이드로 지정.
+        ["--sandbox", "read-only", "-c", 'approval_policy="never"'];
+  const mcp = permission === "write" || permission === "full" ? codexMcpArgs(mcpServers) : [];
+  const mdl = model ? ["-m", model] : []; // /model parity
+  // /effort parity → codex reasoning effort (low|medium|high). max는 high로 매핑.
+  const eff = effort ? ["-c", `model_reasoning_effort="${effort === "max" ? "high" : effort}"`] : [];
   const full = systemPrompt && !(session && session.id) ? `[SYSTEM]\n${systemPrompt}\n\n${prompt}` : prompt;
   // -C/--sandbox/--skip-git-repo-check 는 `codex exec` 옵션이라 `resume <id>` 토큰 *앞에* 와야 한다.
   // (codex-cli 0.133: resume 뒤에 두면 `unexpected argument` 로 거부 → 멀티턴 전부 실패. 실측 검증됨.)
-  const base = ["exec", "--json", "--skip-git-repo-check", "-C", cwd, ...sandbox, ...mcp];
+  const base = ["exec", "--json", "--skip-git-repo-check", "-C", cwd, ...mdl, ...eff, ...sandbox, ...mcp];
   if (session && session.id) {
     return [...base, "resume", session.id, full];
   }
@@ -339,10 +376,101 @@ function truncateLines(s, n) {
   return lines.join(" ").slice(0, 200);
 }
 
-// ── gemini (평문 스트리밍 폴백) ───────────────────────────
-function geminiArgs({ prompt, systemPrompt, permission }) {
-  const yolo = permission === "full" || permission === "write" ? ["--yolo"] : [];
-  return ["--prompt", `[SYSTEM]\n${systemPrompt}\n\n${prompt}`, ...yolo];
+// ── gemini (stream-json 구조화 렌더 — claude/codex와 동일 파리티) ──
+// gemini-cli는 -o stream-json 으로 init/message(delta)/tool_use/tool_result/result 이벤트를 낸다(실측).
+function geminiArgs({ prompt, systemPrompt, permission, model }) {
+  // read = 읽기전용(plan), write/full = 자동승인(yolo).
+  const approval =
+    permission === "full" || permission === "write" ? ["--yolo"] : ["--approval-mode", "plan"];
+  const mdl = model ? ["-m", model] : []; // /model parity
+  return [
+    "--output-format", "stream-json",
+    "--skip-trust", // 헤드리스: 이 세션 동안 워크스페이스 신뢰 (untrusted dir exit 55 방지)
+    ...approval,
+    ...mdl,
+    "--prompt", systemPrompt ? `[SYSTEM]\n${systemPrompt}\n\n${prompt}` : prompt,
+  ];
+}
+
+// gemini 툴명 → 친숙한 표시명 (claude/codex 표기와 통일)
+const GEMINI_TOOL_NAMES = {
+  run_shell_command: "Bash",
+  read_file: "Read",
+  read_many_files: "Read",
+  write_file: "Write",
+  replace: "Edit",
+  edit: "Edit",
+  list_directory: "List",
+  glob: "Glob",
+  search_file_content: "Grep",
+  web_fetch: "Fetch",
+  google_web_search: "Search",
+  save_memory: "Memory",
+};
+function prettyGeminiTool(name) {
+  return GEMINI_TOOL_NAMES[name] || name || "tool";
+}
+function handleGeminiLine(line, st, ui) {
+  let obj;
+  try {
+    obj = JSON.parse(line);
+  } catch {
+    return; // 비-JSON 잡음(경고 등) 무시
+  }
+  switch (obj.type) {
+    case "init":
+      if (obj.session_id) st.session.id = obj.session_id;
+      return;
+    case "tool_use": {
+      const p = obj.parameters || {};
+      const arg = p.command || summarizeToolInput(obj.tool_name, p) || p.description || "";
+      if (st.geminiStreaming) {
+        ui.streamEnd();
+        st.geminiStreaming = false;
+      }
+      ui.tool(prettyGeminiTool(obj.tool_name), arg);
+      return;
+    }
+    case "tool_result": {
+      const out =
+        typeof obj.output === "string"
+          ? obj.output
+          : obj.output != null
+            ? JSON.stringify(obj.output)
+            : "";
+      ui.toolResult(out, obj.status == null || obj.status === "success");
+      return;
+    }
+    case "message": {
+      if (obj.role !== "assistant") return; // user echo 스킵
+      const txt = typeof obj.content === "string" ? obj.content : "";
+      if (!txt) return;
+      if (!st.geminiStreaming) {
+        ui.streamStart();
+        st.geminiStreaming = true;
+      }
+      ui.streamDelta(txt);
+      st.text += txt;
+      return;
+    }
+    case "result": {
+      if (st.geminiStreaming) {
+        ui.streamEnd();
+        st.geminiStreaming = false;
+      }
+      const s = obj.stats || {};
+      st.usage = {
+        input_tokens: s.input_tokens,
+        output_tokens: s.output_tokens,
+        duration_ms: s.duration_ms,
+      };
+      st.finalText = st.text;
+      if (obj.status && obj.status !== "success") st.error = `gemini ${obj.status}`;
+      return;
+    }
+    default:
+      return;
+  }
 }
 
 // ── 공통 실행기 ───────────────────────────────────────────
@@ -358,6 +486,8 @@ function runNativeTurn(req) {
     error: null,
     session: req.session || {},
     tools: {},
+    think: {},
+    geminiStreaming: false,
     itemText: {},
     itemSeen: {},
   };
@@ -373,7 +503,7 @@ function runNativeTurn(req) {
     lineHandler = (l) => handleCodexLine(l, st, ui);
   } else if (kind === "gemini") {
     args = geminiArgs(req);
-    plainStream = true;
+    lineHandler = (l) => handleGeminiLine(l, st, ui);
   } else {
     return Promise.resolve({ text: "", session: st.session, error: `unknown runtime: ${kind}` });
   }
@@ -437,14 +567,15 @@ function runNativeTurn(req) {
       ui.stopSpinner();
       const text = (st.finalText || st.text || "").trim();
       const aborted = req.signal && req.signal.aborted;
+      const errTail = stripAnsi(stderrBuf).replace(/\s+/g, " ").trim(); // ANSI 제거 + 한 줄로
       if (st.error && !st.errorShown) {
         // claude `result` is_error 등 — 이전에 표시되지 않은 에러를 노출
         ui.error(String(st.error));
       } else if (code !== 0 && !text && !aborted) {
-        ui.error(`${kind} exited with code ${code}` + (stderrBuf.trim() ? `\n${stderrBuf.trim().slice(-500)}` : ""));
+        ui.error(`${kind} exited with code ${code}` + (errTail ? `\n  ${errTail.slice(-400)}` : ""));
       } else if (!text && !st.error && !aborted) {
         // 정상 종료인데 출력이 비어 있음(거부/차단 등) — 무음 실패 방지
-        ui.warn(`${kind}: no output` + (stderrBuf.trim() ? ` (${stderrBuf.trim().slice(-200)})` : ""));
+        ui.warn(`${kind}: no output` + (errTail ? ` (${errTail.slice(-200)})` : ""));
       }
       if (st.usage) ui.cost(st.usage);
       resolve({ text, session: st.session, usage: st.usage, error: st.error });

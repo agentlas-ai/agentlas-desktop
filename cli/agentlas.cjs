@@ -261,6 +261,42 @@ function resolveAgent(db, query) {
   );
 }
 const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
+// 메타-빌더(에이전트/팀/회사 생성) — 약한 키워드 점수 경쟁에서 빼고, 명시적 build 의도일 때만 직행 라우팅.
+const META_BUILDER_SLUGS = ["agentlas-core-engine-meta-agent-builtin", "agentlas-meta-agent"];
+const NON_GENERIC_ROUTE_SLUGS = new Set([GLOBAL_ORCHESTRATOR_SLUG, ...META_BUILDER_SLUGS]);
+const AGENT_BUILD_TERMS = [
+  "build an agent", "build a team", "build me an agent", "build me a team", "make an agent",
+  "make a team", "create an agent", "create a team", "agent team", "agent for me",
+  "scaffold a team", "scaffold an agent", "build a company", "create a company",
+  "new agent team", "set up an agent", "set up a team", "spin up an agent",
+  "에이전트팀", "에이전트 팀", "에이전트 만들", "에이전트를 만들", "에이전트 좀 만들",
+  "에이전트 생성", "에이전트 구축", "팀 만들", "팀을 만들", "팀 생성", "회사 만들",
+  "회사를 만들", "에이전트 하나 만들",
+];
+// 한국어 조사("하나만","좀","를")가 끼면 고정 구문 매칭이 깨지므로, 엔티티+동사 근접 규칙을 보강한다.
+const BUILD_ENTITY_RE = /(에이전트|agent|팀|team|회사|company)/i;
+const BUILD_VERB_RE = /(만들|만든|생성|구축|구성해|꾸려|세팅|패키징|scaffold|build|create|\bmake\b|set\s?up|spin\s?up)/i;
+function isAgentBuildIntent(prompt) {
+  const p = routeNormalize(prompt);
+  if (!p.trim() || isTrivialRoutePrompt(p)) return false;
+  if (AGENT_BUILD_TERMS.some((term) => p.includes(routeNormalize(term)))) return true;
+  // 예: "단일 에이전트 하나만 만들어줘", "팀 좀 꾸려줘", "make me an agent"
+  return BUILD_ENTITY_RE.test(p) && BUILD_VERB_RE.test(p);
+}
+function resolveMetaBuilder(db) {
+  try {
+    const rows = db
+      .prepare("SELECT * FROM installed_agents WHERE slug IN ('agentlas-core-engine-meta-agent-builtin','agentlas-meta-agent')")
+      .all();
+    for (const slug of META_BUILDER_SLUGS) {
+      const a = rows.find((r) => r.slug === slug);
+      if (a) return a;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
 const ROUTE_STOP_WORDS = new Set(["the", "and", "for", "with", "this", "that", "from", "into", "make", "build", "create", "agent", "agents", "please", "좀", "해주세요", "해줘", "만들어", "붙여", "연결", "작업", "요청"]);
 const ROUTE_HINTS = [
   {
@@ -414,7 +450,8 @@ function scoreRouteAgent(prompt, promptTerms, agent, lang) {
   const terms = [];
   for (const name of [agent.slug, agent.name, agent.name_en].filter(Boolean)) {
     const n = routeNormalize(name);
-    if (n && promptText.includes(n)) {
+    // 4자 미만 일반 단어("team","agent" 등)가 프롬프트에 우연히 들어가 +20을 독식하지 않도록 가드.
+    if (n && n.length >= 4 && promptText.includes(n)) {
       score += 20;
       terms.push(name);
     }
@@ -439,16 +476,32 @@ function scoreRouteAgent(prompt, promptTerms, agent, lang) {
   return { agent, score, reason, terms: unique };
 }
 function autoRouteAgent(db, prompt, lang) {
-  const agents = listRoutableAgents(db).filter((agent) => agent.slug !== GLOBAL_ORCHESTRATOR_SLUG);
+  const resolvedLang = lang || prefsLang();
+  // 명확한 "에이전트/팀/회사 만들기" 의도 → 메타-빌더로 직행 (약한 키워드 점수에 밀리지 않게).
+  if (isAgentBuildIntent(prompt)) {
+    const meta = resolveMetaBuilder(db);
+    if (meta) {
+      return {
+        agent: meta,
+        score: 1000,
+        reason:
+          resolvedLang === "ko"
+            ? "새 에이전트/팀/회사를 만드는 요청이라 메타에이전트(빌더)로 라우팅했습니다"
+            : "the request is to build a new agent/team/company, so it routes to the meta-agent (builder)",
+        terms: [],
+      };
+    }
+  }
+  const agents = listRoutableAgents(db).filter((agent) => !NON_GENERIC_ROUTE_SLUGS.has(agent.slug));
   if (!agents.length) return null;
   const terms = routeTokenize(prompt);
-  const ranked = agents.map((agent) => scoreRouteAgent(prompt, terms, agent, lang || prefsLang())).sort((a, b) => b.score - a.score);
+  const ranked = agents.map((agent) => scoreRouteAgent(prompt, terms, agent, resolvedLang)).sort((a, b) => b.score - a.score);
   if (ranked[0] && ranked[0].score > 0) return ranked[0];
   const fallback = agents.find((agent) => agent.slug === "agentlas-pm-soul") || agents[0];
   return {
     agent: fallback,
     score: 0,
-    reason: (lang || prefsLang()) === "ko"
+    reason: resolvedLang === "ko"
       ? "명확한 전문 에이전트가 없어 기본 프로젝트 조율 경로를 선택했습니다"
       : "no specialist matched clearly, so Agentlas chose the default coordination route",
     terms: [],
@@ -5559,7 +5612,33 @@ async function executeOnce(db, system, prompt, override, ctx) {
     const permission = ctx.permission || "write";
     const env = await buildChildEnvCli(db, { ...ctx, cwd });
     process.stderr.write(`▸ ${rt.kind} · ${permission} · ${cwd}\n`);
-    return spawnRuntime(rt.kind, sys, prompt, { cwd, permission, env });
+    // one-shot(`agentlas "작업"`)도 REPL과 동일한 리치 렌더(⏺ 툴 / └ 결과 / 토큰)로 출력한다.
+    const { runNativeTurn } = require("./agentlas-native-host.cjs");
+    const { Ui } = require("./agentlas-ui.cjs");
+    const ui = new Ui({ lang: prefsLang() });
+    let mcpServers = [];
+    if (permission !== "read") {
+      try {
+        mcpServers = db.prepare("SELECT id, name, transport, command, args_json, enabled FROM mcp_servers WHERE enabled=1 AND transport='stdio'").all();
+      } catch { /* ignore */ }
+    }
+    ui.beginTurn();
+    const res = await runNativeTurn({
+      kind: rt.kind,
+      bin: which(RUNTIME_BIN[rt.kind]) || RUNTIME_BIN[rt.kind],
+      prompt,
+      systemPrompt: sys,
+      cwd,
+      permission,
+      session: {},
+      model: null,
+      effort: null,
+      mcpServers,
+      env,
+      ui,
+    });
+    ui.endTurn();
+    return res.error ? 1 : 0;
   }
   // API 경로 — emitter 동봉 → 답변에서 메모리 이벤트를 파싱·큐레이션하고 블록은 제거.
   const sys = augmentSystem(db, system, ctx, true);
@@ -5836,6 +5915,50 @@ function buildHelpers(db) {
     autoRoutePreamble: (choice, lang) => autoRoutePreamble(choice, lang),
     cliMemoryContext: (db_, pp) => cliMemoryContext(db_, pp),
     importLocal: (db_, p) => importLocalFolderCli(db_, p),
+    // REPL-safe 마켓플레이스 설치: fail()(process.exit) 대신 Error를 throw 해 REPL이 직접 렌더하게 한다.
+    cloudInstall: async (db_, slug) => {
+      if (typeof fetch !== "function") throw new Error("이 런타임에 fetch가 없습니다(앱 런타임 필요).");
+      const base = process.env.AGENTLAS_MCP_BASE_URL || "https://agentlas.cloud/api/mcp/v1";
+      const headers = { "content-type": "application/json" };
+      const cookie = await cloudSessionCookieCli();
+      if (cookie) headers.cookie = cookie;
+      let resp;
+      try {
+        resp = await fetch(`${base.replace(/\/$/, "")}/tools/call`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ method: "marketplace.get_manifest", params: { name: "marketplace.get_manifest", arguments: { kind: "agent", slug } } }),
+        });
+      } catch (e) {
+        throw new Error(`마켓플레이스 연결 실패: ${(e && e.message) || e}`);
+      }
+      if (!resp.ok) {
+        const authHint = resp.status === 401 || resp.status === 403 ? " — 로그인이 필요합니다 (앱에서 로그인 또는 AGENTLAS_SESSION 설정)" : "";
+        throw new Error(`마켓플레이스 응답 ${resp.status}${authHint}`);
+      }
+      const json = await resp.json();
+      if (json.error) throw new Error(json.error.message || "marketplace error");
+      const listing = json.result;
+      if (!listing) throw new Error(`마켓플레이스에서 찾을 수 없음: ${slug}`);
+      return persistCloudListingCli(db_, listing);
+    },
+    hasCloudSession: async () => {
+      try { return !!(await cloudSessionCookieCli()); } catch { return false; }
+    },
+    mcpServers: (db_) => {
+      try {
+        return db_.prepare("SELECT id, name, name_en, transport, command, args_json, url, env_keys_json, enabled FROM mcp_servers ORDER BY installed_at ASC").all();
+      } catch {
+        return [];
+      }
+    },
+    // CLI 세션 영속화(이어하기 /resume): 네이티브 런타임 세션ID를 cli-sessions.json에 저장.
+    sessionsLoad: () => {
+      try { return JSON.parse(fs.readFileSync(path.join(userDataDir(), "cli-sessions.json"), "utf8")) || []; } catch { return []; }
+    },
+    sessionsSave: (list) => {
+      try { fs.writeFileSync(path.join(userDataDir(), "cli-sessions.json"), JSON.stringify((list || []).slice(0, 30), null, 2), "utf8"); } catch { /* ignore */ }
+    },
     ontologyCommand: (text, ctx) => runOntologyNaturalCli(text, {
       cwd: (ctx && ctx.cwd) || projectCwd(),
       projectPath: (ctx && ctx.cwd) || projectCwd(),
@@ -5850,16 +5973,34 @@ function buildHelpers(db) {
         return null;
       }
     },
-    doctor: (db_, ui) => {
+    doctor: async (db_, ui) => {
       ui.line("");
       ui.info("userData: " + userDataDir());
       ui.info("db: " + (fs.existsSync(dbPath()) ? "OK" : "없음"));
       const ar = activeRuntime(db_);
       ui.info("활성 런타임: " + (ar ? ar.kind : "(없음)"));
+      // CLI 런타임: 설치 + 로그인(인증 파일) 휴리스틱
+      const home = os.homedir();
+      const authFiles = {
+        "claude-code": [path.join(home, ".claude.json"), path.join(home, ".claude", ".credentials.json")],
+        codex: [path.join(home, ".codex", "auth.json")],
+        gemini: [path.join(home, ".gemini", "oauth_creds.json"), path.join(home, ".gemini", "google_accounts.json")],
+      };
+      const has = (p) => { try { return fs.existsSync(p); } catch { return false; } };
       for (const [kind, bin] of Object.entries(RUNTIME_BIN)) {
-        const p = which(bin);
-        ui.info(`  ${kind.padEnd(12)} ${p ? "설치됨" : "미설치"}`);
+        const installed = !!which(bin);
+        const authed = (authFiles[kind] || []).some(has);
+        ui.info(`  ${kind.padEnd(12)} ${!installed ? "미설치" : authed ? "설치됨 · 로그인" : "설치됨 · 로그인 미확인"}`);
       }
+      // BYOK 키 (keytar) + 클라우드 세션
+      const byok = [];
+      for (const b of ["anthropic", "openai", "google", "upstage"]) {
+        try { if (await apiKey(b)) byok.push(b); } catch { /* keytar 미사용 */ }
+      }
+      ui.info("BYOK 키: " + (byok.length ? byok.join(", ") : "(없음 — 앱 설정 → BYOK)"));
+      let cloud = false;
+      try { cloud = !!(await cloudSessionCookieCli()); } catch { /* ignore */ }
+      ui.info("클라우드 세션: " + (cloud ? "로그인됨" : "로그아웃"));
     },
   };
 }

@@ -76,6 +76,8 @@ class Ui {
     this._spinTimer = null;
     this._spinText = "";
     this._spinFrame = 0;
+    this._spinStart = 0;
+    this._turnStart = null; // set by beginTurn() so the spinner shows total-turn elapsed
     this._streaming = false;
     this._atLineStart = true;
     this._lastUsage = null; // last per-turn usage (for session /cost ledger)
@@ -115,15 +117,28 @@ class Ui {
     }
     this._spinText = text || "";
     if (this._spinTimer) return;
+    this._spinStart = Date.now();
     const tick = () => {
       const frame = SPINNER_FRAMES[this._spinFrame % SPINNER_FRAMES.length];
       this._spinFrame++;
-      this.out.write("\r\x1b[2K" + this.c.emerald(frame) + " " + this.c.dim(this._spinText));
+      const start = this._turnStart || this._spinStart;
+      const secs = Math.floor((Date.now() - start) / 1000);
+      // Claude Code 스타일 라이브 메타: 경과초 + 중단 힌트 (1초 이상부터)
+      const meta = secs >= 1 ? this.c.faint(`  (${secs}s · ${this.t ? this.t("spinnerStop") : "ctrl-c to stop"})`) : "";
+      this.out.write("\r\x1b[2K" + this.c.emerald(frame) + " " + this.c.dim(this._spinText) + meta);
       this._atLineStart = false;
     };
     tick();
-    this._spinTimer = setInterval(tick, 90);
+    this._spinTimer = setInterval(tick, 120);
     if (this._spinTimer.unref) this._spinTimer.unref();
+  }
+
+  // 턴 시작/끝 — 스피너가 (툴 사이에 멈췄다 다시 떠도) 총 턴 경과시간을 보여주도록.
+  beginTurn() {
+    this._turnStart = Date.now();
+  }
+  endTurn() {
+    this._turnStart = null;
   }
   updateSpinner(text) {
     this._spinText = text || "";

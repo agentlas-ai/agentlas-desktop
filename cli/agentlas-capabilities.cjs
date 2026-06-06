@@ -43,9 +43,13 @@ const IMAGE_HINTS = [
   /thumbnail/i, /썸네일/, /banner/i, /배너/, /poster/i, /포스터/, /visual/i, /비주얼/, /illustrat/i, /일러스트/,
   /로고/, /\blogo\b/i, /사진/, /photo/i, /nano-?banana/i, /imagen/i, /이미지\s*생성/, /그래픽/, /graphic/i,
 ];
+// 빌더/메타/조율/거버넌스 역할은 (이미지 에이전트를 *만들* 수는 있어도) 스스로 이미지를 생산하지 않는다.
+// 이런 역할이 system_prompt에 "이미지/디자인"을 언급한다는 이유로 gemini로 끌려가면 코드/빌드 품질이 떨어진다.
+const NON_IMAGE_ROLES = new Set(["meta", "builder", "orchestrator", "pm", "curator", "governance"]);
 function needsImage(agent) {
   if (!agent) return false;
-  const hay = `${agent.name || ""} ${agent.name_en || ""} ${agent.tagline || ""} ${agent.tagline_en || ""} ${agent.role || ""} ${agent.system_prompt || ""}`;
+  if (NON_IMAGE_ROLES.has(String(agent.role || "").toLowerCase())) return false;
+  const hay = `${agent.name || ""} ${agent.name_en || ""} ${agent.tagline || ""} ${agent.tagline_en || ""} ${agent.system_prompt || ""}`;
   return IMAGE_HINTS.some((re) => re.test(hay));
 }
 
