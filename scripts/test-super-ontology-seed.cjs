@@ -23,6 +23,7 @@ const {
   SUPER_ONTOLOGY_ENTITY_IDENTITY_RESOLUTION_FILE,
   SUPER_ONTOLOGY_TEMPORAL_STATE_TRANSITION_FILE,
   SUPER_ONTOLOGY_CAPABILITY_DELEGATION_AUTHORITY_FILE,
+  SUPER_ONTOLOGY_PRIVACY_CONFIDENTIALITY_BOUNDARY_FILE,
   SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
@@ -87,6 +88,10 @@ try {
     memoryDir,
     SUPER_ONTOLOGY_CAPABILITY_DELEGATION_AUTHORITY_FILE,
   );
+  const privacyConfidentialityBoundaryPath = path.join(
+    memoryDir,
+    SUPER_ONTOLOGY_PRIVACY_CONFIDENTIALITY_BOUNDARY_FILE,
+  );
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(openWorldCoveragePath), "super ontology open-world coverage should be seeded");
@@ -130,6 +135,10 @@ try {
   assert.ok(
     fs.existsSync(capabilityDelegationAuthorityPath),
     "super ontology capability delegation authority should be seeded",
+  );
+  assert.ok(
+    fs.existsSync(privacyConfidentialityBoundaryPath),
+    "super ontology privacy confidentiality boundary should be seeded",
   );
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
@@ -208,6 +217,12 @@ try {
   assert.equal(contract.promotionPolicy.capabilityAttenuationRequired, true);
   assert.equal(contract.promotionPolicy.purposeBoundCapabilityRequired, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.privacyConfidentialityBoundaryRequired, true);
+  assert.equal(contract.promotionPolicy.unclassifiedPrivateRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.privacyBoundaryReviewRequired, true);
+  assert.equal(contract.promotionPolicy.publicTrainingDisclosureFlagRequired, true);
+  assert.equal(contract.promotionPolicy.deletionAndRetentionStateRequired, true);
+  assert.equal(contract.promotionPolicy.crossTenantPrivacyBleedBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
   assert.ok(contract.layers.includes("memory_curator_bridge"), "contract should include memory curator bridge gate");
@@ -279,6 +294,10 @@ try {
   assert.ok(
     contract.layers.includes("capability_delegation_authority_contract"),
     "contract should include capability delegation authority gate",
+  );
+  assert.ok(
+    contract.layers.includes("privacy_confidentiality_boundary_contract"),
+    "contract should include privacy confidentiality boundary gate",
   );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(
@@ -352,6 +371,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.capabilityDelegationAuthority,
     `.agentlas/${SUPER_ONTOLOGY_CAPABILITY_DELEGATION_AUTHORITY_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.privacyConfidentialityBoundary,
+    `.agentlas/${SUPER_ONTOLOGY_PRIVACY_CONFIDENTIALITY_BOUNDARY_FILE}`,
   );
   const openWorldCoverage = JSON.parse(fs.readFileSync(openWorldCoveragePath, "utf8"));
   assert.equal(openWorldCoverage.kind, "agentlas-super-ontology-open-world-coverage");
@@ -1090,6 +1113,54 @@ try {
       capabilityDelegationAuthority.researchBasis.includes("zanzibar") &&
       capabilityDelegationAuthority.researchBasis.includes("macaroons"),
     "capability delegation authority should retain zero-trust, ABAC, Zanzibar, and Macaroons research anchors",
+  );
+  const privacyConfidentialityBoundary = JSON.parse(
+    fs.readFileSync(privacyConfidentialityBoundaryPath, "utf8"),
+  );
+  assert.equal(
+    privacyConfidentialityBoundary.kind,
+    "agentlas-super-ontology-privacy-confidentiality-boundary",
+  );
+  assert.equal(privacyConfidentialityBoundary.runtimePromotionAllowed, false);
+  assert.equal(
+    privacyConfidentialityBoundary.defaultDecision,
+    "privacy_boundary_evidence_required_before_graph_memory_public_training_tool_route_customer_output_personalization_retrieval_or_analytics_authority",
+  );
+  assert.ok(
+    privacyConfidentialityBoundary.dataClassifications.includes("regulated_pii") &&
+      privacyConfidentialityBoundary.dataClassifications.includes("sensitive_pii") &&
+      privacyConfidentialityBoundary.dataClassifications.includes("credentials_or_secret") &&
+      privacyConfidentialityBoundary.dataClassifications.includes("legal_privileged"),
+    "privacy confidentiality boundary should classify regulated, sensitive, secret, and privileged data",
+  );
+  assert.ok(
+    privacyConfidentialityBoundary.boundarySurfaces.includes("graph_authority") &&
+      privacyConfidentialityBoundary.boundarySurfaces.includes("memory_authority") &&
+      privacyConfidentialityBoundary.boundarySurfaces.includes("training_authority") &&
+      privacyConfidentialityBoundary.boundarySurfaces.includes("retrieval_authority"),
+    "privacy confidentiality boundary should cover graph, memory, training, and retrieval authority surfaces",
+  );
+  assert.ok(
+    privacyConfidentialityBoundary.requiredPrivacyEvidence.includes("data_classification") &&
+      privacyConfidentialityBoundary.requiredPrivacyEvidence.includes("legal_basis_or_owner_approval") &&
+      privacyConfidentialityBoundary.requiredPrivacyEvidence.includes("retention_policy") &&
+      privacyConfidentialityBoundary.requiredPrivacyEvidence.includes("training_allowed_flag") &&
+      privacyConfidentialityBoundary.requiredPrivacyEvidence.includes("vector_index_policy"),
+    "privacy confidentiality boundary should require classification, basis, retention, training, and vector-index evidence",
+  );
+  assert.ok(
+    privacyConfidentialityBoundary.hardStops.includes("pii_as_normal_fact") &&
+      privacyConfidentialityBoundary.hardStops.includes("secret_as_graph_label") &&
+      privacyConfidentialityBoundary.hardStops.includes("public_export_without_redaction") &&
+      privacyConfidentialityBoundary.hardStops.includes("cross_tenant_context_bleed"),
+    "privacy confidentiality boundary should block PII, secret, public-export, and cross-tenant shortcuts",
+  );
+  assert.ok(
+    privacyConfidentialityBoundary.researchBasis.includes("nist_privacy_framework") &&
+      privacyConfidentialityBoundary.researchBasis.includes("gdpr_principles") &&
+      privacyConfidentialityBoundary.researchBasis.includes("contextual_integrity") &&
+      privacyConfidentialityBoundary.researchBasis.includes("data_minimization"),
+    "privacy confidentiality boundary should retain NIST, GDPR, contextual-integrity, and minimization anchors",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");
