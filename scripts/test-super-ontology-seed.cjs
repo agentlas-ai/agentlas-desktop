@@ -24,6 +24,7 @@ const {
   SUPER_ONTOLOGY_TEMPORAL_STATE_TRANSITION_FILE,
   SUPER_ONTOLOGY_CAPABILITY_DELEGATION_AUTHORITY_FILE,
   SUPER_ONTOLOGY_PRIVACY_CONFIDENTIALITY_BOUNDARY_FILE,
+  SUPER_ONTOLOGY_STRATEGIC_INCENTIVE_COMPATIBILITY_FILE,
   SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
@@ -92,6 +93,10 @@ try {
     memoryDir,
     SUPER_ONTOLOGY_PRIVACY_CONFIDENTIALITY_BOUNDARY_FILE,
   );
+  const strategicIncentiveCompatibilityPath = path.join(
+    memoryDir,
+    SUPER_ONTOLOGY_STRATEGIC_INCENTIVE_COMPATIBILITY_FILE,
+  );
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(openWorldCoveragePath), "super ontology open-world coverage should be seeded");
@@ -139,6 +144,10 @@ try {
   assert.ok(
     fs.existsSync(privacyConfidentialityBoundaryPath),
     "super ontology privacy confidentiality boundary should be seeded",
+  );
+  assert.ok(
+    fs.existsSync(strategicIncentiveCompatibilityPath),
+    "super ontology strategic incentive compatibility should be seeded",
   );
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
@@ -223,6 +232,12 @@ try {
   assert.equal(contract.promotionPolicy.publicTrainingDisclosureFlagRequired, true);
   assert.equal(contract.promotionPolicy.deletionAndRetentionStateRequired, true);
   assert.equal(contract.promotionPolicy.crossTenantPrivacyBleedBlocked, true);
+  assert.equal(contract.promotionPolicy.strategicIncentiveCompatibilityRequired, true);
+  assert.equal(contract.promotionPolicy.incentiveConflictRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.mechanismReviewRequired, true);
+  assert.equal(contract.promotionPolicy.independentVerificationRequired, true);
+  assert.equal(contract.promotionPolicy.collusionCheckRequired, true);
+  assert.equal(contract.promotionPolicy.mechanismRedesignRequired, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
   assert.ok(contract.layers.includes("memory_curator_bridge"), "contract should include memory curator bridge gate");
@@ -298,6 +313,10 @@ try {
   assert.ok(
     contract.layers.includes("privacy_confidentiality_boundary_contract"),
     "contract should include privacy confidentiality boundary gate",
+  );
+  assert.ok(
+    contract.layers.includes("strategic_incentive_compatibility_contract"),
+    "contract should include strategic incentive compatibility gate",
   );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(
@@ -375,6 +394,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.privacyConfidentialityBoundary,
     `.agentlas/${SUPER_ONTOLOGY_PRIVACY_CONFIDENTIALITY_BOUNDARY_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.strategicIncentiveCompatibility,
+    `.agentlas/${SUPER_ONTOLOGY_STRATEGIC_INCENTIVE_COMPATIBILITY_FILE}`,
   );
   const openWorldCoverage = JSON.parse(fs.readFileSync(openWorldCoveragePath, "utf8"));
   assert.equal(openWorldCoverage.kind, "agentlas-super-ontology-open-world-coverage");
@@ -1161,6 +1184,47 @@ try {
       privacyConfidentialityBoundary.researchBasis.includes("contextual_integrity") &&
       privacyConfidentialityBoundary.researchBasis.includes("data_minimization"),
     "privacy confidentiality boundary should retain NIST, GDPR, contextual-integrity, and minimization anchors",
+  );
+  const strategicIncentiveCompatibility = JSON.parse(
+    fs.readFileSync(strategicIncentiveCompatibilityPath, "utf8"),
+  );
+  assert.equal(
+    strategicIncentiveCompatibility.kind,
+    "agentlas-super-ontology-strategic-incentive-compatibility",
+  );
+  assert.equal(strategicIncentiveCompatibility.runtimePromotionAllowed, false);
+  assert.equal(
+    strategicIncentiveCompatibility.defaultDecision,
+    "incentive_evidence_required_before_graph_memory_public_training_tool_route_release_financial_hiring_policy_customer_output_analytics_evaluation_or_personalization_authority",
+  );
+  assert.ok(
+    strategicIncentiveCompatibility.incentiveSignalTypes.includes("kpi_bonus") &&
+      strategicIncentiveCompatibility.incentiveSignalTypes.includes("commission") &&
+      strategicIncentiveCompatibility.incentiveSignalTypes.includes("benchmark_score") &&
+      strategicIncentiveCompatibility.incentiveSignalTypes.includes("family_pressure"),
+    "strategic incentive compatibility should include KPI, commission, benchmark, and family-pressure signals",
+  );
+  assert.ok(
+    strategicIncentiveCompatibility.authoritySurfaces.includes("memory_authority") &&
+      strategicIncentiveCompatibility.authoritySurfaces.includes("release_authority") &&
+      strategicIncentiveCompatibility.authoritySurfaces.includes("financial_authority") &&
+      strategicIncentiveCompatibility.authoritySurfaces.includes("evaluation_authority"),
+    "strategic incentive compatibility should cover memory, release, financial, and evaluation surfaces",
+  );
+  assert.ok(
+    strategicIncentiveCompatibility.requiredIncentiveEvidence.includes("payoff_or_reward_model") &&
+      strategicIncentiveCompatibility.requiredIncentiveEvidence.includes("conflict_of_interest_disclosure") &&
+      strategicIncentiveCompatibility.requiredIncentiveEvidence.includes("counterfactual_truthfulness_check") &&
+      strategicIncentiveCompatibility.requiredIncentiveEvidence.includes("independent_verification") &&
+      strategicIncentiveCompatibility.requiredIncentiveEvidence.includes("collusion_check"),
+    "strategic incentive compatibility should require payoff, conflict, truthfulness, independent verification, and collusion evidence",
+  );
+  assert.ok(
+    strategicIncentiveCompatibility.hardStops.includes("self_report_as_truth") &&
+      strategicIncentiveCompatibility.hardStops.includes("kpi_as_objective") &&
+      strategicIncentiveCompatibility.hardStops.includes("agent_vote_as_independent_signal") &&
+      strategicIncentiveCompatibility.hardStops.includes("collusive_agents_as_quorum"),
+    "strategic incentive compatibility should block self-report, KPI, agent-vote, and collusive-quorum shortcuts",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");
