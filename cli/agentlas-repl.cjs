@@ -31,8 +31,8 @@ function normalizeLang(value) {
 function terminalLang(prefs, opts) {
   const explicit = normalizeLang((opts && opts.lang) || process.env.AGENTLAS_TERMINAL_LANG || process.env.AGENTLAS_LANG);
   if (explicit) return explicit;
-  if (process.env.AGENTLAS_RESPECT_SAVED_LANG === "1") return normalizeLang(prefs && prefs.lang) || "en";
-  return "en";
+  // 온보딩에서 고른 언어(cli-prefs.json lang)를 기본 존중. 없으면 en.
+  return normalizeLang(prefs && prefs.lang) || "en";
 }
 
 // Hides the trailing "## Memory Events" block from the live stream while keeping the full
@@ -92,21 +92,45 @@ function makeMemoryGuard(ui, heading) {
   };
 }
 
+// 스트리밍 마크다운 렌더(Claude Code 스타일): 줄 단위로 모아 ui.renderInline 으로
+// **bold**/#heading/`code`/불릿/코드펜스를 ANSI로 렌더한다(예전엔 마크다운을 제거했음).
 function makeStyleGuard(ui) {
-  const sanitizer = style.createStreamingSanitizer();
+  let buf = "";
+  let inCode = false;
+  const emit = (line) => {
+    if (/^\s*```/.test(line)) {
+      inCode = !inCode;
+      ui.write((ui.enabled ? ui.c.faint(line) : line) + "\n");
+      return;
+    }
+    if (inCode) {
+      ui.write((ui.enabled ? ui.c.dim(line) : line) + "\n");
+      return;
+    }
+    ui.write((ui.enabled ? ui.renderInline(line) : line) + "\n");
+  };
   return {
     c: ui.c,
     streamStart: () => {
-      sanitizer.reset();
+      buf = "";
+      inCode = false;
       ui.streamStart();
     },
     streamDelta: (text) => {
-      const cleaned = sanitizer.push(text);
-      if (cleaned) ui.streamDelta(cleaned);
+      if (!text) return;
+      ui.stopSpinner();
+      buf += text;
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        emit(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+      }
     },
     streamEnd: () => {
-      const cleaned = sanitizer.flush();
-      if (cleaned) ui.streamDelta(cleaned);
+      if (buf.length) {
+        emit(buf);
+        buf = "";
+      }
       ui.streamEnd();
     },
     tool: (...a) => ui.tool(...a),
@@ -139,6 +163,7 @@ function startRepl(opts) {
     native: {}, // kind → { id }
     projectPath: opts.projectPath || null,
     routePreambleOnce: null,
+    effort: prefs.effort || null, // /effort: low|medium|high|max → 런타임별 reasoning 강도
     cost: {}, // runtimeLabel → { turns, in, out, cost, ms } — session usage ledger
   };
 
@@ -202,9 +227,30 @@ function startRepl(opts) {
     }
   }
 
+  // /resume 용 세션 영속화 — 네이티브 런타임 세션ID + 에이전트/런타임/cwd/제목을 파일에 저장.
+  function persistSession(kind, sessionId, titlePrompt) {
+    if (!H.sessionsSave || !H.sessionsLoad || !sessionId || !state.subject) return;
+    try {
+      const list = H.sessionsLoad().filter((s) => !(s.agentSlug === state.subject.slug && s.kind === kind));
+      list.unshift({
+        ts: Date.now(),
+        agentSlug: state.subject.slug,
+        agentLabel: state.subject.label,
+        kind,
+        sessionId,
+        cwd: state.cwd,
+        title: String(titlePrompt || "").replace(/\s+/g, " ").trim().slice(0, 60),
+      });
+      H.sessionsSave(list);
+    } catch {
+      /* ignore */
+    }
+  }
+
   // ── run one turn ──
   async function runTurn(prompt, runOptions = {}) {
     busy = true;
+    ui.beginTurn(); // 라이브 경과시간 스피너의 턴 시작점
     currentAbort = new AbortController();
     const signal = currentAbort.signal;
     const recordHistoryEntry = !runOptions.side;
@@ -236,6 +282,12 @@ function startRepl(opts) {
           cwd: state.cwd,
           permission: state.permission,
           session,
+          model: rt.model || null, // /model (claude --model, codex -m, gemini -m)
+          effort: state.effort || null, // /effort (codex reasoning effort, claude think-keyword)
+          mcpServers:
+            (state.permission === "write" || state.permission === "full") && H.mcpServers
+              ? H.mcpServers(db).filter((s) => s.enabled && s.transport === "stdio")
+              : [],
           env: runEnv,
           ui: assistantUi,
           signal,
@@ -243,6 +295,7 @@ function startRepl(opts) {
         const at = (res.text || "").trim();
         if (recordHistoryEntry && at && !res.error) state.history.push({ role: "user", text: prompt }, { role: "assistant", text: at });
         recordCost(costLabel, res.usage);
+        if (!runOptions.side && session.id && !res.error) persistSession(rt.kind, session.id, prompt);
       } else {
         const subjectSystem = state.routePreambleOnce
           ? `${state.routePreambleOnce}\n\n${state.subject.system}`
@@ -287,6 +340,7 @@ function startRepl(opts) {
       }
     } finally {
       busy = false;
+      ui.endTurn();
       currentAbort = null;
     }
   }
@@ -301,6 +355,7 @@ function startRepl(opts) {
       const bin = H.which(H.RUNTIME_BIN[a]);
       if (!bin) return ui.error(ui.t("runtimeNotInstalled", a));
       state.runtime = { mode: "cli", kind: a };
+      baseRuntime = state.runtime; // 명시적 /runtime 은 세션 기본으로 고정 (이후 auto-route가 덮어쓰지 않게)
       state.native = {};
       return ui.ok(ui.t("runtimeSet", a));
     }
@@ -309,6 +364,7 @@ function startRepl(opts) {
         a === "ollama"
           ? { mode: "api", backend: "ollama", model: state.runtime.backend === "ollama" ? state.runtime.model : null }
           : { mode: "api", backend: a, model: null };
+      baseRuntime = state.runtime; // 명시적 /runtime 은 세션 기본으로 고정
       return ui.ok(ui.t("runtimeSet", runtimeLabel(state.runtime)));
     }
     ui.warn(ui.t("runtimeUsage"));
@@ -618,10 +674,25 @@ function startRepl(opts) {
         setRuntime(arg);
         return true;
       case "model":
-        if (state.runtime.mode !== "api") return ui.warn(ui.t("modelOnlyApi")), true;
+        // CLI(claude/codex/gemini)와 BYOK/Ollama 모두 지원 — 각 런타임의 모델 플래그로 전달.
         state.runtime.model = arg || null;
+        state.native = {}; // 새 모델로 세션 리셋
         ui.ok(ui.t("modelSet", state.runtime.model || ui.t("modelDefault")));
         return true;
+      case "effort": {
+        const lv = (arg || "").toLowerCase().trim();
+        if (!lv) {
+          ui.info(ui.t("effortCurrent", state.effort || ui.t("modelDefault")));
+          return true;
+        }
+        if (!["low", "medium", "high", "max", "auto", "off"].includes(lv)) {
+          return ui.warn(ui.t("effortUsage")), true;
+        }
+        state.effort = lv === "auto" || lv === "off" ? null : lv;
+        state.native = {};
+        ui.ok(ui.t("effortSet", state.effort || ui.t("modelDefault")));
+        return true;
+      }
       case "permission":
       case "perm": {
         const p = (arg || "").toLowerCase();
@@ -701,8 +772,93 @@ function startRepl(opts) {
           ui.error((e && e.message) || String(e));
         }
         return true;
+      case "install": {
+        if (!arg) return ui.warn(ui.t("installUsage")), true;
+        if (!H.cloudInstall) return ui.warn("install unavailable"), true;
+        ui.status(ui.t("installing", arg.trim()));
+        try {
+          const agent = await H.cloudInstall(db, arg.trim());
+          ui.ok(ui.t("cloudInstalled", agent.name || agent.slug));
+          if (agent.localPath) ui.info(agent.localPath);
+        } catch (e) {
+          ui.stopSpinner();
+          ui.error((e && e.message) || String(e));
+        }
+        return true;
+      }
+      case "marketplace":
+      case "market": {
+        ui.line("");
+        ui.rule(ui.t("market.title"));
+        ui.line("  " + ui.c.dim(ui.t("market.help")));
+        ui.line("  " + ui.c.emerald("/install <slug>".padEnd(18)) + ui.c.dim(ui.t("market.installHint")));
+        ui.line("  " + ui.c.emerald("/import <path>".padEnd(18)) + ui.c.dim(ui.t("market.importHint")));
+        const logged = H.hasCloudSession ? await H.hasCloudSession() : false;
+        ui.line("  " + ui.c.faint(ui.t(logged ? "market.loggedIn" : "market.loggedOut")));
+        return true;
+      }
+      case "mcp": {
+        const servers = H.mcpServers ? H.mcpServers(db) : [];
+        ui.line("");
+        ui.rule("MCP");
+        if (!servers.length) {
+          ui.info(ui.t("mcp.none"));
+          return true;
+        }
+        for (const s of servers) {
+          let envKeys = [];
+          try { envKeys = JSON.parse(s.env_keys_json || "[]"); } catch { /* ignore */ }
+          const name = ui.lang === "en" ? (s.name_en || s.name) : s.name;
+          const on = s.enabled ? ui.c.green("on ") : ui.c.faint("off");
+          const envStr = envKeys.length ? envKeys.join(", ") : "no key";
+          ui.line("   " + ui.c.emerald(String(name).padEnd(22)) + ui.c.blue(String(s.transport || "").padEnd(7)) + on + ui.c.dim("  " + envStr));
+        }
+        const wired = servers.filter((s) => s.enabled && s.transport === "stdio").length + 1; // +1 = playwright(항상)
+        ui.line("   " + ui.c.faint(ui.t("mcp.wired", String(wired))));
+        ui.line("   " + ui.c.faint(ui.t("mcp.usage")));
+        return true;
+      }
+      case "resume": {
+        const list = H.sessionsLoad ? H.sessionsLoad() : [];
+        if (!arg) {
+          ui.line("");
+          ui.rule(ui.t("resume.title"));
+          if (!list.length) {
+            ui.info(ui.t("resume.none"));
+            return true;
+          }
+          list.slice(0, 10).forEach((s, i) =>
+            ui.line(
+              "   " + ui.c.faint(String(i + 1).padStart(2)) + "  " +
+                ui.c.emerald(String(s.agentLabel || s.agentSlug || "?").padEnd(20)) +
+                ui.c.blue(String(s.kind || "").padEnd(12)) + ui.c.dim(s.title || ""),
+            ),
+          );
+          ui.line("   " + ui.c.faint(ui.t("resume.usage")));
+          return true;
+        }
+        const n = parseInt(arg, 10);
+        const s = n >= 1 && n <= list.length ? list[n - 1] : null;
+        if (!s) return ui.warn(ui.t("resume.noNum")), true;
+        const agent = H.resolveAgent(db, s.agentSlug);
+        if (!agent) return ui.error(ui.t("noAgent", s.agentSlug)), true;
+        setSubjectAgent(agent);
+        if (s.kind && H.RUNTIME_BIN[s.kind] && H.which(H.RUNTIME_BIN[s.kind])) {
+          state.runtime = { mode: "cli", kind: s.kind };
+          baseRuntime = state.runtime;
+        }
+        state.native = { [s.kind]: { id: s.sessionId } };
+        try {
+          const fs2 = require("node:fs");
+          if (s.cwd && fs2.existsSync(s.cwd)) state.cwd = s.cwd;
+        } catch {
+          /* ignore */
+        }
+        ui.ok(ui.t("resume.ok", s.agentLabel || s.agentSlug || "?"));
+        return true;
+      }
       case "doctor":
-        H.doctor(db, ui);
+        await H.doctor(db, ui);
         return true;
       case "status":
         banner.renderStatus({ ui, runtimeLabel: runtimeLabel(state.runtime), subjectLabel: state.subject && state.subject.label, permission: state.permission, cwd: state.cwd });
@@ -771,30 +927,33 @@ function startRepl(opts) {
     routingNote(state.subject);
     ask();
   }
-  function pick() {
+  // skipRoster=true → 명령/오입력 뒤 재호출 시 전체 로스터를 다시 그리지 않는다(노이즈 제거; Claude Code처럼 조용히).
+  function pick(skipRoster) {
     if (closed) return process.exit(0);
     if (slashPalette.setEnabled) slashPalette.setEnabled(false);
-    printRoster();
+    if (!skipRoster) printRoster();
     rl.question("\n   " + ui.c.emerald(ui.t("picker.prompt")), async (line) => {
       const t = (line || "").trim();
-      if (!t) return pick();
+      if (!t) return pick(true);
       if (t.startsWith("/") && !input.isAbsolutePathTask(t)) {
         const handled = await handleSlash(t);
         if (handled === false) return;
-        return pick();
+        // /agent·/firm·/resume 처럼 대화 대상을 정한 명령이면 픽커를 빠져나가 대화 루프로 전환한다.
+        if (state.subject) return ask();
+        return pick(true);
       }
       const ags = H.listAgents(db);
       if (/^\d+$/.test(t)) {
         const n = parseInt(t, 10);
         if (n >= 1 && n <= ags.length) return chooseAndStart(setSubjectAgent, ags[n - 1]);
         ui.warn(ui.t("picker.noNum"));
-        return pick();
+        return pick(true);
       }
       if (/^firm\s+/i.test(t)) {
         const f = H.resolveFirm(db, t.replace(/^firm\s+/i, "").trim());
         if (f) return chooseAndStart(setSubjectFirm, f);
         ui.warn(ui.t("picker.noFirm"));
-        return pick();
+        return pick(true);
       }
       const a = H.resolveAgent(db, t);
       if (a) return chooseAndStart(setSubjectAgent, a);
@@ -812,7 +971,7 @@ function startRepl(opts) {
         }
       }
       ui.warn(ui.t("picker.noMatch", t));
-      return pick();
+      return pick(true);
     });
   }
 
@@ -896,6 +1055,7 @@ function printHelp(ui) {
     ["/firms · /firm <name>", ui.t("help.firms")],
     ["/runtime <kind>", ui.t("help.runtime")],
     ["/model <id>", ui.t("help.model")],
+    ["/effort <lvl>", ui.t("help.effort")],
     ["/permission <lvl>", ui.t("help.permission")],
     ["/permissions", ui.t("help.permissions")],
     ["/setup", ui.t("help.setup")],
@@ -906,10 +1066,14 @@ function printHelp(ui) {
     ["/status", ui.t("help.status")],
     ["/cost", ui.t("help.cost")],
     ["/multimodal", ui.t("help.multimodal")],
+    ["/mcp", ui.t("help.mcp")],
     ["/diff", ui.t("help.diff")],
     ["/history", ui.t("help.history")],
+    ["/resume [n]", ui.t("help.resume")],
     ["/compact", ui.t("help.compact")],
     ["/import <path>", ui.t("help.import")],
+    ["/marketplace", ui.t("help.market")],
+    ["/install <slug>", ui.t("help.install")],
     ["/clear", ui.t("help.clear")],
     ["/doctor", ui.t("help.doctor")],
     ["/keybindings", ui.t("help.keybindings")],

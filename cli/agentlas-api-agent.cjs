@@ -117,9 +117,12 @@ async function streamAnthropic({ apiKey, model, system, messages, permission, ui
         if (arg) ui.info(ui.c.dim("  " + arg));
       }
       // 텍스트 블록 stop에서는 streamEnd를 호출하지 않는다 — 메모리 가드 중간 flush 방지(턴 끝에서만 flush).
+    } else if (ev.type === "message_start") {
+      const u = ev.message && ev.message.usage;
+      if (u) usage = { input_tokens: u.input_tokens || 0, output_tokens: u.output_tokens || 0 };
     } else if (ev.type === "message_delta") {
       if (ev.delta && ev.delta.stop_reason) stopReason = ev.delta.stop_reason;
-      if (ev.usage) usage = { output_tokens: ev.usage.output_tokens };
+      if (ev.usage) usage = { input_tokens: (usage && usage.input_tokens) || 0, output_tokens: ev.usage.output_tokens };
     }
   }
   ui.streamEnd();
@@ -154,6 +157,7 @@ async function runAnthropicLoop(req) {
   const { ctx, ui } = req;
   const messages = req.messages.slice();
   let finalText = "";
+  let inTok = 0, outTok = 0;
   for (let i = 0; i < MAX_ITERS; i++) {
     if (req.signal && req.signal.aborted) break;
     const r = await streamAnthropic({
@@ -166,6 +170,7 @@ async function runAnthropicLoop(req) {
       signal: req.signal,
     });
     finalText = r.text || finalText;
+    if (r.usage) { inTok += r.usage.input_tokens || 0; outTok += r.usage.output_tokens || 0; }
     if (!r.toolUses.length) break;
     messages.push({ role: "assistant", content: r.assistantContent });
     const results = [];
@@ -176,12 +181,13 @@ async function runAnthropicLoop(req) {
     }
     messages.push({ role: "user", content: results });
   }
+  if (inTok || outTok) ui.cost({ input_tokens: inTok, output_tokens: outTok });
   return { text: finalText };
 }
 
 // ── OpenAI ───────────────────────────────────────────────
 async function streamOpenAI({ apiKey, model, messages, permission, ui, signal, baseUrl }) {
-  const body = { model, stream: true, messages };
+  const body = { model, stream: true, stream_options: { include_usage: true }, messages };
   const toolDefs = tools.openaiTools(permission);
   if (toolDefs.length) body.tools = toolDefs;
 
@@ -201,6 +207,7 @@ async function streamOpenAI({ apiKey, model, messages, permission, ui, signal, b
   let started = false;
   const toolCalls = {}; // index → {id, name, args}
   let finish = null;
+  let usage = null;
   for await (const line of iterSse(resp, idle)) {
     const data = sseData(line);
     if (!data || data === "[DONE]") continue;
@@ -210,6 +217,7 @@ async function streamOpenAI({ apiKey, model, messages, permission, ui, signal, b
     } catch {
       continue;
     }
+    if (ev.usage) usage = { input_tokens: ev.usage.prompt_tokens || 0, output_tokens: ev.usage.completion_tokens || 0 };
     const choice = ev.choices && ev.choices[0];
     if (!choice) continue;
     const delta = choice.delta || {};
@@ -242,7 +250,7 @@ async function streamOpenAI({ apiKey, model, messages, permission, ui, signal, b
     .sort((a, b) => a - b)
     .map((k) => toolCalls[k])
     .filter((c) => c.name);
-  return { text, toolCalls: calls, finish };
+  return { text, toolCalls: calls, finish, usage };
 }
 
 async function runOpenAILoop(req) {
@@ -251,6 +259,7 @@ async function runOpenAILoop(req) {
   // OpenAI는 system을 messages[0]로.
   if (!messages.length || messages[0].role !== "system") messages.unshift({ role: "system", content: req.system });
   let finalText = "";
+  let inTok = 0, outTok = 0;
   for (let i = 0; i < MAX_ITERS; i++) {
     if (req.signal && req.signal.aborted) break;
     const r = await streamOpenAI({
@@ -263,6 +272,7 @@ async function runOpenAILoop(req) {
       baseUrl: req.baseUrl,
     });
     finalText = r.text || finalText;
+    if (r.usage) { inTok += r.usage.input_tokens || 0; outTok += r.usage.output_tokens || 0; }
     if (!r.toolCalls.length) break;
     messages.push({
       role: "assistant",
@@ -283,6 +293,7 @@ async function runOpenAILoop(req) {
       messages.push({ role: "tool", tool_call_id: c.id, content: out.content });
     }
   }
+  if (inTok || outTok) ui.cost({ input_tokens: inTok, output_tokens: outTok });
   return { text: finalText };
 }
 

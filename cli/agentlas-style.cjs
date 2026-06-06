@@ -38,12 +38,10 @@ function responseLanguageDirective(lang) {
 function responseStyleDirective() {
   return [
     "Global Agentlas reply style:",
-    "Use plain text only.",
-    "Do not use Markdown bold markers like **text**.",
-    "Do not use emoji.",
-    "Do not use decorative headings, blockquotes, horizontal rules, or hyphen bullet lines.",
-    "If a list is useful, use short numbered lines: 1. 2. 3.",
-    "Keep the first sentence concrete and action-oriented.",
+    "Use normal Markdown when it aids clarity — **bold** for emphasis, `code`/code blocks for code,",
+    "paths, and commands, and # headings, - bullets, or 1. numbered lists for structure.",
+    "Keep replies concise; make the first sentence concrete and action-oriented.",
+    "Do not expose hidden chain-of-thought — give the result and a short rationale.",
   ].join("\n");
 }
 
