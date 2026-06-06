@@ -145,7 +145,7 @@ class Ui {
   agentHeader(name) {
     this.ensureNl();
     this.line("");
-    this.line(this.c.paw("🐾 ") + this.c.bold(this.c.text(name)));
+    this.line(this.c.paw("> ") + this.c.bold(this.c.text(name)));
   }
 
   // ── 스트리밍 텍스트 ──

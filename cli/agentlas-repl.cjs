@@ -14,6 +14,8 @@ const { runNativeTurn } = require("./agentlas-native-host.cjs");
 const { runApiTurn } = require("./agentlas-api-agent.cjs");
 const caps = require("./agentlas-capabilities.cjs");
 const input = require("./agentlas-input.cjs");
+const i18n = require("./agentlas-i18n.cjs");
+const style = require("./agentlas-style.cjs");
 
 function runtimeLabel(rt) {
   if (!rt) return "(none)";
@@ -90,6 +92,36 @@ function makeMemoryGuard(ui, heading) {
   };
 }
 
+function makeStyleGuard(ui) {
+  const sanitizer = style.createStreamingSanitizer();
+  return {
+    c: ui.c,
+    streamStart: () => {
+      sanitizer.reset();
+      ui.streamStart();
+    },
+    streamDelta: (text) => {
+      const cleaned = sanitizer.push(text);
+      if (cleaned) ui.streamDelta(cleaned);
+    },
+    streamEnd: () => {
+      const cleaned = sanitizer.flush();
+      if (cleaned) ui.streamDelta(cleaned);
+      ui.streamEnd();
+    },
+    tool: (...a) => ui.tool(...a),
+    toolResult: (...a) => ui.toolResult(...a),
+    info: (...a) => ui.info(...a),
+    warn: (...a) => ui.warn(...a),
+    error: (...a) => ui.error(...a),
+    status: (...a) => ui.status(...a),
+    ok: (...a) => ui.ok(...a),
+    cost: (...a) => ui.cost(...a),
+    line: (...a) => ui.line(...a),
+    stopSpinner: (...a) => ui.stopSpinner(...a),
+  };
+}
+
 // startRepl({ db, subject|null, runtime, permission, cwd, helpers, prefs, savePrefs })
 function startRepl(opts) {
   const { db } = opts;
@@ -128,6 +160,7 @@ function startRepl(opts) {
   });
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: !!process.stdin.isTTY, completer, historySize: input.HISTORY_MAX });
   input.attachHistory(rl);
+  const slashPalette = input.attachSlashPalette(rl, { ui });
   let busy = false;
   let closed = false;
   let currentAbort = null;
@@ -168,12 +201,17 @@ function startRepl(opts) {
     busy = true;
     currentAbort = new AbortController();
     const signal = currentAbort.signal;
-    const ctx = ctxNow();
+    const targetLang = H.detectResponseLanguage ? H.detectResponseLanguage(prompt, ui.lang) : ui.lang;
+    const ctx = { ...ctxNow(), lang: targetLang, uiLang: ui.lang };
     const rt = state.runtime;
     const costLabel = runtimeLabel(rt);
     const runEnv = H.buildChildEnv ? await H.buildChildEnv(db, { ...ctx, cwd: state.cwd }) : process.env;
     Object.assign(process.env, runEnv);
     ui._lastUsage = null;
+    const assistantUi = makeStyleGuard(ui);
+    const thinkingText = i18n.t(targetLang, "thinkingWith", costLabel);
+    ui.info(thinkingText);
+    ui.status(thinkingText);
     try {
       if (rt.mode === "cli") {
         const bin = H.which(H.RUNTIME_BIN[rt.kind]) || H.RUNTIME_BIN[rt.kind];
@@ -192,7 +230,7 @@ function startRepl(opts) {
           permission: state.permission,
           session,
           env: runEnv,
-          ui,
+          ui: assistantUi,
           signal,
         });
         const at = (res.text || "").trim();
@@ -216,7 +254,7 @@ function startRepl(opts) {
           .filter((h) => h.text && h.text.trim())
           .map((h) => ({ role: h.role, content: h.text }))
           .concat([{ role: "user", content: prompt }]);
-        const guard = makeMemoryGuard(ui, H.eventsHeading());
+        const guard = makeMemoryGuard(assistantUi, H.eventsHeading());
         const res = await runApiTurn({
           backend: rt.backend,
           model: rt.model || H.defaultApiModel(rt.backend),
@@ -355,7 +393,7 @@ function startRepl(opts) {
     ui.line(ui.c.dim("  " + ui.t("picker.agents")));
     ags.forEach((a, i) => {
       const spec = resolvedSpec(a, a.slug);
-      const bdg = caps.needsImage(a) ? (caps.capsFor(spec).image ? "🖼" : "🖼⚠") : "";
+      const bdg = caps.needsImage(a) ? (caps.capsFor(spec).image ? "[image]" : "[image missing]") : "";
       ui.line(
         "   " + ui.c.faint(String(i + 1).padStart(2)) + "  " + ui.c.emerald(a.slug.padEnd(26)) + " " +
           ui.c.text((displayName(a) || "").padEnd(16)) + " " + ui.c.blue(spec) + (bdg ? " " + bdg : ""),
@@ -378,7 +416,7 @@ function startRepl(opts) {
     for (const a of ags) {
       const pinned = prefs.agentRuntime[a.slug] && prefs.agentRuntime[a.slug] !== "auto";
       const spec = resolvedSpec(a, a.slug);
-      const bdg = caps.needsImage(a) ? (caps.capsFor(spec).image ? "🖼" : "🖼⚠") : "";
+      const bdg = caps.needsImage(a) ? (caps.capsFor(spec).image ? "[image]" : "[image missing]") : "";
       ui.line(
         "   " + ui.c.emerald(a.slug.padEnd(28)) + ui.c.blue((spec + (bdg ? " " + bdg : "")).padEnd(14)) +
           ui.c.faint(pinned ? ui.t("team.pinned") : ui.t("team.auto")),
@@ -426,6 +464,14 @@ function startRepl(opts) {
       ui.line("   " + ui.c.blue(label.padEnd(22)) + ui.c.faint(fmt(e)));
     }
     ui.line("   " + ui.c.emerald(ui.t("cost.total").padEnd(22)) + ui.c.text(fmt({ turns: tTurns, in: tIn, out: tOut, cost: tCost, ms: tMs })));
+  }
+
+  function printSlashSkills() {
+    ui.line("");
+    ui.rule("Skills");
+    for (const entry of input.slashCommandEntries()) {
+      ui.line("  " + ui.c.emerald(entry.command.padEnd(18)) + ui.c.dim(entry.description));
+    }
   }
 
   function compactHistory() {
@@ -504,6 +550,9 @@ function startRepl(opts) {
         return true;
       case "agents":
         printRoster();
+        return true;
+      case "skills":
+        printSlashSkills();
         return true;
       case "team":
         arg ? setTeam(arg) : printTeam();
@@ -720,6 +769,7 @@ function startRepl(opts) {
       const full = (cont ? buffer + "\n" : "") + (line || "");
       const t = full.trim();
       if (!t) return ask();
+      slashPalette.clear();
       if (rl.terminal && rl.history && rl.history[0] !== t) rl.history.unshift(t);
       input.persistHistory(rl);
       if (t.startsWith("!")) {
@@ -780,6 +830,7 @@ function printHelp(ui) {
   ui.line("  " + c.faint("Commands"));
   const rows = [
     [ui.t("help.talkKey"), ui.t("help.talk")],
+    ["/skills", ui.t("help.skills")],
     ["/agents", ui.t("help.agents")],
     ["/team [agent rt]", ui.t("help.team")],
     ["/agent <name>", ui.t("help.agent")],

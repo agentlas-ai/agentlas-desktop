@@ -32,7 +32,7 @@ function shorten(p) {
 function renderMascot(ui) {
   const c = ui.c;
   if (!ui.enabled) {
-    ui.line("  🦖 Agentlas");
+    ui.line("  Agentlas");
     return;
   }
   for (let i = 0; i < DINO_ART.length; i++) {

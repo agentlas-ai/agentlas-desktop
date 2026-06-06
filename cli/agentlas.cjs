@@ -5127,7 +5127,8 @@ function parseMemoryEventsCli(text) {
 }
 function curateCliReply(db, text, ctx) {
   const { events, cleaned } = parseMemoryEventsCli(text);
-  if (!events.length || !tableExists(db, "memory_entries")) return cleaned;
+  const style = require("./agentlas-style.cjs");
+  if (!events.length || !tableExists(db, "memory_entries")) return style.sanitizeAssistantText(cleaned);
   ensureMemoryContextColumn(db);
   const arch = loadArch();
   const { randomUUID } = require("node:crypto");
@@ -5153,14 +5154,11 @@ function curateCliReply(db, text, ctx) {
       logCli(ctx.projectPath, { action: "written", scope, kind, content, request_context: requestContext, at: now });
     } catch { /* ignore */ }
   }
-  return cleaned;
+  return style.sanitizeAssistantText(cleaned);
 }
-// 선택된 인터페이스 언어를 권위적으로 못박는 지시. 입력 언어 미러링을 막아
-// "영어로 설정했는데 한글이 나오는" 문제를 차단한다 (desktop status-i18n.sysGuide와 동일 원칙).
+
 function langDirective(lang) {
-  return lang === "ko"
-    ? "사용자의 인터페이스 언어는 한국어입니다. 사용자가 어떤 언어로 입력하든 항상 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 언어로 답하라고 명시적으로 요청할 때만 그 언어를 쓰세요."
-    : "The user's interface language is English. Always reply in English, regardless of the language the user writes in. Only use another language if the user explicitly asks you to in this message.";
+  return require("./agentlas-style.cjs").responseDirective(lang);
 }
 
 function prefsLang() {
@@ -5174,7 +5172,7 @@ function prefsLang() {
 function augmentSystem(db, baseSystem, ctx, withEmitter) {
   const arch = loadArch();
   let sys = baseSystem || "";
-  // 언어 지시를 맨 앞에 — 하위 CLI(claude/codex/gemini)의 입력-언어 미러링보다 우선하도록.
+  // 언어/말투 지시를 맨 앞에 둔다. imported/cloud/company agents도 같은 전역 계약을 따른다.
   const lang = (ctx && ctx.lang) || prefsLang();
   sys = langDirective(lang) + (sys ? "\n\n" + sys : "");
   const connectionSkill = loadGlobalConnectionSkill();
@@ -5546,6 +5544,8 @@ function buildHelpers(db) {
     RUNTIME_BIN,
     augmentSystem: (db_, base, ctx, emit) => augmentSystem(db_, base, ctx, emit),
     curateCliReply: (db_, text, ctx) => curateCliReply(db_, text, ctx),
+    detectResponseLanguage: (prompt, fallback) => require("./agentlas-style.cjs").detectResponseLanguage(prompt, fallback),
+    sanitizeAssistantText: (text) => require("./agentlas-style.cjs").sanitizeAssistantText(text),
     apiKey: (backend) => apiKey(backend),
     eventsHeading: () => loadArch().eventsHeading,
     defaultApiModel: (backend) => DEFAULT_API_MODEL[backend],

@@ -406,8 +406,12 @@ function runNativeTurn(req) {
     }
 
     if (plainStream) {
-      ui.streamStart();
+      let plainStarted = false;
       lineReader(child.stdout, (l) => {
+        if (!plainStarted) {
+          ui.streamStart();
+          plainStarted = true;
+        }
         ui.streamDelta(l + "\n");
         st.text += l + "\n";
       });
