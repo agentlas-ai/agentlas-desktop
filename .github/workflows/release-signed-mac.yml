@@ -13,11 +13,11 @@ on:
       version:
         description: "Desktop package version to release"
         required: true
-        default: "0.2.18"
+        default: "0.2.19"
       tag:
         description: "GitHub release tag"
         required: true
-        default: "v0.2.18"
+        default: "v0.2.19"
       draft:
         description: "Create or keep the GitHub release as draft"
         required: true

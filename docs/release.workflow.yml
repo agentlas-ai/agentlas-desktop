@@ -1,24 +1,23 @@
-name: Release
+name: Release Signed macOS
 
 # Two ways to trigger:
-#   1. Push a tag matching v*.*.*  → automatic release (version extracted from tag)
-#      e.g. git tag v0.0.3 && git push origin v0.0.3
-#   2. Manual via GitHub UI / `gh workflow run` — supply version/tag explicitly
+#   1. Push a tag matching v*.*.*  -> automatic signed macOS release
+#   2. Manual via GitHub UI / `gh workflow run` with explicit version/tag
 on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-*"   # pre-releases (v0.0.3-beta.1 etc.)
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
   workflow_dispatch:
     inputs:
       version:
         description: "Desktop package version to release"
         required: true
-        default: "0.0.3"
+        default: "0.2.19"
       tag:
         description: "GitHub release tag"
         required: true
-        default: "v0.0.3"
+        default: "v0.2.19"
       draft:
         description: "Create or keep the GitHub release as draft"
         required: true
@@ -36,6 +35,10 @@ on:
           - "false"
           - "true"
 
+permissions:
+  contents: write
+  actions: read
+
 jobs:
   build-notarize-publish:
     runs-on: macos-15
@@ -46,7 +49,7 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      CSC_LINK: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE }}
+      MAC_DEVELOPER_ID_CERTIFICATE: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE }}
       CSC_KEY_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
       GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
       GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
@@ -62,8 +65,6 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
-      # Resolve version/tag/draft/apply_web_env from either tag-push or manual input,
-      # then export them as env so subsequent steps see a single source of truth.
       - name: Resolve release inputs
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -100,7 +101,7 @@ jobs:
           test -n "$APPLE_ID"
           test -n "$APPLE_APP_SPECIFIC_PASSWORD"
           test -n "$APPLE_TEAM_ID"
-          test -n "$CSC_LINK"
+          test -n "$MAC_DEVELOPER_ID_CERTIFICATE"
           test -n "$CSC_KEY_PASSWORD"
           test -n "$GH_TOKEN"
 
@@ -114,6 +115,13 @@ jobs:
             echo "::warning::Railway release env credentials are missing or invalid. macOS release will still publish; apply desktop web env manually after release."
             echo "AGENTLAS_RAILWAY_RELEASE_READY=0" >> "$GITHUB_ENV"
           fi
+
+      - name: Restore mac signing certificate
+        run: |
+          cert_path="$RUNNER_TEMP/agentlas-developer-id.p12"
+          printf '%s' "$MAC_DEVELOPER_ID_CERTIFICATE" | base64 -D > "$cert_path"
+          test -s "$cert_path"
+          echo "CSC_LINK=$cert_path" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: npm ci

@@ -33,6 +33,10 @@ The broader release credential contract is tracked in
 `.agentlas/release-credentials.map.json`. It is intentionally non-secret: it
 lists credential names, storage homes, and validation commands only.
 
+That `.agentlas` map is the Agentlas Desktop release credential source of
+truth. AppBridge architecture sync may reference it, but AppBridge must not hold
+raw Apple, GitHub, or Railway release secrets.
+
 If you prefer Keychain Access:
 
 1. Keychain Access > Certificate Assistant > Request a Certificate From a Certificate Authority.
@@ -151,6 +155,10 @@ gh workflow run release-signed-mac.yml \
   -f draft=false \
   -f apply_web_env=true
 ```
+
+Tag-triggered GitHub Actions runs use the workflow file from the tagged commit.
+If the release workflow is fixed after a tag was pushed, rerun the workflow from
+`main` with `workflow_dispatch` or create the next tag after the workflow fix.
 
 ## 5. Verification
 
