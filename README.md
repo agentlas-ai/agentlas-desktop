@@ -64,6 +64,10 @@ Canonical release history lives in
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
 
+- **2026-06-06 · v0.2.18 terminal ontology update** — `agentlas` now accepts
+  short REPL commands such as `/ontology`, `/ontology list`, and
+  `/ontology company ./docs`; company and personal folders stay private unless
+  explicitly registered otherwise.
 - **2026-06-06 · v0.2.17 public desktop release** — Project Ontology panel and
   `agentlas ontology` terminal status/add/open flow shipped. Each project gets a
   separate `.agentlas/ontology-inbox/`, `.agentlas/ontology-sources.json`, and
@@ -200,7 +204,7 @@ process — never a plaintext file, never readable by the renderer/UI.
 - Chats, projects, firms, and installed agents live in **local SQLite**.
 - Ontology sources are project-local by default: add files to the project's
   `.agentlas/ontology-inbox/` or register an explicit source with
-  `agentlas ontology add /path/to/docs --kind company --scope private`.
+  `/ontology company ./docs` inside the Agentlas terminal.
 
 ### Cross-platform, self-updating, bilingual
 
@@ -321,6 +325,20 @@ Invoke-WebRequest $u -OutFile "$env:TEMP\AgentlasSetup.exe"; Start-Process "$env
 ```
 
 (With the GitHub CLI on any OS: `gh release download -R agentlas-ai/agentlas-desktop --pattern '*.dmg'`.)
+
+### Turn on project ontology from the terminal
+
+Open a project folder and type `agentlas`. Inside the Agentlas terminal:
+
+```text
+/ontology
+/ontology list
+/ontology company ./company-docs
+/ontology personal ~/notes
+```
+
+Those commands create/use only this project's `.agentlas/` folder. They do not
+scan your home folder or other projects.
 
 ### Updates — do I need to reinstall?
 

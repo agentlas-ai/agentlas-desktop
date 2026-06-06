@@ -569,6 +569,17 @@ function startRepl(opts) {
         ui.markdown(mem || ui.t("noMemory"));
         return true;
       }
+      case "ontology": {
+        if (!H.ontologyCommand) return ui.warn("ontology command unavailable"), true;
+        try {
+          const lines = H.ontologyCommand(arg, { cwd: state.cwd, projectPath: state.projectPath });
+          ui.line("");
+          for (const item of lines || []) ui.line("  " + ui.c.text(String(item)));
+        } catch (e) {
+          ui.error((e && e.message) || String(e));
+        }
+        return true;
+      }
       case "clear":
         state.history = [];
         state.native = {};
@@ -778,6 +789,7 @@ function printHelp(ui) {
     ["/permission <lvl>", ui.t("help.permission")],
     ["/cwd [path]", ui.t("help.cwd")],
     ["/memory", ui.t("help.memory")],
+    ["/ontology [text]", ui.t("help.ontology")],
     ["/status", ui.t("help.status")],
     ["/cost", ui.t("help.cost")],
     ["/multimodal", ui.t("help.multimodal")],

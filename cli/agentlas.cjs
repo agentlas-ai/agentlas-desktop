@@ -4755,65 +4755,241 @@ function readOntologySourcesCli(sourceManifestPath) {
   return Array.isArray(manifest.sources) ? manifest.sources : [];
 }
 
-function cmdOntology(args) {
-  const sub = args[0] || "status";
-  const paths = ensureOntologyCli(process.cwd());
+function ontologyUsageLinesCli() {
+  return [
+    "Ontology commands:",
+    "  /ontology                         turn on/show this project's ontology",
+    "  /ontology list                    list inbox files and registered folders",
+    "  /ontology open                    open the project ontology inbox",
+    "  /ontology add ./docs              register a folder as private project knowledge",
+    "  /ontology company ./docs          register company docs as private",
+    "  /ontology personal ~/notes        register personal docs as private",
+    "",
+    "Safety: only the current project inbox and registered folders are used.",
+    "No home folder or sibling project scan is started.",
+  ];
+}
+
+function shellSplitCli(text) {
+  const parts = [];
+  let current = "";
+  let quote = null;
+  let escaped = false;
+  for (const ch of String(text || "")) {
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === "\"" || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current) {
+        parts.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (current) parts.push(current);
+  return parts;
+}
+
+function expandUserPathCli(value) {
+  const v = String(value || "").trim();
+  if (v === "~") return os.homedir();
+  if (v.startsWith("~/") || v.startsWith("~\\")) return path.join(os.homedir(), v.slice(2));
+  return v;
+}
+
+function cleanOntologyPathTokenCli(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^@/, "")
+    .replace(/^[`"']+|[`"',;]+$/g, "");
+}
+
+function resolveOntologyPathCli(value, cwd) {
+  const clean = expandUserPathCli(cleanOntologyPathTokenCli(value));
+  return path.isAbsolute(clean) ? path.resolve(clean) : path.resolve(cwd || process.cwd(), clean);
+}
+
+function inferOntologyKindCli(value, text) {
+  const v = String(value || "").toLowerCase();
+  const hay = String(text || "").toLowerCase();
+  if (["company", "work", "business", "corp", "team", "회사", "업무", "팀", "조직"].includes(v) || /(company|work|business|corp|team|회사|업무|조직)/i.test(hay)) return "company";
+  if (["personal", "private-life", "life", "me", "개인", "내자료", "일상"].includes(v) || /(personal|private-life|\bme\b|개인|내\s*자료|일상)/i.test(hay)) return "personal";
+  if (["project", "repo", "프로젝트", "레포"].includes(v) || /(project|repo|프로젝트|레포)/i.test(hay)) return "project";
+  return "project";
+}
+
+function inferOntologyScopeCli(value, text, kind) {
+  const v = String(value || "").toLowerCase();
+  const hay = String(text || "").toLowerCase();
+  if (["public", "open", "공개"].includes(v) || /(public|open|공개)/i.test(hay)) return "public";
+  if (["internal", "team", "내부", "팀"].includes(v) || /(internal|team-only|company-wide|내부|팀\s*공유|회사\s*공유)/i.test(hay)) return "internal";
+  if (["private", "secret", "local", "비공개", "개인"].includes(v) || /(private|secret|local-only|비공개|개인만|나만)/i.test(hay)) return "private";
+  return kind === "company" || kind === "personal" ? "private" : "private";
+}
+
+function isOntologyPathishCli(token, cwd, allowExistingName) {
+  const clean = cleanOntologyPathTokenCli(token);
+  if (!clean || clean === "." || clean === "..") return true;
+  if (/^(?:~|\.{1,2}[\\/]|\/|[A-Za-z]:[\\/])/.test(clean)) return true;
+  if (clean.includes("/") || clean.includes("\\")) return true;
+  if (allowExistingName) {
+    try {
+      return fs.existsSync(resolveOntologyPathCli(clean, cwd));
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function findOntologyPathTokenCli(tokens, cwd, text) {
+  const lower = String(text || "").toLowerCase();
+  const addIntent = /(add|register|attach|source|folder|watch|sync|추가|등록|붙|연결|폴더|자료|문서)/i.test(lower);
+  const skip = new Set([
+    "add", "register", "attach", "source", "sources", "folder", "folders", "watch", "sync", "use",
+    "company", "personal", "project", "private", "internal", "public", "work", "business",
+    "추가", "등록", "붙여", "붙여줘", "연결", "켜줘", "켜", "회사", "개인", "프로젝트", "자료", "문서", "폴더", "비공개", "내부", "공개",
+  ]);
+  for (const token of tokens) {
+    const clean = cleanOntologyPathTokenCli(token);
+    if (!clean || skip.has(clean.toLowerCase())) continue;
+    if (isOntologyPathishCli(clean, cwd, addIntent)) return clean;
+  }
+  return null;
+}
+
+function parseOntologyNaturalArgsCli(text, cwd) {
+  const raw = String(text || "").trim();
+  if (!raw) return ["status"];
+  const lower = raw.toLowerCase();
+  if (/^(?:help|\?|도움|사용법)\b/i.test(raw)) return ["help"];
+  if (/(?:^|\s)(?:list|ls|sources?|status|show|상태|목록|리스트)(?:\s|$)/i.test(raw)) return ["list"];
+  if (/(?:^|\s)(?:open|inbox|finder|열어|열기|인박스)(?:\s|$)/i.test(raw)) return ["open"];
+  const tokens = shellSplitCli(raw);
+  const kind = inferOntologyKindCli(null, raw);
+  const scope = inferOntologyScopeCli(null, raw, kind);
+  let source = findOntologyPathTokenCli(tokens, cwd, raw);
+  if (!source && /(?:this folder|current folder|here|이\s*폴더|현재\s*폴더|지금\s*폴더|여기)/i.test(raw)) source = ".";
+  const wantsAdd = Boolean(source) || /(add|register|attach|source|watch|sync|추가|등록|붙|연결)/i.test(lower);
+  if (wantsAdd) {
+    if (!source) return ["add"];
+    return ["add", source, "--kind", kind, "--scope", scope];
+  }
+  if (/(enable|activate|start|turn on|켜|시작|활성)/i.test(lower)) return ["status"];
+  return ["status"];
+}
+
+function formatOntologyStatusCli(paths) {
+  const sources = readOntologySourcesCli(paths.sourceManifestPath);
+  const inbox = listOntologyInboxCli(paths.inboxPath);
+  const lines = [
+    "Ontology: active",
+    `  project: ${paths.root}`,
+    `  inbox:  ${paths.inboxPath}`,
+    `  db:     ${paths.dbPath}`,
+    "  policy: inbox_and_registered_sources_only",
+    "  scan:   no home folder, no sibling projects",
+    "",
+    `Inbox (${inbox.length}):`,
+  ];
+  for (const item of inbox) lines.push(`  ${item.supported ? "✓" : "!"} ${item.name}  ${item.supported ? "supported" : "adapter pending"}`);
+  if (!inbox.length) lines.push("  (empty)");
+  lines.push("", `Sources (${sources.length}):`);
+  for (const source of sources) {
+    const sourcePath = path.resolve(String(source.path || ""));
+    lines.push(`  ${fs.existsSync(sourcePath) ? "✓" : "!"} ${sourcePath}  ${source.kind || "project"} / ${source.scope || "internal"}`);
+  }
+  if (!sources.length) lines.push("  (none)");
+  lines.push("", "Short add:", "  /ontology add ./docs", "  /ontology company ./docs", "  /ontology personal ~/notes");
+  return lines;
+}
+
+function registerOntologySourceCli(paths, source, kind, scope, cwd) {
+  if (!source) throw new Error("usage: /ontology add <path>  or  /ontology company ./docs");
+  const sourcePath = resolveOntologyPathCli(source, cwd || paths.root);
+  if (!fs.existsSync(sourcePath)) throw new Error(`source not found: ${sourcePath}`);
+  const manifest = readJsonSafeCli(paths.sourceManifestPath, ontologySourceManifestSkeletonCli(paths.root));
+  const nextSources = (Array.isArray(manifest.sources) ? manifest.sources : [])
+    .filter((item) => path.resolve(String(item.path || "")) !== sourcePath);
+  nextSources.push({ path: sourcePath, kind, scope, registeredAt: new Date().toISOString() });
+  manifest.schemaVersion = "1.0";
+  manifest.kind = "agentlas-ontology-source-manifest";
+  manifest.projectRoot = paths.root;
+  manifest.sources = nextSources;
+  writeJsonSafeCli(paths.sourceManifestPath, manifest);
+  return [
+    `Registered ontology source: ${sourcePath}`,
+    `  kind:  ${kind}`,
+    `  scope: ${scope}`,
+    "  copy:  no",
+    "  scan:  only this registered folder, not home/sibling projects",
+  ];
+}
+
+function runOntologyCli(args, opts) {
+  opts = opts || {};
+  const cwd = path.resolve(opts.cwd || process.cwd());
+  const projectPath = path.resolve(opts.projectPath || cwd);
+  const normalizedArgs = Array.isArray(args) ? args : [];
+  const sub = normalizedArgs[0] || "status";
+  const paths = ensureOntologyCli(projectPath);
   if (sub === "status" || sub === "list") {
-    const sources = readOntologySourcesCli(paths.sourceManifestPath);
-    const inbox = listOntologyInboxCli(paths.inboxPath);
-    out("Ontology: active");
-    out(`  project: ${paths.root}`);
-    out(`  inbox:  ${paths.inboxPath}`);
-    out(`  db:     ${paths.dbPath}`);
-    out("  policy: inbox_and_registered_sources_only");
-    out("  scan:   no home folder, no sibling projects");
-    out("");
-    out(`Inbox (${inbox.length}):`);
-    for (const item of inbox) {
-      out(`  ${item.supported ? "✓" : "!"} ${item.name}  ${item.supported ? "supported" : "adapter pending"}`);
-    }
-    if (!inbox.length) out("  (empty)");
-    out("");
-    out(`Sources (${sources.length}):`);
-    for (const source of sources) {
-      const sourcePath = path.resolve(String(source.path || ""));
-      out(`  ${fs.existsSync(sourcePath) ? "✓" : "!"} ${sourcePath}  ${source.kind || "project"} / ${source.scope || "internal"}`);
-    }
-    if (!sources.length) out("  (none)");
-    out("");
-    out("Add docs: put txt/md/json/csv in the inbox or run:");
-    out("  agentlas ontology add /path/to/docs --kind company --scope private");
-    return;
+    return formatOntologyStatusCli(paths);
   }
   if (sub === "open") {
-    openLocalPathCli(paths.inboxPath);
-    out(`Opened ontology inbox: ${paths.inboxPath}`);
-    return;
+    if (!opts.noOpen) openLocalPathCli(paths.inboxPath);
+    return [`Opened ontology inbox: ${paths.inboxPath}`];
+  }
+  if (sub === "help" || sub === "--help" || sub === "-h") {
+    return ontologyUsageLinesCli();
   }
   if (sub === "add") {
-    const flags = parseCloudFlags(args.slice(1));
+    const flags = parseCloudFlags(normalizedArgs.slice(1));
     const source = flags._[0];
-    if (!source) fail("usage: agentlas ontology add <path> [--kind company|personal|project] [--scope private|internal|public]");
-    const sourcePath = path.resolve(source);
-    if (!fs.existsSync(sourcePath)) fail(`소스를 찾을 수 없습니다: ${sourcePath}`);
-    const kind = ["company", "personal", "project"].includes(flags.kind) ? flags.kind : "project";
-    const scope = ["private", "internal", "public"].includes(flags.scope) ? flags.scope : "private";
-    const manifest = readJsonSafeCli(paths.sourceManifestPath, ontologySourceManifestSkeletonCli(paths.root));
-    const nextSources = (Array.isArray(manifest.sources) ? manifest.sources : [])
-      .filter((item) => path.resolve(String(item.path || "")) !== sourcePath);
-    nextSources.push({ path: sourcePath, kind, scope, registeredAt: new Date().toISOString() });
-    manifest.schemaVersion = "1.0";
-    manifest.kind = "agentlas-ontology-source-manifest";
-    manifest.projectRoot = paths.root;
-    manifest.sources = nextSources;
-    writeJsonSafeCli(paths.sourceManifestPath, manifest);
-    out(`Registered ontology source: ${sourcePath}`);
-    out(`  kind:  ${kind}`);
-    out(`  scope: ${scope}`);
-    out("  copy:  no");
-    return;
+    const kind = inferOntologyKindCli(flags.kind || flags._[1], normalizedArgs.join(" "));
+    const scope = inferOntologyScopeCli(flags.scope || flags._[2], normalizedArgs.join(" "), kind);
+    return registerOntologySourceCli(paths, source, kind, scope, cwd);
   }
-  fail("usage: agentlas ontology [status|list|open|add]");
+  if (["company", "personal", "project"].includes(String(sub).toLowerCase())) {
+    const flags = parseCloudFlags(normalizedArgs.slice(1));
+    const kind = inferOntologyKindCli(sub, normalizedArgs.join(" "));
+    const scope = inferOntologyScopeCli(flags.scope || flags._[1], normalizedArgs.join(" "), kind);
+    return registerOntologySourceCli(paths, flags._[0], kind, scope, cwd);
+  }
+  if (isOntologyPathishCli(sub, cwd, true)) {
+    return registerOntologySourceCli(paths, sub, inferOntologyKindCli(null, normalizedArgs.join(" ")), inferOntologyScopeCli(null, normalizedArgs.join(" "), "project"), cwd);
+  }
+  return runOntologyCli(parseOntologyNaturalArgsCli(normalizedArgs.join(" "), cwd), opts);
+}
+
+function runOntologyNaturalCli(text, opts) {
+  const cwd = path.resolve((opts && opts.cwd) || process.cwd());
+  return runOntologyCli(parseOntologyNaturalArgsCli(text, cwd), { ...(opts || {}), cwd });
+}
+
+function cmdOntology(args) {
+  try {
+    for (const line of runOntologyCli(args, { cwd: process.cwd(), projectPath: process.cwd() })) out(line);
+  } catch (e) {
+    fail((e && e.message) || String(e));
+  }
 }
 
 function openLocalPathCli(targetPath) {
@@ -5386,6 +5562,10 @@ function buildHelpers(db) {
     autoRoutePreamble: (choice, lang) => autoRoutePreamble(choice, lang),
     cliMemoryContext: (db_, pp) => cliMemoryContext(db_, pp),
     importLocal: (db_, p) => importLocalFolderCli(db_, p),
+    ontologyCommand: (text, ctx) => runOntologyNaturalCli(text, {
+      cwd: (ctx && ctx.cwd) || projectCwd(),
+      projectPath: (ctx && ctx.cwd) || projectCwd(),
+    }),
     // /cwd 로 작업 폴더를 바꿀 때 그 폴더의 활성 프로젝트 경로(또는 null)를 재계산 — activeProjectPath의 명시-dir 버전.
     projectPathFor: (db_, dir) => {
       try {
@@ -5801,7 +5981,7 @@ function cmdHelp() {
       "  list                  agents/companies + active runtime",
       "  env                   shared env key names",
       "  multimodal            image/video/audio fallback providers",
-      "  ontology              project-local ontology inbox/source status",
+      "  ontology              project-local ontology status/list/add; inside REPL use /ontology",
       "  cloud package <path>  package + static security review for Agentlas Cloud",
       "  cloud publish <path>  register after local review (submitter runtime only)",
       "  cloud install <slug>  download/install a cloud marketplace agent",

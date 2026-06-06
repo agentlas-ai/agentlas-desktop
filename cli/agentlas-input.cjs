@@ -72,7 +72,7 @@ function stripContinuation(line) {
 // ── completion ────────────────────────────────────────────
 const SLASH_COMMANDS = [
   "/help", "/agents", "/team", "/agent", "/firms", "/firm", "/runtime", "/model",
-  "/permission", "/perm", "/cwd", "/memory", "/clear", "/import", "/doctor",
+  "/permission", "/perm", "/cwd", "/memory", "/ontology", "/clear", "/import", "/doctor",
   "/status", "/cost", "/multimodal", "/diff", "/history", "/compact",
   "/keybindings", "/permissions", "/exit", "/quit",
 ];
@@ -144,6 +144,7 @@ function makeCompleter(ctx) {
         return [uniqStartsWith(RUNTIME_SPECS.concat(["auto"]), last), last];
       case "/cwd":
       case "/import":
+      case "/ontology":
         return [completePath(last, getCwd(), ""), last];
       default:
         return [[], last];

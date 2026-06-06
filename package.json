@@ -46,6 +46,7 @@
     "test:super-ontology-seed": "npm run build:electron && node scripts/test-super-ontology-seed.cjs",
     "test:cloud-app-manifest": "npm run build:electron && electron scripts/test-cloud-app-manifest.cjs",
     "test:cloud-agent-package": "npm run build:electron && electron scripts/test-cloud-agent-package.cjs",
+    "test:ontology-repl": "node scripts/test-ontology-repl.cjs",
     "smoke:app-autopilot": "npm run build:electron && electron scripts/smoke-app-autopilot.cjs",
     "smoke:agent-os-handsfree": "npm run build:electron && electron scripts/smoke-agent-os-handsfree.cjs",
     "smoke:chat-local-agent-os": "npm run build:electron && electron scripts/smoke-chat-local-agent-os.cjs",
