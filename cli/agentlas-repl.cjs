@@ -164,6 +164,7 @@ function startRepl(opts) {
   let busy = false;
   let closed = false;
   let currentAbort = null;
+  let idleExitArmedUntil = 0;
   rl.on("close", () => {
     closed = true;
     if (!busy) process.exit(0);
@@ -173,10 +174,15 @@ function startRepl(opts) {
       currentAbort.abort();
       ui.warn(ui.t("interrupted"));
     } else {
-      ui.line("");
-      ui.line(ui.c.dim(ui.t("bye")));
-      rl.close();
-      process.exit(0);
+      const now = Date.now();
+      if (now < idleExitArmedUntil) {
+        ui.line("");
+        ui.line(ui.c.dim(ui.t("bye")));
+        rl.close();
+        process.exit(0);
+      }
+      idleExitArmedUntil = now + 3000;
+      ui.warn(ui.t("ctrlcAgain"));
     }
   });
 
@@ -197,10 +203,11 @@ function startRepl(opts) {
   }
 
   // ── run one turn ──
-  async function runTurn(prompt) {
+  async function runTurn(prompt, runOptions = {}) {
     busy = true;
     currentAbort = new AbortController();
     const signal = currentAbort.signal;
+    const recordHistoryEntry = !runOptions.side;
     const targetLang = H.detectResponseLanguage ? H.detectResponseLanguage(prompt, ui.lang) : ui.lang;
     const ctx = { ...ctxNow(), lang: targetLang, uiLang: ui.lang };
     const rt = state.runtime;
@@ -234,7 +241,7 @@ function startRepl(opts) {
           signal,
         });
         const at = (res.text || "").trim();
-        if (at && !res.error) state.history.push({ role: "user", text: prompt }, { role: "assistant", text: at });
+        if (recordHistoryEntry && at && !res.error) state.history.push({ role: "user", text: prompt }, { role: "assistant", text: at });
         recordCost(costLabel, res.usage);
       } else {
         const subjectSystem = state.routePreambleOnce
@@ -266,7 +273,7 @@ function startRepl(opts) {
           signal,
         });
         const cleaned = (H.curateCliReply(db, res.text || "", ctx) || "").trim();
-        if (cleaned) state.history.push({ role: "user", text: prompt }, { role: "assistant", text: cleaned });
+        if (recordHistoryEntry && cleaned) state.history.push({ role: "user", text: prompt }, { role: "assistant", text: cleaned });
         recordCost(costLabel, ui._lastUsage);
       }
     } catch (e) {
@@ -470,7 +477,43 @@ function startRepl(opts) {
     ui.line("");
     ui.rule("Skills");
     for (const entry of input.slashCommandEntries()) {
-      ui.line("  " + ui.c.emerald(entry.command.padEnd(18)) + ui.c.dim(entry.description));
+      const tag = entry.category ? ui.c.faint(entry.category.padEnd(10)) : "";
+      ui.line("  " + ui.c.emerald(entry.command.padEnd(18)) + tag + ui.c.dim(entry.description));
+      if (!entry.aliasOf && entry.usage) ui.line("  " + ui.c.faint(" ".repeat(18) + entry.usage));
+    }
+  }
+
+  function printPermissions() {
+    ui.line("");
+    ui.rule("Permissions");
+    ui.line("  " + ui.c.faint("Current") + "  " + ui.c.emerald(state.permission));
+    const rows = [
+      ["read", "inspect files and answer; no file writes or shell automation"],
+      ["write", "read plus create/edit files in the current work area"],
+      ["full", "write plus shell commands and external local automation"],
+    ];
+    for (const [level, description] of rows) {
+      const mark = level === state.permission ? "› " : "  ";
+      ui.line("  " + ui.c.emerald((mark + level).padEnd(10)) + ui.c.dim(description));
+    }
+    ui.line("  " + ui.c.faint("usage: /permission read|write|full"));
+  }
+
+  async function rerunSetup() {
+    try {
+      const { runOnboard } = require("./agentlas-onboard.cjs");
+      const result = await runOnboard({ ui, rl, helpers: H });
+      Object.assign(prefs, result);
+      ui.lang = terminalLang(prefs, opts);
+      state.permission = prefs.permission || state.permission;
+      if (prefs.runtime && prefs.runtime !== "auto" && H.RUNTIME_BIN[prefs.runtime] && H.which(H.RUNTIME_BIN[prefs.runtime])) {
+        state.runtime = { mode: "cli", kind: prefs.runtime };
+        baseRuntime = state.runtime;
+        state.native = {};
+      }
+      if (opts.savePrefs) opts.savePrefs(prefs);
+    } catch (e) {
+      ui.error((e && e.message) || String(e));
     }
   }
 
@@ -582,6 +625,10 @@ function startRepl(opts) {
       case "permission":
       case "perm": {
         const p = (arg || "").toLowerCase();
+        if (!p) {
+          printPermissions();
+          return true;
+        }
         if (!["read", "write", "full"].includes(p)) return ui.warn(ui.t("permUsage")), true;
         state.permission = p;
         ui.ok(ui.t("permSet", p));
@@ -594,9 +641,11 @@ function startRepl(opts) {
           state.permission = p;
           ui.ok(ui.t("permSet", p));
         } else {
-          ui.info(ui.t("permCurrent", state.permission));
-          ui.info(ui.t("permUsage"));
+          printPermissions();
         }
+        return true;
+      case "setup":
+        await rerunSetup();
         return true;
       case "cwd":
         if (arg) {
@@ -629,6 +678,14 @@ function startRepl(opts) {
         }
         return true;
       }
+      case "side":
+      case "btw":
+        if (!arg) return ui.warn(ui.t("sideUsage")), true;
+        if (!state.subject) return ui.warn(ui.t("sideNeedsSubject")), true;
+        ui.info(ui.t("sideStart"));
+        await runTurn(expandMentions(arg), { side: true });
+        ui.info(ui.t("sideDone"));
+        return true;
       case "clear":
         state.history = [];
         state.native = {};
@@ -838,9 +895,12 @@ function printHelp(ui) {
     ["/runtime <kind>", ui.t("help.runtime")],
     ["/model <id>", ui.t("help.model")],
     ["/permission <lvl>", ui.t("help.permission")],
+    ["/permissions", ui.t("help.permissions")],
+    ["/setup", ui.t("help.setup")],
     ["/cwd [path]", ui.t("help.cwd")],
     ["/memory", ui.t("help.memory")],
     ["/ontology [text]", ui.t("help.ontology")],
+    ["/side <question>", ui.t("help.side")],
     ["/status", ui.t("help.status")],
     ["/cost", ui.t("help.cost")],
     ["/multimodal", ui.t("help.multimodal")],

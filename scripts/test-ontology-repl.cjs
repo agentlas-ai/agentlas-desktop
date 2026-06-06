@@ -123,7 +123,7 @@ function waitFor(pattern) {
 
 async function main() {
   await waitFor(/Tip: Type \/help/);
-  child.stdin.write(`/ontology company "${docs}"\n`);
+  child.stdin.write(`/ontology use "${docs}" as company knowledge\n`);
   await waitFor(/Registered ontology source:/);
   child.stdin.write("/ontology list\n");
   await waitFor(/Sources \(1\):/);
@@ -143,6 +143,7 @@ async function main() {
   assert.equal(manifest.sources[0].scope, "private");
   assert.match(output, /policy: inbox_and_registered_sources_only/);
   assert.match(output, /no home folder, no sibling projects/);
+  assert.match(output, /Natural examples:/);
   console.log("ontology repl: ok");
 }
 

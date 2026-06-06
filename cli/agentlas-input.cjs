@@ -72,34 +72,35 @@ function stripContinuation(line) {
 
 // ── completion ────────────────────────────────────────────
 const SLASH_COMMAND_META = [
-  ["/help", "Show Agentlas terminal commands"],
-  ["/status", "Show model/runtime, agent, permission, and directory"],
-  ["/skills", "List available Agentlas terminal skills"],
-  ["/ontology", "Turn on, list, or add project ontology sources"],
-  ["/agents", "List installed agents"],
-  ["/team", "View or pin each agent runtime"],
-  ["/agent", "Switch to another agent"],
-  ["/firms", "List installed companies"],
-  ["/firm", "Switch to a company CEO"],
-  ["/runtime", "Switch runtime: claude-code, codex, gemini, BYOK, or Ollama"],
-  ["/model", "Set the model for BYOK or Ollama runtimes"],
-  ["/permission", "Set read/write/full permission"],
-  ["/permissions", "Show or set current permission"],
-  ["/perm", "Alias for /permission"],
-  ["/cwd", "Show or change the working folder"],
-  ["/memory", "Show the memory injected into this run"],
-  ["/multimodal", "Show or set image, video, and audio fallback providers"],
-  ["/diff", "Show the current git diff"],
-  ["/history", "Show recent inputs"],
-  ["/compact", "Drop older transcript turns and keep recent context"],
-  ["/keybindings", "Show terminal shortcuts"],
-  ["/clear", "Clear the chat and redraw"],
-  ["/import", "Import a local agent or team folder"],
-  ["/doctor", "Check runtimes and local data"],
-  ["/exit", "Quit Agentlas"],
-  ["/quit", "Quit Agentlas"],
+  { command: "/help", description: "Show Agentlas terminal commands", category: "Help", usage: "/help", detail: "Open the command reference, shortcuts, and common flows." },
+  { command: "/status", description: "Show model/runtime, agent, permission, and directory", category: "Session", usage: "/status", detail: "Print the current runtime, active agent or company, permission level, and cwd." },
+  { command: "/skills", description: "List available Agentlas terminal skills", category: "Discovery", usage: "/skills", detail: "Show the slash-command skills Agentlas can run inside this terminal." },
+  { command: "/ontology", description: "Turn on, list, or add project ontology sources", category: "Knowledge", usage: "/ontology add ./docs", detail: "Also understands natural text like /ontology use ./docs as company knowledge.", examples: ["/ontology list", "/ontology use ./docs as company knowledge", "/ontology open"] },
+  { command: "/agents", description: "List installed agents", category: "Routing", usage: "/agents", detail: "Show local agents and their routed runtime." },
+  { command: "/team", description: "View or pin each agent runtime", category: "Routing", usage: "/team <agent> <runtime|auto>", detail: "Pin one agent to claude-code, codex, gemini, or automatic routing." },
+  { command: "/agent", description: "Switch to another agent", category: "Routing", usage: "/agent <name>", detail: "Switch the current conversation to an installed agent." },
+  { command: "/firms", description: "List installed companies", category: "Routing", usage: "/firms", detail: "Show company CEOs available in this terminal." },
+  { command: "/firm", description: "Switch to a company CEO", category: "Routing", usage: "/firm <name>", detail: "Switch the current conversation to a company CEO agent." },
+  { command: "/runtime", description: "Switch runtime: claude-code, codex, gemini, BYOK, or Ollama", category: "Settings", usage: "/runtime codex", detail: "Change the engine Agentlas uses for subsequent turns." },
+  { command: "/model", description: "Set the model for BYOK or Ollama runtimes", category: "Settings", usage: "/model <id>", detail: "CLI subscription runtimes keep their own model picker; BYOK/Ollama use this." },
+  { command: "/permission", description: "Set read/write/full permission", category: "Settings", usage: "/permission full", detail: "No argument shows what read, write, and full mean.", aliases: ["/perm"] },
+  { command: "/permissions", description: "Show or set current permission", category: "Settings", usage: "/permissions", detail: "Codex-style permission screen for Agentlas read/write/full." },
+  { command: "/setup", description: "Run first-time setup again", category: "Settings", usage: "/setup", detail: "Re-run language, runtime, and default permission setup in-place." },
+  { command: "/cwd", description: "Show or change the working folder", category: "Files", usage: "/cwd <path>", detail: "Change the folder used for tools, file mentions, and local commands." },
+  { command: "/memory", description: "Show the memory injected into this run", category: "Context", usage: "/memory", detail: "Print the project memory that Agentlas adds to agent turns." },
+  { command: "/side", description: "Ask a side question without saving it to chat context", category: "Context", usage: "/side <question>", detail: "Runs a one-off answer using current context, then returns without appending to chat history.", aliases: ["/btw"] },
+  { command: "/multimodal", description: "Show or set image, video, and audio fallback providers", category: "Settings", usage: "/multimodal", detail: "Inspect or change fallback providers for media work." },
+  { command: "/diff", description: "Show the current git diff", category: "Files", usage: "/diff", detail: "Print the working-tree diff for the current cwd." },
+  { command: "/history", description: "Show recent inputs", category: "Session", usage: "/history", detail: "Show persisted terminal input history." },
+  { command: "/compact", description: "Drop older transcript turns and keep recent context", category: "Context", usage: "/compact", detail: "Keep the newest conversation turns and discard older in-session context." },
+  { command: "/cost", description: "Show session usage and cost by runtime", category: "Session", usage: "/cost", detail: "Show usage captured by Agentlas across routed runtimes." },
+  { command: "/keybindings", description: "Show terminal shortcuts", category: "Help", usage: "/keybindings", detail: "Show slash, file mention, shell, multiline, history, and Ctrl-C controls." },
+  { command: "/clear", description: "Clear the chat and redraw", category: "Session", usage: "/clear", detail: "Clear local conversation state and redraw the Agentlas banner." },
+  { command: "/import", description: "Import a local agent or team folder", category: "Files", usage: "/import <path>", detail: "Install a local agent or team into Agentlas." },
+  { command: "/doctor", description: "Check runtimes and local data", category: "Health", usage: "/doctor", detail: "Run local checks for runtimes, data, credentials, and setup." },
+  { command: "/exit", description: "Quit Agentlas", category: "Session", usage: "/exit", detail: "Close the terminal session.", aliases: ["/quit"] },
 ];
-const SLASH_COMMANDS = SLASH_COMMAND_META.map(([command]) => command);
+const SLASH_COMMANDS = SLASH_COMMAND_META.flatMap((entry) => [entry.command].concat(entry.aliases || []));
 const RUNTIME_SPECS = ["claude-code", "codex", "gemini", "anthropic", "openai", "google", "ollama", "upstage"];
 const PERM_LEVELS = ["read", "write", "full"];
 
@@ -109,7 +110,22 @@ function uniqStartsWith(cands, token) {
 }
 
 function slashCommandEntries() {
-  return SLASH_COMMAND_META.map(([command, description]) => ({ command, description }));
+  const rows = [];
+  for (const entry of SLASH_COMMAND_META) {
+    rows.push({ ...entry, aliasOf: null });
+    for (const alias of entry.aliases || []) {
+      rows.push({
+        command: alias,
+        description: `Alias for ${entry.command}`,
+        category: entry.category,
+        usage: alias + (entry.usage && entry.usage.includes(" ") ? entry.usage.slice(entry.usage.indexOf(" ")) : ""),
+        detail: entry.detail,
+        examples: entry.examples,
+        aliasOf: entry.command,
+      });
+    }
+  }
+  return rows;
 }
 
 function slashCommandQuery(line) {
@@ -164,7 +180,11 @@ function renderSlashPalette(rows, selectedIndex, opts = {}) {
   const commandWidth = Math.min(24, Math.max(16, rows.reduce((n, row) => Math.max(n, row.command.length), 0) + 2));
   const descWidth = Math.max(12, columns - commandWidth - 8);
   const lineWidth = Math.min(columns - 1, commandWidth + descWidth + 5);
-  const out = [c.faint("─".repeat(lineWidth))];
+  const selected = rows[Math.max(0, Math.min(selectedIndex, rows.length - 1))] || rows[0];
+  const out = [
+    c.faint("Slash commands") + c.dim("  type to search"),
+    c.faint("─".repeat(lineWidth)),
+  ];
   rows.forEach((row, index) => {
     const command = padVisible(row.command, commandWidth);
     const desc = truncateVisible(row.description, descWidth);
@@ -172,6 +192,16 @@ function renderSlashPalette(rows, selectedIndex, opts = {}) {
     out.push(index === selectedIndex ? c.inverse(body.padEnd(lineWidth)) : body);
   });
   out.push(c.faint("─".repeat(lineWidth)));
+  if (selected) {
+    const usage = truncateVisible(selected.usage || selected.command, lineWidth - 2);
+    const detail = truncateVisible(selected.detail || selected.description || "", lineWidth - 2);
+    const category = selected.category ? `category: ${selected.category}` : "";
+    out.push(" " + c.text(usage) + (category ? c.dim("  " + category) : ""));
+    if (detail) out.push(" " + c.dim(detail));
+    if (selected.examples && selected.examples.length) {
+      out.push(" " + c.dim("examples: " + selected.examples.slice(0, 2).join("  |  ")));
+    }
+  }
   out.push(c.dim(" ↑↓ move  Enter run  Tab complete  Esc close"));
   return out.join("\n");
 }

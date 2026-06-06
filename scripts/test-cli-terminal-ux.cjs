@@ -27,7 +27,7 @@ function captureUi() {
 function testCommands() {
   const commands = input.SLASH_COMMANDS;
   assert.equal(new Set(commands).size, commands.length, "slash commands should be unique");
-  for (const cmd of ["/help", "/skills", "/status", "/ontology", "/compact", "/keybindings", "/permissions", "/diff", "/history"]) {
+  for (const cmd of ["/help", "/skills", "/status", "/ontology", "/compact", "/keybindings", "/permissions", "/diff", "/history", "/cost", "/setup", "/side", "/btw"]) {
     assert.ok(commands.includes(cmd), `missing ${cmd}`);
   }
 
@@ -50,7 +50,11 @@ function testSlashPalette() {
   const rendered = input.renderSlashPalette(statusRows, 0, { columns: 80 });
   assert.match(rendered, /\/status/);
   assert.match(rendered, /Show model\/runtime/);
+  assert.match(rendered, /Slash commands/);
+  assert.match(rendered, /category:/);
   assert.match(rendered, /↑↓ move/);
+  const ontologyRendered = input.renderSlashPalette(ontologyRows, 0, { columns: 100 });
+  assert.match(ontologyRendered, /Natural|company knowledge|examples:/);
 }
 
 function testGlobalStyle() {

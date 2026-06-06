@@ -4765,6 +4765,11 @@ function ontologyUsageLinesCli() {
     "  /ontology company ./docs          register company docs as private",
     "  /ontology personal ~/notes        register personal docs as private",
     "",
+    "Natural examples:",
+    "  /ontology use ./docs as company knowledge",
+    "  /ontology attach ~/notes as personal private memory",
+    "  /ontology open the inbox",
+    "",
     "Safety: only the current project inbox and registered folders are used.",
     "No home folder or sibling project scan is started.",
   ];
@@ -4917,7 +4922,18 @@ function formatOntologyStatusCli(paths) {
     lines.push(`  ${fs.existsSync(sourcePath) ? "✓" : "!"} ${sourcePath}  ${source.kind || "project"} / ${source.scope || "internal"}`);
   }
   if (!sources.length) lines.push("  (none)");
-  lines.push("", "Short add:", "  /ontology add ./docs", "  /ontology company ./docs", "  /ontology personal ~/notes");
+  lines.push(
+    "",
+    "Add sources:",
+    "  /ontology add ./docs",
+    "  /ontology company ./docs",
+    "  /ontology personal ~/notes",
+    "",
+    "Natural examples:",
+    "  /ontology use ./docs as company knowledge",
+    "  /ontology attach ~/notes as personal private memory",
+    "  /ontology open the inbox",
+  );
   return lines;
 }
 
