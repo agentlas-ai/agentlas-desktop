@@ -39,6 +39,7 @@
     "release:p12": "bash scripts/create-p12-from-apple-cert.sh",
     "release:mac:publish": "node scripts/publish-mac-release.mjs",
     "release:web-env": "node scripts/apply-web-release-env.mjs",
+    "release:railway:check": "node scripts/check-railway-release-access.mjs",
     "qa:committee": "node scripts/committee-gate.mjs",
     "smoke:app-factory": "npm run build:electron && electron scripts/smoke-app-factory.cjs",
     "test:app-builder-routing": "npm run build:electron && node scripts/test-app-builder-routing.cjs",

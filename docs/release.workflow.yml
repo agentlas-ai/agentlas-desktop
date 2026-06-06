@@ -104,6 +104,17 @@ jobs:
           test -n "$CSC_KEY_PASSWORD"
           test -n "$GH_TOKEN"
 
+      - name: Check Railway release credentials
+        if: env.RESOLVED_APPLY_WEB_ENV == 'true'
+        run: |
+          npm install -g @railway/cli
+          if [ -n "$RAILWAY_TOKEN" ] && [ -n "$RAILWAY_PROJECT_ID" ] && npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web; then
+            echo "AGENTLAS_RAILWAY_RELEASE_READY=1" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Railway release env credentials are missing or invalid. macOS release will still publish; apply desktop web env manually after release."
+            echo "AGENTLAS_RAILWAY_RELEASE_READY=0" >> "$GITHUB_ENV"
+          fi
+
       - name: Install dependencies
         run: npm ci
 
@@ -130,8 +141,7 @@ jobs:
           if-no-files-found: error
 
       - name: Apply Railway web release env
-        if: env.RESOLVED_APPLY_WEB_ENV == 'true' && env.RAILWAY_TOKEN != '' && env.RAILWAY_PROJECT_ID != ''
+        if: env.RESOLVED_APPLY_WEB_ENV == 'true' && env.AGENTLAS_RAILWAY_RELEASE_READY == '1'
         run: |
-          npm install -g @railway/cli
           railway link --project "$RAILWAY_PROJECT_ID" --environment production --service agentlas-web
-          npm run release:web-env -- --apply
+          npm run release:web-env -- --apply --restart --verify-url=https://agentlas.cloud/api/desktop/latest

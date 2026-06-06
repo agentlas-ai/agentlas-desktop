@@ -85,18 +85,38 @@ const requiredWorkflowSecrets = [
 ];
 
 const releaseVerification = join(desktopRoot, "release", "desktop-release-verification.json");
+const releaseEnv = join(desktopRoot, "release", "desktop-release.production.env");
 const verification = existsSync(releaseVerification)
   ? JSON.parse(readFileSync(releaseVerification, "utf8"))
+  : null;
+const releaseEnvValues = existsSync(releaseEnv)
+  ? Object.fromEntries(
+      readFileSync(releaseEnv, "utf8")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#") && line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [line.slice(0, index), line.slice(index + 1)];
+        }),
+    )
   : null;
 
 const missingWorkflowSecrets = agentlasSecrets.ok
   ? requiredWorkflowSecrets.filter((name) => !agentlasSecrets.names.includes(name))
   : requiredWorkflowSecrets;
 
+const railwayAccess = run("node", [
+  "scripts/check-railway-release-access.mjs",
+  "--environment=production",
+  "--service=agentlas-web",
+]);
+
 const localReady =
   (developerIdIdentities.length > 0 || (env.CSC_LINK && env.CSC_KEY_PASSWORD) || localSigningFileReady) &&
   notarizationReady &&
-  (env.GH_TOKEN || env.GH_AUTH_LOGIN);
+  (env.GH_TOKEN || env.GH_AUTH_LOGIN) &&
+  railwayAccess.ok;
 const workflowReady = agentlasSecrets.ok && missingWorkflowSecrets.length === 0;
 
 console.log(JSON.stringify({
@@ -109,20 +129,30 @@ console.log(JSON.stringify({
       ready: notaryProfile.ok,
     },
     env,
+    railwayAccess: {
+      ready: railwayAccess.ok,
+      output: railwayAccess.output,
+    },
     nextCommand: localReady
-      ? "AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac && npm run release:mac:publish && npm run release:web-env -- --apply"
-      : "Put Developer ID files in signing/ and configure agentlas-notary, or export APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID.",
+      ? "AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac && npm run release:mac:publish && npm run release:web-env -- --apply --restart --verify-url=https://agentlas.cloud/api/desktop/latest"
+      : "Put Developer ID files in signing/, configure notarization credentials, authenticate GitHub, and verify Railway with npm run release:railway:check.",
   },
   githubActions: {
     ready: workflowReady,
     repo: "agentlas-ai/agentlas-desktop",
     missingSecrets: missingWorkflowSecrets,
+    credentialValidity: "gh secret list verifies secret names only; release-signed-mac.yml checks Railway access with release:railway:check and skips only web env publishing if it is invalid.",
     nextCommand: workflowReady
       ? `gh workflow run release-signed-mac.yml -R agentlas-ai/agentlas-desktop -f version=${currentVersion} -f tag=v${currentVersion} -f draft=false -f apply_web_env=true`
       : "Set the missing GitHub Actions secrets, then run the desktop release workflow.",
   },
-  currentReleaseVerification: verification
+  localCachedReleaseVerification: verification
     ? {
+        stale: releaseEnvValues?.AGENTLAS_DESKTOP_VERSION
+          ? releaseEnvValues.AGENTLAS_DESKTOP_VERSION !== currentVersion
+          : null,
+        envVersion: releaseEnvValues?.AGENTLAS_DESKTOP_VERSION || null,
+        envTag: releaseEnvValues?.AGENTLAS_DESKTOP_RELEASE_TAG || null,
         ready: verification.ready,
         failures: verification.failures,
         artifacts: verification.artifacts?.map((artifact) => ({

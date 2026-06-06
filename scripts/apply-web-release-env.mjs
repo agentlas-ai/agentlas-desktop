@@ -2,6 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import https from "node:https";
 
 const desktopRoot = resolve(new URL("..", import.meta.url).pathname);
 const args = new Map(
@@ -13,6 +14,8 @@ const args = new Map(
 
 const envFile = resolve(desktopRoot, String(args.get("--env-file") || "release/desktop-release.production.env"));
 const apply = args.has("--apply");
+const restart = args.has("--restart");
+const verifyUrl = String(args.get("--verify-url") || "");
 const service = String(args.get("--service") || "agentlas-web");
 const environment = String(args.get("--environment") || "production");
 const railwayCwd = resolve(desktopRoot, String(args.get("--railway-cwd") || process.env.AGENTLAS_RAILWAY_CWD || "."));
@@ -72,7 +75,66 @@ const result = spawnSync(command[0], command.slice(1), {
 });
 if (result.status !== 0) process.exit(result.status || 1);
 
+if (restart) {
+  const restartResult = spawnSync("railway", ["restart", "--service", service, "--yes"], {
+    cwd: railwayCwd,
+    stdio: "inherit",
+    env: process.env,
+    timeout: Number(process.env.AGENTLAS_RAILWAY_RESTART_TIMEOUT_MS || 120_000),
+  });
+  if (restartResult.status !== 0 && !verifyUrl) process.exit(restartResult.status || 1);
+}
+
+if (verifyUrl) {
+  await waitForReleaseApi(verifyUrl, {
+    version: values.AGENTLAS_DESKTOP_VERSION,
+    tag: values.AGENTLAS_DESKTOP_RELEASE_TAG,
+    timeoutMs: Number(process.env.AGENTLAS_RELEASE_API_TIMEOUT_MS || 180_000),
+  });
+}
+
 function shellQuote(value) {
   if (/^[A-Za-z0-9_./:=@,+-]+$/.test(value)) return value;
   return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+async function waitForReleaseApi(url, expected) {
+  const start = Date.now();
+  let last = "";
+  while (Date.now() - start < expected.timeoutMs) {
+    try {
+      const body = await get(url);
+      const json = JSON.parse(body);
+      if (json.version === expected.version && json.releaseTag === expected.tag && json.ready === true) {
+        console.log(`Verified ${url}: version=${json.version} tag=${json.releaseTag} ready=${json.ready}`);
+        return;
+      }
+      last = `version=${json.version} tag=${json.releaseTag} ready=${json.ready}`;
+    } catch (error) {
+      last = error.message;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 5_000));
+  }
+  throw new Error(`Release API did not reflect version=${expected.version} tag=${expected.tag}: ${last}`);
+}
+
+function get(url) {
+  return new Promise((resolveGet, rejectGet) => {
+    https
+      .get(url, (response) => {
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          body += chunk;
+        });
+        response.on("end", () => {
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            rejectGet(new Error(`HTTP ${response.statusCode}: ${body.slice(0, 200)}`));
+            return;
+          }
+          resolveGet(body);
+        });
+      })
+      .on("error", rejectGet);
+  });
 }

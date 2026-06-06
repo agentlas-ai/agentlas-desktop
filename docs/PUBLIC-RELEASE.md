@@ -29,6 +29,10 @@ The `.p12`, private key, app-specific password, and local signing notes stay in
 ignored `signing/`. Only `signing/README.md` is committed so future agents know
 where release signing material lives.
 
+The broader release credential contract is tracked in
+`.agentlas/release-credentials.map.json`. It is intentionally non-secret: it
+lists credential names, storage homes, and validation commands only.
+
 If you prefer Keychain Access:
 
 1. Keychain Access > Certificate Assistant > Request a Certificate From a Certificate Authority.
@@ -60,10 +64,11 @@ The release scripts automatically read local certificate defaults from
 
 ```bash
 npm run release:readiness
+npm run release:railway:check -- --environment=production --service=agentlas-web
 AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac
 npm run release:mac:verify
 npm run release:mac:publish
-npm run release:web-env -- --apply
+npm run release:web-env -- --apply --restart --verify-url=https://agentlas.cloud/api/desktop/latest
 ```
 
 The last command writes the verified release metadata to Railway production so:
@@ -107,6 +112,12 @@ Required GitHub secrets for the **signed macOS** workflow on `agentlas-ai/agentl
 - `RAILWAY_PROJECT_ID`
 
 `MAC_DEVELOPER_ID_CERTIFICATE` must be a base64-encoded `.p12` containing the `Developer ID Application` certificate and its private key.
+
+`RAILWAY_TOKEN` must be valid for the Railway project that contains
+`agentlas-web` in the `production` environment. A secret with the right name is
+not enough. The release workflow checks access before signing starts; if
+Railway access is missing or invalid, the macOS release still publishes and only
+the web env publishing step is skipped.
 
 If you used `release:csr` and `release:p12`, set certificate secrets directly:
 

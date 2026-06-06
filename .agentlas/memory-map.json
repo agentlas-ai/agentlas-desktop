@@ -27,6 +27,12 @@
       "path": "signing/README.md",
       "owner": "Release maintainer",
       "indexed_by": "git-visible signing map; secret files under signing/ are local-only ignored"
+    },
+    {
+      "scope": "project",
+      "path": ".agentlas/release-credentials.map.json",
+      "owner": "Release maintainer",
+      "indexed_by": "git-visible non-secret release credential map for signing, GitHub Actions, and Railway"
     }
   ],
   "scope_aliases": {
@@ -67,6 +73,8 @@
     "signing/*.password",
     "signing/apple-app-specific-password",
     "release-signing/**",
+    ".agentlas/*secret*",
+    ".agentlas/*credential*.local*",
     "*.p12",
     "*.key",
     "*.csr",
