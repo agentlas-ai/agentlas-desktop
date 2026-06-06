@@ -47,11 +47,18 @@ build-resources/notarize-creds.json
 signing/*
 !signing/
 !signing/README.md
+credentials/*
+!credentials/
+!credentials/README.md
 release-signing/
 *.p12
 *.key
 *.csr
 *.pem
+*.p8
+*.mobileprovision
+*.jks
+*.keystore
 
 # Agentlas architecture: ignore volatile runtime memory, keep curated soul/sitemap
 .agentlas/memory-log.jsonl

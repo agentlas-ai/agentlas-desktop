@@ -36,6 +36,11 @@ const {
   ONTOLOGY_INBOX_DIR,
   ONTOLOGY_RUNTIME_FILE,
   ONTOLOGY_SOURCE_MANIFEST_FILE,
+  LOCAL_CREDENTIALS_MAP_FILE,
+  PROJECT_CREDENTIALS_DIR,
+  PROJECT_CREDENTIALS_README_FILE,
+  PROJECT_ENV_EXAMPLE_FILE,
+  PROJECT_SIGNING_DIR,
 } = require("../dist/electron/architecture/manifest.js");
 const { ensureProjectMemory } = require("../dist/electron/memory/project-files.js");
 
@@ -54,6 +59,11 @@ try {
   const ontologyRuntimePath = path.join(memoryDir, ONTOLOGY_RUNTIME_FILE);
   const ontologySourceManifestPath = path.join(memoryDir, ONTOLOGY_SOURCE_MANIFEST_FILE);
   const ontologyInboxPath = path.join(memoryDir, ONTOLOGY_INBOX_DIR);
+  const localCredentialsMapPath = path.join(memoryDir, LOCAL_CREDENTIALS_MAP_FILE);
+  const envExamplePath = path.join(projectPath, PROJECT_ENV_EXAMPLE_FILE);
+  const signingPath = path.join(projectPath, PROJECT_SIGNING_DIR);
+  const credentialsPath = path.join(projectPath, PROJECT_CREDENTIALS_DIR);
+  const gitignorePath = path.join(projectPath, ".gitignore");
   const openWorldCoveragePath = path.join(memoryDir, SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE);
   const consensusCoordinationPath = path.join(memoryDir, SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE);
   const taskCoveragePath = path.join(memoryDir, SUPER_ONTOLOGY_TASK_COVERAGE_FILE);
@@ -170,6 +180,22 @@ try {
   assert.ok(fs.existsSync(ontologyRuntimePath), "ontology runtime activation should be seeded");
   assert.ok(fs.existsSync(ontologySourceManifestPath), "ontology source manifest should be seeded");
   assert.ok(fs.statSync(ontologyInboxPath).isDirectory(), "ontology inbox should be seeded");
+  assert.ok(fs.existsSync(localCredentialsMapPath), "local credential map should be seeded");
+  assert.ok(fs.existsSync(envExamplePath), ".env.example should be seeded");
+  assert.ok(fs.statSync(signingPath).isDirectory(), "signing dir should be seeded");
+  assert.ok(fs.statSync(credentialsPath).isDirectory(), "credentials dir should be seeded");
+  assert.ok(fs.existsSync(path.join(signingPath, PROJECT_CREDENTIALS_README_FILE)), "signing README should be seeded");
+  assert.ok(fs.existsSync(path.join(credentialsPath, PROJECT_CREDENTIALS_README_FILE)), "credentials README should be seeded");
+
+  const localCredentials = JSON.parse(fs.readFileSync(localCredentialsMapPath, "utf8"));
+  assert.equal(localCredentials.kind, "agentlas-local-credential-store");
+  assert.deepEqual(localCredentials.envFiles, [".env", ".env.local"]);
+  assert.deepEqual(localCredentials.secretDirs, [PROJECT_SIGNING_DIR, PROJECT_CREDENTIALS_DIR]);
+  assert.deepEqual(localCredentials.entries, []);
+  const gitignore = fs.readFileSync(gitignorePath, "utf8");
+  assert.match(gitignore, /\.env\.local/);
+  assert.match(gitignore, new RegExp(`${PROJECT_SIGNING_DIR}/\\*`));
+  assert.match(gitignore, new RegExp(`${PROJECT_CREDENTIALS_DIR}/\\*`));
 
   const ontologyRuntime = JSON.parse(fs.readFileSync(ontologyRuntimePath, "utf8"));
   assert.equal(ontologyRuntime.kind, "agentlas-ontology-runtime");

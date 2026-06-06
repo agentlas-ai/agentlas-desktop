@@ -36,7 +36,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.5.31";
+export const ARCHITECTURE_VERSION = "1.5.32";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -106,6 +106,11 @@ export const PROJECT_MEMORY_DIR = ".agentlas";
 export const PROJECT_SOUL_FILE = "project-soul-memory.md";
 export const SITEMAP_FILE = "sitemap.json";
 export const MEMORY_LOG_FILE = "memory-log.jsonl";
+export const LOCAL_CREDENTIALS_MAP_FILE = "local-credentials.map.json";
+export const PROJECT_ENV_EXAMPLE_FILE = ".env.example";
+export const PROJECT_SIGNING_DIR = "signing";
+export const PROJECT_CREDENTIALS_DIR = "credentials";
+export const PROJECT_CREDENTIALS_README_FILE = "README.md";
 export const SKILL_REGISTRY_FILE = "skill-registry.json";
 export const SKILL_TRIALS_FILE = "skill-trials.jsonl";
 export const CURATOR_DECISIONS_FILE = "curator-decisions.jsonl";
@@ -164,6 +169,9 @@ block. Emit nothing when nothing durable was learned.
 
 Rules:
 - Never include secrets, credentials, API keys, raw logs, or full transcripts.
+- Real credential values may live only in local project .env/.env.local,
+  ignored signing/ or credentials/ files, or a local keychain/vault. Memory
+  Events may mention env names and local relative paths only.
 - One event per durable item. Keep "content" to one or two sentences.
 - "memory_kind": fact | decision | preference | risk | procedure | hypothesis | evidence | deprecation | conflict
 - "suggested_scope": user_identity | team_memory | project (this folder) | agent_repo | session (temporary) | discard
@@ -239,6 +247,10 @@ Update memory for: a durable user preference, a project decision, a stable archi
 fact, a repeated workflow pattern, an unresolved blocker, a completed milestone.
 Do NOT store: temporary speculation, credentials, raw logs, file dumps, or context that
 belongs to another project.
+If a release or integration needs a real credential, keep the value in this
+project's local .env, .env.local, signing/, or credentials/ store and
+record only env names, local relative paths, owner, and stale-check notes in
+${PROJECT_MEMORY_DIR}/${LOCAL_CREDENTIALS_MAP_FILE}.
 
 ## Operating artifacts (prefer these over loose summaries)
 problem statement · workstream map · decision log · risk/action log · evidence index ·
@@ -568,6 +580,10 @@ task — you manage memory QUALITY. Agents emit Memory Events; you own durable m
 ## Responsibilities
 - Validate incoming memory events; reject/redact secrets, credentials, private logs,
   customer data, and unsafe content.
+- Preserve local credential usability by keeping value-free env names, provider
+  names, project owners, stale-check notes, and local relative paths in
+  ${PROJECT_MEMORY_DIR}/${LOCAL_CREDENTIALS_MAP_FILE}; never copy scalar values or
+  credential file contents into memory.
 - Classify each event into a scope: user_identity | team_memory | project |
   agent_repo | session | discard. Treat agent_team as a legacy alias for
   team_memory.

@@ -8,12 +8,17 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   CURATOR_DECISIONS_FILE,
+  LOCAL_CREDENTIALS_MAP_FILE,
   MEMORY_LOG_FILE,
   ONTOLOGY_DB_FILE,
   ONTOLOGY_INBOX_DIR,
   ONTOLOGY_RUNTIME_FILE,
   ONTOLOGY_SOURCE_MANIFEST_FILE,
+  PROJECT_CREDENTIALS_DIR,
+  PROJECT_CREDENTIALS_README_FILE,
+  PROJECT_ENV_EXAMPLE_FILE,
   PROJECT_MEMORY_DIR,
+  PROJECT_SIGNING_DIR,
   PROJECT_SOUL_FILE,
   SITEMAP_FILE,
   SKILL_REGISTRY_FILE,
@@ -144,6 +149,127 @@ function ontologySourceManifestSkeleton(projectPath: string): string {
     null,
     2,
   );
+}
+
+function localCredentialsMapSkeleton(projectPath: string, projectName: string, now: string): string {
+  return JSON.stringify(
+    {
+      schemaVersion: "1.0",
+      kind: "agentlas-local-credential-store",
+      projectName,
+      projectRoot: projectPath,
+      createdAt: now,
+      updatedAt: now,
+      envFiles: [".env", ".env.local"],
+      secretDirs: [PROJECT_SIGNING_DIR, PROJECT_CREDENTIALS_DIR],
+      entries: [],
+    },
+    null,
+    2,
+  );
+}
+
+function envExampleTemplate(): string {
+  return `# Agentlas local project environment.
+# Copy this file to .env and fill real values only on this machine.
+
+# File-path style for tools that expect a local JSON credential file.
+SUPPLY_JSON_KEY=${PROJECT_SIGNING_DIR}/google-play.json
+
+# Inline JSON style for tools that support reading a credential directly from env.
+GOOGLE_PLAY_SERVICE_ACCOUNT_JSON=
+`;
+}
+
+function signingReadmeTemplate(): string {
+  return `# ${PROJECT_SIGNING_DIR}/
+
+Put release signing material here when this project needs local deploy or store
+automation. This folder is ignored by git except for this README.
+
+Examples:
+
+- Google Play release JSON used by SUPPLY_JSON_KEY
+- Apple signing certificates or provisioning profiles
+- Notarization or release upload keys
+
+Do not commit files from this folder.
+`;
+}
+
+function credentialsReadmeTemplate(): string {
+  return `# ${PROJECT_CREDENTIALS_DIR}/
+
+Put app or service configuration files here when this project needs local runtime
+access. This folder is ignored by git except for this README.
+
+Examples:
+
+- Android google-services.json
+- iOS GoogleService-Info.plist
+- provider config files used only by this local project
+
+Do not commit files from this folder.
+`;
+}
+
+function ensureAgentlasCredentialIgnore(projectPath: string): void {
+  const gitignorePath = path.join(projectPath, ".gitignore");
+  const marker = "# Agentlas local credentials";
+  const block = `${marker}
+.env
+.env.local
+.env.*.local
+._*
+${PROJECT_SIGNING_DIR}/*
+!${PROJECT_SIGNING_DIR}/
+!${PROJECT_SIGNING_DIR}/${PROJECT_CREDENTIALS_README_FILE}
+${PROJECT_CREDENTIALS_DIR}/*
+!${PROJECT_CREDENTIALS_DIR}/
+!${PROJECT_CREDENTIALS_DIR}/${PROJECT_CREDENTIALS_README_FILE}
+`;
+  let existing = "";
+  try {
+    existing = fs.readFileSync(gitignorePath, "utf8");
+  } catch {
+    existing = "";
+  }
+  if (existing.includes(marker)) {
+    if (!/^\._\*$/m.test(existing)) {
+      fs.writeFileSync(gitignorePath, `${existing.trimEnd()}\n._*\n`, "utf8");
+    }
+    return;
+  }
+  const next = existing.trimEnd()
+    ? `${existing.trimEnd()}\n\n${block}`
+    : `${block}`;
+  fs.writeFileSync(gitignorePath, next.endsWith("\n") ? next : `${next}\n`, "utf8");
+}
+
+function ensureLocalCredentialStore(projectPath: string, projectName: string, now: string): void {
+  const dir = projectMemoryDir(projectPath);
+  const signingDir = path.join(projectPath, PROJECT_SIGNING_DIR);
+  const credentialsDir = path.join(projectPath, PROJECT_CREDENTIALS_DIR);
+  fs.mkdirSync(signingDir, { recursive: true });
+  fs.mkdirSync(credentialsDir, { recursive: true });
+
+  const envExample = path.join(projectPath, PROJECT_ENV_EXAMPLE_FILE);
+  if (!fs.existsSync(envExample)) fs.writeFileSync(envExample, envExampleTemplate(), "utf8");
+
+  const signingReadme = path.join(signingDir, PROJECT_CREDENTIALS_README_FILE);
+  if (!fs.existsSync(signingReadme)) fs.writeFileSync(signingReadme, signingReadmeTemplate(), "utf8");
+
+  const credentialsReadme = path.join(credentialsDir, PROJECT_CREDENTIALS_README_FILE);
+  if (!fs.existsSync(credentialsReadme)) {
+    fs.writeFileSync(credentialsReadme, credentialsReadmeTemplate(), "utf8");
+  }
+
+  const localCredentialsMap = path.join(dir, LOCAL_CREDENTIALS_MAP_FILE);
+  if (!fs.existsSync(localCredentialsMap)) {
+    fs.writeFileSync(localCredentialsMap, localCredentialsMapSkeleton(projectPath, projectName, now), "utf8");
+  }
+
+  ensureAgentlasCredentialIgnore(projectPath);
 }
 
 function skillRegistrySkeleton(projectName: string): string {
@@ -3941,6 +4067,7 @@ export function ensureProjectMemory(
     fs.mkdirSync(dir, { recursive: true });
     const name = projectName || path.basename(projectPath) || "Project";
     const now = new Date().toISOString();
+    ensureLocalCredentialStore(projectPath, name, now);
 
     const soul = path.join(dir, PROJECT_SOUL_FILE);
     if (!fs.existsSync(soul)) fs.writeFileSync(soul, soulTemplate(name), "utf8");

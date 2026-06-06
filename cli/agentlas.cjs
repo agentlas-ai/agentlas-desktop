@@ -1265,12 +1265,178 @@ function seedBuiltins(db) {
 
 const SECRET_RE = [/\b(?:sk|pk|rk)-[A-Za-z0-9]{16,}/, /AKIA[0-9A-Z]{16}/, /ghp_[A-Za-z0-9]{20,}/, /xox[baprs]-[A-Za-z0-9-]{10,}/, /-----BEGIN [A-Z ]*PRIVATE KEY-----/, /\b(?:password|passwd|secret|api[_-]?key|access[_-]?token|bearer)\b\s*[:=]\s*\S+/i];
 
+function localCredentialConfigCli(arch) {
+  return {
+    mapFile: arch.localCredentialsMapFile || "local-credentials.map.json",
+    envExampleFile: arch.projectEnvExampleFile || ".env.example",
+    signingDir: arch.projectSigningDir || "signing",
+    credentialsDir: arch.projectCredentialsDir || "credentials",
+    readmeFile: arch.projectCredentialsReadmeFile || "README.md",
+  };
+}
+function projectEnvIdCli(projectPath) {
+  const raw = path.basename(projectPath || runCwd() || "project") || "project";
+  return raw.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "PROJECT";
+}
+function projectScopedGlobalEnvKeyCli(projectPath, key) {
+  return `AGENTLAS_PROJECT_${projectEnvIdCli(projectPath)}_${key}`;
+}
+function projectScopedEnvValuesCli(values, projectPath) {
+  const prefix = `AGENTLAS_PROJECT_${projectEnvIdCli(projectPath)}_`;
+  const result = {};
+  for (const [key, value] of Object.entries(values || {})) {
+    if (!key.startsWith(prefix)) continue;
+    const actualKey = key.slice(prefix.length);
+    if (/^[A-Z][A-Z0-9_]*$/.test(actualKey)) result[actualKey] = value;
+  }
+  return result;
+}
+function localCredentialsMapSkeletonCli(projectPath, projectName, cfg) {
+  const now = new Date().toISOString();
+  return {
+    schemaVersion: "1.0",
+    kind: "agentlas-local-credential-store",
+    projectName,
+    projectRoot: projectPath,
+    createdAt: now,
+    updatedAt: now,
+    envFiles: [".env", ".env.local"],
+    secretDirs: [cfg.signingDir, cfg.credentialsDir],
+    entries: [],
+  };
+}
+function envExampleContentCli(cfg) {
+  return `# Agentlas local project environment.
+# Copy this file to .env and fill real values only on this machine.
+
+# File-path style for tools that expect a local JSON credential file.
+SUPPLY_JSON_KEY=${cfg.signingDir}/google-play.json
+
+# Inline JSON style for tools that support reading a credential directly from env.
+GOOGLE_PLAY_SERVICE_ACCOUNT_JSON=
+`;
+}
+function signingReadmeContentCli(cfg) {
+  return `# ${cfg.signingDir}/
+
+Put release signing material here when this project needs local deploy or store
+automation. This folder is ignored by git except for this README.
+
+Examples:
+
+- Google Play release JSON used by SUPPLY_JSON_KEY
+- Apple signing certificates or provisioning profiles
+- Notarization or release upload keys
+
+Do not commit files from this folder.
+`;
+}
+function credentialsReadmeContentCli(cfg) {
+  return `# ${cfg.credentialsDir}/
+
+Put app or service configuration files here when this project needs local runtime
+access. This folder is ignored by git except for this README.
+
+Examples:
+
+- Android google-services.json
+- iOS GoogleService-Info.plist
+- provider config files used only by this local project
+
+Do not commit files from this folder.
+`;
+}
+function ensureAgentlasCredentialIgnoreCli(projectPath, cfg) {
+  const gitignorePath = path.join(projectPath, ".gitignore");
+  const marker = "# Agentlas local credentials";
+  const block = `${marker}
+.env
+.env.local
+.env.*.local
+._*
+${cfg.signingDir}/*
+!${cfg.signingDir}/
+!${cfg.signingDir}/${cfg.readmeFile}
+${cfg.credentialsDir}/*
+!${cfg.credentialsDir}/
+!${cfg.credentialsDir}/${cfg.readmeFile}
+`;
+  let existing = "";
+  try { existing = fs.readFileSync(gitignorePath, "utf8"); } catch { existing = ""; }
+  if (existing.includes(marker)) {
+    if (!/^\._\*$/m.test(existing)) fs.writeFileSync(gitignorePath, `${existing.trimEnd()}\n._*\n`, "utf8");
+    return;
+  }
+  const next = existing.trimEnd() ? `${existing.trimEnd()}\n\n${block}` : block;
+  fs.writeFileSync(gitignorePath, next.endsWith("\n") ? next : next + "\n", "utf8");
+}
+function ensureLocalCredentialStoreCli(projectPath, projectName, arch) {
+  const cfg = localCredentialConfigCli(arch || loadArch());
+  const dir = path.join(projectPath, (arch && arch.memoryDir) || ".agentlas");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(path.join(projectPath, cfg.signingDir), { recursive: true });
+  fs.mkdirSync(path.join(projectPath, cfg.credentialsDir), { recursive: true });
+  const envExample = path.join(projectPath, cfg.envExampleFile);
+  if (!fs.existsSync(envExample)) fs.writeFileSync(envExample, envExampleContentCli(cfg), "utf8");
+  const signingReadme = path.join(projectPath, cfg.signingDir, cfg.readmeFile);
+  if (!fs.existsSync(signingReadme)) fs.writeFileSync(signingReadme, signingReadmeContentCli(cfg), "utf8");
+  const credentialsReadme = path.join(projectPath, cfg.credentialsDir, cfg.readmeFile);
+  if (!fs.existsSync(credentialsReadme)) fs.writeFileSync(credentialsReadme, credentialsReadmeContentCli(cfg), "utf8");
+  const mapPath = path.join(dir, cfg.mapFile);
+  if (!fs.existsSync(mapPath)) {
+    fs.writeFileSync(mapPath, JSON.stringify(localCredentialsMapSkeletonCli(projectPath, projectName, cfg), null, 2) + "\n", "utf8");
+  }
+  ensureAgentlasCredentialIgnoreCli(projectPath, cfg);
+  return { cfg, mapPath };
+}
+function readJsonObjectCli(file, fallback) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+function upsertLocalCredentialMapCli(projectPath, projectName, arch, entry) {
+  const { cfg, mapPath } = ensureLocalCredentialStoreCli(projectPath, projectName, arch || loadArch());
+  const data = readJsonObjectCli(mapPath, localCredentialsMapSkeletonCli(projectPath, projectName, cfg));
+  const now = new Date().toISOString();
+  data.updatedAt = now;
+  if (!Array.isArray(data.entries)) data.entries = [];
+  const id = entry.id || `${entry.provider || "credential"}:${(entry.env || []).join(",") || (entry.localFiles || []).join(",")}`;
+  const clean = {
+    id,
+    provider: entry.provider || "unknown",
+    env: Array.isArray(entry.env) ? [...new Set(entry.env.filter(Boolean))] : [],
+    localFiles: Array.isArray(entry.localFiles) ? [...new Set(entry.localFiles.filter(Boolean))] : [],
+    owner: entry.owner || "project",
+    valueMaterialized: Boolean(entry.valueMaterialized),
+    storage: Array.isArray(entry.storage) ? [...new Set(entry.storage.filter(Boolean))] : [],
+    requiredFor: Array.isArray(entry.requiredFor) ? [...new Set(entry.requiredFor.filter(Boolean))] : [],
+    lastVerified: entry.lastVerified || null,
+    staleCheck: entry.staleCheck || null,
+    updatedAt: now,
+  };
+  const idx = data.entries.findIndex((row) => row && row.id === id);
+  if (idx >= 0) data.entries[idx] = { ...data.entries[idx], ...clean };
+  else data.entries.push(clean);
+  fs.writeFileSync(mapPath, JSON.stringify(data, null, 2) + "\n", "utf8");
+}
+function safeCredentialDestRelCli(destRel) {
+  const rel = path.normalize(String(destRel || "")).replace(/\\/g, "/");
+  if (!rel || path.isAbsolute(rel) || rel === "." || rel.startsWith("../") || rel.includes("\0")) {
+    fail("credential destination must be a relative path inside the project");
+  }
+  return rel;
+}
+
 function ensureProjectMemoryCli(projectPath, projectName) {
   const arch = loadArch();
   try {
     const dir = path.join(projectPath, arch.memoryDir);
     fs.mkdirSync(dir, { recursive: true });
     const name = projectName || path.basename(projectPath) || "Project";
+    ensureLocalCredentialStoreCli(projectPath, name, arch);
     const soul = path.join(dir, arch.soulFile);
     if (!fs.existsSync(soul)) {
       fs.writeFileSync(soul, `# Project Soul Memory: ${name}\n\nDurable memory for this project folder, maintained by Agentlas.\n\n## Project Purpose\n\n## Current State\n\n## Decisions\n\n## Risks\n\n## Auto-curated memory\n`, "utf8");
@@ -5205,7 +5371,7 @@ function loadGlobalConnectionSkill() {
   } catch {
     return [
       "## Connecting accounts for the user (always-on background skill)",
-      "When the task needs Slack, Gmail, Google Cloud, Firebase, a database, or another third-party service, open the provider website with the browser tool when available, guide the user one tiny step at a time, and save the issued credential with `agentlas creds save --provider <name> --key <ENV_NAME> --value \"<value>\" --project \"<cwd>\"`.",
+      "When the task needs Slack, Gmail, Google Cloud, Firebase, a database, store release access, or another third-party service, open the provider website with the browser tool when available, guide the user one tiny step at a time, and save the issued credential with `agentlas creds save --provider <name> --key <ENV_NAME> --value \"<value>\" --project \"<cwd>\"` or `agentlas creds file --source <path> --provider <name> --env <ENV_NAME> --project \"<cwd>\"`.",
       "Do not lecture the user about security in this local single-user setup; make the connection effortless.",
     ].join("\n\n");
   }
@@ -5460,15 +5626,22 @@ function agentEnvDirCli(agentId) {
   if (route && route.path) return route.path;
   return null;
 }
-function readVaultEnvValuesCli(keys) {
+function readVaultEnvValuesCli(keys, projectPath) {
   const keytar = readKeytar();
   const result = {};
   if (!keytar || !keys.length) return Promise.resolve(result);
   return Promise.all(
     keys.map((key) =>
-      keytar
-        .getPassword(SERVICE, ENV_PREFIX + key)
-        .then((value) => {
+      Promise.resolve()
+        .then(async () => {
+          if (projectPath) {
+            const scoped = await keytar.getPassword(SERVICE, ENV_PREFIX + projectScopedGlobalEnvKeyCli(projectPath, key)).catch(() => null);
+            if (scoped) {
+              result[key] = scoped;
+              return;
+            }
+          }
+          const value = await keytar.getPassword(SERVICE, ENV_PREFIX + key).catch(() => null);
           if (value) result[key] = value;
         })
         .catch(() => {}),
@@ -5484,8 +5657,12 @@ async function buildChildEnvCli(db, ctx) {
       env[key] = value;
     }
   };
-  apply(readDotEnvFileCli(path.join(userDataDir(), "credentials.env")), false);
-  apply(readDotEnvFileCli(path.join(os.homedir(), ".agentlas", "credentials.env")), false);
+  const globalCredentials = {
+    ...readDotEnvFileCli(path.join(userDataDir(), "credentials.env")),
+    ...readDotEnvFileCli(path.join(os.homedir(), ".agentlas", "credentials.env")),
+  };
+  apply(globalCredentials, false);
+  if (ctx && ctx.projectPath) apply(projectScopedEnvValuesCli(globalCredentials, ctx.projectPath), true);
   if (ctx && ctx.cwd) apply(readDotEnvDirCli(ctx.cwd), true);
   if (ctx && ctx.projectPath) apply(readDotEnvDirCli(ctx.projectPath), true);
   const agentDir = agentEnvDirCli(ctx && ctx.agentId);
@@ -5497,7 +5674,7 @@ async function buildChildEnvCli(db, ctx) {
   for (const req of agentEnvRequirementsCli(db, ctx && ctx.agentId)) {
     if (req && req.key) keys.add(req.key);
   }
-  const vaultValues = await readVaultEnvValuesCli([...keys].filter((key) => !env[key]));
+  const vaultValues = await readVaultEnvValuesCli([...keys].filter((key) => !env[key]), ctx && ctx.projectPath);
   apply(vaultValues, false);
   env.AGENTLAS_MULTIMODAL_IMAGE_PROVIDER = settings.imageProvider;
   env.AGENTLAS_MULTIMODAL_VIDEO_PROVIDER = settings.videoProvider;
@@ -5855,10 +6032,72 @@ function upsertEnvLine(file, key, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, body, "utf8");
 }
+async function cmdCredsFile(db, args) {
+  const f = parseCredFlags(args);
+  const source = typeof f.source === "string" ? f.source : typeof f.path === "string" ? f.path : "";
+  if (!source) fail("usage: agentlas creds file --source <path> [--provider <name>] [--env <ENV_NAME>] [--dest <relative-path>] [--project <path>] [--force]");
+  const project = typeof f.project === "string" && f.project ? f.project : activeProjectPath(db);
+  if (!project) fail("creds file requires a project path");
+  const provider = typeof f.provider === "string" && f.provider ? f.provider : "credential_file";
+  const envKey = typeof f.env === "string" && f.env ? f.env.trim() : "";
+  if (envKey && !/^[A-Z][A-Z0-9_]*$/.test(envKey)) fail("credential env name must look like ENV_NAME");
+
+  const arch = loadArch();
+  const cfg = localCredentialConfigCli(arch);
+  const projectName = path.basename(project) || "Project";
+  ensureLocalCredentialStoreCli(project, projectName, arch);
+
+  const sourceAbs = path.resolve(runCwd(), source);
+  let stat;
+  try { stat = fs.statSync(sourceAbs); } catch { fail(`credential source not found: ${source}`); }
+  if (!stat.isFile()) fail(`credential source is not a file: ${source}`);
+
+  const base = path.basename(sourceAbs);
+  const lower = base.toLowerCase();
+  const defaultDir = lower.includes("google-services") || lower.includes("googleservice-info")
+    ? cfg.credentialsDir
+    : cfg.signingDir;
+  const destRel = safeCredentialDestRelCli(
+    typeof f.dest === "string" && f.dest ? f.dest : path.join(defaultDir, base),
+  );
+  const destAbs = path.join(project, destRel);
+  if (!path.resolve(destAbs).startsWith(path.resolve(project) + path.sep)) {
+    fail("credential destination must stay inside the project");
+  }
+  if (fs.existsSync(destAbs) && !f.force) fail(`credential destination already exists: ${destRel} (use --force to replace)`);
+
+  fs.mkdirSync(path.dirname(destAbs), { recursive: true });
+  fs.copyFileSync(sourceAbs, destAbs);
+  try { fs.chmodSync(destAbs, 0o600); } catch { /* best-effort */ }
+
+  const targets = [destRel];
+  if (envKey) {
+    try { upsertEnvLine(path.join(project, ".env"), envKey, destRel); targets.push("project .env"); }
+    catch (e) { process.stderr.write(".env write failed: " + e.message + "\n"); }
+    const scopedKey = projectScopedGlobalEnvKeyCli(project, envKey);
+    try { upsertEnvLine(path.join(userDataDir(), "credentials.env"), scopedKey, destAbs); targets.push("global project env"); } catch { /* best-effort */ }
+    try { upsertEnvLine(path.join(os.homedir(), ".agentlas", "credentials.env"), scopedKey, destAbs); } catch { /* best-effort */ }
+  }
+
+  upsertLocalCredentialMapCli(project, projectName, arch, {
+    id: typeof f.id === "string" && f.id ? f.id : `${provider}:${envKey || destRel}`,
+    provider,
+    env: envKey ? [envKey] : [],
+    localFiles: [destRel],
+    owner: "project",
+    valueMaterialized: true,
+    storage: envKey ? ["project_file", "project_env", "global_project_env"] : ["project_file"],
+    requiredFor: typeof f.requiredFor === "string" && f.requiredFor ? [f.requiredFor] : [],
+    staleCheck: typeof f.staleCheck === "string" && f.staleCheck ? f.staleCheck : "Validate access before release or deploy.",
+  });
+
+  out(`✓ saved credential file for ${provider} — ${targets.join(", ")}.`);
+}
 async function cmdCreds(db, args) {
   const sub = args[0];
+  if (sub === "file") return cmdCredsFile(db, args.slice(1));
   if (sub !== "save") {
-    fail('usage: agentlas creds save --provider <name> --key <ENV_NAME> --value <value> [--project <path>]');
+    fail('usage: agentlas creds save --provider <name> --key <ENV_NAME> --value <value> [--project <path>] OR agentlas creds file --source <path> [--env <ENV_NAME>]');
   }
   const f = parseCredFlags(args.slice(1));
   const key = typeof f.key === "string" ? f.key.trim() : "";
@@ -5867,11 +6106,15 @@ async function cmdCreds(db, args) {
   const provider = typeof f.provider === "string" && f.provider ? f.provider : key;
   const project = typeof f.project === "string" && f.project ? f.project : activeProjectPath(db);
   const targets = [];
+  const arch = loadArch();
+  const projectName = project ? path.basename(project) || "Project" : "Project";
+  if (project) ensureLocalCredentialStoreCli(project, projectName, arch);
 
-  // 1) keychain vault — MCP 실행 시 자식 env로 자동 주입되는 정본 저장소
+  // 1) keychain vault — project-scoped when a project is active.
   const keytar = readKeytar();
   if (keytar) {
-    try { await keytar.setPassword(SERVICE, ENV_PREFIX + key, value); targets.push("vault"); }
+    const vaultKey = project ? projectScopedGlobalEnvKeyCli(project, key) : key;
+    try { await keytar.setPassword(SERVICE, ENV_PREFIX + vaultKey, value); targets.push(project ? "project vault" : "vault"); }
     catch (e) { process.stderr.write("vault save failed: " + e.message + "\n"); }
   }
   // 2) 프로젝트 .env (평문)
@@ -5884,14 +6127,27 @@ async function cmdCreds(db, args) {
       fs.mkdirSync(soulDir, { recursive: true });
       fs.appendFileSync(
         path.join(soulDir, "project-soul-memory.md"),
-        `\n- Connected ${provider}: ${key} saved (vault + .env) during first setup.\n`,
+        `\n- Connected ${provider}: ${key} saved in local credential store during first setup.\n`,
         "utf8",
       );
     } catch { /* best-effort */ }
+    try {
+      upsertLocalCredentialMapCli(project, projectName, arch, {
+        id: `${provider}:${key}`,
+        provider,
+        env: [key],
+        localFiles: [],
+        owner: "project",
+        valueMaterialized: true,
+        storage: ["project_env", "project_vault", "global_project_env"],
+        staleCheck: "Validate access before release or deploy.",
+      });
+    } catch { /* best-effort */ }
   }
-  // 4) 전역 메모리 (평문) — 프로젝트와 무관하게 재사용
-  try { upsertEnvLine(path.join(userDataDir(), "credentials.env"), key, value); targets.push("global memory"); } catch { /* best-effort */ }
-  try { upsertEnvLine(path.join(os.homedir(), ".agentlas", "credentials.env"), key, value); } catch { /* best-effort */ }
+  // 4) 전역 로컬 env — 프로젝트가 있으면 프로젝트 이름이 붙은 키로 저장
+  const globalKey = project ? projectScopedGlobalEnvKeyCli(project, key) : key;
+  try { upsertEnvLine(path.join(userDataDir(), "credentials.env"), globalKey, value); targets.push(project ? "global project env" : "global memory"); } catch { /* best-effort */ }
+  try { upsertEnvLine(path.join(os.homedir(), ".agentlas", "credentials.env"), globalKey, value); } catch { /* best-effort */ }
 
   out(`✓ connected ${provider} — saved ${key} to ${targets.join(", ") || "(nowhere — check keytar)"}.`);
 }
@@ -6001,7 +6257,8 @@ function cmdHelp() {
       "  cloud package <path>  package + static security review for Agentlas Cloud",
       "  cloud publish <path>  register after local review (submitter runtime only)",
       "  cloud install <slug>  download/install a cloud marketplace agent",
-      "  creds save ...        save an issued key (vault + project .env + global memory)",
+      "  creds save ...        save an issued key (project vault + project .env + project-scoped global env)",
+      "  creds file ...        copy a credential file into signing/credentials and set an env path",
       "  doctor                check runtimes and data",
       "  setup                 re-run first-launch setup (language · runtime · permission)",
       "  version               print the Agentlas CLI version",
