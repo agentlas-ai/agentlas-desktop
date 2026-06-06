@@ -22,6 +22,7 @@ const {
   SUPER_ONTOLOGY_SOURCE_LINEAGE_VERSION_FILE,
   SUPER_ONTOLOGY_ENTITY_IDENTITY_RESOLUTION_FILE,
   SUPER_ONTOLOGY_TEMPORAL_STATE_TRANSITION_FILE,
+  SUPER_ONTOLOGY_CAPABILITY_DELEGATION_AUTHORITY_FILE,
   SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
@@ -82,6 +83,10 @@ try {
     memoryDir,
     SUPER_ONTOLOGY_TEMPORAL_STATE_TRANSITION_FILE,
   );
+  const capabilityDelegationAuthorityPath = path.join(
+    memoryDir,
+    SUPER_ONTOLOGY_CAPABILITY_DELEGATION_AUTHORITY_FILE,
+  );
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(openWorldCoveragePath), "super ontology open-world coverage should be seeded");
@@ -121,6 +126,10 @@ try {
   assert.ok(
     fs.existsSync(temporalStateTransitionPath),
     "super ontology temporal state transition should be seeded",
+  );
+  assert.ok(
+    fs.existsSync(capabilityDelegationAuthorityPath),
+    "super ontology capability delegation authority should be seeded",
   );
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
@@ -193,6 +202,11 @@ try {
   assert.equal(contract.promotionPolicy.timelessStateRuntimeWritesBlocked, true);
   assert.equal(contract.promotionPolicy.eventReplayRequired, true);
   assert.equal(contract.promotionPolicy.projectionVersionRequired, true);
+  assert.equal(contract.promotionPolicy.capabilityDelegationAuthorityRequired, true);
+  assert.equal(contract.promotionPolicy.unscopedCapabilityRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.delegationChainRequired, true);
+  assert.equal(contract.promotionPolicy.capabilityAttenuationRequired, true);
+  assert.equal(contract.promotionPolicy.purposeBoundCapabilityRequired, true);
   assert.equal(contract.promotionPolicy.directDurableMemoryWritesBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
@@ -262,6 +276,10 @@ try {
     contract.layers.includes("temporal_state_transition_contract"),
     "contract should include temporal state transition gate",
   );
+  assert.ok(
+    contract.layers.includes("capability_delegation_authority_contract"),
+    "contract should include capability delegation authority gate",
+  );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(
     contract.evidenceLedgers.openWorldCoverage,
@@ -330,6 +348,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.temporalStateTransition,
     `.agentlas/${SUPER_ONTOLOGY_TEMPORAL_STATE_TRANSITION_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.capabilityDelegationAuthority,
+    `.agentlas/${SUPER_ONTOLOGY_CAPABILITY_DELEGATION_AUTHORITY_FILE}`,
   );
   const openWorldCoverage = JSON.parse(fs.readFileSync(openWorldCoveragePath, "utf8"));
   assert.equal(openWorldCoverage.kind, "agentlas-super-ontology-open-world-coverage");
@@ -1014,6 +1036,60 @@ try {
       temporalStateTransition.hardStops.includes("materialized_view_as_source_of_truth") &&
       temporalStateTransition.hardStops.includes("graph_edge_without_temporal_bounds"),
     "temporal state transition should block snapshot, LLM summary, materialized view, and unbounded-edge shortcuts",
+  );
+  const capabilityDelegationAuthority = JSON.parse(fs.readFileSync(capabilityDelegationAuthorityPath, "utf8"));
+  assert.equal(
+    capabilityDelegationAuthority.kind,
+    "agentlas-super-ontology-capability-delegation-authority",
+  );
+  assert.equal(capabilityDelegationAuthority.runtimePromotionAllowed, false);
+  assert.equal(
+    capabilityDelegationAuthority.defaultDecision,
+    "capability_evidence_required_before_graph_memory_public_training_tool_route_scheduled_permission_financial_release_customer_or_physical_authority",
+  );
+  assert.ok(
+    capabilityDelegationAuthority.principalTypes.includes("delegated_agent") &&
+      capabilityDelegationAuthority.principalTypes.includes("service_account") &&
+      capabilityDelegationAuthority.principalTypes.includes("oauth_client") &&
+      capabilityDelegationAuthority.principalTypes.includes("mcp_tool"),
+    "capability delegation authority should include delegated-agent, service-account, OAuth, and MCP principals",
+  );
+  assert.ok(
+    capabilityDelegationAuthority.capabilityArtifactTypes.includes("oauth_scope") &&
+      capabilityDelegationAuthority.capabilityArtifactTypes.includes("api_key") &&
+      capabilityDelegationAuthority.capabilityArtifactTypes.includes("tool_schema") &&
+      capabilityDelegationAuthority.capabilityArtifactTypes.includes("capability_token"),
+    "capability delegation authority should include OAuth scope, API key, tool schema, and capability token artifacts",
+  );
+  assert.ok(
+    capabilityDelegationAuthority.requiredCapabilityEvidence.includes("delegation_chain") &&
+      capabilityDelegationAuthority.requiredCapabilityEvidence.includes("policy_decision") &&
+      capabilityDelegationAuthority.requiredCapabilityEvidence.includes("scope") &&
+      capabilityDelegationAuthority.requiredCapabilityEvidence.includes("purpose") &&
+      capabilityDelegationAuthority.requiredCapabilityEvidence.includes("caveat_set") &&
+      capabilityDelegationAuthority.requiredCapabilityEvidence.includes("revocation_check"),
+    "capability delegation authority should require delegation, policy, scope, purpose, caveat, and revocation evidence",
+  );
+  assert.ok(
+    capabilityDelegationAuthority.authoritySurfaces.includes("graph_authority") &&
+      capabilityDelegationAuthority.authoritySurfaces.includes("memory_authority") &&
+      capabilityDelegationAuthority.authoritySurfaces.includes("tool_authority") &&
+      capabilityDelegationAuthority.authoritySurfaces.includes("customer_output_authority"),
+    "capability delegation authority should cover graph, memory, tool, and customer-output authority surfaces",
+  );
+  assert.ok(
+    capabilityDelegationAuthority.hardStops.includes("role_as_capability") &&
+      capabilityDelegationAuthority.hardStops.includes("oauth_scope_as_task_permission") &&
+      capabilityDelegationAuthority.hardStops.includes("api_key_as_actor") &&
+      capabilityDelegationAuthority.hardStops.includes("tool_schema_as_authorization"),
+    "capability delegation authority should block role, OAuth, API-key, and tool-schema shortcuts",
+  );
+  assert.ok(
+    capabilityDelegationAuthority.researchBasis.includes("zero_trust") &&
+      capabilityDelegationAuthority.researchBasis.includes("abac") &&
+      capabilityDelegationAuthority.researchBasis.includes("zanzibar") &&
+      capabilityDelegationAuthority.researchBasis.includes("macaroons"),
+    "capability delegation authority should retain zero-trust, ABAC, Zanzibar, and Macaroons research anchors",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");

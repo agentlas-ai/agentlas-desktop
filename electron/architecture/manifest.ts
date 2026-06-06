@@ -36,7 +36,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
 
-export const ARCHITECTURE_VERSION = "1.5.27";
+export const ARCHITECTURE_VERSION = "1.5.28";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -50,6 +50,7 @@ export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
 // superOntologySourceLineageVersionSkeleton.
 // superOntologyEntityIdentityResolutionSkeleton.
 // superOntologyTemporalStateTransitionSkeleton.
+// superOntologyCapabilityDelegationAuthoritySkeleton.
 
 export type MemoryScope =
   | "user_identity"
@@ -132,6 +133,8 @@ export const SUPER_ONTOLOGY_ENTITY_IDENTITY_RESOLUTION_FILE =
   "super-ontology-entity-identity-resolution.json";
 export const SUPER_ONTOLOGY_TEMPORAL_STATE_TRANSITION_FILE =
   "super-ontology-temporal-state-transition.json";
+export const SUPER_ONTOLOGY_CAPABILITY_DELEGATION_AUTHORITY_FILE =
+  "super-ontology-capability-delegation-authority.json";
 export const SUPER_ONTOLOGY_REPLAYS_FILE = "super-ontology-replays.jsonl";
 export const SUPER_ONTOLOGY_EVIDENCE_FILE = "super-ontology-evidence.jsonl";
 export const SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE = "super-ontology-memory-bridge.jsonl";
@@ -337,11 +340,12 @@ the task size:
 	  super-ontology-source-lineage-version,
 	  super-ontology-entity-identity-resolution,
 	  super-ontology-temporal-state-transition,
+	  super-ontology-capability-delegation-authority,
 	  super-ontology-replays,
   super-ontology-evidence, and super-ontology-memory-bridge files as
   candidate-only adaptive knowledge governance metadata. Open-world coverage
 	  ledger keys include objectiveProxyValidity, stakeholderPreferenceGovernance,
-	  normativeAuthorityDrift, sideEffectContainment, sourceLineageVersion, entityIdentityResolution, temporalStateTransition, and memoryCuratorBridge
+	  normativeAuthorityDrift, sideEffectContainment, sourceLineageVersion, entityIdentityResolution, temporalStateTransition, capabilityDelegationAuthority, and memoryCuratorBridge
 	  for cross-surface sync checks. Open-world coverage
   must lower authority for new world/task/modality/fault/authority/write
   combinations before action. Consensus coordination must treat agent agreement,
@@ -408,14 +412,22 @@ the task size:
 	  LLM-generated canonical labels from becoming same-entity authority without
 	  canonical id, source-system namespace, source span, negative evidence,
 	  temporal validity, privacy basis, owner review, merge/split policy, audit,
-	  and rollback. Keep
+	  and rollback. Capability delegation authority contracts must block roles,
+	  OAuth scopes, API keys, service accounts, session cookies, tool schemas,
+	  cached policy decisions, broad approvals, and child-agent tokens from
+	  becoming graph, memory, public, training, tool, route, scheduled,
+	  permission, financial, release, customer-output, or physical authority
+	  without actor identity, task, operation, resource, scope, purpose,
+	  delegation chain, caveats, revocation, audit, rollback, and post-action
+	  verification. Keep
 	  graph writes and direct durable memory writes disabled until
   shadow/canary/rollback evidence, homeostasis review, adversarial provenance
   review, epistemic calibration review, semantic alignment review, resilience
   control review, invariant verification, observability telemetry review,
 	  objective proxy validity review, stakeholder preference governance review,
 	  normative authority drift review, side-effect containment review,
-	  source lineage version review, entity identity resolution review, and Memory
+	  source lineage version review, entity identity resolution review,
+	  temporal state transition review, capability delegation authority review, and Memory
 	  Curator review exist;
 - PM Soul or project owner loop for continuity;
 - Memory Curator rules for durable memory, dedup, scope, and redaction;
@@ -431,6 +443,7 @@ the task size:
   verification, observability telemetry review, objective proxy validity review,
   stakeholder preference governance review,
   normative authority drift review,
+  capability delegation authority review,
   rollback, and sync review
   approve a later phase;
 - hierarchy when useful: HQ/orchestrator -> builders/workers -> QA/evidence gate;
