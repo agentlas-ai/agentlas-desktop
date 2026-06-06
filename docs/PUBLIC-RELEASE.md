@@ -123,6 +123,16 @@ not enough. The release workflow checks access before signing starts; if
 Railway access is missing or invalid, the macOS release still publishes and only
 the web env publishing step is skipped.
 
+Do not copy the local Railway CLI `user.token` from `~/.railway/config.json`
+into GitHub Actions. That token can support an interactive local CLI login while
+still failing as `RAILWAY_TOKEN` in CI. Use a Railway token that works when
+passed through the `RAILWAY_TOKEN` environment variable and verify it with:
+
+```bash
+RAILWAY_TOKEN=... RAILWAY_PROJECT_ID=... \
+  npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web
+```
+
 If you used `release:csr` and `release:p12`, set certificate secrets directly:
 
 ```bash

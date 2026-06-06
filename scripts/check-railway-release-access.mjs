@@ -51,7 +51,7 @@ if (project) {
   ]);
   if (!link.ok) {
     fail(
-      `Railway release credentials cannot access service=${service} environment=${environment}. Check RAILWAY_TOKEN and RAILWAY_PROJECT_ID.`,
+      `Railway release credentials cannot access service=${service} environment=${environment}. Check that RAILWAY_TOKEN is valid as a CI environment token and has access to RAILWAY_PROJECT_ID. A local Railway CLI login token is not sufficient.`,
       link,
     );
   }
