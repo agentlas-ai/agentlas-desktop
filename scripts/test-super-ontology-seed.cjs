@@ -41,6 +41,7 @@ const {
   PROJECT_CREDENTIALS_README_FILE,
   PROJECT_ENV_EXAMPLE_FILE,
   PROJECT_SIGNING_DIR,
+  PROJECT_SOUL_FILE,
 } = require("../dist/electron/architecture/manifest.js");
 const { ensureProjectMemory } = require("../dist/electron/memory/project-files.js");
 
@@ -60,6 +61,7 @@ try {
   const ontologySourceManifestPath = path.join(memoryDir, ONTOLOGY_SOURCE_MANIFEST_FILE);
   const ontologyInboxPath = path.join(memoryDir, ONTOLOGY_INBOX_DIR);
   const localCredentialsMapPath = path.join(memoryDir, LOCAL_CREDENTIALS_MAP_FILE);
+  const projectSoulPath = path.join(memoryDir, PROJECT_SOUL_FILE);
   const envExamplePath = path.join(projectPath, PROJECT_ENV_EXAMPLE_FILE);
   const signingPath = path.join(projectPath, PROJECT_SIGNING_DIR);
   const credentialsPath = path.join(projectPath, PROJECT_CREDENTIALS_DIR);
@@ -180,12 +182,18 @@ try {
   assert.ok(fs.existsSync(ontologyRuntimePath), "ontology runtime activation should be seeded");
   assert.ok(fs.existsSync(ontologySourceManifestPath), "ontology source manifest should be seeded");
   assert.ok(fs.statSync(ontologyInboxPath).isDirectory(), "ontology inbox should be seeded");
+  assert.ok(fs.existsSync(projectSoulPath), "project soul memory should be seeded");
   assert.ok(fs.existsSync(localCredentialsMapPath), "local credential map should be seeded");
   assert.ok(fs.existsSync(envExamplePath), ".env.example should be seeded");
   assert.ok(fs.statSync(signingPath).isDirectory(), "signing dir should be seeded");
   assert.ok(fs.statSync(credentialsPath).isDirectory(), "credentials dir should be seeded");
   assert.ok(fs.existsSync(path.join(signingPath, PROJECT_CREDENTIALS_README_FILE)), "signing README should be seeded");
   assert.ok(fs.existsSync(path.join(credentialsPath, PROJECT_CREDENTIALS_README_FILE)), "credentials README should be seeded");
+
+  const projectSoul = fs.readFileSync(projectSoulPath, "utf8");
+  assert.match(projectSoul, /## Local Credential Index \(read first\)/);
+  assert.match(projectSoul, /local-credentials\.map\.json/);
+  assert.match(projectSoul, /AGENTLAS_PROJECT_<PROJECT>_<ENV_NAME>/);
 
   const localCredentials = JSON.parse(fs.readFileSync(localCredentialsMapPath, "utf8"));
   assert.equal(localCredentials.kind, "agentlas-local-credential-store");
@@ -204,6 +212,9 @@ try {
   assert.equal(ontologyRuntime.autoIngestPolicy.neverScanHomeDirectory, true);
   assert.equal(ontologyRuntime.autoIngestPolicy.neverScanSiblingProjects, true);
   assert.equal(ontologyRuntime.autoIngestPolicy.crossProjectSearchDefault, "disabled");
+  assert.equal(ontologyRuntime.promotionMode.operatorManagedLocal, true);
+  assert.equal(ontologyRuntime.promotionMode.securityGateMode, "context_folder_routing_only");
+  assert.equal(ontologyRuntime.promotionMode.blockingSecurityGate, false);
 
   const ontologySources = JSON.parse(fs.readFileSync(ontologySourceManifestPath, "utf8"));
   assert.equal(ontologySources.kind, "agentlas-ontology-source-manifest");
@@ -214,6 +225,10 @@ try {
   assert.equal(contract.state, "local_candidate");
   assert.equal(contract.runtimeGraphWriteEnabled, false);
   assert.equal(contract.zeroErrorClaim, false);
+  assert.equal(contract.operatorManagedPromotion.enabled, true);
+  assert.equal(contract.operatorManagedPromotion.securityGateMode, "context_folder_routing_only");
+  assert.equal(contract.operatorManagedPromotion.blockingSecurityGate, false);
+  assert.equal(contract.operatorManagedPromotion.publicExportRemainsValueFree, true);
   assert.equal(contract.promotionPolicy.shadowRequired, true);
   assert.equal(contract.promotionPolicy.canaryRequiredForMixedContext, true);
   assert.equal(contract.promotionPolicy.rollbackRequired, true);

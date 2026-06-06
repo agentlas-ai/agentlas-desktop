@@ -58,12 +58,35 @@ export function projectMemoryDir(projectPath: string): string {
 }
 
 const AUTO_SECTION = "## Auto-curated memory";
+const CREDENTIAL_INDEX_SECTION = "## Local Credential Index (read first)";
+
+function credentialIndexSectionTemplate(): string {
+  return `${CREDENTIAL_INDEX_SECTION}
+
+- For deploy, release, store, billing, auth, API, or cloud work, read
+  .agentlas/${LOCAL_CREDENTIALS_MAP_FILE} before saying a credential is missing.
+- Real values may live in .env, .env.local, ${PROJECT_SIGNING_DIR}/,
+  ${PROJECT_CREDENTIALS_DIR}/, local keychain/vault, or project-scoped global env
+  keys like AGENTLAS_PROJECT_<PROJECT>_<ENV_NAME>.
+- Keep this memory value-free: record env names, local relative paths, owner,
+  stale-check notes, and validation commands only.
+
+| Need | Look here first | Memory record |
+|------|-----------------|---------------|
+| Scalar env key | .env or .env.local | env name only |
+| Store/signing file | ${PROJECT_SIGNING_DIR}/ | relative path only |
+| App/provider config | ${PROJECT_CREDENTIALS_DIR}/ | relative path only |
+| Shared local env | AGENTLAS_PROJECT_<PROJECT>_<ENV_NAME> | project-scoped env name |
+`;
+}
 
 function soulTemplate(projectName: string): string {
   return `# Project Soul Memory: ${projectName}
 
 Durable memory for this project folder, maintained by the Agentlas PM Soul.
 Keep it concise. Auto-curated items are appended under the last section.
+
+${credentialIndexSectionTemplate()}
 
 ## Project Purpose
 
@@ -90,6 +113,22 @@ Keep it concise. Auto-curated items are appended under the last section.
 
 ${AUTO_SECTION}
 `;
+}
+
+function ensureSoulCredentialIndex(soulPath: string): void {
+  let content = "";
+  try {
+    content = fs.readFileSync(soulPath, "utf8");
+  } catch {
+    return;
+  }
+  if (content.includes(CREDENTIAL_INDEX_SECTION)) return;
+  const section = credentialIndexSectionTemplate();
+  const marker = "\n## Project Purpose";
+  const next = content.includes(marker)
+    ? content.replace(marker, `\n${section}\n## Project Purpose`)
+    : `${content.trimEnd()}\n\n${section}\n`;
+  fs.writeFileSync(soulPath, next.endsWith("\n") ? next : `${next}\n`, "utf8");
 }
 
 function sitemapSkeleton(projectName: string, now: string): string {
@@ -127,6 +166,13 @@ function ontologyRuntimeSkeleton(projectPath: string, projectName: string): stri
         neverScanSiblingProjects: true,
         crossProjectSearchDefault: "disabled",
         privateScopeDefaultSearch: "excluded",
+      },
+      promotionMode: {
+        operatorManagedLocal: true,
+        securityGateMode: "context_folder_routing_only",
+        blockingSecurityGate: false,
+        notes:
+          "Local promotion is blocked by missing project/folder/owner/evidence/rollback structure, not by a generic security gate.",
       },
       memoryPolicy: {
         durableWrites: "candidate-ticket-only",
@@ -330,6 +376,22 @@ function superOntologyContractSkeleton(projectName: string): string {
       draftId: null,
       runtimeGraphWriteEnabled: false,
       zeroErrorClaim: false,
+      operatorManagedPromotion: {
+        enabled: true,
+        runtimePromotionModel: "operator_managed_local",
+        securityGateMode: "context_folder_routing_only",
+        blockingSecurityGate: false,
+        requiredBeforePromotion: [
+          "project_root",
+          "source_folder",
+          "owner",
+          "evidence_refs",
+          "rollback_or_replay_path",
+        ],
+        publicExportRemainsValueFree: true,
+        notes:
+          "Local operators may promote when structure and ownership are explicit. Security labels are routing metadata, not a generic runtime stop sign.",
+      },
       layers: [
         "source_intake",
         "evidence_packet",
@@ -4071,6 +4133,7 @@ export function ensureProjectMemory(
 
     const soul = path.join(dir, PROJECT_SOUL_FILE);
     if (!fs.existsSync(soul)) fs.writeFileSync(soul, soulTemplate(name), "utf8");
+    ensureSoulCredentialIndex(soul);
 
     const sitemap = path.join(dir, SITEMAP_FILE);
     if (!fs.existsSync(sitemap)) fs.writeFileSync(sitemap, sitemapSkeleton(name, now), "utf8");

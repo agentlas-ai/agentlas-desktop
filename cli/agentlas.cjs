@@ -1305,6 +1305,68 @@ function localCredentialsMapSkeletonCli(projectPath, projectName, cfg) {
     entries: [],
   };
 }
+const CREDENTIAL_INDEX_SECTION_CLI = "## Local Credential Index (read first)";
+function credentialIndexSectionContentCli(arch) {
+  const cfg = localCredentialConfigCli(arch || loadArch());
+  const mapFile = (arch && arch.localCredentialsMapFile) || "local-credentials.map.json";
+  return `${CREDENTIAL_INDEX_SECTION_CLI}
+
+- For deploy, release, store, billing, auth, API, or cloud work, read
+  .agentlas/${mapFile} before saying a credential is missing.
+- Real values may live in .env, .env.local, ${cfg.signingDir}/,
+  ${cfg.credentialsDir}/, local keychain/vault, or project-scoped global env
+  keys like AGENTLAS_PROJECT_<PROJECT>_<ENV_NAME>.
+- Keep this memory value-free: record env names, local relative paths, owner,
+  stale-check notes, and validation commands only.
+
+| Need | Look here first | Memory record |
+|------|-----------------|---------------|
+| Scalar env key | .env or .env.local | env name only |
+| Store/signing file | ${cfg.signingDir}/ | relative path only |
+| App/provider config | ${cfg.credentialsDir}/ | relative path only |
+| Shared local env | AGENTLAS_PROJECT_<PROJECT>_<ENV_NAME> | project-scoped env name |
+`;
+}
+function projectSoulTemplateCli(projectName, arch) {
+  return `# Project Soul Memory: ${projectName}
+
+Durable memory for this project folder, maintained by Agentlas.
+
+${credentialIndexSectionContentCli(arch)}
+
+## Project Purpose
+
+## Current State
+
+## Decisions
+
+## Risks
+
+## Auto-curated memory
+`;
+}
+function ensureSoulCredentialIndexCli(projectPath, projectName, arch) {
+  const memoryDir = (arch && arch.memoryDir) || ".agentlas";
+  const soulFile = (arch && arch.soulFile) || "project-soul-memory.md";
+  const dir = path.join(projectPath, memoryDir);
+  const soul = path.join(dir, soulFile);
+  fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(soul)) {
+    fs.writeFileSync(soul, projectSoulTemplateCli(projectName, arch), "utf8");
+    return soul;
+  }
+  let content = "";
+  try { content = fs.readFileSync(soul, "utf8"); } catch { content = ""; }
+  if (!content.includes(CREDENTIAL_INDEX_SECTION_CLI)) {
+    const section = credentialIndexSectionContentCli(arch);
+    const marker = "\n## Project Purpose";
+    const next = content.includes(marker)
+      ? content.replace(marker, `\n${section}\n## Project Purpose`)
+      : `${content.trimEnd()}\n\n${section}\n`;
+    fs.writeFileSync(soul, next.endsWith("\n") ? next : next + "\n", "utf8");
+  }
+  return soul;
+}
 function envExampleContentCli(cfg) {
   return `# Agentlas local project environment.
 # Copy this file to .env and fill real values only on this machine.
@@ -1437,10 +1499,7 @@ function ensureProjectMemoryCli(projectPath, projectName) {
     fs.mkdirSync(dir, { recursive: true });
     const name = projectName || path.basename(projectPath) || "Project";
     ensureLocalCredentialStoreCli(projectPath, name, arch);
-    const soul = path.join(dir, arch.soulFile);
-    if (!fs.existsSync(soul)) {
-      fs.writeFileSync(soul, `# Project Soul Memory: ${name}\n\nDurable memory for this project folder, maintained by Agentlas.\n\n## Project Purpose\n\n## Current State\n\n## Decisions\n\n## Risks\n\n## Auto-curated memory\n`, "utf8");
-    }
+    ensureSoulCredentialIndexCli(projectPath, name, arch);
     const sitemap = path.join(dir, arch.sitemapFile);
     if (!fs.existsSync(sitemap)) {
       const now = new Date().toISOString();
@@ -1577,6 +1636,12 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           crossProjectSearchDefault: "disabled",
           privateScopeDefaultSearch: "excluded",
         },
+        promotionMode: {
+          operatorManagedLocal: true,
+          securityGateMode: "context_folder_routing_only",
+          blockingSecurityGate: false,
+          notes: "Local promotion is blocked by missing project/folder/owner/evidence/rollback structure, not by a generic security gate.",
+        },
         memoryPolicy: {
           durableWrites: "candidate-ticket-only",
           workingMemory: "runtime-cache-only",
@@ -1606,6 +1671,21 @@ function ensureProjectMemoryCli(projectPath, projectName) {
         draftId: null,
         runtimeGraphWriteEnabled: false,
         zeroErrorClaim: false,
+        operatorManagedPromotion: {
+          enabled: true,
+          runtimePromotionModel: "operator_managed_local",
+          securityGateMode: "context_folder_routing_only",
+          blockingSecurityGate: false,
+          requiredBeforePromotion: [
+            "project_root",
+            "source_folder",
+            "owner",
+            "evidence_refs",
+            "rollback_or_replay_path",
+          ],
+          publicExportRemainsValueFree: true,
+          notes: "Local operators may promote when structure and ownership are explicit. Security labels are routing metadata, not a generic runtime stop sign.",
+        },
         layers: [
           "source_intake",
           "evidence_packet",
@@ -6046,6 +6126,7 @@ async function cmdCredsFile(db, args) {
   const cfg = localCredentialConfigCli(arch);
   const projectName = path.basename(project) || "Project";
   ensureLocalCredentialStoreCli(project, projectName, arch);
+  ensureSoulCredentialIndexCli(project, projectName, arch);
 
   const sourceAbs = path.resolve(runCwd(), source);
   let stat;
@@ -6108,7 +6189,10 @@ async function cmdCreds(db, args) {
   const targets = [];
   const arch = loadArch();
   const projectName = project ? path.basename(project) || "Project" : "Project";
-  if (project) ensureLocalCredentialStoreCli(project, projectName, arch);
+  if (project) {
+    ensureLocalCredentialStoreCli(project, projectName, arch);
+    ensureSoulCredentialIndexCli(project, projectName, arch);
+  }
 
   // 1) keychain vault — project-scoped when a project is active.
   const keytar = readKeytar();
