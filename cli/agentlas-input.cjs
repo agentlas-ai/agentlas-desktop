@@ -131,6 +131,7 @@ function slashCommandEntries() {
 function slashCommandQuery(line) {
   const value = String(line || "");
   if (!value.startsWith("/")) return null;
+  if (isAbsolutePathTask(value)) return null;
   if (/\s/.test(value)) return null;
   return value;
 }
@@ -209,12 +210,14 @@ function renderSlashPalette(rows, selectedIndex, opts = {}) {
 function attachSlashPalette(rl, opts = {}) {
   const stream = opts.stream || rl.output || process.stdout;
   const inputStream = rl.input || process.stdin;
-  const isTty = opts.force || Boolean(rl.terminal && inputStream.isTTY && stream.isTTY);
+  const paletteEnabled = opts.force || process.env.AGENTLAS_SLASH_PALETTE === "1";
+  const isTty = paletteEnabled && Boolean(rl.terminal && inputStream.isTTY && stream.isTTY);
   if (!rl || !inputStream || !stream || !isTty) {
-    return { clear() {}, detach() {}, active: () => false };
+    return { clear() {}, detach() {}, setEnabled() {}, active: () => false };
   }
   const colors = opts.colors || (opts.ui && opts.ui.c) || {};
   const state = {
+    enabled: true,
     selected: 0,
     selectedCommand: null,
     visible: false,
@@ -224,6 +227,7 @@ function attachSlashPalette(rl, opts = {}) {
   readline.emitKeypressEvents(inputStream, rl);
 
   function rows() {
+    if (!state.enabled) return [];
     return slashCommandSuggestions(rl.line || "");
   }
   function active() {
@@ -239,6 +243,10 @@ function attachSlashPalette(rl, opts = {}) {
     state.visible = false;
   }
   function render() {
+    if (!state.enabled) {
+      clear();
+      return;
+    }
     const list = rows();
     if (!list.length || state.dismissedForLine === (rl.line || "")) {
       clear();
@@ -277,6 +285,7 @@ function attachSlashPalette(rl, opts = {}) {
     return true;
   }
   function onKeypress(_str, key = {}) {
+    if (!state.enabled) return;
     const name = key.name || "";
     if (name === "escape" && state.visible) {
       state.dismissedForLine = rl.line || "";
@@ -303,6 +312,10 @@ function attachSlashPalette(rl, opts = {}) {
   return {
     active,
     clear,
+    setEnabled(value) {
+      state.enabled = Boolean(value);
+      if (!state.enabled) clear();
+    },
     detach() {
       inputStream.removeListener("keypress", onKeypress);
       clear();
@@ -332,6 +345,18 @@ function completePath(token, cwd, prefixChar) {
   }
 }
 
+function isAbsolutePathTask(line) {
+  const value = String(line || "").trim();
+  if (!value.startsWith("/")) return false;
+  const first = value.split(/\s+/)[0] || "";
+  if (!first || SLASH_COMMANDS.includes(first)) return false;
+  if (!path.isAbsolute(first)) return false;
+  if (fs.existsSync(first)) return true;
+  const parts = first.split("/").filter(Boolean);
+  if (parts.length >= 2) return true;
+  return /^(?:\/Users|\/Volumes|\/Applications|\/tmp|\/private|\/var|\/opt|\/home)(?:\/|$)/.test(first);
+}
+
 // makeCompleter({ getAgentSlugs, getFirmSlugs, getCwd }) → readline completer(line) → [hits, token]
 function makeCompleter(ctx) {
   const getAgents = ctx.getAgentSlugs || (() => []);
@@ -349,6 +374,7 @@ function makeCompleter(ctx) {
 
     // first token = the command itself
     if (tokens.length === 1) {
+      if (isAbsolutePathTask(lineStr)) return [completePath(lineStr, getCwd(), ""), last];
       if (lineStr.startsWith("/")) return [uniqStartsWith(SLASH_COMMANDS, last), last];
       return [[], last]; // free-text prompt — no completion
     }
@@ -388,6 +414,7 @@ module.exports = {
   attachSlashPalette,
   isContinuation,
   stripContinuation,
+  isAbsolutePathTask,
   makeCompleter,
   completePath,
   slashCommandEntries,

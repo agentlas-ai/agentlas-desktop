@@ -773,11 +773,12 @@ function startRepl(opts) {
   }
   function pick() {
     if (closed) return process.exit(0);
+    if (slashPalette.setEnabled) slashPalette.setEnabled(false);
     printRoster();
     rl.question("\n   " + ui.c.emerald(ui.t("picker.prompt")), async (line) => {
       const t = (line || "").trim();
       if (!t) return pick();
-      if (t.startsWith("/")) {
+      if (t.startsWith("/") && !input.isAbsolutePathTask(t)) {
         const handled = await handleSlash(t);
         if (handled === false) return;
         return pick();
@@ -818,6 +819,7 @@ function startRepl(opts) {
   // ── main loop ── (multiline: a trailing "\\" continues the input)
   function ask(buffer) {
     if (closed) return process.exit(0);
+    if (slashPalette.setEnabled) slashPalette.setEnabled(true);
     const cont = buffer != null;
     rl.question(cont ? ui.c.dim("   … ") : "\n" + ui.promptLabel(), async (line) => {
       if (input.isContinuation(line)) {
@@ -833,7 +835,7 @@ function startRepl(opts) {
         runShell(t.slice(1).trim());
         return ask();
       }
-      if (t.startsWith("/")) {
+      if (t.startsWith("/") && !input.isAbsolutePathTask(t)) {
         const c2 = await handleSlash(t);
         if (c2 === false) return;
         return ask();

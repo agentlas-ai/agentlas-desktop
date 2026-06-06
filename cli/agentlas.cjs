@@ -15,6 +15,7 @@
  *   agentlas env [list]            공유 env 키 목록 (이름만)
  *   agentlas multimodal            이미지/영상/음성 전역 fallback provider
  *   agentlas ontology              현재 프로젝트 온톨로지 inbox/source 상태
+ *   agentlas update                최신 Desktop 공개 릴리즈 확인/설치
  *   agentlas doctor                런타임/데이터 점검
  *   agentlas help
  *
@@ -6321,6 +6322,267 @@ function cmdVersion() {
   out(`agentlas ${readPackageVersion()}`);
 }
 
+function parseUpdateFlags(args) {
+  const flags = {
+    check: false,
+    force: false,
+    json: false,
+    launch: true,
+    url: process.env.AGENTLAS_DESKTOP_UPDATE_URL || "https://agentlas.cloud/api/desktop/latest",
+  };
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--check") flags.check = true;
+    else if (arg === "--force") flags.force = true;
+    else if (arg === "--json") flags.json = true;
+    else if (arg === "--no-launch") flags.launch = false;
+    else if (arg === "--url") flags.url = args[++i] || flags.url;
+    else if (arg === "--help" || arg === "-h" || arg === "help") flags.help = true;
+    else fail(`알 수 없는 update 옵션: ${arg}`);
+  }
+  return flags;
+}
+
+function cmdUpdateHelp() {
+  out(
+    [
+      "agentlas update",
+      "",
+      "  update              최신 공개 Desktop 릴리즈를 확인하고 설치",
+      "  update --check      설치하지 않고 현재/최신 버전만 확인",
+      "  update --force      같은 버전이어도 다시 설치",
+      "  update --json       상태를 JSON으로 출력",
+      "",
+      "macOS는 notarized DMG를 내려받아 검증한 뒤 /Applications/Agentlas.app을 교체합니다.",
+      "Windows/Linux는 현재 자동 설치 대신 최신 다운로드 위치를 안내합니다.",
+    ].join("\n"),
+  );
+}
+
+function versionParts(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^v/i, "")
+    .split(/[.-]/)
+    .slice(0, 3)
+    .map((part) => {
+      const parsed = Number.parseInt(part, 10);
+      return Number.isFinite(parsed) ? parsed : 0;
+    });
+}
+
+function compareVersions(a, b) {
+  const left = versionParts(a);
+  const right = versionParts(b);
+  for (let i = 0; i < 3; i++) {
+    const delta = (left[i] || 0) - (right[i] || 0);
+    if (delta !== 0) return delta;
+  }
+  return 0;
+}
+
+function macReleaseArch() {
+  if (process.arch === "arm64") return "arm64";
+  if (process.arch === "x64") return "x64";
+  return null;
+}
+
+async function fetchDesktopRelease(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const resp = await fetch(url, { headers: { accept: "application/json" }, signal: controller.signal });
+    if (!resp.ok) fail(`업데이트 정보를 가져오지 못했습니다: ${resp.status}`);
+    const json = await resp.json();
+    if (!json || typeof json !== "object" || !json.version) fail("업데이트 정보 형식이 올바르지 않습니다.");
+    return json;
+  } catch (error) {
+    const message = error && error.name === "AbortError" ? "요청 시간이 초과되었습니다." : String((error && error.message) || error);
+    fail(`업데이트 확인 실패: ${message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function findCurrentArtifact(release) {
+  const arch = macReleaseArch();
+  if (!arch || !Array.isArray(release.artifacts)) return null;
+  return release.artifacts.find((artifact) => artifact && artifact.arch === arch && artifact.available !== false) || null;
+}
+
+function desktopReleaseUrl(release) {
+  if (release.releaseRepositoryUrl && release.releaseTag) return `${String(release.releaseRepositoryUrl).replace(/\/$/, "")}/releases/tag/${release.releaseTag}`;
+  return "https://github.com/agentlas-ai/agentlas-desktop/releases/latest";
+}
+
+function formatUpdateSummary(status) {
+  const lines = [
+    `현재 버전: ${status.currentVersion}`,
+    `최신 버전: ${status.latestVersion}${status.releaseTag ? ` (${status.releaseTag})` : ""}`,
+    `상태: ${status.updateAvailable ? "업데이트 가능" : "최신 상태"}`,
+  ];
+  if (status.releaseUrl) lines.push(`릴리즈: ${status.releaseUrl}`);
+  if (status.downloadUrl) lines.push(`다운로드: ${status.downloadUrl}`);
+  return lines.join("\n");
+}
+
+async function cmdUpdate(args) {
+  const flags = parseUpdateFlags(args);
+  if (flags.help) return cmdUpdateHelp();
+  const currentVersion = readPackageVersion();
+  const release = await fetchDesktopRelease(flags.url);
+  const latestVersion = String(release.version || "");
+  const artifact = findCurrentArtifact(release);
+  const updateAvailable = compareVersions(currentVersion, latestVersion) < 0;
+  const status = {
+    currentVersion,
+    latestVersion,
+    releaseTag: release.releaseTag || null,
+    ready: release.ready === true,
+    notarized: release.notarized === true,
+    platform: process.platform,
+    arch: process.arch,
+    updateAvailable,
+    releaseUrl: desktopReleaseUrl(release),
+    downloadUrl: artifact ? artifact.url : null,
+  };
+
+  if (flags.json) return out(JSON.stringify(status, null, 2));
+  out(formatUpdateSummary(status));
+  if (flags.check) return;
+  if (release.ready !== true) fail("최신 릴리즈가 아직 공개 설치 가능 상태가 아닙니다.");
+  if (!updateAvailable && !flags.force) return out("이미 최신 버전입니다.");
+  if (process.platform !== "darwin") return out("이 OS는 아직 자동 설치를 지원하지 않습니다. 위 릴리즈/다운로드 링크에서 최신 설치 파일을 받으세요.");
+  if (!artifact || !artifact.url) fail("현재 Mac에 맞는 DMG를 찾지 못했습니다.");
+  await installMacDesktopUpdate(release, artifact, flags);
+}
+
+function requirePath(commandPath, label) {
+  if (!fs.existsSync(commandPath)) fail(`업데이트에 필요한 도구가 없습니다: ${label}`);
+  return commandPath;
+}
+
+function runCommand(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const capture = Boolean(options.capture);
+    const child = spawn(command, args, {
+      cwd: options.cwd || process.cwd(),
+      env: options.env || process.env,
+      stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
+    });
+    let stdout = "";
+    let stderr = "";
+    if (capture) {
+      child.stdout.on("data", (chunk) => (stdout += String(chunk)));
+      child.stderr.on("data", (chunk) => (stderr += String(chunk)));
+    }
+    child.on("error", reject);
+    child.on("close", (code) => {
+      const result = { code, stdout, stderr };
+      if (code === 0 || options.allowFailure) return resolve(result);
+      const detail = stderr.trim() || stdout.trim();
+      reject(new Error(`${path.basename(command)} 실패 (${code})${detail ? `\n${detail}` : ""}`));
+    });
+  });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function downloadUpdateFile(url, destination, artifact) {
+  const resp = await fetch(url);
+  if (!resp.ok) fail(`다운로드 실패: ${resp.status}`);
+  const bytes = Buffer.from(await resp.arrayBuffer());
+  fs.writeFileSync(destination, bytes);
+  if (artifact.sizeBytes && bytes.length !== Number(artifact.sizeBytes)) {
+    fail(`다운로드 크기가 맞지 않습니다: expected=${artifact.sizeBytes} actual=${bytes.length}`);
+  }
+  if (artifact.sha256) {
+    const actual = crypto.createHash("sha256").update(bytes).digest("hex");
+    if (actual !== artifact.sha256) fail(`다운로드 해시가 맞지 않습니다: ${actual}`);
+  }
+}
+
+function parseHdiutilMountPoint(output) {
+  const line = String(output || "").split(/\r?\n/).find((item) => item.includes("/Volumes/"));
+  if (!line) return "";
+  return line.slice(line.indexOf("/Volumes/")).trim();
+}
+
+function macAppInstallPath() {
+  if (process.env.AGENTLAS_APP_PATH) return process.env.AGENTLAS_APP_PATH;
+  const match = String(process.execPath || "").match(/^(.*?Agentlas\.app)(?:\/|$)/);
+  if (match && match[1]) return match[1];
+  return "/Applications/Agentlas.app";
+}
+
+async function installMacDesktopUpdate(release, artifact, flags) {
+  const hdiutil = requirePath("/usr/bin/hdiutil", "hdiutil");
+  const xcrun = requirePath("/usr/bin/xcrun", "xcrun");
+  const spctl = requirePath("/usr/sbin/spctl", "spctl");
+  const osascript = requirePath("/usr/bin/osascript", "osascript");
+  const ditto = requirePath("/usr/bin/ditto", "ditto");
+  const plistBuddy = requirePath("/usr/libexec/PlistBuddy", "PlistBuddy");
+  const mv = requirePath("/bin/mv", "mv");
+  const rm = requirePath("/bin/rm", "rm");
+  const open = requirePath("/usr/bin/open", "open");
+  const lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-update."));
+  const fileName = artifact.fileName || `Agentlas-${release.version}-${artifact.arch || macReleaseArch()}.dmg`;
+  const dmgPath = path.join(tmpDir, fileName);
+  let mountPoint = "";
+  let backupPath = "";
+  const targetApp = macAppInstallPath();
+
+  try {
+    out(`다운로드: ${fileName}`);
+    await downloadUpdateFile(artifact.url, dmgPath, artifact);
+    out("검증: DMG, notarization, Gatekeeper");
+    await runCommand(hdiutil, ["verify", dmgPath]);
+    await runCommand(xcrun, ["stapler", "validate", dmgPath]);
+    await runCommand(spctl, ["-a", "-t", "open", "--context", "context:primary-signature", "-vv", dmgPath]);
+
+    const mount = await runCommand(hdiutil, ["attach", "-nobrowse", "-readonly", dmgPath], { capture: true });
+    mountPoint = parseHdiutilMountPoint(mount.stdout);
+    const sourceApp = mountPoint ? path.join(mountPoint, "Agentlas.app") : "";
+    if (!sourceApp || !fs.existsSync(sourceApp)) fail("DMG 안에서 Agentlas.app을 찾지 못했습니다.");
+
+    const installedVersion = await runCommand(plistBuddy, ["-c", "Print :CFBundleShortVersionString", path.join(sourceApp, "Contents", "Info.plist")], { capture: true });
+    const appVersion = installedVersion.stdout.trim();
+    if (appVersion !== String(release.version)) fail(`앱 버전이 릴리즈와 다릅니다: release=${release.version} app=${appVersion}`);
+    await runCommand(spctl, ["-a", "-vv", sourceApp]);
+
+    out("설치: 기존 Agentlas 종료 후 앱 교체");
+    await runCommand(osascript, ["-e", 'tell application "Agentlas" to quit'], { capture: true, allowFailure: true });
+    await sleep(2_000);
+    if (fs.existsSync(targetApp)) {
+      backupPath = `${targetApp}.backup.${Date.now()}`;
+      await runCommand(mv, [targetApp, backupPath]);
+    }
+    await runCommand(ditto, [sourceApp, targetApp]);
+    if (fs.existsSync(lsregister)) await runCommand(lsregister, ["-f", targetApp], { allowFailure: true });
+
+    try {
+      await runCommand(spctl, ["-a", "-vv", targetApp]);
+    } catch (error) {
+      if (backupPath && fs.existsSync(backupPath)) {
+        await runCommand(rm, ["-rf", targetApp], { allowFailure: true });
+        await runCommand(mv, [backupPath, targetApp], { allowFailure: true });
+      }
+      throw error;
+    }
+
+    if (backupPath && fs.existsSync(backupPath)) await runCommand(rm, ["-rf", backupPath], { allowFailure: true });
+    if (flags.launch) await runCommand(open, ["-a", "Agentlas"], { allowFailure: true });
+    out(`Agentlas ${release.version} 설치 완료.`);
+  } finally {
+    if (mountPoint) await runCommand(hdiutil, ["detach", mountPoint], { allowFailure: true });
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 function cmdHelp() {
   out(
     [
@@ -6343,6 +6605,7 @@ function cmdHelp() {
       "  cloud install <slug>  download/install a cloud marketplace agent",
       "  creds save ...        save an issued key (project vault + project .env + project-scoped global env)",
       "  creds file ...        copy a credential file into signing/credentials and set an env path",
+      "  update                check and install the latest Agentlas Desktop release",
       "  doctor                check runtimes and data",
       "  setup                 re-run first-launch setup (language · runtime · permission)",
       "  version               print the Agentlas CLI version",
@@ -6390,6 +6653,7 @@ async function main() {
   const cmd = rest[0] || "";
   if (cmd === "help" || cmd === "--help" || cmd === "-h") return cmdHelp();
   if (cmd === "version" || cmd === "--version" || cmd === "-V") return cmdVersion();
+  if (cmd === "update") return cmdUpdate(rest.slice(1));
 
   const db = openDb();
 
