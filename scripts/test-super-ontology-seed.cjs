@@ -25,6 +25,7 @@ const {
   SUPER_ONTOLOGY_CAPABILITY_DELEGATION_AUTHORITY_FILE,
   SUPER_ONTOLOGY_PRIVACY_CONFIDENTIALITY_BOUNDARY_FILE,
   SUPER_ONTOLOGY_STRATEGIC_INCENTIVE_COMPATIBILITY_FILE,
+  SUPER_ONTOLOGY_REFLEXIVE_FEEDBACK_STABILITY_FILE,
   SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE,
   SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE,
   SUPER_ONTOLOGY_CONTRACT_FILE,
@@ -97,6 +98,10 @@ try {
     memoryDir,
     SUPER_ONTOLOGY_STRATEGIC_INCENTIVE_COMPATIBILITY_FILE,
   );
+  const reflexiveFeedbackStabilityPath = path.join(
+    memoryDir,
+    SUPER_ONTOLOGY_REFLEXIVE_FEEDBACK_STABILITY_FILE,
+  );
 
   assert.ok(fs.existsSync(contractPath), "super ontology contract should be seeded");
   assert.ok(fs.existsSync(openWorldCoveragePath), "super ontology open-world coverage should be seeded");
@@ -148,6 +153,10 @@ try {
   assert.ok(
     fs.existsSync(strategicIncentiveCompatibilityPath),
     "super ontology strategic incentive compatibility should be seeded",
+  );
+  assert.ok(
+    fs.existsSync(reflexiveFeedbackStabilityPath),
+    "super ontology reflexive feedback stability should be seeded",
   );
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
@@ -238,6 +247,12 @@ try {
   assert.equal(contract.promotionPolicy.independentVerificationRequired, true);
   assert.equal(contract.promotionPolicy.collusionCheckRequired, true);
   assert.equal(contract.promotionPolicy.mechanismRedesignRequired, true);
+  assert.equal(contract.promotionPolicy.reflexiveFeedbackStabilityRequired, true);
+  assert.equal(contract.promotionPolicy.postInterventionRuntimeWritesBlocked, true);
+  assert.equal(contract.promotionPolicy.feedbackHoldoutRequired, true);
+  assert.equal(contract.promotionPolicy.realWorldAnchorRequired, true);
+  assert.equal(contract.promotionPolicy.dampingAndStopConditionRequired, true);
+  assert.equal(contract.promotionPolicy.modelCollapseLoopBlocked, true);
   assert.ok(contract.layers.includes("belief_ledger"), "contract should include belief ledger gate");
   assert.ok(contract.layers.includes("knowledge_capsule"), "contract should include knowledge capsule gate");
   assert.ok(contract.layers.includes("memory_curator_bridge"), "contract should include memory curator bridge gate");
@@ -317,6 +332,10 @@ try {
   assert.ok(
     contract.layers.includes("strategic_incentive_compatibility_contract"),
     "contract should include strategic incentive compatibility gate",
+  );
+  assert.ok(
+    contract.layers.includes("reflexive_feedback_stability_contract"),
+    "contract should include reflexive feedback stability gate",
   );
   assert.equal(contract.evidenceLedgers.memoryCuratorBridge, `.agentlas/${SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE}`);
   assert.equal(
@@ -398,6 +417,10 @@ try {
   assert.equal(
     contract.evidenceLedgers.strategicIncentiveCompatibility,
     `.agentlas/${SUPER_ONTOLOGY_STRATEGIC_INCENTIVE_COMPATIBILITY_FILE}`,
+  );
+  assert.equal(
+    contract.evidenceLedgers.reflexiveFeedbackStability,
+    `.agentlas/${SUPER_ONTOLOGY_REFLEXIVE_FEEDBACK_STABILITY_FILE}`,
   );
   const openWorldCoverage = JSON.parse(fs.readFileSync(openWorldCoveragePath, "utf8"));
   assert.equal(openWorldCoverage.kind, "agentlas-super-ontology-open-world-coverage");
@@ -1225,6 +1248,45 @@ try {
       strategicIncentiveCompatibility.hardStops.includes("agent_vote_as_independent_signal") &&
       strategicIncentiveCompatibility.hardStops.includes("collusive_agents_as_quorum"),
     "strategic incentive compatibility should block self-report, KPI, agent-vote, and collusive-quorum shortcuts",
+  );
+  const reflexiveFeedbackStability = JSON.parse(fs.readFileSync(reflexiveFeedbackStabilityPath, "utf8"));
+  assert.equal(
+    reflexiveFeedbackStability.kind,
+    "agentlas-super-ontology-reflexive-feedback-stability",
+  );
+  assert.equal(reflexiveFeedbackStability.runtimePromotionAllowed, false);
+  assert.equal(
+    reflexiveFeedbackStability.defaultDecision,
+    "feedback_stability_evidence_required_before_graph_memory_public_training_tool_route_release_financial_hiring_policy_customer_output_analytics_evaluation_physical_or_personalization_authority",
+  );
+  assert.ok(
+    reflexiveFeedbackStability.interventionTypes.includes("recommendation") &&
+      reflexiveFeedbackStability.interventionTypes.includes("training_update") &&
+      reflexiveFeedbackStability.interventionTypes.includes("route_update") &&
+      reflexiveFeedbackStability.interventionTypes.includes("physical_action"),
+    "reflexive feedback stability should include recommendation, training, route, and physical interventions",
+  );
+  assert.ok(
+    reflexiveFeedbackStability.loopSignalTypes.includes("post_intervention_observation") &&
+      reflexiveFeedbackStability.loopSignalTypes.includes("self_generated_content") &&
+      reflexiveFeedbackStability.loopSignalTypes.includes("agent_self_evaluation") &&
+      reflexiveFeedbackStability.loopSignalTypes.includes("social_contagion"),
+    "reflexive feedback stability should include post-intervention, generated-content, self-score, and contagion signals",
+  );
+  assert.ok(
+    reflexiveFeedbackStability.requiredFeedbackEvidence.includes("intervention_id") &&
+      reflexiveFeedbackStability.requiredFeedbackEvidence.includes("pre_intervention_baseline") &&
+      reflexiveFeedbackStability.requiredFeedbackEvidence.includes("counterfactual_or_holdout") &&
+      reflexiveFeedbackStability.requiredFeedbackEvidence.includes("real_world_data_anchor") &&
+      reflexiveFeedbackStability.requiredFeedbackEvidence.includes("stop_condition"),
+    "reflexive feedback stability should require intervention, baseline, holdout, real-world anchor, and stop-condition evidence",
+  );
+  assert.ok(
+    reflexiveFeedbackStability.hardStops.includes("observation_after_intervention_as_neutral_truth") &&
+      reflexiveFeedbackStability.hardStops.includes("self_generated_content_as_training_data") &&
+      reflexiveFeedbackStability.hardStops.includes("closed_loop_without_counterfactual") &&
+      reflexiveFeedbackStability.hardStops.includes("runaway_feedback_to_runtime_write"),
+    "reflexive feedback stability should block post-intervention truth, generated training, no-counterfactual, and runaway-write shortcuts",
   );
   assert.equal(fs.readFileSync(replaysPath, "utf8"), "");
   assert.equal(fs.readFileSync(evidencePath, "utf8"), "");

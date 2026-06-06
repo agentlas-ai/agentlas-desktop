@@ -59,6 +59,8 @@ const data = {
     m.SUPER_ONTOLOGY_PRIVACY_CONFIDENTIALITY_BOUNDARY_FILE,
   superOntologyStrategicIncentiveCompatibilityFile:
     m.SUPER_ONTOLOGY_STRATEGIC_INCENTIVE_COMPATIBILITY_FILE,
+  superOntologyReflexiveFeedbackStabilityFile:
+    m.SUPER_ONTOLOGY_REFLEXIVE_FEEDBACK_STABILITY_FILE,
   superOntologyReplaysFile: m.SUPER_ONTOLOGY_REPLAYS_FILE,
   superOntologyEvidenceFile: m.SUPER_ONTOLOGY_EVIDENCE_FILE,
   superOntologyMemoryBridgeFile: m.SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
