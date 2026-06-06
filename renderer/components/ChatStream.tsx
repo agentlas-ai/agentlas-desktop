@@ -24,6 +24,16 @@ export interface StreamStep {
   result?: string;
   /** 결과가 오류인지 여부 */
   resultIsError?: boolean;
+  /** 실행 이벤트를 낸 에이전트 표시명. 멀티 에이전트/위임 카드에 사용한다. */
+  agentName?: string;
+  /** 회사/팀 안에서의 역할명. */
+  role?: string;
+  /** 오케스트레이션 단계 — plan/delegate/synthesize. */
+  phase?: "plan" | "delegate" | "synthesize";
+  /** 위임 카드 표시용 대상 노드 id 목록. */
+  delegateTo?: string[];
+  /** 채팅 안에서 카드로 보여줄 활동 상태. */
+  activity?: "start" | "handoff" | "tool" | "complete" | "status";
 }
 
 /** 에이전트가 사용자에게 옵션을 묻는 질문. Markdown에서 fence를 파싱해 채워진다. */
@@ -672,15 +682,124 @@ function WorkingPanel({
               }}
             >
               {allRows.map((s, idx) => (
-                s.tool ? (
-                  <ToolRow key={s.id} step={s} current={!done && idx === allRows.length - 1} />
-                ) : (
-                  <ThinkingRow key={s.id} step={s} current={!done && idx === allRows.length - 1} />
-                )
+                <ActivityRow
+                  key={s.id}
+                  step={s}
+                  current={!done && idx === allRows.length - 1}
+                  done={done}
+                />
               ))}
             </div>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+function ActivityRow({ step, current, done }: { step: StreamStep; current?: boolean; done: boolean }) {
+  if (step.tool) return <ToolActivityCard step={step} current={current} done={done} />;
+  return <AgentActivityCard step={step} current={current} />;
+}
+
+function AgentActivityCard({ step, current }: { step: StreamStep; current?: boolean }) {
+  const { locale } = useT();
+  const kind = step.activity ?? activityKindFromStep(step);
+  const title = agentActivityTitle(step, kind, locale);
+  const eyebrow = agentActivityEyebrow(step, kind, locale);
+  const detail = step.text.trim();
+  const isDone = kind === "complete";
+  return (
+    <div
+      className={`agentlas-activity-card${current && !isDone ? " is-running" : ""}${isDone ? " is-complete" : ""}`}
+      style={activityCardBase}
+    >
+      <div style={activityCardHeader}>
+        <span aria-hidden style={activityStatusDot(kind, current)} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={activityTitleStyle}>{title}</div>
+          <div style={activityEyebrowStyle}>{eyebrow}</div>
+        </div>
+        <span style={activityChevronStyle}>›</span>
+      </div>
+      {detail && detail !== title && (
+        <div style={activityDetailStyle}>
+          {detail}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolActivityCard({ step, current, done }: { step: StreamStep; current?: boolean; done: boolean }) {
+  const { locale } = useT();
+  const [argsOpen, setArgsOpen] = useState(false);
+  const [resultOpen, setResultOpen] = useState(false);
+  const view = toolView(step.tool!, step.args, locale);
+  const tone = toolTone(view.group, step.resultIsError === true);
+  const hasArgs = !!(step.args && step.args !== "{}" && step.args !== "");
+  const hasResult = !!(step.result && step.result.trim());
+  const hasDisclosure = hasArgs || hasResult;
+  const kind = step.activity ?? (view.verb === "위임" || view.verb === "delegated" ? "handoff" : "tool");
+  const isRunning = current && !done && !hasResult;
+  const title = toolActivityTitle(view, locale);
+  const eyebrow = hasResult
+    ? step.resultIsError
+      ? locale === "ko" ? "에이전트 작업 오류" : "Agent work failed"
+      : locale === "ko" ? "에이전트 작업 완료" : "Agent work completed"
+    : isRunning
+      ? locale === "ko" ? "에이전트 시작됨" : "Agent started"
+      : toolActivityEyebrow(view, locale);
+  return (
+    <div
+      className={`agentlas-activity-card${isRunning ? " is-running" : ""}${hasResult && !step.resultIsError ? " is-complete" : ""}`}
+      style={{
+        ...activityCardBase,
+        borderColor: isRunning ? tone.border : "var(--paper-edge)",
+      }}
+    >
+      <button
+        onClick={() => {
+          if (hasResult) setResultOpen((v) => !v);
+          else if (hasArgs) setArgsOpen((v) => !v);
+        }}
+        disabled={!hasDisclosure}
+        style={{
+          ...activityCardButton,
+          cursor: hasDisclosure ? "pointer" : "default",
+        }}
+      >
+        <span aria-hidden style={activityStatusDot(kind, isRunning, tone.accent)} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={activityTitleStyle}>{title}</div>
+          <div style={activityEyebrowStyle}>{eyebrow}</div>
+        </div>
+        <span style={{ ...activityPillStyle, color: tone.accent, background: tone.bg, borderColor: tone.border }}>
+          {view.verb}
+        </span>
+        <span style={activityChevronStyle}>›</span>
+      </button>
+      {step.agentName && (
+        <div style={activityMetaStyle}>
+          {step.role ? `${step.agentName} · ${step.role}` : step.agentName}
+        </div>
+      )}
+      {argsOpen && hasArgs && (
+        <pre style={{ ...toolPre, borderColor: tone.border }}>{prettyJson(step.args!)}</pre>
+      )}
+      {resultOpen && hasResult && (
+        <pre
+          style={{
+            ...toolPre,
+            background: step.resultIsError
+              ? "color-mix(in srgb, #fef3f2 78%, var(--paper) 22%)"
+              : "color-mix(in srgb, #f0fdf4 72%, var(--paper) 28%)",
+            borderColor: step.resultIsError ? "#fecdca" : "#bbf7d0",
+            color: step.resultIsError ? "#7a271a" : "#14532d",
+          }}
+        >
+          {step.result}
+        </pre>
       )}
     </div>
   );
@@ -865,6 +984,8 @@ interface ToolViewModel {
   label: string;
 }
 
+type ActivityKind = NonNullable<StreamStep["activity"]>;
+
 const doneDot: CSSProperties = {
   width: 7,
   height: 7,
@@ -908,6 +1029,149 @@ const toolPre: CSSProperties = {
   maxHeight: 220,
   overflow: "auto",
 };
+
+const activityCardBase: CSSProperties = {
+  position: "relative",
+  width: "min(386px, 100%)",
+  minHeight: 58,
+  overflow: "hidden",
+  borderRadius: 8,
+  border: "1px solid var(--paper-edge)",
+  background: "color-mix(in srgb, var(--paper-2) 88%, var(--paper) 12%)",
+  padding: "10px 12px",
+  boxShadow: "0 1px 2px rgba(11, 11, 15, 0.03)",
+};
+
+const activityCardHeader: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 9,
+  minWidth: 0,
+};
+
+const activityCardButton: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 9,
+  width: "100%",
+  minWidth: 0,
+  border: "none",
+  background: "transparent",
+  padding: 0,
+  textAlign: "left",
+};
+
+const activityTitleStyle: CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "var(--ink)",
+  fontSize: 12.5,
+  fontWeight: 720,
+  letterSpacing: 0,
+};
+
+const activityEyebrowStyle: CSSProperties = {
+  marginTop: 2,
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "var(--muted-deep)",
+  fontSize: 11.5,
+  fontWeight: 560,
+  letterSpacing: 0,
+};
+
+const activityDetailStyle: CSSProperties = {
+  marginTop: 8,
+  color: "var(--ink-soft)",
+  fontSize: 11.5,
+  lineHeight: 1.45,
+  overflowWrap: "anywhere",
+  display: "-webkit-box",
+  WebkitLineClamp: 2,
+  WebkitBoxOrient: "vertical",
+  overflow: "hidden",
+};
+
+const activityMetaStyle: CSSProperties = {
+  marginTop: 7,
+  color: "var(--muted-deep)",
+  fontSize: 10.5,
+  fontWeight: 650,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const activityPillStyle: CSSProperties = {
+  flexShrink: 0,
+  border: "1px solid var(--paper-edge)",
+  borderRadius: 999,
+  padding: "2px 7px",
+  fontSize: 10.5,
+  fontWeight: 760,
+};
+
+const activityChevronStyle: CSSProperties = {
+  flexShrink: 0,
+  color: "var(--muted)",
+  fontSize: 22,
+  lineHeight: 1,
+  marginLeft: 1,
+};
+
+function activityStatusDot(kind: ActivityKind, active?: boolean, accent?: string): CSSProperties {
+  const base = accent ?? (kind === "complete" ? "var(--green-deep)" : kind === "handoff" ? "var(--accent)" : "var(--muted-deep)");
+  return {
+    width: kind === "handoff" ? 10 : 9,
+    height: 9,
+    borderRadius: kind === "handoff" ? 3 : "50%",
+    flexShrink: 0,
+    background: active || kind === "complete" ? base : "transparent",
+    border: active || kind === "complete" ? "none" : `1.5px solid ${base}`,
+    boxShadow: active ? `0 0 0 4px color-mix(in srgb, ${base} 14%, transparent)` : undefined,
+  };
+}
+
+function activityKindFromStep(step: StreamStep): ActivityKind {
+  if (step.delegateTo && step.delegateTo.length > 0) return "handoff";
+  if (step.phase === "delegate") return "start";
+  if (step.phase === "synthesize") return "complete";
+  return "status";
+}
+
+function agentActivityTitle(step: StreamStep, kind: ActivityKind, locale: "ko" | "en"): string {
+  const name = step.agentName || (locale === "ko" ? "에이전트" : "Agent");
+  if (kind === "handoff") return locale === "ko" ? `${name} 위임` : `${name} delegation`;
+  return name;
+}
+
+function agentActivityEyebrow(step: StreamStep, kind: ActivityKind, locale: "ko" | "en"): string {
+  if (kind === "complete") return locale === "ko" ? "에이전트 작업 완료" : "Agent work completed";
+  if (kind === "handoff") {
+    const count = step.delegateTo?.length ?? 0;
+    if (count > 0) return locale === "ko" ? `${count}개 에이전트로 위임` : `Delegated to ${count} agent${count > 1 ? "s" : ""}`;
+    return locale === "ko" ? "위임" : "Delegation";
+  }
+  if (kind === "start") return locale === "ko" ? "에이전트 시작됨" : "Agent started";
+  if (step.role) return step.role;
+  return locale === "ko" ? "에이전트" : "Agent";
+}
+
+function toolActivityTitle(view: ToolViewModel, locale: "ko" | "en"): string {
+  const label = view.label || (locale === "ko" ? "에이전트 작업" : "Agent task");
+  if (view.verb === "위임") return `${label} 위임`;
+  if (view.verb === "delegated") return `Delegated ${label}`;
+  return locale === "ko" ? `${view.verb} ${label}` : `${view.verb} ${label}`;
+}
+
+function toolActivityEyebrow(view: ToolViewModel, locale: "ko" | "en"): string {
+  if (view.verb === "위임" || view.verb === "delegated") return locale === "ko" ? "에이전트" : "Agent";
+  return locale === "ko" ? "에이전트 작업" : "Agent activity";
+}
 
 function toolTone(group: ToolGroup, isError: boolean): { accent: string; bg: string; border: string } {
   if (isError) {

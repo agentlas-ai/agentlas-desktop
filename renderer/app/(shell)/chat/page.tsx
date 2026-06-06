@@ -117,7 +117,7 @@ function appendTimeline(
 
 type ToolEvent = NonNullable<McpInvocationEvent["tool"]>;
 
-function toolStepFromEvent(tool: ToolEvent): StreamStep {
+function toolStepFromEvent(tool: ToolEvent, meta?: Partial<StreamStep>): StreamStep {
   return {
     id: uid(),
     kind: "tool",
@@ -127,13 +127,15 @@ function toolStepFromEvent(tool: ToolEvent): StreamStep {
     toolUseId: tool.id,
     result: tool.result,
     resultIsError: tool.isError,
+    activity: "tool",
+    ...meta,
   };
 }
 
-function mergeToolStep(steps: StreamStep[], tool: ToolEvent): StreamStep[] {
+function mergeToolStep(steps: StreamStep[], tool: ToolEvent, meta?: Partial<StreamStep>): StreamStep[] {
   const result = tool.result;
   const hasResult = result != null;
-  if (!hasResult) return [...steps, toolStepFromEvent(tool)];
+  if (!hasResult) return [...steps, toolStepFromEvent(tool, meta)];
 
   let match = -1;
   for (let i = steps.length - 1; i >= 0; i -= 1) {
@@ -148,16 +150,18 @@ function mergeToolStep(steps: StreamStep[], tool: ToolEvent): StreamStep[] {
       break;
     }
   }
-  if (match < 0) return [...steps, toolStepFromEvent(tool)];
+  if (match < 0) return [...steps, toolStepFromEvent(tool, meta)];
 
   return steps.map((s, i) =>
     i === match
       ? {
           ...s,
+          ...meta,
           args: s.args ?? tool.args,
           toolUseId: s.toolUseId ?? tool.id,
           result,
           resultIsError: tool.isError,
+          activity: meta?.activity ?? s.activity ?? "tool",
         }
       : s,
   );
@@ -175,6 +179,14 @@ function parseGoalSlash(input: string): string | null {
   const match = input.trim().match(/^\/goal\s+([\s\S]+)$/i);
   const goal = match?.[1]?.trim();
   return goal || null;
+}
+
+function activityForEvent(ev: McpInvocationEvent): StreamStep["activity"] {
+  if (ev.delegateTo && ev.delegateTo.length > 0) return "handoff";
+  if (ev.phase === "delegate") return "start";
+  if (ev.phase === "synthesize") return "complete";
+  if (ev.kind === "tool-use") return "tool";
+  return "status";
 }
 
 type GeneratedAppChatRoute = {
@@ -360,6 +372,10 @@ function ChatPage() {
     (ev: McpInvocationEvent, placeholderId: string, lastStatusRef: { text: string }) => {
       const fallbackAgentId = agent?.id ?? "active-agent";
       const fallbackAgentName = agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback");
+      const fallbackStepMeta: Partial<StreamStep> = {
+        agentName: fallbackAgentName,
+        activity: "status",
+      };
       const markWorkflowActive = (status?: string) => {
         setLiveAgents((prev) => ({
           ...prev,
@@ -421,7 +437,7 @@ function ChatPage() {
               name: ev.agentName ?? aid,
               role: ev.role ?? "",
               tier: ev.tier,
-              kind: "status",
+              kind: ev.delegateTo ? "handoff" : "status",
               text: ev.status!.trim(),
           });
         }
@@ -431,18 +447,32 @@ function ChatPage() {
           m.map((msg) => {
             if (msg.id !== placeholderId) return msg;
             const steps = msg.steps ?? [];
+            const meta: Partial<StreamStep> = {
+              agentName: ev.agentName,
+              role: ev.role,
+              phase: ev.phase,
+              delegateTo: ev.delegateTo,
+              activity: activityForEvent(ev),
+            };
             if (ev.kind === "tool-use" && ev.tool) {
               return {
                 ...msg,
-                steps: mergeToolStep(steps, ev.tool),
+                steps: mergeToolStep(steps, ev.tool, meta),
               };
             }
             const st = ev.status?.trim();
             if (st && ev.kind !== "partial") {
-              const who = ev.role || ev.agentName;
               return {
                 ...msg,
-                steps: [...steps, { id: uid(), kind: "thinking", text: who ? `${who} · ${st}` : st }],
+                steps: [
+                  ...steps,
+                  {
+                    id: uid(),
+                    kind: "thinking",
+                    text: st,
+                    ...meta,
+                  },
+                ],
               };
             }
             return msg;
@@ -457,7 +487,10 @@ function ChatPage() {
             msg.id === placeholderId
               ? {
                   ...msg,
-                  steps: mergeToolStep(msg.steps ?? [], ev.tool!),
+                  steps: mergeToolStep(msg.steps ?? [], ev.tool!, {
+                    ...fallbackStepMeta,
+                    activity: "tool",
+                  }),
                 }
               : msg,
           ),
@@ -479,6 +512,8 @@ function ChatPage() {
                       kind: "tool",
                       text: `Surface ready · ${ev.surface!.title}`,
                       tool: "agentlas_surface",
+                      agentName: fallbackAgentName,
+                      activity: "tool",
                       args: JSON.stringify({
                         id: surfaceId,
                         domain: ev.surface!.domain,
@@ -502,7 +537,12 @@ function ChatPage() {
                   ...msg,
                   steps: [
                     ...(msg.steps ?? []),
-                    { id: uid(), kind: ev.kind === "thinking" ? "thinking" : "tool", text: status },
+                    {
+                      id: uid(),
+                      kind: ev.kind === "thinking" ? "thinking" : "tool",
+                      text: status,
+                      ...fallbackStepMeta,
+                    },
                   ],
                 }
               : msg,
@@ -535,6 +575,16 @@ function ChatPage() {
               busy: false,
               streaming: false,
               tokens: ev.tokens ?? msg.tokens,
+              steps: [
+                ...(msg.steps ?? []),
+                {
+                  id: uid(),
+                  kind: "thinking",
+                  text: locale === "ko" ? "에이전트 작업 완료" : "Agent work completed",
+                  agentName: fallbackAgentName,
+                  activity: "complete",
+                },
+              ],
               questions: questions.length > 0 ? questions : msg.questions,
             };
           }),
@@ -695,6 +745,8 @@ function ChatPage() {
       if (!cancelled && attached) {
         const placeholderId = uid();
         const startedAt = Date.now();
+        const reconnectAgent = agents.find((a) => a.id === c.agentId);
+        const reconnectAgentName = reconnectAgent ? pickLocalized(reconnectAgent, locale).name : t("chat.assistant_fallback");
         setMessages((m) => [
           ...m,
           {
@@ -703,7 +755,15 @@ function ChatPage() {
             text: "",
             busy: true,
             startedAt,
-            steps: [{ id: uid(), kind: "thinking", text: t("chat.status.sending") }],
+            steps: [
+              {
+                id: uid(),
+                kind: "thinking",
+                text: t("chat.status.sending"),
+                agentName: reconnectAgentName,
+                activity: "start",
+              },
+            ],
           },
         ]);
         setBusy(true);
@@ -876,7 +936,13 @@ function ChatPage() {
           busy: true,
           startedAt,
           steps: [
-            { id: uid(), kind: "thinking", text: initialStatus },
+            {
+              id: uid(),
+              kind: "thinking",
+              text: initialStatus,
+              agentName: activeAgentName,
+              activity: "start",
+            },
           ],
         },
       ]);
@@ -1425,6 +1491,7 @@ function ChatPage() {
   if (!chat) return null;
   const displayAgents = visibleAgents(allAgents);
   const displayAgent = agent?.visibility === "background" ? null : agent;
+  const latestUserPrompt = [...messages].reverse().find((message) => message.role === "user")?.text ?? "";
 
   return (
     <div style={{ display: "flex", height: "100%", width: "100%", minWidth: 0, overflow: "hidden" }}>
@@ -1689,6 +1756,8 @@ function ChatPage() {
           busy={busy}
           liveAgents={liveAgents}
           timeline={netTimeline}
+          chatTitle={chat.title}
+          latestUserPrompt={latestUserPrompt}
           onClose={() => setNetworkOpenPersisted(false)}
         />
       )}
