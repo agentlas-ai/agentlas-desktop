@@ -38,6 +38,14 @@ function userDataDir() {
   return path.join(process.env.XDG_CONFIG_HOME || path.join(home, ".config"), "Agentlas");
 }
 
+function readPackageVersion() {
+  try {
+    return require(path.join(__dirname, "..", "package.json")).version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
 const SERVICE = "com.agentlas.desktop";
 const ENV_PREFIX = "env:";
 const MULTIMODAL_META_KEY = "multimodal_settings";
@@ -53,7 +61,7 @@ function dbPath() {
 function openDb() {
   const p = dbPath();
   if (!fs.existsSync(p)) {
-    fail(`데이터를 찾을 수 없습니다: ${p}\nAgentlas 앱을 한 번 실행해 에이전트를 설치하세요.`);
+    fail(`Agentlas data was not found: ${p}\nOpen Agentlas Desktop once to install agents, then run this command again.`);
   }
   try {
     const Database = require("better-sqlite3");
@@ -5764,21 +5772,25 @@ async function cmdMultimodal(db, args) {
 
 function cmdDoctor(db) {
   out(`userData: ${userDataDir()}`);
-  out(`db: ${fs.existsSync(dbPath()) ? "OK" : "없음"}`);
+  out(`db: ${fs.existsSync(dbPath()) ? "OK" : "missing"}`);
   const ar = activeRuntime(db);
-  out(`활성 런타임: ${ar ? ar.kind : "(없음)"}`);
+  out(`active runtime: ${ar ? ar.kind : "(none)"}`);
   for (const [kind, bin] of Object.entries(RUNTIME_BIN)) {
     const p = which(bin);
-    out(`  ${kind.padEnd(12)} ${p ? "설치됨: " + p : "미설치(PATH에 없음)"}`);
+    out(`  ${kind.padEnd(12)} ${p ? "installed: " + p : "not found on PATH"}`);
   }
+}
+
+function cmdVersion() {
+  out(`agentlas ${readPackageVersion()}`);
 }
 
 function cmdHelp() {
   out(
     [
-      "agentlas — the Boston Terrier terminal",
+      "agentlas — local agent terminal",
       "",
-      "  agentlas              open the terminal (mascot splash, then pick an agent)",
+      "  agentlas              open the terminal (status card, then pick an agent)",
       "  agentlas \"prompt\"     auto-route to the best agent, then run once",
       "  agentlas <agent>      jump straight into a chat with one agent",
       "  open <agent>          same as above (explicit)",
@@ -5796,8 +5808,9 @@ function cmdHelp() {
       "  creds save ...        save an issued key (vault + project .env + global memory)",
       "  doctor                check runtimes and data",
       "  setup                 re-run first-launch setup (language · runtime · permission)",
+      "  version               print the Agentlas CLI version",
       "",
-      "Options: --runtime claude-code|codex|gemini  ·  --permission read|write|full (default write)",
+      "Options: --runtime claude-code|codex|gemini  ·  --permission read|write|full (default write)  ·  --version",
     ].join("\n"),
   );
 }
@@ -5839,6 +5852,7 @@ async function main() {
   }
   const cmd = rest[0] || "";
   if (cmd === "help" || cmd === "--help" || cmd === "-h") return cmdHelp();
+  if (cmd === "version" || cmd === "--version" || cmd === "-V") return cmdVersion();
 
   const db = openDb();
 

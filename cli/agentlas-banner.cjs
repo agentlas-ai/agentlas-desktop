@@ -14,8 +14,6 @@ const DINO_ART = [
   "    ▀▀▀█▌ █▌",
 ];
 
-const WORDMARK = "A G E N T L A S";
-
 function readVersion() {
   try {
     return require(path.join(__dirname, "..", "package.json")).version || "";
@@ -43,54 +41,68 @@ function renderMascot(ui) {
   }
 }
 
-// Main splash. ctx = { ui, version, runtimeLabel, subjectLabel, permission, cwd }
-function renderBanner(ctx) {
+function stripAnsi(s) {
+  return String(s || "").replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function fit(value, width) {
+  let s = stripAnsi(value);
+  if (s.length > width) {
+    if (width <= 1) return "…";
+    s = s.slice(0, Math.max(0, width - 1)) + "…";
+  }
+  return s + " ".repeat(Math.max(0, width - s.length));
+}
+
+function row(ui, width, text) {
+  const inner = Math.max(10, width - 4);
+  ui.line(ui.c.faint("│ ") + ui.c.text(fit(text, inner)) + ui.c.faint(" │"));
+}
+
+function renderStatusCard(ctx, opts = {}) {
   const ui = ctx.ui;
   const c = ui.c;
   const cols = ui.out.columns || 80;
+  const width = Math.max(54, Math.min(cols - 2, 78));
   const version = ctx.version || readVersion();
+  const subject = ctx.subjectLabel || "Pick an agent, choose a company, or type a task";
+  const permission = ctx.permission || "write";
+  const runtime = ctx.runtimeLabel || "(not configured)";
+  const cwd = ctx.cwd ? shorten(ctx.cwd) : process.cwd();
 
-  if (!ui.enabled || cols < 40) {
-    ui.line(`🦖 Agentlas v${version}`);
-    renderStatus(ctx);
-    return;
+  ui.line("");
+  ui.line(c.faint("╭" + "─".repeat(width - 2) + "╮"));
+  row(ui, width, `>_ Agentlas${version ? " (v" + version + ")" : ""}`);
+  row(ui, width, "");
+  row(ui, width, `model:       ${runtime}`);
+  row(ui, width, `agent:       ${subject}`);
+  row(ui, width, `directory:   ${cwd}`);
+  row(ui, width, `permissions: ${permission}`);
+  ui.line(c.faint("╰" + "─".repeat(width - 2) + "╯"));
+  if (!opts.noTip) {
+    ui.line(
+      "  " +
+        c.bold(c.text("Tip:")) +
+        c.dim(" Type ") +
+        c.faint("/help") +
+        c.dim(" for commands, ") +
+        c.faint("/status") +
+        c.dim(" for session state, ") +
+        c.faint("/exit") +
+        c.dim(" to quit."),
+    );
   }
+}
 
-  ui.line("");
-  renderMascot(ui);
-  ui.line("");
-  ui.line("   " + c.bold(c.emerald(WORDMARK)) + (version ? "  " + c.dim("v" + version) : ""));
-  ui.line("");
-  renderStatus(ctx);
-  ui.line("");
-  ui.line(
-    "   " +
-      c.faint("/help") +
-      c.dim(" " + ui.t("banner.help") + " · ") +
-      c.faint("/exit") +
-      c.dim(" " + ui.t("banner.quit") + " · ") +
-      c.faint("Ctrl-C") +
-      c.dim(" " + ui.t("banner.interrupt")),
-  );
-  ui.line("");
+// Main splash. ctx = { ui, version, runtimeLabel, subjectLabel, permission, cwd }
+function renderBanner(ctx) {
+  renderStatusCard(ctx);
+  ctx.ui.line("");
 }
 
 // runtime · subject · permission · working folder
 function renderStatus(ctx) {
-  const ui = ctx.ui;
-  const c = ui.c;
-  const parts = [];
-  if (ctx.subjectLabel) parts.push(c.emerald("◆ ") + c.bold(c.text(ctx.subjectLabel)));
-  if (ctx.runtimeLabel) parts.push(c.dim("runtime ") + c.blue(ctx.runtimeLabel));
-  if (ctx.permission) parts.push(c.dim("perm ") + permColor(c, ctx.permission)(ctx.permission));
-  if (ctx.cwd) parts.push(c.dim("cwd ") + c.lime(shorten(ctx.cwd)));
-  if (parts.length) ui.line("   " + parts.join(c.faint("  ·  ")));
+  renderStatusCard(ctx, { noTip: true });
 }
 
-function permColor(c, p) {
-  if (p === "full") return c.pink;
-  if (p === "write") return c.amber;
-  return c.green; // read
-}
-
-module.exports = { renderBanner, renderStatus, renderMascot, readVersion, shorten, DINO_ART };
+module.exports = { renderBanner, renderStatus, renderMascot, readVersion, shorten, DINO_ART, fit };

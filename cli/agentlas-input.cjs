@@ -73,7 +73,8 @@ function stripContinuation(line) {
 const SLASH_COMMANDS = [
   "/help", "/agents", "/team", "/agent", "/firms", "/firm", "/runtime", "/model",
   "/permission", "/perm", "/cwd", "/memory", "/clear", "/import", "/doctor",
-  "/status", "/cost", "/multimodal", "/diff", "/history", "/exit", "/quit",
+  "/status", "/cost", "/multimodal", "/diff", "/history", "/compact",
+  "/keybindings", "/permissions", "/exit", "/quit",
 ];
 const RUNTIME_SPECS = ["claude-code", "codex", "gemini", "anthropic", "openai", "google", "ollama", "upstage"];
 const PERM_LEVELS = ["read", "write", "full"];
@@ -132,6 +133,7 @@ function makeCompleter(ctx) {
         return [uniqStartsWith(RUNTIME_SPECS, last), last];
       case "/permission":
       case "/perm":
+      case "/permissions":
         return [uniqStartsWith(PERM_LEVELS, last), last];
       case "/agent":
         return [uniqStartsWith(getAgents(), last), last];

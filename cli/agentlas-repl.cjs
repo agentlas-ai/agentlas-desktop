@@ -21,6 +21,18 @@ function runtimeLabel(rt) {
   return `${rt.backend}${rt.model ? " · " + rt.model : ""}`;
 }
 
+function normalizeLang(value) {
+  const v = String(value || "").toLowerCase();
+  return v === "en" || v === "ko" ? v : null;
+}
+
+function terminalLang(prefs, opts) {
+  const explicit = normalizeLang((opts && opts.lang) || process.env.AGENTLAS_TERMINAL_LANG || process.env.AGENTLAS_LANG);
+  if (explicit) return explicit;
+  if (process.env.AGENTLAS_RESPECT_SAVED_LANG === "1") return normalizeLang(prefs && prefs.lang) || "en";
+  return "en";
+}
+
 // Hides the trailing "## Memory Events" block from the live stream while keeping the full
 // text for curation. Holds back the last heading.length chars so a split heading is safe too.
 function makeMemoryGuard(ui, heading) {
@@ -85,7 +97,7 @@ function startRepl(opts) {
   const prefs = opts.prefs || {};
   prefs.agentRuntime = prefs.agentRuntime || {}; // { agentSlug|firmSlug: runtimeSpec|"auto" }
   let baseRuntime = opts.runtime; // session default; per-agent runtime auto-routes from this
-  const ui = new Ui({ lang: prefs.lang || "en" });
+  const ui = new Ui({ lang: terminalLang(prefs, opts) });
   const state = {
     subject: opts.subject || null,
     runtime: opts.runtime,
@@ -129,7 +141,7 @@ function startRepl(opts) {
       ui.warn(ui.t("interrupted"));
     } else {
       ui.line("");
-      ui.line(ui.c.emerald("🦖 ") + ui.c.dim(ui.t("bye")));
+      ui.line(ui.c.dim(ui.t("bye")));
       rl.close();
       process.exit(0);
     }
@@ -416,6 +428,17 @@ function startRepl(opts) {
     ui.line("   " + ui.c.emerald(ui.t("cost.total").padEnd(22)) + ui.c.text(fmt({ turns: tTurns, in: tIn, out: tOut, cost: tCost, ms: tMs })));
   }
 
+  function compactHistory() {
+    const before = state.history.length;
+    const keep = 10;
+    if (before <= keep) {
+      ui.info(ui.t("compact.noop", String(before)));
+      return;
+    }
+    state.history = state.history.slice(-keep);
+    ui.ok(ui.t("compact.done", String(before), String(state.history.length)));
+  }
+
   function showDiff() {
     const { spawnSync } = require("node:child_process");
     const opt = { cwd: state.cwd, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 };
@@ -515,6 +538,17 @@ function startRepl(opts) {
         ui.ok(ui.t("permSet", p));
         return true;
       }
+      case "permissions":
+        if (arg) {
+          const p = (arg || "").toLowerCase();
+          if (!["read", "write", "full"].includes(p)) return ui.warn(ui.t("permUsage")), true;
+          state.permission = p;
+          ui.ok(ui.t("permSet", p));
+        } else {
+          ui.info(ui.t("permCurrent", state.permission));
+          ui.info(ui.t("permUsage"));
+        }
+        return true;
       case "cwd":
         if (arg) {
           const path = require("node:path");
@@ -594,10 +628,16 @@ function startRepl(opts) {
         for (let i = 0; i < items.length; i++) ui.line("   " + ui.c.faint(String(i + 1).padStart(3)) + "  " + ui.c.text(items[i]));
         return true;
       }
+      case "compact":
+        compactHistory();
+        return true;
+      case "keybindings":
+        printKeybindings(ui);
+        return true;
       case "exit":
       case "quit":
       case "q":
-        ui.line(ui.c.emerald("🦖 ") + ui.c.dim(ui.t("bye")));
+        ui.line(ui.c.dim(ui.t("bye")));
         rl.close();
         process.exit(0);
         return false;
@@ -620,22 +660,9 @@ function startRepl(opts) {
     rl.question("\n   " + ui.c.emerald(ui.t("picker.prompt")), async (line) => {
       const t = (line || "").trim();
       if (!t) return pick();
-      if (t === "/exit" || t === "/quit" || t === "/q") {
-        ui.line(ui.c.emerald("🦖 ") + ui.c.dim(ui.t("bye")));
-        rl.close();
-        return process.exit(0);
-      }
-      if (t === "/help" || t === "/?") {
-        printHelp(ui);
-        return pick();
-      }
-      if (/^\/import\s+/.test(t)) {
-        try {
-          const r = H.importLocal(db, t.replace(/^\/import\s+/, "").trim());
-          ui.ok(ui.t(r.updated ? "updated" : "imported", r.name, r.kind));
-        } catch (e) {
-          ui.error((e && e.message) || String(e));
-        }
+      if (t.startsWith("/")) {
+        const handled = await handleSlash(t);
+        if (handled === false) return;
         return pick();
       }
       const ags = H.listAgents(db);
@@ -705,7 +732,7 @@ function startRepl(opts) {
         const { runOnboard } = require("./agentlas-onboard.cjs");
         const result = await runOnboard({ ui, rl, helpers: H });
         Object.assign(prefs, result);
-        ui.lang = prefs.lang || "en";
+        ui.lang = terminalLang(prefs, opts);
         state.permission = prefs.permission || state.permission;
         if (prefs.runtime && prefs.runtime !== "auto" && H.RUNTIME_BIN[prefs.runtime] && H.which(H.RUNTIME_BIN[prefs.runtime])) {
           state.runtime = { mode: "cli", kind: prefs.runtime };
@@ -735,6 +762,11 @@ function startRepl(opts) {
 
 function printHelp(ui) {
   const c = ui.c;
+  ui.line("");
+  ui.rule("Help");
+  ui.line("  " + c.bold(c.text("Agentlas runs local agents from this terminal, with runtime, permission, files, shell, and history controls.")));
+  ui.line("");
+  ui.line("  " + c.faint("Commands"));
   const rows = [
     [ui.t("help.talkKey"), ui.t("help.talk")],
     ["/agents", ui.t("help.agents")],
@@ -746,24 +778,34 @@ function printHelp(ui) {
     ["/permission <lvl>", ui.t("help.permission")],
     ["/cwd [path]", ui.t("help.cwd")],
     ["/memory", ui.t("help.memory")],
+    ["/status", ui.t("help.status")],
     ["/cost", ui.t("help.cost")],
     ["/multimodal", ui.t("help.multimodal")],
     ["/diff", ui.t("help.diff")],
     ["/history", ui.t("help.history")],
+    ["/compact", ui.t("help.compact")],
     ["/import <path>", ui.t("help.import")],
     ["/clear", ui.t("help.clear")],
     ["/doctor", ui.t("help.doctor")],
+    ["/keybindings", ui.t("help.keybindings")],
     ["/exit", ui.t("help.exit")],
   ];
-  ui.line("");
   for (const [k, v] of rows) ui.line("  " + c.emerald(k.padEnd(24)) + c.dim(v));
   ui.line("");
+  printKeybindings(ui);
+}
+
+function printKeybindings(ui) {
+  const c = ui.c;
   ui.line("  " + c.faint(ui.t("help.tipsTitle")));
   const tips = [
+    ["/", ui.t("help.slash")],
     ["@path", ui.t("help.atfile")],
     ["!cmd", ui.t("help.bang")],
     ["\\ + Enter", ui.t("help.multiline")],
     ["Tab", ui.t("help.tab")],
+    ["Up / Down", ui.t("help.arrows")],
+    ["Ctrl-C", ui.t("help.ctrlc")],
   ];
   for (const [k, v] of tips) ui.line("  " + c.emerald(k.padEnd(24)) + c.dim(v));
 }

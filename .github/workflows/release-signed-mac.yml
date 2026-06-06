@@ -1,0 +1,138 @@
+name: Release Signed macOS
+
+# Two ways to trigger:
+#   1. Push a tag matching v*.*.*  -> automatic signed macOS release
+#   2. Manual via GitHub UI / `gh workflow run` with explicit version/tag
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Desktop package version to release"
+        required: true
+        default: "0.2.18"
+      tag:
+        description: "GitHub release tag"
+        required: true
+        default: "v0.2.18"
+      draft:
+        description: "Create or keep the GitHub release as draft"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      apply_web_env:
+        description: "Apply verified desktop release env vars to Railway production"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build-notarize-publish:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      AGENTLAS_DESKTOP_GITHUB_REPO: ${{ github.repository }}
+      AGENTLAS_PUBLIC_RELEASE: "1"
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      CSC_LINK: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE }}
+      CSC_KEY_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+      GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Resolve release inputs
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+            version="${{ inputs.version }}"
+            draft="${{ inputs.draft }}"
+            apply_web_env="${{ inputs.apply_web_env }}"
+          else
+            tag="${{ github.ref_name }}"
+            version="${tag#v}"
+            draft="false"
+            apply_web_env="true"
+          fi
+          if [ -z "$version" ] || [ -z "$tag" ]; then
+            echo "::error::version/tag could not be resolved (tag=$tag, version=$version)"
+            exit 1
+          fi
+          pkgver=$(node -p "require('./package.json').version")
+          if [ "$pkgver" != "$version" ]; then
+            echo "::error::Tag $tag implies version=$version but package.json is $pkgver. Bump package.json before tagging."
+            exit 1
+          fi
+          {
+            echo "RESOLVED_TAG=$tag"
+            echo "RESOLVED_VERSION=$version"
+            echo "RESOLVED_DRAFT=$draft"
+            echo "RESOLVED_APPLY_WEB_ENV=$apply_web_env"
+            echo "AGENTLAS_DESKTOP_RELEASE_TAG=$tag"
+          } >> "$GITHUB_ENV"
+          echo "::notice::Releasing tag=$tag version=$version draft=$draft apply_web_env=$apply_web_env"
+
+      - name: Assert required release secrets
+        run: |
+          test -n "$APPLE_ID"
+          test -n "$APPLE_APP_SPECIFIC_PASSWORD"
+          test -n "$APPLE_TEAM_ID"
+          test -n "$CSC_LINK"
+          test -n "$CSC_KEY_PASSWORD"
+          test -n "$GH_TOKEN"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build, sign, notarize, and verify DMGs
+        run: npm run package:mac
+
+      - name: Publish verified GitHub release
+        run: |
+          args=(--tag="$RESOLVED_TAG" --version="$RESOLVED_VERSION")
+          if [ "$RESOLVED_DRAFT" = "true" ]; then args+=(--draft); fi
+          npm run release:mac:publish -- "${args[@]}"
+
+      - name: Upload release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentlas-desktop-release-evidence
+          path: |
+            release/desktop-release-verification.json
+            release/desktop-release.production.env
+            release/latest-mac.yml
+          if-no-files-found: error
+
+      - name: Apply Railway web release env
+        if: env.RESOLVED_APPLY_WEB_ENV == 'true' && env.RAILWAY_TOKEN != '' && env.RAILWAY_PROJECT_ID != ''
+        run: |
+          npm install -g @railway/cli
+          railway link --project "$RAILWAY_PROJECT_ID" --environment production --service agentlas-web
+          npm run release:web-env -- --apply
