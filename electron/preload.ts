@@ -121,9 +121,15 @@ const api: AgentlasIpc = {
     list: () => ipcRenderer.invoke("projects:list"),
     get: (id: string) => ipcRenderer.invoke("projects:get", id),
     create: (input) => ipcRenderer.invoke("projects:create", input),
-    update: (id: string, patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId">>) =>
+    update: (id: string, patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId" | "folderPath">>) =>
       ipcRenderer.invoke("projects:update", id, patch),
     remove: (id: string) => ipcRenderer.invoke("projects:remove", id),
+  },
+  ontology: {
+    getProject: (projectId: string) => ipcRenderer.invoke("ontology:getProject", projectId),
+    addSource: (projectId, absPath, scope, kind) =>
+      ipcRenderer.invoke("ontology:addSource", projectId, absPath, scope, kind),
+    openInbox: (projectId: string) => ipcRenderer.invoke("ontology:openInbox", projectId),
   },
   chats: {
     listRecent: (limit?: number) => ipcRenderer.invoke("chats:listRecent", limit),

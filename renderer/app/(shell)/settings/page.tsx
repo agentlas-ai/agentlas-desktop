@@ -821,6 +821,7 @@ function AgentlasCliPanel() {
           ["agentlas <이름>", "claude처럼 바로 대화형 세션 시작"],
           ['agentlas run <이름> "질문"', "1회 실행 (스크립트·파이프용)"],
           ["agentlas firm <회사>", "회사(CEO)에게 위임 실행"],
+          ["agentlas ontology", "현재 프로젝트 온톨로지 inbox/source 확인"],
           ["agentlas doctor", "런타임·데이터 점검"],
         ]
       : [
@@ -828,6 +829,7 @@ function AgentlasCliPanel() {
           ["agentlas <name>", "start an interactive session (like claude)"],
           ['agentlas run <name> "prompt"', "one-shot run (scripts / pipes)"],
           ["agentlas firm <firm>", "delegate to a firm's CEO"],
+          ["agentlas ontology", "project ontology inbox/source status"],
           ["agentlas doctor", "check runtime & data"],
         ];
 

@@ -324,6 +324,47 @@ export interface Project {
   updatedAt: string;
 }
 
+export type OntologySourceScope = "public" | "internal" | "private";
+export type OntologySourceKind = "project" | "company" | "personal";
+
+export interface OntologyRegisteredSource {
+  path: string;
+  scope: OntologySourceScope;
+  kind: OntologySourceKind;
+  exists: boolean;
+  registeredAt?: string;
+}
+
+export interface OntologyInboxEntry {
+  name: string;
+  path: string;
+  kind: "file" | "dir";
+  size: number;
+  supported: boolean;
+}
+
+export interface OntologyProjectStatus {
+  projectId: string;
+  projectName: string;
+  state: "active" | "needs_project_folder" | "error";
+  projectPath: string | null;
+  memoryDir: string | null;
+  inboxPath: string | null;
+  dbPath: string | null;
+  configPath: string | null;
+  sourceManifestPath: string | null;
+  policy: {
+    mode: "inbox_and_registered_sources_only";
+    neverScanHomeDirectory: true;
+    neverScanSiblingProjects: true;
+    crossProjectSearchDefault: "disabled";
+    privateScopeDefaultSearch: "excluded";
+  };
+  sources: OntologyRegisteredSource[];
+  inboxEntries: OntologyInboxEntry[];
+  error?: string;
+}
+
 export interface Chat {
   id: string;
   /** 프로젝트 소속이면 그 id, 아니면 null */
@@ -2038,6 +2079,16 @@ export interface AgentlasIpc {
     get: (id: string) => Promise<Project | null>;
     update: (id: string, patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId" | "folderPath">>) => Promise<Project>;
     remove: (id: string) => Promise<void>;
+  };
+  ontology: {
+    getProject: (projectId: string) => Promise<OntologyProjectStatus>;
+    addSource: (
+      projectId: string,
+      absPath: string,
+      scope: OntologySourceScope,
+      kind: OntologySourceKind,
+    ) => Promise<OntologyProjectStatus>;
+    openInbox: (projectId: string) => Promise<{ ok: boolean; path: string | null; message: string }>;
   };
   chats: {
     /** 최신순 활성 채팅 (보관된 것 제외). 사이드바 "최근 채팅" 섹션에서 사용 */

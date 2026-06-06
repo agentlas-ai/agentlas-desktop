@@ -60,6 +60,7 @@ import { runMcpInvocation } from "./mcp/client";
 import { checkSafely as updaterCheck, getUpdaterState, quitAndInstall as updaterInstall } from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
 import { getAuthSession, signInWithBrowser, signInWithGoogle, signOut } from "./auth";
+import { addProjectOntologySource, getProjectOntologyStatus } from "./ontology/project-runtime";
 import {
   createProject,
   getProject,
@@ -561,7 +562,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("projects:get", (_e, id: string) => getProject(id));
   ipcMain.handle(
     "projects:create",
-    (_e, input: { name: string; defaultAgentId?: string | null; contextNote?: string | null }) =>
+    (_e, input: { name: string; defaultAgentId?: string | null; contextNote?: string | null; folderPath?: string | null }) =>
       createProject(input),
   );
   ipcMain.handle(
@@ -569,10 +570,33 @@ export function registerIpcHandlers(): void {
     (
       _e,
       id: string,
-      patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId">>,
+      patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId" | "folderPath">>,
     ) => updateProject(id, patch),
   );
   ipcMain.handle("projects:remove", (_e, id: string) => removeProject(id));
+
+  // ── ontology activation (project-local, inbox + explicit sources only) ──
+  ipcMain.handle("ontology:getProject", (_e, projectId: string) =>
+    getProjectOntologyStatus(projectId),
+  );
+  ipcMain.handle(
+    "ontology:addSource",
+    (
+      _e,
+      projectId: string,
+      absPath: string,
+      scope: "public" | "internal" | "private",
+      kind: "project" | "company" | "personal",
+    ) => addProjectOntologySource(projectId, absPath, scope, kind),
+  );
+  ipcMain.handle("ontology:openInbox", async (_e, projectId: string) => {
+    const status = getProjectOntologyStatus(projectId);
+    if (status.state !== "active" || !status.inboxPath) {
+      return { ok: false, path: null, message: status.error || "Project folder is not set." };
+    }
+    const message = await shell.openPath(status.inboxPath);
+    return { ok: !message, path: status.inboxPath, message: message || "opened" };
+  });
 
   // ── chats ──────────────────────────────────────────────
   ipcMain.handle("chats:listRecent", (_e, limit?: number) => listRecentChats(limit));

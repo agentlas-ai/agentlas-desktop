@@ -33,6 +33,9 @@ const {
   SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE,
   SUPER_ONTOLOGY_REPLAYS_FILE,
   SUPER_ONTOLOGY_TASK_COVERAGE_FILE,
+  ONTOLOGY_INBOX_DIR,
+  ONTOLOGY_RUNTIME_FILE,
+  ONTOLOGY_SOURCE_MANIFEST_FILE,
 } = require("../dist/electron/architecture/manifest.js");
 const { ensureProjectMemory } = require("../dist/electron/memory/project-files.js");
 
@@ -48,6 +51,9 @@ try {
   const replaysPath = path.join(memoryDir, SUPER_ONTOLOGY_REPLAYS_FILE);
   const evidencePath = path.join(memoryDir, SUPER_ONTOLOGY_EVIDENCE_FILE);
   const memoryBridgePath = path.join(memoryDir, SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE);
+  const ontologyRuntimePath = path.join(memoryDir, ONTOLOGY_RUNTIME_FILE);
+  const ontologySourceManifestPath = path.join(memoryDir, ONTOLOGY_SOURCE_MANIFEST_FILE);
+  const ontologyInboxPath = path.join(memoryDir, ONTOLOGY_INBOX_DIR);
   const openWorldCoveragePath = path.join(memoryDir, SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE);
   const consensusCoordinationPath = path.join(memoryDir, SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE);
   const taskCoveragePath = path.join(memoryDir, SUPER_ONTOLOGY_TASK_COVERAGE_FILE);
@@ -161,6 +167,21 @@ try {
   assert.ok(fs.existsSync(replaysPath), "super ontology replay ledger should be seeded");
   assert.ok(fs.existsSync(evidencePath), "super ontology evidence ledger should be seeded");
   assert.ok(fs.existsSync(memoryBridgePath), "super ontology memory bridge ledger should be seeded");
+  assert.ok(fs.existsSync(ontologyRuntimePath), "ontology runtime activation should be seeded");
+  assert.ok(fs.existsSync(ontologySourceManifestPath), "ontology source manifest should be seeded");
+  assert.ok(fs.statSync(ontologyInboxPath).isDirectory(), "ontology inbox should be seeded");
+
+  const ontologyRuntime = JSON.parse(fs.readFileSync(ontologyRuntimePath, "utf8"));
+  assert.equal(ontologyRuntime.kind, "agentlas-ontology-runtime");
+  assert.equal(ontologyRuntime.state, "active");
+  assert.equal(ontologyRuntime.autoIngestPolicy.mode, "inbox_and_registered_sources_only");
+  assert.equal(ontologyRuntime.autoIngestPolicy.neverScanHomeDirectory, true);
+  assert.equal(ontologyRuntime.autoIngestPolicy.neverScanSiblingProjects, true);
+  assert.equal(ontologyRuntime.autoIngestPolicy.crossProjectSearchDefault, "disabled");
+
+  const ontologySources = JSON.parse(fs.readFileSync(ontologySourceManifestPath, "utf8"));
+  assert.equal(ontologySources.kind, "agentlas-ontology-source-manifest");
+  assert.deepEqual(ontologySources.sources, []);
 
   const contract = JSON.parse(fs.readFileSync(contractPath, "utf8"));
   assert.equal(contract.kind, "agentlas-super-ontology-contract");

@@ -9,6 +9,10 @@ import path from "node:path";
 import {
   CURATOR_DECISIONS_FILE,
   MEMORY_LOG_FILE,
+  ONTOLOGY_DB_FILE,
+  ONTOLOGY_INBOX_DIR,
+  ONTOLOGY_RUNTIME_FILE,
+  ONTOLOGY_SOURCE_MANIFEST_FILE,
   PROJECT_MEMORY_DIR,
   PROJECT_SOUL_FILE,
   SITEMAP_FILE,
@@ -92,6 +96,50 @@ function sitemapSkeleton(projectName: string, now: string): string {
       priority_policy:
         "priority = risk_weight*risk + (1 - completion_score) + staleness + blocking_dependencies",
       nodes: [],
+    },
+    null,
+    2,
+  );
+}
+
+function ontologyRuntimeSkeleton(projectPath: string, projectName: string): string {
+  const dir = path.join(projectPath, PROJECT_MEMORY_DIR);
+  return JSON.stringify(
+    {
+      schemaVersion: "1.0",
+      kind: "agentlas-ontology-runtime",
+      state: "active",
+      activation: "automatic",
+      projectRoot: projectPath,
+      projectName,
+      dbPath: path.join(dir, ONTOLOGY_DB_FILE),
+      inboxPath: path.join(dir, ONTOLOGY_INBOX_DIR),
+      sourceManifest: path.join(dir, ONTOLOGY_SOURCE_MANIFEST_FILE),
+      defaultScope: "internal",
+      autoIngestPolicy: {
+        mode: "inbox_and_registered_sources_only",
+        neverScanHomeDirectory: true,
+        neverScanSiblingProjects: true,
+        crossProjectSearchDefault: "disabled",
+        privateScopeDefaultSearch: "excluded",
+      },
+      memoryPolicy: {
+        durableWrites: "candidate-ticket-only",
+        workingMemory: "runtime-cache-only",
+      },
+    },
+    null,
+    2,
+  );
+}
+
+function ontologySourceManifestSkeleton(projectPath: string): string {
+  return JSON.stringify(
+    {
+      schemaVersion: "1.0",
+      kind: "agentlas-ontology-source-manifest",
+      projectRoot: projectPath,
+      sources: [],
     },
     null,
     2,
@@ -3902,6 +3950,19 @@ export function ensureProjectMemory(
 
     const skillRegistry = path.join(dir, SKILL_REGISTRY_FILE);
     if (!fs.existsSync(skillRegistry)) fs.writeFileSync(skillRegistry, skillRegistrySkeleton(name), "utf8");
+
+    const ontologyInbox = path.join(dir, ONTOLOGY_INBOX_DIR);
+    if (!fs.existsSync(ontologyInbox)) fs.mkdirSync(ontologyInbox, { recursive: true });
+
+    const ontologyRuntime = path.join(dir, ONTOLOGY_RUNTIME_FILE);
+    if (!fs.existsSync(ontologyRuntime)) {
+      fs.writeFileSync(ontologyRuntime, ontologyRuntimeSkeleton(projectPath, name), "utf8");
+    }
+
+    const ontologySources = path.join(dir, ONTOLOGY_SOURCE_MANIFEST_FILE);
+    if (!fs.existsSync(ontologySources)) {
+      fs.writeFileSync(ontologySources, ontologySourceManifestSkeleton(projectPath), "utf8");
+    }
 
     const skillTrials = path.join(dir, SKILL_TRIALS_FILE);
     if (!fs.existsSync(skillTrials)) fs.writeFileSync(skillTrials, "", "utf8");

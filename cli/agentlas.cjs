@@ -14,6 +14,7 @@
  *   agentlas chat <agent>          대화형 REPL
  *   agentlas env [list]            공유 env 키 목록 (이름만)
  *   agentlas multimodal            이미지/영상/음성 전역 fallback provider
+ *   agentlas ontology              현재 프로젝트 온톨로지 inbox/source 상태
  *   agentlas doctor                런타임/데이터 점검
  *   agentlas help
  *
@@ -1274,6 +1275,10 @@ function ensureProjectMemoryCli(projectPath, projectName) {
     const skillRegistryFile = arch.skillRegistryFile || "skill-registry.json";
     const skillTrialsFile = arch.skillTrialsFile || "skill-trials.jsonl";
     const curatorDecisionsFile = arch.curatorDecisionsFile || "curator-decisions.jsonl";
+    const ontologyRuntimeFile = arch.ontologyRuntimeFile || "ontology-runtime.json";
+    const ontologySourceManifestFile = arch.ontologySourceManifestFile || "ontology-sources.json";
+    const ontologyInboxDir = arch.ontologyInboxDir || "ontology-inbox";
+    const ontologyDbFile = arch.ontologyDbFile || "ontology-runtime.sqlite";
     const superOntologyContractFile = arch.superOntologyContractFile || "super-ontology-contract.json";
     const superOntologyOpenWorldCoverageFile =
       arch.superOntologyOpenWorldCoverageFile || "super-ontology-open-world-coverage.json";
@@ -1374,6 +1379,43 @@ function ensureProjectMemoryCli(projectPath, projectName) {
           lowRiskCanaryOnly: true,
           severeFailureTolerance: 0,
         },
+      }, null, 2), "utf8");
+    }
+    const ontologyInbox = path.join(dir, ontologyInboxDir);
+    if (!fs.existsSync(ontologyInbox)) fs.mkdirSync(ontologyInbox, { recursive: true });
+    const ontologyRuntime = path.join(dir, ontologyRuntimeFile);
+    if (!fs.existsSync(ontologyRuntime)) {
+      fs.writeFileSync(ontologyRuntime, JSON.stringify({
+        schemaVersion: "1.0",
+        kind: "agentlas-ontology-runtime",
+        state: "active",
+        activation: "automatic",
+        projectRoot: projectPath,
+        projectName: name,
+        dbPath: path.join(dir, ontologyDbFile),
+        inboxPath: ontologyInbox,
+        sourceManifest: path.join(dir, ontologySourceManifestFile),
+        defaultScope: "internal",
+        autoIngestPolicy: {
+          mode: "inbox_and_registered_sources_only",
+          neverScanHomeDirectory: true,
+          neverScanSiblingProjects: true,
+          crossProjectSearchDefault: "disabled",
+          privateScopeDefaultSearch: "excluded",
+        },
+        memoryPolicy: {
+          durableWrites: "candidate-ticket-only",
+          workingMemory: "runtime-cache-only",
+        },
+      }, null, 2), "utf8");
+    }
+    const ontologySources = path.join(dir, ontologySourceManifestFile);
+    if (!fs.existsSync(ontologySources)) {
+      fs.writeFileSync(ontologySources, JSON.stringify({
+        schemaVersion: "1.0",
+        kind: "agentlas-ontology-source-manifest",
+        projectRoot: projectPath,
+        sources: [],
       }, null, 2), "utf8");
     }
     for (const fileName of [skillTrialsFile, curatorDecisionsFile]) {
@@ -4627,6 +4669,154 @@ function ensureProjectMemoryCli(projectPath, projectName) {
     return dir;
   } catch { return null; }
 }
+
+const ONTOLOGY_SUPPORTED_EXTS = new Set([".txt", ".md", ".markdown", ".json", ".csv", ".tsv"]);
+
+function ontologyPathsForCli(projectPath) {
+  const arch = loadArch();
+  const root = path.resolve(projectPath || process.cwd());
+  const memoryDir = path.join(root, arch.memoryDir || ".agentlas");
+  return {
+    root,
+    memoryDir,
+    configPath: path.join(memoryDir, arch.ontologyRuntimeFile || "ontology-runtime.json"),
+    sourceManifestPath: path.join(memoryDir, arch.ontologySourceManifestFile || "ontology-sources.json"),
+    inboxPath: path.join(memoryDir, arch.ontologyInboxDir || "ontology-inbox"),
+    dbPath: path.join(memoryDir, arch.ontologyDbFile || "ontology-runtime.sqlite"),
+  };
+}
+
+function readJsonSafeCli(filePath, fallback) {
+  try {
+    if (!fs.existsSync(filePath)) return fallback;
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonSafeCli(filePath, value) {
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2) + "\n", "utf8");
+}
+
+function ontologySourceManifestSkeletonCli(root) {
+  return {
+    schemaVersion: "1.0",
+    kind: "agentlas-ontology-source-manifest",
+    projectRoot: root,
+    sources: [],
+  };
+}
+
+function ensureOntologyCli(projectPath) {
+  const paths = ontologyPathsForCli(projectPath);
+  ensureProjectMemoryCli(paths.root, path.basename(paths.root) || "Project");
+  fs.mkdirSync(paths.inboxPath, { recursive: true });
+  if (!fs.existsSync(paths.sourceManifestPath)) {
+    writeJsonSafeCli(paths.sourceManifestPath, ontologySourceManifestSkeletonCli(paths.root));
+  }
+  return paths;
+}
+
+function listOntologyInboxCli(inboxPath) {
+  try {
+    if (!fs.existsSync(inboxPath)) return [];
+    return fs.readdirSync(inboxPath, { withFileTypes: true })
+      .filter((entry) => !entry.name.startsWith("."))
+      .map((entry) => {
+        const full = path.join(inboxPath, entry.name);
+        const stat = fs.statSync(full);
+        const isDir = entry.isDirectory();
+        const ext = path.extname(entry.name).toLowerCase();
+        return {
+          name: entry.name,
+          path: full,
+          kind: isDir ? "dir" : "file",
+          size: isDir ? 0 : stat.size,
+          supported: isDir || ONTOLOGY_SUPPORTED_EXTS.has(ext),
+        };
+      })
+      .slice(0, 80);
+  } catch {
+    return [];
+  }
+}
+
+function readOntologySourcesCli(sourceManifestPath) {
+  const manifest = readJsonSafeCli(sourceManifestPath, { sources: [] });
+  return Array.isArray(manifest.sources) ? manifest.sources : [];
+}
+
+function cmdOntology(args) {
+  const sub = args[0] || "status";
+  const paths = ensureOntologyCli(process.cwd());
+  if (sub === "status" || sub === "list") {
+    const sources = readOntologySourcesCli(paths.sourceManifestPath);
+    const inbox = listOntologyInboxCli(paths.inboxPath);
+    out("Ontology: active");
+    out(`  project: ${paths.root}`);
+    out(`  inbox:  ${paths.inboxPath}`);
+    out(`  db:     ${paths.dbPath}`);
+    out("  policy: inbox_and_registered_sources_only");
+    out("  scan:   no home folder, no sibling projects");
+    out("");
+    out(`Inbox (${inbox.length}):`);
+    for (const item of inbox) {
+      out(`  ${item.supported ? "✓" : "!"} ${item.name}  ${item.supported ? "supported" : "adapter pending"}`);
+    }
+    if (!inbox.length) out("  (empty)");
+    out("");
+    out(`Sources (${sources.length}):`);
+    for (const source of sources) {
+      const sourcePath = path.resolve(String(source.path || ""));
+      out(`  ${fs.existsSync(sourcePath) ? "✓" : "!"} ${sourcePath}  ${source.kind || "project"} / ${source.scope || "internal"}`);
+    }
+    if (!sources.length) out("  (none)");
+    out("");
+    out("Add docs: put txt/md/json/csv in the inbox or run:");
+    out("  agentlas ontology add /path/to/docs --kind company --scope private");
+    return;
+  }
+  if (sub === "open") {
+    openLocalPathCli(paths.inboxPath);
+    out(`Opened ontology inbox: ${paths.inboxPath}`);
+    return;
+  }
+  if (sub === "add") {
+    const flags = parseCloudFlags(args.slice(1));
+    const source = flags._[0];
+    if (!source) fail("usage: agentlas ontology add <path> [--kind company|personal|project] [--scope private|internal|public]");
+    const sourcePath = path.resolve(source);
+    if (!fs.existsSync(sourcePath)) fail(`소스를 찾을 수 없습니다: ${sourcePath}`);
+    const kind = ["company", "personal", "project"].includes(flags.kind) ? flags.kind : "project";
+    const scope = ["private", "internal", "public"].includes(flags.scope) ? flags.scope : "private";
+    const manifest = readJsonSafeCli(paths.sourceManifestPath, ontologySourceManifestSkeletonCli(paths.root));
+    const nextSources = (Array.isArray(manifest.sources) ? manifest.sources : [])
+      .filter((item) => path.resolve(String(item.path || "")) !== sourcePath);
+    nextSources.push({ path: sourcePath, kind, scope, registeredAt: new Date().toISOString() });
+    manifest.schemaVersion = "1.0";
+    manifest.kind = "agentlas-ontology-source-manifest";
+    manifest.projectRoot = paths.root;
+    manifest.sources = nextSources;
+    writeJsonSafeCli(paths.sourceManifestPath, manifest);
+    out(`Registered ontology source: ${sourcePath}`);
+    out(`  kind:  ${kind}`);
+    out(`  scope: ${scope}`);
+    out("  copy:  no");
+    return;
+  }
+  fail("usage: agentlas ontology [status|list|open|add]");
+}
+
+function openLocalPathCli(targetPath) {
+  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer.exe" : "xdg-open";
+  try {
+    spawn(command, [targetPath], { detached: true, stdio: "ignore" }).unref();
+  } catch {
+    out(`Open manually: ${targetPath}`);
+  }
+}
+
 function logCli(projectPath, rec) {
   if (!projectPath) return;
   try {
@@ -5599,6 +5789,7 @@ function cmdHelp() {
       "  list                  agents/companies + active runtime",
       "  env                   shared env key names",
       "  multimodal            image/video/audio fallback providers",
+      "  ontology              project-local ontology inbox/source status",
       "  cloud package <path>  package + static security review for Agentlas Cloud",
       "  cloud publish <path>  register after local review (submitter runtime only)",
       "  cloud install <slug>  download/install a cloud marketplace agent",
@@ -5679,6 +5870,8 @@ async function main() {
       return cmdEnv(db);
     case "multimodal":
       return cmdMultimodal(db, rest.slice(1));
+    case "ontology":
+      return cmdOntology(rest.slice(1));
     case "cloud":
       return cmdCloud(db, rest.slice(1), runtimeOverride);
     case "creds":
