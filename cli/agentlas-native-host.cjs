@@ -64,6 +64,11 @@ function codexMcpArgs(servers) {
 // 툴 input(JSON)에서 사람이 읽을 대표 인자 한 줄 추출.
 function summarizeToolInput(name, input) {
   if (!input || typeof input !== "object") return "";
+  // TodoWrite/플랜류 — todos 배열이면 진행 중 항목 또는 개수로 요약.
+  if (Array.isArray(input.todos)) {
+    const ip = input.todos.find((t) => t && t.status === "in_progress");
+    return ip ? String(ip.content || ip.activeForm || "").slice(0, 80) : `${input.todos.length} todos`;
+  }
   const pick = (k) => (typeof input[k] === "string" ? input[k] : undefined);
   return (
     pick("file_path") ||
@@ -228,7 +233,11 @@ function handleClaudeLine(line, st, ui) {
 }
 
 function prettyToolName(name) {
-  return name || "tool";
+  if (!name) return "tool";
+  // mcp__server__tool → server·tool (Claude Code 처럼 깔끔하게)
+  const m = /^mcp__(.+?)__(.+)$/.exec(name);
+  if (m) return `${m[1]}·${m[2]}`;
+  return name;
 }
 
 // ── codex ────────────────────────────────────────────────
