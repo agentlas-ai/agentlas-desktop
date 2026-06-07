@@ -186,14 +186,34 @@ function startRepl(opts) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: !!process.stdin.isTTY, completer, historySize: input.HISTORY_MAX });
   input.attachHistory(rl);
   const slashPalette = input.attachSlashPalette(rl, { ui, force: true });
+  // Raw-mode bottom input box (Claude Code / Hermes style). TTY only; readline is the fallback.
+  const { createComposer } = require("./agentlas-composer.cjs");
+  const useComposer = !!process.stdin.isTTY && process.env.AGENTLAS_CLASSIC_INPUT !== "1";
+  const composer = useComposer
+    ? createComposer({ ui, loadHistory: () => input.loadHistory(), saveHistory: (h) => input.saveHistory(h) })
+    : null;
+  let handoff = false; // set before rl.close() when handing stdin to the composer
   let busy = false;
   let closed = false;
   let currentAbort = null;
   let idleExitArmedUntil = 0;
   rl.on("close", () => {
+    if (handoff) return; // intentionally closed to hand stdin to the raw-mode composer
     closed = true;
     if (!busy) process.exit(0);
   });
+  if (useComposer) {
+    // In composer mode rl is closed; Ctrl-C at the box is a keypress, so process SIGINT only fires mid-turn.
+    process.on("SIGINT", () => {
+      if (busy && currentAbort) {
+        currentAbort.abort();
+        ui.warn(ui.t("interrupted"));
+      }
+    });
+    process.on("exit", () => {
+      try { if (process.stdin.setRawMode) process.stdin.setRawMode(false); } catch { /* ignore */ }
+    });
+  }
   rl.on("SIGINT", () => {
     if (busy && currentAbort) {
       currentAbort.abort();
@@ -895,7 +915,7 @@ function startRepl(opts) {
         showDiff();
         return true;
       case "history": {
-        const items = (rl.history || []).slice(0, 30);
+        const items = input.loadHistory().slice(0, 30);
         ui.line("");
         if (!items.length) { ui.info(ui.t("noHistory")); return true; }
         for (let i = 0; i < items.length; i++) ui.line("   " + ui.c.faint(String(i + 1).padStart(3)) + "  " + ui.c.text(items[i]));
@@ -975,8 +995,91 @@ function startRepl(opts) {
     });
   }
 
-  // ── main loop ── (multiline: a trailing "\\" continues the input)
-  // Claude Code처럼: 에이전트를 번호로 고르지 않아도 된다. 그냥 입력하면 자동 라우팅(또는 현재 대화 대상)으로 처리.
+  // 한 줄 입력 처리(공용): ! 셸 · / 명령 · 미선택 시 번호/이름/자동라우팅 · 그 외 턴 실행. readline·composer 양쪽이 호출.
+  async function processLine(t) {
+    if (t.startsWith("!")) {
+      runShell(t.slice(1).trim());
+      return;
+    }
+    if (t.startsWith("/") && !input.isAbsolutePathTask(t)) {
+      await handleSlash(t); // /exit 는 내부에서 process.exit
+      return;
+    }
+    if (!state.subject) {
+      const ags = H.listAgents(db);
+      const single = !/\s/.test(t);
+      if (/^\d+$/.test(t)) {
+        const n = parseInt(t, 10);
+        if (n >= 1 && n <= ags.length) {
+          setSubjectAgent(ags[n - 1]);
+          ui.ok(ui.t("switched", state.subject.label));
+          routingNote(state.subject);
+          return;
+        }
+      }
+      if (single) {
+        const a = H.resolveAgent(db, t);
+        if (a) { setSubjectAgent(a); ui.ok(ui.t("switched", state.subject.label)); routingNote(state.subject); return; }
+        const f = H.resolveFirm(db, t);
+        if (f) { setSubjectFirm(f); ui.ok(ui.t("switched", state.subject.label)); routingNote(state.subject); return; }
+      }
+      if (H.autoRouteAgent) {
+        const choice = H.autoRouteAgent(db, t, ui.lang);
+        if (choice) {
+          setSubjectAgent(choice.agent);
+          state.routePreambleOnce = H.autoRoutePreamble ? H.autoRoutePreamble(choice, ui.lang) : null;
+          ui.info(H.autoRouteNote ? H.autoRouteNote(choice, ui.lang) : `auto-routed to ${choice.agent.name}`);
+          routingNote(state.subject);
+        }
+      }
+    }
+    await runTurn(expandMentions(t));
+  }
+
+  // ── composer (raw-mode bottom box) main loop ──
+  function composerStatus() {
+    const rt = runtimeLabel(state.runtime);
+    const subj = state.subject ? state.subject.label : ui.t("composer.autoroute");
+    const eff = state.effort ? " · " + state.effort : "";
+    return `${rt} · ${state.permission}${eff} · ${subj} · ${ui.t("composer.hint")}`;
+  }
+  async function composerLoop() {
+    let buffer = "";
+    while (!closed) {
+      let r;
+      try {
+        r = await composer.read({
+          glyph: buffer ? "…" : "›",
+          status: composerStatus(),
+          suggest: (l) => input.slashCommandSuggestions(l),
+          complete: completer,
+        });
+      } catch (e) {
+        ui.error((e && e.message) || String(e));
+        r = { value: "" };
+      }
+      if (r.exit || r.eof) {
+        ui.line(ui.c.dim(ui.t("bye")));
+        return process.exit(0);
+      }
+      const line = r.value || "";
+      if (input.isContinuation(line)) {
+        buffer += input.stripContinuation(line) + "\n";
+        continue;
+      }
+      const t = (buffer + line).trim();
+      buffer = "";
+      if (!t) continue;
+      try {
+        await processLine(t);
+      } catch (e) {
+        ui.error((e && e.message) || String(e));
+      }
+    }
+    process.exit(0);
+  }
+
+  // ── readline fallback loop (non-TTY / AGENTLAS_CLASSIC_INPUT=1) ── (multiline: trailing "\\" continues)
   function ask(buffer) {
     if (closed) return process.exit(0);
     if (slashPalette.setEnabled) slashPalette.setEnabled(true);
@@ -991,46 +1094,8 @@ function startRepl(opts) {
       slashPalette.clear();
       if (rl.terminal && rl.history && rl.history[0] !== t) rl.history.unshift(t);
       input.persistHistory(rl);
-      if (t.startsWith("!")) {
-        runShell(t.slice(1).trim());
-        return ask();
-      }
-      if (t.startsWith("/") && !input.isAbsolutePathTask(t)) {
-        const c2 = await handleSlash(t);
-        if (c2 === false) return;
-        return ask();
-      }
-      // 대화 대상이 아직 없으면: 번호(=/agents 목록의 N번)·단일토큰 이름/회사면 선택만, 그 외엔 자동 라우팅 후 바로 실행.
-      if (!state.subject) {
-        const ags = H.listAgents(db);
-        const single = !/\s/.test(t);
-        if (/^\d+$/.test(t)) {
-          const n = parseInt(t, 10);
-          if (n >= 1 && n <= ags.length) {
-            setSubjectAgent(ags[n - 1]);
-            ui.ok(ui.t("switched", state.subject.label));
-            routingNote(state.subject);
-            return ask();
-          }
-        }
-        if (single) {
-          const a = H.resolveAgent(db, t);
-          if (a) { setSubjectAgent(a); ui.ok(ui.t("switched", state.subject.label)); routingNote(state.subject); return ask(); }
-          const f = H.resolveFirm(db, t);
-          if (f) { setSubjectFirm(f); ui.ok(ui.t("switched", state.subject.label)); routingNote(state.subject); return ask(); }
-        }
-        if (H.autoRouteAgent) {
-          const choice = H.autoRouteAgent(db, t, ui.lang);
-          if (choice) {
-            setSubjectAgent(choice.agent);
-            state.routePreambleOnce = H.autoRoutePreamble ? H.autoRoutePreamble(choice, ui.lang) : null;
-            ui.info(H.autoRouteNote ? H.autoRouteNote(choice, ui.lang) : `auto-routed to ${choice.agent.name}`);
-            routingNote(state.subject);
-          }
-        }
-      }
-      await runTurn(expandMentions(t));
-      ask();
+      await processLine(t);
+      if (!closed) ask();
     });
   }
 
@@ -1065,7 +1130,13 @@ function startRepl(opts) {
       // Claude Code처럼 번호 픽커 없이 바로 입력. 할 일을 입력하면 자동 라우팅된다.
       ui.line("  " + ui.c.dim(ui.t("picker.hint")));
     }
-    ask();
+    if (composer) {
+      handoff = true;
+      try { rl.close(); } catch { /* ignore */ } // hand stdin to the raw-mode composer
+      composerLoop();
+    } else {
+      ask();
+    }
   }
   bootstrap();
 }
