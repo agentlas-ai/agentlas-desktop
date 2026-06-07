@@ -185,7 +185,7 @@ function startRepl(opts) {
   });
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: !!process.stdin.isTTY, completer, historySize: input.HISTORY_MAX });
   input.attachHistory(rl);
-  const slashPalette = input.attachSlashPalette(rl, { ui });
+  const slashPalette = input.attachSlashPalette(rl, { ui, force: true });
   let busy = false;
   let closed = false;
   let currentAbort = null;
@@ -976,6 +976,7 @@ function startRepl(opts) {
   }
 
   // ── main loop ── (multiline: a trailing "\\" continues the input)
+  // Claude Code처럼: 에이전트를 번호로 고르지 않아도 된다. 그냥 입력하면 자동 라우팅(또는 현재 대화 대상)으로 처리.
   function ask(buffer) {
     if (closed) return process.exit(0);
     if (slashPalette.setEnabled) slashPalette.setEnabled(true);
@@ -998,6 +999,35 @@ function startRepl(opts) {
         const c2 = await handleSlash(t);
         if (c2 === false) return;
         return ask();
+      }
+      // 대화 대상이 아직 없으면: 번호(=/agents 목록의 N번)·단일토큰 이름/회사면 선택만, 그 외엔 자동 라우팅 후 바로 실행.
+      if (!state.subject) {
+        const ags = H.listAgents(db);
+        const single = !/\s/.test(t);
+        if (/^\d+$/.test(t)) {
+          const n = parseInt(t, 10);
+          if (n >= 1 && n <= ags.length) {
+            setSubjectAgent(ags[n - 1]);
+            ui.ok(ui.t("switched", state.subject.label));
+            routingNote(state.subject);
+            return ask();
+          }
+        }
+        if (single) {
+          const a = H.resolveAgent(db, t);
+          if (a) { setSubjectAgent(a); ui.ok(ui.t("switched", state.subject.label)); routingNote(state.subject); return ask(); }
+          const f = H.resolveFirm(db, t);
+          if (f) { setSubjectFirm(f); ui.ok(ui.t("switched", state.subject.label)); routingNote(state.subject); return ask(); }
+        }
+        if (H.autoRouteAgent) {
+          const choice = H.autoRouteAgent(db, t, ui.lang);
+          if (choice) {
+            setSubjectAgent(choice.agent);
+            state.routePreambleOnce = H.autoRoutePreamble ? H.autoRoutePreamble(choice, ui.lang) : null;
+            ui.info(H.autoRouteNote ? H.autoRouteNote(choice, ui.lang) : `auto-routed to ${choice.agent.name}`);
+            routingNote(state.subject);
+          }
+        }
       }
       await runTurn(expandMentions(t));
       ask();
@@ -1031,10 +1061,11 @@ function startRepl(opts) {
     showBanner();
     if (state.subject) {
       routingNote(state.subject);
-      ask();
     } else {
-      pick();
+      // Claude Code처럼 번호 픽커 없이 바로 입력. 할 일을 입력하면 자동 라우팅된다.
+      ui.line("  " + ui.c.dim(ui.t("picker.hint")));
     }
+    ask();
   }
   bootstrap();
 }

@@ -155,7 +155,7 @@ class Ui {
 
   // ── 사용자/에이전트 라벨 ──
   promptLabel(name) {
-    return this.c.emerald("you") + this.c.dim(" › ");
+    return this.c.paw("▌") + this.c.emerald(" › ");
   }
   agentHeader(name) {
     this.ensureNl();
