@@ -68,7 +68,7 @@ the current channel quickly.
   short REPL commands such as `/ontology`, `/ontology list`, and
   `/ontology company ./docs`; company and personal folders stay private unless
   explicitly registered otherwise.
-- **2026-06-09 · Cloud-ready agent packages** — terminal users can now repair
+- **2026-06-09 · v0.2.27 Cloud-ready agent packages** — terminal users can now repair
   `agentlas.json`, run a local security scan, compile a manifest-based runtime
   bundle, and test lazy file reads before Cloud sync or Hub publish.
 - **2026-06-06 · v0.2.17 public desktop release** — Project Ontology panel and
