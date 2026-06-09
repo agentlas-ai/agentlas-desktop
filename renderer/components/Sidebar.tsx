@@ -213,7 +213,9 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
     return () => {
       cancelled = true;
     };
-  }, [refreshKey, pathname]);
+    // currentChatId 포함: soft navigation(같은 /chat 라우트, ?id만 변경)으로 새 채팅을
+    // 만들 때도 최근 목록이 갱신되도록. (hard navigation은 full reload라 자동 갱신됐음)
+  }, [refreshKey, pathname, currentChatId]);
 
   const displayAgents = visibleAgents(data.agents);
 
@@ -230,6 +232,8 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       data.agents[0].id;
     const chat = await api.chats.create({ agentId });
     navigate(`/chat?id=${chat.id}`);
+    // soft navigation은 full reload가 없으므로 명시적으로 최근 목록을 갱신한다.
+    triggerRefresh();
   }
 
   // ── 접힘 모드: 아이콘만 ───────────────────────────────
