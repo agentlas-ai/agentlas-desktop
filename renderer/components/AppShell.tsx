@@ -4,17 +4,28 @@
 // + 자동 업데이트 배너 (downloading/downloaded 상태에서만 노출).
 "use client";
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Sidebar } from "./Sidebar";
 import { MenuBridge } from "./MenuBridge";
 import { UpdateBanner } from "./UpdateBanner";
 import { ImportAgentsModal } from "./ImportAgentsModal";
 import { ipc } from "@/lib/ipc";
+import { registerRouter } from "@/lib/navigation";
 
 const ONBOARDED_KEY = "agentlas.onboarded";
 const IMPORT_PROMPTED_KEY = "agentlas.import.prompted";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [importOpen, setImportOpen] = useState(false);
+  const router = useRouter();
+
+  // navigate() 헬퍼가 hard navigation(window.location) 대신 soft navigation을
+  // 쓰도록 App Router 인스턴스를 등록한다. static export 셸에서 hard navigation은
+  // RSC(.txt) 페이로드를 메인 document로 로드해 화면을 깨뜨린다. (navigation.ts 참고)
+  useEffect(() => {
+    registerRouter(router);
+    return () => registerRouter(null);
+  }, [router]);
 
   // 온보딩을 마쳤는데 로컬 에이전트가 0개면 "내 에이전트 가져오기" 팝업을 한 번 띄운다.
   useEffect(() => {
