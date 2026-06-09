@@ -68,6 +68,9 @@ the current channel quickly.
   short REPL commands such as `/ontology`, `/ontology list`, and
   `/ontology company ./docs`; company and personal folders stay private unless
   explicitly registered otherwise.
+- **2026-06-09 · Cloud-ready agent packages** — terminal users can now repair
+  `agentlas.json`, run a local security scan, compile a manifest-based runtime
+  bundle, and test lazy file reads before Cloud sync or Hub publish.
 - **2026-06-06 · v0.2.17 public desktop release** — Project Ontology panel and
   `agentlas ontology` terminal status/add/open flow shipped. Each project gets a
   separate `.agentlas/ontology-inbox/`, `.agentlas/ontology-sources.json`, and
@@ -96,6 +99,9 @@ machine, never on someone else's agent platform.
   OpenAI / Anthropic / Google API keys directly. Agentlas never proxies the model call.
 - **Install Apps over MCP.** Drop in an App, an agent, or a whole team — for example
   a package you built on [agentlas.cloud](https://agentlas.cloud) — and run it.
+- **Prepare Cloud-ready agents locally.** `agentlas cloud wizard` creates or
+  repairs `agentlas.json`; `agentlas cloud runtime bundle` builds the MCP call
+  context from manifest allowlists instead of sending a whole ZIP.
 - **Apps are first-class.** An App opens inside Agentlas Desktop like a small
   macOS/Windows/Linux window: it can have its own UI, UX, backend adapters,
   generated assets, credential requirements, MCP tools, and sub-engines. Assets,
@@ -336,6 +342,23 @@ Open a project folder and type `agentlas`. Inside the Agentlas terminal:
 /ontology company ./company-docs
 /ontology personal ~/notes
 ```
+
+### Prepare an agent for Agentlas Cloud calls
+
+Run these from the Agentlas terminal CLI before private Cloud sync or public Hub
+publish:
+
+```bash
+agentlas cloud wizard ./some-agent --name instagram-operator
+agentlas cloud security scan ./some-agent --strict
+agentlas cloud runtime bundle ./some-agent
+agentlas cloud runtime read-agent-file ./some-agent AGENTS.md
+agentlas cloud field-test
+```
+
+The wizard writes `agentlas.json`, the scan writes
+`.agentlas/security-scan.json`, and lazy reads obey the package allow/deny
+rules so secret-like files stay blocked.
 
 Those commands create/use only this project's `.agentlas/` folder. They do not
 scan your home folder or other projects.
