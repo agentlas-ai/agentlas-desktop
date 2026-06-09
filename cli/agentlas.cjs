@@ -806,6 +806,12 @@ async function cmdCloud(db, args, runtimeOverride) {
     out([
       "agentlas cloud",
       "",
+      "  wizard <path> [--name name] [--json] generate/repair agentlas.json",
+      "  security scan <path> [--strict]     scan risky instructions and secret paths",
+      "  runtime bundle <path> [--json]      compile runtime bundle from agentlas.json",
+      "  runtime read-agent-file <path> <file>",
+      "                                      lazy read with allow/deny gates",
+      "  field-test [--json]                 run local Cloud contract field test",
       "  package <path> [--json]             package + static security review",
       "  publish <path> [--dry-run] [--llm-review] [--slug name]",
       "                                      register with submitter-paid local review",
@@ -814,6 +820,50 @@ async function cmdCloud(db, args, runtimeOverride) {
       "Model cost rule: Agentlas Cloud does not run a platform-owned LLM here.",
       "--llm-review uses only this machine's active CLI/BYOK/Ollama runtime.",
     ].join("\n"));
+    return;
+  }
+  const cloudRuntime = require("./agentlas-cloud-runtime.cjs");
+  if (sub === "wizard") {
+    const flags = parseCloudFlags(args.slice(1));
+    const root = flags._[0];
+    if (!root) fail("usage: agentlas cloud wizard <path> [--name name]");
+    const result = cloudRuntime.runWizard(root, { name: typeof flags.name === "string" ? flags.name : undefined });
+    out(flags.json ? JSON.stringify(result, null, 2) : `${result.status}: ${result.manifest.name} (${result.manifest.entry})`);
+    return;
+  }
+  if (sub === "security") {
+    const action = args[1];
+    if (action !== "scan") fail("usage: agentlas cloud security scan <path> [--strict]");
+    const flags = parseCloudFlags(args.slice(2));
+    const root = flags._[0];
+    if (!root) fail("usage: agentlas cloud security scan <path> [--strict]");
+    const report = cloudRuntime.scanFolder(root);
+    out(JSON.stringify(report, null, 2));
+    if (flags.strict && report.verdict === "BLOCK") process.exit(1);
+    return;
+  }
+  if (sub === "runtime") {
+    const action = args[1];
+    if (action === "bundle") {
+      const root = args[2];
+      if (!root) fail("usage: agentlas cloud runtime bundle <path>");
+      out(JSON.stringify(cloudRuntime.compileBundle(root), null, 2));
+      return;
+    }
+    if (action === "read-agent-file") {
+      const root = args[2];
+      const targetPath = args[3];
+      if (!root || !targetPath) fail("usage: agentlas cloud runtime read-agent-file <path> <file>");
+      out(JSON.stringify(cloudRuntime.readAgentFile(root, targetPath), null, 2));
+      return;
+    }
+    fail("usage: agentlas cloud runtime <bundle|read-agent-file> ...");
+  }
+  if (sub === "field-test") {
+    const flags = parseCloudFlags(args.slice(1));
+    const result = cloudRuntime.runFieldTest();
+    out(flags.json ? JSON.stringify(result, null, 2) : `${result.suite}: ${result.status}`);
+    if (result.status !== "PASS") process.exit(1);
     return;
   }
   if (sub === "install") return cmdCloudInstall(db, args[1]);
@@ -6741,6 +6791,12 @@ function cmdHelp() {
       "  env                   shared env key names",
       "  multimodal            image/video/audio fallback providers",
       "  ontology              project-local ontology status/list/add; inside REPL use /ontology",
+      "  cloud wizard <path>   create/repair agentlas.json for Cloud MCP calls",
+      "  cloud security scan <path>",
+      "                        risk-screen an agent folder before run/publish",
+      "  cloud runtime bundle <path>",
+      "                        compile manifest-based runtime bundle",
+      "  cloud field-test      run local Cloud contract fixture test",
       "  cloud package <path>  package + static security review for Agentlas Cloud",
       "  cloud publish <path>  register after local review (submitter runtime only)",
       "  cloud install <slug>  download/install a cloud marketplace agent",
