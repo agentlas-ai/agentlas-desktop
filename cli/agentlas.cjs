@@ -909,7 +909,7 @@ async function packageCloudAgentCli(db, root, opts) {
     packageHash,
     fileCount: scan.files.length,
     includedFileCount: scan.included.length,
-    totalBytes: scan.totalBytes,
+    totalBytes: scan.included.reduce((sum, file) => sum + file.bytes, 0),
     createdAt: new Date().toISOString(),
     billingMode: opts.llmReview ? "submitter-local-runtime" : "static-only",
     costOwner: opts.llmReview ? "submitter" : "none",

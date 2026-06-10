@@ -123,7 +123,10 @@ export async function packageAndReviewCloudAgent(
     packageHash,
     fileCount: scan.files.length,
     includedFileCount: scan.included.length,
-    totalBytes: scan.totalBytes,
+    // 업로드되는 bundle은 included 파일만 담는다. 서버 register는 받은 bundle의
+    // bytes 합을 totalBytes로 검증하므로, manifest.totalBytes도 included 기준이어야
+    // 한다. (scan.totalBytes는 제외 파일까지 포함한 전체 — MAX_TOTAL_BYTES 게이트용.)
+    totalBytes: scan.included.reduce((sum, file) => sum + file.bytes, 0),
     createdAt: new Date().toISOString(),
     billingMode: input.reviewMode === "local-runtime" ? "submitter-local-runtime" : "static-only",
     costOwner: input.reviewMode === "local-runtime" ? "submitter" : "none",
