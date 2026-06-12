@@ -1,5 +1,6 @@
 import type { InstalledAgent } from "../../shared/types";
 import { APP_BUILDER_SLUG, GLOBAL_ORCHESTRATOR_SLUG } from "../architecture/manifest";
+import { cardScoreAdjustment, findCardForAgent } from "./routing-cards";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 
 export interface AutoRouteChoice {
@@ -335,6 +336,12 @@ function scoreAgent(prompt: string, promptTerms: string[], agent: InstalledAgent
   const hint = routeHintScore(promptText, agent, locale);
   score += hint.score;
   matchedTerms.push(...hint.terms);
+
+  // Hephaestus Network 라우팅 카드 보정 — routing_ready/trusted 카드만 영향 (routing-cards.ts)
+  const card = findCardForAgent(agent.slug, agent.name) ?? findCardForAgent(agent.slug, agent.nameEn);
+  if (card) {
+    score += cardScoreAdjustment(promptTerms, card);
+  }
 
   const uniqueTerms = [...new Set(matchedTerms)].slice(0, 6);
   const reason =
