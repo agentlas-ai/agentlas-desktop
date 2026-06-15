@@ -20,6 +20,9 @@ const MAX_TOTAL_BYTES = 3 * 1024 * 1024;
 const MAX_FILE_BYTES = 512 * 1024;
 const MAX_FILES = 400;
 const MANIFEST_VERSION = "0.1" as const;
+const ROUTING_CARD_PATH = ".agentlas/routing-card.json";
+const ROUTING_CARD_CAPABILITY_RE = /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/;
+const ROUTING_CARD_STATUSES = new Set(["draft", "searchable", "candidate", "routing_ready", "trusted"]);
 
 const TEXT_EXTENSIONS = new Set([
   ".cjs",
@@ -106,11 +109,13 @@ export async function packageAndReviewCloudAgent(
 
   const visibility = input.visibility ?? "marketplace";
   const scan = scanAgentFolder(rootPath);
+  const routingCard = readRoutingCard(rootPath);
+  if (routingCard.finding) scan.findings.push(routingCard.finding);
   const name = readName(rootPath);
   const tagline = readTagline(rootPath);
   const slug = sanitizeSlug(input.slug || name || path.basename(rootPath));
   const packageHash = hashPackage(scan.included);
-  const manifest: CloudAgentPackageManifest = {
+  const manifest: CloudAgentPackageManifest & { routingCard?: Record<string, unknown> } = {
     version: MANIFEST_VERSION,
     kind: "agentlas-cloud-agent",
     slug,
@@ -131,6 +136,7 @@ export async function packageAndReviewCloudAgent(
     billingMode: input.reviewMode === "local-runtime" ? "submitter-local-runtime" : "static-only",
     costOwner: input.reviewMode === "local-runtime" ? "submitter" : "none",
     security: summarizeSecurity(scan.findings),
+    ...(routingCard.card ? { routingCard: routingCard.card } : {}),
   };
 
   const packageDir = packageOutputDir(slug);
@@ -347,6 +353,89 @@ function staticReview(findings: CloudAgentSecurityFinding[]): CloudAgentReviewRe
     findings,
     reviewedAt: new Date().toISOString(),
   };
+}
+
+function readRoutingCard(rootPath: string): {
+  card?: Record<string, unknown>;
+  finding?: CloudAgentSecurityFinding;
+} {
+  const abs = path.join(rootPath, ROUTING_CARD_PATH);
+  if (!fs.existsSync(abs)) {
+    return {
+      finding: {
+        id: "routing-card-required",
+        severity: "blocker",
+        category: "structure",
+        file: ROUTING_CARD_PATH,
+        message: "Cloud registration requires a Hephaestus Network routing card.",
+        remediation: "Add .agentlas/routing-card.json before publishing. In Hephaestus packages, run the routing-card migration or package verifier.",
+      },
+    };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(abs, "utf8")) as unknown;
+    if (!isRecord(parsed)) {
+      return {
+        finding: {
+          id: "routing-card-invalid",
+          severity: "blocker",
+          category: "structure",
+          file: ROUTING_CARD_PATH,
+          message: "Routing card must be a JSON object.",
+          remediation: "Replace .agentlas/routing-card.json with a routing-card/2.0 object.",
+        },
+      };
+    }
+    const problem = routingCardProblem(parsed);
+    if (problem) {
+      return {
+        finding: {
+          id: "routing-card-invalid",
+          severity: "blocker",
+          category: "structure",
+          file: ROUTING_CARD_PATH,
+          message: `Routing card is invalid: ${problem}`,
+          remediation: "Fix .agentlas/routing-card.json before publishing.",
+        },
+      };
+    }
+    return { card: parsed };
+  } catch {
+    return {
+      finding: {
+        id: "routing-card-invalid-json",
+        severity: "blocker",
+        category: "structure",
+        file: ROUTING_CARD_PATH,
+        message: "Routing card is not valid JSON.",
+        remediation: "Fix .agentlas/routing-card.json before publishing.",
+      },
+    };
+  }
+}
+
+function routingCardProblem(card: Record<string, unknown>): string | null {
+  if (card.schemaVersion !== "routing-card/2.0") return "schemaVersion must be routing-card/2.0";
+  if (typeof card.id !== "string" || !card.id.trim()) return "id must be a non-empty string";
+  if (card.type !== "agent" && card.type !== "team" && card.type !== "plugin") return "type must be agent, team, or plugin";
+  if (typeof card.name !== "string" || !card.name.trim()) return "name must be a non-empty string";
+  if (typeof card.summary !== "string" || !card.summary.trim()) return "summary must be a non-empty string";
+  if (!Array.isArray(card.capabilities) || card.capabilities.length === 0) {
+    return "capabilities must be a non-empty array";
+  }
+  for (const capability of card.capabilities) {
+    if (typeof capability !== "string" || !ROUTING_CARD_CAPABILITY_RE.test(capability)) {
+      return `capability ${JSON.stringify(capability)} must be snake_case with at least two words`;
+    }
+  }
+  if (typeof card.routing_status !== "string" || !ROUTING_CARD_STATUSES.has(card.routing_status)) {
+    return "routing_status must be draft, searchable, candidate, routing_ready, or trusted";
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function runSubmitterRuntimeReview(

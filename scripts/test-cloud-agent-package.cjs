@@ -14,8 +14,26 @@ const { packageAndReviewCloudAgent } = require("../dist/electron/cloud-agents/pa
 
 function writeAgent(root, extra = {}) {
   fs.mkdirSync(root, { recursive: true });
+  fs.mkdirSync(path.join(root, ".agentlas"), { recursive: true });
   fs.writeFileSync(path.join(root, "AGENTS.md"), "# Test Agent\n\nYou are a test agent.\n", "utf8");
   fs.writeFileSync(path.join(root, "README.md"), "# Test Agent\n\nPortable test package.\n", "utf8");
+  fs.writeFileSync(
+    path.join(root, ".agentlas", "routing-card.json"),
+    JSON.stringify(
+      {
+        schemaVersion: "routing-card/2.0",
+        id: "test-agent",
+        type: "agent",
+        name: "Test Agent",
+        summary: "Routes test package requests to the test agent.",
+        capabilities: ["test_package"],
+        routing_status: "routing_ready",
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
   for (const [name, body] of Object.entries(extra)) {
     fs.writeFileSync(path.join(root, name), body, "utf8");
   }
@@ -36,7 +54,8 @@ function writeAgent(root, extra = {}) {
     assert.equal(clean.status, "dry-run");
     assert.equal(clean.review.costOwner, "none");
     assert.equal(clean.review.verdict, "pass");
-    assert.equal(clean.manifest.includedFileCount, 2);
+    assert.equal(clean.manifest.includedFileCount, 3);
+    assert.equal(clean.manifest.routingCard.schemaVersion, "routing-card/2.0");
     assert.ok(clean.manifest.packageHash.length >= 32);
     assert.ok(fs.existsSync(clean.bundlePath));
 

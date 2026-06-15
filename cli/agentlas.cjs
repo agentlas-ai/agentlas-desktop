@@ -771,6 +771,9 @@ const CLOUD_TEXT_EXTS = new Set([".cjs", ".css", ".csv", ".js", ".json", ".jsonl
 const CLOUD_AGENT_FILES = new Set(["AGENT.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "README.md", "agent.md", "manifest.md", "system-prompt.md"]);
 const CLOUD_SKIP_DIRS = new Set([".git", ".next", ".turbo", "build", "coverage", "dist", "node_modules", "out", "release"]);
 const CLOUD_BLOCKED_FILE_RE = [/^\.env(?:\..*)?$/i, /^id_rsa(?:\.pub)?$/i, /^credentials(?:\..*)?$/i, /^secrets?(?:\..*)?$/i, /(?:^|[._-])service-account(?:[._-]|$)/i, /\.(?:key|pem|p12|pfx|mobileprovision)$/i];
+const CLOUD_ROUTING_CARD_PATH = ".agentlas/routing-card.json";
+const CLOUD_ROUTING_CARD_CAPABILITY_RE = /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/;
+const CLOUD_ROUTING_CARD_STATUSES = new Set(["draft", "searchable", "candidate", "routing_ready", "trusted"]);
 const CLOUD_SECRET_RE = [
   ["private-key", /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/i, "private key material"],
   ["openai-key", /\bsk-[A-Za-z0-9_-]{20,}\b/, "OpenAI-style API key"],
@@ -893,6 +896,8 @@ async function packageCloudAgentCli(db, root, opts) {
   try { st = fs.statSync(rootPath); } catch { fail(`폴더를 찾을 수 없습니다: ${root}`); }
   if (!st.isDirectory()) fail(`폴더가 아닙니다: ${root}`);
   const scan = scanCloudFolderCli(rootPath);
+  const routingCard = readCloudRoutingCardCli(rootPath);
+  if (routingCard.finding) scan.findings.push(routingCard.finding);
   const name = cloudReadName(rootPath);
   const slug = cloudSlug(opts.slug || name || path.basename(rootPath));
   const packageHash = cloudHashPackage(scan.included);
@@ -915,6 +920,7 @@ async function packageCloudAgentCli(db, root, opts) {
     costOwner: opts.llmReview ? "submitter" : "none",
     security: cloudSecuritySummary(scan.findings),
   };
+  if (routingCard.card) manifest.routingCard = routingCard.card;
   const packageDir = cloudPackageDir(slug);
   fs.mkdirSync(packageDir, { recursive: true });
   const manifestPath = path.join(packageDir, "package.manifest.json");
@@ -1018,6 +1024,66 @@ function scanCloudFolderCli(rootPath) {
   files.sort((a, b) => a.path.localeCompare(b.path));
   included.sort((a, b) => a.path.localeCompare(b.path));
   return { files, included, findings, totalBytes };
+}
+
+function readCloudRoutingCardCli(rootPath) {
+  const abs = path.join(rootPath, CLOUD_ROUTING_CARD_PATH);
+  if (!fs.existsSync(abs)) {
+    return {
+      finding: {
+        id: "routing-card-required",
+        severity: "blocker",
+        category: "structure",
+        file: CLOUD_ROUTING_CARD_PATH,
+        message: "Cloud registration requires a Hephaestus Network routing card.",
+        remediation: "Add .agentlas/routing-card.json before publishing. In Hephaestus packages, run the routing-card migration or package verifier.",
+      },
+    };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(abs, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return cloudRoutingCardFinding("routing-card-invalid", "Routing card must be a JSON object.", "Replace .agentlas/routing-card.json with a routing-card/2.0 object.");
+    }
+    const problem = cloudRoutingCardProblem(parsed);
+    if (problem) {
+      return cloudRoutingCardFinding("routing-card-invalid", `Routing card is invalid: ${problem}`, "Fix .agentlas/routing-card.json before publishing.");
+    }
+    return { card: parsed };
+  } catch {
+    return cloudRoutingCardFinding("routing-card-invalid-json", "Routing card is not valid JSON.", "Fix .agentlas/routing-card.json before publishing.");
+  }
+}
+
+function cloudRoutingCardFinding(id, message, remediation) {
+  return {
+    finding: {
+      id,
+      severity: "blocker",
+      category: "structure",
+      file: CLOUD_ROUTING_CARD_PATH,
+      message,
+      remediation,
+    },
+  };
+}
+
+function cloudRoutingCardProblem(card) {
+  if (card.schemaVersion !== "routing-card/2.0") return "schemaVersion must be routing-card/2.0";
+  if (typeof card.id !== "string" || !card.id.trim()) return "id must be a non-empty string";
+  if (card.type !== "agent" && card.type !== "team" && card.type !== "plugin") return "type must be agent, team, or plugin";
+  if (typeof card.name !== "string" || !card.name.trim()) return "name must be a non-empty string";
+  if (typeof card.summary !== "string" || !card.summary.trim()) return "summary must be a non-empty string";
+  if (!Array.isArray(card.capabilities) || card.capabilities.length === 0) return "capabilities must be a non-empty array";
+  for (const capability of card.capabilities) {
+    if (typeof capability !== "string" || !CLOUD_ROUTING_CARD_CAPABILITY_RE.test(capability)) {
+      return `capability ${JSON.stringify(capability)} must be snake_case with at least two words`;
+    }
+  }
+  if (typeof card.routing_status !== "string" || !CLOUD_ROUTING_CARD_STATUSES.has(card.routing_status)) {
+    return "routing_status must be draft, searchable, candidate, routing_ready, or trusted";
+  }
+  return null;
 }
 
 function cloudStaticReview(findings) {
