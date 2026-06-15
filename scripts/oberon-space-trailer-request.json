@@ -1,0 +1,62 @@
+{
+  "productionId": "oberon-space-blackhole-trailer-20s",
+  "title": "Oberon Space Blackhole Trailer 20s",
+  "aspectRatio": "16:9",
+  "maxShots": 5,
+  "takesPerShot": 1,
+  "provider": "google-enterprise-veo",
+  "model": "veo-3.1-lite-generate-001",
+  "resolution": "720p",
+  "shots": [
+    {
+      "shotId": "SH_001_DEEP_SPACE_WAKE",
+      "index": 0,
+      "durationSec": 4,
+      "aspectRatio": "16:9",
+      "providerId": "google-veo",
+      "providerMode": "text_to_video",
+      "prompt": "Cinematic live-action science fiction trailer, 16:9, 24fps. No humans, no faces, no bodies, no astronauts, no cockpit interiors. In silent deep space, a colossal unmanned exploration ark drifts out of a blue-white jump wake above a dark ringed planet. Thousands of tiny probe lights spread like fireflies across the planet's shadow while a distant black hole bends the starfield. Camera starts as a vast static IMAX-wide shot, then rushes forward through stardust toward the ark's hull. Premium blockbuster realism, cold black space, silver hulls, indigo engine light, no text, no logos. Audio: deep trailer boom, sub-bass engine swell, distant radio-static texture, rising orchestral pulse.",
+      "negativePrompt": "humans, people, astronauts, faces, bodies, hands, cockpit, readable text, subtitles, captions, logos, watermark, cartoon, anime, low quality, distorted geometry"
+    },
+    {
+      "shotId": "SH_002_ORBITAL_WAR",
+      "index": 1,
+      "durationSec": 4,
+      "aspectRatio": "16:9",
+      "providerId": "google-veo",
+      "providerMode": "text_to_video",
+      "prompt": "Cinematic live-action science fiction trailer, 16:9, 24fps. No humans, no faces, no bodies, no astronauts, no cockpit interiors. A massive orbital war erupts above a scarred moon: unmanned carrier ships, drone swarms, railgun flashes, glowing debris trails, shield ripples, and silent explosions blooming in vacuum. Camera performs a fast lateral tracking shot between capital ships, then whips past a burning wreck toward a battlefield of blue and amber light. Premium blockbuster realism, sharp silhouettes, no gore, no text, no logos. Audio: percussion hits, metallic impacts, muffled space thunder, accelerating trailer rhythm.",
+      "negativePrompt": "humans, people, astronauts, faces, bodies, cockpit, gore, blood, readable text, subtitles, captions, logos, watermark, cartoon, anime, low quality, toy-like ships"
+    },
+    {
+      "shotId": "SH_003_BLACKHOLE_APPROACH",
+      "index": 2,
+      "durationSec": 4,
+      "aspectRatio": "16:9",
+      "providerId": "google-veo",
+      "providerMode": "text_to_video",
+      "prompt": "Cinematic live-action science fiction trailer, 16:9, 24fps. No humans, no faces, no bodies, no astronauts, no cockpit interiors. A fleet of tiny unmanned survey probes enters the vast gravitational lens of a supermassive black hole. The accretion disk burns white, copper, and indigo; stars stretch into arcs; dust streams spiral inward like a cosmic hurricane. Camera dives from behind the probes toward the impossible horizon, conveying terrifying scale and wonder. Premium realistic astrophotography mixed with blockbuster spectacle, no text, no logos. Audio: low cosmic drone, glassy whooshes, heartbeat-like bass pulses, swelling brass.",
+      "negativePrompt": "humans, people, astronauts, faces, bodies, cockpit, readable text, subtitles, captions, logos, watermark, cartoon, anime, low quality, flat starfield"
+    },
+    {
+      "shotId": "SH_004_LOST_EXPEDITION",
+      "index": 3,
+      "durationSec": 4,
+      "aspectRatio": "16:9",
+      "providerId": "google-veo",
+      "providerMode": "text_to_video",
+      "prompt": "Cinematic live-action science fiction trailer, 16:9, 24fps. No humans, no faces, no bodies, no astronauts, no cockpit interiors. Inside a cold asteroid graveyard, broken unmanned exploration ships drift among frozen rocks, shattered solar sails, sparks, and blue distress beacons. A small autonomous drone races through the wreckage as pieces tumble slowly around it. Camera follows the drone in a fast low fly-through, then reveals a gigantic alien ring structure half-hidden in darkness near the black hole. Premium blockbuster realism, eerie scale, no text, no logos. Audio: tense ticking percussion, radio chirps without speech, debris impacts, ominous rise.",
+      "negativePrompt": "humans, people, astronauts, faces, bodies, cockpit, readable text, subtitles, captions, logos, watermark, cartoon, anime, low quality, messy unreadable UI"
+    },
+    {
+      "shotId": "SH_005_EVENT_HORIZON_FINALE",
+      "index": 4,
+      "durationSec": 4,
+      "aspectRatio": "16:9",
+      "providerId": "google-veo",
+      "providerMode": "text_to_video",
+      "prompt": "Cinematic live-action science fiction trailer finale, 16:9, 24fps. No humans, no faces, no bodies, no astronauts, no cockpit interiors. A colossal fleet of unmanned arks crosses the edge of a supermassive black hole while the galaxy bends behind them. One enormous ark fractures into glittering fragments as gravity stretches the light; another fires indigo engines and vanishes into a vertical beam of warped spacetime. Camera pulls back rapidly to reveal the black hole swallowing the entire frame, ending on a majestic terrifying event horizon. Premium blockbuster realism, vast scale, no text, no logos. Audio: final trailer rise, thunderous bass drop, choir-like synth, hard cut to silence.",
+      "negativePrompt": "humans, people, astronauts, faces, bodies, cockpit, readable text, subtitles, captions, logos, watermark, cartoon, anime, low quality, confusing object shapes"
+    }
+  ]
+}

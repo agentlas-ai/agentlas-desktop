@@ -15,6 +15,19 @@ import {
   listMultimodalProviders,
   saveMultimodalSettings,
 } from "./multimodal/settings";
+import {
+  cancelOberonKeyframes,
+  getOberonKeyframeJob,
+  openOberonKeyframeOutput,
+  startOberonKeyframes,
+} from "./oberon/keyframes";
+import { planOberonWithCli } from "./oberon/planner";
+import {
+  cancelOberonRenderJob,
+  getOberonRenderJob,
+  openOberonRenderOutput,
+  startOberonRender,
+} from "./oberon/render";
 import { runMigration, scanMigrationSources } from "./migrate";
 import {
   deleteApiKey,
@@ -188,6 +201,9 @@ import type {
   McpTransport,
   MigrationOptions,
   MultimodalSettings,
+  OberonKeyframeRequest,
+  OberonPlanRequest,
+  OberonRenderRequest,
   Project,
   RuntimeBackend,
   RuntimeKind,
@@ -480,6 +496,23 @@ export function registerIpcHandlers(): void {
     saveMultimodalSettings(settings),
   );
   ipcMain.handle("multimodal:status", () => getMultimodalStatus());
+
+  // ── Oberon real generation bridges ─────────────────────────
+  ipcMain.handle("oberon:planWithCli", (_e, request: OberonPlanRequest) =>
+    planOberonWithCli(request),
+  );
+  ipcMain.handle("oberon:startKeyframes", (_e, request: OberonKeyframeRequest) =>
+    startOberonKeyframes(request),
+  );
+  ipcMain.handle("oberon:getKeyframeJob", (_e, id: string) => getOberonKeyframeJob(id));
+  ipcMain.handle("oberon:cancelKeyframes", (_e, id: string) => cancelOberonKeyframes(id));
+  ipcMain.handle("oberon:openKeyframeOutput", (_e, id: string) => openOberonKeyframeOutput(id));
+  ipcMain.handle("oberon:startRender", (_e, request: OberonRenderRequest) =>
+    startOberonRender(request),
+  );
+  ipcMain.handle("oberon:getRenderJob", (_e, id: string) => getOberonRenderJob(id));
+  ipcMain.handle("oberon:cancelRender", (_e, id: string) => cancelOberonRenderJob(id));
+  ipcMain.handle("oberon:openRenderOutput", (_e, id: string) => openOberonRenderOutput(id));
 
   // ── team (설치된 에이전트) ─────────────────────────────
   ipcMain.handle("team:list", () => listInstalledAgents());

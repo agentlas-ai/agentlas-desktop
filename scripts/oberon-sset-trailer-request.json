@@ -1,0 +1,42 @@
+{
+  "productionId": "oberon-sset-trailer-20s",
+  "title": "Oberon SSET Trailer 20s",
+  "aspectRatio": "16:9",
+  "maxShots": 3,
+  "takesPerShot": 1,
+  "provider": "google-enterprise-veo",
+  "model": "veo-3.1-lite-generate-001",
+  "resolution": "720p",
+  "shots": [
+    {
+      "shotId": "SH_001_RIFT_FOREST",
+      "index": 0,
+      "durationSec": 8,
+      "aspectRatio": "16:9",
+      "providerId": "google-veo",
+      "providerMode": "text_to_video",
+      "prompt": "Cinematic live-action fantasy trailer, 16:9, 24fps. Night over the ancient Silvandil forest on the continent of Arthemis. A torn blue-white dimensional rift opens above the canopy; a young adult Earth office worker in damaged modern clothes and sneakers falls through spinning leaves and blue mana sparks. Camera starts high above the trees, then plunges with him in a fast controlled vertical dive, ending low among huge wet roots as he gasps and looks toward distant war horns beyond the trees. Visual style: premium blockbuster fantasy, cool moonlight, green-black forest, volumetric mist, realistic faces and hands, no text. Timing: 0-1s impossible rift hook, 1-4s falling through branches and mana rain, 4-6.5s violent landing in moss, 6.5-8s tense hold as unseen armies thunder far away. Audio: deep trailer boom, rushing wind, cracking branches, rising orchestral pulse, no dialogue.",
+      "negativePrompt": "subtitles, captions, readable text, logos, watermark, cartoon, anime, low quality, distorted face, distorted hands, extra limbs, modern city, comedy tone"
+    },
+    {
+      "shotId": "SH_002_ALBRET_JUSTINIANI_WAR",
+      "index": 1,
+      "durationSec": 8,
+      "aspectRatio": "16:9",
+      "providerId": "google-veo",
+      "providerMode": "text_to_video",
+      "prompt": "Cinematic live-action fantasy trailer, 16:9, 24fps. A single high-speed aerial chase shot races from the fertile Albret plains into a battlefield corridor and toward the glowing sea city of Justiniani. Start over endless wheat fields under storm light; Albret knights and Lamar legions clash below with banners, cavalry dust, fire arrows, siege smoke, and mud. The camera skims over shields and horses without gore, then accelerates toward a grand harbor city inspired by a wealthy maritime republic: white stone towers, canals, black ships, golden lamps, crowded docks, storm waves. Visual style: large-scale blockbuster, grounded medieval fantasy, cool neutral shadows with controlled indigo mana flashes, no text. Timing: 0-2s plains open wide, 2-5s battlefield speed and impacts, 5-7s camera clears smoke and reveals Justiniani harbor, 7-8s bass-hit hold on ships launching into the storm. Audio: war drums, distant horns, metal impacts, whooshes, epic trailer brass, no dialogue.",
+      "negativePrompt": "subtitles, captions, readable text, logos, watermark, excessive blood, gore, severed body parts, cartoon, anime, low quality, distorted horses, distorted faces, modern vehicles"
+    },
+    {
+      "shotId": "SH_003_PRYTONIA_LIZARDMAN_CLOSEUP",
+      "index": 2,
+      "durationSec": 4,
+      "aspectRatio": "16:9",
+      "providerId": "google-veo",
+      "providerMode": "text_to_video",
+      "prompt": "Cinematic live-action fantasy trailer finale, 16:9, 24fps. The New Continent Prytonia, called the Green Hell. Camera rushes from the fortified cliff harbor of Nova Venezia into a hostile jungle overloaded with blue-green mana radiation. Iron-vines move like predators around broken armor, explosive spores glow under rain, and a scout torch blows out. Final frame: an extreme close-up of a Lizardman hunter emerging from wet leaves, reptile eyes sharp, scaled face camouflaged with moss, silent and terrifying, filling the frame. Visual style: premium dark adventure blockbuster, humid jungle, intense contrast, no text. Timing: 0-1s harbor gate and storm, 1-2.5s jungle rush with living vines and glowing spores, 2.5-4s sudden Lizardman close-up hold. Audio: thunder, jungle hiss, low creature growl, final trailer sting.",
+      "negativePrompt": "subtitles, captions, readable text, logos, watermark, cute creature, cartoon, anime, low quality, distorted eyes, distorted mouth, extra heads, excessive gore"
+    }
+  ]
+}

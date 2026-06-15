@@ -1,0 +1,655 @@
+// Oberon — 제작 엔진 (the brain).
+//
+// 브리프 하나를 받아 상업 제작 파이프라인 전체 산출물을 역설계한다:
+//   Project → Sequence → Scene → Beat → Shot (+ 샷별 프롬프트/프로바이더/비용)
+//   + Continuity Bible (인물/공간/소품 레퍼런스 + do-not-change)
+//   + Keyframe 명세 + Cost Ledger
+//
+// 결정적(deterministic) 생성 — 같은 브리프는 같은 계획을 낸다(시드).
+// 실제 LLM/이미지/영상 API는 어댑터 경계 뒤에 있고, 여기서는 "계획 + 프롬프트"를
+// 완전하게 만든다(그 자체로 어떤 영상툴에든 바로 쓸 수 있는 산출물).
+
+import { INITIAL_STAGE_STATUS } from "./agents";
+import {
+  composeKeyframePrompt,
+  composeNegativePrompt,
+  composeReferencePrompt,
+  composeShotPrompt,
+  suggestShotDuration,
+} from "./prompt-craft";
+import {
+  providerById,
+  routeImageProvider,
+  routeVideoProvider,
+} from "./providers";
+import { COVERAGE_PATTERNS, FORMAT_DEFAULT_DURATION, GENRE_TEMPLATES, MOVEMENTS } from "./taxonomy";
+import type {
+  Beat,
+  ContinuityBible,
+  CostLedger,
+  CostLine,
+  EditDecision,
+  FilmBrief,
+  FilmProduction,
+  PaletteSwatch,
+  ProductionStats,
+  QAFinding,
+  QAResult,
+  ReferenceEntry,
+  Scene,
+  Sequence,
+  ShotSpec,
+  Take,
+} from "./types";
+
+// ── 시드 RNG (안정적 변주) ───────────────────────────────
+
+function hashSeed(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function mulberry32(seed: number): () => number {
+  let a = seed;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function pad(n: number, w = 2): string {
+  return String(n).padStart(w, "0");
+}
+
+// ── 팔레트 / 룩 프리셋 ───────────────────────────────────
+
+const PALETTE_PRESETS: Record<string, PaletteSwatch[]> = {
+  warm: [
+    { name: "amber", hex: "#E8A04B" },
+    { name: "terracotta", hex: "#B5532A" },
+    { name: "cream", hex: "#F2E4C9" },
+  ],
+  cold: [
+    { name: "steel blue", hex: "#3E5C76" },
+    { name: "slate", hex: "#1F2A37" },
+    { name: "ice", hex: "#CFE3EE" },
+  ],
+  neon: [
+    { name: "cyan", hex: "#22D3EE" },
+    { name: "magenta", hex: "#E5379B" },
+    { name: "deep night", hex: "#0B1020" },
+  ],
+  natural: [
+    { name: "sage", hex: "#8FA68A" },
+    { name: "oat", hex: "#D8CDB8" },
+    { name: "bark", hex: "#5A4632" },
+  ],
+  sleek: [
+    { name: "graphite", hex: "#2B2B2F" },
+    { name: "platinum", hex: "#D9DBE0" },
+    { name: "signal", hex: "#FF5A36" },
+  ],
+};
+
+function pickPalette(tone: string[]): { palette: PaletteSwatch[]; stock: string; lighting: string } {
+  const t = tone.map((x) => x.toLowerCase()).join(" ");
+  if (/(neon|city|도시|night|밤|cyber)/.test(t)) return { palette: PALETTE_PRESETS.neon, stock: "anamorphic 2x squeeze, oval bokeh", lighting: "neon practicals, cyan-magenta contrast" };
+  if (/(warm|따뜻|golden|로맨|romance)/.test(t)) return { palette: PALETTE_PRESETS.warm, stock: "Kodak Vision3 500T film grain", lighting: "warm motivated practicals, soft key" };
+  if (/(cold|차가|thriller|noir|tense)/.test(t)) return { palette: PALETTE_PRESETS.cold, stock: "shot on Arri Alexa, cinematic color science", lighting: "cool moonlight key, hard rim" };
+  if (/(sleek|product|광고|brand|tech|modern)/.test(t)) return { palette: PALETTE_PRESETS.sleek, stock: "RED Komodo, crisp highlight rolloff", lighting: "softbox studio lighting, controlled gradient" };
+  return { palette: PALETTE_PRESETS.natural, stock: "35mm film, subtle halation", lighting: "naturalistic window light, soft diffusion" };
+}
+
+// ── Continuity Bible 빌드 ────────────────────────────────
+
+function buildBible(brief: FilmBrief): ContinuityBible {
+  const { palette, stock, lighting } = pickPalette([...brief.tone, brief.setting, brief.genre]);
+  const visualDirection =
+    `${brief.tone.join(", ") || "cinematic"} ${brief.genre} look — ${brief.logline}` +
+    (brief.visualReferences.length ? `; referencing ${brief.visualReferences.join(", ")}` : "");
+
+  const references: ReferenceEntry[] = [];
+
+  // 1) 캐릭터
+  brief.characters.forEach((c, i) => {
+    references.push({
+      id: `char_${pad(i + 1)}`,
+      kind: "character",
+      name: c.name,
+      prompt: composeReferencePrompt({
+        kind: "character",
+        name: c.name,
+        description: `${c.role}. ${c.description}`,
+        tone: brief.tone,
+        visualDirection,
+      }),
+      lockedTraits: deriveTraits(c.description),
+      notes: c.role,
+      approvedAssetIds: [],
+    });
+  });
+
+  // 2) 공간 (setting을 1차 location으로)
+  if (brief.setting) {
+    references.push({
+      id: "loc_01",
+      kind: "location",
+      name: brief.setting,
+      prompt: composeReferencePrompt({
+        kind: "location",
+        name: brief.setting,
+        description: brief.setting,
+        tone: brief.tone,
+        visualDirection,
+      }),
+      lockedTraits: [lighting, palette.map((p) => p.name).join("/")],
+      notes: "주 배경",
+      approvedAssetIds: [],
+    });
+  }
+
+  // 3) 제품/브랜드
+  if (brief.brandOrProduct) {
+    references.push({
+      id: "prod_01",
+      kind: "prop",
+      name: brief.brandOrProduct,
+      prompt: composeReferencePrompt({
+        kind: "prop",
+        name: brief.brandOrProduct,
+        description: brief.brandOrProduct,
+        tone: brief.tone,
+        visualDirection,
+      }),
+      lockedTraits: ["정확한 로고·색상", "제품 비율 유지"],
+      notes: "히어로 제품",
+      approvedAssetIds: [],
+    });
+  }
+
+  // 4) mustInclude에서 소품 후보 추출
+  brief.mustInclude.slice(0, 4).forEach((item, i) => {
+    references.push({
+      id: `prop_${pad(i + 2)}`,
+      kind: "prop",
+      name: item,
+      prompt: composeReferencePrompt({ kind: "prop", name: item, description: item, tone: brief.tone, visualDirection }),
+      lockedTraits: [item],
+      notes: "필수 소품",
+      approvedAssetIds: [],
+    });
+  });
+
+  return {
+    visualDirection,
+    filmStock: stock,
+    colorPalette: palette,
+    lightingStyle: lighting,
+    references,
+    globalMustKeep: [
+      ...brief.mustInclude,
+      `color palette: ${palette.map((p) => p.name).join(", ")}`,
+      `lighting: ${lighting}`,
+    ],
+    globalMustAvoid: [...brief.mustAvoid, "identity drift", "axis crossing", "logo distortion"],
+  };
+}
+
+function deriveTraits(desc: string): string[] {
+  const traits = desc
+    .split(/[,，·、]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 5);
+  return traits.length ? traits : [desc];
+}
+
+// ── 슬러그라인 / 씬 생성 헬퍼 ────────────────────────────
+
+function sceneHeading(brief: FilmBrief, idx: number, timeOfDay: string): string {
+  const interior = /(office|오피스|room|방|실내|interior|집|home|카페|cafe)/i.test(brief.setting);
+  const place = brief.setting || "LOCATION";
+  return `${interior ? "INT." : "EXT."} ${place.toUpperCase()} - ${timeOfDay.toUpperCase()}`;
+}
+
+const TIMES_OF_DAY = ["낮", "밤", "황혼", "새벽", "오후"];
+
+// ── 메인: 기획 → 전체 제작 ───────────────────────────────
+
+export interface PlanOptions {
+  premium?: boolean; // 최고 품질 우선 (비용 무시)
+  budgetUsd?: number;
+}
+
+export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmProduction {
+  const premium = opts.premium ?? true;
+  const rng = mulberry32(hashSeed(`${brief.title}|${brief.logline}|${brief.format}`));
+  const template = GENRE_TEMPLATES[brief.format];
+  const duration = brief.durationSec || FORMAT_DEFAULT_DURATION[brief.format];
+  const avgShotLen = template.avgShotLenSec;
+
+  // 1) 규모 계산
+  const totalShotsTarget = clamp(Math.round(duration / avgShotLen), 6, 600);
+  const avgCoverage = 4;
+  const beatsTotal = clamp(Math.round(totalShotsTarget / avgCoverage), template.beats.length, 140);
+  const beatsPerScene = duration <= 90 ? 1 : duration <= 300 ? 2 : 3;
+  const sequences = template.sequenceTarget;
+
+  // 2) 바이블
+  const bible = buildBible(brief);
+  const characterRefs = bible.references.filter((r) => r.kind === "character");
+  const locationRef = bible.references.find((r) => r.kind === "location");
+  const propRefs = bible.references.filter((r) => r.kind === "prop");
+
+  // 3) 비트 확장 — 템플릿 비트를 weight 비례로 세분
+  interface ExpandedBeat {
+    tplName: string;
+    tplNameEn: string;
+    emotion: string;
+    sceneType: Scene["type"];
+    durationSec: number;
+  }
+  const expanded: ExpandedBeat[] = [];
+  for (const tb of template.beats) {
+    const n = Math.max(1, Math.round(tb.weight * beatsTotal));
+    const beatDur = (tb.weight * duration) / n;
+    for (let i = 0; i < n; i++) {
+      expanded.push({
+        tplName: tb.name,
+        tplNameEn: tb.nameEn,
+        emotion: tb.emotion,
+        sceneType: tb.sceneType,
+        durationSec: beatDur,
+      });
+    }
+  }
+
+  // 4) 계층 빌드
+  const scenesArr: Scene[] = [];
+  const beatsArr: Beat[] = [];
+  const shotsArr: ShotSpec[] = [];
+  const sequencesArr: Sequence[] = [];
+
+  let globalShotIndex = 0;
+  let beatGlobal = 0;
+
+  // 비트를 씬으로 그룹핑
+  const sceneChunks: ExpandedBeat[][] = [];
+  for (let i = 0; i < expanded.length; i += beatsPerScene) {
+    sceneChunks.push(expanded.slice(i, i + beatsPerScene));
+  }
+
+  // 씬을 시퀀스로 그룹핑
+  const scenesPerSeq = Math.ceil(sceneChunks.length / sequences);
+
+  sceneChunks.forEach((chunk, sceneIdx) => {
+    const sceneId = `sc${pad(sceneIdx + 1)}`;
+    const lead = chunk[0];
+    const timeOfDay = TIMES_OF_DAY[(sceneIdx + Math.floor(rng() * 5)) % TIMES_OF_DAY.length];
+    const beatIds: string[] = [];
+
+    chunk.forEach((eb) => {
+      beatGlobal += 1;
+      const beatId = `${sceneId}_bt${pad(beatGlobal)}`;
+      beatIds.push(beatId);
+
+      // 이 비트의 샷 생성 — 커버리지 패턴을 채워 넣음
+      const pattern = COVERAGE_PATTERNS[eb.sceneType];
+      const shotsInBeat = Math.max(pattern.length >= 3 ? 2 : 1, Math.round(eb.durationSec / avgShotLen));
+      const shotIds: string[] = [];
+
+      for (let s = 0; s < shotsInBeat; s++) {
+        const cov = pattern[s % pattern.length];
+        globalShotIndex += 1;
+        const shotId = `${beatId}_sh${pad(globalShotIndex, 3)}`;
+
+        // 이 샷에 등장할 레퍼런스 결정
+        const refsForShot: ReferenceEntry[] = [];
+        if (eb.sceneType === "product" && propRefs[0]) refsForShot.push(propRefs[0]);
+        // 대화/감정엔 인물 1-2명, OTS면 둘
+        if (["dialogue", "emotional", "establishing", "action", "montage"].includes(eb.sceneType)) {
+          if (cov.angle === "ots" && characterRefs.length >= 2) {
+            // reverse는 인물 순서 교차
+            const a = characterRefs[(s % characterRefs.length)];
+            const b = characterRefs[((s + 1) % characterRefs.length)];
+            refsForShot.push(a, b);
+          } else if (characterRefs.length) {
+            refsForShot.push(characterRefs[s % characterRefs.length]);
+          }
+        }
+        if (locationRef && cov.size !== "ECU") refsForShot.push(locationRef);
+
+        const dur = suggestShotDuration(cov.size, avgShotLen);
+        const hasDialogue = eb.sceneType === "dialogue" && cov.size !== "ELS" && cov.size !== "LS" && rng() > 0.4;
+        const dialogue = hasDialogue ? sampleDialogue(brief, eb.emotion, rng) : undefined;
+        const action = buildActionLine(brief, eb, cov.role, refsForShot);
+
+        const camera = { size: cov.size, angle: cov.angle, movement: cov.movement, lens: cov.lens };
+        const generationPrompt = composeShotPrompt({
+          action,
+          dialogue,
+          camera,
+          scene: {
+            id: sceneId,
+            index: sceneIdx,
+            heading: sceneHeading(brief, sceneIdx, timeOfDay),
+            type: eb.sceneType,
+            location: brief.setting,
+            timeOfDay,
+            summary: "",
+            characterRefs: characterRefs.map((c) => c.id),
+            beatIds,
+            locked: false,
+          },
+          bible,
+          tone: brief.tone,
+          refs: refsForShot,
+          aspect: brief.aspect,
+        });
+
+        const movementEnergy = MOVEMENTS[cov.movement].energy;
+        const route = routeVideoProvider({
+          needsKeyframes: cov.needsKeyframes,
+          hasDialogue,
+          movementEnergy,
+          size: cov.size,
+          premium,
+        });
+        const provider = providerById(route.providerId);
+        const estCost = provider ? provider.approxCostUsd * (premium ? 1.15 : 1) : 2;
+
+        shotsArr.push({
+          shotId,
+          sceneId,
+          beatId,
+          index: globalShotIndex,
+          durationSec: dur,
+          shotType: eb.sceneType,
+          camera,
+          action,
+          dialogue,
+          continuityRefs: refsForShot.map((r) => r.id),
+          requiresKeyframe: cov.needsKeyframes,
+          mustKeep: [...bible.globalMustKeep.slice(0, 2), ...refsForShot.flatMap((r) => r.lockedTraits.slice(0, 1))],
+          mustAvoid: bible.globalMustAvoid.slice(0, 4),
+          transitionIn: s === 0 ? "cut" : pickTransition(eb.sceneType, s, rng),
+          transitionOut: pickTransition(eb.sceneType, s + 1, rng),
+          generationPrompt,
+          negativePrompt: composeNegativePrompt(eb.sceneType === "product" ? ["text artifacts"] : []),
+          providerId: route.providerId,
+          providerMode: route.mode,
+          estCostUsd: Number(estCost.toFixed(2)),
+        });
+        shotIds.push(shotId);
+      }
+
+      beatsArr.push({
+        id: beatId,
+        name: eb.tplName,
+        description: buildBeatDescription(brief, eb),
+        emotion: eb.emotion,
+        shotIds,
+      });
+    });
+
+    scenesArr.push({
+      id: sceneId,
+      index: sceneIdx,
+      heading: sceneHeading(brief, sceneIdx, timeOfDay),
+      type: lead.sceneType,
+      location: brief.setting,
+      timeOfDay,
+      summary: buildSceneSummary(brief, lead, sceneIdx),
+      characterRefs: characterRefs.map((c) => c.id),
+      beatIds,
+      locked: false,
+    });
+  });
+
+  // 시퀀스 그룹핑
+  for (let q = 0; q < sequences; q++) {
+    const slice = scenesArr.slice(q * scenesPerSeq, (q + 1) * scenesPerSeq);
+    if (!slice.length) continue;
+    sequencesArr.push({
+      id: `seq${pad(q + 1)}`,
+      index: q,
+      title: sequenceTitle(template, q, sequences),
+      purpose: sequencePurpose(template, q, sequences),
+      sceneIds: slice.map((s) => s.id),
+    });
+  }
+
+  // 5) 비용 레저
+  const cost = buildCostLedger(shotsArr, bible, opts.budgetUsd);
+
+  // 6) 통계
+  const totalDur = shotsArr.reduce((a, s) => a + s.durationSec, 0);
+  const stats: ProductionStats = {
+    sequenceCount: sequencesArr.length,
+    sceneCount: scenesArr.length,
+    beatCount: beatsArr.length,
+    shotCount: shotsArr.length,
+    totalDurationSec: Number(totalDur.toFixed(1)),
+    avgShotLenSec: Number((totalDur / Math.max(1, shotsArr.length)).toFixed(1)),
+    estTotalCostUsd: cost.totalUsd,
+    referenceCount: bible.references.length,
+  };
+
+  return {
+    id: `oberon_${hashSeed(brief.title + Date.now()).toString(36)}`,
+    brief,
+    bible,
+    sequences: sequencesArr,
+    scenes: scenesArr,
+    beats: beatsArr,
+    shots: shotsArr,
+    takes: [],
+    edl: [],
+    cost,
+    stageStatus: { ...INITIAL_STAGE_STATUS, brief: "done", script: "ready" },
+    createdAtMs: Date.now(),
+    stats,
+  };
+}
+
+// ── 비용 ─────────────────────────────────────────────────
+// 총비용 = 영상(샷 × 테이크 수) + 이미지(레퍼런스 + 키프레임).
+// 헤더·머니게이트·코스트 레저가 모두 이 totalUsd를 쓴다.
+
+/** 샷당 생성할 후보 테이크 수. 비용·생성 모두 이 값을 공유. */
+export const TAKES_PER_SHOT = 3;
+
+export function recomputeCost(
+  shots: ShotSpec[],
+  imageCostUsd: number,
+  budgetUsd?: number,
+): CostLedger {
+  const lines: CostLine[] = shots.map((s) => ({ shotId: s.shotId, providerId: s.providerId, attempts: 1, costUsd: s.estCostUsd }));
+  const videoCost = Number(lines.reduce((a, l) => a + l.costUsd, 0).toFixed(2));
+  const total = Number((videoCost * TAKES_PER_SHOT + imageCostUsd).toFixed(2));
+  const budget = budgetUsd ?? Math.max(60, Math.ceil((total * 1.35) / 10) * 10);
+  return {
+    lines,
+    imageCostUsd: Number(imageCostUsd.toFixed(2)),
+    videoCostUsd: videoCost,
+    takesPerShot: TAKES_PER_SHOT,
+    totalUsd: total,
+    budgetUsd: budget,
+    withinBudget: total <= budget,
+  };
+}
+
+function buildCostLedger(shots: ShotSpec[], bible: ContinuityBible, budgetUsd?: number): CostLedger {
+  // 이미지: 레퍼런스 시트(~3컷) + 실제 영상 전에 확인할 첫 프레임.
+  const keyframeCount = shots.filter((s) => s.requiresKeyframe).length;
+  const refImageCount = bible.references.length * 3;
+  const imgUnit = providerById(routeImageProvider("keyframe").providerId)?.approxCostUsd ?? 0.04;
+  const imageCost = (keyframeCount + refImageCount) * imgUnit;
+  return recomputeCost(shots, imageCost, budgetUsd);
+}
+
+// ── 내러티브 템플릿 (결정적) ─────────────────────────────
+
+function buildActionLine(
+  brief: FilmBrief,
+  eb: { tplName: string; sceneType: Scene["type"]; emotion: string },
+  role: string,
+  refs: ReferenceEntry[],
+): string {
+  const who = refs.find((r) => r.kind === "character")?.name || brief.characters[0]?.name || "the subject";
+  const product = brief.brandOrProduct;
+  switch (eb.sceneType) {
+    case "product":
+      return `${role} of ${product || "the product"}, ${eb.emotion} mood, emphasizing form and detail`;
+    case "dialogue":
+      return `${who} in conversation — ${role}, ${eb.emotion}`;
+    case "action":
+      return `${who} in motion — ${role}, kinetic ${eb.emotion}`;
+    case "emotional":
+      return `${who} alone — ${role}, ${eb.emotion} on the face`;
+    case "establishing":
+      return `${role} of ${brief.setting} — sets the ${eb.emotion} of "${eb.tplName}"`;
+    case "montage":
+      return `${role} — quick ${eb.emotion} fragment advancing "${eb.tplName}"`;
+    default:
+      return `${role} — ${eb.emotion} bridge`;
+  }
+}
+
+function buildBeatDescription(brief: FilmBrief, eb: { tplName: string; emotion: string; sceneType: Scene["type"] }): string {
+  return `[${eb.tplName}] ${eb.emotion} — ${brief.logline.slice(0, 80)}${brief.logline.length > 80 ? "…" : ""}`;
+}
+
+function buildSceneSummary(brief: FilmBrief, eb: { tplName: string; emotion: string }, idx: number): string {
+  return `씬 ${idx + 1} · "${eb.tplName}" — ${eb.emotion}. ${brief.setting}에서 ${brief.characters[0]?.name || "주인공"}을 중심으로 전개.`;
+}
+
+const DIALOGUE_BANK: Record<string, string[]> = {
+  ko: ["…괜찮아?", "이게 마지막 기회야.", "내가 말했잖아.", "준비됐어.", "믿어도 돼?", "시간이 없어.", "여기서 끝내자."],
+  en: ["…you okay?", "This is our last shot.", "I told you.", "I'm ready.", "Can I trust you?", "We're out of time.", "Let's end this here."],
+};
+
+function sampleDialogue(brief: FilmBrief, emotion: string, rng: () => number): string {
+  const bank = DIALOGUE_BANK[brief.language] ?? DIALOGUE_BANK.en;
+  return bank[Math.floor(rng() * bank.length)];
+}
+
+function pickTransition(sceneType: Scene["type"], i: number, rng: () => number): ShotSpec["transitionOut"] {
+  if (sceneType === "action") return rng() > 0.6 ? "smash_cut" : "cut";
+  if (sceneType === "montage") return rng() > 0.5 ? "match_cut" : "cut";
+  if (sceneType === "transition") return "whip_pan";
+  if (sceneType === "dialogue") return rng() > 0.7 ? "l_cut" : "cut";
+  if (sceneType === "emotional") return rng() > 0.6 ? "dissolve" : "cut";
+  return "cut";
+}
+
+function sequenceTitle(template: { label: string }, q: number, total: number): string {
+  if (total === 1) return "메인 시퀀스";
+  const names = ["오프닝", "전개", "고조", "절정", "결말"];
+  return names[Math.min(q, names.length - 1)];
+}
+
+function sequencePurpose(template: { arc: string }, q: number, total: number): string {
+  const parts = template.arc.split("→").map((s) => s.trim());
+  if (parts.length >= total) return parts[Math.min(q, parts.length - 1)];
+  return template.arc;
+}
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+// ── 생성 시뮬레이션 (실제 API 없이 파이프라인 실증) ───────
+// 실제 키 연결 시 이 함수가 어댑터 호출로 교체된다.
+
+// 차분한 차콜 — 무지개 금지 (컷팅룸 컨택트시트 톤).
+const GRADIENTS = [
+  "linear-gradient(160deg,#2A2824,#3A3833)",
+  "linear-gradient(160deg,#262420,#363430)",
+  "linear-gradient(160deg,#2C2A25,#3C3A34)",
+  "linear-gradient(160deg,#222019,#34322C)",
+];
+
+export function makeTakesForShot(shot: ShotSpec, count = 3): Take[] {
+  const rng = mulberry32(hashSeed(shot.shotId));
+  const takes: Take[] = [];
+  for (let i = 0; i < count; i++) {
+    takes.push({
+      id: `${shot.shotId}_tk${pad(i + 1)}`,
+      shotId: shot.shotId,
+      attempt: i + 1,
+      status: "queued",
+      providerId: shot.providerId,
+      providerMode: shot.providerMode,
+      thumbnailGradient: GRADIENTS[(shot.index + i) % GRADIENTS.length],
+      costUsd: shot.estCostUsd,
+      createdAtMs: Date.now(),
+    });
+  }
+  return takes;
+}
+
+/** 합성 QA — 실제로는 Vision QA 에이전트가 채점. */
+export function scoreTake(take: Take, shot: ShotSpec): QAResult {
+  const rng = mulberry32(hashSeed(take.id + shot.shotId));
+  const base = 0.7 + rng() * 0.28;
+  const findings: QAFinding[] = [];
+  if (rng() > 0.78) findings.push({ type: "continuity", severity: "medium", note: "의상 색이 레퍼런스와 미세하게 다름" });
+  if (rng() > 0.85) findings.push({ type: "editability", severity: "low", note: "마지막 0.5초 카메라가 불안정 — 핸들 부족" });
+  if (shot.dialogue && rng() > 0.8) findings.push({ type: "dialogue", severity: "medium", note: "립싱크 타이밍 약간 어긋남" });
+  if (rng() > 0.9) findings.push({ type: "motion", severity: "high", note: "손 모션 깨짐" });
+  const score = Number(Math.max(0.4, base - findings.length * 0.08).toFixed(2));
+  const highFail = findings.some((f) => f.severity === "high");
+  const pass = score >= 0.75 && !highFail;
+  return {
+    takeId: take.id,
+    shotId: shot.shotId,
+    score,
+    pass,
+    findings,
+    recommendedAction: pass
+      ? "accept"
+      : highFail
+        ? "retry_stronger_reference"
+        : findings.some((f) => f.type === "continuity")
+          ? "retry_stronger_reference"
+          : "retry_same_provider",
+  };
+}
+
+/** EDL 빌드 — shot별 best take를 골라 컷 순서/길이/전환 결정. */
+export function buildEdl(shots: ShotSpec[], takes: Take[]): EditDecision[] {
+  const byShot = new Map<string, Take[]>();
+  for (const t of takes) {
+    const arr = byShot.get(t.shotId) ?? [];
+    arr.push(t);
+    byShot.set(t.shotId, arr);
+  }
+  const edl: EditDecision[] = [];
+  let order = 0;
+  for (const shot of shots) {
+    const cands = (byShot.get(shot.shotId) ?? []).filter((t) => t.status !== "failed");
+    if (!cands.length) continue;
+    const best = cands.reduce((a, b) => ((b.qa?.score ?? 0) > (a.qa?.score ?? 0) ? b : a));
+    order += 1;
+    // 핸들: 첫/마지막 0.3초 trim (컷 연결용)
+    const handle = 0.3;
+    edl.push({
+      shotId: shot.shotId,
+      takeId: best.id,
+      order,
+      inSec: handle,
+      outSec: Number((shot.durationSec - handle).toFixed(1)),
+      transitionIn: shot.transitionIn,
+      durationSec: Number((shot.durationSec - handle * 2).toFixed(1)),
+    });
+  }
+  return edl;
+}

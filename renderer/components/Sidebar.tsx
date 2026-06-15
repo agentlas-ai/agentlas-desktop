@@ -24,6 +24,7 @@ import {
   IconChat,
   IconChevronRight,
   IconFileUp,
+  IconFilm,
   IconFolder,
   IconKey,
   IconMoon,
@@ -452,6 +453,47 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           gap: 6,
         }}
       >
+        <SidebarSection title={t("sidebar.studio")} icon={<IconFilm size={12} />}>
+          <Link
+            href="/oberon"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "9px 10px",
+              margin: "0 4px",
+              borderRadius: 10,
+              textDecoration: "none",
+              background: pathname.startsWith("/oberon")
+                ? "linear-gradient(135deg, color-mix(in srgb, var(--accent) 22%, var(--paper)), color-mix(in srgb, var(--purple-deep) 18%, var(--paper)))"
+                : "var(--paper)",
+              border: `1px solid ${pathname.startsWith("/oberon") ? "var(--accent)" : "var(--paper-edge)"}`,
+              boxShadow: "var(--shadow-1)",
+              transition: "all 0.12s",
+            }}
+          >
+            <span
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: 7,
+                background: "linear-gradient(135deg, var(--accent), var(--purple-deep))",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "#fff",
+                flexShrink: 0,
+              }}
+            >
+              <IconFilm size={14} />
+            </span>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ display: "block", fontSize: 12.5, fontWeight: 700, color: "var(--ink)", lineHeight: 1.2 }}>{t("sidebar.oberon")}</span>
+              <span style={{ display: "block", fontSize: 9.5, color: "var(--muted-deep)", lineHeight: 1.3 }}>{t("sidebar.oberon_hint")}</span>
+            </span>
+          </Link>
+        </SidebarSection>
+
         <SidebarSection
           title={t("sidebar.chats")}
           icon={<IconChat size={12} />}
@@ -1000,6 +1042,12 @@ function CollapsedNav({
     isActive: boolean;
     badge?: string | number;
   }> = [
+    {
+      href: "/oberon",
+      label: t("sidebar.oberon"),
+      icon: <IconFilm size={16} />,
+      isActive: pathname.startsWith("/oberon"),
+    },
     {
       href: "/",
       label: t("sidebar.chats"),

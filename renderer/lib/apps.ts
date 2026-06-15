@@ -26,6 +26,21 @@ export interface GeneratedDocument {
 
 export const INSTALLED_APPS: AgentlasAppDefinition[] = [
   {
+    id: "oberon",
+    slug: "oberon",
+    name: "Oberon 영화 스튜디오",
+    nameEn: "Oberon Film Studio",
+    tagline: "기획→샷 리스트→레퍼런스→생성→QA→편집→납품을 한 흐름으로 묶는 AI 영화 운영체제",
+    taglineEn: "An AI Film OS that chains brief → shot list → references → generation → QA → edit → delivery",
+    kind: "ai-native",
+    route: "/oberon",
+    accent: "var(--accent)",
+    engines: ["Showrunner", "Shot Planner", "Continuity Bible", "Provider Router", "Vision QA", "Editor & Timeline"],
+    vaultKeys: ["GEMINI_API_KEY", "RUNWAY_API_KEY", "LUMA_API_KEY", "OPENAI_API_KEY", "FIREFLY_API_KEY"],
+    artifacts: ["Shot list", "Prompt pack", "Continuity bible", "Generated takes", "Timeline / EDL", "Multi-aspect masters"],
+    slashCommands: ["/oberon", "/film", "/오베론", "/영화스튜디오"],
+  },
+  {
     id: "document-studio",
     slug: "document-studio",
     name: "문서 스튜디오",

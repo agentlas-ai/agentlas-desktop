@@ -73,6 +73,17 @@ const api: AgentlasIpc = {
     saveSettings: (settings) => ipcRenderer.invoke("multimodal:saveSettings", settings),
     status: () => ipcRenderer.invoke("multimodal:status"),
   },
+  oberon: {
+    planWithCli: (request) => ipcRenderer.invoke("oberon:planWithCli", request),
+    startKeyframes: (request) => ipcRenderer.invoke("oberon:startKeyframes", request),
+    getKeyframeJob: (id: string) => ipcRenderer.invoke("oberon:getKeyframeJob", id),
+    cancelKeyframes: (id: string) => ipcRenderer.invoke("oberon:cancelKeyframes", id),
+    openKeyframeOutput: (id: string) => ipcRenderer.invoke("oberon:openKeyframeOutput", id),
+    startRender: (request) => ipcRenderer.invoke("oberon:startRender", request),
+    getRenderJob: (id: string) => ipcRenderer.invoke("oberon:getRenderJob", id),
+    cancelRender: (id: string) => ipcRenderer.invoke("oberon:cancelRender", id),
+    openRenderOutput: (id: string) => ipcRenderer.invoke("oberon:openRenderOutput", id),
+  },
   team: {
     list: () => ipcRenderer.invoke("team:list"),
     install: (slug: string) => ipcRenderer.invoke("team:install", slug),

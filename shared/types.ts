@@ -1919,6 +1919,180 @@ export interface MigrationResult {
   warnings: string[];
 }
 
+// ── Oberon real render jobs ───────────────────────────────────
+export type OberonRenderProvider = "google-gemini-veo" | "google-enterprise-veo";
+export type OberonRenderJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type OberonRenderFileKind = "clip_mp4" | "master_mp4" | "master_mov" | "master_wav";
+export type OberonRenderClipStatus = "queued" | "generating" | "ready" | "failed";
+
+export interface OberonRenderShotInput {
+  shotId: string;
+  index: number;
+  durationSec: number;
+  aspectRatio: string;
+  prompt: string;
+  negativePrompt?: string;
+  providerId?: string;
+  providerMode?: string;
+  firstFrame?: {
+    absPath?: string;
+    imageBytes?: string;
+    mimeType: string;
+  };
+}
+
+export interface OberonRenderRequest {
+  productionId: string;
+  title: string;
+  aspectRatio: string;
+  shots: OberonRenderShotInput[];
+  /** Live renders are capped by default to avoid surprise spend. */
+  maxShots?: number;
+  takesPerShot?: number;
+  provider?: OberonRenderProvider;
+  model?: string;
+  resolution?: "720p" | "1080p" | "4k";
+}
+
+export interface OberonRenderFile {
+  id: string;
+  kind: OberonRenderFileKind;
+  name: string;
+  label: string;
+  absPath: string;
+  url: string;
+  mime: string;
+  sizeBytes: number;
+}
+
+export interface OberonRenderClip {
+  shotId: string;
+  takeId: string;
+  attempt: number;
+  status: OberonRenderClipStatus;
+  provider: OberonRenderProvider;
+  model: string;
+  prompt: string;
+  absPath?: string;
+  url?: string;
+  mime?: string;
+  sizeBytes?: number;
+  error?: string;
+  createdAtMs: number;
+}
+
+export interface OberonRenderProgress {
+  phase: "queued" | "generating" | "assembling" | "complete" | "failed" | "cancelled";
+  totalClips: number;
+  completedClips: number;
+  currentShotId?: string;
+  percent: number;
+}
+
+export interface OberonRenderJob {
+  id: string;
+  productionId: string;
+  title: string;
+  provider: OberonRenderProvider;
+  model: string;
+  status: OberonRenderJobStatus;
+  outputDir: string;
+  progress: OberonRenderProgress;
+  clips: OberonRenderClip[];
+  files: OberonRenderFile[];
+  message: string;
+  error?: string;
+  warnings: string[];
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+// ── Oberon text planning jobs ──────────────────────────────────
+export type OberonPlanRuntime = "claude-code" | "codex" | "gemini";
+
+export interface OberonPlanRequest {
+  productionId?: string;
+  brief: JsonObject;
+  runtime?: OberonPlanRuntime | string;
+  runtimeLabel?: string;
+  premium?: boolean;
+}
+
+export interface OberonPlanResult {
+  ok: boolean;
+  runtime: OberonPlanRuntime | string;
+  runtimeLabel: string;
+  patch?: JsonObject;
+  rawText?: string;
+  error?: string;
+  warnings: string[];
+  createdAtMs: number;
+}
+
+// ── Oberon keyframe image jobs ─────────────────────────────────
+export type OberonKeyframeProvider = "codex-imagegen-cli" | "google-imagen";
+export type OberonKeyframeJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+export interface OberonKeyframeShotInput {
+  shotId: string;
+  index: number;
+  aspectRatio: string;
+  prompt: string;
+  negativePrompt?: string;
+  cameraSize?: string;
+  continuityRefs?: string[];
+}
+
+export interface OberonKeyframeRequest {
+  productionId: string;
+  title: string;
+  aspectRatio: string;
+  shots: OberonKeyframeShotInput[];
+  maxShots?: number;
+  provider?: OberonKeyframeProvider;
+  model?: string;
+  imageSize?: "1K" | "2K";
+}
+
+export interface OberonKeyframeAsset {
+  id: string;
+  shotId: string;
+  kind: "first_frame";
+  provider: OberonKeyframeProvider;
+  model: string;
+  prompt: string;
+  absPath: string;
+  url: string;
+  mime: string;
+  sizeBytes: number;
+  createdAtMs: number;
+}
+
+export interface OberonKeyframeProgress {
+  phase: "queued" | "generating" | "complete" | "failed" | "cancelled";
+  totalImages: number;
+  completedImages: number;
+  currentShotId?: string;
+  percent: number;
+}
+
+export interface OberonKeyframeJob {
+  id: string;
+  productionId: string;
+  title: string;
+  provider: OberonKeyframeProvider;
+  model: string;
+  status: OberonKeyframeJobStatus;
+  outputDir: string;
+  progress: OberonKeyframeProgress;
+  assets: OberonKeyframeAsset[];
+  message: string;
+  error?: string;
+  warnings: string[];
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
 export interface AgentlasIpc {
   /** Electron 메인이 알려주는 OS 환경 정보 (Apple/Codex/Claude 데스크톱과 동일 패턴) */
   app: {
@@ -2006,6 +2180,18 @@ export interface AgentlasIpc {
     getSettings: () => Promise<MultimodalSettings>;
     saveSettings: (settings: Partial<MultimodalSettings>) => Promise<MultimodalSettings>;
     status: () => Promise<MultimodalProviderStatus[]>;
+  };
+  /** Oberon real render bridge — API keys stay in the Electron main process. */
+  oberon: {
+    planWithCli: (request: OberonPlanRequest) => Promise<OberonPlanResult>;
+    startKeyframes: (request: OberonKeyframeRequest) => Promise<OberonKeyframeJob>;
+    getKeyframeJob: (id: string) => Promise<OberonKeyframeJob | null>;
+    cancelKeyframes: (id: string) => Promise<OberonKeyframeJob | null>;
+    openKeyframeOutput: (id: string) => Promise<{ ok: boolean; message: string }>;
+    startRender: (request: OberonRenderRequest) => Promise<OberonRenderJob>;
+    getRenderJob: (id: string) => Promise<OberonRenderJob | null>;
+    cancelRender: (id: string) => Promise<OberonRenderJob | null>;
+    openRenderOutput: (id: string) => Promise<{ ok: boolean; message: string }>;
   };
   team: {
     list: () => Promise<InstalledAgent[]>;
