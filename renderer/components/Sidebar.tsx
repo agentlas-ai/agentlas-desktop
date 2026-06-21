@@ -492,6 +492,45 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
               <span style={{ display: "block", fontSize: 9.5, color: "var(--muted-deep)", lineHeight: 1.3 }}>{t("sidebar.oberon_hint")}</span>
             </span>
           </Link>
+
+          <Link
+            href="/studio/startup"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "9px 10px",
+              margin: "6px 4px 0",
+              borderRadius: 10,
+              textDecoration: "none",
+              background: pathname.startsWith("/studio/startup")
+                ? "linear-gradient(135deg, color-mix(in srgb, #f97316 22%, var(--paper)), color-mix(in srgb, #fb923c 18%, var(--paper)))"
+                : "var(--paper)",
+              border: `1px solid ${pathname.startsWith("/studio/startup") ? "#f97316" : "var(--paper-edge)"}`,
+              boxShadow: "var(--shadow-1)",
+              transition: "all 0.12s",
+            }}
+          >
+            <span
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: 7,
+                background: "linear-gradient(135deg, #f97316, #fb923c)",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "#fff",
+                flexShrink: 0,
+              }}
+            >
+              <IconBolt size={14} />
+            </span>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ display: "block", fontSize: 12.5, fontWeight: 700, color: "var(--ink)", lineHeight: 1.2 }}>{t("sidebar.startup")}</span>
+              <span style={{ display: "block", fontSize: 9.5, color: "var(--muted-deep)", lineHeight: 1.3 }}>{t("sidebar.startup_hint")}</span>
+            </span>
+          </Link>
         </SidebarSection>
 
         <SidebarSection

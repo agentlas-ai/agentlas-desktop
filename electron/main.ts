@@ -20,6 +20,7 @@ import { bootAuthFromKeychain } from "./auth";
 import { materializeAllAgents } from "./agents/files";
 import { seedBuiltinAgents } from "./architecture/seed";
 import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
+import { stopAllStudios } from "./studio/serve";
 
 const isDev = process.env.NODE_ENV === "development";
 
@@ -187,6 +188,11 @@ async function createWindow(): Promise<void> {
 app.on("window-all-closed", () => {
   // macOS first — 마지막 윈도우가 닫혀도 dock에 남아있는 게 표준
   if (process.platform !== "darwin") app.quit();
+});
+
+// 앱 종료 시 — Studio web 패키지로 띄운 localhost 런처 자식 프로세스를 모두 정리.
+app.on("before-quit", () => {
+  stopAllStudios();
 });
 
 app.on("activate", () => {

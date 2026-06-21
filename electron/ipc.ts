@@ -22,6 +22,7 @@ import {
   startOberonKeyframes,
 } from "./oberon/keyframes";
 import { planOberonWithCli } from "./oberon/planner";
+import { serveStudioPackage, stopStudioPackage } from "./studio/serve";
 import {
   cancelOberonRenderJob,
   getOberonRenderJob,
@@ -513,6 +514,10 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("oberon:getRenderJob", (_e, id: string) => getOberonRenderJob(id));
   ipcMain.handle("oberon:cancelRender", (_e, id: string) => cancelOberonRenderJob(id));
   ipcMain.handle("oberon:openRenderOutput", (_e, id: string) => openOberonRenderOutput(id));
+
+  // ── Studio web 임베드 — forge web 패키지를 localhost로 띄워 iframe src를 돌려준다 ──
+  ipcMain.handle("studio:serve", (_e, slug: string) => serveStudioPackage(slug));
+  ipcMain.handle("studio:stop", (_e, slug: string) => stopStudioPackage(slug));
 
   // ── team (설치된 에이전트) ─────────────────────────────
   ipcMain.handle("team:list", () => listInstalledAgents());

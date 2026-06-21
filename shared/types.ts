@@ -2193,6 +2193,16 @@ export interface AgentlasIpc {
     cancelRender: (id: string) => Promise<OberonRenderJob | null>;
     openRenderOutput: (id: string) => Promise<{ ok: boolean; message: string }>;
   };
+  /** Studio web 임베드 — forge web 패키지를 localhost로 띄워 iframe src(url)를 돌려준다.
+   *  python3 런처(open-*-gui.py)를 메인 프로세스에서 spawn한다. */
+  studio: {
+    /** slug로 패키지를 서빙. 성공 시 { url }, 실패 시 { error, message } (throw 안 함). */
+    serve: (
+      slug: string,
+    ) => Promise<{ url: string } | { error: string; message: string }>;
+    /** 해당 slug의 런처 자식 프로세스를 종료. */
+    stop: (slug: string) => Promise<{ ok: boolean }>;
+  };
   team: {
     list: () => Promise<InstalledAgent[]>;
     install: (slug: string) => Promise<InstalledAgent>;

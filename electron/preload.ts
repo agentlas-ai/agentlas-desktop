@@ -84,6 +84,10 @@ const api: AgentlasIpc = {
     cancelRender: (id: string) => ipcRenderer.invoke("oberon:cancelRender", id),
     openRenderOutput: (id: string) => ipcRenderer.invoke("oberon:openRenderOutput", id),
   },
+  studio: {
+    serve: (slug: string) => ipcRenderer.invoke("studio:serve", slug),
+    stop: (slug: string) => ipcRenderer.invoke("studio:stop", slug),
+  },
   team: {
     list: () => ipcRenderer.invoke("team:list"),
     install: (slug: string) => ipcRenderer.invoke("team:install", slug),
