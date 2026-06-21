@@ -767,9 +767,9 @@ function cmdImport(db, absPath) {
 const CLOUD_MAX_TOTAL_BYTES = 3 * 1024 * 1024;
 const CLOUD_MAX_FILE_BYTES = 512 * 1024;
 const CLOUD_MAX_FILES = 400;
-const CLOUD_TEXT_EXTS = new Set([".cjs", ".css", ".csv", ".js", ".json", ".jsonl", ".md", ".mjs", ".py", ".sh", ".toml", ".ts", ".tsx", ".txt", ".yaml", ".yml"]);
+const CLOUD_TEXT_EXTS = new Set([".cjs", ".css", ".csv", ".html", ".js", ".json", ".jsonl", ".md", ".mjs", ".py", ".sh", ".toml", ".ts", ".tsx", ".txt", ".yaml", ".yml"]);
 const CLOUD_AGENT_FILES = new Set(["AGENT.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "README.md", "agent.md", "manifest.md", "system-prompt.md"]);
-const CLOUD_SKIP_DIRS = new Set([".git", ".next", ".turbo", "build", "coverage", "dist", "node_modules", "out", "release"]);
+const CLOUD_SKIP_DIRS = new Set([".git", ".next", ".studio-runtime", ".turbo", "build", "coverage", "dist", "node_modules", "out", "release"]);
 const CLOUD_BLOCKED_FILE_RE = [/^\.env(?:\..*)?$/i, /^id_rsa(?:\.pub)?$/i, /^credentials(?:\..*)?$/i, /^secrets?(?:\..*)?$/i, /(?:^|[._-])service-account(?:[._-]|$)/i, /\.(?:key|pem|p12|pfx|mobileprovision)$/i];
 const CLOUD_ROUTING_CARD_PATH = ".agentlas/routing-card.json";
 const CLOUD_ROUTING_CARD_CAPABILITY_RE = /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/;
