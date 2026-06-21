@@ -1,0 +1,615 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - img "Agentlas" [ref=e5]
+        - generic [ref=e6]: Agentlas
+        - button "사이드바 접기" [ref=e7] [cursor=pointer]:
+          - img [ref=e8]
+      - button "새 채팅" [ref=e11] [cursor=pointer]:
+        - img [ref=e12]
+        - text: 새 채팅
+      - navigation [ref=e14]:
+        - generic [ref=e15]:
+          - generic [ref=e16]:
+            - img [ref=e17]
+            - generic [ref=e19]: 스튜디오
+          - link "Oberon 영화 스튜디오 AI 영화 운영체제" [ref=e21] [cursor=pointer]:
+            - /url: /oberon
+            - img [ref=e23]
+            - generic [ref=e25]:
+              - generic [ref=e26]: Oberon 영화 스튜디오
+              - generic [ref=e27]: AI 영화 운영체제
+        - generic [ref=e28]:
+          - generic [ref=e29]:
+            - button "채팅" [expanded] [ref=e30] [cursor=pointer]:
+              - img [ref=e31]
+              - generic [ref=e33]: 채팅
+              - img [ref=e34]
+            - link "보관함" [ref=e36] [cursor=pointer]:
+              - /url: /chat/archived
+          - generic [ref=e38]: 대화를 시작하면 여기 쌓여요
+        - generic [ref=e39]:
+          - generic [ref=e40]:
+            - img [ref=e41]
+            - generic [ref=e43]: 에이전트
+            - link "마켓플레이스" [ref=e44] [cursor=pointer]:
+              - /url: /marketplace?tab=agents
+              - img [ref=e45]
+          - generic [ref=e47]:
+            - link "에이전트 관리 0" [ref=e48] [cursor=pointer]:
+              - /url: /library/agents
+              - img [ref=e49]
+              - generic [ref=e51]: 에이전트 관리
+              - generic [ref=e52]: "0"
+            - link "마켓플레이스" [ref=e53] [cursor=pointer]:
+              - /url: /marketplace?tab=agents
+              - img [ref=e54]
+              - generic [ref=e56]: 마켓플레이스
+              - img [ref=e57]
+            - link "클라우드 등록" [ref=e59] [cursor=pointer]:
+              - /url: /cloud
+              - img [ref=e60]
+              - generic [ref=e62]: 클라우드 등록
+        - generic [ref=e63]:
+          - generic [ref=e64]:
+            - img [ref=e65]
+            - generic [ref=e67]: 회사
+            - link "회사 설치하기" [ref=e68] [cursor=pointer]:
+              - /url: /marketplace?tab=firms
+              - img [ref=e69]
+          - generic [ref=e72]:
+            - link "+ 회사 설치하기" [ref=e73] [cursor=pointer]:
+              - /url: /marketplace?tab=firms
+            - text: CEO에게 일을 시키는 풀패키지
+        - generic [ref=e74]:
+          - generic [ref=e75]:
+            - img [ref=e76]
+            - generic [ref=e78]: 프로젝트
+            - link [ref=e79] [cursor=pointer]:
+              - /url: /project/new
+              - img [ref=e80]
+          - link "+ 첫 프로젝트 만들기" [ref=e84] [cursor=pointer]:
+            - /url: /project/new
+        - generic [ref=e85]:
+          - generic [ref=e86]:
+            - img [ref=e87]
+            - generic [ref=e89]: 자동화
+            - link [ref=e90] [cursor=pointer]:
+              - /url: /automation/new
+              - img [ref=e91]
+          - link "+ 자동화 만들기" [ref=e95] [cursor=pointer]:
+            - /url: /automation
+        - generic [ref=e96]:
+          - generic [ref=e97]:
+            - img [ref=e98]
+            - generic [ref=e100]: Apps
+          - generic [ref=e101]:
+            - link "설치된 Apps 2" [ref=e102] [cursor=pointer]:
+              - /url: /apps
+              - img [ref=e103]
+              - generic [ref=e105]: 설치된 Apps
+              - generic [ref=e106]: "2"
+            - link "전역 Env" [ref=e107] [cursor=pointer]:
+              - /url: /library/env
+              - img [ref=e108]
+              - generic [ref=e110]: 전역 Env
+            - link "Plugins" [ref=e111] [cursor=pointer]:
+              - /url: /library/mcps
+              - img [ref=e112]
+              - generic [ref=e114]: Plugins
+      - generic [ref=e117]:
+        - button "Google로 로그인" [ref=e118] [cursor=pointer]:
+          - img [ref=e119]
+          - generic [ref=e124]: Google로 로그인
+        - button "브라우저로 로그인" [ref=e125] [cursor=pointer]
+      - generic [ref=e126]:
+        - generic [ref=e129]:
+          - generic [ref=e130]: LLM 미연결
+          - button "v?" [ref=e131] [cursor=pointer]:
+            - generic [ref=e132]: v?
+        - button "라이트/다크 전환" [ref=e133] [cursor=pointer]:
+          - img [ref=e134]
+        - link "설정" [ref=e136] [cursor=pointer]:
+          - /url: /settings
+          - img [ref=e137]
+    - main [ref=e139]:
+      - generic [ref=e140]:
+        - generic [ref=e141]:
+          - link "Apps" [ref=e142] [cursor=pointer]:
+            - /url: /apps
+            - img [ref=e143]
+            - text: Apps
+          - img [ref=e146]
+          - generic [ref=e149]:
+            - generic [ref=e150]:
+              - text: Oberon
+              - generic [ref=e354]: · MIDNIGHT BLOOM
+            - generic [ref=e151]: AI Film Operating System
+          - generic [ref=e355]:
+            - generic [ref=e356]:
+              - generic [ref=e357]: 샷
+              - generic [ref=e358]: "16"
+            - generic [ref=e359]:
+              - generic [ref=e360]: 씬
+              - generic [ref=e361]: "5"
+            - generic [ref=e362]:
+              - generic [ref=e363]: 길이
+              - generic [ref=e364]: 0:25
+            - generic [ref=e365]:
+              - generic [ref=e366]: 예상
+              - generic [ref=e367]: $103.19
+            - button "새 프로젝트" [ref=e368] [cursor=pointer]:
+              - img [ref=e369]
+              - text: 새 프로젝트
+        - generic [ref=e152]:
+          - button "소스 · 모델" [ref=e370] [cursor=pointer]:
+            - img [ref=e371]
+            - generic [ref=e155]: 소스 · 모델
+          - button "기획안" [ref=e498] [cursor=pointer]:
+            - img [ref=e499]
+            - generic [ref=e162]: 기획안
+          - button "3 스토리보드" [ref=e501] [cursor=pointer]:
+            - generic [ref=e165]: "3"
+            - generic [ref=e169]: 스토리보드
+          - button "고정 에셋" [disabled] [ref=e171]:
+            - img [ref=e173]
+            - generic [ref=e176]: 고정 에셋
+          - button "컷 이미지" [disabled] [ref=e178]:
+            - img [ref=e180]
+            - generic [ref=e183]: 컷 이미지
+          - button "영상 생성" [disabled] [ref=e185]:
+            - img [ref=e187]
+            - generic [ref=e190]: 영상 생성
+          - button "편집 · 납품" [disabled] [ref=e192]:
+            - img [ref=e194]
+            - generic [ref=e197]: 편집 · 납품
+        - main [ref=e198]:
+          - generic [ref=e502]:
+            - generic [ref=e503]:
+              - generic [ref=e504]:
+                - img [ref=e506]
+                - generic [ref=e508]:
+                  - generic [ref=e509]: Step 02 · 스토리보드
+                  - heading "장면을 컷으로 나눴어요" [level=2] [ref=e510]
+                  - paragraph [ref=e511]: 한 장면을 여러 각도의 컷 16개로 나눴습니다. 각 컷의 카메라·엔진·비용을 확인하세요. 엔진을 바꾸거나 필요 없는 컷을 지울 수 있어요.
+              - generic [ref=e512]:
+                - button "전체 16" [ref=e513] [cursor=pointer]
+                - button "SC01 · 3" [ref=e514] [cursor=pointer]
+                - button "SC02 · 3" [ref=e515] [cursor=pointer]
+                - button "SC03 · 4" [ref=e516] [cursor=pointer]
+                - button "SC04 · 3" [ref=e517] [cursor=pointer]
+                - button "SC05 · 3" [ref=e518] [cursor=pointer]
+              - generic [ref=e519]:
+                - generic [ref=e520]:
+                  - generic [ref=e521]:
+                    - generic [ref=e522]:
+                      - generic [ref=e523]: ELS
+                      - generic "첫 프레임 생성 필요" [ref=e524]: KF?
+                    - generic [ref=e525]: 2.5s
+                    - generic [ref=e526]: sc01_bt01_sh001
+                  - generic [ref=e527]:
+                    - generic [ref=e528]:
+                      - generic [ref=e529]: Seedance 2.0 (ByteDance)
+                      - generic [ref=e531]: · First/Last
+                    - generic [ref=e532]: 공간 establishing of 지는 빗속 거리 — sets the 호기심 of "훅"
+                    - generic [ref=e533]:
+                      - generic [ref=e534]: 에어리얼
+                      - generic [ref=e535]: 크레인
+                      - generic [ref=e536]: 24mm 광각
+                    - generic [ref=e537]:
+                      - generic "전환" [ref=e538]: 하드컷 → 하드컷
+                      - generic [ref=e539]: $1.61
+                    - generic [ref=e540]:
+                      - button "엔진 변경" [ref=e541] [cursor=pointer]:
+                        - img [ref=e542]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e544] [cursor=pointer]:
+                        - img [ref=e545]
+                    - button "생성 프롬프트" [ref=e547] [cursor=pointer]:
+                      - img [ref=e548]
+                      - text: 생성 프롬프트
+                - generic [ref=e550]:
+                  - generic [ref=e551]:
+                    - generic [ref=e553]: LS
+                    - generic [ref=e554]: 2.3s
+                    - generic [ref=e555]: sc01_bt01_sh002
+                  - generic [ref=e556]:
+                    - generic [ref=e557]:
+                      - generic [ref=e558]: Seedance 2.0 (ByteDance)
+                      - generic [ref=e560]: · I2V
+                    - generic [ref=e561]: 장소 진입 of 지는 빗속 거리 — sets the 호기심 of "훅"
+                    - generic [ref=e562]:
+                      - generic [ref=e563]: 아이레벨
+                      - generic [ref=e564]: 푸시인
+                      - generic [ref=e565]: 35mm 준광각
+                    - generic [ref=e566]:
+                      - generic "전환" [ref=e567]: 하드컷 → 하드컷
+                      - generic [ref=e568]: $1.61
+                    - generic [ref=e569]:
+                      - button "엔진 변경" [ref=e570] [cursor=pointer]:
+                        - img [ref=e571]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e573] [cursor=pointer]:
+                        - img [ref=e574]
+                    - button "생성 프롬프트" [ref=e576] [cursor=pointer]:
+                      - img [ref=e577]
+                      - text: 생성 프롬프트
+                - generic [ref=e579]:
+                  - generic [ref=e580]:
+                    - generic [ref=e582]: MS
+                    - generic [ref=e583]: 1.8s
+                    - generic [ref=e584]: sc01_bt01_sh003
+                  - generic [ref=e585]:
+                    - generic [ref=e586]:
+                      - generic [ref=e587]: Seedance 2.0 (ByteDance)
+                      - generic [ref=e589]: · I2V
+                    - generic [ref=e590]: 인물 도입 of 지는 빗속 거리 — sets the 호기심 of "훅"
+                    - generic [ref=e591]:
+                      - generic [ref=e592]: 아이레벨
+                      - generic [ref=e593]: 고정
+                      - generic [ref=e594]: 50mm 표준
+                    - generic [ref=e595]:
+                      - generic "전환" [ref=e596]: 하드컷 → 하드컷
+                      - generic [ref=e597]: $1.61
+                    - generic [ref=e598]:
+                      - button "엔진 변경" [ref=e599] [cursor=pointer]:
+                        - img [ref=e600]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e602] [cursor=pointer]:
+                        - img [ref=e603]
+                    - button "생성 프롬프트" [ref=e605] [cursor=pointer]:
+                      - img [ref=e606]
+                      - text: 생성 프롬프트
+                - generic [ref=e608]:
+                  - generic [ref=e609]:
+                    - generic [ref=e610]:
+                      - generic [ref=e611]: CU
+                      - generic "첫 프레임 생성 필요" [ref=e612]: KF?
+                    - generic [ref=e613]: 1.4s
+                    - generic [ref=e614]: sc02_bt02_sh004
+                  - generic [ref=e615]:
+                    - generic [ref=e616]:
+                      - generic [ref=e617]: Google Veo 3.1
+                      - generic [ref=e619]: · First/Last
+                    - generic [ref=e620]: the subject alone — 감정 주체, 공감·긴장 on the face
+                    - generic [ref=e621]:
+                      - generic [ref=e622]: 아이레벨
+                      - generic [ref=e623]: 푸시인
+                      - generic [ref=e624]: 85mm 망원
+                    - generic [ref=e625]:
+                      - generic "전환" [ref=e626]: 하드컷 → 디졸브
+                      - generic [ref=e627]: $3.68
+                    - generic [ref=e628]:
+                      - button "엔진 변경" [ref=e629] [cursor=pointer]:
+                        - img [ref=e630]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e632] [cursor=pointer]:
+                        - img [ref=e633]
+                    - button "생성 프롬프트" [ref=e635] [cursor=pointer]:
+                      - img [ref=e636]
+                      - text: 생성 프롬프트
+                - generic [ref=e638]:
+                  - generic [ref=e639]:
+                    - generic [ref=e641]: ECU
+                    - generic [ref=e642]: 1.2s
+                    - generic [ref=e643]: sc02_bt02_sh005
+                  - generic [ref=e644]:
+                    - generic [ref=e645]:
+                      - generic [ref=e646]: Seedance 2.0 (ByteDance)
+                      - generic [ref=e648]: · I2V
+                    - generic [ref=e649]: the subject alone — 눈·미세표정, 공감·긴장 on the face
+                    - generic [ref=e650]:
+                      - generic [ref=e651]: 아이레벨
+                      - generic [ref=e652]: 고정
+                      - generic [ref=e653]: 100mm 마크로
+                    - generic [ref=e654]:
+                      - generic "전환" [ref=e655]: 하드컷 → 디졸브
+                      - generic [ref=e656]: $1.61
+                    - generic [ref=e657]:
+                      - button "엔진 변경" [ref=e658] [cursor=pointer]:
+                        - img [ref=e659]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e661] [cursor=pointer]:
+                        - img [ref=e662]
+                    - button "생성 프롬프트" [ref=e664] [cursor=pointer]:
+                      - img [ref=e665]
+                      - text: 생성 프롬프트
+                - generic [ref=e667]:
+                  - generic [ref=e668]:
+                    - generic [ref=e670]: MS
+                    - generic [ref=e671]: 1.8s
+                    - generic [ref=e672]: sc02_bt02_sh006
+                  - generic [ref=e673]:
+                    - generic [ref=e674]:
+                      - generic [ref=e675]: Seedance 2.0 (ByteDance)
+                      - generic [ref=e677]: · I2V
+                    - generic [ref=e678]: the subject alone — 고립·여백, 공감·긴장 on the face
+                    - generic [ref=e679]:
+                      - generic [ref=e680]: 하이앵글
+                      - generic [ref=e681]: 고정
+                      - generic [ref=e682]: 50mm 표준
+                    - generic [ref=e683]:
+                      - generic "전환" [ref=e684]: 디졸브 → 하드컷
+                      - generic [ref=e685]: $1.61
+                    - generic [ref=e686]:
+                      - button "엔진 변경" [ref=e687] [cursor=pointer]:
+                        - img [ref=e688]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e690] [cursor=pointer]:
+                        - img [ref=e691]
+                    - button "생성 프롬프트" [ref=e693] [cursor=pointer]:
+                      - img [ref=e694]
+                      - text: 생성 프롬프트
+                - generic [ref=e696]:
+                  - generic [ref=e697]:
+                    - generic [ref=e698]:
+                      - generic [ref=e699]: ECU
+                      - generic "첫 프레임 생성 필요" [ref=e700]: KF?
+                    - generic [ref=e701]: 1.2s
+                    - generic [ref=e702]: sc03_bt03_sh007
+                  - generic [ref=e703]:
+                    - generic [ref=e704]:
+                      - generic [ref=e705]: Google Veo 3.1
+                      - generic [ref=e707]: · First/Last
+                    - generic [ref=e708]: 제품 hero (orbit) of the product, 해소 mood, emphasizing form and detail
+                    - generic [ref=e709]:
+                      - generic [ref=e710]: 아이레벨
+                      - generic [ref=e711]: 오빗
+                      - generic [ref=e712]: 100mm 마크로
+                    - generic [ref=e713]:
+                      - generic "전환" [ref=e714]: 하드컷 → 하드컷
+                      - generic [ref=e715]: $3.68
+                    - generic [ref=e716]:
+                      - button "엔진 변경" [ref=e717] [cursor=pointer]:
+                        - img [ref=e718]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e720] [cursor=pointer]:
+                        - img [ref=e721]
+                    - button "생성 프롬프트" [ref=e723] [cursor=pointer]:
+                      - img [ref=e724]
+                      - text: 생성 프롬프트
+                - generic [ref=e726]:
+                  - generic [ref=e727]:
+                    - generic [ref=e729]: CU
+                    - generic [ref=e730]: 1.4s
+                    - generic [ref=e731]: sc03_bt03_sh008
+                  - generic [ref=e732]:
+                    - generic [ref=e733]:
+                      - generic [ref=e734]: Seedance 2.0 (ByteDance)
+                      - generic [ref=e736]: · I2V
+                    - generic [ref=e737]: 손동작·사용 of the product, 해소 mood, emphasizing form and detail
+                    - generic [ref=e738]:
+                      - generic [ref=e739]: 하이앵글
+                      - generic [ref=e740]: 푸시인
+                      - generic [ref=e741]: 85mm 망원
+                    - generic [ref=e742]:
+                      - generic "전환" [ref=e743]: 하드컷 → 하드컷
+                      - generic [ref=e744]: $1.61
+                    - generic [ref=e745]:
+                      - button "엔진 변경" [ref=e746] [cursor=pointer]:
+                        - img [ref=e747]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e749] [cursor=pointer]:
+                        - img [ref=e750]
+                    - button "생성 프롬프트" [ref=e752] [cursor=pointer]:
+                      - img [ref=e753]
+                      - text: 생성 프롬프트
+                - generic [ref=e755]:
+                  - generic [ref=e756]:
+                    - generic [ref=e758]: MS
+                    - generic [ref=e759]: 1.8s
+                    - generic [ref=e760]: sc03_bt03_sh009
+                  - generic [ref=e761]:
+                    - generic [ref=e762]:
+                      - generic [ref=e763]: Seedance 2.0 (ByteDance)
+                      - generic [ref=e765]: · I2V
+                    - generic [ref=e766]: 맥락·라이프스타일 of the product, 해소 mood, emphasizing form and detail
+                    - generic [ref=e767]:
+                      - generic [ref=e768]: 아이레벨
+                      - generic [ref=e769]: 고정
+                      - generic [ref=e770]: 50mm 표준
+                    - generic [ref=e771]:
+                      - generic "전환" [ref=e772]: 하드컷 → 하드컷
+                      - generic [ref=e773]: $1.61
+                    - generic [ref=e774]:
+                      - button "엔진 변경" [ref=e775] [cursor=pointer]:
+                        - img [ref=e776]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e778] [cursor=pointer]:
+                        - img [ref=e779]
+                    - button "생성 프롬프트" [ref=e781] [cursor=pointer]:
+                      - img [ref=e782]
+                      - text: 생성 프롬프트
+                - generic [ref=e784]:
+                  - generic [ref=e785]:
+                    - generic [ref=e786]:
+                      - generic [ref=e787]: ECU
+                      - generic "첫 프레임 생성 필요" [ref=e788]: KF?
+                    - generic [ref=e789]: 1.2s
+                    - generic [ref=e790]: sc03_bt03_sh010
+                  - generic [ref=e791]:
+                    - generic [ref=e792]:
+                      - generic [ref=e793]: Google Veo 3.1
+                      - generic [ref=e795]: · First/Last
+                    - generic [ref=e796]: 로고·claim frame of the product, 해소 mood, emphasizing form and detail
+                    - generic [ref=e797]:
+                      - generic [ref=e798]: 아이레벨
+                      - generic [ref=e799]: 고정
+                      - generic [ref=e800]: 100mm 마크로
+                    - generic [ref=e801]:
+                      - generic "전환" [ref=e802]: 하드컷 → 하드컷
+                      - generic [ref=e803]: $3.68
+                    - generic [ref=e804]:
+                      - button "엔진 변경" [ref=e805] [cursor=pointer]:
+                        - img [ref=e806]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e808] [cursor=pointer]:
+                        - img [ref=e809]
+                    - button "생성 프롬프트" [ref=e811] [cursor=pointer]:
+                      - img [ref=e812]
+                      - text: 생성 프롬프트
+                - generic [ref=e814]:
+                  - generic [ref=e815]:
+                    - generic [ref=e817]: MS
+                    - generic [ref=e818]: 1.8s
+                    - generic [ref=e819]: sc04_bt04_sh011
+                  - generic [ref=e820]:
+                    - generic [ref=e821]:
+                      - generic [ref=e822]: Seedance 2.0 (ByteDance)
+                      - generic [ref=e824]: · I2V
+                    - generic [ref=e825]: 비트 A — quick 신뢰 fragment advancing "증거·혜택"
+                    - generic [ref=e826]:
+                      - generic [ref=e827]: 아이레벨
+                      - generic [ref=e828]: 푸시인
+                      - generic [ref=e829]: 50mm 표준
+                    - generic [ref=e830]:
+                      - generic "전환" [ref=e831]: 하드컷 → 하드컷
+                      - generic [ref=e832]: $1.61
+                    - generic [ref=e833]:
+                      - button "엔진 변경" [ref=e834] [cursor=pointer]:
+                        - img [ref=e835]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e837] [cursor=pointer]:
+                        - img [ref=e838]
+                    - button "생성 프롬프트" [ref=e840] [cursor=pointer]:
+                      - img [ref=e841]
+                      - text: 생성 프롬프트
+                - generic [ref=e843]:
+                  - generic [ref=e844]:
+                    - generic [ref=e846]: CU
+                    - generic [ref=e847]: 1.4s
+                    - generic [ref=e848]: sc04_bt04_sh012
+                  - generic [ref=e849]:
+                    - generic [ref=e850]:
+                      - generic [ref=e851]: Seedance 2.0 (ByteDance)
+                      - generic [ref=e853]: · I2V
+                    - generic [ref=e854]: 비트 B — quick 신뢰 fragment advancing "증거·혜택"
+                    - generic [ref=e855]:
+                      - generic [ref=e856]: 아이레벨
+                      - generic [ref=e857]: 고정
+                      - generic [ref=e858]: 85mm 망원
+                    - generic [ref=e859]:
+                      - generic "전환" [ref=e860]: 하드컷 → 매치컷
+                      - generic [ref=e861]: $1.61
+                    - generic [ref=e862]:
+                      - button "엔진 변경" [ref=e863] [cursor=pointer]:
+                        - img [ref=e864]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e866] [cursor=pointer]:
+                        - img [ref=e867]
+                    - button "생성 프롬프트" [ref=e869] [cursor=pointer]:
+                      - img [ref=e870]
+                      - text: 생성 프롬프트
+                - generic [ref=e872]:
+                  - generic [ref=e873]:
+                    - generic [ref=e875]: ECU
+                    - generic [ref=e876]: 1.2s
+                    - generic [ref=e877]: sc04_bt04_sh013
+                  - generic [ref=e878]:
+                    - generic [ref=e879]:
+                      - generic [ref=e880]: Seedance 2.0 (ByteDance)
+                      - generic [ref=e882]: · I2V
+                    - generic [ref=e883]: 디테일 — quick 신뢰 fragment advancing "증거·혜택"
+                    - generic [ref=e884]:
+                      - generic [ref=e885]: 아이레벨
+                      - generic [ref=e886]: 고정
+                      - generic [ref=e887]: 100mm 마크로
+                    - generic [ref=e888]:
+                      - generic "전환" [ref=e889]: 하드컷 → 하드컷
+                      - generic [ref=e890]: $1.61
+                    - generic [ref=e891]:
+                      - button "엔진 변경" [ref=e892] [cursor=pointer]:
+                        - img [ref=e893]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e895] [cursor=pointer]:
+                        - img [ref=e896]
+                    - button "생성 프롬프트" [ref=e898] [cursor=pointer]:
+                      - img [ref=e899]
+                      - text: 생성 프롬프트
+                - generic [ref=e901]:
+                  - generic [ref=e902]:
+                    - generic [ref=e903]:
+                      - generic [ref=e904]: ECU
+                      - generic "첫 프레임 생성 필요" [ref=e905]: KF?
+                    - generic [ref=e906]: 1.2s
+                    - generic [ref=e907]: sc05_bt05_sh014
+                  - generic [ref=e908]:
+                    - generic [ref=e909]:
+                      - generic [ref=e910]: Google Veo 3.1
+                      - generic [ref=e912]: · First/Last
+                    - generic [ref=e913]: 제품 hero (orbit) of the product, 결단 mood, emphasizing form and detail
+                    - generic [ref=e914]:
+                      - generic [ref=e915]: 아이레벨
+                      - generic [ref=e916]: 오빗
+                      - generic [ref=e917]: 100mm 마크로
+                    - generic [ref=e918]:
+                      - generic "전환" [ref=e919]: 하드컷 → 하드컷
+                      - generic [ref=e920]: $3.68
+                    - generic [ref=e921]:
+                      - button "엔진 변경" [ref=e922] [cursor=pointer]:
+                        - img [ref=e923]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e925] [cursor=pointer]:
+                        - img [ref=e926]
+                    - button "생성 프롬프트" [ref=e928] [cursor=pointer]:
+                      - img [ref=e929]
+                      - text: 생성 프롬프트
+                - generic [ref=e931]:
+                  - generic [ref=e932]:
+                    - generic [ref=e934]: CU
+                    - generic [ref=e935]: 1.4s
+                    - generic [ref=e936]: sc05_bt05_sh015
+                  - generic [ref=e937]:
+                    - generic [ref=e938]:
+                      - generic [ref=e939]: Seedance 2.0 (ByteDance)
+                      - generic [ref=e941]: · I2V
+                    - generic [ref=e942]: 손동작·사용 of the product, 결단 mood, emphasizing form and detail
+                    - generic [ref=e943]:
+                      - generic [ref=e944]: 하이앵글
+                      - generic [ref=e945]: 푸시인
+                      - generic [ref=e946]: 85mm 망원
+                    - generic [ref=e947]:
+                      - generic "전환" [ref=e948]: 하드컷 → 하드컷
+                      - generic [ref=e949]: $1.61
+                    - generic [ref=e950]:
+                      - button "엔진 변경" [ref=e951] [cursor=pointer]:
+                        - img [ref=e952]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e954] [cursor=pointer]:
+                        - img [ref=e955]
+                    - button "생성 프롬프트" [ref=e957] [cursor=pointer]:
+                      - img [ref=e958]
+                      - text: 생성 프롬프트
+                - generic [ref=e960]:
+                  - generic [ref=e961]:
+                    - generic [ref=e963]: MS
+                    - generic [ref=e964]: 1.8s
+                    - generic [ref=e965]: sc05_bt05_sh016
+                  - generic [ref=e966]:
+                    - generic [ref=e967]:
+                      - generic [ref=e968]: Seedance 2.0 (ByteDance)
+                      - generic [ref=e970]: · I2V
+                    - generic [ref=e971]: 맥락·라이프스타일 of the product, 결단 mood, emphasizing form and detail
+                    - generic [ref=e972]:
+                      - generic [ref=e973]: 아이레벨
+                      - generic [ref=e974]: 고정
+                      - generic [ref=e975]: 50mm 표준
+                    - generic [ref=e976]:
+                      - generic "전환" [ref=e977]: 하드컷 → 하드컷
+                      - generic [ref=e978]: $1.61
+                    - generic [ref=e979]:
+                      - button "엔진 변경" [ref=e980] [cursor=pointer]:
+                        - img [ref=e981]
+                        - text: 엔진 변경
+                      - button "샷 삭제" [ref=e983] [cursor=pointer]:
+                        - img [ref=e984]
+                    - button "생성 프롬프트" [ref=e986] [cursor=pointer]:
+                      - img [ref=e987]
+                      - text: 생성 프롬프트
+            - button "스토리보드 승인하고 고정 에셋으로" [ref=e990] [cursor=pointer]:
+              - text: 스토리보드 승인하고 고정 에셋으로
+              - img [ref=e991]
+  - button "Open Next.js Dev Tools" [ref=e349] [cursor=pointer]:
+    - img [ref=e350]
+  - alert [ref=e353]

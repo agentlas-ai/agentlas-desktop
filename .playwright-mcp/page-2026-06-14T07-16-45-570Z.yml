@@ -1,0 +1,249 @@
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - img "Agentlas" [ref=e5]
+        - generic [ref=e6]: Agentlas
+        - button "사이드바 접기" [ref=e7] [cursor=pointer]:
+          - img [ref=e8]
+      - button "새 채팅" [ref=e11] [cursor=pointer]:
+        - img [ref=e12]
+        - text: 새 채팅
+      - navigation [ref=e14]:
+        - generic [ref=e15]:
+          - generic [ref=e16]:
+            - img [ref=e17]
+            - generic [ref=e19]: 스튜디오
+          - link "Oberon 영화 스튜디오 AI 영화 운영체제" [ref=e21] [cursor=pointer]:
+            - /url: /oberon
+            - img [ref=e23]
+            - generic [ref=e25]:
+              - generic [ref=e26]: Oberon 영화 스튜디오
+              - generic [ref=e27]: AI 영화 운영체제
+        - generic [ref=e28]:
+          - generic [ref=e29]:
+            - button "채팅" [expanded] [ref=e30] [cursor=pointer]:
+              - img [ref=e31]
+              - generic [ref=e33]: 채팅
+              - img [ref=e34]
+            - link "보관함" [ref=e36] [cursor=pointer]:
+              - /url: /chat/archived
+          - generic [ref=e38]: 대화를 시작하면 여기 쌓여요
+        - generic [ref=e39]:
+          - generic [ref=e40]:
+            - img [ref=e41]
+            - generic [ref=e43]: 에이전트
+            - link "마켓플레이스" [ref=e44] [cursor=pointer]:
+              - /url: /marketplace?tab=agents
+              - img [ref=e45]
+          - generic [ref=e47]:
+            - link "에이전트 관리 0" [ref=e48] [cursor=pointer]:
+              - /url: /library/agents
+              - img [ref=e49]
+              - generic [ref=e51]: 에이전트 관리
+              - generic [ref=e52]: "0"
+            - link "마켓플레이스" [ref=e53] [cursor=pointer]:
+              - /url: /marketplace?tab=agents
+              - img [ref=e54]
+              - generic [ref=e56]: 마켓플레이스
+              - img [ref=e57]
+            - link "클라우드 등록" [ref=e59] [cursor=pointer]:
+              - /url: /cloud
+              - img [ref=e60]
+              - generic [ref=e62]: 클라우드 등록
+        - generic [ref=e63]:
+          - generic [ref=e64]:
+            - img [ref=e65]
+            - generic [ref=e67]: 회사
+            - link "회사 설치하기" [ref=e68] [cursor=pointer]:
+              - /url: /marketplace?tab=firms
+              - img [ref=e69]
+          - generic [ref=e72]:
+            - link "+ 회사 설치하기" [ref=e73] [cursor=pointer]:
+              - /url: /marketplace?tab=firms
+            - text: CEO에게 일을 시키는 풀패키지
+        - generic [ref=e74]:
+          - generic [ref=e75]:
+            - img [ref=e76]
+            - generic [ref=e78]: 프로젝트
+            - link [ref=e79] [cursor=pointer]:
+              - /url: /project/new
+              - img [ref=e80]
+          - link "+ 첫 프로젝트 만들기" [ref=e84] [cursor=pointer]:
+            - /url: /project/new
+        - generic [ref=e85]:
+          - generic [ref=e86]:
+            - img [ref=e87]
+            - generic [ref=e89]: 자동화
+            - link [ref=e90] [cursor=pointer]:
+              - /url: /automation/new
+              - img [ref=e91]
+          - link "+ 자동화 만들기" [ref=e95] [cursor=pointer]:
+            - /url: /automation
+        - generic [ref=e96]:
+          - generic [ref=e97]:
+            - img [ref=e98]
+            - generic [ref=e100]: Apps
+          - generic [ref=e101]:
+            - link "설치된 Apps 2" [ref=e102] [cursor=pointer]:
+              - /url: /apps
+              - img [ref=e103]
+              - generic [ref=e105]: 설치된 Apps
+              - generic [ref=e106]: "2"
+            - link "전역 Env" [ref=e107] [cursor=pointer]:
+              - /url: /library/env
+              - img [ref=e108]
+              - generic [ref=e110]: 전역 Env
+            - link "Plugins" [ref=e111] [cursor=pointer]:
+              - /url: /library/mcps
+              - img [ref=e112]
+              - generic [ref=e114]: Plugins
+      - generic [ref=e117]:
+        - button "Google로 로그인" [ref=e118] [cursor=pointer]:
+          - img [ref=e119]
+          - generic [ref=e124]: Google로 로그인
+        - button "브라우저로 로그인" [ref=e125] [cursor=pointer]
+      - generic [ref=e126]:
+        - generic [ref=e129]:
+          - generic [ref=e130]: LLM 미연결
+          - button "v?" [ref=e131] [cursor=pointer]:
+            - generic [ref=e132]: v?
+        - button "라이트/다크 전환" [ref=e133] [cursor=pointer]:
+          - img [ref=e134]
+        - link "설정" [ref=e136] [cursor=pointer]:
+          - /url: /settings
+          - img [ref=e137]
+    - main [ref=e139]:
+      - generic [ref=e140]:
+        - generic [ref=e141]:
+          - link "Apps" [ref=e142] [cursor=pointer]:
+            - /url: /apps
+            - img [ref=e143]
+            - text: Apps
+          - img [ref=e146]
+          - generic [ref=e149]:
+            - generic [ref=e150]:
+              - text: Oberon
+              - generic [ref=e354]: · MIDNIGHT BLOOM
+            - generic [ref=e151]: AI Film Operating System
+          - generic [ref=e355]:
+            - generic [ref=e356]:
+              - generic [ref=e357]: 샷
+              - generic [ref=e358]: "16"
+            - generic [ref=e359]:
+              - generic [ref=e360]: 씬
+              - generic [ref=e361]: "5"
+            - generic [ref=e362]:
+              - generic [ref=e363]: 길이
+              - generic [ref=e364]: 0:25
+            - generic [ref=e365]:
+              - generic [ref=e366]: 예상
+              - generic [ref=e367]: $103.19
+            - button "새 프로젝트" [ref=e368] [cursor=pointer]:
+              - img [ref=e369]
+              - text: 새 프로젝트
+        - generic [ref=e152]:
+          - button "소스 · 모델" [ref=e370] [cursor=pointer]:
+            - img [ref=e371]
+            - generic [ref=e155]: 소스 · 모델
+          - button "기획안" [ref=e498] [cursor=pointer]:
+            - img [ref=e499]
+            - generic [ref=e162]: 기획안
+          - button "스토리보드" [ref=e993] [cursor=pointer]:
+            - img [ref=e994]
+            - generic [ref=e169]: 스토리보드
+          - button "고정 에셋" [ref=e1047] [cursor=pointer]:
+            - img [ref=e1048]
+            - generic [ref=e176]: 고정 에셋
+          - button "5 컷 이미지" [ref=e1050] [cursor=pointer]:
+            - generic [ref=e179]: "5"
+            - generic [ref=e183]: 컷 이미지
+          - button "영상 생성" [disabled] [ref=e185]:
+            - img [ref=e187]
+            - generic [ref=e190]: 영상 생성
+          - button "편집 · 납품" [disabled] [ref=e192]:
+            - img [ref=e194]
+            - generic [ref=e197]: 편집 · 납품
+        - main [ref=e198]:
+          - generic [ref=e1051]:
+            - generic [ref=e1052]:
+              - img [ref=e1054]
+              - generic [ref=e1058]:
+                - generic [ref=e1059]: Step 04 · 컷 이미지
+                - heading "첫 장면 먼저 만들기" [level=2] [ref=e1060]
+                - paragraph [ref=e1061]: 각 컷의 첫 장면을 먼저 이미지로 만듭니다 (Codex CLI 이미지). 여기서 확인하고 OK한 장면만 영상으로 만들기 때문에, 비싼 영상에 돈을 낭비하지 않아요.
+              - button "다시 생성" [active] [ref=e1088] [cursor=pointer]
+            - generic [ref=e1064]:
+              - generic [ref=e1065]:
+                - img [ref=e1067]
+                - generic [ref=e1070]: 총 예상 비용
+                - generic [ref=e1071]: 예산 내
+              - generic [ref=e1072]:
+                - generic [ref=e1073]: $103.19
+                - generic [ref=e1074]: 영상 16컷 × 후보 3개 + 이미지 $1.07 · 예산 $140.00
+              - generic [ref=e1077]: 영상 엔진 Google Veo · 승인하면 영상 생성 단계가 열리고, 다음 화면에서 실렌더를 시작합니다.
+            - generic [ref=e1089]:
+              - generic [ref=e1090]:
+                - img [ref=e1092]
+                - generic [ref=e1096]:
+                  - generic [ref=e1097]: Codex image_gen 작업
+                  - generic [ref=e1098]: image_gen.imagegen · Electron Oberon bridge is unavailable. Desktop app에서 다시 실행해야 실제 이미지 생성이 가능합니다.
+                - generic [ref=e1099]: failed
+                - button "출력 폴더" [ref=e1100] [cursor=pointer]
+              - generic [ref=e1101]: Electron Oberon bridge is unavailable. Desktop app에서 다시 실행해야 실제 이미지 생성이 가능합니다.
+            - generic [ref=e1103]:
+              - generic [ref=e1104]: 키프레임 생성 0 / 16
+              - generic [ref=e1105]: 0%
+            - generic [ref=e1078]:
+              - generic [ref=e1107]:
+                - generic [ref=e1108]: ELS
+                - generic [ref=e1109]: sh001
+              - generic [ref=e1110]:
+                - generic [ref=e1111]: LS
+                - generic [ref=e1112]: sh002
+              - generic [ref=e1113]:
+                - generic [ref=e1114]: MS
+                - generic [ref=e1115]: sh003
+              - generic [ref=e1116]:
+                - generic [ref=e1117]: CU
+                - generic [ref=e1118]: sh004
+              - generic [ref=e1119]:
+                - generic [ref=e1120]: ECU
+                - generic [ref=e1121]: sh005
+              - generic [ref=e1122]:
+                - generic [ref=e1123]: MS
+                - generic [ref=e1124]: sh006
+              - generic [ref=e1125]:
+                - generic [ref=e1126]: ECU
+                - generic [ref=e1127]: sh007
+              - generic [ref=e1128]:
+                - generic [ref=e1129]: CU
+                - generic [ref=e1130]: sh008
+              - generic [ref=e1131]:
+                - generic [ref=e1132]: MS
+                - generic [ref=e1133]: sh009
+              - generic [ref=e1134]:
+                - generic [ref=e1135]: ECU
+                - generic [ref=e1136]: sh010
+              - generic [ref=e1137]:
+                - generic [ref=e1138]: MS
+                - generic [ref=e1139]: sh011
+              - generic [ref=e1140]:
+                - generic [ref=e1141]: CU
+                - generic [ref=e1142]: sh012
+              - generic [ref=e1143]:
+                - generic [ref=e1144]: ECU
+                - generic [ref=e1145]: sh013
+              - generic [ref=e1146]:
+                - generic [ref=e1147]: ECU
+                - generic [ref=e1148]: sh014
+              - generic [ref=e1149]:
+                - generic [ref=e1150]: CU
+                - generic [ref=e1151]: sh015
+              - generic [ref=e1152]:
+                - generic [ref=e1153]: MS
+                - generic [ref=e1154]: sh016
+            - generic [ref=e1087]: 키프레임 생성을 완료하면 영상 생성을 승인할 수 있습니다.
+  - button "Open Next.js Dev Tools" [ref=e349] [cursor=pointer]:
+    - img [ref=e350]
+  - alert [ref=e353]

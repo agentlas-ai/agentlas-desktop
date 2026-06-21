@@ -1,0 +1,274 @@
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - img "Agentlas" [ref=e5]
+        - generic [ref=e6]: Agentlas
+        - button "사이드바 접기" [ref=e7] [cursor=pointer]:
+          - img [ref=e8]
+      - button "새 채팅" [ref=e11] [cursor=pointer]:
+        - img [ref=e12]
+        - text: 새 채팅
+      - navigation [ref=e14]:
+        - generic [ref=e15]:
+          - generic [ref=e16]:
+            - img [ref=e17]
+            - generic [ref=e19]: 스튜디오
+          - link "Oberon 영화 스튜디오 AI 영화 운영체제" [ref=e21] [cursor=pointer]:
+            - /url: /oberon
+            - img [ref=e23]
+            - generic [ref=e25]:
+              - generic [ref=e26]: Oberon 영화 스튜디오
+              - generic [ref=e27]: AI 영화 운영체제
+        - generic [ref=e28]:
+          - generic [ref=e29]:
+            - button "채팅" [expanded] [ref=e30] [cursor=pointer]:
+              - img [ref=e31]
+              - generic [ref=e33]: 채팅
+              - img [ref=e34]
+            - link "보관함" [ref=e36] [cursor=pointer]:
+              - /url: /chat/archived
+          - generic [ref=e38]: 대화를 시작하면 여기 쌓여요
+        - generic [ref=e39]:
+          - generic [ref=e40]:
+            - img [ref=e41]
+            - generic [ref=e43]: 에이전트
+            - link "마켓플레이스" [ref=e44] [cursor=pointer]:
+              - /url: /marketplace?tab=agents
+              - img [ref=e45]
+          - generic [ref=e47]:
+            - link "에이전트 관리 0" [ref=e48] [cursor=pointer]:
+              - /url: /library/agents
+              - img [ref=e49]
+              - generic [ref=e51]: 에이전트 관리
+              - generic [ref=e52]: "0"
+            - link "마켓플레이스" [ref=e53] [cursor=pointer]:
+              - /url: /marketplace?tab=agents
+              - img [ref=e54]
+              - generic [ref=e56]: 마켓플레이스
+              - img [ref=e57]
+            - link "클라우드 등록" [ref=e59] [cursor=pointer]:
+              - /url: /cloud
+              - img [ref=e60]
+              - generic [ref=e62]: 클라우드 등록
+        - generic [ref=e63]:
+          - generic [ref=e64]:
+            - img [ref=e65]
+            - generic [ref=e67]: 회사
+            - link "회사 설치하기" [ref=e68] [cursor=pointer]:
+              - /url: /marketplace?tab=firms
+              - img [ref=e69]
+          - generic [ref=e72]:
+            - link "+ 회사 설치하기" [ref=e73] [cursor=pointer]:
+              - /url: /marketplace?tab=firms
+            - text: CEO에게 일을 시키는 풀패키지
+        - generic [ref=e74]:
+          - generic [ref=e75]:
+            - img [ref=e76]
+            - generic [ref=e78]: 프로젝트
+            - link [ref=e79] [cursor=pointer]:
+              - /url: /project/new
+              - img [ref=e80]
+          - link "+ 첫 프로젝트 만들기" [ref=e84] [cursor=pointer]:
+            - /url: /project/new
+        - generic [ref=e85]:
+          - generic [ref=e86]:
+            - img [ref=e87]
+            - generic [ref=e89]: 자동화
+            - link [ref=e90] [cursor=pointer]:
+              - /url: /automation/new
+              - img [ref=e91]
+          - link "+ 자동화 만들기" [ref=e95] [cursor=pointer]:
+            - /url: /automation
+        - generic [ref=e96]:
+          - generic [ref=e97]:
+            - img [ref=e98]
+            - generic [ref=e100]: Apps
+          - generic [ref=e101]:
+            - link "설치된 Apps 2" [ref=e102] [cursor=pointer]:
+              - /url: /apps
+              - img [ref=e103]
+              - generic [ref=e105]: 설치된 Apps
+              - generic [ref=e106]: "2"
+            - link "전역 Env" [ref=e107] [cursor=pointer]:
+              - /url: /library/env
+              - img [ref=e108]
+              - generic [ref=e110]: 전역 Env
+            - link "Plugins" [ref=e111] [cursor=pointer]:
+              - /url: /library/mcps
+              - img [ref=e112]
+              - generic [ref=e114]: Plugins
+      - generic [ref=e117]:
+        - button "Google로 로그인" [ref=e118] [cursor=pointer]:
+          - img [ref=e119]
+          - generic [ref=e124]: Google로 로그인
+        - button "브라우저로 로그인" [ref=e125] [cursor=pointer]
+      - generic [ref=e126]:
+        - generic [ref=e129]:
+          - generic [ref=e130]: LLM 미연결
+          - button "v?" [ref=e131] [cursor=pointer]:
+            - generic [ref=e132]: v?
+        - button "라이트/다크 전환" [ref=e133] [cursor=pointer]:
+          - img [ref=e134]
+        - link "설정" [ref=e136] [cursor=pointer]:
+          - /url: /settings
+          - img [ref=e137]
+    - main [ref=e139]:
+      - generic [ref=e140]:
+        - generic [ref=e141]:
+          - link "Apps" [ref=e142] [cursor=pointer]:
+            - /url: /apps
+            - img [ref=e143]
+            - text: Apps
+          - img [ref=e146]
+          - generic [ref=e149]:
+            - generic [ref=e150]: Oberon
+            - generic [ref=e151]: AI Film Operating System
+        - generic [ref=e152]:
+          - button "1 소스 · 모델" [ref=e153] [cursor=pointer]:
+            - generic [ref=e154]: "1"
+            - generic [ref=e155]: 소스 · 모델
+          - button "기획안" [disabled] [ref=e157]:
+            - img [ref=e159]
+            - generic [ref=e162]: 기획안
+          - button "스토리보드" [disabled] [ref=e164]:
+            - img [ref=e166]
+            - generic [ref=e169]: 스토리보드
+          - button "고정 에셋" [disabled] [ref=e171]:
+            - img [ref=e173]
+            - generic [ref=e176]: 고정 에셋
+          - button "컷 이미지" [disabled] [ref=e178]:
+            - img [ref=e180]
+            - generic [ref=e183]: 컷 이미지
+          - button "영상 생성" [disabled] [ref=e185]:
+            - img [ref=e187]
+            - generic [ref=e190]: 영상 생성
+          - button "편집 · 납품" [disabled] [ref=e192]:
+            - img [ref=e194]
+            - generic [ref=e197]: 편집 · 납품
+        - main [ref=e198]:
+          - generic [ref=e199]:
+            - generic [ref=e200]:
+              - img [ref=e202]
+              - generic [ref=e205]:
+                - generic [ref=e206]: Step 00 · 시작
+                - heading "무엇을 만들까요?" [level=2] [ref=e207]
+                - paragraph [ref=e208]: 제목과 만들고 싶은 영상을 자유롭게 적으면, 에이전트가 장르·톤·캐릭터·샷을 알아서 잡습니다. 다음 단계에서 확인하고 고치면 돼요.
+              - generic [ref=e210]:
+                - button "최고 품질" [ref=e211] [cursor=pointer]:
+                  - img [ref=e212]
+                  - text: 최고 품질
+                - button "저장된 프로젝트" [ref=e214] [cursor=pointer]:
+                  - img [ref=e215]
+                  - text: 저장된 프로젝트
+            - generic [ref=e219]:
+              - generic [ref=e220]:
+                - img [ref=e222]
+                - generic [ref=e226]:
+                  - generic [ref=e227]: 모델 스택
+                  - generic [ref=e228]: 단계별로 어떤 모델/CLI로 만들지 고릅니다 (BYOK)
+              - generic [ref=e229]:
+                - generic [ref=e230]:
+                  - img [ref=e232]
+                  - generic [ref=e235]:
+                    - generic [ref=e236]: 대본 · 기획 엔진
+                    - generic [ref=e237]: 기획·대본·스토리보드를 쓰는 BYOK CLI
+                - generic [ref=e238]:
+                  - button "Claude Code" [ref=e239] [cursor=pointer]
+                  - button "Codex" [ref=e240] [cursor=pointer]
+                  - button "Gemini CLI" [ref=e241] [cursor=pointer]
+              - generic [ref=e242]:
+                - generic [ref=e243]:
+                  - img [ref=e245]
+                  - generic [ref=e249]:
+                    - generic [ref=e250]: 컷 · 이미지 엔진
+                    - generic [ref=e251]: 레퍼런스·키프레임 (병렬 생성)
+                - generic [ref=e252]:
+                  - button "Codex CLI 이미지 구독" [ref=e253] [cursor=pointer]:
+                    - text: Codex CLI 이미지
+                    - generic [ref=e254]: 구독
+                  - button "OpenAI 이미지 API" [ref=e255] [cursor=pointer]
+                  - button "Google Imagen" [ref=e256] [cursor=pointer]
+                  - button "Stability AI" [ref=e257] [cursor=pointer]
+                  - button "Adobe Firefly Services" [ref=e258] [cursor=pointer]
+              - generic [ref=e259]:
+                - generic [ref=e260]:
+                  - img [ref=e262]
+                  - generic [ref=e265]:
+                    - generic [ref=e266]: 영상 엔진 (복수 선택 · 병렬)
+                    - generic [ref=e267]: 샷을 선택한 엔진들에 병렬 분배
+                - generic [ref=e268]:
+                  - button "Runway API" [ref=e269] [cursor=pointer]:
+                    - img [ref=e271]
+                    - text: Runway API
+                  - button "Google Veo" [ref=e272] [cursor=pointer]:
+                    - img [ref=e274]
+                    - text: Google Veo
+                  - button "Higgsfield" [ref=e276] [cursor=pointer]:
+                    - img [ref=e278]
+                    - text: Higgsfield
+                  - button "Seedance 2.0 (fal 경유)" [ref=e279] [cursor=pointer]:
+                    - img [ref=e281]
+                    - text: Seedance 2.0 (fal 경유)
+                  - button "Luma Ray 3" [ref=e282] [cursor=pointer]:
+                    - img [ref=e284]
+                    - text: Luma Ray 3
+                  - button "Kling 2.x (애그리게이터)" [ref=e285] [cursor=pointer]:
+                    - img [ref=e287]
+                    - text: Kling 2.x (애그리게이터)
+                  - button "Replicate" [ref=e288] [cursor=pointer]:
+                    - img [ref=e290]
+                    - text: Replicate
+            - generic [ref=e291]:
+              - generic [ref=e292]: 빠른 시작 (예제로 채우기)
+              - generic [ref=e293]:
+                - button "프리미엄 향수 광고" [active] [ref=e294] [cursor=pointer]
+                - button "SF 단편 트레일러" [ref=e295] [cursor=pointer]
+                - button "단편 드라마 (재회)" [ref=e296] [cursor=pointer]
+                - button "소셜 숏폼 (제품 훅)" [ref=e297] [cursor=pointer]
+            - generic [ref=e298]:
+              - generic [ref=e299]:
+                - generic [ref=e300]: 제목
+                - 'textbox "예: MIDNIGHT BLOOM" [ref=e301]': MIDNIGHT BLOOM
+              - generic [ref=e302]:
+                - generic [ref=e303]: 무엇을 만들고 싶나요?
+                - textbox "만들고 싶은 영상을 편하게 설명해 주세요. 예) 도시의 밤, 한 여인이 향수 한 방울로 군중 속에서 자신만의 빛을 찾는 30초 광고. 네온·세련되고 관능적인 톤. 제품 클로즈업과 브랜드 로고로 마무리." [ref=e304]:
+                  - /placeholder: "만들고 싶은 영상을 편하게 설명해 주세요.\n예) 도시의 밤, 한 여인이 향수 한 방울로 군중 속에서 자신만의 빛을 찾는 30초 광고. 네온·세련되고 관능적인 톤. 제품 클로즈업과 브랜드 로고로 마무리."
+                  - text: 네온이 번지는 빗속 거리. 무채색 군중 사이에서 주인공이 향수를 뿌리는 순간, 세계가 그녀를 중심으로 다시 채색된다. 제품 클로즈업과 함께 브랜드 로고로 마무리.
+              - generic [ref=e305]:
+                - generic [ref=e306]: 참고자료 (선택) — 레퍼런스 작품·룩·분위기
+                - generic [ref=e307]:
+                  - generic [ref=e308]:
+                    - 'textbox "예: Blade Runner 2049 lighting" [ref=e309]'
+                    - button [ref=e310] [cursor=pointer]:
+                      - img [ref=e311]
+                  - generic [ref=e313]:
+                    - img [ref=e314]
+                    - text: 이미지·파일·링크를 여기로 끌어다 놓아도 돼요
+                  - generic [ref=e334]:
+                    - generic [ref=e335]:
+                      - text: Blade Runner 2049 lighting
+                      - button "삭제" [ref=e336] [cursor=pointer]:
+                        - img [ref=e337]
+                    - generic [ref=e339]:
+                      - text: Chanel No.5 film
+                      - button "삭제" [ref=e340] [cursor=pointer]:
+                        - img [ref=e341]
+              - generic [ref=e318]:
+                - generic [ref=e319]: 포맷
+                - generic [ref=e320]:
+                  - button "자동 감지" [ref=e321] [cursor=pointer]
+                  - button "소셜 숏폼" [ref=e322] [cursor=pointer]
+                  - button "30초 광고" [ref=e323] [cursor=pointer]
+                  - button "60초 광고" [ref=e324] [cursor=pointer]
+                  - button "트레일러" [ref=e325] [cursor=pointer]
+                  - button "뮤직비디오" [ref=e326] [cursor=pointer]
+                  - button "단편 드라마" [ref=e327] [cursor=pointer]
+                  - button "시네마틱 단편" [ref=e328] [cursor=pointer]
+                - generic [ref=e343]: 30초 광고 · 평균 1.8초 컷 · 빠르고 리드미컬, 마지막 claim에서 호흡
+            - button "기획안 만들기" [ref=e330] [cursor=pointer]:
+              - img [ref=e331]
+              - text: 기획안 만들기
+  - button "Open Next.js Dev Tools" [ref=e349] [cursor=pointer]:
+    - img [ref=e350]
+  - alert [ref=e353]
