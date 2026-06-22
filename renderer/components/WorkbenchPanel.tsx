@@ -694,8 +694,10 @@ function DelegationPanel({
   const [draftSecrets, setDraftSecrets] = useState<Record<string, string>>({});
   const [saveStatus, setSaveStatus] = useState<Record<string, string>>({});
   const [approvedPayments, setApprovedPayments] = useState<Record<string, string>>({});
+  const [activeCredentialId, setActiveCredentialId] = useState<string | null>(null);
   const actionsById = new Map((surface.manifest.actions ?? []).map((action) => [action.id, action]));
   const visibleSteps = plan.steps.slice(0, 5);
+  const activeCredential = plan.credentialRequests.find((request) => request.id === activeCredentialId) ?? null;
   const hasPanel =
     visibleSteps.length > 0 ||
     plan.credentialRequests.length > 0 ||
@@ -723,6 +725,7 @@ function DelegationPanel({
       await window.agentlas.env.set(request.envKey, value);
       setDraftSecrets((prev) => ({ ...prev, [request.id]: "" }));
       setSaveStatus((prev) => ({ ...prev, [request.id]: "Saved to vault" }));
+      setActiveCredentialId(null);
     } catch (err) {
       setSaveStatus((prev) => ({ ...prev, [request.id]: err instanceof Error ? err.message : String(err) }));
     }
@@ -812,28 +815,98 @@ function DelegationPanel({
               <div key={request.id} style={credentialBox}>
                 <div style={delegationStepTop}>
                   <strong>{request.label}</strong>
-                  <span>{request.envKey}</span>
+                  <span style={credentialModePill(request.brokerMode)}>{request.brokerMode || "runtime-env-injection"}</span>
                 </div>
-                <div style={credentialInputRow}>
-                  <input
-                    type="password"
-                    autoComplete="off"
-                    value={draftSecrets[request.id] ?? ""}
-                    placeholder="Paste secret into vault"
-                    style={credentialInput}
-                    onChange={(event) =>
-                      setDraftSecrets((prev) => ({ ...prev, [request.id]: event.currentTarget.value }))
-                    }
-                  />
-                  <button type="button" style={compactActionButton} onClick={() => void saveCredential(request)}>
-                    Save
-                  </button>
+                <div style={credentialMetaGrid}>
+                  <span>Key</span>
+                  <strong>{request.envKey}</strong>
+                  <span>Provider</span>
+                  <strong>{request.provider || "declared by agent"}</strong>
+                  <span>Allowed host</span>
+                  <strong>{credentialHostText(request)}</strong>
+                  <span>Scope</span>
+                  <strong>{request.scope || request.purpose || "not declared"}</strong>
                 </div>
+                <span style={delegationDetail}>{credentialBrokerText(request)}</span>
+                <button type="button" style={compactActionButton} onClick={() => setActiveCredentialId(request.id)}>
+                  Open secure input
+                </button>
                 {saveStatus[request.id] && <span style={delegationDetail}>{saveStatus[request.id]}</span>}
               </div>
             ))}
           </div>
         </>
+      )}
+
+      {activeCredential && (
+        <div style={secureCredentialOverlay} role="dialog" aria-modal="true" aria-label="Secure credential input">
+          <div style={secureCredentialDialog}>
+            <div style={secureCredentialHeader}>
+              <span style={secureCredentialMark}>
+                <IconShield size={15} />
+              </span>
+              <div style={{ minWidth: 0 }}>
+                <strong>Secure credential save</strong>
+                <span>Agentlas vault · {activeCredential.envKey}</span>
+              </div>
+              <button
+                type="button"
+                style={iconButton}
+                aria-label="Close credential dialog"
+                onClick={() => setActiveCredentialId(null)}
+              >
+                <IconClose size={15} />
+              </button>
+            </div>
+            <div style={secureCredentialFacts}>
+              <div>
+                <span>Requested by</span>
+                <strong>{activeCredential.provider || activeCredential.label}</strong>
+              </div>
+              <div>
+                <span>Allowed host</span>
+                <strong>{credentialHostText(activeCredential)}</strong>
+              </div>
+              <div>
+                <span>Use</span>
+                <strong>{activeCredential.scope || activeCredential.purpose || activeCredential.requiredWhen || "not declared"}</strong>
+              </div>
+              <div>
+                <span>Storage</span>
+                <strong>{credentialStorageText(activeCredential)}</strong>
+              </div>
+            </div>
+            <div style={secureCredentialNotice(activeCredential.brokerMode)}>
+              {credentialBrokerText(activeCredential)}
+            </div>
+            <div style={credentialInputRow}>
+              <input
+                type="password"
+                autoComplete="off"
+                autoFocus
+                value={draftSecrets[activeCredential.id] ?? ""}
+                placeholder="Paste secret into Agentlas vault"
+                style={credentialInput}
+                onChange={(event) =>
+                  setDraftSecrets((prev) => ({ ...prev, [activeCredential.id]: event.currentTarget.value }))
+                }
+              />
+              <button type="button" style={compactActionButton} onClick={() => void saveCredential(activeCredential)}>
+                Save
+              </button>
+            </div>
+            {activeCredential.setupUrl && (
+              <button
+                type="button"
+                style={linkLikeButton}
+                onClick={() => window.open(activeCredential.setupUrl, "_blank", "noopener,noreferrer")}
+              >
+                Open provider setup page
+              </button>
+            )}
+            {saveStatus[activeCredential.id] && <span style={delegationDetail}>{saveStatus[activeCredential.id]}</span>}
+          </div>
+        </div>
       )}
 
       {plan.paymentRequests.length > 0 && (
@@ -892,6 +965,31 @@ function paymentSummary(request: AgentlasSurfacePaymentRequest): string {
       ? "quoted at checkout"
       : `${request.currency ?? "?"} ${request.amount ?? "?"}`;
   return `${amount} · ${request.recurrence} · ${request.approvalMode}`;
+}
+
+function credentialHostText(request: AgentlasSurfaceCredentialRequest): string {
+  return request.allowedHosts?.length ? request.allowedHosts.join(", ") : "not declared";
+}
+
+function credentialStorageText(request: AgentlasSurfaceCredentialRequest): string {
+  if (request.inputMode === "oauth-browser") return "provider OAuth flow";
+  if (request.inputMode === "provider-page") return "provider page";
+  return request.saveTarget === "agentlas-env-vault" || !request.saveTarget
+    ? "Agentlas OS keychain vault"
+    : request.saveTarget;
+}
+
+function credentialBrokerText(request: AgentlasSurfaceCredentialRequest): string {
+  if (request.brokerMode === "host-bound-broker") {
+    return "Host-bound broker mode: Agentlas should attach the credential only to the declared upstream host and return the API result, not the raw secret.";
+  }
+  if (request.inputMode === "oauth-browser" || request.brokerMode === "provider-managed-oauth") {
+    return "OAuth/provider mode: the user signs in at the provider, and Agentlas stores only the returned local token reference when available.";
+  }
+  if (request.inputMode === "provider-page" || request.brokerMode === "manual-provider-page") {
+    return "Provider-page mode: enter the secret only in the provider page or Agentlas secure UI, not in chat or generated source.";
+  }
+  return "Current runtime mode: Agentlas stores the value in the OS keychain, but legacy MCP/runner paths may still inject it into a child process environment.";
 }
 
 function summarizeManifestJobs(manifest: AgentlasSurfaceManifest): SurfaceJobCostSummary | null {
@@ -2033,6 +2131,74 @@ const credentialBox: CSSProperties = {
   color: "var(--muted-deep)",
 };
 
+const credentialMetaGrid: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "82px minmax(0, 1fr)",
+  gap: "4px 8px",
+  alignItems: "baseline",
+  minWidth: 0,
+};
+
+const secureCredentialOverlay: CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(20, 24, 32, 0.22)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  zIndex: 80,
+  padding: 18,
+};
+
+const secureCredentialDialog: CSSProperties = {
+  width: "min(520px, 100%)",
+  borderRadius: 8,
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+  boxShadow: "0 18px 60px rgba(20, 24, 32, 0.24)",
+  display: "grid",
+  gap: 12,
+  padding: 14,
+};
+
+const secureCredentialHeader: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "34px minmax(0, 1fr) auto",
+  alignItems: "center",
+  gap: 10,
+};
+
+const secureCredentialMark: CSSProperties = {
+  width: 34,
+  height: 34,
+  borderRadius: 8,
+  background: "var(--fill-1)",
+  color: "var(--accent)",
+  border: "1px solid var(--accent-soft)",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
+
+const secureCredentialFacts: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: 8,
+};
+
+function secureCredentialNotice(mode: string | undefined): CSSProperties {
+  const brokered = mode === "host-bound-broker";
+  return {
+    padding: 9,
+    borderRadius: 8,
+    border: brokered ? "1px solid rgba(42,127,98,0.28)" : "1px solid rgba(180,83,58,0.24)",
+    background: brokered ? "rgba(42,127,98,0.08)" : "rgba(180,83,58,0.08)",
+    color: brokered ? "var(--green-deep)" : "var(--danger, #b4533a)",
+    fontSize: 11,
+    lineHeight: 1.4,
+  };
+}
+
 const credentialInputRow: CSSProperties = {
   display: "grid",
   gridTemplateColumns: "minmax(0, 1fr) auto",
@@ -2060,6 +2226,33 @@ const compactActionButton: CSSProperties = {
   fontSize: 10.5,
   fontWeight: 800,
   padding: "5px 8px",
+};
+
+function credentialModePill(mode: string | undefined): CSSProperties {
+  const brokered = mode === "host-bound-broker";
+  return {
+    maxWidth: 150,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    borderRadius: 999,
+    border: brokered ? "1px solid rgba(42,127,98,0.28)" : "1px solid var(--paper-edge)",
+    background: brokered ? "rgba(42,127,98,0.08)" : "var(--paper-2)",
+    color: brokered ? "var(--green-deep)" : "var(--muted-deep)",
+    padding: "2px 6px",
+    fontSize: 9.5,
+    fontWeight: 800,
+  };
+}
+
+const linkLikeButton: CSSProperties = {
+  justifySelf: "start",
+  border: "none",
+  background: "transparent",
+  color: "var(--accent)",
+  padding: 0,
+  fontSize: 11,
+  fontWeight: 800,
 };
 
 function delegationStatus(status: string): CSSProperties {

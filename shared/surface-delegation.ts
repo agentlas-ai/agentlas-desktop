@@ -40,6 +40,17 @@ export interface AgentlasSurfaceCredentialRequest {
   envKey: string;
   provider?: string;
   purpose?: string;
+  scope?: string;
+  allowedHosts?: string[];
+  allowedOperations?: string[];
+  setupUrl?: string;
+  saveTarget?: "agentlas-env-vault" | "provider-page" | "oauth-token-store" | string;
+  brokerMode?:
+    | "host-bound-broker"
+    | "runtime-env-injection"
+    | "provider-managed-oauth"
+    | "manual-provider-page"
+    | string;
   inputMode: "agentlas-vault" | "provider-page" | "oauth-browser";
   requiredWhen?: string;
   status?: "not-requested" | "saved" | "missing" | "not-needed" | string;
@@ -217,6 +228,10 @@ export function buildSurfaceDelegationPlan(manifest: AgentlasSurfaceManifest): A
       details: [
         `Vault key: ${request.envKey}`,
         request.provider ? `Provider: ${request.provider}` : "Provider: declared by surface",
+        request.allowedHosts?.length
+          ? `Allowed hosts: ${request.allowedHosts.join(", ")}`
+          : "Allowed hosts: not declared; current vault/env mode cannot enforce host binding by itself.",
+        request.scope ? `Scope: ${request.scope}` : "Scope: not declared",
         "Secret value must go through Agentlas vault or provider page, not ordinary chat or generated source.",
       ],
       actionIds: actions.filter((action) => action.type === "request-credential" || action.type === "connect-service").map((action) => action.id),
@@ -414,6 +429,10 @@ function credentialRequestsFromDelegation(delegation?: JsonObject): AgentlasSurf
     .map((item, idx): AgentlasSurfaceCredentialRequest | null => {
       const envKey = stringValue(item.envKey) || stringValue(item.key);
       if (!envKey) return null;
+      const hosts = credentialHostsFromObject(item);
+      const operations = stringArray(item.allowedOperations).length
+        ? stringArray(item.allowedOperations)
+        : stringArray(item.operations);
       const request: AgentlasSurfaceCredentialRequest = {
         id: stringValue(item.id) || slugify(envKey) || `credential-${idx + 1}`,
         label: stringValue(item.label) || stringValue(item.name) || envKey,
@@ -422,10 +441,20 @@ function credentialRequestsFromDelegation(delegation?: JsonObject): AgentlasSurf
       };
       const provider = stringValue(item.provider);
       const purpose = stringValue(item.purpose);
+      const scope = stringValue(item.scope);
       const requiredWhen = stringValue(item.requiredWhen);
       const status = stringValue(item.status);
+      const setupUrl = stringValue(item.setupUrl) || stringValue(item.url);
+      const saveTarget = stringValue(item.saveTarget);
+      const brokerMode = credentialBrokerMode(item.brokerMode);
       if (provider) request.provider = provider;
       if (purpose) request.purpose = purpose;
+      if (scope) request.scope = scope;
+      if (hosts.length) request.allowedHosts = hosts;
+      if (operations.length) request.allowedOperations = operations;
+      if (setupUrl) request.setupUrl = setupUrl;
+      if (saveTarget) request.saveTarget = saveTarget;
+      if (brokerMode) request.brokerMode = brokerMode;
       if (requiredWhen) request.requiredWhen = requiredWhen;
       if (status) request.status = status;
       return request;
@@ -438,12 +467,25 @@ function credentialRequestsFromConnectors(connectors: AgentlasSurfaceConnectorSp
     .filter((connector) => CREDENTIAL_AUTH.has(stringValue(connector.auth) || ""))
     .map((connector) => {
       const envKey = stringValue(connector.envKey) || connectorEnvKey(connector);
+      const raw = connector as unknown as JsonObject;
+      const hosts = credentialHostsFromObject(raw);
+      const setupUrl =
+        stringValue(raw.setupUrl) ||
+        stringValue(raw.url) ||
+        stringValue(raw.docsUrl) ||
+        stringValue(raw.consoleUrl);
+      const scope = stringValue(raw.scope) || stringValue(raw.permission) || stringValue(raw.permissions);
       return {
         id: `connector-${connector.id}-credential`,
         label: `${connector.name} credential`,
         envKey,
         provider: connector.name,
         purpose: connector.purpose,
+        ...(scope ? { scope } : {}),
+        ...(hosts.length ? { allowedHosts: hosts } : {}),
+        ...(setupUrl ? { setupUrl } : {}),
+        saveTarget: "agentlas-env-vault",
+        brokerMode: connector.auth === "oauth" ? "provider-managed-oauth" : "runtime-env-injection",
         inputMode: connector.auth === "oauth" ? "oauth-browser" : "agentlas-vault",
         requiredWhen: `Using ${connector.name}`,
         status: connector.status === "verified" || connector.status === "configured" ? "saved" : "missing",
@@ -455,16 +497,28 @@ function credentialRequestsFromActions(actions: AgentlasSurfaceAction[]): Agentl
   return actions
     .filter((action) => action.type === "request-credential")
     .map((action, idx) => {
-      const envKey = stringValue(action.envKey) || stringValue(action.key) || `AGENTLAS_SURFACE_${idx + 1}_SECRET`;
+      const raw = action as unknown as JsonObject;
+      const envKey = stringValue(raw.envKey) || stringValue(raw.key) || `AGENTLAS_SURFACE_${idx + 1}_SECRET`;
+      const hosts = credentialHostsFromObject(raw);
+      const operations = stringArray(raw.allowedOperations).length
+        ? stringArray(raw.allowedOperations)
+        : stringArray(raw.operations);
+      const setupUrl = stringValue(raw.setupUrl) || stringValue(action.url);
       return {
         id: action.id,
         label: action.label || envKey,
         envKey,
-        provider: stringValue(action.provider),
+        provider: stringValue(raw.provider),
         purpose: action.prompt,
-        inputMode: credentialInputMode(action.inputMode),
-        requiredWhen: stringValue(action.requiredWhen),
-        status: stringValue(action.status) || "missing",
+        scope: stringValue(raw.scope) || stringValue(raw.permission),
+        ...(hosts.length ? { allowedHosts: hosts } : {}),
+        ...(operations.length ? { allowedOperations: operations } : {}),
+        ...(setupUrl ? { setupUrl } : {}),
+        saveTarget: stringValue(raw.saveTarget) || "agentlas-env-vault",
+        brokerMode: credentialBrokerMode(raw.brokerMode) || "runtime-env-injection",
+        inputMode: credentialInputMode(raw.inputMode),
+        requiredWhen: stringValue(raw.requiredWhen),
+        status: stringValue(raw.status) || "missing",
       };
     });
 }
@@ -562,7 +616,18 @@ function mergeCredentialRequests(requests: AgentlasSurfaceCredentialRequest[]): 
   const map = new Map<string, AgentlasSurfaceCredentialRequest>();
   for (const request of requests) {
     const existing = map.get(request.envKey);
-    map.set(request.envKey, existing ? { ...request, ...existing, status: existing.status ?? request.status } : request);
+    map.set(
+      request.envKey,
+      existing
+        ? {
+            ...request,
+            ...existing,
+            allowedHosts: mergeStrings(request.allowedHosts, existing.allowedHosts),
+            allowedOperations: mergeStrings(request.allowedOperations, existing.allowedOperations),
+            status: existing.status ?? request.status,
+          }
+        : request,
+    );
   }
   return [...map.values()];
 }
@@ -609,6 +674,50 @@ function credentialInputMode(value: unknown): AgentlasSurfaceCredentialRequest["
   const v = stringValue(value);
   if (v === "provider-page" || v === "oauth-browser") return v;
   return "agentlas-vault";
+}
+
+function credentialBrokerMode(value: unknown): AgentlasSurfaceCredentialRequest["brokerMode"] | undefined {
+  const v = stringValue(value);
+  if (!v) return undefined;
+  if (
+    v === "host-bound-broker" ||
+    v === "runtime-env-injection" ||
+    v === "provider-managed-oauth" ||
+    v === "manual-provider-page"
+  ) {
+    return v;
+  }
+  return v;
+}
+
+function credentialHostsFromObject(value: JsonObject): string[] {
+  const direct = [
+    ...stringArray(value.allowedHosts),
+    ...stringArray(value.hosts),
+    ...stringArray(value.hostAllowlist),
+  ];
+  for (const key of ["host", "allowedHost", "apiHost", "baseUrl", "apiBaseUrl", "url", "setupUrl", "consoleUrl", "docsUrl"]) {
+    const v = stringValue(value[key]);
+    if (!v) continue;
+    direct.push(hostFromString(v));
+  }
+  return mergeStrings(direct.filter(Boolean), []) ?? [];
+}
+
+function hostFromString(value: string): string {
+  try {
+    return new URL(value).hostname.replace(/^www\./, "");
+  } catch {
+    return value.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0].trim();
+  }
+}
+
+function mergeStrings(a?: string[], b?: string[]): string[] | undefined {
+  const merged = [...(a ?? []), ...(b ?? [])]
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (merged.length === 0) return undefined;
+  return [...new Set(merged)];
 }
 
 function objectArray(value: unknown): JsonObject[] {

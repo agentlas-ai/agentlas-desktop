@@ -1165,6 +1165,17 @@ export interface AppFactoryProviderCredentialGate {
   envKey: string;
   label: string;
   connectorId?: string;
+  provider?: string;
+  scope?: string;
+  allowedHosts?: string[];
+  allowedOperations?: string[];
+  setupUrl?: string;
+  brokerMode?:
+    | "host-bound-broker"
+    | "runtime-env-injection"
+    | "provider-managed-oauth"
+    | "manual-provider-page"
+    | string;
   inputMode: "agentlas-vault" | "provider-page" | "oauth-browser" | string;
   saveTarget: "agentlas-env-vault" | string;
   hasValue?: boolean;
@@ -1463,6 +1474,12 @@ export interface AppFactoryProviderCredentialResolution {
   envKey: string;
   label: string;
   connectorId?: string;
+  provider?: string;
+  scope?: string;
+  allowedHosts?: string[];
+  allowedOperations?: string[];
+  setupUrl?: string;
+  brokerMode?: string;
   status: "live-credential-ready" | "secure-input-required";
   source: string;
   saveTarget: string;
