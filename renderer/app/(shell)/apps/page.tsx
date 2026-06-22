@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { INSTALLED_APPS } from "@/lib/apps";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
@@ -15,8 +16,25 @@ const SUPPORT_LINKS = [
 
 export default function AppsPage() {
   const { locale } = useT();
+  const router = useRouter();
   const [generatedApps, setGeneratedApps] = useState<AppFactoryAppRecord[]>([]);
   const [deletingAppId, setDeletingAppId] = useState<string | null>(null);
+  const [launching, setLaunching] = useState(false);
+
+  // launchCommand 앱(예: Startup Studio) — 새 채팅을 만들고 그 명령을 자동 전송한다.
+  // GUI 실행은 명령(`/hep-network startup`)이 이미 처리하므로 호스팅/등록이 따로 필요 없다.
+  async function launchHubApp(command: string) {
+    const api = ipc();
+    if (!api || launching) return;
+    setLaunching(true);
+    try {
+      const chat = await api.chats.create({});
+      router.push(`/chat?id=${chat.id}&prompt=${encodeURIComponent(command)}&permission=write`);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err));
+      setLaunching(false);
+    }
+  }
 
   useEffect(() => {
     const api = ipc();
@@ -96,8 +114,8 @@ export default function AppsPage() {
           <div style={appList}>
             {INSTALLED_APPS.map((app) => {
               const loc = pickLocalized(app, locale);
-              return (
-                <Link key={app.id} href={app.route} className="glass-strong" style={appTile}>
+              const inner = (
+                <>
                   <div style={appIcon}>
                     <IconApps size={20} />
                   </div>
@@ -116,6 +134,26 @@ export default function AppsPage() {
                     </div>
                   </div>
                   <IconChevronRight size={14} style={chevronStyle} />
+                </>
+              );
+              // launchCommand 앱: in-app route 대신 새 채팅에서 명령 실행 (GUI는 그 명령이 띄움).
+              if (app.launchCommand) {
+                return (
+                  <button
+                    key={app.id}
+                    type="button"
+                    onClick={() => void launchHubApp(app.launchCommand!)}
+                    disabled={launching}
+                    className="glass-strong"
+                    style={{ ...appTile, textAlign: "left", border: "none", cursor: launching ? "default" : "pointer", opacity: launching ? 0.7 : 1, font: "inherit" }}
+                  >
+                    {inner}
+                  </button>
+                );
+              }
+              return (
+                <Link key={app.id} href={app.route} className="glass-strong" style={appTile}>
+                  {inner}
                 </Link>
               );
             })}

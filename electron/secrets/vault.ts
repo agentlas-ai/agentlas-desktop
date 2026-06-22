@@ -1,5 +1,6 @@
 // macOS Keychain (keytar) wrapper.
-// PRD 6.2 보안 모델 — 모든 비밀은 메인 프로세스만 접근, renderer는 has* boolean만 묻는다.
+// PRD 6.2 보안 모델 — 모든 비밀은 메인 프로세스만 접근, renderer는 has* boolean과
+// 메인에서 생성한 "마스킹 미리보기"(전체 값 아님)만 받는다. 전체 평문은 절대 renderer로 안 나간다.
 //
 // 두 종류의 비밀:
 //   1) BYOK LLM API 키       — account "byok:<backend>"  (Anthropic/OpenAI/Google)
@@ -69,6 +70,30 @@ export async function deleteEnvVar(key: string): Promise<void> {
 /** main 내부 — MCP 서버 spawn 시 envRequirements 매칭해 자식 env로 주입 (M1) */
 export async function readEnvVar(key: string): Promise<string | null> {
   return keytar.getPassword(SERVICE, envAccount(key));
+}
+
+/**
+ * 시크릿을 화면 표시용으로 마스킹한다. **메인 프로세스에서만** 호출하고,
+ * 전체 평문은 절대 반환하지 않는다 — 양끝 일부만 드러내고 가운데를 점으로 가린다.
+ * 짧은 값(≤6자)은 식별 위험이 커서 전부 가린다.
+ */
+export function maskSecret(value: string): string {
+  const v = value ?? "";
+  const len = v.length;
+  if (len === 0) return "";
+  if (len <= 6) return "•".repeat(len); // 너무 짧으면 끝자리도 드러내지 않는다
+  const reveal = Math.min(4, Math.floor(len / 4)); // 양끝 최대 4자만 노출
+  const head = v.slice(0, reveal);
+  const tail = v.slice(len - reveal);
+  const dots = Math.min(8, Math.max(3, len - reveal * 2)); // 가운데 점 (레이아웃 위해 최대 8)
+  return `${head}${"•".repeat(dots)}${tail}`;
+}
+
+/** renderer 노출용 — 저장된 값의 마스킹 미리보기. 미저장이면 null. 전체 값은 안 나간다. */
+export async function previewEnvVar(key: string): Promise<string | null> {
+  const v = await keytar.getPassword(SERVICE, envAccount(key));
+  if (typeof v !== "string" || v.length === 0) return null;
+  return maskSecret(v);
 }
 
 /** keychain에 저장된 env 키 전체 — keytar.findCredentials로 prefix filter */

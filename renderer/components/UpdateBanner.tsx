@@ -68,6 +68,9 @@ export function UpdateBanner() {
 
   return (
     <div
+      // titlebar-drag 헤더 위에 떠 있으므로 no-drag로 클릭 영역을 확보한다.
+      // (없으면 macOS가 이 영역을 창 드래그로 처리해 버튼 클릭이 먹히지 않는다.)
+      className="titlebar-nodrag"
       style={{
         position: "absolute",
         top: 12,

@@ -14,6 +14,9 @@ export interface AgentlasAppDefinition {
   vaultKeys: string[];
   artifacts: string[];
   slashCommands: string[];
+  /** 설정 시 — 타일 클릭이 in-app route 대신 이 명령을 새 채팅에서 실행한다
+   *  (예: Hephaestus Network로 GUI를 띄우는 "/hep-network startup"). */
+  launchCommand?: string;
 }
 
 export interface GeneratedDocument {
@@ -54,6 +57,23 @@ export const INSTALLED_APPS: AgentlasAppDefinition[] = [
     vaultKeys: [],
     artifacts: ["Source highlights", "Citation draft", "Editable document"],
     slashCommands: ["/document-studio", "/docstudio", "/문서스튜디오"],
+  },
+  {
+    id: "startup-founder-studio",
+    slug: "startup-founder-studio",
+    name: "스타트업 파운더 스튜디오",
+    nameEn: "Startup Founder Studio",
+    tagline: "창업 아이디어 → 아이디어·시장·사업설계·PRD·제품·웹·IR 단계로 이어지는 운영 보드. 각 단계는 Agentlas Hub의 전문 HQ를 호출합니다.",
+    taglineEn: "One founder idea → a staged operating board (idea, market, business, PRD, product, web, IR), each calling a specialist Agentlas Hub HQ.",
+    kind: "ai-native",
+    route: "/chat",
+    accent: "var(--accent)",
+    engines: ["Idea Foundry", "Market Intelligence", "Business Plan", "PRD Maker", "Product Dev", "Slide Studio", "Web Build"],
+    vaultKeys: [],
+    artifacts: ["Operating board", "PRD", "Pitch deck", "Web/app build"],
+    slashCommands: ["/hep-network startup", "/startup"],
+    // GUI는 Hephaestus Network로 이미 실행된다 — 타일 클릭이 그 명령을 새 채팅에서 실행.
+    launchCommand: "/hep-network startup",
   },
 ];
 

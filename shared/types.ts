@@ -116,6 +116,8 @@ export interface InstalledAgent {
 export interface EnvVarMeta {
   key: string;
   hasValue: boolean;
+  /** 저장된 값의 마스킹 미리보기 (메인에서 생성, 전체 평문 아님). 미저장이면 null. */
+  preview?: string | null;
   /** 이 env를 요구하는 설치된 에이전트들 (없으면 사용자가 직접 추가한 free-form) */
   requiredBy: Array<{
     agentId: string;
@@ -2189,6 +2191,8 @@ export interface AgentlasIpc {
     set: (key: string, value: string) => Promise<void>;
     /** 값 존재 여부만 — 실제 값은 renderer로 안 보냄 */
     has: (key: string) => Promise<boolean>;
+    /** 저장된 값의 마스킹 미리보기 (전체 평문 아님). 미저장이면 null. */
+    preview: (key: string) => Promise<string | null>;
     remove: (key: string) => Promise<void>;
   };
   /** 멀티모달 전역 fallback — 에이전트/프로젝트 env가 없을 때 이미지·영상·음성 provider를 고른다. */

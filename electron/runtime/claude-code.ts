@@ -229,6 +229,11 @@ export const runClaudeCode: Runner = async (
     let tokens: number | undefined;
     let stderr = "";
     let lastEmit = 0;
+    let accCapped = false;
+    // 런어웨이 출력(예: 장기 실행 GUI/서버 로그가 끝없이 스트리밍되는 명령)으로부터
+    // 메모리를 보호한다. acc를 무제한 누적 + 매 partial마다 전체를 렌더러로 보내면
+    // 메인 문자열과 렌더러 DOM이 동시에 폭주해 앱이 OOM된다(수십 GB). 2MB로 상한.
+    const MAX_ACC = 2 * 1024 * 1024;
 
     const toolNameById = new Map<string, string>();
 
@@ -277,11 +282,17 @@ export const runClaudeCode: Runner = async (
       if (ev.type === "assistant" && ev.message?.content) {
         for (const block of ev.message.content) {
           if (block.type === "text" && block.text) {
-            acc += (acc ? "\n" : "") + block.text;
-            const now = Date.now();
-            if (now - lastEmit > 60) {
-              events.onPartial(acc);
-              lastEmit = now;
+            if (!accCapped) {
+              acc += (acc ? "\n" : "") + block.text;
+              if (acc.length >= MAX_ACC) {
+                acc = acc.slice(0, MAX_ACC) + "\n\n[출력이 너무 길어 잘렸습니다 — 런어웨이 출력 메모리 보호]";
+                accCapped = true;
+              }
+              const now = Date.now();
+              if (now - lastEmit > 60) {
+                events.onPartial(acc);
+                lastEmit = now;
+              }
             }
           } else if (block.type === "tool_use" && block.name) {
             let argStr = "";

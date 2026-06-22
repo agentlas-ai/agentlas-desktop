@@ -65,6 +65,7 @@ const api: AgentlasIpc = {
     list: () => ipcRenderer.invoke("env:list"),
     set: (key: string, value: string) => ipcRenderer.invoke("env:set", key, value),
     has: (key: string) => ipcRenderer.invoke("env:has", key),
+    preview: (key: string) => ipcRenderer.invoke("env:preview", key),
     remove: (key: string) => ipcRenderer.invoke("env:remove", key),
   },
   multimodal: {

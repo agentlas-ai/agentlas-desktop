@@ -489,6 +489,27 @@ function EnvRow({
           </button>
         )}
       </div>
+      {v.hasValue && v.preview && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--muted-deep)" }}>
+          <span style={{ flexShrink: 0 }}>{t("env.preview_label")}</span>
+          <code
+            title={t("env.preview_label")}
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 11.5,
+              color: "var(--ink-soft)",
+              background: "var(--paper)",
+              border: "1px solid var(--paper-edge)",
+              borderRadius: 6,
+              padding: "1px 7px",
+              letterSpacing: 0.5,
+              wordBreak: "break-all",
+            }}
+          >
+            {v.preview}
+          </code>
+        </div>
+      )}
       {hint && <div style={{ fontSize: 11, color: "var(--muted-deep)" }}>{hint}</div>}
       {editing && (
         <InlineSet

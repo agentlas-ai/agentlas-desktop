@@ -35,6 +35,7 @@ import {
   hasApiKey,
   hasEnvVar,
   listEnvKeys,
+  previewEnvVar,
   saveApiKey,
   setEnvVar,
 } from "./secrets/vault";
@@ -232,6 +233,9 @@ interface RunRecord {
 const activeRuns = new Map<string, RunRecord>();
 // tool 폭주하는 긴 실행/대형 firm 실행의 버퍼 무한증가 방지 상한 (재접속 리플레이는 최근 위주).
 const MAX_BUFFERED_EVENTS = 4000;
+// 단일 partial 텍스트 상한 — 런어웨이 출력(끝없이 스트리밍되는 GUI/서버 로그 등)이
+// 매 60ms 누적 전체를 렌더러로 보내 렌더러를 OOM(수십 GB)시키는 걸 모든 런타임 공통으로 막는다.
+const MAX_PARTIAL_CHARS = 2 * 1024 * 1024;
 
 /** 현재 실행 중인 chatId 목록(중복 제거). */
 function activeChatIds(): string[] {
@@ -476,17 +480,22 @@ export function registerIpcHandlers(): void {
     for (const k of stored) {
       if (!map.has(k)) map.set(k, { hasValue: true, requiredBy: [] });
     }
-    // hasValue를 한 번에 체크 (병렬)
+    // hasValue + 마스킹 미리보기를 한 번에 체크 (병렬). 미리보기는 메인에서 생성 — 전체 값 X.
     const keys = [...map.keys()];
     const values = await Promise.all(keys.map((k) => hasEnvVar(k)));
+    const previews = await Promise.all(
+      keys.map((k, i) => (values[i] ? previewEnvVar(k) : Promise.resolve(null))),
+    );
     return keys.map((key, i) => ({
       key,
       hasValue: values[i],
+      preview: previews[i] ?? null,
       requiredBy: map.get(key)!.requiredBy,
     }));
   });
   ipcMain.handle("env:set", (_e, key: string, value: string) => setEnvVar(key, value));
   ipcMain.handle("env:has", (_e, key: string) => hasEnvVar(key));
+  ipcMain.handle("env:preview", (_e, key: string) => previewEnvVar(key));
   ipcMain.handle("env:remove", (_e, key: string) => deleteEnvVar(key));
 
   // ── multimodal global fallback ─────────────────────────
@@ -1044,7 +1053,13 @@ export function registerIpcHandlers(): void {
 
     void runMcpInvocation(
       req,
-      (ev) => {
+      (rawEv) => {
+        // 런어웨이 출력 보호 — partial 텍스트가 과도하면 잘라 렌더러/버퍼 메모리를 바운드한다
+        // (모든 런타임 공통). 정상 응답엔 영향 없고 2MB 초과분만 절단.
+        const ev: McpInvocationEvent =
+          rawEv.kind === "partial" && typeof rawEv.text === "string" && rawEv.text.length > MAX_PARTIAL_CHARS
+            ? { ...rawEv, text: rawEv.text.slice(0, MAX_PARTIAL_CHARS) + "\n\n[출력이 너무 길어 잘렸습니다 — 런어웨이 출력 메모리 보호]" }
+            : rawEv;
         // 재접속용 버퍼링 — partial은 매번 누적 전체 텍스트라, 직전이 partial이면 교체해
         // 메모리를 바운드한다(tool/thinking/agentId 이벤트는 누적 단계라 보존하되 상한 적용).
         const last = record.events[record.events.length - 1];
