@@ -373,9 +373,13 @@ function buildVeoPrompt(request: OberonRenderRequest, shot: OberonRenderShotInpu
   const parts = [
     shot.prompt,
     `Create one self-contained cinematic clip for production "${request.title}".`,
-    `Target duration: ${durationSeconds} seconds. Preserve continuity with the shot description.`,
-    shot.firstFrame ? "Use the provided first-frame image as the opening composition." : "",
-    "No subtitles, no visible watermarks, no UI overlays, no distorted text.",
+    `Target duration: ${durationSeconds} seconds. Camera moves and subject action must resolve to a clean, stable final frame for the editorial cut.`,
+    "Preserve continuity with the shot description: same characters, wardrobe, lighting and screen direction.",
+    shot.firstFrame ? "Use the provided first-frame image as the exact opening composition, then animate from it." : "",
+    // Veo 3.1은 네이티브 동기 오디오를 생성한다 — 위에 기술된 대사/앰비언스/SFX를 정확히 동기화.
+    "Generate synchronized native audio (dialogue, ambience, SFX) exactly as described above; keep any dialogue precisely lip-synced.",
+    // 글자는 후반 번인 — 프레임 안에 텍스트를 그리지 않는다.
+    "No on-screen subtitles, titles, captions, watermarks, UI overlays, or distorted text in the frame.",
   ].filter(Boolean);
   return parts.join("\n").slice(0, 3900);
 }

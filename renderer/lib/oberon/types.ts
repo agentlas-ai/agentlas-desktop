@@ -12,6 +12,10 @@
 // 모든 타입은 직렬화 가능(JSON)해야 한다 — 로컬 저장 / 내보내기 / IPC 전송 대상.
 
 import type { OberonKeyframeAsset, OberonPlanResult, OberonRenderFile } from "@shared/types";
+// 타입 전용 import — 런타임 순환 없음(에러즈드). 풍부한 정의는 각 모듈에 있고
+// 여기서는 Production에 저장되는 형태만 참조한다.
+import type { TypographyKit } from "./typography";
+import type { SubtitleCue } from "./audio-dialogue";
 
 // ── 포맷 / 장르 ───────────────────────────────────────────
 
@@ -155,6 +159,35 @@ export interface CameraSpec {
   lens: Lens;
 }
 
+// ── 샷 부가 레이어 (연출·대사·오디오·연속성) ───────────────
+// directing/audio-dialogue/continuity-chain 모듈이 채우는 데이터의 저장 형태.
+// 구조적 타입이라 모듈을 import하지 않아도 호환된다(순환 방지).
+
+/** 초 단위 모션 비트 (directing.MotionBeat 호환). */
+export interface ShotMotionBeat {
+  fromSec: number;
+  toSec: number;
+  note: string;
+}
+
+/** 구조화된 대사 라인 (audio-dialogue.DialogueLine 호환). */
+export interface ShotDialogueLine {
+  speaker: string;
+  text: string;
+  language: "ko" | "en";
+  emotion: string;
+  /** neutral/whisper/intense/... */
+  delivery: string;
+  voiceover: boolean;
+}
+
+/** 오디오 베드 (audio-dialogue.AudioBed 호환). */
+export interface ShotAudioBed {
+  ambience: string;
+  sfx: string[];
+  musicCue?: string;
+}
+
 /** 샷별 프로바이더 생성 contract (research §10 ShotSpec). */
 export interface ShotSpec {
   shotId: string;
@@ -185,6 +218,28 @@ export interface ShotSpec {
   providerId: string;
   providerMode: ProviderMode;
   estCostUsd: number;
+
+  // ── 부가 연출 레이어 (업그레이드: 카메라/대사/오디오/연속성) ──
+  /** 초 단위 카메라·액션 안무 (directing). */
+  motionBeats?: ShotMotionBeat[];
+  /** 프롬프트용 모션 안무 한 줄. */
+  motionPhrase?: string;
+  /** 속도 연출. */
+  speed?: "real" | "slow_mo" | "ramp" | "time_lapse";
+  /** 구조화된 대사 라인 (audio-dialogue). */
+  dialogueLine?: ShotDialogueLine;
+  /** 오디오 베드 (앰비언스·SFX·음악). */
+  audioBed?: ShotAudioBed;
+  /** Veo 네이티브 오디오 디렉션 구문. */
+  audioDirection?: string;
+  /** 직전 샷에서 물려받은 연속성 구문 (continuity-chain). */
+  continuityNote?: string;
+  /** 적용된 연속성 규칙 (180도/아이라인/매치 등). */
+  appliedContinuityRules?: string[];
+  /** 정밀 연결: first frame을 이 샷의 last frame에서 잇는다. */
+  chainFromShotId?: string;
+  /** 씬의 첫 샷인가 (메모리 리셋 지점). */
+  isSceneOpening?: boolean;
 }
 
 // ── 계층 ─────────────────────────────────────────────────
@@ -436,6 +491,10 @@ export interface FilmProduction {
   createdAtMs: number;
   /** 통계 (UI 헤더용). */
   stats: ProductionStats;
+  /** 작품 타이포그래피 키트 (타이틀·자막·로어서드 폰트). */
+  typography?: TypographyKit;
+  /** 후반 번인용 자막 큐 (SRT/VTT). */
+  subtitleCues?: SubtitleCue[];
 }
 
 export interface ProductionStats {

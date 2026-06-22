@@ -9,10 +9,12 @@ import {
   TRANSITIONS,
   VIDEO_PROVIDERS,
   providerById,
+  summarizeContinuity,
+  threadContinuity,
   type FilmProduction,
   type ShotSpec,
 } from "@/lib/oberon";
-import { IconChevronDown, IconChevronRight, IconLayers, IconRefresh, IconTrash } from "@/components/Icon";
+import { IconChevronDown, IconChevronRight, IconLayers, IconRoute, IconRefresh, IconTrash } from "@/components/Icon";
 import { CHARCOAL, Card, Chip, PanelHead, Tag, aspectCss, formatCost } from "./ui";
 
 export function ShotBoard({
@@ -32,6 +34,18 @@ export function ShotBoard({
     () => (sceneFilter === "all" ? production.shots : production.shots.filter((s) => s.sceneId === sceneFilter)),
     [production.shots, sceneFilter],
   );
+
+  // 연속성 메모리 스레드 — 씬별로 메모리가 이어지는지 한눈에. (목표 4)
+  const continuitySpans = useMemo(() => {
+    const chain = threadContinuity({
+      shots: production.shots,
+      scenes: production.scenes,
+      beats: production.beats,
+      bible: production.bible,
+      brief: production.brief,
+    });
+    return summarizeContinuity(production.shots, production.scenes, chain);
+  }, [production.shots, production.scenes, production.beats, production.bible, production.brief]);
 
   function swapProvider(shotId: string) {
     onUpdateShots?.((all) => {
@@ -57,6 +71,9 @@ export function ShotBoard({
         subtitle={`한 장면을 여러 각도의 컷 ${production.stats.shotCount}개로 나눴습니다. 각 컷의 카메라·엔진·비용을 확인하세요.${editable ? " 엔진을 바꾸거나 필요 없는 컷을 지울 수 있어요." : ""}`}
         icon={<IconLayers size={18} />}
       />
+
+      {/* 연속성 메모리 스레드 (목표 4) */}
+      <ContinuityThread spans={continuitySpans} />
 
       {/* 씬 필터 */}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 18 }}>
@@ -135,6 +152,14 @@ function ShotCard({
           {!shot.firstFrameAssetId && shot.requiresKeyframe && (
             <span title="첫 프레임 생성 필요" style={{ fontSize: 8.5, fontFamily: "var(--font-mono)", color: "rgba(255,255,255,0.5)" }}>KF?</span>
           )}
+          {shot.speed && shot.speed !== "real" && (
+            <span title="속도 연출" style={{ fontSize: 8, fontFamily: "var(--font-mono)", fontWeight: 700, color: "#FFD27A", letterSpacing: 0.4 }}>{speedLabel(shot.speed)}</span>
+          )}
+          {shot.chainFromShotId && (
+            <span title={`연속성 체인 — ${shot.chainFromShotId}의 마지막 프레임에서 이어짐`} style={{ display: "inline-flex", color: "rgba(120,200,255,0.95)" }}>
+              <IconRoute size={9} />
+            </span>
+          )}
         </div>
         <div style={{ position: "absolute", top: 7, right: 8, fontSize: 10, fontFamily: "var(--font-mono)", color: "rgba(255,255,255,0.7)", fontVariantNumeric: "tabular-nums" }}>
           {shot.durationSec}s
@@ -157,8 +182,14 @@ function ShotCard({
         <div style={{ fontSize: 13, color: "var(--ob-ink)", lineHeight: 1.5 }}>{shot.action}</div>
 
         {shot.dialogue && (
-          <div style={{ fontSize: 13, color: "var(--ob-ink-soft)", fontStyle: "italic", paddingLeft: 10, borderLeft: "2px solid var(--ob-edge-strong)" }}>
-            “{shot.dialogue}”
+          <div style={{ display: "flex", flexDirection: "column", gap: 3, paddingLeft: 10, borderLeft: "2px solid var(--ob-edge-strong)" }}>
+            <div style={{ fontSize: 13, color: "var(--ob-ink-soft)", fontStyle: "italic" }}>“{shot.dialogue}”</div>
+            {shot.dialogueLine && (
+              <div style={{ fontSize: 10.5, color: "var(--ob-muted)" }}>
+                {shot.dialogueLine.speaker} · {deliveryKo(shot.dialogueLine.delivery)}
+                {shot.dialogueLine.voiceover ? " · V.O." : ""}
+              </div>
+            )}
           </div>
         )}
 
@@ -167,6 +198,24 @@ function ShotCard({
           <Tag>{MOVEMENTS[shot.camera.movement].ko}</Tag>
           <Tag>{LENSES[shot.camera.lens].ko}</Tag>
         </div>
+
+        {/* 연속성 — 씬 시작 / 적용 규칙 (목표 4) */}
+        {(shot.isSceneOpening || (shot.appliedContinuityRules?.length ?? 0) > 0) && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "var(--ob-muted)" }}>
+            {shot.isSceneOpening ? (
+              <span style={{ fontWeight: 700, color: "var(--ob-accent-text)" }}>● 씬 시작</span>
+            ) : (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                <IconRoute size={10} /> 이어받음
+              </span>
+            )}
+            {(shot.appliedContinuityRules?.length ?? 0) > 0 && (
+              <span title={shot.appliedContinuityRules!.join("\n")} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                · {shot.appliedContinuityRules!.length}개 연속성 규칙
+              </span>
+            )}
+          </div>
+        )}
 
         <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11.5, color: "var(--ob-muted)" }}>
           <span title="전환">{TRANSITIONS[shot.transitionIn].ko} → {TRANSITIONS[shot.transitionOut].ko}</span>
@@ -205,7 +254,10 @@ function ShotCard({
 
         {expanded && (
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {shot.continuityNote && <PromptBlock label="CONTINUITY" text={shot.continuityNote} muted />}
             <PromptBlock label="PROMPT" text={shot.generationPrompt} />
+            {shot.motionPhrase && <PromptBlock label="MOTION · 초단위 안무" text={shot.motionPhrase} />}
+            {shot.audioDirection && <PromptBlock label="AUDIO · 동기 오디오" text={shot.audioDirection} />}
             <PromptBlock label="NEGATIVE" text={shot.negativePrompt} muted />
             {shot.continuityRefs.length > 0 && (
               <div style={{ fontSize: 10, color: "var(--muted-deep)" }}>
@@ -272,4 +324,76 @@ function modeLabel(mode: string): string {
       image: "Image",
     } as Record<string, string>
   )[mode] ?? mode;
+}
+
+function speedLabel(speed: string): string {
+  return ({ slow_mo: "SLO", ramp: "RAMP", time_lapse: "TL" } as Record<string, string>)[speed] ?? "";
+}
+
+function deliveryKo(delivery: string): string {
+  return (
+    {
+      neutral: "담담하게",
+      whisper: "속삭임",
+      intense: "긴장된 저음",
+      warm: "따뜻하게",
+      cold: "차갑게",
+      urgent: "다급하게",
+      playful: "경쾌하게",
+      broken: "울먹이며",
+    } as Record<string, string>
+  )[delivery] ?? delivery;
+}
+
+// ── 연속성 메모리 스레드 (목표 4) ─────────────────────────
+// 씬별로 "메모리가 이어지는지"를 가로 스트립으로 보여준다. 체이닝된 샷 수와
+// 감정 흐름(arc)을 함께 표시해 전체 영상의 연속성을 한눈에 검수.
+
+function ContinuityThread({ spans }: { spans: ReturnType<typeof summarizeContinuity> }) {
+  if (!spans.length) return null;
+  const totalChained = spans.reduce((a, s) => a + s.chainedShots, 0);
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 8 }}>
+        <IconRoute size={13} />
+        <span style={{ fontSize: 12, fontWeight: 700, color: "var(--ob-ink-soft)" }}>연속성 메모리 스레드</span>
+        <span style={{ fontSize: 11, color: "var(--ob-muted)" }}>
+          이전 샷 → 현재 샷으로 상태가 이어집니다 · 정밀 연결 {totalChained}샷
+        </span>
+      </div>
+      <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 4 }}>
+        {spans.map((span, i) => (
+          <div key={span.sceneId} style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+            <div
+              style={{
+                minWidth: 132,
+                padding: "9px 11px",
+                borderRadius: 10,
+                border: "1px solid var(--ob-edge)",
+                background: "var(--ob-surface)",
+              }}
+            >
+              <div style={{ fontSize: 10.5, fontFamily: "var(--font-mono)", color: "var(--ob-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {span.heading}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--ob-ink)" }}>{span.shotCount}샷</span>
+                {span.chainedShots > 0 && (
+                  <span title="키프레임 정밀 연결" style={{ display: "inline-flex", alignItems: "center", gap: 2, fontSize: 10, color: "var(--ob-accent-text)" }}>
+                    <IconRoute size={9} /> {span.chainedShots}
+                  </span>
+                )}
+              </div>
+              {span.emotionalArc.length > 0 && (
+                <div style={{ fontSize: 10, color: "var(--ob-muted)", marginTop: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {span.emotionalArc.slice(0, 3).join(" → ")}
+                </div>
+              )}
+            </div>
+            {i < spans.length - 1 && <span style={{ color: "var(--ob-muted)", fontSize: 12 }}>→</span>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }

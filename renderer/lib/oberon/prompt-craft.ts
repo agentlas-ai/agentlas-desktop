@@ -7,6 +7,7 @@
 //                [lighting] · [palette/film stock] · [mood] · [DNA] · [aspect]
 
 import { ANGLES, LENSES, MOVEMENTS, SHOT_SIZES } from "./taxonomy";
+import { TEXT_RENDER_POLICY } from "./typography";
 import type {
   AspectRatio,
   CameraSpec,
@@ -142,6 +143,17 @@ export interface ComposeShotInput {
   tone: string[];
   refs: ReferenceEntry[]; // 이 샷이 참조하는 자산
   aspect: AspectRatio;
+  // ── 업그레이드: 부가 연출 레이어 (모두 선택) ──
+  /** 직전 샷에서 물려받은 연속성 구문 (continuity-chain). */
+  continuityNote?: string;
+  /** 초 단위 카메라·액션 안무 (directing). */
+  motionPhrase?: string;
+  /** Veo 네이티브 동기 오디오 디렉션 (audio-dialogue). */
+  audioDirection?: string;
+  /** 컷 아웃 전환 지시 (directing.transitionDirective). */
+  transitionDirective?: string;
+  /** true면 프레임 안에 글자를 그리지 말라고 지시(자막은 후반 번인). */
+  suppressOnScreenText?: boolean;
 }
 
 export function composeShotPrompt(input: ComposeShotInput): string {
@@ -157,6 +169,8 @@ export function composeShotPrompt(input: ComposeShotInput): string {
   const locationRef = refs.find((r) => r.kind === "location");
 
   const parts: string[] = [];
+  // 0) 연속성 — 직전 샷에서 이어받는 상태를 맨 앞에 둔다 (메모리 체인).
+  if (input.continuityNote) parts.push(input.continuityNote);
   // 1) 액션 + 인물 (정체성 고정)
   parts.push(subjects ? `${action}. Featuring ${subjects}` : action);
   // 2) 장소
@@ -164,6 +178,8 @@ export function composeShotPrompt(input: ComposeShotInput): string {
   else parts.push(`location: ${scene.location}`);
   // 3) 카메라
   parts.push(cameraPhrase(camera));
+  // 3b) 초 단위 모션 안무 — "시간 위에서 어떻게 움직이는가".
+  if (input.motionPhrase) parts.push(input.motionPhrase);
   // 4) 라이팅
   parts.push(lighting);
   // 5) 팔레트 + 필름 스톡
@@ -172,9 +188,14 @@ export function composeShotPrompt(input: ComposeShotInput): string {
   // 6) 무드 + DNA
   parts.push(mood);
   if (bible.visualDirection) parts.push(bible.visualDirection);
-  // 7) 대사 (있으면 립싱크 지시)
-  if (dialogue) parts.push(`character speaking in sync: "${dialogue}"`);
-  // 8) 비율
+  // 7) 대사·오디오 — 구조화된 오디오 디렉션이 있으면 우선, 없으면 단순 립싱크.
+  if (input.audioDirection) parts.push(input.audioDirection);
+  else if (dialogue) parts.push(`character speaking in sync, mouth precisely lip-synced: "${dialogue}"`);
+  // 7b) 전환 지시 (컷 아웃 핸들).
+  if (input.transitionDirective) parts.push(input.transitionDirective);
+  // 8) 글자 금지 — 자막/타이틀은 후반 합성 (깨진 텍스트 방지).
+  if (input.suppressOnScreenText) parts.push(TEXT_RENDER_POLICY);
+  // 9) 비율
   parts.push(`${aspect} aspect ratio, high detail, sharp focus`);
 
   return parts.join(". ").replace(/\.\./g, ".");

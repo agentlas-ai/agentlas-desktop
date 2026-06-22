@@ -11,6 +11,16 @@
 
 import { INITIAL_STAGE_STATUS } from "./agents";
 import {
+  buildSubtitleCues,
+  composeAudioDirection,
+  defaultAudioBed,
+  deriveDelivery,
+  type DialogueLine,
+} from "./audio-dialogue";
+import { composeChoreography, transitionDirective } from "./directing";
+import { threadContinuity } from "./continuity-chain";
+import { pickTypography } from "./typography";
+import {
   composeKeyframePrompt,
   composeNegativePrompt,
   composeReferencePrompt,
@@ -426,6 +436,15 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
     });
   }
 
+  // 4b) 부가 연출 레이어 (업그레이드) — 연속성 체인 + 초단위 안무 + 대사/오디오 + 타이포.
+  const { typography, subtitleCues } = enrichShots({
+    shots: shotsArr,
+    scenes: scenesArr,
+    beats: beatsArr,
+    bible,
+    brief,
+  });
+
   // 5) 비용 레저
   const cost = buildCostLedger(shotsArr, bible, opts.budgetUsd);
 
@@ -456,7 +475,130 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
     stageStatus: { ...INITIAL_STAGE_STATUS, brief: "done", script: "ready" },
     createdAtMs: Date.now(),
     stats,
+    typography,
+    subtitleCues,
   };
+}
+
+// ── 부가 연출 레이어 통합 ────────────────────────────────
+// 샷 전체를 한 번 더 훑어 (1) 연속성 체인을 잇고 (2) 초단위 안무 + 대사·오디오를
+// 붙여 generationPrompt를 영화적으로 다시 합성한다. 글자는 후반 번인을 전제로
+// 프레임 안에 그리지 않도록 지시한다.
+
+function enrichShots(args: {
+  shots: ShotSpec[];
+  scenes: Scene[];
+  beats: Beat[];
+  bible: ContinuityBible;
+  brief: FilmBrief;
+}): { typography: FilmProduction["typography"]; subtitleCues: FilmProduction["subtitleCues"] } {
+  const { shots, scenes, beats, bible, brief } = args;
+  const refsById = new Map(bible.references.map((r) => [r.id, r]));
+  const sceneById = new Map(scenes.map((s) => [s.id, s]));
+  const beatById = new Map(beats.map((b) => [b.id, b]));
+  const chain = threadContinuity({ shots, scenes, beats, bible, brief });
+
+  // 속도 연출을 환영하는 포맷/장르인가 (슬로모·속도 램프).
+  const allowSpeedFx =
+    brief.format === "trailer" ||
+    brief.format === "music_video" ||
+    brief.format === "social_short" ||
+    brief.genre === "action" ||
+    brief.genre === "thriller";
+
+  const dialogueByShot = new Map<string, DialogueLine>();
+
+  for (const shot of shots) {
+    const scene = sceneById.get(shot.sceneId);
+    const beat = beatById.get(shot.beatId);
+    const cont = chain.get(shot.shotId);
+    const refsForShot = shot.continuityRefs
+      .map((id) => refsById.get(id))
+      .filter((r): r is ReferenceEntry => Boolean(r));
+    const energy = MOVEMENTS[shot.camera.movement].energy;
+
+    // 1) 초 단위 안무.
+    const chor = composeChoreography({
+      durationSec: shot.durationSec,
+      camera: shot.camera,
+      action: shot.action,
+      energy,
+      hasDialogue: Boolean(shot.dialogue),
+      allowSpeedFx,
+    });
+
+    // 2) 구조화된 대사 라인.
+    let dialogueLine: DialogueLine | undefined;
+    if (shot.dialogue) {
+      const speaker = refsForShot.find((r) => r.kind === "character")?.name || brief.characters[0]?.name || "speaker";
+      dialogueLine = {
+        speaker,
+        text: shot.dialogue,
+        language: brief.language,
+        emotion: beat?.emotion ?? "",
+        delivery: deriveDelivery(beat?.emotion ?? "", brief.tone),
+        voiceover: false,
+      };
+      dialogueByShot.set(shot.shotId, dialogueLine);
+    }
+
+    // 3) 오디오 베드 + 네이티브 오디오 디렉션.
+    const provider = providerById(shot.providerId);
+    const nativeAudio = provider?.nativeAudio ?? false;
+    const bed = defaultAudioBed(shot.shotType, brief.setting, brief.tone);
+    const audioDirection = composeAudioDirection({ dialogue: dialogueLine, bed, nativeAudio });
+    const transDirective = transitionDirective(shot.transitionOut);
+
+    // 4) 영화적 프롬프트 재합성 (연속성 + 안무 + 오디오 + 텍스트 금지).
+    shot.generationPrompt = composeShotPrompt({
+      action: shot.action,
+      dialogue: shot.dialogue,
+      camera: shot.camera,
+      scene: scene ?? {
+        id: shot.sceneId,
+        index: 0,
+        heading: "SCENE",
+        type: shot.shotType,
+        location: brief.setting,
+        timeOfDay: "낮",
+        summary: "",
+        characterRefs: [],
+        beatIds: [],
+        locked: false,
+      },
+      bible,
+      tone: brief.tone,
+      refs: refsForShot,
+      aspect: brief.aspect,
+      continuityNote: cont?.continuityPhrase,
+      motionPhrase: chor.motionPhrase,
+      audioDirection,
+      transitionDirective: transDirective,
+      suppressOnScreenText: true,
+    });
+
+    // 5) 샷에 저장 (UI·내보내기·렌더 어댑터가 읽음).
+    shot.motionBeats = chor.beats;
+    shot.motionPhrase = chor.motionPhrase;
+    shot.speed = chor.speed;
+    shot.dialogueLine = dialogueLine;
+    shot.audioBed = bed;
+    shot.audioDirection = audioDirection;
+    shot.continuityNote = cont?.continuityPhrase;
+    shot.appliedContinuityRules = cont?.appliedRules;
+    shot.chainFromShotId = cont?.chainFromShotId;
+    shot.isSceneOpening = cont?.isSceneOpening;
+  }
+
+  const typography = pickTypography({
+    genre: brief.genre,
+    format: brief.format,
+    language: brief.language,
+    tone: brief.tone,
+  });
+  const subtitleCues = buildSubtitleCues({ shots, dialogueByShot });
+
+  return { typography, subtitleCues };
 }
 
 // ── 비용 ─────────────────────────────────────────────────

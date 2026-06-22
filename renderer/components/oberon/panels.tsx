@@ -1,17 +1,20 @@
 // Oberon — 보조 스튜디오 패널들: Script / Keyframe / Approval / QA / Timeline / Delivery.
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
+  FONT_LIBRARY,
   QUALITY_GATES,
   SHOT_SIZES,
   TRANSITIONS,
   buildAllExports,
   composeKeyframePrompt,
   downloadText,
+  googleFontsHref,
   providerById,
   type EditDecision,
   type FilmProduction,
   type Take,
+  type TextRole,
 } from "@/lib/oberon";
 import {
   IconCheck,
@@ -455,6 +458,9 @@ export function DeliveryPanel({ production }: { production: FilmProduction }) {
         </>
       )}
 
+      {/* 타이포그래피 키트 (목표 5) */}
+      <TypographyShowcase production={production} />
+
       {/* 비율 출력 */}
       <div style={{ ...sectionLabel, marginBottom: 12 }}>멀티 비율 마스터</div>
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 32 }}>
@@ -494,6 +500,102 @@ export function DeliveryPanel({ production }: { production: FilmProduction }) {
       </PrimaryButton>
     </div>
   );
+}
+
+// ── 타이포그래피 쇼케이스 (목표 5: 폰트 다양화) ───────────
+// 작품에 자동 선택된 폰트 페어링을 라이브 미리보기로 보여준다. 실제 웹폰트를
+// 로드해 타이틀/자막/로어서드가 어떻게 보일지 확인할 수 있다.
+
+const TYPO_PREVIEW: { role: TextRole; label: string; sample: (title: string) => string }[] = [
+  { role: "title", label: "타이틀 카드", sample: (t) => t || "Untitled" },
+  { role: "subtitle_caption", label: "대사 자막", sample: () => "여기에 대사 자막이 들어갑니다." },
+  { role: "lower_third", label: "로어서드", sample: () => "이름 · 직함" },
+  { role: "kicker", label: "키커 라벨", sample: () => "EP.01 · SEOUL" },
+  { role: "cta", label: "CTA", sample: () => "지금 만나보세요" },
+];
+
+function TypographyShowcase({ production }: { production: FilmProduction }) {
+  const kit = production.typography;
+
+  // 실제 Google Fonts 로드 — 미리보기를 진짜 폰트로 렌더.
+  useEffect(() => {
+    if (!kit) return;
+    const href = googleFontsHref(kit);
+    if (!href) return;
+    const id = "oberon-typo-fonts";
+    let link = document.getElementById(id) as HTMLLinkElement | null;
+    if (!link) {
+      link = document.createElement("link");
+      link.id = id;
+      link.rel = "stylesheet";
+      document.head.appendChild(link);
+    }
+    link.href = href;
+  }, [kit]);
+
+  if (!kit) return null;
+
+  const subtitleCount = production.subtitleCues?.length ?? 0;
+
+  return (
+    <div style={{ marginBottom: 32 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+        <div style={sectionLabel}>타이포그래피 키트</div>
+        {subtitleCount > 0 && (
+          <span style={{ fontSize: 11, color: "var(--ob-muted)" }}>· 자막 {subtitleCount}줄 (SRT/VTT 포함)</span>
+        )}
+      </div>
+      <div style={{ fontSize: 12.5, color: "var(--ob-muted)", marginBottom: 12, maxWidth: 720, lineHeight: 1.5 }}>{kit.rationale}</div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12 }}>
+        {TYPO_PREVIEW.map(({ role, label, sample }) => {
+          const s = kit.styles[role];
+          const font = FONT_LIBRARY[s.fontId];
+          return (
+            <Card key={role} style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10, minHeight: 116 }}>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+                <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--ob-accent-text)" }}>{label}</span>
+                <span style={{ fontSize: 10, color: "var(--ob-muted)", fontFamily: "var(--font-mono)" }}>{font.name}</span>
+              </div>
+              <div
+                style={{
+                  flex: 1,
+                  display: "flex",
+                  alignItems: "center",
+                  borderRadius: 8,
+                  padding: "12px 14px",
+                  background: "linear-gradient(155deg,#2B2A33,#3B3A47)",
+                  color: s.fill,
+                  fontFamily: font.stack,
+                  fontWeight: s.weight,
+                  letterSpacing: `${s.tracking}em`,
+                  textTransform: s.case === "upper" ? "uppercase" : "none",
+                  fontSize: previewPx(role),
+                  lineHeight: 1.2,
+                  textShadow: s.outline ? `0 1px 3px ${s.outline.color}` : "none",
+                }}
+              >
+                {sample(production.brief.title)}
+              </div>
+              <div style={{ fontSize: 10.5, color: "var(--ob-muted)", fontVariantNumeric: "tabular-nums" }}>
+                {s.weight} · {s.sizePct}% · {s.position.replace(/_/g, " ")} · {s.motion}
+              </div>
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function previewPx(role: TextRole): number {
+  switch (role) {
+    case "title": return 26;
+    case "cta": return 22;
+    case "lower_third": return 18;
+    case "subtitle_caption": return 16;
+    default: return 13;
+  }
 }
 
 function fileExt(name: string): string {

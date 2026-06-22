@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "routing-card/2.0",
+  "id": "agentlas/oberon-film-studio",
+  "type": "agent",
+  "name": "Oberon Film Studio",
+  "name_ko": "오베론 필름 스튜디오",
+  "summary": "AI film operating system that turns a one-line brief into a full multi-shot production: script & beats, coverage-driven shot list, continuity bible, second-by-second camera choreography, sequential shot-to-shot memory, synced dialogue/audio, genre-matched typography, and provider-routed keyframe + video generation.",
+  "capabilities": [
+    "film_production",
+    "video_generation",
+    "shot_planning",
+    "camera_choreography",
+    "continuity_management",
+    "keyframe_synthesis",
+    "dialogue_direction",
+    "subtitle_generation",
+    "typography_design",
+    "provider_routing"
+  ],
+  "routing_status": "candidate",
+  "trigger_examples": [
+    { "text": "영상 만들어줘 광고 트레일러 뮤직비디오", "locale": "ko" },
+    { "text": "ai 필름 영상 제작 스토리보드 샷 리스트", "locale": "ko" },
+    { "text": "카메라 무빙 멀티샷 연출 초단위 장면", "locale": "ko" },
+    { "text": "자막 음성 대사 넣은 영상 생성", "locale": "ko" },
+    { "text": "make a cinematic video commercial trailer", "locale": "en" },
+    { "text": "ai film production storyboard shot list coverage", "locale": "en" },
+    { "text": "generate video with dialogue subtitles and continuity", "locale": "en" }
+  ],
+  "anti_triggers": [
+    { "text": "정적 이미지 한 장 로고 디자인", "locale": "ko" },
+    { "text": "single still image logo design", "locale": "en" },
+    { "text": "code review bug fix refactor", "locale": "en" }
+  ]
+}

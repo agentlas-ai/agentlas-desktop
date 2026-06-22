@@ -3,8 +3,10 @@
 // 계획 단계만으로도 즉시 쓸 수 있는 산출물을 만든다. 수백~수천 샷 프롬프트는
 // 어떤 영상툴(Veo/Runway/Luma/Pika 등)에든 붙여 바로 생성할 수 있다.
 
+import { toSrt, toVtt } from "./audio-dialogue";
 import { providerById } from "./providers";
 import { SHOT_SIZES } from "./taxonomy";
+import { FONT_LIBRARY, captionStyleHint, googleFontsHref } from "./typography";
 import type { FilmProduction, ShotSpec } from "./types";
 
 function csvCell(v: string | number): string {
@@ -40,8 +42,14 @@ export function exportPromptPack(prod: FilmProduction): string {
     for (const s of shots) {
       const sz = SHOT_SIZES[s.camera.size].label;
       lines.push(`\n### ${s.shotId} · ${sz} · ${s.durationSec}s · → ${providerById(s.providerId)?.name ?? s.providerId} (${s.providerMode})`);
+      if (s.continuityNote) lines.push(`CONTINUITY: ${s.continuityNote}`);
       lines.push(`PROMPT: ${s.generationPrompt}`);
       lines.push(`NEGATIVE: ${s.negativePrompt}`);
+      if (s.motionPhrase) lines.push(`MOTION: ${s.motionPhrase}${s.speed && s.speed !== "real" ? ` (${s.speed})` : ""}`);
+      if (s.audioDirection) lines.push(`AUDIO: ${s.audioDirection}`);
+      if (s.dialogueLine) lines.push(`DIALOGUE [${s.dialogueLine.speaker} · ${s.dialogueLine.delivery}]: "${s.dialogueLine.text}"`);
+      if (s.appliedContinuityRules?.length) lines.push(`RULES: ${s.appliedContinuityRules.join("; ")}`);
+      if (s.chainFromShotId) lines.push(`CHAIN: first frame continues from ${s.chainFromShotId}'s last frame`);
       if (s.requiresKeyframe) {
         lines.push(`KEYFRAME REQUIRED: generate and approve a first-frame image before video render`);
       }
@@ -107,6 +115,42 @@ export function exportRoutingMatrix(prod: FilmProduction): string {
   return lines.join("\n");
 }
 
+/** 자막 SRT — 후반 번인/플랫폼 업로드용. */
+export function exportSubtitlesSrt(prod: FilmProduction): string {
+  return toSrt(prod.subtitleCues ?? []);
+}
+
+/** 자막 VTT — 웹 플레이어용 (타이포 키트 스타일 포함). */
+export function exportSubtitlesVtt(prod: FilmProduction): string {
+  return toVtt(prod.subtitleCues ?? [], prod.typography);
+}
+
+/** 타이포그래피 키트 — 타이틀/자막/로어서드 폰트 스펙 문서. */
+export function exportTypographyKit(prod: FilmProduction): string {
+  const kit = prod.typography;
+  const lines: string[] = [`# ${prod.brief.title} — Typography Kit`];
+  if (!kit) {
+    lines.push("\n(타이포그래피 키트 없음 — 구버전 프로젝트일 수 있습니다.)");
+    return lines.join("\n");
+  }
+  lines.push(`\n**Rationale:** ${kit.rationale}`);
+  lines.push(`**Display:** ${FONT_LIBRARY[kit.displayFontId].name} (${FONT_LIBRARY[kit.displayFontId].stack})`);
+  lines.push(`**Body / Caption:** ${FONT_LIBRARY[kit.bodyFontId].name} (${FONT_LIBRARY[kit.bodyFontId].stack})`);
+  lines.push(`**Accent / Label:** ${FONT_LIBRARY[kit.accentFontId].name} (${FONT_LIBRARY[kit.accentFontId].stack})`);
+  const href = googleFontsHref(kit);
+  if (href) lines.push(`**Web fonts:** ${href}`);
+  lines.push(`**Caption burn-in style:** ${captionStyleHint(kit)}`);
+  lines.push(`\n## Text roles`);
+  for (const role of Object.keys(kit.styles) as Array<keyof typeof kit.styles>) {
+    const s = kit.styles[role];
+    const f = FONT_LIBRARY[s.fontId];
+    lines.push(
+      `- **${role}** — ${f.name} ${s.weight}, ${s.sizePct}% height, tracking ${s.tracking}em, ${s.case}, ${s.position}, motion ${s.motion}, safe-area ${s.safeAreaPct}%`,
+    );
+  }
+  return lines.join("\n");
+}
+
 export interface ExportFile {
   name: string;
   content: string;
@@ -115,14 +159,21 @@ export interface ExportFile {
 
 export function buildAllExports(prod: FilmProduction): ExportFile[] {
   const slug = prod.brief.title.replace(/[^\w가-힣]+/g, "_").slice(0, 40) || "oberon";
-  return [
+  const files: ExportFile[] = [
     { name: `${slug}_shotlist.csv`, content: exportShotListCsv(prod), mime: "text/csv" },
     { name: `${slug}_prompt_pack.txt`, content: exportPromptPack(prod), mime: "text/plain" },
     { name: `${slug}_continuity_bible.md`, content: exportBibleMarkdown(prod), mime: "text/markdown" },
     { name: `${slug}_routing.csv`, content: exportRoutingMatrix(prod), mime: "text/csv" },
     { name: `${slug}_edl.txt`, content: exportEdl(prod), mime: "text/plain" },
     { name: `${slug}_production.json`, content: exportProductionJson(prod), mime: "application/json" },
+    { name: `${slug}_typography.md`, content: exportTypographyKit(prod), mime: "text/markdown" },
   ];
+  // 대사가 있을 때만 자막 파일 추가.
+  if ((prod.subtitleCues?.length ?? 0) > 0) {
+    files.push({ name: `${slug}.srt`, content: exportSubtitlesSrt(prod), mime: "application/x-subrip" });
+    files.push({ name: `${slug}.vtt`, content: exportSubtitlesVtt(prod), mime: "text/vtt" });
+  }
+  return files;
 }
 
 /** 클라이언트 다운로드 트리거. */
