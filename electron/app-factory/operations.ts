@@ -1131,6 +1131,12 @@ export async function resolveProviderCredentials(
       envKey: gate.envKey,
       label: gate.label,
       ...(gate.connectorId ? { connectorId: gate.connectorId } : {}),
+      ...(gate.provider ? { provider: gate.provider } : {}),
+      ...(gate.scope ? { scope: gate.scope } : {}),
+      ...(gate.allowedHosts?.length ? { allowedHosts: gate.allowedHosts } : {}),
+      ...(gate.allowedOperations?.length ? { allowedOperations: gate.allowedOperations } : {}),
+      ...(gate.setupUrl ? { setupUrl: gate.setupUrl } : {}),
+      ...(gate.brokerMode ? { brokerMode: gate.brokerMode } : {}),
       status: resolved ? "live-credential-ready" : "secure-input-required",
       source,
       saveTarget: gate.saveTarget,
@@ -2596,7 +2602,7 @@ leaking secrets.
 
 ## Status
 
-${credentials.map((item) => `- \`${item.envKey}\`: ${item.status}${item.fingerprint ? ` · fingerprint \`${item.fingerprint}\`` : ""}`).join("\n")}
+${credentials.map((item) => `- \`${item.envKey}\`: ${item.status}${item.provider ? ` · provider ${item.provider}` : ""}${item.allowedHosts?.length ? ` · hosts ${item.allowedHosts.join(", ")}` : ""}${item.brokerMode ? ` · ${item.brokerMode}` : ""}${item.fingerprint ? ` · fingerprint \`${item.fingerprint}\`` : ""}`).join("\n")}
 
 ## Next Step
 
@@ -2885,10 +2891,20 @@ function normalizeCredentialGate(value: JsonObject): AppFactoryProviderCredentia
   const envKey = stringValue(value.envKey);
   const label = stringValue(value.label);
   if (!envKey || !label) return null;
+  const allowedHosts = credentialHostsFromObject(value);
+  const allowedOperations = jsonStringArray(value.allowedOperations).length
+    ? jsonStringArray(value.allowedOperations)
+    : jsonStringArray(value.operations);
   return {
     envKey,
     label,
     ...(stringValue(value.connectorId) ? { connectorId: stringValue(value.connectorId) } : {}),
+    ...(stringValue(value.provider) ? { provider: stringValue(value.provider) } : {}),
+    ...(stringValue(value.scope) ? { scope: stringValue(value.scope) } : {}),
+    ...(allowedHosts.length ? { allowedHosts } : {}),
+    ...(allowedOperations.length ? { allowedOperations } : {}),
+    ...(stringValue(value.setupUrl) ? { setupUrl: stringValue(value.setupUrl) } : {}),
+    ...(stringValue(value.brokerMode) ? { brokerMode: stringValue(value.brokerMode) } : {}),
     inputMode: stringValue(value.inputMode) || "agentlas-vault",
     saveTarget: stringValue(value.saveTarget) || "agentlas-env-vault",
     hasValue: value.hasValue === true,
@@ -2900,10 +2916,26 @@ function providerCredentialGates(pkg: AppPackage): AppFactoryProviderCredentialG
     .map((connector) => {
       const envKey = credentialEnvKey(connector);
       if (!envKey) return null;
+      const raw = connector as unknown as JsonObject;
+      const allowedHosts = credentialHostsFromObject(raw);
+      const allowedOperations = jsonStringArray(raw.allowedOperations).length
+        ? jsonStringArray(raw.allowedOperations)
+        : jsonStringArray(raw.operations);
+      const setupUrl =
+        stringValue(raw.setupUrl) ||
+        stringValue(raw.consoleUrl) ||
+        stringValue(raw.url) ||
+        stringValue(raw.docsUrl);
       return {
         envKey,
         label: `${connector.name} credential`,
         connectorId: connector.id,
+        provider: connector.name,
+        ...(stringValue(raw.scope) ? { scope: stringValue(raw.scope) } : {}),
+        ...(allowedHosts.length ? { allowedHosts } : {}),
+        ...(allowedOperations.length ? { allowedOperations } : {}),
+        ...(setupUrl ? { setupUrl } : {}),
+        brokerMode: connector.auth === "oauth" ? "provider-managed-oauth" : "runtime-env-injection",
         inputMode: connector.auth === "oauth" ? "oauth-browser" : "agentlas-vault",
         saveTarget: "agentlas-env-vault",
       };
@@ -2914,12 +2946,24 @@ function providerCredentialGates(pkg: AppPackage): AppFactoryProviderCredentialG
     .flatMap((action) => {
       const envKey = stringValue((action as unknown as JsonObject).envKey);
       if (!envKey) return [];
+      const raw = action as unknown as JsonObject;
+      const allowedHosts = credentialHostsFromObject(raw);
+      const allowedOperations = jsonStringArray(raw.allowedOperations).length
+        ? jsonStringArray(raw.allowedOperations)
+        : jsonStringArray(raw.operations);
+      const setupUrl = stringValue(raw.setupUrl) || stringValue(action.url);
       return [
         {
           envKey,
           label: action.label || envKey,
-          inputMode: stringValue((action as unknown as JsonObject).inputMode) || "agentlas-vault",
-          saveTarget: "agentlas-env-vault",
+          ...(stringValue(raw.provider) ? { provider: stringValue(raw.provider) } : {}),
+          ...(stringValue(raw.scope) ? { scope: stringValue(raw.scope) } : {}),
+          ...(allowedHosts.length ? { allowedHosts } : {}),
+          ...(allowedOperations.length ? { allowedOperations } : {}),
+          ...(setupUrl ? { setupUrl } : {}),
+          brokerMode: stringValue(raw.brokerMode) || "runtime-env-injection",
+          inputMode: stringValue(raw.inputMode) || "agentlas-vault",
+          saveTarget: stringValue(raw.saveTarget) || "agentlas-env-vault",
         } satisfies AppFactoryProviderCredentialGate,
       ];
     });
@@ -3199,12 +3243,23 @@ function paymentGateFromObject(raw: JsonObject, actionId?: string): AppFactoryPr
 }
 
 function dedupeCredentialGates(gates: AppFactoryProviderCredentialGate[]): AppFactoryProviderCredentialGate[] {
-  const seen = new Set<string>();
-  return gates.filter((gate) => {
-    if (seen.has(gate.envKey)) return false;
-    seen.add(gate.envKey);
-    return true;
-  });
+  const map = new Map<string, AppFactoryProviderCredentialGate>();
+  for (const gate of gates) {
+    const existing = map.get(gate.envKey);
+    map.set(
+      gate.envKey,
+      existing
+        ? {
+            ...gate,
+            ...existing,
+            allowedHosts: mergeStrings(gate.allowedHosts, existing.allowedHosts),
+            allowedOperations: mergeStrings(gate.allowedOperations, existing.allowedOperations),
+            hasValue: existing.hasValue ?? gate.hasValue,
+          }
+        : gate,
+    );
+  }
+  return [...map.values()];
 }
 
 function defaultProviderStartUrl(connector: AgentlasSurfaceConnectorSpec): string | undefined {
@@ -4450,6 +4505,37 @@ function credentialEnvKey(connector: AgentlasSurfaceConnectorSpec): string | und
   if (connector.auth === "oauth") return `${base}_OAUTH_CLIENT`;
   if (connector.auth === "user-approval") return `${base}_USER_APPROVAL`;
   return `${base}_API_KEY`;
+}
+
+function credentialHostsFromObject(value: JsonObject): string[] {
+  const hosts = [
+    ...jsonStringArray(value.allowedHosts),
+    ...jsonStringArray(value.hosts),
+    ...jsonStringArray(value.hostAllowlist),
+  ];
+  for (const key of ["host", "allowedHost", "apiHost", "baseUrl", "apiBaseUrl", "url", "setupUrl", "consoleUrl", "docsUrl"]) {
+    const v = stringValue(value[key]);
+    if (v) hosts.push(hostFromString(v));
+  }
+  return mergeStrings(hosts, []) ?? [];
+}
+
+function jsonStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+}
+
+function hostFromString(value: string): string {
+  try {
+    return new URL(value).hostname.replace(/^www\./, "");
+  } catch {
+    return value.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0].trim();
+  }
+}
+
+function mergeStrings(a?: string[], b?: string[]): string[] | undefined {
+  const merged = [...(a ?? []), ...(b ?? [])].map((item) => item.trim()).filter(Boolean);
+  if (merged.length === 0) return undefined;
+  return [...new Set(merged)];
 }
 
 function appName(pkg: AppPackage): string {
