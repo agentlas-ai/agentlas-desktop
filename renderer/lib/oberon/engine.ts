@@ -396,6 +396,7 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
           providerId: route.providerId,
           providerMode: route.mode,
           estCostUsd: Number(estCost.toFixed(2)),
+          routing: route,
         });
         shotIds.push(shotId);
       }

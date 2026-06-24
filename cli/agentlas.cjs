@@ -6840,6 +6840,320 @@ async function installMacDesktopUpdate(release, artifact, flags) {
   }
 }
 
+// ── Oberon 필름 스튜디오 (터미널 헤드리스 렌더) ───────────
+// GUI 없이 매니페스트 하나로 영상 렌더를 돌린다. 손으로 쓰던 JSON+env 노가다 대신:
+//   agentlas oberon scaffold my.json      → 편집 가능한 렌더 매니페스트 생성
+//   agentlas oberon render my.json         → full Electron 렌더 스폰 + 진행률 스트리밍
+//   agentlas oberon list                   → 최근 렌더 산출물
+// 프롬프트는 직접 채우거나 `agentlas run oberon-film-studio "<브리프>"`로 에이전트가 채운다
+// (OpenMontage "어시스턴트=오케스트레이터" 스킴).
+
+function oberonRepoRoot() {
+  return path.resolve(__dirname, "..");
+}
+
+function oberonParseFlags(args) {
+  const flags = {};
+  const rest = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith("--")) {
+      const key = a.slice(2);
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith("--")) flags[key] = true;
+      else {
+        flags[key] = next;
+        i++;
+      }
+    } else rest.push(a);
+  }
+  return { flags, rest };
+}
+
+function oberonSampleTitles(title) {
+  const koStyle = (over) => ({
+    fontName: "Pretendard",
+    fontStack: '"Pretendard", system-ui, sans-serif',
+    fontCategory: "humanist_sans",
+    cjk: true,
+    sizePct: 5,
+    weight: 700,
+    tracking: 0,
+    case: "none",
+    position: "center",
+    fill: "#FFFFFF",
+    safeAreaPct: 10,
+    ...over,
+  });
+  return {
+    aspectRatio: "16:9",
+    titleCard: { kind: "title", lines: [title], style: koStyle({ sizePct: 9, outline: { color: "rgba(0,0,0,0.45)", widthPx: 2 } }), bg: "#000000", durationSec: 2 },
+    endCard: { kind: "end_card", lines: ["AGENTLAS"], style: koStyle({ sizePct: 7, cjk: false }), bg: "#0A0A0A", durationSec: 1.5 },
+    lowerThirds: [],
+    subtitles: [],
+    subtitleStyle: koStyle({ sizePct: 4.6, weight: 600, position: "lower_center", boxBg: "rgba(0,0,0,0.34)", outline: { color: "rgba(0,0,0,0.9)", widthPx: 3 }, safeAreaPct: 8 }),
+    rationale: "scaffold 기본 타이포 — 한국어 본문/자막은 CJK 폰트 강제",
+  };
+}
+
+function oberonScaffold(args) {
+  const { flags, rest } = oberonParseFlags(args);
+  const outPath = path.resolve(rest[0] || "oberon-manifest.json");
+  const title = flags.title || "My Oberon Film";
+  const aspect = flags.aspect || "16:9";
+  const shotCount = Math.max(1, Math.min(Number(flags.shots) || 2, 12));
+  const shots = Array.from({ length: shotCount }, (_, i) => ({
+    shotId: `SH_${String(i + 1).padStart(3, "0")}`,
+    index: i,
+    durationSec: 4,
+    aspectRatio: aspect,
+    providerId: "google-veo",
+    providerMode: "text_to_video",
+    prompt: `((샷 ${i + 1} 프롬프트를 여기에 — 카메라/피사체/조명/무드. 'agentlas run oberon-film-studio' 로 에이전트가 채우게 할 수 있다.))`,
+    negativePrompt: "low quality, blurry, distorted text, watermark",
+  }));
+  const manifest = {
+    productionId: `oberon-${Date.now().toString(36)}`,
+    title,
+    aspectRatio: aspect,
+    maxShots: shotCount,
+    takesPerShot: 1,
+    provider: flags.provider || "google-gemini-veo",
+    model: flags.model || "veo-3.1-lite-generate-001",
+    resolution: flags.resolution || "720p",
+    shots,
+  };
+  if (flags.titles) manifest.titles = oberonSampleTitles(title);
+  fs.writeFileSync(outPath, JSON.stringify(manifest, null, 2), "utf8");
+  out(`✓ 매니페스트 생성: ${outPath}`);
+  out(`  · 샷 ${shotCount}개 · ${aspect} · ${manifest.provider}`);
+  out(`  · 프롬프트를 채운 뒤:  agentlas oberon render ${path.basename(outPath)}`);
+  out(`  · 또는 에이전트로 채우기:  agentlas run oberon-film-studio "30초 향수 광고 트레일러"`);
+  if (!flags.titles) out(`  · 타이틀/자막 번인 샘플 포함하려면 --titles 플래그`);
+}
+
+function oberonRender(args) {
+  const { flags, rest } = oberonParseFlags(args);
+  if (!rest[0]) fail("렌더할 매니페스트 경로가 필요합니다:  agentlas oberon render <manifest.json>");
+  const manifestPath = path.resolve(rest[0]);
+  if (!fs.existsSync(manifestPath)) fail(`매니페스트를 찾을 수 없습니다: ${manifestPath}`);
+
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  } catch (e) {
+    return fail(`매니페스트 JSON 파싱 실패: ${e.message}`);
+  }
+  if (!Array.isArray(manifest.shots) || !manifest.shots.length) fail("매니페스트에 shots[] 가 비어 있습니다.");
+
+  const root = oberonRepoRoot();
+  const script = path.join(root, "scripts", "render-oberon-live-request.cjs");
+  const builtRender = path.join(root, "dist", "electron", "oberon", "render.js");
+  if (!fs.existsSync(script)) fail(`헤드리스 렌더 스크립트가 없습니다(패키지 앱에는 미포함): ${script}`);
+  if (!fs.existsSync(builtRender)) fail(`Electron 빌드가 필요합니다. 먼저:  npm run build:electron   (없는 파일: ${builtRender})`);
+
+  // --max-shots 등 오버라이드가 있으면 사용자 매니페스트는 그대로 두고 임시 패치본을 만든다.
+  let reqPath = manifestPath;
+  const overrides = {};
+  if (flags["max-shots"]) overrides.maxShots = Number(flags["max-shots"]);
+  if (flags["takes"]) overrides.takesPerShot = Number(flags["takes"]);
+  if (flags["resolution"]) overrides.resolution = flags["resolution"];
+  if (Object.keys(overrides).length) {
+    const patched = { ...manifest, ...overrides };
+    reqPath = path.join(os.tmpdir(), `oberon-req-${Date.now().toString(36)}.json`);
+    fs.writeFileSync(reqPath, JSON.stringify(patched, null, 2), "utf8");
+  }
+
+  const deliveryDir = path.resolve(flags.delivery || path.join(path.dirname(manifestPath), `${slugifyOberon(manifest.title)}-delivery`));
+
+  const childEnv = { ...process.env };
+  delete childEnv.ELECTRON_RUN_AS_NODE; // full Electron으로 부팅
+  childEnv.OBERON_LIVE_VEO = "1";
+  childEnv.OBERON_LIVE_REQUEST_FILE = reqPath;
+  childEnv.OBERON_LIVE_DELIVERY_DIR = deliveryDir;
+  if (flags["max-polls"]) childEnv.OBERON_LIVE_MAX_POLLS = String(flags["max-polls"]);
+  if (flags["poll-ms"]) childEnv.OBERON_LIVE_POLL_MS = String(flags["poll-ms"]);
+  if (flags.open) childEnv.OBERON_LIVE_OPEN_DELIVERY = "1";
+
+  out(`▶ Oberon 렌더: "${manifest.title}"  (${manifest.shots.length}샷, 최대 ${overrides.maxShots ?? manifest.maxShots ?? 3})`);
+  out(`  매니페스트: ${manifestPath}`);
+  out(`  납품 폴더:  ${deliveryDir}`);
+  if (manifest.titles) out(`  타이틀/자막 번인: 활성 → *_titled.mp4 추가 생성`);
+
+  if (flags["dry-run"]) {
+    out("\n[dry-run] 실행할 명령:");
+    out(`  ${process.execPath} ${script}`);
+    out("  env: OBERON_LIVE_VEO=1");
+    out(`       OBERON_LIVE_REQUEST_FILE=${reqPath}`);
+    out(`       OBERON_LIVE_DELIVERY_DIR=${deliveryDir}`);
+    out("  (full Electron · GEMINI_API_KEY/GOOGLE_CLOUD_PROJECT 볼트 필요)");
+    return;
+  }
+
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [script], { env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
+    const files = [];
+    let buf = "";
+    const handle = (chunk) => {
+      buf += chunk.toString();
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        oberonRenderLine(line, files);
+      }
+    };
+    child.stdout.on("data", handle);
+    child.stderr.on("data", (c) => process.stderr.write(c));
+    child.on("close", (code) => {
+      if (code === 0) {
+        out(`\n✓ 렌더 완료 — 납품 폴더: ${deliveryDir}`);
+        const titled = files.filter((f) => f.kind && f.kind.startsWith("titled"));
+        if (titled.length) out(`  타이틀/자막 번인본: ${titled.map((f) => f.name).join(", ")}`);
+      } else {
+        process.stderr.write(`\n✖ 렌더 실패 (exit ${code})\n`);
+        process.exitCode = code || 1;
+      }
+      resolve();
+    });
+  });
+}
+
+function oberonRenderLine(line, files) {
+  let m;
+  if ((m = line.match(/^POLL status=(\S+) phase=(\S+) clips=(\S+) percent=(\d+)/))) {
+    const [, status, phase, clips, pct] = m;
+    const bar = oberonBar(Number(pct));
+    process.stdout.write(`\r⏳ ${bar} ${String(pct).padStart(3)}%  ${phase}  clips ${clips}   `);
+    if (status === "succeeded") process.stdout.write("\n");
+    return;
+  }
+  if ((m = line.match(/^FILE kind=(\S+) name=(\S+) bytes=(\d+)/))) {
+    files.push({ kind: m[1], name: m[2], bytes: Number(m[3]) });
+    return;
+  }
+  if ((m = line.match(/^DELIVERY kind=(\S+) name=(\S+) path=(\S+) bytes=(\d+)/))) {
+    out(`  📦 ${m[1].padEnd(11)} ${m[2]}  (${oberonBytes(Number(m[4]))})`);
+    return;
+  }
+  if (line.startsWith("WARNINGS=")) {
+    out(`  ⚠ ${line.slice("WARNINGS=".length)}`);
+    return;
+  }
+  if (line.startsWith("JOB=") || line.startsWith("OUT_DIR=")) return; // 내부 추적
+  if (/=(present|missing)$/.test(line)) return; // 키 존재 점검 라인
+  if (line.trim()) out(`  ${line}`);
+}
+
+function oberonBar(pct) {
+  const n = Math.max(0, Math.min(20, Math.round((pct / 100) * 20)));
+  return "█".repeat(n) + "░".repeat(20 - n);
+}
+
+function oberonBytes(n) {
+  if (n > 1e6) return (n / 1e6).toFixed(1) + "MB";
+  if (n > 1e3) return (n / 1e3).toFixed(0) + "KB";
+  return n + "B";
+}
+
+function slugifyOberon(value) {
+  return (
+    String(value || "")
+      .trim()
+      .replace(/[^\w가-힣-]+/g, "_")
+      .replace(/_{2,}/g, "_")
+      .slice(0, 48) || "oberon"
+  );
+}
+
+function oberonList() {
+  const dir = path.join(userDataDir(), "oberon");
+  if (!fs.existsSync(dir)) {
+    out("아직 렌더 산출물이 없습니다.  agentlas oberon scaffold my.json  으로 시작하세요.");
+    return;
+  }
+  const entries = fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => {
+      const full = path.join(dir, d.name);
+      let mtime = 0;
+      try {
+        mtime = fs.statSync(full).mtimeMs;
+      } catch {}
+      const files = (() => {
+        try {
+          return fs.readdirSync(full);
+        } catch {
+          return [];
+        }
+      })();
+      return { name: d.name, full, mtime, files };
+    })
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, 15);
+  if (!entries.length) {
+    out("아직 렌더 산출물이 없습니다.");
+    return;
+  }
+  out(`최근 Oberon 렌더 (${dir}):\n`);
+  for (const e of entries) {
+    const masters = e.files.filter((f) => /master|titled/.test(f) && /\.(mp4|mov)$/.test(f));
+    const when = e.mtime ? new Date(e.mtime).toISOString().slice(0, 16).replace("T", " ") : "";
+    out(`  ${when}  ${e.name}`);
+    if (masters.length) out(`            ${masters.join(", ")}`);
+  }
+  out(`\n폴더 열기:  agentlas oberon open`);
+}
+
+function oberonOpen(args) {
+  const target = args[0] ? path.resolve(args[0]) : path.join(userDataDir(), "oberon");
+  if (!fs.existsSync(target)) fail(`경로가 없습니다: ${target}`);
+  const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
+  spawn(opener, [target], { detached: true, stdio: "ignore" }).unref();
+  out(`폴더 열기: ${target}`);
+}
+
+function oberonHelp() {
+  out(
+    [
+      "agentlas oberon — 터미널에서 AI 필름 렌더",
+      "",
+      "  oberon scaffold [out.json] [--title T] [--aspect 16:9] [--shots N] [--titles]",
+      "                         편집 가능한 렌더 매니페스트 생성 (--titles: 타이틀/자막 번인 샘플 포함)",
+      "  oberon render <manifest.json> [--delivery DIR] [--max-shots N] [--open] [--dry-run]",
+      "                         full Electron 렌더 스폰 + 진행률 스트리밍 (GEMINI_API_KEY 볼트 필요)",
+      "  oberon list            최근 렌더 산출물",
+      "  oberon open [path]     산출물 폴더 열기",
+      "",
+      "프롬프트는 직접 채우거나, 에이전트에게:  agentlas run oberon-film-studio \"30초 향수 광고\"",
+    ].join("\n"),
+  );
+}
+
+async function cmdOberon(args) {
+  const sub = args[0] || "help";
+  const rest = args.slice(1);
+  switch (sub) {
+    case "scaffold":
+    case "new":
+      return oberonScaffold(rest);
+    case "render":
+      return oberonRender(rest);
+    case "list":
+    case "ls":
+      return oberonList(rest);
+    case "open":
+      return oberonOpen(rest);
+    case "help":
+    case "--help":
+    case "-h":
+      return oberonHelp();
+    default:
+      fail(`알 수 없는 oberon 하위명령: ${sub}  (scaffold|render|list|open|help)`);
+  }
+}
+
 function cmdHelp() {
   out(
     [
@@ -6856,6 +7170,7 @@ function cmdHelp() {
       "  list                  agents/companies + active runtime",
       "  env                   shared env key names",
       "  multimodal            image/video/audio fallback providers",
+      "  oberon <sub>          AI film render from the terminal (scaffold|render|list) — see: oberon help",
       "  ontology              project-local ontology status/list/add; inside REPL use /ontology",
       "  cloud wizard <path>   create/repair agentlas.json for Cloud MCP calls",
       "  cloud security scan <path>",
@@ -6948,6 +7263,9 @@ async function main() {
       return cmdEnv(db);
     case "multimodal":
       return cmdMultimodal(db, rest.slice(1));
+    case "oberon":
+    case "film":
+      return cmdOberon(rest.slice(1));
     case "ontology":
       return cmdOntology(rest.slice(1));
     case "cloud":

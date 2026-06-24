@@ -14,6 +14,7 @@ export * from "./directing";
 export * from "./audio-dialogue";
 export * from "./continuity-chain";
 export * from "./prompt-craft";
+export * from "./title-spec";
 export * from "./engine";
 export * from "./infer";
 export * from "./exporters";

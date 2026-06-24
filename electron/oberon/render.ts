@@ -15,6 +15,7 @@ import type {
   OberonRenderShotInput,
 } from "../../shared/types";
 import { readEnvVar } from "../secrets/vault";
+import { composeTitledDelivery } from "./titlecards";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_MODEL = "veo-3.1-lite-generate-001";
@@ -298,11 +299,30 @@ async function assembleDeliveryFiles(
     ]);
   }
 
-  return [
+  const files: OberonRenderFile[] = [
     await makeRenderFile("master_mp4", "Master MP4", masterMp4, "video/mp4"),
     await makeRenderFile("master_mov", "Master MOV", masterMov, "video/quicktime"),
     await makeRenderFile("master_wav", "Audio WAV", masterWav, "audio/wav"),
   ];
+
+  // 타이틀/로어서드/자막 결정적 번인 (스펙이 있을 때만). 실패해도 마스터는 유지.
+  if (request.titles) {
+    try {
+      const titled = await composeTitledDelivery({
+        ffmpeg,
+        masterMp4,
+        outDir: job.outputDir,
+        baseName: safeSlug(request.title),
+        spec: request.titles,
+      });
+      for (const w of titled.warnings) job.warnings.push(w);
+      for (const f of titled.files) files.push(await makeRenderFile(f.kind, f.label, f.absPath, f.mime));
+    } catch (error: unknown) {
+      job.warnings.push(`타이틀 번인 건너뜀: ${errorMessage(error)}`);
+    }
+  }
+
+  return files;
 }
 
 async function createGoogleClient(provider: OberonRenderProvider): Promise<{ ai: GoogleGenAI; authLabel: string }> {
