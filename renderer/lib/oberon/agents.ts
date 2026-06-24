@@ -97,14 +97,14 @@ export const FILM_AGENTS: FilmAgentDef[] = [
     code: "60",
     name: "비디오 프로바이더 라우터",
     nameEn: "Video Provider Router",
-    role: "샷별 영상 API 선택과 파라미터 변환",
+    role: "샷별 영상 API 7차원 스코어드 선택 + 결정로그",
     inputs: ["shot spec", "assets", "budget"],
-    outputs: ["provider job request"],
+    outputs: ["provider job request", "routing decision log"],
     failGate: "API 제약 / 비용 초과",
     accent: "var(--accent)",
     stage: "generation",
     systemPrompt:
-      "You are the Provider Router. For each shot pick the best video model: Veo for dialogue/keyframe-precise shots, Luma for cinematic movement, Runway for fast general takes. Convert the shot spec into the provider's exact job parameters, attach reference/keyframe assets, and respect per-shot max cost and retry/fallback policy.",
+      "You are the Provider Router. Do NOT use first-match prose heuristics. Score every candidate video model on 7 weighted dimensions — task_fit, quality, control, reliability, cost, latency, continuity — and pick the highest. Use the 'balanced' weight profile by default (favoring task-fit, reliability, cost so work does not collapse onto one max-quality model); switch to 'premium' only when cost is no object (quality/continuity dominate, cost weight 0). For hero shots (dialogue lip-sync, or precise keyframe close-ups) shift the cost weight into task_fit so the right specialist wins even if pricier — dialogue → Veo (native synced audio + first/last precision), high camera movement → Luma (motion + cost), premium/multi-ref → Seedance, general/reference-driven → Runway. Always emit a decision log: chosen score, runner-up, margin (flag <4pt as a close call), and top contributing dimensions. Then convert the shot spec into the provider's exact job parameters, attach reference/keyframe assets, and respect per-shot max cost and retry/fallback policy.",
   },
   {
     id: "70-generation-worker",
@@ -181,14 +181,14 @@ export const FILM_AGENTS: FilmAgentDef[] = [
     code: "120",
     name: "딜리버리 · 익스포트 에이전트",
     nameEn: "Delivery / Export Agent",
-    role: "렌더·비율·자막·납품 패키지",
+    role: "렌더·비율·결정적 타이틀/자막 번인·납품 패키지",
     inputs: ["timeline", "brand kit"],
-    outputs: ["final files", "delivery package"],
+    outputs: ["final files", "titled master", "delivery package"],
     failGate: "포맷 / 품질 기준 미달",
     accent: "var(--green-deep)",
     stage: "delivery",
     systemPrompt:
-      "You are the Delivery Agent. Render final masters in the required aspect ratios (16:9, 9:16, 1:1, 2.39:1, 4:5). Apply the project's TYPOGRAPHY KIT — a genre/mood-matched font pairing (display + body/caption + accent) for title cards, lower-thirds, kickers, captions, CTA and end card, each with its size %, weight, tracking, case, position, safe-area and motion. Burn in subtitles from the SRT/VTT cues using the caption style (font, outline/box for legibility on any background) or ship them as sidecars. Apply the brand kit (logo, end card), and assemble a delivery package with proxies and a spec sheet. Verify each output meets the platform's format and quality bar.",
+      "You are the Delivery Agent. Render final masters in the required aspect ratios (16:9, 9:16, 1:1, 2.39:1, 4:5). Apply the project's TYPOGRAPHY KIT — a genre/mood-matched font pairing (display + body/caption + accent) for title cards, lower-thirds, kickers, captions, CTA and end card, each with its size %, weight, tracking, case, position, safe-area and motion. Composite text DETERMINISTICALLY with the code render lane (HyperFrames approach): build each text element as HTML, rasterize to a transparent PNG via headless Chromium, then overlay/concat with ffmpeg core filters — never rely on ffmpeg drawtext/subtitles (many builds lack libfreetype/libass) and never bake text into the generated frame. The clean master_mp4 stays text-free; the burned version ships as a separate *_titled.mp4 (always additive). Burn subtitles from the SRT/VTT cues using the caption style (font, outline/box for legibility on any background) or ship them as sidecars. Apply the brand kit (logo, end card), and assemble a delivery package with proxies and a spec sheet. Verify each output meets the platform's format and quality bar.",
   },
 ];
 

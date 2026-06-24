@@ -5,6 +5,14 @@ import type {
   MultimodalProviderStatus,
   MultimodalSettings,
 } from "./multimodal";
+import type { OberonTitleSpec } from "./oberon-titles";
+export type {
+  OberonLowerThird,
+  OberonSubtitleCue,
+  OberonTextStyle,
+  OberonTitleCard,
+  OberonTitleSpec,
+} from "./oberon-titles";
 export type {
   MultimodalModality,
   MultimodalProvider,
@@ -1941,7 +1949,13 @@ export interface MigrationResult {
 // ── Oberon real render jobs ───────────────────────────────────
 export type OberonRenderProvider = "google-gemini-veo" | "google-enterprise-veo";
 export type OberonRenderJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
-export type OberonRenderFileKind = "clip_mp4" | "master_mp4" | "master_mov" | "master_wav";
+export type OberonRenderFileKind =
+  | "clip_mp4"
+  | "master_mp4"
+  | "master_mov"
+  | "master_wav"
+  | "titled_mp4"
+  | "titled_mov";
 export type OberonRenderClipStatus = "queued" | "generating" | "ready" | "failed";
 
 export interface OberonRenderShotInput {
@@ -1971,6 +1985,8 @@ export interface OberonRenderRequest {
   provider?: OberonRenderProvider;
   model?: string;
   resolution?: "720p" | "1080p" | "4k";
+  /** 타이틀/로어서드/자막 결정적 번인 스펙 (있으면 *_titled.mp4 추가 생성). */
+  titles?: OberonTitleSpec;
 }
 
 export interface OberonRenderFile {

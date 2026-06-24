@@ -179,6 +179,27 @@ function ShotCard({
           <span style={{ fontSize: 11, color: "var(--ob-muted)" }}>· {modeLabel(shot.providerMode)}</span>
         </div>
 
+        {/* 7차원 스코어드 라우팅 결정 (점수 + 박빙 플래그, 전체 결정로그는 hover) */}
+        {shot.routing && (
+          <div
+            title={shot.routing.log.join("\n")}
+            style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "var(--ob-muted)" }}
+          >
+            <span style={{ padding: "1px 6px", borderRadius: 5, background: "var(--ob-edge)", color: "var(--ob-ink-soft)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+              라우팅 {shot.routing.total}점
+            </span>
+            {shot.routing.runnerUpId != null && typeof shot.routing.margin === "number" && shot.routing.margin < 4 && (
+              <span
+                style={{ color: "var(--ob-accent-text)", fontWeight: 600 }}
+                title={`2위 ${providerById(shot.routing.runnerUpId)?.name ?? shot.routing.runnerUpId} ${shot.routing.runnerUpTotal}점 (격차 ${shot.routing.margin})`}
+              >
+                박빙
+              </span>
+            )}
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{shot.routing.reason}</span>
+          </div>
+        )}
+
         <div style={{ fontSize: 13, color: "var(--ob-ink)", lineHeight: 1.5 }}>{shot.action}</div>
 
         {shot.dialogue && (

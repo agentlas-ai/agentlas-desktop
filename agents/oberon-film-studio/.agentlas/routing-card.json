@@ -15,7 +15,10 @@
     "dialogue_direction",
     "subtitle_generation",
     "typography_design",
-    "provider_routing"
+    "provider_routing",
+    "scored_provider_routing",
+    "deterministic_title_burnin",
+    "headless_render_cli"
   ],
   "routing_status": "candidate",
   "trigger_examples": [

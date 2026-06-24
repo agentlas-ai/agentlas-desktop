@@ -10,6 +10,7 @@ import {
   OBERON_STEPS,
   INITIAL_STEP_STATE,
   buildEdl,
+  buildTitleSpec,
   defaultModelSettings,
   planProduction,
   recomputeCost,
@@ -437,6 +438,9 @@ export default function OberonPage() {
       provider: "google-enterprise-veo",
       model: "veo-3.1-lite-generate-001",
       resolution: "720p",
+      // 타이틀/로어서드/자막 결정적 번인 — 타이포 키트가 있으면 *_titled.mp4 추가 생성
+      // (master_mp4는 글자 없는 클린본으로 그대로 유지되므로 항상 additive).
+      titles: buildTitleSpec(production),
     };
     setVideoGenerating(true);
     setRenderJob(null);

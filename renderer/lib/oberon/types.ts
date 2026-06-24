@@ -218,6 +218,8 @@ export interface ShotSpec {
   providerId: string;
   providerMode: ProviderMode;
   estCostUsd: number;
+  /** 7차원 스코어드 라우팅 결정로그 (왜 이 프로바이더인가). */
+  routing?: ShotRoutingDecision;
 
   // ── 부가 연출 레이어 (업그레이드: 카메라/대사/오디오/연속성) ──
   /** 초 단위 카메라·액션 안무 (directing). */
@@ -370,6 +372,56 @@ export interface ProviderProfile {
   /** vault에서 필요한 키 이름. */
   vaultKey: string;
   status: "active" | "sunset"; // Sora 류는 sunset
+}
+
+// ── 스코어드 라우팅 결정로그 (업그레이드: 산문 휴리스틱 → 근거기반) ──
+// 7차원 가중 스코어링으로 샷별 프로바이더를 고르고, 왜 골랐는지를 추적 가능하게 남긴다.
+// (OpenMontage 7-dim scorer 개념 차용 — 코드 아님)
+
+export type RouteDimension =
+  | "task_fit" // 이 샷 의도(대사/정밀/모션/품질)에 얼마나 맞나
+  | "quality" // 절대 화질·리얼리즘
+  | "control" // 정밀 컨트롤(first/last·레퍼런스·툴링)
+  | "reliability" // 산출 안정성·툴링 성숙도
+  | "cost" // 저비용일수록 높음 (premium이면 가중 0)
+  | "latency" // 빠를수록 높음
+  | "continuity"; // 인물·소품 일관성 유지력
+
+export interface RouteDimensionScore {
+  dimension: RouteDimension;
+  /** 이번 라우팅에서 이 차원의 가중치 (0-1, 합 1). */
+  weight: number;
+  /** 프로바이더 원점수 (0-1). */
+  raw: number;
+  /** weight × raw. */
+  weighted: number;
+}
+
+export interface ProviderRouteScore {
+  providerId: string;
+  /** 0-100 종합 점수. */
+  total: number;
+  dims: RouteDimensionScore[];
+}
+
+/** 샷별 라우팅 결정 — 선택 프로바이더 + 차순위 + 전 후보 점수 + 사람이 읽는 결정로그. */
+export interface ShotRoutingDecision {
+  providerId: string;
+  mode: ProviderMode;
+  /** 한 줄 선택 사유. */
+  reason: string;
+  /** 선택 프로바이더 종합 점수 (0-100). */
+  total: number;
+  runnerUpId?: string;
+  runnerUpTotal?: number;
+  /** 1위-2위 점수차 (작을수록 박빙 — UI에서 경고/대안 표시용). */
+  margin?: number;
+  /** 전 후보 점수 (내림차순). */
+  scores: ProviderRouteScore[];
+  /** 이번에 적용한 가중치 프로파일. */
+  weightProfile: "balanced" | "premium";
+  /** 사람이 읽는 결정로그 (UI·내보내기). */
+  log: string[];
 }
 
 // ── 에이전트 / 파이프라인 ────────────────────────────────

@@ -138,3 +138,23 @@ own secret vault. **No secret values are included in this package.**
 Total estimated cost vs budget; block on real-person likeness, copyrighted characters,
 trademarks, unlicensed music; propose compliant alternatives. Generated frames carry **no
 on-screen text** (titles/subtitles burned in post) to avoid distorted text artifacts.
+
+## 9. Upgrades (2026-06-24 — competitive-analysis driven)
+
+- **Scored provider routing (agent 60).** First-match prose heuristics are replaced by a
+  **7-dimension weighted scorer** — `task_fit · quality · control · reliability · cost ·
+  latency · continuity`. The `balanced` profile (default) favours task-fit/reliability/cost so
+  work does not collapse onto one max-quality model; `premium` zeroes cost and lets
+  quality/continuity dominate. **Hero shots** (dialogue lip-sync, precise keyframe close-ups)
+  move the cost weight into task_fit so the right specialist wins even when pricier. Every shot
+  carries a **decision log** (chosen score, runner-up, margin — <4pt flagged as a close call —
+  and the top contributing dimensions). *(OpenMontage concept; our own implementation.)*
+- **Deterministic title/caption render lane (agent 120).** Text is composited by code, not by
+  the generation model: each element → HTML → headless-Chromium PNG → ffmpeg `overlay`/`concat`
+  (core filters only, **no `drawtext`/`subtitles`** — many ffmpeg builds lack libfreetype/libass).
+  The clean `master_mp4` stays text-free; the burned version ships as a separate `*_titled.mp4`
+  (always additive). *(HyperFrames approach, Apache-2.0.)*
+- **Terminal parity.** `agentlas oberon scaffold|render|list` runs the pipeline headlessly from a
+  shell — a friendly wrapper that replaces the raw `electron <script> + env soup + hand-written
+  JSON`. Manifest authoring follows the "assistant = orchestrator" scheme: a human or
+  `agentlas run oberon-film-studio "<brief>"` fills the shot prompts.
