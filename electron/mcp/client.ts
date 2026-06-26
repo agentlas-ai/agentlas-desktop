@@ -5,6 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
+// Stormbreaker 슈퍼바이저 — 모든 실행을 Hephaestus 견고-실행 규율로 감독(비차단·실패-무해).
+import { superviseStormbreaker, type StormbreakerHandle } from "../hephaestus/stormbreaker-supervisor";
 import { getAgentById, listInstalledAgents } from "./registry";
 import {
   autoRouteStatus,
@@ -48,6 +50,7 @@ import {
   runGoogleByok,
   runOpenAIByok,
   runUpstageByok,
+  runCustomByok,
 } from "../runtime/byok";
 import { runOllama } from "../runtime/ollama";
 import { type Runner, SURFACE_INTENT_MARKER } from "../runtime/runner";
@@ -71,6 +74,7 @@ const RUNNER_LABEL: Record<string, string> = {
   "byok:openai": "OpenAI API",
   "byok:google": "Google API",
   "byok:upstage": "Upstage Solar API",
+  "byok:custom": "Custom OpenAI API",
 };
 
 function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | null {
@@ -88,6 +92,8 @@ function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | 
       return { runner: runGoogleByok, label: RUNNER_LABEL["byok:google"] };
     if (active.backend === "upstage")
       return { runner: runUpstageByok, label: RUNNER_LABEL["byok:upstage"] };
+    if (active.backend === "custom")
+      return { runner: runCustomByok, label: RUNNER_LABEL["byok:custom"] };
   }
   return null;
 }
@@ -604,6 +610,18 @@ export async function runMcpInvocation(
 
   sink({ kind: "thinking", status: tStatus(locale, "thinking", { agent: agent.name }) });
 
+  // Stormbreaker 슈퍼바이저 — 활성·가용하면 이 실행을 scope→route→gate 로 감독한다(비차단).
+  // division(백그라운드 firm 하위) 세션은 제외(재귀/노이즈 방지). 실패/부재 시 null → no-op.
+  let stormbreaker: StormbreakerHandle | null = null;
+  if (chat.kind !== "division") {
+    stormbreaker = superviseStormbreaker({
+      query: req.userPrompt,
+      cwd: workingFolder ?? undefined,
+      emit: (tool) => sink({ kind: "tool-use", tool }),
+      signal,
+    });
+  }
+
   try {
     const runnerReq = {
       systemPrompt,
@@ -811,6 +829,11 @@ export async function runMcpInvocation(
 
     if (req.appsGenerateMode) {
       displayText = appendAppsGenerateCta(displayText, req.userPrompt, locale);
+    }
+
+    // Stormbreaker 최종 게이트 — 답변 표출 직전 리뷰/증거 게이트(비차단·실패-무해).
+    if (stormbreaker) {
+      await stormbreaker.finish({ workspace: workingFolder ?? undefined, permission: req.permissions });
     }
 
     appendChatMessage(chat.id, "assistant", displayText);

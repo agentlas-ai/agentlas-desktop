@@ -20,6 +20,9 @@ export default function CloudAgentPublishPage() {
   const [result, setResult] = useState<CloudAgentPackageResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeRuntime, setActiveRuntime] = useState<RuntimeStatus | null>(null);
+  // Hephaestus 엔진(upload.py) 직접 검수/업로드 — 데스크탑 자체 cloudAgents 경로와 별개로 실엔진 연결.
+  const [hephRunning, setHephRunning] = useState<"review" | "private-link" | "marketplace" | null>(null);
+  const [hephMsg, setHephMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     const api = ipc();
@@ -78,6 +81,56 @@ export default function CloudAgentPublishPage() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setRunning(null);
+    }
+  }
+
+  // Hephaestus 엔진(upload.py)으로 직접 정적 검수.
+  async function engineReview() {
+    const api = ipc();
+    if (!api || !rootPath.trim()) {
+      setError(t("cloud.no_folder"));
+      return;
+    }
+    setHephRunning("review");
+    setHephMsg(null);
+    try {
+      const res = await api.hephaestus.package({ folder: rootPath.trim(), visibility: "marketplace" });
+      const j = (res?.json ?? {}) as Record<string, unknown>;
+      const findings = (j.findings ?? j.issues ?? []) as unknown[];
+      setHephMsg({
+        ok: Boolean(res?.ok),
+        text: res?.ok
+          ? `엔진 정적 검수 완료 — ${Array.isArray(findings) ? findings.length : 0}건 발견. 업로드 준비됨.`
+          : `검수 실패: ${res?.error ?? res?.stderr?.slice(0, 300) ?? "알 수 없음"}`,
+      });
+    } catch (err) {
+      setHephMsg({ ok: false, text: (err as Error).message });
+    } finally {
+      setHephRunning(null);
+    }
+  }
+
+  // Hephaestus 엔진(upload.py)으로 직접 업로드(Cloud=private-link / Hub=marketplace).
+  async function enginePublish(visibility: "private-link" | "marketplace") {
+    const api = ipc();
+    if (!api || !rootPath.trim()) {
+      setError(t("cloud.no_folder"));
+      return;
+    }
+    setHephRunning(visibility);
+    setHephMsg(null);
+    try {
+      const res = await api.hephaestus.publish({ folder: rootPath.trim(), visibility });
+      setHephMsg({
+        ok: Boolean(res?.ok),
+        text: res?.ok
+          ? `✓ Hephaestus 엔진 업로드 완료 (${visibility === "marketplace" ? "Hub" : "Cloud"})`
+          : `업로드 실패: ${res?.error ?? res?.stderr?.slice(0, 300) ?? "알 수 없음"}`,
+      });
+    } catch (err) {
+      setHephMsg({ ok: false, text: (err as Error).message });
+    } finally {
+      setHephRunning(null);
     }
   }
 
@@ -153,6 +206,40 @@ export default function CloudAgentPublishPage() {
               <IconStore size={13} />
               {running === "publish" ? "..." : t("cloud.publish")}
             </button>
+          </div>
+
+          {/* Hephaestus 엔진(upload.py) 직접 검수/업로드 — 임베딩된 오픈소스 엔진의 실제 패키징·보안·publish */}
+          <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--paper-edge)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+              <IconShield size={13} style={{ color: "var(--accent)" }} />
+              <span style={{ ...label, marginBottom: 0 }}>Hephaestus 엔진 직접 검수·업로드</span>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button onClick={() => void engineReview()} disabled={hephRunning !== null} style={secondaryButton}>
+                <IconShield size={13} />
+                {hephRunning === "review" ? "검수 중…" : "엔진 정적 검수"}
+              </button>
+              <button onClick={() => void enginePublish("private-link")} disabled={hephRunning !== null} style={secondaryButton}>
+                <IconFileUp size={13} />
+                {hephRunning === "private-link" ? "업로드 중…" : "엔진 Cloud 업로드"}
+              </button>
+              <button onClick={() => void enginePublish("marketplace")} disabled={hephRunning !== null} style={primaryButton}>
+                <IconStore size={13} />
+                {hephRunning === "marketplace" ? "업로드 중…" : "엔진 Hub 업로드"}
+              </button>
+            </div>
+            {hephMsg && (
+              <div
+                style={{
+                  ...notice,
+                  marginTop: 10,
+                  borderColor: hephMsg.ok ? "rgba(12,166,120,0.34)" : "rgba(201,58,58,0.34)",
+                  color: hephMsg.ok ? "var(--green-deep)" : "var(--red-deep)",
+                }}
+              >
+                {hephMsg.text}
+              </div>
+            )}
           </div>
         </div>
 

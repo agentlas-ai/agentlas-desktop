@@ -68,12 +68,42 @@ export const INSTALLED_APPS: AgentlasAppDefinition[] = [
     kind: "ai-native",
     route: "/chat",
     accent: "var(--accent)",
-    engines: ["Idea Foundry", "Market Intelligence", "Business Plan", "PRD Maker", "Product Dev", "Slide Studio", "Web Build"],
-    vaultKeys: [],
-    artifacts: ["Operating board", "PRD", "Pitch deck", "Web/app build"],
+    engines: ["Hephaestus Network", "Business Model Generator", "Market Research Engine", "Pitch Deck Compiler"],
+    vaultKeys: ["CRUNCHBASE_API_KEY", "LINKEDIN_API_KEY"],
+    artifacts: ["Business Model Canvas", "Competitor Analysis", "Pitch Deck (PDF)"],
     slashCommands: ["/hep-network startup", "/startup"],
     // GUI는 Hephaestus Network로 이미 실행된다 — 타일 클릭이 그 명령을 새 채팅에서 실행.
     launchCommand: "/hep-network startup",
+  },
+  {
+    id: "creative-studio",
+    slug: "creative-studio",
+    name: "크리에이티브 스튜디오",
+    nameEn: "Creative Studio",
+    tagline: "상품 URL 하나로 제품 스크래핑부터 마케팅 에셋 팩(릴스/이미지)까지 자동 파생",
+    taglineEn: "Turn a single product URL into a full marketing asset pack (reels/images) automatically",
+    kind: "ai-native",
+    route: "/creative-studio",
+    accent: "var(--accent)",
+    engines: ["Browser Scraper", "Image Generator", "Asset Materializer", "Creative Studio Layout"],
+    vaultKeys: [],
+    artifacts: ["Product Context", "Image Assets", "Reels/Video Assets", "Materialized Pack"],
+    slashCommands: ["/creative", "/크리에이티브"],
+  },
+  {
+    id: "ecommerce-os",
+    slug: "ecommerce-os",
+    name: "커머스 에이전트 OS",
+    nameEn: "E-Commerce Agent OS",
+    tagline: "원프롬프트로 스토어프론트, 결제 연동, 로컬 샌드박스까지 갖춘 커머스 자동화 환경 구축",
+    taglineEn: "Scaffold a complete commerce OS with storefront, payments, and local DB from one prompt",
+    kind: "ai-native",
+    route: "/ecommerce-os",
+    accent: "var(--accent)",
+    engines: ["Commerce Scaffold", "Stripe Checkout Sandbox", "Provider Tasks Scheduler", "Local Commerce Stack"],
+    vaultKeys: ["COMMERCE_PROVIDER_CREDENTIALS", "COMMERCE_DATABASE_API_KEY"],
+    artifacts: ["Team Org Chart", "Service App Scaffold", "Provider Sessions", "Local Dashboard"],
+    slashCommands: ["/ecommerce", "/커머스"],
   },
 ];
 
@@ -98,19 +128,30 @@ export interface AppSlashRoute {
 export function parseAppSlashRoute(input: string): AppSlashRoute | null {
   const trimmed = input.trim();
   if (!trimmed.startsWith("/")) return null;
-  const match = trimmed.match(/^(\S+)(?:\s+([\s\S]*))?$/);
-  if (!match) return null;
-  const command = normalizeSlashCommand(match[1]);
+
+  let bestMatch: AppSlashRoute | null = null;
+  let maxLen = -1;
+  const normalizedInput = normalizeSlashCommand(trimmed);
+
   for (const app of INSTALLED_APPS) {
-    if (app.slashCommands.some((c) => normalizeSlashCommand(c) === command)) {
-      return {
-        app,
-        command: match[1],
-        request: (match[2] ?? "").trim(),
-      };
+    for (const rawCmd of app.slashCommands) {
+      const cmd = normalizeSlashCommand(rawCmd);
+      if (normalizedInput.startsWith(cmd)) {
+        if (normalizedInput.length === cmd.length || normalizedInput[cmd.length] === ' ') {
+          if (cmd.length > maxLen) {
+            maxLen = cmd.length;
+            bestMatch = {
+              app,
+              command: rawCmd,
+              request: trimmed.slice(rawCmd.length).trim(),
+            };
+          }
+        }
+      }
     }
   }
-  return null;
+
+  return bestMatch;
 }
 
 export function buildAppRoutePrompt(

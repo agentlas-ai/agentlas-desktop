@@ -10,6 +10,8 @@ import { MenuBridge } from "./MenuBridge";
 import { UpdateBanner } from "./UpdateBanner";
 import { ImportAgentsModal } from "./ImportAgentsModal";
 import { ipc } from "@/lib/ipc";
+import { TopNavbar } from "./TopNavbar";
+import { usePathname } from "next/navigation";
 import { registerRouter } from "@/lib/navigation";
 
 const ONBOARDED_KEY = "agentlas.onboarded";
@@ -18,6 +20,7 @@ const IMPORT_PROMPTED_KEY = "agentlas.import.prompted";
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [importOpen, setImportOpen] = useState(false);
   const router = useRouter();
+  const pathname = usePathname() ?? "/";
 
   // navigate() 헬퍼가 hard navigation(window.location) 대신 soft navigation을
   // 쓰도록 App Router 인스턴스를 등록한다. static export 셸에서 hard navigation은
@@ -52,31 +55,36 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  const showSidebar = pathname.startsWith("/chat") || pathname.startsWith("/project");
+
   return (
     <div
       style={{
         display: "flex",
+        flexDirection: "column",
         height: "100vh",
         background: "transparent",
         overflow: "hidden",
       }}
     >
-      <MenuBridge />
-      <Sidebar />
-      <main
-        style={{
-          position: "relative",
-          flex: 1,
-          minWidth: 0,
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-          background: "transparent",
-        }}
-      >
-        <UpdateBanner />
-        {children}
-      </main>
+      <TopNavbar />
+      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        {showSidebar && <Sidebar />}
+        <main
+          style={{
+            position: "relative",
+            flex: 1,
+            minWidth: 0,
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+            background: "transparent",
+          }}
+        >
+          <UpdateBanner />
+          {children}
+        </main>
+      </div>
       <ImportAgentsModal
         open={importOpen}
         onClose={() => setImportOpen(false)}

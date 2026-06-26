@@ -453,46 +453,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           gap: 6,
         }}
       >
-        <SidebarSection title={t("sidebar.studio")} icon={<IconFilm size={12} />}>
-          <Link
-            href="/oberon"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              padding: "9px 10px",
-              margin: "0 4px",
-              borderRadius: 10,
-              textDecoration: "none",
-              background: pathname.startsWith("/oberon")
-                ? "linear-gradient(135deg, color-mix(in srgb, var(--accent) 22%, var(--paper)), color-mix(in srgb, var(--purple-deep) 18%, var(--paper)))"
-                : "var(--paper)",
-              border: `1px solid ${pathname.startsWith("/oberon") ? "var(--accent)" : "var(--paper-edge)"}`,
-              boxShadow: "var(--shadow-1)",
-              transition: "all 0.12s",
-            }}
-          >
-            <span
-              style={{
-                width: 26,
-                height: 26,
-                borderRadius: 7,
-                background: "linear-gradient(135deg, var(--accent), var(--purple-deep))",
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "#fff",
-                flexShrink: 0,
-              }}
-            >
-              <IconFilm size={14} />
-            </span>
-            <span style={{ flex: 1, minWidth: 0 }}>
-              <span style={{ display: "block", fontSize: 12.5, fontWeight: 700, color: "var(--ink)", lineHeight: 1.2 }}>{t("sidebar.oberon")}</span>
-              <span style={{ display: "block", fontSize: 9.5, color: "var(--muted-deep)", lineHeight: 1.3 }}>{t("sidebar.oberon_hint")}</span>
-            </span>
-          </Link>
-        </SidebarSection>
+
 
         <SidebarSection
           title={t("sidebar.chats")}
@@ -538,82 +499,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           )}
         </SidebarSection>
 
-        <SidebarSection
-          title={t("sidebar.agents")}
-          icon={<IconWand size={12} />}
-          action={
-            <Link
-              href="/marketplace?tab=agents"
-              style={{ color: "var(--muted-deep)", display: "inline-flex" }}
-              title={t("library.agents.add")}
-            >
-              <IconPlus size={12} />
-            </Link>
-          }
-        >
-          <SidebarLink href="/library/agents" active={pathname.startsWith("/library/agents")}>
-            <IconWand size={13} style={{ color: "var(--accent)" }} />
-            <span style={{ flex: 1 }}>{t("sidebar.manage_agents")}</span>
-            <span style={{ fontSize: 10, color: "var(--muted)" }}>{displayAgents.length}</span>
-          </SidebarLink>
-          <SidebarLink href="/marketplace?tab=agents" active={pathname === "/marketplace"}>
-            <IconStore size={13} style={{ color: "var(--peach-ink)" }} />
-            <span style={{ flex: 1 }}>{t("sidebar.marketplace")}</span>
-            <IconChevronRight size={11} style={{ color: "var(--muted)" }} />
-          </SidebarLink>
-          <SidebarLink href="/cloud" active={pathname.startsWith("/cloud")}>
-            <IconFileUp size={13} style={{ color: "var(--green-deep)" }} />
-            <span style={{ flex: 1 }}>{t("sidebar.cloud_publish")}</span>
-          </SidebarLink>
-        </SidebarSection>
 
-        <SidebarSection
-          title={t("sidebar.firms")}
-          icon={<IconBuilding size={12} />}
-          action={
-            <Link
-              href="/marketplace?tab=firms"
-              style={{ color: "var(--muted-deep)", display: "inline-flex" }}
-              title={t("sidebar.empty_firms_install")}
-            >
-              <IconPlus size={12} />
-            </Link>
-          }
-        >
-          {data.firms.length === 0 ? (
-            <EmptyHint>
-              <Link
-                href="/marketplace?tab=firms"
-                style={{ color: "var(--accent)", fontWeight: 600 }}
-              >
-                + {t("sidebar.empty_firms_install")}
-              </Link>
-              <br />
-              <span style={{ fontSize: 10, color: "var(--muted)" }}>
-                {t("sidebar.empty_firms_hint")}
-              </span>
-            </EmptyHint>
-          ) : (
-            data.firms.slice(0, 6).map((f) => {
-              const active = pathname === "/firm/detail" && currentFirmId === f.id;
-              return (
-                <SidebarLink key={f.id} href={`/firm/detail?id=${f.id}`} active={active}>
-                  <IconBuilding size={12} style={{ color: "var(--accent)" }} />
-                  <span
-                    style={{
-                      flex: 1,
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                    }}
-                  >
-                    {pickLocalized(f, locale).name}
-                  </span>
-                </SidebarLink>
-              );
-            })
-          )}
-        </SidebarSection>
 
         <SidebarSection
           title={t("sidebar.projects")}
@@ -654,72 +540,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           )}
         </SidebarSection>
 
-        <SidebarSection
-          title={t("sidebar.automations")}
-          icon={<IconBolt size={12} />}
-          action={
-            <Link
-              href="/automation/new"
-              style={{ color: "var(--muted-deep)", display: "inline-flex" }}
-            >
-              <IconPlus size={12} />
-            </Link>
-          }
-        >
-          {data.automations.length === 0 ? (
-            <EmptyHint>
-              <Link href="/automation" style={{ color: "var(--accent)", fontWeight: 600 }}>
-                + {t("sidebar.empty_automations")}
-              </Link>
-            </EmptyHint>
-          ) : (
-            data.automations.slice(0, 6).map((a) => {
-              const active = pathname === "/automation/detail" && currentAutomationId === a.id;
-              return (
-                <SidebarLink key={a.id} href={`/automation/detail?id=${a.id}`} active={active}>
-                  <span
-                    style={{
-                      width: 6,
-                      height: 6,
-                      borderRadius: "50%",
-                      background: a.enabled ? "var(--green-deep)" : "var(--paper-edge)",
-                      flexShrink: 0,
-                    }}
-                  />
-                  <span
-                    style={{
-                      flex: 1,
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                    }}
-                  >
-                    {a.name}
-                  </span>
-                  <span style={{ fontSize: 10, color: "var(--muted)" }}>{a.scheduleHuman}</span>
-                </SidebarLink>
-              );
-            })
-          )}
-        </SidebarSection>
 
-        <SidebarSection title={t("sidebar.apps")} icon={<IconApps size={12} />}>
-          <SidebarLink href="/apps" active={pathname.startsWith("/apps")}>
-            <IconApps size={13} style={{ color: "var(--accent)" }} />
-            <span style={{ flex: 1 }}>{t("sidebar.apps_installed")}</span>
-            <span style={{ fontSize: 10, color: "var(--muted)" }}>
-              {INSTALLED_APPS.length + data.generatedApps.filter((app) => app.status !== "archived").length}
-            </span>
-          </SidebarLink>
-          <SidebarLink href="/library/env" active={pathname.startsWith("/library/env")}>
-            <IconKey size={13} style={{ color: "var(--peach-ink)" }} />
-            <span style={{ flex: 1 }}>{t("env.title")}</span>
-          </SidebarLink>
-          <SidebarLink href="/library/mcps" active={pathname.startsWith("/library/mcps")}>
-            <IconSparkles size={13} style={{ color: "var(--purple-deep)" }} />
-            <span style={{ flex: 1 }}>{t("sidebar.apps_engines")}</span>
-          </SidebarLink>
-        </SidebarSection>
       </nav>
 
       <div
@@ -1004,8 +825,9 @@ function labelOfRuntime(s: RuntimeStatus): string {
     openai: "OpenAI",
     google: "Google",
     ollama: "Ollama",
-    upstage: "Solar",
-  }[s.backend];
+    upstage: "Upstage",
+    custom: "Custom",
+  }[s.backend ?? ""];
   return `${kind} · ${backend}`;
 }
 
@@ -1043,63 +865,16 @@ function CollapsedNav({
     badge?: string | number;
   }> = [
     {
-      href: "/oberon",
-      label: t("sidebar.oberon"),
-      icon: <IconFilm size={16} />,
-      isActive: pathname.startsWith("/oberon"),
-    },
-    {
       href: "/",
       label: t("sidebar.chats"),
       icon: <IconChat size={16} />,
       isActive: pathname === "/",
     },
     {
-      href: "/marketplace?tab=firms",
-      label: t("sidebar.firms"),
-      icon: <IconBuilding size={16} />,
-      isActive: pathname.startsWith("/firm"),
-    },
-    {
       href: "/project/new",
       label: t("sidebar.projects"),
       icon: <IconFolder size={16} />,
       isActive: pathname.startsWith("/project"),
-    },
-    {
-      href: "/automation",
-      label: t("sidebar.automations"),
-      icon: <IconBolt size={16} />,
-      isActive: pathname.startsWith("/automation"),
-    },
-    {
-      href: "/marketplace?tab=agents",
-      label: t("sidebar.marketplace"),
-      icon: <IconStore size={16} />,
-      isActive: pathname === "/marketplace",
-    },
-    {
-      href: "/library/agents",
-      label: t("sidebar.agents"),
-      icon: <IconWand size={16} />,
-      isActive: pathname.startsWith("/library/agents"),
-      badge: agentCount > 0 ? agentCount : undefined,
-    },
-    {
-      href: "/cloud",
-      label: t("sidebar.cloud_publish"),
-      icon: <IconFileUp size={16} />,
-      isActive: pathname.startsWith("/cloud"),
-    },
-    {
-      href: "/apps",
-      label: t("sidebar.apps"),
-      icon: <IconApps size={16} />,
-      isActive:
-        pathname.startsWith("/apps") ||
-        pathname.startsWith("/library/env") ||
-        pathname.startsWith("/library/mcps"),
-      badge: appCount > 0 ? appCount : undefined,
     },
   ];
   return (

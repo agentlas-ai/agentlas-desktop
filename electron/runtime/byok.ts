@@ -296,6 +296,83 @@ export const runUpstageByok: Runner = async (
   return { text: acc.trim() };
 };
 
+import { getDb } from "../store/db";
+
+// ── Custom OpenAI-compatible ─────────────────────────────
+export const runCustomByok: Runner = async (
+  req: RunnerRequest,
+  events: RunnerEvents,
+): Promise<RunnerResult> => {
+  const key = await readApiKey("custom");
+  if (!key) throw new Error("Custom API key missing (Settings → BYOK)");
+
+  let baseUrl = "https://api.openai.com/v1";
+  try {
+    const row = getDb().prepare("SELECT value FROM meta WHERE key = 'custom_base_url'").get() as { value: string } | undefined;
+    if (row?.value) {
+      baseUrl = row.value.trim().replace(/\/$/, "");
+    }
+  } catch {}
+
+  events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
+
+  const { model, recent, system } = prepareContext("custom", req, events);
+
+  const messages: Array<{ role: "system" | "user" | "assistant"; content: string | OpenAIContent[] }> = [
+    { role: "system", content: system },
+  ];
+  for (const m of recent) {
+    if (m.role === "user" || m.role === "assistant") {
+      messages.push({ role: m.role, content: m.text });
+    }
+  }
+
+  if (req.images && req.images.length > 0) {
+    const content: OpenAIContent[] = req.images.map((img) => ({
+      type: "image_url" as const,
+      image_url: { url: `data:${img.mediaType};base64,${img.data}` },
+    }));
+    content.push({ type: "text", text: req.userPrompt });
+    messages.push({ role: "user", content });
+  } else {
+    messages.push({ role: "user", content: req.userPrompt });
+  }
+
+  const resp = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+    signal: req.signal,
+    body: JSON.stringify({ model, stream: true, messages }),
+  });
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => "");
+    throw new Error(`Custom API ${resp.status}: ${errText.slice(0, 300)}`);
+  }
+
+  let acc = "";
+  let lastEmit = 0;
+  for await (const line of iterSseLines(resp)) {
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice(5).trim();
+    if (payload === "[DONE]") break;
+    try {
+      const event = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
+      const delta = event.choices?.[0]?.delta?.content;
+      if (delta) {
+        acc += delta;
+        const now = Date.now();
+        if (now - lastEmit > 80) {
+          events.onPartial(acc);
+          lastEmit = now;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return { text: acc.trim() };
+};
+
 // ── Google Generative (Gemini) ───────────────────────────
 // SSE는 :streamGenerateContent?alt=sse 엔드포인트.
 export const runGoogleByok: Runner = async (

@@ -29,6 +29,7 @@ import {
   IconHome,
   IconMegaphone,
   IconMoreHorizontal,
+  IconNetwork,
   IconPlus,
   IconSearch,
   IconShoppingBag,
@@ -97,6 +98,31 @@ function MarketplacePage() {
   const [heroIdx, setHeroIdx] = useState(0);
   // 로그인 세션 — marketplace install은 로그인 필수 (서버에 사용자 묶음 동기화 필요).
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
+  // Hephaestus Network(hep-search) — Cloud+Hub 후보를 엔진 라우터로 직접 검색.
+  const [hephSearching, setHephSearching] = useState(false);
+  const [hephHits, setHephHits] = useState<{ ok: boolean; text: string } | null>(null);
+
+  async function engineSearch() {
+    const api = ipc();
+    if (!api || !q.trim()) return;
+    setHephSearching(true);
+    setHephHits(null);
+    try {
+      const res = await api.hephaestus.search({ query: q.trim(), limit: 10 });
+      const j = (res?.json ?? {}) as Record<string, unknown>;
+      const cands = (j.candidates ?? j.results ?? j.matches ?? []) as unknown[];
+      setHephHits({
+        ok: Boolean(res?.ok),
+        text: res?.ok
+          ? `Hephaestus Network: ${Array.isArray(cands) ? cands.length : 0}개 후보 (Cloud + Hub)`
+          : `엔진 검색 실패: ${res?.error ?? "Hub 연결을 확인하세요"}`,
+      });
+    } catch (e) {
+      setHephHits({ ok: false, text: (e as Error).message });
+    } finally {
+      setHephSearching(false);
+    }
+  }
 
   // 로그인 가드 — 미로그인이면 BrowserWindow 로그인 흐름을 띄우고 결과를 반환.
   // true면 진행해도 OK, false면 사용자가 로그인 취소했으니 install 중단.
@@ -434,7 +460,45 @@ function MarketplacePage() {
               />
             </div>
             <PersonaSelect persona={persona} setPersona={setPersona} t={t} />
+            <button
+              onClick={() => void engineSearch()}
+              disabled={hephSearching || !q.trim()}
+              title="Hephaestus Network 라우터로 Cloud + Hub 후보를 직접 검색"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "9px 14px",
+                borderRadius: 999,
+                border: "1px solid var(--paper-edge)",
+                background: hephSearching || !q.trim() ? "var(--fill-2)" : "var(--fill-1)",
+                color: hephSearching || !q.trim() ? "var(--muted)" : "var(--accent)",
+                cursor: hephSearching || !q.trim() ? "default" : "pointer",
+                fontSize: 12.5,
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+              }}
+            >
+              <IconNetwork size={13} />
+              {hephSearching ? "검색 중…" : "Network 검색"}
+            </button>
           </div>
+          {hephHits && (
+            <div
+              role="status"
+              style={{
+                margin: "0 0 8px",
+                padding: "8px 12px",
+                borderRadius: 10,
+                fontSize: 12.5,
+                border: `1px solid ${hephHits.ok ? "rgba(12,166,120,0.3)" : "var(--paper-edge)"}`,
+                background: "var(--fill-1)",
+                color: hephHits.ok ? "var(--green-deep)" : "var(--muted-deep)",
+              }}
+            >
+              {hephHits.text}
+            </div>
+          )}
 
           {sourceStatus?.usingFallback && (
             <div

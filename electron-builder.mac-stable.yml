@@ -26,6 +26,35 @@ asarUnpack:
   - "**/node_modules/better-sqlite3/**/*"
   - "**/node_modules/keytar/**/*"
 
+# ── Embedded Hephaestus engine + optional Python runtime ─────────────────────
+# Keep the from/to/filter rules in sync with electron-builder.yml's extraResources.
+# This file is a standalone (non-`extends`) duplicate, so without this block the
+# signed/notarized mac release would ship WITHOUT the embedded engine.
+extraResources:
+  - from: Hephaestus
+    to: Hephaestus
+    filter:
+      - "**/*"
+      - "!.git/**"
+      - "!.git"
+      - "!output/**"
+      - "!tests/**"
+      - "!benchmarks/**"
+      - "!examples/**"
+      - "!.playwright-mcp/**"
+      - "!.pytest_cache/**"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+      - "!**/*.pyo"
+      - "!**/.DS_Store"
+  # 선택적 standalone Python. 비우면 시스템 python 폴백; `npm run fetch:python` 으로 채우면 동봉.
+  - from: build-resources/python-runtime
+    to: python-runtime
+    filter:
+      - "**/*"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+
 mac:
   category: public.app-category.productivity
   hardenedRuntime: true
@@ -61,9 +90,11 @@ dmg:
       type: link
       path: /Applications
 
+# 배포 채널: 공개 "릴리스 전용" 레포(agentlas-desktop-releases). 비공개 소스 레포라 컴파일된
+# 바이너리만 공개 레포에 게시한다. (release.yml 의 base 설정과 동일 채널 유지)
 publish:
   - provider: github
     owner: agentlas-ai
-    repo: agentlas-desktop
+    repo: agentlas-desktop-releases
     private: false
     releaseType: release

@@ -67,13 +67,32 @@ import {
 } from "./store/firms";
 import { listAgentFiles, readAgentFile, writeAgentFile } from "./agents/files";
 import { importLocalFolder } from "./agents/import-local";
+import { getDb } from "./store/db";
 import { getResolvedOrg } from "./store/org-spec";
 import { resolveTeamOrg } from "./agents/org-resolver";
 import { isPublicDesktopAgent } from "./agents/policy";
 import { runMcpInvocation } from "./mcp/client";
+// ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
+import { hephaestusAvailable, hephaestusDoctor } from "./hephaestus/engine";
+import {
+  aoGraph,
+  hepNetwork,
+  hepPackage,
+  hepPublish,
+  hepSearch,
+  localGui,
+  securityScan,
+  stormbreakerJournal,
+  stormbreakerRun,
+} from "./hephaestus/commands";
+import { isSupervisorEnabled, setSupervisorEnabled } from "./hephaestus/supervisor";
+import { runHephaestusBuild } from "./hephaestus/builder";
+import type { HephaestusBuildRequest } from "../shared/types";
 import { checkSafely as updaterCheck, getUpdaterState, quitAndInstall as updaterInstall } from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
 import { getAuthSession, signInWithBrowser, signInWithGoogle, signOut } from "./auth";
+import { getUsageSnapshot } from "./usage";
+import { listPendingConfirmations } from "./confirm";
 import { addProjectOntologySource, getProjectOntologyStatus } from "./ontology/project-runtime";
 import {
   createProject,
@@ -231,6 +250,8 @@ interface RunRecord {
   events: McpInvocationEvent[];
 }
 const activeRuns = new Map<string, RunRecord>();
+// Hephaestus 빌더(hep-build) 진행 중 실행 — 취소용 AbortController 레지스트리.
+const activeBuilds = new Map<string, AbortController>();
 // tool 폭주하는 긴 실행/대형 firm 실행의 버퍼 무한증가 방지 상한 (재접속 리플레이는 최근 위주).
 const MAX_BUFFERED_EVENTS = 4000;
 // 단일 partial 텍스트 상한 — 런어웨이 출력(끝없이 스트리밍되는 GUI/서버 로그 등)이
@@ -386,6 +407,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("auth:signInWithBrowser", () => signInWithBrowser());
   ipcMain.handle("auth:signOut", () => signOut());
 
+  // ── usage (LLM 엔진 사용량 — 프로바이더 OAuth usage) ─────
+  ipcMain.handle("usage:snapshot", (_e, opts?: { force?: boolean }) => getUsageSnapshot(opts));
+
+  // ── confirm (확인 요청 — 챗에서 사용자 결정 대기) ────────
+  ipcMain.handle("confirm:listPending", () => listPendingConfirmations());
+
   // ── runtime ─────────────────────────────────────────────
   ipcMain.handle("runtime:detect", () => detectRuntimes());
   ipcMain.handle("runtime:setActive", (_e, selection: RuntimeSelection) =>
@@ -409,6 +436,17 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("secrets:deleteApiKey", (_e, backend: RuntimeBackend) =>
     deleteApiKey(backend),
   );
+  
+  // ── custom backend config ───────────────────────────────
+  ipcMain.handle("config:getCustomBaseUrl", () => {
+    try {
+      const row = getDb().prepare("SELECT value FROM meta WHERE key = 'custom_base_url'").get() as { value: string } | undefined;
+      return row?.value ?? "";
+    } catch { return ""; }
+  });
+  ipcMain.handle("config:setCustomBaseUrl", (_e, url: string) => {
+    getDb().prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('custom_base_url', ?)").run(url);
+  });
 
   // ── env vault (글로벌 외부 API 키) ──────────────────────
   ipcMain.handle("env:list", async () => {
@@ -1109,5 +1147,72 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("invoke:history", (_e, chatId: string) => listChatMessages(chatId));
   ipcMain.handle("invoke:clearHistory", (_e, chatId: string) => {
     clearChatMessages(chatId);
+  });
+
+  // ── Hephaestus 엔진 브리지 ──────────────────────────────────────────────
+  // 임베딩된 오픈소스 엔진(Hephaestus)을 범용 CLI/JSON 으로 호출한다. 엔진 측에는 데스크탑
+  // 흔적이 없고, 모든 연결 코드는 electron/hephaestus/* + 아래 핸들러에만 존재한다.
+  ipcMain.handle("hephaestus:status", () => hephaestusAvailable());
+  ipcMain.handle("hephaestus:doctor", () => hephaestusDoctor());
+  ipcMain.handle(
+    "hephaestus:stormbreaker",
+    (_e, input: { query: string; project?: string; background?: boolean; researchEvidence?: boolean }) =>
+      stormbreakerRun(input.query, {
+        project: input.project,
+        background: input.background,
+        researchEvidence: input.researchEvidence,
+      }),
+  );
+  ipcMain.handle("hephaestus:getSupervisor", () => ({ enabled: isSupervisorEnabled() }));
+  ipcMain.handle("hephaestus:setSupervisor", (_e, enabled: boolean) => setSupervisorEnabled(enabled));
+  ipcMain.handle(
+    "hephaestus:journal",
+    (_e, input: { action: "status" | "verify" | "repair" | "gate"; runId?: string; project?: string }) =>
+      stormbreakerJournal(input.action, { runId: input.runId, project: input.project }),
+  );
+  ipcMain.handle("hephaestus:search", (_e, input: { query: string; limit?: number }) =>
+    hepSearch(input.query, { limit: input.limit }),
+  );
+  ipcMain.handle("hephaestus:network", (_e, input: { query: string; autoRun?: boolean; noOpen?: boolean }) =>
+    hepNetwork(input.query, { autoRun: input.autoRun, noOpen: input.noOpen }),
+  );
+  ipcMain.handle("hephaestus:localGui", (_e, input: { shortcut: string; detach?: boolean; noOpen?: boolean }) =>
+    localGui(input.shortcut, { detach: input.detach, noOpen: input.noOpen }),
+  );
+  ipcMain.handle(
+    "hephaestus:publish",
+    (_e, input: { folder: string; visibility: "private-link" | "marketplace"; dryRun?: boolean }) =>
+      hepPublish(input.folder, input.visibility, { dryRun: input.dryRun }),
+  );
+  ipcMain.handle(
+    "hephaestus:package",
+    (_e, input: { folder: string; visibility?: "private-link" | "marketplace" }) =>
+      hepPackage(input.folder, { visibility: input.visibility }),
+  );
+  ipcMain.handle("hephaestus:securityScan", (_e, input: { folder: string; strict?: boolean }) =>
+    securityScan(input.folder, { strict: input.strict }),
+  );
+  ipcMain.handle("hephaestus:aoGraph", (_e, input?: { agent?: string; dir?: string }) => aoGraph(input ?? {}));
+
+  // 빌더(hep-build) — 활성 런타임으로 Hephaestus 빌더 에이전트를 구동, 이벤트 스트리밍.
+  ipcMain.handle("hephaestus:build", (event, req: HephaestusBuildRequest) => {
+    const runId = randomUUID();
+    const channel = `hephaestus:build:${runId}`;
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const controller = new AbortController();
+    activeBuilds.set(runId, controller);
+    void runHephaestusBuild(
+      runId,
+      req,
+      (ev) => {
+        win?.webContents.send(channel, ev);
+      },
+      controller.signal,
+    ).finally(() => activeBuilds.delete(runId));
+    return { runId };
+  });
+  ipcMain.handle("hephaestus:cancelBuild", (_e, runId: string) => {
+    activeBuilds.get(runId)?.abort();
+    activeBuilds.delete(runId);
   });
 }

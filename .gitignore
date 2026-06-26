@@ -3,10 +3,11 @@ node_modules/
 .pnp
 .pnp.js
 
-# build outputs
+# build outputs (root-anchored — must NOT swallow app routes like
+# renderer/app/(shell)/build/ which is real source, not build output)
 dist/
-out/
-build/
+/out/
+/build/
 .next/
 renderer/.next/
 renderer/out/
@@ -68,3 +69,25 @@ release-signing/
 release-local/
 # large demo/verification outputs
 artifacts/
+
+# ── Embedded engine (separate open-source repo) ──────────────────────────────
+# Hephaestus is its own public repo (github.com/agentlas-ai/Hephaestus). It is
+# embedded into the desktop build at PACKAGE time via electron-builder
+# `extraResources` (filesystem copy, independent of git), NOT tracked here.
+# This keeps the private desktop repo free of the engine source while still
+# shipping the engine inside the .app. Engine must be present on disk to build.
+/Hephaestus/
+# Sibling agent-forge working tree (not shipped)
+/Hephaestus_agent_forge/
+
+# Root-level scratch / one-off scripts (not part of the app)
+/clean_settings.py
+/fix_settings.py
+/make_collapsible.py
+/test_wrap.py
+/fix.js
+/rewrite_panels.js
+/rewrite_safe.js
+/rewrite_settings.js
+/renderer/app/(shell)/library/agents/transform.js
+*.bak

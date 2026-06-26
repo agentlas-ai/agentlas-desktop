@@ -7,34 +7,15 @@ import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type { AppFactoryAppRecord } from "@/lib/types";
 import { sanitizePublicAppCopy } from "@shared/brand-safety";
-import { IconApps, IconChevronRight, IconKey, IconTrash, IconWand } from "@/components/Icon";
-
-const SUPPORT_LINKS = [
-  { href: "/library/env", labelKo: "전역 Env", labelEn: "Global Env", descKo: "모든 에이전트와 앱이 공유하는 자격증명과 환경변수", descEn: "Credentials and environment keys shared by every agent and app", icon: "vault" },
-  { href: "/library/mcps", labelKo: "Plugins", labelEn: "Plugins", descKo: "MCP, 브라우저, 백엔드 커넥터", descEn: "MCP, browser, and backend connectors", icon: "engine" },
-];
+import { IconApps, IconChevronRight, IconWand, IconFilm, IconImage, IconStore } from "@/components/Icon";
 
 export default function AppsPage() {
-  const { locale } = useT();
+  const { locale, t } = useT();
   const router = useRouter();
   const [generatedApps, setGeneratedApps] = useState<AppFactoryAppRecord[]>([]);
-  const [deletingAppId, setDeletingAppId] = useState<string | null>(null);
   const [launching, setLaunching] = useState(false);
-
-  // launchCommand 앱(예: Startup Studio) — 새 채팅을 만들고 그 명령을 자동 전송한다.
-  // GUI 실행은 명령(`/hep-network startup`)이 이미 처리하므로 호스팅/등록이 따로 필요 없다.
-  async function launchHubApp(command: string) {
-    const api = ipc();
-    if (!api || launching) return;
-    setLaunching(true);
-    try {
-      const chat = await api.chats.create({});
-      router.push(`/chat?id=${chat.id}&prompt=${encodeURIComponent(command)}&permission=write`);
-    } catch (err) {
-      window.alert(err instanceof Error ? err.message : String(err));
-      setLaunching(false);
-    }
-  }
+  const [featuredIndex, setFeaturedIndex] = useState(0);
+  const [fadeOpacity, setFadeOpacity] = useState(1);
 
   useEffect(() => {
     const api = ipc();
@@ -48,369 +29,165 @@ export default function AppsPage() {
     };
   }, []);
 
-  async function deleteGeneratedApp(app: AppFactoryAppRecord) {
-    const api = ipc();
-    if (!api || deletingAppId) return;
-    const title = sanitizePublicAppCopy(app.appName || app.manifest.app?.name || app.manifest.title, "Generated App");
-    const ok = window.confirm(
-      locale === "en"
-        ? `Delete ${title} from Apps? It will be kept as a reversible archive.`
-        : `${title}을 Apps에서 삭제할까요? 복원 가능한 archive로 보관됩니다.`,
-    );
-    if (!ok) return;
-    setDeletingAppId(app.id);
-    try {
-      await api.appFactory.archive({ rootPath: app.rootPath });
-      setGeneratedApps((apps) => apps.filter((item) => item.id !== app.id));
-    } catch (err) {
-      window.alert(err instanceof Error ? err.message : String(err));
-    } finally {
-      setDeletingAppId(null);
-    }
-  }
+  // Carousel Effect
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setFadeOpacity(0); // Fade out
+      setTimeout(() => {
+        setFeaturedIndex((prev) => (prev + 1) % INSTALLED_APPS.length);
+        setFadeOpacity(1); // Fade in
+      }, 500); // 500ms fade transition
+    }, 5000); // Change every 5 seconds
+    return () => clearInterval(interval);
+  }, []);
+
+  const featuredApp = INSTALLED_APPS[featuredIndex];
+  const builtInApps = INSTALLED_APPS; // Show all in the grid below
+
+  const getAppBg = (id: string) => {
+    if (id === "creative-studio") return "linear-gradient(135deg, rgba(236,72,153,0.4), rgba(0,0,0,0.8))";
+    if (id === "ecommerce-os") return "linear-gradient(135deg, rgba(59,130,246,0.4), rgba(0,0,0,0.8))";
+    if (id === "document-studio") return "linear-gradient(135deg, rgba(16,185,129,0.4), rgba(0,0,0,0.8))";
+    if (id === "oberon") return "linear-gradient(135deg, rgba(132,94,247,0.4), rgba(0,0,0,0.8))";
+    return "linear-gradient(135deg, rgba(255,255,255,0.2), rgba(0,0,0,0.8))";
+  };
 
   return (
-    <div style={{ flex: 1, minHeight: 0, overflowY: "auto", background: "var(--paper)" }}>
-      <header
-        className="titlebar-drag glass-thin"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          padding: "16px 32px 14px 90px",
-          borderBottom: "1px solid var(--glass-border)",
-          minHeight: 64,
-        }}
-      >
-        <div
-          style={{
-            width: 34,
-            height: 34,
-            borderRadius: 8,
-            background: "var(--paper)",
-            border: "1px solid var(--paper-edge)",
-            boxShadow: "var(--neu-raised)",
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "var(--accent)",
-          }}
-        >
-          <IconApps size={18} />
-        </div>
-        <div style={{ minWidth: 0 }}>
-          <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 20, lineHeight: 1.15 }}>Apps</h1>
-          <p style={{ margin: "3px 0 0", color: "var(--muted-deep)", fontSize: 12.5 }}>
-            {locale === "en"
-              ? "First-party Apps open here; Generated Apps stay listed here and run as local web apps."
-              : "1st-party Apps는 여기서 열리고, Generated Apps는 목록에 남긴 뒤 로컬 웹앱으로 실행합니다."}
-          </p>
-        </div>
-      </header>
+    <div style={{ width: "100%", height: "100%", overflowY: "auto", background: "#000", color: "#fff", display: "block" }}>
+      {/* Netflix-style Hero Section */}
+      {featuredApp && (
+        <section style={{ 
+          position: "relative", 
+          width: "100%", 
+          height: 480, 
+          display: "flex", 
+          flexDirection: "column", 
+          justifyContent: "flex-end", 
+          padding: "40px 60px",
+          background: `linear-gradient(to top, #000 0%, transparent 100%), ${getAppBg(featuredApp.id)}`,
+          borderBottom: "1px solid rgba(255,255,255,0.1)",
+          transition: "opacity 0.5s ease-in-out",
+          opacity: fadeOpacity,
+          flexShrink: 0
+        }}>
+          <div style={{ position: "relative", zIndex: 10, maxWidth: 600 }}>
+            <h1 style={{ fontSize: 48, fontWeight: 800, margin: "0 0 16px", fontFamily: "var(--font-head)", letterSpacing: -1, textShadow: "0 4px 20px rgba(0,0,0,0.5)" }}>
+              {pickLocalized(featuredApp, locale).name}
+            </h1>
+            <p style={{ fontSize: 16, color: "rgba(255,255,255,0.8)", lineHeight: 1.5, margin: "0 0 24px", textShadow: "0 2px 10px rgba(0,0,0,0.5)" }}>
+              {pickLocalized(featuredApp, locale).tagline}
+            </p>
+            <div style={{ display: "flex", gap: 12 }}>
+              <Link href={featuredApp.launchCommand ? `${featuredApp.route}?cmd=${encodeURIComponent(featuredApp.launchCommand)}` : featuredApp.route} style={{ 
+                background: "#fff", color: "#000", padding: "12px 28px", borderRadius: 8, 
+                fontWeight: 700, fontSize: 16, textDecoration: "none", display: "flex", alignItems: "center", gap: 8,
+                transition: "transform 0.2s"
+              }} className="hero-btn">
+                <IconApps size={20} /> {t("settings.update.install") || "Get Started"}
+              </Link>
+            </div>
+          </div>
+        </section>
+      )}
 
-      <main style={pageMain}>
+      <main style={{ padding: "30px 60px 60px", display: "flex", flexDirection: "column", gap: 40, overflowX: "hidden" }}>
+        
+        {/* Built-in Apps Grid */}
         <section>
-          <h2 style={sectionTitle}>{locale === "en" ? "Installed Apps" : "설치된 Apps"}</h2>
-          <div style={appList}>
-            {INSTALLED_APPS.map((app) => {
-              const loc = pickLocalized(app, locale);
-              const inner = (
-                <>
-                  <div style={appIcon}>
-                    <IconApps size={20} />
+          <h2 style={{ fontSize: 20, fontWeight: 700, margin: "0 0 16px", color: "#fff", display: "flex", alignItems: "center", gap: 8 }}>
+            First-Party Studio
+          </h2>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 20 }}>
+            {builtInApps.map((app) => (
+                  <Link 
+                key={app.id} 
+                href={app.launchCommand ? `${app.route}?cmd=${encodeURIComponent(app.launchCommand)}` : app.route} 
+                className="netflix-card"
+                style={{ 
+                  borderRadius: 12, 
+                  background: "#141414", 
+                  border: "1px solid rgba(255,255,255,0.1)",
+                  textDecoration: "none", 
+                  color: "inherit",
+                  display: "flex",
+                  flexDirection: "column",
+                  overflow: "hidden",
+                  transition: "transform 0.3s, box-shadow 0.3s",
+                }}
+              >
+                <div style={{ height: 140, background: app.accent || "linear-gradient(135deg, #333, #111)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>
+                  {app.id === "creative-studio" ? <IconImage size={40} /> : app.id === "ecommerce-os" ? <IconStore size={40} /> : <IconApps size={40} />}
+                </div>
+                <div style={{ padding: 16 }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, margin: "0 0 6px", color: "#fff" }}>{pickLocalized(app, locale).name}</div>
+                  <div style={{ fontSize: 13, color: "rgba(255,255,255,0.5)", lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+                    {pickLocalized(app, locale).tagline}
                   </div>
-                  <div style={appBody}>
-                    <div style={appTitleLine}>
-                      <strong style={appName}>{loc.name}</strong>
-                      <span style={appKind}>{locale === "en" ? "Installed" : "설치됨"}</span>
-                    </div>
-                    <span style={appDescription} title={loc.tagline}>
-                      {loc.tagline}
-                    </span>
-                    <div style={pillRow}>
-                      {app.artifacts.map((artifact) => (
-                        <span key={artifact} style={pill}>{artifact}</span>
-                      ))}
-                    </div>
-                  </div>
-                  <IconChevronRight size={14} style={chevronStyle} />
-                </>
-              );
-              // launchCommand 앱: in-app route 대신 새 채팅에서 명령 실행 (GUI는 그 명령이 띄움).
-              if (app.launchCommand) {
-                return (
-                  <button
-                    key={app.id}
-                    type="button"
-                    onClick={() => void launchHubApp(app.launchCommand!)}
-                    disabled={launching}
-                    className="glass-strong"
-                    style={{ ...appTile, textAlign: "left", border: "none", cursor: launching ? "default" : "pointer", opacity: launching ? 0.7 : 1, font: "inherit" }}
-                  >
-                    {inner}
-                  </button>
-                );
-              }
-              return (
-                <Link key={app.id} href={app.route} className="glass-strong" style={appTile}>
-                  {inner}
-                </Link>
-              );
-            })}
+                </div>
+              </Link>
+            ))}
           </div>
         </section>
 
+        {/* Generated Apps Grid */}
         {generatedApps.length > 0 && (
           <section>
-            <h2 style={sectionTitle}>{locale === "en" ? "Generated Apps" : "생성된 Apps"}</h2>
-            <div style={appList}>
+            <h2 style={{ fontSize: 20, fontWeight: 700, margin: "0 0 16px", color: "#fff", display: "flex", alignItems: "center", gap: 8 }}>
+              Agent Generated Apps
+            </h2>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 20 }}>
               {generatedApps.map((app) => {
-                const title = sanitizePublicAppCopy(app.appName || app.manifest.app?.name || app.manifest.title, "Generated App");
-                const description = app.manifest.description;
-                const scaffoldMeta = app.scaffold as typeof app.scaffold & {
-                  runtimeEngine?: string;
-                  version?: string;
-                  fileCount?: number;
-                  launchUrl?: string;
-                  runtimeMode?: string;
-                };
-                const isCloudApp = app.rootPath.startsWith("agentlas-cloud://");
-                const tagline = sanitizePublicAppCopy(
-                  app.manifest.app?.valueProp ||
-                  (typeof description === "string" ? description : "") ||
-                  (locale === "en" ? "Agent-made local web app registered in Apps" : "Apps에 등록된 에이전트 생성 로컬 웹앱"),
-                  locale === "en" ? "Agent-made local web app registered in Apps" : "Apps에 등록된 에이전트 생성 로컬 웹앱",
-                );
-                const artifacts = isCloudApp
-                  ? [
-                      locale === "en" ? "cloud" : "클라우드",
-                      scaffoldMeta.version ? `v${scaffoldMeta.version}` : "",
-                      sanitizePublicAppCopy(scaffoldMeta.launchUrl || scaffoldMeta.runtimeEngine || "launch URL", "launch URL"),
-                    ].filter(Boolean)
-                  : [
-                      sanitizePublicAppCopy(scaffoldMeta.runtimeMode || "local web app", "local web app"),
-                      scaffoldMeta.launchUrl || "localhost",
-                      sanitizePublicAppCopy(app.manifest.domain || app.manifest.layout, app.manifest.layout),
-                    ].filter(Boolean);
+                const title = sanitizePublicAppCopy(app.appName || app.manifest?.app?.name || app.manifest?.title, "Generated App");
+                const tagline = sanitizePublicAppCopy(app.manifest?.app?.valueProp || app.manifest?.description || "Agent-made web app", "Agent-made web app");
                 return (
-                  <div key={app.id} className="glass-strong" style={{ ...appTile, position: "relative", paddingRight: 58 }}>
-                    <Link href={`/apps/generated?id=${app.id}`} style={appTileLink}>
-                      <div style={{ ...appIcon, background: "linear-gradient(135deg, var(--green), var(--accent))" }}>
-                        <IconWand size={20} />
+                  <Link 
+                    key={app.id} 
+                    href={`/apps/generated?id=${app.id}`}
+                    className="netflix-card"
+                    style={{ 
+                      borderRadius: 12, 
+                      background: "#141414", 
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      textDecoration: "none", 
+                      color: "inherit",
+                      display: "flex",
+                      flexDirection: "column",
+                      overflow: "hidden",
+                      transition: "transform 0.3s, box-shadow 0.3s",
+                    }}
+                  >
+                    <div style={{ height: 140, background: "linear-gradient(135deg, #1f2937, #111827)", position: "relative" }}>
+                      <div style={{ position: "absolute", top: 12, right: 12, background: "rgba(0,0,0,0.6)", padding: "4px 8px", borderRadius: 4, fontSize: 10, fontWeight: 700 }}>GENERATED</div>
+                      <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <IconWand size={40} style={{ color: "#3b82f6" }} />
                       </div>
-                      <div style={appBody}>
-                        <div style={appTitleLine}>
-                          <strong style={appName}>{title}</strong>
-                          <span style={appKind}>
-                            {isCloudApp ? (locale === "en" ? "Cloud" : "클라우드") : (locale === "en" ? "Generated" : "생성됨")}
-                          </span>
-                        </div>
-                        <span style={appDescription} title={tagline}>
-                          {tagline}
-                        </span>
-                        <div style={pillRow}>
-                          {artifacts.map((artifact) => (
-                            <span key={artifact} style={pill}>{artifact}</span>
-                          ))}
-                        </div>
+                    </div>
+                    <div style={{ padding: 16 }}>
+                      <div style={{ fontSize: 15, fontWeight: 700, margin: "0 0 6px", color: "#fff" }}>{title}</div>
+                      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+                        {tagline}
                       </div>
-                    </Link>
-                    <button
-                      type="button"
-                      onClick={() => void deleteGeneratedApp(app)}
-                      disabled={deletingAppId === app.id}
-                      aria-label={locale === "en" ? `Delete ${title}` : `${title} 삭제`}
-                      title={locale === "en" ? "Delete App" : "App 삭제"}
-                      style={deleteButton}
-                    >
-                      <IconTrash size={14} />
-                    </button>
-                    <IconChevronRight size={14} style={chevronStyle} />
-                  </div>
+                    </div>
+                  </Link>
                 );
               })}
             </div>
           </section>
         )}
-
-        <section>
-          <h2 style={sectionTitle}>{locale === "en" ? "Runtime Support" : "실행 보조"}</h2>
-          <div style={supportGrid}>
-            {SUPPORT_LINKS.map((item) => (
-              <Link key={item.href} href={item.href} className="neu" style={supportTile}>
-                {item.icon === "vault" ? <IconKey size={16} /> : <IconWand size={16} />}
-                <span style={{ minWidth: 0, flex: 1 }}>
-                  <strong style={{ display: "block", color: "var(--ink)", fontSize: 13 }}>{locale === "en" ? item.labelEn : item.labelKo}</strong>
-                  <span style={{ display: "block", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.4 }}>
-                    {locale === "en" ? item.descEn : item.descKo}
-                  </span>
-                </span>
-                <IconChevronRight size={12} style={{ color: "var(--muted)" }} />
-              </Link>
-            ))}
-          </div>
-        </section>
       </main>
+
+      <style dangerouslySetInnerHTML={{ __html: `
+        .hero-btn:hover {
+          transform: scale(1.05);
+        }
+        .netflix-card:hover {
+          transform: translateY(-4px) scale(1.02);
+          box-shadow: 0 12px 30px rgba(0,0,0,0.5);
+          border-color: rgba(255,255,255,0.3) !important;
+          z-index: 10;
+        }
+      `}} />
     </div>
   );
 }
 
-const pageMain: React.CSSProperties = {
-  width: "100%",
-  maxWidth: 1040,
-  padding: "30px 32px 44px",
-  display: "grid",
-  gap: 26,
-};
-
-const sectionTitle: React.CSSProperties = {
-  margin: "0 0 10px",
-  fontFamily: "var(--font-head)",
-  fontSize: 15,
-  color: "var(--ink)",
-};
-
-const appList: React.CSSProperties = {
-  width: "100%",
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(min(340px, 100%), 1fr))",
-  gap: 10,
-};
-
-const appTile: React.CSSProperties = {
-  width: "100%",
-  minHeight: 92,
-  height: "100%",
-  borderRadius: 8,
-  padding: 14,
-  textDecoration: "none",
-  color: "inherit",
-  display: "flex",
-  alignItems: "flex-start",
-  gap: 13,
-};
-
-const appTileLink: React.CSSProperties = {
-  minWidth: 0,
-  flex: 1,
-  display: "flex",
-  alignItems: "flex-start",
-  gap: 13,
-  color: "inherit",
-  textDecoration: "none",
-};
-
-const appIcon: React.CSSProperties = {
-  width: 42,
-  height: 42,
-  borderRadius: 8,
-  background: "linear-gradient(135deg, var(--accent), var(--peach))",
-  color: "white",
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  boxShadow: "var(--neu-raised-strong)",
-  flexShrink: 0,
-};
-
-const appBody: React.CSSProperties = {
-  minWidth: 0,
-  flex: 1,
-  display: "flex",
-  flexDirection: "column",
-  gap: 4,
-};
-
-const appTitleLine: React.CSSProperties = {
-  minWidth: 0,
-  display: "flex",
-  alignItems: "baseline",
-  gap: 8,
-};
-
-const appName: React.CSSProperties = {
-  minWidth: 0,
-  display: "block",
-  color: "var(--ink)",
-  fontSize: 14.5,
-  lineHeight: 1.25,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const appKind: React.CSSProperties = {
-  flexShrink: 0,
-  color: "var(--muted)",
-  fontSize: 11,
-  fontWeight: 700,
-};
-
-const appDescription: React.CSSProperties = {
-  display: "-webkit-box",
-  WebkitBoxOrient: "vertical",
-  WebkitLineClamp: 2,
-  overflow: "hidden",
-  color: "var(--muted-deep)",
-  fontSize: 12.2,
-  lineHeight: 1.45,
-  maxWidth: 720,
-};
-
-const pillRow: React.CSSProperties = {
-  display: "flex",
-  gap: 6,
-  flexWrap: "wrap",
-  marginTop: 5,
-};
-
-const pill: React.CSSProperties = {
-  maxWidth: "100%",
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  padding: "3px 7px",
-  borderRadius: 999,
-  background: "var(--fill-1)",
-  color: "var(--accent)",
-  fontSize: 10.5,
-  fontWeight: 700,
-};
-
-const chevronStyle: React.CSSProperties = {
-  color: "var(--muted-deep)",
-  flexShrink: 0,
-  marginTop: 14,
-};
-
-const deleteButton: React.CSSProperties = {
-  position: "absolute",
-  top: 12,
-  right: 28,
-  width: 28,
-  height: 28,
-  borderRadius: 6,
-  border: "1px solid var(--paper-edge)",
-  background: "var(--paper)",
-  color: "var(--muted-deep)",
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-};
-
-const supportGrid: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-  gap: 10,
-};
-
-const supportTile: React.CSSProperties = {
-  padding: 12,
-  borderRadius: 8,
-  display: "flex",
-  alignItems: "center",
-  gap: 10,
-  textDecoration: "none",
-  color: "var(--ink-soft)",
-};

@@ -36,6 +36,12 @@ const api: AgentlasIpc = {
     signInWithBrowser: () => ipcRenderer.invoke("auth:signInWithBrowser"),
     signOut: () => ipcRenderer.invoke("auth:signOut"),
   },
+  usage: {
+    snapshot: (opts?: { force?: boolean }) => ipcRenderer.invoke("usage:snapshot", opts),
+  },
+  confirm: {
+    listPending: () => ipcRenderer.invoke("confirm:listPending"),
+  },
   updater: {
     getState: () => ipcRenderer.invoke("updater:getState"),
     check: () => ipcRenderer.invoke("updater:check"),
@@ -52,6 +58,10 @@ const api: AgentlasIpc = {
     listCommands: () => ipcRenderer.invoke("runtime:listCommands"),
     listModels: (sel) => ipcRenderer.invoke("runtime:listModels", sel),
     installAgentlasCli: () => ipcRenderer.invoke("runtime:installAgentlasCli"),
+  },
+  config: {
+    getCustomBaseUrl: () => ipcRenderer.invoke("config:getCustomBaseUrl"),
+    setCustomBaseUrl: (url: string) => ipcRenderer.invoke("config:setCustomBaseUrl", url),
   },
   secrets: {
     saveApiKey: (backend: RuntimeBackend, key: string) =>
@@ -244,6 +254,24 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("invoke:clearHistory", chatId),
     activeChats: () => ipcRenderer.invoke("invoke:activeChats"),
     attach: (chatId: string) => ipcRenderer.invoke("invoke:attach", chatId),
+  },
+  hephaestus: {
+    status: () => ipcRenderer.invoke("hephaestus:status"),
+    doctor: () => ipcRenderer.invoke("hephaestus:doctor"),
+    stormbreaker: (input) => ipcRenderer.invoke("hephaestus:stormbreaker", input),
+    getSupervisor: () => ipcRenderer.invoke("hephaestus:getSupervisor"),
+    setSupervisor: (enabled: boolean) => ipcRenderer.invoke("hephaestus:setSupervisor", enabled),
+    journal: (input) => ipcRenderer.invoke("hephaestus:journal", input),
+    search: (input) => ipcRenderer.invoke("hephaestus:search", input),
+    network: (input) => ipcRenderer.invoke("hephaestus:network", input),
+    localGui: (input) => ipcRenderer.invoke("hephaestus:localGui", input),
+    publish: (input) => ipcRenderer.invoke("hephaestus:publish", input),
+    package: (input) => ipcRenderer.invoke("hephaestus:package", input),
+    securityScan: (input) => ipcRenderer.invoke("hephaestus:securityScan", input),
+    aoGraph: (input) => ipcRenderer.invoke("hephaestus:aoGraph", input),
+    build: (input) => ipcRenderer.invoke("hephaestus:build", input),
+    buildEventChannel: (runId: string) => `hephaestus:build:${runId}`,
+    cancelBuild: (runId: string) => ipcRenderer.invoke("hephaestus:cancelBuild", runId),
   },
 };
 

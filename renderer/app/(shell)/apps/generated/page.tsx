@@ -43,7 +43,7 @@ export default function GeneratedAppPage() {
     };
   }, [locale]);
 
-  const appName = sanitizePublicAppCopy(app?.appName || app?.manifest.app?.name || app?.manifest.title, "Generated App");
+  const appName = sanitizePublicAppCopy(app?.appName || app?.manifest?.app?.name || app?.manifest?.title, "Generated App");
 
   if (loading) {
     return (
@@ -87,7 +87,7 @@ export default function GeneratedAppPage() {
   return (
     <GeneratedShell
       title={appName}
-      subtitle={sanitizePublicAppCopy(app.manifest.domain || app.manifest.layout, app.manifest.layout)}
+      subtitle={sanitizePublicAppCopy(app.manifest?.domain || app.manifest?.layout, app.manifest?.layout)}
       actions={
         <>
           <Link
@@ -230,7 +230,7 @@ function ExternalGeneratedAppManager({ app }: { app: AppFactoryAppRecord }) {
       <section style={managerHero}>
         <div style={{ minWidth: 0 }}>
           <div style={managerEyebrow}>{runtimeLabel}</div>
-          <h2 style={managerTitle}>{app.appName || app.manifest.app?.name || app.manifest.title}</h2>
+          <h2 style={managerTitle}>{app.appName || app.manifest?.app?.name || app.manifest?.title}</h2>
           <p style={managerCopy}>
             {locale === "en"
               ? "This generated App stays listed in Agentlas. The user app runs outside the Desktop renderer as a localhost web app."
@@ -266,7 +266,7 @@ function ExternalGeneratedAppManager({ app }: { app: AppFactoryAppRecord }) {
         <article style={panel}>
           <h3 style={panelTitle}>{locale === "en" ? "Registry state" : "등록 상태"}</h3>
           <SummaryRow label="Status" value={app.status} />
-          <SummaryRow label="Domain" value={app.domain || app.manifest.domain || "generated-app"} />
+          <SummaryRow label="Domain" value={app.domain || app.manifest?.domain || "generated-app"} />
           <SummaryRow label="Files" value={String(app.scaffold.files.length)} />
           <SummaryRow label="Updated" value={new Date(app.updatedAt).toLocaleString()} />
         </article>

@@ -25,6 +25,40 @@ asarUnpack:
   - "**/node_modules/better-sqlite3/**/*"
   - "**/node_modules/keytar/**/*"
 
+# ── Embedded Hephaestus engine ───────────────────────────────────────────────
+# Hephaestus is a separate open-source repo (git-ignored here). It is copied into
+# the packaged app from the on-disk folder — independent of git tracking — so the
+# private desktop repo never holds engine source while the shipped .app still
+# embeds it. Lands at <app>/Contents/Resources/Hephaestus (process.resourcesPath),
+# OUTSIDE the asar so bin/hephaestus + the Python tree stay executable.
+# Heavy, non-runtime dirs (render output, tests, vendored caches, git) excluded.
+extraResources:
+  - from: Hephaestus
+    to: Hephaestus
+    filter:
+      - "**/*"
+      - "!.git/**"
+      - "!.git"
+      - "!output/**"
+      - "!tests/**"
+      - "!benchmarks/**"
+      - "!examples/**"
+      - "!.playwright-mcp/**"
+      - "!.pytest_cache/**"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+      - "!**/*.pyo"
+      - "!**/.DS_Store"
+  # 선택적 standalone Python 런타임. 기본은 빈 디렉터리(.gitkeep만) → 시스템 python 폴백.
+  # `npm run fetch:python` 으로 현재 플랫폼용 python-build-standalone 을 채우면, 그대로 동봉되어
+  # Python 미설치 머신에서도 엔진이 동작한다. 엔진 폴더가 아니라 데스크탑 리소스에 둔다(엔진 청결 유지).
+  - from: build-resources/python-runtime
+    to: python-runtime
+    filter:
+      - "**/*"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+
 # macOS first — Hardened Runtime + notarization 준비
 mac:
   category: public.app-category.productivity
@@ -97,9 +131,13 @@ linux:
   icon: build-resources/icon-1024.png
   artifactName: "Agentlas-${version}-Linux-x64.${ext}"
 
+# 배포 채널: 공개 "릴리스 전용" 레포. 데스크탑 SOURCE 레포(agentlas-desktop)는 비공개라 공개
+# 다운로드를 못 주므로, 컴파일된 바이너리만 이 공개 레포에 게시한다(소스 노출 없음). electron-builder
+# 가 산출물 + latest*.yml 을 여기에 올리고 electron-updater 가 폴링한다.
+# CI 는 AGENTLAS_DESKTOP_RELEASE_TOKEN(크로스-레포 PAT)으로 publish.
 publish:
   - provider: github
     owner: agentlas-ai
-    repo: agentlas-desktop
+    repo: agentlas-desktop-releases
     private: false
     releaseType: release

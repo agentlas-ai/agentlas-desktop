@@ -236,6 +236,18 @@ export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[
   return rows.map((r) => ({ id: r.id, role: r.role, text: r.text, createdAt: r.created_at }));
 }
 
+/** 채팅의 가장 마지막 메시지 1개 (확인 대기 판별용 — 마지막이 미답변 질문 fence면 pending). */
+export function getLastChatMessage(chatId: string): ChatHistoryEntry | null {
+  const row = getDb()
+    .prepare(
+      "SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1",
+    )
+    .get(chatId) as MessageRow | undefined;
+  return row
+    ? { id: row.id, role: row.role, text: row.text, createdAt: row.created_at }
+    : null;
+}
+
 export function clearChatMessages(chatId: string): void {
   getDb().prepare("DELETE FROM chat_messages WHERE chat_id = ?").run(chatId);
 }

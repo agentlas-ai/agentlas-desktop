@@ -1,0 +1,5 @@
+# 선택적 standalone Python 런타임 위치.
+# 비어 있으면 앱은 시스템 python3(3.9+)을 사용한다(graceful degrade).
+# `npm run fetch:python` 으로 현재 플랫폼용 python-build-standalone 을 여기에 채우면,
+# 빌드 시 <app>/Contents/Resources/python-runtime 으로 동봉되어 Python 미설치 머신에서도 동작한다.
+# (이 디렉터리는 데스크탑 리소스이며 Hephaestus 엔진 폴더와 무관 — 엔진은 깨끗하게 유지된다.)

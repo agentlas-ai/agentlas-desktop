@@ -291,7 +291,7 @@ function Highlight({
 }
 
 // BYOK는 클라우드 키 3종 (Ollama는 로컬이라 키 입력 없음 — 감지된 LLM 목록에 자동 표시).
-type ByokBackend = "anthropic" | "openai" | "google" | "upstage";
+type ByokBackend = "anthropic" | "openai" | "google" | "upstage" | "custom";
 
 // ── Step 2: LLM 연결 ───────────────────────────────────────
 function StepBackend() {
@@ -303,13 +303,16 @@ function StepBackend() {
     openai: "",
     google: "",
     upstage: "",
+    custom: "",
   });
   const [savedKey, setSavedKey] = useState<Record<ByokBackend, boolean>>({
     anthropic: false,
     openai: false,
     google: false,
     upstage: false,
+    custom: false,
   });
+  const [draftCustomBaseUrl, setDraftCustomBaseUrl] = useState("");
   const [saving, setSaving] = useState<ByokBackend | null>(null);
 
   async function refresh() {
@@ -318,15 +321,18 @@ function StepBackend() {
       setLoading(false);
       return;
     }
-    const [s, a, o, g, u] = await Promise.all([
+    const [s, a, o, g, u, c, baseUrl] = await Promise.all([
       api.runtime.detect(),
       api.secrets.hasApiKey("anthropic"),
       api.secrets.hasApiKey("openai"),
       api.secrets.hasApiKey("google"),
       api.secrets.hasApiKey("upstage"),
+      api.secrets.hasApiKey("custom"),
+      api.config.getCustomBaseUrl(),
     ]);
     setStatuses(s);
-    setSavedKey({ anthropic: a, openai: o, google: g, upstage: u });
+    setSavedKey({ anthropic: a, openai: o, google: g, upstage: u, custom: c });
+    setDraftCustomBaseUrl(baseUrl);
     setLoading(false);
   }
   useEffect(() => {
@@ -339,6 +345,9 @@ function StepBackend() {
     setSaving(backend);
     try {
       await api.secrets.saveApiKey(backend, draft[backend]);
+      if (backend === "custom") {
+        await api.config.setCustomBaseUrl(draftCustomBaseUrl);
+      }
       setDraft((d) => ({ ...d, [backend]: "" }));
       await refresh();
     } finally {
@@ -347,7 +356,7 @@ function StepBackend() {
   }
 
   const hasAnyBackend =
-    statuses.length > 0 || savedKey.anthropic || savedKey.openai || savedKey.google || savedKey.upstage;
+    statuses.length > 0 || savedKey.anthropic || savedKey.openai || savedKey.google || savedKey.upstage || savedKey.custom;
 
   return (
     <div>
@@ -474,7 +483,7 @@ function StepBackend() {
           >
             {t("onb.backend.byok_title")}
           </h3>
-          {(["anthropic", "openai", "google", "upstage"] as ByokBackend[]).map((b) => (
+          {(["anthropic", "openai", "google", "upstage", "custom"] as ByokBackend[]).map((b) => (
             <div
               key={b}
               style={{
@@ -489,6 +498,24 @@ function StepBackend() {
               }}
             >
               <strong style={{ fontSize: 12, minWidth: 90 }}>{backendLabel(b)}</strong>
+              {b === "custom" && (
+                <input
+                  type="text"
+                  value={draftCustomBaseUrl}
+                  onChange={(e) => setDraftCustomBaseUrl(e.target.value)}
+                  placeholder="Base URL (e.g. https://api.deepseek.com/v1)"
+                  style={{
+                    flex: 1,
+                    padding: "6px 10px",
+                    fontSize: 12,
+                    fontFamily: "var(--font-mono)",
+                    border: "1px solid var(--paper-edge)",
+                    borderRadius: "var(--radius-md)",
+                    background: "var(--paper-2)",
+                    outline: "none",
+                  }}
+                />
+              )}
               <input
                 type="password"
                 value={draft[b]}
@@ -568,6 +595,7 @@ function backendLabel(b: RuntimeBackend) {
     google: "Google",
     ollama: "로컬 모델",
     upstage: "Upstage Solar",
+    custom: "Custom OpenAI",
   }[b];
 }
 

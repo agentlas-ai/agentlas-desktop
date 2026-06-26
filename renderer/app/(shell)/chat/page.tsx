@@ -2,7 +2,7 @@
 // 헤더: 채팅 제목(인라인 편집), 에이전트 정보, 삭제 버튼.
 // 본문: ChatStream + 입력창.
 "use client";
-import { Suspense, useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState, useMemo, type Dispatch, type SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type {
@@ -322,6 +322,32 @@ function ChatPage() {
   const [resolvedOrg, setResolvedOrg] = useState<ResolvedOrg | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [messages, setMessages] = useState<StreamMessage[]>([]);
+
+  // Context Volume Management
+  const maxTokens = 100000;
+  const currentTokens = useMemo(() => {
+    return messages.reduce((acc, msg) => acc + (msg.tokens ?? Math.floor((msg.text?.length || 0) / 4)), 0);
+  }, [messages]);
+
+  // Codex-style Auto Compression
+  useEffect(() => {
+    if (currentTokens > maxTokens && messages.length > 2) {
+      setMessages((prev) => {
+        const toCompress = prev.slice(0, prev.length - 2);
+        const tail = prev.slice(prev.length - 2);
+        
+        if (toCompress.length === 1 && toCompress[0].id === "system-compressed") return prev;
+
+        const compressedMsg: StreamMessage = {
+          id: "system-compressed",
+          role: "system",
+          text: "이전 대화가 자동으로 압축되었습니다 (Context auto-compressed to save tokens).",
+          tokens: 50,
+        };
+        return [compressedMsg, ...tail];
+      });
+    }
+  }, [currentTokens, maxTokens, messages.length]);
   const [busy, setBusy] = useState(false);
   // 멀티 에이전트 실시간 텔레메트리 — 속성(agentId) 이벤트로 채워지는 네트워크 패널 상태.
   const [liveAgents, setLiveAgents] = useState<Record<string, LiveAgent>>({});
@@ -864,7 +890,7 @@ function ChatPage() {
       const goalPrompt = parseGoalSlash(userPrompt);
       const routeInput = goalPrompt ?? userPrompt;
       const appRoute = parseAppSlashRoute(routeInput);
-      if (appRoute && !appRoute.request) {
+      if (appRoute && !appRoute.request && appRoute.app.route !== "/chat") {
         router.push(appRoute.app.route);
         return;
       }
@@ -1410,17 +1436,6 @@ function ChatPage() {
       });
   }, []);
 
-  // 홈 composer에서 ?prompt=...로 넘어왔으면 chat + agent 로드 직후 자동 전송
-  useEffect(() => {
-    if (!seedPrompt || !chat || !agent) return;
-    if (seededRef.current === chatId) return;
-    if (messages.length > 0) return; // 이미 히스토리 있으면 무시
-    seededRef.current = chatId;
-    void send(seedPrompt, { permissions: seedPermission ?? DEFAULT_PERMISSION });
-    // URL에서 prompt 파라미터 제거 — 새로고침에서 중복 전송 안 되도록
-    router.replace(`/chat?id=${chatId}`);
-  }, [seedPrompt, chat, agent, chatId, messages.length, send, router]);
-
   // 슬래시 커맨드 실행 — /new(새 채팅) /clear(기록 지우기) /help(단축키)
   const handleCommand = useCallback(
     (cmd: string) => {
@@ -1454,10 +1469,35 @@ function ChatPage() {
         setEditingTitle(true);
       } else if (cmd === "/help") {
         setMessages((m) => [...m, { id: uid(), role: "system", text: t("chatinput.cmd.help_text") }]);
+      } else {
+        // Fallback for app slash commands like /hep-network startup
+        void send(cmd, { permissions: DEFAULT_PERMISSION });
       }
     },
-    [chat, router, t, setWorkspaceOpenPersisted],
+    [chat, router, t, setWorkspaceOpenPersisted, send],
   );
+
+  // 홈 composer에서 ?prompt=... 또는 앱의 ?cmd=...로 넘어왔을 때
+  useEffect(() => {
+    const seedPrompt = searchParams.get("prompt") ?? "";
+    const seedCmd = searchParams.get("cmd") ?? "";
+    const seedPermission = parsePermission(
+      searchParams.get("permission") ?? searchParams.get("permissions"),
+    );
+
+    if ((!seedPrompt && !seedCmd) || !chat || !agent) return;
+    if (seededRef.current === chatId) return;
+    if (messages.length > 0) return; // 이미 히스토리 있으면 무시
+    seededRef.current = chatId;
+    
+    if (seedCmd) {
+      handleCommand(seedCmd);
+      router.replace(`/chat?id=${chatId}`);
+    } else if (seedPrompt) {
+      void send(seedPrompt, { permissions: seedPermission ?? DEFAULT_PERMISSION });
+      router.replace(`/chat?id=${chatId}`);
+    }
+  }, [chat, agent, chatId, messages.length, send, handleCommand, router, searchParams]);
 
   async function switchAgent(agentId: string) {
     const api = ipc();
@@ -1732,6 +1772,7 @@ function ChatPage() {
         modelOptions={modelOptions}
         onSelectModel={switchModel}
         onSelectEffort={switchEffort}
+        tokensUsage={{ current: currentTokens, limit: maxTokens }}
       />
       </div>
       <WorkbenchPanel

@@ -24,7 +24,7 @@ export type {
 export type RuntimeKind = "claude-code" | "codex" | "gemini" | "byok" | "ollama";
 
 /** LLM 제공자. "ollama"는 로컬 머신에서 도는 오픈 모델(gemma/deepseek 등). */
-export type RuntimeBackend = "anthropic" | "openai" | "google" | "ollama" | "upstage";
+export type RuntimeBackend = "anthropic" | "openai" | "google" | "ollama" | "upstage" | "custom";
 
 export interface RuntimeSelection {
   kind: RuntimeKind;
@@ -1875,6 +1875,74 @@ export interface AuthSession {
   expiresAt?: number;
 }
 
+// ── LLM 엔진 사용량 (구독 rate-limit 창 + 크레딧) ──────────────
+// Claude/Codex/Gemini의 프로바이더 OAuth usage 엔드포인트에서 조회한 정규화 결과.
+/** 사용량 창 종류. 5h=5시간 롤링, 7d=주간(7일), monthly=월 크레딧, daily=일일(모델별·Gemini). */
+export type UsageWindowKind = "5h" | "7d" | "monthly" | "daily";
+
+/** 한 프로바이더의 단일 사용량 창. */
+export interface UsageWindow {
+  /** 안정 id — "five_hour" | "seven_day" | "seven_day_opus" | "extra_usage" 등 */
+  id: string;
+  /** 영문 기본 라벨(폴백). 표시는 렌더러가 kind/model로 로컬라이즈. */
+  label: string;
+  kind: UsageWindowKind;
+  /** 0–100. monthly는 used/limit로 계산. */
+  usedPercent: number;
+  /** 리셋 시각(epoch ms). 모르면 미설정. */
+  resetAt?: number | null;
+  /** 모델 한정 창이면 "opus" | "sonnet" 등. */
+  model?: string | null;
+  /** monthly 크레딧 창: 사용/한도/단위($·credits). */
+  used?: number;
+  limit?: number;
+  unit?: string;
+}
+
+export type UsageProviderStatus =
+  | "ok" // 사용량 창 있음
+  | "key_billed" // API 키형 — 구독 창 없음(키 과금)
+  | "local" // 로컬(Ollama) — 무제한
+  | "no_quota" // 연결됐으나 한도 메타 없음
+  | "error"; // 조회 실패
+
+/** 한 LLM 프로바이더의 사용량 스냅샷. */
+export interface ProviderUsage {
+  /** "claude-code" | "codex" | "gemini" | "deepseek" | "glm" | "grok" | "pi" | "ollama" */
+  provider: string;
+  backend?: RuntimeBackend | string;
+  label: string;
+  status: UsageProviderStatus;
+  windows: UsageWindow[];
+  /** 조회 시각(epoch ms). */
+  fetchedAt: number;
+  /** status=error일 때 사유(민감정보 없음). */
+  error?: string;
+}
+
+/** 전체 엔진 사용량 스냅샷 — 대시보드 "엔진 연결·사용량" 모듈이 소비. */
+export interface UsageSnapshot {
+  providers: ProviderUsage[];
+  fetchedAt: number;
+}
+
+/** 확인 요청 — 에이전트가 챗에서 사용자 결정을 기다리는 항목.
+ *  마지막 메시지가 미답변 질문 fence(<<agentlas-ask>>)인 채팅에서 도출. */
+export interface PendingConfirmation {
+  chatId: string;
+  chatTitle: string;
+  /** 에이전트가 던진 질문 본문 */
+  question: string;
+  /** 짧은 칩 라벨(선택) */
+  header?: string;
+  /** 선택지 개수 */
+  optionCount: number;
+  agentId: string;
+  firmId: string | null;
+  /** 질문 메시지 시각(ISO) */
+  createdAt: string;
+}
+
 /** electron-updater의 자동 업데이트 상태. main → renderer로 broadcast. */
 export interface UpdaterState {
   status:
@@ -2128,6 +2196,44 @@ export interface OberonKeyframeJob {
   updatedAtMs: number;
 }
 
+// ── Hephaestus 엔진 브리지 ──────────────────────────────────────────────────
+/** 임베딩된 Hephaestus 엔진의 가용성. */
+export interface HephaestusStatus {
+  available: boolean;
+  reason?: string;
+  root: string | null;
+  python: string | null;
+  version: string | null;
+}
+/** 엔진 CLI 명령 결과(JSON 출력 + 원시 stdout/stderr). */
+export interface HephaestusCommandResult<T = unknown> {
+  ok: boolean;
+  exitCode: number | null;
+  json: T | null;
+  stdout: string;
+  stderr: string;
+  error?: string;
+}
+export type HephaestusUploadVisibility = "private-link" | "marketplace";
+/** hep-build(빌더) 스트리밍 이벤트 — 데스크탑 런타임으로 Hephaestus 빌더 에이전트 구동. */
+export interface HephaestusBuildEvent {
+  runId: string;
+  kind: "log" | "stage" | "partial" | "done" | "error";
+  text?: string;
+  stage?: string;
+  result?: unknown;
+}
+export interface HephaestusBuildRequest {
+  /** 빌드 요청(자연어). */
+  request: string;
+  /** single | team | package(repair) — 미지정 시 엔진 mode-classification 에 위임. */
+  mode?: "single" | "team" | "package";
+  /** 결과 패키지를 생성할 작업 폴더(워크스페이스). */
+  workspace: string;
+  /** 사용할 런타임 선택(미지정 시 활성 런타임). */
+  runtime?: RuntimeSelection;
+}
+
 export interface AgentlasIpc {
   /** Electron 메인이 알려주는 OS 환경 정보 (Apple/Codex/Claude 데스크톱과 동일 패턴) */
   app: {
@@ -2160,6 +2266,15 @@ export interface AgentlasIpc {
     signInWithBrowser: () => Promise<AuthSession>;
     signOut: () => Promise<void>;
   };
+  /** LLM 엔진 사용량 — 프로바이더 OAuth usage 엔드포인트(Claude/Codex/Gemini)에서
+   *  5시간·주간(7일)·모델별·월 크레딧 조회. main에서 60초 캐시; force로 강제 갱신. */
+  usage: {
+    snapshot: (opts?: { force?: boolean }) => Promise<UsageSnapshot>;
+  };
+  /** 확인 요청 — 에이전트가 챗에서 사용자 결정을 기다리는 채팅 목록(미답변 질문 fence 기준). */
+  confirm: {
+    listPending: () => Promise<PendingConfirmation[]>;
+  };
   /** 자동 업데이트 — electron-updater 래퍼. broadcast는 window.agentlasUpdater.onState로 받음. */
   updater: {
     /** 마운트 직후 현재 상태 동기 조회. broadcast 이전에 새 창이 열려도 onState로 미스되지 않음. */
@@ -2191,6 +2306,10 @@ export interface AgentlasIpc {
     }) => Promise<Array<{ id: string; label: string; tag?: string }>>;
     /** `agentlas` 터미널 CLI 설치 — PATH에 래퍼 스크립트를 둔다. */
     installAgentlasCli: () => Promise<{ ok: boolean; path: string; message: string }>;
+  };
+  config: {
+    getCustomBaseUrl: () => Promise<string>;
+    setCustomBaseUrl: (url: string) => Promise<void>;
   };
   secrets: {
     saveApiKey: (backend: RuntimeBackend, key: string) => Promise<void>;
@@ -2434,6 +2553,54 @@ export interface AgentlasIpc {
     activeChats: () => Promise<string[]>;
     /** 채팅 진입 시 진행 중 실행에 재접속 — 그 chat의 runId + 지금까지 버퍼된 이벤트. 없으면 null. */
     attach: (chatId: string) => Promise<{ runId: string; events: McpInvocationEvent[] } | null>;
+  };
+  /** 임베딩된 Hephaestus 엔진 브리지. 데스크탑↔엔진 연결은 전부 이 도메인으로 흐른다.
+   *  (Hephaestus 소스에는 데스크탑 흔적이 없다 — 엔진은 범용 CLI/JSON 으로만 호출됨.) */
+  hephaestus: {
+    /** 엔진 가용성(번들 + Python). UI 게이트에 사용. */
+    status: () => Promise<HephaestusStatus>;
+    /** 엔진 자가진단(JSON). */
+    doctor: () => Promise<HephaestusCommandResult>;
+    /** Stormbreaker 견고-실행: 쿼리 라우팅 후 pipeline execution_fabric 자동 실행. */
+    stormbreaker: (input: {
+      query: string;
+      project?: string;
+      background?: boolean;
+      researchEvidence?: boolean;
+    }) => Promise<HephaestusCommandResult>;
+    /** Stormbreaker 슈퍼바이저(앱 전역 자동 실행) 상태/토글. */
+    getSupervisor: () => Promise<{ enabled: boolean }>;
+    setSupervisor: (enabled: boolean) => Promise<{ enabled: boolean }>;
+    /** Stormbreaker 런 저널 검사(재개/감사). */
+    journal: (input: {
+      action: "status" | "verify" | "repair" | "gate";
+      runId?: string;
+      project?: string;
+    }) => Promise<HephaestusCommandResult>;
+    /** Hub/Cloud 후보 검색(실행 없음). 마켓플레이스/허브. */
+    search: (input: { query: string; limit?: number }) => Promise<HephaestusCommandResult>;
+    /** Hub 네트워크 라우팅(GUI 숏컷 → 라우팅 폴백). */
+    network: (input: { query: string; autoRun?: boolean; noOpen?: boolean }) => Promise<HephaestusCommandResult>;
+    /** 패키지된 GUI 숏컷(스튜디오 등) 복원/실행. */
+    localGui: (input: { shortcut: string; detach?: boolean; noOpen?: boolean }) => Promise<HephaestusCommandResult>;
+    /** 에이전트 폴더 → Cloud/Hub 업로드(실 패키징 + 보안 스캔 + publish). */
+    publish: (input: {
+      folder: string;
+      visibility: HephaestusUploadVisibility;
+      dryRun?: boolean;
+    }) => Promise<HephaestusCommandResult>;
+    /** 업로드 전 패키징 + 정적 검토 리포트. */
+    package: (input: { folder: string; visibility?: HephaestusUploadVisibility }) => Promise<HephaestusCommandResult>;
+    /** 정적 보안 스캔. */
+    securityScan: (input: { folder: string; strict?: boolean }) => Promise<HephaestusCommandResult>;
+    /** AO(에이전트 온톨로지) 그래프 — 정보 흐름 맵 백킹 데이터. */
+    aoGraph: (input?: { agent?: string; dir?: string }) => Promise<HephaestusCommandResult>;
+    /** 빌더(hep-build) 스트리밍 실행 — 데스크탑 런타임 + Hephaestus 빌더 에이전트. */
+    build: (input: HephaestusBuildRequest) => Promise<{ runId: string }>;
+    /** 빌더 이벤트 채널명(window.agentlasEvents.on 으로 구독). */
+    buildEventChannel: (runId: string) => string;
+    /** 진행 중 빌드 취소. */
+    cancelBuild: (runId: string) => Promise<void>;
   };
 }
 

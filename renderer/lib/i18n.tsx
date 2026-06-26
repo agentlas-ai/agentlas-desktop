@@ -208,6 +208,16 @@ const dict = {
     "chatinput.goal_mode": "목표 추진",
     "chatinput.apps_generate_mode": "전용 App 만들기",
     "chatinput.apps_generate_hint": "이 요청을 Apps에 등록되는 로컬 웹앱으로 만들지 먼저 확인합니다",
+    "chatinput.plus.agents": "에이전트",
+    "chatinput.plus.agents_hint": "이 대화에 에이전트를 호출합니다",
+    "chatinput.agent_picker.title": "에이전트 호출",
+    "chatinput.agent_picker.search": "에이전트 또는 팀 검색…",
+    "chatinput.agent_picker.teams": "에이전트 팀",
+    "chatinput.agent_picker.singles": "싱글 에이전트",
+    "chatinput.agent_picker.selected": "{count}개 선택됨",
+    "chatinput.agent_picker.confirm": "호출",
+    "chatinput.agent_picker.cancel": "취소",
+    "chatinput.agent_picker.empty": "설치된 에이전트가 없습니다",
     "chatinput.apps_generate_confirm": "이 요청을 일반 채팅 답변이 아니라 Apps에 등록되는 로컬 웹앱으로 만들어 진행할까요?",
     "chatinput.apps_generate_sheet_progress": "1/1",
     "chatinput.apps_generate_sheet_dedicated_title": "전용 App으로 만들기",
@@ -744,6 +754,14 @@ const dict = {
     "import.importing": "가져오는 중…",
     "import.skip": "나중에",
     "import.installed": "설치됨",
+
+    // Landing (로그아웃 첫 화면)
+    "landing.title.l1": "내 구독으로 굴리는",
+    "landing.title.l2": "나만의 AI 에이전트 팀",
+    "landing.subtitle":
+      "Claude · ChatGPT · Gemini · Cursor 등 기존 LLM 구독으로, 진짜 일을 끝내는 전문가 에이전트 팀을 한 곳에서 지휘하세요.",
+    "landing.cta": "시작하기",
+    "landing.cta_busy": "브라우저에서 로그인 중…",
   },
   en: {
     // App-wide
@@ -928,6 +946,16 @@ const dict = {
     "chatinput.goal_mode": "Goal mode",
     "chatinput.apps_generate_mode": "Dedicated App",
     "chatinput.apps_generate_hint": "Ask before turning this request into a local web app registered in Apps",
+    "chatinput.plus.agents": "Agents",
+    "chatinput.plus.agents_hint": "Call agents into this conversation",
+    "chatinput.agent_picker.title": "Call Agents",
+    "chatinput.agent_picker.search": "Search agents or teams…",
+    "chatinput.agent_picker.teams": "Agent Teams",
+    "chatinput.agent_picker.singles": "Single Agents",
+    "chatinput.agent_picker.selected": "{count} selected",
+    "chatinput.agent_picker.confirm": "Call",
+    "chatinput.agent_picker.cancel": "Cancel",
+    "chatinput.agent_picker.empty": "No agents installed",
     "chatinput.apps_generate_confirm": "Create a local web app registered in Apps for this request instead of a normal chat reply?",
     "chatinput.apps_generate_sheet_progress": "1/1",
     "chatinput.apps_generate_sheet_dedicated_title": "Create a dedicated App",
@@ -1464,6 +1492,14 @@ const dict = {
     "import.importing": "Importing…",
     "import.skip": "Later",
     "import.installed": "Installed",
+
+    // Landing (logged-out first screen)
+    "landing.title.l1": "Run a whole AI team",
+    "landing.title.l2": "from one command desk",
+    "landing.subtitle":
+      "Command expert agent teams that ship real work — on the Claude · ChatGPT · Gemini · Cursor subscriptions you already pay for.",
+    "landing.cta": "Get Started",
+    "landing.cta_busy": "Signing in via browser…",
   },
 } as const;
 

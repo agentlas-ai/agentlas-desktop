@@ -56,6 +56,7 @@ import {
   IconShield,
   IconSparkles,
   IconTarget,
+  IconUsers,
 } from "@/components/Icon";
 
 type TFunction = ReturnType<typeof useT>["t"];
@@ -124,6 +125,7 @@ export function ChatInput({
   modelOptions,
   onSelectModel,
   onSelectEffort,
+  tokensUsage,
 }: {
   onSend: (text: string, opts?: SendOptions) => void;
   /** 슬래시 커맨드(/new, /clear, /help …) 실행 — 텍스트 삽입이 아니라 액션 */
@@ -143,6 +145,8 @@ export function ChatInput({
   onSelectModel?: (id: string) => void;
   /** 작업량 선택 — "" 이면 기본. claude-code 전용. */
   onSelectEffort?: (id: string) => void;
+  /** 컨텍스트 사용량 표시용 */
+  tokensUsage?: { current: number; limit: number };
 }) {
   const { t, locale } = useT();
   const [input, setInput] = useState("");
@@ -153,6 +157,8 @@ export function ChatInput({
   const [goalMode, setGoalMode] = useState(false);
   const [appsGenerateMode, setAppsGenerateMode] = useState(false);
   const [appsGenerateQuestionOpen, setAppsGenerateQuestionOpen] = useState(false);
+  const [agentPickerOpen, setAgentPickerOpen] = useState(false);
+  const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
   const [appsGenerateChoice, setAppsGenerateChoice] = useState<AppGenerateChoice>("dedicated");
   // 기본값을 write로 — 바이브코딩 앱에서 read-only 기본은 첫 "만들어줘"가 파일을 못 써 조용히 실패한다.
   // write는 cwd 파일 편집만 허용(셸·외부 자동호출은 차단)이라 안전한 기본값.
@@ -309,7 +315,7 @@ export function ChatInput({
 
   // 클릭 외부 — 메뉴 닫기
   useEffect(() => {
-    if (!plusOpen && !permOpen && !modelOpen) return;
+    if (!plusOpen && !permOpen && !modelOpen && !agentPickerOpen) return;
     function onDown(e: MouseEvent) {
       const target = e.target as HTMLElement;
       if (!target.closest("[data-popover-root]")) {
@@ -317,11 +323,13 @@ export function ChatInput({
         setPlusSubmenu(null);
         setPermOpen(false);
         setModelOpen(false);
+        setAgentPickerOpen(false);
+        setSelectedAgentIds(new Set());
       }
     }
     window.addEventListener("mousedown", onDown);
     return () => window.removeEventListener("mousedown", onDown);
-  }, [plusOpen, permOpen, modelOpen]);
+  }, [plusOpen, permOpen, modelOpen, agentPickerOpen]);
 
   // ── 플러그인 목록 (설치된 에이전트의 MCP 서버 dedupe) ─────
   const plugins = useMemo(() => {
@@ -378,7 +386,43 @@ export function ChatInput({
           setGoalMode={setGoalMode}
           appsGenerateMode={appsGenerateMode}
           setAppsGenerateMode={requestAppsGenerateMode}
+          onOpenAgentPicker={() => {
+            setPlusOpen(false);
+            setPlusSubmenu(null);
+            setAgentPickerOpen(true);
+          }}
           t={t}
+        />
+      )}
+
+      {/* 에이전트 선택 팝업 */}
+      {agentPickerOpen && context && (
+        <AgentPickerPopup
+          agents={context.agents}
+          firms={context.firms}
+          selected={selectedAgentIds}
+          onToggle={(id) => {
+            setSelectedAgentIds((prev) => {
+              const next = new Set(prev);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            });
+          }}
+          onConfirm={() => {
+            // 선택된 에이전트들을 호출
+            for (const id of selectedAgentIds) {
+              onCallAgent?.(id);
+            }
+            setAgentPickerOpen(false);
+            setSelectedAgentIds(new Set());
+          }}
+          onClose={() => {
+            setAgentPickerOpen(false);
+            setSelectedAgentIds(new Set());
+          }}
+          t={t}
+          locale={locale}
         />
       )}
 
@@ -705,7 +749,30 @@ export function ChatInput({
               )}
           </div>
 
-          <div className="chat-input-tools-right">
+          <div className="chat-input-tools-right" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* Context Volume Graph */}
+            {tokensUsage && (
+              <div 
+                title={`Context: ${Math.round(tokensUsage.current/1000)}k / ${Math.round(tokensUsage.limit/1000)}k`}
+                style={{ 
+                  display: "flex", alignItems: "center", gap: 6,
+                  padding: "0 8px", height: 26, borderRadius: 13,
+                  background: "var(--fill-1)", border: "1px solid var(--paper-edge)",
+                  fontSize: 10, fontWeight: 600, color: "var(--muted-deep)"
+                }}
+              >
+                <div style={{ width: 40, height: 4, borderRadius: 2, background: "var(--fill-3)", overflow: "hidden" }}>
+                  <div style={{ 
+                    height: "100%", 
+                    width: `${Math.min(100, (tokensUsage.current / tokensUsage.limit) * 100)}%`, 
+                    background: tokensUsage.current > tokensUsage.limit * 0.9 ? "var(--red)" : "var(--accent)",
+                    transition: "width 0.3s"
+                  }} />
+                </div>
+                <span>{Math.round((tokensUsage.current / tokensUsage.limit) * 100)}%</span>
+              </div>
+            )}
+            
             {/* 모드 칩 — Plan */}
             <button
               className="chat-input-chip chat-input-mode-chip"
@@ -750,27 +817,6 @@ export function ChatInput({
               </span>
             </button>
 
-            {/* 모드 칩 — 전용 App 생성 */}
-            <button
-              className="chat-input-chip chat-input-mode-chip"
-              onClick={() => requestAppsGenerateMode(!appsGenerateMode)}
-              disabled={disabled}
-              title={t("chatinput.apps_generate_hint")}
-              style={{
-                ...toolBtnStyle(appsGenerateMode),
-                width: "auto",
-                padding: "0 10px",
-                gap: 6,
-                fontSize: 11,
-                fontWeight: 600,
-                color: appsGenerateMode ? "var(--accent)" : "var(--muted-deep)",
-              }}
-            >
-              <IconApps size={13} />
-              <span className="chat-input-chip-label chat-input-action-label">
-                {t("chatinput.apps_generate_mode")}
-              </span>
-            </button>
 
             {/* 보내기 / 정지 — 실행 중(busy)이고 onStop이 있으면 정지 버튼으로 변신 */}
             {(() => {
@@ -1273,6 +1319,7 @@ function PlusMenu({
   setGoalMode,
   appsGenerateMode,
   setAppsGenerateMode,
+  onOpenAgentPicker,
   t,
 }: {
   submenu: "plugins" | null;
@@ -1285,6 +1332,7 @@ function PlusMenu({
   setGoalMode: (v: boolean) => void;
   appsGenerateMode: boolean;
   setAppsGenerateMode: (v: boolean) => void;
+  onOpenAgentPicker: () => void;
   t: TFunction;
 }) {
   if (submenu === "plugins") {
@@ -1353,6 +1401,14 @@ function PlusMenu({
         subtitle={t("chatinput.apps_generate_hint")}
         on={appsGenerateMode}
         onChange={setAppsGenerateMode}
+      />
+      <Divider />
+      <Row
+        onClick={onOpenAgentPicker}
+        icon={<IconUsers size={14} style={{ color: "var(--accent)" }} />}
+        title={t("chatinput.plus.agents")}
+        subtitle={t("chatinput.plus.agents_hint")}
+        right={<IconChevronRight size={11} style={{ color: "var(--muted)" }} />}
       />
     </Popover>
   );
@@ -1713,6 +1769,423 @@ function toolBtnStyle(active: boolean): React.CSSProperties {
     transition: "background 0.12s",
     cursor: "pointer",
   };
+}
+
+// ── 에이전트 선택 팝업 ─────────────────────────────────────
+function AgentPickerPopup({
+  agents,
+  firms,
+  selected,
+  onToggle,
+  onConfirm,
+  onClose,
+  t,
+  locale,
+}: {
+  agents: InstalledAgent[];
+  firms: InstalledFirm[];
+  selected: Set<string>;
+  onToggle: (id: string) => void;
+  onConfirm: () => void;
+  onClose: () => void;
+  t: TFunction;
+  locale: "ko" | "en";
+}) {
+  const [search, setSearch] = useState("");
+  const q = search.toLowerCase();
+
+  const filteredFirms = firms.filter((f) => {
+    const loc = pickLocalized(f, locale);
+    return !q || loc.name.toLowerCase().includes(q) || f.slug.includes(q);
+  });
+  const filteredAgents = agents.filter((a) => {
+    const loc = pickLocalized(a, locale);
+    return !q || loc.name.toLowerCase().includes(q) || a.slug.includes(q);
+  });
+
+  const selectedCount = selected.size;
+
+  return (
+    <section
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("chatinput.agent_picker.title")}
+      data-popover-root
+      style={{
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: "calc(100% + 8px)",
+        width: "calc(100% - 32px)",
+        maxWidth: 480,
+        margin: "0 auto",
+        zIndex: 50,
+        borderRadius: 16,
+        border: "1px solid var(--paper-edge)",
+        background: "var(--paper)",
+        backdropFilter: "blur(24px)",
+        boxShadow: "0 12px 40px rgba(0,0,0,0.12), 0 0 0 1px rgba(255,255,255,0.08) inset",
+        padding: 0,
+        overflow: "hidden",
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          onClose();
+        }
+        if (e.key === "Enter" && selectedCount > 0) {
+          e.preventDefault();
+          onConfirm();
+        }
+      }}
+    >
+      {/* 헤더 */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "14px 16px 10px",
+          borderBottom: "1px solid var(--paper-edge)",
+        }}
+      >
+        <IconUsers size={16} style={{ color: "var(--accent)", flexShrink: 0 }} />
+        <h2
+          style={{
+            margin: 0,
+            flex: 1,
+            fontSize: 14,
+            fontWeight: 750,
+            color: "var(--ink)",
+          }}
+        >
+          {t("chatinput.agent_picker.title")}
+        </h2>
+        {selectedCount > 0 && (
+          <span
+            style={{
+              borderRadius: 999,
+              background: "color-mix(in srgb, var(--accent) 14%, transparent)",
+              color: "var(--accent)",
+              fontSize: 11,
+              fontWeight: 700,
+              padding: "2px 8px",
+            }}
+          >
+            {t("chatinput.agent_picker.selected", { count: selectedCount })}
+          </span>
+        )}
+        <button
+          onClick={onClose}
+          aria-label={t("chatinput.agent_picker.cancel")}
+          style={{
+            width: 24,
+            height: 24,
+            borderRadius: 6,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "var(--muted-deep)",
+            background: "transparent",
+            border: "none",
+            flexShrink: 0,
+            cursor: "pointer",
+          }}
+        >
+          <IconClose size={13} />
+        </button>
+      </div>
+
+      {/* 검색 */}
+      <div style={{ padding: "10px 16px 6px" }}>
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder={t("chatinput.agent_picker.search")}
+          autoFocus
+          style={{
+            width: "100%",
+            border: "1px solid var(--paper-edge)",
+            borderRadius: 10,
+            padding: "8px 12px",
+            fontSize: 12.5,
+            color: "var(--ink)",
+            background: "var(--fill-1)",
+            outline: "none",
+            fontFamily: "var(--font-body)",
+          }}
+        />
+      </div>
+
+      {/* 리스트 */}
+      <div
+        style={{
+          maxHeight: 320,
+          overflowY: "auto",
+          padding: "4px 8px",
+        }}
+      >
+        {filteredFirms.length === 0 && filteredAgents.length === 0 ? (
+          <div
+            style={{
+              padding: "24px 12px",
+              textAlign: "center",
+              fontSize: 12,
+              color: "var(--muted-deep)",
+            }}
+          >
+            {t("chatinput.agent_picker.empty")}
+          </div>
+        ) : (
+          <>
+            {/* 팀(Firm) 섹션 */}
+            {filteredFirms.length > 0 && (
+              <>
+                <div
+                  style={{
+                    padding: "8px 10px 4px",
+                    fontSize: 10,
+                    fontFamily: "var(--font-mono)",
+                    textTransform: "uppercase",
+                    letterSpacing: 0.6,
+                    color: "var(--muted-deep)",
+                  }}
+                >
+                  {t("chatinput.agent_picker.teams")}
+                </div>
+                {filteredFirms.map((f) => {
+                  const loc = pickLocalized(f, locale);
+                  const checked = selected.has(f.ceoAgentId);
+                  return (
+                    <AgentPickerRow
+                      key={f.id}
+                      checked={checked}
+                      onToggle={() => onToggle(f.ceoAgentId)}
+                      icon={<IconBuilding size={14} style={{ color: "var(--accent)" }} />}
+                      name={loc.name}
+                      tagline={loc.tagline}
+                      badge={locale === "en" ? "Team" : "팀"}
+                    />
+                  );
+                })}
+              </>
+            )}
+            {/* 싱글 에이전트 섹션 */}
+            {filteredAgents.length > 0 && (
+              <>
+                <div
+                  style={{
+                    padding: "8px 10px 4px",
+                    fontSize: 10,
+                    fontFamily: "var(--font-mono)",
+                    textTransform: "uppercase",
+                    letterSpacing: 0.6,
+                    color: "var(--muted-deep)",
+                  }}
+                >
+                  {t("chatinput.agent_picker.singles")}
+                </div>
+                {filteredAgents.map((a) => {
+                  const loc = pickLocalized(a, locale);
+                  const checked = selected.has(a.id);
+                  return (
+                    <AgentPickerRow
+                      key={a.id}
+                      checked={checked}
+                      onToggle={() => onToggle(a.id)}
+                      icon={<IconSparkles size={14} style={{ color: "var(--accent)" }} />}
+                      name={loc.name}
+                      tagline={loc.tagline}
+                    />
+                  );
+                })}
+              </>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* 하단 버튼 */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          gap: 8,
+          padding: "10px 16px 14px",
+          borderTop: "1px solid var(--paper-edge)",
+        }}
+      >
+        <button
+          onClick={onClose}
+          style={{
+            borderRadius: 8,
+            border: "1px solid var(--paper-edge)",
+            background: "var(--paper)",
+            color: "var(--muted-deep)",
+            padding: "7px 14px",
+            fontSize: 12,
+            fontWeight: 650,
+            cursor: "pointer",
+          }}
+        >
+          {t("chatinput.agent_picker.cancel")}
+        </button>
+        <button
+          onClick={onConfirm}
+          disabled={selectedCount === 0}
+          style={{
+            borderRadius: 8,
+            border: "1px solid color-mix(in srgb, var(--accent) 28%, var(--paper-edge))",
+            background: selectedCount > 0
+              ? "color-mix(in srgb, var(--accent) 12%, var(--paper))"
+              : "var(--fill-1)",
+            color: selectedCount > 0 ? "var(--accent)" : "var(--muted-deep)",
+            padding: "7px 16px",
+            fontSize: 12,
+            fontWeight: 750,
+            cursor: selectedCount > 0 ? "pointer" : "not-allowed",
+            transition: "all 0.15s",
+          }}
+        >
+          {t("chatinput.agent_picker.confirm")}
+          {selectedCount > 0 && ` (${selectedCount})`}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function AgentPickerRow({
+  checked,
+  onToggle,
+  icon,
+  name,
+  tagline,
+  badge,
+}: {
+  checked: boolean;
+  onToggle: () => void;
+  icon: React.ReactNode;
+  name: string;
+  tagline?: string;
+  badge?: string;
+}) {
+  return (
+    <button
+      onClick={onToggle}
+      style={{
+        display: "flex",
+        width: "100%",
+        alignItems: "center",
+        gap: 10,
+        padding: "9px 10px",
+        borderRadius: 10,
+        background: checked
+          ? "color-mix(in srgb, var(--accent) 8%, transparent)"
+          : "transparent",
+        border: checked
+          ? "1px solid color-mix(in srgb, var(--accent) 20%, var(--paper-edge))"
+          : "1px solid transparent",
+        textAlign: "left",
+        cursor: "pointer",
+        transition: "all 0.12s",
+      }}
+      onMouseEnter={(e) => {
+        if (!checked)
+          e.currentTarget.style.background = "var(--fill-1)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = checked
+          ? "color-mix(in srgb, var(--accent) 8%, transparent)"
+          : "transparent";
+      }}
+    >
+      {/* 체크박스 */}
+      <span
+        style={{
+          width: 18,
+          height: 18,
+          borderRadius: 5,
+          border: checked
+            ? "2px solid var(--accent)"
+            : "2px solid var(--paper-edge)",
+          background: checked ? "var(--accent)" : "var(--paper)",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+          transition: "all 0.12s",
+        }}
+      >
+        {checked && (
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+            <path
+              d="M2 5L4.2 7.5L8 2.5"
+              stroke="white"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        )}
+      </span>
+      {/* 아이콘 */}
+      <span style={{ flexShrink: 0, color: "var(--ink-soft)" }}>{icon}</span>
+      {/* 텍스트 */}
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <span
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
+          <span
+            style={{
+              fontSize: 12.5,
+              fontWeight: 650,
+              color: "var(--ink)",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {name}
+          </span>
+          {badge && (
+            <span
+              style={{
+                fontSize: 9,
+                fontWeight: 700,
+                color: "var(--accent)",
+                background: "color-mix(in srgb, var(--accent) 12%, transparent)",
+                padding: "1px 5px",
+                borderRadius: 4,
+                flexShrink: 0,
+              }}
+            >
+              {badge}
+            </span>
+          )}
+        </span>
+        {tagline && (
+          <span
+            style={{
+              display: "block",
+              fontSize: 10.5,
+              color: "var(--muted-deep)",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {tagline}
+          </span>
+        )}
+      </span>
+    </button>
+  );
 }
 
 function fileToBase64(file: File): Promise<string> {
