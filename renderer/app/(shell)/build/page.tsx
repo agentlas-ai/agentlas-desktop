@@ -167,7 +167,8 @@ export default function BuildPage() {
 
   const engineMissing = status ? !status.available : false;
   const running = phase === "running";
-  const showPipeline = phase !== "idle";
+  // 파이프라인은 항상 표시 — idle 에선 딤된 프리뷰로 무엇을 할지 보여준다.
+  const showPipeline = true;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "var(--paper)" }}>
@@ -272,12 +273,14 @@ export default function BuildPage() {
           <section style={{ maxWidth: 1000, margin: "0 auto", width: "100%" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
               <h3 style={{ fontSize: 13, margin: 0, color: "var(--muted-deep)", textTransform: "uppercase", letterSpacing: 0.6, fontFamily: "var(--font-mono)" }}>Forge Pipeline</h3>
-              {running && (
+              {running ? (
                 <span style={{ fontSize: 11, color: "var(--accent)", display: "inline-flex", alignItems: "center", gap: 5 }}>
                   <span className="forge-pulse" style={{ width: 7, height: 7, borderRadius: 999, background: "var(--accent)", display: "inline-block" }} />
                   {STAGES[Math.min(reached, STAGES.length - 1)].label}
                 </span>
-              )}
+              ) : phase === "idle" ? (
+                <span style={{ fontSize: 11, color: "var(--muted)" }}>빌드 시작 시 단계별로 진행됩니다</span>
+              ) : null}
             </div>
 
             <div style={{ borderRadius: 16, border: "1px solid var(--paper-edge)", background: "var(--fill-1)", padding: "18px 20px" }}>
