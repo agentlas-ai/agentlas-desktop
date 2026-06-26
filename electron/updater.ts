@@ -11,7 +11,9 @@
 //
 // publish 채널은 electron-builder.yml의 publish:github 그대로.
 // 사용자 토큰 없이도 public release면 동작.
-import { BrowserWindow } from "electron";
+import { app, BrowserWindow } from "electron";
+import fs from "node:fs";
+import path from "node:path";
 
 // electron-updater는 main 프로세스 ESM 호환 모듈. import는 CJS interop으로.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -52,6 +54,59 @@ export function getUpdaterState(): UpdateState {
   return currentState;
 }
 
+function versionTuple(value: string | undefined): number[] {
+  return String(value ?? "")
+    .replace(/^v/i, "")
+    .split(/[.-]/)
+    .map((part) => Number.parseInt(part.replace(/\D/g, ""), 10))
+    .map((part) => (Number.isFinite(part) ? part : 0));
+}
+
+function compareVersions(left: string | undefined, right: string | undefined): number {
+  const a = versionTuple(left);
+  const b = versionTuple(right);
+  const length = Math.max(a.length, b.length, 3);
+  for (let index = 0; index < length; index += 1) {
+    const delta = (a[index] ?? 0) - (b[index] ?? 0);
+    if (delta !== 0) return delta;
+  }
+  return 0;
+}
+
+function isNewerThanCurrent(version: string | undefined): boolean {
+  return compareVersions(version, app.getVersion()) > 0;
+}
+
+function pendingUpdateDir(): string | null {
+  if (process.platform !== "darwin") return null;
+  return path.join(app.getPath("home"), "Library", "Caches", "agentlas-desktop-updater", "pending");
+}
+
+function pendingUpdateVersion(pendingDir: string): string | null {
+  try {
+    const payload = JSON.parse(fs.readFileSync(path.join(pendingDir, "update-info.json"), "utf8"));
+    const fileName = typeof payload.fileName === "string" ? payload.fileName : "";
+    const match = fileName.match(/Agentlas-([0-9]+(?:\.[0-9]+){1,3})-/);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function pruneStalePendingUpdate(): void {
+  const pendingDir = pendingUpdateDir();
+  if (!pendingDir || !fs.existsSync(pendingDir)) return;
+  const pendingVersion = pendingUpdateVersion(pendingDir);
+  if (!pendingVersion || isNewerThanCurrent(pendingVersion)) return;
+  try {
+    fs.rmSync(pendingDir, { recursive: true, force: true });
+    console.log(`[updater] removed stale pending update v${pendingVersion}; current is v${app.getVersion()}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn("[updater] failed to remove stale pending update", message);
+  }
+}
+
 /**
  * production에서 호출. dev에서는 dev-app-update.yml이 없으면 throw하므로 NODE_ENV check 후 skip.
  */
@@ -66,9 +121,13 @@ export function initAutoUpdater(): void {
     return;
   }
 
-  // 사용자 동의 없이 자동 다운로드 (Claude Code 데스크톱과 동일). 다운로드 완료 후에만 사용자 액션 요구.
+  pruneStalePendingUpdate();
+
+  // 사용자 동의 없이 자동 다운로드. 설치는 사용자가 "재시작 업데이트"를 눌렀을 때만
+  // 진행한다. autoInstallOnAppQuit=true면 root-owned /Applications 앱에서
+  // 종료할 때마다 ShipIt 권한 프롬프트가 반복될 수 있다.
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.autoInstallOnAppQuit = false;
 
   autoUpdater.on("checking-for-update", () => {
     broadcast({ status: "checking" });
@@ -92,6 +151,11 @@ export function initAutoUpdater(): void {
   });
 
   autoUpdater.on("update-downloaded", (info) => {
+    if (!isNewerThanCurrent(info.version)) {
+      pruneStalePendingUpdate();
+      broadcast({ status: "not-available" });
+      return;
+    }
     broadcast({ status: "downloaded", version: info.version });
   });
 
@@ -122,6 +186,7 @@ export function disposeAutoUpdater(): void {
 /** 사용자가 "지금 확인" 버튼을 누르거나 메뉴에서 호출. 실패해도 throw 안 함 (에러는 broadcast로). */
 export async function checkSafely(): Promise<void> {
   try {
+    pruneStalePendingUpdate();
     await autoUpdater.checkForUpdates();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -134,6 +199,12 @@ export async function checkSafely(): Promise<void> {
 export function quitAndInstall(): void {
   if (currentState.status !== "downloaded") {
     console.warn("[updater] quitAndInstall called but no update downloaded");
+    return;
+  }
+  if (!isNewerThanCurrent(currentState.version)) {
+    pruneStalePendingUpdate();
+    broadcast({ status: "not-available" });
+    console.warn("[updater] quitAndInstall ignored because downloaded version is not newer than current");
     return;
   }
   // isSilent=false: 사용자에게 macOS 표준 설치 progress가 보임
