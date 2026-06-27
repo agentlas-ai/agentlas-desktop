@@ -66,14 +66,13 @@ export const INSTALLED_APPS: AgentlasAppDefinition[] = [
     tagline: "창업 아이디어 → 아이디어·시장·사업설계·PRD·제품·웹·IR 단계로 이어지는 운영 보드. 각 단계는 Agentlas Hub의 전문 HQ를 호출합니다.",
     taglineEn: "One founder idea → a staged operating board (idea, market, business, PRD, product, web, IR), each calling a specialist Agentlas Hub HQ.",
     kind: "ai-native",
-    route: "/chat",
+    // 네이티브 구동 — 브라우저 GUI 대신 앱 안의 스텝 보드에서 7단계를 엔진(network)으로 돌린다.
+    route: "/startup-founder-studio",
     accent: "var(--accent)",
     engines: ["Hephaestus Network", "Business Model Generator", "Market Research Engine", "Pitch Deck Compiler"],
     vaultKeys: ["CRUNCHBASE_API_KEY", "LINKEDIN_API_KEY"],
     artifacts: ["Business Model Canvas", "Competitor Analysis", "Pitch Deck (PDF)"],
     slashCommands: ["/hep-network startup", "/startup"],
-    // GUI는 Hephaestus Network로 이미 실행된다 — 타일 클릭이 그 명령을 새 채팅에서 실행.
-    launchCommand: "/hep-network startup",
   },
   {
     id: "creative-studio",
