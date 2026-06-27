@@ -1,6 +1,6 @@
 // 회사 상세 — 접고 펴기 가능한 왼쪽 사이드바 조직도 + 오른쪽 에이전트 상세 통제 센터 (메모리 큐레이션, 프롬프트 에디터, 스킬 주입, 클라우드 싱크)
 "use client";
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
 import { ipc } from "@/lib/ipc";
@@ -258,23 +258,38 @@ function LibraryAgentsView() {
     }
   }
 
-  // 메모리 데이터 저장 핸들러
-  async function saveMemory(updated: typeof memoryParsed) {
-    const api = ipc();
-    if (!api || !selectedNode || !selectedNode.agentId) return;
-    setSavingFiles(true);
-    try {
-      const serialized = serializeMemoryMarkdown(updated.decisions, updated.gotchas, updated.openQuestions);
-      const memFile = agentFiles.find((e) => e.name.toLowerCase() === "memory.md");
-      const path = memFile ? memFile.path : "memory.md";
-      await api.agentFiles.write(selectedNode.agentId, path, serialized);
-      setMemoryContent(serialized);
-      setMemoryParsed(updated);
-    } catch (e) {
-      alert("메모리 갱신 실패: " + String(e));
-    } finally {
-      setSavingFiles(false);
-    }
+  // 메모리 저장 직렬화 큐 + 최신-상태 ref — 빠른 연속 변이가 stale 클로저로 서로를 덮어쓰지 않게 한다.
+  const memorySaveChain = useRef<Promise<void>>(Promise.resolve());
+  const memoryParsedRef = useRef(memoryParsed);
+  useEffect(() => {
+    memoryParsedRef.current = memoryParsed;
+  }, [memoryParsed]);
+
+  // 메모리 데이터 저장 핸들러. updater 는 "최신" 상태를 받아 다음 상태를 만든다(stale prop 미사용).
+  // 다음 상태를 ref(최신 누적본) 기준으로 동기 계산해 낙관적 반영하고, 디스크 쓰기는 큐로
+  // 직렬화해 순서/원자성을 보장한다(lost update 방지).
+  function saveMemory(updater: (prev: typeof memoryParsed) => typeof memoryParsed) {
+    const next = updater(memoryParsedRef.current);
+    memoryParsedRef.current = next; // 다음 동기 호출이 이 결과 위에 쌓이도록 즉시 갱신.
+    setMemoryParsed(next);
+    const run = memorySaveChain.current.then(async () => {
+      const api = ipc();
+      if (!api || !selectedNode || !selectedNode.agentId) return;
+      setSavingFiles(true);
+      try {
+        const serialized = serializeMemoryMarkdown(next.decisions, next.gotchas, next.openQuestions);
+        const memFile = agentFiles.find((e) => e.name.toLowerCase() === "memory.md");
+        const path = memFile ? memFile.path : "memory.md";
+        await api.agentFiles.write(selectedNode.agentId, path, serialized);
+        setMemoryContent(serialized);
+      } catch (e) {
+        alert("메모리 갱신 실패: " + String(e));
+      } finally {
+        setSavingFiles(false);
+      }
+    });
+    memorySaveChain.current = run.catch(() => {});
+    return run;
   }
 
   function showToast(msg: string) {
@@ -811,7 +826,7 @@ interface AgentDetailViewProps {
     gotchas: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[];
     openQuestions: { id: string; title: string; content: string }[];
   };
-  onSaveMemory: (updated: any) => Promise<void>;
+  onSaveMemory: (updater: (prev: any) => any) => Promise<void>;
   promptContent: string;
   promptDraft: string;
   onPromptDraftChange: (v: string) => void;
@@ -1048,7 +1063,7 @@ interface AgentDetailViewProps {
     gotchas: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[];
     openQuestions: { id: string; title: string; content: string }[];
   };
-  onSaveMemory: (updated: any) => Promise<void>;
+  onSaveMemory: (updater: (prev: any) => any) => Promise<void>;
   promptContent: string;
   promptDraft: string;
   onPromptDraftChange: (v: string) => void;
@@ -1165,23 +1180,18 @@ function AgentDetailView({
 
   // 메모리 규칙 개별 비활성화/활성화 토글
   const handleToggleRule = (section: "decisions" | "gotchas", id: string) => {
-    const updatedSection = memoryParsed[section].map(item => {
-      if (item.id === id) {
-        const nextState = item.enabled === false;
-        return { ...item, enabled: nextState };
-      }
-      return item;
-    });
-    const nextMemory = { ...memoryParsed, [section]: updatedSection };
-    void onSaveMemory(nextMemory);
-    
-    const targetItem = nextMemory[section].find(item => item.id === id);
+    void onSaveMemory((prev: typeof memoryParsed) => ({
+      ...prev,
+      [section]: prev[section].map(item => (item.id === id ? { ...item, enabled: item.enabled === false } : item)),
+    }));
+
+    const targetItem = memoryParsed[section].find(item => item.id === id);
     if (targetItem) {
       setTimelineEvents(prev => [
         {
           id: `timeline-${Date.now()}`,
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          title: targetItem.enabled !== false ? "규칙 활성화" : "규칙 비활성화",
+          title: targetItem.enabled === false ? "규칙 활성화" : "규칙 비활성화",
           desc: `'${targetItem.title}' 규칙의 런타임 적용 여부를 전환했습니다.`,
           type: "sync"
         },
@@ -1193,51 +1203,42 @@ function AgentDetailView({
 
   // 개별 규칙 클라우드 허브(MongoDB) 공유/로컬전용 토글
   const handleToggleSync = (section: "decisions" | "gotchas", id: string) => {
-    const updatedSection = memoryParsed[section].map(item => {
-      if (item.id === id) {
-        const nextState = !item.synced;
-        return { ...item, synced: nextState };
-      }
-      return item;
-    });
-    const nextMemory = { ...memoryParsed, [section]: updatedSection };
-    void onSaveMemory(nextMemory);
-    
-    const targetItem = nextMemory[section].find(item => item.id === id);
+    void onSaveMemory((prev: typeof memoryParsed) => ({
+      ...prev,
+      [section]: prev[section].map(item => (item.id === id ? { ...item, synced: !item.synced } : item)),
+    }));
+
+    const targetItem = memoryParsed[section].find(item => item.id === id);
+    const nextSynced = targetItem ? !targetItem.synced : false; // 토글 후 상태
     if (targetItem) {
       setTimelineEvents(prev => [
         {
           id: `timeline-${Date.now()}`,
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          title: targetItem.synced ? "클라우드 허브 공유" : "로컬 전용 전환",
+          title: nextSynced ? "클라우드 허브 공유" : "로컬 전용 전환",
           desc: `'${targetItem.title}' 규칙을 Hephaestus 클라우드 데이터베이스에 연동/격리했습니다.`,
           type: "sync"
         },
         ...prev
       ]);
     }
-    showToast(nextMemory[section].find(i => i.id === id)?.synced ? "Hephaestus 클라우드 허브에 연동 공유되었습니다." : "로컬 프로젝트 전용으로 변경되었습니다.");
+    showToast(nextSynced ? "Hephaestus 클라우드 허브에 연동 공유되었습니다." : "로컬 프로젝트 전용으로 변경되었습니다.");
   };
 
   // 미결 과제를 결정 사항(Decision)으로 반영 승격
   const handleResolveOpen = (id: string) => {
     const target = memoryParsed.openQuestions.find(item => item.id === id);
     if (!target) return;
-    const updatedOpen = memoryParsed.openQuestions.filter(item => item.id !== id);
-    const newDecision = {
-      id: target.id,
-      title: target.title,
-      content: target.content + " (미결 항목 승격 반영)",
-      synced: globalHubSync,
-      enabled: true
-    };
-    const nextMemory = {
-      ...memoryParsed,
-      decisions: [...memoryParsed.decisions, newDecision],
-      openQuestions: updatedOpen
-    };
-    void onSaveMemory(nextMemory);
-    
+    void onSaveMemory((prev: typeof memoryParsed) => {
+      const t = prev.openQuestions.find(item => item.id === id);
+      if (!t) return prev; // 이미 다른 변이로 처리됨
+      return {
+        ...prev,
+        decisions: [...prev.decisions, { id: t.id, title: t.title, content: t.content + " (미결 항목 승격 반영)", synced: globalHubSync, enabled: true }],
+        openQuestions: prev.openQuestions.filter(item => item.id !== id),
+      };
+    });
+
     setTimelineEvents(prev => [
       {
         id: `timeline-${Date.now()}`,
@@ -1267,15 +1268,12 @@ function AgentDetailView({
       enabled: true
     };
 
-    const nextMemory = { ...memoryParsed };
-    if (target.type === "gotcha") {
-      nextMemory.gotchas = [...nextMemory.gotchas, newItem];
-    } else {
-      nextMemory.decisions = [...nextMemory.decisions, newItem];
-    }
+    void onSaveMemory((prev: typeof memoryParsed) =>
+      target.type === "gotcha"
+        ? { ...prev, gotchas: [...prev.gotchas, newItem] }
+        : { ...prev, decisions: [...prev.decisions, newItem] },
+    );
 
-    void onSaveMemory(nextMemory);
-    
     setTimelineEvents(prev => [
       {
         id: `timeline-${Date.now()}`,
@@ -1313,11 +1311,10 @@ function AgentDetailView({
       synced: globalHubSync,
       enabled: true,
     };
-    const nextMemory = {
-      ...memoryParsed,
-      decisions: [...memoryParsed.decisions, newDecision],
-    };
-    void onSaveMemory(nextMemory);
+    void onSaveMemory((prev: typeof memoryParsed) => ({
+      ...prev,
+      decisions: [...prev.decisions, newDecision],
+    }));
     onSetSkillDrawerOpen(false);
 
     setTimelineEvents((prev) => [

@@ -2599,6 +2599,8 @@ export interface AgentlasIpc {
     build: (input: HephaestusBuildRequest) => Promise<{ runId: string }>;
     /** 빌더 이벤트 채널명(window.agentlasEvents.on 으로 구독). */
     buildEventChannel: (runId: string) => string;
+    /** 채널 구독 완료 신호 — 구독 전 버퍼링된 초기 이벤트를 flush 한다(첫 stage 틱 유실 방지). */
+    buildReady: (runId: string) => Promise<void>;
     /** 진행 중 빌드 취소. */
     cancelBuild: (runId: string) => Promise<void>;
     /** Startup Founder Studio — 패키지의 실제 GUI 런처를 띄우고 iframe 용 로컬 URL 반환. */

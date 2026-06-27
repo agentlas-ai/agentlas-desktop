@@ -271,6 +271,7 @@ const api: AgentlasIpc = {
     aoGraph: (input) => ipcRenderer.invoke("hephaestus:aoGraph", input),
     build: (input) => ipcRenderer.invoke("hephaestus:build", input),
     buildEventChannel: (runId: string) => `hephaestus:build:${runId}`,
+    buildReady: (runId: string) => ipcRenderer.invoke("hephaestus:buildReady", runId),
     cancelBuild: (runId: string) => ipcRenderer.invoke("hephaestus:cancelBuild", runId),
     startStudio: () => ipcRenderer.invoke("hephaestus:startStudio"),
     stopStudio: () => ipcRenderer.invoke("hephaestus:stopStudio"),

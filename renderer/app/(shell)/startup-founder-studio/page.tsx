@@ -51,9 +51,10 @@ export default function StartupFounderStudioPage() {
         <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 16, color: "var(--ink)" }}>Startup Founder Studio</h1>
         <button
           onClick={() => void start()}
+          disabled={phase === "starting"}
           className="titlebar-nodrag"
           title="다시 시작"
-          style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--muted-deep)", background: "var(--fill-1)", border: "1px solid var(--paper-edge)", borderRadius: 8, padding: "5px 10px", cursor: "pointer" }}
+          style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--muted-deep)", background: "var(--fill-1)", border: "1px solid var(--paper-edge)", borderRadius: 8, padding: "5px 10px", cursor: phase === "starting" ? "default" : "pointer", opacity: phase === "starting" ? 0.5 : 1 }}
         >
           <IconRefresh size={13} /> 새로고침
         </button>
@@ -77,7 +78,7 @@ export default function StartupFounderStudioPage() {
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, color: "#bbb", background: "#0f0f12", padding: 32, textAlign: "center" }}>
             <div style={{ fontSize: 15, fontWeight: 600, color: "#e9e9ee" }}>스튜디오를 시작할 수 없습니다</div>
             <div style={{ fontSize: 13, color: "#9aa", maxWidth: 460, lineHeight: 1.6 }}>{reason}</div>
-            <button onClick={() => void start()} style={{ marginTop: 6, padding: "9px 20px", borderRadius: 10, border: "none", background: "#845EF7", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+            <button onClick={() => void start()} disabled={phase !== "error"} style={{ marginTop: 6, padding: "9px 20px", borderRadius: 10, border: "none", background: "#845EF7", color: "#fff", fontSize: 13, fontWeight: 600, cursor: phase !== "error" ? "default" : "pointer", opacity: phase !== "error" ? 0.6 : 1 }}>
               다시 시도
             </button>
           </div>

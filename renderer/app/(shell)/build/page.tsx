@@ -129,6 +129,8 @@ export default function BuildPage() {
         unsubRef.current?.();
       }
     });
+    // 구독이 끝났음을 메인에 알려 버퍼링된 초기 이벤트(첫 stage 틱)를 flush 받는다.
+    void api.hephaestus.buildReady(runId);
   };
 
   const cancel = () => {

@@ -25,10 +25,12 @@ export function DashboardStats() {
   const [confirms, setConfirms] = useState<number | "—">("—");
   const [autos, setAutos] = useState<number | "—">("—");
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const mounted = useRef(true);
 
   const load = useCallback(async () => {
     const api = ipc();
     if (!api) {
+      if (!mounted.current) return;
       setEngines(0);
       setRunning(0);
       setConfirms(0);
@@ -42,6 +44,8 @@ export function DashboardStats() {
         api.confirm.listPending().catch(() => []),
         api.automations.list().catch(() => []),
       ]);
+      // 언마운트 후 도착한 폴링 결과는 무시(언마운트된 컴포넌트 setState 경고 방지).
+      if (!mounted.current) return;
       // 연결된 엔진 = 버전/소스가 잡힌(실제 설치·활성) 런타임.
       setEngines(rt.filter((r) => r.active || Boolean(r.version)).length);
       setRunning(run.length);
@@ -53,9 +57,11 @@ export function DashboardStats() {
   }, []);
 
   useEffect(() => {
+    mounted.current = true;
     void load();
     timer.current = setInterval(() => void load(), POLL_MS);
     return () => {
+      mounted.current = false;
       if (timer.current) clearInterval(timer.current);
     };
   }, [load]);

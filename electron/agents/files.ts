@@ -139,12 +139,37 @@ function writeIfMissing(file: string, content: string): void {
   fs.writeFileSync(file, content.endsWith("\n") ? content : content + "\n", "utf8");
 }
 
-/** 지정한 base 폴더 내부 경로인지 확인. 아니면 throw. */
-function ensureInside(baseDir: string, absPath: string): string {
+/** 실재하는 가장 깊은 조상 경로의 realpath 를 반환(심볼릭 링크 해소). 없으면 base 까지 거슬러 올라간다. */
+function realpathOfExistingPrefix(target: string): string {
+  let cur = target;
+  // 루트(또는 더 이상 못 올라감)까지: 존재하는 첫 조상의 realpath 를 잡는다.
+  for (;;) {
+    try {
+      return fs.realpathSync.native(cur);
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return cur; // 루트까지 도달
+      cur = parent;
+    }
+  }
+}
+
+/** 지정한 base 폴더 내부 경로인지 확인. 아니면 throw.
+ *  - 상대경로는 base 기준으로 해석(계약: 호출자가 agent-dir 상대경로를 줄 수 있다).
+ *  - 어휘적 검사 후, 심볼릭 링크를 해소한 realpath 가 여전히 base 내부인지 추가 검증(샌드박스 탈출 방지). */
+function ensureInside(baseDir: string, requested: string): string {
   const root = path.resolve(baseDir);
-  const resolved = path.resolve(absPath);
+  // 상대경로면 agent 폴더 기준으로 해석(process.cwd() 기준 X).
+  const resolved = path.isAbsolute(requested) ? path.resolve(requested) : path.resolve(root, requested);
   const rel = path.relative(root, resolved);
   if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error("Path escapes the agent folder");
+  }
+  // 심볼릭 링크 탈출 차단: base 와 (대상이 존재하면 대상, 아니면 존재하는 상위)의 realpath 비교.
+  const realRoot = realpathOfExistingPrefix(root);
+  const realTarget = realpathOfExistingPrefix(resolved);
+  const realRel = path.relative(realRoot, realTarget);
+  if (realRel !== "" && (realRel.startsWith("..") || path.isAbsolute(realRel))) {
     throw new Error("Path escapes the agent folder");
   }
   return resolved;
@@ -178,7 +203,14 @@ export function writeAgentFile(agentId: string, absPath: string, content: string
   const { dir } = resolveDir(agentId, row.slug);
   const safe = ensureInside(dir, absPath);
   fs.mkdirSync(path.dirname(safe), { recursive: true });
-  fs.writeFileSync(safe, content, "utf8");
+  // O_NOFOLLOW: 최종 컴포넌트가 심볼릭 링크면 거부(ELOOP) — 링크를 통한 폴더 밖 쓰기 차단.
+  // ensureInside 가 중간 경로의 realpath 도 검증하므로, 이중 방어가 된다.
+  const fd = fs.openSync(safe, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, 0o644);
+  try {
+    fs.writeFileSync(fd, content, "utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
   // system-prompt.md 편집은 DB에도 반영해 새 메시지에 즉시 적용.
   if (path.basename(safe) === "system-prompt.md") {
     getDb().prepare("UPDATE installed_agents SET system_prompt = ? WHERE id = ?").run(content, agentId);

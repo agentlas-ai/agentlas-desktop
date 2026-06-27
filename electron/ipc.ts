@@ -85,10 +85,11 @@ import {
   stormbreakerJournal,
   stormbreakerRun,
 } from "./hephaestus/commands";
+import { confirmUpload, PathGuardError, resolveFolderArg } from "./hephaestus/path-guard";
 import { isSupervisorEnabled, setSupervisorEnabled } from "./hephaestus/supervisor";
 import { runHephaestusBuild } from "./hephaestus/builder";
 import { startStudio, stopStudio } from "./hephaestus/studio";
-import type { HephaestusBuildRequest } from "../shared/types";
+import type { HephaestusBuildEvent, HephaestusBuildRequest } from "../shared/types";
 import { checkSafely as updaterCheck, getUpdaterState, quitAndInstall as updaterInstall } from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
 import { getAuthSession, signInWithBrowser, signInWithGoogle, signOut } from "./auth";
@@ -253,6 +254,8 @@ interface RunRecord {
 const activeRuns = new Map<string, RunRecord>();
 // Hephaestus 빌더(hep-build) 진행 중 실행 — 취소용 AbortController 레지스트리.
 const activeBuilds = new Map<string, AbortController>();
+// runId → "렌더러 구독 완료" 신호. 구독 전 발생한 이벤트를 버퍼링하다 이 신호로 flush 한다.
+const buildReadySignals = new Map<string, () => void>();
 // tool 폭주하는 긴 실행/대형 firm 실행의 버퍼 무한증가 방지 상한 (재접속 리플레이는 최근 위주).
 const MAX_BUFFERED_EVENTS = 4000;
 // 단일 partial 텍스트 상한 — 런어웨이 출력(끝없이 스트리밍되는 GUI/서버 로그 등)이
@@ -1182,18 +1185,63 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle(
     "hephaestus:publish",
-    (_e, input: { folder: string; visibility: "private-link" | "marketplace"; dryRun?: boolean }) =>
-      hepPublish(input.folder, input.visibility, { dryRun: input.dryRun }),
+    async (event, input: { folder: string; visibility: "private-link" | "marketplace"; dryRun?: boolean }) => {
+      let folder: string;
+      try {
+        folder = resolveFolderArg(input.folder);
+      } catch (e) {
+        return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as PathGuardError).message };
+      }
+      // off-device 업로드 — 사용자 확인 강제(dry-run 은 업로드 없음이므로 제외).
+      if (!input.dryRun) {
+        const win = BrowserWindow.fromWebContents(event.sender);
+        const ok = await confirmUpload(folder, input.visibility, win);
+        if (!ok) {
+          return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: "사용자가 업로드를 취소했습니다." };
+        }
+      }
+      return hepPublish(folder, input.visibility, { dryRun: input.dryRun });
+    },
   );
   ipcMain.handle(
     "hephaestus:package",
-    (_e, input: { folder: string; visibility?: "private-link" | "marketplace" }) =>
-      hepPackage(input.folder, { visibility: input.visibility }),
+    async (event, input: { folder: string; visibility?: "private-link" | "marketplace" }) => {
+      let folder: string;
+      try {
+        folder = resolveFolderArg(input.folder);
+      } catch (e) {
+        return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as PathGuardError).message };
+      }
+      // package 는 폴더 텍스트 내용을 읽어 번들을 만들므로(off-device 후속 가능) 확인을 받는다.
+      const win = BrowserWindow.fromWebContents(event.sender);
+      const ok = await confirmUpload(folder, input.visibility ?? "marketplace", win);
+      if (!ok) {
+        return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: "사용자가 패키징을 취소했습니다." };
+      }
+      return hepPackage(folder, { visibility: input.visibility });
+    },
   );
-  ipcMain.handle("hephaestus:securityScan", (_e, input: { folder: string; strict?: boolean }) =>
-    securityScan(input.folder, { strict: input.strict }),
-  );
-  ipcMain.handle("hephaestus:aoGraph", (_e, input?: { agent?: string; dir?: string }) => aoGraph(input ?? {}));
+  ipcMain.handle("hephaestus:securityScan", (_e, input: { folder: string; strict?: boolean }) => {
+    let folder: string;
+    try {
+      folder = resolveFolderArg(input.folder);
+    } catch (e) {
+      return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as PathGuardError).message };
+    }
+    return securityScan(folder, { strict: input.strict });
+  });
+  ipcMain.handle("hephaestus:aoGraph", (_e, input?: { agent?: string; dir?: string }) => {
+    const inp = input ?? {};
+    let dir: string | undefined;
+    if (inp.dir != null && String(inp.dir).trim()) {
+      try {
+        dir = resolveFolderArg(inp.dir);
+      } catch (e) {
+        return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as PathGuardError).message };
+      }
+    }
+    return aoGraph({ agent: inp.agent, dir });
+  });
 
   // 빌더(hep-build) — 활성 런타임으로 Hephaestus 빌더 에이전트를 구동, 이벤트 스트리밍.
   ipcMain.handle("hephaestus:build", (event, req: HephaestusBuildRequest) => {
@@ -1202,15 +1250,32 @@ export function registerIpcHandlers(): void {
     const win = BrowserWindow.fromWebContents(event.sender);
     const controller = new AbortController();
     activeBuilds.set(runId, controller);
-    void runHephaestusBuild(
-      runId,
-      req,
-      (ev) => {
+    // 렌더러는 build() 응답을 await 한 뒤에야 채널을 구독하므로, 그 사이에 발생한 첫 이벤트
+    // (예: 'build' stage 틱)가 유실될 수 있다. 렌더러가 buildReady 로 구독 완료를 알릴 때까지
+    // 이벤트를 버퍼링했다가 한 번에 flush 한다(첫 stage 틱 손실 방지).
+    const pending: HephaestusBuildEvent[] = [];
+    let ready = false;
+    const emit = (ev: HephaestusBuildEvent) => {
+      if (ready) {
         win?.webContents.send(channel, ev);
-      },
-      controller.signal,
-    ).finally(() => activeBuilds.delete(runId));
+      } else {
+        pending.push(ev);
+      }
+    };
+    buildReadySignals.set(runId, () => {
+      if (ready) return;
+      ready = true;
+      for (const ev of pending) win?.webContents.send(channel, ev);
+      pending.length = 0;
+    });
+    void runHephaestusBuild(runId, req, emit, controller.signal).finally(() => {
+      activeBuilds.delete(runId);
+      buildReadySignals.delete(runId);
+    });
     return { runId };
+  });
+  ipcMain.handle("hephaestus:buildReady", (_e, runId: string) => {
+    buildReadySignals.get(runId)?.();
   });
   ipcMain.handle("hephaestus:cancelBuild", (_e, runId: string) => {
     activeBuilds.get(runId)?.abort();
