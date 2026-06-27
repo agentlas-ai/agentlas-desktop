@@ -77,11 +77,11 @@ function FirmDetailPage() {
     { slug: "xcode-project-setup", name: "xcode-project-setup", description: "iOS Xcode 프로젝트 종속성 파일 주입 스킬" }
   ]);
 
-  // 온톨로지 인박스 제안 데이터 (Inbox)
-  const [ontologyInbox, setOntologyInbox] = useState([
-    { id: "suggest-1", type: "gotcha" as const, title: "Sora 세로형 왜곡 주의", content: "Sora 비디오 모델에서 세로 방향(9:16) 출력물 끝자락 왜곡 현상 방지 규칙", source: "local" as const },
-    { id: "suggest-2", type: "decision" as const, title: "Pretendard 폰트 CJK 강제", content: "Pretendard를 한국어 자막에 강제 적용하여 자막 폰트 깨짐 현상 완전 방지", source: "cloud" as const }
-  ]);
+  // 온톨로지 인박스 — 실제 보류 중인 학습 제안만 표출(가짜 데이터 없음).
+  // selectedNode 의 메모리 미결 과제(openQuestions)에서 도출 → 정식 규칙 승격 후보.
+  const [ontologyInbox, setOntologyInbox] = useState<
+    { id: string; type: "gotcha" | "decision"; title: string; content: string; source: "local" | "cloud" }[]
+  >([]);
 
   // 허브 연동 글로벌 알림용 토스트 상태
   const [toastMsg, setToastMsg] = useState("");
@@ -1092,12 +1092,18 @@ function AgentDetailView({
   // 카메라 연출 인터랙션 칩 상태
   const [selectedTechnique, setSelectedTechnique] = useState<"orbit" | "crane" | "dolly-zoom" | "pan-tilt">("orbit");
 
-  // 셀프에볼루션 자체 개선 프롬프트 디프 뷰 기믹을 위한 목 데이터
+  // 셀프에볼루션 — 실제 메모리(활성 결정·주의 규칙) 중 아직 시스템 프롬프트에 반영되지 않은
+  // 학습 규칙을 프롬프트 부록으로 접어 넣는 실데이터 기반 진화 제안. (가짜 텍스트 아님)
   const [evolutionApproved, setEvolutionApproved] = useState(false);
-  const evolutionDiff = {
-    old: promptContent,
-    new: promptContent + "\n\n# 5. [Evolution Upgrade - Speed Ramps]\n- 카메라 무브먼트의 가속도를 매초 정교하게 분배하며 (Speed Ramping), 움직임 간 간극에 0.4초의 감속 완충(Ease-out) 버퍼 구간을 반드시 제공한다.\n- 자막 렌더링 시 한국어 자막(Pretendard 강제)에 테두리 검정 스트로크 오프셋(StrokeWidth 2px)을 입혀 영상 톤과 명확히 구분되게 포스트 컴포지팅한다."
-  };
+  const learnedRules = [...memoryParsed.decisions, ...memoryParsed.gotchas].filter(
+    (r) => r.enabled !== false && r.title && !promptContent.includes(r.title),
+  );
+  const evolutionAppendix = learnedRules.length
+    ? "\n\n## Learned rules (folded from memory)\n" +
+      learnedRules.map((r) => `- **${r.title}** — ${r.content}`).join("\n")
+    : "";
+  const hasPendingEvolution = learnedRules.length > 0;
+  const evolutionDiff = { old: promptContent, new: promptContent + evolutionAppendix };
 
   // 프롬프트 복사 핸들러
   const handleCopyPrompt = () => {
@@ -1271,33 +1277,48 @@ function AgentDetailView({
   };
 
   // 스킬 서랍에서 드래그 혹은 클릭하여 스킬 주입
-  const handleInjectSkill = (skill: { name: string; description: string }) => {
+  const handleInjectSkill = async (skill: { slug?: string; name: string; description: string }) => {
+    const api = ipc();
+    const slug = (skill.slug ?? skill.name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    let fileWritten = false;
+    if (api && node?.agentId) {
+      const skillMd = `# ${skill.name}\n\n${skill.description}\n\n## When to use\nInjected into this agent from the skill catalog. Apply this skill's guidance when the task matches its scope.\n`;
+      try {
+        await api.agentFiles.write(node.agentId, `.agentlas/skills/${slug}/SKILL.md`, skillMd);
+        fileWritten = true;
+      } catch (e) {
+        showToast(`스킬 파일 작성 실패: ${String(e)}`);
+      }
+    }
+
     const newDecision = {
-      id: `skill-${skill.name}`,
-      title: `${skill.name} 스킬 인젝션`,
-      content: `${skill.description} 가이드라인 룰셋을 에이전트의 액션 플레이북에 동적 주입 병합함.`,
+      id: `skill-${slug}`,
+      title: `${skill.name} 스킬 주입`,
+      content: `${skill.description} — .agentlas/skills/${slug}/SKILL.md 로 주입됨.`,
       synced: globalHubSync,
-      enabled: true
+      enabled: true,
     };
     const nextMemory = {
       ...memoryParsed,
-      decisions: [...memoryParsed.decisions, newDecision]
+      decisions: [...memoryParsed.decisions, newDecision],
     };
     void onSaveMemory(nextMemory);
     onSetSkillDrawerOpen(false);
-    
-    setTimelineEvents(prev => [
+
+    setTimelineEvents((prev) => [
       {
         id: `timeline-${Date.now()}`,
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        title: "수동 스킬 주입 (Manual Skill Evolution)",
-        desc: `스킬 카탈로그에서 '${skill.name}' 컴포넌트를 이 에이전트 런타임에 직접 병합 마운트했습니다.`,
-        type: "skill"
+        title: "수동 스킬 주입 (Skill Injection)",
+        desc: fileWritten
+          ? `'${skill.name}' 스킬을 .agentlas/skills/${slug}/SKILL.md 로 에이전트 폴더에 작성했습니다.`
+          : `'${skill.name}' 스킬을 메모리에 기록했습니다(파일 작성은 건너뜀).`,
+        type: "skill",
       },
-      ...prev
+      ...prev,
     ]);
-    
-    showToast(`${skill.name}의 가이드라인 룰셋이 플레이북에 수동 주입되었습니다.`);
+
+    showToast(fileWritten ? `${skill.name} 스킬이 에이전트 폴더에 주입되었습니다.` : `${skill.name} 스킬을 메모리에 기록했습니다.`);
   };
 
 
@@ -2232,19 +2253,23 @@ function AgentDetailView({
           {activeTab === "activity" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 840 }}>
               
-              {/* 목 지표 영역 */}
+              {/* 실 지표 — 이 에이전트의 실제 메모리·타임라인에서 도출 */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>QA 통과율 (Quality Gate)</div>
-                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--green-deep)" }}>94.2%</div>
+                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>활성 규칙 (Active rules)</div>
+                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--green-deep)" }}>
+                    {[...memoryParsed.decisions, ...memoryParsed.gotchas].filter((r) => r.enabled !== false).length}
+                  </div>
                 </div>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>누적 사용 토큰 수</div>
-                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--accent)" }}>1.28M</div>
+                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>메모리 항목 (Memory items)</div>
+                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--accent)" }}>
+                    {memoryParsed.decisions.length + memoryParsed.gotchas.length + memoryParsed.openQuestions.length}
+                  </div>
                 </div>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>에러 리트라이 확률</div>
-                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--peach-ink)" }}>0.82%</div>
+                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>진화·활동 이력 (Events)</div>
+                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--peach-ink)" }}>{timelineEvents.length}</div>
                 </div>
               </div>
 
@@ -2256,10 +2281,19 @@ function AgentDetailView({
                     자가 프롬프트 진화 제안 (Agent Evolution Proposal)
                   </h4>
                   <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 4, background: "rgba(245,201,122,0.16)", color: "var(--amber-deep)", fontWeight: 700 }}>
-                    {evolutionApproved ? "적용 완료" : "업그레이드 대기"}
+                    {evolutionApproved ? "적용 완료" : hasPendingEvolution ? "업그레이드 대기" : "최신 상태"}
                   </span>
                 </div>
 
+                {!hasPendingEvolution && !evolutionApproved && (
+                  <div style={{ fontSize: 12, color: "var(--muted-deep)", padding: "12px 4px", lineHeight: 1.6 }}>
+                    메모리의 활성 규칙이 모두 시스템 프롬프트에 반영되어 있습니다. 메모리 탭에서 새 결정·주의 규칙이
+                    학습되면 여기에 프롬프트 진화 제안이 나타납니다.
+                  </div>
+                )}
+
+                {(hasPendingEvolution || evolutionApproved) && (
+                <>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-sm)", overflow: "hidden" }}>
                   {/* 기존 버젼 */}
                   <div style={{ background: "rgba(255,138,138,0.04)" }}>
@@ -2281,7 +2315,7 @@ function AgentDetailView({
                   </div>
                 </div>
 
-                {!evolutionApproved && (
+                {!evolutionApproved && hasPendingEvolution && (
                   <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
                     <button
                       onClick={async () => {
@@ -2312,6 +2346,8 @@ function AgentDetailView({
                       진화 제안 승인 및 적용
                     </button>
                   </div>
+                )}
+                </>
                 )}
               </div>
 
