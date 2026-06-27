@@ -87,6 +87,7 @@ import {
 } from "./hephaestus/commands";
 import { isSupervisorEnabled, setSupervisorEnabled } from "./hephaestus/supervisor";
 import { runHephaestusBuild } from "./hephaestus/builder";
+import { startStudio, stopStudio } from "./hephaestus/studio";
 import type { HephaestusBuildRequest } from "../shared/types";
 import { checkSafely as updaterCheck, getUpdaterState, quitAndInstall as updaterInstall } from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
@@ -1214,5 +1215,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("hephaestus:cancelBuild", (_e, runId: string) => {
     activeBuilds.get(runId)?.abort();
     activeBuilds.delete(runId);
+  });
+
+  // Startup Founder Studio — 패키지 자체 런처를 spawn 해 실제 SPA 를 로컬 서빙, iframe URL 반환.
+  ipcMain.handle("hephaestus:startStudio", () => startStudio());
+  ipcMain.handle("hephaestus:stopStudio", () => {
+    stopStudio();
   });
 }

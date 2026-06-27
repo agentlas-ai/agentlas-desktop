@@ -58,6 +58,21 @@ extraResources:
       - "**/*"
       - "!**/__pycache__/**"
       - "!**/*.pyc"
+  # Startup Founder Studio 패키지 — 자체 GUI 런처 + 빌드된 SPA(web/dist). 앱이 런처를 spawn 해
+  # 실제 스튜디오를 로컬 서빙하고 렌더러가 iframe 으로 띄운다. node_modules/소스/git 제외.
+  - from: studio-pack
+    to: studio-pack
+    filter:
+      - "**/*"
+      - "!**/node_modules/**"
+      - "!.git/**"
+      - "!.git"
+      - "!web/src/**"
+      - "!web/node_modules/**"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+      - "!**/*.map"
+      - "!**/.DS_Store"
 
 # macOS first — Hardened Runtime + notarization 준비
 mac:

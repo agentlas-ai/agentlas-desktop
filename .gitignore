@@ -91,3 +91,6 @@ artifacts/
 /rewrite_settings.js
 /renderer/app/(shell)/library/agents/transform.js
 *.bak
+
+# Embedded Startup Founder Studio package (separate paid package, bundled at build)
+/studio-pack/

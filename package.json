@@ -30,6 +30,7 @@
     "ensure:engine": "node scripts/ensure-engine.mjs",
     "fetch:python": "node scripts/fetch-python-runtime.mjs",
     "publish:cdn": "node scripts/publish-cdn.mjs",
+    "e2e:smoke": "node scripts/e2e-smoke.mjs",
     "package:mac": "npm run ensure:engine && bash scripts/package-mac.sh",
     "install:mac:stable": "bash scripts/install-stable-mac.sh",
     "dist:mac:unsigned": "npm run ensure:engine && npm run build && electron-builder --mac -c.mac.notarize=false -c.mac.identity=null",

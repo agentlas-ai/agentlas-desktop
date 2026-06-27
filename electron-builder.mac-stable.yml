@@ -54,6 +54,20 @@ extraResources:
       - "**/*"
       - "!**/__pycache__/**"
       - "!**/*.pyc"
+  # Startup Founder Studio 패키지(런처 + web/dist). base 설정과 동기화 유지.
+  - from: studio-pack
+    to: studio-pack
+    filter:
+      - "**/*"
+      - "!**/node_modules/**"
+      - "!.git/**"
+      - "!.git"
+      - "!web/src/**"
+      - "!web/node_modules/**"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+      - "!**/*.map"
+      - "!**/.DS_Store"
 
 mac:
   category: public.app-category.productivity

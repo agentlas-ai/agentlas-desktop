@@ -2601,6 +2601,9 @@ export interface AgentlasIpc {
     buildEventChannel: (runId: string) => string;
     /** 진행 중 빌드 취소. */
     cancelBuild: (runId: string) => Promise<void>;
+    /** Startup Founder Studio — 패키지의 실제 GUI 런처를 띄우고 iframe 용 로컬 URL 반환. */
+    startStudio: () => Promise<{ ok: boolean; url?: string; reason?: string }>;
+    stopStudio: () => Promise<void>;
   };
 }
 
