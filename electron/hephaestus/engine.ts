@@ -71,12 +71,20 @@ export function hephaestusRoot(): string | null {
   if (process.resourcesPath) {
     candidates.push(path.join(process.resourcesPath, "Hephaestus"));
   }
-  // dev: 레포 루트/Hephaestus
+  // dev: 레포 루트/Hephaestus (app.getAppPath() == repo)
   try {
     candidates.push(path.join(app.getAppPath(), "Hephaestus"));
   } catch {
-    // app 미가용(테스트) — __dirname 기반 폴백
-    candidates.push(path.join(__dirname, "..", "..", "..", "Hephaestus"));
+    // app 미가용
+  }
+  // __dirname 기반 폴백 — dist/electron/hephaestus/engine.js 기준 레포 루트로 올라감.
+  candidates.push(path.join(__dirname, "..", "..", "..", "Hephaestus"));
+  candidates.push(path.join(__dirname, "..", "..", "Hephaestus"));
+  // cwd 기반 폴백 — 비패키지 실행/테스트 컨텍스트.
+  try {
+    candidates.push(path.join(process.cwd(), "Hephaestus"));
+  } catch {
+    // noop
   }
   // 명시적 오버라이드
   if (process.env.HEPHAESTUS_RUNTIME_ROOT) {
