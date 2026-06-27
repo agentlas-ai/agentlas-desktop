@@ -1,12 +1,20 @@
-# Cross-platform preview release — builds Windows / Linux installers and uploads
-# them to the GitHub Release for the pushed tag. Uses only the built-in
-# GITHUB_TOKEN, so it works on a fresh public fork with no extra secrets.
+# Cross-platform release — builds Windows / Linux installers and publishes them to
+# the SEPARATE PUBLIC releases repo (agentlas-ai/agentlas-desktop-releases) via the
+# electron-builder GitHub publisher. The desktop SOURCE repo is private, so only the
+# compiled binaries + latest*.yml (the update feed electron-updater polls) are made
+# public — no source is exposed.
+#
+# The embedded Hephaestus engine is git-ignored, so a fresh checkout has no
+# engine — `npm run ensure:engine` clones the public engine repo before build.
 #
 # These builds are UNSIGNED (no Windows certificate required). macOS is
 # intentionally excluded here: public Mac releases must come from
 # scripts/package-mac.sh with Developer ID signing + notarization, otherwise
 # users can get a "newer" DMG that cannot safely auto-update.
 # For the signed + notarized macOS pipeline, see docs/PUBLIC-RELEASE.md.
+#
+# Requires the AGENTLAS_DESKTOP_RELEASE_TOKEN secret (a PAT with `repo` scope that
+# can write to the releases repo) — already present in repo secrets.
 #
 # Trigger:
 #   git tag v0.0.3 && git push origin v0.0.3      # version comes from the tag
@@ -25,10 +33,9 @@ on:
         required: true
         default: "v0.0.3"
 
-# electron-builder's GitHub publisher needs write access to create the release
-# and upload assets using the default GITHUB_TOKEN.
+# Distribution is to the CDN, not GitHub Releases — read-only checkout suffices.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
@@ -43,9 +50,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      # electron-builder reads the GitHub token from GH_TOKEN to publish.
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Publishing to the SEPARATE public releases repo requires a cross-repo PAT
+      # (the default GITHUB_TOKEN is scoped to this private source repo only).
+      # AGENTLAS_DESKTOP_RELEASE_TOKEN already exists in repo secrets.
+      GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
 
     steps:
       - uses: actions/checkout@v4
@@ -74,6 +83,10 @@ jobs:
           fi
           echo "Releasing $tag (version $version)"
 
+      # Clone the git-ignored Hephaestus engine so extraResources can embed it.
+      - name: Ensure embedded engine (Hephaestus)
+        run: npm run ensure:engine
+
       - name: Install dependencies
         run: npm ci
 
@@ -84,10 +97,9 @@ jobs:
       - name: Build renderer + electron
         run: npm run build
 
-      # --publish always uploads the artifacts (and the per-platform update feed:
-      # latest.yml / latest-mac.yml / latest-linux.yml) to the tag's release.
-      # Retried because hdiutil (macOS DMG creation) flakes intermittently on
-      # hosted runners; re-publish overwrites partially uploaded assets.
+      # --publish always uploads installers + the update feed (latest*.yml) to the
+      # public releases repo (per electron-builder.yml publish config). Retried
+      # because installer creation flakes intermittently on hosted runners.
       - name: Package and publish
         shell: bash
         run: |

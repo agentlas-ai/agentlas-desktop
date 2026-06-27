@@ -106,6 +106,21 @@ interface AutocompleteOption {
 
 type PermissionLevel = "read" | "write" | "full";
 type AppGenerateChoice = "dedicated" | "chat";
+type HepCommandId = "cloud" | "network" | "build" | "upload";
+
+const HEP_COMMANDS: Array<{
+  id: HepCommandId;
+  command: string;
+  label: string;
+  titleKo: string;
+  titleEn: string;
+}> = [
+  { id: "cloud", command: "hep-cloud", label: "Cloud", titleKo: "Cloud 작업으로 보내기", titleEn: "Send through Cloud" },
+  { id: "network", command: "hep-network", label: "Network", titleKo: "Hephaestus Network 라우팅", titleEn: "Route through Hephaestus Network" },
+  { id: "build", command: "hep-build", label: "Build", titleKo: "빌드 요청으로 보내기", titleEn: "Send as a build request" },
+  { id: "upload", command: "hep-upload", label: "Upload", titleKo: "Hub 업로드 요청으로 보내기", titleEn: "Send as a Hub upload request" },
+];
+
 interface BottomQuestionOption {
   id: AppGenerateChoice;
   title: string;
@@ -155,6 +170,7 @@ export function ChatInput({
   const [plusSubmenu, setPlusSubmenu] = useState<"plugins" | null>(null);
   const [planMode, setPlanMode] = useState(false);
   const [goalMode, setGoalMode] = useState(false);
+  const [hepCommand, setHepCommand] = useState<HepCommandId | null>(null);
   const [appsGenerateMode, setAppsGenerateMode] = useState(false);
   const [appsGenerateQuestionOpen, setAppsGenerateQuestionOpen] = useState(false);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
@@ -178,7 +194,18 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const submitDisabled =
-    busy || (!input.trim() && images.length === 0) || disabled;
+    busy || (!input.trim() && images.length === 0 && !hepCommand) || disabled;
+  const selectedHepCommand = hepCommand ? HEP_COMMANDS.find((cmd) => cmd.id === hepCommand) ?? null : null;
+  const contextManagedByRuntime = runtime ? CONTEXT_MANAGED_BY[runtime.kind] === "runtime" : true;
+  const contextPercent = tokensUsage
+    ? Math.min(100, Math.max(0, Math.round((tokensUsage.current / Math.max(1, tokensUsage.limit)) * 100)))
+    : 0;
+  const contextOwnerLabel = contextManagedByRuntime
+    ? t("chatinput.context.runtime_short")
+    : t("chatinput.context.agentlas_short");
+  const contextOwnerDescription = contextManagedByRuntime
+    ? t("chatinput.context.runtime_desc")
+    : t("chatinput.context.agentlas_desc");
 
   // ── 파일 첨부 ──────────────────────────────────────────
   async function addFiles(files: FileList | File[]) {
@@ -279,9 +306,12 @@ export function ChatInput({
   function submit() {
     if (submitDisabled) return;
     const text = input.trim();
+    const outgoingText = selectedHepCommand
+      ? `${selectedHepCommand.command}${text ? ` ${text}` : ""}`
+      : text;
     const attachments =
       images.length > 0 ? images.map(({ mediaType, data }) => ({ mediaType, data })) : undefined;
-    onSend(text, {
+    onSend(outgoingText, {
       images: attachments,
       planMode: planMode || undefined,
       goalMode: goalMode || undefined,
@@ -290,6 +320,7 @@ export function ChatInput({
     });
     setInput("");
     setImages([]);
+    setHepCommand(null);
     setTrigger(null);
   }
 
@@ -632,6 +663,8 @@ export function ChatInput({
           placeholder={
             disabled
               ? t("chatinput.placeholder_disabled")
+              : selectedHepCommand
+                ? `${selectedHepCommand.command} ${locale === "ko" ? "요청을 입력하세요" : "describe the request"}`
               : t("chatinput.placeholder_rich")
           }
           rows={2}
@@ -695,6 +728,32 @@ export function ChatInput({
               <IconAtSign size={14} />
             </button>
 
+            <div className="chat-input-hep-toggle-group" role="group" aria-label="Hephaestus commands">
+              {HEP_COMMANDS.map((cmd) => {
+                const active = hepCommand === cmd.id;
+                return (
+                  <button
+                    key={cmd.id}
+                    type="button"
+                    className={"chat-input-hep-chip" + (active ? " active" : "")}
+                    onClick={() => {
+                      setHepCommand((current) => (current === cmd.id ? null : cmd.id));
+                      setPlusOpen(false);
+                      setPermOpen(false);
+                      setModelOpen(false);
+                      setTimeout(() => textareaRef.current?.focus(), 0);
+                    }}
+                    disabled={disabled}
+                    title={locale === "ko" ? cmd.titleKo : cmd.titleEn}
+                    aria-pressed={active}
+                  >
+                    <span className="chat-input-hep-dot" aria-hidden />
+                    <span className="chat-input-hep-label">{cmd.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+
             {/* 권한 칩 */}
             <button
               className="chat-input-chip"
@@ -750,10 +809,10 @@ export function ChatInput({
           </div>
 
           <div className="chat-input-tools-right" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {/* Context Volume Graph */}
+            {/* Context volume indicator */}
             {tokensUsage && (
               <div 
-                title={`Context: ${Math.round(tokensUsage.current/1000)}k / ${Math.round(tokensUsage.limit/1000)}k`}
+                title={`${contextOwnerDescription} · ${Math.round(tokensUsage.current/1000)}k / ${Math.round(tokensUsage.limit/1000)}k`}
                 style={{ 
                   display: "flex", alignItems: "center", gap: 6,
                   padding: "0 8px", height: 26, borderRadius: 13,
@@ -761,15 +820,18 @@ export function ChatInput({
                   fontSize: 10, fontWeight: 600, color: "var(--muted-deep)"
                 }}
               >
+                <span style={{ color: contextManagedByRuntime ? "var(--muted-deep)" : "var(--accent)" }}>
+                  {contextOwnerLabel}
+                </span>
                 <div style={{ width: 40, height: 4, borderRadius: 2, background: "var(--fill-3)", overflow: "hidden" }}>
                   <div style={{ 
                     height: "100%", 
-                    width: `${Math.min(100, (tokensUsage.current / tokensUsage.limit) * 100)}%`, 
+                    width: `${contextPercent}%`,
                     background: tokensUsage.current > tokensUsage.limit * 0.9 ? "var(--red)" : "var(--accent)",
                     transition: "width 0.3s"
                   }} />
                 </div>
-                <span>{Math.round((tokensUsage.current / tokensUsage.limit) * 100)}%</span>
+                <span>{contextPercent}%</span>
               </div>
             )}
             

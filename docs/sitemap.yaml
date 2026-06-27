@@ -1,7 +1,19 @@
 version: 1
 project: agentlas-desktop
-updated_at: 2026-06-02
+updated_at: 2026-06-27
 nodes:
+  chat:
+    label: Chat
+    route: /chat
+    priority: high
+    owner: Agentlas Desktop
+    status: active
+    actions:
+      - send-agent-message
+      - toggle-hep-cloud
+      - toggle-hep-network
+      - toggle-hep-build
+      - toggle-hep-upload
   apps:
     label: Apps
     route: /apps
@@ -14,6 +26,7 @@ nodes:
       - apps.store
       - apps.vault
       - apps.engines
+      - apps.startup_studio
   apps.document_studio:
     label: Document Studio
     route: /apps/document-studio
@@ -27,11 +40,48 @@ nodes:
     owner: Agentlas Desktop
     status: active
   apps.store:
-    label: Apps Store
+    label: Hub
     route: /marketplace
-    priority: medium
+    priority: high
     owner: Agentlas Desktop
     status: active
+    actions:
+      - install-team
+      - install-plugin
+      - install-agent
+      - import-local-agent-folder
+  build:
+    label: Build
+    route: /build
+    priority: high
+    owner: Agentlas Desktop
+    status: active
+    actions:
+      - run-hep-build
+      - install-build-output
+      - upload-private-link
+      - upload-marketplace
+  agents:
+    label: Agents
+    route: /library/agents
+    priority: high
+    owner: Agentlas Desktop
+    status: active
+    actions:
+      - edit-agent-prompt
+      - review-memory
+      - approve-memory-rule
+      - inject-skill
+      - apply-manual-evolution
+  apps.startup_studio:
+    label: Startup Founder Studio
+    route: /startup-founder-studio
+    priority: high
+    owner: Agentlas Desktop
+    status: active
+    actions:
+      - start-real-studio-runtime
+      - render-studio-iframe
   apps.vault:
     label: Apps Vault
     route: /library/env

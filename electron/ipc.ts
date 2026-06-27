@@ -174,6 +174,12 @@ import {
   recordScaffoldedTool,
 } from "./store/agent-tools";
 import {
+  getAgentRuntimeOverride,
+  listAgentRuntimeOverrides,
+  removeAgentRuntimeOverride,
+  setAgentRuntimeOverride,
+} from "./store/agent-runtime-overrides";
+import {
   archiveAppPackage,
   activateLocalCommerceStack,
   approveProviderPayment,
@@ -215,6 +221,8 @@ import type {
   AppFactoryRootRequest,
   AppFactoryScaffoldRequest,
   AppFactoryScaffoldSnapshot,
+  AgentRuntimeOverrideScope,
+  AgentRuntimeOverrideSetInput,
   Automation,
   CloudAgentPublishRequest,
   McpInvocationEvent,
@@ -431,6 +439,22 @@ export function registerIpcHandlers(): void {
       listRuntimeModels(sel.kind, sel.backend ?? null, sel.availableModels ?? null, Date.now()),
   );
   ipcMain.handle("runtime:installAgentlasCli", () => installAgentlasCli());
+
+  ipcMain.handle("agentRuntime:list", () => listAgentRuntimeOverrides());
+  ipcMain.handle(
+    "agentRuntime:get",
+    (_e, scope: AgentRuntimeOverrideScope, targetId: string) =>
+      getAgentRuntimeOverride(scope, targetId),
+  );
+  ipcMain.handle(
+    "agentRuntime:set",
+    (_e, input: AgentRuntimeOverrideSetInput) => setAgentRuntimeOverride(input),
+  );
+  ipcMain.handle(
+    "agentRuntime:remove",
+    (_e, scope: AgentRuntimeOverrideScope, targetId: string) =>
+      removeAgentRuntimeOverride(scope, targetId),
+  );
 
   // ── secrets (macOS Keychain) ────────────────────────────
   ipcMain.handle("secrets:saveApiKey", (_e, backend: RuntimeBackend, key: string) =>

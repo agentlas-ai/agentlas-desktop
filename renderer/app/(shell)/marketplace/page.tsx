@@ -1,10 +1,3 @@
-// 마켓플레이스 — Codex 데스크톱의 플러그인/스킬 마켓 디자인을 따른다.
-// 구조:
-//   상단 탭 좌측: 회사 / 에이전트   |   우측: 관리 · 만들기
-//   가운데 큰 타이틀: "원하는 방식으로 Agentlas를 활용하세요"
-//   검색바 + 페르소나 필터
-//   추천 히어로 카드 (회전, 글래스)
-//   Featured: 회사와 추천 팀 구성을 한 화면에 묶은 2-col 카드 그리드
 "use client";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
@@ -15,8 +8,10 @@ import { navigate } from "@/lib/navigation";
 import type {
   FirmListing,
   InstalledFirm,
+  InstalledMcpServer,
   MarketplaceListing,
   MarketplaceSourceStatus,
+  McpToolCatalogEntry,
   TeamBundle,
 } from "@/lib/types";
 import {
@@ -38,32 +33,7 @@ import {
   IconWand,
 } from "@/components/Icon";
 
-type Tab = "firms" | "agents";
-type Persona = "all" | "쇼핑몰" | "마케터" | "부동산" | "크리에이터";
-
-const PERSONA_ICONS: Record<Persona, React.ReactNode> = {
-  all: <IconSparkles size={12} />,
-  쇼핑몰: <IconShoppingBag size={12} />,
-  마케터: <IconMegaphone size={12} />,
-  부동산: <IconHome size={12} />,
-  크리에이터: <IconFilm size={12} />,
-};
-
-const PERSONA_T_KEY: Record<Persona, "persona.all" | "persona.shop" | "persona.marketer" | "persona.realestate" | "persona.creator"> = {
-  all: "persona.all",
-  쇼핑몰: "persona.shop",
-  마케터: "persona.marketer",
-  부동산: "persona.realestate",
-  크리에이터: "persona.creator",
-};
-const PERSONA_IDS: Persona[] = ["all", "쇼핑몰", "마케터", "부동산", "크리에이터"];
-
-const PERSONA_PREFIX: Record<Exclude<Persona, "all">, string> = {
-  쇼핑몰: "shop-",
-  마케터: "marketer-",
-  부동산: "realestate-",
-  크리에이터: "creator-",
-};
+type HubCategory = "team" | "plugin" | "agent";
 
 export default function MarketplacePageWrapper() {
   return (
@@ -77,55 +47,29 @@ function MarketplacePage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { t, locale } = useT();
-  const requestedTab = searchParams.get("tab");
-  const initialTab: Tab = requestedTab === "agents" ? "agents" : "firms";
-  const [tab, setTab] = useState<Tab>(initialTab);
+  const ko = locale === "ko";
 
-  const TABS: { id: Tab; label: string }[] = [
-    { id: "firms", label: t("market.tab.firms") },
-    { id: "agents", label: t("market.tab.agents") },
-  ];
+  const [active, setActive] = useState<HubCategory>("team");
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 12;
+
   const [bundles, setBundles] = useState<TeamBundle[]>([]);
   const [firms, setFirms] = useState<FirmListing[]>([]);
   const [installedFirms, setInstalledFirms] = useState<InstalledFirm[]>([]);
+  const [pluginCatalog, setPluginCatalog] = useState<McpToolCatalogEntry[]>([]);
+  const [installedPlugins, setInstalledPlugins] = useState<InstalledMcpServer[]>([]);
   const [importing, setImporting] = useState(false);
   const [listings, setListings] = useState<MarketplaceListing[]>([]);
   const [installedAgentSlugs, setInstalledAgentSlugs] = useState<Set<string>>(new Set());
   const [sourceStatus, setSourceStatus] = useState<MarketplaceSourceStatus | null>(null);
   const [q, setQ] = useState("");
-  const [persona, setPersona] = useState<Persona>("all");
   const [installing, setInstalling] = useState<string | null>(null);
-  const [heroIdx, setHeroIdx] = useState(0);
-  // 로그인 세션 — marketplace install은 로그인 필수 (서버에 사용자 묶음 동기화 필요).
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
-  // Hephaestus Network(hep-search) — Cloud+Hub 후보를 엔진 라우터로 직접 검색.
-  const [hephSearching, setHephSearching] = useState(false);
-  const [hephHits, setHephHits] = useState<{ ok: boolean; text: string } | null>(null);
 
-  async function engineSearch() {
-    const api = ipc();
-    if (!api || !q.trim()) return;
-    setHephSearching(true);
-    setHephHits(null);
-    try {
-      const res = await api.hephaestus.search({ query: q.trim(), limit: 10 });
-      const j = (res?.json ?? {}) as Record<string, unknown>;
-      const cands = (j.candidates ?? j.results ?? j.matches ?? []) as unknown[];
-      setHephHits({
-        ok: Boolean(res?.ok),
-        text: res?.ok
-          ? `Hephaestus Network: ${Array.isArray(cands) ? cands.length : 0}개 후보 (Cloud + Hub)`
-          : `엔진 검색 실패: ${res?.error ?? "Hub 연결을 확인하세요"}`,
-      });
-    } catch (e) {
-      setHephHits({ ok: false, text: (e as Error).message });
-    } finally {
-      setHephSearching(false);
-    }
-  }
+  useEffect(() => {
+    setPage(1);
+  }, [active, q]);
 
-  // 로그인 가드 — 미로그인이면 BrowserWindow 로그인 흐름을 띄우고 결과를 반환.
-  // true면 진행해도 OK, false면 사용자가 로그인 취소했으니 install 중단.
   async function ensureSignedIn(): Promise<boolean> {
     const api = ipc();
     if (!api) return false;
@@ -142,26 +86,28 @@ function MarketplacePage() {
   async function refresh() {
     const api = ipc();
     if (!api) return;
-    const [bd, sf, lf, ls, ag, status, session] = await Promise.all([
+    const [bd, sf, lf, ls, ag, plugins, installedMcp, status, session] = await Promise.all([
       api.marketplace.listBundles(),
       api.marketplace.listFirms(),
       api.firms.list(),
       api.marketplace.search(""),
       api.team.list(),
+      api.mcpTools.listCatalog(),
+      api.mcpTools.listInstalled(),
       api.marketplace.status(),
       api.auth.getSession(),
     ]);
     setBundles(bd);
     setFirms(sf);
     setInstalledFirms(lf);
+    setPluginCatalog(plugins);
+    setInstalledPlugins(installedMcp);
     setListings(ls);
     setInstalledAgentSlugs(new Set(ag.map((a) => a.slug)));
     setSourceStatus(status);
     setSignedIn(session.signedIn);
   }
 
-  // 로컬 폴더에서 회사/에이전트 임포트 — Agents 화면과 동일하게 마켓에서도 가능.
-  // 팀으로 감지되면 firms에 등록되므로 그 회사 상세로 이동한다.
   async function importLocalFolderFromMarket() {
     const api = ipc();
     if (!api || importing) return;
@@ -178,8 +124,7 @@ function MarketplacePage() {
           return;
         }
       }
-      setTab("agents");
-      router.replace("/marketplace?tab=agents");
+      setActive("agent");
     } finally {
       setImporting(false);
     }
@@ -201,14 +146,6 @@ function MarketplacePage() {
     return () => clearTimeout(t);
   }, [q]);
 
-  // 히어로 자동 회전 — 5초마다
-  const heroItems = useMemo(() => firms.slice(0, 4), [firms]);
-  useEffect(() => {
-    if (heroItems.length === 0) return;
-    const t = setInterval(() => setHeroIdx((i) => (i + 1) % heroItems.length), 5000);
-    return () => clearInterval(t);
-  }, [heroItems.length]);
-
   const installedFirmSlugs = new Set(installedFirms.map((f) => f.slug));
 
   async function installFirm(firm: FirmListing) {
@@ -224,6 +161,7 @@ function MarketplacePage() {
       setInstalling(null);
     }
   }
+
   async function installBundle(bundle: TeamBundle) {
     const api = ipc();
     if (!api) return;
@@ -236,6 +174,7 @@ function MarketplacePage() {
       setInstalling(null);
     }
   }
+
   async function installOne(slug: string) {
     const api = ipc();
     if (!api) return;
@@ -249,370 +188,244 @@ function MarketplacePage() {
     }
   }
 
+  async function installPlugin(plugin: McpToolCatalogEntry) {
+    const api = ipc();
+    if (!api) return;
+    setInstalling(`plugin:${plugin.id}`);
+    try {
+      await api.mcpTools.install(plugin.id);
+      const [catalog, installed] = await Promise.all([
+        api.mcpTools.listCatalog(),
+        api.mcpTools.listInstalled(),
+      ]);
+      setPluginCatalog(catalog);
+      setInstalledPlugins(installed);
+    } finally {
+      setInstalling(null);
+    }
+  }
+
   const normalizedQuery = q.trim().toLowerCase();
-  const matchesQuery = (item: FirmListing | TeamBundle | MarketplaceListing) => {
+  const matchesQuery = (item: any) => {
     if (!normalizedQuery) return true;
     const loc = pickLocalized(item, locale);
     return (
-      loc.name.toLowerCase().includes(normalizedQuery) ||
-      loc.tagline.toLowerCase().includes(normalizedQuery)
+      (loc.name || "").toLowerCase().includes(normalizedQuery) ||
+      (loc.tagline || "").toLowerCase().includes(normalizedQuery)
     );
   };
-  const filteredFirms = (persona === "all" ? firms : firms.filter((f) => f.persona === persona)).filter(matchesQuery);
-  const filteredBundles = (persona === "all" ? bundles : bundles.filter((b) => b.persona === persona)).filter(matchesQuery);
-  const filteredListings = useMemo(() => {
-    const base = persona === "all"
-      ? listings
-      : listings.filter((l) => l.slug.startsWith(PERSONA_PREFIX[persona]));
-    if (!normalizedQuery) return base;
-    const needle = normalizedQuery;
-    return base.filter(
-      (l) => l.name.toLowerCase().includes(needle) || l.tagline.toLowerCase().includes(needle),
+
+  const pluginMatchesQuery = (plugin: McpToolCatalogEntry) => {
+    if (!normalizedQuery) return true;
+    return (
+      plugin.name.toLowerCase().includes(normalizedQuery) ||
+      plugin.nameEn.toLowerCase().includes(normalizedQuery) ||
+      plugin.description.toLowerCase().includes(normalizedQuery) ||
+      plugin.descriptionEn.toLowerCase().includes(normalizedQuery) ||
+      plugin.category.toLowerCase().includes(normalizedQuery)
     );
-  }, [listings, normalizedQuery, persona]);
+  };
+
+  const filteredTeams = [...firms, ...bundles].filter(matchesQuery);
+  const filteredPlugins = pluginCatalog.filter(pluginMatchesQuery);
+  const filteredAgents = listings.filter((l) => {
+    if (!normalizedQuery) return true;
+    return (l.name || "").toLowerCase().includes(normalizedQuery) || (l.tagline || "").toLowerCase().includes(normalizedQuery);
+  });
+
+  const counts = {
+    agent: filteredAgents.length,
+    plugin: filteredPlugins.length,
+    team: filteredTeams.length,
+  };
+
+  const activeTotal = counts[active];
+  const totalPages = Math.max(1, Math.ceil(activeTotal / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageStart = (safePage - 1) * PAGE_SIZE;
+  const pageEnd = pageStart + PAGE_SIZE;
+
+  const pagedTeams = filteredTeams.slice(pageStart, pageEnd);
+  const pagedPlugins = filteredPlugins.slice(pageStart, pageEnd);
+  const pagedAgents = filteredAgents.slice(pageStart, pageEnd);
+  const installedPluginIds = new Set(installedPlugins.map((plugin) => plugin.catalogId).filter(Boolean));
+
+  const CATEGORY_NAV = [
+    { key: "team" as HubCategory, ko: "팀", en: "Team", tone: "#a07cfa", note: { ko: "여러 에이전트가 함께 일하는 팀", en: "Multi-agent teams" } },
+    { key: "plugin" as HubCategory, ko: "플러그인", en: "Plugin", tone: "#f2795a", note: { ko: "Hub 에이전트가 찾아 쓰는 도구", en: "Tools Hub agents can use" } },
+    { key: "agent" as HubCategory, ko: "에이전트", en: "Agent", tone: "#0ca678", note: { ko: "단일 에이전트", en: "Single agents" } },
+  ];
 
   return (
-    <div
-      style={{
-        flex: 1,
-        overflow: "hidden",
-        display: "flex",
-        flexDirection: "column",
-        background: "transparent",
-      }}
-    >
-      {/* ── 상단 바: 탭 좌측 + 관리/만들기 우측 ───────── */}
-      <header
-        className="titlebar-drag glass-thin"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          padding: "0 16px 0 90px",
-          minHeight: 44,
-          borderBottom: "1px solid var(--glass-border)",
-          flexShrink: 0,
-        }}
-      >
-        <nav
-          className="titlebar-nodrag"
-          style={{ display: "flex", alignItems: "center", gap: 4, flex: 1 }}
-        >
-          {TABS.map((t) => {
-            const active = tab === t.id;
-            return (
-              <button
-                key={t.id}
-                onClick={() => {
-                  setTab(t.id);
-                  router.replace(`/marketplace?tab=${t.id}`);
-                }}
-                style={{
-                  padding: "5px 11px",
-                  borderRadius: 6,
-                  fontSize: 12,
-                  fontWeight: active ? 600 : 500,
-                  color: active ? "var(--ink)" : "var(--muted-deep)",
-                  background: active ? "var(--paper)" : "transparent",
-                  boxShadow: active
-                    ? "0 1px 0 rgba(11,11,15,0.04), 0 1px 2px rgba(11,11,15,0.04)"
-                    : "none",
-                  border: active ? "1px solid var(--paper-edge)" : "1px solid transparent",
-                }}
-              >
-                {t.label}
-              </button>
-            );
-          })}
-        </nav>
-        <div
-          className="titlebar-nodrag"
-          style={{ display: "flex", alignItems: "center", gap: 4 }}
-        >
-          <button
-            onClick={() => void importLocalFolderFromMarket()}
-            disabled={importing}
-            title={t("library.agents.import_local_hint")}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 5,
-              padding: "5px 11px",
-              borderRadius: 6,
-              fontSize: 12,
-              fontWeight: 600,
-              color: "var(--ink-soft)",
-              background: "var(--paper)",
-              border: "1px solid var(--paper-edge)",
-              boxShadow: "0 1px 0 rgba(11,11,15,0.04)",
-              cursor: importing ? "default" : "pointer",
-              opacity: importing ? 0.6 : 1,
-            }}
-          >
+    <div className="rd" style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", background: "var(--rd-page-bg, #fcfaf6)" }}>
+      {/* Titlebar with basic actions */}
+      <header className="titlebar-drag glass-thin" style={{ display: "flex", alignItems: "center", padding: "0 16px 0 90px", minHeight: 44, borderBottom: "1px solid var(--glass-border)", flexShrink: 0 }}>
+        <div className="titlebar-nodrag" style={{ flex: 1 }} />
+        <div className="titlebar-nodrag" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <button onClick={() => void importLocalFolderFromMarket()} disabled={importing} style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "5px 11px", borderRadius: 6, fontSize: 12, fontWeight: 600, color: "var(--ink-soft)", background: "var(--paper)", border: "1px solid var(--paper-edge)", cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
             <IconFolder size={12} />
             {importing ? t("import.importing") : t("library.agents.import_local")}
-          </button>
-          <button
-            aria-label={t("generic.more")}
-            style={{
-              padding: 6,
-              borderRadius: 6,
-              color: "var(--ink-soft)",
-              background: "transparent",
-            }}
-          >
-            <IconMoreHorizontal size={14} />
           </button>
         </div>
       </header>
 
       {signedIn === false && (
-        <div
-          className="titlebar-nodrag"
-          role="status"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            padding: "10px 16px",
-            background: "var(--paper-2)",
-            borderBottom: "1px solid var(--paper-edge)",
-            fontSize: 12,
-            color: "var(--ink-soft)",
-          }}
-        >
+        <div className="titlebar-nodrag" role="status" style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", background: "var(--paper-2)", borderBottom: "1px solid var(--paper-edge)", fontSize: 12, color: "var(--ink-soft)" }}>
           <span style={{ flex: 1 }}>
-            <strong style={{ color: "var(--ink)", fontWeight: 600 }}>
-              {t("account.required.title")}
-            </strong>
+            <strong style={{ color: "var(--ink)", fontWeight: 600 }}>{t("account.required.title")}</strong>
             <span style={{ marginLeft: 8 }}>{t("account.required.body")}</span>
           </span>
-          <button
-            onClick={() => void ensureSignedIn()}
-            style={{
-              padding: "5px 12px",
-              borderRadius: 999,
-              background: "var(--paper)",
-              color: "var(--ink)",
-              fontSize: 12,
-              fontWeight: 600,
-              border: "1px solid var(--paper-edge)",
-              boxShadow: "var(--neu-raised)",
-              cursor: "pointer",
-            }}
-          >
+          <button onClick={() => void ensureSignedIn()} style={{ padding: "5px 12px", borderRadius: 999, background: "var(--paper)", color: "var(--ink)", fontSize: 12, fontWeight: 600, border: "1px solid var(--paper-edge)", cursor: "pointer" }}>
             {t("account.sign_in")}
           </button>
         </div>
       )}
 
-      {/* ── 본문 스크롤 ─────────────────────────────── */}
-      <div
-        className="titlebar-nodrag"
-        style={{ flex: 1, overflowY: "auto", padding: "0 0 60px" }}
-      >
-        <div style={{ maxWidth: 840, margin: "0 auto", padding: "48px 32px 0" }}>
-          <h1
-            style={{
-              textAlign: "center",
-              fontFamily: "var(--font-head)",
-              fontSize: 26,
-              fontWeight: 600,
-              margin: 0,
-              letterSpacing: -0.5,
-              color: "var(--ink)",
-            }}
-          >
-            {t("market.title.before")}{" "}
-            <span style={{ color: "var(--accent)" }}>Agentlas</span>
-            {t("market.title.after")}
-          </h1>
+      <div className="titlebar-nodrag" style={{ flex: 1, overflowY: "auto", padding: "0 0 60px" }}>
+        <div className="hub-page-root" style={{ maxWidth: 1120, margin: "0 auto", padding: "48px 32px 0" }}>
+          <div className="portal-hero-row" style={{ display: "flex", gap: 18, flexWrap: "wrap", marginBottom: 18 }}>
+            <div className="portal-hero-main" style={{ minWidth: 0, flex: 1, minHeight: 132 }}>
+              <div className="portal-eyebrow" style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: "var(--rd-muted-deep)", marginBottom: 8 }}>{ko ? "레지스트리 허브" : "REGISTRY HUB"}</div>
+              <h1 className="portal-hero-title" style={{ fontSize: 28, fontWeight: 600, color: "var(--rd-ink)", margin: "0 0 12px", letterSpacing: 0 }}>{ko ? "필요한 에이전트를 찾거나 연동하세요" : "Find and call the right agent"}</h1>
+              <div className="portal-hero-sub" style={{ fontSize: 14, color: "var(--rd-ink-2)", lineHeight: 1.5 }}>
+                {ko ? "팀과 에이전트는 일을 실행하고, 플러그인은 그들이 필요할 때 찾아 쓰는 도구 레이어입니다." : "Teams and agents do the work. Plugins are the tool layer they can discover and use."}
+              </div>
+            </div>
+            <div className="portal-hero-side" style={{ width: 240, minHeight: 132 }}>
+              <div className="portal-eyebrow" style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: "var(--rd-muted-deep)", marginBottom: 8 }}>{ko ? "빠른 검색" : "QUICK SEARCH"}</div>
+              <div className="portal-panel-title" style={{ fontSize: 14, fontWeight: 600, color: "var(--rd-ink)", marginBottom: 6 }}>{ko ? "필요한 걸 바로 찾기" : "Search the Registry"}</div>
+              <div className="portal-panel-sub" style={{ fontSize: 12, color: "var(--rd-ink-3)", lineHeight: 1.5 }}>
+                {ko ? "에이전트·플러그인·팀을 한 검색창에서 찾을 수 있습니다." : "Search agents, plugins, and teams in a single search."}
+              </div>
+            </div>
+          </div>
 
-          {/* 검색 + 필터 */}
-          <div style={{ marginTop: 24, display: "flex", gap: 8, alignItems: "center" }}>
-            <div
-              className="glass-strong"
-              style={{
-                flex: 1,
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "9px 14px",
-                borderRadius: 999,
-              }}
-            >
-              <IconSearch size={14} color="var(--muted-deep)" />
+          <div className="portal-search-panel" style={{ background: "#fff", padding: 18, borderRadius: 16, border: "1px solid var(--rd-hair)", boxShadow: "0 8px 30px rgba(15,23,42,0.04)", marginBottom: 32 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--rd-surface)", borderRadius: 8, padding: "10px 14px", border: "1px solid var(--rd-hair)" }}>
+              <IconSearch size={16} color="var(--rd-muted-deep)" />
               <input
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
-                placeholder={
-                  tab === "firms"
-                    ? t("market.search.firms")
-                    : t("market.search.agents")
-                }
-                style={{
-                  flex: 1,
-                  border: "none",
-                  outline: "none",
-                  fontSize: 13,
-                  background: "transparent",
-                  color: "var(--ink)",
-                }}
+                placeholder={ko ? "에이전트, 플러그인, 팀 검색..." : "Search agents, plugins, and teams..."}
+                style={{ flex: 1, border: "none", outline: "none", background: "transparent", fontSize: 14, color: "var(--rd-ink)" }}
               />
             </div>
-            <PersonaSelect persona={persona} setPersona={setPersona} t={t} />
-            <button
-              onClick={() => void engineSearch()}
-              disabled={hephSearching || !q.trim()}
-              title="Hephaestus Network 라우터로 Cloud + Hub 후보를 직접 검색"
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "9px 14px",
-                borderRadius: 999,
-                border: "1px solid var(--paper-edge)",
-                background: hephSearching || !q.trim() ? "var(--fill-2)" : "var(--fill-1)",
-                color: hephSearching || !q.trim() ? "var(--muted)" : "var(--accent)",
-                cursor: hephSearching || !q.trim() ? "default" : "pointer",
-                fontSize: 12.5,
-                fontWeight: 600,
-                whiteSpace: "nowrap",
-              }}
-            >
-              <IconNetwork size={13} />
-              {hephSearching ? "검색 중…" : "Network 검색"}
-            </button>
+            <div className="portal-chip-row" style={{ marginTop: 12, display: "flex", gap: 8 }}>
+              <div style={{ background: "#f2eefe", color: "#6a2cf0", fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 4 }}>{ko ? `팀 ${counts.team}` : `${counts.team} Teams`}</div>
+              <div style={{ background: "#feede9", color: "#d64620", fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 4 }}>{ko ? `플러그인 ${counts.plugin}` : `${counts.plugin} Plugins`}</div>
+              <div style={{ background: "#e0f6ec", color: "#067c59", fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 4 }}>{ko ? `에이전트 ${counts.agent}` : `${counts.agent} Agents`}</div>
+            </div>
+            {sourceStatus && (
+              <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 7, fontSize: 11.5, color: "var(--rd-ink-3)" }}>
+                <span style={{ width: 7, height: 7, borderRadius: 999, background: sourceStatus.online && !sourceStatus.usingFallback ? "#0ca678" : "#f59f00", flexShrink: 0 }} />
+                <span>
+                  {sourceStatus.online && !sourceStatus.usingFallback
+                    ? (ko ? "Hub MCP live source" : "Hub MCP live source")
+                    : (ko ? "Fallback registry source" : "Fallback registry source")}
+                </span>
+                {sourceStatus.lastError && <span style={{ color: "var(--peach-ink)" }}>{sourceStatus.lastError}</span>}
+              </div>
+            )}
           </div>
-          {hephHits && (
-            <div
-              role="status"
-              style={{
-                margin: "0 0 8px",
-                padding: "8px 12px",
-                borderRadius: 10,
-                fontSize: 12.5,
-                border: `1px solid ${hephHits.ok ? "rgba(12,166,120,0.3)" : "var(--paper-edge)"}`,
-                background: "var(--fill-1)",
-                color: hephHits.ok ? "var(--green-deep)" : "var(--muted-deep)",
-              }}
-            >
-              {hephHits.text}
-            </div>
-          )}
 
-          {sourceStatus?.usingFallback && (
-            <div
-              role="status"
-              style={{
-                marginTop: 10,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 12,
-                padding: "9px 12px",
-                borderRadius: 8,
-                background: "var(--paper-2)",
-                border: "1px solid rgba(181, 87, 46, 0.2)",
-                color: "var(--ink-soft)",
-                fontSize: 11.5,
-                lineHeight: 1.35,
-              }}
-            >
-              <span style={{ minWidth: 0 }}>
-                {locale === "ko"
-                  ? "Agentlas MCP에 연결하지 못해 오프라인 캐시를 보여주고 있어요."
-                  : "Showing offline cache because Agentlas MCP is unreachable."}
-              </span>
+          <div className="hub-cat-nav" role="tablist" style={{ marginBottom: 32 }}>
+            {CATEGORY_NAV.map((cat) => (
               <button
-                onClick={() => void refresh()}
-                style={{
-                  flexShrink: 0,
-                  border: "1px solid var(--paper-edge)",
-                  background: "var(--paper)",
-                  borderRadius: 6,
-                  padding: "4px 8px",
-                  color: "var(--ink)",
-                  fontSize: 11.5,
-                  fontWeight: 600,
-                }}
+                key={cat.key}
+                role="tab"
+                aria-selected={active === cat.key}
+                className={"hub-cat-chip" + (active === cat.key ? " active" : "")}
+                onClick={() => setActive(cat.key)}
               >
-                {locale === "ko" ? "다시 연결" : "Retry"}
+                <span className="hub-cat-dot" style={{ background: cat.tone }} aria-hidden="true" />
+                <span className="hub-cat-label">{ko ? cat.ko : cat.en}</span>
+                <span className="hub-cat-count">{counts[cat.key]}</span>
               </button>
-            </div>
+            ))}
+          </div>
+
+          {active === "team" && (
+            <section className="portal-panel" id="hub-team">
+              <div style={{ marginBottom: 24 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: "#a07cfa", marginBottom: 6 }}>TEAM</div>
+                <h2 style={{ fontSize: 20, fontWeight: 600, color: "var(--rd-ink)", margin: "0 0 6px" }}>{ko ? "여러 에이전트가 함께 일하는 팀" : "Multi-Agent Teams"}</h2>
+                <div style={{ fontSize: 13, color: "var(--rd-ink-2)" }}>{ko ? "여러 전문 에이전트가 연동하여 동작하는 워크플로 단위입니다." : "Collaborative agent teams for complex workflows."}</div>
+              </div>
+              {pagedTeams.length > 0 ? (
+                <div className="market-card-grid">
+                  {pagedTeams.map((team: any) => {
+                    const isFirm = "agents" in team ? false : true;
+                    return isFirm ? (
+                      <FirmCard key={team.slug} firm={team} locale={locale} installed={installedFirmSlugs.has(team.slug)} installing={installing === team.slug} onInstall={() => installFirm(team)} onOpen={() => {
+                        const inst = installedFirms.find((f) => f.slug === team.slug);
+                        if (inst) navigate(`/firm/detail?id=${inst.id}`);
+                      }} />
+                    ) : (
+                      <BundleCard key={team.id} bundle={team} locale={locale} installing={installing === team.id} onInstall={() => installBundle(team)} />
+                    );
+                  })}
+                </div>
+              ) : (
+                <div style={{ padding: 24, background: "#fff", borderRadius: 12, border: "1px solid var(--rd-hair)", textAlign: "center", color: "var(--rd-ink-2)", fontSize: 14 }}>{ko ? "조건에 맞는 팀이 없습니다." : "No teams match."}</div>
+              )}
+            </section>
           )}
 
-          {/* 추천 히어로 카드 */}
-          {heroItems.length > 0 && (
-            <HeroCard
-              firm={heroItems[heroIdx]}
-              locale={locale}
-              installed={installedFirmSlugs.has(heroItems[heroIdx].slug)}
-              installLabel={t("market.hero.install")}
-              chatLabel={t("market.hero.chat")}
-              onInstall={() => void installFirm(heroItems[heroIdx])}
-              onSeeChat={() => router.push("/")}
-              total={heroItems.length}
-              activeIdx={heroIdx}
-              onSelect={setHeroIdx}
-            />
-          )}
-        </div>
-
-        <div style={{ maxWidth: 840, margin: "0 auto", padding: "0 32px" }}>
-          {tab === "firms" && (
-            <>
-              <Section
-                title={t("market.section.recommended_firms")}
-                empty={filteredFirms.length === 0 ? t("market.empty_firms") : undefined}
-              >
-                {filteredFirms.map((firm) => (
-                  <FirmRow
-                    key={firm.slug}
-                    firm={firm}
-                    locale={locale}
-                    installed={installedFirmSlugs.has(firm.slug)}
-                    installing={installing === firm.slug}
-                    onInstall={() => void installFirm(firm)}
-                    onOpen={() => {
-                      const inst = installedFirms.find((f) => f.slug === firm.slug);
-                      if (inst) navigate(`/firm/detail?id=${inst.id}`);
-                    }}
-                  />
-                ))}
-              </Section>
-
-              {filteredBundles.length > 0 && (
-                <Section title={t("market.section.recommended_bundles")}>
-                  {filteredBundles.map((b) => (
-                    <BundleRow
-                      key={b.id}
-                      bundle={b}
+          {active === "plugin" && (
+            <section className="portal-panel" id="hub-plugin">
+              <div style={{ marginBottom: 24 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: "#f2795a", marginBottom: 6 }}>PLUGIN</div>
+                <h2 style={{ fontSize: 20, fontWeight: 600, color: "var(--rd-ink)", margin: "0 0 6px" }}>{ko ? "Hub 에이전트가 필요할 때 찾아 쓰는 도구" : "Tools Hub agents can call"}</h2>
+                <div style={{ fontSize: 13, color: "var(--rd-ink-2)" }}>{ko ? "에이전트 실행 중 필요한 능력을 붙이는 레이어입니다." : "Capability layer for Hub agents."}</div>
+              </div>
+              {pagedPlugins.length > 0 ? (
+                <div className="market-card-grid">
+                  {pagedPlugins.map((plugin) => (
+                    <PluginCard
+                      key={plugin.id}
+                      plugin={plugin}
                       locale={locale}
-                      installing={installing === b.id}
-                      onInstall={() => void installBundle(b)}
+                      installed={installedPluginIds.has(plugin.id)}
+                      installing={installing === `plugin:${plugin.id}`}
+                      onInstall={() => installPlugin(plugin)}
                     />
                   ))}
-                </Section>
+                </div>
+              ) : (
+                <div style={{ padding: 24, background: "#fff", borderRadius: 12, border: "1px solid var(--rd-hair)", textAlign: "center", color: "var(--rd-ink-2)", fontSize: 14 }}>
+                  {ko ? "조건에 맞는 플러그인이 없습니다." : "No plugins match."}
+                </div>
               )}
-            </>
+            </section>
           )}
 
-          {tab === "agents" && (
-            <Section
-              title={t("market.section.recommended_agents")}
-              empty={filteredListings.length === 0 ? t("market.empty_agents") : undefined}
-            >
-              {filteredListings.map((l) => (
-                <AgentRow
-                  key={l.slug}
-                  listing={l}
-                  locale={locale}
-                  installed={installedAgentSlugs.has(l.slug)}
-                  installing={installing === l.slug}
-                  onInstall={() => void installOne(l.slug)}
-                />
-              ))}
-            </Section>
+          {active === "agent" && (
+            <section className="portal-panel" id="hub-agent">
+              <div style={{ marginBottom: 24 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: "#0ca678", marginBottom: 6 }}>AGENT</div>
+                <h2 style={{ fontSize: 20, fontWeight: 600, color: "var(--rd-ink)", margin: "0 0 6px" }}>{ko ? "다른 사람이 공유한 에이전트" : "Community Agents"}</h2>
+                <div style={{ fontSize: 13, color: "var(--rd-ink-2)" }}>{ko ? "단일 에이전트입니다. 허브에서 바로 설치하세요." : "Single-purpose agents shared by the community."}</div>
+              </div>
+              {pagedAgents.length > 0 ? (
+                <div className="market-card-grid">
+                  {pagedAgents.map((agent) => (
+                    <AgentCard key={agent.slug} listing={agent} locale={locale} installed={installedAgentSlugs.has(agent.slug)} installing={installing === agent.slug} onInstall={() => installOne(agent.slug)} />
+                  ))}
+                </div>
+              ) : (
+                <div style={{ padding: 24, background: "#fff", borderRadius: 12, border: "1px solid var(--rd-hair)", textAlign: "center", color: "var(--rd-ink-2)", fontSize: 14 }}>{ko ? "아직 공개된 에이전트가 없습니다." : "No public agents yet."}</div>
+              )}
+            </section>
+          )}
+
+          {totalPages > 1 && (
+            <nav className="hub-pager">
+              <button className="hub-pager-btn" disabled={safePage <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>{ko ? "이전" : "Prev"}</button>
+              <span className="hub-pager-status">
+                {ko ? `${safePage} / ${totalPages} 페이지` : `Page ${safePage} of ${totalPages}`}
+              </span>
+              <button className="hub-pager-btn" disabled={safePage >= totalPages} onClick={() => setPage(p => Math.min(totalPages, p + 1))}>{ko ? "다음" : "Next"}</button>
+            </nav>
           )}
         </div>
       </div>
@@ -620,501 +433,196 @@ function MarketplacePage() {
   );
 }
 
-// ── 페르소나 드롭다운 ────────────────────────────────
-type PersonaT = (typeof PERSONA_T_KEY)[Persona];
-function PersonaSelect({
-  persona,
-  setPersona,
-  t,
-}: {
-  persona: Persona;
-  setPersona: (p: Persona) => void;
-  t: (k: PersonaT) => string;
-}) {
-  return (
-    <label
-      className="glass-strong"
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        padding: "8px 14px",
-        borderRadius: 999,
-        fontSize: 12,
-        fontWeight: 600,
-        color: "var(--ink-soft)",
-        position: "relative",
-        cursor: "pointer",
-      }}
-    >
-      {PERSONA_ICONS[persona]}
-      <span>{t(PERSONA_T_KEY[persona])}</span>
-      <IconChevronRight size={10} style={{ transform: "rotate(90deg)" }} />
-      <select
-        value={persona}
-        onChange={(e) => setPersona(e.target.value as Persona)}
-        style={{ position: "absolute", inset: 0, opacity: 0, cursor: "pointer" }}
-      >
-        {PERSONA_IDS.map((p) => (
-          <option key={p} value={p}>
-            {t(PERSONA_T_KEY[p])}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-// ── 히어로 카드 (Codex 스크린샷의 보라 카드 자리) ────────────
-function HeroCard({
-  firm,
+function PluginCard({
+  plugin,
   locale,
   installed,
-  installLabel,
-  chatLabel,
+  installing,
   onInstall,
-  onSeeChat,
-  total,
-  activeIdx,
-  onSelect,
 }: {
-  firm: FirmListing;
+  plugin: McpToolCatalogEntry;
   locale: Locale;
   installed: boolean;
-  installLabel: string;
-  chatLabel: string;
+  installing: boolean;
   onInstall: () => void;
-  onSeeChat: () => void;
-  total: number;
-  activeIdx: number;
-  onSelect: (i: number) => void;
 }) {
-  const loc = pickLocalized(firm, locale);
-  return (
-    <article
-      className="glass-lift"
-      style={{
-        marginTop: 28,
-        borderRadius: var_radius_xl(),
-        padding: 28,
-        position: "relative",
-        overflow: "hidden",
-        minHeight: 200,
-        background:
-          "linear-gradient(135deg, rgba(202, 198, 250, 0.55) 0%, rgba(255, 214, 198, 0.45) 50%, rgba(168, 217, 155, 0.4) 100%)",
-        backdropFilter: "saturate(160%) blur(20px)",
-        WebkitBackdropFilter: "saturate(160%) blur(20px)",
-        border: "1px solid var(--glass-border)",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 18,
-          minHeight: 160,
-        }}
-      >
-        <div
-          className="glass-strong"
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 10,
-            padding: "10px 16px",
-            borderRadius: 999,
-          }}
-        >
-          <IconBuilding size={14} style={{ color: "var(--accent)" }} />
-          <span style={{ fontWeight: 600, fontSize: 13, color: "var(--ink)" }}>
-            {loc.name}
-          </span>
-          <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>
-            {loc.tagline}
-          </span>
-        </div>
-        <button
-          onClick={installed ? onSeeChat : onInstall}
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "10px 18px",
-            borderRadius: 999,
-            background: "var(--paper)",
-            color: "var(--ink)",
-            fontWeight: 600,
-            fontSize: 12.5,
-            border: "1px solid var(--paper-edge)",
-            boxShadow: "var(--neu-raised)",
-          }}
-        >
-          {installed ? (
-            <>
-              <IconChat size={14} />
-              {chatLabel}
-            </>
-          ) : (
-            <>
-              <IconPlus size={14} />
-              {installLabel}
-            </>
-          )}
-        </button>
-      </div>
-      {/* 인디케이터 — 우측 점 */}
-      <div
-        style={{
-          position: "absolute",
-          right: 16,
-          top: "50%",
-          transform: "translateY(-50%)",
-          display: "flex",
-          flexDirection: "column",
-          gap: 6,
-        }}
-      >
-        {Array.from({ length: total }).map((_, i) => (
-          <button
-            key={i}
-            onClick={() => onSelect(i)}
-            aria-label={`히어로 ${i + 1}`}
-            style={{
-              width: 6,
-              height: 6,
-              borderRadius: "50%",
-              background: i === activeIdx ? "var(--ink)" : "var(--paper-edge)",
-              border: "none",
-              padding: 0,
-              cursor: "pointer",
-            }}
-          />
-        ))}
-      </div>
-    </article>
-  );
-}
-
-function var_radius_xl() {
-  return "var(--radius-xl)";
-}
-
-// ── 섹션 헤더 + children ───────────────────────────────
-function Section({
-  title,
-  empty,
-  children,
-}: {
-  title: string;
-  empty?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section style={{ marginTop: 36 }}>
-      <h2
-        style={{
-          fontFamily: "var(--font-head)",
-          fontSize: 13,
-          fontWeight: 600,
-          color: "var(--ink-soft)",
-          margin: "0 0 12px",
-          paddingBottom: 8,
-          borderBottom: "1px solid var(--glass-border)",
-        }}
-      >
-        {title}
-      </h2>
-      {empty ? (
-        <div
-          style={{
-            padding: "40px 24px",
-            textAlign: "center",
-            color: "var(--muted-deep)",
-            fontSize: 13,
-          }}
-        >
-          {empty}
-        </div>
-      ) : (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-            columnGap: 32,
-            rowGap: 0,
-          }}
-        >
-          {children}
-        </div>
-      )}
-    </section>
-  );
-}
-
-// ── 카드 row (Codex 스크린샷의 2-col 그리드 행) ──────────
-function Row({
-  iconBox,
-  title,
-  subtitle,
-  right,
-  onClick,
-}: {
-  iconBox: React.ReactNode;
-  title: string;
-  subtitle: string;
-  right: React.ReactNode;
-  onClick?: () => void;
-}) {
-  // right slot에 actionable button(InstallChip)이 들어오므로 외곽은 <div role="button">로 둠.
-  // <button> 안 <button> 중첩은 React hydration 에러.
-  const interactive = Boolean(onClick);
+  const ko = locale === "ko";
+  const name = ko ? plugin.name : plugin.nameEn;
+  const description = ko ? plugin.description : plugin.descriptionEn;
+  const requiredKeys = plugin.envRequirements.filter((env) => env.required).map((env) => env.key);
+  const mark = plugin.mark ?? name.slice(0, 2).toUpperCase();
   return (
     <div
-      role={interactive ? "button" : undefined}
-      tabIndex={interactive ? 0 : undefined}
-      onClick={onClick}
-      onKeyDown={
-        interactive
-          ? (e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onClick?.();
-              }
-            }
-          : undefined
-      }
+      className="hub-entity-card"
       style={{
         display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: "12px 4px",
-        background: "transparent",
-        border: "none",
-        borderRadius: 0,
-        textAlign: "left",
-        cursor: interactive ? "pointer" : "default",
-        width: "100%",
+        flexDirection: "column",
+        padding: 20,
+        background: "#fff",
+        borderRadius: 12,
+        border: "1px solid var(--rd-hair)",
+        boxShadow: "0 4px 12px rgba(15,23,42,0.03)",
+        minHeight: 230,
       }}
     >
-      <span
-        style={{
-          width: 36,
-          height: 36,
-          borderRadius: 8,
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
-        }}
-      >
-        {iconBox}
-      </span>
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
         <div
           style={{
-            fontSize: 13,
-            fontWeight: 600,
-            color: "var(--ink)",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
+            width: 42,
+            height: 42,
+            borderRadius: 10,
+            background: plugin.brandColor ?? "#f2795a",
+            color: "#fff",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 12,
+            fontWeight: 800,
+            letterSpacing: 0,
           }}
         >
-          {title}
+          {mark}
         </div>
-        <div
-          style={{
-            fontSize: 11.5,
-            color: "var(--muted-deep)",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            marginTop: 2,
-          }}
-        >
-          {subtitle}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 650, color: "var(--rd-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {name}
+            </div>
+            {installed && <IconCheck size={13} style={{ color: "var(--green-deep)", flexShrink: 0 }} />}
+          </div>
+          <div style={{ fontSize: 12, color: "var(--rd-ink-3)", textTransform: "capitalize" }}>
+            {plugin.category} · {plugin.trust}
+          </div>
         </div>
       </div>
-      <div style={{ flexShrink: 0 }}>{right}</div>
+
+      <div style={{ fontSize: 13, color: "var(--rd-ink-2)", lineHeight: 1.5, marginBottom: 14, flex: 1 }}>
+        {description}
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+        <span className="hub-command-chip">{plugin.transport}</span>
+        {requiredKeys.length > 0 ? (
+          requiredKeys.slice(0, 3).map((key) => (
+            <span key={key} className="hub-command-chip">
+              {key}
+            </span>
+          ))
+        ) : (
+          <span className="hub-command-chip">{ko ? "키 불필요" : "No key"}</span>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button
+          onClick={installed ? undefined : onInstall}
+          disabled={installing || installed}
+          style={{
+            flex: 1,
+            padding: "8px 0",
+            borderRadius: 8,
+            background: installed ? "var(--rd-surface-2)" : "var(--rd-ink)",
+            color: installed ? "var(--rd-ink)" : "#fff",
+            fontSize: 13,
+            fontWeight: 650,
+            border: installed ? "1px solid var(--rd-hair)" : "none",
+            cursor: installing || installed ? "default" : "pointer",
+          }}
+        >
+          {installing ? (ko ? "설치 중..." : "Installing...") : installed ? (ko ? "설치됨" : "Installed") : (ko ? "설치" : "Install")}
+        </button>
+        {plugin.docsUrl && (
+          <a
+            href={plugin.docsUrl}
+            target="_blank"
+            rel="noreferrer"
+            title={ko ? "문서 열기" : "Open docs"}
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: 8,
+              border: "1px solid var(--rd-hair)",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "var(--rd-ink-2)",
+              textDecoration: "none",
+              flexShrink: 0,
+            }}
+          >
+            <IconChevronRight size={14} />
+          </a>
+        )}
+      </div>
     </div>
   );
 }
 
-function FirmRow({
-  firm,
-  locale,
-  installed,
-  installing,
-  onInstall,
-  onOpen,
-}: {
-  firm: FirmListing;
-  locale: Locale;
-  installed: boolean;
-  installing: boolean;
-  onInstall: () => void;
-  onOpen: () => void;
-}) {
+function FirmCard({ firm, locale, installed, installing, onInstall, onOpen }: any) {
   const loc = pickLocalized(firm, locale);
   return (
-    <Row
-      onClick={installed ? onOpen : undefined}
-      iconBox={
-        <span
-          style={{
-            width: 36,
-            height: 36,
-            borderRadius: 8,
-            background:
-              "linear-gradient(135deg, rgba(202,198,250,0.7) 0%, rgba(255,214,198,0.6) 100%)",
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "var(--ink)",
-          }}
-        >
-          <IconBuilding size={16} />
-        </span>
-      }
-      title={loc.name}
-      subtitle={loc.tagline}
-      right={<InstallChip installed={installed} installing={installing} onInstall={onInstall} />}
-    />
+    <div style={{ display: "flex", flexDirection: "column", padding: 20, background: "#fff", borderRadius: 12, border: "1px solid var(--rd-hair)", boxShadow: "0 4px 12px rgba(15,23,42,0.03)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+        <div style={{ width: 40, height: 40, borderRadius: 8, background: "linear-gradient(135deg, rgba(202,198,250,0.7) 0%, rgba(255,214,198,0.6) 100%)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--ink)" }}>
+          <IconBuilding size={18} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--rd-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</div>
+          <div style={{ fontSize: 12, color: "var(--rd-ink-3)" }}>Firm</div>
+        </div>
+      </div>
+      <div style={{ fontSize: 13, color: "var(--rd-ink-2)", lineHeight: 1.5, marginBottom: 16, flex: 1 }}>{loc.tagline}</div>
+      <div>
+        <button onClick={installed ? onOpen : onInstall} disabled={installing} style={{ width: "100%", padding: "8px 0", borderRadius: 8, background: installed ? "var(--rd-surface-2)" : "var(--rd-ink)", color: installed ? "var(--rd-ink)" : "#fff", fontSize: 13, fontWeight: 600, border: installed ? "1px solid var(--rd-hair)" : "none", cursor: installing ? "default" : "pointer" }}>
+          {installing ? "설치 중..." : (installed ? "열기" : "설치")}
+        </button>
+      </div>
+    </div>
   );
 }
 
-function BundleRow({
-  bundle,
-  locale,
-  installing,
-  onInstall,
-}: {
-  bundle: TeamBundle;
-  locale: Locale;
-  installing: boolean;
-  onInstall: () => void;
-}) {
+function BundleCard({ bundle, locale, installing, onInstall }: any) {
   const loc = pickLocalized(bundle, locale);
   return (
-    <Row
-      onClick={onInstall}
-      iconBox={
-        <span
-          style={{
-            width: 36,
-            height: 36,
-            borderRadius: 8,
-            background: "var(--fill-1)",
-            color: "var(--accent)",
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <IconUsers size={16} />
-        </span>
-      }
-      title={loc.name}
-      subtitle={loc.tagline}
-      right={<InstallChip installed={false} installing={installing} onInstall={onInstall} />}
-    />
+    <div style={{ display: "flex", flexDirection: "column", padding: 20, background: "#fff", borderRadius: 12, border: "1px solid var(--rd-hair)", boxShadow: "0 4px 12px rgba(15,23,42,0.03)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+        <div style={{ width: 40, height: 40, borderRadius: 8, background: "var(--fill-2)", color: "var(--accent)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <IconUsers size={18} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--rd-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</div>
+          <div style={{ fontSize: 12, color: "var(--rd-ink-3)" }}>Team Bundle</div>
+        </div>
+      </div>
+      <div style={{ fontSize: 13, color: "var(--rd-ink-2)", lineHeight: 1.5, marginBottom: 16, flex: 1 }}>{loc.tagline}</div>
+      <div>
+        <button onClick={onInstall} disabled={installing} style={{ width: "100%", padding: "8px 0", borderRadius: 8, background: "var(--rd-ink)", color: "#fff", fontSize: 13, fontWeight: 600, border: "none", cursor: installing ? "default" : "pointer" }}>
+          {installing ? "설치 중..." : "설치"}
+        </button>
+      </div>
+    </div>
   );
 }
 
-function AgentRow({
-  listing,
-  locale,
-  installed,
-  installing,
-  onInstall,
-}: {
-  listing: MarketplaceListing;
-  locale: Locale;
-  installed: boolean;
-  installing: boolean;
-  onInstall: () => void;
-}) {
+function AgentCard({ listing, locale, installed, installing, onInstall }: any) {
   const loc = pickLocalized(listing, locale);
   return (
-    <Row
-      onClick={installed ? undefined : onInstall}
-      iconBox={
-        <span
-          style={{
-            width: 36,
-            height: 36,
-            borderRadius: 8,
-            background: "var(--fill-1)",
-            color: "var(--accent)",
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <IconWand size={15} />
-        </span>
-      }
-      title={loc.name}
-      subtitle={loc.tagline}
-      right={<InstallChip installed={installed} installing={installing} onInstall={onInstall} />}
-    />
-  );
-}
-
-function InstallChip({
-  installed,
-  installing,
-  onInstall,
-}: {
-  installed: boolean;
-  installing: boolean;
-  onInstall: () => void;
-}) {
-  const { t } = useT();
-  if (installed) {
-    return (
-      <span
-        style={{
-          width: 28,
-          height: 28,
-          borderRadius: "50%",
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          color: "var(--green-deep)",
-        }}
-        aria-label={t("generic.installed")}
-        title={t("generic.installed")}
-      >
-        <IconCheck size={15} />
-      </span>
-    );
-  }
-  return (
-    <button
-      onClick={(e) => {
-        e.stopPropagation();
-        if (!installing) onInstall();
-      }}
-      disabled={installing}
-      aria-label={t("generic.install")}
-      title={t("generic.install")}
-      style={{
-        width: 28,
-        height: 28,
-        borderRadius: "50%",
-        background: "var(--paper-2)",
-        border: "1px solid var(--paper-edge)",
-        color: "var(--ink-soft)",
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        cursor: installing ? "default" : "pointer",
-      }}
-    >
-      <IconPlus size={14} />
-    </button>
+    <div style={{ display: "flex", flexDirection: "column", padding: 20, background: "#fff", borderRadius: 12, border: "1px solid var(--rd-hair)", boxShadow: "0 4px 12px rgba(15,23,42,0.03)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+        <div style={{ width: 40, height: 40, borderRadius: 8, background: "var(--fill-2)", color: "var(--accent)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <IconWand size={18} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--rd-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</div>
+          <div style={{ fontSize: 12, color: "var(--rd-ink-3)" }}>Agent</div>
+        </div>
+      </div>
+      <div style={{ fontSize: 13, color: "var(--rd-ink-2)", lineHeight: 1.5, marginBottom: 16, flex: 1 }}>{loc.tagline}</div>
+      <div>
+        <button onClick={installed ? undefined : onInstall} disabled={installing || installed} style={{ width: "100%", padding: "8px 0", borderRadius: 8, background: installed ? "var(--rd-surface-2)" : "var(--rd-ink)", color: installed ? "var(--rd-ink)" : "#fff", fontSize: 13, fontWeight: 600, border: installed ? "1px solid var(--rd-hair)" : "none", cursor: (installing || installed) ? "default" : "pointer" }}>
+          {installing ? "설치 중..." : (installed ? "설치됨" : "설치")}
+        </button>
+      </div>
+    </div>
   );
 }

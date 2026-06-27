@@ -38,6 +38,25 @@ export interface RuntimeSelection {
   effort?: string;
 }
 
+export type AgentRuntimeOverrideScope = "agent" | "firm" | "division";
+
+export interface AgentRuntimeOverride {
+  scope: AgentRuntimeOverrideScope;
+  /** agent id, firm id, or `${firmId}:${divisionNodeId}` for division-wide defaults. */
+  targetId: string;
+  /** User-facing source label such as agent name, firm name, or division role. */
+  label?: string | null;
+  selection: RuntimeSelection;
+  updatedAt: string;
+}
+
+export interface AgentRuntimeOverrideSetInput {
+  scope: AgentRuntimeOverrideScope;
+  targetId: string;
+  label?: string | null;
+  selection: RuntimeSelection;
+}
+
 /** CLI(Claude/Codex/Gemini)에서 스캔한 슬래시 명령 — 챗 입력 `/` 자동완성에 노출. */
 export interface RuntimeCommand {
   /** "/deploy", "/frontend:component" 등 (앞에 / 포함) */
@@ -2306,6 +2325,15 @@ export interface AgentlasIpc {
     }) => Promise<Array<{ id: string; label: string; tag?: string }>>;
     /** `agentlas` 터미널 CLI 설치 — PATH에 래퍼 스크립트를 둔다. */
     installAgentlasCli: () => Promise<{ ok: boolean; path: string; message: string }>;
+  };
+  agentRuntime: {
+    list: () => Promise<AgentRuntimeOverride[]>;
+    get: (
+      scope: AgentRuntimeOverrideScope,
+      targetId: string,
+    ) => Promise<AgentRuntimeOverride | null>;
+    set: (input: AgentRuntimeOverrideSetInput) => Promise<AgentRuntimeOverride>;
+    remove: (scope: AgentRuntimeOverrideScope, targetId: string) => Promise<void>;
   };
   config: {
     getCustomBaseUrl: () => Promise<string>;

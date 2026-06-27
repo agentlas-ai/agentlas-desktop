@@ -59,6 +59,12 @@ const api: AgentlasIpc = {
     listModels: (sel) => ipcRenderer.invoke("runtime:listModels", sel),
     installAgentlasCli: () => ipcRenderer.invoke("runtime:installAgentlasCli"),
   },
+  agentRuntime: {
+    list: () => ipcRenderer.invoke("agentRuntime:list"),
+    get: (scope, targetId) => ipcRenderer.invoke("agentRuntime:get", scope, targetId),
+    set: (input) => ipcRenderer.invoke("agentRuntime:set", input),
+    remove: (scope, targetId) => ipcRenderer.invoke("agentRuntime:remove", scope, targetId),
+  },
   config: {
     getCustomBaseUrl: () => ipcRenderer.invoke("config:getCustomBaseUrl"),
     setCustomBaseUrl: (url: string) => ipcRenderer.invoke("config:setCustomBaseUrl", url),

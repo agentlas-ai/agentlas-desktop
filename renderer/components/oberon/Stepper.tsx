@@ -74,7 +74,7 @@ export function Stepper({
                   color: st === "locked" ? "var(--ob-muted)" : isActive ? "var(--ob-ink)" : "var(--ob-ink-soft)",
                   lineHeight: 1.2,
                   textAlign: "center",
-                  letterSpacing: "-0.01em",
+                  letterSpacing: 0,
                 }}
               >
                 {step.title}

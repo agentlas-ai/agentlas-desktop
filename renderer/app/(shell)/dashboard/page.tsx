@@ -34,7 +34,7 @@ export default function DashboardPage() {
           {/* 헤더 */}
           <div style={{ display: "flex", alignItems: "flex-end", gap: 12, margin: "0 0 18px" }}>
             <div>
-              <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, letterSpacing: "-0.02em", color: "var(--ink)", fontFamily: "var(--font-head)" }}>
+              <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, letterSpacing: 0, color: "var(--ink)", fontFamily: "var(--font-head)" }}>
                 {ko ? "대시보드" : "Dashboard"}
               </h1>
               <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "var(--muted-deep)" }}>

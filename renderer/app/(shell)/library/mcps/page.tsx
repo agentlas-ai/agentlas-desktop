@@ -645,7 +645,7 @@ function Logo({
         fontFamily: "var(--font-head)",
         fontWeight: 800,
         fontSize: size * (mark.length > 1 ? 0.4 : 0.5),
-        letterSpacing: -0.3,
+        letterSpacing: 0,
       }}
     >
       {mark}

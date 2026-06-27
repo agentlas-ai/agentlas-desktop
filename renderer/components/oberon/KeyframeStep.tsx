@@ -132,7 +132,7 @@ export function KeyframeStep({
           </span>
         </div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 12 }}>
-          <span style={{ fontSize: 34, fontWeight: 500, fontFamily: "var(--font-display, serif)", color: withinBudget ? "var(--ob-ink)" : "var(--ob-danger)", lineHeight: 1, fontVariantNumeric: "tabular-nums", letterSpacing: -0.5 }}>{formatCost(projected)}</span>
+          <span style={{ fontSize: 34, fontWeight: 500, fontFamily: "var(--font-display, serif)", color: withinBudget ? "var(--ob-ink)" : "var(--ob-danger)", lineHeight: 1, fontVariantNumeric: "tabular-nums", letterSpacing: 0 }}>{formatCost(projected)}</span>
           <span style={{ fontSize: 13, color: "var(--ob-muted)", fontVariantNumeric: "tabular-nums" }}>
             영상 {total}컷 × 후보 {takesPerShot}개 + 이미지 {formatCost(production.cost.imageCostUsd)} · 예산 {formatCost(budget)}
           </span>

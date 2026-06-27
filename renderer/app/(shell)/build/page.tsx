@@ -42,6 +42,13 @@ const STAGES: { key: string; label: string; sub: string; icon: typeof IconRoute;
   { key: "deliver", label: "배포", sub: "라이브러리 설치 · Cloud/Hub 업로드", icon: IconStore, color: "#FFA94D" },
 ];
 
+const ACTION_CONTRACTS = [
+  { label: "hep-build", desc: "요청을 설치 가능한 Agentlas 패키지로 생성", icon: IconWand },
+  { label: "install", desc: "현재 폴더를 Agents Library와 Chat 라우팅에 등록", icon: IconCheck },
+  { label: "Cloud private", desc: "검토용 비공개 링크로 업로드", icon: IconBolt },
+  { label: "Hub public", desc: "공개 Marketplace 제출 흐름으로 업로드", icon: IconStore },
+];
+
 // 이벤트 신호에서 도달한 최대 단계 인덱스를 추정(전진 전용).
 const WRITE_SIGNALS = /write|edit|create|touch|mkdir|apply_patch|str_replace|\.md|agentlas\.json|\.agentlas|파일|생성|scaffold/i;
 function stageFromEvent(ev: HephaestusBuildEvent, current: number): number {
@@ -151,7 +158,7 @@ export default function BuildPage() {
     if (!workspace) return;
     try {
       await ipc()?.team.importLocalFolder(workspace);
-      setLog((prev) => [...prev, { kind: "log", text: "✓ 라이브러리에 설치됨 — 에이전트 메뉴에서 확인하세요." }]);
+      setLog((prev) => [...prev, { kind: "log", text: "완료: 라이브러리에 설치됨 - 에이전트 메뉴에서 확인하세요." }]);
     } catch (e) {
       setLog((prev) => [...prev, { kind: "error", text: `설치 실패: ${(e as Error).message}` }]);
     }
@@ -159,11 +166,11 @@ export default function BuildPage() {
 
   const upload = async (visibility: "private-link" | "marketplace") => {
     if (!workspace) return;
-    setLog((prev) => [...prev, { kind: "stage", text: `업로드(${visibility === "marketplace" ? "Hub" : "Cloud"})…` }]);
+    setLog((prev) => [...prev, { kind: "stage", text: `업로드(${visibility === "marketplace" ? "Hub public" : "Cloud private"})...` }]);
     const res = await ipc()?.hephaestus.publish({ folder: workspace, visibility });
     setLog((prev) => [
       ...prev,
-      { kind: res?.ok ? "done" : "error", text: res?.ok ? "✓ 업로드 완료" : `업로드 실패: ${res?.error ?? res?.stderr ?? "알 수 없음"}` },
+      { kind: res?.ok ? "done" : "error", text: res?.ok ? "완료: 업로드 완료" : `업로드 실패: ${res?.error ?? res?.stderr ?? "알 수 없음"}` },
     ]);
   };
 
@@ -187,7 +194,7 @@ export default function BuildPage() {
         </div>
         <div>
           <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 18, lineHeight: 1.15, color: "var(--ink)" }}>Agent Forge: Build</h1>
-          <p style={{ margin: "2px 0 0", color: "var(--muted-deep)", fontSize: 12 }}>/hep-build — Hephaestus 빌더 파이프라인</p>
+          <p style={{ margin: "2px 0 0", color: "var(--muted-deep)", fontSize: 12 }}>hep-build - Hephaestus 빌더 파이프라인</p>
         </div>
         {status?.available && (
           <span style={{ marginLeft: "auto" }} className="titlebar-nodrag">
@@ -200,8 +207,9 @@ export default function BuildPage() {
 
       <main style={{ flex: 1, overflowY: "auto", padding: "28px 40px", display: "flex", flexDirection: "column", gap: 22 }}>
         {engineMissing && (
-          <div style={{ maxWidth: 1000, margin: "0 auto", width: "100%", padding: 16, borderRadius: 12, background: "var(--fill-1)", border: "1px solid var(--paper-edge)", color: "var(--muted-deep)", fontSize: 13 }}>
-            ⚠ Hephaestus 엔진을 사용할 수 없습니다: {status?.reason}. Python 3.9+ 설치 후 다시 시도하세요.
+          <div style={{ maxWidth: 1000, margin: "0 auto", width: "100%", padding: 16, borderRadius: 12, background: "var(--fill-1)", border: "1px solid var(--paper-edge)", color: "var(--muted-deep)", fontSize: 13, display: "flex", gap: 10, alignItems: "flex-start" }}>
+            <IconShield size={15} style={{ color: "var(--amber-deep)", flexShrink: 0, marginTop: 1 }} />
+            <span>Hephaestus 엔진을 사용할 수 없습니다: {status?.reason}. Python 3.9+ 설치 후 다시 시도하세요.</span>
           </div>
         )}
 
@@ -211,6 +219,21 @@ export default function BuildPage() {
           <p style={{ color: "var(--muted-deep)", fontSize: 13.5, margin: "0 0 16px" }}>
             요청을 적으면 빌더가 인터뷰·리서치 후 설치 가능한 Agentlas 패키지를 폴더에 생성합니다. 아래에서 진행이 단계별로 시각화됩니다.
           </p>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10, marginBottom: 14 }}>
+            {ACTION_CONTRACTS.map((item) => {
+              const Icon = item.icon;
+              return (
+                <div key={item.label} style={{ border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--fill-1)", padding: 12, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 5, color: "var(--ink)" }}>
+                    <Icon size={14} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                    <strong style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.label}</strong>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--muted-deep)", lineHeight: 1.35 }}>{item.desc}</div>
+                </div>
+              );
+            })}
+          </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 14 }}>
             {MODES.map((m) => {
@@ -307,7 +330,7 @@ export default function BuildPage() {
             <div style={{ borderRadius: 12, border: "1px solid var(--paper-edge)", background: "#0d1117", padding: 16, maxHeight: 300, overflowY: "auto", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12, lineHeight: 1.6 }}>
               {log.map((l, i) => (
                 <div key={i} style={{ color: l.kind === "error" ? "#ff7b72" : l.kind === "done" ? "#3fb950" : l.kind === "stage" ? "#79c0ff" : l.kind === "partial" ? "#c9d1d9" : "#8b949e", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                  {l.kind === "stage" ? `▸ ${l.text}` : l.text}
+                  {l.kind === "stage" ? `> ${l.text}` : l.text}
                 </div>
               ))}
               <div ref={logEndRef} />
@@ -319,8 +342,8 @@ export default function BuildPage() {
                   <IconCheck size={15} /> 패키지 준비됨
                 </span>
                 <button onClick={installToLibrary} style={actionBtn(true)}>라이브러리에 설치</button>
-                <button onClick={() => upload("private-link")} style={actionBtn(false)}>Cloud 업로드(비공개)</button>
-                <button onClick={() => upload("marketplace")} style={actionBtn(false)}>Hub 업로드(공개)</button>
+                <button onClick={() => upload("private-link")} style={actionBtn(false)}>Cloud private 업로드</button>
+                <button onClick={() => upload("marketplace")} style={actionBtn(false)}>Hub public 제출</button>
               </div>
             )}
           </section>
@@ -328,7 +351,6 @@ export default function BuildPage() {
       </main>
 
       <style dangerouslySetInnerHTML={{ __html: `
-        @keyframes forgeDash { to { stroke-dashoffset: -14; } }
         @keyframes forgePulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.45; transform: scale(0.82); } }
         @keyframes forgeGlow { 0%,100% { box-shadow: 0 0 0 0 var(--forge-c, #4DABF7)40; } 50% { box-shadow: 0 0 0 6px transparent; } }
         .forge-pulse { animation: forgePulse 1.2s ease-in-out infinite; }
@@ -374,17 +396,17 @@ function StageRow({
           {done ? <IconCheck size={18} /> : <Icon size={18} />}
         </div>
         {!isLast && (
-          <svg width="3" height="34" style={{ flex: 1, minHeight: 28 }}>
-            <line x1="1.5" y1="0" x2="1.5" y2="34" stroke="var(--paper-edge)" strokeWidth="3" />
-            {(done || active) && (
-              <line
-                x1="1.5" y1="0" x2="1.5" y2="34"
-                stroke={c} strokeWidth="3"
-                strokeDasharray={done ? "0" : "6 8"}
-                style={done ? undefined : { animation: "forgeDash 0.9s linear infinite" }}
-              />
-            )}
-          </svg>
+          <div
+            style={{
+              flex: 1,
+              minHeight: 28,
+              width: 3,
+              borderRadius: 999,
+              background: done || active ? c : "var(--paper-edge)",
+              opacity: active ? 0.65 : 1,
+              transition: "background 0.25s, opacity 0.25s",
+            }}
+          />
         )}
       </div>
 

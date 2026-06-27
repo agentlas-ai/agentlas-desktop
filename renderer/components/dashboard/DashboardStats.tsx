@@ -120,7 +120,7 @@ export function DashboardStats() {
               )}
             </div>
             <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-              <span style={{ fontSize: 26, fontWeight: 700, fontFamily: "var(--font-head)", letterSpacing: "-0.02em", color: "var(--ink)", lineHeight: 1 }}>
+              <span style={{ fontSize: 26, fontWeight: 700, fontFamily: "var(--font-head)", letterSpacing: 0, color: "var(--ink)", lineHeight: 1 }}>
                 {s.value}
               </span>
             </div>

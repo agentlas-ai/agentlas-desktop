@@ -71,7 +71,7 @@ export function aspectCss(aspect?: string): string {
   }
 }
 
-export const displayStyle: CSSProperties = { fontFamily: "var(--font-display, serif)", letterSpacing: -0.2 };
+export const displayStyle: CSSProperties = { fontFamily: "var(--font-display, serif)", letterSpacing: 0 };
 
 export function formatCost(n: number): string {
   return `$${n.toFixed(2)}`;
@@ -289,7 +289,7 @@ export function PanelHead({
       )}
       <div style={{ flex: 1, minWidth: 0 }}>
         {eyebrow && <Eyebrow>{eyebrow}</Eyebrow>}
-        <h2 style={{ margin: 0, fontSize: 27, fontWeight: 600, fontFamily: "var(--font-display)", letterSpacing: "-0.02em", color: "var(--ob-ink)", lineHeight: 1.12 }}>{title}</h2>
+        <h2 style={{ margin: 0, fontSize: 27, fontWeight: 600, fontFamily: "var(--font-display)", letterSpacing: 0, color: "var(--ob-ink)", lineHeight: 1.12 }}>{title}</h2>
         {subtitle && <p style={{ margin: "10px 0 0", fontSize: 14.5, color: "var(--ob-ink-soft)", lineHeight: 1.6, maxWidth: 720 }}>{subtitle}</p>}
       </div>
       {right && <div style={{ flexShrink: 0 }}>{right}</div>}

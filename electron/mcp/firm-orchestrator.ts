@@ -27,6 +27,7 @@ import { buildMemoryContext } from "../memory/context";
 import { curateReply } from "../memory/curator";
 import { MEMORY_EMITTER_BLOCK } from "../architecture/manifest";
 import { buildDelegateProtocol, parseDelegations, type Delegation } from "./delegate";
+import { selectRuntimeForTargets } from "../runtime/selection";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -42,6 +43,7 @@ export interface FirmRunParams {
   org: ResolvedOrg;
   ceoAgent: InstalledAgent;
   active: RuntimeStatus;
+  runtimes: RuntimeStatus[];
   picked: { runner: Runner; label: string };
   workingFolder?: string | null;
   mcpConfigPath?: string;
@@ -157,6 +159,8 @@ interface NodeTurn {
   withImages?: boolean;
   /** per-call abort (노드별 타임아웃) — 없으면 p.signal 사용 */
   signal?: AbortSignal;
+  /** The division branch this node belongs to, used for division-wide runtime defaults. */
+  divisionId?: string;
 }
 
 /** 노드 1턴 실행 — 프롬프트 조립(노드 프롬프트 + per-agent 메모리 + 위임/메모리 프로토콜),
@@ -200,16 +204,33 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
 
   emit({ kind: "thinking", status: phaseStatus(p.locale, phase, node.name) });
 
-  const result = await p.picked.runner(
+  const runtimeChoice = selectRuntimeForTargets(p.runtimes, [
+    { scope: "agent", targetId: node.agentId },
+    { scope: "division", targetId: turn.divisionId && p.chat.firmId ? `${p.chat.firmId}:${turn.divisionId}` : null },
+    { scope: "firm", targetId: p.chat.firmId },
+  ]);
+  const active = runtimeChoice?.picked ? runtimeChoice.active : p.active;
+  const picked = runtimeChoice?.picked ?? p.picked;
+  if (runtimeChoice?.unavailableOverride) {
+    emit({
+      kind: "tool-use",
+      status:
+        p.locale === "ko"
+          ? `지정 런타임(${runtimeChoice.unavailableOverride.selection.kind})을 찾지 못해 기본 런타임으로 실행합니다.`
+          : `Assigned runtime (${runtimeChoice.unavailableOverride.selection.kind}) is unavailable, using the default runtime.`,
+    });
+  }
+
+  const result = await picked.runner(
     {
       systemPrompt,
       history: turn.history,
       userPrompt: turn.userPrompt,
       images: turn.withImages ? p.req.images : undefined,
-      backendLabel: p.picked.label,
-      model: p.active.model ?? undefined,
-      longContext: p.active.longContextEnabled ?? false,
-      effort: p.active.effort ?? undefined,
+      backendLabel: picked.label,
+      model: active.model ?? undefined,
+      longContext: active.longContextEnabled ?? false,
+      effort: active.effort ?? undefined,
       signal: turn.signal ?? p.signal,
       permission: p.req.permissions,
       cwd: workingFolder ?? undefined,
@@ -281,6 +302,7 @@ async function runDivision(
     history,
     reports: specialists.length > 0 ? specialists : undefined,
     chatId: divChat.id,
+    divisionId: division.id,
   });
 
   let result = plan.text;
@@ -304,6 +326,7 @@ async function runDivision(
         userPrompt: m.brief,
         history: [],
         chatId: null, // ephemeral — 메모리는 node.id로 저장됨
+        divisionId: division.id,
       });
       return { name: m.node.name, role: m.node.role, text: r.text };
     });
@@ -317,6 +340,7 @@ async function runDivision(
       userPrompt: synthPrompt,
       history: listChatMessages(divChat.id, 80),
       chatId: divChat.id,
+      divisionId: division.id,
     });
     result = synth.text;
   }
@@ -439,6 +463,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
         userPrompt: m.brief,
         history: [],
         chatId: null,
+        divisionId: divisions[0]?.id,
       });
       return { node: m.node, result: r.text };
     });

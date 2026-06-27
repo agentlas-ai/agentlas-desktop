@@ -44,7 +44,8 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     env:
-      AGENTLAS_DESKTOP_GITHUB_REPO: ${{ github.repository }}
+      # Publish to the SEPARATE public releases repo (source repo is private).
+      AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -123,6 +124,10 @@ jobs:
           test -s "$cert_path"
           echo "CSC_LINK=$cert_path" >> "$GITHUB_ENV"
 
+      # Clone the git-ignored Hephaestus engine so the signed .app embeds it.
+      - name: Ensure embedded engine (Hephaestus)
+        run: npm run ensure:engine
+
       - name: Install dependencies
         run: npm ci
 
@@ -132,7 +137,9 @@ jobs:
       - name: Build, sign, notarize, and verify DMGs
         run: npm run package:mac
 
-      - name: Publish verified GitHub release
+      # Publish notarized .dmg/.zip + latest-mac.yml to the public releases repo
+      # (AGENTLAS_DESKTOP_GITHUB_REPO) — this is the public download + update feed.
+      - name: Publish verified release (public releases repo)
         run: |
           args=(--tag="$RESOLVED_TAG" --version="$RESOLVED_VERSION")
           if [ "$RESOLVED_DRAFT" = "true" ]; then args+=(--draft); fi

@@ -323,31 +323,13 @@ function ChatPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [messages, setMessages] = useState<StreamMessage[]>([]);
 
-  // Context Volume Management
+  // Context volume indicator only. Actual compaction happens in the runtime
+  // layer: CLI tools manage their own sessions, while BYOK/Ollama use
+  // electron/runtime/compact.ts before requests are sent.
   const maxTokens = 100000;
   const currentTokens = useMemo(() => {
     return messages.reduce((acc, msg) => acc + (msg.tokens ?? Math.floor((msg.text?.length || 0) / 4)), 0);
   }, [messages]);
-
-  // Codex-style Auto Compression
-  useEffect(() => {
-    if (currentTokens > maxTokens && messages.length > 2) {
-      setMessages((prev) => {
-        const toCompress = prev.slice(0, prev.length - 2);
-        const tail = prev.slice(prev.length - 2);
-        
-        if (toCompress.length === 1 && toCompress[0].id === "system-compressed") return prev;
-
-        const compressedMsg: StreamMessage = {
-          id: "system-compressed",
-          role: "system",
-          text: "이전 대화가 자동으로 압축되었습니다 (Context auto-compressed to save tokens).",
-          tokens: 50,
-        };
-        return [compressedMsg, ...tail];
-      });
-    }
-  }, [currentTokens, maxTokens, messages.length]);
   const [busy, setBusy] = useState(false);
   // 멀티 에이전트 실시간 텔레메트리 — 속성(agentId) 이벤트로 채워지는 네트워크 패널 상태.
   const [liveAgents, setLiveAgents] = useState<Record<string, LiveAgent>>({});

@@ -400,7 +400,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
             fontSize: 14,
             fontWeight: 700,
             color: "var(--ink)",
-            letterSpacing: -0.1,
+            letterSpacing: 0,
             flex: 1,
           }}
         >

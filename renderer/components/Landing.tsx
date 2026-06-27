@@ -298,7 +298,7 @@ export function Landing({
             fontSize: 64,
             lineHeight: 1.05,
             fontWeight: 700,
-            letterSpacing: "-0.035em",
+            letterSpacing: 0,
             color: C.ink,
             wordBreak: "keep-all",
             textShadow: "0 4px 40px rgba(6,8,11,.85)",

@@ -5,16 +5,24 @@ import { usePathname } from "next/navigation";
 import { PawLogo } from "./PawLogo";
 import { 
   IconChevronDown, IconApps, IconWand, IconSettings, IconBuilding, 
-  IconFileUp, IconStore, IconBolt, IconFilm, IconNetwork 
+  IconFileUp, IconStore, IconBolt, IconFilm, IconNetwork, IconKey, IconLayers
 } from "./Icon";
 import { AccountChip } from "./AccountChip";
 
-type DropdownState = "agent_forge" | "studio" | "hub" | null;
+type DropdownState = "agent_forge" | "studio" | "hub" | "environment" | null;
 
 export function TopNavbar() {
   const pathname = usePathname() ?? "/";
   const [activeDropdown, setActiveDropdown] = useState<DropdownState>(null);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const studioActive =
+    pathname.startsWith("/apps") ||
+    pathname.startsWith("/automation") ||
+    pathname.startsWith("/oberon") ||
+    pathname.startsWith("/creative-studio") ||
+    pathname.startsWith("/ecommerce-os") ||
+    pathname.startsWith("/startup-founder-studio");
+  const environmentActive = pathname.startsWith("/library") && !pathname.startsWith("/library/agents");
 
   const handleMouseEnter = (menu: DropdownState) => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
@@ -70,7 +78,10 @@ export function TopNavbar() {
           <div 
             style={{
               background: "var(--paper)", border: "1px solid var(--paper-edge)",
-              borderRadius: 12, boxShadow: "0 8px 30px rgba(0,0,0,0.12)", padding: 6, minWidth: 200,
+              borderRadius: 12,
+              boxShadow: "0 8px 30px rgba(0,0,0,0.12)",
+              padding: 6,
+              minWidth: dropdown === "studio" || dropdown === "environment" ? 260 : 220,
               display: "flex", flexDirection: "column", gap: 2,
               animation: "slideDown 0.15s ease-out"
             }}
@@ -84,6 +95,11 @@ export function TopNavbar() {
           {dropdown === "studio" && (
             <>
               <DropdownLink href="/apps" icon={<IconApps size={14} />} label="Built-in Apps" sub="First-party UI capabilities" />
+              <DropdownLink href="/startup-founder-studio" icon={<IconNetwork size={14} />} label="Startup Studio" sub="Founder workflow runtime" />
+              <DropdownLink href="/apps/document-studio" icon={<IconFileUp size={14} />} label="Document Studio" sub="Docs, artifacts, and files" />
+              <DropdownLink href="/creative-studio" icon={<IconWand size={14} />} label="Creative Studio" sub="Creative production workspace" />
+              <DropdownLink href="/ecommerce-os" icon={<IconStore size={14} />} label="Commerce OS" sub="Operations surface" />
+              <DropdownLink href="/oberon" icon={<IconFilm size={14} />} label="Oberon" sub="Video and story studio" />
               <DropdownLink href="/automation" icon={<IconBolt size={14} />} label="Automations" sub="Scheduled background tasks" />
             </>
           )}
@@ -91,6 +107,16 @@ export function TopNavbar() {
             <>
               <DropdownLink href="/marketplace" icon={<IconStore size={14} />} label="Agent Hub" sub="Discover agents and firms" />
               <DropdownLink href="/cloud" icon={<IconFileUp size={14} />} label="Publish" sub="Share your capabilities" />
+            </>
+          )}
+          {dropdown === "environment" && (
+            <>
+              <DropdownLink href="/library/env" icon={<IconKey size={14} />} label="Environment Keys" sub="Secrets and runtime variables" />
+              <DropdownLink href="/library/mcps" icon={<IconLayers size={14} />} label="MCP Tools" sub="Connected tool servers" />
+              <DropdownLink href="/library/apps" icon={<IconApps size={14} />} label="Apps Library" sub="Generated app inventory" />
+              <DropdownLink href="/library/tools" icon={<IconWand size={14} />} label="Tool Library" sub="Reusable local tools" />
+              <DropdownLink href="/library/surfaces" icon={<IconBuilding size={14} />} label="Surfaces" sub="Dashboards and workbenches" />
+              <DropdownLink href="/library/assets" icon={<IconFileUp size={14} />} label="Assets" sub="Files and generated packs" />
             </>
           )}
           </div>
@@ -118,7 +144,7 @@ export function TopNavbar() {
         {/* Logo */}
         <Link href="/" className="titlebar-nodrag" style={{ display: "flex", alignItems: "center", gap: 8, textDecoration: "none", color: "var(--ink)" }}>
           <PawLogo size={20} />
-          <span style={{ fontFamily: "var(--font-head)", fontSize: 14, fontWeight: 700, letterSpacing: -0.2 }}>Agentlas</span>
+          <span style={{ fontFamily: "var(--font-head)", fontSize: 14, fontWeight: 700, letterSpacing: 0 }}>Agentlas</span>
         </Link>
 
         {/* Navigation Tabs */}
@@ -126,9 +152,9 @@ export function TopNavbar() {
           <NavItem label="Dashboard" href="/dashboard" active={pathname.startsWith("/dashboard")} />
           <NavItem label="Workspace" href="/chat" active={pathname.startsWith("/chat") || pathname.startsWith("/project")} />
           <NavItem label="Agent Forge" href="/build" dropdown="agent_forge" active={pathname.startsWith("/library/agents") || pathname.startsWith("/build")} />
-          <NavItem label="Studio" href="/apps" dropdown="studio" active={pathname.startsWith("/apps") || pathname.startsWith("/automation") || pathname.startsWith("/oberon")} />
+          <NavItem label="Studio" href="/apps" dropdown="studio" active={studioActive} />
           <NavItem label="Hub" href="/marketplace" dropdown="hub" active={pathname.startsWith("/marketplace") || pathname.startsWith("/cloud")} />
-          <NavItem label="Environment" href="/library/env" active={pathname.startsWith("/library/env") || pathname.startsWith("/library/mcps")} />
+          <NavItem label="Environment" href="/library/env" dropdown="environment" active={environmentActive} />
         </nav>
       </div>
 

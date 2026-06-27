@@ -1,21 +1,20 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { INSTALLED_APPS } from "@/lib/apps";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type { AppFactoryAppRecord } from "@/lib/types";
 import { sanitizePublicAppCopy } from "@shared/brand-safety";
-import { IconApps, IconChevronRight, IconWand, IconFilm, IconImage, IconStore } from "@/components/Icon";
+import { IconApps, IconCheck, IconChevronRight, IconImage, IconStore, IconWand } from "@/components/Icon";
+
+type StudioProbe = "idle" | "checking" | "ok" | "error";
 
 export default function AppsPage() {
-  const { locale, t } = useT();
-  const router = useRouter();
+  const { locale } = useT();
   const [generatedApps, setGeneratedApps] = useState<AppFactoryAppRecord[]>([]);
-  const [launching, setLaunching] = useState(false);
-  const [featuredIndex, setFeaturedIndex] = useState(0);
-  const [fadeOpacity, setFadeOpacity] = useState(1);
+  const [studioProbe, setStudioProbe] = useState<StudioProbe>("idle");
+  const [studioMessage, setStudioMessage] = useState("");
 
   useEffect(() => {
     const api = ipc();
@@ -29,165 +28,225 @@ export default function AppsPage() {
     };
   }, []);
 
-  // Carousel Effect
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setFadeOpacity(0); // Fade out
-      setTimeout(() => {
-        setFeaturedIndex((prev) => (prev + 1) % INSTALLED_APPS.length);
-        setFadeOpacity(1); // Fade in
-      }, 500); // 500ms fade transition
-    }, 5000); // Change every 5 seconds
-    return () => clearInterval(interval);
-  }, []);
+  async function checkStudioRuntime() {
+    const api = ipc();
+    if (!api || studioProbe === "checking") return;
+    setStudioProbe("checking");
+    setStudioMessage("");
+    try {
+      const res = await api.hephaestus.startStudio();
+      if (res.ok && res.url) {
+        setStudioProbe("ok");
+        setStudioMessage(`Runtime ready at ${res.url}`);
+      } else {
+        setStudioProbe("error");
+        setStudioMessage(res.reason ?? "Studio runtime could not start.");
+      }
+    } catch (err) {
+      setStudioProbe("error");
+      setStudioMessage(err instanceof Error ? err.message : String(err));
+    }
+  }
 
-  const featuredApp = INSTALLED_APPS[featuredIndex];
-  const builtInApps = INSTALLED_APPS; // Show all in the grid below
-
-  const getAppBg = (id: string) => {
-    if (id === "creative-studio") return "linear-gradient(135deg, rgba(236,72,153,0.4), rgba(0,0,0,0.8))";
-    if (id === "ecommerce-os") return "linear-gradient(135deg, rgba(59,130,246,0.4), rgba(0,0,0,0.8))";
-    if (id === "document-studio") return "linear-gradient(135deg, rgba(16,185,129,0.4), rgba(0,0,0,0.8))";
-    if (id === "oberon") return "linear-gradient(135deg, rgba(132,94,247,0.4), rgba(0,0,0,0.8))";
-    return "linear-gradient(135deg, rgba(255,255,255,0.2), rgba(0,0,0,0.8))";
-  };
+  const featuredStudio = INSTALLED_APPS.find((app) => app.id === "startup-founder-studio");
+  const firstPartyApps = INSTALLED_APPS.filter((app) => app.id !== "startup-founder-studio");
 
   return (
-    <div style={{ width: "100%", height: "100%", overflowY: "auto", background: "#000", color: "#fff", display: "block" }}>
-      {/* Netflix-style Hero Section */}
-      {featuredApp && (
-        <section style={{ 
-          position: "relative", 
-          width: "100%", 
-          height: 480, 
-          display: "flex", 
-          flexDirection: "column", 
-          justifyContent: "flex-end", 
-          padding: "40px 60px",
-          background: `linear-gradient(to top, #000 0%, transparent 100%), ${getAppBg(featuredApp.id)}`,
-          borderBottom: "1px solid rgba(255,255,255,0.1)",
-          transition: "opacity 0.5s ease-in-out",
-          opacity: fadeOpacity,
-          flexShrink: 0
-        }}>
-          <div style={{ position: "relative", zIndex: 10, maxWidth: 600 }}>
-            <h1 style={{ fontSize: 48, fontWeight: 800, margin: "0 0 16px", fontFamily: "var(--font-head)", letterSpacing: -1, textShadow: "0 4px 20px rgba(0,0,0,0.5)" }}>
-              {pickLocalized(featuredApp, locale).name}
-            </h1>
-            <p style={{ fontSize: 16, color: "rgba(255,255,255,0.8)", lineHeight: 1.5, margin: "0 0 24px", textShadow: "0 2px 10px rgba(0,0,0,0.5)" }}>
-              {pickLocalized(featuredApp, locale).tagline}
-            </p>
-            <div style={{ display: "flex", gap: 12 }}>
-              <Link href={featuredApp.launchCommand ? `${featuredApp.route}?cmd=${encodeURIComponent(featuredApp.launchCommand)}` : featuredApp.route} style={{ 
-                background: "#fff", color: "#000", padding: "12px 28px", borderRadius: 8, 
-                fontWeight: 700, fontSize: 16, textDecoration: "none", display: "flex", alignItems: "center", gap: 8,
-                transition: "transform 0.2s"
-              }} className="hero-btn">
-                <IconApps size={20} /> {t("settings.update.install") || "Get Started"}
-              </Link>
+    <div style={{ width: "100%", height: "100%", overflowY: "auto", background: "var(--paper)", color: "var(--ink)" }}>
+      <main style={{ maxWidth: 1180, margin: "0 auto", padding: "34px 34px 64px", display: "flex", flexDirection: "column", gap: 28 }}>
+        <header style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 20, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: "var(--muted-deep)", textTransform: "uppercase", marginBottom: 8 }}>
+              Agentlas Apps
             </div>
+            <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 26, lineHeight: 1.15, fontWeight: 750 }}>
+              실행 가능한 Studio와 생성 앱
+            </h1>
+            <p style={{ margin: "8px 0 0", color: "var(--ink-soft)", fontSize: 13.5, lineHeight: 1.55, maxWidth: 680 }}>
+              각 타일은 실제 라우트와 런타임으로 이동합니다. 생성 앱은 로컬 App Factory 상태에서 active 항목만 표시합니다.
+            </p>
           </div>
-        </section>
-      )}
+          <Link
+            href="/build"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              height: 36,
+              padding: "0 13px",
+              borderRadius: 8,
+              border: "1px solid var(--paper-edge)",
+              background: "var(--fill-1)",
+              color: "var(--ink)",
+              textDecoration: "none",
+              fontSize: 12.5,
+              fontWeight: 700,
+            }}
+          >
+            <IconWand size={14} />
+            Build 새 에이전트
+          </Link>
+        </header>
 
-      <main style={{ padding: "30px 60px 60px", display: "flex", flexDirection: "column", gap: 40, overflowX: "hidden" }}>
-        
-        {/* Built-in Apps Grid */}
-        <section>
-          <h2 style={{ fontSize: 20, fontWeight: 700, margin: "0 0 16px", color: "#fff", display: "flex", alignItems: "center", gap: 8 }}>
-            First-Party Studio
-          </h2>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 20 }}>
-            {builtInApps.map((app) => (
-                  <Link 
-                key={app.id} 
-                href={app.launchCommand ? `${app.route}?cmd=${encodeURIComponent(app.launchCommand)}` : app.route} 
-                className="netflix-card"
-                style={{ 
-                  borderRadius: 12, 
-                  background: "#141414", 
-                  border: "1px solid rgba(255,255,255,0.1)",
-                  textDecoration: "none", 
-                  color: "inherit",
-                  display: "flex",
-                  flexDirection: "column",
-                  overflow: "hidden",
-                  transition: "transform 0.3s, box-shadow 0.3s",
-                }}
-              >
-                <div style={{ height: 140, background: app.accent || "linear-gradient(135deg, #333, #111)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>
-                  {app.id === "creative-studio" ? <IconImage size={40} /> : app.id === "ecommerce-os" ? <IconStore size={40} /> : <IconApps size={40} />}
-                </div>
-                <div style={{ padding: 16 }}>
-                  <div style={{ fontSize: 16, fontWeight: 700, margin: "0 0 6px", color: "#fff" }}>{pickLocalized(app, locale).name}</div>
-                  <div style={{ fontSize: 13, color: "rgba(255,255,255,0.5)", lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-                    {pickLocalized(app, locale).tagline}
+        {featuredStudio && (
+          <section style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--fill-1)", overflow: "hidden" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.4fr) minmax(280px, 0.8fr)", minHeight: 250 }}>
+              <div style={{ padding: 24, display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 18 }}>
+                <div>
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 800, color: "var(--accent)", marginBottom: 10 }}>
+                    <IconStore size={13} />
+                    REAL STUDIO RUNTIME
                   </div>
+                  <h2 style={{ margin: 0, fontSize: 23, fontWeight: 750, fontFamily: "var(--font-head)" }}>
+                    {pickLocalized(featuredStudio, locale).name}
+                  </h2>
+                  <p style={{ margin: "10px 0 0", color: "var(--ink-soft)", fontSize: 13.5, lineHeight: 1.55, maxWidth: 680 }}>
+                    {pickLocalized(featuredStudio, locale).tagline}
+                  </p>
                 </div>
-              </Link>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <Link href={featuredStudio.route} style={primaryLinkStyle}>
+                    열기
+                    <IconChevronRight size={14} />
+                  </Link>
+                  <button onClick={checkStudioRuntime} disabled={studioProbe === "checking"} style={secondaryButtonStyle}>
+                    {studioProbe === "checking" ? "점검 중..." : "런타임 점검"}
+                  </button>
+                  {studioProbe !== "idle" && (
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: studioProbe === "ok" ? "var(--green-deep)" : studioProbe === "error" ? "var(--red-deep)" : "var(--muted-deep)" }}>
+                      {studioProbe === "ok" && <IconCheck size={13} />}
+                      {studioMessage || (studioProbe === "checking" ? "Studio runtime starting" : "")}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <AppMedia appId={featuredStudio.id} label={pickLocalized(featuredStudio, locale).name} large />
+            </div>
+          </section>
+        )}
+
+        <section>
+          <SectionHeader title="First-Party Studio" count={firstPartyApps.length} />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 }}>
+            {firstPartyApps.map((app) => (
+              <AppCard key={app.id} href={app.launchCommand ? `${app.route}?cmd=${encodeURIComponent(app.launchCommand)}` : app.route}>
+                <AppMedia appId={app.id} label={pickLocalized(app, locale).name} />
+                <div style={{ padding: 14 }}>
+                  <div style={{ fontSize: 15, fontWeight: 750, color: "var(--ink)", marginBottom: 5 }}>{pickLocalized(app, locale).name}</div>
+                  <div style={{ fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.45 }}>{pickLocalized(app, locale).tagline}</div>
+                </div>
+              </AppCard>
             ))}
           </div>
         </section>
 
-        {/* Generated Apps Grid */}
-        {generatedApps.length > 0 && (
-          <section>
-            <h2 style={{ fontSize: 20, fontWeight: 700, margin: "0 0 16px", color: "#fff", display: "flex", alignItems: "center", gap: 8 }}>
-              Agent Generated Apps
-            </h2>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 20 }}>
+        <section>
+          <SectionHeader title="Generated Apps" count={generatedApps.length} />
+          {generatedApps.length === 0 ? (
+            <div style={{ border: "1px dashed var(--paper-edge)", borderRadius: 8, background: "var(--fill-1)", padding: 24, color: "var(--muted-deep)", fontSize: 13 }}>
+              아직 생성된 앱이 없습니다. Chat에서 Apps 생성 모드를 켜거나 Build에서 새 도구를 만든 뒤 여기에 표시됩니다.
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 }}>
               {generatedApps.map((app) => {
                 const title = sanitizePublicAppCopy(app.appName || app.manifest?.app?.name || app.manifest?.title, "Generated App");
                 const tagline = sanitizePublicAppCopy(app.manifest?.app?.valueProp || app.manifest?.description || "Agent-made web app", "Agent-made web app");
                 return (
-                  <Link 
-                    key={app.id} 
-                    href={`/apps/generated?id=${app.id}`}
-                    className="netflix-card"
-                    style={{ 
-                      borderRadius: 12, 
-                      background: "#141414", 
-                      border: "1px solid rgba(255,255,255,0.1)",
-                      textDecoration: "none", 
-                      color: "inherit",
-                      display: "flex",
-                      flexDirection: "column",
-                      overflow: "hidden",
-                      transition: "transform 0.3s, box-shadow 0.3s",
-                    }}
-                  >
-                    <div style={{ height: 140, background: "linear-gradient(135deg, #1f2937, #111827)", position: "relative" }}>
-                      <div style={{ position: "absolute", top: 12, right: 12, background: "rgba(0,0,0,0.6)", padding: "4px 8px", borderRadius: 4, fontSize: 10, fontWeight: 700 }}>GENERATED</div>
-                      <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                        <IconWand size={40} style={{ color: "#3b82f6" }} />
-                      </div>
+                  <AppCard key={app.id} href={`/apps/generated?id=${app.id}`}>
+                    <div style={{ height: 136, background: "linear-gradient(135deg, var(--fill-2), var(--paper-2))", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--accent)" }}>
+                      <IconWand size={38} />
                     </div>
-                    <div style={{ padding: 16 }}>
-                      <div style={{ fontSize: 15, fontWeight: 700, margin: "0 0 6px", color: "#fff" }}>{title}</div>
-                      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-                        {tagline}
-                      </div>
+                    <div style={{ padding: 14 }}>
+                      <div style={{ fontSize: 15, fontWeight: 750, color: "var(--ink)", marginBottom: 5 }}>{title}</div>
+                      <div style={{ fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.45 }}>{tagline}</div>
                     </div>
-                  </Link>
+                  </AppCard>
                 );
               })}
             </div>
-          </section>
-        )}
+          )}
+        </section>
       </main>
-
-      <style dangerouslySetInnerHTML={{ __html: `
-        .hero-btn:hover {
-          transform: scale(1.05);
-        }
-        .netflix-card:hover {
-          transform: translateY(-4px) scale(1.02);
-          box-shadow: 0 12px 30px rgba(0,0,0,0.5);
-          border-color: rgba(255,255,255,0.3) !important;
-          z-index: 10;
-        }
-      `}} />
     </div>
   );
 }
 
+function SectionHeader({ title, count }: { title: string; count: number }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+      <h2 style={{ margin: 0, fontSize: 15, fontWeight: 750 }}>{title}</h2>
+      <span style={{ fontSize: 11, color: "var(--muted-deep)", border: "1px solid var(--paper-edge)", borderRadius: 999, padding: "1px 7px" }}>{count}</span>
+    </div>
+  );
+}
+
+function AppCard({ href, children }: { href: string; children: React.ReactNode }) {
+  return (
+    <Link
+      href={href}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 250,
+        overflow: "hidden",
+        border: "1px solid var(--paper-edge)",
+        borderRadius: 8,
+        background: "var(--paper)",
+        color: "inherit",
+        textDecoration: "none",
+        boxShadow: "var(--shadow-1)",
+      }}
+    >
+      {children}
+    </Link>
+  );
+}
+
+function AppMedia({ appId, label, large = false }: { appId: string; label: string; large?: boolean }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <div style={{ minHeight: large ? 250 : 136, background: "var(--paper-2)", position: "relative", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+      {!failed && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={`/apps/${appId}.png`}
+          alt={label}
+          onError={() => setFailed(true)}
+          style={{ width: "100%", height: "100%", objectFit: "cover" }}
+        />
+      )}
+      {failed && (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, color: "var(--muted-deep)" }}>
+          {appId === "creative-studio" ? <IconImage size={34} /> : appId === "ecommerce-os" ? <IconStore size={34} /> : <IconApps size={34} />}
+          <span style={{ fontSize: 12, fontWeight: 650 }}>{label}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const primaryLinkStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  height: 36,
+  padding: "0 14px",
+  borderRadius: 8,
+  background: "var(--ink)",
+  color: "var(--paper)",
+  textDecoration: "none",
+  fontSize: 13,
+  fontWeight: 750,
+};
+
+const secondaryButtonStyle: React.CSSProperties = {
+  height: 36,
+  padding: "0 13px",
+  borderRadius: 8,
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+  color: "var(--ink)",
+  fontSize: 13,
+  fontWeight: 700,
+  cursor: "pointer",
+};

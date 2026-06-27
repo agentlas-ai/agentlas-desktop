@@ -1,12 +1,23 @@
 // 회사 상세 — 접고 펴기 가능한 왼쪽 사이드바 조직도 + 오른쪽 에이전트 상세 통제 센터 (메모리 큐레이션, 프롬프트 에디터, 스킬 주입, 클라우드 싱크)
 "use client";
-import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
-import type { Chat, InstalledAgent, InstalledFirm, ResolvedOrg, ResolvedNode, WorkspaceNode } from "@/lib/types";
+import type {
+  AgentRuntimeOverride,
+  AgentRuntimeOverrideScope,
+  Chat,
+  InstalledAgent,
+  InstalledFirm,
+  ResolvedOrg,
+  ResolvedNode,
+  RuntimeSelection,
+  RuntimeStatus,
+  WorkspaceNode,
+} from "@/lib/types";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import {
   IconBuilding,
@@ -45,6 +56,8 @@ function LibraryAgentsView() {
   const [resolving, setResolving] = useState(false);
   const [resolveMsg, setResolveMsg] = useState("");
   const [resolvedOrgs, setResolvedOrgs] = useState<Record<string, ResolvedOrg>>({});
+  const [runtimeStatuses, setRuntimeStatuses] = useState<RuntimeStatus[]>([]);
+  const [runtimeOverrides, setRuntimeOverrides] = useState<AgentRuntimeOverride[]>([]);
 
   // 왼쪽 조직도 패널 너비 & 접기 상태 (localStorage 영속)
   const [orgWidth, setOrgWidth] = useState(300);
@@ -137,12 +150,16 @@ function LibraryAgentsView() {
   const refresh = useCallback(async () => {
     const api = ipc();
     if (!api) return;
-    const [fList, agList] = await Promise.all([
+    const [fList, agList, runtimes, overrides] = await Promise.all([
       api.firms.list(),
       api.team.list(),
+      api.runtime.detect().catch(() => []),
+      api.agentRuntime?.list ? api.agentRuntime.list().catch(() => []) : Promise.resolve([]),
     ]);
     setFirms(fList);
     setAgents(agList);
+    setRuntimeStatuses(runtimes);
+    setRuntimeOverrides(overrides);
 
     const orgs: Record<string, ResolvedOrg> = {};
     for (const f of fList) {
@@ -298,6 +315,10 @@ function LibraryAgentsView() {
   }
 
   const agentMap = new Map(agents.map((a) => [a.id, a]));
+  const selectedContext = useMemo(
+    () => (selectedNode ? findSelectedNodeContext(selectedNode, firms, resolvedOrgs) : null),
+    [selectedNode, firms, resolvedOrgs],
+  );
 
   return (
     <div style={{ flex: 1, display: "flex", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
@@ -599,6 +620,10 @@ function LibraryAgentsView() {
             ontologyInbox={ontologyInbox}
             onSetOntologyInbox={setOntologyInbox}
             showToast={showToast}
+            runtimeStatuses={runtimeStatuses}
+            runtimeOverrides={runtimeOverrides}
+            nodeContext={selectedContext}
+            onRuntimeOverridesChange={setRuntimeOverrides}
           />
         )}
       </main>
@@ -814,33 +839,71 @@ function OrgChart({
   return renderNode(ceo, 0);
 }
 
-// ── 3. 에이전트 상세 컨트롤 타워 뷰 컴포넌트 ──────────
-interface AgentDetailViewProps {
-  node: ResolvedNode;
-  agent: InstalledAgent | null;
-  activeTab: "identity" | "memory" | "playbook" | "activity";
-  onTabChange: (tab: "identity" | "memory" | "playbook" | "activity") => void;
-  onBackToOverview: () => void;
-  memoryParsed: {
-    decisions: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[];
-    gotchas: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[];
-    openQuestions: { id: string; title: string; content: string }[];
-  };
-  onSaveMemory: (updater: (prev: any) => any) => Promise<void>;
-  promptContent: string;
-  promptDraft: string;
-  onPromptDraftChange: (v: string) => void;
-  editingPrompt: boolean;
-  onSetEditingPrompt: (v: boolean) => void;
-  onSavePrompt: () => Promise<void>;
-  onSaveEvolution: (newPrompt: string) => Promise<void>;
-  saving: boolean;
-  availableSkills: { slug: string; name: string; description: string }[];
-  skillDrawerOpen: boolean;
-  onSetSkillDrawerOpen: (v: boolean) => void;
-  ontologyInbox: { id: string; type: "gotcha" | "decision"; title: string; content: string; source: "local" | "cloud" }[];
-  onSetOntologyInbox: (v: any) => void;
-  showToast: (msg: string) => void;
+type SelectedNodeContext = {
+  firm: InstalledFirm | null;
+  division: ResolvedNode | null;
+  isDivision: boolean;
+};
+
+function nodeMatches(candidate: ResolvedNode, selected: ResolvedNode): boolean {
+  return (
+    candidate.id === selected.id ||
+    (!!candidate.agentId && candidate.agentId === selected.agentId) ||
+    (!!selected.agentId && candidate.id === selected.agentId)
+  );
+}
+
+function divisionTargetId(firmId: string, divisionId: string): string {
+  return `${firmId}:${divisionId}`;
+}
+
+function findSelectedNodeContext(
+  selected: ResolvedNode,
+  firms: InstalledFirm[],
+  orgs: Record<string, ResolvedOrg>,
+): SelectedNodeContext {
+  for (const firm of firms) {
+    const org = orgs[firm.id];
+    if (org) {
+      if (nodeMatches(org.ceo, selected)) return { firm, division: null, isDivision: false };
+      for (const division of org.divisions) {
+        if (nodeMatches(division, selected)) return { firm, division, isDivision: true };
+        if (division.specialists.some((specialist) => nodeMatches(specialist, selected))) {
+          return { firm, division, isDivision: false };
+        }
+      }
+    }
+
+    const rawNode = firm.orgChart.find(
+      (node) => node.agentSlug === selected.id || (!!selected.agentId && node.agentId === selected.agentId),
+    );
+    if (rawNode) {
+      const children = firm.orgChart.filter((node) => node.reportsTo === rawNode.agentSlug);
+      const parent = rawNode.reportsTo
+        ? firm.orgChart.find((node) => node.agentSlug === rawNode.reportsTo)
+        : null;
+      const parentAsDivision = parent && parent.reportsTo !== null
+        ? { id: parent.agentSlug, name: parent.role, role: parent.role, agentId: parent.agentId }
+        : null;
+      return {
+        firm,
+        division: children.length > 0
+          ? { id: rawNode.agentSlug, name: rawNode.role, role: rawNode.role, agentId: rawNode.agentId }
+          : parentAsDivision,
+        isDivision: children.length > 0,
+      };
+    }
+  }
+  return { firm: null, division: null, isDivision: false };
+}
+
+function MetricMini({ label, value }: { label: string; value: number }) {
+  return (
+    <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)", padding: "8px 10px" }}>
+      <div style={{ fontSize: 10.5, color: "var(--muted-deep)", marginBottom: 2 }}>{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 750, color: "var(--ink)" }}>{value}</div>
+    </div>
+  );
 }
 
 // ── 3.5 정보 흐름 연결 맵 (Information Flow Mapper) ──
@@ -848,13 +911,12 @@ interface AgentDetailViewProps {
 // 엣지에서 도출하고, 그래프가 없으면 역할 휴리스틱으로 폴백한다.
 function flowHeuristic(role: string): { upstream: string; downstream: string } {
   const r = role.toLowerCase();
-  if (r.includes("dp") || r.includes("planner") || role.includes("카메라")) return { upstream: "Screenwriter / Director", downstream: "Keyframe Generator" };
-  if (r.includes("writer") || r.includes("creative") || role.includes("작가")) return { upstream: "Executive Producer / CEO", downstream: "DP / Shot Planner" };
-  if (r.includes("keyframe") || r.includes("animator") || role.includes("키프레임")) return { upstream: "DP / Shot Planner", downstream: "QA Supervisor" };
-  if (r.includes("qa") || r.includes("supervisor") || role.includes("검증")) return { upstream: "Keyframe Generator", downstream: "Video Compositor" };
-  if (r.includes("compositor") || r.includes("editor") || role.includes("편집")) return { upstream: "QA Supervisor", downstream: "Audio & Sync Master" };
-  if (r.includes("audio") || r.includes("sound") || role.includes("오디오")) return { upstream: "Video Compositor", downstream: "Delivery Agent (Publish)" };
-  return { upstream: "EP / CEO (Showrunner)", downstream: "Production Engine" };
+  if (r.includes("ceo") || r.includes("orchestrator") || role.includes("오케스트")) return { upstream: "User / Hub request", downstream: "Specialist agents" };
+  if (r.includes("pm") || r.includes("planner") || role.includes("기획")) return { upstream: "Orchestrator", downstream: "Worker agents" };
+  if (r.includes("research") || role.includes("리서치")) return { upstream: "Brief / query", downstream: "Synthesis agent" };
+  if (r.includes("qa") || r.includes("review") || role.includes("검증")) return { upstream: "Worker output", downstream: "Approval / delivery" };
+  if (r.includes("deploy") || r.includes("publish") || role.includes("배포")) return { upstream: "Verified package", downstream: "Cloud / Hub" };
+  return { upstream: "Chat / Team route", downstream: "Workspace output" };
 }
 
 /** AO 그래프 JSON 에서 이 노드의 upstream(공급자)/downstream(수신자)를 도출. 못 찾으면 null. */
@@ -1051,6 +1113,296 @@ function InformationFlowMapper({ node }: { node: ResolvedNode }) {
   );
 }
 
+type RuntimeTargetOption = {
+  scope: AgentRuntimeOverrideScope;
+  targetId: string;
+  label: string;
+  note: string;
+};
+
+function runtimeStatusKey(runtime: Pick<RuntimeStatus, "kind" | "backend">): string {
+  return `${runtime.kind}:${runtime.backend}`;
+}
+
+function runtimeDisplayName(runtime: Pick<RuntimeStatus, "kind" | "backend" | "model">): string {
+  if (runtime.kind === "claude-code") return "Claude Code";
+  if (runtime.kind === "codex") return "Codex";
+  if (runtime.kind === "gemini") return "Gemini";
+  if (runtime.kind === "ollama") return runtime.model ? `Ollama · ${runtime.model}` : "Ollama";
+  if (runtime.kind === "byok") return `BYOK · ${runtime.backend}`;
+  return runtime.kind;
+}
+
+function selectionSummary(selection?: RuntimeSelection | null): string {
+  if (!selection) return "전역 활성 런타임";
+  const base = selection.kind === "byok" ? `BYOK · ${selection.backend ?? "provider"}` : selection.kind;
+  return [base, selection.model, selection.effort ? `effort ${selection.effort}` : ""].filter(Boolean).join(" · ");
+}
+
+function RuntimeAssignmentPanel({
+  node,
+  agent,
+  nodeContext,
+  runtimeStatuses,
+  runtimeOverrides,
+  onRuntimeOverridesChange,
+  showToast,
+}: {
+  node: ResolvedNode;
+  agent: InstalledAgent | null;
+  nodeContext: SelectedNodeContext | null;
+  runtimeStatuses: RuntimeStatus[];
+  runtimeOverrides: AgentRuntimeOverride[];
+  onRuntimeOverridesChange: (items: AgentRuntimeOverride[]) => void;
+  showToast: (msg: string) => void;
+}) {
+  const targets = useMemo<RuntimeTargetOption[]>(() => {
+    const items: RuntimeTargetOption[] = [];
+    if (node.agentId) {
+      items.push({
+        scope: "agent",
+        targetId: node.agentId,
+        label: `${node.name}만`,
+        note: "선택한 개별 에이전트에만 적용",
+      });
+    }
+    if (nodeContext?.firm && nodeContext.division) {
+      items.push({
+        scope: "division",
+        targetId: divisionTargetId(nodeContext.firm.id, nodeContext.division.id),
+        label: `${nodeContext.division.name} 디비전`,
+        note: "해당 디비전과 하위 전문가 기본값",
+      });
+    }
+    if (nodeContext?.firm) {
+      items.push({
+        scope: "firm",
+        targetId: nodeContext.firm.id,
+        label: `${nodeContext.firm.name} 전체`,
+        note: "조직 전체 기본값",
+      });
+    }
+    return items;
+  }, [node.agentId, node.name, nodeContext]);
+
+  const [targetKey, setTargetKey] = useState("");
+  const [runtimeKey, setRuntimeKey] = useState("");
+  const [modelOptions, setModelOptions] = useState<Array<{ id: string; label: string; tag?: string }>>([]);
+  const [selectedModel, setSelectedModel] = useState("");
+  const [selectedEffort, setSelectedEffort] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (targets.length === 0) {
+      setTargetKey("");
+      return;
+    }
+    setTargetKey((current) => (targets.some((target) => `${target.scope}:${target.targetId}` === current) ? current : `${targets[0].scope}:${targets[0].targetId}`));
+  }, [targets]);
+
+  const selectedTarget = targets.find((target) => `${target.scope}:${target.targetId}` === targetKey) ?? targets[0] ?? null;
+  const selectedOverride = selectedTarget
+    ? runtimeOverrides.find((item) => item.scope === selectedTarget.scope && item.targetId === selectedTarget.targetId) ?? null
+    : null;
+
+  useEffect(() => {
+    const fallback = runtimeStatuses.find((runtime) => runtime.active) ?? runtimeStatuses[0];
+    const source = selectedOverride
+      ? runtimeStatuses.find(
+          (runtime) =>
+            runtime.kind === selectedOverride.selection.kind &&
+            (!selectedOverride.selection.backend || runtime.backend === selectedOverride.selection.backend),
+        ) ?? fallback
+      : fallback;
+    setRuntimeKey(source ? runtimeStatusKey(source) : "");
+    setSelectedModel(selectedOverride?.selection.model ?? source?.model ?? "");
+    setSelectedEffort(selectedOverride?.selection.effort ?? source?.effort ?? "");
+  }, [selectedOverride, runtimeStatuses]);
+
+  const selectedRuntime = runtimeStatuses.find((runtime) => runtimeStatusKey(runtime) === runtimeKey) ?? null;
+  useEffect(() => {
+    let cancelled = false;
+    const api = ipc();
+    if (!api || !selectedRuntime) {
+      setModelOptions([]);
+      return;
+    }
+    void api.runtime
+      .listModels({
+        kind: selectedRuntime.kind,
+        backend: selectedRuntime.backend,
+        availableModels: selectedRuntime.availableModels,
+      })
+      .then((items) => {
+        if (!cancelled) setModelOptions(items);
+      })
+      .catch(() => {
+        if (!cancelled) setModelOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRuntime]);
+
+  const effortOptions = selectedRuntime?.efforts ?? [];
+
+  async function refreshOverrides() {
+    const api = ipc();
+    if (!api) return;
+    onRuntimeOverridesChange(await api.agentRuntime.list());
+  }
+
+  async function saveOverride() {
+    const api = ipc();
+    if (!api || !selectedTarget || !selectedRuntime) return;
+    setSaving(true);
+    try {
+      const selection: RuntimeSelection = {
+        kind: selectedRuntime.kind,
+        backend: selectedRuntime.backend,
+        source: selectedRuntime.source,
+        model: selectedModel || undefined,
+        longContext: selectedRuntime.kind === "byok" ? selectedRuntime.longContextEnabled ?? false : undefined,
+        effort: selectedEffort || undefined,
+      };
+      await api.agentRuntime.set({
+        scope: selectedTarget.scope,
+        targetId: selectedTarget.targetId,
+        label: selectedTarget.label,
+        selection,
+      });
+      await refreshOverrides();
+      showToast("런타임 모델 지정이 저장되었습니다.");
+    } catch (err) {
+      alert("런타임 지정 저장 실패: " + String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function clearOverride() {
+    const api = ipc();
+    if (!api || !selectedTarget) return;
+    setSaving(true);
+    try {
+      await api.agentRuntime.remove(selectedTarget.scope, selectedTarget.targetId);
+      await refreshOverrides();
+      showToast("런타임 모델 지정을 해제했습니다.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (targets.length === 0) {
+    return (
+      <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
+        <h4 style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 700 }}>실행 모델 지정</h4>
+        <p style={{ margin: 0, fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.5 }}>설치된 에이전트 노드를 선택하면 CLI 모델을 고정할 수 있습니다.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
+        <div>
+          <h4 style={{ margin: 0, fontSize: 13, fontWeight: 700 }}>실행 모델 지정</h4>
+          <p style={{ margin: "3px 0 0", fontSize: 11.5, color: "var(--muted-deep)" }}>
+            저장된 값은 다음 Chat, Team 라우팅, Hub 후보 호출부터 우선 적용됩니다.
+          </p>
+        </div>
+        <span style={{ fontSize: 10.5, padding: "2px 7px", borderRadius: 999, background: selectedOverride ? "rgba(12,166,120,0.12)" : "var(--fill-2)", color: selectedOverride ? "var(--green-deep)" : "var(--muted-deep)", fontWeight: 700 }}>
+          {selectedOverride ? "고정됨" : "전역 기본"}
+        </span>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+        <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, color: "var(--muted-deep)", fontWeight: 600 }}>
+          적용 범위
+          <select value={targetKey} onChange={(e) => setTargetKey(e.target.value)} style={runtimeSelectStyle}>
+            {targets.map((target) => (
+              <option key={`${target.scope}:${target.targetId}`} value={`${target.scope}:${target.targetId}`}>
+                {target.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, color: "var(--muted-deep)", fontWeight: 600 }}>
+          CLI / Runtime
+          <select value={runtimeKey} onChange={(e) => setRuntimeKey(e.target.value)} style={runtimeSelectStyle}>
+            {runtimeStatuses.map((runtime) => (
+              <option key={runtimeStatusKey(runtime)} value={runtimeStatusKey(runtime)}>
+                {runtimeDisplayName(runtime)}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: effortOptions.length > 0 ? "1fr 1fr" : "1fr", gap: 10 }}>
+        <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, color: "var(--muted-deep)", fontWeight: 600 }}>
+          모델
+          <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} style={runtimeSelectStyle}>
+            <option value="">구독/전역 기본</option>
+            {modelOptions.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.label}{model.tag ? ` · ${model.tag}` : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        {effortOptions.length > 0 && (
+          <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, color: "var(--muted-deep)", fontWeight: 600 }}>
+            작업량
+            <select value={selectedEffort} onChange={(e) => setSelectedEffort(e.target.value)} style={runtimeSelectStyle}>
+              <option value="">기본</option>
+              {effortOptions.map((effort) => (
+                <option key={effort.id} value={effort.id}>{effort.label}</option>
+              ))}
+            </select>
+          </label>
+        )}
+      </div>
+
+      <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 8, background: "var(--paper-2)", border: "1px solid var(--paper-edge)", fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.45 }}>
+        <strong style={{ color: "var(--ink)" }}>현재 저장값:</strong> {selectionSummary(selectedOverride?.selection)}
+        {selectedTarget && <span style={{ color: "var(--muted-deep)" }}> · {selectedTarget.note}</span>}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+        <button onClick={clearOverride} disabled={saving || !selectedOverride} style={{ ...runtimeButtonStyle, opacity: selectedOverride ? 1 : 0.45 }}>
+          전역 기본
+        </button>
+        <button onClick={saveOverride} disabled={saving || !selectedRuntime} style={{ ...runtimeButtonStyle, background: "var(--accent)", color: "#fff", border: "1px solid var(--accent)" }}>
+          {saving ? "저장 중..." : "저장"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const runtimeSelectStyle: React.CSSProperties = {
+  width: "100%",
+  minWidth: 0,
+  padding: "8px 9px",
+  borderRadius: 7,
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper-2)",
+  color: "var(--ink)",
+  fontSize: 12,
+};
+
+const runtimeButtonStyle: React.CSSProperties = {
+  padding: "7px 11px",
+  borderRadius: 7,
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+  color: "var(--ink-soft)",
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
 // ── 3. 에이전트 상세 컨트롤 타워 뷰 컴포넌트 ──────────
 interface AgentDetailViewProps {
   node: ResolvedNode;
@@ -1079,6 +1431,10 @@ interface AgentDetailViewProps {
   onSetOntologyInbox: (v: any) => void;
   showToast: (msg: string) => void;
   agentFiles: WorkspaceNode[];
+  runtimeStatuses: RuntimeStatus[];
+  runtimeOverrides: AgentRuntimeOverride[];
+  nodeContext: SelectedNodeContext | null;
+  onRuntimeOverridesChange: (items: AgentRuntimeOverride[]) => void;
 }
 
 function AgentDetailView({
@@ -1103,23 +1459,40 @@ function AgentDetailView({
   ontologyInbox,
   onSetOntologyInbox,
   showToast,
-  agentFiles
+  agentFiles,
+  runtimeStatuses,
+  runtimeOverrides,
+  nodeContext,
+  onRuntimeOverridesChange
 }: AgentDetailViewProps) {
   
   // 규칙 카드별 열림/닫힘(Accordion) 관리 상태
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
   
-  // 헤바이스토스 네트워크 전체 싱크 모드 토글
+  // Hub 공유 상태 메타데이터 기본값 토글. 실제 원격 업로드는 Hub/Cloud publish 흐름에서 수행한다.
   const [globalHubSync, setGlobalHubSync] = useState(true);
+  const effectiveRuntimeOverride = useMemo(() => {
+    const orderedTargets: Array<{ scope: AgentRuntimeOverrideScope; targetId?: string | null }> = [
+      { scope: "agent", targetId: node.agentId },
+      {
+        scope: "division",
+        targetId: nodeContext?.firm && nodeContext.division
+          ? divisionTargetId(nodeContext.firm.id, nodeContext.division.id)
+          : null,
+      },
+      { scope: "firm", targetId: nodeContext?.firm?.id },
+    ];
+    for (const target of orderedTargets) {
+      if (!target.targetId) continue;
+      const found = runtimeOverrides.find((item) => item.scope === target.scope && item.targetId === target.targetId);
+      if (found) return found;
+    }
+    return null;
+  }, [node.agentId, nodeContext, runtimeOverrides]);
 
-  // 메모리 진화 타임라인 관리 상태
-  const [timelineEvents, setTimelineEvents] = useState<Array<{ id: string; timestamp: string; title: string; desc: string; type: "skill" | "sync" | "evolution" | "resolve" }>>([
-    { id: "timeline-1", timestamp: "2026-06-26 10:15", title: "에이전트 계약 마운트", desc: "Agentlas Desktop 시스템 로컬 프로파일 정상 적재 완료.", type: "sync" },
-    { id: "timeline-2", timestamp: "2026-06-26 11:20", title: "초기 지식베이스 로드", desc: "AGENT.md 및 memory.md 파일 연동 정상 바인딩.", type: "sync" }
-  ]);
-
-  // 카메라 연출 인터랙션 칩 상태
-  const [selectedTechnique, setSelectedTechnique] = useState<"orbit" | "crane" | "dolly-zoom" | "pan-tilt">("orbit");
+  // 메모리 진화 타임라인 관리 상태 — 사용자가 수행한 액션만 state로 보관하고,
+  // 로드 상태는 아래 observedTimelineEvents에서 현재 파일 상태로 파생한다.
+  const [timelineEvents, setTimelineEvents] = useState<Array<{ id: string; timestamp: string; title: string; desc: string; type: "skill" | "sync" | "evolution" | "resolve" }>>([]);
 
   // 셀프에볼루션 — 실제 메모리(활성 결정·주의 규칙) 중 아직 시스템 프롬프트에 반영되지 않은
   // 학습 규칙을 프롬프트 부록으로 접어 넣는 실데이터 기반 진화 제안. (가짜 텍스트 아님)
@@ -1133,6 +1506,38 @@ function AgentDetailView({
     : "";
   const hasPendingEvolution = learnedRules.length > 0;
   const evolutionDiff = { old: promptContent, new: promptContent + evolutionAppendix };
+  const observedTimelineEvents = useMemo(() => {
+    const derived: Array<{ id: string; timestamp: string; title: string; desc: string; type: "skill" | "sync" | "evolution" | "resolve" }> = [];
+    if (agentFiles.length > 0) {
+      derived.push({
+        id: "observed-files",
+        timestamp: "loaded",
+        title: "로컬 에이전트 파일 연결",
+        desc: `${agentFiles.length}개 파일을 읽어 프롬프트, 메모리, 플레이북 탭에 반영했습니다.`,
+        type: "sync",
+      });
+    }
+    if (promptContent.trim()) {
+      derived.push({
+        id: "observed-prompt",
+        timestamp: "loaded",
+        title: "프롬프트 소스 확인",
+        desc: "AGENT.md 또는 system-prompt.md 기준으로 현재 런타임 정체성을 표시 중입니다.",
+        type: "sync",
+      });
+    }
+    const memoryCount = memoryParsed.decisions.length + memoryParsed.gotchas.length + memoryParsed.openQuestions.length;
+    if (memoryCount > 0) {
+      derived.push({
+        id: "observed-memory",
+        timestamp: "loaded",
+        title: "메모리 규칙 로드",
+        desc: `${memoryCount}개 메모리 항목을 규칙, 주의사항, 미결 과제로 분류했습니다.`,
+        type: "sync",
+      });
+    }
+    return [...timelineEvents, ...derived];
+  }, [agentFiles.length, memoryParsed.decisions.length, memoryParsed.gotchas.length, memoryParsed.openQuestions.length, promptContent, timelineEvents]);
 
   // 프롬프트 복사 핸들러
   const handleCopyPrompt = () => {
@@ -1201,7 +1606,7 @@ function AgentDetailView({
     showToast(`규칙 설정이 저장되었습니다.`);
   };
 
-  // 개별 규칙 클라우드 허브(MongoDB) 공유/로컬전용 토글
+  // 개별 규칙 Hub 공유 후보/로컬전용 토글
   const handleToggleSync = (section: "decisions" | "gotchas", id: string) => {
     void onSaveMemory((prev: typeof memoryParsed) => ({
       ...prev,
@@ -1216,13 +1621,13 @@ function AgentDetailView({
           id: `timeline-${Date.now()}`,
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
           title: nextSynced ? "클라우드 허브 공유" : "로컬 전용 전환",
-          desc: `'${targetItem.title}' 규칙을 Hephaestus 클라우드 데이터베이스에 연동/격리했습니다.`,
+          desc: `'${targetItem.title}' 규칙의 Hub 공유 후보 상태를 전환했습니다.`,
           type: "sync"
         },
         ...prev
       ]);
     }
-    showToast(nextSynced ? "Hephaestus 클라우드 허브에 연동 공유되었습니다." : "로컬 프로젝트 전용으로 변경되었습니다.");
+    showToast(nextSynced ? "Hub 공유 후보로 표시했습니다." : "로컬 프로젝트 전용으로 변경되었습니다.");
   };
 
   // 미결 과제를 결정 사항(Decision)으로 반영 승격
@@ -1642,13 +2047,23 @@ function AgentDetailView({
                 )}
               </div>
 
+              <RuntimeAssignmentPanel
+                node={node}
+                agent={agent}
+                nodeContext={nodeContext}
+                runtimeStatuses={runtimeStatuses}
+                runtimeOverrides={runtimeOverrides}
+                onRuntimeOverridesChange={onRuntimeOverridesChange}
+                showToast={showToast}
+              />
+
               {/* 매핑 메타 데이터 */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
                   <h4 style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 700 }}>런타임 정보</h4>
                   <div style={{ fontSize: 12.5, lineHeight: 1.8, color: "var(--ink-soft)" }}>
                     <div><strong>에이전트 ID:</strong> {node.agentId ?? "미설치(임시)"}</div>
-                    <div><strong>권장 엔진:</strong> {agent?.preferredBackend ?? "자동 라우팅"}</div>
+                    <div><strong>적용 런타임:</strong> {effectiveRuntimeOverride ? selectionSummary(effectiveRuntimeOverride.selection) : "전역 자동 라우팅"}</div>
                     <div><strong>신뢰 등급:</strong> Trust {agent?.trustGrade ?? "B"}</div>
                   </div>
                 </div>
@@ -1718,15 +2133,15 @@ function AgentDetailView({
                 </div>
               )}
 
-              {/* 클라우드 동기화 제어 헤더 */}
+              {/* Hub 공유 상태 제어 헤더 */}
               <div style={{ display: "flex", alignItems: "center", justifyItems: "space-between", padding: "12px 16px", background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)" }}>
                 <div style={{ flex: 1 }}>
-                  <h4 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>Hephaestus 클라우드 동기화 설정</h4>
-                  <p style={{ margin: 0, fontSize: 11, color: "var(--muted-deep)" }}>규칙 생성 시 기본적으로 MongoDB Cloud Hub에 공유 저장합니다.</p>
+                  <h4 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>Hub 공유 상태 설정</h4>
+                  <p style={{ margin: 0, fontSize: 11, color: "var(--muted-deep)" }}>규칙 생성 시 공유 후보 플래그를 함께 저장합니다. 실제 원격 업로드는 Hub/Cloud publish 단계에서 처리됩니다.</p>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontSize: 11, fontWeight: 600, color: globalHubSync ? "var(--green-deep)" : "var(--muted)" }}>
-                    {globalHubSync ? "글로벌 허브 연동 중" : "로컬 단독 오프라인"}
+                    {globalHubSync ? "Hub 공유 후보" : "로컬 단독"}
                   </span>
                   <input
                     type="checkbox"
@@ -1959,7 +2374,12 @@ function AgentDetailView({
                 </h4>
                 
                 <div style={{ display: "flex", flexDirection: "column", gap: 16, position: "relative", paddingLeft: 16, borderLeft: "2px solid var(--paper-edge)", marginLeft: 6 }}>
-                  {timelineEvents.map((evt) => {
+                  {observedTimelineEvents.length === 0 && (
+                    <div style={{ fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.5 }}>
+                      아직 기록된 진화 이벤트가 없습니다. 메모리 승격, 스킬 주입, 프롬프트 진화를 실행하면 여기에 남습니다.
+                    </div>
+                  )}
+                  {observedTimelineEvents.map((evt) => {
                     const colorMap = {
                       skill: "var(--purple-deep)",
                       sync: "var(--accent)",
@@ -2005,259 +2425,88 @@ function AgentDetailView({
           {/* 탭 3: 플레이북 & 워크플로우 */}
           {activeTab === "playbook" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 840 }}>
-              
-              {/* 수평 파이프라인 단계 표시기 */}
-              <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, overflowX: "auto" }}>
-                <h4 style={{ margin: "0 0 16px 0", fontSize: 13.5, fontWeight: 700 }}>생성 프로세스 매핑 (Pipeline Stepper)</h4>
-                
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", position: "relative", minWidth: 600 }}>
-                  
-                  {/* 중앙 선 */}
-                  <div style={{ position: "absolute", left: 0, right: 0, top: 12, height: 2, background: "var(--paper-edge)", zIndex: 1 }} />
-                  
-                  {/* 각 단계 스텝 */}
-                  {Array.from({ length: 11 }).map((_, stepIdx) => {
-                    const stepName = [
-                      "Brief", "Script", "Shotlist", "Continuity", "Keyframe", 
-                      "Approval", "Generation", "QA", "Edit", "Audio", "Delivery"
-                    ][stepIdx];
-                    
-                    // DP 에이전트 역할에 따른 하이라이트 (단계 2, 3)
-                    const isDP = node.role.includes("DP") || node.role.includes("Planner");
-                    const isCeo = node.role.includes("CEO") || node.role.includes("Showrunner");
-                    const highlight = isDP ? (stepIdx === 2 || stepIdx === 3) : isCeo ? (stepIdx === 0 || stepIdx === 5 || stepIdx === 10) : false;
-                    
+              <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
+                <h4 style={{ margin: "0 0 14px 0", fontSize: 13.5, fontWeight: 700 }}>실행 루프 (Runtime Loop)</h4>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 }}>
+                  {[
+                    { label: "Route", desc: "Chat 또는 Hub 호출에서 이 에이전트가 후보가 됩니다.", icon: IconRoute },
+                    { label: "Context", desc: "프로젝트, Env, 메모리 규칙이 invocation에 주입됩니다.", icon: IconBrain },
+                    { label: "Tools", desc: "필요한 MCP 서버와 로컬 권한을 확인합니다.", icon: IconLayers },
+                    { label: "Persist", desc: "결정, 주의사항, 진화 로그를 로컬 파일에 남깁니다.", icon: IconPaperclip },
+                  ].map((item) => {
+                    const Icon = item.icon;
                     return (
-                      <div key={stepIdx} style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1, zIndex: 2 }}>
-                        <div
-                          style={{
-                            width: 24,
-                            height: 24,
-                            borderRadius: 999,
-                            background: highlight ? "var(--accent)" : "var(--paper)",
-                            border: highlight ? "2px solid var(--accent)" : "2px solid var(--muted)",
-                            color: highlight ? "#fff" : "var(--muted-deep)",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            fontSize: 10,
-                            fontWeight: 700
-                          }}
-                        >
-                          {String(stepIdx).padStart(2, "0")}
+                      <div key={item.label} style={{ border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper-2)", padding: 12, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 6 }}>
+                          <Icon size={14} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                          <strong style={{ fontSize: 12.5 }}>{item.label}</strong>
                         </div>
-                        <span style={{ fontSize: 9.5, marginTop: 4, fontWeight: highlight ? 700 : 500, color: highlight ? "var(--accent)" : "var(--muted-deep)" }}>
-                          {stepName}
-                        </span>
+                        <p style={{ margin: 0, fontSize: 11.5, lineHeight: 1.45, color: "var(--ink-soft)" }}>{item.desc}</p>
                       </div>
                     );
                   })}
                 </div>
               </div>
 
-              {/* 영화적 연출 문법 및 대화형 시각화 */}
-              <div>
-                <h4 style={{ margin: "0 0 12px 0", fontSize: 14, fontWeight: 700 }}>연출 및 문법 룰셋 (Playbook Spec)</h4>
-                
-                <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 16 }}>
-                  
-                  {/* Left: 규칙 설명 카드 */}
-                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 14 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 13, fontWeight: 700 }}>
-                        <IconRoute size={14} style={{ color: "var(--accent)" }} />
-                        카메라 지오메트리 룰
-                      </div>
-                      <p style={{ margin: 0, fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.6 }}>
-                        - **180° 법칙 준수**: Eyeline 매치 및 스크린 디렉션 축 고정.<br />
-                        - **30° 법칙 준수**: 인접 샷 연결 시 카메라 각도 30도 이상 이동.<br />
-                        - **매치 온 액션**: 프레임 연속 동작 연결을 위한 컷 아웃포인트 정밀 배치.
-                      </p>
-                    </div>
-                    
-                    <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 14 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 13, fontWeight: 700 }}>
-                        <IconLayers size={14} style={{ color: "var(--accent)" }} />
-                        비디오 컷 아웃 핸들
-                      </div>
-                      <p style={{ margin: 0, fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.6 }}>
-                        - **모션 버퍼**: 안전한 컷 크로싱용 0.3초간의 후반 정적 핸들 확보.<br />
-                        - **TTS 자막 매핑**: 립싱크 대사 처리 시 SRT 번인 오프셋 자동 큐잉.<br />
-                        - **샷 일관성**: 극 클로즈업 상태에서의 인스턴트 가파른 줌인 억제.
-                      </p>
-                    </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
+                  <h4 style={{ margin: "0 0 12px 0", fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
+                    <IconRoute size={14} style={{ color: "var(--accent)" }} />
+                    라우팅 카드
+                  </h4>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 12, color: "var(--ink-soft)", lineHeight: 1.55 }}>
+                    <div><strong>역할:</strong> {node.role || "자동 라우팅"}</div>
+                    <div><strong>Agent ID:</strong> {node.agentId ?? "미설치 노드"}</div>
+                    <div><strong>적용 런타임:</strong> {effectiveRuntimeOverride ? selectionSummary(effectiveRuntimeOverride.selection) : "런타임 자동 선택"}</div>
+                    <div><strong>신뢰 등급:</strong> Trust {agent?.trustGrade ?? "B"}</div>
+                    <div><strong>호출 경로:</strong> Chat 멘션, Team 라우팅, Hub 후보 검색</div>
                   </div>
+                </div>
 
-                  {/* Right: 대화형 카메라 연출 시각화 */}
-                  <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
-                      <IconWand size={14} style={{ color: "var(--accent)" }} />
-                      카메라 무브먼트 궤적 뷰어 (Interactive)
-                    </div>
-
-                    {/* 무브먼트 전환 칩 */}
+                <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
+                  <h4 style={{ margin: "0 0 12px 0", fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
+                    <IconLayers size={14} style={{ color: "var(--accent)" }} />
+                    도구와 파일
+                  </h4>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+                    <MetricMini label="Files" value={agentFiles.length} />
+                    <MetricMini label="MCP" value={agent?.mcpServers?.length ?? 0} />
+                    <MetricMini label="Memory" value={memoryParsed.decisions.length + memoryParsed.gotchas.length} />
+                    <MetricMini label="Open Q" value={memoryParsed.openQuestions.length} />
+                  </div>
+                  {(agent?.mcpServers?.length ?? 0) > 0 ? (
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                      {(["orbit", "crane", "dolly-zoom", "pan-tilt"] as const).map((tech) => {
-                        const active = selectedTechnique === tech;
-                        const labels = {
-                          orbit: "Orbit (공전)",
-                          crane: "Crane (상승/하강)",
-                          "dolly-zoom": "Dolly Zoom",
-                          "pan-tilt": "Pan/Tilt (패닝)"
-                        };
-                        return (
-                          <button
-                            key={tech}
-                            onClick={() => setSelectedTechnique(tech)}
-                            style={{
-                              fontSize: 10.5,
-                              padding: "4px 8px",
-                              borderRadius: 6,
-                              background: active ? "var(--accent)" : "var(--paper-2)",
-                              color: active ? "#fff" : "var(--ink-soft)",
-                              border: active ? "1px solid var(--accent)" : "1px solid var(--paper-edge)",
-                              cursor: "pointer"
-                            }}
-                          >
-                            {labels[tech]}
-                          </button>
-                        );
-                      })}
+                      {agent!.mcpServers.map((server) => (
+                        <span key={server} style={{ fontSize: 11, padding: "3px 7px", borderRadius: 999, background: "var(--fill-1)", color: "var(--ink-soft)", border: "1px solid var(--paper-edge)" }}>
+                          {server}
+                        </span>
+                      ))}
                     </div>
-
-                    {/* SVG/CSS 애니메이션 뷰포트 */}
-                    <div style={{
-                      flex: 1,
-                      minHeight: 160,
-                      background: "var(--paper-2)",
-                      borderRadius: 8,
-                      border: "1px solid var(--paper-edge)",
-                      position: "relative",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      overflow: "hidden"
-                    }}>
-                      <style>{`
-                        @keyframes orbitMotion {
-                          from { transform: rotate(0deg); }
-                          to { transform: rotate(360deg); }
-                        }
-                        @keyframes craneMotion {
-                          0% { transform: translateY(15px) rotate(-8deg); }
-                          50% { transform: translateY(-15px) rotate(10deg); }
-                          100% { transform: translateY(15px) rotate(-8deg); }
-                        }
-                        @keyframes dollyZoomBg {
-                          0% { transform: scale(1); opacity: 0.2; }
-                          50% { transform: scale(1.6); opacity: 0.7; }
-                          100% { transform: scale(1); opacity: 0.2; }
-                        }
-                        @keyframes panTiltMotion {
-                          0% { transform: rotate(-25deg); }
-                          50% { transform: rotate(25deg); }
-                          100% { transform: rotate(-25deg); }
-                        }
-                      `}</style>
-
-                      {selectedTechnique === "orbit" && (
-                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
-                          <div style={{ width: 80, height: 80, borderRadius: "50%", border: "1.5px dashed var(--accent-soft)", position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                            {/* 피사체 */}
-                            <div style={{ width: 16, height: 16, borderRadius: "50%", background: "var(--amber-deep)" }} />
-                            {/* 공전하는 카메라 */}
-                            <div style={{
-                              position: "absolute",
-                              width: "100%",
-                              height: "100%",
-                              animation: "orbitMotion 4s linear infinite",
-                              display: "flex",
-                              alignItems: "center",
-                              left: 0,
-                              top: 0
-                            }}>
-                              <div style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--accent)", marginLeft: -4 }} />
-                            </div>
-                          </div>
-                          <span style={{ fontSize: 10, color: "var(--muted-deep)" }}>대상을 중심으로 원형 공전하는 카메라 궤적</span>
-                        </div>
-                      )}
-
-                      {selectedTechnique === "crane" && (
-                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
-                          <div style={{ width: 120, height: 80, position: "relative" }}>
-                            {/* 바닥 지표 */}
-                            <div style={{ width: "100%", height: 1.5, background: "var(--paper-edge)", position: "absolute", bottom: 10 }} />
-                            {/* 지브 크레인 암 */}
-                            <div style={{
-                              position: "absolute",
-                              left: 45,
-                              top: 10,
-                              animation: "craneMotion 4s ease-in-out infinite",
-                              display: "flex",
-                              flexDirection: "column",
-                              alignItems: "center"
-                            }}>
-                              <div style={{ width: 30, height: 15, background: "var(--accent)", borderRadius: 3, position: "relative" }}>
-                                <div style={{ width: 6, height: 10, background: "var(--accent)", position: "absolute", left: -4, top: 2 }} />
-                                <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#fff", position: "absolute", right: 4, top: 4 }} />
-                              </div>
-                              <div style={{ width: 2, height: 35, background: "var(--accent-soft)" }} />
-                            </div>
-                          </div>
-                          <span style={{ fontSize: 10, color: "var(--muted-deep)" }}>수직 상승/하강 및 틸트 다운 연출</span>
-                        </div>
-                      )}
-
-                      {selectedTechnique === "dolly-zoom" && (
-                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10, width: "100%" }}>
-                          <div style={{ width: "100%", height: 80, position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                            {/* 원근 변화 격자배경 */}
-                            <div style={{
-                              width: 140,
-                              height: 70,
-                              position: "absolute",
-                              border: "1.5px solid var(--paper-edge)",
-                              animation: "dollyZoomBg 3s ease-in-out infinite",
-                              background: "radial-gradient(circle, transparent 20%, var(--paper-edge) 80%)",
-                              borderRadius: 4
-                            }} />
-                            {/* 크기 고정 피사체 */}
-                            <div style={{ width: 24, height: 24, borderRadius: 4, background: "linear-gradient(135deg, var(--accent), var(--blue))", zIndex: 2, boxShadow: "var(--glass-shadow-lift)" }} />
-                          </div>
-                          <span style={{ fontSize: 10, color: "var(--muted-deep)" }}>피사체는 고정되고 배경의 심도 및 왜곡만 급변</span>
-                        </div>
-                      )}
-
-                      {selectedTechnique === "pan-tilt" && (
-                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
-                          <div style={{ width: 100, height: 80, position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                            {/* 카메라 Pan 시야각 */}
-                            <div style={{
-                              width: 60,
-                              height: 60,
-                              animation: "panTiltMotion 3.5s ease-in-out infinite",
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center"
-                            }}>
-                              <svg style={{ width: 50, height: 50, overflow: "visible" }}>
-                                <path d="M 25,25 L 5,5 A 20,20 0 0,1 45,5 Z" fill="rgba(90, 86, 220, 0.12)" stroke="var(--accent-soft)" strokeWidth="1" />
-                                <rect x="18" y="20" width="14" height="10" rx="1.5" fill="var(--accent)" />
-                              </svg>
-                            </div>
-                          </div>
-                          <span style={{ fontSize: 10, color: "var(--muted-deep)" }}>카메라 삼각대 축 기준 좌우 수평 회전(Pan)</span>
-                        </div>
-                      )}
-
-                    </div>
-                  </div>
-
+                  ) : (
+                    <p style={{ margin: 0, fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.5 }}>
+                      연결된 MCP 서버가 없습니다. Hub Plugin에서 필요한 도구를 설치하면 이 에이전트의 도구 레이어와 함께 확인할 수 있습니다.
+                    </p>
+                  )}
                 </div>
               </div>
 
-
+              <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
+                <h4 style={{ margin: "0 0 12px 0", fontSize: 13.5, fontWeight: 700 }}>로컬 플레이북 소스</h4>
+                {agentFiles.length === 0 ? (
+                  <div style={{ padding: 14, border: "1px dashed var(--paper-edge)", borderRadius: 10, color: "var(--muted-deep)", fontSize: 12 }}>
+                    아직 읽힌 로컬 파일이 없습니다. 설치된 에이전트를 선택하면 AGENT.md, memory.md, skill 파일을 여기에서 확인합니다.
+                  </div>
+                ) : (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+                    {agentFiles.slice(0, 12).map((file) => (
+                      <div key={file.path} style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, padding: "8px 10px", background: "var(--paper-2)", minWidth: 0 }}>
+                        <div style={{ fontSize: 12, fontWeight: 650, color: "var(--ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{file.name}</div>
+                        <div style={{ fontSize: 10.5, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginTop: 2 }}>{file.path}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -2281,7 +2530,7 @@ function AgentDetailView({
                 </div>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
                   <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>진화·활동 이력 (Events)</div>
-                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--peach-ink)" }}>{timelineEvents.length}</div>
+                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--peach-ink)" }}>{observedTimelineEvents.length}</div>
                 </div>
               </div>
 
@@ -2474,7 +2723,7 @@ function serializeMemoryMarkdown(
   gotchas: { title: string; content: string }[],
   openQuestions: { title: string; content: string }[]
 ) {
-  let md = `# Oberon Film Studio — Memory\n\n작품 간(cross-production)에 유지할 학습·결정·게이트 근거를 적는다. 작품별 휘발 상태는 여기 두지 않는다.\n\n`;
+  let md = `# Agentlas Agent Memory\n\n이 에이전트가 다음 호출에서도 유지해야 할 결정, 주의사항, 미결 과제를 적는다. 프로젝트별 휘발 상태는 해당 프로젝트 컨텍스트에 둔다.\n\n`;
   
   md += `## Decisions\n\n`;
   decisions.forEach((item) => {
@@ -2553,4 +2802,3 @@ function parsePromptSections(content: string) {
   
   return sections;
 }
-

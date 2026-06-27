@@ -40,20 +40,10 @@ import { prepareEcommerceOpsManifest } from "../ecommerce-pack/surface";
 import { createAutomation } from "../store/automations";
 import { recordAgentSurface } from "../store/agent-surfaces";
 import { getAgentApp } from "../store/agent-apps";
-import { runClaudeCode } from "../runtime/claude-code";
 import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
 import { buildRunnerEnv } from "../runtime/env-resolver";
-import { runCodex } from "../runtime/codex";
-import { runGemini } from "../runtime/gemini";
-import {
-  runAnthropicByok,
-  runGoogleByok,
-  runOpenAIByok,
-  runUpstageByok,
-  runCustomByok,
-} from "../runtime/byok";
-import { runOllama } from "../runtime/ollama";
 import { type Runner, SURFACE_INTENT_MARKER } from "../runtime/runner";
+import { pickActive, pickRunner, selectRuntimeForTargets } from "../runtime/selection";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
 import type {
   Chat,
@@ -65,42 +55,6 @@ import type {
 } from "../../shared/types";
 
 type EventSink = (ev: McpInvocationEvent) => void;
-
-const RUNNER_LABEL: Record<string, string> = {
-  "claude-code": "Claude Code CLI",
-  codex: "Codex CLI",
-  gemini: "Gemini CLI",
-  "byok:anthropic": "Anthropic API",
-  "byok:openai": "OpenAI API",
-  "byok:google": "Google API",
-  "byok:upstage": "Upstage Solar API",
-  "byok:custom": "Custom OpenAI API",
-};
-
-function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | null {
-  if (active.kind === "claude-code") return { runner: runClaudeCode, label: RUNNER_LABEL["claude-code"] };
-  if (active.kind === "codex") return { runner: runCodex, label: RUNNER_LABEL.codex };
-  if (active.kind === "gemini") return { runner: runGemini, label: RUNNER_LABEL.gemini };
-  if (active.kind === "ollama")
-    return { runner: runOllama, label: `Ollama${active.model ? ` · ${active.model}` : ""}` };
-  if (active.kind === "byok") {
-    if (active.backend === "anthropic")
-      return { runner: runAnthropicByok, label: RUNNER_LABEL["byok:anthropic"] };
-    if (active.backend === "openai")
-      return { runner: runOpenAIByok, label: RUNNER_LABEL["byok:openai"] };
-    if (active.backend === "google")
-      return { runner: runGoogleByok, label: RUNNER_LABEL["byok:google"] };
-    if (active.backend === "upstage")
-      return { runner: runUpstageByok, label: RUNNER_LABEL["byok:upstage"] };
-    if (active.backend === "custom")
-      return { runner: runCustomByok, label: RUNNER_LABEL["byok:custom"] };
-  }
-  return null;
-}
-
-function pickActive(list: RuntimeStatus[]): RuntimeStatus | null {
-  return list.find((r) => r.active) ?? list[0] ?? null;
-}
 
 function cleanPathCandidate(raw: string | undefined): string | null {
   const cleaned = raw?.trim().replace(/^`|`$/g, "").replace(/[),.;]+$/g, "");
@@ -437,8 +391,11 @@ export async function runMcpInvocation(
   const workingFolder = targetAppWorkingFolder ?? existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
 
   const runtimes = await detectRuntimes();
-  const active = pickActive(runtimes);
-  if (!active) {
+  const runtimeChoice = selectRuntimeForTargets(runtimes, [
+    { scope: "agent", targetId: agent.id },
+    { scope: "firm", targetId: chat.firmId },
+  ]);
+  if (!runtimeChoice) {
     const handled = await runLocalAgentOsIntent(
       {
         req,
@@ -457,7 +414,18 @@ export async function runMcpInvocation(
     return;
   }
 
-  const picked = pickRunner(active);
+  if (runtimeChoice.unavailableOverride) {
+    sink({
+      kind: "tool-use",
+      status:
+        locale === "ko"
+          ? `지정된 런타임(${runtimeChoice.unavailableOverride.selection.kind})을 찾지 못해 전역 활성 런타임으로 실행합니다.`
+          : `The assigned runtime (${runtimeChoice.unavailableOverride.selection.kind}) is unavailable, so Agentlas is using the global active runtime.`,
+    });
+  }
+
+  const active = runtimeChoice.active;
+  const picked = runtimeChoice.picked;
   if (!picked) {
     const handled = await runLocalAgentOsIntent(
       {
@@ -520,6 +488,7 @@ export async function runMcpInvocation(
             org,
             ceoAgent: agent,
             active,
+            runtimes,
             picked,
             workingFolder,
             mcpConfigPath,

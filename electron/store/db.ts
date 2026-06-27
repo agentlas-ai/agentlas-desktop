@@ -10,7 +10,7 @@ import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 25;
+const SCHEMA_VERSION = 26;
 
 export function initStore(): void {
   if (_db) return;
@@ -673,6 +673,30 @@ export function initStore(): void {
         PRIMARY KEY (chat_id, kind),
         FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
       );
+    `);
+  }
+
+  // ── v25 → v26: Agent/Firm/Division runtime overrides ─────
+  // Users can pin a CLI/BYOK/Ollama model per agent, for a whole firm, or for
+  // a division branch. Invocation falls back to the global active runtime when
+  // no override is available.
+  if (userVersion < 26) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_runtime_overrides (
+        scope TEXT NOT NULL CHECK(scope IN ('agent','firm','division')),
+        target_id TEXT NOT NULL,
+        label TEXT,
+        kind TEXT NOT NULL,
+        backend TEXT,
+        source TEXT,
+        model TEXT,
+        effort TEXT,
+        long_context INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(scope, target_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_runtime_overrides_updated
+        ON agent_runtime_overrides(updated_at DESC);
     `);
   }
 

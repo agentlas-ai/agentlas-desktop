@@ -196,7 +196,7 @@ function StepWelcome() {
           fontFamily: "var(--font-head)",
           fontSize: 36,
           fontWeight: 700,
-          letterSpacing: -0.5,
+          letterSpacing: 0,
         }}
       >
         {t("onb.welcome.title")}

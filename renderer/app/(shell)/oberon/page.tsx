@@ -505,7 +505,7 @@ export default function OberonPage() {
         </Link>
         <OberonBadge name="film" tone="accent" size={28} glyphSize={15} />
         <div>
-          <div style={{ fontSize: 16, fontWeight: 600, color: "var(--ob-ink)", fontFamily: "var(--font-display, serif)", letterSpacing: -0.2, lineHeight: 1 }}>
+          <div style={{ fontSize: 16, fontWeight: 600, color: "var(--ob-ink)", fontFamily: "var(--font-display, serif)", letterSpacing: 0, lineHeight: 1 }}>
             Oberon
             {production && <span style={{ color: "var(--ob-muted)", fontWeight: 400, fontStyle: "italic" }}> · {production.brief.title}</span>}
           </div>
