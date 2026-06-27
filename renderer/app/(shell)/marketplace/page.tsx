@@ -294,6 +294,11 @@ function MarketplacePage() {
                   ? "팀과 에이전트는 일을 실행하고, 플러그인은 필요할 때 설치 후보로 제안되는 도구 레이어입니다."
                   : "Teams and agents do the work. Plugins are the tool layer suggested for install when a run needs more capability."}
               </div>
+              <div className="portal-hero-sub" style={{ marginTop: 8, fontSize: 13, color: "var(--ink-soft)" }}>
+                {ko
+                  ? "설치·다운로드는 무료예요. 받은 에이전트는 내 구독(Claude · ChatGPT 등)으로 직접 돌아갑니다 — 크레딧은 클라우드에 올라간 에이전트를 직접 호출할 때만 들어요."
+                  : "Installing and downloading is free — agents run on your own subscription. Credits apply only when you call a cloud-hosted agent directly."}
+              </div>
             </div>
             <div className="portal-hero-side">
               <div className="portal-eyebrow">{ko ? "빠른 검색" : "QUICK SEARCH"}</div>

@@ -222,9 +222,8 @@ const panel: CSSProperties = {
   padding: 24,
   borderRadius: 14,
   border: "1px solid rgba(255,255,255,0.16)",
-  background: "rgba(11,15,24,0.72)",
+  background: "rgba(11,15,24,0.96)",
   boxShadow: "0 30px 100px rgba(0,0,0,0.34)",
-  backdropFilter: "blur(20px)",
 };
 
 const panelTopline: CSSProperties = {

@@ -596,7 +596,7 @@ function WorkingPanel({
     toolSteps.length > 0
       ? summary
       : locale === "ko"
-        ? `진행 로그 ${thinkingSteps.length}개`
+        ? `진행 상황 ${thinkingSteps.length}단계`
         : `${thinkingSteps.length} progress update${thinkingSteps.length > 1 ? "s" : ""}`;
 
   return (

@@ -283,7 +283,7 @@ function Highlight({
         {icon}
       </span>
       <div style={{ fontWeight: 700, fontSize: 13 }}>{title}</div>
-      <div style={{ fontSize: 12, color: "var(--muted-deep)", marginTop: 2 }}>
+      <div style={{ fontSize: 12.5, color: "var(--ink-soft)", marginTop: 2, lineHeight: 1.5 }}>
         {desc}
       </div>
     </div>
@@ -314,6 +314,8 @@ function StepBackend() {
   });
   const [draftCustomBaseUrl, setDraftCustomBaseUrl] = useState("");
   const [saving, setSaving] = useState<ByokBackend | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const [installResult, setInstallResult] = useState<{ ok: boolean; message: string; command?: string } | null>(null);
 
   async function refresh() {
     const api = ipc();
@@ -352,6 +354,22 @@ function StepBackend() {
       await refresh();
     } finally {
       setSaving(null);
+    }
+  }
+
+  async function installClaude() {
+    const api = ipc();
+    if (!api) return;
+    setInstalling(true);
+    setInstallResult(null);
+    try {
+      const r = (await api.runtime.installCli("claude-code")) as { ok: boolean; message: string; command?: string };
+      setInstallResult(r);
+      if (r?.ok) setTimeout(() => void refresh(), 2500);
+    } catch (e) {
+      setInstallResult({ ok: false, message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setInstalling(false);
     }
   }
 
@@ -397,16 +415,61 @@ function StepBackend() {
           {statuses.filter((s) => s.kind !== "byok").length === 0 ? (
             <div
               style={{
-                padding: 14,
+                padding: 16,
                 background: "var(--paper-2)",
                 border: "1px dashed var(--paper-edge)",
                 borderRadius: "var(--radius-md)",
-                fontSize: 13,
-                color: "var(--muted-deep)",
+                fontSize: 14,
+                lineHeight: 1.6,
+                color: "var(--ink-soft)",
                 marginTop: 8,
               }}
             >
               {t("onb.backend.no_cli")}
+              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                <button
+                  onClick={() => void installClaude()}
+                  disabled={installing}
+                  className="titlebar-nodrag"
+                  style={{
+                    alignSelf: "flex-start",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "10px 18px",
+                    borderRadius: 10,
+                    border: "none",
+                    background: installing ? "var(--fill-3)" : "var(--accent)",
+                    color: installing ? "var(--muted)" : "#fff",
+                    fontWeight: 600,
+                    fontSize: 13,
+                    cursor: installing ? "default" : "pointer",
+                  }}
+                >
+                  {installing ? t("onb.backend.installing") : t("onb.backend.install_claude")}
+                </button>
+                {installResult && (
+                  <div style={{ fontSize: 12.5, lineHeight: 1.6, color: installResult.ok ? "var(--green-deep)" : "var(--ink-soft)" }}>
+                    {installResult.ok ? t("onb.backend.install_ok") : t("onb.backend.install_fail")}
+                    {!installResult.ok && installResult.command && (
+                      <code
+                        style={{
+                          display: "block",
+                          marginTop: 6,
+                          padding: "8px 10px",
+                          background: "var(--fill-2)",
+                          borderRadius: 8,
+                          fontFamily: "var(--font-mono)",
+                          fontSize: 12,
+                          userSelect: "all",
+                        }}
+                      >
+                        {installResult.command}
+                      </code>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           ) : (
             <ul

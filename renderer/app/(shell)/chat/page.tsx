@@ -1533,7 +1533,17 @@ function ChatPage() {
     router.replace("/");
   }
 
-  if (!chat) return null;
+  if (!chat) {
+    if (chatId) return null; // 특정 채팅 로딩 중
+    return (
+      <div style={{ display: "flex", flex: 1, height: "100%", width: "100%", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ textAlign: "center", maxWidth: 440 }}>
+          <div style={{ fontSize: 17, fontWeight: 700, color: "var(--ink)", marginBottom: 8 }}>{t("chat.empty.title")}</div>
+          <div style={{ fontSize: 14, lineHeight: 1.6, color: "var(--ink-soft)" }}>{t("chat.empty.hint")}</div>
+        </div>
+      </div>
+    );
+  }
   const displayAgents = visibleAgents(allAgents);
   const displayAgent = agent?.visibility === "background" ? null : agent;
   const latestUserPrompt = [...messages].reverse().find((message) => message.role === "user")?.text ?? "";

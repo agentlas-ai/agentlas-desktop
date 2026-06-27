@@ -124,7 +124,7 @@ export default function EcommerceOsPage() {
         className="titlebar-drag"
         style={{ display: "flex", alignItems: "center", gap: 12, padding: "16px 32px 14px 90px", borderBottom: "1px solid var(--glass-border)", minHeight: 64, flexShrink: 0 }}
       >
-        <Link href="/apps" className="titlebar-nodrag" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 13, color: "var(--muted)", textDecoration: "none" }}>
+        <Link href="/apps" className="titlebar-nodrag" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 13, color: "var(--ink-soft)", textDecoration: "none" }}>
           <IconChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Apps
         </Link>
         <div style={{ width: 1, height: 20, background: "var(--paper-edge)", margin: "0 4px" }} />
@@ -167,7 +167,7 @@ export default function EcommerceOsPage() {
                 <button
                   onClick={pickWorkspace}
                   className="titlebar-nodrag"
-                  style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "8px 12px", borderRadius: 10, border: "1px solid var(--paper-edge)", background: "var(--fill-2)", color: workspace ? "var(--ink)" : "var(--muted)", cursor: "pointer", fontSize: 12, maxWidth: 360, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "8px 12px", borderRadius: 10, border: workspace ? "1px solid var(--paper-edge)" : "1px solid var(--accent)", background: "var(--fill-2)", color: workspace ? "var(--ink)" : "var(--accent)", fontWeight: workspace ? 400 : 600, cursor: "pointer", fontSize: 12, maxWidth: 360, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}
                 >
                   <IconFolder size={14} /> {workspace ? workspace.split("/").slice(-2).join("/") : "생성 폴더"}
                 </button>
@@ -175,9 +175,10 @@ export default function EcommerceOsPage() {
                   onClick={startScaffold}
                   disabled={!prompt.trim() || !workspace || engineMissing}
                   style={{
-                    display: "inline-flex", alignItems: "center", gap: 8, padding: "0 24px", height: 44, borderRadius: 22, border: "none",
-                    background: !prompt.trim() || !workspace || engineMissing ? "var(--fill-3)" : "var(--ink)",
-                    color: !prompt.trim() || !workspace || engineMissing ? "var(--muted)" : "#fff",
+                    display: "inline-flex", alignItems: "center", gap: 8, padding: "0 24px", height: 44, borderRadius: 22,
+                    border: !prompt.trim() || !workspace || engineMissing ? "1px solid var(--paper-edge)" : "none",
+                    background: !prompt.trim() || !workspace || engineMissing ? "var(--fill-2)" : "var(--ink)",
+                    color: !prompt.trim() || !workspace || engineMissing ? "var(--ink-soft)" : "#fff",
                     fontWeight: 600, fontSize: 14, cursor: !prompt.trim() || !workspace || engineMissing ? "not-allowed" : "pointer", transition: "all 0.2s",
                   }}
                 >

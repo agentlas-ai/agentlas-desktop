@@ -32,8 +32,8 @@ interface LogLine {
 }
 
 const MODES: { id: Mode; label: string; labelEn: string; desc: string; descEn: string; icon: typeof IconBuilding }[] = [
-  { id: "single", label: "단일 에이전트", labelEn: "Single agent", desc: "설치 가능한 워커 하나 — 메모리·스킬·자가진화", descEn: "One installable worker — memory, skills, self-evolution", icon: IconWand },
-  { id: "team", label: "멀티 에이전트 팀", labelEn: "Multi-agent team", desc: "오케스트레이터·PM·큐레이터·정책게이트·워커 조직", descEn: "Orchestrator, PM, curator, policy gate, worker org", icon: IconUsers },
+  { id: "single", label: "단일 에이전트", labelEn: "Single agent", desc: "혼자 일하는 에이전트 하나 — 기억·기술·스스로 개선", descEn: "A single agent that works on its own — memory, skills, self-improvement", icon: IconWand },
+  { id: "team", label: "멀티 에이전트 팀", labelEn: "Multi-agent team", desc: "여러 역할이 함께 일하는 에이전트 팀 (기획·실행·검수)", descEn: "A team of agents that plan, run, and review together", icon: IconUsers },
   { id: "package", label: "기존 에이전트 패키징", labelEn: "Package existing agent", desc: "외부/로컬 에이전트를 Agentlas 아키텍처로 변환·복구", descEn: "Convert/repair an external or local agent into Agentlas", icon: IconBuilding },
 ];
 
@@ -49,9 +49,9 @@ const STARTERS: { ko: string; en: string; prompt: string }[] = [
 const STAGES: { key: string; label: string; labelEn: string; sub: string; subEn: string; icon: typeof IconRoute; color: string }[] = [
   { key: "classify", label: "모드 분류", labelEn: "Classify", sub: "단일 · 팀 · 패키지 판정", subEn: "single · team · package", icon: IconRoute, color: "#4DABF7" },
   { key: "research", label: "인터뷰 & 리서치", labelEn: "Interview & research", sub: "요구사항 인터뷰 · 공식 소스 조사", subEn: "requirements interview · source research", icon: IconSearch, color: "#9775FA" },
-  { key: "generate", label: "패키지 생성", labelEn: "Generate package", sub: "AGENTS.md · 어댑터 · .agentlas 파일 작성", subEn: "AGENTS.md · adapters · .agentlas files", icon: IconWand, color: "#F783AC" },
-  { key: "verify", label: "검증", labelEn: "Verify", sub: "정적 보안 스캔 · 패키지 무결성", subEn: "static security scan · package integrity", icon: IconShield, color: "#4DD4AC" },
-  { key: "deliver", label: "배포", labelEn: "Deliver", sub: "라이브러리 설치 · Cloud/Hub 업로드", subEn: "install to library · Cloud/Hub upload", icon: IconStore, color: "#FFA94D" },
+  { key: "generate", label: "패키지 생성", labelEn: "Generate package", sub: "설치할 수 있는 패키지 파일을 만들어요", subEn: "Creates the installable package files", icon: IconWand, color: "#F783AC" },
+  { key: "verify", label: "검증", labelEn: "Verify", sub: "보안·무결성 자동 검사", subEn: "automatic security & integrity checks", icon: IconShield, color: "#4DD4AC" },
+  { key: "deliver", label: "배포", labelEn: "Deliver", sub: "내 라이브러리에 설치 · 클라우드에 올리기", subEn: "install to my library · upload to the cloud", icon: IconStore, color: "#FFA94D" },
 ];
 
 // 파이프라인 단계 매핑 — 엔진이 emit하는 "실제 신호"에 1:1로 묶는다(가짜 추정 금지).

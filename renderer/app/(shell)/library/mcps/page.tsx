@@ -284,8 +284,8 @@ export default function LibraryMcpsPage() {
                           padding: "4px 10px",
                           borderRadius: 999,
                           border: "1px solid var(--paper-edge)",
-                          background: server.enabled ? "rgba(168,217,155,0.20)" : "var(--paper-2)",
-                          color: server.enabled ? "var(--green-deep)" : "var(--muted-deep)",
+                          background: server.enabled ? "rgba(86,161,74,0.16)" : "var(--paper-2)",
+                          color: server.enabled ? "#2f6b2a" : "var(--ink-soft)",
                         }}
                       >
                         {server.enabled ? t("mcps.on") : t("mcps.off")}

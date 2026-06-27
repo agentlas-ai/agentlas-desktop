@@ -136,23 +136,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 const TOUR_STEPS = [
   {
     title: "Workspace",
-    body: "채팅으로 에이전트를 호출하고, 입력창의 Hephaestus 토글로 cloud, network, build, upload 명령을 바로 보낼 수 있습니다.",
+    body: "여기서 에이전트에게 채팅으로 일을 시켜요. 처음엔 그냥 메시지만 보내도 충분해요 — 입력창 아래 옵션(클라우드 협업 등)은 익숙해지면 써보면 돼요.",
   },
   {
     title: "Agent Forge",
-    body: "Build는 새 에이전트와 팀을 만들고, Agent 메뉴는 프롬프트, 메모리, 플레이북, 진화 로그를 확인하고 수정하는 곳입니다.",
+    body: "나만의 에이전트나 팀을 직접 만들고 다듬는 곳이에요. 개발에 익숙한 분을 위한 고급 메뉴라, 처음엔 건너뛰어도 괜찮아요.",
   },
   {
     title: "Studio",
-    body: "Apps는 실제 first-party Studio와 생성 앱을 여는 작업 화면입니다. Startup Studio는 실제 로컬 런타임으로 실행됩니다.",
+    body: "바로 쓸 수 있는 완성형 작업 앱들이에요(창업·커머스·크리에이티브 등). 하고 싶은 걸 적으면 알아서 만들어 줘요.",
   },
   {
     title: "Hub",
-    body: "Agentlas Web Hub와 같은 구조로 Team, Plugin, Agent를 찾고 설치합니다. Plugin은 로컬 MCP 도구 카탈로그와 연결됩니다.",
+    body: "남들이 만든 에이전트·팀을 찾아 설치하는 곳이에요. 설치는 무료고, 받은 에이전트는 내 구독으로 돌아가요.",
   },
   {
     title: "Environment",
-    body: "API 키와 MCP 도구 설정을 관리합니다. Hub Plugin 설치 후 필요한 Env 키도 여기에서 이어집니다.",
+    body: "AI 연결(구독·API 키)과 도구 설정을 관리하는 곳이에요. 잘 모르면 나중에 와도 괜찮아요.",
   },
 ];
 
