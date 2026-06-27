@@ -22,6 +22,10 @@ if (!fs.existsSync(main)) {
 const errors = [];
 const results = [];
 
+// 외부 리소스 로드 실패(예: 샘플 데이터가 참조하는 죽은 CDN 미디어)는 앱 버그가 아니므로 무시한다.
+// 실제 JS 오류(pageerror)와 앱 자체 콘솔 오류만 실패로 본다.
+const isResourceLoad = (t) => /Failed to load resource|net::ERR|ERR_/i.test(t);
+
 const app = await electron.launch({
   args: [main],
   cwd: ROOT,
@@ -30,7 +34,7 @@ const app = await electron.launch({
 });
 const win = await app.firstWindow({ timeout: 30000 });
 win.on("console", (m) => {
-  if (m.type() === "error") errors.push(m.text().slice(0, 240));
+  if (m.type() === "error" && !isResourceLoad(m.text())) errors.push(m.text().slice(0, 240));
 });
 win.on("pageerror", (e) => errors.push("PAGEERR " + String(e).slice(0, 240)));
 await win.waitForLoadState("domcontentloaded").catch(() => {});
