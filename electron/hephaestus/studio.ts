@@ -95,7 +95,15 @@ export async function startStudio(): Promise<StudioStartResult> {
   if (!py) return { ok: false, reason: "Python 3.9+ 를 찾을 수 없습니다." };
 
   const port = await findFreePort(4173);
-  const env = withCliPath({ ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", HEPHAESTUS_PYTHON: py.python });
+  // 데스크탑 임베드는 사용자 본인 머신에서 본인 엔진으로 돈다 → 크레딧 게이트 없이 무료 동작
+  // (런처 계약: STUDIO_CREDITS=off 또는 owner 는 free). STUDIO_CREDITS 가 이미 설정돼 있으면 존중.
+  const env = withCliPath({
+    PYTHONUTF8: "1",
+    PYTHONIOENCODING: "utf-8",
+    STUDIO_CREDITS: "off",
+    ...process.env,
+    HEPHAESTUS_PYTHON: py.python,
+  });
   const args = py.python === "py" ? ["-3", path.join("scripts", "open-studio-gui.py"), "--no-open", "--port", String(port)] : [path.join("scripts", "open-studio-gui.py"), "--no-open", "--port", String(port)];
   try {
     proc = crossSpawn(py.python, args, { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
