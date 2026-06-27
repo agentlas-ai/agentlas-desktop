@@ -517,6 +517,9 @@ export function ChatInput({
           display: "flex",
           flexDirection: "column",
           gap: 8,
+          background: "var(--paper)",
+          backdropFilter: "none",
+          WebkitBackdropFilter: "none",
         }}
       >
         {/* 이미지 미리보기 */}
