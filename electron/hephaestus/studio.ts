@@ -208,6 +208,16 @@ async function startStudioInner(): Promise<StudioStartResult> {
 
   // 쓰기 가능한 로컬 런타임 루트(userData)에서 구동 — 데이터는 전부 로컬, 블랭크 시작.
   const runRoot = ensureWritablePack(root);
+  // 페일세이프(defense-in-depth): 런처가 인증 게이트(studio_request_authorized)를 갖추지 않았으면
+  // (예: studio-pack 재provision 으로 보안 패치 유실) 무인증 /__studio/request RCE 서버를 띄우지 않는다.
+  try {
+    const launcherSrc = fs.readFileSync(path.join(runRoot, "scripts", "open-studio-gui.py"), "utf8");
+    if (!launcherSrc.includes("studio_request_authorized")) {
+      return { ok: false, reason: "스튜디오 런처에 보안 인증 게이트가 없어 시작을 거부했습니다(런처 재패치 필요)." };
+    }
+  } catch {
+    return { ok: false, reason: "스튜디오 런처를 읽을 수 없습니다." };
+  }
   // 첫 실행이면 "유효하지만 빈" board 를 시드한다. SPA 는 유효 board 를 받으면 baked 데모 샘플 대신
   // 이 빈 board 를 렌더한다(목업/외부 미디어 없음). 기존 세션 데이터가 있으면 보존(로컬 누적).
   try {
