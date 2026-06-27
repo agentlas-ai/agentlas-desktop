@@ -1,7 +1,7 @@
 // Stormbreaker 슈퍼바이저 상태.
 //
-// "앱에서 뭘 하든 Stormbreaker 가 자동 실행" — 그 전역 토글의 영속 상태를 관리한다.
-// 기본 ON. userData/hephaestus-settings.json 에 저장(다른 설정과 분리, 단순 JSON).
+// Stormbreaker는 내부 실행 규율이다. 사용자가 UI에서 켜고 끄는 기능이 아니며,
+// 이전 빌드에서 저장된 off 값이 있더라도 현재 빌드에서는 항상 활성으로 취급한다.
 import fs from "node:fs";
 import path from "node:path";
 import { app } from "electron";
@@ -41,12 +41,12 @@ function persist(next: HephaestusSettings): void {
   }
 }
 
-/** Stormbreaker 슈퍼바이저(전역 자동 실행) 활성 여부. */
+/** Stormbreaker 슈퍼바이저 활성 여부. 현재는 항상 ON. */
 export function isSupervisorEnabled(): boolean {
-  return load().supervisorEnabled;
+  return true;
 }
 
 export function setSupervisorEnabled(enabled: boolean): { enabled: boolean } {
-  persist({ ...load(), supervisorEnabled: enabled });
-  return { enabled };
+  persist({ ...load(), supervisorEnabled: true });
+  return { enabled: true };
 }

@@ -1,404 +1,194 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
-import type { CSSProperties, ReactNode } from "react";
-import Link from "next/link";
+import { useState } from "react";
+import type { CSSProperties } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
-import type {
-  CloudAgentPackageResult,
-  CloudAgentReviewMode,
-  CloudAgentSecurityFinding,
-  RuntimeStatus,
-} from "@/lib/types";
-import { IconCheck, IconFileUp, IconKey, IconShield, IconStore } from "@/components/Icon";
+import { IconCheck, IconFileUp } from "@/components/Icon";
+
+type UploadIssue = {
+  severity: string;
+  message: string;
+  file?: string;
+  remediation?: string;
+};
+
+type UploadResult = {
+  ok: boolean;
+  title: string;
+  issues: UploadIssue[];
+  detail?: string;
+};
 
 export default function CloudAgentPublishPage() {
-  const { t } = useT();
+  const { locale } = useT();
+  const ko = locale !== "en";
   const [rootPath, setRootPath] = useState("");
-  const [reviewMode, setReviewMode] = useState<CloudAgentReviewMode>("static-only");
-  const [running, setRunning] = useState<"dry-run" | "publish" | null>(null);
-  const [result, setResult] = useState<CloudAgentPackageResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [activeRuntime, setActiveRuntime] = useState<RuntimeStatus | null>(null);
-  // Hephaestus 엔진(upload.py) 직접 검수/업로드 — 데스크탑 자체 cloudAgents 경로와 별개로 실엔진 연결.
-  const [hephRunning, setHephRunning] = useState<"review" | "private-link" | "marketplace" | null>(null);
-  const [hephMsg, setHephMsg] = useState<{ ok: boolean; text: string } | null>(null);
-
-  useEffect(() => {
-    const api = ipc();
-    if (!api) return;
-    void api.runtime.detect().then((runtimes) => {
-      setActiveRuntime(runtimes.find((runtime) => runtime.active) ?? runtimes[0] ?? null);
-    });
-  }, []);
-
-  const statusLabel = useMemo(() => {
-    if (!result) return "";
-    if (result.status === "registered") return t("cloud.registered");
-    if (result.status === "blocked") return t("cloud.blocked");
-    return t("cloud.ready");
-  }, [result, t]);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<UploadResult | null>(null);
 
   async function chooseFolder() {
     const api = ipc();
-    if (!api) return;
+    if (!api || running) return;
     const dir = await api.fs.pickDirectory();
     if (dir) {
       setRootPath(dir);
       setResult(null);
-      setError(null);
     }
   }
 
-  async function run(mode: "dry-run" | "publish") {
+  async function upload() {
     const api = ipc();
+    const folder = rootPath.trim();
     if (!api) return;
-    if (!rootPath.trim()) {
-      setError(t("cloud.no_folder"));
+    if (!folder) {
+      setResult({
+        ok: false,
+        title: ko ? "폴더를 먼저 선택하세요." : "Choose a folder first.",
+        issues: [],
+      });
       return;
     }
-    setRunning(mode);
-    setError(null);
+    setRunning(true);
+    setResult(null);
     try {
-      if (mode === "publish") {
-        const session = await api.auth.getSession();
-        if (!session.signedIn) {
-          const next = await api.auth.signInWithGoogle();
-          if (!next.signedIn) {
-            setError(t("cloud.signin"));
-            return;
-          }
-        }
-      }
-      const next = await api.cloudAgents.publish({
-        rootPath: rootPath.trim(),
-        reviewMode,
-        visibility: "marketplace",
-        dryRun: mode === "dry-run",
-      });
-      setResult(next);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setRunning(null);
-    }
-  }
-
-  // Hephaestus 엔진(upload.py)으로 직접 정적 검수.
-  async function engineReview() {
-    const api = ipc();
-    if (!api || !rootPath.trim()) {
-      setError(t("cloud.no_folder"));
-      return;
-    }
-    setHephRunning("review");
-    setHephMsg(null);
-    try {
-      const res = await api.hephaestus.package({ folder: rootPath.trim(), visibility: "marketplace" });
-      const j = (res?.json ?? {}) as Record<string, unknown>;
-      const findings = (j.findings ?? j.issues ?? []) as unknown[];
-      setHephMsg({
-        ok: Boolean(res?.ok),
-        text: res?.ok
-          ? `엔진 정적 검수 완료 — ${Array.isArray(findings) ? findings.length : 0}건 발견. 업로드 준비됨.`
-          : `검수 실패: ${res?.error ?? res?.stderr?.slice(0, 300) ?? "알 수 없음"}`,
+      const res = await api.hephaestus.publish({ folder, visibility: "private-link" });
+      const issues = extractIssues(res.json);
+      const detail = [res.error, res.stderr, res.stdout].filter(Boolean).join("\n").trim();
+      setResult({
+        ok: Boolean(res.ok),
+        title: res.ok ? (ko ? "업로드 완료" : "Upload complete") : ko ? "업로드 중단" : "Upload stopped",
+        issues,
+        detail: detail ? detail.slice(0, 1600) : undefined,
       });
     } catch (err) {
-      setHephMsg({ ok: false, text: (err as Error).message });
-    } finally {
-      setHephRunning(null);
-    }
-  }
-
-  // Hephaestus 엔진(upload.py)으로 직접 업로드(Cloud=private-link / Hub=marketplace).
-  async function enginePublish(visibility: "private-link" | "marketplace") {
-    const api = ipc();
-    if (!api || !rootPath.trim()) {
-      setError(t("cloud.no_folder"));
-      return;
-    }
-    setHephRunning(visibility);
-    setHephMsg(null);
-    try {
-      const res = await api.hephaestus.publish({ folder: rootPath.trim(), visibility });
-      setHephMsg({
-        ok: Boolean(res?.ok),
-        text: res?.ok
-          ? `✓ Hephaestus 엔진 업로드 완료 (${visibility === "marketplace" ? "Hub" : "Cloud"})`
-          : `업로드 실패: ${res?.error ?? res?.stderr?.slice(0, 300) ?? "알 수 없음"}`,
+      setResult({
+        ok: false,
+        title: ko ? "업로드 실패" : "Upload failed",
+        issues: [],
+        detail: err instanceof Error ? err.message : String(err),
       });
-    } catch (err) {
-      setHephMsg({ ok: false, text: (err as Error).message });
     } finally {
-      setHephRunning(null);
+      setRunning(false);
     }
   }
 
   return (
-    <div style={{ height: "100%", overflowY: "auto", padding: "28px 32px" }}>
-      <section style={{ maxWidth: 980, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
-        <header style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+    <div style={{ height: "100%", overflowY: "auto", padding: "32px" }}>
+      <section style={{ maxWidth: 760, margin: "0 auto", display: "flex", flexDirection: "column", gap: 18 }}>
+        <header style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={iconPlate}>
             <IconFileUp size={18} />
           </div>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 22, lineHeight: 1.2 }}>
-              {t("cloud.title")}
-            </h1>
-            <p style={{ margin: "4px 0 0", color: "var(--muted-deep)", fontSize: 13 }}>
-              {t("cloud.subtitle")}
-            </p>
-          </div>
+          <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 22, lineHeight: 1.2 }}>
+            {ko ? "에이전트 업로드" : "Agent upload"}
+          </h1>
         </header>
 
         <div className="glass-thin" style={panel}>
-          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 10, alignItems: "end" }}>
-            <label style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
-              <span style={label}>{t("cloud.path")}</span>
-              <input
-                value={rootPath}
-                onChange={(event) => setRootPath(event.target.value)}
-                placeholder="/path/to/agent"
-                style={input}
-              />
-            </label>
-            <button onClick={chooseFolder} style={secondaryButton}>
-              <IconFileUp size={13} />
-              {t("cloud.pick_folder")}
-            </button>
-          </div>
-
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginTop: 14 }}>
-            <span style={label}>{t("cloud.review_mode")}</span>
-            <SegmentButton
-              active={reviewMode === "static-only"}
-              onClick={() => setReviewMode("static-only")}
-              icon={<IconShield size={13} />}
-              label={t("cloud.review.static")}
-            />
-            <SegmentButton
-              active={reviewMode === "local-runtime"}
-              onClick={() => setReviewMode("local-runtime")}
-              icon={<IconKey size={13} />}
-              label={t("cloud.review.local")}
-            />
-            <span style={{ color: "var(--muted-deep)", fontSize: 12, marginLeft: "auto" }}>
-              {reviewMode === "local-runtime"
-                ? `${t("cloud.cost.submitter")}${activeRuntime ? ` · ${runtimeLabel(activeRuntime)}` : ""}`
-                : t("cloud.cost.none")}
+          <button onClick={chooseFolder} disabled={running} style={folderPicker}>
+            <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "left" }}>
+              {rootPath || (ko ? "업로드할 에이전트 폴더 선택" : "Choose an agent folder")}
             </span>
-          </div>
+            <IconFileUp size={14} />
+          </button>
 
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-            <button
-              onClick={() => void run("dry-run")}
-              disabled={running !== null}
-              style={secondaryButton}
-            >
-              <IconShield size={13} />
-              {running === "dry-run" ? "..." : t("cloud.dry_run")}
-            </button>
-            <button
-              onClick={() => void run("publish")}
-              disabled={running !== null}
-              style={primaryButton}
-            >
-              <IconStore size={13} />
-              {running === "publish" ? "..." : t("cloud.publish")}
-            </button>
-          </div>
-
-          {/* Hephaestus 엔진(upload.py) 직접 검수/업로드 — 임베딩된 오픈소스 엔진의 실제 패키징·보안·publish */}
-          <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--paper-edge)" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-              <IconShield size={13} style={{ color: "var(--accent)" }} />
-              <span style={{ ...label, marginBottom: 0 }}>Hephaestus 엔진 직접 검수·업로드 (고급)</span>
-            </div>
-            <p style={{ margin: "0 0 10px", fontSize: 11.5, color: "var(--muted-deep)", lineHeight: 1.5 }}>
-              위쪽 등록은 데스크탑 표준 경로입니다. 아래는 임베딩된 엔진(upload.py)으로 직접 패키징·보안 스캔·게시하는 고급 경로 —
-              Cloud(비공개 링크) / Hub(공개 마켓플레이스)를 명시적으로 선택합니다.
-            </p>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button onClick={() => void engineReview()} disabled={hephRunning !== null || !rootPath.trim()} style={secondaryButton}>
-                <IconShield size={13} />
-                {hephRunning === "review" ? "검수 중…" : "엔진 정적 검수"}
-              </button>
-              <button onClick={() => void enginePublish("private-link")} disabled={hephRunning !== null || !rootPath.trim()} style={secondaryButton}>
-                <IconFileUp size={13} />
-                {hephRunning === "private-link" ? "업로드 중…" : "엔진 Cloud 업로드(비공개)"}
-              </button>
-              <button onClick={() => void enginePublish("marketplace")} disabled={hephRunning !== null || !rootPath.trim()} style={primaryButton}>
-                <IconStore size={13} />
-                {hephRunning === "marketplace" ? "업로드 중…" : "엔진 Hub 업로드(공개)"}
-              </button>
-            </div>
-            {hephMsg && (
-              <div
-                style={{
-                  ...notice,
-                  marginTop: 10,
-                  borderColor: hephMsg.ok ? "rgba(12,166,120,0.34)" : "rgba(201,58,58,0.34)",
-                  color: hephMsg.ok ? "var(--green-deep)" : "var(--red-deep)",
-                }}
-              >
-                {hephMsg.text}
-              </div>
-            )}
-          </div>
+          <button onClick={() => void upload()} disabled={running || !rootPath.trim()} style={{ ...uploadButton, opacity: running || !rootPath.trim() ? 0.55 : 1 }}>
+            <IconFileUp size={15} />
+            {running ? (ko ? "검사 및 업로드 중..." : "Checking and uploading...") : ko ? "업로드" : "Upload"}
+          </button>
         </div>
 
-        {error && (
-          <div style={{ ...notice, borderColor: "rgba(201,58,58,0.34)", color: "var(--red-deep)" }}>
-            {error}
-          </div>
-        )}
-
         {result && (
-          <div className="glass-thin" style={panel}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <div style={{ ...iconPlate, color: result.status === "blocked" ? "var(--red-deep)" : "var(--green-deep)" }}>
-                <IconCheck size={17} />
-              </div>
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontSize: 12, color: "var(--muted-deep)", textTransform: "uppercase", fontFamily: "var(--font-mono)" }}>
-                  {t("cloud.result")}
-                </div>
-                <h2 style={{ margin: "2px 0 0", fontSize: 17, fontFamily: "var(--font-head)" }}>
-                  {statusLabel}
-                </h2>
-              </div>
-              {result.registration?.marketplaceUrl && (
-                <a href={result.registration.marketplaceUrl} target="_blank" rel="noreferrer" style={secondaryButton}>
-                  <IconStore size={13} />
-                  {t("cloud.open_market")}
-                </a>
-              )}
-              {!result.registration?.marketplaceUrl && result.status === "registered" && (
-                <Link href="/marketplace?tab=agents" style={secondaryButton}>
-                  <IconStore size={13} />
-                  {t("cloud.open_market")}
-                </Link>
-              )}
-            </div>
-
-            <div style={metricsGrid}>
-              <Metric label={t("cloud.status")} value={result.status} />
-              <Metric label={t("cloud.package")} value={result.manifest.slug} />
-              <Metric label={t("cloud.files")} value={`${result.manifest.includedFileCount}/${result.manifest.fileCount}`} />
-              <Metric label={t("cloud.hash")} value={result.manifest.packageHash.slice(0, 16)} mono />
+          <section className="glass-thin" style={panel}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ ...statusIcon, color: result.ok ? "var(--green-deep)" : "var(--red-deep)" }}>
+                {result.ok ? <IconCheck size={17} /> : "!"}
+              </span>
+              <h2 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 16 }}>
+                {result.title}
+              </h2>
             </div>
 
             <div style={{ marginTop: 14 }}>
-              <div style={label}>{t("cloud.findings")}</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
-                {result.review.findings.length === 0 ? (
-                  <div style={notice}>{t("cloud.no_findings")}</div>
-                ) : (
-                  result.review.findings.map((finding) => (
-                    <FindingRow key={finding.id} finding={finding} />
-                  ))
-                )}
-              </div>
+              {result.issues.length === 0 ? (
+                <div style={notice}>{result.ok ? (ko ? "문제 없음" : "No issues found") : (ko ? "검사 결과가 비어 있습니다." : "No review details returned.")}</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {result.issues.map((issue, index) => (
+                    <IssueRow key={`${issue.severity}-${index}`} issue={issue} />
+                  ))}
+                </div>
+              )}
             </div>
-          </div>
+
+            {result.detail && (
+              <pre style={detailBox}>{result.detail}</pre>
+            )}
+          </section>
         )}
       </section>
     </div>
   );
 }
 
-function SegmentButton({
-  active,
-  onClick,
-  icon,
-  label,
-}: {
-  active: boolean;
-  onClick: () => void;
-  icon: ReactNode;
-  label: string;
-}) {
+function IssueRow({ issue }: { issue: UploadIssue }) {
   return (
-    <button
-      onClick={onClick}
-      style={{
-        ...secondaryButton,
-        background: active ? "var(--fill-1)" : "var(--paper)",
-        borderColor: active ? "var(--accent)" : "var(--paper-edge)",
-        color: active ? "var(--accent)" : "var(--ink-soft)",
-      }}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
-
-function Metric({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div style={{ padding: 10, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-sm)", background: "var(--paper)" }}>
-      <div style={{ fontSize: 10, color: "var(--muted-deep)", textTransform: "uppercase", fontFamily: "var(--font-mono)" }}>
-        {label}
-      </div>
-      <div
-        style={{
-          marginTop: 3,
-          fontSize: 13,
-          color: "var(--ink)",
-          fontFamily: mono ? "var(--font-mono)" : "var(--font-body)",
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-        }}
-      >
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function FindingRow({ finding }: { finding: CloudAgentSecurityFinding }) {
-  return (
-    <div style={{ display: "flex", gap: 10, padding: 10, borderRadius: "var(--radius-sm)", border: "1px solid var(--paper-edge)", background: "var(--paper)" }}>
-      <span style={{ ...severityDot(finding.severity), flexShrink: 0 }} />
+    <div style={issueRow}>
+      <span style={severityDot(issue.severity)} />
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "baseline", minWidth: 0 }}>
-          <span style={{ fontSize: 12, fontWeight: 700 }}>{finding.severity}</span>
-          {finding.file && (
-            <span style={{ fontSize: 11, color: "var(--muted-deep)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {finding.file}
-            </span>
-          )}
+          <strong style={{ fontSize: 12, textTransform: "uppercase" }}>{issue.severity}</strong>
+          {issue.file && <span style={issueFile}>{issue.file}</span>}
         </div>
-        <div style={{ fontSize: 12.5, color: "var(--ink-soft)", marginTop: 2 }}>{finding.message}</div>
-        {finding.remediation && (
-          <div style={{ fontSize: 11.5, color: "var(--muted-deep)", marginTop: 4 }}>{finding.remediation}</div>
-        )}
+        <div style={{ marginTop: 3, fontSize: 13, color: "var(--ink-soft)", lineHeight: 1.45 }}>{issue.message}</div>
+        {issue.remediation && <div style={{ marginTop: 4, fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.45 }}>{issue.remediation}</div>}
       </div>
     </div>
   );
 }
 
-function runtimeLabel(status: RuntimeStatus): string {
-  if (status.kind === "byok") return `BYOK · ${status.backend}${status.model ? ` · ${status.model}` : ""}`;
-  if (status.kind === "ollama") return `Ollama${status.model ? ` · ${status.model}` : ""}`;
-  return status.kind;
+function extractIssues(json: unknown): UploadIssue[] {
+  const root = isRecord(json) ? json : {};
+  const candidates = [
+    root.findings,
+    root.issues,
+    isRecord(root.review) ? root.review.findings : null,
+    isRecord(root.security) ? root.security.findings : null,
+    isRecord(root.report) ? root.report.findings : null,
+  ];
+  const rows = candidates.flatMap((item) => (Array.isArray(item) ? item : []));
+  return rows.map((row, index) => {
+    const item = isRecord(row) ? row : {};
+    return {
+      severity: String(item.severity ?? item.level ?? "info"),
+      message: String(item.message ?? item.title ?? item.detail ?? row ?? `Issue ${index + 1}`),
+      file: typeof item.file === "string" ? item.file : typeof item.path === "string" ? item.path : undefined,
+      remediation: typeof item.remediation === "string" ? item.remediation : undefined,
+    };
+  });
 }
 
-function severityDot(severity: CloudAgentSecurityFinding["severity"]): CSSProperties {
-  const color =
-    severity === "blocker" || severity === "high"
-      ? "var(--red-deep)"
-      : severity === "medium"
-        ? "var(--amber-deep)"
-        : "var(--green-deep)";
-  return { width: 8, height: 8, borderRadius: "50%", background: color, marginTop: 6 };
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function severityDot(severity: string): CSSProperties {
+  const s = severity.toLowerCase();
+  const color = s.includes("block") || s.includes("high") || s.includes("error")
+    ? "var(--red-deep)"
+    : s.includes("medium") || s.includes("warn")
+      ? "var(--amber-deep)"
+      : "var(--green-deep)";
+  return { width: 8, height: 8, borderRadius: "50%", background: color, marginTop: 6, flexShrink: 0 };
 }
 
 const panel: CSSProperties = {
   padding: 16,
   borderRadius: "var(--radius-lg)",
   border: "1px solid var(--glass-border)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 12,
 };
 
 const iconPlate: CSSProperties = {
@@ -414,60 +204,85 @@ const iconPlate: CSSProperties = {
   color: "var(--accent)",
 };
 
-const label: CSSProperties = {
-  fontSize: 11,
-  fontFamily: "var(--font-mono)",
-  textTransform: "uppercase",
-  letterSpacing: 0.5,
-  color: "var(--muted-deep)",
-};
-
-const input: CSSProperties = {
-  width: "100%",
+const folderPicker: CSSProperties = {
+  minHeight: 46,
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  padding: "0 13px",
+  borderRadius: "var(--radius-md)",
   border: "1px solid var(--paper-edge)",
-  borderRadius: "var(--radius-sm)",
-  padding: "9px 10px",
   background: "var(--paper)",
-  color: "var(--ink)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 12,
-  outline: "none",
+  color: "var(--ink-soft)",
+  fontSize: 13,
+  cursor: "pointer",
 };
 
-const secondaryButton: CSSProperties = {
+const uploadButton: CSSProperties = {
+  height: 44,
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
-  gap: 6,
-  padding: "8px 12px",
-  borderRadius: "var(--radius-sm)",
-  border: "1px solid var(--paper-edge)",
-  background: "var(--paper)",
-  color: "var(--ink-soft)",
-  fontSize: 12.5,
-  fontWeight: 600,
-  textDecoration: "none",
-  boxShadow: "var(--neu-raised)",
+  gap: 8,
+  borderRadius: "var(--radius-md)",
+  border: "none",
+  background: "var(--ink)",
+  color: "var(--paper)",
+  fontSize: 14,
+  fontWeight: 800,
+  cursor: "pointer",
 };
 
-const primaryButton: CSSProperties = {
-  ...secondaryButton,
-  color: "var(--ink)",
-  boxShadow: "var(--neu-raised-strong)",
+const statusIcon: CSSProperties = {
+  width: 28,
+  height: 28,
+  borderRadius: 8,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  background: "var(--paper)",
+  border: "1px solid var(--paper-edge)",
+  fontWeight: 900,
 };
 
 const notice: CSSProperties = {
-  padding: "9px 11px",
+  padding: "10px 12px",
+  borderRadius: "var(--radius-md)",
   border: "1px solid var(--paper-edge)",
-  borderRadius: "var(--radius-sm)",
   background: "var(--paper)",
   color: "var(--ink-soft)",
-  fontSize: 12.5,
+  fontSize: 13,
 };
 
-const metricsGrid: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
-  gap: 8,
-  marginTop: 16,
+const issueRow: CSSProperties = {
+  display: "flex",
+  gap: 10,
+  padding: 12,
+  borderRadius: "var(--radius-md)",
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+};
+
+const issueFile: CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontSize: 11,
+  color: "var(--muted-deep)",
+  fontFamily: "var(--font-mono)",
+};
+
+const detailBox: CSSProperties = {
+  margin: "12px 0 0",
+  maxHeight: 220,
+  overflow: "auto",
+  padding: 12,
+  borderRadius: "var(--radius-md)",
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+  color: "var(--muted-deep)",
+  fontSize: 11,
+  lineHeight: 1.5,
+  whiteSpace: "pre-wrap",
 };

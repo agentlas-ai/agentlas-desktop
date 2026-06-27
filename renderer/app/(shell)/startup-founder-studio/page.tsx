@@ -1,122 +1,457 @@
 "use client";
-// Startup Founder Studio — 패키지의 실제 GUI 를 앱 안에서 그대로 구동.
-// 새로 그리지 않는다. electron 이 패키지 자체 런처(open-studio-gui.py)를 spawn 해 실제 SPA 를
-// 로컬 서빙하고, 이 페이지는 그 URL 을 <iframe> 으로 띄운다 → 진짜 스튜디오가 앱 안에서 돈다.
+// Startup opens the real Hub cloud package GUI. The renderer only hosts the launcher URL.
 import { useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import Link from "next/link";
-import { IconChevronRight, IconRoute, IconRefresh } from "@/components/Icon";
+import { IconChevronRight, IconRefresh } from "@/components/Icon";
+import { StudioBotLogo } from "@/components/StudioBotLogo";
 import { ipc } from "@/lib/ipc";
 
 type Phase = "starting" | "ready" | "error";
 
+const IDEA_KEY = "agentlas.startupFounder.idea";
+const STARTUP_NAME_KO = "스타트업 창업자 스튜디오";
+const STARTUP_NAME_EN = "Startup Founder Studio";
+const STARTUP_SLUG = "agentlas-startup-founder-studio";
+
 export default function StartupFounderStudioPage() {
   const [phase, setPhase] = useState<Phase>("starting");
   const [url, setUrl] = useState<string | null>(null);
-  const [reason, setReason] = useState<string>("");
+  const [reason, setReason] = useState("");
+  const [ideaPromptOpen, setIdeaPromptOpen] = useState(false);
+  const [ideaDraft, setIdeaDraft] = useState("");
   const startedRef = useRef(false);
-
   const loadWatchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const start = async () => {
+  const start = async (idea?: string) => {
+    const trimmedIdea = idea?.trim() ?? "";
+    const api = ipc();
     setPhase("starting");
     setReason("");
+    setIdeaPromptOpen(false);
     if (loadWatchRef.current) clearTimeout(loadWatchRef.current);
-    // 런처 시작이 멈춰도 무한 대기하지 않게 타임아웃을 건다.
     const timeout = new Promise<{ ok: false; reason: string }>((resolve) =>
-      setTimeout(() => resolve({ ok: false, reason: "스튜디오 시작이 지연됩니다(시간 초과). 새로고침으로 다시 시도하세요." }), 25_000),
+      setTimeout(() => resolve({ ok: false, reason: "스튜디오 서버 시작 시간 초과." }), 25_000),
     );
+
     let res: { ok: boolean; url?: string; reason?: string } | undefined;
     try {
-      res = await Promise.race([ipc()?.hephaestus.startStudio() ?? Promise.resolve(undefined), timeout]);
+      res = await Promise.race([api?.hephaestus.startStudio() ?? Promise.resolve(undefined), timeout]);
     } catch (e) {
       res = { ok: false, reason: (e as Error).message };
     }
+
     if (res?.ok && res.url) {
-      setUrl(res.url + "?t=" + Date.now());
+      const params = new URLSearchParams({ t: String(Date.now()) });
+      if (trimmedIdea) {
+        params.set("idea", trimmedIdea);
+        params.set("newIdea", "1");
+      }
+      setUrl(`${res.url}?${params.toString()}`);
       setPhase("ready");
-      // iframe 로드 워치독 — 일정 시간 내 onLoad 가 없으면(서버 죽음/블랭크) 에러로 전환.
       loadWatchRef.current = setTimeout(() => {
-        setReason("스튜디오 화면을 불러오지 못했습니다. 다시 시도하세요.");
+        setReason("스튜디오 화면을 불러오지 못했습니다.");
         setPhase("error");
       }, 15_000);
-    } else {
-      setReason(res?.reason ?? "스튜디오를 시작할 수 없습니다.");
-      setPhase("error");
+      return;
     }
+
+    setReason(res?.reason ?? "스튜디오를 시작할 수 없습니다.");
+    setPhase("error");
   };
 
   const onFrameLoad = () => {
     if (loadWatchRef.current) clearTimeout(loadWatchRef.current);
     loadWatchRef.current = null;
   };
+
   const onFrameError = () => {
     if (loadWatchRef.current) clearTimeout(loadWatchRef.current);
-    setReason("스튜디오 화면 로드 실패. 다시 시도하세요.");
+    setReason("스튜디오 화면 로드 실패.");
     setPhase("error");
   };
 
   useEffect(() => {
     if (startedRef.current) return;
     startedRef.current = true;
-    void start();
-    // 페이지를 벗어나도 런처는 유지(재방문 빠름) — 앱 종료 시 electron 이 정리.
+    let savedIdea = "";
+    try {
+      savedIdea = window.sessionStorage.getItem(IDEA_KEY) ?? "";
+    } catch {
+      // ignore
+    }
+    if (savedIdea && savedIdea !== "__skip__") setIdeaDraft(savedIdea);
+    void start(savedIdea === "__skip__" ? "" : savedIdea);
     return () => {
       if (loadWatchRef.current) clearTimeout(loadWatchRef.current);
     };
   }, []);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "var(--paper)" }}>
-      <header
-        className="titlebar-drag"
-        style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 24px 12px 90px", borderBottom: "1px solid var(--glass-border)", minHeight: 56, flexShrink: 0 }}
-      >
-        <Link href="/apps" className="titlebar-nodrag" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 13, color: "var(--muted)", textDecoration: "none" }}>
+    <div style={shell}>
+      <header className="titlebar-drag" style={header}>
+        <Link href="/apps" className="titlebar-nodrag" style={backLink}>
           <IconChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Apps
         </Link>
-        <div style={{ width: 1, height: 18, background: "var(--paper-edge)", margin: "0 2px" }} />
-        <div style={{ width: 28, height: 28, borderRadius: 7, background: "linear-gradient(135deg, #845EF7, #5C7CFA)", display: "inline-flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>
-          <IconRoute size={15} />
+        <div style={divider} />
+        <StudioBotLogo size={32} />
+        <div style={{ minWidth: 0 }}>
+          <h1 style={title}>{STARTUP_NAME_KO}</h1>
+          <p style={subtitle}>{STARTUP_NAME_EN}</p>
         </div>
-        <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 16, color: "var(--ink)" }}>Startup Founder Studio</h1>
-        <button
-          onClick={() => void start()}
-          disabled={phase === "starting"}
-          className="titlebar-nodrag"
-          title="다시 시작"
-          style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--muted-deep)", background: "var(--fill-1)", border: "1px solid var(--paper-edge)", borderRadius: 8, padding: "5px 10px", cursor: phase === "starting" ? "default" : "pointer", opacity: phase === "starting" ? 0.5 : 1 }}
-        >
+        <button onClick={() => setIdeaPromptOpen(true)} className="titlebar-nodrag" style={{ ...ghostButton, marginLeft: "auto" }}>
+          새 아이디어
+        </button>
+        <button onClick={() => void start()} disabled={phase === "starting"} className="titlebar-nodrag" title="다시 시작" style={{ ...ghostButton, opacity: phase === "starting" ? 0.52 : 1 }}>
           <IconRefresh size={13} /> 새로고침
         </button>
       </header>
 
-      <div style={{ flex: 1, minHeight: 0, position: "relative", background: "#0f0f12" }}>
-        {phase === "ready" && url ? (
+      <div style={stage}>
+        {ideaPromptOpen ? (
+          <IdeaStartOverlay
+            value={ideaDraft}
+            onChange={setIdeaDraft}
+            onSubmit={() => {
+              try {
+                window.sessionStorage.setItem(IDEA_KEY, ideaDraft.trim() || "__skip__");
+              } catch {
+                // ignore
+              }
+              void start(ideaDraft);
+            }}
+            onSkip={() => {
+              try {
+                window.sessionStorage.setItem(IDEA_KEY, "__skip__");
+              } catch {
+                // ignore
+              }
+              void start();
+            }}
+          />
+        ) : phase === "ready" && url ? (
           <iframe
             key={url}
             src={url}
-            title="Startup Founder Studio"
+            title={STARTUP_NAME_EN}
             onLoad={onFrameLoad}
             onError={onFrameError}
-            style={{ width: "100%", height: "100%", border: "none", display: "block" }}
+            style={iframe}
             allow="clipboard-write; clipboard-read"
           />
-        ) : phase === "starting" ? (
-          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, color: "#9aa", background: "#0f0f12" }}>
-            <div className="sfs-spin" style={{ width: 34, height: 34, borderRadius: "50%", border: "3px solid rgba(255,255,255,0.15)", borderTopColor: "#845EF7" }} />
-            <div style={{ fontSize: 13.5 }}>스튜디오 엔진을 시작하는 중…</div>
-          </div>
         ) : (
-          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, color: "#bbb", background: "#0f0f12", padding: 32, textAlign: "center" }}>
-            <div style={{ fontSize: 15, fontWeight: 600, color: "#e9e9ee" }}>스튜디오를 시작할 수 없습니다</div>
-            <div style={{ fontSize: 13, color: "#9aa", maxWidth: 460, lineHeight: 1.6 }}>{reason}</div>
-            <button onClick={() => void start()} disabled={phase !== "error"} style={{ marginTop: 6, padding: "9px 20px", borderRadius: 10, border: "none", background: "#845EF7", color: "#fff", fontSize: 13, fontWeight: 600, cursor: phase !== "error" ? "default" : "pointer", opacity: phase !== "error" ? 0.6 : 1 }}>
-              다시 시도
-            </button>
-          </div>
+          <LaunchState phase={phase} reason={reason} onRetry={() => void start()} />
         )}
       </div>
-      <style dangerouslySetInnerHTML={{ __html: `@keyframes sfsSpin{to{transform:rotate(360deg)}} .sfs-spin{animation:sfsSpin .8s linear infinite}` }} />
+      <style dangerouslySetInnerHTML={{ __html: "@keyframes sfsSpin{to{transform:rotate(360deg)}} .sfs-spin{animation:sfsSpin .8s linear infinite}" }} />
     </div>
   );
 }
+
+function VideoBackdrop() {
+  return (
+    <>
+      <video src="/apps/startup-founder-studio.mp4" poster="/apps/startup-founder-studio.png" autoPlay muted loop playsInline style={video} />
+      <div style={shade} />
+    </>
+  );
+}
+
+function LaunchState({ phase, reason, onRetry }: { phase: Phase; reason: string; onRetry: () => void }) {
+  return (
+    <div style={stateLayer}>
+      <VideoBackdrop />
+      <div style={statePanel}>
+        <StudioBotLogo size={54} />
+        <div>
+          <div style={stateName}>{STARTUP_NAME_KO}</div>
+          <div style={stateSlug}>{STARTUP_SLUG}</div>
+        </div>
+        {phase === "starting" ? (
+          <>
+            <div className="sfs-spin" style={spinner} />
+            <div style={stateText}>GUI 런처를 시작하는 중</div>
+          </>
+        ) : (
+          <>
+            <div style={stateText}>GUI 런처를 시작할 수 없습니다</div>
+            <div style={errorText}>{reason}</div>
+            <button onClick={onRetry} style={solidButton}>
+              다시 시도
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function IdeaStartOverlay({
+  value,
+  onChange,
+  onSubmit,
+  onSkip,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  onSkip: () => void;
+}) {
+  return (
+    <div style={stateLayer}>
+      <VideoBackdrop />
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSubmit();
+        }}
+        style={ideaPanel}
+      >
+        <StudioBotLogo size={44} />
+        <div>
+          <h2 style={ideaTitle}>{STARTUP_NAME_KO}</h2>
+          <p style={ideaSlug}>{STARTUP_SLUG}</p>
+        </div>
+        <input
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          autoFocus
+          placeholder="창업 아이디어 한 줄"
+          style={ideaInput}
+        />
+        <div style={ideaActions}>
+          <button type="button" onClick={onSkip} style={outlineButton}>
+            건너뛰기
+          </button>
+          <button type="submit" style={solidButton}>
+            시작
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+const shell: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  height: "100%",
+  background: "#07090f",
+};
+
+const header: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  padding: "12px 24px 12px 90px",
+  borderBottom: "1px solid rgba(255,255,255,0.1)",
+  minHeight: 58,
+  flexShrink: 0,
+  background: "#0a0d14",
+  color: "#f7f8ff",
+};
+
+const backLink: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  fontSize: 13,
+  color: "rgba(247,248,255,0.68)",
+  textDecoration: "none",
+};
+
+const divider: CSSProperties = {
+  width: 1,
+  height: 20,
+  background: "rgba(255,255,255,0.14)",
+};
+
+const title: CSSProperties = {
+  margin: 0,
+  fontFamily: "var(--font-head)",
+  fontSize: 16,
+  color: "#ffffff",
+  whiteSpace: "nowrap",
+};
+
+const subtitle: CSSProperties = {
+  margin: "2px 0 0",
+  fontSize: 11.5,
+  color: "rgba(247,248,255,0.54)",
+};
+
+const ghostButton: CSSProperties = {
+  height: 32,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  fontSize: 12,
+  color: "#f7f8ff",
+  background: "rgba(255,255,255,0.08)",
+  border: "1px solid rgba(255,255,255,0.14)",
+  borderRadius: 7,
+  padding: "0 11px",
+  cursor: "pointer",
+};
+
+const stage: CSSProperties = {
+  flex: 1,
+  minHeight: 0,
+  position: "relative",
+  background: "#07090f",
+};
+
+const iframe: CSSProperties = {
+  width: "100%",
+  height: "100%",
+  border: "none",
+  display: "block",
+  background: "#07090f",
+};
+
+const stateLayer: CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  display: "grid",
+  placeItems: "center",
+  overflow: "hidden",
+  padding: 28,
+};
+
+const video: CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  width: "100%",
+  height: "100%",
+  objectFit: "cover",
+  filter: "saturate(1.04) contrast(1.06)",
+};
+
+const shade: CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  background:
+    "linear-gradient(90deg, rgba(5,7,12,0.94), rgba(5,7,12,0.66) 48%, rgba(5,7,12,0.88)), linear-gradient(0deg, rgba(5,7,12,0.94), rgba(5,7,12,0.22) 58%, rgba(5,7,12,0.64))",
+};
+
+const statePanel: CSSProperties = {
+  position: "relative",
+  zIndex: 1,
+  width: "min(430px, 100%)",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 14,
+  padding: 24,
+  borderRadius: 14,
+  border: "1px solid rgba(255,255,255,0.16)",
+  background: "rgba(11,15,24,0.72)",
+  boxShadow: "0 28px 90px rgba(0,0,0,0.36)",
+  backdropFilter: "blur(18px)",
+  color: "#f7f8ff",
+  textAlign: "center",
+};
+
+const stateName: CSSProperties = {
+  fontSize: 18,
+  fontWeight: 820,
+  color: "#ffffff",
+};
+
+const stateSlug: CSSProperties = {
+  marginTop: 4,
+  fontSize: 11.5,
+  color: "rgba(247,248,255,0.58)",
+  fontFamily: "var(--font-mono)",
+};
+
+const spinner: CSSProperties = {
+  width: 28,
+  height: 28,
+  borderRadius: "50%",
+  border: "3px solid rgba(255,255,255,0.18)",
+  borderTopColor: "#83F7FF",
+};
+
+const stateText: CSSProperties = {
+  fontSize: 13,
+  color: "rgba(247,248,255,0.74)",
+};
+
+const errorText: CSSProperties = {
+  maxWidth: 360,
+  fontSize: 12.5,
+  lineHeight: 1.55,
+  color: "rgba(247,248,255,0.62)",
+};
+
+const ideaPanel: CSSProperties = {
+  position: "relative",
+  zIndex: 1,
+  width: "min(480px, 100%)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 14,
+  padding: 22,
+  borderRadius: 14,
+  border: "1px solid rgba(255,255,255,0.16)",
+  background: "rgba(11,15,24,0.76)",
+  boxShadow: "0 28px 90px rgba(0,0,0,0.36)",
+  backdropFilter: "blur(18px)",
+};
+
+const ideaTitle: CSSProperties = {
+  margin: 0,
+  color: "#ffffff",
+  fontFamily: "var(--font-head)",
+  fontSize: 22,
+  lineHeight: 1.2,
+};
+
+const ideaSlug: CSSProperties = {
+  margin: "5px 0 0",
+  color: "rgba(247,248,255,0.58)",
+  fontSize: 11.5,
+  fontFamily: "var(--font-mono)",
+};
+
+const ideaInput: CSSProperties = {
+  height: 46,
+  borderRadius: 9,
+  border: "1px solid rgba(255,255,255,0.18)",
+  background: "rgba(255,255,255,0.08)",
+  color: "#ffffff",
+  outline: "none",
+  padding: "0 13px",
+  fontSize: 14,
+};
+
+const ideaActions: CSSProperties = {
+  display: "flex",
+  justifyContent: "flex-end",
+  gap: 8,
+  flexWrap: "wrap",
+};
+
+const outlineButton: CSSProperties = {
+  height: 38,
+  borderRadius: 8,
+  border: "1px solid rgba(255,255,255,0.18)",
+  background: "transparent",
+  color: "rgba(247,248,255,0.74)",
+  padding: "0 14px",
+  fontSize: 13,
+  cursor: "pointer",
+};
+
+const solidButton: CSSProperties = {
+  height: 38,
+  borderRadius: 8,
+  border: "none",
+  background: "#6D91FF",
+  color: "#071122",
+  padding: "0 16px",
+  fontSize: 13,
+  fontWeight: 820,
+  cursor: "pointer",
+};

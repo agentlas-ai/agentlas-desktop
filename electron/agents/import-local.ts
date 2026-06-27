@@ -175,7 +175,7 @@ function readFirst(dir: string, candidates: string[], maxChars = 8000): string {
 
 /** manifest.md / 첫 마크다운 제목 / 폴더명에서 표시 이름 추출. */
 function readName(dir: string): string {
-  const manifest = readFirst(dir, ["manifest.md", "AGENT.md", "CLAUDE.md", "README.md"], 2000);
+  const manifest = readFirst(dir, ["manifest.md", "TEAM.md", "AGENT.md", "CLAUDE.md", "README.md"], 2000);
   const m = manifest.match(/^#\s+(.+)$/m);
   if (m) {
     return m[1].replace(/\(.*?\)/g, "").trim().slice(0, 60) || path.basename(dir);
@@ -184,7 +184,7 @@ function readName(dir: string): string {
 }
 
 function readTagline(dir: string): string {
-  const text = readFirst(dir, ["README.md", "soul.md", "AGENT.md"], 2000);
+  const text = readFirst(dir, ["README.md", "TEAM.md", "soul.md", "AGENT.md"], 2000);
   // 첫 번째 헤더가 아닌 비어있지 않은 줄
   for (const line of text.split("\n")) {
     const t = line.trim();

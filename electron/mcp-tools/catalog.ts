@@ -201,6 +201,22 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
 
   // ── 웹 / 컴퓨터 유즈 ──────────────────────────────────────
   {
+    id: "hephaestus-network",
+    name: "Hephaestus Network",
+    nameEn: "Hephaestus Network",
+    description: "Agentlas Hub/Cloud 에이전트 라우팅, 런타임 번들 준비, Hub 플러그인 해석",
+    descriptionEn: "Route Agentlas Hub/Cloud agents, prepare runtime bundles, resolve Hub plugin needs",
+    category: "dev",
+    transport: "stdio",
+    command: "~/.agentlas/runtime/current/bin/hephaestus",
+    args: ["mcp", "serve"],
+    trust: "official",
+    docsUrl: "https://github.com/agentlas-ai/hephaestus",
+    brandColor: "#111827",
+    mark: "HN",
+    envRequirements: [],
+  },
+  {
     id: "cua-driver",
     name: "CUA Driver",
     nameEn: "CUA Driver",

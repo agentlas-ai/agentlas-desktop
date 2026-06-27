@@ -2,6 +2,7 @@
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { detectRuntimes, setActiveRuntime } from "./runtime/detect";
@@ -73,7 +74,7 @@ import { resolveTeamOrg } from "./agents/org-resolver";
 import { isPublicDesktopAgent } from "./agents/policy";
 import { runMcpInvocation } from "./mcp/client";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
-import { hephaestusAvailable, hephaestusDoctor } from "./hephaestus/engine";
+import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot } from "./hephaestus/engine";
 import {
   aoGraph,
   hepNetwork,
@@ -89,7 +90,7 @@ import { confirmUpload, PathGuardError, resolveFolderArg } from "./hephaestus/pa
 import { isSupervisorEnabled, setSupervisorEnabled } from "./hephaestus/supervisor";
 import { runHephaestusBuild } from "./hephaestus/builder";
 import { startStudio, stopStudio } from "./hephaestus/studio";
-import type { HephaestusBuildEvent, HephaestusBuildRequest } from "../shared/types";
+import type { HephaestusBuildEvent, HephaestusBuildRequest, SkillCatalogEntry } from "../shared/types";
 import { checkSafely as updaterCheck, getUpdaterState, quitAndInstall as updaterInstall } from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
 import { getAuthSession, signInWithBrowser, signInWithGoogle, signOut } from "./auth";
@@ -399,6 +400,23 @@ export function registerIpcHandlers(): void {
     listDirectory(absPath, showHidden ?? false),
   );
   ipcMain.handle("fs:readTextFile", (_e, absPath: string) => readTextFilePreview(absPath));
+  // 산출물 내보내기 — 네이티브 저장 다이얼로그로 사용자가 고른 위치에 텍스트를 쓴다(lock-in 없음).
+  ipcMain.handle(
+    "fs:saveTextFile",
+    async (e, suggestedName: string, content: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }> => {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      try {
+        const res = await dialog.showSaveDialog(win ?? undefined!, {
+          defaultPath: suggestedName || "export.txt",
+        });
+        if (res.canceled || !res.filePath) return { ok: false, canceled: true };
+        fs.writeFileSync(res.filePath, content, "utf8");
+        return { ok: true, path: res.filePath };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    },
+  );
 
   // ── workspace (채팅별 working_folder) ───────────────────
   ipcMain.handle("workspace:selectFolder", async () => {
@@ -605,6 +623,44 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("agentFiles:write", (_e, agentId: string, absPath: string, content: string) =>
     writeAgentFile(agentId, absPath, content),
   );
+
+  // ── skills (주입 가능한 스킬 카탈로그 — 엔진 skills/ 디렉토리 실측) ──
+  // 하드코딩 목록이 아니라 디스크의 SKILL.md 프론트매터에서 name/description 을 읽는다.
+  // SKILL.md 가 없는 디렉토리는 카탈로그에서 제외(추측 금지, 실측 원칙).
+  ipcMain.handle("skills:listCatalog", (): SkillCatalogEntry[] => {
+    const root = hephaestusRoot();
+    if (!root) return [];
+    const skillsDir = path.join(root, "skills");
+    let dirs: string[] = [];
+    try {
+      dirs = fs
+        .readdirSync(skillsDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name);
+    } catch {
+      return [];
+    }
+    const out: SkillCatalogEntry[] = [];
+    for (const slug of dirs) {
+      const md = path.join(skillsDir, slug, "SKILL.md");
+      let name = slug;
+      let description = "";
+      try {
+        const txt = fs.readFileSync(md, "utf8");
+        const fm = txt.match(/^---\s*([\s\S]*?)\s*---/);
+        const block = fm ? fm[1] : txt.slice(0, 600);
+        const nameM = block.match(/^name:\s*["']?(.+?)["']?\s*$/m);
+        const descM = block.match(/^description:\s*["']?([\s\S]+?)["']?\s*$/m);
+        if (nameM) name = nameM[1].trim();
+        if (descM) description = descM[1].trim().replace(/\s+/g, " ");
+      } catch {
+        continue;
+      }
+      out.push({ slug, name, description });
+    }
+    out.sort((a, b) => a.slug.localeCompare(b.slug));
+    return out;
+  });
 
   // ── mcpTools (외부 MCP 툴 플러그인 — Slack/Discord/GitHub 등) ─
   ipcMain.handle("mcpTools:listCatalog", () => MCP_TOOL_CATALOG);

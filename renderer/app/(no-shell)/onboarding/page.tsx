@@ -601,37 +601,41 @@ function backendLabel(b: RuntimeBackend) {
 
 // ── Step 3: 메뉴 투어 ─────────────────────────────────────
 function StepTour() {
-  const { t } = useT();
+  const { t, locale } = useT();
+  const ko = locale === "ko";
+  // 상단 네비게이션(Dashboard/Workspace/Agent Forge/Studio/Hub/Environment)과 동일한 IA를 가르친다.
+  // 기획안: 온보딩 투어와 앱 셸 투어가 서로 다른 IA를 가르치던 불일치를 제거하고, 소유 생애주기
+  // (Build에서 만들고 → Agent에서 보유 → Workspace에서 가동)를 한 멘탈모델로 전달한다.
   const items = [
     {
-      icon: <IconChat size={18} />,
-      title: t("onb.tour.chat.title"),
-      desc: t("onb.tour.chat.desc"),
-    },
-    {
-      icon: <IconFolder size={18} />,
-      title: t("onb.tour.projects.title"),
-      desc: t("onb.tour.projects.desc"),
+      icon: <IconApps size={18} />,
+      title: ko ? "Dashboard — 내 함대 관제탑" : "Dashboard — your fleet control tower",
+      desc: ko ? "내가 소유한 일꾼과 승인 대기·키 상태를 한눈에." : "All your owned workers, pending approvals, and key status at a glance.",
     },
     {
       icon: <IconBolt size={18} />,
-      title: t("onb.tour.automations.title"),
-      desc: t("onb.tour.automations.desc"),
-    },
-    {
-      icon: <IconApps size={18} />,
-      title: t("onb.tour.library.title"),
-      desc: t("onb.tour.library.desc"),
-    },
-    {
-      icon: <IconSettings size={18} />,
-      title: t("onb.tour.settings.title"),
-      desc: t("onb.tour.settings.desc"),
+      title: ko ? "Agent Forge — 만들기(생산)" : "Agent Forge — build (produce)",
+      desc: ko ? "자연어로 에이전트·팀을 만들어 내 폴더에 떨군다." : "Describe an agent or team; it lands as files in your folder.",
     },
     {
       icon: <IconSparkles size={18} />,
-      title: t("onb.tour.shortcuts.title"),
-      desc: t("onb.tour.shortcuts.desc"),
+      title: ko ? "Agents — 보유·운영" : "Agents — own & operate",
+      desc: ko ? "소유한 일꾼을 보고 신뢰·승인·진화시킨다." : "View owned workers; trust, approve, and evolve them.",
+    },
+    {
+      icon: <IconChat size={18} />,
+      title: ko ? "Workspace — 일 시키기(가동)" : "Workspace — put them to work",
+      desc: ko ? "일꾼과 실제로 일하고 과정·비용을 통제한다." : "Actually work with them and control the process and cost.",
+    },
+    {
+      icon: <IconFolder size={18} />,
+      title: ko ? "Hub — 빌려쓰기" : "Hub — borrow",
+      desc: ko ? "검증된 남의 에이전트를 빌려와 내 것으로." : "Borrow verified agents from others and make them yours.",
+    },
+    {
+      icon: <IconSettings size={18} />,
+      title: ko ? "Environment — 내 키·구독" : "Environment — your keys & subscription",
+      desc: ko ? "내 키는 OS 키체인에. Agentlas 마진 ₩0." : "Your keys stay in the OS keychain. Agentlas margin $0.",
     },
   ];
   return (

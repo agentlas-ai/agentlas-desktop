@@ -1,8 +1,8 @@
 "use client";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import type {
@@ -15,25 +15,21 @@ import type {
   TeamBundle,
 } from "@/lib/types";
 import {
-  IconBuilding,
-  IconChat,
   IconCheck,
   IconChevronRight,
-  IconFilm,
   IconFolder,
-  IconHome,
-  IconMegaphone,
-  IconMoreHorizontal,
-  IconNetwork,
-  IconPlus,
-  IconSearch,
-  IconShoppingBag,
-  IconSparkles,
-  IconUsers,
-  IconWand,
 } from "@/components/Icon";
 
 type HubCategory = "team" | "plugin" | "agent";
+
+const TEAM_CALL_CREDITS = 10;
+const AGENT_CALL_CREDITS = 1;
+
+const C = {
+  purple: "color-mix(in oklch, #5A56DC 20%, var(--rd-surface))",
+  peach: "var(--rd-accent-2)",
+  green: "color-mix(in oklch, var(--rd-ok) 24%, var(--rd-surface))",
+};
 
 export default function MarketplacePageWrapper() {
   return (
@@ -44,8 +40,6 @@ export default function MarketplacePageWrapper() {
 }
 
 function MarketplacePage() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
   const { t, locale } = useT();
   const ko = locale === "ko";
 
@@ -59,6 +53,7 @@ function MarketplacePage() {
   const [pluginCatalog, setPluginCatalog] = useState<McpToolCatalogEntry[]>([]);
   const [installedPlugins, setInstalledPlugins] = useState<InstalledMcpServer[]>([]);
   const [importing, setImporting] = useState(false);
+  const [importNotice, setImportNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [listings, setListings] = useState<MarketplaceListing[]>([]);
   const [installedAgentSlugs, setInstalledAgentSlugs] = useState<Set<string>>(new Set());
   const [sourceStatus, setSourceStatus] = useState<MarketplaceSourceStatus | null>(null);
@@ -103,7 +98,7 @@ function MarketplacePage() {
     setPluginCatalog(plugins);
     setInstalledPlugins(installedMcp);
     setListings(ls);
-    setInstalledAgentSlugs(new Set(ag.map((a) => a.slug)));
+    setInstalledAgentSlugs(new Set(visibleAgents(ag).map((a) => a.slug)));
     setSourceStatus(status);
     setSignedIn(session.signedIn);
   }
@@ -111,6 +106,7 @@ function MarketplacePage() {
   async function importLocalFolderFromMarket() {
     const api = ipc();
     if (!api || importing) return;
+    setImportNotice(null);
     const dir = await api.fs.pickDirectory();
     if (!dir) return;
     setImporting(true);
@@ -120,11 +116,23 @@ function MarketplacePage() {
       if (agent && agent.kind === "team") {
         const inst = (await api.firms.list()).find((f) => f.slug === `firm-${agent.slug}`);
         if (inst) {
+          setImportNotice({ tone: "ok", text: ko ? `${agent.name || agent.slug} 가져오기 완료` : `Imported ${agent.name || agent.slug}` });
           navigate(`/firm/detail?id=${inst.id}`);
           return;
         }
       }
+      setImportNotice({ tone: "ok", text: ko ? `${agent.name || agent.slug} 가져오기 완료` : `Imported ${agent.name || agent.slug}` });
       setActive("agent");
+    } catch (err) {
+      setImportNotice({
+        tone: "error",
+        text:
+          err instanceof Error
+            ? err.message
+            : ko
+              ? "가져오기에 실패했습니다. 폴더 구조와 권한을 확인하세요."
+              : "Import failed. Check the folder structure and permissions.",
+      });
     } finally {
       setImporting(false);
     }
@@ -251,87 +259,111 @@ function MarketplacePage() {
   const installedPluginIds = new Set(installedPlugins.map((plugin) => plugin.catalogId).filter(Boolean));
 
   const CATEGORY_NAV = [
-    { key: "team" as HubCategory, ko: "팀", en: "Team", tone: "#a07cfa", note: { ko: "여러 에이전트가 함께 일하는 팀", en: "Multi-agent teams" } },
-    { key: "plugin" as HubCategory, ko: "플러그인", en: "Plugin", tone: "#f2795a", note: { ko: "Hub 에이전트가 찾아 쓰는 도구", en: "Tools Hub agents can use" } },
-    { key: "agent" as HubCategory, ko: "에이전트", en: "Agent", tone: "#0ca678", note: { ko: "단일 에이전트", en: "Single agents" } },
+    { key: "team" as HubCategory, ko: "팀", en: "Team", tone: C.purple, note: { ko: `여러 에이전트가 함께 일하는 팀 · 호출 ${TEAM_CALL_CREDITS}크레딧`, en: `Multi-agent teams · ${TEAM_CALL_CREDITS} credits per call` } },
+    { key: "plugin" as HubCategory, ko: "플러그인", en: "Plugin", tone: C.peach, note: { ko: "필요 시 검색·설치 후보로 제안되는 도구", en: "Tools suggested for install when a Hub agent needs them" } },
+    { key: "agent" as HubCategory, ko: "에이전트", en: "Agent", tone: C.green, note: { ko: `단일 에이전트 · 호출 ${AGENT_CALL_CREDITS}크레딧`, en: `Single agents · ${AGENT_CALL_CREDITS} credits per call` } },
   ];
 
   return (
-    <div className="rd" style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", background: "var(--rd-page-bg, #fcfaf6)" }}>
-      {/* Titlebar with basic actions */}
-      <header className="titlebar-drag glass-thin" style={{ display: "flex", alignItems: "center", padding: "0 16px 0 90px", minHeight: 44, borderBottom: "1px solid var(--glass-border)", flexShrink: 0 }}>
-        <div className="titlebar-nodrag" style={{ flex: 1 }} />
-        <div className="titlebar-nodrag" style={{ display: "flex", alignItems: "center", gap: 4 }}>
-          <button onClick={() => void importLocalFolderFromMarket()} disabled={importing} style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "5px 11px", borderRadius: 6, fontSize: 12, fontWeight: 600, color: "var(--ink-soft)", background: "var(--paper)", border: "1px solid var(--paper-edge)", cursor: importing ? "default" : "pointer", opacity: importing ? 0.6 : 1 }}>
-            <IconFolder size={12} />
-            {importing ? t("import.importing") : t("library.agents.import_local")}
-          </button>
-        </div>
-      </header>
-
-      {signedIn === false && (
-        <div className="titlebar-nodrag" role="status" style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", background: "var(--paper-2)", borderBottom: "1px solid var(--paper-edge)", fontSize: 12, color: "var(--ink-soft)" }}>
-          <span style={{ flex: 1 }}>
-            <strong style={{ color: "var(--ink)", fontWeight: 600 }}>{t("account.required.title")}</strong>
-            <span style={{ marginLeft: 8 }}>{t("account.required.body")}</span>
-          </span>
-          <button onClick={() => void ensureSignedIn()} style={{ padding: "5px 12px", borderRadius: 999, background: "var(--paper)", color: "var(--ink)", fontSize: 12, fontWeight: 600, border: "1px solid var(--paper-edge)", cursor: "pointer" }}>
-            {t("account.sign_in")}
-          </button>
-        </div>
-      )}
-
-      <div className="titlebar-nodrag" style={{ flex: 1, overflowY: "auto", padding: "0 0 60px" }}>
-        <div className="hub-page-root" style={{ maxWidth: 1120, margin: "0 auto", padding: "48px 32px 0" }}>
-          <div className="portal-hero-row" style={{ display: "flex", gap: 18, flexWrap: "wrap", marginBottom: 18 }}>
-            <div className="portal-hero-main" style={{ minWidth: 0, flex: 1, minHeight: 132 }}>
-              <div className="portal-eyebrow" style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: "var(--rd-muted-deep)", marginBottom: 8 }}>{ko ? "레지스트리 허브" : "REGISTRY HUB"}</div>
-              <h1 className="portal-hero-title" style={{ fontSize: 28, fontWeight: 600, color: "var(--rd-ink)", margin: "0 0 12px", letterSpacing: 0 }}>{ko ? "필요한 에이전트를 찾거나 연동하세요" : "Find and call the right agent"}</h1>
-              <div className="portal-hero-sub" style={{ fontSize: 14, color: "var(--rd-ink-2)", lineHeight: 1.5 }}>
-                {ko ? "팀과 에이전트는 일을 실행하고, 플러그인은 그들이 필요할 때 찾아 쓰는 도구 레이어입니다." : "Teams and agents do the work. Plugins are the tool layer they can discover and use."}
+    <div className="rd hub-desktop-root">
+      <div className="titlebar-nodrag hub-desktop-scroll">
+        <div className="hub-web-frame">
+          <HubWebRail
+            ko={ko}
+            active="hub"
+            importing={importing}
+            onImport={() => void importLocalFolderFromMarket()}
+          />
+          <div className="hub-web-main">
+            <div className="hub-web-topbar">
+              <div className="hub-web-topbar-title">Hub</div>
+              <div className="hub-web-topbar-actions" aria-label={ko ? "허브 계정 상태" : "Hub account state"}>
+                <span>EN</span>
+                <span>KO</span>
+                <span>{signedIn ? (ko ? "연결됨" : "Connected") : (ko ? "로그인 필요" : "Signed out")}</span>
               </div>
             </div>
-            <div className="portal-hero-side" style={{ width: 240, minHeight: 132 }}>
-              <div className="portal-eyebrow" style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: "var(--rd-muted-deep)", marginBottom: 8 }}>{ko ? "빠른 검색" : "QUICK SEARCH"}</div>
-              <div className="portal-panel-title" style={{ fontSize: 14, fontWeight: 600, color: "var(--rd-ink)", marginBottom: 6 }}>{ko ? "필요한 걸 바로 찾기" : "Search the Registry"}</div>
-              <div className="portal-panel-sub" style={{ fontSize: 12, color: "var(--rd-ink-3)", lineHeight: 1.5 }}>
-                {ko ? "에이전트·플러그인·팀을 한 검색창에서 찾을 수 있습니다." : "Search agents, plugins, and teams in a single search."}
+            <main className="rd-page hub-web-content">
+              <div className="hub-page-root">
+          <div className="portal-hero-row">
+            <div className="portal-hero-main">
+              <div className="portal-eyebrow">{ko ? "레지스트리 허브" : "REGISTRY HUB"}</div>
+              <h1 className="portal-hero-title">{ko ? "필요한 에이전트를 찾거나 연동하세요" : "Find and call the right agent"}</h1>
+              <div className="portal-hero-sub">
+                {ko
+                  ? "팀과 에이전트는 일을 실행하고, 플러그인은 필요할 때 설치 후보로 제안되는 도구 레이어입니다."
+                  : "Teams and agents do the work. Plugins are the tool layer suggested for install when a run needs more capability."}
+              </div>
+            </div>
+            <div className="portal-hero-side">
+              <div className="portal-eyebrow">{ko ? "빠른 검색" : "QUICK SEARCH"}</div>
+              <div className="portal-panel-title">{ko ? "필요한 걸 바로 찾기" : "Search the Registry"}</div>
+              <div className="portal-panel-sub">
+                {ko
+                  ? "에이전트·플러그인·팀을 한 검색창에서 찾을 수 있습니다."
+                  : "Search agents, plugins, and teams in a single search."}
               </div>
             </div>
           </div>
 
-          <div className="portal-search-panel" style={{ background: "#fff", padding: 18, borderRadius: 16, border: "1px solid var(--rd-hair)", boxShadow: "0 8px 30px rgba(15,23,42,0.04)", marginBottom: 32 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--rd-surface)", borderRadius: 8, padding: "10px 14px", border: "1px solid var(--rd-hair)" }}>
-              <IconSearch size={16} color="var(--rd-muted-deep)" />
+          <div className="card portal-search-panel rd-card-cream">
               <input
+                className="portal-input"
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
                 placeholder={ko ? "에이전트, 플러그인, 팀 검색..." : "Search agents, plugins, and teams..."}
-                style={{ flex: 1, border: "none", outline: "none", background: "transparent", fontSize: 14, color: "var(--rd-ink)" }}
+                aria-label={ko ? "허브 검색" : "Search the Hub"}
               />
-            </div>
-            <div className="portal-chip-row" style={{ marginTop: 12, display: "flex", gap: 8 }}>
-              <div style={{ background: "#f2eefe", color: "#6a2cf0", fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 4 }}>{ko ? `팀 ${counts.team}` : `${counts.team} Teams`}</div>
-              <div style={{ background: "#feede9", color: "#d64620", fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 4 }}>{ko ? `플러그인 ${counts.plugin}` : `${counts.plugin} Plugins`}</div>
-              <div style={{ background: "#e0f6ec", color: "#067c59", fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 4 }}>{ko ? `에이전트 ${counts.agent}` : `${counts.agent} Agents`}</div>
+            <div className="portal-chip-row" style={{ marginTop: 10 }}>
+              <RdTag bg={C.purple}>{ko ? `팀 ${counts.team}` : `${counts.team} Teams`}</RdTag>
+              <RdTag bg={C.peach}>{ko ? `플러그인 ${counts.plugin}` : `${counts.plugin} Plugins`}</RdTag>
+              <RdTag bg={C.green}>{ko ? `에이전트 ${counts.agent}` : `${counts.agent} Agents`}</RdTag>
             </div>
             {sourceStatus && (
-              <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 7, fontSize: 11.5, color: "var(--rd-ink-3)" }}>
-                <span style={{ width: 7, height: 7, borderRadius: 999, background: sourceStatus.online && !sourceStatus.usingFallback ? "#0ca678" : "#f59f00", flexShrink: 0 }} />
+              <div className="hub-status-line" style={{ marginTop: 10 }}>
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 7,
+                    height: 7,
+                    borderRadius: 999,
+                    background: sourceStatus.online && !sourceStatus.usingFallback ? "var(--rd-ok)" : "var(--rd-warn)",
+                    flexShrink: 0,
+                  }}
+                />
                 <span>
                   {sourceStatus.online && !sourceStatus.usingFallback
-                    ? (ko ? "Hub MCP live source" : "Hub MCP live source")
-                    : (ko ? "Fallback registry source" : "Fallback registry source")}
+                    ? "Hub MCP live source"
+                    : "Fallback registry source"}
                 </span>
-                {sourceStatus.lastError && <span style={{ color: "var(--peach-ink)" }}>{sourceStatus.lastError}</span>}
+                {sourceStatus.lastError && <span style={{ color: "var(--rd-accent-2-text)" }}>{sourceStatus.lastError}</span>}
               </div>
             )}
           </div>
 
-          <div className="hub-cat-nav" role="tablist" style={{ marginBottom: 32 }}>
+          {importNotice && (
+            <div className="hub-import-notice" data-tone={importNotice.tone} role="status">
+              <span>{importNotice.text}</span>
+            </div>
+          )}
+
+          {signedIn === false && (
+            <div className="hub-signin-notice" role="status">
+              <span>
+                <strong style={{ color: "var(--rd-ink)", fontWeight: 600 }}>{t("account.required.title")}</strong>
+                <span style={{ marginLeft: 8 }}>{t("account.required.body")}</span>
+              </span>
+              <button type="button" className="btn sm" onClick={() => void ensureSignedIn()}>
+                {t("account.sign_in")}
+              </button>
+            </div>
+          )}
+
+          <div className="hub-cat-nav" role="tablist" aria-label={ko ? "허브 카테고리" : "Hub categories"}>
             {CATEGORY_NAV.map((cat) => (
               <button
                 key={cat.key}
+                type="button"
                 role="tab"
                 aria-selected={active === cat.key}
                 className={"hub-cat-chip" + (active === cat.key ? " active" : "")}
@@ -346,15 +378,15 @@ function MarketplacePage() {
 
           {active === "team" && (
             <section className="portal-panel" id="hub-team">
-              <div style={{ marginBottom: 24 }}>
-                <div style={{ fontSize: 11, fontWeight: 800, color: "#a07cfa", marginBottom: 6 }}>TEAM</div>
-                <h2 style={{ fontSize: 20, fontWeight: 600, color: "var(--rd-ink)", margin: "0 0 6px" }}>{ko ? "여러 에이전트가 함께 일하는 팀" : "Multi-Agent Teams"}</h2>
-                <div style={{ fontSize: 13, color: "var(--rd-ink-2)" }}>{ko ? "여러 전문 에이전트가 연동하여 동작하는 워크플로 단위입니다." : "Collaborative agent teams for complex workflows."}</div>
-              </div>
+              <SectionHead
+                kicker={ko ? `팀 · 호출 시 ${TEAM_CALL_CREDITS}크레딧` : `TEAM · ${TEAM_CALL_CREDITS} CREDITS PER CALL`}
+                title={ko ? "여러 에이전트가 함께 일하는 팀" : "Multi-Agent Teams"}
+                sub={ko ? "여러 전문 에이전트가 유기적으로 연동하여 동작하는 워크플로 단위입니다. 실행은 호출 크레딧으로 과금되고, 다운로드 패키지와는 별개입니다." : "Collaborative agent teams for complex, multi-stage workflows. Invocation uses call credits and is separate from downloadable packages."}
+              />
               {pagedTeams.length > 0 ? (
                 <div className="market-card-grid">
                   {pagedTeams.map((team: any) => {
-                    const isFirm = "agents" in team ? false : true;
+                    const isFirm = !("agents" in team);
                     return isFirm ? (
                       <FirmCard key={team.slug} firm={team} locale={locale} installed={installedFirmSlugs.has(team.slug)} installing={installing === team.slug} onInstall={() => installFirm(team)} onOpen={() => {
                         const inst = installedFirms.find((f) => f.slug === team.slug);
@@ -366,20 +398,22 @@ function MarketplacePage() {
                   })}
                 </div>
               ) : (
-                <div style={{ padding: 24, background: "#fff", borderRadius: 12, border: "1px solid var(--rd-hair)", textAlign: "center", color: "var(--rd-ink-2)", fontSize: 14 }}>{ko ? "조건에 맞는 팀이 없습니다." : "No teams match."}</div>
+                <HubEmpty message={ko ? "조건에 맞는 팀이 없습니다." : "No teams match that search."} />
               )}
             </section>
           )}
 
           {active === "plugin" && (
             <section className="portal-panel" id="hub-plugin">
-              <div style={{ marginBottom: 24 }}>
-                <div style={{ fontSize: 11, fontWeight: 800, color: "#f2795a", marginBottom: 6 }}>PLUGIN</div>
-                <h2 style={{ fontSize: 20, fontWeight: 600, color: "var(--rd-ink)", margin: "0 0 6px" }}>{ko ? "Hub 에이전트가 필요할 때 찾아 쓰는 도구" : "Tools Hub agents can call"}</h2>
-                <div style={{ fontSize: 13, color: "var(--rd-ink-2)" }}>{ko ? "에이전트 실행 중 필요한 능력을 붙이는 레이어입니다." : "Capability layer for Hub agents."}</div>
+              <div className="hub-panel-headrow">
+                <SectionHead
+                  kicker={ko ? "플러그인 · 도구 레이어" : "PLUGIN · TOOL LAYER"}
+                  title={ko ? "필요한 능력에 맞춰 제안되는 도구" : "Tools suggested when work needs more capability"}
+                  sub={ko ? "플러그인은 자동 실행 보장이 아니라 설치·인증 후보입니다. 실행 중 필요한 능력이 있으면 적합한 도구를 제안하고, 외부 API가 필요하면 사용자 연결과 허용 범위가 갖춰진 뒤 사용할 수 있습니다." : "Plugins are install and auth candidates, not a guarantee of automatic execution. When a run needs a capability, Agentlas can suggest matching tools and use them only after install, account access, and approved scope are available."}
+                />
               </div>
               {pagedPlugins.length > 0 ? (
-                <div className="market-card-grid">
+                <div className="plugin-featured-grid">
                   {pagedPlugins.map((plugin) => (
                     <PluginCard
                       key={plugin.id}
@@ -392,20 +426,18 @@ function MarketplacePage() {
                   ))}
                 </div>
               ) : (
-                <div style={{ padding: 24, background: "#fff", borderRadius: 12, border: "1px solid var(--rd-hair)", textAlign: "center", color: "var(--rd-ink-2)", fontSize: 14 }}>
-                  {ko ? "조건에 맞는 플러그인이 없습니다." : "No plugins match."}
-                </div>
+                <HubEmpty message={ko ? "조건에 맞는 플러그인이 없습니다." : "No plugins match that search."} />
               )}
             </section>
           )}
 
           {active === "agent" && (
             <section className="portal-panel" id="hub-agent">
-              <div style={{ marginBottom: 24 }}>
-                <div style={{ fontSize: 11, fontWeight: 800, color: "#0ca678", marginBottom: 6 }}>AGENT</div>
-                <h2 style={{ fontSize: 20, fontWeight: 600, color: "var(--rd-ink)", margin: "0 0 6px" }}>{ko ? "다른 사람이 공유한 에이전트" : "Community Agents"}</h2>
-                <div style={{ fontSize: 13, color: "var(--rd-ink-2)" }}>{ko ? "단일 에이전트입니다. 허브에서 바로 설치하세요." : "Single-purpose agents shared by the community."}</div>
-              </div>
+              <SectionHead
+                kicker={ko ? `에이전트 · 호출 시 ${AGENT_CALL_CREDITS}크레딧` : `AGENT · ${AGENT_CALL_CREDITS} CREDITS PER CALL`}
+                title={ko ? "다른 사람이 공유한 에이전트" : "Community Agents"}
+                sub={ko ? "다른 사용자가 공개한 단일 에이전트입니다. Hub에서 명령으로 바로 호출합니다." : "Single-purpose agents shared by the community. Call them directly from the Hub."}
+              />
               {pagedAgents.length > 0 ? (
                 <div className="market-card-grid">
                   {pagedAgents.map((agent) => (
@@ -413,22 +445,165 @@ function MarketplacePage() {
                   ))}
                 </div>
               ) : (
-                <div style={{ padding: 24, background: "#fff", borderRadius: 12, border: "1px solid var(--rd-hair)", textAlign: "center", color: "var(--rd-ink-2)", fontSize: 14 }}>{ko ? "아직 공개된 에이전트가 없습니다." : "No public agents yet."}</div>
+                <div className="card portal-empty-panel" style={{ padding: 18 }}>
+                  <div style={{ fontFamily: "var(--rd-f-display)", fontSize: 20, fontWeight: 400 }}>
+                    {ko ? "아직 공개된 에이전트가 없습니다" : "No public agents yet"}
+                  </div>
+                  <div style={{ fontSize: 13, color: "var(--rd-ink-3)", lineHeight: 1.55, marginTop: 6 }}>
+                    {ko ? "Hub에 공개된 에이전트가 있으면 이곳에 표시됩니다." : "Published Hub agents will appear here."}
+                  </div>
+                </div>
               )}
             </section>
           )}
 
           {totalPages > 1 && (
-            <nav className="hub-pager">
-              <button className="hub-pager-btn" disabled={safePage <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>{ko ? "이전" : "Prev"}</button>
+            <nav className="hub-pager" aria-label={ko ? "페이지" : "Pagination"}>
+              <button type="button" className="hub-pager-btn" disabled={safePage <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>{ko ? "이전" : "Prev"}</button>
               <span className="hub-pager-status">
                 {ko ? `${safePage} / ${totalPages} 페이지` : `Page ${safePage} of ${totalPages}`}
+                <span className="hub-pager-total">{ko ? ` · 총 ${activeTotal}개` : ` · ${activeTotal} total`}</span>
               </span>
-              <button className="hub-pager-btn" disabled={safePage >= totalPages} onClick={() => setPage(p => Math.min(totalPages, p + 1))}>{ko ? "다음" : "Next"}</button>
+              <button type="button" className="hub-pager-btn" disabled={safePage >= totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>{ko ? "다음" : "Next"}</button>
             </nav>
           )}
+              </div>
+            </main>
+          </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function HubWebRail({
+  ko,
+  active,
+  importing,
+  onImport,
+}: {
+  ko: boolean;
+  active: "hub" | "plugins" | "desktop";
+  importing: boolean;
+  onImport: () => void;
+}) {
+  const primary = [
+    { label: "Dashboard", href: "/dashboard" },
+    { label: "Agent Cloud", href: "/cloud" },
+    { label: "Prompt Dictionary", href: "/library/assets" },
+  ];
+  const create = [
+    { label: "Single agent", href: "/build" },
+    { label: "Multi agent", href: "/build" },
+  ];
+  const manage = [
+    { label: "Edit", href: "/library/agents" },
+    { label: "Security", href: "/library/tools" },
+    { label: "Hub", href: "/marketplace", key: "hub" },
+    { label: "Plugins", href: "/library/mcps", key: "plugins" },
+    { label: "Desktop app", href: "/apps", key: "desktop" },
+    { label: "Lab", href: "/surface-preview" },
+  ];
+
+  return (
+    <aside className="hub-web-rail" aria-label={ko ? "Agentlas Hub 내비게이션" : "Agentlas Hub navigation"}>
+      <div className="hub-web-brand">
+        <div className="hub-web-brand-mark">A</div>
+        <div>
+          <strong>Agentlas Hub</strong>
+          <span>HUB</span>
+        </div>
+      </div>
+      <HubRailGroup items={primary} />
+      <HubRailGroup title="CREATE" items={create} />
+      <HubRailGroup title="MANAGE" items={manage} active={active} />
+      <div className="hub-web-rail-bottom">
+        <button type="button" className="hub-web-local-import" onClick={onImport} disabled={importing}>
+          <IconFolder size={13} />
+          <span>{importing ? (ko ? "가져오는 중" : "Importing") : (ko ? "로컬 폴더" : "Local folder")}</span>
+        </button>
+        <div className="hub-web-account">
+          <span className="hub-web-lock">?</span>
+          <div>
+            <strong>{ko ? "데스크탑 계정" : "Desktop account"}</strong>
+            <span>{ko ? "로컬과 Hub 연결" : "Local and Hub link"}</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function HubRailGroup({
+  title,
+  items,
+  active,
+}: {
+  title?: string;
+  items: Array<{ label: string; href: string; key?: string }>;
+  active?: string;
+}) {
+  return (
+    <div className="hub-web-rail-group">
+      {title && <div className="hub-web-rail-title">{title}</div>}
+      {items.map((item) => (
+        <Link
+          key={`${item.label}:${item.href}`}
+          href={item.href}
+          className={"hub-web-rail-link" + (item.key && item.key === active ? " active" : "")}
+        >
+          <span className="hub-web-rail-glyph" aria-hidden="true" />
+          <span>{item.label}</span>
+        </Link>
+      ))}
+    </div>
+  );
+}
+
+function RdTag({
+  dashed,
+  bg,
+  size,
+  className,
+  style,
+  children,
+}: {
+  dashed?: boolean;
+  bg?: string;
+  size?: "s" | "m";
+  className?: string;
+  style?: CSSProperties;
+  children: ReactNode;
+}) {
+  return (
+    <span
+      className={["chip", dashed ? "dashed" : "", className || ""].filter(Boolean).join(" ")}
+      style={{
+        background: bg,
+        fontSize: size === "s" ? 10.5 : undefined,
+        whiteSpace: "nowrap",
+        ...style,
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function SectionHead({ kicker, title, sub }: { kicker: ReactNode; title: ReactNode; sub: ReactNode }) {
+  return (
+    <div>
+      <div className="portal-eyebrow">{kicker}</div>
+      <div className="portal-panel-title">{title}</div>
+      <div className="portal-panel-sub">{sub}</div>
+    </div>
+  );
+}
+
+function HubEmpty({ message }: { message: string }) {
+  return (
+    <div className="card portal-empty-panel" style={{ padding: 18, marginTop: 14 }}>
+      <div style={{ fontFamily: "var(--rd-f-display)", fontSize: 18, fontWeight: 500 }}>{message}</div>
     </div>
   );
 }
@@ -449,132 +624,59 @@ function PluginCard({
   const ko = locale === "ko";
   const name = ko ? plugin.name : plugin.nameEn;
   const description = ko ? plugin.description : plugin.descriptionEn;
-  const requiredKeys = plugin.envRequirements.filter((env) => env.required).map((env) => env.key);
   const mark = plugin.mark ?? name.slice(0, 2).toUpperCase();
   return (
-    <div
-      className="hub-entity-card"
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        padding: 20,
-        background: "#fff",
-        borderRadius: 12,
-        border: "1px solid var(--rd-hair)",
-        boxShadow: "0 4px 12px rgba(15,23,42,0.03)",
-        minHeight: 230,
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-        <div
-          style={{
-            width: 42,
-            height: 42,
-            borderRadius: 10,
-            background: plugin.brandColor ?? "#f2795a",
-            color: "#fff",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 12,
-            fontWeight: 800,
-            letterSpacing: 0,
-          }}
-        >
-          {mark}
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 650, color: "var(--rd-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-              {name}
-            </div>
-            {installed && <IconCheck size={13} style={{ color: "var(--green-deep)", flexShrink: 0 }} />}
-          </div>
-          <div style={{ fontSize: 12, color: "var(--rd-ink-3)", textTransform: "capitalize" }}>
-            {plugin.category} · {plugin.trust}
-          </div>
-        </div>
+    <div className="plugin-featured-tile">
+      <div className="plugin-featured-icon" style={{ background: plugin.brandColor ?? "var(--rd-accent-2)" }}>
+        {mark}
       </div>
-
-      <div style={{ fontSize: 13, color: "var(--rd-ink-2)", lineHeight: 1.5, marginBottom: 14, flex: 1 }}>
-        {description}
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div className="plugin-featured-name">{name}</div>
+        <div className="plugin-featured-desc">{description}</div>
       </div>
-
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
-        <span className="hub-command-chip">{plugin.transport}</span>
-        {requiredKeys.length > 0 ? (
-          requiredKeys.slice(0, 3).map((key) => (
-            <span key={key} className="hub-command-chip">
-              {key}
-            </span>
-          ))
-        ) : (
-          <span className="hub-command-chip">{ko ? "키 불필요" : "No key"}</span>
-        )}
-      </div>
-
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <button
-          onClick={installed ? undefined : onInstall}
-          disabled={installing || installed}
-          style={{
-            flex: 1,
-            padding: "8px 0",
-            borderRadius: 8,
-            background: installed ? "var(--rd-surface-2)" : "var(--rd-ink)",
-            color: installed ? "var(--rd-ink)" : "#fff",
-            fontSize: 13,
-            fontWeight: 650,
-            border: installed ? "1px solid var(--rd-hair)" : "none",
-            cursor: installing || installed ? "default" : "pointer",
-          }}
-        >
-          {installing ? (ko ? "설치 중..." : "Installing...") : installed ? (ko ? "설치됨" : "Installed") : (ko ? "설치" : "Install")}
-        </button>
-        {plugin.docsUrl && (
-          <a
-            href={plugin.docsUrl}
-            target="_blank"
-            rel="noreferrer"
-            title={ko ? "문서 열기" : "Open docs"}
-            style={{
-              width: 34,
-              height: 34,
-              borderRadius: 8,
-              border: "1px solid var(--rd-hair)",
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "var(--rd-ink-2)",
-              textDecoration: "none",
-              flexShrink: 0,
-            }}
-          >
-            <IconChevronRight size={14} />
-          </a>
-        )}
-      </div>
+      <span className="plugin-featured-add" aria-hidden="true">
+        {installed ? <IconCheck size={13} /> : "+"}
+      </span>
+      <button
+        type="button"
+        className={"btn sm" + (installed ? "" : " primary")}
+        onClick={installed ? undefined : onInstall}
+        disabled={installing || installed}
+      >
+        {installing ? (ko ? "설치 중" : "Installing") : installed ? (ko ? "설치됨" : "Installed") : (ko ? "설치" : "Install")}
+      </button>
+      {plugin.docsUrl && (
+        <a className="btn sm" href={plugin.docsUrl} target="_blank" rel="noreferrer" title={ko ? "문서 열기" : "Open docs"}>
+          <IconChevronRight size={14} />
+        </a>
+      )}
     </div>
   );
 }
 
 function FirmCard({ firm, locale, installed, installing, onInstall, onOpen }: any) {
   const loc = pickLocalized(firm, locale);
+  const ko = locale === "ko";
   return (
-    <div style={{ display: "flex", flexDirection: "column", padding: 20, background: "#fff", borderRadius: 12, border: "1px solid var(--rd-hair)", boxShadow: "0 4px 12px rgba(15,23,42,0.03)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-        <div style={{ width: 40, height: 40, borderRadius: 8, background: "linear-gradient(135deg, rgba(202,198,250,0.7) 0%, rgba(255,214,198,0.6) 100%)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--ink)" }}>
-          <IconBuilding size={18} />
+    <div className="card portal-entity-card hub-entity-card">
+      <div className="hub-card-head">
+        <div className="hub-card-main">
+          <div className="hub-card-kicker">{ko ? "허브 팀" : "HUB TEAM"}</div>
+          <button type="button" className="portal-card-title hub-card-title" onClick={installed ? onOpen : undefined}>
+            {loc.name}
+          </button>
+          <div className="hub-card-author">{ko ? "Agentlas Hub" : "Agentlas Hub"}</div>
         </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--rd-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</div>
-          <div style={{ fontSize: 12, color: "var(--rd-ink-3)" }}>Firm</div>
-        </div>
+        <RdTag className="hub-credit-tag" bg={C.purple}>{ko ? `크레딧 ${TEAM_CALL_CREDITS}` : `${TEAM_CALL_CREDITS} credits`}</RdTag>
       </div>
-      <div style={{ fontSize: 13, color: "var(--rd-ink-2)", lineHeight: 1.5, marginBottom: 16, flex: 1 }}>{loc.tagline}</div>
-      <div>
-        <button onClick={installed ? onOpen : onInstall} disabled={installing} style={{ width: "100%", padding: "8px 0", borderRadius: 8, background: installed ? "var(--rd-surface-2)" : "var(--rd-ink)", color: installed ? "var(--rd-ink)" : "#fff", fontSize: 13, fontWeight: 600, border: installed ? "1px solid var(--rd-hair)" : "none", cursor: installing ? "default" : "pointer" }}>
-          {installing ? "설치 중..." : (installed ? "열기" : "설치")}
+      <div className="hub-card-copy">{loc.tagline}</div>
+      <div className="portal-chip-row hub-card-meta">
+        <RdTag dashed>{ko ? "본부형 팀" : "Firm"}</RdTag>
+        <RdTag className="hub-command-chip" dashed>{`/hep-call ${firm.slug}`}</RdTag>
+      </div>
+      <div className="hub-card-actions">
+        <button type="button" className={"btn sm" + (installed ? "" : " primary")} onClick={installed ? onOpen : onInstall} disabled={installing}>
+          {installing ? (ko ? "설치 중" : "Installing") : installed ? (ko ? "열기" : "Open") : (ko ? "설치" : "Install")}
         </button>
       </div>
     </div>
@@ -583,21 +685,25 @@ function FirmCard({ firm, locale, installed, installing, onInstall, onOpen }: an
 
 function BundleCard({ bundle, locale, installing, onInstall }: any) {
   const loc = pickLocalized(bundle, locale);
+  const ko = locale === "ko";
   return (
-    <div style={{ display: "flex", flexDirection: "column", padding: 20, background: "#fff", borderRadius: 12, border: "1px solid var(--rd-hair)", boxShadow: "0 4px 12px rgba(15,23,42,0.03)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-        <div style={{ width: 40, height: 40, borderRadius: 8, background: "var(--fill-2)", color: "var(--accent)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <IconUsers size={18} />
+    <div className="card portal-entity-card hub-entity-card">
+      <div className="hub-card-head">
+        <div className="hub-card-main">
+          <div className="hub-card-kicker">{ko ? "팀 번들" : "TEAM BUNDLE"}</div>
+          <div className="portal-card-title hub-card-title">{loc.name}</div>
+          <div className="hub-card-author">{ko ? "Agentlas Starter" : "Agentlas Starter"}</div>
         </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--rd-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</div>
-          <div style={{ fontSize: 12, color: "var(--rd-ink-3)" }}>Team Bundle</div>
-        </div>
+        <RdTag className="hub-credit-tag" bg={C.purple}>{ko ? `크레딧 ${TEAM_CALL_CREDITS}` : `${TEAM_CALL_CREDITS} credits`}</RdTag>
       </div>
-      <div style={{ fontSize: 13, color: "var(--rd-ink-2)", lineHeight: 1.5, marginBottom: 16, flex: 1 }}>{loc.tagline}</div>
-      <div>
-        <button onClick={onInstall} disabled={installing} style={{ width: "100%", padding: "8px 0", borderRadius: 8, background: "var(--rd-ink)", color: "#fff", fontSize: 13, fontWeight: 600, border: "none", cursor: installing ? "default" : "pointer" }}>
-          {installing ? "설치 중..." : "설치"}
+      <div className="hub-card-copy">{loc.tagline}</div>
+      <div className="portal-chip-row hub-card-meta">
+        <RdTag dashed>{ko ? `에이전트 ${bundle.agents?.length ?? 0}명` : `${bundle.agents?.length ?? 0} Specialist Roles`}</RdTag>
+        <RdTag className="hub-command-chip" dashed>{`/hep-call ${bundle.id}`}</RdTag>
+      </div>
+      <div className="hub-card-actions">
+        <button type="button" className="btn sm primary" onClick={onInstall} disabled={installing}>
+          {installing ? (ko ? "설치 중" : "Installing") : (ko ? "설치" : "Install")}
         </button>
       </div>
     </div>
@@ -606,21 +712,25 @@ function BundleCard({ bundle, locale, installing, onInstall }: any) {
 
 function AgentCard({ listing, locale, installed, installing, onInstall }: any) {
   const loc = pickLocalized(listing, locale);
+  const ko = locale === "ko";
   return (
-    <div style={{ display: "flex", flexDirection: "column", padding: 20, background: "#fff", borderRadius: 12, border: "1px solid var(--rd-hair)", boxShadow: "0 4px 12px rgba(15,23,42,0.03)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-        <div style={{ width: 40, height: 40, borderRadius: 8, background: "var(--fill-2)", color: "var(--accent)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <IconWand size={18} />
+    <div className="card portal-entity-card hub-entity-card">
+      <div className="hub-card-head">
+        <div className="hub-card-main">
+          <div className="hub-card-kicker">{ko ? "에이전트" : "AGENT"}</div>
+          <div className="portal-card-title hub-card-title">{loc.name}</div>
+          <div className="hub-card-author">{listing.ownerName ? (ko ? `${listing.ownerName} 제작` : `by ${listing.ownerName}`) : "Agentlas Hub"}</div>
         </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--rd-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</div>
-          <div style={{ fontSize: 12, color: "var(--rd-ink-3)" }}>Agent</div>
-        </div>
+        <RdTag className="hub-credit-tag" bg={C.green}>{ko ? `크레딧 ${AGENT_CALL_CREDITS}` : `${AGENT_CALL_CREDITS} credits`}</RdTag>
       </div>
-      <div style={{ fontSize: 13, color: "var(--rd-ink-2)", lineHeight: 1.5, marginBottom: 16, flex: 1 }}>{loc.tagline}</div>
-      <div>
-        <button onClick={installed ? undefined : onInstall} disabled={installing || installed} style={{ width: "100%", padding: "8px 0", borderRadius: 8, background: installed ? "var(--rd-surface-2)" : "var(--rd-ink)", color: installed ? "var(--rd-ink)" : "#fff", fontSize: 13, fontWeight: 600, border: installed ? "1px solid var(--rd-hair)" : "none", cursor: (installing || installed) ? "default" : "pointer" }}>
-          {installing ? "설치 중..." : (installed ? "설치됨" : "설치")}
+      <div className="hub-card-copy">{loc.tagline}</div>
+      <div className="portal-chip-row hub-card-meta">
+        <RdTag dashed>{ko ? "단일 에이전트" : "Single agent"}</RdTag>
+        <RdTag className="hub-command-chip" dashed>{`/hep-call ${listing.slug}`}</RdTag>
+      </div>
+      <div className="hub-card-actions">
+        <button type="button" className={"btn sm" + (installed ? "" : " primary")} onClick={installed ? undefined : onInstall} disabled={installing || installed}>
+          {installing ? (ko ? "설치 중" : "Installing") : installed ? (ko ? "설치됨" : "Installed") : (ko ? "설치" : "Install")}
         </button>
       </div>
     </div>

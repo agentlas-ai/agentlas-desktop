@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
 import { ipc } from "@/lib/ipc";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type {
   InstalledAgent,
@@ -43,7 +44,7 @@ export default function LibraryAssetsPage() {
       api.projects.list(),
     ]);
     setPacks(nextPacks);
-    setAgents(nextAgents);
+    setAgents(visibleAgents(nextAgents));
     setProjects(nextProjects);
     setSelectedId((cur) => (cur && nextPacks.some((pack) => pack.id === cur) ? cur : nextPacks[0]?.id ?? null));
   }, []);

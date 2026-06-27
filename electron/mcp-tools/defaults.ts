@@ -3,7 +3,7 @@
 // 사용자 동의 없이 실행하지 않는다.
 import { installFromCatalog, listInstalledServers } from "./registry";
 
-export const DEFAULT_MCP_CATALOG_IDS = ["playwright", "cua-driver"] as const;
+export const DEFAULT_MCP_CATALOG_IDS = ["hephaestus-network", "playwright", "cua-driver"] as const;
 
 export function ensureDefaultMcpPluginsInstalled(): void {
   try {

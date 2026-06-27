@@ -5,7 +5,6 @@ import { ipc, updaterEvents } from "@/lib/ipc";
 import { useT, type LocalePref } from "@/lib/i18n";
 import { useTheme, type ThemePref } from "@/lib/theme";
 import type {
-  HephaestusStatus,
   MultimodalModality,
   MultimodalProvider,
   MultimodalProviderStatus,
@@ -211,7 +210,6 @@ export default function SettingsPage() {
       >
         <Banner />
         <UpdatePanel />
-        <StormbreakerPanel />
 
         {/* 언어 선택 */}
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
@@ -1324,101 +1322,3 @@ const multimodalSecretButtonStyle: CSSProperties = {
   border: "1px solid var(--paper-edge)",
   boxShadow: "var(--neu-raised)",
 };
-
-// ── Hephaestus 엔진 · Stormbreaker 자동 실행 ──────────────────────────────────
-// 임베딩된 엔진 가용성 표시 + "앱에서 뭘 하든 Stormbreaker 자동 감독" 전역 토글.
-function StormbreakerPanel() {
-  const [status, setStatus] = useState<HephaestusStatus | null>(null);
-  const [enabled, setEnabled] = useState<boolean>(true);
-
-  useEffect(() => {
-    const api = ipc();
-    if (!api) return;
-    void api.hephaestus.status().then(setStatus).catch(() => setStatus(null));
-    void api.hephaestus.getSupervisor().then((s) => setEnabled(s.enabled)).catch(() => {});
-  }, []);
-
-  const toggle = async () => {
-    const next = !enabled;
-    setEnabled(next);
-    await ipc()?.hephaestus.setSupervisor(next).catch(() => setEnabled(!next));
-  };
-
-  return (
-    <>
-      <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "32px 0 12px" }}>
-        Hephaestus 엔진 · Stormbreaker
-      </h2>
-      <div
-        style={{
-          padding: 16,
-          borderRadius: "var(--radius-md)",
-          background: "var(--paper)",
-          border: "1px solid var(--paper-edge)",
-          boxShadow: "var(--neu-raised)",
-          display: "flex",
-          flexDirection: "column",
-          gap: 14,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span
-            style={{
-              width: 9,
-              height: 9,
-              borderRadius: 999,
-              background: status?.available ? "#0ca678" : "#fa5252",
-              display: "inline-block",
-            }}
-          />
-          <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ink)" }}>
-            {status?.available ? "엔진 준비됨" : "엔진 사용 불가"}
-          </span>
-          <span style={{ fontSize: 11.5, color: "var(--muted-deep)" }}>
-            {status?.available ? `Python ${status.version}` : (status?.reason ?? "확인 중…")}
-          </span>
-        </div>
-
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink)" }}>Stormbreaker 자동 실행</div>
-            <div style={{ fontSize: 12, color: "var(--muted-deep)", marginTop: 3, lineHeight: 1.5 }}>
-              켜면 모든 채팅 실행을 견고-실행 규율(scope lock → route → 증거/리뷰 게이트)로 자동 감독합니다.
-            </div>
-          </div>
-          <button
-            onClick={() => void toggle()}
-            disabled={!status?.available}
-            aria-pressed={enabled}
-            style={{
-              flexShrink: 0,
-              width: 46,
-              height: 26,
-              borderRadius: 999,
-              border: "none",
-              cursor: status?.available ? "pointer" : "default",
-              background: enabled && status?.available ? "var(--accent)" : "var(--fill-3)",
-              position: "relative",
-              transition: "background 0.2s",
-              opacity: status?.available ? 1 : 0.5,
-            }}
-          >
-            <span
-              style={{
-                position: "absolute",
-                top: 3,
-                left: enabled ? 23 : 3,
-                width: 20,
-                height: 20,
-                borderRadius: 999,
-                background: "#fff",
-                transition: "left 0.2s",
-                boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
-              }}
-            />
-          </button>
-        </div>
-      </div>
-    </>
-  );
-}

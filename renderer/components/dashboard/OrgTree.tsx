@@ -9,39 +9,24 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
-import { IconBuilding } from "@/components/Icon";
-import type { InstalledAgent, InstalledFirm, ResolvedOrg } from "@/lib/types";
+import { isVisibleAgent, isUserFacingAgentText } from "@/lib/agent-visibility";
+import { IconBuilding, IconFileUp, IconSearch } from "@/components/Icon";
+import type { InstalledAgent, InstalledFirm, ResolvedNode, ResolvedOrg } from "@/lib/types";
 
 type Mode = "multi" | "single";
 type Source = "local" | "cloud" | "hub";
 
-const ROW = { display: "flex", alignItems: "center", gap: 6 } as const;
-
-// 시스템/인프라 에이전트(오케스트레이터·PM 소울·큐레이터·메타에이전트·앱빌더·마켓 패키저 등)는 로스터에서 숨긴다.
-// visibility가 "background"뿐 아니라 "private"(web-only 제어 에이전트)인 경우도 있어 둘 다 거르고, slug 패턴도 함께 차단.
-const SYSTEM_SLUG_RE =
-  /(orchestrator|pm-soul|memory-curator|task-bias|meta-agent|app-builder|marketplace-packager|packager|governance)/i;
-
-// 회사 안에 주입되는 표준 인프라 역할(이름/역할 텍스트 기준): 오케스트레이터·PM 소울·메모리 큐레이터·
-// 폴리시 게이트·Eval QA·태스크 바이어스·메타에이전트·앱 빌더·마켓 패키저. 비즈니스 에이전트는 매칭 안 됨.
-const SYSTEM_NODE_RE =
-  /(orchestrator|pm[\s-]?soul|memory[\s-]?curator|policy[\s-]?gate|eval[\s-]?qa|task[\s-]?bias|meta[\s-]?agent|app[\s-]?builder|marketplace[\s-]?packager|governance)/i;
-
-/** 이름/역할 텍스트로 시스템·인프라 노드 판별 (resolvedOrg 노드용 — slug 없음). */
-function isSystemNode(name?: string | null, role?: string | null): boolean {
-  return SYSTEM_NODE_RE.test(`${name ?? ""} ${role ?? ""}`);
-}
-
-function isRosterAgent(a: InstalledAgent): boolean {
-  if (a.visibility === "background" || a.visibility === "private") return false;
-  if (SYSTEM_SLUG_RE.test(a.slug)) return false;
-  if (isSystemNode(a.name, a.nameEn)) return false;
-  if ((a.kind ?? "agent") === "team") return false;
-  return true;
-}
-
 function dedupById(list: InstalledAgent[]): InstalledAgent[] {
   return Array.from(new Map(list.map((a) => [a.id, a])).values());
+}
+
+function agentLibraryRoute(input: { agentId?: string; nodeId?: string; firmId?: string }): string {
+  const params = new URLSearchParams();
+  if (input.agentId) params.set("agentId", input.agentId);
+  if (input.nodeId) params.set("nodeId", input.nodeId);
+  if (input.firmId) params.set("firmId", input.firmId);
+  const query = params.toString();
+  return query ? `/library/agents?${query}` : "/library/agents";
 }
 
 export function OrgTree() {
@@ -53,6 +38,7 @@ export function OrgTree() {
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [importMessage, setImportMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [openCats, setOpenCats] = useState<Record<Source, boolean>>({
     local: true,
     cloud: true,
@@ -68,7 +54,7 @@ export function OrgTree() {
       return;
     }
     const [a, f] = await Promise.all([api.team.list(), api.firms.list()]);
-    setAgents(dedupById(a).filter(isRosterAgent));
+    setAgents(dedupById(a).filter(isVisibleAgent));
     setFirms(f);
     setLoading(false);
   }, []);
@@ -98,12 +84,27 @@ export function OrgTree() {
     const api = ipc();
     if (!api || busy) return;
     setBusy(true);
+    setImportMessage(null);
     try {
       const dir = await api.fs.pickDirectory();
       if (dir) {
-        await api.team.importLocalFolder(dir);
+        const agent = await api.team.importLocalFolder(dir);
         await load();
+        setImportMessage({
+          tone: "ok",
+          text: ko ? `${agent.name || agent.slug} 가져오기 완료` : `Imported ${agent.name || agent.slug}`,
+        });
       }
+    } catch (err) {
+      setImportMessage({
+        tone: "error",
+        text:
+          err instanceof Error
+            ? err.message
+            : ko
+              ? "가져오기에 실패했습니다. 폴더 구조와 권한을 확인하세요."
+              : "Import failed. Check the folder structure and permissions.",
+      });
     } finally {
       setBusy(false);
     }
@@ -137,8 +138,8 @@ export function OrgTree() {
 
   if (loading) {
     return (
-      <Shell mode={mode} setMode={setMode} query={query} setQuery={setQuery} onImport={importFolder} busy={busy} ko={ko}>
-        <div style={{ padding: "14px 4px", fontSize: 12, color: "var(--muted-deep)" }}>
+      <Shell mode={mode} setMode={setMode} query={query} setQuery={setQuery} onImport={importFolder} busy={busy} ko={ko} importMessage={importMessage}>
+        <div className="dashboard-org-empty">
           {ko ? "불러오는 중…" : "Loading…"}
         </div>
       </Shell>
@@ -146,8 +147,8 @@ export function OrgTree() {
   }
 
   return (
-    <Shell mode={mode} setMode={setMode} query={query} setQuery={setQuery} onImport={importFolder} busy={busy} ko={ko}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+    <Shell mode={mode} setMode={setMode} query={query} setQuery={setQuery} onImport={importFolder} busy={busy} ko={ko} importMessage={importMessage}>
+      <div className="dashboard-org-list">
         {cats.map((cat) => {
           const { firms: cf, agents: ca } = bySource(cat.key);
           const count = cf.length + ca.length;
@@ -156,17 +157,17 @@ export function OrgTree() {
             <div key={cat.key}>
               <button
                 onClick={() => setOpenCats((p) => ({ ...p, [cat.key]: !p[cat.key] }))}
-                style={{ ...ROW, width: "100%", padding: "6px 3px", background: "transparent", border: "none", cursor: "pointer" }}
+                className="dashboard-org-row dashboard-org-category"
               >
                 <Chevron open={open} />
-                <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ink)", flex: 1, textAlign: "left" }}>
+                <span className="dashboard-org-label">
                   {cat.label}
                 </span>
-                <span style={{ fontSize: 10.5, color: "var(--muted-deep)", fontFamily: "var(--font-mono)" }}>{count}</span>
+                <span className="dashboard-org-count">{count}</span>
               </button>
 
               {open && cat.key === "hub" && (
-                <div style={{ padding: "4px 3px 8px 24px", fontSize: 11, color: "var(--muted-deep)" }}>
+                <div className="dashboard-org-empty dashboard-org-nested">
                   {ko ? "북마크한 허브 에이전트가 여기 모입니다." : "Bookmarked hub agents appear here."}
                 </div>
               )}
@@ -176,15 +177,15 @@ export function OrgTree() {
                   <div key={f.id}>
                     <button
                       onClick={() => void toggleFirm(f.id)}
-                      style={{ ...ROW, width: "100%", padding: "4px 3px 4px 15px", background: "transparent", border: "none", cursor: "pointer" }}
+                      className="dashboard-org-row dashboard-org-firm"
                     >
                       <Chevron open={!!openFirms[f.id]} small />
-                      <IconBuilding size={13} style={{ color: "var(--accent)" }} />
-                      <span style={{ fontSize: 12, fontWeight: 500, color: "var(--ink)", flex: 1, textAlign: "left" }}>
+                      <IconBuilding size={13} />
+                      <span className="dashboard-org-label">
                         {dn(f)}
                       </span>
                     </button>
-                    {openFirms[f.id] && <FirmBody org={orgs[f.id]} ko={ko} />}
+                    {openFirms[f.id] && <FirmBody org={orgs[f.id]} firmId={f.id} ko={ko} />}
                   </div>
                 ))}
 
@@ -192,11 +193,11 @@ export function OrgTree() {
                 ca.filter((a) => matches(dn(a))).map((a) => (
                   <button
                     key={a.id}
-                    onClick={() => navigate("/")}
-                    style={{ ...ROW, gap: 7, width: "100%", padding: "3px 3px 3px 24px", background: "transparent", border: "none", cursor: "pointer" }}
+                    onClick={() => navigate(agentLibraryRoute({ agentId: a.id }))}
+                    className="dashboard-org-row dashboard-org-agent"
                   >
                     <Dot />
-                    <span style={{ fontSize: 11.5, color: "var(--ink)", flex: 1, textAlign: "left" }}>{dn(a)}</span>
+                    <span className="dashboard-org-label">{dn(a)}</span>
                   </button>
                 ))}
             </div>
@@ -216,6 +217,7 @@ function Shell({
   onImport,
   busy,
   ko,
+  importMessage,
 }: {
   children: React.ReactNode;
   mode: Mode;
@@ -225,72 +227,54 @@ function Shell({
   onImport: () => void;
   busy: boolean;
   ko: boolean;
+  importMessage?: { tone: "ok" | "error"; text: string } | null;
 }) {
   return (
     <aside
-      style={{
-        background: "var(--paper-2)",
-        border: "1px solid var(--paper-edge)",
-        borderRadius: 12,
-        padding: 11,
-        display: "flex",
-        flexDirection: "column",
-        gap: 8,
-        minWidth: 0,
-      }}
+      className="dashboard-org-tree"
     >
-      <div style={{ display: "flex", gap: 4, background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: 8, padding: 3 }}>
+      <div className="dashboard-org-title">
+        <span>{ko ? "조직도" : "Org chart"}</span>
+        <span>{mode === "multi" ? "HQ" : "1:1"}</span>
+      </div>
+      <div className="dashboard-org-segmented">
         {(["multi", "single"] as Mode[]).map((m) => (
           <button
             key={m}
             onClick={() => setMode(m)}
-            style={{
-              flex: 1,
-              fontSize: 12,
-              padding: "4px 0",
-              borderRadius: 5,
-              border: "none",
-              cursor: "pointer",
-              fontWeight: mode === m ? 600 : 400,
-              background: mode === m ? "var(--paper-2)" : "transparent",
-              color: mode === m ? "var(--ink)" : "var(--muted-deep)",
-            }}
+            className="dashboard-org-mode"
+            data-active={mode === m ? "true" : "false"}
           >
             {m === "multi" ? (ko ? "멀티" : "Multi") : ko ? "싱글" : "Single"}
           </button>
         ))}
       </div>
-      <input
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        placeholder={ko ? "조직·에이전트 검색" : "Search org, agents"}
-        style={{
-          height: 31,
-          padding: "0 10px",
-          fontSize: 12,
-          background: "var(--paper-2)",
-          border: "1px solid var(--paper-edge)",
-          borderRadius: 8,
-          color: "var(--ink)",
-        }}
-      />
+      <label className="dashboard-org-search">
+        <IconSearch size={14} />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={ko ? "조직·에이전트 검색" : "Search org, agents"}
+        />
+      </label>
       <button
         onClick={onImport}
         disabled={busy}
         className="titlebar-nodrag"
-        style={{
-          height: 32,
-          fontSize: 12,
-          borderRadius: 8,
-          border: "1px solid var(--accent)",
-          color: "var(--accent)",
-          background: "transparent",
-          cursor: busy ? "default" : "pointer",
-          fontWeight: 600,
-        }}
+        data-dashboard-import="true"
       >
+        <IconFileUp size={14} />
         {busy ? (ko ? "가져오는 중…" : "Importing…") : ko ? "에이전트 가져오기" : "Import agents"}
       </button>
+      {importMessage && (
+        <div
+          role="status"
+          className="dashboard-org-message"
+          data-tone={importMessage.tone}
+        >
+          {importMessage.text}
+        </div>
+      )}
       {children}
     </aside>
   );
@@ -299,14 +283,9 @@ function Shell({
 function Chevron({ open, small }: { open: boolean; small?: boolean }) {
   return (
     <span
-      style={{
-        fontSize: small ? 9 : 10,
-        color: "var(--muted-deep)",
-        display: "inline-block",
-        width: 10,
-        transform: open ? "rotate(90deg)" : "none",
-        transition: "transform .15s",
-      }}
+      className="dashboard-org-chevron"
+      data-open={open ? "true" : "false"}
+      data-small={small ? "true" : "false"}
     >
       ▶
     </span>
@@ -314,35 +293,35 @@ function Chevron({ open, small }: { open: boolean; small?: boolean }) {
 }
 
 function Dot() {
-  return <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--muted-deep)", flexShrink: 0 }} />;
+  return <span className="dashboard-org-dot" />;
 }
 
 // 회사 하위 구조 렌더 — 분류 규칙:
 //   · 시스템/인프라 노드(오케스트레이터·PM 소울·큐레이터·폴리시게이트·Eval QA 등)는 제거.
 //   · 본부(division)에 하위 에이전트(specialists)가 있을 때만 "HQ"로 표시하고 그 아래 에이전트를 분해.
 //   · 하위가 없는 노드는 HQ가 아니라 회사 직속 "에이전트"로 표시(HQ 태그 없음).
-function FirmBody({ org, ko }: { org: ResolvedOrg | null | undefined; ko: boolean }) {
+function FirmBody({ org, firmId, ko }: { org: ResolvedOrg | null | undefined; firmId: string; ko: boolean }) {
   if (org === undefined) {
     return (
-      <div style={{ padding: "3px 3px 3px 30px", fontSize: 11, color: "var(--muted-deep)" }}>
+      <div className="dashboard-org-empty dashboard-org-deep">
         {ko ? "불러오는 중…" : "Loading…"}
       </div>
     );
   }
-  const hqs: Array<{ id: string; name: string; agents: Array<{ id: string; name: string }> }> = [];
-  const direct: Array<{ id: string; name: string }> = [];
+  const hqs: Array<{ id: string; name: string; agents: Array<Pick<ResolvedNode, "id" | "name" | "agentId">> }> = [];
+  const direct: Array<Pick<ResolvedNode, "id" | "name" | "agentId">> = [];
   for (const div of org?.divisions ?? []) {
-    if (isSystemNode(div.name, div.role)) continue;
-    const specs = div.specialists.filter((s) => !isSystemNode(s.name, s.role));
+    if (!isUserFacingAgentText(div.name, div.role)) continue;
+    const specs = div.specialists.filter((s) => isUserFacingAgentText(s.name, s.role));
     if (specs.length > 0) {
-      hqs.push({ id: div.id, name: div.name, agents: specs.map((s) => ({ id: s.id, name: s.name })) });
+      hqs.push({ id: div.id, name: div.name, agents: specs.map((s) => ({ id: s.id, name: s.name, agentId: s.agentId })) });
     } else {
-      direct.push({ id: div.id, name: div.name });
+      direct.push({ id: div.id, name: div.name, agentId: div.agentId });
     }
   }
   if (hqs.length === 0 && direct.length === 0) {
     return (
-      <div style={{ padding: "3px 3px 3px 30px", fontSize: 11, color: "var(--muted-deep)" }}>
+      <div className="dashboard-org-empty dashboard-org-deep">
         {ko ? "구성원 없음" : "No members"}
       </div>
     );
@@ -351,18 +330,18 @@ function FirmBody({ org, ko }: { org: ResolvedOrg | null | undefined; ko: boolea
     <>
       {hqs.map((hq) => (
         <div key={hq.id}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 3px 3px 30px" }}>
-            <span style={{ fontSize: 11.5, color: "var(--muted-deep)", flex: 1 }}>{hq.name}</span>
-            <span style={{ fontSize: 9.5, color: "var(--muted-deep)", fontFamily: "var(--font-mono)" }}>HQ</span>
+          <div className="dashboard-org-hq">
+            <span>{hq.name}</span>
+            <span>HQ</span>
           </div>
           {hq.agents.map((a) => (
             <button
               key={a.id}
-              onClick={() => navigate("/")}
-              style={{ display: "flex", alignItems: "center", gap: 7, width: "100%", padding: "3px 3px 3px 44px", background: "transparent", border: "none", cursor: "pointer" }}
+              onClick={() => navigate(agentLibraryRoute({ agentId: a.agentId, nodeId: a.id, firmId }))}
+              className="dashboard-org-row dashboard-org-agent dashboard-org-agent-deep"
             >
               <Dot />
-              <span style={{ fontSize: 11.5, color: "var(--ink)", flex: 1, textAlign: "left" }}>{a.name}</span>
+              <span className="dashboard-org-label">{a.name}</span>
             </button>
           ))}
         </div>
@@ -370,11 +349,11 @@ function FirmBody({ org, ko }: { org: ResolvedOrg | null | undefined; ko: boolea
       {direct.map((a) => (
         <button
           key={a.id}
-          onClick={() => navigate("/")}
-          style={{ display: "flex", alignItems: "center", gap: 7, width: "100%", padding: "3px 3px 3px 30px", background: "transparent", border: "none", cursor: "pointer" }}
+          onClick={() => navigate(agentLibraryRoute({ agentId: a.agentId, nodeId: a.id, firmId }))}
+          className="dashboard-org-row dashboard-org-agent dashboard-org-agent-mid"
         >
           <Dot />
-          <span style={{ fontSize: 11.5, color: "var(--ink)", flex: 1, textAlign: "left" }}>{a.name}</span>
+          <span className="dashboard-org-label">{a.name}</span>
         </button>
       ))}
     </>

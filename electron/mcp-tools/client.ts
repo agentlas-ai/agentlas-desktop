@@ -73,7 +73,7 @@ export async function testServerConnection(server: InstalledMcpServer): Promise<
         Object.entries(baseEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
       );
       transport = new StdioClientTransport({
-        command: server.command,
+        command: expandHome(server.command),
         args: (server.args ?? []).map(expandHome),
         // getDefaultEnvironment()는 PATH/HOME 등 안전한 기본값 — 거기에 시크릿을 얹는다.
         env: { ...stdioEnv, ...resolved },

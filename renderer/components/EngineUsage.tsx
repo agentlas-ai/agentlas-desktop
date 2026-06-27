@@ -27,18 +27,19 @@ interface EngineDef {
   auth: EngineAuth;
   cliKind?: "claude-code" | "codex" | "gemini";
   keyEnv?: string;
-  glyph: string;
+  logoSrc: string;
+  logoAlt: string;
 }
 
 const ENGINES: EngineDef[] = [
-  { id: "claude-code", label: "Claude Code", auth: "cli", cliKind: "claude-code", glyph: "C" },
-  { id: "codex", label: "Codex", auth: "cli", cliKind: "codex", glyph: "G" },
-  { id: "gemini", label: "Gemini", auth: "cli", cliKind: "gemini", glyph: "✦" },
-  { id: "deepseek", label: "DeepSeek", auth: "apikey", keyEnv: "DEEPSEEK_API_KEY", glyph: "D" },
-  { id: "grok", label: "Grok", auth: "apikey", keyEnv: "XAI_API_KEY", glyph: "x" },
-  { id: "glm", label: "GLM", auth: "apikey", keyEnv: "ZHIPU_API_KEY", glyph: "Z" },
-  { id: "pi", label: "Pi", auth: "apikey", keyEnv: "PI_API_KEY", glyph: "π" },
-  { id: "ollama", label: "Ollama", auth: "local", glyph: "O" },
+  { id: "claude-code", label: "Claude Code", auth: "cli", cliKind: "claude-code", logoSrc: "/brand/llm/claude.svg", logoAlt: "Claude" },
+  { id: "codex", label: "Codex", auth: "cli", cliKind: "codex", logoSrc: "/brand/llm/openai.svg", logoAlt: "OpenAI" },
+  { id: "gemini", label: "Gemini", auth: "cli", cliKind: "gemini", logoSrc: "/brand/llm/googlegemini.svg", logoAlt: "Google Gemini" },
+  { id: "deepseek", label: "DeepSeek", auth: "apikey", keyEnv: "DEEPSEEK_API_KEY", logoSrc: "/brand/llm/deepseek.svg", logoAlt: "DeepSeek" },
+  { id: "grok", label: "Grok", auth: "apikey", keyEnv: "XAI_API_KEY", logoSrc: "/brand/llm/x.svg", logoAlt: "xAI" },
+  { id: "glm", label: "GLM", auth: "apikey", keyEnv: "ZHIPU_API_KEY", logoSrc: "/brand/llm/zhipu.png", logoAlt: "Zhipu GLM" },
+  { id: "pi", label: "Pi", auth: "apikey", keyEnv: "PI_API_KEY", logoSrc: "/brand/llm/pi.png", logoAlt: "Pi" },
+  { id: "ollama", label: "Ollama", auth: "local", logoSrc: "/brand/llm/ollama.svg", logoAlt: "Ollama" },
 ];
 
 function windowLabel(w: UsageWindow, ko: boolean): string {
@@ -70,13 +71,13 @@ function UsageBar({ w, ko }: { w: UsageWindow; ko: boolean }) {
   const warn = pct >= WARN_PCT;
   const fill = warn ? "var(--red-deep, #c0392b)" : "var(--accent)";
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <span style={{ fontSize: 10.5, color: "var(--muted-deep)", width: 76, flexShrink: 0 }}>{windowLabel(w, ko)}</span>
-      <div style={{ flex: 1, height: 6, borderRadius: 99, background: "var(--fill-1)", overflow: "hidden" }}>
-        <div style={{ height: "100%", width: `${pct}%`, background: fill, borderRadius: 99 }} />
+    <div className="dashboard-usage-bar">
+      <span>{windowLabel(w, ko)}</span>
+      <div>
+        <div style={{ width: `${pct}%`, background: fill }} />
       </div>
-      <span style={{ fontSize: 10.5, fontFamily: "var(--font-mono)", width: 32, textAlign: "right", flexShrink: 0, color: warn ? "var(--red-deep, #c0392b)" : "var(--muted-deep)" }}>{pct}%</span>
-      <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", width: 92, textAlign: "right", flexShrink: 0, color: "var(--muted-deep)" }}>{formatReset(w.resetAt, ko)}</span>
+      <span data-warn={warn ? "true" : "false"}>{pct}%</span>
+      <span>{formatReset(w.resetAt, ko)}</span>
     </div>
   );
 }
@@ -190,18 +191,18 @@ export function EngineUsage() {
   }
 
   return (
-    <div style={{ background: "var(--paper-2)", border: "1px solid var(--paper-edge)", borderRadius: 12, overflow: "hidden" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 13px", background: "var(--fill-1)", borderBottom: collapsed ? "none" : "1px solid var(--paper-edge)" }}>
+    <div className="dashboard-engine-usage">
+      <div className="dashboard-module-head" data-collapsed={collapsed ? "true" : "false"}>
         <button
           onClick={toggleCollapsed}
           className="titlebar-nodrag"
           aria-label={ko ? "접기/펼치기" : "Toggle"}
-          style={{ background: "transparent", border: "none", cursor: "pointer", color: "var(--muted-deep)", fontSize: 10, width: 14, transform: collapsed ? "none" : "rotate(90deg)", transition: "transform .15s", padding: 0 }}
+          data-dashboard-chevron={collapsed ? "closed" : "open"}
         >
           ▶
         </button>
-        <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink)", flex: 1 }}>{ko ? "엔진 사용량" : "Engine usage"}</span>
-        <button onClick={() => void loadUsage(true)} className="titlebar-nodrag" title={ko ? "새로고침" : "Refresh"} style={{ background: "transparent", border: "none", color: "var(--muted-deep)", cursor: "pointer", fontSize: 11, padding: "2px 6px" }}>↻</button>
+        <span>{ko ? "엔진 사용량" : "Engine usage"}</span>
+        <button onClick={() => void loadUsage(true)} className="titlebar-nodrag dashboard-refresh-button" title={ko ? "새로고침" : "Refresh"}>↻</button>
       </div>
 
       {!collapsed &&
@@ -210,23 +211,25 @@ export function EngineUsage() {
           const connected = isConnected(e);
           const hasBars = connected && (u?.windows.length ?? 0) > 0;
           return (
-            <div key={e.id} style={{ display: "flex", flexDirection: "column", gap: 7, padding: "10px 13px", borderTop: "1px solid var(--paper-edge)" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-                <span style={{ width: 25, height: 25, borderRadius: 7, background: connected ? "var(--accent-soft, var(--fill-1))" : "var(--fill-1)", color: connected ? "var(--accent)" : "var(--muted-deep)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 600, flexShrink: 0 }}>{e.glyph}</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink)" }}>{e.label}</div>
-                  <div style={{ fontSize: 10.5, color: "var(--muted-deep)", fontFamily: "var(--font-mono)" }}>
+            <div key={e.id} className="dashboard-engine-row" data-connected={connected ? "true" : "false"}>
+              <div className="dashboard-engine-topline">
+                <span className="dashboard-engine-logo" aria-hidden="true">
+                  <img src={e.logoSrc} alt="" />
+                </span>
+                <span className="sr-only">{e.logoAlt}</span>
+                <div className="dashboard-engine-copy">
+                  <div>{e.label}</div>
+                  <div>
                     {connected ? statusText(e, u) : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected") : e.auth === "apikey" ? (ko ? "API 키 · 미연결" : "API key · not connected") : ko ? "미설치" : "not installed"}
                   </div>
                 </div>
                 {connected ? (
-                  <span style={{ fontSize: 14, color: "var(--green-deep, var(--accent))" }} aria-label={ko ? "연결됨" : "connected"}>✓</span>
+                  <span className="dashboard-engine-check" aria-label={ko ? "연결됨" : "connected"}>✓</span>
                 ) : (
                   <button
                     onClick={() => (e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))}
                     disabled={busy === e.id}
                     className="titlebar-nodrag"
-                    style={{ fontSize: 11.5, padding: "4px 12px", borderRadius: 8, border: "1px solid var(--accent)", color: "var(--accent)", background: "transparent", cursor: busy === e.id ? "default" : "pointer", flexShrink: 0, fontWeight: 500 }}
                   >
                     {busy === e.id ? (ko ? "연결 중…" : "Connecting…") : ko ? "연결" : "Connect"}
                   </button>
@@ -236,7 +239,7 @@ export function EngineUsage() {
               {hasBars && u!.windows.map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
 
               {keyFor === e.id && !connected && (
-                <div style={{ display: "flex", gap: 7, marginTop: 2 }}>
+                <div className="dashboard-key-editor">
                   <input
                     type="password"
                     autoFocus
@@ -245,9 +248,8 @@ export function EngineUsage() {
                     onKeyDown={(ev) => ev.key === "Enter" && void saveKey(e)}
                     placeholder={e.keyEnv}
                     className="titlebar-nodrag"
-                    style={{ flex: 1, height: 30, padding: "0 9px", fontSize: 12, fontFamily: "var(--font-mono)", background: "var(--paper-2)", border: "1px solid var(--paper-edge)", borderRadius: 8, color: "var(--ink)" }}
                   />
-                  <button onClick={() => void saveKey(e)} disabled={busy === e.id || !keyVal.trim()} className="titlebar-nodrag" style={{ fontSize: 11.5, padding: "0 13px", borderRadius: 8, border: "none", background: "var(--accent)", color: "#fff", cursor: keyVal.trim() ? "pointer" : "default", fontWeight: 500 }}>
+                  <button onClick={() => void saveKey(e)} disabled={busy === e.id || !keyVal.trim()} className="titlebar-nodrag">
                     {ko ? "저장" : "Save"}
                   </button>
                 </div>

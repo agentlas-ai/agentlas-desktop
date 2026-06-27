@@ -50,7 +50,7 @@ function ProjectPage() {
     setProject(p);
     setNoteDraft(p.contextNote ?? "");
     setChats(cs);
-    setAgents(ag);
+    setAgents(visibleAgents(ag));
     setOntology(ont);
   }, [id]);
 

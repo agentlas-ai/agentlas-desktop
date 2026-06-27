@@ -72,11 +72,11 @@ export async function buildMcpConfigFile(): Promise<McpConfigResult | null> {
         if (v) env[k] = v;
       }
       mcpServers[key] = {
-        command: s.command,
+        command: expandHome(s.command),
         args: (s.args ?? []).map(expandHome),
         ...(Object.keys(env).length ? { env } : {}),
       };
-      pushCodexConfig(codexConfigArgs, key, "command", tomlString(s.command));
+      pushCodexConfig(codexConfigArgs, key, "command", tomlString(expandHome(s.command)));
       pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray((s.args ?? []).map(expandHome)));
       if (Object.keys(env).length > 0) {
         pushCodexConfig(codexConfigArgs, key, "env", tomlInlineStringTable(env));

@@ -1218,6 +1218,10 @@ function toolView(tool: string, argsStr: string | undefined, locale: "ko" | "en"
   const name = tool.toLowerCase();
   const str = (x: unknown) => (typeof x === "string" ? x : "");
   const v = (g: ToolGroup) => VERB[g][locale];
+  if (name.includes("stormbreaker")) {
+    const label = tool.replace(/^.*Stormbreaker(?: Loop)?\s*·\s*/i, "Stormbreaker Loop · ");
+    return { group: "other", verb: locale === "ko" ? "루프" : "loop", label: squish(label) };
+  }
   if (name === "bash")
     return { group: "command", verb: v("command"), label: squish(str(a.command).split("\n")[0]) };
   if (name === "grep")

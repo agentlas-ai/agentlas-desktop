@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
 import { ipc } from "@/lib/ipc";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type {
   AgentlasSurfaceAction,
@@ -78,7 +79,7 @@ export default function LibrarySurfacesPage() {
       api.projects.list(),
     ]);
     setSurfaces(nextSurfaces);
-    setAgents(nextAgents);
+    setAgents(visibleAgents(nextAgents));
     setProjects(nextProjects);
     setSelectedId((cur) =>
       cur && nextSurfaces.some((surface) => surface.id === cur)

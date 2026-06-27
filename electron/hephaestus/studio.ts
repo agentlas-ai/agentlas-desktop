@@ -39,6 +39,12 @@ function installStudioMediaGuard(): void {
 export function studioRoot(): string | null {
   if (cachedRoot !== undefined) return cachedRoot;
   const candidates: string[] = [];
+  try {
+    candidates.push(path.join(app.getPath("home"), ".agentlas", "cloud-agent-installs", "agentlas-startup-founder-studio"));
+  } catch {
+    const home = process.env.HOME;
+    if (home) candidates.push(path.join(home, ".agentlas", "cloud-agent-installs", "agentlas-startup-founder-studio"));
+  }
   if (process.resourcesPath) candidates.push(path.join(process.resourcesPath, "studio-pack"));
   try {
     candidates.push(path.join(app.getAppPath(), "studio-pack"));
@@ -49,7 +55,12 @@ export function studioRoot(): string | null {
   candidates.push(path.join(process.cwd(), "studio-pack"));
   for (const c of candidates) {
     try {
-      if (c && fs.existsSync(path.join(c, "scripts", "open-studio-gui.py"))) {
+      const launcher = path.join(c, "scripts", "open-studio-gui.py");
+      if (c && fs.existsSync(launcher)) {
+        if (c.includes(`${path.sep}.agentlas${path.sep}cloud-agent-installs${path.sep}`)) {
+          const launcherSrc = fs.readFileSync(launcher, "utf8");
+          if (!launcherSrc.includes("studio_request_authorized")) continue;
+        }
         cachedRoot = path.resolve(c);
         return cachedRoot;
       }
@@ -83,6 +94,26 @@ function ensureWritablePack(bundled: string): string {
       if (fs.statSync(path.join(bundled, "manifest.json")).mtimeMs > fs.statSync(path.join(dest, "manifest.json")).mtimeMs) {
         needCopy = true;
       }
+    } catch {
+      /* 비교 실패 시 기존 사용 */
+    }
+  }
+  if (!needCopy) {
+    try {
+      const bundledLauncher = fs.readFileSync(path.join(bundled, "scripts", "open-studio-gui.py"), "utf8");
+      const destLauncherSrc = fs.readFileSync(destLauncher, "utf8");
+      if (bundledLauncher.includes("studio_request_authorized") && !destLauncherSrc.includes("studio_request_authorized")) {
+        needCopy = true;
+      }
+    } catch {
+      /* 비교 실패 시 기존 사용 */
+    }
+  }
+  if (!needCopy) {
+    try {
+      const bundledSeed = fs.readFileSync(path.join(bundled, "clean-studio-data.json"), "utf8");
+      const destSeed = fs.readFileSync(path.join(dest, "clean-studio-data.json"), "utf8");
+      if (bundledSeed !== destSeed) needCopy = true;
     } catch {
       /* 비교 실패 시 기존 사용 */
     }
@@ -227,6 +258,13 @@ async function startStudioInner(): Promise<StudioStartResult> {
     if (!fs.existsSync(live) && fs.existsSync(seed)) {
       fs.mkdirSync(runtimeDir, { recursive: true });
       fs.copyFileSync(seed, live);
+    } else if (fs.existsSync(live) && fs.existsSync(seed)) {
+      const liveDoc = JSON.parse(fs.readFileSync(live, "utf8"));
+      const stages = liveDoc?.ko?.stages ?? liveDoc?.en?.stages ?? {};
+      const labels = ["idea", "market", "business", "prd", "build", "deck"].map((key) => String(stages[key]?.label ?? "").trim());
+      if (labels.every((label) => label.length === 0)) {
+        fs.copyFileSync(seed, live);
+      }
     }
   } catch {
     /* 비치명적 — 시드 실패 시 런처 기본 동작 */

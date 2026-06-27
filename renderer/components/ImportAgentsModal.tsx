@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type { FirmListing, MarketplaceListing } from "@/lib/types";
-import { IconCheck, IconClose, IconSparkles, IconBuilding } from "@/components/Icon";
+import { IconCheck, IconClose, IconSparkles, IconBuilding, IconFolder } from "@/components/Icon";
 
 const BUILD_URL = "https://agentlas.cloud/build";
 
@@ -27,11 +27,14 @@ export function ImportAgentsModal({
   const [selAgents, setSelAgents] = useState<Set<string>>(new Set());
   const [selFirms, setSelFirms] = useState<Set<string>>(new Set());
   const [importing, setImporting] = useState(false);
+  const [localImporting, setLocalImporting] = useState(false);
+  const [status, setStatus] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
 
   const load = useCallback(async () => {
     const api = ipc();
     if (!api) return;
     setLoading(true);
+    setStatus(null);
     try {
       const session = await api.auth.getSession();
       setSignedIn(session.signedIn);
@@ -48,10 +51,15 @@ export function ImportAgentsModal({
       setMyAgents(mine);
       setFirms(allFirms);
       setInstalledFirmSlugs(new Set(installedFirms.map((f) => f.slug)));
+    } catch (err) {
+      setStatus({
+        tone: "error",
+        text: err instanceof Error ? err.message : t("import.error.load"),
+      });
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (open) void load();
@@ -60,9 +68,17 @@ export function ImportAgentsModal({
   async function signIn() {
     const api = ipc();
     if (!api) return;
-    const next = await api.auth.signInWithGoogle();
-    setSignedIn(next.signedIn);
-    if (next.signedIn) void load();
+    setStatus(null);
+    try {
+      const next = await api.auth.signInWithGoogle();
+      setSignedIn(next.signedIn);
+      if (next.signedIn) void load();
+    } catch (err) {
+      setStatus({
+        tone: "error",
+        text: err instanceof Error ? err.message : t("import.error.signin"),
+      });
+    }
   }
 
   function toggle(set: Set<string>, key: string, setter: (s: Set<string>) => void) {
@@ -78,17 +94,48 @@ export function ImportAgentsModal({
     const api = ipc();
     if (!api || totalSelected === 0) return;
     setImporting(true);
+    setStatus(null);
     try {
       for (const slug of selAgents) {
-        await api.team.installMine(slug).catch(() => null);
+        await api.team.installMine(slug);
       }
       for (const slug of selFirms) {
-        await api.firms.install(slug).catch(() => null);
+        await api.firms.install(slug);
       }
       await onImported();
       onClose();
+    } catch (err) {
+      setStatus({
+        tone: "error",
+        text: err instanceof Error ? err.message : t("import.error.selected"),
+      });
     } finally {
       setImporting(false);
+    }
+  }
+
+  async function importLocalFolder() {
+    const api = ipc();
+    if (!api || localImporting) return;
+    setLocalImporting(true);
+    setStatus(null);
+    try {
+      const dir = await api.fs.pickDirectory();
+      if (!dir) return;
+      const agent = await api.team.importLocalFolder(dir);
+      setStatus({
+        tone: "ok",
+        text: t("import.local_success", { name: agent.name || agent.slug }),
+      });
+      await onImported();
+      onClose();
+    } catch (err) {
+      setStatus({
+        tone: "error",
+        text: err instanceof Error ? err.message : t("import.error.local"),
+      });
+    } finally {
+      setLocalImporting(false);
     }
   }
 
@@ -144,6 +191,32 @@ export function ImportAgentsModal({
         </header>
 
         <div style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
+          <LocalImportPanel
+            title={t("import.local_title")}
+            body={t("import.local_body")}
+            action={localImporting ? t("import.importing") : t("import.local_action")}
+            busy={localImporting}
+            onImport={() => void importLocalFolder()}
+          />
+
+          {status && (
+            <div
+              role="status"
+              style={{
+                margin: "0 0 12px",
+                padding: "9px 11px",
+                borderRadius: "var(--radius-md)",
+                border: `1px solid ${status.tone === "ok" ? "rgba(34, 139, 85, 0.24)" : "rgba(194, 65, 12, 0.24)"}`,
+                background: status.tone === "ok" ? "rgba(34, 139, 85, 0.08)" : "rgba(194, 65, 12, 0.08)",
+                color: status.tone === "ok" ? "var(--green-deep)" : "#9a3412",
+                fontSize: 12,
+                lineHeight: 1.45,
+              }}
+            >
+              {status.text}
+            </div>
+          )}
+
           {loading ? (
             <div style={{ padding: 24, textAlign: "center", color: "var(--muted-deep)", fontSize: 13 }}>
               {t("import.loading")}
@@ -264,6 +337,75 @@ export function ImportAgentsModal({
           </footer>
         )}
       </div>
+    </div>
+  );
+}
+
+function LocalImportPanel({
+  title,
+  body,
+  action,
+  busy,
+  onImport,
+}: {
+  title: string;
+  body: string;
+  action: string;
+  busy: boolean;
+  onImport: () => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: 12,
+        marginBottom: 14,
+        borderRadius: "var(--radius-md)",
+        border: "1px solid var(--paper-edge)",
+        background: "var(--paper-2)",
+      }}
+    >
+      <span
+        style={{
+          width: 32,
+          height: 32,
+          borderRadius: 8,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "var(--fill-1)",
+          color: "var(--accent)",
+          flexShrink: 0,
+        }}
+      >
+        <IconFolder size={16} />
+      </span>
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <span style={{ display: "block", fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>{title}</span>
+        <span style={{ display: "block", marginTop: 2, fontSize: 11.5, color: "var(--muted-deep)", lineHeight: 1.45 }}>
+          {body}
+        </span>
+      </span>
+      <button
+        onClick={onImport}
+        disabled={busy}
+        style={{
+          flexShrink: 0,
+          padding: "7px 12px",
+          borderRadius: 8,
+          border: "1px solid var(--accent)",
+          background: "transparent",
+          color: "var(--accent)",
+          fontSize: 12,
+          fontWeight: 700,
+          cursor: busy ? "default" : "pointer",
+          opacity: busy ? 0.65 : 1,
+        }}
+      >
+        {action}
+      </button>
     </div>
   );
 }

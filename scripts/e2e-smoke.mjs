@@ -39,6 +39,16 @@ win.on("console", (m) => {
 win.on("pageerror", (e) => errors.push("PAGEERR " + String(e).slice(0, 240)));
 await win.waitForLoadState("domcontentloaded").catch(() => {});
 await win.waitForTimeout(2500);
+await win
+  .evaluate(() => {
+    window.localStorage.setItem("agentlas.onboarded", "1");
+    window.localStorage.setItem("agentlas.shellTour.dismissed.v1", "1");
+    window.sessionStorage.setItem("agentlas.import.prompted", "1");
+    window.location.href = "/dashboard";
+  })
+  .catch(() => {});
+await win.waitForLoadState("domcontentloaded").catch(() => {});
+await win.waitForTimeout(1200);
 
 async function snap(name) {
   await win.waitForTimeout(1100);
@@ -77,11 +87,16 @@ async function openTile(name, shot) {
 }
 
 await snap("00-dashboard");
+await win.evaluate(() => {
+  window.location.href = "/automation";
+});
+await win.waitForLoadState("domcontentloaded").catch(() => {});
+await snap("00b-automation");
 await hover("Agent Forge");
 if (await clickLink("/build")) await snap("01-build");
 await hover("Agent Forge");
 if (await clickLink("/library/agents")) await snap("02-agents");
-await openTile("스타트업 파운더 스튜디오", "03-startup-studio");
+await openTile("스타트업 창업자 스튜디오", "03-startup-studio");
 await openTile("크리에이티브", "04-creative-studio");
 await openTile("커머스", "05-ecommerce");
 await hover("Hub");

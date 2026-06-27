@@ -18,7 +18,7 @@ function assertPositional(value: string, label: string): string {
 }
 
 /**
- * Stormbreaker 자동 실행: 쿼리를 라우팅하고 pipeline execution_fabric 을 견고-실행한다.
+ * Stormbreaker 실행: 쿼리를 라우팅하고 가능한 pipeline execution_fabric 을 견고-실행한다.
  * bin/hephaestus 의 `route <q> --auto-run` 경로(= run_stormbreaker_query)와 동일.
  */
 export function stormbreakerRun(

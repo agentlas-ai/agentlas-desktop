@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
 import { ipc } from "@/lib/ipc";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type {
   InstalledAgent,
@@ -45,7 +46,7 @@ export default function LibraryToolsPage() {
       api.projects.list(),
     ]);
     setTools(nextTools);
-    setAgents(nextAgents);
+    setAgents(visibleAgents(nextAgents));
     setProjects(nextProjects);
     setSelectedId((cur) => (cur && nextTools.some((tool) => tool.id === cur) ? cur : nextTools[0]?.id ?? null));
   }, []);

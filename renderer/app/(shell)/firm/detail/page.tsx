@@ -4,8 +4,11 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
+import { isUserFacingAgentText, visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
+import { parseMemoryMarkdown, serializeMemoryMarkdown } from "@/lib/agent-memory";
+import { classifyAgent } from "@/lib/ownership";
 import type { Chat, InstalledAgent, InstalledFirm, ResolvedOrg, ResolvedNode, WorkspaceNode } from "@/lib/types";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import {
@@ -69,13 +72,14 @@ function FirmDetailPage() {
   const [savingFiles, setSavingFiles] = useState(false);
 
   // 스킬 주입 서랍 (Skill Evolution Drawer)
+  // 하드코딩 목록이 아니라 엔진 skills/ 디렉토리를 실제로 스캔한 카탈로그를 쓴다(실측 원칙).
   const [skillDrawerOpen, setSkillDrawerOpen] = useState(false);
-  const [availableSkills] = useState([
-    { slug: "android-cli", name: "android-cli", description: "Android 빌드 및 환경 진단 스킬" },
-    { slug: "chrome-extensions", name: "chrome-extensions", description: "크롬 확장 프로그램 매니페스트 및 API 스킬" },
-    { slug: "firebase-firestore", name: "firebase-firestore", description: "Firestore DB 스키마 설계 및 색인 관리 스킬" },
-    { slug: "xcode-project-setup", name: "xcode-project-setup", description: "iOS Xcode 프로젝트 종속성 파일 주입 스킬" }
-  ]);
+  const [availableSkills, setAvailableSkills] = useState<{ slug: string; name: string; description: string }[]>([]);
+  useEffect(() => {
+    ipc()?.skills?.listCatalog?.()
+      .then((list) => setAvailableSkills(list ?? []))
+      .catch(() => setAvailableSkills([]));
+  }, []);
 
   // 온톨로지 인박스 — 실제 보류 중인 학습 제안만 표출(가짜 데이터 없음).
   // selectedNode 의 메모리 미결 과제(openQuestions)에서 도출 → 정식 규칙 승격 후보.
@@ -148,7 +152,7 @@ function FirmDetailPage() {
       return;
     }
     setFirm(f);
-    setAgents(ag);
+    setAgents(visibleAgents(ag));
     setChats(cs);
     setResolvedOrg(org);
   }, [id]);
@@ -262,7 +266,7 @@ function FirmDetailPage() {
       setEditingPrompt(false);
       showToast("시스템 프롬프트가 성공적으로 반영되었습니다.");
     } catch (e) {
-      alert("프롬프트 저장 실패: " + String(e));
+      showToast("프롬프트 저장 실패: " + String(e));
     } finally {
       setSavingFiles(false);
     }
@@ -283,7 +287,7 @@ function FirmDetailPage() {
       setPromptDraft(newPromptContent);
       showToast("자가 진화 제안이 성공적으로 프롬프트에 병합되었습니다.");
     } catch (e) {
-      alert("진화 적용 실패: " + String(e));
+      showToast("진화 적용 실패: " + String(e));
     } finally {
       setSavingFiles(false);
     }
@@ -295,14 +299,17 @@ function FirmDetailPage() {
     if (!api || !selectedNode || !selectedNode.agentId) return;
     setSavingFiles(true);
     try {
-      const serialized = serializeMemoryMarkdown(updated.decisions, updated.gotchas, updated.openQuestions);
+      const serialized = serializeMemoryMarkdown(updated.decisions, updated.gotchas, updated.openQuestions, {
+        header:
+          "# Oberon Film Studio — Memory\n\n작품 간(cross-production)에 유지할 학습·결정·게이트 근거를 적는다. 작품별 휘발 상태는 여기 두지 않는다.\n\n",
+      });
       const memFile = agentFiles.find((e) => e.name.toLowerCase() === "memory.md");
       const path = memFile ? memFile.path : "memory.md";
       await api.agentFiles.write(selectedNode.agentId, path, serialized);
       setMemoryContent(serialized);
       setMemoryParsed(updated);
     } catch (e) {
-      alert("메모리 갱신 실패: " + String(e));
+      showToast("메모리 갱신 실패: " + String(e));
     } finally {
       setSavingFiles(false);
     }
@@ -612,13 +619,26 @@ function MiniNodeAvatar({ node, active, onClick }: { node: { name: string; role?
 
 // ── 정규화된 3-tier 조직 렌더 (사이드바 내부) ──────────
 function ResolvedOrgChart({ org, selectedId, onSelect }: { org: ResolvedOrg; selectedId: string | null; onSelect: (node: ResolvedNode) => void }) {
+  const divisions = org.divisions.filter(
+    (division) =>
+      isUserFacingAgentText(division.name, division.role) ||
+      division.specialists.some((specialist) => isUserFacingAgentText(specialist.name, specialist.role)),
+  );
+  const showCeo = isUserFacingAgentText(org.ceo.name, org.ceo.role);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <OrgNodeCard node={org.ceo} tier={1} active={selectedId === org.ceo.id} onClick={() => onSelect(org.ceo)} />
-      {org.divisions.map((d) => (
-        <div key={d.id}>
-          <OrgNodeCard node={d} tier={2} active={selectedId === d.id} onClick={() => onSelect(d)} />
-          {d.specialists.length > 0 && (
+      {showCeo && <OrgNodeCard node={org.ceo} tier={1} active={selectedId === org.ceo.id} onClick={() => onSelect(org.ceo)} />}
+      {divisions.map((d) => {
+        const specialists = d.specialists.filter((specialist) => isUserFacingAgentText(specialist.name, specialist.role));
+        const showDivision = isUserFacingAgentText(d.name, d.role);
+        return (
+          <div key={d.id}>
+            {showDivision ? (
+              <OrgNodeCard node={d} tier={2} active={selectedId === d.id} onClick={() => onSelect(d)} />
+            ) : (
+              <OrgGroupLabel node={d} />
+            )}
+            {specialists.length > 0 && (
             <div
               style={{
                 marginLeft: 16,
@@ -630,13 +650,24 @@ function ResolvedOrgChart({ org, selectedId, onSelect }: { org: ResolvedOrg; sel
                 marginTop: 6,
               }}
             >
-              {d.specialists.map((s) => (
+              {specialists.map((s) => (
                 <OrgNodeCard key={s.id} node={s} tier={3} active={selectedId === s.id} onClick={() => onSelect(s)} />
               ))}
             </div>
-          )}
-        </div>
-      ))}
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function OrgGroupLabel({ node }: { node: ResolvedNode }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", color: "var(--muted-deep)" }}>
+      <span style={{ width: 26, height: 1, background: "var(--paper-edge)", flexShrink: 0 }} />
+      <strong style={{ fontSize: 11.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.name}</strong>
+      <span style={{ marginLeft: "auto", fontSize: 9.5, fontFamily: "var(--font-mono)" }}>HQ</span>
     </div>
   );
 }
@@ -709,7 +740,7 @@ function OrgChart({
   if (!ceo) return <div style={{ fontSize: 12, color: "var(--muted)" }}>조직도가 비어있습니다.</div>;
 
   function children(parentSlug: string) {
-    return firm.orgChart.filter((n) => n.reportsTo === parentSlug);
+    return firm.orgChart.filter((n) => n.reportsTo === parentSlug && isUserFacingAgentText(n.agentSlug, n.role));
   }
 
   function renderNode(node: typeof firm.orgChart[number], depth: number): React.ReactNode {
@@ -787,7 +818,10 @@ function OrgChart({
     );
   }
 
-  return renderNode(ceo, 0);
+  if (isUserFacingAgentText(ceo.agentSlug, ceo.role)) return renderNode(ceo, 0);
+  const roots = children(ceo.agentSlug);
+  if (roots.length === 0) return <div style={{ fontSize: 12, color: "var(--muted)" }}>표시할 에이전트가 없습니다.</div>;
+  return <>{roots.map((node) => renderNode(node, 0))}</>;
 }
 
 // ── 3. 에이전트 상세 컨트롤 타워 뷰 컴포넌트 ──────────
@@ -1638,6 +1672,18 @@ function AgentDetailView({
                     <div><strong>에이전트 ID:</strong> {node.agentId ?? "미설치(임시)"}</div>
                     <div><strong>권장 엔진:</strong> {agent?.preferredBackend ?? "자동 라우팅"}</div>
                     <div><strong>신뢰 등급:</strong> Trust {agent?.trustGrade ?? "B"}</div>
+                    {agent && (() => {
+                      const own = classifyAgent(agent);
+                      return (
+                        <div className="agent-ownership-row" data-owned={own.owned ? "true" : "false"}>
+                          <strong>소유:</strong>{" "}
+                          <span className="agent-ownership-badge" data-owned={own.owned ? "true" : "false"}>
+                            {own.owned ? "내 직원 · owned" : "빌린 게스트 · borrowed"}
+                          </span>
+                          <div className="agent-ownership-path">{own.localPath ?? own.origin}</div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
@@ -2401,86 +2447,6 @@ function AgentDetailView({
   );
 }
 
-// ── 4. memory.md 파서 / 직렬화 유틸리티 ───────────────
-function parseMemoryMarkdown(content: string) {
-  const decisions: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[] = [];
-  const gotchas: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[] = [];
-  const openQuestions: { id: string; title: string; content: string }[] = [];
-
-  const lines = content.split("\n");
-  let currentSection: "decisions" | "gotchas" | "open" | null = null;
-
-  for (let line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("## Decisions") || trimmed.startsWith("## 의사결정") || trimmed.toLowerCase().includes("decisions")) {
-      currentSection = "decisions";
-      continue;
-    } else if (trimmed.startsWith("## Gotchas") || trimmed.startsWith("## 주의사항") || trimmed.toLowerCase().includes("gotchas")) {
-      currentSection = "gotchas";
-      continue;
-    } else if (trimmed.startsWith("## Open") || trimmed.startsWith("## 미결") || trimmed.toLowerCase().includes("open")) {
-      currentSection = "open";
-      continue;
-    } else if (trimmed.startsWith("##")) {
-      currentSection = null;
-      continue;
-    }
-
-    if (currentSection) {
-      // Parse: - **Title**: Description
-      const bulletMatch =
-        trimmed.match(/^-\s+\*\*(.*?)\*\*(?:(?:\s*—\s*)|(?:\s*-\s*)|(?:\s*:\s*)|(?:\s+))(.*)/) ||
-        trimmed.match(/^-\s+\*\*(.*?)\*\*(.*)/);
-
-      if (bulletMatch) {
-        const title = bulletMatch[1].trim();
-        const body = bulletMatch[2].trim();
-        const id = title.replace(/\s+/g, "-").toLowerCase();
-        const item = { id, title, content: body, synced: Math.random() > 0.4, enabled: true };
-        if (currentSection === "decisions") decisions.push(item);
-        else if (currentSection === "gotchas") gotchas.push(item);
-        else if (currentSection === "open") openQuestions.push(item);
-      } else if (trimmed.startsWith("-")) {
-        const body = trimmed.substring(1).trim();
-        if (body) {
-          const title = body.substring(0, Math.min(25, body.length)) + "...";
-          const id = "item-" + Math.random().toString(36).substr(2, 9);
-          const item = { id, title, content: body, synced: Math.random() > 0.4, enabled: true };
-          if (currentSection === "decisions") decisions.push(item);
-          else if (currentSection === "gotchas") gotchas.push(item);
-          else if (currentSection === "open") openQuestions.push(item);
-        }
-      }
-    }
-  }
-
-  return { decisions, gotchas, openQuestions };
-}
-
-function serializeMemoryMarkdown(
-  decisions: { title: string; content: string }[],
-  gotchas: { title: string; content: string }[],
-  openQuestions: { title: string; content: string }[]
-) {
-  let md = `# Oberon Film Studio — Memory\n\n작품 간(cross-production)에 유지할 학습·결정·게이트 근거를 적는다. 작품별 휘발 상태는 여기 두지 않는다.\n\n`;
-  
-  md += `## Decisions\n\n`;
-  decisions.forEach((item) => {
-    md += `- **${item.title}**: ${item.content}\n`;
-  });
-  
-  md += `\n## Gotchas\n\n`;
-  gotchas.forEach((item) => {
-    md += `- **${item.title}**: ${item.content}\n`;
-  });
-  
-  md += `\n## Open\n\n`;
-  openQuestions.forEach((item) => {
-    md += `- **${item.title}**: ${item.content}\n`;
-  });
-  
-  return md;
-}
 
 // ── 시스템 프롬프트 세부 지시 구조화 파서 ──
 function parsePromptSections(content: string) {
@@ -2541,4 +2507,3 @@ function parsePromptSections(content: string) {
   
   return sections;
 }
-

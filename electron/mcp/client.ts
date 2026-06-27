@@ -5,8 +5,17 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
-// Stormbreaker 슈퍼바이저 — 모든 실행을 Hephaestus 견고-실행 규율로 감독(비차단·실패-무해).
+// Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
 import { superviseStormbreaker, type StormbreakerHandle } from "../hephaestus/stormbreaker-supervisor";
+import {
+  buildStormbreakerLongRunPrompt,
+  buildStormbreakerContinuationPrompt,
+  STORMBREAKER_LONG_RUN_SCHEDULE,
+  STORMBREAKER_LOOP_PROTOCOL,
+  STORMBREAKER_MAX_EXECUTION_PASSES,
+  STORMBREAKER_MAX_REPAIR_PASSES,
+  stripStormbreakerContinueMarker,
+} from "../hephaestus/loop-engineering";
 import { getAgentById, listInstalledAgents } from "./registry";
 import {
   autoRouteStatus,
@@ -37,9 +46,10 @@ import { SURFACE_PROTOCOL, parseSurfaces, type SurfaceManifestDiagnostic } from 
 import { runHandsFreeAgentOs, shouldRunHandsFreeAgentOs } from "../agent-os/hands-free";
 import { prepareCreativeAdPackManifest } from "../creative-pack/surface";
 import { prepareEcommerceOpsManifest } from "../ecommerce-pack/surface";
-import { createAutomation } from "../store/automations";
+import { createAutomation, listAutomations } from "../store/automations";
 import { recordAgentSurface } from "../store/agent-surfaces";
 import { getAgentApp } from "../store/agent-apps";
+import { autoSelectMcpTools, buildMcpAutoSelectionPrompt } from "../mcp-tools/auto-select";
 import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
 import { buildRunnerEnv } from "../runtime/env-resolver";
 import { type Runner, SURFACE_INTENT_MARKER } from "../runtime/runner";
@@ -330,7 +340,7 @@ export async function runMcpInvocation(
   req: McpInvocationRequest,
   sink: EventSink,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<{ finalText?: string; tokens?: number; stormbreakerContinueRequested: boolean }> {
   // 한 마이크로태스크 양보 — ipc:run 핸들러가 { runId }를 반환하고 렌더러가 이벤트 채널을
   // 구독한 뒤에야 sink가 발화하도록 보장한다. 이게 없으면 동기 early-return(no-chat/no-agent)
   // 에러가 구독 전에 발화돼 렌더러가 종료 이벤트를 놓치고 busy(정지 버튼)가 영구 고착된다.
@@ -339,12 +349,12 @@ export async function runMcpInvocation(
   const chat = getChat(req.chatId);
   if (!chat) {
     sink({ kind: "error", error: { code: "no-chat", message: tStatus(locale, "errChatNotFound") } });
-    return;
+    return { stormbreakerContinueRequested: false };
   }
   let agent = getAgentById(chat.agentId);
   if (!agent) {
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
-    return;
+    return { stormbreakerContinueRequested: false };
   }
   const targetApp = req.targetAppId ? getAgentApp(req.targetAppId) : null;
   const isTargetAppEdit = Boolean(targetApp && req.targetAppAction === "edit");
@@ -359,7 +369,7 @@ export async function runMcpInvocation(
             : `Could not find the App to edit: ${req.targetAppId}`,
       },
     });
-    return;
+    return { stormbreakerContinueRequested: false };
   }
   const effectiveUserPrompt = isTargetAppEdit && targetApp
     ? buildAppEditUserPrompt(req.userPrompt, targetApp, locale)
@@ -406,12 +416,12 @@ export async function runMcpInvocation(
       },
       sink,
     );
-    if (handled) return;
+    if (handled) return { stormbreakerContinueRequested: false };
     sink({
       kind: "error",
       error: { code: "no-runtime", message: tStatus(locale, "errNoRuntime") },
     });
-    return;
+    return { stormbreakerContinueRequested: false };
   }
 
   if (runtimeChoice.unavailableOverride) {
@@ -437,7 +447,7 @@ export async function runMcpInvocation(
       },
       sink,
     );
-    if (handled) return;
+    if (handled) return { stormbreakerContinueRequested: false };
     sink({
       kind: "error",
       error: {
@@ -448,18 +458,36 @@ export async function runMcpInvocation(
         }),
       },
     });
-    return;
+    return { stormbreakerContinueRequested: false };
   }
 
   // ── MCP 툴 브리지 ──────────────────────────────────────────
-  // Claude Code/Codex 러너 + write/full 권한일 때만, 설치·활성 MCP 서버(브라우저 Playwright 포함)를
-  // 런타임별 설정으로 직렬화해 넘긴다. read 권한이나 다른 런타임에서는 생략.
+  // Claude Code/Codex 러너에는 요청/에이전트 문맥으로 필요한 MCP 플러그인을 자동 선택한 뒤
+  // 런타임별 설정으로 직렬화해 넘긴다. env가 필요한 플러그인은 vault 값이 있을 때만 자동 설치한다.
   let mcpConfigPath: string | undefined;
   let mcpAllowedTools: string[] | undefined;
   let mcpCodexConfigArgs: string[] | undefined;
+  let mcpAutoSelectionPrompt = "";
   const runtimeCanUseMcp = active.kind === "claude-code" || active.kind === "codex";
-  if (runtimeCanUseMcp && (req.permissions === "write" || req.permissions === "full")) {
+  if (runtimeCanUseMcp) {
     try {
+      const selectedTools = await autoSelectMcpTools({
+        userPrompt: effectiveUserPrompt,
+        systemPrompt: agent.systemPrompt,
+        agentName: agent.nameEn || agent.name,
+        workingFolder,
+      });
+      mcpAutoSelectionPrompt = buildMcpAutoSelectionPrompt(selectedTools);
+      const installedTools = selectedTools.filter((tool) => tool.installed);
+      if (installedTools.length > 0) {
+        sink({
+          kind: "tool-use",
+          tool: {
+            name: "Agentlas Plugins · auto-select",
+            result: installedTools.map((tool) => `${tool.id}: ${tool.reason}`).join("\n"),
+          },
+        });
+      }
       const cfg = await buildMcpConfigFile();
       if (cfg) {
         mcpConfigPath = cfg.configPath;
@@ -504,7 +532,7 @@ export async function runMcpInvocation(
           const msg = err instanceof Error ? err.message : String(err);
           sink({ kind: "error", error: { code: "firm-failed", message: msg } });
         }
-        return;
+        return { stormbreakerContinueRequested: false };
       }
     }
   }
@@ -568,6 +596,9 @@ export async function runMcpInvocation(
   }
   // 모든 대화에 메모리 이벤트 emitter를 동봉 → 큐레이터가 전역적으로 기억을 관리.
   systemPrompt = `${systemPrompt}\n\n${MEMORY_EMITTER_BLOCK}`;
+  if (mcpAutoSelectionPrompt) systemPrompt = `${systemPrompt}\n\n${mcpAutoSelectionPrompt}`;
+  // Stormbreaker Loop — 일반 채팅과 백그라운드 자동화 모두 같은 목표 분해/연속 실행 계약을 공유한다.
+  systemPrompt = `${systemPrompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`;
   // 사용자 채팅에서만 자동화 생성 protocol 주입 (백그라운드 automation 실행 세션은 제외 → 재귀 방지)
   if (chat.kind !== "division") systemPrompt = `${systemPrompt}\n\n${AUTOMATION_PROTOCOL}`;
 
@@ -624,6 +655,55 @@ export async function runMcpInvocation(
         sink({ kind: "tool-use", tool: { name, args, result, id, isError } }),
     };
     let result = await picked.runner(runnerReq, runnerEvents);
+    for (let pass = 2; pass <= STORMBREAKER_MAX_EXECUTION_PASSES; pass += 1) {
+      const continuation = stripStormbreakerContinueMarker(result.text);
+      if (!continuation.shouldContinue || signal?.aborted) {
+        result = { ...result, text: continuation.text };
+        break;
+      }
+      result = { ...result, text: continuation.text };
+      stormbreaker?.continuePass({
+        pass,
+        reason: "runner reported more safe Stormbreaker work remains",
+      });
+      result = await picked.runner(
+        {
+          ...runnerReq,
+          userPrompt: buildStormbreakerContinuationPrompt(result.text, pass),
+          images: undefined,
+        },
+        runnerEvents,
+      );
+    }
+    const finalContinuation = stripStormbreakerContinueMarker(result.text);
+    const stormbreakerContinueRequested = finalContinuation.shouldContinue;
+    result = { ...result, text: finalContinuation.text };
+    if (stormbreakerContinueRequested && chat.kind !== "division") {
+      const marker = `Source chat: ${chat.id}`;
+      const exists = listAutomations().some((automation) => automation.enabled && automation.promptTemplate.includes(marker));
+      if (!exists) {
+        createAutomation({
+          name: `Stormbreaker continuation · ${chat.title || agent.name}`,
+          scheduleHuman: STORMBREAKER_LONG_RUN_SCHEDULE,
+          targetType: chat.firmId ? "firm" : "agent",
+          targetId: chat.firmId ?? chat.agentId,
+          promptTemplate: buildStormbreakerLongRunPrompt({
+            sourceChatId: chat.id,
+            previousOutput: result.text,
+            userPrompt: req.userPrompt,
+            workingFolder,
+          }),
+          createdBy: "agent",
+        });
+        sink({
+          kind: "tool-use",
+          tool: {
+            name: "Stormbreaker Loop · long-run",
+            result: `More safe work remains after ${STORMBREAKER_MAX_EXECUTION_PASSES} immediate passes. Queued a hidden ${STORMBREAKER_LONG_RUN_SCHEDULE} continuation that reuses its own durable session and disables itself when the marker stops.`,
+          },
+        });
+      }
+    }
 
     // 2차 패스(모델 판단 surface 게이트): 1차에서 무거운 SURFACE_PROTOCOL을 안 줬는데 모델이
     // "이건 surface가 낫다"고 판단해 마커만 냈으면 → 풀 프로토콜을 강제 주입(forceSurface)하고 재호출.
@@ -658,19 +738,27 @@ export async function runMcpInvocation(
     }
     try {
       let surfaceParse = parseSurfaces(displayText);
-      const originalSurfaceCleanedText = surfaceParse.cleanedText || displayText;
-      if (
-        surfaceParse.surfaces.length === 0 &&
-        surfaceParse.errors.length > 0 &&
-        displayText.includes("<<agentlas-surface>>")
-      ) {
+      let surfaceText = displayText;
+      let surfaceVisibleText = surfaceParse.cleanedText || displayText;
+      for (let repairAttempt = 1; repairAttempt <= STORMBREAKER_MAX_REPAIR_PASSES; repairAttempt += 1) {
+        const needsRepair =
+          surfaceParse.surfaces.length === 0 &&
+          surfaceParse.errors.length > 0 &&
+          surfaceText.includes("<<agentlas-surface>>");
+        if (!needsRepair) break;
         try {
-          sink({ kind: "tool-use", status: "Repairing Agentlas surface manifest" });
+          const reason = surfaceParse.errors.slice(0, 2).join("; ") || "surface manifest validation failed";
+          stormbreaker?.repair({
+            stage: "Agentlas surface manifest",
+            reason,
+            attempt: repairAttempt,
+          });
+          sink({ kind: "tool-use", status: `Repairing Agentlas surface manifest (${repairAttempt}/${STORMBREAKER_MAX_REPAIR_PASSES})` });
           const repaired = await picked.runner(
             {
               systemPrompt,
               history,
-              userPrompt: buildSurfaceRepairPrompt(displayText, surfaceParse.errors, surfaceParse.diagnostics),
+              userPrompt: buildSurfaceRepairPrompt(surfaceText, surfaceParse.errors, surfaceParse.diagnostics),
               images: undefined,
               backendLabel: picked.label,
               model: active.model ?? undefined,
@@ -692,15 +780,21 @@ export async function runMcpInvocation(
                 sink({ kind: "tool-use", tool: { name, args, result, id, isError } }),
             },
           );
-          const repairedParse = parseSurfaces(repaired.text);
+          const repairedText = repaired.text.split(SURFACE_INTENT_MARKER).join("").trim();
+          const repairedParse = parseSurfaces(repairedText);
           if (repairedParse.surfaces.length > 0) {
             surfaceParse = repairedParse;
+            surfaceVisibleText = repairedParse.cleanedText || surfaceVisibleText;
+            break;
           }
+          surfaceText = repairedText;
+          surfaceParse = repairedParse;
         } catch (err) {
           console.error("[surface] repair failed:", err);
+          break;
         }
       }
-      displayText = originalSurfaceCleanedText;
+      displayText = surfaceParse.surfaces.length > 0 ? (surfaceParse.cleanedText || surfaceVisibleText) : surfaceVisibleText;
       if (surfaceParse.surfaces.length === 0) {
         const seededEcommerceSurface = prepareEcommerceOpsManifest({
           prompt: req.userPrompt,
@@ -807,8 +901,10 @@ export async function runMcpInvocation(
 
     appendChatMessage(chat.id, "assistant", displayText);
     sink({ kind: "final", text: displayText, tokens: result.tokens });
+    return { finalText: displayText, tokens: result.tokens, stormbreakerContinueRequested };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     sink({ kind: "error", error: { code: "runner-failed", message: msg } });
+    return { stormbreakerContinueRequested: false };
   }
 }

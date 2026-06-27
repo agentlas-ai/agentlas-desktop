@@ -2,9 +2,10 @@
 // 실행 = 타깃(firm/agent)의 백그라운드(division) chat을 만들어 runMcpInvocation로 promptTemplate을 돌린다.
 // (M1: 인프로세스 타이머. 앱이 꺼져 있으면 안 돎 — launchd persistent 데몬은 후속 작업.)
 import type { Automation } from "../shared/types";
-import { dueAutomations, markAutomationRun } from "./store/automations";
-import { createChat } from "./store/chats";
+import { dueAutomations, markAutomationRun, toggleAutomation } from "./store/automations";
+import { getOrCreateAutomationSession } from "./store/chats";
 import { runMcpInvocation } from "./mcp/client";
+import { isStormbreakerLongRunPrompt } from "./hephaestus/loop-engineering";
 
 let timer: ReturnType<typeof setInterval> | null = null;
 const running = new Set<string>();
@@ -13,19 +14,21 @@ async function runOne(a: Automation): Promise<void> {
   if (running.has(a.id)) return; // 직전 실행이 아직 진행 중이면 건너뜀
   running.add(a.id);
   try {
-    const chat = createChat({
+    const chat = getOrCreateAutomationSession({
+      automationId: a.id,
       ...(a.targetType === "firm" ? { firmId: a.targetId } : { agentId: a.targetId }),
-      kind: "division", // 사이드바에 안 보이는 백그라운드 세션
-      title: `⚙ ${a.name}`,
     });
     const controller = new AbortController();
-    await runMcpInvocation(
+    const result = await runMcpInvocation(
       { chatId: chat.id, userPrompt: a.promptTemplate, permissions: "write" },
       () => {
         /* 백그라운드 실행 — UI 싱크 없음. 결과는 chat 메시지에 영속됨. */
       },
       controller.signal,
     );
+    if (isStormbreakerLongRunPrompt(a.promptTemplate) && !result.stormbreakerContinueRequested) {
+      toggleAutomation(a.id, false);
+    }
   } catch (err) {
     console.error(`[automation] run failed (${a.name}):`, err);
   } finally {

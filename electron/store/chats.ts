@@ -151,6 +151,27 @@ export function getOrCreateDivisionSession(
   });
 }
 
+/** 자동화별 숨김 지속 세션을 찾거나 만든다.
+ *  recurring work가 매 실행마다 새 대화로 초기화되지 않고 이전 결과/차단 상태를 이어받게 한다. */
+export function getOrCreateAutomationSession(input: {
+  automationId: string;
+  agentId?: string;
+  firmId?: string | null;
+}): Chat {
+  const marker = `⟦automation⟧${input.automationId}`;
+  const db = getDb();
+  const existing = db
+    .prepare("SELECT * FROM chats WHERE kind = 'division' AND title = ? LIMIT 1")
+    .get(marker) as ChatRow | undefined;
+  if (existing) return toChat(existing);
+  return createChat({
+    agentId: input.agentId,
+    firmId: input.firmId ?? null,
+    title: marker,
+    kind: "division",
+  });
+}
+
 export function renameChat(id: string, title: string): Chat {
   // 빈 문자열 허용 — UI는 fallback 라벨 표시
   getDb()

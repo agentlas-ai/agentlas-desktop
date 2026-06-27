@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import Link from "next/link";
 import {
   IconBuilding,
@@ -15,7 +16,11 @@ import {
   IconCheck,
 } from "@/components/Icon";
 import { ipc, ipcEvents } from "@/lib/ipc";
-import type { HephaestusBuildEvent, HephaestusStatus } from "@/lib/types";
+import { navigate } from "@/lib/navigation";
+import { useT } from "@/lib/i18n";
+import { KeyStatusBanner } from "@/components/KeyStatusBanner";
+import { MARGIN_LINE_KO, MARGIN_LINE_EN } from "@/lib/receipts";
+import type { DirListing, HephaestusBuildEvent, HephaestusStatus } from "@/lib/types";
 
 type Mode = "single" | "team" | "package";
 type Phase = "idle" | "running" | "done" | "error";
@@ -26,41 +31,54 @@ interface LogLine {
   text: string;
 }
 
-const MODES: { id: Mode; label: string; desc: string; icon: typeof IconBuilding }[] = [
-  { id: "single", label: "단일 에이전트", desc: "설치 가능한 워커 하나 — 메모리·스킬·자가진화", icon: IconWand },
-  { id: "team", label: "멀티 에이전트 팀", desc: "오케스트레이터·PM·큐레이터·정책게이트·워커 조직", icon: IconUsers },
-  { id: "package", label: "기존 에이전트 패키징", desc: "외부/로컬 에이전트를 Agentlas 아키텍처로 변환·복구", icon: IconBuilding },
+const MODES: { id: Mode; label: string; labelEn: string; desc: string; descEn: string; icon: typeof IconBuilding }[] = [
+  { id: "single", label: "단일 에이전트", labelEn: "Single agent", desc: "설치 가능한 워커 하나 — 메모리·스킬·자가진화", descEn: "One installable worker — memory, skills, self-evolution", icon: IconWand },
+  { id: "team", label: "멀티 에이전트 팀", labelEn: "Multi-agent team", desc: "오케스트레이터·PM·큐레이터·정책게이트·워커 조직", descEn: "Orchestrator, PM, curator, policy gate, worker org", icon: IconUsers },
+  { id: "package", label: "기존 에이전트 패키징", labelEn: "Package existing agent", desc: "외부/로컬 에이전트를 Agentlas 아키텍처로 변환·복구", descEn: "Convert/repair an external or local agent into Agentlas", icon: IconBuilding },
+];
+
+// 빌드 첫 진입 빈 화면을 없애는 스타터(value-first). 클릭하면 요청 입력을 채운다.
+const STARTERS: { ko: string; en: string; prompt: string }[] = [
+  { ko: "인스타 마케팅 운영팀", en: "Instagram marketing team", prompt: "인스타그램 마케팅을 운영하는 에이전트 팀 — 콘텐츠 기획, 카피, 해시태그, 게시 일정 관리" },
+  { ko: "경리 자동화 에이전트", en: "Bookkeeping automation agent", prompt: "영수증·세금계산서를 분류하고 월 정산표를 만드는 경리 자동화 에이전트" },
+  { ko: "리서치 애널리스트", en: "Research analyst", prompt: "주제를 받아 출처를 모으고 사실검증한 뒤 요약 리포트를 쓰는 리서치 애널리스트 에이전트" },
 ];
 
 // /hep-build 의 표준 파이프라인 단계 — 빌더 에이전트 규율(모드 분류 → 인터뷰/리서치 게이트 →
 // 패키지 생성 → 검증 → 배포)을 시각화한다.
-const STAGES: { key: string; label: string; sub: string; icon: typeof IconRoute; color: string }[] = [
-  { key: "classify", label: "모드 분류", sub: "단일 · 팀 · 패키지 판정", icon: IconRoute, color: "#4DABF7" },
-  { key: "research", label: "인터뷰 & 리서치", sub: "요구사항 인터뷰 · 공식 소스 조사", icon: IconSearch, color: "#9775FA" },
-  { key: "generate", label: "패키지 생성", sub: "AGENTS.md · 어댑터 · .agentlas 파일 작성", icon: IconWand, color: "#F783AC" },
-  { key: "verify", label: "검증", sub: "정적 보안 스캔 · 패키지 무결성", icon: IconShield, color: "#4DD4AC" },
-  { key: "deliver", label: "배포", sub: "라이브러리 설치 · Cloud/Hub 업로드", icon: IconStore, color: "#FFA94D" },
+const STAGES: { key: string; label: string; labelEn: string; sub: string; subEn: string; icon: typeof IconRoute; color: string }[] = [
+  { key: "classify", label: "모드 분류", labelEn: "Classify", sub: "단일 · 팀 · 패키지 판정", subEn: "single · team · package", icon: IconRoute, color: "#4DABF7" },
+  { key: "research", label: "인터뷰 & 리서치", labelEn: "Interview & research", sub: "요구사항 인터뷰 · 공식 소스 조사", subEn: "requirements interview · source research", icon: IconSearch, color: "#9775FA" },
+  { key: "generate", label: "패키지 생성", labelEn: "Generate package", sub: "AGENTS.md · 어댑터 · .agentlas 파일 작성", subEn: "AGENTS.md · adapters · .agentlas files", icon: IconWand, color: "#F783AC" },
+  { key: "verify", label: "검증", labelEn: "Verify", sub: "정적 보안 스캔 · 패키지 무결성", subEn: "static security scan · package integrity", icon: IconShield, color: "#4DD4AC" },
+  { key: "deliver", label: "배포", labelEn: "Deliver", sub: "라이브러리 설치 · Cloud/Hub 업로드", subEn: "install to library · Cloud/Hub upload", icon: IconStore, color: "#FFA94D" },
 ];
 
-const ACTION_CONTRACTS = [
-  { label: "hep-build", desc: "요청을 설치 가능한 Agentlas 패키지로 생성", icon: IconWand },
-  { label: "install", desc: "현재 폴더를 Agents Library와 Chat 라우팅에 등록", icon: IconCheck },
-  { label: "Cloud private", desc: "검토용 비공개 링크로 업로드", icon: IconBolt },
-  { label: "Hub public", desc: "공개 Marketplace 제출 흐름으로 업로드", icon: IconStore },
-];
-
-// 이벤트 신호에서 도달한 최대 단계 인덱스를 추정(전진 전용).
+// 파이프라인 단계 매핑 — 엔진이 emit하는 "실제 신호"에 1:1로 묶는다(가짜 추정 금지).
+// 엔진(electron/hephaestus/builder.ts)이 보내는 실제 stage:
+//   · stage:"build"  → 빌더 시작(분류 완료, 인터뷰/리서치 진입) → index 1
+//   · stage:<도구명> (write/edit/create 등 파일 쓰기) → 패키지 생성 → index 2
+//   · stage:"security" → 정적 보안 스캔 = 검증 → index 3
+//   · done → 전부 완료(배포 가능) → index 5(=STAGES.length)
+// 그 외 partial/log 는 LLM 가동 신호이므로 최소 인터뷰/리서치(index 1)로만 본다.
 const WRITE_SIGNALS = /write|edit|create|touch|mkdir|apply_patch|str_replace|\.md|agentlas\.json|\.agentlas|파일|생성|scaffold/i;
 function stageFromEvent(ev: HephaestusBuildEvent, current: number): number {
-  const t = `${ev.stage ?? ""} ${ev.text ?? ""}`;
   if (ev.kind === "done") return STAGES.length; // 전부 완료
-  if (ev.kind === "stage" && (ev.stage === "security" || /보안|security/i.test(t))) return Math.max(current, 3);
-  if (WRITE_SIGNALS.test(t)) return Math.max(current, 2); // 파일 쓰기 = 생성 단계
-  if (ev.kind === "partial" || ev.kind === "log" || ev.kind === "stage") return Math.max(current, 1); // LLM 가동 = 인터뷰/리서치
+  // 엔진의 명시적 stage 필드를 최우선으로 본다(계약 기반).
+  if (ev.kind === "stage") {
+    if (ev.stage === "security") return Math.max(current, 3); // 검증
+    if (ev.stage === "build") return Math.max(current, 1); // 빌더 시작 = 인터뷰/리서치
+    // tool 이름이 파일 쓰기면 생성 단계.
+    if (WRITE_SIGNALS.test(`${ev.stage ?? ""} ${ev.text ?? ""}`)) return Math.max(current, 2);
+    return Math.max(current, 1);
+  }
+  if (ev.kind === "partial" || ev.kind === "log") return Math.max(current, 1);
   return current;
 }
 
 export default function BuildPage() {
+  const { locale } = useT();
+  const ko = locale === "ko";
   const [status, setStatus] = useState<HephaestusStatus | null>(null);
   const [request, setRequest] = useState("");
   const [mode, setMode] = useState<Mode | "">("");
@@ -69,6 +87,8 @@ export default function BuildPage() {
   const [log, setLog] = useState<LogLine[]>([]);
   const [reached, setReached] = useState(0); // 도달한 최대 단계(0..STAGES.length)
   const [errored, setErrored] = useState(false);
+  // 빌드 done 시 엔진이 첨부하는 실제 결과(생성 폴더 + 보안 스캔). 산출물 미리보기/검증 게이트가 소비.
+  const [result, setResult] = useState<{ workspace: string; securityScan: unknown } | null>(null);
   const runIdRef = useRef<string | null>(null);
   const unsubRef = useRef<null | (() => void)>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
@@ -104,6 +124,7 @@ export default function BuildPage() {
     setPhase("running");
     setErrored(false);
     setReached(0);
+    setResult(null);
     setLog([{ kind: "stage", text: "빌더 초기화 — Hephaestus 빌더 에이전트 가동" }]);
 
     const { runId } = await api.hephaestus.build({ request: request.trim(), mode: mode || undefined, workspace });
@@ -126,6 +147,8 @@ export default function BuildPage() {
         setLog((prev) => [...prev, { kind: "log", text: e.text ?? "" }]);
       } else if (e.kind === "done") {
         setReached(STAGES.length);
+        const r = e.result as { workspace?: string; securityScan?: unknown } | undefined;
+        setResult({ workspace: r?.workspace ?? workspace, securityScan: r?.securityScan ?? null });
         setLog((prev) => [...prev, { kind: "done", text: "빌드 완료 — 패키지 생성됨" }]);
         setPhase("done");
         unsubRef.current?.();
@@ -152,13 +175,16 @@ export default function BuildPage() {
     setReached(0);
     setErrored(false);
     setLog([]);
+    setResult(null);
   };
 
   const installToLibrary = async () => {
     if (!workspace) return;
     try {
-      await ipc()?.team.importLocalFolder(workspace);
-      setLog((prev) => [...prev, { kind: "log", text: "완료: 라이브러리에 설치됨 - 에이전트 메뉴에서 확인하세요." }]);
+      const imported = await ipc()?.team.importLocalFolder(workspace);
+      setLog((prev) => [...prev, { kind: "log", text: "완료: 라이브러리에 설치됨 — 인스펙터로 이동합니다." }]);
+      // 빌드→보유 전환: 설치 직후 해당 에이전트 인스펙터로 자동 점프(생애주기 동선 연결).
+      if (imported?.id) navigate(`/library/agents?agentId=${imported.id}`);
     } catch (e) {
       setLog((prev) => [...prev, { kind: "error", text: `설치 실패: ${(e as Error).message}` }]);
     }
@@ -180,181 +206,182 @@ export default function BuildPage() {
   const showPipeline = true;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "var(--paper)" }}>
-      <header
-        className="titlebar-drag"
-        style={{ display: "flex", alignItems: "center", gap: 12, padding: "16px 32px 14px 90px", borderBottom: "1px solid var(--glass-border)", minHeight: 64, flexShrink: 0 }}
-      >
-        <Link href="/apps" className="titlebar-nodrag" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 13, color: "var(--muted)", textDecoration: "none" }}>
-          <IconChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Apps
-        </Link>
-        <div style={{ width: 1, height: 20, background: "var(--paper-edge)", margin: "0 4px" }} />
-        <div style={{ width: 34, height: 34, borderRadius: 8, background: "linear-gradient(135deg, #4DABF7, #845EF7)", display: "inline-flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>
-          <IconBuilding size={18} />
-        </div>
-        <div>
-          <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 18, lineHeight: 1.15, color: "var(--ink)" }}>Agent Forge: Build</h1>
-          <p style={{ margin: "2px 0 0", color: "var(--muted-deep)", fontSize: 12 }}>hep-build - Hephaestus 빌더 파이프라인</p>
-        </div>
-        {status?.available && (
-          <span style={{ marginLeft: "auto" }} className="titlebar-nodrag">
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--muted)", padding: "4px 10px", borderRadius: 999, background: "var(--fill-1)", border: "1px solid var(--paper-edge)" }}>
-              <IconBolt size={12} /> 엔진 준비됨 · Python {status.version}
-            </span>
-          </span>
-        )}
-      </header>
+    <div className="rd build-root">
+      <div className="titlebar-drag build-window-drag" />
+      <main className="build-scroll">
+        <div className="build-shell">
+          <header className="build-header">
+            <div className="build-title-group">
+              <Link href="/apps" className="titlebar-nodrag build-back-link">
+                <IconChevronRight size={14} />
+                Apps
+              </Link>
+              <div className="build-title-mark"><IconBuilding size={18} /></div>
+              <div>
+                <h1>Build</h1>
+                <div className="build-subtitle">hep-build</div>
+              </div>
+            </div>
+            <div className="build-header-status titlebar-nodrag">
+              <KeyStatusBanner mode="pill" />
+              {status?.available && (
+                <span className="build-status-pill">
+                  <IconBolt size={12} /> Python {status.version}
+                </span>
+              )}
+            </div>
+          </header>
 
-      <main style={{ flex: 1, overflowY: "auto", padding: "28px 40px", display: "flex", flexDirection: "column", gap: 22 }}>
-        {engineMissing && (
-          <div style={{ maxWidth: 1000, margin: "0 auto", width: "100%", padding: 16, borderRadius: 12, background: "var(--fill-1)", border: "1px solid var(--paper-edge)", color: "var(--muted-deep)", fontSize: 13, display: "flex", gap: 10, alignItems: "flex-start" }}>
-            <IconShield size={15} style={{ color: "var(--amber-deep)", flexShrink: 0, marginTop: 1 }} />
-            <span>Hephaestus 엔진을 사용할 수 없습니다: {status?.reason}. Python 3.9+ 설치 후 다시 시도하세요.</span>
-          </div>
-        )}
+          <KeyStatusBanner mode="banner" />
 
-        {/* ── 컨트롤 ── */}
-        <section style={{ maxWidth: 1000, margin: "0 auto", width: "100%" }}>
-          <h2 style={{ fontSize: 21, margin: "0 0 6px", color: "var(--ink)" }}>무엇을 만들까요?</h2>
-          <p style={{ color: "var(--muted-deep)", fontSize: 13.5, margin: "0 0 16px" }}>
-            요청을 적으면 빌더가 인터뷰·리서치 후 설치 가능한 Agentlas 패키지를 폴더에 생성합니다. 아래에서 진행이 단계별로 시각화됩니다.
-          </p>
+          {engineMissing && (
+            <div className="build-alert">
+              <IconShield size={15} />
+              <div className="key-status-banner-copy">
+                <strong>
+                  {ko ? "Hephaestus 엔진을 사용할 수 없습니다" : "Hephaestus engine unavailable"}
+                  {status?.reason ? `: ${status.reason}` : ""}
+                </strong>
+                <span>
+                  {ko
+                    ? "엔진은 앱에 번들된 오픈소스입니다. 복구하려면 앱을 재설치하거나 Python 런타임을 확인하세요 (npm run ensure:engine)."
+                    : "The engine ships bundled with the app. To recover, reinstall the app or check the Python runtime (npm run ensure:engine)."}
+                </span>
+              </div>
+            </div>
+          )}
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10, marginBottom: 14 }}>
-            {ACTION_CONTRACTS.map((item) => {
-              const Icon = item.icon;
-              return (
-                <div key={item.label} style={{ border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--fill-1)", padding: 12, minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 5, color: "var(--ink)" }}>
-                    <Icon size={14} style={{ color: "var(--accent)", flexShrink: 0 }} />
-                    <strong style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.label}</strong>
-                  </div>
-                  <div style={{ fontSize: 11.5, color: "var(--muted-deep)", lineHeight: 1.35 }}>{item.desc}</div>
+          <section className="build-grid">
+            <div className="build-card build-composer">
+              <div className="build-card-head">
+                <span>{ko ? "요청" : "Request"}</span>
+                <span>{mode || "auto"}</span>
+              </div>
+
+              <div className="build-mode-grid">
+                {MODES.map((m) => {
+                  const active = mode === m.id;
+                  const Icon = m.icon;
+                  return (
+                    <button
+                      key={m.id}
+                      onClick={() => setMode(active ? "" : m.id)}
+                      disabled={running}
+                      className="build-mode-card titlebar-nodrag"
+                      data-active={active ? "true" : "false"}
+                    >
+                      <Icon size={16} />
+                      <strong>{ko ? m.label : m.labelEn}</strong>
+                      <span>{ko ? m.desc : m.descEn}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {!running && (
+                <div className="build-starters">
+                  <span className="build-starters-label">{ko ? "스타터" : "Starters"}</span>
+                  {STARTERS.map((s) => (
+                    <button
+                      key={s.prompt}
+                      type="button"
+                      className="build-starter-chip titlebar-nodrag"
+                      onClick={() => setRequest(s.prompt)}
+                    >
+                      {ko ? s.ko : s.en}
+                    </button>
+                  ))}
                 </div>
-              );
-            })}
-          </div>
+              )}
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 14 }}>
-            {MODES.map((m) => {
-              const active = mode === m.id;
-              const Icon = m.icon;
-              return (
-                <button
-                  key={m.id}
-                  onClick={() => setMode(active ? "" : m.id)}
-                  disabled={running}
-                  style={{
-                    textAlign: "left", padding: 14, borderRadius: 12,
-                    border: `1px solid ${active ? "var(--accent)" : "var(--paper-edge)"}`,
-                    background: active ? "var(--fill-2)" : "var(--fill-1)",
-                    cursor: running ? "default" : "pointer", transition: "all 0.15s",
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, color: active ? "var(--accent)" : "var(--ink)" }}>
-                    <Icon size={16} />
-                    <span style={{ fontWeight: 600, fontSize: 14 }}>{m.label}</span>
-                  </div>
-                  <p style={{ margin: 0, fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.4 }}>{m.desc}</p>
+              <textarea
+                value={request}
+                onChange={(e) => setRequest(e.target.value)}
+                disabled={running}
+                placeholder={ko ? "무엇을 시킬까요? 예) 인스타그램 마케팅 운영 에이전트" : "What should it do? e.g. an Instagram marketing agent"}
+                rows={5}
+                className="build-request-input titlebar-nodrag"
+              />
+
+              <div className="build-action-row">
+                <button onClick={pickWorkspace} disabled={running} className="build-folder-button titlebar-nodrag">
+                  <IconFolder size={15} />
+                  <span>{workspace ? workspace.split("/").slice(-2).join("/") : ko ? "생성 폴더 선택" : "Choose output folder"}</span>
                 </button>
-              );
-            })}
-          </div>
-
-          <textarea
-            value={request}
-            onChange={(e) => setRequest(e.target.value)}
-            disabled={running}
-            placeholder="예) 인스타그램 마케팅 운영 에이전트 — 트렌드 리서치, 캡션 작성, 해시태그 추천을 하고 매주 자가 학습"
-            rows={2}
-            style={{ width: "100%", padding: "14px 16px", fontSize: 14, borderRadius: 12, border: "1px solid var(--paper-edge)", background: "var(--fill-1)", color: "var(--ink)", outline: "none", resize: "vertical", fontFamily: "inherit", lineHeight: 1.5, boxSizing: "border-box" }}
-          />
-
-          <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12 }}>
-            <button onClick={pickWorkspace} disabled={running} className="titlebar-nodrag"
-              style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 10, border: "1px solid var(--paper-edge)", background: "var(--fill-1)", color: workspace ? "var(--ink)" : "var(--muted)", cursor: "pointer", fontSize: 13, maxWidth: 420, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
-              <IconFolder size={15} />
-              {workspace ? workspace.split("/").slice(-2).join("/") : "생성 폴더 선택"}
-            </button>
-            <div style={{ flex: 1 }} />
-            {running ? (
-              <button onClick={cancel} style={{ padding: "11px 22px", borderRadius: 10, border: "1px solid var(--paper-edge)", background: "var(--fill-2)", color: "var(--ink)", cursor: "pointer", fontSize: 14, fontWeight: 600 }}>중지</button>
-            ) : phase === "done" || phase === "error" ? (
-              <button onClick={reset} style={{ padding: "11px 22px", borderRadius: 10, border: "1px solid var(--paper-edge)", background: "var(--fill-1)", color: "var(--ink)", cursor: "pointer", fontSize: 14, fontWeight: 600 }}>새 빌드</button>
-            ) : (
-              <>
-                {(!request.trim() || !workspace) && !engineMissing && (
-                  <span style={{ fontSize: 12, color: "var(--muted)", marginRight: 10, alignSelf: "center" }}>
-                    {!request.trim() ? "요청을 입력하세요" : "생성 폴더를 선택하세요"}
-                  </span>
+                {running ? (
+                  <button onClick={cancel} className="build-secondary-button titlebar-nodrag">{ko ? "중지" : "Stop"}</button>
+                ) : phase === "done" || phase === "error" ? (
+                  <button onClick={reset} className="build-secondary-button titlebar-nodrag">{ko ? "새 빌드" : "New build"}</button>
+                ) : (
+                  <button
+                    onClick={start}
+                    disabled={!request.trim() || !workspace || engineMissing}
+                    className="build-primary-button titlebar-nodrag"
+                  >
+                    <IconWand size={15} /> {ko ? "빌드 시작" : "Start build"}
+                  </button>
                 )}
-                <button onClick={start} disabled={!request.trim() || !workspace || engineMissing}
-                  style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "11px 24px", borderRadius: 10, border: "none",
-                    background: !request.trim() || !workspace || engineMissing ? "var(--fill-2)" : "linear-gradient(135deg, #4DABF7, #845EF7)",
-                    color: !request.trim() || !workspace || engineMissing ? "var(--muted)" : "#fff",
-                    cursor: !request.trim() || !workspace || engineMissing ? "default" : "pointer", fontSize: 14, fontWeight: 600 }}>
-                  <IconWand size={15} /> 빌드 시작
-                </button>
-              </>
-            )}
-          </div>
-        </section>
-
-        {/* ── 시각화 파이프라인 ── */}
-        {showPipeline && (
-          <section style={{ maxWidth: 1000, margin: "0 auto", width: "100%" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-              <h3 style={{ fontSize: 13, margin: 0, color: "var(--muted-deep)", textTransform: "uppercase", letterSpacing: 0.6, fontFamily: "var(--font-mono)" }}>Forge Pipeline</h3>
-              {running ? (
-                <span style={{ fontSize: 11, color: "var(--accent)", display: "inline-flex", alignItems: "center", gap: 5 }}>
-                  <span className="forge-pulse" style={{ width: 7, height: 7, borderRadius: 999, background: "var(--accent)", display: "inline-block" }} />
-                  {STAGES[Math.min(reached, STAGES.length - 1)].label}
-                </span>
-              ) : phase === "idle" ? (
-                <span style={{ fontSize: 11, color: "var(--muted)" }}>빌드 시작 시 단계별로 진행됩니다</span>
-              ) : null}
+              </div>
             </div>
 
-            <div style={{ borderRadius: 16, border: "1px solid var(--paper-edge)", background: "var(--fill-1)", padding: "18px 20px" }}>
-              {STAGES.map((s, i) => (
-                <StageRow key={s.key} stage={s} state={stageStates[i]} isLast={i === STAGES.length - 1} index={i} />
-              ))}
-            </div>
-          </section>
-        )}
-
-        {/* ── 라이브 터미널 ── */}
-        {log.length > 0 && (
-          <section style={{ maxWidth: 1000, margin: "0 auto", width: "100%" }}>
-            <h3 style={{ fontSize: 13, margin: "0 0 8px", color: "var(--muted-deep)", textTransform: "uppercase", letterSpacing: 0.6, fontFamily: "var(--font-mono)" }}>Build Log</h3>
-            <div style={{ borderRadius: 12, border: "1px solid var(--paper-edge)", background: "#0d1117", padding: 16, maxHeight: 300, overflowY: "auto", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12, lineHeight: 1.6 }}>
-              {log.map((l, i) => (
-                <div key={i} style={{ color: l.kind === "error" ? "#ff7b72" : l.kind === "done" ? "#3fb950" : l.kind === "stage" ? "#79c0ff" : l.kind === "partial" ? "#c9d1d9" : "#8b949e", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                  {l.kind === "stage" ? `> ${l.text}` : l.text}
+            {showPipeline && (
+              <div className="build-card build-pipeline-card">
+                <div className="build-card-head">
+                  <span>{ko ? "파이프라인" : "Pipeline"}</span>
+                  {running ? (
+                    <span className="build-live">
+                      <span className="forge-pulse" />
+                      {ko ? STAGES[Math.min(reached, STAGES.length - 1)].label : STAGES[Math.min(reached, STAGES.length - 1)].labelEn}
+                    </span>
+                  ) : (
+                    <span>{phase}</span>
+                  )}
                 </div>
-              ))}
-              <div ref={logEndRef} />
-            </div>
-
-            {phase === "done" && (
-              <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap", alignItems: "center" }}>
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "#0ca678", fontSize: 13, fontWeight: 600, marginRight: 4 }}>
-                  <IconCheck size={15} /> 패키지 준비됨
-                </span>
-                <button onClick={installToLibrary} style={actionBtn(true)}>라이브러리에 설치</button>
-                <button onClick={() => upload("private-link")} style={actionBtn(false)}>Cloud private 업로드</button>
-                <button onClick={() => upload("marketplace")} style={actionBtn(false)}>Hub public 제출</button>
+                <div className="build-pipeline-list">
+                  {STAGES.map((s, i) => (
+                    <StageRow key={s.key} stage={s} state={stageStates[i]} isLast={i === STAGES.length - 1} ko={ko} />
+                  ))}
+                </div>
               </div>
             )}
           </section>
-        )}
-      </main>
 
-      <style dangerouslySetInnerHTML={{ __html: `
-        @keyframes forgePulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.45; transform: scale(0.82); } }
-        @keyframes forgeGlow { 0%,100% { box-shadow: 0 0 0 0 var(--forge-c, #4DABF7)40; } 50% { box-shadow: 0 0 0 6px transparent; } }
-        .forge-pulse { animation: forgePulse 1.2s ease-in-out infinite; }
-      `}} />
+          {phase === "done" && result && (
+            <section className="build-card build-artifact-card">
+              <div className="build-card-head">
+                <span>{ko ? "산출물" : "Artifacts"}</span>
+                <span>ready</span>
+              </div>
+              <ArtifactPreview workspace={result.workspace} ko={ko} />
+              <VerifyGate scan={result.securityScan} ko={ko} />
+              <BuildCostReceipt ko={ko} />
+              <div className="build-result-actions">
+                <span><IconCheck size={15} /> {ko ? "패키지 준비됨" : "Package ready"}</span>
+                <button onClick={installToLibrary} className="build-primary-button titlebar-nodrag">{ko ? "라이브러리에 설치" : "Install to library"}</button>
+                <button onClick={() => upload("private-link")} className="build-secondary-button titlebar-nodrag">{ko ? "Cloud private 업로드" : "Upload Cloud private"}</button>
+                <button onClick={() => upload("marketplace")} className="build-secondary-button titlebar-nodrag">{ko ? "Hub public 제출" : "Submit Hub public"}</button>
+              </div>
+            </section>
+          )}
+
+          {log.length > 0 && (
+            <section className="build-card build-log-card">
+              <div className="build-card-head">
+                <span>Build Log</span>
+                {phase === "done" && <span>ready</span>}
+              </div>
+              <div className="build-log-body">
+                {log.map((l, i) => (
+                  <div key={i} data-kind={l.kind}>
+                    {l.kind === "stage" ? `> ${l.text}` : l.text}
+                  </div>
+                ))}
+                <div ref={logEndRef} />
+              </div>
+            </section>
+          )}
+        </div>
+      </main>
     </div>
   );
 }
@@ -363,73 +390,156 @@ function StageRow({
   stage,
   state,
   isLast,
-  index,
+  ko,
 }: {
   stage: (typeof STAGES)[number];
   state: StageState;
   isLast: boolean;
-  index: number;
+  ko: boolean;
 }) {
   const Icon = stage.icon;
   const c = stage.color;
   const active = state === "active";
   const done = state === "done";
   const error = state === "error";
-  const dim = state === "pending";
-
-  const nodeBg = error ? "#fa5252" : done ? c : active ? c : "var(--fill-3)";
-  const nodeColor = done || active || error ? "#fff" : "var(--muted)";
 
   return (
-    <div style={{ display: "flex", gap: 16, alignItems: "stretch", opacity: dim ? 0.5 : 1, transition: "opacity 0.4s" }}>
-      {/* spine + node */}
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 40, flexShrink: 0 }}>
-        <div
-          style={{
-            width: 40, height: 40, borderRadius: 12, background: nodeBg, color: nodeColor,
-            display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-            border: active ? `2px solid ${c}` : "2px solid transparent",
-            boxShadow: active ? `0 0 0 4px ${c}22` : "none",
-            transition: "all 0.3s",
-          }}
-        >
+    <div className="build-stage-row" data-state={state} style={{ "--stage-color": c } as CSSProperties}>
+      <div className="build-stage-rail">
+        <div className="build-stage-node">
           {done ? <IconCheck size={18} /> : <Icon size={18} />}
         </div>
-        {!isLast && (
-          <div
-            style={{
-              flex: 1,
-              minHeight: 28,
-              width: 3,
-              borderRadius: 999,
-              background: done || active ? c : "var(--paper-edge)",
-              opacity: active ? 0.65 : 1,
-              transition: "background 0.25s, opacity 0.25s",
-            }}
-          />
-        )}
+        {!isLast && <div className="build-stage-line" />}
       </div>
-
-      {/* card */}
-      <div style={{ flex: 1, paddingBottom: isLast ? 0 : 16, minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 14, fontWeight: 600, color: error ? "#fa5252" : active ? c : "var(--ink)" }}>{stage.label}</span>
-          {active && <span style={{ fontSize: 10, padding: "1px 7px", borderRadius: 999, background: `${c}1e`, color: c, fontWeight: 600 }}>진행 중</span>}
-          {done && <span style={{ fontSize: 10, padding: "1px 7px", borderRadius: 999, background: "rgba(12,166,120,0.14)", color: "#0ca678", fontWeight: 600 }}>완료</span>}
-          {error && <span style={{ fontSize: 10, padding: "1px 7px", borderRadius: 999, background: "rgba(250,82,82,0.14)", color: "#fa5252", fontWeight: 600 }}>중단</span>}
+      <div className="build-stage-copy">
+        <div>
+          <span>{ko ? stage.label : stage.labelEn}</span>
+          {active && <em>{ko ? "진행 중" : "running"}</em>}
+          {done && <em>{ko ? "완료" : "done"}</em>}
+          {error && <em>{ko ? "중단" : "stopped"}</em>}
         </div>
-        <p style={{ margin: "3px 0 0", fontSize: 12.5, color: "var(--muted-deep)", lineHeight: 1.4 }}>{stage.sub}</p>
+        <p>{ko ? stage.sub : stage.subEn}</p>
       </div>
     </div>
   );
 }
 
-function actionBtn(primary: boolean): React.CSSProperties {
-  return {
-    padding: "10px 18px", borderRadius: 10,
-    border: primary ? "none" : "1px solid var(--paper-edge)",
-    background: primary ? "var(--accent)" : "var(--fill-1)",
-    color: primary ? "#fff" : "var(--ink)",
-    cursor: "pointer", fontSize: 13, fontWeight: 600,
-  };
+// ── 산출물 미리보기 — "무엇이·어디에 만들어졌나"를 실제 디스크에서 보여준다(소유의 물증). ──
+const KEY_ARTIFACTS = ["AGENTS.md", "AGENT.md", "agentlas.json", ".agentlas", "README.md", "system-prompt.md"];
+function ArtifactPreview({ workspace, ko }: { workspace: string; ko: boolean }) {
+  const [listing, setListing] = useState<DirListing | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    ipc()?.fs.listDirectory(workspace, true)
+      .then((d) => { if (alive) setListing(d); })
+      .catch((e) => { if (alive) setErr(String(e)); });
+    return () => { alive = false; };
+  }, [workspace]);
+  const entries = listing?.entries ?? [];
+  return (
+    <div className="build-artifact">
+      <div className="build-artifact-path" title={workspace}>
+        <IconFolder size={14} />
+        <span>{workspace}</span>
+      </div>
+      <p className="build-artifact-note">
+        {ko ? "이게 진짜 내 디스크에 생긴 파일입니다 — 클라우드가 아니라 내 폴더." : "These are real files on your disk — your folder, not the cloud."}
+      </p>
+      {err && <div className="build-artifact-empty">{ko ? "폴더를 읽을 수 없습니다" : "Could not read folder"}: {err}</div>}
+      {!err && entries.length === 0 && <div className="build-artifact-empty">{ko ? "생성된 파일을 확인하는 중…" : "Checking generated files…"}</div>}
+      {entries.length > 0 && (
+        <ul className="build-artifact-tree">
+          {entries.map((n) => (
+            <li key={n.path} data-key={KEY_ARTIFACTS.includes(n.name) ? "true" : "false"}>
+              {n.kind === "dir" ? <IconFolder size={13} /> : <span className="build-artifact-filedot" />}
+              <span>{n.name}{n.kind === "dir" ? "/" : ""}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// ── 검증 게이트 — 엔진의 실제 보안 스캔 결과(done.result.securityScan)를 비개발자 어휘로 표시. ──
+function parseScan(scan: unknown): {
+  unknown: boolean;
+  tone: "ok" | "warn" | "block";
+  pass: number;
+  warn: number;
+  blocker: number;
+  items: { severity: string; message: string; file?: string }[];
+} {
+  if (!scan || typeof scan !== "object") {
+    return { unknown: true, tone: "ok", pass: 0, warn: 0, blocker: 0, items: [] };
+  }
+  const obj = scan as Record<string, unknown>;
+  const raw = Array.isArray(scan)
+    ? (scan as unknown[])
+    : Array.isArray(obj.findings)
+      ? (obj.findings as unknown[])
+      : [];
+  const items = (raw as Record<string, unknown>[]).map((f) => ({
+    severity: String(f?.severity ?? "info"),
+    message: String(f?.message ?? f?.id ?? "항목"),
+    file: typeof f?.file === "string" ? (f.file as string) : undefined,
+  }));
+  if (items.length === 0) {
+    return { unknown: false, tone: "ok", pass: 0, warn: 0, blocker: 0, items: [] };
+  }
+  const blocker = items.filter((i) => i.severity === "blocker" || i.severity === "high").length;
+  const warn = items.filter((i) => i.severity === "medium").length;
+  const pass = items.length - blocker - warn;
+  const tone = blocker > 0 ? "block" : warn > 0 ? "warn" : "ok";
+  return { unknown: false, tone, pass, warn, blocker, items };
+}
+
+function VerifyGate({ scan, ko }: { scan: unknown; ko: boolean }) {
+  const p = parseScan(scan);
+  return (
+    <div className="build-verify" data-tone={p.tone}>
+      <div className="build-verify-head">
+        <IconShield size={14} />
+        <strong>{ko ? "안전 점검 (검증 게이트)" : "Safety check (verify gate)"}</strong>
+      </div>
+      {p.unknown ? (
+        <p className="build-verify-note">
+          {ko
+            ? "보안 스캔 결과를 확인할 수 없습니다 (엔진이 결과를 반환하지 않음). 설치 전 수동 검토를 권장합니다."
+            : "Security scan result unavailable (engine returned none). Manual review recommended before install."}
+        </p>
+      ) : p.items.length === 0 ? (
+        <p className="build-verify-note">{ko ? "정적 보안 스캔 통과 — 차단·주의 항목 없음." : "Static security scan passed — no blockers or warnings."}</p>
+      ) : (
+        <>
+          <p className="build-verify-summary">
+            {ko ? "통과" : "pass"} {p.pass} · {ko ? "주의" : "warn"} {p.warn}
+            {p.blocker > 0 ? ` · ${ko ? "차단" : "block"} ${p.blocker}` : ""}
+          </p>
+          {p.items.slice(0, 5).map((f, i) => (
+            <div key={i} className="build-verify-item" data-sev={f.severity}>
+              <span className="build-verify-sev">{f.severity}</span> {f.message}
+              {f.file ? ` (${f.file})` : ""}
+            </div>
+          ))}
+          <p className="build-verify-note">{ko ? "검증 통과·승인 후에만 설치/게시됩니다 — 자동 게시 없음." : "Installs/publishes only after passing and approval — no auto-publish."}</p>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── 빌드 비용 영수증 — 가치5(독립)를 칩이 아니라 '마진 ₩0' 사실로 증명. ──
+function BuildCostReceipt({ ko }: { ko: boolean }) {
+  return (
+    <div className="build-cost-receipt">
+      <div className="build-cost-row">
+        <strong>{ko ? "빌드 비용" : "Build cost"}</strong>
+        <span>{ko ? "당신의 구독/키에서 차감" : "billed to your subscription/keys"}</span>
+      </div>
+      <div className="build-cost-margin">{ko ? MARGIN_LINE_KO : MARGIN_LINE_EN}</div>
+      <p>{ko ? "모델 호출을 Agentlas가 중계하지 않습니다 — 추가 요금 0." : "Agentlas does not relay model calls — zero extra fees."}</p>
+    </div>
+  );
 }

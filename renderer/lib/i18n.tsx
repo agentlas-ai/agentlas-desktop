@@ -411,7 +411,7 @@ const dict = {
     // Automation
     "auto.title": "자동화",
     "auto.new": "새 자동화",
-    "auto.stub_note": "자동화는 백그라운드 스케줄러가 1분마다 예약을 확인해 실행합니다. 항목은 저장되어 앱을 다시 열어도 유지됩니다.",
+    "auto.stub_note": "자동화는 백그라운드 스케줄러가 1분마다 예약을 확인해 프롬프트를 다시 실행합니다. 외부 계정 작업은 커넥터나 브라우저 실행 증거가 있어야 완료로 봅니다.",
     "auto.empty": "등록된 자동화가 없습니다. 우측 상단 새 자동화로 시작하세요.",
     "auto.on": "활성",
     "auto.off": "꺼짐",
@@ -421,7 +421,7 @@ const dict = {
     "auto.field.schedule": "언제 실행할까요?",
     "auto.field.target": "누구에게 시킬까요?",
     "auto.field.prompt": "기본 프롬프트",
-    "auto.field.prompt.hint": "자동 실행될 때 사용자 입력으로 들어갈 텍스트",
+    "auto.field.prompt.hint": "예약 실행 때 사용자 입력으로 들어갈 텍스트",
     "auto.target.firm": "회사",
     "auto.target.agent": "개별 에이전트",
     "auto.empty_firms": "설치된 회사가 없습니다. 마켓플레이스 → 회사 탭에서 설치하세요.",
@@ -439,7 +439,7 @@ const dict = {
     "auto.detail.last_run": "마지막 실행",
     "auto.detail.never": "아직 실행된 적 없음",
     "auto.detail.prompt": "프롬프트",
-    "auto.detail.stub": "이 자동화는 예약에 따라 백그라운드에서 실행됩니다. 비활성화하면 다음 실행이 멈춥니다.",
+    "auto.detail.stub": "이 자동화는 예약에 따라 백그라운드에서 프롬프트를 다시 실행합니다. 비활성화하면 다음 실행이 멈춥니다.",
 
     // Agent files (Library > Agents 우측 패널)
     "agentfiles.title": "에이전트 파일",
@@ -749,6 +749,10 @@ const dict = {
     "import.subtitle": "agentlas.cloud에서 만든 에이전트와 팀을 이 앱으로 가져옵니다.",
     "import.signin_needed": "가져오려면 먼저 Agentlas 계정으로 로그인하세요.",
     "import.loading": "불러오는 중…",
+    "import.local_title": "로컬 폴더에서 가져오기",
+    "import.local_body": "내 Mac에 있는 에이전트/팀/App 폴더를 바로 분석해 추가합니다.",
+    "import.local_action": "폴더 선택",
+    "import.local_success": "{name} 가져오기 완료",
     "import.section.agents": "내 에이전트",
     "import.section.teams": "팀",
     "import.empty_agents": "agentlas.cloud에 만든 에이전트가 없습니다.",
@@ -758,6 +762,10 @@ const dict = {
     "import.importing": "가져오는 중…",
     "import.skip": "나중에",
     "import.installed": "설치됨",
+    "import.error.load": "목록을 불러오지 못했습니다.",
+    "import.error.signin": "로그인에 실패했습니다.",
+    "import.error.selected": "선택한 항목 가져오기에 실패했습니다.",
+    "import.error.local": "로컬 폴더 가져오기에 실패했습니다.",
 
     // Landing (로그아웃 첫 화면)
     "landing.title.l1": "내 구독으로 굴리는",
@@ -1153,7 +1161,7 @@ const dict = {
     // Automation
     "auto.title": "Automations",
     "auto.new": "New automation",
-    "auto.stub_note": "Automations run in the background — the scheduler checks every minute and entries persist across restarts.",
+    "auto.stub_note": "Automations rerun the prompt in the background every minute when due. External account work is only verified when a connector or browser run proves it.",
     "auto.empty": "No automations. Use New automation at the top right.",
     "auto.on": "On",
     "auto.off": "Off",
@@ -1181,7 +1189,7 @@ const dict = {
     "auto.detail.last_run": "Last run",
     "auto.detail.never": "Never run",
     "auto.detail.prompt": "Prompt",
-    "auto.detail.stub": "This automation runs in the background on schedule. Disable it to stop the next run.",
+    "auto.detail.stub": "This automation reruns the prompt in the background on schedule. Disable it to stop the next run.",
 
     // Agent files (Library > Agents right panel)
     "agentfiles.title": "Agent files",
@@ -1491,6 +1499,10 @@ const dict = {
     "import.subtitle": "Bring the agents and teams you built on agentlas.cloud into this app.",
     "import.signin_needed": "Sign in with your Agentlas account to import.",
     "import.loading": "Loading…",
+    "import.local_title": "Import from local folder",
+    "import.local_body": "Analyze an agent, team, or App folder on this Mac and add it here.",
+    "import.local_action": "Choose folder",
+    "import.local_success": "Imported {name}",
     "import.section.agents": "Your agents",
     "import.section.teams": "Teams",
     "import.empty_agents": "You haven't built any agents on agentlas.cloud yet.",
@@ -1500,6 +1512,10 @@ const dict = {
     "import.importing": "Importing…",
     "import.skip": "Later",
     "import.installed": "Installed",
+    "import.error.load": "Could not load import options.",
+    "import.error.signin": "Sign-in failed.",
+    "import.error.selected": "Could not import the selected items.",
+    "import.error.local": "Could not import the local folder.",
 
     // Landing (logged-out first screen)
     "landing.title.l1": "Run a whole AI team",

@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import { PawLogo } from "./PawLogo";
 import { 
   IconChevronDown, IconApps, IconWand, IconSettings, IconBuilding, 
-  IconFileUp, IconStore, IconBolt, IconFilm, IconNetwork, IconKey, IconLayers
+  IconFileUp, IconStore, IconBolt, IconKey, IconLayers
 } from "./Icon";
 import { AccountChip } from "./AccountChip";
 
@@ -94,12 +94,7 @@ export function TopNavbar() {
           )}
           {dropdown === "studio" && (
             <>
-              <DropdownLink href="/apps" icon={<IconApps size={14} />} label="Built-in Apps" sub="First-party UI capabilities" />
-              <DropdownLink href="/startup-founder-studio" icon={<IconNetwork size={14} />} label="Startup Studio" sub="Founder workflow runtime" />
-              <DropdownLink href="/apps/document-studio" icon={<IconFileUp size={14} />} label="Document Studio" sub="Docs, artifacts, and files" />
-              <DropdownLink href="/creative-studio" icon={<IconWand size={14} />} label="Creative Studio" sub="Creative production workspace" />
-              <DropdownLink href="/ecommerce-os" icon={<IconStore size={14} />} label="Commerce OS" sub="Operations surface" />
-              <DropdownLink href="/oberon" icon={<IconFilm size={14} />} label="Oberon" sub="Video and story studio" />
+              <DropdownLink href="/apps" icon={<IconApps size={14} />} label="Apps" sub="Studio catalog" />
               <DropdownLink href="/automation" icon={<IconBolt size={14} />} label="Automations" sub="Scheduled background tasks" />
             </>
           )}

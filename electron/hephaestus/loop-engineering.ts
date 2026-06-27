@@ -1,0 +1,76 @@
+// Stormbreaker Loop prompt contract.
+//
+// This is intentionally runtime-agnostic. The native Hephaestus supervisor emits
+// visible scope/route/final-gate events. Host-enforced repair is bounded to
+// verification failures Agentlas can actually detect, such as invalid structured
+// surface manifests. Everything else must be reported as verified, unverified,
+// or blocked instead of being presented as autonomous completion.
+
+export const STORMBREAKER_MAX_REPAIR_PASSES = 2;
+export const STORMBREAKER_MAX_EXECUTION_PASSES = 3;
+export const STORMBREAKER_CONTINUE_MARKER = "<<stormbreaker-continue>>";
+export const STORMBREAKER_LONG_RUN_MARKER = "<<stormbreaker-long-run>>";
+export const STORMBREAKER_LONG_RUN_SCHEDULE = "every-30m";
+
+export const STORMBREAKER_LOOP_PROTOCOL = [
+  "Stormbreaker Loop is always on in Agentlas Desktop chat. There is no user-facing Stormbreaker toggle.",
+  "Use it automatically for non-trivial work: app, game, site, agent, automation, trading/ops, deployment, debugging, data/report generation, multi-step research, or any task with files, tools, tests, screenshots, or external verification.",
+  "Simple questions can be answered directly. Loop-worthy work must follow: scope-lock -> goal decomposition -> sub-agent/work-packet architecture -> plan-lock -> act -> verify -> bounded repair/retry when the host reports a concrete validation error -> final-gate.",
+  "For large goals, create a visible goal ledger with work packets, owners, verification gates, and resume state. Execute the next safe packet instead of stopping at a plan.",
+  `If more safe work remains and you are not blocked by auth, payment, policy, missing secrets, or user approval, end the assistant output with ${STORMBREAKER_CONTINUE_MARKER} on its own line. Agentlas Desktop will strip this marker and immediately run the next continuation pass.`,
+  "Do not claim autonomous completion unless the host or tool output verifies it. When a tool, credential, browser session, connector, or external service is missing, report the run as blocked or unverified with the exact next step.",
+  "For recurring automations, write the prompt so each run resumes from the latest durable evidence, verifies the current state where tools allow it, acts conservatively, and records what changed. A scheduled prompt is not proof that an external account action succeeded.",
+  "Keep visible progress concise: show what was attempted, what was verified, and exactly where to resume if blocked.",
+  "Never expose hidden chain-of-thought; show progress, evidence, decisions, and final status only.",
+].join("\n");
+
+export function stripStormbreakerContinueMarker(text: string): { text: string; shouldContinue: boolean } {
+  const pattern = new RegExp(`\\n?${STORMBREAKER_CONTINUE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`);
+  const shouldContinue = pattern.test(text.trimEnd());
+  return { text: text.replace(pattern, "").trim(), shouldContinue };
+}
+
+export function buildStormbreakerContinuationPrompt(previousOutput: string, pass: number): string {
+  return [
+    `Continue Stormbreaker execution pass ${pass}.`,
+    "Resume from the previous assistant output. Do not restart.",
+    "Pick the next unfinished work packet, act on it with available tools, verify the result, and update the visible goal ledger.",
+    "If all requested work is verified, do not include the continuation marker.",
+    `If more safe work remains after this pass, end with ${STORMBREAKER_CONTINUE_MARKER} on its own line.`,
+    "",
+    "Previous assistant output:",
+    previousOutput,
+  ].join("\n");
+}
+
+export function isStormbreakerLongRunPrompt(prompt: string): boolean {
+  return prompt.includes(STORMBREAKER_LONG_RUN_MARKER);
+}
+
+export function buildStormbreakerLongRunPrompt(input: {
+  sourceChatId: string;
+  previousOutput: string;
+  userPrompt: string;
+  workingFolder?: string | null;
+}): string {
+  return [
+    STORMBREAKER_LONG_RUN_MARKER,
+    `Source chat: ${input.sourceChatId}`,
+    input.workingFolder ? `Workspace: ${input.workingFolder}` : "",
+    "",
+    "Continue the unfinished Stormbreaker Loop goal from the source chat.",
+    "Use this hidden automation session history plus durable workspace evidence. Do not restart from scratch.",
+    "Maintain a visible goal ledger, pick the next unfinished safe work packet, act with available tools, verify the result, and record what changed.",
+    "If the work is fully verified, do not include the continuation marker.",
+    "If blocked by auth, payment, provider policy, missing secrets, unavailable tools, or user approval, report the blocker and do not include the continuation marker.",
+    `If more safe work remains after this run, end with ${STORMBREAKER_CONTINUE_MARKER} on its own line.`,
+    "",
+    "Original user request:",
+    input.userPrompt,
+    "",
+    "Previous visible Stormbreaker state:",
+    input.previousOutput,
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+}

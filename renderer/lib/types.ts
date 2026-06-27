@@ -134,6 +134,7 @@ export type {
   RuntimeKind,
   RuntimeSelection,
   RuntimeStatus,
+  SkillCatalogEntry,
   SurfaceAssetPackGeneratedFile,
   SurfaceAssetPackMaterializeResult,
   SurfaceAssetPackOperationKind,

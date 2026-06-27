@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
 import { ipc } from "@/lib/ipc";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { sanitizePublicAppCopy } from "@shared/brand-safety";
 import type {
@@ -58,7 +59,7 @@ export default function LibraryAppsPage() {
       api.projects.list(),
     ]);
     setApps(nextApps);
-    setAgents(nextAgents);
+    setAgents(visibleAgents(nextAgents));
     setProjects(nextProjects);
     setSelectedId((cur) => {
       if (cur && nextApps.some((app) => app.id === cur)) return cur;

@@ -61,7 +61,7 @@ export const INSTALLED_APPS: AgentlasAppDefinition[] = [
   {
     id: "startup-founder-studio",
     slug: "startup-founder-studio",
-    name: "스타트업 파운더 스튜디오",
+    name: "스타트업 창업자 스튜디오",
     nameEn: "Startup Founder Studio",
     tagline: "창업 아이디어 → 아이디어·시장·사업설계·PRD·제품·웹·IR 단계로 이어지는 운영 보드. 각 단계는 Agentlas Hub의 전문 HQ를 호출합니다.",
     taglineEn: "One founder idea → a staged operating board (idea, market, business, PRD, product, web, IR), each calling a specialist Agentlas Hub HQ.",

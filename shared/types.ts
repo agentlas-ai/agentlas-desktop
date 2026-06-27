@@ -197,6 +197,13 @@ export interface MarketplaceSourceStatus {
 export type McpTransport = "stdio" | "sse" | "http";
 
 /** 연결 가능한 외부 MCP 툴 카탈로그 항목 — 설정 가이드(setting_guide)의 외부 툴. */
+/** 엔진 skills/ 디렉토리에서 읽은 주입 가능한 스킬 한 건. */
+export interface SkillCatalogEntry {
+  slug: string;
+  name: string;
+  description: string;
+}
+
 export interface McpToolCatalogEntry {
   id: string; // "slack" | "discord" | "github" | "notion" ...
   name: string;
@@ -422,7 +429,7 @@ export interface ChatHistoryEntry {
   imageDataUrls?: string[];
 }
 
-// ── 자동화 (M0 stub — UI만 구현, 실제 cron은 M1) ────────────
+// ── 자동화 — SQLite 영속 + 앱 실행 중 백그라운드 스케줄러 ────────────
 export interface Automation {
   id: string;
   name: string;
@@ -2266,6 +2273,11 @@ export interface AgentlasIpc {
     pickDirectory: () => Promise<string | null>;
     listDirectory: (absPath: string, showHidden?: boolean) => Promise<DirListing>;
     readTextFile: (absPath: string) => Promise<TextFilePreview>;
+    /** 네이티브 저장 다이얼로그로 텍스트를 디스크에 쓴다(산출물 내보내기). 취소 시 canceled=true. */
+    saveTextFile: (
+      suggestedName: string,
+      content: string,
+    ) => Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
   };
   /** 채팅마다 마지막에 연 워킹 폴더 — SQLite에 저장. null이면 미설정. */
   workspace: {
@@ -2395,6 +2407,12 @@ export interface AgentlasIpc {
     read: (agentId: string, absPath: string) => Promise<TextFilePreview>;
     /** 폴더 내부 파일 저장 (system-prompt.md면 동작 프롬프트도 갱신) */
     write: (agentId: string, absPath: string, content: string) => Promise<{ ok: boolean }>;
+  };
+  /** 스킬 카탈로그 — 엔진(Hephaestus)의 skills/ 디렉토리를 실제로 스캔해 반환한다.
+   *  하드코딩 목록이 아니라 디스크의 SKILL.md 프론트매터에서 읽는다. */
+  skills: {
+    /** 주입 가능한 스킬 카탈로그 (엔진 skills/ 디렉토리 실측) */
+    listCatalog: () => Promise<SkillCatalogEntry[]>;
   };
   /** 외부 MCP 툴 플러그인 — Slack/Discord/GitHub 등을 실제로 연결한다.
    *  env 값은 글로벌 vault(env)에서 가져와 stdio 자식 프로세스에 주입. */
@@ -2589,14 +2607,14 @@ export interface AgentlasIpc {
     status: () => Promise<HephaestusStatus>;
     /** 엔진 자가진단(JSON). */
     doctor: () => Promise<HephaestusCommandResult>;
-    /** Stormbreaker 견고-실행: 쿼리 라우팅 후 pipeline execution_fabric 자동 실행. */
+    /** Stormbreaker 견고-실행: 쿼리 라우팅 후 가능한 pipeline execution_fabric 실행. */
     stormbreaker: (input: {
       query: string;
       project?: string;
       background?: boolean;
       researchEvidence?: boolean;
     }) => Promise<HephaestusCommandResult>;
-    /** Stormbreaker 슈퍼바이저(앱 전역 자동 실행) 상태/토글. */
+    /** Stormbreaker 슈퍼바이저 상태. 현재 제품 UI에서는 항상 ON이며 토글은 호환 API다. */
     getSupervisor: () => Promise<{ enabled: boolean }>;
     setSupervisor: (enabled: boolean) => Promise<{ enabled: boolean }>;
     /** Stormbreaker 런 저널 검사(재개/감사). */

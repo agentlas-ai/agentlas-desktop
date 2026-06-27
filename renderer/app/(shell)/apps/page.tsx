@@ -1,32 +1,45 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { INSTALLED_APPS } from "@/lib/apps";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
-import type { AppFactoryAppRecord } from "@/lib/types";
-import { sanitizePublicAppCopy } from "@shared/brand-safety";
-import { IconApps, IconCheck, IconChevronRight, IconImage, IconStore, IconWand } from "@/components/Icon";
+import { StudioBotLogo } from "@/components/StudioBotLogo";
+import {
+  IconApps,
+  IconCheck,
+  IconChevronRight,
+  IconFilm,
+  IconFileUp,
+  IconImage,
+  IconNetwork,
+  IconSearch,
+  IconStore,
+  IconWand,
+} from "@/components/Icon";
+import type { CSSProperties, ReactNode } from "react";
 
 type StudioProbe = "idle" | "checking" | "ok" | "error";
+type CatalogFilter = "all" | "original" | "studio";
+
+type StudioTile = {
+  id: string;
+  href: string;
+  name: string;
+  tagline: string;
+  meta: string;
+  posterSrc?: string;
+  videoSrc?: string;
+  icon: ReactNode;
+};
 
 export default function AppsPage() {
   const { locale } = useT();
-  const [generatedApps, setGeneratedApps] = useState<AppFactoryAppRecord[]>([]);
+  const ko = locale !== "en";
   const [studioProbe, setStudioProbe] = useState<StudioProbe>("idle");
   const [studioMessage, setStudioMessage] = useState("");
-
-  useEffect(() => {
-    const api = ipc();
-    if (!api) return;
-    let cancelled = false;
-    void api.appFactory.listApps().then((apps) => {
-      if (!cancelled) setGeneratedApps(apps.filter((app) => app.status !== "archived"));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [catalogFilter, setCatalogFilter] = useState<CatalogFilter>("all");
 
   async function checkStudioRuntime() {
     const api = ipc();
@@ -37,10 +50,10 @@ export default function AppsPage() {
       const res = await api.hephaestus.startStudio();
       if (res.ok && res.url) {
         setStudioProbe("ok");
-        setStudioMessage(`Runtime ready at ${res.url}`);
+        setStudioMessage(ko ? `런타임 준비됨: ${res.url}` : `Runtime ready: ${res.url}`);
       } else {
         setStudioProbe("error");
-        setStudioMessage(res.reason ?? "Studio runtime could not start.");
+        setStudioMessage(res.reason ?? (ko ? "Studio 런타임을 시작하지 못했습니다." : "Studio runtime could not start."));
       }
     } catch (err) {
       setStudioProbe("error");
@@ -48,205 +61,670 @@ export default function AppsPage() {
     }
   }
 
-  const featuredStudio = INSTALLED_APPS.find((app) => app.id === "startup-founder-studio");
-  const firstPartyApps = INSTALLED_APPS.filter((app) => app.id !== "startup-founder-studio");
+  const installedTiles = useMemo<StudioTile[]>(
+    () =>
+      INSTALLED_APPS.map((app) => {
+        const loc = pickLocalized(app, locale);
+        return {
+          id: app.id,
+          href: app.launchCommand ? `${app.route}?cmd=${encodeURIComponent(app.launchCommand)}` : app.route,
+          name: loc.name,
+          tagline: loc.tagline,
+          meta: app.id === "startup-founder-studio" ? "ORIGINAL" : app.kind === "ai-native" ? "STUDIO" : "APP",
+          posterSrc: `/apps/${app.id}.png`,
+          videoSrc: `/apps/${app.id}.mp4`,
+          icon:
+            app.id === "startup-founder-studio" ? (
+              <StudioBotLogo size={18} />
+            ) : app.id === "document-studio" ? (
+              <IconFileUp size={14} />
+            ) : app.id === "creative-studio" ? (
+              <IconWand size={14} />
+            ) : app.id === "ecommerce-os" ? (
+              <IconStore size={14} />
+            ) : app.id === "oberon" ? (
+              <IconFilm size={14} />
+            ) : (
+              <IconApps size={14} />
+            ),
+        };
+      }),
+    [locale],
+  );
+
+  const studioOrder = ["startup-founder-studio", "oberon", "document-studio", "creative-studio", "ecommerce-os"];
+  const studioTiles = useMemo<StudioTile[]>(
+    () =>
+      studioOrder
+        .map((id) => installedTiles.find((tile) => tile.id === id))
+        .filter((tile): tile is StudioTile => Boolean(tile)),
+    [installedTiles],
+  );
+  const featuredStudio = installedTiles.find((app) => app.id === "startup-founder-studio") ?? installedTiles[0];
+  const quickLaunchTiles = useMemo(() => studioTiles.slice(0, 3), [studioTiles]);
+  const filteredTiles = useMemo(
+    () =>
+      studioTiles.filter((tile) => {
+        if (catalogFilter === "original") return tile.meta === "ORIGINAL";
+        if (catalogFilter === "studio") return tile.meta === "STUDIO";
+        return true;
+      }),
+    [catalogFilter, studioTiles],
+  );
+  const query = searchTerm.trim().toLowerCase();
+  const visibleTiles = useMemo(
+    () =>
+      query
+        ? filteredTiles.filter((tile) => `${tile.name} ${tile.tagline} ${tile.meta}`.toLowerCase().includes(query))
+        : filteredTiles,
+    [filteredTiles, query],
+  );
+  const activeSubtitle = ko
+    ? `${visibleTiles.length}개 앱 · 전체 ${studioTiles.length}개`
+    : `${visibleTiles.length} apps · ${studioTiles.length} total`;
 
   return (
-    <div style={{ width: "100%", height: "100%", overflowY: "auto", background: "var(--paper)", color: "var(--ink)" }}>
-      <main style={{ maxWidth: 1180, margin: "0 auto", padding: "34px 34px 64px", display: "flex", flexDirection: "column", gap: 28 }}>
-        <header style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 20, flexWrap: "wrap" }}>
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: "var(--muted-deep)", textTransform: "uppercase", marginBottom: 8 }}>
-              Agentlas Apps
+    <div style={pageShell}>
+      {featuredStudio && (
+        <section style={heroSection}>
+          <video
+            src={featuredStudio.videoSrc}
+            poster={featuredStudio.posterSrc}
+            autoPlay
+            muted
+            loop
+            playsInline
+            style={heroVideo}
+          />
+          <div style={heroShade} />
+          <div style={heroContent}>
+            <StudioWordmark />
+            <div style={heroEyebrow}>NOW PLAYING</div>
+            <h1 style={heroTitle}>Agentlas Studio</h1>
+            <div style={heroActions}>
+              <Link href={featuredStudio.href} style={primaryAction}>
+                {ko ? "Startup Studio 열기" : "Open Startup Studio"}
+                <IconChevronRight size={15} />
+              </Link>
+              <button onClick={checkStudioRuntime} disabled={studioProbe === "checking"} style={secondaryAction}>
+                {studioProbe === "checking" ? (ko ? "점검 중..." : "Checking...") : ko ? "런타임 점검" : "Check runtime"}
+              </button>
+              {studioProbe !== "idle" && (
+                <span style={{ ...probeText, color: studioProbe === "ok" ? "#91e7b4" : studioProbe === "error" ? "#ff9a9a" : "#d7d4ca" }}>
+                  {studioProbe === "ok" && <IconCheck size={13} />}
+                  {studioMessage}
+                </span>
+              )}
             </div>
-            <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 26, lineHeight: 1.15, fontWeight: 750 }}>
-              실행 가능한 Studio와 생성 앱
-            </h1>
-            <p style={{ margin: "8px 0 0", color: "var(--ink-soft)", fontSize: 13.5, lineHeight: 1.55, maxWidth: 680 }}>
-              각 타일은 실제 라우트와 런타임으로 이동합니다. 생성 앱은 로컬 App Factory 상태에서 active 항목만 표시합니다.
+          </div>
+          <div style={heroBottomPreview}>
+            {quickLaunchTiles.map((tile) => (
+              <Link key={tile.id} href={tile.href} style={miniPreviewCard}>
+                <span style={{ ...miniPreviewIcon, ...appBadgeStyle(tile.id) }}>{tile.icon}</span>
+                <span style={miniPreviewText}>{tile.name}</span>
+              </Link>
+            ))}
+            <a href="#studio-catalog" style={miniPreviewCard}>
+              <span style={miniPreviewIcon}>
+                <IconApps size={14} />
+              </span>
+              <span style={miniPreviewText}>{ko ? "전체 카탈로그" : "Full catalog"}</span>
+            </a>
+          </div>
+        </section>
+      )}
+
+      <main id="studio-catalog" style={catalogMain}>
+        <div style={catalogToolbar}>
+          <div>
+            <h2 style={catalogTitle}>{ko ? "Studio 카탈로그" : "Studio catalog"}</h2>
+            <p style={catalogCaption}>
+              {ko
+                ? "상단은 대표 앱만 고정하고, 실제 탐색은 검색과 필터로 처리합니다."
+                : "The hero keeps only featured apps; search and filters handle full discovery."}
             </p>
           </div>
-          <Link
-            href="/build"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 8,
-              height: 36,
-              padding: "0 13px",
-              borderRadius: 8,
-              border: "1px solid var(--paper-edge)",
-              background: "var(--fill-1)",
-              color: "var(--ink)",
-              textDecoration: "none",
-              fontSize: 12.5,
-              fontWeight: 700,
-            }}
-          >
-            <IconWand size={14} />
-            Build 새 에이전트
-          </Link>
-        </header>
-
-        {featuredStudio && (
-          <section style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--fill-1)", overflow: "hidden" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.4fr) minmax(280px, 0.8fr)", minHeight: 250 }}>
-              <div style={{ padding: 24, display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 18 }}>
-                <div>
-                  <div style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 800, color: "var(--accent)", marginBottom: 10 }}>
-                    <IconStore size={13} />
-                    REAL STUDIO RUNTIME
-                  </div>
-                  <h2 style={{ margin: 0, fontSize: 23, fontWeight: 750, fontFamily: "var(--font-head)" }}>
-                    {pickLocalized(featuredStudio, locale).name}
-                  </h2>
-                  <p style={{ margin: "10px 0 0", color: "var(--ink-soft)", fontSize: 13.5, lineHeight: 1.55, maxWidth: 680 }}>
-                    {pickLocalized(featuredStudio, locale).tagline}
-                  </p>
-                </div>
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                  <Link href={featuredStudio.route} style={primaryLinkStyle}>
-                    열기
-                    <IconChevronRight size={14} />
-                  </Link>
-                  <button onClick={checkStudioRuntime} disabled={studioProbe === "checking"} style={secondaryButtonStyle}>
-                    {studioProbe === "checking" ? "점검 중..." : "런타임 점검"}
-                  </button>
-                  {studioProbe !== "idle" && (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: studioProbe === "ok" ? "var(--green-deep)" : studioProbe === "error" ? "var(--red-deep)" : "var(--muted-deep)" }}>
-                      {studioProbe === "ok" && <IconCheck size={13} />}
-                      {studioMessage || (studioProbe === "checking" ? "Studio runtime starting" : "")}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <AppMedia appId={featuredStudio.id} label={pickLocalized(featuredStudio, locale).name} large />
+          <div style={toolbarControls}>
+            <div style={filterGroup} role="tablist" aria-label={ko ? "Studio 필터" : "Studio filters"}>
+              {([
+                ["all", ko ? "전체" : "All"],
+                ["original", "Original"],
+                ["studio", "Studio"],
+              ] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setCatalogFilter(value)}
+                  aria-selected={catalogFilter === value}
+                  style={catalogFilter === value ? filterButtonActive : filterButton}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
-          </section>
-        )}
-
-        <section>
-          <SectionHeader title="First-Party Studio" count={firstPartyApps.length} />
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 }}>
-            {firstPartyApps.map((app) => (
-              <AppCard key={app.id} href={app.launchCommand ? `${app.route}?cmd=${encodeURIComponent(app.launchCommand)}` : app.route}>
-                <AppMedia appId={app.id} label={pickLocalized(app, locale).name} />
-                <div style={{ padding: 14 }}>
-                  <div style={{ fontSize: 15, fontWeight: 750, color: "var(--ink)", marginBottom: 5 }}>{pickLocalized(app, locale).name}</div>
-                  <div style={{ fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.45 }}>{pickLocalized(app, locale).tagline}</div>
-                </div>
-              </AppCard>
-            ))}
+            <label style={searchBox}>
+              <IconSearch size={15} />
+              <input
+                value={searchTerm}
+                onChange={(event) => setSearchTerm(event.target.value)}
+                placeholder={ko ? "Studio 검색" : "Search Studio"}
+                style={searchInput}
+              />
+            </label>
           </div>
-        </section>
+        </div>
 
-        <section>
-          <SectionHeader title="Generated Apps" count={generatedApps.length} />
-          {generatedApps.length === 0 ? (
-            <div style={{ border: "1px dashed var(--paper-edge)", borderRadius: 8, background: "var(--fill-1)", padding: 24, color: "var(--muted-deep)", fontSize: 13 }}>
-              아직 생성된 앱이 없습니다. Chat에서 Apps 생성 모드를 켜거나 Build에서 새 도구를 만든 뒤 여기에 표시됩니다.
-            </div>
-          ) : (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 }}>
-              {generatedApps.map((app) => {
-                const title = sanitizePublicAppCopy(app.appName || app.manifest?.app?.name || app.manifest?.title, "Generated App");
-                const tagline = sanitizePublicAppCopy(app.manifest?.app?.valueProp || app.manifest?.description || "Agent-made web app", "Agent-made web app");
-                return (
-                  <AppCard key={app.id} href={`/apps/generated?id=${app.id}`}>
-                    <div style={{ height: 136, background: "linear-gradient(135deg, var(--fill-2), var(--paper-2))", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--accent)" }}>
-                      <IconWand size={38} />
-                    </div>
-                    <div style={{ padding: 14 }}>
-                      <div style={{ fontSize: 15, fontWeight: 750, color: "var(--ink)", marginBottom: 5 }}>{title}</div>
-                      <div style={{ fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.45 }}>{tagline}</div>
-                    </div>
-                  </AppCard>
-                );
-              })}
-            </div>
-          )}
-        </section>
+        <StudioRow
+          id={query ? "studio-search-results" : "studio-apps"}
+          title={query ? (ko ? "검색 결과" : "Search results") : ko ? "전체 Studio" : "All Studio"}
+          subtitle={activeSubtitle}
+          tiles={visibleTiles}
+          emptyText={ko ? "검색 결과가 없습니다." : "No matching apps."}
+        />
       </main>
     </div>
   );
 }
 
-function SectionHeader({ title, count }: { title: string; count: number }) {
+function StudioWordmark() {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-      <h2 style={{ margin: 0, fontSize: 15, fontWeight: 750 }}>{title}</h2>
-      <span style={{ fontSize: 11, color: "var(--muted-deep)", border: "1px solid var(--paper-edge)", borderRadius: 999, padding: "1px 7px" }}>{count}</span>
+    <StudioBotLogo
+      wordmark
+      label="Agentlas Studio"
+      size={42}
+      style={wordmark}
+      textStyle={{ color: "#ffffff", fontSize: 13, fontWeight: 820 }}
+    />
+  );
+}
+
+function StudioRow({
+  id,
+  title,
+  subtitle,
+  tiles,
+  emptyText,
+}: {
+  id: string;
+  title: string;
+  subtitle: string;
+  tiles: StudioTile[];
+  emptyText?: string;
+}) {
+  return (
+    <section id={id} style={rowSection}>
+      <SectionTitle title={title} subtitle={subtitle} />
+      {tiles.length === 0 ? (
+        <div style={emptyState}>{emptyText}</div>
+      ) : (
+        <div style={rail}>
+          {tiles.map((tile) => (
+            <StudioCard key={tile.id} tile={tile} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SectionTitle({ title, subtitle }: { title: string; subtitle: string }) {
+  return (
+    <div style={sectionHeading}>
+      <h2 style={sectionTitle}>{title}</h2>
+      <p style={sectionSubtitle}>{subtitle}</p>
     </div>
   );
 }
 
-function AppCard({ href, children }: { href: string; children: React.ReactNode }) {
+function StudioCard({ tile }: { tile: StudioTile }) {
+  const [videoFailed, setVideoFailed] = useState(false);
+  const [posterFailed, setPosterFailed] = useState(false);
   return (
-    <Link
-      href={href}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        minHeight: 250,
-        overflow: "hidden",
-        border: "1px solid var(--paper-edge)",
-        borderRadius: 8,
-        background: "var(--paper)",
-        color: "inherit",
-        textDecoration: "none",
-        boxShadow: "var(--shadow-1)",
-      }}
-    >
-      {children}
+    <Link href={tile.href} style={studioCard}>
+      <div style={mediaWrap}>
+        {tile.videoSrc && !videoFailed ? (
+          <video
+            src={tile.videoSrc}
+            poster={tile.posterSrc}
+            autoPlay
+            muted
+            loop
+            playsInline
+            onError={() => setVideoFailed(true)}
+            style={cardVideo}
+          />
+        ) : tile.posterSrc && !posterFailed ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={tile.posterSrc} alt={tile.name} onError={() => setPosterFailed(true)} style={cardVideo} />
+        ) : (
+          <div style={mediaFallback}>
+            {tile.id.includes("creative") ? <IconImage size={34} /> : tile.icon}
+          </div>
+        )}
+        <div style={cardShade} />
+        <span style={cardMeta}>{tile.meta}</span>
+      </div>
+      <div style={cardBody}>
+        <div style={cardTitleLine}>
+          <span style={{ ...cardIcon, ...appBadgeStyle(tile.id) }}>{tile.icon}</span>
+          <strong style={cardTitle}>{tile.name}</strong>
+        </div>
+        <p style={cardCopy}>{tile.tagline}</p>
+      </div>
     </Link>
   );
 }
 
-function AppMedia({ appId, label, large = false }: { appId: string; label: string; large?: boolean }) {
-  const [failed, setFailed] = useState(false);
-  return (
-    <div style={{ minHeight: large ? 250 : 136, background: "var(--paper-2)", position: "relative", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
-      {!failed && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={`/apps/${appId}.png`}
-          alt={label}
-          onError={() => setFailed(true)}
-          style={{ width: "100%", height: "100%", objectFit: "cover" }}
-        />
-      )}
-      {failed && (
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, color: "var(--muted-deep)" }}>
-          {appId === "creative-studio" ? <IconImage size={34} /> : appId === "ecommerce-os" ? <IconStore size={34} /> : <IconApps size={34} />}
-          <span style={{ fontSize: 12, fontWeight: 650 }}>{label}</span>
-        </div>
-      )}
-    </div>
-  );
-}
+const pageShell: CSSProperties = {
+  width: "100%",
+  height: "100%",
+  overflowY: "auto",
+  background: "#080807",
+  color: "#f7f4ea",
+};
 
-const primaryLinkStyle: React.CSSProperties = {
+const heroSection: CSSProperties = {
+  position: "relative",
+  minHeight: "min(560px, 58vh)",
+  overflow: "hidden",
+  display: "flex",
+  alignItems: "center",
+  padding: "54px 46px 82px",
+};
+
+const heroVideo: CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  width: "100%",
+  height: "100%",
+  objectFit: "cover",
+  filter: "saturate(1.08) contrast(1.06)",
+};
+
+const heroShade: CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  background:
+    "linear-gradient(90deg, rgba(5,5,4,0.96) 0%, rgba(5,5,4,0.76) 42%, rgba(5,5,4,0.26) 72%, rgba(5,5,4,0.76) 100%), linear-gradient(0deg, #080807 0%, rgba(8,8,7,0.14) 28%, rgba(8,8,7,0.08) 70%, rgba(8,8,7,0.72) 100%)",
+};
+
+const heroContent: CSSProperties = {
+  position: "relative",
+  zIndex: 1,
+  width: "min(640px, 62vw)",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "flex-start",
+};
+
+const wordmark: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 10,
+  marginBottom: 34,
+};
+
+const heroEyebrow: CSSProperties = {
+  color: "#ffefe8",
+  fontSize: 12,
+  fontWeight: 760,
+  marginBottom: 12,
+};
+
+const heroTitle: CSSProperties = {
+  margin: 0,
+  color: "#ffffff",
+  fontFamily: "var(--font-head)",
+  fontSize: "clamp(44px, 6.2vw, 78px)",
+  lineHeight: 0.96,
+  fontWeight: 780,
+  letterSpacing: 0,
+};
+
+const heroActions: CSSProperties = {
+  marginTop: 24,
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  flexWrap: "wrap",
+};
+
+const primaryAction: CSSProperties = {
+  height: 40,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "0 16px",
+  borderRadius: 6,
+  background: "#e50914",
+  color: "#ffffff",
+  textDecoration: "none",
+  fontSize: 13,
+  fontWeight: 760,
+};
+
+const secondaryAction: CSSProperties = {
+  height: 40,
+  display: "inline-flex",
+  alignItems: "center",
+  padding: "0 15px",
+  borderRadius: 6,
+  border: "1px solid rgba(255,255,255,0.28)",
+  background: "rgba(255,255,255,0.12)",
+  color: "#ffffff",
+  fontSize: 13,
+  fontWeight: 720,
+  cursor: "pointer",
+};
+
+const probeText: CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
   gap: 6,
-  height: 36,
-  padding: "0 14px",
-  borderRadius: 8,
-  background: "var(--ink)",
-  color: "var(--paper)",
-  textDecoration: "none",
-  fontSize: 13,
-  fontWeight: 750,
+  maxWidth: 460,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontSize: 12,
 };
 
-const secondaryButtonStyle: React.CSSProperties = {
-  height: 36,
-  padding: "0 13px",
-  borderRadius: 8,
-  border: "1px solid var(--paper-edge)",
-  background: "var(--paper)",
-  color: "var(--ink)",
-  fontSize: 13,
+const heroBottomPreview: CSSProperties = {
+  position: "absolute",
+  left: 46,
+  right: 46,
+  bottom: 22,
+  zIndex: 2,
+  display: "flex",
+  gap: 10,
+  overflow: "hidden",
+};
+
+const miniPreviewCard: CSSProperties = {
+  width: 180,
+  minWidth: 0,
+  height: 38,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 9,
+  padding: "0 11px",
+  borderRadius: 6,
+  border: "1px solid rgba(255,255,255,0.16)",
+  background: "rgba(0,0,0,0.42)",
+  color: "#f7f4ea",
+  textDecoration: "none",
+  backdropFilter: "blur(10px)",
+};
+
+const miniPreviewIcon: CSSProperties = {
+  width: 22,
+  height: 22,
+  borderRadius: 5,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  background: "rgba(109,145,255,0.24)",
+  border: "1px solid rgba(255,255,255,0.16)",
+  flexShrink: 0,
+};
+
+const miniPreviewText: CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontSize: 12,
   fontWeight: 700,
+};
+
+const catalogMain: CSSProperties = {
+  position: "relative",
+  padding: "30px 36px 58px",
+  display: "flex",
+  flexDirection: "column",
+  gap: 28,
+};
+
+const catalogToolbar: CSSProperties = {
+  display: "flex",
+  alignItems: "flex-end",
+  justifyContent: "space-between",
+  gap: 18,
+  flexWrap: "wrap",
+};
+
+const catalogTitle: CSSProperties = {
+  margin: 0,
+  color: "#ffffff",
+  fontSize: 22,
+  fontFamily: "var(--font-head)",
+  fontWeight: 760,
+  letterSpacing: 0,
+};
+
+const catalogCaption: CSSProperties = {
+  margin: "7px 0 0",
+  maxWidth: 540,
+  color: "rgba(255,255,255,0.50)",
+  fontSize: 12.5,
+  lineHeight: 1.45,
+};
+
+const toolbarControls: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  flexWrap: "wrap",
+  justifyContent: "flex-end",
+};
+
+const filterGroup: CSSProperties = {
+  height: 38,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 3,
+  padding: 3,
+  borderRadius: 6,
+  border: "1px solid rgba(255,255,255,0.12)",
+  background: "rgba(255,255,255,0.07)",
+};
+
+const filterButton: CSSProperties = {
+  height: 30,
+  minWidth: 62,
+  border: 0,
+  borderRadius: 5,
+  background: "transparent",
+  color: "rgba(255,255,255,0.62)",
+  fontSize: 12,
+  fontWeight: 720,
   cursor: "pointer",
+};
+
+const filterButtonActive: CSSProperties = {
+  ...filterButton,
+  background: "rgba(255,255,255,0.16)",
+  color: "#ffffff",
+};
+
+const searchBox: CSSProperties = {
+  width: "min(360px, 100%)",
+  height: 38,
+  display: "flex",
+  alignItems: "center",
+  gap: 9,
+  padding: "0 12px",
+  borderRadius: 6,
+  border: "1px solid rgba(255,255,255,0.16)",
+  background: "rgba(255,255,255,0.08)",
+  color: "rgba(255,255,255,0.72)",
+};
+
+const searchInput: CSSProperties = {
+  minWidth: 0,
+  flex: 1,
+  height: "100%",
+  border: 0,
+  outline: 0,
+  background: "transparent",
+  color: "#ffffff",
+  fontSize: 13,
+};
+
+const rowSection: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 12,
+  scrollMarginTop: 72,
+};
+
+const sectionHeading: CSSProperties = {
+  display: "flex",
+  alignItems: "baseline",
+  gap: 10,
+  flexWrap: "wrap",
+};
+
+const sectionTitle: CSSProperties = {
+  margin: 0,
+  color: "#ffffff",
+  fontSize: 17,
+  fontWeight: 760,
+  letterSpacing: 0,
+};
+
+const sectionSubtitle: CSSProperties = {
+  margin: 0,
+  color: "rgba(255,255,255,0.50)",
+  fontSize: 12.5,
+};
+
+const rail: CSSProperties = {
+  display: "flex",
+  gap: 14,
+  overflowX: "auto",
+  padding: "0 0 12px",
+  scrollSnapType: "x proximity",
+};
+
+const studioCard: CSSProperties = {
+  width: 294,
+  flex: "0 0 294px",
+  borderRadius: 7,
+  overflow: "hidden",
+  background: "#151412",
+  color: "#f7f4ea",
+  textDecoration: "none",
+  border: "1px solid rgba(255,255,255,0.10)",
+  scrollSnapAlign: "start",
+};
+
+const mediaWrap: CSSProperties = {
+  position: "relative",
+  aspectRatio: "16 / 9",
+  overflow: "hidden",
+  background: "#201f1b",
+};
+
+const cardVideo: CSSProperties = {
+  width: "100%",
+  height: "100%",
+  objectFit: "cover",
+  display: "block",
+};
+
+const cardShade: CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  background: "linear-gradient(180deg, rgba(0,0,0,0.05) 0%, rgba(0,0,0,0.62) 100%)",
+};
+
+const mediaFallback: CSSProperties = {
+  width: "100%",
+  height: "100%",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  color: "rgba(255,255,255,0.70)",
+};
+
+const cardMeta: CSSProperties = {
+  position: "absolute",
+  left: 10,
+  bottom: 9,
+  zIndex: 1,
+  height: 22,
+  display: "inline-flex",
+  alignItems: "center",
+  padding: "0 8px",
+  borderRadius: 5,
+  background: "rgba(0,0,0,0.56)",
+  color: "#fff7f3",
+  fontSize: 10.5,
+  fontWeight: 760,
+};
+
+const cardBody: CSSProperties = {
+  padding: "11px 12px 13px",
+};
+
+const cardTitleLine: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  minWidth: 0,
+};
+
+const cardIcon: CSSProperties = {
+  width: 24,
+  height: 24,
+  borderRadius: 6,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  background: "rgba(109,145,255,0.22)",
+  border: "1px solid rgba(255,255,255,0.14)",
+  color: "#ffffff",
+  flexShrink: 0,
+};
+
+function appBadgeStyle(id: string): CSSProperties {
+  if (id === "startup-founder-studio") return { background: "rgba(109,145,255,0.16)", color: "#ffffff" };
+  if (id === "oberon") return { background: "rgba(131,247,255,0.15)", color: "#dffcff" };
+  if (id === "document-studio") return { background: "rgba(226,226,224,0.16)", color: "#ffffff" };
+  if (id === "creative-studio") return { background: "rgba(255,184,77,0.16)", color: "#ffe1a3" };
+  if (id === "ecommerce-os") return { background: "rgba(145,231,180,0.15)", color: "#d9ffe7" };
+  return {};
+}
+
+const cardTitle: CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "#ffffff",
+  fontSize: 14,
+  lineHeight: 1.25,
+};
+
+const cardCopy: CSSProperties = {
+  margin: "8px 0 0",
+  display: "-webkit-box",
+  WebkitBoxOrient: "vertical",
+  WebkitLineClamp: 2,
+  overflow: "hidden",
+  minHeight: 34,
+  color: "rgba(255,255,255,0.58)",
+  fontSize: 12,
+  lineHeight: 1.43,
+};
+
+const emptyState: CSSProperties = {
+  minHeight: 92,
+  display: "flex",
+  alignItems: "center",
+  padding: "0 18px",
+  borderRadius: 7,
+  border: "1px dashed rgba(255,255,255,0.18)",
+  color: "rgba(255,255,255,0.54)",
+  fontSize: 13,
 };

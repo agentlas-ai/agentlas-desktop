@@ -6,6 +6,7 @@
 import { useMemo, useState, type CSSProperties } from "react";
 import type { InstalledAgent, InstalledFirm, ResolvedOrg } from "@/lib/types";
 import { pickLocalized, useT } from "@/lib/i18n";
+import { marginLine, formatTokens } from "@/lib/receipts";
 import { IconClose, IconNetwork } from "./Icon";
 
 /** 실시간 에이전트 상태 — chat 페이지가 속성 이벤트로 채운다. */
@@ -27,6 +28,13 @@ export interface NetTimelineItem {
   tier?: 1 | 2 | 3;
   kind: "status" | "tool" | "handoff";
   text: string;
+  // ── 영수증(receipt)용 실측 필드 — 이벤트가 줄 때만 채워진다. 없으면 생략(지어내지 않음). ──
+  /** 사용한 도구 이름 — tool 이벤트의 tool.name */
+  toolName?: string;
+  /** 생성 토큰 수 — 이벤트의 tokens (formatTokens로 포맷, 없으면 미표시) */
+  tokens?: number;
+  /** 위임/핸드오프 대상 노드 id 들 — handoff 카드의 "to" */
+  delegateTo?: string[];
 }
 
 interface Props {
@@ -247,6 +255,9 @@ export function AgentNetworkPanel({
           )}
         </div>
       </div>
+
+      {/* 패널 하단 고정 — 세션 누적 마진(항상 ₩0)을 1급 영수증 데이터로 노출 */}
+      <SessionMarginCounter receiptCount={timeline.length} locale={locale} />
     </aside>
   );
 }
@@ -305,6 +316,9 @@ function WorkflowCard({
       : item.kind === "tool"
         ? locale === "ko" ? "에이전트" : "Agent"
         : locale === "ko" ? "상태" : "Status";
+  // ── 영수증 메타 — 실측값만. 없으면 해당 줄을 그리지 않는다(지어내지 않음). ──
+  const tokensText = formatTokens(item.tokens, locale);
+  const handoffTargets = isHandoff && item.delegateTo && item.delegateTo.length > 0 ? item.delegateTo : null;
   return (
     <article
       className={`agentlas-activity-card${live ? " is-running" : ""}${isComplete ? " is-complete" : ""}`}
@@ -321,7 +335,54 @@ function WorkflowCard({
       <div style={workflowTextStyle}>
         {isHandoff ? `↳ ${item.text}` : item.text}
       </div>
+      {/* 구조화된 영수증 라인 — from→to(핸드오프), 사용 도구, 토큰. 실측 있을 때만. */}
+      {(handoffTargets || item.toolName || tokensText) && (
+        <div style={receiptMetaRowStyle}>
+          {handoffTargets && (
+            <span style={receiptChipStyle}>
+              {locale === "ko" ? "위임 →" : "to →"} {handoffTargets.join(", ")}
+            </span>
+          )}
+          {item.toolName && (
+            <span style={receiptChipStyle}>
+              {locale === "ko" ? "도구" : "tool"} · {item.toolName}
+            </span>
+          )}
+          {tokensText && <span style={receiptChipStyle}>{tokensText}</span>}
+        </div>
+      )}
+      {/* 모든 영수증에 1급 데이터로 박는 마진 라인 — 구조적으로 항상 ₩0. */}
+      <div style={receiptMarginStyle}>{marginLine(locale)}</div>
     </article>
+  );
+}
+
+/**
+ * 세션 누적 마진 카운터 — 이번 세션의 모든 영수증을 합쳐도 Agentlas 마진은 ₩0.
+ * 마진은 구조적으로 0이므로(모델 호출을 중계하지 않음) 누적도 0 — 이게 핵심 메시지다.
+ * receiptCount는 실측(타임라인 항목 수)이고, 마진/추가요금만 변하지 않는 사실로 단정한다.
+ */
+function SessionMarginCounter({
+  receiptCount,
+  locale,
+}: {
+  receiptCount: number;
+  locale: "ko" | "en";
+}) {
+  return (
+    <div style={sessionMarginCounterStyle}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <span style={sessionMarginLabelStyle}>
+          {locale === "ko" ? "이번 세션 누적" : "This session"}
+        </span>
+        <span style={sessionMarginValueStyle}>{marginLine(locale)}</span>
+      </div>
+      <div style={sessionMarginSubStyle}>
+        {locale === "ko"
+          ? `영수증 ${receiptCount}건 · 추가요금 0 (내 구독/키로만 구동)`
+          : `${receiptCount} receipt${receiptCount === 1 ? "" : "s"} · $0 surcharge (runs on your own subscription/keys)`}
+      </div>
+    </div>
   );
 }
 
@@ -521,6 +582,73 @@ const workflowCardStyle: CSSProperties = {
   background: "var(--paper)",
   padding: "10px 11px",
   boxShadow: "0 1px 2px rgba(11, 11, 15, 0.035)",
+};
+
+// 영수증 메타 칩 줄 — from→to / 도구 / 토큰. 실측 있을 때만 렌더.
+const receiptMetaRowStyle: CSSProperties = {
+  marginTop: 8,
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 5,
+};
+
+const receiptChipStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  maxWidth: "100%",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  borderRadius: 999,
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper-2)",
+  color: "var(--muted-deep)",
+  padding: "2px 7px",
+  fontSize: 9.5,
+  fontWeight: 750,
+};
+
+// 마진 라인 — 모든 영수증에 1급 데이터로. 항상 ₩0.
+const receiptMarginStyle: CSSProperties = {
+  marginTop: 8,
+  paddingTop: 7,
+  borderTop: "1px solid color-mix(in srgb, var(--paper-edge) 72%, transparent)",
+  color: "var(--green-deep)",
+  fontSize: 10.5,
+  fontWeight: 800,
+  letterSpacing: 0.1,
+};
+
+// 세션 누적 마진 카운터 — 패널 하단 고정 바.
+const sessionMarginCounterStyle: CSSProperties = {
+  flexShrink: 0,
+  borderTop: "var(--hairline)",
+  background: "var(--paper)",
+  padding: "10px 12px",
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+};
+
+const sessionMarginLabelStyle: CSSProperties = {
+  color: "var(--muted-deep)",
+  fontSize: 10.5,
+  fontWeight: 700,
+  textTransform: "uppercase",
+  letterSpacing: 0.4,
+};
+
+const sessionMarginValueStyle: CSSProperties = {
+  color: "var(--green-deep)",
+  fontSize: 12.5,
+  fontWeight: 850,
+};
+
+const sessionMarginSubStyle: CSSProperties = {
+  color: "var(--muted-deep)",
+  fontSize: 10,
+  lineHeight: 1.4,
+  overflowWrap: "anywhere",
 };
 
 function searchingDotStyle(active: boolean): CSSProperties {

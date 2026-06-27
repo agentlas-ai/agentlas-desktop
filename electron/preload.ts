@@ -23,6 +23,8 @@ const api: AgentlasIpc = {
     listDirectory: (absPath: string, showHidden?: boolean) =>
       ipcRenderer.invoke("fs:listDirectory", absPath, showHidden ?? false),
     readTextFile: (absPath: string) => ipcRenderer.invoke("fs:readTextFile", absPath),
+    saveTextFile: (suggestedName: string, content: string) =>
+      ipcRenderer.invoke("fs:saveTextFile", suggestedName, content),
   },
   workspace: {
     selectFolder: () => ipcRenderer.invoke("workspace:selectFolder"),
@@ -115,6 +117,9 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("agentFiles:read", agentId, absPath),
     write: (agentId: string, absPath: string, content: string) =>
       ipcRenderer.invoke("agentFiles:write", agentId, absPath, content),
+  },
+  skills: {
+    listCatalog: () => ipcRenderer.invoke("skills:listCatalog"),
   },
   mcpTools: {
     listCatalog: () => ipcRenderer.invoke("mcpTools:listCatalog"),

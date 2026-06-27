@@ -31,11 +31,12 @@ import { AgentNetworkPanel, type LiveAgent, type NetTimelineItem } from "@/compo
 import { ProjectFolderBar } from "@/components/ProjectFolderBar";
 import { AgentPicker } from "@/components/AgentPicker";
 import type { CodeArtifact } from "@/components/Markdown";
-import { IconBuilding, IconFolder, IconNetwork, IconSparkles, IconTrash } from "@/components/Icon";
+import { IconBuilding, IconClose, IconFolder, IconNetwork, IconSparkles, IconTrash } from "@/components/Icon";
 import { buildAppRoutePrompt, INSTALLED_APPS, parseAppSlashRoute } from "@/lib/apps";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { surfaceApprovalRequirement, type SurfaceApprovalRequirement } from "@/lib/surface-approval";
+import { KeyStatusBanner } from "@/components/KeyStatusBanner";
 
 function uid(): string {
   return Math.random().toString(36).slice(2);
@@ -355,6 +356,9 @@ function ChatPage() {
   const [networkOpen, setNetworkOpen] = useState(false);
   // 슬래시 명령(/folder·/global)으로 워킹 폴더를 바꾸면 하단 폴더 바를 다시 읽게 하는 토큰
   const [folderReload, setFolderReload] = useState(0);
+  // ContinuityReceipt(복원 배너)용 — 채팅 진입 시 ipc().workspace.get으로 복원된 마지막 작업 폴더.
+  // 기기 간 클라우드 복원 여부는 백엔드 미확인이므로, 실제로 알 수 있는 사실(로컬 복원 경로)만 보여준다.
+  const [restoredFolder, setRestoredFolder] = useState<string | null>(null);
 
   // 사용자가 직접 패널을 접고/펴면 선호값을 영속화 (자동 노출과 구분).
   const setWorkspaceOpenPersisted = useCallback((open: boolean) => {
@@ -396,7 +400,12 @@ function ChatPage() {
           },
         }));
       };
-      const pushWorkflow = (kind: NetTimelineItem["kind"], text: string) => {
+      const pushWorkflow = (
+        kind: NetTimelineItem["kind"],
+        text: string,
+        // 영수증 실측 — 도구명/토큰. 단일 에이전트(fallback) 경로에서도 영수증을 채운다.
+        receipt?: { toolName?: string; tokens?: number },
+      ) => {
         const trimmed = text.trim();
         if (!trimmed) return;
         markWorkflowActive(trimmed);
@@ -408,6 +417,8 @@ function ChatPage() {
           tier: 1,
           kind,
           text: trimmed,
+          toolName: receipt?.toolName,
+          tokens: receipt?.tokens,
         });
       };
 
@@ -436,6 +447,10 @@ function ChatPage() {
                 tier: ev.tier,
                 kind: ev.delegateTo ? "handoff" : ev.tool ? "tool" : "status",
                 text: ev.status?.trim() || label,
+                // 영수증 실측 — 이벤트가 줄 때만(없으면 undefined → 카드에서 생략)
+                toolName: ev.tool?.name,
+                tokens: ev.tokens,
+                delegateTo: ev.delegateTo,
             });
           }
         } else if (ev.kind === "thinking" && ev.status?.trim()) {
@@ -447,6 +462,8 @@ function ChatPage() {
               tier: ev.tier,
               kind: ev.delegateTo ? "handoff" : "status",
               text: ev.status!.trim(),
+              tokens: ev.tokens,
+              delegateTo: ev.delegateTo,
           });
         }
         // 메인 버블에도 활동 반영 — 접기요약(WorkingPanel)이 "돌아가는 중 + 도구 N개"를
@@ -489,7 +506,10 @@ function ChatPage() {
         return;
       }
       if (ev.kind === "tool-use" && ev.tool) {
-        pushWorkflow("tool", ev.status?.trim() || toolWorkflowText(ev.tool, locale));
+        pushWorkflow("tool", ev.status?.trim() || toolWorkflowText(ev.tool, locale), {
+          toolName: ev.tool.name,
+          tokens: ev.tokens,
+        });
         setMessages((m) =>
           m.map((msg) =>
             msg.id === placeholderId
@@ -571,7 +591,7 @@ function ChatPage() {
           }),
         );
       } else if (ev.kind === "final") {
-        pushWorkflow("status", locale === "ko" ? "완료" : "Done");
+        pushWorkflow("status", locale === "ko" ? "완료" : "Done", { tokens: ev.tokens });
         setMessages((m) =>
           m.map((msg) => {
             if (msg.id !== placeholderId) return msg;
@@ -667,6 +687,7 @@ function ChatPage() {
       setScaffoldedTools({});
       setInstalledPlugins([]);
       setAllGeneratedApps([]);
+      setRestoredFolder(null);
       void (async () => {
       const c = await api.chats.get(chatId);
       if (cancelled || !c) {
@@ -714,6 +735,8 @@ function ChatPage() {
         if (storedOpen === "1") setWorkspaceOpen(true);
         else if (storedOpen === "0") setWorkspaceOpen(false);
         else if (savedFolder) setWorkspaceOpen(true);
+        // ContinuityReceipt — 복원된 작업 폴더가 있을 때만 배너를 띄운다(없으면 null → 렌더 안 함).
+        setRestoredFolder(savedFolder ?? null);
       }
       // 팀 네트워크 패널 — 저장된 선호값 복원 (기본 닫힘)
       let storedNet: string | null = null;
@@ -1650,6 +1673,10 @@ function ChatPage() {
             </div>
           )}
         </div>
+        {/* BYOC 키/구독 상태 pill — 키 사망이 가장 흔한 실패이므로 헤더에 상시 노출 */}
+        <span className="titlebar-nodrag" style={{ flexShrink: 0, display: "inline-flex" }}>
+          <KeyStatusBanner mode="pill" />
+        </span>
         <button
           onClick={() => setNetworkOpenPersisted(!networkOpen)}
           className="titlebar-nodrag"
@@ -1696,6 +1723,69 @@ function ChatPage() {
           <IconTrash size={16} />
         </button>
       </header>
+
+      {/* ContinuityReceipt(복원 배너) — 실제로 알 수 있는 사실만: 마지막 작업 폴더가 로컬에서
+          복원됐다는 점. 기기 간 클라우드 동기화는 백엔드 미확인이라 단정하지 않는다.
+          복원할 폴더가 없으면 렌더하지 않는다. */}
+      {restoredFolder && (
+        <div
+          role="status"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            margin: "8px 16px 0",
+            padding: "7px 11px",
+            borderRadius: 8,
+            border: "1px solid var(--paper-edge)",
+            background: "var(--paper-2)",
+            color: "var(--muted-deep)",
+            fontSize: 11.5,
+            lineHeight: 1.4,
+            minWidth: 0,
+          }}
+        >
+          <IconFolder size={13} style={{ color: "var(--accent)", flexShrink: 0 }} />
+          <span style={{ flexShrink: 0, color: "var(--ink-soft)", fontWeight: 700 }}>
+            {locale === "ko" ? "이전 작업 폴더에서 이어집니다" : "Continuing from your last working folder"}
+          </span>
+          <code
+            style={{
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              fontFamily: "var(--font-mono)",
+              fontSize: 10.5,
+              color: "var(--muted-deep)",
+            }}
+            title={restoredFolder}
+          >
+            {restoredFolder}
+          </code>
+          <button
+            onClick={() => setRestoredFolder(null)}
+            aria-label={t("chat.untitled") /* 일반 닫기 — 전용 키 없음 */}
+            title={locale === "ko" ? "배너 닫기" : "Dismiss"}
+            style={{
+              marginLeft: "auto",
+              flexShrink: 0,
+              width: 20,
+              height: 20,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              border: "none",
+              background: "transparent",
+              color: "var(--muted-deep)",
+              borderRadius: 6,
+              cursor: "pointer",
+            }}
+          >
+            <IconClose size={12} />
+          </button>
+        </div>
+      )}
 
       <ChatStream
         messages={messages}

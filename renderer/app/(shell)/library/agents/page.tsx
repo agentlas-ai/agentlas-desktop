@@ -2,10 +2,15 @@
 "use client";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 
 import { ipc } from "@/lib/ipc";
+import { isVisibleAgent, isUserFacingAgentText, visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
+import { parseMemoryMarkdown, serializeMemoryMarkdown } from "@/lib/agent-memory";
+import { classifyAgent } from "@/lib/ownership";
+import { MARGIN_LINE_KO } from "@/lib/receipts";
 import type {
   AgentRuntimeOverride,
   AgentRuntimeOverrideScope,
@@ -34,6 +39,7 @@ import {
   IconEdit,
   IconClose,
   IconPlus,
+  IconFileUp,
   IconPaperclip,
   IconRoute
 } from "@/components/Icon";
@@ -49,12 +55,14 @@ export default function LibraryAgentsPage() {
 function LibraryAgentsView() {
   
   const { t, locale } = useT();
+  const searchParams = useSearchParams();
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
   const [firmCollapsed, setFirmCollapsed] = useState<Record<string, boolean>>({});
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [chats, setChats] = useState<Chat[]>([]);
   const [resolving, setResolving] = useState(false);
   const [resolveMsg, setResolveMsg] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
   const [resolvedOrgs, setResolvedOrgs] = useState<Record<string, ResolvedOrg>>({});
   const [runtimeStatuses, setRuntimeStatuses] = useState<RuntimeStatus[]>([]);
   const [runtimeOverrides, setRuntimeOverrides] = useState<AgentRuntimeOverride[]>([]);
@@ -66,6 +74,9 @@ function LibraryAgentsView() {
   // 선택된 에이전트 노드 (null 이면 회사 오버뷰 노출)
   const [selectedNode, setSelectedNode] = useState<ResolvedNode | null>(null);
   const [activeTab, setActiveTab] = useState<"identity" | "memory" | "playbook" | "activity">("identity");
+  const targetAgentId = searchParams.get("agentId") ?? "";
+  const targetNodeId = searchParams.get("nodeId") ?? "";
+  const targetFirmId = searchParams.get("firmId") ?? "";
 
   // 파일 핸들링 및 상태
   const [agentFiles, setAgentFiles] = useState<WorkspaceNode[]>([]);
@@ -82,13 +93,14 @@ function LibraryAgentsView() {
   const [savingFiles, setSavingFiles] = useState(false);
 
   // 스킬 주입 서랍 (Skill Evolution Drawer)
+  // 하드코딩 목록이 아니라 엔진 skills/ 디렉토리를 실제로 스캔한 카탈로그를 쓴다(실측 원칙).
   const [skillDrawerOpen, setSkillDrawerOpen] = useState(false);
-  const [availableSkills] = useState([
-    { slug: "android-cli", name: "android-cli", description: "Android 빌드 및 환경 진단 스킬" },
-    { slug: "chrome-extensions", name: "chrome-extensions", description: "크롬 확장 프로그램 매니페스트 및 API 스킬" },
-    { slug: "firebase-firestore", name: "firebase-firestore", description: "Firestore DB 스키마 설계 및 색인 관리 스킬" },
-    { slug: "xcode-project-setup", name: "xcode-project-setup", description: "iOS Xcode 프로젝트 종속성 파일 주입 스킬" }
-  ]);
+  const [availableSkills, setAvailableSkills] = useState<{ slug: string; name: string; description: string }[]>([]);
+  useEffect(() => {
+    ipc()?.skills?.listCatalog?.()
+      .then((list) => setAvailableSkills(list ?? []))
+      .catch(() => setAvailableSkills([]));
+  }, []);
 
   // 온톨로지 인박스 — 실제 보류 중인 학습 제안만 표출(가짜 데이터 없음).
   // selectedNode 의 메모리 미결 과제(openQuestions)에서 도출 → 정식 규칙 승격 후보.
@@ -157,7 +169,7 @@ function LibraryAgentsView() {
       api.agentRuntime?.list ? api.agentRuntime.list().catch(() => []) : Promise.resolve([]),
     ]);
     setFirms(fList);
-    setAgents(agList);
+    setAgents(visibleAgents(agList));
     setRuntimeStatuses(runtimes);
     setRuntimeOverrides(overrides);
 
@@ -172,6 +184,28 @@ function LibraryAgentsView() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!targetAgentId && !targetNodeId) return;
+    const target = findAgentRouteNode({
+      agentId: targetAgentId,
+      nodeId: targetNodeId,
+      firmId: targetFirmId,
+      firms,
+      agents,
+      resolvedOrgs,
+      locale,
+    });
+    if (!target) return;
+    setSelectedNode((current) => {
+      if (current?.id === target.id && current.agentId === target.agentId) return current;
+      return target;
+    });
+    setActiveTab("identity");
+    if (targetFirmId) {
+      setFirmCollapsed((prev) => ({ ...prev, [targetFirmId]: false }));
+    }
+  }, [agents, firms, locale, resolvedOrgs, targetAgentId, targetFirmId, targetNodeId]);
 
   // 에이전트 선택 변경 시 파일 로드
   useEffect(() => {
@@ -248,7 +282,7 @@ function LibraryAgentsView() {
       setEditingPrompt(false);
       showToast("시스템 프롬프트가 성공적으로 반영되었습니다.");
     } catch (e) {
-      alert("프롬프트 저장 실패: " + String(e));
+      showToast("프롬프트 저장 실패: " + String(e));
     } finally {
       setSavingFiles(false);
     }
@@ -269,7 +303,7 @@ function LibraryAgentsView() {
       setPromptDraft(newPromptContent);
       showToast("자가 진화 제안이 성공적으로 프롬프트에 병합되었습니다.");
     } catch (e) {
-      alert("진화 적용 실패: " + String(e));
+      showToast("진화 적용 실패: " + String(e));
     } finally {
       setSavingFiles(false);
     }
@@ -300,7 +334,7 @@ function LibraryAgentsView() {
         await api.agentFiles.write(selectedNode.agentId, path, serialized);
         setMemoryContent(serialized);
       } catch (e) {
-        alert("메모리 갱신 실패: " + String(e));
+        showToast("메모리 갱신 실패: " + String(e));
       } finally {
         setSavingFiles(false);
       }
@@ -312,6 +346,31 @@ function LibraryAgentsView() {
   function showToast(msg: string) {
     setToastMsg(msg);
     setTimeout(() => setToastMsg(""), 3000);
+  }
+
+  async function importAgentFolder() {
+    const api = ipc();
+    if (!api || importBusy) return;
+    setImportBusy(true);
+    try {
+      const dir = await api.fs.pickDirectory();
+      if (!dir) return;
+      const imported = await api.team.importLocalFolder(dir);
+      await refresh();
+      const loc = pickLocalized(imported, locale);
+      setSelectedNode({
+        id: imported.id,
+        name: loc.name,
+        role: loc.tagline || imported.slug,
+        agentId: imported.id,
+      });
+      setActiveTab("identity");
+      showToast(`${loc.name} 가져오기 완료`);
+    } catch (err) {
+      showToast("에이전트 가져오기 실패: " + String(err));
+    } finally {
+      setImportBusy(false);
+    }
   }
 
   const agentMap = new Map(agents.map((a) => [a.id, a]));
@@ -352,7 +411,7 @@ function LibraryAgentsView() {
               <IconBuilding size={20} />
             </button>
           ) : (
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, width: "100%" }}>
               <div
                 onClick={() => setSelectedNode(null)}
                 style={{ flex: 1, cursor: "pointer", display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}
@@ -362,6 +421,33 @@ function LibraryAgentsView() {
                   My Agents
                 </div>
               </div>
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void importAgentFolder();
+                }}
+                disabled={importBusy}
+                className="titlebar-nodrag"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  minHeight: 30,
+                  padding: "0 10px",
+                  borderRadius: 8,
+                  border: "1px solid var(--paper-edge)",
+                  background: "var(--paper)",
+                  color: "var(--ink)",
+                  fontSize: 11.5,
+                  fontWeight: 700,
+                  cursor: importBusy ? "default" : "pointer",
+                  opacity: importBusy ? 0.62 : 1,
+                  flexShrink: 0,
+                }}
+              >
+                <IconFileUp size={13} />
+                {importBusy ? "가져오는 중" : "가져오기"}
+              </button>
             </div>
           )}
         </header>
@@ -391,18 +477,24 @@ function LibraryAgentsView() {
                       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
                         {rOrg ? (
                           <>
-                            <MiniNodeAvatar node={rOrg.ceo} active={selectedNode?.id === rOrg.ceo.id} onClick={() => { setSelectedNode(rOrg.ceo); setActiveTab("identity"); }} />
-                            {rOrg.divisions.map((d) => (
+                            {isVisibleResolvedNode(rOrg.ceo, agentMap) && (
+                              <MiniNodeAvatar node={rOrg.ceo} active={selectedNode?.id === rOrg.ceo.id} onClick={() => { setSelectedNode(rOrg.ceo); setActiveTab("identity"); }} />
+                            )}
+                            {rOrg.divisions
+                              .filter((d) => isVisibleResolvedNode(d, agentMap) || d.specialists.some((s) => isVisibleResolvedNode(s, agentMap)))
+                              .map((d) => (
                               <div key={d.id} style={{ display: "flex", flexDirection: "column", gap: 8, borderTop: "1px solid var(--paper-edge)", paddingTop: 8 }}>
-                                <MiniNodeAvatar node={d} active={selectedNode?.id === d.id} onClick={() => { setSelectedNode(d); setActiveTab("identity"); }} />
-                                {d.specialists.map((s) => (
+                                {isVisibleResolvedNode(d, agentMap) && (
+                                  <MiniNodeAvatar node={d} active={selectedNode?.id === d.id} onClick={() => { setSelectedNode(d); setActiveTab("identity"); }} />
+                                )}
+                                {d.specialists.filter((s) => isVisibleResolvedNode(s, agentMap)).map((s) => (
                                   <MiniNodeAvatar key={s.id} node={s} active={selectedNode?.id === s.id} onClick={() => { setSelectedNode(s); setActiveTab("identity"); }} />
                                 ))}
                               </div>
                             ))}
                           </>
                         ) : (
-                          firm.orgChart.map((n) => {
+                          firm.orgChart.filter((n) => isVisibleFirmOrgNode(n, agentMap)).map((n) => {
                             const agent = agentMap.get(n.agentId);
                             return (
                               <MiniNodeAvatar
@@ -421,7 +513,7 @@ function LibraryAgentsView() {
                       </div>
                     ) : rOrg ? (
                       <div style={{ paddingLeft: 12 }}>
-                        <ResolvedOrgChart org={rOrg} selectedId={selectedNode?.id ?? null} onSelect={(node) => { setSelectedNode(node); setActiveTab("identity"); }} />
+                        <ResolvedOrgChart org={rOrg} agentMap={agentMap} selectedId={selectedNode?.id ?? null} onSelect={(node) => { setSelectedNode(node); setActiveTab("identity"); }} />
                       </div>
                     ) : (
                       <div style={{ paddingLeft: 12 }}>
@@ -558,8 +650,29 @@ function LibraryAgentsView() {
                   My Agents Library
                 </h1>
               </div>
-              
-              
+              <button
+                onClick={() => void importAgentFolder()}
+                disabled={importBusy}
+                className="titlebar-nodrag"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 8,
+                  minHeight: 34,
+                  padding: "0 12px",
+                  borderRadius: 8,
+                  border: "1px solid var(--accent)",
+                  background: "var(--accent)",
+                  color: "#fff",
+                  fontSize: 12,
+                  fontWeight: 750,
+                  cursor: importBusy ? "default" : "pointer",
+                  opacity: importBusy ? 0.72 : 1,
+                }}
+              >
+                <IconFileUp size={14} />
+                {importBusy ? "가져오는 중..." : "에이전트 가져오기"}
+              </button>
             </header>
 
             <section style={{ maxWidth: 960, margin: "24px auto", padding: "0 24px" }}>
@@ -660,14 +773,37 @@ function MiniNodeAvatar({ node, active, onClick }: { node: { name: string; role?
 }
 
 // ── 정규화된 3-tier 조직 렌더 (사이드바 내부) ──────────
-function ResolvedOrgChart({ org, selectedId, onSelect }: { org: ResolvedOrg; selectedId: string | null; onSelect: (node: ResolvedNode) => void }) {
+function ResolvedOrgChart({
+  org,
+  agentMap,
+  selectedId,
+  onSelect,
+}: {
+  org: ResolvedOrg;
+  agentMap: Map<string, InstalledAgent>;
+  selectedId: string | null;
+  onSelect: (node: ResolvedNode) => void;
+}) {
+  const visibleDivisions = org.divisions.filter(
+    (division) =>
+      isVisibleResolvedNode(division, agentMap) ||
+      division.specialists.some((specialist) => isVisibleResolvedNode(specialist, agentMap)),
+  );
+  const showCeo = isVisibleResolvedNode(org.ceo, agentMap);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <OrgNodeCard node={org.ceo} tier={1} active={selectedId === org.ceo.id} onClick={() => onSelect(org.ceo)} />
-      {org.divisions.map((d) => (
+      {showCeo && <OrgNodeCard node={org.ceo} tier={1} active={selectedId === org.ceo.id} onClick={() => onSelect(org.ceo)} />}
+      {visibleDivisions.map((d) => {
+        const visibleSpecialists = d.specialists.filter((specialist) => isVisibleResolvedNode(specialist, agentMap));
+        const showDivision = isVisibleResolvedNode(d, agentMap);
+        return (
         <div key={d.id}>
-          <OrgNodeCard node={d} tier={2} active={selectedId === d.id} onClick={() => onSelect(d)} />
-          {d.specialists.length > 0 && (
+          {showDivision ? (
+            <OrgNodeCard node={d} tier={2} active={selectedId === d.id} onClick={() => onSelect(d)} />
+          ) : (
+            <OrgGroupLabel node={d} />
+          )}
+          {visibleSpecialists.length > 0 && (
             <div
               style={{
                 marginLeft: 16,
@@ -679,13 +815,24 @@ function ResolvedOrgChart({ org, selectedId, onSelect }: { org: ResolvedOrg; sel
                 marginTop: 6,
               }}
             >
-              {d.specialists.map((s) => (
+              {visibleSpecialists.map((s) => (
                 <OrgNodeCard key={s.id} node={s} tier={3} active={selectedId === s.id} onClick={() => onSelect(s)} />
               ))}
             </div>
           )}
         </div>
-      ))}
+        );
+      })}
+    </div>
+  );
+}
+
+function OrgGroupLabel({ node }: { node: ResolvedNode }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", color: "var(--muted-deep)" }}>
+      <span style={{ width: 26, height: 1, background: "var(--paper-edge)", flexShrink: 0 }} />
+      <strong style={{ fontSize: 11.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.name}</strong>
+      <span style={{ marginLeft: "auto", fontSize: 9.5, fontFamily: "var(--font-mono)" }}>HQ</span>
     </div>
   );
 }
@@ -740,6 +887,22 @@ function OrgNodeCard({ node, tier, active, onClick }: { node: ResolvedNode; tier
   );
 }
 
+function isVisibleResolvedNode(node: ResolvedNode, agentMap: Map<string, InstalledAgent>): boolean {
+  if (!isUserFacingAgentText(node.name, node.role)) return false;
+  if (!node.agentId) return true;
+  const agent = agentMap.get(node.agentId);
+  return Boolean(agent && isVisibleAgent(agent));
+}
+
+function isVisibleFirmOrgNode(
+  node: InstalledFirm["orgChart"][number],
+  agentMap: Map<string, InstalledAgent>,
+): boolean {
+  if (!isUserFacingAgentText(node.agentSlug, node.role)) return false;
+  const agent = agentMap.get(node.agentId);
+  return Boolean(agent && isVisibleAgent(agent));
+}
+
 // ── 일반 트리 재귀 렌더 (사이드바 내부) ─────────────────
 function OrgChart({
   firm,
@@ -758,7 +921,7 @@ function OrgChart({
   if (!ceo) return <div style={{ fontSize: 12, color: "var(--muted)" }}>조직도가 비어있습니다.</div>;
 
   function children(parentSlug: string) {
-    return firm.orgChart.filter((n) => n.reportsTo === parentSlug);
+    return firm.orgChart.filter((n) => n.reportsTo === parentSlug && isVisibleFirmOrgNode(n, agentMap));
   }
 
   function renderNode(node: typeof firm.orgChart[number], depth: number): React.ReactNode {
@@ -836,7 +999,10 @@ function OrgChart({
     );
   }
 
-  return renderNode(ceo, 0);
+  if (isVisibleFirmOrgNode(ceo, agentMap)) return renderNode(ceo, 0);
+  const visibleRoots = children(ceo.agentSlug);
+  if (visibleRoots.length === 0) return <div style={{ fontSize: 12, color: "var(--muted)" }}>표시할 에이전트가 없습니다.</div>;
+  return <>{visibleRoots.map((node) => renderNode(node, 0))}</>;
 }
 
 type SelectedNodeContext = {
@@ -844,6 +1010,79 @@ type SelectedNodeContext = {
   division: ResolvedNode | null;
   isDivision: boolean;
 };
+
+function findResolvedNode(org: ResolvedOrg, matches: (node: ResolvedNode) => boolean): ResolvedNode | null {
+  if (matches(org.ceo)) return org.ceo;
+  for (const division of org.divisions) {
+    if (matches(division)) return division;
+    const specialist = division.specialists.find(matches);
+    if (specialist) return specialist;
+  }
+  return null;
+}
+
+function findAgentRouteNode({
+  agentId,
+  nodeId,
+  firmId,
+  firms,
+  agents,
+  resolvedOrgs,
+  locale,
+}: {
+  agentId: string;
+  nodeId: string;
+  firmId: string;
+  firms: InstalledFirm[];
+  agents: InstalledAgent[];
+  resolvedOrgs: Record<string, ResolvedOrg>;
+  locale: Locale;
+}): ResolvedNode | null {
+  const agentMap = new Map(agents.map((agent) => [agent.id, agent]));
+  const matches = (node: ResolvedNode) =>
+    isVisibleResolvedNode(node, agentMap) &&
+    Boolean((agentId && node.agentId === agentId) || (nodeId && node.id === nodeId));
+  const scopedFirms = firmId ? firms.filter((firm) => firm.id === firmId) : firms;
+
+  for (const firm of scopedFirms) {
+    const resolved = resolvedOrgs[firm.id];
+    if (resolved) {
+      const node = findResolvedNode(resolved, matches);
+      if (node) return node;
+    }
+
+    const raw = firm.orgChart.find(
+      (node) =>
+        (agentId && node.agentId === agentId) ||
+        (nodeId && (node.agentSlug === nodeId || node.role === nodeId)),
+    );
+    if (raw && isVisibleFirmOrgNode(raw, agentMap)) {
+      const agent = agents.find((item) => item.id === raw.agentId);
+      const localized = agent ? pickLocalized(agent, locale) : null;
+      return {
+        id: raw.agentSlug,
+        name: localized?.name ?? raw.role,
+        role: raw.role,
+        agentId: raw.agentId,
+      };
+    }
+  }
+
+  if (agentId) {
+    const agent = agents.find((item) => item.id === agentId);
+    if (agent) {
+      const localized = pickLocalized(agent, locale);
+      return {
+        id: agent.id,
+        name: localized.name,
+        role: localized.tagline,
+        agentId: agent.id,
+      };
+    }
+  }
+
+  return null;
+}
 
 function nodeMatches(candidate: ResolvedNode, selected: ResolvedNode): boolean {
   return (
@@ -957,11 +1196,11 @@ function InformationFlowMapper({ node }: { node: ResolvedNode }) {
 
   useEffect(() => {
     setFlow(flowHeuristic(node.role));
-    setFromEngine(false);
-    let cancelled = false;
-    const api = ipc();
-    if (!api) return;
-    void api.hephaestus
+	    setFromEngine(false);
+	    let cancelled = false;
+	    const api = ipc();
+	    if (!api?.hephaestus?.aoGraph) return;
+	    void api.hephaestus
       .aoGraph({ agent: node.agentId ?? node.id })
       .then((res) => {
         if (cancelled || !res?.ok) return;
@@ -1274,7 +1513,7 @@ function RuntimeAssignmentPanel({
       await refreshOverrides();
       showToast("런타임 모델 지정이 저장되었습니다.");
     } catch (err) {
-      alert("런타임 지정 저장 실패: " + String(err));
+      showToast("런타임 지정 저장 실패: " + String(err));
     } finally {
       setSaving(false);
     }
@@ -1367,6 +1606,11 @@ function RuntimeAssignmentPanel({
       <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 8, background: "var(--paper-2)", border: "1px solid var(--paper-edge)", fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.45 }}>
         <strong style={{ color: "var(--ink)" }}>현재 저장값:</strong> {selectionSummary(selectedOverride?.selection)}
         {selectedTarget && <span style={{ color: "var(--muted-deep)" }}> · {selectedTarget.note}</span>}
+      </div>
+
+      {/* 가치5(독립): 키는 내 OS 키체인에, 모델 호출은 내 구독으로 — Agentlas 마진 ₩0. */}
+      <div className="runtime-independence-note">
+        키는 내 OS 키체인에 저장되고 Agentlas 서버를 거치지 않습니다 · 모델 호출은 내 구독/키로 — {MARGIN_LINE_KO}
       </div>
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
@@ -1573,8 +1817,8 @@ function AgentDetailView({
         ]);
         
         showToast("프롬프트가 초기 사양으로 재설정되었습니다.");
-      } catch (e: any) {
-        alert("재설정 반영 실패: " + String(e));
+      } catch (e) {
+        showToast("재설정 반영 실패: " + String(e));
       }
     }
   };
@@ -1781,8 +2025,27 @@ function AgentDetailView({
           <div style={{ fontSize: 13, color: "var(--muted-deep)" }}>
             {agent?.kind === "team" ? "팀 에이전트" : "개별 전문가 에이전트"}
           </div>
+          {node.agentId && (
+            <button
+              className="agent-run-button"
+              onClick={async () => {
+                const api = ipc();
+                if (!api || !node.agentId) return;
+                try {
+                  // 보유→가동 전환: 이 일꾼과 새 작업 채팅을 열어 바로 일을 시킨다.
+                  const chat = await api.chats.create({ agentId: node.agentId });
+                  navigate(`/chat?id=${chat.id}`);
+                } catch {
+                  /* 무시 */
+                }
+              }}
+              title="이 일꾼과 새 작업을 시작합니다"
+            >
+              ▶ 일 시키기
+            </button>
+          )}
         </div>
-        
+
         {/* 정보 흐름 연결 맵 (Information Flow Mapper) */}
         <InformationFlowMapper node={node} />
 
@@ -2065,6 +2328,25 @@ function AgentDetailView({
                     <div><strong>에이전트 ID:</strong> {node.agentId ?? "미설치(임시)"}</div>
                     <div><strong>적용 런타임:</strong> {effectiveRuntimeOverride ? selectionSummary(effectiveRuntimeOverride.selection) : "전역 자동 라우팅"}</div>
                     <div><strong>신뢰 등급:</strong> Trust {agent?.trustGrade ?? "B"}</div>
+                    {agent && (() => {
+                      const own = classifyAgent(agent);
+                      return (
+                        <div className="agent-ownership-row" data-owned={own.owned ? "true" : "false"}>
+                          <strong>소유:</strong>{" "}
+                          <span className="agent-ownership-badge" data-owned={own.owned ? "true" : "false"}>
+                            {own.owned ? "내 직원 · owned" : "빌린 게스트 · borrowed"}
+                          </span>
+                          <div className="agent-ownership-path">{own.localPath ?? own.origin}</div>
+                          <div className="agent-ownership-note">
+                            {own.owned
+                              ? own.localPath
+                                ? "내 디스크의 실제 폴더 — 게시자가 사라져도 안 죽는다."
+                                : "내 라이브러리에 설치됨 — 내 자산이다."
+                              : "원격 게스트 — 게시자가 내리면 사용 불가. Fork 하면 내 것이 된다."}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
@@ -2088,7 +2370,23 @@ function AgentDetailView({
           {/* 탭 2: 큐레이팅된 메모리 */}
           {activeTab === "memory" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 20, maxWidth: 840 }}>
-              
+
+              {/* 메모리 요약 — 비개발자 어휘로 한 문장. 그래프는 아래의 2차(고급) 보기에서. */}
+              <div className="memory-summary">
+                <div className="memory-summary-line">
+                  이 일꾼이 기억하는 것: 결정 <strong>{memoryParsed.decisions.length}</strong>
+                  {" · "}주의 <strong>{memoryParsed.gotchas.length}</strong>
+                  {" · "}미결 <strong>{memoryParsed.openQuestions.length}</strong>
+                  {(() => {
+                    const synced = [...memoryParsed.decisions, ...memoryParsed.gotchas].filter((r) => r.synced).length;
+                    return synced > 0 ? <> · 허브 공유 <strong>{synced}</strong></> : null;
+                  })()}
+                </div>
+                <div className="memory-summary-note">
+                  기억은 내 디스크의 markdown 파일로 저장됩니다 — 켜고 끈 상태도 파일에 함께 남아 새로고침해도 유지됩니다.
+                </div>
+              </div>
+
               {/* 온톨로지 인박스 알림 영역 */}
               {ontologyInbox.length > 0 && (
                 <div style={{ border: "1px solid var(--accent-soft)", borderRadius: "var(--radius-md)", overflow: "hidden" }}>
@@ -2459,6 +2757,14 @@ function AgentDetailView({
                     <div><strong>Agent ID:</strong> {node.agentId ?? "미설치 노드"}</div>
                     <div><strong>적용 런타임:</strong> {effectiveRuntimeOverride ? selectionSummary(effectiveRuntimeOverride.selection) : "런타임 자동 선택"}</div>
                     <div><strong>신뢰 등급:</strong> Trust {agent?.trustGrade ?? "B"}</div>
+                    {agent && (
+                      <div>
+                        <strong>소유:</strong>{" "}
+                        <span className="agent-ownership-badge" data-owned={classifyAgent(agent).owned ? "true" : "false"}>
+                          {classifyAgent(agent).owned ? "내 직원 · owned" : "빌린 게스트 · borrowed"}
+                        </span>
+                      </div>
+                    )}
                     <div><strong>호출 경로:</strong> Chat 멘션, Team 라우팅, Hub 후보 검색</div>
                   </div>
                 </div>
@@ -2662,86 +2968,6 @@ function AgentDetailView({
   );
 }
 
-// ── 4. memory.md 파서 / 직렬화 유틸리티 ───────────────
-function parseMemoryMarkdown(content: string) {
-  const decisions: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[] = [];
-  const gotchas: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[] = [];
-  const openQuestions: { id: string; title: string; content: string }[] = [];
-
-  const lines = content.split("\n");
-  let currentSection: "decisions" | "gotchas" | "open" | null = null;
-
-  for (let line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("## Decisions") || trimmed.startsWith("## 의사결정") || trimmed.toLowerCase().includes("decisions")) {
-      currentSection = "decisions";
-      continue;
-    } else if (trimmed.startsWith("## Gotchas") || trimmed.startsWith("## 주의사항") || trimmed.toLowerCase().includes("gotchas")) {
-      currentSection = "gotchas";
-      continue;
-    } else if (trimmed.startsWith("## Open") || trimmed.startsWith("## 미결") || trimmed.toLowerCase().includes("open")) {
-      currentSection = "open";
-      continue;
-    } else if (trimmed.startsWith("##")) {
-      currentSection = null;
-      continue;
-    }
-
-    if (currentSection) {
-      // Parse: - **Title**: Description
-      const bulletMatch =
-        trimmed.match(/^-\s+\*\*(.*?)\*\*(?:(?:\s*—\s*)|(?:\s*-\s*)|(?:\s*:\s*)|(?:\s+))(.*)/) ||
-        trimmed.match(/^-\s+\*\*(.*?)\*\*(.*)/);
-
-      if (bulletMatch) {
-        const title = bulletMatch[1].trim();
-        const body = bulletMatch[2].trim();
-        const id = title.replace(/\s+/g, "-").toLowerCase();
-        const item = { id, title, content: body, synced: Math.random() > 0.4, enabled: true };
-        if (currentSection === "decisions") decisions.push(item);
-        else if (currentSection === "gotchas") gotchas.push(item);
-        else if (currentSection === "open") openQuestions.push(item);
-      } else if (trimmed.startsWith("-")) {
-        const body = trimmed.substring(1).trim();
-        if (body) {
-          const title = body.substring(0, Math.min(25, body.length)) + "...";
-          const id = "item-" + Math.random().toString(36).substr(2, 9);
-          const item = { id, title, content: body, synced: Math.random() > 0.4, enabled: true };
-          if (currentSection === "decisions") decisions.push(item);
-          else if (currentSection === "gotchas") gotchas.push(item);
-          else if (currentSection === "open") openQuestions.push(item);
-        }
-      }
-    }
-  }
-
-  return { decisions, gotchas, openQuestions };
-}
-
-function serializeMemoryMarkdown(
-  decisions: { title: string; content: string }[],
-  gotchas: { title: string; content: string }[],
-  openQuestions: { title: string; content: string }[]
-) {
-  let md = `# Agentlas Agent Memory\n\n이 에이전트가 다음 호출에서도 유지해야 할 결정, 주의사항, 미결 과제를 적는다. 프로젝트별 휘발 상태는 해당 프로젝트 컨텍스트에 둔다.\n\n`;
-  
-  md += `## Decisions\n\n`;
-  decisions.forEach((item) => {
-    md += `- **${item.title}**: ${item.content}\n`;
-  });
-  
-  md += `\n## Gotchas\n\n`;
-  gotchas.forEach((item) => {
-    md += `- **${item.title}**: ${item.content}\n`;
-  });
-  
-  md += `\n## Open\n\n`;
-  openQuestions.forEach((item) => {
-    md += `- **${item.title}**: ${item.content}\n`;
-  });
-  
-  return md;
-}
 
 // ── 시스템 프롬프트 세부 지시 구조화 파서 ──
 function parsePromptSections(content: string) {

@@ -4,27 +4,39 @@ import { chromium } from "playwright";
 
 const baseUrl = process.env.AGENTLAS_DESKTOP_BASE_URL ?? "http://127.0.0.1:3100";
 const runs = Number.parseInt(process.env.UI_REGRESSION_RUNS ?? "1", 10);
-const screenshotDir = path.resolve(process.cwd(), "artifacts", "ui-regression");
+const screenshotDir = path.resolve(process.cwd(), process.env.UI_REGRESSION_ARTIFACT_DIR ?? path.join("artifacts", "ui-regression"));
+const recordVideo = process.env.UI_REGRESSION_RECORD_VIDEO === "1";
+const viewport = { width: 1440, height: 980 };
 
 const routes = [
+  { name: "import-dashboard", path: "/dashboard", check: checkDashboardImport },
+  { name: "dashboard", path: "/dashboard", check: checkDashboard },
   { name: "hub", path: "/marketplace", check: checkHub },
   { name: "build", path: "/build", check: checkBuild },
+  { name: "cloud-upload", path: "/cloud", check: checkCloudUpload },
   { name: "apps", path: "/apps", check: checkApps },
+  { name: "startup-studio", path: "/startup-founder-studio", check: checkStartupStudio },
   { name: "agents", path: "/library/agents", check: checkAgents },
   { name: "chat", path: "/chat?id=chat-1", check: checkChat },
   { name: "onboarding", path: "/onboarding", check: checkOnboarding },
 ];
 
+fs.rmSync(screenshotDir, { recursive: true, force: true });
 fs.mkdirSync(screenshotDir, { recursive: true });
 
 const browser = await chromium.launch();
 const failures = [];
+const evidence = [];
 
 for (let run = 1; run <= runs; run += 1) {
   for (const route of routes) {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 980 } });
+    const context = await browser.newContext({
+      viewport,
+      recordVideo: recordVideo ? { dir: screenshotDir, size: viewport } : undefined,
+    });
     await context.addInitScript(mockAgentlasBridge);
     const page = await context.newPage();
+    const video = page.video();
     const errors = [];
     page.on("console", (msg) => {
       if (msg.type() === "error") errors.push(msg.text());
@@ -43,17 +55,47 @@ for (let run = 1; run <= runs; run += 1) {
       }
       const actionableErrors = errors.filter((line) => !/favicon|hydration warning/i.test(line));
       if (actionableErrors.length > 0) throw new Error(actionableErrors.join("\n"));
+      evidence.push({ route: route.name, path: route.path, run, status: "pass" });
       console.log(`[ui-regression] pass ${run}/${runs} ${route.name}`);
     } catch (err) {
-      failures.push(`${route.name} run ${run}: ${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      failures.push(`${route.name} run ${run}: ${message}`);
+      evidence.push({ route: route.name, path: route.path, run, status: "fail", message });
       await page.screenshot({ path: path.join(screenshotDir, `${route.name}-failed-run-${run}.png`), fullPage: true }).catch(() => {});
     } finally {
       await context.close();
+      if (recordVideo && video) {
+        try {
+          const rawVideo = await video.path();
+          const target = path.join(screenshotDir, `${String(run).padStart(2, "0")}-${route.name}.webm`);
+          fs.renameSync(rawVideo, target);
+        } catch (err) {
+          console.warn(`[ui-regression] could not save video for ${route.name}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     }
   }
 }
 
 await browser.close();
+
+fs.writeFileSync(
+  path.join(screenshotDir, "proof-summary.json"),
+  JSON.stringify(
+    {
+      ok: failures.length === 0,
+      baseUrl,
+      recordedAt: new Date().toISOString(),
+      recordVideo,
+      viewport,
+      evidence,
+      failures,
+    },
+    null,
+    2,
+  ) + "\n",
+  "utf8",
+);
 
 if (failures.length > 0) {
   console.error(failures.join("\n\n"));
@@ -62,8 +104,25 @@ if (failures.length > 0) {
 
 console.log(`[ui-regression] clean runs: ${runs}`);
 
+async function checkDashboardImport(page) {
+  await page.getByRole("heading", { name: /대시보드|Dashboard/ }).waitFor();
+  await page.getByRole("button", { name: /에이전트 가져오기|Import agents/ }).click();
+  await page.getByText(/가져오기 완료|Imported/).waitFor();
+}
+
+async function checkDashboard(page) {
+  await page.getByRole("heading", { name: /대시보드|Dashboard/ }).waitFor();
+  await page.getByText("Founder HQ").click();
+  await page.getByText("Builder Agent").first().waitFor();
+  await page.getByText("Builder Agent").first().click();
+  await page.waitForURL(/\/library\/agents\?.*agentId=agent-2/);
+  await page.getByText("실행 모델 지정").waitFor();
+}
+
 async function checkHub(page) {
   await page.getByText(/REGISTRY HUB|레지스트리 허브/).waitFor();
+  await page.getByRole("button", { name: /로컬 폴더|Local folder/ }).click();
+  await page.getByText(/가져오기 완료|Imported/).waitFor();
   await page.getByRole("tab", { name: /Plugin|플러그인/ }).click();
   await page.getByText("Slack", { exact: true }).first().waitFor();
   await page.getByRole("button", { name: /^설치$|^Install$/ }).first().click();
@@ -71,22 +130,46 @@ async function checkHub(page) {
 }
 
 async function checkBuild(page) {
-  await page.getByText("Agent Forge: Build").waitFor();
+  await page.getByRole("heading", { name: /^Build$/ }).waitFor();
   await page.getByText("hep-build", { exact: true }).first().waitFor();
   await page.getByRole("button", { name: /단일 에이전트/ }).click();
   await page.getByPlaceholder(/인스타그램/).fill("검증용 리서치 에이전트");
+  await page.getByRole("button", { name: /생성 폴더 선택/ }).click();
+  await page.getByRole("button", { name: /빌드 시작/ }).click();
+  await page.getByText(/검증 완료|패키지 준비됨/).first().waitFor();
+}
+
+async function checkCloudUpload(page) {
+  await page.getByRole("heading", { name: /에이전트 업로드|Agent upload/ }).waitFor();
+  await page.getByRole("button", { name: /업로드할 에이전트 폴더 선택|Choose an agent folder/ }).click();
+  await page.getByRole("button", { name: /^업로드$|^Upload$/ }).click();
+  await page.getByText(/업로드 완료|Upload complete/).waitFor();
 }
 
 async function checkApps(page) {
-  await page.getByText("Agentlas Apps").waitFor();
-  await page.getByText(/스타트업 파운더 스튜디오|Startup Founder Studio/).waitFor();
-  await page.getByRole("button", { name: "런타임 점검" }).click();
-  await page.getByText(/Runtime ready/).waitFor();
+  await page.getByRole("heading", { name: "Agentlas Studio" }).waitFor();
+  await page.getByText(/Studio 카탈로그|Studio catalog/).waitFor();
+  await page.getByText(/스타트업 창업자 스튜디오|Startup Founder Studio/).first().waitFor();
+  await page.getByRole("button", { name: /런타임 점검|Check runtime/ }).click();
+  await page.getByText(/런타임 준비됨|Runtime ready/).waitFor();
+  await page.getByPlaceholder(/검색|Search/).fill("Oberon");
+  await page.getByText(/검색 결과|Search results/).waitFor();
+}
+
+async function checkStartupStudio(page) {
+  await page.getByText("Startup Founder Studio", { exact: true }).waitFor();
+  await page.getByRole("button", { name: /새 아이디어/ }).click();
+  await page.getByPlaceholder(/창업 아이디어|startup idea/i).fill("검증용 창업 아이디어");
+  await page.getByRole("button", { name: /^시작$/ }).click();
+  await page.locator("iframe[title='Startup Founder Studio']").waitFor();
 }
 
 async function checkAgents(page) {
   await page.getByText("My Agents Library").waitFor();
-  await page.getByText("Orchestrator").first().click();
+  if ((await page.getByText("Orchestrator").count()) > 0) {
+    throw new Error("System agent leaked into the user-facing agents screen.");
+  }
+  await page.getByText("Builder Agent").first().click();
   await page.getByText("실행 모델 지정").waitFor();
   await page.getByLabel("모델").selectOption("gpt-5.1-codex");
   await page.getByRole("button", { name: /^저장$/ }).click();
@@ -129,9 +212,24 @@ function mockAgentlasBridge() {
     taglineEn: "Routes requests to the right agent.",
     kind: "agent",
     tone: "blue",
-    visibility: "local",
+    visibility: "background",
     systemPrompt: "# Orchestrator\n\nRoute work clearly.",
     mcpServers: ["github", "slack"],
+    preferredBackend: "codex",
+    trustGrade: "A",
+  };
+  const builderAgent = {
+    id: "agent-2",
+    slug: "builder-agent",
+    name: "빌더 에이전트",
+    nameEn: "Builder Agent",
+    tagline: "빌드 실행 에이전트",
+    taglineEn: "Build execution agent",
+    kind: "agent",
+    tone: "purple",
+    visibility: "local",
+    systemPrompt: "# Builder\n\nBuild Agentlas work clearly.",
+    mcpServers: ["github"],
     preferredBackend: "codex",
     trustGrade: "A",
   };
@@ -143,12 +241,24 @@ function mockAgentlasBridge() {
     tagline: "창업자 작업을 돕는 팀",
     taglineEn: "Team for founder work",
     ceoAgentId: "agent-1",
-    orgChart: [{ agentSlug: "agentlas-orchestrator", agentId: "agent-1", role: "Orchestrator", reportsTo: null }],
+    orgChart: [
+      { agentSlug: "agentlas-orchestrator", agentId: "agent-1", role: "Orchestrator", reportsTo: null },
+      { agentSlug: "builder-agent", agentId: "agent-2", role: "Builder", reportsTo: "agentlas-orchestrator" },
+    ],
   };
   const resolvedOrg = {
+    source: "orgchart",
     firmId: "firm-1",
     ceo: { id: "agentlas-orchestrator", name: "Orchestrator", role: "Orchestrator", agentId: "agent-1" },
-    divisions: [],
+    divisions: [
+      {
+        id: "builder-hq",
+        name: "Builder HQ",
+        role: "Builder HQ",
+        agentId: "agent-1",
+        specialists: [{ id: "builder-node", name: "Builder Agent", role: "Builder", agentId: "agent-2" }],
+      },
+    ],
   };
   const pluginCatalog = [
     {
@@ -227,7 +337,7 @@ function mockAgentlasBridge() {
       getResolvedOrg: async () => resolvedOrg,
     },
     team: {
-      list: async () => [agent],
+      list: async () => [agent, builderAgent],
       install: async () => agent,
       importLocalFolder: async () => agent,
     },

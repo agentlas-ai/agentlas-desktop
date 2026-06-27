@@ -64,6 +64,13 @@ the [Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/rel
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
 
+- **2026-06-27 · Always-on Stormbreaker Loop** — non-trivial chat and
+  automation runs now get scope lock, goal decomposition, work packets,
+  verification, immediate continuation passes, background continuation,
+  concrete-error repair, and final-gate discipline without a user-facing
+  Stormbreaker toggle. The desktop also auto-selects relevant MCP plugins for
+  Claude Code/Codex runs, with Hephaestus Network installed by default for
+  Agentlas Hub/Cloud routing.
 - **2026-06-06 · v0.2.18 terminal ontology update** — `agentlas` now accepts
   short REPL commands such as `/ontology`, `/ontology list`, and
   `/ontology company ./docs`; company and personal folders stay private unless
@@ -86,6 +93,7 @@ the current channel quickly.
 | **+$0 to your model bill** | Agentlas runs no model and never proxies a call |
 | **100% local** | keys in the OS keychain, chats & agents in local SQLite |
 | **Agent teams, visible** | every firm renders as an org chart, not a black box |
+| **Stormbreaker loop** | big jobs get automatic scope, goals, work packets, plugin selection, continuation, repair, and final-gate evidence |
 | **Apps Store** | install Apps, agent firms, and supporting engines over the Model Context Protocol |
 | **3 platforms** | macOS (Apple Silicon + Intel) · Windows · Linux, self-updating |
 | **Apache-2.0** | audit it, fork it, ship your own variant |
@@ -163,6 +171,38 @@ A complete tour of what ships today.
 - **Working-folder panel** pins a folder to a chat with a read-only file tree and
   text preview, so you can see the repo an agent is helping with.
 
+### Stormbreaker Loop
+
+- **Always on for serious work.** App builds, game builds, agent packaging,
+  debugging, deployment, data/report work, automations, trading/ops jobs, and
+  other multi-step runs receive a scope-lock -> goal decomposition -> work
+  packets/sub-agent architecture -> act -> verify -> bounded continuation ->
+  concrete-error repair -> final-gate instruction set. There is no Stormbreaker
+  toggle in chat or Settings.
+- **Visible in chat.** The same grey working panel used for agent activity shows
+  `Stormbreaker Loop` events before the answer is finalized.
+- **Plugin-aware.** Claude Code and Codex runs inspect the request and installed
+  MCP catalog, then enable relevant tools automatically when credentials are
+  already available. Hephaestus Network is part of the default MCP set so Hub and
+  Cloud routing/plugin discovery are reachable without a separate manual setup.
+- **Continuation.** If the runner reports more safe work remains, the desktop
+  continues the same invocation for a bounded number of immediate passes instead
+  of stopping at the first draft. If safe work still remains after those passes,
+  Agentlas creates a hidden `every-30m` Stormbreaker continuation automation that
+  reuses its own durable background session and disables itself once the marker
+  stops because the task is complete or blocked.
+- **Bounded host repair.** The desktop only performs automatic repair where it
+  has a concrete verifier. Today that includes invalid Agentlas Surface manifests:
+  Agentlas asks the runner for a corrected manifest, re-parses it, and stops
+  after a small bounded retry count.
+- **Automation-aware, not account-proof.** Scheduled runs receive the same loop
+  prompt, so each background cycle is asked to resume from evidence and record
+  what changed. A scheduled prompt is not proof that an external account action
+  succeeded unless a connector, browser session, or tool output verifies it.
+- **Honest stops.** If auth, missing access, provider policy, unavailable tools,
+  or an external outage blocks verification, the run must report that blocked or
+  unverified state instead of claiming completion.
+
 ### Apps Store — install and generate Apps
 
 - **MCP-native installs.** Browse and install Apps, agents, and whole firms from the
@@ -194,7 +234,11 @@ A complete tour of what ships today.
 ### Automations
 
 - **Schedule recurring runs** against an agent or a firm from a prompt template.
-  (UI ships in the current M0 build; the persistent scheduler lands in V1.)
+  The scheduler checks due runs while the app is open, supports interval forms
+  like `hourly` and `every-30m`, and runs each prompt through the Stormbreaker
+  loop contract in a durable hidden session per automation. External services
+  such as Instagram still require a capable connector/browser path plus
+  authenticated proof before the result is verified.
 
 ### Migrate in — never locked in
 

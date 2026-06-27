@@ -136,6 +136,7 @@ export function WorkbenchPanel({
           <IconClose size={15} />
         </button>
       </header>
+      <ExportBar artifact={artifact} surface={surface} />
       {surface ? (
         <SurfaceWorkbench surface={surface} onAction={onSurfaceAction} onStatePatch={onSurfaceStatePatch} />
       ) : artifact ? (
@@ -143,6 +144,136 @@ export function WorkbenchPanel({
       ) : null}
     </aside>
   );
+}
+
+/**
+ * ExportBar — 산출물을 .agentlas/MD/JSON 등으로 가져갈 수 있다는 점을 노출. "내보내기: lock-in 없음".
+ * MD/JSON 복사는 클립보드로, "파일로 저장"은 fs.saveTextFile(네이티브 저장 다이얼로그)로 디스크에 실제 기록한다.
+ */
+function ExportBar({
+  artifact,
+  surface,
+}: {
+  artifact: CodeArtifact | null;
+  surface: WorkbenchSurface | null;
+}) {
+  const { locale } = useT();
+  const ko = locale === "ko";
+  const [copied, setCopied] = useState<string | null>(null);
+
+  // 실제로 클립보드에 넣을 수 있는 내용물만 — 없으면 버튼 비활성.
+  const copyAsMarkdown = () => {
+    const text = surface
+      ? surfaceToMarkdown(surface)
+      : artifact
+        ? `\`\`\`${artifact.language || ""}\n${artifact.code}\n\`\`\``
+        : "";
+    if (!text) return;
+    void navigator.clipboard.writeText(text);
+    flash("md");
+  };
+  const copyAsJson = () => {
+    const text = surface
+      ? JSON.stringify(surface.manifest, null, 2)
+      : artifact
+        ? JSON.stringify({ id: artifact.id, language: artifact.language, code: artifact.code }, null, 2)
+        : "";
+    if (!text) return;
+    void navigator.clipboard.writeText(text);
+    flash("json");
+  };
+  const flash = (which: string) => {
+    setCopied(which);
+    window.setTimeout(() => setCopied((cur) => (cur === which ? null : cur)), 1600);
+  };
+
+  // 파일로 저장 — 네이티브 저장 다이얼로그(fs.saveTextFile)로 디스크에 실제로 쓴다. lock-in 없음.
+  const saveToFile = async () => {
+    const api = window.agentlas?.fs;
+    if (!api?.saveTextFile) return;
+    const langExt: Record<string, string> = {
+      typescript: "ts", javascript: "js", tsx: "tsx", jsx: "jsx",
+      python: "py", json: "json", html: "html", css: "css", markdown: "md",
+    };
+    const name = surface
+      ? `${surface.id || "surface"}.agentlas.json`
+      : `artifact.${langExt[(artifact?.language || "").toLowerCase()] || "txt"}`;
+    const content = surface
+      ? JSON.stringify(surface.manifest, null, 2)
+      : (artifact?.code ?? "");
+    if (!content) return;
+    const res = await api.saveTextFile(name, content);
+    if (res.ok) flash("saved");
+    else if (!res.canceled) flash("save-error");
+  };
+
+  const hasContent = Boolean(artifact || surface);
+  if (!hasContent) return null;
+
+  // ArtifactFileBridge — 이 산출물이 디스크 어디에 연결돼 있는지 실측 경로만 표시(없으면 미표시).
+  const diskPath = surface ? surfaceDiskPath(surface) : null;
+
+  return (
+    <div style={exportBar}>
+      <span style={exportLabel}>
+        {ko ? "내보내기" : "Export"}
+        <span style={exportLockFree}>{ko ? "lock-in 없음" : "no lock-in"}</span>
+      </span>
+      <button type="button" style={exportButton} onClick={copyAsMarkdown}>
+        {copied === "md" ? (ko ? "복사됨" : "Copied") : ko ? "MD 복사" : "Copy MD"}
+      </button>
+      <button type="button" style={exportButton} onClick={copyAsJson}>
+        {copied === "json" ? (ko ? "복사됨" : "Copied") : ko ? "JSON 복사" : "Copy JSON"}
+      </button>
+      {/* 파일로 저장 — 네이티브 저장 다이얼로그로 디스크에 실제 기록(fs.saveTextFile) */}
+      <button
+        type="button"
+        style={exportButton}
+        onClick={saveToFile}
+        title={ko ? "산출물을 내 디스크의 파일로 저장합니다 (lock-in 없음)" : "Save the artifact to a file on your disk (no lock-in)"}
+      >
+        {copied === "saved"
+          ? ko ? "저장됨" : "Saved"
+          : copied === "save-error"
+            ? ko ? "저장 실패" : "Save failed"
+            : ko ? "파일로 저장" : "Save to file"}
+      </button>
+      {diskPath && (
+        <span style={exportFileBridge} title={diskPath}>
+          <IconLayers size={11} />
+          {ko ? "파일 위치" : "On disk"} · <code style={exportFilePath}>{diskPath}</code>
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * ArtifactFileBridge — surface가 실제 디스크에 연결된 경로를 실측으로 찾는다.
+ * 1순위: app.deployment.repoPath, 2순위: artifacts 데이터셋 row의 path 필드. 둘 다 없으면 null
+ * (지어내지 않음 — CodeArtifact에는 경로 자체가 없어 항상 null).
+ */
+function surfaceDiskPath(surface: WorkbenchSurface): string | null {
+  const repoPath = surface.manifest.app?.deployment?.repoPath;
+  if (typeof repoPath === "string" && repoPath.trim()) return repoPath.trim();
+  const artifactData = dataByName(surface.manifest, "artifacts") ?? firstData(surface.manifest, "artifacts");
+  for (const row of rowsOf(artifactData)) {
+    const path = stringField(row, "path") || stringField(row, "filePath") || stringField(row, "rootPath");
+    if (path && path.trim()) return path.trim();
+  }
+  return null;
+}
+
+/** Surface manifest를 사람이 읽는 마크다운으로 — 내보내기용. 실측 필드만, 추측 금지. */
+function surfaceToMarkdown(surface: WorkbenchSurface): string {
+  const m = surface.manifest;
+  const lines: string[] = [`# ${m.title}`, "", `- domain: ${m.domain}`, `- layout: ${m.layout}`];
+  const dataKeys = Object.keys(m.data ?? {});
+  if (dataKeys.length > 0) {
+    lines.push("", "## Data", ...dataKeys.map((k) => `- ${k}`));
+  }
+  lines.push("", "```json", JSON.stringify(m, null, 2), "```");
+  return lines.join("\n");
 }
 
 export function SurfaceWorkbench({
@@ -333,12 +464,28 @@ function AppFactorySurface({
               <SectionTitle icon={<IconFileUp size={14} />} label="Artifacts" />
               <div style={miniStack}>
                 {artifactRows.length > 0 ? (
-                  artifactRows.slice(0, 6).map((row, idx) => (
-                    <div key={idx} style={artifactRow}>
-                      <span>{stringField(row, "name") || stringField(row, "path") || `Artifact ${idx + 1}`}</span>
-                      <small>{stringField(row, "status") || "Not declared"}</small>
-                    </div>
-                  ))
+                  artifactRows.slice(0, 6).map((row, idx) => {
+                    // ArtifactFileBridge — 산출물의 실제 디스크 경로가 있으면 명시적으로 노출(없으면 미표시).
+                    const filePath =
+                      stringField(row, "path") ||
+                      stringField(row, "filePath") ||
+                      stringField(row, "rootPath");
+                    return (
+                      <div key={idx} style={artifactRow}>
+                        <div style={{ minWidth: 0, display: "grid", gap: 2 }}>
+                          <span style={truncate}>
+                            {stringField(row, "name") || filePath || `Artifact ${idx + 1}`}
+                          </span>
+                          {filePath && (
+                            <code style={artifactPathStyle} title={filePath}>
+                              {filePath}
+                            </code>
+                          )}
+                        </div>
+                        <small>{stringField(row, "status") || "Not declared"}</small>
+                      </div>
+                    );
+                  })
                 ) : (
                   <div style={mutedSmall}>No artifacts declared yet.</div>
                 )}
@@ -1448,6 +1595,74 @@ const iconButton: CSSProperties = {
   justifyContent: "center",
 };
 
+const exportBar: CSSProperties = {
+  flexShrink: 0,
+  display: "flex",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: 7,
+  padding: "8px 14px",
+  borderBottom: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+};
+
+const exportLabel: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  fontSize: 11,
+  fontWeight: 800,
+  color: "var(--muted-deep)",
+  marginRight: 2,
+};
+
+const exportLockFree: CSSProperties = {
+  fontSize: 9.5,
+  fontWeight: 800,
+  color: "var(--green-deep)",
+  background: "rgba(80,150,110,0.12)",
+  border: "1px solid rgba(80,150,110,0.24)",
+  borderRadius: 999,
+  padding: "1px 6px",
+};
+
+const exportButton: CSSProperties = {
+  minHeight: 26,
+  borderRadius: 8,
+  border: "1px solid var(--accent-soft)",
+  background: "var(--fill-1)",
+  color: "var(--ink)",
+  fontSize: 11,
+  fontWeight: 800,
+  padding: "3px 9px",
+  cursor: "pointer",
+};
+
+
+// ArtifactFileBridge — 디스크 경로 칩. 좁은 폭에서 줄여 넘침 방지.
+const exportFileBridge: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  minWidth: 0,
+  maxWidth: "100%",
+  marginLeft: "auto",
+  color: "var(--muted-deep)",
+  fontSize: 10.5,
+  fontWeight: 700,
+};
+
+const exportFilePath: CSSProperties = {
+  minWidth: 0,
+  maxWidth: 260,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  color: "var(--ink-soft)",
+};
+
 const surfaceBody: CSSProperties = {
   flex: 1,
   overflow: "auto",
@@ -1779,6 +1994,16 @@ const artifactRow: CSSProperties = {
   gap: 8,
   minWidth: 0,
   fontSize: 11,
+  color: "var(--muted-deep)",
+};
+
+const artifactPathStyle: CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontFamily: "var(--font-mono)",
+  fontSize: 9.5,
   color: "var(--muted-deep)",
 };
 

@@ -43,6 +43,21 @@ export function computeNextRun(schedule: string, from: Date = new Date()): strin
   const parts = (schedule || "").split("-");
   const kind = parts[0];
   const time = parts[parts.length - 1] || "09:00";
+  if (kind === "hourly") {
+    return new Date(from.getTime() + 60 * 60 * 1000).toISOString();
+  }
+  if (kind === "every") {
+    const raw = parts[1] ?? "";
+    const match = raw.match(/^(\d+)(m|h)$/);
+    if (match) {
+      const amount = parseInt(match[1], 10);
+      const unit = match[2];
+      if (amount > 0) {
+        const minutes = unit === "h" ? amount * 60 : amount;
+        return new Date(from.getTime() + minutes * 60 * 1000).toISOString();
+      }
+    }
+  }
   const [hh, mm] = time.split(":").map((n) => parseInt(n, 10));
   const fallback = new Date(from.getTime() + 24 * 3600 * 1000).toISOString();
   if (Number.isNaN(hh) || Number.isNaN(mm)) return fallback;

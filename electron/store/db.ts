@@ -10,7 +10,7 @@ import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 26;
+const SCHEMA_VERSION = 27;
 
 export function initStore(): void {
   if (_db) return;
@@ -699,6 +699,10 @@ export function initStore(): void {
         ON agent_runtime_overrides(updated_at DESC);
     `);
   }
+
+  // v27 was reserved during the Stormbreaker Loop Engineering work. Keep the
+  // version number monotonic for already-migrated local databases; no new table
+  // is required because loop state lives in chat/tool evidence.
 
   _db.pragma(`user_version = ${SCHEMA_VERSION}`);
 }

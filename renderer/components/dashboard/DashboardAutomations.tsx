@@ -43,29 +43,29 @@ export function DashboardAutomations() {
   const activeCount = items?.filter((a) => a.enabled).length ?? 0;
 
   return (
-    <div style={{ background: "var(--paper-2)", border: "1px solid var(--paper-edge)", borderRadius: 12, overflow: "hidden" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 13px", background: "var(--fill-1)", borderBottom: "1px solid var(--paper-edge)" }}>
-        <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink)", flex: 1 }}>{ko ? "자동화" : "Automations"}</span>
+    <div className="dashboard-module">
+      <div className="dashboard-module-head">
+        <span>{ko ? "자동화" : "Automations"}</span>
         {items && items.length > 0 && (
-          <span style={{ fontSize: 11, color: "var(--muted-deep)", fontFamily: "var(--font-mono)" }}>
+          <span className="dashboard-module-meta">
             {ko ? `${activeCount}개 활성` : `${activeCount} on`}
           </span>
         )}
       </div>
       {items === null ? (
-        <div style={{ padding: "14px 13px", fontSize: 12, color: "var(--muted-deep)" }}>{ko ? "불러오는 중…" : "Loading…"}</div>
+        <div className="dashboard-module-empty">{ko ? "불러오는 중…" : "Loading…"}</div>
       ) : items.length === 0 ? (
-        <div style={{ padding: "14px 13px", fontSize: 12, color: "var(--muted-deep)" }}>
+        <div className="dashboard-module-empty">
           {ko ? "등록된 자동화가 없어요." : "No automations yet."}
         </div>
       ) : (
         items.map((a) => (
-          <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 13px", borderTop: "1px solid var(--paper-edge)" }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, color: a.enabled ? "var(--ink)" : "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          <div key={a.id} className="dashboard-module-row">
+            <div className="dashboard-row-copy" data-disabled={a.enabled ? "false" : "true"}>
+              <div>
                 {a.name}
               </div>
-              <div style={{ fontSize: 10.5, color: "var(--muted-deep)", fontFamily: "var(--font-mono)" }}>
+              <div>
                 {a.scheduleHuman}
                 {a.enabled && a.nextRunAt ? ` · ${relNext(a.nextRunAt, ko)}` : ""}
               </div>
@@ -73,16 +73,7 @@ export function DashboardAutomations() {
             <button
               onClick={() => void toggle(a)}
               className="titlebar-nodrag"
-              style={{
-                fontSize: 10.5,
-                fontWeight: 500,
-                padding: "2px 9px",
-                borderRadius: 8,
-                cursor: "pointer",
-                border: a.enabled ? "none" : "1px solid var(--paper-edge)",
-                color: a.enabled ? "var(--accent)" : "var(--muted-deep)",
-                background: a.enabled ? "var(--fill-1)" : "transparent",
-              }}
+              data-toggle-state={a.enabled ? "on" : "off"}
             >
               {a.enabled ? (ko ? "켜짐" : "On") : ko ? "꺼짐" : "Off"}
             </button>
