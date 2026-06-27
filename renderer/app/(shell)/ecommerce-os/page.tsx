@@ -93,6 +93,28 @@ export default function EcommerceOsPage() {
     }
   };
 
+  // Hub 업로드 — 결과를 로그로 피드백(이전엔 fire-and-forget).
+  const [uploading, setUploading] = useState(false);
+  const uploadToHub = async () => {
+    if (!workspace) return;
+    setUploading(true);
+    setLog((prev) => [...prev, "▸ Hub 업로드…"]);
+    try {
+      const res = await ipc()?.hephaestus.publish({ folder: workspace, visibility: "marketplace" });
+      setLog((prev) => [...prev, res?.ok ? "✓ Hub 업로드 완료" : `Error: 업로드 실패 ${res?.error ?? res?.stderr ?? ""}`]);
+    } catch (e) {
+      setLog((prev) => [...prev, `Error: 업로드 실패 ${(e as Error).message}`]);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const restart = () => {
+    setPhase("idle");
+    setLog([]);
+    unsubRef.current?.();
+  };
+
   const engineMissing = status ? !status.available : false;
   const building = phase === "running";
 
@@ -216,15 +238,19 @@ export default function EcommerceOsPage() {
                 {phase === "ready" && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 16 }}>
                     <button onClick={installToLibrary} style={{ padding: "10px 14px", background: "var(--ink)", color: "#fff", borderRadius: 8, border: "none", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>라이브러리에 설치</button>
-                    <button onClick={() => ipc()?.hephaestus.publish({ folder: workspace!, visibility: "marketplace" })} style={{ padding: "10px 14px", background: "var(--fill-2)", color: "var(--ink)", borderRadius: 8, border: "1px solid var(--paper-edge)", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Hub 업로드</button>
+                    <button onClick={() => void uploadToHub()} disabled={uploading} style={{ padding: "10px 14px", background: "var(--fill-2)", color: "var(--ink)", borderRadius: 8, border: "1px solid var(--paper-edge)", fontSize: 13, fontWeight: 600, cursor: uploading ? "default" : "pointer", opacity: uploading ? 0.6 : 1 }}>{uploading ? "업로드 중…" : "Hub 업로드"}</button>
                   </div>
                 )}
               </section>
-              {building && (
+              {building ? (
                 <button onClick={cancel} style={{ padding: "11px 14px", borderRadius: 10, border: "1px solid var(--paper-edge)", background: "var(--fill-1)", color: "var(--ink)", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
                   중지
                 </button>
-              )}
+              ) : phase === "error" ? (
+                <button onClick={restart} style={{ padding: "11px 14px", borderRadius: 10, border: "none", background: "var(--accent)", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+                  새로 시작
+                </button>
+              ) : null}
             </div>
           </div>
         )}

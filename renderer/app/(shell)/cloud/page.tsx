@@ -210,22 +210,26 @@ export default function CloudAgentPublishPage() {
 
           {/* Hephaestus 엔진(upload.py) 직접 검수/업로드 — 임베딩된 오픈소스 엔진의 실제 패키징·보안·publish */}
           <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--paper-edge)" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
               <IconShield size={13} style={{ color: "var(--accent)" }} />
-              <span style={{ ...label, marginBottom: 0 }}>Hephaestus 엔진 직접 검수·업로드</span>
+              <span style={{ ...label, marginBottom: 0 }}>Hephaestus 엔진 직접 검수·업로드 (고급)</span>
             </div>
+            <p style={{ margin: "0 0 10px", fontSize: 11.5, color: "var(--muted-deep)", lineHeight: 1.5 }}>
+              위쪽 등록은 데스크탑 표준 경로입니다. 아래는 임베딩된 엔진(upload.py)으로 직접 패키징·보안 스캔·게시하는 고급 경로 —
+              Cloud(비공개 링크) / Hub(공개 마켓플레이스)를 명시적으로 선택합니다.
+            </p>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button onClick={() => void engineReview()} disabled={hephRunning !== null} style={secondaryButton}>
+              <button onClick={() => void engineReview()} disabled={hephRunning !== null || !rootPath.trim()} style={secondaryButton}>
                 <IconShield size={13} />
                 {hephRunning === "review" ? "검수 중…" : "엔진 정적 검수"}
               </button>
-              <button onClick={() => void enginePublish("private-link")} disabled={hephRunning !== null} style={secondaryButton}>
+              <button onClick={() => void enginePublish("private-link")} disabled={hephRunning !== null || !rootPath.trim()} style={secondaryButton}>
                 <IconFileUp size={13} />
-                {hephRunning === "private-link" ? "업로드 중…" : "엔진 Cloud 업로드"}
+                {hephRunning === "private-link" ? "업로드 중…" : "엔진 Cloud 업로드(비공개)"}
               </button>
-              <button onClick={() => void enginePublish("marketplace")} disabled={hephRunning !== null} style={primaryButton}>
+              <button onClick={() => void enginePublish("marketplace")} disabled={hephRunning !== null || !rootPath.trim()} style={primaryButton}>
                 <IconStore size={13} />
-                {hephRunning === "marketplace" ? "업로드 중…" : "엔진 Hub 업로드"}
+                {hephRunning === "marketplace" ? "업로드 중…" : "엔진 Hub 업로드(공개)"}
               </button>
             </div>
             {hephMsg && (

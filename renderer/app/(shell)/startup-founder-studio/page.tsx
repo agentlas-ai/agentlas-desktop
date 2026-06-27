@@ -15,17 +15,44 @@ export default function StartupFounderStudioPage() {
   const [reason, setReason] = useState<string>("");
   const startedRef = useRef(false);
 
+  const loadWatchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const start = async () => {
     setPhase("starting");
     setReason("");
-    const res = await ipc()?.hephaestus.startStudio();
+    if (loadWatchRef.current) clearTimeout(loadWatchRef.current);
+    // 런처 시작이 멈춰도 무한 대기하지 않게 타임아웃을 건다.
+    const timeout = new Promise<{ ok: false; reason: string }>((resolve) =>
+      setTimeout(() => resolve({ ok: false, reason: "스튜디오 시작이 지연됩니다(시간 초과). 새로고침으로 다시 시도하세요." }), 25_000),
+    );
+    let res: { ok: boolean; url?: string; reason?: string } | undefined;
+    try {
+      res = await Promise.race([ipc()?.hephaestus.startStudio() ?? Promise.resolve(undefined), timeout]);
+    } catch (e) {
+      res = { ok: false, reason: (e as Error).message };
+    }
     if (res?.ok && res.url) {
       setUrl(res.url + "?t=" + Date.now());
       setPhase("ready");
+      // iframe 로드 워치독 — 일정 시간 내 onLoad 가 없으면(서버 죽음/블랭크) 에러로 전환.
+      loadWatchRef.current = setTimeout(() => {
+        setReason("스튜디오 화면을 불러오지 못했습니다. 다시 시도하세요.");
+        setPhase("error");
+      }, 15_000);
     } else {
       setReason(res?.reason ?? "스튜디오를 시작할 수 없습니다.");
       setPhase("error");
     }
+  };
+
+  const onFrameLoad = () => {
+    if (loadWatchRef.current) clearTimeout(loadWatchRef.current);
+    loadWatchRef.current = null;
+  };
+  const onFrameError = () => {
+    if (loadWatchRef.current) clearTimeout(loadWatchRef.current);
+    setReason("스튜디오 화면 로드 실패. 다시 시도하세요.");
+    setPhase("error");
   };
 
   useEffect(() => {
@@ -33,6 +60,9 @@ export default function StartupFounderStudioPage() {
     startedRef.current = true;
     void start();
     // 페이지를 벗어나도 런처는 유지(재방문 빠름) — 앱 종료 시 electron 이 정리.
+    return () => {
+      if (loadWatchRef.current) clearTimeout(loadWatchRef.current);
+    };
   }, []);
 
   return (
@@ -66,6 +96,8 @@ export default function StartupFounderStudioPage() {
             key={url}
             src={url}
             title="Startup Founder Studio"
+            onLoad={onFrameLoad}
+            onError={onFrameError}
             style={{ width: "100%", height: "100%", border: "none", display: "block" }}
             allow="clipboard-write; clipboard-read"
           />

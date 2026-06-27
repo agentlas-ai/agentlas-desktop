@@ -259,13 +259,20 @@ export default function BuildPage() {
             ) : phase === "done" || phase === "error" ? (
               <button onClick={reset} style={{ padding: "11px 22px", borderRadius: 10, border: "1px solid var(--paper-edge)", background: "var(--fill-1)", color: "var(--ink)", cursor: "pointer", fontSize: 14, fontWeight: 600 }}>새 빌드</button>
             ) : (
-              <button onClick={start} disabled={!request.trim() || !workspace || engineMissing}
-                style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "11px 24px", borderRadius: 10, border: "none",
-                  background: !request.trim() || !workspace || engineMissing ? "var(--fill-2)" : "linear-gradient(135deg, #4DABF7, #845EF7)",
-                  color: !request.trim() || !workspace || engineMissing ? "var(--muted)" : "#fff",
-                  cursor: !request.trim() || !workspace || engineMissing ? "default" : "pointer", fontSize: 14, fontWeight: 600 }}>
-                <IconWand size={15} /> 빌드 시작
-              </button>
+              <>
+                {(!request.trim() || !workspace) && !engineMissing && (
+                  <span style={{ fontSize: 12, color: "var(--muted)", marginRight: 10, alignSelf: "center" }}>
+                    {!request.trim() ? "요청을 입력하세요" : "생성 폴더를 선택하세요"}
+                  </span>
+                )}
+                <button onClick={start} disabled={!request.trim() || !workspace || engineMissing}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "11px 24px", borderRadius: 10, border: "none",
+                    background: !request.trim() || !workspace || engineMissing ? "var(--fill-2)" : "linear-gradient(135deg, #4DABF7, #845EF7)",
+                    color: !request.trim() || !workspace || engineMissing ? "var(--muted)" : "#fff",
+                    cursor: !request.trim() || !workspace || engineMissing ? "default" : "pointer", fontSize: 14, fontWeight: 600 }}>
+                  <IconWand size={15} /> 빌드 시작
+                </button>
+              </>
             )}
           </div>
         </section>

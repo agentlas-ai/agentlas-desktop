@@ -39,6 +39,15 @@ export default function CreativeStudioPage() {
   const start = async () => {
     const api = ipc();
     if (!api || !url.trim() || phase === "routing") return;
+    // 유효한 URL 인지 먼저 확인 — "asdf" 같은 입력으로 라우팅을 낭비하지 않는다.
+    try {
+      const u = new URL(url.trim());
+      if (!/^https?:$/.test(u.protocol)) throw new Error("scheme");
+    } catch {
+      setResult({ title: "유효한 URL을 입력하세요", detail: "예: https://example.com/products/orbit-lamp" });
+      setPhase("error");
+      return;
+    }
     setPhase("routing");
     setResult(null);
     const query = `마케팅 광고 에셋 팩 생성 — 제품 URL: ${url.trim()}. 제품 아이덴티티 스크랩, 이미지/릴 키프레임 생성, 에셋 팩 구성.`;

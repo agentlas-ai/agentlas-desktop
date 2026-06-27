@@ -30,11 +30,12 @@ export function DashboardStats() {
   const load = useCallback(async () => {
     const api = ipc();
     if (!api) {
+      // IPC 없음(브라우저/오프라인) — 실제 0 과 구분되도록 "—" 로 둔다.
       if (!mounted.current) return;
-      setEngines(0);
-      setRunning(0);
-      setConfirms(0);
-      setAutos(0);
+      setEngines("—");
+      setRunning("—");
+      setConfirms("—");
+      setAutos("—");
       return;
     }
     try {
