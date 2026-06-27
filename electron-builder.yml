@@ -64,6 +64,8 @@ extraResources:
     to: studio-pack
     filter:
       - "**/*"
+      - "!**/.studio-runtime/**"
+      - "!**/.studio-runtime"
       - "!**/node_modules/**"
       - "!.git/**"
       - "!.git"
