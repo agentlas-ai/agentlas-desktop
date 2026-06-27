@@ -29,6 +29,7 @@
     "postinstall": "electron-rebuild --force",
     "ensure:engine": "node scripts/ensure-engine.mjs",
     "fetch:python": "node scripts/fetch-python-runtime.mjs",
+    "studio:seed": "node scripts/studio-clean-seed.mjs",
     "publish:cdn": "node scripts/publish-cdn.mjs",
     "e2e:smoke": "node scripts/e2e-smoke.mjs",
     "package:mac": "npm run ensure:engine && bash scripts/package-mac.sh",
