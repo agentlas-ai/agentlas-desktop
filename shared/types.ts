@@ -1841,6 +1841,8 @@ export interface McpInvocationRequest {
   /** 추천 시트의 네트워크 모드에서 고른 Hub 에이전트 슬러그 — runMcpInvocation 이 hep-call 로
    *  이들을 빌려와(BYOM) 프롬프트 앞에 borrow 지시를 붙여 데스크탑 런타임으로 실행한다. */
   borrowAgents?: string[];
+  /** 저신뢰 라우팅 결정을 호스트 LLM Router Agent로 재판단해야 할 때 전달되는 에스컬레이션. */
+  routerAgent?: RecRouterAgent;
 }
 
 export interface McpInvocationEvent {
@@ -2439,14 +2441,16 @@ export interface RecRouterAgent {
   reason: string;
   /** 호스트 런타임이 따를 지침(엔진이 생성, 모델 호출은 호스트). */
   directive?: string;
+  /** 엔진이 첨부한 구조화 컨텍스트. query/candidates/hub_candidates 등을 포함할 수 있음. */
+  context?: JsonObject;
 }
 
 /** 추천 시트에서 사용자가 고른 실행 경로 — 페이지가 적절한 send/switch 로 디스패치한다. */
 export type RecExecChoice =
-  | { kind: "agent"; agentId: string; isFirm?: boolean }
-  | { kind: "network"; agents?: string[] }
-  | { kind: "pipeline"; stages?: RecStage[] }
-  | { kind: "plain" };
+  | { kind: "agent"; agentId: string; isFirm?: boolean; routerAgent?: RecRouterAgent }
+  | { kind: "network"; agents?: string[]; routerAgent?: RecRouterAgent }
+  | { kind: "pipeline"; stages?: RecStage[]; routerAgent?: RecRouterAgent }
+  | { kind: "plain"; routerAgent?: RecRouterAgent };
 
 export interface AgentlasIpc {
   /** Electron 메인이 알려주는 OS 환경 정보 (Apple/Codex/Claude 데스크톱과 동일 패턴) */

@@ -25,6 +25,8 @@ import {
   selectAutoRoutedAgent,
   type AutoRouteChoice,
 } from "../agents/auto-router";
+import { assembleSystemPrompt } from "../system-agents/assemble";
+import { ROUTER_AGENT_ID, ROUTER_SYSTEM_AGENT } from "../system-agents/router";
 import {
   appendChatMessage,
   autoTitleFromFirstMessage,
@@ -62,6 +64,7 @@ import type {
   InstalledAgent,
   McpInvocationEvent,
   McpInvocationRequest,
+  RecRouterAgent,
   RuntimeStatus,
 } from "../../shared/types";
 
@@ -255,6 +258,75 @@ function appendAppsGenerateCta(text: string, prompt: string, locale: "ko" | "en"
       ? "생성된 App은 Agentlas Desktop의 Apps 표면에서 열 수 있습니다."
       : "The generated App can be opened from the Agentlas Desktop Apps surface.";
   return `${text.trim()}\n\n---\n${note}\n\n[${label}](${appPath})`;
+}
+
+function buildRouterAgentEscalationPrompt(input: {
+  routerAgent: RecRouterAgent;
+  userPrompt: string;
+  effectiveUserPrompt: string;
+  locale: "ko" | "en";
+  selectedAgent: InstalledAgent;
+  autoRoute: AutoRouteChoice | null;
+  borrowedAgents?: string[];
+}): string {
+  const context = input.routerAgent.context ?? {};
+  const contextHasQuery = typeof context.query === "string" && context.query.trim().length > 0;
+  const payload = {
+    routerAgent: input.routerAgent.agent,
+    reason: input.routerAgent.reason,
+    locale: input.locale,
+    query: contextHasQuery ? context.query : input.userPrompt,
+    effectiveQuery: input.effectiveUserPrompt,
+    deterministicContext: context,
+    currentDesktopRoute: input.autoRoute
+      ? {
+          agentId: input.autoRoute.agent.id,
+          slug: input.autoRoute.agent.slug,
+          name: input.autoRoute.agent.nameEn || input.autoRoute.agent.name,
+          reason: input.autoRoute.reason,
+          matchedTerms: input.autoRoute.matchedTerms,
+        }
+      : {
+          agentId: input.selectedAgent.id,
+          slug: input.selectedAgent.slug,
+          name: input.selectedAgent.nameEn || input.selectedAgent.name,
+        },
+    borrowedAgents: input.borrowedAgents ?? [],
+  };
+  return [
+    input.routerAgent.directive ||
+      "Resolve this low-confidence routing decision with the Router Agent before answering.",
+    "",
+    "Router escalation payload:",
+    JSON.stringify(payload, null, 2),
+  ].join("\n");
+}
+
+function buildRouterAgentSystemPreamble(input: {
+  routerAgent: RecRouterAgent;
+  userPrompt: string;
+  effectiveUserPrompt: string;
+  locale: "ko" | "en";
+  selectedAgent: InstalledAgent;
+  autoRoute: AutoRouteChoice | null;
+  borrowedAgents?: string[];
+}): { preamble: string; loadedModuleIds: string[] } | null {
+  const agentId = input.routerAgent.agent.trim();
+  if (!agentId || (agentId !== ROUTER_AGENT_ID && agentId !== ROUTER_SYSTEM_AGENT.id)) return null;
+  const escalationPrompt = buildRouterAgentEscalationPrompt(input);
+  const assembled = assembleSystemPrompt(ROUTER_SYSTEM_AGENT, escalationPrompt, {
+    threshold: 0.4,
+    maxModules: 2,
+  });
+  const preamble = [
+    "## Agentlas Router Agent escalation",
+    "",
+    assembled.systemPrompt,
+    "",
+    "### Escalation directive",
+    escalationPrompt,
+  ].join("\n");
+  return { preamble, loadedModuleIds: assembled.loadedModuleIds };
 }
 
 function buildSurfaceRepairPrompt(
@@ -623,6 +695,27 @@ export async function runMcpInvocation(
       locale,
       isTargetAppEdit ? "app-edit" : req.appsGenerateMode ? "apps-generate" : "default",
     )}\n\n${systemPrompt}`;
+  }
+  const routerAgentPreamble = req.routerAgent
+    ? buildRouterAgentSystemPreamble({
+        routerAgent: req.routerAgent,
+        userPrompt: req.userPrompt,
+        effectiveUserPrompt,
+        locale,
+        selectedAgent: agent,
+        autoRoute,
+        borrowedAgents: req.borrowAgents,
+      })
+    : null;
+  if (routerAgentPreamble) {
+    systemPrompt = `${routerAgentPreamble.preamble}\n\n${systemPrompt}`;
+    sink({
+      kind: "tool-use",
+      status:
+        locale === "ko"
+          ? `Router Agent 에스컬레이션 적용: ${routerAgentPreamble.loadedModuleIds.join(", ") || "core"}`
+          : `Router Agent escalation applied: ${routerAgentPreamble.loadedModuleIds.join(", ") || "core"}`,
+    });
   }
   if (chat.projectId) {
     const project = getProject(chat.projectId);
