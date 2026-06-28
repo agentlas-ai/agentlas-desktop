@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.4.3 — 2026-06-29
+
+### Changed
+
+- Re-released the desktop app with Hephaestus v1.0.0 as the embedded Agent OS
+  engine baseline.
+- Preserved the Router Agent runtime injection from 0.4.2 and paired it with the
+  v1.0.0 routing engine release so low-confidence Agentlas Hub routing can keep
+  its escalation context across the desktop runtime handoff.
+- Refreshed the production update feed target for the 100K-agent routing rollout
+  after the R2 marketplace index and Atlas vector search path were activated.
+
 ## 0.4.0 — 2026-06-28
 
 ### Added
