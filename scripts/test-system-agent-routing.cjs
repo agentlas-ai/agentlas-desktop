@@ -109,4 +109,29 @@ const coreOk = MEMORY_CORE.includes("memory_kind") && MEMORY_CORE.includes("sugg
 console.log(`core always carries kinds/scopes + safety: ${coreOk ? "✓" : "✗"}`);
 console.log(`\n${mpass}/${memCases.length} memory routing cases passed`);
 
-process.exit(pass === cases.length && rpass === realCases.length && mpass === memCases.length && coreOk ? 0 : 1);
+// ── Router Agent escalation spec ──
+const { ROUTER_SYSTEM_AGENT } = require("../dist/electron/system-agents/router/index.js");
+const routerCases = [
+  {
+    q: "Resolve low-confidence route: rerank candidates by intent fit and choose best agent.",
+    expect: ["router-rerank", "router-clarify"],
+  },
+  {
+    q: "Ask one clarification question because candidates are ambiguous.",
+    expect: ["router-clarify"],
+  },
+  { q: "안녕", expect: [] },
+];
+let routerPass = 0;
+console.log("\n=== router escalation spec ===");
+for (const c of routerCases) {
+  const r = assembleSystemPrompt(ROUTER_SYSTEM_AGENT, c.q, { threshold: 0.4, maxModules: 2 });
+  const got = r.loadedModuleIds.slice().sort();
+  const ok = JSON.stringify(got) === JSON.stringify(c.expect.slice().sort());
+  console.log(`${ok ? "✓" : "✗"} "${c.q}" → [${r.loadedModuleIds.join(", ") || "core-only"}]  chars=${r.chars}`);
+  if (ok) routerPass++;
+  else console.log(`   EXPECTED=[${c.expect.join(", ")}]  scores=${r.scores.map((s) => `${s.id}:${s.score.toFixed(2)}`).join(", ")}`);
+}
+console.log(`\n${routerPass}/${routerCases.length} router escalation cases passed`);
+
+process.exit(pass === cases.length && rpass === realCases.length && mpass === memCases.length && routerPass === routerCases.length && coreOk ? 0 : 1);

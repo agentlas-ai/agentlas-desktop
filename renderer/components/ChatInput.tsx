@@ -1340,6 +1340,7 @@ function RecommendationSheet({
   locale: Locale;
 }) {
   const mode = preview?.mode ?? "none";
+  const routerAgent = preview?.routerAgent;
   const selectable = mode === "network" || mode === "multi";
   // 네트워크 모드: 빌릴 Hub 에이전트를 골라 담는다. 기본 전체 선택.
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -1546,7 +1547,7 @@ function RecommendationSheet({
             <button type="button" onClick={onCancel} style={ghostBtn}>
               {t("chatinput.rec.cancel")}
             </button>
-            <button type="button" onClick={() => onPick({ kind: "plain" })} style={ghostBtn}>
+            <button type="button" onClick={() => onPick({ kind: "plain", routerAgent })} style={ghostBtn}>
               {t("chatinput.rec.send_plain")}
             </button>
             {preview && mode === "single" && preview.agents[0] && (
@@ -1555,8 +1556,8 @@ function RecommendationSheet({
                 onClick={() =>
                   // Hub 단일 추천은 설치 에이전트가 아니므로 switchAgent 대신 borrow 경로로 실행.
                   preview.agents[0].source === "hub"
-                    ? onPick({ kind: "network", agents: [preview.agents[0].id] })
-                    : onPick({ kind: "agent", agentId: preview.agents[0].id, isFirm: preview.agents[0].isFirm })
+                    ? onPick({ kind: "network", agents: [preview.agents[0].id], routerAgent })
+                    : onPick({ kind: "agent", agentId: preview.agents[0].id, isFirm: preview.agents[0].isFirm, routerAgent })
                 }
                 style={primaryBtn}
               >
@@ -1566,7 +1567,7 @@ function RecommendationSheet({
             {preview && (mode === "network" || mode === "multi") && (
               <button
                 type="button"
-                onClick={() => onPick({ kind: "network", agents: [...selected] })}
+                onClick={() => onPick({ kind: "network", agents: [...selected], routerAgent })}
                 disabled={selected.size === 0}
                 style={{ ...primaryBtn, opacity: selected.size === 0 ? 0.5 : 1, cursor: selected.size === 0 ? "not-allowed" : "pointer" }}
               >
@@ -1574,7 +1575,7 @@ function RecommendationSheet({
               </button>
             )}
             {preview && mode === "pipeline" && (
-              <button type="button" onClick={() => onPick({ kind: "pipeline", stages: preview.stages })} style={primaryBtn}>
+              <button type="button" onClick={() => onPick({ kind: "pipeline", stages: preview.stages, routerAgent })} style={primaryBtn}>
                 {t("chatinput.rec.run_pipeline")}
               </button>
             )}

@@ -22,7 +22,7 @@ import type {
   ToolFactoryScaffoldResult,
   ToolFactoryToolRecord,
 } from "@/lib/types";
-import type { Recommendation, RecExecChoice } from "@shared/types";
+import type { Recommendation, RecExecChoice, RecRouterAgent } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { extractQuestions } from "@/lib/ask-question";
 import { ChatInput } from "@/components/ChatInput";
@@ -938,6 +938,8 @@ function ChatPage() {
         pipelineStages?: PipelineStage[];
         /** 추천 시트의 네트워크 픽이면 빌려올 Hub 에이전트 슬러그 — 백엔드가 hep-call 로 borrow. */
         borrowAgents?: string[];
+        /** Router Agent 에스컬레이션 — main 런타임이 시스템 프롬프트 앞에 주입한다. */
+        routerAgent?: RecRouterAgent;
       },
     ) => {
       const api = ipc();
@@ -1068,6 +1070,7 @@ function ChatPage() {
           targetAppId: generatedAppRoute?.action === "edit" ? generatedAppRoute.app.id : undefined,
           targetAppAction: generatedAppRoute?.action === "edit" ? "edit" : undefined,
           borrowAgents: opts?.borrowAgents,
+          routerAgent: opts?.routerAgent,
         });
         runIdRef.current = runId;
         // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
@@ -1597,6 +1600,7 @@ function ChatPage() {
       planMode: opts?.planMode,
       goalMode: opts?.goalMode,
       appsGenerateMode: opts?.appsGenerateMode,
+      routerAgent: choice.routerAgent,
     };
     switch (choice.kind) {
       case "agent":

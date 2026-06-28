@@ -8,7 +8,7 @@
 //   · Hub 에서 빌린 에이전트 → 실제 perCallCredits(원시 decision.hub.results[] 에 살아있음).
 // 라우터가 _selected_payload/_compact_hub_result 에서 cost_hints 를 떼므로 로컬 단가는
 // 애초에 없고, BYOC 라 0 이 맞다. Hub 단가만 실측으로 노출한다(추정·휴리스틱 숫자는 쓰지 않음).
-import type { Recommendation, RecAgent, RecStage } from "../../shared/types";
+import type { JsonObject, Recommendation, RecAgent, RecStage } from "../../shared/types";
 
 function asObj(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
@@ -55,6 +55,22 @@ export function normalizeRecommendation(json: unknown, query: string): Recommend
   const receiptId = str(decision.receipt_id) ?? str(decision.receiptId);
   const hubCredits = hubCreditIndex(decision);
 
+  // Router Agent escalation: the engine attaches this on low-confidence
+  // (clarify/propose_new) decisions so the host can resolve them with an LLM
+  // reasoning pass instead of dead-ending on a weak clarify. Carried on every
+  // mode; only present when the engine escalated.
+  const ra = asObj(decision.router_agent);
+  const raAgent = str(ra.agent);
+  const raContext = asObj(ra.context);
+  const routerAgent = raAgent
+    ? {
+        agent: raAgent,
+        reason: str(ra.reason) ?? "",
+        directive: str(ra.directive),
+        ...(Object.keys(raContext).length ? { context: raContext as JsonObject } : {}),
+      }
+    : undefined;
+
   const base = (extra: Partial<Recommendation>): Recommendation => ({
     mode: "none",
     agents: [],
@@ -63,6 +79,7 @@ export function normalizeRecommendation(json: unknown, query: string): Recommend
     rawAction: action,
     receiptId,
     query,
+    ...(routerAgent ? { routerAgent } : {}),
     ...extra,
   });
 
