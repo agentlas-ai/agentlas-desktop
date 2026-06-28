@@ -111,6 +111,6 @@ dmg:
 publish:
   - provider: github
     owner: agentlas-ai
-    repo: agentlas-desktop
+    repo: agentlas-desktop-releases
     private: false
     releaseType: release

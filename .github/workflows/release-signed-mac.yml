@@ -45,7 +45,7 @@ jobs:
     timeout-minutes: 60
     env:
       # Publish to the SEPARATE public releases repo (source repo is private).
-      AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop
+      AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
