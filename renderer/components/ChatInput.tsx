@@ -107,20 +107,33 @@ interface AutocompleteOption {
 
 type PermissionLevel = "read" | "write" | "full";
 type AppGenerateChoice = "dedicated" | "chat";
-// 챗 입력바 모드 토글 — Network(허브 라우팅) + Stormbreaker(견고-실행 루프) + Recommend(추천 미리보기).
+// 챗 입력바 모드 토글 — 에이전트 찾기(추천 미리보기) + Stormbreaker(견고-실행 루프).
 // 단일선택이 아니라 다중선택이며, 전송해도 꺼지지 않고 계속 켜둘 수 있다.
-// Recommend 는 프리픽스가 아니라 전송 동작을 바꾼다(보내기 전에 추천 시트를 띄움). composeHepPrefix 는 무시한다.
+// /hep-network 직접 입력은 여전히 허브 라우팅으로 동작하지만, 하단에서는 추천/네트워크 선택을 한 흐름으로 묶는다.
+// recommend 는 프리픽스가 아니라 전송 동작을 바꾼다(실행 전에 추천 시트를 띄움). composeHepPrefix 는 무시한다.
 type HepToggleId = "network" | "stormbreaker" | "recommend";
 
 const HEP_TOGGLES: Array<{
   id: HepToggleId;
-  label: string;
+  labelKo: string;
+  labelEn: string;
   titleKo: string;
   titleEn: string;
 }> = [
-  { id: "network", label: "Network", titleKo: "Hephaestus Network로 라우팅 (계속 켜둘 수 있음)", titleEn: "Route through Hephaestus Network (stays on)" },
-  { id: "stormbreaker", label: "Stormbreaker", titleKo: "Stormbreaker 견고-실행: 검증·복구 루프로 끝까지 (계속 켜둘 수 있음)", titleEn: "Stormbreaker robust run: verify/repair loop to completion (stays on)" },
-  { id: "recommend", label: "Recommend", titleKo: "추천: 보내기 전에 알맞은 에이전트·TF·예상 비용을 먼저 추천받기 (계속 켜둘 수 있음)", titleEn: "Recommend: preview the right agent/TF and estimated credits before sending (stays on)" },
+  {
+    id: "recommend",
+    labelKo: "에이전트 찾기",
+    labelEn: "Find agent",
+    titleKo: "요청에 맞는 에이전트·네트워크 TF·예상 비용을 먼저 확인",
+    titleEn: "Find the right agent, network TF, and estimated credits first",
+  },
+  {
+    id: "stormbreaker",
+    labelKo: "Stormbreaker",
+    labelEn: "Stormbreaker",
+    titleKo: "Stormbreaker 견고-실행: 검증·복구 루프로 끝까지 (계속 켜둘 수 있음)",
+    titleEn: "Stormbreaker robust run: verify/repair loop to completion (stays on)",
+  },
 ];
 
 // Stormbreaker 워닝 버블 — 토글을 OFF→ON 할 때 1회만. per-device 선호라 localStorage(설정 스토어 아님).
@@ -195,7 +208,7 @@ export function ChatInput({
   const [plusSubmenu, setPlusSubmenu] = useState<"plugins" | null>(null);
   const [planMode, setPlanMode] = useState(false);
   const [goalMode, setGoalMode] = useState(false);
-  // 다중선택·지속 모드 토글(Network/Stormbreaker). 전송해도 유지된다.
+  // 다중선택·지속 모드 토글(에이전트 찾기/Stormbreaker). 전송해도 유지된다.
   const [hepToggles, setHepToggles] = useState<Set<HepToggleId>>(() => new Set());
   // Stormbreaker를 처음 켤 때 뜨는 비용/시간 경고 버블. dismiss하면 다시 안 뜸.
   const [showStormWarning, setShowStormWarning] = useState(false);
@@ -231,6 +244,7 @@ export function ChatInput({
   const submitDisabled =
     busy || (!input.trim() && images.length === 0) || disabled;
   // 활성 토글을 Hephaestus 지시 프리픽스로 합성. Network=허브 라우팅, Stormbreaker=견고-실행(--stormbreaker).
+  // Network 칩은 하단에서 숨겼지만 /hep-network 직접 실행 및 내부 선택 경로를 위해 동작은 유지한다.
   function composeHepPrefix(text: string): string {
     const net = hepToggles.has("network");
     const storm = hepToggles.has("stormbreaker");
@@ -241,7 +255,10 @@ export function ChatInput({
     return text;
   }
   const hepHint = [...hepToggles]
-    .map((id) => HEP_TOGGLES.find((t) => t.id === id)?.label)
+    .map((id) => {
+      const toggle = HEP_TOGGLES.find((t) => t.id === id);
+      return toggle ? (locale === "ko" ? toggle.labelKo : toggle.labelEn) : null;
+    })
     .filter(Boolean)
     .join(" + ");
   const contextManagedByRuntime = runtime ? CONTEXT_MANAGED_BY[runtime.kind] === "runtime" : true;
@@ -351,6 +368,10 @@ export function ChatInput({
     }, 0);
   }
 
+  function selectedAutocompleteOption(): AutocompleteOption | undefined {
+    return autocompleteOptions[activeIndex] ?? autocompleteOptions[0];
+  }
+
   /** 현재 첨부/모드 상태로 SendOptions 를 합성. */
   function currentSendOptions(): SendOptions {
     const attachments =
@@ -376,7 +397,7 @@ export function ChatInput({
     onSend(outgoingText, currentSendOptions());
     setInput("");
     setImages([]);
-    // 모드 토글(Network/Stormbreaker/Recommend)은 리셋하지 않는다 — 계속 켜둘 수 있음.
+    // 모드 토글(에이전트 찾기/Stormbreaker)은 리셋하지 않는다 — 계속 켜둘 수 있음.
     setTrigger(null);
   }
 
@@ -755,13 +776,13 @@ export function ChatInput({
               // Tab = 텍스트만 자동완성(실행/전송 안 함). Enter = 선택(앱 명령 실행 / 에이전트 콜 / 텍스트 삽입).
               if (e.key === "Tab") {
                 e.preventDefault();
-                const opt = autocompleteOptions[activeIndex];
+                const opt = selectedAutocompleteOption();
                 if (opt) applyAutocomplete(opt, true);
                 return;
               }
               if (e.key === "Enter" && !e.metaKey && !e.ctrlKey) {
                 e.preventDefault();
-                const opt = autocompleteOptions[activeIndex];
+                const opt = selectedAutocompleteOption();
                 if (opt) applyAutocomplete(opt);
                 return;
               }
@@ -909,7 +930,7 @@ export function ChatInput({
                     aria-pressed={active}
                   >
                     <span className="chat-input-hep-dot" aria-hidden />
-                    <span className="chat-input-hep-label">{tg.label}</span>
+                    <span className="chat-input-hep-label">{locale === "ko" ? tg.labelKo : tg.labelEn}</span>
                   </button>
                 );
               })}

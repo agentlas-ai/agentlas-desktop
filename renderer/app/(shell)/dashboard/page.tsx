@@ -25,21 +25,20 @@ export default function DashboardPage() {
           <FleetSummaryStrip />
 
           <div className="dashboard-workspace">
-            <div className="dashboard-org-column">
+            <div className="dashboard-org-column" data-tour-id="dashboard.org">
               <OrgTree />
             </div>
             <div className="dashboard-flow-column">
-              <div className="dashboard-panel">
+              {/* 승인 인박스 — 가장 먼저 눈에 띄도록 최상단 전체폭으로. 대기 시 빨간 강조(data-alert). */}
+              <div className="dashboard-panel" data-tour-id="dashboard.approvals"><ConfirmRequests /></div>
+              <div className="dashboard-panel" data-tour-id="dashboard.activity">
                 <DashboardActivity />
               </div>
-              <div className="dashboard-panel dashboard-engine-panel">
+              <div className="dashboard-panel dashboard-engine-panel" data-tour-id="dashboard.llm">
                 <EngineUsage />
               </div>
-              <div className="dashboard-two-up">
-                <div className="dashboard-panel"><ConfirmRequests /></div>
-                <div className="dashboard-panel"><DashboardAutomations /></div>
-              </div>
-              <div className="dashboard-panel">
+              <div className="dashboard-panel" data-tour-id="dashboard.automations"><DashboardAutomations /></div>
+              <div className="dashboard-panel" data-tour-id="dashboard.hub">
                 <HubBorrowRoom />
               </div>
             </div>

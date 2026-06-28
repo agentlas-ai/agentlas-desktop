@@ -7,7 +7,6 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Sidebar } from "./Sidebar";
 import { MenuBridge } from "./MenuBridge";
-import { UpdateBanner } from "./UpdateBanner";
 import { ImportAgentsModal } from "./ImportAgentsModal";
 import { ipc } from "@/lib/ipc";
 import { SideNav } from "./SideNav";
@@ -15,17 +14,23 @@ import { usePathname } from "next/navigation";
 import { registerRouter } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
 import { IconChat, IconLayers } from "./Icon";
+import { PageTour, replayCurrentPageTour } from "./PageTour";
+import {
+  isOberonBackgroundJobActive,
+  startOberonBackgroundJobMonitor,
+  subscribeOberonBackgroundJobs,
+  visibleOberonBackgroundJobs,
+  type OberonBackgroundJob,
+} from "@/lib/oberon/jobs";
 
 const ONBOARDED_KEY = "agentlas.onboarded";
 const IMPORT_PROMPTED_KEY = "agentlas.import.prompted";
-const TOUR_DISMISSED_KEY = "agentlas.shellTour.dismissed.v1";
 const ATTENTION_POLL_MS = 3_000;
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [importOpen, setImportOpen] = useState(false);
-  const [tourOpen, setTourOpen] = useState(false);
-  const [tourStep, setTourStep] = useState(0);
   const [pendingConfirmations, setPendingConfirmations] = useState(0);
+  const [oberonJobs, setOberonJobs] = useState<OberonBackgroundJob[]>([]);
   const router = useRouter();
   const pathname = usePathname() ?? "/";
   const { locale } = useT();
@@ -100,27 +105,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    try {
-      const dismissed = window.localStorage.getItem(TOUR_DISMISSED_KEY) === "1";
-      const onboarded = window.localStorage.getItem(ONBOARDED_KEY) === "1";
-      if (onboarded && !dismissed) {
-        const timer = window.setTimeout(() => setTourOpen(true), 600);
-        return () => window.clearTimeout(timer);
-      }
-    } catch {
-      // ignore
-    }
-    return undefined;
+    const sync = () => setOberonJobs(visibleOberonBackgroundJobs());
+    sync();
+    const stopMonitor = startOberonBackgroundJobMonitor();
+    const unsubscribe = subscribeOberonBackgroundJobs(sync);
+    const timer = window.setInterval(sync, 2_000);
+    return () => {
+      window.clearInterval(timer);
+      unsubscribe();
+      stopMonitor();
+    };
   }, []);
-
-  function dismissTour() {
-    setTourOpen(false);
-    try {
-      window.localStorage.setItem(TOUR_DISMISSED_KEY, "1");
-    } catch {
-      // ignore
-    }
-  }
 
   const showSidebar = pathname.startsWith("/chat") || pathname.startsWith("/project");
 
@@ -147,7 +142,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           background: "transparent",
         }}
       >
-        <UpdateBanner />
         {pendingConfirmations > 0 && (
           <AttentionNudge
             count={pendingConfirmations}
@@ -157,11 +151,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         )}
         {children}
       </main>
-      <FirstRunTour
-        open={tourOpen}
-        step={tourStep}
-        onStep={setTourStep}
-        onClose={dismissTour}
+      <PageTour pathname={pathname} />
+      <BackgroundWorkPill
+        jobs={oberonJobs}
+        avoidComposer={pathname.startsWith("/chat")}
+        onOpen={() => router.push("/oberon")}
       />
       <ImportAgentsModal
         open={importOpen}
@@ -178,12 +172,49 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <GuideFab
         avoidComposer={pathname.startsWith("/chat")}
         onReplayOnboarding={() => router.push("/onboarding")}
-        onReplayTour={() => {
-          setTourStep(0);
-          setTourOpen(true);
-        }}
+        onReplayTour={replayCurrentPageTour}
       />
     </div>
+  );
+}
+
+function BackgroundWorkPill({
+  jobs,
+  avoidComposer,
+  onOpen,
+}: {
+  jobs: OberonBackgroundJob[];
+  avoidComposer?: boolean;
+  onOpen: () => void;
+}) {
+  const job = jobs.find(isOberonBackgroundJobActive) ?? jobs[0];
+  if (!job) return null;
+  const active = isOberonBackgroundJobActive(job);
+  const failed = job.status === "failed" || job.status === "cancelled";
+  const headline = active ? "백그라운드 작업 중" : failed ? "확인 필요" : "작업 완료";
+  const color = failed ? "var(--red-deep)" : active ? "var(--accent)" : "var(--green-deep)";
+  const bottom = avoidComposer ? 160 : 78;
+
+  return (
+    <button
+      type="button"
+      className="background-work-pill titlebar-nodrag"
+      style={{ bottom }}
+      onClick={onOpen}
+      aria-label={`Oberon ${job.label} ${job.percent}%`}
+    >
+      <span
+        className="background-work-ring"
+        style={{ background: `conic-gradient(${color} ${job.percent}%, var(--paper-edge) 0)` }}
+        aria-hidden="true"
+      >
+        <span>{job.percent}%</span>
+      </span>
+      <span className="background-work-copy">
+        <strong>{headline}</strong>
+        <span>{`Oberon · ${job.label} · ${job.title}`}</span>
+      </span>
+    </button>
   );
 }
 

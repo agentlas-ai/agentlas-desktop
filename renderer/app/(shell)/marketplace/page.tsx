@@ -18,9 +18,10 @@ import {
   IconCheck,
   IconChevronRight,
   IconFolder,
+  IconImage,
 } from "@/components/Icon";
 
-type HubCategory = "team" | "plugin" | "agent";
+type HubCategory = "team" | "plugin" | "agent" | "visual";
 
 const TEAM_CALL_CREDITS = 10;
 const AGENT_CALL_CREDITS = 1;
@@ -29,7 +30,25 @@ const C = {
   purple: "color-mix(in oklch, #5A56DC 20%, var(--rd-surface))",
   peach: "var(--rd-accent-2)",
   green: "color-mix(in oklch, var(--rd-ok) 24%, var(--rd-surface))",
+  blue: "color-mix(in oklch, #0284c7 18%, var(--rd-surface))",
 };
+
+const VISUAL_AGENT_RE =
+  /(visual|image|photo|video|film|motion|design|creative|thumbnail|poster|비주얼|이미지|사진|영상|영화|모션|디자인|크리에이티브|썸네일|포스터|오베론|oberon)/i;
+
+function categoryFromParam(value: string | null): HubCategory {
+  return value === "visual" || value === "agent" || value === "plugin" || value === "team" ? value : "agent";
+}
+
+function isVisualAgent(listing: MarketplaceListing): boolean {
+  return VISUAL_AGENT_RE.test([
+    listing.slug,
+    listing.name,
+    listing.nameEn,
+    listing.tagline,
+    listing.taglineEn,
+  ].join(" "));
+}
 
 export default function MarketplacePageWrapper() {
   return (
@@ -43,8 +62,9 @@ function MarketplacePage() {
   const { t, locale } = useT();
   const ko = locale === "ko";
   const searchParams = useSearchParams();
+  const categoryParam = searchParams.get("category");
 
-  const [active, setActive] = useState<HubCategory>("team");
+  const [active, setActive] = useState<HubCategory>(() => categoryFromParam(categoryParam));
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 12;
 
@@ -69,6 +89,10 @@ function MarketplacePage() {
   }, [searchParams]);
 
   useEffect(() => {
+    setActive(categoryFromParam(categoryParam));
+  }, [categoryParam]);
+
+  useEffect(() => {
     setPage(1);
   }, [active, q]);
 
@@ -88,7 +112,7 @@ function MarketplacePage() {
   async function refresh() {
     const api = ipc();
     if (!api) return;
-    const [bd, sf, lf, ls, ag, plugins, installedMcp, status, session] = await Promise.all([
+    const [bd, sf, lf, ls, ag, plugins, installedMcp, session] = await Promise.all([
       api.marketplace.listBundles(),
       api.marketplace.listFirms(),
       api.firms.list(),
@@ -96,9 +120,11 @@ function MarketplacePage() {
       api.team.list(),
       api.mcpTools.listCatalog(),
       api.mcpTools.listInstalled(),
-      api.marketplace.status(),
       api.auth.getSession(),
     ]);
+    // status는 위 Hub 호출(listBundles/listFirms/search)이 setStatus를 갱신한 "뒤"에 읽어야 정확하다.
+    // 병렬로 읽으면 첫 로드 때 갱신 전 초기값(미연결)을 잡거나 race가 난다.
+    const status = await api.marketplace.status();
     setBundles(bd);
     setFirms(sf);
     setInstalledFirms(lf);
@@ -243,13 +269,16 @@ function MarketplacePage() {
 
   const filteredTeams = [...firms, ...bundles].filter(matchesQuery);
   const filteredPlugins = pluginCatalog.filter(pluginMatchesQuery);
-  const filteredAgents = listings.filter((l) => {
+  const matchingAgents = listings.filter((l) => {
     if (!normalizedQuery) return true;
     return (l.name || "").toLowerCase().includes(normalizedQuery) || (l.tagline || "").toLowerCase().includes(normalizedQuery);
   });
+  const filteredVisualAgents = matchingAgents.filter(isVisualAgent);
+  const filteredAgents = matchingAgents.filter((agent) => !isVisualAgent(agent));
 
   const counts = {
     agent: filteredAgents.length,
+    visual: filteredVisualAgents.length,
     plugin: filteredPlugins.length,
     team: filteredTeams.length,
   };
@@ -263,6 +292,7 @@ function MarketplacePage() {
   const pagedTeams = filteredTeams.slice(pageStart, pageEnd);
   const pagedPlugins = filteredPlugins.slice(pageStart, pageEnd);
   const pagedAgents = filteredAgents.slice(pageStart, pageEnd);
+  const pagedVisualAgents = filteredVisualAgents.slice(pageStart, pageEnd);
   const installedPluginIds = new Set(installedPlugins.map((plugin) => plugin.catalogId).filter(Boolean));
   const hubLive = sourceStatus ? sourceStatus.online && !sourceStatus.usingFallback : false;
   const usingFallbackCatalog = sourceStatus ? !hubLive : false;
@@ -276,9 +306,8 @@ function MarketplacePage() {
     : ko ? "로그인 필요" : "Signed out";
 
   const CATEGORY_NAV = [
-    { key: "team" as HubCategory, ko: "팀", en: "Team", tone: C.purple, note: { ko: `여러 에이전트가 함께 일하는 팀 · 호출 ${TEAM_CALL_CREDITS}크레딧`, en: `Multi-agent teams · ${TEAM_CALL_CREDITS} credits per call` } },
-    { key: "plugin" as HubCategory, ko: "플러그인", en: "Plugin", tone: C.peach, note: { ko: "필요 시 검색·설치 후보로 제안되는 도구", en: "Tools suggested for install when a Hub agent needs them" } },
-    { key: "agent" as HubCategory, ko: "에이전트", en: "Agent", tone: C.green, note: { ko: `단일 에이전트 · 호출 ${AGENT_CALL_CREDITS}크레딧`, en: `Single agents · ${AGENT_CALL_CREDITS} credits per call` } },
+    { key: "agent" as HubCategory, ko: "일반 에이전트", en: "Regular agents", tone: C.green },
+    { key: "visual" as HubCategory, ko: "비주얼 에이전트", en: "Visual agents", tone: C.blue },
   ];
 
   return (
@@ -286,7 +315,7 @@ function MarketplacePage() {
       <div className="titlebar-nodrag hub-desktop-scroll">
         <div className="hub-web-frame">
           <div className="hub-web-main">
-            <div className="hub-web-topbar">
+            <div className="hub-web-topbar" data-tour-id="hub.status">
               <div className="hub-web-topbar-title">Hub</div>
               <div className="hub-web-topbar-actions" aria-label={ko ? "허브 계정 상태" : "Hub account state"}>
                 <button
@@ -326,8 +355,8 @@ function MarketplacePage() {
               <h1 className="portal-hero-title">{ko ? "필요한 에이전트를 찾거나 연동하세요" : "Find and call the right agent"}</h1>
               <div className="portal-hero-sub">
                 {ko
-                  ? "팀과 에이전트는 일을 실행하고, 플러그인은 필요할 때 설치 후보로 제안되는 도구 레이어입니다."
-                  : "Teams and agents do the work. Plugins are the tool layer suggested for install when a run needs more capability."}
+                  ? "일반 에이전트와 비주얼 에이전트를 나눠 찾아 바로 설치합니다."
+                  : "Find regular agents and visual agents in separate lanes."}
               </div>
               <div className="portal-hero-sub" style={{ marginTop: 8, fontSize: 13, color: "var(--ink-soft)" }}>
                 {ko
@@ -340,24 +369,23 @@ function MarketplacePage() {
               <div className="portal-panel-title">{ko ? "필요한 걸 바로 찾기" : "Search the Registry"}</div>
               <div className="portal-panel-sub">
                 {ko
-                  ? "에이전트·플러그인·팀을 한 검색창에서 찾을 수 있습니다."
-                  : "Search agents, plugins, and teams in a single search."}
+                  ? "에이전트 이름이나 역할을 검색하면 현재 탭 안에서 좁혀집니다."
+                  : "Search by agent name or role within the current lane."}
               </div>
             </div>
           </div>
 
-          <div className="card portal-search-panel rd-card-cream">
+          <div className="card portal-search-panel rd-card-cream" data-tour-id="hub.search">
               <input
                 className="portal-input"
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
-                placeholder={ko ? "에이전트, 플러그인, 팀 검색..." : "Search agents, plugins, and teams..."}
+                placeholder={ko ? "에이전트 검색..." : "Search agents..."}
                 aria-label={ko ? "허브 검색" : "Search the Hub"}
               />
             <div className="portal-chip-row" style={{ marginTop: 10 }}>
-              <RdTag bg={C.purple}>{ko ? `팀 ${counts.team}` : `${counts.team} Teams`}</RdTag>
-              <RdTag bg={C.peach}>{ko ? `플러그인 ${counts.plugin}` : `${counts.plugin} Plugins`}</RdTag>
-              <RdTag bg={C.green}>{ko ? `에이전트 ${counts.agent}` : `${counts.agent} Agents`}</RdTag>
+              <RdTag bg={C.green}>{ko ? `일반 ${counts.agent}` : `${counts.agent} regular`}</RdTag>
+              <RdTag bg={C.blue}>{ko ? `비주얼 ${counts.visual}` : `${counts.visual} visual`}</RdTag>
             </div>
             {sourceStatus && (
               <div className="hub-status-line" style={{ marginTop: 10 }}>
@@ -423,7 +451,7 @@ function MarketplacePage() {
             </div>
           )}
 
-          <div className="hub-cat-nav" role="tablist" aria-label={ko ? "허브 카테고리" : "Hub categories"}>
+          <div className="hub-cat-nav" role="tablist" aria-label={ko ? "허브 카테고리" : "Hub categories"} data-tour-id="hub.categories">
             {CATEGORY_NAV.map((cat) => (
               <button
                 key={cat.key}
@@ -441,7 +469,7 @@ function MarketplacePage() {
           </div>
 
           {active === "team" && (
-            <section className="portal-panel" id="hub-team">
+            <section className="portal-panel" id="hub-team" data-tour-id="hub.results">
               <SectionHead
                 kicker={ko ? `팀 · 호출 시 ${TEAM_CALL_CREDITS}크레딧` : `TEAM · ${TEAM_CALL_CREDITS} CREDITS PER CALL`}
                 title={ko ? "여러 에이전트가 함께 일하는 팀" : "Multi-Agent Teams"}
@@ -468,7 +496,7 @@ function MarketplacePage() {
           )}
 
           {active === "plugin" && (
-            <section className="portal-panel" id="hub-plugin">
+            <section className="portal-panel" id="hub-plugin" data-tour-id="hub.results">
               <div className="hub-panel-headrow">
                 <SectionHead
                   kicker={ko ? "플러그인 · 도구 레이어" : "PLUGIN · TOOL LAYER"}
@@ -496,11 +524,11 @@ function MarketplacePage() {
           )}
 
           {active === "agent" && (
-            <section className="portal-panel" id="hub-agent">
+            <section className="portal-panel" id="hub-agent" data-tour-id="hub.results">
               <SectionHead
                 kicker={ko ? `에이전트 · 호출 시 ${AGENT_CALL_CREDITS}크레딧` : `AGENT · ${AGENT_CALL_CREDITS} CREDITS PER CALL`}
-                title={ko ? "다른 사람이 공유한 에이전트" : "Community Agents"}
-                sub={ko ? "다른 사용자가 공개한 단일 에이전트입니다. Hub에서 명령으로 바로 호출합니다." : "Single-purpose agents shared by the community. Call them directly from the Hub."}
+                title={ko ? "일반 에이전트" : "Regular Agents"}
+                sub={ko ? "리서치, 글쓰기, 운영, 자동화처럼 일반 업무를 맡는 단일 에이전트입니다." : "Single agents for research, writing, operations, and automation work."}
               />
               {pagedAgents.length > 0 ? (
                 <div className="market-card-grid">
@@ -515,6 +543,35 @@ function MarketplacePage() {
                   </div>
                   <div style={{ fontSize: 13, color: "var(--rd-ink-3)", lineHeight: 1.55, marginTop: 6 }}>
                     {ko ? "Hub에 공개된 에이전트가 있으면 이곳에 표시됩니다." : "Published Hub agents will appear here."}
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
+          {active === "visual" && (
+            <section className="portal-panel" id="hub-visual" data-tour-id="hub.results">
+              <SectionHead
+                kicker={ko ? "비주얼 에이전트" : "VISUAL AGENTS"}
+                title={ko ? "이미지·영상·디자인 작업 에이전트" : "Image, video, and design agents"}
+                sub={ko ? "시각 자료, 영상, 모션, 디자인 제작에 가까운 에이전트를 따로 봅니다." : "Agents focused on visual assets, video, motion, and design work."}
+              />
+              {pagedVisualAgents.length > 0 ? (
+                <div className="market-card-grid">
+                  {pagedVisualAgents.map((agent) => (
+                    <AgentCard key={agent.slug} listing={agent} locale={locale} offlineCatalog={usingFallbackCatalog} installed={installedAgentSlugs.has(agent.slug)} installing={installing === agent.slug} onInstall={() => installOne(agent.slug)} />
+                  ))}
+                </div>
+              ) : (
+                <div className="card portal-empty-panel" style={{ padding: 18 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ color: "var(--rd-accent)" }}><IconImage size={18} /></span>
+                    <div style={{ fontFamily: "var(--rd-f-display)", fontSize: 20, fontWeight: 400 }}>
+                      {ko ? "아직 비주얼 에이전트가 없습니다" : "No visual agents yet"}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 13, color: "var(--rd-ink-3)", lineHeight: 1.55, marginTop: 6 }}>
+                    {ko ? "Hub에 공개된 이미지·영상·디자인 에이전트가 있으면 이곳에 표시됩니다." : "Published image, video, and design agents will appear here."}
                   </div>
                 </div>
               )}

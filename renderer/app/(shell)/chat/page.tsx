@@ -130,6 +130,7 @@ function toolStepFromEvent(tool: ToolEvent, meta?: Partial<StreamStep>): StreamS
     result: tool.result,
     resultIsError: tool.isError,
     activity: "tool",
+    createdAt: Date.now(),
     ...meta,
   };
 }
@@ -164,6 +165,7 @@ function mergeToolStep(steps: StreamStep[], tool: ToolEvent, meta?: Partial<Stre
           result,
           resultIsError: tool.isError,
           activity: meta?.activity ?? s.activity ?? "tool",
+          createdAt: Date.now(),
         }
       : s,
   );
@@ -215,6 +217,21 @@ function advancePipeline(stages: PipelineStage[] | undefined, ev: McpInvocationE
 function completePipeline(stages: PipelineStage[] | undefined): PipelineStage[] | undefined {
   if (!stages || !stages.length) return stages;
   return stages.map((s) => ({ ...s, status: "done" as const }));
+}
+
+function historyEntryToStreamMessage(entry: { id: string; role: string; text: string }): StreamMessage {
+  const role: StreamMessage["role"] =
+    entry.role === "assistant" ? "agent" : entry.role === "user" ? "user" : "system";
+  if (role !== "agent") {
+    return { id: entry.id, role, text: entry.text };
+  }
+  const parsed = extractQuestions(entry.text, entry.id);
+  return {
+    id: entry.id,
+    role,
+    text: parsed.text,
+    questions: parsed.questions.length > 0 ? parsed.questions : undefined,
+  };
 }
 
 type GeneratedAppChatRoute = {
@@ -522,6 +539,7 @@ function ChatPage() {
                     id: uid(),
                     kind: "thinking",
                     text: st,
+                    createdAt: Date.now(),
                     ...meta,
                   },
                 ],
@@ -575,6 +593,7 @@ function ChatPage() {
                       tool: "agentlas_surface",
                       agentName: fallbackAgentName,
                       activity: "tool",
+                      createdAt: Date.now(),
                       args: JSON.stringify({
                         id: surfaceId,
                         domain: ev.surface!.domain,
@@ -602,6 +621,7 @@ function ChatPage() {
                       id: uid(),
                       kind: ev.kind === "thinking" ? "thinking" : "tool",
                       text: status,
+                      createdAt: Date.now(),
                       ...fallbackStepMeta,
                     },
                   ],
@@ -645,6 +665,7 @@ function ChatPage() {
                   text: locale === "ko" ? "에이전트 작업 완료" : "Agent work completed",
                   agentName: fallbackAgentName,
                   activity: "complete",
+                  createdAt: Date.now(),
                 },
               ],
               questions: questions.length > 0 ? questions : msg.questions,
@@ -795,11 +816,7 @@ function ChatPage() {
         setFirm(null);
         setResolvedOrg(null);
       }
-      const historyMessages: StreamMessage[] = history.map((e) => ({
-          id: e.id,
-          role: e.role === "assistant" ? "agent" : e.role === "user" ? "user" : "system",
-          text: e.text,
-        }));
+      const historyMessages: StreamMessage[] = history.map(historyEntryToStreamMessage);
       setMessages((current) => {
         const hasLiveDraft = current.some((msg) => msg.busy || msg.streaming);
         return hasLiveDraft ? current : historyMessages;
@@ -827,6 +844,7 @@ function ChatPage() {
                 text: t("chat.status.sending"),
                 agentName: reconnectAgentName,
                 activity: "start",
+                createdAt: startedAt,
               },
             ],
           },
@@ -877,13 +895,7 @@ function ChatPage() {
         Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
       );
       void api.invoke.history(chatId).then((h) => {
-        setMessages(
-          h.map((e) => ({
-            id: e.id,
-            role: e.role === "assistant" ? "agent" : e.role === "user" ? "user" : "system",
-            text: e.text,
-          })),
-        );
+        setMessages(h.map(historyEntryToStreamMessage));
       });
     });
   }, [chatId]);
@@ -1013,6 +1025,7 @@ function ChatPage() {
               text: initialStatus,
               agentName: activeAgentName,
               activity: "start",
+              createdAt: startedAt,
             },
           ],
         },
@@ -1801,6 +1814,7 @@ function ChatPage() {
         <button
           onClick={() => setNetworkOpenPersisted(!networkOpen)}
           className="titlebar-nodrag"
+          data-tour-id="workspace.workflow-toggle"
           aria-label={t("chat.network_panel")}
           title={t("chat.network_panel")}
           style={{
@@ -1908,25 +1922,28 @@ function ChatPage() {
         </div>
       )}
 
-      <ChatStream
-        messages={messages}
-        agentName={displayAgent ? pickLocalized(displayAgent, locale).name : t("chat.assistant_fallback")}
-        agentTone={displayAgent?.tone ?? "blue"}
-        emptyDirectory={{
-          apps: INSTALLED_APPS,
-          agents: displayAgents,
-          firms: allFirms,
-          projects: allProjects,
-          envKeys: allEnvKeys,
-          commands: cliCommands,
-          plugins: installedPlugins,
-        }}
-        onOpenArtifact={(a) => {
-          setSurface(null);
-          setArtifact(a);
-        }}
-        onAnswerQuestion={answerQuestion}
-      />
+      <div data-tour-id="workspace.chat" style={{ minHeight: 0, flex: 1, display: "flex", flexDirection: "column" }}>
+        <ChatStream
+          messages={messages}
+          agentName={displayAgent ? pickLocalized(displayAgent, locale).name : t("chat.assistant_fallback")}
+          agentTone={displayAgent?.tone ?? "blue"}
+          emptyDirectory={{
+            apps: INSTALLED_APPS,
+            agents: displayAgents,
+            firms: allFirms,
+            projects: allProjects,
+            envKeys: allEnvKeys,
+            commands: cliCommands,
+            plugins: installedPlugins,
+          }}
+          onOpenArtifact={(a) => {
+            setSurface(null);
+            setArtifact(a);
+          }}
+          onOpenWorkflow={() => setNetworkOpenPersisted(true)}
+          onAnswerQuestion={answerQuestion}
+        />
+      </div>
       {/* Codex식: 이 대화가 폴더(프로젝트)에서 작업하는지 / 전역 대화인지 선택 */}
       <div style={{ padding: "6px 16px 0", display: "flex" }}>
         <ProjectFolderBar
@@ -1938,38 +1955,40 @@ function ChatPage() {
           }}
         />
       </div>
-      <ChatInput
-        onSend={(text, opts) => {
-          void send(text, {
-            images: opts?.images,
-            permissions: opts?.permissions,
-            planMode: opts?.planMode,
-            goalMode: opts?.goalMode,
-            appsGenerateMode: opts?.appsGenerateMode,
-          });
-        }}
-        onCommand={handleCommand}
-        onCallAgent={(agentId) => void switchAgent(agentId)}
-        onRecommendPreview={handleRecommendPreview}
-        onRecommendExecute={handleRecommendExecute}
-        onStop={stop}
-        busy={busy}
-        disabled={!agent}
-        context={{
-          agents: displayAgents,
-          projects: allProjects,
-          firms: allFirms,
-          apps: INSTALLED_APPS,
-          generatedApps: allGeneratedApps,
-          envKeys: allEnvKeys,
-          commands: cliCommands,
-        }}
-        runtime={activeRuntime}
-        modelOptions={modelOptions}
-        onSelectModel={switchModel}
-        onSelectEffort={switchEffort}
-        tokensUsage={{ current: currentTokens, limit: maxTokens }}
-      />
+      <div data-tour-id="workspace.input">
+        <ChatInput
+          onSend={(text, opts) => {
+            void send(text, {
+              images: opts?.images,
+              permissions: opts?.permissions,
+              planMode: opts?.planMode,
+              goalMode: opts?.goalMode,
+              appsGenerateMode: opts?.appsGenerateMode,
+            });
+          }}
+          onCommand={handleCommand}
+          onCallAgent={(agentId) => void switchAgent(agentId)}
+          onRecommendPreview={handleRecommendPreview}
+          onRecommendExecute={handleRecommendExecute}
+          onStop={stop}
+          busy={busy}
+          disabled={!agent}
+          context={{
+            agents: displayAgents,
+            projects: allProjects,
+            firms: allFirms,
+            apps: INSTALLED_APPS,
+            generatedApps: allGeneratedApps,
+            envKeys: allEnvKeys,
+            commands: cliCommands,
+          }}
+          runtime={activeRuntime}
+          modelOptions={modelOptions}
+          onSelectModel={switchModel}
+          onSelectEffort={switchEffort}
+          tokensUsage={{ current: currentTokens, limit: maxTokens }}
+        />
+      </div>
       </div>
       <WorkbenchPanel
         artifact={artifact}

@@ -7,7 +7,7 @@
 // - nodeIntegration: false
 // - sandbox: true (renderer는 sandboxed)
 // - 모든 Node API는 preload → ipc 경로로만 노출
-import { app, BrowserWindow, Menu, nativeImage, net, protocol, shell } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, net, protocol, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -217,7 +217,23 @@ app.whenReady().then(async () => {
   registerIpcHandlers();
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
   await createWindow();
-  Menu.setApplicationMenu(buildAppMenu(() => mainWindow));
+  // 네이티브 메뉴바도 인앱 언어 설정을 따른다. 초기값은 OS 로케일(app.getLocale),
+  // 이후 렌더러가 menu:setLocale로 사용자 override를 통지하면 다시 그린다.
+  applyAppMenu(resolveMenuLocale());
+  ipcMain.handle("menu:setLocale", (_e, locale: unknown) => {
+    applyAppMenu(resolveMenuLocale(typeof locale === "string" ? locale : undefined));
+  });
   // 자동 업데이트는 production에서만. updater.ts 안에서 NODE_ENV 체크.
   initAutoUpdater();
 });
+
+/** OS 로케일 또는 렌더러가 통지한 표시 언어를 ko/en으로 정규화. */
+function resolveMenuLocale(pref?: string): "ko" | "en" {
+  const v = (pref ?? app.getLocale() ?? "en").toLowerCase();
+  return v.startsWith("ko") ? "ko" : "en";
+}
+
+/** 주어진 언어로 네이티브 메뉴를 다시 빌드해 적용. */
+function applyAppMenu(locale: "ko" | "en"): void {
+  Menu.setApplicationMenu(buildAppMenu(() => mainWindow, locale));
+}

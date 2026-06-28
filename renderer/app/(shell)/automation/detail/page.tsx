@@ -115,6 +115,7 @@ function AutomationDetailPage() {
 
       <section
         className="titlebar-nodrag"
+        data-tour-id="automation.status"
         style={{ maxWidth: 640, margin: "24px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 16 }}
       >
         <Row label={t("auto.detail.schedule")} value={automation.scheduleHuman} />

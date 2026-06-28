@@ -80,6 +80,7 @@ export default function AutomationListPage() {
         <Link
           href="/automation/new"
           className="titlebar-nodrag"
+          data-tour-id="automation.new"
           style={{
             display: "inline-flex",
             alignItems: "center",
@@ -100,7 +101,7 @@ export default function AutomationListPage() {
         </Link>
       </header>
 
-      <section style={{ maxWidth: 880, margin: "24px auto", padding: "0 24px" }}>
+      <section style={{ maxWidth: 880, margin: "24px auto", padding: "0 24px" }} data-tour-id="automation.list">
         <div
           style={{
             padding: 12,
@@ -144,17 +145,22 @@ export default function AutomationListPage() {
               >
                 <IconBolt size={16} style={{ color: a.enabled ? "var(--accent)" : "var(--muted)" }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div
+                  <Link
+                    href={`/automation/detail?id=${encodeURIComponent(a.id)}`}
+                    className="titlebar-nodrag"
                     style={{
+                      display: "block",
                       fontWeight: 600,
                       fontSize: 13,
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
+                      color: "var(--ink)",
+                      textDecoration: "none",
                     }}
                   >
                     {a.name}
-                  </div>
+                  </Link>
                   <div style={{ fontSize: 11, color: "var(--muted-deep)", overflowWrap: "anywhere" }}>
                     {a.scheduleHuman} ·{" "}
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>

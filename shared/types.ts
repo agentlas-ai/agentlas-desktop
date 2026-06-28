@@ -2444,6 +2444,11 @@ export interface AgentlasIpc {
     /** package.json의 version — 사이드바 푸터 표기/디버그 용 */
     getVersion: () => Promise<string>;
   };
+  /** 네이티브 macOS 메뉴바 제어 — 인앱 언어 설정을 메인 프로세스로 전달해 메뉴를 다시 그린다. */
+  menu: {
+    /** 현재 표시 언어를 메인에 알려 네이티브 메뉴 라벨을 ko/en으로 갱신. */
+    setLocale: (locale: "ko" | "en") => Promise<void>;
+  };
   /** 워킹 폴더 — 채팅 우측의 폴더 트리 패널이 사용. read-only. */
   fs: {
     pickDirectory: () => Promise<string | null>;

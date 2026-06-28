@@ -12,6 +12,7 @@ import {
   buildEdl,
   buildTitleSpec,
   defaultModelSettings,
+  loadProduction,
   planProduction,
   recomputeCost,
   saveProduction,
@@ -28,6 +29,18 @@ import {
   type Take,
   type OberonStudio,
 } from "@/lib/oberon";
+import {
+  clearOberonBackgroundJobsForProduction,
+  failOberonBackgroundJob,
+  finishOberonPlanJob,
+  isOberonBackgroundJobActive,
+  listOberonBackgroundJobs,
+  removeOberonBackgroundJob,
+  startOberonPlanJob,
+  subscribeOberonBackgroundJobs,
+  trackOberonLiveJob,
+  type OberonBackgroundJob,
+} from "@/lib/oberon/jobs";
 import { ipc } from "@/lib/ipc";
 import { BriefWizard } from "@/components/oberon/BriefWizard";
 import { StudioLanding } from "@/components/oberon/StudioLanding";
@@ -90,6 +103,8 @@ export default function OberonPage() {
   const [animateJob, setAnimateJob] = useState<OberonAnimateJob | null>(null);
   const animatePoll = useRef<ReturnType<typeof setInterval> | null>(null);
   const [animateKey, setAnimateKey] = useState<OberonAnimateKeyStatus | null>(null);
+  const [backgroundJobs, setBackgroundJobs] = useState<OberonBackgroundJob[]>([]);
+  const attachedBackgroundJobs = useRef({ keyframe: "", render: "", motion: "", animate: "" });
 
   useEffect(() => () => {
     if (keyframePoll.current) clearInterval(keyframePoll.current);
@@ -151,12 +166,17 @@ export default function OberonPage() {
   // 00 → CLI 기획 생성
   const handlePlan = useCallback(
     (brief: FilmBrief, premium: boolean) => {
+      const planJob = startOberonPlanJob(brief.title);
       setPlanning(true);
       void buildProductionWithPlanner(brief, premium)
         .then((prod) => {
           setProduction(prod);
           complete("setup");
           saveProduction(prod);
+          finishOberonPlanJob(planJob.id, prod.id, prod.brief.title);
+        })
+        .catch((error) => {
+          failOberonBackgroundJob("plan", planJob.id, error instanceof Error ? error.message : String(error));
         })
         .finally(() => setPlanning(false));
     },
@@ -168,15 +188,19 @@ export default function OberonPage() {
     if (keyframePoll.current) clearInterval(keyframePoll.current);
     if (renderPoll.current) clearInterval(renderPoll.current);
     if (motionPoll.current) clearInterval(motionPoll.current);
+    if (animatePoll.current) clearInterval(animatePoll.current);
     keyframePoll.current = null;
     renderPoll.current = null;
     motionPoll.current = null;
+    animatePoll.current = null;
     setKfGenerating(false);
     setVideoGenerating(false);
     setMotionGenerating(false);
+    setAnimateGenerating(false);
     setKeyframeJob(null);
     setRenderJob(null);
     setMotionJob(null);
+    setAnimateJob(null);
     if (prod.modelSettings) setModel(prod.modelSettings);
     const hasShots = prod.shots.length > 0;
     const hasKeyframes = (prod.keyframeAssets?.length ?? 0) > 0;
@@ -216,12 +240,15 @@ export default function OberonPage() {
   // 01 AI로 다시 생성 — 편집된 브리프로 재계획, 하위 단계 리셋
   const replan = useCallback(() => {
     if (!production) return;
+    clearOberonBackgroundJobsForProduction(production.id);
     if (keyframePoll.current) clearInterval(keyframePoll.current);
     if (renderPoll.current) clearInterval(renderPoll.current);
     if (motionPoll.current) clearInterval(motionPoll.current);
+    if (animatePoll.current) clearInterval(animatePoll.current);
     keyframePoll.current = null;
     renderPoll.current = null;
     motionPoll.current = null;
+    animatePoll.current = null;
     setPlanning(true);
     void buildProductionWithPlanner(production.brief, true)
       .then((prod) => {
@@ -234,6 +261,8 @@ export default function OberonPage() {
         setRenderJob(null);
         setMotionGenerating(false);
         setMotionJob(null);
+        setAnimateGenerating(false);
+        setAnimateJob(null);
         setStepState({ ...INITIAL_STEP_STATE, setup: "done", plan: "active" });
         setActive("plan");
         saveProduction(prod);
@@ -342,6 +371,7 @@ export default function OberonPage() {
           const bridge = ipc();
           const job = await bridge?.oberon.getRenderJob(jobId);
           if (!job) return;
+          trackOberonLiveJob("render", job);
           setRenderJob(job);
           if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
             if (renderPoll.current) clearInterval(renderPoll.current);
@@ -353,6 +383,7 @@ export default function OberonPage() {
           if (renderPoll.current) clearInterval(renderPoll.current);
           renderPoll.current = null;
           setVideoGenerating(false);
+          failOberonBackgroundJob("render", jobId, error instanceof Error ? error.message : String(error));
           setRenderJob((job) =>
             job
               ? { ...job, status: "failed", progress: { ...job.progress, phase: "failed" }, error: String(error), message: String(error) }
@@ -390,6 +421,7 @@ export default function OberonPage() {
           const bridge = ipc();
           const job = await bridge?.oberon.getMotionAdJob(jobId);
           if (!job) return;
+          trackOberonLiveJob("motion", job);
           setMotionJob(job);
           if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
             if (motionPoll.current) clearInterval(motionPoll.current);
@@ -401,6 +433,7 @@ export default function OberonPage() {
           if (motionPoll.current) clearInterval(motionPoll.current);
           motionPoll.current = null;
           setMotionGenerating(false);
+          failOberonBackgroundJob("motion", jobId, error instanceof Error ? error.message : String(error));
           setMotionJob((job) =>
             job
               ? { ...job, status: "failed", progress: { ...job.progress, phase: "failed" }, error: String(error), message: String(error) }
@@ -440,6 +473,7 @@ export default function OberonPage() {
           const bridge = ipc();
           const job = await bridge?.oberon.getKeyframeJob(jobId);
           if (!job) return;
+          trackOberonLiveJob("keyframe", job);
           setKeyframeJob(job);
           setKfProgress(job.progress.completedImages);
           if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
@@ -452,6 +486,7 @@ export default function OberonPage() {
           if (keyframePoll.current) clearInterval(keyframePoll.current);
           keyframePoll.current = null;
           setKfGenerating(false);
+          failOberonBackgroundJob("keyframe", jobId, error instanceof Error ? error.message : String(error));
           setKeyframeJob((job) =>
             job
               ? { ...job, status: "failed", progress: { ...job.progress, phase: "failed" }, error: String(error), message: String(error) }
@@ -468,7 +503,9 @@ export default function OberonPage() {
     if (!production) return;
     const bridge = ipc();
     if (!bridge?.oberon?.startKeyframes) {
-      setKeyframeJob(localKeyframeError(production, "Electron Oberon bridge is unavailable. Desktop app에서 다시 실행해야 실제 이미지 생성이 가능합니다."));
+      const failedJob = localKeyframeError(production, "Electron Oberon bridge is unavailable. Desktop app에서 다시 실행해야 실제 이미지 생성이 가능합니다.");
+      trackOberonLiveJob("keyframe", failedJob);
+      setKeyframeJob(failedJob);
       setKfGenerating(false);
       return;
     }
@@ -498,6 +535,7 @@ export default function OberonPage() {
     void bridge.oberon
       .startKeyframes(request)
       .then((job) => {
+        trackOberonLiveJob("keyframe", job);
         setKeyframeJob(job);
         setProduction((p) => {
           if (!p) return p;
@@ -508,8 +546,10 @@ export default function OberonPage() {
         pollKeyframeJob(job.id);
       })
       .catch((error) => {
+        const failedJob = localKeyframeError(production, error instanceof Error ? error.message : String(error));
+        trackOberonLiveJob("keyframe", failedJob);
         setKfGenerating(false);
-        setKeyframeJob(localKeyframeError(production, error instanceof Error ? error.message : String(error)));
+        setKeyframeJob(failedJob);
       });
   }, [model.imageProvider, pollKeyframeJob, production]);
 
@@ -518,7 +558,9 @@ export default function OberonPage() {
     if (!production) return;
     const bridge = ipc();
     if (!bridge?.oberon) {
-      setRenderJob(localRenderError(production, "Electron Oberon bridge is unavailable. Desktop app에서 다시 실행해야 실제 생성이 가능합니다."));
+      const failedJob = localRenderError(production, "Electron Oberon bridge is unavailable. Desktop app에서 다시 실행해야 실제 생성이 가능합니다.");
+      trackOberonLiveJob("render", failedJob);
+      setRenderJob(failedJob);
       setVideoGenerating(false);
       return;
     }
@@ -557,6 +599,7 @@ export default function OberonPage() {
     void bridge.oberon
       .startRender(request)
       .then((job) => {
+        trackOberonLiveJob("render", job);
         setRenderJob(job);
         setProduction((p) => {
           if (!p) return p;
@@ -567,8 +610,10 @@ export default function OberonPage() {
         pollRenderJob(job.id);
       })
       .catch((error) => {
+        const failedJob = localRenderError(production, error instanceof Error ? error.message : String(error));
+        trackOberonLiveJob("render", failedJob);
         setVideoGenerating(false);
-        setRenderJob(localRenderError(production, error instanceof Error ? error.message : String(error)));
+        setRenderJob(failedJob);
       });
   }, [pollRenderJob, production]);
 
@@ -576,7 +621,9 @@ export default function OberonPage() {
     if (!production) return;
     const bridge = ipc();
     if (!bridge?.oberon?.startMotionAd) {
-      setMotionJob(localMotionError(production, "Electron Oberon bridge is unavailable. Desktop app에서 다시 실행해야 모션그래픽 렌더가 가능합니다."));
+      const failedJob = localMotionError(production, "Electron Oberon bridge is unavailable. Desktop app에서 다시 실행해야 모션그래픽 렌더가 가능합니다.");
+      trackOberonLiveJob("motion", failedJob);
+      setMotionJob(failedJob);
       setMotionGenerating(false);
       return;
     }
@@ -601,6 +648,7 @@ export default function OberonPage() {
     void bridge.oberon
       .startMotionAd(request)
       .then((job) => {
+        trackOberonLiveJob("motion", job);
         setMotionJob(job);
         setProduction((p) => {
           if (!p) return p;
@@ -611,8 +659,10 @@ export default function OberonPage() {
         pollMotionJob(job.id);
       })
       .catch((error) => {
+        const failedJob = localMotionError(production, error instanceof Error ? error.message : String(error));
+        trackOberonLiveJob("motion", failedJob);
         setMotionGenerating(false);
-        setMotionJob(localMotionError(production, error instanceof Error ? error.message : String(error)));
+        setMotionJob(failedJob);
       });
   }, [pollMotionJob, production]);
 
@@ -620,6 +670,7 @@ export default function OberonPage() {
     if (renderPoll.current) clearInterval(renderPoll.current);
     renderPoll.current = null;
     if (renderJob && videoGenerating) void ipc()?.oberon.cancelRender(renderJob.id);
+    if (renderJob) removeOberonBackgroundJob("render", renderJob.id);
     setVideoGenerating(false);
     setRenderJob(null);
     setProduction((p) => {
@@ -635,6 +686,7 @@ export default function OberonPage() {
     if (motionPoll.current) clearInterval(motionPoll.current);
     motionPoll.current = null;
     if (motionJob && motionGenerating) void ipc()?.oberon.cancelMotionAd(motionJob.id);
+    if (motionJob) removeOberonBackgroundJob("motion", motionJob.id);
     setMotionGenerating(false);
     setMotionJob(null);
     setProduction((p) => {
@@ -662,6 +714,7 @@ export default function OberonPage() {
           const bridge = ipc();
           const job = await bridge?.oberon.getAnimateJob(jobId);
           if (!job) return;
+          trackOberonLiveJob("animate", job);
           setAnimateJob(job);
           if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
             if (animatePoll.current) clearInterval(animatePoll.current);
@@ -669,20 +722,130 @@ export default function OberonPage() {
             setAnimateGenerating(false);
             if (job.status === "succeeded") materializeAnimateJob();
           }
-        })().catch(() => {
+        })().catch((error) => {
           if (animatePoll.current) clearInterval(animatePoll.current);
           animatePoll.current = null;
           setAnimateGenerating(false);
+          failOberonBackgroundJob("animate", jobId, error instanceof Error ? error.message : String(error));
         });
       }, 2000);
     },
     [materializeAnimateJob],
   );
 
+  const attachBackgroundJob = useCallback(
+    (snapshot: OberonBackgroundJob) => {
+      if (snapshot.kind === "plan" || !snapshot.job) return;
+      const running = isOberonBackgroundJobActive(snapshot);
+      if (snapshot.kind === "keyframe") {
+        const job = snapshot.job as OberonKeyframeJob;
+        setKeyframeJob(job);
+        setKfProgress(job.progress.completedImages);
+        setKfGenerating(running);
+        if (running) {
+          if (attachedBackgroundJobs.current.keyframe !== job.id) {
+            attachedBackgroundJobs.current.keyframe = job.id;
+            pollKeyframeJob(job.id);
+          }
+        } else {
+          attachedBackgroundJobs.current.keyframe = "";
+          if (job.assets.length > 0) materializeKeyframeJob(job);
+        }
+        return;
+      }
+      if (snapshot.kind === "render") {
+        const job = snapshot.job as OberonRenderJob;
+        setRenderJob(job);
+        setVideoGenerating(running);
+        if (running) {
+          if (attachedBackgroundJobs.current.render !== job.id) {
+            attachedBackgroundJobs.current.render = job.id;
+            pollRenderJob(job.id);
+          }
+        } else {
+          attachedBackgroundJobs.current.render = "";
+          if (job.status === "succeeded") materializeRenderJob(job);
+        }
+        return;
+      }
+      if (snapshot.kind === "motion") {
+        const job = snapshot.job as OberonMotionAdJob;
+        setVideoMode("motion_ad");
+        setMotionJob(job);
+        setMotionGenerating(running);
+        if (running) {
+          if (attachedBackgroundJobs.current.motion !== job.id) {
+            attachedBackgroundJobs.current.motion = job.id;
+            pollMotionJob(job.id);
+          }
+        } else {
+          attachedBackgroundJobs.current.motion = "";
+          if (job.status === "succeeded") materializeMotionJob(job);
+        }
+        return;
+      }
+      const job = snapshot.job as OberonAnimateJob;
+      setAnimateJob(job);
+      setAnimateGenerating(running);
+      if (running) {
+        if (attachedBackgroundJobs.current.animate !== job.id) {
+          attachedBackgroundJobs.current.animate = job.id;
+          pollAnimateJob(job.id);
+        }
+      } else {
+        attachedBackgroundJobs.current.animate = "";
+        if (job.status === "succeeded") materializeAnimateJob();
+      }
+    },
+    [materializeAnimateJob, materializeKeyframeJob, materializeMotionJob, materializeRenderJob, pollAnimateJob, pollKeyframeJob, pollMotionJob, pollRenderJob],
+  );
+
+  useEffect(() => {
+    const sync = () => {
+      const jobs = listOberonBackgroundJobs();
+      setBackgroundJobs(jobs);
+      if (!production) {
+        const loadable = jobs.find((job) => job.productionId);
+        if (loadable?.productionId) {
+          const saved = loadProduction(loadable.productionId);
+          if (saved) loadSaved(saved);
+        }
+        return;
+      }
+      for (const job of jobs.filter((item) => item.productionId === production.id)) {
+        attachBackgroundJob(job);
+      }
+    };
+    sync();
+    return subscribeOberonBackgroundJobs(sync);
+  }, [attachBackgroundJob, loadSaved, production]);
+
   const startAnimate = useCallback(() => {
     if (!production) return;
     const bridge = ipc();
-    if (!bridge?.oberon?.startAnimate) return;
+    if (!bridge?.oberon?.startAnimate) {
+      const now = Date.now();
+      const failedJob: OberonAnimateJob = {
+        id: `local-error-${now}`,
+        productionId: production.id,
+        title: production.brief.title,
+        provider: animateKey?.runway ? "runway" : "luma",
+        model: "",
+        status: "failed",
+        outputDir: "",
+        progress: { phase: "failed", percent: 0 },
+        files: [],
+        message: "Electron Oberon bridge is unavailable. Desktop app에서 다시 실행해야 애니메이션 생성이 가능합니다.",
+        error: "Electron Oberon bridge is unavailable.",
+        warnings: [],
+        createdAtMs: now,
+        updatedAtMs: now,
+      };
+      trackOberonLiveJob("animate", failedJob);
+      setAnimateJob(failedJob);
+      setAnimateGenerating(false);
+      return;
+    }
     const firstKf = (production.keyframeAssets ?? [])[0];
     const shot = production.shots[0];
     const prompt =
@@ -704,13 +867,14 @@ export default function OberonPage() {
     void bridge.oberon
       .startAnimate(request)
       .then((job) => {
+        trackOberonLiveJob("animate", job);
         setAnimateJob(job);
         pollAnimateJob(job.id);
       })
       .catch((error) => {
-        setAnimateGenerating(false);
-        setAnimateJob({
-          id: "local-error",
+        const now = Date.now();
+        const failedJob: OberonAnimateJob = {
+          id: `local-error-${now}`,
           productionId: production.id,
           title: production.brief.title,
           provider,
@@ -722,9 +886,12 @@ export default function OberonPage() {
           message: "실패",
           error: error instanceof Error ? error.message : String(error),
           warnings: [],
-          createdAtMs: Date.now(),
-          updatedAtMs: Date.now(),
-        });
+          createdAtMs: now,
+          updatedAtMs: now,
+        };
+        trackOberonLiveJob("animate", failedJob);
+        setAnimateGenerating(false);
+        setAnimateJob(failedJob);
       });
   }, [animateKey, pollAnimateJob, production]);
 
@@ -735,7 +902,10 @@ export default function OberonPage() {
     keyframePoll.current = null;
     renderPoll.current = null;
     motionPoll.current = null;
-    setProduction(null);
+    setProduction((p) => {
+      if (p) clearOberonBackgroundJobsForProduction(p.id);
+      return null;
+    });
     setStepState({ ...INITIAL_STEP_STATE });
     setActive("setup");
     setStudio(null);
@@ -786,7 +956,17 @@ export default function OberonPage() {
         )}
       </header>
 
-      {!studio && !production ? (
+      {!production && backgroundJobs.length > 0 ? (
+        <main style={{ flex: 1, minWidth: 0, display: "flex", minHeight: 0 }}>
+          <OberonBackgroundResume
+            jobs={backgroundJobs}
+            onOpenProduction={(productionId) => {
+              const saved = loadProduction(productionId);
+              if (saved) loadSaved(saved);
+            }}
+          />
+        </main>
+      ) : !studio && !production ? (
         /* 진입 랜딩 — 모션그래픽 / 애니메이션 스튜디오 선택 */
         <main style={{ flex: 1, minWidth: 0, display: "flex", minHeight: 0 }}>
           <StudioLanding onPick={setStudio} />
@@ -873,6 +1053,7 @@ export default function OberonPage() {
                 onReset={() => {
                   if (animatePoll.current) clearInterval(animatePoll.current);
                   animatePoll.current = null;
+                  if (animateJob) removeOberonBackgroundJob("animate", animateJob.id);
                   setAnimateJob(null);
                   setAnimateGenerating(false);
                 }}
@@ -960,6 +1141,118 @@ function VideoModeSwitch({
 
 function StepFrame({ children }: { children: React.ReactNode }) {
   return <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>{children}</div>;
+}
+
+function OberonBackgroundResume({
+  jobs,
+  onOpenProduction,
+}: {
+  jobs: OberonBackgroundJob[];
+  onOpenProduction: (productionId: string) => void;
+}) {
+  const job = jobs.find(isOberonBackgroundJobActive) ?? jobs[0];
+  if (!job) return null;
+  const active = isOberonBackgroundJobActive(job);
+  const failed = job.status === "failed" || job.status === "cancelled";
+  const tone = failed ? "var(--red-deep)" : active ? "var(--ob-accent)" : "var(--green-deep)";
+  const title = active ? "Oberon 만들기가 계속 진행 중입니다" : failed ? "Oberon 작업을 확인해야 합니다" : "Oberon 작업이 완료됐습니다";
+  const canOpen = !!job.productionId && !active;
+
+  return (
+    <section
+      className="titlebar-nodrag"
+      style={{
+        flex: 1,
+        minHeight: 0,
+        display: "grid",
+        placeItems: "center",
+        padding: 28,
+        background: "var(--ob-bg)",
+      }}
+    >
+      <div
+        style={{
+          width: "min(520px, 100%)",
+          border: "1px solid var(--ob-edge)",
+          borderRadius: 14,
+          background: "var(--ob-paper)",
+          boxShadow: "0 18px 46px rgba(38,35,30,0.10)",
+          padding: 24,
+        }}
+      >
+        <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+          <span
+            style={{
+              width: 68,
+              height: 68,
+              borderRadius: "50%",
+              display: "inline-grid",
+              placeItems: "center",
+              background: `conic-gradient(${tone} ${job.percent}%, var(--ob-edge) 0)`,
+              flexShrink: 0,
+            }}
+          >
+            <span
+              style={{
+                width: 50,
+                height: 50,
+                borderRadius: "50%",
+                display: "inline-grid",
+                placeItems: "center",
+                background: "var(--ob-paper)",
+                color: "var(--ob-ink)",
+                fontSize: 13,
+                fontWeight: 850,
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {job.percent}%
+            </span>
+          </span>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 18, fontWeight: 760, color: "var(--ob-ink)", letterSpacing: 0 }}>{title}</div>
+            <div style={{ marginTop: 5, color: "var(--ob-muted)", fontSize: 13, lineHeight: 1.45 }}>
+              {job.label} · {job.title}
+            </div>
+          </div>
+        </div>
+        <div style={{ marginTop: 20, height: 8, borderRadius: 999, background: "var(--ob-edge)", overflow: "hidden" }}>
+          <div
+            style={{
+              width: `${job.percent}%`,
+              height: "100%",
+              background: tone,
+              borderRadius: 999,
+              transition: "width 0.3s ease",
+            }}
+          />
+        </div>
+        <div style={{ marginTop: 14, color: "var(--ob-ink-soft)", fontSize: 12.5, lineHeight: 1.5 }}>
+          뒤로가기를 해도 작업은 앱 안에서 계속 이어집니다. 완료되면 이 화면이 저장된 프로젝트로 다시 연결합니다.
+        </div>
+        <div style={{ marginTop: 18, display: "flex", justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            disabled={!canOpen}
+            onClick={() => job.productionId && onOpenProduction(job.productionId)}
+            style={{
+              minHeight: 38,
+              padding: "0 15px",
+              borderRadius: 999,
+              border: `1px solid ${canOpen ? "var(--ob-ink)" : "var(--ob-edge)"}`,
+              background: canOpen ? "var(--ob-ink)" : "var(--ob-surface)",
+              color: canOpen ? "var(--ob-paper)" : "var(--ob-muted)",
+              fontSize: 12.5,
+              fontWeight: 750,
+              cursor: canOpen ? "pointer" : "default",
+            }}
+          >
+            프로젝트 열기
+          </button>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function ApproveBar({ label, onApprove, done }: { label: string; onApprove: () => void; done?: boolean }) {

@@ -9,22 +9,16 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { PawLogo } from "./PawLogo";
 import { AccountChip } from "./AccountChip";
+import { UpdateBanner } from "./UpdateBanner";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
 import {
-  IconHome,
-  IconChat,
   IconWand,
-  IconBuilding,
   IconUsers,
-  IconSparkles,
-  IconApps,
-  IconBolt,
   IconStore,
   IconFileUp,
-  IconKey,
   IconLayers,
-  IconNetwork,
+  IconImage,
   IconSearch,
   IconSettings,
   IconChevronDown,
@@ -50,7 +44,7 @@ interface Group {
 }
 
 export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: number }) {
-  const { locale } = useT();
+  const { t } = useT();
   const pathname = usePathname() ?? "/";
   const [collapsed, setCollapsed] = useState(false);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
@@ -78,68 +72,37 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
 
   const primary: Leaf[] = useMemo(
     () => [
-      { label: "Dashboard", href: "/dashboard", icon: IconHome },
-      { label: "Workspace", href: "/chat", icon: IconChat },
+      { label: t("nav.create_agent"), href: "/build", icon: IconWand },
     ],
-    [],
+    [t],
   );
 
   const groups: Group[] = useMemo(
     () => [
       {
-        id: "agent_forge",
-        label: "Agent Forge",
-        href: "/build",
-        icon: IconWand,
-        isActive: (p) => p.startsWith("/build") || p.startsWith("/library/agents"),
+        id: "my_agents",
+        label: t("nav.group.my_agents"),
+        href: "/library/agents?view=general",
+        icon: IconLayers,
+        isActive: (p) => p.startsWith("/library/agents") || p.startsWith("/cloud"),
         items: [
-          { label: "Build", href: "/build", icon: IconBuilding },
-          { label: "Agent", href: "/library/agents", icon: IconUsers },
-        ],
-      },
-      {
-        id: "studio",
-        label: "Studio",
-        href: "/apps",
-        icon: IconSparkles,
-        isActive: (p) =>
-          p.startsWith("/apps") ||
-          p.startsWith("/automation") ||
-          p.startsWith("/oberon") ||
-          p.startsWith("/startup-founder-studio"),
-        items: [
-          { label: "Apps", href: "/apps", icon: IconApps },
-          { label: "Automations", href: "/automation", icon: IconBolt },
+          { label: t("nav.local_agents"), href: "/library/agents?view=general", icon: IconUsers },
+          { label: t("nav.published_agents"), href: "/library/agents?view=published", icon: IconFileUp },
         ],
       },
       {
         id: "hub",
-        label: "Hub",
-        href: "/marketplace",
+        label: t("nav.group.hub"),
+        href: "/marketplace?category=agent",
         icon: IconStore,
-        isActive: (p) => p.startsWith("/marketplace") || p.startsWith("/cloud"),
+        isActive: (p) => p.startsWith("/marketplace"),
         items: [
-          { label: "Agent Hub", href: "/marketplace", icon: IconStore },
-          { label: "Publish", href: "/cloud", icon: IconFileUp },
-        ],
-      },
-      {
-        id: "environment",
-        label: "Environment",
-        href: "/library/env",
-        icon: IconKey,
-        isActive: (p) => p.startsWith("/library") && !p.startsWith("/library/agents"),
-        items: [
-          { label: "Environment Keys", href: "/library/env", icon: IconKey },
-          { label: "MCP Tools", href: "/library/mcps", icon: IconNetwork },
-          { label: "Apps Library", href: "/library/apps", icon: IconApps },
-          { label: "Tool Library", href: "/library/tools", icon: IconWand },
-          { label: "Surfaces", href: "/library/surfaces", icon: IconBuilding },
-          { label: "Assets", href: "/library/assets", icon: IconLayers },
+          { label: t("nav.hub_regular_agents"), href: "/marketplace?category=agent", icon: IconStore },
+          { label: t("nav.hub_visual_agents"), href: "/marketplace?category=visual", icon: IconImage },
         ],
       },
     ],
-    [],
+    [t],
   );
 
   // 활성 그룹은 기본으로 펼친다(사용자가 명시적으로 토글하면 그 값 우선).
@@ -150,12 +113,29 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
     setOpenGroups((p) => ({ ...p, [id]: !(p[id] ?? fallbackOpen) }));
   }
 
-  const isLeafActive = (href: string) =>
-    href === "/chat"
+  const hrefPath = (href: string) => href.split("?")[0] || href;
+  const currentSearch = typeof window === "undefined" ? "" : window.location.search;
+  const currentParams = new URLSearchParams(currentSearch);
+  const isLeafActive = (href: string) => {
+    const path = hrefPath(href);
+    if (href.includes("view=published")) {
+      return pathname.startsWith("/library/agents") && currentParams.get("view") === "published";
+    }
+    if (href.includes("view=general")) {
+      return pathname.startsWith("/library/agents") && currentParams.get("view") !== "published";
+    }
+    if (href.includes("category=visual")) {
+      return pathname.startsWith("/marketplace") && currentParams.get("category") === "visual";
+    }
+    if (href.includes("category=agent")) {
+      return pathname.startsWith("/marketplace") && currentParams.get("category") !== "visual";
+    }
+    return path === "/chat"
       ? pathname.startsWith("/chat") || pathname.startsWith("/project")
-      : href === "/dashboard"
+      : path === "/dashboard"
         ? pathname.startsWith("/dashboard")
-        : pathname === href || pathname.startsWith(href + "/");
+        : pathname === path || pathname.startsWith(path + "/");
+  };
 
   function submitSearch() {
     const q = query.trim();
@@ -173,7 +153,7 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
           {!collapsed && (
             <span className="sidenav-brand-text">
               <strong>Agentlas</strong>
-              <span>agent workspace</span>
+              <span>{t("nav.brand_sub")}</span>
             </span>
           )}
         </Link>
@@ -181,24 +161,8 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
           type="button"
           onClick={toggleCollapsed}
           className="sidenav-collapse"
-          aria-label={
-            collapsed
-              ? locale === "ko"
-                ? "사이드바 펼치기"
-                : "Expand sidebar"
-              : locale === "ko"
-                ? "사이드바 접기"
-                : "Collapse sidebar"
-          }
-          title={
-            collapsed
-              ? locale === "ko"
-                ? "펼치기"
-                : "Expand"
-              : locale === "ko"
-                ? "접기"
-                : "Collapse"
-          }
+          aria-label={collapsed ? t("nav.expand_sidebar") : t("nav.collapse_sidebar")}
+          title={collapsed ? t("nav.expand") : t("nav.collapse")}
         >
           <IconSidebar size={16} />
         </button>
@@ -216,8 +180,8 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={locale === "ko" ? "허브 검색" : "Search hub"}
-            aria-label={locale === "ko" ? "허브 검색" : "Search hub"}
+            placeholder={t("nav.search_placeholder")}
+            aria-label={t("nav.search_placeholder")}
           />
         </form>
       )}
@@ -231,7 +195,7 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
             const alertCount = it.href === "/dashboard" ? pendingConfirmations : 0;
             const alertLabel =
               alertCount > 0
-                ? `${it.label}, ${alertCount} ${locale === "ko" ? "개 승인 대기" : "pending approvals"}`
+                ? `${it.label}, ${t("nav.pending_approvals", { n: alertCount })}`
                 : it.label;
             return (
               <Link
@@ -312,14 +276,15 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
 
       {/* 하단: 설정 + 계정 */}
       <div className="sidenav-foot titlebar-nodrag">
+        <UpdateBanner collapsed={collapsed} />
         <Link
           href="/settings"
           className="sidenav-item"
           data-active={pathname === "/settings" ? "true" : "false"}
         >
           <span className="sidenav-ic"><IconSettings size={18} /></span>
-          {!collapsed && <span className="sidenav-label">Settings</span>}
-          {collapsed && <span className="sidenav-tooltip">Settings</span>}
+          {!collapsed && <span className="sidenav-label">{t("nav.settings")}</span>}
+          {collapsed && <span className="sidenav-tooltip">{t("nav.settings")}</span>}
         </Link>
         <div className="sidenav-account">
           <AccountChip />

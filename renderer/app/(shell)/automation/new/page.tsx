@@ -92,6 +92,7 @@ export default function NewAutomationPage() {
 
       <section
         className="titlebar-nodrag"
+        data-tour-id="automation.form"
         style={{ maxWidth: 640, margin: "32px auto", padding: "0 24px" }}
       >
         <Field label={t("auto.field.name")}>

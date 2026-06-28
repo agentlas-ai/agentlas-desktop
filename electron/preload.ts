@@ -18,6 +18,9 @@ const api: AgentlasIpc = {
     getLocale: () => ipcRenderer.invoke("app:getLocale"),
     getVersion: () => ipcRenderer.invoke("app:getVersion"),
   },
+  menu: {
+    setLocale: (locale: "ko" | "en") => ipcRenderer.invoke("menu:setLocale", locale),
+  },
   fs: {
     pickDirectory: () => ipcRenderer.invoke("fs:pickDirectory"),
     listDirectory: (absPath: string, showHidden?: boolean) =>

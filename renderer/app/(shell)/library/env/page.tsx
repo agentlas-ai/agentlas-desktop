@@ -177,6 +177,7 @@ export default function LibraryEnvPage() {
 
       <div
         className="glass-strong"
+        data-tour-id="env.security"
         style={{
           padding: "10px 14px",
           borderRadius: "var(--radius-md)",
@@ -195,7 +196,7 @@ export default function LibraryEnvPage() {
       </div>
 
       {/* 툴바 */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }} data-tour-id="env.toolbar">
         <div style={{ position: "relative", flex: "1 1 200px", minWidth: 160 }}>
           <IconSearch
             size={13}
@@ -313,6 +314,7 @@ export default function LibraryEnvPage() {
       {/* 섹션들 */}
       {sections.length === 0 ? (
         <div
+          data-tour-id="env.sections"
           style={{
             padding: 32,
             border: "1px dashed var(--paper-edge)",
@@ -325,7 +327,7 @@ export default function LibraryEnvPage() {
           {search.trim() || filter !== "all" ? t("env.no_results") : t("env.empty")}
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }} data-tour-id="env.sections">
           {sections.map((s) => {
             const isCollapsed = collapsed[s.id];
             const setCount = s.vars.filter((v) => v.hasValue).length;

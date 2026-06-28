@@ -8,6 +8,7 @@
 //      목적지(Cloud private-link vs Hub marketplace)를 보여주고 명시적 동의를 받는다.
 //      렌더러가 조용히 임의 경로 업로드를 트리거할 수 없다.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { BrowserWindow, dialog } from "electron";
 
@@ -18,7 +19,11 @@ export function resolveFolderArg(folder: unknown): string {
   if (typeof folder !== "string" || !folder.trim()) {
     throw new PathGuardError("폴더 경로가 비어 있습니다.");
   }
-  const abs = path.resolve(folder.trim());
+  const raw = folder.trim();
+  if (raw.startsWith("-")) {
+    throw new PathGuardError("폴더 경로가 옵션처럼 보입니다.");
+  }
+  const abs = path.resolve(raw);
   let real: string;
   try {
     real = fs.realpathSync.native(abs);
@@ -33,6 +38,22 @@ export function resolveFolderArg(folder: unknown): string {
   }
   if (!stat.isDirectory()) {
     throw new PathGuardError("폴더(디렉터리)가 아닙니다.");
+  }
+  const highRiskRoots = new Set([
+    path.parse(real).root,
+    os.homedir(),
+    path.dirname(os.homedir()),
+    "/Applications",
+    "/bin",
+    "/etc",
+    "/Library",
+    "/private",
+    "/System",
+    "/usr",
+    "/var",
+  ]);
+  if (highRiskRoots.has(real)) {
+    throw new PathGuardError("너무 넓은 시스템 폴더는 업로드할 수 없습니다. 에이전트 폴더를 선택해 주세요.");
   }
   return real;
 }

@@ -245,6 +245,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
     return (
       <aside
         className="glass-thin"
+        data-tour-id="workspace.sidebar"
         style={{
           width: COLLAPSED_WIDTH,
           borderRight: "1px solid var(--glass-border)",
@@ -371,6 +372,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   return (
     <aside
       className="glass-thin"
+      data-tour-id="workspace.sidebar"
       style={{
         width: EXPANDED_WIDTH,
         borderRight: "1px solid var(--glass-border)",

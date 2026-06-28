@@ -22,6 +22,9 @@ const {
   toggleAutomation,
 } = require("../dist/electron/store/automations.js");
 const { parseAutomations } = require("../dist/electron/automation-emitter.js");
+const mcpClient = require("../dist/electron/mcp/client.js");
+const { runDueAutomationsNow } = require("../dist/electron/automation-scheduler.js");
+const { getChat } = require("../dist/electron/store/chats.js");
 
 function assertLocalTime(iso, expected) {
   const d = new Date(iso);
@@ -36,6 +39,24 @@ function assertLocalTime(iso, expected) {
   let exitCode = 0;
   try {
     initStore();
+    getDb()
+      .prepare(
+        `INSERT INTO installed_agents
+          (id, slug, name, tagline, system_prompt, mcp_servers_json, preferred_backend, trust_grade, installed_at, tone)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "agent-1",
+        "qa-agent",
+        "QA Agent",
+        "Runs QA automation",
+        "# QA",
+        "[]",
+        "codex",
+        "A",
+        new Date("2026-06-01T00:00:00.000Z").toISOString(),
+        "blue",
+      );
 
     assert.equal(listAutomations().length, 0, "new store should start empty");
 
@@ -134,7 +155,101 @@ function assertLocalTime(iso, expected) {
     assert.equal(invalid.automations.length, 0);
     assert.equal(invalid.cleanedText, "일회성 답변");
 
+    const originalRunMcpInvocation = mcpClient.runMcpInvocation;
+    try {
+      const schedulerCalls = [];
+      mcpClient.runMcpInvocation = async (payload) => {
+        schedulerCalls.push(payload);
+        return { finalText: "done", stormbreakerContinueRequested: false };
+      };
+
+      const dueRun = createAutomation({
+        name: "Due Runner",
+        scheduleHuman: "daily-09:00",
+        targetType: "agent",
+        targetId: "agent-1",
+        promptTemplate: "Run due automation",
+      });
+      getDb()
+        .prepare("UPDATE automations SET next_run_at = ? WHERE id = ?")
+        .run(new Date("2026-06-01T00:00:00.000Z").toISOString(), dueRun.id);
+      await runDueAutomationsNow(new Date("2026-06-01T00:00:01.000Z"));
+      assert.equal(schedulerCalls.length, 1, "due scheduler should invoke once");
+      assert.equal(schedulerCalls[0].userPrompt, "Run due automation");
+      assert.equal(schedulerCalls[0].permissions, "write");
+      const automationChat = getChat(schedulerCalls[0].chatId);
+      assert.ok(automationChat, "scheduler should create a hidden automation chat");
+      assert.equal(automationChat.kind, "division");
+      const dueAfterRun = getAutomation(dueRun.id);
+      assert.ok(dueAfterRun.lastRunAt, "scheduler should mark lastRunAt");
+      assert.ok(new Date(dueAfterRun.nextRunAt).getTime() > new Date(dueAfterRun.lastRunAt).getTime());
+
+      schedulerCalls.length = 0;
+      let resolveLongRun;
+      mcpClient.runMcpInvocation = async (payload) => {
+        schedulerCalls.push(payload);
+        await new Promise((resolve) => {
+          resolveLongRun = resolve;
+        });
+        return { finalText: "slow done", stormbreakerContinueRequested: false };
+      };
+      const duplicateGuard = createAutomation({
+        name: "Duplicate Guard",
+        scheduleHuman: "daily-09:00",
+        targetType: "agent",
+        targetId: "agent-1",
+        promptTemplate: "Long running automation",
+      });
+      getDb()
+        .prepare("UPDATE automations SET next_run_at = ? WHERE id = ?")
+        .run(new Date("2026-06-01T00:00:00.000Z").toISOString(), duplicateGuard.id);
+      const firstTick = runDueAutomationsNow(new Date("2026-06-01T00:00:01.000Z"));
+      const secondTick = runDueAutomationsNow(new Date("2026-06-01T00:00:01.000Z"));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(schedulerCalls.length, 1, "running automation should not invoke twice");
+      resolveLongRun();
+      await Promise.all([firstTick, secondTick]);
+
+      schedulerCalls.length = 0;
+      mcpClient.runMcpInvocation = async () => {
+        schedulerCalls.push({ failed: true });
+        throw new Error("mock invocation failed");
+      };
+      const failing = createAutomation({
+        name: "Failure Advances",
+        scheduleHuman: "daily-09:00",
+        targetType: "agent",
+        targetId: "agent-1",
+        promptTemplate: "This run fails",
+      });
+      getDb()
+        .prepare("UPDATE automations SET next_run_at = ? WHERE id = ?")
+        .run(new Date("2026-06-01T00:00:00.000Z").toISOString(), failing.id);
+      await runDueAutomationsNow(new Date("2026-06-01T00:00:01.000Z"));
+      assert.equal(schedulerCalls.length, 1);
+      const failedAfterRun = getAutomation(failing.id);
+      assert.ok(failedAfterRun.lastRunAt, "failed scheduler run should still mark lastRunAt");
+      assert.ok(new Date(failedAfterRun.nextRunAt).getTime() > new Date(failedAfterRun.lastRunAt).getTime());
+
+      mcpClient.runMcpInvocation = async () => ({ finalText: "no continue", stormbreakerContinueRequested: false });
+      const storm = createAutomation({
+        name: "Storm Long Run",
+        scheduleHuman: "daily-09:00",
+        targetType: "agent",
+        targetId: "agent-1",
+        promptTemplate: "<<stormbreaker-long-run>>\nContinue a previous job",
+      });
+      getDb()
+        .prepare("UPDATE automations SET next_run_at = ? WHERE id = ?")
+        .run(new Date("2026-06-01T00:00:00.000Z").toISOString(), storm.id);
+      await runDueAutomationsNow(new Date("2026-06-01T00:00:01.000Z"));
+      assert.equal(getAutomation(storm.id).enabled, false, "long-run automation without continue should disable itself");
+    } finally {
+      mcpClient.runMcpInvocation = originalRunMcpInvocation;
+    }
+
     removeAutomation(created.id);
+    for (const item of listAutomations()) removeAutomation(item.id);
     assert.equal(listAutomations().length, 0);
 
     console.log("automation store smoke passed");

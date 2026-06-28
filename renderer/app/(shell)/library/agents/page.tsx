@@ -16,6 +16,7 @@ import type {
   Chat,
   InstalledAgent,
   InstalledFirm,
+  MarketplaceListing,
   ResolvedOrg,
   ResolvedNode,
   RuntimeSelection,
@@ -40,8 +41,10 @@ import {
   IconPlus,
   IconFileUp,
   IconPaperclip,
-  IconRoute
+  IconRoute,
 } from "@/components/Icon";
+
+type ManageView = "general" | "published";
 
 export default function LibraryAgentsPage() {
   return (
@@ -78,6 +81,11 @@ function LibraryAgentsView() {
   const targetAgentId = searchParams.get("agentId") ?? "";
   const targetNodeId = searchParams.get("nodeId") ?? "";
   const targetFirmId = searchParams.get("firmId") ?? "";
+  const manageView: ManageView = searchParams.get("view") === "published" ? "published" : "general";
+  const [publishedAgents, setPublishedAgents] = useState<MarketplaceListing[]>([]);
+  const [publishedLoading, setPublishedLoading] = useState(false);
+  const [publishedSignedIn, setPublishedSignedIn] = useState<boolean | null>(null);
+  const [publishedInstalling, setPublishedInstalling] = useState<string | null>(null);
 
   // 파일 핸들링 및 상태
   const [agentFiles, setAgentFiles] = useState<WorkspaceNode[]>([]);
@@ -185,6 +193,76 @@ function LibraryAgentsView() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const loadPublishedAgents = useCallback(async () => {
+    const api = ipc();
+    if (!api) return;
+    setPublishedLoading(true);
+    try {
+      const session = await api.auth.getSession();
+      setPublishedSignedIn(session.signedIn);
+      if (!session.signedIn) {
+        setPublishedAgents([]);
+        return;
+      }
+      setPublishedAgents(await api.marketplace.listMine());
+    } catch {
+      setPublishedAgents([]);
+    } finally {
+      setPublishedLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (manageView === "published") void loadPublishedAgents();
+  }, [loadPublishedAgents, manageView]);
+
+  async function signInForPublishedAgents() {
+    const api = ipc();
+    if (!api) return;
+    setPublishedLoading(true);
+    try {
+      const session = await api.auth.signInWithGoogle();
+      setPublishedSignedIn(session.signedIn);
+      if (session.signedIn) await loadPublishedAgents();
+    } finally {
+      setPublishedLoading(false);
+    }
+  }
+
+  async function installPublishedAgent(slug: string) {
+    const api = ipc();
+    if (!api) return;
+    setPublishedInstalling(slug);
+    try {
+      const installed = await api.team.installMine(slug);
+      await refresh();
+      const loc = pickLocalized(installed, locale);
+      setSelectedNode({
+        id: installed.id,
+        name: loc.name,
+        role: loc.tagline || installed.slug,
+        agentId: installed.id,
+      });
+      setActiveTab("identity");
+      showToast(locale === "ko" ? `${loc.name} 설치 완료` : `Installed ${loc.name}`);
+    } catch (err) {
+      showToast((locale === "ko" ? "퍼블리시 에이전트 설치 실패: " : "Failed to install published agent: ") + String(err));
+    } finally {
+      setPublishedInstalling(null);
+    }
+  }
+
+  function openInstalledAgent(agent: InstalledAgent) {
+    const loc = pickLocalized(agent, locale);
+    setSelectedNode({
+      id: agent.id,
+      name: loc.name,
+      role: loc.tagline || agent.slug,
+      agentId: agent.id,
+    });
+    setActiveTab("identity");
+  }
 
   useEffect(() => {
     if (!targetAgentId && !targetNodeId) return;
@@ -377,6 +455,7 @@ function LibraryAgentsView() {
   }
 
   const agentMap = new Map(agents.map((a) => [a.id, a]));
+  const installedAgentSlugs = new Set(agents.map((a) => a.slug));
   const selectedContext = useMemo(
     () => (selectedNode ? findSelectedNodeContext(selectedNode, firms, resolvedOrgs) : null),
     [selectedNode, firms, resolvedOrgs],
@@ -387,6 +466,7 @@ function LibraryAgentsView() {
       {/* 1. 왼쪽 접이식 사이드바 (조직도 구성) */}
       <aside
         className="glass-thin"
+        data-tour-id="agents.roster"
         style={{
           position: "relative",
           width: sidebarCollapsed ? 64 : orgWidth,
@@ -431,6 +511,7 @@ function LibraryAgentsView() {
                 }}
                 disabled={importBusy}
                 className="titlebar-nodrag"
+                data-tour-id="agents.import"
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
@@ -455,8 +536,26 @@ function LibraryAgentsView() {
           )}
         </header>
 
-        {/* 멀티/싱글 로스터 탭 (대시보드 조직도와 동일) */}
         {!sidebarCollapsed && (
+          <div className="library-roster-tabs">
+            {(["general", "published"] as const).map((view) => (
+              <button
+                key={view}
+                type="button"
+                onClick={() => navigate(`/library/agents?view=${view}`)}
+                className="library-roster-tab"
+                data-active={manageView === view ? "true" : "false"}
+              >
+                {view === "general"
+                  ? locale === "ko" ? "일반 에이전트" : "Regular agents"
+                  : locale === "ko" ? "퍼블리시한 에이전트" : "Published agents"}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* 멀티/싱글 로스터 탭 (일반 에이전트 안에서만 표시) */}
+        {manageView === "general" && !sidebarCollapsed && (
           <div className="library-roster-tabs">
             {(["multi", "single"] as const).map((tab) => (
               <button
@@ -476,7 +575,21 @@ function LibraryAgentsView() {
 
         {/* 조직도 목록 */}
         <div style={{ flex: 1, overflowY: "auto", padding: sidebarCollapsed ? "12px 6px" : 12 }}>
-          {/* Multi-Firm & Independent Agents Org Tree */}
+          {manageView === "published" ? (
+            <PublishedAgentsRoster
+              items={publishedAgents}
+              loading={publishedLoading}
+              signedIn={publishedSignedIn}
+              installedSlugs={installedAgentSlugs}
+              installedAgents={agents}
+              installingSlug={publishedInstalling}
+              collapsed={sidebarCollapsed}
+              locale={locale}
+              onSignIn={() => void signInForPublishedAgents()}
+              onInstall={(slug) => void installPublishedAgent(slug)}
+              onOpen={openInstalledAgent}
+            />
+          ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             {(sidebarCollapsed || rosterTab === "multi") && firms.map(firm => {
               const rOrg = resolvedOrgs[firm.id];
@@ -597,6 +710,7 @@ function LibraryAgentsView() {
             </div>
             )}
           </div>
+          )}
         </div>
 
         {/* 사이드바 접기 하단 컨트롤 */}
@@ -660,7 +774,7 @@ function LibraryAgentsView() {
 
         {selectedNode === null ? (
           /* A. 에이전트 미선택 시: 기존 회사 오버뷰 화면 */
-          <div style={{ flex: 1, overflowY: "auto" }}>
+          <div style={{ flex: 1, overflowY: "auto" }} data-tour-id="agents.detail">
             <header
               className="titlebar-drag"
               style={{
@@ -678,13 +792,16 @@ function LibraryAgentsView() {
               </span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 18, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {locale === "ko" ? "에이전트 라이브러리" : "My Agents Library"}
+                  {manageView === "published"
+                    ? locale === "ko" ? "퍼블리시한 에이전트 관리" : "Published Agents"
+                    : locale === "ko" ? "에이전트 라이브러리" : "My Agents Library"}
                 </h1>
               </div>
               <button
-                onClick={() => void importAgentFolder()}
-                disabled={importBusy}
+                onClick={() => manageView === "published" ? navigate("/cloud") : void importAgentFolder()}
+                disabled={manageView !== "published" && importBusy}
                 className="titlebar-nodrag"
+                data-tour-id="agents.import"
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
@@ -697,18 +814,36 @@ function LibraryAgentsView() {
                   color: "#fff",
                   fontSize: 12,
                   fontWeight: 750,
-                  cursor: importBusy ? "default" : "pointer",
-                  opacity: importBusy ? 0.72 : 1,
+                  cursor: manageView !== "published" && importBusy ? "default" : "pointer",
+                  opacity: manageView !== "published" && importBusy ? 0.72 : 1,
                 }}
               >
                 <IconFileUp size={14} />
-                {importBusy ? (locale === "ko" ? "가져오는 중..." : "Importing...") : locale === "ko" ? "에이전트 가져오기" : "Import agent"}
+                {manageView === "published"
+                  ? locale === "ko" ? "에이전트 업로드" : "Upload agent"
+                  : importBusy ? (locale === "ko" ? "가져오는 중..." : "Importing...") : locale === "ko" ? "에이전트 가져오기" : "Import agent"}
               </button>
             </header>
 
             <section style={{ maxWidth: 960, margin: "24px auto", padding: "0 24px" }}>
-              <p style={{ margin: "0 0 24px", fontSize: 14, color: "var(--ink-soft)", lineHeight: 1.6 }}>{locale === "ko" ? "로컬 환경에 설치된 모든 에이전트와 조직(Team) 목록입니다. 좌측 조직도에서 개별 에이전트를 클릭하여 세부 통제 센터를 열어보세요." : "List of all agents and organizations (Teams). Click an agent to open its detailed control center."}</p>
+              <p style={{ margin: "0 0 24px", fontSize: 14, color: "var(--ink-soft)", lineHeight: 1.6 }}>
+                {manageView === "published"
+                  ? locale === "ko"
+                    ? "왼쪽 목록에서 내가 agentlas.cloud에 퍼블리시한 에이전트를 확인하고, 로컬에 설치해 상세 관리로 이어갈 수 있습니다."
+                    : "Select an agent you published on agentlas.cloud, install it locally, then manage it in the detail view."
+                  : locale === "ko"
+                    ? "로컬 환경에 설치된 모든 에이전트와 조직(Team) 목록입니다. 좌측 조직도에서 개별 에이전트를 클릭하여 세부 통제 센터를 열어보세요."
+                    : "List of all agents and organizations (Teams). Click an agent to open its detailed control center."}
+              </p>
               
+              {manageView === "published" ? (
+                <div style={{ padding: 22, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)", color: "var(--ink-soft)", fontSize: 13, lineHeight: 1.6 }}>
+                  {locale === "ko"
+                    ? "퍼블리시 목록은 계정 기준입니다. 아직 목록이 비어 있다면 오른쪽 위 업로드 버튼으로 로컬 에이전트 폴더를 먼저 등록하세요."
+                    : "Published agents are account-based. If the list is empty, use Upload agent to register a local agent folder first."}
+                </div>
+              ) : (
+              <>
               {/* 회사 관련 채팅 리스트 */}
               <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "0 0 12px", display: "flex", alignItems: "center", gap: 6 }}>
                 <IconChat size={14} style={{ color: "var(--accent)" }} />
@@ -736,6 +871,8 @@ function LibraryAgentsView() {
                     </li>
                   ))}
                 </ul>
+              )}
+              </>
               )}
             </section>
           </div>
@@ -771,6 +908,150 @@ function LibraryAgentsView() {
           />
         )}
       </main>
+    </div>
+  );
+}
+
+function PublishedAgentsRoster({
+  items,
+  loading,
+  signedIn,
+  installedSlugs,
+  installedAgents,
+  installingSlug,
+  collapsed,
+  locale,
+  onSignIn,
+  onInstall,
+  onOpen,
+}: {
+  items: MarketplaceListing[];
+  loading: boolean;
+  signedIn: boolean | null;
+  installedSlugs: Set<string>;
+  installedAgents: InstalledAgent[];
+  installingSlug: string | null;
+  collapsed: boolean;
+  locale: Locale;
+  onSignIn: () => void;
+  onInstall: (slug: string) => void;
+  onOpen: (agent: InstalledAgent) => void;
+}) {
+  const ko = locale === "ko";
+
+  if (loading) {
+    return (
+      <div style={{ padding: collapsed ? "10px 0" : 14, fontSize: 12, color: "var(--muted-deep)", textAlign: collapsed ? "center" : "left" }}>
+        {ko ? "불러오는 중..." : "Loading..."}
+      </div>
+    );
+  }
+
+  if (signedIn === false) {
+    return (
+      <div style={{ padding: collapsed ? "8px 2px" : 12, display: "flex", flexDirection: "column", gap: 10 }}>
+        {!collapsed && (
+          <div style={{ fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.5 }}>
+            {ko ? "agentlas.cloud 계정으로 로그인하면 내가 퍼블리시한 에이전트를 볼 수 있습니다." : "Sign in to see the agents you published on agentlas.cloud."}
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={onSignIn}
+          style={{
+            minHeight: 34,
+            borderRadius: 8,
+            border: "1px solid var(--accent)",
+            background: "var(--accent)",
+            color: "#fff",
+            fontSize: 12,
+            fontWeight: 750,
+            cursor: "pointer",
+          }}
+        >
+          {collapsed ? "↗" : ko ? "로그인" : "Sign in"}
+        </button>
+      </div>
+    );
+  }
+
+  if (items.length === 0) {
+    return (
+      <div style={{ padding: collapsed ? "10px 0" : 14, fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.5, textAlign: collapsed ? "center" : "left" }}>
+        {collapsed ? "0" : ko ? "아직 퍼블리시한 에이전트가 없습니다." : "No published agents yet."}
+      </div>
+    );
+  }
+
+  if (collapsed) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
+        {items.map((item) => {
+          const installed = installedAgents.find((agent) => agent.slug === item.slug);
+          const loc = pickLocalized(item, locale);
+          return (
+            <MiniNodeAvatar
+              key={item.slug}
+              node={{ name: loc.name, role: loc.tagline }}
+              active={false}
+              onClick={() => installed ? onOpen(installed) : onInstall(item.slug)}
+            />
+          );
+        })}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted-deep)", textTransform: "uppercase", padding: "0 4px 2px" }}>
+        {ko ? `퍼블리시 ${items.length}개` : `${items.length} published`}
+      </div>
+      {items.map((item) => {
+        const loc = pickLocalized(item, locale);
+        const installed = installedAgents.find((agent) => agent.slug === item.slug);
+        const isInstalled = installedSlugs.has(item.slug);
+        const busy = installingSlug === item.slug;
+        return (
+          <div
+            key={item.slug}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "9px 10px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--paper-edge)",
+              background: "var(--paper)",
+            }}
+          >
+            <AgentAvatar name={loc.name} tone={item.trustGrade === "A" ? "green" : "blue"} size={28} />
+            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</span>
+              <span style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.tagline}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => installed ? onOpen(installed) : onInstall(item.slug)}
+              disabled={busy}
+              style={{
+                minHeight: 28,
+                padding: "0 9px",
+                borderRadius: 7,
+                border: `1px solid ${isInstalled ? "var(--paper-edge)" : "var(--accent)"}`,
+                background: isInstalled ? "var(--paper-2)" : "var(--accent)",
+                color: isInstalled ? "var(--ink)" : "#fff",
+                fontSize: 11.5,
+                fontWeight: 750,
+                cursor: busy ? "default" : "pointer",
+                flexShrink: 0,
+              }}
+            >
+              {busy ? (ko ? "설치 중" : "Installing") : isInstalled ? (ko ? "열기" : "Open") : (ko ? "설치" : "Install")}
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -2068,7 +2349,7 @@ function AgentDetailView({
   };
 
   return (
-    <div style={{ flex: 1, display: "flex", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
+    <div style={{ flex: 1, display: "flex", minWidth: 0, minHeight: 0, overflow: "hidden" }} data-tour-id="agents.detail">
       
       {/* 본 영역 (좌측 탭 컨텐츠) */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, height: "100%", overflow: "hidden" }}>
@@ -2958,13 +3239,92 @@ function AgentDetailView({
                       {locale === "ko" ? "진화 제안 승인 및 적용" : "Approve & apply evolution"}
                     </button>
                   </div>
-                )}
-                </>
-                )}
-              </div>
+	                )}
+	                </>
+	                )}
+	              </div>
 
-            </div>
-          )}
+	              <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
+	                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: skillDrawerOpen ? 12 : 0 }}>
+	                  <h4 style={{ margin: 0, fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
+	                    <IconLayers size={14} style={{ color: "var(--accent)" }} />
+	                    {locale === "ko" ? "스킬 주입" : "Skill injection"}
+	                  </h4>
+	                  <button
+	                    type="button"
+	                    onClick={() => onSetSkillDrawerOpen(!skillDrawerOpen)}
+	                    style={{
+	                      padding: "7px 12px",
+	                      background: skillDrawerOpen ? "var(--paper-2)" : "var(--accent)",
+	                      color: skillDrawerOpen ? "var(--ink-soft)" : "#fff",
+	                      border: skillDrawerOpen ? "1px solid var(--paper-edge)" : "1px solid var(--accent)",
+	                      borderRadius: 6,
+	                      fontSize: 12,
+	                      fontWeight: 650,
+	                      cursor: "pointer",
+	                    }}
+	                  >
+	                    {skillDrawerOpen
+	                      ? (locale === "ko" ? "닫기" : "Close")
+	                      : (locale === "ko" ? "스킬 고르기" : "Choose skill")}
+	                  </button>
+	                </div>
+	                {skillDrawerOpen && (
+	                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+	                    {availableSkills.length === 0 ? (
+	                      <div style={{ padding: 12, border: "1px dashed var(--paper-edge)", borderRadius: 8, color: "var(--muted-deep)", fontSize: 12 }}>
+	                        {locale === "ko" ? "주입 가능한 스킬이 없습니다." : "No skills available to inject."}
+	                      </div>
+	                    ) : (
+	                      availableSkills.map((skill) => (
+	                        <div key={skill.slug ?? skill.name} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)" }}>
+	                          <div style={{ flex: 1, minWidth: 0 }}>
+	                            <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--ink)" }}>{skill.name}</div>
+	                            <div style={{ fontSize: 11.5, color: "var(--ink-soft)", marginTop: 2, lineHeight: 1.45 }}>{skill.description}</div>
+	                          </div>
+	                          <button
+	                            type="button"
+	                            onClick={() => void handleInjectSkill(skill)}
+	                            style={{
+	                              padding: "6px 10px",
+	                              background: "var(--accent)",
+	                              color: "#fff",
+	                              border: "none",
+	                              borderRadius: 6,
+	                              fontSize: 11.5,
+	                              fontWeight: 650,
+	                              cursor: "pointer",
+	                              flexShrink: 0,
+	                            }}
+	                          >
+	                            {locale === "ko" ? "주입" : "Inject"}
+	                          </button>
+	                        </div>
+	                      ))
+	                    )}
+	                  </div>
+	                )}
+	              </div>
+
+	              <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
+	                <h4 style={{ margin: "0 0 12px 0", fontSize: 13.5, fontWeight: 700 }}>
+	                  {locale === "ko" ? "최근 활동" : "Recent activity"}
+	                </h4>
+	                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+	                  {observedTimelineEvents.slice(0, 6).map((evt) => (
+	                    <div key={evt.id} style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, padding: "9px 10px", background: "var(--paper-2)" }}>
+	                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+	                        <span style={{ fontSize: 10.5, color: "var(--muted-deep)", fontFamily: "var(--font-mono)" }}>{evt.timestamp}</span>
+	                        <strong style={{ fontSize: 12, color: "var(--ink)" }}>{evt.title}</strong>
+	                      </div>
+	                      <div style={{ fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.45 }}>{evt.desc}</div>
+	                    </div>
+	                  ))}
+	                </div>
+	              </div>
+
+	            </div>
+	          )}
 
         </div>
       </div>

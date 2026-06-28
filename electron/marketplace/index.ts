@@ -19,8 +19,10 @@ const DEFAULT_BASE_URL = "https://agentlas.cloud/api/mcp/v1";
 let _status: MarketplaceSourceStatus = {
   mode: "memory",
   baseUrl: null,
-  online: true,
-  usingFallback: false,
+  // 아직 실제 Hub 호출이 한 번도 성공하지 않았으므로 "미연결"로 시작한다.
+  // 초기값을 online:true로 두면 검증 전/오프라인에도 "허브 실시간 연결됨"으로 거짓 표시된다.
+  online: false,
+  usingFallback: true,
   lastError: null,
   lastCheckedAt: null,
 };
@@ -185,10 +187,11 @@ export function getSource(): MarketplaceSource {
     _source = new FallbackSource(mcp, memory, baseUrl);
   } else {
     setStatus({
+      // 명시적 in-memory 모드 = 실제 Hub 연결이 아니라 앱 내장 카탈로그.
       mode: "memory",
       baseUrl: null,
-      online: true,
-      usingFallback: false,
+      online: false,
+      usingFallback: true,
       lastError: null,
     });
     _source = memory;

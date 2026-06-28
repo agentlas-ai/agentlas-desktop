@@ -70,6 +70,40 @@ const dict = {
     "sidebar.backend_none": "LLM 미연결",
     "sidebar.byoc_free": "BYOC · 무료",
 
+    // 좌측 글로벌 메뉴 (SideNav) — 쉬운 한국어 우선
+    "nav.brand_sub": "에이전트 작업 공간",
+    "nav.search_placeholder": "허브 검색",
+    "nav.dashboard": "홈",
+    "nav.workspace": "작업 공간",
+    "nav.create_agent": "에이전트 만들기",
+    "nav.group.my_agents": "내가 만든 에이전트 관리",
+    "nav.local_agents": "일반 에이전트",
+    "nav.published_agents": "퍼블리시한 에이전트",
+    "nav.group.agent_forge": "에이전트",
+    "nav.build": "만들기",
+    "nav.agent": "내 에이전트",
+    "nav.group.studio": "스튜디오",
+    "nav.apps": "앱",
+    "nav.automations": "자동화",
+    "nav.group.hub": "마켓",
+    "nav.agent_hub": "에이전트 받기",
+    "nav.hub_regular_agents": "일반 에이전트",
+    "nav.hub_visual_agents": "비주얼 에이전트",
+    "nav.publish": "내 에이전트 올리기",
+    "nav.group.environment": "보관함",
+    "nav.env_keys": "연결 키",
+    "nav.mcp_tools": "외부 도구",
+    "nav.apps_library": "만든 앱",
+    "nav.tool_library": "만든 도구",
+    "nav.surfaces": "만든 화면",
+    "nav.assets": "만든 자료",
+    "nav.settings": "설정",
+    "nav.expand_sidebar": "메뉴 펼치기",
+    "nav.collapse_sidebar": "메뉴 접기",
+    "nav.expand": "펼치기",
+    "nav.collapse": "접기",
+    "nav.pending_approvals": "{n}개 승인 대기",
+
     // Chat row actions
     "chat.untitled": "새 채팅",
     "chat.action.rename": "이름 변경",
@@ -235,19 +269,19 @@ const dict = {
     "chatinput.storm_warning.title": "Stormbreaker 켜짐",
     "chatinput.storm_warning.body": "Stormbreaker는 토큰을 많이 사용할 수 있고, 작업이 며칠 걸릴 수 있어요. 처음에 지시를 명확하고 완전하게 적어 주세요.",
     "chatinput.storm_warning.ok": "확인",
-    "chatinput.rec.title": "추천",
+    "chatinput.rec.title": "에이전트 찾기",
     "chatinput.rec.loading": "알맞은 에이전트를 찾는 중…",
     "chatinput.rec.estimate_note": "예상 크레딧이에요 — 확정 견적이 아닙니다.",
     "chatinput.rec.credits_suffix": "크레딧",
     "chatinput.rec.mode.single": "추천 에이전트",
     "chatinput.rec.mode.network": "네트워크 TF · 에이전트 {n}명",
     "chatinput.rec.mode.pipeline": "파이프라인 · {n}단계",
-    "chatinput.rec.run_single": "이 에이전트로 보내기",
-    "chatinput.rec.run_network": "네트워크로 실행",
-    "chatinput.rec.run_pipeline": "파이프라인 실행",
-    "chatinput.rec.send_plain": "그냥 보내기",
-    "chatinput.rec.cancel": "취소",
-    "chatinput.rec.none": "마땅한 추천을 찾지 못했어요. 그냥 보낼까요?",
+    "chatinput.rec.run_single": "이 에이전트 사용하기",
+    "chatinput.rec.run_network": "선택한 에이전트 사용하기",
+    "chatinput.rec.run_pipeline": "이 파이프라인 사용하기",
+    "chatinput.rec.send_plain": "추천 없이 실행",
+    "chatinput.rec.cancel": "다른 에이전트 찾기",
+    "chatinput.rec.none": "마땅한 추천을 찾지 못했어요. 다른 표현으로 다시 찾거나 추천 없이 실행할 수 있어요.",
     "chatinput.rec.clarify": "먼저 확인이 필요해요",
     "chatinput.rec.source.local": "로컬",
     "chatinput.rec.source.cloud": "클라우드",
@@ -771,7 +805,7 @@ const dict = {
     "market.bundle.install": "팀 원클릭 설치",
 
     // Ask the user
-    "ask.submit": "보내기",
+    "ask.submit": "확인",
     "ask.other": "기타 (직접 입력)",
     "ask.other_placeholder": "직접 입력…",
 
@@ -850,6 +884,40 @@ const dict = {
     "sidebar.backend_label": "LLM",
     "sidebar.backend_none": "No LLM connected",
     "sidebar.byoc_free": "BYOC · Free",
+
+    // Left global nav (SideNav)
+    "nav.brand_sub": "agent workspace",
+    "nav.search_placeholder": "Search hub",
+    "nav.dashboard": "Dashboard",
+    "nav.workspace": "Workspace",
+    "nav.create_agent": "Create agent",
+    "nav.group.my_agents": "Manage my agents",
+    "nav.local_agents": "Regular agents",
+    "nav.published_agents": "Published agents",
+    "nav.group.agent_forge": "Agent Forge",
+    "nav.build": "Build",
+    "nav.agent": "Agent",
+    "nav.group.studio": "Studio",
+    "nav.apps": "Apps",
+    "nav.automations": "Automations",
+    "nav.group.hub": "Hub",
+    "nav.agent_hub": "Agent Hub",
+    "nav.hub_regular_agents": "Regular agents",
+    "nav.hub_visual_agents": "Visual agents",
+    "nav.publish": "Publish",
+    "nav.group.environment": "Environment",
+    "nav.env_keys": "Environment Keys",
+    "nav.mcp_tools": "MCP Tools",
+    "nav.apps_library": "Apps Library",
+    "nav.tool_library": "Tool Library",
+    "nav.surfaces": "Surfaces",
+    "nav.assets": "Assets",
+    "nav.settings": "Settings",
+    "nav.expand_sidebar": "Expand sidebar",
+    "nav.collapse_sidebar": "Collapse sidebar",
+    "nav.expand": "Expand",
+    "nav.collapse": "Collapse",
+    "nav.pending_approvals": "{n} pending approvals",
 
     // Chat row actions
     "chat.untitled": "New chat",
@@ -1016,19 +1084,19 @@ const dict = {
     "chatinput.storm_warning.title": "Stormbreaker is on",
     "chatinput.storm_warning.body": "Stormbreaker can use a lot of tokens and may run for days. Give clear, complete instructions up front.",
     "chatinput.storm_warning.ok": "Got it",
-    "chatinput.rec.title": "Recommendations",
+    "chatinput.rec.title": "Find agent",
     "chatinput.rec.loading": "Finding the right agents…",
     "chatinput.rec.estimate_note": "Estimated credits — not a final quote.",
     "chatinput.rec.credits_suffix": "credits",
     "chatinput.rec.mode.single": "Recommended agent",
     "chatinput.rec.mode.network": "Network TF · {n} agents",
     "chatinput.rec.mode.pipeline": "Pipeline · {n} stages",
-    "chatinput.rec.run_single": "Send to this agent",
-    "chatinput.rec.run_network": "Run on the network",
-    "chatinput.rec.run_pipeline": "Run pipeline",
-    "chatinput.rec.send_plain": "Send as-is",
-    "chatinput.rec.cancel": "Cancel",
-    "chatinput.rec.none": "No strong recommendation found. Send as-is?",
+    "chatinput.rec.run_single": "Use this agent",
+    "chatinput.rec.run_network": "Use selected agents",
+    "chatinput.rec.run_pipeline": "Use this pipeline",
+    "chatinput.rec.send_plain": "Run without recommendation",
+    "chatinput.rec.cancel": "Find another agent",
+    "chatinput.rec.none": "No strong recommendation found. Adjust the request or run without a recommendation.",
     "chatinput.rec.clarify": "A quick question first",
     "chatinput.rec.source.local": "Local",
     "chatinput.rec.source.cloud": "Cloud",
@@ -1552,7 +1620,7 @@ const dict = {
     "market.bundle.install": "Install team in one click",
 
     // Ask the user
-    "ask.submit": "Send",
+    "ask.submit": "Confirm",
     "ask.other": "Other (type your own)",
     "ask.other_placeholder": "Type your answer…",
 
@@ -1650,6 +1718,12 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       setReady(true);
     })();
   }, []);
+
+  // 표시 언어가 바뀔 때마다 네이티브 macOS 메뉴바도 같은 언어로 다시 그린다.
+  useEffect(() => {
+    const api = ipc();
+    void api?.menu?.setLocale?.(locale);
+  }, [locale]);
 
   const setPref = useCallback((p: LocalePref) => {
     try {

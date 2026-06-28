@@ -34,6 +34,8 @@ export interface StreamStep {
   delegateTo?: string[];
   /** 채팅 안에서 카드로 보여줄 활동 상태. */
   activity?: "start" | "handoff" | "tool" | "complete" | "status";
+  /** 이 단계가 화면에 들어온 시각. 긴 실행 중 마지막 활동 표시용. */
+  createdAt?: number;
 }
 
 /** 에이전트가 사용자에게 옵션을 묻는 질문. Markdown에서 fence를 파싱해 채워진다. */
@@ -101,6 +103,7 @@ export function ChatStream({
   agentTone,
   emptyDirectory,
   onOpenArtifact,
+  onOpenWorkflow,
   onAnswerQuestion,
 }: {
   messages: StreamMessage[];
@@ -108,6 +111,7 @@ export function ChatStream({
   agentTone: InstalledAgent["tone"];
   emptyDirectory?: ChatEmptyDirectory;
   onOpenArtifact?: (a: CodeArtifact) => void;
+  onOpenWorkflow?: () => void;
   /** 사용자가 질문에 답함 — 부모가 user 메시지로 전송 */
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
 }) {
@@ -152,6 +156,7 @@ export function ChatStream({
           agentName={agentName}
           agentTone={agentTone}
           onOpenArtifact={onOpenArtifact}
+          onOpenWorkflow={onOpenWorkflow}
           onAnswerQuestion={onAnswerQuestion}
         />
       ))}
@@ -164,12 +169,14 @@ function Bubble({
   agentName,
   agentTone,
   onOpenArtifact,
+  onOpenWorkflow,
   onAnswerQuestion,
 }: {
   message: StreamMessage;
   agentName: string;
   agentTone: InstalledAgent["tone"];
   onOpenArtifact?: (a: CodeArtifact) => void;
+  onOpenWorkflow?: () => void;
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
 }) {
   const { t } = useT();
@@ -253,6 +260,7 @@ function Bubble({
             startedAt={message.startedAt}
             done={!message.busy}
             tokens={message.tokens}
+            onOpenWorkflow={onOpenWorkflow}
           />
         )}
         {message.text && message.busy && (
@@ -379,8 +387,8 @@ function QuestionBlock({
       else next.add(label);
       setPicked(next);
     } else {
-      // 단일 선택 — 클릭 즉시 답변
-      onAnswer([label]);
+      // 단일 선택도 확인 버튼 전까지는 전송하지 않는다.
+      setPicked(new Set([label]));
     }
   }
 
@@ -392,67 +400,98 @@ function QuestionBlock({
   return (
     <div
       style={{
-        border: "1px solid var(--paper-edge)",
-        borderRadius: 0,
-        background: "#fff",
-        padding: 12,
+        border: "1px solid color-mix(in srgb, var(--accent) 20%, var(--paper-edge))",
+        borderRadius: 8,
+        background: "linear-gradient(180deg, #fff 0%, var(--fill-1) 100%)",
+        padding: 14,
         display: "flex",
         flexDirection: "column",
-        gap: 7,
-        boxShadow: "none",
+        gap: 9,
+        boxShadow: "0 8px 22px rgba(17, 24, 39, 0.06)",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 2 }}>
         <span
           style={{
             flexShrink: 0,
             fontSize: 11,
             fontFamily: "var(--font-mono)",
-            color: "var(--amber-deep)",
-            background: "var(--fill-1)",
+            color: "var(--accent)",
+            background: "color-mix(in srgb, var(--accent) 10%, #fff)",
             padding: "2px 7px",
             borderRadius: 999,
             fontWeight: 750,
+            border: "1px solid color-mix(in srgb, var(--accent) 16%, transparent)",
           }}
         >
           {question.header || "1/1"}
         </span>
-        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ink)" }}>
+        <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--ink)", lineHeight: 1.45 }}>
           {question.question}
         </span>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
         {question.options.map((opt, index) => {
           const isPicked = picked.has(opt.label);
           const isAnswered = answered && (question.answer ?? []).includes(opt.label);
           const dim = answered && !isAnswered;
+          const selected = isAnswered || isPicked;
           return (
             <button
               key={opt.label}
               onClick={() => toggle(opt.label)}
               disabled={answered || disabled}
+              aria-pressed={selected}
               style={{
-                display: "flex",
+                display: "grid",
+                gridTemplateColumns: "30px minmax(0, 1fr)",
                 alignItems: "flex-start",
                 gap: 10,
                 textAlign: "left",
-                padding: "9px 10px",
+                padding: "10px 11px",
                 borderRadius: 8,
-                border: isAnswered || isPicked
-                  ? "1px solid color-mix(in srgb, var(--accent) 34%, var(--paper-edge))"
+                border: selected
+                  ? "1px solid color-mix(in srgb, var(--accent) 56%, var(--paper-edge))"
                   : "1px solid transparent",
-                background: isAnswered || isPicked ? "var(--fill-1)" : "var(--paper-2)",
+                background: selected
+                  ? "linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, #fff), color-mix(in srgb, var(--amber-deep) 8%, #fff))"
+                  : "var(--paper-2)",
+                boxShadow: selected ? "0 8px 18px color-mix(in srgb, var(--accent) 14%, transparent)" : "none",
                 opacity: dim ? 0.45 : 1,
                 cursor: answered || disabled ? "default" : "pointer",
               }}
             >
+              <span
+                aria-hidden
+                style={{
+                  width: 30,
+                  height: 30,
+                  flexShrink: 0,
+                  borderRadius: 999,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  border: selected
+                    ? "1px solid var(--accent)"
+                    : "1px solid var(--paper-edge)",
+                  background: selected ? "var(--accent)" : "var(--paper)",
+                  color: selected ? "#fff" : "var(--ink-soft)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                  fontWeight: 800,
+                }}
+              >
+                {index + 1}
+              </span>
               <span style={{ flex: 1, minWidth: 0 }}>
                 <span
                   style={{
                     display: "block",
-                    fontSize: 12.5,
-                    fontWeight: 600,
+                    fontSize: 12.8,
+                    fontWeight: 720,
                     color: "var(--ink)",
+                    lineHeight: 1.35,
+                    overflowWrap: "anywhere",
                   }}
                 >
                   {opt.label}
@@ -465,30 +504,12 @@ function QuestionBlock({
                       color: "var(--muted-deep)",
                       lineHeight: 1.45,
                       marginTop: 2,
+                      overflowWrap: "anywhere",
                     }}
                   >
                     {opt.description}
                   </span>
                 )}
-              </span>
-              <span
-                aria-hidden
-                style={{
-                  minWidth: 22,
-                  height: 22,
-                  flexShrink: 0,
-                  borderRadius: 6,
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  border: "1px solid var(--paper-edge)",
-                  background: "var(--paper)",
-                  color: isAnswered || isPicked ? "var(--accent)" : "var(--muted-deep)",
-                  fontSize: 11,
-                  fontWeight: 700,
-                }}
-              >
-                {index + 1}
               </span>
             </button>
           );
@@ -553,7 +574,7 @@ function QuestionBlock({
           </div>
         </div>
       )}
-      {question.multiSelect && !answered && (
+      {!answered && (
         <button
           onClick={submit}
           disabled={picked.size === 0 || disabled}
@@ -650,12 +671,14 @@ function WorkingPanel({
   startedAt,
   done,
   tokens,
+  onOpenWorkflow,
 }: {
   steps: StreamStep[];
   fallback?: string;
   startedAt?: number;
   done: boolean;
   tokens?: number;
+  onOpenWorkflow?: () => void;
 }) {
   const { t, locale } = useT();
   const elapsed = useElapsedSeconds(startedAt, !done);
@@ -663,6 +686,16 @@ function WorkingPanel({
 
   const allRows: StreamStep[] =
     steps.length > 0 ? steps : fallback ? [{ id: "_f", kind: "thinking", text: fallback }] : [];
+  const latestStep = allRows[allRows.length - 1];
+  const latestStepAt = latestStep?.createdAt ?? (allRows.length > 0 ? startedAt : undefined);
+  const quietFor = useElapsedSeconds(latestStepAt, !done);
+  const liveState = buildLiveState({
+    done,
+    elapsed,
+    quietFor,
+    latestText: latestStep?.text,
+    locale,
+  });
   const toolSteps = allRows.filter((s) => s.tool);
   const thinkingSteps = allRows.filter((s) => !s.tool);
 
@@ -706,7 +739,7 @@ function WorkingPanel({
         <span style={statusBadge(done)}>
           {!done && <PulsingDot />}
           {done && <span aria-hidden style={doneDot} />}
-          <span>{done ? t("chatstream.done") : t("chatstream.running")}</span>
+          <span>{done ? t("chatstream.done") : liveState.label}</span>
         </span>
         <span style={{ color: "var(--muted-deep)" }}>
           {done
@@ -715,6 +748,16 @@ function WorkingPanel({
           {tokens != null && tokens > 0 && ` · ${formatTokens(tokens)} tokens`}
         </span>
       </div>
+
+      {!done && (
+        <div style={liveStateStyle(liveState.tone)} role="status">
+          <span aria-hidden style={liveStateDotStyle(liveState.tone)} />
+          <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+            <span style={{ fontWeight: 760, color: "var(--ink)" }}>{liveState.message}</span>
+            {liveState.detail && <span style={{ color: "var(--muted-deep)" }}>{liveState.detail}</span>}
+          </div>
+        </div>
+      )}
 
       {/* 작업 로그 — 접기/펴기 요약 + 목록 (Claude Code/FleetView 형식) */}
       {allRows.length > 0 && (
@@ -768,6 +811,7 @@ function WorkingPanel({
                   step={s}
                   current={!done && idx === allRows.length - 1}
                   done={done}
+                  onOpenWorkflow={onOpenWorkflow}
                 />
               ))}
             </div>
@@ -778,12 +822,22 @@ function WorkingPanel({
   );
 }
 
-function ActivityRow({ step, current, done }: { step: StreamStep; current?: boolean; done: boolean }) {
-  if (step.tool) return <ToolActivityCard step={step} current={current} done={done} />;
-  return <AgentActivityCard step={step} current={current} />;
+function ActivityRow({
+  step,
+  current,
+  done,
+  onOpenWorkflow,
+}: {
+  step: StreamStep;
+  current?: boolean;
+  done: boolean;
+  onOpenWorkflow?: () => void;
+}) {
+  if (step.tool) return <ToolActivityCard step={step} current={current} done={done} onOpenWorkflow={onOpenWorkflow} />;
+  return <AgentActivityCard step={step} current={current} onOpenWorkflow={onOpenWorkflow} />;
 }
 
-function AgentActivityCard({ step, current }: { step: StreamStep; current?: boolean }) {
+function AgentActivityCard({ step, current, onOpenWorkflow }: { step: StreamStep; current?: boolean; onOpenWorkflow?: () => void }) {
   const { locale } = useT();
   const kind = step.activity ?? activityKindFromStep(step);
   const title = agentActivityTitle(step, kind, locale);
@@ -793,7 +847,18 @@ function AgentActivityCard({ step, current }: { step: StreamStep; current?: bool
   return (
     <div
       className={`agentlas-activity-card${current && !isDone ? " is-running" : ""}${isDone ? " is-complete" : ""}`}
-      style={activityCardBase}
+      style={{ ...activityCardBase, cursor: onOpenWorkflow ? "pointer" : "default" }}
+      role={onOpenWorkflow ? "button" : undefined}
+      tabIndex={onOpenWorkflow ? 0 : undefined}
+      onClick={onOpenWorkflow}
+      onKeyDown={(event) => {
+        if (!onOpenWorkflow) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpenWorkflow();
+        }
+      }}
+      title={locale === "ko" ? "우측 실행 로그 열기" : "Open workflow logs"}
     >
       <div style={activityCardHeader}>
         <span aria-hidden style={activityStatusDot(kind, current)} />
@@ -812,7 +877,17 @@ function AgentActivityCard({ step, current }: { step: StreamStep; current?: bool
   );
 }
 
-function ToolActivityCard({ step, current, done }: { step: StreamStep; current?: boolean; done: boolean }) {
+function ToolActivityCard({
+  step,
+  current,
+  done,
+  onOpenWorkflow,
+}: {
+  step: StreamStep;
+  current?: boolean;
+  done: boolean;
+  onOpenWorkflow?: () => void;
+}) {
   const { locale } = useT();
   const [argsOpen, setArgsOpen] = useState(false);
   const [resultOpen, setResultOpen] = useState(false);
@@ -837,7 +912,14 @@ function ToolActivityCard({ step, current, done }: { step: StreamStep; current?:
       style={{
         ...activityCardBase,
         borderColor: isRunning ? tone.border : "var(--paper-edge)",
+        cursor: onOpenWorkflow ? "pointer" : "default",
       }}
+      onClick={(event) => {
+        const target = event.target as HTMLElement;
+        if (target.closest("pre")) return;
+        onOpenWorkflow?.();
+      }}
+      title={locale === "ko" ? "우측 실행 로그 열기" : "Open workflow logs"}
     >
       <button
         onClick={() => {
@@ -1066,6 +1148,81 @@ interface ToolViewModel {
 }
 
 type ActivityKind = NonNullable<StreamStep["activity"]>;
+type LiveStateTone = "active" | "quiet" | "stale";
+
+function buildLiveState({
+  done,
+  elapsed,
+  quietFor,
+  latestText,
+  locale,
+}: {
+  done: boolean;
+  elapsed: number;
+  quietFor: number;
+  latestText?: string;
+  locale: "ko" | "en";
+}): { label: string; message: string; detail: string; tone: LiveStateTone } {
+  if (done) {
+    return {
+      label: locale === "ko" ? "완료" : "Done",
+      message: locale === "ko" ? "완료됐습니다." : "Completed.",
+      detail: "",
+      tone: "active",
+    };
+  }
+  const current = compactStatusText(latestText);
+  if (quietFor >= 180) {
+    return {
+      label: locale === "ko" ? "멈춤 가능성" : "Possibly stuck",
+      message: locale === "ko" ? `마지막 업데이트 후 ${formatElapsed(quietFor, locale)} 동안 조용합니다.` : `No update for ${formatElapsed(quietFor, locale)}.`,
+      detail: current
+        ? locale === "ko"
+          ? `마지막 단계: ${current}`
+          : `Last step: ${current}`
+        : locale === "ko"
+          ? "아직 첫 진행 이벤트가 오지 않았습니다. 필요하면 중지 후 다시 보낼 수 있습니다."
+          : "No first progress event yet. You can stop and retry if needed.",
+      tone: "stale",
+    };
+  }
+  if (quietFor >= 45) {
+    return {
+      label: locale === "ko" ? "조용히 실행 중" : "Quietly running",
+      message: locale === "ko" ? `아직 실행 중입니다. 마지막 업데이트 ${formatElapsed(quietFor, locale)} 전.` : `Still running. Last update ${formatElapsed(quietFor, locale)} ago.`,
+      detail: current
+        ? locale === "ko"
+          ? `현재 보이는 단계: ${current}`
+          : `Visible step: ${current}`
+        : locale === "ko"
+          ? "첫 업데이트를 기다리는 중입니다."
+          : "Waiting for the first update.",
+      tone: "quiet",
+    };
+  }
+  return {
+    label: locale === "ko" ? "실행 중" : "Running",
+    message: locale === "ko" ? "실행이 살아 있습니다." : "Run is active.",
+    detail: current
+      ? locale === "ko"
+        ? `현재 단계: ${current}`
+        : `Current step: ${current}`
+      : elapsed >= 5
+        ? locale === "ko"
+          ? "첫 업데이트를 기다리는 중입니다."
+          : "Waiting for the first update."
+        : locale === "ko"
+          ? "막 시작했습니다."
+          : "Just started.",
+    tone: "active",
+  };
+}
+
+function compactStatusText(value?: string): string {
+  const trimmed = (value ?? "").replace(/\s+/g, " ").trim();
+  if (!trimmed) return "";
+  return trimmed.length > 96 ? `${trimmed.slice(0, 95)}…` : trimmed;
+}
 
 const doneDot: CSSProperties = {
   width: 7,
@@ -1082,6 +1239,44 @@ function statusBadge(done: boolean): CSSProperties {
     gap: 6,
     color: done ? "#15803d" : "var(--muted-deep)",
     fontWeight: 700,
+  };
+}
+
+function liveStateStyle(tone: LiveStateTone): CSSProperties {
+  const color = tone === "stale" ? "#b42318" : tone === "quiet" ? "var(--amber-deep)" : "var(--green-deep)";
+  const bg =
+    tone === "stale"
+      ? "color-mix(in srgb, #fef3f2 76%, var(--paper) 24%)"
+      : tone === "quiet"
+        ? "color-mix(in srgb, #fffbeb 72%, var(--paper) 28%)"
+        : "color-mix(in srgb, #f0fdf4 68%, var(--paper) 32%)";
+  const border = tone === "stale" ? "#fecdca" : tone === "quiet" ? "#fde68a" : "#bbf7d0";
+  return {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 8,
+    width: "min(386px, 100%)",
+    border: `1px solid ${border}`,
+    borderRadius: 8,
+    background: bg,
+    color,
+    padding: "8px 10px",
+    fontSize: 11.5,
+    lineHeight: 1.42,
+    overflow: "hidden",
+  };
+}
+
+function liveStateDotStyle(tone: LiveStateTone): CSSProperties {
+  const color = tone === "stale" ? "#d92d20" : tone === "quiet" ? "var(--amber-deep)" : "var(--green-deep)";
+  return {
+    width: 8,
+    height: 8,
+    marginTop: 4,
+    borderRadius: "50%",
+    flexShrink: 0,
+    background: color,
+    boxShadow: `0 0 0 4px color-mix(in srgb, ${color} 14%, transparent)`,
   };
 }
 

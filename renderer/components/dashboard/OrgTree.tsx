@@ -123,6 +123,49 @@ export function OrgTree() {
     }
   }
 
+  // 제거 — 개별 에이전트/회사, 그리고 최상단 그룹(local/cloud/hub) 전체.
+  async function removeAgent(id: string, name: string) {
+    const api = ipc();
+    if (!api || busy) return;
+    if (!window.confirm(ko ? `'${name}' 에이전트를 제거할까요?` : `Remove agent '${name}'?`)) return;
+    setBusy(true);
+    try {
+      await api.team.uninstall(id);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function removeFirm(id: string, name: string) {
+    const api = ipc();
+    if (!api || busy) return;
+    if (!window.confirm(ko ? `회사 '${name}'을(를) 제거할까요?` : `Remove company '${name}'?`)) return;
+    setBusy(true);
+    try {
+      await api.firms.uninstall(id);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function removeGroup(src: Source, label: string) {
+    const api = ipc();
+    if (!api || busy) return;
+    const gFirms = firms.filter((f) => firmSource(f) === src);
+    const gAgents = agents.filter((a) => agentSource(a) === src && !firmAgentIds.has(a.id));
+    const total = gFirms.length + gAgents.length;
+    if (total === 0) return;
+    if (!window.confirm(ko ? `'${label}' 그룹의 ${total}개 항목을 모두 제거할까요?` : `Remove all ${total} items in '${label}'?`)) return;
+    setBusy(true);
+    try {
+      for (const f of gFirms) await api.firms.uninstall(f.id);
+      for (const a of gAgents) await api.team.uninstall(a.id);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function toggleFirm(id: string) {
     setOpenFirms((p) => ({ ...p, [id]: !p[id] }));
     if (orgs[id] === undefined) {
@@ -174,16 +217,29 @@ export function OrgTree() {
           const open = openCats[cat.key];
           return (
             <div key={cat.key}>
-              <button
-                onClick={() => setOpenCats((p) => ({ ...p, [cat.key]: !p[cat.key] }))}
-                className="dashboard-org-row dashboard-org-category"
-              >
-                <Chevron open={open} />
-                <span className="dashboard-org-label">
-                  {cat.label}
-                </span>
-                <span className="dashboard-org-count">{count}</span>
-              </button>
+              <div className="dashboard-org-rowwrap">
+                <button
+                  onClick={() => setOpenCats((p) => ({ ...p, [cat.key]: !p[cat.key] }))}
+                  className="dashboard-org-row dashboard-org-category"
+                >
+                  <Chevron open={open} />
+                  <span className="dashboard-org-label">
+                    {cat.label}
+                  </span>
+                  <span className="dashboard-org-count">{count}</span>
+                </button>
+                {count > 0 && cat.key !== "hub" && (
+                  <button
+                    type="button"
+                    className="dashboard-org-remove dashboard-org-remove-group"
+                    title={ko ? "그룹 전체 제거" : "Remove all in group"}
+                    aria-label={ko ? "그룹 전체 제거" : "Remove all in group"}
+                    onClick={() => void removeGroup(cat.key, String(cat.label))}
+                  >
+                    {ko ? "전체 제거" : "Clear"}
+                  </button>
+                )}
+              </div>
 
               {open && cat.key === "hub" && (
                 <div className="dashboard-org-empty dashboard-org-nested">
@@ -194,30 +250,51 @@ export function OrgTree() {
               {open &&
                 cf.filter((f) => matches(dn(f))).map((f) => (
                   <div key={f.id}>
-                    <button
-                      onClick={() => void toggleFirm(f.id)}
-                      className="dashboard-org-row dashboard-org-firm"
-                    >
-                      <Chevron open={!!openFirms[f.id]} small />
-                      <IconBuilding size={13} />
-                      <span className="dashboard-org-label">
-                        {dn(f)}
-                      </span>
-                    </button>
+                    <div className="dashboard-org-rowwrap">
+                      <button
+                        onClick={() => void toggleFirm(f.id)}
+                        className="dashboard-org-row dashboard-org-firm"
+                      >
+                        <Chevron open={!!openFirms[f.id]} small />
+                        <IconBuilding size={13} />
+                        <span className="dashboard-org-label">
+                          {dn(f)}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className="dashboard-org-remove"
+                        title={ko ? "제거" : "Remove"}
+                        aria-label={ko ? "제거" : "Remove"}
+                        onClick={() => void removeFirm(f.id, dn(f))}
+                      >
+                        ×
+                      </button>
+                    </div>
                     {openFirms[f.id] && <FirmBody org={orgs[f.id]} firmId={f.id} ko={ko} />}
                   </div>
                 ))}
 
               {open &&
                 ca.filter((a) => matches(dn(a))).map((a) => (
-                  <button
-                    key={a.id}
-                    onClick={() => navigate(agentLibraryRoute({ agentId: a.id }))}
-                    className="dashboard-org-row dashboard-org-agent"
-                  >
-                    <Dot />
-                    <span className="dashboard-org-label">{dn(a)}</span>
-                  </button>
+                  <div key={a.id} className="dashboard-org-rowwrap">
+                    <button
+                      onClick={() => navigate(agentLibraryRoute({ agentId: a.id }))}
+                      className="dashboard-org-row dashboard-org-agent"
+                    >
+                      <Dot />
+                      <span className="dashboard-org-label">{dn(a)}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="dashboard-org-remove"
+                      title={ko ? "제거" : "Remove"}
+                      aria-label={ko ? "제거" : "Remove"}
+                      onClick={() => void removeAgent(a.id, dn(a))}
+                    >
+                      ×
+                    </button>
+                  </div>
                 ))}
 
               {open &&

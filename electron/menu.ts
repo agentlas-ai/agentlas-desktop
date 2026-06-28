@@ -70,8 +70,66 @@ function send(win: BrowserWindow | null, route: string) {
   win.webContents.send("menu:navigate", route);
 }
 
-export function buildAppMenu(getWindow: () => BrowserWindow | null): Menu {
+type MenuLocale = "ko" | "en";
+
+/** 네이티브 메뉴 라벨 — 쉬운 한국어 우선. role 항목(undo/copy/minimize 등)은
+ *  macOS가 OS 언어로 자동 번역하므로 여기서 다루지 않는다. */
+function menuLabels(locale: MenuLocale) {
+  const en = {
+    aboutApp: "About Agentlas",
+    checkUpdates: "Check for Updates…",
+    signIn: "Sign in to Agentlas…",
+    openWeb: "Open Agentlas Web",
+    preferences: "Preferences…",
+    appMenu: "Agentlas",
+    newChat: "New Chat",
+    marketplace: "Marketplace",
+    installedApps: "Installed Apps",
+    globalEnv: "Global Env",
+    plugins: "Plugins",
+    automations: "Automations",
+    buildOnWeb: "Build Agent on Web",
+    myAgentsWeb: "My agents on Web",
+    edit: "Edit",
+    view: "View",
+    toggleSidebar: "Toggle Sidebar",
+    window: "Window",
+    docs: "Agentlas Docs",
+    reportIssue: "Report an Issue",
+    shortcuts: "Keyboard Shortcuts",
+  };
+  const ko: typeof en = {
+    aboutApp: "Agentlas 정보",
+    checkUpdates: "업데이트 확인…",
+    signIn: "Agentlas 로그인…",
+    openWeb: "Agentlas 웹 열기",
+    preferences: "설정…",
+    appMenu: "Agentlas",
+    newChat: "새 채팅",
+    marketplace: "마켓",
+    installedApps: "설치된 앱",
+    globalEnv: "연결 키",
+    plugins: "외부 도구",
+    automations: "자동화",
+    buildOnWeb: "웹에서 에이전트 만들기",
+    myAgentsWeb: "웹에서 내 에이전트 보기",
+    edit: "편집",
+    view: "보기",
+    toggleSidebar: "사이드바 보이기/숨기기",
+    window: "창",
+    docs: "Agentlas 사용 설명서",
+    reportIssue: "문제 신고하기",
+    shortcuts: "키보드 단축키",
+  };
+  return locale === "ko" ? ko : en;
+}
+
+export function buildAppMenu(
+  getWindow: () => BrowserWindow | null,
+  locale: MenuLocale = "en",
+): Menu {
   const isMac = process.platform === "darwin";
+  const L = menuLabels(locale);
 
   const template: Electron.MenuItemConstructorOptions[] = [
     // macOS 첫 번째는 App 메뉴 (앱 이름 자동 표시)
@@ -80,14 +138,14 @@ export function buildAppMenu(getWindow: () => BrowserWindow | null): Menu {
           {
             label: app.getName(),
             submenu: [
-              { role: "about" as const, label: "About Agentlas" },
+              { role: "about" as const, label: L.aboutApp },
               {
-                label: "Check for Updates…",
+                label: L.checkUpdates,
                 click: () => void checkUpdatesInteractive(getWindow()),
               },
               { type: "separator" as const },
               {
-                label: "Sign in to Agentlas…",
+                label: L.signIn,
                 accelerator: "Shift+CmdOrCtrl+L",
                 click: () => {
                   // V1: OAuth device flow. V0: 웹 사인인 페이지 열고 사용자 안내.
@@ -95,12 +153,12 @@ export function buildAppMenu(getWindow: () => BrowserWindow | null): Menu {
                 },
               },
               {
-                label: "Open Agentlas Web",
+                label: L.openWeb,
                 click: () => void shell.openExternal(WEB_BASE),
               },
               { type: "separator" as const },
               {
-                label: "Preferences…",
+                label: L.preferences,
                 accelerator: "CmdOrCtrl+,",
                 click: () => send(getWindow(), "/settings"),
               },
@@ -119,51 +177,51 @@ export function buildAppMenu(getWindow: () => BrowserWindow | null): Menu {
 
     // Agentlas 도메인 메뉴 — 어디서나 접근 가능
     {
-      label: "Agentlas",
+      label: L.appMenu,
       submenu: [
         {
-          label: "New Chat",
+          label: L.newChat,
           accelerator: "CmdOrCtrl+N",
           click: () => send(getWindow(), "/"),
         },
         { type: "separator" },
         {
-          label: "Marketplace",
+          label: L.marketplace,
           accelerator: "CmdOrCtrl+Shift+M",
           click: () => send(getWindow(), "/marketplace"),
         },
         {
-          label: "Installed Apps",
+          label: L.installedApps,
           accelerator: "CmdOrCtrl+Shift+L",
           click: () => send(getWindow(), "/apps"),
         },
         {
-          label: "Global Env",
+          label: L.globalEnv,
           click: () => send(getWindow(), "/library/env"),
         },
         {
-          label: "Plugins",
+          label: L.plugins,
           click: () => send(getWindow(), "/library/mcps"),
         },
         {
-          label: "Automations",
+          label: L.automations,
           click: () => send(getWindow(), "/automation"),
         },
         { type: "separator" },
         {
-          label: "Sign in to Agentlas…",
+          label: L.signIn,
           click: () => void shell.openExternal(`${WEB_BASE}/account?signin=1&redirectTo=/workspace`),
         },
         {
-          label: "Open Agentlas Web",
+          label: L.openWeb,
           click: () => void shell.openExternal(WEB_BASE),
         },
         {
-          label: "Build Agent on Web",
+          label: L.buildOnWeb,
           click: () => void shell.openExternal(`${WEB_BASE}/build`),
         },
         {
-          label: "My agents on Web",
+          label: L.myAgentsWeb,
           click: () => void shell.openExternal(`${WEB_BASE}/cargo`),
         },
       ],
@@ -171,7 +229,7 @@ export function buildAppMenu(getWindow: () => BrowserWindow | null): Menu {
 
     // Edit
     {
-      label: "Edit",
+      label: L.edit,
       submenu: [
         { role: "undo" },
         { role: "redo" },
@@ -185,10 +243,10 @@ export function buildAppMenu(getWindow: () => BrowserWindow | null): Menu {
 
     // View
     {
-      label: "View",
+      label: L.view,
       submenu: [
         {
-          label: "Toggle Sidebar",
+          label: L.toggleSidebar,
           accelerator: "CmdOrCtrl+[",
           click: () => send(getWindow(), "__toggle_sidebar__"),
         },
@@ -207,7 +265,7 @@ export function buildAppMenu(getWindow: () => BrowserWindow | null): Menu {
 
     // Window
     {
-      label: "Window",
+      label: L.window,
       submenu: [
         { role: "minimize" },
         { role: "zoom" },
@@ -222,20 +280,20 @@ export function buildAppMenu(getWindow: () => BrowserWindow | null): Menu {
       role: "help",
       submenu: [
         {
-          label: "Check for Updates…",
+          label: L.checkUpdates,
           click: () => void checkUpdatesInteractive(getWindow()),
         },
         { type: "separator" },
         {
-          label: "Agentlas Docs",
+          label: L.docs,
           click: () => void shell.openExternal(`${WEB_BASE}/docs`),
         },
         {
-          label: "Report an Issue",
+          label: L.reportIssue,
           click: () => void shell.openExternal("mailto:appbridge@appbridge.co.kr?subject=Agentlas%20Desktop%20Issue"),
         },
         {
-          label: "Keyboard Shortcuts",
+          label: L.shortcuts,
           accelerator: "CmdOrCtrl+/",
           click: () => send(getWindow(), "__show_shortcuts__"),
         },

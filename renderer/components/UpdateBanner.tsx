@@ -1,4 +1,4 @@
-// 자동 업데이트 배너 — 실제 업데이트가 있을 때만 노출 (우측 상단).
+// 자동 업데이트 카드 — 실제 업데이트가 있을 때만 좌측 사이드바 하단에 노출.
 //   - available:   새 버전 발견 (자동 다운로드 시작) 알림
 //   - downloading: 진행률 표시
 //   - downloaded:  "재시작 업데이트" 강조 버튼 (dismissed 전까지)
@@ -12,7 +12,7 @@ import { ipc, updaterEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type { UpdaterState } from "@/lib/types";
 
-export function UpdateBanner() {
+export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
   const { t } = useT();
   const [state, setState] = useState<UpdaterState>({ status: "idle" });
   /** 사용자가 "나중에" 누른 버전. 그 버전에 대해서는 더 이상 안 띄움 */
@@ -68,84 +68,41 @@ export function UpdateBanner() {
 
   return (
     <div
-      // titlebar-drag 헤더 위에 떠 있으므로 no-drag로 클릭 영역을 확보한다.
-      // (없으면 macOS가 이 영역을 창 드래그로 처리해 버튼 클릭이 먹히지 않는다.)
-      className="titlebar-nodrag"
-      style={{
-        position: "absolute",
-        top: 12,
-        right: 16,
-        zIndex: 50,
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "8px 12px 8px 14px",
-        borderRadius: 999,
-        background: isDownloaded ? "var(--accent)" : "var(--paper)",
-        color: isDownloaded ? "white" : "var(--ink)",
-        border: isDownloaded ? "none" : "1px solid var(--paper-edge)",
-        boxShadow: isDownloaded
-          ? "0 8px 24px rgba(11,11,15,0.18)"
-          : "0 2px 8px rgba(11,11,15,0.06)",
-        fontSize: 12,
-        fontWeight: 500,
-      }}
+      className="sidenav-update-card titlebar-nodrag"
+      data-downloaded={isDownloaded ? "true" : "false"}
+      data-collapsed={collapsed ? "true" : "false"}
       role="status"
       aria-live="polite"
     >
       {isDownloaded ? (
         <>
-          <span
-            aria-hidden
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: "50%",
-              background: "white",
-              boxShadow: "0 0 0 4px rgba(255,255,255,0.25)",
-            }}
-          />
-          <span>
-            {t("update.ready", { version: state.version ?? "?" })}
+          <span className="sidenav-update-dot" aria-hidden />
+          <span className="sidenav-update-copy">
+            <strong>{collapsed ? `v${state.version ?? "?"}` : t("update.ready", { version: state.version ?? "?" })}</strong>
+            {!collapsed && <span>{t("update.restart_now")}</span>}
           </span>
           <button
             onClick={() => void install()}
-            style={{
-              padding: "4px 12px",
-              borderRadius: 999,
-              background: "white",
-              color: "var(--accent)",
-              fontWeight: 700,
-              fontSize: 12,
-              border: "none",
-              cursor: "pointer",
-              boxShadow: "0 1px 3px rgba(0,0,0,0.12)",
-            }}
+            className="sidenav-update-action"
+            title={t("update.restart_now")}
           >
-            {t("update.restart_now")}
+            {collapsed ? "↻" : t("update.restart_now")}
           </button>
-          <button
-            onClick={() => state.version && setDismissedVersion(state.version)}
-            aria-label={t("update.dismiss")}
-            title={t("update.dismiss")}
-            style={{
-              padding: "2px 8px",
-              borderRadius: 999,
-              background: "transparent",
-              color: "white",
-              fontSize: 11,
-              opacity: 0.85,
-              border: "none",
-              cursor: "pointer",
-            }}
-          >
-            ×
-          </button>
+          {!collapsed && (
+            <button
+              onClick={() => state.version && setDismissedVersion(state.version)}
+              aria-label={t("update.dismiss")}
+              title={t("update.dismiss")}
+              className="sidenav-update-dismiss"
+            >
+              ×
+            </button>
+          )}
         </>
       ) : (
         <>
           <Spinner />
-          <span style={{ color: "var(--ink-soft)" }}>
+          <span className="sidenav-update-copy">
             {state.status === "available"
               ? t("update.found", { version: state.version ?? "?" })
               : t("update.downloading", { pct: state.progress ?? 0 })}

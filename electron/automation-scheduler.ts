@@ -42,15 +42,19 @@ async function runOne(a: Automation): Promise<void> {
   }
 }
 
-function tick(): void {
+export async function runDueAutomationsNow(now: Date = new Date()): Promise<void> {
   let due: Automation[];
   try {
-    due = dueAutomations();
+    due = dueAutomations(now);
   } catch (err) {
     console.error("[automation] dueAutomations failed:", err);
     return;
   }
-  for (const a of due) void runOne(a);
+  await Promise.all(due.map((a) => runOne(a)));
+}
+
+function tick(): void {
+  void runDueAutomationsNow();
 }
 
 export function startAutomationScheduler(): void {

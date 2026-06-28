@@ -28,10 +28,12 @@ import {
   setRuntime as setBuildRuntime,
   startBuild,
   answerBuild,
+  rewindBuildInterview,
   cancelBuild,
   resetBuild,
   type Mode,
 } from "@/lib/build-session";
+import type { ChatQuestion } from "@/components/ChatStream";
 
 type StageState = "pending" | "active" | "done" | "error";
 
@@ -90,17 +92,38 @@ export default function BuildPage() {
   const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [reply, setReply] = useState("");
+  const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
-  const { request, mode, workspace, runtime, phase, log, reached, errored, result, registered, pendingQuestions, awaitingReply, turn } = s;
+  const { request, mode, workspace, runtime, phase, log, reached, errored, result, registered, pendingQuestions, awaitingReply, turn, canRewindInterview } = s;
+  const pendingQuestionKey = pendingQuestions.map((q) => q.id).join("|");
+  const selectedCount = pendingQuestions.reduce((sum, q) => sum + (selectedOptions[q.id]?.length ?? 0), 0);
+  const composedReply = useMemo(
+    () => composeInterviewReply(pendingQuestions, selectedOptions, reply),
+    [pendingQuestions, reply, selectedOptions],
+  );
 
   const sendReply = (text: string) => {
     const t = text.trim();
     if (!t) return;
     setReply("");
     void answerBuild(t);
+  };
+
+  const toggleInterviewOption = (questionId: string, label: string) => {
+    setSelectedOptions((prev) => {
+      const current = prev[questionId] ?? [];
+      const next = current.includes(label) ? current.filter((item) => item !== label) : [...current, label];
+      return { ...prev, [questionId]: next };
+    });
+  };
+
+  const confirmInterviewReply = () => {
+    if (!composedReply.trim()) return;
+    setSelectedOptions({});
+    sendReply(composedReply);
   };
 
   useEffect(() => {
@@ -110,6 +133,10 @@ export default function BuildPage() {
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [log]);
+  useEffect(() => {
+    setSelectedOptions({});
+    setReply("");
+  }, [pendingQuestionKey]);
 
   // 단계 상태 배열 도출.
   const stageStates: StageState[] = useMemo(() => {
@@ -202,7 +229,7 @@ export default function BuildPage() {
           )}
 
           <section className="build-grid">
-            <div className="build-card build-composer">
+            <div className="build-card build-composer" data-tour-id="build.request">
               <div className="build-card-head">
                 <span>{ko ? "요청" : "Request"}</span>
                 <span>{mode || "auto"}</span>
@@ -219,10 +246,17 @@ export default function BuildPage() {
                       disabled={busy}
                       className="build-mode-card titlebar-nodrag"
                       data-active={active ? "true" : "false"}
+                      data-mode={m.id}
+                      aria-pressed={active}
                     >
-                      <Icon size={16} />
+                      <span className="build-mode-icon" aria-hidden="true">
+                        <Icon size={16} />
+                      </span>
                       <strong>{ko ? m.label : m.labelEn}</strong>
-                      <span>{ko ? m.desc : m.descEn}</span>
+                      <span className="build-mode-desc">{ko ? m.desc : m.descEn}</span>
+                      <span className="build-mode-check" aria-hidden="true">
+                        <IconCheck size={12} />
+                      </span>
                     </button>
                   );
                 })}
@@ -275,7 +309,7 @@ export default function BuildPage() {
                 </select>
               </div>
 
-              <div className="build-action-row">
+              <div className="build-action-row" data-tour-id="build.interview">
                 <button onClick={pickWorkspace} disabled={busy} className="build-folder-button titlebar-nodrag">
                   <IconFolder size={15} />
                   <span>{workspace ? workspace.split("/").slice(-2).join("/") : ko ? "생성 폴더 선택" : "Choose output folder"}</span>
@@ -304,7 +338,7 @@ export default function BuildPage() {
             </div>
 
             {showPipeline && (
-              <div className="build-card build-pipeline-card">
+              <div className="build-card build-pipeline-card" data-tour-id="build.pipeline">
                 <div className="build-card-head">
                   <span>{ko ? "파이프라인" : "Pipeline"}</span>
                   {running ? (
@@ -332,30 +366,53 @@ export default function BuildPage() {
 
           {awaitingReply && (
             <section className="build-card build-interview-card">
-              <div className="build-card-head">
+              <div className="build-card-head build-interview-head">
                 <span>{ko ? `딥인터뷰 · ${turn}번째 답변` : `Deep interview · answer ${turn}`}</span>
-                <span className="build-live"><span className="forge-pulse" />{ko ? "답변 대기" : "awaiting"}</span>
+                <div className="build-interview-head-actions">
+                  {canRewindInterview && (
+                    <button
+                      type="button"
+                      onClick={rewindBuildInterview}
+                      className="build-interview-back titlebar-nodrag"
+                    >
+                      {ko ? `${Math.max(1, turn - 1)}번째 답변으로 돌아가기` : `Back to answer ${Math.max(1, turn - 1)}`}
+                    </button>
+                  )}
+                  <span className="build-live"><span className="forge-pulse" />{ko ? "답변 대기" : "awaiting"}</span>
+                </div>
               </div>
               <p className="build-interview-hint">
                 {ko
-                  ? "빌더가 요구사항을 캐묻는 중입니다. 위 로그의 질문을 보고 아래 옵션을 고르거나 직접 답해 주세요. 충분해지면 자동으로 빌드를 시작합니다."
-                  : "The builder is gathering requirements. Read its question in the log above, then pick an option or type your answer. It builds automatically once requirements are clear."}
+                  ? "옵션은 여러 개 선택할 수 있습니다. 선택을 마친 뒤 확인을 눌러야 다음 질문으로 넘어갑니다."
+                  : "You can select multiple options. Nothing is sent until you press Confirm."}
               </p>
               {pendingQuestions.map((q) => (
                 <div key={q.id} className="build-interview-q">
                   <div className="build-interview-qtext">{q.question}</div>
                   <div className="build-interview-opts">
-                    {q.options.map((o) => (
-                      <button
-                        key={o.label}
-                        type="button"
-                        className="build-interview-opt titlebar-nodrag"
-                        title={o.description}
-                        onClick={() => sendReply(o.label)}
-                      >
-                        {o.label}
-                      </button>
-                    ))}
+                    {q.options.map((o, index) => {
+                      const selected = (selectedOptions[q.id] ?? []).includes(o.label);
+                      return (
+                        <button
+                          key={o.label}
+                          type="button"
+                          className="build-interview-opt titlebar-nodrag"
+                          data-selected={selected ? "true" : "false"}
+                          aria-pressed={selected}
+                          title={o.description ? `${o.label}: ${o.description}` : o.label}
+                          onClick={() => toggleInterviewOption(q.id, o.label)}
+                        >
+                          <span className="build-interview-opt-index">{index + 1}</span>
+                          <span className="build-interview-opt-body">
+                            <strong>{o.label}</strong>
+                            {o.description && <span>{o.description}</span>}
+                          </span>
+                          <span className="build-interview-opt-check" aria-hidden="true">
+                            <IconCheck size={12} />
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               ))}
@@ -364,19 +421,19 @@ export default function BuildPage() {
                   value={reply}
                   onChange={(e) => setReply(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendReply(reply);
+                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) confirmInterviewReply();
                   }}
                   rows={2}
-                  placeholder={ko ? "직접 답변 입력… (⌘↵ 전송)" : "Type your answer… (⌘↵ to send)"}
+                  placeholder={ko ? "직접 답변을 추가로 입력… (⌘↵ 확인)" : "Add a note… (⌘↵ to confirm)"}
                   className="build-interview-input titlebar-nodrag"
                 />
                 <button
                   type="button"
-                  onClick={() => sendReply(reply)}
-                  disabled={!reply.trim()}
+                  onClick={confirmInterviewReply}
+                  disabled={!composedReply.trim()}
                   className="build-primary-button titlebar-nodrag"
                 >
-                  {ko ? "보내기" : "Send"}
+                  {ko ? (selectedCount > 0 ? `선택 ${selectedCount}개 확인` : "확인") : selectedCount > 0 ? `Confirm ${selectedCount}` : "Confirm"}
                 </button>
               </div>
             </section>
@@ -417,7 +474,7 @@ export default function BuildPage() {
           )}
 
           {log.length > 0 && (
-            <section className="build-card build-log-card">
+            <section className="build-card build-log-card" data-tour-id="build.log">
               <div className="build-card-head">
                 <span>Build Log</span>
                 {running ? <span className="build-live"><span className="forge-pulse" />live</span> : phase === "done" && <span>ready</span>}
@@ -437,6 +494,26 @@ export default function BuildPage() {
       </main>
     </div>
   );
+}
+
+function composeInterviewReply(
+  questions: ChatQuestion[],
+  selectedOptions: Record<string, string[]>,
+  manualReply: string,
+): string {
+  const chunks: string[] = [];
+  for (const q of questions) {
+    const selected = selectedOptions[q.id] ?? [];
+    if (!selected.length) continue;
+    chunks.push([
+      `질문: ${q.question}`,
+      "선택:",
+      ...selected.map((label, index) => `${index + 1}. ${label}`),
+    ].join("\n"));
+  }
+  const manual = manualReply.trim();
+  if (manual) chunks.push(manual);
+  return chunks.join("\n\n");
 }
 
 function StageRow({
@@ -582,4 +659,3 @@ function VerifyGate({ scan, ko }: { scan: unknown; ko: boolean }) {
     </div>
   );
 }
-

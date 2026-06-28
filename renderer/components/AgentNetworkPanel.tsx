@@ -127,6 +127,7 @@ export function AgentNetworkPanel({
   const feed = timeline.slice(-10);
   const activityRows = workflowActivityRows(timeline, locale);
   const webSeen = timeline.some((item) => /web|검색|search|탐색/i.test(item.text));
+  const waitingForFirstEvent = feed.length === 0 && (busy || anyActive);
   const activeParticipant =
     participants.find((node) => liveAgents[node.key]?.active) ??
     participants[0] ??
@@ -134,6 +135,7 @@ export function AgentNetworkPanel({
 
   return (
     <aside
+      data-tour-id="workspace.workflow"
       style={{
         width: 318,
         minWidth: 268,
@@ -239,9 +241,15 @@ export function AgentNetworkPanel({
 
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
           {feed.length === 0 ? (
-            <div style={idleCardStyle}>
-              <span aria-hidden style={idleDotStyle} />
-              <span>{t("network.idle")}</span>
+            <div style={idleCardStyle(waitingForFirstEvent)}>
+              <span aria-hidden style={idleDotStyle(waitingForFirstEvent)} />
+              <span>
+                {waitingForFirstEvent
+                  ? locale === "ko"
+                    ? "실행 시작됨 · 첫 업데이트 기다리는 중"
+                    : "Run started · waiting for the first update"
+                  : t("network.idle")}
+              </span>
             </div>
           ) : (
             feed.map((item, i) => (
@@ -519,26 +527,33 @@ const participantLineStyle: CSSProperties = {
   padding: "4px 8px",
 };
 
-const idleCardStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  borderRadius: 8,
-  border: "1px solid var(--paper-edge)",
-  background: "var(--paper)",
-  padding: "10px 12px",
-  color: "var(--muted-deep)",
-  fontSize: 11.5,
-  lineHeight: 1.5,
-};
+function idleCardStyle(active: boolean): CSSProperties {
+  return {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    borderRadius: 8,
+    border: active ? "1px solid #bbf7d0" : "1px solid var(--paper-edge)",
+    background: active ? "color-mix(in srgb, #f0fdf4 68%, var(--paper) 32%)" : "var(--paper)",
+    padding: "10px 12px",
+    color: active ? "var(--green-deep)" : "var(--muted-deep)",
+    fontSize: 11.5,
+    fontWeight: active ? 740 : 500,
+    lineHeight: 1.5,
+  };
+}
 
-const idleDotStyle: CSSProperties = {
-  width: 8,
-  height: 8,
-  borderRadius: "50%",
-  border: "1.5px solid var(--muted)",
-  flexShrink: 0,
-};
+function idleDotStyle(active: boolean): CSSProperties {
+  return {
+    width: 8,
+    height: 8,
+    borderRadius: "50%",
+    border: active ? "none" : "1.5px solid var(--muted)",
+    background: active ? "var(--green-deep)" : "transparent",
+    boxShadow: active ? "0 0 0 4px color-mix(in srgb, var(--green-deep) 14%, transparent)" : undefined,
+    flexShrink: 0,
+  };
+}
 
 const workflowCardStyle: CSSProperties = {
   position: "relative",

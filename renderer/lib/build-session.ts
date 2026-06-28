@@ -50,6 +50,16 @@ export interface BuildState {
   awaitingReply: boolean;
   /** 진행된 인터뷰 턴 수(헤더 표시용). */
   turn: number;
+  /** 이전 인터뷰 답변 상태로 되돌릴 수 있는지. */
+  canRewindInterview: boolean;
+}
+
+interface InterviewCheckpoint {
+  turn: number;
+  pendingQuestions: ChatQuestion[];
+  log: LogLine[];
+  reached: number;
+  history: ChatMsg[];
 }
 
 // 빌드 파이프라인 단계 수 — 화면의 STAGES 배열과 일치(모드분류·인터뷰/리서치·생성·검증·배포).
@@ -80,6 +90,7 @@ const state: BuildState = {
   pendingQuestions: [],
   awaitingReply: false,
   turn: 0,
+  canRewindInterview: false,
 };
 
 let snapshot: BuildState = { ...state };
@@ -91,8 +102,10 @@ let lastAcc = "";
 // 대화 history(이번 턴 입력 이전까지) + 이번 턴 사용자 입력.
 let history: ChatMsg[] = [];
 let currentInput = "";
+let interviewCheckpoints: InterviewCheckpoint[] = [];
 
 function commit() {
+  state.canRewindInterview = state.phase === "interview" && interviewCheckpoints.length > 1;
   snapshot = { ...state };
   for (const l of listeners) l();
 }
@@ -179,6 +192,36 @@ function stageFromEvent(ev: HephaestusBuildEvent, current: number): number {
 function detach() {
   unsub?.();
   unsub = null;
+}
+
+function cloneQuestions(questions: ChatQuestion[]): ChatQuestion[] {
+  return questions.map((q) => ({
+    ...q,
+    options: q.options.map((option) => ({ ...option })),
+    answer: q.answer ? [...q.answer] : undefined,
+  }));
+}
+
+function cloneLog(log: LogLine[]): LogLine[] {
+  return log.map((line) => ({ ...line }));
+}
+
+function cloneHistory(items: ChatMsg[]): ChatMsg[] {
+  return items.map((item) => ({ ...item }));
+}
+
+function rememberInterviewCheckpoint(): void {
+  const checkpoint: InterviewCheckpoint = {
+    turn: state.turn,
+    pendingQuestions: cloneQuestions(state.pendingQuestions),
+    log: cloneLog(state.log),
+    reached: state.reached,
+    history: cloneHistory(history),
+  };
+  interviewCheckpoints = [
+    ...interviewCheckpoints.filter((item) => item.turn !== checkpoint.turn),
+    checkpoint,
+  ];
 }
 
 /** 빌드 완료 시 결과 폴더를 라이브러리(조직도)에 자동 등록 — "조직도에 안 뜬다" 문제 해소. */
@@ -288,6 +331,7 @@ async function runTurn(input: string): Promise<void> {
           ? "딥인터뷰 — 아래에서 답해 주세요."
           : "어시스턴트가 추가 정보를 기다립니다 — 아래에 답해 주세요.",
       );
+      rememberInterviewCheckpoint();
       commit();
       return;
     } else if (e.kind === "error") {
@@ -305,6 +349,7 @@ export async function startBuild(): Promise<void> {
   if (!state.request.trim() || !state.workspace || state.phase === "running") return;
   // 새 빌드 — 대화/로그/단계 초기화.
   history = [];
+  interviewCheckpoints = [];
   state.turn = 0;
   state.reached = 0;
   state.result = null;
@@ -326,12 +371,35 @@ export async function answerBuild(reply: string): Promise<void> {
   await runTurn(reply.trim());
 }
 
+/** 현재 딥인터뷰 대기 상태에서 바로 이전 답변 단계로 되돌린다. */
+export function rewindBuildInterview(): void {
+  if (state.phase !== "interview" || interviewCheckpoints.length < 2) return;
+  detach();
+  const target = interviewCheckpoints[interviewCheckpoints.length - 2];
+  interviewCheckpoints = interviewCheckpoints.slice(0, -1);
+  history = cloneHistory(target.history);
+  currentInput = "";
+  state.phase = "interview";
+  state.errored = false;
+  state.awaitingReply = true;
+  state.pendingQuestions = cloneQuestions(target.pendingQuestions);
+  state.turn = target.turn;
+  state.reached = target.reached;
+  state.log = cloneLog(target.log);
+  state.result = null;
+  state.runId = null;
+  state.registered = false;
+  pushLog("log", `${target.turn}번째 답변으로 돌아갔습니다 — 다시 선택해 주세요.`);
+  commit();
+}
+
 export function cancelBuild() {
   if (state.runId) ipc()?.hephaestus.cancelBuild(state.runId);
   state.phase = "idle";
   state.reached = 0;
   state.awaitingReply = false;
   state.pendingQuestions = [];
+  interviewCheckpoints = [];
   detach();
   commit();
 }
@@ -347,6 +415,8 @@ export function resetBuild() {
   state.awaitingReply = false;
   state.pendingQuestions = [];
   state.turn = 0;
+  state.canRewindInterview = false;
   history = [];
+  interviewCheckpoints = [];
   commit();
 }
