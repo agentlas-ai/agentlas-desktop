@@ -175,8 +175,16 @@ function FirmDetailPage() {
     }
 
     let cancelled = false;
+    // 여러 런타임 규약의 프롬프트 파일명(claude-code: CLAUDE.md, codex: AGENTS.md 등).
+    const PROMPT_FILES = ["agent.md", "system-prompt.md", "claude.md", "agents.md", "gemini.md", "soul.md", "persona.md", "prompt.md"];
     async function loadAgentAssets() {
       if (!selectedNode?.agentId || !api) return;
+      // 메타데이터 systemPrompt를 먼저 기본값으로 — 파일 로드가 실패해도 "내용 없음"이 되지 않게.
+      const curAgent = agents.find((a) => a.id === selectedNode.agentId);
+      if (curAgent?.systemPrompt?.trim()) {
+        setPromptContent(curAgent.systemPrompt);
+        setPromptDraft(curAgent.systemPrompt);
+      }
       try {
         const listing = await api.agentFiles.list(selectedNode.agentId);
         if (cancelled) return;
@@ -192,24 +200,18 @@ function FirmDetailPage() {
           setMemoryParsed(parseMemoryMarkdown(m.content));
         }
 
-        // AGENT.md 또는 system-prompt.md 로드
-        const promptFile = fileEntries.find(
-          (e) => e.name.toLowerCase() === "agent.md" || e.name.toLowerCase() === "system-prompt.md"
-        );
+        // 프롬프트 파일이 있으면 그 원문으로 덮어쓴다(메타데이터보다 정확).
+        const promptFile = fileEntries.find((e) => PROMPT_FILES.includes(e.name.toLowerCase()));
         if (promptFile) {
           const p = await api.agentFiles.read(selectedNode.agentId, promptFile.path);
           if (cancelled) return;
-          setPromptContent(p.content);
-          setPromptDraft(p.content);
-        } else {
-          // Fallback to agent metadata
-          const curAgent = agents.find((a) => a.id === selectedNode.agentId);
-          if (curAgent) {
-            setPromptContent(curAgent.systemPrompt);
-            setPromptDraft(curAgent.systemPrompt);
+          if (p.content?.trim()) {
+            setPromptContent(p.content);
+            setPromptDraft(p.content);
           }
         }
       } catch (e) {
+        // 파일 로드 실패 시에도 위에서 설정한 메타데이터 프롬프트가 남아있다.
         console.error("에이전트 파일 로드 실패:", e);
       }
     }
@@ -264,9 +266,9 @@ function FirmDetailPage() {
       await api.agentFiles.write(selectedNode.agentId, path, promptDraft);
       setPromptContent(promptDraft);
       setEditingPrompt(false);
-      showToast("시스템 프롬프트가 성공적으로 반영되었습니다.");
+      showToast(locale === "ko" ? "시스템 프롬프트가 성공적으로 반영되었습니다." : "System prompt updated successfully.");
     } catch (e) {
-      showToast("프롬프트 저장 실패: " + String(e));
+      showToast((locale === "ko" ? "프롬프트 저장 실패: " : "Failed to save prompt: ") + String(e));
     } finally {
       setSavingFiles(false);
     }
@@ -285,9 +287,9 @@ function FirmDetailPage() {
       await api.agentFiles.write(selectedNode.agentId, path, newPromptContent);
       setPromptContent(newPromptContent);
       setPromptDraft(newPromptContent);
-      showToast("자가 진화 제안이 성공적으로 프롬프트에 병합되었습니다.");
+      showToast(locale === "ko" ? "자가 진화 제안이 성공적으로 프롬프트에 병합되었습니다." : "Self-evolution suggestion merged into the prompt successfully.");
     } catch (e) {
-      showToast("진화 적용 실패: " + String(e));
+      showToast((locale === "ko" ? "진화 적용 실패: " : "Failed to apply evolution: ") + String(e));
     } finally {
       setSavingFiles(false);
     }
@@ -309,7 +311,7 @@ function FirmDetailPage() {
       setMemoryContent(serialized);
       setMemoryParsed(updated);
     } catch (e) {
-      showToast("메모리 갱신 실패: " + String(e));
+      showToast((locale === "ko" ? "메모리 갱신 실패: " : "Failed to update memory: ") + String(e));
     } finally {
       setSavingFiles(false);
     }
@@ -379,7 +381,7 @@ function FirmDetailPage() {
                   cursor: resolving ? "default" : "pointer",
                 }}
               >
-                {resolving ? "..." : "분석"}
+                {resolving ? "..." : (locale === "ko" ? "분석" : "Analyze")}
               </button>
             </div>
           )}
@@ -737,7 +739,7 @@ function OrgChart({
   onSelect: (node: ResolvedNode) => void;
 }) {
   const ceo = firm.orgChart.find((n) => n.reportsTo === null);
-  if (!ceo) return <div style={{ fontSize: 12, color: "var(--muted)" }}>조직도가 비어있습니다.</div>;
+  if (!ceo) return <div style={{ fontSize: 12, color: "var(--muted)" }}>{locale === "ko" ? "조직도가 비어있습니다." : "The org chart is empty."}</div>;
 
   function children(parentSlug: string) {
     return firm.orgChart.filter((n) => n.reportsTo === parentSlug && isUserFacingAgentText(n.agentSlug, n.role));
@@ -820,7 +822,7 @@ function OrgChart({
 
   if (isUserFacingAgentText(ceo.agentSlug, ceo.role)) return renderNode(ceo, 0);
   const roots = children(ceo.agentSlug);
-  if (roots.length === 0) return <div style={{ fontSize: 12, color: "var(--muted)" }}>표시할 에이전트가 없습니다.</div>;
+  if (roots.length === 0) return <div style={{ fontSize: 12, color: "var(--muted)" }}>{locale === "ko" ? "표시할 에이전트가 없습니다." : "No agents to display."}</div>;
   return <>{roots.map((node) => renderNode(node, 0))}</>;
 }
 
@@ -897,6 +899,7 @@ function flowFromAoGraph(graph: unknown, node: ResolvedNode): { upstream: string
 }
 
 function InformationFlowMapper({ node }: { node: ResolvedNode }) {
+  const { locale } = useT();
   const [flow, setFlow] = useState<{ upstream: string; downstream: string }>(flowHeuristic(node.role));
   const [fromEngine, setFromEngine] = useState(false);
 
@@ -935,7 +938,7 @@ function InformationFlowMapper({ node }: { node: ResolvedNode }) {
       gap: 6
     }}>
       <div style={{ fontSize: 10, fontWeight: 700, color: "var(--muted-deep)", textTransform: "uppercase", letterSpacing: 0.6, fontFamily: "var(--font-mono)", display: "flex", alignItems: "center", gap: 8 }}>
-        <span>정보 흐름 연결 맵 (Information Flow Mapper)</span>
+        <span>{locale === "ko" ? "정보 흐름 연결 맵 (Information Flow Mapper)" : "Information Flow Mapper"}</span>
         {fromEngine && (
           <span style={{ fontSize: 8.5, padding: "1px 6px", borderRadius: 999, background: "rgba(12,166,120,0.12)", color: "var(--green-deep, #0ca678)", letterSpacing: 0.3 }}>
             AO GRAPH
@@ -1110,7 +1113,8 @@ function AgentDetailView({
   showToast,
   agentFiles
 }: AgentDetailViewProps) {
-  
+  const { locale } = useT();
+
   // 규칙 카드별 열림/닫힘(Accordion) 관리 상태
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
   
@@ -1119,8 +1123,8 @@ function AgentDetailView({
 
   // 메모리 진화 타임라인 관리 상태
   const [timelineEvents, setTimelineEvents] = useState<Array<{ id: string; timestamp: string; title: string; desc: string; type: "skill" | "sync" | "evolution" | "resolve" }>>([
-    { id: "timeline-1", timestamp: "2026-06-26 10:15", title: "에이전트 계약 마운트", desc: "Agentlas Desktop 시스템 로컬 프로파일 정상 적재 완료.", type: "sync" },
-    { id: "timeline-2", timestamp: "2026-06-26 11:20", title: "초기 지식베이스 로드", desc: "AGENT.md 및 memory.md 파일 연동 정상 바인딩.", type: "sync" }
+    { id: "timeline-1", timestamp: "2026-06-26 10:15", title: locale === "ko" ? "에이전트 계약 마운트" : "Agent contract mounted", desc: locale === "ko" ? "Agentlas Desktop 시스템 로컬 프로파일 정상 적재 완료." : "Agentlas Desktop local profile loaded successfully.", type: "sync" },
+    { id: "timeline-2", timestamp: "2026-06-26 11:20", title: locale === "ko" ? "초기 지식베이스 로드" : "Initial knowledge base loaded", desc: locale === "ko" ? "AGENT.md 및 memory.md 파일 연동 정상 바인딩." : "AGENT.md and memory.md files bound successfully.", type: "sync" }
   ]);
 
   // 카메라 연출 인터랙션 칩 상태
@@ -1142,12 +1146,12 @@ function AgentDetailView({
   // 프롬프트 복사 핸들러
   const handleCopyPrompt = () => {
     navigator.clipboard.writeText(promptContent);
-    showToast("시스템 프롬프트가 클립보드에 복사되었습니다.");
+    showToast(locale === "ko" ? "시스템 프롬프트가 클립보드에 복사되었습니다." : "System prompt copied to clipboard.");
   };
 
   // 프롬프트 기본값 재설정 핸들러
   const handleResetPrompt = async () => {
-    if (!confirm("시스템 프롬프트를 에이전트 기본 룰셋 정의서 프로필로 재설정하시겠습니까?")) return;
+    if (!confirm(locale === "ko" ? "시스템 프롬프트를 에이전트 기본 룰셋 정의서 프로필로 재설정하시겠습니까?" : "Reset the system prompt to the agent's default ruleset profile?")) return;
     const defaultVal = agent?.systemPrompt ?? "# Default Prompt\nNo default instruction available.";
     onPromptDraftChange(defaultVal);
     
@@ -1165,16 +1169,16 @@ function AgentDetailView({
           {
             id: `timeline-${Date.now()}`,
             timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-            title: "시스템 프롬프트 초기화",
-            desc: "프롬프트를 로컬 런타임 내의 에이전트 팩토리 기본 프로필로 강제 재설정했습니다.",
+            title: locale === "ko" ? "시스템 프롬프트 초기화" : "System prompt reset",
+            desc: locale === "ko" ? "프롬프트를 로컬 런타임 내의 에이전트 팩토리 기본 프로필로 강제 재설정했습니다." : "Forcibly reset the prompt to the agent factory default profile in the local runtime.",
             type: "evolution"
           },
           ...prev
         ]);
         
-        showToast("프롬프트가 초기 사양으로 재설정되었습니다.");
+        showToast(locale === "ko" ? "프롬프트가 초기 사양으로 재설정되었습니다." : "Prompt reset to default spec.");
       } catch (e: any) {
-        alert("재설정 반영 실패: " + String(e));
+        alert((locale === "ko" ? "재설정 반영 실패: " : "Failed to apply reset: ") + String(e));
       }
     }
   };
@@ -1201,14 +1205,14 @@ function AgentDetailView({
         {
           id: `timeline-${Date.now()}`,
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          title: targetItem.enabled !== false ? "규칙 활성화" : "규칙 비활성화",
-          desc: `'${targetItem.title}' 규칙의 런타임 적용 여부를 전환했습니다.`,
+          title: targetItem.enabled !== false ? (locale === "ko" ? "규칙 활성화" : "Rule activated") : (locale === "ko" ? "규칙 비활성화" : "Rule deactivated"),
+          desc: locale === "ko" ? `'${targetItem.title}' 규칙의 런타임 적용 여부를 전환했습니다.` : `Toggled runtime application of rule '${targetItem.title}'.`,
           type: "sync"
         },
         ...prev
       ]);
     }
-    showToast(`규칙 설정이 저장되었습니다.`);
+    showToast(locale === "ko" ? "규칙 설정이 저장되었습니다." : "Rule settings saved.");
   };
 
   // 개별 규칙 클라우드 허브(MongoDB) 공유/로컬전용 토글
@@ -1229,14 +1233,14 @@ function AgentDetailView({
         {
           id: `timeline-${Date.now()}`,
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          title: targetItem.synced ? "클라우드 허브 공유" : "로컬 전용 전환",
-          desc: `'${targetItem.title}' 규칙을 Hephaestus 클라우드 데이터베이스에 연동/격리했습니다.`,
+          title: targetItem.synced ? (locale === "ko" ? "클라우드 허브 공유" : "Shared to cloud hub") : (locale === "ko" ? "로컬 전용 전환" : "Switched to local-only"),
+          desc: locale === "ko" ? `'${targetItem.title}' 규칙을 Hephaestus 클라우드 데이터베이스에 연동/격리했습니다.` : `Synced/isolated rule '${targetItem.title}' with the Hephaestus cloud database.`,
           type: "sync"
         },
         ...prev
       ]);
     }
-    showToast(nextMemory[section].find(i => i.id === id)?.synced ? "Hephaestus 클라우드 허브에 연동 공유되었습니다." : "로컬 프로젝트 전용으로 변경되었습니다.");
+    showToast(nextMemory[section].find(i => i.id === id)?.synced ? (locale === "ko" ? "Hephaestus 클라우드 허브에 연동 공유되었습니다." : "Shared to the Hephaestus cloud hub.") : (locale === "ko" ? "로컬 프로젝트 전용으로 변경되었습니다." : "Changed to local-project only."));
   };
 
   // 미결 과제를 결정 사항(Decision)으로 반영 승격
@@ -1247,7 +1251,7 @@ function AgentDetailView({
     const newDecision = {
       id: target.id,
       title: target.title,
-      content: target.content + " (미결 항목 승격 반영)",
+      content: target.content + (locale === "ko" ? " (미결 항목 승격 반영)" : " (promoted from an open question)"),
       synced: globalHubSync,
       enabled: true
     };
@@ -1262,14 +1266,14 @@ function AgentDetailView({
       {
         id: `timeline-${Date.now()}`,
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        title: "의사결정 공식 반영",
-        desc: `미결 과제였던 '${target.title}'건을 검토 후 공식 Decisions 룰로 승격 처리했습니다.`,
+        title: locale === "ko" ? "의사결정 공식 반영" : "Decision formally recorded",
+        desc: locale === "ko" ? `미결 과제였던 '${target.title}'건을 검토 후 공식 Decisions 룰로 승격 처리했습니다.` : `Reviewed the open question '${target.title}' and promoted it to a formal Decisions rule.`,
         type: "resolve"
       },
       ...prev
     ]);
-    
-    showToast("미결 과제가 결정 사항(Decision)으로 승격 저장되었습니다.");
+
+    showToast(locale === "ko" ? "미결 과제가 결정 사항(Decision)으로 승격 저장되었습니다." : "Open question promoted and saved as a Decision.");
   };
 
   // 온톨로지 인박스 제안 승인 & 메모리 병합
@@ -1300,14 +1304,14 @@ function AgentDetailView({
       {
         id: `timeline-${Date.now()}`,
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        title: target.source === "cloud" ? "허브 공유 지식 풀(Pull)" : "로컬 자동 학습 병합",
-        desc: `'${target.title}' 온톨로지 추천 피드백을 에이전트 지식베이스에 승인 및 결합 완료했습니다.`,
+        title: target.source === "cloud" ? (locale === "ko" ? "허브 공유 지식 풀(Pull)" : "Pulled shared hub knowledge") : (locale === "ko" ? "로컬 자동 학습 병합" : "Merged local auto-learning"),
+        desc: locale === "ko" ? `'${target.title}' 온톨로지 추천 피드백을 에이전트 지식베이스에 승인 및 결합 완료했습니다.` : `Approved and merged the ontology recommendation '${target.title}' into the agent's knowledge base.`,
         type: "resolve"
       },
       ...prev
     ]);
-    
-    showToast(`학습 제안 '${target.title}'이 메모리에 병합 반영되었습니다.`);
+
+    showToast(locale === "ko" ? `학습 제안 '${target.title}'이 메모리에 병합 반영되었습니다.` : `Learning suggestion '${target.title}' merged into memory.`);
   };
 
   // 스킬 서랍에서 드래그 혹은 클릭하여 스킬 주입
@@ -1321,14 +1325,16 @@ function AgentDetailView({
         await api.agentFiles.write(node.agentId, `.agentlas/skills/${slug}/SKILL.md`, skillMd);
         fileWritten = true;
       } catch (e) {
-        showToast(`스킬 파일 작성 실패: ${String(e)}`);
+        showToast(locale === "ko" ? `스킬 파일 작성 실패: ${String(e)}` : `Failed to write skill file: ${String(e)}`);
       }
     }
 
     const newDecision = {
       id: `skill-${slug}`,
-      title: `${skill.name} 스킬 주입`,
-      content: `${skill.description} — .agentlas/skills/${slug}/SKILL.md 로 주입됨.`,
+      title: locale === "ko" ? `${skill.name} 스킬 주입` : `${skill.name} skill injection`,
+      content: locale === "ko"
+        ? `${skill.description} — .agentlas/skills/${slug}/SKILL.md 로 주입됨.`
+        : `${skill.description} — injected into .agentlas/skills/${slug}/SKILL.md.`,
       synced: globalHubSync,
       enabled: true,
     };
@@ -1343,16 +1349,22 @@ function AgentDetailView({
       {
         id: `timeline-${Date.now()}`,
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        title: "수동 스킬 주입 (Skill Injection)",
+        title: locale === "ko" ? "수동 스킬 주입 (Skill Injection)" : "Manual skill injection",
         desc: fileWritten
-          ? `'${skill.name}' 스킬을 .agentlas/skills/${slug}/SKILL.md 로 에이전트 폴더에 작성했습니다.`
-          : `'${skill.name}' 스킬을 메모리에 기록했습니다(파일 작성은 건너뜀).`,
+          ? (locale === "ko"
+              ? `'${skill.name}' 스킬을 .agentlas/skills/${slug}/SKILL.md 로 에이전트 폴더에 작성했습니다.`
+              : `Wrote skill '${skill.name}' to the agent folder at .agentlas/skills/${slug}/SKILL.md.`)
+          : (locale === "ko"
+              ? `'${skill.name}' 스킬을 메모리에 기록했습니다(파일 작성은 건너뜀).`
+              : `Recorded skill '${skill.name}' in memory (file write skipped).`),
         type: "skill",
       },
       ...prev,
     ]);
 
-    showToast(fileWritten ? `${skill.name} 스킬이 에이전트 폴더에 주입되었습니다.` : `${skill.name} 스킬을 메모리에 기록했습니다.`);
+    showToast(fileWritten
+      ? (locale === "ko" ? `${skill.name} 스킬이 에이전트 폴더에 주입되었습니다.` : `Skill '${skill.name}' injected into the agent folder.`)
+      : (locale === "ko" ? `${skill.name} 스킬을 메모리에 기록했습니다.` : `Skill '${skill.name}' recorded in memory.`));
   };
 
 
@@ -1392,17 +1404,14 @@ function AgentDetailView({
               cursor: "pointer"
             }}
           >
-            ← 회사 개요
+            {locale === "ko" ? "← 회사 개요" : "← Firm overview"}
           </button>
           <div style={{ height: 12, width: 1, background: "var(--paper-edge)" }} />
           <div style={{ fontSize: 13, color: "var(--muted-deep)" }}>
-            {agent?.kind === "team" ? "팀 에이전트" : "개별 전문가 에이전트"}
+            {agent?.kind === "team" ? (locale === "ko" ? "팀 에이전트" : "Team agent") : (locale === "ko" ? "개별 전문가 에이전트" : "Individual specialist agent")}
           </div>
         </div>
         
-        {/* 정보 흐름 연결 맵 (Information Flow Mapper) */}
-        <InformationFlowMapper node={node} />
-
         {/* 에이전트 마스터 헤더 */}
         <header style={{ padding: "20px 24px", background: "var(--paper)", borderBottom: "var(--hairline)", display: "flex", alignItems: "center", gap: 16 }}>
           <div
@@ -1432,7 +1441,7 @@ function AgentDetailView({
               </span>
             </div>
             <p style={{ margin: 0, fontSize: 12, color: "var(--muted-deep)" }}>
-              {agent?.tagline || `${node.name}의 규칙 지식베이스 및 계약 런타임`}
+              {agent?.tagline || (locale === "ko" ? `${node.name}의 규칙 지식베이스 및 계약 런타임` : `${node.name}'s rule knowledge base and contract runtime`)}
             </p>
           </div>
         </header>
@@ -1442,10 +1451,10 @@ function AgentDetailView({
           {(["identity", "memory", "playbook", "activity"] as const).map((tab) => {
             const active = activeTab === tab;
             const labels = {
-              identity: "정체성 & 페르소나",
-              memory: "큐레이팅된 메모리",
-              playbook: "플레이북 & 워크플로우",
-              activity: "활동 및 자체 진화"
+              identity: locale === "ko" ? "정체성 & 페르소나" : "Identity & Persona",
+              memory: locale === "ko" ? "큐레이팅된 메모리" : "Curated Memory",
+              playbook: locale === "ko" ? "플레이북 & 워크플로우" : "Playbook & Workflow",
+              activity: locale === "ko" ? "활동 및 자체 진화" : "Activity & Self-evolution"
             };
             return (
               <button
@@ -1476,7 +1485,7 @@ function AgentDetailView({
           {activeTab === "identity" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 840 }}>
               <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-                <h3 style={{ margin: "0 0 12px 0", fontSize: 14, fontWeight: 700 }}>시스템 프롬프트 (System Prompt)</h3>
+                <h3 style={{ margin: "0 0 12px 0", fontSize: 14, fontWeight: 700 }}>{locale === "ko" ? "시스템 프롬프트 (System Prompt)" : "System Prompt"}</h3>
                 
                 {editingPrompt ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -1501,14 +1510,14 @@ function AgentDetailView({
                         onClick={() => onSetEditingPrompt(false)}
                         style={{ padding: "6px 12px", border: "1px solid var(--paper-edge)", background: "none", borderRadius: 6, cursor: "pointer", fontSize: 12 }}
                       >
-                        취소
+                        {locale === "ko" ? "취소" : "Cancel"}
                       </button>
                       <button
                         onClick={() => void onSavePrompt()}
                         disabled={saving}
                         style={{ padding: "6px 12px", background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 600 }}
                       >
-                        {saving ? "저장 중..." : "반영하기"}
+                        {saving ? (locale === "ko" ? "저장 중..." : "Saving...") : (locale === "ko" ? "반영하기" : "Apply")}
                       </button>
                     </div>
                   </div>
@@ -1525,10 +1534,10 @@ function AgentDetailView({
                             <div style={{ background: "rgba(90, 86, 220, 0.03)", border: "1px solid rgba(90, 86, 220, 0.15)", borderRadius: 8, padding: 12 }}>
                               <h4 style={{ margin: "0 0 8px 0", fontSize: 12, fontWeight: 700, color: "var(--accent)", display: "flex", alignItems: "center", gap: 4 }}>
                                 <IconWand size={12} />
-                                지시사항 (Directives)
+                                {locale === "ko" ? "지시사항 (Directives)" : "Directives"}
                               </h4>
                               {promptSections.directives.length === 0 ? (
-                                <span style={{ fontSize: 11, color: "var(--muted)" }}>감지된 지시사항이 없습니다.</span>
+                                <span style={{ fontSize: 11, color: "var(--muted)" }}>{locale === "ko" ? "감지된 지시사항이 없습니다." : "No directives detected."}</span>
                               ) : (
                                 <ul style={{ paddingLeft: 14, margin: 0, fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.5 }}>
                                   {promptSections.directives.slice(0, 5).map((d, idx) => (
@@ -1542,10 +1551,10 @@ function AgentDetailView({
                             <div style={{ background: "rgba(194, 74, 40, 0.03)", border: "1px solid rgba(194, 74, 40, 0.15)", borderRadius: 8, padding: 12 }}>
                               <h4 style={{ margin: "0 0 8px 0", fontSize: 12, fontWeight: 700, color: "var(--peach-ink)", display: "flex", alignItems: "center", gap: 4 }}>
                                 <IconShield size={12} />
-                                제약조건 (Constraints)
+                                {locale === "ko" ? "제약조건 (Constraints)" : "Constraints"}
                               </h4>
                               {promptSections.constraints.length === 0 ? (
-                                <span style={{ fontSize: 11, color: "var(--muted)" }}>감지된 제약사항이 없습니다.</span>
+                                <span style={{ fontSize: 11, color: "var(--muted)" }}>{locale === "ko" ? "감지된 제약사항이 없습니다." : "No constraints detected."}</span>
                               ) : (
                                 <ul style={{ paddingLeft: 14, margin: 0, fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.5 }}>
                                   {promptSections.constraints.slice(0, 5).map((c, idx) => (
@@ -1559,10 +1568,10 @@ function AgentDetailView({
                             <div style={{ background: "rgba(86, 161, 74, 0.03)", border: "1px solid rgba(86, 161, 74, 0.15)", borderRadius: 8, padding: 12 }}>
                               <h4 style={{ margin: "0 0 8px 0", fontSize: 12, fontWeight: 700, color: "var(--green-deep)", display: "flex", alignItems: "center", gap: 4 }}>
                                 <IconLayers size={12} />
-                                입출력 형태 (Formats)
+                                {locale === "ko" ? "입출력 형태 (Formats)" : "I/O Formats"}
                               </h4>
                               {promptSections.formats.length === 0 ? (
-                                <span style={{ fontSize: 11, color: "var(--muted)" }}>감지된 규격정보가 없습니다.</span>
+                                <span style={{ fontSize: 11, color: "var(--muted)" }}>{locale === "ko" ? "감지된 규격정보가 없습니다." : "No format specs detected."}</span>
                               ) : (
                                 <ul style={{ paddingLeft: 14, margin: 0, fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.5 }}>
                                   {promptSections.formats.slice(0, 5).map((f, idx) => (
@@ -1577,7 +1586,7 @@ function AgentDetailView({
                           {/* 전체 원문 아코디언 */}
                           <details style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)" }}>
                             <summary style={{ padding: "8px 12px", fontSize: 12, fontWeight: 600, color: "var(--ink-soft)", cursor: "pointer", outline: "none" }}>
-                              시스템 프롬프트 전체 원문(Source) 보기
+                              {locale === "ko" ? "시스템 프롬프트 전체 원문(Source) 보기" : "View full system prompt source"}
                             </summary>
                             <pre
                               style={{
@@ -1594,7 +1603,7 @@ function AgentDetailView({
                                 overflowY: "auto"
                               }}
                             >
-                              {promptContent || "로드된 프롬프트 내용이 없습니다."}
+                              {promptContent || (locale === "ko" ? "로드된 프롬프트 내용이 없습니다." : "No prompt content loaded.")}
                             </pre>
                           </details>
 
@@ -1615,7 +1624,7 @@ function AgentDetailView({
                                   color: "var(--ink-soft)"
                                 }}
                               >
-                                프롬프트 복사
+                                {locale === "ko" ? "프롬프트 복사" : "Copy prompt"}
                               </button>
                               <button
                                 onClick={handleResetPrompt}
@@ -1631,7 +1640,7 @@ function AgentDetailView({
                                   color: "var(--peach-ink)"
                                 }}
                               >
-                                기본값 재설정
+                                {locale === "ko" ? "기본값 재설정" : "Reset to default"}
                               </button>
                             </div>
                             {agent?.localPath && (
@@ -1653,7 +1662,7 @@ function AgentDetailView({
                                 }}
                               >
                                 <IconEdit size={12} />
-                                프롬프트 편집
+                                {locale === "ko" ? "프롬프트 편집" : "Edit prompt"}
                               </button>
                             )}
                           </div>
@@ -1667,18 +1676,18 @@ function AgentDetailView({
               {/* 매핑 메타 데이터 */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-                  <h4 style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 700 }}>런타임 정보</h4>
+                  <h4 style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 700 }}>{locale === "ko" ? "런타임 정보" : "Runtime info"}</h4>
                   <div style={{ fontSize: 12.5, lineHeight: 1.8, color: "var(--ink-soft)" }}>
-                    <div><strong>에이전트 ID:</strong> {node.agentId ?? "미설치(임시)"}</div>
-                    <div><strong>권장 엔진:</strong> {agent?.preferredBackend ?? "자동 라우팅"}</div>
-                    <div><strong>신뢰 등급:</strong> Trust {agent?.trustGrade ?? "B"}</div>
+                    <div><strong>{locale === "ko" ? "에이전트 ID:" : "Agent ID:"}</strong> {node.agentId ?? (locale === "ko" ? "미설치(임시)" : "Not installed (temporary)")}</div>
+                    <div><strong>{locale === "ko" ? "권장 엔진:" : "Preferred engine:"}</strong> {agent?.preferredBackend ?? (locale === "ko" ? "자동 라우팅" : "Auto-routing")}</div>
+                    <div><strong>{locale === "ko" ? "신뢰 등급:" : "Trust grade:"}</strong> Trust {agent?.trustGrade ?? "B"}</div>
                     {agent && (() => {
                       const own = classifyAgent(agent);
                       return (
                         <div className="agent-ownership-row" data-owned={own.owned ? "true" : "false"}>
-                          <strong>소유:</strong>{" "}
+                          <strong>{locale === "ko" ? "소유:" : "Ownership:"}</strong>{" "}
                           <span className="agent-ownership-badge" data-owned={own.owned ? "true" : "false"}>
-                            {own.owned ? "내 직원 · owned" : "빌린 게스트 · borrowed"}
+                            {own.owned ? (locale === "ko" ? "내 직원 · owned" : "My staff · owned") : (locale === "ko" ? "빌린 게스트 · borrowed" : "Borrowed guest · borrowed")}
                           </span>
                           <div className="agent-ownership-path">{own.localPath ?? own.origin}</div>
                         </div>
@@ -1687,7 +1696,7 @@ function AgentDetailView({
                   </div>
                 </div>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-                  <h4 style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 700 }}>외부 도구연동</h4>
+                  <h4 style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 700 }}>{locale === "ko" ? "외부 도구연동" : "External tool integrations"}</h4>
                   <div style={{ fontSize: 12.5, color: "var(--ink-soft)" }}>
                     {agent?.mcpServers && agent.mcpServers.length > 0 ? (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
@@ -1696,7 +1705,7 @@ function AgentDetailView({
                         ))}
                       </div>
                     ) : (
-                      "연동된 외부 MCP 서버 도구가 없습니다."
+                      (locale === "ko" ? "연동된 외부 MCP 서버 도구가 없습니다." : "No external MCP server tools connected.")
                     )}
                   </div>
                 </div>
@@ -1714,7 +1723,7 @@ function AgentDetailView({
                   <div style={{ background: "var(--fill-1)", padding: "10px 16px", display: "flex", alignItems: "center", justifyItems: "space-between", borderBottom: "1px solid var(--accent-soft)" }}>
                     <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 700, color: "var(--accent)" }}>
                       <IconBrain size={14} />
-                      온톨로지 인박스 (학습된 정보 추천)
+                      {locale === "ko" ? "온톨로지 인박스 (학습된 정보 추천)" : "Ontology Inbox (learned suggestions)"}
                     </div>
                     <span style={{ fontSize: 10, background: "var(--accent)", color: "#fff", padding: "1px 6px", borderRadius: 999 }}>{ontologyInbox.length}</span>
                   </div>
@@ -1724,7 +1733,7 @@ function AgentDetailView({
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
                             <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 5px", borderRadius: 4, background: item.source === "cloud" ? "var(--accent)" : "var(--fill-2)", color: item.source === "cloud" ? "#fff" : "var(--accent)" }}>
-                              {item.source === "cloud" ? "허브 추천" : "로컬 학습"}
+                              {item.source === "cloud" ? (locale === "ko" ? "허브 추천" : "Hub suggestion") : (locale === "ko" ? "로컬 학습" : "Local learning")}
                             </span>
                             <strong style={{ fontSize: 12.5, color: "var(--ink)" }}>{item.title}</strong>
                           </div>
@@ -1744,32 +1753,13 @@ function AgentDetailView({
                             flexShrink: 0
                           }}
                         >
-                          반영 승인
+                          {locale === "ko" ? "반영 승인" : "Approve"}
                         </button>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
-
-              {/* 클라우드 동기화 제어 헤더 */}
-              <div style={{ display: "flex", alignItems: "center", justifyItems: "space-between", padding: "12px 16px", background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)" }}>
-                <div style={{ flex: 1 }}>
-                  <h4 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>Hephaestus 클라우드 동기화 설정</h4>
-                  <p style={{ margin: 0, fontSize: 11, color: "var(--muted-deep)" }}>규칙 생성 시 기본적으로 MongoDB Cloud Hub에 공유 저장합니다.</p>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 11, fontWeight: 600, color: globalHubSync ? "var(--green-deep)" : "var(--muted)" }}>
-                    {globalHubSync ? "글로벌 허브 연동 중" : "로컬 단독 오프라인"}
-                  </span>
-                  <input
-                    type="checkbox"
-                    checked={globalHubSync}
-                    onChange={(e) => setGlobalHubSync(e.target.checked)}
-                    style={{ width: 34, height: 18, cursor: "pointer" }}
-                  />
-                </div>
-              </div>
 
               {/* 메모리 리스트 */}
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -1778,11 +1768,11 @@ function AgentDetailView({
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
                     <IconCheck size={14} style={{ color: "var(--green-deep)" }} />
-                    결정 사항 (Decisions)
+                    {locale === "ko" ? "결정 사항 (Decisions)" : "Decisions"}
                   </h3>
                   {memoryParsed.decisions.length === 0 ? (
                     <div style={{ padding: 16, background: "var(--paper)", border: "1px dashed var(--paper-edge)", borderRadius: "var(--radius-md)", fontSize: 12, color: "var(--muted)" }}>
-                      기록된 결정 사항이 없습니다.
+                      {locale === "ko" ? "기록된 결정 사항이 없습니다." : "No decisions recorded."}
                     </div>
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1813,7 +1803,7 @@ function AgentDetailView({
                                 {/* 클라우드 허브 공유 상태 */}
                                 <button
                                   onClick={() => handleToggleSync("decisions", item.id)}
-                                  title={item.synced ? "허브 동기화됨" : "로컬 전용 규칙"}
+                                  title={item.synced ? (locale === "ko" ? "허브 동기화됨" : "Synced to hub") : (locale === "ko" ? "로컬 전용 규칙" : "Local-only rule")}
                                   style={{
                                     border: "none",
                                     background: "none",
@@ -1849,11 +1839,11 @@ function AgentDetailView({
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
                     <IconShield size={14} style={{ color: "var(--peach-ink)" }} />
-                    주의 사항 (Gotchas)
+                    {locale === "ko" ? "주의 사항 (Gotchas)" : "Gotchas"}
                   </h3>
                   {memoryParsed.gotchas.length === 0 ? (
                     <div style={{ padding: 16, background: "var(--paper)", border: "1px dashed var(--paper-edge)", borderRadius: "var(--radius-md)", fontSize: 12, color: "var(--muted)" }}>
-                      기록된 주의 사항이 없습니다.
+                      {locale === "ko" ? "기록된 주의 사항이 없습니다." : "No gotchas recorded."}
                     </div>
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1912,11 +1902,11 @@ function AgentDetailView({
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
                     <IconWand size={14} style={{ color: "var(--accent)" }} />
-                    미결 과제 (Open Questions)
+                    {locale === "ko" ? "미결 과제 (Open Questions)" : "Open Questions"}
                   </h3>
                   {memoryParsed.openQuestions.length === 0 ? (
                     <div style={{ padding: 16, background: "var(--paper)", border: "1px dashed var(--paper-edge)", borderRadius: "var(--radius-md)", fontSize: 12, color: "var(--muted)" }}>
-                      기록된 미결 과제가 없습니다.
+                      {locale === "ko" ? "기록된 미결 과제가 없습니다." : "No open questions recorded."}
                     </div>
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1952,7 +1942,7 @@ function AgentDetailView({
                               whiteSpace: "nowrap"
                             }}
                           >
-                            결정 승격
+                            {locale === "ko" ? "결정 승격" : "Promote to decision"}
                           </button>
                         </div>
                       ))}
@@ -1962,34 +1952,12 @@ function AgentDetailView({
 
               </div>
 
-              {/* 스킬 주입 활성화 버튼 */}
-              <div style={{ display: "flex", justifyContent: "flex-start", marginTop: 8 }}>
-                <button
-                  onClick={() => onSetSkillDrawerOpen(true)}
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 6,
-                    padding: "10px 16px",
-                    background: "var(--paper)",
-                    border: "1px solid var(--paper-edge)",
-                    borderRadius: "var(--radius-md)",
-                    fontSize: 12.5,
-                    fontWeight: 600,
-                    cursor: "pointer",
-                    boxShadow: "var(--shadow-1)"
-                  }}
-                >
-                  <IconPlus size={12} />
-                  수동 스킬 주입 (Manual Skill Evolution)
-                </button>
-              </div>
 
               {/* 메모리 진화 히스토리 타임라인 */}
               <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
                 <h4 style={{ margin: "0 0 16px 0", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 6, color: "var(--ink)" }}>
                   <IconRoute size={14} style={{ color: "var(--accent)" }} />
-                  메모리 진화 히스토리 (Evolution Timeline)
+                  {locale === "ko" ? "메모리 진화 히스토리 (Evolution Timeline)" : "Memory Evolution Timeline"}
                 </h4>
                 
                 <div style={{ display: "flex", flexDirection: "column", gap: 16, position: "relative", paddingLeft: 16, borderLeft: "2px solid var(--paper-edge)", marginLeft: 6 }}>
@@ -2042,7 +2010,7 @@ function AgentDetailView({
               
               {/* 수평 파이프라인 단계 표시기 */}
               <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, overflowX: "auto" }}>
-                <h4 style={{ margin: "0 0 16px 0", fontSize: 13.5, fontWeight: 700 }}>생성 프로세스 매핑 (Pipeline Stepper)</h4>
+                <h4 style={{ margin: "0 0 16px 0", fontSize: 13.5, fontWeight: 700 }}>{locale === "ko" ? "생성 프로세스 매핑 (Pipeline Stepper)" : "Production Pipeline Stepper"}</h4>
                 
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", position: "relative", minWidth: 600 }}>
                   
@@ -2091,7 +2059,7 @@ function AgentDetailView({
 
               {/* 영화적 연출 문법 및 대화형 시각화 */}
               <div>
-                <h4 style={{ margin: "0 0 12px 0", fontSize: 14, fontWeight: 700 }}>연출 및 문법 룰셋 (Playbook Spec)</h4>
+                <h4 style={{ margin: "0 0 12px 0", fontSize: 14, fontWeight: 700 }}>{locale === "ko" ? "연출 및 문법 룰셋 (Playbook Spec)" : "Direction & Grammar Ruleset (Playbook Spec)"}</h4>
                 
                 <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 16 }}>
                   
@@ -2100,24 +2068,44 @@ function AgentDetailView({
                     <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 14 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 13, fontWeight: 700 }}>
                         <IconRoute size={14} style={{ color: "var(--accent)" }} />
-                        카메라 지오메트리 룰
+                        {locale === "ko" ? "카메라 지오메트리 룰" : "Camera geometry rules"}
                       </div>
                       <p style={{ margin: 0, fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.6 }}>
-                        - **180° 법칙 준수**: Eyeline 매치 및 스크린 디렉션 축 고정.<br />
-                        - **30° 법칙 준수**: 인접 샷 연결 시 카메라 각도 30도 이상 이동.<br />
-                        - **매치 온 액션**: 프레임 연속 동작 연결을 위한 컷 아웃포인트 정밀 배치.
+                        {locale === "ko" ? (
+                          <>
+                            - **180° 법칙 준수**: Eyeline 매치 및 스크린 디렉션 축 고정.<br />
+                            - **30° 법칙 준수**: 인접 샷 연결 시 카메라 각도 30도 이상 이동.<br />
+                            - **매치 온 액션**: 프레임 연속 동작 연결을 위한 컷 아웃포인트 정밀 배치.
+                          </>
+                        ) : (
+                          <>
+                            - **Follow the 180° rule**: Maintain eyeline match and a fixed screen-direction axis.<br />
+                            - **Follow the 30° rule**: Move the camera angle by at least 30° between adjacent shots.<br />
+                            - **Match on action**: Precisely place cut points to connect continuous motion across frames.
+                          </>
+                        )}
                       </p>
                     </div>
                     
                     <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 14 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 13, fontWeight: 700 }}>
                         <IconLayers size={14} style={{ color: "var(--accent)" }} />
-                        비디오 컷 아웃 핸들
+                        {locale === "ko" ? "비디오 컷 아웃 핸들" : "Video cut-out handles"}
                       </div>
                       <p style={{ margin: 0, fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.6 }}>
-                        - **모션 버퍼**: 안전한 컷 크로싱용 0.3초간의 후반 정적 핸들 확보.<br />
-                        - **TTS 자막 매핑**: 립싱크 대사 처리 시 SRT 번인 오프셋 자동 큐잉.<br />
-                        - **샷 일관성**: 극 클로즈업 상태에서의 인스턴트 가파른 줌인 억제.
+                        {locale === "ko" ? (
+                          <>
+                            - **모션 버퍼**: 안전한 컷 크로싱용 0.3초간의 후반 정적 핸들 확보.<br />
+                            - **TTS 자막 매핑**: 립싱크 대사 처리 시 SRT 번인 오프셋 자동 큐잉.<br />
+                            - **샷 일관성**: 극 클로즈업 상태에서의 인스턴트 가파른 줌인 억제.
+                          </>
+                        ) : (
+                          <>
+                            - **Motion buffer**: Reserve a 0.3s static handle at the tail for safe cut crossings.<br />
+                            - **TTS subtitle mapping**: Auto-queue SRT burn-in offsets when handling lip-sync dialogue.<br />
+                            - **Shot consistency**: Suppress instant, abrupt zoom-ins during extreme close-ups.
+                          </>
+                        )}
                       </p>
                     </div>
                   </div>
@@ -2126,7 +2114,7 @@ function AgentDetailView({
                   <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
                     <div style={{ fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
                       <IconWand size={14} style={{ color: "var(--accent)" }} />
-                      카메라 무브먼트 궤적 뷰어 (Interactive)
+                      {locale === "ko" ? "카메라 무브먼트 궤적 뷰어 (Interactive)" : "Camera Movement Path Viewer (Interactive)"}
                     </div>
 
                     {/* 무브먼트 전환 칩 */}
@@ -2134,10 +2122,10 @@ function AgentDetailView({
                       {(["orbit", "crane", "dolly-zoom", "pan-tilt"] as const).map((tech) => {
                         const active = selectedTechnique === tech;
                         const labels = {
-                          orbit: "Orbit (공전)",
-                          crane: "Crane (상승/하강)",
+                          orbit: locale === "ko" ? "Orbit (공전)" : "Orbit",
+                          crane: locale === "ko" ? "Crane (상승/하강)" : "Crane (rise/fall)",
                           "dolly-zoom": "Dolly Zoom",
-                          "pan-tilt": "Pan/Tilt (패닝)"
+                          "pan-tilt": locale === "ko" ? "Pan/Tilt (패닝)" : "Pan/Tilt"
                         };
                         return (
                           <button
@@ -2213,7 +2201,7 @@ function AgentDetailView({
                               <div style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--accent)", marginLeft: -4 }} />
                             </div>
                           </div>
-                          <span style={{ fontSize: 10, color: "var(--muted-deep)" }}>대상을 중심으로 원형 공전하는 카메라 궤적</span>
+                          <span style={{ fontSize: 10, color: "var(--muted-deep)" }}>{locale === "ko" ? "대상을 중심으로 원형 공전하는 카메라 궤적" : "Circular camera path orbiting around the subject"}</span>
                         </div>
                       )}
 
@@ -2239,7 +2227,7 @@ function AgentDetailView({
                               <div style={{ width: 2, height: 35, background: "var(--accent-soft)" }} />
                             </div>
                           </div>
-                          <span style={{ fontSize: 10, color: "var(--muted-deep)" }}>수직 상승/하강 및 틸트 다운 연출</span>
+                          <span style={{ fontSize: 10, color: "var(--muted-deep)" }}>{locale === "ko" ? "수직 상승/하강 및 틸트 다운 연출" : "Vertical rise/fall with tilt-down framing"}</span>
                         </div>
                       )}
 
@@ -2259,7 +2247,7 @@ function AgentDetailView({
                             {/* 크기 고정 피사체 */}
                             <div style={{ width: 24, height: 24, borderRadius: 4, background: "linear-gradient(135deg, var(--accent), var(--blue))", zIndex: 2, boxShadow: "var(--glass-shadow-lift)" }} />
                           </div>
-                          <span style={{ fontSize: 10, color: "var(--muted-deep)" }}>피사체는 고정되고 배경의 심도 및 왜곡만 급변</span>
+                          <span style={{ fontSize: 10, color: "var(--muted-deep)" }}>{locale === "ko" ? "피사체는 고정되고 배경의 심도 및 왜곡만 급변" : "Subject stays fixed while background depth and distortion shift sharply"}</span>
                         </div>
                       )}
 
@@ -2281,7 +2269,7 @@ function AgentDetailView({
                               </svg>
                             </div>
                           </div>
-                          <span style={{ fontSize: 10, color: "var(--muted-deep)" }}>카메라 삼각대 축 기준 좌우 수평 회전(Pan)</span>
+                          <span style={{ fontSize: 10, color: "var(--muted-deep)" }}>{locale === "ko" ? "카메라 삼각대 축 기준 좌우 수평 회전(Pan)" : "Horizontal left-right rotation around the tripod axis (Pan)"}</span>
                         </div>
                       )}
 
@@ -2302,19 +2290,19 @@ function AgentDetailView({
               {/* 실 지표 — 이 에이전트의 실제 메모리·타임라인에서 도출 */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>활성 규칙 (Active rules)</div>
+                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>{locale === "ko" ? "활성 규칙 (Active rules)" : "Active rules"}</div>
                   <div style={{ fontSize: 24, fontWeight: 700, color: "var(--green-deep)" }}>
                     {[...memoryParsed.decisions, ...memoryParsed.gotchas].filter((r) => r.enabled !== false).length}
                   </div>
                 </div>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>메모리 항목 (Memory items)</div>
+                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>{locale === "ko" ? "메모리 항목 (Memory items)" : "Memory items"}</div>
                   <div style={{ fontSize: 24, fontWeight: 700, color: "var(--accent)" }}>
                     {memoryParsed.decisions.length + memoryParsed.gotchas.length + memoryParsed.openQuestions.length}
                   </div>
                 </div>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>진화·활동 이력 (Events)</div>
+                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>{locale === "ko" ? "진화·활동 이력 (Events)" : "Evolution & activity log (Events)"}</div>
                   <div style={{ fontSize: 24, fontWeight: 700, color: "var(--peach-ink)" }}>{timelineEvents.length}</div>
                 </div>
               </div>
@@ -2324,17 +2312,18 @@ function AgentDetailView({
                 <div style={{ display: "flex", justifyItems: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
                   <h4 style={{ margin: 0, fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
                     <IconWand size={14} style={{ color: "var(--accent)" }} />
-                    자가 프롬프트 진화 제안 (Agent Evolution Proposal)
+                    {locale === "ko" ? "자가 프롬프트 진화 제안 (Agent Evolution Proposal)" : "Agent Evolution Proposal"}
                   </h4>
                   <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 4, background: "rgba(245,201,122,0.16)", color: "var(--amber-deep)", fontWeight: 700 }}>
-                    {evolutionApproved ? "적용 완료" : hasPendingEvolution ? "업그레이드 대기" : "최신 상태"}
+                    {evolutionApproved ? (locale === "ko" ? "적용 완료" : "Applied") : hasPendingEvolution ? (locale === "ko" ? "업그레이드 대기" : "Upgrade pending") : (locale === "ko" ? "최신 상태" : "Up to date")}
                   </span>
                 </div>
 
                 {!hasPendingEvolution && !evolutionApproved && (
                   <div style={{ fontSize: 12, color: "var(--muted-deep)", padding: "12px 4px", lineHeight: 1.6 }}>
-                    메모리의 활성 규칙이 모두 시스템 프롬프트에 반영되어 있습니다. 메모리 탭에서 새 결정·주의 규칙이
-                    학습되면 여기에 프롬프트 진화 제안이 나타납니다.
+                    {locale === "ko"
+                      ? "메모리의 활성 규칙이 모두 시스템 프롬프트에 반영되어 있습니다. 메모리 탭에서 새 결정·주의 규칙이 학습되면 여기에 프롬프트 진화 제안이 나타납니다."
+                      : "All active rules in memory are already reflected in the system prompt. When new decision or gotcha rules are learned in the Memory tab, a prompt evolution proposal will appear here."}
                   </div>
                 )}
 
@@ -2344,7 +2333,7 @@ function AgentDetailView({
                   {/* 기존 버젼 */}
                   <div style={{ background: "rgba(255,138,138,0.04)" }}>
                     <div style={{ background: "rgba(255,138,138,0.08)", padding: "6px 12px", borderBottom: "1px solid var(--paper-edge)", fontSize: 11.5, fontWeight: 600, color: "var(--red-deep)" }}>
-                      기존 버전 (Current)
+                      {locale === "ko" ? "기존 버전 (Current)" : "Current version"}
                     </div>
                     <pre style={{ margin: 0, padding: 12, fontSize: 10.5, fontFamily: "var(--font-mono)", lineHeight: 1.5, whiteSpace: "pre-wrap", maxHeight: 180, overflowY: "auto" }}>
                       {evolutionDiff.old}
@@ -2353,7 +2342,7 @@ function AgentDetailView({
                   {/* 제안 버젼 */}
                   <div style={{ background: "rgba(168,217,155,0.04)", borderLeft: "1px solid var(--paper-edge)" }}>
                     <div style={{ background: "rgba(168,217,155,0.08)", padding: "6px 12px", borderBottom: "1px solid var(--paper-edge)", fontSize: 11.5, fontWeight: 600, color: "var(--green-deep)" }}>
-                      개선 제안 (Evolved Draft)
+                      {locale === "ko" ? "개선 제안 (Evolved Draft)" : "Evolved draft"}
                     </div>
                     <pre style={{ margin: 0, padding: 12, fontSize: 10.5, fontFamily: "var(--font-mono)", lineHeight: 1.5, whiteSpace: "pre-wrap", maxHeight: 180, overflowY: "auto" }}>
                       {evolutionDiff.new}
@@ -2371,8 +2360,8 @@ function AgentDetailView({
                           {
                             id: `timeline-${Date.now()}`,
                             timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-                            title: "자가 프롬프트 진화 승인",
-                            desc: "AI 개선 제안 드래프트를 에이전트 마스터 정의서(AGENT.md)에 정식 적용 및 저장했습니다.",
+                            title: locale === "ko" ? "자가 프롬프트 진화 승인" : "Self-evolution approved",
+                            desc: locale === "ko" ? "AI 개선 제안 드래프트를 에이전트 마스터 정의서(AGENT.md)에 정식 적용 및 저장했습니다." : "Applied and saved the AI improvement draft to the agent master definition (AGENT.md).",
                             type: "evolution"
                           },
                           ...prev
@@ -2389,7 +2378,7 @@ function AgentDetailView({
                         cursor: "pointer"
                       }}
                     >
-                      진화 제안 승인 및 적용
+                      {locale === "ko" ? "진화 제안 승인 및 적용" : "Approve & apply evolution"}
                     </button>
                   </div>
                 )}
@@ -2402,46 +2391,6 @@ function AgentDetailView({
 
         </div>
       </div>
-
-      {/* 4. 우측 스킬 인젝션 서랍 (Skill Drawer) */}
-      {skillDrawerOpen && (
-        <aside
-          className="glass-thin"
-          style={{
-            width: 280,
-            flexShrink: 0,
-            borderLeft: "1px solid var(--glass-border)",
-            display: "flex",
-            flexDirection: "column",
-          }}
-        >
-          <header style={{ padding: "14px 16px", borderBottom: "1px solid var(--glass-border)", display: "flex", justifyItems: "space-between", alignItems: "center" }}>
-            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)", flex: 1 }}>사용 가능한 스킬 카탈로그</span>
-            <button onClick={() => onSetSkillDrawerOpen(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted-deep)" }}>
-              <IconClose size={16} />
-            </button>
-          </header>
-          <div style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-            {availableSkills.map((sk) => (
-              <div
-                key={sk.slug}
-                onClick={() => handleInjectSkill(sk)}
-                style={{
-                  background: "var(--paper)",
-                  border: "1px solid var(--paper-edge)",
-                  borderRadius: "var(--radius-sm)",
-                  padding: 10,
-                  cursor: "pointer",
-                  transition: "all 0.15s",
-                }}
-              >
-                <div style={{ fontSize: 12, fontWeight: 700, color: "var(--accent)", marginBottom: 2 }}>{sk.name}</div>
-                <div style={{ fontSize: 11, color: "var(--ink-soft)" }}>{sk.description}</div>
-              </div>
-            ))}
-          </div>
-        </aside>
-      )}
 
     </div>
   );

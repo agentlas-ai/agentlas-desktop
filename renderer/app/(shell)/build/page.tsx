@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
 import Link from "next/link";
 import {
@@ -8,28 +8,32 @@ import {
   IconUsers,
   IconWand,
   IconFolder,
-  IconBolt,
   IconRoute,
   IconSearch,
   IconShield,
   IconStore,
   IconCheck,
 } from "@/components/Icon";
-import { ipc, ipcEvents } from "@/lib/ipc";
+import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
 import { KeyStatusBanner } from "@/components/KeyStatusBanner";
-import { MARGIN_LINE_KO, MARGIN_LINE_EN } from "@/lib/receipts";
-import type { DirListing, HephaestusBuildEvent, HephaestusStatus } from "@/lib/types";
+import type { DirListing, HephaestusStatus, RuntimeSelection, RuntimeStatus } from "@/lib/types";
+import {
+  subscribe as buildSubscribe,
+  getSnapshot as getBuildSnapshot,
+  setRequest as setBuildRequest,
+  setMode as setBuildMode,
+  setWorkspace as setBuildWorkspace,
+  setRuntime as setBuildRuntime,
+  startBuild,
+  answerBuild,
+  cancelBuild,
+  resetBuild,
+  type Mode,
+} from "@/lib/build-session";
 
-type Mode = "single" | "team" | "package";
-type Phase = "idle" | "running" | "done" | "error";
 type StageState = "pending" | "active" | "done" | "error";
-
-interface LogLine {
-  kind: HephaestusBuildEvent["kind"];
-  text: string;
-}
 
 const MODES: { id: Mode; label: string; labelEn: string; desc: string; descEn: string; icon: typeof IconBuilding }[] = [
   { id: "single", label: "단일 에이전트", labelEn: "Single agent", desc: "혼자 일하는 에이전트 하나 — 기억·기술·스스로 개선", descEn: "A single agent that works on its own — memory, skills, self-improvement", icon: IconWand },
@@ -54,48 +58,54 @@ const STAGES: { key: string; label: string; labelEn: string; sub: string; subEn:
   { key: "deliver", label: "배포", labelEn: "Deliver", sub: "내 라이브러리에 설치 · 클라우드에 올리기", subEn: "install to my library · upload to the cloud", icon: IconStore, color: "#FFA94D" },
 ];
 
-// 파이프라인 단계 매핑 — 엔진이 emit하는 "실제 신호"에 1:1로 묶는다(가짜 추정 금지).
-// 엔진(electron/hephaestus/builder.ts)이 보내는 실제 stage:
-//   · stage:"build"  → 빌더 시작(분류 완료, 인터뷰/리서치 진입) → index 1
-//   · stage:<도구명> (write/edit/create 등 파일 쓰기) → 패키지 생성 → index 2
-//   · stage:"security" → 정적 보안 스캔 = 검증 → index 3
-//   · done → 전부 완료(배포 가능) → index 5(=STAGES.length)
-// 그 외 partial/log 는 LLM 가동 신호이므로 최소 인터뷰/리서치(index 1)로만 본다.
-const WRITE_SIGNALS = /write|edit|create|touch|mkdir|apply_patch|str_replace|\.md|agentlas\.json|\.agentlas|파일|생성|scaffold/i;
-function stageFromEvent(ev: HephaestusBuildEvent, current: number): number {
-  if (ev.kind === "done") return STAGES.length; // 전부 완료
-  // 엔진의 명시적 stage 필드를 최우선으로 본다(계약 기반).
-  if (ev.kind === "stage") {
-    if (ev.stage === "security") return Math.max(current, 3); // 검증
-    if (ev.stage === "build") return Math.max(current, 1); // 빌더 시작 = 인터뷰/리서치
-    // tool 이름이 파일 쓰기면 생성 단계.
-    if (WRITE_SIGNALS.test(`${ev.stage ?? ""} ${ev.text ?? ""}`)) return Math.max(current, 2);
-    return Math.max(current, 1);
+function engineLabel(r: RuntimeStatus, ko: boolean): string {
+  switch (r.kind) {
+    case "claude-code":
+      return "Claude";
+    case "codex":
+      return "Codex (GPT)";
+    case "gemini":
+      return "Gemini";
+    case "ollama":
+      return ko ? "Ollama · 로컬" : "Ollama · local";
+    default:
+      return r.kind;
   }
-  if (ev.kind === "partial" || ev.kind === "log") return Math.max(current, 1);
-  return current;
+}
+
+function runtimeKey(sel: RuntimeSelection | null): string {
+  return sel ? `${sel.kind}:${sel.source ?? ""}` : "";
+}
+
+function fmtLogTime(at: number): string {
+  const d = new Date(at);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 export default function BuildPage() {
   const { locale } = useT();
   const ko = locale === "ko";
   const [status, setStatus] = useState<HephaestusStatus | null>(null);
-  const [request, setRequest] = useState("");
-  const [mode, setMode] = useState<Mode | "">("");
-  const [workspace, setWorkspace] = useState<string | null>(null);
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [log, setLog] = useState<LogLine[]>([]);
-  const [reached, setReached] = useState(0); // 도달한 최대 단계(0..STAGES.length)
-  const [errored, setErrored] = useState(false);
-  // 빌드 done 시 엔진이 첨부하는 실제 결과(생성 폴더 + 보안 스캔). 산출물 미리보기/검증 게이트가 소비.
-  const [result, setResult] = useState<{ workspace: string; securityScan: unknown } | null>(null);
-  const runIdRef = useRef<string | null>(null);
-  const unsubRef = useRef<null | (() => void)>(null);
+  const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
+  const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const [reply, setReply] = useState("");
   const logEndRef = useRef<HTMLDivElement | null>(null);
+
+  // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
+  const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
+  const { request, mode, workspace, runtime, phase, log, reached, errored, result, registered, pendingQuestions, awaitingReply, turn } = s;
+
+  const sendReply = (text: string) => {
+    const t = text.trim();
+    if (!t) return;
+    setReply("");
+    void answerBuild(t);
+  };
 
   useEffect(() => {
     ipc()?.hephaestus.status().then(setStatus).catch(() => setStatus(null));
-    return () => unsubRef.current?.();
+    ipc()?.runtime.detect().then(setRuntimes).catch(() => setRuntimes([]));
   }, []);
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -114,94 +124,39 @@ export default function BuildPage() {
 
   const pickWorkspace = async () => {
     const dir = await ipc()?.fs.pickDirectory();
-    if (dir) setWorkspace(dir);
+    if (dir) setBuildWorkspace(dir);
   };
 
-  const start = async () => {
-    const api = ipc();
-    const ev = ipcEvents();
-    if (!api || !ev || !request.trim() || !workspace || phase === "running") return;
-    setPhase("running");
-    setErrored(false);
-    setReached(0);
-    setResult(null);
-    setLog([{ kind: "stage", text: "빌더 초기화 — Hephaestus 빌더 에이전트 가동" }]);
-
-    const { runId } = await api.hephaestus.build({ request: request.trim(), mode: mode || undefined, workspace });
-    runIdRef.current = runId;
-    const channel = api.hephaestus.buildEventChannel(runId);
-    unsubRef.current = ev.on(channel, (raw) => {
-      const e = raw as unknown as HephaestusBuildEvent;
-      setReached((cur) => stageFromEvent(e, cur));
-      if (e.kind === "partial") {
-        setLog((prev) => {
-          const last = prev[prev.length - 1];
-          if (last && last.kind === "partial") {
-            return [...prev.slice(0, -1), { kind: "partial", text: (last.text + (e.text ?? "")).slice(-4000) }];
-          }
-          return [...prev, { kind: "partial", text: e.text ?? "" }];
-        });
-      } else if (e.kind === "stage") {
-        setLog((prev) => [...prev, { kind: "stage", text: e.text ?? e.stage ?? "" }]);
-      } else if (e.kind === "log") {
-        setLog((prev) => [...prev, { kind: "log", text: e.text ?? "" }]);
-      } else if (e.kind === "done") {
-        setReached(STAGES.length);
-        const r = e.result as { workspace?: string; securityScan?: unknown } | undefined;
-        setResult({ workspace: r?.workspace ?? workspace, securityScan: r?.securityScan ?? null });
-        setLog((prev) => [...prev, { kind: "done", text: "빌드 완료 — 패키지 생성됨" }]);
-        setPhase("done");
-        unsubRef.current?.();
-      } else if (e.kind === "error") {
-        setErrored(true);
-        setLog((prev) => [...prev, { kind: "error", text: e.text ?? "오류" }]);
-        setPhase("error");
-        unsubRef.current?.();
-      }
-    });
-    // 구독이 끝났음을 메인에 알려 버퍼링된 초기 이벤트(첫 stage 틱)를 flush 받는다.
-    void api.hephaestus.buildReady(runId);
-  };
-
-  const cancel = () => {
-    if (runIdRef.current) ipc()?.hephaestus.cancelBuild(runIdRef.current);
-    setPhase("idle");
-    setReached(0);
-    unsubRef.current?.();
-  };
-
-  const reset = () => {
-    setPhase("idle");
-    setReached(0);
-    setErrored(false);
-    setLog([]);
-    setResult(null);
+  const onSelectRuntime = (key: string) => {
+    if (!key) {
+      setBuildRuntime(null);
+      return;
+    }
+    const r = runtimes.find((x) => `${x.kind}:${x.source}` === key);
+    setBuildRuntime(r ? { kind: r.kind, backend: r.backend, source: r.source, model: r.model ?? undefined } : null);
   };
 
   const installToLibrary = async () => {
     if (!workspace) return;
     try {
       const imported = await ipc()?.team.importLocalFolder(workspace);
-      setLog((prev) => [...prev, { kind: "log", text: "완료: 라이브러리에 설치됨 — 인스펙터로 이동합니다." }]);
-      // 빌드→보유 전환: 설치 직후 해당 에이전트 인스펙터로 자동 점프(생애주기 동선 연결).
       if (imported?.id) navigate(`/library/agents?agentId=${imported.id}`);
     } catch (e) {
-      setLog((prev) => [...prev, { kind: "error", text: `설치 실패: ${(e as Error).message}` }]);
+      setActionMsg((ko ? "설치 실패: " : "Install failed: ") + (e as Error).message);
     }
   };
 
   const upload = async (visibility: "private-link" | "marketplace") => {
     if (!workspace) return;
-    setLog((prev) => [...prev, { kind: "stage", text: `업로드(${visibility === "marketplace" ? "Hub public" : "Cloud private"})...` }]);
+    setActionMsg(ko ? `업로드 중 (${visibility === "marketplace" ? "Hub public" : "Cloud private"})…` : "Uploading…");
     const res = await ipc()?.hephaestus.publish({ folder: workspace, visibility });
-    setLog((prev) => [
-      ...prev,
-      { kind: res?.ok ? "done" : "error", text: res?.ok ? "완료: 업로드 완료" : `업로드 실패: ${res?.error ?? res?.stderr ?? "알 수 없음"}` },
-    ]);
+    setActionMsg(res?.ok ? (ko ? "업로드 완료" : "Uploaded") : (ko ? "업로드 실패: " : "Upload failed: ") + (res?.error ?? res?.stderr ?? (ko ? "알 수 없음" : "unknown")));
   };
 
   const engineMissing = status ? !status.available : false;
   const running = phase === "running";
+  // 대화형 빌드가 진행 중(엔진 실행 중이거나 인터뷰 답변 대기 중)이면 컴포저 입력을 잠근다.
+  const busy = phase === "running" || phase === "interview";
   // 파이프라인은 항상 표시 — idle 에선 딤된 프리뷰로 무엇을 할지 보여준다.
   const showPipeline = true;
 
@@ -218,17 +173,12 @@ export default function BuildPage() {
               </Link>
               <div className="build-title-mark"><IconBuilding size={18} /></div>
               <div>
-                <h1>Build</h1>
+                <h1>{ko ? "빌드" : "Build"}</h1>
                 <div className="build-subtitle">hep-build</div>
               </div>
             </div>
             <div className="build-header-status titlebar-nodrag">
               <KeyStatusBanner mode="pill" />
-              {status?.available && (
-                <span className="build-status-pill">
-                  <IconBolt size={12} /> Python {status.version}
-                </span>
-              )}
             </div>
           </header>
 
@@ -265,8 +215,8 @@ export default function BuildPage() {
                   return (
                     <button
                       key={m.id}
-                      onClick={() => setMode(active ? "" : m.id)}
-                      disabled={running}
+                      onClick={() => setBuildMode(active ? "" : m.id)}
+                      disabled={busy}
                       className="build-mode-card titlebar-nodrag"
                       data-active={active ? "true" : "false"}
                     >
@@ -278,7 +228,7 @@ export default function BuildPage() {
                 })}
               </div>
 
-              {!running && (
+              {!busy && (
                 <div className="build-starters">
                   <span className="build-starters-label">{ko ? "스타터" : "Starters"}</span>
                   {STARTERS.map((s) => (
@@ -286,7 +236,7 @@ export default function BuildPage() {
                       key={s.prompt}
                       type="button"
                       className="build-starter-chip titlebar-nodrag"
-                      onClick={() => setRequest(s.prompt)}
+                      onClick={() => setBuildRequest(s.prompt)}
                     >
                       {ko ? s.ko : s.en}
                     </button>
@@ -296,32 +246,61 @@ export default function BuildPage() {
 
               <textarea
                 value={request}
-                onChange={(e) => setRequest(e.target.value)}
-                disabled={running}
+                onChange={(e) => setBuildRequest(e.target.value)}
+                disabled={busy}
                 placeholder={ko ? "무엇을 시킬까요? 예) 인스타그램 마케팅 운영 에이전트" : "What should it do? e.g. an Instagram marketing agent"}
                 rows={5}
                 className="build-request-input titlebar-nodrag"
               />
 
+              <div className="build-model-row">
+                <label className="build-model-label" htmlFor="build-model-select">
+                  {ko ? "빌드 모델" : "Build model"}
+                </label>
+                <select
+                  id="build-model-select"
+                  className="build-model-select titlebar-nodrag"
+                  value={runtimeKey(runtime)}
+                  onChange={(e) => onSelectRuntime(e.target.value)}
+                  disabled={busy}
+                >
+                  <option value="">{ko ? "자동 선택 (활성 엔진)" : "Auto (active engine)"}</option>
+                  {runtimes.map((r) => (
+                    <option key={`${r.kind}:${r.source}`} value={`${r.kind}:${r.source}`}>
+                      {engineLabel(r, ko)}
+                      {r.model ? ` · ${r.model}` : ""}
+                      {r.active ? (ko ? " · 활성" : " · active") : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div className="build-action-row">
-                <button onClick={pickWorkspace} disabled={running} className="build-folder-button titlebar-nodrag">
+                <button onClick={pickWorkspace} disabled={busy} className="build-folder-button titlebar-nodrag">
                   <IconFolder size={15} />
                   <span>{workspace ? workspace.split("/").slice(-2).join("/") : ko ? "생성 폴더 선택" : "Choose output folder"}</span>
                 </button>
                 {running ? (
-                  <button onClick={cancel} className="build-secondary-button titlebar-nodrag">{ko ? "중지" : "Stop"}</button>
+                  <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "중지" : "Stop"}</button>
+                ) : phase === "interview" ? (
+                  <button onClick={resetBuild} className="build-secondary-button titlebar-nodrag">{ko ? "인터뷰 취소" : "Cancel interview"}</button>
                 ) : phase === "done" || phase === "error" ? (
-                  <button onClick={reset} className="build-secondary-button titlebar-nodrag">{ko ? "새 빌드" : "New build"}</button>
+                  <button onClick={resetBuild} className="build-secondary-button titlebar-nodrag">{ko ? "새 빌드" : "New build"}</button>
                 ) : (
                   <button
-                    onClick={start}
+                    onClick={() => void startBuild()}
                     disabled={!request.trim() || !workspace || engineMissing}
                     className="build-primary-button titlebar-nodrag"
                   >
-                    <IconWand size={15} /> {ko ? "빌드 시작" : "Start build"}
+                    <IconWand size={15} /> {ko ? "딥인터뷰로 빌드 시작" : "Start build (deep interview)"}
                   </button>
                 )}
               </div>
+              <p className="build-autoadd-hint">
+                {ko
+                  ? "빌드 시작 → 빌더가 먼저 딥인터뷰로 요구사항을 캐묻고, 충분해지면 패키지를 만들어 조직도에 자동 추가합니다. 마지막 폴더는 기억됩니다."
+                  : "On start, the builder first runs a deep interview, then builds the package and auto-adds it to your org chart. Your last folder is remembered."}
+              </p>
             </div>
 
             {showPipeline && (
@@ -332,6 +311,11 @@ export default function BuildPage() {
                     <span className="build-live">
                       <span className="forge-pulse" />
                       {ko ? STAGES[Math.min(reached, STAGES.length - 1)].label : STAGES[Math.min(reached, STAGES.length - 1)].labelEn}
+                    </span>
+                  ) : phase === "interview" ? (
+                    <span className="build-live">
+                      <span className="forge-pulse" />
+                      {ko ? "딥인터뷰 진행 중" : "deep interview"}
                     </span>
                   ) : (
                     <span>{phase}</span>
@@ -346,6 +330,58 @@ export default function BuildPage() {
             )}
           </section>
 
+          {awaitingReply && (
+            <section className="build-card build-interview-card">
+              <div className="build-card-head">
+                <span>{ko ? `딥인터뷰 · ${turn}번째 답변` : `Deep interview · answer ${turn}`}</span>
+                <span className="build-live"><span className="forge-pulse" />{ko ? "답변 대기" : "awaiting"}</span>
+              </div>
+              <p className="build-interview-hint">
+                {ko
+                  ? "빌더가 요구사항을 캐묻는 중입니다. 위 로그의 질문을 보고 아래 옵션을 고르거나 직접 답해 주세요. 충분해지면 자동으로 빌드를 시작합니다."
+                  : "The builder is gathering requirements. Read its question in the log above, then pick an option or type your answer. It builds automatically once requirements are clear."}
+              </p>
+              {pendingQuestions.map((q) => (
+                <div key={q.id} className="build-interview-q">
+                  <div className="build-interview-qtext">{q.question}</div>
+                  <div className="build-interview-opts">
+                    {q.options.map((o) => (
+                      <button
+                        key={o.label}
+                        type="button"
+                        className="build-interview-opt titlebar-nodrag"
+                        title={o.description}
+                        onClick={() => sendReply(o.label)}
+                      >
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <div className="build-interview-reply">
+                <textarea
+                  value={reply}
+                  onChange={(e) => setReply(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendReply(reply);
+                  }}
+                  rows={2}
+                  placeholder={ko ? "직접 답변 입력… (⌘↵ 전송)" : "Type your answer… (⌘↵ to send)"}
+                  className="build-interview-input titlebar-nodrag"
+                />
+                <button
+                  type="button"
+                  onClick={() => sendReply(reply)}
+                  disabled={!reply.trim()}
+                  className="build-primary-button titlebar-nodrag"
+                >
+                  {ko ? "보내기" : "Send"}
+                </button>
+              </div>
+            </section>
+          )}
+
           {phase === "done" && result && (
             <section className="build-card build-artifact-card">
               <div className="build-card-head">
@@ -354,13 +390,29 @@ export default function BuildPage() {
               </div>
               <ArtifactPreview workspace={result.workspace} ko={ko} />
               <VerifyGate scan={result.securityScan} ko={ko} />
-              <BuildCostReceipt ko={ko} />
               <div className="build-result-actions">
-                <span><IconCheck size={15} /> {ko ? "패키지 준비됨" : "Package ready"}</span>
-                <button onClick={installToLibrary} className="build-primary-button titlebar-nodrag">{ko ? "라이브러리에 설치" : "Install to library"}</button>
-                <button onClick={() => upload("private-link")} className="build-secondary-button titlebar-nodrag">{ko ? "Cloud private 업로드" : "Upload Cloud private"}</button>
-                <button onClick={() => upload("marketplace")} className="build-secondary-button titlebar-nodrag">{ko ? "Hub public 제출" : "Submit Hub public"}</button>
+                <span>
+                  <IconCheck size={15} />{" "}
+                  {registered
+                    ? ko ? "패키지 준비됨 · 조직도에 추가됨" : "Package ready · added to org chart"
+                    : ko ? "패키지 준비됨" : "Package ready"}
+                </span>
+                <button onClick={installToLibrary} className="build-primary-button titlebar-nodrag">{ko ? "조직도에서 열기" : "Open in org chart"}</button>
               </div>
+              <div className="build-upload-choice">
+                <div className="build-upload-choice-label">{ko ? "어디에 올릴까요?" : "Where to upload?"}</div>
+                <div className="build-upload-choice-grid">
+                  <button onClick={() => upload("private-link")} className="build-upload-option titlebar-nodrag">
+                    <strong>{ko ? "내 클라우드 (비공개)" : "My Cloud (private)"}</strong>
+                    <span>{ko ? "로그인한 내 계정에만 저장 · 링크로만 공유" : "Stored to your account · share by link only"}</span>
+                  </button>
+                  <button onClick={() => upload("marketplace")} className="build-upload-option titlebar-nodrag">
+                    <strong>{ko ? "허브 (공개)" : "Hub (public)"}</strong>
+                    <span>{ko ? "허브 레지스트리에 공개 후보로 제출" : "Submit to the public Hub registry"}</span>
+                  </button>
+                </div>
+              </div>
+              {actionMsg && <div className="build-action-msg">{actionMsg}</div>}
             </section>
           )}
 
@@ -368,11 +420,12 @@ export default function BuildPage() {
             <section className="build-card build-log-card">
               <div className="build-card-head">
                 <span>Build Log</span>
-                {phase === "done" && <span>ready</span>}
+                {running ? <span className="build-live"><span className="forge-pulse" />live</span> : phase === "done" && <span>ready</span>}
               </div>
               <div className="build-log-body">
                 {log.map((l, i) => (
                   <div key={i} data-kind={l.kind}>
+                    <span className="build-log-time">{fmtLogTime(l.at)}</span>
                     {l.kind === "stage" ? `> ${l.text}` : l.text}
                   </div>
                 ))}
@@ -530,16 +583,3 @@ function VerifyGate({ scan, ko }: { scan: unknown; ko: boolean }) {
   );
 }
 
-// ── 빌드 비용 영수증 — 가치5(독립)를 칩이 아니라 '마진 ₩0' 사실로 증명. ──
-function BuildCostReceipt({ ko }: { ko: boolean }) {
-  return (
-    <div className="build-cost-receipt">
-      <div className="build-cost-row">
-        <strong>{ko ? "빌드 비용" : "Build cost"}</strong>
-        <span>{ko ? "당신의 구독/키에서 차감" : "billed to your subscription/keys"}</span>
-      </div>
-      <div className="build-cost-margin">{ko ? MARGIN_LINE_KO : MARGIN_LINE_EN}</div>
-      <p>{ko ? "모델 호출을 Agentlas가 중계하지 않습니다 — 추가 요금 0." : "Agentlas does not relay model calls — zero extra fees."}</p>
-    </div>
-  );
-}

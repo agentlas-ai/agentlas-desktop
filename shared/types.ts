@@ -1829,6 +1829,8 @@ export interface McpInvocationRequest {
   locale?: "ko" | "en";
   /** 도구 사용 권한 수준 (ChatInput 권한 칩) — 런타임 권한 모드로 매핑 */
   permissions?: "read" | "write" | "full";
+  /** 계획 모드 — 실행 전에 사용자에게 읽히는 작업 계획과 검증 기준을 먼저 세운다. */
+  planMode?: boolean;
   /** 목표 추진 모드 — 사용자의 요청을 지속 가능한 목표로 구조화한다. */
   goalMode?: boolean;
   /** 채팅 목표를 Agentlas 안에서 실행되는 Apps 패키지로 생성하도록 요청한다. */
@@ -1836,6 +1838,9 @@ export interface McpInvocationRequest {
   /** 기존 생성 App을 채팅에서 수정/보관할 때 지정하는 대상. */
   targetAppId?: string;
   targetAppAction?: "edit" | "archive";
+  /** 추천 시트의 네트워크 모드에서 고른 Hub 에이전트 슬러그 — runMcpInvocation 이 hep-call 로
+   *  이들을 빌려와(BYOM) 프롬프트 앞에 borrow 지시를 붙여 데스크탑 런타임으로 실행한다. */
+  borrowAgents?: string[];
 }
 
 export interface McpInvocationEvent {
@@ -2150,6 +2155,10 @@ export interface OberonMotionAdRequest {
   fps?: number;
   width?: number;
   height?: number;
+  /** 고객 로고 — 이미지 URL/로컬 절대경로/data-uri. 없으면 브랜드 이니셜 모노그램. */
+  logoSource?: string;
+  /** 브랜드 강조색 #hex. 없으면 브랜드명에서 결정적으로 선택. */
+  accentColor?: string;
   outputDir?: string;
 }
 
@@ -2189,6 +2198,61 @@ export interface OberonMotionAdJob {
   height: number;
   createdAtMs: number;
   updatedAtMs: number;
+}
+
+// ── Oberon image-to-video (애니메이션 스튜디오) ──────────────
+export type OberonAnimateProvider = "runway" | "luma";
+export type OberonAnimateJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+export interface OberonAnimateRequest {
+  productionId?: string;
+  title?: string;
+  provider?: OberonAnimateProvider;
+  /** 입력 이미지 — 로컬 절대경로(runway는 base64 data-uri로 인라인). */
+  imagePath?: string;
+  /** 입력 이미지 — 공개 HTTPS URL(luma는 공개 URL만 허용). */
+  imageUrl?: string;
+  prompt: string;
+  aspectRatio?: "16:9" | "9:16" | "1:1";
+  durationSec?: number;
+  model?: string;
+}
+
+export interface OberonAnimateFile {
+  id: string;
+  kind: "animation_mp4";
+  name: string;
+  absPath: string;
+  url: string;
+  mime: string;
+  sizeBytes: number;
+}
+
+export interface OberonAnimateProgress {
+  phase: "queued" | "submitting" | "generating" | "downloading" | "complete" | "failed" | "cancelled";
+  percent: number;
+}
+
+export interface OberonAnimateJob {
+  id: string;
+  productionId?: string;
+  title: string;
+  provider: OberonAnimateProvider;
+  model: string;
+  status: OberonAnimateJobStatus;
+  outputDir: string;
+  progress: OberonAnimateProgress;
+  files: OberonAnimateFile[];
+  message: string;
+  error?: string;
+  warnings: string[];
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface OberonAnimateKeyStatus {
+  runway: boolean;
+  luma: boolean;
 }
 
 // ── Oberon text planning jobs ──────────────────────────────────
@@ -2305,7 +2369,7 @@ export interface HephaestusBuildEvent {
   result?: unknown;
 }
 export interface HephaestusBuildRequest {
-  /** 빌드 요청(자연어). */
+  /** 이번 턴의 사용자 입력(자연어). 1턴=원 요청, 인터뷰 답변 턴=사용자의 답변. */
   request: string;
   /** single | team | package(repair) — 미지정 시 엔진 mode-classification 에 위임. */
   mode?: "single" | "team" | "package";
@@ -2313,7 +2377,64 @@ export interface HephaestusBuildRequest {
   workspace: string;
   /** 사용할 런타임 선택(미지정 시 활성 런타임). */
   runtime?: RuntimeSelection;
+  /** 대화형 딥인터뷰용 이전 대화(이번 턴 입력 이전까지). 빌더가 인터뷰 맥락을 이어간다. */
+  history?: Array<{ role: "user" | "assistant"; text: string }>;
 }
+
+// ── 추천 바텀시트(Recommendation) ──────────────────────────────────────────
+// routePreview 가 routeOnly(실행 없음) 결정 JSON 을 정규화해 렌더러에 넘기는 모양.
+// 렌더러는 엔진 내부 JSON 을 직접 파싱하지 않고 이 정규형만 소비한다.
+export type RecMode = "single" | "multi" | "network" | "pipeline" | "clarify" | "none";
+export type RecSource = "local" | "cloud" | "hub";
+export interface RecAgent {
+  id: string;
+  name: string;
+  source: RecSource;
+  /** 점추정 크레딧(예상). 알 수 없으면 null. */
+  estCredits: number | null;
+  /** 범위 추정(pipeline/network 처럼 패스·규모 불확실할 때). */
+  estCreditsRange?: [number, number];
+  /** single 라우트의 정규 실행 명령(entrypoints.canonical_command). */
+  canonicalCommand?: string;
+  /** type 이 팀/회사면 firm 바인딩 경로로 실행. */
+  isFirm?: boolean;
+}
+export interface RecStage {
+  order: number;
+  /** 단계 라벨(plan/build/qa/deploy 등 엔진 stage 키). */
+  kind: string;
+  agentId?: string;
+  agentName?: string;
+  produces?: string[];
+  consumes?: string[];
+  estCredits?: number | null;
+}
+export interface Recommendation {
+  mode: RecMode;
+  /** single→1, multi/network→N. */
+  agents: RecAgent[];
+  /** mode==="pipeline" 일 때 단계. */
+  stages?: RecStage[];
+  /** 전체 예상 크레딧(점추정). */
+  totalEstCredits: number | null;
+  totalEstCreditsRange?: [number, number];
+  /** 항상 추정치임을 UI 가 명시하도록 하는 리터럴 플래그. */
+  estimate: true;
+  receiptId?: string;
+  /** 원본 엔진 action(텔레메트리/디버그). */
+  rawAction: string;
+  /** action==="clarify" 일 때 되물을 질문. */
+  clarifyQuestion?: string;
+  /** 원 요청 텍스트(시트가 실행할 때 사용). */
+  query: string;
+}
+
+/** 추천 시트에서 사용자가 고른 실행 경로 — 페이지가 적절한 send/switch 로 디스패치한다. */
+export type RecExecChoice =
+  | { kind: "agent"; agentId: string; isFirm?: boolean }
+  | { kind: "network"; agents?: string[] }
+  | { kind: "pipeline"; stages?: RecStage[] }
+  | { kind: "plain" };
 
 export interface AgentlasIpc {
   /** Electron 메인이 알려주는 OS 환경 정보 (Apple/Codex/Claude 데스크톱과 동일 패턴) */
@@ -2360,6 +2481,10 @@ export interface AgentlasIpc {
   /** 확인 요청 — 에이전트가 챗에서 사용자 결정을 기다리는 채팅 목록(미답변 질문 fence 기준). */
   confirm: {
     listPending: () => Promise<PendingConfirmation[]>;
+  };
+  /** 앱 주의 표시 — Dock/taskbar badge와 네이티브 알림을 갱신한다. */
+  attention: {
+    setPendingConfirmations: (count: number) => Promise<void>;
   };
   /** 자동 업데이트 — electron-updater 래퍼. broadcast는 window.agentlasUpdater.onState로 받음. */
   updater: {
@@ -2447,6 +2572,11 @@ export interface AgentlasIpc {
     getMotionAdJob: (id: string) => Promise<OberonMotionAdJob | null>;
     cancelMotionAd: (id: string) => Promise<OberonMotionAdJob | null>;
     openMotionAdOutput: (id: string) => Promise<{ ok: boolean; message: string }>;
+    startAnimate: (request: OberonAnimateRequest) => Promise<OberonAnimateJob>;
+    getAnimateJob: (id: string) => Promise<OberonAnimateJob | null>;
+    cancelAnimate: (id: string) => Promise<OberonAnimateJob | null>;
+    openAnimateOutput: (id: string) => Promise<{ ok: boolean; message: string }>;
+    animateKeyStatus: () => Promise<OberonAnimateKeyStatus>;
   };
   team: {
     list: () => Promise<InstalledAgent[]>;
@@ -2686,6 +2816,14 @@ export interface AgentlasIpc {
     search: (input: { query: string; limit?: number }) => Promise<HephaestusCommandResult>;
     /** Hub 네트워크 라우팅(GUI 숏컷 → 라우팅 폴백). */
     network: (input: { query: string; autoRun?: boolean; noOpen?: boolean }) => Promise<HephaestusCommandResult>;
+    /** 추천 미리보기 — routeOnly(실행 없음) 결정을 정규화해 추천 바텀시트에 넘긴다. 짧은 timeout(인터랙티브). */
+    routePreview: (input: {
+      query: string;
+      project?: string;
+      scope?: "network" | "cloud";
+      allowLocal?: boolean;
+      offline?: boolean;
+    }) => Promise<Recommendation>;
     /** 패키지된 GUI 숏컷(스튜디오 등) 복원/실행. */
     localGui: (input: { shortcut: string; detach?: boolean; noOpen?: boolean }) => Promise<HephaestusCommandResult>;
     /** 에이전트 폴더 → Cloud/Hub 업로드(실 패키징 + 보안 스캔 + publish). */

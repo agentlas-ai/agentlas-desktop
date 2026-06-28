@@ -18,9 +18,10 @@ import type {
   RuntimeStatus,
 } from "@/lib/types";
 import { CONTEXT_MANAGED_BY } from "@shared/models";
+import type { Recommendation, RecExecChoice } from "@shared/types";
 import type { AgentlasAppDefinition } from "@/lib/apps";
 import { appDisplayName, appSlashCommands, appTagline } from "@/lib/apps";
-import { pickLocalized, useT } from "@/lib/i18n";
+import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 
 type ModelOption = { id: string; label: string; tag?: string };
 
@@ -106,20 +107,38 @@ interface AutocompleteOption {
 
 type PermissionLevel = "read" | "write" | "full";
 type AppGenerateChoice = "dedicated" | "chat";
-type HepCommandId = "cloud" | "network" | "build" | "upload";
+// 챗 입력바 모드 토글 — Network(허브 라우팅) + Stormbreaker(견고-실행 루프) + Recommend(추천 미리보기).
+// 단일선택이 아니라 다중선택이며, 전송해도 꺼지지 않고 계속 켜둘 수 있다.
+// Recommend 는 프리픽스가 아니라 전송 동작을 바꾼다(보내기 전에 추천 시트를 띄움). composeHepPrefix 는 무시한다.
+type HepToggleId = "network" | "stormbreaker" | "recommend";
 
-const HEP_COMMANDS: Array<{
-  id: HepCommandId;
-  command: string;
+const HEP_TOGGLES: Array<{
+  id: HepToggleId;
   label: string;
   titleKo: string;
   titleEn: string;
 }> = [
-  { id: "cloud", command: "hep-cloud", label: "Cloud", titleKo: "Cloud 작업으로 보내기", titleEn: "Send through Cloud" },
-  { id: "network", command: "hep-network", label: "Network", titleKo: "Hephaestus Network 라우팅", titleEn: "Route through Hephaestus Network" },
-  { id: "build", command: "hep-build", label: "Build", titleKo: "빌드 요청으로 보내기", titleEn: "Send as a build request" },
-  { id: "upload", command: "hep-upload", label: "Upload", titleKo: "Hub 업로드 요청으로 보내기", titleEn: "Send as a Hub upload request" },
+  { id: "network", label: "Network", titleKo: "Hephaestus Network로 라우팅 (계속 켜둘 수 있음)", titleEn: "Route through Hephaestus Network (stays on)" },
+  { id: "stormbreaker", label: "Stormbreaker", titleKo: "Stormbreaker 견고-실행: 검증·복구 루프로 끝까지 (계속 켜둘 수 있음)", titleEn: "Stormbreaker robust run: verify/repair loop to completion (stays on)" },
+  { id: "recommend", label: "Recommend", titleKo: "추천: 보내기 전에 알맞은 에이전트·TF·예상 비용을 먼저 추천받기 (계속 켜둘 수 있음)", titleEn: "Recommend: preview the right agent/TF and estimated credits before sending (stays on)" },
 ];
+
+// Stormbreaker 워닝 버블 — 토글을 OFF→ON 할 때 1회만. per-device 선호라 localStorage(설정 스토어 아님).
+const STORM_WARNING_DISMISSED_KEY = "agentlas.stormbreaker.warning.dismissed";
+function isStormWarningDismissed(): boolean {
+  try {
+    return typeof window !== "undefined" && window.localStorage.getItem(STORM_WARNING_DISMISSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function dismissStormWarning() {
+  try {
+    window.localStorage.setItem(STORM_WARNING_DISMISSED_KEY, "1");
+  } catch {
+    // ignore
+  }
+}
 
 interface BottomQuestionOption {
   id: AppGenerateChoice;
@@ -132,6 +151,8 @@ export function ChatInput({
   onSend,
   onCallAgent,
   onCommand,
+  onRecommendPreview,
+  onRecommendExecute,
   onStop,
   busy,
   disabled,
@@ -147,6 +168,10 @@ export function ChatInput({
   onCommand?: (cmd: string) => void;
   /** @멘션으로 에이전트/회사를 고르면 그 에이전트를 호출(활성 에이전트 전환). */
   onCallAgent?: (agentId: string) => void;
+  /** 추천 토글 ON 시 보내기 전에 라우터 미리보기를 요청 — 정규화된 추천을 반환(없으면 null). */
+  onRecommendPreview?: (text: string) => Promise<Recommendation | null>;
+  /** 추천 시트에서 고른 실행 경로를 디스패치(에이전트 전환/네트워크/파이프라인/그냥보내기). */
+  onRecommendExecute?: (choice: RecExecChoice, text: string, opts: SendOptions) => void;
   /** 진행 중 실행 취소 — 제공되면 busy일 때 전송 버튼이 정지 버튼으로 변신(Esc도 정지). */
   onStop?: () => void;
   busy: boolean;
@@ -170,7 +195,17 @@ export function ChatInput({
   const [plusSubmenu, setPlusSubmenu] = useState<"plugins" | null>(null);
   const [planMode, setPlanMode] = useState(false);
   const [goalMode, setGoalMode] = useState(false);
-  const [hepCommand, setHepCommand] = useState<HepCommandId | null>(null);
+  // 다중선택·지속 모드 토글(Network/Stormbreaker). 전송해도 유지된다.
+  const [hepToggles, setHepToggles] = useState<Set<HepToggleId>>(() => new Set());
+  // Stormbreaker를 처음 켤 때 뜨는 비용/시간 경고 버블. dismiss하면 다시 안 뜸.
+  const [showStormWarning, setShowStormWarning] = useState(false);
+  // 추천 토글 ON 시 보내기 전에 뜨는 추천 바텀시트. 픽 시 onRecommendExecute로 실제 실행.
+  const [recSheet, setRecSheet] = useState<null | {
+    loading: boolean;
+    preview: Recommendation | null;
+    text: string;
+    opts: SendOptions;
+  }>(null);
   const [appsGenerateMode, setAppsGenerateMode] = useState(false);
   const [appsGenerateQuestionOpen, setAppsGenerateQuestionOpen] = useState(false);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
@@ -194,8 +229,21 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const submitDisabled =
-    busy || (!input.trim() && images.length === 0 && !hepCommand) || disabled;
-  const selectedHepCommand = hepCommand ? HEP_COMMANDS.find((cmd) => cmd.id === hepCommand) ?? null : null;
+    busy || (!input.trim() && images.length === 0) || disabled;
+  // 활성 토글을 Hephaestus 지시 프리픽스로 합성. Network=허브 라우팅, Stormbreaker=견고-실행(--stormbreaker).
+  function composeHepPrefix(text: string): string {
+    const net = hepToggles.has("network");
+    const storm = hepToggles.has("stormbreaker");
+    const body = text ? ` ${text}` : "";
+    if (net && storm) return `hep-network --stormbreaker${body}`;
+    if (net) return `hep-network${body}`;
+    if (storm) return `stormbreaker${body}`;
+    return text;
+  }
+  const hepHint = [...hepToggles]
+    .map((id) => HEP_TOGGLES.find((t) => t.id === id)?.label)
+    .filter(Boolean)
+    .join(" + ");
   const contextManagedByRuntime = runtime ? CONTEXT_MANAGED_BY[runtime.kind] === "runtime" : true;
   const contextPercent = tokensUsage
     ? Math.min(100, Math.max(0, Math.round((tokensUsage.current / Math.max(1, tokensUsage.limit)) * 100)))
@@ -303,25 +351,60 @@ export function ChatInput({
     }, 0);
   }
 
-  function submit() {
-    if (submitDisabled) return;
-    const text = input.trim();
-    const outgoingText = selectedHepCommand
-      ? `${selectedHepCommand.command}${text ? ` ${text}` : ""}`
-      : text;
+  /** 현재 첨부/모드 상태로 SendOptions 를 합성. */
+  function currentSendOptions(): SendOptions {
     const attachments =
       images.length > 0 ? images.map(({ mediaType, data }) => ({ mediaType, data })) : undefined;
-    onSend(outgoingText, {
+    return {
       images: attachments,
       planMode: planMode || undefined,
       goalMode: goalMode || undefined,
       permissions,
       appsGenerateMode: appsGenerateMode || undefined,
-    });
+    };
+  }
+
+  function submit() {
+    if (submitDisabled) return;
+    const text = input.trim();
+    // 추천 토글 ON → 즉시 전송 대신 추천 미리보기 시트. 텍스트/첨부는 시트가 들고 있다가 픽 시 실행한다.
+    if (hepToggles.has("recommend") && text && onRecommendPreview) {
+      void openRecSheet(text);
+      return;
+    }
+    const outgoingText = composeHepPrefix(text);
+    onSend(outgoingText, currentSendOptions());
     setInput("");
     setImages([]);
-    setHepCommand(null);
+    // 모드 토글(Network/Stormbreaker/Recommend)은 리셋하지 않는다 — 계속 켜둘 수 있음.
     setTrigger(null);
+  }
+
+  // ── 추천 바텀시트 흐름 ─────────────────────────────────
+  async function openRecSheet(text: string) {
+    if (!onRecommendPreview) return;
+    const opts = currentSendOptions();
+    setRecSheet({ loading: true, preview: null, text, opts });
+    const preview = await onRecommendPreview(text).catch(() => null);
+    // 사용자가 그새 취소했으면(또는 다른 텍스트로 다시 열었으면) 무시.
+    setRecSheet((cur) => (cur && cur.text === text ? { ...cur, loading: false, preview } : cur));
+  }
+
+  function pickRec(choice: RecExecChoice) {
+    const cur = recSheet;
+    if (!cur) return;
+    onRecommendExecute?.(choice, cur.text, cur.opts);
+    setRecSheet(null);
+    setInput("");
+    setImages([]);
+    setTrigger(null);
+    setTimeout(() => textareaRef.current?.focus(), 0);
+  }
+
+  function cancelRec() {
+    // 텍스트는 입력창에 그대로 둔다 — 사용자가 다시 보내거나 추천 토글을 끌 수 있음.
+    setRecSheet(null);
+    setTimeout(() => textareaRef.current?.focus(), 0);
   }
 
   function requestAppsGenerateMode(next: boolean) {
@@ -474,6 +557,70 @@ export function ChatInput({
             setModelOpen(false);
           }}
           t={t}
+        />
+      )}
+
+      {/* Stormbreaker 비용/시간 경고 버블 — 첫 활성화 시 1회 */}
+      {showStormWarning && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: "absolute",
+            left: 16,
+            bottom: "calc(100% + 8px)",
+            zIndex: 45,
+            maxWidth: 360,
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            border: "1px solid var(--paper-edge)",
+            background: "#fff",
+            padding: 12,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ flexShrink: 0, color: "var(--amber-deep)", display: "inline-flex" }} aria-hidden>
+              <IconSparkles size={14} />
+            </span>
+            <strong style={{ fontSize: 12.5, fontWeight: 700 }}>{t("chatinput.storm_warning.title")}</strong>
+          </div>
+          <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, color: "var(--ink-soft)" }}>
+            {t("chatinput.storm_warning.body")}
+          </p>
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              onClick={() => {
+                dismissStormWarning();
+                setShowStormWarning(false);
+                setTimeout(() => textareaRef.current?.focus(), 0);
+              }}
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                padding: "4px 12px",
+                border: "1px solid var(--paper-edge)",
+                background: "var(--fill-1)",
+                color: "inherit",
+                cursor: "pointer",
+              }}
+            >
+              {t("chatinput.storm_warning.ok")}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 추천 바텀시트 — 추천 토글 ON 으로 보낼 때 라우터 미리보기 결과 */}
+      {recSheet && (
+        <RecommendationSheet
+          loading={recSheet.loading}
+          preview={recSheet.preview}
+          onPick={pickRec}
+          onCancel={cancelRec}
+          t={t}
+          locale={locale}
         />
       )}
 
@@ -666,8 +813,8 @@ export function ChatInput({
           placeholder={
             disabled
               ? t("chatinput.placeholder_disabled")
-              : selectedHepCommand
-                ? `${selectedHepCommand.command} ${locale === "ko" ? "요청을 입력하세요" : "describe the request"}`
+              : hepHint
+                ? `${hepHint} · ${locale === "ko" ? "요청을 입력하세요" : "describe the request"}`
               : t("chatinput.placeholder_rich")
           }
           rows={2}
@@ -731,27 +878,38 @@ export function ChatInput({
               <IconAtSign size={14} />
             </button>
 
-            <div className="chat-input-hep-toggle-group" role="group" aria-label="Hephaestus commands">
-              {HEP_COMMANDS.map((cmd) => {
-                const active = hepCommand === cmd.id;
+            <div className="chat-input-hep-toggle-group" role="group" aria-label="Hephaestus modes">
+              {HEP_TOGGLES.map((tg) => {
+                const active = hepToggles.has(tg.id);
                 return (
                   <button
-                    key={cmd.id}
+                    key={tg.id}
                     type="button"
                     className={"chat-input-hep-chip" + (active ? " active" : "")}
                     onClick={() => {
-                      setHepCommand((current) => (current === cmd.id ? null : cmd.id));
+                      // Stormbreaker OFF→ON 전환 감지 — 첫 활성화 시 비용/시간 경고 버블.
+                      const turningStormOn = tg.id === "stormbreaker" && !hepToggles.has("stormbreaker");
+                      // 다중선택 토글 — 독립적으로 켜고 끈다(전송해도 유지).
+                      setHepToggles((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(tg.id)) next.delete(tg.id);
+                        else next.add(tg.id);
+                        return next;
+                      });
+                      if (tg.id === "stormbreaker") {
+                        setShowStormWarning(turningStormOn && !isStormWarningDismissed());
+                      }
                       setPlusOpen(false);
                       setPermOpen(false);
                       setModelOpen(false);
                       setTimeout(() => textareaRef.current?.focus(), 0);
                     }}
                     disabled={disabled}
-                    title={locale === "ko" ? cmd.titleKo : cmd.titleEn}
+                    title={locale === "ko" ? tg.titleKo : tg.titleEn}
                     aria-pressed={active}
                   >
                     <span className="chat-input-hep-dot" aria-hidden />
-                    <span className="chat-input-hep-label">{cmd.label}</span>
+                    <span className="chat-input-hep-label">{tg.label}</span>
                   </button>
                 );
               })}
@@ -1138,6 +1296,270 @@ function BottomQuestionSheet({
           {t("chatinput.question_next")}
         </button>
       </div>
+    </section>
+  );
+}
+
+// ── 추천 바텀시트 ──────────────────────────────────────
+// routePreview(정규화된 Recommendation)를 보고 싱글/네트워크TF/파이프라인을 예상 크레딧과 함께
+// 제시한다. BottomQuestionSheet 와 동일한 절대배치 바텀시트 스타일. 픽 시 onPick(choice)로 디스패치.
+function RecommendationSheet({
+  loading,
+  preview,
+  onPick,
+  onCancel,
+  t,
+  locale,
+}: {
+  loading: boolean;
+  preview: Recommendation | null;
+  onPick: (choice: RecExecChoice) => void;
+  onCancel: () => void;
+  t: TFunction;
+  locale: Locale;
+}) {
+  const mode = preview?.mode ?? "none";
+  const selectable = mode === "network" || mode === "multi";
+  // 네트워크 모드: 빌릴 Hub 에이전트를 골라 담는다. 기본 전체 선택.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (preview && (preview.mode === "network" || preview.mode === "multi")) {
+      setSelected(new Set(preview.agents.map((a) => a.id)));
+    }
+  }, [preview]);
+  const toggleAgent = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const suffix = t("chatinput.rec.credits_suffix");
+  // 한 에이전트의 비용 라벨 — BYOC: Hub 만 실제 크레딧, 로컬/클라우드는 "내 구독"(별도 크레딧 없음).
+  const agentCost = (source: string, credits: number | null | undefined): string =>
+    source === "hub"
+      ? credits != null
+        ? `~${credits} ${suffix}`
+        : t("chatinput.rec.credits_unknown")
+      : t("chatinput.rec.byoc");
+  // 네트워크 합계는 "선택한" Hub 에이전트의 실제 크레딧 합(미정은 제외). 선택 0이면 null.
+  const selectedHubKnown = preview
+    ? preview.agents.filter(
+        (a) => (selectable ? selected.has(a.id) : true) && a.source === "hub" && a.estCredits != null,
+      )
+    : [];
+  const selectedHubTotal = selectedHubKnown.length
+    ? selectedHubKnown.reduce((s, a) => s + (a.estCredits ?? 0), 0)
+    : null;
+  const sourceLabel = (s: string): string =>
+    s === "hub" ? t("chatinput.rec.source.hub") : s === "cloud" ? t("chatinput.rec.source.cloud") : t("chatinput.rec.source.local");
+
+  const primaryBtn: React.CSSProperties = {
+    fontSize: 12,
+    fontWeight: 700,
+    padding: "6px 14px",
+    border: "1px solid var(--ink-soft)",
+    background: "var(--ink, #1a1a1a)",
+    color: "#fff",
+    cursor: "pointer",
+  };
+  const ghostBtn: React.CSSProperties = {
+    fontSize: 12,
+    fontWeight: 600,
+    padding: "6px 12px",
+    border: "1px solid var(--paper-edge)",
+    background: "var(--fill-1)",
+    color: "inherit",
+    cursor: "pointer",
+  };
+
+  const headerLabel =
+    mode === "single"
+      ? t("chatinput.rec.mode.single")
+      : mode === "network" || mode === "multi"
+        ? t("chatinput.rec.mode.network", { n: String(preview?.agents.length ?? 0) })
+        : mode === "pipeline"
+          ? t("chatinput.rec.mode.pipeline", { n: String(preview?.stages?.length ?? 0) })
+          : t("chatinput.rec.title");
+
+  return (
+    <section
+      role="dialog"
+      aria-modal="false"
+      aria-label={t("chatinput.rec.title")}
+      style={{
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: "calc(100% + 8px)",
+        width: "calc(100% - 32px)",
+        maxWidth: 980,
+        margin: "0 auto",
+        zIndex: 45,
+        border: "1px solid var(--paper-edge)",
+        background: "#fff",
+        padding: 12,
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          onCancel();
+        }
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <span
+          style={{
+            flexShrink: 0,
+            borderRadius: 999,
+            background: "var(--fill-1)",
+            color: "var(--amber-deep)",
+            fontSize: 11,
+            fontWeight: 700,
+            padding: "2px 7px",
+          }}
+        >
+          {t("chatinput.rec.title")}
+        </span>
+        <strong style={{ fontSize: 13, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {loading ? t("chatinput.rec.loading") : headerLabel}
+        </strong>
+      </div>
+
+      {loading ? (
+        <div style={{ fontSize: 12, color: "var(--ink-soft)", padding: "8px 2px" }}>{t("chatinput.rec.loading")}</div>
+      ) : !preview || mode === "none" ? (
+        <div style={{ fontSize: 12.5, color: "var(--ink-soft)", padding: "4px 2px 10px" }}>{t("chatinput.rec.none")}</div>
+      ) : mode === "clarify" ? (
+        <div style={{ fontSize: 12.5, padding: "4px 2px 10px" }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>{t("chatinput.rec.clarify")}</div>
+          <div style={{ color: "var(--ink-soft)" }}>{preview.clarifyQuestion ?? ""}</div>
+        </div>
+      ) : mode === "pipeline" ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+          {(preview.stages ?? []).map((s) => (
+            <div key={s.order} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
+              <span style={{ flexShrink: 0, width: 18, color: "var(--ink-soft)", fontWeight: 700 }}>{s.order}.</span>
+              <span style={{ flexShrink: 0, fontWeight: 600 }}>{s.kind}</span>
+              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--ink-soft)" }}>
+                {s.agentName ?? s.agentId ?? ""}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+          {preview.agents.map((a) => (
+            <div
+              key={a.id}
+              onClick={selectable ? () => toggleAgent(a.id) : undefined}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 12.5,
+                cursor: selectable ? "pointer" : "default",
+                opacity: selectable && !selected.has(a.id) ? 0.5 : 1,
+              }}
+            >
+              {selectable && (
+                <span
+                  aria-hidden
+                  style={{
+                    flexShrink: 0,
+                    width: 14,
+                    height: 14,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    border: "1px solid var(--paper-edge)",
+                    background: selected.has(a.id) ? "var(--ink, #1a1a1a)" : "#fff",
+                    color: "#fff",
+                    fontSize: 10,
+                    fontWeight: 800,
+                    borderRadius: 3,
+                  }}
+                >
+                  {selected.has(a.id) ? "✓" : ""}
+                </span>
+              )}
+              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>
+                {a.name}
+              </span>
+              <span
+                style={{
+                  flexShrink: 0,
+                  fontSize: 10.5,
+                  fontWeight: 700,
+                  color: "var(--ink-soft)",
+                  border: "1px solid var(--paper-edge)",
+                  padding: "0 5px",
+                  borderRadius: 3,
+                }}
+              >
+                {sourceLabel(a.source)}
+              </span>
+              <span style={{ marginLeft: "auto", flexShrink: 0, color: "var(--ink-soft)", fontSize: 11.5 }}>
+                {agentCost(a.source, a.estCredits)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!loading && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+          {preview && mode !== "none" && mode !== "clarify" && (
+            <span style={{ fontSize: 11, color: "var(--ink-soft)" }}>
+              {mode === "network" || mode === "multi"
+                ? selectedHubTotal != null
+                  ? `~${selectedHubTotal} ${suffix} · ${t("chatinput.rec.estimate_note")}`
+                  : t("chatinput.rec.credits_unknown")
+                : mode === "pipeline"
+                  ? t("chatinput.rec.pipeline_note")
+                  : t("chatinput.rec.byoc_note")}
+            </span>
+          )}
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            <button type="button" onClick={onCancel} style={ghostBtn}>
+              {t("chatinput.rec.cancel")}
+            </button>
+            <button type="button" onClick={() => onPick({ kind: "plain" })} style={ghostBtn}>
+              {t("chatinput.rec.send_plain")}
+            </button>
+            {preview && mode === "single" && preview.agents[0] && (
+              <button
+                type="button"
+                onClick={() =>
+                  // Hub 단일 추천은 설치 에이전트가 아니므로 switchAgent 대신 borrow 경로로 실행.
+                  preview.agents[0].source === "hub"
+                    ? onPick({ kind: "network", agents: [preview.agents[0].id] })
+                    : onPick({ kind: "agent", agentId: preview.agents[0].id, isFirm: preview.agents[0].isFirm })
+                }
+                style={primaryBtn}
+              >
+                {t("chatinput.rec.run_single")}
+              </button>
+            )}
+            {preview && (mode === "network" || mode === "multi") && (
+              <button
+                type="button"
+                onClick={() => onPick({ kind: "network", agents: [...selected] })}
+                disabled={selected.size === 0}
+                style={{ ...primaryBtn, opacity: selected.size === 0 ? 0.5 : 1, cursor: selected.size === 0 ? "not-allowed" : "pointer" }}
+              >
+                {t("chatinput.rec.run_network")}
+              </button>
+            )}
+            {preview && mode === "pipeline" && (
+              <button type="button" onClick={() => onPick({ kind: "pipeline", stages: preview.stages })} style={primaryBtn}>
+                {t("chatinput.rec.run_pipeline")}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </section>
   );
 }

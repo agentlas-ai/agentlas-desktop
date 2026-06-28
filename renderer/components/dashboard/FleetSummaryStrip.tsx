@@ -8,6 +8,7 @@ import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { deriveKeyStatus, type KeyHealth } from "@/lib/key-status";
 import { navigate } from "@/lib/navigation";
+import { visibleAgents } from "@/lib/agent-visibility";
 import { IconBolt, IconCheck, IconShield } from "@/components/Icon";
 
 const POLL_MS = 10_000;
@@ -30,7 +31,8 @@ export function FleetSummaryStrip() {
   const [pending, setPending] = useState(0);
   const [oldestPending, setOldestPending] = useState<string | null>(null);
   const [active, setActive] = useState(0);
-  const [owned, setOwned] = useState<number | null>(null);
+  const [teamCount, setTeamCount] = useState<number | null>(null);
+  const [singleCount, setSingleCount] = useState(0);
   const [keyHealth, setKeyHealth] = useState<KeyHealth>("unknown");
 
   useEffect(() => {
@@ -51,8 +53,16 @@ export function FleetSummaryStrip() {
     };
     const loadOwned = async () => {
       try {
-        const a = (await ipc()?.team.list()) ?? [];
-        if (alive) setOwned(a.length);
+        const api = ipc();
+        if (!api) return;
+        const [a, f] = await Promise.all([api.team.list(), api.firms.list()]);
+        if (!alive) return;
+        // 멀티(에이전트팀) = 회사(firm) 수, 싱글 = 회사 조직도에 속하지 않은 개별 에이전트.
+        const firmAgentIds = new Set<string>();
+        for (const firm of f) for (const node of firm.orgChart) firmAgentIds.add(node.agentId);
+        const singles = visibleAgents(a).filter((x) => !firmAgentIds.has(x.id));
+        setTeamCount(f.length);
+        setSingleCount(singles.length);
       } catch {
         /* 무시 */
       }
@@ -93,16 +103,25 @@ export function FleetSummaryStrip() {
       <button
         className="fleet-stat fleet-stat-button"
         data-tone={pending > 0 ? "warn" : "muted"}
-        onClick={() => navigate("/chat")}
+        onClick={() => {
+          const el = document.getElementById("approval-inbox");
+          if (el) {
+            el.scrollIntoView({ behavior: "smooth", block: "center" });
+            return;
+          }
+          navigate("/dashboard#approval-inbox");
+        }}
         title={ko ? "승인 대기 항목으로 이동" : "Go to pending approvals"}
       >
         <IconShield size={12} />
         {pending} {ko ? "승인대기" : "awaiting approval"}
         {stall ? ` · ${stall}` : ""}
       </button>
-      {owned != null && (
+      {teamCount != null && (
         <span className="fleet-stat" data-tone="muted">
-          {owned} {ko ? "보유 일꾼" : "owned workers"}
+          {ko
+            ? `에이전트팀 ${teamCount} · 싱글 에이전트 ${singleCount}`
+            : `${teamCount} teams · ${singleCount} single agents`}
         </span>
       )}
       <span className="fleet-stat fleet-stat-key" data-health={keyHealth}>

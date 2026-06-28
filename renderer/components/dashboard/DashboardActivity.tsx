@@ -62,7 +62,7 @@ export function DashboardActivity() {
   return (
     <div className="dashboard-module dashboard-activity-module">
       <div className="dashboard-module-head">
-        <span>{ko ? "활동" : "Activity"}</span>
+        <span>{ko ? "최근 대화" : "Recent chats"}</span>
         {runningCount > 0 && (
           <span className="dashboard-running-pill">
             <LiveDot />

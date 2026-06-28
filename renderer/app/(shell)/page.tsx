@@ -16,7 +16,9 @@ export default function HomeRedirect() {
       return;
     }
     void (async () => {
-      // 1) 첫 실행 마법사를 완료하지 않았으면 → /onboarding
+      // 첫 실행 마법사를 완료(또는 건너뛰기)하지 않았으면 → /onboarding.
+      // 완료했다면 런타임 0개여도 대시보드로 보낸다(무한 온보딩 루프 방지). LLM 연결은
+      // 온보딩의 살아있는 가이드 단계와 대시보드 상시 가이드가 유도한다.
       try {
         if (window.localStorage.getItem("agentlas.onboarded") !== "1") {
           router.replace("/onboarding");
@@ -25,17 +27,6 @@ export default function HomeRedirect() {
       } catch {
         // localStorage 불가 — 계속 진행
       }
-      // 2) 백엔드(LLM) 0개면 → /onboarding (백엔드 단계)
-      try {
-        const runtimes = await api.runtime.detect();
-        if (runtimes.length === 0) {
-          router.replace("/onboarding");
-          return;
-        }
-      } catch {
-        // 감지 실패 — 대시보드로 진행
-      }
-      // 3) 그 외에는 대시보드로
       router.replace("/dashboard");
     })();
   }, [router]);

@@ -2,8 +2,15 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-06-28
+
 ### Added
 
+- Redesigned the first-run onboarding into a 5-step, Duolingo-style learning path: pick a goal → connect your AI → ask a live guide → hire your first agent → graduate with a day-1 streak.
+- Added a live guide step: the AI you just connected answers your real questions right inside onboarding — a real model response, with no demo or fallback answers.
+- Added an always-available help button so you can replay the setup or take the menu tour again anytime.
+- Added local streaks and milestone tracking that reflect what you actually did during onboarding (no fake rewards).
+- Rewrote all onboarding copy in Korean and English for a warmer, clearer first run, keeping product terms (agent, skill, Hub, Stormbreaker) and dropping engineer jargon.
 - Added the always-on Stormbreaker Loop as the default execution discipline for non-trivial chat and automation work.
 - Added visible `Stormbreaker Loop` activity events to the chat working panel, including armed, scope-lock, route, and final-gate stages.
 - Added automatic goal decomposition, work-packet/sub-agent architecture instructions, immediate continuation passes, and hidden `every-30m` long-run continuation automations for loop-worthy work such as app builds, game builds, automations, trading/ops runs, deployment, debugging, and data/report generation.

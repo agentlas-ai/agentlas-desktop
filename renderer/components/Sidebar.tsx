@@ -223,18 +223,21 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   async function handleNewChat() {
     const api = ipc();
     if (!api) return;
-    if (data.agents.length === 0) {
-      navigate("/onboarding");
-      return;
-    }
+    // "새 채팅"은 항상 채팅으로 이어져야 한다 — 온보딩/허브로 튕기지 않는다.
+    // 에이전트가 비어 보여도 백엔드가 orchestrator로 폴백해 채팅을 만든다.
     const agentId =
       data.agents.find((a) => a.slug === "agentlas-orchestrator")?.id ??
       data.chats[0]?.agentId ??
-      data.agents[0].id;
-    const chat = await api.chats.create({ agentId });
-    navigate(`/chat?id=${chat.id}`);
-    // soft navigation은 full reload가 없으므로 명시적으로 최근 목록을 갱신한다.
-    triggerRefresh();
+      data.agents[0]?.id;
+    try {
+      const chat = await api.chats.create(agentId ? { agentId } : {});
+      navigate(`/chat?id=${chat.id}`);
+      // soft navigation은 full reload가 없으므로 명시적으로 최근 목록을 갱신한다.
+      triggerRefresh();
+    } catch {
+      // 정말 호출 가능한 에이전트가 하나도 없을 때만 — 그래도 채팅 화면으로(허브 아님).
+      navigate("/chat");
+    }
   }
 
   // ── 접힘 모드: 아이콘만 ───────────────────────────────

@@ -10,7 +10,6 @@ import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { parseMemoryMarkdown, serializeMemoryMarkdown } from "@/lib/agent-memory";
 import { classifyAgent } from "@/lib/ownership";
-import { MARGIN_LINE_KO } from "@/lib/receipts";
 import type {
   AgentRuntimeOverride,
   AgentRuntimeOverrideScope,
@@ -70,6 +69,8 @@ function LibraryAgentsView() {
   // 왼쪽 조직도 패널 너비 & 접기 상태 (localStorage 영속)
   const [orgWidth, setOrgWidth] = useState(300);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // 좌측 로스터 탭 — 멀티(에이전트 팀=firm) / 싱글(개별 에이전트). 대시보드 조직도와 동일한 분리.
+  const [rosterTab, setRosterTab] = useState<"multi" | "single">("multi");
 
   // 선택된 에이전트 노드 (null 이면 회사 오버뷰 노출)
   const [selectedNode, setSelectedNode] = useState<ResolvedNode | null>(null);
@@ -221,8 +222,16 @@ function LibraryAgentsView() {
     }
 
     let cancelled = false;
+    // 여러 런타임 규약의 프롬프트 파일명(claude-code: CLAUDE.md, codex: AGENTS.md 등).
+    const PROMPT_FILES = ["agent.md", "system-prompt.md", "claude.md", "agents.md", "gemini.md", "soul.md", "persona.md", "prompt.md"];
     async function loadAgentAssets() {
       if (!selectedNode?.agentId || !api) return;
+      // 메타데이터 systemPrompt를 먼저 기본값으로 — 파일 로드가 실패해도 "내용 없음"이 되지 않게.
+      const curAgent = agents.find((a) => a.id === selectedNode.agentId);
+      if (curAgent?.systemPrompt?.trim()) {
+        setPromptContent(curAgent.systemPrompt);
+        setPromptDraft(curAgent.systemPrompt);
+      }
       try {
         const listing = await api.agentFiles.list(selectedNode.agentId);
         if (cancelled) return;
@@ -238,24 +247,18 @@ function LibraryAgentsView() {
           setMemoryParsed(parseMemoryMarkdown(m.content));
         }
 
-        // AGENT.md 또는 system-prompt.md 로드
-        const promptFile = fileEntries.find(
-          (e) => e.name.toLowerCase() === "agent.md" || e.name.toLowerCase() === "system-prompt.md"
-        );
+        // 프롬프트 파일이 있으면 그 원문으로 덮어쓴다(메타데이터보다 정확).
+        const promptFile = fileEntries.find((e) => PROMPT_FILES.includes(e.name.toLowerCase()));
         if (promptFile) {
           const p = await api.agentFiles.read(selectedNode.agentId, promptFile.path);
           if (cancelled) return;
-          setPromptContent(p.content);
-          setPromptDraft(p.content);
-        } else {
-          // Fallback to agent metadata
-          const curAgent = agents.find((a) => a.id === selectedNode.agentId);
-          if (curAgent) {
-            setPromptContent(curAgent.systemPrompt);
-            setPromptDraft(curAgent.systemPrompt);
+          if (p.content?.trim()) {
+            setPromptContent(p.content);
+            setPromptDraft(p.content);
           }
         }
       } catch (e) {
+        // 파일 로드 실패 시에도 위에서 설정한 메타데이터 프롬프트가 남아있다.
         console.error("에이전트 파일 로드 실패:", e);
       }
     }
@@ -280,9 +283,9 @@ function LibraryAgentsView() {
       await api.agentFiles.write(selectedNode.agentId, path, promptDraft);
       setPromptContent(promptDraft);
       setEditingPrompt(false);
-      showToast("시스템 프롬프트가 성공적으로 반영되었습니다.");
+      showToast(locale === "ko" ? "시스템 프롬프트가 성공적으로 반영되었습니다." : "System prompt updated successfully.");
     } catch (e) {
-      showToast("프롬프트 저장 실패: " + String(e));
+      showToast((locale === "ko" ? "프롬프트 저장 실패: " : "Failed to save prompt: ") + String(e));
     } finally {
       setSavingFiles(false);
     }
@@ -301,9 +304,9 @@ function LibraryAgentsView() {
       await api.agentFiles.write(selectedNode.agentId, path, newPromptContent);
       setPromptContent(newPromptContent);
       setPromptDraft(newPromptContent);
-      showToast("자가 진화 제안이 성공적으로 프롬프트에 병합되었습니다.");
+      showToast(locale === "ko" ? "자가 진화 제안이 성공적으로 프롬프트에 병합되었습니다." : "Self-evolution suggestion merged into the prompt successfully.");
     } catch (e) {
-      showToast("진화 적용 실패: " + String(e));
+      showToast((locale === "ko" ? "진화 적용 실패: " : "Failed to apply evolution: ") + String(e));
     } finally {
       setSavingFiles(false);
     }
@@ -334,7 +337,7 @@ function LibraryAgentsView() {
         await api.agentFiles.write(selectedNode.agentId, path, serialized);
         setMemoryContent(serialized);
       } catch (e) {
-        showToast("메모리 갱신 실패: " + String(e));
+        showToast((locale === "ko" ? "메모리 갱신 실패: " : "Failed to update memory: ") + String(e));
       } finally {
         setSavingFiles(false);
       }
@@ -365,9 +368,9 @@ function LibraryAgentsView() {
         agentId: imported.id,
       });
       setActiveTab("identity");
-      showToast(`${loc.name} 가져오기 완료`);
+      showToast(locale === "ko" ? `${loc.name} 가져오기 완료` : `Imported ${loc.name}`);
     } catch (err) {
-      showToast("에이전트 가져오기 실패: " + String(err));
+      showToast((locale === "ko" ? "에이전트 가져오기 실패: " : "Import failed: ") + String(err));
     } finally {
       setImportBusy(false);
     }
@@ -418,7 +421,7 @@ function LibraryAgentsView() {
               >
                 <IconLayers size={14} style={{ color: "var(--accent)" }} />
                 <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--font-head)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  My Agents
+                  {locale === "ko" ? "내 에이전트" : "My Agents"}
                 </div>
               </div>
               <button
@@ -446,17 +449,36 @@ function LibraryAgentsView() {
                 }}
               >
                 <IconFileUp size={13} />
-                {importBusy ? "가져오는 중" : "가져오기"}
+                {importBusy ? (locale === "ko" ? "가져오는 중" : "Importing") : locale === "ko" ? "가져오기" : "Import"}
               </button>
             </div>
           )}
         </header>
 
+        {/* 멀티/싱글 로스터 탭 (대시보드 조직도와 동일) */}
+        {!sidebarCollapsed && (
+          <div className="library-roster-tabs">
+            {(["multi", "single"] as const).map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                onClick={() => setRosterTab(tab)}
+                className="library-roster-tab"
+                data-active={rosterTab === tab ? "true" : "false"}
+              >
+                {tab === "multi"
+                  ? locale === "ko" ? "멀티 · 에이전트 팀" : "Multi · teams"
+                  : locale === "ko" ? "싱글 · 에이전트" : "Single · agents"}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* 조직도 목록 */}
         <div style={{ flex: 1, overflowY: "auto", padding: sidebarCollapsed ? "12px 6px" : 12 }}>
           {/* Multi-Firm & Independent Agents Org Tree */}
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {firms.map(firm => {
+            {(sidebarCollapsed || rosterTab === "multi") && firms.map(firm => {
               const rOrg = resolvedOrgs[firm.id];
               const fLoc = pickLocalized(firm, locale);
               const isCollapsed = firmCollapsed[firm.id];
@@ -525,8 +547,16 @@ function LibraryAgentsView() {
               );
             })}
 
-            {/* Independent Agents */}
+            {/* Independent Agents (싱글 탭) */}
+            {(sidebarCollapsed || rosterTab === "single") && (
             <div style={{ marginTop: 8 }}>
+              {!sidebarCollapsed && agents.filter(a => !firms.some(f => f.orgChart.some(n => n.agentId === a.id))).length === 0 && (
+                <div style={{ fontSize: 12, color: "var(--muted-deep)", padding: "8px 12px" }}>
+                  {locale === "ko"
+                    ? "싱글 에이전트가 없습니다. 허브에서 받거나 빌드로 만들어 보세요."
+                    : "No single agents yet. Get one from the Hub or build one."}
+                </div>
+              )}
               {!sidebarCollapsed && agents.filter(a => !firms.some(f => f.orgChart.some(n => n.agentId === a.id))).length > 0 && (
                 <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-deep)", textTransform: "uppercase", padding: "0 12px", marginBottom: 8 }}>
                   {t("library.agents.subtitle") || "Independent Agents"}
@@ -565,6 +595,7 @@ function LibraryAgentsView() {
                 })}
               </div>
             </div>
+            )}
           </div>
         </div>
 
@@ -647,7 +678,7 @@ function LibraryAgentsView() {
               </span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 18, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                  My Agents Library
+                  {locale === "ko" ? "에이전트 라이브러리" : "My Agents Library"}
                 </h1>
               </div>
               <button
@@ -671,12 +702,12 @@ function LibraryAgentsView() {
                 }}
               >
                 <IconFileUp size={14} />
-                {importBusy ? "가져오는 중..." : "에이전트 가져오기"}
+                {importBusy ? (locale === "ko" ? "가져오는 중..." : "Importing...") : locale === "ko" ? "에이전트 가져오기" : "Import agent"}
               </button>
             </header>
 
             <section style={{ maxWidth: 960, margin: "24px auto", padding: "0 24px" }}>
-              <p style={{ margin: "0 0 24px", fontSize: 14, color: "var(--ink-soft)", lineHeight: 1.6 }}>로컬 환경에 설치된 모든 에이전트와 조직(Team) 목록입니다. 좌측 조직도에서 개별 에이전트를 클릭하여 세부 통제 센터를 열어보세요.</p>
+              <p style={{ margin: "0 0 24px", fontSize: 14, color: "var(--ink-soft)", lineHeight: 1.6 }}>{locale === "ko" ? "로컬 환경에 설치된 모든 에이전트와 조직(Team) 목록입니다. 좌측 조직도에서 개별 에이전트를 클릭하여 세부 통제 센터를 열어보세요." : "List of all agents and organizations (Teams). Click an agent to open its detailed control center."}</p>
               
               {/* 회사 관련 채팅 리스트 */}
               <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "0 0 12px", display: "flex", alignItems: "center", gap: 6 }}>
@@ -918,7 +949,7 @@ function OrgChart({
   onSelect: (node: ResolvedNode) => void;
 }) {
   const ceo = firm.orgChart.find((n) => n.reportsTo === null);
-  if (!ceo) return <div style={{ fontSize: 12, color: "var(--muted)" }}>조직도가 비어있습니다.</div>;
+  if (!ceo) return <div style={{ fontSize: 12, color: "var(--muted)" }}>{locale === "ko" ? "조직도가 비어있습니다." : "The org chart is empty."}</div>;
 
   function children(parentSlug: string) {
     return firm.orgChart.filter((n) => n.reportsTo === parentSlug && isVisibleFirmOrgNode(n, agentMap));
@@ -1001,7 +1032,7 @@ function OrgChart({
 
   if (isVisibleFirmOrgNode(ceo, agentMap)) return renderNode(ceo, 0);
   const visibleRoots = children(ceo.agentSlug);
-  if (visibleRoots.length === 0) return <div style={{ fontSize: 12, color: "var(--muted)" }}>표시할 에이전트가 없습니다.</div>;
+  if (visibleRoots.length === 0) return <div style={{ fontSize: 12, color: "var(--muted)" }}>{locale === "ko" ? "표시할 에이전트가 없습니다." : "No agents to display."}</div>;
   return <>{visibleRoots.map((node) => renderNode(node, 0))}</>;
 }
 
@@ -1372,8 +1403,8 @@ function runtimeDisplayName(runtime: Pick<RuntimeStatus, "kind" | "backend" | "m
   return runtime.kind;
 }
 
-function selectionSummary(selection?: RuntimeSelection | null): string {
-  if (!selection) return "전역 활성 런타임";
+function selectionSummary(selection?: RuntimeSelection | null, locale: Locale = "ko"): string {
+  if (!selection) return locale === "ko" ? "전역 활성 런타임" : "Global active runtime";
   const base = selection.kind === "byok" ? `BYOK · ${selection.backend ?? "provider"}` : selection.kind;
   return [base, selection.model, selection.effort ? `effort ${selection.effort}` : ""].filter(Boolean).join(" · ");
 }
@@ -1395,34 +1426,35 @@ function RuntimeAssignmentPanel({
   onRuntimeOverridesChange: (items: AgentRuntimeOverride[]) => void;
   showToast: (msg: string) => void;
 }) {
+  const { locale } = useT();
   const targets = useMemo<RuntimeTargetOption[]>(() => {
     const items: RuntimeTargetOption[] = [];
     if (node.agentId) {
       items.push({
         scope: "agent",
         targetId: node.agentId,
-        label: `${node.name}만`,
-        note: "선택한 개별 에이전트에만 적용",
+        label: locale === "ko" ? `${node.name}만` : `${node.name} only`,
+        note: locale === "ko" ? "선택한 개별 에이전트에만 적용" : "Applies only to the selected individual agent",
       });
     }
     if (nodeContext?.firm && nodeContext.division) {
       items.push({
         scope: "division",
         targetId: divisionTargetId(nodeContext.firm.id, nodeContext.division.id),
-        label: `${nodeContext.division.name} 디비전`,
-        note: "해당 디비전과 하위 전문가 기본값",
+        label: locale === "ko" ? `${nodeContext.division.name} 디비전` : `${nodeContext.division.name} division`,
+        note: locale === "ko" ? "해당 디비전과 하위 전문가 기본값" : "Default for this division and its specialists",
       });
     }
     if (nodeContext?.firm) {
       items.push({
         scope: "firm",
         targetId: nodeContext.firm.id,
-        label: `${nodeContext.firm.name} 전체`,
-        note: "조직 전체 기본값",
+        label: locale === "ko" ? `${nodeContext.firm.name} 전체` : `All of ${nodeContext.firm.name}`,
+        note: locale === "ko" ? "조직 전체 기본값" : "Default for the whole organization",
       });
     }
     return items;
-  }, [node.agentId, node.name, nodeContext]);
+  }, [node.agentId, node.name, nodeContext, locale]);
 
   const [targetKey, setTargetKey] = useState("");
   const [runtimeKey, setRuntimeKey] = useState("");
@@ -1511,9 +1543,9 @@ function RuntimeAssignmentPanel({
         selection,
       });
       await refreshOverrides();
-      showToast("런타임 모델 지정이 저장되었습니다.");
+      showToast(locale === "ko" ? "런타임 모델 지정이 저장되었습니다." : "Runtime model assignment saved.");
     } catch (err) {
-      showToast("런타임 지정 저장 실패: " + String(err));
+      showToast((locale === "ko" ? "런타임 지정 저장 실패: " : "Failed to save runtime assignment: ") + String(err));
     } finally {
       setSaving(false);
     }
@@ -1526,7 +1558,7 @@ function RuntimeAssignmentPanel({
     try {
       await api.agentRuntime.remove(selectedTarget.scope, selectedTarget.targetId);
       await refreshOverrides();
-      showToast("런타임 모델 지정을 해제했습니다.");
+      showToast(locale === "ko" ? "런타임 모델 지정을 해제했습니다." : "Runtime model assignment cleared.");
     } finally {
       setSaving(false);
     }
@@ -1535,8 +1567,8 @@ function RuntimeAssignmentPanel({
   if (targets.length === 0) {
     return (
       <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-        <h4 style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 700 }}>실행 모델 지정</h4>
-        <p style={{ margin: 0, fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.5 }}>설치된 에이전트 노드를 선택하면 CLI 모델을 고정할 수 있습니다.</p>
+        <h4 style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 700 }}>{locale === "ko" ? "실행 모델 지정" : "Runtime Model Assignment"}</h4>
+        <p style={{ margin: 0, fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.5 }}>{locale === "ko" ? "설치된 에이전트 노드를 선택하면 CLI 모델을 고정할 수 있습니다." : "Select an installed agent node to pin its CLI model."}</p>
       </div>
     );
   }
@@ -1545,19 +1577,21 @@ function RuntimeAssignmentPanel({
     <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
         <div>
-          <h4 style={{ margin: 0, fontSize: 13, fontWeight: 700 }}>실행 모델 지정</h4>
+          <h4 style={{ margin: 0, fontSize: 13, fontWeight: 700 }}>{locale === "ko" ? "실행 모델 지정" : "Runtime Model Assignment"}</h4>
           <p style={{ margin: "3px 0 0", fontSize: 11.5, color: "var(--muted-deep)" }}>
-            저장된 값은 다음 Chat, Team 라우팅, Hub 후보 호출부터 우선 적용됩니다.
+            {locale === "ko"
+              ? "저장된 값은 다음 Chat, Team 라우팅, Hub 후보 호출부터 우선 적용됩니다."
+              : "Saved values take priority from the next Chat, Team routing, and Hub candidate invocation onward."}
           </p>
         </div>
         <span style={{ fontSize: 10.5, padding: "2px 7px", borderRadius: 999, background: selectedOverride ? "rgba(12,166,120,0.12)" : "var(--fill-2)", color: selectedOverride ? "var(--green-deep)" : "var(--muted-deep)", fontWeight: 700 }}>
-          {selectedOverride ? "고정됨" : "전역 기본"}
+          {selectedOverride ? (locale === "ko" ? "고정됨" : "Pinned") : (locale === "ko" ? "전역 기본" : "Global default")}
         </span>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
         <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, color: "var(--muted-deep)", fontWeight: 600 }}>
-          적용 범위
+          {locale === "ko" ? "적용 범위" : "Scope"}
           <select value={targetKey} onChange={(e) => setTargetKey(e.target.value)} style={runtimeSelectStyle}>
             {targets.map((target) => (
               <option key={`${target.scope}:${target.targetId}`} value={`${target.scope}:${target.targetId}`}>
@@ -1580,9 +1614,9 @@ function RuntimeAssignmentPanel({
 
       <div style={{ display: "grid", gridTemplateColumns: effortOptions.length > 0 ? "1fr 1fr" : "1fr", gap: 10 }}>
         <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, color: "var(--muted-deep)", fontWeight: 600 }}>
-          모델
+          {locale === "ko" ? "모델" : "Model"}
           <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} style={runtimeSelectStyle}>
-            <option value="">구독/전역 기본</option>
+            <option value="">{locale === "ko" ? "구독/전역 기본" : "Subscription / global default"}</option>
             {modelOptions.map((model) => (
               <option key={model.id} value={model.id}>
                 {model.label}{model.tag ? ` · ${model.tag}` : ""}
@@ -1592,9 +1626,9 @@ function RuntimeAssignmentPanel({
         </label>
         {effortOptions.length > 0 && (
           <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, color: "var(--muted-deep)", fontWeight: 600 }}>
-            작업량
+            {locale === "ko" ? "작업량" : "Effort"}
             <select value={selectedEffort} onChange={(e) => setSelectedEffort(e.target.value)} style={runtimeSelectStyle}>
-              <option value="">기본</option>
+              <option value="">{locale === "ko" ? "기본" : "Default"}</option>
               {effortOptions.map((effort) => (
                 <option key={effort.id} value={effort.id}>{effort.label}</option>
               ))}
@@ -1604,21 +1638,23 @@ function RuntimeAssignmentPanel({
       </div>
 
       <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 8, background: "var(--paper-2)", border: "1px solid var(--paper-edge)", fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.45 }}>
-        <strong style={{ color: "var(--ink)" }}>현재 저장값:</strong> {selectionSummary(selectedOverride?.selection)}
+        <strong style={{ color: "var(--ink)" }}>{locale === "ko" ? "현재 저장값:" : "Current saved value:"}</strong> {selectionSummary(selectedOverride?.selection, locale)}
         {selectedTarget && <span style={{ color: "var(--muted-deep)" }}> · {selectedTarget.note}</span>}
       </div>
 
-      {/* 가치5(독립): 키는 내 OS 키체인에, 모델 호출은 내 구독으로 — Agentlas 마진 ₩0. */}
+      {/* 독립성: 키는 내 OS 키체인에 저장되고 Agentlas 서버를 거치지 않으며, 모델 호출은 내 구독/키로 직접 나간다. */}
       <div className="runtime-independence-note">
-        키는 내 OS 키체인에 저장되고 Agentlas 서버를 거치지 않습니다 · 모델 호출은 내 구독/키로 — {MARGIN_LINE_KO}
+        {locale === "ko"
+          ? "키는 내 OS 키체인에 저장되고 Agentlas 서버를 거치지 않습니다 · 모델 호출은 내 구독/키로 직접 나갑니다"
+          : "Keys are stored in your OS keychain and never pass through Agentlas servers · model calls go out directly with your own subscription/key"}
       </div>
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
         <button onClick={clearOverride} disabled={saving || !selectedOverride} style={{ ...runtimeButtonStyle, opacity: selectedOverride ? 1 : 0.45 }}>
-          전역 기본
+          {locale === "ko" ? "전역 기본" : "Global default"}
         </button>
         <button onClick={saveOverride} disabled={saving || !selectedRuntime} style={{ ...runtimeButtonStyle, background: "var(--accent)", color: "#fff", border: "1px solid var(--accent)" }}>
-          {saving ? "저장 중..." : "저장"}
+          {saving ? (locale === "ko" ? "저장 중..." : "Saving...") : (locale === "ko" ? "저장" : "Save")}
         </button>
       </div>
     </div>
@@ -1709,7 +1745,8 @@ function AgentDetailView({
   nodeContext,
   onRuntimeOverridesChange
 }: AgentDetailViewProps) {
-  
+  const { locale } = useT();
+
   // 규칙 카드별 열림/닫힘(Accordion) 관리 상태
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
   
@@ -1756,8 +1793,10 @@ function AgentDetailView({
       derived.push({
         id: "observed-files",
         timestamp: "loaded",
-        title: "로컬 에이전트 파일 연결",
-        desc: `${agentFiles.length}개 파일을 읽어 프롬프트, 메모리, 플레이북 탭에 반영했습니다.`,
+        title: locale === "ko" ? "로컬 에이전트 파일 연결" : "Local agent files linked",
+        desc: locale === "ko"
+          ? `${agentFiles.length}개 파일을 읽어 프롬프트, 메모리, 플레이북 탭에 반영했습니다.`
+          : `Read ${agentFiles.length} files and reflected them into the Prompt, Memory, and Playbook tabs.`,
         type: "sync",
       });
     }
@@ -1765,8 +1804,10 @@ function AgentDetailView({
       derived.push({
         id: "observed-prompt",
         timestamp: "loaded",
-        title: "프롬프트 소스 확인",
-        desc: "AGENT.md 또는 system-prompt.md 기준으로 현재 런타임 정체성을 표시 중입니다.",
+        title: locale === "ko" ? "프롬프트 소스 확인" : "Prompt source confirmed",
+        desc: locale === "ko"
+          ? "AGENT.md 또는 system-prompt.md 기준으로 현재 런타임 정체성을 표시 중입니다."
+          : "Showing the current runtime identity based on AGENT.md or system-prompt.md.",
         type: "sync",
       });
     }
@@ -1775,23 +1816,25 @@ function AgentDetailView({
       derived.push({
         id: "observed-memory",
         timestamp: "loaded",
-        title: "메모리 규칙 로드",
-        desc: `${memoryCount}개 메모리 항목을 규칙, 주의사항, 미결 과제로 분류했습니다.`,
+        title: locale === "ko" ? "메모리 규칙 로드" : "Memory rules loaded",
+        desc: locale === "ko"
+          ? `${memoryCount}개 메모리 항목을 규칙, 주의사항, 미결 과제로 분류했습니다.`
+          : `Classified ${memoryCount} memory items into decisions, gotchas, and open questions.`,
         type: "sync",
       });
     }
     return [...timelineEvents, ...derived];
-  }, [agentFiles.length, memoryParsed.decisions.length, memoryParsed.gotchas.length, memoryParsed.openQuestions.length, promptContent, timelineEvents]);
+  }, [agentFiles.length, memoryParsed.decisions.length, memoryParsed.gotchas.length, memoryParsed.openQuestions.length, promptContent, timelineEvents, locale]);
 
   // 프롬프트 복사 핸들러
   const handleCopyPrompt = () => {
     navigator.clipboard.writeText(promptContent);
-    showToast("시스템 프롬프트가 클립보드에 복사되었습니다.");
+    showToast(locale === "ko" ? "시스템 프롬프트가 클립보드에 복사되었습니다." : "System prompt copied to clipboard.");
   };
 
   // 프롬프트 기본값 재설정 핸들러
   const handleResetPrompt = async () => {
-    if (!confirm("시스템 프롬프트를 에이전트 기본 룰셋 정의서 프로필로 재설정하시겠습니까?")) return;
+    if (!confirm(locale === "ko" ? "시스템 프롬프트를 에이전트 기본 룰셋 정의서 프로필로 재설정하시겠습니까?" : "Reset the system prompt to the agent's default ruleset profile?")) return;
     const defaultVal = agent?.systemPrompt ?? "# Default Prompt\nNo default instruction available.";
     onPromptDraftChange(defaultVal);
     
@@ -1809,16 +1852,18 @@ function AgentDetailView({
           {
             id: `timeline-${Date.now()}`,
             timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-            title: "시스템 프롬프트 초기화",
-            desc: "프롬프트를 로컬 런타임 내의 에이전트 팩토리 기본 프로필로 강제 재설정했습니다.",
+            title: locale === "ko" ? "시스템 프롬프트 초기화" : "System prompt reset",
+            desc: locale === "ko"
+              ? "프롬프트를 로컬 런타임 내의 에이전트 팩토리 기본 프로필로 강제 재설정했습니다."
+              : "Force-reset the prompt to the agent factory default profile in the local runtime.",
             type: "evolution"
           },
           ...prev
         ]);
-        
-        showToast("프롬프트가 초기 사양으로 재설정되었습니다.");
+
+        showToast(locale === "ko" ? "프롬프트가 초기 사양으로 재설정되었습니다." : "Prompt reset to its initial specification.");
       } catch (e) {
-        showToast("재설정 반영 실패: " + String(e));
+        showToast((locale === "ko" ? "재설정 반영 실패: " : "Failed to apply reset: ") + String(e));
       }
     }
   };
@@ -1840,14 +1885,18 @@ function AgentDetailView({
         {
           id: `timeline-${Date.now()}`,
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          title: targetItem.enabled === false ? "규칙 활성화" : "규칙 비활성화",
-          desc: `'${targetItem.title}' 규칙의 런타임 적용 여부를 전환했습니다.`,
+          title: targetItem.enabled === false
+            ? (locale === "ko" ? "규칙 활성화" : "Rule enabled")
+            : (locale === "ko" ? "규칙 비활성화" : "Rule disabled"),
+          desc: locale === "ko"
+            ? `'${targetItem.title}' 규칙의 런타임 적용 여부를 전환했습니다.`
+            : `Toggled whether the '${targetItem.title}' rule applies at runtime.`,
           type: "sync"
         },
         ...prev
       ]);
     }
-    showToast(`규칙 설정이 저장되었습니다.`);
+    showToast(locale === "ko" ? "규칙 설정이 저장되었습니다." : "Rule setting saved.");
   };
 
   // 개별 규칙 Hub 공유 후보/로컬전용 토글
@@ -1864,14 +1913,20 @@ function AgentDetailView({
         {
           id: `timeline-${Date.now()}`,
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          title: nextSynced ? "클라우드 허브 공유" : "로컬 전용 전환",
-          desc: `'${targetItem.title}' 규칙의 Hub 공유 후보 상태를 전환했습니다.`,
+          title: nextSynced
+            ? (locale === "ko" ? "클라우드 허브 공유" : "Shared to Cloud Hub")
+            : (locale === "ko" ? "로컬 전용 전환" : "Switched to local-only"),
+          desc: locale === "ko"
+            ? `'${targetItem.title}' 규칙의 Hub 공유 후보 상태를 전환했습니다.`
+            : `Toggled the Hub share candidate status of the '${targetItem.title}' rule.`,
           type: "sync"
         },
         ...prev
       ]);
     }
-    showToast(nextSynced ? "Hub 공유 후보로 표시했습니다." : "로컬 프로젝트 전용으로 변경되었습니다.");
+    showToast(nextSynced
+      ? (locale === "ko" ? "Hub 공유 후보로 표시했습니다." : "Marked as a Hub share candidate.")
+      : (locale === "ko" ? "로컬 프로젝트 전용으로 변경되었습니다." : "Changed to local-project-only."));
   };
 
   // 미결 과제를 결정 사항(Decision)으로 반영 승격
@@ -1883,7 +1938,7 @@ function AgentDetailView({
       if (!t) return prev; // 이미 다른 변이로 처리됨
       return {
         ...prev,
-        decisions: [...prev.decisions, { id: t.id, title: t.title, content: t.content + " (미결 항목 승격 반영)", synced: globalHubSync, enabled: true }],
+        decisions: [...prev.decisions, { id: t.id, title: t.title, content: t.content + (locale === "ko" ? " (미결 항목 승격 반영)" : " (promoted from an open question)"), synced: globalHubSync, enabled: true }],
         openQuestions: prev.openQuestions.filter(item => item.id !== id),
       };
     });
@@ -1892,14 +1947,16 @@ function AgentDetailView({
       {
         id: `timeline-${Date.now()}`,
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        title: "의사결정 공식 반영",
-        desc: `미결 과제였던 '${target.title}'건을 검토 후 공식 Decisions 룰로 승격 처리했습니다.`,
+        title: locale === "ko" ? "의사결정 공식 반영" : "Decision formally applied",
+        desc: locale === "ko"
+          ? `미결 과제였던 '${target.title}'건을 검토 후 공식 Decisions 룰로 승격 처리했습니다.`
+          : `Reviewed the open question '${target.title}' and promoted it to an official Decisions rule.`,
         type: "resolve"
       },
       ...prev
     ]);
-    
-    showToast("미결 과제가 결정 사항(Decision)으로 승격 저장되었습니다.");
+
+    showToast(locale === "ko" ? "미결 과제가 결정 사항(Decision)으로 승격 저장되었습니다." : "Open question promoted and saved as a Decision.");
   };
 
   // 온톨로지 인박스 제안 승인 & 메모리 병합
@@ -1927,14 +1984,20 @@ function AgentDetailView({
       {
         id: `timeline-${Date.now()}`,
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        title: target.source === "cloud" ? "허브 공유 지식 풀(Pull)" : "로컬 자동 학습 병합",
-        desc: `'${target.title}' 온톨로지 추천 피드백을 에이전트 지식베이스에 승인 및 결합 완료했습니다.`,
+        title: target.source === "cloud"
+          ? (locale === "ko" ? "허브 공유 지식 풀(Pull)" : "Pulled shared knowledge from Hub")
+          : (locale === "ko" ? "로컬 자동 학습 병합" : "Merged local auto-learning"),
+        desc: locale === "ko"
+          ? `'${target.title}' 온톨로지 추천 피드백을 에이전트 지식베이스에 승인 및 결합 완료했습니다.`
+          : `Approved and merged the ontology suggestion '${target.title}' into the agent's knowledge base.`,
         type: "resolve"
       },
       ...prev
     ]);
-    
-    showToast(`학습 제안 '${target.title}'이 메모리에 병합 반영되었습니다.`);
+
+    showToast(locale === "ko"
+      ? `학습 제안 '${target.title}'이 메모리에 병합 반영되었습니다.`
+      : `Learning suggestion '${target.title}' merged into memory.`);
   };
 
   // 스킬 주입 — 에이전트 폴더에 실제 스킬 파일(.agentlas/skills/<slug>/SKILL.md)을 쓰고,
@@ -1949,14 +2012,16 @@ function AgentDetailView({
         await api.agentFiles.write(node.agentId, `.agentlas/skills/${slug}/SKILL.md`, skillMd);
         fileWritten = true;
       } catch (e) {
-        showToast(`스킬 파일 작성 실패: ${String(e)}`);
+        showToast(locale === "ko" ? `스킬 파일 작성 실패: ${String(e)}` : `Failed to write skill file: ${String(e)}`);
       }
     }
 
     const newDecision = {
       id: `skill-${slug}`,
-      title: `${skill.name} 스킬 주입`,
-      content: `${skill.description} — .agentlas/skills/${slug}/SKILL.md 로 주입됨.`,
+      title: locale === "ko" ? `${skill.name} 스킬 주입` : `${skill.name} skill injected`,
+      content: locale === "ko"
+        ? `${skill.description} — .agentlas/skills/${slug}/SKILL.md 로 주입됨.`
+        : `${skill.description} — injected as .agentlas/skills/${slug}/SKILL.md.`,
       synced: globalHubSync,
       enabled: true,
     };
@@ -1970,16 +2035,22 @@ function AgentDetailView({
       {
         id: `timeline-${Date.now()}`,
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        title: "수동 스킬 주입 (Skill Injection)",
+        title: locale === "ko" ? "수동 스킬 주입 (Skill Injection)" : "Manual skill injection",
         desc: fileWritten
-          ? `'${skill.name}' 스킬을 .agentlas/skills/${slug}/SKILL.md 로 에이전트 폴더에 작성했습니다.`
-          : `'${skill.name}' 스킬을 메모리에 기록했습니다(파일 작성은 건너뜀).`,
+          ? (locale === "ko"
+              ? `'${skill.name}' 스킬을 .agentlas/skills/${slug}/SKILL.md 로 에이전트 폴더에 작성했습니다.`
+              : `Wrote the '${skill.name}' skill to the agent folder at .agentlas/skills/${slug}/SKILL.md.`)
+          : (locale === "ko"
+              ? `'${skill.name}' 스킬을 메모리에 기록했습니다(파일 작성은 건너뜀).`
+              : `Recorded the '${skill.name}' skill in memory (file write skipped).`),
         type: "skill",
       },
       ...prev,
     ]);
 
-    showToast(fileWritten ? `${skill.name} 스킬이 에이전트 폴더에 주입되었습니다.` : `${skill.name} 스킬을 메모리에 기록했습니다.`);
+    showToast(fileWritten
+      ? (locale === "ko" ? `${skill.name} 스킬이 에이전트 폴더에 주입되었습니다.` : `${skill.name} skill injected into the agent folder.`)
+      : (locale === "ko" ? `${skill.name} 스킬을 메모리에 기록했습니다.` : `${skill.name} skill recorded in memory.`));
   };
 
 
@@ -2019,11 +2090,11 @@ function AgentDetailView({
               cursor: "pointer"
             }}
           >
-            ← 회사 개요
+            {locale === "ko" ? "← 회사 개요" : "← Company overview"}
           </button>
           <div style={{ height: 12, width: 1, background: "var(--paper-edge)" }} />
           <div style={{ fontSize: 13, color: "var(--muted-deep)" }}>
-            {agent?.kind === "team" ? "팀 에이전트" : "개별 전문가 에이전트"}
+            {agent?.kind === "team" ? (locale === "ko" ? "팀 에이전트" : "Team agent") : (locale === "ko" ? "개별 전문가 에이전트" : "Individual specialist agent")}
           </div>
           {node.agentId && (
             <button
@@ -2039,15 +2110,12 @@ function AgentDetailView({
                   /* 무시 */
                 }
               }}
-              title="이 일꾼과 새 작업을 시작합니다"
+              title={locale === "ko" ? "이 에이전트와 새 작업을 시작합니다" : "Start a new task with this agent"}
             >
-              ▶ 일 시키기
+              {locale === "ko" ? "▶ 일 시키기" : "▶ Put to work"}
             </button>
           )}
         </div>
-
-        {/* 정보 흐름 연결 맵 (Information Flow Mapper) */}
-        <InformationFlowMapper node={node} />
 
         {/* 에이전트 마스터 헤더 */}
         <header style={{ padding: "20px 24px", background: "var(--paper)", borderBottom: "var(--hairline)", display: "flex", alignItems: "center", gap: 16 }}>
@@ -2078,7 +2146,7 @@ function AgentDetailView({
               </span>
             </div>
             <p style={{ margin: 0, fontSize: 12, color: "var(--muted-deep)" }}>
-              {agent?.tagline || `${node.name}의 규칙 지식베이스 및 계약 런타임`}
+              {agent?.tagline || (locale === "ko" ? `${node.name}의 규칙 지식베이스 및 계약 런타임` : `${node.name}'s rule knowledge base and contract runtime`)}
             </p>
           </div>
         </header>
@@ -2088,10 +2156,10 @@ function AgentDetailView({
           {(["identity", "memory", "playbook", "activity"] as const).map((tab) => {
             const active = activeTab === tab;
             const labels = {
-              identity: "정체성 & 페르소나",
-              memory: "큐레이팅된 메모리",
-              playbook: "플레이북 & 워크플로우",
-              activity: "활동 및 자체 진화"
+              identity: locale === "ko" ? "정체성 & 페르소나" : "Identity & Persona",
+              memory: locale === "ko" ? "큐레이팅된 메모리" : "Curated Memory",
+              playbook: locale === "ko" ? "플레이북 & 워크플로우" : "Playbook & Workflow",
+              activity: locale === "ko" ? "활동 및 자체 진화" : "Activity & Self-Evolution"
             };
             return (
               <button
@@ -2122,7 +2190,7 @@ function AgentDetailView({
           {activeTab === "identity" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 840 }}>
               <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-                <h3 style={{ margin: "0 0 12px 0", fontSize: 14, fontWeight: 700 }}>시스템 프롬프트 (System Prompt)</h3>
+                <h3 style={{ margin: "0 0 12px 0", fontSize: 14, fontWeight: 700 }}>{locale === "ko" ? "시스템 프롬프트 (System Prompt)" : "System Prompt"}</h3>
                 
                 {editingPrompt ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -2147,14 +2215,14 @@ function AgentDetailView({
                         onClick={() => onSetEditingPrompt(false)}
                         style={{ padding: "6px 12px", border: "1px solid var(--paper-edge)", background: "none", borderRadius: 6, cursor: "pointer", fontSize: 12 }}
                       >
-                        취소
+                        {locale === "ko" ? "취소" : "Cancel"}
                       </button>
                       <button
                         onClick={() => void onSavePrompt()}
                         disabled={saving}
                         style={{ padding: "6px 12px", background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 600 }}
                       >
-                        {saving ? "저장 중..." : "반영하기"}
+                        {saving ? (locale === "ko" ? "저장 중..." : "Saving...") : (locale === "ko" ? "반영하기" : "Apply")}
                       </button>
                     </div>
                   </div>
@@ -2171,10 +2239,10 @@ function AgentDetailView({
                             <div style={{ background: "rgba(90, 86, 220, 0.03)", border: "1px solid rgba(90, 86, 220, 0.15)", borderRadius: 8, padding: 12 }}>
                               <h4 style={{ margin: "0 0 8px 0", fontSize: 12, fontWeight: 700, color: "var(--accent)", display: "flex", alignItems: "center", gap: 4 }}>
                                 <IconWand size={12} />
-                                지시사항 (Directives)
+                                {locale === "ko" ? "지시사항 (Directives)" : "Directives"}
                               </h4>
                               {promptSections.directives.length === 0 ? (
-                                <span style={{ fontSize: 11, color: "var(--muted)" }}>감지된 지시사항이 없습니다.</span>
+                                <span style={{ fontSize: 11, color: "var(--muted)" }}>{locale === "ko" ? "감지된 지시사항이 없습니다." : "No directives detected."}</span>
                               ) : (
                                 <ul style={{ paddingLeft: 14, margin: 0, fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.5 }}>
                                   {promptSections.directives.slice(0, 5).map((d, idx) => (
@@ -2188,10 +2256,10 @@ function AgentDetailView({
                             <div style={{ background: "rgba(194, 74, 40, 0.03)", border: "1px solid rgba(194, 74, 40, 0.15)", borderRadius: 8, padding: 12 }}>
                               <h4 style={{ margin: "0 0 8px 0", fontSize: 12, fontWeight: 700, color: "var(--peach-ink)", display: "flex", alignItems: "center", gap: 4 }}>
                                 <IconShield size={12} />
-                                제약조건 (Constraints)
+                                {locale === "ko" ? "제약조건 (Constraints)" : "Constraints"}
                               </h4>
                               {promptSections.constraints.length === 0 ? (
-                                <span style={{ fontSize: 11, color: "var(--muted)" }}>감지된 제약사항이 없습니다.</span>
+                                <span style={{ fontSize: 11, color: "var(--muted)" }}>{locale === "ko" ? "감지된 제약사항이 없습니다." : "No constraints detected."}</span>
                               ) : (
                                 <ul style={{ paddingLeft: 14, margin: 0, fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.5 }}>
                                   {promptSections.constraints.slice(0, 5).map((c, idx) => (
@@ -2205,10 +2273,10 @@ function AgentDetailView({
                             <div style={{ background: "rgba(86, 161, 74, 0.03)", border: "1px solid rgba(86, 161, 74, 0.15)", borderRadius: 8, padding: 12 }}>
                               <h4 style={{ margin: "0 0 8px 0", fontSize: 12, fontWeight: 700, color: "var(--green-deep)", display: "flex", alignItems: "center", gap: 4 }}>
                                 <IconLayers size={12} />
-                                입출력 형태 (Formats)
+                                {locale === "ko" ? "입출력 형태 (Formats)" : "I/O Formats"}
                               </h4>
                               {promptSections.formats.length === 0 ? (
-                                <span style={{ fontSize: 11, color: "var(--muted)" }}>감지된 규격정보가 없습니다.</span>
+                                <span style={{ fontSize: 11, color: "var(--muted)" }}>{locale === "ko" ? "감지된 규격정보가 없습니다." : "No format info detected."}</span>
                               ) : (
                                 <ul style={{ paddingLeft: 14, margin: 0, fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.5 }}>
                                   {promptSections.formats.slice(0, 5).map((f, idx) => (
@@ -2223,7 +2291,7 @@ function AgentDetailView({
                           {/* 전체 원문 아코디언 */}
                           <details style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)" }}>
                             <summary style={{ padding: "8px 12px", fontSize: 12, fontWeight: 600, color: "var(--ink-soft)", cursor: "pointer", outline: "none" }}>
-                              시스템 프롬프트 전체 원문(Source) 보기
+                              {locale === "ko" ? "시스템 프롬프트 전체 원문(Source) 보기" : "View full system prompt source"}
                             </summary>
                             <pre
                               style={{
@@ -2240,7 +2308,7 @@ function AgentDetailView({
                                 overflowY: "auto"
                               }}
                             >
-                              {promptContent || "로드된 프롬프트 내용이 없습니다."}
+                              {promptContent || (locale === "ko" ? "로드된 프롬프트 내용이 없습니다." : "No prompt content loaded.")}
                             </pre>
                           </details>
 
@@ -2261,7 +2329,7 @@ function AgentDetailView({
                                   color: "var(--ink-soft)"
                                 }}
                               >
-                                프롬프트 복사
+                                {locale === "ko" ? "프롬프트 복사" : "Copy prompt"}
                               </button>
                               <button
                                 onClick={handleResetPrompt}
@@ -2277,7 +2345,7 @@ function AgentDetailView({
                                   color: "var(--peach-ink)"
                                 }}
                               >
-                                기본값 재설정
+                                {locale === "ko" ? "기본값 재설정" : "Reset to default"}
                               </button>
                             </div>
                             {agent?.localPath && (
@@ -2299,7 +2367,7 @@ function AgentDetailView({
                                 }}
                               >
                                 <IconEdit size={12} />
-                                프롬프트 편집
+                                {locale === "ko" ? "프롬프트 편집" : "Edit prompt"}
                               </button>
                             )}
                           </div>
@@ -2323,26 +2391,28 @@ function AgentDetailView({
               {/* 매핑 메타 데이터 */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-                  <h4 style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 700 }}>런타임 정보</h4>
+                  <h4 style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 700 }}>{locale === "ko" ? "런타임 정보" : "Runtime info"}</h4>
                   <div style={{ fontSize: 12.5, lineHeight: 1.8, color: "var(--ink-soft)" }}>
-                    <div><strong>에이전트 ID:</strong> {node.agentId ?? "미설치(임시)"}</div>
-                    <div><strong>적용 런타임:</strong> {effectiveRuntimeOverride ? selectionSummary(effectiveRuntimeOverride.selection) : "전역 자동 라우팅"}</div>
-                    <div><strong>신뢰 등급:</strong> Trust {agent?.trustGrade ?? "B"}</div>
+                    <div><strong>{locale === "ko" ? "에이전트 ID:" : "Agent ID:"}</strong> {node.agentId ?? (locale === "ko" ? "미설치(임시)" : "Not installed (temporary)")}</div>
+                    <div><strong>{locale === "ko" ? "적용 런타임:" : "Active runtime:"}</strong> {effectiveRuntimeOverride ? selectionSummary(effectiveRuntimeOverride.selection, locale) : (locale === "ko" ? "전역 자동 라우팅" : "Global auto-routing")}</div>
+                    <div><strong>{locale === "ko" ? "신뢰 등급:" : "Trust grade:"}</strong> Trust {agent?.trustGrade ?? "B"}</div>
                     {agent && (() => {
                       const own = classifyAgent(agent);
                       return (
                         <div className="agent-ownership-row" data-owned={own.owned ? "true" : "false"}>
-                          <strong>소유:</strong>{" "}
+                          <strong>{locale === "ko" ? "소유:" : "Ownership:"}</strong>{" "}
                           <span className="agent-ownership-badge" data-owned={own.owned ? "true" : "false"}>
-                            {own.owned ? "내 직원 · owned" : "빌린 게스트 · borrowed"}
+                            {own.owned
+                              ? (locale === "ko" ? "내 직원 · owned" : "My staff · owned")
+                              : (locale === "ko" ? "빌린 게스트 · borrowed" : "Borrowed guest · borrowed")}
                           </span>
                           <div className="agent-ownership-path">{own.localPath ?? own.origin}</div>
                           <div className="agent-ownership-note">
                             {own.owned
                               ? own.localPath
-                                ? "내 디스크의 실제 폴더 — 게시자가 사라져도 안 죽는다."
-                                : "내 라이브러리에 설치됨 — 내 자산이다."
-                              : "원격 게스트 — 게시자가 내리면 사용 불가. Fork 하면 내 것이 된다."}
+                                ? (locale === "ko" ? "내 디스크의 실제 폴더 — 게시자가 사라져도 안 죽는다." : "A real folder on my disk — it survives even if the publisher disappears.")
+                                : (locale === "ko" ? "내 라이브러리에 설치됨 — 내 자산이다." : "Installed in my library — it's my asset.")
+                              : (locale === "ko" ? "원격 게스트 — 게시자가 내리면 사용 불가. Fork 하면 내 것이 된다." : "Remote guest — unusable if the publisher takes it down. Fork it to make it yours.")}
                           </div>
                         </div>
                       );
@@ -2350,7 +2420,7 @@ function AgentDetailView({
                   </div>
                 </div>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-                  <h4 style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 700 }}>외부 도구연동</h4>
+                  <h4 style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 700 }}>{locale === "ko" ? "외부 도구연동" : "External tool integrations"}</h4>
                   <div style={{ fontSize: 12.5, color: "var(--ink-soft)" }}>
                     {agent?.mcpServers && agent.mcpServers.length > 0 ? (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
@@ -2359,7 +2429,7 @@ function AgentDetailView({
                         ))}
                       </div>
                     ) : (
-                      "연동된 외부 MCP 서버 도구가 없습니다."
+                      locale === "ko" ? "연동된 외부 MCP 서버 도구가 없습니다." : "No external MCP server tools connected."
                     )}
                   </div>
                 </div>
@@ -2374,16 +2444,18 @@ function AgentDetailView({
               {/* 메모리 요약 — 비개발자 어휘로 한 문장. 그래프는 아래의 2차(고급) 보기에서. */}
               <div className="memory-summary">
                 <div className="memory-summary-line">
-                  이 일꾼이 기억하는 것: 결정 <strong>{memoryParsed.decisions.length}</strong>
-                  {" · "}주의 <strong>{memoryParsed.gotchas.length}</strong>
-                  {" · "}미결 <strong>{memoryParsed.openQuestions.length}</strong>
+                  {locale === "ko" ? "이 에이전트가 기억하는 것: 결정 " : "What this agent remembers: Decisions "}<strong>{memoryParsed.decisions.length}</strong>
+                  {" · "}{locale === "ko" ? "주의 " : "Gotchas "}<strong>{memoryParsed.gotchas.length}</strong>
+                  {" · "}{locale === "ko" ? "미결 " : "Open "}<strong>{memoryParsed.openQuestions.length}</strong>
                   {(() => {
                     const synced = [...memoryParsed.decisions, ...memoryParsed.gotchas].filter((r) => r.synced).length;
-                    return synced > 0 ? <> · 허브 공유 <strong>{synced}</strong></> : null;
+                    return synced > 0 ? <> · {locale === "ko" ? "허브 공유 " : "Hub-shared "}<strong>{synced}</strong></> : null;
                   })()}
                 </div>
                 <div className="memory-summary-note">
-                  기억은 내 디스크의 markdown 파일로 저장됩니다 — 켜고 끈 상태도 파일에 함께 남아 새로고침해도 유지됩니다.
+                  {locale === "ko"
+                    ? "기억은 내 디스크의 markdown 파일로 저장됩니다 — 켜고 끈 상태도 파일에 함께 남아 새로고침해도 유지됩니다."
+                    : "Memory is stored as markdown files on my disk — the on/off state is saved with the file too, so it persists across refreshes."}
                 </div>
               </div>
 
@@ -2393,7 +2465,7 @@ function AgentDetailView({
                   <div style={{ background: "var(--fill-1)", padding: "10px 16px", display: "flex", alignItems: "center", justifyItems: "space-between", borderBottom: "1px solid var(--accent-soft)" }}>
                     <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 700, color: "var(--accent)" }}>
                       <IconBrain size={14} />
-                      온톨로지 인박스 (학습된 정보 추천)
+                      {locale === "ko" ? "온톨로지 인박스 (학습된 정보 추천)" : "Ontology inbox (learned-info suggestions)"}
                     </div>
                     <span style={{ fontSize: 10, background: "var(--accent)", color: "#fff", padding: "1px 6px", borderRadius: 999 }}>{ontologyInbox.length}</span>
                   </div>
@@ -2403,7 +2475,7 @@ function AgentDetailView({
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
                             <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 5px", borderRadius: 4, background: item.source === "cloud" ? "var(--accent)" : "var(--fill-2)", color: item.source === "cloud" ? "#fff" : "var(--accent)" }}>
-                              {item.source === "cloud" ? "허브 추천" : "로컬 학습"}
+                              {item.source === "cloud" ? (locale === "ko" ? "허브 추천" : "Hub suggestion") : (locale === "ko" ? "로컬 학습" : "Local learning")}
                             </span>
                             <strong style={{ fontSize: 12.5, color: "var(--ink)" }}>{item.title}</strong>
                           </div>
@@ -2423,32 +2495,13 @@ function AgentDetailView({
                             flexShrink: 0
                           }}
                         >
-                          반영 승인
+                          {locale === "ko" ? "반영 승인" : "Approve"}
                         </button>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
-
-              {/* Hub 공유 상태 제어 헤더 */}
-              <div style={{ display: "flex", alignItems: "center", justifyItems: "space-between", padding: "12px 16px", background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)" }}>
-                <div style={{ flex: 1 }}>
-                  <h4 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>Hub 공유 상태 설정</h4>
-                  <p style={{ margin: 0, fontSize: 11, color: "var(--muted-deep)" }}>규칙 생성 시 공유 후보 플래그를 함께 저장합니다. 실제 원격 업로드는 Hub/Cloud publish 단계에서 처리됩니다.</p>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 11, fontWeight: 600, color: globalHubSync ? "var(--green-deep)" : "var(--muted)" }}>
-                    {globalHubSync ? "Hub 공유 후보" : "로컬 단독"}
-                  </span>
-                  <input
-                    type="checkbox"
-                    checked={globalHubSync}
-                    onChange={(e) => setGlobalHubSync(e.target.checked)}
-                    style={{ width: 34, height: 18, cursor: "pointer" }}
-                  />
-                </div>
-              </div>
 
               {/* 메모리 리스트 */}
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -2457,11 +2510,11 @@ function AgentDetailView({
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
                     <IconCheck size={14} style={{ color: "var(--green-deep)" }} />
-                    결정 사항 (Decisions)
+                    {locale === "ko" ? "결정 사항 (Decisions)" : "Decisions"}
                   </h3>
                   {memoryParsed.decisions.length === 0 ? (
                     <div style={{ padding: 16, background: "var(--paper)", border: "1px dashed var(--paper-edge)", borderRadius: "var(--radius-md)", fontSize: 12, color: "var(--muted)" }}>
-                      기록된 결정 사항이 없습니다.
+                      {locale === "ko" ? "기록된 결정 사항이 없습니다." : "No decisions recorded."}
                     </div>
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -2492,7 +2545,7 @@ function AgentDetailView({
                                 {/* 클라우드 허브 공유 상태 */}
                                 <button
                                   onClick={() => handleToggleSync("decisions", item.id)}
-                                  title={item.synced ? "허브 동기화됨" : "로컬 전용 규칙"}
+                                  title={item.synced ? (locale === "ko" ? "허브 동기화됨" : "Synced to Hub") : (locale === "ko" ? "로컬 전용 규칙" : "Local-only rule")}
                                   style={{
                                     border: "none",
                                     background: "none",
@@ -2528,11 +2581,11 @@ function AgentDetailView({
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
                     <IconShield size={14} style={{ color: "var(--peach-ink)" }} />
-                    주의 사항 (Gotchas)
+                    {locale === "ko" ? "주의 사항 (Gotchas)" : "Gotchas"}
                   </h3>
                   {memoryParsed.gotchas.length === 0 ? (
                     <div style={{ padding: 16, background: "var(--paper)", border: "1px dashed var(--paper-edge)", borderRadius: "var(--radius-md)", fontSize: 12, color: "var(--muted)" }}>
-                      기록된 주의 사항이 없습니다.
+                      {locale === "ko" ? "기록된 주의 사항이 없습니다." : "No gotchas recorded."}
                     </div>
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -2591,11 +2644,11 @@ function AgentDetailView({
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
                     <IconWand size={14} style={{ color: "var(--accent)" }} />
-                    미결 과제 (Open Questions)
+                    {locale === "ko" ? "미결 과제 (Open Questions)" : "Open Questions"}
                   </h3>
                   {memoryParsed.openQuestions.length === 0 ? (
                     <div style={{ padding: 16, background: "var(--paper)", border: "1px dashed var(--paper-edge)", borderRadius: "var(--radius-md)", fontSize: 12, color: "var(--muted)" }}>
-                      기록된 미결 과제가 없습니다.
+                      {locale === "ko" ? "기록된 미결 과제가 없습니다." : "No open questions recorded."}
                     </div>
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -2631,7 +2684,7 @@ function AgentDetailView({
                               whiteSpace: "nowrap"
                             }}
                           >
-                            결정 승격
+                            {locale === "ko" ? "결정 승격" : "Promote to decision"}
                           </button>
                         </div>
                       ))}
@@ -2641,40 +2694,19 @@ function AgentDetailView({
 
               </div>
 
-              {/* 스킬 주입 활성화 버튼 */}
-              <div style={{ display: "flex", justifyContent: "flex-start", marginTop: 8 }}>
-                <button
-                  onClick={() => onSetSkillDrawerOpen(true)}
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 6,
-                    padding: "10px 16px",
-                    background: "var(--paper)",
-                    border: "1px solid var(--paper-edge)",
-                    borderRadius: "var(--radius-md)",
-                    fontSize: 12.5,
-                    fontWeight: 600,
-                    cursor: "pointer",
-                    boxShadow: "var(--shadow-1)"
-                  }}
-                >
-                  <IconPlus size={12} />
-                  수동 스킬 주입 (Manual Skill Evolution)
-                </button>
-              </div>
-
               {/* 메모리 진화 히스토리 타임라인 */}
               <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
                 <h4 style={{ margin: "0 0 16px 0", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 6, color: "var(--ink)" }}>
                   <IconRoute size={14} style={{ color: "var(--accent)" }} />
-                  메모리 진화 히스토리 (Evolution Timeline)
+                  {locale === "ko" ? "메모리 진화 히스토리 (Evolution Timeline)" : "Memory Evolution Timeline"}
                 </h4>
                 
                 <div style={{ display: "flex", flexDirection: "column", gap: 16, position: "relative", paddingLeft: 16, borderLeft: "2px solid var(--paper-edge)", marginLeft: 6 }}>
                   {observedTimelineEvents.length === 0 && (
                     <div style={{ fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.5 }}>
-                      아직 기록된 진화 이벤트가 없습니다. 메모리 승격, 스킬 주입, 프롬프트 진화를 실행하면 여기에 남습니다.
+                      {locale === "ko"
+                        ? "아직 기록된 진화 이벤트가 없습니다. 메모리 승격, 스킬 주입, 프롬프트 진화를 실행하면 여기에 남습니다."
+                        : "No evolution events recorded yet. Promoting memory, injecting skills, or evolving the prompt will appear here."}
                     </div>
                   )}
                   {observedTimelineEvents.map((evt) => {
@@ -2724,13 +2756,13 @@ function AgentDetailView({
           {activeTab === "playbook" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 840 }}>
               <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-                <h4 style={{ margin: "0 0 14px 0", fontSize: 13.5, fontWeight: 700 }}>실행 루프 (Runtime Loop)</h4>
+                <h4 style={{ margin: "0 0 14px 0", fontSize: 13.5, fontWeight: 700 }}>{locale === "ko" ? "실행 루프 (Runtime Loop)" : "Runtime Loop"}</h4>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 }}>
                   {[
-                    { label: "Route", desc: "Chat 또는 Hub 호출에서 이 에이전트가 후보가 됩니다.", icon: IconRoute },
-                    { label: "Context", desc: "프로젝트, Env, 메모리 규칙이 invocation에 주입됩니다.", icon: IconBrain },
-                    { label: "Tools", desc: "필요한 MCP 서버와 로컬 권한을 확인합니다.", icon: IconLayers },
-                    { label: "Persist", desc: "결정, 주의사항, 진화 로그를 로컬 파일에 남깁니다.", icon: IconPaperclip },
+                    { label: "Route", desc: locale === "ko" ? "Chat 또는 Hub 호출에서 이 에이전트가 후보가 됩니다." : "This agent becomes a candidate on Chat or Hub invocations.", icon: IconRoute },
+                    { label: "Context", desc: locale === "ko" ? "프로젝트, Env, 메모리 규칙이 invocation에 주입됩니다." : "Project, env, and memory rules are injected into the invocation.", icon: IconBrain },
+                    { label: "Tools", desc: locale === "ko" ? "필요한 MCP 서버와 로컬 권한을 확인합니다." : "Checks the required MCP servers and local permissions.", icon: IconLayers },
+                    { label: "Persist", desc: locale === "ko" ? "결정, 주의사항, 진화 로그를 로컬 파일에 남깁니다." : "Records decisions, gotchas, and evolution logs to local files.", icon: IconPaperclip },
                   ].map((item) => {
                     const Icon = item.icon;
                     return (
@@ -2750,29 +2782,31 @@ function AgentDetailView({
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
                   <h4 style={{ margin: "0 0 12px 0", fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
                     <IconRoute size={14} style={{ color: "var(--accent)" }} />
-                    라우팅 카드
+                    {locale === "ko" ? "라우팅 카드" : "Routing card"}
                   </h4>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 12, color: "var(--ink-soft)", lineHeight: 1.55 }}>
-                    <div><strong>역할:</strong> {node.role || "자동 라우팅"}</div>
-                    <div><strong>Agent ID:</strong> {node.agentId ?? "미설치 노드"}</div>
-                    <div><strong>적용 런타임:</strong> {effectiveRuntimeOverride ? selectionSummary(effectiveRuntimeOverride.selection) : "런타임 자동 선택"}</div>
-                    <div><strong>신뢰 등급:</strong> Trust {agent?.trustGrade ?? "B"}</div>
+                    <div><strong>{locale === "ko" ? "역할:" : "Role:"}</strong> {node.role || (locale === "ko" ? "자동 라우팅" : "Auto-routing")}</div>
+                    <div><strong>Agent ID:</strong> {node.agentId ?? (locale === "ko" ? "미설치 노드" : "Uninstalled node")}</div>
+                    <div><strong>{locale === "ko" ? "적용 런타임:" : "Active runtime:"}</strong> {effectiveRuntimeOverride ? selectionSummary(effectiveRuntimeOverride.selection, locale) : (locale === "ko" ? "런타임 자동 선택" : "Automatic runtime selection")}</div>
+                    <div><strong>{locale === "ko" ? "신뢰 등급:" : "Trust grade:"}</strong> Trust {agent?.trustGrade ?? "B"}</div>
                     {agent && (
                       <div>
-                        <strong>소유:</strong>{" "}
+                        <strong>{locale === "ko" ? "소유:" : "Ownership:"}</strong>{" "}
                         <span className="agent-ownership-badge" data-owned={classifyAgent(agent).owned ? "true" : "false"}>
-                          {classifyAgent(agent).owned ? "내 직원 · owned" : "빌린 게스트 · borrowed"}
+                          {classifyAgent(agent).owned
+                            ? (locale === "ko" ? "내 직원 · owned" : "My staff · owned")
+                            : (locale === "ko" ? "빌린 게스트 · borrowed" : "Borrowed guest · borrowed")}
                         </span>
                       </div>
                     )}
-                    <div><strong>호출 경로:</strong> Chat 멘션, Team 라우팅, Hub 후보 검색</div>
+                    <div><strong>{locale === "ko" ? "호출 경로:" : "Invocation paths:"}</strong> {locale === "ko" ? "Chat 멘션, Team 라우팅, Hub 후보 검색" : "Chat mentions, Team routing, Hub candidate search"}</div>
                   </div>
                 </div>
 
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
                   <h4 style={{ margin: "0 0 12px 0", fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
                     <IconLayers size={14} style={{ color: "var(--accent)" }} />
-                    도구와 파일
+                    {locale === "ko" ? "도구와 파일" : "Tools & files"}
                   </h4>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
                     <MetricMini label="Files" value={agentFiles.length} />
@@ -2790,17 +2824,21 @@ function AgentDetailView({
                     </div>
                   ) : (
                     <p style={{ margin: 0, fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.5 }}>
-                      연결된 MCP 서버가 없습니다. Hub Plugin에서 필요한 도구를 설치하면 이 에이전트의 도구 레이어와 함께 확인할 수 있습니다.
+                      {locale === "ko"
+                        ? "연결된 MCP 서버가 없습니다. Hub Plugin에서 필요한 도구를 설치하면 이 에이전트의 도구 레이어와 함께 확인할 수 있습니다."
+                        : "No MCP servers connected. Install the tools you need from Hub Plugin to see them alongside this agent's tool layer."}
                     </p>
                   )}
                 </div>
               </div>
 
               <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-                <h4 style={{ margin: "0 0 12px 0", fontSize: 13.5, fontWeight: 700 }}>로컬 플레이북 소스</h4>
+                <h4 style={{ margin: "0 0 12px 0", fontSize: 13.5, fontWeight: 700 }}>{locale === "ko" ? "로컬 플레이북 소스" : "Local playbook source"}</h4>
                 {agentFiles.length === 0 ? (
                   <div style={{ padding: 14, border: "1px dashed var(--paper-edge)", borderRadius: 10, color: "var(--muted-deep)", fontSize: 12 }}>
-                    아직 읽힌 로컬 파일이 없습니다. 설치된 에이전트를 선택하면 AGENT.md, memory.md, skill 파일을 여기에서 확인합니다.
+                    {locale === "ko"
+                      ? "아직 읽힌 로컬 파일이 없습니다. 설치된 에이전트를 선택하면 AGENT.md, memory.md, skill 파일을 여기에서 확인합니다."
+                      : "No local files read yet. Select an installed agent to view its AGENT.md, memory.md, and skill files here."}
                   </div>
                 ) : (
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
@@ -2823,19 +2861,19 @@ function AgentDetailView({
               {/* 실 지표 — 이 에이전트의 실제 메모리·타임라인에서 도출 */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>활성 규칙 (Active rules)</div>
+                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>{locale === "ko" ? "활성 규칙 (Active rules)" : "Active rules"}</div>
                   <div style={{ fontSize: 24, fontWeight: 700, color: "var(--green-deep)" }}>
                     {[...memoryParsed.decisions, ...memoryParsed.gotchas].filter((r) => r.enabled !== false).length}
                   </div>
                 </div>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>메모리 항목 (Memory items)</div>
+                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>{locale === "ko" ? "메모리 항목 (Memory items)" : "Memory items"}</div>
                   <div style={{ fontSize: 24, fontWeight: 700, color: "var(--accent)" }}>
                     {memoryParsed.decisions.length + memoryParsed.gotchas.length + memoryParsed.openQuestions.length}
                   </div>
                 </div>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>진화·활동 이력 (Events)</div>
+                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>{locale === "ko" ? "진화·활동 이력 (Events)" : "Evolution & activity log (Events)"}</div>
                   <div style={{ fontSize: 24, fontWeight: 700, color: "var(--peach-ink)" }}>{observedTimelineEvents.length}</div>
                 </div>
               </div>
@@ -2845,17 +2883,22 @@ function AgentDetailView({
                 <div style={{ display: "flex", justifyItems: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
                   <h4 style={{ margin: 0, fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
                     <IconWand size={14} style={{ color: "var(--accent)" }} />
-                    자가 프롬프트 진화 제안 (Agent Evolution Proposal)
+                    {locale === "ko" ? "자가 프롬프트 진화 제안 (Agent Evolution Proposal)" : "Agent Evolution Proposal"}
                   </h4>
                   <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 4, background: "rgba(245,201,122,0.16)", color: "var(--amber-deep)", fontWeight: 700 }}>
-                    {evolutionApproved ? "적용 완료" : hasPendingEvolution ? "업그레이드 대기" : "최신 상태"}
+                    {evolutionApproved
+                      ? (locale === "ko" ? "적용 완료" : "Applied")
+                      : hasPendingEvolution
+                        ? (locale === "ko" ? "업그레이드 대기" : "Upgrade pending")
+                        : (locale === "ko" ? "최신 상태" : "Up to date")}
                   </span>
                 </div>
 
                 {!hasPendingEvolution && !evolutionApproved && (
                   <div style={{ fontSize: 12, color: "var(--muted-deep)", padding: "12px 4px", lineHeight: 1.6 }}>
-                    메모리의 활성 규칙이 모두 시스템 프롬프트에 반영되어 있습니다. 메모리 탭에서 새 결정·주의 규칙이
-                    학습되면 여기에 프롬프트 진화 제안이 나타납니다.
+                    {locale === "ko"
+                      ? "메모리의 활성 규칙이 모두 시스템 프롬프트에 반영되어 있습니다. 메모리 탭에서 새 결정·주의 규칙이 학습되면 여기에 프롬프트 진화 제안이 나타납니다."
+                      : "All active memory rules are already reflected in the system prompt. When new decision or gotcha rules are learned in the Memory tab, a prompt evolution proposal will appear here."}
                   </div>
                 )}
 
@@ -2865,7 +2908,7 @@ function AgentDetailView({
                   {/* 기존 버젼 */}
                   <div style={{ background: "rgba(255,138,138,0.04)" }}>
                     <div style={{ background: "rgba(255,138,138,0.08)", padding: "6px 12px", borderBottom: "1px solid var(--paper-edge)", fontSize: 11.5, fontWeight: 600, color: "var(--red-deep)" }}>
-                      기존 버전 (Current)
+                      {locale === "ko" ? "기존 버전 (Current)" : "Current"}
                     </div>
                     <pre style={{ margin: 0, padding: 12, fontSize: 10.5, fontFamily: "var(--font-mono)", lineHeight: 1.5, whiteSpace: "pre-wrap", maxHeight: 180, overflowY: "auto" }}>
                       {evolutionDiff.old}
@@ -2874,7 +2917,7 @@ function AgentDetailView({
                   {/* 제안 버젼 */}
                   <div style={{ background: "rgba(168,217,155,0.04)", borderLeft: "1px solid var(--paper-edge)" }}>
                     <div style={{ background: "rgba(168,217,155,0.08)", padding: "6px 12px", borderBottom: "1px solid var(--paper-edge)", fontSize: 11.5, fontWeight: 600, color: "var(--green-deep)" }}>
-                      개선 제안 (Evolved Draft)
+                      {locale === "ko" ? "개선 제안 (Evolved Draft)" : "Evolved Draft"}
                     </div>
                     <pre style={{ margin: 0, padding: 12, fontSize: 10.5, fontFamily: "var(--font-mono)", lineHeight: 1.5, whiteSpace: "pre-wrap", maxHeight: 180, overflowY: "auto" }}>
                       {evolutionDiff.new}
@@ -2892,8 +2935,10 @@ function AgentDetailView({
                           {
                             id: `timeline-${Date.now()}`,
                             timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-                            title: "자가 프롬프트 진화 승인",
-                            desc: "AI 개선 제안 드래프트를 에이전트 마스터 정의서(AGENT.md)에 정식 적용 및 저장했습니다.",
+                            title: locale === "ko" ? "자가 프롬프트 진화 승인" : "Self-prompt evolution approved",
+                            desc: locale === "ko"
+                              ? "AI 개선 제안 드래프트를 에이전트 마스터 정의서(AGENT.md)에 정식 적용 및 저장했습니다."
+                              : "Officially applied and saved the AI improvement draft to the agent master definition (AGENT.md).",
                             type: "evolution"
                           },
                           ...prev
@@ -2910,7 +2955,7 @@ function AgentDetailView({
                         cursor: "pointer"
                       }}
                     >
-                      진화 제안 승인 및 적용
+                      {locale === "ko" ? "진화 제안 승인 및 적용" : "Approve & apply evolution"}
                     </button>
                   </div>
                 )}
@@ -2923,46 +2968,6 @@ function AgentDetailView({
 
         </div>
       </div>
-
-      {/* 4. 우측 스킬 인젝션 서랍 (Skill Drawer) */}
-      {skillDrawerOpen && (
-        <aside
-          className="glass-thin"
-          style={{
-            width: 280,
-            flexShrink: 0,
-            borderLeft: "1px solid var(--glass-border)",
-            display: "flex",
-            flexDirection: "column",
-          }}
-        >
-          <header style={{ padding: "14px 16px", borderBottom: "1px solid var(--glass-border)", display: "flex", justifyItems: "space-between", alignItems: "center" }}>
-            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)", flex: 1 }}>사용 가능한 스킬 카탈로그</span>
-            <button onClick={() => onSetSkillDrawerOpen(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted-deep)" }}>
-              <IconClose size={16} />
-            </button>
-          </header>
-          <div style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-            {availableSkills.map((sk) => (
-              <div
-                key={sk.slug}
-                onClick={() => handleInjectSkill(sk)}
-                style={{
-                  background: "var(--paper)",
-                  border: "1px solid var(--paper-edge)",
-                  borderRadius: "var(--radius-sm)",
-                  padding: 10,
-                  cursor: "pointer",
-                  transition: "all 0.15s",
-                }}
-              >
-                <div style={{ fontSize: 12, fontWeight: 700, color: "var(--accent)", marginBottom: 2 }}>{sk.name}</div>
-                <div style={{ fontSize: 11, color: "var(--ink-soft)" }}>{sk.description}</div>
-              </div>
-            ))}
-          </div>
-        </aside>
-      )}
 
     </div>
   );

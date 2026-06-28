@@ -50,6 +50,17 @@ export interface ChatQuestion {
   answer?: string[];
 }
 
+/** PRD→build→QA 같은 다단계 파이프라인의 한 단계 — 추천 시트에서 pipeline 을 고르면 시드된다(계획 가시화). */
+export interface PipelineStage {
+  order: number;
+  /** 엔진 stage 키(plan/build/verify 등). */
+  kind: string;
+  agentName?: string;
+  agentId?: string;
+  /** 실행 상태 — 라이브 이벤트가 이 단계의 에이전트를 낼 때만 갱신(매칭 안 되면 미정으로 둔다 — 가짜 진행 금지). */
+  status?: "pending" | "running" | "done";
+}
+
 export interface StreamMessage {
   id: string;
   role: "user" | "agent" | "system";
@@ -70,6 +81,8 @@ export interface StreamMessage {
   questions?: ChatQuestion[];
   /** 생성 토큰 수 — "N tokens" 표시 (Claude Code 스타일) */
   tokens?: number;
+  /** 파이프라인 단계 계획 — 있으면 메시지 상단에 스테퍼로 표시(PRD→배포 가시화). */
+  pipeline?: PipelineStage[];
 }
 
 export interface ChatEmptyDirectory {
@@ -230,6 +243,9 @@ function Bubble({
         <AgentAvatar name={agentName} tone={agentTone} size={28} />
       </div>
       <div style={{ minWidth: 0, flex: 1, paddingTop: 1 }}>
+        {message.pipeline && message.pipeline.length > 0 && (
+          <PipelineStepper stages={message.pipeline} running={Boolean(message.busy)} />
+        )}
         {showWorking && (
           <WorkingPanel
             steps={message.steps ?? []}
@@ -557,6 +573,71 @@ function QuestionBlock({
           {t("ask.submit")}
         </button>
       )}
+    </div>
+  );
+}
+
+// ── 파이프라인 스테퍼 ──────────────────────────────────────
+// 추천 시트에서 pipeline 을 고르면 시드된 단계 계획(PRD→배포)을 메시지 상단에 가로 스테퍼로 보여준다.
+// 단계별 실시간 상태는 아직 신뢰성 있게 추적할 수 없으므로(엔진 이벤트→단계 매핑은 후속), 전체
+// 진행/완료만 정직하게 표시하고 단계는 계획으로 노출한다.
+function PipelineStepper({ stages, running }: { stages: PipelineStage[]; running: boolean }) {
+  const { t, locale } = useT();
+  const stageLabel = (kind: string): string => {
+    const key = (kind || "").toLowerCase();
+    if (key === "plan") return locale === "ko" ? "기획" : "Plan";
+    if (key === "build") return locale === "ko" ? "개발" : "Build";
+    if (key === "verify" || key === "qa") return locale === "ko" ? "검증·QA" : "Verify · QA";
+    if (key === "deploy") return locale === "ko" ? "배포" : "Deploy";
+    return kind;
+  };
+  return (
+    <div
+      style={{
+        border: "1px solid var(--paper-edge)",
+        background: "var(--fill-1)",
+        padding: "8px 10px",
+        marginBottom: 10,
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 700, color: "var(--ink-soft)" }}>
+        <span>{t("chatstream.pipeline")}</span>
+        <span style={{ opacity: 0.7 }}>· {running ? t("chatstream.running") : t("chatstream.done")}</span>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 4 }}>
+        {stages.map((s, i) => {
+          const st = s.status;
+          const marker = st === "done" ? "✓" : st === "running" ? "●" : String(s.order);
+          const markerColor =
+            st === "done" ? "var(--green-deep)" : st === "running" ? "var(--amber-deep)" : "var(--ink-soft)";
+          return (
+            <span key={s.order} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  border: st === "running" ? "1px solid var(--amber-deep)" : "1px solid var(--paper-edge)",
+                  background: "#fff",
+                  padding: "2px 8px",
+                  borderRadius: 3,
+                  opacity: !st || st === "pending" ? 0.72 : 1,
+                }}
+                title={s.agentName ?? undefined}
+              >
+                <span style={{ color: markerColor, fontWeight: 700 }}>{marker}</span>
+                <span>{stageLabel(s.kind)}</span>
+              </span>
+              {i < stages.length - 1 && <span style={{ color: "var(--ink-soft)", fontSize: 12 }}>→</span>}
+            </span>
+          );
+        })}
+      </div>
     </div>
   );
 }

@@ -29,6 +29,9 @@ export default function DashboardPage() {
               <OrgTree />
             </div>
             <div className="dashboard-flow-column">
+              <div className="dashboard-panel">
+                <DashboardActivity />
+              </div>
               <div className="dashboard-panel dashboard-engine-panel">
                 <EngineUsage />
               </div>
@@ -38,9 +41,6 @@ export default function DashboardPage() {
               </div>
               <div className="dashboard-panel">
                 <HubBorrowRoom />
-              </div>
-              <div className="dashboard-panel">
-              <DashboardActivity />
               </div>
             </div>
           </div>

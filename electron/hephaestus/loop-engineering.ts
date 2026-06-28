@@ -13,7 +13,7 @@ export const STORMBREAKER_LONG_RUN_MARKER = "<<stormbreaker-long-run>>";
 export const STORMBREAKER_LONG_RUN_SCHEDULE = "every-30m";
 
 export const STORMBREAKER_LOOP_PROTOCOL = [
-  "Stormbreaker Loop is always on in Agentlas Desktop chat. There is no user-facing Stormbreaker toggle.",
+  "Stormbreaker Loop is always on as a baseline in Agentlas Desktop chat. The chat input also exposes a Stormbreaker toggle: turning it on requests an explicit, force-robust run (verify/repair loop carried to completion), which the host surfaces as a one-time cost/time warning.",
   "Use it automatically for non-trivial work: app, game, site, agent, automation, trading/ops, deployment, debugging, data/report generation, multi-step research, or any task with files, tools, tests, screenshots, or external verification.",
   "Simple questions can be answered directly. Loop-worthy work must follow: scope-lock -> goal decomposition -> sub-agent/work-packet architecture -> plan-lock -> act -> verify -> bounded repair/retry when the host reports a concrete validation error -> final-gate.",
   "For large goals, create a visible goal ledger with work packets, owners, verification gates, and resume state. Execute the next safe packet instead of stopping at a plan.",
@@ -25,9 +25,22 @@ export const STORMBREAKER_LOOP_PROTOCOL = [
 ].join("\n");
 
 export function stripStormbreakerContinueMarker(text: string): { text: string; shouldContinue: boolean } {
-  const pattern = new RegExp(`\\n?${STORMBREAKER_CONTINUE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`);
-  const shouldContinue = pattern.test(text.trimEnd());
-  return { text: text.replace(pattern, "").trim(), shouldContinue };
+  const escaped = STORMBREAKER_CONTINUE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Detect the continuation marker as the last meaningful token, tolerating trailing
+  // whitespace, punctuation, or a short sign-off on the closing lines. A missed marker
+  // silently ends the loop with work still unfinished — a failure the loop must never
+  // mask as success — so detection cannot hinge on the model ending its output with
+  // byte-exact formatting (a trailing "." or "Hope this helps." used to break it).
+  const trimmed = text.trimEnd();
+  const tail = trimmed.split("\n").slice(-3).join("\n");
+  const shouldContinue = new RegExp(escaped).test(tail);
+  // Strip every occurrence of the marker (with surrounding inline spaces) and collapse
+  // the blank lines it leaves behind, wherever in the text it appeared.
+  const cleaned = trimmed
+    .replace(new RegExp(`[ \\t]*${escaped}[ \\t]*`, "g"), "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return { text: cleaned, shouldContinue };
 }
 
 export function buildStormbreakerContinuationPrompt(previousOutput: string, pass: number): string {

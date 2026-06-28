@@ -55,8 +55,13 @@ export function ConfirmRequests() {
   const count = items?.length ?? 0;
 
   return (
-    <div className="dashboard-module">
-      <div className="dashboard-module-head" data-alert={count > 0 ? "true" : "false"}>
+    <div id="approval-inbox" className="dashboard-module" data-alert={count > 0 ? "true" : "false"}>
+      <div
+        className="dashboard-module-head"
+        data-alert={count > 0 ? "true" : "false"}
+        role="status"
+        aria-live="polite"
+      >
         <span>{ko ? "승인 인박스" : "Approval inbox"}</span>
         {count > 0 && <span className="dashboard-count-pill">{count}</span>}
       </div>
@@ -65,7 +70,7 @@ export function ConfirmRequests() {
         <div className="dashboard-module-empty">{ko ? "불러오는 중…" : "Loading…"}</div>
       ) : items.length === 0 ? (
         <div className="dashboard-module-empty">
-          {ko ? "기다리는 승인이 없어요 — 멈춰 있는 일꾼 없음." : "Nothing waiting — no stalled workers."}
+          {ko ? "기다리는 승인이 없어요 — 멈춰 있는 에이전트 없음." : "Nothing waiting — no stalled workers."}
         </div>
       ) : (
         items.map((it) => (

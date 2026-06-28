@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
 // Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
 import { superviseStormbreaker, type StormbreakerHandle } from "../hephaestus/stormbreaker-supervisor";
+import { hepCall } from "../hephaestus/commands";
 import {
   buildStormbreakerLongRunPrompt,
   buildStormbreakerContinuationPrompt,
@@ -167,6 +168,64 @@ function buildGoalUserPrompt(prompt: string, locale: "ko" | "en"): string {
           "Restate the goal clearly, proceed with the next concrete action, and include verification criteria.",
         ].join("\n");
   return `${guide}\n\nUser goal:\n${prompt}`;
+}
+
+function buildPlanUserPrompt(prompt: string, locale: "ko" | "en"): string {
+  const guide =
+    locale === "ko"
+      ? [
+          "Agentlas Plan mode가 켜져 있다.",
+          "바로 실행으로 뛰어들기 전에 사용자에게 읽히는 짧은 작업 계획을 먼저 세워라.",
+          "계획에는 작업 순서, 실제 확인할 증거, 위험하거나 아직 모르는 부분을 포함하라.",
+          "필요한 실행은 계획 뒤에 이어서 하되, 완료라고 말할 때는 실제 검증 결과를 함께 말하라.",
+        ].join("\n")
+      : [
+          "Agentlas Plan mode is enabled.",
+          "Before jumping into execution, first write a concise user-facing work plan.",
+          "Include the order of work, the evidence you will verify, and any risks or unknowns.",
+          "Then proceed when appropriate, and only call the work complete with real verification results.",
+        ].join("\n");
+  return `${guide}\n\nUser request:\n${prompt}`;
+}
+
+/**
+ * 추천 시트 네트워크 모드에서 고른 Hub 에이전트를 hep-call 로 빌려와(BYOM) 프롬프트 앞에
+ * borrow 지시를 붙인다. BYOC 라 실행은 데스크탑 런타임(사용자 LLM)이 한다 — 엔진은 빌려올
+ * 에이전트와 grounding 만 제공한다. 오프라인/허브 미연결이면 hep-call 이 비어도 슬러그를
+ * 명시한 기본 지시로 폴백한다(런타임이 시도하도록).
+ */
+async function buildBorrowDirective(
+  slugs: string[],
+  prompt: string,
+  project: string | null,
+  locale: "ko" | "en",
+): Promise<string> {
+  const list = slugs.join(", ");
+  let directive = "";
+  try {
+    const res = await hepCall(slugs.join(","), [prompt], { project: project ?? "." });
+    const j = (res.json ?? null) as Record<string, unknown> | null;
+    const top = j?.directive;
+    if (typeof top === "string" && top.trim()) {
+      directive = top.trim();
+    } else {
+      const agents = Array.isArray(j?.agents) ? (j!.agents as Array<Record<string, unknown>>) : [];
+      const fromAgent = agents.map((a) => a?.directive).find((d) => typeof d === "string" && d.trim());
+      if (typeof fromAgent === "string") directive = fromAgent.trim();
+    }
+  } catch {
+    // 오프라인/허브 미연결 → 기본 지시로 폴백.
+  }
+  const header =
+    locale === "ko"
+      ? `[Hephaestus Network · 빌려온 Hub 에이전트: ${list}]`
+      : `[Hephaestus Network · borrowed Hub agents: ${list}]`;
+  const body =
+    directive ||
+    (locale === "ko"
+      ? "위 빌려온 전문가 에이전트(들)를 현재 프로젝트에 attach해서 아래 요청을 처리해줘. 각 에이전트의 실제 전문성을 적용하고 결과를 종합해."
+      : "Apply the borrowed specialist agent(s) above to the request below, attached to the current project. Use each agent's actual expertise and synthesize the result.");
+  return `${header}\n${body}\n\nRequest:\n${prompt}`;
 }
 
 function selectAppBuilderForExistingAppEdit(
@@ -371,13 +430,32 @@ export async function runMcpInvocation(
     });
     return { stormbreakerContinueRequested: false };
   }
-  const effectiveUserPrompt = isTargetAppEdit && targetApp
+  let effectiveUserPrompt = isTargetAppEdit && targetApp
     ? buildAppEditUserPrompt(req.userPrompt, targetApp, locale)
     : req.appsGenerateMode
     ? buildAppsGenerateUserPrompt(req.userPrompt, locale)
     : req.goalMode
       ? buildGoalUserPrompt(req.userPrompt, locale)
+      : req.planMode
+        ? buildPlanUserPrompt(req.userPrompt, locale)
       : req.userPrompt;
+
+  // 추천 시트 네트워크 모드 — 고른 Hub 에이전트를 빌려와 프롬프트 앞에 borrow 지시를 붙인다(BYOM).
+  if (req.borrowAgents && req.borrowAgents.length > 0) {
+    sink({
+      kind: "tool-use",
+      status:
+        locale === "ko"
+          ? `Hub 에이전트 빌리는 중: ${req.borrowAgents.join(", ")}`
+          : `Borrowing Hub agents: ${req.borrowAgents.join(", ")}`,
+    });
+    effectiveUserPrompt = await buildBorrowDirective(
+      req.borrowAgents,
+      effectiveUserPrompt,
+      getChatWorkingFolder(chat.id),
+      locale,
+    );
+  }
 
   const installedAgents = listInstalledAgents();
   const autoRoute = isTargetAppEdit

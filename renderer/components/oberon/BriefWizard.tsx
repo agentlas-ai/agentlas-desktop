@@ -9,6 +9,7 @@ import {
   type FilmBrief,
   type FilmFormat,
   type FilmProduction,
+  type OberonStudio,
 } from "@/lib/oberon";
 import { IconPlus, IconClose, IconSparkles } from "@/components/Icon";
 import { Chip, GhostButton, PanelHead, PrimaryButton } from "./ui";
@@ -30,12 +31,14 @@ const FORMATS: { id: FilmFormat | ""; label: string }[] = [
 
 export function BriefWizard({
   initial,
+  studio,
   onPlan,
   planning,
   onLoad,
   headerSlot,
 }: {
   initial?: FilmBrief;
+  studio?: OberonStudio | null;
   onPlan: (brief: FilmBrief, premium: boolean) => void;
   planning: boolean;
   onLoad?: (prod: FilmProduction) => void;
@@ -44,9 +47,14 @@ export function BriefWizard({
   const [title, setTitle] = useState(initial?.title ?? "");
   const [prompt, setPrompt] = useState(initial?.synopsis || initial?.logline || "");
   const [refs, setRefs] = useState<string[]>(initial?.visualReferences ?? []);
-  const [format, setFormat] = useState<FilmFormat | "">(initial?.format ?? "");
+  const [format, setFormat] = useState<FilmFormat | "">(
+    initial?.format ?? (studio === "motion" ? "motion_graphics_30" : ""),
+  );
   const [premium, setPremium] = useState(true);
   const [loadOpen, setLoadOpen] = useState(false);
+  // 모션그래픽 스튜디오 전용 입력 — 고객 브랜드/로고.
+  const [brandName, setBrandName] = useState(initial?.brandOrProduct ?? "");
+  const [logoSrc, setLogoSrc] = useState(initial?.logoSource ?? "");
 
   function loadPreset(id: string) {
     const p = BRIEF_PRESETS.find((x) => x.id === id);
@@ -61,15 +69,19 @@ export function BriefWizard({
   const tpl = format ? GENRE_TEMPLATES[format] : null;
 
   function generate() {
-    const brief = inferBriefFromPrompt({ title, prompt, references: refs, format });
+    const base = inferBriefFromPrompt({ title, prompt, references: refs, format });
+    const brief =
+      studio === "motion"
+        ? { ...base, brandOrProduct: brandName.trim() || base.brandOrProduct, logoSource: logoSrc.trim() || undefined }
+        : base;
     onPlan(brief, premium);
   }
 
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 32px 56px" }}>
       <PanelHead
-        eyebrow="Step 00 · 시작"
-        title="무엇을 만들까요?"
+        eyebrow={studio === "motion" ? "모션그래픽 · 시작" : studio === "animation" ? "애니메이션 · 시작" : "Step 00 · 시작"}
+        title={studio === "motion" ? "어떤 모션그래픽을 만들까요?" : studio === "animation" ? "어떤 애니메이션을 만들까요?" : "무엇을 만들까요?"}
         subtitle="제목과 만들고 싶은 영상을 자유롭게 적으면, 에이전트가 장르·톤·캐릭터·샷을 알아서 잡습니다. 다음 단계에서 확인하고 고치면 돼요."
         icon={<Glyph name="sparkle" size={18} />}
         right={
@@ -144,6 +156,17 @@ export function BriefWizard({
             </div>
           )}
         </Field>
+
+        {studio === "motion" && (
+          <>
+            <Field label="브랜드명">
+              <input style={inputStyle} value={brandName} placeholder="예: 원코치" onChange={(e) => setBrandName(e.target.value)} />
+            </Field>
+            <Field label="로고 (이미지 URL 또는 파일 경로 · 선택)">
+              <input style={inputStyle} value={logoSrc} placeholder="https://… 또는 /Users/…/logo.png" onChange={(e) => setLogoSrc(e.target.value)} />
+            </Field>
+          </>
+        )}
       </div>
 
       {/* 액션 — 인라인 (플로팅 아님) */}

@@ -11,7 +11,7 @@ import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { isVisibleAgent, isUserFacingAgentText } from "@/lib/agent-visibility";
 import { IconBuilding, IconFileUp, IconSearch } from "@/components/Icon";
-import type { InstalledAgent, InstalledFirm, ResolvedNode, ResolvedOrg } from "@/lib/types";
+import type { InstalledAgent, InstalledFirm, MarketplaceListing, ResolvedNode, ResolvedOrg } from "@/lib/types";
 
 type Mode = "multi" | "single";
 type Source = "local" | "cloud" | "hub";
@@ -36,6 +36,8 @@ export function OrgTree() {
   const [query, setQuery] = useState("");
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
+  // 로그인한 계정의 실제 서버 클라우드(cargo) 에이전트 — "클라우드" 카테고리에 리스트업.
+  const [cloudListings, setCloudListings] = useState<MarketplaceListing[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [importMessage, setImportMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
@@ -53,9 +55,14 @@ export function OrgTree() {
       setLoading(false);
       return;
     }
-    const [a, f] = await Promise.all([api.team.list(), api.firms.list()]);
+    const [a, f, mine] = await Promise.all([
+      api.team.list(),
+      api.firms.list(),
+      api.marketplace.listMine().catch(() => [] as MarketplaceListing[]),
+    ]);
     setAgents(dedupById(a).filter(isVisibleAgent));
     setFirms(f);
+    setCloudListings(mine);
     setLoading(false);
   }, []);
   useEffect(() => {
@@ -74,8 +81,14 @@ export function OrgTree() {
   }, [firms]);
 
   const agentSource = (a: InstalledAgent): Source => (a.localPath ? "local" : "cloud");
-  const firmSource = (f: InstalledFirm): Source =>
-    agentById.get(f.ceoAgentId)?.localPath ? "local" : "cloud";
+  // firm 출처: CEO 에이전트의 localPath가 1차. CEO가 visible 필터에서 빠져 map에 없을 수 있으므로
+  // 로컬 임포트 firm(slug: firm-local-*) 이거나 조직도의 어떤 에이전트라도 로컬이면 로컬로 본다.
+  const firmSource = (f: InstalledFirm): Source => {
+    if (agentById.get(f.ceoAgentId)?.localPath) return "local";
+    if (f.slug?.startsWith("firm-local-")) return "local";
+    if (f.orgChart.some((n) => agentById.get(n.agentId)?.localPath)) return "local";
+    return "cloud";
+  };
 
   const matches = (name: string) =>
     !query.trim() || name.toLowerCase().includes(query.trim().toLowerCase());
@@ -151,7 +164,13 @@ export function OrgTree() {
       <div className="dashboard-org-list">
         {cats.map((cat) => {
           const { firms: cf, agents: ca } = bySource(cat.key);
-          const count = cf.length + ca.length;
+          // 클라우드 카테고리(싱글 모드)엔 로컬에 아직 안 받은 서버 클라우드 에이전트도 함께 보여준다.
+          const installedSlugs = new Set(agents.map((a) => a.slug));
+          const cloudOnly =
+            cat.key === "cloud" && mode === "single"
+              ? cloudListings.filter((m) => !installedSlugs.has(m.slug) && matches(ko ? m.name : m.nameEn || m.name))
+              : [];
+          const count = cf.length + ca.length + cloudOnly.length;
           const open = openCats[cat.key];
           return (
             <div key={cat.key}>
@@ -198,6 +217,20 @@ export function OrgTree() {
                   >
                     <Dot />
                     <span className="dashboard-org-label">{dn(a)}</span>
+                  </button>
+                ))}
+
+              {open &&
+                cloudOnly.map((m) => (
+                  <button
+                    key={`cloud:${m.slug}`}
+                    onClick={() => navigate("/cloud")}
+                    className="dashboard-org-row dashboard-org-agent"
+                    title={ko ? "서버 클라우드에 있는 에이전트 — 클라우드에서 관리" : "On your server cloud — manage in Cloud"}
+                  >
+                    <Dot />
+                    <span className="dashboard-org-label">{ko ? m.name : m.nameEn || m.name}</span>
+                    <span className="dashboard-org-count">{ko ? "클라우드" : "cloud"}</span>
                   </button>
                 ))}
             </div>

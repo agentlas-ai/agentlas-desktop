@@ -34,8 +34,8 @@ export function deriveKeyStatus(snap: UsageSnapshot | null | undefined): KeyStat
 
   // 모든 프로바이더가 error → 전 함대 정지(키 사망).
   if (connected === 0) return { health: "error", affected: errored, connected: 0 };
-  // 일부 error 또는 한도 임박 → 경고.
-  if (errored.length > 0) return { health: "warning", affected: errored, connected };
+  // 한도 임박만 경고로 올린다. 일부 프로바이더의 usage 조회 실패(transient)는
+  // "한도 임박"과 다른 사안이므로 경고 배너로 오인시키지 않는다(연결 자체는 살아있음).
   if (nearLimit.length > 0) return { health: "warning", affected: nearLimit, connected };
   return { health: "ok", affected: [], connected };
 }

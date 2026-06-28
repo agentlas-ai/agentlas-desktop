@@ -78,6 +78,8 @@ export interface FilmBrief {
   characters: CharacterBriefInput[];
   setting: string; // 주 배경 ("심야의 도시 오피스")
   brandOrProduct?: string; // 광고일 때
+  logoSource?: string; // 모션그래픽: 고객 로고(이미지 URL/로컬경로/data-uri)
+  accentColor?: string; // 모션그래픽: 브랜드 강조색 #hex
   mustInclude: string[]; // 반드시 들어갈 요소
   mustAvoid: string[]; // 금지 요소
   language: "ko" | "en";

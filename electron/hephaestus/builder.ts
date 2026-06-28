@@ -60,12 +60,28 @@ function composeBuilderPrompt(root: string, req: HephaestusBuildRequest): string
       "current working directory (use your file-write and shell tools — do not just describe).",
       "",
       "Rules:",
-      "- Follow the Hephaestus builder discipline above (interview/research gate, contracts, adapters,",
-      "  verification). Keep runtime-specific files as thin adapters over the canonical core.",
+      "",
+      "## DEEP INTERVIEW FIRST (this is the core of the builder — do not skip it)",
+      "This Build runs as a CONVERSATION. The desktop relays your questions to the user and sends their",
+      "answers back as the next turn, so you CAN and MUST interview before building.",
+      "- BEFORE writing any file, run the Builder Interview and Research Gate. Do NOT accept a vague",
+      "  one-line idea as the final spec. Interview the user until the target user, recurring tasks,",
+      "  inputs, outputs, tools/plugins, concrete examples, failure modes, memory policy, and evaluation",
+      "  rubric are all clear.",
+      "- Ask your clarifying questions using the `<<agentlas-ask>>` fenced JSON block defined above —",
+      "  emit exactly ONE question per turn (with 2+ concrete options when there is a sensible choice),",
+      "  then STOP and wait for the answer. Open-ended questions: still use the fence with options that",
+      "  represent the most likely answers plus an 'Other / let me type' option.",
+      "- Keep interviewing turn by turn until you have enough. Do NOT write files and do NOT print",
+      "  'BUILD_COMPLETE' during the interview phase.",
+      "",
+      "## THEN BUILD (only after the interview)",
+      "- Follow the Hephaestus builder discipline above (research gate, contracts, adapters, verification).",
+      "  Keep runtime-specific files as thin adapters over the canonical core.",
       "- Write every required file (AGENTS.md, agent.md or agents/*/agent.md, agentlas.json, .agentlas/*,",
-      "  runtime adapters, scripts/verify-package.sh, docs/*).",
-      "- When finished, print a final summary line beginning with 'BUILD_COMPLETE:' followed by the",
-      "  package root folder name you created.",
+      "  runtime adapters, scripts/verify-package.sh, docs/*) as REAL files in the current working directory.",
+      "- When the package is fully written, print a final summary line beginning with 'BUILD_COMPLETE:'",
+      "  followed by the package root folder name you created. Print this ONLY when truly done building.",
       "- Do not embed any reference to the desktop app inside the generated package — it must be a clean,",
       "  portable Agentlas package.",
     ].join("\n"),
@@ -108,11 +124,20 @@ export async function runHephaestusBuild(
 
   sink({ runId, kind: "stage", stage: "build", text: `빌더 시작 (${picked.label})` });
 
+  // 대화형 인터뷰 history → 러너의 ChatHistoryEntry로 매핑(id/createdAt는 표시에 쓰이지 않음).
+  const nowIso = new Date().toISOString();
+  const historyEntries = (req.history ?? []).map((m, i) => ({
+    id: `build-h${i}`,
+    role: m.role,
+    text: m.text,
+    createdAt: nowIso,
+  }));
+
   try {
     const result = await picked.runner(
       {
         systemPrompt,
-        history: [],
+        history: historyEntries,
         userPrompt: req.request,
         backendLabel: picked.label,
         permission: "full",
@@ -123,13 +148,16 @@ export async function runHephaestusBuild(
       {
         onPartial: (chunk) => sink({ runId, kind: "partial", text: chunk }),
         onStatus: (status) => sink({ runId, kind: "log", text: status }),
-        onTool: (name, args, toolResult, _id, isError) =>
-          sink({
-            runId,
-            kind: "stage",
-            stage: name,
-            text: isError ? `도구 오류: ${name}` : name + (args ? ` ${args.slice(0, 120)}` : ""),
-          }),
+        onTool: (name, args, toolResult, _id, isError) => {
+          // 도구 호출(args 있음)만 한 줄로 표시. 도구 결과(args 없음)는 에러일 때만 표시한다.
+          // — 안 그러면 tool_use/tool_result 양쪽에서 발화돼 "Bash" 같은 줄이 중복된다.
+          if (args !== undefined) {
+            sink({ runId, kind: "stage", stage: name, text: `${name} ${args.slice(0, 120)}`.trim() });
+          } else if (isError) {
+            const detail = typeof toolResult === "string" && toolResult ? ` — ${toolResult.slice(0, 120)}` : "";
+            sink({ runId, kind: "stage", stage: name, text: `도구 오류: ${name}${detail}` });
+          }
+        },
       },
     );
 
@@ -137,8 +165,20 @@ export async function runHephaestusBuild(
     sink({ runId, kind: "stage", stage: "security", text: "정적 보안 스캔" });
     let scan: unknown = null;
     if (!signal.aborted) {
-      const scanRes = await securityScan(req.workspace, { signal, timeoutMs: 120_000 }).catch(() => null);
-      scan = scanRes?.json ?? null;
+      try {
+        const scanRes = await securityScan(req.workspace, { signal, timeoutMs: 120_000 });
+        scan = scanRes?.json ?? null;
+        if (scan === null) {
+          // 스캔이 결과를 내지 못함 — 빈/클린 결과처럼 보이지 않게 명시한다.
+          scan = { status: "unverified", reason: "security scan returned no result" };
+          sink({ runId, kind: "stage", stage: "security", text: "보안 스캔 미검증: 결과 없음 — 통과로 간주하지 말 것" });
+        }
+      } catch (scanErr) {
+        // 스캔 실패/타임아웃을 null(=클린처럼 보임)로 삼키지 않는다 — 미검증으로 표면화한다.
+        const reason = scanErr instanceof Error ? scanErr.message : String(scanErr);
+        scan = { status: "unverified", reason };
+        sink({ runId, kind: "stage", stage: "security", text: `보안 스캔 미검증: ${reason} — 통과로 간주하지 말 것` });
+      }
     }
 
     sink({

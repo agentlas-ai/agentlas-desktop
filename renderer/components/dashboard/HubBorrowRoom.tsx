@@ -92,39 +92,46 @@ export function HubBorrowRoom() {
       ) : results.length === 0 ? (
         <div className="dashboard-module-empty">{ko ? "검색 결과가 없어요." : "No results."}</div>
       ) : (
-        <div className="hub-borrow-list">
-          {results.slice(0, 8).map((r) => {
+        <div className="hub-borrow-carousel" role="list">
+          {results.slice(0, 12).map((r) => {
             const owned = installed.has(r.slug);
             return (
-              <div key={r.slug} className="hub-borrow-row">
-                <div className="hub-borrow-copy">
-                  <div className="hub-borrow-name">
-                    {ko ? r.name : r.nameEn || r.name}
-                    <span className="hub-borrow-trust" data-grade={r.trustGrade}>Trust {r.trustGrade}</span>
-                    <span className="agent-ownership-badge" data-owned={owned ? "true" : "false"}>
-                      {owned ? "내 직원 · owned" : "원격 게스트 · borrowed"}
-                    </span>
-                  </div>
-                  <div className="hub-borrow-tagline">
-                    {(ko ? r.tagline : r.taglineEn || r.tagline) || ""}
-                    {r.installCount > 0 ? ` · ${r.installCount}${ko ? "회 사용" : " installs"}` : ""}
-                  </div>
-                </div>
-                {owned ? (
-                  <span className="hub-borrow-owned">
-                    <IconCheck size={13} /> {ko ? "보유" : "owned"}
+              <div key={r.slug} className="hub-borrow-card" role="listitem">
+                <div className="hub-borrow-card-top">
+                  <span className="hub-borrow-trust" data-grade={r.trustGrade}>Trust {r.trustGrade}</span>
+                  <span className="agent-ownership-badge" data-owned={owned ? "true" : "false"}>
+                    {owned ? (ko ? "owned" : "owned") : ko ? "borrowed" : "borrowed"}
                   </span>
-                ) : (
-                  <button
-                    onClick={() => addToLibrary(r.slug)}
-                    disabled={busy === r.slug}
-                    className="titlebar-nodrag"
-                    data-dashboard-action="true"
-                    title={ko ? "내 라이브러리에 추가하면 내 자산(owned)이 됩니다" : "Adding makes it yours (owned)"}
-                  >
-                    {busy === r.slug ? (ko ? "추가 중…" : "Adding…") : ko ? "내 팀에 추가" : "Add to my team"}
-                  </button>
-                )}
+                </div>
+                <div className="hub-borrow-card-name" title={ko ? r.name : r.nameEn || r.name}>
+                  {ko ? r.name : r.nameEn || r.name}
+                </div>
+                <div className="hub-borrow-card-tagline">
+                  {(ko ? r.tagline : r.taglineEn || r.tagline) || ""}
+                </div>
+                <div className="hub-borrow-card-foot">
+                  {r.installCount > 0 && (
+                    <span className="hub-borrow-card-installs">
+                      {r.installCount}
+                      {ko ? "회" : ""}
+                    </span>
+                  )}
+                  {owned ? (
+                    <span className="hub-borrow-owned">
+                      <IconCheck size={12} /> {ko ? "보유" : "owned"}
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => addToLibrary(r.slug)}
+                      disabled={busy === r.slug}
+                      className="titlebar-nodrag hub-borrow-card-add"
+                      data-dashboard-action="true"
+                      title={ko ? "내 라이브러리에 추가하면 내 자산(owned)이 됩니다" : "Adding makes it yours (owned)"}
+                    >
+                      {busy === r.slug ? (ko ? "추가 중…" : "Adding…") : ko ? "내 팀에 추가" : "Add"}
+                    </button>
+                  )}
+                </div>
               </div>
             );
           })}

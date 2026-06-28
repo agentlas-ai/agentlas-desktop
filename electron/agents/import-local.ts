@@ -119,6 +119,19 @@ function detectKind(dir: string): "agent" | "team" {
   return "agent";
 }
 
+// 공유/임시 폴더명 — 이런 폴더 자체를 회사(firm)로 등록하면 안 된다. 빌드 워크스페이스나
+// 다운로드/휴지통 같은 부모 폴더가 단지 여러 에이전트를 "담고 있다"는 이유로 회사로 잡히는 걸 막는다.
+const JUNK_DIRS = /^(trash|tmp|temp|downloads|desktop|documents|untitled|new folder|cache)$/i;
+
+/** 명시적 팀 마커(의도적으로 만든 팀 구조). 이게 있으면 정크명이어도 진짜 팀으로 인정한다. */
+function hasTeamMarkers(dir: string): boolean {
+  for (const base of [dir, path.join(dir, ".claude")]) {
+    if (TEAM_SPEC_FILES.some((f) => exists(path.join(base, f)))) return true;
+    if (isDir(path.join(base, "ceo"))) return true;
+  }
+  return false;
+}
+
 /**
  * 팀이면 CEO 두뇌(.claude/ceo/AGENT.md 등)를 시스템 프롬프트로 삼고, 임의의 작업 폴더(cwd)에서
  * 실행돼도 동작하도록 팀 루트 절대경로 오리엔테이션 헤더를 붙인다.
@@ -173,14 +186,51 @@ function readFirst(dir: string, candidates: string[], maxChars = 8000): string {
   return "";
 }
 
-/** manifest.md / 첫 마크다운 제목 / 폴더명에서 표시 이름 추출. */
+// 런타임 어댑터/도구 문서의 제목은 에이전트 정체성이 아니다 — 예: "▶CLAUDE.md — Claude Code 어댑터".
+// 이런 헤딩을 팀/에이전트 이름으로 쓰면 안 되므로 거른다.
+const ADAPTER_HEADING = /어댑터|adapter|\.md\b|claude\s*code|\bcodex\b|\bgemini\b|\bcursor\b|read\s*me|table of contents|목차/i;
+
+/** 마크다운 헤딩 후보를 정제. 앞의 장식 기호(▶ ▷ ► ▸ • – — # 등)와 괄호 보조설명을 제거. */
+function cleanHeading(raw: string): string {
+  return raw
+    .replace(/^[\s#>►▶▷▸▹•·\-–—*]+/, "")
+    .replace(/\(.*?\)/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/** "k-startup-team" → "K Startup Team" 같은 폴더명 기반 표시 이름(폴백). */
+function prettyFromDir(dir: string): string {
+  const pretty = deptLabel(path.basename(dir));
+  return pretty || path.basename(dir);
+}
+
+/** manifest/정체성 파일의 첫 제목 → 폴더명 순으로 표시 이름 추출.
+ *  어댑터/도구 문서(CLAUDE.md 등)의 제목은 정체성이 아니므로 건너뛴다. */
 function readName(dir: string): string {
-  const manifest = readFirst(dir, ["manifest.md", "TEAM.md", "AGENT.md", "CLAUDE.md", "README.md"], 2000);
-  const m = manifest.match(/^#\s+(.+)$/m);
-  if (m) {
-    return m[1].replace(/\(.*?\)/g, "").trim().slice(0, 60) || path.basename(dir);
+  // 정체성 파일을 우선(manifest/TEAM/AGENT). 어댑터 문서(CLAUDE/AGENTS/GEMINI/README)는 뒤로.
+  const candidates = ["manifest.md", "TEAM.md", "AGENT.md", "soul.md", "persona.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md", "README.md"];
+  for (const file of candidates) {
+    const p = path.join(dir, file);
+    if (!exists(p) || isDir(p)) continue;
+    let text = "";
+    try {
+      text = fs.readFileSync(p, "utf8").slice(0, 2000);
+    } catch {
+      continue;
+    }
+    const m = text.match(/^#\s+(.+)$/m);
+    if (!m) continue;
+    const name = cleanHeading(m[1]).slice(0, 60);
+    // 비었거나 어댑터/도구 문서 제목이면 이 파일은 스킵하고 다음 후보로.
+    if (!name || ADAPTER_HEADING.test(name)) continue;
+    return name;
   }
-  return path.basename(dir);
+  // 정크/공유 폴더명(trash 등)을 그대로 회사/에이전트 이름으로 노출하지 않는다.
+  if (JUNK_DIRS.test(path.basename(dir).toLowerCase())) {
+    return `Unnamed (${path.basename(dir)})`;
+  }
+  return prettyFromDir(dir);
 }
 
 function readTagline(dir: string): string {
@@ -276,6 +326,10 @@ function registerTeamAsFirm(
   tagline: string,
   divisions?: ResolvedOrg["divisions"],
 ): InstalledFirm | null {
+  // 최후 방어선: 정크/공유 폴더(trash 등)는 명시적 팀 마커가 없으면 회사로 등록하지 않는다.
+  if (JUNK_DIRS.test(path.basename(dir).toLowerCase()) && !hasTeamMarkers(dir)) {
+    return null;
+  }
   let orgChart: Array<FirmOrgNode & { agentId: string }>;
   if (divisions && divisions.length > 0) {
     orgChart = [{ agentSlug: slug, agentId, role: "CEO", reportsTo: null }];
@@ -312,7 +366,13 @@ export async function importLocalFolder(absPath: string): Promise<LocalImportRes
   // 활성 LLM(CLI/BYOK)으로 폴더를 인식 — 단일 에이전트 vs 팀 + 3-tier 구조. 하드코딩 폴더명 매칭 아님.
   // 런타임이 없거나 실패하면 null → 휴리스틱(detectKind)으로 폴백.
   const analysis = await analyzeFolder(dir, name).catch(() => null);
-  const kind = analysis ? analysis.kind : detectKind(dir);
+  let kind = analysis ? analysis.kind : detectKind(dir);
+  // 근본 가드: 정크/공유 폴더(trash 등)가 단지 ≥2개의 에이전트를 담고 있다는 이유만으로 회사로
+  // 잡히는 걸 막는다. 명시적 팀 마커(TEAM.md/ceo 등)가 없으면 회사가 아니라 단일 에이전트로 본다.
+  // (analysis.kind가 detectKind 가드를 우회하므로 여기 결정 지점에서 한 번 더 막아야 한다.)
+  if (kind === "team" && JUNK_DIRS.test(path.basename(dir).toLowerCase()) && !hasTeamMarkers(dir)) {
+    kind = "agent";
+  }
   const tagline = readTagline(dir) || (kind === "team" ? "Imported local team" : "Imported local agent");
   const systemPrompt =
     kind === "team"

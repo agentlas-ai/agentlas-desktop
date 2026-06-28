@@ -67,7 +67,7 @@ export function KeyStatusBanner({ mode = "banner" }: { mode?: "banner" | "pill" 
       <div className="key-status-banner-copy">
         <strong>
           {isError
-            ? ko ? "BYOC 키 연결이 끊겼습니다 — 모든 일꾼이 멈춥니다." : "BYOC keys disconnected — all workers stall."
+            ? ko ? "BYOC 키 연결이 끊겼습니다 — 모든 에이전트가 멈춥니다." : "BYOC keys disconnected — all workers stall."
             : ko ? "사용량 한도에 근접했습니다." : "Approaching usage limit."}
         </strong>
         <span>
@@ -76,8 +76,8 @@ export function KeyStatusBanner({ mode = "banner" }: { mode?: "banner" | "pill" 
             : ko ? "엔진 연결 상태를 확인하세요." : "Check engine connection."}
           {" · "}
           {ko
-            ? "내 구독/키로만 구동됩니다 (Agentlas 마진 ₩0)."
-            : "Runs only on your own subscription/keys (Agentlas margin $0)."}
+            ? "내 구독/키로만 구동됩니다."
+            : "Runs only on your own subscription/keys."}
         </span>
       </div>
     </div>

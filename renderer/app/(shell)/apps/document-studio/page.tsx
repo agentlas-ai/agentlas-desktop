@@ -33,6 +33,8 @@ export default function DocumentStudioPage() {
   const [citationOpen, setCitationOpen] = useState(false);
   const [citationSearch, setCitationSearch] = useState("");
   const [activeSource, setActiveSource] = useState("architecture");
+  const [leftOpen, setLeftOpen] = useState(true);
+  const [rightOpen, setRightOpen] = useState(true);
 
   function generate() {
     const next = buildDocument(goal, mode);
@@ -53,33 +55,6 @@ export default function DocumentStudioPage() {
           <IconApps size={15} />
           Apps
         </Link>
-        <IconChevronRight size={12} style={{ color: "var(--muted)" }} />
-        <div style={toolbarDivider} />
-        <button style={iconButton} aria-label={locale === "en" ? "Undo" : "실행 취소"}>↶</button>
-        <button style={{ ...iconButton, color: "var(--muted)" }} aria-label={locale === "en" ? "Redo" : "다시 실행"}>↷</button>
-        <select style={toolbarSelect} defaultValue="fit" aria-label={locale === "en" ? "Zoom" : "보기 크기"}>
-          <option value="fit">Fit</option>
-          <option value="100">100%</option>
-          <option value="wide">Wide</option>
-        </select>
-        <select style={toolbarSelect} defaultValue="paragraph" aria-label={locale === "en" ? "Paragraph style" : "문단 스타일"}>
-          <option value="paragraph">Paragraph</option>
-          <option value="heading">Heading</option>
-          <option value="quote">Quote</option>
-        </select>
-        <ToolbarText label="B" active />
-        <ToolbarText label="I" italic />
-        <ToolbarText label="U" underline />
-        <ToolbarText label="S" strike />
-        <ToolbarText label="≡" />
-        <ToolbarText label="1." />
-        <ToolbarText label="☰" />
-        <ToolbarText label="⌄" />
-        <button style={iconButton} aria-label={locale === "en" ? "Insert image" : "이미지 삽입"}>
-          <IconImage size={15} />
-        </button>
-        <ToolbarText label="▦" />
-        <ToolbarText label="fx" />
         <div style={{ position: "relative", marginLeft: "auto" }} className="titlebar-nodrag">
           <button type="button" onClick={() => setCitationOpen((open) => !open)} style={citationButton}>
             {citationStyle}
@@ -123,8 +98,6 @@ export default function DocumentStudioPage() {
 
       <div style={aiToolbar}>
         <span style={aiBadge}>AI</span>
-        <button style={plainTool}>{locale === "en" ? "Grammar check" : "문법 검사"}</button>
-        <button style={plainTool}>{locale === "en" ? "Generate figure" : "도표 생성"}</button>
         <div style={goalBox}>
           <IconSparkles size={14} style={{ color: "var(--accent)" }} />
           <input value={goal} onChange={(event) => setGoal(event.target.value)} style={goalInput} aria-label={locale === "en" ? "Document goal" : "문서 목표"} />
@@ -136,28 +109,49 @@ export default function DocumentStudioPage() {
         ))}
       </div>
 
-      <main style={workspace}>
-        <aside style={sourceRail}>
-          <div style={railTitle}>{locale === "en" ? "Sources" : "소스"}</div>
-          {sourceCards.map((source) => (
-            <button
-              key={source.id}
-              onClick={() => setActiveSource(source.id)}
-              style={{
-                ...sourceCard,
-                borderColor: activeSource === source.id ? "var(--accent)" : "var(--paper-edge)",
-                background: activeSource === source.id ? "var(--fill-1)" : "var(--paper)",
-              }}
-            >
-              <strong>{source.title}</strong>
-              <span>{source.detail}</span>
-            </button>
-          ))}
-          <div style={figurePanel}>
-            <div style={railTitle}>{locale === "en" ? "Figure note" : "도표 메모"}</div>
-            <textarea value={figureCaption} onChange={(event) => setFigureCaption(event.target.value)} rows={5} style={figureInput} />
-          </div>
-        </aside>
+      <main
+        style={{
+          ...workspace,
+          gridTemplateColumns: `${leftOpen ? "260px" : "40px"} minmax(360px, 1fr) ${rightOpen ? "290px" : "40px"}`,
+        }}
+      >
+        {leftOpen ? (
+          <aside style={sourceRail}>
+            <div style={railHeader}>
+              <span style={railTitle}>{locale === "en" ? "Sources" : "소스"}</span>
+              <button
+                type="button"
+                onClick={() => setLeftOpen(false)}
+                style={collapseButton}
+                aria-label={locale === "en" ? "Collapse sources panel" : "소스 패널 접기"}
+                title={locale === "en" ? "Collapse" : "접기"}
+              >
+                <IconChevronRight size={14} style={{ transform: "rotate(180deg)" }} />
+              </button>
+            </div>
+            {sourceCards.map((source) => (
+              <button
+                key={source.id}
+                onClick={() => setActiveSource(source.id)}
+                style={{
+                  ...sourceCard,
+                  borderColor: activeSource === source.id ? "var(--accent)" : "var(--paper-edge)",
+                  background: activeSource === source.id ? "var(--fill-1)" : "var(--paper)",
+                }}
+              >
+                <strong>{source.title}</strong>
+                <span>{source.detail}</span>
+              </button>
+            ))}
+          </aside>
+        ) : (
+          <CollapsedRail
+            side="left"
+            label={locale === "en" ? "Sources" : "소스"}
+            onExpand={() => setLeftOpen(true)}
+            ariaLabel={locale === "en" ? "Expand sources panel" : "소스 패널 펼치기"}
+          />
+        )}
 
         <section style={editorStage}>
           <div style={paper}>
@@ -176,12 +170,30 @@ export default function DocumentStudioPage() {
           </div>
         </section>
 
-        <aside style={inspector}>
-          <div style={railTitle}>{locale === "en" ? "Writing assistant" : "작성 보조"}</div>
-          <ActionCard icon={<IconEdit size={15} />} title={locale === "en" ? "Tighten thesis" : "논지 압축"} text={locale === "en" ? "Make the first claim clearer and source-ready." : "첫 주장을 더 명확하고 인용 가능한 문장으로 다듬습니다."} />
-          <ActionCard icon={<IconSearch size={15} />} title={locale === "en" ? "Find weak citation" : "약한 인용 찾기"} text={locale === "en" ? "Detect claims that still need source support." : "출처 보강이 필요한 주장을 찾아 표시합니다."} />
-          <ActionCard icon={<IconImage size={15} />} title={locale === "en" ? "Turn into figure" : "도표로 변환"} text={locale === "en" ? "Convert selected structure into an academic figure." : "선택한 구조를 학술 도표 초안으로 바꿉니다."} />
-        </aside>
+        {rightOpen ? (
+          <aside style={inspector}>
+            <div style={railHeader}>
+              <span style={railTitle}>{locale === "en" ? "Figure note" : "도표 메모"}</span>
+              <button
+                type="button"
+                onClick={() => setRightOpen(false)}
+                style={collapseButton}
+                aria-label={locale === "en" ? "Collapse figure note panel" : "도표 메모 패널 접기"}
+                title={locale === "en" ? "Collapse" : "접기"}
+              >
+                <IconChevronRight size={14} />
+              </button>
+            </div>
+            <textarea value={figureCaption} onChange={(event) => setFigureCaption(event.target.value)} rows={6} style={figureInput} />
+          </aside>
+        ) : (
+          <CollapsedRail
+            side="right"
+            label={locale === "en" ? "Figure note" : "도표 메모"}
+            onExpand={() => setRightOpen(true)}
+            ariaLabel={locale === "en" ? "Expand figure note panel" : "도표 메모 패널 펼치기"}
+          />
+        )}
       </main>
     </div>
   );
@@ -214,6 +226,17 @@ function ActionCard({ icon, title, text }: { icon: React.ReactNode; title: strin
       <strong>{title}</strong>
       <span>{text}</span>
     </button>
+  );
+}
+
+function CollapsedRail({ side, label, onExpand, ariaLabel }: { side: "left" | "right"; label: string; onExpand: () => void; ariaLabel: string }) {
+  return (
+    <div style={collapsedRail}>
+      <button type="button" onClick={onExpand} style={expandButton} aria-label={ariaLabel} title={label}>
+        <IconChevronRight size={14} style={{ transform: side === "left" ? "none" : "rotate(180deg)" }} />
+      </button>
+      <span style={collapsedLabel}>{label}</span>
+    </div>
   );
 }
 
@@ -431,7 +454,7 @@ const workspace: CSSProperties = {
   flex: 1,
   minHeight: 0,
   display: "grid",
-  gridTemplateColumns: "260px minmax(420px, 1fr) 290px",
+  gridTemplateColumns: "260px minmax(420px, 1fr)",
   overflow: "hidden",
 };
 
@@ -451,6 +474,64 @@ const railTitle: CSSProperties = {
   fontWeight: 900,
   textTransform: "uppercase",
   letterSpacing: ".06em",
+};
+
+const railHeader: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+};
+
+const collapseButton: CSSProperties = {
+  width: 24,
+  height: 24,
+  border: "1px solid var(--paper-edge)",
+  borderRadius: 6,
+  background: "var(--paper)",
+  color: "var(--muted-deep)",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  cursor: "pointer",
+  flexShrink: 0,
+};
+
+const collapsedRail: CSSProperties = {
+  borderRight: "1px solid #e5e7eb",
+  borderLeft: "1px solid #e5e7eb",
+  background: "#fbfcfd",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 12,
+  padding: "12px 0",
+  overflow: "hidden",
+};
+
+const expandButton: CSSProperties = {
+  width: 26,
+  height: 26,
+  border: "1px solid var(--paper-edge)",
+  borderRadius: 6,
+  background: "var(--paper)",
+  color: "var(--ink-soft)",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  cursor: "pointer",
+  flexShrink: 0,
+};
+
+const collapsedLabel: CSSProperties = {
+  writingMode: "vertical-rl",
+  transform: "rotate(180deg)",
+  color: "var(--muted-deep)",
+  fontSize: 11,
+  fontWeight: 800,
+  textTransform: "uppercase",
+  letterSpacing: ".08em",
+  whiteSpace: "nowrap",
 };
 
 const sourceCard: CSSProperties = {

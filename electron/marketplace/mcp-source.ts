@@ -15,6 +15,19 @@ interface McpSourceOptions {
   cookieProvider?: () => string | null;
 }
 
+/** 원격 result를 배열로 정규화. 서버가 배열을 직접 주거나 {agents|firms|bundles|listings|items|results:[...]}
+ *  로 감싸 주거나, 단일 객체를 줄 수 있다. 어떤 경우든 caller(.filter 등)가 깨지지 않도록 배열로 만든다. */
+function asArray<T>(raw: unknown, ...keys: string[]): T[] {
+  if (Array.isArray(raw)) return raw as T[];
+  if (raw && typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    for (const k of [...keys, "items", "results", "data"]) {
+      if (Array.isArray(obj[k])) return obj[k] as T[];
+    }
+  }
+  return [];
+}
+
 export class McpSource implements MarketplaceSource {
   constructor(private opts: McpSourceOptions) {}
 
@@ -43,16 +56,20 @@ export class McpSource implements MarketplaceSource {
     }
   }
 
-  listFirms(): Promise<FirmListing[]> {
-    return this.call<FirmListing[]>("marketplace.list_firms", {});
+  async listFirms(): Promise<FirmListing[]> {
+    return asArray<FirmListing>(await this.call<unknown>("marketplace.list_firms", {}), "firms");
   }
 
-  listBundles(): Promise<TeamBundle[]> {
-    return this.call<TeamBundle[]>("marketplace.list_bundles", {});
+  async listBundles(): Promise<TeamBundle[]> {
+    return asArray<TeamBundle>(await this.call<unknown>("marketplace.list_bundles", {}), "bundles");
   }
 
-  searchAgents(q: string): Promise<MarketplaceListing[]> {
-    return this.call<MarketplaceListing[]>("marketplace.search_agents", { q });
+  async searchAgents(q: string): Promise<MarketplaceListing[]> {
+    return asArray<MarketplaceListing>(
+      await this.call<unknown>("marketplace.search_agents", { q }),
+      "agents",
+      "listings",
+    );
   }
 
   async getListingBySlug(
@@ -73,8 +90,8 @@ export class McpSource implements MarketplaceSource {
 
   // ── cargo.* — 로그인한 사용자가 만든 자기 에이전트 (인증 필요) ──────────
   /** 내 에이전트 목록 (cookieProvider가 세션 쿠키 첨부). */
-  listMyAgents(): Promise<MarketplaceListing[]> {
-    return this.call<MarketplaceListing[]>("cargo.list_agents", {});
+  async listMyAgents(): Promise<MarketplaceListing[]> {
+    return asArray<MarketplaceListing>(await this.call<unknown>("cargo.list_agents", {}), "agents", "listings");
   }
 
   /** 내 에이전트 풀 매니페스트 (설치용). slug 또는 "cargo:<id>" 모두 허용. */

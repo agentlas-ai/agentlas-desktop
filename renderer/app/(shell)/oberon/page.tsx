@@ -4,7 +4,7 @@
 //   00 소스·모델 → 01 기획안(BYOK CLI) → 02 스토리보드 → 03 고정 에셋(카테고리)
 //   → 04 컷 이미지(병렬·머니게이트) → 05 영상(병렬) → 06 편집·납품
 "use client";
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import {
   OBERON_STEPS,
@@ -17,22 +17,27 @@ import {
   saveProduction,
   scoreTake,
   stepIndex,
+  stepById,
+  OBERON_STUDIOS,
+  type OberonStepDef,
   type FilmBrief,
   type FilmProduction,
   type ModelSettings,
   type OberonStepId,
   type StepState,
   type Take,
+  type OberonStudio,
 } from "@/lib/oberon";
 import { ipc } from "@/lib/ipc";
 import { BriefWizard } from "@/components/oberon/BriefWizard";
+import { StudioLanding } from "@/components/oberon/StudioLanding";
 import { ModelSettingsPanel } from "@/components/oberon/ModelSettingsPanel";
 import { PlanStep } from "@/components/oberon/PlanStep";
 import { ShotBoard } from "@/components/oberon/ShotBoard";
 import { AssetBible } from "@/components/oberon/AssetBible";
 import { KeyframeStep } from "@/components/oberon/KeyframeStep";
-import { GenerationQueue } from "@/components/oberon/GenerationQueue";
 import { MotionGraphicsPanel } from "@/components/oberon/MotionGraphicsPanel";
+import { AnimatePanel } from "@/components/oberon/AnimatePanel";
 import { TimelineEditor, DeliveryPanel } from "@/components/oberon/panels";
 import { Stepper } from "@/components/oberon/Stepper";
 import { Glyph, OberonBadge } from "@/components/oberon/icons";
@@ -41,6 +46,9 @@ import type {
   JsonObject,
   OberonKeyframeJob,
   OberonKeyframeRequest,
+  OberonAnimateJob,
+  OberonAnimateKeyStatus,
+  OberonAnimateRequest,
   OberonMotionAdJob,
   OberonMotionAdRequest,
   OberonPlanResult,
@@ -54,6 +62,13 @@ export default function OberonPage() {
   const [stepState, setStepState] = useState<Record<OberonStepId, StepState>>({ ...INITIAL_STEP_STATE });
   const [active, setActive] = useState<OberonStepId>("setup");
   const [planning, setPlanning] = useState(false);
+  // 진입 랜딩에서 고른 스튜디오. null이면 랜딩(스튜디오 선택)을 먼저 보여준다.
+  const [studio, setStudio] = useState<OberonStudio | null>(null);
+  // 스튜디오별 노출 단계(검토 게이트는 건너뜀). 미선택/불러오기 시 전체 7단계로 폴백.
+  const studioStepDefs = useMemo<OberonStepDef[]>(() => {
+    const ids = (studio && OBERON_STUDIOS.find((s) => s.id === studio)?.steps) || OBERON_STEPS.map((s) => s.id);
+    return ids.map((id) => stepById(id));
+  }, [studio]);
 
   // 실제 키프레임 이미지 생성
   const [kfProgress, setKfProgress] = useState(0);
@@ -70,28 +85,41 @@ export default function OberonPage() {
   const [motionGenerating, setMotionGenerating] = useState(false);
   const [motionJob, setMotionJob] = useState<OberonMotionAdJob | null>(null);
   const motionPoll = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 애니메이션 스튜디오 i2v
+  const [animateGenerating, setAnimateGenerating] = useState(false);
+  const [animateJob, setAnimateJob] = useState<OberonAnimateJob | null>(null);
+  const animatePoll = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [animateKey, setAnimateKey] = useState<OberonAnimateKeyStatus | null>(null);
 
   useEffect(() => () => {
     if (keyframePoll.current) clearInterval(keyframePoll.current);
     if (renderPoll.current) clearInterval(renderPoll.current);
     if (motionPoll.current) clearInterval(motionPoll.current);
+    if (animatePoll.current) clearInterval(animatePoll.current);
   }, []);
+
+  // 애니메이션 스튜디오 진입 시 i2v BYOK 키 상태 조회.
+  useEffect(() => {
+    if (studio !== "animation") return;
+    void ipc()?.oberon
+      .animateKeyStatus()
+      .then((s) => setAnimateKey(s))
+      .catch(() => setAnimateKey({ runway: false, luma: false }));
+  }, [studio]);
 
   const isDone = (id: OberonStepId) => stepState[id] === "done";
 
   // 단계 완료 → 다음 단계 활성화 + 이동
   const complete = useCallback((id: OberonStepId, goNext = true) => {
+    const cur = studioStepDefs.findIndex((s) => s.id === id);
+    const nextStep = cur >= 0 ? studioStepDefs[cur + 1] : undefined;
     setStepState((prev) => {
       const next = { ...prev, [id]: "done" as StepState };
-      const idx = stepIndex(id);
-      const nextStep = OBERON_STEPS[idx + 1];
       if (nextStep && next[nextStep.id] === "locked") next[nextStep.id] = "active";
       return next;
     });
-    const idx = stepIndex(id);
-    const nextStep = OBERON_STEPS[idx + 1];
     if (goNext && nextStep) setActive(nextStep.id);
-  }, []);
+  }, [studioStepDefs]);
 
   const buildProductionWithPlanner = useCallback(
     async (brief: FilmBrief, premium: boolean): Promise<FilmProduction> => {
@@ -562,8 +590,10 @@ export default function OberonPage() {
       brand: production.brief.brandOrProduct || (production.brief.title.toLowerCase().includes("agentlas") ? "Agentlas" : production.brief.title),
       concept: [production.brief.logline, production.brief.synopsis].filter(Boolean).join("\n"),
       aspectRatio: production.brief.aspect === "9:16" ? "9:16" : "16:9",
+      logoSource: production.brief.logoSource,
+      accentColor: production.brief.accentColor,
       durationSec: duration,
-      fps: 15,
+      fps: 24,
     };
     setMotionGenerating(true);
     setMotionJob(null);
@@ -616,6 +646,88 @@ export default function OberonPage() {
     setStepState((prev) => ({ ...prev, video: "active", delivery: "locked" }));
   }, [motionGenerating, motionJob]);
 
+  const materializeAnimateJob = useCallback(() => {
+    setStepState((prev) => {
+      const ns = { ...prev, video: "done" as StepState };
+      if (ns.delivery === "locked") ns.delivery = "active";
+      return ns;
+    });
+  }, []);
+
+  const pollAnimateJob = useCallback(
+    (jobId: string) => {
+      if (animatePoll.current) clearInterval(animatePoll.current);
+      animatePoll.current = setInterval(() => {
+        void (async () => {
+          const bridge = ipc();
+          const job = await bridge?.oberon.getAnimateJob(jobId);
+          if (!job) return;
+          setAnimateJob(job);
+          if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
+            if (animatePoll.current) clearInterval(animatePoll.current);
+            animatePoll.current = null;
+            setAnimateGenerating(false);
+            if (job.status === "succeeded") materializeAnimateJob();
+          }
+        })().catch(() => {
+          if (animatePoll.current) clearInterval(animatePoll.current);
+          animatePoll.current = null;
+          setAnimateGenerating(false);
+        });
+      }, 2000);
+    },
+    [materializeAnimateJob],
+  );
+
+  const startAnimate = useCallback(() => {
+    if (!production) return;
+    const bridge = ipc();
+    if (!bridge?.oberon?.startAnimate) return;
+    const firstKf = (production.keyframeAssets ?? [])[0];
+    const shot = production.shots[0];
+    const prompt =
+      [shot?.generationPrompt, production.brief.logline, production.brief.synopsis].filter(Boolean).join(" ").slice(0, 400) ||
+      production.brief.title;
+    const provider = animateKey?.runway ? "runway" : "luma";
+    const request: OberonAnimateRequest = {
+      productionId: production.id,
+      title: production.brief.title || "Oberon Animation",
+      provider,
+      imagePath: firstKf?.absPath,
+      imageUrl: firstKf?.url && /^https:\/\//i.test(firstKf.url) ? firstKf.url : undefined,
+      prompt,
+      aspectRatio: production.brief.aspect === "9:16" ? "9:16" : production.brief.aspect === "1:1" ? "1:1" : "16:9",
+      durationSec: 5,
+    };
+    setAnimateGenerating(true);
+    setAnimateJob(null);
+    void bridge.oberon
+      .startAnimate(request)
+      .then((job) => {
+        setAnimateJob(job);
+        pollAnimateJob(job.id);
+      })
+      .catch((error) => {
+        setAnimateGenerating(false);
+        setAnimateJob({
+          id: "local-error",
+          productionId: production.id,
+          title: production.brief.title,
+          provider,
+          model: "",
+          status: "failed",
+          outputDir: "",
+          progress: { phase: "failed", percent: 0 },
+          files: [],
+          message: "실패",
+          error: error instanceof Error ? error.message : String(error),
+          warnings: [],
+          createdAtMs: Date.now(),
+          updatedAtMs: Date.now(),
+        });
+      });
+  }, [animateKey, pollAnimateJob, production]);
+
   const newProject = useCallback(() => {
     if (keyframePoll.current) clearInterval(keyframePoll.current);
     if (renderPoll.current) clearInterval(renderPoll.current);
@@ -626,6 +738,7 @@ export default function OberonPage() {
     setProduction(null);
     setStepState({ ...INITIAL_STEP_STATE });
     setActive("setup");
+    setStudio(null);
     setVideoMode("veo");
     setKfProgress(0);
     setKfGenerating(false);
@@ -635,6 +748,10 @@ export default function OberonPage() {
     setRenderJob(null);
     setMotionGenerating(false);
     setMotionJob(null);
+    if (animatePoll.current) clearInterval(animatePoll.current);
+    animatePoll.current = null;
+    setAnimateGenerating(false);
+    setAnimateJob(null);
   }, []);
 
   return (
@@ -669,13 +786,22 @@ export default function OberonPage() {
         )}
       </header>
 
-      {/* 상단 게이트 스테퍼 */}
-      <Stepper state={stepState} active={active} onSelect={setActive} />
+      {!studio && !production ? (
+        /* 진입 랜딩 — 모션그래픽 / 애니메이션 스튜디오 선택 */
+        <main style={{ flex: 1, minWidth: 0, display: "flex", minHeight: 0 }}>
+          <StudioLanding onPick={setStudio} />
+        </main>
+      ) : (
+        <>
+          {/* 상단 게이트 스테퍼 — 스튜디오별 단계만 노출 */}
+          <Stepper steps={studioStepDefs} state={stepState} active={active} onSelect={setActive} />
 
-      {/* 본문 */}
-      <main style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
-        {renderStep()}
-      </main>
+          {/* 본문 */}
+          <main style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+            {renderStep()}
+          </main>
+        </>
+      )}
     </div>
   );
 
@@ -684,6 +810,7 @@ export default function OberonPage() {
       return (
         <BriefWizard
           initial={production?.brief}
+          studio={studio}
           onPlan={handlePlan}
           planning={planning}
           onLoad={loadSaved}
@@ -735,16 +862,27 @@ export default function OberonPage() {
       case "video":
         return (
           <StepFrame>
-            <VideoModeSwitch value={videoMode} onChange={setVideoMode} />
-            {videoMode === "veo" ? (
-              <GenerationQueue
+            {studio === "animation" ? (
+              <AnimatePanel
                 production={production}
-                generating={videoGenerating}
-                renderJob={renderJob}
-                onStart={startVideo}
-                onSelectTake={selectTake}
-                onReset={resetVideo}
-                onOpenOutput={(jobId) => void ipc()?.oberon.openRenderOutput(jobId)}
+                generating={animateGenerating}
+                job={animateJob}
+                keyStatus={animateKey}
+                hasKeyframe={(production.keyframeAssets?.length ?? 0) > 0}
+                onStart={startAnimate}
+                onReset={() => {
+                  if (animatePoll.current) clearInterval(animatePoll.current);
+                  animatePoll.current = null;
+                  setAnimateJob(null);
+                  setAnimateGenerating(false);
+                }}
+                onOpenOutput={(jobId) => void ipc()?.oberon.openAnimateOutput(jobId)}
+                onSaveKey={async (provider, value) => {
+                  const k = provider === "runway" ? "RUNWAYML_API_SECRET" : "LUMAAI_API_KEY";
+                  await ipc()?.env.set(k, value);
+                  const s = await ipc()?.oberon.animateKeyStatus();
+                  if (s) setAnimateKey(s);
+                }}
               />
             ) : (
               <MotionGraphicsPanel

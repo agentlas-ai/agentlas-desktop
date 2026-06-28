@@ -78,10 +78,6 @@ export default function AppsPage() {
               <StudioBotLogo size={18} />
             ) : app.id === "document-studio" ? (
               <IconFileUp size={14} />
-            ) : app.id === "creative-studio" ? (
-              <IconWand size={14} />
-            ) : app.id === "ecommerce-os" ? (
-              <IconStore size={14} />
             ) : app.id === "oberon" ? (
               <IconFilm size={14} />
             ) : (
@@ -92,7 +88,7 @@ export default function AppsPage() {
     [locale],
   );
 
-  const studioOrder = ["startup-founder-studio", "oberon", "document-studio", "creative-studio", "ecommerce-os"];
+  const studioOrder = ["startup-founder-studio", "oberon", "document-studio"];
   const studioTiles = useMemo<StudioTile[]>(
     () =>
       studioOrder
@@ -691,8 +687,6 @@ function appBadgeStyle(id: string): CSSProperties {
   if (id === "startup-founder-studio") return { background: "rgba(109,145,255,0.16)", color: "#ffffff" };
   if (id === "oberon") return { background: "rgba(131,247,255,0.15)", color: "#dffcff" };
   if (id === "document-studio") return { background: "rgba(226,226,224,0.16)", color: "#ffffff" };
-  if (id === "creative-studio") return { background: "rgba(255,184,77,0.16)", color: "#ffe1a3" };
-  if (id === "ecommerce-os") return { background: "rgba(145,231,180,0.15)", color: "#d9ffe7" };
   return {};
 }
 

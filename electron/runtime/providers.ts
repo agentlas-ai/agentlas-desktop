@@ -35,7 +35,7 @@ async function fetchAnthropic(key: string): Promise<ModelOption[]> {
   const res = await fetchWithTimeout("https://api.anthropic.com/v1/models?limit=100", {
     headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
   });
-  if (!res.ok) return [];
+  if (!res.ok) throw new Error(`models endpoint returned HTTP ${res.status}`);
   const json = (await res.json()) as { data?: Array<{ id?: string; display_name?: string }> };
   return (json.data ?? [])
     .filter((m): m is { id: string; display_name?: string } => typeof m.id === "string")
@@ -46,7 +46,7 @@ async function fetchOpenAI(key: string): Promise<ModelOption[]> {
   const res = await fetchWithTimeout("https://api.openai.com/v1/models", {
     headers: { authorization: `Bearer ${key}` },
   });
-  if (!res.ok) return [];
+  if (!res.ok) throw new Error(`models endpoint returned HTTP ${res.status}`);
   const json = (await res.json()) as { data?: Array<{ id?: string }> };
   return (json.data ?? [])
     .map((m) => m.id)
@@ -62,7 +62,7 @@ async function fetchGoogle(key: string): Promise<ModelOption[]> {
     `https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${encodeURIComponent(key)}`,
     {},
   );
-  if (!res.ok) return [];
+  if (!res.ok) throw new Error(`models endpoint returned HTTP ${res.status}`);
   const json = (await res.json()) as {
     models?: Array<{ name?: string; displayName?: string; supportedGenerationMethods?: string[] }>;
   };
@@ -88,8 +88,13 @@ export async function fetchByokModels(backend: ByokBackend, now: number): Promis
             ? await fetchOpenAI(key)
             : await fetchGoogle(key);
     }
-  } catch {
-    // 네트워크/파싱 실패 — fallback으로.
+  } catch (err) {
+    // 실시간 조회 실패를 조용히 삼키지 않는다 — 카탈로그로 표시하더라도 이유를 로그로 남겨
+    // "라이브 목록인 줄 알고 넘어가는" 일을 막는다.
+    console.warn(
+      `[providers] live ${backend} model fetch failed; falling back to built-in catalog:`,
+      err instanceof Error ? err.message : err,
+    );
   }
   if (models.length === 0) {
     models = byokModels(backend).map((m) => ({ id: m.id, label: m.label }));

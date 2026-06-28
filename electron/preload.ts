@@ -44,6 +44,10 @@ const api: AgentlasIpc = {
   confirm: {
     listPending: () => ipcRenderer.invoke("confirm:listPending"),
   },
+  attention: {
+    setPendingConfirmations: (count: number) =>
+      ipcRenderer.invoke("attention:setPendingConfirmations", count),
+  },
   updater: {
     getState: () => ipcRenderer.invoke("updater:getState"),
     check: () => ipcRenderer.invoke("updater:check"),
@@ -106,6 +110,11 @@ const api: AgentlasIpc = {
     getMotionAdJob: (id: string) => ipcRenderer.invoke("oberon:getMotionAdJob", id),
     cancelMotionAd: (id: string) => ipcRenderer.invoke("oberon:cancelMotionAd", id),
     openMotionAdOutput: (id: string) => ipcRenderer.invoke("oberon:openMotionAdOutput", id),
+    startAnimate: (request) => ipcRenderer.invoke("oberon:startAnimate", request),
+    getAnimateJob: (id: string) => ipcRenderer.invoke("oberon:getAnimateJob", id),
+    cancelAnimate: (id: string) => ipcRenderer.invoke("oberon:cancelAnimate", id),
+    openAnimateOutput: (id: string) => ipcRenderer.invoke("oberon:openAnimateOutput", id),
+    animateKeyStatus: () => ipcRenderer.invoke("oberon:animateKeyStatus"),
   },
   team: {
     list: () => ipcRenderer.invoke("team:list"),
@@ -279,6 +288,7 @@ const api: AgentlasIpc = {
     journal: (input) => ipcRenderer.invoke("hephaestus:journal", input),
     search: (input) => ipcRenderer.invoke("hephaestus:search", input),
     network: (input) => ipcRenderer.invoke("hephaestus:network", input),
+    routePreview: (input) => ipcRenderer.invoke("hephaestus:routePreview", input),
     localGui: (input) => ipcRenderer.invoke("hephaestus:localGui", input),
     publish: (input) => ipcRenderer.invoke("hephaestus:publish", input),
     package: (input) => ipcRenderer.invoke("hephaestus:package", input),
@@ -310,7 +320,9 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
   on: (channel: string, handler: (event: McpInvocationEvent) => void) => {
     const wrapped = (_evt: Electron.IpcRendererEvent, payload: McpInvocationEvent) =>
       handler(payload);
-    if (!channel.startsWith("invoke:event:")) return () => {};
+    // 화이트리스트: 호출 이벤트(invoke:event:*)와 Hephaestus 빌드 진행 채널(hephaestus:build:<runId>).
+    // 빌드 채널이 빠져 있어 빌드 로그/단계 이벤트가 렌더러에 전혀 도달하지 못하던 버그를 수정.
+    if (!channel.startsWith("invoke:event:") && !channel.startsWith("hephaestus:build:")) return () => {};
     ipcRenderer.on(channel, wrapped);
     return () => ipcRenderer.removeListener(channel, wrapped);
   },

@@ -1,6 +1,6 @@
 "use client";
 import { Suspense, useEffect, useState, type CSSProperties, type ReactNode } from "react";
-import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
@@ -42,6 +42,7 @@ export default function MarketplacePageWrapper() {
 function MarketplacePage() {
   const { t, locale } = useT();
   const ko = locale === "ko";
+  const searchParams = useSearchParams();
 
   const [active, setActive] = useState<HubCategory>("team");
   const [page, setPage] = useState(1);
@@ -57,9 +58,15 @@ function MarketplacePage() {
   const [listings, setListings] = useState<MarketplaceListing[]>([]);
   const [installedAgentSlugs, setInstalledAgentSlugs] = useState<Set<string>>(new Set());
   const [sourceStatus, setSourceStatus] = useState<MarketplaceSourceStatus | null>(null);
-  const [q, setQ] = useState("");
+  const [q, setQ] = useState(() => searchParams.get("q") ?? "");
   const [installing, setInstalling] = useState<string | null>(null);
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
+
+  // 좌측 사이드바 검색 등 외부에서 ?q= 로 진입하면 검색어를 반영.
+  useEffect(() => {
+    const urlQ = searchParams.get("q");
+    if (urlQ != null) setQ(urlQ);
+  }, [searchParams]);
 
   useEffect(() => {
     setPage(1);
@@ -257,6 +264,16 @@ function MarketplacePage() {
   const pagedPlugins = filteredPlugins.slice(pageStart, pageEnd);
   const pagedAgents = filteredAgents.slice(pageStart, pageEnd);
   const installedPluginIds = new Set(installedPlugins.map((plugin) => plugin.catalogId).filter(Boolean));
+  const hubLive = sourceStatus ? sourceStatus.online && !sourceStatus.usingFallback : false;
+  const usingFallbackCatalog = sourceStatus ? !hubLive : false;
+  const sourceLabel = !sourceStatus
+    ? ko ? "Hub 확인 중" : "Checking Hub"
+    : hubLive
+      ? ko ? "Hub 실시간" : "Hub live"
+      : ko ? "Hub 오프라인" : "Hub offline";
+  const accountLabel = signedIn
+    ? ko ? "계정 로그인됨" : "Account signed in"
+    : ko ? "로그인 필요" : "Signed out";
 
   const CATEGORY_NAV = [
     { key: "team" as HubCategory, ko: "팀", en: "Team", tone: C.purple, note: { ko: `여러 에이전트가 함께 일하는 팀 · 호출 ${TEAM_CALL_CREDITS}크레딧`, en: `Multi-agent teams · ${TEAM_CALL_CREDITS} credits per call` } },
@@ -268,19 +285,37 @@ function MarketplacePage() {
     <div className="rd hub-desktop-root">
       <div className="titlebar-nodrag hub-desktop-scroll">
         <div className="hub-web-frame">
-          <HubWebRail
-            ko={ko}
-            active="hub"
-            importing={importing}
-            onImport={() => void importLocalFolderFromMarket()}
-          />
           <div className="hub-web-main">
             <div className="hub-web-topbar">
               <div className="hub-web-topbar-title">Hub</div>
               <div className="hub-web-topbar-actions" aria-label={ko ? "허브 계정 상태" : "Hub account state"}>
-                <span>EN</span>
-                <span>KO</span>
-                <span>{signedIn ? (ko ? "연결됨" : "Connected") : (ko ? "로그인 필요" : "Signed out")}</span>
+                <button
+                  type="button"
+                  className="btn sm"
+                  onClick={() => void importLocalFolderFromMarket()}
+                  disabled={importing}
+                  title={ko ? "로컬 폴더의 에이전트를 가져옵니다" : "Import an agent from a local folder"}
+                >
+                  <IconFolder size={13} />
+                  <span style={{ marginLeft: 4 }}>
+                    {importing ? (ko ? "가져오는 중" : "Importing") : ko ? "로컬 폴더 가져오기" : "Import local folder"}
+                  </span>
+                </button>
+                <span>{accountLabel}</span>
+                <span
+                  style={{
+                    border: "1px solid var(--rd-border)",
+                    borderRadius: 999,
+                    padding: "3px 8px",
+                    color: hubLive ? "var(--rd-ok)" : "var(--rd-warn)",
+                    background: "var(--rd-surface)",
+                    fontSize: 12,
+                    fontWeight: 650,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {sourceLabel}
+                </span>
               </div>
             </div>
             <main className="rd-page hub-web-content">
@@ -337,14 +372,38 @@ function MarketplacePage() {
                   }}
                 />
                 <span>
-                  {sourceStatus.online && !sourceStatus.usingFallback
-                    ? "Hub MCP live source"
-                    : "Fallback registry source"}
+                  {hubLive
+                    ? ko ? "허브 실시간 연결됨" : "Hub live source"
+                    : ko ? "오프라인 · 기본 추천 목록 표시 중 (실제 Hub 연결 아님)" : "Offline · showing built-in catalog, not live Hub"}
                 </span>
-                {sourceStatus.lastError && <span style={{ color: "var(--rd-accent-2-text)" }}>{sourceStatus.lastError}</span>}
+                {!hubLive && sourceStatus.lastError && (
+                  <span style={{ color: "var(--rd-accent-2-text)", overflowWrap: "anywhere" }}>
+                    {sourceStatus.lastError}
+                  </span>
+                )}
               </div>
             )}
           </div>
+
+          {sourceStatus && !hubLive && (
+            <div className="hub-signin-notice" role="status" style={{ borderColor: "var(--rd-warn)", background: "color-mix(in oklch, var(--rd-warn) 10%, var(--rd-surface))" }}>
+              <span>
+                <strong style={{ color: "var(--rd-ink)", fontWeight: 650 }}>
+                  {ko ? "실제 Hub에 연결되지 않았습니다." : "Live Hub is not connected."}
+                </strong>
+                <span style={{ marginLeft: 8 }}>
+                  {ko
+                    ? "지금 보이는 팀/에이전트는 앱에 포함된 기본 목록입니다. 실시간 Hub 등록, 호출 가능 여부, 최신 공개 목록 검증으로 보지 마세요."
+                    : "The teams and agents shown now are the built-in catalog. Do not treat them as live Hub registration, callable status, or the latest public list."}
+                </span>
+                {sourceStatus.baseUrl && (
+                  <span style={{ display: "block", marginTop: 4, color: "var(--rd-ink-3)", overflowWrap: "anywhere" }}>
+                    {sourceStatus.baseUrl}
+                  </span>
+                )}
+              </span>
+            </div>
+          )}
 
           {importNotice && (
             <div className="hub-import-notice" data-tone={importNotice.tone} role="status">
@@ -393,12 +452,12 @@ function MarketplacePage() {
                   {pagedTeams.map((team: any) => {
                     const isFirm = !("agents" in team);
                     return isFirm ? (
-                      <FirmCard key={team.slug} firm={team} locale={locale} installed={installedFirmSlugs.has(team.slug)} installing={installing === team.slug} onInstall={() => installFirm(team)} onOpen={() => {
+                      <FirmCard key={team.slug} firm={team} locale={locale} offlineCatalog={usingFallbackCatalog} installed={installedFirmSlugs.has(team.slug)} installing={installing === team.slug} onInstall={() => installFirm(team)} onOpen={() => {
                         const inst = installedFirms.find((f) => f.slug === team.slug);
                         if (inst) navigate(`/firm/detail?id=${inst.id}`);
                       }} />
                     ) : (
-                      <BundleCard key={team.id} bundle={team} locale={locale} installing={installing === team.id} onInstall={() => installBundle(team)} />
+                      <BundleCard key={team.id} bundle={team} locale={locale} offlineCatalog={usingFallbackCatalog} installing={installing === team.id} onInstall={() => installBundle(team)} />
                     );
                   })}
                 </div>
@@ -446,7 +505,7 @@ function MarketplacePage() {
               {pagedAgents.length > 0 ? (
                 <div className="market-card-grid">
                   {pagedAgents.map((agent) => (
-                    <AgentCard key={agent.slug} listing={agent} locale={locale} installed={installedAgentSlugs.has(agent.slug)} installing={installing === agent.slug} onInstall={() => installOne(agent.slug)} />
+                    <AgentCard key={agent.slug} listing={agent} locale={locale} offlineCatalog={usingFallbackCatalog} installed={installedAgentSlugs.has(agent.slug)} installing={installing === agent.slug} onInstall={() => installOne(agent.slug)} />
                   ))}
                 </div>
               ) : (
@@ -477,90 +536,6 @@ function MarketplacePage() {
           </div>
         </div>
       </div>
-    </div>
-  );
-}
-
-function HubWebRail({
-  ko,
-  active,
-  importing,
-  onImport,
-}: {
-  ko: boolean;
-  active: "hub" | "plugins" | "desktop";
-  importing: boolean;
-  onImport: () => void;
-}) {
-  const primary = [
-    { label: "Dashboard", href: "/dashboard" },
-    { label: "Agent Cloud", href: "/cloud" },
-    { label: "Prompt Dictionary", href: "/library/assets" },
-  ];
-  const create = [
-    { label: "Single agent", href: "/build" },
-    { label: "Multi agent", href: "/build" },
-  ];
-  const manage = [
-    { label: "Edit", href: "/library/agents" },
-    { label: "Security", href: "/library/tools" },
-    { label: "Hub", href: "/marketplace", key: "hub" },
-    { label: "Plugins", href: "/library/mcps", key: "plugins" },
-    { label: "Desktop app", href: "/apps", key: "desktop" },
-    { label: "Lab", href: "/surface-preview" },
-  ];
-
-  return (
-    <aside className="hub-web-rail" aria-label={ko ? "Agentlas Hub 내비게이션" : "Agentlas Hub navigation"}>
-      <div className="hub-web-brand">
-        <div className="hub-web-brand-mark">A</div>
-        <div>
-          <strong>Agentlas Hub</strong>
-          <span>HUB</span>
-        </div>
-      </div>
-      <HubRailGroup items={primary} />
-      <HubRailGroup title="CREATE" items={create} />
-      <HubRailGroup title="MANAGE" items={manage} active={active} />
-      <div className="hub-web-rail-bottom">
-        <button type="button" className="hub-web-local-import" onClick={onImport} disabled={importing}>
-          <IconFolder size={13} />
-          <span>{importing ? (ko ? "가져오는 중" : "Importing") : (ko ? "로컬 폴더" : "Local folder")}</span>
-        </button>
-        <div className="hub-web-account">
-          <span className="hub-web-lock">?</span>
-          <div>
-            <strong>{ko ? "데스크탑 계정" : "Desktop account"}</strong>
-            <span>{ko ? "로컬과 Hub 연결" : "Local and Hub link"}</span>
-          </div>
-        </div>
-      </div>
-    </aside>
-  );
-}
-
-function HubRailGroup({
-  title,
-  items,
-  active,
-}: {
-  title?: string;
-  items: Array<{ label: string; href: string; key?: string }>;
-  active?: string;
-}) {
-  return (
-    <div className="hub-web-rail-group">
-      {title && <div className="hub-web-rail-title">{title}</div>}
-      {items.map((item) => (
-        <Link
-          key={`${item.label}:${item.href}`}
-          href={item.href}
-          className={"hub-web-rail-link" + (item.key && item.key === active ? " active" : "")}
-        >
-          <span className="hub-web-rail-glyph" aria-hidden="true" />
-          <span>{item.label}</span>
-        </Link>
-      ))}
     </div>
   );
 }
@@ -659,83 +634,90 @@ function PluginCard({
   );
 }
 
-function FirmCard({ firm, locale, installed, installing, onInstall, onOpen }: any) {
+function FirmCard({ firm, locale, offlineCatalog, installed, installing, onInstall, onOpen }: any) {
   const loc = pickLocalized(firm, locale);
   const ko = locale === "ko";
+  const sourceName = offlineCatalog ? (ko ? "앱 내장 기본 목록" : "Built-in catalog") : "Agentlas Hub";
   return (
     <div className="card portal-entity-card hub-entity-card">
       <div className="hub-card-head">
         <div className="hub-card-main">
-          <div className="hub-card-kicker">{ko ? "허브 팀" : "HUB TEAM"}</div>
+          <div className="hub-card-kicker">{offlineCatalog ? (ko ? "기본 팀" : "BUILT-IN TEAM") : (ko ? "허브 팀" : "HUB TEAM")}</div>
           <button type="button" className="portal-card-title hub-card-title" onClick={installed ? onOpen : undefined}>
             {loc.name}
           </button>
-          <div className="hub-card-author">{ko ? "Agentlas Hub" : "Agentlas Hub"}</div>
+          <div className="hub-card-author">{sourceName}</div>
         </div>
         <RdTag className="hub-credit-tag" bg={C.purple}>{ko ? `크레딧 ${TEAM_CALL_CREDITS}` : `${TEAM_CALL_CREDITS} credits`}</RdTag>
       </div>
       <div className="hub-card-copy">{loc.tagline}</div>
       <div className="portal-chip-row hub-card-meta">
+        {offlineCatalog && <RdTag dashed>{ko ? "실시간 Hub 아님" : "Not live Hub"}</RdTag>}
         <RdTag dashed>{ko ? "본부형 팀" : "Firm"}</RdTag>
         <RdTag className="hub-command-chip" dashed>{`/hep-call ${firm.slug}`}</RdTag>
       </div>
       <div className="hub-card-actions">
         <button type="button" className={"btn sm" + (installed ? "" : " primary")} onClick={installed ? onOpen : onInstall} disabled={installing}>
-          {installing ? (ko ? "설치 중" : "Installing") : installed ? (ko ? "열기" : "Open") : (ko ? "설치" : "Install")}
+          {installing ? (ko ? "설치 중" : "Installing") : installed ? (ko ? "열기" : "Open") : offlineCatalog ? (ko ? "기본 설치" : "Install built-in") : (ko ? "설치" : "Install")}
         </button>
       </div>
     </div>
   );
 }
 
-function BundleCard({ bundle, locale, installing, onInstall }: any) {
+function BundleCard({ bundle, locale, offlineCatalog, installing, onInstall }: any) {
   const loc = pickLocalized(bundle, locale);
   const ko = locale === "ko";
   return (
     <div className="card portal-entity-card hub-entity-card">
       <div className="hub-card-head">
         <div className="hub-card-main">
-          <div className="hub-card-kicker">{ko ? "팀 번들" : "TEAM BUNDLE"}</div>
+          <div className="hub-card-kicker">{offlineCatalog ? (ko ? "기본 팀 번들" : "BUILT-IN TEAM BUNDLE") : (ko ? "팀 번들" : "TEAM BUNDLE")}</div>
           <div className="portal-card-title hub-card-title">{loc.name}</div>
-          <div className="hub-card-author">{ko ? "Agentlas Starter" : "Agentlas Starter"}</div>
+          <div className="hub-card-author">{offlineCatalog ? (ko ? "앱 내장 기본 목록" : "Built-in catalog") : (ko ? "Agentlas Starter" : "Agentlas Starter")}</div>
         </div>
         <RdTag className="hub-credit-tag" bg={C.purple}>{ko ? `크레딧 ${TEAM_CALL_CREDITS}` : `${TEAM_CALL_CREDITS} credits`}</RdTag>
       </div>
       <div className="hub-card-copy">{loc.tagline}</div>
       <div className="portal-chip-row hub-card-meta">
+        {offlineCatalog && <RdTag dashed>{ko ? "실시간 Hub 아님" : "Not live Hub"}</RdTag>}
         <RdTag dashed>{ko ? `에이전트 ${bundle.agents?.length ?? 0}명` : `${bundle.agents?.length ?? 0} Specialist Roles`}</RdTag>
         <RdTag className="hub-command-chip" dashed>{`/hep-call ${bundle.id}`}</RdTag>
       </div>
       <div className="hub-card-actions">
         <button type="button" className="btn sm primary" onClick={onInstall} disabled={installing}>
-          {installing ? (ko ? "설치 중" : "Installing") : (ko ? "설치" : "Install")}
+          {installing ? (ko ? "설치 중" : "Installing") : offlineCatalog ? (ko ? "기본 설치" : "Install built-in") : (ko ? "설치" : "Install")}
         </button>
       </div>
     </div>
   );
 }
 
-function AgentCard({ listing, locale, installed, installing, onInstall }: any) {
+function AgentCard({ listing, locale, offlineCatalog, installed, installing, onInstall }: any) {
   const loc = pickLocalized(listing, locale);
   const ko = locale === "ko";
+  const author = offlineCatalog
+    ? ko ? "앱 내장 기본 목록" : "Built-in catalog"
+    : listing.ownerName ? (ko ? `${listing.ownerName} 제작` : `by ${listing.ownerName}`) : "Agentlas Hub";
   return (
     <div className="card portal-entity-card hub-entity-card">
       <div className="hub-card-head">
         <div className="hub-card-main">
-          <div className="hub-card-kicker">{ko ? "에이전트" : "AGENT"}</div>
+          <div className="hub-card-kicker">{offlineCatalog ? (ko ? "기본 에이전트" : "BUILT-IN AGENT") : (ko ? "에이전트" : "AGENT")}</div>
           <div className="portal-card-title hub-card-title">{loc.name}</div>
-          <div className="hub-card-author">{listing.ownerName ? (ko ? `${listing.ownerName} 제작` : `by ${listing.ownerName}`) : "Agentlas Hub"}</div>
+          <div className="hub-card-author">{author}</div>
         </div>
         <RdTag className="hub-credit-tag" bg={C.green}>{ko ? `크레딧 ${AGENT_CALL_CREDITS}` : `${AGENT_CALL_CREDITS} credits`}</RdTag>
       </div>
       <div className="hub-card-copy">{loc.tagline}</div>
       <div className="portal-chip-row hub-card-meta">
+        {offlineCatalog && <RdTag dashed>{ko ? "실시간 Hub 아님" : "Not live Hub"}</RdTag>}
         <RdTag dashed>{ko ? "단일 에이전트" : "Single agent"}</RdTag>
         <RdTag className="hub-command-chip" dashed>{`/hep-call ${listing.slug}`}</RdTag>
       </div>
       <div className="hub-card-actions">
         <button type="button" className={"btn sm" + (installed ? "" : " primary")} onClick={installed ? undefined : onInstall} disabled={installing || installed}>
-          {installing ? (ko ? "설치 중" : "Installing") : installed ? (ko ? "설치됨" : "Installed") : (ko ? "설치" : "Install")}
+          {installing ? (ko ? "설치 중" : "Installing") : installed ? (ko ? "설치됨" : "Installed") : offlineCatalog ? (ko ? "기본 설치" : "Install built-in") : (ko ? "설치" : "Install")}
         </button>
       </div>
     </div>

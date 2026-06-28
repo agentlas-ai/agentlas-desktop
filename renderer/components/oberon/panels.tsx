@@ -414,6 +414,23 @@ const ASPECT_OUTPUTS: { aspect: string; platform: string; ratio: string }[] = [
   { aspect: "2.39:1", platform: "시네마 스코프", ratio: "2.39 / 1" },
 ];
 
+// file:// 절대경로를 데스크톱 셸의 agentlas:// 미디어 프로토콜로 변환한다.
+// webSecurity:true 에서 <video src="file://">는 차단되므로 인-앱 재생에 필수.
+function toLocalMediaSrc(url: string): string {
+  if (!url) return url;
+  let abs = url;
+  if (url.startsWith("file://")) {
+    try {
+      abs = decodeURIComponent(new URL(url).pathname);
+    } catch {
+      return url;
+    }
+  } else if (!url.startsWith("/")) {
+    return url; // 이미 http(s)/agentlas/blob 등 로드 가능한 URL.
+  }
+  return `agentlas://localfile/?p=${encodeURIComponent(abs)}`;
+}
+
 export function DeliveryPanel({ production }: { production: FilmProduction }) {
   const exports = buildAllExports(production);
   const renderOutputs = production.renderOutputs ?? [];
@@ -438,7 +455,7 @@ export function DeliveryPanel({ production }: { production: FilmProduction }) {
               {master && (
                 <video
                   controls
-                  src={master.url}
+                  src={toLocalMediaSrc(master.url)}
                   style={{ width: "100%", borderRadius: 10, background: "#111", aspectRatio: "16 / 9", objectFit: "contain" }}
                 />
               )}

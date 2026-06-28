@@ -58,7 +58,7 @@ function summarizeGate(scan: Record<string, unknown>): string {
 /**
  * 채팅 실행을 항상 켜진 Stormbreaker Loop 로 감독한다(비차단).
  * 즉시 핸들을 반환하고, 엔진 가용성 확인·scope-lock·라우팅 평가는
- * 백그라운드에서 동시 수행한다. 엔진이 없어도 prompt-level guard 계약은 이미 주입되어 있다.
+ * 백그라운드에서 동시 수행한다. 엔진이 없으면 이 실행은 감독·검증되지 않음을 명시적으로 표출한다(가짜 통과 금지).
  */
 export function superviseStormbreaker(opts: {
   query: string;
@@ -86,7 +86,8 @@ export function superviseStormbreaker(opts: {
       if (!ok) {
         opts.emit({
           name: "Stormbreaker Loop · engine",
-          result: "Native Hephaestus engine unavailable; prompt-level guard remains active for this run.",
+          result:
+            "UNVERIFIED: native Hephaestus engine unavailable. This run is NOT supervised, routed, or verified — treat every result as unverified and re-run with the engine available. No prompt-level guard substitutes for engine verification.",
           isError: true,
         });
         return;
@@ -125,26 +126,44 @@ export function superviseStormbreaker(opts: {
       });
     },
     finish: async (fin) => {
+      if (opts.signal?.aborted) return;
       const ok = await readyP.catch(() => false);
-      if (!ok || opts.signal?.aborted) return; // 엔진 부재 — 게이트 표식 생략(가짜 표식 방지).
+      if (!ok) {
+        // 엔진 부재 — 게이트를 조용히 생략하지 않는다. 감독되지 않은 실행이
+        // 검증된 것으로 오인되지 않도록 명시적 unverified 판정을 표출한다.
+        opts.emit({
+          name: "Stormbreaker Loop · final-gate",
+          result:
+            "UNVERIFIED: Hephaestus engine unavailable, so no verification gate ran. Do not treat this run as verified.",
+          isError: true,
+        });
+        return;
+      }
       await routeP.catch(() => {});
       if (opts.signal?.aborted) return;
-      try {
-        const producesArtifacts =
-          (fin?.permission === "write" || fin?.permission === "full") && Boolean(fin?.workspace);
-        if (producesArtifacts && fin?.workspace) {
-          // evidence gate — 산출물이 있는 턴만 정적 보안 스캔(비-빌드 Q&A 턴은 가볍게).
-          // 답변 표출을 과도히 지연하지 않도록 25s 로 바운드(초과 시 무해하게 생략).
+      const producesArtifacts =
+        (fin?.permission === "write" || fin?.permission === "full") && Boolean(fin?.workspace);
+      if (producesArtifacts && fin?.workspace) {
+        // evidence gate — 산출물이 있는 턴만 정적 보안 스캔(비-빌드 Q&A 턴은 가볍게).
+        try {
           const scan = await securityScan(fin.workspace, { signal: opts.signal, timeoutMs: 25_000 });
           opts.emit({ name: "Stormbreaker Loop · final-gate", result: summarizeGate(asObj(scan.json)) });
-        } else {
+        } catch (err) {
+          // 스캔 실패/타임아웃을 암묵적 통과로 삼키지 않는다 — unverified 로 보고해
+          // 산출물이 '통과'로 표출되지 않게 한다.
+          if (opts.signal?.aborted) return;
+          const reason = err instanceof Error ? err.message : String(err);
           opts.emit({
             name: "Stormbreaker Loop · final-gate",
-            result: "Review gate: response reviewed against locked scope. No file artifacts to verify this turn.",
+            result: `UNVERIFIED: security scan did not complete (${reason}). Artifacts were NOT cleared — re-run the gate before publishing.`,
+            isError: true,
           });
         }
-      } catch {
-        /* 비차단 */
+      } else {
+        opts.emit({
+          name: "Stormbreaker Loop · final-gate",
+          result: "Review gate: response reviewed against locked scope. No file artifacts to verify this turn.",
+        });
       }
     },
   };

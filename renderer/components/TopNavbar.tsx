@@ -19,8 +19,6 @@ export function TopNavbar() {
     pathname.startsWith("/apps") ||
     pathname.startsWith("/automation") ||
     pathname.startsWith("/oberon") ||
-    pathname.startsWith("/creative-studio") ||
-    pathname.startsWith("/ecommerce-os") ||
     pathname.startsWith("/startup-founder-studio");
   const environmentActive = pathname.startsWith("/library") && !pathname.startsWith("/library/agents");
 

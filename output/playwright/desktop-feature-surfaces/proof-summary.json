@@ -1,0 +1,33 @@
+{
+  "ok": true,
+  "baseUrl": "http://127.0.0.1:57538",
+  "recordedAt": "2026-06-28T09:33:19.897Z",
+  "evidence": [
+    {
+      "name": "build-surface",
+      "status": "pass",
+      "url": "http://127.0.0.1:57538/build.html"
+    },
+    {
+      "name": "library-agents-surface",
+      "status": "pass",
+      "url": "http://127.0.0.1:57538/library/agents.html"
+    },
+    {
+      "name": "chat-options-surface",
+      "status": "pass",
+      "url": "http://127.0.0.1:57538/chat.html?id=chat-1"
+    },
+    {
+      "name": "automation-create-surface",
+      "status": "pass",
+      "url": "http://127.0.0.1:57538/automation"
+    },
+    {
+      "name": "hub-live-surface",
+      "status": "pass",
+      "url": "http://127.0.0.1:57538/marketplace.html"
+    }
+  ],
+  "screenshots": "/Users/mason/Documents/Agentlas_F/agentlas_desktop/output/playwright/desktop-feature-surfaces"
+}

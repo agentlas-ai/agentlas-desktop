@@ -6,7 +6,7 @@
 import { useMemo, useState, type CSSProperties } from "react";
 import type { InstalledAgent, InstalledFirm, ResolvedOrg } from "@/lib/types";
 import { pickLocalized, useT } from "@/lib/i18n";
-import { marginLine, formatTokens } from "@/lib/receipts";
+import { formatTokens } from "@/lib/receipts";
 import { IconClose, IconNetwork } from "./Icon";
 
 /** 실시간 에이전트 상태 — chat 페이지가 속성 이벤트로 채운다. */
@@ -255,9 +255,6 @@ export function AgentNetworkPanel({
           )}
         </div>
       </div>
-
-      {/* 패널 하단 고정 — 세션 누적 마진(항상 ₩0)을 1급 영수증 데이터로 노출 */}
-      <SessionMarginCounter receiptCount={timeline.length} locale={locale} />
     </aside>
   );
 }
@@ -351,38 +348,7 @@ function WorkflowCard({
           {tokensText && <span style={receiptChipStyle}>{tokensText}</span>}
         </div>
       )}
-      {/* 모든 영수증에 1급 데이터로 박는 마진 라인 — 구조적으로 항상 ₩0. */}
-      <div style={receiptMarginStyle}>{marginLine(locale)}</div>
     </article>
-  );
-}
-
-/**
- * 세션 누적 마진 카운터 — 이번 세션의 모든 영수증을 합쳐도 Agentlas 마진은 ₩0.
- * 마진은 구조적으로 0이므로(모델 호출을 중계하지 않음) 누적도 0 — 이게 핵심 메시지다.
- * receiptCount는 실측(타임라인 항목 수)이고, 마진/추가요금만 변하지 않는 사실로 단정한다.
- */
-function SessionMarginCounter({
-  receiptCount,
-  locale,
-}: {
-  receiptCount: number;
-  locale: "ko" | "en";
-}) {
-  return (
-    <div style={sessionMarginCounterStyle}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <span style={sessionMarginLabelStyle}>
-          {locale === "ko" ? "이번 세션 누적" : "This session"}
-        </span>
-        <span style={sessionMarginValueStyle}>{marginLine(locale)}</span>
-      </div>
-      <div style={sessionMarginSubStyle}>
-        {locale === "ko"
-          ? `영수증 ${receiptCount}건 · 추가요금 0 (내 구독/키로만 구동)`
-          : `${receiptCount} receipt${receiptCount === 1 ? "" : "s"} · $0 surcharge (runs on your own subscription/keys)`}
-      </div>
-    </div>
   );
 }
 

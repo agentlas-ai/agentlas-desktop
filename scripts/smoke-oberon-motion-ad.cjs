@@ -17,16 +17,20 @@ async function main() {
     root,
     "dist/electron/oberon/motion-graphics.js",
   ));
+  const outputDir = process.env.OBERON_MOTION_OUTPUT_DIR
+    ? path.resolve(process.env.OBERON_MOTION_OUTPUT_DIR)
+    : undefined;
   const job = startOberonMotionAd({
     productionId: `oberon-motion-smoke-${Date.now()}`,
-    title: process.env.OBERON_MOTION_TITLE || "Agentlas Motion Ad",
+    title: process.env.OBERON_MOTION_TITLE || "Agentlas Owned AI Workers",
     brand: "Agentlas",
     concept:
-      "Agentlas turns scattered prompts, agents, images, and folders into a local production operating system.",
+      process.env.OBERON_MOTION_CONCEPT ||
+      "빌려 쓰는 AI가 아니라, 내가 소유하는 AI 일꾼들. Agentlas는 내 로컬 환경에서 에이전트 팀을 운영하는 데스크탑 Agent OS입니다.",
     aspectRatio: process.env.OBERON_MOTION_ASPECT === "9:16" ? "9:16" : "16:9",
     durationSec: Number(process.env.OBERON_MOTION_DURATION || 30),
-    fps: Number(process.env.OBERON_MOTION_FPS || 15),
-    outputDir: process.env.OBERON_MOTION_OUTPUT_DIR || undefined,
+    fps: Number(process.env.OBERON_MOTION_FPS || 24),
+    outputDir,
   });
 
   console.log(`JOB=${job.id}`);

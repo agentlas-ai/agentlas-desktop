@@ -22,7 +22,8 @@ import type {
   ToolFactoryScaffoldResult,
   ToolFactoryToolRecord,
 } from "@/lib/types";
-import { ChatStream, type StreamMessage, type StreamStep } from "@/components/ChatStream";
+import type { Recommendation, RecExecChoice } from "@shared/types";
+import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { extractQuestions } from "@/lib/ask-question";
 import { ChatInput } from "@/components/ChatInput";
 import { WorkbenchPanel, type SurfaceStatePatchHandler, type WorkbenchSurface } from "@/components/WorkbenchPanel";
@@ -188,6 +189,32 @@ function activityForEvent(ev: McpInvocationEvent): StreamStep["activity"] {
   if (ev.phase === "synthesize") return "complete";
   if (ev.kind === "tool-use") return "tool";
   return "status";
+}
+
+// 라이브 이벤트의 에이전트를 파이프라인 단계에 best-effort 로 매칭해 단계 상태를 monotonic 하게 전진.
+// 매칭 안 되면 그대로 둔다(가짜 진행 금지) — 매칭될 때만 단계가 켜진다.
+function advancePipeline(stages: PipelineStage[] | undefined, ev: McpInvocationEvent): PipelineStage[] | undefined {
+  if (!stages || !stages.length) return stages;
+  const key = (ev.agentName ?? ev.agentId ?? "").toLowerCase().trim();
+  if (!key) return stages;
+  const idx = stages.findIndex((s) => {
+    const a = (s.agentName ?? "").toLowerCase();
+    const b = (s.agentId ?? "").toLowerCase();
+    return (a && (key.includes(a) || a.includes(key))) || (b && (key.includes(b) || b.includes(key)));
+  });
+  if (idx < 0) return stages;
+  // 이미 진행된 최대 단계 — 역행 금지(단계는 순서대로 실행).
+  const progressed = stages.reduce(
+    (mx, s, i) => (s.status === "running" || s.status === "done" ? Math.max(mx, i) : mx),
+    -1,
+  );
+  const target = Math.max(idx, progressed);
+  return stages.map((s, i) => (i < target ? { ...s, status: "done" } : i === target ? { ...s, status: "running" } : s));
+}
+
+function completePipeline(stages: PipelineStage[] | undefined): PipelineStage[] | undefined {
+  if (!stages || !stages.length) return stages;
+  return stages.map((s) => ({ ...s, status: "done" as const }));
 }
 
 type GeneratedAppChatRoute = {
@@ -503,6 +530,12 @@ function ChatPage() {
             return msg;
           }),
         );
+        // 파이프라인 단계 진행 — 이 에이전트가 어떤 단계인지 매칭되면 켠다(best-effort, 비차단).
+        setMessages((m) =>
+          m.map((msg) =>
+            msg.id === placeholderId && msg.pipeline ? { ...msg, pipeline: advancePipeline(msg.pipeline, ev) } : msg,
+          ),
+        );
         return;
       }
       if (ev.kind === "tool-use" && ev.tool) {
@@ -603,6 +636,7 @@ function ChatPage() {
               busy: false,
               streaming: false,
               tokens: ev.tokens ?? msg.tokens,
+              pipeline: completePipeline(msg.pipeline),
               steps: [
                 ...(msg.steps ?? []),
                 {
@@ -885,8 +919,13 @@ function ChatPage() {
       opts?: {
         images?: ImageAttachment[];
         permissions?: PermissionLevel;
+        planMode?: boolean;
         goalMode?: boolean;
         appsGenerateMode?: boolean;
+        /** 추천 시트의 pipeline 픽이면 에이전트 플레이스홀더 상단에 보여줄 단계 계획. */
+        pipelineStages?: PipelineStage[];
+        /** 추천 시트의 네트워크 픽이면 빌려올 Hub 에이전트 슬러그 — 백엔드가 hep-call 로 borrow. */
+        borrowAgents?: string[];
       },
     ) => {
       const api = ipc();
@@ -966,6 +1005,7 @@ function ChatPage() {
           text: "",
           busy: true,
           startedAt,
+          pipeline: opts?.pipelineStages,
           steps: [
             {
               id: uid(),
@@ -1009,10 +1049,12 @@ function ChatPage() {
           images,
           locale,
           permissions: opts?.permissions ?? DEFAULT_PERMISSION,
+          planMode: opts?.planMode,
           goalMode: opts?.goalMode || Boolean(goalPrompt),
           appsGenerateMode: opts?.appsGenerateMode || Boolean(appRoute),
           targetAppId: generatedAppRoute?.action === "edit" ? generatedAppRoute.app.id : undefined,
           targetAppAction: generatedAppRoute?.action === "edit" ? "edit" : undefined,
+          borrowAgents: opts?.borrowAgents,
         });
         runIdRef.current = runId;
         // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
@@ -1513,6 +1555,75 @@ function ChatPage() {
     setFirm(null); // switchAgent는 firm을 해제
   }
 
+  // 추천 토글 ON → 보내기 전 라우터 미리보기. routeOnly(실행 없음)를 정규화해 추천 시트에 넘긴다.
+  // 실패/비가용 시에도 throw 하지 않고 null → 시트가 "그냥 보내기" 폴백을 보여준다.
+  async function handleRecommendPreview(text: string): Promise<Recommendation | null> {
+    const api = ipc();
+    if (!api || !chat) return null;
+    const folder = await api.workspace.get(chat.id).catch(() => null);
+    try {
+      return await api.hephaestus.routePreview({
+        query: text,
+        project: folder ?? undefined,
+        allowLocal: true, // 로컬 카드 + 허브 혼합 추천
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  // 추천 시트에서 고른 경로를 실제 실행으로 디스패치. 기존 send/switchAgent 경로를 그대로 재사용한다.
+  function handleRecommendExecute(
+    choice: RecExecChoice,
+    text: string,
+    opts: { images?: ImageAttachment[]; permissions?: PermissionLevel; planMode?: boolean; goalMode?: boolean; appsGenerateMode?: boolean },
+  ) {
+    const sendOpts = {
+      images: opts?.images,
+      permissions: opts?.permissions,
+      planMode: opts?.planMode,
+      goalMode: opts?.goalMode,
+      appsGenerateMode: opts?.appsGenerateMode,
+    };
+    switch (choice.kind) {
+      case "agent":
+        // 팀/회사 추천은 파괴적 rebind(switchAgent=firm_id NULL)를 피해 네트워크 경로로 실행한다.
+        if (choice.isFirm) {
+          void send(`hep-network ${text}`, sendOpts);
+        } else {
+          void switchAgent(choice.agentId).then(() => send(text, sendOpts));
+        }
+        break;
+      case "network":
+        // 고른 Hub 에이전트를 borrow 해서 실행(BYOM). 선택이 없으면(혹시) 네트워크 라우팅 폴백.
+        if (choice.agents && choice.agents.length > 0) {
+          void send(text, { ...sendOpts, borrowAgents: choice.agents });
+        } else {
+          void send(`hep-network ${text}`, sendOpts);
+        }
+        break;
+      case "pipeline": {
+        // 단계 계획을 플레이스홀더 메시지 상단 스테퍼로 보여준다(PRD→배포 가시화).
+        const stages: PipelineStage[] = (choice.stages ?? []).map((s) => ({
+          order: s.order,
+          kind: s.kind,
+          agentName: s.agentName ?? s.agentId,
+          agentId: s.agentId,
+          status: "pending" as const,
+        }));
+        void send(`stormbreaker ${text}`, {
+          ...sendOpts,
+          pipelineStages: stages.length ? stages : undefined,
+        });
+        break;
+      }
+      case "plain":
+      default:
+        void send(text, sendOpts);
+        break;
+    }
+  }
+
   async function saveTitle() {
     const api = ipc();
     if (!api || !chat) return;
@@ -1832,12 +1943,15 @@ function ChatPage() {
           void send(text, {
             images: opts?.images,
             permissions: opts?.permissions,
+            planMode: opts?.planMode,
             goalMode: opts?.goalMode,
             appsGenerateMode: opts?.appsGenerateMode,
           });
         }}
         onCommand={handleCommand}
         onCallAgent={(agentId) => void switchAgent(agentId)}
+        onRecommendPreview={handleRecommendPreview}
+        onRecommendExecute={handleRecommendExecute}
         onStop={stop}
         busy={busy}
         disabled={!agent}

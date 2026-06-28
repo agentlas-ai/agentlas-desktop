@@ -1,6 +1,6 @@
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -35,6 +35,13 @@ import {
   openOberonMotionAdOutput,
   startOberonMotionAd,
 } from "./oberon/motion-graphics";
+import {
+  animateKeyStatus,
+  cancelOberonAnimate,
+  getOberonAnimateJob,
+  openOberonAnimateOutput,
+  startOberonAnimate,
+} from "./oberon/animate";
 import { runMigration, scanMigrationSources } from "./migrate";
 import {
   deleteApiKey,
@@ -88,10 +95,12 @@ import {
   hepPublish,
   hepSearch,
   localGui,
+  routeOnly,
   securityScan,
   stormbreakerJournal,
   stormbreakerRun,
 } from "./hephaestus/commands";
+import { normalizeRecommendation } from "./hephaestus/recommendation";
 import { confirmUpload, PathGuardError, resolveFolderArg } from "./hephaestus/path-guard";
 import { isSupervisorEnabled, setSupervisorEnabled } from "./hephaestus/supervisor";
 import { runHephaestusBuild } from "./hephaestus/builder";
@@ -276,6 +285,67 @@ const MAX_BUFFERED_EVENTS = 4000;
 // 단일 partial 텍스트 상한 — 런어웨이 출력(끝없이 스트리밍되는 GUI/서버 로그 등)이
 // 매 60ms 누적 전체를 렌더러로 보내 렌더러를 OOM(수십 GB)시키는 걸 모든 런타임 공통으로 막는다.
 const MAX_PARTIAL_CHARS = 2 * 1024 * 1024;
+let pendingConfirmationCount = 0;
+let pendingConfirmationBounceId: number | null = null;
+let lastPendingConfirmationNoticeAt = 0;
+
+function applyPendingConfirmationAttention(win: BrowserWindow | null, rawCount: number): void {
+  const count = Math.max(0, Math.min(99, Math.floor(Number(rawCount) || 0)));
+  const previous = pendingConfirmationCount;
+  pendingConfirmationCount = count;
+
+  try {
+    app.setBadgeCount(count);
+  } catch {
+    // Badge support varies by platform/window manager.
+  }
+
+  if (count <= 0) {
+    try {
+      win?.flashFrame(false);
+      if (process.platform === "darwin" && app.dock && pendingConfirmationBounceId !== null) {
+        app.dock.cancelBounce(pendingConfirmationBounceId);
+      }
+    } catch {
+      // ignore platform-specific attention failures
+    }
+    pendingConfirmationBounceId = null;
+    return;
+  }
+
+  const focused = win?.isFocused() ?? false;
+  if (focused || count <= previous) return;
+
+  try {
+    if (process.platform === "darwin" && app.dock) {
+      if (pendingConfirmationBounceId !== null) app.dock.cancelBounce(pendingConfirmationBounceId);
+      pendingConfirmationBounceId = app.dock.bounce("informational");
+    } else {
+      win?.flashFrame(true);
+    }
+  } catch {
+    // ignore platform-specific attention failures
+  }
+
+  const now = Date.now();
+  if (now - lastPendingConfirmationNoticeAt < 30_000) return;
+  lastPendingConfirmationNoticeAt = now;
+
+  try {
+    if (Notification.isSupported()) {
+      new Notification({
+        title: "Agentlas 승인 대기",
+        body:
+          count === 1
+            ? "에이전트가 결정을 기다리고 있습니다."
+            : `${count}개의 에이전트 승인 요청이 대기 중입니다.`,
+        silent: false,
+      }).show();
+    }
+  } catch {
+    // Native notifications can be disabled by the OS.
+  }
+}
 
 /** 현재 실행 중인 chatId 목록(중복 제거). */
 function activeChatIds(): string[] {
@@ -449,6 +519,11 @@ export function registerIpcHandlers(): void {
   // ── confirm (확인 요청 — 챗에서 사용자 결정 대기) ────────
   ipcMain.handle("confirm:listPending", () => listPendingConfirmations());
 
+  // ── attention (Dock/taskbar/app badge — 놓치면 에이전트가 멈추는 승인 요청) ─────
+  ipcMain.handle("attention:setPendingConfirmations", (e, count: number) => {
+    applyPendingConfirmationAttention(BrowserWindow.fromWebContents(e.sender), count);
+  });
+
   // ── runtime ─────────────────────────────────────────────
   ipcMain.handle("runtime:detect", () => detectRuntimes());
   ipcMain.handle("runtime:setActive", (_e, selection: RuntimeSelection) =>
@@ -616,6 +691,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("oberon:getMotionAdJob", (_e, id: string) => getOberonMotionAdJob(id));
   ipcMain.handle("oberon:cancelMotionAd", (_e, id: string) => cancelOberonMotionAd(id));
   ipcMain.handle("oberon:openMotionAdOutput", (_e, id: string) => openOberonMotionAdOutput(id));
+  ipcMain.handle("oberon:startAnimate", (_e, request) => startOberonAnimate(request));
+  ipcMain.handle("oberon:getAnimateJob", (_e, id: string) => getOberonAnimateJob(id));
+  ipcMain.handle("oberon:cancelAnimate", (_e, id: string) => cancelOberonAnimate(id));
+  ipcMain.handle("oberon:openAnimateOutput", (_e, id: string) => openOberonAnimateOutput(id));
+  ipcMain.handle("oberon:animateKeyStatus", () => animateKeyStatus());
 
   // ── team (설치된 에이전트) ─────────────────────────────
   ipcMain.handle("team:list", () => listInstalledAgents());
@@ -1269,6 +1349,28 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle("hephaestus:network", (_e, input: { query: string; autoRun?: boolean; noOpen?: boolean }) =>
     hepNetwork(input.query, { autoRun: input.autoRun, noOpen: input.noOpen }),
+  );
+  // 추천 미리보기 — routeOnly(실행 없음)을 정규화해 추천 바텀시트에 넘긴다. 인터랙티브해야 하므로
+  // 기본 120s 대신 짧은 timeout. 실패/비가용 시에도 절대 throw 하지 않고 mode:"none" 으로 강등한다.
+  ipcMain.handle(
+    "hephaestus:routePreview",
+    async (
+      _e,
+      input: { query: string; project?: string; scope?: "network" | "cloud"; allowLocal?: boolean; offline?: boolean },
+    ) => {
+      try {
+        const res = await routeOnly(input.query, {
+          project: input.project,
+          scope: input.scope,
+          allowLocal: input.allowLocal ?? true,
+          noHub: input.offline, // 오프라인-안전: 로컬 라우팅만
+          timeoutMs: 30_000,
+        });
+        return normalizeRecommendation(res.json, input.query);
+      } catch {
+        return normalizeRecommendation(null, input.query);
+      }
+    },
   );
   ipcMain.handle("hephaestus:localGui", (_e, input: { shortcut: string; detach?: boolean; noOpen?: boolean }) =>
     localGui(input.shortcut, { detach: input.detach, noOpen: input.noOpen }),

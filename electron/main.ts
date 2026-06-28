@@ -114,6 +114,9 @@ const LOCAL_IMAGE_EXTS = new Set([
   ".bmp",
 ]);
 
+// 인-앱 비디오 재생용 — 오베론 렌더/모션 출력(mp4 등)을 agentlas:// 로 서빙한다.
+const LOCAL_VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".m4v", ".ogv"]);
+
 function registerRendererProtocol(): void {
   protocol.handle("agentlas", (request) => {
     // 로컬 이미지 인라인 서빙 — agentlas://localfile/?p=<encoded abs path>.
@@ -127,12 +130,14 @@ function registerRendererProtocol(): void {
           const abs = path.normalize(decodeURIComponent(p));
           const ext = path.extname(abs).toLowerCase();
           if (
-            LOCAL_IMAGE_EXTS.has(ext) &&
+            (LOCAL_IMAGE_EXTS.has(ext) || LOCAL_VIDEO_EXTS.has(ext)) &&
             path.isAbsolute(abs) &&
             fs.existsSync(abs) &&
             fs.statSync(abs).isFile()
           ) {
-            return net.fetch(pathToFileURL(abs).toString());
+            // 비디오 재생을 위해 Range 요청을 전달(seek 지원); 이미지엔 무해.
+            const range = request.headers.get("range");
+            return net.fetch(pathToFileURL(abs).toString(), range ? { headers: { range } } : undefined);
           }
         }
         return new Response("not found", { status: 404 });

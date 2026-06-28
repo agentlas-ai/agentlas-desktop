@@ -2,14 +2,16 @@
 // 이전 단계를 완료(승인)하기 전에는 다음 단계로 못 넘어간다(잠금).
 "use client";
 import { Fragment } from "react";
-import { OBERON_STEPS, type OberonStepId, type StepState } from "@/lib/oberon";
+import { OBERON_STEPS, type OberonStepDef, type OberonStepId, type StepState } from "@/lib/oberon";
 import { Glyph } from "./icons";
 
 export function Stepper({
+  steps = OBERON_STEPS,
   state,
   active,
   onSelect,
 }: {
+  steps?: OberonStepDef[];
   state: Record<OberonStepId, StepState>;
   active: OberonStepId;
   onSelect: (id: OberonStepId) => void;
@@ -26,11 +28,11 @@ export function Stepper({
         boxSizing: "border-box",
       }}
     >
-      {OBERON_STEPS.map((step, i) => {
+      {steps.map((step, i) => {
         const st = state[step.id];
         const isActive = active === step.id;
         const clickable = st !== "locked";
-        const prevDone = i > 0 && state[OBERON_STEPS[i - 1].id] === "done";
+        const prevDone = i > 0 && state[steps[i - 1].id] === "done";
 
         return (
           <Fragment key={step.id}>

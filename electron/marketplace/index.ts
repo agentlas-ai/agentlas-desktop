@@ -34,10 +34,13 @@ function setStatus(patch: Partial<MarketplaceSourceStatus>) {
 }
 
 function publicListings<T extends MarketplaceListing>(listings: T[]): T[] {
+  // 원격 소스가 배열이 아닌 응답을 줘도 깨지지 않도록 방어(listings.filter is not a function 방지).
+  if (!Array.isArray(listings)) return [];
   return listings.filter((listing) => isPublicDesktopAgent(listing));
 }
 
 function publicBundles(bundles: TeamBundle[]): TeamBundle[] {
+  if (!Array.isArray(bundles)) return [];
   return bundles
     .map((bundle) => ({
       ...bundle,
