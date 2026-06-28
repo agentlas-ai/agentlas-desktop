@@ -60,7 +60,7 @@ function writeAgent(root, extra = {}) {
     assert.ok(fs.existsSync(clean.bundlePath));
 
     const blockedRoot = path.join(tempDir, "blocked-agent");
-    writeAgent(blockedRoot, { ".env": "OPENAI_API_KEY=sk-testsecretvaluethatshouldblock\n" });
+    writeAgent(blockedRoot, { ".env": "OPENAI_API_KEY=NOT_A_REAL_OPENAI_KEY_FOR_TEST\n" });
     const blocked = await packageAndReviewCloudAgent({
       rootPath: blockedRoot,
       dryRun: true,

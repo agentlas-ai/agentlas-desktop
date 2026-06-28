@@ -29,5 +29,5 @@
       "url": "http://127.0.0.1:57538/marketplace.html"
     }
   ],
-  "screenshots": "/Users/mason/Documents/Agentlas_F/agentlas_desktop/output/playwright/desktop-feature-surfaces"
+  "screenshots": "output/playwright/desktop-feature-surfaces"
 }

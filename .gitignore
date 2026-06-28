@@ -69,6 +69,8 @@ release-signing/
 release-local/
 # large demo/verification outputs
 artifacts/
+# generated Playwright QA screenshots/reports
+output/playwright/
 
 # ── Embedded engine (separate open-source repo) ──────────────────────────────
 # Hephaestus is its own public repo (github.com/agentlas-ai/Hephaestus). It is

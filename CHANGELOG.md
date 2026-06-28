@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.4.4 — 2026-06-29
+
+### Changed
+
+- Set Desktop Build pricing to match the BYOK/BYOC model: single-agent builds
+  now show 5 credits and multi-agent team builds show 10 credits.
+- Added visible Build mode credit badges and kept the desktop surface smoke test
+  locked to the new 5/10 credit display.
+- Removed public-source hygiene issues from the desktop repo: local absolute
+  paths in Oberon tooling, a realistic-looking fake API key in a smoke test, and
+  absolute Playwright proof paths are no longer committed.
+
 ## 0.4.3 — 2026-06-29
 
 ### Changed

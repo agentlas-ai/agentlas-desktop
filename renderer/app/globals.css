@@ -2023,7 +2023,7 @@ button[data-toggle-state="on"] {
   --build-mode-accent-2: var(--rd-accent-2);
   --build-mode-active-bg: var(--rd-accent-soft);
   min-width: 0;
-  min-height: 104px;
+  min-height: 126px;
   padding: 12px;
   border: 1px solid var(--rd-hair);
   border-radius: var(--rd-r-sm);
@@ -2034,7 +2034,8 @@ button[data-toggle-state="on"] {
   grid-template-columns: auto minmax(0, 1fr) auto;
   grid-template-areas:
     "icon title check"
-    "icon desc check";
+    "icon desc check"
+    "icon price check";
   column-gap: 10px;
   row-gap: 4px;
   align-content: start;
@@ -2156,12 +2157,36 @@ button[data-toggle-state="on"] {
   z-index: 1;
 }
 
+.build-mode-price {
+  grid-area: price;
+  justify-self: start;
+  margin-top: 4px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--build-mode-accent) 10%, var(--rd-surface));
+  color: color-mix(in oklch, var(--build-mode-accent) 56%, var(--rd-ink));
+  border: 1px solid color-mix(in oklch, var(--build-mode-accent) 20%, var(--rd-hair));
+  font-size: 11px;
+  font-weight: 760;
+  line-height: 1;
+  white-space: nowrap;
+  position: relative;
+  z-index: 1;
+}
+
 .build-mode-card[data-active="true"] strong {
   color: color-mix(in oklch, var(--build-mode-accent) 46%, var(--rd-ink));
 }
 
 .build-mode-card[data-active="true"] .build-mode-desc {
   color: color-mix(in oklch, var(--build-mode-accent) 24%, var(--rd-ink-2));
+}
+
+.build-mode-card[data-active="true"] .build-mode-price {
+  background: linear-gradient(135deg, var(--build-mode-accent), var(--build-mode-accent-2));
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 8px 18px color-mix(in oklch, var(--build-mode-accent) 20%, transparent);
 }
 
 .build-mode-check {

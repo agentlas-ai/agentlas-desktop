@@ -45,8 +45,8 @@ function testSlashPalette() {
   const statusRows = input.slashCommandSuggestions("/s");
   assert.ok(statusRows.some((row) => row.command === "/status"), "slash palette should suggest /status for /s");
   assert.ok(statusRows.some((row) => row.command === "/skills"), "slash palette should suggest /skills for /s");
-  assert.equal(input.isAbsolutePathTask("/Volumes/X31/Hephaestus_agent_forge/Wedding_agent_team make a team"), true);
-  assert.equal(input.slashCommandSuggestions("/Volumes/X31/Hephaestus_agent_forge/Wedding_agent_team").length, 0);
+  assert.equal(input.isAbsolutePathTask("/Volumes/External/Hephaestus_agent_forge/Wedding_agent_team make a team"), true);
+  assert.equal(input.slashCommandSuggestions("/Volumes/External/Hephaestus_agent_forge/Wedding_agent_team").length, 0);
   assert.equal(input.isAbsolutePathTask("/help"), false);
   const ontologyRows = input.slashCommandSuggestions("/ont");
   assert.equal(ontologyRows[0]?.command, "/ontology");

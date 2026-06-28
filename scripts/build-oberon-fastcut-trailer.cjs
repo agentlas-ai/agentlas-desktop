@@ -6,13 +6,15 @@ const { promisify } = require("node:util");
 
 const execFileAsync = promisify(execFile);
 
-const sourceDir = process.env.OBERON_TRAILER_SOURCE_DIR || "/Users/mason/Desktop/Oberon/Space_Blackhole_Trailer_20s";
+const sourceDir =
+  process.env.OBERON_TRAILER_SOURCE_DIR ||
+  path.resolve(process.cwd(), "oberon-trailer-source");
 const outBase = process.env.OBERON_TRAILER_OUT_BASE || path.join(sourceDir, "Oberon_Space_Blackhole_Trailer_20s_fastcut");
 const workDir = path.join(sourceDir, "_fastcut_work");
 const fontPath = process.env.OBERON_TRAILER_FONT || "/System/Library/Fonts/AppleSDGothicNeo.ttc";
 const pythonBin =
   process.env.OBERON_TRAILER_PYTHON ||
-  "/Users/mason/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3";
+  "python3";
 
 const sources = {
   wake: "001_SH_001_DEEP_SPACE_WAKE_take1.mp4",

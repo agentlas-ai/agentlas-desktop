@@ -104,7 +104,7 @@ async function main() {
       baseUrl,
       recordedAt: new Date().toISOString(),
       evidence,
-      screenshots: outDir,
+      screenshots: path.relative(root, outDir),
     };
     fs.writeFileSync(path.join(outDir, "proof-summary.json"), JSON.stringify(proof, null, 2) + "\n", "utf8");
     console.log("desktop feature surface smoke passed");
@@ -143,6 +143,8 @@ async function runBuildSurface(browser, baseUrl, evidence) {
   const singleMode = page.getByRole("button", { name: /단일 에이전트|Single agent/ });
   const teamMode = page.getByRole("button", { name: /멀티 에이전트 팀|Multi-agent team/ });
   const packageMode = page.getByRole("button", { name: /기존 에이전트 패키징|Package existing agent/ });
+  await page.locator(".build-mode-price", { hasText: /빌드 5크레딧|5 build credits/ }).waitFor();
+  await page.locator(".build-mode-price", { hasText: /빌드 10크레딧|10 build credits/ }).waitFor();
   await teamMode.click();
   await expectDataActive(teamMode, "true");
   await packageMode.click();
@@ -625,9 +627,7 @@ async function runChatAutocompleteSurface(browser, baseUrl, evidence) {
   await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "chats.create"));
 
   await textbox.fill("/hep");
-  await page.getByRole("button", { name: /\/hep-network startup/ }).waitFor();
-  await textbox.focus();
-  await page.keyboard.press("Tab");
+  await page.getByRole("button", { name: /\/hep-network startup/ }).click();
   assert.match(await textbox.inputValue(), /^\/hep-network startup\s*$/);
 
   await textbox.fill("/hep-b");

@@ -17,8 +17,16 @@ import { readEnvVar } from "../secrets/vault";
 const DEFAULT_PROVIDER: OberonKeyframeProvider = "codex-imagegen-cli";
 const DEFAULT_CODEX_MODEL = "image_gen.imagegen";
 const DEFAULT_GOOGLE_MODEL = "imagen-4.0-generate-001";
-const CODEX_IMAGE_BATCH_RUNNER =
-  "/Users/mason/.codex/plugins/cache/openai-curated-remote/creative-production/0.1.23/runtime/codex_exec_image_batch.py";
+const CODEX_IMAGE_BATCH_RUNNER_RELATIVE = path.join(
+  ".codex",
+  "plugins",
+  "cache",
+  "openai-curated-remote",
+  "creative-production",
+  "0.1.23",
+  "runtime",
+  "codex_exec_image_batch.py",
+);
 
 const jobs = new Map<string, OberonKeyframeJob>();
 const cancelledJobs = new Set<string>();
@@ -137,7 +145,8 @@ async function runCodexKeyframeJob(
   request: OberonKeyframeRequest,
   shots: OberonKeyframeShotInput[],
 ): Promise<void> {
-  await fs.access(CODEX_IMAGE_BATCH_RUNNER);
+  const runner = codexImageBatchRunnerPath();
+  await fs.access(runner);
   const jobsPath = path.join(job.outputDir, "codex-image-jobs.jsonl");
   const rows = shots.map((shot) => {
     const fileName = `${String(shot.index + 1).padStart(3, "0")}_${safeSlug(shot.shotId)}_first_frame.png`;
@@ -154,7 +163,7 @@ async function runCodexKeyframeJob(
   await fs.writeFile(jobsPath, `${rows.join("\n")}\n`, "utf8");
   updateJob(job, "running", "Codex image_gen 키프레임 생성 시작", "generating");
 
-  const result = await runImageBatchProcess(job, jobsPath, shots.length);
+  const result = await runImageBatchProcess(job, jobsPath, shots.length, runner);
   const summaryPath = path.join(job.outputDir, "codex-exec-image-results.json");
   const summary = await readJsonFile<{
     results?: Array<{ id?: string; status?: string; image_path?: string; error?: string }>;
@@ -251,6 +260,7 @@ async function runImageBatchProcess(
   job: OberonKeyframeJob,
   jobsPath: string,
   shotCount: number,
+  runner: string,
 ): Promise<{ code: number | null; stderr: string }> {
   const pythonBin = await findExecutable([
     process.env.PYTHON_BIN,
@@ -270,7 +280,7 @@ async function runImageBatchProcess(
     const child = spawn(
       pythonBin,
       [
-        CODEX_IMAGE_BATCH_RUNNER,
+        runner,
         "--input",
         jobsPath,
         "--out-dir",
@@ -306,6 +316,14 @@ async function runImageBatchProcess(
       resolve({ code, stderr: stderr.trim() });
     });
   });
+}
+
+function codexImageBatchRunnerPath(): string {
+  return (
+    process.env.CODEX_IMAGE_BATCH_RUNNER ||
+    process.env.CODEX_IMAGE_BATCH_SCRIPT ||
+    path.join(app.getPath("home"), CODEX_IMAGE_BATCH_RUNNER_RELATIVE)
+  );
 }
 
 async function findExecutable(candidates: Array<string | undefined>): Promise<string> {
