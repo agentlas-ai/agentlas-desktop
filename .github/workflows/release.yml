@@ -1,5 +1,5 @@
 # Cross-platform release — builds Windows / Linux installers and publishes them to
-# the SEPARATE PUBLIC releases repo (agentlas-ai/agentlas-desktop-releases) via the
+# the SEPARATE PUBLIC releases repo (agentlas-ai/agentlas-desktop) via the
 # electron-builder GitHub publisher. The desktop SOURCE repo is private, so only the
 # compiled binaries + latest*.yml (the update feed electron-updater polls) are made
 # public — no source is exposed.

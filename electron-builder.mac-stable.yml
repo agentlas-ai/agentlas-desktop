@@ -106,11 +106,11 @@ dmg:
       type: link
       path: /Applications
 
-# 배포 채널: 공개 "릴리스 전용" 레포(agentlas-desktop-releases). 비공개 소스 레포라 컴파일된
+# 배포 채널: 공개 "릴리스 전용" 레포(agentlas-desktop). 비공개 소스 레포라 컴파일된
 # 바이너리만 공개 레포에 게시한다. (release.yml 의 base 설정과 동일 채널 유지)
 publish:
   - provider: github
     owner: agentlas-ai
-    repo: agentlas-desktop-releases
+    repo: agentlas-desktop
     private: false
     releaseType: release

@@ -15,16 +15,16 @@
 
 <!-- ── Download (primary action) ───────────────────────────────────────── -->
 <p align="center">
-  <a href="https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest">
+  <a href="https://github.com/agentlas-ai/agentlas-desktop/releases/latest">
     <img alt="Download for macOS — Apple Silicon" src="https://img.shields.io/badge/Download_for_Mac-Apple_Silicon-000000?style=for-the-badge&logo=apple&logoColor=white">
   </a>
-  <a href="https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest">
+  <a href="https://github.com/agentlas-ai/agentlas-desktop/releases/latest">
     <img alt="Download for macOS — Intel" src="https://img.shields.io/badge/Download_for_Mac-Intel-555555?style=for-the-badge&logo=apple&logoColor=white">
   </a>
-  <a href="https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest">
+  <a href="https://github.com/agentlas-ai/agentlas-desktop/releases/latest">
     <img alt="Download for Windows" src="https://img.shields.io/badge/Download_for-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white">
   </a>
-  <a href="https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest">
+  <a href="https://github.com/agentlas-ai/agentlas-desktop/releases/latest">
     <img alt="Download for Linux" src="https://img.shields.io/badge/Download_for-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black">
   </a>
 </p>
@@ -37,14 +37,14 @@
   ·
   <a href="https://agentlas.cloud/desktop">Desktop page</a>
   ·
-  <a href="https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest">Download</a>
+  <a href="https://github.com/agentlas-ai/agentlas-desktop/releases/latest">Download</a>
   ·
   <a href="#documentation">Docs</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest">
-    <img alt="Latest release" src="https://img.shields.io/github/v/release/agentlas-ai/agentlas-desktop-releases?include_prereleases&label=download&color=blue">
+  <a href="https://github.com/agentlas-ai/agentlas-desktop/releases/latest">
+    <img alt="Latest release" src="https://img.shields.io/github/v/release/agentlas-ai/agentlas-desktop?include_prereleases&label=download&color=blue">
   </a>
   <a href="LICENSE">
     <img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-green">
@@ -60,7 +60,7 @@
 ## Release log
 
 Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
-the [Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest) (the public download/auto-update channel).
+the [Releases page](https://github.com/agentlas-ai/agentlas-desktop/releases/latest) (the public download/auto-update channel).
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
 
@@ -327,7 +327,7 @@ Add more later in **Settings**.
 
 ## Quick install
 
-Get the latest build from the [**Releases page**](https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest).
+Get the latest build from the [**Releases page**](https://github.com/agentlas-ai/agentlas-desktop/releases/latest).
 
 | OS | File | Notes |
 |----|------|-------|
@@ -345,7 +345,7 @@ from the public releases repo (no need to hardcode a version).
 
 ```bash
 arch=$([ "$(uname -m)" = "arm64" ] && echo arm64 || echo x64)
-url=$(curl -fsSL https://api.github.com/repos/agentlas-ai/agentlas-desktop-releases/releases/latest \
+url=$(curl -fsSL https://api.github.com/repos/agentlas-ai/agentlas-desktop/releases/latest \
   | grep -o "https://[^\"]*-${arch}\.dmg" | head -1)
 curl -fL "$url" -o Agentlas.dmg && open Agentlas.dmg
 ```
@@ -353,7 +353,7 @@ curl -fL "$url" -o Agentlas.dmg && open Agentlas.dmg
 **Linux (.deb — Debian/Ubuntu):**
 
 ```bash
-url=$(curl -fsSL https://api.github.com/repos/agentlas-ai/agentlas-desktop-releases/releases/latest \
+url=$(curl -fsSL https://api.github.com/repos/agentlas-ai/agentlas-desktop/releases/latest \
   | grep -o 'https://[^"]*\.deb' | head -1)
 curl -fL "$url" -o agentlas.deb && sudo dpkg -i agentlas.deb
 ```
@@ -361,7 +361,7 @@ curl -fL "$url" -o agentlas.deb && sudo dpkg -i agentlas.deb
 **Linux (AppImage — any distro):**
 
 ```bash
-url=$(curl -fsSL https://api.github.com/repos/agentlas-ai/agentlas-desktop-releases/releases/latest \
+url=$(curl -fsSL https://api.github.com/repos/agentlas-ai/agentlas-desktop/releases/latest \
   | grep -o 'https://[^"]*\.AppImage' | head -1)
 curl -fL "$url" -o Agentlas.AppImage && chmod +x Agentlas.AppImage && ./Agentlas.AppImage
 ```
@@ -369,7 +369,7 @@ curl -fL "$url" -o Agentlas.AppImage && chmod +x Agentlas.AppImage && ./Agentlas
 **Windows (PowerShell):**
 
 ```powershell
-$r = Invoke-RestMethod https://api.github.com/repos/agentlas-ai/agentlas-desktop-releases/releases/latest
+$r = Invoke-RestMethod https://api.github.com/repos/agentlas-ai/agentlas-desktop/releases/latest
 $u = ($r.assets | Where-Object { $_.name -like '*Windows-x64-Setup.exe' }).browser_download_url
 Invoke-WebRequest $u -OutFile "$env:TEMP\AgentlasSetup.exe"; Start-Process "$env:TEMP\AgentlasSetup.exe"
 ```
