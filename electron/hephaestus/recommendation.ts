@@ -55,6 +55,16 @@ export function normalizeRecommendation(json: unknown, query: string): Recommend
   const receiptId = str(decision.receipt_id) ?? str(decision.receiptId);
   const hubCredits = hubCreditIndex(decision);
 
+  // Router Agent escalation: the engine attaches this on low-confidence
+  // (clarify/propose_new) decisions so the host can resolve them with an LLM
+  // reasoning pass instead of dead-ending on a weak clarify. Carried on every
+  // mode; only present when the engine escalated.
+  const ra = asObj(decision.router_agent);
+  const raAgent = str(ra.agent);
+  const routerAgent = raAgent
+    ? { agent: raAgent, reason: str(ra.reason) ?? "", directive: str(ra.directive) }
+    : undefined;
+
   const base = (extra: Partial<Recommendation>): Recommendation => ({
     mode: "none",
     agents: [],
@@ -63,6 +73,7 @@ export function normalizeRecommendation(json: unknown, query: string): Recommend
     rawAction: action,
     receiptId,
     query,
+    ...(routerAgent ? { routerAgent } : {}),
     ...extra,
   });
 

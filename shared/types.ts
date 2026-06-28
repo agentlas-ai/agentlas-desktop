@@ -2427,6 +2427,18 @@ export interface Recommendation {
   clarifyQuestion?: string;
   /** 원 요청 텍스트(시트가 실행할 때 사용). */
   query: string;
+  /** 저신뢰(clarify/propose_new) 결정에 엔진이 붙인 Router Agent 에스컬레이션.
+   *  있으면 호스트 런타임이 LLM 추론으로 의도 재해석·후보 재정렬해 재라우팅한다(BYOC). */
+  routerAgent?: RecRouterAgent;
+}
+
+export interface RecRouterAgent {
+  /** 호스트가 로드·실행할 Router Agent id. */
+  agent: string;
+  /** 에스컬레이션 사유(clarify|propose_new). */
+  reason: string;
+  /** 호스트 런타임이 따를 지침(엔진이 생성, 모델 호출은 호스트). */
+  directive?: string;
 }
 
 /** 추천 시트에서 사용자가 고른 실행 경로 — 페이지가 적절한 send/switch 로 디스패치한다. */
