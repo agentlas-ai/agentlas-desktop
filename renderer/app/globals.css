@@ -1484,7 +1484,7 @@ button[data-toggle-state="off"] {
 /* Web design.md alignment: keep portal body on Agentlas paper/.rd tokens.
    Pinterest refs only inform layout density, not palette. */
 .dashboard-root {
-  --dash-bg: var(--rd-bg);
+  --dash-bg: #ffffff;
   --dash-surface: var(--rd-surface);
   --dash-surface-2: var(--rd-surface-2);
   --dash-ink: var(--rd-ink);
@@ -1498,6 +1498,11 @@ button[data-toggle-state="off"] {
   --dash-amber: var(--rd-accent-2);
   --dash-red: var(--rd-err);
   --dash-shadow: var(--rd-shadow-1);
+}
+
+/* 대시보드 캔버스는 라이트에서 퓨어 화이트. 다크모드는 .rd 다크 배경 유지. */
+:root[data-theme="dark"] .dashboard-root {
+  --dash-bg: var(--rd-bg);
 }
 
 .dashboard-shell {
