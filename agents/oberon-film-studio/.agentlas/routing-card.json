@@ -18,6 +18,8 @@
     "provider_routing",
     "scored_provider_routing",
     "deterministic_title_burnin",
+    "motion_graphics_ads",
+    "no_api_local_video_render",
     "headless_render_cli"
   ],
   "routing_status": "candidate",
@@ -26,9 +28,12 @@
     { "text": "ai 필름 영상 제작 스토리보드 샷 리스트", "locale": "ko" },
     { "text": "카메라 무빙 멀티샷 연출 초단위 장면", "locale": "ko" },
     { "text": "자막 음성 대사 넣은 영상 생성", "locale": "ko" },
+    { "text": "API 없이 제품 모션그래픽 광고 만들어줘", "locale": "ko" },
+    { "text": "Framer Motion Remotion 같은 코드 기반 광고 영상", "locale": "ko" },
     { "text": "make a cinematic video commercial trailer", "locale": "en" },
     { "text": "ai film production storyboard shot list coverage", "locale": "en" },
-    { "text": "generate video with dialogue subtitles and continuity", "locale": "en" }
+    { "text": "generate video with dialogue subtitles and continuity", "locale": "en" },
+    { "text": "code-render a product motion graphics ad without a video API", "locale": "en" }
   ],
   "anti_triggers": [
     { "text": "정적 이미지 한 장 로고 디자인", "locale": "ko" },

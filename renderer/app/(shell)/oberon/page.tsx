@@ -32,6 +32,7 @@ import { ShotBoard } from "@/components/oberon/ShotBoard";
 import { AssetBible } from "@/components/oberon/AssetBible";
 import { KeyframeStep } from "@/components/oberon/KeyframeStep";
 import { GenerationQueue } from "@/components/oberon/GenerationQueue";
+import { MotionGraphicsPanel } from "@/components/oberon/MotionGraphicsPanel";
 import { TimelineEditor, DeliveryPanel } from "@/components/oberon/panels";
 import { Stepper } from "@/components/oberon/Stepper";
 import { Glyph, OberonBadge } from "@/components/oberon/icons";
@@ -40,6 +41,8 @@ import type {
   JsonObject,
   OberonKeyframeJob,
   OberonKeyframeRequest,
+  OberonMotionAdJob,
+  OberonMotionAdRequest,
   OberonPlanResult,
   OberonRenderJob,
   OberonRenderRequest,
@@ -60,13 +63,18 @@ export default function OberonPage() {
   const keyframePoll = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // 실제 영상 렌더
+  const [videoMode, setVideoMode] = useState<"veo" | "motion_ad">("veo");
   const [videoGenerating, setVideoGenerating] = useState(false);
   const [renderJob, setRenderJob] = useState<OberonRenderJob | null>(null);
   const renderPoll = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [motionGenerating, setMotionGenerating] = useState(false);
+  const [motionJob, setMotionJob] = useState<OberonMotionAdJob | null>(null);
+  const motionPoll = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => () => {
     if (keyframePoll.current) clearInterval(keyframePoll.current);
     if (renderPoll.current) clearInterval(renderPoll.current);
+    if (motionPoll.current) clearInterval(motionPoll.current);
   }, []);
 
   const isDone = (id: OberonStepId) => stepState[id] === "done";
@@ -131,33 +139,40 @@ export default function OberonPage() {
   const loadSaved = useCallback((prod: FilmProduction) => {
     if (keyframePoll.current) clearInterval(keyframePoll.current);
     if (renderPoll.current) clearInterval(renderPoll.current);
+    if (motionPoll.current) clearInterval(motionPoll.current);
     keyframePoll.current = null;
     renderPoll.current = null;
+    motionPoll.current = null;
     setKfGenerating(false);
     setVideoGenerating(false);
+    setMotionGenerating(false);
     setKeyframeJob(null);
     setRenderJob(null);
+    setMotionJob(null);
     if (prod.modelSettings) setModel(prod.modelSettings);
     const hasShots = prod.shots.length > 0;
     const hasKeyframes = (prod.keyframeAssets?.length ?? 0) > 0;
     const hasTakes = prod.takes.length > 0;
     const hasEdl = prod.edl.length > 0;
+    const hasMotionOutput = (prod.renderOutputs ?? []).some((file) => file.kind === "motion_mp4");
+    const motionFormat = isMotionFormat(prod.brief.format);
     const ss: Record<OberonStepId, StepState> = { ...INITIAL_STEP_STATE, setup: "done" };
     if (hasShots) {
       ss.plan = "done";
       ss.storyboard = "done";
       ss.assets = "done";
-      ss.keyframe = hasKeyframes || hasTakes ? "done" : "active";
-      if (hasKeyframes || hasTakes) ss.video = hasEdl ? "done" : "active";
-      if (hasEdl) ss.delivery = "active";
+      ss.keyframe = motionFormat || hasKeyframes || hasTakes ? "done" : "active";
+      if (motionFormat || hasKeyframes || hasTakes) ss.video = hasEdl || hasMotionOutput ? "done" : "active";
+      if (hasEdl || hasMotionOutput) ss.delivery = "active";
     } else {
       ss.plan = "active";
     }
     setKfProgress(hasKeyframes ? prod.keyframeAssets?.length ?? 0 : hasTakes ? prod.shots.length : 0);
     setKfDone(hasKeyframes || hasTakes);
+    setVideoMode(hasMotionOutput ? "motion_ad" : "veo");
     setProduction(prod);
     setStepState(ss);
-    setActive(hasEdl ? "delivery" : hasKeyframes || hasTakes ? "video" : hasShots ? "keyframe" : "plan");
+    setActive(hasEdl || hasMotionOutput ? "delivery" : motionFormat || hasKeyframes || hasTakes ? "video" : hasShots ? "keyframe" : "plan");
   }, []);
 
   // 01 기획 편집 영속 (로그라인/트리트먼트 등)
@@ -175,8 +190,10 @@ export default function OberonPage() {
     if (!production) return;
     if (keyframePoll.current) clearInterval(keyframePoll.current);
     if (renderPoll.current) clearInterval(renderPoll.current);
+    if (motionPoll.current) clearInterval(motionPoll.current);
     keyframePoll.current = null;
     renderPoll.current = null;
+    motionPoll.current = null;
     setPlanning(true);
     void buildProductionWithPlanner(production.brief, true)
       .then((prod) => {
@@ -187,6 +204,8 @@ export default function OberonPage() {
         setKeyframeJob(null);
         setVideoGenerating(false);
         setRenderJob(null);
+        setMotionGenerating(false);
+        setMotionJob(null);
         setStepState({ ...INITIAL_STEP_STATE, setup: "done", plan: "active" });
         setActive("plan");
         saveProduction(prod);
@@ -227,6 +246,21 @@ export default function OberonPage() {
       return next;
     });
   }, []);
+
+  const approveAssets = useCallback(() => {
+    if (!production || !isMotionFormat(production.brief.format)) {
+      complete("assets");
+      return;
+    }
+    setStepState((prev) => ({
+      ...prev,
+      assets: "done",
+      keyframe: "done",
+      video: "active",
+    }));
+    setVideoMode("motion_ad");
+    setActive("video");
+  }, [complete, production]);
 
   const materializeRenderJob = useCallback((job: OberonRenderJob) => {
     setProduction((p) => {
@@ -300,6 +334,54 @@ export default function OberonPage() {
       }, 1000);
     },
     [materializeRenderJob],
+  );
+
+  const materializeMotionJob = useCallback((job: OberonMotionAdJob) => {
+    setProduction((p) => {
+      if (!p) return p;
+      const next: FilmProduction = {
+        ...p,
+        renderJobId: job.id,
+        renderOutputs: job.files,
+      };
+      saveProduction(next);
+      return next;
+    });
+    setStepState((prev) => {
+      const ns = { ...prev, video: "done" as StepState };
+      if (ns.delivery === "locked") ns.delivery = "active";
+      return ns;
+    });
+  }, []);
+
+  const pollMotionJob = useCallback(
+    (jobId: string) => {
+      if (motionPoll.current) clearInterval(motionPoll.current);
+      motionPoll.current = setInterval(() => {
+        void (async () => {
+          const bridge = ipc();
+          const job = await bridge?.oberon.getMotionAdJob(jobId);
+          if (!job) return;
+          setMotionJob(job);
+          if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
+            if (motionPoll.current) clearInterval(motionPoll.current);
+            motionPoll.current = null;
+            setMotionGenerating(false);
+            if (job.status === "succeeded") materializeMotionJob(job);
+          }
+        })().catch((error) => {
+          if (motionPoll.current) clearInterval(motionPoll.current);
+          motionPoll.current = null;
+          setMotionGenerating(false);
+          setMotionJob((job) =>
+            job
+              ? { ...job, status: "failed", progress: { ...job.progress, phase: "failed" }, error: String(error), message: String(error) }
+              : null,
+          );
+        });
+      }, 1000);
+    },
+    [materializeMotionJob],
   );
 
   const materializeKeyframeJob = useCallback((job: OberonKeyframeJob) => {
@@ -462,6 +544,48 @@ export default function OberonPage() {
       });
   }, [pollRenderJob, production]);
 
+  const startMotionAd = useCallback(() => {
+    if (!production) return;
+    const bridge = ipc();
+    if (!bridge?.oberon?.startMotionAd) {
+      setMotionJob(localMotionError(production, "Electron Oberon bridge is unavailable. Desktop app에서 다시 실행해야 모션그래픽 렌더가 가능합니다."));
+      setMotionGenerating(false);
+      return;
+    }
+    const duration =
+      production.brief.format === "motion_graphics_60" || production.brief.format === "commercial_60"
+        ? 60
+        : 30;
+    const request: OberonMotionAdRequest = {
+      productionId: production.id,
+      title: production.brief.title || "Agentlas Motion Ad",
+      brand: production.brief.brandOrProduct || (production.brief.title.toLowerCase().includes("agentlas") ? "Agentlas" : production.brief.title),
+      concept: [production.brief.logline, production.brief.synopsis].filter(Boolean).join("\n"),
+      aspectRatio: production.brief.aspect === "9:16" ? "9:16" : "16:9",
+      durationSec: duration,
+      fps: 15,
+    };
+    setMotionGenerating(true);
+    setMotionJob(null);
+    setVideoMode("motion_ad");
+    void bridge.oberon
+      .startMotionAd(request)
+      .then((job) => {
+        setMotionJob(job);
+        setProduction((p) => {
+          if (!p) return p;
+          const next = { ...p, renderJobId: job.id, renderOutputs: [] };
+          saveProduction(next);
+          return next;
+        });
+        pollMotionJob(job.id);
+      })
+      .catch((error) => {
+        setMotionGenerating(false);
+        setMotionJob(localMotionError(production, error instanceof Error ? error.message : String(error)));
+      });
+  }, [pollMotionJob, production]);
+
   const resetVideo = useCallback(() => {
     if (renderPoll.current) clearInterval(renderPoll.current);
     renderPoll.current = null;
@@ -477,20 +601,40 @@ export default function OberonPage() {
     setStepState((prev) => ({ ...prev, video: "active", delivery: "locked" }));
   }, [renderJob, videoGenerating]);
 
+  const resetMotionAd = useCallback(() => {
+    if (motionPoll.current) clearInterval(motionPoll.current);
+    motionPoll.current = null;
+    if (motionJob && motionGenerating) void ipc()?.oberon.cancelMotionAd(motionJob.id);
+    setMotionGenerating(false);
+    setMotionJob(null);
+    setProduction((p) => {
+      if (!p) return p;
+      const next: FilmProduction = { ...p, renderJobId: undefined, renderOutputs: [] };
+      saveProduction(next);
+      return next;
+    });
+    setStepState((prev) => ({ ...prev, video: "active", delivery: "locked" }));
+  }, [motionGenerating, motionJob]);
+
   const newProject = useCallback(() => {
     if (keyframePoll.current) clearInterval(keyframePoll.current);
     if (renderPoll.current) clearInterval(renderPoll.current);
+    if (motionPoll.current) clearInterval(motionPoll.current);
     keyframePoll.current = null;
     renderPoll.current = null;
+    motionPoll.current = null;
     setProduction(null);
     setStepState({ ...INITIAL_STEP_STATE });
     setActive("setup");
+    setVideoMode("veo");
     setKfProgress(0);
     setKfGenerating(false);
     setKfDone(false);
     setKeyframeJob(null);
     setVideoGenerating(false);
     setRenderJob(null);
+    setMotionGenerating(false);
+    setMotionJob(null);
   }, []);
 
   return (
@@ -572,7 +716,7 @@ export default function OberonPage() {
           </StepFrame>
         );
       case "assets":
-        return <AssetBible production={production} model={model} approved={isDone("assets")} onApprove={() => complete("assets")} />;
+        return <AssetBible production={production} model={model} approved={isDone("assets")} onApprove={approveAssets} />;
       case "keyframe":
         return (
           <KeyframeStep
@@ -591,15 +735,27 @@ export default function OberonPage() {
       case "video":
         return (
           <StepFrame>
-            <GenerationQueue
-              production={production}
-              generating={videoGenerating}
-              renderJob={renderJob}
-              onStart={startVideo}
-              onSelectTake={selectTake}
-              onReset={resetVideo}
-              onOpenOutput={(jobId) => void ipc()?.oberon.openRenderOutput(jobId)}
-            />
+            <VideoModeSwitch value={videoMode} onChange={setVideoMode} />
+            {videoMode === "veo" ? (
+              <GenerationQueue
+                production={production}
+                generating={videoGenerating}
+                renderJob={renderJob}
+                onStart={startVideo}
+                onSelectTake={selectTake}
+                onReset={resetVideo}
+                onOpenOutput={(jobId) => void ipc()?.oberon.openRenderOutput(jobId)}
+              />
+            ) : (
+              <MotionGraphicsPanel
+                production={production}
+                generating={motionGenerating}
+                job={motionJob}
+                onStart={startMotionAd}
+                onReset={resetMotionAd}
+                onOpenOutput={(jobId) => void ipc()?.oberon.openMotionAdOutput(jobId)}
+              />
+            )}
             {isDone("video") && (
               <ApproveBar label="영상 확정 — 편집·납품으로" done onApprove={() => setActive("delivery")} />
             )}
@@ -617,6 +773,51 @@ export default function OberonPage() {
         return null;
     }
   }
+}
+
+function VideoModeSwitch({
+  value,
+  onChange,
+}: {
+  value: "veo" | "motion_ad";
+  onChange: (value: "veo" | "motion_ad") => void;
+}) {
+  const items: Array<{ id: "veo" | "motion_ad"; label: string; sub: string; icon: "video" | "layers" }> = [
+    { id: "veo", label: "Veo Clips", sub: "실사/시네마틱", icon: "video" },
+    { id: "motion_ad", label: "Motion Ad", sub: "코드 렌더", icon: "layers" },
+  ];
+  return (
+    <div style={{ flexShrink: 0, display: "flex", gap: 8, alignItems: "center", padding: "14px 32px 0", background: "var(--ob-bg)" }}>
+      {items.map((item) => {
+        const active = value === item.id;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onChange(item.id)}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 9,
+              minHeight: 42,
+              padding: "0 14px",
+              borderRadius: 10,
+              border: `1px solid ${active ? "var(--ob-accent)" : "var(--ob-edge)"}`,
+              background: active ? "var(--ob-accent-soft)" : "var(--ob-paper)",
+              color: active ? "var(--ob-accent-text)" : "var(--ob-ink-soft)",
+              cursor: "pointer",
+            }}
+          >
+            <Glyph name={item.icon} size={15} strokeWidth={2.1} />
+            <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", lineHeight: 1.15 }}>
+              <span style={{ fontSize: 13, fontWeight: 800 }}>{item.label}</span>
+              <span style={{ fontSize: 10.5, color: active ? "var(--ob-accent-text)" : "var(--ob-muted)", fontWeight: 600 }}>{item.sub}</span>
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 function StepFrame({ children }: { children: React.ReactNode }) {
@@ -669,6 +870,36 @@ function localRenderError(production: FilmProduction, message: string): OberonRe
   };
 }
 
+function localMotionError(production: FilmProduction, message: string): OberonMotionAdJob {
+  const now = Date.now();
+  const durationSec = production.brief.format === "motion_graphics_60" || production.brief.format === "commercial_60" ? 60 : 30;
+  const fps = 15;
+  return {
+    id: `local-error-${now}`,
+    productionId: production.id,
+    title: production.brief.title,
+    brand: production.brief.brandOrProduct || production.brief.title,
+    status: "failed",
+    outputDir: "",
+    progress: {
+      phase: "failed",
+      totalFrames: durationSec * fps,
+      completedFrames: 0,
+      percent: 0,
+    },
+    files: [],
+    message,
+    error: message,
+    warnings: [],
+    durationSec,
+    fps,
+    width: production.brief.aspect === "9:16" ? 720 : 1280,
+    height: production.brief.aspect === "9:16" ? 1280 : 720,
+    createdAtMs: now,
+    updatedAtMs: now,
+  };
+}
+
 function localKeyframeError(production: FilmProduction, message: string): OberonKeyframeJob {
   const now = Date.now();
   return {
@@ -709,9 +940,15 @@ function fallbackPlanResult(model: ModelSettings, message: string): OberonPlanRe
   };
 }
 
+function isMotionFormat(format: FilmBrief["format"]): boolean {
+  return format === "motion_graphics_30" || format === "motion_graphics_60";
+}
+
 const FORMATS = new Set<FilmBrief["format"]>([
   "commercial_30",
   "commercial_60",
+  "motion_graphics_30",
+  "motion_graphics_60",
   "trailer",
   "short_drama",
   "music_video",

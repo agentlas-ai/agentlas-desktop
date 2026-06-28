@@ -7,6 +7,8 @@ import { emptyBrief } from "./presets";
 import type { AspectRatio, FilmBrief, FilmFormat, Genre } from "./types";
 
 const FORMAT_KEYWORDS: [RegExp, FilmFormat][] = [
+  [/(모션\s*그래픽|motion\s*graphics?|프레이머|framer|리모션|remotion).*(60\s*초|1\s*분)|(60\s*초|1\s*분).*(모션\s*그래픽|motion\s*graphics?|프레이머|framer|리모션|remotion)/i, "motion_graphics_60"],
+  [/모션\s*그래픽|motion\s*graphics?|프레이머|framer|리모션|remotion/i, "motion_graphics_30"],
   [/트레일러|trailer|예고편/i, "trailer"],
   [/뮤직\s*비디오|뮤비|music\s*video|\bmv\b/i, "music_video"],
   [/숏폼|쇼츠|쇼트폼|틱톡|릴스|reels|shorts|tiktok|세로\s*영상/i, "social_short"],
@@ -59,7 +61,7 @@ function pickFormat(text: string): FilmFormat {
 
 function pickGenre(text: string, format: FilmFormat): Genre {
   for (const [re, g] of GENRE_KEYWORDS) if (re.test(text)) return g;
-  return format === "commercial_30" || format === "commercial_60" || format === "social_short" ? "commercial" : "drama";
+  return format === "commercial_30" || format === "commercial_60" || format === "motion_graphics_30" || format === "motion_graphics_60" || format === "social_short" ? "commercial" : "drama";
 }
 
 function pickTone(text: string): string[] {

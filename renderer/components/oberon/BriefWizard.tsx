@@ -17,6 +17,8 @@ import { LoadProjectModal } from "./LoadProjectModal";
 
 const FORMATS: { id: FilmFormat | ""; label: string }[] = [
   { id: "", label: "자동 감지" },
+  { id: "motion_graphics_30", label: "30초 모션그래픽" },
+  { id: "motion_graphics_60", label: "60초 모션그래픽" },
   { id: "social_short", label: "소셜 숏폼" },
   { id: "commercial_30", label: "30초 광고" },
   { id: "commercial_60", label: "60초 광고" },

@@ -14,6 +14,9 @@
   0.3초 정지)을 남긴다 — 편집 연결을 위해.
 - **프로바이더는 샷별로 고른다.** 대사·립싱크 → Veo, 최고 화질 → Seedance,
   카메라 무브 → Luma, 범용 → Runway. 어댑터 경계 뒤에 두어 API 종료(예: Sora)에 대비.
+- **모션그래픽 광고는 별도 lane이다.** 제품/SaaS/UI 광고, Framer Motion/Remotion 류 요청,
+  "API 없이" 요청은 비디오 생성 모델 대신 로컬 코드 렌더(HTML/CSS → Chromium frames →
+  ffmpeg MP4)를 우선한다. 결과 폴더에는 MP4, HTML preview, manifest, prompt pack을 남긴다.
 
 ## Gotchas
 

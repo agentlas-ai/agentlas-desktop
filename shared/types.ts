@@ -2136,6 +2136,61 @@ export interface OberonRenderJob {
   updatedAtMs: number;
 }
 
+// ── Oberon local motion graphics jobs ─────────────────────────
+export type OberonMotionAdJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type OberonMotionAdFileKind = "motion_mp4" | "html_preview" | "prompt_pack" | "manifest_json";
+
+export interface OberonMotionAdRequest {
+  productionId?: string;
+  title?: string;
+  brand?: string;
+  concept?: string;
+  aspectRatio?: "16:9" | "9:16";
+  durationSec?: number;
+  fps?: number;
+  width?: number;
+  height?: number;
+  outputDir?: string;
+}
+
+export interface OberonMotionAdFile {
+  id: string;
+  kind: OberonMotionAdFileKind;
+  name: string;
+  label: string;
+  absPath: string;
+  url: string;
+  mime: string;
+  sizeBytes: number;
+}
+
+export interface OberonMotionAdProgress {
+  phase: "queued" | "rendering_frames" | "encoding" | "complete" | "failed" | "cancelled";
+  totalFrames: number;
+  completedFrames: number;
+  percent: number;
+}
+
+export interface OberonMotionAdJob {
+  id: string;
+  productionId?: string;
+  title: string;
+  brand: string;
+  status: OberonMotionAdJobStatus;
+  outputDir: string;
+  progress: OberonMotionAdProgress;
+  files: OberonMotionAdFile[];
+  message: string;
+  error?: string;
+  warnings: string[];
+  durationSec: number;
+  fps: number;
+  width: number;
+  height: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
 // ── Oberon text planning jobs ──────────────────────────────────
 export type OberonPlanRuntime = "claude-code" | "codex" | "gemini";
 
@@ -2388,6 +2443,10 @@ export interface AgentlasIpc {
     getRenderJob: (id: string) => Promise<OberonRenderJob | null>;
     cancelRender: (id: string) => Promise<OberonRenderJob | null>;
     openRenderOutput: (id: string) => Promise<{ ok: boolean; message: string }>;
+    startMotionAd: (request: OberonMotionAdRequest) => Promise<OberonMotionAdJob>;
+    getMotionAdJob: (id: string) => Promise<OberonMotionAdJob | null>;
+    cancelMotionAd: (id: string) => Promise<OberonMotionAdJob | null>;
+    openMotionAdOutput: (id: string) => Promise<{ ok: boolean; message: string }>;
   };
   team: {
     list: () => Promise<InstalledAgent[]>;

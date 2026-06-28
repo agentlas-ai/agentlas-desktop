@@ -72,6 +72,7 @@
     "smoke:surface-state": "npm run build:electron && node scripts/smoke-surface-state.cjs",
     "smoke:surface": "npm run build:electron && node scripts/smoke-surface-emitter.cjs",
     "smoke:multimodal": "npm run build:electron && node scripts/smoke-multimodal-settings.cjs",
+    "smoke:oberon-motion": "npm run build:electron && electron scripts/smoke-oberon-motion-ad.cjs",
     "typecheck": "tsc -p electron/tsconfig.json --noEmit && cd renderer && tsc --noEmit",
     "lint": "next lint --dir renderer",
     "clean": "node -e \"['dist','out','release','renderer/.next','renderer/out'].forEach(d=>require('fs').rmSync(d,{recursive:true,force:true}))\""

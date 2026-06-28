@@ -11,6 +11,29 @@ export interface BriefPreset {
 
 export const BRIEF_PRESETS: BriefPreset[] = [
   {
+    id: "agentlas_motion_ad",
+    label: "Agentlas 모션광고",
+    emoji: "▣",
+    brief: {
+      title: "Agentlas Motion Ad",
+      format: "motion_graphics_30",
+      genre: "commercial",
+      aspect: "16:9",
+      durationSec: 30,
+      logline: "흩어진 프롬프트와 에이전트 작업을 하나의 로컬 제작 운영체제로 정리한다.",
+      synopsis: "프롬프트 조각, 모델 선택, 출력 폴더가 흩어져 있는 혼란에서 시작한다. Agentlas가 이를 앱, 에이전트, 폴더 패키지, 렌더 큐로 정렬하고, 구독/CLI 기반으로 바로 실행 가능한 제작 스튜디오가 되는 30초 제품 모션그래픽 광고.",
+      audience: "AI로 제품·광고·에이전트 워크플로를 만드는 창업자와 크리에이터",
+      tone: ["precise", "kinetic", "premium", "operational"],
+      visualReferences: ["premium SaaS product motion", "editorial motion graphics", "desktop command center"],
+      characters: [],
+      setting: "로컬 데스크탑 제작 운영체제",
+      brandOrProduct: "Agentlas Desktop",
+      mustInclude: ["prompt chaos", "local apps", "Oberon", "export folder", "Build agents as apps"],
+      mustAvoid: ["stock footage", "cartoon mascot", "fake dashboard text", "single-color purple gradient"],
+      language: "ko",
+    },
+  },
+  {
     id: "perfume_ad",
     label: "프리미엄 향수 광고",
     emoji: "🌃",

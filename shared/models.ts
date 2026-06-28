@@ -213,10 +213,8 @@ export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
   ],
   // Codex — `codex exec -m <model>`. 구독 기본 외 명시 모델.
   codex: [
-    { id: "gpt-5.6-codex", label: "GPT-5.6 Codex" },
-    { id: "gpt-5.6", label: "GPT-5.6" },
-    { id: "gpt-5.5-codex", label: "GPT-5.5 Codex", tag: "레거시" },
-    { id: "gpt-5.5", label: "GPT-5.5", tag: "레거시" },
+    { id: "gpt-5.5-codex", label: "GPT-5.5 Codex" },
+    { id: "gpt-5.5", label: "GPT-5.5" },
     { id: "gpt-5.1-codex", label: "GPT-5.1 Codex" },
     { id: "gpt-5.1", label: "GPT-5.1" },
     { id: "gpt-5-codex", label: "GPT-5 Codex" },

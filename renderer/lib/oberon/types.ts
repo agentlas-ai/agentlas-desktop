@@ -11,7 +11,7 @@
 //
 // 모든 타입은 직렬화 가능(JSON)해야 한다 — 로컬 저장 / 내보내기 / IPC 전송 대상.
 
-import type { OberonKeyframeAsset, OberonPlanResult, OberonRenderFile } from "@shared/types";
+import type { OberonKeyframeAsset, OberonMotionAdFile, OberonPlanResult, OberonRenderFile } from "@shared/types";
 // 타입 전용 import — 런타임 순환 없음(에러즈드). 풍부한 정의는 각 모듈에 있고
 // 여기서는 Production에 저장되는 형태만 참조한다.
 import type { TypographyKit } from "./typography";
@@ -23,6 +23,8 @@ import type { SubtitleCue } from "./audio-dialogue";
 export type FilmFormat =
   | "commercial_30"
   | "commercial_60"
+  | "motion_graphics_30"
+  | "motion_graphics_60"
   | "trailer"
   | "short_drama"
   | "music_video"
@@ -536,7 +538,7 @@ export interface FilmProduction {
   /** Electron real-render job id, when the video step used a live provider. */
   renderJobId?: string;
   /** Locally saved MP4/MOV/WAV outputs from a live render job. */
-  renderOutputs?: OberonRenderFile[];
+  renderOutputs?: Array<OberonRenderFile | OberonMotionAdFile>;
   cost: CostLedger;
   /** 각 파이프라인 스테이지의 상태. */
   stageStatus: Record<PipelineStageKey, StageStatus>;

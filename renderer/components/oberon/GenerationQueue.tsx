@@ -151,7 +151,7 @@ export function GenerationQueue({
       {renderJob && (
         <RenderJobCard
           job={renderJob}
-          outputs={production.renderOutputs ?? renderJob.files}
+          outputs={renderJob.files}
           onOpenOutput={onOpenOutput}
         />
       )}

@@ -29,6 +29,12 @@ import {
   openOberonRenderOutput,
   startOberonRender,
 } from "./oberon/render";
+import {
+  cancelOberonMotionAd,
+  getOberonMotionAdJob,
+  openOberonMotionAdOutput,
+  startOberonMotionAd,
+} from "./oberon/motion-graphics";
 import { runMigration, scanMigrationSources } from "./migrate";
 import {
   deleteApiKey,
@@ -606,6 +612,10 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("oberon:getRenderJob", (_e, id: string) => getOberonRenderJob(id));
   ipcMain.handle("oberon:cancelRender", (_e, id: string) => cancelOberonRenderJob(id));
   ipcMain.handle("oberon:openRenderOutput", (_e, id: string) => openOberonRenderOutput(id));
+  ipcMain.handle("oberon:startMotionAd", (_e, request) => startOberonMotionAd(request));
+  ipcMain.handle("oberon:getMotionAdJob", (_e, id: string) => getOberonMotionAdJob(id));
+  ipcMain.handle("oberon:cancelMotionAd", (_e, id: string) => cancelOberonMotionAd(id));
+  ipcMain.handle("oberon:openMotionAdOutput", (_e, id: string) => openOberonMotionAdOutput(id));
 
   // ── team (설치된 에이전트) ─────────────────────────────
   ipcMain.handle("team:list", () => listInstalledAgents());

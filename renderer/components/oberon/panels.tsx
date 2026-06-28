@@ -417,13 +417,16 @@ const ASPECT_OUTPUTS: { aspect: string; platform: string; ratio: string }[] = [
 export function DeliveryPanel({ production }: { production: FilmProduction }) {
   const exports = buildAllExports(production);
   const renderOutputs = production.renderOutputs ?? [];
-  const master = renderOutputs.find((file) => file.kind === "master_mp4") ?? renderOutputs.find((file) => file.kind === "clip_mp4");
+  const master =
+    renderOutputs.find((file) => file.kind === "master_mp4") ??
+    renderOutputs.find((file) => file.kind === "motion_mp4") ??
+    renderOutputs.find((file) => file.kind === "clip_mp4");
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 32px 72px" }}>
       <PanelHead
         eyebrow="Step 06 · 납품"
         title="납품 패키지"
-        subtitle={renderOutputs.length > 0 ? "실제 렌더 파일과 편집 가능한 제작 패키지를 함께 납품합니다." : "아직 실제 렌더 파일은 없습니다. 먼저 영상 생성 단계에서 Google Veo 렌더를 완료하세요."}
+        subtitle={renderOutputs.length > 0 ? "실제 렌더 파일과 편집 가능한 제작 패키지를 함께 납품합니다." : "아직 실제 렌더 파일은 없습니다. 먼저 영상 생성 단계에서 렌더를 완료하세요."}
         icon={<IconFileUp size={18} />}
       />
 

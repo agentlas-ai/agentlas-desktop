@@ -102,6 +102,10 @@ const api: AgentlasIpc = {
     getRenderJob: (id: string) => ipcRenderer.invoke("oberon:getRenderJob", id),
     cancelRender: (id: string) => ipcRenderer.invoke("oberon:cancelRender", id),
     openRenderOutput: (id: string) => ipcRenderer.invoke("oberon:openRenderOutput", id),
+    startMotionAd: (request) => ipcRenderer.invoke("oberon:startMotionAd", request),
+    getMotionAdJob: (id: string) => ipcRenderer.invoke("oberon:getMotionAdJob", id),
+    cancelMotionAd: (id: string) => ipcRenderer.invoke("oberon:cancelMotionAd", id),
+    openMotionAdOutput: (id: string) => ipcRenderer.invoke("oberon:openMotionAdOutput", id),
   },
   team: {
     list: () => ipcRenderer.invoke("team:list"),

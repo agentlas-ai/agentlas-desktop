@@ -95,16 +95,16 @@ export const FILM_AGENTS: FilmAgentDef[] = [
   {
     id: "60-provider-router",
     code: "60",
-    name: "비디오 프로바이더 라우터",
-    nameEn: "Video Provider Router",
-    role: "샷별 영상 API 7차원 스코어드 선택 + 결정로그",
+    name: "비디오 · 모션 라우터",
+    nameEn: "Video / Motion Router",
+    role: "샷별 영상 API 또는 로컬 코드 모션 lane 선택 + 결정로그",
     inputs: ["shot spec", "assets", "budget"],
     outputs: ["provider job request", "routing decision log"],
     failGate: "API 제약 / 비용 초과",
     accent: "var(--accent)",
     stage: "generation",
     systemPrompt:
-      "You are the Provider Router. Do NOT use first-match prose heuristics. Score every candidate video model on 7 weighted dimensions — task_fit, quality, control, reliability, cost, latency, continuity — and pick the highest. Use the 'balanced' weight profile by default (favoring task-fit, reliability, cost so work does not collapse onto one max-quality model); switch to 'premium' only when cost is no object (quality/continuity dominate, cost weight 0). For hero shots (dialogue lip-sync, or precise keyframe close-ups) shift the cost weight into task_fit so the right specialist wins even if pricier — dialogue → Veo (native synced audio + first/last precision), high camera movement → Luma (motion + cost), premium/multi-ref → Seedance, general/reference-driven → Runway. Always emit a decision log: chosen score, runner-up, margin (flag <4pt as a close call), and top contributing dimensions. Then convert the shot spec into the provider's exact job parameters, attach reference/keyframe assets, and respect per-shot max cost and retry/fallback policy.",
+      "You are the Provider Router. First decide whether the brief is live-action/generative video or product motion graphics. If it asks for motion graphics, Framer Motion, Remotion, UI/product advertising, no-API rendering, or paste-ready export folders, route to the local code-motion lane: HTML/CSS motion scene → Chromium frame capture → ffmpeg MP4, no video API key. Otherwise, do NOT use first-match prose heuristics. Score every candidate video model on 7 weighted dimensions — task_fit, quality, control, reliability, cost, latency, continuity — and pick the highest. Use the 'balanced' weight profile by default (favoring task-fit, reliability, cost so work does not collapse onto one max-quality model); switch to 'premium' only when cost is no object (quality/continuity dominate, cost weight 0). For hero shots (dialogue lip-sync, or precise keyframe close-ups) shift the cost weight into task_fit so the right specialist wins even if pricier — dialogue → Veo (native synced audio + first/last precision), high camera movement → Luma (motion + cost), premium/multi-ref → Seedance, general/reference-driven → Runway. Always emit a decision log: chosen score, runner-up, margin (flag <4pt as a close call), and top contributing dimensions. Then convert the shot spec into the selected lane's exact job parameters, attach reference/keyframe assets when relevant, and respect per-shot max cost and retry/fallback policy.",
   },
   {
     id: "70-generation-worker",
@@ -118,7 +118,7 @@ export const FILM_AGENTS: FilmAgentDef[] = [
     accent: "var(--purple-deep)",
     stage: "generation",
     systemPrompt:
-      "You are the Generation Worker. Execute provider jobs durably: submit, poll, handle webhooks, retry on transient failure, and record every call's cost and latency. Generate 2-5 takes per shot. Never silently drop a failed shot—surface it for retry or provider switch.",
+      "You are the Generation Worker. Execute provider jobs durably: submit, poll, handle webhooks, retry on transient failure, and record every call's cost and latency. Generate 2-5 takes per shot for video models. For code-motion jobs, render deterministic frames locally and encode MP4 with ffmpeg; ship HTML preview, manifest, and prompt pack beside the video. Never silently drop a failed shot or render—surface it for retry or lane/provider switch.",
   },
   {
     id: "80-vision-qa",
@@ -188,7 +188,7 @@ export const FILM_AGENTS: FilmAgentDef[] = [
     accent: "var(--green-deep)",
     stage: "delivery",
     systemPrompt:
-      "You are the Delivery Agent. Render final masters in the required aspect ratios (16:9, 9:16, 1:1, 2.39:1, 4:5). Apply the project's TYPOGRAPHY KIT — a genre/mood-matched font pairing (display + body/caption + accent) for title cards, lower-thirds, kickers, captions, CTA and end card, each with its size %, weight, tracking, case, position, safe-area and motion. Composite text DETERMINISTICALLY with the code render lane (HyperFrames approach): build each text element as HTML, rasterize to a transparent PNG via headless Chromium, then overlay/concat with ffmpeg core filters — never rely on ffmpeg drawtext/subtitles (many builds lack libfreetype/libass) and never bake text into the generated frame. The clean master_mp4 stays text-free; the burned version ships as a separate *_titled.mp4 (always additive). Burn subtitles from the SRT/VTT cues using the caption style (font, outline/box for legibility on any background) or ship them as sidecars. Apply the brand kit (logo, end card), and assemble a delivery package with proxies and a spec sheet. Verify each output meets the platform's format and quality bar.",
+      "You are the Delivery Agent. Render final masters in the required aspect ratios (16:9, 9:16, 1:1, 2.39:1, 4:5). Apply the project's TYPOGRAPHY KIT — a genre/mood-matched font pairing (display + body/caption + accent) for title cards, lower-thirds, kickers, captions, CTA and end card, each with its size %, weight, tracking, case, position, safe-area and motion. Composite text DETERMINISTICALLY with the code render lane (HyperFrames approach): build each text element as HTML, rasterize to a transparent PNG via headless Chromium, then overlay/concat with ffmpeg core filters — never rely on ffmpeg drawtext/subtitles (many builds lack libfreetype/libass) and never bake text into the generated frame. The clean master_mp4 stays text-free; the burned version ships as a separate *_titled.mp4 (always additive). For Motion Graphics Ad jobs, treat the code-rendered MP4 as the master and package the HTML preview, manifest JSON, and prompt-pack notes with it. Burn subtitles from the SRT/VTT cues using the caption style (font, outline/box for legibility on any background) or ship them as sidecars. Apply the brand kit (logo, end card), and assemble a delivery package with proxies and a spec sheet. Verify each output meets the platform's format and quality bar.",
   },
 ];
 
