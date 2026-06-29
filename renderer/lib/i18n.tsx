@@ -1751,9 +1751,13 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     [locale],
   );
 
+  // locale이 확정(_ready)되기 전에는 텍스트를 그리지 않는다 — OS 언어를 IPC로 받기 전에는
+  // SSR 기본값 "ko"로 먼저 그려져, 영어 시스템에서 ko→en 깜빡임이 생기거나 텍스트 없는
+  // 순간이 (다크 테마에선 --paper=#131316이라) 검은 화면처럼 보이던 문제를 막는다.
+  // 빈 자리는 현재 테마색(var(--paper))으로 채워 라이트/다크 어느 쪽도 검게 보이지 않게 한다.
   return (
     <I18nContext.Provider value={{ locale, pref, setPref, t }}>
-      {children}
+      {_ready ? children : <div style={{ minHeight: "100vh", background: "var(--paper)" }} aria-hidden />}
     </I18nContext.Provider>
   );
 }
