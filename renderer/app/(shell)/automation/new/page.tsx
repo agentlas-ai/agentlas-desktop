@@ -28,6 +28,7 @@ export default function NewAutomationPage() {
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     const api = ipc();
@@ -50,14 +51,22 @@ export default function NewAutomationPage() {
 
   // targetType 바뀌면 그 타입의 첫 항목 자동 선택
   useEffect(() => {
-    if (targetType === "agent" && agents[0]) setTargetId(agents[0].id);
-    if (targetType === "firm" && firms[0]) setTargetId(firms[0].id);
+    setTargetId(targetType === "agent" ? agents[0]?.id ?? "" : firms[0]?.id ?? "");
+    setError("");
   }, [targetType, agents, firms]);
 
   async function submit() {
     const api = ipc();
-    if (!api || !name.trim() || !targetId || busy) return;
+    if (!api || !name.trim() || busy) return;
+    const validTarget = targetType === "firm"
+      ? firms.some((f) => f.id === targetId)
+      : agents.some((a) => a.id === targetId);
+    if (!validTarget) {
+      setError(locale === "ko" ? "선택한 대상이 없습니다. 다른 대상 탭을 선택하세요." : "No valid target is selected. Choose another target tab.");
+      return;
+    }
     setBusy(true);
+    setError("");
     try {
       await api.automations.create({
         name: name.trim(),
@@ -67,6 +76,8 @@ export default function NewAutomationPage() {
         promptTemplate: prompt.trim() || "오늘 할 일 요약해줘",
       });
       navigate("/automation", "replace");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -122,12 +133,14 @@ export default function NewAutomationPage() {
               onClick={() => setTargetType("firm")}
               icon={<IconBuilding size={13} />}
               label={`${t("auto.target.firm")} (${firms.length})`}
+              disabled={firms.length === 0}
             />
             <TabBtn
               active={targetType === "agent"}
               onClick={() => setTargetType("agent")}
               icon={<IconSparkles size={13} />}
               label={`${t("auto.target.agent")} (${agents.length})`}
+              disabled={agents.length === 0}
             />
           </div>
           {targetType === "firm" ? (
@@ -172,6 +185,12 @@ export default function NewAutomationPage() {
           />
         </Field>
 
+        {error && (
+          <div role="alert" style={errorStyle}>
+            {error}
+          </div>
+        )}
+
         <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
           <button
             onClick={() => void submit()}
@@ -213,21 +232,24 @@ function TabBtn({
   onClick,
   icon,
   label,
+  disabled,
 }: {
   active: boolean;
   onClick: () => void;
   icon: React.ReactNode;
   label: string;
+  disabled?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
+      disabled={disabled}
       style={{
         flex: 1,
         padding: "10px 14px",
         borderRadius: "var(--radius-md)",
-        background: active ? "var(--fill-1)" : "var(--paper)",
-        color: active ? "var(--accent)" : "var(--ink-soft)",
+        background: active ? "var(--fill-1)" : disabled ? "var(--paper-2)" : "var(--paper)",
+        color: active ? "var(--accent)" : disabled ? "var(--muted)" : "var(--ink-soft)",
         border: active ? "1px solid var(--accent-soft)" : "1px solid var(--paper-edge)",
         fontWeight: 600,
         fontSize: 13,
@@ -235,7 +257,8 @@ function TabBtn({
         alignItems: "center",
         justifyContent: "center",
         gap: 6,
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.62 : 1,
       }}
     >
       {icon}
@@ -302,4 +325,15 @@ const inputStyle: React.CSSProperties = {
   background: "var(--paper)",
   fontSize: 13,
   outline: "none",
+};
+
+const errorStyle: React.CSSProperties = {
+  marginTop: 8,
+  border: "1px solid color-mix(in srgb, var(--red-deep, #b4533a) 28%, var(--paper-edge))",
+  borderRadius: "var(--radius-md)",
+  background: "color-mix(in srgb, var(--red-deep, #b4533a) 8%, var(--paper))",
+  color: "var(--red-deep, #b4533a)",
+  padding: "9px 11px",
+  fontSize: 12,
+  lineHeight: 1.45,
 };

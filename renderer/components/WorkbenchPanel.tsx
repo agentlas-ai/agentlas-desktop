@@ -48,7 +48,7 @@ export interface WorkbenchSurface {
 export type SurfaceActionHandler = (
   surface: WorkbenchSurface,
   action: AgentlasSurfaceAction,
-) => void;
+) => void | Promise<void>;
 
 export type SurfaceStatePatchHandler = (
   surface: WorkbenchSurface,
@@ -61,12 +61,14 @@ export function WorkbenchPanel({
   onClose,
   onSurfaceAction,
   onSurfaceStatePatch,
+  embedded = false,
 }: {
   artifact: CodeArtifact | null;
   surface: WorkbenchSurface | null;
-  onClose: () => void;
+  onClose?: () => void;
   onSurfaceAction?: SurfaceActionHandler;
   onSurfaceStatePatch?: SurfaceStatePatchHandler;
+  embedded?: boolean;
 }) {
   const { t } = useT();
   if (!artifact && !surface) return null;
@@ -80,7 +82,7 @@ export function WorkbenchPanel({
       : "";
 
   return (
-    <aside className="agentlas-workbench-panel" style={shell}>
+    <aside className="agentlas-workbench-panel" style={embedded ? embeddedShell : shell}>
       <style>{`
         @keyframes workbench-in {
           from { transform: translateX(20px); opacity: 0; }
@@ -132,9 +134,11 @@ export function WorkbenchPanel({
         >
           {t("chatstream.copy")}
         </button>
-        <button onClick={onClose} aria-label={t("chatstream.close_panel")} title={t("chatstream.close")} style={iconButton}>
-          <IconClose size={15} />
-        </button>
+        {onClose && (
+          <button onClick={onClose} aria-label={t("chatstream.close_panel")} title={t("chatstream.close")} style={iconButton}>
+            <IconClose size={15} />
+          </button>
+        )}
       </header>
       <ExportBar artifact={artifact} surface={surface} />
       {surface ? (
@@ -169,8 +173,7 @@ function ExportBar({
         ? `\`\`\`${artifact.language || ""}\n${artifact.code}\n\`\`\``
         : "";
     if (!text) return;
-    void navigator.clipboard.writeText(text);
-    flash("md");
+    void copyToClipboard(text, "md");
   };
   const copyAsJson = () => {
     const text = surface
@@ -179,8 +182,15 @@ function ExportBar({
         ? JSON.stringify({ id: artifact.id, language: artifact.language, code: artifact.code }, null, 2)
         : "";
     if (!text) return;
-    void navigator.clipboard.writeText(text);
-    flash("json");
+    void copyToClipboard(text, "json");
+  };
+  const copyToClipboard = async (text: string, which: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      flash(which);
+    } catch {
+      flash(`${which}-error`);
+    }
   };
   const flash = (which: string) => {
     setCopied(which);
@@ -220,10 +230,10 @@ function ExportBar({
         <span style={exportLockFree}>{ko ? "lock-in 없음" : "no lock-in"}</span>
       </span>
       <button type="button" style={exportButton} onClick={copyAsMarkdown}>
-        {copied === "md" ? (ko ? "복사됨" : "Copied") : ko ? "MD 복사" : "Copy MD"}
+        {copied === "md" ? (ko ? "복사됨" : "Copied") : copied === "md-error" ? (ko ? "복사 실패" : "Copy failed") : ko ? "MD 복사" : "Copy MD"}
       </button>
       <button type="button" style={exportButton} onClick={copyAsJson}>
-        {copied === "json" ? (ko ? "복사됨" : "Copied") : ko ? "JSON 복사" : "Copy JSON"}
+        {copied === "json" ? (ko ? "복사됨" : "Copied") : copied === "json-error" ? (ko ? "복사 실패" : "Copy failed") : ko ? "JSON 복사" : "Copy JSON"}
       </button>
       {/* 파일로 저장 — 네이티브 저장 다이얼로그로 디스크에 실제 기록(fs.saveTextFile) */}
       <button
@@ -745,33 +755,47 @@ function SurfaceActionButton({
   const { locale } = useT();
   const ko = locale === "ko";
   const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const profile = surfaceActionProfile(action, ko);
   const title = [
     action.prompt || action.url || action.label,
     profile.description,
   ].filter(Boolean).join("\n\n");
 
-  const run = () => {
+  const run = async () => {
     if (pending) return;
+    if (!onAction) {
+      setError(ko ? "실행할 수 없는 작업입니다." : "This action is not available.");
+      return;
+    }
     setPending(true);
-    onAction?.(surface, action);
-    window.setTimeout(() => setPending(false), 1600);
+    setError(null);
+    try {
+      await onAction(surface, action);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPending(false);
+    }
   };
 
   return (
-    <button
-      type="button"
-      style={{ ...actionButton, ...profile.style, opacity: pending ? 0.68 : 1 }}
-      title={title}
-      onClick={run}
-      disabled={pending}
-    >
-      <span style={actionButtonTopLine}>
-        <span style={truncate}>{pending ? (ko ? "시작 중..." : "Starting...") : action.label}</span>
-        <span style={profile.badgeStyle}>{profile.badge}</span>
-      </span>
-      <span style={actionButtonMeta}>{profile.description}</span>
-    </button>
+    <div style={{ display: "grid", gap: 4, minWidth: 0 }}>
+      <button
+        type="button"
+        style={{ ...actionButton, ...profile.style, opacity: pending ? 0.68 : 1 }}
+        title={title}
+        onClick={() => void run()}
+        disabled={pending}
+      >
+        <span style={actionButtonTopLine}>
+          <span style={truncate}>{pending ? (ko ? "진행 중..." : "Running...") : action.label}</span>
+          <span style={profile.badgeStyle}>{profile.badge}</span>
+        </span>
+        <span style={actionButtonMeta}>{profile.description}</span>
+      </button>
+      {error && <span style={actionErrorStyle}>{error}</span>}
+    </div>
   );
 }
 
@@ -1203,7 +1227,7 @@ function paymentApprovalLabel(value: string | undefined): string {
 }
 
 function isPreviewSurfaceId(surfaceId: string): boolean {
-  return surfaceId === "preview" || surfaceId.startsWith("surface-preview");
+  return surfaceId === "preview" || surfaceId.startsWith("surface-preview") || surfaceId.startsWith("preview-");
 }
 
 function paymentSummary(request: AgentlasSurfacePaymentRequest): string {
@@ -1402,7 +1426,7 @@ function AssetTile({
   return (
     <article style={assetTile}>
       {source && canRenderRemote && isVideo ? (
-        <video src={source} muted playsInline controls={false} style={assetImage} />
+        <video src={source} muted playsInline controls preload="metadata" style={assetImage} />
       ) : source && canRenderRemote ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img src={source} alt={title} style={assetImage} />
@@ -1619,6 +1643,17 @@ const shell: CSSProperties = {
   flexDirection: "column",
   overflow: "hidden",
   animation: "workbench-in 0.18s ease",
+};
+
+const embeddedShell: CSSProperties = {
+  ...shell,
+  width: "100%",
+  minWidth: 0,
+  maxWidth: "none",
+  flex: 1,
+  flexShrink: 1,
+  borderLeft: "none",
+  animation: "none",
 };
 
 const header: CSSProperties = {
@@ -2299,6 +2334,13 @@ const actionButtonMeta: CSSProperties = {
   fontSize: 10.5,
   lineHeight: 1.3,
   fontWeight: 650,
+};
+
+const actionErrorStyle: CSSProperties = {
+  color: "var(--red-deep)",
+  fontSize: 10.5,
+  lineHeight: 1.35,
+  fontWeight: 700,
 };
 
 const actionButtonDanger: CSSProperties = {

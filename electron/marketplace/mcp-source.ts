@@ -1,12 +1,18 @@
 // MCP source — agentlas.cloud/api/mcp/v1 HTTPS 호출.
 // Node 20+ 글로벌 fetch. 인증 토큰은 옵션 (anonymous read-only).
 //
-// 응답 실패/타임아웃 시 fallback으로 InMemorySource를 자동 사용 (오프라인 보호).
+// Desktop Hub는 공개 Hub 프로필 전체 목록을 우선 읽고, 실패 시에만 live MCP 검색을 보조로 사용한다.
+// 응답 실패/타임아웃 시 하드코딩 카탈로그로 대체하지 않는다.
 import type { FirmListing, MarketplaceListing, TeamBundle } from "../../shared/types";
 import type { MarketplaceSource, SeedListingFull } from "./source";
 
+const MCP_SEARCH_FALLBACK_LIMIT = 20;
+const PUBLIC_AGENT_CACHE_MS = 60_000;
+
 interface McpSourceOptions {
   baseUrl: string;
+  /** Public full Hub list endpoint. Defaults to `${origin}/api/marketplace/agents`. */
+  publicAgentsUrl?: string;
   /** 인증 토큰 (있으면 cargo/builder 호출 가능) */
   bearer?: string;
   /** 요청 타임아웃 (ms) — 기본 15000 */
@@ -28,7 +34,147 @@ function asArray<T>(raw: unknown, ...keys: string[]): T[] {
   return [];
 }
 
+function cleanString(value: unknown, fallback = ""): string {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function cleanNumber(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function cleanIsoString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function trustGrade(value: unknown): MarketplaceListing["trustGrade"] {
+  return value === "A" || value === "B" || value === "C" || value === "unknown" ? value : "unknown";
+}
+
+function normalizeListing(raw: MarketplaceListing): MarketplaceListing | null {
+  const record = raw as MarketplaceListing & Record<string, unknown>;
+  const slug = cleanString(record.slug);
+  if (!slug) return null;
+
+  const name = cleanString(record.name, slug);
+  const nameEn = cleanString(record.nameEn, name);
+  const isHubCallable = record.kind === "cloud-callable" || record.callable === true || record.source === "hub-index" || record.source === "hub-profile";
+  const entityKind = cleanString(record.entityKind, "agent");
+  const fallbackTagline = isHubCallable
+    ? entityKind === "team"
+      ? "Callable Hub team"
+      : "Callable Hub agent"
+    : "Installable Agentlas agent";
+  const tagline = cleanString(record.tagline, fallbackTagline);
+  const taglineEn = cleanString(record.taglineEn, tagline);
+  const manifestUrl = cleanString(
+    record.manifestUrl,
+    `https://agentlas.cloud/api/mcp/v1/manifest/agent/${slug}`,
+  );
+
+  return {
+    ...record,
+    slug,
+    name,
+    nameEn,
+    tagline,
+    taglineEn,
+    trustGrade: trustGrade(record.trustGrade),
+    installCount: cleanNumber(record.installCount, cleanNumber(record.verifiedInvocations)),
+    manifestUrl,
+  };
+}
+
+function normalizeListings(listings: MarketplaceListing[]): MarketplaceListing[] {
+  return listings
+    .map(normalizeListing)
+    .filter((listing): listing is MarketplaceListing => Boolean(listing));
+}
+
+function isLiveHubRecord(record: Record<string, unknown>): boolean {
+  return (
+    record.source === "hub-index" ||
+    record.source === "hub-profile" ||
+    record.kind === "cloud-callable" ||
+    record.callable === true
+  );
+}
+
+function liveHubListings(listings: MarketplaceListing[]): MarketplaceListing[] {
+  return normalizeListings(listings).filter((listing) => isLiveHubRecord(listing as unknown as Record<string, unknown>));
+}
+
+function liveHubTeams<T extends FirmListing | TeamBundle>(items: T[]): T[] {
+  return items.filter((item) => isLiveHubRecord(item as unknown as Record<string, unknown>));
+}
+
+function publicAgentsUrlFor(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl);
+    return `${url.origin}/api/marketplace/agents`;
+  } catch {
+    return "https://agentlas.cloud/api/marketplace/agents";
+  }
+}
+
+function marketPublicAgentToListing(raw: Record<string, unknown>): MarketplaceListing | null {
+  const slug = cleanString(raw.slug);
+  if (!slug) return null;
+  const entityKind = cleanString(raw.kind, "agent") === "team" ? "team" : "agent";
+  const titleEn = cleanString(raw.titleEn, cleanString(raw.title, slug));
+  const titleKo = cleanString(raw.titleKo, titleEn);
+  const name = titleKo || titleEn || slug;
+  const taglineEn = cleanString(raw.taglineEn, cleanString(raw.tagline, entityKind === "team" ? "Callable Hub team" : "Callable Hub agent"));
+  const taglineKo = cleanString(raw.taglineKo, taglineEn);
+  const totalBorrows = cleanNumber(raw.totalBorrows);
+  const perCallCredits = cleanNumber(raw.perCallCredits, entityKind === "team" ? 10 : 3);
+
+  return {
+    slug,
+    name,
+    nameEn: titleEn || name,
+    tagline: taglineKo || taglineEn,
+    taglineEn,
+    trustGrade: "A",
+    installCount: totalBorrows,
+    manifestUrl: `https://agentlas.cloud/p/${slug}`,
+    ownerName: cleanString(raw.ownerName),
+    publishedAt: cleanIsoString(raw.publishedAt),
+    kind: "cloud-callable",
+    callable: true,
+    routingReady: true,
+    routingStatus: "public-profile",
+    source: "hub-profile",
+    entityKind,
+    perCallCredits,
+    verifiedInvocations: totalBorrows,
+    totalBorrows,
+    todayBorrows: cleanNumber(raw.todayBorrows),
+    assetCount: cleanNumber(raw.assetCount),
+    agentCount: cleanNumber(raw.agentCount, entityKind === "team" ? 1 : 0),
+    lastRoutingSuccessAt: cleanIsoString(raw.lastBorrowedAt),
+  };
+}
+
+function matchesQuery(listing: MarketplaceListing, q: string): boolean {
+  const needle = q.trim().toLowerCase();
+  if (!needle) return true;
+  return [
+    listing.slug,
+    listing.name,
+    listing.nameEn,
+    listing.tagline,
+    listing.taglineEn,
+    listing.ownerName,
+    listing.entityKind,
+  ]
+    .join(" ")
+    .toLowerCase()
+    .includes(needle);
+}
+
 export class McpSource implements MarketplaceSource {
+  private publicAgentCache: { fetchedAt: number; listings: MarketplaceListing[] } | null = null;
+
   constructor(private opts: McpSourceOptions) {}
 
   private async call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
@@ -56,20 +202,52 @@ export class McpSource implements MarketplaceSource {
     }
   }
 
+  private async listPublicHubAgents(): Promise<MarketplaceListing[]> {
+    const now = Date.now();
+    if (this.publicAgentCache && now - this.publicAgentCache.fetchedAt < PUBLIC_AGENT_CACHE_MS) {
+      return this.publicAgentCache.listings;
+    }
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.opts.timeoutMs ?? 15000);
+    const url = this.opts.publicAgentsUrl || publicAgentsUrlFor(this.opts.baseUrl);
+    try {
+      const resp = await fetch(url, {
+        headers: { accept: "application/json" },
+        signal: ctrl.signal,
+      });
+      if (!resp.ok) throw new Error(`public marketplace agents ${resp.status}`);
+      const json = (await resp.json()) as unknown;
+      const rawAgents = asArray<Record<string, unknown>>(json, "agents", "listings");
+      const listings = liveHubListings(rawAgents.map(marketPublicAgentToListing).filter((item): item is MarketplaceListing => Boolean(item)));
+      this.publicAgentCache = { fetchedAt: now, listings };
+      return listings;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async listFirms(): Promise<FirmListing[]> {
-    return asArray<FirmListing>(await this.call<unknown>("marketplace.list_firms", {}), "firms");
+    return liveHubTeams(asArray<FirmListing>(await this.call<unknown>("marketplace.list_firms", {}), "firms"));
   }
 
   async listBundles(): Promise<TeamBundle[]> {
-    return asArray<TeamBundle>(await this.call<unknown>("marketplace.list_bundles", {}), "bundles");
+    return liveHubTeams(asArray<TeamBundle>(await this.call<unknown>("marketplace.list_bundles", {}), "bundles"));
   }
 
   async searchAgents(q: string): Promise<MarketplaceListing[]> {
-    return asArray<MarketplaceListing>(
-      await this.call<unknown>("marketplace.search_agents", { q }),
-      "agents",
-      "listings",
-    );
+    try {
+      const listings = await this.listPublicHubAgents();
+      return listings.filter((listing) => matchesQuery(listing, q));
+    } catch (error) {
+      console.warn("[marketplace] public Hub list failed; using live MCP search only:", error instanceof Error ? error.message : String(error));
+      const listings = asArray<MarketplaceListing>(
+        await this.call<unknown>("marketplace.search_agents", { q, limit: MCP_SEARCH_FALLBACK_LIMIT }),
+        "agents",
+        "listings",
+      );
+      return liveHubListings(listings);
+    }
   }
 
   async getListingBySlug(

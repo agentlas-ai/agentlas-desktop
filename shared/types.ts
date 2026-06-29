@@ -178,8 +178,26 @@ export interface MarketplaceListing {
   trustGrade: "A" | "B" | "C" | "unknown";
   installCount: number;
   manifestUrl: string;
+  ownerName?: string;
+  publishedAt?: string;
   visibility?: AgentVisibility;
   cloudPackage?: CloudAgentPackageDownload;
+  kind?: "cloud-callable" | "install-only" | string;
+  callable?: boolean;
+  routingReady?: boolean;
+  routingStatus?: string | null;
+  source?: string;
+  entityKind?: "agent" | "team" | string;
+  perCallCredits?: number;
+  verifiedInvocations?: number;
+  totalBorrows?: number;
+  todayBorrows?: number;
+  assetCount?: number;
+  agentCount?: number;
+  lastRoutingSuccessAt?: string;
+  recentFailureRate?: number;
+  evalPassRate?: number;
+  rating?: number;
 }
 
 export interface MarketplaceSourceStatus {
@@ -2468,8 +2486,8 @@ export interface AgentlasIpc {
   /** 워킹 폴더 — 채팅 우측의 폴더 트리 패널이 사용. read-only. */
   fs: {
     pickDirectory: () => Promise<string | null>;
-    listDirectory: (absPath: string, showHidden?: boolean) => Promise<DirListing>;
-    readTextFile: (absPath: string) => Promise<TextFilePreview>;
+    listDirectory: (absPath: string, showHidden?: boolean, rootPath?: string) => Promise<DirListing>;
+    readTextFile: (absPath: string, rootPath?: string) => Promise<TextFilePreview>;
     /** 네이티브 저장 다이얼로그로 텍스트를 디스크에 쓴다(산출물 내보내기). 취소 시 canceled=true. */
     saveTextFile: (
       suggestedName: string,

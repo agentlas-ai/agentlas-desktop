@@ -251,7 +251,7 @@ export function appendChatMessage(
 export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[] {
   const rows = getDb()
     .prepare(
-      "SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY created_at ASC LIMIT ?",
+      "SELECT id, role, text, created_at FROM (SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?) ORDER BY created_at ASC",
     )
     .all(chatId, limit) as MessageRow[];
   return rows.map((r) => ({ id: r.id, role: r.role, text: r.text, createdAt: r.created_at }));

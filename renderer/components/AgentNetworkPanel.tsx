@@ -48,7 +48,8 @@ interface Props {
   timeline: NetTimelineItem[];
   chatTitle?: string;
   latestUserPrompt?: string;
-  onClose: () => void;
+  onClose?: () => void;
+  embedded?: boolean;
 }
 
 type RosterNode = { key: string; name: string; role: string; tier: 1 | 2 | 3 };
@@ -65,6 +66,7 @@ export function AgentNetworkPanel({
   chatTitle,
   latestUserPrompt,
   onClose,
+  embedded = false,
 }: Props) {
   const { t, locale } = useT();
   const [briefOpen, setBriefOpen] = useState(false);
@@ -136,17 +138,7 @@ export function AgentNetworkPanel({
   return (
     <aside
       data-tour-id="workspace.workflow"
-      style={{
-        width: 318,
-        minWidth: 268,
-        maxWidth: "45vw",
-        flexShrink: 1, // 좁은 창에서 줄어들어 화면 안에 맞춤(고정폭이면 우측으로 오버플로우)
-        height: "100%",
-        background: "var(--paper)",
-        borderLeft: "1px solid var(--paper-edge)",
-        display: "flex",
-        flexDirection: "column",
-      }}
+      style={embedded ? embeddedPanelStyle : panelStyle}
     >
       {/* 헤더 */}
       <div
@@ -169,26 +161,16 @@ export function AgentNetworkPanel({
           </div>
         </div>
         {(busy || anyActive) && <LiveBadge label={t("network.live")} />}
-        <button
-          onClick={onClose}
-          aria-label={t("workspace.close_panel")}
-          title={t("workspace.close_panel")}
-          style={{
-            width: 24,
-            height: 24,
-            flexShrink: 0,
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            border: "none",
-            background: "transparent",
-            color: "var(--muted-deep)",
-            borderRadius: 6,
-            cursor: "pointer",
-          }}
-        >
-          <IconClose size={14} />
-        </button>
+        {onClose && (
+          <button
+            onClick={onClose}
+            aria-label={t("workspace.close_panel")}
+            title={t("workspace.close_panel")}
+            style={closeButtonStyle}
+          >
+            <IconClose size={14} />
+          </button>
+        )}
       </div>
 
       <div style={{ flex: 1, overflow: "auto", minHeight: 0, padding: "12px 10px" }}>
@@ -220,24 +202,30 @@ export function AgentNetworkPanel({
 
         <div style={activityRowsWrapStyle}>
           {activityRows.map((row) => (
-            <button key={row.label} style={activitySummaryRowStyle}>
+            <div key={row.label} style={activitySummaryRowStyle}>
               <span>{row.label}</span>
-              <span style={{ color: "var(--muted)" }}>›</span>
-            </button>
+            </div>
           ))}
           <div style={searchingRowStyle}>
             <span aria-hidden style={searchingDotStyle(busy || anyActive)} />
-            <span>{webSeen || busy || anyActive ? (locale === "ko" ? "탐색함 웹" : "Browsing web") : (locale === "ko" ? "대기 중" : "Idle")}</span>
-            <span style={{ color: "var(--muted)" }}>›</span>
+            <span>
+              {webSeen
+                ? (locale === "ko" ? "웹 확인됨" : "Web checked")
+                : busy || anyActive
+                  ? (locale === "ko" ? "실행 중" : "Running")
+                  : (locale === "ko" ? "대기 중" : "Idle")}
+            </span>
           </div>
         </div>
 
         {activeParticipant && (
           <div style={participantLineStyle}>
-            <span aria-hidden style={participantDotStyle(!!liveAgents[activeParticipant.key]?.active || busy)} />
+            <span aria-hidden style={participantDotStyle(!!liveAgents[activeParticipant.key]?.active)} />
             <span>{activeParticipant.name}</span>
           </div>
         )}
+
+        <WorkflowKanban participants={participants} liveAgents={liveAgents} timeline={timeline} busy={busy} locale={locale} />
 
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
           {feed.length === 0 ? (
@@ -262,6 +250,8 @@ export function AgentNetworkPanel({
             ))
           )}
         </div>
+
+        <ParallelAgentBitmap participants={participants} liveAgents={liveAgents} timeline={timeline} busy={busy} locale={locale} />
       </div>
     </aside>
   );
@@ -360,6 +350,125 @@ function WorkflowCard({
   );
 }
 
+function WorkflowKanban({
+  participants,
+  liveAgents,
+  timeline,
+  busy,
+  locale,
+}: {
+  participants: RosterNode[];
+  liveAgents: Record<string, LiveAgent>;
+  timeline: NetTimelineItem[];
+  busy: boolean;
+  locale: "ko" | "en";
+}) {
+  const nodes = participantFallback(participants, liveAgents);
+  const cards = nodes.slice(0, 8).map((node, index) => {
+    const live = Boolean(liveAgents[node.key]?.active) || (busy && index === 0 && Object.keys(liveAgents).length === 0);
+    const complete = timeline.some((item) => item.agentId === node.key && /완료|done|completed/i.test(item.text));
+    const status: "running" | "done" | "waiting" = live ? "running" : complete ? "done" : "waiting";
+    return { node, status };
+  });
+  const columns = [
+    { id: "running", label: locale === "ko" ? "진행" : "Running" },
+    { id: "done", label: locale === "ko" ? "완료" : "Done" },
+    { id: "waiting", label: locale === "ko" ? "대기" : "Waiting" },
+  ] as const;
+
+  return (
+    <section style={kanbanWrapStyle}>
+      <div style={sectionTitleStyle}>{locale === "ko" ? "작업 과정 칸반" : "Workflow kanban"}</div>
+      <div style={kanbanGridStyle}>
+        {columns.map((column) => {
+          const columnCards = cards.filter((card) => card.status === column.id);
+          return (
+            <div key={column.id} style={kanbanColumnStyle}>
+              <div style={kanbanColumnHeaderStyle}>
+                <span>{column.label}</span>
+                <strong>{columnCards.length}</strong>
+              </div>
+              <div style={kanbanCardStackStyle}>
+                {columnCards.length === 0 ? (
+                  <span style={kanbanEmptyStyle}>-</span>
+                ) : (
+                  columnCards.map((card) => (
+                    <span key={card.node.key} style={kanbanCardStyle(card.status)}>
+                      {card.node.name}
+                    </span>
+                  ))
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function ParallelAgentBitmap({
+  participants,
+  liveAgents,
+  timeline,
+  busy,
+  locale,
+}: {
+  participants: RosterNode[];
+  liveAgents: Record<string, LiveAgent>;
+  timeline: NetTimelineItem[];
+  busy: boolean;
+  locale: "ko" | "en";
+}) {
+  const nodes = participantFallback(participants, liveAgents).slice(0, 10);
+  const activeCount = nodes.filter((node, index) => liveAgents[node.key]?.active || (busy && index === 0 && Object.keys(liveAgents).length === 0)).length;
+  const latest = timeline.slice(-18);
+  const cells = Array.from({ length: 36 }, (_, index) => {
+    const event = latest[index % Math.max(1, latest.length)];
+    const node = nodes[index % Math.max(1, nodes.length)];
+    const live = node ? liveAgents[node.key]?.active : false;
+    const tone = live || (busy && index % 7 === 0)
+      ? "live"
+      : event?.kind === "handoff"
+        ? "handoff"
+        : event?.kind === "tool"
+          ? "tool"
+          : event
+            ? "status"
+            : "idle";
+    return { key: `${index}:${event?.key ?? "idle"}`, tone };
+  });
+
+  return (
+    <section style={bitmapWrapStyle}>
+      <div style={bitmapHeaderStyle}>
+        <span>{locale === "ko" ? "병렬 서브에이전트" : "Parallel subagents"}</span>
+        <strong>{activeCount || (busy ? 1 : 0)} live</strong>
+      </div>
+      <div style={bitmapBoardStyle} aria-hidden>
+        {cells.map((cell) => (
+          <span key={cell.key} style={bitmapCellStyle(cell.tone)} />
+        ))}
+      </div>
+      <div style={bitmapLegendStyle}>
+        {nodes.length === 0
+          ? (locale === "ko" ? "메시지를 보내면 실행 노드가 여기에 표시됩니다." : "Send a message to show active nodes here.")
+          : nodes.slice(0, 3).map((node) => node.name).join(" · ")}
+      </div>
+    </section>
+  );
+}
+
+function participantFallback(participants: RosterNode[], liveAgents: Record<string, LiveAgent>): RosterNode[] {
+  if (participants.length > 0) return participants;
+  return Object.entries(liveAgents).map(([key, agent]) => ({
+    key,
+    name: agent.name,
+    role: agent.role,
+    tier: agent.tier ?? 1,
+  }));
+}
+
 function workflowActivityRows(timeline: NetTimelineItem[], locale: "ko" | "en") {
   const handoff = timeline.filter((item) => item.kind === "handoff").length;
   const tool = timeline.filter((item) => item.kind === "tool").length;
@@ -402,6 +511,42 @@ const panelSubtitleStyle: CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
+};
+
+const panelStyle: CSSProperties = {
+  width: 318,
+  minWidth: 268,
+  maxWidth: "45vw",
+  flexShrink: 1,
+  height: "100%",
+  background: "var(--paper)",
+  borderLeft: "1px solid var(--paper-edge)",
+  display: "flex",
+  flexDirection: "column",
+  minHeight: 0,
+};
+
+const embeddedPanelStyle: CSSProperties = {
+  ...panelStyle,
+  width: "100%",
+  minWidth: 0,
+  maxWidth: "none",
+  flex: 1,
+  borderLeft: "none",
+};
+
+const closeButtonStyle: CSSProperties = {
+  width: 24,
+  height: 24,
+  flexShrink: 0,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  border: "none",
+  background: "transparent",
+  color: "var(--muted-deep)",
+  borderRadius: 6,
+  cursor: "pointer",
 };
 
 const briefCardStyle: CSSProperties = {
@@ -487,6 +632,136 @@ const activitySummaryRowStyle: CSSProperties = {
   fontSize: 11.2,
   fontWeight: 700,
   textAlign: "left",
+};
+
+const kanbanWrapStyle: CSSProperties = {
+  marginTop: 14,
+  borderRadius: 8,
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+  padding: 10,
+};
+
+const sectionTitleStyle: CSSProperties = {
+  color: "var(--ink)",
+  fontSize: 11.5,
+  fontWeight: 820,
+  marginBottom: 8,
+};
+
+const kanbanGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+  gap: 6,
+};
+
+const kanbanColumnStyle: CSSProperties = {
+  minWidth: 0,
+  borderRadius: 7,
+  background: "var(--paper-2)",
+  border: "1px solid color-mix(in srgb, var(--paper-edge) 72%, transparent)",
+  padding: 6,
+};
+
+const kanbanColumnHeaderStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 6,
+  color: "var(--muted-deep)",
+  fontSize: 9.8,
+  fontWeight: 800,
+  textTransform: "uppercase",
+  letterSpacing: 0.2,
+};
+
+const kanbanCardStackStyle: CSSProperties = {
+  marginTop: 6,
+  display: "grid",
+  gap: 4,
+};
+
+function kanbanCardStyle(status: "running" | "done" | "waiting"): CSSProperties {
+  return {
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    borderRadius: 6,
+    padding: "4px 5px",
+    background:
+      status === "running"
+        ? "color-mix(in srgb, var(--green-deep) 13%, var(--paper))"
+        : status === "done"
+          ? "color-mix(in srgb, var(--accent) 9%, var(--paper))"
+          : "var(--paper)",
+    color: status === "running" ? "var(--green-deep)" : status === "done" ? "var(--accent)" : "var(--muted-deep)",
+    border: "1px solid color-mix(in srgb, currentColor 17%, var(--paper-edge))",
+    fontSize: 10.2,
+    fontWeight: 760,
+  };
+}
+
+const kanbanEmptyStyle: CSSProperties = {
+  color: "var(--muted)",
+  fontSize: 11,
+  padding: "4px 0",
+};
+
+const bitmapWrapStyle: CSSProperties = {
+  marginTop: 10,
+  borderRadius: 8,
+  border: "1px solid color-mix(in srgb, var(--paper-edge) 78%, transparent)",
+  background: "linear-gradient(180deg, color-mix(in srgb, var(--paper-2) 92%, var(--ink) 3%), var(--paper))",
+  padding: 10,
+  overflow: "hidden",
+};
+
+const bitmapHeaderStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+  color: "var(--ink)",
+  fontSize: 11.5,
+  fontWeight: 820,
+};
+
+const bitmapBoardStyle: CSSProperties = {
+  marginTop: 9,
+  display: "grid",
+  gridTemplateColumns: "repeat(12, 1fr)",
+  gap: 3,
+};
+
+function bitmapCellStyle(tone: string): CSSProperties {
+  const color =
+    tone === "live"
+      ? "var(--green-deep)"
+      : tone === "handoff"
+        ? "var(--accent)"
+        : tone === "tool"
+          ? "var(--blue-deep)"
+          : tone === "status"
+            ? "var(--muted-deep)"
+            : "var(--paper-edge)";
+  return {
+    aspectRatio: "1 / 1",
+    borderRadius: 2,
+    background: color,
+    opacity: tone === "idle" ? 0.45 : 0.92,
+    boxShadow: tone === "live" ? "0 0 0 2px color-mix(in srgb, var(--green-deep) 13%, transparent)" : undefined,
+  };
+}
+
+const bitmapLegendStyle: CSSProperties = {
+  marginTop: 8,
+  color: "var(--muted-deep)",
+  fontSize: 10.5,
+  lineHeight: 1.4,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
 };
 
 const searchingRowStyle: CSSProperties = {

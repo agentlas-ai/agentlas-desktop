@@ -27,17 +27,33 @@ interface Props {
    *  null이면 패널을 렌더하지 않음. 이 값이 바뀌면 트리 상태가 초기화된다. */
   chatId: string | null;
   /** 닫기 버튼 콜백 */
-  onClose: () => void;
+  onClose?: () => void;
   /** 선택한 폴더의 영속화 어댑터. 없으면 채팅 working_folder(IPC)에 저장한다.
    *  firm/agents 화면은 localStorage 기반 어댑터를 넘겨 채팅 없이도 폴더를 기억한다. */
   persistence?: {
     load: () => Promise<string | null>;
     save: (path: string | null) => Promise<void>;
   };
+  /** Render inside a parent rail instead of as its own resizable side panel. */
+  embedded?: boolean;
+  /** Notify a parent viewer panel when a file is selected. */
+  onOpenFilePreview?: (preview: WorkspaceFilePreview) => void;
 }
 
-export function WorkspacePanel({ chatId, onClose, persistence }: Props) {
-  const { t } = useT();
+export interface WorkspaceFilePreview {
+  path: string;
+  name: string;
+  size: number;
+  viewerKind: "markdown" | "json" | "text" | "browser" | "image" | "video" | "pdf" | "document" | "binary";
+  fileUrl: string;
+  browserUrl?: string;
+  content?: string;
+  truncated?: boolean;
+  reason?: TextFilePreview["reason"];
+}
+
+export function WorkspacePanel({ chatId, onClose, persistence, embedded = false, onOpenFilePreview }: Props) {
+  const { t, locale } = useT();
   // persistence를 ref로 들고 effect 의존성을 [chatId]로 유지 (인라인 객체 재생성으로 인한 루프 방지).
   const persistRef = useRef(persistence);
   persistRef.current = persistence;
@@ -47,7 +63,12 @@ export function WorkspacePanel({ chatId, onClose, persistence }: Props) {
   const [expanded, setExpanded] = useState<Map<string, DirListing>>(new Map());
   const [selected, setSelected] = useState<string | null>(null);
   const [preview, setPreview] = useState<TextFilePreview | null>(null);
-  const dragStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const dragStateRef = useRef<{ startX: number; startWidth: number; currentWidth: number } | null>(null);
+  const errorPrefix = locale === "ko" ? "폴더/파일을 열 수 없습니다" : "Could not open folder or file";
+  const setPanelError = useCallback((err: unknown) => {
+    setError(`${errorPrefix}: ${err instanceof Error ? err.message : String(err)}`);
+  }, [errorPrefix]);
 
   // 너비 영구 저장
   useEffect(() => {
@@ -73,58 +94,76 @@ export function WorkspacePanel({ chatId, onClose, persistence }: Props) {
     }
     let cancelled = false;
     void (async () => {
-      const folder = persistRef.current
-        ? await persistRef.current.load()
-        : await api.workspace.get(chatId);
-      if (cancelled) return;
-      if (folder) {
-        setRootPath(folder);
-        const listing = await api.fs.listDirectory(folder);
-        if (!cancelled) setRootListing(listing);
-      } else {
-        setRootPath(null);
-        setRootListing(null);
+      try {
+        setError(null);
+        const folder = persistRef.current
+          ? await persistRef.current.load()
+          : await api.workspace.get(chatId);
+        if (cancelled) return;
+        if (folder) {
+          setRootPath(folder);
+          const listing = await api.fs.listDirectory(folder, false, folder);
+          if (!cancelled) setRootListing(listing);
+        } else {
+          setRootPath(null);
+          setRootListing(null);
+        }
+        setExpanded(new Map());
+        setSelected(null);
+        setPreview(null);
+      } catch (err) {
+        if (!cancelled) {
+          setRootListing(null);
+          setPanelError(err);
+        }
       }
-      setExpanded(new Map());
-      setSelected(null);
-      setPreview(null);
     })();
     return () => {
       cancelled = true;
     };
-  }, [chatId]);
+  }, [chatId, setPanelError]);
 
   const pickFolder = useCallback(async () => {
     const api = ipc();
     if (!api || !chatId) return;
-    const picked = await api.fs.pickDirectory();
-    if (!picked) return;
-    setRootPath(picked);
-    const listing = await api.fs.listDirectory(picked);
-    setRootListing(listing);
-    setExpanded(new Map());
-    setSelected(null);
-    setPreview(null);
-    if (persistRef.current) await persistRef.current.save(picked);
-    else await api.workspace.set(chatId, picked);
-  }, [chatId]);
+    try {
+      setError(null);
+      const picked = await api.fs.pickDirectory();
+      if (!picked) return;
+      setRootPath(picked);
+      const listing = await api.fs.listDirectory(picked, false, picked);
+      setRootListing(listing);
+      setExpanded(new Map());
+      setSelected(null);
+      setPreview(null);
+      if (persistRef.current) await persistRef.current.save(picked);
+      else await api.workspace.set(chatId, picked);
+    } catch (err) {
+      setPanelError(err);
+    }
+  }, [chatId, setPanelError]);
 
   const refresh = useCallback(async () => {
     const api = ipc();
     if (!api || !rootPath) return;
-    const listing = await api.fs.listDirectory(rootPath);
-    setRootListing(listing);
-    // 펼쳐진 디렉터리들도 재요청
-    const next = new Map<string, DirListing>();
-    for (const [p] of expanded) {
-      try {
-        next.set(p, await api.fs.listDirectory(p));
-      } catch {
-        // ignore
+    try {
+      setError(null);
+      const listing = await api.fs.listDirectory(rootPath, false, rootPath);
+      setRootListing(listing);
+      // 펼쳐진 디렉터리들도 재요청
+      const next = new Map<string, DirListing>();
+      for (const [p] of expanded) {
+        try {
+          next.set(p, await api.fs.listDirectory(p, false, rootPath));
+        } catch {
+          // ignore stale expanded folders while keeping the root visible.
+        }
       }
+      setExpanded(next);
+    } catch (err) {
+      setPanelError(err);
     }
-    setExpanded(next);
-  }, [rootPath, expanded]);
+  }, [rootPath, expanded, setPanelError]);
 
   const toggleDir = useCallback(
     async (node: WorkspaceNode) => {
@@ -137,41 +176,55 @@ export function WorkspacePanel({ chatId, onClose, persistence }: Props) {
         setExpanded(next);
         return;
       }
-      const listing = await api.fs.listDirectory(node.path);
-      const next = new Map(expanded);
-      next.set(node.path, listing);
-      setExpanded(next);
+      try {
+        setError(null);
+        const listing = await api.fs.listDirectory(node.path, false, rootPath ?? undefined);
+        const next = new Map(expanded);
+        next.set(node.path, listing);
+        setExpanded(next);
+      } catch (err) {
+        setPanelError(err);
+      }
     },
-    [expanded],
+    [expanded, rootPath, setPanelError],
   );
 
   const openFile = useCallback(async (node: WorkspaceNode) => {
     const api = ipc();
     if (!api) return;
     setSelected(node.path);
+    setError(null);
     if (!node.isTextLike) {
-      setPreview({ path: node.path, content: "", truncated: false, size: node.size, reason: "binary" });
+      const binaryPreview: TextFilePreview = { path: node.path, content: "", truncated: false, size: node.size, reason: "binary" };
+      setPreview(binaryPreview);
+      onOpenFilePreview?.(toWorkspaceFilePreview(node, binaryPreview));
       return;
     }
-    const text = await api.fs.readTextFile(node.path);
-    setPreview(text);
-  }, []);
+    try {
+      const text = await api.fs.readTextFile(node.path, rootPath ?? undefined);
+      setPreview(text);
+      onOpenFilePreview?.(toWorkspaceFilePreview(node, text));
+    } catch (err) {
+      setPanelError(err);
+    }
+  }, [onOpenFilePreview, rootPath, setPanelError]);
 
   // 좌측 가장자리 드래그 핸들
   const onResizeStart = useCallback(
     (e: React.MouseEvent) => {
-      dragStateRef.current = { startX: e.clientX, startWidth: width };
+      dragStateRef.current = { startX: e.clientX, startWidth: width, currentWidth: width };
       function onMove(ev: MouseEvent) {
         if (!dragStateRef.current) return;
         // 우측 패널이라 왼쪽으로 드래그하면 폭이 늘어남
         const dx = dragStateRef.current.startX - ev.clientX;
         const next = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dragStateRef.current.startWidth + dx));
+        dragStateRef.current.currentWidth = next;
         setWidth(next);
       }
       function onUp() {
         if (dragStateRef.current) {
           try {
-            window.localStorage.setItem(WIDTH_STORAGE_KEY, String(width));
+            window.localStorage.setItem(WIDTH_STORAGE_KEY, String(dragStateRef.current.currentWidth));
           } catch {
             // ignore
           }
@@ -196,12 +249,29 @@ export function WorkspacePanel({ chatId, onClose, persistence }: Props) {
     }
   }, [width]);
 
+  const resizeByKeyboard = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    let next: number | null = null;
+    if (e.key === "ArrowLeft") next = Math.min(MAX_WIDTH, width + 24);
+    else if (e.key === "ArrowRight") next = Math.max(MIN_WIDTH, width - 24);
+    else if (e.key === "Home") next = MIN_WIDTH;
+    else if (e.key === "End") next = MAX_WIDTH;
+    if (next === null) return;
+    e.preventDefault();
+    setWidth(next);
+    try {
+      window.localStorage.setItem(WIDTH_STORAGE_KEY, String(next));
+    } catch {
+      // ignore
+    }
+  }, [width]);
+
   return (
     <aside
       style={{
         position: "relative",
-        width,
-        maxWidth: "45vw",
+        width: embedded ? "100%" : width,
+        maxWidth: embedded ? "none" : "45vw",
+        flex: embedded ? 1 : undefined,
         flexShrink: 1, // 좁은 창/다중 패널에서 줄어들어 화면 안에 맞춤
         height: "100%",
         background: "var(--paper)",
@@ -212,20 +282,28 @@ export function WorkspacePanel({ chatId, onClose, persistence }: Props) {
       }}
     >
       {/* 좌측 가장자리 드래그 핸들 */}
-      <div
-        role="separator"
-        aria-label={t("workspace.resize")}
-        onMouseDown={onResizeStart}
-        style={{
-          position: "absolute",
-          left: -3,
-          top: 0,
-          bottom: 0,
-          width: 6,
-          cursor: "ew-resize",
-          zIndex: 2,
-        }}
-      />
+      {!embedded && (
+        <div
+          role="separator"
+          tabIndex={0}
+          aria-orientation="vertical"
+          aria-valuemin={MIN_WIDTH}
+          aria-valuemax={MAX_WIDTH}
+          aria-valuenow={width}
+          aria-label={t("workspace.resize")}
+          onMouseDown={onResizeStart}
+          onKeyDown={resizeByKeyboard}
+          style={{
+            position: "absolute",
+            left: -3,
+            top: 0,
+            bottom: 0,
+            width: 6,
+            cursor: "ew-resize",
+            zIndex: 2,
+          }}
+        />
+      )}
 
       {/* 헤더 */}
       <div
@@ -278,12 +356,19 @@ export function WorkspacePanel({ chatId, onClose, persistence }: Props) {
             </button>
           </>
         )}
-        <button onClick={onClose} aria-label={t("workspace.close_panel")} title={t("workspace.close_panel")} style={iconBtn()}>
-          <IconClose size={14} />
-        </button>
+        {onClose && (
+          <button onClick={onClose} aria-label={t("workspace.close_panel")} title={t("workspace.close_panel")} style={iconBtn()}>
+            <IconClose size={14} />
+          </button>
+        )}
       </div>
 
       {/* 본문 — 빈 상태 / 트리 */}
+      {error && (
+        <div role="alert" style={errorBannerStyle}>
+          {error}
+        </div>
+      )}
       {!rootPath ? (
         <EmptyState onPick={() => void pickFolder()} t={t} />
       ) : (
@@ -361,7 +446,11 @@ interface TreeListProps {
 
 function TreeList({ entries, depth, expanded, onToggle, onOpenFile, selected }: TreeListProps) {
   return (
-    <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+    <ul
+      role={depth === 0 ? "tree" : "group"}
+      aria-label={depth === 0 ? "Workspace files" : undefined}
+      style={{ listStyle: "none", padding: 0, margin: 0 }}
+    >
       {entries.map((entry) => (
         <TreeNode
           key={entry.path}
@@ -391,8 +480,12 @@ function TreeNode({ node, depth, expanded, onToggle, onOpenFile, selected }: Tre
   const isSelected = selected === node.path;
   const indent = 10 + depth * 12;
   return (
-    <li>
+    <li role="none">
       <button
+        role="treeitem"
+        aria-expanded={node.kind === "dir" ? isOpen : undefined}
+        aria-selected={node.kind === "file" ? isSelected : undefined}
+        aria-current={isSelected ? "true" : undefined}
         onClick={() => {
           if (node.kind === "dir") onToggle(node);
           else onOpenFile(node);
@@ -553,6 +646,58 @@ function formatSize(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function toWorkspaceFilePreview(node: WorkspaceNode, preview: TextFilePreview): WorkspaceFilePreview {
+  return {
+    path: node.path,
+    name: node.name || basename(node.path),
+    size: preview.size || node.size,
+    viewerKind: viewerKindForFile(node.name || node.path, preview),
+    fileUrl: fileUrlForPath(node.path),
+    browserUrl: browserUrlForPreview(node.name || node.path, preview.content),
+    content: preview.content,
+    truncated: preview.truncated,
+    reason: preview.reason,
+  };
+}
+
+function viewerKindForFile(name: string, preview: TextFilePreview): WorkspaceFilePreview["viewerKind"] {
+  const ext = extensionOf(name);
+  if ([".md", ".mdx"].includes(ext)) return "markdown";
+  if ([".json", ".jsonl"].includes(ext)) return "json";
+  if ([".html", ".htm", ".url", ".webloc"].includes(ext)) return "browser";
+  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg"].includes(ext)) return "image";
+  if ([".mp4", ".webm", ".mov", ".m4v", ".ogv"].includes(ext)) return "video";
+  if (ext === ".pdf") return "pdf";
+  if ([".doc", ".docx", ".rtf", ".pages", ".ppt", ".pptx", ".xls", ".xlsx"].includes(ext)) return "document";
+  if (!preview.reason) return "text";
+  return "binary";
+}
+
+function extensionOf(name: string): string {
+  const base = basename(name).toLowerCase();
+  const dot = base.lastIndexOf(".");
+  return dot >= 0 ? base.slice(dot) : "";
+}
+
+function fileUrlForPath(absPath: string): string {
+  const normalized = absPath.replace(/\\/g, "/");
+  const withSlash = normalized.startsWith("/") ? normalized : `/${normalized}`;
+  return `file://${encodeURI(withSlash).replace(/#/g, "%23").replace(/\?/g, "%3F")}`;
+}
+
+function browserUrlForPreview(name: string, content: string | undefined): string | undefined {
+  if (!content) return undefined;
+  const ext = extensionOf(name);
+  if (![".url", ".webloc"].includes(ext)) return undefined;
+  const direct = content.match(/https?:\/\/[^\s"'<>]+/i)?.[0];
+  if (!direct) return undefined;
+  try {
+    return new URL(direct).toString();
+  } catch {
+    return undefined;
+  }
+}
+
 function iconBtn(): React.CSSProperties {
   return {
     width: 24,
@@ -568,3 +713,15 @@ function iconBtn(): React.CSSProperties {
     cursor: "pointer",
   };
 }
+
+const errorBannerStyle: React.CSSProperties = {
+  margin: "8px 10px 0",
+  border: "1px solid color-mix(in srgb, var(--red-deep, #b4533a) 28%, var(--paper-edge))",
+  borderRadius: 8,
+  background: "color-mix(in srgb, var(--red-deep, #b4533a) 8%, var(--paper))",
+  color: "var(--red-deep, #b4533a)",
+  padding: "8px 10px",
+  fontSize: 11.5,
+  lineHeight: 1.45,
+  overflowWrap: "anywhere",
+};

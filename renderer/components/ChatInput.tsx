@@ -275,8 +275,12 @@ export function ChatInput({
   // ── 파일 첨부 ──────────────────────────────────────────
   async function addFiles(files: FileList | File[]) {
     const accepted: PreviewedImage[] = [];
+    const rejected: string[] = [];
     for (const file of Array.from(files)) {
-      if (!file.type.startsWith("image/")) continue;
+      if (!file.type.startsWith("image/")) {
+        rejected.push(file.name);
+        continue;
+      }
       if (file.size > 5 * 1024 * 1024) {
         alert(t("chatinput.image_too_large", { name: file.name }));
         continue;
@@ -290,6 +294,13 @@ export function ChatInput({
       });
     }
     if (accepted.length > 0) setImages((arr) => [...arr, ...accepted]);
+    if (rejected.length > 0) {
+      alert(
+        locale === "ko"
+          ? `이미지 파일만 첨부할 수 있습니다: ${rejected.join(", ")}`
+          : `Only image files can be attached here: ${rejected.join(", ")}`,
+      );
+    }
   }
 
   function removeImage(i: number) {
@@ -787,8 +798,8 @@ export function ChatInput({
                 return;
               }
             }
-            // 슬래시/멘션 토큰을 입력 중이면(매칭 0개라도) Enter/Tab으로 메시지를 전송하지 않는다.
-            if (trigger && (e.key === "Enter" || e.key === "Tab") && !e.metaKey && !e.ctrlKey) {
+            // 매칭 후보가 없으면 Enter는 사용자가 쓴 텍스트 그대로 전송한다. Tab만 포커스 이탈 방지.
+            if (trigger && e.key === "Tab" && !e.metaKey && !e.ctrlKey) {
               e.preventDefault();
               return;
             }

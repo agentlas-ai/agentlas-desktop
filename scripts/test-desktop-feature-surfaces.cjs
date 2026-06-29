@@ -425,6 +425,9 @@ async function runChatSurface(browser, baseUrl, evidence) {
   await page.goto(`${baseUrl}/chat.html?id=chat-1`, { waitUntil: "domcontentloaded" });
   const textbox = page.getByRole("textbox").first();
   await textbox.waitFor();
+  assert.equal(await page.locator(".sidenav").count(), 0, "chat route should not render the global SideNav next to the chat sidebar");
+  assert.equal(await page.locator("[data-tour-id='workspace.sidebar']").count(), 1, "chat route should keep exactly one left sidebar");
+  await page.locator("[data-tour-id='workspace.sidebar']").getByText(/에이전트 만들기|Create agent/).waitFor();
 
   await page.locator("button.chat-input-mode-chip", { hasText: /플랜 모드|Plan mode/ }).click();
   await page.locator("button.chat-input-mode-chip", { hasText: /목표 추진|Goal mode/ }).click();
@@ -465,6 +468,23 @@ async function runChatSurface(browser, baseUrl, evidence) {
   );
   await page.locator(".agentlas-activity-card", { hasText: /Hub 에이전트 빌리는 중: qa-agent/ }).first().click();
   await page.locator("aside").getByText(/Hub 에이전트 빌리는 중: qa-agent/).first().waitFor();
+  const rightPanel = page.locator(".chat-right-panel");
+  await rightPanel.getByText(/작업 과정 칸반|Workflow kanban/).waitFor();
+  await rightPanel.getByText(/병렬 서브에이전트|Parallel subagents/).waitFor();
+  const kanbanBox = await rightPanel.getByText(/작업 과정 칸반|Workflow kanban/).boundingBox();
+  const activityBox = await rightPanel.locator(".agentlas-activity-card").first().boundingBox();
+  const bitmapBox = await rightPanel.getByText(/병렬 서브에이전트|Parallel subagents/).boundingBox();
+  assert.ok(kanbanBox && activityBox && bitmapBox, "agent tab should render kanban, activity cards, and subagent bitmap");
+  assert.ok(kanbanBox.y < activityBox.y && activityBox.y < bitmapBox.y, "agent work should stay above the parallel subagent bitmap");
+  await page.getByRole("button", { name: /워크스페이스 패널|Workspace panel/ }).click();
+  await page.getByRole("button", { name: /폴더 열기|Open folder/ }).click();
+  await page.getByRole("button", { name: "README.md" }).click();
+  await page.locator(".chat-right-panel").getByText("README.md").waitFor();
+  await page.locator(".chat-right-panel").getByText(/Panel viewer smoke file/).waitFor();
+  await page.locator(".chat-right-panel").getByRole("button", { name: /파일|file/ }).click();
+  await page.getByRole("button", { name: "preview.html" }).click();
+  await page.locator(".chat-right-panel").getByText("preview.html", { exact: true }).waitFor();
+  await page.frameLocator(".chat-right-panel iframe").getByText("Browser smoke frame").waitFor();
   const invokeCall = await page.evaluate(() => window.__qa.calls.find((call) => call.name === "invoke.run"));
   assert.equal(invokeCall.payload.chatId, "chat-1");
   assert.match(invokeCall.payload.userPrompt, /^stormbreaker 검증용 채팅 옵션 실행$/);
@@ -707,7 +727,7 @@ async function runChatRecommendSurface(browser, baseUrl, evidence) {
     proofName: "chat-recommend-network-surface",
     assertCalls: (calls) => {
       const call = calls.find((item) => item.name === "invoke.run");
-      assert.deepEqual(call.payload.borrowAgents, ["shop-product-writer"]);
+      assert.deepEqual(call.payload.borrowAgents, ["no-ai-slop-copywriter"]);
       assert.equal(call.payload.userPrompt, "추천 네트워크 실행");
     },
   });
@@ -898,6 +918,8 @@ async function runHubLiveSurface(browser, baseUrl, evidence) {
   await page.goto(`${baseUrl}/marketplace.html`, { waitUntil: "domcontentloaded" });
   await page.getByText(/Hub 실시간|Hub live/).waitFor();
   assert.equal(await page.getByText(/실제 Hub에 연결되지 않았습니다|not connected to the real Hub/).count(), 0);
+  await page.getByText(/FDA SaMD 510\(k\)|Pre-market Notification/).waitFor();
+  assert.equal(await page.getByText(/Shop Product Writer|상품설명 작가/).count(), 0);
   await finishPage(context, page, errors, evidence, "hub-live-surface");
 }
 
@@ -907,6 +929,7 @@ function setupMockAgentlasBridge(options) {
   const eventHandlers = {};
   const automations = [];
   let runtimeOverrides = [];
+  const workspaceFolders = {};
   let lastRunId = 0;
   const pendingConfirmations = Array.from({ length: options?.pendingConfirmations ?? 0 }, (_, index) => ({
     chatId: `confirm-chat-${index + 1}`,
@@ -1158,27 +1181,32 @@ function setupMockAgentlasBridge(options) {
       install: async () => firm,
       getResolvedOrg: async () => resolvedOrg,
     },
-    marketplace: {
-      status: async () =>
-        options && options.hubOffline
-          ? { mode: "mcp", baseUrl: "mock://offline", online: false, usingFallback: true, lastError: "fetch failed", lastCheckedAt: now }
-          : { mode: "mcp", baseUrl: "https://agentlas.cloud/api/mcp/v1", online: true, usingFallback: false, lastError: null, lastCheckedAt: now },
-      listBundles: async () => [],
-      listFirms: async () => [firm],
-      listMine: async () => [],
-      search: async () => [
-        {
-          slug: "shop-product-writer",
-          name: "Shop Product Writer",
-          nameEn: "Shop Product Writer",
-          tagline: "상품 문구 작성",
-          taglineEn: "Writes product copy",
-          trustGrade: "A",
-          installCount: 10,
-          manifestUrl: "mock",
-        },
-      ],
-    },
+	    marketplace: {
+	      status: async () =>
+	        options && options.hubOffline
+	          ? { mode: "mcp", baseUrl: "mock://offline", online: false, usingFallback: false, lastError: "fetch failed", lastCheckedAt: now }
+	          : { mode: "mcp", baseUrl: "https://agentlas.cloud/api/mcp/v1", online: true, usingFallback: false, lastError: null, lastCheckedAt: now },
+	      listBundles: async () => [],
+	      listFirms: async () => [],
+	      listMine: async () => [],
+	      search: async () => [
+	        {
+	          slug: "fda-samd-510k-readiness-desk",
+	          name: "FDA SaMD 510(k) 사전 승인 준비 데스크",
+	          nameEn: "FDA SaMD 510(k) Pre-market Notification Readiness Desk",
+	          tagline: "Callable Hub team",
+	          taglineEn: "Callable Hub team",
+	          trustGrade: "A",
+	          installCount: 0,
+	          manifestUrl: "mock",
+	          kind: "cloud-callable",
+	          callable: true,
+	          source: "hub-index",
+	          entityKind: "team",
+	          perCallCredits: 10,
+	        },
+	      ],
+	    },
     mcpTools: {
       listCatalog: async () => [],
       listInstalled: async () => [],
@@ -1291,7 +1319,7 @@ function setupMockAgentlasBridge(options) {
         if (options.recommendMode === "network") {
           return {
             mode: "network",
-            agents: [{ id: "shop-product-writer", name: "Shop Product Writer", source: "hub", estCredits: 3 }],
+            agents: [{ id: "no-ai-slop-copywriter", name: "No-AI-Slop Copywriter", source: "hub", estCredits: 3 }],
             totalEstCredits: 3,
             estimate: true,
             rawAction: "network",
@@ -1389,8 +1417,9 @@ function setupMockAgentlasBridge(options) {
       get: async (id) => (id === project.id ? project : null),
     },
     workspace: {
-      get: async () => null,
+      get: async (chatId) => workspaceFolders[chatId] ?? null,
       set: async (chatId, folder) => {
+        workspaceFolders[chatId] = folder;
         record("workspace.set", { chatId, folder });
         return { chatId, folder };
       },
@@ -1466,11 +1495,29 @@ function setupMockAgentlasBridge(options) {
         path: absPath,
         exists: true,
         entries: [
-          { kind: "file", name: "AGENTS.md", path: `${absPath}/AGENTS.md` },
-          { kind: "file", name: "README.md", path: `${absPath}/README.md` },
-          { kind: "dir", name: ".agentlas", path: `${absPath}/.agentlas` },
+          { kind: "file", name: "AGENTS.md", path: `${absPath}/AGENTS.md`, size: 40, isTextLike: true },
+          { kind: "file", name: "README.md", path: `${absPath}/README.md`, size: 64, isTextLike: true },
+          { kind: "file", name: "preview.html", path: `${absPath}/preview.html`, size: 112, isTextLike: true },
+          { kind: "file", name: "preview.png", path: `${absPath}/preview.png`, size: 128, isTextLike: false },
+          { kind: "dir", name: ".agentlas", path: `${absPath}/.agentlas`, size: 0 },
         ],
       }),
+      readTextFile: async (absPath) => {
+        if (absPath.endsWith(".html")) {
+          return {
+            path: absPath,
+            content: "<!doctype html><html><body><main><h1>Browser smoke frame</h1><p>Rendered inside the panel tab.</p></main></body></html>",
+            truncated: false,
+            size: 119,
+          };
+        }
+        return {
+          path: absPath,
+          content: "# Panel viewer smoke file\n\nWorkspace file content rendered in the panel tab.",
+          truncated: false,
+          size: 73,
+        };
+      },
     },
     secrets: {
       saveApiKey: async () => {},

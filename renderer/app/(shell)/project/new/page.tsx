@@ -17,6 +17,7 @@ export default function NewProjectPage() {
   const [folderPath, setFolderPath] = useState<string>("");
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     const api = ipc();
@@ -28,6 +29,7 @@ export default function NewProjectPage() {
     const api = ipc();
     if (!api || !name.trim() || busy) return;
     setBusy(true);
+    setError("");
     try {
       const project = await api.projects.create({
         name: name.trim(),
@@ -36,6 +38,8 @@ export default function NewProjectPage() {
         folderPath: folderPath || null,
       });
       navigate(`/project/detail?id=${project.id}`, "replace");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -121,8 +125,13 @@ export default function NewProjectPage() {
               onClick={async () => {
                 const api = ipc();
                 if (!api) return;
-                const picked = await api.workspace.selectFolder();
-                if (picked) setFolderPath(picked);
+                try {
+                  setError("");
+                  const picked = await api.workspace.selectFolder();
+                  if (picked) setFolderPath(picked);
+                } catch (err: unknown) {
+                  setError(err instanceof Error ? err.message : String(err));
+                }
               }}
               style={pickBtnStyle}
             >
@@ -135,6 +144,12 @@ export default function NewProjectPage() {
             )}
           </div>
         </Field>
+
+        {error && (
+          <div role="alert" style={errorStyle}>
+            {error}
+          </div>
+        )}
 
         <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
           <button
@@ -224,4 +239,15 @@ const pickBtnStyle: React.CSSProperties = {
   color: "var(--ink-soft)",
   whiteSpace: "nowrap",
   flexShrink: 0,
+};
+
+const errorStyle: React.CSSProperties = {
+  marginTop: 8,
+  border: "1px solid color-mix(in srgb, var(--red-deep, #b4533a) 28%, var(--paper-edge))",
+  borderRadius: "var(--radius-md)",
+  background: "color-mix(in srgb, var(--red-deep, #b4533a) 8%, var(--paper))",
+  color: "var(--red-deep, #b4533a)",
+  padding: "9px 11px",
+  fontSize: 12,
+  lineHeight: 1.45,
 };

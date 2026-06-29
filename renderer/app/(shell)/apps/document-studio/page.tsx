@@ -29,6 +29,7 @@ export default function DocumentStudioPage() {
   const [documentText, setDocumentText] = useState(initialDoc.body);
   const [figureCaption, setFigureCaption] = useState(initialDoc.figureCaption);
   const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [citationStyle, setCitationStyle] = useState("APA");
   const [citationOpen, setCitationOpen] = useState(false);
   const [citationSearch, setCitationSearch] = useState("");
@@ -42,6 +43,30 @@ export default function DocumentStudioPage() {
     setDocumentText(next.body);
     setFigureCaption(next.figureCaption);
     setGeneratedAt(new Date().toLocaleTimeString(locale === "en" ? "en-US" : "ko-KR", { hour: "2-digit", minute: "2-digit" }));
+    setExportStatus(null);
+  }
+
+  function exportDocument() {
+    const body = [
+      `# ${title.trim() || goal.trim() || "Agentlas Document"}`,
+      "",
+      documentText.trim(),
+      "",
+      figureCaption.trim() ? `## ${locale === "en" ? "Figure note" : "도표 메모"}` : "",
+      figureCaption.trim(),
+      "",
+      `Citation style: ${citationStyle}`,
+    ].filter((part) => part !== "").join("\n");
+    const blob = new Blob([body], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${fileSlug(title || goal)}.md`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setExportStatus(locale === "en" ? "Markdown exported" : "Markdown 내보냄");
   }
 
   const wordCount = documentText.trim().split(/\s+/).filter(Boolean).length;
@@ -50,7 +75,34 @@ export default function DocumentStudioPage() {
 
   return (
     <div style={shell}>
-      <header className="titlebar-drag" style={topToolbar}>
+      <style>{`
+        @media (max-width: 900px) {
+          .document-studio-toolbar {
+            padding-left: 16px !important;
+            flex-wrap: wrap;
+            min-height: auto !important;
+          }
+          .document-studio-ai-toolbar {
+            flex-wrap: wrap;
+            min-height: auto !important;
+          }
+          .document-studio-goal {
+            min-width: min(100%, 220px) !important;
+            flex-basis: 100%;
+          }
+          .document-studio-workspace {
+            grid-template-columns: 1fr !important;
+            overflow: auto !important;
+          }
+          .document-studio-workspace > aside {
+            min-height: 160px;
+            max-height: 260px;
+            border-right: none !important;
+            border-bottom: 1px solid #e5e7eb;
+          }
+        }
+      `}</style>
+      <header className="titlebar-drag document-studio-toolbar" style={topToolbar}>
         <Link href="/apps" className="titlebar-nodrag" style={backLink}>
           <IconApps size={15} />
           Apps
@@ -90,15 +142,16 @@ export default function DocumentStudioPage() {
             </div>
           )}
         </div>
-        <button onClick={generate} className="titlebar-nodrag" style={exportButton}>
+        <button onClick={exportDocument} className="titlebar-nodrag" style={exportButton}>
           <IconFileUp size={14} />
           {locale === "en" ? "Export" : "내보내기"}
         </button>
+        {exportStatus && <span role="status" style={exportStatusStyle}>{exportStatus}</span>}
       </header>
 
-      <div style={aiToolbar}>
+      <div className="document-studio-ai-toolbar" style={aiToolbar}>
         <span style={aiBadge}>AI</span>
-        <div style={goalBox}>
+        <div className="document-studio-goal" style={goalBox}>
           <IconSparkles size={14} style={{ color: "var(--accent)" }} />
           <input value={goal} onChange={(event) => setGoal(event.target.value)} style={goalInput} aria-label={locale === "en" ? "Document goal" : "문서 목표"} />
         </div>
@@ -107,9 +160,14 @@ export default function DocumentStudioPage() {
             {labelForMode(id, locale)}
           </button>
         ))}
+        <button type="button" onClick={generate} style={generateButton}>
+          <IconSparkles size={13} />
+          {locale === "en" ? "Generate" : "생성"}
+        </button>
       </div>
 
       <main
+        className="document-studio-workspace"
         style={{
           ...workspace,
           gridTemplateColumns: `${leftOpen ? "260px" : "40px"} minmax(360px, 1fr) ${rightOpen ? "290px" : "40px"}`,
@@ -184,7 +242,13 @@ export default function DocumentStudioPage() {
                 <IconChevronRight size={14} />
               </button>
             </div>
-            <textarea value={figureCaption} onChange={(event) => setFigureCaption(event.target.value)} rows={6} style={figureInput} />
+            <textarea
+              value={figureCaption}
+              onChange={(event) => setFigureCaption(event.target.value)}
+              rows={6}
+              style={figureInput}
+              aria-label={locale === "en" ? "Figure note" : "도표 메모"}
+            />
           </aside>
         ) : (
           <CollapsedRail
@@ -197,6 +261,15 @@ export default function DocumentStudioPage() {
       </main>
     </div>
   );
+}
+
+function fileSlug(value: string) {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  return slug || "agentlas-document";
 }
 
 function labelForMode(mode: Mode, locale: "ko" | "en") {
@@ -387,6 +460,13 @@ const exportButton: CSSProperties = {
   fontWeight: 900,
 };
 
+const exportStatusStyle: CSSProperties = {
+  color: "var(--green-deep)",
+  fontSize: 11.5,
+  fontWeight: 800,
+  whiteSpace: "nowrap",
+};
+
 const aiToolbar: CSSProperties = {
   minHeight: 42,
   borderBottom: "1px solid #e5e7eb",
@@ -447,6 +527,21 @@ const modeChip: CSSProperties = {
   borderRadius: 999,
   padding: "6px 9px",
   fontSize: 11.5,
+  fontWeight: 900,
+};
+
+const generateButton: CSSProperties = {
+  minHeight: 30,
+  border: "1px solid var(--accent-soft)",
+  borderRadius: 7,
+  background: "var(--fill-1)",
+  color: "var(--accent)",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 6,
+  padding: "0 10px",
+  fontSize: 12,
   fontWeight: 900,
 };
 

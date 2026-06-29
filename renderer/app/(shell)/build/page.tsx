@@ -128,6 +128,7 @@ export default function BuildPage() {
   const [status, setStatus] = useState<HephaestusStatus | null>(null);
   const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const [folderMsg, setFolderMsg] = useState<string | null>(null);
   const [reply, setReply] = useState("");
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
   const logEndRef = useRef<HTMLDivElement | null>(null);
@@ -187,8 +188,23 @@ export default function BuildPage() {
   }, [reached, phase, errored]);
 
   const pickWorkspace = async () => {
-    const dir = await ipc()?.fs.pickDirectory();
-    if (dir) setBuildWorkspace(dir);
+    const api = ipc();
+    if (!api) {
+      setFolderMsg(ko ? "폴더 선택을 사용할 수 없습니다." : "Folder picker is not available.");
+      return;
+    }
+    setFolderMsg(ko ? "폴더 선택 창을 여는 중..." : "Opening folder picker...");
+    try {
+      const dir = await api.fs.pickDirectory();
+      if (dir) {
+        setBuildWorkspace(dir);
+        setFolderMsg(ko ? "생성 폴더가 선택되었습니다." : "Output folder selected.");
+      } else {
+        setFolderMsg(ko ? "폴더 선택이 취소되었습니다." : "Folder selection cancelled.");
+      }
+    } catch (err) {
+      setFolderMsg((ko ? "폴더 선택 실패: " : "Folder picker failed: ") + friendlyHephaestusMessage(String(err), ko));
+    }
   };
 
   const onSelectRuntime = (key: string) => {
@@ -230,6 +246,13 @@ export default function BuildPage() {
   const running = phase === "running";
   // 대화형 빌드가 진행 중(엔진 실행 중이거나 인터뷰 답변 대기 중)이면 컴포저 입력을 잠근다.
   const busy = phase === "running" || phase === "interview";
+  const startBlocker = !request.trim()
+    ? (ko ? "요청을 먼저 입력하세요." : "Enter a request first.")
+    : !workspace
+      ? (ko ? "생성 폴더를 선택하세요." : "Choose an output folder.")
+      : engineMissing
+        ? (ko ? "Hephaestus 엔진을 사용할 수 없습니다." : "Hephaestus engine is unavailable.")
+        : null;
   // 파이프라인은 항상 표시 — idle 에선 딤된 프리뷰로 무엇을 할지 보여준다.
   const showPipeline = true;
 
@@ -370,13 +393,18 @@ export default function BuildPage() {
                 ) : (
                   <button
                     onClick={() => void startBuild()}
-                    disabled={!request.trim() || !workspace || engineMissing}
+                    disabled={Boolean(startBlocker)}
                     className="build-primary-button titlebar-nodrag"
                   >
                     <IconWand size={15} /> {ko ? "딥인터뷰로 빌드 시작" : "Start build (deep interview)"}
                   </button>
                 )}
               </div>
+              {(folderMsg || startBlocker) && !running && phase !== "interview" && (
+                <div role="status" className="build-inline-hint">
+                  {folderMsg || startBlocker}
+                </div>
+              )}
               <p className="build-autoadd-hint">
                 {ko
                   ? "BYOK/BYOC 기준: 단일 빌드 5크레딧, 멀티 빌드 10크레딧. 모델 사용료는 내 구독/키에서 직접 처리됩니다."

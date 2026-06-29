@@ -292,7 +292,7 @@ export default function LibrarySurfacesPage() {
             <IconSparkles size={24} style={{ color: "var(--muted-deep)" }} />
             <strong style={{ color: "var(--ink)", fontSize: 14 }}>{t("library.surfaces.empty")}</strong>
             <span style={{ fontSize: 12, color: "var(--muted-deep)" }}>{t("library.surfaces.empty_hint")}</span>
-            <Link href="/" style={{ color: "var(--accent)", fontWeight: 700, textDecoration: "none", marginTop: 4 }}>
+            <Link href="/chat" style={{ color: "var(--accent)", fontWeight: 700, textDecoration: "none", marginTop: 4 }}>
               {t("sidebar.new_chat")} <IconChevronRight size={11} />
             </Link>
           </div>

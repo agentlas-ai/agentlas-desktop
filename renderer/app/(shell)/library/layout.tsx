@@ -1,16 +1,18 @@
 // 공용 레이아웃 — 상단 드래그 영역과 동적 타이틀을 제공합니다.
 "use client";
 import { usePathname } from "next/navigation";
-import { useT } from "@/lib/i18n";
 
 export default function LibraryLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() ?? "";
-  const { t } = useT();
 
-  let title = "";
+  let title = "Library";
   if (pathname.startsWith("/library/agents")) title = "My Agents";
   else if (pathname.startsWith("/library/env")) title = "Environment Variables";
   else if (pathname.startsWith("/library/mcps")) title = "Plugins & MCPs";
+  else if (pathname.startsWith("/library/apps")) title = "Generated Apps";
+  else if (pathname.startsWith("/library/assets")) title = "Asset Packs";
+  else if (pathname.startsWith("/library/surfaces")) title = "Generated Surfaces";
+  else if (pathname.startsWith("/library/tools")) title = "Generated Tools";
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "transparent", overflow: "hidden" }}>

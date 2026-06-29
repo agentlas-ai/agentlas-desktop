@@ -124,16 +124,16 @@ const GOAL_KEY = "agentlas.onboarding.goal";
 const STREAK_KEY = "agentlas.streak";
 const MILESTONE_KEY = "agentlas.milestones";
 
-// 목표 → 추천 에이전트 슬러그(SEED_LISTINGS 기준). 둘러보기(explore)는 빈 목록 → 대표 추천으로 폴백.
+// 목표 → 추천 Hub 에이전트 slug. 둘러보기(explore)는 빈 목록 → 대표 추천으로 폴백.
 interface Goal {
   id: string;
   icon: React.ReactNode;
   slugs: string[];
 }
 const GOALS: Goal[] = [
-  { id: "write", icon: <IconChat size={20} />, slugs: ["marketer-content-writer", "shop-product-writer"] },
-  { id: "research", icon: <IconBrain size={20} />, slugs: ["marketer-seo-researcher", "marketer-analytics-reader"] },
-  { id: "shop", icon: <IconApps size={20} />, slugs: ["shop-product-writer", "shop-cs-responder"] },
+  { id: "write", icon: <IconChat size={20} />, slugs: ["no-ai-slop-copywriter", "marketing-content-studio"] },
+  { id: "research", icon: <IconBrain size={20} />, slugs: ["research-intelligence-desk", "market-intelligence-hq"] },
+  { id: "shop", icon: <IconApps size={20} />, slugs: ["ecommerce-ops-hq", "market-intelligence-hq"] },
   { id: "explore", icon: <IconSparkles size={20} />, slugs: [] },
 ];
 

@@ -139,7 +139,7 @@ export default function LibraryToolsPage() {
             <IconWand size={24} style={{ color: "var(--muted-deep)" }} />
             <strong style={{ color: "var(--ink)", fontSize: 14 }}>{t("library.tools.empty")}</strong>
             <span style={{ fontSize: 12, color: "var(--muted-deep)" }}>{t("library.tools.empty_hint")}</span>
-            <Link href="/" style={{ color: "var(--accent)", fontWeight: 700, textDecoration: "none", marginTop: 4 }}>
+            <Link href="/chat" style={{ color: "var(--accent)", fontWeight: 700, textDecoration: "none", marginTop: 4 }}>
               {t("sidebar.new_chat")} <IconChevronRight size={11} />
             </Link>
           </div>

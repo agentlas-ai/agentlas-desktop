@@ -1,13 +1,11 @@
 // 마켓 데이터 소스 추상화. registry.ts·firms.ts·UI는 인터페이스에만 의존.
 // 구현체:
-//   - InMemorySource : 시드 데이터를 메인 프로세스에 박아둠 (V0 dev/오프라인 fallback)
 //   - McpSource      : agentlas.cloud/api/mcp/v1 HTTPS 호출 (production 기본)
 //
-// 환경변수 분기:
-//   AGENTLAS_MARKET_SOURCE = "mcp" | "memory"  (기본: "mcp")
+// 환경변수:
 //   AGENTLAS_MCP_BASE_URL  = "https://agentlas.cloud/api/mcp/v1" (기본)
 //
-// MCP 호출 실패 시 마지막 성공 응답 캐시 → InMemory fallback 순으로 내려간다.
+// Desktop Hub 경로는 원격 호출 실패 시 하드코딩 시드로 대체하지 않는다.
 import type {
   AgentEnvRequirement,
   AgentVisibility,

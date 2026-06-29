@@ -472,10 +472,10 @@ export function registerIpcHandlers(): void {
     const win = BrowserWindow.fromWebContents(e.sender);
     return pickDirectory(win);
   });
-  ipcMain.handle("fs:listDirectory", (_e, absPath: string, showHidden?: boolean) =>
-    listDirectory(absPath, showHidden ?? false),
+  ipcMain.handle("fs:listDirectory", (_e, absPath: string, showHidden?: boolean, rootPath?: string) =>
+    listDirectory(absPath, showHidden ?? false, rootPath),
   );
-  ipcMain.handle("fs:readTextFile", (_e, absPath: string) => readTextFilePreview(absPath));
+  ipcMain.handle("fs:readTextFile", (_e, absPath: string, rootPath?: string) => readTextFilePreview(absPath, rootPath));
   // 산출물 내보내기 — 네이티브 저장 다이얼로그로 사용자가 고른 위치에 텍스트를 쓴다(lock-in 없음).
   ipcMain.handle(
     "fs:saveTextFile",

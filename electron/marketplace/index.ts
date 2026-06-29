@@ -1,8 +1,7 @@
-// 마켓 소스 진입점. 환경변수 분기 + fallback wrapper.
+// 마켓 소스 진입점. Hub-only wrapper.
 //
 // 모든 caller는 `getSource()`를 호출하고 인터페이스만 알면 됨.
-// MCP 호출 실패 → 마지막 성공 캐시 → InMemory로 자동 fallback (오프라인 보호).
-import { InMemorySource } from "./in-memory-source";
+// MCP 호출 실패 시 하드코딩 카탈로그로 대체하지 않는다. Desktop Hub는 실제 Hub 결과만 표시한다.
 import { McpSource } from "./mcp-source";
 import type { MarketplaceSource, SeedListingFull } from "./source";
 import { getSessionCookieHeader } from "../auth";
@@ -17,12 +16,12 @@ import type {
 const DEFAULT_BASE_URL = "https://agentlas.cloud/api/mcp/v1";
 
 let _status: MarketplaceSourceStatus = {
-  mode: "memory",
-  baseUrl: null,
+  mode: "mcp",
+  baseUrl: DEFAULT_BASE_URL,
   // 아직 실제 Hub 호출이 한 번도 성공하지 않았으므로 "미연결"로 시작한다.
   // 초기값을 online:true로 두면 검증 전/오프라인에도 "허브 실시간 연결됨"으로 거짓 표시된다.
   online: false,
-  usingFallback: true,
+  usingFallback: false,
   lastError: null,
   lastCheckedAt: null,
 };
@@ -51,28 +50,19 @@ function publicBundles(bundles: TeamBundle[]): TeamBundle[] {
     .filter((bundle) => bundle.agents.length > 0);
 }
 
-class FallbackSource implements MarketplaceSource {
-  private firmListCache: FirmListing[] | null = null;
-  private bundleListCache: TeamBundle[] | null = null;
-  private searchCache = new Map<string, MarketplaceListing[]>();
-  private agentManifestCache = new Map<string, (SeedListingFull & MarketplaceListing) | null>();
-  private firmManifestCache = new Map<string, FirmListing | null>();
-
+class HubOnlySource implements MarketplaceSource {
   constructor(
     private primary: MarketplaceSource,
-    private fallback: MarketplaceSource,
     private baseUrl: string,
   ) {}
 
   private async tryPrimary<T>(
     fn: (s: MarketplaceSource) => Promise<T>,
     method: string,
-    cacheRead?: () => T | undefined,
-    cacheWrite?: (value: T) => void,
+    offlineValue: T,
   ): Promise<T> {
     try {
       const result = await fn(this.primary);
-      cacheWrite?.(result);
       setStatus({
         mode: "mcp",
         baseUrl: this.baseUrl,
@@ -87,16 +77,14 @@ class FallbackSource implements MarketplaceSource {
         mode: "mcp",
         baseUrl: this.baseUrl,
         online: false,
-        usingFallback: true,
+        usingFallback: false,
         lastError: message,
       });
       console.warn(
-        `[marketplace] mcp(${this.baseUrl}) ${method} failed, falling back to in-memory:`,
+        `[marketplace] mcp(${this.baseUrl}) ${method} failed; Hub-only mode returns an empty result:`,
         message,
       );
-      const cached = cacheRead?.();
-      if (cached !== undefined) return cached;
-      return fn(this.fallback);
+      return offlineValue;
     }
   }
 
@@ -104,31 +92,21 @@ class FallbackSource implements MarketplaceSource {
     return this.tryPrimary(
       (s) => s.listFirms(),
       "listFirms",
-      () => this.firmListCache ?? undefined,
-      (firms) => {
-        this.firmListCache = firms;
-      },
+      [],
     );
   }
   listBundles(): Promise<TeamBundle[]> {
     return this.tryPrimary(
       (s) => s.listBundles(),
       "listBundles",
-      () => this.bundleListCache ?? undefined,
-      (bundles) => {
-        this.bundleListCache = publicBundles(bundles);
-      },
+      [],
     ).then(publicBundles);
   }
   searchAgents(q: string): Promise<MarketplaceListing[]> {
-    const key = q.trim().toLowerCase();
     return this.tryPrimary(
       (s) => s.searchAgents(q),
       "searchAgents",
-      () => this.searchCache.get(key),
-      (listings) => {
-        this.searchCache.set(key, publicListings(listings));
-      },
+      [],
     ).then(publicListings);
   }
   getListingBySlug(slug: string): Promise<(SeedListingFull & MarketplaceListing) | null> {
@@ -136,20 +114,14 @@ class FallbackSource implements MarketplaceSource {
     return this.tryPrimary(
       (s) => s.getListingBySlug(slug),
       "getListingBySlug",
-      () => (this.agentManifestCache.has(slug) ? this.agentManifestCache.get(slug)! : undefined),
-      (listing) => {
-        this.agentManifestCache.set(slug, listing && isPublicDesktopAgent(listing) ? listing : null);
-      },
+      null,
     ).then((listing) => (listing && isPublicDesktopAgent(listing) ? listing : null));
   }
   getFirmBySlug(slug: string): Promise<FirmListing | null> {
     return this.tryPrimary(
       (s) => s.getFirmBySlug(slug),
       "getFirmBySlug",
-      () => (this.firmManifestCache.has(slug) ? this.firmManifestCache.get(slug)! : undefined),
-      (firm) => {
-        this.firmManifestCache.set(slug, firm);
-      },
+      null,
     );
   }
 }
@@ -158,7 +130,7 @@ let _source: MarketplaceSource | null = null;
 // cargo.*(내 에이전트)는 인증 필수 + in-memory 폴백 금지 → raw McpSource를 따로 들고 있는다.
 let _cargoSource: McpSource | null = null;
 
-/** 내 에이전트(cargo) 호출용 raw 소스. memory 모드면 null. */
+/** 내 에이전트(cargo) 호출용 raw 소스. */
 export function getCargoSource(): McpSource | null {
   getSource();
   return _cargoSource;
@@ -166,36 +138,27 @@ export function getCargoSource(): McpSource | null {
 
 export function getSource(): MarketplaceSource {
   if (_source) return _source;
-  const mode = (process.env.AGENTLAS_MARKET_SOURCE ?? "mcp").toLowerCase();
-  const memory = new InMemorySource();
-  if (mode === "mcp") {
-    const baseUrl = process.env.AGENTLAS_MCP_BASE_URL ?? DEFAULT_BASE_URL;
-    // cookieProvider는 함수로 — 로그인 상태가 런타임 중 바뀌므로 매 호출마다 평가.
-    const mcp = new McpSource({
-      baseUrl,
-      timeoutMs: 15000,
-      cookieProvider: () => getSessionCookieHeader(),
-    });
-    _cargoSource = mcp;
-    setStatus({
-      mode: "mcp",
-      baseUrl,
-      online: false,
-      usingFallback: false,
-      lastError: null,
-    });
-    _source = new FallbackSource(mcp, memory, baseUrl);
-  } else {
-    setStatus({
-      // 명시적 in-memory 모드 = 실제 Hub 연결이 아니라 앱 내장 카탈로그.
-      mode: "memory",
-      baseUrl: null,
-      online: false,
-      usingFallback: true,
-      lastError: null,
-    });
-    _source = memory;
+  const requestedMode = (process.env.AGENTLAS_MARKET_SOURCE ?? "mcp").toLowerCase();
+  if (requestedMode !== "mcp") {
+    console.warn(`[marketplace] AGENTLAS_MARKET_SOURCE=${requestedMode} ignored; Desktop Hub is Hub-only.`);
   }
+  const baseUrl = process.env.AGENTLAS_MCP_BASE_URL ?? DEFAULT_BASE_URL;
+  // cookieProvider는 함수로 — 로그인 상태가 런타임 중 바뀌므로 매 호출마다 평가.
+  const mcp = new McpSource({
+    baseUrl,
+    publicAgentsUrl: process.env.AGENTLAS_MARKETPLACE_AGENTS_URL,
+    timeoutMs: 15000,
+    cookieProvider: () => getSessionCookieHeader(),
+  });
+  _cargoSource = mcp;
+  setStatus({
+    mode: "mcp",
+    baseUrl,
+    online: false,
+    usingFallback: false,
+    lastError: null,
+  });
+  _source = new HubOnlySource(mcp, baseUrl);
   return _source;
 }
 

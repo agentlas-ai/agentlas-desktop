@@ -3,8 +3,8 @@
 // 안전 정책:
 //   - 트리는 lazy expand. 한 번에 모든 자식만 (sub-tree 재귀는 클라이언트가 별 요청).
 //   - 숨김 파일(.git, .DS_Store)은 기본 제외, 옵션으로 노출 가능.
-//   - 파일 미리보기는 텍스트만, 사이즈 cap (256KB). 바이너리는 mime 추정으로 거부.
-//   - 모든 path는 절대경로로 받고 path.resolve 후 fs.stat 확인 — 심볼릭 링크 escape 방지를 위해 reuse.
+//   - 파일 미리보기는 텍스트만, 사이즈 cap (256KB). 큰 텍스트는 앞부분만 보여준다.
+//   - 모든 path는 절대경로로 받고, rootPath가 있으면 realpath 기준으로 root 내부만 허용한다.
 //   - 쓰기/삭제는 노출하지 않는다 (이번 단계 read-only).
 import { dialog, BrowserWindow } from "electron";
 import fs from "node:fs/promises";
@@ -16,7 +16,7 @@ const TEXT_EXT = new Set([
   ".txt", ".md", ".mdx", ".json", ".yml", ".yaml", ".toml", ".csv", ".tsv",
   ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".rb", ".go", ".rs",
   ".java", ".kt", ".swift", ".sh", ".bash", ".zsh", ".html", ".htm", ".css",
-  ".scss", ".sass", ".less", ".xml", ".svg", ".vue", ".astro", ".sql", ".env",
+  ".scss", ".sass", ".less", ".xml", ".svg", ".url", ".webloc", ".vue", ".astro", ".sql", ".env",
   ".gitignore", ".npmrc", ".editorconfig", ".prettierrc", ".eslintrc",
   ".dockerfile", ".gradle", ".properties", ".ini", ".conf", ".log",
 ]);
@@ -59,8 +59,7 @@ function isHiddenName(name: string): boolean {
   return !HIDDEN_ALLOW.has(name);
 }
 
-function isTextLike(name: string, size: number): boolean {
-  if (size > TEXT_PREVIEW_MAX) return false;
+function hasTextLikeName(name: string): boolean {
   const lower = name.toLowerCase();
   if (TEXT_EXT.has(path.extname(lower))) return true;
   // 확장자 없는 흔한 파일들 (README, LICENSE, Makefile)
@@ -69,6 +68,32 @@ function isTextLike(name: string, size: number): boolean {
     return true;
   }
   return false;
+}
+
+function isTextLike(name: string): boolean {
+  return hasTextLikeName(name);
+}
+
+async function realpathSafe(absPath: string): Promise<string | null> {
+  try {
+    return await fs.realpath(absPath);
+  } catch {
+    return null;
+  }
+}
+
+function isInsidePath(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+async function resolveScopedPath(absPath: string, rootPath?: string): Promise<string | null> {
+  const resolved = path.resolve(absPath);
+  if (!rootPath) return resolved;
+  const rootReal = await realpathSafe(path.resolve(rootPath));
+  const targetReal = await realpathSafe(resolved);
+  if (!rootReal || !targetReal || !isInsidePath(targetReal, rootReal)) return null;
+  return targetReal;
 }
 
 /** OS native picker — 사용자가 폴더를 직접 고른다. parent는 modal 부착용. */
@@ -81,8 +106,9 @@ export async function pickDirectory(parent: BrowserWindow | null): Promise<strin
   return res.filePaths[0];
 }
 
-export async function listDirectory(absPath: string, showHidden = false): Promise<DirListing> {
-  const resolved = path.resolve(absPath);
+export async function listDirectory(absPath: string, showHidden = false, rootPath?: string): Promise<DirListing> {
+  const resolved = await resolveScopedPath(absPath, rootPath);
+  if (!resolved) return { path: path.resolve(absPath), exists: false, entries: [] };
   if (!existsSync(resolved)) {
     return { path: resolved, exists: false, entries: [] };
   }
@@ -108,10 +134,11 @@ export async function listDirectory(absPath: string, showHidden = false): Promis
     const full = path.join(resolved, name);
     let stat: Stats;
     try {
-      stat = await fs.stat(full);
+      stat = await fs.lstat(full);
     } catch {
       continue;
     }
+    if (stat.isSymbolicLink()) continue;
     if (stat.isDirectory()) {
       entries.push({
         name,
@@ -126,7 +153,7 @@ export async function listDirectory(absPath: string, showHidden = false): Promis
         path: full,
         kind: "file",
         size: stat.size,
-        isTextLike: isTextLike(name, stat.size),
+        isTextLike: isTextLike(name),
       });
     }
     // 심볼릭 링크 등은 무시 (escape 방지)
@@ -139,31 +166,39 @@ export async function listDirectory(absPath: string, showHidden = false): Promis
   return { path: resolved, exists: true, entries };
 }
 
-export async function readTextFilePreview(absPath: string): Promise<TextFilePreview> {
-  const resolved = path.resolve(absPath);
+export async function readTextFilePreview(absPath: string, rootPath?: string): Promise<TextFilePreview> {
+  const resolved = await resolveScopedPath(absPath, rootPath);
+  if (!resolved) {
+    return { path: path.resolve(absPath), content: "", truncated: false, size: 0, reason: "binary" };
+  }
   let stat: Stats;
   try {
-    stat = await fs.stat(resolved);
+    stat = await fs.lstat(resolved);
   } catch {
     return { path: resolved, content: "", truncated: false, size: 0, reason: "binary" };
   }
-  if (!stat.isFile()) {
+  if (stat.isSymbolicLink() || !stat.isFile()) {
     return { path: resolved, content: "", truncated: false, size: 0, reason: "binary" };
   }
-  if (!isTextLike(path.basename(resolved), stat.size)) {
-    if (stat.size > TEXT_PREVIEW_MAX) {
-      return { path: resolved, content: "", truncated: false, size: stat.size, reason: "too-large" };
-    }
+  if (!isTextLike(path.basename(resolved))) {
     return { path: resolved, content: "", truncated: false, size: stat.size, reason: "not-text-ext" };
   }
-  const buf = await fs.readFile(resolved);
+  const handle = await fs.open(resolved, "r");
+  let buf: Buffer;
+  try {
+    const readSize = Math.min(stat.size, TEXT_PREVIEW_MAX);
+    buf = Buffer.alloc(readSize);
+    await handle.read(buf, 0, readSize, 0);
+  } finally {
+    await handle.close();
+  }
   const truncated = buf.byteLength > TEXT_PREVIEW_MAX;
-  const slice = truncated ? buf.subarray(0, TEXT_PREVIEW_MAX) : buf;
+  const slice = buf.byteLength > TEXT_PREVIEW_MAX ? buf.subarray(0, TEXT_PREVIEW_MAX) : buf;
   // UTF-8로 디코드 — 바이너리면 깨진 문자가 들어가지만 clients가 reason으로 판단 안 하므로 우리가 한 번 더 검사.
   const text = slice.toString("utf8");
   // NULL byte가 보이면 바이너리로 간주 (가벼운 heuristic)
   if (text.indexOf("\u0000") >= 0) {
     return { path: resolved, content: "", truncated: false, size: stat.size, reason: "binary" };
   }
-  return { path: resolved, content: text, truncated, size: stat.size };
+  return { path: resolved, content: text, truncated: truncated || stat.size > TEXT_PREVIEW_MAX, size: stat.size };
 }

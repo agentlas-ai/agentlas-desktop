@@ -31,7 +31,7 @@ type PendingInstallReview = {
 };
 
 const TEAM_CALL_CREDITS = 10;
-const AGENT_CALL_CREDITS = 1;
+const AGENT_CALL_CREDITS = 3;
 
 const C = {
   purple: "color-mix(in oklch, #5A56DC 20%, var(--rd-surface))",
@@ -55,6 +55,24 @@ function isVisualAgent(listing: MarketplaceListing): boolean {
     listing.tagline,
     listing.taglineEn,
   ].join(" "));
+}
+
+function isLiveHubListing(listing: MarketplaceListing): boolean {
+  return listing.source === "hub-index" || listing.source === "hub-profile" || listing.kind === "cloud-callable" || listing.callable === true;
+}
+
+function hubListingScore(listing: MarketplaceListing): number {
+  if (!isLiveHubListing(listing)) return 0;
+  return 1000 + (listing.verifiedInvocations ?? listing.installCount ?? 0) + (listing.entityKind === "team" ? 20 : 0);
+}
+
+function orderListingsForHub(listings: MarketplaceListing[], hubLive: boolean): MarketplaceListing[] {
+  if (!hubLive) return listings;
+  return [...listings].sort((a, b) => {
+    const score = hubListingScore(b) - hubListingScore(a);
+    if (score !== 0) return score;
+    return a.name.localeCompare(b.name);
+  });
 }
 
 export default function MarketplacePageWrapper() {
@@ -331,6 +349,8 @@ function MarketplacePage() {
   }
 
   const normalizedQuery = q.trim().toLowerCase();
+  const hubLive = sourceStatus ? sourceStatus.online && !sourceStatus.usingFallback : false;
+  const usingFallbackCatalog = false;
   const matchesQuery = (item: any) => {
     if (!normalizedQuery) return true;
     const loc = pickLocalized(item, locale);
@@ -353,10 +373,10 @@ function MarketplacePage() {
 
   const filteredTeams = [...firms, ...bundles].filter(matchesQuery);
   const filteredPlugins = pluginCatalog.filter(pluginMatchesQuery);
-  const matchingAgents = listings.filter((l) => {
+  const matchingAgents = orderListingsForHub(listings.filter(isLiveHubListing).filter((l) => {
     if (!normalizedQuery) return true;
     return (l.name || "").toLowerCase().includes(normalizedQuery) || (l.tagline || "").toLowerCase().includes(normalizedQuery);
-  });
+  }), hubLive);
   const filteredVisualAgents = matchingAgents.filter(isVisualAgent);
   const filteredAgents = matchingAgents.filter((agent) => !isVisualAgent(agent));
 
@@ -378,13 +398,11 @@ function MarketplacePage() {
   const pagedAgents = filteredAgents.slice(pageStart, pageEnd);
   const pagedVisualAgents = filteredVisualAgents.slice(pageStart, pageEnd);
   const installedPluginIds = new Set(installedPlugins.map((plugin) => plugin.catalogId).filter(Boolean));
-  const hubLive = sourceStatus ? sourceStatus.online && !sourceStatus.usingFallback : false;
-  const usingFallbackCatalog = sourceStatus ? !hubLive : false;
   const sourceLabel = !sourceStatus
     ? ko ? "Hub 확인 중" : "Checking Hub"
     : hubLive
       ? ko ? "Hub 실시간" : "Hub live"
-      : ko ? "Hub 오프라인" : "Hub offline";
+      : ko ? "Hub 연결 안 됨" : "Hub unavailable";
   const accountLabel = signedIn
     ? ko ? "계정 로그인됨" : "Account signed in"
     : ko ? "로그인 필요" : "Signed out";
@@ -486,7 +504,7 @@ function MarketplacePage() {
                 <span>
                   {hubLive
                     ? ko ? "허브 실시간 연결됨" : "Hub live source"
-                    : ko ? "오프라인 · 기본 추천 목록 표시 중 (실제 Hub 연결 아님)" : "Offline · showing built-in catalog, not live Hub"}
+                    : ko ? "Hub 연결 안 됨 · 표시할 Hub 항목 없음" : "Hub unavailable · no Hub items shown"}
                 </span>
                 {!hubLive && sourceStatus.lastError && (
                   <span style={{ color: "var(--rd-accent-2-text)", overflowWrap: "anywhere" }}>
@@ -505,8 +523,8 @@ function MarketplacePage() {
                 </strong>
                 <span style={{ marginLeft: 8 }}>
                   {ko
-                    ? "지금 보이는 팀/에이전트는 앱에 포함된 기본 목록입니다. 실시간 Hub 등록, 호출 가능 여부, 최신 공개 목록 검증으로 보지 마세요."
-                    : "The teams and agents shown now are the built-in catalog. Do not treat them as live Hub registration, callable status, or the latest public list."}
+                    ? "하드코딩 기본 목록은 표시하지 않습니다. 실제 Hub 연결이 복구되면 공개 Hub 에이전트만 다시 표시됩니다."
+                    : "The hardcoded built-in catalog is hidden. When the live Hub connection recovers, only public Hub agents will appear."}
                 </span>
                 {sourceStatus.baseUrl && (
                   <span style={{ display: "block", marginTop: 4, color: "var(--rd-ink-3)", overflowWrap: "anywhere" }}>
@@ -887,6 +905,10 @@ function AgentCard({ listing, locale, offlineCatalog, installed, installing, onI
   const loc = pickLocalized(listing, locale);
   const ko = locale === "ko";
   const needsReview = (listing.trustGrade ?? "unknown") !== "A" || Boolean(listing.cloudPackage);
+  const entityKind = listing.entityKind === "team" ? "team" : "agent";
+  const perCallCredits = typeof listing.perCallCredits === "number" && Number.isFinite(listing.perCallCredits)
+    ? listing.perCallCredits
+    : entityKind === "team" ? TEAM_CALL_CREDITS : AGENT_CALL_CREDITS;
   const author = offlineCatalog
     ? ko ? "앱 내장 기본 목록" : "Built-in catalog"
     : listing.ownerName ? (ko ? `${listing.ownerName} 제작` : `by ${listing.ownerName}`) : "Agentlas Hub";
@@ -894,11 +916,17 @@ function AgentCard({ listing, locale, offlineCatalog, installed, installing, onI
     <div className="card portal-entity-card hub-entity-card">
       <div className="hub-card-head">
         <div className="hub-card-main">
-          <div className="hub-card-kicker">{offlineCatalog ? (ko ? "기본 에이전트" : "BUILT-IN AGENT") : (ko ? "에이전트" : "AGENT")}</div>
+          <div className="hub-card-kicker">
+            {offlineCatalog
+              ? (ko ? "기본 에이전트" : "BUILT-IN AGENT")
+              : entityKind === "team"
+                ? (ko ? "허브 팀" : "HUB TEAM")
+                : (ko ? "허브 에이전트" : "HUB AGENT")}
+          </div>
           <div className="portal-card-title hub-card-title">{loc.name}</div>
           <div className="hub-card-author">{author}</div>
         </div>
-        <RdTag className="hub-credit-tag" bg={C.green}>{ko ? `크레딧 ${AGENT_CALL_CREDITS}` : `${AGENT_CALL_CREDITS} credits`}</RdTag>
+        <RdTag className="hub-credit-tag" bg={entityKind === "team" ? C.purple : C.green}>{ko ? `크레딧 ${perCallCredits}` : `${perCallCredits} credits`}</RdTag>
       </div>
       <div className="hub-card-copy">{loc.tagline}</div>
       <div className="portal-chip-row hub-card-meta">
@@ -907,7 +935,8 @@ function AgentCard({ listing, locale, offlineCatalog, installed, installing, onI
         {listing.cloudPackage && (
           <RdTag dashed>{ko ? `로컬 파일 ${listing.cloudPackage.fileCount}개` : `${listing.cloudPackage.fileCount} local files`}</RdTag>
         )}
-        <RdTag dashed>{ko ? "단일 에이전트" : "Single agent"}</RdTag>
+        <RdTag dashed>{entityKind === "team" ? (ko ? "팀" : "Team") : (ko ? "단일 에이전트" : "Single agent")}</RdTag>
+        {listing.totalBorrows ? <RdTag dashed>{ko ? `호출 ${listing.totalBorrows}회` : `${listing.totalBorrows} calls`}</RdTag> : null}
         <RdTag className="hub-command-chip" dashed>{`/hep-call ${listing.slug}`}</RdTag>
       </div>
       <div className="hub-card-actions">

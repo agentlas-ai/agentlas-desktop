@@ -7,7 +7,8 @@ import { randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
 // Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
 import { superviseStormbreaker, type StormbreakerHandle } from "../hephaestus/stormbreaker-supervisor";
-import { hepCall } from "../hephaestus/commands";
+import { hepCall, routeOnly } from "../hephaestus/commands";
+import { normalizeRecommendation } from "../hephaestus/recommendation";
 import {
   buildStormbreakerLongRunPrompt,
   buildStormbreakerContinuationPrompt,
@@ -550,6 +551,24 @@ export async function runMcpInvocation(
   const targetAppWorkingFolder = targetApp ? path.resolve(targetApp.rootPath) : null;
   const workingFolder = targetAppWorkingFolder ?? existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
 
+  // ── Hephaestus Router Agent 에스컬레이션 판단 ──
+  let routerAgent = req.routerAgent;
+  if (!routerAgent && (req.appsGenerateMode || isGlobalOrchestrator(agent))) {
+    try {
+      const routeRes = await routeOnly(effectiveUserPrompt, {
+        project: workingFolder ?? undefined,
+        allowLocal: true,
+        timeoutMs: 15_000,
+      });
+      const norm = normalizeRecommendation(routeRes.json, effectiveUserPrompt);
+      if (norm.routerAgent) {
+        routerAgent = norm.routerAgent;
+      }
+    } catch (err) {
+      console.error("[routing] Dynamic Hephaestus routing check failed:", err);
+    }
+  }
+
   const runtimes = await detectRuntimes();
   const runtimeChoice = selectRuntimeForTargets(runtimes, [
     { scope: "agent", targetId: agent.id },
@@ -696,9 +715,9 @@ export async function runMcpInvocation(
       isTargetAppEdit ? "app-edit" : req.appsGenerateMode ? "apps-generate" : "default",
     )}\n\n${systemPrompt}`;
   }
-  const routerAgentPreamble = req.routerAgent
+  const routerAgentPreamble = routerAgent
     ? buildRouterAgentSystemPreamble({
-        routerAgent: req.routerAgent,
+        routerAgent: routerAgent,
         userPrompt: req.userPrompt,
         effectiveUserPrompt,
         locale,

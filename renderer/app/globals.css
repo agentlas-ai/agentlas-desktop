@@ -2010,11 +2010,12 @@ button[data-toggle-state="on"] {
   display: grid;
   gap: 14px;
   align-content: start;
+  container-type: inline-size;
 }
 
 .build-mode-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
   gap: 10px;
 }
 
@@ -2023,7 +2024,7 @@ button[data-toggle-state="on"] {
   --build-mode-accent-2: var(--rd-accent-2);
   --build-mode-active-bg: var(--rd-accent-soft);
   min-width: 0;
-  min-height: 126px;
+  min-height: 132px;
   padding: 12px;
   border: 1px solid var(--rd-hair);
   border-radius: var(--rd-r-sm);
@@ -2031,7 +2032,7 @@ button[data-toggle-state="on"] {
   color: var(--rd-ink);
   text-align: left;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: 30px minmax(0, 1fr) 22px;
   grid-template-areas:
     "icon title check"
     "icon desc check"
@@ -2138,9 +2139,10 @@ button[data-toggle-state="on"] {
 
 .build-mode-card strong {
   grid-area: title;
+  min-width: 0;
   overflow: hidden;
   color: var(--rd-ink);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 740;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2150,9 +2152,17 @@ button[data-toggle-state="on"] {
 
 .build-mode-desc {
   grid-area: desc;
+  min-width: 0;
   color: var(--rd-ink-3);
   font-size: 11.5px;
   line-height: 1.35;
+  overflow: hidden;
+  overflow-wrap: normal;
+  word-break: keep-all;
+  hyphens: none;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
   position: relative;
   z-index: 1;
 }
@@ -2172,6 +2182,39 @@ button[data-toggle-state="on"] {
   white-space: nowrap;
   position: relative;
   z-index: 1;
+}
+
+@container (max-width: 560px) {
+  .build-mode-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .build-mode-card {
+    min-height: 92px;
+    grid-template-columns: 30px minmax(0, 1fr);
+    grid-template-areas:
+      "icon title"
+      "desc desc"
+      "price price";
+  }
+
+  .build-mode-card .build-mode-check {
+    display: none;
+  }
+
+  .build-mode-card strong {
+    white-space: normal;
+  }
+
+  .build-mode-card .build-mode-desc {
+    -webkit-line-clamp: 2;
+  }
+}
+
+@container (min-width: 561px) and (max-width: 720px) {
+  .build-mode-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .build-mode-card[data-active="true"] strong {
@@ -2326,10 +2369,34 @@ button[data-toggle-state="on"] {
   line-height: 1.5;
   color: var(--rd-ink-4);
 }
+.build-inline-hint {
+  margin-top: 7px;
+  padding: 7px 10px;
+  border: 1px solid var(--rd-hair);
+  border-radius: var(--rd-r-sm, 8px);
+  background: var(--rd-surface-2);
+  color: var(--rd-ink-2);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
 .build-action-msg {
   margin-top: 8px;
   font-size: 12px;
   color: var(--rd-ink-2);
+}
+
+@media (max-width: 1100px) {
+  .chat-right-panel {
+    position: fixed !important;
+    top: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: min(430px, calc(100vw - 16px)) !important;
+    max-width: none !important;
+    height: 100vh !important;
+    z-index: 180;
+    box-shadow: -24px 0 64px rgba(15, 23, 42, 0.16);
+  }
 }
 .build-log-time {
   color: var(--rd-ink-4);

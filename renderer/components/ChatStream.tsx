@@ -105,6 +105,7 @@ export function ChatStream({
   onOpenArtifact,
   onOpenWorkflow,
   onAnswerQuestion,
+  interactionBusy = false,
 }: {
   messages: StreamMessage[];
   agentName: string;
@@ -114,6 +115,8 @@ export function ChatStream({
   onOpenWorkflow?: () => void;
   /** 사용자가 질문에 답함 — 부모가 user 메시지로 전송 */
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
+  /** 다른 메시지가 실행 중이면 오래된 질문 카드도 전송하지 않는다. */
+  interactionBusy?: boolean;
 }) {
   const { t } = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -158,6 +161,7 @@ export function ChatStream({
           onOpenArtifact={onOpenArtifact}
           onOpenWorkflow={onOpenWorkflow}
           onAnswerQuestion={onAnswerQuestion}
+          interactionBusy={interactionBusy}
         />
       ))}
     </div>
@@ -171,6 +175,7 @@ function Bubble({
   onOpenArtifact,
   onOpenWorkflow,
   onAnswerQuestion,
+  interactionBusy,
 }: {
   message: StreamMessage;
   agentName: string;
@@ -178,6 +183,7 @@ function Bubble({
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenWorkflow?: () => void;
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
+  interactionBusy: boolean;
 }) {
   const { t } = useT();
   if (message.role === "user") {
@@ -294,7 +300,7 @@ function Bubble({
               <QuestionBlock
                 key={q.id}
                 question={q}
-                disabled={message.busy === true}
+                disabled={message.busy === true || interactionBusy}
                 onAnswer={(answers) => onAnswerQuestion?.(message.id, q.id, answers)}
               />
             ))}
@@ -380,7 +386,7 @@ function QuestionBlock({
   }
 
   function toggle(label: string) {
-    if (answered) return;
+    if (answered || disabled) return;
     if (question.multiSelect) {
       const next = new Set(picked);
       if (next.has(label)) next.delete(label);
@@ -393,7 +399,7 @@ function QuestionBlock({
   }
 
   function submit() {
-    if (answered || picked.size === 0) return;
+    if (answered || disabled || picked.size === 0) return;
     onAnswer([...picked]);
   }
 
@@ -537,6 +543,7 @@ function QuestionBlock({
               placeholder={t("ask.other_placeholder")}
               disabled={disabled}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing) return;
                 if (e.key === "Enter") {
                   e.preventDefault();
                   submitOther();

@@ -84,7 +84,7 @@ export function KeyStatusBanner({ mode = "banner" }: { mode?: "banner" | "pill" 
       <button
         type="button"
         className="titlebar-nodrag"
-        onClick={() => navigate("/library/env")}
+        onClick={() => navigate("/settings")}
         style={{
           marginLeft: "auto",
           flexShrink: 0,

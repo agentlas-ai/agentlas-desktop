@@ -1,28 +1,21 @@
-// In-memory 시드 — 데스크톱에 박힌 큐레이션. dev 오프라인 + MCP 실패 fallback.
-// 데이터는 기존 client.ts의 그대로 재사용.
-import {
-  getSeedFirmBySlug,
-  getSeedListingBySlug,
-  listSeedBundles,
-  listSeedFirms,
-  searchMarketplace,
-} from "./client";
+// Legacy in-memory source kept only to satisfy old imports. It intentionally
+// returns no catalog items: Desktop Hub must display live Hub data only.
 import type { MarketplaceSource } from "./source";
 
 export class InMemorySource implements MarketplaceSource {
   listFirms() {
-    return listSeedFirms();
+    return Promise.resolve([]);
   }
   listBundles() {
-    return listSeedBundles();
+    return Promise.resolve([]);
   }
-  searchAgents(q: string) {
-    return searchMarketplace(q);
+  searchAgents(_q: string) {
+    return Promise.resolve([]);
   }
-  getListingBySlug(slug: string) {
-    return getSeedListingBySlug(slug);
+  getListingBySlug(_slug: string) {
+    return Promise.resolve(null);
   }
-  getFirmBySlug(slug: string) {
-    return getSeedFirmBySlug(slug);
+  getFirmBySlug(_slug: string) {
+    return Promise.resolve(null);
   }
 }
