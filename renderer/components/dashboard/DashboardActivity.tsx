@@ -27,6 +27,7 @@ export function DashboardActivity() {
   const [recent, setRecent] = useState<Chat[]>([]);
   const [active, setActive] = useState<Set<string>>(new Set());
   const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadActive = useCallback(async () => {
@@ -46,16 +47,24 @@ export function DashboardActivity() {
       setLoaded(true);
       return;
     }
-    void api.chats.listRecent(8).then((c) => {
-      setRecent(c);
-      setLoaded(true);
-    });
+    void api.chats
+      .listRecent(8)
+      .then((c) => {
+        setRecent(c);
+        setError("");
+        setLoaded(true);
+      })
+      .catch(() => {
+        setRecent([]);
+        setError(ko ? "최근 대화를 불러오지 못했습니다. 데이터는 바뀌지 않았습니다." : "Recent chats could not be loaded. Nothing changed.");
+        setLoaded(true);
+      });
     void loadActive();
     timer.current = setInterval(() => void loadActive(), POLL_MS);
     return () => {
       if (timer.current) clearInterval(timer.current);
     };
-  }, [loadActive]);
+  }, [loadActive, ko]);
 
   const runningCount = recent.filter((c) => active.has(c.id)).length;
 
@@ -71,7 +80,9 @@ export function DashboardActivity() {
         )}
       </div>
       {!loaded ? (
-        <div className="dashboard-module-empty">{ko ? "불러오는 중…" : "Loading…"}</div>
+        <div className="dashboard-module-empty">{ko ? "최근 대화를 불러오는 중…" : "Loading recent chats…"}</div>
+      ) : error ? (
+        <div className="dashboard-module-empty">{error}</div>
       ) : recent.length === 0 ? (
         <div className="dashboard-module-empty">
           {ko ? "아직 대화가 없어요. 새 채팅으로 일을 시작하세요." : "No chats yet. Start one to get going."}

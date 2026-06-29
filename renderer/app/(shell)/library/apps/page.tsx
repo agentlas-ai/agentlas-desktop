@@ -153,7 +153,11 @@ export default function LibraryAppsPage() {
           setMessage(result.summary);
         } else if (kind === "run-smoke-test") {
           const result = await api.appFactory.runSmoke({ rootPath: selected.rootPath });
-          setMessage(result.ok ? "Smoke passed" : `Smoke failed: exit ${result.exitCode ?? "unknown"}`);
+          setMessage(
+            result.ok
+              ? locale === "ko" ? "검증을 통과했습니다. 로컬 App 실행 조건이 확인됐습니다." : "Check passed. Local app run requirements were confirmed."
+              : locale === "ko" ? `검증에 실패했습니다. 파일은 바뀌지 않았습니다. exit ${result.exitCode ?? "unknown"}` : `Check failed. Files were not changed. exit ${result.exitCode ?? "unknown"}`,
+          );
         } else if (kind === "deploy-preview") {
           const result = await api.appFactory.preparePreview({ rootPath: selected.rootPath });
           setMessage(`Preview package ready: ${result.deployPath}`);
@@ -164,8 +168,8 @@ export default function LibraryAppsPage() {
         } else if (kind === "archive") {
           const result = await api.appFactory.archive({ rootPath: selected.rootPath });
           const archiveResult = result.result && typeof result.result === "object" ? result.result as Record<string, unknown> : {};
-          const mcpNote = archiveResult.removedMcpServerId ? ` · MCP unregistered: ${String(archiveResult.removedMcpServerId)}` : "";
-          setMessage(`Archived reversibly: ${String(archiveResult.archivePath ?? selected.rootPath)}${mcpNote}`);
+          const mcpNote = archiveResult.removedMcpServerId ? locale === "ko" ? ` · MCP 등록 해제: ${String(archiveResult.removedMcpServerId)}` : ` · MCP unregistered: ${String(archiveResult.removedMcpServerId)}` : "";
+          setMessage((locale === "ko" ? "복원 가능한 보관으로 옮겼습니다: " : "Moved to a reversible archive: ") + `${String(archiveResult.archivePath ?? selected.rootPath)}${mcpNote}`);
         } else if (kind === "restore") {
           const result = await api.appFactory.restore({ rootPath: selected.rootPath });
           const restoreResult = result.result && typeof result.result === "object" ? result.result as Record<string, unknown> : {};
@@ -184,7 +188,7 @@ export default function LibraryAppsPage() {
         setBusyAction(null);
       }
     },
-    [refresh, selected],
+    [locale, refresh, selected],
   );
 
   const approvePaymentGate = useCallback(
@@ -1187,7 +1191,7 @@ function operationLabel(operation: AppFactoryOperationKind): string {
   if (operation === "resolve-provider-credentials") return "Credential resolution";
   if (operation === "approve-provider-payment") return "Payment approval";
   if (operation === "open-provider-browser") return "Provider browser";
-  if (operation === "run-smoke-test") return "Smoke test";
+  if (operation === "run-smoke-test") return "Validation check";
   if (operation === "deploy-preview") return "Preview package";
   if (operation === "open-launch-target") return "Open local app";
   if (operation === "publish-as-tool") return "Publish as tool";

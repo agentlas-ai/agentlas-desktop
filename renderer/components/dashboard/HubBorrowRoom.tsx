@@ -20,6 +20,7 @@ export function HubBorrowRoom() {
   const [status, setStatus] = useState<MarketplaceSourceStatus | null>(null);
   const [installed, setInstalled] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>(null);
+  const [message, setMessage] = useState("");
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const search = useCallback(async (q: string) => {
@@ -32,10 +33,12 @@ export function HubBorrowRoom() {
       const [res, st] = await Promise.all([api.marketplace.search(q), api.marketplace.status()]);
       setResults(res);
       setStatus(st);
+      setMessage("");
     } catch {
       setResults([]);
+      setMessage(ko ? "허브 검색을 불러오지 못했습니다. 설치된 에이전트에는 영향이 없습니다." : "Hub search could not be loaded. Installed agents were not changed.");
     }
-  }, []);
+  }, [ko]);
 
   useEffect(() => {
     void search("");
@@ -60,8 +63,9 @@ export function HubBorrowRoom() {
     try {
       await api.team.install(slug);
       setInstalled((prev) => new Set(prev).add(slug));
+      setMessage(ko ? "내 팀에 추가했습니다. 이제 Library에서 확인할 수 있습니다." : "Added to your team. You can check it in Library.");
     } catch {
-      /* 무시 — 다음 시도 */
+      setMessage(ko ? "추가하지 못했습니다. 일부 설치됐는지 Library에서 확인한 뒤 다시 시도하세요." : "Could not add it. Check Library for a partial install, then try again.");
     } finally {
       setBusy(null);
     }
@@ -88,7 +92,7 @@ export function HubBorrowRoom() {
       </label>
 
       {results === null ? (
-        <div className="dashboard-module-empty">{ko ? "불러오는 중…" : "Loading…"}</div>
+        <div className="dashboard-module-empty">{ko ? "허브 에이전트를 불러오는 중…" : "Loading Hub agents…"}</div>
       ) : results.length === 0 ? (
         <div className="dashboard-module-empty">{ko ? "검색 결과가 없어요." : "No results."}</div>
       ) : (
@@ -138,7 +142,9 @@ export function HubBorrowRoom() {
         </div>
       )}
       <div className="hub-borrow-note">
-        {ko
+        {message
+          ? message
+          : ko
           ? "허브 에이전트는 원격 게스트입니다 — 내 팀에 추가하면 내 라이브러리(owned)가 되어 게시자와 무관하게 동작합니다."
           : "Hub agents are remote guests — adding to your team makes them owned, independent of the publisher."}
       </div>

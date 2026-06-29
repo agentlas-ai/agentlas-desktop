@@ -26,6 +26,7 @@ export function ConfirmRequests() {
   const { locale } = useT();
   const ko = locale === "ko";
   const [items, setItems] = useState<PendingConfirmation[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
@@ -39,8 +40,10 @@ export function ConfirmRequests() {
       // 가장 오래 기다린 항목(가장 멈춰 있는 것)이 위로 — 긴급성 정렬.
       list.sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
       setItems(list);
-    } catch {
-      // 다음 폴링 재시도
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setItems((cur) => cur ?? []);
     }
   }, []);
 
@@ -68,6 +71,21 @@ export function ConfirmRequests() {
 
       {items === null ? (
         <div className="dashboard-module-empty">{ko ? "불러오는 중…" : "Loading…"}</div>
+      ) : error ? (
+        <div className="dashboard-module-empty" style={{ display: "grid", gap: 8 }}>
+          <span>
+            {ko ? "승인 목록을 불러오지 못했습니다." : "Could not load approval requests."}
+          </span>
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="titlebar-nodrag"
+            data-dashboard-action="true"
+            style={{ justifySelf: "start" }}
+          >
+            {ko ? "다시 시도" : "Retry"}
+          </button>
+        </div>
       ) : items.length === 0 ? (
         <div className="dashboard-module-empty">
           {ko ? "기다리는 승인이 없어요 — 멈춰 있는 에이전트 없음." : "Nothing waiting — no stalled workers."}
@@ -78,6 +96,7 @@ export function ConfirmRequests() {
             <div className="dashboard-row-copy">
               <div>{it.question}</div>
               <div>
+                {confirmationKindLabel(it.question, ko)}
                 {it.chatTitle || (ko ? "채팅" : "Chat")}
                 {it.optionCount > 0 ? ` · ${it.optionCount}${ko ? "개 선택지" : " options"}` : ""}
                 {it.createdAt ? ` · ${stallLabel(it.createdAt, ko)}` : ""}
@@ -95,4 +114,14 @@ export function ConfirmRequests() {
       )}
     </div>
   );
+}
+
+function confirmationKindLabel(question: string, ko: boolean): string {
+  const q = question.toLowerCase();
+  if (/\bfull\b|전체 권한|permission/.test(q)) return ko ? "전체 권한 확인 · " : "Full permission · ";
+  if (/payment|checkout|결제|카드|구독/.test(q)) return ko ? "결제 확인 · " : "Payment · ";
+  if (/credential|api key|token|비밀|키|토큰/.test(q)) return ko ? "키/계정 확인 · " : "Credential · ";
+  if (/browser|oauth|login|로그인|브라우저/.test(q)) return ko ? "브라우저/로그인 · " : "Browser/login · ";
+  if (/file|write|폴더|파일|쓰기|저장/.test(q)) return ko ? "파일 작업 · " : "File action · ";
+  return ko ? "선택 대기 · " : "Waiting · ";
 }

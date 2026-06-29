@@ -104,10 +104,17 @@ function parsePermission(raw: string | null): PermissionLevel | undefined {
 
 function inferPermissionFromAnswer(answers: string[]): PermissionLevel | undefined {
   const joined = answers.join(" ").toLowerCase();
-  if (/\bfull\b|전체 권한/.test(joined)) return "full";
   if (/\bwrite\b|쓰기|편집/.test(joined)) return "write";
   if (/\bread\b|읽기만/.test(joined)) return "read";
   return undefined;
+}
+
+function confirmFullPermissionFromUrl(locale: string): boolean {
+  return window.confirm(
+    locale === "ko"
+      ? "이 링크가 전체 권한 실행을 요청합니다.\n\n파일 변경, 셸 명령, 외부 도구 호출까지 허용될 수 있습니다. 계속할까요?"
+      : "This link requests full-permission execution.\n\nIt may allow file changes, shell commands, and external tool calls. Continue?",
+  );
 }
 
 function appendTimeline(
@@ -962,7 +969,7 @@ function ChatPage() {
           {
             id: placeholderId,
             role: "agent",
-            text: locale === "ko" ? `${appName} 삭제 중...` : `Deleting ${appName}...`,
+            text: locale === "ko" ? `${appName}을 Apps 목록에서 숨기는 중...` : `Hiding ${appName} from Apps...`,
             busy: true,
             startedAt: Date.now(),
           },
@@ -979,8 +986,8 @@ function ChatPage() {
                     busy: false,
                     text:
                       locale === "ko"
-                        ? `${appName}을 삭제했습니다. 복원이 가능한 archive 상태로 보관했고 Apps 목록에서는 바로 숨겼습니다.`
-                        : `${appName} was deleted from Apps and kept as a reversible archive.`,
+                        ? `${appName}을 Apps 목록에서 숨겼습니다. 파일은 복원 가능한 보관함에 남아 있습니다.`
+                        : `${appName} was hidden from Apps and kept in a reversible archive.`,
                   }
                 : msg,
             ),
@@ -1316,7 +1323,7 @@ function ChatPage() {
                     `Root: ${tool.rootPath}`,
                     `Runtime: ${tool.toolPath}`,
                     `MCP: ${tool.mcpPath}`,
-                    `Smoke: ${tool.smokePath}`,
+                    `Check script: ${tool.smokePath}`,
                     "",
                     tool.summary,
                   ].join("\n"),
@@ -1325,7 +1332,7 @@ function ChatPage() {
                 const result = await api.toolFactory.runSmoke({ rootPath: tool.rootPath });
                 update(
                   [
-                    result.ok ? `Tool smoke passed: ${tool.toolName}` : `Tool smoke failed: ${tool.toolName}`,
+                    result.ok ? `Tool check passed: ${tool.toolName}` : `Tool check failed without changing files: ${tool.toolName}`,
                     "",
                     `Command: ${result.command}`,
                     `Exit: ${result.exitCode ?? "unknown"}`,
@@ -1365,7 +1372,7 @@ function ChatPage() {
                   `Run: ${devCommand}`,
                   `Open local app: ${launchUrl}`,
                   `Setup: ${scaffold.setupPath}`,
-                  `Smoke: ${scaffold.smokePath}`,
+                  `Check script: ${scaffold.smokePath}`,
                   "",
                   scaffold.summary,
                 ].join("\n"),
@@ -1413,7 +1420,7 @@ function ChatPage() {
               const result = await api.appFactory.runSmoke({ rootPath: scaffold.rootPath });
               update(
                 [
-                  result.ok ? `Smoke passed: ${scaffold.appName}` : `Smoke failed: ${scaffold.appName}`,
+                  result.ok ? `App check passed: ${scaffold.appName}` : `App check failed without changing files: ${scaffold.appName}`,
                   "",
                   `Command: ${result.command}`,
                   `Exit: ${result.exitCode ?? "unknown"}`,
@@ -1557,10 +1564,14 @@ function ChatPage() {
       handleCommand(seedCmd);
       router.replace(`/chat?id=${chatId}`);
     } else if (seedPrompt) {
+      if (seedPermission === "full" && !confirmFullPermissionFromUrl(locale)) {
+        router.replace(`/chat?id=${chatId}`);
+        return;
+      }
       void send(seedPrompt, { permissions: seedPermission ?? DEFAULT_PERMISSION });
       router.replace(`/chat?id=${chatId}`);
     }
-  }, [chat, agent, chatId, messages.length, send, handleCommand, router, searchParams]);
+  }, [chat, agent, chatId, locale, messages.length, send, handleCommand, router, searchParams]);
 
   async function switchAgent(agentId: string) {
     const api = ipc();

@@ -13,18 +13,32 @@ export default function AutomationListPage() {
   const [items, setItems] = useState<Automation[]>([]);
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState("");
 
   async function refresh() {
     const api = ipc();
-    if (!api) return;
-    const [list, ag, fm] = await Promise.all([
-      api.automations.list(),
-      api.team.list(),
-      api.firms.list(),
-    ]);
-    setItems(list);
-    setAgents(visibleAgents(ag));
-    setFirms(fm);
+    setLoading(true);
+    setMessage("");
+    if (!api) {
+      setLoading(false);
+      setMessage(locale === "en" ? "Automations are only available in the desktop app." : "자동화는 데스크톱 앱에서만 사용할 수 있습니다.");
+      return;
+    }
+    try {
+      const [list, ag, fm] = await Promise.all([
+        api.automations.list(),
+        api.team.list(),
+        api.firms.list(),
+      ]);
+      setItems(list);
+      setAgents(visibleAgents(ag));
+      setFirms(fm);
+    } catch (err) {
+      setMessage(locale === "en" ? `Automations could not be loaded. Existing schedules were not changed. ${String(err)}` : `자동화를 불러오지 못했습니다. 기존 예약은 그대로 둡니다. ${String(err)}`);
+    } finally {
+      setLoading(false);
+    }
   }
   useEffect(() => {
     void refresh();
@@ -33,16 +47,24 @@ export default function AutomationListPage() {
   async function toggle(id: string, enabled: boolean) {
     const api = ipc();
     if (!api) return;
-    await api.automations.toggle(id, enabled);
-    await refresh();
+    try {
+      await api.automations.toggle(id, enabled);
+      await refresh();
+    } catch (err) {
+      setMessage(locale === "en" ? `Status did not change. ${String(err)}` : `상태를 바꾸지 못했습니다. ${String(err)}`);
+    }
   }
 
   async function remove(id: string) {
     const api = ipc();
     if (!api) return;
     if (!confirm(t("auto.confirm_delete"))) return;
-    await api.automations.remove(id);
-    await refresh();
+    try {
+      await api.automations.remove(id);
+      await refresh();
+    } catch (err) {
+      setMessage(locale === "en" ? `Automation was not deleted. ${String(err)}` : `자동화를 삭제하지 못했습니다. ${String(err)}`);
+    }
   }
 
   function targetLabel(a: Automation): { icon: React.ReactNode; name: string } {
@@ -113,10 +135,37 @@ export default function AutomationListPage() {
             marginBottom: 16,
           }}
         >
-          {t("auto.stub_note")}
+          {t("auto.runtime_note")}
         </div>
 
-        {items.length === 0 ? (
+        {message ? (
+          <div
+            style={{
+              padding: 16,
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--paper-edge)",
+              background: "var(--paper)",
+              color: "var(--ink-soft)",
+              fontSize: 13,
+              lineHeight: 1.5,
+            }}
+          >
+            {message}
+          </div>
+        ) : loading ? (
+          <div
+            style={{
+              padding: 16,
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--paper-edge)",
+              background: "var(--paper)",
+              color: "var(--muted-deep)",
+              fontSize: 13,
+            }}
+          >
+            {locale === "en" ? "Loading automations…" : "자동화를 불러오는 중입니다…"}
+          </div>
+        ) : items.length === 0 ? (
           <div
             style={{
               padding: 32,

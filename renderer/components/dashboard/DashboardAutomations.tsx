@@ -23,6 +23,7 @@ export function DashboardAutomations() {
   const { locale } = useT();
   const ko = locale === "ko";
   const [items, setItems] = useState<Automation[] | null>(null);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     const api = ipc();
@@ -30,14 +31,28 @@ export function DashboardAutomations() {
       setItems([]);
       return;
     }
-    void api.automations.list().then(setItems);
-  }, []);
+    void api.automations
+      .list()
+      .then((list) => {
+        setItems(list);
+        setError("");
+      })
+      .catch(() => {
+        setItems([]);
+        setError(ko ? "자동화를 불러오지 못했습니다. 기존 예약은 그대로 둡니다." : "Automations could not be loaded. Existing schedules were not changed.");
+      });
+  }, [ko]);
 
   async function toggle(a: Automation) {
     const api = ipc();
     if (!api) return;
-    const next = await api.automations.toggle(a.id, !a.enabled);
-    setItems((prev) => (prev ? prev.map((x) => (x.id === a.id ? next : x)) : prev));
+    try {
+      const next = await api.automations.toggle(a.id, !a.enabled);
+      setItems((prev) => (prev ? prev.map((x) => (x.id === a.id ? next : x)) : prev));
+      setError("");
+    } catch {
+      setError(ko ? "상태를 바꾸지 못했습니다. 예약은 이전 상태로 남아 있습니다." : "The status did not change. The schedule kept its previous state.");
+    }
   }
 
   const activeCount = items?.filter((a) => a.enabled).length ?? 0;
@@ -53,7 +68,9 @@ export function DashboardAutomations() {
         )}
       </div>
       {items === null ? (
-        <div className="dashboard-module-empty">{ko ? "불러오는 중…" : "Loading…"}</div>
+        <div className="dashboard-module-empty">{ko ? "자동화를 불러오는 중…" : "Loading automations…"}</div>
+      ) : error ? (
+        <div className="dashboard-module-empty">{error}</div>
       ) : items.length === 0 ? (
         <div className="dashboard-module-empty">
           {ko ? "등록된 자동화가 없어요." : "No automations yet."}

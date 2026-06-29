@@ -20,6 +20,7 @@ export default function GeneratedAppPage() {
   const router = useRouter();
   const [app, setApp] = useState<AppFactoryAppRecord | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadNotice, setLoadNotice] = useState("");
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
@@ -35,6 +36,13 @@ export default function GeneratedAppPage() {
     void api.appFactory.getApp(id).then((record) => {
       if (!cancelled) {
         setApp(record ?? demoGeneratedApp(id, locale));
+        setLoadNotice("");
+        setLoading(false);
+      }
+    }).catch(() => {
+      if (!cancelled) {
+        setApp(demoGeneratedApp(id, locale));
+        setLoadNotice(locale === "en" ? "Local app history could not be read, so this preview opened in safe demo mode." : "로컬 App 기록을 읽지 못해 안전한 미리보기로 열었습니다.");
         setLoading(false);
       }
     });
@@ -47,8 +55,8 @@ export default function GeneratedAppPage() {
 
   if (loading) {
     return (
-      <GeneratedShell title="Generated App" subtitle={locale === "en" ? "Loading App" : "App 로딩 중"}>
-        <div style={emptyState}>{locale === "en" ? "Loading..." : "불러오는 중..."}</div>
+      <GeneratedShell title="Generated App" subtitle={locale === "en" ? "Loading app record" : "App 기록 확인 중"}>
+        <div style={emptyState}>{locale === "en" ? "Reading local app history…" : "로컬 App 기록을 읽는 중입니다…"}</div>
       </GeneratedShell>
     );
   }
@@ -68,8 +76,8 @@ export default function GeneratedAppPage() {
     if (!api || !app || deleting) return;
     const ok = window.confirm(
       locale === "en"
-        ? `Delete ${appName} from Apps? It will be kept as a reversible archive.`
-        : `${appName}을 Apps에서 삭제할까요? 복원 가능한 archive로 보관됩니다.`,
+        ? `Hide ${appName} from Apps? The files stay in a reversible archive.`
+        : `${appName}을 Apps 목록에서 숨길까요? 파일은 복원 가능한 보관함에 남습니다.`,
     );
     if (!ok) return;
     setDeleting(true);
@@ -106,11 +114,12 @@ export default function GeneratedAppPage() {
             style={headerAction}
           >
             <IconTrash size={13} />
-            {locale === "en" ? "Delete" : "삭제"}
+            {locale === "en" ? "Hide" : "목록에서 숨기기"}
           </button>
         </>
       }
     >
+      {loadNotice && <div style={noticeBanner}>{loadNotice}</div>}
       <ExternalGeneratedAppManager app={app} />
     </GeneratedShell>
   );
@@ -164,7 +173,7 @@ function ExternalGeneratedAppManager({ app }: { app: AppFactoryAppRecord }) {
     { label: locale === "en" ? "Launch URL" : "실행 URL", value: launchUrl || "" },
     { label: locale === "en" ? "Dev command" : "실행 명령", value: devCommand },
     { label: locale === "en" ? "Setup" : "설정 파일", value: app.setupPath },
-    { label: locale === "en" ? "Smoke" : "스모크", value: app.smokePath },
+    { label: locale === "en" ? "Check script" : "검증 스크립트", value: app.smokePath },
   ].filter((item) => item.value);
 
   async function copy(value: string) {
@@ -203,7 +212,11 @@ function ExternalGeneratedAppManager({ app }: { app: AppFactoryAppRecord }) {
     setBusy("smoke");
     try {
       const result = await api.appFactory.runSmoke({ rootPath: app.rootPath });
-      setMessage(result.ok ? `Smoke passed: ${result.command}` : `Smoke failed: ${result.stderr || result.stdout || result.command}`);
+      setMessage(
+        result.ok
+          ? locale === "en" ? `Check passed: ${result.command}` : `검증을 통과했습니다: ${result.command}`
+          : locale === "en" ? `Check failed. Files were not changed: ${result.stderr || result.stdout || result.command}` : `검증에 실패했습니다. 파일은 바뀌지 않았습니다: ${result.stderr || result.stdout || result.command}`,
+      );
     } catch (err) {
       setMessage(err instanceof Error ? err.message : String(err));
     } finally {
@@ -282,7 +295,7 @@ function ExternalGeneratedAppManager({ app }: { app: AppFactoryAppRecord }) {
           </div>
           <div style={toolbar}>
             <button type="button" onClick={() => void runSmoke()} disabled={busy === "smoke" || isCloudOnly} style={secondaryBtn}>
-              {busy === "smoke" ? "..." : "Smoke"}
+              {busy === "smoke" ? "..." : (locale === "en" ? "Run check" : "검증 실행")}
             </button>
             <button type="button" onClick={() => void preparePreview()} disabled={busy === "preview" || isCloudOnly} style={secondaryBtn}>
               <IconFileUp size={13} />
@@ -425,6 +438,18 @@ const emptyState: CSSProperties = {
   color: "var(--muted-deep)",
   fontWeight: 750,
   background: "var(--panel)",
+};
+
+const noticeBanner: CSSProperties = {
+  margin: "16px 28px 0",
+  border: "1px solid var(--accent-soft)",
+  borderRadius: 8,
+  background: "var(--fill-1)",
+  color: "var(--ink-soft)",
+  padding: "10px 12px",
+  fontSize: 12,
+  fontWeight: 750,
+  lineHeight: 1.45,
 };
 
 const managerShell: CSSProperties = {

@@ -51,7 +51,7 @@ const RUNTIME_LABEL: Record<string, string> = {
 };
 
 export default function SettingsPage() {
-  const { t, pref, setPref } = useT();
+  const { t, pref, setPref, locale } = useT();
   const { pref: themePref, setPref: setThemePref } = useTheme();
   const [statuses, setStatuses] = useState<RuntimeStatus[]>([]);
   const [draftKey, setDraftKey] = useState<Record<ByokBackend, string>>({
@@ -74,6 +74,7 @@ export default function SettingsPage() {
   const [multimodalSettings, setMultimodalSettings] = useState<MultimodalSettings | null>(null);
   const [multimodalStatus, setMultimodalStatus] = useState<MultimodalProviderStatus[]>([]);
   const [multimodalDraft, setMultimodalDraft] = useState<Record<string, string>>({});
+  const [runtimeMessage, setRuntimeMessage] = useState("");
 
   const refresh = useCallback(async () => {
     const api = ipc();
@@ -106,58 +107,83 @@ export default function SettingsPage() {
   async function activateRuntime(runtime: RuntimeStatus) {
     const api = ipc();
     if (!api) return;
-    const updated = await api.runtime.setActive({
-      kind: runtime.kind,
-      backend: runtime.backend,
-      source: runtime.source,
-      model: runtime.model ?? undefined,
-    });
-    setStatuses(updated);
+    try {
+      const updated = await api.runtime.setActive({
+        kind: runtime.kind,
+        backend: runtime.backend,
+        source: runtime.source,
+        model: runtime.model ?? undefined,
+      });
+      setStatuses(updated);
+      setRuntimeMessage("");
+    } catch (err) {
+      setRuntimeMessage(locale === "ko" ? `런타임을 바꾸지 못했습니다. 이전 설정이 유지됩니다. ${String(err)}` : `Runtime did not change. The previous setting was kept. ${String(err)}`);
+    }
   }
 
   // Ollama 모델 선택 — 같은 ollama 런타임을 model만 바꿔 활성화.
   async function activateOllamaModel(model: string) {
     const api = ipc();
     if (!api) return;
-    const updated = await api.runtime.setActive({
-      kind: "ollama",
-      backend: "ollama",
-      source: "ollama",
-      model,
-    });
-    setStatuses(updated);
+    try {
+      const updated = await api.runtime.setActive({
+        kind: "ollama",
+        backend: "ollama",
+        source: "ollama",
+        model,
+      });
+      setStatuses(updated);
+      setRuntimeMessage("");
+    } catch (err) {
+      setRuntimeMessage(locale === "ko" ? `Ollama 모델을 바꾸지 못했습니다. ${String(err)}` : `Ollama model did not change. ${String(err)}`);
+    }
   }
 
   // BYOK 모델/1M 선택 — 해당 백엔드를 model·longContext와 함께 활성화.
   async function activateByok(backend: ByokBackend, model: string, longContext: boolean) {
     const api = ipc();
     if (!api) return;
-    const updated = await api.runtime.setActive({
-      kind: "byok",
-      backend,
-      source: `byok:${backend}`,
-      model,
-      longContext,
-    });
-    setStatuses(updated);
+    try {
+      const updated = await api.runtime.setActive({
+        kind: "byok",
+        backend,
+        source: `byok:${backend}`,
+        model,
+        longContext,
+      });
+      setStatuses(updated);
+      setRuntimeMessage("");
+    } catch (err) {
+      setRuntimeMessage(locale === "ko" ? `BYOK 런타임을 바꾸지 못했습니다. ${String(err)}` : `BYOK runtime did not change. ${String(err)}`);
+    }
   }
 
   async function saveKey(backend: ByokBackend) {
     const api = ipc();
     if (!api) return;
-    await api.secrets.saveApiKey(backend, draftKey[backend]);
-    if (backend === "custom") {
-      await api.config.setCustomBaseUrl(draftCustomBaseUrl);
+    try {
+      await api.secrets.saveApiKey(backend, draftKey[backend]);
+      if (backend === "custom") {
+        await api.config.setCustomBaseUrl(draftCustomBaseUrl);
+      }
+      setDraftKey((d) => ({ ...d, [backend]: "" }));
+      setRuntimeMessage(locale === "ko" ? "키를 저장했습니다. 값은 화면에 다시 표시하지 않습니다." : "Key saved. The value will not be shown again.");
+      await refresh();
+    } catch (err) {
+      setRuntimeMessage(locale === "ko" ? `키를 저장하지 못했습니다. 이전 값은 그대로입니다. ${String(err)}` : `Key was not saved. The previous value was kept. ${String(err)}`);
     }
-    setDraftKey((d) => ({ ...d, [backend]: "" }));
-    await refresh();
   }
 
   async function clearKey(backend: ByokBackend) {
     const api = ipc();
     if (!api) return;
-    await api.secrets.deleteApiKey(backend);
-    await refresh();
+    try {
+      await api.secrets.deleteApiKey(backend);
+      setRuntimeMessage(locale === "ko" ? "키를 삭제했습니다." : "Key deleted.");
+      await refresh();
+    } catch (err) {
+      setRuntimeMessage(locale === "ko" ? `키를 삭제하지 못했습니다. ${String(err)}` : `Key was not deleted. ${String(err)}`);
+    }
   }
 
   async function saveMultimodalProvider(modality: MultimodalModality, providerId: string) {
@@ -300,6 +326,22 @@ export default function SettingsPage() {
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
           {t("settings.detected")}
         </h2>
+        {runtimeMessage && (
+          <div
+            style={{
+              padding: 12,
+              border: "1px solid var(--paper-edge)",
+              borderRadius: "var(--radius-md)",
+              color: "var(--ink-soft)",
+              background: "var(--paper)",
+              fontSize: 13,
+              lineHeight: 1.5,
+              marginBottom: 10,
+            }}
+          >
+            {runtimeMessage}
+          </div>
+        )}
         {statuses.length === 0 && (
           <div
             style={{
@@ -863,6 +905,8 @@ function AgentlasCliPanel() {
     try {
       const r = await api.runtime.installAgentlasCli();
       setMsg(r.message);
+    } catch (err) {
+      setMsg((t("settings.cli.install_failed", { cmd: "" }) || "Install failed.") + ` ${String(err)}`);
     } finally {
       setBusy(false);
     }
@@ -1128,6 +1172,8 @@ function CliInstallPanel({
       } else {
         setMsg((m) => ({ ...m, [kind]: t("settings.cli.install_failed", { cmd: r.command ?? "" }) }));
       }
+    } catch (err) {
+      setMsg((m) => ({ ...m, [kind]: `${t("settings.cli.install_failed", { cmd: "" })} ${String(err)}` }));
     } finally {
       setInstalling(null);
     }
@@ -1136,8 +1182,12 @@ function CliInstallPanel({
   async function doLogin(kind: CliKind) {
     const api = ipc();
     if (!api) return;
-    await api.runtime.openCliLogin(kind);
-    setMsg((m) => ({ ...m, [kind]: t("settings.cli.login_hint") }));
+    try {
+      await api.runtime.openCliLogin(kind);
+      setMsg((m) => ({ ...m, [kind]: t("settings.cli.login_hint") }));
+    } catch (err) {
+      setMsg((m) => ({ ...m, [kind]: `${t("settings.cli.login_hint")} ${String(err)}` }));
+    }
   }
 
   return (

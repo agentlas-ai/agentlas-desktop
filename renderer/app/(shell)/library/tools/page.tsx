@@ -82,15 +82,19 @@ export default function LibraryToolsPage() {
       try {
         if (kind === "run-smoke-test") {
           const result = await api.toolFactory.runSmoke({ rootPath: selected.rootPath });
-          setMessage(result.ok ? "Smoke passed" : `Smoke failed: exit ${result.exitCode ?? "unknown"}`);
+          setMessage(
+            result.ok
+              ? locale === "ko" ? "검증을 통과했습니다. 통과한 MCP는 다음 턴부터 사용 가능할 수 있습니다." : "Check passed. A passing MCP may be available from the next turn."
+              : locale === "ko" ? `검증에 실패했습니다. 파일은 바뀌지 않았습니다. exit ${result.exitCode ?? "unknown"}` : `Check failed. Files were not changed. exit ${result.exitCode ?? "unknown"}`,
+          );
         } else if (kind === "install-mcp") {
           const result = await api.toolFactory.installMcp({ rootPath: selected.rootPath });
-          setMessage(`MCP installed: ${result.server.name}`);
+          setMessage(locale === "ko" ? `MCP를 설치했습니다: ${result.server.name}` : `MCP installed: ${result.server.name}`);
         } else if (kind === "archive") {
           const op = await api.toolFactory.archive({ rootPath: selected.rootPath });
           const result = op.result && typeof op.result === "object" && !Array.isArray(op.result) ? op.result as Record<string, unknown> : {};
-          const mcpNote = result.removedServerId ? ` · MCP unregistered: ${String(result.removedServerId)}` : "";
-          setMessage(`Archived reversibly: ${String(result.archivePath ?? selected.rootPath)}${mcpNote}`);
+          const mcpNote = result.removedServerId ? locale === "ko" ? ` · MCP 등록 해제: ${String(result.removedServerId)}` : ` · MCP unregistered: ${String(result.removedServerId)}` : "";
+          setMessage((locale === "ko" ? "복원 가능한 보관으로 옮겼습니다: " : "Moved to a reversible archive: ") + `${String(result.archivePath ?? selected.rootPath)}${mcpNote}`);
         } else if (kind === "restore") {
           const op = await api.toolFactory.restore({ rootPath: selected.rootPath });
           const result = op.result && typeof op.result === "object" && !Array.isArray(op.result) ? op.result as Record<string, unknown> : {};
@@ -108,7 +112,7 @@ export default function LibraryToolsPage() {
         setBusyAction(null);
       }
     },
-    [refresh, selected],
+    [locale, refresh, selected],
   );
 
   const copyRoot = useCallback(() => {
@@ -274,6 +278,11 @@ function ToolDetail({
           ) : (
             <ActionButton onClick={onArchive} label={t("library.tools.archive")} icon={<IconClose size={12} />} busy={busyAction === "archive"} />
           )}
+        </div>
+        <div style={toolActionNote}>
+          {locale === "ko"
+            ? "주의: 검증이 통과하면 이 MCP가 다음 턴부터 사용 가능하도록 등록될 수 있습니다. 확인만 원했다면 결과를 본 뒤 보관하거나 비활성 상태를 확인하세요."
+            : "Note: a passing check can register this MCP for use on the next turn. If you only wanted to inspect it, review the result and archive or disable it if needed."}
         </div>
 
         {message && (
@@ -454,7 +463,7 @@ function toolIcon(status: ToolFactoryToolStatus): CSSProperties {
 
 function operationLabel(operation: ToolFactoryOperationKind): string {
   if (operation === "install-mcp") return "MCP install";
-  if (operation === "run-smoke-test") return "Smoke test";
+  if (operation === "run-smoke-test") return "Validation check";
   if (operation === "archive") return "Archive";
   if (operation === "restore") return "Restore";
   return "Scaffold";
@@ -598,6 +607,16 @@ const actionButton: CSSProperties = {
   fontSize: 11,
   fontWeight: 800,
   cursor: "pointer",
+};
+
+const toolActionNote: CSSProperties = {
+  border: "1px solid rgba(186,116,44,0.28)",
+  background: "rgba(233,169,108,0.10)",
+  color: "var(--muted-deep)",
+  borderRadius: "var(--radius-md)",
+  padding: "7px 9px",
+  fontSize: 11,
+  lineHeight: 1.45,
 };
 
 const messageBox: CSSProperties = {

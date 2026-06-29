@@ -20,16 +20,22 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       return;
     }
     let alive = true;
+    const timeout = window.setTimeout(() => {
+      if (alive) setSession({ signedIn: false });
+    }, 10_000);
     api.auth
       .getSession()
       .then((s) => {
+        window.clearTimeout(timeout);
         if (alive) setSession(s);
       })
       .catch(() => {
+        window.clearTimeout(timeout);
         if (alive) setSession({ signedIn: false });
       });
     return () => {
       alive = false;
+      window.clearTimeout(timeout);
     };
   }, []);
 
@@ -37,9 +43,26 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (session === null) {
     return (
       <div
-        style={{ position: "fixed", inset: 0, background: "#06080B" }}
-        aria-hidden
-      />
+        role="status"
+        aria-live="polite"
+        style={{
+          position: "fixed",
+          inset: 0,
+          background: "#06080B",
+          color: "#EEF5F2",
+          display: "grid",
+          placeItems: "center",
+          textAlign: "center",
+          padding: 24,
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>Agentlas</div>
+          <div style={{ fontSize: 13, color: "rgba(238,245,242,0.72)", lineHeight: 1.5 }}>
+            세션을 확인하고 있습니다. 오래 걸리면 로그인 화면으로 돌아갑니다.
+          </div>
+        </div>
+      </div>
     );
   }
 

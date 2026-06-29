@@ -203,8 +203,8 @@ export default function LibrarySurfacesPage() {
                 const result = await api.toolFactory.runSmoke({ rootPath: tool.rootPath });
                 setMessage(
                   result.ok
-                    ? `Tool smoke passed: ${tool.toolName}`
-                    : `Tool smoke failed: ${tool.toolName} · exit ${result.exitCode ?? "unknown"}`,
+                    ? `Tool check passed: ${tool.toolName}`
+                    : `Tool check failed without changing files: ${tool.toolName} · exit ${result.exitCode ?? "unknown"}`,
                 );
                 return;
               }
@@ -227,8 +227,8 @@ export default function LibrarySurfacesPage() {
               const result = await api.appFactory.runSmoke({ rootPath: app.rootPath });
               setMessage(
                 result.ok
-                  ? `App smoke passed: ${app.appName}`
-                  : `App smoke failed: ${app.appName} · exit ${result.exitCode ?? "unknown"}`,
+                  ? `App check passed: ${app.appName}`
+                  : `App check failed without changing files: ${app.appName} · exit ${result.exitCode ?? "unknown"}`,
               );
             } else if (action.type === "deploy-preview") {
               const result = await api.appFactory.preparePreview({ rootPath: app.rootPath });

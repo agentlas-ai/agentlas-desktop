@@ -54,18 +54,21 @@ export default function CloudAgentPublishPage() {
       const res = await api.hephaestus.publish({ folder, visibility: "private-link" });
       const issues = extractIssues(res.json);
       const detail = [res.error, res.stderr, res.stdout].filter(Boolean).join("\n").trim();
+      const friendly = friendlyUploadMessage(detail, ko);
       setResult({
         ok: Boolean(res.ok),
-        title: res.ok ? (ko ? "업로드 완료" : "Upload complete") : ko ? "업로드 중단" : "Upload stopped",
-        issues,
+        title: res.ok ? (ko ? "업로드 완료" : "Upload complete") : friendly.title,
+        issues: issues.length > 0 ? issues : friendly.issue ? [friendly.issue] : [],
         detail: detail ? detail.slice(0, 1600) : undefined,
       });
     } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      const friendly = friendlyUploadMessage(detail, ko);
       setResult({
         ok: false,
-        title: ko ? "업로드 실패" : "Upload failed",
-        issues: [],
-        detail: err instanceof Error ? err.message : String(err),
+        title: friendly.title,
+        issues: friendly.issue ? [friendly.issue] : [],
+        detail,
       });
     } finally {
       setRunning(false);
@@ -166,6 +169,89 @@ function extractIssues(json: unknown): UploadIssue[] {
       remediation: typeof item.remediation === "string" ? item.remediation : undefined,
     };
   });
+}
+
+function friendlyUploadMessage(detail: string, ko: boolean): { title: string; issue?: UploadIssue } {
+  const raw = detail.trim();
+  const lower = raw.toLowerCase();
+  const baseTitle = ko ? "업로드 중단" : "Upload stopped";
+  if (!raw) return { title: baseTitle };
+  if (lower.includes("sign in") || lower.includes("login") || lower.includes("auth") || lower.includes("unauthorized") || lower.includes("401")) {
+    return {
+      title: ko ? "로그인이 필요합니다" : "Sign in required",
+      issue: {
+        severity: "warning",
+        message: ko ? "업로드는 시작되지 않았고 로컬 파일은 그대로입니다." : "Upload did not start and local files were not changed.",
+        remediation: ko ? "Agentlas 계정으로 다시 로그인한 뒤 같은 폴더로 재시도하세요." : "Sign in to Agentlas again, then retry with the same folder.",
+      },
+    };
+  }
+  if (lower.includes("routing_card_required")) {
+    return {
+      title: ko ? "라우팅 정보가 필요합니다" : "Routing metadata required",
+      issue: {
+        severity: "warning",
+        message: ko
+          ? "Hub나 Cloud가 이 패키지를 어떻게 실행할지 알 수 없습니다."
+          : "Hub or Cloud cannot tell how this package should run.",
+        remediation: ko
+          ? "routing-card.json 또는 agentlas.json의 라우팅 정보를 보강한 뒤 다시 업로드하세요."
+          : "Add routing-card.json or routing metadata in agentlas.json, then retry.",
+      },
+    };
+  }
+  if (lower.includes("unsafe_path")) {
+    return {
+      title: ko ? "안전하지 않은 파일 경로가 있습니다" : "Unsafe file path",
+      issue: {
+        severity: "error",
+        message: ko
+          ? "패키지 밖을 가리키는 경로가 있어 업로드를 멈췄습니다."
+          : "A path appears to escape the package folder, so upload stopped.",
+        remediation: ko
+          ? "절대경로, .., 심볼릭 링크를 확인하고 패키지 폴더 안의 파일만 포함하세요."
+          : "Check absolute paths, .. segments, and symlinks; include only files inside the package folder.",
+      },
+    };
+  }
+  if (lower.includes("manifest_missing") || lower.includes("agentlas.json")) {
+    return {
+      title: ko ? "agentlas.json을 먼저 고쳐야 합니다" : "Fix agentlas.json first",
+      issue: {
+        severity: "error",
+        message: ko ? "패키지 설명 파일이 없거나 읽을 수 없습니다." : "The package manifest is missing or unreadable.",
+        remediation: ko ? "패키지 wizard/복구를 실행한 뒤 다시 업로드하세요." : "Run the package wizard/repair step, then retry.",
+      },
+    };
+  }
+  if (lower.includes("needs-review") || lower.includes("acknowledge")) {
+    return {
+      title: ko ? "검토가 필요한 경고가 있습니다" : "Review required",
+      issue: {
+        severity: "warning",
+        message: ko ? "위험 경고가 있어 바로 공개하지 않았습니다." : "Warnings were found, so the package was not published immediately.",
+        remediation: ko ? "경고 내용을 확인하고 필요한 경우 승인 후 다시 업로드하세요." : "Review the warnings and retry with acknowledgement if appropriate.",
+      },
+    };
+  }
+  if (lower.includes("quota") || lower.includes("credit")) {
+    return {
+      title: ko ? "크레딧 또는 사용량 확인이 필요합니다" : "Credit or quota check needed",
+      issue: {
+        severity: "warning",
+        message: ko ? "계정 한도 때문에 업로드가 멈췄을 수 있습니다." : "The upload may have stopped because of account quota.",
+        remediation: ko ? "계정/크레딧 상태를 확인한 뒤 다시 시도하세요." : "Check account and credit status, then retry.",
+      },
+    };
+  }
+  return {
+    title: baseTitle,
+    issue: {
+      severity: "error",
+      message: ko ? "업로드가 끝나지 않았습니다. 로컬 파일은 그대로입니다." : "Upload did not finish. Local files were not changed.",
+      remediation: ko ? "세부 정보가 길면 기술 상세를 펼쳐 원인을 확인한 뒤 같은 폴더로 다시 시도하세요." : "Use the technical details below for diagnosis, then retry with the same folder.",
+    },
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

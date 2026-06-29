@@ -33,26 +33,40 @@ function ProjectPage() {
   const [sourceKind, setSourceKind] = useState<OntologySourceKind>("company");
   const [ontologyBusy, setOntologyBusy] = useState(false);
   const [ontologyMessage, setOntologyMessage] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [pageMessage, setPageMessage] = useState("");
 
   const refresh = useCallback(async () => {
     const api = ipc();
-    if (!api || !id) return;
-    const [p, cs, ag, ont] = await Promise.all([
-      api.projects.get(id),
-      api.chats.listByProject(id),
-      api.team.list(),
-      api.ontology.getProject(id),
-    ]);
-    if (!p) {
-      navigate("/", "replace");
+    setLoading(true);
+    setPageMessage("");
+    if (!api || !id) {
+      setPageMessage(locale === "en" ? "Project could not be opened. Nothing changed." : "프로젝트를 열 수 없습니다. 바뀐 내용은 없습니다.");
+      setLoading(false);
       return;
     }
-    setProject(p);
-    setNoteDraft(p.contextNote ?? "");
-    setChats(cs);
-    setAgents(visibleAgents(ag));
-    setOntology(ont);
-  }, [id]);
+    try {
+      const [p, cs, ag, ont] = await Promise.all([
+        api.projects.get(id),
+        api.chats.listByProject(id),
+        api.team.list(),
+        api.ontology.getProject(id),
+      ]);
+      if (!p) {
+        navigate("/", "replace");
+        return;
+      }
+      setProject(p);
+      setNoteDraft(p.contextNote ?? "");
+      setChats(cs);
+      setAgents(visibleAgents(ag));
+      setOntology(ont);
+    } catch (err) {
+      setPageMessage(locale === "en" ? `Project could not be loaded. Nothing changed. ${String(err)}` : `프로젝트를 불러오지 못했습니다. 바뀐 내용은 없습니다. ${String(err)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [id, locale]);
 
   useEffect(() => {
     void refresh();
@@ -69,24 +83,37 @@ function ProjectPage() {
       navigate("/marketplace");
       return;
     }
-    const chat = await api.chats.create({ agentId, projectId: project.id });
-    navigate(`/chat?id=${chat.id}`);
+    try {
+      const chat = await api.chats.create({ agentId, projectId: project.id });
+      navigate(`/chat?id=${chat.id}`);
+    } catch (err) {
+      setPageMessage(locale === "en" ? `New chat was not created. ${String(err)}` : `새 채팅을 만들지 못했습니다. ${String(err)}`);
+    }
   }
 
   async function saveNote() {
     const api = ipc();
     if (!api || !project) return;
-    const updated = await api.projects.update(project.id, { contextNote: noteDraft.trim() || null });
-    setProject(updated);
-    setEditingNote(false);
+    try {
+      const updated = await api.projects.update(project.id, { contextNote: noteDraft.trim() || null });
+      setProject(updated);
+      setEditingNote(false);
+      setPageMessage("");
+    } catch (err) {
+      setPageMessage(locale === "en" ? `Note was not saved. ${String(err)}` : `노트를 저장하지 못했습니다. ${String(err)}`);
+    }
   }
 
   async function removeProject() {
     const api = ipc();
     if (!api || !project) return;
     if (!confirm(t("project.confirm_delete", { name: project.name }))) return;
-    await api.projects.remove(project.id);
-    navigate("/", "replace");
+    try {
+      await api.projects.remove(project.id);
+      navigate("/", "replace");
+    } catch (err) {
+      setPageMessage(locale === "en" ? `Project was not deleted. ${String(err)}` : `프로젝트를 삭제하지 못했습니다. ${String(err)}`);
+    }
   }
 
   async function chooseProjectFolder() {
@@ -130,7 +157,19 @@ function ProjectPage() {
     }
   }
 
-  if (!project) return null;
+  if (loading || !project) {
+    return (
+      <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
+        <section style={{ maxWidth: 720, margin: "24px auto", padding: "0 24px" }}>
+          <div style={pageNotice}>
+            {loading
+              ? locale === "en" ? "Loading project…" : "프로젝트를 불러오는 중입니다…"
+              : pageMessage || (locale === "en" ? "Project could not be opened." : "프로젝트를 열 수 없습니다.")}
+          </div>
+        </section>
+      </div>
+    );
+  }
   const agentById = new Map(visibleAgents(agents).map((a) => [a.id, a]));
 
   return (
@@ -184,6 +223,12 @@ function ProjectPage() {
           <IconTrash size={16} />
         </button>
       </header>
+
+      {pageMessage && (
+        <section style={{ maxWidth: 960, margin: "16px auto 0", padding: "0 24px" }}>
+          <div style={pageNotice}>{pageMessage}</div>
+        </section>
+      )}
 
       <section
         className="titlebar-nodrag"
@@ -537,6 +582,16 @@ function ProjectPage() {
     </div>
   );
 }
+
+const pageNotice: React.CSSProperties = {
+  border: "1px solid var(--paper-edge)",
+  borderRadius: "var(--radius-md)",
+  background: "var(--paper)",
+  color: "var(--ink-soft)",
+  padding: 16,
+  fontSize: 13,
+  lineHeight: 1.5,
+};
 
 function OntologyFact({ label, value }: { label: string; value: string }) {
   return (

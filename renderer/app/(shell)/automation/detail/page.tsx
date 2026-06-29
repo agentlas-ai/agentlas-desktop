@@ -23,30 +23,44 @@ function AutomationDetailPage() {
   const { t, locale } = useT();
   const [automation, setAutomation] = useState<Automation | null>(null);
   const [target, setTarget] = useState<{ kind: "agent" | "firm"; name: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   async function load() {
     const api = ipc();
-    if (!api) return;
-    const all = await api.automations.list();
-    const found = all.find((a) => a.id === id);
-    if (!found) {
-      router.replace("/automation");
+    setLoading(true);
+    setError("");
+    if (!api || !id) {
+      setError(locale === "en" ? "Automation could not be opened. Nothing changed." : "자동화를 열 수 없습니다. 바뀐 내용은 없습니다.");
+      setLoading(false);
       return;
     }
-    setAutomation(found);
-    if (found.targetType === "firm") {
-      const firm = await api.firms.get(found.targetId);
-      setTarget({
-        kind: "firm",
-        name: firm ? pickLocalized(firm, locale).name : locale === "en" ? "(removed firm)" : "(삭제된 회사)",
-      });
-    } else {
-      const agents: InstalledAgent[] = await api.team.list();
-      const a = visibleAgents(agents).find((x) => x.id === found.targetId);
-      setTarget({
-        kind: "agent",
-        name: a ? pickLocalized(a, locale).name : locale === "en" ? "(removed agent)" : "(삭제된 에이전트)",
-      });
+    try {
+      const all = await api.automations.list();
+      const found = all.find((a) => a.id === id);
+      if (!found) {
+        router.replace("/automation");
+        return;
+      }
+      setAutomation(found);
+      if (found.targetType === "firm") {
+        const firm = await api.firms.get(found.targetId);
+        setTarget({
+          kind: "firm",
+          name: firm ? pickLocalized(firm, locale).name : locale === "en" ? "(removed firm)" : "(삭제된 회사)",
+        });
+      } else {
+        const agents: InstalledAgent[] = await api.team.list();
+        const a = visibleAgents(agents).find((x) => x.id === found.targetId);
+        setTarget({
+          kind: "agent",
+          name: a ? pickLocalized(a, locale).name : locale === "en" ? "(removed agent)" : "(삭제된 에이전트)",
+        });
+      }
+    } catch (err) {
+      setError(locale === "en" ? `Automation could not be loaded. Nothing changed. ${String(err)}` : `자동화를 불러오지 못했습니다. 바뀐 내용은 없습니다. ${String(err)}`);
+    } finally {
+      setLoading(false);
     }
   }
   useEffect(() => {
@@ -56,19 +70,40 @@ function AutomationDetailPage() {
   async function toggle() {
     const api = ipc();
     if (!api || !automation) return;
-    const next = await api.automations.toggle(automation.id, !automation.enabled);
-    setAutomation(next);
+    try {
+      const next = await api.automations.toggle(automation.id, !automation.enabled);
+      setAutomation(next);
+      setError("");
+    } catch (err) {
+      setError(locale === "en" ? `Status did not change. ${String(err)}` : `상태를 바꾸지 못했습니다. ${String(err)}`);
+    }
   }
 
   async function remove() {
     const api = ipc();
     if (!api || !automation) return;
     if (!confirm(t("auto.confirm_delete"))) return;
-    await api.automations.remove(automation.id);
-    router.replace("/automation");
+    try {
+      await api.automations.remove(automation.id);
+      router.replace("/automation");
+    } catch (err) {
+      setError(locale === "en" ? `Automation was not deleted. ${String(err)}` : `자동화를 삭제하지 못했습니다. ${String(err)}`);
+    }
   }
 
-  if (!automation) return null;
+  if (loading || error || !automation) {
+    return (
+      <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
+        <section style={{ maxWidth: 640, margin: "24px auto", padding: "0 24px" }}>
+          <div style={noticeBox}>
+            {loading
+              ? locale === "en" ? "Loading automation…" : "자동화를 불러오는 중입니다…"
+              : error || (locale === "en" ? "Automation could not be opened." : "자동화를 열 수 없습니다.")}
+          </div>
+        </section>
+      </div>
+    );
+  }
 
   return (
     <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
@@ -164,12 +199,22 @@ function AutomationDetailPage() {
             borderRadius: "var(--radius-md)",
           }}
         >
-          {t("auto.detail.stub")}
+          {t("auto.detail.runtime_note")}
         </p>
       </section>
     </div>
   );
 }
+
+const noticeBox: React.CSSProperties = {
+  border: "1px solid var(--paper-edge)",
+  borderRadius: "var(--radius-md)",
+  background: "var(--paper)",
+  color: "var(--ink-soft)",
+  padding: 16,
+  fontSize: 13,
+  lineHeight: 1.5,
+};
 
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (

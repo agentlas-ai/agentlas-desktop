@@ -48,6 +48,8 @@ function FirmDetailPage() {
   const [resolving, setResolving] = useState(false);
   const [resolveMsg, setResolveMsg] = useState("");
   const [resolvedOrg, setResolvedOrg] = useState<ResolvedOrg | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadMessage, setLoadMessage] = useState("");
 
   // 왼쪽 조직도 패널 너비 & 접기 상태 (localStorage 영속)
   const [orgWidth, setOrgWidth] = useState(300);
@@ -140,22 +142,34 @@ function FirmDetailPage() {
 
   const refresh = useCallback(async () => {
     const api = ipc();
-    if (!api || !id) return;
-    const [f, ag, cs, org] = await Promise.all([
-      api.firms.get(id),
-      api.team.list(),
-      api.chats.listByFirm(id),
-      api.firms.getResolvedOrg(id),
-    ]);
-    if (!f) {
-      navigate("/marketplace?tab=firms", "replace");
+    setLoading(true);
+    setLoadMessage("");
+    if (!api || !id) {
+      setLoadMessage(locale === "ko" ? "회사 정보를 열 수 없습니다. 바뀐 내용은 없습니다." : "Firm details could not be opened. Nothing changed.");
+      setLoading(false);
       return;
     }
-    setFirm(f);
-    setAgents(visibleAgents(ag));
-    setChats(cs);
-    setResolvedOrg(org);
-  }, [id]);
+    try {
+      const [f, ag, cs, org] = await Promise.all([
+        api.firms.get(id),
+        api.team.list(),
+        api.chats.listByFirm(id),
+        api.firms.getResolvedOrg(id),
+      ]);
+      if (!f) {
+        navigate("/marketplace?tab=firms", "replace");
+        return;
+      }
+      setFirm(f);
+      setAgents(visibleAgents(ag));
+      setChats(cs);
+      setResolvedOrg(org);
+    } catch (err) {
+      setLoadMessage(locale === "ko" ? `회사 정보를 불러오지 못했습니다. 바뀐 내용은 없습니다. ${String(err)}` : `Firm details could not be loaded. Nothing changed. ${String(err)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [id, locale]);
 
   useEffect(() => {
     void refresh();
@@ -213,6 +227,7 @@ function FirmDetailPage() {
       } catch (e) {
         // 파일 로드 실패 시에도 위에서 설정한 메타데이터 프롬프트가 남아있다.
         console.error("에이전트 파일 로드 실패:", e);
+        if (!cancelled) showToast((locale === "ko" ? "에이전트 파일을 읽지 못했습니다. 메타데이터만 표시합니다: " : "Agent files could not be read. Showing metadata only: ") + String(e));
       }
     }
 
@@ -322,7 +337,19 @@ function FirmDetailPage() {
     setTimeout(() => setToastMsg(""), 3000);
   }
 
-  if (!firm) return null;
+  if (loading || !firm) {
+    return (
+      <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
+        <section style={{ maxWidth: 720, margin: "24px auto", padding: "0 24px" }}>
+          <div style={firmNotice}>
+            {loading
+              ? locale === "ko" ? "회사 정보를 불러오는 중입니다…" : "Loading firm details…"
+              : loadMessage || (locale === "ko" ? "회사 정보를 열 수 없습니다." : "Firm details could not be opened.")}
+          </div>
+        </section>
+      </div>
+    );
+  }
   const agentMap = new Map(agents.map((a) => [a.id, a]));
   const firmLoc = pickLocalized(firm, locale);
 
@@ -590,6 +617,16 @@ function FirmDetailPage() {
     </div>
   );
 }
+
+const firmNotice: React.CSSProperties = {
+  border: "1px solid var(--paper-edge)",
+  borderRadius: "var(--radius-md)",
+  background: "var(--paper)",
+  color: "var(--ink-soft)",
+  padding: 16,
+  fontSize: 13,
+  lineHeight: 1.5,
+};
 
 // ── 미니 사이드바 노드 아바타 ────────────────────────────
 function MiniNodeAvatar({ node, active, onClick }: { node: { name: string; role?: string }; active: boolean; onClick: () => void }) {

@@ -85,13 +85,14 @@ export function surfaceApprovalRequirement(
     Boolean(budget || summary) &&
     ((threshold !== undefined && spent + jobEstimate >= threshold) ||
       (limit !== undefined && spent + jobEstimate > limit));
+  const fullPermission = action.permission === "full";
   const fullWithoutCapabilities = action.permission === "full" && capabilities.length === 0;
   const delegatedWithoutCapabilities = DELEGATED_ACTIONS.has(action.type) && capabilities.length === 0;
   const agentFirst =
     stringValue(isObject(manifest.delegation) ? manifest.delegation.mode : undefined) === "agent-operated" &&
     stringValue(isObject(manifest.delegation) && isObject(manifest.delegation.autonomy) ? manifest.delegation.autonomy.mode : undefined) !==
       "supervised";
-  const checkpointAction = action.type === "request-payment-approval" || budgetGate || fullWithoutCapabilities || delegatedWithoutCapabilities;
+  const checkpointAction = action.type === "request-payment-approval" || budgetGate || fullPermission || delegatedWithoutCapabilities;
 
   if (agentFirst && AGENT_FIRST_ACTIONS.has(action.type) && !checkpointAction) return null;
 
@@ -119,7 +120,7 @@ export function surfaceApprovalRequirement(
     paymentScope,
   ].join(":");
 
-  const kind = approvalKind(action, budgetGate, fullWithoutCapabilities);
+  const kind = approvalKind(action, budgetGate, fullPermission);
   const metadata: JsonObject = {
     actionId: action.id,
     actionType: action.type,
@@ -170,6 +171,9 @@ export function surfaceApprovalRequirement(
             : `${stringValue(payment.currency) || "currency"} ${stringValue(payment.amount) || "amount"}`
         }, ${stringValue(payment.recurrence) || "unknown recurrence"}`
       : "",
+    fullPermission && !fullWithoutCapabilities
+      ? "Warning: this action asks for full permission. Review the target, tools, and next step before approving."
+      : "",
     fullWithoutCapabilities
       ? "Warning: this action asks for full permission but the manifest declares no capability scope."
       : "",
@@ -183,7 +187,7 @@ export function surfaceApprovalRequirement(
   const persist =
     capabilities.length > 0 &&
     capabilities.every((capability) => capability.approval === undefined || capability.approval === "once") &&
-    !fullWithoutCapabilities &&
+    !fullPermission &&
     !delegatedWithoutCapabilities &&
     action.type !== "request-payment-approval" &&
     action.type !== "request-credential" &&
@@ -203,13 +207,13 @@ export function surfaceApprovalRequirement(
 function approvalKind(
   action: AgentlasSurfaceAction,
   budgetGate: boolean,
-  fullWithoutCapabilities: boolean,
+  fullPermission: boolean,
 ): SurfaceApprovalKind {
   if (action.type === "request-payment-approval") return "payment";
   if (action.type === "request-credential") return "credential";
   if (action.type === "delegate-browser" || action.type === "connect-service") return "browser-session";
   if (budgetGate) return "budget";
-  if (fullWithoutCapabilities) return "full-permission";
+  if (fullPermission) return "full-permission";
   return "capability";
 }
 

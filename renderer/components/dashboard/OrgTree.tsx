@@ -39,6 +39,7 @@ export function OrgTree() {
   // 로그인한 계정의 실제 서버 클라우드(cargo) 에이전트 — "클라우드" 카테고리에 리스트업.
   const [cloudListings, setCloudListings] = useState<MarketplaceListing[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState(false);
   const [importMessage, setImportMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [openCats, setOpenCats] = useState<Record<Source, boolean>>({
@@ -55,16 +56,25 @@ export function OrgTree() {
       setLoading(false);
       return;
     }
-    const [a, f, mine] = await Promise.all([
-      api.team.list(),
-      api.firms.list(),
-      api.marketplace.listMine().catch(() => [] as MarketplaceListing[]),
-    ]);
-    setAgents(dedupById(a).filter(isVisibleAgent));
-    setFirms(f);
-    setCloudListings(mine);
-    setLoading(false);
-  }, []);
+    try {
+      const [a, f, mine] = await Promise.all([
+        api.team.list(),
+        api.firms.list(),
+        api.marketplace.listMine().catch(() => [] as MarketplaceListing[]),
+      ]);
+      setAgents(dedupById(a).filter(isVisibleAgent));
+      setFirms(f);
+      setCloudListings(mine);
+      setLoadError("");
+    } catch {
+      setAgents([]);
+      setFirms([]);
+      setCloudListings([]);
+      setLoadError(ko ? "조직도를 불러오지 못했습니다. 설치된 항목은 바뀌지 않았습니다." : "Org chart could not be loaded. Installed items were not changed.");
+    } finally {
+      setLoading(false);
+    }
+  }, [ko]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -132,6 +142,8 @@ export function OrgTree() {
     try {
       await api.team.uninstall(id);
       await load();
+    } catch (err) {
+      setImportMessage({ tone: "error", text: ko ? `제거하지 못했습니다. 그대로 남아 있습니다. ${String(err)}` : `Could not remove it. It is still installed. ${String(err)}` });
     } finally {
       setBusy(false);
     }
@@ -144,6 +156,8 @@ export function OrgTree() {
     try {
       await api.firms.uninstall(id);
       await load();
+    } catch (err) {
+      setImportMessage({ tone: "error", text: ko ? `회사를 제거하지 못했습니다. 그대로 남아 있습니다. ${String(err)}` : `Could not remove the firm. It is still installed. ${String(err)}` });
     } finally {
       setBusy(false);
     }
@@ -161,6 +175,8 @@ export function OrgTree() {
       for (const f of gFirms) await api.firms.uninstall(f.id);
       for (const a of gAgents) await api.team.uninstall(a.id);
       await load();
+    } catch (err) {
+      setImportMessage({ tone: "error", text: ko ? `일부 항목이 남아 있을 수 있습니다. 목록을 확인한 뒤 다시 시도하세요. ${String(err)}` : `Some items may still remain. Check the list, then try again. ${String(err)}` });
     } finally {
       setBusy(false);
     }
@@ -171,8 +187,12 @@ export function OrgTree() {
     if (orgs[id] === undefined) {
       const api = ipc();
       if (!api) return;
-      const org = await api.firms.getResolvedOrg(id);
-      setOrgs((p) => ({ ...p, [id]: org }));
+      try {
+        const org = await api.firms.getResolvedOrg(id);
+        setOrgs((p) => ({ ...p, [id]: org }));
+      } catch (err) {
+        setImportMessage({ tone: "error", text: ko ? `하위 조직도를 열지 못했습니다. ${String(err)}` : `Could not open the nested org chart. ${String(err)}` });
+      }
     }
   }
 
@@ -204,6 +224,7 @@ export function OrgTree() {
 
   return (
     <Shell mode={mode} setMode={setMode} query={query} setQuery={setQuery} onImport={importFolder} busy={busy} ko={ko} importMessage={importMessage}>
+      {loadError && <div className="dashboard-org-empty">{loadError}</div>}
       <div className="dashboard-org-list">
         {cats.map((cat) => {
           const { firms: cf, agents: ca } = bySource(cat.key);

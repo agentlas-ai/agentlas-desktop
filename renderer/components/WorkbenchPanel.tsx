@@ -498,14 +498,12 @@ function AppFactorySurface({
           <SectionTitle icon={<IconStore size={14} />} label="Ship Console" />
           <div style={actionStack}>
             {(manifest.actions ?? []).slice(0, 6).map((action) => (
-              <button
+              <SurfaceActionButton
                 key={action.id}
-                style={actionButton}
-                title={action.prompt || action.url || action.label}
-                onClick={() => onAction?.(surface, action)}
-              >
-                {action.label}
-              </button>
+                surface={surface}
+                action={action}
+                onAction={onAction}
+              />
             ))}
             {(manifest.actions ?? []).length === 0 && <div style={mutedSmall}>No launch actions declared.</div>}
           </div>
@@ -652,14 +650,12 @@ function CreativeStudioSurface({
           <SectionTitle icon={<IconCheck size={14} />} label="Actions" />
           <div style={actionStack}>
             {(manifest.actions ?? []).slice(0, 5).map((action) => (
-              <button
+              <SurfaceActionButton
                 key={action.id}
-                style={actionButton}
-                title={action.prompt || action.url || action.label}
-                onClick={() => onAction?.(surface, action)}
-              >
-                {action.label}
-              </button>
+                surface={surface}
+                action={action}
+                onAction={onAction}
+              />
             ))}
             {(manifest.actions ?? []).length === 0 && <div style={mutedSmall}>No actions declared.</div>}
           </div>
@@ -720,14 +716,12 @@ function GenericSurface({
           {(manifest.actions ?? []).length > 0 && (
             <div style={genericActionRow}>
               {(manifest.actions ?? []).slice(0, 4).map((action) => (
-                <button
+                <SurfaceActionButton
                   key={action.id}
-                  style={actionButton}
-                  title={action.prompt || action.url || action.label}
-                  onClick={() => onAction?.(surface, action)}
-                >
-                  {action.label}
-                </button>
+                  surface={surface}
+                  action={action}
+                  onAction={onAction}
+                />
               ))}
             </div>
           )}
@@ -737,6 +731,112 @@ function GenericSurface({
       </section>
     </div>
   );
+}
+
+function SurfaceActionButton({
+  surface,
+  action,
+  onAction,
+}: {
+  surface: WorkbenchSurface;
+  action: AgentlasSurfaceAction;
+  onAction?: SurfaceActionHandler;
+}) {
+  const { locale } = useT();
+  const ko = locale === "ko";
+  const [pending, setPending] = useState(false);
+  const profile = surfaceActionProfile(action, ko);
+  const title = [
+    action.prompt || action.url || action.label,
+    profile.description,
+  ].filter(Boolean).join("\n\n");
+
+  const run = () => {
+    if (pending) return;
+    setPending(true);
+    onAction?.(surface, action);
+    window.setTimeout(() => setPending(false), 1600);
+  };
+
+  return (
+    <button
+      type="button"
+      style={{ ...actionButton, ...profile.style, opacity: pending ? 0.68 : 1 }}
+      title={title}
+      onClick={run}
+      disabled={pending}
+    >
+      <span style={actionButtonTopLine}>
+        <span style={truncate}>{pending ? (ko ? "시작 중..." : "Starting...") : action.label}</span>
+        <span style={profile.badgeStyle}>{profile.badge}</span>
+      </span>
+      <span style={actionButtonMeta}>{profile.description}</span>
+    </button>
+  );
+}
+
+function surfaceActionProfile(action: AgentlasSurfaceAction, ko: boolean): {
+  badge: string;
+  description: string;
+  badgeStyle: CSSProperties;
+  style: CSSProperties;
+} {
+  const type = String(action.type || "");
+  const permission = action.permission || "write";
+  if (permission === "full") {
+    return {
+      badge: ko ? "전체 권한" : "Full",
+      description: ko ? "파일/도구/외부 작업을 크게 바꿀 수 있어 승인 후 실행됩니다." : "Can change files/tools/external work; approval is required.",
+      badgeStyle: actionBadgeDanger,
+      style: actionButtonDanger,
+    };
+  }
+  if (type === "request-payment-approval") {
+    return {
+      badge: ko ? "결제" : "Payment",
+      description: ko ? "상점/결제 단계입니다. 금액과 다음 행동을 확인하세요." : "Payment step. Check amount and next action.",
+      badgeStyle: actionBadgeWarn,
+      style: actionButtonWarn,
+    };
+  }
+  if (type === "request-credential") {
+    return {
+      badge: ko ? "키/계정" : "Credential",
+      description: ko ? "키나 계정 연결이 필요한 작업입니다." : "Needs a key or account connection.",
+      badgeStyle: actionBadgeWarn,
+      style: actionButtonWarn,
+    };
+  }
+  if (type === "delegate-browser" || type === "connect-service") {
+    return {
+      badge: ko ? "브라우저" : "Browser",
+      description: ko ? "외부 서비스나 브라우저 세션을 열 수 있습니다." : "May open an external service or browser session.",
+      badgeStyle: actionBadgeWarn,
+      style: actionButtonWarn,
+    };
+  }
+  if (type.includes("install") || type.includes("deploy") || type.includes("scaffold") || type.includes("materialize")) {
+    return {
+      badge: ko ? "로컬 변경" : "Local change",
+      description: ko ? "파일 생성, 설치, 배포 같은 변경 작업입니다." : "Creates files, installs, or deploys local work.",
+      badgeStyle: actionBadgeInfo,
+      style: actionButtonInfo,
+    };
+  }
+  if (permission === "read") {
+    return {
+      badge: ko ? "읽기" : "Read",
+      description: ko ? "읽기 중심 작업입니다. 쓰기 권한은 요청하지 않습니다." : "Read-oriented action; no write permission requested.",
+      badgeStyle: actionBadgeNeutral,
+      style: {},
+    };
+  }
+  return {
+    badge: ko ? "쓰기" : "Write",
+    description: ko ? "기본 쓰기 작업입니다. 실행 전 결과 위치를 확인하세요." : "Default write action. Check where the result will land.",
+    badgeStyle: actionBadgeNeutral,
+    style: {},
+  };
 }
 
 function GovernancePanel({
@@ -2173,7 +2273,7 @@ const actionStack: CSSProperties = {
 
 const actionButton: CSSProperties = {
   width: "100%",
-  minHeight: 34,
+  minHeight: 50,
   borderRadius: 8,
   border: "1px solid var(--accent-soft)",
   background: "var(--fill-1)",
@@ -2181,7 +2281,80 @@ const actionButton: CSSProperties = {
   fontSize: 12,
   fontWeight: 800,
   textAlign: "left",
-  padding: "7px 9px",
+  padding: "8px 9px",
+  display: "grid",
+  gap: 5,
+};
+
+const actionButtonTopLine: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+  minWidth: 0,
+};
+
+const actionButtonMeta: CSSProperties = {
+  color: "var(--muted-deep)",
+  fontSize: 10.5,
+  lineHeight: 1.3,
+  fontWeight: 650,
+};
+
+const actionButtonDanger: CSSProperties = {
+  border: "1px solid rgba(180,83,58,0.38)",
+  background: "rgba(180,83,58,0.08)",
+};
+
+const actionButtonWarn: CSSProperties = {
+  border: "1px solid rgba(186,116,44,0.34)",
+  background: "rgba(233,169,108,0.12)",
+};
+
+const actionButtonInfo: CSSProperties = {
+  border: "1px solid rgba(45,117,184,0.28)",
+  background: "rgba(96,139,224,0.10)",
+};
+
+const actionBadgeBase: CSSProperties = {
+  flexShrink: 0,
+  borderRadius: 999,
+  padding: "2px 6px",
+  fontSize: 9.5,
+  lineHeight: 1.2,
+  fontWeight: 900,
+  maxWidth: 108,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const actionBadgeDanger: CSSProperties = {
+  ...actionBadgeBase,
+  color: "var(--danger, #b4533a)",
+  background: "rgba(180,83,58,0.12)",
+  border: "1px solid rgba(180,83,58,0.32)",
+};
+
+const actionBadgeWarn: CSSProperties = {
+  ...actionBadgeBase,
+  color: "var(--peach-ink)",
+  background: "rgba(233,169,108,0.20)",
+  border: "1px solid rgba(186,116,44,0.26)",
+};
+
+const actionBadgeInfo: CSSProperties = {
+  ...actionBadgeBase,
+  color: "var(--blue-deep)",
+  background: "rgba(96,139,224,0.16)",
+  border: "1px solid rgba(45,117,184,0.22)",
+};
+
+const actionBadgeNeutral: CSSProperties = {
+  ...actionBadgeBase,
+  color: "var(--muted-deep)",
+  background: "var(--paper-2)",
+  border: "1px solid var(--paper-edge)",
 };
 
 const provenanceRow: CSSProperties = {

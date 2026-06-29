@@ -167,16 +167,26 @@ export function Landing({
 }: {
   onSignedIn: (session: AuthSession) => void;
 }) {
-  const { t } = useT();
+  const { t, locale } = useT();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   useGlobe(canvasRef);
 
   // 크롬 등 이미 로그인된 기본 브라우저 재사용 → 미완료 시 창 로그인 폴백 (AccountChip과 동일).
   const getStarted = useCallback(async () => {
     const api = ipc();
-    if (!api || busy) return;
+    if (busy) return;
+    if (!api) {
+      setNotice(
+        locale === "ko"
+          ? "데스크톱 앱 안에서 열어야 로그인을 시작할 수 있습니다. 브라우저 미리보기에서는 Electron 브릿지가 없어 실행되지 않습니다."
+          : "Open this inside the desktop app to start sign-in. Browser preview has no Electron bridge.",
+      );
+      return;
+    }
     setBusy(true);
+    setNotice(null);
     try {
       const next = await api.auth.signInWithBrowser();
       if (next.signedIn) {
@@ -185,10 +195,19 @@ export function Landing({
       }
       const fallback = await api.auth.signInWithGoogle();
       if (fallback.signedIn) onSignedIn(fallback);
+      else {
+        setNotice(
+          locale === "ko"
+            ? "로그인이 완료되지 않았습니다. 브라우저 창을 확인하거나 다시 시도하세요."
+            : "Sign-in did not complete. Check the browser window or try again.",
+        );
+      }
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
-  }, [busy, onSignedIn]);
+  }, [busy, locale, onSignedIn]);
 
   return (
     <div
@@ -388,6 +407,21 @@ export function Landing({
               </svg>
             )}
           </button>
+          {notice && (
+            <div
+              role="status"
+              style={{
+                margin: "14px auto 0",
+                maxWidth: 520,
+                color: C.ink2,
+                fontSize: 13,
+                lineHeight: 1.55,
+                textAlign: "center",
+              }}
+            >
+              {notice}
+            </div>
+          )}
         </div>
       </div>
     </div>

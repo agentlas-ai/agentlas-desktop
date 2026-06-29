@@ -5,6 +5,7 @@
 import { useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { navigate } from "@/lib/navigation";
 import { deriveKeyStatus, type KeyStatus } from "@/lib/key-status";
 import { IconBolt, IconShield, IconCheck } from "@/components/Icon";
 
@@ -80,6 +81,24 @@ export function KeyStatusBanner({ mode = "banner" }: { mode?: "banner" | "pill" 
             : "Runs only on your own subscription/keys."}
         </span>
       </div>
+      <button
+        type="button"
+        className="titlebar-nodrag"
+        onClick={() => navigate("/library/env")}
+        style={{
+          marginLeft: "auto",
+          flexShrink: 0,
+          border: "1px solid var(--paper-edge)",
+          borderRadius: 8,
+          background: "var(--paper)",
+          color: "var(--ink)",
+          padding: "6px 9px",
+          fontSize: 11,
+          fontWeight: 800,
+        }}
+      >
+        {isError ? (ko ? "키 열기" : "Open keys") : ko ? "사용량 확인" : "Check usage"}
+      </button>
     </div>
   );
 }

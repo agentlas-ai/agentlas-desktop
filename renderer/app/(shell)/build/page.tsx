@@ -90,6 +90,38 @@ function buildCreditLabel(credits: number, ko: boolean): string {
   return `${credits} build credits`;
 }
 
+function friendlyHephaestusMessage(raw: string, ko: boolean): string {
+  const text = raw.trim();
+  const lower = text.toLowerCase();
+  if (!text) return ko ? "알 수 없음" : "Unknown error";
+  if (lower.includes("routing_card_required")) {
+    return ko
+      ? "라우팅 카드가 없어 업로드가 멈췄습니다. 패키지의 routing-card.json 또는 agentlas.json 라우팅 정보를 먼저 보강하세요."
+      : "Upload stopped because the routing card is missing. Add routing-card.json or routing metadata in agentlas.json.";
+  }
+  if (lower.includes("unsafe_path")) {
+    return ko
+      ? "안전하지 않은 파일 경로가 있어 멈췄습니다. 절대경로, .., 심볼릭 링크가 패키지 밖을 가리키는지 확인하세요."
+      : "Upload stopped because a file path is unsafe. Check absolute paths, .. segments, or symlinks escaping the package.";
+  }
+  if (lower.includes("manifest_missing") || lower.includes("agentlas.json")) {
+    return ko
+      ? "agentlas.json이 없거나 읽을 수 없습니다. 패키지 폴더에서 wizard/복구를 먼저 실행하세요."
+      : "agentlas.json is missing or unreadable. Run the package wizard/repair step in the agent folder first.";
+  }
+  if (lower.includes("needs-review") || lower.includes("acknowledge")) {
+    return ko
+      ? "검토가 필요한 경고가 있습니다. 경고 내용을 확인한 뒤 다시 업로드하세요."
+      : "The package has warnings that need review. Check the warnings before uploading again.";
+  }
+  if (lower.includes("quota") || lower.includes("credit")) {
+    return ko
+      ? "크레딧 또는 사용량 한도 때문에 멈췄습니다. 계정/크레딧 상태를 확인하세요."
+      : "Upload stopped because of credits or quota. Check account and credit status.";
+  }
+  return text.length > 220 ? `${text.slice(0, 220)}...` : text;
+}
+
 export default function BuildPage() {
   const { locale } = useT();
   const ko = locale === "ko";
@@ -174,15 +206,24 @@ export default function BuildPage() {
       const imported = await ipc()?.team.importLocalFolder(workspace);
       if (imported?.id) navigate(`/library/agents?agentId=${imported.id}`);
     } catch (e) {
-      setActionMsg((ko ? "설치 실패: " : "Install failed: ") + (e as Error).message);
+      setActionMsg((ko ? "설치 실패: " : "Install failed: ") + friendlyHephaestusMessage((e as Error).message, ko));
     }
   };
 
   const upload = async (visibility: "private-link" | "marketplace") => {
     if (!workspace) return;
     setActionMsg(ko ? `업로드 중 (${visibility === "marketplace" ? "Hub public" : "Cloud private"})…` : "Uploading…");
-    const res = await ipc()?.hephaestus.publish({ folder: workspace, visibility });
-    setActionMsg(res?.ok ? (ko ? "업로드 완료" : "Uploaded") : (ko ? "업로드 실패: " : "Upload failed: ") + (res?.error ?? res?.stderr ?? (ko ? "알 수 없음" : "unknown")));
+    try {
+      const res = await ipc()?.hephaestus.publish({ folder: workspace, visibility });
+      const raw = res?.error ?? res?.stderr ?? "";
+      setActionMsg(
+        res?.ok
+          ? (ko ? "업로드 완료. 공개/공유 상태는 Hub 또는 Cloud에서 한 번 더 확인하세요." : "Uploaded. Check Hub or Cloud once more for public/share status.")
+          : (ko ? "업로드 실패. 파일은 그대로입니다: " : "Upload failed. Files were not changed: ") + friendlyHephaestusMessage(raw, ko),
+      );
+    } catch (err) {
+      setActionMsg((ko ? "업로드를 시작하지 못했습니다. 파일은 그대로입니다: " : "Upload could not start. Files were not changed: ") + friendlyHephaestusMessage(String(err), ko));
+    }
   };
 
   const engineMissing = status ? !status.available : false;
