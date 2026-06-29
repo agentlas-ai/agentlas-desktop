@@ -824,7 +824,7 @@ export async function runMcpInvocation(
       effort: active.effort ?? undefined,
       signal,
       permission: req.appsGenerateMode ? "read" : req.permissions,
-      // 세션 resume 키 — codex가 (chatId, kind)별 CLI 세션을 재사용해
+      // 세션 resume 키 — CLI 러너가 (chatId, kind)별 세션을 재사용해
       // 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
       chatId: chat.id,
       mcpConfigPath,
@@ -844,7 +844,8 @@ export async function runMcpInvocation(
       onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean) =>
         sink({ kind: "tool-use", tool: { name, args, result, id, isError } }),
     };
-    let result = await picked.runner(runnerReq, runnerEvents);
+    let activeRunnerReq = runnerReq;
+    let result = await picked.runner(activeRunnerReq, runnerEvents);
     for (let pass = 2; pass <= STORMBREAKER_MAX_EXECUTION_PASSES; pass += 1) {
       const continuation = stripStormbreakerContinueMarker(result.text);
       if (!continuation.shouldContinue || signal?.aborted) {
@@ -856,14 +857,12 @@ export async function runMcpInvocation(
         pass,
         reason: "runner reported more safe Stormbreaker work remains",
       });
-      result = await picked.runner(
-        {
-          ...runnerReq,
-          userPrompt: buildStormbreakerContinuationPrompt(result.text, pass),
-          images: undefined,
-        },
-        runnerEvents,
-      );
+      activeRunnerReq = {
+        ...runnerReq,
+        userPrompt: buildStormbreakerContinuationPrompt(result.text, pass),
+        images: undefined,
+      };
+      result = await picked.runner(activeRunnerReq, runnerEvents);
     }
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
     const stormbreakerContinueRequested = finalContinuation.shouldContinue;
@@ -900,7 +899,8 @@ export async function runMcpInvocation(
     // 사용자가 "대시보드"라 말 안 해도 와우모먼트가 뜬다(키워드 의존 X). 단순/일회성은 마커가 안 와 1패스로 끝.
     if (chat.kind !== "division" && result.text.trim().includes(SURFACE_INTENT_MARKER)) {
       sink({ kind: "thinking", status: tStatus(locale, "thinking", { agent: agent.name }) });
-      result = await picked.runner({ ...runnerReq, forceSurface: true }, runnerEvents);
+      activeRunnerReq = { ...runnerReq, forceSurface: true };
+      result = await picked.runner(activeRunnerReq, runnerEvents);
     }
 
     // 항상-켜진 큐레이터: 답변 끝의 "## Memory Events" 블록을 파싱해 안전·스코프·중복 처리 후
@@ -930,6 +930,7 @@ export async function runMcpInvocation(
       let surfaceParse = parseSurfaces(displayText);
       let surfaceText = displayText;
       let surfaceVisibleText = surfaceParse.cleanedText || displayText;
+      let repairRuntimeSessionId = result.sessionId;
       for (let repairAttempt = 1; repairAttempt <= STORMBREAKER_MAX_REPAIR_PASSES; repairAttempt += 1) {
         const needsRepair =
           surfaceParse.surfaces.length === 0 &&
@@ -946,22 +947,11 @@ export async function runMcpInvocation(
           sink({ kind: "tool-use", status: `Repairing Agentlas surface manifest (${repairAttempt}/${STORMBREAKER_MAX_REPAIR_PASSES})` });
           const repaired = await picked.runner(
             {
-              systemPrompt,
+              ...activeRunnerReq,
               history,
               userPrompt: buildSurfaceRepairPrompt(surfaceText, surfaceParse.errors, surfaceParse.diagnostics),
               images: undefined,
-              backendLabel: picked.label,
-              model: active.model ?? undefined,
-              longContext: active.longContextEnabled ?? false,
-              effort: active.effort ?? undefined,
-              signal,
-              permission: "read",
-              mcpConfigPath,
-              mcpAllowedTools,
-              mcpCodexConfigArgs,
-              env: runnerEnv.env,
-              cwd: workingFolder ?? undefined,
-              locale,
+              runtimeSessionId: repairRuntimeSessionId,
             },
             {
               onStatus: (status) => sink({ kind: "tool-use", status }),
@@ -970,6 +960,7 @@ export async function runMcpInvocation(
                 sink({ kind: "tool-use", tool: { name, args, result, id, isError } }),
             },
           );
+          if (repaired.sessionId) repairRuntimeSessionId = repaired.sessionId;
           const repairedText = repaired.text.split(SURFACE_INTENT_MARKER).join("").trim();
           const repairedParse = parseSurfaces(repairedText);
           if (repairedParse.surfaces.length > 0) {

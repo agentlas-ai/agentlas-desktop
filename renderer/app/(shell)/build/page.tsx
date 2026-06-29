@@ -442,7 +442,7 @@ export default function BuildPage() {
           {awaitingReply && (
             <section className="build-card build-interview-card">
               <div className="build-card-head build-interview-head">
-                <span>{ko ? `딥인터뷰 · ${turn}번째 답변` : `Deep interview · answer ${turn}`}</span>
+                <span>{ko ? `딥인터뷰 · 질문 묶음 ${turn}` : `Deep interview · question batch ${turn}`}</span>
                 <div className="build-interview-head-actions">
                   {canRewindInterview && (
                     <button
@@ -458,8 +458,8 @@ export default function BuildPage() {
               </div>
               <p className="build-interview-hint">
                 {ko
-                  ? "옵션은 여러 개 선택할 수 있습니다. 선택을 마친 뒤 확인을 눌러야 다음 질문으로 넘어갑니다."
-                  : "You can select multiple options. Nothing is sent until you press Confirm."}
+                  ? "필요한 질문을 한 번에 모았습니다. 모두 선택한 뒤 확인을 눌러 한 번에 보냅니다."
+                  : "The needed questions are grouped here. Choose everything, then press Confirm once."}
               </p>
               {pendingQuestions.map((q) => (
                 <div key={q.id} className="build-interview-q">

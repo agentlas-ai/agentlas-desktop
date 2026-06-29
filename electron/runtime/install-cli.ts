@@ -37,6 +37,9 @@ const EXTRA_BIN_DIRS = [
   path.join(os.homedir(), ".gemini", "bin"),
   path.join(os.homedir(), ".grok", "bin"),
   path.join(os.homedir(), ".bun", "bin"),
+  // 앱이 sudo 없이 설치한 CLI — 유저 npm prefix(~/.agentlas/npm). unix=…/bin, Windows=prefix 루트.
+  path.join(os.homedir(), ".agentlas", "npm", "bin"),
+  path.join(os.homedir(), ".agentlas", "npm"),
 ];
 
 function searchDirs(): string[] {
@@ -76,16 +79,65 @@ export interface CliActionResult {
   command?: string;
 }
 
+/** grok-cli 공식 install.sh 실행 (curl | bash). ~/.grok/bin에 바이너리 설치 — sudo 불필요. */
+function installGrokViaScript(): Promise<CliActionResult> {
+  const url = "https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh";
+  const command = `curl -fsSL ${url} | bash`;
+  return new Promise<CliActionResult>((resolve) => {
+    let settled = false;
+    const done = (r: CliActionResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    let out = "";
+    let err = "";
+    let child: ReturnType<typeof spawnCli>;
+    try {
+      // curl|bash 파이프는 셸이 필요 → bash -c. 고정 URL이라 인젝션 위험 없음.
+      child = spawnCli("bash", ["-c", command], { stdio: ["ignore", "pipe", "pipe"], env: augmentedEnv() });
+    } catch (e) {
+      done({ ok: false, message: e instanceof Error ? e.message : String(e), command });
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+      done({ ok: false, message: "timed out after 3 min", command });
+    }, 3 * 60 * 1000);
+    child.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
+    child.stderr?.on("data", (c: Buffer) => (err += c.toString("utf8")));
+    child.on("error", (e) => done({ ok: false, message: e.message, command }));
+    child.on("close", (code) => {
+      if (code === 0) done({ ok: true, message: out.slice(-400).trim() || "installed" });
+      else done({ ok: false, message: (err || out).slice(-800).trim(), command });
+    });
+  });
+}
+
 /** `npm i -g <pkg>` 실행. node/npm이 없거나 권한 문제면 ok:false + 직접 실행할 명령 안내. */
 export function installCli(kind: InstallableCli): Promise<CliActionResult> {
   const plan = CLI_PLAN[kind];
   if (!plan) return Promise.resolve({ ok: false, message: `Unknown CLI: ${kind}` });
-  const command = `npm install -g ${plan.pkg}`;
+  // sudo 없이 항상 성공하도록 유저 prefix(~/.agentlas/npm)로 설치한다 — 시스템 전역 prefix(/opt/homebrew 등)는
+  // 쓰기에 root가 필요해 `npm i -g`가 EACCES로 실패하는 머신이 많다. 유저 prefix는 항상 쓰기 가능.
+  const userPrefix = path.join(os.homedir(), ".agentlas", "npm");
+  const command = `npm install -g ${plan.pkg} --prefix ${userPrefix}`;
 
   // 이미 설치돼 있으면 npm을 건드리지 않는다 — 네이티브 설치본(~/.local/bin/claude 등)도 인정.
   const existing = resolveBinary(plan.bin);
   if (existing) {
     return Promise.resolve({ ok: true, message: `already installed: ${existing}` });
+  }
+
+  // grok-cli는 공식 install.sh(~/.grok/bin, sudo 불필요)로 설치 — npm 전역 prefix가 sudo를 요구하는
+  // 머신(homebrew 등)에서 `npm i -g`가 실패하는 문제를 피한다. (Windows는 아래 npm 폴백.)
+  if (kind === "grok" && process.platform !== "win32") {
+    return installGrokViaScript();
   }
 
   // GUI에서도 npm을 찾도록 절대경로로 resolve(+PATH 보강). 못 찾으면 직접 실행 명령 안내.
@@ -111,7 +163,7 @@ export function installCli(kind: InstallableCli): Promise<CliActionResult> {
     let err = "";
     let child: ReturnType<typeof spawnCli>;
     try {
-      child = spawnCli(npmBin, ["install", "-g", plan.pkg], {
+      child = spawnCli(npmBin, ["install", "-g", plan.pkg, "--prefix", userPrefix], {
         stdio: ["ignore", "pipe", "pipe"],
         env: augmentedEnv(),
       });

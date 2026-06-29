@@ -41,10 +41,15 @@ export interface RunnerRequest {
   /** Agentlas-resolved environment: agent .env first, then global multimodal fallback/vault. */
   env?: NodeJS.ProcessEnv;
   /**
-   * 현재 chat 식별자 — 세션 resume를 지원하는 러너(codex)가 (chatId, kind)별 CLI 세션을
+   * 현재 chat 식별자 — 세션 resume를 지원하는 러너가 (chatId, kind)별 CLI 세션을
    * 재사용해 시스템 프롬프트/히스토리를 매 턴 재전송하지 않도록 한다. 미설정이면 매번 full-context.
    */
   chatId?: string;
+  /**
+   * 임시/비채팅 표면(Build 등)이 직접 넘기는 CLI 세션 id. 설정되면 러너는 가능한 경우 이 세션에서
+   * 이어가고, 결과의 sessionId를 호출자가 다음 턴에 보관한다.
+   */
+  runtimeSessionId?: string;
   /** 2차 패스 플래그 — 모델이 surface-intent 마커를 emit해 dispatch가 재호출할 때 SURFACE_PROTOCOL 강제 로드. */
   forceSurface?: boolean;
   /** 상태/오류 메시지 i18n에 사용. renderer가 동봉, fallback "en" */
@@ -62,6 +67,8 @@ export interface RunnerEvents {
 
 export interface RunnerResult {
   text: string;
+  /** Claude/Codex 같은 CLI 런타임이 반환한 재개 가능한 세션 id. */
+  sessionId?: string;
   /** 생성 토큰 수 (가능한 런타임만) */
   tokens?: number;
 }
@@ -76,7 +83,7 @@ export type Runner = (
  *  토큰을 아끼기 위해 짧게. */
 const ASK_PROTOCOL = `## Clarifying questions to the user
 
-If — and only if — you need an explicit choice from the user to proceed, emit exactly one fenced block, then STOP and wait:
+If — and only if — you need explicit choices from the user to proceed, emit one or more fenced blocks in the same reply, then STOP and wait:
 
 <<agentlas-ask>>
 { "question": "Question text ending with ?", "header": "Short label", "multiSelect": false, "options": [ { "label": "Option A", "description": "what happens" }, { "label": "Option B", "description": "what happens" } ] }
@@ -84,8 +91,9 @@ If — and only if — you need an explicit choice from the user to proceed, emi
 
 Rules:
 - 2–4 options. First option is the recommended one when there's a clear default.
+- If several independent choices are needed, ask them together as multiple <<agentlas-ask>> blocks in one reply.
 - Skip this when the user's answer wouldn't change what you do, or when a sensible default is obvious — pick it and proceed.
-- After the fence, do NOT also answer. The user's selection arrives as their next message.`;
+- After the question block(s), do NOT also answer. The user's selections arrive as their next message.`;
 
 /** 모델이 surface가 낫다고 판단했을 때 emit하는 마커. dispatch가 감지해 2차 패스에서 풀 프로토콜을 로드. */
 export const SURFACE_INTENT_MARKER = "<<surface-intent>>";

@@ -14,6 +14,7 @@
 //   <<\/agentlas-ask>>
 //
 // 본문에서 fence는 통째로 제거하고, 추출한 질문은 메시지 메타데이터로 옮긴다.
+// 질문이 여러 개 필요하면 fence를 여러 개 연속으로 emit할 수 있다.
 // 스트리밍 중 부분적으로 도착할 수 있어, 닫는 fence가 없으면 추출하지 않고 그대로 둔다.
 import type { ChatQuestion } from "@/components/ChatStream";
 
@@ -93,7 +94,7 @@ function tryParse(body: string, id: string): ChatQuestion | null {
 /** system prompt에 자동 prefix될 사용법 안내. 짧고 명확하게 — 토큰 부담 최소. */
 export const ASK_USER_SYSTEM_PROMPT = `## Asking the user a clarifying question
 
-When you need the user to pick from explicit options to proceed, emit exactly one fenced block:
+When you need the user to pick from explicit options to proceed, emit one or more fenced blocks in the same reply:
 
 <<agentlas-ask>>
 {
@@ -110,6 +111,7 @@ When you need the user to pick from explicit options to proceed, emit exactly on
 Rules:
 - Use only when their answer changes what you do next. Don't ask about defaults you can pick yourself.
 - 2–4 options. The first option should be the recommended one when there is a clear default.
-- After emitting the fence, STOP and wait — do not also try to answer.
-- The user's selection arrives as their next message verbatim.
+- If several independent choices are needed, ask them together as multiple blocks in one reply.
+- After emitting the question block(s), STOP and wait — do not also try to answer.
+- The user's selections arrive as their next message verbatim.
 `;

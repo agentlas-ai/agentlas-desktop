@@ -1,18 +1,27 @@
 // Claude Code CLI — 감지 + 실호출.
 // 사용자의 Claude Pro/Max 구독으로 돌아간다 (PRD §3.1 6-A).
 //
-// 호출 형식: claude -p "<user prompt>" --append-system-prompt "<system>"
-// 이전 메시지 컨텍스트는 V0에서는 system prompt에 inline. M1에서 --resume 옵션 활용 검토.
+// 호출 형식: claude -p "<user prompt>" --append-system-prompt-file <system>
+// 첫 턴은 full-context로 시작하고, 이후 턴은 Claude Code session_id로 resume한다.
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
+import crypto from "node:crypto";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, probeCliVersion, spawnCli, writeStdin } from "./exec";
+import {
+  clearRuntimeSession,
+  getRuntimeSession,
+  saveRuntimeSession,
+} from "../store/runtime-sessions";
+
+const KIND = "claude-code";
 
 const CANDIDATES = [
   "claude",
+  path.join(os.homedir(), ".agentlas/npm/bin/claude"), // 앱이 설치한 유저 prefix (sudo 불필요)
   path.join(os.homedir(), ".local/bin/claude"), // 네이티브 인스톨러 기본 위치
   path.join(os.homedir(), ".claude/local/claude"),
   "/opt/homebrew/bin/claude",
@@ -133,6 +142,28 @@ function flattenHistory(req: RunnerRequest): string {
   return lines.join("\n\n");
 }
 
+/**
+ * 세션 지문 — 시스템 프롬프트/모델/effort/권한이 바뀌면 기존 Claude 세션을 이어 쓰지 않는다.
+ * 사용자 입력은 매 턴 달라지므로 지문에 넣지 않는다. 넣으면 일반 채팅 세션이 매번 끊긴다.
+ * Build처럼 runtimeSessionId를 직접 넘기는 표면은 호출자가 세션 수명을 관리한다.
+ */
+function systemFingerprint(req: RunnerRequest): string {
+  return crypto
+    .createHash("sha256")
+    .update(req.systemPrompt)
+    .update("\0")
+    .update(req.locale)
+    .update("\0")
+    .update(req.permission ?? "")
+    .update("\0")
+    .update(req.forceSurface ? "force-surface" : "normal")
+    .update("\0")
+    .update(req.model ?? "")
+    .update("\0")
+    .update(req.effort ?? "")
+    .digest("hex");
+}
+
 export const runClaudeCode: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
@@ -142,16 +173,32 @@ export const runClaudeCode: Runner = async (
     throw new Error(tStatus(req.locale, "errCliMissingClaude"));
   }
 
+  const systemPrompt = wrapSystemPrompt(req.systemPrompt, req.locale, req.permission, req.userPrompt, req.forceSurface);
+  const fingerprint = req.chatId ? systemFingerprint(req) : null;
+  const savedSession = req.chatId ? getRuntimeSession(req.chatId, KIND) : null;
+  const storedSessionId =
+    savedSession && fingerprint && savedSession.fingerprint === fingerprint
+      ? savedSession.sessionId
+      : null;
+  if (req.chatId && savedSession && fingerprint && savedSession.fingerprint !== fingerprint) {
+    clearRuntimeSession(req.chatId, KIND);
+  }
+  const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
+  const flatUser = resumeSessionId ? req.userPrompt : flattenHistory(req);
+
   if (req.images && req.images.length > 0) {
     events.onStatus(
       tStatus(req.locale, "cliNoImageClaude", { backend: req.backendLabel }),
     );
+  } else if (resumeSessionId) {
+    events.onStatus(
+      req.locale === "ko"
+        ? `${req.backendLabel} 세션 이어가는 중...`
+        : `Resuming ${req.backendLabel} session...`,
+    );
   } else {
     events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
   }
-
-  const systemPrompt = wrapSystemPrompt(req.systemPrompt, req.locale, req.permission, req.userPrompt, req.forceSurface);
-  const flatUser = flattenHistory(req);
 
   // 권한 칩 → claude 권한 모드. read=기본(헤드리스에서 위험 툴 자동 거부), write=편집 허용, full=전체.
   const permArgs =
@@ -194,19 +241,34 @@ export const runClaudeCode: Runner = async (
   return new Promise<RunnerResult>((resolve, reject) => {
     // stream-json + verbose: tool_use / 텍스트 / 토큰(usage) 이벤트를 NDJSON으로 받아
     // Claude Code식 tool-use 블록 + 토큰 표시를 가능하게 한다.
-    const args = [
-      "-p",
-      "--append-system-prompt-file",
-      sysPromptFile,
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      ...modelArgs,
-      ...effortArgs,
-      ...permArgs,
-      ...mcpArgs,
-      ...allowedToolArgs,
-    ];
+    const args = resumeSessionId
+      ? [
+          "--resume",
+          resumeSessionId,
+          "--fork-session",
+          "-p",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          ...modelArgs,
+          ...effortArgs,
+          ...permArgs,
+          ...mcpArgs,
+          ...allowedToolArgs,
+        ]
+      : [
+          "-p",
+          "--append-system-prompt-file",
+          sysPromptFile,
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          ...modelArgs,
+          ...effortArgs,
+          ...permArgs,
+          ...mcpArgs,
+          ...allowedToolArgs,
+        ];
     const child = spawnCli(bin, args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: req.env ?? process.env,
@@ -229,6 +291,7 @@ export const runClaudeCode: Runner = async (
     let tokens: number | undefined;
     let stderr = "";
     let lastEmit = 0;
+    let sessionId: string | undefined;
     let accCapped = false;
     // 런어웨이 출력(예: 장기 실행 GUI/서버 로그가 끝없이 스트리밍되는 명령)으로부터
     // 메모리를 보호한다. acc를 무제한 누적 + 매 partial마다 전체를 렌더러로 보내면
@@ -264,6 +327,7 @@ export const runClaudeCode: Runner = async (
 
     function handleEvent(ev: {
       type?: string;
+      session_id?: string;
       message?: {
         content?: Array<{
           type?: string;
@@ -279,6 +343,9 @@ export const runClaudeCode: Runner = async (
       result?: unknown;
       usage?: { output_tokens?: number };
     }): void {
+      if (typeof ev.session_id === "string" && ev.session_id) {
+        sessionId = ev.session_id;
+      }
       if (ev.type === "assistant" && ev.message?.content) {
         for (const block of ev.message.content) {
           if (block.type === "text" && block.text) {
@@ -362,8 +429,18 @@ export const runClaudeCode: Runner = async (
       }
       if (code === 0) {
         if (acc) events.onPartial(finalText || acc);
-        resolve({ text: (finalText || acc).trim(), tokens });
+        if (req.chatId && fingerprint && sessionId) {
+          saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint);
+        }
+        resolve({ text: (finalText || acc).trim(), sessionId, tokens });
       } else {
+        if (resumeSessionId && req.chatId) clearRuntimeSession(req.chatId, KIND);
+        if (resumeSessionId) {
+          // 저장된 CLI 세션이 만료/손상되면 같은 턴을 full-context로 즉시 복구한다.
+          // Build는 req.history를 갖고 있고, Chat은 DB history를 갖고 있으므로 문맥은 유지된다.
+          void runClaudeCode({ ...req, runtimeSessionId: undefined }, events).then(resolve, reject);
+          return;
+        }
         reject(new Error(`claude CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));
       }
     });

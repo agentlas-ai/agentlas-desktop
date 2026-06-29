@@ -60,6 +60,7 @@ interface InterviewCheckpoint {
   log: LogLine[];
   reached: number;
   history: ChatMsg[];
+  runtimeSessionId: string | null;
 }
 
 // 빌드 파이프라인 단계 수 — 화면의 STAGES 배열과 일치(모드분류·인터뷰/리서치·생성·검증·배포).
@@ -103,6 +104,7 @@ let lastAcc = "";
 let history: ChatMsg[] = [];
 let currentInput = "";
 let interviewCheckpoints: InterviewCheckpoint[] = [];
+let runtimeSessionId: string | null = null;
 
 function commit() {
   state.canRewindInterview = state.phase === "interview" && interviewCheckpoints.length > 1;
@@ -217,6 +219,7 @@ function rememberInterviewCheckpoint(): void {
     log: cloneLog(state.log),
     reached: state.reached,
     history: cloneHistory(history),
+    runtimeSessionId,
   };
   interviewCheckpoints = [
     ...interviewCheckpoints.filter((item) => item.turn !== checkpoint.turn),
@@ -260,6 +263,7 @@ async function runTurn(input: string): Promise<void> {
     mode: state.mode || undefined,
     workspace,
     runtime: state.runtime || undefined,
+    runtimeSessionId: runtimeSessionId || undefined,
     history: [...history],
   });
   state.runId = runId;
@@ -291,6 +295,7 @@ async function runTurn(input: string): Promise<void> {
       pushLog("log", e.text ?? "");
     } else if (e.kind === "done") {
       const assistantText = e.text ?? "";
+      if (e.sessionId) runtimeSessionId = e.sessionId;
       history.push({ role: "user", text: input });
       history.push({ role: "assistant", text: assistantText });
       detach();
@@ -328,7 +333,7 @@ async function runTurn(input: string): Promise<void> {
       pushLog(
         "log",
         parsed.questions.length
-          ? "딥인터뷰 — 아래에서 답해 주세요."
+          ? "딥인터뷰 — 질문 묶음에 한 번에 답해 주세요."
           : "어시스턴트가 추가 정보를 기다립니다 — 아래에 답해 주세요.",
       );
       rememberInterviewCheckpoint();
@@ -350,6 +355,7 @@ export async function startBuild(): Promise<void> {
   // 새 빌드 — 대화/로그/단계 초기화.
   history = [];
   interviewCheckpoints = [];
+  runtimeSessionId = null;
   state.turn = 0;
   state.reached = 0;
   state.result = null;
@@ -378,6 +384,7 @@ export function rewindBuildInterview(): void {
   const target = interviewCheckpoints[interviewCheckpoints.length - 2];
   interviewCheckpoints = interviewCheckpoints.slice(0, -1);
   history = cloneHistory(target.history);
+  runtimeSessionId = target.runtimeSessionId;
   currentInput = "";
   state.phase = "interview";
   state.errored = false;
@@ -400,6 +407,7 @@ export function cancelBuild() {
   state.awaitingReply = false;
   state.pendingQuestions = [];
   interviewCheckpoints = [];
+  runtimeSessionId = null;
   detach();
   commit();
 }
@@ -418,5 +426,6 @@ export function resetBuild() {
   state.canRewindInterview = false;
   history = [];
   interviewCheckpoints = [];
+  runtimeSessionId = null;
   commit();
 }

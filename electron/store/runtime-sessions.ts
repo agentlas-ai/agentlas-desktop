@@ -1,5 +1,5 @@
 // CLI 런타임 세션 매핑 — chat × backend(kind)별로 CLI 세션 id를 보관한다.
-// 세션 resume를 지원하는 러너(codex)가 두 번째 턴부터 시스템 프롬프트/히스토리를
+// 세션 resume를 지원하는 러너(Claude Code/Codex)가 두 번째 턴부터 시스템 프롬프트/히스토리를
 // 재전송하지 않고 이어가도록 한다. fingerprint가 달라지면(시스템 프롬프트/모델 변경)
 // 기존 세션을 버리고 새로 시작한다.
 import { getDb } from "./db";

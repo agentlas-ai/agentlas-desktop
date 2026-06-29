@@ -2394,6 +2394,8 @@ export interface HephaestusBuildEvent {
   kind: "log" | "stage" | "partial" | "done" | "error";
   text?: string;
   stage?: string;
+  /** CLI 런타임이 반환한 재개 가능한 세션 id. 다음 인터뷰 턴에서 그대로 이어간다. */
+  sessionId?: string;
   result?: unknown;
 }
 export interface HephaestusBuildRequest {
@@ -2405,6 +2407,8 @@ export interface HephaestusBuildRequest {
   workspace: string;
   /** 사용할 런타임 선택(미지정 시 활성 런타임). */
   runtime?: RuntimeSelection;
+  /** 이전 인터뷰 턴에서 받은 CLI 세션 id. 있으면 새 호출 대신 같은 대화를 resume한다. */
+  runtimeSessionId?: string;
   /** 대화형 딥인터뷰용 이전 대화(이번 턴 입력 이전까지). 빌더가 인터뷰 맥락을 이어간다. */
   history?: Array<{ role: "user" | "assistant"; text: string }>;
 }

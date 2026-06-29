@@ -12,6 +12,7 @@ import { agentRunCwd, probeCliVersion, spawnCli, writeStdin } from "./exec";
 
 const CANDIDATES = [
   "gemini",
+  path.join(os.homedir(), ".agentlas/npm/bin/gemini"), // 앱이 설치한 유저 prefix (sudo 불필요)
   path.join(os.homedir(), ".local/bin/gemini"), // 네이티브 인스톨러 기본 위치
   path.join(os.homedir(), ".gemini/bin/gemini"),
   "/opt/homebrew/bin/gemini",

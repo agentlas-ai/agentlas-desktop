@@ -660,8 +660,8 @@ export function initStore(): void {
   }
 
   // ── v24 → v25: CLI 런타임 세션 매핑 (chat × backend별 세션 id) ──
-  //   세션 resume(codex 등)로 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
-  //   fingerprint: 시스템 프롬프트/모델/effort가 바뀌면 새 세션을 시작하기 위한 해시.
+  //   세션 resume(Claude Code/Codex 등)로 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
+  //   fingerprint: 시스템 프롬프트/권한/표면 모드/모델/effort가 바뀌면 새 세션을 시작하기 위한 해시.
   if (userVersion < 25) {
     _db.exec(`
       CREATE TABLE IF NOT EXISTS chat_runtime_sessions (

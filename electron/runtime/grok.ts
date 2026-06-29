@@ -18,6 +18,7 @@ import { agentRunCwd, probeCliVersion, spawnCli } from "./exec";
 
 const CANDIDATES = [
   "grok",
+  path.join(os.homedir(), ".grok/bin/grok"), // 공식 install.sh 기본 설치 경로
   path.join(os.homedir(), ".local/bin/grok"),
   path.join(os.homedir(), ".bun/bin/grok"), // bun add -g grok-dev
   "/opt/homebrew/bin/grok",
@@ -87,10 +88,15 @@ function listGrokModels(bin: string): Promise<string[]> {
     child.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
     child.on("error", () => finish([]));
     child.on("close", () => {
-      // 출력에서 grok-* 토큰 추출 — JSON이든 plain text 목록이든 동작.
-      const ids = new Set<string>();
-      for (const m of out.matchAll(/grok[-\w.]+/gi)) ids.add(m[0].toLowerCase());
-      finish([...ids]);
+      // `grok models` 실측 출력: 각 기본 모델이 `  grok-4.3 — Grok 4.3 (reasoning)` 형태(ANSI 컬러 포함).
+      // ANSI 제거 후 "id — 설명" 라인의 id만 뽑는다(별칭 줄은 제외 → 드롭다운 깔끔).
+      // ANSI(컬러) 무관하게 grok-* 모델 id를 추출한다(별칭 포함이지만 모두 유효한 모델).
+      const ids: string[] = [];
+      for (const mm of out.matchAll(/grok[\w.-]*\d[\w.-]*/gi)) {
+        const id = mm[0].toLowerCase();
+        if (!ids.includes(id)) ids.push(id);
+      }
+      finish(ids);
     });
   });
 }
@@ -167,8 +173,8 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
 
   const cwd = req.cwd ?? agentRunCwd();
   const env = grokEnv(req.env ?? process.env);
-  if (req.model) env.GROK_MODEL = req.model;
   const args = ["--prompt", buildPrompt(req), "--directory", cwd, "--format", "json"];
+  if (req.model) args.push("-m", req.model); // grok --help 확인: -m, --model <model>
 
   const truncate = (s: string, max = 12000): string => (s.length > max ? `${s.slice(0, max)}…` : s);
   const stringify = (v: unknown): string => {

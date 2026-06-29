@@ -248,6 +248,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
       signal: turn.signal ?? p.signal,
       permission: p.req.permissions,
       cwd: workingFolder ?? undefined,
+      chatId: turn.chatId ?? undefined,
       mcpConfigPath: p.mcpConfigPath,
       mcpAllowedTools: p.mcpAllowedTools,
       mcpCodexConfigArgs: p.mcpCodexConfigArgs,

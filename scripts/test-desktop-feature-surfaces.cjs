@@ -243,35 +243,26 @@ async function runBuildInterviewSurface(browser, baseUrl, evidence) {
   await page.locator("textarea").first().fill("인터뷰가 필요한 에이전트");
   await page.getByRole("button", { name: /딥인터뷰로 빌드 시작|Start build/ }).click();
   await page.getByText(/어떤 산출물이 필요합니까/).waitFor();
+  await page.getByText(/어디에 배포할까요/).waitFor();
   await page.getByRole("button", { name: /리포트/ }).click();
   await page.getByRole("button", { name: /앱/ }).click();
+  await page.getByRole("button", { name: /비공개/ }).click();
   assert.equal(
     await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "hephaestus.build").length),
     1,
     "interview option clicks must not advance before confirm",
   );
-  await page.getByRole("button", { name: /선택 2개 확인|Confirm 2/ }).click();
-  await page.getByText(/어디에 배포할까요/).waitFor();
-  await page.getByRole("button", { name: /1번째 답변으로 돌아가기|Back to answer 1/ }).click();
-  await page.getByText(/1번째 답변으로 돌아갔습니다/).waitFor();
-  await page.getByText(/어떤 산출물이 필요합니까/).waitFor();
-  await page.getByRole("button", { name: /앱/ }).click();
-  await page.getByRole("button", { name: /선택 1개 확인|Confirm 1/ }).click();
-  await page.getByText(/어디에 배포할까요/).waitFor();
-  await page.getByRole("button", { name: /비공개/ }).click();
-  await page.getByRole("button", { name: /선택 1개 확인|Confirm 1/ }).click();
+  await page.getByRole("button", { name: /선택 3개 확인|Confirm 3/ }).click();
   await page.getByText(/패키지 준비됨|Package ready/).waitFor();
 
   const calls = await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "hephaestus.build"));
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 2);
   assert.equal(calls[0].payload.request, "인터뷰가 필요한 에이전트");
   assert.match(calls[1].payload.request, /1\. 리포트/);
   assert.match(calls[1].payload.request, /2\. 앱/);
+  assert.match(calls[1].payload.request, /1\. 비공개/);
   assert.ok(Array.isArray(calls[1].payload.history));
   assert.ok(calls[1].payload.history.some((item) => item.role === "assistant" && item.text.includes("<<agentlas-ask>>")));
-  assert.doesNotMatch(calls[2].payload.request, /리포트/);
-  assert.match(calls[2].payload.request, /1\. 앱/);
-  assert.match(calls[3].payload.request, /1\. 비공개/);
 
   await finishPage(context, page, errors, evidence, "build-interview-surface");
 }
@@ -1332,14 +1323,10 @@ function setupMockAgentlasBridge(options) {
             }),
             "<</agentlas-ask>>",
           ].join("\n");
+          const askBatch = [askOne, askTwo].join("\n\n");
           if (runId === "build-run-1") {
-            window.setTimeout(() => emit(`build:${runId}`, { kind: "partial", text: askOne }), 20);
-            window.setTimeout(() => emit(`build:${runId}`, { kind: "done", text: askOne, result: { workspace: "/tmp/agentlas-qa", securityScan: { findings: [] } } }), 60);
-            return;
-          }
-          if (runId === "build-run-2" || runId === "build-run-3") {
-            window.setTimeout(() => emit(`build:${runId}`, { kind: "partial", text: askTwo }), 20);
-            window.setTimeout(() => emit(`build:${runId}`, { kind: "done", text: askTwo, result: { workspace: "/tmp/agentlas-qa", securityScan: { findings: [] } } }), 60);
+            window.setTimeout(() => emit(`build:${runId}`, { kind: "partial", text: askBatch }), 20);
+            window.setTimeout(() => emit(`build:${runId}`, { kind: "done", text: askBatch, result: { workspace: "/tmp/agentlas-qa", securityScan: { findings: [] } } }), 60);
             return;
           }
           window.setTimeout(() => emit(`build:${runId}`, { kind: "stage", stage: "build", text: "QA build stage" }), 20);

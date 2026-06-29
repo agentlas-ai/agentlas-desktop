@@ -68,12 +68,14 @@ function composeBuilderPrompt(root: string, req: HephaestusBuildRequest): string
       "  one-line idea as the final spec. Interview the user until the target user, recurring tasks,",
       "  inputs, outputs, tools/plugins, concrete examples, failure modes, memory policy, and evaluation",
       "  rubric are all clear.",
-      "- Ask your clarifying questions using the `<<agentlas-ask>>` fenced JSON block defined above —",
-      "  emit exactly ONE question per turn (with 2+ concrete options when there is a sensible choice),",
-      "  then STOP and wait for the answer. Open-ended questions: still use the fence with options that",
-      "  represent the most likely answers plus an 'Other / let me type' option.",
-      "- Keep interviewing turn by turn until you have enough. Do NOT write files and do NOT print",
-      "  'BUILD_COMPLETE' during the interview phase.",
+      "- Ask clarifying questions as a BATCH. In the first interview reply, emit 4-8",
+      "  `<<agentlas-ask>>` fenced JSON blocks together, covering the key unknowns: target user,",
+      "  recurring jobs, inputs, outputs, tools/plugins, concrete examples, memory policy, and quality bar.",
+      "  Then STOP and wait for the single combined answer.",
+      "- Do NOT drip-feed one question per turn. Ask a follow-up turn only when the user's batch answer",
+      "  exposes a real blocker that cannot be decided by a sensible default.",
+      "- Open-ended questions still use a fence with likely options plus an 'Other / let me type' option.",
+      "- Do NOT write files and do NOT print 'BUILD_COMPLETE' during the interview phase.",
       "",
       "## THEN BUILD (only after the interview)",
       "- Follow the Hephaestus builder discipline above (research gate, contracts, adapters, verification).",
@@ -122,7 +124,12 @@ export async function runHephaestusBuild(
   const agentPrompt = composeBuilderPrompt(root, req);
   const systemPrompt = wrapSystemPrompt(agentPrompt, locale, "full", req.request, true);
 
-  sink({ runId, kind: "stage", stage: "build", text: `빌더 시작 (${picked.label})` });
+  sink({
+    runId,
+    kind: "stage",
+    stage: "build",
+    text: req.runtimeSessionId ? `빌더 이어서 진행 (${picked.label})` : `빌더 시작 (${picked.label})`,
+  });
 
   // 대화형 인터뷰 history → 러너의 ChatHistoryEntry로 매핑(id/createdAt는 표시에 쓰이지 않음).
   const nowIso = new Date().toISOString();
@@ -142,6 +149,7 @@ export async function runHephaestusBuild(
         backendLabel: picked.label,
         permission: "full",
         cwd: req.workspace,
+        runtimeSessionId: req.runtimeSessionId,
         signal,
         locale,
       },
@@ -185,6 +193,7 @@ export async function runHephaestusBuild(
       runId,
       kind: "done",
       text: result.text,
+      sessionId: result.sessionId,
       result: { workspace: req.workspace, securityScan: scan },
     });
   } catch (e) {
