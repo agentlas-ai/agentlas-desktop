@@ -94,5 +94,16 @@ output/playwright/
 /renderer/app/(shell)/library/agents/transform.js
 *.bak
 
-# Embedded Startup Founder Studio package (separate paid package, bundled at build)
-/studio-pack/
+# Embedded Startup Founder Studio package (bundled at build). Keep runtime/private
+# data out, but track the sanitized launcher + built SPA so clean CI can package.
+/studio-pack/.agentlas/
+/studio-pack/.studio-runtime/
+/studio-pack/**/__pycache__/
+/studio-pack/**/*.pyc
+/studio-pack/node_modules/
+/studio-pack/web/node_modules/
+/studio-pack/web/dist/generated/
+/studio-pack/web/dist/studio-data.json
+/studio-pack/web/public/generated/
+/studio-pack/web/public/studio-data.json
+/studio-pack/docs/dogfood/**/stitch/generated/

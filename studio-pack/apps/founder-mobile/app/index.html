@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Startup Studio Mobile</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="phone-shell">
+      <header class="topbar">
+        <div>
+          <p>Startup Studio</p>
+          <h1>오늘의 창업 작업</h1>
+        </div>
+        <span id="stagePill">앱 제작</span>
+      </header>
+
+      <section class="idea-card" aria-labelledby="ideaTitle">
+        <span>RAW IDEA</span>
+        <h2 id="ideaTitle">아이디어를 앱 행동으로 바꾸기</h2>
+        <textarea id="ideaInput" rows="4" aria-label="창업 아이디어">스타트업 패키지 에이전트 앱</textarea>
+      </section>
+
+      <section class="action-card" aria-labelledby="actionTitle">
+        <span>APP ACTIONS</span>
+        <h2 id="actionTitle">바로 실행할 일</h2>
+        <div class="action-list">
+          <button type="button" data-action="idea">새 아이디어 만들기</button>
+          <button type="button" data-action="today">오늘 할 일 보기</button>
+          <button type="button" data-action="market">시장 검증 열기</button>
+        </div>
+      </section>
+
+      <section class="stage-card" aria-label="진행 상태">
+        <div class="stage-row is-active"><span>아이디어 구체화</span><b>진행</b></div>
+        <div class="stage-row"><span>PRD/화면 설계</span><b>다음</b></div>
+        <div class="stage-row"><span>앱 제작</span><b>연결</b></div>
+      </section>
+
+      <nav class="tabbar" aria-label="앱 하단 메뉴">
+        <button type="button" class="is-active">홈</button>
+        <button type="button">작업</button>
+        <button type="button">검증</button>
+      </nav>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -33,6 +33,14 @@ const COLLAPSE_KEY = "agentlas.sidebar.collapsed";
 const CHATS_SECTION_COLLAPSE_KEY = "agentlas.sidebar.section.chats.collapsed";
 const COLLAPSED_WIDTH = 60;
 const EXPANDED_WIDTH = 248;
+const workspaceNavLinks = [
+  { href: "/dashboard", ko: "대시보드", en: "Dashboard" },
+  { href: "/build", ko: "만들기", en: "Build" },
+  { href: "/library/agents", ko: "에이전트", en: "Agents" },
+  { href: "/apps", ko: "Apps", en: "Apps" },
+  { href: "/marketplace", ko: "Hub", en: "Hub" },
+  { href: "/library/env", ko: "Env", en: "Env" },
+];
 
 interface SidebarData {
   chats: Chat[];
@@ -88,6 +96,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   const [chatsCollapsed, setChatsCollapsed] = useState(false);
   const [chatListLimit, setChatListLimit] = useState(12);
   const [newChatDialogOpen, setNewChatDialogOpen] = useState(false);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
   const refreshKey = refreshKeyProp + refreshTick;
   const triggerRefresh = () => setRefreshTick((n) => n + 1);
@@ -121,8 +130,15 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       if (!id) return;
       setData((prev) => ({ ...prev, chats: prev.chats.filter((chat) => chat.id !== id) }));
     }
+    function onChanged() {
+      triggerRefresh();
+    }
     window.addEventListener("agentlas:chat-removed", onRemoved);
-    return () => window.removeEventListener("agentlas:chat-removed", onRemoved);
+    window.addEventListener("agentlas:chat-changed", onChanged);
+    return () => {
+      window.removeEventListener("agentlas:chat-removed", onRemoved);
+      window.removeEventListener("agentlas:chat-changed", onChanged);
+    };
   }, []);
 
   function toggleChatsCollapsed() {
@@ -191,6 +207,10 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       if (cancelled) return;
       const active = runtimes.find((r) => r.active) ?? runtimes[0] ?? null;
       setData({ chats, projects, agents, runtime: active });
+    }).catch(() => {
+      if (!cancelled) setData((prev) => ({ ...prev, projects: [] }));
+    }).finally(() => {
+      if (!cancelled) setProjectsLoaded(true);
     });
     return () => {
       cancelled = true;
@@ -230,7 +250,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   }
 
   function handleNewChat() {
-    if (data.projects.length > 0) {
+    if (!projectsLoaded || data.projects.length > 0) {
       setNewChatDialogOpen(true);
       return;
     }
@@ -240,6 +260,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   const newChatDialog = newChatDialogOpen ? (
     <NewChatScopeDialog
       projects={data.projects}
+      projectsLoaded={projectsLoaded}
       locale={locale}
       onCancel={() => setNewChatDialogOpen(false)}
       onGlobal={() => {
@@ -408,9 +429,9 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         style={{
           height: 44,
           flexShrink: 0,
-          // 워크스페이스 병합 레일에선 축소 SideNav가 왼쪽에서 맥 신호등 영역을 이미 차지하므로
-          // 채팅 Sidebar 헤더는 신호등 여백이 필요 없다(과거 72px → 죽은 여백이었음).
-          paddingLeft: 12,
+          // hiddenInset titlebar 신호등 영역을 피한다. 워크스페이스에서는 SideNav가 없으므로
+          // Sidebar 자체가 좌상단 macOS 컨트롤 여백을 책임진다.
+          paddingLeft: 76,
           paddingRight: 8,
           display: "flex",
           alignItems: "center",
@@ -478,6 +499,15 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         }}
       >
 
+        <SidebarSection title={locale === "en" ? "Navigate" : "이동"} icon={<IconChevronRight size={12} />}>
+          {workspaceNavLinks.map((link) => (
+            <SidebarLink key={link.href} href={link.href} active={pathname === link.href}>
+              <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {locale === "en" ? link.en : link.ko}
+              </span>
+            </SidebarLink>
+          ))}
+        </SidebarSection>
 
         <SidebarSection
           title={t("sidebar.chats")}
@@ -811,12 +841,14 @@ function EmptyHint({ children }: { children: React.ReactNode }) {
 
 function NewChatScopeDialog({
   projects,
+  projectsLoaded,
   locale,
   onCancel,
   onGlobal,
   onProject,
 }: {
   projects: Project[];
+  projectsLoaded: boolean;
   locale: "ko" | "en";
   onCancel: () => void;
   onGlobal: () => void;
@@ -873,19 +905,25 @@ function NewChatScopeDialog({
           </span>
         </button>
         <div style={{ display: "grid", gap: 6, maxHeight: 260, overflowY: "auto" }}>
-          {projects.map((project) => (
-            <button key={project.id} type="button" onClick={() => onProject(project)} style={scopeButtonStyle}>
-              <span style={scopeIconStyle}><IconFolder size={15} /></span>
-              <span style={{ minWidth: 0 }}>
-                <strong style={scopeTitleStyle}>{project.name}</strong>
-                <span style={scopeSubStyle}>
-                  {project.folderPath
-                    ? project.folderPath
-                    : ko ? "프로젝트 메모리만 연결" : "Project memory only"}
+          {!projectsLoaded ? (
+            <div style={{ padding: "8px 10px", color: "var(--muted-deep)", fontSize: 12 }}>
+              {ko ? "프로젝트 불러오는 중..." : "Loading projects..."}
+            </div>
+          ) : (
+            projects.map((project) => (
+              <button key={project.id} type="button" onClick={() => onProject(project)} style={scopeButtonStyle}>
+                <span style={scopeIconStyle}><IconFolder size={15} /></span>
+                <span style={{ minWidth: 0 }}>
+                  <strong style={scopeTitleStyle}>{project.name}</strong>
+                  <span style={scopeSubStyle}>
+                    {project.folderPath
+                      ? project.folderPath
+                      : ko ? "프로젝트 메모리만 연결" : "Project memory only"}
+                  </span>
                 </span>
-              </span>
-            </button>
-          ))}
+              </button>
+            ))
+          )}
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
           <button type="button" onClick={onCancel} style={cancelButtonStyle}>

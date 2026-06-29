@@ -22,7 +22,7 @@ const TEAM_CALL_CREDITS = 10;
 const AGENT_CALL_CREDITS = 3;
 
 const C = {
-  purple: "color-mix(in oklch, #5A56DC 20%, var(--rd-surface))",
+  purple: "color-mix(in oklch, var(--rd-accent) 18%, var(--rd-surface))",
   peach: "var(--rd-accent-2)",
   green: "color-mix(in oklch, var(--rd-ok) 24%, var(--rd-surface))",
   blue: "color-mix(in oklch, #0284c7 18%, var(--rd-surface))",
@@ -189,7 +189,9 @@ function MarketplacePage() {
   }
 
   const normalizedQuery = q.trim().toLowerCase();
-  const hubLive = sourceStatus ? sourceStatus.online && !sourceStatus.usingFallback : false;
+  const hubPartial = Boolean(sourceStatus?.online && !sourceStatus.usingFallback && sourceStatus.lastError);
+  const hubLive = sourceStatus ? sourceStatus.online && !sourceStatus.usingFallback && !sourceStatus.lastError : false;
+  const hubAvailable = Boolean(sourceStatus?.online && !sourceStatus.usingFallback);
 
   const matchingListings = orderListingsForHub(listings.filter(isLiveHubListing).filter((l) => {
     if (!normalizedQuery) return true;
@@ -222,6 +224,8 @@ function MarketplacePage() {
     ? ko ? "Hub 확인 중" : "Checking Hub"
     : hubLive
       ? ko ? "Hub 실시간" : "Hub live"
+      : hubPartial
+        ? ko ? "Hub 부분 연결" : "Hub partial"
       : ko ? "Hub 연결 안 됨" : "Hub unavailable";
   const accountLabel = signedIn
     ? ko ? "계정 로그인됨" : "Account signed in"
@@ -238,10 +242,10 @@ function MarketplacePage() {
                 <span>{accountLabel}</span>
                 <span
                   style={{
-                    border: "1px solid var(--rd-border)",
+                    border: "1px solid var(--rd-hair)",
                     borderRadius: 999,
                     padding: "3px 8px",
-                    color: hubLive ? "var(--rd-ok)" : "var(--rd-warn)",
+                    color: hubAvailable ? (hubPartial ? "var(--rd-warn)" : "var(--rd-ok)") : "var(--rd-warn)",
                     background: "var(--rd-surface)",
                     fontSize: 12,
                     fontWeight: 650,
@@ -270,16 +274,18 @@ function MarketplacePage() {
                     width: 7,
                     height: 7,
                     borderRadius: 999,
-                    background: sourceStatus.online && !sourceStatus.usingFallback ? "var(--rd-ok)" : "var(--rd-warn)",
+                    background: hubAvailable && !hubPartial ? "var(--rd-ok)" : "var(--rd-warn)",
                     flexShrink: 0,
                   }}
                 />
                 <span>
-                  {hubLive
-                    ? ko ? "허브 실시간 연결됨" : "Hub live source"
+                  {hubAvailable
+                    ? hubPartial
+                      ? ko ? "Hub 일부만 연결됨 · 표시 가능한 Hub 항목만 보여줍니다" : "Hub partially connected · showing available Hub items"
+                      : ko ? "허브 실시간 연결됨" : "Hub live source"
                     : ko ? "Hub 연결 안 됨 · 표시할 Hub 항목 없음" : "Hub unavailable · no Hub items shown"}
                 </span>
-                {!hubLive && sourceStatus.lastError && (
+                {sourceStatus.lastError && (
                   <span style={{ color: "var(--rd-accent-2-text)", overflowWrap: "anywhere" }}>
                     {sourceStatus.lastError}
                   </span>
@@ -288,7 +294,7 @@ function MarketplacePage() {
             )}
           </div>
 
-          {sourceStatus && !hubLive && (
+          {sourceStatus && !hubAvailable && (
             <div className="hub-signin-notice" role="status" style={{ borderColor: "var(--rd-warn)", background: "color-mix(in oklch, var(--rd-warn) 10%, var(--rd-surface))" }}>
               <span>
                 <strong style={{ color: "var(--rd-ink)", fontWeight: 650 }}>
@@ -533,7 +539,7 @@ const reviewOverlay: CSSProperties = {
 const reviewDialog: CSSProperties = {
   width: "min(520px, 100%)",
   borderRadius: 8,
-  border: "1px solid var(--rd-border)",
+  border: "1px solid var(--rd-hair)",
   background: "var(--rd-surface)",
   boxShadow: "0 18px 60px rgba(20, 24, 32, 0.24)",
   display: "grid",
@@ -548,7 +554,7 @@ const reviewItem: CSSProperties = {
   padding: "8px 9px",
   borderRadius: 8,
   background: "var(--rd-surface-2)",
-  border: "1px solid var(--rd-border)",
+  border: "1px solid var(--rd-hair)",
   color: "var(--rd-ink-2)",
   fontSize: 12,
   lineHeight: 1.35,

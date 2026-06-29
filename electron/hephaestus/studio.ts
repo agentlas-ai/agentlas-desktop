@@ -19,6 +19,46 @@ let activeUrl: string | null = null;
 let mediaGuardInstalled = false;
 // 동시 startStudio() 호출을 하나의 spawn 으로 합류시키는 in-flight 락(고아 프로세스 누수 방지).
 let starting: Promise<StudioStartResult> | null = null;
+const PACK_SIGNATURE_FILE = ".agentlas-pack-signature";
+
+function shouldCopyStudioPath(root: string, src: string): boolean {
+  const rel = path.relative(root, src);
+  const parts = rel.split(path.sep);
+  const base = path.basename(src);
+  if (base === ".studio-runtime" || base === "node_modules" || base === ".git") return false;
+  if (parts[0] === ".agentlas" || parts[0] === "field-test") return false;
+  if (src.includes(`${path.sep}web${path.sep}src`)) return false;
+  if (parts[0] === "web" && parts[1] === "dist" && parts[2] === "generated") return false;
+  if (parts[0] === "web" && parts[1] === "dist" && parts[2] === "studio-data.json") return false;
+  if (parts[0] === "web" && parts[1] === "public" && parts[2] === "generated") return false;
+  if (parts[0] === "web" && parts[1] === "public" && parts[2] === "studio-data.json") return false;
+  return true;
+}
+
+function studioPackSignature(root: string): string | null {
+  const entries: string[] = [];
+  const visit = (abs: string) => {
+    if (!shouldCopyStudioPath(root, abs)) return;
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(abs);
+    } catch {
+      return;
+    }
+    if (stat.isDirectory()) {
+      for (const child of fs.readdirSync(abs).sort()) visit(path.join(abs, child));
+      return;
+    }
+    if (!stat.isFile()) return;
+    const rel = path.relative(root, abs);
+    const hash = crypto.createHash("sha256").update(fs.readFileSync(abs)).digest("hex");
+    entries.push(`${rel}:${hash}`);
+  };
+  for (const rel of ["manifest.json", "clean-studio-data.json", "scripts", path.join("web", "dist")]) {
+    visit(path.join(root, rel));
+  }
+  return entries.length > 0 ? crypto.createHash("sha256").update(entries.join("\n")).digest("hex") : null;
+}
 
 /** 임베드된 스튜디오 SPA 가 init 시 참조하는 죽은 외부 데모 미디어(cdn.pixabay.com 배경 영상)를
  *  차단해 404 노이즈를 없앤다. 폰트 CDN(jsdelivr/googleapis)·로컬 서버·생성 콘텐츠는 영향 없음
@@ -119,6 +159,15 @@ function ensureWritablePack(bundled: string): string {
       /* 비교 실패 시 기존 사용 */
     }
   }
+  const bundledSignature = studioPackSignature(bundled);
+  if (!needCopy && bundledSignature) {
+    try {
+      const currentDestSignature = studioPackSignature(dest);
+      if (currentDestSignature !== bundledSignature) needCopy = true;
+    } catch {
+      needCopy = true;
+    }
+  }
   if (needCopy) {
     // .studio-runtime 은 사용자 누적 데이터(studio-data.json, artifacts) — 재복사 시 절대 잃지 않게
     // rmSync 전에 sibling 으로 백업하고, cpSync 후 복원한다. cpSync 필터는 번들의 데모 .studio-runtime 을
@@ -133,20 +182,17 @@ function ensureWritablePack(bundled: string): string {
         backedUp = true;
       }
     } catch {
-      backedUp = false; // 백업 실패 시에도 복사는 진행하되, 복원 시도하지 않음.
+      // 사용자 생성 데이터 보존을 확신할 수 없으면 업데이트 복사를 중단한다.
+      // 낡은 팩을 쓰더라도 .studio-runtime 을 잃는 것보다는 안전하다.
+      return dest;
     }
     try {
       fs.rmSync(dest, { recursive: true, force: true });
       fs.cpSync(bundled, dest, {
         recursive: true,
-        filter: (src) => {
-          const base = path.basename(src);
-          // 생성물/의존성/소스/git 제외 — 데모 상태가 따라오지 않게 .studio-runtime 도 제외.
-          if (base === ".studio-runtime" || base === "node_modules" || base === ".git") return false;
-          if (src.includes(`${path.sep}web${path.sep}src`)) return false;
-          return true;
-        },
+        filter: (src) => shouldCopyStudioPath(bundled, src),
       });
+      if (bundledSignature) fs.writeFileSync(path.join(dest, PACK_SIGNATURE_FILE), bundledSignature, "utf8");
     } catch {
       // 복사 실패 — 백업해 둔 런타임을 되돌려 놓고 번들 경로로 폴백.
       if (backedUp) {

@@ -130,16 +130,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         overflow: "hidden",
       }}
     >
-      {/* 워크스페이스(채팅/프로젝트)에서도 글로벌 네비를 잃지 않도록 — 아이콘 전용 SideNav를
-          채팅 Sidebar와 나란히 둬 하나의 좌측 레일로 자연스럽게 합친다. (에이전트 관리 등 글로벌
-          진입점도 워크스페이스에서 그대로 접근 가능) */}
       {!showWorkspaceSidebar && <SideNav pendingConfirmations={pendingConfirmations} />}
-      {showWorkspaceSidebar && (
-        <>
-          <SideNav pendingConfirmations={pendingConfirmations} forceCollapsed />
-          <Sidebar />
-        </>
-      )}
+      {showWorkspaceSidebar && <Sidebar />}
       <main
         style={{
           position: "relative",
@@ -292,7 +284,15 @@ function GuideFab({
   if (hidden) return null;
 
   return (
-    <div className="titlebar-nodrag" style={{ position: "fixed", right: 20, bottom, zIndex: 150 }}>
+    <div
+      className="guide-fab titlebar-nodrag"
+      style={{
+        position: "fixed",
+        right: "var(--guide-fab-right, 20px)",
+        bottom: avoidComposer ? "var(--guide-fab-bottom-chat, 102px)" : "var(--guide-fab-bottom, 20px)",
+        zIndex: 150,
+      }}
+    >
       {open && (
         <div
           style={{

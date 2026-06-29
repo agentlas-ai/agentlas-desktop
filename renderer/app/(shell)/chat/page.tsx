@@ -763,7 +763,10 @@ function ChatPage() {
         subRef.current = null;
         // 첫 메시지였으면 main이 자동 제목 생성 → 갱신해서 사이드바도 반영
         const api = ipc();
-        void api?.chats.get(chatId).then((c) => c && setChat(c));
+        void api?.chats.get(chatId).then((c) => {
+          if (c) setChat(c);
+          window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chatId } }));
+        });
       } else if (ev.kind === "error") {
         pushWorkflow("status", ev.error?.message ?? t("chat.err.unknown"));
         setMessages((m) => [
@@ -1157,6 +1160,7 @@ function ChatPage() {
           borrowAgents: opts?.borrowAgents,
           routerAgent: opts?.routerAgent,
         });
+        window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chat.id } }));
         runIdRef.current = runId;
         // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
         subscribeRun(runId, placeholderId);
@@ -1613,7 +1617,10 @@ function ChatPage() {
       const api = ipc();
       if (!api || !chat) return;
       if (cmd === "/clear") {
-        void api.invoke.clearHistory(chat.id).then(() => setMessages([]));
+        void api.invoke.clearHistory(chat.id).then(() => {
+          setMessages([]);
+          window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chat.id } }));
+        });
       } else if (cmd === "/new") {
         void api.chats
           .create({ agentId: chat.agentId, projectId: chat.projectId, firmId: chat.firmId })

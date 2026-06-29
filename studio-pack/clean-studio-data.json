@@ -1,0 +1,583 @@
+{
+  "name": "Startup Founder Studio",
+  "en": {
+    "ideaSpine": {
+      "oneLiner": "New founder idea",
+      "customer": "Define the first customer",
+      "problem": "Clarify the painful problem",
+      "stage": "idea"
+    },
+    "stages": {
+      "idea": {
+        "key": "idea",
+        "index": 1,
+        "label": "Shape the idea",
+        "tagline": "Turn one line into customer, problem, and proof",
+        "hq": "Idea Foundry HQ",
+        "hqPath": "Startup/01-idea-foundry-hq",
+        "agent": { "persona": "Idea Coach", "engine": "Idea Foundry", "avatar": "IF" },
+        "icon": "Lightbulb",
+        "headline": "Start by naming the first customer, the painful problem, and the proof to collect.",
+        "verdict": { "label": "Awaiting", "tone": "warning" },
+        "summary": "This stage turns a raw idea into a founder-ready brief without inventing market facts.",
+        "metrics": [
+          { "label": "Customer", "value": "TBD", "tone": "warning" },
+          { "label": "Problem", "value": "TBD", "tone": "warning" },
+          { "label": "Proof", "value": "0/3", "tone": "neutral" }
+        ],
+        "workItems": [
+          { "id": "STU-101", "title": "First customer", "content": "Choose the person who feels the problem and can pay or spend time first.", "state": "todo", "priority": "high", "evidence": "needs-founder", "owner": "Idea Foundry", "updated": "new session" },
+          { "id": "STU-102", "title": "Core problem", "content": "Write the repeated situation, cost, and current workaround.", "state": "todo", "priority": "high", "evidence": "needs-founder", "owner": "Idea Foundry", "updated": "new session" },
+          { "id": "STU-103", "title": "Validation plan", "content": "List the fastest interviews, screenshots, or references that can prove the problem.", "state": "todo", "priority": "medium", "evidence": "needs-evidence", "owner": "Idea Foundry", "updated": "new session" }
+        ],
+        "decision": {
+          "stage": "idea",
+          "proofStatus": "Founder input needed",
+          "question": "Who is the first customer?",
+          "helper": "This choice decides the first product screen and the market check.",
+          "options": ["End user", "Buyer", "Operator", "Not sure yet"],
+          "affects": "First customer",
+          "blocks": "Market validation"
+        },
+        "crossChecks": [
+          { "label": "Problem evidence", "status": "needs-evidence", "note": "No founder evidence attached yet." },
+          { "label": "Customer clarity", "status": "needs-founder", "note": "Pick one narrow first customer before running market work." }
+        ],
+        "document": {
+          "title": "Idea brief",
+          "audience": "Founder",
+          "sections": [
+            { "heading": "Customer", "body": "Define who has the pain and who decides to adopt the solution.", "status": "needs-founder" },
+            { "heading": "Problem", "body": "Describe the repeated painful workflow and why the current workaround is not enough.", "status": "needs-founder" },
+            { "heading": "Proof", "body": "Attach interviews, screenshots, URLs, data, or direct founder notes before moving claims forward.", "status": "needs-evidence" }
+          ]
+        },
+        "runSteps": ["Read the founder idea", "Extract customer and problem", "Build a validation checklist"]
+      },
+      "market": {
+        "key": "market",
+        "index": 2,
+        "label": "Validate the market",
+        "tagline": "Map competitors, personas, and the wedge",
+        "hq": "Market Intelligence HQ",
+        "hqPath": "Startup/02-market-intelligence-hq",
+        "agent": { "persona": "Market Analyst", "engine": "Market Intelligence", "avatar": "MI" },
+        "icon": "Radar",
+        "headline": "Market work should separate evidence, assumptions, and open questions.",
+        "verdict": { "label": "Awaiting", "tone": "warning" },
+        "summary": "This stage compares alternatives and checks whether the chosen customer has a reachable market.",
+        "metrics": [
+          { "label": "Competitors", "value": "0", "tone": "neutral" },
+          { "label": "Personas", "value": "0", "tone": "neutral" },
+          { "label": "Sources", "value": "0", "tone": "warning" }
+        ],
+        "workItems": [
+          { "id": "STU-201", "title": "Alternative map", "content": "List what the customer uses today and why it falls short.", "state": "todo", "priority": "high", "evidence": "needs-evidence", "owner": "Market Intelligence", "updated": "new session" },
+          { "id": "STU-202", "title": "Persona signals", "content": "Capture motivations, objections, and willingness to switch.", "state": "todo", "priority": "medium", "evidence": "needs-founder", "owner": "Market Intelligence", "updated": "new session" }
+        ],
+        "decision": {
+          "stage": "market",
+          "proofStatus": "Market references needed",
+          "question": "Which competitor or workaround should be compared first?",
+          "helper": "Pick the alternative the customer already trusts.",
+          "options": ["Manual workaround", "Existing software", "Agency/service", "Unknown"],
+          "affects": "Competitive wedge",
+          "blocks": "Business model"
+        },
+        "crossChecks": [
+          { "label": "Source quality", "status": "needs-evidence", "note": "No sources attached yet." }
+        ],
+        "document": {
+          "title": "Market intelligence",
+          "audience": "Founder and reviewer",
+          "sections": [
+            { "heading": "Customer segment", "body": "Summarize the first reachable segment after evidence is attached.", "status": "needs-evidence" },
+            { "heading": "Competition", "body": "Compare current alternatives before claiming a gap.", "status": "needs-evidence" }
+          ]
+        },
+        "runSteps": ["Search the market", "Compare alternatives", "Draft the wedge"],
+        "competitors": [],
+        "marketSizing": {
+          "tam": { "label": "TAM", "value": "TBD", "basis": "Awaiting source" },
+          "sam": { "label": "SAM", "value": "TBD", "basis": "Awaiting source" },
+          "som": { "label": "SOM", "value": "TBD", "basis": "Awaiting source" },
+          "note": "Market size is not filled until evidence exists."
+        },
+        "personas": [],
+        "trends": [],
+        "positioning": { "xAxis": ["Generic", "Specific"], "yAxis": ["Manual", "Automated"], "players": [] },
+        "sources": []
+      },
+      "business": {
+        "key": "business",
+        "index": 3,
+        "label": "Design the business",
+        "tagline": "Revenue model, assumptions, and unit economics",
+        "hq": "Business Plan HQ",
+        "hqPath": "Startup/03-business-plan-hq",
+        "agent": { "persona": "Business Modeler", "engine": "Business Plan", "avatar": "BP" },
+        "icon": "Landmark",
+        "headline": "Business design should show which numbers are evidence and which are assumptions.",
+        "verdict": { "label": "Awaiting", "tone": "warning" },
+        "summary": "This stage drafts pricing, costs, risk assumptions, and a fundable business plan.",
+        "metrics": [
+          { "label": "Price", "value": "TBD", "tone": "warning" },
+          { "label": "Cost", "value": "TBD", "tone": "warning" },
+          { "label": "Risk", "value": "Open", "tone": "neutral" }
+        ],
+        "workItems": [
+          { "id": "STU-301", "title": "Revenue model", "content": "Decide whether the first model is subscription, transaction, service, or hybrid.", "state": "todo", "priority": "high", "evidence": "assumption", "owner": "Business Plan", "updated": "new session" },
+          { "id": "STU-302", "title": "Risk assumptions", "content": "List the assumptions that can break the business model.", "state": "todo", "priority": "high", "evidence": "needs-evidence", "owner": "Business Plan", "updated": "new session" }
+        ],
+        "decision": {
+          "stage": "business",
+          "proofStatus": "Pricing evidence needed",
+          "question": "What is the first pricing model?",
+          "helper": "Pricing determines the validation interview and the investor narrative.",
+          "options": ["Subscription", "Transaction fee", "Service package", "Not sure yet"],
+          "affects": "Revenue model",
+          "blocks": "PRD scope"
+        },
+        "crossChecks": [
+          { "label": "Pricing proof", "status": "needs-evidence", "note": "No payment evidence yet." }
+        ],
+        "document": {
+          "title": "Business plan",
+          "audience": "Founder, investor, or bank reviewer",
+          "sections": [
+            { "heading": "Revenue", "body": "State the model only after the target customer and value metric are clear.", "status": "assumption" },
+            { "heading": "Risks", "body": "Mark every unproven number as an assumption.", "status": "needs-evidence" }
+          ]
+        },
+        "runSteps": ["Draft pricing", "Map costs", "Flag risky assumptions"],
+        "unitEconomics": [],
+        "businessModel": [],
+        "financials": { "columns": [], "unit": "", "rows": [], "chart": [] },
+        "milestones": [],
+        "useOfFunds": []
+      },
+      "prd": {
+        "key": "prd",
+        "index": 4,
+        "label": "Plan the product",
+        "tagline": "PRD, UX flow, and first screen",
+        "hq": "PRD Maker HQ",
+        "hqPath": "Startup/04-product-planning-prd-maker",
+        "agent": { "persona": "Product Planner", "engine": "PRD Maker", "avatar": "PR" },
+        "icon": "PencilRuler",
+        "headline": "The PRD should turn the business decision into a buildable first product.",
+        "verdict": { "label": "Awaiting", "tone": "warning" },
+        "summary": "This stage converts the chosen customer and business model into product requirements and UX.",
+        "metrics": [
+          { "label": "Screens", "value": "TBD", "tone": "neutral" },
+          { "label": "User flow", "value": "Open", "tone": "warning" }
+        ],
+        "workItems": [
+          { "id": "STU-401", "title": "First workflow", "content": "Define the shortest workflow that proves the value proposition.", "state": "todo", "priority": "high", "evidence": "needs-founder", "owner": "PRD Maker", "updated": "new session" },
+          { "id": "STU-402", "title": "Screen spec", "content": "Name the first screen, primary action, empty state, loading state, and success state.", "state": "todo", "priority": "high", "evidence": "needs-founder", "owner": "PRD Maker", "updated": "new session" }
+        ],
+        "decision": {
+          "stage": "prd",
+          "proofStatus": "Product scope needed",
+          "question": "What is the first user action?",
+          "helper": "A single first action keeps the MVP buildable.",
+          "options": ["Create", "Search", "Upload", "Connect data", "Not sure yet"],
+          "affects": "UX flow",
+          "blocks": "Build plan"
+        },
+        "crossChecks": [
+          { "label": "Scope creep", "status": "needs-founder", "note": "First version scope is not fixed yet." }
+        ],
+        "document": {
+          "title": "Product requirements",
+          "audience": "Builder and designer",
+          "sections": [
+            { "heading": "MVP workflow", "body": "Define the first action and the proof it should create.", "status": "needs-founder" },
+            { "heading": "Screen states", "body": "Specify empty, loading, success, error, and review states.", "status": "needs-founder" }
+          ]
+        },
+        "runSteps": ["Read business decisions", "Draft UX flow", "Write first-screen spec"],
+        "userFlow": [],
+        "wireframe": { "name": "First screen", "caption": "Awaiting PRD run", "blocks": [] },
+        "spec": []
+      },
+      "build": {
+        "key": "build",
+        "index": 5,
+        "label": "Plan the build",
+        "tagline": "Architecture, UI handoff, and QA route",
+        "hq": "Product Development HQ",
+        "hqPath": "Startup/05-product-development-hq",
+        "agent": { "persona": "Build Planner", "engine": "Product Development", "avatar": "PD" },
+        "icon": "Hammer",
+        "headline": "Build planning should identify the smallest reliable release path.",
+        "verdict": { "label": "Awaiting", "tone": "warning" },
+        "summary": "This stage turns PRD decisions into frontend, backend, data, auth, payment, and QA work.",
+        "metrics": [
+          { "label": "Frontend", "value": "TBD", "tone": "neutral" },
+          { "label": "Backend", "value": "TBD", "tone": "neutral" },
+          { "label": "QA", "value": "Open", "tone": "warning" }
+        ],
+        "workItems": [
+          { "id": "STU-501", "title": "Architecture scope", "content": "Pick local-only, cloud, hybrid, or prototype architecture.", "state": "todo", "priority": "high", "evidence": "needs-founder", "owner": "Product Development", "updated": "new session" },
+          { "id": "STU-502", "title": "Visual QA plan", "content": "Define screenshots, user flows, and release checks before calling the UI complete.", "state": "todo", "priority": "high", "evidence": "needs-evidence", "owner": "Product Development", "updated": "new session" }
+        ],
+        "decision": {
+          "stage": "build",
+          "proofStatus": "Implementation route needed",
+          "question": "What should the first build surface be?",
+          "helper": "The surface determines the repo, stack, and testing path.",
+          "options": ["Web app", "Mobile app", "Desktop app", "Prototype only"],
+          "affects": "Build route",
+          "blocks": "Deck proof"
+        },
+        "crossChecks": [
+          { "label": "Release proof", "status": "needs-evidence", "note": "No build evidence yet." }
+        ],
+        "document": {
+          "title": "Build plan",
+          "audience": "Engineering owner",
+          "sections": [
+            { "heading": "Scope", "body": "Translate PRD into screens, data, and integrations.", "status": "needs-founder" },
+            { "heading": "Verification", "body": "List the visual, functional, and backend checks required before release.", "status": "needs-evidence" }
+          ]
+        },
+        "runSteps": ["Choose build surface", "Map components and data", "Create QA checklist"],
+        "product": { "appName": "First product", "screenTitle": "MVP", "date": "", "summary": [], "items": [], "cta": "" }
+      },
+      "deck": {
+        "key": "deck",
+        "index": 6,
+        "label": "Prepare the deck",
+        "tagline": "Pitch, IR, and evidence defects",
+        "hq": "Pitch & IR HQ",
+        "hqPath": "Startup/06-pitch-ir-hq",
+        "agent": { "persona": "Deck Editor", "engine": "Pitch Deck", "avatar": "PI" },
+        "icon": "Presentation",
+        "headline": "The deck should expose weak claims before it tries to persuade.",
+        "verdict": { "label": "Awaiting", "tone": "warning" },
+        "summary": "This stage turns decisions and proof into a pitch deck with visible evidence gaps.",
+        "metrics": [
+          { "label": "Slides", "value": "TBD", "tone": "neutral" },
+          { "label": "Evidence gaps", "value": "Open", "tone": "warning" }
+        ],
+        "workItems": [
+          { "id": "STU-601", "title": "Claim spine", "content": "Convert idea, market, business, PRD, and build proof into a slide narrative.", "state": "todo", "priority": "high", "evidence": "needs-evidence", "owner": "Pitch & IR", "updated": "new session" },
+          { "id": "STU-602", "title": "Defect list", "content": "Mark missing evidence, weak numbers, and risky assumptions before export.", "state": "todo", "priority": "high", "evidence": "needs-evidence", "owner": "Pitch & IR", "updated": "new session" }
+        ],
+        "decision": {
+          "stage": "deck",
+          "proofStatus": "Deck audience needed",
+          "question": "Who will read the first deck?",
+          "helper": "Investor, grant, bank, and internal decks need different proof emphasis.",
+          "options": ["Investor", "Grant", "Bank", "Internal planning"],
+          "affects": "Deck format",
+          "blocks": "Export"
+        },
+        "crossChecks": [
+          { "label": "Unsupported claims", "status": "needs-evidence", "note": "Deck proof has not run yet." }
+        ],
+        "document": {
+          "title": "Pitch deck outline",
+          "audience": "Selected deck reader",
+          "sections": [
+            { "heading": "Narrative", "body": "Tie problem, customer, market, business, product, and traction into one claim spine.", "status": "needs-evidence" },
+            { "heading": "Defects", "body": "Show which claims need stronger proof before sharing.", "status": "needs-evidence" }
+          ]
+        },
+        "runSteps": ["Build claim spine", "Create slide outline", "Flag weak evidence"],
+        "slides": []
+      }
+    }
+  },
+  "ko": {
+    "ideaSpine": {
+      "oneLiner": "새 창업 아이디어",
+      "customer": "첫 고객 정의 필요",
+      "problem": "반복되는 문제를 좁혀야 함",
+      "stage": "idea"
+    },
+    "stages": {
+      "idea": {
+        "key": "idea",
+        "index": 1,
+        "label": "아이디어 구체화",
+        "tagline": "한 줄을 고객·문제·근거로 바꾸기",
+        "hq": "Idea Foundry HQ",
+        "hqPath": "Startup/01-idea-foundry-hq",
+        "agent": { "persona": "아이디어 코치", "engine": "Idea Foundry", "avatar": "IF" },
+        "icon": "Lightbulb",
+        "headline": "첫 고객, 아픈 문제, 확인할 근거부터 정리합니다.",
+        "verdict": { "label": "대기", "tone": "warning" },
+        "summary": "날것의 아이디어를 시장 숫자 없이도 읽히는 창업 브리프로 바꾸는 단계입니다.",
+        "metrics": [
+          { "label": "고객", "value": "미정", "tone": "warning" },
+          { "label": "문제", "value": "미정", "tone": "warning" },
+          { "label": "근거", "value": "0/3", "tone": "neutral" }
+        ],
+        "workItems": [
+          { "id": "STU-101", "title": "첫 고객", "content": "문제를 느끼고 돈이나 시간을 먼저 쓸 사람을 좁힙니다.", "state": "todo", "priority": "high", "evidence": "needs-founder", "owner": "Idea Foundry", "updated": "새 세션" },
+          { "id": "STU-102", "title": "핵심 문제", "content": "반복 상황, 비용, 현재 대안을 한 문장으로 적습니다.", "state": "todo", "priority": "high", "evidence": "needs-founder", "owner": "Idea Foundry", "updated": "새 세션" },
+          { "id": "STU-103", "title": "검증 계획", "content": "가장 빠른 인터뷰, 화면 캡처, URL, 자료를 정리합니다.", "state": "todo", "priority": "medium", "evidence": "needs-evidence", "owner": "Idea Foundry", "updated": "새 세션" }
+        ],
+        "decision": {
+          "stage": "idea",
+          "proofStatus": "창업자 입력 필요",
+          "question": "첫 고객은 누구인가요?",
+          "helper": "이 선택이 첫 화면과 시장 검증 방향을 정합니다.",
+          "options": ["최종 사용자", "구매자", "운영자", "아직 모름"],
+          "affects": "첫 고객",
+          "blocks": "시장 검증"
+        },
+        "crossChecks": [
+          { "label": "문제 근거", "status": "needs-evidence", "note": "아직 첨부된 근거가 없습니다." },
+          { "label": "고객 선명도", "status": "needs-founder", "note": "시장 검증 전 첫 고객을 좁혀야 합니다." }
+        ],
+        "document": {
+          "title": "아이디어 브리프",
+          "audience": "창업자",
+          "sections": [
+            { "heading": "고객", "body": "누가 문제를 겪고 누가 도입을 결정하는지 정합니다.", "status": "needs-founder" },
+            { "heading": "문제", "body": "반복되는 아픈 업무와 현재 대안이 왜 부족한지 씁니다.", "status": "needs-founder" },
+            { "heading": "근거", "body": "인터뷰, 화면 캡처, URL, 데이터, 창업자 메모를 붙입니다.", "status": "needs-evidence" }
+          ]
+        },
+        "runSteps": ["창업 아이디어 읽기", "고객과 문제 추출", "검증 체크리스트 만들기"]
+      },
+      "market": {
+        "key": "market",
+        "index": 2,
+        "label": "시장 검증",
+        "tagline": "경쟁·페르소나·차별점 확인",
+        "hq": "Market Intelligence HQ",
+        "hqPath": "Startup/02-market-intelligence-hq",
+        "agent": { "persona": "시장 분석가", "engine": "Market Intelligence", "avatar": "MI" },
+        "icon": "Radar",
+        "headline": "시장 검증은 근거, 가정, 미결 질문을 분리해야 합니다.",
+        "verdict": { "label": "대기", "tone": "warning" },
+        "summary": "현재 대안과 경쟁 제품을 비교하고, 첫 고객이 닿을 수 있는 시장인지 확인합니다.",
+        "metrics": [
+          { "label": "경쟁", "value": "0", "tone": "neutral" },
+          { "label": "페르소나", "value": "0", "tone": "neutral" },
+          { "label": "출처", "value": "0", "tone": "warning" }
+        ],
+        "workItems": [
+          { "id": "STU-201", "title": "대안 지도", "content": "고객이 지금 쓰는 방법과 부족한 지점을 적습니다.", "state": "todo", "priority": "high", "evidence": "needs-evidence", "owner": "Market Intelligence", "updated": "새 세션" },
+          { "id": "STU-202", "title": "페르소나 신호", "content": "동기, 반대 이유, 전환 의사를 정리합니다.", "state": "todo", "priority": "medium", "evidence": "needs-founder", "owner": "Market Intelligence", "updated": "새 세션" }
+        ],
+        "decision": {
+          "stage": "market",
+          "proofStatus": "시장 레퍼런스 필요",
+          "question": "먼저 비교할 경쟁 또는 현재 대안은 무엇인가요?",
+          "helper": "고객이 이미 믿고 쓰는 대안을 먼저 비교해야 합니다.",
+          "options": ["수동 업무", "기존 소프트웨어", "대행/서비스", "아직 모름"],
+          "affects": "차별화 포인트",
+          "blocks": "사업 모델"
+        },
+        "crossChecks": [
+          { "label": "출처 품질", "status": "needs-evidence", "note": "아직 출처가 없습니다." }
+        ],
+        "document": {
+          "title": "시장 인텔리전스",
+          "audience": "창업자와 검토자",
+          "sections": [
+            { "heading": "고객군", "body": "근거가 붙은 뒤 도달 가능한 첫 시장을 요약합니다.", "status": "needs-evidence" },
+            { "heading": "경쟁", "body": "공백을 주장하기 전에 현재 대안을 비교합니다.", "status": "needs-evidence" }
+          ]
+        },
+        "runSteps": ["시장 찾기", "현재 대안 비교", "차별점 초안 작성"],
+        "competitors": [],
+        "marketSizing": {
+          "tam": { "label": "TAM", "value": "미정", "basis": "출처 대기" },
+          "sam": { "label": "SAM", "value": "미정", "basis": "출처 대기" },
+          "som": { "label": "SOM", "value": "미정", "basis": "출처 대기" },
+          "note": "근거가 생기기 전에는 시장 규모를 채우지 않습니다."
+        },
+        "personas": [],
+        "trends": [],
+        "positioning": { "xAxis": ["범용", "특화"], "yAxis": ["수동", "자동"], "players": [] },
+        "sources": []
+      },
+      "business": {
+        "key": "business",
+        "index": 3,
+        "label": "사업 설계",
+        "tagline": "수익 구조·가정·단위경제",
+        "hq": "Business Plan HQ",
+        "hqPath": "Startup/03-business-plan-hq",
+        "agent": { "persona": "사업 설계가", "engine": "Business Plan", "avatar": "BP" },
+        "icon": "Landmark",
+        "headline": "사업 설계는 숫자의 근거와 가정을 분리해서 보여줘야 합니다.",
+        "verdict": { "label": "대기", "tone": "warning" },
+        "summary": "가격, 비용, 위험 가정, 사업계획서 골격을 만드는 단계입니다.",
+        "metrics": [
+          { "label": "가격", "value": "미정", "tone": "warning" },
+          { "label": "비용", "value": "미정", "tone": "warning" },
+          { "label": "위험", "value": "열림", "tone": "neutral" }
+        ],
+        "workItems": [
+          { "id": "STU-301", "title": "수익 모델", "content": "구독, 거래 수수료, 서비스 패키지, 하이브리드 중 첫 모델을 정합니다.", "state": "todo", "priority": "high", "evidence": "assumption", "owner": "Business Plan", "updated": "새 세션" },
+          { "id": "STU-302", "title": "위험 가정", "content": "사업 모델을 깨뜨릴 수 있는 가정을 먼저 적습니다.", "state": "todo", "priority": "high", "evidence": "needs-evidence", "owner": "Business Plan", "updated": "새 세션" }
+        ],
+        "decision": {
+          "stage": "business",
+          "proofStatus": "가격 근거 필요",
+          "question": "첫 가격 모델은 무엇인가요?",
+          "helper": "가격은 검증 인터뷰와 투자자 설명을 바꿉니다.",
+          "options": ["구독", "거래 수수료", "서비스 패키지", "아직 모름"],
+          "affects": "수익 모델",
+          "blocks": "PRD 범위"
+        },
+        "crossChecks": [
+          { "label": "가격 근거", "status": "needs-evidence", "note": "아직 결제 근거가 없습니다." }
+        ],
+        "document": {
+          "title": "사업계획",
+          "audience": "창업자·투자자·은행 검토자",
+          "sections": [
+            { "heading": "수익", "body": "목표 고객과 가치 기준이 분명해진 뒤 수익 모델을 적습니다.", "status": "assumption" },
+            { "heading": "위험", "body": "증명되지 않은 숫자는 모두 가정으로 표시합니다.", "status": "needs-evidence" }
+          ]
+        },
+        "runSteps": ["가격 초안 작성", "비용 구조 지도", "위험 가정 표시"],
+        "unitEconomics": [],
+        "businessModel": [],
+        "financials": { "columns": [], "unit": "", "rows": [], "chart": [] },
+        "milestones": [],
+        "useOfFunds": []
+      },
+      "prd": {
+        "key": "prd",
+        "index": 4,
+        "label": "제품 기획",
+        "tagline": "PRD·UX 흐름·첫 화면",
+        "hq": "PRD Maker HQ",
+        "hqPath": "Startup/04-product-planning-prd-maker",
+        "agent": { "persona": "제품 기획자", "engine": "PRD Maker", "avatar": "PR" },
+        "icon": "PencilRuler",
+        "headline": "PRD는 사업 결정을 만들 수 있는 첫 제품으로 바꿔야 합니다.",
+        "verdict": { "label": "대기", "tone": "warning" },
+        "summary": "고객과 사업 모델을 제품 요구사항과 UX로 변환합니다.",
+        "metrics": [
+          { "label": "화면", "value": "미정", "tone": "neutral" },
+          { "label": "흐름", "value": "열림", "tone": "warning" }
+        ],
+        "workItems": [
+          { "id": "STU-401", "title": "첫 워크플로우", "content": "가치를 증명하는 가장 짧은 사용자 흐름을 정합니다.", "state": "todo", "priority": "high", "evidence": "needs-founder", "owner": "PRD Maker", "updated": "새 세션" },
+          { "id": "STU-402", "title": "화면 명세", "content": "첫 화면, 주 액션, 빈 상태, 로딩, 성공, 오류 상태를 적습니다.", "state": "todo", "priority": "high", "evidence": "needs-founder", "owner": "PRD Maker", "updated": "새 세션" }
+        ],
+        "decision": {
+          "stage": "prd",
+          "proofStatus": "제품 범위 필요",
+          "question": "첫 사용자 액션은 무엇인가요?",
+          "helper": "하나의 첫 액션이 있어야 MVP가 만들어집니다.",
+          "options": ["생성", "검색", "업로드", "데이터 연결", "아직 모름"],
+          "affects": "UX 흐름",
+          "blocks": "빌드 계획"
+        },
+        "crossChecks": [
+          { "label": "범위 확장", "status": "needs-founder", "note": "첫 버전 범위가 아직 고정되지 않았습니다." }
+        ],
+        "document": {
+          "title": "제품 요구사항",
+          "audience": "빌더와 디자이너",
+          "sections": [
+            { "heading": "MVP 흐름", "body": "첫 액션과 그 액션이 만들어야 할 증거를 정의합니다.", "status": "needs-founder" },
+            { "heading": "화면 상태", "body": "빈 상태, 로딩, 성공, 오류, 리뷰 상태를 지정합니다.", "status": "needs-founder" }
+          ]
+        },
+        "runSteps": ["사업 결정 읽기", "UX 흐름 작성", "첫 화면 명세 작성"],
+        "userFlow": [],
+        "wireframe": { "name": "첫 화면", "caption": "PRD 실행 대기", "blocks": [] },
+        "spec": []
+      },
+      "build": {
+        "key": "build",
+        "index": 5,
+        "label": "빌드 계획",
+        "tagline": "아키텍처·UI 핸드오프·QA",
+        "hq": "Product Development HQ",
+        "hqPath": "Startup/05-product-development-hq",
+        "agent": { "persona": "빌드 설계자", "engine": "Product Development", "avatar": "PD" },
+        "icon": "Hammer",
+        "headline": "빌드 계획은 가장 작은 안정 출시 경로를 찾아야 합니다.",
+        "verdict": { "label": "대기", "tone": "warning" },
+        "summary": "PRD를 프론트엔드, 백엔드, 데이터, 인증, 결제, QA 작업으로 나눕니다.",
+        "metrics": [
+          { "label": "프론트", "value": "미정", "tone": "neutral" },
+          { "label": "백엔드", "value": "미정", "tone": "neutral" },
+          { "label": "QA", "value": "열림", "tone": "warning" }
+        ],
+        "workItems": [
+          { "id": "STU-501", "title": "아키텍처 범위", "content": "로컬, 클라우드, 하이브리드, 프로토타입 중 경로를 고릅니다.", "state": "todo", "priority": "high", "evidence": "needs-founder", "owner": "Product Development", "updated": "새 세션" },
+          { "id": "STU-502", "title": "시각 QA 계획", "content": "완료 선언 전 필요한 스크린샷, 흐름, 릴리즈 체크를 정합니다.", "state": "todo", "priority": "high", "evidence": "needs-evidence", "owner": "Product Development", "updated": "새 세션" }
+        ],
+        "decision": {
+          "stage": "build",
+          "proofStatus": "구현 경로 필요",
+          "question": "첫 빌드 표면은 무엇인가요?",
+          "helper": "표면이 레포, 스택, 테스트 경로를 결정합니다.",
+          "options": ["웹 앱", "모바일 앱", "데스크탑 앱", "프로토타입만"],
+          "affects": "빌드 경로",
+          "blocks": "덱 근거"
+        },
+        "crossChecks": [
+          { "label": "출시 증거", "status": "needs-evidence", "note": "아직 빌드 증거가 없습니다." }
+        ],
+        "document": {
+          "title": "빌드 계획",
+          "audience": "엔지니어링 담당자",
+          "sections": [
+            { "heading": "범위", "body": "PRD를 화면, 데이터, 연동으로 바꿉니다.", "status": "needs-founder" },
+            { "heading": "검증", "body": "출시 전 필요한 시각, 기능, 백엔드 체크를 적습니다.", "status": "needs-evidence" }
+          ]
+        },
+        "runSteps": ["빌드 표면 선택", "컴포넌트와 데이터 지도", "QA 체크리스트 작성"],
+        "product": { "appName": "첫 제품", "screenTitle": "MVP", "date": "", "summary": [], "items": [], "cta": "" }
+      },
+      "deck": {
+        "key": "deck",
+        "index": 6,
+        "label": "덱 준비",
+        "tagline": "피치·IR·근거 결함",
+        "hq": "Pitch & IR HQ",
+        "hqPath": "Startup/06-pitch-ir-hq",
+        "agent": { "persona": "덱 에디터", "engine": "Pitch Deck", "avatar": "PI" },
+        "icon": "Presentation",
+        "headline": "덱은 설득하기 전에 약한 주장을 먼저 드러내야 합니다.",
+        "verdict": { "label": "대기", "tone": "warning" },
+        "summary": "결정과 근거를 피치 덱으로 바꾸고 빈 근거를 표시합니다.",
+        "metrics": [
+          { "label": "슬라이드", "value": "미정", "tone": "neutral" },
+          { "label": "근거 결함", "value": "열림", "tone": "warning" }
+        ],
+        "workItems": [
+          { "id": "STU-601", "title": "주장 뼈대", "content": "아이디어, 시장, 사업, PRD, 빌드 근거를 하나의 슬라이드 흐름으로 묶습니다.", "state": "todo", "priority": "high", "evidence": "needs-evidence", "owner": "Pitch & IR", "updated": "새 세션" },
+          { "id": "STU-602", "title": "결함 목록", "content": "공유 전 부족한 근거, 약한 숫자, 위험 가정을 표시합니다.", "state": "todo", "priority": "high", "evidence": "needs-evidence", "owner": "Pitch & IR", "updated": "새 세션" }
+        ],
+        "decision": {
+          "stage": "deck",
+          "proofStatus": "덱 독자 필요",
+          "question": "첫 덱은 누가 읽나요?",
+          "helper": "투자자, 지원사업, 은행, 내부용은 필요한 근거가 다릅니다.",
+          "options": ["투자자", "지원사업", "은행", "내부 계획"],
+          "affects": "덱 형식",
+          "blocks": "내보내기"
+        },
+        "crossChecks": [
+          { "label": "근거 없는 주장", "status": "needs-evidence", "note": "덱 검증이 아직 실행되지 않았습니다." }
+        ],
+        "document": {
+          "title": "피치 덱 아웃라인",
+          "audience": "선택한 독자",
+          "sections": [
+            { "heading": "흐름", "body": "문제, 고객, 시장, 사업, 제품, 진행 상황을 하나로 묶습니다.", "status": "needs-evidence" },
+            { "heading": "결함", "body": "공유 전 보강해야 할 주장을 표시합니다.", "status": "needs-evidence" }
+          ]
+        },
+        "runSteps": ["주장 뼈대 만들기", "슬라이드 아웃라인 작성", "약한 근거 표시"],
+        "slides": []
+      }
+    }
+  }
+}

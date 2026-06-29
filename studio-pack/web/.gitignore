@@ -1,0 +1,11 @@
+node_modules
+dist
+dist-ssr
+*.local
+.vite
+.DS_Store
+
+# Per-session agent output rendered live by the GUI (written by a /hep-network
+# startup session). Not committed — it's this run's founder data, not source.
+public/studio-data.json
+public/generated/requests.jsonl

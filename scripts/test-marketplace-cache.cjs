@@ -12,11 +12,13 @@ app.setPath("userData", path.join(tempDir, "user-data"));
 
 const hits = {
   publicAgents: 0,
+  searchAgents: 0,
   plugins: 0,
   firms: 0,
   bundles: 0,
   mine: 0,
 };
+let pluginFailuresRemaining = 1;
 
 function sendJson(res, payload) {
   res.writeHead(200, { "content-type": "application/json" });
@@ -40,7 +42,22 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === "GET" && req.url === "/api/plugins") {
     hits.plugins += 1;
-    sendJson(res, { plugins: [] });
+    if (pluginFailuresRemaining > 0) {
+      pluginFailuresRemaining -= 1;
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "temporary plugin failure" }));
+      return;
+    }
+    sendJson(res, {
+      plugins: [
+        {
+          slug: "hub-plugin-cache-smoke",
+          name: "Hub Plugin Cache Smoke",
+          tagline: "Installable Hub plugin",
+          developer: "Agentlas QA",
+        },
+      ],
+    });
     return;
   }
   if (req.method === "POST" && req.url === "/api/mcp/v1/tools/call") {
@@ -50,6 +67,28 @@ const server = http.createServer((req, res) => {
     });
     req.on("end", () => {
       const method = JSON.parse(body).method;
+      if (method === "marketplace.search_agents") {
+        hits.searchAgents += 1;
+        sendJson(res, {
+          result: {
+            results: [
+              {
+                slug: "hub-agent-cache-smoke",
+                name: "Hub Agent Cache Smoke",
+                nameEn: "Hub Agent Cache Smoke",
+                tagline: "Callable Hub agent",
+                kind: "cloud-callable",
+                callable: true,
+                source: "hub-index",
+                trustGrade: "A",
+                manifestUrl: "mock",
+                installCount: 0,
+              },
+            ],
+          },
+        });
+        return;
+      }
       if (method === "marketplace.list_firms") {
         hits.firms += 1;
         sendJson(res, { result: { firms: [] } });
@@ -99,7 +138,13 @@ server.listen(0, "127.0.0.1", async () => {
     const { getSource, listMyAgentsCached } = require("../dist/electron/marketplace/index.js");
     const source = getSource();
 
-    await source.searchAgents("");
+    const partial = await source.searchAgents("");
+    assert.deepEqual(partial.map((item) => item.slug), ["hub-agent-cache-smoke"]);
+    const recovered = await source.searchAgents("");
+    assert.deepEqual(
+      recovered.map((item) => item.slug).sort(),
+      ["hub-agent-cache-smoke", "hub-plugin-cache-smoke"].sort(),
+    );
     await source.searchAgents("");
     await source.listFirms();
     await source.listFirms();
@@ -110,7 +155,8 @@ server.listen(0, "127.0.0.1", async () => {
 
     assert.deepEqual(hits, {
       publicAgents: 1,
-      plugins: 1,
+      searchAgents: 0,
+      plugins: 2,
       firms: 1,
       bundles: 1,
       mine: 1,

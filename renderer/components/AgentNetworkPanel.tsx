@@ -361,10 +361,16 @@ function OrchestrationTree({
     return seen ? "done" : "pending";
   };
   const latestTextOf = (key: string): string | null => {
+    let genericCompletion: string | null = null;
     for (let i = timeline.length - 1; i >= 0; i--) {
-      if (timeline[i].agentId === key) return timeline[i].text;
+      if (timeline[i].agentId !== key) continue;
+      if (/^(완료|done)$/i.test(timeline[i].text.trim())) {
+        genericCompletion = genericCompletion ?? timeline[i].text;
+        continue;
+      }
+      return timeline[i].text;
     }
-    return liveAgents[key]?.status ?? null;
+    return genericCompletion ?? liveAgents[key]?.status ?? null;
   };
   const tokensOf = (key: string): number =>
     timeline.reduce((sum, it) => (it.agentId === key && it.tokens ? sum + it.tokens : sum), 0);
@@ -697,7 +703,7 @@ function AgentRow({
           <span style={agentRoleStyle}>{roleLabel}</span>
           <span style={agentRoleSepStyle}> · </span>
           <span style={statusWordStyle(status)}>{statusWord}</span>
-          {activity && status === "running" && <span style={agentActivityStyle}> · {activity}</span>}
+          {activity && <span style={agentActivityStyle}> · {activity}</span>}
         </div>
       </div>
       {tokensText && <span style={agentTokensStyle}>{tokensText}</span>}

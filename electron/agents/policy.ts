@@ -31,6 +31,21 @@ const BACKGROUND_AGENT_FINGERPRINTS = new Set([
 
 const BACKGROUND_ROLES = new Set(["orchestrator", "pm", "curator", "governance"]);
 
+const REMOVED_MARKETPLACE_SEED_SLUGS = new Set([
+  "shop-product-writer",
+  "shop-cs-responder",
+  "shop-review-monitor",
+  "shop-pricing-scout",
+  "shop-keyword-finder",
+  "marketer-content-writer",
+  "marketer-seo-researcher",
+  "marketer-schedule-secretary",
+  "marketer-ad-copywriter",
+  "marketer-analytics-reader",
+  "firm-ceo-shop",
+  "firm-ceo-marketer",
+]);
+
 function normalize(value: string | null | undefined): string {
   return String(value ?? "").toLowerCase().replace(/\s+/g, " ").trim();
 }
@@ -77,6 +92,7 @@ export function isBackgroundAgent(agent: AgentLike): boolean {
 }
 
 export function publicAgentVisibility(agent: AgentLike): AgentVisibility {
+  if (REMOVED_MARKETPLACE_SEED_SLUGS.has(normalize(agent.slug))) return "private";
   if (isPrivateWebOnlyAgent(agent)) return "private";
   if (isBackgroundAgent(agent)) return "background";
   return normalizeAgentVisibility(agent.visibility) ?? "visible";

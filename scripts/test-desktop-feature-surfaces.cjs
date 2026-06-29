@@ -223,10 +223,10 @@ async function runDashboardFirstVisitTourSurface(browser, baseUrl, evidence) {
   await page.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
   await page.getByRole("dialog", { name: /대시보드 안내|Dashboard tour/ }).waitFor();
   await page.locator(".agentlas-tour-ring").waitFor();
-  await page.getByText(/왼쪽 조직도|Left org chart/).waitFor();
-  await page.getByText(/Hephaestus 카피라이터|Hephaestus Copywriter/).waitFor();
+  await page.getByText(/내 팀 한눈에|Your whole team/).waitFor();
+  await page.getByText(/로컬·클라우드·허브 에이전트|Every local, cloud, and Hub agent/).waitFor();
   await page.getByRole("button", { name: /다음|Next/ }).click();
-  await page.getByText(/LLM 연결과 사용량|LLM connections and usage/).waitFor();
+  await page.getByText(/엔진 연결 상태|Engine connections/).waitFor();
   await page.locator("[data-tour-id='dashboard.llm'].agentlas-tour-target-active").waitFor();
   await finishPage(context, page, errors, evidence, "dashboard-first-visit-tour-surface");
 }
@@ -473,9 +473,11 @@ async function runChatSurface(browser, baseUrl, evidence) {
   const workflowHeading = rightPanel.getByText(/오케스트레이션|Orchestration|에이전트 작업|Agent activity/).first();
   await workflowHeading.waitFor();
   await rightPanel.getByText(/실행 중|running|위임 중|delegating|대기|idle/).first().waitFor();
+  const activityText = rightPanel.getByText(/Hub 에이전트 빌리는 중: qa-agent/).first();
+  await activityText.waitFor();
   const orchestrationBox = await workflowHeading.boundingBox();
-  const activityBox = await rightPanel.locator(".agentlas-activity-card").first().boundingBox();
-  assert.ok(orchestrationBox && activityBox, "agent tab should render orchestration and activity cards");
+  const activityBox = await activityText.boundingBox();
+  assert.ok(orchestrationBox && activityBox, "agent tab should render orchestration and activity status");
   assert.ok(orchestrationBox.y < activityBox.y, "workflow tree should stay above activity cards");
   await page.getByRole("button", { name: /워크스페이스 패널|Workspace panel/ }).click();
   await page.getByRole("button", { name: /폴더 열기|Open folder/ }).click();
@@ -508,10 +510,12 @@ async function runNewChatScopeSurface(browser, baseUrl, evidence) {
     window.__qa.calls.some((call) => call.name === "chats.create" && call.payload.projectId === "project-1"),
   );
   await page.waitForFunction(() =>
-    window.__qa.calls.some((call) => call.name === "workspace.set" && call.payload.chatId === "chat-1" && call.payload.folder === "/tmp/agentlas-qa-project"),
+    window.__qa.calls.some((call) => call.name === "workspace.set" && call.payload.chatId !== "chat-1" && call.payload.folder === "/tmp/agentlas-qa-project"),
   );
   const createCall = await page.evaluate(() => window.__qa.calls.find((call) => call.name === "chats.create" && call.payload.projectId === "project-1"));
+  const workspaceCall = await page.evaluate(() => window.__qa.calls.find((call) => call.name === "workspace.set" && call.payload.folder === "/tmp/agentlas-qa-project"));
   assert.equal(createCall.payload.agentId, "agent-2");
+  assert.match(workspaceCall.payload.chatId, /^chat-created-/);
   await finishPage(context, page, errors, evidence, "chat-new-project-scope-surface");
 }
 
@@ -862,8 +866,23 @@ async function runChatLongSessionSurface(browser, baseUrl, evidence) {
   assert.equal(calls[0].payload.userPrompt, "장기 세션 QA 001");
   assert.equal(calls[total - 1].payload.userPrompt, "장기 세션 QA 105");
   assert.equal(await page.getByText(/QA final 105/).count(), 1);
+  const workflowPanel = page.locator("[data-tour-id='workspace.workflow']");
+  if ((await workflowPanel.count()) === 0) {
+    await page.locator("[data-tour-id='workspace.workflow-toggle']").click();
+    await workflowPanel.waitFor();
+  }
+  if ((await workflowPanel.getByText(/Network route stable #105/).count()) === 0) {
+    try {
+      await workflowPanel.getByText(/Network route stable #105/).waitFor({ timeout: 5000 });
+    } catch (err) {
+      const workflowText = await workflowPanel.evaluateAll((nodes) => nodes.map((node) => node.innerText)).catch(() => []);
+      const bodyText = await page.locator("body").innerText().catch(() => "");
+      console.error(JSON.stringify({ longSessionWorkflowMissing: true, workflowText, bodyTail: bodyText.slice(-3000) }, null, 2));
+      throw err;
+    }
+  }
   assert.equal(
-    await page.locator("aside").getByText(/Network route stable #105/).count(),
+    await workflowPanel.getByText(/Network route stable #105/).count(),
     1,
     "workflow panel should show latest network activity instead of idle state",
   );
@@ -938,14 +957,12 @@ async function runHubLiveSurface(browser, baseUrl, evidence) {
   await page.getByText(/Hub 실시간|Hub live/).waitFor();
   assert.equal(await page.getByText(/실제 Hub에 연결되지 않았습니다|not connected to the real Hub/).count(), 0);
   assert.equal(await page.getByText(/라이브 Hub 항목|live Hub items/).count(), 0);
-  await page.locator(".hub-cat-chip", { hasText: /전체|All/ }).getByText("267").waitFor();
-  await page.locator(".hub-cat-chip", { hasText: /에이전트|Agent/ }).getByText("266").waitFor();
+  assert.equal(await page.locator(".hub-cat-chip").count(), 0, "Hub top category chips should stay removed");
   await page.getByText(/총 267개|267 total/).waitFor();
   await page.locator(".portal-input").fill("FDA");
   await page.getByText(/FDA SaMD 510\(k\)|Pre-market Notification/).waitFor();
   assert.equal(await page.getByText(/Shop Product Writer|상품설명 작가/).count(), 0);
   await page.locator(".portal-input").fill("");
-  await page.locator(".hub-cat-chip", { hasText: /전체|All/ }).getByText("267").waitFor();
   await page.getByText(/총 267개|267 total/).waitFor();
   await finishPage(context, page, errors, evidence, "hub-live-surface");
 }
@@ -996,6 +1013,7 @@ function setupMockAgentlasBridge(options) {
   let runtimeOverrides = [];
   const workspaceFolders = {};
   let lastRunId = 0;
+  let createdChatId = 0;
   const pendingConfirmations = Array.from({ length: options?.pendingConfirmations ?? 0 }, (_, index) => ({
     chatId: `confirm-chat-${index + 1}`,
     chatTitle: `QA approval ${index + 1}`,
@@ -1425,7 +1443,9 @@ function setupMockAgentlasBridge(options) {
       listRecent: async () => [],
       create: async (input) => {
         record("chats.create", input);
-        return { id: "chat-1", projectId: input.projectId || null, firmId: input.firmId || null, agentId: input.agentId || "agent-2", kind: "user", title: "QA Chat", archivedAt: null, createdAt: now, updatedAt: now };
+        createdChatId += 1;
+        const id = `chat-created-${createdChatId}`;
+        return { id, projectId: input.projectId || null, firmId: input.firmId || null, agentId: input.agentId || "agent-2", kind: "user", title: "QA Chat", archivedAt: null, createdAt: now, updatedAt: now };
       },
       switchAgent: async (chatId, agentId) => {
         record("chats.switchAgent", { chatId, agentId });

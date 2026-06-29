@@ -1,0 +1,17 @@
+.DS_Store
+.playwright-mcp/
+node_modules/
+dist/
+build/
+.build/
+output/
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+__pycache__/
+*.pyc
+deck.pptx
+.studio-runtime/
+*.png

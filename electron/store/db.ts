@@ -10,7 +10,7 @@ import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 27;
+const SCHEMA_VERSION = 28;
 
 export function initStore(): void {
   if (_db) return;
@@ -703,6 +703,24 @@ export function initStore(): void {
   // v27 was reserved during the Stormbreaker Loop Engineering work. Keep the
   // version number monotonic for already-migrated local databases; no new table
   // is required because loop state lives in chat/tool evidence.
+
+  // ── v27 → v28: chats.used_at ──────────────────────────────
+  // Empty draft chats stay hidden, but once the user sends the first message the
+  // chat remains navigable even if /clear removes all chat_messages.
+  if (userVersion < 28) {
+    const chatCols = _db
+      .prepare("PRAGMA table_info(chats)")
+      .all() as Array<{ name: string }>;
+    if (!chatCols.some((c) => c.name === "used_at")) {
+      _db.exec("ALTER TABLE chats ADD COLUMN used_at TEXT");
+      _db.exec(
+        `UPDATE chats
+         SET used_at = updated_at
+         WHERE EXISTS (SELECT 1 FROM chat_messages WHERE chat_messages.chat_id = chats.id)`,
+      );
+      _db.exec("CREATE INDEX IF NOT EXISTS idx_chats_used_updated ON chats(used_at, updated_at DESC)");
+    }
+  }
 
   _db.pragma(`user_version = ${SCHEMA_VERSION}`);
 }

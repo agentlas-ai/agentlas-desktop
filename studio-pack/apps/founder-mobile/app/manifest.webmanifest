@@ -1,0 +1,11 @@
+{
+  "name": "Startup Studio Mobile",
+  "short_name": "Startup Studio",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f4f6f1",
+  "theme_color": "#17191c",
+  "lang": "ko",
+  "orientation": "portrait",
+  "icons": []
+}

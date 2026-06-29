@@ -8,7 +8,7 @@ cleaner_pid=""
 dmg_signing_keychain=""
 dmg_signing_identity=""
 original_keychains=()
-stable_repo="${AGENTLAS_DESKTOP_GITHUB_REPO:-agentlas-ai/agentlas-desktop}"
+stable_repo="${AGENTLAS_DESKTOP_GITHUB_REPO:-agentlas-ai/agentlas-desktop-releases}"
 
 load_local_signing_defaults() {
   local p12_path="$signing_dir/agentlas-developer-id.p12"

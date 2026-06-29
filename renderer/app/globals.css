@@ -24,9 +24,9 @@
   --rd-ink-4: rgba(0, 21, 25, 0.34);
   --rd-hair: rgba(0, 21, 25, 0.10);
   --rd-hair-2: rgba(0, 21, 25, 0.18);
-  --rd-accent: #808368;      /* Moss — 브랜드 강조 */
+  --rd-accent: #6b6e52;      /* Moss — 브랜드 강조 */
   --rd-accent-2: #b6c8c7;    /* Sea Foam — 보조 */
-  --rd-accent-3: #808368;    /* Moss */
+  --rd-accent-3: #6b6e52;    /* Moss */
   --rd-accent-text: #474a35; /* 진한 Moss(밝은 배경 위 텍스트) */
   --rd-accent-2-text: #3c534f; /* 진한 Sea Foam */
   --rd-accent-3-text: #474a35;
@@ -41,7 +41,7 @@
   --rd-r-lg: 20px;
   --rd-r-xl: 28px;
   /* 소프트 섀도우 — 낮은 opacity + 높은 blur + 큰 Y + 음의 spread(접점은 좁게, 가장자리는
-     부드럽게) + 탈채도 쿨톤(브랜드 인디고-네이비). 하드한 1px 라인 대신 자연스러운 떠 있는 느낌. */
+     부드럽게) + 탈채도 쿨톤. 하드한 1px 라인 대신 자연스러운 떠 있는 느낌. */
   --rd-shadow-1: 0 1px 2px rgba(20, 22, 45, 0.04), 0 6px 20px -6px rgba(20, 22, 45, 0.10);
   --rd-shadow-2: 0 4px 10px -2px rgba(20, 22, 45, 0.06), 0 18px 44px -12px rgba(20, 22, 45, 0.16);
   --rd-shadow-3: 0 8px 18px -4px rgba(20, 22, 45, 0.08), 0 36px 80px -16px rgba(20, 22, 45, 0.22);
@@ -55,11 +55,11 @@
   --muted: #b8bbbf;          /* Disco */
   --muted-deep: #868483;     /* Cheers */
 
-  --accent: #808368;         /* Moss */
-  --accent-soft: rgba(128, 131, 104, 0.14);
-  --accent-strong: #6b6e52;
-  --fill-1: rgba(128, 131, 104, 0.09);
-  --fill-2: rgba(128, 131, 104, 0.18);
+  --accent: #6b6e52;         /* Moss */
+  --accent-soft: rgba(107, 110, 82, 0.14);
+  --accent-strong: #55583f;
+  --fill-1: rgba(107, 110, 82, 0.09);
+  --fill-2: rgba(107, 110, 82, 0.18);
 
   /* 장식/카테고리 색 — 팔레트 안에서 색상만 구분(채도는 낮게). */
   --peach: #c7b27e;          /* muted gold(Citronella 계열) */
@@ -122,7 +122,7 @@
 }
 
 /* ── Dark theme — 동일 토큰을 재정의 (data-theme="dark" on <html>) ──── */
-/* 인디고 브랜드에서 파생한 뉴트럴 다크 팔레트. 컴포넌트는 토큰만 참조하므로 */
+/* 뉴트럴 다크 팔레트. 컴포넌트는 토큰만 참조하므로 */
 /* 여기 값만 바꾸면 전 화면 다크모드가 일관되게 적용된다. */
 :root[data-theme="dark"] {
   color-scheme: dark;
@@ -144,8 +144,8 @@
   --rd-shadow-2: 0 6px 16px -4px rgba(0, 0, 0, 0.4), 0 22px 52px -12px rgba(0, 0, 0, 0.6);
   --rd-shadow-3: 0 10px 24px -6px rgba(0, 0, 0, 0.5), 0 40px 90px -18px rgba(0, 0, 0, 0.72);
 
-  /* accent — FILL vs TEXT split. Dark block previously inherited the light olive
-     palette, so accent fills rendered #808368 + white text ≈ 3.0:1 (AA fail). */
+  /* accent — FILL vs TEXT split. Dark block uses a brighter fill while the light
+     theme keeps the quieter moss brand accent. */
   --rd-accent: #7c7cff;             /* fill behind white text (≈4.8:1) */
   --rd-accent-2: #5ad1c0;           /* secondary / live·connected */
   --rd-accent-3: #7c7cff;
@@ -2509,7 +2509,7 @@ button[data-toggle-state="on"] {
 
 /* 딥인터뷰 답변 패널 */
 .build-interview-card {
-  border: 1px solid color-mix(in oklch, var(--rd-accent, #5a56dc) 35%, var(--rd-hair));
+  border: 1px solid color-mix(in oklch, var(--rd-accent, #6b6e52) 35%, var(--rd-hair));
 }
 .build-interview-head {
   align-items: center;
@@ -5474,8 +5474,8 @@ button[data-toggle-state="on"] {
   text-overflow: ellipsis;
 }
 .library-roster-tab[data-active="true"] {
-  background: var(--accent, #5a56dc);
-  border-color: var(--accent, #5a56dc);
+  background: var(--accent, #6b6e52);
+  border-color: var(--accent, #6b6e52);
   color: #fff;
 }
 
@@ -5665,8 +5665,8 @@ button[data-toggle-state="on"] {
   font-weight: 500;
   padding: 5px 12px;
   border-radius: 7px;
-  border: 1px solid var(--rd-accent, #5a56dc);
-  background: var(--rd-accent, #5a56dc);
+  border: 1px solid var(--rd-accent, #6b6e52);
+  background: var(--rd-accent, #6b6e52);
   color: #fff;
   cursor: pointer;
 }
@@ -5678,6 +5678,12 @@ button[data-toggle-state="on"] {
   font-size: 11px;
   color: var(--rd-ink-4, var(--muted-deep));
   line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  .guide-fab {
+    display: none !important;
+  }
 }
 
 /* Build StarterGallery — 빈 화면 제거(value-first) */
@@ -5703,7 +5709,7 @@ button[data-toggle-state="on"] {
   cursor: pointer;
 }
 .build-starter-chip:hover {
-  border-color: var(--rd-accent, #5a56dc);
+  border-color: var(--rd-accent, #6b6e52);
   color: var(--rd-accent-text, var(--rd-accent));
 }
 

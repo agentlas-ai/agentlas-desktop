@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo="${AGENTLAS_DESKTOP_STABLE_REPO:-agentlas-ai/agentlas-desktop}"
+repo="${AGENTLAS_DESKTOP_STABLE_REPO:-agentlas-ai/agentlas-desktop-releases}"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/agentlas-stable-install.XXXXXX")"
 mount_point=""
 backup_path=""

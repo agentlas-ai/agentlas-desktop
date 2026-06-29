@@ -1,0 +1,43 @@
+{
+  "schema_version": "agentlas.package.v1",
+  "name": "agentlas-startup-founder-studio",
+  "display_name": "Agentlas Startup Founder Studio",
+  "description": "English-first, Korean-capable founder-workflow task force (TF): a GUI + orchestrator that routes each stage to its separately-published Agentlas Hub HQ (idea, market, business, PRD, product, deck, web). It does not bundle the HQs — each GUI action is a metered call to the HQ over the Hephaestus network.",
+  "model": "task-force",
+  "entrypoint": "agents/00-startup-orchestrator/agent.md",
+  "ui_surface": {
+    "type": "served_spa",
+    "path": "web/dist/index.html",
+    "launcher": "scripts/open-studio-gui.py",
+    "legacy_launcher": "scripts/open-studio-gui.py",
+    "build": "cd web && npm install && npm run build",
+    "visible_workflow": [
+      "idea_shaping",
+      "market_validation",
+      "business_design",
+      "prd_screen_design",
+      "app_build",
+      "web_build",
+      "qa_launch"
+    ]
+  },
+  "design_provider_login": "scripts/design-provider-login.py",
+  "language_policy": {
+    "default": "en",
+    "supported": ["en", "ko"]
+  },
+  "routes_to": [
+    { "hq": "idea-foundry-hq", "command": "idea-foundry" },
+    { "hq": "market-intelligence-hq", "command": "market-intel" },
+    { "hq": "business-plan-hq", "command": "business-plan-hq" },
+    { "hq": "agentlas-prd-maker-studio", "command": "/prd" },
+    { "hq": "product-development-hq", "command": "product-dev" },
+    { "hq": "defect-driven-slide-studio", "command": "slide-studio" },
+    { "hq": "Web_master", "command": "/webmaster" }
+  ],
+  "plugin_tools": ".agentlas/global-plugin-tools.json",
+  "design_provider_mcp": ".agentlas/design-provider-mcp.json",
+  "design_concept": "docs/design.md",
+  "design_memory": ".agentlas/design-memory.md",
+  "verification": "scripts/verify-package.sh"
+}

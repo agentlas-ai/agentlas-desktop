@@ -1,0 +1,79 @@
+{
+  "schema": "agentlas.startup.stitch-handoff.v1",
+  "provider": "Google Stitch",
+  "generated_at": "2026-06-19T14:07:07.873435+00:00",
+  "status": "generated_desktop_source_available",
+  "input_files": [
+    {
+      "path": "docs/dogfood/startup-agent-app/prd/spec.md",
+      "chars": 2923,
+      "sha_hint": "len:2923"
+    },
+    {
+      "path": "docs/dogfood/startup-agent-app/stitch/stitch-brief.md",
+      "chars": 4335,
+      "sha_hint": "len:4335"
+    },
+    {
+      "path": "docs/dogfood/startup-agent-app/05-build-plan.md",
+      "chars": 2706,
+      "sha_hint": "len:2706"
+    },
+    {
+      "path": "docs/dogfood/startup-agent-app/07-sales-demo.md",
+      "chars": 2122,
+      "sha_hint": "len:2122"
+    },
+    {
+      "path": "docs/design.md",
+      "chars": 11062,
+      "sha_hint": "len:11062"
+    }
+  ],
+  "generated_sources": [
+    {
+      "source_id": "REF-GEN-STITCH-001-v2",
+      "project_id": "3890069885648704489",
+      "screen_id": "e47d5e29b5684f908d7891a65697e069",
+      "status": "current_desktop_visual_source",
+      "files": [
+        "docs/dogfood/startup-agent-app/stitch/generated/ref-gen-stitch-001-v2.png",
+        "docs/dogfood/startup-agent-app/stitch/generated/ref-gen-stitch-001-v2.html"
+      ]
+    },
+    {
+      "source_id": "REF-GEN-STITCH-001",
+      "project_id": "3890069885648704489",
+      "screen_id": "15b051f4155047a4b72e9253bdd4be1d",
+      "status": "superseded",
+      "reason": "First pass kept English/action-label residue and incomplete package visibility.",
+      "files": [
+        "docs/dogfood/startup-agent-app/stitch/generated/ref-gen-stitch-001.png",
+        "docs/dogfood/startup-agent-app/stitch/generated/ref-gen-stitch-001.html"
+      ]
+    }
+  ],
+  "prompt": "# Google Stitch Design Request\n\nDesign the Startup Studio product surface from these source files.\n\nThe output must preserve the lifecycle workflow, the right dock's app web prototype plus web artifact, and Founder Packet handoff.\n\nDo not include account data, local paths, secrets, unsupported market claims, or private screenshots.\n\n\n\n# Google Stitch Handoff Brief\n\n## Provider\n\nGoogle Stitch\n\nSources checked:\n\n- [Google Developers Blog: Stitch introduction](https://developers.googleblog.com/stitch-a-new-way-to-design-uis/)\n- [Google Blog: Stitch AI-native design canvas](https://blog.google/innovation-and-ai/models-and-research/google-labs/stitch-ai-ui-design/)\n- [Google Codelab: Design-to-Code with Antigravity and Stitch MCP](https://codelabs.developers.google.com/design-to-code-with-antigravity-stitch)\n- [davideast/stitch-mcp](https://github.com/davideast/stitch-mcp)\n\n## Readiness\n\n| Item | Status |\n|---|---|\n| Stitch site | available at `stitch.withgoogle.com` |\n| Local MCP helper | `npx @_davideast/stitch-mcp` resolves and exposes commands |\n| Login helper | `scripts/design-provider-login.py --provider stitch --dry-run` returns `ready_to_run` |\n| Actual Stitch account/API key | not stored in repo; must be completed by user-owned provider session |\n| Handoff status | desktop design generated through Stitch MCP; additional mobile/state screens still pending |\n\n## Generated Results\n\n| Source ID | Stitch project | Screen | Status | Local evidence |\n|---|---|---|---|---|\n| `REF-GEN-STITCH-001` | `3890069885648704489` | `15b051f4155047a4b72e9253bdd4be1d` | superseded by v2; first pass kept English/action-label issues | `stitch/generated/ref-gen-stitch-001.png`, `stitch/generated/ref-gen-stitch-001.html` |\n| `REF-GEN-STITCH-001-v2` | `3890069885648704489` | `e47d5e29b5684f908d7891a65697e069` | accepted as current desktop visual source with caveats | `stitch/generated/ref-gen-stitch-001-v2.png`, `stitch/generated/ref-gen-stitch-001-v2.html` |\n\nStitch v2 evidence includes the seven lifecycle stages, Starter/Studio/Concierge,\nPilot 01/02/03, `2/3` conversation progress, `검증 전`, `신뢰`, and\n`지원사업 양식 비교`. It still contains non-visible English comments in exported\nHTML, so the local webapp remains the stricter implementation contract.\n\n## Stitch Prompt\n\nDesign a Korean-first SaaS product called \"Startup Studio\". It is a founder\noperating board that helps a solo founder go from raw startup idea to market\nvalidation, business plan, PRD, app build, web build, and QA/launch.\n\nCreate a high-fidelity responsive web app UI, not a marketing landing page.\n\nLayout:\n\n- Left rail with lifecycle stages:\n  - 아이디어 구체화\n  - 시장 검증\n  - 사업 설계\n  - PRD/화면 설계\n  - 앱 제작\n  - 웹 제작\n  - QA/출시\n- Center workspace:\n  - raw idea input;\n  - current decision card;\n  - paid package selector with Starter, Studio, and Concierge choices;\n  - paid-pilot tracker with three anonymous candidates, objection, and next action;\n  - lifecycle timeline;\n  - work board with stable IDs such as STU-101;\n  - copyable work bundle action.\n- Right dock:\n  - componentized app web prototype with home, tasks, proof, action buttons, and bottom tabs;\n  - web artifact preview;\n  - current artifact status.\n\nVisual style:\n\n- compact founder operating board;\n- neutral background, dark rail, restrained accent colors;\n- Korean text must fit on mobile;\n- avoid oversized hero marketing layout;\n- use dense but readable SaaS workspace patterns;\n- app/web previews should look real, inspectable, and clickable enough to judge the workflow before native builds.\n\nRequired screens:\n\n1. Desktop workspace.\n2. Mobile stacked workspace.\n3. App build stage state with the right-side app web prototype visible.\n4. Web build stage state.\n5. Package selection state showing the selected paid offer.\n6. Paid-pilot tracker state showing objection and next action.\n7. QA/launch stage state.\n\nDo not expose internal words like manifest, backend, token, system, or HQ in\nfounder-facing copy.\n\n## Expected Stitch Output\n\n- Desktop and mobile screen images.\n- HTML/CSS or frontend code for the selected direction.\n- A right-dock app prototype direction that can be implemented in web code before iOS/Android native work.\n- A paid package selector mapped to `REQ-DOG-006`.\n- A paid-pilot tracker mapped to `REQ-DOG-007`.\n- Screen IDs to map back to `REQ-DOG-*`.\n- A generated visual source ID: `REF-GEN-STITCH-001`.\n- Current generated desktop source: `REF-GEN-STITCH-001-v2`.\n\n## Next Command\n\n```bash\npython3 scripts/design-provider-login.py --provider stitch\n```\n\nThen create the Stitch design from the prompt above. After the design exists,\nuse the Stitch MCP helper to inspect, serve, or export screens.\n\n\n\n\n# 07 Sales Demo\n\n## Sales Claim\n\nStartup Studio is sold as a founder package app, not as a generic chat prompt.\nThe product promise is: write a rough startup idea once, then leave with a\nvalidated Founder Packet, PRD/design handoff, web/app proof, and QA log.\n\n## Package Choices\n\n| Package | Price hypothesis | Buyer intent |\n|---|---:|---|\n| Starter | $19-29/month | Solo founder validating one idea |\n| Studio | $79-149/month | Founder running multiple ideas and exports |\n| Concierge | $299-999/run | Founder who wants a reviewed support-program or investor package |\n\n## In-App Proof\n\n- The package selector is visible inside `webapp/index.html`.\n- Selecting Starter, Studio, or Concierge updates the visible package status.\n- The Founder Packet records the selected package, price hypothesis, buyer fit,\n  and next paid-pilot action.\n- The paid-pilot tracker shows three anonymous pilot candidates and records the\n  active conversation status, objection, and next action.\n- The tracker shows progress such as `2/3 대화 기록` and keeps `매출 검증 전`\n  visible until three real paid pilots are recorded outside the demo.\n- The browser test must treat this as purchase intent only; no real payment is\n  executed in the dogfood proof.\n\n## Paid Pilot Script\n\n1. Ask the founder for one raw idea and one deadline.\n2. Run the Startup lifecycle through PRD, Stitch handoff, app web prototype, and\n   QA evidence.\n3. Show the before/after Founder Packet.\n4. Ask whether Starter, Studio, or Concierge matches the next paid step.\n5. Record objections: price, trust, quality, missing artifacts, or provider\n   setup friction.\n6. Record whether each pilot is `대화 전`, `대화 기록`, `유료 파일럿`, or `보류`.\n7. Do not mark revenue validated until three real paid pilots are recorded\n   outside the demo.\n\n## Pilot Tracker Defaults\n\n| Candidate | Package | Default status | First objection | First next action |\n|---|---|---|---|---|\n| Pilot 01 | Starter | 대화 기록 | Price | Send sample Founder Packet |\n| Pilot 02 | Concierge | 대화 기록 | Trust | Compare against a support-program form |\n| Pilot 03 | Studio | 대화 전 | Repeat usage | Run a 20-minute demo |\n",
+  "mcp_commands": {
+    "doctor": "npx @_davideast/stitch-mcp doctor --json",
+    "login": "npx @_davideast/stitch-mcp init",
+    "proxy": "npx @_davideast/stitch-mcp proxy",
+    "upload_html": "npx @_davideast/stitch-mcp upload --project <project-id> --file webapp/index.html --title 'Startup Studio'",
+    "list_screens": "npx @_davideast/stitch-mcp screens --project <project-id>",
+    "export_site": "npx @_davideast/stitch-mcp site --project <project-id> --output docs/dogfood/startup-agent-app/stitch/generated-site"
+  },
+  "expected_outputs": [
+    "desktop screen design",
+    "mobile screen design",
+    "app web prototype dock treatment",
+    "web artifact dock treatment",
+    "component/state notes mapped to REQ/FLOW/SCR/WF anchors",
+    "preview URL, screenshots, or exported site files"
+  ],
+  "acceptance": [
+    "Generated screen preserves the seven founder lifecycle stages.",
+    "Right rail shows a clickable app web prototype and a web artifact preview.",
+    "Founder Packet or equivalent handoff is visible.",
+    "No credentials, raw cookies, account identifiers, or local paths appear in outputs."
+  ]
+}

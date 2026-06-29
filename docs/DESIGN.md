@@ -10,7 +10,7 @@
 - **System font first (desktop).** 데스크탑은 웹폰트를 번들하지 않는다 → 시스템 폰트(SF) 1순위. 커스텀 폰트를
   앞세우면 부분 설치 환경에서 글리프가 섞여 "텍스트가 깨져" 보인다.
 - **Density with air.** 정보 밀도는 높되, 카드/섹션 사이 여백(12–16px)과 카드 내부 패딩(14–20px)으로 숨 쉬게.
-- **One accent.** 인디고(`--accent #5a56dc`)가 주 강조. 화면당 강조 1개 원칙. 상태색(ok/warn/err)은 의미일 때만.
+- **One accent.** 모스(`--accent #6b6e52`)가 주 강조. 화면당 강조 1개 원칙. 상태색(ok/warn/err)은 의미일 때만.
 
 ## 2. Soft Shadows (가장 자주 틀리는 부분)
 
@@ -24,7 +24,7 @@
 | `--rd-shadow-3` | 모달/시트 | `0 8px 18px -4px /.08, 0 36px 80px -16px /.22` |
 | `--neu-raised` | 버튼/박스 | `0 1px 2px /.05, 0 4px 12px -2px /.08` |
 
-- 그림자 색은 순검정이 아니라 **탈채도 쿨톤** `rgba(20,22,45, …)`(브랜드 인디고-네이비) → 페이지에 자연스럽게 녹는다.
+- 그림자 색은 순검정이 아니라 **탈채도 쿨톤** `rgba(20,22,45, …)` → 페이지에 자연스럽게 녹는다.
 - 다크 테마는 동일 구조 + 순검정 저opacity·고blur.
 - 새 그림자가 필요하면 토큰을 쓰고, 정 없으면 같은 공식(저opacity/고blur/음의 spread)으로.
 
@@ -32,7 +32,7 @@
 
 - Ink: `--ink #0b0b0f`, `--ink-soft`, `--muted-deep`, `--muted`. 본문=ink, 보조=ink-soft, 캡션=muted-deep.
 - Surface: 페이지 캔버스 `--rd-bg #fff`(퓨어 화이트). `--paper #fff`, `--paper-2`, `--paper-edge`(경계). rd 계열: `--rd-surface/-2`, `--rd-hair`(헤어라인).
-- Accent: `--accent`(인디고). 채움 `--fill-1/-2`, 텍스트 `--rd-accent-text`.
+- Accent: `--accent`(모스). 채움 `--fill-1/-2`, 텍스트 `--rd-accent-text`.
 - Status: `--rd-ok/--rd-warn/--rd-err`(또는 green/amber/red-deep). 의미 전달일 때만, 장식 금지.
 - **색 위 텍스트**: 같은 색 계열의 진한 톤을 쓴다(순검정/회색 금지).
 

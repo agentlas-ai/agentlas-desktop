@@ -8,6 +8,16 @@ import type { MarketplaceSource, SeedListingFull } from "./source";
 
 const PUBLIC_AGENT_CACHE_MS = 60_000;
 
+export class PartialHubResultError<T> extends Error {
+  constructor(
+    message: string,
+    readonly partialValue: T,
+  ) {
+    super(message);
+    this.name = "PartialHubResultError";
+  }
+}
+
 interface McpSourceOptions {
   baseUrl: string;
   /** Public full Hub list endpoint. Defaults to `${origin}/api/marketplace/agents`. */
@@ -124,6 +134,76 @@ function publicPluginsUrlFor(baseUrl: string): string {
   } catch {
     return "https://agentlas.cloud/api/plugins";
   }
+}
+
+function marketplacePageUrlFor(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl);
+    return `${url.origin}/marketplace`;
+  } catch {
+    return "https://agentlas.cloud/marketplace";
+  }
+}
+
+function decodeNextFlightText(html: string): string {
+  return html
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\");
+}
+
+function extractSlugObjects(text: string): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  let idx = 0;
+  while (idx < text.length) {
+    const start = text.indexOf('{"slug":"', idx);
+    if (start === -1) break;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let end = -1;
+    for (let i = start; i < text.length; i += 1) {
+      const ch = text[i];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (ch === "{") depth += 1;
+      if (ch === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          end = i + 1;
+          break;
+        }
+      }
+    }
+    if (end === -1) break;
+    try {
+      const parsed = JSON.parse(text.slice(start, end));
+      if (parsed && typeof parsed === "object") out.push(parsed as Record<string, unknown>);
+    } catch {
+      /* ignore malformed embedded fragments */
+    }
+    idx = end;
+  }
+  return out;
+}
+
+function dedupeListings(listings: MarketplaceListing[]): MarketplaceListing[] {
+  const bySlug = new Map<string, MarketplaceListing>();
+  for (const listing of listings) {
+    if (!bySlug.has(listing.slug)) bySlug.set(listing.slug, listing);
+  }
+  return Array.from(bySlug.values());
 }
 
 function marketPublicAgentToListing(raw: Record<string, unknown>): MarketplaceListing | null {
@@ -262,7 +342,14 @@ export class McpSource implements MarketplaceSource {
         headers: { accept: "application/json" },
         signal: ctrl.signal,
       });
-      if (!resp.ok) throw new Error(`public marketplace agents ${resp.status}`);
+      if (!resp.ok) {
+        if (resp.status === 404 && !this.opts.publicAgentsUrl) {
+          const listings = await this.listMarketplacePageAgents(ctrl.signal);
+          this.publicAgentCache = { fetchedAt: now, listings };
+          return listings;
+        }
+        throw new Error(`public marketplace agents ${resp.status}`);
+      }
       const json = (await resp.json()) as unknown;
       const rawAgents = asArray<Record<string, unknown>>(json, "agents", "listings");
       const listings = liveHubListings(rawAgents.map(marketPublicAgentToListing).filter((item): item is MarketplaceListing => Boolean(item)));
@@ -271,6 +358,19 @@ export class McpSource implements MarketplaceSource {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  private async listMarketplacePageAgents(signal?: AbortSignal): Promise<MarketplaceListing[]> {
+    const resp = await fetch(marketplacePageUrlFor(this.opts.baseUrl), {
+      headers: { accept: "text/html" },
+      signal,
+    });
+    if (!resp.ok) throw new Error(`public marketplace page ${resp.status}`);
+    const html = await resp.text();
+    const rawAgents = extractSlugObjects(decodeNextFlightText(html));
+    const listings = liveHubListings(rawAgents.map(marketPublicAgentToListing).filter((item): item is MarketplaceListing => Boolean(item)));
+    if (listings.length === 0) throw new Error("public marketplace page contained no Hub agents");
+    return listings;
   }
 
   private async listPublicHubPlugins(): Promise<MarketplaceListing[]> {
@@ -308,13 +408,26 @@ export class McpSource implements MarketplaceSource {
 
   async searchAgents(q: string): Promise<MarketplaceListing[]> {
     // 에이전트: 작동하는 MCP marketplace.search_agents 사용.
-    //   공개 REST /api/marketplace/agents 는 서버에 존재하지 않아 404 → 과거엔 검색이 항상 빈 결과였다.
+    //   공개 REST /api/marketplace/agents 가 없는 배포에선 실제 웹 /marketplace 렌더 데이터를 같이 긁어온다.
     // 플러그인: 공개 /api/plugins (정상 동작).
-    const [agents, plugins] = await Promise.all([
-      this.searchHubAgents(q).catch(() => [] as MarketplaceListing[]),
-      this.listPublicHubPlugins().catch(() => [] as MarketplaceListing[]),
-    ]);
-    return [...agents, ...plugins].filter((listing) => matchesQuery(listing, q));
+    const sources: Array<Promise<MarketplaceListing[]>> = [
+      this.listPublicHubAgents(),
+      this.listPublicHubPlugins(),
+    ];
+    if (q.trim()) sources.push(this.searchHubAgents(q));
+    const results = await Promise.allSettled(sources);
+    const listings = results.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
+    const errors = results
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => (result.reason instanceof Error ? result.reason.message : String(result.reason)));
+    const filtered = dedupeListings(listings).filter((listing) => matchesQuery(listing, q));
+    if (errors.length > 0) {
+      if (results.some((result) => result.status === "fulfilled")) {
+        throw new PartialHubResultError(`public marketplace partial failure: ${errors.join("; ")}`, filtered);
+      }
+      throw new Error(`public marketplace unavailable: ${errors.join("; ")}`);
+    }
+    return filtered;
   }
 
   /** 허브 에이전트 검색 — MCP marketplace.search_agents.

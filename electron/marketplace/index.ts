@@ -2,7 +2,7 @@
 //
 // 모든 caller는 `getSource()`를 호출하고 인터페이스만 알면 됨.
 // MCP 호출 실패 시 하드코딩 카탈로그로 대체하지 않는다. Desktop Hub는 실제 Hub 결과만 표시한다.
-import { McpSource } from "./mcp-source";
+import { McpSource, PartialHubResultError } from "./mcp-source";
 import type { MarketplaceSource, SeedListingFull } from "./source";
 import { getSessionCookieHeader } from "../auth";
 import { isPublicDesktopAgent } from "../agents/policy";
@@ -17,6 +17,7 @@ const DEFAULT_BASE_URL = "https://agentlas.cloud/api/mcp/v1";
 const HUB_CACHE_TTL_MS = 5 * 60_000;
 
 type TimedCache<T> = { value: T; at: number };
+type PrimaryAttempt<T> = { value: T; cacheable: boolean };
 
 function cacheFresh<T>(entry: TimedCache<T> | undefined, now = Date.now()): T | undefined {
   return entry && now - entry.at < HUB_CACHE_TTL_MS ? entry.value : undefined;
@@ -73,7 +74,7 @@ class HubOnlySource implements MarketplaceSource {
     fn: (s: MarketplaceSource) => Promise<T>,
     method: string,
     offlineValue: T,
-  ): Promise<T> {
+  ): Promise<PrimaryAttempt<T>> {
     try {
       const result = await fn(this.primary);
       setStatus({
@@ -83,9 +84,23 @@ class HubOnlySource implements MarketplaceSource {
         usingFallback: false,
         lastError: null,
       });
-      return result;
+      return { value: result, cacheable: true };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof PartialHubResultError) {
+        setStatus({
+          mode: "mcp",
+          baseUrl: this.baseUrl,
+          online: true,
+          usingFallback: false,
+          lastError: message,
+        });
+        console.warn(
+          `[marketplace] mcp(${this.baseUrl}) ${method} partially failed; showing live Hub partial result without caching:`,
+          message,
+        );
+        return { value: err.partialValue as T, cacheable: false };
+      }
       setStatus({
         mode: "mcp",
         baseUrl: this.baseUrl,
@@ -97,23 +112,24 @@ class HubOnlySource implements MarketplaceSource {
         `[marketplace] mcp(${this.baseUrl}) ${method} failed; Hub-only mode returns an empty result:`,
         message,
       );
-      return offlineValue;
+      return { value: offlineValue, cacheable: false };
     }
   }
 
   listFirms(): Promise<FirmListing[]> {
     const cached = cacheFresh(this.firmCache);
     if (cached) return Promise.resolve(cached);
-    return this.tryPrimary((s) => s.listFirms(), "listFirms", []).then((firms) => {
-      this.firmCache = { value: firms, at: Date.now() };
-      return firms;
+    return this.tryPrimary((s) => s.listFirms(), "listFirms", []).then(({ value, cacheable }) => {
+      if (cacheable) this.firmCache = { value, at: Date.now() };
+      return value;
     });
   }
   listBundles(): Promise<TeamBundle[]> {
     const cached = cacheFresh(this.bundleCache);
     if (cached) return Promise.resolve(cached);
-    return this.tryPrimary((s) => s.listBundles(), "listBundles", []).then(publicBundles).then((bundles) => {
-      this.bundleCache = { value: bundles, at: Date.now() };
+    return this.tryPrimary((s) => s.listBundles(), "listBundles", []).then(({ value, cacheable }) => {
+      const bundles = publicBundles(value);
+      if (cacheable) this.bundleCache = { value: bundles, at: Date.now() };
       return bundles;
     });
   }
@@ -126,8 +142,9 @@ class HubOnlySource implements MarketplaceSource {
       setStatus({ mode: "mcp", baseUrl: this.baseUrl, online: true, usingFallback: false, lastError: null });
       return Promise.resolve(cached);
     }
-    return this.tryPrimary((s) => s.searchAgents(q), "searchAgents", []).then(publicListings).then((listings) => {
-      this.searchCache.set(key, { value: listings, at: Date.now() });
+    return this.tryPrimary((s) => s.searchAgents(q), "searchAgents", []).then(({ value, cacheable }) => {
+      const listings = publicListings(value);
+      if (cacheable) this.searchCache.set(key, { value: listings, at: Date.now() });
       return listings;
     });
   }
@@ -135,19 +152,18 @@ class HubOnlySource implements MarketplaceSource {
     if (!isPublicDesktopAgent({ slug })) return Promise.resolve(null);
     const cached = cacheFresh(this.listingCache.get(slug));
     if (cached !== undefined) return Promise.resolve(cached);
-    return this.tryPrimary((s) => s.getListingBySlug(slug), "getListingBySlug", null)
-      .then((listing) => (listing && isPublicDesktopAgent(listing) ? listing : null))
-      .then((listing) => {
-        this.listingCache.set(slug, { value: listing, at: Date.now() });
-        return listing;
-      });
+    return this.tryPrimary((s) => s.getListingBySlug(slug), "getListingBySlug", null).then(({ value, cacheable }) => {
+      const listing = value && isPublicDesktopAgent(value) ? value : null;
+      if (cacheable) this.listingCache.set(slug, { value: listing, at: Date.now() });
+      return listing;
+    });
   }
   getFirmBySlug(slug: string): Promise<FirmListing | null> {
     const cached = cacheFresh(this.firmBySlugCache.get(slug));
     if (cached !== undefined) return Promise.resolve(cached);
-    return this.tryPrimary((s) => s.getFirmBySlug(slug), "getFirmBySlug", null).then((firm) => {
-      this.firmBySlugCache.set(slug, { value: firm, at: Date.now() });
-      return firm;
+    return this.tryPrimary((s) => s.getFirmBySlug(slug), "getFirmBySlug", null).then(({ value, cacheable }) => {
+      if (cacheable) this.firmBySlugCache.set(slug, { value, at: Date.now() });
+      return value;
     });
   }
 }
