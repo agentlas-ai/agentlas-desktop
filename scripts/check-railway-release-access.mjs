@@ -39,7 +39,7 @@ function fail(message, result) {
 const version = run("railway", ["--version"]);
 if (!version.ok) fail("Railway CLI is not available for release credential validation.", version);
 
-if (project) {
+if (project && !process.env.RAILWAY_TOKEN) {
   const link = run("railway", [
     "link",
     "--project",
@@ -55,6 +55,8 @@ if (project) {
       link,
     );
   }
+} else if (project) {
+  console.log("Using RAILWAY_TOKEN for project-scoped Railway access; skipping local railway link.");
 } else {
   const status = run("railway", ["status"]);
   if (!status.ok) fail("Railway is not linked locally and RAILWAY_PROJECT_ID is not set.", status);

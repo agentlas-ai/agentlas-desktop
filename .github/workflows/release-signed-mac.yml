@@ -158,5 +158,7 @@ jobs:
       - name: Apply Railway web release env
         if: env.RESOLVED_APPLY_WEB_ENV == 'true' && env.AGENTLAS_RAILWAY_RELEASE_READY == '1'
         run: |
-          railway link --project "$RAILWAY_PROJECT_ID" --environment production --service agentlas-web
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            railway link --project "$RAILWAY_PROJECT_ID" --environment production --service agentlas-web
+          fi
           npm run release:web-env -- --apply --restart --verify-url=https://agentlas.cloud/api/desktop/latest
