@@ -18,7 +18,13 @@ import {
   IconStore,
   IconFileUp,
   IconLayers,
-  IconImage,
+  IconHome,
+  IconChat,
+  IconBuilding,
+  IconApps,
+  IconBolt,
+  IconKey,
+  IconNetwork,
   IconSearch,
   IconSettings,
   IconChevronDown,
@@ -72,7 +78,8 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
 
   const primary: Leaf[] = useMemo(
     () => [
-      { label: t("nav.create_agent"), href: "/build", icon: IconWand },
+      { label: t("nav.dashboard"), href: "/dashboard", icon: IconHome },
+      { label: t("nav.workspace"), href: "/chat", icon: IconChat },
     ],
     [t],
   );
@@ -80,25 +87,51 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
   const groups: Group[] = useMemo(
     () => [
       {
-        id: "my_agents",
-        label: t("nav.group.my_agents"),
-        href: "/library/agents?view=general",
-        icon: IconLayers,
-        isActive: (p) => p.startsWith("/library/agents") || p.startsWith("/cloud"),
+        id: "agent_forge",
+        label: t("nav.group.agent_forge"),
+        href: "/build",
+        icon: IconBuilding,
+        isActive: (p) => p.startsWith("/build") || p.startsWith("/library/agents") || p.startsWith("/cloud"),
         items: [
-          { label: t("nav.local_agents"), href: "/library/agents?view=general", icon: IconUsers },
-          { label: t("nav.published_agents"), href: "/library/agents?view=published", icon: IconFileUp },
+          { label: t("nav.build"), href: "/build", icon: IconWand },
+          { label: t("nav.agent"), href: "/library/agents", icon: IconUsers },
+        ],
+      },
+      {
+        id: "studio",
+        label: t("nav.group.studio"),
+        href: "/apps",
+        icon: IconApps,
+        isActive: (p) => p.startsWith("/apps") || p.startsWith("/automation"),
+        items: [
+          { label: t("nav.apps"), href: "/apps", icon: IconApps },
+          { label: t("nav.automations"), href: "/automation", icon: IconBolt },
         ],
       },
       {
         id: "hub",
         label: t("nav.group.hub"),
-        href: "/marketplace?category=agent",
+        href: "/marketplace",
         icon: IconStore,
         isActive: (p) => p.startsWith("/marketplace"),
         items: [
-          { label: t("nav.hub_regular_agents"), href: "/marketplace?category=agent", icon: IconStore },
-          { label: t("nav.hub_visual_agents"), href: "/marketplace?category=visual", icon: IconImage },
+          { label: t("nav.agent_hub"), href: "/marketplace", icon: IconStore },
+          { label: t("nav.publish"), href: "/cloud", icon: IconFileUp },
+        ],
+      },
+      {
+        id: "environment",
+        label: t("nav.group.environment"),
+        href: "/library/env",
+        icon: IconKey,
+        isActive: (p) => p.startsWith("/library") && !p.startsWith("/library/agents"),
+        items: [
+          { label: t("nav.env_keys"), href: "/library/env", icon: IconKey },
+          { label: t("nav.mcp_tools"), href: "/library/mcps", icon: IconNetwork },
+          { label: t("nav.apps_library"), href: "/library/apps", icon: IconApps },
+          { label: t("nav.tool_library"), href: "/library/tools", icon: IconWand },
+          { label: t("nav.surfaces"), href: "/library/surfaces", icon: IconBuilding },
+          { label: t("nav.assets"), href: "/library/assets", icon: IconLayers },
         ],
       },
     ],
@@ -114,27 +147,15 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
   }
 
   const hrefPath = (href: string) => href.split("?")[0] || href;
-  const currentSearch = typeof window === "undefined" ? "" : window.location.search;
-  const currentParams = new URLSearchParams(currentSearch);
   const isLeafActive = (href: string) => {
     const path = hrefPath(href);
-    if (href.includes("view=published")) {
-      return pathname.startsWith("/library/agents") && currentParams.get("view") === "published";
+    if (path === "/chat") {
+      return pathname.startsWith("/chat") || pathname.startsWith("/project");
     }
-    if (href.includes("view=general")) {
-      return pathname.startsWith("/library/agents") && currentParams.get("view") !== "published";
+    if (path === "/dashboard") {
+      return pathname.startsWith("/dashboard");
     }
-    if (href.includes("category=visual")) {
-      return pathname.startsWith("/marketplace") && currentParams.get("category") === "visual";
-    }
-    if (href.includes("category=agent")) {
-      return pathname.startsWith("/marketplace") && currentParams.get("category") !== "visual";
-    }
-    return path === "/chat"
-      ? pathname.startsWith("/chat") || pathname.startsWith("/project")
-      : path === "/dashboard"
-        ? pathname.startsWith("/dashboard")
-        : pathname === path || pathname.startsWith(path + "/");
+    return pathname === path || pathname.startsWith(path + "/");
   };
 
   function submitSearch() {

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.4.7 — 2026-06-29
+
+### Fixed
+
+- Restored the left sidebar navigation, which had disappeared after an
+  incomplete navigation refactor left `AppShell` hiding `SideNav` on chat routes
+  and moved a half-built menu section into the chat `Sidebar`.
+
+### Changed
+
+- Brought back the full grouped left navigation in `SideNav`, porting the 0.4.0
+  menu structure onto the current shell: **Dashboard** and **Workspace** as
+  top-level items, plus the **Agent Forge** (Build, Agent), **Studio** (Apps,
+  Automations), **Hub** (Agent Hub, Publish), and **Environment** (Connection
+  Keys, MCP Tools, Apps Library, Tool Library, Surfaces, Assets) groups. All
+  labels reuse existing localized `nav.*` keys; all 14 menu routes were verified.
+- Removed now-dead query-param branches from the `SideNav` active-state helper.
+
 ## 0.4.4 — 2026-06-29
 
 ### Changed
