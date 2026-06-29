@@ -57,6 +57,8 @@ export type {
   AppFactorySmokeResult,
   AuthSession,
   Automation,
+  EarningsTransferResult,
+  HubCreditBalance,
   Chat,
   ChatHistoryEntry,
   CloudAgentPackageFile,

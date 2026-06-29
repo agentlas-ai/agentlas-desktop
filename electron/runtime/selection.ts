@@ -4,6 +4,7 @@ import { runAnthropicByok, runCustomByok, runGoogleByok, runOpenAIByok, runUpsta
 import { runClaudeCode } from "./claude-code";
 import { runCodex } from "./codex";
 import { runGemini } from "./gemini";
+import { runGrok } from "./grok";
 import { runOllama } from "./ollama";
 import type { Runner } from "./runner";
 
@@ -11,6 +12,7 @@ const RUNNER_LABEL: Record<string, string> = {
   "claude-code": "Claude Code CLI",
   codex: "Codex CLI",
   gemini: "Gemini CLI",
+  grok: "Grok CLI",
   "byok:anthropic": "Anthropic API",
   "byok:openai": "OpenAI API",
   "byok:google": "Google API",
@@ -29,6 +31,8 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
   if (active.kind === "claude-code") return { runner: runClaudeCode, label: RUNNER_LABEL["claude-code"] };
   if (active.kind === "codex") return { runner: runCodex, label: RUNNER_LABEL.codex };
   if (active.kind === "gemini") return { runner: runGemini, label: RUNNER_LABEL.gemini };
+  if (active.kind === "grok")
+    return { runner: runGrok, label: `Grok CLI${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "ollama")
     return { runner: runOllama, label: `Ollama${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "byok") {

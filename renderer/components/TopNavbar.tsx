@@ -106,10 +106,6 @@ export function TopNavbar() {
             <>
               <DropdownLink href="/library/env" icon={<IconKey size={14} />} label="Environment Keys" sub="Secrets and runtime variables" />
               <DropdownLink href="/library/mcps" icon={<IconLayers size={14} />} label="MCP Tools" sub="Connected tool servers" />
-              <DropdownLink href="/library/apps" icon={<IconApps size={14} />} label="Apps Library" sub="Generated app inventory" />
-              <DropdownLink href="/library/tools" icon={<IconWand size={14} />} label="Tool Library" sub="Reusable local tools" />
-              <DropdownLink href="/library/surfaces" icon={<IconBuilding size={14} />} label="Surfaces" sub="Dashboards and workbenches" />
-              <DropdownLink href="/library/assets" icon={<IconFileUp size={14} />} label="Assets" sub="Files and generated packs" />
             </>
           )}
           </div>

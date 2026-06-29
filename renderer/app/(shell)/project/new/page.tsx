@@ -109,8 +109,8 @@ export default function NewProjectPage() {
           label={locale === "ko" ? "작업 폴더 (선택)" : "Working folder (optional)"}
           hint={
             locale === "ko"
-              ? "이 프로젝트의 채팅은 이 폴더에서 실행되고 .agentlas 메모리와 ontology inbox가 활성화됩니다."
-              : "Chats in this project run in this folder; .agentlas memory and ontology inbox activate here."
+              ? "이 프로젝트의 모든 채팅이 이 폴더에서 실행되고, 메모리와 에이전트 활동 내역을 자동으로 공유합니다."
+              : "Every chat in this project runs in this folder and automatically shares memory and agent activity."
           }
         >
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

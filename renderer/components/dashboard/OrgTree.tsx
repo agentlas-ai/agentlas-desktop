@@ -141,10 +141,10 @@ export function OrgTree() {
     setBusy(true);
     try {
       await api.team.uninstall(id);
-      await load();
     } catch (err) {
       setImportMessage({ tone: "error", text: ko ? `제거하지 못했습니다. 그대로 남아 있습니다. ${String(err)}` : `Could not remove it. It is still installed. ${String(err)}` });
     } finally {
+      await load();
       setBusy(false);
     }
   }
@@ -155,10 +155,10 @@ export function OrgTree() {
     setBusy(true);
     try {
       await api.firms.uninstall(id);
-      await load();
     } catch (err) {
       setImportMessage({ tone: "error", text: ko ? `회사를 제거하지 못했습니다. 그대로 남아 있습니다. ${String(err)}` : `Could not remove the firm. It is still installed. ${String(err)}` });
     } finally {
+      await load();
       setBusy(false);
     }
   }
@@ -174,10 +174,10 @@ export function OrgTree() {
     try {
       for (const f of gFirms) await api.firms.uninstall(f.id);
       for (const a of gAgents) await api.team.uninstall(a.id);
-      await load();
     } catch (err) {
       setImportMessage({ tone: "error", text: ko ? `일부 항목이 남아 있을 수 있습니다. 목록을 확인한 뒤 다시 시도하세요. ${String(err)}` : `Some items may still remain. Check the list, then try again. ${String(err)}` });
     } finally {
+      await load();
       setBusy(false);
     }
   }

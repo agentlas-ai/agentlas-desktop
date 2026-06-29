@@ -182,6 +182,7 @@ export const CONTEXT_MANAGED_BY: Record<RuntimeKind, "runtime" | "agentlas"> = {
   "claude-code": "runtime",
   codex: "runtime",
   gemini: "runtime",
+  grok: "runtime",
   byok: "agentlas",
   ollama: "agentlas",
 };
@@ -223,6 +224,11 @@ export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
   gemini: [
     { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
     { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  ],
+  // Grok CLI — `grok --model <id>` (GROK_MODEL). 정적 폴백 — detect가 `grok models`로 라이브 목록을 덮어쓴다.
+  grok: [
+    { id: "grok-4.3", label: "Grok 4.3" },
+    { id: "grok-4.20-non-reasoning", label: "Grok 4.20" },
   ],
 };
 

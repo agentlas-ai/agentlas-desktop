@@ -21,7 +21,7 @@ export type {
   MultimodalSettings,
 } from "./multimodal";
 
-export type RuntimeKind = "claude-code" | "codex" | "gemini" | "byok" | "ollama";
+export type RuntimeKind = "claude-code" | "codex" | "gemini" | "grok" | "byok" | "ollama";
 
 /** LLM 제공자. "ollama"는 로컬 머신에서 도는 오픈 모델(gemma/deepseek 등). */
 export type RuntimeBackend = "anthropic" | "openai" | "google" | "ollama" | "upstage" | "custom";
@@ -198,6 +198,10 @@ export interface MarketplaceListing {
   recentFailureRate?: number;
   evalPassRate?: number;
   rating?: number;
+  category?: string;
+  developer?: string;
+  detailUrl?: string;
+  installCli?: string;
 }
 
 export interface MarketplaceSourceStatus {
@@ -1888,6 +1892,10 @@ export interface McpInvocationEvent {
   phase?: "plan" | "delegate" | "synthesize";
   /** 위임 흐름 표시용 — 이 노드가 위임한 대상 노드 id들 (handoff 엣지) */
   delegateTo?: string[];
+  /** per-node 완료 신호 — 이 노드의 한 턴이 끝났음(성공/실패). UI가 그 노드만 비활성(✓)으로 처리. */
+  done?: boolean;
+  /** 이 노드가 실행 중인 모델/런타임 라벨(예: "grok-4.3", "claude", "gpt-5") — 트리에 "모델 사용 중" 표시. */
+  model?: string;
 }
 
 /** 워킹 폴더 트리의 한 엔트리 — lazy expand. dir이면 hasChildren 힌트로 chevron 표시. */
@@ -2470,6 +2478,30 @@ export type RecExecChoice =
   | { kind: "pipeline"; stages?: RecStage[]; routerAgent?: RecRouterAgent }
   | { kind: "plain"; routerAgent?: RecRouterAgent };
 
+/** Agentlas Hub 크레딧 잔액 — GET /api/billing/credits 응답 형태.
+ *  구독 계좌(A: 월 초기화 + 톱업 + 전송분)와 렌트수익 계좌(B: 적립 전용)를 분리해서 본다.
+ *  `remainingCredits`=사용 가능(A), `earningsCredits`=이동 가능한 렌트수익(B). */
+export interface HubCreditBalance {
+  authenticated: boolean;
+  plan?: string;
+  usedCredits?: number;
+  planCreditLimit?: number;
+  topUpCredits?: number;
+  limitCredits?: number;
+  remainingCredits?: number;
+  earningsCredits?: number;
+  error?: string;
+}
+
+/** 렌트수익(B) → 구독(A) 일방 전송 결과. POST /api/billing/earnings/transfer. */
+export interface EarningsTransferResult {
+  ok: boolean;
+  moved?: number;
+  earningsCredits?: number;
+  remainingCredits?: number;
+  error?: string;
+}
+
 export interface AgentlasIpc {
   /** Electron 메인이 알려주는 OS 환경 정보 (Apple/Codex/Claude 데스크톱과 동일 패턴) */
   app: {
@@ -2517,6 +2549,12 @@ export interface AgentlasIpc {
   usage: {
     snapshot: (opts?: { force?: boolean }) => Promise<UsageSnapshot>;
   };
+  /** Agentlas Hub 크레딧 — 구독(사용 가능) 잔액과 렌트수익(이동 가능) 잔액을 함께 조회하고,
+   *  렌트수익 → 구독 일방 전송을 수행한다. 세션 쿠키로 Hub HTTP API를 main에서 호출. */
+  billing: {
+    getCredits: () => Promise<HubCreditBalance>;
+    transferEarnings: (credits: number) => Promise<EarningsTransferResult>;
+  };
   /** 확인 요청 — 에이전트가 챗에서 사용자 결정을 기다리는 채팅 목록(미답변 질문 fence 기준). */
   confirm: {
     listPending: () => Promise<PendingConfirmation[]>;
@@ -2539,11 +2577,11 @@ export interface AgentlasIpc {
     setActive: (selection: RuntimeSelection) => Promise<RuntimeStatus[]>;
     /** CLI 미설치 사용자용 — 고정 명령으로 `npm i -g <pkg>` 실행. 성공 후 detect()로 재인식. */
     installCli: (
-      kind: "claude-code" | "codex" | "gemini",
+      kind: "claude-code" | "codex" | "gemini" | "grok",
     ) => Promise<{ ok: boolean; message: string; command?: string }>;
     /** 시스템 터미널을 열어 CLI 로그인 실행 — 사용자는 브라우저 로그인만 하면 됨. */
     openCliLogin: (
-      kind: "claude-code" | "codex" | "gemini",
+      kind: "claude-code" | "codex" | "gemini" | "grok",
     ) => Promise<{ ok: boolean; message: string; command?: string }>;
     /** CLI(Claude/Codex/Gemini)의 커스텀 슬래시 명령을 스캔 — 매 호출마다 최신. */
     listCommands: () => Promise<RuntimeCommand[]>;

@@ -106,6 +106,16 @@ async function runNodeTurnSafe(
     return { ...r, ok: true };
   } catch (err) {
     if (p.signal?.aborted) throw err; // 사용자 취소는 전파
+    // 실패/타임아웃 노드도 per-node 완료 신호 → UI에서 ▶ 가 멈추고 정리된다(스턱 방지).
+    p.sink({
+      kind: "tool-use",
+      done: true,
+      status: p.locale === "ko" ? `${turn.node.name} 응답 실패` : `${turn.node.name} failed`,
+      agentId: turn.node.id,
+      agentName: turn.node.name,
+      role: turn.node.role,
+      tier: turn.tier,
+    });
     if (timedOut) {
       return {
         text: `(${turn.node.name} 응답 실패: ${Math.round(NODE_TIMEOUT_MS / 1000)}초 동안 응답이 없어 자동 중단했습니다.)`,
@@ -202,8 +212,6 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
   }
   systemPrompt += `\n\n${MEMORY_EMITTER_BLOCK}`;
 
-  emit({ kind: "thinking", status: phaseStatus(p.locale, phase, node.name) });
-
   const runtimeChoice = selectRuntimeForTargets(p.runtimes, [
     { scope: "agent", targetId: node.agentId },
     { scope: "division", targetId: turn.divisionId && p.chat.firmId ? `${p.chat.firmId}:${turn.divisionId}` : null },
@@ -211,6 +219,12 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
   ]);
   const active = runtimeChoice?.picked ? runtimeChoice.active : p.active;
   const picked = runtimeChoice?.picked ?? p.picked;
+  // 이 노드가 어떤 모델/런타임으로 도는지 — 오케스트레이션 트리에 "모델 사용 중" 표시용.
+  const modelLabel =
+    active.model ||
+    (active.kind === "byok" ? active.backend ?? "api" : active.kind === "claude-code" ? "claude" : active.kind);
+
+  emit({ kind: "thinking", status: phaseStatus(p.locale, phase, node.name), model: modelLabel });
   if (runtimeChoice?.unavailableOverride) {
     emit({
       kind: "tool-use",
@@ -272,6 +286,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
   } catch {
     // ignore curation failures
   }
+  // per-node 완료 신호 — 이 노드의 한 턴이 끝났다. UI(오케스트레이션 트리)가 이 노드만 ▶→✓ 로 정리한다.
+  // 단, plan 턴은 곧 delegate/synthesize가 이어지므로 완료로 보지 않는다 — orchestrator/본부 행이
+  // 위임 단계 내내 ▶(실행)으로 유지되어 "끝난 듯 보였다 되돌아오는" 플리커를 막는다.
+  if (phase !== "plan") emit({ kind: "tool-use", done: true });
   return { text: display, delegations };
 }
 

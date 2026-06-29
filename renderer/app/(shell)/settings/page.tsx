@@ -47,6 +47,7 @@ const RUNTIME_LABEL: Record<string, string> = {
   "claude-code": "Claude Code CLI",
   codex: "Codex CLI",
   gemini: "Gemini CLI",
+  grok: "Grok CLI",
   ollama: "Ollama",
 };
 
@@ -195,18 +196,28 @@ export default function SettingsPage() {
         : modality === "video"
         ? { videoProvider: providerId }
         : { audioProvider: providerId };
-    const next = await api.multimodal.saveSettings({ ...multimodalSettings, ...patch });
-    setMultimodalSettings(next);
-    setMultimodalStatus(await api.multimodal.status());
+    try {
+      const next = await api.multimodal.saveSettings({ ...multimodalSettings, ...patch });
+      setMultimodalSettings(next);
+      setMultimodalStatus(await api.multimodal.status());
+      setRuntimeMessage("");
+    } catch (err) {
+      setRuntimeMessage(locale === "ko" ? `프로바이더를 바꾸지 못했습니다. 이전 설정이 유지됩니다. ${String(err)}` : `Provider did not change. The previous setting was kept. ${String(err)}`);
+    }
   }
 
   async function saveMultimodalEnv(key: string) {
     const api = ipc();
     const value = multimodalDraft[key]?.trim();
     if (!api || !value) return;
-    await api.env.set(key, value);
-    setMultimodalDraft((draft) => ({ ...draft, [key]: "" }));
-    await refresh();
+    try {
+      await api.env.set(key, value);
+      setMultimodalDraft((draft) => ({ ...draft, [key]: "" }));
+      await refresh();
+      setRuntimeMessage("");
+    } catch (err) {
+      setRuntimeMessage(locale === "ko" ? `키를 저장하지 못했습니다. 이전 값은 그대로입니다. ${String(err)}` : `Key was not saved. The previous value was kept. ${String(err)}`);
+    }
   }
 
   const ollama = statuses.find((s) => s.kind === "ollama") ?? null;
@@ -658,16 +669,16 @@ function MultimodalFallbackPanel({
       <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 12px", lineHeight: 1.55 }}>
         {t("settings.multimodal.note")}
       </p>
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {modalities.map((modality) => {
           const items = providers.filter((provider) => provider.modality === modality.id);
           return (
             <div key={modality.id} style={multimodalGroupStyle}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
                 <span style={{ color: "var(--accent)", display: "inline-flex" }}>{modality.icon}</span>
                 <strong style={{ fontSize: 13 }}>{modality.label}</strong>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 8 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {items.map((provider) => {
                   const active = selected[modality.id] === provider.id;
                   const providerStatus = statusByProvider.get(provider.id);
@@ -682,29 +693,33 @@ function MultimodalFallbackPanel({
                         boxShadow: active ? "var(--neu-raised)" : "none",
                       }}
                     >
-                      <span style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
-                        <span style={{ fontWeight: 700, color: "var(--ink)", lineHeight: 1.25 }}>{providerName}</span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: "1 1 220px" }}>
                         {active && <IconCheck size={14} style={{ color: "var(--green-deep)", flexShrink: 0 }} />}
+                        <span style={{ fontWeight: 700, color: "var(--ink)", lineHeight: 1.25, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{providerName}</span>
                       </span>
-                      <span style={{ color: "var(--muted-deep)", fontSize: 11, lineHeight: 1.45 }}>
+                      <span style={{ color: "var(--muted-deep)", fontSize: 11, lineHeight: 1.35, minWidth: 0, flex: "2 1 280px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {locale === "en" ? provider.summary : provider.summaryKo}
                       </span>
-                      <span style={{ color: "var(--muted)", fontSize: 10.5, fontFamily: "var(--font-mono)" }}>
+                      <span style={{ color: "var(--muted)", fontSize: 10.5, fontFamily: "var(--font-mono)", flex: "0 1 auto", minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {provider.defaultModel ?? provider.mode}
                       </span>
                       {active && providerStatus && providerStatus.env.length > 0 && (
-                        <span style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 2 }}>
-                          {providerStatus.env.map((env) => (
-                            <span key={env.key} style={multimodalEnvRowStyle}>
-                              <span style={{ display: "inline-flex", alignItems: "center", gap: 5, minWidth: 0 }}>
-                                <IconKey size={11} />
-                                <code style={{ overflowWrap: "anywhere" }}>{env.key}</code>
-                              </span>
-                              <span style={{ color: env.hasValue ? "var(--green-deep)" : "var(--peach-ink)", fontWeight: 700 }}>
-                                {env.hasValue ? t("settings.multimodal.key_saved") : t("settings.multimodal.key_missing")}
-                              </span>
-                            </span>
-                          ))}
+                        <span
+                          style={{
+                            ...multimodalEnvRowStyle,
+                            justifyContent: "flex-start",
+                            flex: "0 1 auto",
+                            minWidth: 0,
+                            overflow: "hidden",
+                            color: providerStatus.env.every((e) => e.hasValue) ? "var(--green-deep)" : "var(--peach-ink)",
+                            fontWeight: 700,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          <IconKey size={11} />
+                          {providerStatus.env.every((e) => e.hasValue)
+                            ? t("settings.multimodal.key_saved")
+                            : t("settings.multimodal.key_missing")}
                         </span>
                       )}
                     </button>
@@ -1215,8 +1230,8 @@ function CliInstallPanel({
               gap: 8,
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <div style={{ flex: "1 1 160px", minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 600 }}>{def.name}</div>
                 <div style={{ fontSize: 11, color: "var(--muted-deep)" }}>{def.sub}</div>
               </div>
@@ -1316,7 +1331,7 @@ function CliInstallPanel({
 }
 
 const multimodalGroupStyle: CSSProperties = {
-  padding: 14,
+  padding: 12,
   border: "1px solid var(--paper-edge)",
   borderRadius: "var(--radius-md)",
   background: "var(--paper)",
@@ -1324,14 +1339,17 @@ const multimodalGroupStyle: CSSProperties = {
 
 const multimodalProviderStyle: CSSProperties = {
   textAlign: "left",
-  padding: 12,
+  padding: "8px 10px",
   border: "1px solid var(--paper-edge)",
-  borderRadius: "var(--radius-md)",
+  borderRadius: "var(--radius-sm)",
   background: "var(--paper-2)",
   display: "flex",
-  flexDirection: "column",
-  gap: 7,
-  minHeight: 128,
+  alignItems: "center",
+  flexWrap: "nowrap",
+  gap: 8,
+  minHeight: 38,
+  overflow: "hidden",
+  width: "100%",
 };
 
 const multimodalEnvRowStyle: CSSProperties = {

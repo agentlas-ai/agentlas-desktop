@@ -31,7 +31,7 @@
 ## 3. Color
 
 - Ink: `--ink #0b0b0f`, `--ink-soft`, `--muted-deep`, `--muted`. 본문=ink, 보조=ink-soft, 캡션=muted-deep.
-- Surface: `--paper #fff`, `--paper-2`, `--paper-edge`(경계). rd 계열: `--rd-surface/-2`, `--rd-hair`(헤어라인).
+- Surface: 페이지 캔버스 `--rd-bg #fff`(퓨어 화이트). `--paper #fff`, `--paper-2`, `--paper-edge`(경계). rd 계열: `--rd-surface/-2`, `--rd-hair`(헤어라인).
 - Accent: `--accent`(인디고). 채움 `--fill-1/-2`, 텍스트 `--rd-accent-text`.
 - Status: `--rd-ok/--rd-warn/--rd-err`(또는 green/amber/red-deep). 의미 전달일 때만, 장식 금지.
 - **색 위 텍스트**: 같은 색 계열의 진한 톤을 쓴다(순검정/회색 금지).

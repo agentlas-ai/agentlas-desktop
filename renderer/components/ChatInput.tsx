@@ -29,6 +29,7 @@ const CLI_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
   gemini: "Gemini",
+  grok: "Grok",
 };
 
 /** 모델 칩에 보일 라벨 — 현재 모델 라벨(opts에서) 또는 런타임 기본명. */
@@ -687,7 +688,7 @@ export function ChatInput({
       )}
 
       <div
-        className="glass-lift"
+        className="glass-lift chat-input-shell"
         style={{
           width: "min(100%, 980px)",
           margin: "0 auto",

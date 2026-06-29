@@ -1,7 +1,9 @@
-// 우측 Workflow 패널 — 세로 활동 타임라인 + 에이전트/팀 명단.
-//   - 명단: firm.orgChart에서 CEO → 본부 → 전문가 3계층을 그리고, 실행 중인 노드는
-//     실시간 속성 이벤트(liveAgents)로 활성(녹색)·대기(빈 점) 표시.
-//   - 타임라인: 단일 에이전트/팀 오케스트레이터의 상태, 도구, 위임(handoff)을 위→아래 피드로.
+// 우측 오케스트레이션 패널 — Kimchi식 멀티에이전트 트리 + 활동 피드.
+//   - 트리: orchestrator(CEO) → 본부(병렬 그룹) → 전문가(워커)를 실시간 상태(▶ 실행 / ✓ 완료 / ○ 대기)로.
+//     백엔드(electron/mcp/firm-orchestrator.ts)가 이미 본부/전문가를 병렬 실행하고 per-agent 이벤트(+done 완료신호)를
+//     스트리밍하므로, 추가 백엔드 없이 그대로 시각화한다.
+//   - 팀(firm/org)이 없는 단일 에이전트 채팅에서는 병렬 표기를 쓰지 않고 단독 작업 뷰로 표시(정직성).
+//   - 타임라인: 노드들의 상태/도구/위임(handoff)을 위→아래 피드로.
 "use client";
 import { useMemo, useState, type CSSProperties } from "react";
 import type { InstalledAgent, InstalledFirm, ResolvedOrg } from "@/lib/types";
@@ -17,6 +19,8 @@ export interface LiveAgent {
   active: boolean;
   status?: string;
   delegateTo?: string[];
+  /** 이 에이전트가 실행 중인 모델/런타임 라벨 (예: "grok-4.3", "claude") */
+  model?: string;
 }
 
 /** 타임라인 항목 — discrete 활동/위임. */
@@ -54,6 +58,7 @@ interface Props {
 
 type RosterNode = { key: string; name: string; role: string; tier: 1 | 2 | 3 };
 type RosterDivision = RosterNode & { specialists: RosterNode[] };
+type Roster = { ceo: RosterNode | null; divisions: RosterDivision[] };
 
 export function AgentNetworkPanel({
   firm,
@@ -71,7 +76,7 @@ export function AgentNetworkPanel({
   const { t, locale } = useT();
   const [briefOpen, setBriefOpen] = useState(false);
 
-  const roster = useMemo(() => {
+  const roster = useMemo<Roster | null>(() => {
     // ResolvedOrg가 있으면 그걸로 명단 (노드 id = 이벤트 agentId와 정확히 일치)
     if (org) {
       const divisions: RosterDivision[] = org.divisions.map((d) => ({
@@ -113,27 +118,17 @@ export function AgentNetworkPanel({
   }, [org, firm, agents, locale]);
 
   const anyActive = Object.values(liveAgents).some((a) => a.active);
+  const activeCount = Object.values(liveAgents).filter((a) => a.active).length;
+  // 진짜 멀티에이전트(팀/조직) 컨텍스트일 때만 "오케스트레이션/병렬" 프레이밍을 쓴다.
+  const hasRoster = Boolean(roster && (roster.ceo || roster.divisions.length > 0));
   const activeTitle =
     chatTitle?.trim() ||
     (firm ? pickLocalized(firm, locale).name : agent ? pickLocalized(agent, locale).name : t("network.title"));
   const promptPreview = cleanPromptPreview(latestUserPrompt ?? "");
-  const participants = roster
-    ? [
-        roster.ceo,
-        ...roster.divisions,
-        ...roster.divisions.flatMap((d) => d.specialists),
-      ].filter((node): node is RosterNode => Boolean(node))
-    : agent
-      ? [{ key: agent.id, name: pickLocalized(agent, locale).name, role: "", tier: 1 as const }]
-      : [];
   const feed = timeline.slice(-10);
   const activityRows = workflowActivityRows(timeline, locale);
   const webSeen = timeline.some((item) => /web|검색|search|탐색/i.test(item.text));
   const waitingForFirstEvent = feed.length === 0 && (busy || anyActive);
-  const activeParticipant =
-    participants.find((node) => liveAgents[node.key]?.active) ??
-    participants[0] ??
-    null;
 
   return (
     <aside
@@ -160,6 +155,15 @@ export function AgentNetworkPanel({
             {firm ? t("network.subtitle.firm") : agent ? t("network.subtitle.agent") : t("network.idle")}
           </div>
         </div>
+        {/* 병렬 배지 — 실제로 2개 이상 동시 실행일 때만(거짓 ∥ 방지) */}
+        {activeCount >= 2 && (
+          <span
+            style={headerCountBadgeStyle}
+            title={locale === "ko" ? "병렬 실행 중인 서브에이전트 수" : "sub-agents running in parallel"}
+          >
+            {activeCount} ∥
+          </span>
+        )}
         {(busy || anyActive) && <LiveBadge label={t("network.live")} />}
         {onClose && (
           <button
@@ -218,40 +222,14 @@ export function AgentNetworkPanel({
           </div>
         </div>
 
-        {activeParticipant && (
-          <div style={participantLineStyle}>
-            <span aria-hidden style={participantDotStyle(!!liveAgents[activeParticipant.key]?.active)} />
-            <span>{activeParticipant.name}</span>
-          </div>
-        )}
-
-        <WorkflowKanban participants={participants} liveAgents={liveAgents} timeline={timeline} busy={busy} locale={locale} />
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
-          {feed.length === 0 ? (
-            <div style={idleCardStyle(waitingForFirstEvent)}>
-              <span aria-hidden style={idleDotStyle(waitingForFirstEvent)} />
-              <span>
-                {waitingForFirstEvent
-                  ? locale === "ko"
-                    ? "실행 시작됨 · 첫 업데이트 기다리는 중"
-                    : "Run started · waiting for the first update"
-                  : t("network.idle")}
-              </span>
-            </div>
-          ) : (
-            feed.map((item, i) => (
-              <WorkflowCard
-                key={item.key}
-                item={item}
-                live={busy && i === feed.length - 1}
-                locale={locale}
-              />
-            ))
-          )}
-        </div>
-
-        <ParallelAgentBitmap participants={participants} liveAgents={liveAgents} timeline={timeline} busy={busy} locale={locale} />
+        <OrchestrationTree
+          roster={roster}
+          hasRoster={hasRoster}
+          liveAgents={liveAgents}
+          timeline={timeline}
+          busy={busy}
+          locale={locale}
+        />
       </div>
     </aside>
   );
@@ -350,123 +328,381 @@ function WorkflowCard({
   );
 }
 
-function WorkflowKanban({
-  participants,
+/**
+ * Kimchi식 오케스트레이션 트리 — orchestrator(root) → 본부(병렬 그룹) → 전문가(워커).
+ * 데스크탑 org roster를 Kimchi의 orchestrator→phase→worker 모델에 매핑하고, 기존 liveAgents + timeline
+ * (+ 백엔드의 per-node done 신호)에서 파생한 per-agent 라이프사이클(✓ 완료 · ▶ 실행 · ○ 대기)을 렌더한다.
+ * 한 그룹에서 2개 이상의 워커가 동시 실행이거나 본부가 2개 이상 동시 실행이면 `∥` 병렬 마커를 단다.
+ * 팀/조직(roster)이 없으면(단일 에이전트) 병렬 프레이밍을 쓰지 않고 단독 작업 뷰로 표시한다.
+ */
+type OrchStatus = "running" | "done" | "pending";
+
+function OrchestrationTree({
+  roster,
+  hasRoster,
   liveAgents,
   timeline,
   busy,
   locale,
 }: {
-  participants: RosterNode[];
+  roster: Roster | null;
+  hasRoster: boolean;
   liveAgents: Record<string, LiveAgent>;
   timeline: NetTimelineItem[];
   busy: boolean;
   locale: "ko" | "en";
 }) {
-  const nodes = participantFallback(participants, liveAgents);
-  const cards = nodes.slice(0, 8).map((node, index) => {
-    const live = Boolean(liveAgents[node.key]?.active) || (busy && index === 0 && Object.keys(liveAgents).length === 0);
-    const complete = timeline.some((item) => item.agentId === node.key && /완료|done|completed/i.test(item.text));
-    const status: "running" | "done" | "waiting" = live ? "running" : complete ? "done" : "waiting";
-    return { node, status };
-  });
-  const columns = [
-    { id: "running", label: locale === "ko" ? "진행" : "Running" },
-    { id: "done", label: locale === "ko" ? "완료" : "Done" },
-    { id: "waiting", label: locale === "ko" ? "대기" : "Waiting" },
-  ] as const;
+  const ko = locale === "ko";
+
+  // per-agent 라이프사이클: active 플래그(라이브) + 과거 이벤트(=실행됨=완료). done 이벤트가 active를 끈다.
+  const statusOf = (key: string): OrchStatus => {
+    if (liveAgents[key]?.active) return "running";
+    const seen = liveAgents[key] !== undefined || timeline.some((it) => it.agentId === key);
+    return seen ? "done" : "pending";
+  };
+  const latestTextOf = (key: string): string | null => {
+    for (let i = timeline.length - 1; i >= 0; i--) {
+      if (timeline[i].agentId === key) return timeline[i].text;
+    }
+    return liveAgents[key]?.status ?? null;
+  };
+  const tokensOf = (key: string): number =>
+    timeline.reduce((sum, it) => (it.agentId === key && it.tokens ? sum + it.tokens : sum), 0);
+
+  // 그룹(본부) 상태는 본부 노드 + 자식에서 파생한다. (단일-division/CEO-단독 시 본부 노드 자체는
+  // 실행 이벤트를 안 내므로, 자식이 일하는데 부모만 회색으로 멈춰 보이는 모순을 막는다.)
+  const groupStatusOf = (div: RosterDivision): OrchStatus => {
+    const own = statusOf(div.key);
+    if (own === "running") return "running";
+    const childStatuses = div.specialists.map((s) => statusOf(s.key));
+    if (childStatuses.some((s) => s === "running")) return "running";
+    const seen = childStatuses.filter((s) => s !== "pending");
+    if (div.specialists.length > 0 && seen.length === div.specialists.length) return "done";
+    if (seen.length > 0) return "running"; // 일부 진행했지만 전부 완료 전 → 아직 작업 중
+    return own; // pending(또는 본부 자체 done)
+  };
+
+  const activeCount = Object.values(liveAgents).filter((a) => a.active).length;
+
+  // roster 키 집합 — 여기에 안 잡히는 live 에이전트(리졸버 레이스/슬러그 불일치)는 따로라도 보여준다.
+  const rosterKeys = new Set<string>();
+  if (roster) {
+    if (roster.ceo) rosterKeys.add(roster.ceo.key);
+    for (const d of roster.divisions) {
+      rosterKeys.add(d.key);
+      for (const s of d.specialists) rosterKeys.add(s.key);
+    }
+  }
+  const extraNodes: RosterNode[] = Object.entries(liveAgents)
+    .filter(([k]) => !rosterKeys.has(k))
+    .map(([key, a]) => ({ key, name: a.name, role: a.role, tier: a.tier ?? 3 }));
+
+  // 동시 "실제 실행 중"인 본부 수 → 교차-division 병렬(∥) 판정. groupStatusOf의 표시용 'running'
+  // (일부 완료 + 일부 대기로 진행 중)과 달리, ∥는 진짜 동시 실행(active)일 때만 켠다.
+  const groupActuallyRunning = (div: RosterDivision): boolean =>
+    statusOf(div.key) === "running" || div.specialists.some((s) => statusOf(s.key) === "running");
+  const divisionsRunning = roster ? roster.divisions.filter(groupActuallyRunning).length : 0;
+
+  const flatNodes: RosterNode[] = hasRoster
+    ? []
+    : Object.entries(liveAgents).map(([key, a]) => ({ key, name: a.name, role: a.role, tier: a.tier ?? 1 }));
+  const isEmpty = !hasRoster && flatNodes.length === 0 && !busy;
+
+  const statusWord =
+    activeCount > 0
+      ? ko ? "실행 중" : "running"
+      : busy
+        ? ko ? "위임 중…" : "delegating…"
+        : ko ? "대기" : "idle";
 
   return (
-    <section style={kanbanWrapStyle}>
-      <div style={sectionTitleStyle}>{locale === "ko" ? "작업 과정 칸반" : "Workflow kanban"}</div>
-      <div style={kanbanGridStyle}>
-        {columns.map((column) => {
-          const columnCards = cards.filter((card) => card.status === column.id);
-          return (
-            <div key={column.id} style={kanbanColumnStyle}>
-              <div style={kanbanColumnHeaderStyle}>
-                <span>{column.label}</span>
-                <strong>{columnCards.length}</strong>
-              </div>
-              <div style={kanbanCardStackStyle}>
-                {columnCards.length === 0 ? (
-                  <span style={kanbanEmptyStyle}>-</span>
-                ) : (
-                  columnCards.map((card) => (
-                    <span key={card.node.key} style={kanbanCardStyle(card.status)}>
-                      {card.node.name}
-                    </span>
-                  ))
+    <section style={orchWrapStyle}>
+      <div style={orchHeaderStyle}>
+        <span style={orchTitleStyle}>
+          {hasRoster ? (ko ? "오케스트레이션" : "Orchestration") : (ko ? "에이전트 작업" : "Agent activity")}
+        </span>
+        <span style={orchStatusWordStyle(activeCount > 0 || busy)}>{statusWord}</span>
+      </div>
+
+      {isEmpty ? (
+        <div style={orchEmptyStyle}>
+          {hasRoster
+            ? ko
+              ? "메시지를 보내면 오케스트레이터가 작업을 분해해 병렬 서브에이전트로 위임합니다. 각 에이전트의 진행이 여기 트리로 실시간 표시됩니다."
+              : "Send a message — the orchestrator decomposes the task and delegates to parallel sub-agents. Each agent's progress shows here as a live tree."
+            : ko
+              ? "이 에이전트가 단독으로 작업합니다. 단계와 도구 사용이 여기에 실시간으로 표시됩니다."
+              : "This agent works solo — its steps and tools appear here as it runs."}
+        </div>
+      ) : hasRoster && roster ? (
+        <div style={orchTreeStyle}>
+          {roster.ceo && (
+            <AgentRow
+              node={roster.ceo}
+              kind="orchestrator"
+              status={statusOf(roster.ceo.key)}
+              activity={latestTextOf(roster.ceo.key)}
+              tokens={tokensOf(roster.ceo.key)}
+              model={liveAgents[roster.ceo.key]?.model}
+              parallel={divisionsRunning >= 2}
+              locale={locale}
+            />
+          )}
+          {roster.divisions.map((div) => {
+            const specs = div.specialists;
+            const doneCount = specs.filter((s) => statusOf(s.key) === "done").length;
+            const runningCount = specs.filter((s) => statusOf(s.key) === "running").length;
+            const groupParallel = runningCount >= 2 || divisionsRunning >= 2;
+            return (
+              <div key={div.key} style={orchGroupStyle}>
+                <AgentRow
+                  node={div}
+                  kind="group"
+                  status={groupStatusOf(div)}
+                  activity={latestTextOf(div.key)}
+                  tokens={tokensOf(div.key)}
+                  model={liveAgents[div.key]?.model}
+                  stepCount={specs.length > 0 ? `${doneCount}/${specs.length}` : undefined}
+                  parallel={groupParallel}
+                  locale={locale}
+                />
+                {specs.length > 0 && (
+                  <div style={orchWorkersStyle}>
+                    {specs.map((s) => (
+                      <AgentRow
+                        key={s.key}
+                        node={s}
+                        kind="worker"
+                        status={statusOf(s.key)}
+                        activity={latestTextOf(s.key)}
+                        tokens={tokensOf(s.key)}
+                        model={liveAgents[s.key]?.model}
+                        locale={locale}
+                      />
+                    ))}
+                  </div>
                 )}
               </div>
+            );
+          })}
+          {extraNodes.length > 0 && (
+            <div style={orchWorkersStyle}>
+              {extraNodes.map((n) => (
+                <AgentRow
+                  key={n.key}
+                  node={n}
+                  kind="worker"
+                  status={statusOf(n.key)}
+                  activity={latestTextOf(n.key)}
+                  tokens={tokensOf(n.key)}
+                  model={liveAgents[n.key]?.model}
+                  locale={locale}
+                />
+              ))}
             </div>
-          );
-        })}
-      </div>
+          )}
+        </div>
+      ) : (
+        <div style={orchTreeStyle}>
+          {flatNodes.map((n, i) => (
+            <AgentRow
+              key={n.key}
+              node={n}
+              kind={i === 0 ? "orchestrator" : "worker"}
+              status={statusOf(n.key)}
+              activity={latestTextOf(n.key)}
+              tokens={tokensOf(n.key)}
+              model={liveAgents[n.key]?.model}
+              locale={locale}
+            />
+          ))}
+        </div>
+      )}
     </section>
   );
 }
 
-function ParallelAgentBitmap({
-  participants,
-  liveAgents,
-  timeline,
-  busy,
+// ── 오케스트레이션 팔레트 — 테마 적응형. 배경/텍스트/엣지는 앱 CSS 변수(다크모드=다크, 라이트모드=주위 색).
+//    상태색(amber=작업 중 / green=완료)은 두 테마에서 모두 비비드하게 고정. 픽셀 캐릭터는 시드별 비비드 hue.
+const RETRO = {
+  bg: "var(--paper)",
+  bgGrid: "var(--paper-2)",
+  card: "var(--paper)",
+  cardRun: "color-mix(in srgb, #F59E0B 10%, var(--paper))",
+  edge: "var(--paper-edge)",
+  edgeRun: "color-mix(in srgb, #F59E0B 42%, var(--paper-edge))",
+  ink: "var(--ink)",
+  inkSoft: "var(--ink-soft)",
+  muted: "var(--muted-deep)",
+  amber: "#F59E0B",
+  green: "#10B981",
+  ghost: "var(--muted)",
+} as const;
+
+// 8-bit 픽셀 캐릭터 — agent id를 시드로 절차 생성(안정·고유). 레퍼런스(크림 미니 몬스터) 감성.
+function hashSeed(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+function mulberry32(a: number): () => number {
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const CODENAMES = [
+  "Bitsy", "Gloomba", "Pixl", "Nibbit", "Zorp", "Mochi", "Goblet", "Wisp", "Tato", "Bonk",
+  "Bloop", "Snib", "Crumb", "Munch", "Glitch", "Pip", "Boop", "Fizz", "Gizmo", "Noodle",
+  "Pesto", "Quark", "Riff", "Sprout", "Tumble", "Vex", "Wobble", "Yolk", "Ziggy", "Cog",
+  "Dapple", "Echo", "Flick", "Grub", "Hush", "Inky", "Jolt", "Kobo", "Lumi", "Mossy",
+  "Nub", "Orbit", "Puddle", "Runt", "Spud", "Twix", "Umber", "Volt", "Whirl", "Blip",
+] as const;
+function codenameFor(seed: string): string {
+  const rnd = mulberry32(hashSeed(`${seed}:name`));
+  return CODENAMES[Math.floor(rnd() * CODENAMES.length)];
+}
+function buildCreature(seed: string): boolean[][] {
+  const rnd = mulberry32(hashSeed(seed));
+  const N = 9;
+  const half = 5; // 0..4, 4 = 중앙 (좌우 대칭)
+  const g: boolean[][] = Array.from({ length: N }, () => Array<boolean>(N).fill(false));
+  for (let y = 0; y < N; y++) {
+    const w = y === 0 ? 0.28 : y === N - 1 ? 0.32 : y <= 1 || y >= N - 2 ? 0.5 : 0.68;
+    for (let x = 0; x < half; x++) {
+      const on = rnd() < w;
+      g[y][x] = on;
+      g[y][N - 1 - x] = on;
+    }
+  }
+  // 몸통 코어 — 가운데 세로 스파인 채워 "빈 캐릭터" 방지
+  for (let y = 2; y < N - 1; y++) g[y][4] = true;
+  // 눈 — 상단-중앙 구멍 2개(다크 배경이 비쳐 눈처럼). 주변을 채워 눈이 보이게.
+  const ey = 2 + Math.floor(rnd() * 2);
+  const ex = 2;
+  for (const xx of [ex, N - 1 - ex]) {
+    g[ey][xx] = false;
+    if (g[ey - 1]) g[ey - 1][xx] = true;
+  }
+  return g;
+}
+
+function PixelAvatar({
+  seed,
+  status,
+  kind,
+}: {
+  seed: string;
+  status: OrchStatus;
+  kind: "orchestrator" | "group" | "worker";
+}) {
+  const grid = useMemo(() => buildCreature(seed), [seed]);
+  const N = grid.length;
+  const size = kind === "worker" ? 28 : 32;
+  const inner = size - 8;
+  // 비비드 캐릭터 — 에이전트마다 시드 기반 선명한 hue (라이트/다크 양쪽에서 잘 보임).
+  const hue = hashSeed(`${seed}:hue`) % 360;
+  const tone =
+    status === "pending"
+      ? "var(--muted)"
+      : kind === "orchestrator"
+        ? "#F59E0B"
+        : `hsl(${hue} 72% 52%)`;
+  const pip =
+    status === "running" ? RETRO.amber : status === "done" ? RETRO.green : RETRO.muted;
+  return (
+    <span style={avatarChipStyle(status, size)}>
+      <svg
+        width={inner}
+        height={inner}
+        viewBox={`0 0 ${N} ${N}`}
+        shapeRendering="crispEdges"
+        style={{ display: "block", imageRendering: "pixelated", opacity: status === "pending" ? 0.7 : 1 }}
+        aria-hidden
+      >
+        {grid.flatMap((row, y) =>
+          row.map((on, x) =>
+            on ? <rect key={`${x}-${y}`} x={x} y={y} width={1.04} height={1.04} fill={tone} /> : null,
+          ),
+        )}
+      </svg>
+      <span
+        aria-hidden
+        style={{
+          position: "absolute",
+          right: -2,
+          bottom: -2,
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          background: pip,
+          border: `2px solid ${RETRO.bg}`,
+          boxShadow: status === "running" ? `0 0 0 2px color-mix(in srgb, ${RETRO.amber} 30%, transparent)` : undefined,
+        }}
+      />
+    </span>
+  );
+}
+
+function AgentRow({
+  node,
+  kind,
+  status,
+  activity,
+  tokens,
+  model,
+  stepCount,
+  parallel,
   locale,
 }: {
-  participants: RosterNode[];
-  liveAgents: Record<string, LiveAgent>;
-  timeline: NetTimelineItem[];
-  busy: boolean;
+  node: RosterNode;
+  kind: "orchestrator" | "group" | "worker";
+  status: OrchStatus;
+  activity: string | null;
+  tokens: number;
+  model?: string;
+  stepCount?: string;
+  parallel?: boolean;
   locale: "ko" | "en";
 }) {
-  const nodes = participantFallback(participants, liveAgents).slice(0, 10);
-  const activeCount = nodes.filter((node, index) => liveAgents[node.key]?.active || (busy && index === 0 && Object.keys(liveAgents).length === 0)).length;
-  const latest = timeline.slice(-18);
-  const cells = Array.from({ length: 36 }, (_, index) => {
-    const event = latest[index % Math.max(1, latest.length)];
-    const node = nodes[index % Math.max(1, nodes.length)];
-    const live = node ? liveAgents[node.key]?.active : false;
-    const tone = live || (busy && index % 7 === 0)
-      ? "live"
-      : event?.kind === "handoff"
-        ? "handoff"
-        : event?.kind === "tool"
-          ? "tool"
-          : event
-            ? "status"
-            : "idle";
-    return { key: `${index}:${event?.key ?? "idle"}`, tone };
-  });
-
+  const ko = locale === "ko";
+  const code = codenameFor(node.key);
+  const statusWord = status === "done" ? (ko ? "완료" : "done") : status === "running" ? (ko ? "작업 중" : "working") : (ko ? "대기" : "idle");
+  const roleLabel =
+    node.role ||
+    (kind === "orchestrator"
+      ? ko ? "오케스트레이터" : "Orchestrator"
+      : kind === "group"
+        ? ko ? "본부" : "Lead"
+        : ko ? "워커" : "Worker");
+  const tokensText = formatTokens(tokens || undefined, locale);
   return (
-    <section style={bitmapWrapStyle}>
-      <div style={bitmapHeaderStyle}>
-        <span>{locale === "ko" ? "병렬 서브에이전트" : "Parallel subagents"}</span>
-        <strong>{activeCount || (busy ? 1 : 0)} live</strong>
+    <div style={agentRowStyle(kind, status)} aria-label={`${code} (${node.name}), ${model ? model + ", " : ""}${statusWord}`}>
+      <PixelAvatar seed={node.key} status={status} kind={kind} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={agentRowTopStyle}>
+          <span style={agentNameStyle(kind, status)}>{code}</span>
+          {model && <span style={modelPillStyle(status)} title={ko ? `${model} 사용 중` : `using ${model}`}>{model}</span>}
+          {parallel && (
+            <span style={parallelBadgeStyle} title={ko ? "병렬 실행" : "running in parallel"}>∥</span>
+          )}
+          {stepCount && <span style={stepCountStyle}>{stepCount}</span>}
+        </div>
+        <div style={agentMetaStyle}>
+          <span style={agentRoleStyle}>{roleLabel}</span>
+          <span style={agentRoleSepStyle}> · </span>
+          <span style={statusWordStyle(status)}>{statusWord}</span>
+          {activity && status === "running" && <span style={agentActivityStyle}> · {activity}</span>}
+        </div>
       </div>
-      <div style={bitmapBoardStyle} aria-hidden>
-        {cells.map((cell) => (
-          <span key={cell.key} style={bitmapCellStyle(cell.tone)} />
-        ))}
-      </div>
-      <div style={bitmapLegendStyle}>
-        {nodes.length === 0
-          ? (locale === "ko" ? "메시지를 보내면 실행 노드가 여기에 표시됩니다." : "Send a message to show active nodes here.")
-          : nodes.slice(0, 3).map((node) => node.name).join(" · ")}
-      </div>
-    </section>
+      {tokensText && <span style={agentTokensStyle}>{tokensText}</span>}
+    </div>
   );
-}
-
-function participantFallback(participants: RosterNode[], liveAgents: Record<string, LiveAgent>): RosterNode[] {
-  if (participants.length > 0) return participants;
-  return Object.entries(liveAgents).map(([key, agent]) => ({
-    key,
-    name: agent.name,
-    role: agent.role,
-    tier: agent.tier ?? 1,
-  }));
 }
 
 function workflowActivityRows(timeline: NetTimelineItem[], locale: "ko" | "en") {
@@ -634,136 +870,6 @@ const activitySummaryRowStyle: CSSProperties = {
   textAlign: "left",
 };
 
-const kanbanWrapStyle: CSSProperties = {
-  marginTop: 14,
-  borderRadius: 8,
-  border: "1px solid var(--paper-edge)",
-  background: "var(--paper)",
-  padding: 10,
-};
-
-const sectionTitleStyle: CSSProperties = {
-  color: "var(--ink)",
-  fontSize: 11.5,
-  fontWeight: 820,
-  marginBottom: 8,
-};
-
-const kanbanGridStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-  gap: 6,
-};
-
-const kanbanColumnStyle: CSSProperties = {
-  minWidth: 0,
-  borderRadius: 7,
-  background: "var(--paper-2)",
-  border: "1px solid color-mix(in srgb, var(--paper-edge) 72%, transparent)",
-  padding: 6,
-};
-
-const kanbanColumnHeaderStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 6,
-  color: "var(--muted-deep)",
-  fontSize: 9.8,
-  fontWeight: 800,
-  textTransform: "uppercase",
-  letterSpacing: 0.2,
-};
-
-const kanbanCardStackStyle: CSSProperties = {
-  marginTop: 6,
-  display: "grid",
-  gap: 4,
-};
-
-function kanbanCardStyle(status: "running" | "done" | "waiting"): CSSProperties {
-  return {
-    minWidth: 0,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-    borderRadius: 6,
-    padding: "4px 5px",
-    background:
-      status === "running"
-        ? "color-mix(in srgb, var(--green-deep) 13%, var(--paper))"
-        : status === "done"
-          ? "color-mix(in srgb, var(--accent) 9%, var(--paper))"
-          : "var(--paper)",
-    color: status === "running" ? "var(--green-deep)" : status === "done" ? "var(--accent)" : "var(--muted-deep)",
-    border: "1px solid color-mix(in srgb, currentColor 17%, var(--paper-edge))",
-    fontSize: 10.2,
-    fontWeight: 760,
-  };
-}
-
-const kanbanEmptyStyle: CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 11,
-  padding: "4px 0",
-};
-
-const bitmapWrapStyle: CSSProperties = {
-  marginTop: 10,
-  borderRadius: 8,
-  border: "1px solid color-mix(in srgb, var(--paper-edge) 78%, transparent)",
-  background: "linear-gradient(180deg, color-mix(in srgb, var(--paper-2) 92%, var(--ink) 3%), var(--paper))",
-  padding: 10,
-  overflow: "hidden",
-};
-
-const bitmapHeaderStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 8,
-  color: "var(--ink)",
-  fontSize: 11.5,
-  fontWeight: 820,
-};
-
-const bitmapBoardStyle: CSSProperties = {
-  marginTop: 9,
-  display: "grid",
-  gridTemplateColumns: "repeat(12, 1fr)",
-  gap: 3,
-};
-
-function bitmapCellStyle(tone: string): CSSProperties {
-  const color =
-    tone === "live"
-      ? "var(--green-deep)"
-      : tone === "handoff"
-        ? "var(--accent)"
-        : tone === "tool"
-          ? "var(--blue-deep)"
-          : tone === "status"
-            ? "var(--muted-deep)"
-            : "var(--paper-edge)";
-  return {
-    aspectRatio: "1 / 1",
-    borderRadius: 2,
-    background: color,
-    opacity: tone === "idle" ? 0.45 : 0.92,
-    boxShadow: tone === "live" ? "0 0 0 2px color-mix(in srgb, var(--green-deep) 13%, transparent)" : undefined,
-  };
-}
-
-const bitmapLegendStyle: CSSProperties = {
-  marginTop: 8,
-  color: "var(--muted-deep)",
-  fontSize: 10.5,
-  lineHeight: 1.4,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
 const searchingRowStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
@@ -776,31 +882,16 @@ const searchingRowStyle: CSSProperties = {
   padding: "0 1px",
 };
 
-function participantDotStyle(active: boolean): CSSProperties {
+function searchingDotStyle(active: boolean): CSSProperties {
   return {
-    width: 6,
-    height: 6,
+    width: 7,
+    height: 7,
     borderRadius: "50%",
     flexShrink: 0,
-    background: active ? "var(--green-deep)" : "transparent",
-    border: active ? "none" : "1px solid var(--muted)",
+    background: active ? "var(--peach)" : "var(--muted)",
+    boxShadow: active ? "0 0 0 4px color-mix(in srgb, var(--peach) 14%, transparent)" : undefined,
   };
 }
-
-const participantLineStyle: CSSProperties = {
-  marginTop: 10,
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
-  maxWidth: "100%",
-  color: "var(--muted-deep)",
-  fontSize: 10.5,
-  fontWeight: 720,
-  borderRadius: 999,
-  border: "1px solid var(--paper-edge)",
-  background: "var(--paper)",
-  padding: "4px 8px",
-};
 
 function idleCardStyle(active: boolean): CSSProperties {
   return {
@@ -864,60 +955,6 @@ const receiptChipStyle: CSSProperties = {
   fontWeight: 750,
 };
 
-// 마진 라인 — 모든 영수증에 1급 데이터로. 항상 ₩0.
-const receiptMarginStyle: CSSProperties = {
-  marginTop: 8,
-  paddingTop: 7,
-  borderTop: "1px solid color-mix(in srgb, var(--paper-edge) 72%, transparent)",
-  color: "var(--green-deep)",
-  fontSize: 10.5,
-  fontWeight: 800,
-  letterSpacing: 0.1,
-};
-
-// 세션 누적 마진 카운터 — 패널 하단 고정 바.
-const sessionMarginCounterStyle: CSSProperties = {
-  flexShrink: 0,
-  borderTop: "var(--hairline)",
-  background: "var(--paper)",
-  padding: "10px 12px",
-  display: "flex",
-  flexDirection: "column",
-  gap: 4,
-};
-
-const sessionMarginLabelStyle: CSSProperties = {
-  color: "var(--muted-deep)",
-  fontSize: 10.5,
-  fontWeight: 700,
-  textTransform: "uppercase",
-  letterSpacing: 0.4,
-};
-
-const sessionMarginValueStyle: CSSProperties = {
-  color: "var(--green-deep)",
-  fontSize: 12.5,
-  fontWeight: 850,
-};
-
-const sessionMarginSubStyle: CSSProperties = {
-  color: "var(--muted-deep)",
-  fontSize: 10,
-  lineHeight: 1.4,
-  overflowWrap: "anywhere",
-};
-
-function searchingDotStyle(active: boolean): CSSProperties {
-  return {
-    width: 7,
-    height: 7,
-    borderRadius: "50%",
-    flexShrink: 0,
-    background: active ? "var(--peach)" : "var(--muted)",
-    boxShadow: active ? "0 0 0 4px color-mix(in srgb, var(--peach) 14%, transparent)" : undefined,
-  };
-}
-
 const workflowTitleStyle: CSSProperties = {
   minWidth: 0,
   overflow: "hidden",
@@ -974,5 +1011,234 @@ function workflowKindStyle(kind: NetTimelineItem["kind"], complete = false): CSS
     padding: "2px 7px",
     fontSize: 10,
     fontWeight: 760,
+  };
+}
+
+// ── 오케스트레이션 트리 스타일 ──────────────────────────────
+const headerCountBadgeStyle: CSSProperties = {
+  flexShrink: 0,
+  display: "inline-flex",
+  alignItems: "center",
+  borderRadius: 999,
+  border: "1px solid color-mix(in srgb, var(--green-deep) 40%, var(--paper-edge))",
+  background: "color-mix(in srgb, var(--green-deep) 12%, var(--paper))",
+  color: "var(--green-deep)",
+  padding: "2px 7px",
+  fontSize: 10,
+  fontWeight: 850,
+};
+
+const RETRO_MONO = "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)";
+
+const orchWrapStyle: CSSProperties = {
+  marginTop: 14,
+  borderRadius: 12,
+  border: `1px solid ${RETRO.edge}`,
+  background: RETRO.bg,
+  padding: "11px 11px 12px",
+  overflow: "hidden",
+};
+
+const orchHeaderStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+  marginBottom: 10,
+};
+
+const orchTitleStyle: CSSProperties = {
+  color: RETRO.ink,
+  fontSize: 10.5,
+  fontWeight: 800,
+  letterSpacing: 1.4,
+  textTransform: "uppercase",
+  fontFamily: RETRO_MONO,
+};
+
+function orchStatusWordStyle(active: boolean): CSSProperties {
+  return {
+    flexShrink: 0,
+    color: active ? RETRO.green : RETRO.muted,
+    fontSize: 9.5,
+    fontWeight: 700,
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
+    fontFamily: RETRO_MONO,
+  };
+}
+
+const orchEmptyStyle: CSSProperties = {
+  borderRadius: 9,
+  border: `1px solid ${RETRO.edge}`,
+  background: RETRO.card,
+  padding: "12px 12px",
+  color: RETRO.inkSoft,
+  fontSize: 11.3,
+  lineHeight: 1.55,
+};
+
+const orchTreeStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+};
+
+const orchGroupStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+};
+
+const orchWorkersStyle: CSSProperties = {
+  marginLeft: 14,
+  paddingLeft: 11,
+  borderLeft: `1px dashed ${RETRO.edge}`,
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+};
+
+function agentRowStyle(kind: "orchestrator" | "group" | "worker", status: OrchStatus): CSSProperties {
+  const running = status === "running";
+  return {
+    display: "flex",
+    alignItems: "center",
+    gap: 9,
+    borderRadius: 9,
+    border: `1px solid ${kind === "orchestrator" ? RETRO.edgeRun : running ? RETRO.edgeRun : RETRO.edge}`,
+    background:
+      kind === "orchestrator"
+        ? "color-mix(in srgb, #F59E0B 12%, var(--paper))"
+        : running
+          ? RETRO.cardRun
+          : RETRO.card,
+    padding: kind === "worker" ? "6px 8px" : "8px 9px",
+    opacity: status === "pending" ? 0.6 : 1,
+  };
+}
+
+function avatarChipStyle(status: OrchStatus, size: number): CSSProperties {
+  const running = status === "running";
+  return {
+    position: "relative",
+    flexShrink: 0,
+    width: size,
+    height: size,
+    borderRadius: 7,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: running ? "color-mix(in srgb, #F59E0B 13%, var(--paper-2))" : "var(--paper-2)",
+    border: `1px solid ${running ? RETRO.edgeRun : RETRO.edge}`,
+    boxShadow: running ? `0 0 10px -3px color-mix(in srgb, ${RETRO.amber} 45%, transparent)` : undefined,
+  };
+}
+
+const agentRowTopStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  minWidth: 0,
+};
+
+function agentNameStyle(kind: "orchestrator" | "group" | "worker", status: OrchStatus): CSSProperties {
+  return {
+    flex: 1,
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    color: status === "pending" ? RETRO.inkSoft : kind === "orchestrator" ? RETRO.amber : RETRO.ink,
+    fontSize: kind === "worker" ? 12 : 12.5,
+    fontWeight: 800,
+    letterSpacing: 0.3,
+    fontFamily: RETRO_MONO,
+  };
+}
+
+const parallelBadgeStyle: CSSProperties = {
+  flexShrink: 0,
+  color: RETRO.amber,
+  fontSize: 12,
+  fontWeight: 900,
+  lineHeight: 1,
+};
+
+const stepCountStyle: CSSProperties = {
+  flexShrink: 0,
+  borderRadius: 5,
+  border: `1px solid ${RETRO.edge}`,
+  background: "transparent",
+  color: RETRO.inkSoft,
+  padding: "1px 5px",
+  fontSize: 9.5,
+  fontWeight: 700,
+  fontVariantNumeric: "tabular-nums",
+  fontFamily: RETRO_MONO,
+};
+
+const agentMetaStyle: CSSProperties = {
+  marginTop: 3,
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: RETRO.muted,
+  fontSize: 10.2,
+  lineHeight: 1.4,
+};
+
+const agentRoleStyle: CSSProperties = {
+  color: RETRO.inkSoft,
+  fontWeight: 700,
+};
+
+const agentRoleSepStyle: CSSProperties = {
+  color: RETRO.muted,
+  fontWeight: 600,
+};
+
+const agentActivityStyle: CSSProperties = {
+  color: RETRO.muted,
+  fontWeight: 500,
+};
+
+const agentTokensStyle: CSSProperties = {
+  flexShrink: 0,
+  alignSelf: "center",
+  color: RETRO.muted,
+  fontSize: 9.5,
+  fontWeight: 600,
+  fontVariantNumeric: "tabular-nums",
+  fontFamily: RETRO_MONO,
+};
+
+// "모델 사용 중" pill — 실행 중이면 앰버, 아니면 muted.
+function modelPillStyle(status: OrchStatus): CSSProperties {
+  const running = status === "running";
+  return {
+    flexShrink: 0,
+    maxWidth: 110,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    borderRadius: 5,
+    border: `1px solid ${running ? RETRO.edgeRun : RETRO.edge}`,
+    background: running ? "color-mix(in srgb, #FFC061 12%, transparent)" : "transparent",
+    color: running ? RETRO.amber : RETRO.inkSoft,
+    padding: "0 5px",
+    fontSize: 9.5,
+    fontWeight: 700,
+    lineHeight: "15px",
+    fontFamily: RETRO_MONO,
+  };
+}
+
+// 상태 워드 — 작업 중(앰버) · 완료(그린) · 대기(muted).
+function statusWordStyle(status: OrchStatus): CSSProperties {
+  return {
+    color: status === "running" ? RETRO.amber : status === "done" ? RETRO.green : RETRO.muted,
+    fontWeight: 700,
   };
 }

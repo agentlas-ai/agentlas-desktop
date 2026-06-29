@@ -8,6 +8,7 @@ import { navigate } from "@/lib/navigation";
 import type { Chat } from "@/lib/types";
 
 const POLL_MS = 8000;
+const PAGE_SIZE = 5;
 
 function relTime(iso: string, ko: boolean): string {
   const t = Date.parse(iso);
@@ -26,6 +27,7 @@ export function DashboardActivity() {
   const ko = locale === "ko";
   const [recent, setRecent] = useState<Chat[]>([]);
   const [active, setActive] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -41,32 +43,42 @@ export function DashboardActivity() {
     }
   }, []);
 
-  useEffect(() => {
+  // 최근 대화는 마운트 1회가 아니라 폴링마다 다시 읽는다 — 새 채팅/이름변경/완료가
+  // 대시보드를 다시 열지 않아도 반영되도록(첫 메시지 후에야 목록에 뜨는 fix와 짝).
+  const loadRecent = useCallback(async () => {
     const api = ipc();
     if (!api) {
       setLoaded(true);
       return;
     }
-    void api.chats
-      .listRecent(8)
-      .then((c) => {
-        setRecent(c);
-        setError("");
-        setLoaded(true);
-      })
-      .catch(() => {
-        setRecent([]);
-        setError(ko ? "최근 대화를 불러오지 못했습니다. 데이터는 바뀌지 않았습니다." : "Recent chats could not be loaded. Nothing changed.");
-        setLoaded(true);
-      });
+    try {
+      const c = await api.chats.listRecent(25);
+      setRecent(c);
+      setError("");
+    } catch {
+      // 폴링 중 일시 오류는 기존 목록을 비우지 않는다(깜빡임 방지).
+      setError(ko ? "최근 대화를 불러오지 못했습니다. 데이터는 바뀌지 않았습니다." : "Recent chats could not be loaded. Nothing changed.");
+    } finally {
+      setLoaded(true);
+    }
+  }, [ko]);
+
+  useEffect(() => {
+    void loadRecent();
     void loadActive();
-    timer.current = setInterval(() => void loadActive(), POLL_MS);
+    timer.current = setInterval(() => {
+      void loadActive();
+      void loadRecent();
+    }, POLL_MS);
     return () => {
       if (timer.current) clearInterval(timer.current);
     };
-  }, [loadActive, ko]);
+  }, [loadActive, loadRecent]);
 
   const runningCount = recent.filter((c) => active.has(c.id)).length;
+  const pageCount = Math.max(1, Math.ceil(recent.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount - 1);
+  const visibleRecent = recent.slice(currentPage * PAGE_SIZE, currentPage * PAGE_SIZE + PAGE_SIZE);
 
   return (
     <div className="dashboard-module dashboard-activity-module">
@@ -88,24 +100,47 @@ export function DashboardActivity() {
           {ko ? "아직 대화가 없어요. 새 채팅으로 일을 시작하세요." : "No chats yet. Start one to get going."}
         </div>
       ) : (
-        recent.map((c) => {
-          const running = active.has(c.id);
-          return (
-            <button
-              key={c.id}
-              onClick={() => navigate(`/chat?id=${c.id}`)}
-              className="dashboard-activity-row"
-            >
-              {running ? <LiveDot /> : <span className="dashboard-muted-dot" />}
-              <span>
-                {c.title || (ko ? "새 채팅" : "New chat")}
-              </span>
-              <span>
-                {running ? (ko ? "실행 중" : "running") : relTime(c.updatedAt, ko)}
-              </span>
-            </button>
-          );
-        })
+        <>
+          {visibleRecent.map((c) => {
+            const running = active.has(c.id);
+            return (
+              <button
+                key={c.id}
+                onClick={() => navigate(`/chat?id=${c.id}`)}
+                className="dashboard-activity-row"
+              >
+                {running ? <LiveDot /> : <span className="dashboard-muted-dot" />}
+                <span>
+                  {c.title || (ko ? "새 채팅" : "New chat")}
+                </span>
+                <span>
+                  {running ? (ko ? "실행 중" : "running") : relTime(c.updatedAt, ko)}
+                </span>
+              </button>
+            );
+          })}
+          {pageCount > 1 && (
+            <div className="dashboard-activity-pager">
+              <button
+                type="button"
+                onClick={() => setPage((value) => Math.max(0, value - 1))}
+                disabled={currentPage === 0}
+                aria-label={ko ? "이전 최근 대화" : "Previous recent chats"}
+              >
+                ‹
+              </button>
+              <span>{currentPage + 1} / {pageCount}</span>
+              <button
+                type="button"
+                onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}
+                disabled={currentPage >= pageCount - 1}
+                aria-label={ko ? "다음 최근 대화" : "Next recent chats"}
+              >
+                ›
+              </button>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

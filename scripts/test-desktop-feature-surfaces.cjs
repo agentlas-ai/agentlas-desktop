@@ -86,6 +86,7 @@ async function main() {
     await runImportSurface(browser, baseUrl, evidence);
     await runMemoryEvolutionSurface(browser, baseUrl, evidence);
     await runChatSurface(browser, baseUrl, evidence);
+    await runNewChatScopeSurface(browser, baseUrl, evidence);
     await runChatModelSurface(browser, baseUrl, evidence);
     await runChatAttachmentSurface(browser, baseUrl, evidence);
     await runChatPasteDropAttachmentSurface(browser, baseUrl, evidence);
@@ -427,7 +428,7 @@ async function runChatSurface(browser, baseUrl, evidence) {
   await textbox.waitFor();
   assert.equal(await page.locator(".sidenav").count(), 0, "chat route should not render the global SideNav next to the chat sidebar");
   assert.equal(await page.locator("[data-tour-id='workspace.sidebar']").count(), 1, "chat route should keep exactly one left sidebar");
-  await page.locator("[data-tour-id='workspace.sidebar']").getByText(/에이전트 만들기|Create agent/).waitFor();
+  await page.locator("[data-tour-id='workspace.sidebar']").getByRole("button", { name: /새 채팅|New chat/ }).waitFor();
 
   await page.locator("button.chat-input-mode-chip", { hasText: /플랜 모드|Plan mode/ }).click();
   await page.locator("button.chat-input-mode-chip", { hasText: /목표 추진|Goal mode/ }).click();
@@ -469,20 +470,20 @@ async function runChatSurface(browser, baseUrl, evidence) {
   await page.locator(".agentlas-activity-card", { hasText: /Hub 에이전트 빌리는 중: qa-agent/ }).first().click();
   await page.locator("aside").getByText(/Hub 에이전트 빌리는 중: qa-agent/).first().waitFor();
   const rightPanel = page.locator(".chat-right-panel");
-  await rightPanel.getByText(/작업 과정 칸반|Workflow kanban/).waitFor();
-  await rightPanel.getByText(/병렬 서브에이전트|Parallel subagents/).waitFor();
-  const kanbanBox = await rightPanel.getByText(/작업 과정 칸반|Workflow kanban/).boundingBox();
+  const workflowHeading = rightPanel.getByText(/오케스트레이션|Orchestration|에이전트 작업|Agent activity/).first();
+  await workflowHeading.waitFor();
+  await rightPanel.getByText(/실행 중|running|위임 중|delegating|대기|idle/).first().waitFor();
+  const orchestrationBox = await workflowHeading.boundingBox();
   const activityBox = await rightPanel.locator(".agentlas-activity-card").first().boundingBox();
-  const bitmapBox = await rightPanel.getByText(/병렬 서브에이전트|Parallel subagents/).boundingBox();
-  assert.ok(kanbanBox && activityBox && bitmapBox, "agent tab should render kanban, activity cards, and subagent bitmap");
-  assert.ok(kanbanBox.y < activityBox.y && activityBox.y < bitmapBox.y, "agent work should stay above the parallel subagent bitmap");
+  assert.ok(orchestrationBox && activityBox, "agent tab should render orchestration and activity cards");
+  assert.ok(orchestrationBox.y < activityBox.y, "workflow tree should stay above activity cards");
   await page.getByRole("button", { name: /워크스페이스 패널|Workspace panel/ }).click();
   await page.getByRole("button", { name: /폴더 열기|Open folder/ }).click();
-  await page.getByRole("button", { name: "README.md" }).click();
+  await page.locator(".chat-right-panel").getByRole("treeitem", { name: "README.md" }).click();
   await page.locator(".chat-right-panel").getByText("README.md").waitFor();
   await page.locator(".chat-right-panel").getByText(/Panel viewer smoke file/).waitFor();
   await page.locator(".chat-right-panel").getByRole("button", { name: /파일|file/ }).click();
-  await page.getByRole("button", { name: "preview.html" }).click();
+  await page.locator(".chat-right-panel").getByRole("treeitem", { name: "preview.html" }).click();
   await page.locator(".chat-right-panel").getByText("preview.html", { exact: true }).waitFor();
   await page.frameLocator(".chat-right-panel iframe").getByText("Browser smoke frame").waitFor();
   const invokeCall = await page.evaluate(() => window.__qa.calls.find((call) => call.name === "invoke.run"));
@@ -494,6 +495,24 @@ async function runChatSurface(browser, baseUrl, evidence) {
   assert.equal(invokeCall.payload.appsGenerateMode, true);
 
   await finishPage(context, page, errors, evidence, "chat-options-surface");
+}
+
+async function runNewChatScopeSurface(browser, baseUrl, evidence) {
+  const { context, page, errors } = await newPage(browser);
+  await page.goto(`${baseUrl}/chat.html?id=chat-1`, { waitUntil: "domcontentloaded" });
+  await page.locator("[data-tour-id='workspace.sidebar']").getByRole("button", { name: /새 채팅|New chat/ }).click();
+  await page.getByRole("dialog", { name: /새 채팅 시작 위치|New chat scope/ }).waitFor();
+  await page.screenshot({ path: path.join(outDir, "chat-new-project-scope-dialog-surface.png"), fullPage: true });
+  await page.getByRole("button", { name: /QA Project/ }).click();
+  await page.waitForFunction(() =>
+    window.__qa.calls.some((call) => call.name === "chats.create" && call.payload.projectId === "project-1"),
+  );
+  await page.waitForFunction(() =>
+    window.__qa.calls.some((call) => call.name === "workspace.set" && call.payload.chatId === "chat-1" && call.payload.folder === "/tmp/agentlas-qa-project"),
+  );
+  const createCall = await page.evaluate(() => window.__qa.calls.find((call) => call.name === "chats.create" && call.payload.projectId === "project-1"));
+  assert.equal(createCall.payload.agentId, "agent-2");
+  await finishPage(context, page, errors, evidence, "chat-new-project-scope-surface");
 }
 
 async function runChatModelSurface(browser, baseUrl, evidence) {
@@ -918,12 +937,58 @@ async function runHubLiveSurface(browser, baseUrl, evidence) {
   await page.goto(`${baseUrl}/marketplace.html`, { waitUntil: "domcontentloaded" });
   await page.getByText(/Hub 실시간|Hub live/).waitFor();
   assert.equal(await page.getByText(/실제 Hub에 연결되지 않았습니다|not connected to the real Hub/).count(), 0);
+  assert.equal(await page.getByText(/라이브 Hub 항목|live Hub items/).count(), 0);
+  await page.locator(".hub-cat-chip", { hasText: /전체|All/ }).getByText("267").waitFor();
+  await page.locator(".hub-cat-chip", { hasText: /에이전트|Agent/ }).getByText("266").waitFor();
+  await page.getByText(/총 267개|267 total/).waitFor();
+  await page.locator(".portal-input").fill("FDA");
   await page.getByText(/FDA SaMD 510\(k\)|Pre-market Notification/).waitFor();
   assert.equal(await page.getByText(/Shop Product Writer|상품설명 작가/).count(), 0);
+  await page.locator(".portal-input").fill("");
+  await page.locator(".hub-cat-chip", { hasText: /전체|All/ }).getByText("267").waitFor();
+  await page.getByText(/총 267개|267 total/).waitFor();
   await finishPage(context, page, errors, evidence, "hub-live-surface");
 }
 
 function setupMockAgentlasBridge(options) {
+  function makeHubCatalog(total) {
+    return Array.from({ length: total }, (_, index) => {
+      if (index === 0) {
+        return {
+          slug: "fda-samd-510k-readiness-desk",
+          name: "FDA SaMD 510(k) 사전 승인 준비 데스크",
+          nameEn: "FDA SaMD 510(k) Pre-market Notification Readiness Desk",
+          tagline: "Callable Hub team",
+          taglineEn: "Callable Hub team",
+          trustGrade: "A",
+          installCount: 0,
+          manifestUrl: "mock",
+          kind: "cloud-callable",
+          callable: true,
+          source: "hub-index",
+          entityKind: "team",
+          perCallCredits: 10,
+        };
+      }
+      const n = String(index + 1).padStart(3, "0");
+      return {
+        slug: `hub-agent-${n}`,
+        name: `허브 에이전트 ${n}`,
+        nameEn: `Hub Agent ${n}`,
+        tagline: "Callable Hub agent",
+        taglineEn: "Callable Hub agent",
+        trustGrade: "A",
+        installCount: total - index,
+        manifestUrl: "mock",
+        kind: "cloud-callable",
+        callable: true,
+        source: "hub-profile",
+        entityKind: "agent",
+        perCallCredits: 3,
+      };
+    });
+  }
+
   const now = new Date().toISOString();
   const calls = [];
   const eventHandlers = {};
@@ -1189,23 +1254,7 @@ function setupMockAgentlasBridge(options) {
 	      listBundles: async () => [],
 	      listFirms: async () => [],
 	      listMine: async () => [],
-	      search: async () => [
-	        {
-	          slug: "fda-samd-510k-readiness-desk",
-	          name: "FDA SaMD 510(k) 사전 승인 준비 데스크",
-	          nameEn: "FDA SaMD 510(k) Pre-market Notification Readiness Desk",
-	          tagline: "Callable Hub team",
-	          taglineEn: "Callable Hub team",
-	          trustGrade: "A",
-	          installCount: 0,
-	          manifestUrl: "mock",
-	          kind: "cloud-callable",
-	          callable: true,
-	          source: "hub-index",
-	          entityKind: "team",
-	          perCallCredits: 10,
-	        },
-	      ],
+	      search: async () => makeHubCatalog(267),
 	    },
     mcpTools: {
       listCatalog: async () => [],
@@ -1376,7 +1425,7 @@ function setupMockAgentlasBridge(options) {
       listRecent: async () => [],
       create: async (input) => {
         record("chats.create", input);
-        return { id: "chat-1", projectId: null, firmId: null, agentId: input.agentId || "agent-2", kind: "user", title: "QA Chat", archivedAt: null, createdAt: now, updatedAt: now };
+        return { id: "chat-1", projectId: input.projectId || null, firmId: input.firmId || null, agentId: input.agentId || "agent-2", kind: "user", title: "QA Chat", archivedAt: null, createdAt: now, updatedAt: now };
       },
       switchAgent: async (chatId, agentId) => {
         record("chats.switchAgent", { chatId, agentId });

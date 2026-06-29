@@ -14,6 +14,13 @@ import type {
 } from "../../shared/types";
 
 const DEFAULT_BASE_URL = "https://agentlas.cloud/api/mcp/v1";
+const HUB_CACHE_TTL_MS = 5 * 60_000;
+
+type TimedCache<T> = { value: T; at: number };
+
+function cacheFresh<T>(entry: TimedCache<T> | undefined, now = Date.now()): T | undefined {
+  return entry && now - entry.at < HUB_CACHE_TTL_MS ? entry.value : undefined;
+}
 
 let _status: MarketplaceSourceStatus = {
   mode: "mcp",
@@ -51,6 +58,12 @@ function publicBundles(bundles: TeamBundle[]): TeamBundle[] {
 }
 
 class HubOnlySource implements MarketplaceSource {
+  private firmCache?: TimedCache<FirmListing[]>;
+  private bundleCache?: TimedCache<TeamBundle[]>;
+  private searchCache = new Map<string, TimedCache<MarketplaceListing[]>>();
+  private listingCache = new Map<string, TimedCache<(SeedListingFull & MarketplaceListing) | null>>();
+  private firmBySlugCache = new Map<string, TimedCache<FirmListing | null>>();
+
   constructor(
     private primary: MarketplaceSource,
     private baseUrl: string,
@@ -89,51 +102,77 @@ class HubOnlySource implements MarketplaceSource {
   }
 
   listFirms(): Promise<FirmListing[]> {
-    return this.tryPrimary(
-      (s) => s.listFirms(),
-      "listFirms",
-      [],
-    );
+    const cached = cacheFresh(this.firmCache);
+    if (cached) return Promise.resolve(cached);
+    return this.tryPrimary((s) => s.listFirms(), "listFirms", []).then((firms) => {
+      this.firmCache = { value: firms, at: Date.now() };
+      return firms;
+    });
   }
   listBundles(): Promise<TeamBundle[]> {
-    return this.tryPrimary(
-      (s) => s.listBundles(),
-      "listBundles",
-      [],
-    ).then(publicBundles);
+    const cached = cacheFresh(this.bundleCache);
+    if (cached) return Promise.resolve(cached);
+    return this.tryPrimary((s) => s.listBundles(), "listBundles", []).then(publicBundles).then((bundles) => {
+      this.bundleCache = { value: bundles, at: Date.now() };
+      return bundles;
+    });
   }
   searchAgents(q: string): Promise<MarketplaceListing[]> {
-    return this.tryPrimary(
-      (s) => s.searchAgents(q),
-      "searchAgents",
-      [],
-    ).then(publicListings);
+    const key = q.trim().toLowerCase();
+    const cached = cacheFresh(this.searchCache.get(key));
+    if (cached) {
+      // 캐시 값은 직전 성공(tryPrimary)에서만 생성되므로 online 상태를 동기화한다 —
+      // 캐시 히트가 status를 갱신하지 않아 마켓 배지가 최대 5분간 stale로 굳는 버그 방지.
+      setStatus({ mode: "mcp", baseUrl: this.baseUrl, online: true, usingFallback: false, lastError: null });
+      return Promise.resolve(cached);
+    }
+    return this.tryPrimary((s) => s.searchAgents(q), "searchAgents", []).then(publicListings).then((listings) => {
+      this.searchCache.set(key, { value: listings, at: Date.now() });
+      return listings;
+    });
   }
   getListingBySlug(slug: string): Promise<(SeedListingFull & MarketplaceListing) | null> {
     if (!isPublicDesktopAgent({ slug })) return Promise.resolve(null);
-    return this.tryPrimary(
-      (s) => s.getListingBySlug(slug),
-      "getListingBySlug",
-      null,
-    ).then((listing) => (listing && isPublicDesktopAgent(listing) ? listing : null));
+    const cached = cacheFresh(this.listingCache.get(slug));
+    if (cached !== undefined) return Promise.resolve(cached);
+    return this.tryPrimary((s) => s.getListingBySlug(slug), "getListingBySlug", null)
+      .then((listing) => (listing && isPublicDesktopAgent(listing) ? listing : null))
+      .then((listing) => {
+        this.listingCache.set(slug, { value: listing, at: Date.now() });
+        return listing;
+      });
   }
   getFirmBySlug(slug: string): Promise<FirmListing | null> {
-    return this.tryPrimary(
-      (s) => s.getFirmBySlug(slug),
-      "getFirmBySlug",
-      null,
-    );
+    const cached = cacheFresh(this.firmBySlugCache.get(slug));
+    if (cached !== undefined) return Promise.resolve(cached);
+    return this.tryPrimary((s) => s.getFirmBySlug(slug), "getFirmBySlug", null).then((firm) => {
+      this.firmBySlugCache.set(slug, { value: firm, at: Date.now() });
+      return firm;
+    });
   }
 }
 
 let _source: MarketplaceSource | null = null;
 // cargo.*(내 에이전트)는 인증 필수 + in-memory 폴백 금지 → raw McpSource를 따로 들고 있는다.
 let _cargoSource: McpSource | null = null;
+let _myAgentsCache: TimedCache<{ cookie: string | null; agents: MarketplaceListing[] }> | null = null;
 
 /** 내 에이전트(cargo) 호출용 raw 소스. */
 export function getCargoSource(): McpSource | null {
   getSource();
   return _cargoSource;
+}
+
+/** 로그인 사용자의 published/cargo agent 목록. 세션 cookie별로 짧게 캐시해 Library 탭 전환 지연을 줄인다. */
+export async function listMyAgentsCached(): Promise<MarketplaceListing[]> {
+  const source = getCargoSource();
+  if (!source) return [];
+  const cookie = getSessionCookieHeader();
+  const cached = cacheFresh(_myAgentsCache ?? undefined);
+  if (cached && cached.cookie === cookie) return cached.agents;
+  const agents = (await source.listMyAgents()).filter((agent) => isPublicDesktopAgent(agent));
+  _myAgentsCache = { value: { cookie, agents }, at: Date.now() };
+  return agents;
 }
 
 export function getSource(): MarketplaceSource {
@@ -147,6 +186,7 @@ export function getSource(): MarketplaceSource {
   const mcp = new McpSource({
     baseUrl,
     publicAgentsUrl: process.env.AGENTLAS_MARKETPLACE_AGENTS_URL,
+    publicPluginsUrl: process.env.AGENTLAS_MARKETPLACE_PLUGINS_URL,
     timeoutMs: 15000,
     cookieProvider: () => getSessionCookieHeader(),
   });

@@ -531,6 +531,24 @@ function ChatPage() {
       // ── 속성(agentId) 이벤트 → 네트워크 패널 (메인 버블 안 건드림) ──
       if (ev.agentId) {
         const aid = ev.agentId;
+        // per-node 완료 신호 — 그 노드만 비활성(▶→✓)으로 정리하고 종료. (전체 active 리셋과 별개)
+        if (ev.done) {
+          setLiveAgents((prev) =>
+            prev[aid] ? { ...prev, [aid]: { ...prev[aid], active: false } } : prev,
+          );
+          appendTimeline(setNetTimeline, {
+            key: uid(),
+            agentId: aid,
+            name: ev.agentName ?? aid,
+            role: ev.role ?? "",
+            tier: ev.tier,
+            kind: "status",
+            // 실패 경로 done은 status("… 실패/failed")를 동봉 → 완료로 위장하지 않고 실패를 표시.
+            text: ev.status?.trim() || (locale === "ko" ? "완료" : "completed"),
+            tokens: ev.tokens,
+          });
+          return;
+        }
         setLiveAgents((prev) => ({
           ...prev,
           [aid]: {
@@ -540,6 +558,7 @@ function ChatPage() {
             active: true,
             status: ev.status ?? prev[aid]?.status,
             delegateTo: ev.delegateTo ?? prev[aid]?.delegateTo,
+            model: ev.model ?? prev[aid]?.model,
           },
         }));
         if (ev.kind === "tool-use") {
@@ -2062,7 +2081,7 @@ function ChatPage() {
           }}
         />
       </div>
-      <div data-tour-id="workspace.input">
+      <div data-tour-id="workspace.input" style={{ flexShrink: 0, minWidth: 0 }}>
         <ChatInput
           onSend={(text, opts) => {
             void send(text, {

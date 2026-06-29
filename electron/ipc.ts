@@ -71,7 +71,7 @@ import { statusAllServers, testServerById } from "./mcp-tools/client";
 import {
   getSource as getMarketSource,
   getSourceStatus as getMarketSourceStatus,
-  getCargoSource,
+  listMyAgentsCached,
 } from "./marketplace";
 import {
   getFirm,
@@ -84,7 +84,6 @@ import { importLocalFolder } from "./agents/import-local";
 import { getDb } from "./store/db";
 import { getResolvedOrg } from "./store/org-spec";
 import { resolveTeamOrg } from "./agents/org-resolver";
-import { isPublicDesktopAgent } from "./agents/policy";
 import { runMcpInvocation } from "./mcp/client";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
 import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot } from "./hephaestus/engine";
@@ -109,6 +108,7 @@ import type { HephaestusBuildEvent, HephaestusBuildRequest, SkillCatalogEntry } 
 import { checkSafely as updaterCheck, getUpdaterState, quitAndInstall as updaterInstall } from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
 import { getAuthSession, signInWithBrowser, signInWithGoogle, signOut } from "./auth";
+import { getBillingCredits, transferEarnings } from "./billing";
 import { getUsageSnapshot } from "./usage";
 import { listPendingConfirmations } from "./confirm";
 import { addProjectOntologySource, getProjectOntologyStatus } from "./ontology/project-runtime";
@@ -516,6 +516,10 @@ export function registerIpcHandlers(): void {
   // ── usage (LLM 엔진 사용량 — 프로바이더 OAuth usage) ─────
   ipcMain.handle("usage:snapshot", (_e, opts?: { force?: boolean }) => getUsageSnapshot(opts));
 
+  // ── billing (Agentlas Hub 크레딧 — 구독/렌트수익 2계좌 + 일방 전송) ─────
+  ipcMain.handle("billing:getCredits", () => getBillingCredits());
+  ipcMain.handle("billing:transferEarnings", (_e, credits: number) => transferEarnings(credits));
+
   // ── confirm (확인 요청 — 챗에서 사용자 결정 대기) ────────
   ipcMain.handle("confirm:listPending", () => listPendingConfirmations());
 
@@ -777,17 +781,15 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("mcpTools:test", (_e, id: string) => testServerById(id));
   ipcMain.handle("mcpTools:status", () => statusAllServers());
 
-  // ── marketplace (agentlas.cloud MCP 또는 in-memory fallback) ─
+  // ── marketplace (agentlas.cloud Hub-only; no in-memory fallback catalog) ─
   ipcMain.handle("marketplace:listBundles", () => getMarketSource().listBundles());
   ipcMain.handle("marketplace:search", (_e, q: string) => getMarketSource().searchAgents(q));
   ipcMain.handle("marketplace:listFirms", () => getMarketSource().listFirms());
   ipcMain.handle("marketplace:status", () => getMarketSourceStatus());
   // 내 에이전트(cargo) — 미로그인/오프라인/실패면 빈 배열(팝업이 안내 처리).
   ipcMain.handle("marketplace:listMine", async () => {
-    const source = getCargoSource();
-    if (!source) return [];
     try {
-      return (await source.listMyAgents()).filter((agent) => isPublicDesktopAgent(agent));
+      return await listMyAgentsCached();
     } catch {
       return [];
     }

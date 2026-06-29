@@ -6,13 +6,14 @@
 import type { FirmListing, MarketplaceListing, TeamBundle } from "../../shared/types";
 import type { MarketplaceSource, SeedListingFull } from "./source";
 
-const MCP_SEARCH_FALLBACK_LIMIT = 20;
 const PUBLIC_AGENT_CACHE_MS = 60_000;
 
 interface McpSourceOptions {
   baseUrl: string;
   /** Public full Hub list endpoint. Defaults to `${origin}/api/marketplace/agents`. */
   publicAgentsUrl?: string;
+  /** Public Hub plugin endpoint. Defaults to `${origin}/api/plugins`. */
+  publicPluginsUrl?: string;
   /** 인증 토큰 (있으면 cargo/builder 호출 가능) */
   bearer?: string;
   /** 요청 타임아웃 (ms) — 기본 15000 */
@@ -116,6 +117,15 @@ function publicAgentsUrlFor(baseUrl: string): string {
   }
 }
 
+function publicPluginsUrlFor(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl);
+    return `${url.origin}/api/plugins`;
+  } catch {
+    return "https://agentlas.cloud/api/plugins";
+  }
+}
+
 function marketPublicAgentToListing(raw: Record<string, unknown>): MarketplaceListing | null {
   const slug = cleanString(raw.slug);
   if (!slug) return null;
@@ -155,6 +165,39 @@ function marketPublicAgentToListing(raw: Record<string, unknown>): MarketplaceLi
   };
 }
 
+function marketPublicPluginToListing(raw: Record<string, unknown>): MarketplaceListing | null {
+  const slug = cleanString(raw.slug);
+  if (!slug) return null;
+  const name = cleanString(raw.name, slug);
+  const tagline = cleanString(raw.tagline, "Hub plugin");
+  const developer = cleanString(raw.developer, "Agentlas Hub");
+  const detailUrl = cleanString(raw.detailUrl, cleanString(raw.manifestHref, `/api/plugins/${slug}`));
+  const install = raw.install && typeof raw.install === "object" ? raw.install as Record<string, unknown> : {};
+
+  return {
+    slug,
+    name,
+    nameEn: name,
+    tagline,
+    taglineEn: tagline,
+    trustGrade: "A",
+    installCount: 0,
+    manifestUrl: detailUrl.startsWith("http") ? detailUrl : `https://agentlas.cloud${detailUrl}`,
+    ownerName: developer,
+    kind: "hub-plugin",
+    callable: false,
+    routingReady: true,
+    routingStatus: "public-plugin",
+    source: "hub-plugin",
+    entityKind: "plugin",
+    perCallCredits: 0,
+    category: cleanString(raw.category),
+    developer,
+    detailUrl: detailUrl.startsWith("http") ? detailUrl : `https://agentlas.cloud${detailUrl}`,
+    installCli: cleanString(install.cli, `npx agentlas@latest plugin add ${slug}`),
+  };
+}
+
 function matchesQuery(listing: MarketplaceListing, q: string): boolean {
   const needle = q.trim().toLowerCase();
   if (!needle) return true;
@@ -166,6 +209,8 @@ function matchesQuery(listing: MarketplaceListing, q: string): boolean {
     listing.taglineEn,
     listing.ownerName,
     listing.entityKind,
+    listing.category,
+    listing.developer,
   ]
     .join(" ")
     .toLowerCase()
@@ -174,6 +219,7 @@ function matchesQuery(listing: MarketplaceListing, q: string): boolean {
 
 export class McpSource implements MarketplaceSource {
   private publicAgentCache: { fetchedAt: number; listings: MarketplaceListing[] } | null = null;
+  private publicPluginCache: { fetchedAt: number; listings: MarketplaceListing[] } | null = null;
 
   constructor(private opts: McpSourceOptions) {}
 
@@ -227,6 +273,31 @@ export class McpSource implements MarketplaceSource {
     }
   }
 
+  private async listPublicHubPlugins(): Promise<MarketplaceListing[]> {
+    const now = Date.now();
+    if (this.publicPluginCache && now - this.publicPluginCache.fetchedAt < PUBLIC_AGENT_CACHE_MS) {
+      return this.publicPluginCache.listings;
+    }
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.opts.timeoutMs ?? 15000);
+    const url = this.opts.publicPluginsUrl || publicPluginsUrlFor(this.opts.baseUrl);
+    try {
+      const resp = await fetch(url, {
+        headers: { accept: "application/json" },
+        signal: ctrl.signal,
+      });
+      if (!resp.ok) throw new Error(`public marketplace plugins ${resp.status}`);
+      const json = (await resp.json()) as unknown;
+      const rawPlugins = asArray<Record<string, unknown>>(json, "plugins", "items", "listings");
+      const listings = normalizeListings(rawPlugins.map(marketPublicPluginToListing).filter((item): item is MarketplaceListing => Boolean(item)));
+      this.publicPluginCache = { fetchedAt: now, listings };
+      return listings;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async listFirms(): Promise<FirmListing[]> {
     return liveHubTeams(asArray<FirmListing>(await this.call<unknown>("marketplace.list_firms", {}), "firms"));
   }
@@ -236,18 +307,31 @@ export class McpSource implements MarketplaceSource {
   }
 
   async searchAgents(q: string): Promise<MarketplaceListing[]> {
-    try {
-      const listings = await this.listPublicHubAgents();
-      return listings.filter((listing) => matchesQuery(listing, q));
-    } catch (error) {
-      console.warn("[marketplace] public Hub list failed; using live MCP search only:", error instanceof Error ? error.message : String(error));
-      const listings = asArray<MarketplaceListing>(
-        await this.call<unknown>("marketplace.search_agents", { q, limit: MCP_SEARCH_FALLBACK_LIMIT }),
-        "agents",
-        "listings",
-      );
-      return liveHubListings(listings);
-    }
+    // 에이전트: 작동하는 MCP marketplace.search_agents 사용.
+    //   공개 REST /api/marketplace/agents 는 서버에 존재하지 않아 404 → 과거엔 검색이 항상 빈 결과였다.
+    // 플러그인: 공개 /api/plugins (정상 동작).
+    const [agents, plugins] = await Promise.all([
+      this.searchHubAgents(q).catch(() => [] as MarketplaceListing[]),
+      this.listPublicHubPlugins().catch(() => [] as MarketplaceListing[]),
+    ]);
+    return [...agents, ...plugins].filter((listing) => matchesQuery(listing, q));
+  }
+
+  /** 허브 에이전트 검색 — MCP marketplace.search_agents.
+   *  서버는 query를 느슨히 적용하고 limit 상한이 작으므로 넉넉히 받아 client matchesQuery로 최종 필터한다.
+   *  install-only 에이전트도 정당한 허브 결과이므로 liveHub 필터를 적용하지 않는다. */
+  private async searchHubAgents(q: string): Promise<MarketplaceListing[]> {
+    // 게이트웨이 스키마는 `q`(limit≤20)지만 `query`도 받는다 — 양쪽 모두 보내 안전하게.
+    const raw = await this.call<unknown>("marketplace.search_agents", { query: q, q, limit: 60 });
+    // 서버 응답은 { count, total, results, ... } 형태 — asArray가 "results"를 추출한다.
+    const rows = asArray<MarketplaceListing>(raw, "results", "agents", "listings");
+    // search_agents 결과엔 source 마커가 없어(렌더러의 isLiveHubListing 필터가 source∈{hub-*}/cloud-callable/
+    // callable 만 통과시킴) install-only 허브 에이전트가 마켓 화면에서 전부 걸러진다 → 허브 인덱스 출처로 명시.
+    const stamped = rows.map((row) => {
+      const rec = row as MarketplaceListing & Record<string, unknown>;
+      return { ...rec, source: typeof rec.source === "string" && rec.source ? rec.source : "hub-index" } as MarketplaceListing;
+    });
+    return normalizeListings(stamped);
   }
 
   async getListingBySlug(

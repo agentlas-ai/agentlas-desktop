@@ -11,13 +11,15 @@ import os from "node:os";
 import path from "node:path";
 import { spawnCli } from "./exec";
 
-export type InstallableCli = "claude-code" | "codex" | "gemini";
+export type InstallableCli = "claude-code" | "codex" | "gemini" | "grok";
 
 /** 고정 명령 화이트리스트 — 절대 사용자 입력을 끼우지 않는다. bin은 설치 후 PATH에 생기는 실행파일명. */
 const CLI_PLAN: Record<InstallableCli, { pkg: string; loginCmd: string; bin: string }> = {
   "claude-code": { pkg: "@anthropic-ai/claude-code", loginCmd: "claude", bin: "claude" },
   codex: { pkg: "@openai/codex", loginCmd: "codex login", bin: "codex" },
   gemini: { pkg: "@google/gemini-cli", loginCmd: "gemini", bin: "gemini" },
+  // grok-cli는 xAI 키(XAI_API_KEY/GROK_API_KEY)로 동작 — 로그인 명령은 대화형 셸을 연다(키 설정·확인용).
+  grok: { pkg: "grok-dev", loginCmd: "grok", bin: "grok" },
 };
 
 // GUI Electron은 Finder/dock에서 뜨면 로그인 셸 PATH(/opt/homebrew/bin 등)를 못 받는다 →
@@ -33,6 +35,8 @@ const EXTRA_BIN_DIRS = [
   path.join(os.homedir(), ".claude", "local"),
   path.join(os.homedir(), ".codex", "bin"),
   path.join(os.homedir(), ".gemini", "bin"),
+  path.join(os.homedir(), ".grok", "bin"),
+  path.join(os.homedir(), ".bun", "bin"),
 ];
 
 function searchDirs(): string[] {

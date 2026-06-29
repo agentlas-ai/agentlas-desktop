@@ -23,6 +23,10 @@ export function HubBorrowRoom() {
   const [message, setMessage] = useState("");
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // locale을 ref로 읽어 search 콜백 identity를 고정한다 — 언어 토글 시 search가 재생성돼
+  // 마운트 effect가 재실행되며 현재 검색 결과가 초기화되던 글리치 방지.
+  const koRef = useRef(ko);
+  koRef.current = ko;
   const search = useCallback(async (q: string) => {
     const api = ipc();
     if (!api) {
@@ -30,15 +34,16 @@ export function HubBorrowRoom() {
       return;
     }
     try {
-      const [res, st] = await Promise.all([api.marketplace.search(q), api.marketplace.status()]);
-      setResults(res);
+      const res = await api.marketplace.search(q);
+      const st = await api.marketplace.status();
+      setResults(res.filter((item) => item.entityKind !== "plugin" && item.source !== "hub-plugin"));
       setStatus(st);
       setMessage("");
     } catch {
       setResults([]);
-      setMessage(ko ? "허브 검색을 불러오지 못했습니다. 설치된 에이전트에는 영향이 없습니다." : "Hub search could not be loaded. Installed agents were not changed.");
+      setMessage(koRef.current ? "허브 검색을 불러오지 못했습니다. 설치된 에이전트에는 영향이 없습니다." : "Hub search could not be loaded. Installed agents were not changed.");
     }
-  }, [ko]);
+  }, []);
 
   useEffect(() => {
     void search("");
@@ -71,7 +76,7 @@ export function HubBorrowRoom() {
     }
   }
 
-  const online = status ? status.online : true;
+  const online = status ? status.online && !status.usingFallback : false;
 
   return (
     <div className="dashboard-module hub-borrow">
@@ -97,7 +102,7 @@ export function HubBorrowRoom() {
         <div className="dashboard-module-empty">{ko ? "검색 결과가 없어요." : "No results."}</div>
       ) : (
         <div className="hub-borrow-carousel" role="list">
-          {results.slice(0, 12).map((r) => {
+          {results.slice(0, 6).map((r) => {
             const owned = installed.has(r.slug);
             return (
               <div key={r.slug} className="hub-borrow-card" role="listitem">

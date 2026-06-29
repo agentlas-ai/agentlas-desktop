@@ -7,33 +7,20 @@ import { usePathname, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { navigate } from "@/lib/navigation";
-import { INSTALLED_APPS } from "@/lib/apps";
 import type {
-  AppFactoryAppRecord,
-  Automation,
   Chat,
   InstalledAgent,
-  InstalledFirm,
   Project,
   RuntimeStatus,
 } from "@/lib/types";
 import {
-  IconApps,
-  IconBolt,
-  IconBuilding,
   IconChat,
   IconChevronRight,
-  IconFileUp,
-  IconFilm,
   IconFolder,
-  IconKey,
   IconMoon,
   IconPlus,
   IconSettings,
-  IconSparkles,
-  IconStore,
   IconSun,
-  IconWand,
 } from "./Icon";
 import { PawLogo } from "./PawLogo";
 import { ChatRow } from "./ChatRow";
@@ -50,20 +37,14 @@ const EXPANDED_WIDTH = 248;
 interface SidebarData {
   chats: Chat[];
   projects: Project[];
-  firms: InstalledFirm[];
-  automations: Automation[];
   agents: InstalledAgent[];
-  generatedApps: AppFactoryAppRecord[];
   runtime: RuntimeStatus | null;
 }
 
 const EMPTY: SidebarData = {
   chats: [],
   projects: [],
-  firms: [],
-  automations: [],
   agents: [],
-  generatedApps: [],
   runtime: null,
 };
 
@@ -82,6 +63,7 @@ function SidebarSkeleton() {
       className="glass-thin"
       style={{
         width: EXPANDED_WIDTH,
+        flexShrink: 0,
         borderRight: "1px solid var(--glass-border)",
         borderTop: "none",
         borderBottom: "none",
@@ -104,6 +86,8 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   const [data, setData] = useState<SidebarData>(EMPTY);
   const [collapsed, setCollapsed] = useState(false);
   const [chatsCollapsed, setChatsCollapsed] = useState(false);
+  const [chatListLimit, setChatListLimit] = useState(12);
+  const [newChatDialogOpen, setNewChatDialogOpen] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
   const refreshKey = refreshKeyProp + refreshTick;
   const triggerRefresh = () => setRefreshTick((n) => n + 1);
@@ -201,15 +185,12 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
     void Promise.all([
       api.chats.listRecent(20),
       api.projects.list(),
-      api.firms.list(),
-      api.automations.list(),
       api.team.list(),
-      api.appFactory.listApps(),
       api.runtime.detect(),
-    ]).then(([chats, projects, firms, automations, agents, generatedApps, runtimes]) => {
+    ]).then(([chats, projects, agents, runtimes]) => {
       if (cancelled) return;
       const active = runtimes.find((r) => r.active) ?? runtimes[0] ?? null;
-      setData({ chats, projects, firms, automations, agents, generatedApps, runtime: active });
+      setData({ chats, projects, agents, runtime: active });
     });
     return () => {
       cancelled = true;
@@ -220,17 +201,25 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
 
   const displayAgents = visibleAgents(data.agents);
 
-  async function handleNewChat() {
-    const api = ipc();
-    if (!api) return;
-    // "새 채팅"은 항상 채팅으로 이어져야 한다 — 온보딩/허브로 튕기지 않는다.
-    // 에이전트가 비어 보여도 백엔드가 orchestrator로 폴백해 채팅을 만든다.
-    const agentId =
+  function defaultAgentIdFor(project?: Project | null): string | undefined {
+    return (
+      project?.defaultAgentId ??
       data.agents.find((a) => a.slug === "agentlas-orchestrator")?.id ??
       data.chats[0]?.agentId ??
-      data.agents[0]?.id;
+      data.agents[0]?.id
+    );
+  }
+
+  async function createNewChat(project?: Project | null) {
+    const api = ipc();
+    if (!api) return;
     try {
-      const chat = await api.chats.create(agentId ? { agentId } : {});
+      const agentId = defaultAgentIdFor(project);
+      const chat = await api.chats.create({
+        ...(agentId ? { agentId } : {}),
+        ...(project ? { projectId: project.id } : {}),
+      });
+      if (project?.folderPath) await api.workspace.set(chat.id, project.folderPath);
       navigate(`/chat?id=${chat.id}`);
       // soft navigation은 full reload가 없으므로 명시적으로 최근 목록을 갱신한다.
       triggerRefresh();
@@ -240,14 +229,40 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
     }
   }
 
+  function handleNewChat() {
+    if (data.projects.length > 0) {
+      setNewChatDialogOpen(true);
+      return;
+    }
+    void createNewChat(null);
+  }
+
+  const newChatDialog = newChatDialogOpen ? (
+    <NewChatScopeDialog
+      projects={data.projects}
+      locale={locale}
+      onCancel={() => setNewChatDialogOpen(false)}
+      onGlobal={() => {
+        setNewChatDialogOpen(false);
+        void createNewChat(null);
+      }}
+      onProject={(project) => {
+        setNewChatDialogOpen(false);
+        void createNewChat(project);
+      }}
+    />
+  ) : null;
+
   // ── 접힘 모드: 아이콘만 ───────────────────────────────
   if (collapsed) {
     return (
+      <>
       <aside
         className="glass-thin"
         data-tour-id="workspace.sidebar"
         style={{
           width: COLLAPSED_WIDTH,
+          flexShrink: 0,
           borderRight: "1px solid var(--glass-border)",
           borderTop: "none",
           borderBottom: "none",
@@ -336,8 +351,6 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         >
           <CollapsedNav
             pathname={pathname}
-            agentCount={displayAgents.length}
-            appCount={INSTALLED_APPS.length + data.generatedApps.filter((app) => app.status !== "archived").length}
           />
         </nav>
         <footer
@@ -365,16 +378,20 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           </Link>
         </footer>
       </aside>
+      {newChatDialog}
+      </>
     );
   }
 
   // ── 펼침 모드: 풀 사이드바 ─────────────────────────────
   return (
+    <>
     <aside
       className="glass-thin"
       data-tour-id="workspace.sidebar"
       style={{
         width: EXPANDED_WIDTH,
+        flexShrink: 0,
         borderRight: "1px solid var(--glass-border)",
         borderTop: "none",
         borderBottom: "none",
@@ -391,7 +408,9 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         style={{
           height: 44,
           flexShrink: 0,
-          paddingLeft: 72, // macOS 신호등 자리
+          // 워크스페이스 병합 레일에선 축소 SideNav가 왼쪽에서 맥 신호등 영역을 이미 차지하므로
+          // 채팅 Sidebar 헤더는 신호등 여백이 필요 없다(과거 72px → 죽은 여백이었음).
+          paddingLeft: 12,
           paddingRight: 8,
           display: "flex",
           alignItems: "center",
@@ -487,20 +506,43 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           {data.chats.length === 0 ? (
             <EmptyHint>{t("sidebar.empty_chats")}</EmptyHint>
           ) : (
-            data.chats.slice(0, 12).map((c) => {
-              const agent = displayAgents.find((a) => a.id === c.agentId);
-              const active = pathname === "/chat" && currentChatId === c.id;
-              return (
-                <ChatRow
-                  key={c.id}
-                  chat={c}
-                  agent={agent}
-                  active={active}
-                  running={runningChats.has(c.id)}
-                  onChanged={triggerRefresh}
-                />
-              );
-            })
+            <>
+              {data.chats.slice(0, chatListLimit).map((c) => {
+                const agent = displayAgents.find((a) => a.id === c.agentId);
+                const active = pathname === "/chat" && currentChatId === c.id;
+                return (
+                  <ChatRow
+                    key={c.id}
+                    chat={c}
+                    agent={agent}
+                    active={active}
+                    running={runningChats.has(c.id)}
+                    onChanged={triggerRefresh}
+                  />
+                );
+              })}
+              {data.chats.length > 12 && (
+                <button
+                  type="button"
+                  onClick={() => setChatListLimit((limit) => limit >= data.chats.length ? 12 : Math.min(data.chats.length, limit + 12))}
+                  style={{
+                    margin: "4px 8px 0",
+                    padding: "6px 8px",
+                    borderRadius: 8,
+                    border: "1px solid var(--paper-edge)",
+                    background: "var(--paper)",
+                    color: "var(--ink-soft)",
+                    fontSize: 11.5,
+                    fontWeight: 650,
+                    cursor: "pointer",
+                  }}
+                >
+                  {chatListLimit >= data.chats.length
+                    ? locale === "en" ? "Show less" : "접기"
+                    : locale === "en" ? `Show more (${data.chats.length - chatListLimit})` : `더 보기 (${data.chats.length - chatListLimit})`}
+                </button>
+              )}
+            </>
           )}
         </SidebarSection>
 
@@ -638,6 +680,8 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         </Link>
       </footer>
     </aside>
+    {newChatDialog}
+    </>
   );
 }
 
@@ -765,6 +809,94 @@ function EmptyHint({ children }: { children: React.ReactNode }) {
   );
 }
 
+function NewChatScopeDialog({
+  projects,
+  locale,
+  onCancel,
+  onGlobal,
+  onProject,
+}: {
+  projects: Project[];
+  locale: "ko" | "en";
+  onCancel: () => void;
+  onGlobal: () => void;
+  onProject: (project: Project) => void;
+}) {
+  const ko = locale === "ko";
+  return (
+    <div
+      className="titlebar-nodrag"
+      role="dialog"
+      aria-modal="true"
+      aria-label={ko ? "새 채팅 시작 위치" : "New chat scope"}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 80,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 20,
+        background: "rgba(0, 21, 25, 0.18)",
+      }}
+      onMouseDown={(e) => {
+        if (e.currentTarget === e.target) onCancel();
+      }}
+    >
+      <div
+        style={{
+          width: "min(460px, 100%)",
+          border: "1px solid var(--paper-edge)",
+          borderRadius: 12,
+          background: "var(--paper)",
+          boxShadow: "0 18px 60px rgba(0, 21, 25, 0.20)",
+          padding: 14,
+          display: "grid",
+          gap: 10,
+        }}
+      >
+        <div style={{ display: "grid", gap: 4, padding: "2px 2px 6px" }}>
+          <strong style={{ fontSize: 15, color: "var(--ink)" }}>
+            {ko ? "새 채팅을 어디에서 시작할까요?" : "Where should this new chat start?"}
+          </strong>
+          <span style={{ fontSize: 12.5, color: "var(--muted-deep)", lineHeight: 1.45 }}>
+            {ko
+              ? "일반 대화로 시작하거나, 프로젝트 메모리와 작업 폴더를 이어받아 시작합니다."
+              : "Start a global chat, or attach project memory and its working folder."}
+          </span>
+        </div>
+        <button type="button" onClick={onGlobal} style={scopeButtonStyle}>
+          <span style={scopeIconStyle}><IconChat size={15} /></span>
+          <span style={{ minWidth: 0 }}>
+            <strong style={scopeTitleStyle}>{ko ? "그냥 새 채팅" : "Global chat"}</strong>
+            <span style={scopeSubStyle}>{ko ? "프로젝트 메모리 없이 시작" : "No project memory attached"}</span>
+          </span>
+        </button>
+        <div style={{ display: "grid", gap: 6, maxHeight: 260, overflowY: "auto" }}>
+          {projects.map((project) => (
+            <button key={project.id} type="button" onClick={() => onProject(project)} style={scopeButtonStyle}>
+              <span style={scopeIconStyle}><IconFolder size={15} /></span>
+              <span style={{ minWidth: 0 }}>
+                <strong style={scopeTitleStyle}>{project.name}</strong>
+                <span style={scopeSubStyle}>
+                  {project.folderPath
+                    ? project.folderPath
+                    : ko ? "프로젝트 메모리만 연결" : "Project memory only"}
+                </span>
+              </span>
+            </button>
+          ))}
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button type="button" onClick={onCancel} style={cancelButtonStyle}>
+            {ko ? "취소" : "Cancel"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RuntimeDot({ status }: { status: RuntimeStatus | null }) {
   return (
     <span
@@ -822,6 +954,7 @@ function labelOfRuntime(s: RuntimeStatus): string {
     "claude-code": "Claude Code",
     codex: "Codex",
     gemini: "Gemini",
+    grok: "Grok",
     byok: "API",
     ollama: "Ollama",
   }[s.kind];
@@ -852,14 +985,67 @@ function iconBtnStyle(active: boolean): React.CSSProperties {
   };
 }
 
+const scopeButtonStyle: React.CSSProperties = {
+  width: "100%",
+  minWidth: 0,
+  display: "grid",
+  gridTemplateColumns: "32px minmax(0, 1fr)",
+  alignItems: "center",
+  gap: 10,
+  padding: "10px 11px",
+  borderRadius: 10,
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+  color: "var(--ink)",
+  textAlign: "left",
+  cursor: "pointer",
+};
+
+const scopeIconStyle: React.CSSProperties = {
+  width: 32,
+  height: 32,
+  borderRadius: 9,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  background: "var(--fill-1)",
+  color: "var(--accent)",
+};
+
+const scopeTitleStyle: React.CSSProperties = {
+  display: "block",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontSize: 13,
+  fontWeight: 700,
+};
+
+const scopeSubStyle: React.CSSProperties = {
+  display: "block",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  marginTop: 2,
+  fontSize: 11.5,
+  color: "var(--muted-deep)",
+};
+
+const cancelButtonStyle: React.CSSProperties = {
+  border: "1px solid var(--paper-edge)",
+  borderRadius: 999,
+  background: "var(--paper)",
+  color: "var(--ink-soft)",
+  padding: "7px 12px",
+  fontSize: 12.5,
+  fontWeight: 650,
+  cursor: "pointer",
+};
+
 function CollapsedNav({
   pathname,
-  agentCount,
-  appCount,
 }: {
   pathname: string;
-  agentCount: number;
-  appCount: number;
 }) {
   const { t } = useT();
   const items: Array<{

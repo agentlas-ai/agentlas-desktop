@@ -51,6 +51,7 @@ export function studioRoot(): string | null {
   } catch {
     /* noop */
   }
+  candidates.push(path.join(__dirname, "..", "..", "studio-pack"));
   candidates.push(path.join(__dirname, "..", "..", "..", "studio-pack"));
   candidates.push(path.join(process.cwd(), "studio-pack"));
   for (const c of candidates) {

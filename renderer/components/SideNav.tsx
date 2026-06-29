@@ -9,6 +9,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { PawLogo } from "./PawLogo";
 import { AccountChip } from "./AccountChip";
+import { CreditBalanceWidget } from "./CreditBalanceWidget";
 import { UpdateBanner } from "./UpdateBanner";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
@@ -17,7 +18,6 @@ import {
   IconUsers,
   IconStore,
   IconFileUp,
-  IconLayers,
   IconHome,
   IconChat,
   IconBuilding,
@@ -49,10 +49,18 @@ interface Group {
   items: Leaf[];
 }
 
-export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: number }) {
+export function SideNav({
+  pendingConfirmations = 0,
+  forceCollapsed = false,
+}: {
+  pendingConfirmations?: number;
+  /** 워크스페이스(채팅) 병합 레일 — 채팅 Sidebar와 나란히 둘 때 아이콘 전용으로 강제 축소. */
+  forceCollapsed?: boolean;
+}) {
   const { t } = useT();
   const pathname = usePathname() ?? "/";
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsedPref, setCollapsed] = useState(false);
+  const collapsed = forceCollapsed || collapsedPref;
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState("");
 
@@ -65,6 +73,7 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
   }, []);
 
   function toggleCollapsed() {
+    if (forceCollapsed) return;
     setCollapsed((c) => {
       const next = !c;
       try {
@@ -128,10 +137,6 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
         items: [
           { label: t("nav.env_keys"), href: "/library/env", icon: IconKey },
           { label: t("nav.mcp_tools"), href: "/library/mcps", icon: IconNetwork },
-          { label: t("nav.apps_library"), href: "/library/apps", icon: IconApps },
-          { label: t("nav.tool_library"), href: "/library/tools", icon: IconWand },
-          { label: t("nav.surfaces"), href: "/library/surfaces", icon: IconBuilding },
-          { label: t("nav.assets"), href: "/library/assets", icon: IconLayers },
         ],
       },
     ],
@@ -164,7 +169,7 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
   }
 
   return (
-    <aside className="sidenav glass-thin" data-collapsed={collapsed ? "true" : "false"}>
+    <aside className="sidenav glass-thin" data-collapsed={collapsed ? "true" : "false"} data-merged={forceCollapsed ? "true" : "false"}>
       {/* 맥 신호등 회피 + 창 드래그 */}
       <div className="sidenav-drag titlebar-drag" />
 
@@ -178,15 +183,17 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
             </span>
           )}
         </Link>
-        <button
-          type="button"
-          onClick={toggleCollapsed}
-          className="sidenav-collapse"
-          aria-label={collapsed ? t("nav.expand_sidebar") : t("nav.collapse_sidebar")}
-          title={collapsed ? t("nav.expand") : t("nav.collapse")}
-        >
-          <IconSidebar size={16} />
-        </button>
+        {!forceCollapsed && (
+          <button
+            type="button"
+            onClick={toggleCollapsed}
+            className="sidenav-collapse"
+            aria-label={collapsed ? t("nav.expand_sidebar") : t("nav.collapse_sidebar")}
+            title={collapsed ? t("nav.expand") : t("nav.collapse")}
+          >
+            <IconSidebar size={16} />
+          </button>
+        )}
       </div>
 
       {!collapsed && (
@@ -308,6 +315,7 @@ export function SideNav({ pendingConfirmations = 0 }: { pendingConfirmations?: n
           {collapsed && <span className="sidenav-tooltip">{t("nav.settings")}</span>}
         </Link>
         <div className="sidenav-account">
+          <CreditBalanceWidget collapsed={collapsed} />
           <AccountChip />
         </div>
       </div>

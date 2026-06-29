@@ -454,6 +454,21 @@ function LibraryAgentsView() {
     }
   }
 
+  async function removeInstalledAgent(agent: InstalledAgent | null) {
+    const api = ipc();
+    if (!api || !agent) return;
+    const loc = pickLocalized(agent, locale);
+    if (!window.confirm(locale === "ko" ? `'${loc.name}' 에이전트를 설치 목록에서 제거할까요? 원본 폴더는 삭제하지 않습니다.` : `Remove '${loc.name}' from installed agents? The source folder will not be deleted.`)) return;
+    try {
+      await api.team.uninstall(agent.id);
+      setSelectedNode(null);
+      await refresh();
+      showToast(locale === "ko" ? "에이전트를 설치 목록에서 제거했습니다." : "Agent removed from installed agents.");
+    } catch (err) {
+      showToast((locale === "ko" ? "에이전트 제거 실패: " : "Failed to remove agent: ") + String(err));
+    }
+  }
+
   const agentMap = new Map(agents.map((a) => [a.id, a]));
   const installedAgentSlugs = new Set(agents.map((a) => a.slug));
   const selectedContext = useMemo(
@@ -905,6 +920,7 @@ function LibraryAgentsView() {
             runtimeOverrides={runtimeOverrides}
             nodeContext={selectedContext}
             onRuntimeOverridesChange={setRuntimeOverrides}
+            onRemoveAgent={() => void removeInstalledAgent(agents.find((a) => a.id === selectedNode.agentId) ?? null)}
           />
         )}
       </main>
@@ -1996,6 +2012,7 @@ interface AgentDetailViewProps {
   runtimeOverrides: AgentRuntimeOverride[];
   nodeContext: SelectedNodeContext | null;
   onRuntimeOverridesChange: (items: AgentRuntimeOverride[]) => void;
+  onRemoveAgent: () => void;
 }
 
 function AgentDetailView({
@@ -2024,7 +2041,8 @@ function AgentDetailView({
   runtimeStatuses,
   runtimeOverrides,
   nodeContext,
-  onRuntimeOverridesChange
+  onRuntimeOverridesChange,
+  onRemoveAgent,
 }: AgentDetailViewProps) {
   const { locale } = useT();
 
@@ -2394,6 +2412,31 @@ function AgentDetailView({
               title={locale === "ko" ? "이 에이전트와 새 작업을 시작합니다" : "Start a new task with this agent"}
             >
               {locale === "ko" ? "▶ 일 시키기" : "▶ Put to work"}
+            </button>
+          )}
+          {agent && (
+            <button
+              className="titlebar-nodrag"
+              onClick={onRemoveAgent}
+              title={locale === "ko" ? "설치 목록에서 제거합니다. 원본 폴더는 삭제하지 않습니다." : "Remove from installed agents. The source folder is not deleted."}
+              style={{
+                marginLeft: node.agentId ? 0 : "auto",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5,
+                minHeight: 30,
+                padding: "0 10px",
+                borderRadius: 7,
+                border: "1px solid color-mix(in srgb, var(--red-deep, #b83b2f) 30%, var(--paper-edge))",
+                background: "var(--paper)",
+                color: "var(--red-deep, #b83b2f)",
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              <IconTrash size={13} />
+              {locale === "ko" ? "제거" : "Remove"}
             </button>
           )}
         </div>

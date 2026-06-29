@@ -3,6 +3,7 @@
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { probeCodex } from "./codex";
 import { probeGemini } from "./gemini";
+import { probeGrok } from "./grok";
 import { probeOllama } from "./ollama";
 import { hasApiKey } from "../secrets/vault";
 import { getDb } from "../store/db";
@@ -119,11 +120,12 @@ export async function detectRuntimes(): Promise<RuntimeStatus[]> {
     .get() as ActiveRuntimeRow | undefined;
   const active = activeRow ?? null;
 
-  const [cc, cx, gm, ollama, anthropicByok, openaiByok, googleByok, claudeEfforts] =
+  const [cc, cx, gm, gr, ollama, anthropicByok, openaiByok, googleByok, claudeEfforts] =
     await Promise.all([
       probeClaudeCode(),
       probeCodex(),
       probeGemini(),
+      probeGrok(),
       probeOllama(),
       hasApiKey("anthropic"),
       hasApiKey("openai"),
@@ -164,6 +166,23 @@ export async function detectRuntimes(): Promise<RuntimeStatus[]> {
       source: gm.path,
       version: gm.version,
       active: false,
+    });
+  }
+  if (gr) {
+    // 모델: `grok models` 라이브 목록 우선(새 모델 자동 반영) → 없으면 정적 카탈로그로 폴백.
+    const grokModels = gr.models.length > 0 ? gr.models : cliModels("grok").map((m) => m.id);
+    const storedGrok =
+      active?.kind === "grok" && active.model && grokModels.includes(active.model)
+        ? active.model
+        : undefined;
+    list.push({
+      kind: "grok",
+      backend: "custom",
+      source: gr.path,
+      version: gr.version,
+      active: false,
+      model: storedGrok ?? grokModels[0],
+      availableModels: grokModels,
     });
   }
   if (ollama) {

@@ -8,6 +8,7 @@ import { OrgTree } from "@/components/dashboard/OrgTree";
 import { FleetSummaryStrip } from "@/components/dashboard/FleetSummaryStrip";
 import { HubBorrowRoom } from "@/components/dashboard/HubBorrowRoom";
 import { EngineUsage } from "@/components/EngineUsage";
+import { RuntimeControl } from "@/components/dashboard/RuntimeControl";
 import { ConfirmRequests } from "@/components/dashboard/ConfirmRequests";
 import { DashboardActivity } from "@/components/dashboard/DashboardActivity";
 import { DashboardAutomations } from "@/components/dashboard/DashboardAutomations";
@@ -35,6 +36,7 @@ export default function DashboardPage() {
                 <DashboardActivity />
               </div>
               <div className="dashboard-panel dashboard-engine-panel" data-tour-id="dashboard.llm">
+                <RuntimeControl />
                 <EngineUsage />
               </div>
               <div className="dashboard-panel" data-tour-id="dashboard.automations"><DashboardAutomations /></div>

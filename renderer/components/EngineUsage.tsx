@@ -25,7 +25,7 @@ interface EngineDef {
   id: string; // usage provider id와 일치(구독형)
   label: string;
   auth: EngineAuth;
-  cliKind?: "claude-code" | "codex" | "gemini";
+  cliKind?: "claude-code" | "codex" | "gemini" | "grok";
   keyEnv?: string;
   logoSrc: string;
   logoAlt: string;
@@ -36,7 +36,7 @@ const ENGINES: EngineDef[] = [
   { id: "codex", label: "Codex", auth: "cli", cliKind: "codex", logoSrc: "/brand/llm/openai.svg", logoAlt: "OpenAI" },
   { id: "gemini", label: "Gemini", auth: "cli", cliKind: "gemini", logoSrc: "/brand/llm/googlegemini.svg", logoAlt: "Google Gemini" },
   { id: "deepseek", label: "DeepSeek", auth: "apikey", keyEnv: "DEEPSEEK_API_KEY", logoSrc: "/brand/llm/deepseek.svg", logoAlt: "DeepSeek" },
-  { id: "grok", label: "Grok", auth: "apikey", keyEnv: "XAI_API_KEY", logoSrc: "/brand/llm/x.svg", logoAlt: "xAI" },
+  { id: "grok", label: "Grok", auth: "cli", cliKind: "grok", keyEnv: "XAI_API_KEY", logoSrc: "/brand/llm/x.svg", logoAlt: "xAI" },
   { id: "glm", label: "GLM", auth: "apikey", keyEnv: "ZHIPU_API_KEY", logoSrc: "/brand/llm/zhipu.png", logoAlt: "Zhipu GLM" },
   { id: "pi", label: "Pi", auth: "apikey", keyEnv: "PI_API_KEY", logoSrc: "/brand/llm/pi.png", logoAlt: "Pi" },
   { id: "ollama", label: "Ollama", auth: "local", logoSrc: "/brand/llm/ollama.svg", logoAlt: "Ollama" },

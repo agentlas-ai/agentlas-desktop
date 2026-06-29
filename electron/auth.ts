@@ -27,7 +27,7 @@ const KEYTAR_SERVICE = "Agentlas Session";
 const KEYTAR_ACCOUNT = "default";
 const AUTH_PARTITION = "persist:agentlas-auth";
 
-function webBaseUrl(): string {
+export function webBaseUrl(): string {
   const fromEnv = process.env.AGENTLAS_WEB_BASE_URL?.trim();
   if (fromEnv) return fromEnv.replace(/\/$/, "");
   return "https://agentlas.cloud";

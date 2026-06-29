@@ -50,12 +50,12 @@ app.setPath("userData", path.join(tempDir, "user-data"));
       assert.equal(status.usingFallback, false, "live mode should not use fallback when Hub responds");
       assert.equal(status.online, true, "live mode should mark the Hub source online");
       assert.ok(
-        agents.length >= 100,
-        `live mode should load the full public Hub list, not the limited MCP search result; got ${agents.length}`,
+        agents.length >= 200,
+        `live mode should load the public Hub catalog, not the limited MCP seed result; got ${agents.length}`,
       );
       assert.ok(
-        agents.every((agent) => agent.kind === "cloud-callable" || agent.callable === true || agent.source === "hub-index" || agent.source === "hub-profile"),
-        "live mode should include only real Hub-callable agents, not the built-in seed catalog",
+        agents.every((agent) => agent.kind === "cloud-callable" || agent.callable === true || agent.source === "hub-index" || agent.source === "hub-profile" || agent.source === "hub-plugin"),
+        "live mode should include only real Hub API items, not the built-in seed catalog",
       );
       assert.ok(
         agents.every((agent) => !forbiddenSeedSlugs.has(agent.slug)),

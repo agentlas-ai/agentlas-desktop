@@ -37,7 +37,12 @@ function toChat(row: ChatRow): Chat {
 export function listRecentChats(limit = 50): Chat[] {
   const rows = getDb()
     .prepare(
-      "SELECT * FROM chats WHERE archived_at IS NULL AND kind = 'user' ORDER BY updated_at DESC LIMIT ?",
+      `SELECT * FROM chats
+       WHERE archived_at IS NULL
+         AND kind = 'user'
+         AND EXISTS (SELECT 1 FROM chat_messages WHERE chat_messages.chat_id = chats.id)
+       ORDER BY updated_at DESC
+       LIMIT ?`,
     )
     .all(limit) as ChatRow[];
   return rows.map(toChat);
@@ -54,14 +59,26 @@ export function listArchivedChats(): Chat[] {
 
 export function listChatsByProject(projectId: string): Chat[] {
   const rows = getDb()
-    .prepare("SELECT * FROM chats WHERE project_id = ? AND kind = 'user' ORDER BY updated_at DESC")
+    .prepare(
+      `SELECT * FROM chats
+       WHERE project_id = ?
+         AND kind = 'user'
+         AND EXISTS (SELECT 1 FROM chat_messages WHERE chat_messages.chat_id = chats.id)
+       ORDER BY updated_at DESC`,
+    )
     .all(projectId) as ChatRow[];
   return rows.map(toChat);
 }
 
 export function listChatsByFirm(firmId: string): Chat[] {
   const rows = getDb()
-    .prepare("SELECT * FROM chats WHERE firm_id = ? AND kind = 'user' ORDER BY updated_at DESC")
+    .prepare(
+      `SELECT * FROM chats
+       WHERE firm_id = ?
+         AND kind = 'user'
+         AND EXISTS (SELECT 1 FROM chat_messages WHERE chat_messages.chat_id = chats.id)
+       ORDER BY updated_at DESC`,
+    )
     .all(firmId) as ChatRow[];
   return rows.map(toChat);
 }

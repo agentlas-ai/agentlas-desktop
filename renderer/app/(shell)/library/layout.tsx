@@ -9,10 +9,6 @@ export default function LibraryLayout({ children }: { children: React.ReactNode 
   if (pathname.startsWith("/library/agents")) title = "My Agents";
   else if (pathname.startsWith("/library/env")) title = "Environment Variables";
   else if (pathname.startsWith("/library/mcps")) title = "Plugins & MCPs";
-  else if (pathname.startsWith("/library/apps")) title = "Generated Apps";
-  else if (pathname.startsWith("/library/assets")) title = "Asset Packs";
-  else if (pathname.startsWith("/library/surfaces")) title = "Generated Surfaces";
-  else if (pathname.startsWith("/library/tools")) title = "Generated Tools";
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "transparent", overflow: "hidden" }}>

@@ -25,6 +25,7 @@ import {
 
 const ONBOARDED_KEY = "agentlas.onboarded";
 const IMPORT_PROMPTED_KEY = "agentlas.import.prompted";
+const GUIDE_FAB_HIDDEN_KEY = "agentlas.guideFab.hidden";
 const ATTENTION_POLL_MS = 3_000;
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -117,7 +118,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const showSidebar = pathname.startsWith("/chat") || pathname.startsWith("/project");
+  const showWorkspaceSidebar = pathname.startsWith("/chat") || pathname.startsWith("/project");
 
   return (
     <div
@@ -129,8 +130,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         overflow: "hidden",
       }}
     >
-      <SideNav pendingConfirmations={pendingConfirmations} />
-      {showSidebar && <Sidebar />}
+      {/* 워크스페이스(채팅/프로젝트)에서도 글로벌 네비를 잃지 않도록 — 아이콘 전용 SideNav를
+          채팅 Sidebar와 나란히 둬 하나의 좌측 레일로 자연스럽게 합친다. (에이전트 관리 등 글로벌
+          진입점도 워크스페이스에서 그대로 접근 가능) */}
+      {!showWorkspaceSidebar && <SideNav pendingConfirmations={pendingConfirmations} />}
+      {showWorkspaceSidebar && (
+        <>
+          <SideNav pendingConfirmations={pendingConfirmations} forceCollapsed />
+          <Sidebar />
+        </>
+      )}
       <main
         style={{
           position: "relative",
@@ -259,7 +268,29 @@ function GuideFab({
   const { locale } = useT();
   const ko = locale === "ko";
   const [open, setOpen] = useState(false);
+  const [hidden, setHidden] = useState(false);
   const bottom = avoidComposer ? 102 : 20;
+
+  useEffect(() => {
+    try {
+      setHidden(window.localStorage.getItem(GUIDE_FAB_HIDDEN_KEY) === "1");
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  function hideGuideFab() {
+    try {
+      window.localStorage.setItem(GUIDE_FAB_HIDDEN_KEY, "1");
+    } catch {
+      // ignore
+    }
+    setOpen(false);
+    setHidden(true);
+  }
+
+  if (hidden) return null;
+
   return (
     <div className="titlebar-nodrag" style={{ position: "fixed", right: 20, bottom, zIndex: 150 }}>
       {open && (
@@ -279,8 +310,29 @@ function GuideFab({
             gap: 2,
           }}
         >
-          <div style={{ padding: "6px 10px 4px", fontSize: 11, color: "var(--muted-deep)", fontWeight: 600 }}>
-            {ko ? "도움이 필요하신가요?" : "Need some help?"}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 4px 4px 10px" }}>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--muted-deep)", fontWeight: 600 }}>
+              {ko ? "도움이 필요하신가요?" : "Need some help?"}
+            </div>
+            <button
+              type="button"
+              onClick={hideGuideFab}
+              aria-label={ko ? "도움말 버튼 숨기기" : "Hide help button"}
+              title={ko ? "도움말 버튼 숨기기" : "Hide help button"}
+              style={{
+                width: 24,
+                height: 24,
+                borderRadius: 7,
+                border: "none",
+                background: "transparent",
+                color: "var(--muted-deep)",
+                cursor: "pointer",
+                fontSize: 16,
+                lineHeight: 1,
+              }}
+            >
+              ×
+            </button>
           </div>
           <FabItem
             icon={<IconChat size={15} />}
@@ -300,27 +352,57 @@ function GuideFab({
           />
         </div>
       )}
-      <button
-        onClick={() => setOpen((o) => !o)}
-        aria-label={ko ? "도움말" : "Help"}
-        style={{
-          width: 46,
-          height: 46,
-          borderRadius: "50%",
-          border: "none",
-          background: "var(--accent)",
-          color: "#fff",
-          fontSize: 22,
-          fontWeight: 700,
-          cursor: "pointer",
-          boxShadow: "0 6px 18px rgba(0,0,0,0.18)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        {open ? "×" : "?"}
-      </button>
+      <div style={{ position: "relative", width: 46, height: 46 }}>
+        <button
+          onClick={() => setOpen((o) => !o)}
+          aria-label={ko ? "도움말" : "Help"}
+          style={{
+            width: 46,
+            height: 46,
+            borderRadius: "50%",
+            border: "none",
+            background: "var(--accent)",
+            color: "#fff",
+            fontSize: 22,
+            fontWeight: 700,
+            cursor: "pointer",
+            boxShadow: "0 6px 18px rgba(0,0,0,0.18)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          {open ? "×" : "?"}
+        </button>
+        {!open && (
+          <button
+            type="button"
+            onClick={hideGuideFab}
+            aria-label={ko ? "도움말 버튼 숨기기" : "Hide help button"}
+            title={ko ? "도움말 버튼 숨기기 — 다시 보려면 설정에서" : "Hide help button — re-enable in Settings"}
+            style={{
+              position: "absolute",
+              top: -4,
+              right: -4,
+              width: 18,
+              height: 18,
+              borderRadius: "50%",
+              border: "1px solid var(--paper-edge)",
+              background: "var(--paper)",
+              color: "var(--muted-deep)",
+              fontSize: 11,
+              lineHeight: 1,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              boxShadow: "0 2px 6px rgba(0,0,0,0.18)",
+            }}
+          >
+            ×
+          </button>
+        )}
+      </div>
     </div>
   );
 }

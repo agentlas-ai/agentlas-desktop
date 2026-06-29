@@ -44,6 +44,10 @@ const api: AgentlasIpc = {
   usage: {
     snapshot: (opts?: { force?: boolean }) => ipcRenderer.invoke("usage:snapshot", opts),
   },
+  billing: {
+    getCredits: () => ipcRenderer.invoke("billing:getCredits"),
+    transferEarnings: (credits: number) => ipcRenderer.invoke("billing:transferEarnings", credits),
+  },
   confirm: {
     listPending: () => ipcRenderer.invoke("confirm:listPending"),
   },
@@ -60,9 +64,9 @@ const api: AgentlasIpc = {
     detect: () => ipcRenderer.invoke("runtime:detect"),
     setActive: (selection: RuntimeSelection) =>
       ipcRenderer.invoke("runtime:setActive", selection),
-    installCli: (kind: "claude-code" | "codex" | "gemini") =>
+    installCli: (kind: "claude-code" | "codex" | "gemini" | "grok") =>
       ipcRenderer.invoke("runtime:installCli", kind),
-    openCliLogin: (kind: "claude-code" | "codex" | "gemini") =>
+    openCliLogin: (kind: "claude-code" | "codex" | "gemini" | "grok") =>
       ipcRenderer.invoke("runtime:openCliLogin", kind),
     listCommands: () => ipcRenderer.invoke("runtime:listCommands"),
     listModels: (sel) => ipcRenderer.invoke("runtime:listModels", sel),
