@@ -26,6 +26,14 @@
 
 ### Fixed
 
+- **Chat no longer gets stuck on "working…" after a run finishes.** A fast or
+  early-completing run could emit its `final` event (and the active-chats
+  broadcast) before the renderer had set the run id and subscribed, so the live
+  view never cleared `busy` and the elapsed timer climbed indefinitely — even
+  though the answer was already persisted (visible after navigating away and
+  back). Added a watchdog that, while a turn is in progress, periodically checks
+  the main process's active-run list and reconciles from history the moment that
+  run is gone, so a missed completion clears within ~1s instead of hanging.
 - **Routing no longer recommends a plugin as an agent.** The local router pooled
   the cached plugin catalog (`type: plugin`, e.g. `plugin/shopify-dev`) together
   with real agent/team cards, so a generic-vocabulary lexical match (e.g. the word

@@ -32,7 +32,8 @@ import type { LiveAgent, NetTimelineItem } from "@/components/AgentNetworkPanel"
 import { ChatRightPanel, type ChatRightPanelTab } from "@/components/ChatRightPanel";
 import { ProjectFolderBar } from "@/components/ProjectFolderBar";
 import { AgentPicker } from "@/components/AgentPicker";
-import type { CodeArtifact } from "@/components/Markdown";
+import type { CodeArtifact, MediaArtifact } from "@/components/Markdown";
+import type { WorkspaceFilePreview } from "@/components/WorkspacePanel";
 import { IconBuilding, IconClose, IconFolder, IconLayers, IconNetwork, IconPanelRight, IconSparkles, IconTrash } from "@/components/Icon";
 import { buildAppRoutePrompt, INSTALLED_APPS, parseAppSlashRoute } from "@/lib/apps";
 import { visibleAgents } from "@/lib/agent-visibility";
@@ -42,6 +43,19 @@ import { KeyStatusBanner } from "@/components/KeyStatusBanner";
 
 function uid(): string {
   return Math.random().toString(36).slice(2);
+}
+
+function workspacePreviewFromMedia(media: MediaArtifact): WorkspaceFilePreview {
+  return {
+    path: media.path || media.src,
+    name: media.name,
+    size: 0,
+    viewerKind: media.kind,
+    fileUrl: media.src,
+    content: "",
+    truncated: false,
+    reason: "binary",
+  };
 }
 
 function scaffoldResultFromRecord(record: AppFactoryAppRecord): AppFactoryScaffoldResult {
@@ -426,6 +440,7 @@ function ChatPage() {
     return messages.reduce((acc, msg) => acc + (msg.tokens ?? Math.floor((msg.text?.length || 0) / 4)), 0);
   }, [messages]);
   const [busy, setBusy] = useState(false);
+  const [cancelPending, setCancelPending] = useState(false);
   // 멀티 에이전트 실시간 텔레메트리 — 속성(agentId) 이벤트로 채워지는 네트워크 패널 상태.
   const [liveAgents, setLiveAgents] = useState<Record<string, LiveAgent>>({});
   const [netTimeline, setNetTimeline] = useState<NetTimelineItem[]>([]);
@@ -438,10 +453,12 @@ function ChatPage() {
   // 활성 런타임의 모델 목록 — 실시간 조회(BYOK는 provider API, ollama 동적, CLI 카탈로그).
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const runIdRef = useRef<string | null>(null);
+  const lastRunIdRef = useRef<string | null>(null);
   // runId가 도착하기 전(invoke:run 왕복 중)에 Stop을 누른 경우를 기억 — 도착 즉시 취소한다.
   const cancelRequestedRef = useRef(false);
   const [artifact, setArtifact] = useState<CodeArtifact | null>(null);
   const [surface, setSurface] = useState<WorkbenchSurface | null>(null);
+  const [mediaPreview, setMediaPreview] = useState<WorkspaceFilePreview | null>(null);
   const [scaffoldedApps, setScaffoldedApps] = useState<Record<string, AppFactoryScaffoldResult>>({});
   const [scaffoldedTools, setScaffoldedTools] = useState<Record<string, ToolFactoryScaffoldResult>>({});
   // 우측 패널 — file / agent / panel 탭을 하나의 rail 안에서 전환한다.
@@ -663,6 +680,7 @@ function ChatPage() {
         pushWorkflow("tool", `Surface ready · ${ev.surface.title}`);
         const surfaceId = ev.surfaceId ?? uid();
         setArtifact(null);
+        setMediaPreview(null);
         setSurface({ id: surfaceId, manifest: ev.surface });
         openPanelTab("panel");
         setMessages((m) =>
@@ -759,10 +777,13 @@ function ChatPage() {
           }),
         );
         setBusy(false);
+        setCancelPending(false);
+        cancelRequestedRef.current = false;
         setLiveAgents((prev) =>
           Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
         );
         runIdRef.current = null;
+        lastRunIdRef.current = null;
         subRef.current?.();
         subRef.current = null;
         // 첫 메시지였으면 main이 자동 제목 생성 → 갱신해서 사이드바도 반영
@@ -778,10 +799,13 @@ function ChatPage() {
           { id: uid(), role: "system", text: `⚠️ ${ev.error?.message ?? t("chat.err.unknown")}` },
         ]);
         setBusy(false);
+        setCancelPending(false);
+        cancelRequestedRef.current = false;
         setLiveAgents((prev) =>
           Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
         );
         runIdRef.current = null;
+        lastRunIdRef.current = null;
         subRef.current?.();
         subRef.current = null;
       }
@@ -820,28 +844,39 @@ function ChatPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [closeRightPanel, rightPanelOpen]);
 
+  // 채팅 전환 시 이전 채팅의 진행 상태(busy/정지버튼/스트림)가 새 뷰로 새지 않게 리셋.
+  // 메타데이터 effect는 번역/콜백 변화에도 다시 돌 수 있으므로, 전환 초기화는 chatId에만 묶는다.
+  useEffect(() => {
+    if (!chatId) return;
+    setBusy(false);
+    setCancelPending(false);
+    runIdRef.current = null;
+    lastRunIdRef.current = null;
+    cancelRequestedRef.current = false;
+    setArtifact(null);
+    setSurface(null);
+    setMediaPreview(null);
+    setRightPanelOpen(false);
+    setRightPanelTab("agent");
+    setLiveAgents({});
+    setNetTimeline([]);
+    setScaffoldedApps({});
+    setScaffoldedTools({});
+    setInstalledPlugins([]);
+    setAllGeneratedApps([]);
+    setRestoredFolder(null);
+    return () => {
+      subRef.current?.();
+      subRef.current = null;
+    };
+  }, [chatId]);
+
   // 메타데이터 로드
   useEffect(() => {
     const api = ipc();
     if (!api || !chatId) return;
     let cancelled = false;
-    // 채팅 전환 시 이전 채팅의 진행 상태(busy/정지버튼/스트림)가 새 뷰로 새지 않게 리셋.
-    // (Next 클라 네비게이션은 같은 컴포넌트를 재사용 → state가 남는다)
-    setBusy(false);
-    runIdRef.current = null;
-    cancelRequestedRef.current = false;
-    setArtifact(null);
-    setSurface(null);
-    setRightPanelOpen(false);
-    setRightPanelTab("agent");
-    setLiveAgents({});
-    setNetTimeline([]);
-      setScaffoldedApps({});
-      setScaffoldedTools({});
-      setInstalledPlugins([]);
-      setAllGeneratedApps([]);
-      setRestoredFolder(null);
-      void (async () => {
+    void (async () => {
       const c = await api.chats.get(chatId);
       if (cancelled || !c) {
         if (!c) router.replace("/");
@@ -948,7 +983,9 @@ function ChatPage() {
           },
         ]);
         setBusy(true);
+        setCancelPending(false);
         runIdRef.current = attached.runId;
+        lastRunIdRef.current = attached.runId;
         const lastStatusRef = { text: "" };
         for (const ev of attached.events) consumeEvent(ev, placeholderId, lastStatusRef);
         subscribeRun(attached.runId, placeholderId, lastStatusRef);
@@ -956,8 +993,6 @@ function ChatPage() {
     })();
     return () => {
       cancelled = true;
-      subRef.current?.();
-      subRef.current = null;
     };
   }, [chatId, router, consumeEvent, subscribeRun, t]);
 
@@ -970,6 +1005,7 @@ function ChatPage() {
     void api.surfaces.getSurface(surfaceParam).then((record) => {
       if (cancelled || !record || record.chatId !== chatId) return;
       setArtifact(null);
+      setMediaPreview(null);
       setSurface({ id: record.id, manifest: record.manifest, state: record.state, jobSummary: record.jobSummary });
       openPanelTab("panel");
     });
@@ -990,6 +1026,7 @@ function ChatPage() {
       subRef.current?.();
       subRef.current = null;
       setBusy(false);
+      setCancelPending(false);
       setLiveAgents((prev) =>
         Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
       );
@@ -998,6 +1035,44 @@ function ChatPage() {
       });
     });
   }, [chatId]);
+
+  // 안전망 보강 (무한 '진행중' 방지) — onActiveChats 브로드캐스트를 놓치는 레이스(빠른/조기 종료 실행이
+  // runId 설정·구독 전에 끝나 final/activeChats를 모두 놓친 경우)에 대비한다. busy 동안 main의 활성 실행
+  // 목록을 주기적으로 확인해, 이 채팅의 실행이 이미 끝났으면(=답변은 DB에 영속화됨) 히스토리로 화해한다.
+  useEffect(() => {
+    if (!busy || !chatId) return;
+    const api = ipc();
+    if (!api) return;
+    let stopped = false;
+    const reconcile = async () => {
+      if (stopped) return;
+      try {
+        const ids = await api.invoke.activeChats();
+        if (stopped || !runIdRef.current || ids.includes(chatId)) return;
+        // main은 이 실행을 끝냈는데 UI는 여전히 진행중 → final/activeChats를 놓친 것. 화해.
+        runIdRef.current = null;
+        lastRunIdRef.current = null;
+        subRef.current?.();
+        subRef.current = null;
+        setBusy(false);
+        setCancelPending(false);
+        setLiveAgents((prev) =>
+          Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
+        );
+        const h = await api.invoke.history(chatId);
+        if (!stopped) setMessages(h.map(historyEntryToStreamMessage));
+      } catch {
+        /* 무시 — 다음 틱에 재시도 */
+      }
+    };
+    const first = setTimeout(reconcile, 700);
+    const iv = setInterval(reconcile, 2500);
+    return () => {
+      stopped = true;
+      clearTimeout(first);
+      clearInterval(iv);
+    };
+  }, [busy, chatId]);
 
   // 활성 런타임이 바뀌면 모델 목록을 실시간 조회 (BYOK provider API / ollama / CLI 카탈로그).
   useEffect(() => {
@@ -1044,6 +1119,7 @@ function ChatPage() {
       const api = ipc();
       const events = ipcEvents();
       if (!api || !events || !chat || busy) return false;
+      setCancelPending(false);
       const goalPrompt = parseGoalSlash(userPrompt);
       const routeInput = goalPrompt ?? userPrompt;
       const appRoute = parseAppSlashRoute(routeInput);
@@ -1067,6 +1143,7 @@ function ChatPage() {
           },
         ]);
         setBusy(true);
+        setCancelPending(false);
         try {
           await api.appFactory.archive({ rootPath: generatedAppRoute.app.rootPath });
           setAllGeneratedApps((apps) => apps.filter((app) => app.id !== generatedAppRoute.app.id));
@@ -1095,6 +1172,7 @@ function ChatPage() {
           );
         } finally {
           setBusy(false);
+          setCancelPending(false);
         }
         return true;
       }
@@ -1140,6 +1218,7 @@ function ChatPage() {
         },
       ]);
       setBusy(true);
+      setCancelPending(false);
       setNetworkOpenPersisted(true);
       cancelRequestedRef.current = false;
       setLiveAgents({
@@ -1165,7 +1244,7 @@ function ChatPage() {
 
       try {
         // locale을 동봉 — main이 emit하는 상태/오류 메시지가 사용자 언어로 나오도록.
-        const { runId } = await api.invoke.run({
+        const invokeResult = await api.invoke.run({
           chatId: chat.id,
           userPrompt: invocationPrompt,
           images,
@@ -1180,13 +1259,14 @@ function ChatPage() {
           pipelineStages: opts?.pipelineStages,
           routerAgent: opts?.routerAgent,
         });
+        const { runId } = invokeResult;
         window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chat.id } }));
         runIdRef.current = runId;
+        lastRunIdRef.current = runId;
         // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
         subscribeRun(runId, placeholderId);
         // runId 도착 전에 Stop을 눌렀다면(레이스) 구독을 건 직후 즉시 취소 — abort 종료 이벤트를 수신해 busy 해제.
         if (cancelRequestedRef.current) {
-          cancelRequestedRef.current = false;
           void api.invoke.cancel(runId);
         }
         return true;
@@ -1204,10 +1284,13 @@ function ChatPage() {
           ),
         );
         setBusy(false);
+        setCancelPending(false);
         setLiveAgents((prev) =>
           Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
         );
         runIdRef.current = null;
+        lastRunIdRef.current = null;
+        cancelRequestedRef.current = false;
         return false;
       }
     },
@@ -1218,12 +1301,13 @@ function ChatPage() {
   const stop = useCallback(() => {
     const api = ipc();
     if (!api) return;
+    if (cancelRequestedRef.current) return;
+    setCancelPending(true);
+    cancelRequestedRef.current = true;
     // runId가 아직 안 왔으면(invoke:run 왕복 중) 취소 의사만 기록 → 도착 즉시 취소된다.
-    if (!runIdRef.current) {
-      cancelRequestedRef.current = true;
-      return;
-    }
-    void api.invoke.cancel(runIdRef.current);
+    const runId = runIdRef.current ?? lastRunIdRef.current;
+    if (!runId) return;
+    void api.invoke.cancel(runId);
   }, []);
 
   // 활성 모델/작업량을 입력창 picker에서 바로 변경 — BYOK 및 CLI 공통.
@@ -1732,7 +1816,7 @@ function ChatPage() {
       planMode: opts?.planMode,
       goalMode: opts?.goalMode,
       appsGenerateMode: opts?.appsGenerateMode,
-      routerAgent: choice.routerAgent,
+      routerAgent: choice.kind === "plain" ? undefined : choice.routerAgent,
     };
     switch (choice.kind) {
       case "agent":
@@ -2144,12 +2228,21 @@ function ChatPage() {
           }}
           onOpenArtifact={(a) => {
             setSurface(null);
+            setMediaPreview(null);
             setArtifact(a);
             openPanelTab("panel");
           }}
+          onOpenMedia={(media) => {
+            setSurface(null);
+            setArtifact(null);
+            setMediaPreview(workspacePreviewFromMedia(media));
+            openPanelTab("panel");
+          }}
           onOpenWorkflow={() => setNetworkOpenPersisted(true)}
+          onStop={stop}
           onAnswerQuestion={answerQuestion}
           interactionBusy={busy}
+          stopRequested={cancelPending}
         />
       </div>
       {/* Codex식: 이 대화가 폴더(프로젝트)에서 작업하는지 / 전역 대화인지 선택 */}
@@ -2179,6 +2272,8 @@ function ChatPage() {
           onRecommendPreview={handleRecommendPreview}
           onRecommendExecute={handleRecommendExecute}
           onStop={stop}
+          stopRequested={cancelPending}
+          activeAgentId={agent?.id ?? chat.agentId ?? null}
           busy={busy}
           disabled={!agent}
           context={{
@@ -2207,6 +2302,7 @@ function ChatPage() {
           chatId={chatId || null}
           artifact={artifact}
           surface={surface}
+          filePreview={mediaPreview}
           generatedApps={allGeneratedApps}
           onSurfaceAction={handleSurfaceAction}
           onSurfaceStatePatch={handleSurfaceStatePatch}
