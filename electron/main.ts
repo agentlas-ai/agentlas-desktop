@@ -14,8 +14,9 @@ import { pathToFileURL } from "node:url";
 import { registerIpcHandlers } from "./ipc";
 import { buildAppMenu } from "./menu";
 import { initStore } from "./store/db";
-import { startAutomationScheduler } from "./automation-scheduler";
-import { initAutoUpdater } from "./updater";
+import { startAutomationScheduler, stopAutomationScheduler } from "./automation-scheduler";
+import { initAutoUpdater, disposeAutoUpdater } from "./updater";
+import { disposeAppFactoryLaunches } from "./app-factory/operations";
 import { bootAuthFromKeychain } from "./auth";
 import { materializeAllAgents } from "./agents/files";
 import { seedBuiltinAgents } from "./architecture/seed";
@@ -224,6 +225,16 @@ app.on("window-all-closed", () => {
 
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) void createWindow();
+});
+
+// 앱 종료 정리 — 백그라운드 타이머/자식 프로세스를 누수 없이 거둔다(중복 등록 방지 플래그).
+let quitCleanupDone = false;
+app.on("before-quit", () => {
+  if (quitCleanupDone) return;
+  quitCleanupDone = true;
+  try { stopAutomationScheduler(); } catch {}
+  try { disposeAutoUpdater(); } catch {}
+  try { disposeAppFactoryLaunches(); } catch {}
 });
 
 app.whenReady().then(async () => {

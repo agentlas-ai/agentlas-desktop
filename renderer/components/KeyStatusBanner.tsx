@@ -2,8 +2,9 @@
 // 기획안 비평 5번(통제의 대가): 키 사망은 가장 흔한 실패인데 화면에서 미설계였다. 이 컴포넌트가
 // usage.snapshot() 실측에서 상태를 도출해 정상은 헤더 pill, 한도임박/오류는 배너로 책임진다.
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
+import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { deriveKeyStatus, type KeyStatus } from "@/lib/key-status";
@@ -16,23 +17,20 @@ export function KeyStatusBanner({ mode = "banner" }: { mode?: "banner" | "pill" 
   const ko = locale === "ko";
   const [status, setStatus] = useState<KeyStatus | null>(null);
 
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const snap = await ipc()?.usage.snapshot();
-        if (alive) setStatus(deriveKeyStatus(snap ?? null));
-      } catch {
-        if (alive) setStatus({ health: "unknown", affected: [], connected: 0 });
-      }
-    };
-    void load();
-    const t = setInterval(load, REFRESH_MS);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
+  const load = useCallback(async () => {
+    try {
+      const snap = await ipc()?.usage.snapshot();
+      setStatus(deriveKeyStatus(snap ?? null));
+    } catch {
+      setStatus({ health: "unknown", affected: [], connected: 0 });
+    }
   }, []);
+
+  // 초기 1회 load는 유지, 주기 폴링(60s)은 탭 보일 때만 — useVisibleInterval이 hidden 시 정지.
+  useEffect(() => {
+    void load();
+  }, [load]);
+  useVisibleInterval(() => void load(), REFRESH_MS);
 
   if (!status || status.health === "unknown") return null;
 

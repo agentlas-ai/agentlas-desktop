@@ -1,7 +1,7 @@
 // 메시지 스트림 렌더 — agent 메시지는 Markdown으로, 사용자 메시지는 plain.
 // 작업 중 메시지는 Codex/Claude 데스크톱처럼 step log + 경과 시간을 실시간으로 보여준다.
 "use client";
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { InstalledAgent, InstalledFirm, InstalledMcpServer, Project, RuntimeCommand } from "@/lib/types";
 import type { AgentlasAppDefinition } from "@/lib/apps";
 import { AgentAvatar } from "./AgentAvatar";
@@ -181,7 +181,8 @@ export function ChatStream({
   );
 }
 
-function Bubble({
+// React.memo: props 동일 시 리렌더 스킵(스트리밍 중 무관 버블 재렌더 비용 제거). 표시명 유지.
+const Bubble = memo(function Bubble({
   message,
   agentName,
   agentTone,
@@ -360,7 +361,8 @@ function Bubble({
       </div>
     </div>
   );
-}
+});
+Bubble.displayName = "Bubble";
 
 // 버퍼 스무스 reveal — 토큰이 큰 덩어리로 도착해도 화면엔 일정 속도로 흘러나오게 한다.
 // target(누적 전체 텍스트)을 받아, active 동안 표시 길이를 매 프레임 조금씩 따라가게 한다.
@@ -533,7 +535,8 @@ function isInternalRunStatus(value: string): boolean {
 
 // ── 질문 카드 ───────────────────────────────────────────
 // LLM이 본문 fence로 emit한 옵션 질문. 사용자가 답하면 부모가 user 메시지로 자동 전송.
-function QuestionBlock({
+// React.memo: 다른 메시지 스트리밍 중 질문 카드 리렌더 스킵. 표시명 유지.
+const QuestionBlock = memo(function QuestionBlock({
   question,
   disabled,
   onAnswer,
@@ -543,7 +546,8 @@ function QuestionBlock({
   onAnswer: (answers: string[]) => void;
 }) {
   const { t } = useT();
-  const [picked, setPicked] = useState<Set<string>>(new Set(question.answer ?? []));
+  // lazy initializer: 매 렌더마다 new Set 생성하지 않고 최초 마운트 시에만 만든다.
+  const [picked, setPicked] = useState<Set<string>>(() => new Set(question.answer ?? []));
   const [otherText, setOtherText] = useState("");
   const answered = !!question.answer && question.answer.length > 0;
 
@@ -554,18 +558,24 @@ function QuestionBlock({
     onAnswer(question.multiSelect ? [...picked, v] : [v]);
   }
 
-  function toggle(label: string) {
-    if (answered || disabled) return;
-    if (question.multiSelect) {
-      const next = new Set(picked);
-      if (next.has(label)) next.delete(label);
-      else next.add(label);
-      setPicked(next);
-    } else {
-      // 단일 선택도 확인 버튼 전까지는 전송하지 않는다.
-      setPicked(new Set([label]));
-    }
-  }
+  // useCallback + 함수형 setState: memo된 옵션 버튼에 안정적인 핸들러 전달, picked 의존성 제거.
+  const toggle = useCallback(
+    (label: string) => {
+      if (answered || disabled) return;
+      if (question.multiSelect) {
+        setPicked((prev) => {
+          const next = new Set(prev);
+          if (next.has(label)) next.delete(label);
+          else next.add(label);
+          return next;
+        });
+      } else {
+        // 단일 선택도 확인 버튼 전까지는 전송하지 않는다.
+        setPicked(new Set([label]));
+      }
+    },
+    [answered, disabled, question.multiSelect],
+  );
 
   function submit() {
     if (answered || disabled || picked.size === 0) return;
@@ -772,7 +782,8 @@ function QuestionBlock({
       )}
     </div>
   );
-}
+});
+QuestionBlock.displayName = "QuestionBlock";
 
 // ── 파이프라인 스테퍼 ──────────────────────────────────────
 // 추천 시트에서 pipeline 을 고르면 시드된 단계 계획(PRD→배포)을 메시지 상단에 가로 스테퍼로 보여준다.
@@ -1949,7 +1960,8 @@ function useElapsedSeconds(startedAt: number | undefined, ticking: boolean): num
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!ticking || !startedAt) return;
-    const id = setInterval(() => setNow(Date.now()), 250);
+    // 경과초 표시는 1초 단위라 250ms→1000ms로 낮춰 초당 setState 4회→1회.
+    const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [ticking, startedAt]);
   if (!startedAt) return 0;

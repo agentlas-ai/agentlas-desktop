@@ -3,8 +3,9 @@
 // 데이터는 전부 실측 IPC: confirm.listPending(승인대기+가장 오래된 대기시각), onActiveChats(작업중),
 // team.list(보유 일꾼 수), usage.snapshot(키 상태). 가짜 값 없음.
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
 import { deriveKeyStatus, type KeyHealth } from "@/lib/key-status";
 import { navigate } from "@/lib/navigation";
@@ -35,22 +36,36 @@ export function FleetSummaryStrip() {
   const [singleCount, setSingleCount] = useState(0);
   const [keyHealth, setKeyHealth] = useState<KeyHealth>("unknown");
 
+  const loadPending = useCallback(async () => {
+    try {
+      const list = (await ipc()?.confirm.listPending()) ?? [];
+      setPending(list.length);
+      const oldest = list
+        .map((p) => p.createdAt)
+        .filter(Boolean)
+        .sort()[0];
+      setOldestPending(oldest ?? null);
+    } catch {
+      /* 무시 */
+    }
+  }, []);
+  const loadKey = useCallback(async () => {
+    try {
+      const snap = await ipc()?.usage.snapshot();
+      setKeyHealth(deriveKeyStatus(snap ?? null).health);
+    } catch {
+      /* 무시 */
+    }
+  }, []);
+
+  // 폴링(10s)으로 도는 loadPending+loadKey만 useVisibleInterval로(탭 숨김 시 정지).
+  useVisibleInterval(() => {
+    void loadPending();
+    void loadKey();
+  }, POLL_MS);
+
   useEffect(() => {
     let alive = true;
-    const loadPending = async () => {
-      try {
-        const list = (await ipc()?.confirm.listPending()) ?? [];
-        if (!alive) return;
-        setPending(list.length);
-        const oldest = list
-          .map((p) => p.createdAt)
-          .filter(Boolean)
-          .sort()[0];
-        setOldestPending(oldest ?? null);
-      } catch {
-        /* 무시 */
-      }
-    };
     const loadOwned = async () => {
       try {
         const api = ipc();
@@ -67,30 +82,18 @@ export function FleetSummaryStrip() {
         /* 무시 */
       }
     };
-    const loadKey = async () => {
-      try {
-        const snap = await ipc()?.usage.snapshot();
-        if (alive) setKeyHealth(deriveKeyStatus(snap ?? null).health);
-      } catch {
-        /* 무시 */
-      }
-    };
+    // 초기 1회 load는 유지(loadOwned는 마운트 1회만 — 폴링 대상 아님).
     void loadPending();
     void loadOwned();
     void loadKey();
-    const t = setInterval(() => {
-      void loadPending();
-      void loadKey();
-    }, POLL_MS);
     const off = ipcEvents()?.onActiveChats?.((ids) => {
       if (alive) setActive(ids.length);
     });
     return () => {
       alive = false;
-      clearInterval(t);
       off?.();
     };
-  }, []);
+  }, [loadPending, loadKey]);
 
   const stall = pending > 0 ? stallText(oldestPending, ko) : "";
 

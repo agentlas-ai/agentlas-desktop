@@ -174,6 +174,8 @@ export function initAutoUpdater(): void {
   timer = setInterval(() => {
     void checkSafely();
   }, CHECK_INTERVAL_MS);
+  // 이 타이머만으로 이벤트루프를 붙잡아 종료를 막지 않게(automation-scheduler 패턴과 동일).
+  if (timer.unref) timer.unref();
 }
 
 export function disposeAutoUpdater(): void {

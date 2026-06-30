@@ -1,8 +1,9 @@
 // 대시보드 "활동" 모듈 — 지금 실행 중(activeChats) + 최근 채팅(chats.listRecent).
 // 실행 중인 채팅엔 라이브 점등, 클릭하면 해당 채팅으로 이동.
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
+import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import type { Chat } from "@/lib/types";
@@ -30,7 +31,6 @@ export function DashboardActivity() {
   const [page, setPage] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadActive = useCallback(async () => {
     const api = ipc();
@@ -63,17 +63,15 @@ export function DashboardActivity() {
     }
   }, [ko]);
 
+  // 초기 1회 load는 유지, 주기 폴링(8s)은 탭 보일 때만 — useVisibleInterval이 hidden 시 정지.
   useEffect(() => {
     void loadRecent();
     void loadActive();
-    timer.current = setInterval(() => {
-      void loadActive();
-      void loadRecent();
-    }, POLL_MS);
-    return () => {
-      if (timer.current) clearInterval(timer.current);
-    };
   }, [loadActive, loadRecent]);
+  useVisibleInterval(() => {
+    void loadActive();
+    void loadRecent();
+  }, POLL_MS);
 
   const runningCount = recent.filter((c) => active.has(c.id)).length;
   const pageCount = Math.max(1, Math.ceil(recent.length / PAGE_SIZE));

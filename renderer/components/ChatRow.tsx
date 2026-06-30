@@ -1,7 +1,7 @@
 // 사이드바 채팅 행 — hover 시 ⋯ 메뉴 (이름 변경 / 보관 / 삭제).
 // Codex / Claude Desktop의 사이드바 패턴 동일.
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
@@ -9,7 +9,9 @@ import { pickLocalized, useT } from "@/lib/i18n";
 import type { Chat, InstalledAgent } from "@/lib/types";
 import { IconMoreHorizontal } from "./Icon";
 
-export function ChatRow({
+// React.memo: 사이드바 채팅 행. props 동일 시 리렌더 스킵(agent는 Sidebar의 Map으로 안정 참조).
+// onChanged(triggerRefresh)는 부모에서 매 렌더 재생성되어 효과가 제한적일 수 있으나 부작용은 없다.
+export const ChatRow = memo(function ChatRow({
   chat,
   agent,
   targetLabel,
@@ -248,7 +250,8 @@ export function ChatRow({
       )}
     </div>
   );
-}
+});
+ChatRow.displayName = "ChatRow";
 
 function MenuBtn({
   onClick,

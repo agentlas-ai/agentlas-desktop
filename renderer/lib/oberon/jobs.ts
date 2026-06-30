@@ -138,6 +138,8 @@ export function startOberonBackgroundJobMonitor(): () => void {
 }
 
 async function tickOberonBackgroundJobs(): Promise<void> {
+  // 탭 숨김 시 이 tick만 건너뛴다(타이머·POLL_MS는 유지) — 백그라운드 폴링 폭주 방지.
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
   if (monitorBusy) return;
   monitorBusy = true;
   try {

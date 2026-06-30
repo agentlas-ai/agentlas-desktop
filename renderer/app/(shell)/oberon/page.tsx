@@ -367,6 +367,8 @@ export default function OberonPage() {
     (jobId: string) => {
       if (renderPoll.current) clearInterval(renderPoll.current);
       renderPoll.current = setInterval(() => {
+        // 탭 숨김 시 이 tick만 skip(타이머·주기 유지) — 백그라운드 폴링 폭주 방지.
+        if (typeof document !== "undefined" && document.hidden) return;
         void (async () => {
           const bridge = ipc();
           const job = await bridge?.oberon.getRenderJob(jobId);
@@ -417,6 +419,8 @@ export default function OberonPage() {
     (jobId: string) => {
       if (motionPoll.current) clearInterval(motionPoll.current);
       motionPoll.current = setInterval(() => {
+        // 탭 숨김 시 이 tick만 skip(타이머·주기 유지) — 백그라운드 폴링 폭주 방지.
+        if (typeof document !== "undefined" && document.hidden) return;
         void (async () => {
           const bridge = ipc();
           const job = await bridge?.oberon.getMotionAdJob(jobId);
@@ -469,6 +473,8 @@ export default function OberonPage() {
     (jobId: string) => {
       if (keyframePoll.current) clearInterval(keyframePoll.current);
       keyframePoll.current = setInterval(() => {
+        // 탭 숨김 시 이 tick만 skip(타이머·주기 유지) — 백그라운드 폴링 폭주 방지.
+        if (typeof document !== "undefined" && document.hidden) return;
         void (async () => {
           const bridge = ipc();
           const job = await bridge?.oberon.getKeyframeJob(jobId);
@@ -710,6 +716,8 @@ export default function OberonPage() {
     (jobId: string) => {
       if (animatePoll.current) clearInterval(animatePoll.current);
       animatePoll.current = setInterval(() => {
+        // 탭 숨김 시 이 tick만 skip(타이머·주기 유지) — 백그라운드 폴링 폭주 방지.
+        if (typeof document !== "undefined" && document.hidden) return;
         void (async () => {
           const bridge = ipc();
           const job = await bridge?.oberon.getAnimateJob(jobId);

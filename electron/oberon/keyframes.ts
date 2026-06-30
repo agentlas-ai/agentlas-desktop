@@ -1,5 +1,6 @@
 import { app, shell } from "electron";
 import { spawn } from "child_process";
+import type { ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
@@ -30,6 +31,34 @@ const CODEX_IMAGE_BATCH_RUNNER_RELATIVE = path.join(
 
 const jobs = new Map<string, OberonKeyframeJob>();
 const cancelledJobs = new Set<string>();
+// 실행 중인 Codex 배치 자식 프로세스를 job id로 추적 — 취소/타임아웃 시 프로세스 그룹째 거두기 위함.
+const runningChildren = new Map<string, ChildProcess>();
+
+// detached로 띄운 자식은 프로세스 그룹 리더라 -pid로 그룹 전체에 시그널을 보낸다(자손 codex 포함).
+// exec.ts terminateProbeProcess 패턴: SIGTERM 후 일정시간 뒤 SIGKILL(타이머는 unref로 종료 비차단).
+function killChildGroup(child: ChildProcess): void {
+  if (process.platform !== "win32" && child.pid) {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+      const sigkill = setTimeout(() => {
+        try {
+          process.kill(-child.pid!, "SIGKILL");
+        } catch {
+          // already exited
+        }
+      }, 1000);
+      sigkill.unref?.();
+      return;
+    } catch {
+      // fall through to direct child kill
+    }
+  }
+  try {
+    child.kill();
+  } catch {
+    // already exited
+  }
+}
 
 class KeyframeCancelled extends Error {
   constructor() {
@@ -84,6 +113,9 @@ export function cancelOberonKeyframes(id: string): OberonKeyframeJob | null {
   job.progress.phase = "cancelled";
   job.message = "키프레임 생성 취소됨";
   job.updatedAtMs = Date.now();
+  // 진행 중인 Codex 배치 자식이 있으면 프로세스 그룹째 종료 — 기존엔 플래그만 세워 자식이 계속 돌았다.
+  const child = runningChildren.get(id);
+  if (child) killChildGroup(child);
   return snapshot(job);
 }
 
@@ -300,19 +332,25 @@ async function runImageBatchProcess(
         "--poll-interval",
         "0.5",
       ],
-      { stdio: ["ignore", "ignore", "pipe"] },
+      // detached: 자기 프로세스 그룹의 리더가 되어 -pid로 자손(codex)까지 한 번에 거둘 수 있게.
+      { stdio: ["ignore", "ignore", "pipe"], detached: process.platform !== "win32" },
     );
+    // 취소(cancelOberonKeyframes)·종료 정리가 이 자식에 도달할 수 있게 job id로 추적.
+    runningChildren.set(job.id, child);
     let stderr = "";
-    const timer = setTimeout(() => child.kill(), 15 * 60 * 1000);
+    // 타임아웃 시에도 자식 단독이 아니라 프로세스 그룹째 종료(고아 codex 방지).
+    const timer = setTimeout(() => killChildGroup(child), 15 * 60 * 1000);
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
     });
     child.on("error", (error) => {
       clearTimeout(timer);
+      runningChildren.delete(job.id);
       reject(error);
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      runningChildren.delete(job.id);
       resolve({ code, stderr: stderr.trim() });
     });
   });

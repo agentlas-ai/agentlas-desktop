@@ -10,6 +10,31 @@ import { isStormbreakerLongRunPrompt } from "./hephaestus/loop-engineering";
 let timer: ReturnType<typeof setInterval> | null = null;
 const running = new Set<string>();
 
+// 한 번의 점검에서 동시에 돌릴 자동화 수 상한. due가 한꺼번에 많이 쌓여도(앱이 오래 꺼져
+// 있다 켜진 경우 등) 모든 에이전트 런을 동시에 띄우지 않게 막는다 — 저사양 기기에서
+// CPU/RAM 폭주 방지. 각 런은 내부에서 다시 CLI/엔진 프로세스를 띄우므로 N을 작게 둔다.
+const MAX_CONCURRENT_AUTOMATIONS = Number(
+  process.env.AGENTLAS_AUTOMATION_CONCURRENCY ?? 2,
+);
+
+/** 작업 배열을 최대 `limit`개씩만 동시 실행하는 경량 풀(외부 의존성 없음). */
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  const queue = items.slice();
+  const size = Math.max(1, Math.min(limit, queue.length));
+  const lanes = Array.from({ length: size }, async () => {
+    while (queue.length > 0) {
+      const next = queue.shift();
+      if (next === undefined) break;
+      await worker(next);
+    }
+  });
+  await Promise.all(lanes);
+}
+
 async function runOne(a: Automation): Promise<void> {
   if (running.has(a.id)) return; // 직전 실행이 아직 진행 중이면 건너뜀
   running.add(a.id);
@@ -50,7 +75,7 @@ export async function runDueAutomationsNow(now: Date = new Date()): Promise<void
     console.error("[automation] dueAutomations failed:", err);
     return;
   }
-  await Promise.all(due.map((a) => runOne(a)));
+  await runWithConcurrency(due, MAX_CONCURRENT_AUTOMATIONS, runOne);
 }
 
 function tick(): void {

@@ -1,7 +1,7 @@
 // 좌측 사이드바 — Claude Desktop / Codex / Antigravity 스타일.
 // 섹션: 새 채팅 / 최근 채팅 / 프로젝트 / 자동화 / 라이브러리. Footer = 런타임 상태 + 설정.
 "use client";
-import { Suspense, useEffect, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { Suspense, useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
@@ -264,6 +264,8 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   }, [refreshKey, pathname, currentChatId]);
 
   const displayAgents = visibleAgents(data.agents);
+  // ChatRow마다 O(n) find 대신 id→agent Map으로 O(1) 조회(채팅 많을수록 효과).
+  const agentById = useMemo(() => new Map(displayAgents.map((a) => [a.id, a])), [displayAgents]);
 
   function defaultAgentIdFor(project?: Project | null): string | undefined {
     return (
@@ -592,7 +594,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           ) : (
             <>
               {data.chats.slice(0, chatListLimit).map((c) => {
-                const agent = displayAgents.find((a) => a.id === c.agentId);
+                const agent = c.agentId ? agentById.get(c.agentId) : undefined;
                 const group = c.agentGroupId ? data.agentGroups.find((item) => item.id === c.agentGroupId) : null;
                 const active = pathname === "/chat" && currentChatId === c.id;
                 return (
@@ -1047,7 +1049,7 @@ function labelOfRuntime(s: RuntimeStatus): string {
   const kind = {
     "claude-code": "Claude Code",
     codex: "Codex",
-    gemini: "Gemini",
+    gemini: "Antigravity",
     grok: "Grok",
     byok: "API",
     ollama: "Ollama",

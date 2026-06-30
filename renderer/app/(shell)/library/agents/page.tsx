@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
 import { ipc } from "@/lib/ipc";
+import { mapWithConcurrency } from "@/lib/concurrency";
 import { isVisibleAgent, isUserFacingAgentText, visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
@@ -186,10 +187,18 @@ function LibraryAgentsView() {
     setRuntimeStatuses(runtimes);
     setRuntimeOverrides(overrides);
 
+    // 순차 for-await(20개면 ~4s 프리즈) → 동시성 3 병렬. 실패/null firm 은 기존처럼 누락(worker 내부 try/catch 로 null 반환). 순서 보존.
     const orgs: Record<string, ResolvedOrg> = {};
-    for (const f of fList) {
-      const o = await api.firms.getResolvedOrg(f.id);
-      if (o) orgs[f.id] = o;
+    const orgPairs = await mapWithConcurrency(fList, 3, async (f) => {
+      try {
+        const o = await api.firms.getResolvedOrg(f.id);
+        return o ? ([f.id, o] as const) : null;
+      } catch {
+        return null;
+      }
+    });
+    for (const pair of orgPairs) {
+      if (pair) orgs[pair[0]] = pair[1];
     }
     setResolvedOrgs(orgs);
   }, []);

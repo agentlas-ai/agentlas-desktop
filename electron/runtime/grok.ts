@@ -87,8 +87,14 @@ function listGrokModels(bin: string): Promise<string[]> {
       finish([]);
     }, 5000);
     child.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
-    child.on("error", () => finish([]));
+    child.on("error", () => {
+      // 프로세스 종료 시 stdout data 리스너를 제거해 누수 방지(stderr는 ignore라 리스너 없음).
+      child.stdout?.removeAllListeners("data");
+      finish([]);
+    });
     child.on("close", () => {
+      // 프로세스 종료 시 stdout data 리스너를 제거해 누수 방지(stderr는 ignore라 리스너 없음).
+      child.stdout?.removeAllListeners("data");
       // `grok models` 실측 출력: 각 기본 모델이 `  grok-4.3 — Grok 4.3 (reasoning)` 형태(ANSI 컬러 포함).
       // ANSI 제거 후 "id — 설명" 라인의 id만 뽑는다(별칭 줄은 제외 → 드롭다운 깔끔).
       // ANSI(컬러) 무관하게 grok-* 모델 id를 추출한다(별칭 포함이지만 모두 유효한 모델).
@@ -271,10 +277,16 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     });
 
     child.on("error", (err) => {
+      // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
+      child.stdout?.removeAllListeners("data");
+      child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
       reject(err);
     });
     child.on("close", (code) => {
+      // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
+      child.stdout?.removeAllListeners("data");
+      child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
       if (req.signal?.aborted) {
         reject(new Error(tStatus(req.locale, "aborted")));

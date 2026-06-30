@@ -500,6 +500,17 @@ export function registerIpcHandlers(): void {
   /** package.json의 version — 사이드바 푸터 표기/디버그 용 */
   ipcMain.handle("app:getVersion", () => app.getVersion());
 
+  // ── T-rex 슬라이드 스튜디오 이미지 생성(키리스 CLI: codex image_gen / gemini) ──
+  ipcMain.handle("trex:generateImage", async (_e, payload: { model?: "codex" | "gemini"; prompt?: string }) => {
+    const { generateTrexImage } = await import("./trex/imagegen");
+    const model = payload?.model === "gemini" ? "gemini" : "codex";
+    return generateTrexImage(model, String(payload?.prompt ?? ""));
+  });
+  ipcMain.handle("trex:imageProviders", async () => {
+    const { trexImageProviders } = await import("./trex/imagegen");
+    return trexImageProviders();
+  });
+
   // ── updater (electron-updater) ──────────────────────────
   // renderer가 마운트되자마자 현재 상태를 동기 조회. broadcast 이전에 새 창이 열려도 onState로 캐치.
   ipcMain.handle("updater:getState", () => getUpdaterState());
@@ -1344,7 +1355,10 @@ export function registerIpcHandlers(): void {
         if (record.events.length > MAX_BUFFERED_EVENTS) {
           record.events.splice(0, record.events.length - MAX_BUFFERED_EVENTS);
         }
-        win?.webContents.send(channel, ev);
+        // 창이 닫힌 뒤(닫기와 스트림 종료가 겹치는 경우) send는 throw하므로 destroyed 가드.
+        if (win && !win.isDestroyed()) {
+          try { win.webContents.send(channel, ev); } catch {}
+        }
         // 종료 이벤트는 즉시 레지스트리에서 제거 — 답변은 final emit 직전에 이미 영속화되므로(client.ts),
         // 재접속(attach)이 '끝난 실행'을 반환해 히스토리 행과 답변이 중복 렌더되는 창을 닫는다.
         if (ev.kind === "final" || ev.kind === "error") {
@@ -1508,9 +1522,15 @@ export function registerIpcHandlers(): void {
     // 이벤트를 버퍼링했다가 한 번에 flush 한다(첫 stage 틱 손실 방지).
     const pending: HephaestusBuildEvent[] = [];
     let ready = false;
+    // 창이 닫힌 뒤 send는 throw하므로 destroyed 가드(빌드 종료와 닫기가 겹치는 경우).
+    const sendToWin = (ev: HephaestusBuildEvent) => {
+      if (win && !win.isDestroyed()) {
+        try { win.webContents.send(channel, ev); } catch {}
+      }
+    };
     const emit = (ev: HephaestusBuildEvent) => {
       if (ready) {
-        win?.webContents.send(channel, ev);
+        sendToWin(ev);
       } else {
         pending.push(ev);
       }
@@ -1518,7 +1538,7 @@ export function registerIpcHandlers(): void {
     buildReadySignals.set(runId, () => {
       if (ready) return;
       ready = true;
-      for (const ev of pending) win?.webContents.send(channel, ev);
+      for (const ev of pending) sendToWin(ev);
       pending.length = 0;
     });
     void runHephaestusBuild(runId, req, emit, controller.signal).finally(() => {

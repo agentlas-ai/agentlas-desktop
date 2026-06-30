@@ -259,10 +259,16 @@ function runCodexProcess(
     });
 
     child.on("error", (err) => {
+      // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
+      child.stdout?.removeAllListeners("data");
+      child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
       reject(err);
     });
     child.on("close", (code) => {
+      // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
+      child.stdout?.removeAllListeners("data");
+      child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
       resolve({ code, stderr, text, threadId, tokens });
     });

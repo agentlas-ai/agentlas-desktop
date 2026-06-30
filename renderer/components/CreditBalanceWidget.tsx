@@ -6,6 +6,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
+import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
 import type { HubCreditBalance } from "@/lib/types";
 
@@ -31,18 +32,12 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
     }
   }, []);
 
+  // 초기 1회 refresh는 유지. 주기 폴링(60s)은 useVisibleInterval이 담당 —
+  // 기존 visibilitychange가 interval을 멈추지 않던 버그(숨김 중에도 계속 폴링)를 훅이 해결한다.
   useEffect(() => {
     void refresh();
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void refresh();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    const timer = window.setInterval(() => void refresh(), POLL_MS);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisible);
-      window.clearInterval(timer);
-    };
   }, [refresh]);
+  useVisibleInterval(() => void refresh(), POLL_MS);
 
   useEffect(() => {
     if (!open) return;

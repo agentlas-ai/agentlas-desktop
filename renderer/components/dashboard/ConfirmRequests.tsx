@@ -3,8 +3,9 @@
 // 긴급성으로 드러낸다. "답하기"로 해당 채팅에 가서 응답하면 자동 해소된다 — 인라인 응답은 챗에서 이뤄진다
 // (단일 상태: 워크스페이스 인라인 게이트와 같은 confirm 소스를 공유).
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
+import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import type { PendingConfirmation } from "@/lib/types";
@@ -27,7 +28,6 @@ export function ConfirmRequests() {
   const ko = locale === "ko";
   const [items, setItems] = useState<PendingConfirmation[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
     const api = ipc();
@@ -47,13 +47,11 @@ export function ConfirmRequests() {
     }
   }, []);
 
+  // 초기 1회 load는 유지, 주기 폴링(10s)은 탭 보일 때만 — useVisibleInterval이 hidden 시 정지.
   useEffect(() => {
     void load();
-    timer.current = setInterval(() => void load(), POLL_MS);
-    return () => {
-      if (timer.current) clearInterval(timer.current);
-    };
   }, [load]);
+  useVisibleInterval(() => void load(), POLL_MS);
 
   const count = items?.length ?? 0;
 

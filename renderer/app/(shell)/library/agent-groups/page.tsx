@@ -16,6 +16,7 @@ import {
   IconTrash,
 } from "@/components/Icon";
 import { ipc } from "@/lib/ipc";
+import { mapWithConcurrency } from "@/lib/concurrency";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { visibleAgents } from "@/lib/agent-visibility";
@@ -74,18 +75,22 @@ export default function AgentGroupsPage() {
       setFirms(firmRows);
       setGroups(groupRows);
 
+      // 무제한 병렬 → 동시성 3으로 제한(동작·결과 동일, 순서 보존). 실패한 firm 만 누락되도록 worker 내부에서 null 반환.
       const nextResolved: Record<string, ResolvedNode[]> = {};
-      await Promise.all(
-        firmRows.map(async (firm) => {
-          const org = await api.firms.getResolvedOrg(firm.id).catch(() => null);
-          if (org) {
-            nextResolved[firm.id] = [
-              org.ceo,
-              ...org.divisions.flatMap((division) => [division, ...division.specialists]),
-            ];
-          }
-        }),
-      );
+      const resolvedPairs = await mapWithConcurrency(firmRows, 3, async (firm) => {
+        const org = await api.firms.getResolvedOrg(firm.id).catch(() => null);
+        if (!org) return null;
+        return [
+          firm.id,
+          [
+            org.ceo,
+            ...org.divisions.flatMap((division) => [division, ...division.specialists]),
+          ],
+        ] as [string, ResolvedNode[]];
+      });
+      for (const pair of resolvedPairs) {
+        if (pair) nextResolved[pair[0]] = pair[1];
+      }
       setResolvedNodes(nextResolved);
 
       const hub = await api.marketplace.search("").catch(() => []);

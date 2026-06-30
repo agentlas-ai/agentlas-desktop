@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -61,6 +62,38 @@ interface AppPackage {
 }
 
 const LOCAL_ASSET_GENERATOR = "agentlas-local-catalog-asset-generator";
+
+/** 작업 배열을 최대 `limit`개씩만 동시 실행하는 경량 풀(automation-scheduler 패턴, 결과 순서 보존). */
+async function runWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  const size = Math.max(1, Math.min(limit, items.length || 1));
+  let cursor = 0;
+  const lanes = Array.from({ length: size }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(lanes);
+  return results;
+}
+
+// 커넥터별 detached 브라우저 런처 자식 추적 — 같은 커넥터를 다시 띄우면 직전 것을 교체하고,
+// 앱 종료 시(disposeAppFactoryLaunches) 남은 런처를 거둔다. unref는 유지하되 핸들은 남긴다.
+const activeLaunches = new Map<string, ChildProcess>();
+
+/** 앱 종료 정리 — 추적 중인 모든 provider 브라우저 런처 자식을 종료(main.ts before-quit에서 호출). */
+export function disposeAppFactoryLaunches(): void {
+  for (const child of activeLaunches.values()) {
+    try { child.kill(); } catch {}
+  }
+  activeLaunches.clear();
+}
 
 export async function installMcpPlan(
   input: AppFactoryRootRequest,
@@ -860,12 +893,23 @@ export async function launchProviderBrowserSession(
     status = "approval-required";
     summary = `Approval required before launching the controlled provider browser for ${connectorName}.`;
   } else if (!dryRun) {
+    // 같은 커넥터의 직전 런처가 아직 살아 있으면 교체 전에 종료(중복 브라우저 누수 방지).
+    const prior = activeLaunches.get(connectorId);
+    if (prior) {
+      try { prior.kill(); } catch {}
+      activeLaunches.delete(connectorId);
+    }
     const child = spawn(nodeExecPath(), [launcherPath], {
       cwd: rootPath,
       detached: true,
       stdio: "ignore",
     });
     child.unref();
+    // unref로 분리하되 핸들은 추적 — 교체/종료 정리(disposeAppFactoryLaunches)가 도달하도록.
+    activeLaunches.set(connectorId, child);
+    child.on("exit", () => {
+      if (activeLaunches.get(connectorId) === child) activeLaunches.delete(connectorId);
+    });
     status = "launched";
     launched = true;
     pid = child.pid;
@@ -1124,7 +1168,8 @@ export async function resolveProviderCredentials(
     .filter(Boolean) as AppFactoryProviderCredentialGate[];
   const gates = dedupeCredentialGates(gatesFromRuntime.length > 0 ? gatesFromRuntime : providerCredentialGates(pkg));
   const requestedSource = input.source || "agentlas-env-vault";
-  const credentials: AppFactoryProviderCredentialResolution[] = await Promise.all(gates.map(async (gate) => {
+  // keytar 자격증명 해석을 동시성 3으로 제한(gates 무제한 → 키체인 동시 접근 폭주 방지). 결과 순서/형태 보존.
+  const credentials: AppFactoryProviderCredentialResolution[] = await runWithConcurrency(gates, 3, async (gate) => {
     const { value, source } = await resolveCredentialValue(gate.envKey, requestedSource);
     const resolved = typeof value === "string" && value.trim().length > 0;
     return {
@@ -1143,7 +1188,7 @@ export async function resolveProviderCredentials(
       inputMode: gate.inputMode,
       ...(resolved ? { fingerprint: credentialFingerprint(value) } : {}),
     };
-  }));
+  });
   const resolvedCount = credentials.filter((item) => item.status === "live-credential-ready").length;
   const missingCount = credentials.length - resolvedCount;
 

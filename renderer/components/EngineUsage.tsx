@@ -5,8 +5,9 @@
 // 미연결 엔진은 [연결] 버튼 — CLI는 자동설치+로그인창, API키는 인라인 입력 후 저장.
 // 카드 헤더로 접기/펼치기(상태는 localStorage).
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
+import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
 import type {
   EnvVarMeta,
@@ -92,7 +93,6 @@ export function EngineUsage() {
   const [keyFor, setKeyFor] = useState<string | null>(null);
   const [keyVal, setKeyVal] = useState("");
   const [collapsed, setCollapsed] = useState(false);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     try {
@@ -124,14 +124,12 @@ export function EngineUsage() {
     }
   }, []);
 
+  // 초기 1회 load(usage+connections)는 유지, 주기 폴링(60s)은 loadUsage만 탭 보일 때 — useVisibleInterval이 hidden 시 정지.
   useEffect(() => {
     void loadUsage();
     void loadConnections();
-    timer.current = setInterval(() => void loadUsage(), POLL_MS);
-    return () => {
-      if (timer.current) clearInterval(timer.current);
-    };
   }, [loadUsage, loadConnections]);
+  useVisibleInterval(() => void loadUsage(), POLL_MS);
 
   function toggleCollapsed() {
     setCollapsed((c) => {

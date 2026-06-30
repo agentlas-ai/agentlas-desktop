@@ -3,12 +3,13 @@
 // + Electron 메뉴 → 라우터 브릿지.
 // + 자동 업데이트 배너 (downloading/downloaded 상태에서만 노출).
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Sidebar } from "./Sidebar";
 import { MenuBridge } from "./MenuBridge";
 import { ImportAgentsModal } from "./ImportAgentsModal";
 import { ipc } from "@/lib/ipc";
+import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { SideNav } from "./SideNav";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { usePathname } from "next/navigation";
@@ -45,41 +46,35 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return () => registerRouter(null);
   }, [router]);
 
+  const syncAttention = useCallback(async () => {
+    const api = ipc();
+    if (!api) {
+      setPendingConfirmations(0);
+      return;
+    }
+    try {
+      const list = await api.confirm.listPending();
+      const count = list.length;
+      setPendingConfirmations(count);
+      await api.attention?.setPendingConfirmations(count);
+    } catch {
+      // Transient IPC errors should not clear an existing badge.
+    }
+  }, []);
+
+  // 폴링은 useVisibleInterval이 담당(탭 숨김 시 정지·복귀 시 즉시 1회). 초기 load와 앱 이벤트 갱신은 아래 effect에서.
+  useVisibleInterval(() => void syncAttention(), ATTENTION_POLL_MS);
+
   useEffect(() => {
-    let cancelled = false;
-    let timer: number | null = null;
-
-    const syncAttention = async () => {
-      const api = ipc();
-      if (!api) {
-        if (!cancelled) setPendingConfirmations(0);
-        return;
-      }
-      try {
-        const list = await api.confirm.listPending();
-        if (cancelled) return;
-        const count = list.length;
-        setPendingConfirmations(count);
-        await api.attention?.setPendingConfirmations(count);
-      } catch {
-        // Transient IPC errors should not clear an existing badge.
-      }
-    };
-
     void syncAttention();
-    timer = window.setInterval(() => void syncAttention(), ATTENTION_POLL_MS);
-    window.addEventListener("focus", syncAttention);
+    // focus/visibilitychange 폴링은 useVisibleInterval로 대체됨 — 앱 내부 갱신 이벤트만 여기서 듣는다.
     window.addEventListener("agentlas:attention-refresh", syncAttention);
-
     return () => {
-      cancelled = true;
-      if (timer) window.clearInterval(timer);
-      window.removeEventListener("focus", syncAttention);
       window.removeEventListener("agentlas:attention-refresh", syncAttention);
       const api = ipc();
       void api?.attention?.setPendingConfirmations(0);
     };
-  }, []);
+  }, [syncAttention]);
 
   // 온보딩을 마쳤는데 로컬 에이전트가 0개면 "내 에이전트 가져오기" 팝업을 한 번 띄운다.
   useEffect(() => {

@@ -1077,6 +1077,8 @@ function ChatPage() {
     let stopped = false;
     const reconcile = async () => {
       if (stopped) return;
+      // 탭 숨김 시 이 tick만 skip(타이머·escalation 유지) — 백그라운드 폴링 폭주 방지.
+      if (typeof document !== "undefined" && document.hidden) return;
       try {
         const ids = await api.invoke.activeChats();
         if (stopped || !runIdRef.current || ids.includes(chatId)) return;
@@ -1097,7 +1099,8 @@ function ChatPage() {
       }
     };
     const first = setTimeout(reconcile, 700);
-    const iv = setInterval(reconcile, 2500);
+    // 정상 주기를 2500→5000으로 상향(escalation 구조는 유지) — busy 중 폴링 부하 절감.
+    const iv = setInterval(reconcile, 5000);
     return () => {
       stopped = true;
       clearTimeout(first);
