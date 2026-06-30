@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- Reworded Marketplace docs and QA references around Hub-only catalog behavior:
+  Desktop no longer presents an offline in-memory marketplace fallback, and
+  offline Hub failures should remain visible as empty/error states.
+
 ## 0.5.2 — 2026-06-30
 
 ### Added

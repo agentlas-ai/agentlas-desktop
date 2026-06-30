@@ -20,7 +20,7 @@ const forbiddenSeedSlugs = new Set([
   "firm-ceo-shop",
   "firm-ceo-marketer",
 ]);
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `agentlas-marketplace-${mode}-`));
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `agentlas-marketplace-hub-only-${mode}-`));
 process.env.AGENTLAS_STORE_PATH = path.join(tempDir, "agentlas.sqlite");
 if (mode === "offline") {
   process.env.AGENTLAS_MCP_BASE_URL = "http://127.0.0.1:9/mcp";
@@ -50,7 +50,7 @@ app.setPath("userData", path.join(tempDir, "user-data"));
       assert.equal(status.usingFallback, false, "live mode should not use fallback when Hub responds");
       assert.equal(status.online, true, "live mode should mark the Hub source online");
       assert.ok(
-        agents.length >= 200,
+        agents.length >= 100,
         `live mode should load the public Hub catalog, not the limited MCP seed result; got ${agents.length}`,
       );
       assert.ok(

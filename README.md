@@ -236,8 +236,9 @@ A complete tour of what ships today.
   and an "Open in Apps" CTA.
 - **Trust grades.** Listings carry a trust grade; sideloading unvetted agents is
   gated.
-- **Works offline.** An in-memory fallback source keeps the marketplace usable when
-  the network or cloud is down.
+- **Hub-only catalog.** If the network or cloud is down, the marketplace shows an
+  empty/error state instead of local hardcoded agents, so stale demo listings never
+  masquerade as live Hub results.
 
 ### Apps — manage the whole toolbox
 
@@ -316,7 +317,7 @@ Three common ways to run AI agents today — and where Agentlas lands.
 | **Firm detail** | The agent company's org chart — CEO → department heads → workers, plus the firm persona. |
 | **Automations** | List, create, and toggle scheduled runs targeting an agent or a firm. |
 | **Apps · Installed** | Installed Apps launcher. Includes Document Studio and App Builder generated Apps. |
-| **Apps · Store** | Browse and install Apps, agents, and firms from `agentlas.cloud` (with an offline in-memory fallback). |
+| **Apps · Store** | Browse and install Apps, agents, and firms from the live `agentlas.cloud` Hub catalog. Offline/error states do not show local hardcoded agents. |
 | **Apps · Engines** | Installed MCP servers, backend connectors, and sub-engines used by Apps. |
 | **Apps · Vault** | The shared credential vault — which keys are set and which Apps require them. |
 | **Settings** | Backend connections, BYOK API keys, language, and migration from OpenClaw / Hermes. |

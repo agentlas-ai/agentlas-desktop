@@ -52,7 +52,7 @@
     "test:super-ontology-seed": "npm run build:electron && node scripts/test-super-ontology-seed.cjs",
     "test:cloud-app-manifest": "npm run build:electron && electron scripts/test-cloud-app-manifest.cjs",
     "test:cloud-agent-package": "npm run build:electron && electron scripts/test-cloud-agent-package.cjs",
-    "test:marketplace-fallback": "npm run build:electron && electron scripts/test-marketplace-fallback.cjs",
+    "test:marketplace-hub-only": "npm run build:electron && electron scripts/test-marketplace-hub-only.cjs",
     "test:marketplace-cache": "npm run build:electron && electron scripts/test-marketplace-cache.cjs",
     "test:borrowed-task-force": "npm run build:electron && electron scripts/test-borrowed-task-force.cjs",
     "test:studio-start": "npm run build:electron && electron scripts/test-studio-start.cjs",

@@ -216,7 +216,7 @@
 - 원격 MCP 호출: `electron/marketplace/mcp-source.ts`
 - 기본 목록: `electron/marketplace/in-memory-source.ts`
 - 설치: `electron/mcp/registry.ts`, `electron/store/firms.ts`
-- 스모크: `scripts/test-marketplace-fallback.cjs`
+- 스모크: `scripts/test-marketplace-hub-only.cjs`
 
 기능 목록:
 
@@ -271,8 +271,8 @@
 | 앱 빌더 라우팅 | `node scripts/test-app-builder-routing.cjs` | PASS | positive 4, negative 5 |
 | Cloud 패키징 리뷰 | `./node_modules/.bin/electron scripts/test-cloud-agent-package.cjs` | PASS | clean pass, secret blocked |
 | 자동화 저장소/스케줄/파서 | `./node_modules/.bin/electron scripts/test-automations-store.cjs` | PASS | CRUD, nextRun, due, parseAutomations |
-| Hub 강제 오프라인 | `./node_modules/.bin/electron scripts/test-marketplace-fallback.cjs --offline` | PASS | `online=false`, `usingFallback=true`, `lastError=fetch failed` |
-| Hub live | `./node_modules/.bin/electron scripts/test-marketplace-fallback.cjs --live` | PASS | `online=true`, `usingFallback=false`, agents=10 |
+| Hub 강제 오프라인 | `./node_modules/.bin/electron scripts/test-marketplace-hub-only.cjs --offline` | PASS | `online=false`, `usingFallback=false`, `lastError=fetch failed`, agents=0 |
+| Hub live | `./node_modules/.bin/electron scripts/test-marketplace-hub-only.cjs --live` | PASS | `online=true`, `usingFallback=false`, live Hub catalog only |
 | scoped whitespace check | `git diff --check -- <changed QA files>` | PASS | 현재 작업 범위 diff check 통과 |
 
 이번 QA 중 발견해서 수정한 문제:
