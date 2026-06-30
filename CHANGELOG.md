@@ -18,6 +18,11 @@
 
 - `buildMemoryContext` now appends a `### Code map` section alongside project
   soul, sitemap and curated memory when a project map is present.
+- **Smoother chat streaming.** Streamed agent text now reveals at a steady cadence
+  instead of jumping in whenever a large token chunk arrives. A buffered reveal
+  (`useSmoothReveal`) advances the visible text toward the received buffer each
+  animation frame, so the answer flows out evenly; it snaps to the full text the
+  moment the turn completes, and reading is unaffected when not streaming.
 
 ### Fixed
 

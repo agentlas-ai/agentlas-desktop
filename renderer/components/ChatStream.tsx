@@ -5,7 +5,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { InstalledAgent, InstalledFirm, InstalledMcpServer, Project, RuntimeCommand } from "@/lib/types";
 import type { AgentlasAppDefinition } from "@/lib/apps";
 import { AgentAvatar } from "./AgentAvatar";
-import { Markdown, type CodeArtifact } from "./Markdown";
+import { Markdown, type CodeArtifact, type MediaArtifact } from "./Markdown";
 import { useT } from "@/lib/i18n";
 
 /** 작업 중 패널에 누적되는 단일 단계. 새 이벤트마다 push (replace 아님). */
@@ -103,20 +103,26 @@ export function ChatStream({
   agentTone,
   emptyDirectory,
   onOpenArtifact,
+  onOpenMedia,
   onOpenWorkflow,
   onAnswerQuestion,
+  onStop,
   interactionBusy = false,
+  stopRequested = false,
 }: {
   messages: StreamMessage[];
   agentName: string;
   agentTone: InstalledAgent["tone"];
   emptyDirectory?: ChatEmptyDirectory;
   onOpenArtifact?: (a: CodeArtifact) => void;
+  onOpenMedia?: (a: MediaArtifact) => void;
   onOpenWorkflow?: () => void;
+  onStop?: () => void;
   /** 사용자가 질문에 답함 — 부모가 user 메시지로 전송 */
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
   /** 다른 메시지가 실행 중이면 오래된 질문 카드도 전송하지 않는다. */
   interactionBusy?: boolean;
+  stopRequested?: boolean;
 }) {
   const { t } = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -159,9 +165,12 @@ export function ChatStream({
           agentName={agentName}
           agentTone={agentTone}
           onOpenArtifact={onOpenArtifact}
+          onOpenMedia={onOpenMedia}
           onOpenWorkflow={onOpenWorkflow}
+          onStop={onStop}
           onAnswerQuestion={onAnswerQuestion}
           interactionBusy={interactionBusy}
+          stopRequested={stopRequested}
         />
       ))}
     </div>
@@ -173,17 +182,23 @@ function Bubble({
   agentName,
   agentTone,
   onOpenArtifact,
+  onOpenMedia,
   onOpenWorkflow,
   onAnswerQuestion,
   interactionBusy,
+  onStop,
+  stopRequested,
 }: {
   message: StreamMessage;
   agentName: string;
   agentTone: InstalledAgent["tone"];
   onOpenArtifact?: (a: CodeArtifact) => void;
+  onOpenMedia?: (a: MediaArtifact) => void;
   onOpenWorkflow?: () => void;
+  onStop?: () => void;
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
   interactionBusy: boolean;
+  stopRequested: boolean;
 }) {
   const { t } = useT();
   if (message.role === "user") {
@@ -267,6 +282,8 @@ function Bubble({
             done={!message.busy}
             tokens={message.tokens}
             onOpenWorkflow={onOpenWorkflow}
+            onStop={message.busy ? onStop : undefined}
+            stopRequested={stopRequested}
           />
         )}
         {message.text && message.busy && (
@@ -274,6 +291,7 @@ function Bubble({
             text={message.text}
             streaming={message.streaming}
             onOpenArtifact={onOpenArtifact}
+            onOpenMedia={onOpenMedia}
             messageId={message.id}
           />
         )}
@@ -290,6 +308,7 @@ function Bubble({
               text={message.text}
               messageId={message.id}
               onOpenArtifact={onOpenArtifact}
+              onOpenMedia={onOpenMedia}
             />
             {message.streaming && <BlinkingCursor />}
           </div>
@@ -327,17 +346,53 @@ function Bubble({
   );
 }
 
+// 버퍼 스무스 reveal — 토큰이 큰 덩어리로 도착해도 화면엔 일정 속도로 흘러나오게 한다.
+// target(누적 전체 텍스트)을 받아, active 동안 표시 길이를 매 프레임 조금씩 따라가게 한다.
+function useSmoothReveal(target: string, active: boolean | undefined): string {
+  const [shown, setShown] = useState(active ? 0 : target.length);
+  const targetRef = useRef(target);
+  targetRef.current = target;
+  useEffect(() => {
+    if (!active) {
+      setShown(targetRef.current.length);
+      return;
+    }
+    let raf = 0;
+    let cancelled = false;
+    const loop = () => {
+      if (cancelled) return;
+      setShown((s) => {
+        const t = targetRef.current.length;
+        if (s >= t) return s;
+        const step = Math.max(2, Math.ceil((t - s) / 6));
+        return Math.min(t, s + step);
+      });
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+    };
+  }, [active]);
+  const len = active ? Math.min(shown, target.length) : target.length;
+  return target.slice(0, len);
+}
+
 function LiveOutputPanel({
   text,
   streaming,
   messageId,
   onOpenArtifact,
+  onOpenMedia,
 }: {
   text: string;
   streaming?: boolean;
   messageId: string;
   onOpenArtifact?: (a: CodeArtifact) => void;
+  onOpenMedia?: (a: MediaArtifact) => void;
 }) {
+  const display = useSmoothReveal(text, streaming);
   return (
     <div
       style={{
@@ -348,7 +403,7 @@ function LiveOutputPanel({
         opacity: 0.92,
       }}
     >
-      <Markdown text={text} messageId={messageId} onOpenArtifact={onOpenArtifact} />
+      <Markdown text={display} messageId={messageId} onOpenArtifact={onOpenArtifact} onOpenMedia={onOpenMedia} />
       {streaming && <BlinkingCursor />}
     </div>
   );
@@ -679,6 +734,8 @@ function WorkingPanel({
   done,
   tokens,
   onOpenWorkflow,
+  onStop,
+  stopRequested = false,
 }: {
   steps: StreamStep[];
   fallback?: string;
@@ -686,6 +743,8 @@ function WorkingPanel({
   done: boolean;
   tokens?: number;
   onOpenWorkflow?: () => void;
+  onStop?: () => void;
+  stopRequested?: boolean;
 }) {
   const { t, locale } = useT();
   const elapsed = useElapsedSeconds(startedAt, !done);
@@ -757,12 +816,60 @@ function WorkingPanel({
       </div>
 
       {!done && (
-        <div style={liveStateStyle(liveState.tone)} role="status">
+        <div
+          style={{ ...liveStateStyle(liveState.tone), width: "min(520px, 100%)", alignItems: "center" }}
+          role="status"
+        >
           <span aria-hidden style={liveStateDotStyle(liveState.tone)} />
-          <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+          <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
             <span style={{ fontWeight: 760, color: "var(--ink)" }}>{liveState.message}</span>
-            {liveState.detail && <span style={{ color: "var(--muted-deep)" }}>{liveState.detail}</span>}
+            {liveState.detail && (
+              <span style={{ color: "var(--muted-deep)" }}>
+                {stopRequested
+                  ? locale === "ko"
+                    ? "중지 요청을 보냈습니다. 실행을 정리하는 중입니다."
+                    : "Stop requested. Cleaning up the run."
+                  : liveState.detail}
+              </span>
+            )}
           </div>
+          {onStop && (
+            <button
+              type="button"
+              data-chat-stop-button="true"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!stopRequested) onStop?.();
+              }}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!stopRequested) onStop?.();
+              }}
+              disabled={stopRequested}
+              style={{
+                flexShrink: 0,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                border: "1px solid color-mix(in srgb, #b42318 30%, var(--paper-edge))",
+                borderRadius: 999,
+                background: stopRequested ? "var(--paper-2)" : "#fff",
+                color: stopRequested ? "var(--muted-deep)" : "#b42318",
+                padding: "4px 10px",
+                fontSize: 11.5,
+                fontWeight: 760,
+                cursor: stopRequested ? "default" : "pointer",
+              }}
+            >
+              <span
+                aria-hidden
+                style={{ width: 8, height: 8, borderRadius: 2, background: "currentColor", flexShrink: 0 }}
+              />
+              {stopRequested ? (locale === "ko" ? "중지 요청됨" : "Stopping") : t("chat.stop")}
+            </button>
+          )}
         </div>
       )}
 
