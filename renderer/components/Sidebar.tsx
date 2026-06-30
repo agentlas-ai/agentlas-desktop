@@ -9,6 +9,7 @@ import { visibleAgents } from "@/lib/agent-visibility";
 import { navigate } from "@/lib/navigation";
 import type {
   Chat,
+  AgentGroupResolved,
   InstalledAgent,
   Project,
   RuntimeStatus,
@@ -46,6 +47,7 @@ interface SidebarData {
   chats: Chat[];
   projects: Project[];
   agents: InstalledAgent[];
+  agentGroups: AgentGroupResolved[];
   runtime: RuntimeStatus | null;
 }
 
@@ -53,6 +55,7 @@ const EMPTY: SidebarData = {
   chats: [],
   projects: [],
   agents: [],
+  agentGroups: [],
   runtime: null,
 };
 
@@ -202,11 +205,12 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       api.chats.listRecent(20),
       api.projects.list(),
       api.team.list(),
+      api.agentGroups.listResolved(),
       api.runtime.detect(),
-    ]).then(([chats, projects, agents, runtimes]) => {
+    ]).then(([chats, projects, agents, agentGroups, runtimes]) => {
       if (cancelled) return;
       const active = runtimes.find((r) => r.active) ?? runtimes[0] ?? null;
-      setData({ chats, projects, agents, runtime: active });
+      setData({ chats, projects, agents, agentGroups, runtime: active });
     }).catch(() => {
       if (!cancelled) setData((prev) => ({ ...prev, projects: [] }));
     }).finally(() => {
@@ -539,12 +543,14 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
             <>
               {data.chats.slice(0, chatListLimit).map((c) => {
                 const agent = displayAgents.find((a) => a.id === c.agentId);
+                const group = c.agentGroupId ? data.agentGroups.find((item) => item.id === c.agentGroupId) : null;
                 const active = pathname === "/chat" && currentChatId === c.id;
                 return (
                   <ChatRow
                     key={c.id}
                     chat={c}
                     agent={agent}
+                    targetLabel={group?.name ?? undefined}
                     active={active}
                     running={runningChats.has(c.id)}
                     onChanged={triggerRefresh}

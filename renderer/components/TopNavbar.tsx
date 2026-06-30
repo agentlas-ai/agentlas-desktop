@@ -8,11 +8,13 @@ import {
   IconFileUp, IconStore, IconBolt, IconKey, IconLayers
 } from "./Icon";
 import { AccountChip } from "./AccountChip";
+import { useT } from "@/lib/i18n";
 
 type DropdownState = "agent_forge" | "studio" | "hub" | "environment" | null;
 
 export function TopNavbar() {
   const pathname = usePathname() ?? "/";
+  const { t } = useT();
   const [activeDropdown, setActiveDropdown] = useState<DropdownState>(null);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
   const studioActive =
@@ -20,7 +22,14 @@ export function TopNavbar() {
     pathname.startsWith("/automation") ||
     pathname.startsWith("/oberon") ||
     pathname.startsWith("/startup-founder-studio");
-  const environmentActive = pathname.startsWith("/library") && !pathname.startsWith("/library/agents");
+  const agentForgeActive =
+    pathname.startsWith("/library/agents") ||
+    pathname.startsWith("/library/agent-groups") ||
+    pathname.startsWith("/build");
+  const environmentActive =
+    pathname.startsWith("/library") &&
+    !pathname.startsWith("/library/agents") &&
+    !pathname.startsWith("/library/agent-groups");
 
   const handleMouseEnter = (menu: DropdownState) => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
@@ -86,26 +95,27 @@ export function TopNavbar() {
           >
             {dropdown === "agent_forge" && (
             <>
-              <DropdownLink href="/build" icon={<IconBuilding size={14} />} label="Build" sub="Create new organizational structures" />
-              <DropdownLink href="/library/agents" icon={<IconWand size={14} />} label="Agent" sub="Manage your local agents" />
+              <DropdownLink href="/build" icon={<IconBuilding size={14} />} label={t("nav.build")} sub={t("nav.top.build_sub")} />
+              <DropdownLink href="/library/agents" icon={<IconWand size={14} />} label={t("nav.agent")} sub={t("nav.top.agent_sub")} />
+              <DropdownLink href="/library/agent-groups" icon={<IconLayers size={14} />} label={t("nav.agent_group")} sub={t("nav.top.agent_group_sub")} />
             </>
           )}
           {dropdown === "studio" && (
             <>
-              <DropdownLink href="/apps" icon={<IconApps size={14} />} label="Apps" sub="Agent app catalog" />
-              <DropdownLink href="/automation" icon={<IconBolt size={14} />} label="Automations" sub="Scheduled background tasks" />
+              <DropdownLink href="/apps" icon={<IconApps size={14} />} label={t("nav.apps")} sub={t("nav.top.apps_sub")} />
+              <DropdownLink href="/automation" icon={<IconBolt size={14} />} label={t("nav.automations")} sub={t("nav.top.automations_sub")} />
             </>
           )}
           {dropdown === "hub" && (
             <>
-              <DropdownLink href="/marketplace" icon={<IconStore size={14} />} label="Agent Hub" sub="Discover agents and firms" />
-              <DropdownLink href="/cloud" icon={<IconFileUp size={14} />} label="Publish" sub="Share your capabilities" />
+              <DropdownLink href="/marketplace" icon={<IconStore size={14} />} label={t("nav.agent_hub")} sub={t("nav.top.agent_hub_sub")} />
+              <DropdownLink href="/cloud" icon={<IconFileUp size={14} />} label={t("nav.publish")} sub={t("nav.top.publish_sub")} />
             </>
           )}
           {dropdown === "environment" && (
             <>
-              <DropdownLink href="/library/env" icon={<IconKey size={14} />} label="Environment Keys" sub="Secrets and runtime variables" />
-              <DropdownLink href="/library/mcps" icon={<IconLayers size={14} />} label="MCP Tools" sub="Connected tool servers" />
+              <DropdownLink href="/library/env" icon={<IconKey size={14} />} label={t("nav.env_keys")} sub={t("nav.top.env_keys_sub")} />
+              <DropdownLink href="/library/mcps" icon={<IconLayers size={14} />} label={t("nav.mcp_tools")} sub={t("nav.top.mcp_tools_sub")} />
             </>
           )}
           </div>
@@ -138,12 +148,12 @@ export function TopNavbar() {
 
         {/* Navigation Tabs */}
         <nav className="titlebar-nodrag" style={{ display: "flex", alignItems: "center", gap: 4, height: "100%" }}>
-          <NavItem label="Dashboard" href="/dashboard" active={pathname.startsWith("/dashboard")} />
-          <NavItem label="Workspace" href="/chat" active={pathname.startsWith("/chat") || pathname.startsWith("/project")} />
-          <NavItem label="Agent Forge" href="/build" dropdown="agent_forge" active={pathname.startsWith("/library/agents") || pathname.startsWith("/build")} />
-          <NavItem label="Agent Apps" href="/apps" dropdown="studio" active={studioActive} />
-          <NavItem label="Hub" href="/marketplace" dropdown="hub" active={pathname.startsWith("/marketplace") || pathname.startsWith("/cloud")} />
-          <NavItem label="Environment" href="/library/env" dropdown="environment" active={environmentActive} />
+          <NavItem label={t("nav.dashboard")} href="/dashboard" active={pathname.startsWith("/dashboard")} />
+          <NavItem label={t("nav.workspace")} href="/chat" active={pathname.startsWith("/chat") || pathname.startsWith("/project")} />
+          <NavItem label={t("nav.group.agent_forge")} href="/build" dropdown="agent_forge" active={agentForgeActive} />
+          <NavItem label={t("nav.group.studio")} href="/apps" dropdown="studio" active={studioActive} />
+          <NavItem label={t("nav.group.hub")} href="/marketplace" dropdown="hub" active={pathname.startsWith("/marketplace") || pathname.startsWith("/cloud")} />
+          <NavItem label={t("nav.group.environment")} href="/library/env" dropdown="environment" active={environmentActive} />
         </nav>
       </div>
 

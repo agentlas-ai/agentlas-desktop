@@ -332,6 +332,76 @@ export interface InstalledFirm {
   installedAt: string;
 }
 
+export type AgentGroupMemberSource = "installed" | "firm-node" | "hub";
+export type AgentGroupMemberStatus = "ok" | "moved" | "missing";
+
+export interface AgentGroupMemberSnapshot {
+  name: string;
+  nameEn: string;
+  tagline: string;
+  taglineEn: string;
+  routeLabel: string;
+  trustGrade?: InstalledAgent["trustGrade"];
+  runtimeLabel?: InstalledAgent["runtimeLabel"];
+  entityKind?: string;
+  routingStatus?: string | null;
+}
+
+export interface AgentGroupMember {
+  id: string;
+  source: AgentGroupMemberSource;
+  /** Stable local installed_agents.id when available. */
+  agentId?: string;
+  /** Local or Hub slug used for automatic re-resolution after upgrades. */
+  agentSlug?: string;
+  /** Explicit Hub slug; kept separate so missing Hub catalog entries can warn. */
+  hubSlug?: string;
+  /** Firm/org-chart route where the agent was picked. */
+  firmId?: string;
+  firmSlug?: string;
+  /** Resolved org node id or raw firm orgChart agentSlug. */
+  nodeId?: string;
+  role?: string;
+  snapshot: AgentGroupMemberSnapshot;
+  addedAt: string;
+}
+
+export interface AgentGroupResolvedMember extends AgentGroupMember {
+  status: AgentGroupMemberStatus;
+  warnings: Array<"agent_missing" | "hub_missing" | "route_missing" | "route_changed">;
+  /** Latest display/routing metadata, re-resolved from installed agents/org chart/Hub. */
+  current?: AgentGroupMemberSnapshot;
+}
+
+export interface AgentGroup {
+  id: string;
+  name: string;
+  description: string;
+  orchestratorName: string;
+  members: AgentGroupMember[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentGroupResolved extends Omit<AgentGroup, "members"> {
+  members: AgentGroupResolvedMember[];
+  warningCount: number;
+}
+
+export interface AgentGroupCreateInput {
+  name: string;
+  description?: string;
+  orchestratorName?: string;
+  members: AgentGroupMember[];
+}
+
+export interface AgentGroupUpdateInput {
+  name?: string;
+  description?: string;
+  orchestratorName?: string;
+  members?: AgentGroupMember[];
+}
+
 // ── 정규화된 3-tier 조직 스펙 (멀티 에이전트 오케스트레이션의 입력) ──────
 // firm.orgChart(또는 LLM 리졸버)를 CEO → 본부(division) → 전문가(specialist)
 // 3계층으로 정규화한다. 오케스트레이터는 이 스펙만 보고 실행하므로 소스(시드/임포트)와 분리된다.
@@ -429,6 +499,8 @@ export interface Chat {
   projectId: string | null;
   /** 회사 채팅이면 firm id, 아니면 null. firmId가 있으면 agentId = firm.ceoAgentId */
   firmId: string | null;
+  /** 에이전트 조합 채팅이면 그 group id, 아니면 null. firm보다 상위 오케스트레이터 대상이다. */
+  agentGroupId: string | null;
   /** 이 채팅에 묶인 에이전트 (개별) 또는 firm의 CEO 에이전트 */
   agentId: string;
   /** 'user'(일반, 사이드바 노출) | 'division'(백그라운드 본부/자동화 세션, 숨김) */
@@ -2733,6 +2805,15 @@ export interface AgentlasIpc {
     /** LLM으로 팀 폴더를 분석해 3-tier 조직 스펙 생성 (임포트 팀용) */
     resolveOrg: (id: string) => Promise<{ ok: boolean; org?: ResolvedOrg; error?: string }>;
   };
+  agentGroups: {
+    list: () => Promise<AgentGroup[]>;
+    listResolved: () => Promise<AgentGroupResolved[]>;
+    getResolved: (id: string) => Promise<AgentGroupResolved | null>;
+    create: (input: AgentGroupCreateInput) => Promise<AgentGroup>;
+    update: (id: string, patch: AgentGroupUpdateInput) => Promise<AgentGroup>;
+    removeMember: (groupId: string, memberId: string) => Promise<AgentGroup>;
+    remove: (id: string) => Promise<void>;
+  };
   projects: {
     list: () => Promise<Project[]>;
     create: (input: { name: string; defaultAgentId?: string | null; contextNote?: string | null; folderPath?: string | null }) => Promise<Project>;
@@ -2762,6 +2843,7 @@ export interface AgentlasIpc {
     create: (input: {
       agentId?: string;
       firmId?: string | null;
+      agentGroupId?: string | null;
       projectId?: string | null;
       title?: string;
     }) => Promise<Chat>;

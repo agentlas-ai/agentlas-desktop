@@ -7,10 +7,12 @@ import { useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import type { AuthSession } from "@/lib/types";
 import { Landing } from "./Landing";
+import { useT } from "@/lib/i18n";
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
   // null = 아직 조회 전 (세션 확인 중 — 흰 화면 깜빡임 방지용 다크 스플래시)
   const [session, setSession] = useState<AuthSession | null>(null);
+  const { t } = useT();
 
   useEffect(() => {
     const api = ipc();
@@ -57,9 +59,9 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
         }}
       >
         <div>
-          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>Agentlas</div>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>{t("auth.checking.title")}</div>
           <div style={{ fontSize: 13, color: "rgba(238,245,242,0.72)", lineHeight: 1.5 }}>
-            세션을 확인하고 있습니다. 오래 걸리면 로그인 화면으로 돌아갑니다.
+            {t("auth.checking.body")}
           </div>
         </div>
       </div>

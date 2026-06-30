@@ -1,6 +1,15 @@
 // shared/types.ts를 렌더러에서 그대로 쓰도록 re-export.
 export type {
   AgentEnvRequirement,
+  AgentGroup,
+  AgentGroupCreateInput,
+  AgentGroupMember,
+  AgentGroupMemberSnapshot,
+  AgentGroupMemberSource,
+  AgentGroupMemberStatus,
+  AgentGroupResolved,
+  AgentGroupResolvedMember,
+  AgentGroupUpdateInput,
   AgentlasIpc,
   AgentlasSurfaceAppRoute,
   AgentlasSurfaceAppSpec,

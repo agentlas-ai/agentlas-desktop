@@ -16,6 +16,7 @@ import { useT } from "@/lib/i18n";
 import {
   IconWand,
   IconUsers,
+  IconLayers,
   IconStore,
   IconFileUp,
   IconHome,
@@ -100,10 +101,11 @@ export function SideNav({
         label: t("nav.group.agent_forge"),
         href: "/build",
         icon: IconBuilding,
-        isActive: (p) => p.startsWith("/build") || p.startsWith("/library/agents") || p.startsWith("/cloud"),
+        isActive: (p) => p.startsWith("/build") || p.startsWith("/library/agents") || p.startsWith("/library/agent-groups") || p.startsWith("/cloud"),
         items: [
           { label: t("nav.build"), href: "/build", icon: IconWand },
           { label: t("nav.agent"), href: "/library/agents", icon: IconUsers },
+          { label: t("nav.agent_group"), href: "/library/agent-groups", icon: IconLayers },
         ],
       },
       {
@@ -133,7 +135,7 @@ export function SideNav({
         label: t("nav.group.environment"),
         href: "/library/env",
         icon: IconKey,
-        isActive: (p) => p.startsWith("/library") && !p.startsWith("/library/agents"),
+        isActive: (p) => p.startsWith("/library") && !p.startsWith("/library/agents") && !p.startsWith("/library/agent-groups"),
         items: [
           { label: t("nav.env_keys"), href: "/library/env", icon: IconKey },
           { label: t("nav.mcp_tools"), href: "/library/mcps", icon: IconNetwork },

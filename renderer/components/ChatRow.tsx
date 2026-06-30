@@ -12,6 +12,7 @@ import { IconMoreHorizontal } from "./Icon";
 export function ChatRow({
   chat,
   agent,
+  targetLabel,
   active,
   archived,
   running,
@@ -19,6 +20,7 @@ export function ChatRow({
 }: {
   chat: Chat;
   agent?: InstalledAgent;
+  targetLabel?: string | null;
   active: boolean;
   /** 이 행이 보관함에서 렌더된 거면 메뉴가 '보관 해제'로 바뀜 */
   archived?: boolean;
@@ -30,6 +32,7 @@ export function ChatRow({
   const router = useRouter();
   const { t, locale } = useT();
   const agentName = agent ? pickLocalized(agent, locale).name : null;
+  const displayTarget = targetLabel || agentName;
   const titleDisplay = chat.title.trim() || t("chat.untitled");
   const [hovered, setHovered] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -167,7 +170,7 @@ export function ChatRow({
           >
             {titleDisplay}
           </span>
-          {agentName && (
+          {displayTarget && (
             <span
               style={{
                 fontSize: 10,
@@ -176,7 +179,7 @@ export function ChatRow({
                 flexShrink: 0,
               }}
             >
-              {agentName.split(" ")[0]}
+              {displayTarget.split(" ")[0]}
             </span>
           )}
         </Link>

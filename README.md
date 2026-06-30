@@ -64,6 +64,11 @@ the [Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/rel
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
 
+- **2026-06-30 · v0.5.3 Agent groups + Hub TF permissions** — saved Agent
+  groups can combine org-chart, local, and Hub agents into one higher-level
+  orchestrator chat. Borrowed Hub task-force sub-runs now inherit the user's
+  selected read/write/full permission instead of being forced read-only, while
+  host policy and redaction still keep secrets out of visible output.
 - **2026-06-30 · v0.5.2 Live borrowed Hub task forces** — recommendation-sheet
   Network picks with multiple Hub agents now execute as a real
   plan/delegate/synthesize task force. Borrowed Hub sub-runs are read-only,

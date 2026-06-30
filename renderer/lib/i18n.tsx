@@ -29,6 +29,8 @@ const dict = {
     // App-wide
     "app.name": "Agentlas",
     "app.tagline": "이미 내고 있는 구독으로 어시스턴트 팀을 무료로",
+    "auth.checking.title": "Agentlas",
+    "auth.checking.body": "세션을 확인하고 있습니다. 오래 걸리면 로그인 화면으로 돌아갑니다.",
 
     // Sidebar sections
     "sidebar.new_chat": "새 채팅",
@@ -82,6 +84,7 @@ const dict = {
     "nav.group.agent_forge": "에이전트",
     "nav.build": "만들기",
     "nav.agent": "내 에이전트",
+    "nav.agent_group": "에이전트 조합",
     "nav.group.studio": "에이전트 앱",
     "nav.apps": "앱",
     "nav.automations": "자동화",
@@ -103,6 +106,15 @@ const dict = {
     "nav.expand": "펼치기",
     "nav.collapse": "접기",
     "nav.pending_approvals": "{n}개 승인 대기",
+    "nav.top.build_sub": "새 에이전트 구조 만들기",
+    "nav.top.agent_sub": "로컬 에이전트 관리",
+    "nav.top.agent_group_sub": "저장한 조합을 오케스트레이션",
+    "nav.top.apps_sub": "에이전트 앱 카탈로그",
+    "nav.top.automations_sub": "예약 백그라운드 작업",
+    "nav.top.agent_hub_sub": "에이전트와 회사를 찾기",
+    "nav.top.publish_sub": "내 에이전트 공유",
+    "nav.top.env_keys_sub": "시크릿과 런타임 변수",
+    "nav.top.mcp_tools_sub": "연결된 도구 서버",
 
     // Chat row actions
     "chat.untitled": "새 채팅",
@@ -844,6 +856,8 @@ const dict = {
     // App-wide
     "app.name": "Agentlas",
     "app.tagline": "Run a team of expert assistants for free, on your existing subscriptions",
+    "auth.checking.title": "Agentlas",
+    "auth.checking.body": "Checking your session. If it takes too long, you will return to sign in.",
 
     // Sidebar sections
     "sidebar.new_chat": "New chat",
@@ -897,6 +911,7 @@ const dict = {
     "nav.group.agent_forge": "Agent Forge",
     "nav.build": "Build",
     "nav.agent": "Agent",
+    "nav.agent_group": "Agent group",
     "nav.group.studio": "Agent Apps",
     "nav.apps": "Apps",
     "nav.automations": "Automations",
@@ -918,6 +933,15 @@ const dict = {
     "nav.expand": "Expand",
     "nav.collapse": "Collapse",
     "nav.pending_approvals": "{n} pending approvals",
+    "nav.top.build_sub": "Create new organizational structures",
+    "nav.top.agent_sub": "Manage your local agents",
+    "nav.top.agent_group_sub": "Orchestrate saved agent combinations",
+    "nav.top.apps_sub": "Agent app catalog",
+    "nav.top.automations_sub": "Scheduled background tasks",
+    "nav.top.agent_hub_sub": "Discover agents and firms",
+    "nav.top.publish_sub": "Share your capabilities",
+    "nav.top.env_keys_sub": "Secrets and runtime variables",
+    "nav.top.mcp_tools_sub": "Connected tool servers",
 
     // Chat row actions
     "chat.untitled": "New chat",

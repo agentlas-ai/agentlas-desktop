@@ -3,6 +3,7 @@
 // 프로젝트 페이지는 listByProject로, 회사 페이지는 listByFirm으로 채운다.
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
+import { getAgentGroup } from "./agent-groups";
 import { getFirm } from "./firms";
 import { touchProject } from "./projects";
 import type { Chat, ChatHistoryEntry } from "../../shared/types";
@@ -11,6 +12,7 @@ interface ChatRow {
   id: string;
   project_id: string | null;
   firm_id: string | null;
+  agent_group_id: string | null;
   agent_id: string;
   title: string;
   archived_at: string | null;
@@ -24,6 +26,7 @@ function toChat(row: ChatRow): Chat {
     id: row.id,
     projectId: row.project_id,
     firmId: row.firm_id,
+    agentGroupId: row.agent_group_id,
     agentId: row.agent_id,
     title: row.title,
     archivedAt: row.archived_at,
@@ -93,6 +96,7 @@ export function getChat(id: string): Chat | null {
 export function createChat(input: {
   agentId?: string;
   firmId?: string | null;
+  agentGroupId?: string | null;
   projectId?: string | null;
   title?: string;
   /** 'user'(기본, 사이드바 노출) | 'division'(백그라운드 본부 세션, 숨김) */
@@ -101,6 +105,10 @@ export function createChat(input: {
   parentChatId?: string | null;
 }): Chat {
   let resolvedAgentId = input.agentId;
+  if (input.agentGroupId) {
+    const group = getAgentGroup(input.agentGroupId);
+    if (!group) throw new Error(`에이전트 조합 ${input.agentGroupId}을 찾을 수 없습니다`);
+  }
   if (input.firmId && !resolvedAgentId) {
     const firm = getFirm(input.firmId);
     if (!firm) throw new Error(`회사 ${input.firmId}을 찾을 수 없습니다`);
@@ -122,13 +130,14 @@ export function createChat(input: {
   // 첫 user 메시지 도착 시 autoTitleFromFirstMessage가 채움.
   getDb()
     .prepare(
-      `INSERT INTO chats (id, project_id, firm_id, agent_id, title, kind, parent_chat_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO chats (id, project_id, firm_id, agent_group_id, agent_id, title, kind, parent_chat_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
       input.projectId ?? null,
-      input.firmId ?? null,
+      input.agentGroupId ? null : input.firmId ?? null,
+      input.agentGroupId ?? null,
       resolvedAgentId,
       input.title?.trim() ?? "",
       input.kind ?? "user",
@@ -174,6 +183,7 @@ export function getOrCreateAutomationSession(input: {
   automationId: string;
   agentId?: string;
   firmId?: string | null;
+  agentGroupId?: string | null;
 }): Chat {
   const marker = `⟦automation⟧${input.automationId}`;
   const db = getDb();
@@ -184,6 +194,7 @@ export function getOrCreateAutomationSession(input: {
   return createChat({
     agentId: input.agentId,
     firmId: input.firmId ?? null,
+    agentGroupId: input.agentGroupId ?? null,
     title: marker,
     kind: "division",
   });
@@ -201,7 +212,7 @@ export function renameChat(id: string, title: string): Chat {
 export function switchChatAgent(id: string, agentId: string): Chat {
   getDb()
     .prepare(
-      "UPDATE chats SET agent_id = ?, firm_id = NULL, updated_at = ? WHERE id = ?",
+      "UPDATE chats SET agent_id = ?, firm_id = NULL, agent_group_id = NULL, updated_at = ? WHERE id = ?",
     )
     .run(agentId, new Date().toISOString(), id);
   return getChat(id) as Chat;

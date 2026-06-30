@@ -7,6 +7,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type {
   Chat,
+  AgentGroupResolved,
   AgentlasSurfaceAction,
   AppFactoryAppRecord,
   AppFactoryScaffoldResult,
@@ -32,7 +33,7 @@ import { ChatRightPanel, type ChatRightPanelTab } from "@/components/ChatRightPa
 import { ProjectFolderBar } from "@/components/ProjectFolderBar";
 import { AgentPicker } from "@/components/AgentPicker";
 import type { CodeArtifact } from "@/components/Markdown";
-import { IconBuilding, IconClose, IconFolder, IconNetwork, IconPanelRight, IconSparkles, IconTrash } from "@/components/Icon";
+import { IconBuilding, IconClose, IconFolder, IconLayers, IconNetwork, IconPanelRight, IconSparkles, IconTrash } from "@/components/Icon";
 import { buildAppRoutePrompt, INSTALLED_APPS, parseAppSlashRoute } from "@/lib/apps";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
@@ -412,6 +413,7 @@ function ChatPage() {
   const [cliCommands, setCliCommands] = useState<RuntimeCommand[]>([]);
   const [installedPlugins, setInstalledPlugins] = useState<InstalledMcpServer[]>([]);
   const [firm, setFirm] = useState<InstalledFirm | null>(null);
+  const [agentGroup, setAgentGroup] = useState<AgentGroupResolved | null>(null);
   const [resolvedOrg, setResolvedOrg] = useState<ResolvedOrg | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [messages, setMessages] = useState<StreamMessage[]>([]);
@@ -489,7 +491,9 @@ function ChatPage() {
   const consumeEvent = useCallback(
     (ev: McpInvocationEvent, placeholderId: string, lastStatusRef: { text: string }) => {
       const fallbackAgentId = agent?.id ?? "active-agent";
-      const fallbackAgentName = agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback");
+      const fallbackAgentName =
+        agentGroup?.orchestratorName ||
+        (agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback"));
       const fallbackStepMeta: Partial<StreamStep> = {
         agentName: fallbackAgentName,
         activity: "status",
@@ -782,7 +786,7 @@ function ChatPage() {
         subRef.current = null;
       }
     },
-    [agent, chatId, locale, openPanelTab, t],
+    [agent, agentGroup, chatId, locale, openPanelTab, t],
   );
 
   // runId 채널 구독 — send()와 재접속 경로 공용. lastStatusRef를 받으면(리플레이 후) 이어서 쓴다.
@@ -871,6 +875,13 @@ function ChatPage() {
         if (!cancelled) setActiveRuntime(list.find((r) => r.active) ?? null);
       });
       setAgent(agents.find((a) => a.id === c.agentId) ?? null);
+      if (c.agentGroupId) {
+        void api.agentGroups.getResolved(c.agentGroupId).then((group) => {
+          if (!cancelled) setAgentGroup(group);
+        });
+      } else {
+        setAgentGroup(null);
+      }
       // 패널 노출 결정: 사용자가 명시적으로 접고/편 선호값이 있으면 그것을 우선,
       // 없으면 working_folder가 저장돼 있을 때만 자동 노출.
       const savedFolder = await api.workspace.get(chatId);
@@ -1632,7 +1643,7 @@ function ChatPage() {
         });
       } else if (cmd === "/new") {
         void api.chats
-          .create({ agentId: chat.agentId, projectId: chat.projectId, firmId: chat.firmId })
+          .create({ agentId: chat.agentId, projectId: chat.projectId, firmId: chat.firmId, agentGroupId: chat.agentGroupId })
           .then((c) => router.push(`/chat?id=${c.id}`));
       } else if (cmd === "/folder") {
         void api.fs.pickDirectory().then((p) => {
@@ -1689,6 +1700,7 @@ function ChatPage() {
     setChat(updated);
     setAgent(allAgents.find((a) => a.id === agentId) ?? null);
     setFirm(null); // switchAgent는 firm을 해제
+    setAgentGroup(null);
   }
 
   // 추천 토글 ON → 보내기 전 라우터 미리보기. routeOnly(실행 없음)를 정규화해 추천 시트에 넘긴다.
@@ -1804,7 +1816,68 @@ function ChatPage() {
           minHeight: 56,
         }}
       >
-        {displayAgent && displayAgents.length > 0 && (
+        {agentGroup ? (
+          <div
+            className="titlebar-nodrag"
+            title={agentGroup.description || agentGroup.name}
+            style={{
+              maxWidth: 420,
+              minWidth: 0,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "6px 9px",
+              borderRadius: 9,
+              border: "1px solid var(--accent-soft)",
+              background: "var(--fill-1)",
+              color: "var(--ink)",
+              flexShrink: 0,
+            }}
+          >
+            <span
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: 8,
+                background: "var(--accent)",
+                color: "white",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+              }}
+            >
+              <IconLayers size={14} />
+            </span>
+            <span style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
+              <strong
+                style={{
+                  fontSize: 12.5,
+                  lineHeight: 1.1,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {agentGroup.name}
+              </strong>
+              <span
+                style={{
+                  fontSize: 10,
+                  color: "var(--muted-deep)",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {agentGroup.orchestratorName}
+                {agentGroup.warningCount > 0
+                  ? ` · ${agentGroup.warningCount}${locale === "ko" ? "개 경고" : " warning"}`
+                  : ""}
+              </span>
+            </span>
+          </div>
+        ) : displayAgent && displayAgents.length > 0 && (
           <AgentPicker
             agents={displayAgents}
             activeId={displayAgent.id}
@@ -2058,8 +2131,8 @@ function ChatPage() {
       <div data-tour-id="workspace.chat" style={{ minHeight: 0, flex: 1, display: "flex", flexDirection: "column" }}>
         <ChatStream
           messages={messages}
-          agentName={displayAgent ? pickLocalized(displayAgent, locale).name : t("chat.assistant_fallback")}
-          agentTone={displayAgent?.tone ?? "blue"}
+          agentName={agentGroup?.orchestratorName || (displayAgent ? pickLocalized(displayAgent, locale).name : t("chat.assistant_fallback"))}
+          agentTone={agentGroup ? "green" : displayAgent?.tone ?? "blue"}
           emptyDirectory={{
             apps: INSTALLED_APPS,
             agents: displayAgents,

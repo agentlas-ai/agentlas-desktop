@@ -104,7 +104,13 @@ import { confirmUpload, PathGuardError, resolveFolderArg } from "./hephaestus/pa
 import { isSupervisorEnabled, setSupervisorEnabled } from "./hephaestus/supervisor";
 import { runHephaestusBuild } from "./hephaestus/builder";
 import { startStudio, stopStudio } from "./hephaestus/studio";
-import type { HephaestusBuildEvent, HephaestusBuildRequest, SkillCatalogEntry } from "../shared/types";
+import type {
+  AgentGroupCreateInput,
+  AgentGroupUpdateInput,
+  HephaestusBuildEvent,
+  HephaestusBuildRequest,
+  SkillCatalogEntry,
+} from "../shared/types";
 import { checkSafely as updaterCheck, getUpdaterState, quitAndInstall as updaterInstall } from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
 import { getAuthSession, signInWithBrowser, signInWithGoogle, signOut } from "./auth";
@@ -195,6 +201,15 @@ import {
   removeAgentRuntimeOverride,
   setAgentRuntimeOverride,
 } from "./store/agent-runtime-overrides";
+import {
+  createAgentGroup,
+  getResolvedAgentGroup,
+  listAgentGroups,
+  listResolvedAgentGroups,
+  removeAgentGroup,
+  removeAgentGroupMember,
+  updateAgentGroup,
+} from "./store/agent-groups";
 import {
   archiveAppPackage,
   activateLocalCommerceStack,
@@ -813,6 +828,21 @@ export function registerIpcHandlers(): void {
   // LLM으로 팀 폴더를 분석해 3-tier 조직 스펙 생성 (임포트 팀용)
   ipcMain.handle("firms:resolveOrg", (_e, id: string) => resolveTeamOrg(id));
 
+  // ── agent groups (자주 쓰는 조합 / 상위 오케스트레이터) ──────
+  ipcMain.handle("agentGroups:list", () => listAgentGroups());
+  ipcMain.handle("agentGroups:listResolved", () => listResolvedAgentGroups());
+  ipcMain.handle("agentGroups:getResolved", (_e, id: string) => getResolvedAgentGroup(id));
+  ipcMain.handle("agentGroups:create", (_e, input: AgentGroupCreateInput) =>
+    createAgentGroup(input),
+  );
+  ipcMain.handle("agentGroups:update", (_e, id: string, patch: AgentGroupUpdateInput) =>
+    updateAgentGroup(id, patch),
+  );
+  ipcMain.handle("agentGroups:removeMember", (_e, groupId: string, memberId: string) =>
+    removeAgentGroupMember(groupId, memberId),
+  );
+  ipcMain.handle("agentGroups:remove", (_e, id: string) => removeAgentGroup(id));
+
   // ── projects ───────────────────────────────────────────
   ipcMain.handle("projects:list", () => listProjects());
   ipcMain.handle("projects:get", (_e, id: string) => getProject(id));
@@ -871,6 +901,7 @@ export function registerIpcHandlers(): void {
       input: {
         agentId?: string;
         firmId?: string | null;
+        agentGroupId?: string | null;
         projectId?: string | null;
         title?: string;
       },

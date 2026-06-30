@@ -1,12 +1,30 @@
 # Changelog
 
-## Unreleased
+## 0.5.3 — 2026-06-30
 
 ### Changed
 
+- **Borrowed Hub task-force permissions now follow the chat permission.** Hub
+  agents are no longer hard-forced to read-only in the planner, delegate, or
+  synthesis sub-runs. If the user selects read-only, they stay read-only; if the
+  user selects read-write or full access, the borrowed task force receives the
+  matching runtime permission and MCP/tool bridge for that run while the host
+  policy still blocks secret exfiltration and permission escalation.
 - Reworded Marketplace docs and QA references around Hub-only catalog behavior:
   Desktop no longer presents an offline in-memory marketplace fallback, and
   offline Hub failures should remain visible as empty/error states.
+- Localized the top navigation dropdowns and Library headers so the new Agent
+  group path renders cleanly in both Korean and English.
+
+### Added
+
+- Added **Agent group** under the Agent menu: users can drag installed agents,
+  org-chart nodes, and live Hub agents into a saved top-level orchestrator group.
+  Groups re-resolve members from the latest local org chart and Hub catalog,
+  surface route/missing-agent warnings, and allow removing one member without
+  deleting the whole group. Saved groups can now start a chat directly; the
+  chat stores `agent_group_id` and runs the resolved roster through the local
+  task-force orchestrator instead of flattening it into one prompt.
 
 ## 0.5.2 — 2026-06-30
 

@@ -40,7 +40,12 @@ import { getProject } from "../store/projects";
 import { getFirm } from "../store/firms";
 import { getResolvedOrg } from "../store/org-spec";
 import { runFirmInvocation } from "./firm-orchestrator";
-import { runBorrowedTaskForceInvocation } from "./borrowed-task-force";
+import {
+  normalizeBorrowedAgentSpecs,
+  runBorrowedTaskForceInvocation,
+  type BorrowedAgentSpec,
+} from "./borrowed-task-force";
+import { resolveAgentGroupForRuntime } from "../store/agent-groups";
 import { recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
 import { curateReply } from "../memory/curator";
@@ -264,6 +269,65 @@ async function buildBorrowDirective(
       ? "위 빌려온 전문가 에이전트(들)를 현재 프로젝트에 attach해서 아래 요청을 처리해줘. 각 에이전트의 실제 전문성을 적용하고 결과를 종합해."
       : "Apply the borrowed specialist agent(s) above to the request below, attached to the current project. Use each agent's actual expertise and synthesize the result.");
   return `${header}\n${body}\n\nRequest:\n${prompt}`;
+}
+
+async function buildAgentGroupTaskForceSpecs(input: {
+  groupId: string;
+  prompt: string;
+  project: string | null;
+  locale: "ko" | "en";
+  sink: EventSink;
+}): Promise<{ groupName: string; orchestratorName: string; specs: BorrowedAgentSpec[] }> {
+  const resolved = await resolveAgentGroupForRuntime(input.groupId);
+  if (!resolved) {
+    throw new Error(
+      input.locale === "ko"
+        ? `에이전트 조합을 찾을 수 없습니다: ${input.groupId}`
+        : `Agent group not found: ${input.groupId}`,
+    );
+  }
+  for (const skipped of resolved.skipped) {
+    input.sink({
+      kind: "tool-use",
+      status:
+        input.locale === "ko"
+          ? `조합 멤버 제외: ${skipped.name} (${skipped.warnings.join(", ")})`
+          : `Skipped group member: ${skipped.name} (${skipped.warnings.join(", ")})`,
+    });
+  }
+  const hubSlugs = resolved.members.filter((member) => member.source === "hub").map((member) => member.slug);
+  let hubSpecs = new Map<string, BorrowedAgentSpec>();
+  if (hubSlugs.length > 0) {
+    try {
+      const res = await hepCall(hubSlugs.join(","), [input.prompt], { project: input.project ?? "." });
+      hubSpecs = new Map(normalizeBorrowedAgentSpecs(hubSlugs, res.json ?? null).map((spec) => [spec.slug, spec]));
+    } catch {
+      hubSpecs = new Map(normalizeBorrowedAgentSpecs(hubSlugs, null).map((spec) => [spec.slug, spec]));
+    }
+  }
+  const specs = resolved.members.map((member): BorrowedAgentSpec => {
+    const hub = member.source === "hub" ? hubSpecs.get(member.slug) : null;
+    return {
+      slug: member.slug,
+      name: hub?.name || member.name,
+      directive: hub?.directive || member.directive,
+      source: member.source,
+      routeLabel: member.routeLabel,
+      warnings: member.warnings,
+    };
+  });
+  if (specs.length === 0) {
+    throw new Error(
+      input.locale === "ko"
+        ? "이 에이전트 조합에는 현재 실행 가능한 멤버가 없습니다."
+        : "This agent group has no runnable members right now.",
+    );
+  }
+  return {
+    groupName: resolved.group.name,
+    orchestratorName: resolved.group.orchestratorName,
+    specs,
+  };
 }
 
 function selectAppBuilderForExistingAppEdit(
@@ -708,6 +772,47 @@ export async function runMcpInvocation(
   }
 
   const runnerEnv = await buildRunnerEnv(agent, workingFolder ?? undefined);
+
+  // ── Agent Group 오케스트레이션 ───────────────────────────
+  // 저장된 그룹은 firm/division보다 상위의 라우팅 묶음이다. 실행 직전에
+  // installed agents, org chart, live Hub catalog/bundle을 다시 풀어서 최신 경로로 호출한다.
+  if (chat.agentGroupId && chat.kind !== "division") {
+    try {
+      const groupRun = await buildAgentGroupTaskForceSpecs({
+        groupId: chat.agentGroupId,
+        prompt: effectiveUserPrompt,
+        project: workingFolder,
+        locale,
+        sink,
+      });
+      await runBorrowedTaskForceInvocation({
+        req: { ...req, userPrompt: effectiveUserPrompt },
+        chat,
+        orchestratorAgent: {
+          ...agent,
+          name: groupRun.orchestratorName || agent.name,
+          nameEn: groupRun.orchestratorName || agent.nameEn || agent.name,
+        },
+        taskForceName: groupRun.groupName,
+        taskForceKind: "agent-group",
+        taskForceSpecs: groupRun.specs,
+        active,
+        picked,
+        workingFolder,
+        mcpConfigPath,
+        mcpAllowedTools,
+        mcpCodexConfigArgs,
+        runnerEnv: runnerEnv.env,
+        locale,
+        sink,
+        signal,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sink({ kind: "error", error: { code: "agent-group-failed", message: msg } });
+    }
+    return { stormbreakerContinueRequested: false };
+  }
 
   // ── Hub borrowed task force ─────────────────────────────────
   // 추천 시트에서 Hub 에이전트 2개 이상을 고른 경우: 단일 프롬프트에 "여러 전문가를 적용"이라고

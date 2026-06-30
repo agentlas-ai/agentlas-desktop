@@ -170,6 +170,16 @@ const api: AgentlasIpc = {
     getResolvedOrg: (id: string) => ipcRenderer.invoke("firms:getResolvedOrg", id),
     resolveOrg: (id: string) => ipcRenderer.invoke("firms:resolveOrg", id),
   },
+  agentGroups: {
+    list: () => ipcRenderer.invoke("agentGroups:list"),
+    listResolved: () => ipcRenderer.invoke("agentGroups:listResolved"),
+    getResolved: (id: string) => ipcRenderer.invoke("agentGroups:getResolved", id),
+    create: (input) => ipcRenderer.invoke("agentGroups:create", input),
+    update: (id, patch) => ipcRenderer.invoke("agentGroups:update", id, patch),
+    removeMember: (groupId, memberId) =>
+      ipcRenderer.invoke("agentGroups:removeMember", groupId, memberId),
+    remove: (id) => ipcRenderer.invoke("agentGroups:remove", id),
+  },
   projects: {
     list: () => ipcRenderer.invoke("projects:list"),
     get: (id: string) => ipcRenderer.invoke("projects:get", id),

@@ -10,7 +10,7 @@ import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 28;
+const SCHEMA_VERSION = 30;
 
 export function initStore(): void {
   if (_db) return;
@@ -719,6 +719,40 @@ export function initStore(): void {
          WHERE EXISTS (SELECT 1 FROM chat_messages WHERE chat_messages.chat_id = chats.id)`,
       );
       _db.exec("CREATE INDEX IF NOT EXISTS idx_chats_used_updated ON chats(used_at, updated_at DESC)");
+    }
+  }
+
+  // ── v28 → v29: Agent Groups ────────────────────────────
+  // A group is a user-made orchestration layer above firm/division routes. It
+  // stores routing references only; display and execution metadata are resolved
+  // from the latest installed agents, org charts, and live Hub catalog.
+  if (userVersion < 29) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_groups (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        orchestrator_name TEXT NOT NULL,
+        members_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_groups_updated
+        ON agent_groups(updated_at DESC);
+    `);
+  }
+
+  // ── v29 → v30: chats.agent_group_id ───────────────────
+  // Agent Group chats are a user-made orchestration layer above firm/division.
+  // They keep the fallback local orchestrator agent in agent_id for FK/runtime
+  // compatibility, while agent_group_id points to the live routing roster.
+  if (userVersion < 30) {
+    const chatCols = _db
+      .prepare("PRAGMA table_info(chats)")
+      .all() as Array<{ name: string }>;
+    if (!chatCols.some((c) => c.name === "agent_group_id")) {
+      _db.exec("ALTER TABLE chats ADD COLUMN agent_group_id TEXT REFERENCES agent_groups(id) ON DELETE SET NULL");
+      _db.exec("CREATE INDEX IF NOT EXISTS idx_chats_agent_group_updated ON chats(agent_group_id, updated_at DESC)");
     }
   }
 

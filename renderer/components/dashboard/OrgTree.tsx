@@ -10,8 +10,8 @@ import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { isVisibleAgent, isUserFacingAgentText } from "@/lib/agent-visibility";
-import { IconBuilding, IconFileUp, IconSearch } from "@/components/Icon";
-import type { InstalledAgent, InstalledFirm, MarketplaceListing, ResolvedNode, ResolvedOrg } from "@/lib/types";
+import { IconBuilding, IconFileUp, IconLayers, IconSearch } from "@/components/Icon";
+import type { AgentGroupResolved, InstalledAgent, InstalledFirm, MarketplaceListing, ResolvedNode, ResolvedOrg } from "@/lib/types";
 
 type Mode = "multi" | "single";
 type Source = "local" | "cloud" | "hub";
@@ -36,6 +36,7 @@ export function OrgTree() {
   const [query, setQuery] = useState("");
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
+  const [agentGroups, setAgentGroups] = useState<AgentGroupResolved[]>([]);
   // 로그인한 계정의 실제 서버 클라우드(cargo) 에이전트 — "클라우드" 카테고리에 리스트업.
   const [cloudListings, setCloudListings] = useState<MarketplaceListing[]>([]);
   const [loading, setLoading] = useState(true);
@@ -57,18 +58,21 @@ export function OrgTree() {
       return;
     }
     try {
-      const [a, f, mine] = await Promise.all([
+      const [a, f, groups, mine] = await Promise.all([
         api.team.list(),
         api.firms.list(),
+        api.agentGroups.listResolved(),
         api.marketplace.listMine().catch(() => [] as MarketplaceListing[]),
       ]);
       setAgents(dedupById(a).filter(isVisibleAgent));
       setFirms(f);
+      setAgentGroups(groups);
       setCloudListings(mine);
       setLoadError("");
     } catch {
       setAgents([]);
       setFirms([]);
+      setAgentGroups([]);
       setCloudListings([]);
       setLoadError(ko ? "조직도를 불러오지 못했습니다. 설치된 항목은 바뀌지 않았습니다." : "Org chart could not be loaded. Installed items were not changed.");
     } finally {
@@ -102,6 +106,7 @@ export function OrgTree() {
 
   const matches = (name: string) =>
     !query.trim() || name.toLowerCase().includes(query.trim().toLowerCase());
+  const visibleAgentGroups = agentGroups.filter((group) => matches(group.name));
 
   async function importFolder() {
     const api = ipc();
@@ -226,6 +231,33 @@ export function OrgTree() {
     <Shell mode={mode} setMode={setMode} query={query} setQuery={setQuery} onImport={importFolder} busy={busy} ko={ko} importMessage={importMessage}>
       {loadError && <div className="dashboard-org-empty">{loadError}</div>}
       <div className="dashboard-org-list">
+        {visibleAgentGroups.length > 0 && (
+          <div>
+            <button
+              onClick={() => navigate("/library/agent-groups")}
+              className="dashboard-org-row dashboard-org-category"
+            >
+              <IconLayers size={13} />
+              <span className="dashboard-org-label">
+                {ko ? "에이전트 조합" : "Agent groups"}
+              </span>
+              <span className="dashboard-org-count">{visibleAgentGroups.length}</span>
+            </button>
+            {visibleAgentGroups.slice(0, 5).map((group) => (
+              <button
+                key={group.id}
+                onClick={() => navigate("/library/agent-groups")}
+                className="dashboard-org-row dashboard-org-agent dashboard-org-agent-mid"
+              >
+                <Dot />
+                <span className="dashboard-org-label">{group.name}</span>
+                <span className="dashboard-org-count">
+                  {group.warningCount > 0 ? "!" : group.members.length}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
         {cats.map((cat) => {
           const { firms: cf, agents: ca } = bySource(cat.key);
           // 클라우드 카테고리(싱글 모드)엔 로컬에 아직 안 받은 서버 클라우드 에이전트도 함께 보여준다.
