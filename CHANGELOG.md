@@ -19,6 +19,17 @@
 - `buildMemoryContext` now appends a `### Code map` section alongside project
   soul, sitemap and curated memory when a project map is present.
 
+### Fixed
+
+- **Routing no longer recommends a plugin as an agent.** The local router pooled
+  the cached plugin catalog (`type: plugin`, e.g. `plugin/shopify-dev`) together
+  with real agent/team cards, so a generic-vocabulary lexical match (e.g. the word
+  "AI" in a request) could confidently route to a plugin — "make this not look
+  AI-written" was recommending the Shopify plugin at score 15.3. Plugins are tools
+  an agent loads via `required_plugins`, not route targets, so they are now
+  excluded from the agent route pool. Same request now correctly surfaces the
+  `no-ai-slop-copywriter` agent that the plugin's spurious score had been hiding.
+
 ## 0.5.3 — 2026-06-30
 
 ### Changed
