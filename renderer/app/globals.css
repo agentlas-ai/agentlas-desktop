@@ -300,27 +300,6 @@ a:hover {
   box-shadow: 0 20px 58px rgba(0, 21, 25, 0.24);
 }
 
-.agentlas-tour-source {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-bottom: 9px;
-  color: var(--muted-deep);
-  font-size: 10px;
-  font-weight: 750;
-}
-
-.agentlas-tour-source span {
-  display: inline-flex;
-  align-items: center;
-  min-height: 18px;
-  padding: 0 7px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 999px;
-  background: var(--paper-2);
-}
-
 .agentlas-tour-topline {
   display: flex;
   align-items: center;

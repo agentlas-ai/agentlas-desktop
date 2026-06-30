@@ -647,12 +647,13 @@ function formatSize(n: number): string {
 }
 
 function toWorkspaceFilePreview(node: WorkspaceNode, preview: TextFilePreview): WorkspaceFilePreview {
+  const viewerKind = viewerKindForFile(node.name || node.path, preview);
   return {
     path: node.path,
     name: node.name || basename(node.path),
     size: preview.size || node.size,
-    viewerKind: viewerKindForFile(node.name || node.path, preview),
-    fileUrl: fileUrlForPath(node.path),
+    viewerKind,
+    fileUrl: fileUrlForPath(node.path, viewerKind),
     browserUrl: browserUrlForPreview(node.name || node.path, preview.content),
     content: preview.content,
     truncated: preview.truncated,
@@ -679,7 +680,10 @@ function extensionOf(name: string): string {
   return dot >= 0 ? base.slice(dot) : "";
 }
 
-function fileUrlForPath(absPath: string): string {
+function fileUrlForPath(absPath: string, viewerKind?: WorkspaceFilePreview["viewerKind"]): string {
+  if (viewerKind === "image" || viewerKind === "video") {
+    return `agentlas://localfile/?p=${encodeURIComponent(absPath)}`;
+  }
   const normalized = absPath.replace(/\\/g, "/");
   const withSlash = normalized.startsWith("/") ? normalized : `/${normalized}`;
   return `file://${encodeURI(withSlash).replace(/#/g, "%23").replace(/\?/g, "%3F")}`;

@@ -778,7 +778,7 @@ async function runRecommendChoice(browser, baseUrl, evidence, spec) {
   await page.goto(`${baseUrl}/chat.html?id=chat-1`, { waitUntil: "domcontentloaded" });
   const textbox = page.locator("textarea").first();
   await textbox.waitFor();
-  await page.getByRole("button", { name: /에이전트 찾기|Find agent/ }).click();
+  await page.getByRole("button", { name: /알아서 에이전트 부르기|에이전트 찾기|Find agent/ }).click();
   const textByMode = {
     single: "추천 단일 실행",
     network: "추천 네트워크 실행",
@@ -787,7 +787,7 @@ async function runRecommendChoice(browser, baseUrl, evidence, spec) {
   };
   await textbox.fill(textByMode[spec.mode]);
   await page.getByRole("button", { name: /보내기|Send/ }).click();
-  await page.getByRole("dialog", { name: /에이전트 찾기|Find agent/ }).waitFor();
+  await page.getByRole("dialog", { name: /알아서 에이전트 부르기|에이전트 찾기|Find agent/ }).waitFor();
   await page.getByRole("button", { name: /다른 에이전트 찾기|Find another agent/ }).waitFor();
   await page.getByRole("button", { name: spec.button }).click();
   await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "invoke.run"));

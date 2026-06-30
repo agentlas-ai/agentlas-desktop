@@ -123,9 +123,9 @@ const HEP_TOGGLES: Array<{
 }> = [
   {
     id: "recommend",
-    labelKo: "에이전트 찾기",
+    labelKo: "알아서 에이전트 부르기",
     labelEn: "Find agent",
-    titleKo: "요청에 맞는 에이전트·네트워크 TF·예상 비용을 먼저 확인",
+    titleKo: "요청에 맞는 에이전트·네트워크 TF·예상 비용을 먼저 확인하고 호출",
     titleEn: "Find the right agent, network TF, and estimated credits first",
   },
   {
@@ -176,6 +176,8 @@ export function ChatInput({
   onSelectModel,
   onSelectEffort,
   tokensUsage,
+  activeAgentId,
+  stopRequested = false,
 }: {
   onSend: (text: string, opts?: SendOptions) => void;
   /** 슬래시 커맨드(/new, /clear, /help …) 실행 — 텍스트 삽입이 아니라 액션 */
@@ -188,6 +190,10 @@ export function ChatInput({
   onRecommendExecute?: (choice: RecExecChoice, text: string, opts: SendOptions) => void;
   /** 진행 중 실행 취소 — 제공되면 busy일 때 전송 버튼이 정지 버튼으로 변신(Esc도 정지). */
   onStop?: () => void;
+  /** 상단/멘션에서 명시적으로 선택된 현재 에이전트. 바뀌면 자동추천 라우팅을 끈다. */
+  activeAgentId?: string | null;
+  /** 정지 요청이 이미 눌린 상태 — 중복 클릭과 불확실한 UI를 막는다. */
+  stopRequested?: boolean;
   busy: boolean;
   disabled?: boolean;
   context?: MentionContext;
@@ -241,6 +247,8 @@ export function ChatInput({
   const [activeIndex, setActiveIndex] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const lastActiveAgentIdRef = useRef<string | null | undefined>(undefined);
+  const autocompleteSignatureRef = useRef<string>("");
 
   const submitDisabled =
     busy || (!input.trim() && images.length === 0) || disabled;
@@ -337,10 +345,38 @@ export function ChatInput({
     return buildAutocompleteOptions(trigger, context, locale, t);
   }, [trigger, context, locale, t]);
 
-  // trigger가 바뀌거나 query가 갱신되면 activeIndex를 0으로 리셋 — 빈 결과는 -1
+  const autocompleteOptionKey = useMemo(
+    () => autocompleteOptions.map((opt) => opt.key).join("\u001f"),
+    [autocompleteOptions],
+  );
+  const autocompleteSignature = `${trigger?.kind ?? "none"}\u001f${trigger?.startIndex ?? -1}\u001f${trigger?.query ?? ""}\u001f${autocompleteOptionKey}`;
+
+  // trigger/query/결과 목록이 실제로 바뀔 때만 activeIndex를 보정한다.
+  // context 객체는 부모 렌더마다 새로 만들어질 수 있으므로 배열 identity에 의존하면
+  // 키보드/마우스 선택이 매 렌더 0번으로 튀어 오른다.
   useEffect(() => {
-    setActiveIndex(autocompleteOptions.length > 0 ? 0 : -1);
-  }, [autocompleteOptions]);
+    const changed = autocompleteSignatureRef.current !== autocompleteSignature;
+    autocompleteSignatureRef.current = autocompleteSignature;
+    setActiveIndex((current) => {
+      if (autocompleteOptions.length === 0) return -1;
+      if (changed) return 0;
+      if (current < 0 || current >= autocompleteOptions.length) return 0;
+      return current;
+    });
+  }, [autocompleteSignature, autocompleteOptions.length]);
+
+  useEffect(() => {
+    const previous = lastActiveAgentIdRef.current;
+    lastActiveAgentIdRef.current = activeAgentId;
+    if (!previous || !activeAgentId || previous === activeAgentId) return;
+    setRecSheet(null);
+    setHepToggles((prev) => {
+      if (!prev.has("recommend")) return prev;
+      const next = new Set(prev);
+      next.delete("recommend");
+      return next;
+    });
+  }, [activeAgentId]);
 
   // fillOnly=true(Tab): 실행/전환 없이 텍스트만 자동완성해 넣는다(절대 전송 안 함).
   // fillOnly=false(Enter): 앱 명령은 실행, @agent/@firm은 에이전트 전환, 그 외는 텍스트 삽입.
@@ -355,6 +391,12 @@ export function ChatInput({
       if (opt.switchAgentId && onCallAgent) {
         setInput(`${before}${after}`.trimStart());
         setTrigger(null);
+        setRecSheet(null);
+        setHepToggles((prev) => {
+          const next = new Set(prev);
+          next.delete("recommend");
+          return next;
+        });
         onCallAgent(opt.switchAgentId);
         setTimeout(() => textareaRef.current?.focus(), 0);
         return;
@@ -427,6 +469,11 @@ export function ChatInput({
     const cur = recSheet;
     if (!cur) return;
     onRecommendExecute?.(choice, cur.text, cur.opts);
+    setHepToggles((prev) => {
+      const next = new Set(prev);
+      next.delete("recommend");
+      return next;
+    });
     setRecSheet(null);
     setInput("");
     setImages([]);
@@ -438,6 +485,12 @@ export function ChatInput({
     // 텍스트는 입력창에 그대로 둔다 — 사용자가 다시 보내거나 추천 토글을 끌 수 있음.
     setRecSheet(null);
     setTimeout(() => textareaRef.current?.focus(), 0);
+  }
+
+  function retryRec() {
+    const cur = recSheet;
+    if (!cur) return;
+    void openRecSheet(cur.text);
   }
 
   function requestAppsGenerateMode(next: boolean) {
@@ -558,6 +611,11 @@ export function ChatInput({
           }}
           onConfirm={() => {
             // 선택된 에이전트들을 호출
+            setHepToggles((prev) => {
+              const next = new Set(prev);
+              next.delete("recommend");
+              return next;
+            });
             for (const id of selectedAgentIds) {
               onCallAgent?.(id);
             }
@@ -652,6 +710,7 @@ export function ChatInput({
           preview={recSheet.preview}
           onPick={pickRec}
           onCancel={cancelRec}
+          onRetry={retryRec}
           t={t}
           locale={locale}
         />
@@ -1077,49 +1136,113 @@ export function ChatInput({
             {/* 보내기 / 정지 — 실행 중(busy)이고 onStop이 있으면 정지 버튼으로 변신 */}
             {(() => {
               const showStop = busy && !!onStop;
+              const stopLabel = stopRequested
+                ? locale === "ko"
+                  ? "중지 요청됨"
+                  : "Stopping"
+                : t("chat.stop");
               return (
-                <button
-                  className="chat-input-send-button"
-                  onClick={showStop ? onStop : submit}
-                  disabled={showStop ? false : submitDisabled}
-                  aria-label={showStop ? t("chat.stop") : t("chatinput.send")}
-                  title={showStop ? t("chat.stop") : undefined}
-                  style={{
-                    width: 32,
-                    height: 32,
-                    flexShrink: 0,
-                    borderRadius: "50%",
-                    background: showStop || !submitDisabled ? "var(--paper)" : "var(--paper-2)",
-                    color: showStop
-                      ? "var(--red-deep)"
-                      : submitDisabled
-                        ? "var(--muted-deep)"
-                        : "var(--ink)",
-                    border: "1px solid var(--paper-edge)",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    boxShadow: showStop || !submitDisabled ? "var(--neu-raised)" : "none",
-                    cursor: showStop ? "pointer" : undefined,
-                  }}
-                >
-                  {showStop ? (
-                    <span
-                      style={{
-                        width: 10,
-                        height: 10,
-                        background: "currentColor",
-                        borderRadius: 2,
-                        display: "inline-block",
+                <>
+                  {showStop && (
+                    <button
+                      type="button"
+                      className="chat-input-stop-button"
+                      data-chat-stop-button="true"
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (!stopRequested) onStop?.();
                       }}
-                      aria-hidden
-                    />
-                  ) : busy ? (
-                    <span className="agentlas-spinner" aria-hidden />
-                  ) : (
-                    <IconArrowUp size={15} />
+                      onClick={stopRequested ? undefined : onStop}
+                      disabled={stopRequested}
+                      aria-label={stopLabel}
+                      title={stopLabel}
+                      style={{
+                        height: 32,
+                        flexShrink: 0,
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 7,
+                        padding: "0 12px",
+                        borderRadius: 999,
+                        border: "1px solid color-mix(in srgb, var(--red-deep) 30%, var(--paper-edge))",
+                        background: "color-mix(in srgb, var(--red-deep) 8%, var(--paper))",
+                        color: stopRequested ? "var(--muted-deep)" : "var(--red-deep)",
+                        fontSize: 12,
+                        fontWeight: 750,
+                        opacity: stopRequested ? 0.72 : 1,
+                        cursor: stopRequested ? "default" : "pointer",
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: 9,
+                          height: 9,
+                          background: "currentColor",
+                          borderRadius: 2,
+                          display: "inline-block",
+                          flexShrink: 0,
+                        }}
+                        aria-hidden
+                      />
+                      <span>{stopLabel}</span>
+                    </button>
                   )}
-                </button>
+                  <button
+                    className="chat-input-send-button"
+                    data-chat-stop-button={showStop ? "true" : undefined}
+                    onPointerDown={
+                      showStop
+                        ? (e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (!stopRequested) onStop?.();
+                          }
+                        : undefined
+                    }
+                    onClick={showStop ? (stopRequested ? undefined : onStop) : submit}
+                    disabled={showStop ? stopRequested : submitDisabled}
+                    aria-label={showStop ? stopLabel : t("chatinput.send")}
+                    title={showStop ? stopLabel : undefined}
+                    style={{
+                      width: 32,
+                      height: 32,
+                      flexShrink: 0,
+                      borderRadius: "50%",
+                      background: showStop || !submitDisabled ? "var(--paper)" : "var(--paper-2)",
+                      color: showStop
+                        ? "var(--red-deep)"
+                        : submitDisabled
+                          ? "var(--muted-deep)"
+                          : "var(--ink)",
+                      border: "1px solid var(--paper-edge)",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      boxShadow: showStop || !submitDisabled ? "var(--neu-raised)" : "none",
+                      cursor: showStop && !stopRequested ? "pointer" : undefined,
+                      opacity: showStop && stopRequested ? 0.72 : 1,
+                    }}
+                  >
+                    {showStop ? (
+                      <span
+                        style={{
+                          width: 10,
+                          height: 10,
+                          background: "currentColor",
+                          borderRadius: 2,
+                          display: "inline-block",
+                        }}
+                        aria-hidden
+                      />
+                    ) : busy ? (
+                      <span className="agentlas-spinner" aria-hidden />
+                    ) : (
+                      <IconArrowUp size={15} />
+                    )}
+                  </button>
+                </>
               );
             })()}
           </div>
@@ -1341,6 +1464,7 @@ function RecommendationSheet({
   preview,
   onPick,
   onCancel,
+  onRetry,
   t,
   locale,
 }: {
@@ -1348,6 +1472,7 @@ function RecommendationSheet({
   preview: Recommendation | null;
   onPick: (choice: RecExecChoice) => void;
   onCancel: () => void;
+  onRetry: () => void;
   t: TFunction;
   locale: Locale;
 }) {
@@ -1459,6 +1584,26 @@ function RecommendationSheet({
         <strong style={{ fontSize: 13, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {loading ? t("chatinput.rec.loading") : headerLabel}
         </strong>
+        <button
+          type="button"
+          onClick={onCancel}
+          aria-label={t("chatinput.agent_picker.cancel")}
+          title={t("chatinput.agent_picker.cancel")}
+          style={{
+            width: 24,
+            height: 24,
+            flexShrink: 0,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            border: "none",
+            background: "transparent",
+            color: "var(--muted-deep)",
+            cursor: "pointer",
+          }}
+        >
+          <IconClose size={13} />
+        </button>
       </div>
 
       {loading ? (
@@ -1556,10 +1701,10 @@ function RecommendationSheet({
             </span>
           )}
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-            <button type="button" onClick={onCancel} style={ghostBtn}>
+            <button type="button" onClick={onRetry} style={ghostBtn}>
               {t("chatinput.rec.cancel")}
             </button>
-            <button type="button" onClick={() => onPick({ kind: "plain", routerAgent })} style={ghostBtn}>
+            <button type="button" onClick={() => onPick({ kind: "plain" })} style={ghostBtn}>
               {t("chatinput.rec.send_plain")}
             </button>
             {preview && mode === "single" && preview.agents[0] && (
@@ -1787,7 +1932,7 @@ function AutocompletePopover({
   // 그룹 헤더는 같은 group이 처음 등장할 때만 그린다.
   const seenGroups = new Set<string>();
   return (
-    <Popover title={title}>
+    <Popover title={title} dataKind="autocomplete" role="listbox">
       {options.map((opt, i) => {
         const showHeader = opt.group && !seenGroups.has(opt.group);
         if (opt.group) seenGroups.add(opt.group);
@@ -1801,6 +1946,7 @@ function AutocompletePopover({
               icon={kindIcon(opt.kind)}
               title={opt.title}
               subtitle={opt.subtitle}
+              autocompleteOption
             />
           </div>
         );
@@ -2045,13 +2191,19 @@ function ModelMenu({
 function Popover({
   title,
   children,
+  dataKind,
+  role,
 }: {
   title?: string;
   children: React.ReactNode;
+  dataKind?: string;
+  role?: React.AriaRole;
 }) {
   return (
     <div
       data-popover-root
+      data-popover-kind={dataKind}
+      role={role}
       className="glass-lift"
       style={{
         position: "absolute",
@@ -2130,6 +2282,7 @@ function Row({
   title,
   subtitle,
   right,
+  autocompleteOption = false,
 }: {
   onClick?: () => void;
   /** 마우스가 위로 올라오면 호출 — 키보드 activeIndex와 마우스 활성을 동기화 */
@@ -2140,12 +2293,16 @@ function Row({
   title: string;
   subtitle?: string;
   right?: React.ReactNode;
+  autocompleteOption?: boolean;
 }) {
   // active일 때는 hover 색을 항상 표시 — inline 토글이라 ref로 보존하지 않음
   return (
     <button
       onClick={onClick}
       disabled={!onClick}
+      data-autocomplete-option={autocompleteOption ? "true" : undefined}
+      role={autocompleteOption ? "option" : undefined}
+      aria-selected={autocompleteOption ? (active ? "true" : "false") : undefined}
       style={{
         display: "flex",
         width: "100%",

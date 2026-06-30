@@ -281,7 +281,7 @@ const dict = {
     "chatinput.storm_warning.title": "Stormbreaker 켜짐",
     "chatinput.storm_warning.body": "Stormbreaker는 토큰을 많이 사용할 수 있고, 작업이 며칠 걸릴 수 있어요. 처음에 지시를 명확하고 완전하게 적어 주세요.",
     "chatinput.storm_warning.ok": "확인",
-    "chatinput.rec.title": "에이전트 찾기",
+    "chatinput.rec.title": "알아서 에이전트 부르기",
     "chatinput.rec.loading": "알맞은 에이전트를 찾는 중…",
     "chatinput.rec.estimate_note": "예상 크레딧이에요 — 확정 견적이 아닙니다.",
     "chatinput.rec.credits_suffix": "크레딧",

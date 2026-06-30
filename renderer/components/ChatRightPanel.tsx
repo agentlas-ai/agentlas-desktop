@@ -38,6 +38,7 @@ interface Props {
   chatId: string | null;
   artifact: CodeArtifact | null;
   surface: WorkbenchSurface | null;
+  filePreview?: WorkspaceFilePreview | null;
   generatedApps: AppFactoryAppRecord[];
   onSurfaceAction?: SurfaceActionHandler;
   onSurfaceStatePatch?: SurfaceStatePatchHandler;
@@ -59,6 +60,7 @@ export function ChatRightPanel({
   chatId,
   artifact,
   surface,
+  filePreview: externalFilePreview,
   generatedApps,
   onSurfaceAction,
   onSurfaceStatePatch,
@@ -88,6 +90,12 @@ export function ChatRightPanel({
   useEffect(() => {
     if (artifact || surface) setViewerSource("workbench");
   }, [artifact?.id, surface?.id]);
+
+  useEffect(() => {
+    if (!externalFilePreview) return;
+    setFilePreview(externalFilePreview);
+    setViewerSource("file");
+  }, [externalFilePreview?.path, externalFilePreview?.fileUrl]);
 
   return (
     <aside className="chat-right-panel titlebar-nodrag" style={shellStyle}>

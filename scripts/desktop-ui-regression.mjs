@@ -170,7 +170,7 @@ async function checkAgents(page) {
 async function checkChat(page) {
   await page.getByRole("textbox").waitFor();
   await page.getByRole("textbox").fill("검증용 에이전트 만들어줘");
-  await page.getByText(/에이전트 찾기|Find agents/).first().waitFor();
+  await page.getByText(/알아서 에이전트 부르기|에이전트 찾기|Find agents/).first().waitFor();
 }
 
 async function checkOnboarding(page) {

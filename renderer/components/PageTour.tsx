@@ -14,6 +14,7 @@ interface TourConfig {
   id: string;
   labelKo: string;
   labelEn: string;
+  autoOpen?: boolean;
   steps: TourStep[];
 }
 
@@ -50,6 +51,7 @@ export function PageTour({ pathname }: { pathname: string }) {
     setOpen(false);
     setStepIndex(0);
     if (!config) return undefined;
+    if (config.autoOpen === false) return undefined;
     try {
       if (window.localStorage.getItem(pageTourStorageKey(config.id)) === "1") return undefined;
     } catch {
@@ -158,10 +160,6 @@ export function PageTour({ pathname }: { pathname: string }) {
         aria-label={ko ? `${config.labelKo} 안내` : `${config.labelEn} tour`}
         style={{ left: callout.left, top: callout.top }}
       >
-        <div className="agentlas-tour-source">
-          <span>{ko ? "Hephaestus 카피라이터" : "Hephaestus Copywriter"}</span>
-          <span>{ko ? "Gemini 초안 검수" : "Gemini draft reviewed"}</span>
-        </div>
         <div className="agentlas-tour-topline">
           <span>{progress}</span>
           <button type="button" onClick={close} aria-label={ko ? "튜토리얼 닫기" : "Close tutorial"}>
@@ -291,7 +289,7 @@ function tourConfigForPath(pathname: string): TourConfig | null {
       {
         target: "workspace.input",
         titleKo: "여기서 일 맡기기",
-        bodyKo: "할 일을 쓰고 에이전트 찾기·Stormbreaker·권한·모델을 고르세요. 처음엔 한 줄로 짧게 시작해도 됩니다.",
+        bodyKo: "할 일을 쓰고 알아서 에이전트 부르기·Stormbreaker·권한·모델을 고르세요. 처음엔 한 줄로 짧게 시작해도 됩니다.",
         titleEn: "Hand off the task",
         bodyEn: "Write the task, then set agent finding, Stormbreaker, permissions, and model. One short line is enough to start.",
       },
@@ -300,6 +298,7 @@ function tourConfigForPath(pathname: string): TourConfig | null {
       id: "workspace",
       labelKo: "워크스페이스",
       labelEn: "Workspace",
+      autoOpen: false,
       steps: pathname.startsWith("/chat") ? [sidebarStep, ...chatOnlySteps] : [sidebarStep],
     };
   }
