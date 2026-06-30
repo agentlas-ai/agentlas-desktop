@@ -104,6 +104,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   const [data, setData] = useState<SidebarData>(EMPTY);
   const [collapsed, setCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(EXPANDED_WIDTH);
+  const [resizing, setResizing] = useState(false);
   const [chatsCollapsed, setChatsCollapsed] = useState(false);
   const [chatListLimit, setChatListLimit] = useState(12);
   const [newChatDialogOpen, setNewChatDialogOpen] = useState(false);
@@ -209,12 +210,14 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
 
   function beginSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
     event.preventDefault();
+    setResizing(true);
     const startX = event.clientX;
     const startWidth = sidebarWidth;
     const onMove = (moveEvent: PointerEvent) => {
       persistSidebarWidth(startWidth + moveEvent.clientX - startX);
     };
     const onUp = () => {
+      setResizing(false);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
@@ -463,7 +466,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         flexDirection: "column",
         height: "100vh",
         overflow: "hidden",
-        transition: "width 0.18s ease",
+        transition: resizing ? "none" : "width 0.18s ease",
       }}
     >
       <div
@@ -1158,10 +1161,10 @@ function CollapsedNav({
     badge?: string | number;
   }> = [
     {
-      href: "/",
+      href: "/chat",
       label: t("sidebar.chats"),
       icon: <IconChat size={16} />,
-      isActive: pathname === "/",
+      isActive: pathname === "/chat",
     },
     {
       href: "/project/new",

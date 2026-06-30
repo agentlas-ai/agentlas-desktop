@@ -115,7 +115,7 @@ function MarketplacePage() {
     // status는 위 Hub 호출(listBundles/listFirms/search)이 setStatus를 갱신한 "뒤"에 읽어야 정확하다.
     // 병렬로 읽으면 첫 로드 때 갱신 전 초기값(미연결)을 잡거나 race가 난다.
     const status = await api.marketplace.status();
-    setListings(ls);
+    setListings(Array.isArray(ls) ? ls : []);
     setInstalledAgentSlugs(new Set(visibleAgents(ag).map((a) => a.slug)));
     setSourceStatus(status);
     setSignedIn(session.signedIn);
@@ -130,7 +130,7 @@ function MarketplacePage() {
     if (!api) return;
     const t = setTimeout(() => {
       void api.marketplace.search(q).then(async (results) => {
-        setListings(results);
+        setListings(Array.isArray(results) ? results : []);
         setSourceStatus(await api.marketplace.status());
       });
     }, 150);

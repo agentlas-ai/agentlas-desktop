@@ -10,6 +10,7 @@ import { MenuBridge } from "./MenuBridge";
 import { ImportAgentsModal } from "./ImportAgentsModal";
 import { ipc } from "@/lib/ipc";
 import { SideNav } from "./SideNav";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { usePathname } from "next/navigation";
 import { registerRouter } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
@@ -150,7 +151,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             onOpen={() => router.push("/dashboard#approval-inbox")}
           />
         )}
-        {children}
+        <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>
       </main>
       <PageTour pathname={pathname} />
       <BackgroundWorkPill

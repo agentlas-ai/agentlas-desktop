@@ -49,6 +49,7 @@ interface Props {
   timeline: NetTimelineItem[];
   chatTitle: string;
   latestUserPrompt: string;
+  hasPipeline?: boolean;
   width?: number;
   onResizeWidth?: (width: number) => void;
 }
@@ -72,6 +73,7 @@ export function ChatRightPanel({
   timeline,
   chatTitle,
   latestUserPrompt,
+  hasPipeline,
   width,
   onResizeWidth,
 }: Props) {
@@ -177,6 +179,7 @@ export function ChatRightPanel({
             timeline={timeline}
             chatTitle={chatTitle}
             latestUserPrompt={latestUserPrompt}
+            hasPipeline={hasPipeline}
           />
         )}
         {activeTab === "panel" && (

@@ -1914,6 +1914,9 @@ function ChatPage() {
   const displayAgents = visibleAgents(allAgents);
   const displayAgent = agent?.visibility === "background" ? null : agent;
   const latestUserPrompt = [...messages].reverse().find((message) => message.role === "user")?.text ?? "";
+  // 현재(가장 최근) 에이전트 실행이 다단계 파이프라인(2+ stage)이면, 단일 에이전트라도 카드/네트워크 뷰를 켠다.
+  const hasPipeline =
+    ([...messages].reverse().find((message) => message.role === "agent")?.pipeline?.length ?? 0) > 1;
 
   return (
     <div style={{ display: "flex", height: "100%", width: "100%", minWidth: 0, overflow: "hidden" }}>
@@ -2344,6 +2347,7 @@ function ChatPage() {
           timeline={netTimeline}
           chatTitle={chat.title}
           latestUserPrompt={latestUserPrompt}
+          hasPipeline={hasPipeline}
           width={rightPanelWidth}
           onResizeWidth={resizeRightPanel}
         />

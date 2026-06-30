@@ -52,6 +52,8 @@ interface Props {
   timeline: NetTimelineItem[];
   chatTitle?: string;
   latestUserPrompt?: string;
+  /** 현재 실행이 다단계 파이프라인(2+ stage)이면 단일 에이전트라도 카드/네트워크 뷰를 켠다. */
+  hasPipeline?: boolean;
   onClose?: () => void;
   embedded?: boolean;
 }
@@ -70,6 +72,7 @@ export function AgentNetworkPanel({
   timeline,
   chatTitle,
   latestUserPrompt,
+  hasPipeline = false,
   onClose,
   embedded = false,
 }: Props) {
@@ -133,6 +136,7 @@ export function AgentNetworkPanel({
   const hasParallelSignal =
     activeCount >= 2 ||
     Boolean(firm || org) ||
+    hasPipeline ||
     uniqueTimelineAgents.size > 1 ||
     timeline.some((item) => (item.delegateTo?.length ?? 0) > 1);
 
