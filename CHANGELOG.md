@@ -2,6 +2,18 @@
 
 ## 0.5.5 — 2026-06-30
 
+### Security
+
+- **Main-process hardening (from a Hermes Desktop infra comparison).** Added a
+  `will-navigate` guard so the trusted app window can only navigate within
+  `agentlas://` (prod) or the dev server — external links open in the system
+  browser instead. Installed a deny-by-default permission handler for
+  device/sensor capabilities (geolocation, media, USB/serial/HID, display
+  capture) the app never uses, while leaving clipboard and notifications allowed.
+  Validated `config:setCustomBaseUrl` (https, or http only on localhost/LAN) so a
+  compromised renderer can't redirect the BYOK base URL and exfiltrate the API
+  key. Each change was adversarially reviewed for side effects before landing.
+
 ### Changed
 
 - **Chat input now grows with what you type.** The composer textarea auto-expands
