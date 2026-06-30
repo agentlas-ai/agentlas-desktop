@@ -250,6 +250,15 @@ export function ChatInput({
   const lastActiveAgentIdRef = useRef<string | null | undefined>(undefined);
   const autocompleteSignatureRef = useRef<string>("");
 
+  // 입력 내용에 따라 textarea 높이를 늘린다(auto-grow) — 최대치까지 자라고 그 뒤엔 내부 스크롤.
+  // 전송 후 비우기·자동완성 삽입 같은 프로그램적 변경도 input 값 변화로 함께 반영된다.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 150)}px`;
+  }, [input]);
+
   const submitDisabled =
     busy || (!input.trim() && images.length === 0) || disabled;
   // 활성 토글을 Hephaestus 지시 프리픽스로 합성. Network=허브 라우팅, Stormbreaker=견고-실행(--stormbreaker).
@@ -909,7 +918,7 @@ export function ChatInput({
                 ? `${hepHint} · ${locale === "ko" ? "요청을 입력하세요" : "describe the request"}`
               : t("chatinput.placeholder_rich")
           }
-          rows={2}
+          rows={1}
           disabled={disabled}
           style={{
             width: "100%",
@@ -922,6 +931,10 @@ export function ChatInput({
             resize: "none",
             padding: "4px 6px",
             fontFamily: "var(--font-body)",
+            minHeight: 46,
+            maxHeight: 150,
+            overflowY: "auto",
+            boxSizing: "border-box",
           }}
         />
 

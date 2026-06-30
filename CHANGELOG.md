@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.5 — Unreleased
+
+### Changed
+
+- **Chat input now grows with what you type.** The composer textarea auto-expands
+  from a two-line minimum up to a bounded height (then scrolls internally), and
+  collapses back after sending — instead of staying a fixed two rows.
+
+### Fixed
+
+- Routing plugin-exclusion fix now needs to ship in the bundled engine: the change
+  lives in the Hephaestus source/runtime but the packaged app carries its own
+  bundled engine, so it only takes effect on a rebuild (or once the fix lands in
+  the canonical Hephaestus the build clones).
+
 ## 0.5.4 — 2026-06-30
 
 ### Added
