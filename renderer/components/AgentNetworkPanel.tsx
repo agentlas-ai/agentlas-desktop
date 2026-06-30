@@ -129,6 +129,12 @@ export function AgentNetworkPanel({
   const activityRows = workflowActivityRows(timeline, locale);
   const webSeen = timeline.some((item) => /web|검색|search|탐색/i.test(item.text));
   const waitingForFirstEvent = feed.length === 0 && (busy || anyActive);
+  const uniqueTimelineAgents = new Set(timeline.map((item) => item.agentId).filter(Boolean));
+  const hasParallelSignal =
+    activeCount >= 2 ||
+    Boolean(firm || org) ||
+    uniqueTimelineAgents.size > 1 ||
+    timeline.some((item) => (item.delegateTo?.length ?? 0) > 1);
 
   return (
     <aside
@@ -178,58 +184,69 @@ export function AgentNetworkPanel({
       </div>
 
       <div style={{ flex: 1, overflow: "auto", minHeight: 0, padding: "12px 10px" }}>
-        <section
-          style={briefCardStyle}
-        >
-          <div style={briefTitleStyle}>
-            {locale === "ko" ? "사용자 요청" : "User request"}
-          </div>
-          <div style={briefBodyStyle(briefOpen)}>
-            {promptPreview || (locale === "ko" ? "메시지를 보내면 현재 위임 내용이 여기에 표시됩니다." : "Send a message to show the current delegation brief here.")}
-          </div>
-          {promptPreview && (
-            <div style={briefSectionStyle}>
-              <div style={briefSectionLabelStyle}>
-                {locale === "ko" ? "## 사용자 의도" : "## User intent"}
+        {hasParallelSignal ? (
+          <>
+            <section
+              style={briefCardStyle}
+            >
+              <div style={briefTitleStyle}>
+                {locale === "ko" ? "사용자 요청" : "User request"}
               </div>
-              <div style={briefSectionTextStyle}>
-                {deriveBriefIntent(promptPreview, locale)}
+              <div style={briefBodyStyle(briefOpen)}>
+                {promptPreview || (locale === "ko" ? "메시지를 보내면 현재 위임 내용이 여기에 표시됩니다." : "Send a message to show the current delegation brief here.")}
+              </div>
+              {promptPreview && (
+                <div style={briefSectionStyle}>
+                  <div style={briefSectionLabelStyle}>
+                    {locale === "ko" ? "## 사용자 의도" : "## User intent"}
+                  </div>
+                  <div style={briefSectionTextStyle}>
+                    {deriveBriefIntent(promptPreview, locale)}
+                  </div>
+                </div>
+              )}
+              {promptPreview.length > 130 && (
+                <button onClick={() => setBriefOpen((v) => !v)} style={moreButtonStyle}>
+                  {briefOpen ? (locale === "ko" ? "접기" : "Show less") : (locale === "ko" ? "더보기" : "Show more")}
+                </button>
+              )}
+            </section>
+
+            <div style={activityRowsWrapStyle}>
+              {activityRows.map((row) => (
+                <div key={row.label} style={activitySummaryRowStyle}>
+                  <span>{row.label}</span>
+                </div>
+              ))}
+              <div style={searchingRowStyle}>
+                <span aria-hidden style={searchingDotStyle(busy || anyActive)} />
+                <span>
+                  {webSeen
+                    ? (locale === "ko" ? "웹 확인됨" : "Web checked")
+                    : busy || anyActive
+                      ? (locale === "ko" ? "실행 중" : "Running")
+                      : (locale === "ko" ? "대기 중" : "Idle")}
+                </span>
               </div>
             </div>
-          )}
-          {promptPreview.length > 130 && (
-            <button onClick={() => setBriefOpen((v) => !v)} style={moreButtonStyle}>
-              {briefOpen ? (locale === "ko" ? "접기" : "Show less") : (locale === "ko" ? "더보기" : "Show more")}
-            </button>
-          )}
-        </section>
 
-        <div style={activityRowsWrapStyle}>
-          {activityRows.map((row) => (
-            <div key={row.label} style={activitySummaryRowStyle}>
-              <span>{row.label}</span>
-            </div>
-          ))}
-          <div style={searchingRowStyle}>
-            <span aria-hidden style={searchingDotStyle(busy || anyActive)} />
-            <span>
-              {webSeen
-                ? (locale === "ko" ? "웹 확인됨" : "Web checked")
-                : busy || anyActive
-                  ? (locale === "ko" ? "실행 중" : "Running")
-                  : (locale === "ko" ? "대기 중" : "Idle")}
-            </span>
-          </div>
-        </div>
-
-        <OrchestrationTree
-          roster={roster}
-          hasRoster={hasRoster}
-          liveAgents={liveAgents}
-          timeline={timeline}
-          busy={busy}
-          locale={locale}
-        />
+            <OrchestrationTree
+              roster={roster}
+              hasRoster={hasRoster}
+              liveAgents={liveAgents}
+              timeline={timeline}
+              busy={busy}
+              locale={locale}
+            />
+          </>
+        ) : (
+          <SoloAgentSummary
+            busy={busy || anyActive || waitingForFirstEvent}
+            timeline={timeline}
+            latestUserPrompt={promptPreview}
+            locale={locale}
+          />
+        )}
       </div>
     </aside>
   );
@@ -264,6 +281,54 @@ function LiveBadge({ label }: { label: string }) {
       {label}
     </span>
   );
+}
+
+function SoloAgentSummary({
+  busy,
+  timeline,
+  latestUserPrompt,
+  locale,
+}: {
+  busy: boolean;
+  timeline: NetTimelineItem[];
+  latestUserPrompt: string;
+  locale: "ko" | "en";
+}) {
+  const latest = latestSoloTimelineText(timeline, locale, busy);
+  return (
+    <section style={soloWrapStyle}>
+      <div style={soloLineStyle}>
+        <span aria-hidden style={soloDotStyle(busy)} />
+        <span style={soloStateStyle(busy)}>
+          {busy ? (locale === "ko" ? "실행 중" : "Running") : (locale === "ko" ? "대기 중" : "Idle")}
+        </span>
+        <span style={soloDetailStyle}>{latest}</span>
+      </div>
+      {latestUserPrompt && (
+        <p style={soloPromptStyle}>
+          {latestUserPrompt.length > 150 ? `${latestUserPrompt.slice(0, 149)}…` : latestUserPrompt}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function latestSoloTimelineText(timeline: NetTimelineItem[], locale: "ko" | "en", busy: boolean): string {
+  for (let i = timeline.length - 1; i >= 0; i -= 1) {
+    const cleaned = cleanSoloStatus(timeline[i].text, locale, busy);
+    if (cleaned) return cleaned;
+  }
+  return busy ? (locale === "ko" ? "응답 준비 중" : "Preparing response") : (locale === "ko" ? "메시지를 보내면 상태가 표시됩니다" : "Send a message to show status");
+}
+
+function cleanSoloStatus(value: string, locale: "ko" | "en", busy: boolean): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (/stormbreaker|scope-lock|verifier-first|agentlas\s*오케스트레이터|orchestrator|루프\s*stormbreaker|loop\s*[·:]|armed|route\b/i.test(text)) {
+    return busy ? (locale === "ko" ? "처리 중" : "Working") : "";
+  }
+  if (/^(완료|done|completed)$/i.test(text)) return busy ? text : "";
+  return text.length > 110 ? `${text.slice(0, 109)}…` : text;
 }
 
 function WorkflowCard({
@@ -789,6 +854,62 @@ const closeButtonStyle: CSSProperties = {
   color: "var(--muted-deep)",
   borderRadius: 6,
   cursor: "pointer",
+};
+
+const soloWrapStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 9,
+  padding: "2px 1px",
+};
+
+const soloLineStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 7,
+  minWidth: 0,
+  color: "var(--muted-deep)",
+  fontSize: 12.3,
+  lineHeight: 1.45,
+};
+
+function soloDotStyle(active: boolean): CSSProperties {
+  return {
+    width: 7,
+    height: 7,
+    borderRadius: "50%",
+    flexShrink: 0,
+    background: active ? "var(--green-deep)" : "var(--muted)",
+    boxShadow: active ? "0 0 0 4px color-mix(in srgb, var(--green-deep) 13%, transparent)" : undefined,
+  };
+}
+
+function soloStateStyle(active: boolean): CSSProperties {
+  return {
+    flexShrink: 0,
+    fontWeight: 820,
+    color: active ? "transparent" : "var(--ink-soft)",
+    backgroundImage: active ? "linear-gradient(90deg, var(--green-deep), var(--accent), var(--amber-deep))" : undefined,
+    backgroundClip: active ? "text" : undefined,
+    WebkitBackgroundClip: active ? "text" : undefined,
+  };
+}
+
+const soloDetailStyle: CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "var(--ink-soft)",
+  fontWeight: 650,
+};
+
+const soloPromptStyle: CSSProperties = {
+  margin: 0,
+  color: "var(--muted-deep)",
+  fontSize: 11.2,
+  lineHeight: 1.5,
+  overflowWrap: "anywhere",
 };
 
 const briefCardStyle: CSSProperties = {

@@ -1,7 +1,7 @@
 // Unified right rail for chat: files, agent workflow, and artifact/viewer panel.
 "use client";
 
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Markdown, type CodeArtifact } from "./Markdown";
 import { WorkspacePanel, type WorkspaceFilePreview } from "./WorkspacePanel";
 import {
@@ -15,10 +15,9 @@ import {
   type SurfaceStatePatchHandler,
   type WorkbenchSurface,
 } from "./WorkbenchPanel";
-import type { AppFactoryAppRecord, InstalledAgent, InstalledFirm, ResolvedOrg } from "@/lib/types";
+import type { InstalledAgent, InstalledFirm, ResolvedOrg } from "@/lib/types";
 import { IconClose, IconFileUp, IconFilm, IconFolder, IconImage, IconLayers, IconNetwork, IconPanelRight } from "./Icon";
 import { useT } from "@/lib/i18n";
-import { navigate } from "@/lib/navigation";
 
 export type ChatRightPanelTab = "file" | "agent" | "panel";
 type PanelViewerSource = "workbench" | "file";
@@ -39,7 +38,6 @@ interface Props {
   artifact: CodeArtifact | null;
   surface: WorkbenchSurface | null;
   filePreview?: WorkspaceFilePreview | null;
-  generatedApps: AppFactoryAppRecord[];
   onSurfaceAction?: SurfaceActionHandler;
   onSurfaceStatePatch?: SurfaceStatePatchHandler;
   firm: InstalledFirm | null;
@@ -51,6 +49,8 @@ interface Props {
   timeline: NetTimelineItem[];
   chatTitle: string;
   latestUserPrompt: string;
+  width?: number;
+  onResizeWidth?: (width: number) => void;
 }
 
 export function ChatRightPanel({
@@ -61,7 +61,6 @@ export function ChatRightPanel({
   artifact,
   surface,
   filePreview: externalFilePreview,
-  generatedApps,
   onSurfaceAction,
   onSurfaceStatePatch,
   firm,
@@ -73,6 +72,8 @@ export function ChatRightPanel({
   timeline,
   chatTitle,
   latestUserPrompt,
+  width,
+  onResizeWidth,
 }: Props) {
   const { locale } = useT();
   const ko = locale === "ko";
@@ -97,8 +98,35 @@ export function ChatRightPanel({
     setViewerSource("file");
   }, [externalFilePreview?.path, externalFilePreview?.fileUrl]);
 
+  function beginResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!onResizeWidth) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = width ?? 360;
+    const maxWidth = Math.max(340, Math.min(window.innerWidth - 420, Math.floor(window.innerWidth * 0.64)));
+    const onMove = (moveEvent: PointerEvent) => {
+      const next = Math.round(startWidth + startX - moveEvent.clientX);
+      onResizeWidth(Math.min(maxWidth, Math.max(300, next)));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  }
+
   return (
-    <aside className="chat-right-panel titlebar-nodrag" style={shellStyle}>
+    <aside className="chat-right-panel titlebar-nodrag" style={{ ...shellStyle, width: width ?? shellStyle.width, maxWidth: "none" }}>
+      {onResizeWidth && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          title={ko ? "패널 너비 조절" : "Resize panel"}
+          onPointerDown={beginResize}
+          style={resizeHandleStyle}
+        />
+      )}
       <header style={headerStyle}>
         <div style={headerMarkStyle}>
           {activeTab === "file" ? <IconFolder size={15} /> : activeTab === "agent" ? <IconNetwork size={15} /> : <IconPanelRight size={15} />}
@@ -125,7 +153,6 @@ export function ChatRightPanel({
           <FileTab
             artifact={artifact}
             surface={surface}
-            generatedApps={generatedApps}
             onOpenPanel={() => {
               setViewerSource("workbench");
               onTabChange("panel");
@@ -187,14 +214,12 @@ export function ChatRightPanel({
 function FileTab({
   artifact,
   surface,
-  generatedApps,
   onOpenPanel,
   onOpenFilePreview,
   chatId,
 }: {
   artifact: CodeArtifact | null;
   surface: WorkbenchSurface | null;
-  generatedApps: AppFactoryAppRecord[];
   onOpenPanel: () => void;
   onOpenFilePreview: (preview: WorkspaceFilePreview) => void;
   chatId: string | null;
@@ -220,13 +245,6 @@ function FileTab({
           action: onOpenPanel,
         }
       : null,
-    ...generatedApps.slice(0, 4).map((app) => ({
-      key: `app:${app.id}`,
-      title: app.appName || app.manifest.app?.name || app.manifest.title || "Generated App",
-      meta: `${app.status} · ${app.manifest.domain}`,
-      icon: <IconLayers size={13} />,
-      action: () => navigate(`/apps/generated?id=${encodeURIComponent(app.id)}`),
-    })),
   ];
   const outputRows = rawOutputRows.filter((row): row is OutputRow => row !== null);
 
@@ -379,7 +397,7 @@ function EmptyViewer() {
     <div style={emptyViewerStyle}>
       <IconPanelRight size={30} style={{ color: "var(--muted)" }} />
       <strong>{ko ? "열린 뷰어가 없습니다" : "No viewer is open"}</strong>
-      <p>{ko ? "채팅에서 코드, surface, 파일 미리보기, 앱 산출물을 열면 여기에서 확인합니다." : "Open a code block, surface, file preview, or app output from chat to inspect it here."}</p>
+      <p>{ko ? "채팅에서 코드, surface, 파일 미리보기를 열면 여기에서 확인합니다." : "Open a code block, surface, or file preview from chat to inspect it here."}</p>
       <div style={viewerGridStyle}>
         {viewers.map((viewer) => (
           <span key={viewer.label} style={viewerChipStyle} title={ko ? "지원되는 뷰어 형식" : "Supported viewer type"}>
@@ -457,6 +475,7 @@ function TabButton({
 }
 
 const shellStyle: CSSProperties = {
+  position: "relative",
   width: "clamp(310px, 32vw, 430px)",
   minWidth: 290,
   maxWidth: "44vw",
@@ -468,6 +487,17 @@ const shellStyle: CSSProperties = {
   flexDirection: "column",
   minHeight: 0,
   overflow: "hidden",
+};
+
+const resizeHandleStyle: CSSProperties = {
+  position: "absolute",
+  left: 0,
+  top: 0,
+  bottom: 0,
+  width: 7,
+  cursor: "col-resize",
+  zIndex: 6,
+  touchAction: "none",
 };
 
 const headerStyle: CSSProperties = {

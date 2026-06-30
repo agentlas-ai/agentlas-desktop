@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.5.6 — 2026-07-01
+
+### Changed
+
+- **Calmer chat surface for simple runs.** A plain single-agent run now shows a
+  one-line status instead of agent cards, the org tree, and internal Stormbreaker
+  loop events (armed / scope-lock / route) — those internal events are filtered
+  out of the inline status. The card / network view is reserved for runs that
+  actually fan out (2+ agents, borrowed Hub task forces, saved agent groups). The
+  stop control stays on both the inline status and the input box and still cancels.
+- **Resizable chat sidebars.** The left navigation and the right output panel can
+  be dragged to resize, with min/max bounds and the width remembered per side.
+- Retired the orphaned `/apps/generated` page: visiting it now redirects to Apps,
+  and the right-panel output list and `@`-mention no longer link into it.
+
+### Security
+
+- **Main-process hardening (from a Hermes Desktop infra comparison).** Added a
+  `will-navigate` guard (the app window can only navigate within `agentlas://` or
+  the dev server; external links open in the system browser), a deny-by-default
+  permission handler for unused device/sensor capabilities (clipboard and
+  notifications stay allowed), and validation of `config:setCustomBaseUrl` (https,
+  or http only on localhost/LAN) so a compromised renderer can't redirect the BYOK
+  base URL and exfiltrate the API key. Each change was adversarially reviewed for
+  side effects before landing.
+
+### Fixed
+
+- The engine now classifies a missing-Python-dependency exit as an actionable
+  error and invalidates its cached interpreter/root on structural spawn failures,
+  and the renderer auto-recovers from a renderer crash (bounded reload budget).
+- Routing plugin-exclusion is carried in the bundled engine for this build, so the
+  earlier "make this not look AI-written → Shopify plugin" misroute no longer
+  appears (it now surfaces the copywriter agent).
+
 ## 0.5.5 — 2026-06-30
 
 ### Security

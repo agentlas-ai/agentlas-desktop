@@ -117,9 +117,21 @@ async function main() {
         };
       });
       ipcMain.removeHandler("invoke:run");
-      ipcMain.handle("invoke:run", (_event, req) => {
+      ipcMain.handle("invoke:run", (event, req) => {
         globalThis.__qaRouting.runs.push(req);
+        setTimeout(() => {
+          event.sender.send("invoke:event:qa-run-1", {
+            kind: "thinking",
+            status: "루프 Stormbreaker Loop · armed/scope-lock/route",
+          });
+        }, 80);
         return { runId: "qa-run-1" };
+      });
+      ipcMain.removeHandler("invoke:activeChats");
+      ipcMain.handle("invoke:activeChats", () => {
+        const run = globalThis.__qaRouting.runs[0];
+        if (!run || globalThis.__qaRouting.cancels.includes("qa-run-1")) return [];
+        return [run.chatId];
       });
       ipcMain.removeHandler("invoke:cancel");
       ipcMain.handle("invoke:cancel", (_event, runId) => {
@@ -166,6 +178,14 @@ async function main() {
     assert.equal(activeRows[2]?.active, true, `Mouse hover should keep third row active: ${JSON.stringify(activeRows)}`);
     await page.screenshot({ path: path.join(SHOTS, "01-autocomplete-stable.png"), fullPage: true });
 
+    const sidebar = page.locator("[data-tour-id='workspace.sidebar']").first();
+    const sidebarBefore = await sidebar.boundingBox();
+    const sidebarHandle = sidebar.locator('[role="separator"][aria-orientation="vertical"]').first();
+    await dragHandle(page, sidebarHandle, 56);
+    const sidebarAfter = await sidebar.boundingBox();
+    assert.ok(sidebarBefore && sidebarAfter, "sidebar resize boxes should be measurable");
+    assert.ok(sidebarAfter.width > sidebarBefore.width + 30, `left sidebar should resize wider: ${sidebarBefore.width} -> ${sidebarAfter.width}`);
+
     await page.keyboard.press("Escape");
     await textarea.fill("");
     await page.getByText("알아서 에이전트 부르기").click();
@@ -197,11 +217,32 @@ async function main() {
 
     const stopButton = page.locator('[data-chat-stop-button="true"]').first();
     await stopButton.waitFor();
+    await page.waitForTimeout(250);
+    assert.equal(await page.getByText("Stormbreaker Loop").count(), 0, "internal Stormbreaker loop status must stay hidden in plain chat");
+    assert.equal(
+      await page.locator("[data-tour-id='workspace.chat'] .agentlas-activity-card").count(),
+      0,
+      "plain single-agent run must not render activity cards in the chat stream",
+    );
+    const rightPanel = page.locator(".chat-right-panel").first();
+    const rightPanelBefore = await rightPanel.boundingBox();
+    const rightPanelHandle = rightPanel.locator('[role="separator"][aria-orientation="vertical"]').first();
+    await dragHandle(page, rightPanelHandle, -64);
+    const rightPanelAfter = await rightPanel.boundingBox();
+    assert.ok(rightPanelBefore && rightPanelAfter, "right panel resize boxes should be measurable");
+    assert.ok(rightPanelAfter.width > rightPanelBefore.width + 30, `right panel should resize wider: ${rightPanelBefore.width} -> ${rightPanelAfter.width}`);
     await page.screenshot({ path: path.join(SHOTS, "03-visible-stop.png"), fullPage: true });
     await stopButton.click();
     await waitForMainQa(app, (qa) => qa.cancels.includes("qa-run-1"));
     await page.getByRole("button", { name: "중지 요청됨" }).first().waitFor();
     await page.screenshot({ path: path.join(SHOTS, "04-stop-requested.png"), fullPage: true });
+
+    await page.evaluate(() => {
+      window.location.href = "/apps/generated?id=qa-orphan-app";
+    });
+    await page.waitForFunction(() => location.pathname === "/apps");
+    assert.equal(await page.getByText("Local Web App").count(), 0, "generated local app page must not render");
+    await page.screenshot({ path: path.join(SHOTS, "05-generated-app-redirect.png"), fullPage: true });
 
     assert.deepEqual(consoleErrors, []);
     const report = {
@@ -215,6 +256,10 @@ async function main() {
         "Find another agent reruns recommendation without closing the sheet",
         "Run without recommendation sends no routerAgent and no borrowed agents",
         "Stop is visible and transitions to stop-requested state",
+        "Internal Stormbreaker loop status is hidden for plain single-agent runs",
+        "Plain single-agent run renders no activity cards",
+        "Left and right sidebars resize by dragging",
+        "/apps/generated redirects to Apps without rendering Local Web App",
       ],
       selectedAgent: setup.second,
       runPayload: run,
@@ -277,6 +322,17 @@ async function autoRouteChipActive(page) {
     );
     return Boolean(button?.classList.contains("active") || button?.getAttribute("aria-pressed") === "true");
   });
+}
+
+async function dragHandle(page, locator, deltaX) {
+  await locator.waitFor();
+  const box = await locator.boundingBox();
+  assert.ok(box, "resize handle should have a bounding box");
+  await page.mouse.move(box.x + box.width / 2, box.y + Math.min(40, Math.max(2, box.height / 2)));
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + deltaX, box.y + Math.min(40, Math.max(2, box.height / 2)), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(200);
 }
 
 async function mainQa(app) {

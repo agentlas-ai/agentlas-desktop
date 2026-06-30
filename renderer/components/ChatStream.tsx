@@ -127,15 +127,19 @@ export function ChatStream({
   const { t } = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const last = messages[messages.length - 1];
+  const scrollSignal = last
+    ? `${messages.length}:${last.id}:${last.text.length}:${last.busy ? 1 : 0}:${last.streaming ? 1 : 0}:${last.steps?.length ?? 0}`
+    : "empty";
 
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || !stickToBottomRef.current) return;
-    const handle = window.setTimeout(() => {
-      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-    }, 0);
-    return () => window.clearTimeout(handle);
-  }, [messages]);
+    const handle = window.requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(handle);
+  }, [scrollSignal]);
 
   function handleScroll() {
     const el = scrollRef.current;
@@ -200,7 +204,7 @@ function Bubble({
   interactionBusy: boolean;
   stopRequested: boolean;
 }) {
-  const { t } = useT();
+  const { t, locale } = useT();
   if (message.role === "user") {
     return (
       <div style={{ alignSelf: "flex-end", maxWidth: "75%" }}>
@@ -263,24 +267,36 @@ function Bubble({
       </div>
     );
   }
-  // agent — Markdown 렌더링. 작업 중이거나 step/tool 기록이 있으면 워킹 패널(완료 후엔 시간·토큰·툴블록).
-  const showWorking = message.busy || (message.steps && message.steps.length > 0);
+  // agent — Markdown 렌더링.
+  // 단일 실행은 한 줄 상태만 보여주고, 카드형 작업 패널은 실제 멀티/병렬 실행에서만 쓴다.
+  const hasProgress = Boolean(message.busy || message.status || (message.steps && message.steps.length > 0));
+  const showParallelWork = hasProgress && isParallelWorkMessage(message);
+  const showInlineRun = hasProgress && !showParallelWork;
   return (
     <div style={{ display: "flex", gap: 10, alignSelf: "stretch", maxWidth: 820 }}>
       <div style={{ position: "relative", flexShrink: 0 }}>
         <AgentAvatar name={agentName} tone={agentTone} size={28} />
       </div>
       <div style={{ minWidth: 0, flex: 1, paddingTop: 1 }}>
-        {message.pipeline && message.pipeline.length > 0 && (
+        {message.pipeline && message.pipeline.length > 0 && showParallelWork && (
           <PipelineStepper stages={message.pipeline} running={Boolean(message.busy)} />
         )}
-        {showWorking && (
+        {showParallelWork && (
           <WorkingPanel
             steps={message.steps ?? []}
             fallback={message.status}
             startedAt={message.startedAt}
             done={!message.busy}
             tokens={message.tokens}
+            onOpenWorkflow={onOpenWorkflow}
+            onStop={message.busy ? onStop : undefined}
+            stopRequested={stopRequested}
+          />
+        )}
+        {showInlineRun && (
+          <InlineRunStatus
+            message={message}
+            locale={locale}
             onOpenWorkflow={onOpenWorkflow}
             onStop={message.busy ? onStop : undefined}
             stopRequested={stopRequested}
@@ -301,7 +317,7 @@ function Bubble({
               color: "var(--ink)",
               fontSize: 14,
               lineHeight: 1.65,
-              marginTop: showWorking ? 10 : 0,
+              marginTop: showParallelWork || showInlineRun ? 10 : 0,
             }}
           >
             <Markdown
@@ -409,12 +425,110 @@ function LiveOutputPanel({
   );
 }
 
+function InlineRunStatus({
+  message,
+  locale,
+  onOpenWorkflow,
+  onStop,
+  stopRequested,
+}: {
+  message: StreamMessage;
+  locale: "ko" | "en";
+  onOpenWorkflow?: () => void;
+  onStop?: () => void;
+  stopRequested: boolean;
+}) {
+  const elapsed = useElapsedSeconds(message.startedAt, Boolean(message.busy));
+  const done = !message.busy;
+  const label = done ? (locale === "ko" ? "실행됨" : "Done") : (locale === "ko" ? "실행 중" : "Running");
+  const detail = inlineRunDetail(message, locale, done);
+  return (
+    <div style={inlineRunWrapStyle} role={message.busy ? "status" : undefined}>
+      <button
+        type="button"
+        onClick={onOpenWorkflow}
+        disabled={!onOpenWorkflow}
+        style={inlineRunButtonStyle(Boolean(onOpenWorkflow))}
+        title={onOpenWorkflow ? (locale === "ko" ? "실행 로그 열기" : "Open run log") : undefined}
+      >
+        <span aria-hidden style={inlineRunDotStyle(Boolean(message.busy))} />
+        <span style={inlineRunLabelStyle(Boolean(message.busy))}>{label}</span>
+        {detail && <span style={inlineRunDetailStyle}>{detail}</span>}
+        <span style={inlineRunTimeStyle}>{formatElapsed(elapsed, locale)}</span>
+        {message.tokens != null && message.tokens > 0 && (
+          <span style={inlineRunTimeStyle}>{formatTokens(message.tokens)} tokens</span>
+        )}
+        {onOpenWorkflow && <span aria-hidden style={inlineRunChevronStyle}>›</span>}
+      </button>
+      {onStop && (
+        <button
+          type="button"
+          data-chat-stop-button="true"
+          onPointerDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!stopRequested) onStop?.();
+          }}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!stopRequested) onStop?.();
+          }}
+          disabled={stopRequested}
+          style={inlineStopButtonStyle(stopRequested)}
+        >
+          <span aria-hidden style={inlineStopIconStyle} />
+          {stopRequested ? (locale === "ko" ? "중지 중" : "Stopping") : (locale === "ko" ? "정지" : "Stop")}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function isInternalSystemNote(text: string) {
   const trimmed = text.trim();
   return (
     trimmed.startsWith("Agentlas OS operated this surface hands-free.") ||
     trimmed.startsWith("Agentlas OS prepared this surface hands-free.")
   );
+}
+
+function isParallelWorkMessage(message: StreamMessage): boolean {
+  const steps = message.steps ?? [];
+  const stepAgents = steps
+    .map((step) => (step.agentName || step.role || "").trim().toLowerCase())
+    .filter(Boolean);
+  const pipelineAgents = (message.pipeline ?? [])
+    .map((stage) => (stage.agentId || stage.agentName || "").trim().toLowerCase())
+    .filter(Boolean);
+  const uniqueAgents = new Set([...stepAgents, ...pipelineAgents]);
+  const fanout = steps.some((step) => (step.delegateTo?.length ?? 0) > 1);
+  return uniqueAgents.size > 1 || fanout;
+}
+
+function inlineRunDetail(message: StreamMessage, locale: "ko" | "en", done: boolean): string {
+  const candidates = [
+    ...(message.steps ?? []).slice().reverse().map((step) => step.text),
+    message.status,
+  ];
+  for (const candidate of candidates) {
+    const cleaned = cleanInlineStatus(candidate, locale, done);
+    if (cleaned) return cleaned;
+  }
+  return done ? "" : locale === "ko" ? "응답 준비 중" : "Preparing response";
+}
+
+function cleanInlineStatus(value: string | undefined, locale: "ko" | "en", done: boolean): string {
+  const trimmed = compactStatusText(value);
+  if (!trimmed) return "";
+  if (isInternalRunStatus(trimmed)) return done ? "" : locale === "ko" ? "처리 중" : "Working";
+  if (/^(완료|done|completed|에이전트 작업 완료|agent work completed)$/i.test(trimmed)) return "";
+  if (/^(메시지 전송 중|sending|전송 중)/i.test(trimmed)) return done ? "" : trimmed;
+  return trimmed;
+}
+
+function isInternalRunStatus(value: string): boolean {
+  return /stormbreaker|scope-lock|verifier-first|agentlas\s*오케스트레이터|orchestrator|루프\s*stormbreaker|loop\s*[·:]|armed|route\b/i.test(value);
 }
 
 // ── 질문 카드 ───────────────────────────────────────────
@@ -1393,6 +1507,104 @@ function liveStateDotStyle(tone: LiveStateTone): CSSProperties {
     boxShadow: `0 0 0 4px color-mix(in srgb, ${color} 14%, transparent)`,
   };
 }
+
+const inlineRunWrapStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  minWidth: 0,
+  padding: "1px 0 4px",
+  flexWrap: "wrap",
+};
+
+function inlineRunButtonStyle(clickable: boolean): CSSProperties {
+  return {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 7,
+    minWidth: 0,
+    maxWidth: "100%",
+    border: "none",
+    background: "transparent",
+    padding: 0,
+    color: "var(--muted-deep)",
+    fontSize: 12.5,
+    lineHeight: 1.45,
+    cursor: clickable ? "pointer" : "default",
+    textAlign: "left",
+  };
+}
+
+function inlineRunDotStyle(active: boolean): CSSProperties {
+  return {
+    width: 7,
+    height: 7,
+    borderRadius: "50%",
+    flexShrink: 0,
+    background: active ? "var(--green-deep)" : "var(--muted)",
+    boxShadow: active ? "0 0 0 4px color-mix(in srgb, var(--green-deep) 13%, transparent)" : undefined,
+  };
+}
+
+function inlineRunLabelStyle(active: boolean): CSSProperties {
+  return {
+    flexShrink: 0,
+    fontWeight: 800,
+    color: active ? "transparent" : "var(--ink-soft)",
+    backgroundImage: active
+      ? "linear-gradient(90deg, var(--green-deep), var(--accent), var(--amber-deep))"
+      : undefined,
+    backgroundClip: active ? "text" : undefined,
+    WebkitBackgroundClip: active ? "text" : undefined,
+  };
+}
+
+const inlineRunDetailStyle: CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "var(--ink-soft)",
+  fontWeight: 650,
+};
+
+const inlineRunTimeStyle: CSSProperties = {
+  flexShrink: 0,
+  color: "var(--muted)",
+  fontSize: 11,
+  fontWeight: 650,
+};
+
+const inlineRunChevronStyle: CSSProperties = {
+  flexShrink: 0,
+  color: "var(--muted)",
+  fontSize: 18,
+  lineHeight: 1,
+};
+
+function inlineStopButtonStyle(disabled: boolean): CSSProperties {
+  return {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 5,
+    flexShrink: 0,
+    border: "none",
+    background: "transparent",
+    color: disabled ? "var(--muted)" : "#b42318",
+    padding: "0 2px",
+    fontSize: 11.5,
+    fontWeight: 800,
+    cursor: disabled ? "default" : "pointer",
+  };
+}
+
+const inlineStopIconStyle: CSSProperties = {
+  width: 7,
+  height: 7,
+  borderRadius: 2,
+  background: "currentColor",
+  flexShrink: 0,
+};
 
 const toolMiniButton: CSSProperties = {
   flexShrink: 0,

@@ -1,7 +1,7 @@
 // 좌측 사이드바 — Claude Desktop / Codex / Antigravity 스타일.
 // 섹션: 새 채팅 / 최근 채팅 / 프로젝트 / 자동화 / 라이브러리. Footer = 런타임 상태 + 설정.
 "use client";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useState, type PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
@@ -32,8 +32,15 @@ import { useTheme } from "@/lib/theme";
 
 const COLLAPSE_KEY = "agentlas.sidebar.collapsed";
 const CHATS_SECTION_COLLAPSE_KEY = "agentlas.sidebar.section.chats.collapsed";
+const WIDTH_KEY = "agentlas.sidebar.width";
 const COLLAPSED_WIDTH = 60;
 const EXPANDED_WIDTH = 248;
+const SIDEBAR_MIN_WIDTH = 204;
+const SIDEBAR_MAX_WIDTH = 380;
+
+function clampSidebarWidth(width: number): number {
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
+}
 const workspaceNavLinks = [
   { href: "/dashboard", ko: "대시보드", en: "Dashboard" },
   { href: "/build", ko: "만들기", en: "Build" },
@@ -96,6 +103,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   const currentAutomationId = searchParams.get("id");
   const [data, setData] = useState<SidebarData>(EMPTY);
   const [collapsed, setCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(EXPANDED_WIDTH);
   const [chatsCollapsed, setChatsCollapsed] = useState(false);
   const [chatListLimit, setChatListLimit] = useState(12);
   const [newChatDialogOpen, setNewChatDialogOpen] = useState(false);
@@ -161,6 +169,10 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
     try {
       const stored = window.localStorage.getItem(COLLAPSE_KEY);
       if (stored === "1") setCollapsed(true);
+      const storedWidth = Number(window.localStorage.getItem(WIDTH_KEY));
+      if (Number.isFinite(storedWidth) && storedWidth > 0) {
+        setSidebarWidth(clampSidebarWidth(storedWidth));
+      }
     } catch {
       // sandbox/private mode — 그냥 기본값 사용
     }
@@ -183,6 +195,31 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       }
       return next;
     });
+  }
+
+  function persistSidebarWidth(width: number) {
+    const next = clampSidebarWidth(width);
+    setSidebarWidth(next);
+    try {
+      window.localStorage.setItem(WIDTH_KEY, String(next));
+    } catch {
+      // ignore
+    }
+  }
+
+  function beginSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const onMove = (moveEvent: PointerEvent) => {
+      persistSidebarWidth(startWidth + moveEvent.clientX - startX);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
   }
 
   // ⌘[ 또는 Ctrl+[ 단축키로 토글
@@ -415,7 +452,8 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       className="glass-thin"
       data-tour-id="workspace.sidebar"
       style={{
-        width: EXPANDED_WIDTH,
+        position: "relative",
+        width: sidebarWidth,
         flexShrink: 0,
         borderRight: "1px solid var(--glass-border)",
         borderTop: "none",
@@ -428,6 +466,15 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         transition: "width 0.18s ease",
       }}
     >
+      <div
+        className="titlebar-nodrag"
+        role="separator"
+        aria-orientation="vertical"
+        title={locale === "en" ? "Resize sidebar" : "사이드바 너비 조절"}
+        onPointerDown={beginSidebarResize}
+        onDoubleClick={() => persistSidebarWidth(EXPANDED_WIDTH)}
+        style={sidebarResizeHandleStyle}
+      />
       <div
         className="titlebar-drag"
         style={{
@@ -1084,6 +1131,17 @@ const cancelButtonStyle: React.CSSProperties = {
   fontSize: 12.5,
   fontWeight: 650,
   cursor: "pointer",
+};
+
+const sidebarResizeHandleStyle: React.CSSProperties = {
+  position: "absolute",
+  top: 0,
+  right: 0,
+  bottom: 0,
+  width: 7,
+  cursor: "col-resize",
+  zIndex: 8,
+  touchAction: "none",
 };
 
 function CollapsedNav({

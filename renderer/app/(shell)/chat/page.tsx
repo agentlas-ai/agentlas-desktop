@@ -107,6 +107,10 @@ async function ensureSurfaceApproval(
 const WORKSPACE_OPEN_KEY = "agentlas.workspace.open";
 const NETWORK_OPEN_KEY = "agentlas.network.open";
 const RIGHT_PANEL_STATE_KEY = "agentlas.chat.right_panel";
+const RIGHT_PANEL_WIDTH_KEY = "agentlas.chat.right_panel_width";
+const RIGHT_PANEL_DEFAULT_WIDTH = 360;
+const RIGHT_PANEL_MIN_WIDTH = 300;
+const RIGHT_PANEL_MAX_WIDTH = 760;
 
 /** picker 모델 옵션 — runtime.listModels가 실시간 조회해 채워준다. */
 type ModelOption = { id: string; label: string; tag?: string };
@@ -151,6 +155,28 @@ function writeRightPanelPreference(open: boolean, tab: ChatRightPanelTab) {
     window.localStorage.removeItem(NETWORK_OPEN_KEY);
   } catch {
     // sandbox/private mode — 영속화 생략
+  }
+}
+
+function clampRightPanelWidth(width: number): number {
+  return Math.min(RIGHT_PANEL_MAX_WIDTH, Math.max(RIGHT_PANEL_MIN_WIDTH, Math.round(width)));
+}
+
+function readRightPanelWidth(): number {
+  try {
+    const raw = Number(window.localStorage.getItem(RIGHT_PANEL_WIDTH_KEY));
+    if (Number.isFinite(raw) && raw > 0) return clampRightPanelWidth(raw);
+  } catch {
+    // ignore
+  }
+  return RIGHT_PANEL_DEFAULT_WIDTH;
+}
+
+function writeRightPanelWidth(width: number) {
+  try {
+    window.localStorage.setItem(RIGHT_PANEL_WIDTH_KEY, String(width));
+  } catch {
+    // ignore
   }
 }
 
@@ -464,6 +490,7 @@ function ChatPage() {
   // 우측 패널 — file / agent / panel 탭을 하나의 rail 안에서 전환한다.
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState<ChatRightPanelTab>("agent");
+  const [rightPanelWidth, setRightPanelWidth] = useState(() => readRightPanelWidth());
   const workspaceOpen = rightPanelOpen && rightPanelTab === "file";
   const networkOpen = rightPanelOpen && rightPanelTab === "agent";
   // 슬래시 명령(/folder·/global)으로 워킹 폴더를 바꾸면 하단 폴더 바를 다시 읽게 하는 토큰
@@ -502,6 +529,11 @@ function ChatPage() {
     setRightPanelOpen(false);
     writeRightPanelPreference(false, rightPanelTab);
   }, [rightPanelTab]);
+  const resizeRightPanel = useCallback((width: number) => {
+    const next = clampRightPanelWidth(width);
+    setRightPanelWidth(next);
+    writeRightPanelWidth(next);
+  }, []);
 
   // 한 실행의 이벤트(라이브 스트림 OR 재접속 리플레이)를 메인 버블 + 네트워크 패널에 반영.
   // send()의 인라인 핸들러를 추출해 재접속 경로와 공유 — lastStatusRef는 중복 status 억제용(공유).
@@ -884,21 +916,20 @@ function ChatPage() {
       }
       setChat(c);
       setTitleDraft(c.title);
-      const [agents, history, projectsAll, firmsAll, envVars, plugins, generatedApps] = await Promise.all([
+      const [agents, history, projectsAll, firmsAll, envVars, plugins] = await Promise.all([
         api.team.list(),
         api.invoke.history(chatId),
         api.projects.list(),
         api.firms.list(),
         api.env.list(),
         api.mcpTools.listInstalled(),
-        api.appFactory.listApps(),
       ]);
       if (cancelled) return;
       setAllAgents(agents);
       setAllProjects(projectsAll);
       setAllFirms(firmsAll);
       setInstalledPlugins(plugins);
-      setAllGeneratedApps(generatedApps.filter((app) => app.status !== "archived"));
+      setAllGeneratedApps([]);
       // @ 멘션 popover에는 실제로 값이 저장된 키만 노출 — 비어있는 키를 멘션하면 invocation에서 빈 값이 주입돼 혼란.
       setAllEnvKeys(envVars.filter((e) => e.hasValue).map((e) => e.key));
       // CLI 슬래시 명령 스캔 (매 진입 시 최신) — 느려도 채팅 표시를 막지 않게 후속 로드.
@@ -1127,7 +1158,7 @@ function ChatPage() {
         router.push(appRoute.app.route);
         return true;
       }
-      const generatedAppRoute = appRoute ? null : parseGeneratedAppChatRoute(routeInput, allGeneratedApps);
+      const generatedAppRoute = appRoute ? null : parseGeneratedAppChatRoute(routeInput, []);
       if (generatedAppRoute?.action === "archive") {
         const appName = generatedAppDisplayName(generatedAppRoute.app);
         const placeholderId = uid();
@@ -1219,7 +1250,9 @@ function ChatPage() {
       ]);
       setBusy(true);
       setCancelPending(false);
-      setNetworkOpenPersisted(true);
+      if (agentGroup || (opts?.borrowAgents?.length ?? 0) > 0 || (opts?.pipelineStages?.length ?? 0) > 1) {
+        setNetworkOpenPersisted(true);
+      }
       cancelRequestedRef.current = false;
       setLiveAgents({
         [activeAgentId]: {
@@ -1294,7 +1327,7 @@ function ChatPage() {
         return false;
       }
     },
-    [agent, allGeneratedApps, chat, busy, locale, router, setNetworkOpenPersisted, t, subscribeRun],
+    [agent, agentGroup, chat, busy, locale, router, setNetworkOpenPersisted, t, subscribeRun],
   );
 
   // 진행 중 실행 취소 — 입력창의 정지 버튼(전송 버튼이 busy일 때 변신) / Cmd/Ctrl+Esc.
@@ -1548,7 +1581,6 @@ function ChatPage() {
             return;
           }
           const scaffold = await ensureScaffold();
-          const appRegistryPath = scaffold.record?.id ? `/apps/generated?id=${scaffold.record.id}` : "/apps";
           const launchUrl = scaffold.launchUrl || scaffold.previewPath;
           const devCommand = scaffold.devCommand || "node scripts/serve.mjs";
           if (action.type === "scaffold-app") {
@@ -1556,7 +1588,6 @@ function ChatPage() {
               [
                 `App scaffold ready: ${scaffold.appName}`,
                 "",
-                `Apps registry: ${appRegistryPath}`,
                 `Run: ${devCommand}`,
                 `Open local app: ${launchUrl}`,
                 `Setup: ${scaffold.setupPath}`,
@@ -1583,7 +1614,6 @@ function ChatPage() {
                 `Status: ${result.status}`,
                 `Steps: ${result.steps.filter((step) => step.status === "completed").length}/${result.steps.length}`,
                 result.waitingOn.length ? `Waiting: ${result.waitingOn.join(", ")}` : "Waiting: none",
-                `Apps registry: ${appRegistryPath}`,
                 `Open local app: ${launchUrl}`,
                 result.appTool ? `Tool: ${result.appTool.toolName}` : "",
               ]
@@ -2281,7 +2311,7 @@ function ChatPage() {
             projects: allProjects,
             firms: allFirms,
             apps: INSTALLED_APPS,
-            generatedApps: allGeneratedApps,
+            generatedApps: [],
             envKeys: allEnvKeys,
             commands: cliCommands,
           }}
@@ -2303,7 +2333,6 @@ function ChatPage() {
           artifact={artifact}
           surface={surface}
           filePreview={mediaPreview}
-          generatedApps={allGeneratedApps}
           onSurfaceAction={handleSurfaceAction}
           onSurfaceStatePatch={handleSurfaceStatePatch}
           firm={firm}
@@ -2315,6 +2344,8 @@ function ChatPage() {
           timeline={netTimeline}
           chatTitle={chat.title}
           latestUserPrompt={latestUserPrompt}
+          width={rightPanelWidth}
+          onResizeWidth={resizeRightPanel}
         />
       )}
     </div>
