@@ -64,6 +64,12 @@ the [Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/rel
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
 
+- **2026-06-30 · v0.5.4 Chat routing + stop controls** — chat agent calling now
+  labels the router as `알아서 에이전트 부르기`, keeps `@` autocomplete selection
+  stable, disables auto-routing after explicit agent selection, retries
+  recommendation search without closing the sheet, and makes stop visible and
+  cancellable. Workspace tours no longer inject hardcoded sample labels into live
+  work, and image outputs render inline with right-panel preview support.
 - **2026-06-30 · v0.5.3 Agent groups + Hub TF permissions** — saved Agent
   groups can combine org-chart, local, and Hub agents into one higher-level
   orchestrator chat. Borrowed Hub task-force sub-runs now inherit the user's

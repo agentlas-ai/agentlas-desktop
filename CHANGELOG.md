@@ -13,6 +13,11 @@
   best-effort and non-blocking; reading is fully guarded, so a missing or partial
   map never affects a run. The zero-dependency generator is bundled with the app
   (`electron/memory/code-map-gen.mjs`).
+- Added a focused Electron QA harness for the chat agent-call surface, covering
+  `@` autocomplete keyboard/mouse stability, explicit-agent routing, recommendation
+  retry, plain execution payloads, and stop-button cancellation.
+- Added an Agentlas Desktop UI/UX stabilization playbook documenting the design
+  system and failure patterns that caused recent surface regressions.
 
 ### Changed
 
@@ -23,6 +28,12 @@
   (`useSmoothReveal`) advances the visible text toward the received buffer each
   animation frame, so the answer flows out evenly; it snaps to the full text the
   moment the turn completes, and reading is unaffected when not streaming.
+- Renamed the chat router chip from `에이전트 찾기` to `알아서 에이전트 부르기` and
+  removed hardcoded tour-source labels from the live workspace.
+- Chat and project page tours no longer auto-open over active work; they remain
+  available through the help menu.
+- Local image outputs and file paths now render as first-class media in the chat
+  stream and can open in the right-side preview panel.
 
 ### Fixed
 
@@ -42,6 +53,21 @@
   an agent loads via `required_plugins`, not route targets, so they are now
   excluded from the agent route pool. Same request now correctly surfaces the
   `no-ai-slop-copywriter` agent that the plugin's spurious score had been hiding.
+- **Agent-call autocomplete no longer jumps away from the hovered or keyboard-selected
+  row.** Autocomplete active state now resets only when the actual trigger/query
+  changes, not on every parent render.
+- **Explicit `@agent` selection disables automatic routing.** Choosing an agent
+  directly clears the recommendation mode so the selected agent is the one that
+  runs.
+- **Recommendation-sheet controls now keep the user in flow.** `다른 에이전트 찾기`
+  reruns route preview without closing the sheet, and `추천 없이 실행` no longer
+  forwards a hidden router agent or borrowed-agent payload.
+- **Stop is visible and actually cancels.** The chat input and live working card
+  expose a stop control, preserve the current run id across metadata refreshes,
+  and send cancel even if the stop request races with run-id arrival.
+- Gemini CLI launches with a real terminal/color environment and disables default
+  extensions for prompt runs; Grok CLI can now load its API key from the local vault
+  when the process environment is missing it.
 
 ## 0.5.3 — 2026-06-30
 
