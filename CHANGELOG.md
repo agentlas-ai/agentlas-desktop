@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.5 — Unreleased
+## 0.5.5 — 2026-06-30
 
 ### Changed
 
@@ -14,6 +14,9 @@
   lives in the Hephaestus source/runtime but the packaged app carries its own
   bundled engine, so it only takes effect on a rebuild (or once the fix lands in
   the canonical Hephaestus the build clones).
+- Packaged builds now pin the embedded engine to Hephaestus `v1.0.4` instead of
+  a moving `main` checkout, so the signed app, Windows/Linux builds, and CLI
+  runtime release can be traced to the same engine tag.
 
 ## 0.5.4 — 2026-06-30
 

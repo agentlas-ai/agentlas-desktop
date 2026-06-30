@@ -64,6 +64,10 @@ the [Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/rel
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
 
+- **2026-06-30 · v0.5.5 Hephaestus v1.0.4 engine pin** — desktop builds now
+  bundle the tagged Hephaestus `v1.0.4` router fix, excluding plugins from
+  user-facing agent routing so tools like Shopify cannot be launched as agents.
+  The composer also expands with typed content instead of staying fixed-height.
 - **2026-06-30 · v0.5.4 Chat routing + stop controls** — chat agent calling now
   labels the router as `알아서 에이전트 부르기`, keeps `@` autocomplete selection
   stable, disables auto-routing after explicit agent selection, retries

@@ -55,6 +55,7 @@ jobs:
       # AGENTLAS_DESKTOP_RELEASE_TOKEN already exists in repo secrets.
       GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
       GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+      HEPHAESTUS_REF: v1.0.4
 
     steps:
       - uses: actions/checkout@v4

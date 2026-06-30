@@ -63,6 +63,32 @@ async function main() {
     await page.setViewportSize({ width: 1320, height: 920 }).catch(() => undefined);
     await page.waitForLoadState("domcontentloaded");
     await page.waitForFunction(() => Boolean(window.agentlas));
+    await page.evaluate(() => {
+      try {
+        window.localStorage.setItem("agentlas.onboarded", "1");
+      } catch {
+        // Some transient Electron documents deny storage; the visible onboarding
+        // skip button below covers that first-run path.
+      }
+      window.location.href = "/chat";
+    });
+    await Promise.race([
+      page.waitForFunction(() => location.pathname.includes("/chat")),
+      page.waitForFunction(() => location.pathname.includes("/onboarding")),
+    ]);
+    if (new URL(page.url()).pathname.includes("/onboarding")) {
+      await page.getByRole("button", { name: /건너뛰기|Skip/i }).click();
+      await page.waitForFunction(() => !location.pathname.includes("/onboarding"));
+      await page.evaluate(() => {
+        try {
+          window.localStorage.setItem("agentlas.onboarded", "1");
+        } catch {
+          // Continue; the skip action already persisted onboarding state.
+        }
+        window.location.href = "/chat";
+      });
+      await page.waitForFunction(() => location.pathname.includes("/chat"));
+    }
     await app.evaluate(({ ipcMain }) => {
       globalThis.__qaRouting = { routeCalls: 0, runs: [], cancels: [] };
       ipcMain.removeHandler("hephaestus:routePreview");
