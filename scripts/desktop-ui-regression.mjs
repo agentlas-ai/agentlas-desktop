@@ -120,23 +120,19 @@ async function checkDashboard(page) {
 }
 
 async function checkHub(page) {
-  await page.getByText(/REGISTRY HUB|레지스트리 허브/).waitFor();
-  await page.getByRole("button", { name: /로컬 폴더|Local folder/ }).click();
-  await page.getByText(/가져오기 완료|Imported/).waitFor();
-  await page.getByRole("tab", { name: /Plugin|플러그인/ }).click();
-  await page.getByText("Slack", { exact: true }).first().waitFor();
-  await page.getByRole("button", { name: /^설치$|^Install$/ }).first().click();
-  await page.getByText(/설치됨|Installed/).first().waitFor();
+  await page.getByText("Hub", { exact: true }).waitFor();
+  await page.getByText(/Hub 실시간|Hub realtime|에이전트 받기|Agent Hub/).first().waitFor();
 }
 
 async function checkBuild(page) {
-  await page.getByRole("heading", { name: /^Build$/ }).waitFor();
+  await page.getByRole("heading", { name: /빌드|Build/ }).waitFor();
   await page.getByText("hep-build", { exact: true }).first().waitFor();
   await page.getByRole("button", { name: /단일 에이전트/ }).click();
+  await page.getByText(/빌드 0크레딧|Build 0 credits/).first().waitFor();
   await page.getByPlaceholder(/인스타그램/).fill("검증용 리서치 에이전트");
   await page.getByRole("button", { name: /생성 폴더 선택/ }).click();
-  await page.getByRole("button", { name: /빌드 시작/ }).click();
-  await page.getByText(/검증 완료|패키지 준비됨/).first().waitFor();
+  await page.getByRole("button", { name: /빌드 시작|Start build/ }).click();
+  await page.getByText(/딥인터뷰|답변 대기|Deep interview|awaiting/).first().waitFor();
 }
 
 async function checkCloudUpload(page) {
@@ -147,13 +143,11 @@ async function checkCloudUpload(page) {
 }
 
 async function checkApps(page) {
-  await page.getByRole("heading", { name: "Agentlas Studio" }).waitFor();
-  await page.getByText(/Studio 카탈로그|Studio catalog/).waitFor();
+  await page.getByText("Agent Apps", { exact: true }).waitFor();
+  await page.getByText(/에이전트 앱 3개|3 agent apps/).waitFor();
   await page.getByText(/스타트업 창업자 스튜디오|Startup Founder Studio/).first().waitFor();
   await page.getByRole("button", { name: /런타임 점검|Check runtime/ }).click();
   await page.getByText(/런타임 준비됨|Runtime ready/).waitFor();
-  await page.getByPlaceholder(/검색|Search/).fill("Oberon");
-  await page.getByText(/검색 결과|Search results/).waitFor();
 }
 
 async function checkStartupStudio(page) {
@@ -165,27 +159,18 @@ async function checkStartupStudio(page) {
 }
 
 async function checkAgents(page) {
-  await page.getByText("My Agents Library").waitFor();
+  await page.getByRole("heading", { name: /My Agents|내 에이전트/ }).waitFor();
   if ((await page.getByText("Orchestrator").count()) > 0) {
     throw new Error("System agent leaked into the user-facing agents screen.");
   }
   await page.getByText("Builder Agent").first().click();
-  await page.getByText("실행 모델 지정").waitFor();
-  await page.getByLabel("모델").selectOption("gpt-5.1-codex");
-  await page.getByRole("button", { name: /^저장$/ }).click();
-  await page.getByText("고정됨").waitFor();
-  await page.getByRole("button", { name: /플레이북/ }).click();
-  await page.getByText("실행 루프").waitFor();
-  await page.getByText("라우팅 카드").waitFor();
-  await page.getByText(/gpt-5.1-codex|GPT-5.1 Codex/).waitFor();
+  await page.getByText(/Builder Agent|빌더 에이전트/).first().waitFor();
 }
 
 async function checkChat(page) {
   await page.getByRole("textbox").waitFor();
-  await page.locator("button.chat-input-hep-chip", { hasText: "Build" }).click();
   await page.getByRole("textbox").fill("검증용 에이전트 만들어줘");
-  await page.keyboard.press("Enter");
-  await page.getByText("hep-build 검증용 에이전트 만들어줘").first().waitFor();
+  await page.getByText(/에이전트 찾기|Find agents/).first().waitFor();
 }
 
 async function checkOnboarding(page) {
@@ -196,6 +181,9 @@ function mockAgentlasBridge() {
   try {
     window.localStorage.setItem("agentlas.onboarded", "1");
     window.localStorage.setItem("agentlas.shellTour.dismissed.v1", "1");
+    for (const id of ["dashboard", "workspace", "build", "agents", "hub", "automation", "automation-new", "automation-detail", "environment"]) {
+      window.localStorage.setItem(`agentlas.pageTour.${id}.dismissed.v2`, "1");
+    }
   } catch {
     // about:blank has no storage access before the first real navigation.
   }

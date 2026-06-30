@@ -1863,6 +1863,8 @@ export interface McpInvocationRequest {
   /** 추천 시트의 네트워크 모드에서 고른 Hub 에이전트 슬러그 — runMcpInvocation 이 hep-call 로
    *  이들을 빌려와(BYOM) 프롬프트 앞에 borrow 지시를 붙여 데스크탑 런타임으로 실행한다. */
   borrowAgents?: string[];
+  /** 추천 시트의 pipeline 모드에서 받은 stage 계약 — 런타임이 단계별 입력/출력 handoff로 실행한다. */
+  pipelineStages?: RecStage[];
   /** 저신뢰 라우팅 결정을 호스트 LLM Router Agent로 재판단해야 할 때 전달되는 에스컬레이션. */
   routerAgent?: RecRouterAgent;
 }

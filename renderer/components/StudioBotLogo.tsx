@@ -13,7 +13,7 @@ type StudioBotLogoProps = {
 export function StudioBotLogo({
   size = 36,
   wordmark = false,
-  label = "Agentlas Studio",
+  label = "Agent Apps",
   style,
   markStyle,
   textStyle,

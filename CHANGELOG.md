@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+## 0.5.2 — 2026-06-30
+
+### Added
+
+- **Live Hub borrowed task-force execution.** Selecting multiple Hub agents from
+  the recommendation sheet now runs a real local orchestrator flow instead of
+  flattening them into one prompt: plan per-agent input packets, run each
+  borrowed Hub agent in an isolated local sub-session, then synthesize the final
+  answer.
+- Added visible coordination events for borrowed Hub TF runs:
+  `plan → delegate → synthesize`, with per-agent `borrow:<slug>` completion
+  markers so the right panel can show the actual handoff.
+- Added regression and live smoke harnesses for the borrowed task-force path.
+
+### Security
+
+- Borrowed Hub sub-runs are forced to read-only permission and no longer inherit
+  MCP auto-approval config, allowed-tool lists, Codex MCP config args, or vault
+  environment variables from the orchestrator.
+- Added host-policy prompts for untrusted borrowed directives, secret-file
+  refusal guidance, and output redaction for common tokens/API keys/private keys
+  across status, tool, partial, and final events.
+
+### Changed
+
+- Recommended pipeline stages now reach the main runtime as an execution
+  contract, not only as a placeholder UI stepper.
+- Desktop Build copy and README keep the pricing boundary explicit: Build itself
+  is 0 Agentlas credits; model usage is the user's runtime/subscription/key;
+  Hub Network calls remain separately quoted and credited.
+
 ## 0.5.0 — 2026-06-29
 
 22개 UI/기능 항목 + 3차 병렬 검수 + 버그헌터 5스웜 수정.

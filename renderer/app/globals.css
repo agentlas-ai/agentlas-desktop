@@ -5713,7 +5713,7 @@ button[data-toggle-state="on"] {
   color: var(--rd-accent-text, var(--rd-accent));
 }
 
-/* ── Agentlas Studio — 아틀리에/컨트롤룸 (no-slop 리디자인, 변수 기반=라이트/다크 안전) ── */
+/* ── Agent Apps — 아틀리에/컨트롤룸 (no-slop 리디자인, 변수 기반=라이트/다크 안전) ── */
 .studio-page {
   max-width: 1180px;
   margin: 0 auto;

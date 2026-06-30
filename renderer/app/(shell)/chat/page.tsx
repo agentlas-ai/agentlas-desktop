@@ -22,7 +22,7 @@ import type {
   ToolFactoryScaffoldResult,
   ToolFactoryToolRecord,
 } from "@/lib/types";
-import type { Recommendation, RecExecChoice, RecRouterAgent } from "@shared/types";
+import type { Recommendation, RecExecChoice, RecRouterAgent, RecStage } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { extractQuestions } from "@/lib/ask-question";
 import { ChatInput } from "@/components/ChatInput";
@@ -1022,8 +1022,8 @@ function ChatPage() {
         planMode?: boolean;
         goalMode?: boolean;
         appsGenerateMode?: boolean;
-        /** 추천 시트의 pipeline 픽이면 에이전트 플레이스홀더 상단에 보여줄 단계 계획. */
-        pipelineStages?: PipelineStage[];
+        /** 추천 시트의 pipeline 픽이면 main에도 전달하고 에이전트 플레이스홀더 상단에 보여줄 단계 계획. */
+        pipelineStages?: RecStage[];
         /** 추천 시트의 네트워크 픽이면 빌려올 Hub 에이전트 슬러그 — 백엔드가 hep-call 로 borrow. */
         borrowAgents?: string[];
         /** Router Agent 에스컬레이션 — main 런타임이 시스템 프롬프트 앞에 주입한다. */
@@ -1107,7 +1107,15 @@ function ChatPage() {
           text: "",
           busy: true,
           startedAt,
-          pipeline: opts?.pipelineStages,
+          pipeline: opts?.pipelineStages?.map((stage) => ({
+            order: stage.order,
+            kind: stage.kind,
+            agentId: stage.agentId,
+            agentName: stage.agentName ?? stage.agentId,
+            produces: stage.produces,
+            consumes: stage.consumes,
+            status: "pending" as const,
+          })),
           steps: [
             {
               id: uid(),
@@ -1158,6 +1166,7 @@ function ChatPage() {
           targetAppId: generatedAppRoute?.action === "edit" ? generatedAppRoute.app.id : undefined,
           targetAppAction: generatedAppRoute?.action === "edit" ? "edit" : undefined,
           borrowAgents: opts?.borrowAgents,
+          pipelineStages: opts?.pipelineStages,
           routerAgent: opts?.routerAgent,
         });
         window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chat.id } }));
@@ -1732,16 +1741,9 @@ function ChatPage() {
         break;
       case "pipeline": {
         // 단계 계획을 플레이스홀더 메시지 상단 스테퍼로 보여준다(PRD→배포 가시화).
-        const stages: PipelineStage[] = (choice.stages ?? []).map((s) => ({
-          order: s.order,
-          kind: s.kind,
-          agentName: s.agentName ?? s.agentId,
-          agentId: s.agentId,
-          status: "pending" as const,
-        }));
         void send(`stormbreaker ${text}`, {
           ...sendOpts,
-          pipelineStages: stages.length ? stages : undefined,
+          pipelineStages: choice.stages?.length ? choice.stages : undefined,
         });
         break;
       }

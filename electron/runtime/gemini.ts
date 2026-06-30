@@ -5,10 +5,18 @@
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, probeCliVersion, spawnCli, writeStdin } from "./exec";
+import {
+  clearRuntimeSession,
+  getRuntimeSession,
+  saveRuntimeSession,
+} from "../store/runtime-sessions";
+
+const KIND = "gemini";
 
 const CANDIDATES = [
   "gemini",
@@ -80,6 +88,24 @@ function buildPrompt(req: RunnerRequest): string {
   return parts.join("\n");
 }
 
+/**
+ * Gemini CLI 세션 지문. 사용자 입력은 매 턴 달라지므로 제외하고, 세션을 갈라야 하는
+ * 시스템/권한/표면/모델 설정만 반영한다.
+ */
+function systemFingerprint(req: RunnerRequest): string {
+  return createHash("sha256")
+    .update(req.systemPrompt)
+    .update("\0")
+    .update(req.locale)
+    .update("\0")
+    .update(req.permission ?? "")
+    .update("\0")
+    .update(req.forceSurface ? "force-surface" : "normal")
+    .update("\0")
+    .update(req.model ?? "")
+    .digest("hex");
+}
+
 export const runGemini: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
@@ -89,20 +115,46 @@ export const runGemini: Runner = async (
     throw new Error(tStatus(req.locale, "errCliMissingGemini"));
   }
 
+  const fingerprint = req.chatId ? systemFingerprint(req) : null;
+  const savedSession = req.chatId ? getRuntimeSession(req.chatId, KIND) : null;
+  const storedSessionId =
+    savedSession && fingerprint && savedSession.fingerprint === fingerprint
+      ? savedSession.sessionId
+      : null;
+  if (req.chatId && savedSession && fingerprint && savedSession.fingerprint !== fingerprint) {
+    clearRuntimeSession(req.chatId, KIND);
+  }
+  const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
+  const createSessionId = !resumeSessionId && (req.chatId || req.runtimeSessionId)
+    ? randomUUID()
+    : undefined;
+
   if (req.images && req.images.length > 0) {
     events.onStatus(tStatus(req.locale, "cliNoImage", { backend: req.backendLabel }));
+  } else if (resumeSessionId) {
+    events.onStatus(
+      req.locale === "ko"
+        ? `${req.backendLabel} 세션 이어가는 중...`
+        : `Resuming ${req.backendLabel} session...`,
+    );
   } else {
     events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
   }
 
-  const prompt = buildPrompt(req);
+  const prompt = resumeSessionId ? req.userPrompt : buildPrompt(req);
 
   return new Promise<RunnerResult>((resolve, reject) => {
     // Gemini CLI 비대화형(헤드리스) 모드 — `-p ""`로 헤드리스를 트리거하고 실제 프롬프트는
     // stdin으로 싣는다(`-p`는 stdin 입력 뒤에 append됨). argv로 큰 프롬프트를 넘기면 Windows
     // cmd.exe 8191자 한계로 잘려 exit 1. GEMINI_CLI_TRUST_WORKSPACE: 비대화형은 신뢰-폴더
     // 프롬프트를 띄울 수 없어, 미설정 시 "not running in a trusted directory"로 죽는다(exit 55).
-    const child = spawnCli(bin, ["--prompt", ""], {
+    const sessionArgs = resumeSessionId
+      ? ["--resume", resumeSessionId]
+      : createSessionId
+        ? ["--session-id", createSessionId]
+        : [];
+    const modelArgs = req.model && req.model.trim() ? ["--model", req.model.trim()] : [];
+    const child = spawnCli(bin, [...sessionArgs, ...modelArgs, "--prompt", ""], {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...(req.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" },
       // 사용자가 지정한 프로젝트 폴더에서 실행 — 미지정이면 전용 폴더.
@@ -142,8 +194,17 @@ export const runGemini: Runner = async (
         return;
       }
       if (code === 0) {
-        resolve({ text: stdout.trim() });
+        const sessionId = resumeSessionId ?? createSessionId;
+        if (req.chatId && fingerprint && sessionId) {
+          saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint);
+        }
+        resolve({ text: stdout.trim(), sessionId });
       } else {
+        if (resumeSessionId && req.chatId) clearRuntimeSession(req.chatId, KIND);
+        if (resumeSessionId) {
+          void runGemini({ ...req, runtimeSessionId: undefined }, events).then(resolve, reject);
+          return;
+        }
         reject(
           new Error(
             `gemini CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`,

@@ -75,7 +75,7 @@ async function clickLink(href) {
   }
 }
 async function openTile(name, shot) {
-  await hover("Studio");
+  await hover("Agent Apps");
   await clickLink("/apps");
   await win.waitForTimeout(900);
   try {

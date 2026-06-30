@@ -1,6 +1,6 @@
 // 좌측 글로벌 내비게이션 사이드바 — 기존 상단 TopNavbar를 대체.
 // 레퍼런스(Untitled UI) 패턴: 로고 헤더 → 검색 → 1차 메뉴 → 펼침 섹션 → 하단 설정/계정.
-//   · 상단 드롭다운(Agent Forge/Studio/Hub/Environment)을 펼침 섹션으로 변환.
+//   · 상단 드롭다운(Agent Forge/Agent Apps/Hub/Environment)을 펼침 섹션으로 변환.
 //   · 접기(collapsed) 모드: 아이콘만 + hover 툴팁. 상태는 localStorage 영속.
 //   · 최상단은 titlebar-drag(맥 신호등 회피 + 창 드래그).
 "use client";

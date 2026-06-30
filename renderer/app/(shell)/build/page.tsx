@@ -37,10 +37,10 @@ import type { ChatQuestion } from "@/components/ChatStream";
 
 type StageState = "pending" | "active" | "done" | "error";
 
-const MODES: { id: Mode; label: string; labelEn: string; desc: string; descEn: string; credits: number; icon: typeof IconBuilding }[] = [
-  { id: "single", label: "단일 에이전트", labelEn: "Single agent", desc: "혼자 일하는 에이전트 하나 — 기억·기술·스스로 개선", descEn: "A single agent that works on its own — memory, skills, self-improvement", credits: 5, icon: IconWand },
-  { id: "team", label: "멀티 에이전트 팀", labelEn: "Multi-agent team", desc: "여러 역할이 함께 일하는 에이전트 팀 (기획·실행·검수)", descEn: "A team of agents that plan, run, and review together", credits: 10, icon: IconUsers },
-  { id: "package", label: "기존 에이전트 패키징", labelEn: "Package existing agent", desc: "외부/로컬 에이전트를 Agentlas 아키텍처로 변환·복구", descEn: "Convert/repair an external or local agent into Agentlas", credits: 0, icon: IconBuilding },
+const MODES: { id: Mode; label: string; labelEn: string; desc: string; descEn: string; icon: typeof IconBuilding }[] = [
+  { id: "single", label: "단일 에이전트", labelEn: "Single agent", desc: "혼자 일하는 에이전트 하나 — 기억·기술·스스로 개선", descEn: "A single agent that works on its own — memory, skills, self-improvement", icon: IconWand },
+  { id: "team", label: "멀티 에이전트 팀", labelEn: "Multi-agent team", desc: "여러 역할이 함께 일하는 에이전트 팀 (기획·실행·검수)", descEn: "A team of agents that plan, run, and review together", icon: IconUsers },
+  { id: "package", label: "기존 에이전트 패키징", labelEn: "Package existing agent", desc: "외부/로컬 에이전트를 Agentlas 아키텍처로 변환·복구", descEn: "Convert/repair an external or local agent into Agentlas", icon: IconBuilding },
 ];
 
 // 빌드 첫 진입 빈 화면을 없애는 스타터(value-first). 클릭하면 요청 입력을 채운다.
@@ -85,9 +85,8 @@ function fmtLogTime(at: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function buildCreditLabel(credits: number, ko: boolean): string {
-  if (ko) return `빌드 ${credits}크레딧`;
-  return `${credits} build credits`;
+function buildLocalBillingLabel(ko: boolean): string {
+  return ko ? "빌드 0크레딧" : "Build 0 credits";
 }
 
 function friendlyHephaestusMessage(raw: string, ko: boolean): string {
@@ -323,7 +322,7 @@ export default function BuildPage() {
                       </span>
                       <strong>{ko ? m.label : m.labelEn}</strong>
                       <span className="build-mode-desc">{ko ? m.desc : m.descEn}</span>
-                      <span className="build-mode-price">{buildCreditLabel(m.credits, ko)}</span>
+                      <span className="build-mode-price">{buildLocalBillingLabel(ko)}</span>
                       <span className="build-mode-check" aria-hidden="true">
                         <IconCheck size={12} />
                       </span>
@@ -407,8 +406,8 @@ export default function BuildPage() {
               )}
               <p className="build-autoadd-hint">
                 {ko
-                  ? "BYOK/BYOC 기준: 단일 빌드 5크레딧, 멀티 빌드 10크레딧. 모델 사용료는 내 구독/키에서 직접 처리됩니다."
-                  : "BYOK/BYOC pricing: single builds are 5 credits; multi builds are 10 credits. Model usage stays on your own subscription/key."}
+                  ? "데스크톱 Build 자체는 Agentlas 크레딧 0입니다. 이 Mac의 Claude Code/Codex/Gemini/BYOK/Ollama로 실행되며, Hub Network 호출은 별도 견적/확인 후 크레딧을 씁니다."
+                  : "Desktop Build itself costs 0 Agentlas credits. It runs on this Mac through Claude Code/Codex/Gemini/BYOK/Ollama; Hub Network calls spend credits separately after quote and confirmation."}
               </p>
             </div>
 

@@ -92,7 +92,7 @@ export function TopNavbar() {
           )}
           {dropdown === "studio" && (
             <>
-              <DropdownLink href="/apps" icon={<IconApps size={14} />} label="Apps" sub="Studio catalog" />
+              <DropdownLink href="/apps" icon={<IconApps size={14} />} label="Apps" sub="Agent app catalog" />
               <DropdownLink href="/automation" icon={<IconBolt size={14} />} label="Automations" sub="Scheduled background tasks" />
             </>
           )}
@@ -141,7 +141,7 @@ export function TopNavbar() {
           <NavItem label="Dashboard" href="/dashboard" active={pathname.startsWith("/dashboard")} />
           <NavItem label="Workspace" href="/chat" active={pathname.startsWith("/chat") || pathname.startsWith("/project")} />
           <NavItem label="Agent Forge" href="/build" dropdown="agent_forge" active={pathname.startsWith("/library/agents") || pathname.startsWith("/build")} />
-          <NavItem label="Studio" href="/apps" dropdown="studio" active={studioActive} />
+          <NavItem label="Agent Apps" href="/apps" dropdown="studio" active={studioActive} />
           <NavItem label="Hub" href="/marketplace" dropdown="hub" active={pathname.startsWith("/marketplace") || pathname.startsWith("/cloud")} />
           <NavItem label="Environment" href="/library/env" dropdown="environment" active={environmentActive} />
         </nav>

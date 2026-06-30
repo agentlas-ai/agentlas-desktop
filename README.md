@@ -64,15 +64,21 @@ the [Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/rel
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
 
+- **2026-06-30 · v0.5.2 Live borrowed Hub task forces** — recommendation-sheet
+  Network picks with multiple Hub agents now execute as a real
+  plan/delegate/synthesize task force. Borrowed Hub sub-runs are read-only,
+  do not inherit MCP auto-approval or vault env, and redact common secret shapes
+  before status/tool/final output reaches the UI.
 - **2026-06-30 · v0.5.0 Desktop Hub parity** — Desktop Marketplace now reads the
   live Hub-only catalog, removes local hardcoded fallback agents, preserves real
   Hub partial results without poisoning cache, and ships Studio/Sidebar/QA fixes
   through the signed public macOS release channel.
 - **2026-06-29 · v0.4.4 BYOK Build pricing** — Desktop Build now treats local
-  BYOK/BYOC creation as a light builder action: single-agent builds show
-  5 credits and multi-agent team builds show 10 credits, with model usage still
-  handled by the user's own subscription or API key. This release also removes
-  local absolute paths and realistic-looking fake keys from public source files.
+  BYOK/BYOC creation as a 0 Agentlas-credit builder action, with model usage
+  still handled by the user's own subscription, local runtime, or API key.
+  Hub Network calls remain billed separately after quote and confirmation. This
+  release also removes local absolute paths and realistic-looking fake keys from
+  public source files.
 - **2026-06-27 · Always-on Stormbreaker Loop** — non-trivial chat and
   automation runs now get scope lock, goal decomposition, work packets,
   verification, immediate continuation passes, background continuation,

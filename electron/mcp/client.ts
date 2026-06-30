@@ -40,6 +40,7 @@ import { getProject } from "../store/projects";
 import { getFirm } from "../store/firms";
 import { getResolvedOrg } from "../store/org-spec";
 import { runFirmInvocation } from "./firm-orchestrator";
+import { runBorrowedTaskForceInvocation } from "./borrowed-task-force";
 import { recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
 import { curateReply } from "../memory/curator";
@@ -65,6 +66,7 @@ import type {
   InstalledAgent,
   McpInvocationEvent,
   McpInvocationRequest,
+  RecStage,
   RecRouterAgent,
   RuntimeStatus,
 } from "../../shared/types";
@@ -190,6 +192,38 @@ function buildPlanUserPrompt(prompt: string, locale: "ko" | "en"): string {
           "Then proceed when appropriate, and only call the work complete with real verification results.",
         ].join("\n");
   return `${guide}\n\nUser request:\n${prompt}`;
+}
+
+function buildRecommendedPipelineUserPrompt(prompt: string, stages: RecStage[], locale: "ko" | "en"): string {
+  const stageLines = stages
+    .map((stage) =>
+      [
+        `${stage.order}. ${stage.kind}`,
+        stage.agentId ? `agent: ${stage.agentName ?? stage.agentId} (${stage.agentId})` : undefined,
+        stage.consumes?.length ? `consumes: ${stage.consumes.join(", ")}` : undefined,
+        stage.produces?.length ? `produces: ${stage.produces.join(", ")}` : undefined,
+      ]
+        .filter(Boolean)
+        .join(" | "),
+    )
+    .join("\n");
+  const guide =
+    locale === "ko"
+      ? [
+          "Agentlas 추천 파이프라인 모드가 켜져 있다.",
+          "아래 stage들을 단순 장식이 아니라 실행 계약으로 취급하라.",
+          "먼저 각 stage에 들어갈 input packet을 정하라: inputType, inputKind, brief, consumes, expectedOutput, constraints.",
+          "각 stage의 산출물을 다음 stage 입력으로 넘기고, 마지막에 하나의 사용자 답변으로 종합하라.",
+          "실제로 별도 로컬/Hub 에이전트를 호출할 수 없는 stage가 있으면, 그 한계를 숨기지 말고 현재 런타임의 오케스트레이션으로 처리했다고 표시하라.",
+        ].join("\n")
+      : [
+          "Agentlas recommended pipeline mode is enabled.",
+          "Treat the stages below as an execution contract, not visual decoration.",
+          "First define each stage input packet: inputType, inputKind, brief, consumes, expectedOutput, and constraints.",
+          "Carry each stage output into the next stage, then synthesize one final answer for the user.",
+          "If a stage cannot call a separate local/Hub agent, say so plainly and execute it as orchestration inside the current runtime.",
+        ].join("\n");
+  return [guide, "", "Recommended stages:", stageLines, "", "User request:", prompt].join("\n");
 }
 
 /**
@@ -511,19 +545,24 @@ export async function runMcpInvocation(
       ? buildGoalUserPrompt(req.userPrompt, locale)
       : req.planMode
         ? buildPlanUserPrompt(req.userPrompt, locale)
-      : req.userPrompt;
+        : req.userPrompt;
+  const borrowedAgentSlugs = [...new Set((req.borrowAgents ?? []).map((slug) => slug.trim()).filter(Boolean))];
+  if (req.pipelineStages && req.pipelineStages.length > 0) {
+    effectiveUserPrompt = buildRecommendedPipelineUserPrompt(effectiveUserPrompt, req.pipelineStages, locale);
+  }
 
-  // 추천 시트 네트워크 모드 — 고른 Hub 에이전트를 빌려와 프롬프트 앞에 borrow 지시를 붙인다(BYOM).
-  if (req.borrowAgents && req.borrowAgents.length > 0) {
+  // 추천 시트 네트워크 모드(단일) — 고른 Hub 에이전트를 빌려와 프롬프트 앞에 borrow 지시를 붙인다(BYOM).
+  // 2개 이상은 아래 Borrowed Task Force 실행기로 분기해 plan → parallel delegate → synthesize를 수행한다.
+  if (borrowedAgentSlugs.length === 1) {
     sink({
       kind: "tool-use",
       status:
         locale === "ko"
-          ? `Hub 에이전트 빌리는 중: ${req.borrowAgents.join(", ")}`
-          : `Borrowing Hub agents: ${req.borrowAgents.join(", ")}`,
+          ? `Hub 에이전트 빌리는 중: ${borrowedAgentSlugs.join(", ")}`
+          : `Borrowing Hub agents: ${borrowedAgentSlugs.join(", ")}`,
     });
     effectiveUserPrompt = await buildBorrowDirective(
-      req.borrowAgents,
+      borrowedAgentSlugs,
       effectiveUserPrompt,
       getChatWorkingFolder(chat.id),
       locale,
@@ -669,6 +708,34 @@ export async function runMcpInvocation(
   }
 
   const runnerEnv = await buildRunnerEnv(agent, workingFolder ?? undefined);
+
+  // ── Hub borrowed task force ─────────────────────────────────
+  // 추천 시트에서 Hub 에이전트 2개 이상을 고른 경우: 단일 프롬프트에 "여러 전문가를 적용"이라고
+  // 뭉개지 않고, 로컬 오케스트레이터가 에이전트별 입력 패킷을 설계한 뒤 각 borrowed agent를
+  // 별도 세션으로 병렬 실행하고 최종 종합한다.
+  if (borrowedAgentSlugs.length > 1 && chat.kind !== "division") {
+    try {
+      await runBorrowedTaskForceInvocation({
+        req: { ...req, borrowAgents: borrowedAgentSlugs },
+        chat,
+        orchestratorAgent: agent,
+        active,
+        picked,
+        workingFolder,
+        mcpConfigPath,
+        mcpAllowedTools,
+        mcpCodexConfigArgs,
+        runnerEnv: runnerEnv.env,
+        locale,
+        sink,
+        signal,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sink({ kind: "error", error: { code: "borrowed-task-force-failed", message: msg } });
+    }
+    return { stormbreakerContinueRequested: false };
+  }
 
   // ── 멀티 에이전트 firm 오케스트레이션 ──
   // 회사 채팅이고 정규화된 조직에 본부/전문가가 있으면 3-tier 오케스트레이터로 분기.

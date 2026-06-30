@@ -144,8 +144,8 @@ async function runBuildSurface(browser, baseUrl, evidence) {
   const singleMode = page.getByRole("button", { name: /단일 에이전트|Single agent/ });
   const teamMode = page.getByRole("button", { name: /멀티 에이전트 팀|Multi-agent team/ });
   const packageMode = page.getByRole("button", { name: /기존 에이전트 패키징|Package existing agent/ });
-  await page.locator(".build-mode-price", { hasText: /빌드 5크레딧|5 build credits/ }).waitFor();
-  await page.locator(".build-mode-price", { hasText: /빌드 10크레딧|10 build credits/ }).waitFor();
+  await page.locator(".build-mode-price", { hasText: /빌드 0크레딧|Build 0 credits/ }).first().waitFor();
+  await page.getByText(/데스크톱 Build 자체는 Agentlas 크레딧 0|Desktop Build itself costs 0 Agentlas credits/).waitFor();
   await teamMode.click();
   await expectDataActive(teamMode, "true");
   await packageMode.click();
@@ -244,9 +244,9 @@ async function runBuildInterviewSurface(browser, baseUrl, evidence) {
   await page.getByRole("button", { name: /딥인터뷰로 빌드 시작|Start build/ }).click();
   await page.getByText(/어떤 산출물이 필요합니까/).waitFor();
   await page.getByText(/어디에 배포할까요/).waitFor();
-  await page.getByRole("button", { name: /리포트/ }).click();
-  await page.getByRole("button", { name: /앱/ }).click();
-  await page.getByRole("button", { name: /비공개/ }).click();
+  await page.locator(".build-interview-card .build-interview-opt", { hasText: /리포트/ }).click();
+  await page.locator(".build-interview-card .build-interview-opt[title^='앱:']").click();
+  await page.locator(".build-interview-card .build-interview-opt", { hasText: /비공개/ }).click();
   assert.equal(
     await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "hephaestus.build").length),
     1,
@@ -741,7 +741,7 @@ async function runChatRecommendSurface(browser, baseUrl, evidence) {
     proofName: "chat-recommend-network-surface",
     assertCalls: (calls) => {
       const call = calls.find((item) => item.name === "invoke.run");
-      assert.deepEqual(call.payload.borrowAgents, ["no-ai-slop-copywriter"]);
+      assert.deepEqual(call.payload.borrowAgents, ["no-ai-slop-copywriter", "security-reviewer"]);
       assert.equal(call.payload.userPrompt, "추천 네트워크 실행");
     },
   });
@@ -752,6 +752,13 @@ async function runChatRecommendSurface(browser, baseUrl, evidence) {
     assertCalls: (calls) => {
       const call = calls.find((item) => item.name === "invoke.run");
       assert.equal(call.payload.userPrompt, "stormbreaker 추천 파이프라인 실행");
+      assert.deepEqual(
+        call.payload.pipelineStages.map((stage) => [stage.order, stage.kind, stage.agentId, stage.agentName]),
+        [
+          [1, "plan", "agent-1", "Planner"],
+          [2, "qa", "agent-2", "Builder"],
+        ],
+      );
     },
   });
   await runRecommendChoice(browser, baseUrl, evidence, {
@@ -1373,8 +1380,11 @@ function setupMockAgentlasBridge(options) {
         if (options.recommendMode === "network") {
           return {
             mode: "network",
-            agents: [{ id: "no-ai-slop-copywriter", name: "No-AI-Slop Copywriter", source: "hub", estCredits: 3 }],
-            totalEstCredits: 3,
+            agents: [
+              { id: "no-ai-slop-copywriter", name: "No-AI-Slop Copywriter", source: "hub", estCredits: 3 },
+              { id: "security-reviewer", name: "Security Reviewer", source: "hub", estCredits: 3 },
+            ],
+            totalEstCredits: 6,
             estimate: true,
             rawAction: "network",
             query: payload.query,

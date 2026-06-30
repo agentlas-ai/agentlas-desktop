@@ -448,10 +448,10 @@ const TOUR_STEPS = [
       "This is where you build and fine-tune your own agents or teams. It's an advanced menu meant for those comfortable with development, so it's fine to skip it at first.",
   },
   {
-    title: "Studio",
-    body: "바로 쓸 수 있는 완성형 작업 앱들이에요(창업·커머스·크리에이티브 등). 하고 싶은 걸 적으면 알아서 만들어 줘요.",
+    title: "Agent Apps",
+    body: "바로 쓸 수 있는 에이전트 앱들이에요(창업·커머스·크리에이티브 등). 하고 싶은 걸 적으면 알아서 만들어 줘요.",
     bodyEn:
-      "These are ready-to-use, fully built work apps (for startups, commerce, creative work, and more). Just write down what you want to do, and it builds it for you.",
+      "These are ready-to-use agent apps (for startups, commerce, creative work, and more). Just write down what you want to do, and it builds it for you.",
   },
   {
     title: "Hub",

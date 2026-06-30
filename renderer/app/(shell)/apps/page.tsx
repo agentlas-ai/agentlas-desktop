@@ -1,6 +1,6 @@
-// Agentlas Studio — 아틀리에/컨트롤룸 컨셉 (넷플릭스 그리드 폐기).
+// Agent Apps — 아틀리에/컨트롤룸 컨셉 (넷플릭스 그리드 폐기).
 //   A) 컨트롤룸 헤더(워드마크 + 런타임 상태 칩)
-//   B) 더 벤치(대표 스튜디오 1개 — poster 기본, hover 시 video)
+//   B) 더 벤치(대표 에이전트 앱 1개 — poster 기본, hover 시 video)
 //   C) 더 랙(나머지를 콘솔 행으로)
 // 색은 전부 앱 레벨 CSS 변수 → 라이트/다크 양쪽 정상. (이 페이지는 .rd 래핑이 아니다)
 "use client";
@@ -62,7 +62,7 @@ export default function AppsPage() {
         setStudioMessage(ko ? `런타임 준비됨: ${res.url}` : `Runtime ready: ${res.url}`);
       } else {
         setStudioProbe("error");
-        setStudioMessage(res.reason ?? (ko ? "Studio 런타임을 시작하지 못했습니다." : "Studio runtime could not start."));
+        setStudioMessage(res.reason ?? (ko ? "앱 런타임을 시작하지 못했습니다." : "Agent app runtime could not start."));
       }
     } catch (err) {
       setStudioProbe("error");
@@ -116,8 +116,8 @@ export default function AppsPage() {
   }, [studioTiles, featuredStudio?.id, query]);
 
   const subtitle = ko
-    ? `${studioTiles.length}개 스튜디오`
-    : `${studioTiles.length} studios`;
+    ? `에이전트 앱 ${studioTiles.length}개`
+    : `${studioTiles.length} agent apps`;
 
   const runtimeLabel =
     studioProbe === "checking"
@@ -131,7 +131,7 @@ export default function AppsPage() {
   return (
     <div className="studio-page">
       <header className="studio-bar">
-        <StudioBotLogo wordmark label="Agentlas Studio" size={22} />
+        <StudioBotLogo wordmark label="Agent Apps" size={22} />
         <button
           type="button"
           className="studio-runtime"
@@ -168,7 +168,7 @@ export default function AppsPage() {
               </div>
             )}
             <Link href={featuredStudio.href} className="studio-open studio-open--primary">
-              {ko ? "스튜디오 열기" : "Open studio"}
+              {ko ? "앱 열기" : "Open app"}
               <IconChevronRight size={15} />
             </Link>
           </div>
@@ -177,7 +177,7 @@ export default function AppsPage() {
 
       <section className="studio-rack">
         <div className="studio-rack-head">
-          <h2 className="studio-rack-title">{ko ? "스튜디오 랙" : "Studio rack"}</h2>
+          <h2 className="studio-rack-title">{ko ? "에이전트 앱" : "Agent Apps"}</h2>
           <span className="studio-rack-count">{subtitle}</span>
           {studioTiles.length > 6 && (
             <label className="studio-search">
@@ -185,14 +185,14 @@ export default function AppsPage() {
               <input
                 value={searchTerm}
                 onChange={(event) => setSearchTerm(event.target.value)}
-                placeholder={ko ? "스튜디오 검색" : "Search studios"}
+                placeholder={ko ? "앱 검색" : "Search apps"}
               />
             </label>
           )}
         </div>
 
         {rackTiles.length === 0 ? (
-          <div className="studio-empty">{ko ? "검색 결과가 없습니다." : "No matching studios."}</div>
+          <div className="studio-empty">{ko ? "검색 결과가 없습니다." : "No matching apps."}</div>
         ) : (
           rackTiles.map((tile) => (
             <Link key={tile.id} href={tile.href} className="studio-row">
