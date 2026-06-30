@@ -15,6 +15,7 @@ import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner
 import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, probeCliVersion, spawnCli } from "./exec";
+import { readEnvVar } from "../secrets/vault";
 
 const CANDIDATES = [
   "grok",
@@ -173,6 +174,13 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
 
   const cwd = req.cwd ?? agentRunCwd();
   const env = grokEnv(req.env ?? process.env);
+  if (!env.GROK_API_KEY && !env.XAI_API_KEY) {
+    const key = (await readEnvVar("GROK_API_KEY")) || (await readEnvVar("XAI_API_KEY"));
+    if (key) {
+      env.GROK_API_KEY = key;
+      env.XAI_API_KEY = key;
+    }
+  }
   const args = ["--prompt", buildPrompt(req), "--directory", cwd, "--format", "json"];
   if (req.model) args.push("-m", req.model); // grok --help 확인: -m, --model <model>
 

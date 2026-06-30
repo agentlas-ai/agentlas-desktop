@@ -154,9 +154,13 @@ export const runGemini: Runner = async (
         ? ["--session-id", createSessionId]
         : [];
     const modelArgs = req.model && req.model.trim() ? ["--model", req.model.trim()] : [];
-    const child = spawnCli(bin, [...sessionArgs, ...modelArgs, "--prompt", ""], {
+    const env: NodeJS.ProcessEnv = { ...(req.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" };
+    if (!env.TERM || env.TERM === "dumb") env.TERM = "xterm-256color";
+    if (!env.COLORTERM) env.COLORTERM = "truecolor";
+
+    const child = spawnCli(bin, [...sessionArgs, ...modelArgs, "--extensions", "", "--prompt", ""], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...(req.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" },
+      env,
       // 사용자가 지정한 프로젝트 폴더에서 실행 — 미지정이면 전용 폴더.
       cwd: req.cwd ?? agentRunCwd(),
     });
