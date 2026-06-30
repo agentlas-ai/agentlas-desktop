@@ -304,6 +304,30 @@ let pendingConfirmationCount = 0;
 let pendingConfirmationBounceId: number | null = null;
 let lastPendingConfirmationNoticeAt = 0;
 
+/**
+ * custom_base_url 검증 — byok.ts가 이 값으로 BYOK 키를 Bearer 전송하므로 임의 origin 재지정을 막는다.
+ * 허용: 빈 값(기본값 복귀), 공개/사설 https, localhost/LAN 사설 IP의 http(로컬 LLM).
+ * 거부: 그 외 스킴(file/data/javascript…)·공개 http·잘못된 URL → throw(렌더러에 거부 전달).
+ * 순수 함수 — 부수효과 없음(단위테스트 가능).
+ */
+function validateCustomBaseUrl(raw: string): string {
+  const url = (raw ?? "").trim();
+  if (!url) return ""; // 빈 값 = 기본 OpenAI baseUrl로 복귀(허용)
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("Invalid base URL");
+  }
+  const host = parsed.hostname.toLowerCase();
+  const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+  const isPrivateLan =
+    /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+  if (parsed.protocol === "https:") return url;
+  if (parsed.protocol === "http:" && (isLoopback || isPrivateLan)) return url;
+  throw new Error("Custom base URL must be https, or http on localhost/LAN");
+}
+
 function applyPendingConfirmationAttention(win: BrowserWindow | null, rawCount: number): void {
   const count = Math.max(0, Math.min(99, Math.floor(Number(rawCount) || 0)));
   const previous = pendingConfirmationCount;
@@ -590,8 +614,12 @@ export function registerIpcHandlers(): void {
       return row?.value ?? "";
     } catch { return ""; }
   });
-  ipcMain.handle("config:setCustomBaseUrl", (_e, url: string) => {
-    getDb().prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('custom_base_url', ?)").run(url);
+  // 보안: 이 값은 byok.ts가 BYOK API 키를 Bearer로 보내는 baseUrl이 된다. 손상된 렌더러가
+  // 임의 origin으로 재지정해 키를 탈취하지 못하게, 저장 전에 스킴/호스트를 검증한다.
+  // 정상 사용(공개 https API, 로컬/LAN http LLM)은 그대로 허용 — 부작용 없음.
+  ipcMain.handle("config:setCustomBaseUrl", (_e, url: unknown) => {
+    const safe = validateCustomBaseUrl(typeof url === "string" ? url : "");
+    getDb().prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('custom_base_url', ?)").run(safe);
   });
 
   // ── env vault (글로벌 외부 API 키) ──────────────────────

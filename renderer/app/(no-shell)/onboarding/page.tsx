@@ -440,10 +440,18 @@ function StepConnect() {
     try {
       await api.secrets.saveApiKey(backend, draft[backend]);
       if (backend === "custom") {
-        await api.config.setCustomBaseUrl(draftCustomBaseUrl);
+        // base URL 검증 실패는 비치명적 — 키 저장/새로고침은 그대로 진행하고 사용자에게만 알린다.
+        try {
+          await api.config.setCustomBaseUrl(draftCustomBaseUrl);
+        } catch (e) {
+          if (typeof window !== "undefined") window.alert(e instanceof Error ? e.message : String(e));
+        }
       }
       setDraft((d) => ({ ...d, [backend]: "" }));
       await refresh();
+    } catch (e) {
+      console.error("[onboarding] save key failed:", e);
+      if (typeof window !== "undefined") window.alert(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(null);
     }

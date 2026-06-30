@@ -7,7 +7,7 @@
 // - nodeIntegration: false
 // - sandbox: true (renderer는 sandboxed)
 // - 모든 Node API는 preload → ipc 경로로만 노출
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, net, protocol, shell } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, net, protocol, session, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -181,6 +181,34 @@ async function createWindow(): Promise<void> {
   });
 
   const startUrl = process.env.ELECTRON_START_URL;
+
+  // [보안] top-level navigation 가드 — 앱 내부(prod=agentlas://, dev=dev 서버)만 허용. 그 외 항해는
+  // 차단하고 외부 http(s)는 기본 브라우저로. SPA 클라이언트 라우팅(pushState)은 will-navigate를 안 띄운다.
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    const allowed = url.startsWith("agentlas://") || (isDev && startUrl ? url.startsWith(startUrl) : false);
+    if (allowed) return;
+    event.preventDefault();
+    if (url.startsWith("http://") || url.startsWith("https://")) void shell.openExternal(url);
+  });
+
+  // [회복] 렌더러 크래시(OOM 등) 시 자동 reload — 60초 롤링 윈도우에서 최대 3회로 reload→crash 루프 차단.
+  const rendererReloadTimes: number[] = [];
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    if (details.reason === "clean-exit") return;
+    const now = Date.now();
+    while (rendererReloadTimes.length && now - rendererReloadTimes[0] > 60_000) rendererReloadTimes.shift();
+    if (rendererReloadTimes.length >= 3) {
+      console.error("[main] renderer crash budget exhausted, not reloading:", details.reason);
+      return;
+    }
+    rendererReloadTimes.push(now);
+    // null만이 아니라 destroyed 윈도우도 가드 — 닫기와 비-clean teardown이 겹쳐도 예외 없음.
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      console.error("[main] renderer process gone, reloading:", details.reason);
+      mainWindow.webContents.reload();
+    }
+  });
+
   if (isDev && startUrl) {
     await mainWindow.loadURL(startUrl);
     mainWindow.webContents.openDevTools({ mode: "detach" });
@@ -200,6 +228,17 @@ app.on("activate", () => {
 
 app.whenReady().then(async () => {
   registerRendererProtocol();
+  // [보안] 권한 deny — 우리 렌더러가 실제로 쓰는 건 clipboard(복사 버튼)뿐. device/sensor 류
+  // (geolocation/media/usb/serial/hid/midi/display-capture 등)는 main-side에서 거부하고,
+  // clipboard·notifications 등 무해한 권한은 허용한다(부작용 없이 공격면만 닫음).
+  const DENIED_PERMISSIONS = new Set([
+    "geolocation", "media", "midi", "midiSysex", "hid", "serial", "usb",
+    "idle-detection", "speaker-selection", "display-capture", "window-management",
+  ]);
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(!DENIED_PERMISSIONS.has(permission));
+  });
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => !DENIED_PERMISSIONS.has(permission));
   applyDockIcon();
   initStore();
   ensureDefaultMcpPluginsInstalled();

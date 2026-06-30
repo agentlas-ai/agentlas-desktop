@@ -330,6 +330,7 @@ export async function runHephaestus<T = unknown>(
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (e) {
+      resetHephaestusCache(); // 스폰 실패(경로/바이너리 문제) → 다음 호출에서 인터프리터/루트 재탐지
       resolve({ ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as Error).message });
       return;
     }
@@ -398,17 +399,26 @@ export async function runHephaestus<T = unknown>(
       }
     });
     child.on("error", (e) => {
+      resetHephaestusCache(); // spawn-level 오류(ENOENT/ETXTBSY 등) → 죽은 인터프리터/루트 캐시 무효화
       finish({ ok: false, exitCode: null, json: null, stdout, stderr, error: e.message });
     });
     child.on("close", (code) => {
       if (opts.onStdout && stdoutBuf.trim()) opts.onStdout(stdoutBuf);
       if (opts.onStderr && stderrBuf.trim()) opts.onStderr(stderrBuf);
+      const json = parseEngineJson<T>(stdout);
+      // 비정상 종료 + JSON 없음 + 모듈 누락 패턴이면 actionable 오류로 분류(그 외엔 raw stderr 유지).
+      // close 경로에선 캐시를 비우지 않는다 — deps 문제는 경로 문제가 아니고, 재탐지 thrash를 막기 위함.
+      const depError =
+        code !== 0 && json === null && /ModuleNotFoundError|ImportError|No module named/.test(stderr)
+          ? "엔진 Python 의존성 누락 — 런타임 재설치 필요"
+          : undefined;
       finish({
         ok: code === 0,
         exitCode: code,
-        json: parseEngineJson<T>(stdout),
+        json,
         stdout,
         stderr,
+        ...(depError ? { error: depError } : {}),
       });
     });
   });
