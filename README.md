@@ -190,6 +190,11 @@ A complete tour of what ships today.
 - **Image attachments** are sent as multimodal input on BYOK backends.
 - **Working-folder panel** pins a folder to a chat with a read-only file tree and
   text preview, so you can see the repo an agent is helping with.
+- **Code map** lets an agent find code in a large project without scanning the
+  whole tree. On first attach, a compact index (symbols, references, modules,
+  entry points) is built in the background under `<project>/.agentlas/code-map/`
+  and its seed is injected each turn, so the model orients instead of grepping
+  blindly. Generation is non-blocking and reading is fully guarded.
 
 ### Stormbreaker Loop
 

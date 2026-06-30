@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.4 — 2026-06-30
+
+### Added
+
+- **Code map (RECALL layer): the agent can now find code without scanning the
+  tree.** On first attach to a project, a compact code-map is generated in the
+  background (`<project>/.agentlas/code-map/`) indexing symbols, references,
+  modules, entry points and docs. Its seed (modules / entry points /
+  most-referenced symbols) is injected into the per-turn memory context, so the
+  model orients in a large codebase instead of grepping blindly. Generation is
+  best-effort and non-blocking; reading is fully guarded, so a missing or partial
+  map never affects a run. The zero-dependency generator is bundled with the app
+  (`electron/memory/code-map-gen.mjs`).
+
+### Changed
+
+- `buildMemoryContext` now appends a `### Code map` section alongside project
+  soul, sitemap and curated memory when a project map is present.
+
 ## 0.5.3 — 2026-06-30
 
 ### Changed

@@ -1,5 +1,8 @@
 // Builds the memory context injected into the system prompt before a run.
 // Kept compact (token-bounded) on purpose — it runs on every turn.
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
 import {
   listGlobalMemory,
   listGlobalMemoryForAgent,
@@ -12,6 +15,85 @@ import { readProjectSoul, readSitemap } from "./project-files";
 const SOUL_MAX_CHARS = 1800;
 const MAX_ENTRIES = 12;
 const CONTEXT_MAX_CHARS = 180;
+
+// ── Code map (RECALL layer) ────────────────────────────────────────────────
+// Lets the agent locate code without scanning source. The map is generated in
+// the background on first project attach; here we only read its compact seed.
+const CODEMAP_MODULES = 8;
+const CODEMAP_ENTRIES = 4;
+const CODEMAP_SYMBOLS = 6;
+const codeMapTriggered = new Set<string>();
+
+function codeMapGenPath(): string | null {
+  const cands = [
+    path.join(__dirname, "code-map-gen.mjs"),
+    path.join(__dirname, "..", "..", "..", "electron", "memory", "code-map-gen.mjs"),
+  ];
+  for (const c of cands) {
+    try {
+      if (fs.existsSync(c)) return c;
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
+// Best-effort, non-blocking: generate the map once per project per session if missing.
+function ensureCodeMap(projectPath: string): void {
+  try {
+    const mapFile = path.join(projectPath, ".agentlas", "code-map", "project-map.json");
+    if (fs.existsSync(mapFile)) return;
+    if (codeMapTriggered.has(projectPath)) return;
+    const gen = codeMapGenPath();
+    if (!gen) return;
+    codeMapTriggered.add(projectPath);
+    const child = spawn(process.execPath, [gen, projectPath], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    });
+    child.unref();
+  } catch {
+    /* never block a turn on map generation */
+  }
+}
+
+function summarizeCodeMap(projectPath: string): string | null {
+  try {
+    const mapFile = path.join(projectPath, ".agentlas", "code-map", "project-map.json");
+    if (!fs.existsSync(mapFile)) return null;
+    const m = JSON.parse(fs.readFileSync(mapFile, "utf8")) as {
+      project?: string;
+      stats?: { codeFiles?: number; symbols?: number };
+      modules?: { id: string; role: string }[];
+      entryPoints?: { path: string }[];
+      topSymbols?: { name: string; defAt: string }[];
+    };
+    const mods = (m.modules ?? [])
+      .slice(0, CODEMAP_MODULES)
+      .map((x) => `${x.id}(${x.role})`)
+      .join(", ");
+    const eps = (m.entryPoints ?? [])
+      .slice(0, CODEMAP_ENTRIES)
+      .map((e) => e.path)
+      .join(", ");
+    const tops = (m.topSymbols ?? [])
+      .slice(0, CODEMAP_SYMBOLS)
+      .map((s) => `${s.name} → ${s.defAt}`)
+      .join(", ");
+    const lines = [
+      `### Code map (${m.project ?? "project"} · ${m.stats?.codeFiles ?? "?"} code files, ${m.stats?.symbols ?? "?"} symbols)`,
+      `To locate code, do NOT scan source first — query the map index instead of grepping the tree.`,
+    ];
+    if (mods) lines.push(`Modules: ${mods}`);
+    if (eps) lines.push(`Entry points: ${eps}`);
+    if (tops) lines.push(`Most-referenced: ${tops}`);
+    return lines.join("\n");
+  } catch {
+    return null;
+  }
+}
 
 function summarizeSitemap(projectPath: string): string | null {
   const sm = readSitemap(projectPath);
@@ -68,6 +150,10 @@ export function buildMemoryContext(
     }
     const sitemap = summarizeSitemap(projectPath);
     if (sitemap) sections.push(sitemap);
+    // Code map: generate in background if missing, inject its seed if present.
+    ensureCodeMap(projectPath);
+    const codeMap = summarizeCodeMap(projectPath);
+    if (codeMap) sections.push(codeMap);
     const entries = (
       perAgent
         ? listMemoryByPathForAgent(projectPath, agentId ?? null, MAX_ENTRIES)
