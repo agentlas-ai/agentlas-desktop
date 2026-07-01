@@ -27,19 +27,25 @@ function resolveBin(name: string, extra: string[]): string | null {
 }
 
 function buildPrompt(topic: string, count: number, mode?: string): string {
-  const middle = Math.max(3, Math.min(12, count - 2));
+  // 클로징("감사합니다") 장표 폐기 — 덱 = 커버 1장 + 본문 (count-1)장, 마지막은 statement로 닫는다.
+  const middle = Math.max(3, Math.min(13, count - 1));
   const modeLine = mode ? `Set "mode" to ${mode}.` : `Pick "mode" by topic: cinematic(narrative), editorial(business), diagrammatic(academic), hybrid(sports/data).`;
   return [
     "You are an expert presentation content designer. Output ONLY valid minified JSON — no markdown, no code fences, no prose before or after.",
     `TOPIC: ${topic}`,
-    'SCHEMA: {"title":str,"subtitle":str,"mode":"cinematic|editorial|diagrammatic|hybrid","slides":[ {"role":"agenda","title":str,"items":[str,str,str,str]} | {"role":"metrics","title":str,"kpis":[{"value":str,"label":str}]} | {"role":"comparison","title":str,"bars":[{"label":str,"value":int}]} | {"role":"structure","title":str,"cards":[{"label":str,"text":str}]} | {"role":"process","title":str,"steps":[{"label":str,"text":str}]} | {"role":"highlight","title":str,"stat":{"value":str,"label":str},"text":str} | {"role":"statement","text":str} ]}',
+    'SCHEMA: {"title":str,"subtitle":str,"mode":"cinematic|editorial|diagrammatic|hybrid","styleId":"swiss|bauhaus|didot|vignelli|brutal|hara","slides":[ {"role":"agenda","title":str,"items":[str],"note":str,"img":str} | {"role":"metrics","title":str,"kpis":[{"value":str,"label":str}],"note":str,"img":str} | {"role":"comparison","title":str,"bars":[{"label":str,"value":int}],"note":str,"img":str} | {"role":"structure","title":str,"cards":[{"label":str,"text":str}],"note":str,"img":str} | {"role":"process","title":str,"steps":[{"label":str,"text":str}],"note":str,"img":str} | {"role":"highlight","title":str,"stat":{"value":str,"label":str},"text":str,"img":str} | {"role":"statement","text":str,"note":str,"img":str} ]}',
     "RULES:",
     "- Write in the SAME language as the topic.",
+    '- "styleId" = design school (art direction): swiss(Müller-Brockmann grid+Helvetica — tech/pitch/strategy), bauhaus(primary-color geometry — creative/education/design), didot(Vogue serif+ivory — fashion/luxury/culture), vignelli(bold bands+hierarchy — reports/finance/ops), brutal(raw borders+mono — gaming/street/hackathon), hara(emptiness+whitespace — minimal/philosophy/wellness). Pick what a top art director would choose for this topic.',
     "- One idea per slide. Titles are ACTION CLAIMS, not topic labels.",
-    "- Real, specific, concrete content — plausible real numbers and concrete claims, never placeholders like 'item 1'.",
-    `- Exactly ${middle} middle slides. Start with an "agenda", then a VARIED mix of metrics/comparison/structure/process/highlight/statement (2-4 kpis/bars/cards/steps each).`,
+    "- Real, specific, concrete content — plausible real numbers and concrete claims, never placeholders like 'item 1'. Research-grade density: a reader should learn something from every slide.",
+    `- Exactly ${middle} middle slides. Start with an "agenda", then a VARIED mix of metrics/comparison/structure/process/highlight (3-4 kpis/bars/cards/steps each — prefer 4). The LAST slide MUST be a "statement" (the one-line takeaway that closes the deck — no thank-you slide).`,
+    '- "note" (every slide) = the SO-WHAT: one concrete conclusion/implication sentence (15-25 words CJK 30-50 chars) that a consultant would write at the bottom of the page.',
+    '- agenda "items": 4-6 entries, each formatted "Title — one-line description" (em-dash separated).',
+    '- cards/steps "text": 2 short sentences each (what it is + why it matters).',
+    '- "img" (every slide) = a concrete photographable scene for an accompanying image, in English, no text/letters/numbers in the scene (e.g. "a delivery robot crossing a rainy Seoul crosswalk at dusk").',
     `- ${modeLine}`,
-    "- Keep each text concise (roughly under 40 chars for CJK, 8 words for English).",
+    "- Titles under 40 chars CJK / 10 words. KPI labels under 20 chars.",
   ].join("\n");
 }
 

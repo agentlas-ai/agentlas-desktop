@@ -9,11 +9,13 @@ import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
 
-export type TrexImageModel = "codex" | "gemini";
+export type TrexImageModel = "codex" | "gemini" | "auto";
 export interface TrexImageResult {
   ok: boolean;
   src?: string;
   reason?: string;
+  /** 실제 생성에 성공한 엔진(auto 페일오버 추적용). */
+  engine?: "codex" | "gemini";
 }
 
 function resolveBin(name: string, extra: string[]): string | null {
@@ -78,11 +80,18 @@ async function runCodexImage(prompt: string, target: string, cwd: string): Promi
     };
     let child;
     try {
-      child = spawn(bin, ["exec", "-s", "workspace-write", "--skip-git-repo-check", instruction], { cwd, env: process.env });
+      // stdin은 반드시 닫는다(ignore) — 파이프로 열려 있으면 codex가
+      // "Reading additional input from stdin..."으로 EOF를 기다리며 영원히 블록된다.
+      child = spawn(bin, ["exec", "-s", "workspace-write", "--skip-git-repo-check", instruction], {
+        cwd,
+        env: process.env,
+        stdio: ["ignore", "ignore", "ignore"],
+      });
     } catch {
       finish();
       return;
     }
+    // 실측: codex image_gen은 콜드 스타트 시 2~4분 — 150s는 완성 직전에 죽인다(all-engines 오탐 원인).
     const timer = setTimeout(() => {
       try {
         child?.kill("SIGKILL");
@@ -90,7 +99,7 @@ async function runCodexImage(prompt: string, target: string, cwd: string): Promi
         /* ignore */
       }
       finish();
-    }, 150_000);
+    }, 300_000);
     child.on("close", () => {
       clearTimeout(timer);
       finish();
@@ -161,7 +170,12 @@ async function runAgyNanoBanana(prompt: string, target: string): Promise<boolean
     };
     let child;
     try {
-      child = spawn(bin, ["--dangerously-skip-permissions", "--add-dir", outDir, "--print", instruction], { cwd: outDir, env });
+      // stdin ignore — codex와 동일한 stdin-EOF 대기 블록 방지.
+      child = spawn(bin, ["--dangerously-skip-permissions", "--add-dir", outDir, "--print", instruction], {
+        cwd: outDir,
+        env,
+        stdio: ["ignore", "ignore", "ignore"],
+      });
     } catch {
       finish();
       return;
@@ -173,7 +187,7 @@ async function runAgyNanoBanana(prompt: string, target: string): Promise<boolean
         /* ignore */
       }
       finish();
-    }, 180_000);
+    }, 300_000);
     child.on("close", () => {
       clearTimeout(timer);
       finish();
@@ -195,6 +209,25 @@ async function runAgyNanoBanana(prompt: string, target: string): Promise<boolean
   return fs.existsSync(target);
 }
 
+/** gemini 경로 1회 시도 — agy 나노바나나(키리스) → GEMINI_API_KEY Imagen 폴백. */
+async function tryGemini(clean: string, target: string): Promise<boolean> {
+  const agyOk = await runAgyNanoBanana(clean, target);
+  if (agyOk) return true;
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
+  if (!apiKey) return false;
+  return runGeminiImage(clean, target, apiKey);
+}
+
+// auto 페일오버 상태 — 한 엔진이 실패(쿼터 소진/미설치)하면 세션 내 잠시 뒤로 미룬다(15분).
+// 매 이미지마다 죽은 엔진에 150초 타임아웃을 다시 태우는 낭비를 막는 소프트 쿨다운.
+const engineCooldown: Record<"codex" | "gemini", number> = { codex: 0, gemini: 0 };
+const COOLDOWN_MS = 15 * 60 * 1000;
+
+/**
+ * 이미지 생성. model="auto"면 codex→gemini 순으로 시도하고, 실패한 엔진은 쿨다운을 걸어
+ * 남은 사용량이 있는 쪽을 자동으로 쓴다(사용자 요구: 사용량 부족 시 남는 곳 자동 사용).
+ * 명시 모델(codex/gemini)이어도 실패 시 반대쪽을 1회 시도한다 — 이미지 없는 덱보다 낫다.
+ */
 export async function generateTrexImage(model: TrexImageModel, prompt: string): Promise<TrexImageResult> {
   try {
     const clean = (prompt || "").trim().slice(0, 1200);
@@ -203,23 +236,29 @@ export async function generateTrexImage(model: TrexImageModel, prompt: string): 
     fs.mkdirSync(dir, { recursive: true });
     const target = path.join(dir, `trex_${Date.now()}_${Math.floor(Math.random() * 1e6)}.png`);
 
-    if (model === "gemini") {
-      // 1) Antigravity CLI(agy) 나노바나나 — 키리스(OAuth). 연결한 사용자면 누구나.
-      const agyOk = await runAgyNanoBanana(clean, target);
-      if (!agyOk) {
-        // 2) 폴백: GEMINI_API_KEY가 있으면 Imagen으로.
-        const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
-        if (!apiKey) return { ok: false, reason: "gemini-needs-connect" };
-        const ok = await runGeminiImage(clean, target, apiKey);
-        if (!ok) return { ok: false, reason: "gemini-failed" };
+    const now = Date.now();
+    const preferred: Array<"codex" | "gemini"> =
+      model === "gemini" ? ["gemini", "codex"] : model === "codex" ? ["codex", "gemini"] : ["codex", "gemini"];
+    // auto일 때만 쿨다운으로 순서 재배열(명시 모델은 사용자의 의도를 우선 존중).
+    const order =
+      model === "auto"
+        ? [...preferred].sort((a, b) => (engineCooldown[a] > now ? 1 : 0) - (engineCooldown[b] > now ? 1 : 0))
+        : preferred;
+
+    let engine: "codex" | "gemini" | null = null;
+    for (const e of order) {
+      const ok = e === "codex" ? await runCodexImage(clean, target, dir) : await tryGemini(clean, target);
+      if (ok) {
+        engine = e;
+        engineCooldown[e] = 0;
+        break;
       }
-    } else {
-      const ok = await runCodexImage(clean, target, dir);
-      if (!ok) return { ok: false, reason: "codex-unavailable" };
+      engineCooldown[e] = now + COOLDOWN_MS;
     }
+    if (!engine) return { ok: false, reason: "all-engines-unavailable" };
 
     const buf = fs.readFileSync(target);
-    return { ok: true, src: `data:image/png;base64,${buf.toString("base64")}` };
+    return { ok: true, src: `data:image/png;base64,${buf.toString("base64")}`, engine };
   } catch (e) {
     return { ok: false, reason: e instanceof Error ? e.message : String(e) };
   }

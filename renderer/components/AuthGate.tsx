@@ -4,15 +4,21 @@
 // 세션은 main 메모리에서 1회 조회. 로그인 직후 children으로 전환되며 하위가 새로 마운트된다.
 "use client";
 import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import type { AuthSession } from "@/lib/types";
 import { Landing } from "./Landing";
 import { useT } from "@/lib/i18n";
 
+// DEV 전용 QA 라우트 — 브라우저(Playwright) 렌더 회귀 검증용으로 게이트를 우회한다.
+// 프로덕션 빌드에선 절대 우회하지 않는다(해당 페이지 자체도 프로덕션에서 null 렌더).
+const DEV_QA_ROUTES = ["/trex-gallery", "/surface-preview"];
+
 export function AuthGate({ children }: { children: React.ReactNode }) {
   // null = 아직 조회 전 (세션 확인 중 — 흰 화면 깜빡임 방지용 다크 스플래시)
   const [session, setSession] = useState<AuthSession | null>(null);
   const { t } = useT();
+  const pathname = usePathname();
 
   useEffect(() => {
     const api = ipc();
@@ -40,6 +46,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       window.clearTimeout(timeout);
     };
   }, []);
+
+  if (process.env.NODE_ENV !== "production" && DEV_QA_ROUTES.some((r) => pathname?.startsWith(r))) {
+    return <>{children}</>;
+  }
 
   // 세션 확인 중 — 다크 배경만 (랜딩/앱 어느 쪽으로도 깜빡이지 않게)
   if (session === null) {

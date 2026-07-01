@@ -13,36 +13,38 @@ import {
   type DeckContent,
   type TrexDeck,
 } from "@/lib/trex/model";
+import { STYLES, STYLE_IDS, styleById } from "@/lib/trex/styles";
 
 // 전 역할을 커버하는 현실적 합성 콘텐츠(LLM 없이 렌더 품질만 검증).
 const FULL: DeckContent = {
   title: "국내 로봇 배달 시장 진입 전략 리뷰",
   subtitle: "시장 규모 분석, 경쟁 구도 대응 및 단계별 상용화 로드맵",
   slides: [
-    { role: "agenda", title: "시장 주도권 확보를 위한 네 가지 흐름", items: ["2,500억 규모 배달 시장 기회 분석", "대기업·스타트업 3파전 경쟁 구도", "규제 완화 맞춘 3단계 상용화", "초기 시장 안착 파트너십 구축"] },
-    { role: "metrics", title: "규제 완화와 인건비 상승이 수요를 밀어올린다", kpis: [{ value: "2,500억원", label: "2026년 국내 시장 규모" }, { value: "+150%", label: "전년 대비 서비스 도입률" }, { value: "1,800원", label: "건당 배달 비용 절감액" }] },
-    { role: "comparison", title: "어느 세그먼트에 먼저 집중할 것인가", bars: [{ label: "대학·대단지", value: 82 }, { label: "도심 상권", value: 61 }, { label: "교외 지역", value: 39 }] },
-    { role: "structure", title: "3대 핵심 플레이어가 시장을 과점하고 있다", cards: [{ label: "플랫폼 대기업", text: "배달 앱 연동 및 대규모 주문 인프라 장악" }, { label: "로봇 전문 제조사", text: "자율주행 하드웨어 개발 및 솔루션 공급" }, { label: "통신·IT 기업", text: "5G 기반 실시간 관제 및 정밀 지도 제공" }] },
-    { role: "process", title: "단계적 도입 시나리오로 운영 리스크 최소화", steps: [{ label: "1단계: 거점 검증", text: "규제 특구 내 시범 운영 및 데이터 확보" }, { label: "2단계: 제휴 확장", text: "배달 플랫폼 연동 및 서비스 커버리지 확대" }, { label: "3단계: 전국 상용화", text: "양산화를 통한 비용 절감 및 전면 개시" }] },
-    { role: "highlight", title: "한 가지가 성패를 가른다", stat: { value: "76%", label: "규제 샌드박스 통과율" }, text: "규제 대응 속도가 시장 선점의 결정 변수다." },
-    { role: "statement", text: "결국 실행 속도가 시장의 승자를 결정한다" },
+    { role: "agenda", title: "시장 주도권 확보를 위한 네 가지 흐름", items: ["2,500억 배달 시장 기회 분석 — 규제 완화 이후 실수요가 열리는 구간을 짚는다", "대기업·스타트업 3파전 경쟁 구도 — 플랫폼·제조·통신 진영별 강점 비교", "규제 완화 맞춘 3단계 상용화 — 거점 검증에서 전국 확산까지의 로드맵", "초기 시장 안착 파트너십 구축 — 배달 플랫폼·지자체 제휴 우선순위"] },
+    { role: "metrics", title: "규제 완화와 인건비 상승이 수요를 밀어올린다", kpis: [{ value: "2,500억원", label: "2026년 국내 시장 규모" }, { value: "+150%", label: "전년 대비 서비스 도입률" }, { value: "1,800원", label: "건당 배달 비용 절감액" }], note: "인건비 대비 절감폭이 임계점을 넘었다 — 도입을 미룰수록 경쟁사에 단가 우위를 내준다.", img: "a delivery robot crossing a rainy Seoul crosswalk at dusk" },
+    { role: "comparison", title: "어느 세그먼트에 먼저 집중할 것인가", bars: [{ label: "대학·대단지", value: 82 }, { label: "도심 상권", value: 61 }, { label: "교외 지역", value: 39 }], note: "대학·대단지가 규제·수요·주행환경 3박자를 모두 갖춘 유일한 세그먼트다." },
+    { role: "structure", title: "3대 핵심 플레이어가 시장을 과점하고 있다", cards: [{ label: "플랫폼 대기업", text: "배달 앱 연동 및 대규모 주문 인프라 장악. 트래픽을 쥐고 있어 제휴 협상력이 가장 세다." }, { label: "로봇 전문 제조사", text: "자율주행 하드웨어 개발 및 솔루션 공급. 원가 절감의 열쇠를 쥔 축이다." }, { label: "통신·IT 기업", text: "5G 기반 실시간 관제 및 정밀 지도 제공. 안전 규제 대응의 필수 파트너다." }], note: "세 진영 중 두 곳 이상과 동시 제휴해야 교섭력이 생긴다 — 단독 진입은 원가·트래픽 양쪽에서 진다." },
+    { role: "process", title: "단계적 도입 시나리오로 운영 리스크 최소화", steps: [{ label: "1단계: 거점 검증", text: "규제 특구 내 시범 운영 및 데이터 확보. 사고율·완주율 기준선을 만든다." }, { label: "2단계: 제휴 확장", text: "배달 플랫폼 연동 및 서비스 커버리지 확대. 주문 밀도가 손익분기를 결정한다." }, { label: "3단계: 전국 상용화", text: "양산화를 통한 비용 절감 및 전면 개시. 대당 운영비를 절반으로 낮춘다." }], note: "각 단계의 관문 지표(사고율·주문밀도·대당비용)를 통과해야 다음 투자를 집행한다." },
+    { role: "highlight", title: "한 가지가 성패를 가른다", stat: { value: "76%", label: "규제 샌드박스 통과율" }, text: "규제 대응 속도가 시장 선점의 결정 변수다. 심사 리드타임을 아는 팀이 6개월을 번다.", img: "a small autonomous delivery robot waiting at a university campus gate in warm morning light" },
+    { role: "statement", text: "결국 실행 속도가 시장의 승자를 결정한다", note: "완벽한 계획보다 검증된 거점 하나가 협상 테이블에서 더 세다.", img: "an empty pedestrian road stretching toward the horizon at dawn" },
   ],
 };
 
-function Deck({ label, content, deck: prebuilt, mode, formatId, only }: { label: string; content?: DeckContent; deck?: TrexDeck; mode?: ArtMode; formatId?: string; only?: number[] }) {
-  const deck = prebuilt ?? buildDeckFromContent({ ...(content as DeckContent), mode: mode ?? content?.mode }, formatId);
+function Deck({ label, content, deck: prebuilt, mode, formatId, styleId, only }: { label: string; content?: DeckContent; deck?: TrexDeck; mode?: ArtMode; formatId?: string; styleId?: string; only?: number[] }) {
+  const deck = prebuilt ?? buildDeckFromContent({ ...(content as DeckContent), mode: mode ?? content?.mode }, formatId, "ko", styleId);
   const fmt = formatById(prebuilt ? prebuilt.formatId : formatId);
   const ratio = formatRatio(fmt);
   const wide = fmt.w / fmt.h >= 1.25;
   const slides = only ? only.map((i) => deck.slides[i]).filter(Boolean) : deck.slides;
+  const dna = styleById(deck.styleId);
   return (
     <section style={{ marginBottom: 40 }}>
       <div style={{ fontSize: 13, fontWeight: 800, color: "#111", marginBottom: 10, fontFamily: "monospace" }}>{label}</div>
       <div style={{ display: "grid", gridTemplateColumns: wide ? "repeat(auto-fill, minmax(360px, 1fr))" : "repeat(auto-fill, minmax(230px, 1fr))", gap: 16, alignItems: "start" }}>
         {slides.map((s, i) => (
           <div key={s.id} style={{ position: "relative" }}>
-            <DeckStage slide={s} accent={deck.accent} editable={false} ratio={ratio} />
-            <div style={{ position: "absolute", top: 4, left: 4, fontSize: 9, fontWeight: 800, color: "#fff", background: "rgba(0,0,0,.5)", padding: "1px 5px", borderRadius: 4 }}>{only ? only[i] : i}</div>
+            <DeckStage slide={s} accent={deck.accent} editable={false} ratio={ratio} dna={dna} />
+            <div style={{ position: "absolute", top: 4, left: 4, fontSize: 9, fontWeight: 800, color: "#fff", background: "rgba(0,0,0,.5)", padding: "1px 5px", borderRadius: 4, zIndex: 9 }}>{only ? only[i] : i}</div>
           </div>
         ))}
       </div>
@@ -80,8 +82,8 @@ export default function TrexGalleryPage() {
       ))}
 
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>② 방향 인지 — 같은 콘텐츠, 세로/정사각</h2>
-      <Deck label="story 9:16 (portrait)  ·  표지·구조·과정·클로징" content={FULL} mode="editorial" formatId="story" only={[0, 4, 5, 8]} />
-      <Deck label="ig-square 1:1 (square)  ·  표지·지표·구조·클로징" content={FULL} mode="editorial" formatId="ig-square" only={[0, 2, 4, 8]} />
+      <Deck label="story 9:16 (portrait)  ·  표지·구조·과정·클로징" content={FULL} mode="editorial" formatId="story" only={[0, 4, 5, 7]} />
+      <Deck label="ig-square 1:1 (square)  ·  표지·지표·구조·클로징" content={FULL} mode="editorial" formatId="ig-square" only={[0, 2, 4, 7]} />
       <Deck label="A4 세로 (print portrait)  ·  표지·목차·구조" content={FULL} mode="diagrammatic" formatId="a4" only={[0, 1, 4]} />
 
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>③ 긴 텍스트 스트레스 — 클리핑/오버플로 임계(LLM 변동 대비)</h2>
@@ -101,6 +103,15 @@ export default function TrexGalleryPage() {
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>⑤ 장수 극단 — 결정적 생성기(스캐폴드)</h2>
       <Deck label="count=3 (MIN)  ·  deterministic" deck={generateDeck("최소 장수 테스트 — 핵심만", "editorial", 3)} />
       <Deck label="count=14 (MAX)  ·  deterministic 표지·중간·클로징" deck={generateDeck("최대 장수 스트레스 테스트 — 여러 역할 회전", "editorial", 14)} only={[0, 1, 6, 10, 13]} />
+
+      <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>⑥ Style DNA — 6개 디자인 유파 × 같은 콘텐츠(표지·목차·지표·구조·핵심·클로징)</h2>
+      {STYLE_IDS.map((sid) => (
+        <Deck key={sid} label={`style=${sid} (${STYLES[sid].nameKo})  ·  ${STYLES[sid].hintKo}`} content={FULL} mode="editorial" styleId={sid} only={[0, 1, 2, 4, 6, 7]} />
+      ))}
+      <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>⑦ Style DNA × 방향 — 세로/정사각 회귀</h2>
+      <Deck label="swiss · story 9:16" content={FULL} mode="editorial" styleId="swiss" formatId="story" only={[0, 2, 4, 7]} />
+      <Deck label="didot · ig-square 1:1" content={FULL} mode="editorial" styleId="didot" formatId="ig-square" only={[0, 2, 4, 7]} />
+      <Deck label="brutal · A4 세로" content={FULL} mode="editorial" styleId="brutal" formatId="a4" only={[0, 4, 7]} />
     </div>
   );
 }

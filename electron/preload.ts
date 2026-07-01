@@ -22,7 +22,7 @@ const api: AgentlasIpc = {
     getVersion: () => ipcRenderer.invoke("app:getVersion"),
   },
   trex: {
-    generateImage: (payload: { model?: "codex" | "gemini"; prompt: string }) => ipcRenderer.invoke("trex:generateImage", payload),
+    generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => ipcRenderer.invoke("trex:generateImage", payload),
     imageProviders: () => ipcRenderer.invoke("trex:imageProviders"),
     generateContent: (payload: { topic: string; count?: number; mode?: string }) => ipcRenderer.invoke("trex:generateContent", payload),
     contentAvailable: () => ipcRenderer.invoke("trex:contentAvailable"),

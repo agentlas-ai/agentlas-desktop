@@ -514,9 +514,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("app:getVersion", () => app.getVersion());
 
   // ── T-rex 슬라이드 스튜디오 이미지 생성(키리스 CLI: codex image_gen / gemini) ──
-  ipcMain.handle("trex:generateImage", async (_e, payload: { model?: "codex" | "gemini"; prompt?: string }) => {
+  ipcMain.handle("trex:generateImage", async (_e, payload: { model?: "codex" | "gemini" | "auto"; prompt?: string }) => {
     const { generateTrexImage } = await import("./trex/imagegen");
-    const model = payload?.model === "gemini" ? "gemini" : "codex";
+    const model = payload?.model === "gemini" ? "gemini" : payload?.model === "codex" ? "codex" : "auto";
     return generateTrexImage(model, String(payload?.prompt ?? ""));
   });
   ipcMain.handle("trex:imageProviders", async () => {

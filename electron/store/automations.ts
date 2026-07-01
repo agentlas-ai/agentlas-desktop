@@ -284,6 +284,28 @@ export function updateAutomationGraph(id: string, graph: WorkflowGraph | null): 
   getDb()
     .prepare("UPDATE automations SET graph_json = ? WHERE id = ?")
     .run(graph ? JSON.stringify(graph) : null, id);
+
+  // 트리거 노드에서 편집한 스케줄(scheduleSpec/schedule)을 실제 발사 컬럼에 동기화한다.
+  // graph_json만 쓰면 캔버스에는 새 스케줄이 보이는데 스케줄러(next_run_at)는 옛 시각으로
+  // 발사하는 사일런트 괴리가 생긴다. 이벤트 트리거는 시계 승격 금지 규칙 그대로 제외.
+  if (graph && existing.triggerType === "schedule") {
+    const trigger = graph.nodes.find((n) => n.type === "trigger");
+    const cfg = trigger?.config ?? {};
+    const spec = cfg.scheduleSpec;
+    const hasSpec = !!spec && typeof spec === "object" && typeof (spec as { kind?: unknown }).kind === "string";
+    const specJson = hasSpec ? JSON.stringify(spec) : null;
+    const token = typeof cfg.schedule === "string" && cfg.schedule.trim() ? cfg.schedule.trim() : null;
+    const row = getDb().prepare("SELECT schedule, schedule_json FROM automations WHERE id = ?").get(id) as {
+      schedule: string;
+      schedule_json: string | null;
+    };
+    if (hasSpec && specJson !== row.schedule_json) {
+      updateAutomation(id, { scheduleJson: specJson, ...(token ? { scheduleHuman: token } : {}) });
+    } else if (!hasSpec && token && token !== row.schedule) {
+      // 스펙 없이 레거시 토큰만 바뀐 경우(합성 그래프 편집 등) — 토큰을 진실로 삼고 stale spec 제거.
+      updateAutomation(id, { scheduleHuman: token, scheduleJson: null });
+    }
+  }
   return getAutomation(id) as Automation;
 }
 

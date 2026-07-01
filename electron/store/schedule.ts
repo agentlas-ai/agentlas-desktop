@@ -68,7 +68,7 @@ const DOW: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fr
 /**
  * 레거시 하이픈 토큰(6종)을 ScheduleSpec으로 매핑한다. 기존 자동화가 계속 발사되도록
  * "daily-09:00" 같은 문자열을 cron/interval spec으로 승격한다(설계 §2.1 표).
- * - hourly           → cron "m * * * *"(현재 분에 고정, 매시)
+ * - hourly           → interval 1h lastRun(레거시 드리프트 동작 보존 — 토큰에 분 정보가 없어 cron 고정 불가)
  * - every-Nm/every-Nh→ interval lastRun(레거시 드리프트 동작 보존)
  * - daily-HH:MM      → cron "M H * * *"
  * - weekday-HH:MM    → cron "M H * * 1-5"
@@ -82,7 +82,7 @@ export function parseLegacyToken(token: string, tz: string): ScheduleSpec | null
   const time = parts[parts.length - 1] || "09:00";
 
   if (kind === "hourly") {
-    return { kind: "cron", expr: "0 * * * *", tz };
+    return { kind: "interval", everyMs: 60 * 60 * 1000, anchor: "lastRun" };
   }
   if (kind === "every") {
     const raw = parts[1] ?? "";

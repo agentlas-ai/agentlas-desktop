@@ -31,14 +31,16 @@ import {
 } from "@/lib/trex/model";
 import { IconApps, IconSparkles, IconFileUp, IconEdit, IconChevronRight, IconCheck } from "@/components/Icon";
 import { DeckStage, GlobalStyle, bgStyle } from "@/components/trex/DeckStage";
+import { STYLES, STYLE_IDS, styleById, routeStyle, type StyleId } from "@/lib/trex/styles";
 
 type ViewState = "home" | "generating" | "view" | "edit";
-type ImageModel = "codex" | "gemini" | "svg";
+// "auto"=codex↔나노바나나 자동 페일오버(사용량 부족 시 남는 엔진 사용). "none"=이미지 생성 끔.
+type ImageModel = "auto" | "codex" | "gemini" | "none";
 const RECENTS_KEY = "trex.recents.v1";
 const EXAMPLE = "중견 제조사 디지털 전환 전략 — 진단과 12개월 로드맵";
 const EXAMPLE_EN = "Mid-market manufacturer digital transformation — diagnosis and a 12-month roadmap";
 const ALL_MODES: ArtMode[] = ["editorial", "cinematic", "diagrammatic", "hybrid"];
-const PALETTE: BlockKind[] = ["title", "subtitle", "body", "card", "kicker", "pill", "kpi", "bar", "rule", "footer"];
+const PALETTE: BlockKind[] = ["title", "subtitle", "body", "card", "image", "kicker", "pill", "kpi", "bar", "rule", "footer"];
 
 export default function TrexPage() {
   const { locale } = useT();
@@ -47,12 +49,14 @@ export default function TrexPage() {
   const [prompt, setPrompt] = useState("");
   const [count, setCount] = useState(5);
   const [formatId, setFormatId] = useState<string>(DEFAULT_FORMAT_ID);
-  const [imageModel, setImageModel] = useState<ImageModel>("codex");
+  const [imageModel, setImageModel] = useState<ImageModel>("auto");
   const [providers, setProviders] = useState<{ codex: boolean; gemini: boolean }>({ codex: false, gemini: false });
   const [aiContent, setAiContent] = useState(true);
   const [aiWriting, setAiWriting] = useState(false);
   const [contentEngines, setContentEngines] = useState<{ agy: boolean; codex: boolean }>({ agy: false, codex: false });
   const [modeOverride, setModeOverride] = useState<ArtMode | null>(null);
+  // Style DNA — null=자동(주제 라우팅, 매치 없으면 레거시 모드 룩), "legacy"=명시적 기본 룩.
+  const [styleOverride, setStyleOverride] = useState<StyleId | "legacy" | null>(null);
 
   useEffect(() => {
     const api = ipc();
@@ -79,13 +83,24 @@ export default function TrexPage() {
   const persistRecents = useCallback((next: TrexDeck[]) => {
     setRecents(next);
     try {
-      localStorage.setItem(RECENTS_KEY, JSON.stringify(next.slice(0, 24)));
+      // dataURL 이미지(장당 ~1-2MB)는 localStorage 쿼터를 즉시 태운다 → 저장본에선 스트립.
+      // 세션 안에서는 상태(deck)에 남아 있고, 재열람 시 이미지 블록은 생성중 표시로 되돌아간다.
+      const slim = next.slice(0, 24).map((d) => ({
+        ...d,
+        slides: d.slides.map((s) => ({
+          ...s,
+          bg: s.bg.kind === "image" && s.bg.src.startsWith("data:") ? { kind: "solid" as const, color: "#111" } : s.bg,
+          blocks: s.blocks.map((b) => (b.kind === "image" && (b.src || "").startsWith("data:") ? { ...b, src: "" } : b)),
+        })),
+      }));
+      localStorage.setItem(RECENTS_KEY, JSON.stringify(slim));
     } catch {
       /* ignore */
     }
   }, []);
 
   const routedMode = modeOverride ?? routeMode(prompt || EXAMPLE);
+  const routedStyle = styleOverride && styleOverride !== "legacy" ? styleOverride : routeStyle(prompt || EXAMPLE);
 
   // 생성한 덱을 한 장씩 드러낸다. 시네마틱/하이브리드는 codex/agy 이미지가 있으면 배경 교체.
   const revealDeck = useCallback(
@@ -106,7 +121,9 @@ export default function TrexPage() {
             setView("view");
             persistRecents([d, ...recents.filter((r) => r.id !== d.id)]);
             const gen = ipc()?.trex?.generateImage;
-            if (imageModel !== "svg" && gen) {
+            if (imageModel !== "none" && gen) {
+              // 레거시 씬 배경(cinematic/hybrid)은 슬라이드 오버레이로, 이미지 블록은 블록 자체가
+              // 생성중 표시를 하므로 pending 상태가 따로 필요 없다.
               setImagePending(new Set(d.slides.filter((s) => s.scene !== "none").map((s) => s.id)));
               void maybeFetchScenes(d, imageModel, (slideId, src) => {
                 setDeck((cur) => (cur && cur.id === d.id ? patchSlideBg(cur, slideId, src) : cur));
@@ -116,6 +133,9 @@ export default function TrexPage() {
                   return nn;
                 });
               }).finally(() => setImagePending(new Set()));
+              void fillBlockImages(d, imageModel, (slideId, blockId, src) => {
+                setDeck((cur) => (cur && cur.id === d.id ? patchBlockSrc(cur, slideId, blockId, src) : cur));
+              });
             }
           }, 360);
         }
@@ -129,26 +149,29 @@ export default function TrexPage() {
   const runGenerate = useCallback(
     async (text: string, n: number) => {
       const p = text.trim() || (ko ? EXAMPLE : EXAMPLE_EN);
+      // 스타일 결정 — 명시 선택 > 자동(주제 라우팅) > LLM 위임(undefined) > "legacy"=명시적 기본 룩(null).
+      const styleId = styleOverride === "legacy" ? null : styleOverride ?? routeStyle(p) ?? undefined;
       const gc = ipc()?.trex?.generateContent;
       if (aiContent && gc) {
         setDeck(null);
         setView("generating");
         setAiWriting(true);
+        const withImages = imageModel !== "none";
         let d: TrexDeck;
         try {
           const r = await gc({ topic: p, count: n, mode: modeOverride ?? undefined });
           const parsed = r?.ok && r.text ? parseDeckContent(r.text) : null;
-          d = parsed ? buildDeckFromContent(parsed, formatId, locale) : generateDeck(p, modeOverride ?? undefined, n, formatId, locale);
+          d = parsed ? buildDeckFromContent(parsed, formatId, locale, styleId, withImages) : generateDeck(p, modeOverride ?? undefined, n, formatId, locale, styleId, withImages);
         } catch {
-          d = generateDeck(p, modeOverride ?? undefined, n, formatId, locale);
+          d = generateDeck(p, modeOverride ?? undefined, n, formatId, locale, styleId, withImages);
         }
         setAiWriting(false);
         revealDeck(d);
       } else {
-        revealDeck(generateDeck(p, modeOverride ?? undefined, n, formatId, locale));
+        revealDeck(generateDeck(p, modeOverride ?? undefined, n, formatId, locale, styleId, imageModel !== "none"));
       }
     },
-    [aiContent, modeOverride, formatId, revealDeck, locale],
+    [aiContent, modeOverride, styleOverride, formatId, revealDeck, locale, imageModel],
   );
 
   const updateDeck = useCallback((updater: (d: TrexDeck) => TrexDeck) => {
@@ -312,6 +335,9 @@ export default function TrexPage() {
           routedMode={routedMode}
           modeOverride={modeOverride}
           setModeOverride={setModeOverride}
+          routedStyle={routedStyle}
+          styleOverride={styleOverride}
+          setStyleOverride={setStyleOverride}
           recents={recents}
           onGenerate={() => runGenerate(prompt, count)}
           onOpen={(d) => { setDeck(d); setActiveSlide(0); setView("view"); }}
@@ -340,7 +366,7 @@ export default function TrexPage() {
                 className="trex-print-slide"
                 style={{ opacity: view === "generating" && i >= revealed ? 0.1 : 1, transform: view === "generating" && i >= revealed ? "translateY(10px)" : "none", transition: "opacity .4s, transform .4s" }}
               >
-                <DeckStage slide={s} accent={deck.accent} editable={false} ratio={formatRatio(formatById(deck.formatId))} pending={imagePending.has(s.id)} pendingLabel={imageModel === "gemini" ? (ko ? "나노바나나 이미지 생성 중" : "Generating nano-banana image") : ko ? "이미지 생성 중" : "Generating image"} />
+                <DeckStage slide={s} accent={deck.accent} editable={false} ratio={formatRatio(formatById(deck.formatId))} dna={styleById(deck.styleId)} pending={imagePending.has(s.id)} pendingLabel={imageModel === "gemini" ? (ko ? "나노바나나 이미지 생성 중" : "Generating nano-banana image") : ko ? "이미지 생성 중" : "Generating image"} />
               </div>
             ))}
           </div>
@@ -377,9 +403,9 @@ function scenePrompt(kind: SceneKind, deckTitle: string): string | null {
   return null;
 }
 
-async function maybeFetchScenes(deck: TrexDeck, model: "codex" | "gemini", onImage: (slideId: string, src: string) => void): Promise<void> {
+async function maybeFetchScenes(deck: TrexDeck, model: ImageModel, onImage: (slideId: string, src: string) => void): Promise<void> {
   const gen = ipc()?.trex?.generateImage;
-  if (!gen) return; // 브라우저/미지원 — SVG 씬으로 폴백(렌더러가 그림)
+  if (!gen || model === "none") return; // 브라우저/미지원 — SVG 씬으로 폴백(렌더러가 그림)
   for (const s of deck.slides) {
     const p = scenePrompt(s.scene, deck.title);
     if (!p) continue;
@@ -392,19 +418,53 @@ async function maybeFetchScenes(deck: TrexDeck, model: "codex" | "gemini", onIma
   }
 }
 
+/**
+ * Style DNA 덱의 이미지 블록 채우기 — 각 블록의 장면 설명 + 유파 사진 룩(dna.photoStyle)으로
+ * 실제 이미지를 생성한다(auto면 codex↔나노바나나 자동 페일오버). 커버부터 순차 생성해
+ * 첫 화면이 가장 먼저 완성되게 한다.
+ */
+async function fillBlockImages(deck: TrexDeck, model: ImageModel, onImage: (slideId: string, blockId: string, src: string) => void): Promise<void> {
+  const gen = ipc()?.trex?.generateImage;
+  if (!gen || model === "none") return;
+  const dna = styleById(deck.styleId);
+  for (const s of deck.slides) {
+    for (const b of s.blocks) {
+      if (b.kind !== "image" || b.src) continue;
+      const scene = (b.prompt || "").trim() || `An evocative editorial photograph for a presentation titled "${deck.title}"`;
+      const prompt = `${scene}. ${dna?.photoStyle ?? "Clean professional editorial photography"}. Absolutely no text, no letters, no numbers, no watermark.`;
+      try {
+        const r = await gen({ model, prompt });
+        if (r?.ok && r.src) onImage(s.id, b.id, r.src);
+      } catch {
+        /* 블록은 생성중 표시 유지 — 다음 블록 계속 */
+      }
+    }
+  }
+}
+
+function patchBlockSrc(deck: TrexDeck, slideId: string, blockId: string, src: string): TrexDeck {
+  return {
+    ...deck,
+    slides: deck.slides.map((s) =>
+      s.id === slideId ? { ...s, blocks: s.blocks.map((b) => (b.id === blockId ? { ...b, src } : b)) } : s,
+    ),
+  };
+}
+
 function patchSlideBg(deck: TrexDeck, slideId: string, src: string): TrexDeck {
   return { ...deck, slides: deck.slides.map((s) => (s.id === slideId ? { ...s, bg: { kind: "image", src }, scene: "none" } : s)) };
 }
 
 /* ─────────────── 랜딩 ─────────────── */
 function Home({
-  ko, prompt, setPrompt, count, setCount, formatId, setFormatId, imageModel, setImageModel, providers, aiContent, setAiContent, contentEngines, routedMode, modeOverride, setModeOverride, recents, onGenerate, onOpen,
+  ko, prompt, setPrompt, count, setCount, formatId, setFormatId, imageModel, setImageModel, providers, aiContent, setAiContent, contentEngines, routedMode, modeOverride, setModeOverride, routedStyle, styleOverride, setStyleOverride, recents, onGenerate, onOpen,
 }: {
   ko: boolean; prompt: string; setPrompt: (v: string) => void; count: number; setCount: (n: number) => void;
   formatId: string; setFormatId: (id: string) => void;
   imageModel: ImageModel; setImageModel: (m: ImageModel) => void; providers: { codex: boolean; gemini: boolean };
   aiContent: boolean; setAiContent: (v: boolean) => void; contentEngines: { agy: boolean; codex: boolean };
   routedMode: ArtMode; modeOverride: ArtMode | null; setModeOverride: (m: ArtMode | null) => void;
+  routedStyle: StyleId | null; styleOverride: StyleId | "legacy" | null; setStyleOverride: (s: StyleId | "legacy" | null) => void;
   recents: TrexDeck[]; onGenerate: () => void; onOpen: (d: TrexDeck) => void;
 }) {
   return (
@@ -462,6 +522,23 @@ function Home({
         </div>
 
         <div style={controlRow}>
+          <span style={{ fontSize: 11.5, color: "var(--muted-deep)", fontWeight: 700 }}>{ko ? "디자인 유파" : "Design DNA"}</span>
+          <button type="button" onClick={() => setStyleOverride(null)} style={modeChip(styleOverride === null)} title={ko ? "주제에 맞는 유파를 자동 선택" : "Auto-route a design school by topic"}>
+            {ko ? "자동" : "Auto"}
+            {routedStyle && <span style={{ opacity: 0.6, marginLeft: 4 }}>· {STYLES[routedStyle][ko ? "nameKo" : "nameEn"]}</span>}
+          </button>
+          <button type="button" onClick={() => setStyleOverride("legacy")} style={modeChip(styleOverride === "legacy")} title={ko ? "기존 기본 룩" : "The original default look"}>
+            {ko ? "기본" : "Default"}
+          </button>
+          {STYLE_IDS.map((sid) => (
+            <button key={sid} type="button" onClick={() => setStyleOverride(sid)} style={modeChip(styleOverride === sid)} title={ko ? STYLES[sid].hintKo : STYLES[sid].hintEn}>
+              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: STYLES[sid].radius === 0 ? 1 : 999, background: STYLES[sid].accent, marginRight: 5, verticalAlign: "baseline" }} />
+              {STYLES[sid][ko ? "nameKo" : "nameEn"]}
+            </button>
+          ))}
+        </div>
+
+        <div style={controlRow}>
           {(contentEngines.agy || contentEngines.codex) && (
             <>
               <button type="button" onClick={() => setAiContent(!aiContent)} style={modeChip(aiContent)} title={ko ? "AI가 슬라이드별 실제 내용을 작성" : "AI writes real per-slide content"}>
@@ -472,14 +549,17 @@ function Home({
           )}
           <span style={{ fontSize: 11.5, color: "var(--muted-deep)", fontWeight: 700 }}>{ko ? "이미지 모델" : "Image model"}</span>
           <select value={imageModel} onChange={(e) => setImageModel(e.target.value as ImageModel)} style={imageSelect} aria-label={ko ? "이미지 모델" : "Image model"}>
+            <option value="auto">{ko ? "자동 (Codex ↔ 나노바나나)" : "Auto (Codex ↔ nano-banana)"}</option>
             <option value="codex">Codex image_gen{providers.codex ? "" : ko ? " · CLI 필요" : " · needs CLI"}</option>
             <option value="gemini" disabled={!providers.gemini}>Antigravity 나노바나나{providers.gemini ? "" : ko ? " · 연결 필요" : " · connect Antigravity"}</option>
-            <option value="svg">{ko ? "오프라인 SVG (생성 안 함)" : "Offline SVG"}</option>
+            <option value="none">{ko ? "이미지 끄기" : "No images"}</option>
           </select>
           <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>
-            {imageModel === "svg"
-              ? ko ? "AI 이미지 없이 벡터 배경" : "Vector backgrounds, no AI image"
-              : ko ? "생성 직후 배경을 실제 이미지로 채웁니다" : "Backgrounds fill with real images after generation"}
+            {imageModel === "none"
+              ? ko ? "텍스트·도표 전용 레이아웃" : "Text & chart only layouts"
+              : imageModel === "auto"
+                ? ko ? "사용량이 부족하면 남는 엔진을 자동 사용" : "Falls over to whichever engine has quota"
+                : ko ? "생성 직후 실제 이미지로 채웁니다" : "Fills with real images after generation"}
           </span>
         </div>
 
@@ -552,6 +632,7 @@ function Editor({
             accent={deck.accent}
             editable
             ratio={formatRatio(formatById(deck.formatId))}
+            dna={styleById(deck.styleId)}
             selectedId={selected}
             editingId={editingId}
             onSelect={(id) => { setSelected(id || null); if (!id) setEditingId(null); }}
@@ -604,7 +685,7 @@ function Editor({
 function clamp(n: number, lo: number, hi: number): number { return Math.max(lo, Math.min(hi, n)); }
 function blockLabel(k: BlockKind, ko: boolean): string {
   const map: Record<BlockKind, [string, string]> = {
-    title: ["제목", "Title"], subtitle: ["부제", "Subtitle"], body: ["본문", "Body"], card: ["카드", "Card"], kicker: ["라벨", "Kicker"],
+    title: ["제목", "Title"], subtitle: ["부제", "Subtitle"], body: ["본문", "Body"], card: ["카드", "Card"], image: ["이미지", "Image"], kicker: ["라벨", "Kicker"],
     pill: ["태그", "Pill"], kpi: ["숫자", "KPI"], bar: ["막대", "Bar"], rule: ["선", "Rule"], footer: ["푸터", "Footer"],
   };
   return ko ? map[k][0] : map[k][1];

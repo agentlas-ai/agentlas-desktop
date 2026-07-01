@@ -2804,7 +2804,7 @@ export interface AgentlasIpc {
   };
   /** T-rex 슬라이드 스튜디오 — 키리스 CLI 이미지 생성(codex image_gen / gemini). */
   trex: {
-    generateImage: (payload: { model?: "codex" | "gemini"; prompt: string }) => Promise<{ ok: boolean; src?: string; reason?: string }>;
+    generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => Promise<{ ok: boolean; src?: string; reason?: string; engine?: "codex" | "gemini" }>;
     imageProviders: () => Promise<{ codex: boolean; gemini: boolean }>;
     generateContent: (payload: { topic: string; count?: number; mode?: string }) => Promise<{ ok: boolean; text?: string; engine?: "agy" | "codex"; reason?: string }>;
     contentAvailable: () => Promise<{ agy: boolean; codex: boolean }>;

@@ -248,6 +248,53 @@ function assertLocalTime(iso, expected) {
       mcpClient.runMcpInvocation = originalRunMcpInvocation;
     }
 
+    // ── 그래프 트리거 스케줄 편집 → 발사 컬럼(schedule_json/next_run_at) 동기화 회귀 ──
+    const { updateAutomationGraph } = require("../dist/electron/store/automations.js");
+    const graphEdit = createAutomation({
+      name: "Graph Trigger Sync",
+      scheduleHuman: "daily-09:00",
+      targetType: "agent",
+      targetId: "agent-1",
+      promptTemplate: "graph sync",
+    });
+    const editedSpec = { kind: "cron", expr: "0 18 * * *", tz: "Asia/Seoul" };
+    updateAutomationGraph(graphEdit.id, {
+      version: 1,
+      nodes: [
+        {
+          id: "n0",
+          type: "trigger",
+          position: { x: 0, y: 0 },
+          config: { scheduleSpec: editedSpec, schedule: "daily-18:00" },
+        },
+        { id: "n1", type: "agent", position: { x: 280, y: 0 }, config: { prompt: "hi" } },
+      ],
+      edges: [{ id: "e0", source: "n0", target: "n1" }],
+    });
+    const synced = getAutomation(graphEdit.id);
+    assert.equal(synced.scheduleHuman, "daily-18:00", "trigger edit should sync legacy token");
+    assert.deepEqual(synced.scheduleSpec, editedSpec, "trigger edit should sync schedule_json");
+    assert.equal(new Date(synced.nextRunAt).getHours(), 18, "next_run_at should follow edited trigger schedule");
+    // 이벤트 트리거는 시계 승격 금지 — 그래프 저장이 next_run_at을 만들면 안 된다.
+    const fsTrig = createAutomation({
+      name: "FS Trigger Graph Save",
+      scheduleHuman: "daily-09:00",
+      targetType: "agent",
+      targetId: "agent-1",
+      promptTemplate: "fs",
+      triggerType: "fs",
+      trigger: { kind: "fs", path: "/tmp/watch", on: "modify" },
+    });
+    updateAutomationGraph(fsTrig.id, {
+      version: 1,
+      nodes: [
+        { id: "n0", type: "trigger", position: { x: 0, y: 0 }, config: { scheduleSpec: editedSpec, schedule: "daily-18:00" } },
+        { id: "n1", type: "agent", position: { x: 280, y: 0 }, config: { prompt: "hi" } },
+      ],
+      edges: [{ id: "e0", source: "n0", target: "n1" }],
+    });
+    assert.equal(getAutomation(fsTrig.id).nextRunAt, null, "event trigger must not gain a clock from graph save");
+
     removeAutomation(created.id);
     for (const item of listAutomations()) removeAutomation(item.id);
     assert.equal(listAutomations().length, 0);

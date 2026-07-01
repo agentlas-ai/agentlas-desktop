@@ -3,6 +3,7 @@
 "use client";
 import { useRef, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import type { SceneKind, TrexBlock, TrexSlide } from "@/lib/trex/model";
+import type { StyleDna } from "@/lib/trex/styles";
 
 type SlideBg = TrexSlide["bg"];
 
@@ -24,9 +25,11 @@ const pendingOverlay: CSSProperties = { position: "absolute", inset: 0, zIndex: 
 
 /* ─────────────── 슬라이드 무대 ─────────────── */
 export function DeckStage({
-  slide, accent, editable, ratio, selectedId, editingId, pending, pendingLabel, onSelect, onStartEdit, onDrag, onText,
+  slide, accent, editable, ratio, dna, selectedId, editingId, pending, pendingLabel, onSelect, onStartEdit, onDrag, onText,
 }: {
   slide: TrexSlide; accent: string; editable: boolean; ratio?: string;
+  /** Style DNA(styles.ts) — 서체·모서리·장식을 유파 규칙으로 렌더. 없으면 레거시 룩. */
+  dna?: StyleDna | null;
   selectedId?: string | null; editingId?: string | null; pending?: boolean; pendingLabel?: string;
   onSelect?: (id: string) => void; onStartEdit?: (id: string) => void;
   onDrag?: (id: string, dx: number, dy: number, mode: "move" | "resize") => void;
@@ -58,8 +61,14 @@ export function DeckStage({
   };
 
   return (
-    <div ref={ref} className="trex-stage" style={{ ...stageBase, ...bgStyle(slide.bg, accent), color: slide.ink, aspectRatio: ratio ?? "16 / 9" }} onPointerDown={() => editable && onSelect?.("")}>
+    <div
+      ref={ref}
+      className="trex-stage"
+      style={{ ...stageBase, ...bgStyle(slide.bg, accent), color: slide.ink, aspectRatio: ratio ?? "16 / 9", ...(dna ? { fontFamily: dna.bodyFont } : null) }}
+      onPointerDown={() => editable && onSelect?.("")}
+    >
       <Scene kind={slide.scene} accent={accent} />
+      {dna && slide.deco && slide.deco !== "none" && <Deco slide={slide} dna={dna} accent={accent} />}
       {pending && (
         <div style={pendingOverlay}>
           <span className="trex-spin" style={{ width: "3cqw", height: "3cqw", borderRadius: "50%", border: "0.35cqw solid rgba(255,255,255,.25)", borderTopColor: accent, display: "inline-block" }} />
@@ -72,6 +81,7 @@ export function DeckStage({
           b={b}
           accent={accent}
           ink={slide.ink}
+          dna={dna}
           editable={editable}
           selected={selectedId === b.id}
           editing={editingId === b.id}
@@ -83,6 +93,122 @@ export function DeckStage({
       ))}
     </div>
   );
+}
+
+/* ─────────────── Style DNA 장식 모티프 레이어 ───────────────
+ * 블록 뒤(zIndex 1)에 그려지는 유파별 시각 서명 — 스위스 거대 번호, 바우하우스 기하,
+ * 디도 헤어라인 프레임, 비녤리 밴드, 브루탈 보더, 하라의 점. 전부 비인터랙티브. */
+function Deco({ slide, dna, accent }: { slide: TrexSlide; dna: StyleDna; accent: string }) {
+  const v = slide.decoV ?? "body";
+  const ink = slide.ink;
+  const n = slide.decoN ?? "01";
+  const a2 = dna.accent2 ?? accent;
+  const L: CSSProperties = { position: "absolute", inset: 0, pointerEvents: "none", zIndex: 1, overflow: "hidden" };
+
+  if (slide.deco === "swiss-index") {
+    // 뮐러-브로크만 — 거대 인덱스 숫자 + 상단 헤어라인(그리드의 존재를 드러낸다).
+    const big = v === "cover";
+    return (
+      <div style={L} aria-hidden>
+        <div
+          style={{
+            position: "absolute", top: big ? "-9cqw" : "-4.5cqw", right: "1.5cqw",
+            fontFamily: dna.displayFont, fontWeight: 800, letterSpacing: "-.05em",
+            fontSize: big ? "34cqw" : "20cqw", lineHeight: 1, color: withAlpha(ink, big ? 0.14 : 0.07),
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {n}
+        </div>
+        {v !== "cover" && <div style={{ position: "absolute", top: "8.5%", left: "6%", right: "6%", height: 1, background: withAlpha(ink, 0.2) }} />}
+      </div>
+    );
+  }
+
+  if (slide.deco === "bauhaus-geo") {
+    // 바우하우스 — 원·삼각·바의 원색 기하. 커버는 대담하게, 본문은 여백의 소품으로.
+    if (v === "cover" || v === "close") {
+      return (
+        <div style={L} aria-hidden>
+          <div style={{ position: "absolute", top: "-14cqw", right: "-10cqw", width: "34cqw", height: "34cqw", borderRadius: "50%", background: a2, opacity: 0.92 }} />
+          <div style={{ position: "absolute", top: "6cqw", right: "16cqw", width: "9cqw", height: "9cqw", borderRadius: "50%", background: accent, opacity: 0.9 }} />
+          <div style={{ position: "absolute", bottom: 0, left: "-4cqw", width: "18cqw", height: "14cqw", clipPath: "polygon(0 100%, 50% 0, 100% 100%)", background: withAlpha(ink, 0.85), opacity: 0.18 }} />
+          <div style={{ position: "absolute", bottom: "12%", left: 0, width: "38%", height: "0.5cqw", background: accent, opacity: 0.85 }} />
+        </div>
+      );
+    }
+    return (
+      <div style={L} aria-hidden>
+        <div style={{ position: "absolute", top: "5.5%", right: "5%", width: "4.6cqw", height: "4.6cqw", borderRadius: "50%", border: `0.34cqw solid ${a2}`, opacity: 0.9 }} />
+        <div style={{ position: "absolute", top: "7.2%", right: "9.2%", width: "2.2cqw", height: "2.2cqw", borderRadius: "50%", background: accent, opacity: 0.85 }} />
+      </div>
+    );
+  }
+
+  if (slide.deco === "didot-frame") {
+    // 패션 매거진 — 이중 헤어라인 프레임과 다이아 오너먼트. 지면 자체가 오브제가 된다.
+    const strong = v !== "body";
+    return (
+      <div style={L} aria-hidden>
+        <div style={{ position: "absolute", inset: "2.4%", border: `1px solid ${withAlpha(ink, strong ? 0.55 : 0.28)}` }} />
+        {strong && <div style={{ position: "absolute", inset: "3.4%", border: `1px solid ${withAlpha(ink, 0.25)}` }} />}
+        {strong && (
+          <div style={{ position: "absolute", top: "2.4%", left: "50%", transform: "translate(-50%, -50%)", padding: "0 1.2cqw", background: bgFlat(slide.bg), color: accent, fontSize: "1.5cqw", lineHeight: 1 }}>◆</div>
+        )}
+      </div>
+    );
+  }
+
+  if (slide.deco === "vignelli-band") {
+    // 비녤리/유니그리드 — 상단의 두꺼운 잉크 밴드. 위계는 장식이 아니라 구조다.
+    const coverBand = v === "cover";
+    return (
+      <div style={L} aria-hidden>
+        <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: coverBand ? "3.2cqw" : "1.4cqw", background: v === "close" ? withAlpha(ink, 0.92) : ink }} />
+        {coverBand && <div style={{ position: "absolute", top: "3.2cqw", left: 0, right: 0, height: "0.55cqw", background: accent }} />}
+        {!coverBand && v === "body" && <div style={{ position: "absolute", top: "1.4cqw", left: 0, width: "22%", height: "0.45cqw", background: accent }} />}
+      </div>
+    );
+  }
+
+  if (slide.deco === "brutal-frame") {
+    // 브루탈리즘 — 원시 보더와 모노 인덱스 칩. 구조 그 자체를 노출한다.
+    const bold = v !== "body";
+    return (
+      <div style={L} aria-hidden>
+        <div style={{ position: "absolute", inset: "2.2%", border: `${bold ? 0.5 : 0.3}cqw solid ${withAlpha(ink, 0.9)}` }} />
+        {/* 인덱스 칩 — 커버/클로징은 우하단(푸터 없음 근처 대담하게), 본문은 우상단(푸터 페이지번호와 충돌 방지). */}
+        <div
+          style={{
+            position: "absolute", right: "2.2%", ...(bold ? { bottom: "2.2%" } : { top: "2.2%" }),
+            padding: "0.5cqw 1.1cqw", background: bold ? accent : "transparent",
+            border: `${bold ? 0 : 0.22}cqw solid ${withAlpha(ink, 0.9)}`,
+            fontFamily: dna.monoFont ?? dna.bodyFont, fontWeight: 700, fontSize: bold ? "2.6cqw" : "1.4cqw",
+            color: bold ? "#111" : withAlpha(ink, 0.8), lineHeight: 1.1,
+          }}
+        >
+          {n}
+        </div>
+        {bold && <div style={{ position: "absolute", top: "2.2%", right: "2.2%", width: "4cqw", height: "4cqw", background: accent }} />}
+      </div>
+    );
+  }
+
+  if (slide.deco === "hara-void") {
+    // 하라 켄야 — 점 하나. 여백이 일을 하게 둔다.
+    return (
+      <div style={L} aria-hidden>
+        <div style={{ position: "absolute", top: v === "cover" ? "26%" : "6.5%", left: v === "cover" ? "50%" : "auto", right: v === "cover" ? "auto" : "6%", transform: v === "cover" ? "translateX(-50%)" : "none", width: "1.2cqw", height: "1.2cqw", borderRadius: "50%", background: accent }} />
+        {v === "cover" && <div style={{ position: "absolute", bottom: "16%", left: "50%", transform: "translateX(-50%)", width: "10cqw", height: 1, background: withAlpha(ink, 0.3) }} />}
+      </div>
+    );
+  }
+  return null;
+}
+
+/** 프레임 오너먼트 배경 매칭용 — 솔리드만 확실히, 그 외엔 투명 처리. */
+function bgFlat(bg: SlideBg | undefined): string {
+  return bg && bg.kind === "solid" ? bg.color : "transparent";
 }
 
 function Scene({ kind, accent }: { kind: SceneKind; accent: string }) {
@@ -127,9 +253,9 @@ function Scene({ kind, accent }: { kind: SceneKind; accent: string }) {
 }
 
 function BlockView({
-  b, accent, ink, editable, selected, editing, onPointerDown, onDoubleClick, onResize, onText,
+  b, accent, ink, dna, editable, selected, editing, onPointerDown, onDoubleClick, onResize, onText,
 }: {
-  b: TrexBlock; accent: string; ink: string; editable: boolean; selected: boolean; editing: boolean;
+  b: TrexBlock; accent: string; ink: string; dna?: StyleDna | null; editable: boolean; selected: boolean; editing: boolean;
   onPointerDown: (e: ReactPointerEvent) => void; onDoubleClick: () => void; onResize: (e: ReactPointerEvent) => void;
   onText?: (id: string, field: "text" | "value" | "label", v: string) => void;
 }) {
@@ -145,9 +271,37 @@ function BlockView({
       ? { contentEditable: true, suppressContentEditableWarning: true, onBlur: (e: React.FocusEvent<HTMLElement>) => onText?.(b.id, field, e.currentTarget.textContent ?? ""), style: { outline: "none", cursor: "text" } as CSSProperties }
       : {};
 
+  // Style DNA 타이포그래피 — 유파 서체·자간·굵기·대문자화(없으면 레거시 값 유지).
+  const displayFont = dna?.displayFont;
+  const bodyFont = dna?.bodyFont;
+  const monoFont = dna?.monoFont ?? dna?.bodyFont;
+
   let inner: React.ReactNode = null;
-  if (b.kind === "kicker") inner = <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.4), letterSpacing: ".28em", fontWeight: 800, textTransform: "uppercase", color: b.accent ? accent : muted }}>{b.text}</div>;
-  else if (b.kind === "title") inner = <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 3.4), fontWeight: b.weight ?? 800, lineHeight: 1.12, letterSpacing: "-.02em", color: b.accent ? accent : ink, wordBreak: "keep-all", textAlign: b.align ?? "left" }}>{b.text}</div>;
+  if (b.kind === "kicker")
+    inner = (
+      <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.4), letterSpacing: dna?.kickerTracking ?? ".28em", fontWeight: dna ? 700 : 800, textTransform: "uppercase", color: b.accent ? accent : muted, ...(bodyFont ? { fontFamily: bodyFont } : null), textAlign: b.align ?? "left" }}>
+        {b.text}
+      </div>
+    );
+  else if (b.kind === "title")
+    inner = (
+      <div
+        {...ed("text")}
+        style={{
+          fontSize: cqw(b.size ?? 3.4),
+          fontWeight: dna ? dna.titleWeight : b.weight ?? 800,
+          lineHeight: dna?.titleLineHeight ?? 1.12,
+          letterSpacing: dna?.titleTracking ?? "-.02em",
+          ...(dna?.titleTransform === "uppercase" ? { textTransform: "uppercase" as const } : null),
+          ...(displayFont ? { fontFamily: displayFont } : null),
+          color: b.accent ? accent : ink,
+          wordBreak: "keep-all",
+          textAlign: b.align ?? "left",
+        }}
+      >
+        {b.text}
+      </div>
+    );
   else if (b.kind === "subtitle" || b.kind === "body")
     inner = b.inline ? (
       <div style={{ display: "flex", alignItems: "baseline", gap: cqw(1.8), wordBreak: "keep-all" }}>
@@ -162,7 +316,22 @@ function BlockView({
     );
   else if (b.kind === "card")
     inner = (
-      <div style={{ height: b.h ? "100%" : undefined, boxSizing: "border-box", background: withAlpha(ink, 0.04), border: `1px solid ${withAlpha(ink, 0.11)}`, borderRadius: cqw(1.3), padding: `${cqw(1.9)} ${cqw(1.7)}`, display: "flex", flexDirection: "column", gap: cqw(1), wordBreak: "keep-all", overflow: "hidden" }}>
+      <div
+        style={{
+          height: b.h ? "100%" : undefined,
+          boxSizing: "border-box",
+          background: withAlpha(ink, 0.04),
+          border: dna ? `${0.14 * dna.borderScale}cqw solid ${withAlpha(ink, dna.borderScale > 1.5 ? 0.85 : 0.22)}` : `1px solid ${withAlpha(ink, 0.11)}`,
+          borderRadius: dna ? cqw(dna.radius) : cqw(1.3),
+          ...(dna?.hardShadow ? { boxShadow: `0.55cqw 0.55cqw 0 ${withAlpha(ink, 0.9)}` } : null),
+          padding: `${cqw(1.9)} ${cqw(1.7)}`,
+          display: "flex",
+          flexDirection: "column",
+          gap: cqw(1),
+          wordBreak: "keep-all",
+          overflow: "hidden",
+        }}
+      >
         {b.value ? (
           <div style={{ display: "flex", alignItems: "center", gap: cqw(1), marginBottom: cqw(0.2) }}>
             <span style={{ fontSize: cqw(2), fontWeight: 800, color: accent, letterSpacing: "-.02em", lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>{b.value}</span>
@@ -175,28 +344,59 @@ function BlockView({
         <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.45), lineHeight: 1.5, color: withAlpha(ink, 0.72), fontWeight: 500 }}>{b.text}</div>
       </div>
     );
-  else if (b.kind === "rule") inner = <div style={{ height: cqw(0.32), width: "100%", background: b.accent ? accent : muted, borderRadius: 2 }} />;
-  else if (b.kind === "pill") inner = <span {...ed("text")} style={{ display: "inline-block", fontSize: cqw(b.size ?? 1.2), fontWeight: 800, letterSpacing: ".06em", color: accent, background: withAlpha(accent, 0.14), padding: `${cqw(0.5)} ${cqw(1.1)}`, borderRadius: 999 }}>{b.text}</span>;
+  else if (b.kind === "rule") inner = <div style={{ height: cqw(dna && dna.borderScale > 1 ? 0.32 * dna.borderScale : 0.32), width: "100%", background: b.accent ? accent : muted, borderRadius: dna && dna.radius === 0 ? 0 : 2 }} />;
+  else if (b.kind === "pill")
+    inner = (
+      <span {...ed("text")} style={{ display: "inline-block", fontSize: cqw(b.size ?? 1.2), fontWeight: 800, letterSpacing: ".06em", color: accent, background: withAlpha(accent, 0.14), padding: `${cqw(0.5)} ${cqw(1.1)}`, borderRadius: dna && dna.radius === 0 ? 0 : 999, ...(monoFont ? { fontFamily: monoFont } : null) }}>
+        {b.text}
+      </span>
+    );
   else if (b.kind === "kpi")
     inner = (
       <div>
-        <div {...ed("value")} style={{ fontSize: cqw(b.size ?? 6), fontWeight: 800, letterSpacing: "-.03em", lineHeight: 0.9, color: b.accent ? accent : ink }}>{b.value}</div>
+        <div {...ed("value")} style={{ fontSize: cqw(b.size ?? 6), fontWeight: dna ? Math.max(dna.titleWeight, 600) : 800, letterSpacing: dna?.titleTracking ?? "-.03em", lineHeight: 0.9, color: b.accent ? accent : ink, ...(displayFont ? { fontFamily: displayFont } : null) }}>{b.value}</div>
         <div style={{ height: cqw(0.26), width: cqw(3), background: accent, margin: `${cqw(1.1)} 0 ${cqw(0.9)}` }} />
         <div {...ed("label")} style={{ fontSize: cqw(1.25), color: muted, fontWeight: 600, lineHeight: 1.4 }}>{b.label}</div>
       </div>
     );
   else if (b.kind === "bar") {
     const v = Math.max(0, Math.min(100, Number(b.value) || 0));
+    const barR = dna && dna.radius === 0 ? 0 : 999;
     inner = (
       <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: cqw(1.2) }}>
         <span {...ed("label")} style={{ fontSize: cqw(b.size ?? 1.3), fontWeight: 700, color: ink, minWidth: cqw(8) }}>{b.label}</span>
-        <span style={{ height: cqw(1.9), background: withAlpha(ink, 0.1), borderRadius: 999, overflow: "hidden" }}><span style={{ display: "block", height: "100%", width: `${v}%`, background: accent, borderRadius: 999 }} /></span>
-        <span style={{ fontSize: cqw(1.35), fontWeight: 800, color: accent }}>{v}%</span>
+        <span style={{ height: cqw(2.4), background: withAlpha(ink, 0.1), borderRadius: barR, overflow: "hidden" }}><span style={{ display: "block", height: "100%", width: `${v}%`, background: accent, borderRadius: barR }} /></span>
+        <span style={{ fontSize: cqw(1.35), fontWeight: 800, color: accent, ...(monoFont ? { fontFamily: monoFont } : null) }}>{v}%</span>
       </div>
     );
-  } else if (b.kind === "footer")
+  } else if (b.kind === "image")
+    // 생성 이미지 패널 — src 없으면 생성중 플레이스홀더(맥박 점). SVG 장식이 아니라 실제 사진이 원칙.
     inner = (
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: `1px solid ${withAlpha(ink, 0.14)}`, paddingTop: cqw(1.2), fontSize: cqw(b.size ?? 1.05), color: muted }}>
+      <div
+        style={{
+          width: "100%",
+          height: "100%",
+          overflow: "hidden",
+          borderRadius: dna ? cqw(dna.radius) : cqw(1.3),
+          border: dna && dna.borderScale > 1.5 ? `${0.14 * dna.borderScale}cqw solid ${withAlpha(ink, 0.85)}` : `1px solid ${withAlpha(ink, 0.1)}`,
+          ...(dna?.hardShadow ? { boxShadow: `0.55cqw 0.55cqw 0 ${withAlpha(ink, 0.9)}` } : null),
+          background: withAlpha(ink, 0.05),
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        {b.src ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={b.src} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+        ) : (
+          <span className="trex-pulse" style={{ width: cqw(1.6), height: cqw(1.6), borderRadius: "50%", background: accent, display: "inline-block" }} />
+        )}
+      </div>
+    );
+  else if (b.kind === "footer")
+    inner = (
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: `1px solid ${withAlpha(ink, 0.14)}`, paddingTop: cqw(1.2), fontSize: cqw(b.size ?? 1.05), color: muted, ...(monoFont ? { fontFamily: monoFont } : null) }}>
         <span {...ed("text")}>{b.text}</span><span style={{ fontWeight: 700, opacity: 0.7 }}>{b.value}</span>
       </div>
     );
@@ -219,6 +419,8 @@ export function GlobalStyle() {
       .trex-recent:hover { transform: translateY(-2px); box-shadow: var(--rd-shadow-2, 0 10px 30px rgba(0,0,0,.12)); }
       .trex-spin { animation: trexspin .8s linear infinite; }
       @keyframes trexspin { to { transform: rotate(360deg); } }
+      .trex-pulse { animation: trexpulse 1.2s ease-in-out infinite; }
+      @keyframes trexpulse { 0%,100% { opacity: .35; transform: scale(.8); } 50% { opacity: 1; transform: scale(1.15); } }
       @media print {
         body.trex-printing * { visibility: hidden; }
         body.trex-printing .trex-print-slide, body.trex-printing .trex-print-slide * { visibility: visible; }
