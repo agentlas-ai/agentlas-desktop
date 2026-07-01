@@ -18,6 +18,7 @@ import {
   IconChat,
   IconChevronRight,
   IconFolder,
+  IconHome,
   IconMoon,
   IconPlus,
   IconSettings,
@@ -41,15 +42,6 @@ const SIDEBAR_MAX_WIDTH = 380;
 function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
 }
-const workspaceNavLinks = [
-  { href: "/dashboard", ko: "대시보드", en: "Dashboard" },
-  { href: "/build", ko: "만들기", en: "Build" },
-  { href: "/library/agents", ko: "에이전트", en: "Agents" },
-  { href: "/apps", ko: "Apps", en: "Apps" },
-  { href: "/marketplace", ko: "Hub", en: "Hub" },
-  { href: "/library/env", ko: "Env", en: "Env" },
-];
-
 interface SidebarData {
   chats: Chat[];
   projects: Project[];
@@ -555,15 +547,12 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         }}
       >
 
-        <SidebarSection title={locale === "en" ? "Navigate" : "이동"} icon={<IconChevronRight size={12} />}>
-          {workspaceNavLinks.map((link) => (
-            <SidebarLink key={link.href} href={link.href} active={pathname === link.href}>
-              <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                {locale === "en" ? link.en : link.ko}
-              </span>
-            </SidebarLink>
-          ))}
-        </SidebarSection>
+        <SidebarLink href="/dashboard" active={pathname === "/dashboard"}>
+          <IconHome size={14} style={{ flexShrink: 0, color: "var(--muted-deep)" }} />
+          <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            {locale === "en" ? "Dashboard" : "대시보드"}
+          </span>
+        </SidebarLink>
 
         <SidebarSection
           title={t("sidebar.chats")}
@@ -1165,6 +1154,12 @@ function CollapsedNav({
     isActive: boolean;
     badge?: string | number;
   }> = [
+    {
+      href: "/dashboard",
+      label: "Dashboard",
+      icon: <IconHome size={16} />,
+      isActive: pathname === "/dashboard",
+    },
     {
       href: "/chat",
       label: t("sidebar.chats"),
