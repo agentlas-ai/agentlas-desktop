@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.5.8 — 2026-07-01
+
+### Added
+
+- **Autonomous swarm mode (🐝).** Turn one chat into an emergent multi-agent swarm:
+  a seed task splits into sub-tasks, workers run in parallel and spawn more work as
+  the graph grows, then a synthesizer merges everything into one answer. Safety caps
+  (max tasks/rounds, deadlock and infinite-spawn guards) protect your machine and
+  wallet; Stop skips the final synthesis to save cost.
+- **Continuous live mode ("계속 라이브로").** Keeps the same chat streaming live
+  across many execution passes instead of stopping at the 3-pass limit — long,
+  uninterrupted autonomous work in one window. Each pass is saved immediately so a
+  disconnect never loses progress.
+- **Spec-aware concurrency slider (Settings).** How many agents run at once is no
+  longer a hardcoded 4. The app reads your CPU/RAM and shows a recommended value;
+  a slider (game-graphics-settings style) lets you scale up or down, with a warning
+  when you go above the recommendation.
+
+### Changed
+
+- **Chat toolbar consolidated into the + menu.** The bottom bar no longer scatters
+  buttons when the window is resized. `/` and `@` moved into the + menu as
+  **명령어 (command)** and **에이전트 부르기 (agent call)**; Hephaestus modes
+  (find-agent, Stormbreaker, network) moved in too. Active modes show as removable
+  chips next to +. The non-functional "앱 생성" entry was removed.
+- **Smarter agent import.** Selecting a folder now scans nearby directories for an
+  actual agent (looks for `.agentlas/` and other agent markers) instead of blindly
+  registering the exact path — and explains *why* when a folder isn't an agent,
+  rather than silently showing "no members."
+
 ## 0.5.7 — 2026-07-01
 
 ### Added

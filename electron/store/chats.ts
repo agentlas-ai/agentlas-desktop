@@ -19,6 +19,8 @@ interface ChatRow {
   created_at: string;
   updated_at: string;
   kind: string | null;
+  continuous_mode: number | null;
+  swarm_mode: number | null;
 }
 
 function toChat(row: ChatRow): Chat {
@@ -33,6 +35,8 @@ function toChat(row: ChatRow): Chat {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     kind: row.kind === "division" ? "division" : "user",
+    continuousMode: row.continuous_mode === 1,
+    swarmMode: row.swarm_mode === 1,
   };
 }
 
@@ -249,6 +253,21 @@ export function setChatWorkingFolder(chatId: string, absPath: string | null): vo
   getDb()
     .prepare("UPDATE chats SET working_folder = ?, updated_at = ? WHERE id = ?")
     .run(absPath, new Date().toISOString(), chatId);
+}
+
+/** "계속 라이브로" 모드 — 켜두면 이 채팅의 Stormbreaker 연속실행이 짧은 상한에 닿아도
+ *  백그라운드로 넘기지 않고 같은 채팅에서 라이브 스트리밍을 계속 이어간다(runMcpInvocation 참고). */
+export function setChatContinuousMode(chatId: string, enabled: boolean): void {
+  getDb()
+    .prepare("UPDATE chats SET continuous_mode = ?, updated_at = ? WHERE id = ?")
+    .run(enabled ? 1 : 0, new Date().toISOString(), chatId);
+}
+
+/** 스웜 모드 — 켜면 이 채팅이 목표를 작업 그래프로 분해해 여러 워커가 병렬 협업한다(runSwarmInvocation). */
+export function setChatSwarmMode(chatId: string, enabled: boolean): void {
+  getDb()
+    .prepare("UPDATE chats SET swarm_mode = ?, updated_at = ? WHERE id = ?")
+    .run(enabled ? 1 : 0, new Date().toISOString(), chatId);
 }
 
 // ── chat_messages ───────────────────────────────────────────

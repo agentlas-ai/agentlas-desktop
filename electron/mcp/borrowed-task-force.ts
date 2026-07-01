@@ -19,10 +19,10 @@ import {
   listChatMessages,
 } from "../store/chats";
 import { curateReply } from "../memory/curator";
+import { getAgentConcurrency } from "../store/concurrency";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
-const MAX_BORROWED_AGENTS_PARALLEL = 4;
 const BORROWED_AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 const PACKET_HEADING = "## Agent Input Packets";
 const BORROWED_SECRET_FILE_GUARD =
@@ -676,7 +676,7 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
   const specBySlug = new Map(specs.map((spec) => [spec.slug, spec]));
   const results = await parallelCap(
     plan.packets,
-    MAX_BORROWED_AGENTS_PARALLEL,
+    getAgentConcurrency(),
     async (packet) => runBorrowedAgentTurn(p, specBySlug.get(packet.agent) ?? specs[0], packet),
   );
 

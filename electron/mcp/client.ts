@@ -12,6 +12,7 @@ import { normalizeRecommendation } from "../hephaestus/recommendation";
 import {
   buildStormbreakerLongRunPrompt,
   buildStormbreakerContinuationPrompt,
+  CONTINUOUS_MODE_MAX_PASSES,
   STORMBREAKER_LONG_RUN_SCHEDULE,
   STORMBREAKER_LOOP_PROTOCOL,
   STORMBREAKER_MAX_EXECUTION_PASSES,
@@ -45,6 +46,7 @@ import {
   runBorrowedTaskForceInvocation,
   type BorrowedAgentSpec,
 } from "./borrowed-task-force";
+import { runSwarmInvocation } from "./swarm-run";
 import { resolveAgentGroupForRuntime } from "../store/agent-groups";
 import { recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
@@ -818,6 +820,32 @@ export async function runMcpInvocation(
   // 추천 시트에서 Hub 에이전트 2개 이상을 고른 경우: 단일 프롬프트에 "여러 전문가를 적용"이라고
   // 뭉개지 않고, 로컬 오케스트레이터가 에이전트별 입력 패킷을 설계한 뒤 각 borrowed agent를
   // 별도 세션으로 병렬 실행하고 최종 종합한다.
+  // ── 스웜 모드 ──
+  // 켜져 있으면 목표를 작업 그래프로 분해해 여러 워커가 병렬 협업(emergent A2A). 동시성=사용자 슬라이더.
+  if (chat.swarmMode && chat.kind !== "division") {
+    try {
+      await runSwarmInvocation({
+        req,
+        chat,
+        orchestratorAgent: agent,
+        active,
+        picked,
+        workingFolder,
+        mcpConfigPath,
+        mcpAllowedTools,
+        mcpCodexConfigArgs,
+        runnerEnv: runnerEnv.env,
+        locale,
+        sink,
+        signal,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sink({ kind: "error", error: { code: "swarm-failed", message: msg } });
+    }
+    return { stormbreakerContinueRequested: false };
+  }
+
   if (borrowedAgentSlugs.length > 1 && chat.kind !== "division") {
     try {
       await runBorrowedTaskForceInvocation({
@@ -1016,15 +1044,25 @@ export async function runMcpInvocation(
       onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean) =>
         sink({ kind: "tool-use", tool: { name, args, result, id, isError } }),
     };
+    // "계속 라이브로" 모드: 채팅에 켜져 있으면 짧은 상한(3턴)에서 멈춰 30분 간격 백그라운드로
+    // 넘기지 않고, 같은 채팅에서 라이브 스트리밍을 계속 이어간다(사실상 무제한, 안전 상한만).
+    const continuousMode = chat.kind !== "division" && chat.continuousMode === true;
+    const maxPasses = continuousMode ? CONTINUOUS_MODE_MAX_PASSES : STORMBREAKER_MAX_EXECUTION_PASSES;
     let activeRunnerReq = runnerReq;
     let result = await picked.runner(activeRunnerReq, runnerEvents);
-    for (let pass = 2; pass <= STORMBREAKER_MAX_EXECUTION_PASSES; pass += 1) {
+    for (let pass = 2; pass <= maxPasses; pass += 1) {
       const continuation = stripStormbreakerContinueMarker(result.text);
       if (!continuation.shouldContinue || signal?.aborted) {
         result = { ...result, text: continuation.text };
         break;
       }
       result = { ...result, text: continuation.text };
+      if (continuousMode) {
+        // 이 턴의 완료된 결과를 즉시 별도 assistant 메시지로 남긴다 — 화면엔 새 말풍선이
+        // 계속 이어 붙는 것처럼 보이고, 앱이 중간에 꺼져도 그때까지 기록은 남는다.
+        appendChatMessage(chat.id, "assistant", continuation.text);
+        sink({ kind: "tool-use", status: `계속 진행 중 · ${pass}턴째 (안 끊기고 이어짐)` });
+      }
       stormbreaker?.continuePass({
         pass,
         reason: "runner reported more safe Stormbreaker work remains",
@@ -1039,6 +1077,9 @@ export async function runMcpInvocation(
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
     const stormbreakerContinueRequested = finalContinuation.shouldContinue;
     result = { ...result, text: finalContinuation.text };
+    // continuousMode는 안전 상한(20,000턴)이 사실상 안 걸리므로 정상적으론 이 분기에 안 들어온다.
+    // 혹시라도 상한에 닿았는데 아직 할 일이 있다고 하면(진짜 폭주 등) 작업을 잃지 않도록 기존
+    // 백그라운드 30분 자동화로 안전하게 이어받는다.
     if (stormbreakerContinueRequested && chat.kind !== "division") {
       const marker = `Source chat: ${chat.id}`;
       const exists = listAutomations().some((automation) => automation.enabled && automation.promptTemplate.includes(marker));

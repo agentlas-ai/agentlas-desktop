@@ -138,10 +138,13 @@ import {
   listRecentChats,
   removeChat,
   renameChat,
+  setChatContinuousMode,
+  setChatSwarmMode,
   setChatWorkingFolder,
   switchChatAgent,
   unarchiveChat,
 } from "./store/chats";
+import { getAgentConcurrencyInfo, setAgentConcurrency } from "./store/concurrency";
 import {
   createAutomation,
   listAutomations,
@@ -642,6 +645,13 @@ export function registerIpcHandlers(): void {
     getDb().prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('custom_base_url', ?)").run(safe);
   });
 
+  // ── 에이전트 동시성(스웜 크기) — 사양 기반 추천 + 사용자 슬라이더 ─────────
+  ipcMain.handle("system:concurrencyInfo", () => getAgentConcurrencyInfo());
+  ipcMain.handle("system:setConcurrency", (_e, value: unknown) => {
+    setAgentConcurrency(Number(value));
+    return getAgentConcurrencyInfo();
+  });
+
   // ── env vault (글로벌 외부 API 키) ──────────────────────
   ipcMain.handle("env:list", async () => {
     // 1) keychain에 저장된 env keys
@@ -960,6 +970,14 @@ export function registerIpcHandlers(): void {
     switchChatAgent(id, agentId),
   );
   ipcMain.handle("chats:remove", (_e, id: string) => removeChat(id));
+  ipcMain.handle("chats:setContinuousMode", (_e, id: string, enabled: boolean) => {
+    setChatContinuousMode(id, enabled);
+    return getChat(id);
+  });
+  ipcMain.handle("chats:setSwarmMode", (_e, id: string, enabled: boolean) => {
+    setChatSwarmMode(id, enabled);
+    return getChat(id);
+  });
 
   // ── automations (SQLite + scheduler) ───────────────────
   ipcMain.handle("automations:list", () => listAutomations());

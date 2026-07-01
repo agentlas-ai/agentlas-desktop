@@ -593,8 +593,34 @@ export function ChatInput({
           setPlanMode={setPlanMode}
           goalMode={goalMode}
           setGoalMode={setGoalMode}
-          appsGenerateMode={appsGenerateMode}
-          setAppsGenerateMode={requestAppsGenerateMode}
+          onInsertSlash={() => {
+            setInput((s) => `${s}${s.endsWith(" ") || s === "" ? "" : " "}/`);
+            setPlusOpen(false);
+            setPlusSubmenu(null);
+            setTimeout(() => textareaRef.current?.focus(), 0);
+          }}
+          onInsertMention={() => {
+            setInput((s) => `${s}${s.endsWith(" ") || s === "" ? "" : " "}@`);
+            setPlusOpen(false);
+            setPlusSubmenu(null);
+            setTimeout(() => textareaRef.current?.focus(), 0);
+          }}
+          hepToggles={hepToggles}
+          onToggleHep={(id) => {
+            // Stormbreaker OFF→ON 전환 감지 — 첫 활성화 시 비용/시간 경고 버블.
+            const turningStormOn = id === "stormbreaker" && !hepToggles.has("stormbreaker");
+            setHepToggles((prev) => {
+              const next = new Set(prev);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            });
+            if (id === "stormbreaker") {
+              setShowStormWarning(turningStormOn && !isStormWarningDismissed());
+            }
+            setTimeout(() => textareaRef.current?.focus(), 0);
+          }}
+          locale={locale}
           onOpenAgentPicker={() => {
             setPlusOpen(false);
             setPlusSubmenu(null);
@@ -955,70 +981,32 @@ export function ChatInput({
               <IconPlus size={15} />
             </button>
 
-            {/* 슬래시 힌트 */}
-            <button
-              onClick={() => {
-                setInput((s) => `${s}${s.endsWith(" ") || s === "" ? "" : " "}/`);
-                setTimeout(() => textareaRef.current?.focus(), 0);
-              }}
-              aria-label={t("chatinput.slash")}
-              title={t("chatinput.slash")}
-              disabled={disabled}
-              style={toolBtnStyle(false)}
-            >
-              <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 700 }}>/</span>
-            </button>
-
-            {/* @ 멘션 힌트 */}
-            <button
-              onClick={() => {
-                setInput((s) => `${s}${s.endsWith(" ") || s === "" ? "" : " "}@`);
-                setTimeout(() => textareaRef.current?.focus(), 0);
-              }}
-              aria-label={t("chatinput.mention")}
-              title={t("chatinput.mention")}
-              disabled={disabled}
-              style={toolBtnStyle(false)}
-            >
-              <IconAtSign size={14} />
-            </button>
-
-            <div className="chat-input-hep-toggle-group" role="group" aria-label="Hephaestus modes">
-              {HEP_TOGGLES.map((tg) => {
-                const active = hepToggles.has(tg.id);
-                return (
+            {/* 켜진 모드 칩 — 평소엔 + 메뉴에 있고, 활성일 때만 바에 표시(가시성 + 눌러서 끄기). */}
+            {HEP_TOGGLES.some((tg) => hepToggles.has(tg.id)) && (
+              <div className="chat-input-hep-toggle-group" role="group" aria-label="Active modes">
+                {HEP_TOGGLES.filter((tg) => hepToggles.has(tg.id)).map((tg) => (
                   <button
                     key={tg.id}
                     type="button"
-                    className={"chat-input-hep-chip" + (active ? " active" : "")}
+                    className="chat-input-hep-chip active"
                     onClick={() => {
-                      // Stormbreaker OFF→ON 전환 감지 — 첫 활성화 시 비용/시간 경고 버블.
-                      const turningStormOn = tg.id === "stormbreaker" && !hepToggles.has("stormbreaker");
-                      // 다중선택 토글 — 독립적으로 켜고 끈다(전송해도 유지).
                       setHepToggles((prev) => {
                         const next = new Set(prev);
-                        if (next.has(tg.id)) next.delete(tg.id);
-                        else next.add(tg.id);
+                        next.delete(tg.id);
                         return next;
                       });
-                      if (tg.id === "stormbreaker") {
-                        setShowStormWarning(turningStormOn && !isStormWarningDismissed());
-                      }
-                      setPlusOpen(false);
-                      setPermOpen(false);
-                      setModelOpen(false);
                       setTimeout(() => textareaRef.current?.focus(), 0);
                     }}
                     disabled={disabled}
-                    title={locale === "ko" ? tg.titleKo : tg.titleEn}
-                    aria-pressed={active}
+                    title={`${locale === "ko" ? tg.labelKo : tg.labelEn} — ${locale === "ko" ? "끄기" : "turn off"}`}
+                    aria-pressed={true}
                   >
                     <span className="chat-input-hep-dot" aria-hidden />
                     <span className="chat-input-hep-label">{locale === "ko" ? tg.labelKo : tg.labelEn}</span>
                   </button>
-                );
-              })}
-            </div>
+                ))}
+              </div>
+            )}
 
             {/* 권한 칩 */}
             <button
@@ -1997,8 +1985,11 @@ function PlusMenu({
   setPlanMode,
   goalMode,
   setGoalMode,
-  appsGenerateMode,
-  setAppsGenerateMode,
+  onInsertSlash,
+  onInsertMention,
+  hepToggles,
+  onToggleHep,
+  locale,
   onOpenAgentPicker,
   t,
 }: {
@@ -2010,8 +2001,15 @@ function PlusMenu({
   setPlanMode: (v: boolean) => void;
   goalMode: boolean;
   setGoalMode: (v: boolean) => void;
-  appsGenerateMode: boolean;
-  setAppsGenerateMode: (v: boolean) => void;
+  /** "/" 명령어 삽입 — 인라인 버튼을 + 메뉴로 통합(리사이즈 시 버튼 스캐터 방지). */
+  onInsertSlash: () => void;
+  /** "@" 에이전트 부르기 삽입. */
+  onInsertMention: () => void;
+  /** 현재 켜진 Hephaestus 모드들(다중선택). */
+  hepToggles: Set<HepToggleId>;
+  /** Hephaestus 모드 토글(스톰브레이커 경고·포커스 등은 부모가 처리). */
+  onToggleHep: (id: HepToggleId) => void;
+  locale: string;
   onOpenAgentPicker: () => void;
   t: TFunction;
 }) {
@@ -2057,6 +2055,16 @@ function PlusMenu({
         title={t("chatinput.plus.attach")}
       />
       <Row
+        onClick={onInsertSlash}
+        icon={<span style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 700 }}>/</span>}
+        title={t("chatinput.slash")}
+      />
+      <Row
+        onClick={onInsertMention}
+        icon={<IconAtSign size={14} />}
+        title={t("chatinput.mention")}
+      />
+      <Row
         onClick={() => setSubmenu("plugins")}
         icon={<IconLayers size={14} style={{ color: "var(--accent)" }} />}
         title={t("chatinput.plus.plugins")}
@@ -2075,13 +2083,28 @@ function PlusMenu({
         on={goalMode}
         onChange={setGoalMode}
       />
-      <ToggleRow
-        icon={<IconApps size={14} />}
-        title={t("chatinput.apps_generate_mode")}
-        subtitle={t("chatinput.apps_generate_hint")}
-        on={appsGenerateMode}
-        onChange={setAppsGenerateMode}
-      />
+      <Divider />
+      {HEP_TOGGLES.map((tg) => (
+        <ToggleRow
+          key={tg.id}
+          icon={
+            <span
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                background: hepToggles.has(tg.id) ? "var(--accent)" : "var(--muted)",
+                display: "inline-block",
+                flexShrink: 0,
+              }}
+            />
+          }
+          title={locale === "ko" ? tg.labelKo : tg.labelEn}
+          subtitle={locale === "ko" ? tg.titleKo : tg.titleEn}
+          on={hepToggles.has(tg.id)}
+          onChange={() => onToggleHep(tg.id)}
+        />
+      ))}
       <Divider />
       <Row
         onClick={onOpenAgentPicker}

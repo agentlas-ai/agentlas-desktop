@@ -522,6 +522,21 @@ export interface Chat {
   createdAt: string;
   /** 마지막 메시지 시각 — 사이드바 정렬 키 */
   updatedAt: string;
+  /** "계속 라이브로" 모드 — Stormbreaker 연속실행 상한에 닿아도 백그라운드로 넘기지 않고
+   *  같은 채팅에서 라이브 스트리밍을 계속 이어간다(수 시간 단위). */
+  continuousMode: boolean;
+  /** 스웜 모드 — 목표를 작업 그래프로 분해해 여러 워커가 병렬로 협업(emergent A2A). */
+  swarmMode: boolean;
+}
+
+/** 에이전트 동시 실행 수(스웜 크기) — 사양 기반 추천 + 사용자 슬라이더값. */
+export interface AgentConcurrencyInfo {
+  cores: number;
+  totalMemGB: number;
+  recommended: number;
+  current: number;
+  hardMax: number;
+  userSet: boolean;
 }
 
 export interface ChatHistoryEntry {
@@ -2873,6 +2888,16 @@ export interface AgentlasIpc {
     unarchive: (id: string) => Promise<Chat>;
     /** 영구 삭제 — 메시지까지 cascade */
     remove: (id: string) => Promise<void>;
+    /** "계속 라이브로" 모드 — 켜두면 Stormbreaker 연속실행이 짧은 상한에 닿아도 이 채팅에서
+     *  라이브 스트리밍을 계속 이어간다(수 시간 단위). */
+    setContinuousMode: (id: string, enabled: boolean) => Promise<Chat>;
+    /** 스웜 모드 on/off — 여러 워커가 목표를 분해해 병렬 협업. */
+    setSwarmMode: (id: string, enabled: boolean) => Promise<Chat>;
+  };
+  /** 시스템/하드웨어 설정 — 에이전트 동시성(스웜 크기) 슬라이더 등. */
+  system: {
+    concurrencyInfo: () => Promise<AgentConcurrencyInfo>;
+    setConcurrency: (value: number) => Promise<AgentConcurrencyInfo>;
   };
   automations: {
     list: () => Promise<Automation[]>;

@@ -10,7 +10,7 @@ import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 30;
+const SCHEMA_VERSION = 32;
 
 export function initStore(): void {
   if (_db) return;
@@ -753,6 +753,29 @@ export function initStore(): void {
     if (!chatCols.some((c) => c.name === "agent_group_id")) {
       _db.exec("ALTER TABLE chats ADD COLUMN agent_group_id TEXT REFERENCES agent_groups(id) ON DELETE SET NULL");
       _db.exec("CREATE INDEX IF NOT EXISTS idx_chats_agent_group_updated ON chats(agent_group_id, updated_at DESC)");
+    }
+  }
+
+  // ── v30 → v31: chats.continuous_mode ───────────────────
+  // "계속 라이브로" 모드 — Stormbreaker 연속실행이 짧은 상한(면대면 몇 턴)에 닿아도
+  // 백그라운드 30분 간격 자동화로 넘기지 않고, 같은 채팅에서 라이브 스트리밍을 계속 이어간다.
+  if (userVersion < 31) {
+    const chatCols = _db
+      .prepare("PRAGMA table_info(chats)")
+      .all() as Array<{ name: string }>;
+    if (!chatCols.some((c) => c.name === "continuous_mode")) {
+      _db.exec("ALTER TABLE chats ADD COLUMN continuous_mode INTEGER NOT NULL DEFAULT 0");
+    }
+  }
+
+  // ── v31 → v32: chats.swarm_mode ────────────────────────
+  // 스웜 모드 — 켜면 이 채팅이 목표를 작업 그래프로 분해해 여러 워커가 병렬 협업(emergent A2A)한다.
+  if (userVersion < 32) {
+    const chatCols = _db
+      .prepare("PRAGMA table_info(chats)")
+      .all() as Array<{ name: string }>;
+    if (!chatCols.some((c) => c.name === "swarm_mode")) {
+      _db.exec("ALTER TABLE chats ADD COLUMN swarm_mode INTEGER NOT NULL DEFAULT 0");
     }
   }
 

@@ -2282,7 +2282,7 @@ function ChatPage() {
         />
       </div>
       {/* Codex식: 이 대화가 폴더(프로젝트)에서 작업하는지 / 전역 대화인지 선택 */}
-      <div style={{ padding: "6px 16px 0", display: "flex" }}>
+      <div style={{ padding: "6px 16px 0", display: "flex", alignItems: "center", gap: 8 }}>
         <ProjectFolderBar
           chatId={chatId || null}
           reloadToken={folderReload}
@@ -2291,6 +2291,94 @@ function ChatPage() {
             if (f) setWorkspaceOpenPersisted(true);
           }}
         />
+        {chat && chat.kind !== "division" && (
+          <button
+            type="button"
+            title={
+              locale === "ko"
+                ? "켜두면 이 대화가 멈추지 않고 계속 라이브로 이어서 작업합니다(수 시간까지 가능). 끝나거나 직접 멈출 때까지."
+                : "When on, this chat keeps working live without stopping (can run for hours) until it finishes or you stop it."
+            }
+            onClick={() => {
+              const next = !chat.continuousMode;
+              // 스웜과 상호 배제 — 켜면 스웜은 끈다(둘 다 켜면 실행 경로가 겹친다).
+              const prev = chat;
+              setChat({ ...chat, continuousMode: next, swarmMode: next ? false : chat.swarmMode });
+              const api = ipc();
+              if (next && chat.swarmMode) void api?.chats.setSwarmMode(chat.id, false);
+              void api?.chats
+                .setContinuousMode(chat.id, next)
+                .then((updated: Chat | null) => {
+                  if (updated) setChat({ ...updated, swarmMode: next ? false : updated.swarmMode });
+                })
+                .catch(() => setChat(prev));
+            }}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "4px 10px",
+              borderRadius: 999,
+              border: "1px solid var(--paper-edge)",
+              background: chat.continuousMode ? "var(--accent)" : "var(--paper)",
+              color: chat.continuousMode ? "#fff" : "var(--ink)",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            <span
+              aria-hidden
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: chat.continuousMode ? "#fff" : "var(--muted-deep)",
+              }}
+            />
+            {locale === "ko" ? "계속 라이브로" : "Keep going live"}
+          </button>
+        )}
+        {chat && chat.kind !== "division" && (
+          <button
+            type="button"
+            title={
+              locale === "ko"
+                ? "켜면 목표를 여러 작업으로 쪼개 여러 에이전트가 동시에 협업합니다. 동시 실행 수는 설정의 슬라이더로 조절."
+                : "When on, the goal is split into tasks and multiple agents collaborate in parallel. Adjust parallelism in Settings."
+            }
+            onClick={() => {
+              const next = !chat.swarmMode;
+              // 계속-라이브와 상호 배제 — 켜면 그건 끈다.
+              const prev = chat;
+              setChat({ ...chat, swarmMode: next, continuousMode: next ? false : chat.continuousMode });
+              const api = ipc();
+              if (next && chat.continuousMode) void api?.chats.setContinuousMode(chat.id, false);
+              void api?.chats
+                .setSwarmMode(chat.id, next)
+                .then((updated: Chat | null) => {
+                  if (updated) setChat({ ...updated, continuousMode: next ? false : updated.continuousMode });
+                })
+                .catch(() => setChat(prev));
+            }}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "4px 10px",
+              borderRadius: 999,
+              border: "1px solid var(--paper-edge)",
+              background: chat.swarmMode ? "var(--accent-2, var(--accent))" : "var(--paper)",
+              color: chat.swarmMode ? "#fff" : "var(--ink)",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            <span aria-hidden>🐝</span>
+            {locale === "ko" ? "스웜" : "Swarm"}
+          </button>
+        )}
       </div>
       <div data-tour-id="workspace.input" style={{ flexShrink: 0, minWidth: 0 }}>
         <ChatInput

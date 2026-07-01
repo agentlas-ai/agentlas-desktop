@@ -214,6 +214,14 @@ const api: AgentlasIpc = {
     archive: (id: string) => ipcRenderer.invoke("chats:archive", id),
     unarchive: (id: string) => ipcRenderer.invoke("chats:unarchive", id),
     remove: (id: string) => ipcRenderer.invoke("chats:remove", id),
+    setContinuousMode: (id: string, enabled: boolean) =>
+      ipcRenderer.invoke("chats:setContinuousMode", id, enabled),
+    setSwarmMode: (id: string, enabled: boolean) =>
+      ipcRenderer.invoke("chats:setSwarmMode", id, enabled),
+  },
+  system: {
+    concurrencyInfo: () => ipcRenderer.invoke("system:concurrencyInfo"),
+    setConcurrency: (value: number) => ipcRenderer.invoke("system:setConcurrency", value),
   },
   automations: {
     list: () => ipcRenderer.invoke("automations:list"),

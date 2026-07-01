@@ -6,6 +6,7 @@ import { useT, type LocalePref } from "@/lib/i18n";
 import { useTheme, type ThemePref } from "@/lib/theme";
 import type {
   MultimodalModality,
+  AgentConcurrencyInfo,
   MultimodalProvider,
   MultimodalProviderStatus,
   MultimodalSettings,
@@ -98,6 +99,7 @@ export default function SettingsPage() {
   const [multimodalStatus, setMultimodalStatus] = useState<MultimodalProviderStatus[]>([]);
   const [multimodalDraft, setMultimodalDraft] = useState<Record<string, string>>({});
   const [runtimeMessage, setRuntimeMessage] = useState("");
+  const [concurrency, setConcurrency] = useState<AgentConcurrencyInfo | null>(null);
 
   const refresh = useCallback(async () => {
     const api = ipc();
@@ -118,6 +120,7 @@ export default function SettingsPage() {
         api.multimodal.getSettings(),
         api.multimodal.status(),
       ]);
+    api.system?.concurrencyInfo().then(setConcurrency).catch(() => {});
     setStatuses(s);
     setHasKey({
       anthropic: a,
@@ -368,6 +371,86 @@ export default function SettingsPage() {
             );
           })}
         </div>
+
+        {/* 에이전트 동시성(스웜 크기) — 게임 그래픽 세팅처럼 내 컴 사양 기반 추천 + 슬라이더 */}
+        {concurrency && (
+          <>
+            <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
+              {locale === "ko" ? "에이전트 동시 실행 (스웜 크기)" : "Parallel agents (swarm size)"}
+            </h2>
+            <div
+              style={{
+                padding: 14,
+                marginBottom: 12,
+                border: "1px solid var(--paper-edge)",
+                borderRadius: "var(--radius-md)",
+                background: "var(--paper)",
+              }}
+            >
+              <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 12px" }}>
+                {locale === "ko"
+                  ? "여러 에이전트가 한 번에 몇 명까지 동시에 일할지. 에이전트 1명 = 무거운 프로세스라, 높이면 빨라지지만 컴이 느려질 수 있어요."
+                  : "How many agents work at once. Each agent is a heavy process — higher is faster but can slow your machine."}
+              </p>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <input
+                  type="range"
+                  min={1}
+                  max={concurrency.hardMax}
+                  value={concurrency.current}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setConcurrency({ ...concurrency, current: v, userSet: true });
+                  }}
+                  onMouseUp={(e) => {
+                    const v = Number((e.target as HTMLInputElement).value);
+                    void ipc()?.system?.setConcurrency(v).then((info) => info && setConcurrency(info));
+                  }}
+                  onTouchEnd={(e) => {
+                    const v = Number((e.target as HTMLInputElement).value);
+                    void ipc()?.system?.setConcurrency(v).then((info) => info && setConcurrency(info));
+                  }}
+                  style={{ flex: 1, accentColor: "var(--accent)" }}
+                />
+                <strong style={{ fontSize: 20, minWidth: 32, textAlign: "center" }}>
+                  {concurrency.current}
+                </strong>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8, gap: 8, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>
+                  {locale === "ko"
+                    ? `내 컴: 코어 ${concurrency.cores}개 · 메모리 ${concurrency.totalMemGB}GB`
+                    : `Your machine: ${concurrency.cores} cores · ${concurrency.totalMemGB}GB RAM`}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void ipc()?.system?.setConcurrency(concurrency.recommended).then((info) => info && setConcurrency(info));
+                  }}
+                  style={{
+                    fontSize: 11,
+                    padding: "3px 10px",
+                    borderRadius: 999,
+                    border: "1px solid var(--paper-edge)",
+                    background: concurrency.current === concurrency.recommended ? "var(--accent)" : "var(--paper-2)",
+                    color: concurrency.current === concurrency.recommended ? "#fff" : "var(--ink)",
+                    cursor: "pointer",
+                    fontWeight: 600,
+                  }}
+                >
+                  {locale === "ko" ? `추천: ${concurrency.recommended}` : `Recommended: ${concurrency.recommended}`}
+                </button>
+              </div>
+              {concurrency.current > concurrency.recommended && (
+                <p style={{ fontSize: 11, color: "var(--warn-deep, #b8860b)", margin: "8px 0 0" }}>
+                  {locale === "ko"
+                    ? "⚠️ 추천보다 높아요 — 이 컴에선 느려지거나 버벅일 수 있어요."
+                    : "⚠️ Above recommended — this machine may slow down or stutter."}
+                </p>
+              )}
+            </div>
+          </>
+        )}
 
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
           {t("settings.detected")}

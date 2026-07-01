@@ -28,12 +28,12 @@ import { curateReply } from "../memory/curator";
 import { MEMORY_EMITTER_BLOCK } from "../architecture/manifest";
 import { buildDelegateProtocol, parseDelegations, type Delegation } from "./delegate";
 import { selectRuntimeForTargets } from "../runtime/selection";
+import { getAgentConcurrency } from "../store/concurrency";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
-/** 동시성 캡 — 22개 팀이어도 한 번에 이만큼만 연다. */
-const MAX_DIVISIONS_PARALLEL = 4;
-const MAX_SPECIALISTS_PARALLEL = 4;
+/** 동시성 캡 — 팀이 많아도 한 번에 이만큼만 연다. 하드코딩이 아니라 사양 기반 추천 + 사용자
+ *  슬라이더 설정값(getAgentConcurrency). 저사양은 낮게, 강한 머신은 크게 = 스웜 크기 조절. */
 /** 노드 1턴 안전 타임아웃 — 멈춘 CLI 1개가 전체를 무한 대기시키지 않게. */
 const NODE_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -337,7 +337,7 @@ async function runDivision(
       phase: "delegate",
       delegateTo: matched.map((m) => m.node.id),
     });
-    const specResults = await parallelCap(matched, MAX_SPECIALISTS_PARALLEL, async (m) => {
+    const specResults = await parallelCap(matched, getAgentConcurrency(), async (m) => {
       const r = await runNodeTurnSafe(p, {
         node: m.node,
         tier: 3,
@@ -474,7 +474,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
   let teamResults: Array<{ node: ResolvedNode; result: string }>;
   if (singleDivision) {
     // tier-2 skip: matched는 전문가 — ephemeral 병렬
-    teamResults = await parallelCap(matched, MAX_SPECIALISTS_PARALLEL, async (m) => {
+    teamResults = await parallelCap(matched, getAgentConcurrency(), async (m) => {
       const r = await runNodeTurnSafe(p, {
         node: m.node,
         tier: 3,
@@ -488,7 +488,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
     });
   } else {
     // 본부들 — 지속 세션 병렬, 각자 전문가에게 재위임
-    teamResults = await parallelCap(matched, MAX_DIVISIONS_PARALLEL, async (m) =>
+    teamResults = await parallelCap(matched, getAgentConcurrency(), async (m) =>
       runDivision(p, m.node as ResolvedDivision, m.brief),
     );
   }

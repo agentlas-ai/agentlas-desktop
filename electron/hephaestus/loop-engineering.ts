@@ -11,6 +11,11 @@ export const STORMBREAKER_MAX_EXECUTION_PASSES = 3;
 export const STORMBREAKER_CONTINUE_MARKER = "<<stormbreaker-continue>>";
 export const STORMBREAKER_LONG_RUN_MARKER = "<<stormbreaker-long-run>>";
 export const STORMBREAKER_LONG_RUN_SCHEDULE = "every-30m";
+// "계속 라이브로" 모드(chat.continuousMode)의 안전 상한 — 사실상 무제한이지만, 완전한 폭주
+// (매번 continue 마커만 반복하는 등)로부터 사용자 컴퓨터를 지키는 최후 방어선일 뿐이다. 매 턴이
+// 실제 CLI 호출로 실제 시간이 걸리므로, 정상적인 장시간(수십 시간) 작업에서 이 숫자에 실제로
+// 도달하는 일은 없다.
+export const CONTINUOUS_MODE_MAX_PASSES = 20_000;
 
 export const STORMBREAKER_LOOP_PROTOCOL = [
   "Stormbreaker Loop is always on as a baseline in Agentlas Desktop chat. The chat input also exposes a Stormbreaker toggle: turning it on requests an explicit, force-robust run (verify/repair loop carried to completion), which the host surfaces as a one-time cost/time warning.",
