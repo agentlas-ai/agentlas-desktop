@@ -23,6 +23,25 @@ type ActiveRuntimeRow = {
   long_context: number;
 };
 
+let detectCache: { at: number; list: RuntimeStatus[] } | null = null;
+let detectInFlight: Promise<RuntimeStatus[]> | null = null;
+
+function runtimeDetectCacheMs(): number {
+  return Number(process.env.AGENTLAS_RUNTIME_DETECT_CACHE_MS ?? 10_000);
+}
+
+function cloneRuntimeStatuses(list: RuntimeStatus[]): RuntimeStatus[] {
+  return list.map((runtime) => ({
+    ...runtime,
+    availableModels: runtime.availableModels ? [...runtime.availableModels] : runtime.availableModels,
+    efforts: runtime.efforts ? runtime.efforts.map((effort) => ({ ...effort })) : runtime.efforts,
+  }));
+}
+
+function clearDetectCache(): void {
+  detectCache = null;
+}
+
 /** BYOK 백엔드의 활성 모델 — 저장된 선택이 카탈로그에 있으면 그대로, 아니면 기본값. */
 function byokModelOf(backend: RuntimeBackend, active: ActiveRuntimeRow | null): string | undefined {
   if (active?.kind === "byok" && active.backend === backend && findByokModel(backend, active.model)) {
@@ -114,24 +133,56 @@ function saveActiveRuntime(status: RuntimeStatus | RuntimeSelection): void {
  */
 export async function detectRuntimes(): Promise<RuntimeStatus[]> {
   if (process.env.AGENTLAS_DISABLE_RUNTIME_PROBES === "1") return [];
+  const now = Date.now();
+  if (detectCache && now - detectCache.at < runtimeDetectCacheMs()) {
+    return cloneRuntimeStatuses(detectCache.list);
+  }
+  if (detectInFlight) return cloneRuntimeStatuses(await detectInFlight);
+
+  detectInFlight = detectRuntimesUncached();
+  try {
+    const list = await detectInFlight;
+    detectCache = { at: Date.now(), list: cloneRuntimeStatuses(list) };
+    return cloneRuntimeStatuses(list);
+  } finally {
+    detectInFlight = null;
+  }
+}
+
+async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   const db = getDb();
   const activeRow = db
     .prepare("SELECT kind, backend, source, model, long_context FROM active_runtime WHERE id = 1")
     .get() as ActiveRuntimeRow | undefined;
   const active = activeRow ?? null;
 
-  const [cc, cx, gm, gr, ollama, anthropicByok, openaiByok, googleByok, claudeEfforts] =
-    await Promise.all([
-      probeClaudeCode(),
-      probeCodex(),
-      probeGemini(),
-      probeGrok(),
-      probeOllama(),
-      hasApiKey("anthropic"),
-      hasApiKey("openai"),
-      hasApiKey("google"),
-      probeClaudeEfforts(),
-    ]);
+  const [
+    cc,
+    cx,
+    gm,
+    gr,
+    ollama,
+    anthropicByok,
+    openaiByok,
+    googleByok,
+    glmByok,
+    kimiByok,
+    deepseekByok,
+    claudeEfforts,
+  ] = await Promise.all([
+    probeClaudeCode(),
+    probeCodex(),
+    probeGemini(),
+    probeGrok(),
+    probeOllama(),
+    hasApiKey("anthropic"),
+    hasApiKey("openai"),
+    hasApiKey("google"),
+    hasApiKey("glm"),
+    hasApiKey("kimi"),
+    hasApiKey("deepseek"),
+    probeClaudeEfforts(),
+  ]);
 
   const list: RuntimeStatus[] = [];
 
@@ -238,6 +289,26 @@ export async function detectRuntimes(): Promise<RuntimeStatus[]> {
     });
   }
 
+  // Anthropic 호환 서드파티(GLM/Kimi/DeepSeek) — 키가 저장돼 있으면 엔진으로 노출. base URL은 프리셋 자동.
+  const compatFlags: Record<"glm" | "kimi" | "deepseek", boolean> = {
+    glm: glmByok,
+    kimi: kimiByok,
+    deepseek: deepseekByok,
+  };
+  for (const backend of ["glm", "kimi", "deepseek"] as const) {
+    if (!compatFlags[backend]) continue;
+    list.push({
+      kind: "byok",
+      backend,
+      source: `byok:${backend}`,
+      version: null,
+      active: false,
+      model: byokModelOf(backend, active),
+      availableModels: byokModels(backend).map((m) => m.id),
+      longContextEnabled: byokLongOf(backend, active),
+    });
+  }
+
   let activeAssigned = false;
   for (const runtime of list) {
     const matchesActive = isActiveRuntime(runtime, active);
@@ -258,5 +329,6 @@ export async function setActiveRuntime(selection: RuntimeSelection): Promise<Run
   saveActiveRuntime(selection);
   // effort가 명시된 경우에만 갱신 — 모델만 바꾸는 호출은 기존 작업량을 유지.
   if (selection.effort !== undefined) setStoredEffort(selection.effort);
+  clearDetectCache();
   return detectRuntimes();
 }

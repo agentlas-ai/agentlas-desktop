@@ -705,7 +705,7 @@ function StepConnect() {
 
 function labelOf(kind: string) {
   return (
-    { "claude-code": "Claude Code", codex: "Codex", gemini: "Gemini", byok: "API", ollama: "Ollama" }[
+    { "claude-code": "Claude Code", codex: "Codex", gemini: "Antigravity", byok: "API", ollama: "Ollama" }[
       kind as "claude-code" | "codex" | "gemini" | "byok" | "ollama"
     ] ?? kind
   );
@@ -718,6 +718,9 @@ function backendLabel(b: RuntimeBackend, locale: "ko" | "en" = "ko") {
     ollama: locale === "ko" ? "로컬 모델" : "Local models",
     upstage: "Upstage Solar",
     custom: "Custom OpenAI",
+    glm: "GLM (Z.ai)",
+    kimi: "Kimi (Moonshot)",
+    deepseek: "DeepSeek",
   }[b];
 }
 

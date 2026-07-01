@@ -63,6 +63,8 @@ release-signing/
 
 # Agentlas architecture: ignore volatile runtime memory, keep curated soul/sitemap
 .agentlas/memory-log.jsonl
+# Generated AI code-map (produced by the code-map tool background gen — not source)
+.agentlas/code-map/
 ._*
 
 # local packaging output (large)

@@ -49,12 +49,11 @@ import { PlanStep } from "@/components/oberon/PlanStep";
 import { ShotBoard } from "@/components/oberon/ShotBoard";
 import { AssetBible } from "@/components/oberon/AssetBible";
 import { KeyframeStep } from "@/components/oberon/KeyframeStep";
-import { MotionGraphicsPanel } from "@/components/oberon/MotionGraphicsPanel";
 import { AnimatePanel } from "@/components/oberon/AnimatePanel";
 import { TimelineEditor, DeliveryPanel } from "@/components/oberon/panels";
 import { Stepper } from "@/components/oberon/Stepper";
 import { Glyph, OberonBadge } from "@/components/oberon/icons";
-import { OB_GRID, OB_VARS, StatChip, formatCost, formatDuration } from "@/components/oberon/ui";
+import { Card, OB_GRID, OB_VARS, StatChip, formatCost, formatDuration } from "@/components/oberon/ui";
 import type {
   JsonObject,
   OberonKeyframeJob,
@@ -1074,14 +1073,7 @@ export default function OberonPage() {
                 }}
               />
             ) : (
-              <MotionGraphicsPanel
-                production={production}
-                generating={motionGenerating}
-                job={motionJob}
-                onStart={startMotionAd}
-                onReset={resetMotionAd}
-                onOpenOutput={(jobId) => void ipc()?.oberon.openMotionAdOutput(jobId)}
-              />
+              <MotionMovedPanel title={production.brief.title} />
             )}
             {isDone("video") && (
               <ApproveBar label="영상 확정 — 편집·납품으로" done onApprove={() => setActive("delivery")} />
@@ -1100,6 +1092,31 @@ export default function OberonPage() {
         return null;
     }
   }
+}
+
+function MotionMovedPanel({ title }: { title: string }) {
+  return (
+    <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 32px 72px" }}>
+      <Card style={{ padding: 22, maxWidth: 760 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+          <span style={{ display: "inline-flex", width: 38, height: 38, alignItems: "center", justifyContent: "center", borderRadius: 12, background: "var(--ob-accent-soft)", color: "var(--ob-accent-text)" }}>
+            <Glyph name="layers" size={18} />
+          </span>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: ".08em", color: "var(--ob-muted)", textTransform: "uppercase" }}>Motion graphics moved</div>
+            <h2 style={{ margin: "2px 0 0", fontSize: 20, lineHeight: 1.15, color: "var(--ob-ink)" }}>{title}</h2>
+          </div>
+        </div>
+        <p style={{ margin: "0 0 16px", color: "var(--ob-ink-soft)", fontSize: 13.5, lineHeight: 1.55 }}>
+          모션그래픽은 이제 영화/애니메이션 파이프라인이 아니라 별도 Agent App에서 실행합니다.
+        </p>
+        <Link href="/oberon-motion" className="studio-open studio-open--primary">
+          Oberon Motiongraphic Studio 열기
+          <Glyph name="chevron" size={12} />
+        </Link>
+      </Card>
+    </div>
+  );
 }
 
 function VideoModeSwitch({

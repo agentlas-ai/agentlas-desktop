@@ -510,6 +510,15 @@ export function registerIpcHandlers(): void {
     const { trexImageProviders } = await import("./trex/imagegen");
     return trexImageProviders();
   });
+  // T-rex 슬라이드 "내용" 생성 — 연결된 LLM(agy/codex)이 슬라이드별 실제 카피·수치를 JSON으로 작성.
+  ipcMain.handle("trex:generateContent", async (_e, payload: { topic?: string; count?: number; mode?: string }) => {
+    const { generateDeckContent } = await import("./trex/content");
+    return generateDeckContent(String(payload?.topic ?? ""), Number(payload?.count ?? 7), payload?.mode);
+  });
+  ipcMain.handle("trex:contentAvailable", async () => {
+    const { trexContentAvailable } = await import("./trex/content");
+    return trexContentAvailable();
+  });
 
   // ── updater (electron-updater) ──────────────────────────
   // renderer가 마운트되자마자 현재 상태를 동기 조회. broadcast 이전에 새 창이 열려도 onState로 캐치.

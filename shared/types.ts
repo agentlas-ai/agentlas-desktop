@@ -24,7 +24,17 @@ export type {
 export type RuntimeKind = "claude-code" | "codex" | "gemini" | "grok" | "byok" | "ollama";
 
 /** LLM 제공자. "ollama"는 로컬 머신에서 도는 오픈 모델(gemma/deepseek 등). */
-export type RuntimeBackend = "anthropic" | "openai" | "google" | "ollama" | "upstage" | "custom";
+export type RuntimeBackend =
+  | "anthropic"
+  | "openai"
+  | "google"
+  | "ollama"
+  | "upstage"
+  | "custom"
+  // Anthropic Messages API 호환 서드파티(구독/종량제 코딩 플랜)
+  | "glm"
+  | "kimi"
+  | "deepseek";
 
 export interface RuntimeSelection {
   kind: RuntimeKind;
@@ -2587,6 +2597,13 @@ export interface AgentlasIpc {
     getLocale: () => Promise<string>;
     /** package.json의 version — 사이드바 푸터 표기/디버그 용 */
     getVersion: () => Promise<string>;
+  };
+  /** T-rex 슬라이드 스튜디오 — 키리스 CLI 이미지 생성(codex image_gen / gemini). */
+  trex: {
+    generateImage: (payload: { model?: "codex" | "gemini"; prompt: string }) => Promise<{ ok: boolean; src?: string; reason?: string }>;
+    imageProviders: () => Promise<{ codex: boolean; gemini: boolean }>;
+    generateContent: (payload: { topic: string; count?: number; mode?: string }) => Promise<{ ok: boolean; text?: string; engine?: "agy" | "codex"; reason?: string }>;
+    contentAvailable: () => Promise<{ agy: boolean; codex: boolean }>;
   };
   /** 네이티브 macOS 메뉴바 제어 — 인앱 언어 설정을 메인 프로세스로 전달해 메뉴를 다시 그린다. */
   menu: {

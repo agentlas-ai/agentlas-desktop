@@ -8,7 +8,16 @@
 //                 모델 선택·1M 컨텍스트·히스토리 압축을 Agentlas가 구현/적용한다.
 import type { RuntimeKind } from "./types";
 
-export type ByokBackend = "anthropic" | "openai" | "google" | "upstage" | "custom";
+export type ByokBackend =
+  | "anthropic"
+  | "openai"
+  | "google"
+  | "upstage"
+  | "custom"
+  // Anthropic Messages API 호환 서드파티(구독/종량제) — base URL만 프리셋으로 바꿔 호출한다.
+  | "glm"
+  | "kimi"
+  | "deepseek";
 
 export interface ModelOption {
   /** vendor API에 그대로 전달되는 모델 ID */
@@ -111,6 +120,24 @@ export const BYOK_MODELS: Record<ByokBackend, ModelOption[]> = {
     { id: "glm-4", label: "GLM-4", contextWindow: 128_000, multimodal: false },
     { id: "custom", label: "Other Compatible Model", contextWindow: 128_000, multimodal: false }
   ],
+  // ── Anthropic Messages API 호환 서드파티 ──────────────────
+  // 모델 ID는 각 프로바이더가 자체 관리 — 세대가 바뀌면 갱신. 잘못된 ID는 서버가 거부할 뿐 크래시 없음.
+  // "custom" 항목으로 사용자가 최신 모델명을 직접 입력할 수 있게 둔다.
+  glm: [
+    { id: "glm-4.6", label: "GLM-4.6", contextWindow: 200_000, multimodal: false },
+    { id: "glm-4.5-air", label: "GLM-4.5 Air", contextWindow: 128_000, multimodal: false },
+    { id: "custom", label: "다른 GLM 모델 직접 입력", contextWindow: 200_000, multimodal: false },
+  ],
+  kimi: [
+    { id: "kimi-k2-0711-preview", label: "Kimi K2", contextWindow: 128_000, multimodal: false },
+    { id: "kimi-k2-turbo-preview", label: "Kimi K2 Turbo", contextWindow: 128_000, multimodal: false },
+    { id: "custom", label: "다른 Kimi 모델 직접 입력", contextWindow: 128_000, multimodal: false },
+  ],
+  deepseek: [
+    { id: "deepseek-chat", label: "DeepSeek Chat (V3)", contextWindow: 64_000, multimodal: false },
+    { id: "deepseek-reasoner", label: "DeepSeek Reasoner (R1)", contextWindow: 64_000, multimodal: false },
+    { id: "custom", label: "다른 DeepSeek 모델 직접 입력", contextWindow: 64_000, multimodal: false },
+  ],
 };
 
 /** 백엔드별 기본 모델 — 사용자가 명시 선택 전 fallback. */
@@ -120,10 +147,64 @@ export const DEFAULT_BYOK_MODEL: Record<ByokBackend, string> = {
   google: "gemini-1.5-flash",
   upstage: "solar-pro2",
   custom: "deepseek-chat",
+  glm: "glm-4.6",
+  kimi: "kimi-k2-0711-preview",
+  deepseek: "deepseek-chat",
 };
 
+const BYOK_BACKENDS_ALL: ByokBackend[] = [
+  "anthropic",
+  "openai",
+  "google",
+  "upstage",
+  "custom",
+  "glm",
+  "kimi",
+  "deepseek",
+];
+
 function isByokBackend(backend: string): backend is ByokBackend {
-  return backend === "anthropic" || backend === "openai" || backend === "google" || backend === "upstage" || backend === "custom";
+  return (BYOK_BACKENDS_ALL as string[]).includes(backend);
+}
+
+/**
+ * Anthropic Messages API 호환 서드파티 프로바이더 프리셋.
+ * base URL만 프리셋으로 바꾸면 Claude 호환 클라이언트(우리 앱 포함)로 그대로 호출된다.
+ * 사용자는 키만 입력하면 되고(연결 시 base URL 자동 주입), 구독 플랜이 있으면 그 키로 구독 쿼터를 쓴다.
+ */
+export interface AnthropicCompatProvider {
+  label: string;
+  /** `${baseUrl}/v1/messages` 로 호출 */
+  baseUrl: string;
+  /** 키 발급 페이지 */
+  signupUrl: string;
+  /** 정액 구독(코딩 플랜) 존재 여부 — UI 안내용 */
+  hasSubscription: boolean;
+}
+
+export const ANTHROPIC_COMPAT_PROVIDERS: Partial<Record<ByokBackend, AnthropicCompatProvider>> = {
+  glm: {
+    label: "GLM (Z.ai)",
+    baseUrl: "https://api.z.ai/api/anthropic",
+    signupUrl: "https://z.ai/subscribe",
+    hasSubscription: true,
+  },
+  kimi: {
+    label: "Kimi (Moonshot)",
+    baseUrl: "https://api.moonshot.ai/anthropic",
+    signupUrl: "https://platform.moonshot.ai/console/api-keys",
+    hasSubscription: true,
+  },
+  deepseek: {
+    label: "DeepSeek",
+    baseUrl: "https://api.deepseek.com/anthropic",
+    signupUrl: "https://platform.deepseek.com/api_keys",
+    hasSubscription: false,
+  },
+};
+
+export function anthropicCompatProvider(backend: string): AnthropicCompatProvider | undefined {
+  return (ANTHROPIC_COMPAT_PROVIDERS as Record<string, AnthropicCompatProvider | undefined>)[backend];
 }
 
 export function byokModels(backend: string): ModelOption[] {

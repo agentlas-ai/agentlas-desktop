@@ -1,6 +1,15 @@
 import type { AgentRuntimeOverride, RuntimeStatus } from "../../shared/types";
 import { findAgentRuntimeOverride, type RuntimeOverrideTarget } from "../store/agent-runtime-overrides";
-import { runAnthropicByok, runCustomByok, runGoogleByok, runOpenAIByok, runUpstageByok } from "./byok";
+import {
+  runAnthropicByok,
+  runCustomByok,
+  runDeepseekByok,
+  runGlmByok,
+  runGoogleByok,
+  runKimiByok,
+  runOpenAIByok,
+  runUpstageByok,
+} from "./byok";
 import { runClaudeCode } from "./claude-code";
 import { runCodex } from "./codex";
 import { runGemini } from "./gemini";
@@ -11,13 +20,16 @@ import type { Runner } from "./runner";
 const RUNNER_LABEL: Record<string, string> = {
   "claude-code": "Claude Code CLI",
   codex: "Codex CLI",
-  gemini: "Gemini CLI",
+  gemini: "Antigravity CLI",
   grok: "Grok CLI",
   "byok:anthropic": "Anthropic API",
   "byok:openai": "OpenAI API",
   "byok:google": "Google API",
   "byok:upstage": "Upstage Solar API",
   "byok:custom": "Custom OpenAI API",
+  "byok:glm": "GLM (Z.ai)",
+  "byok:kimi": "Kimi (Moonshot)",
+  "byok:deepseek": "DeepSeek",
 };
 
 export interface RuntimeChoice {
@@ -46,6 +58,12 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
       return { runner: runUpstageByok, label: RUNNER_LABEL["byok:upstage"] };
     if (active.backend === "custom")
       return { runner: runCustomByok, label: RUNNER_LABEL["byok:custom"] };
+    if (active.backend === "glm")
+      return { runner: runGlmByok, label: RUNNER_LABEL["byok:glm"] };
+    if (active.backend === "kimi")
+      return { runner: runKimiByok, label: RUNNER_LABEL["byok:kimi"] };
+    if (active.backend === "deepseek")
+      return { runner: runDeepseekByok, label: RUNNER_LABEL["byok:deepseek"] };
   }
   return null;
 }

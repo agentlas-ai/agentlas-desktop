@@ -18,6 +18,12 @@ const api: AgentlasIpc = {
     getLocale: () => ipcRenderer.invoke("app:getLocale"),
     getVersion: () => ipcRenderer.invoke("app:getVersion"),
   },
+  trex: {
+    generateImage: (payload: { model?: "codex" | "gemini"; prompt: string }) => ipcRenderer.invoke("trex:generateImage", payload),
+    imageProviders: () => ipcRenderer.invoke("trex:imageProviders"),
+    generateContent: (payload: { topic: string; count?: number; mode?: string }) => ipcRenderer.invoke("trex:generateContent", payload),
+    contentAvailable: () => ipcRenderer.invoke("trex:contentAvailable"),
+  },
   menu: {
     setLocale: (locale: "ko" | "en") => ipcRenderer.invoke("menu:setLocale", locale),
   },

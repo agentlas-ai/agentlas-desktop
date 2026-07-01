@@ -28,7 +28,7 @@ type ModelOption = { id: string; label: string; tag?: string };
 const CLI_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
-  gemini: "Gemini",
+  gemini: "Antigravity",
   grok: "Grok",
 };
 
@@ -1812,7 +1812,7 @@ function buildAutocompleteOptions(
     const srcLabel: Record<RuntimeCommand["source"], string> = {
       "claude-code": "Claude",
       codex: "Codex",
-      gemini: "Gemini",
+      gemini: "Antigravity",
     };
     const cli = (context.commands ?? [])
       .filter((c) => !q || c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q))

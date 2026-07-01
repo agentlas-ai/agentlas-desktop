@@ -14,9 +14,8 @@ export type OberonStepId =
 
 export type StepState = "locked" | "active" | "done";
 
-// 오베론 진입 랜딩에서 고르는 두 스튜디오.
-//   motion    — 로고/표현의도 → 인앱 모션엔진(Chromium→ffmpeg). 외부 키 0.
-//   animation — 스타일라이즈드 이미지 → image-to-video(BYOK). "진짜 움직이는" 애니메이션.
+// 오베론 본체는 애니메이션 스튜디오만 담당한다.
+// 모션그래픽은 Agent Apps의 /oberon-motion으로 분리되어 별도 HQ가 운영한다.
 export type OberonStudio = "motion" | "animation";
 
 export interface OberonStudioDef {
@@ -31,14 +30,6 @@ export interface OberonStudioDef {
 }
 
 export const OBERON_STUDIOS: OberonStudioDef[] = [
-  {
-    id: "motion",
-    title: "모션그래픽",
-    tagline: "로고 · 텍스트",
-    glyph: "layers",
-    blurb: "로고·텍스트로 만드는 모션그래픽 영상.",
-    steps: ["setup", "video", "delivery"],
-  },
   {
     id: "animation",
     title: "애니메이션",

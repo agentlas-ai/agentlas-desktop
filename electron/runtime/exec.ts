@@ -106,6 +106,20 @@ export function agentRunCwd(): string {
  * 실행 가능하면 버전 문자열을, 아니면 null을 반환한다. Windows 심도 해석된다.
  */
 export function probeCliVersion(command: string, timeoutMs = 3000): Promise<string | null> {
+  const cacheMs = Number(process.env.AGENTLAS_RUNTIME_PROBE_CACHE_MS ?? 30_000);
+  const key = `${command}\0${timeoutMs}`;
+  const now = Date.now();
+  const cached = versionProbeCache.get(key);
+  if (cached && now - cached.at < cacheMs) return cached.promise;
+
+  const promise = runProbeCliVersion(command, timeoutMs);
+  versionProbeCache.set(key, { at: now, promise });
+  return promise;
+}
+
+const versionProbeCache = new Map<string, { at: number; promise: Promise<string | null> }>();
+
+function runProbeCliVersion(command: string, timeoutMs: number): Promise<string | null> {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (v: string | null) => {
@@ -115,13 +129,20 @@ export function probeCliVersion(command: string, timeoutMs = 3000): Promise<stri
       resolve(v);
     };
 
-    const child = crossSpawn(command, ["--version"], {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: withCliPath(process.env),
-    });
+    let child: ChildProcess;
+    try {
+      child = crossSpawn(command, ["--version"], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: withCliPath(process.env),
+        detached: process.platform !== "win32",
+      });
+    } catch {
+      finish(null);
+      return;
+    }
 
     const timer = setTimeout(() => {
-      child.kill();
+      terminateProbeProcess(child);
       finish(null);
     }, timeoutMs);
 
@@ -138,4 +159,28 @@ export function probeCliVersion(command: string, timeoutMs = 3000): Promise<stri
       }
     });
   });
+}
+
+function terminateProbeProcess(child: ChildProcess): void {
+  if (process.platform !== "win32" && child.pid) {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+      const sigkill = setTimeout(() => {
+        try {
+          process.kill(-child.pid!, "SIGKILL");
+        } catch {
+          // already exited
+        }
+      }, 750);
+      sigkill.unref?.();
+      return;
+    } catch {
+      // fall through to direct child kill
+    }
+  }
+  try {
+    child.kill();
+  } catch {
+    // already exited
+  }
 }

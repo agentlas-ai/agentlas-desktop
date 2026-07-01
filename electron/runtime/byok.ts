@@ -15,6 +15,7 @@ import { tStatus } from "./status-i18n";
 import { compactHistory } from "./compact";
 import {
   ANTHROPIC_1M_BETA,
+  anthropicCompatProvider,
   type ByokBackend,
   defaultByokModel,
   effectiveContextWindow,
@@ -75,16 +76,20 @@ type AnthropicContent =
       source: { type: "base64"; media_type: string; data: string };
     };
 
-export const runAnthropicByok: Runner = async (
+/**
+ * Anthropic Messages API(및 그 호환 서드파티 엔드포인트) 공통 호출.
+ * base URL과 인증 헤더만 프로바이더마다 다르고 나머지 와이어 포맷은 동일하다.
+ */
+async function runAnthropicMessages(
+  backend: ByokBackend,
+  baseUrl: string,
+  authHeaders: Record<string, string>,
   req: RunnerRequest,
   events: RunnerEvents,
-): Promise<RunnerResult> => {
-  const key = await readApiKey("anthropic");
-  if (!key) throw new Error(tStatus(req.locale, "errKeyMissingAnthropic"));
-
+): Promise<RunnerResult> {
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 
-  const { model, recent, system } = prepareContext("anthropic", req, events);
+  const { model, recent, system } = prepareContext(backend, req, events);
 
   const messages: Array<{ role: "user" | "assistant"; content: string | AnthropicContent[] }> = [];
   for (const m of recent) {
@@ -107,15 +112,15 @@ export const runAnthropicByok: Runner = async (
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    "x-api-key": key,
     "anthropic-version": "2023-06-01",
+    ...authHeaders,
   };
   // 1M 컨텍스트: beta-header 모델 + 사용자 토글 ON일 때만 베타 헤더 전송 (default OFF라 안전).
-  if (req.longContext && needsLongContextToggle("anthropic", model)) {
+  if (req.longContext && needsLongContextToggle(backend, model)) {
     headers["anthropic-beta"] = ANTHROPIC_1M_BETA;
   }
 
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+  const resp = await fetch(`${baseUrl}/v1/messages`, {
     method: "POST",
     headers,
     signal: req.signal,
@@ -157,7 +162,48 @@ export const runAnthropicByok: Runner = async (
     }
   }
   return { text: acc.trim() };
+}
+
+export const runAnthropicByok: Runner = async (
+  req: RunnerRequest,
+  events: RunnerEvents,
+): Promise<RunnerResult> => {
+  const key = await readApiKey("anthropic");
+  if (!key) throw new Error(tStatus(req.locale, "errKeyMissingAnthropic"));
+  return runAnthropicMessages("anthropic", "https://api.anthropic.com", { "x-api-key": key }, req, events);
 };
+
+/**
+ * Anthropic 호환 서드파티(GLM/Kimi/DeepSeek) 러너 팩토리.
+ * 프리셋 base URL로 Messages API를 그대로 호출한다 — 사용자는 키만 저장하면 base URL은 자동.
+ * 인증 헤더는 프로바이더마다 x-api-key 또는 Authorization: Bearer 를 쓰므로 둘 다 보낸다
+ * (대개 한쪽만 인식하고 나머지는 무시하므로 안전).
+ */
+function makeAnthropicCompatByok(backend: ByokBackend): Runner {
+  return async (req, events) => {
+    const preset = anthropicCompatProvider(backend);
+    if (!preset) throw new Error(`Unknown Anthropic-compatible backend: ${backend}`);
+    const key = await readApiKey(backend);
+    if (!key) {
+      throw new Error(
+        req.locale === "ko"
+          ? `${preset.label} API 키가 없습니다. 설정에서 키를 저장하세요.`
+          : `Missing ${preset.label} API key. Save it in Settings.`,
+      );
+    }
+    return runAnthropicMessages(
+      backend,
+      preset.baseUrl,
+      { "x-api-key": key, authorization: `Bearer ${key}` },
+      req,
+      events,
+    );
+  };
+}
+
+export const runGlmByok: Runner = makeAnthropicCompatByok("glm");
+export const runKimiByok: Runner = makeAnthropicCompatByok("kimi");
+export const runDeepseekByok: Runner = makeAnthropicCompatByok("deepseek");
 
 // ── OpenAI Chat Completions ──────────────────────────────
 type OpenAIContent =

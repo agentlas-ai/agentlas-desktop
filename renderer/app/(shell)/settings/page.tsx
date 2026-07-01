@@ -14,6 +14,7 @@ import type {
   UpdaterState,
 } from "@/lib/types";
 import {
+  type ByokBackend,
   BYOK_MODELS,
   CONTEXT_MANAGED_BY,
   findByokModel,
@@ -22,9 +23,18 @@ import {
 import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconRefresh, IconWand } from "@/components/Icon";
 import { MigrationPanel } from "@/components/MigrationPanel";
 
-// BYOK는 API 키를 직접 넣는 클라우드 3종 (Ollama는 로컬이라 키 없음).
-type ByokBackend = "anthropic" | "openai" | "google" | "upstage" | "custom";
-const BYOK_BACKENDS: ByokBackend[] = ["anthropic", "openai", "google", "upstage", "custom"];
+// BYOK 백엔드 목록은 shared/models.ts의 ByokBackend(단일 출처)를 그대로 쓴다.
+const BYOK_BACKENDS: ByokBackend[] = [
+  "anthropic",
+  "openai",
+  "google",
+  "upstage",
+  // Anthropic 호환 서드파티(구독/종량제) — base URL은 프리셋 자동, 사용자는 키만 입력.
+  "glm",
+  "kimi",
+  "deepseek",
+  "custom",
+];
 
 const BACKEND_LABEL: Record<RuntimeBackend, string> = {
   anthropic: "Anthropic (Claude)",
@@ -33,6 +43,9 @@ const BACKEND_LABEL: Record<RuntimeBackend, string> = {
   ollama: "Ollama (로컬)",
   upstage: "Upstage Solar (🇰🇷 한국 소버린)",
   custom: "Custom OpenAI (호환 모델)",
+  glm: "GLM (Z.ai)",
+  kimi: "Kimi (Moonshot)",
+  deepseek: "DeepSeek",
 };
 
 const BACKEND_KEY_HINT: Record<ByokBackend, string> = {
@@ -41,12 +54,15 @@ const BACKEND_KEY_HINT: Record<ByokBackend, string> = {
   google: "aistudio.google.com/app/apikey",
   upstage: "console.upstage.ai/api-keys",
   custom: "Your Base URL's Provider",
+  glm: "z.ai/subscribe · 구독 코딩 플랜",
+  kimi: "platform.moonshot.ai · 구독 코딩 플랜",
+  deepseek: "platform.deepseek.com/api_keys · 종량제",
 };
 
 const RUNTIME_LABEL: Record<string, string> = {
   "claude-code": "Claude Code CLI",
   codex: "Codex CLI",
-  gemini: "Gemini CLI",
+  gemini: "Antigravity CLI",
   grok: "Grok CLI",
   ollama: "Ollama",
 };
@@ -61,6 +77,9 @@ export default function SettingsPage() {
     google: "",
     upstage: "",
     custom: "",
+    glm: "",
+    kimi: "",
+    deepseek: "",
   });
   const [hasKey, setHasKey] = useState<Record<ByokBackend, boolean>>({
     anthropic: false,
@@ -68,6 +87,9 @@ export default function SettingsPage() {
     google: false,
     upstage: false,
     custom: false,
+    glm: false,
+    kimi: false,
+    deepseek: false,
   });
   const [customBaseUrl, setCustomBaseUrl] = useState("");
   const [draftCustomBaseUrl, setDraftCustomBaseUrl] = useState("");
@@ -80,20 +102,33 @@ export default function SettingsPage() {
   const refresh = useCallback(async () => {
     const api = ipc();
     if (!api) return;
-    const [s, a, o, g, u, c, baseUrl, providers, mmSettings, mmStatus] = await Promise.all([
-      api.runtime.detect(),
-      api.secrets.hasApiKey("anthropic"),
-      api.secrets.hasApiKey("openai"),
-      api.secrets.hasApiKey("google"),
-      api.secrets.hasApiKey("upstage"),
-      api.secrets.hasApiKey("custom"),
-      api.config.getCustomBaseUrl(),
-      api.multimodal.listProviders(),
-      api.multimodal.getSettings(),
-      api.multimodal.status(),
-    ]);
+    const [s, a, o, g, u, c, glmK, kimiK, dsK, baseUrl, providers, mmSettings, mmStatus] =
+      await Promise.all([
+        api.runtime.detect(),
+        api.secrets.hasApiKey("anthropic"),
+        api.secrets.hasApiKey("openai"),
+        api.secrets.hasApiKey("google"),
+        api.secrets.hasApiKey("upstage"),
+        api.secrets.hasApiKey("custom"),
+        api.secrets.hasApiKey("glm"),
+        api.secrets.hasApiKey("kimi"),
+        api.secrets.hasApiKey("deepseek"),
+        api.config.getCustomBaseUrl(),
+        api.multimodal.listProviders(),
+        api.multimodal.getSettings(),
+        api.multimodal.status(),
+      ]);
     setStatuses(s);
-    setHasKey({ anthropic: a, openai: o, google: g, upstage: u, custom: c });
+    setHasKey({
+      anthropic: a,
+      openai: o,
+      google: g,
+      upstage: u,
+      custom: c,
+      glm: glmK,
+      kimi: kimiK,
+      deepseek: dsK,
+    });
     setCustomBaseUrl(baseUrl);
     setDraftCustomBaseUrl(baseUrl);
     setMultimodalProviders(providers);

@@ -2,6 +2,7 @@
 // docs/DESIGN.md 준수: 토큰만(하드코딩 X), 강조 1개, soft shadow(--rd-shadow), H1 ≤22px, 시스템 폰트.
 "use client";
 import type { CSSProperties } from "react";
+import Link from "next/link";
 import { OBERON_STUDIOS, type OberonStudio } from "@/lib/oberon";
 import { Glyph, type GlyphName } from "./icons";
 
@@ -11,7 +12,7 @@ export function StudioLanding({ onPick }: { onPick: (studio: OberonStudio) => vo
       <div style={inner}>
         <div style={eyebrow}>OBERON STUDIO</div>
         <h1 style={title}>무엇을 만들까요?</h1>
-        <p style={subtitle}>만들 유형을 선택하세요.</p>
+        <p style={subtitle}>오베론 본체는 애니메이션 제작에 집중합니다.</p>
 
         <div style={grid}>
           {OBERON_STUDIOS.map((s) => (
@@ -34,6 +35,10 @@ export function StudioLanding({ onPick }: { onPick: (studio: OberonStudio) => vo
             </button>
           ))}
         </div>
+
+        <Link href="/oberon-motion" style={motionLink}>
+          모션그래픽은 Oberon Motiongraphic Studio에서 열기 <Glyph name="chevron" size={12} />
+        </Link>
       </div>
 
       <style
@@ -99,7 +104,8 @@ const subtitle: CSSProperties = {
 
 const grid: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gridTemplateColumns: "minmax(260px, 420px)",
+  justifyContent: "center",
   gap: 16,
   width: "100%",
 };
@@ -162,4 +168,20 @@ const cardCta: CSSProperties = {
   fontSize: 13,
   fontWeight: 650,
   color: "var(--ob-accent-text)",
+};
+
+const motionLink: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  marginTop: 18,
+  minHeight: 34,
+  padding: "0 12px",
+  borderRadius: "var(--rd-r-sm, 10px)",
+  border: "1px solid var(--ob-edge)",
+  color: "var(--ob-accent-text)",
+  background: "var(--ob-paper)",
+  fontSize: 13,
+  fontWeight: 650,
+  textDecoration: "none",
 };

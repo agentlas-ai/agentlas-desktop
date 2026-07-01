@@ -34,7 +34,7 @@ const DICT = {
     errChatNotFound: "채팅을 찾지 못했습니다.",
     errAgentNotFound: "에이전트가 삭제되었거나 찾을 수 없습니다.",
     errNoRuntime:
-      "연결된 LLM 백엔드가 없습니다. 설정에서 Claude Code/Codex/Gemini CLI 또는 API 키를 연결해 주세요.",
+      "연결된 LLM 백엔드가 없습니다. 설정에서 Claude Code/Codex/Antigravity CLI 또는 API 키를 연결해 주세요.",
     errNoRunner: "지원하지 않는 런타임 조합: {kind}/{backend}",
     errKeyMissingAnthropic: "Anthropic API 키가 저장되어 있지 않습니다. 설정에서 추가하세요.",
     errKeyMissingOpenAI: "OpenAI API 키가 저장되어 있지 않습니다. 설정에서 추가하세요.",
@@ -84,7 +84,7 @@ const DICT = {
     errChatNotFound: "Chat not found.",
     errAgentNotFound: "Agent was removed or could not be found.",
     errNoRuntime:
-      "No LLM backend connected. Connect a Claude Code/Codex/Gemini CLI or an API key in Settings.",
+      "No LLM backend connected. Connect a Claude Code/Codex/Antigravity CLI or an API key in Settings.",
     errNoRunner: "Unsupported runtime combination: {kind}/{backend}",
     errKeyMissingAnthropic: "Anthropic API key is not saved. Add it in Settings.",
     errKeyMissingOpenAI: "OpenAI API key is not saved. Add it in Settings.",

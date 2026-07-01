@@ -9,7 +9,7 @@ type ModelRow = { id: string; label: string; tag?: string };
 const RUNTIME_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
-  gemini: "Gemini",
+  gemini: "Antigravity",
   grok: "Grok",
   byok: "BYOK API",
   ollama: "Ollama",

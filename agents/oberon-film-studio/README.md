@@ -21,16 +21,16 @@ Oberon은 Agentlas Desktop에 내장된 AI 필름 스튜디오의 **에이전트
   SRT/VTT 자막(프레임에 안 그리고 후반 번인).
 - **폰트 다양화** — 장르/무드별 폰트 페어링(타이틀·자막·로어서드·CTA), 한국어는 CJK
   폰트 강제.
-- **모션그래픽 광고 lane** — Framer Motion/Remotion 류의 코드 모션 발상으로 제품 광고를
-  로컬 렌더한다. HTML/CSS 모션 → Chromium 프레임 → ffmpeg MP4라서 Veo/Runway/Luma API
-  없이도 구독/CLI 중심 워크플로에 붙일 수 있다.
+- **모션그래픽은 별도 팀으로 분리** — SaaS/UI/product motion, Remotion, Framer Motion,
+  Lottie, Tailwind, deterministic MP4 요청은 이 필름 패키지가 처리하지 않는다.
+  `Hephaestus_agent_forge/Paid/oberon-motiongraphic-studio`의 `/oberon-motion` HQ로
+  넘긴다.
 
 ## 능력 (routing card capabilities)
 
 `film_production` · `video_generation` · `shot_planning` · `camera_choreography` ·
 `continuity_management` · `keyframe_synthesis` · `dialogue_direction` ·
-`subtitle_generation` · `typography_design` · `provider_routing` · `motion_graphics_ads` ·
-`no_api_local_video_render`
+`subtitle_generation` · `typography_design` · `provider_routing`
 
 ## 빌려 쓰기 (Hephaestus Network)
 

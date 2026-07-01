@@ -29,6 +29,21 @@ export interface GeneratedDocument {
 
 export const INSTALLED_APPS: AgentlasAppDefinition[] = [
   {
+    id: "trex",
+    slug: "trex",
+    name: "T-rex 슬라이드 스튜디오",
+    nameEn: "T-rex Slide Studio",
+    tagline: "프롬프트 한 줄 → 목적에 맞춰 실시간으로 만드는 편집 가능한 HTML 슬라이드 덱. 드래그·블록 편집과 PDF 저장까지.",
+    taglineEn: "One prompt → a deck builds itself, art-directed to your purpose. Edit blocks by drag, export to PDF.",
+    kind: "ai-native",
+    route: "/trex",
+    accent: "var(--accent)",
+    engines: ["Art-direction router", "Slide engine", "Block editor", "PDF export"],
+    vaultKeys: [],
+    artifacts: ["Editable HTML deck", "Slide images", "PDF"],
+    slashCommands: ["/trex", "/slides", "/티렉스", "/슬라이드"],
+  },
+  {
     id: "oberon",
     slug: "oberon",
     name: "Oberon 영화 스튜디오",
@@ -42,6 +57,21 @@ export const INSTALLED_APPS: AgentlasAppDefinition[] = [
     vaultKeys: ["GEMINI_API_KEY", "RUNWAY_API_KEY", "LUMA_API_KEY", "OPENAI_API_KEY", "FIREFLY_API_KEY"],
     artifacts: ["Shot list", "Prompt pack", "Continuity bible", "Generated takes", "Timeline / EDL", "Multi-aspect masters"],
     slashCommands: ["/oberon", "/film", "/오베론", "/영화스튜디오"],
+  },
+  {
+    id: "oberon-motiongraphic-studio",
+    slug: "oberon-motiongraphic-studio",
+    name: "Oberon 모션그래픽 스튜디오",
+    nameEn: "Oberon Motiongraphic Studio",
+    tagline: "제품 화면 증거를 중심으로 Remotion·Motion·Lottie·Tailwind 렌더 스택을 운영하는 모션그래픽 Agent App",
+    taglineEn: "A motion-graphics Agent App that runs a Remotion, Motion, Lottie, and Tailwind render stack around product-proof footage.",
+    kind: "ai-native",
+    route: "/oberon-motion",
+    accent: "var(--teal)",
+    engines: ["Motiongraphic HQ", "Remotion compositor", "Motion preview", "Lottie asset director", "Export QA"],
+    vaultKeys: [],
+    artifacts: ["Motion storyboard", "Render manifest", "HTML preview", "MP4 masters", "QA report"],
+    slashCommands: ["/oberon-motion", "/motiongraphic", "/motiongraphics", "/모션그래픽"],
   },
   {
     id: "document-studio",

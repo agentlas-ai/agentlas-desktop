@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.7 — 2026-07-01
+
+### Added
+
+- **Connect GLM, Kimi, and DeepSeek in one click.** New BYOK providers that speak
+  the Anthropic Messages API — Settings shows each with a preset endpoint, so you
+  paste only the key and the base URL is filled in automatically. GLM (Z.ai) and
+  Kimi (Moonshot) coding subscriptions work through their keys; DeepSeek runs
+  pay-as-you-go. Routed through the existing Anthropic runner with a per-provider
+  preset (`ANTHROPIC_COMPAT_PROVIDERS`).
+- **Studio apps (Trex) + Oberon motion.** New agent-built app surfaces bundled in.
+
+### Changed
+
+- **Antigravity CLI.** The Gemini runtime now prefers the Antigravity (`agy`) CLI.
+- **Bundled Hephaestus engine → v1.0.5.** Named multi-agent borrow (borrow every
+  specialist the operator names) + a temporary orchestrator directive for
+  multi-specialist requests.
+
+### Fixed / Performance
+
+- **Big CPU/RAM cleanup for low-end machines (27 files).** Visibility-aware
+  polling that pauses when the window is hidden (approval/notification polling
+  stays live), runtime child-process listener-leak cleanup, bounded concurrency
+  for firm-org and app-factory work, process-group kill + tracking for Oberon
+  keyframe and App Factory browser spawns, updater timer `unref` + before-quit
+  cleanup, and render hot-path memoization (Bubble/Sidebar/Markdown).
+
 ## 0.5.6 — 2026-07-01
 
 ### Changed

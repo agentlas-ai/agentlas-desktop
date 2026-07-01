@@ -1061,6 +1061,9 @@ function labelOfRuntime(s: RuntimeStatus): string {
     ollama: "Ollama",
     upstage: "Upstage",
     custom: "Custom",
+    glm: "GLM",
+    kimi: "Kimi",
+    deepseek: "DeepSeek",
   }[s.backend ?? ""];
   return `${kind} · ${backend}`;
 }

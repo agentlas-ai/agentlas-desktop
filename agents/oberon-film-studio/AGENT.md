@@ -107,24 +107,18 @@
   레퍼런스) · Runway Gen-4.5 (툴링·Aleph v2v) · Luma Ray 2 (저비용·카메라 무브).
 - **Image**: Nano Banana Pro (다중 캐릭터 일관성·키프레임) · Imagen 4 (제품 스틸) ·
   Gemini Flash Image (대량 드래프트) · gpt-image-1.5 · Firefly (브랜드 세이프).
-- **Code motion**: product/SaaS motion graphics, prompt-pack ads, UI explainers, and
-  typography-led commercials use the local deterministic lane first: HTML/CSS motion scene
-  → Chromium frame capture → ffmpeg MP4. This lane uses no video-generation API and is the
-  default when the brief mentions motion graphics, Framer Motion, Remotion, no-API rendering,
-  product UI advertising, or export folders for manual paste workflows.
+- **Motion graphics handoff**: product/SaaS motion graphics, prompt-pack ads, UI explainers,
+  Remotion, Framer Motion / Motion for React, Lottie, Tailwind, no-API rendering, deterministic
+  MP4, and product UI advertising are no longer handled inside Oberon Film Studio. Route them
+  to **Oberon Motiongraphic Studio** (`/oberon-motion`) so film/animation and product motion
+  graphics stay separate.
 
 ### Motion Graphics Ad Lane
 
-For product ads that should look like a Google/SaaS motion commercial rather than live-action
-film, route to **Motion Graphics Ad**:
-
-1. Write a concise motion board: hook, system reveal, product proof, export/package proof, CTA.
-2. Produce copy as deterministic on-screen typography, not model-generated text.
-3. Compose with code: layout, easing, product UI panels, asset chips, progress bars, folder/package
-   reveal, and CTA.
-4. Render locally by frame capture and ffmpeg. Do not require Veo/Runway/Luma keys for this lane.
-5. Ship a folder: MP4, HTML preview, manifest JSON, and prompt-pack notes that a human can paste
-   into Flow/Veo/Higgsfield later if they want a generative variant.
+This lane has moved out of this package. Product ads that should look like a Google/SaaS motion
+commercial rather than live-action film must route to **Oberon Motiongraphic Studio**. This
+package may still produce cinematic variants after that team ships a prompt pack, but it must
+not own the deterministic motion render.
 
 ## 6. I/O schema (summary)
 
@@ -137,9 +131,7 @@ generationPrompt + motionBeats + dialogueLine + audioBed + continuityNote + chai
 takes[], edl[], cost, typography (font kit), subtitleCues[] }`
 
 **Exports** (usable in any video tool): shot-list CSV, prompt pack, continuity bible MD,
-routing matrix, EDL, production JSON, typography kit MD, `.srt` / `.vtt` subtitles. For
-motion graphics ads, also export `motion_mp4`, `html_preview`, `manifest_json`, and a
-paste-ready prompt pack.
+routing matrix, EDL, production JSON, typography kit MD, `.srt` / `.vtt` subtitles.
 
 ## 7. Runtime dependencies & secrets (NAMES ONLY — never values)
 
@@ -151,7 +143,6 @@ own secret vault. **No secret values are included in this package.**
   `RUNWAY_API_KEY`, `LUMA_API_KEY`, `OPENAI_API_KEY`, `FIREFLY_API_KEY`.
 - External tools: Google GenAI (Veo video / Imagen image), a CLI text runtime
   (Claude Code / Codex / Gemini) for brief planning, `ffmpeg` for clip assembly.
-- Motion graphics lane: Electron/Chromium frame capture + `ffmpeg`; no video API key required.
 - Long-running: video render polls up to ~12 min/clip; assembly via ffmpeg.
 
 ## 8. Safety / rights gate (always before expensive generation)

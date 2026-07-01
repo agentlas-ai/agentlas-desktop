@@ -85,7 +85,7 @@ export default function AgentGroupsPage() {
           [
             org.ceo,
             ...org.divisions.flatMap((division) => [division, ...division.specialists]),
-          ],
+          ] as ResolvedNode[],
         ] as [string, ResolvedNode[]];
       });
       for (const pair of resolvedPairs) {

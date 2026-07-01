@@ -19,7 +19,7 @@ const dir = process.env.HEPHAESTUS_DIR
   ? path.resolve(process.env.HEPHAESTUS_DIR)
   : path.join(repoRoot, "Hephaestus");
 const repo = process.env.HEPHAESTUS_REPO || "https://github.com/agentlas-ai/Hephaestus.git";
-const ref = process.env.HEPHAESTUS_REF || "v1.0.4";
+const ref = process.env.HEPHAESTUS_REF || "v1.0.5";
 
 // 엔진 존재 판정: 런타임 진입 모듈이 있어야 "있다"로 본다(빈 폴더/부분 클론 방지).
 const sentinel = path.join(dir, "agentlas_cloud", "__main__.py");

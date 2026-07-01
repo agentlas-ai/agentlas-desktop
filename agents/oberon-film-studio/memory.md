@@ -14,9 +14,9 @@
   0.3초 정지)을 남긴다 — 편집 연결을 위해.
 - **프로바이더는 샷별로 고른다.** 대사·립싱크 → Veo, 최고 화질 → Seedance,
   카메라 무브 → Luma, 범용 → Runway. 어댑터 경계 뒤에 두어 API 종료(예: Sora)에 대비.
-- **모션그래픽 광고는 별도 lane이다.** 제품/SaaS/UI 광고, Framer Motion/Remotion 류 요청,
-  "API 없이" 요청은 비디오 생성 모델 대신 로컬 코드 렌더(HTML/CSS → Chromium frames →
-  ffmpeg MP4)를 우선한다. 결과 폴더에는 MP4, HTML preview, manifest, prompt pack을 남긴다.
+- **모션그래픽 광고는 별도 팀이다.** 제품/SaaS/UI 광고, Framer Motion/Remotion/Lottie/Tailwind
+  요청, "API 없이" 요청은 이 Oberon Film Studio 패키지에서 처리하지 않는다.
+  `oberon-motiongraphic-studio`의 `/oberon-motion` HQ로 넘긴다.
 
 ## Gotchas
 
@@ -31,4 +31,7 @@
 
 - Oberon은 현재 데스크탑 빌트인 기능 + 이 배포팩(계약/지식)으로 이중 존재한다.
   엔진 자체의 플랫폼 비종속 추출(Veo/ffmpeg/IPC 분리)은 향후 리팩터 과제.
+- 2026-07-01: deterministic product motion graphics는
+  `Hephaestus_agent_forge/Paid/oberon-motiongraphic-studio`로 분리했다. Film Studio는
+  cinematic/animation continuity만 맡는다.
 - `routing_status`는 candidate로 시작 — 클라우드 동작 검증 후 routing_ready로 승격.

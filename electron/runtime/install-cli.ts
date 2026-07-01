@@ -17,7 +17,9 @@ export type InstallableCli = "claude-code" | "codex" | "gemini" | "grok";
 const CLI_PLAN: Record<InstallableCli, { pkg: string; loginCmd: string; bin: string }> = {
   "claude-code": { pkg: "@anthropic-ai/claude-code", loginCmd: "claude", bin: "claude" },
   codex: { pkg: "@openai/codex", loginCmd: "codex login", bin: "codex" },
-  gemini: { pkg: "@google/gemini-cli", loginCmd: "gemini", bin: "gemini" },
+  // "gemini" 슬롯 = Antigravity CLI(agy)로 대체. 설치는 공식 install.sh(curl), 로그인은 `agy`(Google OAuth · 1회).
+  // 키 불필요 — Antigravity OAuth로 채팅/에이전트 + 나노바나나(이미지)까지 키리스.
+  gemini: { pkg: "antigravity-cli", loginCmd: "agy", bin: "agy" },
   // grok-cli는 xAI 키(XAI_API_KEY/GROK_API_KEY)로 동작 — 로그인 명령은 대화형 셸을 연다(키 설정·확인용).
   grok: { pkg: "grok-dev", loginCmd: "grok", bin: "grok" },
 };
@@ -119,6 +121,46 @@ function installGrokViaScript(): Promise<CliActionResult> {
   });
 }
 
+/** Antigravity CLI 공식 install.sh 실행 (curl | bash). ~/.local/bin/agy에 바이너리 설치 — sudo 불필요. */
+function installAntigravityViaScript(): Promise<CliActionResult> {
+  const url = "https://antigravity.google/cli/install.sh";
+  const command = `curl -fsSL ${url} | bash`;
+  return new Promise<CliActionResult>((resolve) => {
+    let settled = false;
+    const done = (r: CliActionResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    let out = "";
+    let err = "";
+    let child: ReturnType<typeof spawnCli>;
+    try {
+      // curl|bash 파이프는 셸이 필요 → bash -c. 고정 URL(공식 antigravity.google)이라 인젝션 위험 없음.
+      child = spawnCli("bash", ["-c", command], { stdio: ["ignore", "pipe", "pipe"], env: augmentedEnv() });
+    } catch (e) {
+      done({ ok: false, message: e instanceof Error ? e.message : String(e), command });
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+      done({ ok: false, message: "timed out after 3 min", command });
+    }, 3 * 60 * 1000);
+    child.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
+    child.stderr?.on("data", (c: Buffer) => (err += c.toString("utf8")));
+    child.on("error", (e) => done({ ok: false, message: e.message, command }));
+    child.on("close", (code) => {
+      if (code === 0) done({ ok: true, message: out.slice(-400).trim() || "installed" });
+      else done({ ok: false, message: (err || out).slice(-800).trim(), command });
+    });
+  });
+}
+
 /** `npm i -g <pkg>` 실행. node/npm이 없거나 권한 문제면 ok:false + 직접 실행할 명령 안내. */
 export function installCli(kind: InstallableCli): Promise<CliActionResult> {
   const plan = CLI_PLAN[kind];
@@ -138,6 +180,11 @@ export function installCli(kind: InstallableCli): Promise<CliActionResult> {
   // 머신(homebrew 등)에서 `npm i -g`가 실패하는 문제를 피한다. (Windows는 아래 npm 폴백.)
   if (kind === "grok" && process.platform !== "win32") {
     return installGrokViaScript();
+  }
+
+  // "gemini" 슬롯 = Antigravity CLI(agy) — 공식 install.sh(curl|bash, ~/.local/bin/agy)로 설치. npm 패키지가 아님.
+  if (kind === "gemini" && process.platform !== "win32") {
+    return installAntigravityViaScript();
   }
 
   // GUI에서도 npm을 찾도록 절대경로로 resolve(+PATH 보강). 못 찾으면 직접 실행 명령 안내.

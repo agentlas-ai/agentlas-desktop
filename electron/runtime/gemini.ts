@@ -19,15 +19,23 @@ import {
 const KIND = "gemini";
 
 const CANDIDATES = [
+  // Antigravity CLI(agy) 우선 — 공식 install.sh가 ~/.local/bin/agy에 설치(Google OAuth · 키리스).
+  "agy",
+  path.join(os.homedir(), ".local/bin/agy"),
+  path.join(os.homedir(), ".agentlas/npm/bin/agy"),
+  "/opt/homebrew/bin/agy",
+  "/usr/local/bin/agy",
+  // 폴백: 기존 Gemini CLI — 이미 연결한 사용자 호환(점진 마이그레이션).
   "gemini",
   path.join(os.homedir(), ".agentlas/npm/bin/gemini"), // 앱이 설치한 유저 prefix (sudo 불필요)
   path.join(os.homedir(), ".local/bin/gemini"), // 네이티브 인스톨러 기본 위치
   path.join(os.homedir(), ".gemini/bin/gemini"),
   "/opt/homebrew/bin/gemini",
   "/usr/local/bin/gemini",
-  // Windows npm 전역 심 — GUI 앱이 PATH를 못 받았을 때의 fallback.
+  // Windows — GUI 앱이 PATH를 못 받았을 때의 fallback.
   ...(process.platform === "win32"
     ? [
+        path.join(os.homedir(), ".local", "bin", "agy.exe"),
         path.join(process.env.APPDATA ?? "", "npm", "gemini.cmd"),
         path.join(process.env.LOCALAPPDATA ?? "", "npm", "gemini.cmd"),
       ]
@@ -114,6 +122,10 @@ export const runGemini: Runner = async (
   if (!bin) {
     throw new Error(tStatus(req.locale, "errCliMissingGemini"));
   }
+  // Antigravity CLI(agy)는 gemini-cli와 헤드리스 stdin(`--prompt ""`)은 동일하지만
+  // `--extensions`·`--session-id`/`--resume`를 지원하지 않는다("flags provided but not defined").
+  // → agy면 세션 인자/확장 인자를 끄고, 매 호출 full prompt(컨텍스트 포함)로 보낸다.
+  const isAgy = /(^|[/\\])agy(\.exe)?$/.test(bin);
 
   const fingerprint = req.chatId ? systemFingerprint(req) : null;
   const savedSession = req.chatId ? getRuntimeSession(req.chatId, KIND) : null;
@@ -124,10 +136,12 @@ export const runGemini: Runner = async (
   if (req.chatId && savedSession && fingerprint && savedSession.fingerprint !== fingerprint) {
     clearRuntimeSession(req.chatId, KIND);
   }
-  const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
-  const createSessionId = !resumeSessionId && (req.chatId || req.runtimeSessionId)
-    ? randomUUID()
-    : undefined;
+  const resumeSessionId = isAgy ? null : (req.runtimeSessionId ?? storedSessionId);
+  const createSessionId = isAgy
+    ? undefined
+    : !resumeSessionId && (req.chatId || req.runtimeSessionId)
+      ? randomUUID()
+      : undefined;
 
   if (req.images && req.images.length > 0) {
     events.onStatus(tStatus(req.locale, "cliNoImage", { backend: req.backendLabel }));
@@ -158,7 +172,8 @@ export const runGemini: Runner = async (
     if (!env.TERM || env.TERM === "dumb") env.TERM = "xterm-256color";
     if (!env.COLORTERM) env.COLORTERM = "truecolor";
 
-    const child = spawnCli(bin, [...sessionArgs, ...modelArgs, "--extensions", "", "--prompt", ""], {
+    const extArgs = isAgy ? [] : ["--extensions", ""];
+    const child = spawnCli(bin, [...sessionArgs, ...modelArgs, ...extArgs, "--prompt", ""], {
       stdio: ["pipe", "pipe", "pipe"],
       env,
       // 사용자가 지정한 프로젝트 폴더에서 실행 — 미지정이면 전용 폴더.
@@ -190,8 +205,16 @@ export const runGemini: Runner = async (
       stderr += chunk.toString("utf8");
     });
 
-    child.on("error", (err) => reject(err));
+    child.on("error", (err) => {
+      // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지(일관성+안전).
+      child.stdout?.removeAllListeners("data");
+      child.stderr?.removeAllListeners("data");
+      reject(err);
+    });
     child.on("close", (code) => {
+      // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지(일관성+안전).
+      child.stdout?.removeAllListeners("data");
+      child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
       if (req.signal?.aborted) {
         reject(new Error(tStatus(req.locale, "aborted")));

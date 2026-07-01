@@ -15,7 +15,7 @@ import type { Runner } from "../runtime/runner";
 const RUNTIMES: Record<OberonPlanRuntime, { label: string; runner: Runner }> = {
   "claude-code": { label: "Claude Code", runner: runClaudeCode },
   codex: { label: "Codex CLI", runner: runCodex },
-  gemini: { label: "Gemini CLI", runner: runGemini },
+  gemini: { label: "Antigravity CLI", runner: runGemini },
 };
 
 export async function planOberonWithCli(request: OberonPlanRequest): Promise<OberonPlanResult> {
