@@ -5,7 +5,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProper
 import type { InstalledAgent, InstalledFirm, InstalledMcpServer, Project, RuntimeCommand } from "@/lib/types";
 import type { AgentlasAppDefinition } from "@/lib/apps";
 import { AgentAvatar } from "./AgentAvatar";
-import { Markdown, type CodeArtifact, type MediaArtifact } from "./Markdown";
+import { Markdown, StreamingMarkdown, type CodeArtifact, type MediaArtifact } from "./Markdown";
 import { useT } from "@/lib/i18n";
 
 /** 작업 중 패널에 누적되는 단일 단계. 새 이벤트마다 push (replace 아님). */
@@ -364,38 +364,9 @@ const Bubble = memo(function Bubble({
 });
 Bubble.displayName = "Bubble";
 
-// 버퍼 스무스 reveal — 토큰이 큰 덩어리로 도착해도 화면엔 일정 속도로 흘러나오게 한다.
-// target(누적 전체 텍스트)을 받아, active 동안 표시 길이를 매 프레임 조금씩 따라가게 한다.
-function useSmoothReveal(target: string, active: boolean | undefined): string {
-  const [shown, setShown] = useState(active ? 0 : target.length);
-  const targetRef = useRef(target);
-  targetRef.current = target;
-  useEffect(() => {
-    if (!active) {
-      setShown(targetRef.current.length);
-      return;
-    }
-    let raf = 0;
-    let cancelled = false;
-    const loop = () => {
-      if (cancelled) return;
-      setShown((s) => {
-        const t = targetRef.current.length;
-        if (s >= t) return s;
-        const step = Math.max(2, Math.ceil((t - s) / 6));
-        return Math.min(t, s + step);
-      });
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(raf);
-    };
-  }, [active]);
-  const len = active ? Math.min(shown, target.length) : target.length;
-  return target.slice(0, len);
-}
+// (이전의 rAF 기반 useSmoothReveal은 제거 — 매 프레임(60fps) setState + 전체 마크다운
+//  재파싱으로 긴 답변에서 스트리밍이 끊기는 주범이었다. 이제 partial 도착(≈60ms) 단위로만
+//  렌더하고, StreamingMarkdown이 완결 세그먼트를 memo로 고정해 마지막 세그먼트만 재파싱한다.)
 
 function LiveOutputPanel({
   text,
@@ -410,7 +381,6 @@ function LiveOutputPanel({
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
 }) {
-  const display = useSmoothReveal(text, streaming);
   return (
     <div
       style={{
@@ -421,7 +391,11 @@ function LiveOutputPanel({
         opacity: 0.92,
       }}
     >
-      <Markdown text={display} messageId={messageId} onOpenArtifact={onOpenArtifact} onOpenMedia={onOpenMedia} />
+      {streaming ? (
+        <StreamingMarkdown text={text} messageId={messageId} onOpenArtifact={onOpenArtifact} onOpenMedia={onOpenMedia} />
+      ) : (
+        <Markdown text={text} messageId={messageId} onOpenArtifact={onOpenArtifact} onOpenMedia={onOpenMedia} />
+      )}
       {streaming && <BlinkingCursor />}
     </div>
   );

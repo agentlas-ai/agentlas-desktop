@@ -500,6 +500,9 @@ function ChatPage() {
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const runIdRef = useRef<string | null>(null);
   const lastRunIdRef = useRef<string | null>(null);
+  // 델타 partial 누적 버퍼 — main이 증분만 보내므로 여기서 전문을 재조립한다.
+  // 리셋 지점: 채팅 전환 / 새 실행 시작 / final·error / 전문(text) 이벤트 수신.
+  const partialTextRef = useRef("");
   // runId가 도착하기 전(invoke:run 왕복 중)에 Stop을 누른 경우를 기억 — 도착 즉시 취소한다.
   const cancelRequestedRef = useRef(false);
   // 실행 중 steering — busy일 때 엔터로 들어온 메시지를 큐에 쌓고, 현재 턴이 끝나면 순서대로 전송한다.
@@ -800,10 +803,40 @@ function ChatPage() {
           ),
         );
       } else if (ev.kind === "partial") {
+        // 델타 스트림 재조립 — main은 증분(delta)+검증 길이(textLen)만 보낸다.
+        // 전문(text) 이벤트는 리플레이/폴백 경로로, 누적 버퍼를 그대로 덮어쓴다.
+        let raw: string;
+        if (typeof ev.delta === "string") {
+          const next = partialTextRef.current + ev.delta;
+          if (ev.textLen != null && next.length !== ev.textLen) {
+            // 어긋남(리플레이 경계 등 드묾) — 버퍼 스냅샷을 다시 받아 재동기화.
+            const api = ipc();
+            void api?.invoke.attach(chatId).then((att) => {
+              const snap = [...(att?.events ?? [])]
+                .reverse()
+                .find((e) => e.kind === "partial" && !e.agentId && typeof e.text === "string");
+              const snapText = snap?.text;
+              if (typeof snapText !== "string") return;
+              partialTextRef.current = snapText;
+              setMessages((m) =>
+                m.map((msg) => {
+                  if (msg.id !== placeholderId) return msg;
+                  const { text, questions } = extractQuestions(snapText, msg.id);
+                  return { ...msg, text, streaming: true, questions: questions.length > 0 ? questions : msg.questions };
+                }),
+              );
+            });
+            return;
+          }
+          partialTextRef.current = next;
+          raw = next;
+        } else {
+          raw = ev.text ?? "";
+          partialTextRef.current = raw;
+        }
         setMessages((m) =>
           m.map((msg) => {
             if (msg.id !== placeholderId) return msg;
-            const raw = ev.text ?? "";
             const { text, questions } = extractQuestions(raw, msg.id);
             return {
               ...msg,
@@ -850,6 +883,7 @@ function ChatPage() {
         );
         runIdRef.current = null;
         lastRunIdRef.current = null;
+        partialTextRef.current = "";
         subRef.current?.();
         subRef.current = null;
         // 첫 메시지였으면 main이 자동 제목 생성 → 갱신해서 사이드바도 반영
@@ -872,6 +906,7 @@ function ChatPage() {
         );
         runIdRef.current = null;
         lastRunIdRef.current = null;
+        partialTextRef.current = "";
         subRef.current?.();
         subRef.current = null;
       }
@@ -930,6 +965,7 @@ function ChatPage() {
     setCancelPending(false);
     runIdRef.current = null;
     lastRunIdRef.current = null;
+    partialTextRef.current = "";
     cancelRequestedRef.current = false;
     steerQueueRef.current = [];
     setQueuedSteers([]);
@@ -1333,6 +1369,7 @@ function ChatPage() {
       const runId = crypto.randomUUID();
       runIdRef.current = runId;
       lastRunIdRef.current = runId;
+      partialTextRef.current = "";
       // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
       subscribeRun(runId, placeholderId);
       try {

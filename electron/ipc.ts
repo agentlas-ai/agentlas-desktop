@@ -302,6 +302,8 @@ interface RunRecord {
   controller: AbortController;
   chatId: string;
   events: McpInvocationEvent[];
+  /** 메인 스트림(무-agentId) partial의 마지막 누적 전문 — 델타 계산 기준. */
+  partialText: string;
 }
 const activeRuns = new Map<string, RunRecord>();
 // Hephaestus 빌더(hep-build) 진행 중 실행 — 취소용 AbortController 레지스트리.
@@ -1443,7 +1445,7 @@ export function registerIpcHandlers(): void {
 
     // 실행마다 AbortController를 등록 — 병렬 실행이 서로 독립적으로 취소 가능.
     const controller = new AbortController();
-    const record: RunRecord = { controller, chatId: req.chatId, events: [] };
+    const record: RunRecord = { controller, chatId: req.chatId, events: [], partialText: "" };
     activeRuns.set(runId, record);
     broadcastActiveChats();
 
@@ -1463,6 +1465,27 @@ export function registerIpcHandlers(): void {
                     : "\n\n[Output truncated — runaway output memory guard]"),
               }
             : rawEv;
+        // 메인 스트림 partial은 델타로 전송 — 런타임이 60ms마다 누적 전문을 주므로 그대로 보내면
+        // IPC 페이로드가 O(전체)로 커져 긴 답변일수록 끊긴다. 여기서 증분만 잘라 보낸다.
+        // 버퍼(attach 리플레이)에는 항상 전문 스냅샷을 유지해 재접속 복원은 기존과 동일.
+        let wireEv = ev;
+        if (ev.kind === "partial" && !ev.agentId && typeof ev.text === "string") {
+          const full = ev.text;
+          const prev = record.partialText;
+          const probe = Math.min(32, prev.length);
+          const appended =
+            full.length >= prev.length &&
+            (probe === 0 || full.slice(prev.length - probe, prev.length) === prev.slice(-probe));
+          if (appended) {
+            const delta = full.slice(prev.length);
+            if (!delta) return; // 변화 없음(절단 안정 상태 등) — 전송/버퍼 갱신 불필요
+            wireEv = { ...ev, text: undefined, delta, textLen: full.length };
+          } else {
+            // append 불변식이 깨짐(절단 전환 등) — 전문 폴백, 렌더러는 text로 재동기화
+            wireEv = { ...ev, textLen: full.length };
+          }
+          record.partialText = full;
+        }
         // 재접속용 버퍼링 — partial은 매번 누적 전체 텍스트라, 직전이 partial이면 교체해
         // 메모리를 바운드한다(tool/thinking/agentId 이벤트는 누적 단계라 보존하되 상한 적용).
         const last = record.events[record.events.length - 1];
@@ -1476,7 +1499,7 @@ export function registerIpcHandlers(): void {
         }
         // 창이 닫힌 뒤(닫기와 스트림 종료가 겹치는 경우) send는 throw하므로 destroyed 가드.
         if (win && !win.isDestroyed()) {
-          try { win.webContents.send(channel, ev); } catch {}
+          try { win.webContents.send(channel, wireEv); } catch {}
         }
         // 종료 이벤트는 즉시 레지스트리에서 제거 — 답변은 final emit 직전에 이미 영속화되므로(client.ts),
         // 재접속(attach)이 '끝난 실행'을 반환해 히스토리 행과 답변이 중복 렌더되는 창을 닫는다.

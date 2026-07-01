@@ -2136,6 +2136,12 @@ export interface McpInvocationEvent {
   kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface";
   status?: string;
   text?: string;
+  /** partial 델타 스트리밍(무-agentId 메인 스트림 한정) — text(누적 전문) 대신 직전 partial
+   *  이후 추가분만 담는다. IPC 페이로드를 O(전체)→O(증분)으로 줄인다. 리플레이/폴백 이벤트는
+   *  여전히 text를 쓴다. */
+  delta?: string;
+  /** 델타 적용 후 전체 텍스트 길이 — 렌더러가 누적 결과를 검증해 어긋나면 재동기화한다. */
+  textLen?: number;
   error?: { code: string; message: string };
   /** Agent OS surface manifest, emitted when an agent produces a safe interactive surface. */
   surfaceId?: string;
