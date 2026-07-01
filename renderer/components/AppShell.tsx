@@ -9,7 +9,6 @@ import { Sidebar } from "./Sidebar";
 import { MenuBridge } from "./MenuBridge";
 import { ImportAgentsModal } from "./ImportAgentsModal";
 import { ipc } from "@/lib/ipc";
-import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { SideNav } from "./SideNav";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { usePathname } from "next/navigation";
@@ -62,14 +61,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // 폴링은 useVisibleInterval이 담당(탭 숨김 시 정지·복귀 시 즉시 1회). 초기 load와 앱 이벤트 갱신은 아래 effect에서.
-  useVisibleInterval(() => void syncAttention(), ATTENTION_POLL_MS);
-
+  // 승인 대기(독 빨간 배지·독 튕김·"승인 대기" 알림)는 앱을 내려놓은 사이에 와도 떠야 하므로
+  // 이 폴링만은 화면이 숨어도 계속 돈다(다른 폴러와 달리 절전 예외). 이 알림은 오직 렌더러
+  // 폴링에만 물려 있어서(메인이 따로 안 쏨) 멈추면 최소화 중 승인 요청이 배지·알림으로 안 뜬다.
   useEffect(() => {
     void syncAttention();
-    // focus/visibilitychange 폴링은 useVisibleInterval로 대체됨 — 앱 내부 갱신 이벤트만 여기서 듣는다.
+    const timer = window.setInterval(() => void syncAttention(), ATTENTION_POLL_MS);
     window.addEventListener("agentlas:attention-refresh", syncAttention);
     return () => {
+      window.clearInterval(timer);
       window.removeEventListener("agentlas:attention-refresh", syncAttention);
       const api = ipc();
       void api?.attention?.setPendingConfirmations(0);
