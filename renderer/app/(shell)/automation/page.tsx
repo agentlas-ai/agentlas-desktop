@@ -124,20 +124,6 @@ export default function AutomationListPage() {
       </header>
 
       <section style={{ maxWidth: 880, margin: "24px auto", padding: "0 24px" }} data-tour-id="automation.list">
-        <div
-          style={{
-            padding: 12,
-            background: "var(--fill-1)",
-            border: "1px solid var(--accent-soft)",
-            borderRadius: "var(--radius-md)",
-            fontSize: 12,
-            color: "var(--ink-soft)",
-            marginBottom: 16,
-          }}
-        >
-          {t("auto.runtime_note")}
-        </div>
-
         {message ? (
           <div
             style={{
@@ -195,7 +181,7 @@ export default function AutomationListPage() {
                 <IconBolt size={16} style={{ color: a.enabled ? "var(--accent)" : "var(--muted)" }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <Link
-                    href={`/automation/detail?id=${encodeURIComponent(a.id)}`}
+                    href={`/automation/flow?id=${encodeURIComponent(a.id)}`}
                     className="titlebar-nodrag"
                     style={{
                       display: "block",
@@ -232,6 +218,21 @@ export default function AutomationListPage() {
                 >
                   {a.enabled ? t("auto.on") : t("auto.off")}
                 </button>
+                <Link
+                  href={`/automation/new?id=${encodeURIComponent(a.id)}`}
+                  className="titlebar-nodrag"
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: "var(--ink-soft)",
+                    padding: "4px 10px",
+                    borderRadius: 999,
+                    border: "1px solid var(--paper-edge)",
+                    textDecoration: "none",
+                  }}
+                >
+                  {t("auto.list.edit")}
+                </Link>
                 <button
                   onClick={() => void remove(a.id)}
                   aria-label={t("common.delete")}

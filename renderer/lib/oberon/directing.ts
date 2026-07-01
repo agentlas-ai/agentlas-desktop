@@ -151,19 +151,65 @@ function shortAction(action: string): string {
 export interface SequencePattern {
   id: string;
   ko: string;
+  /** 영문 표시 라벨. */
+  labelEn: string;
   /** 컷 흐름 설명. */
   flow: string;
+  /** 컷 흐름 설명 (영문). */
+  flowEn: string;
   /** 추천 평균 컷 길이(초). */
   avgCut: number;
 }
 
 export const SEQUENCE_PATTERNS: Record<string, SequencePattern> = {
-  shot_reverse: { id: "shot_reverse", ko: "샷/리버스", flow: "master → A OTS → B OTS(reverse) → 리액션 인서트", avgCut: 2.4 },
-  intensify: { id: "intensify", ko: "점층 인텐시파이", flow: "WS → MS → CU → ECU 로 점점 좁혀 긴장 고조", avgCut: 1.8 },
-  reveal: { id: "reveal", ko: "리빌", flow: "디테일 인서트 → pull-out/크레인으로 전체 공간 공개", avgCut: 2.6 },
-  match_action: { id: "match_action", ko: "매치 온 액션", flow: "동작 시작(WS) → 컷 → 같은 동작 이어받기(CU)", avgCut: 1.5 },
-  montage_beat: { id: "montage_beat", ko: "비트 몽타주", flow: "짧은 컷들을 음악 비트에 맞춰 리듬감 있게 연결", avgCut: 1.0 },
-  oner: { id: "oner", ko: "원테이크 지향", flow: "한 컷 안에서 카메라 무빙으로 여러 비트를 담는다(긴 호흡)", avgCut: 6.0 },
+  shot_reverse: {
+    id: "shot_reverse",
+    ko: "샷/리버스",
+    labelEn: "Shot / Reverse",
+    flow: "master → A OTS → B OTS(reverse) → 리액션 인서트",
+    flowEn: "master → A OTS → B OTS (reverse) → reaction insert",
+    avgCut: 2.4,
+  },
+  intensify: {
+    id: "intensify",
+    ko: "점층 인텐시파이",
+    labelEn: "Escalating Intensify",
+    flow: "WS → MS → CU → ECU 로 점점 좁혀 긴장 고조",
+    flowEn: "WS → MS → CU → ECU, tightening progressively to build tension",
+    avgCut: 1.8,
+  },
+  reveal: {
+    id: "reveal",
+    ko: "리빌",
+    labelEn: "Reveal",
+    flow: "디테일 인서트 → pull-out/크레인으로 전체 공간 공개",
+    flowEn: "detail insert → pull-out/crane reveals the full space",
+    avgCut: 2.6,
+  },
+  match_action: {
+    id: "match_action",
+    ko: "매치 온 액션",
+    labelEn: "Match on Action",
+    flow: "동작 시작(WS) → 컷 → 같은 동작 이어받기(CU)",
+    flowEn: "action begins (WS) → cut → the same action continues (CU)",
+    avgCut: 1.5,
+  },
+  montage_beat: {
+    id: "montage_beat",
+    ko: "비트 몽타주",
+    labelEn: "Montage Beat",
+    flow: "짧은 컷들을 음악 비트에 맞춰 리듬감 있게 연결",
+    flowEn: "short cuts linked rhythmically to the music's beat",
+    avgCut: 1.0,
+  },
+  oner: {
+    id: "oner",
+    ko: "원테이크 지향",
+    labelEn: "Oner",
+    flow: "한 컷 안에서 카메라 무빙으로 여러 비트를 담는다(긴 호흡)",
+    flowEn: "a single unbroken take carries several beats through camera movement (a long, unhurried breath)",
+    avgCut: 6.0,
+  },
 };
 
 /** 씬 타입 → 추천 시퀀스 패턴. */

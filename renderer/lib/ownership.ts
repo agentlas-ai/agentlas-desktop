@@ -21,12 +21,13 @@ export interface OwnershipInfo {
 
 /** 설치된 에이전트의 소유 클래스. localPath 가 있으면 내 디스크의 실제 폴더(owned-local),
  *  없으면 클라우드에서 내 라이브러리에 설치된 것(owned-cloud). 둘 다 내 자산이다. */
-export function classifyAgent(a: Pick<InstalledAgent, "localPath" | "slug">): OwnershipInfo {
+export function classifyAgent(a: Pick<InstalledAgent, "localPath" | "slug">, locale: "ko" | "en" = "ko"): OwnershipInfo {
+  const ko = locale === "ko";
   if (a.localPath) {
     return {
       klass: "owned-local",
       owned: true,
-      label: "내 직원",
+      label: ko ? "내 직원" : "My staff",
       origin: a.localPath,
       localPath: a.localPath,
       fragile: false,
@@ -35,22 +36,30 @@ export function classifyAgent(a: Pick<InstalledAgent, "localPath" | "slug">): Ow
   return {
     klass: "owned-cloud",
     owned: true,
-    label: "내 직원",
-    origin: "클라우드에서 내 라이브러리에 설치됨",
+    label: ko ? "내 직원" : "My staff",
+    origin: ko ? "클라우드에서 내 라이브러리에 설치됨" : "Installed to my library from the cloud",
     fragile: false,
   };
 }
 
 /** 허브에서 빌려쓰는(호출형) 게스트. 로컬에 파일이 없고 게시자 가용성에 종속된다. */
-export function borrowedInfo(input: { publisher?: string; available?: boolean }): OwnershipInfo {
+export function borrowedInfo(
+  input: { publisher?: string; available?: boolean },
+  locale: "ko" | "en" = "ko",
+): OwnershipInfo {
+  const ko = locale === "ko";
   const available = input.available !== false;
   return {
     klass: "borrowed",
     owned: false,
-    label: "빌린 게스트",
-    origin: available
-      ? `원격 게스트 — 호출만 함${input.publisher ? ` · 게시자 ${input.publisher}` : ""}`
-      : `사용 불가 — 게시자가 내림${input.publisher ? ` (${input.publisher})` : ""}`,
+    label: ko ? "빌린 게스트" : "Borrowed guest",
+    origin: ko
+      ? (available
+          ? `원격 게스트 — 호출만 함${input.publisher ? ` · 게시자 ${input.publisher}` : ""}`
+          : `사용 불가 — 게시자가 내림${input.publisher ? ` (${input.publisher})` : ""}`)
+      : (available
+          ? `Remote guest — call-only${input.publisher ? ` · publisher ${input.publisher}` : ""}`
+          : `Unavailable — publisher took it down${input.publisher ? ` (${input.publisher})` : ""}`),
     fragile: true,
   };
 }

@@ -9,6 +9,7 @@
 // 실제 LLM/이미지/영상 API는 어댑터 경계 뒤에 있고, 여기서는 "계획 + 프롬프트"를
 // 완전하게 만든다(그 자체로 어떤 영상툴에든 바로 쓸 수 있는 산출물).
 
+import type { Locale } from "@/lib/i18n";
 import { INITIAL_STAGE_STATUS } from "./agents";
 import {
   buildSubtitleCues,
@@ -78,6 +79,21 @@ function pad(n: number, w = 2): string {
   return String(n).padStart(w, "0");
 }
 
+// ── 로케일 (UI 표시 언어) ────────────────────────────────
+// brief.language(대사 언어)와는 별개 — 이 값은 생성되는 라벨/설명 텍스트의 언어를 결정한다.
+// taxonomy.ts/providers.ts와 동일하게 lib/i18n의 Locale을 그대로 쓴다.
+
+/** 카탈로그(taxonomy/agents/providers/steps)의 ko/en 텍스트 쌍 중 로케일에 맞는 값을 고른다.
+ *  en 값이 아직 없으면(카탈로그 갱신 전) ko로 폴백. */
+function pickText(ko: string, en: string | undefined, locale: Locale): string {
+  return locale === "ko" ? ko : en || ko;
+}
+
+/** BeatTemplate에 emotionEn이 아직 없을 수 있어(카탈로그 갱신 전) 구조적으로 안전하게 읽는다. */
+function readEmotionEn(tb: { emotion: string; emotionEn?: string }): string | undefined {
+  return tb.emotionEn;
+}
+
 // ── 팔레트 / 룩 프리셋 ───────────────────────────────────
 
 const PALETTE_PRESETS: Record<string, PaletteSwatch[]> = {
@@ -119,7 +135,7 @@ function pickPalette(tone: string[]): { palette: PaletteSwatch[]; stock: string;
 
 // ── Continuity Bible 빌드 ────────────────────────────────
 
-function buildBible(brief: FilmBrief): ContinuityBible {
+function buildBible(brief: FilmBrief, locale: Locale = "ko"): ContinuityBible {
   const { palette, stock, lighting } = pickPalette([...brief.tone, brief.setting, brief.genre]);
   const visualDirection =
     `${brief.tone.join(", ") || "cinematic"} ${brief.genre} look — ${brief.logline}` +
@@ -160,7 +176,7 @@ function buildBible(brief: FilmBrief): ContinuityBible {
         visualDirection,
       }),
       lockedTraits: [lighting, palette.map((p) => p.name).join("/")],
-      notes: "주 배경",
+      notes: locale === "ko" ? "주 배경" : "Primary location",
       approvedAssetIds: [],
     });
   }
@@ -178,8 +194,11 @@ function buildBible(brief: FilmBrief): ContinuityBible {
         tone: brief.tone,
         visualDirection,
       }),
-      lockedTraits: ["정확한 로고·색상", "제품 비율 유지"],
-      notes: "히어로 제품",
+      lockedTraits:
+        locale === "ko"
+          ? ["정확한 로고·색상", "제품 비율 유지"]
+          : ["accurate logo and color", "maintain product proportions"],
+      notes: locale === "ko" ? "히어로 제품" : "Hero product",
       approvedAssetIds: [],
     });
   }
@@ -192,7 +211,7 @@ function buildBible(brief: FilmBrief): ContinuityBible {
       name: item,
       prompt: composeReferencePrompt({ kind: "prop", name: item, description: item, tone: brief.tone, visualDirection }),
       lockedTraits: [item],
-      notes: "필수 소품",
+      notes: locale === "ko" ? "필수 소품" : "Required prop",
       approvedAssetIds: [],
     });
   });
@@ -230,16 +249,24 @@ function sceneHeading(brief: FilmBrief, idx: number, timeOfDay: string): string 
 }
 
 const TIMES_OF_DAY = ["낮", "밤", "황혼", "새벽", "오후"];
+const TIMES_OF_DAY_EN = ["day", "night", "dusk", "dawn", "afternoon"];
+
+function timeOfDayLabel(idx: number, locale: Locale): string {
+  return locale === "ko" ? TIMES_OF_DAY[idx] : TIMES_OF_DAY_EN[idx];
+}
 
 // ── 메인: 기획 → 전체 제작 ───────────────────────────────
 
 export interface PlanOptions {
   premium?: boolean; // 최고 품질 우선 (비용 무시)
   budgetUsd?: number;
+  /** 생성되는 라벨/설명 텍스트의 UI 로케일 (기본 "ko" — 기존 호출부 호환). */
+  locale?: Locale;
 }
 
 export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmProduction {
   const premium = opts.premium ?? true;
+  const locale: Locale = opts.locale ?? "ko";
   const rng = mulberry32(hashSeed(`${brief.title}|${brief.logline}|${brief.format}`));
   const template = GENRE_TEMPLATES[brief.format];
   const duration = brief.durationSec || FORMAT_DEFAULT_DURATION[brief.format];
@@ -253,7 +280,7 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
   const sequences = template.sequenceTarget;
 
   // 2) 바이블
-  const bible = buildBible(brief);
+  const bible = buildBible(brief, locale);
   const characterRefs = bible.references.filter((r) => r.kind === "character");
   const locationRef = bible.references.find((r) => r.kind === "location");
   const propRefs = bible.references.filter((r) => r.kind === "prop");
@@ -263,6 +290,8 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
     tplName: string;
     tplNameEn: string;
     emotion: string;
+    /** taxonomy가 emotionEn을 아직 안 주면 undefined — ko로 폴백. */
+    emotionEn?: string;
     sceneType: Scene["type"];
     durationSec: number;
   }
@@ -275,6 +304,7 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
         tplName: tb.name,
         tplNameEn: tb.nameEn,
         emotion: tb.emotion,
+        emotionEn: readEmotionEn(tb),
         sceneType: tb.sceneType,
         durationSec: beatDur,
       });
@@ -302,7 +332,7 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
   sceneChunks.forEach((chunk, sceneIdx) => {
     const sceneId = `sc${pad(sceneIdx + 1)}`;
     const lead = chunk[0];
-    const timeOfDay = TIMES_OF_DAY[(sceneIdx + Math.floor(rng() * 5)) % TIMES_OF_DAY.length];
+    const timeOfDay = timeOfDayLabel((sceneIdx + Math.floor(rng() * 5)) % TIMES_OF_DAY.length, locale);
     const beatIds: string[] = [];
 
     chunk.forEach((eb) => {
@@ -339,7 +369,7 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
         const dur = suggestShotDuration(cov.size, avgShotLen);
         const hasDialogue = eb.sceneType === "dialogue" && cov.size !== "ELS" && cov.size !== "LS" && rng() > 0.4;
         const dialogue = hasDialogue ? sampleDialogue(brief, eb.emotion, rng) : undefined;
-        const action = buildActionLine(brief, eb, cov.role, refsForShot);
+        const action = buildActionLine(brief, eb, cov, refsForShot, locale);
 
         const camera = { size: cov.size, angle: cov.angle, movement: cov.movement, lens: cov.lens };
         const generationPrompt = composeShotPrompt({
@@ -403,9 +433,9 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
 
       beatsArr.push({
         id: beatId,
-        name: eb.tplName,
-        description: buildBeatDescription(brief, eb),
-        emotion: eb.emotion,
+        name: pickText(eb.tplName, eb.tplNameEn, locale),
+        description: buildBeatDescription(brief, eb, locale),
+        emotion: pickText(eb.emotion, eb.emotionEn, locale),
         shotIds,
       });
     });
@@ -417,7 +447,7 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
       type: lead.sceneType,
       location: brief.setting,
       timeOfDay,
-      summary: buildSceneSummary(brief, lead, sceneIdx),
+      summary: buildSceneSummary(brief, lead, sceneIdx, locale),
       characterRefs: characterRefs.map((c) => c.id),
       beatIds,
       locked: false,
@@ -431,8 +461,8 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
     sequencesArr.push({
       id: `seq${pad(q + 1)}`,
       index: q,
-      title: sequenceTitle(template, q, sequences),
-      purpose: sequencePurpose(template, q, sequences),
+      title: sequenceTitle(template, q, sequences, locale),
+      purpose: sequencePurpose(template, q, sequences, locale),
       sceneIds: slice.map((s) => s.id),
     });
   }
@@ -444,6 +474,7 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
     beats: beatsArr,
     bible,
     brief,
+    locale,
   });
 
   // 5) 비용 레저
@@ -492,12 +523,13 @@ function enrichShots(args: {
   beats: Beat[];
   bible: ContinuityBible;
   brief: FilmBrief;
+  locale: Locale;
 }): { typography: FilmProduction["typography"]; subtitleCues: FilmProduction["subtitleCues"] } {
-  const { shots, scenes, beats, bible, brief } = args;
+  const { shots, scenes, beats, bible, brief, locale } = args;
   const refsById = new Map(bible.references.map((r) => [r.id, r]));
   const sceneById = new Map(scenes.map((s) => [s.id, s]));
   const beatById = new Map(beats.map((b) => [b.id, b]));
-  const chain = threadContinuity({ shots, scenes, beats, bible, brief });
+  const chain = threadContinuity({ shots, scenes, beats, bible, brief, locale });
 
   // 속도 연출을 환영하는 포맷/장르인가 (슬로모·속도 램프).
   const allowSpeedFx =
@@ -561,7 +593,7 @@ function enrichShots(args: {
         heading: "SCENE",
         type: shot.shotType,
         location: brief.setting,
-        timeOfDay: "낮",
+        timeOfDay: locale === "ko" ? "낮" : "day",
         summary: "",
         characterRefs: [],
         beatIds: [],
@@ -596,6 +628,7 @@ function enrichShots(args: {
     format: brief.format,
     language: brief.language,
     tone: brief.tone,
+    locale,
   });
   const subtitleCues = buildSubtitleCues({ shots, dialogueByShot });
 
@@ -642,36 +675,56 @@ function buildCostLedger(shots: ShotSpec[], bible: ContinuityBible, budgetUsd?: 
 
 function buildActionLine(
   brief: FilmBrief,
-  eb: { tplName: string; sceneType: Scene["type"]; emotion: string },
-  role: string,
+  eb: { tplName: string; tplNameEn: string; sceneType: Scene["type"]; emotion: string; emotionEn?: string },
+  cov: { role: string; roleEn?: string },
   refs: ReferenceEntry[],
+  locale: Locale,
 ): string {
   const who = refs.find((r) => r.kind === "character")?.name || brief.characters[0]?.name || "the subject";
   const product = brief.brandOrProduct;
+  const role = pickText(cov.role, cov.roleEn, locale);
+  const emotion = pickText(eb.emotion, eb.emotionEn, locale);
+  const tplName = pickText(eb.tplName, eb.tplNameEn, locale);
   switch (eb.sceneType) {
     case "product":
-      return `${role} of ${product || "the product"}, ${eb.emotion} mood, emphasizing form and detail`;
+      return `${role} of ${product || "the product"}, ${emotion} mood, emphasizing form and detail`;
     case "dialogue":
-      return `${who} in conversation — ${role}, ${eb.emotion}`;
+      return `${who} in conversation — ${role}, ${emotion}`;
     case "action":
-      return `${who} in motion — ${role}, kinetic ${eb.emotion}`;
+      return `${who} in motion — ${role}, kinetic ${emotion}`;
     case "emotional":
-      return `${who} alone — ${role}, ${eb.emotion} on the face`;
+      return `${who} alone — ${role}, ${emotion} on the face`;
     case "establishing":
-      return `${role} of ${brief.setting} — sets the ${eb.emotion} of "${eb.tplName}"`;
+      return `${role} of ${brief.setting} — sets the ${emotion} of "${tplName}"`;
     case "montage":
-      return `${role} — quick ${eb.emotion} fragment advancing "${eb.tplName}"`;
+      return `${role} — quick ${emotion} fragment advancing "${tplName}"`;
     default:
-      return `${role} — ${eb.emotion} bridge`;
+      return `${role} — ${emotion} bridge`;
   }
 }
 
-function buildBeatDescription(brief: FilmBrief, eb: { tplName: string; emotion: string; sceneType: Scene["type"] }): string {
-  return `[${eb.tplName}] ${eb.emotion} — ${brief.logline.slice(0, 80)}${brief.logline.length > 80 ? "…" : ""}`;
+function buildBeatDescription(
+  brief: FilmBrief,
+  eb: { tplName: string; tplNameEn: string; emotion: string; emotionEn?: string; sceneType: Scene["type"] },
+  locale: Locale,
+): string {
+  const tplName = pickText(eb.tplName, eb.tplNameEn, locale);
+  const emotion = pickText(eb.emotion, eb.emotionEn, locale);
+  return `[${tplName}] ${emotion} — ${brief.logline.slice(0, 80)}${brief.logline.length > 80 ? "…" : ""}`;
 }
 
-function buildSceneSummary(brief: FilmBrief, eb: { tplName: string; emotion: string }, idx: number): string {
-  return `씬 ${idx + 1} · "${eb.tplName}" — ${eb.emotion}. ${brief.setting}에서 ${brief.characters[0]?.name || "주인공"}을 중심으로 전개.`;
+function buildSceneSummary(
+  brief: FilmBrief,
+  eb: { tplName: string; tplNameEn: string; emotion: string; emotionEn?: string },
+  idx: number,
+  locale: Locale,
+): string {
+  const tplName = pickText(eb.tplName, eb.tplNameEn, locale);
+  const emotion = pickText(eb.emotion, eb.emotionEn, locale);
+  if (locale === "ko") {
+    return `씬 ${idx + 1} · "${tplName}" — ${emotion}. ${brief.setting}에서 ${brief.characters[0]?.name || "주인공"}을 중심으로 전개.`;
+  }
+  return `Scene ${idx + 1} · "${tplName}" — ${emotion}. Unfolds around ${brief.characters[0]?.name || "the protagonist"} in ${brief.setting}.`;
 }
 
 const DIALOGUE_BANK: Record<string, string[]> = {
@@ -693,16 +746,22 @@ function pickTransition(sceneType: Scene["type"], i: number, rng: () => number):
   return "cut";
 }
 
-function sequenceTitle(template: { label: string }, q: number, total: number): string {
-  if (total === 1) return "메인 시퀀스";
-  const names = ["오프닝", "전개", "고조", "절정", "결말"];
-  return names[Math.min(q, names.length - 1)];
+function sequenceTitle(template: { label: string; labelEn?: string }, q: number, total: number, locale: Locale): string {
+  if (locale === "ko") {
+    if (total === 1) return "메인 시퀀스";
+    const names = ["오프닝", "전개", "고조", "절정", "결말"];
+    return names[Math.min(q, names.length - 1)];
+  }
+  if (total === 1) return "Main Sequence";
+  const namesEn = ["Opening", "Rising Action", "Escalation", "Climax", "Resolution"];
+  return namesEn[Math.min(q, namesEn.length - 1)];
 }
 
-function sequencePurpose(template: { arc: string }, q: number, total: number): string {
-  const parts = template.arc.split("→").map((s) => s.trim());
+function sequencePurpose(template: { arc: string; arcEn?: string }, q: number, total: number, locale: Locale): string {
+  const arc = pickText(template.arc, template.arcEn, locale);
+  const parts = arc.split("→").map((s) => s.trim());
   if (parts.length >= total) return parts[Math.min(q, parts.length - 1)];
-  return template.arc;
+  return arc;
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -740,14 +799,30 @@ export function makeTakesForShot(shot: ShotSpec, count = 3): Take[] {
 }
 
 /** 합성 QA — 실제로는 Vision QA 에이전트가 채점. */
-export function scoreTake(take: Take, shot: ShotSpec): QAResult {
+export function scoreTake(take: Take, shot: ShotSpec, locale: Locale = "ko"): QAResult {
   const rng = mulberry32(hashSeed(take.id + shot.shotId));
   const base = 0.7 + rng() * 0.28;
   const findings: QAFinding[] = [];
-  if (rng() > 0.78) findings.push({ type: "continuity", severity: "medium", note: "의상 색이 레퍼런스와 미세하게 다름" });
-  if (rng() > 0.85) findings.push({ type: "editability", severity: "low", note: "마지막 0.5초 카메라가 불안정 — 핸들 부족" });
-  if (shot.dialogue && rng() > 0.8) findings.push({ type: "dialogue", severity: "medium", note: "립싱크 타이밍 약간 어긋남" });
-  if (rng() > 0.9) findings.push({ type: "motion", severity: "high", note: "손 모션 깨짐" });
+  if (rng() > 0.78)
+    findings.push({
+      type: "continuity",
+      severity: "medium",
+      note: locale === "ko" ? "의상 색이 레퍼런스와 미세하게 다름" : "Wardrobe color drifts slightly from the reference",
+    });
+  if (rng() > 0.85)
+    findings.push({
+      type: "editability",
+      severity: "low",
+      note: locale === "ko" ? "마지막 0.5초 카메라가 불안정 — 핸들 부족" : "Camera unstable in the final 0.5s — insufficient cut handle",
+    });
+  if (shot.dialogue && rng() > 0.8)
+    findings.push({
+      type: "dialogue",
+      severity: "medium",
+      note: locale === "ko" ? "립싱크 타이밍 약간 어긋남" : "Lip-sync timing is slightly off",
+    });
+  if (rng() > 0.9)
+    findings.push({ type: "motion", severity: "high", note: locale === "ko" ? "손 모션 깨짐" : "Hand motion breaks down" });
   const score = Number(Math.max(0.4, base - findings.length * 0.08).toFixed(2));
   const highFail = findings.some((f) => f.severity === "high");
   const pass = score >= 0.75 && !highFail;

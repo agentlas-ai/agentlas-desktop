@@ -11,7 +11,7 @@ import type {
 } from "@/lib/types";
 
 export function MigrationPanel() {
-  const { t } = useT();
+  const { t, locale } = useT();
   const [sources, setSources] = useState<MigrationSourcePreview[]>([]);
   const [loading, setLoading] = useState(true);
   const [overwrite, setOverwrite] = useState(false);
@@ -41,7 +41,7 @@ export function MigrationPanel() {
     if (!api) return;
     setBusy(kind);
     try {
-      const res = await api.migration.import({ source: kind, overwrite, importKeys: true });
+      const res = await api.migration.import({ source: kind, overwrite, importKeys: true, locale });
       setResults((r) => ({ ...r, [kind]: res }));
       await scan();
     } finally {

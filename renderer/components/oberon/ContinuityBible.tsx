@@ -3,6 +3,7 @@
 import type { ContinuityBible as Bible, ReferenceEntry, FilmProduction } from "@/lib/oberon";
 import { providerById, routeImageProvider } from "@/lib/oberon";
 import { IconShield, IconCheck, IconClose, IconImage } from "@/components/Icon";
+import { useT, type Locale } from "@/lib/i18n";
 import { Card, PanelHead, Swatch, Tag, providerColor } from "./ui";
 
 const KIND_KO: Record<ReferenceEntry["kind"], string> = {
@@ -12,6 +13,14 @@ const KIND_KO: Record<ReferenceEntry["kind"], string> = {
   prop: "소품",
   vehicle: "탈것",
   style: "스타일",
+};
+const KIND_EN: Record<ReferenceEntry["kind"], string> = {
+  character: "Character",
+  location: "Location",
+  wardrobe: "Wardrobe",
+  prop: "Prop",
+  vehicle: "Vehicle",
+  style: "Style",
 };
 const KIND_GRAD: Record<ReferenceEntry["kind"], string> = {
   character: "linear-gradient(135deg,#3a2438,#1a0f18)",
@@ -23,12 +32,17 @@ const KIND_GRAD: Record<ReferenceEntry["kind"], string> = {
 };
 
 export function ContinuityBiblePanel({ production }: { production: FilmProduction }) {
+  const { locale } = useT();
   const b: Bible = production.bible;
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 28px 60px" }}>
       <PanelHead
-        title="Continuity Bible — 절대 변하면 안 되는 것"
-        subtitle="인물·공간·소품의 식별 특징을 락(lock)하고, 모든 샷 프롬프트가 이 레퍼런스 id를 인용합니다. QA는 이 바이블로 정합성을 검사합니다."
+        title={locale === "ko" ? "Continuity Bible — 절대 변하면 안 되는 것" : "Continuity Bible — What Must Never Change"}
+        subtitle={
+          locale === "ko"
+            ? "인물·공간·소품의 식별 특징을 락(lock)하고, 모든 샷 프롬프트가 이 레퍼런스 id를 인용합니다. QA는 이 바이블로 정합성을 검사합니다."
+            : "Locks the identifying traits of characters, locations, and props — every shot prompt cites these reference ids. QA checks consistency against this bible."
+        }
         icon={<IconShield size={18} />}
       />
 
@@ -61,7 +75,7 @@ export function ContinuityBiblePanel({ production }: { production: FilmProductio
       {/* 글로벌 do-not-change */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 22 }}>
         <Card style={{ padding: 14 }}>
-          <div style={{ ...miniLabel, color: "var(--green-deep)" }}>✅ KEEP — 유지</div>
+          <div style={{ ...miniLabel, color: "var(--green-deep)" }}>{locale === "ko" ? "✅ KEEP — 유지" : "✅ KEEP"}</div>
           <ul style={listStyle}>
             {b.globalMustKeep.map((k, i) => (
               <li key={i} style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
@@ -72,7 +86,7 @@ export function ContinuityBiblePanel({ production }: { production: FilmProductio
           </ul>
         </Card>
         <Card style={{ padding: 14 }}>
-          <div style={{ ...miniLabel, color: "var(--red-deep)" }}>⛔ AVOID — 금지</div>
+          <div style={{ ...miniLabel, color: "var(--red-deep)" }}>{locale === "ko" ? "⛔ AVOID — 금지" : "⛔ AVOID"}</div>
           <ul style={listStyle}>
             {b.globalMustAvoid.map((k, i) => (
               <li key={i} style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
@@ -85,24 +99,26 @@ export function ContinuityBiblePanel({ production }: { production: FilmProductio
       </div>
 
       {/* 레퍼런스 세트 */}
-      <div style={{ ...miniLabel, marginBottom: 10 }}>REFERENCE SET — {b.references.length}개</div>
+      <div style={{ ...miniLabel, marginBottom: 10 }}>
+        {locale === "ko" ? `REFERENCE SET — ${b.references.length}개` : `REFERENCE SET — ${b.references.length}`}
+      </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 14 }}>
         {b.references.map((r) => (
-          <ReferenceCard key={r.id} entry={r} />
+          <ReferenceCard key={r.id} entry={r} locale={locale} />
         ))}
       </div>
     </div>
   );
 }
 
-function ReferenceCard({ entry }: { entry: ReferenceEntry }) {
+function ReferenceCard({ entry, locale }: { entry: ReferenceEntry; locale: Locale }) {
   const imgRoute = routeImageProvider(entry.kind === "character" ? "character" : entry.kind === "prop" ? "product" : "keyframe");
   const provider = providerById(imgRoute.providerId);
   const pColor = providerColor(imgRoute.providerId);
   return (
     <Card style={{ display: "flex", flexDirection: "column" }}>
       <div style={{ height: 96, background: KIND_GRAD[entry.kind], position: "relative", display: "flex", alignItems: "flex-end", padding: 8 }}>
-        <Tag color="#fff">{KIND_KO[entry.kind]}</Tag>
+        <Tag color="#fff">{locale === "ko" ? KIND_KO[entry.kind] : KIND_EN[entry.kind]}</Tag>
         <code style={{ position: "absolute", top: 8, right: 8, fontSize: 9.5, fontFamily: "var(--font-mono)", color: "rgba(255,255,255,0.85)", background: "rgba(0,0,0,0.4)", padding: "2px 5px", borderRadius: 4 }}>
           {entry.id}
         </code>

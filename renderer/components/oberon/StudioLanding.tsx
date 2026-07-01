@@ -3,16 +3,20 @@
 "use client";
 import type { CSSProperties } from "react";
 import Link from "next/link";
-import { OBERON_STUDIOS, type OberonStudio } from "@/lib/oberon";
+import { OBERON_STUDIOS, stepText, type OberonStudio } from "@/lib/oberon";
+import { useT } from "@/lib/i18n";
 import { Glyph, type GlyphName } from "./icons";
 
 export function StudioLanding({ onPick }: { onPick: (studio: OberonStudio) => void }) {
+  const { locale } = useT();
   return (
     <div style={wrap}>
       <div style={inner}>
         <div style={eyebrow}>OBERON STUDIO</div>
-        <h1 style={title}>무엇을 만들까요?</h1>
-        <p style={subtitle}>오베론 본체는 애니메이션 제작에 집중합니다.</p>
+        <h1 style={title}>{locale === "ko" ? "무엇을 만들까요?" : "What should we make?"}</h1>
+        <p style={subtitle}>
+          {locale === "ko" ? "오베론 본체는 애니메이션 제작에 집중합니다." : "Oberon's core is focused on animation production."}
+        </p>
 
         <div style={grid}>
           {OBERON_STUDIOS.map((s) => (
@@ -26,18 +30,21 @@ export function StudioLanding({ onPick }: { onPick: (studio: OberonStudio) => vo
               <span style={cardIcon}>
                 <Glyph name={s.glyph as GlyphName} size={20} />
               </span>
-              <span style={cardTagline}>{s.tagline}</span>
-              <span style={cardTitle}>{s.title}</span>
-              <span style={cardBlurb}>{s.blurb}</span>
+              <span style={cardTagline}>{stepText(s.tagline, s.taglineEn, locale)}</span>
+              <span style={cardTitle}>{stepText(s.title, s.titleEn, locale)}</span>
+              <span style={cardBlurb}>{stepText(s.blurb, s.blurbEn, locale)}</span>
               <span style={cardCta}>
-                시작하기 <Glyph name="chevron" size={12} />
+                {locale === "ko" ? "시작하기" : "Get started"} <Glyph name="chevron" size={12} />
               </span>
             </button>
           ))}
         </div>
 
         <Link href="/oberon-motion" style={motionLink}>
-          모션그래픽은 Oberon Motiongraphic Studio에서 열기 <Glyph name="chevron" size={12} />
+          {locale === "ko"
+            ? "모션그래픽은 Oberon Motiongraphic Studio에서 열기"
+            : "Open motion graphics in Oberon Motiongraphic Studio"}{" "}
+          <Glyph name="chevron" size={12} />
         </Link>
       </div>
 

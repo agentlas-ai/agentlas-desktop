@@ -548,6 +548,130 @@ export interface ChatHistoryEntry {
   imageDataUrls?: string[];
 }
 
+// ── 스케줄 트리거 spec — 저장/문법/표시 분리(설계 §2.1) ───────────
+// 내부 진실은 이 discriminated union 하나. 프리셋은 별도 kind가 아니라 라벨 붙은 cron.
+export type ScheduleSpec =
+  | { kind: "cron"; expr: string; tz: string }
+  | { kind: "interval"; everyMs: number; anchor: "wallclock" | "lastRun" }
+  | { kind: "once"; atIso: string }
+  | { kind: "manual" };
+
+// ── 조건 게이트(설계 §3.5) — 트리거 발사 시 or 그래프 워크 중 평가하는 순수 조건 ──────
+// P1은 Tier 0(이벤트/체인/스케줄+게이트)만. poll 계열의 cond도 같은 타입을 쓴다.
+export interface TriggerCondition {
+  /** 비교할 좌변 — 변수명({{var}}) 또는 리터럴 문자열. */
+  left: string;
+  op: "eq" | "ne" | "contains" | "gt" | "lt" | "gte" | "lte" | "exists" | "changed";
+  /** 우변 — 리터럴(연산자가 exists/changed면 무시). */
+  right?: string;
+}
+
+// ── 트리거 union(설계 §3.5) — "언제 fire하나"만 바꾸는 전위 레이어. 실행 엔진은 불변. ──
+// schedule = 기존 시간 트리거(scheduleSpec/scheduleHuman으로 표현, 하위호환).
+// 이벤트 계열(fs/chain)은 스케줄러가 아니라 트리거 매니저의 리스너에 등록 → 유휴 0.
+export type Trigger =
+  | { kind: "schedule"; onlyIf?: TriggerCondition }
+  | { kind: "fs"; path: string; on: "create" | "modify" | "delete"; debounceMs?: number; onlyIf?: TriggerCondition }
+  | { kind: "chain"; afterAutomationId: string; onlyIf?: TriggerCondition }
+  | { kind: "webhook"; token: string; onlyIf?: TriggerCondition }
+  | {
+      kind: "poll";
+      /** 폴 소스 명세(설계 §3.4 Tier 1). 어떤 외부 값을 어떻게 읽을지. */
+      source: PollSource;
+      cond: TriggerCondition;
+      /** 적응형 백오프 하한(변화·임계근접 시 이 간격으로 조임). */
+      minIntervalMs: number;
+      /** 적응형 백오프 상한(값 안 변하면 여기까지 지수 증가). */
+      maxIntervalMs: number;
+      /** dedup 커서 — 마지막으로 관측한 값(같으면 재발사 안 함). */
+      lastSeen?: string;
+    };
+
+export type TriggerKind = Trigger["kind"];
+
+// ── 폴 소스(설계 §3.2, §3.4 Tier 1) — 폴링 강제 트리거의 데이터 소스 명세 ──────
+// 폴링은 유일한 실질 비용이므로(설계 §3.1) 적응형 간격 + lastSeen 커서로 통제한다.
+// 각 소스는 하나의 스칼라/문자열 값을 관측한다(조건 평가기가 이 값을 좌변으로 쓴다).
+export type PollSource =
+  | {
+      /** 주가/지표 임계값 — stock/alphavantage MCP(GLOBAL_QUOTE/RSI 등). MARKET_STATUS로 게이팅. */
+      kind: "stock";
+      /** 티커 심볼(예 "AAPL", "005930.KS"). */
+      symbol: string;
+      /** 관측 지표 — "price"(현재가) | 지표명(rsi 등). 기본 price. */
+      metric?: string;
+      /** 시장이 닫혀 있으면 폴을 더 늘린다(설계 §3.3 게이팅). 기본 true. */
+      gateMarket?: boolean;
+    }
+  | {
+      /** GitHub 이슈/PR 폴링. lastSeen 커서로 새 항목만 발사. */
+      kind: "github";
+      /** "owner/repo". */
+      repo: string;
+      /** issues | pulls. 기본 issues. */
+      resource?: "issues" | "pulls";
+    }
+  | {
+      /** Slack 채널 새 메시지 폴링(webhook 없을 때). */
+      kind: "slack";
+      /** 채널 id 또는 "#name". */
+      channel: string;
+    }
+  | {
+      /** Notion 데이터베이스 새 항목 폴링. */
+      kind: "notion";
+      /** 데이터베이스 id. */
+      databaseId: string;
+    };
+
+// ── 비주얼 워크플로우 그래프(설계 §4.2) ───────────────────────────
+// automations 행의 nullable graph_json 컬럼에 직렬화. null = 오늘의 단일-프롬프트 동작.
+export type WorkflowNodeType =
+  | "trigger" // schedule | manual → schedule 컬럼 미러
+  | "agent" // agent.id | firm.id | agentGroupId | borrowAgents[] | swarm | pipeline
+  | "tool" // MCP catalog id / 커스텀 → 인접 agent 런타임 MCP 설정에 컴파일
+  | "action" // surface action.type / appFactory:* / toolFactory:* / hep-call
+  | "condition" // 이전 출력 분기
+  | "transform" // 노드 간 변수 map/extract/format
+  | "output"; // Slack post / notification / file write / chat surface
+
+export interface WorkflowNode {
+  id: string;
+  type: WorkflowNodeType;
+  position: { x: number; y: number };
+  /** 타입별 자유형 설정(스케줄/에이전트 ref/툴 catalog/변수 produces·consumes 등). */
+  config: Record<string, unknown>;
+  label?: string;
+}
+
+export interface WorkflowEdge {
+  id: string;
+  source: string;
+  target: string;
+  /** condition 노드의 분기 핸들: "true" | "false" | 변수명 라벨. */
+  sourceHandle?: string;
+}
+
+export interface WorkflowGraph {
+  version: 1;
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+}
+
+// ── run history — 놓친 실행/스킵 가시화(설계 §2.7) ─────────────────
+export interface AutomationRunRecord {
+  id: string;
+  automationId: string;
+  /** 이 실행이 겨냥한 예정 시각(ISO). catch-up 시 놓쳤던 슬롯. */
+  scheduledFor: string | null;
+  /** 실제 실행 시각(ISO). */
+  ranAt: string;
+  status: "ok" | "error" | "skipped";
+  /** 이 실행에서 병합/스킵된 놓친 발생 수. */
+  skippedCount: number;
+  error: string | null;
+}
+
 // ── 자동화 — SQLite 영속 + 앱 실행 중 백그라운드 스케줄러 ────────────
 export interface Automation {
   id: string;
@@ -567,6 +691,45 @@ export interface Automation {
   lastRunAt: string | null;
   /** 다음 실행 예정 시각(ISO). 스케줄러가 이 값으로 due 판단 후 재계산 */
   nextRunAt: string | null;
+  /** 저장된 워크플로우 그래프(있으면 그래프 러너로 실행). null = 단일 프롬프트. */
+  graph?: WorkflowGraph | null;
+  /** IANA 타임존(예 "Asia/Seoul"). cron 해석 기준. */
+  timezone?: string | null;
+  /** 구조화 스케줄 spec(있으면 scheduleHuman 레거시 토큰보다 우선). */
+  scheduleSpec?: ScheduleSpec | null;
+  /** 트리거 종류(설계 §3.5). 기본 'schedule'(기존 시간 트리거). */
+  triggerType?: TriggerKind;
+  /** 트리거 상세(fs 경로/chain afterId/webhook token/poll source 등). 'schedule'이면 null. */
+  trigger?: Trigger | null;
+}
+
+/** 기존 자동화 편집 패치(설계 한계 #7 — 삭제-재생성 대신 in-place 수정). */
+export interface AutomationUpdatePatch {
+  name?: string;
+  scheduleHuman?: string;
+  targetType?: "agent" | "firm";
+  targetId?: string;
+  promptTemplate?: string;
+  scheduleJson?: string | null;
+  timezone?: string | null;
+  endAt?: string | null;
+  maxRuns?: number | null;
+  triggerType?: TriggerKind;
+  trigger?: Trigger | null;
+}
+
+/** launchd LaunchAgent 상태(설계 §2.6). macOS 전용. */
+export interface LaunchdStatus {
+  /** 이 플랫폼에서 지원되는지(현재 macOS(darwin)만). */
+  supported: boolean;
+  /** plist가 설치돼 있는지(파일 존재). */
+  installed: boolean;
+  /** launchd에 로드/부트스트랩돼 실제로 도는지. */
+  loaded: boolean;
+  /** plist 절대 경로(진단용). */
+  plistPath: string;
+  /** 마지막 작업 실패 사유(있으면). */
+  error?: string;
 }
 
 // ── invocation ───────────────────────────────────────────────
@@ -1938,6 +2101,9 @@ export interface ToolFactoryMcpInstallResult {
 }
 
 export interface McpInvocationRequest {
+  /** 렌더러가 미리 생성한 실행 id — invoke.run 왕복 전에 이벤트 채널을 구독하기 위함
+   *  (subscribe-before-trigger). 없으면 main이 randomUUID로 생성한다(하위호환). */
+  runId?: string;
   /** 새 모델: chatId 기반. 에이전트는 chat에서 lookup */
   chatId: string;
   userPrompt: string;
@@ -1995,6 +2161,25 @@ export interface McpInvocationEvent {
   done?: boolean;
   /** 이 노드가 실행 중인 모델/런타임 라벨(예: "grok-4.3", "claude", "gpt-5") — 트리에 "모델 사용 중" 표시. */
   model?: string;
+  // ── 워크플로우 그래프 라이브 실행(설계 §5 P2) — run-graph.ts가 per-node 상태를 emit ──
+  /** 이 이벤트가 겨냥한 워크플로우 노드 id(그래프 러너 라이브 오버레이용). */
+  nodeId?: string;
+  /** 노드 실행 상태 — 캔버스가 이 값으로 노드/엣지 애니메이션을 그린다. */
+  nodeState?: WorkflowNodeRunState;
+}
+
+/** 워크플로우 그래프 노드의 라이브 실행 상태(설계 §5 P2 — 캔버스 오버레이). */
+export type WorkflowNodeRunState = "pending" | "running" | "done" | "failed" | "skipped";
+
+/** 워크플로우 1회 실행의 per-node 상태 스냅샷(automation_runs.node_states_json에 직렬화). */
+export interface WorkflowRunSnapshot {
+  /** 이 실행 식별자. */
+  runId: string;
+  automationId: string;
+  startedAt: string;
+  status: "running" | "ok" | "error";
+  /** 노드 id → 마지막 상태. */
+  nodeStates: Record<string, WorkflowNodeRunState>;
 }
 
 /** 워킹 폴더 트리의 한 엔트리 — lazy expand. dir이면 hasChildren 힌트로 chevron 표시. */
@@ -2156,6 +2341,8 @@ export interface MigrationOptions {
   overwrite?: boolean;
   /** API 키를 OS 키체인으로 가져오기 (기본 true) */
   importKeys?: boolean;
+  /** UI 표시 언어 — 결과 경고 메시지를 이 언어로 낸다. */
+  locale?: "ko" | "en";
 }
 
 export interface MigrationResult {
@@ -2510,6 +2697,8 @@ export interface HephaestusBuildRequest {
   runtimeSessionId?: string;
   /** 대화형 딥인터뷰용 이전 대화(이번 턴 입력 이전까지). 빌더가 인터뷰 맥락을 이어간다. */
   history?: Array<{ role: "user" | "assistant"; text: string }>;
+  /** 렌더러 표시 언어. 빌더가 UI 노출 로그/상태 메시지를 이 언어로 낸다. 미지정 시 백엔드 기본. */
+  locale?: "ko" | "en";
 }
 
 // ── 추천 바텀시트(Recommendation) ──────────────────────────────────────────
@@ -2901,9 +3090,32 @@ export interface AgentlasIpc {
   };
   automations: {
     list: () => Promise<Automation[]>;
+    get: (id: string) => Promise<Automation | null>;
     create: (input: Omit<Automation, "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy">) => Promise<Automation>;
     toggle: (id: string, enabled: boolean) => Promise<Automation>;
     remove: (id: string) => Promise<void>;
+    /** 기존 자동화의 이름/스케줄/타깃/프롬프트/트리거를 갱신(삭제-재생성 회피, 설계 한계 #7). */
+    update: (id: string, patch: AutomationUpdatePatch) => Promise<Automation>;
+    updateGraph: (id: string, graph: WorkflowGraph | null) => Promise<Automation>;
+    runNow: (id: string) => Promise<void>;
+    listRuns: (id: string, limit?: number) => Promise<AutomationRunRecord[]>;
+    /** 그래프 라이브 실행 상태 채널명 — agentlasEvents.on으로 구독해 per-node 상태를 받는다(설계 §5 P2). */
+    liveRunChannel: (automationId: string) => string;
+    /** 이 자동화의 최근 실행 스냅샷(per-node 상태). 라이브 오버레이 초기 하이드레이트용. */
+    latestRun: (automationId: string) => Promise<WorkflowRunSnapshot | null>;
+  };
+  /** launchd LaunchAgent — 앱이 꺼져도 자동화를 도는 macOS 영속성(opt-in, 설계 §2.6). */
+  launchd: {
+    status: () => Promise<LaunchdStatus>;
+    enable: () => Promise<LaunchdStatus>;
+    disable: () => Promise<LaunchdStatus>;
+  };
+  /** 스케줄 문법 헬퍼 — croner는 메인에서만 돌므로 렌더러 스케줄 빌더가 IPC로 검증/표시. */
+  schedule: {
+    validateCron: (expr: string) => Promise<boolean>;
+    describe: (spec: ScheduleSpec, locale?: "ko" | "en") => Promise<string>;
+    nextRun: (spec: ScheduleSpec) => Promise<string | null>;
+    defaultTz: () => Promise<string>;
   };
   /** Agent-made interactive work surfaces emitted by agents. */
   surfaces: {
@@ -3000,7 +3212,7 @@ export interface AgentlasIpc {
    *  (Hephaestus 소스에는 데스크탑 흔적이 없다 — 엔진은 범용 CLI/JSON 으로만 호출됨.) */
   hephaestus: {
     /** 엔진 가용성(번들 + Python). UI 게이트에 사용. */
-    status: () => Promise<HephaestusStatus>;
+    status: (locale?: "ko" | "en") => Promise<HephaestusStatus>;
     /** 엔진 자가진단(JSON). */
     doctor: () => Promise<HephaestusCommandResult>;
     /** Stormbreaker 견고-실행: 쿼리 라우팅 후 가능한 pipeline execution_fabric 실행. */

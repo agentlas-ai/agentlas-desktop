@@ -4,15 +4,32 @@
 // 그대로 따른다(프로그래matic JSON 명령만 사용; hep-build 같은 LLM-라우팅 텍스트 surface 는
 // 데스크탑 런타임 + 빌더 에이전트 프롬프트로 별도 구동한다 — builder.ts 참조).
 import { runHephaestus, type HephaestusResult, type HephaestusRunOptions } from "./engine";
+import { currentUiLocale } from "../main";
 
 export type UploadVisibility = "private-link" | "marketplace";
 
+type PositionalKind = "query" | "folder" | "shortcut" | "slug" | "agent" | "context" | "directory";
+
+const POSITIONAL_LABEL: Record<PositionalKind, { ko: string; en: string }> = {
+  query: { ko: "쿼리", en: "query" },
+  folder: { ko: "폴더", en: "folder" },
+  shortcut: { ko: "숏컷", en: "shortcut" },
+  slug: { ko: "슬러그", en: "slug" },
+  agent: { ko: "에이전트", en: "agent" },
+  context: { ko: "컨텍스트", en: "context" },
+  directory: { ko: "디렉터리", en: "directory" },
+};
+
 /** 엔진 argparse 가 '-' 로 시작하는 위치 인자를 플래그로 오해석하는 것을 막는다(인자 인젝션 방어).
  *  cross-spawn 은 shell 을 안 쓰므로 OS 메타문자 인젝션은 불가하나, 엔진 CLI 플래그 변조는 가능하다. */
-function assertPositional(value: string, label: string): string {
+function assertPositional(value: string, kind: PositionalKind, index?: number): string {
   const v = String(value ?? "");
   if (v.startsWith("-")) {
-    throw new Error(`잘못된 ${label}: '-' 로 시작할 수 없습니다.`);
+    const ko = currentUiLocale() === "ko";
+    const label = POSITIONAL_LABEL[kind][ko ? "ko" : "en"] + (index != null ? `[${index}]` : "");
+    throw new Error(
+      ko ? `잘못된 ${label}: '-' 로 시작할 수 없습니다.` : `Invalid ${label}: cannot start with '-'.`,
+    );
   }
   return v;
 }
@@ -31,7 +48,7 @@ export function stormbreakerRun(
     allowLocal?: boolean;
   } & HephaestusRunOptions = {},
 ): Promise<HephaestusResult> {
-  const args = ["route", assertPositional(query, "쿼리"), "--project", opts.project ?? ".", "--runtime", opts.runtime ?? "terminal", "--auto-run"];
+  const args = ["route", assertPositional(query, "query"), "--project", opts.project ?? ".", "--runtime", opts.runtime ?? "terminal", "--auto-run"];
   if (opts.background) args.push("--background");
   if (opts.researchEvidence) args.push("--research-evidence");
   if (opts.allowLocal) args.push("--allow-local-routing");
@@ -53,7 +70,7 @@ export function routeOnly(
     allowLocal?: boolean;
   } & HephaestusRunOptions = {},
 ): Promise<HephaestusResult> {
-  const args = ["route", assertPositional(query, "쿼리"), "--project", opts.project ?? ".", "--runtime", opts.runtime ?? "terminal"];
+  const args = ["route", assertPositional(query, "query"), "--project", opts.project ?? ".", "--runtime", opts.runtime ?? "terminal"];
   if (opts.hubOnly) args.push("--hub-only");
   if (opts.noHub) args.push("--no-hub"); // 오프라인-안전: Hub 네트워크 호출 생략(로컬 라우팅만)
   if (opts.scope) args.push("--scope", opts.scope);
@@ -76,7 +93,7 @@ export function hepSearch(
   query: string,
   opts: { limit?: number; project?: string; runtime?: string } & HephaestusRunOptions = {},
 ): Promise<HephaestusResult> {
-  const args = ["search", assertPositional(query, "쿼리"), "--project", opts.project ?? ".", "--runtime", opts.runtime ?? "terminal"];
+  const args = ["search", assertPositional(query, "query"), "--project", opts.project ?? ".", "--runtime", opts.runtime ?? "terminal"];
   if (opts.limit) args.push("--limit", String(opts.limit));
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 120_000, ...opts });
 }
@@ -89,8 +106,8 @@ export function hepCall(
 ): Promise<HephaestusResult> {
   const args = [
     "call",
-    assertPositional(agents, "에이전트"),
-    ...context.map((c, i) => assertPositional(c, `컨텍스트[${i}]`)),
+    assertPositional(agents, "agent"),
+    ...context.map((c, i) => assertPositional(c, "context", i)),
     "--project",
     opts.project ?? ".",
     "--runtime",
@@ -101,7 +118,7 @@ export function hepCall(
 
 /** hep-cloud: 소유자 본인 Cloud 패키지(보관함)만 라우팅. */
 export function hepCloud(query: string, opts: { project?: string } & HephaestusRunOptions = {}): Promise<HephaestusResult> {
-  return runHephaestus("agentlas_cloud", ["route", assertPositional(query, "쿼리"), "--project", opts.project ?? ".", "--scope", "cloud"], {
+  return runHephaestus("agentlas_cloud", ["route", assertPositional(query, "query"), "--project", opts.project ?? ".", "--scope", "cloud"], {
     timeoutMs: 180_000,
     ...opts,
   });
@@ -121,7 +138,7 @@ export async function hepNetwork(
   if (gui.exitCode !== 4 && (gui.ok || gui.exitCode !== null)) {
     if (gui.ok || gui.json) return gui;
   }
-  const args = ["route", assertPositional(query, "쿼리"), "--project", opts.project ?? ".", "--hub-only", "--scope", "network"];
+  const args = ["route", assertPositional(query, "query"), "--project", opts.project ?? ".", "--hub-only", "--scope", "network"];
   if (opts.autoRun ?? true) args.push("--auto-run", "--background");
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 180_000, ...opts });
 }
@@ -131,7 +148,7 @@ export function localGui(
   shortcut: string,
   opts: { detach?: boolean; noOpen?: boolean } & HephaestusRunOptions = {},
 ): Promise<HephaestusResult> {
-  const args = ["local-gui", assertPositional(shortcut, "숏컷")];
+  const args = ["local-gui", assertPositional(shortcut, "shortcut")];
   if (opts.detach) args.push("--detach");
   if (opts.noOpen) args.push("--no-open");
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 120_000, ...opts });
@@ -143,10 +160,10 @@ export function hepPublish(
   visibility: UploadVisibility,
   opts: { dryRun?: boolean; noOpen?: boolean; slug?: string; baseUrl?: string } & HephaestusRunOptions = {},
 ): Promise<HephaestusResult> {
-  const args = ["publish", assertPositional(folder, "폴더"), "--visibility", visibility];
+  const args = ["publish", assertPositional(folder, "folder"), "--visibility", visibility];
   if (opts.dryRun) args.push("--dry-run");
   if (opts.noOpen) args.push("--no-open");
-  if (opts.slug) args.push("--slug", assertPositional(opts.slug, "슬러그"));
+  if (opts.slug) args.push("--slug", assertPositional(opts.slug, "slug"));
   if (opts.baseUrl) args.push("--base-url", opts.baseUrl);
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 300_000, ...opts });
 }
@@ -156,7 +173,7 @@ export function hepPackage(
   folder: string,
   opts: { visibility?: UploadVisibility } & HephaestusRunOptions = {},
 ): Promise<HephaestusResult> {
-  const args = ["package", assertPositional(folder, "폴더")];
+  const args = ["package", assertPositional(folder, "folder")];
   if (opts.visibility) args.push("--visibility", opts.visibility);
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 180_000, ...opts });
 }
@@ -166,7 +183,7 @@ export function securityScan(
   folder: string,
   opts: { strict?: boolean } & HephaestusRunOptions = {},
 ): Promise<HephaestusResult> {
-  const args = ["security", "scan", assertPositional(folder, "폴더")];
+  const args = ["security", "scan", assertPositional(folder, "folder")];
   if (opts.strict) args.push("--strict");
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 180_000, ...opts });
 }
@@ -176,7 +193,7 @@ export function hepWizard(
   folder: string,
   opts: { name?: string } & HephaestusRunOptions = {},
 ): Promise<HephaestusResult> {
-  const args = ["wizard", assertPositional(folder, "폴더")];
+  const args = ["wizard", assertPositional(folder, "folder")];
   if (opts.name) args.push("--name", opts.name);
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 120_000, ...opts });
 }
@@ -185,14 +202,14 @@ export function hepWizard(
 export function aoGraph(opts: { agent?: string; dir?: string } & HephaestusRunOptions = {}): Promise<HephaestusResult> {
   const args = ["ao", "graph"];
   if (opts.agent) args.push("--agent", opts.agent);
-  if (opts.dir) args.push(assertPositional(opts.dir, "디렉터리"));
+  if (opts.dir) args.push(assertPositional(opts.dir, "directory"));
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 60_000, ...opts });
 }
 
 /** AO 쿼리(에이전트 간 produces/consumes 관계 조회). */
 export function aoQuery(query: string, opts: { dir?: string } & HephaestusRunOptions = {}): Promise<HephaestusResult> {
-  const args = ["ao", "query", assertPositional(query, "쿼리")];
-  if (opts.dir) args.push(assertPositional(opts.dir, "디렉터리"));
+  const args = ["ao", "query", assertPositional(query, "query")];
+  if (opts.dir) args.push(assertPositional(opts.dir, "directory"));
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 60_000, ...opts });
 }
 

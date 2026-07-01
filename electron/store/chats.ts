@@ -7,6 +7,7 @@ import { getAgentGroup } from "./agent-groups";
 import { getFirm } from "./firms";
 import { touchProject } from "./projects";
 import type { Chat, ChatHistoryEntry } from "../../shared/types";
+import { currentUiLocale } from "../main";
 
 interface ChatRow {
   id: string;
@@ -108,14 +109,19 @@ export function createChat(input: {
   /** 본부 세션 → 부모 firm 채팅 링크 */
   parentChatId?: string | null;
 }): Chat {
+  const ko = currentUiLocale() === "ko";
   let resolvedAgentId = input.agentId;
   if (input.agentGroupId) {
     const group = getAgentGroup(input.agentGroupId);
-    if (!group) throw new Error(`에이전트 조합 ${input.agentGroupId}을 찾을 수 없습니다`);
+    if (!group) {
+      throw new Error(
+        ko ? `에이전트 조합 ${input.agentGroupId}을 찾을 수 없습니다` : `Could not find agent group ${input.agentGroupId}`,
+      );
+    }
   }
   if (input.firmId && !resolvedAgentId) {
     const firm = getFirm(input.firmId);
-    if (!firm) throw new Error(`회사 ${input.firmId}을 찾을 수 없습니다`);
+    if (!firm) throw new Error(ko ? `회사 ${input.firmId}을 찾을 수 없습니다` : `Could not find firm ${input.firmId}`);
     resolvedAgentId = firm.ceoAgentId;
   }
   if (!resolvedAgentId) {
@@ -125,7 +131,7 @@ export function createChat(input: {
     resolvedAgentId = fallback?.id;
   }
   if (!resolvedAgentId) {
-    throw new Error("새 채팅에는 agentId 또는 firmId가 필요합니다");
+    throw new Error(ko ? "새 채팅에는 agentId 또는 firmId가 필요합니다" : "A new chat needs an agentId or firmId");
   }
 
   const id = randomUUID();

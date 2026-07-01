@@ -14,6 +14,7 @@ import { execFile } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
 import { promisify } from "util";
+import { currentUiLocale } from "../main";
 import {
   cardHtml,
   frameSizeFor,
@@ -63,6 +64,7 @@ interface TimedOverlay {
 
 /** 타이틀/로어서드/자막을 본편에 번인해 *_titled.mp4 / .mov를 만든다. */
 export async function composeTitledDelivery(input: TitleComposeInput): Promise<TitleComposeResult> {
+  const ko = currentUiLocale() === "ko";
   const { ffmpeg, masterMp4, outDir, baseName, spec } = input;
   const warnings: string[] = [];
   const hasWork =
@@ -83,7 +85,12 @@ export async function composeTitledDelivery(input: TitleComposeInput): Promise<T
       disposeRaster = built.dispose;
     }
   } catch (error) {
-    return { files: [], warnings: [`래스터라이저 초기화 실패(타이틀 건너뜀): ${msg(error)}`] };
+    return {
+      files: [],
+      warnings: [
+        ko ? `래스터라이저 초기화 실패(타이틀 건너뜀): ${msg(error)}` : `Rasterizer initialization failed (skipping titles): ${msg(error)}`,
+      ],
+    };
   }
 
   const probed = await probeSize(ffmpeg, masterMp4).catch(() => null);
@@ -117,7 +124,9 @@ export async function composeTitledDelivery(input: TitleComposeInput): Promise<T
     if (spec.subtitleStyle) {
       for (const cue of spec.subtitles) {
         if (overlays.length >= MAX_OVERLAYS) {
-          warnings.push(`자막 큐가 많아 ${MAX_OVERLAYS}개까지만 번인`);
+          warnings.push(
+            ko ? `자막 큐가 많아 ${MAX_OVERLAYS}개까지만 번인` : `Too many subtitle cues; burning in only the first ${MAX_OVERLAYS}`,
+          );
           break;
         }
         if (!cue.text.trim() || cue.endSec <= cue.startSec) continue;
@@ -155,7 +164,12 @@ export async function composeTitledDelivery(input: TitleComposeInput): Promise<T
     }
 
     const files: TitleComposeFile[] = [
-      { kind: "titled_mp4", absPath: titledMp4Abs, label: "Titled MP4 (타이틀/자막 번인)", mime: "video/mp4" },
+      {
+        kind: "titled_mp4",
+        absPath: titledMp4Abs,
+        label: ko ? "Titled MP4 (타이틀/자막 번인)" : "Titled MP4 (title/subtitle burn-in)",
+        mime: "video/mp4",
+      },
     ];
 
     // 5) MOV
@@ -164,12 +178,12 @@ export async function composeTitledDelivery(input: TitleComposeInput): Promise<T
       await run(ffmpeg, ["-y", "-i", titledMp4, "-c", "copy", titledMov], outDir);
       files.push({ kind: "titled_mov", absPath: path.join(outDir, titledMov), label: "Titled MOV", mime: "video/quicktime" });
     } catch {
-      warnings.push("titled MOV 생성 실패(MP4는 정상)");
+      warnings.push(ko ? "titled MOV 생성 실패(MP4는 정상)" : "Failed to create titled MOV (MP4 is fine)");
     }
 
     return { files, warnings };
   } catch (error) {
-    warnings.push(`타이틀 번인 실패(마스터는 정상): ${msg(error)}`);
+    warnings.push(ko ? `타이틀 번인 실패(마스터는 정상): ${msg(error)}` : `Title burn-in failed (master is fine): ${msg(error)}`);
     return { files: [], warnings };
   } finally {
     if (disposeRaster) await disposeRaster().catch(() => undefined);
@@ -191,6 +205,7 @@ async function buildCardSegment(
   temps: string[],
   warnings: string[],
 ): Promise<string | null> {
+  const ko = currentUiLocale() === "ko";
   try {
     const png = `_card_${tag}.png`;
     await writePng(rasterize, path.join(outDir, png), cardHtml(card, W, H, fontHref), W, H);
@@ -234,7 +249,7 @@ async function buildCardSegment(
     );
     return seg;
   } catch (error) {
-    warnings.push(`${tag} 카드 생성 실패: ${msg(error)}`);
+    warnings.push(ko ? `${tag} 카드 생성 실패: ${msg(error)}` : `Failed to create the ${tag} card: ${msg(error)}`);
     return null;
   }
 }
@@ -296,10 +311,13 @@ function subtitleOverlayHtml(cue: OberonSubtitleCue, style: OberonTextStyle, W: 
 // 헤드리스 Chromium 경로. 창 1개를 재사용하고, capture는 타임아웃으로 가드한다.
 
 function buildElectronRasterizer(): { rasterize: RasterizeFn; dispose: () => Promise<void> } {
+  const ko = currentUiLocale() === "ko";
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const electron = require("electron") as typeof import("electron");
   const { BrowserWindow } = electron;
-  if (!BrowserWindow) throw new Error("Electron BrowserWindow 사용 불가(메인 프로세스 아님)");
+  if (!BrowserWindow) {
+    throw new Error(ko ? "Electron BrowserWindow 사용 불가(메인 프로세스 아님)" : "Electron BrowserWindow unavailable (not the main process)");
+  }
 
   let win: import("electron").BrowserWindow | null = null;
 

@@ -36,6 +36,7 @@ type ViewState = "home" | "generating" | "view" | "edit";
 type ImageModel = "codex" | "gemini" | "svg";
 const RECENTS_KEY = "trex.recents.v1";
 const EXAMPLE = "중견 제조사 디지털 전환 전략 — 진단과 12개월 로드맵";
+const EXAMPLE_EN = "Mid-market manufacturer digital transformation — diagnosis and a 12-month roadmap";
 const ALL_MODES: ArtMode[] = ["editorial", "cinematic", "diagrammatic", "hybrid"];
 const PALETTE: BlockKind[] = ["title", "subtitle", "body", "card", "kicker", "pill", "kpi", "bar", "rule", "footer"];
 
@@ -127,7 +128,7 @@ export default function TrexPage() {
   // 실시간 생성 — AI(agy/codex)가 슬라이드별 실제 내용을 쓰고, 완성되면 렌더. 미가용 시 스캐폴드.
   const runGenerate = useCallback(
     async (text: string, n: number) => {
-      const p = text.trim() || EXAMPLE;
+      const p = text.trim() || (ko ? EXAMPLE : EXAMPLE_EN);
       const gc = ipc()?.trex?.generateContent;
       if (aiContent && gc) {
         setDeck(null);
@@ -137,17 +138,17 @@ export default function TrexPage() {
         try {
           const r = await gc({ topic: p, count: n, mode: modeOverride ?? undefined });
           const parsed = r?.ok && r.text ? parseDeckContent(r.text) : null;
-          d = parsed ? buildDeckFromContent(parsed, formatId) : generateDeck(p, modeOverride ?? undefined, n, formatId);
+          d = parsed ? buildDeckFromContent(parsed, formatId, locale) : generateDeck(p, modeOverride ?? undefined, n, formatId, locale);
         } catch {
-          d = generateDeck(p, modeOverride ?? undefined, n, formatId);
+          d = generateDeck(p, modeOverride ?? undefined, n, formatId, locale);
         }
         setAiWriting(false);
         revealDeck(d);
       } else {
-        revealDeck(generateDeck(p, modeOverride ?? undefined, n, formatId));
+        revealDeck(generateDeck(p, modeOverride ?? undefined, n, formatId, locale));
       }
     },
-    [aiContent, modeOverride, formatId, revealDeck],
+    [aiContent, modeOverride, formatId, revealDeck, locale],
   );
 
   const updateDeck = useCallback((updater: (d: TrexDeck) => TrexDeck) => {
@@ -177,11 +178,11 @@ export default function TrexPage() {
     (kind: BlockKind) => {
       if (!deck) return;
       const slide = deck.slides[activeSlide];
-      const b = newBlock(kind);
+      const b = newBlock(kind, locale);
       updateDeck((d) => ({ ...d, slides: d.slides.map((s) => (s.id === slide.id ? { ...s, blocks: [...s.blocks, b] } : s)) }));
       setSelected(b.id);
     },
-    [deck, activeSlide, updateDeck],
+    [deck, activeSlide, updateDeck, locale],
   );
 
   const duplicateBlock = useCallback(() => {
@@ -197,8 +198,8 @@ export default function TrexPage() {
   const addSlide = useCallback(() => {
     if (!deck) return;
     const theme = MODE_THEMES[deck.mode];
-    const seedTitle = { ...newBlock("title"), x: 7, y: 16, w: 80 };
-    const seedBody = { ...newBlock("body"), x: 7, y: 46, w: 66, size: 1.6 };
+    const seedTitle = { ...newBlock("title", locale), x: 7, y: 16, w: 80 };
+    const seedBody = { ...newBlock("body", locale), x: 7, y: 46, w: 66, size: 1.6 };
     const blank: TrexSlide = { id: `s_${Date.now().toString(36)}`, bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [seedTitle, seedBody] };
     updateDeck((d) => {
       const slides = [...d.slides];
@@ -207,7 +208,7 @@ export default function TrexPage() {
     });
     setActiveSlide((i) => i + 1);
     setSelected(null);
-  }, [deck, activeSlide, updateDeck]);
+  }, [deck, activeSlide, updateDeck, locale]);
 
   const deleteSlide = useCallback(() => {
     if (!deck || deck.slides.length <= 1) return;
@@ -419,7 +420,7 @@ function Home({
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onGenerate(); } }}
-            placeholder={ko ? `예: ${EXAMPLE}` : `e.g. ${EXAMPLE}`}
+            placeholder={ko ? `예: ${EXAMPLE}` : `e.g. ${EXAMPLE_EN}`}
             rows={2}
             style={promptInput}
             aria-label={ko ? "발표 주제" : "Deck prompt"}

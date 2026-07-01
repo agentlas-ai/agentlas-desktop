@@ -152,6 +152,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <BackgroundWorkPill
         jobs={oberonJobs}
         avoidComposer={pathname.startsWith("/chat")}
+        locale={locale}
         onOpen={() => router.push("/oberon")}
       />
       <ImportAgentsModal
@@ -178,17 +179,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 function BackgroundWorkPill({
   jobs,
   avoidComposer,
+  locale,
   onOpen,
 }: {
   jobs: OberonBackgroundJob[];
   avoidComposer?: boolean;
+  locale: string;
   onOpen: () => void;
 }) {
   const job = jobs.find(isOberonBackgroundJobActive) ?? jobs[0];
   if (!job) return null;
   const active = isOberonBackgroundJobActive(job);
   const failed = job.status === "failed" || job.status === "cancelled";
-  const headline = active ? "백그라운드 작업 중" : failed ? "확인 필요" : "작업 완료";
+  const ko = locale === "ko";
+  const headline = active
+    ? (ko ? "백그라운드 작업 중" : "Working in background")
+    : failed
+      ? (ko ? "확인 필요" : "Needs attention")
+      : (ko ? "작업 완료" : "Work complete");
   const color = failed ? "var(--red-deep)" : active ? "var(--accent)" : "var(--green-deep)";
   const bottom = avoidComposer ? 160 : 78;
 

@@ -112,6 +112,65 @@ export async function testServerConnection(server: InstalledMcpServer): Promise<
   }
 }
 
+/**
+ * 한 서버에 붙어 tool 1개를 호출하고 텍스트 결과를 반환한다(폴 소스용, 설계 §3.4 Tier 1).
+ * 매 폴마다 spawn→call→close하는 단발 호출이라 무겁지만, 폴 매니저의 적응형 간격이
+ * 호출 빈도를 통제하므로(설계 §3.1) 유휴 비용은 0에 수렴한다. 필수 env 미충족이면 null.
+ *
+ * 반환은 MCP content의 text 조각을 이어붙인 문자열(구조화 파싱은 호출자가). 실패 시 throw.
+ */
+export async function callServerTool(
+  server: InstalledMcpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<string | null> {
+  const { resolved, missing } = await resolveEnv(server.envKeys);
+  if (missing.length > 0) return null; // 자격증명 미충족 — 폴 스킵(needsCredential UI가 안내).
+
+  const client = new Client({ name: "agentlas-desktop", version: app.getVersion() }, { capabilities: {} });
+  let transport: unknown;
+  try {
+    if (server.transport === "stdio") {
+      if (!server.command) throw new Error("stdio server has no command");
+      const baseEnv = withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" });
+      const stdioEnv = Object.fromEntries(
+        Object.entries(baseEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+      );
+      transport = new StdioClientTransport({
+        command: expandHome(server.command),
+        args: (server.args ?? []).map(expandHome),
+        env: { ...stdioEnv, ...resolved },
+        stderr: "ignore",
+      });
+    } else {
+      if (!server.url) throw new Error("sse/http server has no url");
+      transport = new SSEClientTransport(new URL(server.url));
+    }
+
+    const text = await withTimeout(
+      (async () => {
+        await client.connect(transport);
+        const res = (await client.callTool({ name: toolName, arguments: args })) as {
+          content?: Array<{ type?: string; text?: string }>;
+        };
+        const parts = (res.content ?? [])
+          .filter((c) => c && c.type === "text" && typeof c.text === "string")
+          .map((c) => c.text as string);
+        return parts.join("\n");
+      })(),
+      CONNECT_TIMEOUT_MS,
+      () => {
+        void client.close().catch(() => {});
+      },
+    );
+    await client.close().catch(() => {});
+    return text;
+  } catch (err) {
+    await client.close().catch(() => {});
+    throw err;
+  }
+}
+
 export async function testServerById(id: string): Promise<McpServerStatus> {
   const server = getServer(id);
   if (!server) {

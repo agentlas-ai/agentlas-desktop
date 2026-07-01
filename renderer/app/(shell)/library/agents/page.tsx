@@ -11,6 +11,7 @@ import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { parseMemoryMarkdown, serializeMemoryMarkdown } from "@/lib/agent-memory";
 import { classifyAgent } from "@/lib/ownership";
+import { cliModelTagLabel } from "@shared/models";
 import type {
   AgentRuntimeOverride,
   AgentRuntimeOverrideScope,
@@ -422,7 +423,7 @@ function LibraryAgentsView() {
       if (!api || !selectedNode || !selectedNode.agentId) return;
       setSavingFiles(true);
       try {
-        const serialized = serializeMemoryMarkdown(next.decisions, next.gotchas, next.openQuestions);
+        const serialized = serializeMemoryMarkdown(next.decisions, next.gotchas, next.openQuestions, { locale });
         const memFile = agentFiles.find((e) => e.name.toLowerCase() === "memory.md");
         const path = memFile ? memFile.path : "memory.md";
         await api.agentFiles.write(selectedNode.agentId, path, serialized);
@@ -2012,7 +2013,7 @@ function RuntimeAssignmentPanel({
             <option value="">{locale === "ko" ? "구독/전역 기본" : "Subscription / global default"}</option>
             {modelOptions.map((model) => (
               <option key={model.id} value={model.id}>
-                {model.label}{model.tag ? ` · ${model.tag}` : ""}
+                {model.label}{model.tag ? ` · ${cliModelTagLabel(model.tag, locale)}` : ""}
               </option>
             ))}
           </select>
@@ -2817,7 +2818,7 @@ function AgentDetailView({
                     <div><strong>{locale === "ko" ? "적용 런타임:" : "Active runtime:"}</strong> {effectiveRuntimeOverride ? selectionSummary(effectiveRuntimeOverride.selection, locale) : (locale === "ko" ? "전역 자동 라우팅" : "Global auto-routing")}</div>
                     <div><strong>{locale === "ko" ? "신뢰 등급:" : "Trust grade:"}</strong> Trust {agent?.trustGrade ?? "B"}</div>
                     {agent && (() => {
-                      const own = classifyAgent(agent);
+                      const own = classifyAgent(agent, locale);
                       return (
                         <div className="agent-ownership-row" data-owned={own.owned ? "true" : "false"}>
                           <strong>{locale === "ko" ? "소유:" : "Ownership:"}</strong>{" "}

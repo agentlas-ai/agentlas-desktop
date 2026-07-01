@@ -11,6 +11,9 @@ import type {
   RuntimeBackend,
   RuntimeSelection,
   UpdaterState,
+  WorkflowGraph,
+  AutomationUpdatePatch,
+  ScheduleSpec,
 } from "../shared/types";
 
 const api: AgentlasIpc = {
@@ -225,11 +228,32 @@ const api: AgentlasIpc = {
   },
   automations: {
     list: () => ipcRenderer.invoke("automations:list"),
+    get: (id: string) => ipcRenderer.invoke("automations:get", id),
     create: (input: Omit<Automation, "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy">) =>
       ipcRenderer.invoke("automations:create", input),
     toggle: (id: string, enabled: boolean) =>
       ipcRenderer.invoke("automations:toggle", id, enabled),
     remove: (id: string) => ipcRenderer.invoke("automations:remove", id),
+    update: (id: string, patch: AutomationUpdatePatch) =>
+      ipcRenderer.invoke("automations:update", id, patch),
+    updateGraph: (id: string, graph: WorkflowGraph | null) =>
+      ipcRenderer.invoke("automations:updateGraph", id, graph),
+    runNow: (id: string) => ipcRenderer.invoke("automations:runNow", id),
+    listRuns: (id: string, limit?: number) => ipcRenderer.invoke("automations:listRuns", id, limit),
+    liveRunChannel: (automationId: string) => `automations:liveRun:${automationId}`,
+    latestRun: (automationId: string) => ipcRenderer.invoke("automations:latestRun", automationId),
+  },
+  launchd: {
+    status: () => ipcRenderer.invoke("launchd:status"),
+    enable: () => ipcRenderer.invoke("launchd:enable"),
+    disable: () => ipcRenderer.invoke("launchd:disable"),
+  },
+  schedule: {
+    validateCron: (expr: string) => ipcRenderer.invoke("schedule:validateCron", expr),
+    describe: (spec: ScheduleSpec, locale?: "ko" | "en") =>
+      ipcRenderer.invoke("schedule:describe", spec, locale),
+    nextRun: (spec: ScheduleSpec) => ipcRenderer.invoke("schedule:nextRun", spec),
+    defaultTz: () => ipcRenderer.invoke("schedule:defaultTz"),
   },
   surfaces: {
     listSurfaces: (chatId) => ipcRenderer.invoke("surfaces:list", chatId),
@@ -311,7 +335,7 @@ const api: AgentlasIpc = {
     attach: (chatId: string) => ipcRenderer.invoke("invoke:attach", chatId),
   },
   hephaestus: {
-    status: () => ipcRenderer.invoke("hephaestus:status"),
+    status: (locale) => ipcRenderer.invoke("hephaestus:status", locale),
     doctor: () => ipcRenderer.invoke("hephaestus:doctor"),
     stormbreaker: (input) => ipcRenderer.invoke("hephaestus:stormbreaker", input),
     getSupervisor: () => ipcRenderer.invoke("hephaestus:getSupervisor"),
@@ -353,7 +377,14 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
       handler(payload);
     // 화이트리스트: 호출 이벤트(invoke:event:*)와 Hephaestus 빌드 진행 채널(hephaestus:build:<runId>).
     // 빌드 채널이 빠져 있어 빌드 로그/단계 이벤트가 렌더러에 전혀 도달하지 못하던 버그를 수정.
-    if (!channel.startsWith("invoke:event:") && !channel.startsWith("hephaestus:build:")) return () => {};
+    // 화이트리스트에 자동화 그래프 라이브 실행 채널(automations:liveRun:<id>) 추가 — 플로우
+    // 캔버스가 per-node 상태를 실시간 구독한다(설계 §5 P2).
+    if (
+      !channel.startsWith("invoke:event:") &&
+      !channel.startsWith("hephaestus:build:") &&
+      !channel.startsWith("automations:liveRun:")
+    )
+      return () => {};
     ipcRenderer.on(channel, wrapped);
     return () => ipcRenderer.removeListener(channel, wrapped);
   },

@@ -323,6 +323,26 @@ function historyEntryToStreamMessage(entry: { id: string; role: string; text: st
   };
 }
 
+// 재진입(히스토리 재로드) 시 이미 답한 질문이 다시 '미답변'으로 보여 사용자가 재선택→중복 전송하는
+// 버그를 막는다. answer 상태는 DB에 저장되지 않으므로(본문만 저장), 대화 순서로 복원한다:
+// 질문을 가진 에이전트 메시지 '뒤에' 다른 메시지가 있으면 = 이미 답하고 대화가 진행된 것 → answered 처리.
+// 답 라벨은 바로 뒤의 user 메시지에서 복원(멀티select 불릿 분해). 마지막 메시지의 질문만 미답으로 남긴다.
+function restoreAnsweredQuestions(messages: StreamMessage[]): StreamMessage[] {
+  return messages.map((msg, i) => {
+    if (!msg.questions || msg.questions.length === 0) return msg;
+    if (i >= messages.length - 1) return msg; // 마지막 = 아직 답할 차례
+    const nextUser = messages.slice(i + 1).find((m) => m.role === "user");
+    const answerText = nextUser?.text?.trim() ?? "";
+    const answers = answerText
+      ? answerText.split("\n").map((s) => s.replace(/^•\s*/, "").trim()).filter(Boolean)
+      : ["✓"];
+    return {
+      ...msg,
+      questions: msg.questions.map((q) => (q.answer && q.answer.length ? q : { ...q, answer: answers })),
+    };
+  });
+}
+
 type GeneratedAppChatRoute = {
   action: "edit" | "archive";
   app: AppFactoryAppRecord;
@@ -482,6 +502,20 @@ function ChatPage() {
   const lastRunIdRef = useRef<string | null>(null);
   // runId가 도착하기 전(invoke:run 왕복 중)에 Stop을 누른 경우를 기억 — 도착 즉시 취소한다.
   const cancelRequestedRef = useRef(false);
+  // 실행 중 steering — busy일 때 엔터로 들어온 메시지를 큐에 쌓고, 현재 턴이 끝나면 순서대로 전송한다.
+  const steerQueueRef = useRef<
+    Array<{
+      text: string;
+      opts?: {
+        images?: ImageAttachment[];
+        permissions?: PermissionLevel;
+        planMode?: boolean;
+        goalMode?: boolean;
+        appsGenerateMode?: boolean;
+      };
+    }>
+  >([]);
+  const [queuedSteers, setQueuedSteers] = useState<string[]>([]);
   const [artifact, setArtifact] = useState<CodeArtifact | null>(null);
   const [surface, setSurface] = useState<WorkbenchSurface | null>(null);
   const [mediaPreview, setMediaPreview] = useState<WorkspaceFilePreview | null>(null);
@@ -845,7 +879,15 @@ function ChatPage() {
     [agent, agentGroup, chatId, locale, openPanelTab, t],
   );
 
+  // consumeEvent를 ref로 미러 — subscribeRun/메타데이터 effect가 consumeEvent identity 변화(agent·
+  // agentGroup 세팅 등)에 재구독/재실행되던 churn을 없앤다. 리스너는 항상 최신 consumeEvent를 호출한다.
+  const consumeEventRef = useRef(consumeEvent);
+  useEffect(() => {
+    consumeEventRef.current = consumeEvent;
+  }, [consumeEvent]);
+
   // runId 채널 구독 — send()와 재접속 경로 공용. lastStatusRef를 받으면(리플레이 후) 이어서 쓴다.
+  // deps [] 로 안정화(consumeEvent는 ref로 접근) — 한 번 건 구독이 렌더 도중 교체돼 이벤트를 흘리지 않게.
   const subscribeRun = useCallback(
     (runId: string, placeholderId: string, lastStatusRef: { text: string } = { text: "" }) => {
       const api = ipc();
@@ -854,10 +896,10 @@ function ChatPage() {
       const channel = api.invoke.eventChannel(runId);
       subRef.current?.();
       subRef.current = events.on(channel, (ev: McpInvocationEvent) =>
-        consumeEvent(ev, placeholderId, lastStatusRef),
+        consumeEventRef.current(ev, placeholderId, lastStatusRef),
       );
     },
-    [consumeEvent],
+    [],
   );
 
   // Esc는 현재 보이는 우측 레일만 닫는다. 산출물 자체를 지우면 사용자가 작업을 잃은 것처럼 보인다.
@@ -880,11 +922,17 @@ function ChatPage() {
   // 메타데이터 effect는 번역/콜백 변화에도 다시 돌 수 있으므로, 전환 초기화는 chatId에만 묶는다.
   useEffect(() => {
     if (!chatId) return;
+    // 이전 채팅의 메시지/스트림 드래프트를 즉시 비운다 — 안 그러면 이전 채팅이 실행 중일 때
+    // (busy 드래프트가 남아) 메타데이터 로드의 hasLiveDraft 가드가 새 채팅에도 옛 세션을 계속
+    // 보여준다(다른 챗 눌러도 지금 세션이 뜨는 버그). 새 히스토리는 곧바로 이어서 로드된다.
+    setMessages([]);
     setBusy(false);
     setCancelPending(false);
     runIdRef.current = null;
     lastRunIdRef.current = null;
     cancelRequestedRef.current = false;
+    steerQueueRef.current = [];
+    setQueuedSteers([]);
     setArtifact(null);
     setSurface(null);
     setMediaPreview(null);
@@ -980,7 +1028,7 @@ function ChatPage() {
         setFirm(null);
         setResolvedOrg(null);
       }
-      const historyMessages: StreamMessage[] = history.map(historyEntryToStreamMessage);
+      const historyMessages: StreamMessage[] = restoreAnsweredQuestions(history.map(historyEntryToStreamMessage));
       setMessages((current) => {
         const hasLiveDraft = current.some((msg) => msg.busy || msg.streaming);
         return hasLiveDraft ? current : historyMessages;
@@ -1018,14 +1066,16 @@ function ChatPage() {
         runIdRef.current = attached.runId;
         lastRunIdRef.current = attached.runId;
         const lastStatusRef = { text: "" };
-        for (const ev of attached.events) consumeEvent(ev, placeholderId, lastStatusRef);
+        for (const ev of attached.events) consumeEventRef.current(ev, placeholderId, lastStatusRef);
         subscribeRun(attached.runId, placeholderId, lastStatusRef);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [chatId, router, consumeEvent, subscribeRun, t]);
+    // consumeEvent를 deps에서 제외(ref로 접근) — agent/agentGroup 세팅이 이 effect를 재실행시켜
+    // attach가 중복 placeholder를 만들고 구독을 갈아치우던 churn을 없앤다. subscribeRun은 이제 안정적.
+  }, [chatId, router, subscribeRun, t]);
 
   // Library > Generated surfaces can deep-link back to the originating chat and
   // reopen the durable Workbench surface without requiring a live invocation.
@@ -1062,7 +1112,7 @@ function ChatPage() {
         Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
       );
       void api.invoke.history(chatId).then((h) => {
-        setMessages(h.map(historyEntryToStreamMessage));
+        setMessages(restoreAnsweredQuestions(h.map(historyEntryToStreamMessage)));
       });
     });
   }, [chatId]);
@@ -1093,7 +1143,7 @@ function ChatPage() {
           Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
         );
         const h = await api.invoke.history(chatId);
-        if (!stopped) setMessages(h.map(historyEntryToStreamMessage));
+        if (!stopped) setMessages(restoreAnsweredQuestions(h.map(historyEntryToStreamMessage)));
       } catch {
         /* 무시 — 다음 틱에 재시도 */
       }
@@ -1278,9 +1328,17 @@ function ChatPage() {
         },
       ]);
 
+      // runId를 렌더러가 먼저 생성하고 invoke 왕복 전에 구독한다(subscribe-before-trigger) —
+      // 런타임이 즉시 emit하는 초기 이벤트도 절대 놓치지 않아 스트리밍/최종 답변이 라이브로 뜬다.
+      const runId = crypto.randomUUID();
+      runIdRef.current = runId;
+      lastRunIdRef.current = runId;
+      // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
+      subscribeRun(runId, placeholderId);
       try {
         // locale을 동봉 — main이 emit하는 상태/오류 메시지가 사용자 언어로 나오도록.
-        const invokeResult = await api.invoke.run({
+        await api.invoke.run({
+          runId,
           chatId: chat.id,
           userPrompt: invocationPrompt,
           images,
@@ -1295,18 +1353,16 @@ function ChatPage() {
           pipelineStages: opts?.pipelineStages,
           routerAgent: opts?.routerAgent,
         });
-        const { runId } = invokeResult;
         window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chat.id } }));
-        runIdRef.current = runId;
-        lastRunIdRef.current = runId;
-        // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
-        subscribeRun(runId, placeholderId);
         // runId 도착 전에 Stop을 눌렀다면(레이스) 구독을 건 직후 즉시 취소 — abort 종료 이벤트를 수신해 busy 해제.
         if (cancelRequestedRef.current) {
           void api.invoke.cancel(runId);
         }
         return true;
       } catch (err) {
+        // invoke 실패 — 미리 건 구독을 정리해 유령 리스너가 남지 않게 한다.
+        subRef.current?.();
+        subRef.current = null;
         const message = err instanceof Error ? err.message : String(err);
         setMessages((m) =>
           m.map((msg) =>
@@ -1345,6 +1401,27 @@ function ChatPage() {
     if (!runId) return;
     void api.invoke.cancel(runId);
   }, []);
+
+  // 실행 중 steering — busy면 큐에 넣고(엔터가 막히지 않게), 아니면 즉시 전송한다.
+  const submitOrQueue = useCallback(
+    (text: string, opts?: (typeof steerQueueRef)["current"][number]["opts"]) => {
+      if (busy) {
+        steerQueueRef.current.push({ text, opts });
+        setQueuedSteers(steerQueueRef.current.map((q) => q.text));
+        return;
+      }
+      void send(text, opts);
+    },
+    [busy, send],
+  );
+
+  // 턴이 끝나면(busy→false) 큐에 쌓인 steering 메시지를 하나씩 순서대로 전송한다.
+  useEffect(() => {
+    if (busy || steerQueueRef.current.length === 0) return;
+    const next = steerQueueRef.current.shift();
+    setQueuedSteers(steerQueueRef.current.map((q) => q.text));
+    if (next) void send(next.text, next.opts);
+  }, [busy, send]);
 
   // 활성 모델/작업량을 입력창 picker에서 바로 변경 — BYOK 및 CLI 공통.
   // model === "" 이면 모델 미지정(구독 기본). effort는 명시할 때만 갱신.
@@ -2291,99 +2368,14 @@ function ChatPage() {
             if (f) setWorkspaceOpenPersisted(true);
           }}
         />
-        {chat && chat.kind !== "division" && (
-          <button
-            type="button"
-            title={
-              locale === "ko"
-                ? "켜두면 이 대화가 멈추지 않고 계속 라이브로 이어서 작업합니다(수 시간까지 가능). 끝나거나 직접 멈출 때까지."
-                : "When on, this chat keeps working live without stopping (can run for hours) until it finishes or you stop it."
-            }
-            onClick={() => {
-              const next = !chat.continuousMode;
-              // 스웜과 상호 배제 — 켜면 스웜은 끈다(둘 다 켜면 실행 경로가 겹친다).
-              const prev = chat;
-              setChat({ ...chat, continuousMode: next, swarmMode: next ? false : chat.swarmMode });
-              const api = ipc();
-              if (next && chat.swarmMode) void api?.chats.setSwarmMode(chat.id, false);
-              void api?.chats
-                .setContinuousMode(chat.id, next)
-                .then((updated: Chat | null) => {
-                  if (updated) setChat({ ...updated, swarmMode: next ? false : updated.swarmMode });
-                })
-                .catch(() => setChat(prev));
-            }}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              padding: "4px 10px",
-              borderRadius: 999,
-              border: "1px solid var(--paper-edge)",
-              background: chat.continuousMode ? "var(--accent)" : "var(--paper)",
-              color: chat.continuousMode ? "#fff" : "var(--ink)",
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            <span
-              aria-hidden
-              style={{
-                width: 6,
-                height: 6,
-                borderRadius: "50%",
-                background: chat.continuousMode ? "#fff" : "var(--muted-deep)",
-              }}
-            />
-            {locale === "ko" ? "계속 라이브로" : "Keep going live"}
-          </button>
-        )}
-        {chat && chat.kind !== "division" && (
-          <button
-            type="button"
-            title={
-              locale === "ko"
-                ? "켜면 목표를 여러 작업으로 쪼개 여러 에이전트가 동시에 협업합니다. 동시 실행 수는 설정의 슬라이더로 조절."
-                : "When on, the goal is split into tasks and multiple agents collaborate in parallel. Adjust parallelism in Settings."
-            }
-            onClick={() => {
-              const next = !chat.swarmMode;
-              // 계속-라이브와 상호 배제 — 켜면 그건 끈다.
-              const prev = chat;
-              setChat({ ...chat, swarmMode: next, continuousMode: next ? false : chat.continuousMode });
-              const api = ipc();
-              if (next && chat.continuousMode) void api?.chats.setContinuousMode(chat.id, false);
-              void api?.chats
-                .setSwarmMode(chat.id, next)
-                .then((updated: Chat | null) => {
-                  if (updated) setChat({ ...updated, continuousMode: next ? false : updated.continuousMode });
-                })
-                .catch(() => setChat(prev));
-            }}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              padding: "4px 10px",
-              borderRadius: 999,
-              border: "1px solid var(--paper-edge)",
-              background: chat.swarmMode ? "var(--accent-2, var(--accent))" : "var(--paper)",
-              color: chat.swarmMode ? "#fff" : "var(--ink)",
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            <span aria-hidden>🐝</span>
-            {locale === "ko" ? "스웜" : "Swarm"}
-          </button>
-        )}
+        {/* 계속 라이브로(continuousMode)·스웜(swarmMode) 토글은 입력창 + 메뉴로 통합됨.
+            켜진 모드는 + 버튼 옆 컴팩트 칩으로 표시된다(ChatInput). */}
       </div>
       <div data-tour-id="workspace.input" style={{ flexShrink: 0, minWidth: 0 }}>
         <ChatInput
           onSend={(text, opts) => {
-            void send(text, {
+            // busy면 큐잉(steering), 아니면 즉시 전송 — 실행 중에도 엔터가 먹히게.
+            submitOrQueue(text, {
               images: opts?.images,
               permissions: opts?.permissions,
               planMode: opts?.planMode,
@@ -2391,6 +2383,7 @@ function ChatPage() {
               appsGenerateMode: opts?.appsGenerateMode,
             });
           }}
+          queuedCount={queuedSteers.length}
           onCommand={handleCommand}
           onCallAgent={(agentId) => void switchAgent(agentId)}
           onRecommendPreview={handleRecommendPreview}
@@ -2414,6 +2407,37 @@ function ChatPage() {
           onSelectModel={switchModel}
           onSelectEffort={switchEffort}
           tokensUsage={{ current: currentTokens, limit: maxTokens }}
+          showModeToggles={chat.kind !== "division"}
+          continuousMode={chat.continuousMode === true}
+          swarmMode={chat.swarmMode === true}
+          onToggleContinuous={() => {
+            const next = !chat.continuousMode;
+            // 스웜과 상호 배제 — 켜면 스웜은 끈다.
+            const prev = chat;
+            setChat({ ...chat, continuousMode: next, swarmMode: next ? false : chat.swarmMode });
+            const api = ipc();
+            if (next && chat.swarmMode) void api?.chats.setSwarmMode(chat.id, false);
+            void api?.chats
+              .setContinuousMode(chat.id, next)
+              .then((updated: Chat | null) => {
+                if (updated) setChat({ ...updated, swarmMode: next ? false : updated.swarmMode });
+              })
+              .catch(() => setChat(prev));
+          }}
+          onToggleSwarm={() => {
+            const next = !chat.swarmMode;
+            // 계속-라이브와 상호 배제 — 켜면 그건 끈다.
+            const prev = chat;
+            setChat({ ...chat, swarmMode: next, continuousMode: next ? false : chat.continuousMode });
+            const api = ipc();
+            if (next && chat.continuousMode) void api?.chats.setContinuousMode(chat.id, false);
+            void api?.chats
+              .setSwarmMode(chat.id, next)
+              .then((updated: Chat | null) => {
+                if (updated) setChat({ ...updated, continuousMode: next ? false : updated.continuousMode });
+              })
+              .catch(() => setChat(prev));
+          }}
         />
       </div>
       </div>

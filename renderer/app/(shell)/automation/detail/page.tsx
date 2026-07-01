@@ -1,6 +1,7 @@
 // 자동화 상세 — 메타데이터 + 토글 + 삭제.
 "use client";
 import { Suspense, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
@@ -123,6 +124,23 @@ function AutomationDetailPage() {
         <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 17, fontWeight: 700, flex: 1 }}>
           {automation.name}
         </h1>
+        <Link
+          href={`/automation/flow?id=${encodeURIComponent(automation.id)}`}
+          className="titlebar-nodrag"
+          style={{
+            padding: "6px 14px",
+            borderRadius: "var(--radius-md)",
+            fontSize: 12,
+            fontWeight: 600,
+            border: "1px solid var(--paper-edge)",
+            background: "var(--paper)",
+            color: "var(--ink)",
+            boxShadow: "var(--neu-raised)",
+            textDecoration: "none",
+          }}
+        >
+          {t("auto.flow.view")}
+        </Link>
         <button
           onClick={() => void toggle()}
           className="titlebar-nodrag"

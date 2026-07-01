@@ -12,6 +12,7 @@ import { app, session } from "electron";
 import type { ChildProcess } from "node:child_process";
 import { withCliPath } from "../runtime/exec";
 import { resolveHephaestusPython } from "./engine";
+import { currentUiLocale } from "../main";
 
 let cachedRoot: string | null | undefined;
 let proc: ChildProcess | null = null;
@@ -274,15 +275,16 @@ export function startStudio(): Promise<StudioStartResult> {
 }
 
 async function startStudioInner(): Promise<StudioStartResult> {
+  const ko = currentUiLocale() === "ko";
   installStudioMediaGuard();
   if (proc && activeUrl) {
     if (await probeManifest(Number(new URL(activeUrl).port))) return { ok: true, url: activeUrl };
     stopStudio();
   }
   const root = studioRoot();
-  if (!root) return { ok: false, reason: "스튜디오 패키지(studio-pack)를 찾을 수 없습니다." };
+  if (!root) return { ok: false, reason: ko ? "스튜디오 패키지(studio-pack)를 찾을 수 없습니다." : "Could not find the studio package (studio-pack)." };
   const py = await resolveHephaestusPython();
-  if (!py) return { ok: false, reason: "Python 3.9+ 를 찾을 수 없습니다." };
+  if (!py) return { ok: false, reason: ko ? "Python 3.9+ 를 찾을 수 없습니다." : "Could not find Python 3.9+." };
 
   // 쓰기 가능한 로컬 런타임 루트(userData)에서 구동 — 데이터는 전부 로컬, 블랭크 시작.
   const runRoot = ensureWritablePack(root);
@@ -291,10 +293,15 @@ async function startStudioInner(): Promise<StudioStartResult> {
   try {
     const launcherSrc = fs.readFileSync(path.join(runRoot, "scripts", "open-studio-gui.py"), "utf8");
     if (!launcherSrc.includes("studio_request_authorized")) {
-      return { ok: false, reason: "스튜디오 런처에 보안 인증 게이트가 없어 시작을 거부했습니다(런처 재패치 필요)." };
+      return {
+        ok: false,
+        reason: ko
+          ? "스튜디오 런처에 보안 인증 게이트가 없어 시작을 거부했습니다(런처 재패치 필요)."
+          : "Refused to start — the studio launcher is missing its security auth gate (needs re-patching).",
+      };
     }
   } catch {
-    return { ok: false, reason: "스튜디오 런처를 읽을 수 없습니다." };
+    return { ok: false, reason: ko ? "스튜디오 런처를 읽을 수 없습니다." : "Could not read the studio launcher." };
   }
   // 첫 실행이면 "유효하지만 빈" board 를 시드한다. SPA 는 유효 board 를 받으면 baked 데모 샘플 대신
   // 이 빈 board 를 렌더한다(목업/외부 미디어 없음). 기존 세션 데이터가 있으면 보존(로컬 누적).
@@ -361,7 +368,7 @@ async function startStudioInner(): Promise<StudioStartResult> {
     await new Promise((r) => setTimeout(r, 400));
   }
   stopStudio();
-  return { ok: false, reason: "스튜디오 서버 시작 시간 초과." };
+  return { ok: false, reason: ko ? "스튜디오 서버 시작 시간 초과." : "Timed out starting the studio server." };
 }
 
 export function stopStudio(): void {

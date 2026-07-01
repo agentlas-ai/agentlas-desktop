@@ -275,12 +275,28 @@ export const CONTEXT_MANAGED_BY: Record<RuntimeKind, "runtime" | "agentlas"> = {
 //
 // 헤드리스(-p) 한계: Claude Code의 인터랙티브 메뉴에 있는 "빠른 모드"와 `model[1m]`(1M) 변형은
 // CLI 플래그가 없어 옮길 수 없다. 대신 claude는 `--effort`(작업량)를 지원한다.
+/** 보조 표기 키. 라벨은 하드코딩하지 말고 cliModelTagLabel()로 로케일 변환. */
+export type CliModelTag = "legacy";
+
 export interface CliModelOption {
   /** CLI 모델 플래그에 전달하는 값. claude는 opus/sonnet/haiku 별칭 또는 풀ID(claude-opus-4-7 등) */
   id: string;
   label: string;
-  /** "레거시" 같은 보조 표기 */
-  tag?: string;
+  /** 보조 표기 키(로케일 무관). 표시 라벨은 cliModelTagLabel(tag, locale). */
+  tag?: CliModelTag;
+}
+
+// tag 키 → 로케일별 표시 라벨. IPC로는 키만 넘기고, 렌더러에서 로케일에 맞춰 변환.
+const CLI_MODEL_TAG_LABELS: Record<CliModelTag, { ko: string; en: string }> = {
+  legacy: { ko: "레거시", en: "Legacy" },
+};
+
+/** CLI 모델의 보조 표기(tag)를 로케일 라벨로. tag 없으면 빈 문자열. */
+export function cliModelTagLabel(tag: string | undefined, locale: string): string {
+  if (!tag) return "";
+  const entry = CLI_MODEL_TAG_LABELS[tag as CliModelTag];
+  if (!entry) return tag;
+  return locale === "ko" ? entry.ko : entry.en;
 }
 
 // 모델 ID/라벨은 여기서만 관리 — 새 세대는 이 배열에 한 줄. 잘못된 ID는 CLI가 거부할 뿐 크래시 없음.
@@ -290,8 +306,8 @@ export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
     { id: "opus", label: "Opus 4.8" },
     { id: "sonnet", label: "Sonnet 4.6" },
     { id: "haiku", label: "Haiku 4.5" },
-    { id: "claude-opus-4-7", label: "Opus 4.7", tag: "레거시" },
-    { id: "claude-opus-4-6", label: "Opus 4.6", tag: "레거시" },
+    { id: "claude-opus-4-7", label: "Opus 4.7", tag: "legacy" },
+    { id: "claude-opus-4-6", label: "Opus 4.6", tag: "legacy" },
   ],
   // Codex — `codex exec -m <model>`. 구독 기본 외 명시 모델.
   codex: [

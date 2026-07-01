@@ -3,11 +3,18 @@
 // 계획 단계만으로도 즉시 쓸 수 있는 산출물을 만든다. 수백~수천 샷 프롬프트는
 // 어떤 영상툴(Veo/Runway/Luma/Pika 등)에든 붙여 바로 생성할 수 있다.
 
+import type { Locale } from "@/lib/i18n";
 import { toSrt, toVtt } from "./audio-dialogue";
 import { providerById } from "./providers";
 import { SHOT_SIZES } from "./taxonomy";
 import { FONT_LIBRARY, captionStyleHint, googleFontsHref } from "./typography";
 import type { FilmProduction, ShotSpec } from "./types";
+
+/** provider.bestFor의 en 짝(bestForEn)이 아직 카탈로그에 없을 수 있어 구조적으로 안전하게 읽는다. */
+function localizedBestFor(p: { bestFor: string; bestForEn?: string } | undefined, locale: Locale): string {
+  if (!p) return "";
+  return locale === "ko" ? p.bestFor : p.bestForEn || p.bestFor;
+}
 
 function csvCell(v: string | number): string {
   const s = String(v ?? "");
@@ -60,7 +67,7 @@ export function exportPromptPack(prod: FilmProduction): string {
 }
 
 /** Continuity Bible — Markdown. 제작팀 공유용 do-not-change 문서. */
-export function exportBibleMarkdown(prod: FilmProduction): string {
+export function exportBibleMarkdown(prod: FilmProduction, locale: Locale = "ko"): string {
   const b = prod.bible;
   const lines: string[] = [];
   lines.push(`# ${prod.brief.title} — Continuity Bible`);
@@ -68,7 +75,7 @@ export function exportBibleMarkdown(prod: FilmProduction): string {
   lines.push(`**Film Stock / Grade:** ${b.filmStock}`);
   lines.push(`**Lighting:** ${b.lightingStyle}`);
   lines.push(`**Palette:** ${b.colorPalette.map((c) => `${c.name} (${c.hex})`).join(", ")}`);
-  lines.push(`\n## Global — 절대 변경 금지`);
+  lines.push(`\n## Global — ${locale === "ko" ? "절대 변경 금지" : "Absolute Do-Not-Change"}`);
   b.globalMustKeep.forEach((k) => lines.push(`- ✅ KEEP: ${k}`));
   b.globalMustAvoid.forEach((k) => lines.push(`- ⛔ AVOID: ${k}`));
   lines.push(`\n## References (${b.references.length})`);
@@ -99,7 +106,7 @@ export function exportProductionJson(prod: FilmProduction): string {
 }
 
 /** 프로바이더 라우팅 매트릭스 요약 (제작 비용 리포트). */
-export function exportRoutingMatrix(prod: FilmProduction): string {
+export function exportRoutingMatrix(prod: FilmProduction, locale: Locale = "ko"): string {
   const counts = new Map<string, { shots: number; cost: number }>();
   for (const s of prod.shots) {
     const cur = counts.get(s.providerId) ?? { shots: 0, cost: 0 };
@@ -110,7 +117,7 @@ export function exportRoutingMatrix(prod: FilmProduction): string {
   const lines = ["provider,shots,est_cost_usd,best_for"];
   for (const [id, v] of counts) {
     const p = providerById(id);
-    lines.push([id, v.shots, v.cost.toFixed(2), p?.bestFor ?? ""].map(csvCell).join(","));
+    lines.push([id, v.shots, v.cost.toFixed(2), localizedBestFor(p, locale)].map(csvCell).join(","));
   }
   return lines.join("\n");
 }
@@ -126,11 +133,15 @@ export function exportSubtitlesVtt(prod: FilmProduction): string {
 }
 
 /** 타이포그래피 키트 — 타이틀/자막/로어서드 폰트 스펙 문서. */
-export function exportTypographyKit(prod: FilmProduction): string {
+export function exportTypographyKit(prod: FilmProduction, locale: Locale = "ko"): string {
   const kit = prod.typography;
   const lines: string[] = [`# ${prod.brief.title} — Typography Kit`];
   if (!kit) {
-    lines.push("\n(타이포그래피 키트 없음 — 구버전 프로젝트일 수 있습니다.)");
+    lines.push(
+      locale === "ko"
+        ? "\n(타이포그래피 키트 없음 — 구버전 프로젝트일 수 있습니다.)"
+        : "\n(No typography kit — this may be a legacy project.)",
+    );
     return lines.join("\n");
   }
   lines.push(`\n**Rationale:** ${kit.rationale}`);
@@ -157,16 +168,16 @@ export interface ExportFile {
   mime: string;
 }
 
-export function buildAllExports(prod: FilmProduction): ExportFile[] {
+export function buildAllExports(prod: FilmProduction, locale: Locale = "ko"): ExportFile[] {
   const slug = prod.brief.title.replace(/[^\w가-힣]+/g, "_").slice(0, 40) || "oberon";
   const files: ExportFile[] = [
     { name: `${slug}_shotlist.csv`, content: exportShotListCsv(prod), mime: "text/csv" },
     { name: `${slug}_prompt_pack.txt`, content: exportPromptPack(prod), mime: "text/plain" },
-    { name: `${slug}_continuity_bible.md`, content: exportBibleMarkdown(prod), mime: "text/markdown" },
-    { name: `${slug}_routing.csv`, content: exportRoutingMatrix(prod), mime: "text/csv" },
+    { name: `${slug}_continuity_bible.md`, content: exportBibleMarkdown(prod, locale), mime: "text/markdown" },
+    { name: `${slug}_routing.csv`, content: exportRoutingMatrix(prod, locale), mime: "text/csv" },
     { name: `${slug}_edl.txt`, content: exportEdl(prod), mime: "text/plain" },
     { name: `${slug}_production.json`, content: exportProductionJson(prod), mime: "application/json" },
-    { name: `${slug}_typography.md`, content: exportTypographyKit(prod), mime: "text/markdown" },
+    { name: `${slug}_typography.md`, content: exportTypographyKit(prod, locale), mime: "text/markdown" },
   ];
   // 대사가 있을 때만 자막 파일 추가.
   if ((prod.subtitleCues?.length ?? 0) > 0) {

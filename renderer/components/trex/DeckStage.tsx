@@ -149,7 +149,12 @@ function BlockView({
   if (b.kind === "kicker") inner = <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.4), letterSpacing: ".28em", fontWeight: 800, textTransform: "uppercase", color: b.accent ? accent : muted }}>{b.text}</div>;
   else if (b.kind === "title") inner = <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 3.4), fontWeight: b.weight ?? 800, lineHeight: 1.12, letterSpacing: "-.02em", color: b.accent ? accent : ink, wordBreak: "keep-all", textAlign: b.align ?? "left" }}>{b.text}</div>;
   else if (b.kind === "subtitle" || b.kind === "body")
-    inner = (
+    inner = b.inline ? (
+      <div style={{ display: "flex", alignItems: "baseline", gap: cqw(1.8), wordBreak: "keep-all" }}>
+        {b.label && <span style={{ fontSize: cqw((b.size ?? 1.7) * 1.02), fontWeight: 800, color: accent, fontVariantNumeric: "tabular-nums", flexShrink: 0, letterSpacing: "-.01em" }}>{b.label}</span>}
+        <span {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.7), lineHeight: 1.28, color: withAlpha(ink, 0.92), fontWeight: 600 }}>{b.text}</span>
+      </div>
+    ) : (
       <div style={{ wordBreak: "keep-all", textAlign: b.align ?? "left" }}>
         {b.label && <div style={{ fontSize: cqw(1.5), fontWeight: 800, color: accent, marginBottom: cqw(0.5) }}>{b.label}</div>}
         <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.5), lineHeight: 1.5, color: b.kind === "subtitle" ? muted : withAlpha(ink, 0.86), fontWeight: 500 }}>{b.text}</div>

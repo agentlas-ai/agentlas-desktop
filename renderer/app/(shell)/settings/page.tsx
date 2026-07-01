@@ -13,6 +13,7 @@ import type {
   RuntimeBackend,
   RuntimeStatus,
   UpdaterState,
+  LaunchdStatus,
 } from "@/lib/types";
 import {
   type ByokBackend,
@@ -37,7 +38,7 @@ const BYOK_BACKENDS: ByokBackend[] = [
   "custom",
 ];
 
-const BACKEND_LABEL: Record<RuntimeBackend, string> = {
+const BACKEND_LABEL_KO: Record<RuntimeBackend, string> = {
   anthropic: "Anthropic (Claude)",
   openai: "OpenAI (ChatGPT)",
   google: "Google (Gemini)",
@@ -49,7 +50,23 @@ const BACKEND_LABEL: Record<RuntimeBackend, string> = {
   deepseek: "DeepSeek",
 };
 
-const BACKEND_KEY_HINT: Record<ByokBackend, string> = {
+const BACKEND_LABEL_EN: Record<RuntimeBackend, string> = {
+  anthropic: "Anthropic (Claude)",
+  openai: "OpenAI (ChatGPT)",
+  google: "Google (Gemini)",
+  ollama: "Ollama (local)",
+  upstage: "Upstage Solar (🇰🇷 Korean sovereign)",
+  custom: "Custom OpenAI (compatible model)",
+  glm: "GLM (Z.ai)",
+  kimi: "Kimi (Moonshot)",
+  deepseek: "DeepSeek",
+};
+
+function backendLabel(b: RuntimeBackend, locale: string): string {
+  return (locale === "ko" ? BACKEND_LABEL_KO : BACKEND_LABEL_EN)[b];
+}
+
+const BACKEND_KEY_HINT_KO: Record<ByokBackend, string> = {
   anthropic: "console.anthropic.com/settings/keys",
   openai: "platform.openai.com/api-keys",
   google: "aistudio.google.com/app/apikey",
@@ -59,6 +76,21 @@ const BACKEND_KEY_HINT: Record<ByokBackend, string> = {
   kimi: "platform.moonshot.ai · 구독 코딩 플랜",
   deepseek: "platform.deepseek.com/api_keys · 종량제",
 };
+
+const BACKEND_KEY_HINT_EN: Record<ByokBackend, string> = {
+  anthropic: "console.anthropic.com/settings/keys",
+  openai: "platform.openai.com/api-keys",
+  google: "aistudio.google.com/app/apikey",
+  upstage: "console.upstage.ai/api-keys",
+  custom: "Your Base URL's Provider",
+  glm: "z.ai/subscribe · subscription coding plan",
+  kimi: "platform.moonshot.ai · subscription coding plan",
+  deepseek: "platform.deepseek.com/api_keys · pay-as-you-go",
+};
+
+function backendKeyHint(b: ByokBackend, locale: string): string {
+  return (locale === "ko" ? BACKEND_KEY_HINT_KO : BACKEND_KEY_HINT_EN)[b];
+}
 
 const RUNTIME_LABEL: Record<string, string> = {
   "claude-code": "Claude Code CLI",
@@ -452,6 +484,8 @@ export default function SettingsPage() {
           </>
         )}
 
+        <LaunchdPanel />
+
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
           {t("settings.detected")}
         </h2>
@@ -508,7 +542,7 @@ export default function SettingsPage() {
               />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 600, fontSize: 13 }}>
-                  {(s.kind === "byok" ? t("settings.runtime.byok") : RUNTIME_LABEL[s.kind] ?? s.kind)} · {BACKEND_LABEL[s.backend]}
+                  {(s.kind === "byok" ? t("settings.runtime.byok") : RUNTIME_LABEL[s.kind] ?? s.kind)} · {backendLabel(s.backend, locale)}
                 </div>
                 <div style={{ fontSize: 11, color: "var(--muted-deep)" }}>
                   {s.source}
@@ -652,7 +686,7 @@ export default function SettingsPage() {
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <strong style={{ fontSize: 13 }}>{BACKEND_LABEL[b]}</strong>
+              <strong style={{ fontSize: 13 }}>{backendLabel(b, locale)}</strong>
               {hasKey[b] && (
                 <span
                   style={{
@@ -689,7 +723,7 @@ export default function SettingsPage() {
                 type="password"
                 value={draftKey[b]}
                 onChange={(e) => setDraftKey((d) => ({ ...d, [b]: e.target.value }))}
-                placeholder={`sk-...  (${BACKEND_KEY_HINT[b]})`}
+                placeholder={`sk-...  (${backendKeyHint(b, locale)})`}
                 style={{
                   flex: 1,
                   padding: "8px 12px",
@@ -1233,6 +1267,89 @@ function ByokModelControls({
         </div>
       )}
     </div>
+  );
+}
+
+// ── launchd "앱 꺼져도 실행"(opt-in, macOS) ────────────────
+function LaunchdPanel() {
+  const { t, locale } = useT();
+  const [status, setStatus] = useState<LaunchdStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    const api = ipc();
+    if (!api) return;
+    void api.launchd?.status().then(setStatus).catch(() => {});
+  }, []);
+
+  async function toggle(on: boolean) {
+    const api = ipc();
+    if (!api || busy) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      const next = on ? await api.launchd.enable() : await api.launchd.disable();
+      setStatus(next);
+      if (next.error) setMsg(next.error);
+    } catch (err) {
+      setMsg(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // 미지원(비-macOS 또는 비패키지 빌드)이면 패널 자체를 숨긴다.
+  if (status && !status.supported) return null;
+
+  const on = !!status?.loaded;
+  return (
+    <>
+      <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
+        {t("settings.launchd.title")}
+      </h2>
+      <div
+        style={{
+          padding: 14,
+          border: "1px solid var(--paper-edge)",
+          borderRadius: "var(--radius-md)",
+          background: "var(--paper)",
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+        }}
+      >
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.55 }}>{t("settings.launchd.note")}</div>
+          {msg && <div style={{ fontSize: 11.5, color: "var(--red-deep, #b4533a)", marginTop: 6 }}>{msg}</div>}
+        </div>
+        <span style={{ fontSize: 11, fontWeight: 600, color: on ? "var(--green-deep)" : "var(--muted-deep)" }}>
+          {on ? t("settings.launchd.on") : t("settings.launchd.off")}
+        </span>
+        <button
+          onClick={() => void toggle(!on)}
+          disabled={busy || !status}
+          style={{
+            padding: "8px 14px",
+            borderRadius: "var(--radius-md)",
+            fontSize: 12,
+            fontWeight: 700,
+            border: "1px solid var(--paper-edge)",
+            background: busy ? "var(--paper-2)" : "var(--paper)",
+            color: on ? "var(--red-deep, #b4533a)" : "var(--ink)",
+            boxShadow: busy ? "none" : "var(--neu-raised)",
+            cursor: busy ? "default" : "pointer",
+            flexShrink: 0,
+          }}
+        >
+          {busy
+            ? locale === "ko" ? "처리 중…" : "Working…"
+            : on
+              ? t("settings.launchd.disable")
+              : t("settings.launchd.enable")}
+        </button>
+      </div>
+    </>
   );
 }
 

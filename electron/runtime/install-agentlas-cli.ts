@@ -6,6 +6,7 @@ import { app } from "electron";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { currentUiLocale } from "../main";
 
 export interface InstallCliResult {
   ok: boolean;
@@ -18,7 +19,8 @@ function cliScriptPath(): string {
   return path.join(app.getAppPath(), "cli", "agentlas.cjs");
 }
 
-export function installAgentlasCli(): InstallCliResult {
+export function installAgentlasCli(locale: "ko" | "en" = currentUiLocale()): InstallCliResult {
+  const ko = locale === "ko";
   const exec = process.execPath; // Agentlas Electron 바이너리
   const script = cliScriptPath();
 
@@ -33,10 +35,16 @@ export function installAgentlasCli(): InstallCliResult {
       return {
         ok: true,
         path: target,
-        message: onPath ? `설치됨: ${target}` : `설치됨: ${target}\nPATH에 ${dir} 를 추가하세요.`,
+        message: ko
+          ? (onPath ? `설치됨: ${target}` : `설치됨: ${target}\nPATH에 ${dir} 를 추가하세요.`)
+          : (onPath ? `Installed: ${target}` : `Installed: ${target}\nAdd ${dir} to your PATH.`),
       };
     } catch (e) {
-      return { ok: false, path: "", message: `설치 실패: ${(e as Error).message}` };
+      return {
+        ok: false,
+        path: "",
+        message: ko ? `설치 실패: ${(e as Error).message}` : `Install failed: ${(e as Error).message}`,
+      };
     }
   }
 
@@ -52,9 +60,9 @@ export function installAgentlasCli(): InstallCliResult {
       return {
         ok: true,
         path: target,
-        message: onPath
-          ? `설치됨: ${target} — 터미널에서 'agentlas list'`
-          : `설치됨: ${target}\nPATH에 ${dir} 를 추가한 뒤 'agentlas list'`,
+        message: ko
+          ? (onPath ? `설치됨: ${target} — 터미널에서 'agentlas list'` : `설치됨: ${target}\nPATH에 ${dir} 를 추가한 뒤 'agentlas list'`)
+          : (onPath ? `Installed: ${target} — run 'agentlas list' in a terminal` : `Installed: ${target}\nAdd ${dir} to your PATH, then run 'agentlas list'`),
       };
     } catch {
       // 다음 후보로
@@ -63,8 +71,10 @@ export function installAgentlasCli(): InstallCliResult {
   return {
     ok: false,
     path: "",
-    message:
-      "자동 설치 실패(권한). 수동 설치:\n" +
-      `sudo sh -c 'printf %s "${wrapper.replace(/"/g, '\\"')}" > /usr/local/bin/agentlas && chmod +x /usr/local/bin/agentlas'`,
+    message: ko
+      ? "자동 설치 실패(권한). 수동 설치:\n" +
+        `sudo sh -c 'printf %s "${wrapper.replace(/"/g, '\\"')}" > /usr/local/bin/agentlas && chmod +x /usr/local/bin/agentlas'`
+      : "Automatic install failed (permissions). Manual install:\n" +
+        `sudo sh -c 'printf %s "${wrapper.replace(/"/g, '\\"')}" > /usr/local/bin/agentlas && chmod +x /usr/local/bin/agentlas'`,
   };
 }

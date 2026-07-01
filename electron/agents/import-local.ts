@@ -14,6 +14,7 @@ import { analyzeFolder } from "./org-resolver";
 import { saveResolvedOrg } from "../store/org-spec";
 import { detectEnvRequirementsFromFolder } from "./env-detect";
 import type { FirmOrgNode, InstalledAgent, InstalledFirm, ResolvedOrg } from "../../shared/types";
+import { currentUiLocale } from "../main";
 
 const TONES: InstalledAgent["tone"][] = ["blue", "green", "purple", "amber", "peach"];
 
@@ -449,7 +450,11 @@ function registerTeamAsFirm(
 }
 
 /** 로컬 폴더를 분석·등록하고 라우팅 저장. 원본 파일은 건드리지 않는다. */
-export async function importLocalFolder(absPath: string): Promise<LocalImportResult> {
+export async function importLocalFolder(
+  absPath: string,
+  locale: "ko" | "en" = currentUiLocale(),
+): Promise<LocalImportResult> {
+  const ko = locale === "ko";
   const selected = path.resolve(absPath);
   if (!isDir(selected)) throw new Error(`Not a folder: ${absPath}`);
 
@@ -457,7 +462,11 @@ export async function importLocalFolder(absPath: string): Promise<LocalImportRes
   // 그 자체로 에이전트/팀이 아니면 재귀로 실제 루트(들)를 찾는다.
   const roots = locateAgentRoots(selected);
   if (roots.length === 0) {
-    throw new Error("이 폴더 안에서 에이전트를 찾지 못했어요. 에이전트 폴더나 그 상위 폴더를 골라 주세요.");
+    throw new Error(
+      ko
+        ? "이 폴더 안에서 에이전트를 찾지 못했어요. 에이전트 폴더나 그 상위 폴더를 골라 주세요."
+        : "Couldn't find an agent inside this folder. Pick an agent folder or its parent folder.",
+    );
   }
   const selectedIsAgenty = isAgentyDir(selected);
   const junky = JUNK_DIRS.test(path.basename(selected).toLowerCase());
@@ -491,7 +500,9 @@ export async function importLocalFolder(absPath: string): Promise<LocalImportRes
         kind = "agent";
       } else {
         throw new Error(
-          "이 폴더는 팀처럼 보이는데 구성원(에이전트)을 찾지 못했어요. 각 구성원 폴더에 CLAUDE.md · AGENT.md 같은 정의 파일이나 .agentlas 폴더가 있는지 확인해 주세요.",
+          ko
+            ? "이 폴더는 팀처럼 보이는데 구성원(에이전트)을 찾지 못했어요. 각 구성원 폴더에 CLAUDE.md · AGENT.md 같은 정의 파일이나 .agentlas 폴더가 있는지 확인해 주세요."
+            : "This folder looks like a team, but no member agents were found. Check that each member folder has a definition file like CLAUDE.md/AGENT.md or an .agentlas folder.",
         );
       }
     }

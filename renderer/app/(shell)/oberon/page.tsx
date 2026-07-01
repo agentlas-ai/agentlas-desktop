@@ -42,6 +42,7 @@ import {
   type OberonBackgroundJob,
 } from "@/lib/oberon/jobs";
 import { ipc } from "@/lib/ipc";
+import { useT, type Locale } from "@/lib/i18n";
 import { BriefWizard } from "@/components/oberon/BriefWizard";
 import { StudioLanding } from "@/components/oberon/StudioLanding";
 import { ModelSettingsPanel } from "@/components/oberon/ModelSettingsPanel";
@@ -69,6 +70,7 @@ import type {
 } from "@/lib/types";
 
 export default function OberonPage() {
+  const { locale } = useT();
   const [production, setProduction] = useState<FilmProduction | null>(null);
   const [model, setModel] = useState<ModelSettings>(defaultModelSettings());
   const [stepState, setStepState] = useState<Record<OberonStepId, StepState>>({ ...INITIAL_STEP_STATE });
@@ -153,13 +155,13 @@ export default function OberonPage() {
       } else {
         planningRun = fallbackPlanResult(model, "Electron planner bridge is unavailable. Local deterministic planner was used.");
       }
-      const plannedBrief = planningRun.ok ? mergeBriefWithPlan(brief, planningRun.patch) : brief;
-      const prod = planProduction(plannedBrief, { premium });
+      const plannedBrief = planningRun.ok ? mergeBriefWithPlan(brief, planningRun.patch, locale) : brief;
+      const prod = planProduction(plannedBrief, { premium, locale });
       prod.modelSettings = model;
       prod.planningRun = planningRun;
       return prod;
     },
-    [model],
+    [model, locale],
   );
 
   // 00 → CLI 기획 생성
@@ -337,7 +339,7 @@ export default function OberonPage() {
             costUsd: shot?.estCostUsd ?? 0,
             createdAtMs: clip.createdAtMs,
           };
-          if (shot) take.qa = scoreTake(take, shot);
+          if (shot) take.qa = scoreTake(take, shot, locale);
           return take;
         });
       const edl = buildEdl(p.shots, liveTakes);
@@ -360,7 +362,7 @@ export default function OberonPage() {
       if (ns.delivery === "locked") ns.delivery = "active";
       return ns;
     });
-  }, []);
+  }, [locale]);
 
   const pollRenderJob = useCallback(
     (jobId: string) => {
@@ -508,7 +510,12 @@ export default function OberonPage() {
     if (!production) return;
     const bridge = ipc();
     if (!bridge?.oberon?.startKeyframes) {
-      const failedJob = localKeyframeError(production, "Electron Oberon bridge is unavailable. Desktop app에서 다시 실행해야 실제 이미지 생성이 가능합니다.");
+      const failedJob = localKeyframeError(
+        production,
+        locale === "ko"
+          ? "Electron Oberon 브리지를 사용할 수 없습니다. 데스크톱 앱에서 다시 실행해야 실제 이미지 생성이 가능합니다."
+          : "The Electron Oberon bridge is unavailable. Relaunch inside the desktop app to generate real images.",
+      );
       trackOberonLiveJob("keyframe", failedJob);
       setKeyframeJob(failedJob);
       setKfGenerating(false);
@@ -556,14 +563,19 @@ export default function OberonPage() {
         setKfGenerating(false);
         setKeyframeJob(failedJob);
       });
-  }, [model.imageProvider, pollKeyframeJob, production]);
+  }, [locale, model.imageProvider, pollKeyframeJob, production]);
 
   // 05 실제 영상 렌더 — Electron main이 Google Veo 호출과 파일 저장을 담당한다.
   const startVideo = useCallback(() => {
     if (!production) return;
     const bridge = ipc();
     if (!bridge?.oberon) {
-      const failedJob = localRenderError(production, "Electron Oberon bridge is unavailable. Desktop app에서 다시 실행해야 실제 생성이 가능합니다.");
+      const failedJob = localRenderError(
+        production,
+        locale === "ko"
+          ? "Electron Oberon 브리지를 사용할 수 없습니다. 데스크톱 앱에서 다시 실행해야 실제 생성이 가능합니다."
+          : "The Electron Oberon bridge is unavailable. Relaunch inside the desktop app to generate real output.",
+      );
       trackOberonLiveJob("render", failedJob);
       setRenderJob(failedJob);
       setVideoGenerating(false);
@@ -620,13 +632,18 @@ export default function OberonPage() {
         setVideoGenerating(false);
         setRenderJob(failedJob);
       });
-  }, [pollRenderJob, production]);
+  }, [locale, pollRenderJob, production]);
 
   const startMotionAd = useCallback(() => {
     if (!production) return;
     const bridge = ipc();
     if (!bridge?.oberon?.startMotionAd) {
-      const failedJob = localMotionError(production, "Electron Oberon bridge is unavailable. Desktop app에서 다시 실행해야 모션그래픽 렌더가 가능합니다.");
+      const failedJob = localMotionError(
+        production,
+        locale === "ko"
+          ? "Electron Oberon 브리지를 사용할 수 없습니다. 데스크톱 앱에서 다시 실행해야 모션그래픽 렌더가 가능합니다."
+          : "The Electron Oberon bridge is unavailable. Relaunch inside the desktop app to render motion graphics.",
+      );
       trackOberonLiveJob("motion", failedJob);
       setMotionJob(failedJob);
       setMotionGenerating(false);
@@ -669,7 +686,7 @@ export default function OberonPage() {
         setMotionGenerating(false);
         setMotionJob(failedJob);
       });
-  }, [pollMotionJob, production]);
+  }, [locale, pollMotionJob, production]);
 
   const resetVideo = useCallback(() => {
     if (renderPoll.current) clearInterval(renderPoll.current);
@@ -842,7 +859,10 @@ export default function OberonPage() {
         outputDir: "",
         progress: { phase: "failed", percent: 0 },
         files: [],
-        message: "Electron Oberon bridge is unavailable. Desktop app에서 다시 실행해야 애니메이션 생성이 가능합니다.",
+        message:
+          locale === "ko"
+            ? "Electron Oberon 브리지를 사용할 수 없습니다. 데스크톱 앱에서 다시 실행해야 애니메이션 생성이 가능합니다."
+            : "The Electron Oberon bridge is unavailable. Relaunch inside the desktop app to generate animation.",
         error: "Electron Oberon bridge is unavailable.",
         warnings: [],
         createdAtMs: now,
@@ -890,7 +910,7 @@ export default function OberonPage() {
           outputDir: "",
           progress: { phase: "failed", percent: 0 },
           files: [],
-          message: "실패",
+          message: locale === "ko" ? "실패" : "Failed",
           error: error instanceof Error ? error.message : String(error),
           warnings: [],
           createdAtMs: now,
@@ -900,7 +920,7 @@ export default function OberonPage() {
         setAnimateGenerating(false);
         setAnimateJob(failedJob);
       });
-  }, [animateKey, pollAnimateJob, production]);
+  }, [animateKey, locale, pollAnimateJob, production]);
 
   const newProject = useCallback(() => {
     if (keyframePoll.current) clearInterval(keyframePoll.current);
@@ -952,12 +972,12 @@ export default function OberonPage() {
         <div style={{ flex: 1 }} />
         {production && (
           <div className="titlebar-nodrag" style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <StatChip label="샷" value={production.stats.shotCount} />
-            <StatChip label="씬" value={production.stats.sceneCount} />
-            <StatChip label="길이" value={formatDuration(production.stats.totalDurationSec)} />
-            <StatChip label="예상" value={formatCost(production.stats.estTotalCostUsd)} />
+            <StatChip label={locale === "ko" ? "샷" : "Shots"} value={production.stats.shotCount} />
+            <StatChip label={locale === "ko" ? "씬" : "Scenes"} value={production.stats.sceneCount} />
+            <StatChip label={locale === "ko" ? "길이" : "Length"} value={formatDuration(production.stats.totalDurationSec)} />
+            <StatChip label={locale === "ko" ? "예상" : "Est."} value={formatCost(production.stats.estTotalCostUsd)} />
             <button onClick={newProject} style={newBtn}>
-              <Glyph name="plus" size={13} strokeWidth={2.2} /> 새 프로젝트
+              <Glyph name="plus" size={13} strokeWidth={2.2} /> {locale === "ko" ? "새 프로젝트" : "New Project"}
             </button>
           </div>
         )}
@@ -967,6 +987,7 @@ export default function OberonPage() {
         <main style={{ flex: 1, minWidth: 0, display: "flex", minHeight: 0 }}>
           <OberonBackgroundResume
             jobs={backgroundJobs}
+            locale={locale}
             onOpenProduction={(productionId) => {
               const saved = loadProduction(productionId);
               if (saved) loadSaved(saved);
@@ -1023,7 +1044,15 @@ export default function OberonPage() {
           <StepFrame>
             <ShotBoard production={production} editable={!isDone("storyboard")} onUpdateShots={updateShots} />
             <ApproveBar
-              label={isDone("storyboard") ? "스토리보드 승인됨 — 에셋 단계로" : "스토리보드 승인하고 고정 에셋으로"}
+              label={
+                locale === "ko"
+                  ? isDone("storyboard")
+                    ? "스토리보드 승인됨 — 에셋 단계로"
+                    : "스토리보드 승인하고 고정 에셋으로"
+                  : isDone("storyboard")
+                    ? "Storyboard approved — on to assets"
+                    : "Approve storyboard and lock assets"
+              }
               done={isDone("storyboard")}
               onApprove={() => (isDone("storyboard") ? setActive("assets") : complete("storyboard"))}
             />
@@ -1073,10 +1102,14 @@ export default function OberonPage() {
                 }}
               />
             ) : (
-              <MotionMovedPanel title={production.brief.title} />
+              <MotionMovedPanel title={production.brief.title} locale={locale} />
             )}
             {isDone("video") && (
-              <ApproveBar label="영상 확정 — 편집·납품으로" done onApprove={() => setActive("delivery")} />
+              <ApproveBar
+                label={locale === "ko" ? "영상 확정 — 편집·납품으로" : "Video locked — on to edit & delivery"}
+                done
+                onApprove={() => setActive("delivery")}
+              />
             )}
           </StepFrame>
         );
@@ -1094,7 +1127,7 @@ export default function OberonPage() {
   }
 }
 
-function MotionMovedPanel({ title }: { title: string }) {
+function MotionMovedPanel({ title, locale }: { title: string; locale: Locale }) {
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 32px 72px" }}>
       <Card style={{ padding: 22, maxWidth: 760 }}>
@@ -1108,10 +1141,12 @@ function MotionMovedPanel({ title }: { title: string }) {
           </div>
         </div>
         <p style={{ margin: "0 0 16px", color: "var(--ob-ink-soft)", fontSize: 13.5, lineHeight: 1.55 }}>
-          모션그래픽은 이제 영화/애니메이션 파이프라인이 아니라 별도 Agent App에서 실행합니다.
+          {locale === "ko"
+            ? "모션그래픽은 이제 영화/애니메이션 파이프라인이 아니라 별도 Agent App에서 실행합니다."
+            : "Motion graphics now runs as a separate Agent App instead of the film/animation pipeline."}
         </p>
         <Link href="/oberon-motion" className="studio-open studio-open--primary">
-          Oberon Motiongraphic Studio 열기
+          {locale === "ko" ? "Oberon Motiongraphic Studio 열기" : "Open Oberon Motiongraphic Studio"}
           <Glyph name="chevron" size={12} />
         </Link>
       </Card>
@@ -1122,13 +1157,15 @@ function MotionMovedPanel({ title }: { title: string }) {
 function VideoModeSwitch({
   value,
   onChange,
+  locale = "ko",
 }: {
   value: "veo" | "motion_ad";
   onChange: (value: "veo" | "motion_ad") => void;
+  locale?: Locale;
 }) {
   const items: Array<{ id: "veo" | "motion_ad"; label: string; sub: string; icon: "video" | "layers" }> = [
-    { id: "veo", label: "Veo Clips", sub: "실사/시네마틱", icon: "video" },
-    { id: "motion_ad", label: "Motion Ad", sub: "코드 렌더", icon: "layers" },
+    { id: "veo", label: "Veo Clips", sub: locale === "ko" ? "실사/시네마틱" : "Live-action / cinematic", icon: "video" },
+    { id: "motion_ad", label: "Motion Ad", sub: locale === "ko" ? "코드 렌더" : "Code-rendered", icon: "layers" },
   ];
   return (
     <div style={{ flexShrink: 0, display: "flex", gap: 8, alignItems: "center", padding: "14px 32px 0", background: "var(--ob-bg)" }}>
@@ -1171,16 +1208,29 @@ function StepFrame({ children }: { children: React.ReactNode }) {
 function OberonBackgroundResume({
   jobs,
   onOpenProduction,
+  locale,
 }: {
   jobs: OberonBackgroundJob[];
   onOpenProduction: (productionId: string) => void;
+  locale: Locale;
 }) {
   const job = jobs.find(isOberonBackgroundJobActive) ?? jobs[0];
   if (!job) return null;
   const active = isOberonBackgroundJobActive(job);
   const failed = job.status === "failed" || job.status === "cancelled";
   const tone = failed ? "var(--red-deep)" : active ? "var(--ob-accent)" : "var(--green-deep)";
-  const title = active ? "Oberon 만들기가 계속 진행 중입니다" : failed ? "Oberon 작업을 확인해야 합니다" : "Oberon 작업이 완료됐습니다";
+  const title =
+    locale === "ko"
+      ? active
+        ? "Oberon 만들기가 계속 진행 중입니다"
+        : failed
+          ? "Oberon 작업을 확인해야 합니다"
+          : "Oberon 작업이 완료됐습니다"
+      : active
+        ? "Your Oberon build is still running"
+        : failed
+          ? "An Oberon job needs your attention"
+          : "Your Oberon job is complete";
   const canOpen = !!job.productionId && !active;
 
   return (
@@ -1253,7 +1303,9 @@ function OberonBackgroundResume({
           />
         </div>
         <div style={{ marginTop: 14, color: "var(--ob-ink-soft)", fontSize: 12.5, lineHeight: 1.5 }}>
-          뒤로가기를 해도 작업은 앱 안에서 계속 이어집니다. 완료되면 이 화면이 저장된 프로젝트로 다시 연결합니다.
+          {locale === "ko"
+            ? "뒤로가기를 해도 작업은 앱 안에서 계속 이어집니다. 완료되면 이 화면이 저장된 프로젝트로 다시 연결합니다."
+            : "The job keeps running inside the app even if you navigate away. Once it finishes, this screen reconnects to the saved project."}
         </div>
         <div style={{ marginTop: 18, display: "flex", justifyContent: "flex-end" }}>
           <button
@@ -1272,7 +1324,7 @@ function OberonBackgroundResume({
               cursor: canOpen ? "pointer" : "default",
             }}
           >
-            프로젝트 열기
+            {locale === "ko" ? "프로젝트 열기" : "Open Project"}
           </button>
         </div>
       </div>
@@ -1425,7 +1477,7 @@ const GENRES = new Set<FilmBrief["genre"]>([
 ]);
 const ASPECTS = new Set<FilmBrief["aspect"]>(["16:9", "9:16", "1:1", "2.39:1", "4:5"]);
 
-function mergeBriefWithPlan(brief: FilmBrief, patch?: JsonObject): FilmBrief {
+function mergeBriefWithPlan(brief: FilmBrief, patch?: JsonObject, locale: Locale = "ko"): FilmBrief {
   if (!patch) return brief;
   const next: FilmBrief = {
     ...brief,
@@ -1479,7 +1531,7 @@ function mergeBriefWithPlan(brief: FilmBrief, patch?: JsonObject): FilmBrief {
         .filter((item): item is JsonObject => !!item && typeof item === "object" && !Array.isArray(item))
         .map((item) => ({
           name: typeof item.name === "string" && item.name.trim() ? item.name.trim() : "Character",
-          role: typeof item.role === "string" && item.role.trim() ? item.role.trim() : "등장인물",
+          role: typeof item.role === "string" && item.role.trim() ? item.role.trim() : locale === "ko" ? "등장인물" : "Character",
           description: typeof item.description === "string" ? item.description.trim() : "",
         }))
         .filter((item) => item.name)

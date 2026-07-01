@@ -8,6 +8,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
 import { readEnvVar, hasEnvVar } from "../secrets/vault";
+import { currentUiLocale } from "../main";
 import type {
   OberonAnimateFile,
   OberonAnimateJob,
@@ -33,6 +34,7 @@ export async function animateKeyStatus(): Promise<OberonAnimateKeyStatus> {
 }
 
 export function startOberonAnimate(request: OberonAnimateRequest): OberonAnimateJob {
+  const ko = currentUiLocale() === "ko";
   const id = randomUUID();
   const provider: OberonAnimateProvider = request.provider ?? "runway";
   const model = request.model || (provider === "runway" ? "gen4_turbo" : "ray-2");
@@ -49,7 +51,7 @@ export function startOberonAnimate(request: OberonAnimateRequest): OberonAnimate
     outputDir,
     progress: { phase: "queued", percent: 0 },
     files: [],
-    message: "준비 중",
+    message: ko ? "준비 중" : "Preparing",
     warnings: [],
     createdAtMs: now,
     updatedAtMs: now,
@@ -67,10 +69,11 @@ export function getOberonAnimateJob(id: string): OberonAnimateJob | null {
 export function cancelOberonAnimate(id: string): OberonAnimateJob | null {
   const job = jobs.get(id);
   if (!job) return null;
+  const ko = currentUiLocale() === "ko";
   cancelledJobs.add(id);
   job.status = "cancelled";
   job.progress.phase = "cancelled";
-  job.message = "취소됨";
+  job.message = ko ? "취소됨" : "Cancelled";
   job.updatedAtMs = Date.now();
   return snapshot(job);
 }
@@ -84,19 +87,35 @@ export async function openOberonAnimateOutput(id: string): Promise<{ ok: boolean
 }
 
 async function runAnimateJob(id: string, request: OberonAnimateRequest): Promise<void> {
+  const ko = currentUiLocale() === "ko";
   const job = requireJob(id);
   const prompt = (request.prompt || "").trim();
-  if (!prompt) throw new Error("모션 프롬프트가 비어 있습니다. 무엇을 어떻게 움직일지 적어주세요.");
+  if (!prompt) {
+    throw new Error(
+      ko
+        ? "모션 프롬프트가 비어 있습니다. 무엇을 어떻게 움직일지 적어주세요."
+        : "The motion prompt is empty. Describe what should move and how.",
+    );
+  }
 
   const keyName = job.provider === "runway" ? RUNWAY_KEY : LUMA_KEY;
   const key = await readEnvVar(keyName);
   if (!key) {
     // no-fallback: 키 없으면 명시적으로 막는다(다른 provider로 몰래 떨어지지 않음).
-    throw new Error(`${keyName} 미설정 — Environment Keys에 ${job.provider.toUpperCase()} API 키를 추가하세요.`);
+    throw new Error(
+      ko
+        ? `${keyName} 미설정 — Environment Keys에 ${job.provider.toUpperCase()} API 키를 추가하세요.`
+        : `${keyName} is not set — add a ${job.provider.toUpperCase()} API key in Environment Keys.`,
+    );
   }
 
   await fs.mkdir(job.outputDir, { recursive: true });
-  updateJob(job, { status: "running", phase: "submitting", message: `${job.provider} 제출 중`, percent: 5 });
+  updateJob(job, {
+    status: "running",
+    phase: "submitting",
+    message: ko ? `${job.provider} 제출 중` : `Submitting to ${job.provider}`,
+    percent: 5,
+  });
   assertNotCancelled(id);
 
   const videoUrl =
@@ -105,14 +124,15 @@ async function runAnimateJob(id: string, request: OberonAnimateRequest): Promise
       : await runLuma(job, request, key, prompt);
 
   assertNotCancelled(id);
-  updateJob(job, { phase: "downloading", message: "결과 영상 다운로드 중", percent: 92 });
+  updateJob(job, { phase: "downloading", message: ko ? "결과 영상 다운로드 중" : "Downloading the result video", percent: 92 });
   const file = await downloadVideo(job, videoUrl);
   job.files.push(file);
-  updateJob(job, { status: "succeeded", phase: "complete", message: "애니메이션 완료", percent: 100 });
+  updateJob(job, { status: "succeeded", phase: "complete", message: ko ? "애니메이션 완료" : "Animation complete", percent: 100 });
 }
 
 // ── Runway (gen4_turbo, image_to_video) ──────────────────────
 async function runRunway(job: OberonAnimateJob, request: OberonAnimateRequest, key: string, prompt: string): Promise<string> {
+  const ko = currentUiLocale() === "ko";
   const promptImage = await resolveRunwayImage(request);
   const headers = {
     Authorization: `Bearer ${key}`,
@@ -127,42 +147,53 @@ async function runRunway(job: OberonAnimateJob, request: OberonAnimateRequest, k
     duration: clampDuration(request.durationSec),
   };
   const res = await fetch(`${RUNWAY_BASE}/v1/image_to_video`, { method: "POST", headers, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(`Runway 제출 실패 (HTTP ${res.status}): ${truncate(await res.text())}`);
+  if (!res.ok) {
+    throw new Error(
+      ko
+        ? `Runway 제출 실패 (HTTP ${res.status}): ${truncate(await res.text())}`
+        : `Runway submission failed (HTTP ${res.status}): ${truncate(await res.text())}`,
+    );
+  }
   const json = (await res.json()) as { id?: string };
   const taskId = json.id;
-  if (!taskId) throw new Error("Runway 응답에 task id가 없습니다.");
+  if (!taskId) throw new Error(ko ? "Runway 응답에 task id가 없습니다." : "The Runway response did not include a task id.");
 
-  updateJob(job, { phase: "generating", message: "Runway 생성 중", percent: 25 });
+  updateJob(job, { phase: "generating", message: ko ? "Runway 생성 중" : "Runway generating", percent: 25 });
   for (let i = 0; i < MAX_POLLS; i++) {
     assertNotCancelled(job.id);
     await sleep(POLL_MS);
     const poll = await fetch(`${RUNWAY_BASE}/v1/tasks/${taskId}`, { headers });
     if (!poll.ok) {
       if (poll.status === 429) continue; // throttled
-      throw new Error(`Runway 폴링 실패 (HTTP ${poll.status})`);
+      throw new Error(ko ? `Runway 폴링 실패 (HTTP ${poll.status})` : `Runway polling failed (HTTP ${poll.status})`);
     }
     const data = (await poll.json()) as { status?: string; output?: string[]; failure?: string; failureCode?: string };
     const status = String(data.status || "").toUpperCase();
     if (status === "SUCCEEDED") {
       const url = data.output?.[0];
-      if (!url) throw new Error("Runway 완료됐으나 결과 URL이 없습니다.");
+      if (!url) throw new Error(ko ? "Runway 완료됐으나 결과 URL이 없습니다." : "Runway completed but returned no result URL.");
       return url;
     }
     if (status === "FAILED" || status === "CANCELED" || status === "EXPIRED") {
-      throw new Error(`Runway 생성 실패: ${data.failure || data.failureCode || status}`);
+      throw new Error(
+        ko ? `Runway 생성 실패: ${data.failure || data.failureCode || status}` : `Runway generation failed: ${data.failure || data.failureCode || status}`,
+      );
     }
     updateJob(job, { percent: Math.min(90, 25 + Math.round((i / MAX_POLLS) * 65)) });
   }
-  throw new Error("Runway 생성 시간 초과(약 10분).");
+  throw new Error(ko ? "Runway 생성 시간 초과(약 10분)." : "Runway generation timed out (~10 minutes).");
 }
 
 async function resolveRunwayImage(request: OberonAnimateRequest): Promise<string> {
+  const ko = currentUiLocale() === "ko";
   if (request.imageUrl && /^https:\/\//i.test(request.imageUrl)) return request.imageUrl;
   if (request.imagePath) {
     const buf = await fs.readFile(request.imagePath);
     return `data:${mimeForPath(request.imagePath)};base64,${buf.toString("base64")}`;
   }
-  throw new Error("입력 이미지가 없습니다. 컷 이미지(키프레임)를 먼저 생성하세요.");
+  throw new Error(
+    ko ? "입력 이미지가 없습니다. 컷 이미지(키프레임)를 먼저 생성하세요." : "No input image. Generate a shot image (keyframe) first.",
+  );
 }
 
 function runwayRatio(aspect: OberonAnimateRequest["aspectRatio"]): string {
@@ -173,8 +204,13 @@ function runwayRatio(aspect: OberonAnimateRequest["aspectRatio"]): string {
 
 // ── Luma (ray-2, image-to-video; 공개 URL만) ─────────────────
 async function runLuma(job: OberonAnimateJob, request: OberonAnimateRequest, key: string, prompt: string): Promise<string> {
+  const ko = currentUiLocale() === "ko";
   if (!request.imageUrl || !/^https:\/\//i.test(request.imageUrl)) {
-    throw new Error("Luma는 공개 HTTPS 이미지 URL만 지원합니다. 로컬 이미지를 쓰려면 provider를 runway로 선택하세요.");
+    throw new Error(
+      ko
+        ? "Luma는 공개 HTTPS 이미지 URL만 지원합니다. 로컬 이미지를 쓰려면 provider를 runway로 선택하세요."
+        : "Luma only supports public HTTPS image URLs. Choose provider runway to use a local image.",
+    );
   }
   const headers = { Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
   const body = {
@@ -186,34 +222,43 @@ async function runLuma(job: OberonAnimateJob, request: OberonAnimateRequest, key
     aspect_ratio: request.aspectRatio ?? "16:9",
   };
   const res = await fetch(`${LUMA_BASE}/dream-machine/v1/generations`, { method: "POST", headers, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(`Luma 제출 실패 (HTTP ${res.status}): ${truncate(await res.text())}`);
+  if (!res.ok) {
+    throw new Error(
+      ko
+        ? `Luma 제출 실패 (HTTP ${res.status}): ${truncate(await res.text())}`
+        : `Luma submission failed (HTTP ${res.status}): ${truncate(await res.text())}`,
+    );
+  }
   const json = (await res.json()) as { id?: string };
   const genId = json.id;
-  if (!genId) throw new Error("Luma 응답에 generation id가 없습니다.");
+  if (!genId) throw new Error(ko ? "Luma 응답에 generation id가 없습니다." : "The Luma response did not include a generation id.");
 
-  updateJob(job, { phase: "generating", message: "Luma 생성 중", percent: 25 });
+  updateJob(job, { phase: "generating", message: ko ? "Luma 생성 중" : "Luma generating", percent: 25 });
   for (let i = 0; i < MAX_POLLS; i++) {
     assertNotCancelled(job.id);
     await sleep(POLL_MS);
     const poll = await fetch(`${LUMA_BASE}/dream-machine/v1/generations/${genId}`, { headers });
-    if (!poll.ok) throw new Error(`Luma 폴링 실패 (HTTP ${poll.status})`);
+    if (!poll.ok) throw new Error(ko ? `Luma 폴링 실패 (HTTP ${poll.status})` : `Luma polling failed (HTTP ${poll.status})`);
     const data = (await poll.json()) as { state?: string; assets?: { video?: string }; failure_reason?: string };
     const state = String(data.state || "").toLowerCase();
     if (state === "completed") {
       const url = data.assets?.video;
-      if (!url) throw new Error("Luma 완료됐으나 결과 영상이 없습니다.");
+      if (!url) throw new Error(ko ? "Luma 완료됐으나 결과 영상이 없습니다." : "Luma completed but returned no result video.");
       return url;
     }
-    if (state === "failed") throw new Error(`Luma 생성 실패: ${data.failure_reason || "unknown"}`);
+    if (state === "failed") {
+      throw new Error(ko ? `Luma 생성 실패: ${data.failure_reason || "unknown"}` : `Luma generation failed: ${data.failure_reason || "unknown"}`);
+    }
     updateJob(job, { percent: Math.min(90, 25 + Math.round((i / MAX_POLLS) * 65)) });
   }
-  throw new Error("Luma 생성 시간 초과(약 10분).");
+  throw new Error(ko ? "Luma 생성 시간 초과(약 10분)." : "Luma generation timed out (~10 minutes).");
 }
 
 // ── 공통 ─────────────────────────────────────────────────────
 async function downloadVideo(job: OberonAnimateJob, url: string): Promise<OberonAnimateFile> {
+  const ko = currentUiLocale() === "ko";
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`결과 영상 다운로드 실패 (HTTP ${res.status})`);
+  if (!res.ok) throw new Error(ko ? `결과 영상 다운로드 실패 (HTTP ${res.status})` : `Failed to download the result video (HTTP ${res.status})`);
   const buf = Buffer.from(await res.arrayBuffer());
   const name = `${safeSlug(job.title)}-${job.id.slice(0, 8)}.mp4`;
   const absPath = path.join(job.outputDir, name);
@@ -277,10 +322,11 @@ function failJob(id: string, error: unknown): void {
   const job = jobs.get(id);
   if (!job) return;
   if (job.status === "cancelled") return;
+  const ko = currentUiLocale() === "ko";
   job.status = "failed";
   job.progress.phase = "failed";
   job.error = error instanceof Error ? error.message : String(error);
-  job.message = "실패";
+  job.message = ko ? "실패" : "Failed";
   job.updatedAtMs = Date.now();
 }
 

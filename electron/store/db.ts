@@ -10,7 +10,7 @@ import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 32;
+const SCHEMA_VERSION = 35;
 
 export function initStore(): void {
   if (_db) return;
@@ -777,6 +777,80 @@ export function initStore(): void {
     if (!chatCols.some((c) => c.name === "swarm_mode")) {
       _db.exec("ALTER TABLE chats ADD COLUMN swarm_mode INTEGER NOT NULL DEFAULT 0");
     }
+  }
+
+  // ── v32 → v33: 자동화 워크플로우 그래프 + cron/tz 스케줄 + 실행 이력 ─
+  // graph_json: nullable(null=오늘의 단일 프롬프트, 있으면 그래프 러너로 실행).
+  // schedule_json: 구조화 ScheduleSpec(있으면 레거시 schedule 토큰보다 우선).
+  // timezone/end_at/max_runs/run_count: cron tz 해석 + "N회 실행"·"~까지" 종료 정책.
+  // run_history: 놓친 실행/스킵 가시화(설계 §2.7). 모든 컬럼 추가는 table_info 가드.
+  if (userVersion < 33) {
+    const db = _db;
+    const autoCols = db
+      .prepare("PRAGMA table_info(automations)")
+      .all() as Array<{ name: string }>;
+    const addAutoCol = (name: string, ddl: string): void => {
+      if (!autoCols.some((c) => c.name === name)) {
+        db.exec(`ALTER TABLE automations ADD COLUMN ${ddl}`);
+      }
+    };
+    addAutoCol("graph_json", "graph_json TEXT");
+    addAutoCol("schedule_json", "schedule_json TEXT");
+    addAutoCol("timezone", "timezone TEXT");
+    addAutoCol("end_at", "end_at TEXT");
+    addAutoCol("max_runs", "max_runs INTEGER");
+    addAutoCol("run_count", "run_count INTEGER NOT NULL DEFAULT 0");
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS run_history (
+        id TEXT PRIMARY KEY,
+        automation_id TEXT,
+        scheduled_for TEXT,
+        ran_at TEXT,
+        status TEXT,
+        skipped_count INTEGER DEFAULT 0,
+        error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_run_history_automation ON run_history(automation_id);
+    `);
+  }
+
+  // ── v33 → v34: 조건 트리거 + 크로스프로세스 리스(설계 §3.5, §2.6) ─
+  // trigger_type/trigger_json: fs/chain/webhook/poll 트리거(기본 'schedule'로 하위호환).
+  // claimed_at/lease_owner: 헤드리스 launchd 러너와 열린 GUI가 같은 due 행을 이중 실행하지
+  //   않도록 원자적 UPDATE로 클레임하는 DB 리스(설계 §2.6 "단일 라이터 안전장치").
+  if (userVersion < 34) {
+    const db = _db;
+    const autoCols = db
+      .prepare("PRAGMA table_info(automations)")
+      .all() as Array<{ name: string }>;
+    const addAutoCol = (name: string, ddl: string): void => {
+      if (!autoCols.some((c) => c.name === name)) {
+        db.exec(`ALTER TABLE automations ADD COLUMN ${ddl}`);
+      }
+    };
+    addAutoCol("trigger_type", "trigger_type TEXT NOT NULL DEFAULT 'schedule'");
+    addAutoCol("trigger_json", "trigger_json TEXT");
+    addAutoCol("claimed_at", "claimed_at TEXT");
+    addAutoCol("lease_owner", "lease_owner TEXT");
+  }
+
+  // ── v34 → v35: 그래프 라이브 실행 per-node 상태(설계 §5 P2) ─────────
+  // automation_runs: 그래프 러너 1회 실행의 per-node 상태 스냅샷(node_states_json).
+  //   run_history(누적 시계열, §2.7)와 별개 — 이쪽은 캔버스 라이브 오버레이의 재하이드레이트용.
+  //   latestRun IPC가 이 테이블의 최신 행을 읽어 새로고침 후에도 마지막 실행 상태를 복원한다.
+  if (userVersion < 35) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS automation_runs (
+        id TEXT PRIMARY KEY,
+        automation_id TEXT,
+        started_at TEXT,
+        status TEXT,
+        node_states_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_automation_runs_auto
+        ON automation_runs(automation_id, started_at);
+    `);
   }
 
   _db.pragma(`user_version = ${SCHEMA_VERSION}`);

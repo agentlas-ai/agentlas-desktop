@@ -7,6 +7,7 @@
 //   · 'BUILD_COMPLETE' 포함 → 진짜 빌드 완료 → 조직도 자동 등록.
 //   · 아니면 → 인터뷰 질문/추가 입력 대기(awaitingReply). 사용자가 답하면 history에 쌓아 다음 턴 실행.
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { currentLocale } from "@/lib/i18n";
 import { extractQuestions } from "@/lib/ask-question";
 import type { ChatQuestion } from "@/components/ChatStream";
 import type { HephaestusBuildEvent, RuntimeSelection } from "@/lib/types";
@@ -231,13 +232,20 @@ function rememberInterviewCheckpoint(): void {
 async function autoRegister(workspace: string) {
   const api = ipc();
   if (!api) return;
+  const ko = currentLocale() === "ko";
   try {
-    pushLog("stage", "조직도에 등록 중 — 라이브러리에 추가");
+    pushLog("stage", ko ? "조직도에 등록 중 — 라이브러리에 추가" : "Registering to org chart — adding to library");
     const imported = await api.team.importLocalFolder(workspace);
     state.registered = true;
-    pushLog("done", `조직도에 추가됨: ${imported?.name || imported?.slug || "에이전트"}`);
+    const who = imported?.name || imported?.slug || (ko ? "에이전트" : "agent");
+    pushLog("done", ko ? `조직도에 추가됨: ${who}` : `Added to org chart: ${who}`);
   } catch (e) {
-    pushLog("error", `조직도 등록 실패: ${(e as Error).message} — '라이브러리에 설치'로 다시 시도하세요.`);
+    pushLog(
+      "error",
+      ko
+        ? `조직도 등록 실패: ${(e as Error).message} — '라이브러리에 설치'로 다시 시도하세요.`
+        : `Failed to register to org chart: ${(e as Error).message} — retry with "Install to library".`,
+    );
   }
   commit();
 }
@@ -247,6 +255,7 @@ async function runTurn(input: string): Promise<void> {
   const api = ipc();
   const ev = ipcEvents();
   if (!api || !ev || !state.workspace) return;
+  const ko = currentLocale() === "ko";
 
   detach();
   lastAcc = "";
@@ -265,6 +274,7 @@ async function runTurn(input: string): Promise<void> {
     runtime: state.runtime || undefined,
     runtimeSessionId: runtimeSessionId || undefined,
     history: [...history],
+    locale: currentLocale(),
   });
   state.runId = runId;
   commit();
@@ -310,13 +320,18 @@ async function runTurn(input: string): Promise<void> {
         const pkgPath = packagePathFromText(baseWs, assistantText);
         const registerPath = pkgPath ?? (JUNK_WS.test(wsBasename(baseWs)) ? null : baseWs);
         state.result = { workspace: pkgPath ?? baseWs, securityScan: r?.securityScan ?? null };
-        pushLog("done", "빌드 완료 — 패키지 생성됨");
+        pushLog("done", ko ? "빌드 완료 — 패키지 생성됨" : "Build complete — package created");
         state.phase = "done";
         commit();
         if (registerPath) {
           void autoRegister(registerPath);
         } else {
-          pushLog("log", "자동 등록 생략(공용 폴더) — '조직도에서 열기'로 생성된 패키지 폴더만 직접 추가하세요.");
+          pushLog(
+            "log",
+            ko
+              ? "자동 등록 생략(공용 폴더) — '조직도에서 열기'로 생성된 패키지 폴더만 직접 추가하세요."
+              : "Skipped auto-registration (shared folder) — add only the generated package folder via \"Open in org chart\".",
+          );
           commit();
         }
         return;
@@ -333,15 +348,15 @@ async function runTurn(input: string): Promise<void> {
       pushLog(
         "log",
         parsed.questions.length
-          ? "딥인터뷰 — 질문 묶음에 한 번에 답해 주세요."
-          : "어시스턴트가 추가 정보를 기다립니다 — 아래에 답해 주세요.",
+          ? (ko ? "딥인터뷰 — 질문 묶음에 한 번에 답해 주세요." : "Deep interview — answer the batch of questions in one go.")
+          : (ko ? "어시스턴트가 추가 정보를 기다립니다 — 아래에 답해 주세요." : "The assistant is waiting for more detail — reply below."),
       );
       rememberInterviewCheckpoint();
       commit();
       return;
     } else if (e.kind === "error") {
       state.errored = true;
-      pushLog("error", e.text ?? "오류");
+      pushLog("error", e.text ?? (ko ? "오류" : "Error"));
       state.phase = "error";
       detach();
     }
@@ -361,10 +376,13 @@ export async function startBuild(): Promise<void> {
   state.result = null;
   state.registered = false;
   state.log = [];
-  pushLog("stage", "딥인터뷰 시작 — Hephaestus 빌더 에이전트 가동");
-  pushLog("log", `요청 길이 ${state.request.trim().length}자 · 모드 ${state.mode || "자동 분류"}`);
-  pushLog("log", `생성 폴더 ${state.workspace}`);
-  if (state.runtime) pushLog("log", `엔진 ${state.runtime.kind}${state.runtime.model ? ` · ${state.runtime.model}` : ""}`);
+  const ko = currentLocale() === "ko";
+  const reqLen = state.request.trim().length;
+  const mode = state.mode || (ko ? "자동 분류" : "auto-classify");
+  pushLog("stage", ko ? "딥인터뷰 시작 — Hephaestus 빌더 에이전트 가동" : "Deep interview started — Hephaestus builder agent engaged");
+  pushLog("log", ko ? `요청 길이 ${reqLen}자 · 모드 ${mode}` : `Request length ${reqLen} chars · mode ${mode}`);
+  pushLog("log", ko ? `생성 폴더 ${state.workspace}` : `Output folder ${state.workspace}`);
+  if (state.runtime) pushLog("log", `${ko ? "엔진" : "Engine"} ${state.runtime.kind}${state.runtime.model ? ` · ${state.runtime.model}` : ""}`);
   commit();
   await runTurn(state.request.trim());
 }
@@ -372,7 +390,8 @@ export async function startBuild(): Promise<void> {
 /** 인터뷰 답변 제출 — 다음 턴 실행. */
 export async function answerBuild(reply: string): Promise<void> {
   if (!state.awaitingReply || !reply.trim()) return;
-  pushLog("log", `↳ 답변: ${reply.trim().slice(0, 240)}`);
+  const ko = currentLocale() === "ko";
+  pushLog("log", `↳ ${ko ? "답변" : "Reply"}: ${reply.trim().slice(0, 240)}`);
   commit();
   await runTurn(reply.trim());
 }
@@ -396,7 +415,12 @@ export function rewindBuildInterview(): void {
   state.result = null;
   state.runId = null;
   state.registered = false;
-  pushLog("log", `${target.turn}번째 답변으로 돌아갔습니다 — 다시 선택해 주세요.`);
+  pushLog(
+    "log",
+    currentLocale() === "ko"
+      ? `${target.turn}번째 답변으로 돌아갔습니다 — 다시 선택해 주세요.`
+      : `Rewound to answer #${target.turn} — choose again.`,
+  );
   commit();
 }
 

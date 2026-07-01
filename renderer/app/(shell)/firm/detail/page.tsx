@@ -318,7 +318,9 @@ function FirmDetailPage() {
     try {
       const serialized = serializeMemoryMarkdown(updated.decisions, updated.gotchas, updated.openQuestions, {
         header:
-          "# Oberon Film Studio — Memory\n\n작품 간(cross-production)에 유지할 학습·결정·게이트 근거를 적는다. 작품별 휘발 상태는 여기 두지 않는다.\n\n",
+          locale === "ko"
+            ? "# Oberon Film Studio — Memory\n\n작품 간(cross-production)에 유지할 학습·결정·게이트 근거를 적는다. 작품별 휘발 상태는 여기 두지 않는다.\n\n"
+            : "# Oberon Film Studio — Memory\n\nLearnings, decisions, and gate rationale to keep across productions (cross-production). Per-production transient state doesn't belong here.\n\n",
       });
       const memFile = agentFiles.find((e) => e.name.toLowerCase() === "memory.md");
       const path = memFile ? memFile.path : "memory.md";
@@ -1719,7 +1721,7 @@ function AgentDetailView({
                     <div><strong>{locale === "ko" ? "권장 엔진:" : "Preferred engine:"}</strong> {agent?.preferredBackend ?? (locale === "ko" ? "자동 라우팅" : "Auto-routing")}</div>
                     <div><strong>{locale === "ko" ? "신뢰 등급:" : "Trust grade:"}</strong> Trust {agent?.trustGrade ?? "B"}</div>
                     {agent && (() => {
-                      const own = classifyAgent(agent);
+                      const own = classifyAgent(agent, locale);
                       return (
                         <div className="agent-ownership-row" data-owned={own.owned ? "true" : "false"}>
                           <strong>{locale === "ko" ? "소유:" : "Ownership:"}</strong>{" "}

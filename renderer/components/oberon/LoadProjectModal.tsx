@@ -3,18 +3,25 @@
 import { useEffect, useState } from "react";
 import {
   deleteProduction,
+  GENRE_TEMPLATES,
   listProductions,
   loadProduction,
+  taxonomyText,
+  type FilmFormat,
   type FilmProduction,
   type ProductionMeta,
 } from "@/lib/oberon";
+import { useT } from "@/lib/i18n";
 import { Glyph, OberonBadge } from "./icons";
 import { GhostButton } from "./ui";
 
-const FORMAT_KO: Record<string, string> = {
-  commercial_30: "30초 광고", commercial_60: "60초 광고", trailer: "트레일러",
-  short_drama: "단편 드라마", music_video: "뮤직비디오", cinematic_short: "시네마틱 단편", social_short: "소셜 숏폼",
-};
+/** ProductionMeta.format(string)을 GENRE_TEMPLATES 카탈로그에서 locale에 맞게 고른다.
+ *  키가 카탈로그에 없으면(구버전 데이터) 원본 문자열로 폴백. */
+function formatLabel(format: string, locale: "ko" | "en"): string {
+  const tpl = GENRE_TEMPLATES[format as FilmFormat];
+  if (!tpl) return format;
+  return taxonomyText(tpl.label, tpl.labelEn, locale);
+}
 
 export function LoadProjectModal({
   open,
@@ -25,6 +32,7 @@ export function LoadProjectModal({
   onClose: () => void;
   onLoad: (prod: FilmProduction) => void;
 }) {
+  const { locale } = useT();
   const [list, setList] = useState<ProductionMeta[]>([]);
 
   useEffect(() => {
@@ -71,10 +79,18 @@ export function LoadProjectModal({
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "18px 20px", borderBottom: "1px solid var(--ob-edge)" }}>
           <OberonBadge name="layers" tone="accent" size={26} glyphSize={14} />
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 16, fontWeight: 600, color: "var(--ob-ink)", fontFamily: "var(--font-display)" }}>저장된 프로젝트</div>
-            <div style={{ fontSize: 12, color: "var(--ob-muted)" }}>이전에 만든 작업을 이어서 합니다</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: "var(--ob-ink)", fontFamily: "var(--font-display)" }}>
+              {locale === "ko" ? "저장된 프로젝트" : "Saved Projects"}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--ob-muted)" }}>
+              {locale === "ko" ? "이전에 만든 작업을 이어서 합니다" : "Pick up work you started earlier"}
+            </div>
           </div>
-          <button onClick={onClose} aria-label="닫기" style={{ border: "none", background: "var(--ob-fill)", borderRadius: 999, width: 30, height: 30, display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "var(--ob-ink-soft)" }}>
+          <button
+            onClick={onClose}
+            aria-label={locale === "ko" ? "닫기" : "Close"}
+            style={{ border: "none", background: "var(--ob-fill)", borderRadius: 999, width: 30, height: 30, display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "var(--ob-ink-soft)" }}
+          >
             <Glyph name="x" size={14} strokeWidth={2.2} />
           </button>
         </div>
@@ -83,8 +99,12 @@ export function LoadProjectModal({
           {list.length === 0 ? (
             <div style={{ textAlign: "center", padding: "48px 24px", color: "var(--ob-muted)" }}>
               <OberonBadge name="film" size={40} />
-              <p style={{ fontSize: 14, color: "var(--ob-ink-soft)", margin: "16px 0 4px", fontWeight: 600 }}>저장된 프로젝트가 없어요</p>
-              <p style={{ fontSize: 13, margin: 0 }}>창을 닫고 제목·프롬프트를 적어 새로 만들어 보세요.</p>
+              <p style={{ fontSize: 14, color: "var(--ob-ink-soft)", margin: "16px 0 4px", fontWeight: 600 }}>
+                {locale === "ko" ? "저장된 프로젝트가 없어요" : "No saved projects yet"}
+              </p>
+              <p style={{ fontSize: 13, margin: 0 }}>
+                {locale === "ko" ? "창을 닫고 제목·프롬프트를 적어 새로 만들어 보세요." : "Close this window and enter a title and prompt to start a new one."}
+              </p>
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -96,11 +116,15 @@ export function LoadProjectModal({
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 14, fontWeight: 600, color: "var(--ob-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{m.title || "Untitled"}</div>
                     <div style={{ fontSize: 12, color: "var(--ob-muted)", marginTop: 2 }}>
-                      {FORMAT_KO[m.format] ?? m.format} · {m.shotCount}컷
+                      {formatLabel(m.format, locale)} · {locale === "ko" ? `${m.shotCount}컷` : `${m.shotCount} shots`}
                     </div>
                   </div>
-                  <button onClick={() => handleLoad(m.id)} style={loadBtn}>불러오기</button>
-                  <button onClick={() => handleDelete(m.id)} aria-label="삭제" style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--ob-muted)", display: "inline-flex", padding: 6 }}>
+                  <button onClick={() => handleLoad(m.id)} style={loadBtn}>{locale === "ko" ? "불러오기" : "Load"}</button>
+                  <button
+                    onClick={() => handleDelete(m.id)}
+                    aria-label={locale === "ko" ? "삭제" : "Delete"}
+                    style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--ob-muted)", display: "inline-flex", padding: 6 }}
+                  >
                     <Glyph name="x" size={14} strokeWidth={2} />
                   </button>
                 </div>
@@ -110,7 +134,7 @@ export function LoadProjectModal({
         </div>
 
         <div style={{ padding: "14px 20px", borderTop: "1px solid var(--ob-edge)", display: "flex", justifyContent: "flex-end" }}>
-          <GhostButton onClick={onClose}>닫고 새로 만들기</GhostButton>
+          <GhostButton onClick={onClose}>{locale === "ko" ? "닫고 새로 만들기" : "Close and Start New"}</GhostButton>
         </div>
       </div>
     </div>

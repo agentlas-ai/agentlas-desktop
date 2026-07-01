@@ -6,16 +6,20 @@ import {
   QUALITY_GATES,
   SHOT_SIZES,
   TRANSITIONS,
+  agentText,
   buildAllExports,
   composeKeyframePrompt,
   downloadText,
   googleFontsHref,
   providerById,
+  taxonomyText,
   type EditDecision,
   type FilmProduction,
   type Take,
   type TextRole,
 } from "@/lib/oberon";
+import type { Locale } from "@/lib/i18n";
+import { useT } from "@/lib/i18n";
 import {
   IconCheck,
   IconChevronRight,
@@ -31,11 +35,16 @@ import { Card, Chip, GhostButton, Meter, PanelHead, PrimaryButton, SizeBadge, Ta
 // ── Script / Beat Board ──────────────────────────────────
 
 export function ScriptBoard({ production }: { production: FilmProduction }) {
+  const { locale } = useT();
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 28px 60px" }}>
       <PanelHead
         title="Script & Beat Board"
-        subtitle={`${production.stats.totalDurationSec}초를 ${production.stats.sequenceCount}개 시퀀스 · ${production.stats.sceneCount}개 씬 · ${production.stats.beatCount}개 비트로 분해했습니다. 각 비트는 감정선과 커버리지 의도를 가집니다.`}
+        subtitle={
+          locale === "ko"
+            ? `${production.stats.totalDurationSec}초를 ${production.stats.sequenceCount}개 시퀀스 · ${production.stats.sceneCount}개 씬 · ${production.stats.beatCount}개 비트로 분해했습니다. 각 비트는 감정선과 커버리지 의도를 가집니다.`
+            : `${production.stats.totalDurationSec}s broken down into ${production.stats.sequenceCount} sequences · ${production.stats.sceneCount} scenes · ${production.stats.beatCount} beats. Each beat carries an emotional arc and a coverage intent.`
+        }
         icon={<IconFilm size={18} />}
       />
       <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -57,7 +66,9 @@ export function ScriptBoard({ production }: { production: FilmProduction }) {
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
                       <span style={{ fontFamily: "var(--font-mono)", fontSize: 12.5, fontWeight: 800, color: "var(--ink)" }}>{scene.heading}</span>
                       <Tag>{scene.type}</Tag>
-                      <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted-deep)" }}>{shotCount}샷 · {scene.timeOfDay}</span>
+                      <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted-deep)" }}>
+                        {locale === "ko" ? `${shotCount}샷` : `${shotCount} shots`} · {scene.timeOfDay}
+                      </span>
                     </div>
                     <p style={{ margin: "0 0 9px", fontSize: 12, color: "var(--ink-soft)", lineHeight: 1.5 }}>{scene.summary}</p>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -65,7 +76,9 @@ export function ScriptBoard({ production }: { production: FilmProduction }) {
                         <span key={b.id} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, padding: "4px 9px", borderRadius: 8, background: "var(--fill-1)", border: "1px solid var(--paper-edge)", color: "var(--ink-soft)" }}>
                           <strong style={{ color: "var(--ink)" }}>{b.name}</strong>
                           <span style={{ color: "var(--peach-ink)", fontSize: 10 }}>{b.emotion}</span>
-                          <span style={{ color: "var(--muted-deep)", fontSize: 10 }}>{b.shotIds.length}샷</span>
+                          <span style={{ color: "var(--muted-deep)", fontSize: 10 }}>
+                            {locale === "ko" ? `${b.shotIds.length}샷` : `${b.shotIds.length} shots`}
+                          </span>
                         </span>
                       ))}
                     </div>
@@ -83,16 +96,23 @@ export function ScriptBoard({ production }: { production: FilmProduction }) {
 // ── Keyframe Lab ─────────────────────────────────────────
 
 export function KeyframeLab({ production }: { production: FilmProduction }) {
+  const { locale } = useT();
   const kfShots = production.shots.filter((s) => s.requiresKeyframe || s.firstFrameAssetId);
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 28px 60px" }}>
       <PanelHead
-        title="Keyframe Lab — 컷 이미지"
-        subtitle={`정밀 컷 연결이 필요한 ${kfShots.length}개 샷은 비싼 영상 호출 전에 첫 프레임으로 구도·정체성을 먼저 확인합니다. 실제 파일이 생기기 전에는 완료로 보지 않습니다.`}
+        title={locale === "ko" ? "Keyframe Lab — 컷 이미지" : "Keyframe Lab — Cut Images"}
+        subtitle={
+          locale === "ko"
+            ? `정밀 컷 연결이 필요한 ${kfShots.length}개 샷은 비싼 영상 호출 전에 첫 프레임으로 구도·정체성을 먼저 확인합니다. 실제 파일이 생기기 전에는 완료로 보지 않습니다.`
+            : `The ${kfShots.length} shots that need precise cut continuity confirm composition and identity with a first frame before the expensive video call. Not treated as done until a real file exists.`
+        }
         icon={<IconImage size={18} />}
       />
       {kfShots.length === 0 ? (
-        <div style={{ textAlign: "center", padding: 60, color: "var(--muted-deep)", fontSize: 13 }}>이 포맷에는 키프레임 필수 샷이 없습니다.</div>
+        <div style={{ textAlign: "center", padding: 60, color: "var(--muted-deep)", fontSize: 13 }}>
+          {locale === "ko" ? "이 포맷에는 키프레임 필수 샷이 없습니다." : "This format has no shots that require keyframes."}
+        </div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 14 }}>
           {kfShots.map((shot) => {
@@ -107,8 +127,8 @@ export function KeyframeLab({ production }: { production: FilmProduction }) {
                   <span style={{ marginLeft: "auto", fontSize: 10, color: providerColor(shot.providerId), fontWeight: 700 }}>{providerById(shot.providerId)?.name}</span>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <KeyframeSlot label="FIRST FRAME" grad="linear-gradient(135deg,#1e3a5f,#0b1020)" prompt={first} />
-                  <KeyframeSlot label="LAST FRAME" grad="linear-gradient(135deg,#3a2438,#180c18)" prompt={last} />
+                  <KeyframeSlot label="FIRST FRAME" grad="linear-gradient(135deg,#1e3a5f,#0b1020)" prompt={first} locale={locale} />
+                  <KeyframeSlot label="LAST FRAME" grad="linear-gradient(135deg,#3a2438,#180c18)" prompt={last} locale={locale} />
                 </div>
               </Card>
             );
@@ -119,7 +139,7 @@ export function KeyframeLab({ production }: { production: FilmProduction }) {
   );
 }
 
-function KeyframeSlot({ label, grad, prompt }: { label: string; grad: string; prompt: string }) {
+function KeyframeSlot({ label, grad, prompt, locale }: { label: string; grad: string; prompt: string; locale: Locale }) {
   const [open, setOpen] = useState(false);
   return (
     <div>
@@ -127,7 +147,7 @@ function KeyframeSlot({ label, grad, prompt }: { label: string; grad: string; pr
         <span style={{ fontSize: 8.5, fontFamily: "var(--font-mono)", fontWeight: 800, color: "rgba(255,255,255,0.85)" }}>{label}</span>
       </div>
       <button onClick={() => setOpen((o) => !o)} style={{ marginTop: 4, fontSize: 10, color: "var(--muted-deep)", background: "transparent", border: "none", cursor: "pointer", padding: 0 }}>
-        {open ? "접기" : "프롬프트 보기"}
+        {locale === "ko" ? (open ? "접기" : "프롬프트 보기") : open ? "Collapse" : "View prompt"}
       </button>
       {open && <div style={{ fontSize: 10, color: "var(--ink-soft)", lineHeight: 1.5, marginTop: 4, background: "var(--fill-1)", borderRadius: 6, padding: 7, border: "1px solid var(--paper-edge)" }}>{prompt}</div>}
     </div>
@@ -137,6 +157,7 @@ function KeyframeSlot({ label, grad, prompt }: { label: string; grad: string; pr
 // ── Approval Gate ────────────────────────────────────────
 
 export function ApprovalGate({ production, onApprove, approved }: { production: FilmProduction; onApprove: () => void; approved: boolean }) {
+  const { locale } = useT();
   const cost = production.cost;
   const requiredKeyframes = production.shots.filter((s) => s.requiresKeyframe);
   const approvedKeyframes = new Set((production.keyframeAssets ?? []).map((asset) => asset.shotId));
@@ -160,14 +181,18 @@ export function ApprovalGate({ production, onApprove, approved }: { production: 
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 28px 60px" }}>
       <PanelHead
-        title="Approval Gate — 비용·권리·세이프티 승인"
-        subtitle="비싼 영상 생성 전에 사람이 한 번 승인합니다. 7개 품질 게이트와 예산을 확인하고, 통과하면 생성 큐가 열립니다."
+        title={locale === "ko" ? "Approval Gate — 비용·권리·세이프티 승인" : "Approval Gate — Cost, Rights & Safety Approval"}
+        subtitle={
+          locale === "ko"
+            ? "비싼 영상 생성 전에 사람이 한 번 승인합니다. 7개 품질 게이트와 예산을 확인하고, 통과하면 생성 큐가 열립니다."
+            : "A human approves once before any expensive video generation. Check the 7 quality gates and the budget — once they pass, the generation queue opens."
+        }
         icon={<IconShield size={18} />}
       />
 
       <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 16 }}>
         <Card style={{ padding: 16 }}>
-          <div style={{ fontSize: 12, fontWeight: 800, color: "var(--ink)", marginBottom: 12 }}>품질 게이트</div>
+          <div style={{ fontSize: 12, fontWeight: 800, color: "var(--ink)", marginBottom: 12 }}>{locale === "ko" ? "품질 게이트" : "Quality Gates"}</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
             {checks.map(({ gate, pass }) => (
               <div key={gate.key} style={{ display: "flex", alignItems: "flex-start", gap: 9 }}>
@@ -175,8 +200,8 @@ export function ApprovalGate({ production, onApprove, approved }: { production: 
                   {pass ? <IconCheck size={11} style={{ color: "#fff" }} /> : <IconClose size={11} style={{ color: "#fff" }} />}
                 </span>
                 <div>
-                  <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--ink)" }}>{gate.name}</div>
-                  <div style={{ fontSize: 11, color: "var(--muted-deep)", lineHeight: 1.4 }}>{gate.passCondition}</div>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--ink)" }}>{agentText(gate.name, gate.nameEn, locale)}</div>
+                  <div style={{ fontSize: 11, color: "var(--muted-deep)", lineHeight: 1.4 }}>{agentText(gate.passCondition, gate.passConditionEn, locale)}</div>
                 </div>
               </div>
             ))}
@@ -185,19 +210,34 @@ export function ApprovalGate({ production, onApprove, approved }: { production: 
 
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <Card style={{ padding: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 800, color: "var(--ink)", marginBottom: 10 }}>예상 비용</div>
+            <div style={{ fontSize: 12, fontWeight: 800, color: "var(--ink)", marginBottom: 10 }}>{locale === "ko" ? "예상 비용" : "Estimated Cost"}</div>
             <div style={{ fontSize: 28, fontWeight: 800, color: cost.withinBudget ? "var(--ink)" : "var(--red-deep)", lineHeight: 1 }}>{formatCost(cost.totalUsd)}</div>
-            <div style={{ fontSize: 11, color: "var(--muted-deep)", margin: "4px 0 10px" }}>예산 {formatCost(cost.budgetUsd)} · 영상 {formatCost(cost.videoCostUsd)} + 이미지 {formatCost(cost.imageCostUsd)}</div>
+            <div style={{ fontSize: 11, color: "var(--muted-deep)", margin: "4px 0 10px" }}>
+              {locale === "ko"
+                ? `예산 ${formatCost(cost.budgetUsd)} · 영상 ${formatCost(cost.videoCostUsd)} + 이미지 ${formatCost(cost.imageCostUsd)}`
+                : `Budget ${formatCost(cost.budgetUsd)} · Video ${formatCost(cost.videoCostUsd)} + Image ${formatCost(cost.imageCostUsd)}`}
+            </div>
             <Meter value={cost.totalUsd} max={cost.budgetUsd} color={cost.withinBudget ? "var(--accent)" : "var(--red-deep)"} />
           </Card>
 
           <Card style={{ padding: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 800, color: "var(--ink)", marginBottom: 8 }}>권리 · 세이프티</div>
+            <div style={{ fontSize: 12, fontWeight: 800, color: "var(--ink)", marginBottom: 8 }}>{locale === "ko" ? "권리 · 세이프티" : "Rights & Safety"}</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 11.5, color: "var(--ink-soft)" }}>
-              <SafetyRow ok label="실존 인물 likeness 없음 (가상 캐릭터)" />
-              <SafetyRow ok label="저작권 캐릭터/IP 미사용" />
-              <SafetyRow ok={production.brief.mustAvoid.length > 0} label={production.brief.mustAvoid.length > 0 ? `금지 요소 ${production.brief.mustAvoid.length}건 등록됨` : "금지 요소 미지정 (권장)"} />
-              <SafetyRow ok label="라이선스 안전 음악 사용 예정" />
+              <SafetyRow ok label={locale === "ko" ? "실존 인물 likeness 없음 (가상 캐릭터)" : "No real-person likeness (fictional characters)"} />
+              <SafetyRow ok label={locale === "ko" ? "저작권 캐릭터/IP 미사용" : "No copyrighted characters or IP used"} />
+              <SafetyRow
+                ok={production.brief.mustAvoid.length > 0}
+                label={
+                  production.brief.mustAvoid.length > 0
+                    ? locale === "ko"
+                      ? `금지 요소 ${production.brief.mustAvoid.length}건 등록됨`
+                      : `${production.brief.mustAvoid.length} prohibited items registered`
+                    : locale === "ko"
+                      ? "금지 요소 미지정 (권장)"
+                      : "No prohibited items specified (recommended)"
+                }
+              />
+              <SafetyRow ok label={locale === "ko" ? "라이선스 안전 음악 사용 예정" : "Licensed, rights-safe music planned"} />
             </div>
           </Card>
         </div>
@@ -206,14 +246,18 @@ export function ApprovalGate({ production, onApprove, approved }: { production: 
       <div style={{ marginTop: 22, display: "flex", alignItems: "center", gap: 14 }}>
         {approved ? (
           <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700, color: "var(--green-deep)" }}>
-            <IconCheck size={16} /> 승인 완료 — 생성 큐가 열렸습니다.
+            <IconCheck size={16} /> {locale === "ko" ? "승인 완료 — 생성 큐가 열렸습니다." : "Approved — the generation queue is open."}
           </span>
         ) : (
           <>
             <PrimaryButton onClick={onApprove} disabled={!allPass}>
-              <IconShield size={15} /> 승인하고 생성 시작
+              <IconShield size={15} /> {locale === "ko" ? "승인하고 생성 시작" : "Approve & start generation"}
             </PrimaryButton>
-            {!allPass && <span style={{ fontSize: 12, color: "var(--red-deep)" }}>일부 게이트가 통과되지 않았습니다.</span>}
+            {!allPass && (
+              <span style={{ fontSize: 12, color: "var(--red-deep)" }}>
+                {locale === "ko" ? "일부 게이트가 통과되지 않았습니다." : "Some gates have not passed yet."}
+              </span>
+            )}
           </>
         )}
       </div>
@@ -233,12 +277,19 @@ function SafetyRow({ ok, label }: { ok: boolean; label: string }) {
 // ── QA / Take Compare ────────────────────────────────────
 
 export function TakeCompare({ production, onSelectTake }: { production: FilmProduction; onSelectTake: (shotId: string, takeId: string) => void }) {
+  const { locale } = useT();
   const ready = production.takes.filter((t) => t.qa);
   if (ready.length === 0) {
     return (
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 28px 60px" }}>
-        <PanelHead title="Vision QA — 테이크 비교" subtitle="생성 큐에서 테이크를 먼저 생성하세요." icon={<IconLayers size={18} />} />
-        <div style={{ textAlign: "center", padding: 60, color: "var(--muted-deep)", fontSize: 13 }}>아직 QA할 테이크가 없습니다.</div>
+        <PanelHead
+          title={locale === "ko" ? "Vision QA — 테이크 비교" : "Vision QA — Take Comparison"}
+          subtitle={locale === "ko" ? "생성 큐에서 테이크를 먼저 생성하세요." : "Generate takes in the queue first."}
+          icon={<IconLayers size={18} />}
+        />
+        <div style={{ textAlign: "center", padding: 60, color: "var(--muted-deep)", fontSize: 13 }}>
+          {locale === "ko" ? "아직 QA할 테이크가 없습니다." : "No takes to QA yet."}
+        </div>
       </div>
     );
   }
@@ -247,8 +298,12 @@ export function TakeCompare({ production, onSelectTake }: { production: FilmProd
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 28px 60px" }}>
       <PanelHead
-        title="Vision QA — 테이크 비교 & 선택"
-        subtitle={`각 테이크를 정체성·연결·편집성·모션·마감으로 채점합니다. 통과율 ${passRate}%. shot당 최고 점수 테이크가 자동 선택되며, 직접 바꿀 수 있습니다.`}
+        title={locale === "ko" ? "Vision QA — 테이크 비교 & 선택" : "Vision QA — Compare & Select Takes"}
+        subtitle={
+          locale === "ko"
+            ? `각 테이크를 정체성·연결·편집성·모션·마감으로 채점합니다. 통과율 ${passRate}%. shot당 최고 점수 테이크가 자동 선택되며, 직접 바꿀 수 있습니다.`
+            : `Each take is scored on identity, continuity, editability, motion, and finish. Pass rate ${passRate}%. The highest-scoring take per shot is auto-selected, and you can change it yourself.`
+        }
         icon={<IconLayers size={18} />}
       />
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -265,7 +320,7 @@ export function TakeCompare({ production, onSelectTake }: { production: FilmProd
               </div>
               <div style={{ display: "grid", gridTemplateColumns: `repeat(${takes.length}, 1fr)`, gap: 10 }}>
                 {takes.map((t) => (
-                  <TakeQACard key={t.id} take={t} selected={t.id === selected.id} onSelect={() => onSelectTake(shot.shotId, t.id)} />
+                  <TakeQACard key={t.id} take={t} selected={t.id === selected.id} onSelect={() => onSelectTake(shot.shotId, t.id)} locale={locale} />
                 ))}
               </div>
             </Card>
@@ -284,7 +339,19 @@ const ACTION_KO: Record<string, string> = {
   resplit_shot: "샷 재분할",
 };
 
-function TakeQACard({ take, selected, onSelect }: { take: Take; selected: boolean; onSelect: () => void }) {
+const ACTION_EN: Record<string, string> = {
+  accept: "Accept",
+  retry_same_provider: "Retry (same)",
+  retry_stronger_reference: "Retry with stronger reference",
+  switch_provider: "Switch provider",
+  resplit_shot: "Re-split shot",
+};
+
+function actionLabel(action: string, locale: Locale): string {
+  return (locale === "ko" ? ACTION_KO[action] : ACTION_EN[action]) ?? action;
+}
+
+function TakeQACard({ take, selected, onSelect, locale }: { take: Take; selected: boolean; onSelect: () => void; locale: Locale }) {
   const qa = take.qa!;
   return (
     <div style={{ borderRadius: 10, border: selected ? "2px solid var(--green-deep)" : "1px solid var(--paper-edge)", overflow: "hidden", background: "var(--paper)" }}>
@@ -296,7 +363,7 @@ function TakeQACard({ take, selected, onSelect }: { take: Take; selected: boolea
       </div>
       <div style={{ padding: "8px 9px", display: "flex", flexDirection: "column", gap: 6 }}>
         {qa.findings.length === 0 ? (
-          <div style={{ fontSize: 10.5, color: "var(--green-deep)" }}>결함 없음 — 클린</div>
+          <div style={{ fontSize: 10.5, color: "var(--green-deep)" }}>{locale === "ko" ? "결함 없음 — 클린" : "No defects — clean"}</div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
             {qa.findings.map((f, i) => (
@@ -307,7 +374,7 @@ function TakeQACard({ take, selected, onSelect }: { take: Take; selected: boolea
           </div>
         )}
         <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-          <Tag color={qa.pass ? "var(--green-deep)" : "var(--peach-ink)"}>{ACTION_KO[qa.recommendedAction] ?? qa.recommendedAction}</Tag>
+          <Tag color={qa.pass ? "var(--green-deep)" : "var(--peach-ink)"}>{actionLabel(qa.recommendedAction, locale)}</Tag>
         </div>
         <button
           onClick={onSelect}
@@ -322,7 +389,7 @@ function TakeQACard({ take, selected, onSelect }: { take: Take; selected: boolea
             color: selected ? "#fff" : "var(--ink-soft)",
           }}
         >
-          {selected ? "✓ 선택됨" : "이 테이크 선택"}
+          {selected ? (locale === "ko" ? "✓ 선택됨" : "✓ Selected") : locale === "ko" ? "이 테이크 선택" : "Select this take"}
         </button>
       </div>
     </div>
@@ -332,22 +399,33 @@ function TakeQACard({ take, selected, onSelect }: { take: Take; selected: boolea
 // ── Timeline / Editor ────────────────────────────────────
 
 export function TimelineEditor({ production }: { production: FilmProduction }) {
+  const { locale } = useT();
   const edl = production.edl;
   const totalDur = edl.reduce((a, e) => a + e.durationSec, 0);
   if (edl.length === 0) {
     return (
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 28px 60px" }}>
-        <PanelHead title="Timeline — 편집 결정 리스트" subtitle="QA를 통과한 테이크를 선택하면 타임라인이 구성됩니다." icon={<IconLayers size={18} />} />
-        <div style={{ textAlign: "center", padding: 60, color: "var(--muted-deep)", fontSize: 13 }}>생성·QA 후 타임라인이 만들어집니다.</div>
+        <PanelHead
+          title={locale === "ko" ? "Timeline — 편집 결정 리스트" : "Timeline — Edit Decision List"}
+          subtitle={locale === "ko" ? "QA를 통과한 테이크를 선택하면 타임라인이 구성됩니다." : "Once you select QA-passed takes, the timeline is assembled."}
+          icon={<IconLayers size={18} />}
+        />
+        <div style={{ textAlign: "center", padding: 60, color: "var(--muted-deep)", fontSize: 13 }}>
+          {locale === "ko" ? "생성·QA 후 타임라인이 만들어집니다." : "The timeline is built after generation and QA."}
+        </div>
       </div>
     );
   }
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 32px 40px" }}>
       <PanelHead
-        eyebrow="Step 06 · 편집"
-        title="영상 이어붙이기"
-        subtitle={`고른 영상들을 순서대로 이어 붙인 편집표예요. 총 ${edl.length}개 컷 · ${formatDuration(totalDur)}. 컷 길이와 전환은 자동으로 정리돼 있습니다.`}
+        eyebrow={locale === "ko" ? "Step 06 · 편집" : "Step 06 · Edit"}
+        title={locale === "ko" ? "영상 이어붙이기" : "Stitching Clips Together"}
+        subtitle={
+          locale === "ko"
+            ? `고른 영상들을 순서대로 이어 붙인 편집표예요. 총 ${edl.length}개 컷 · ${formatDuration(totalDur)}. 컷 길이와 전환은 자동으로 정리돼 있습니다.`
+            : `An edit list of the selected clips in order. ${edl.length} cuts total · ${formatDuration(totalDur)}. Cut length and transitions are arranged automatically.`
+        }
         icon={<IconFilm size={18} />}
       />
 
@@ -360,7 +438,7 @@ export function TimelineEditor({ production }: { production: FilmProduction }) {
             return (
               <div
                 key={e.shotId}
-                title={`${e.shotId} · ${e.durationSec}s · ${TRANSITIONS[e.transitionIn].ko}`}
+                title={`${e.shotId} · ${e.durationSec}s · ${taxonomyText(TRANSITIONS[e.transitionIn].ko, TRANSITIONS[e.transitionIn].koEn, locale)}`}
                 style={{
                   width: w,
                   flexShrink: 0,
@@ -382,7 +460,7 @@ export function TimelineEditor({ production }: { production: FilmProduction }) {
       {/* EDL 리스트 */}
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <div style={{ display: "grid", gridTemplateColumns: "40px 1fr 90px 90px 70px", gap: 8, fontSize: 9.5, fontFamily: "var(--font-mono)", color: "var(--muted-deep)", padding: "0 10px", letterSpacing: 0.5 }}>
-          <span>#</span><span>SHOT</span><span>전환</span><span>구간</span><span>길이</span>
+          <span>#</span><span>SHOT</span><span>{locale === "ko" ? "전환" : "Transition"}</span><span>{locale === "ko" ? "구간" : "Range"}</span><span>{locale === "ko" ? "길이" : "Length"}</span>
         </div>
         {edl.map((e) => {
           const shot = production.shots.find((s) => s.shotId === e.shotId);
@@ -394,7 +472,7 @@ export function TimelineEditor({ production }: { production: FilmProduction }) {
                 <code style={{ fontSize: 10, color: "var(--muted-deep)" }}>{e.shotId}</code>
                 <span style={{ color: "var(--ink-soft)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{shot?.action}</span>
               </span>
-              <span><Tag>{TRANSITIONS[e.transitionIn].ko}</Tag></span>
+              <span><Tag>{taxonomyText(TRANSITIONS[e.transitionIn].ko, TRANSITIONS[e.transitionIn].koEn, locale)}</Tag></span>
               <span style={{ fontFamily: "var(--font-mono)", fontSize: 10.5, color: "var(--muted-deep)" }}>{e.inSec}–{e.outSec}s</span>
               <span style={{ fontWeight: 700, color: "var(--ink)" }}>{e.durationSec}s</span>
             </div>
@@ -407,11 +485,11 @@ export function TimelineEditor({ production }: { production: FilmProduction }) {
 
 // ── Delivery / Export ────────────────────────────────────
 
-const ASPECT_OUTPUTS: { aspect: string; platform: string; ratio: string }[] = [
-  { aspect: "16:9", platform: "YouTube · TV · 와이드", ratio: "16 / 9" },
-  { aspect: "9:16", platform: "Shorts · Reels · TikTok", ratio: "9 / 16" },
-  { aspect: "1:1", platform: "Instagram 피드", ratio: "1 / 1" },
-  { aspect: "2.39:1", platform: "시네마 스코프", ratio: "2.39 / 1" },
+const ASPECT_OUTPUTS: { aspect: string; platform: string; platformEn: string; ratio: string }[] = [
+  { aspect: "16:9", platform: "YouTube · TV · 와이드", platformEn: "YouTube · TV · Widescreen", ratio: "16 / 9" },
+  { aspect: "9:16", platform: "Shorts · Reels · TikTok", platformEn: "Shorts · Reels · TikTok", ratio: "9 / 16" },
+  { aspect: "1:1", platform: "Instagram 피드", platformEn: "Instagram Feed", ratio: "1 / 1" },
+  { aspect: "2.39:1", platform: "시네마 스코프", platformEn: "Cinema Scope", ratio: "2.39 / 1" },
 ];
 
 // file:// 절대경로를 데스크톱 셸의 agentlas:// 미디어 프로토콜로 변환한다.
@@ -432,7 +510,8 @@ function toLocalMediaSrc(url: string): string {
 }
 
 export function DeliveryPanel({ production }: { production: FilmProduction }) {
-  const exports = buildAllExports(production);
+  const { locale } = useT();
+  const exports = buildAllExports(production, locale);
   const renderOutputs = production.renderOutputs ?? [];
   const master =
     renderOutputs.find((file) => file.kind === "master_mp4") ??
@@ -441,15 +520,23 @@ export function DeliveryPanel({ production }: { production: FilmProduction }) {
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 32px 72px" }}>
       <PanelHead
-        eyebrow="Step 06 · 납품"
-        title="납품 패키지"
-        subtitle={renderOutputs.length > 0 ? "실제 렌더 파일과 편집 가능한 제작 패키지를 함께 납품합니다." : "아직 실제 렌더 파일은 없습니다. 먼저 영상 생성 단계에서 렌더를 완료하세요."}
+        eyebrow={locale === "ko" ? "Step 06 · 납품" : "Step 06 · Delivery"}
+        title={locale === "ko" ? "납품 패키지" : "Delivery Package"}
+        subtitle={
+          renderOutputs.length > 0
+            ? locale === "ko"
+              ? "실제 렌더 파일과 편집 가능한 제작 패키지를 함께 납품합니다."
+              : "Delivers the actual render files together with an editable production package."
+            : locale === "ko"
+              ? "아직 실제 렌더 파일은 없습니다. 먼저 영상 생성 단계에서 렌더를 완료하세요."
+              : "No actual render files yet. Complete rendering in the video generation step first."
+        }
         icon={<IconFileUp size={18} />}
       />
 
       {renderOutputs.length > 0 && (
         <>
-          <div style={{ ...sectionLabel, marginBottom: 12 }}>실제 렌더 파일</div>
+          <div style={{ ...sectionLabel, marginBottom: 12 }}>{locale === "ko" ? "실제 렌더 파일" : "Actual Render Files"}</div>
           <Card style={{ padding: 16, marginBottom: 28 }}>
             <div style={{ display: "grid", gridTemplateColumns: master ? "minmax(280px, 1.2fr) 1fr" : "1fr", gap: 16 }}>
               {master && (
@@ -482,7 +569,7 @@ export function DeliveryPanel({ production }: { production: FilmProduction }) {
       <TypographyShowcase production={production} />
 
       {/* 비율 출력 */}
-      <div style={{ ...sectionLabel, marginBottom: 12 }}>멀티 비율 마스터</div>
+      <div style={{ ...sectionLabel, marginBottom: 12 }}>{locale === "ko" ? "멀티 비율 마스터" : "Multi-Aspect-Ratio Masters"}</div>
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 32 }}>
         {ASPECT_OUTPUTS.map((o) => (
           <Card key={o.aspect} style={{ padding: 14, width: 156 }}>
@@ -491,15 +578,17 @@ export function DeliveryPanel({ production }: { production: FilmProduction }) {
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ob-ink)" }}>{o.aspect}</div>
-              {o.aspect === production.brief.aspect && <span style={{ fontSize: 10, color: "var(--ob-accent)", fontWeight: 600 }}>기본</span>}
+              {o.aspect === production.brief.aspect && (
+                <span style={{ fontSize: 10, color: "var(--ob-accent)", fontWeight: 600 }}>{locale === "ko" ? "기본" : "Default"}</span>
+              )}
             </div>
-            <div style={{ fontSize: 11.5, color: "var(--ob-muted)", marginTop: 1 }}>{o.platform}</div>
+            <div style={{ fontSize: 11.5, color: "var(--ob-muted)", marginTop: 1 }}>{locale === "ko" ? o.platform : o.platformEn}</div>
           </Card>
         ))}
       </div>
 
       {/* 산출물 다운로드 */}
-      <div style={{ ...sectionLabel, marginBottom: 12 }}>산출물 — 지금 바로 사용 가능</div>
+      <div style={{ ...sectionLabel, marginBottom: 12 }}>{locale === "ko" ? "산출물 — 지금 바로 사용 가능" : "Deliverables — Ready to Use Now"}</div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(270px, 1fr))", gap: 12, marginBottom: 20 }}>
         {exports.map((f) => (
           <Card key={f.name} style={{ padding: 15, display: "flex", alignItems: "center", gap: 12 }}>
@@ -516,7 +605,7 @@ export function DeliveryPanel({ production }: { production: FilmProduction }) {
       </div>
 
       <PrimaryButton onClick={() => exports.forEach((f) => downloadText(f))}>
-        <IconFileUp size={15} /> 전체 패키지 다운로드 ({exports.length})
+        <IconFileUp size={15} /> {locale === "ko" ? `전체 패키지 다운로드 (${exports.length})` : `Download Full Package (${exports.length})`}
       </PrimaryButton>
     </div>
   );
@@ -526,7 +615,7 @@ export function DeliveryPanel({ production }: { production: FilmProduction }) {
 // 작품에 자동 선택된 폰트 페어링을 라이브 미리보기로 보여준다. 실제 웹폰트를
 // 로드해 타이틀/자막/로어서드가 어떻게 보일지 확인할 수 있다.
 
-const TYPO_PREVIEW: { role: TextRole; label: string; sample: (title: string) => string }[] = [
+const TYPO_PREVIEW_KO: { role: TextRole; label: string; sample: (title: string) => string }[] = [
   { role: "title", label: "타이틀 카드", sample: (t) => t || "Untitled" },
   { role: "subtitle_caption", label: "대사 자막", sample: () => "여기에 대사 자막이 들어갑니다." },
   { role: "lower_third", label: "로어서드", sample: () => "이름 · 직함" },
@@ -534,8 +623,18 @@ const TYPO_PREVIEW: { role: TextRole; label: string; sample: (title: string) => 
   { role: "cta", label: "CTA", sample: () => "지금 만나보세요" },
 ];
 
+const TYPO_PREVIEW_EN: { role: TextRole; label: string; sample: (title: string) => string }[] = [
+  { role: "title", label: "Title Card", sample: (t) => t || "Untitled" },
+  { role: "subtitle_caption", label: "Dialogue Caption", sample: () => "Dialogue captions go here." },
+  { role: "lower_third", label: "Lower Third", sample: () => "Name · Title" },
+  { role: "kicker", label: "Kicker Label", sample: () => "EP.01 · SEOUL" },
+  { role: "cta", label: "CTA", sample: () => "See it now" },
+];
+
 function TypographyShowcase({ production }: { production: FilmProduction }) {
+  const { locale } = useT();
   const kit = production.typography;
+  const typoPreview = locale === "ko" ? TYPO_PREVIEW_KO : TYPO_PREVIEW_EN;
 
   // 실제 Google Fonts 로드 — 미리보기를 진짜 폰트로 렌더.
   useEffect(() => {
@@ -560,15 +659,17 @@ function TypographyShowcase({ production }: { production: FilmProduction }) {
   return (
     <div style={{ marginBottom: 32 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-        <div style={sectionLabel}>타이포그래피 키트</div>
+        <div style={sectionLabel}>{locale === "ko" ? "타이포그래피 키트" : "Typography Kit"}</div>
         {subtitleCount > 0 && (
-          <span style={{ fontSize: 11, color: "var(--ob-muted)" }}>· 자막 {subtitleCount}줄 (SRT/VTT 포함)</span>
+          <span style={{ fontSize: 11, color: "var(--ob-muted)" }}>
+            {locale === "ko" ? `· 자막 ${subtitleCount}줄 (SRT/VTT 포함)` : `· Captions: ${subtitleCount} lines (SRT/VTT included)`}
+          </span>
         )}
       </div>
       <div style={{ fontSize: 12.5, color: "var(--ob-muted)", marginBottom: 12, maxWidth: 720, lineHeight: 1.5 }}>{kit.rationale}</div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12 }}>
-        {TYPO_PREVIEW.map(({ role, label, sample }) => {
+        {typoPreview.map(({ role, label, sample }) => {
           const s = kit.styles[role];
           const font = FONT_LIBRARY[s.fontId];
           return (

@@ -10,6 +10,7 @@ import type {
   OberonMotionAdJob,
   OberonMotionAdRequest,
 } from "../../shared/types";
+import { currentUiLocale } from "../main";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_DURATION = 30;
@@ -27,6 +28,7 @@ class MotionAdCancelled extends Error {
 }
 
 export function startOberonMotionAd(request: OberonMotionAdRequest): OberonMotionAdJob {
+  const ko = currentUiLocale() === "ko";
   const id = randomUUID();
   const width = evenInt(request.width ?? (request.aspectRatio === "9:16" ? 720 : DEFAULT_WIDTH), 320, 3840);
   const height = evenInt(request.height ?? (request.aspectRatio === "9:16" ? 1280 : DEFAULT_HEIGHT), 320, 3840);
@@ -53,7 +55,7 @@ export function startOberonMotionAd(request: OberonMotionAdRequest): OberonMotio
       percent: 0,
     },
     files: [],
-    message: "모션그래픽 렌더 준비 중",
+    message: ko ? "모션그래픽 렌더 준비 중" : "Preparing the motion graphics render",
     warnings: [],
     durationSec,
     fps,
@@ -75,10 +77,11 @@ export function getOberonMotionAdJob(id: string): OberonMotionAdJob | null {
 export function cancelOberonMotionAd(id: string): OberonMotionAdJob | null {
   const job = jobs.get(id);
   if (!job) return null;
+  const ko = currentUiLocale() === "ko";
   cancelledJobs.add(id);
   job.status = "cancelled";
   job.progress.phase = "cancelled";
-  job.message = "모션그래픽 렌더 취소됨";
+  job.message = ko ? "모션그래픽 렌더 취소됨" : "Motion graphics render cancelled";
   job.updatedAtMs = Date.now();
   return snapshot(job);
 }
@@ -92,6 +95,7 @@ export async function openOberonMotionAdOutput(id: string): Promise<{ ok: boolea
 }
 
 async function runMotionAdJob(id: string, request: OberonMotionAdRequest): Promise<void> {
+  const ko = currentUiLocale() === "ko";
   const job = requireJob(id);
   await fs.mkdir(job.outputDir, { recursive: true });
   const framesDir = path.join(job.outputDir, "frames");
@@ -108,14 +112,14 @@ async function runMotionAdJob(id: string, request: OberonMotionAdRequest): Promi
 
   job.files.push(await makeFile("html_preview", "HTML preview", htmlPath, "text/html"));
   job.files.push(await makeFile("prompt_pack", "Prompt pack", promptPackPath, "text/markdown"));
-  updateJob(job, "running", "rendering_frames", 0, "Chromium 프레임 렌더 중");
+  updateJob(job, "running", "rendering_frames", 0, ko ? "Chromium 프레임 렌더 중" : "Rendering frames with Chromium");
 
   await renderFramesWithElectron(job, htmlPath, framesDir);
   assertNotCancelled(job.id);
 
   const ffmpeg = await findFfmpeg();
   if (!ffmpeg) throw new Error("ffmpeg not found. Install ffmpeg to encode the motion ad MP4.");
-  updateJob(job, "running", "encoding", job.progress.totalFrames, "프레임을 MP4로 인코딩 중");
+  updateJob(job, "running", "encoding", job.progress.totalFrames, ko ? "프레임을 MP4로 인코딩 중" : "Encoding frames to MP4");
   await runFfmpeg(ffmpeg, [
     "-y",
     "-framerate",
@@ -175,10 +179,11 @@ async function runMotionAdJob(id: string, request: OberonMotionAdRequest): Promi
     "utf8",
   );
   job.files.push(await makeFile("manifest_json", "Render manifest", manifestPath, "application/json"));
-  updateJob(job, "succeeded", "complete", job.progress.totalFrames, "모션그래픽 렌더 완료");
+  updateJob(job, "succeeded", "complete", job.progress.totalFrames, ko ? "모션그래픽 렌더 완료" : "Motion graphics render complete");
 }
 
 async function renderFramesWithElectron(job: OberonMotionAdJob, htmlPath: string, framesDir: string): Promise<void> {
+  const ko = currentUiLocale() === "ko";
   let win: BrowserWindow | null = null;
   try {
     win = new BrowserWindow({
@@ -205,7 +210,13 @@ async function renderFramesWithElectron(job: OberonMotionAdJob, htmlPath: string
       const image = await win.webContents.capturePage();
       await fs.writeFile(path.join(framesDir, `frame_${String(frame).padStart(4, "0")}.png`), image.toPNG());
       if (frame % 5 === 0 || frame === job.progress.totalFrames - 1) {
-        updateJob(job, "running", "rendering_frames", frame + 1, `프레임 ${frame + 1}/${job.progress.totalFrames}`);
+        updateJob(
+          job,
+          "running",
+          "rendering_frames",
+          frame + 1,
+          ko ? `프레임 ${frame + 1}/${job.progress.totalFrames}` : `Frame ${frame + 1}/${job.progress.totalFrames}`,
+        );
       }
     }
   } finally {
@@ -707,10 +718,11 @@ function updateJob(
 function failJob(id: string, error: unknown): void {
   const job = jobs.get(id);
   if (!job) return;
+  const ko = currentUiLocale() === "ko";
   if (cancelledJobs.has(id) || error instanceof MotionAdCancelled) {
     job.status = "cancelled";
     job.progress.phase = "cancelled";
-    job.message = "모션그래픽 렌더 취소됨";
+    job.message = ko ? "모션그래픽 렌더 취소됨" : "Motion graphics render cancelled";
   } else {
     job.status = "failed";
     job.progress.phase = "failed";

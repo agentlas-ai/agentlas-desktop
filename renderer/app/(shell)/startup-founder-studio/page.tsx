@@ -6,6 +6,8 @@ import Link from "next/link";
 import { IconChevronRight, IconRefresh } from "@/components/Icon";
 import { StudioBotLogo } from "@/components/StudioBotLogo";
 import { ipc } from "@/lib/ipc";
+import { useT } from "@/lib/i18n";
+import type { Locale } from "@/lib/i18n";
 
 type Phase = "starting" | "ready" | "error";
 
@@ -15,6 +17,7 @@ const STARTUP_NAME_EN = "Startup Founder Studio";
 const STARTUP_SLUG = "agentlas-startup-founder-studio";
 
 export default function StartupFounderStudioPage() {
+  const { locale } = useT();
   const [phase, setPhase] = useState<Phase>("starting");
   const [url, setUrl] = useState<string | null>(null);
   const [reason, setReason] = useState("");
@@ -31,7 +34,14 @@ export default function StartupFounderStudioPage() {
     setIdeaPromptOpen(false);
     if (loadWatchRef.current) clearTimeout(loadWatchRef.current);
     const timeout = new Promise<{ ok: false; reason: string }>((resolve) =>
-      setTimeout(() => resolve({ ok: false, reason: "스튜디오 서버 시작 시간 초과." }), 25_000),
+      setTimeout(
+        () =>
+          resolve({
+            ok: false,
+            reason: locale === "ko" ? "스튜디오 서버 시작 시간 초과." : "Studio server startup timed out.",
+          }),
+        25_000,
+      ),
     );
 
     let res: { ok: boolean; url?: string; reason?: string } | undefined;
@@ -50,13 +60,13 @@ export default function StartupFounderStudioPage() {
       setUrl(`${res.url}?${params.toString()}`);
       setPhase("ready");
       loadWatchRef.current = setTimeout(() => {
-        setReason("스튜디오 화면을 불러오지 못했습니다.");
+        setReason(locale === "ko" ? "스튜디오 화면을 불러오지 못했습니다." : "Failed to load the studio screen.");
         setPhase("error");
       }, 15_000);
       return;
     }
 
-    setReason(res?.reason ?? "스튜디오를 시작할 수 없습니다.");
+    setReason(res?.reason ?? (locale === "ko" ? "스튜디오를 시작할 수 없습니다." : "Unable to start the studio."));
     setPhase("error");
   };
 
@@ -67,7 +77,7 @@ export default function StartupFounderStudioPage() {
 
   const onFrameError = () => {
     if (loadWatchRef.current) clearTimeout(loadWatchRef.current);
-    setReason("스튜디오 화면 로드 실패.");
+    setReason(locale === "ko" ? "스튜디오 화면 로드 실패." : "Studio screen failed to load.");
     setPhase("error");
   };
 
@@ -96,20 +106,27 @@ export default function StartupFounderStudioPage() {
         <div style={divider} />
         <StudioBotLogo size={32} />
         <div style={{ minWidth: 0 }}>
-          <h1 style={title}>{STARTUP_NAME_KO}</h1>
-          <p style={subtitle}>{STARTUP_NAME_EN}</p>
+          <h1 style={title}>{locale === "ko" ? STARTUP_NAME_KO : STARTUP_NAME_EN}</h1>
+          {locale === "ko" ? <p style={subtitle}>{STARTUP_NAME_EN}</p> : null}
         </div>
         <button onClick={() => setIdeaPromptOpen(true)} className="titlebar-nodrag" style={{ ...ghostButton, marginLeft: "auto" }}>
-          새 아이디어
+          {locale === "ko" ? "새 아이디어" : "New Idea"}
         </button>
-        <button onClick={() => void start()} disabled={phase === "starting"} className="titlebar-nodrag" title="다시 시작" style={{ ...ghostButton, opacity: phase === "starting" ? 0.52 : 1 }}>
-          <IconRefresh size={13} /> 새로고침
+        <button
+          onClick={() => void start()}
+          disabled={phase === "starting"}
+          className="titlebar-nodrag"
+          title={locale === "ko" ? "다시 시작" : "Restart"}
+          style={{ ...ghostButton, opacity: phase === "starting" ? 0.52 : 1 }}
+        >
+          <IconRefresh size={13} /> {locale === "ko" ? "새로고침" : "Refresh"}
         </button>
       </header>
 
       <div style={stage}>
         {ideaPromptOpen ? (
           <IdeaStartOverlay
+            locale={locale}
             value={ideaDraft}
             onChange={setIdeaDraft}
             onSubmit={() => {
@@ -133,14 +150,14 @@ export default function StartupFounderStudioPage() {
           <iframe
             key={url}
             src={url}
-            title={STARTUP_NAME_EN}
+            title={locale === "ko" ? STARTUP_NAME_KO : STARTUP_NAME_EN}
             onLoad={onFrameLoad}
             onError={onFrameError}
             style={iframe}
             allow="clipboard-write; clipboard-read"
           />
         ) : (
-          <LaunchState phase={phase} reason={reason} onRetry={() => void start()} />
+          <LaunchState phase={phase} reason={reason} onRetry={() => void start()} locale={locale} />
         )}
       </div>
       <style dangerouslySetInnerHTML={{ __html: "@keyframes sfsSpin{to{transform:rotate(360deg)}} .sfs-spin{animation:sfsSpin .8s linear infinite}" }} />
@@ -157,27 +174,39 @@ function VideoBackdrop() {
   );
 }
 
-function LaunchState({ phase, reason, onRetry }: { phase: Phase; reason: string; onRetry: () => void }) {
+function LaunchState({
+  phase,
+  reason,
+  onRetry,
+  locale,
+}: {
+  phase: Phase;
+  reason: string;
+  onRetry: () => void;
+  locale: Locale;
+}) {
   return (
     <div style={stateLayer}>
       <VideoBackdrop />
       <div style={statePanel}>
         <StudioBotLogo size={54} />
         <div>
-          <div style={stateName}>{STARTUP_NAME_KO}</div>
+          <div style={stateName}>{locale === "ko" ? STARTUP_NAME_KO : STARTUP_NAME_EN}</div>
           <div style={stateSlug}>{STARTUP_SLUG}</div>
         </div>
         {phase === "starting" ? (
           <>
             <div className="sfs-spin" style={spinner} />
-            <div style={stateText}>GUI 런처를 시작하는 중</div>
+            <div style={stateText}>{locale === "ko" ? "GUI 런처를 시작하는 중" : "Starting the GUI launcher"}</div>
           </>
         ) : (
           <>
-            <div style={stateText}>GUI 런처를 시작할 수 없습니다</div>
+            <div style={stateText}>
+              {locale === "ko" ? "GUI 런처를 시작할 수 없습니다" : "Unable to start the GUI launcher"}
+            </div>
             <div style={errorText}>{reason}</div>
             <button onClick={onRetry} style={solidButton}>
-              다시 시도
+              {locale === "ko" ? "다시 시도" : "Try Again"}
             </button>
           </>
         )}
@@ -191,11 +220,13 @@ function IdeaStartOverlay({
   onChange,
   onSubmit,
   onSkip,
+  locale,
 }: {
   value: string;
   onChange: (value: string) => void;
   onSubmit: () => void;
   onSkip: () => void;
+  locale: Locale;
 }) {
   return (
     <div style={stateLayer}>
@@ -209,22 +240,22 @@ function IdeaStartOverlay({
       >
         <StudioBotLogo size={44} />
         <div>
-          <h2 style={ideaTitle}>{STARTUP_NAME_KO}</h2>
+          <h2 style={ideaTitle}>{locale === "ko" ? STARTUP_NAME_KO : STARTUP_NAME_EN}</h2>
           <p style={ideaSlug}>{STARTUP_SLUG}</p>
         </div>
         <input
           value={value}
           onChange={(event) => onChange(event.target.value)}
           autoFocus
-          placeholder="창업 아이디어 한 줄"
+          placeholder={locale === "ko" ? "창업 아이디어 한 줄" : "Describe your startup idea in one line"}
           style={ideaInput}
         />
         <div style={ideaActions}>
           <button type="button" onClick={onSkip} style={outlineButton}>
-            건너뛰기
+            {locale === "ko" ? "건너뛰기" : "Skip"}
           </button>
           <button type="submit" style={solidButton}>
-            시작
+            {locale === "ko" ? "시작" : "Start"}
           </button>
         </div>
       </form>

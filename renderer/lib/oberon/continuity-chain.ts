@@ -14,6 +14,7 @@
 // 추가로: 키프레임 체이닝 — 정밀 연결이 필요한 샷은 직전 샷의 last frame을
 // 다음 샷의 first frame 후보로 잇는다(180도·아이라인·동작 매치 보존).
 
+import type { Locale } from "@/lib/i18n";
 import { CONTINUITY_RULES } from "./taxonomy";
 import type {
   Beat,
@@ -22,6 +23,18 @@ import type {
   Scene,
   ShotSpec,
 } from "./types";
+
+/** CONTINUITY_RULES 항목에서 로케일에 맞는 규칙 설명을 고른다. ruleEn이 아직 카탈로그에
+ *  없으면(갱신 전) ko로, rule 자체가 없으면(키 미스매치) 폴백 문구로 안전하게 내려간다. */
+function ruleText(
+  rule: { rule: string; ruleEn?: string } | undefined,
+  fallbackKo: string,
+  fallbackEn: string,
+  locale: Locale,
+): string {
+  if (!rule) return locale === "ko" ? fallbackKo : fallbackEn;
+  return locale === "ko" ? rule.rule : rule.ruleEn || rule.rule;
+}
 
 // ── 샷이 남기는 상태 ─────────────────────────────────────
 
@@ -142,10 +155,13 @@ export interface ThreadInput {
   beats: Beat[];
   bible: ContinuityBible;
   brief: FilmBrief;
+  /** 생성되는 연속성 구문/폴백 텍스트의 로케일 (기본 "ko" — 기존 호출부 호환). */
+  locale?: Locale;
 }
 
 export function threadContinuity(input: ThreadInput): Map<string, ShotContinuity> {
   const { shots, scenes, beats } = input;
+  const locale: Locale = input.locale ?? "ko";
   const sceneById = new Map(scenes.map((s) => [s.id, s]));
   const beatById = new Map(beats.map((b) => [b.id, b]));
   const ruleByKey = new Map(CONTINUITY_RULES.map((r) => [r.key, r]));
@@ -178,12 +194,15 @@ export function threadContinuity(input: ThreadInput): Map<string, ShotContinuity
     // 적용 규칙 결정.
     const appliedRules: string[] = [];
     if (!isSceneOpening) {
-      if (carry && carry.screenDirection !== "neutral") appliedRules.push(ruleByKey.get("180")?.rule ?? "180도");
-      if (shot.camera.angle === "ots") appliedRules.push(ruleByKey.get("eyeline")?.rule ?? "아이라인");
-      if (shot.shotType === "action") appliedRules.push(ruleByKey.get("match_action")?.rule ?? "매치 온 액션");
+      if (carry && carry.screenDirection !== "neutral")
+        appliedRules.push(ruleText(ruleByKey.get("180"), "180도", "180-degree rule", locale));
+      if (shot.camera.angle === "ots")
+        appliedRules.push(ruleText(ruleByKey.get("eyeline"), "아이라인", "eyeline match", locale));
+      if (shot.shotType === "action")
+        appliedRules.push(ruleText(ruleByKey.get("match_action"), "매치 온 액션", "match on action", locale));
       // 같은 피사체 연속 컷이면 30도 법칙(점프컷 방지).
       if (carry && sameSubjects(carry.subjectsPresent, charNames(shot.continuityRefs)) && carry.screenDirection === dir) {
-        appliedRules.push(ruleByKey.get("30deg")?.rule ?? "30도");
+        appliedRules.push(ruleText(ruleByKey.get("30deg"), "30도", "30-degree rule", locale));
       }
     }
 
@@ -198,11 +217,17 @@ export function threadContinuity(input: ThreadInput): Map<string, ShotContinuity
       emotionalTemp: emotion || carry?.emotionalTemp || "neutral",
       screenDirection: dir,
       lightingState: input.bible.lightingStyle,
-      timeOfDay: scene?.timeOfDay ?? "낮",
+      timeOfDay: scene?.timeOfDay ?? (locale === "ko" ? "낮" : "day"),
       establishedRefs: Array.from(established),
     };
 
-    const continuityPhrase = buildContinuityPhrase({ carry, isSceneOpening, scene: scene ?? fallbackScene(shot), emotion, appliedRules });
+    const continuityPhrase = buildContinuityPhrase({
+      carry,
+      isSceneOpening,
+      scene: scene ?? fallbackScene(shot, locale),
+      emotion,
+      appliedRules,
+    });
 
     // 키프레임 체이닝: 정밀 연결 샷이면서 씬 중간이면 직전 샷에서 잇는다.
     const chainFromShotId =
@@ -232,14 +257,14 @@ function sameSubjects(a: string[], b: string[]): boolean {
   return a.some((x) => b.includes(x));
 }
 
-function fallbackScene(shot: ShotSpec): Scene {
+function fallbackScene(shot: ShotSpec, locale: Locale = "ko"): Scene {
   return {
     id: shot.sceneId,
     index: 0,
     heading: "SCENE",
     type: shot.shotType,
     location: "",
-    timeOfDay: "낮",
+    timeOfDay: locale === "ko" ? "낮" : "day",
     summary: "",
     characterRefs: [],
     beatIds: [],

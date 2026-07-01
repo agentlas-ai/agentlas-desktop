@@ -178,6 +178,12 @@ export function ChatInput({
   tokensUsage,
   activeAgentId,
   stopRequested = false,
+  showModeToggles = false,
+  continuousMode = false,
+  swarmMode = false,
+  onToggleContinuous,
+  onToggleSwarm,
+  queuedCount = 0,
 }: {
   onSend: (text: string, opts?: SendOptions) => void;
   /** 슬래시 커맨드(/new, /clear, /help …) 실행 — 텍스트 삽입이 아니라 액션 */
@@ -207,6 +213,16 @@ export function ChatInput({
   onSelectEffort?: (id: string) => void;
   /** 컨텍스트 사용량 표시용 */
   tokensUsage?: { current: number; limit: number };
+  /** 실행 모드 토글 노출 여부(division 챗은 숨김). + 메뉴에 "계속 라이브로"·"스웜"을 넣는다. */
+  showModeToggles?: boolean;
+  /** 계속 라이브로(continuousMode) 현재 상태 + 토글. */
+  continuousMode?: boolean;
+  onToggleContinuous?: () => void;
+  /** 스웜(swarmMode) 현재 상태 + 토글. */
+  swarmMode?: boolean;
+  onToggleSwarm?: () => void;
+  /** 실행 중 steering 큐에 대기 중인 메시지 수 — 0보다 크면 "대기 중" 표시. */
+  queuedCount?: number;
 }) {
   const { t, locale } = useT();
   const [input, setInput] = useState("");
@@ -259,8 +275,10 @@ export function ChatInput({
     el.style.height = `${Math.min(el.scrollHeight, 150)}px`;
   }, [input]);
 
+  // busy는 제외 — 실행 중에도 엔터로 메시지를 보낼 수 있게(steering). 부모가 busy면 큐에 쌓아
+  // 현재 턴이 끝나면 순서대로 전송한다. (실행 중 전송 버튼 자체는 여전히 정지 버튼으로 변신.)
   const submitDisabled =
-    busy || (!input.trim() && images.length === 0) || disabled;
+    (!input.trim() && images.length === 0) || disabled;
   // 활성 토글을 Hephaestus 지시 프리픽스로 합성. Network=허브 라우팅, Stormbreaker=견고-실행(--stormbreaker).
   // Network 칩은 하단에서 숨겼지만 /hep-network 직접 실행 및 내부 선택 경로를 위해 동작은 유지한다.
   function composeHepPrefix(text: string): string {
@@ -625,6 +643,17 @@ export function ChatInput({
             setPlusOpen(false);
             setPlusSubmenu(null);
             setAgentPickerOpen(true);
+          }}
+          showModeToggles={showModeToggles}
+          continuousMode={continuousMode}
+          swarmMode={swarmMode}
+          onToggleContinuous={() => {
+            onToggleContinuous?.();
+            setTimeout(() => textareaRef.current?.focus(), 0);
+          }}
+          onToggleSwarm={() => {
+            onToggleSwarm?.();
+            setTimeout(() => textareaRef.current?.focus(), 0);
           }}
           t={t}
         />
@@ -1006,6 +1035,62 @@ export function ChatInput({
                   </button>
                 ))}
               </div>
+            )}
+
+            {/* 계속 라이브로 / 스웜 활성 칩 — 켜졌을 때만 바에 표시, 눌러서 끄기(평소엔 + 메뉴). */}
+            {showModeToggles && continuousMode && (
+              <div className="chat-input-hep-toggle-group" role="group" aria-label="Active modes">
+                <button
+                  type="button"
+                  className="chat-input-hep-chip active"
+                  onClick={() => onToggleContinuous?.()}
+                  disabled={disabled}
+                  title={`${locale === "ko" ? "계속 라이브로" : "Keep going live"} — ${locale === "ko" ? "끄기" : "turn off"}`}
+                  aria-pressed={true}
+                >
+                  <span className="chat-input-hep-dot" aria-hidden />
+                  <span className="chat-input-hep-label">{locale === "ko" ? "계속 라이브로" : "Keep going live"}</span>
+                </button>
+              </div>
+            )}
+            {showModeToggles && swarmMode && (
+              <div className="chat-input-hep-toggle-group" role="group" aria-label="Active modes">
+                <button
+                  type="button"
+                  className="chat-input-hep-chip active"
+                  onClick={() => onToggleSwarm?.()}
+                  disabled={disabled}
+                  title={`${locale === "ko" ? "스웜" : "Swarm"} — ${locale === "ko" ? "끄기" : "turn off"}`}
+                  aria-pressed={true}
+                >
+                  <span aria-hidden style={{ fontSize: 11, lineHeight: 1 }}>🐝</span>
+                  <span className="chat-input-hep-label">{locale === "ko" ? "스웜" : "Swarm"}</span>
+                </button>
+              </div>
+            )}
+
+            {/* 실행 중 steering 대기 표시 — 큐에 쌓인 메시지가 있으면 개수를 보여준다. */}
+            {queuedCount > 0 && (
+              <span
+                title={locale === "ko" ? "실행이 끝나면 순서대로 전송됩니다" : "Will send in order when the run finishes"}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  height: 24,
+                  padding: "0 9px",
+                  borderRadius: 999,
+                  fontSize: 11,
+                  fontWeight: 600,
+                  color: "var(--amber-deep)",
+                  background: "color-mix(in srgb, var(--amber-deep) 10%, var(--paper))",
+                  border: "1px solid color-mix(in srgb, var(--amber-deep) 24%, var(--paper-edge))",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <span aria-hidden>⏳</span>
+                {locale === "ko" ? `${queuedCount}개 대기 중` : `${queuedCount} queued`}
+              </span>
             )}
 
             {/* 권한 칩 */}
@@ -1991,6 +2076,11 @@ function PlusMenu({
   onToggleHep,
   locale,
   onOpenAgentPicker,
+  showModeToggles,
+  continuousMode,
+  swarmMode,
+  onToggleContinuous,
+  onToggleSwarm,
   t,
 }: {
   submenu: "plugins" | null;
@@ -2011,6 +2101,12 @@ function PlusMenu({
   onToggleHep: (id: HepToggleId) => void;
   locale: string;
   onOpenAgentPicker: () => void;
+  /** 실행 모드 토글(계속 라이브로·스웜) 노출 여부. */
+  showModeToggles: boolean;
+  continuousMode: boolean;
+  swarmMode: boolean;
+  onToggleContinuous: () => void;
+  onToggleSwarm: () => void;
   t: TFunction;
 }) {
   if (submenu === "plugins") {
@@ -2083,6 +2179,44 @@ function PlusMenu({
         on={goalMode}
         onChange={setGoalMode}
       />
+      {showModeToggles && (
+        <>
+          <Divider />
+          <ToggleRow
+            icon={
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: continuousMode ? "var(--accent)" : "var(--muted)",
+                  display: "inline-block",
+                  flexShrink: 0,
+                }}
+              />
+            }
+            title={locale === "ko" ? "계속 라이브로" : "Keep going live"}
+            subtitle={
+              locale === "ko"
+                ? "멈추지 않고 라이브로 계속 작업 (끝나거나 멈출 때까지)"
+                : "Keep working live without stopping until done or stopped"
+            }
+            on={continuousMode}
+            onChange={onToggleContinuous}
+          />
+          <ToggleRow
+            icon={<span aria-hidden style={{ fontSize: 13, lineHeight: 1 }}>🐝</span>}
+            title={locale === "ko" ? "스웜" : "Swarm"}
+            subtitle={
+              locale === "ko"
+                ? "목표를 쪼개 여러 에이전트가 동시에 협업"
+                : "Split the goal across parallel agents"
+            }
+            on={swarmMode}
+            onChange={onToggleSwarm}
+          />
+        </>
+      )}
       <Divider />
       {HEP_TOGGLES.map((tg) => (
         <ToggleRow

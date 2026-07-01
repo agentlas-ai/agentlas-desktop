@@ -6,6 +6,7 @@ import { useState } from "react";
 import Link from "next/link";
 import type { FilmProduction } from "@/lib/oberon";
 import type { OberonAnimateFile, OberonAnimateJob, OberonAnimateKeyStatus } from "@/lib/types";
+import { useT } from "@/lib/i18n";
 import { Glyph } from "./icons";
 import { Card, GhostButton, Meter, PanelHead, PrimaryButton } from "./ui";
 
@@ -30,6 +31,7 @@ export function AnimatePanel({
   onOpenOutput?: (jobId: string) => void;
   onSaveKey?: (provider: "runway" | "luma", value: string) => void | Promise<void>;
 }) {
+  const { locale } = useT();
   const mp4 = (job?.files ?? []).find((f) => f.kind === "animation_mp4");
   const hasKey = Boolean(keyStatus?.runway || keyStatus?.luma);
   const [keyDraft, setKeyDraft] = useState("");
@@ -45,19 +47,23 @@ export function AnimatePanel({
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 32px 72px" }}>
       <PanelHead
-        eyebrow="애니메이션 · 영상"
-        title="이미지 → 영상"
-        subtitle={`${production.brief.title} · 컷 이미지를 image-to-video로 애니메이션`}
+        eyebrow={locale === "ko" ? "애니메이션 · 영상" : "Animation · Video"}
+        title={locale === "ko" ? "이미지 → 영상" : "Image → Video"}
+        subtitle={
+          locale === "ko"
+            ? `${production.brief.title} · 컷 이미지를 image-to-video로 애니메이션`
+            : `${production.brief.title} · Animate the cut images with image-to-video`
+        }
         icon={<Glyph name="sparkle" size={18} />}
         right={
           job ? (
             <GhostButton onClick={onReset}>
-              <Glyph name="x" size={14} /> 리셋
+              <Glyph name="x" size={14} /> {locale === "ko" ? "리셋" : "Reset"}
             </GhostButton>
           ) : (
             <PrimaryButton onClick={onStart} disabled={generating || !hasKey || !hasKeyframe}>
               <Glyph name="sparkle" size={14} />
-              {generating ? "생성 중…" : "애니메이션 생성"}
+              {generating ? (locale === "ko" ? "생성 중…" : "Generating…") : locale === "ko" ? "애니메이션 생성" : "Generate Animation"}
             </PrimaryButton>
           )
         }
@@ -65,16 +71,20 @@ export function AnimatePanel({
 
       {!hasKey ? (
         <Card style={{ padding: 18, borderColor: "var(--ob-accent)" }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: "var(--ob-ink)", marginBottom: 6 }}>API 키 입력</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "var(--ob-ink)", marginBottom: 6 }}>
+            {locale === "ko" ? "API 키 입력" : "Enter API Key"}
+          </div>
           <p style={{ fontSize: 13, lineHeight: 1.55, color: "var(--ob-ink-soft)", margin: "0 0 12px" }}>
-            애니메이션은 외부 image-to-video 모델로 생성합니다. 키를 입력하면 OS 키체인(공통 자격증명 볼트)에 안전하게 저장됩니다.
+            {locale === "ko"
+              ? "애니메이션은 외부 image-to-video 모델로 생성합니다. 키를 입력하면 OS 키체인(공통 자격증명 볼트)에 안전하게 저장됩니다."
+              : "Animation is generated with an external image-to-video model. Once you enter a key, it's stored securely in the OS keychain (the shared credentials vault)."}
           </p>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <input
               type="password"
               value={keyDraft}
               onChange={(e) => setKeyDraft(e.target.value)}
-              placeholder="RUNWAYML_API_SECRET (로컬 이미지 지원)"
+              placeholder={locale === "ko" ? "RUNWAYML_API_SECRET (로컬 이미지 지원)" : "RUNWAYML_API_SECRET (supports local images)"}
               style={{ flex: 1, minHeight: 38, padding: "0 12px", borderRadius: 10, border: "1px solid var(--ob-edge)", background: "var(--ob-paper)", color: "var(--ob-ink)", fontSize: 13 }}
             />
             <PrimaryButton
@@ -89,21 +99,41 @@ export function AnimatePanel({
               }}
               disabled={!keyDraft.trim() || saving}
             >
-              {saving ? "저장 중…" : "저장"}
+              {saving ? (locale === "ko" ? "저장 중…" : "Saving…") : locale === "ko" ? "저장" : "Save"}
             </PrimaryButton>
           </div>
           <div style={{ marginTop: 10, fontSize: 12, color: "var(--ob-muted)" }}>
-            Luma(공개 URL)를 쓰려면{" "}
-            <Link href="/library/env" style={{ color: "var(--ob-accent-text)", textDecoration: "none" }}>
-              Environment Keys
-            </Link>
-            에서 LUMAAI_API_KEY를 추가하세요.
+            {locale === "ko" ? (
+              <>
+                Luma(공개 URL)를 쓰려면{" "}
+                <Link href="/library/env" style={{ color: "var(--ob-accent-text)", textDecoration: "none" }}>
+                  Environment Keys
+                </Link>
+                에서 LUMAAI_API_KEY를 추가하세요.
+              </>
+            ) : (
+              <>
+                To use Luma (public URLs), add LUMAAI_API_KEY in{" "}
+                <Link href="/library/env" style={{ color: "var(--ob-accent-text)", textDecoration: "none" }}>
+                  Environment Keys
+                </Link>
+                .
+              </>
+            )}
           </div>
         </Card>
       ) : !hasKeyframe ? (
         <Card style={{ padding: 18 }}>
           <div style={{ fontSize: 13, color: "var(--ob-ink-soft)", lineHeight: 1.55 }}>
-            먼저 <strong>컷 이미지</strong> 단계에서 키프레임 이미지를 생성하세요. 그 이미지를 영상으로 움직입니다.
+            {locale === "ko" ? (
+              <>
+                먼저 <strong>컷 이미지</strong> 단계에서 키프레임 이미지를 생성하세요. 그 이미지를 영상으로 움직입니다.
+              </>
+            ) : (
+              <>
+                First generate keyframe images in the <strong>Cut Images</strong> step. Those images will be animated into video.
+              </>
+            )}
           </div>
         </Card>
       ) : (
@@ -113,7 +143,13 @@ export function AnimatePanel({
               <video controls src={mp4.url} style={{ width: "100%", borderRadius: 10, background: "#111", aspectRatio: ratio, objectFit: "contain" }} />
             ) : (
               <div style={{ aspectRatio: ratio, borderRadius: 10, background: "var(--ob-surface)", border: "1px solid var(--ob-edge)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--ob-muted)", fontSize: 13 }}>
-                {generating ? "생성 중…" : "생성하면 여기서 바로 재생됩니다"}
+                {generating
+                  ? locale === "ko"
+                    ? "생성 중…"
+                    : "Generating…"
+                  : locale === "ko"
+                    ? "생성하면 여기서 바로 재생됩니다"
+                    : "It will play here as soon as it's generated"}
               </div>
             )}
           </Card>
@@ -121,19 +157,19 @@ export function AnimatePanel({
           <Card style={{ padding: 18 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
               <span style={{ width: 8, height: 8, borderRadius: "50%", background: statusTone }} />
-              <span style={{ fontSize: 14, fontWeight: 700, color: "var(--ob-ink)" }}>{job?.message ?? "대기 중"}</span>
+              <span style={{ fontSize: 14, fontWeight: 700, color: "var(--ob-ink)" }}>{job?.message ?? (locale === "ko" ? "대기 중" : "Waiting")}</span>
               <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--ob-muted)", fontVariantNumeric: "tabular-nums" }}>{job?.progress.percent ?? 0}%</span>
             </div>
             <Meter value={job?.progress.percent ?? 0} max={100} color={statusTone} />
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 16 }}>
               <Metric label="provider" value={keyStatus?.runway ? "Runway" : "Luma"} />
-              <Metric label="길이" value={`${clampLen(production.brief.durationSec)}s`} />
+              <Metric label={locale === "ko" ? "길이" : "Length"} value={`${clampLen(production.brief.durationSec)}s`} />
             </div>
             {job?.error && <div style={{ marginTop: 12, fontSize: 12, color: "var(--ob-danger)", lineHeight: 1.45 }}>{job.error}</div>}
             {mp4 && <div style={{ marginTop: 16 }}><FileLink file={mp4} /></div>}
             {job && onOpenOutput && (
               <GhostButton onClick={() => onOpenOutput(job.id)} style={{ marginTop: 14 }}>
-                출력 폴더 열기
+                {locale === "ko" ? "출력 폴더 열기" : "Open Output Folder"}
               </GhostButton>
             )}
           </Card>

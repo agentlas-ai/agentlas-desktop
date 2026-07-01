@@ -4,16 +4,17 @@
 "use client";
 import { providerById, routeImageProvider, type FilmProduction, type ModelSettings, type ReferenceEntry } from "@/lib/oberon";
 import { getMultimodalProvider } from "@shared/multimodal";
+import { useT, type Locale } from "@/lib/i18n";
 import { Glyph, OberonBadge, type GlyphName } from "./icons";
 import { CHARCOAL, Card, Eyebrow, PanelHead, PrimaryButton, Tag } from "./ui";
 
-const CATEGORY_ORDER: { kind: ReferenceEntry["kind"]; label: string; glyph: GlyphName }[] = [
-  { kind: "character", label: "인물", glyph: "character" },
-  { kind: "location", label: "배경", glyph: "background" },
-  { kind: "prop", label: "소품", glyph: "prop" },
-  { kind: "wardrobe", label: "의상", glyph: "style" },
-  { kind: "vehicle", label: "탈것", glyph: "prop" },
-  { kind: "style", label: "스타일", glyph: "style" },
+const CATEGORY_ORDER: { kind: ReferenceEntry["kind"]; label: string; labelEn: string; glyph: GlyphName }[] = [
+  { kind: "character", label: "인물", labelEn: "Characters", glyph: "character" },
+  { kind: "location", label: "배경", labelEn: "Locations", glyph: "background" },
+  { kind: "prop", label: "소품", labelEn: "Props", glyph: "prop" },
+  { kind: "wardrobe", label: "의상", labelEn: "Wardrobe", glyph: "style" },
+  { kind: "vehicle", label: "탈것", labelEn: "Vehicles", glyph: "prop" },
+  { kind: "style", label: "스타일", labelEn: "Style", glyph: "style" },
 ];
 
 const BUNDLE_SLOTS: Record<string, string[]> = {
@@ -23,6 +24,15 @@ const BUNDLE_SLOTS: Record<string, string[]> = {
   wardrobe: ["플랫레이", "착장"],
   vehicle: ["3/4 히어로", "측면"],
   style: ["스타일 프레임"],
+};
+
+const BUNDLE_SLOTS_EN: Record<string, string[]> = {
+  character: ["Front", "3/4 Left", "3/4 Right", "Profile", "Face CU★", "Full Body"],
+  location: ["establishing", "Corner Detail", "Day Lighting", "Night Lighting"],
+  prop: ["Hero", "Held Cut"],
+  wardrobe: ["Flat Lay", "Worn"],
+  vehicle: ["3/4 Hero", "Profile"],
+  style: ["Style Frame"],
 };
 
 export function AssetBible({
@@ -36,17 +46,23 @@ export function AssetBible({
   approved: boolean;
   onApprove: () => void;
 }) {
+  const { locale } = useT();
   const imgProviderId = model?.imageProvider;
-  const imgLabel = imgProviderId ? getMultimodalProvider(imgProviderId)?.labelKo : undefined;
+  const imgProvider = imgProviderId ? getMultimodalProvider(imgProviderId) : undefined;
+  const imgLabel = imgProvider ? (locale === "ko" ? imgProvider.labelKo : imgProvider.label) : undefined;
   const refs = production.bible.references;
   const cats = CATEGORY_ORDER.filter((c) => refs.some((r) => r.kind === c.kind));
 
   return (
     <div style={panelStyle}>
       <PanelHead
-        eyebrow="Step 03 · 등장 요소"
-        title="인물·배경·소품 미리 만들기"
-        subtitle={`인물·배경·소품을 여러 각도의 참고 이미지로 미리 만들어 둡니다${imgLabel ? ` · 이미지 엔진 ${imgLabel}` : ""}. 모든 컷이 이걸 참고해 같은 얼굴·같은 장소를 유지해요. (얼굴 정면 ★ 이미지가 제일 중요)`}
+        eyebrow={locale === "ko" ? "Step 03 · 등장 요소" : "Step 03 · Cast & Elements"}
+        title={locale === "ko" ? "인물·배경·소품 미리 만들기" : "Pre-Generate Characters, Locations & Props"}
+        subtitle={
+          locale === "ko"
+            ? `인물·배경·소품을 여러 각도의 참고 이미지로 미리 만들어 둡니다${imgLabel ? ` · 이미지 엔진 ${imgLabel}` : ""}. 모든 컷이 이걸 참고해 같은 얼굴·같은 장소를 유지해요. (얼굴 정면 ★ 이미지가 제일 중요)`
+            : `Pre-generate characters, locations, and props as multi-angle reference images${imgLabel ? ` · Image engine: ${imgLabel}` : ""}. Every shot references these to keep the same face and the same place. (The front-face ★ image matters most.)`
+        }
         icon={<Glyph name="assets" size={18} />}
       />
 
@@ -56,12 +72,12 @@ export function AssetBible({
           <div key={c.kind} style={{ marginBottom: 28 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 12 }}>
               <OberonBadge name={c.glyph} size={24} glyphSize={13} />
-              <span style={{ fontSize: 15, fontWeight: 600, color: "var(--ob-ink)" }}>{c.label}</span>
+              <span style={{ fontSize: 15, fontWeight: 600, color: "var(--ob-ink)" }}>{locale === "ko" ? c.label : c.labelEn}</span>
               <span style={{ fontSize: 12.5, color: "var(--ob-muted)", fontVariantNumeric: "tabular-nums" }}>{items.length}</span>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(330px, 1fr))", gap: 16 }}>
               {items.map((r, i) => (
-                <BundleCard key={r.id} entry={r} index={i} model={model} />
+                <BundleCard key={r.id} entry={r} index={i} model={model} locale={locale} />
               ))}
             </div>
           </div>
@@ -71,11 +87,12 @@ export function AssetBible({
       <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 12 }}>
         {approved ? (
           <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, color: "var(--ob-success)" }}>
-            <Glyph name="check" size={16} strokeWidth={2.4} /> 에셋 확정됨 — 컷 이미지 단계가 열렸습니다.
+            <Glyph name="check" size={16} strokeWidth={2.4} />{" "}
+            {locale === "ko" ? "에셋 확정됨 — 컷 이미지 단계가 열렸습니다." : "Assets confirmed — the Cut Images step is unlocked."}
           </span>
         ) : (
           <PrimaryButton onClick={onApprove}>
-            에셋 확정하고 컷 이미지로 <Glyph name="chevron" size={14} strokeWidth={2.4} />
+            {locale === "ko" ? "에셋 확정하고 컷 이미지로" : "Confirm Assets and Continue to Cut Images"} <Glyph name="chevron" size={14} strokeWidth={2.4} />
           </PrimaryButton>
         )}
       </div>
@@ -83,8 +100,18 @@ export function AssetBible({
   );
 }
 
-function BundleCard({ entry, index, model }: { entry: ReferenceEntry; index: number; model?: ModelSettings }) {
-  const slots = BUNDLE_SLOTS[entry.kind] ?? ["메인", "디테일"];
+function BundleCard({
+  entry,
+  index,
+  model,
+  locale,
+}: {
+  entry: ReferenceEntry;
+  index: number;
+  model?: ModelSettings;
+  locale: Locale;
+}) {
+  const slots = (locale === "ko" ? BUNDLE_SLOTS : BUNDLE_SLOTS_EN)[entry.kind] ?? (locale === "ko" ? ["메인", "디테일"] : ["Main", "Detail"]);
   const route = routeImageProvider(entry.kind === "character" ? "character" : entry.kind === "prop" ? "product" : "keyframe");
   const oberonProvider = providerById(route.providerId);
   const stableId = `${({ character: "CHAR", location: "LOC", prop: "PROP", wardrobe: "WARD", vehicle: "VEH", style: "STYLE" } as Record<string, string>)[entry.kind] ?? "ASSET"}_${entry.id.split("_").pop()}`;

@@ -164,9 +164,9 @@ export default function BuildPage() {
   };
 
   useEffect(() => {
-    ipc()?.hephaestus.status().then(setStatus).catch(() => setStatus(null));
+    ipc()?.hephaestus.status(locale).then(setStatus).catch(() => setStatus(null));
     ipc()?.runtime.detect().then(setRuntimes).catch(() => setRuntimes([]));
-  }, []);
+  }, [locale]);
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [log]);

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.5.9 — 2026-07-01
+
+### Added
+
+- **Automation workflow engine (P0–P2).** Automations are no longer just a prompt on a
+  timer. Proper scheduling (full cron + presets + time picker + timezone/DST via croner),
+  a **visual node-graph** for every automation (React Flow) that is **auto-generated from
+  chat**, condition triggers (file-change, chain, schedule+gate), opt-in launchd
+  persistence so schedules fire even when the app is closed, and per-run history. DB
+  migrations v33–v35 (graph, schedule spec, timezone, triggers, run history, lease).
+- **Parallel workflows.** A chat request can now fan out into **parallel branches**
+  (e.g. keyword research → 3 parallel deep-dives → writing → publish). The graph
+  generator builds a real DAG with fan-out/fan-in + a layered layout, and the graph
+  runner **executes independent branches concurrently** (bounded by the concurrency
+  slider), running dependent steps in order. Verified end-to-end in the app.
+
+### Changed
+
+- **Smarter agent import, chat toolbar consolidation, and accumulated fixes** from
+  parallel work streams (Oberon motion, Trex studio, Hephaestus, i18n leaks, capture
+  media) are bundled into this release.
+
+### Fixed
+
+- Automation review pass: event-driven triggers no longer get promoted onto a clock
+  schedule; "Run now" / trigger fires no longer eat the next scheduled slot; condition
+  branches persist correctly; per-node agent targets resolve; chat-generated cron parses;
+  fs-watcher no longer drops modify events on rename collisions. Removed the confusing
+  "completion evidence" runtime note.
+
 ## 0.5.8 — 2026-07-01
 
 ### Added

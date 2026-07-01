@@ -9,6 +9,7 @@ import { getDb } from "../store/db";
 import { saveApiKey, setEnvVar } from "../secrets/vault";
 import { createProject } from "../store/projects";
 import { createAutomation } from "../store/automations";
+import { currentUiLocale } from "../main";
 import {
   backendForEnvKey,
   looksLikeSecretKey,
@@ -170,6 +171,7 @@ async function importKeysFrom(src: ParsedSource): Promise<string[]> {
 
 /** preview를 실제 적용. dryRun이면 무엇이 적용될지 형태만 계산. */
 export async function runMigration(opts: MigrationOptions): Promise<MigrationResult> {
+  const ko = (opts.locale ?? currentUiLocale()) === "ko";
   const src = parseSource(opts.source);
   const dryRun = opts.dryRun ?? false;
   const overwrite = opts.overwrite ?? false;
@@ -189,12 +191,20 @@ export async function runMigration(opts: MigrationOptions): Promise<MigrationRes
   };
 
   if (!src.available) {
-    warnings.push(`${src.label} 설정을 ${src.rootPath} 에서 찾지 못했습니다.`);
+    warnings.push(
+      ko
+        ? `${src.label} 설정을 ${src.rootPath} 에서 찾지 못했습니다.`
+        : `Could not find ${src.label} settings at ${src.rootPath}.`,
+    );
     return base;
   }
 
   if (!src.persona) {
-    warnings.push("SOUL/페르소나 파일을 찾지 못해 빈 에이전트로 가져옵니다.");
+    warnings.push(
+      ko
+        ? "SOUL/페르소나 파일을 찾지 못해 빈 에이전트로 가져옵니다."
+        : "Couldn't find a SOUL/persona file — importing as a blank agent.",
+    );
   }
 
   // ── dry-run: 아무것도 쓰지 않고 예상 결과만 ──────────────
@@ -219,7 +229,9 @@ export async function runMigration(opts: MigrationOptions): Promise<MigrationRes
   const agent = upsertAgent(src, overwrite);
   if (agent.skipped) {
     warnings.push(
-      `이미 ${src.label}에서 가져온 에이전트가 있습니다. 다시 가져오려면 덮어쓰기를 켜세요.`,
+      ko
+        ? `이미 ${src.label}에서 가져온 에이전트가 있습니다. 다시 가져오려면 덮어쓰기를 켜세요.`
+        : `An agent imported from ${src.label} already exists. Turn on overwrite to import again.`,
     );
   }
 

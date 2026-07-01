@@ -8,6 +8,7 @@
 // 폰트를 많이 쓰면 아마추어로 보인다. 다양화 = "장르마다 다른 페어링"이지
 // "한 작품 안에서 폰트 난사"가 아니다.
 
+import type { Locale } from "@/lib/i18n";
 import type { FilmFormat, Genre } from "./types";
 
 // ── 폰트 카테고리 ────────────────────────────────────────
@@ -259,26 +260,102 @@ interface Pairing {
   body: FontId;
   accent: FontId;
   rationale: string;
+  rationaleEn: string;
 }
 
 const GENRE_PAIRINGS: Record<Genre, Pairing> = {
-  commercial: { display: "interTight", body: "pretendard", accent: "spaceGrotesk", rationale: "모던 지오메트릭 + 휴머니스트 본문 — 깨끗한 브랜드 광고 룩" },
-  drama: { display: "fraunces", body: "notoSansKr", accent: "spaceGrotesk", rationale: "시네마틱 세리프 디스플레이 + 중립 자막 — 감정 드라마" },
-  action: { display: "anton", body: "pretendard", accent: "jetbrainsMono", rationale: "블랙 디스플레이 + 강한 본문 + 모노 라벨 — 임팩트 액션" },
-  thriller: { display: "oswald", body: "notoSansKr", accent: "jetbrainsMono", rationale: "컨덴스드 + 모노 — 긴장·수사·뉴스 톤" },
-  romance: { display: "playfair", body: "notoSerifKr", accent: "caveat", rationale: "에디토리얼 세리프 + 손글씨 액센트 — 따뜻한 로맨스" },
-  scifi: { display: "sora", body: "pretendard", accent: "jetbrainsMono", rationale: "지오메트릭 + 모노 HUD — 미래·테크 SF" },
-  documentary: { display: "robotoSlab", body: "notoSansKr", accent: "spaceGrotesk", rationale: "슬랩 + 중립 자막 — 신뢰감 다큐멘터리" },
-  fantasy: { display: "playfair", body: "notoSerifKr", accent: "fraunces", rationale: "세리프 디스플레이 — 서사·판타지 격조" },
-  horror: { display: "oswald", body: "notoSansKr", accent: "jetbrainsMono", rationale: "컨덴스드 + 모노 — 불안·차가운 호러" },
-  comedy: { display: "archivoBlack", body: "pretendard", accent: "caveat", rationale: "두꺼운 디스플레이 + 손글씨 — 경쾌한 코미디" },
+  commercial: {
+    display: "interTight",
+    body: "pretendard",
+    accent: "spaceGrotesk",
+    rationale: "모던 지오메트릭 + 휴머니스트 본문 — 깨끗한 브랜드 광고 룩",
+    rationaleEn: "Modern geometric display + humanist body — a clean brand-ad look",
+  },
+  drama: {
+    display: "fraunces",
+    body: "notoSansKr",
+    accent: "spaceGrotesk",
+    rationale: "시네마틱 세리프 디스플레이 + 중립 자막 — 감정 드라마",
+    rationaleEn: "Cinematic serif display + neutral captions — emotional drama",
+  },
+  action: {
+    display: "anton",
+    body: "pretendard",
+    accent: "jetbrainsMono",
+    rationale: "블랙 디스플레이 + 강한 본문 + 모노 라벨 — 임팩트 액션",
+    rationaleEn: "Black display + strong body + mono labels — high-impact action",
+  },
+  thriller: {
+    display: "oswald",
+    body: "notoSansKr",
+    accent: "jetbrainsMono",
+    rationale: "컨덴스드 + 모노 — 긴장·수사·뉴스 톤",
+    rationaleEn: "Condensed + mono — tense, investigative, news-style tone",
+  },
+  romance: {
+    display: "playfair",
+    body: "notoSerifKr",
+    accent: "caveat",
+    rationale: "에디토리얼 세리프 + 손글씨 액센트 — 따뜻한 로맨스",
+    rationaleEn: "Editorial serif + handwritten accent — warm romance",
+  },
+  scifi: {
+    display: "sora",
+    body: "pretendard",
+    accent: "jetbrainsMono",
+    rationale: "지오메트릭 + 모노 HUD — 미래·테크 SF",
+    rationaleEn: "Geometric + mono HUD — futuristic, tech-forward sci-fi",
+  },
+  documentary: {
+    display: "robotoSlab",
+    body: "notoSansKr",
+    accent: "spaceGrotesk",
+    rationale: "슬랩 + 중립 자막 — 신뢰감 다큐멘터리",
+    rationaleEn: "Slab serif + neutral captions — a trustworthy documentary tone",
+  },
+  fantasy: {
+    display: "playfair",
+    body: "notoSerifKr",
+    accent: "fraunces",
+    rationale: "세리프 디스플레이 — 서사·판타지 격조",
+    rationaleEn: "Serif display — epic, narrative fantasy elegance",
+  },
+  horror: {
+    display: "oswald",
+    body: "notoSansKr",
+    accent: "jetbrainsMono",
+    rationale: "컨덴스드 + 모노 — 불안·차가운 호러",
+    rationaleEn: "Condensed + mono — unsettling, cold horror",
+  },
+  comedy: {
+    display: "archivoBlack",
+    body: "pretendard",
+    accent: "caveat",
+    rationale: "두꺼운 디스플레이 + 손글씨 — 경쾌한 코미디",
+    rationaleEn: "Bold display + handwritten accent — light-hearted comedy",
+  },
 };
 
 /** 숏폼/소셜은 자막이 핵심 — 본문을 더 두껍고 크게. */
 const FORMAT_TONE: Partial<Record<FilmFormat, Partial<Pairing>>> = {
-  trailer: { display: "anton", accent: "jetbrainsMono", rationale: "트레일러 — 블랙 임팩트 타이틀, 모노 날짜 카드" },
-  music_video: { display: "bebas", accent: "spaceGrotesk", rationale: "뮤직비디오 — 포스터 디스플레이, 리드미컬 라벨" },
-  social_short: { display: "archivoBlack", accent: "interTight", rationale: "소셜 숏폼 — 두꺼운 자막 친화 타이틀(엄지 정지)" },
+  trailer: {
+    display: "anton",
+    accent: "jetbrainsMono",
+    rationale: "트레일러 — 블랙 임팩트 타이틀, 모노 날짜 카드",
+    rationaleEn: "Trailer — bold black-display titles, mono date cards",
+  },
+  music_video: {
+    display: "bebas",
+    accent: "spaceGrotesk",
+    rationale: "뮤직비디오 — 포스터 디스플레이, 리드미컬 라벨",
+    rationaleEn: "Music video — poster-style display, rhythmic labels",
+  },
+  social_short: {
+    display: "archivoBlack",
+    accent: "interTight",
+    rationale: "소셜 숏폼 — 두꺼운 자막 친화 타이틀(엄지 정지)",
+    rationaleEn: "Social short — bold, caption-friendly titles (thumb-stopping)",
+  },
 };
 
 // ── 역할별 스타일 빌더 ───────────────────────────────────
@@ -375,11 +452,15 @@ function heaviest(id: FontId): number {
 export interface TypographyInput {
   genre: Genre;
   format: FilmFormat;
+  /** 영상 속 대사 언어 (UI 로케일과 별개). */
   language: "ko" | "en";
   tone: string[];
+  /** rationale 등 표시 텍스트의 UI 로케일 (기본 "ko" — 기존 호출부 호환). */
+  locale?: Locale;
 }
 
 export function pickTypography(input: TypographyInput): TypographyKit {
+  const locale = input.locale ?? "ko";
   const base = { ...GENRE_PAIRINGS[input.genre] };
   const override = FORMAT_TONE[input.format];
   if (override?.display) base.display = override.display;
@@ -399,7 +480,11 @@ export function pickTypography(input: TypographyInput): TypographyKit {
   }
 
   const styles = buildStyles(base);
-  const rationale = [GENRE_PAIRINGS[input.genre].rationale, override?.rationale].filter(Boolean).join(" · ");
+  const genrePairing = GENRE_PAIRINGS[input.genre];
+  const rationale =
+    locale === "ko"
+      ? [genrePairing.rationale, override?.rationale].filter(Boolean).join(" · ")
+      : [genrePairing.rationaleEn, override?.rationaleEn].filter(Boolean).join(" · ");
   const googleFamilies = collectGoogleFamilies([base.display, base.body, base.accent]);
 
   return {

@@ -101,14 +101,16 @@ export function parseMemoryMarkdown(content: string): ParsedMemory {
   return { decisions, gotchas, openQuestions };
 }
 
-const DEFAULT_MEMORY_HEADER =
+const DEFAULT_MEMORY_HEADER_KO =
   "# Agentlas Agent Memory\n\n이 에이전트가 다음 호출에서도 유지해야 할 결정, 주의사항, 미결 과제를 적는다. 프로젝트별 휘발 상태는 해당 프로젝트 컨텍스트에 둔다.\n\n";
+const DEFAULT_MEMORY_HEADER_EN =
+  "# Agentlas Agent Memory\n\nDecisions, gotchas, and open questions this agent should keep across future calls. Project-specific transient state belongs in that project's context.\n\n";
 
 export function serializeMemoryMarkdown(
   decisions: MemoryItemLike[],
   gotchas: MemoryItemLike[],
   openQuestions: MemoryItemLike[],
-  opts?: { header?: string }
+  opts?: { header?: string; locale?: "ko" | "en" }
 ): string {
   const line = (item: MemoryItemLike) => {
     let s = `- **${item.title}**: ${item.content}`;
@@ -117,7 +119,7 @@ export function serializeMemoryMarkdown(
     return s + `\n`;
   };
 
-  let md = opts?.header ?? DEFAULT_MEMORY_HEADER;
+  let md = opts?.header ?? (opts?.locale === "en" ? DEFAULT_MEMORY_HEADER_EN : DEFAULT_MEMORY_HEADER_KO);
   md += `## Decisions\n\n`;
   decisions.forEach((item) => { md += line(item); });
   md += `\n## Gotchas\n\n`;

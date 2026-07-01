@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { ipc } from "@/lib/ipc";
+import { useT } from "@/lib/i18n";
 import {
   IconCheck,
   IconChevronRight,
@@ -25,10 +26,35 @@ const team = [
 ];
 
 const beats = [
-  { t: "00-04", label: "Friction", copy: "작업이 흩어진 상태" },
-  { t: "04-11", label: "Surface proof", copy: "Agentlas 데스크탑 흐름을 실제 화면 중심으로 노출" },
-  { t: "11-20", label: "Pipeline", copy: "Remotion timeline + Motion preview + Lottie accent" },
-  { t: "20-30", label: "Delivery", copy: "MP4, storyboard, manifest, QA report" },
+  {
+    t: "00-04",
+    label: "Friction",
+    copy: { ko: "작업이 흩어진 상태", en: "Work is scattered across tools" },
+  },
+  {
+    t: "04-11",
+    label: "Surface proof",
+    copy: {
+      ko: "Agentlas 데스크탑 흐름을 실제 화면 중심으로 노출",
+      en: "Showcase the Agentlas Desktop flow through real product screens",
+    },
+  },
+  {
+    t: "11-20",
+    label: "Pipeline",
+    copy: {
+      ko: "Remotion 타임라인 + Motion 프리뷰 + Lottie 액센트",
+      en: "Remotion timeline + Motion preview + Lottie accent",
+    },
+  },
+  {
+    t: "20-30",
+    label: "Delivery",
+    copy: {
+      ko: "MP4, 스토리보드, 매니페스트, QA 리포트",
+      en: "MP4, storyboard, manifest, QA report",
+    },
+  },
 ];
 
 const gates = [
@@ -40,6 +66,7 @@ const gates = [
 ];
 
 export default function OberonMotionPage() {
+  const { locale } = useT();
   const [routeState, setRouteState] = useState<RouteState>("idle");
   const [routeResult, setRouteResult] = useState<Recommendation | null>(null);
   const [routeError, setRouteError] = useState("");
@@ -101,7 +128,11 @@ export default function OberonMotionPage() {
         <div className="motion-app-title-row">
           <div>
             <h1>Oberon Motiongraphic Studio</h1>
-            <p>제품 화면 증거를 중심으로 모션그래픽 팀을 실행합니다.</p>
+            <p>
+              {locale === "ko"
+                ? "제품 화면 증거를 중심으로 모션그래픽 팀을 실행합니다."
+                : "Runs a motion-graphics team built around real product-screen evidence."}
+            </p>
           </div>
           <Link href="/apps" className="motion-app-link">
             Apps
@@ -143,7 +174,13 @@ export default function OberonMotionPage() {
             <span>Live route test</span>
           </div>
           <button className="motion-primary" type="button" onClick={checkRoute} disabled={routeState === "running"}>
-            {routeState === "running" ? "라우팅 확인 중" : "Hephaestus 라우팅 확인"}
+            {locale === "ko"
+              ? routeState === "running"
+                ? "라우팅 확인 중"
+                : "Hephaestus 라우팅 확인"
+              : routeState === "running"
+                ? "Checking route..."
+                : "Check Hephaestus routing"}
           </button>
           <StatusLine label="Route" state={routeState} />
           {selected && <ResultLine label="selected" value={selected} />}
@@ -157,7 +194,13 @@ export default function OberonMotionPage() {
             <span>Render check</span>
           </div>
           <button className="motion-secondary" type="button" onClick={runRenderCheck} disabled={renderState === "running"}>
-            {renderState === "running" ? "테스트 중" : "샘플 렌더 테스트"}
+            {locale === "ko"
+              ? renderState === "running"
+                ? "테스트 중"
+                : "샘플 렌더 테스트"
+              : renderState === "running"
+                ? "Testing..."
+                : "Run sample render test"}
           </button>
           <div className="motion-meter" aria-label="render progress">
             <span style={{ width: `${progress}%` }} />
@@ -173,7 +216,7 @@ export default function OberonMotionPage() {
             <div key={beat.t} className="motion-beat-row">
               <span>{beat.t}</span>
               <strong>{beat.label}</strong>
-              <p>{beat.copy}</p>
+              <p>{locale === "ko" ? beat.copy.ko : beat.copy.en}</p>
             </div>
           ))}
         </div>

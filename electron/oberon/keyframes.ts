@@ -14,6 +14,7 @@ import type {
   OberonKeyframeShotInput,
 } from "../../shared/types";
 import { readEnvVar } from "../secrets/vault";
+import { currentUiLocale } from "../main";
 
 const DEFAULT_PROVIDER: OberonKeyframeProvider = "codex-imagegen-cli";
 const DEFAULT_CODEX_MODEL = "image_gen.imagegen";
@@ -67,6 +68,7 @@ class KeyframeCancelled extends Error {
 }
 
 export function startOberonKeyframes(request: OberonKeyframeRequest): OberonKeyframeJob {
+  const ko = currentUiLocale() === "ko";
   const shots = selectShots(request);
   if (!shots.length) throw new Error("Oberon keyframe generation requires at least one shot.");
 
@@ -90,7 +92,7 @@ export function startOberonKeyframes(request: OberonKeyframeRequest): OberonKeyf
       percent: 0,
     },
     assets: [],
-    message: "키프레임 준비 중",
+    message: ko ? "키프레임 준비 중" : "Preparing keyframes",
     warnings: [],
     createdAtMs: now,
     updatedAtMs: now,
@@ -108,10 +110,11 @@ export function getOberonKeyframeJob(id: string): OberonKeyframeJob | null {
 export function cancelOberonKeyframes(id: string): OberonKeyframeJob | null {
   const job = jobs.get(id);
   if (!job) return null;
+  const ko = currentUiLocale() === "ko";
   cancelledJobs.add(id);
   job.status = "cancelled";
   job.progress.phase = "cancelled";
-  job.message = "키프레임 생성 취소됨";
+  job.message = ko ? "키프레임 생성 취소됨" : "Keyframe generation cancelled";
   job.updatedAtMs = Date.now();
   // 진행 중인 Codex 배치 자식이 있으면 프로세스 그룹째 종료 — 기존엔 플래그만 세워 자식이 계속 돌았다.
   const child = runningChildren.get(id);
@@ -132,6 +135,7 @@ async function runKeyframeJob(
   request: OberonKeyframeRequest,
   shots: OberonKeyframeShotInput[],
 ): Promise<void> {
+  const ko = currentUiLocale() === "ko";
   const job = requireJob(id);
   await fs.mkdir(job.outputDir, { recursive: true });
   if (job.provider === "codex-imagegen-cli") {
@@ -140,12 +144,12 @@ async function runKeyframeJob(
   }
 
   const client = await createGoogleClient(job.provider);
-  updateJob(job, "running", "Google Imagen 키프레임 생성 시작", "generating");
+  updateJob(job, "running", ko ? "Google Imagen 키프레임 생성 시작" : "Starting Google Imagen keyframe generation", "generating");
 
   for (const shot of shots) {
     assertNotCancelled(job.id);
     job.progress.currentShotId = shot.shotId;
-    job.message = `${shot.shotId} 첫 프레임 생성 중`;
+    job.message = ko ? `${shot.shotId} 첫 프레임 생성 중` : `Generating first frame for ${shot.shotId}`;
     job.updatedAtMs = Date.now();
     try {
       const asset = await generateKeyframe(client.ai, job, request, shot);
@@ -167,7 +171,7 @@ async function runKeyframeJob(
   updateJob(
     job,
     "succeeded",
-    "키프레임 생성 완료",
+    ko ? "키프레임 생성 완료" : "Keyframe generation complete",
     "complete",
   );
 }
@@ -177,6 +181,7 @@ async function runCodexKeyframeJob(
   request: OberonKeyframeRequest,
   shots: OberonKeyframeShotInput[],
 ): Promise<void> {
+  const ko = currentUiLocale() === "ko";
   const runner = codexImageBatchRunnerPath();
   await fs.access(runner);
   const jobsPath = path.join(job.outputDir, "codex-image-jobs.jsonl");
@@ -193,7 +198,7 @@ async function runCodexKeyframeJob(
     });
   });
   await fs.writeFile(jobsPath, `${rows.join("\n")}\n`, "utf8");
-  updateJob(job, "running", "Codex image_gen 키프레임 생성 시작", "generating");
+  updateJob(job, "running", ko ? "Codex image_gen 키프레임 생성 시작" : "Starting Codex image_gen keyframe generation", "generating");
 
   const result = await runImageBatchProcess(job, jobsPath, shots.length, runner);
   const summaryPath = path.join(job.outputDir, "codex-exec-image-results.json");
@@ -223,7 +228,7 @@ async function runCodexKeyframeJob(
   if (job.assets.length < shots.length) {
     throw new Error(`Codex image_gen generated ${job.assets.length}/${shots.length} keyframes. Retry the missing shots before video render.`);
   }
-  updateJob(job, "succeeded", "키프레임 생성 완료", "complete");
+  updateJob(job, "succeeded", ko ? "키프레임 생성 완료" : "Keyframe generation complete", "complete");
 }
 
 async function generateKeyframe(
@@ -431,10 +436,11 @@ function updateJob(
 function failJob(id: string, error: unknown): void {
   const job = jobs.get(id);
   if (!job) return;
+  const ko = currentUiLocale() === "ko";
   if (cancelledJobs.has(id) || error instanceof KeyframeCancelled) {
     job.status = "cancelled";
     job.progress.phase = "cancelled";
-    job.message = "키프레임 생성 취소됨";
+    job.message = ko ? "키프레임 생성 취소됨" : "Keyframe generation cancelled";
   } else {
     job.status = "failed";
     job.progress.phase = "failed";

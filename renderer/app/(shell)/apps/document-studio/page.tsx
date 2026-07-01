@@ -17,14 +17,16 @@ import {
 
 type Mode = "report" | "paper" | "brief";
 
-const EXAMPLE_GOAL = "대학교 리포트: AI native Apps가 지식 작업을 바꾸는 방식";
+const EXAMPLE_GOAL_KO = "대학교 리포트: AI native Apps가 지식 작업을 바꾸는 방식";
+const EXAMPLE_GOAL_EN = "University report: how AI-native Apps change knowledge work";
 const CITATION_STYLES = ["ACS", "AMA (11th ed.)", "APA", "APA (6th ed.)", "Cite Them Right 12th ed.", "CMOS author-date", "Council of Science Editors", "Harvard"];
 
 export default function DocumentStudioPage() {
   const { locale } = useT();
-  const [goal, setGoal] = useState(EXAMPLE_GOAL);
+  const exampleGoal = locale === "ko" ? EXAMPLE_GOAL_KO : EXAMPLE_GOAL_EN;
+  const [goal, setGoal] = useState(exampleGoal);
   const [mode, setMode] = useState<Mode>("paper");
-  const initialDoc = useMemo(() => buildDocument(EXAMPLE_GOAL, "paper"), []);
+  const initialDoc = useMemo(() => buildDocument(exampleGoal, "paper", locale), []);
   const [title, setTitle] = useState(initialDoc.title);
   const [documentText, setDocumentText] = useState(initialDoc.body);
   const [figureCaption, setFigureCaption] = useState(initialDoc.figureCaption);
@@ -38,7 +40,7 @@ export default function DocumentStudioPage() {
   const [rightOpen, setRightOpen] = useState(true);
 
   function generate() {
-    const next = buildDocument(goal, mode);
+    const next = buildDocument(goal, mode, locale);
     setTitle(next.title);
     setDocumentText(next.body);
     setFigureCaption(next.figureCaption);

@@ -103,6 +103,8 @@ import { normalizeRecommendation } from "./hephaestus/recommendation";
 import { confirmUpload, PathGuardError, resolveFolderArg } from "./hephaestus/path-guard";
 import { isSupervisorEnabled, setSupervisorEnabled } from "./hephaestus/supervisor";
 import { runHephaestusBuild } from "./hephaestus/builder";
+import { pickLocale } from "./runtime/status-i18n";
+import { currentUiLocale } from "./main";
 import { startStudio, stopStudio } from "./hephaestus/studio";
 import type {
   AgentGroupCreateInput,
@@ -147,9 +149,14 @@ import {
 import { getAgentConcurrencyInfo, setAgentConcurrency } from "./store/concurrency";
 import {
   createAutomation,
+  getAutomation,
   listAutomations,
   removeAutomation,
   toggleAutomation,
+  updateAutomation,
+  updateAutomationGraph,
+  listRunHistory,
+  getLatestGraphRun,
 } from "./store/automations";
 import {
   getAgentSurface,
@@ -282,6 +289,9 @@ import type {
   ToolFactoryRootRequest,
   ToolFactoryScaffoldRequest,
   ToolFactoryToolStatus,
+  WorkflowGraph,
+  AutomationUpdatePatch,
+  ScheduleSpec,
 } from "../shared/types";
 
 // 진행 중인 실행 레지스트리 — runId → { 취소 컨트롤러, 대상 chatId, 방출 이벤트 버퍼 }.
@@ -375,12 +385,12 @@ function applyPendingConfirmationAttention(win: BrowserWindow | null, rawCount: 
 
   try {
     if (Notification.isSupported()) {
+      const ko = currentUiLocale() === "ko";
       new Notification({
-        title: "Agentlas 승인 대기",
-        body:
-          count === 1
-            ? "에이전트가 결정을 기다리고 있습니다."
-            : `${count}개의 에이전트 승인 요청이 대기 중입니다.`,
+        title: ko ? "Agentlas 승인 대기" : "Agentlas approval pending",
+        body: ko
+          ? (count === 1 ? "에이전트가 결정을 기다리고 있습니다." : `${count}개의 에이전트 승인 요청이 대기 중입니다.`)
+          : (count === 1 ? "An agent is waiting on a decision." : `${count} agent approval requests are pending.`),
         silent: false,
       }).show();
     }
@@ -980,16 +990,88 @@ export function registerIpcHandlers(): void {
   });
 
   // ── automations (SQLite + scheduler) ───────────────────
+  // 이벤트 트리거(fs/chain)를 가진 자동화가 바뀌면 트리거 매니저를 재동기화한다(리스너 갱신).
+  const resyncTriggers = async (): Promise<void> => {
+    try {
+      const { syncTriggers } = await import("./triggers/manager");
+      syncTriggers();
+    } catch {
+      /* 매니저 미기동(헤드리스 등)이면 무시 */
+    }
+  };
   ipcMain.handle("automations:list", () => listAutomations());
   ipcMain.handle(
     "automations:create",
-    (_e, input: Omit<Automation, "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy">) =>
-      createAutomation(input),
+    async (_e, input: Omit<Automation, "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy">) => {
+      const created = createAutomation(input);
+      await resyncTriggers();
+      return created;
+    },
   );
-  ipcMain.handle("automations:toggle", (_e, id: string, enabled: boolean) =>
-    toggleAutomation(id, enabled),
+  ipcMain.handle("automations:toggle", async (_e, id: string, enabled: boolean) => {
+    const next = toggleAutomation(id, enabled);
+    await resyncTriggers();
+    return next;
+  });
+  ipcMain.handle("automations:update", async (_e, id: string, patch: AutomationUpdatePatch) => {
+    const next = updateAutomation(id, patch);
+    await resyncTriggers();
+    return next;
+  });
+  ipcMain.handle("automations:remove", async (_e, id: string) => {
+    removeAutomation(id);
+    await resyncTriggers();
+  });
+  ipcMain.handle("automations:get", (_e, id: string) => getAutomation(id));
+  ipcMain.handle("automations:listRuns", (_e, id: string, limit?: number) => listRunHistory(id, limit ?? 50));
+  ipcMain.handle("automations:updateGraph", (_e, id: string, graph: WorkflowGraph | null) =>
+    updateAutomationGraph(id, graph),
   );
-  ipcMain.handle("automations:remove", (_e, id: string) => removeAutomation(id));
+  ipcMain.handle("automations:runNow", async (_e, id: string) => {
+    const { runAutomationNow } = await import("./automation-scheduler");
+    await runAutomationNow(id);
+  });
+  ipcMain.handle("automations:latestRun", (_e, id: string) => getLatestGraphRun(id));
+
+  // ── schedule 문법 헬퍼(렌더러 스케줄 빌더용 — croner는 메인에서만) ──
+  ipcMain.handle("schedule:validateCron", async (_e, expr: string) => {
+    const { validateCron } = await import("./store/schedule");
+    return validateCron(expr);
+  });
+  ipcMain.handle("schedule:describe", async (_e, spec: ScheduleSpec, loc?: "ko" | "en") => {
+    const { describeSchedule } = await import("./store/schedule");
+    try {
+      return describeSchedule(spec, loc ?? "en");
+    } catch {
+      return "";
+    }
+  });
+  ipcMain.handle("schedule:nextRun", async (_e, spec: ScheduleSpec) => {
+    const { nextRun } = await import("./store/schedule");
+    try {
+      return nextRun(spec);
+    } catch {
+      return null;
+    }
+  });
+  ipcMain.handle("schedule:defaultTz", async () => {
+    const { defaultTz } = await import("./store/schedule");
+    return defaultTz();
+  });
+
+  // ── launchd LaunchAgent (opt-in 앱 꺼져도 실행, macOS) ───
+  ipcMain.handle("launchd:status", async () => {
+    const { launchdStatus } = await import("./launchd/agent");
+    return launchdStatus();
+  });
+  ipcMain.handle("launchd:enable", async () => {
+    const { enableLaunchd } = await import("./launchd/agent");
+    return enableLaunchd();
+  });
+  ipcMain.handle("launchd:disable", async () => {
+    const { disableLaunchd } = await import("./launchd/agent");
+    return disableLaunchd();
+  });
 
   // ── Surfaces (agent-made Workbench outputs) ─────────────
   ipcMain.handle("surfaces:list", (_e, chatId?: string) => listAgentSurfaces(chatId));
@@ -1352,7 +1434,10 @@ export function registerIpcHandlers(): void {
 
   // ── invoke (백엔드 라우터 — 스트리밍 실행) ─────────────
   ipcMain.handle("invoke:run", async (event, req: McpInvocationRequest) => {
-    const runId = randomUUID();
+    // 렌더러가 runId를 미리 넘기면 그대로 사용 — 렌더러가 invoke 왕복 전에 이 채널을 이미
+    // 구독하고 있으므로 런타임이 즉시 emit하는 초기 이벤트도 놓치지 않는다(subscribe-before-trigger).
+    // 안 넘겼으면(자동화/구버전 호출) 기존처럼 main이 생성(하위호환).
+    const runId = req.runId ?? randomUUID();
     const channel = `invoke:event:${runId}`;
     const win = BrowserWindow.fromWebContents(event.sender);
 
@@ -1369,7 +1454,14 @@ export function registerIpcHandlers(): void {
         // (모든 런타임 공통). 정상 응답엔 영향 없고 2MB 초과분만 절단.
         const ev: McpInvocationEvent =
           rawEv.kind === "partial" && typeof rawEv.text === "string" && rawEv.text.length > MAX_PARTIAL_CHARS
-            ? { ...rawEv, text: rawEv.text.slice(0, MAX_PARTIAL_CHARS) + "\n\n[출력이 너무 길어 잘렸습니다 — 런어웨이 출력 메모리 보호]" }
+            ? {
+                ...rawEv,
+                text:
+                  rawEv.text.slice(0, MAX_PARTIAL_CHARS) +
+                  (pickLocale(req) === "ko"
+                    ? "\n\n[출력이 너무 길어 잘렸습니다 — 런어웨이 출력 메모리 보호]"
+                    : "\n\n[Output truncated — runaway output memory guard]"),
+              }
             : rawEv;
         // 재접속용 버퍼링 — partial은 매번 누적 전체 텍스트라, 직전이 partial이면 교체해
         // 메모리를 바운드한다(tool/thinking/agentId 이벤트는 누적 단계라 보존하되 상한 적용).
@@ -1428,7 +1520,7 @@ export function registerIpcHandlers(): void {
   // ── Hephaestus 엔진 브리지 ──────────────────────────────────────────────
   // 임베딩된 오픈소스 엔진(Hephaestus)을 범용 CLI/JSON 으로 호출한다. 엔진 측에는 데스크탑
   // 흔적이 없고, 모든 연결 코드는 electron/hephaestus/* + 아래 핸들러에만 존재한다.
-  ipcMain.handle("hephaestus:status", () => hephaestusAvailable());
+  ipcMain.handle("hephaestus:status", (_e, locale?: "ko" | "en") => hephaestusAvailable(locale));
   ipcMain.handle("hephaestus:doctor", () => hephaestusDoctor());
   ipcMain.handle(
     "hephaestus:stormbreaker",
@@ -1479,19 +1571,30 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle(
     "hephaestus:publish",
-    async (event, input: { folder: string; visibility: "private-link" | "marketplace"; dryRun?: boolean }) => {
+    async (
+      event,
+      input: { folder: string; visibility: "private-link" | "marketplace"; dryRun?: boolean; locale?: "ko" | "en" },
+    ) => {
+      const locale = input.locale ?? "ko";
       let folder: string;
       try {
-        folder = resolveFolderArg(input.folder);
+        folder = resolveFolderArg(input.folder, locale);
       } catch (e) {
         return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as PathGuardError).message };
       }
       // off-device 업로드 — 사용자 확인 강제(dry-run 은 업로드 없음이므로 제외).
       if (!input.dryRun) {
         const win = BrowserWindow.fromWebContents(event.sender);
-        const ok = await confirmUpload(folder, input.visibility, win);
+        const ok = await confirmUpload(folder, input.visibility, win, locale);
         if (!ok) {
-          return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: "사용자가 업로드를 취소했습니다." };
+          return {
+            ok: false,
+            exitCode: null,
+            json: null,
+            stdout: "",
+            stderr: "",
+            error: locale === "ko" ? "사용자가 업로드를 취소했습니다." : "Upload cancelled by user.",
+          };
         }
       }
       return hepPublish(folder, input.visibility, { dryRun: input.dryRun });
@@ -1499,37 +1602,45 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle(
     "hephaestus:package",
-    async (event, input: { folder: string; visibility?: "private-link" | "marketplace" }) => {
+    async (event, input: { folder: string; visibility?: "private-link" | "marketplace"; locale?: "ko" | "en" }) => {
+      const locale = input.locale ?? "ko";
       let folder: string;
       try {
-        folder = resolveFolderArg(input.folder);
+        folder = resolveFolderArg(input.folder, locale);
       } catch (e) {
         return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as PathGuardError).message };
       }
       // package 는 폴더 텍스트 내용을 읽어 번들을 만들므로(off-device 후속 가능) 확인을 받는다.
       const win = BrowserWindow.fromWebContents(event.sender);
-      const ok = await confirmUpload(folder, input.visibility ?? "marketplace", win);
+      const ok = await confirmUpload(folder, input.visibility ?? "marketplace", win, locale);
       if (!ok) {
-        return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: "사용자가 패키징을 취소했습니다." };
+        return {
+          ok: false,
+          exitCode: null,
+          json: null,
+          stdout: "",
+          stderr: "",
+          error: locale === "ko" ? "사용자가 패키징을 취소했습니다." : "Packaging cancelled by user.",
+        };
       }
       return hepPackage(folder, { visibility: input.visibility });
     },
   );
-  ipcMain.handle("hephaestus:securityScan", (_e, input: { folder: string; strict?: boolean }) => {
+  ipcMain.handle("hephaestus:securityScan", (_e, input: { folder: string; strict?: boolean; locale?: "ko" | "en" }) => {
     let folder: string;
     try {
-      folder = resolveFolderArg(input.folder);
+      folder = resolveFolderArg(input.folder, input.locale ?? "ko");
     } catch (e) {
       return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as PathGuardError).message };
     }
     return securityScan(folder, { strict: input.strict });
   });
-  ipcMain.handle("hephaestus:aoGraph", (_e, input?: { agent?: string; dir?: string }) => {
+  ipcMain.handle("hephaestus:aoGraph", (_e, input?: { agent?: string; dir?: string; locale?: "ko" | "en" }) => {
     const inp = input ?? {};
     let dir: string | undefined;
     if (inp.dir != null && String(inp.dir).trim()) {
       try {
-        dir = resolveFolderArg(inp.dir);
+        dir = resolveFolderArg(inp.dir, inp.locale ?? "ko");
       } catch (e) {
         return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as PathGuardError).message };
       }
@@ -1568,7 +1679,7 @@ export function registerIpcHandlers(): void {
       for (const ev of pending) sendToWin(ev);
       pending.length = 0;
     });
-    void runHephaestusBuild(runId, req, emit, controller.signal).finally(() => {
+    void runHephaestusBuild(runId, req, emit, controller.signal, pickLocale(req)).finally(() => {
       activeBuilds.delete(runId);
       buildReadySignals.delete(runId);
     });

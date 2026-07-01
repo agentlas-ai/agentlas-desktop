@@ -1061,7 +1061,11 @@ export async function runMcpInvocation(
         // 이 턴의 완료된 결과를 즉시 별도 assistant 메시지로 남긴다 — 화면엔 새 말풍선이
         // 계속 이어 붙는 것처럼 보이고, 앱이 중간에 꺼져도 그때까지 기록은 남는다.
         appendChatMessage(chat.id, "assistant", continuation.text);
-        sink({ kind: "tool-use", status: `계속 진행 중 · ${pass}턴째 (안 끊기고 이어짐)` });
+        sink({
+          kind: "tool-use",
+          status:
+            locale === "ko" ? `계속 진행 중 · ${pass}턴째 (안 끊기고 이어짐)` : `Continuing · pass ${pass} (uninterrupted)`,
+        });
       }
       stormbreaker?.continuePass({
         pass,
@@ -1123,7 +1127,11 @@ export async function runMcpInvocation(
     // (백그라운드 automation 실행 세션은 제외 → 자동화가 자동화를 만드는 재귀 방지)
     if (chat.kind !== "division") {
       try {
-        const { automations: autos, cleanedText } = parseAutomations(displayText);
+        const { automations: autos, cleanedText, errors } = parseAutomations(displayText);
+        if (errors.length > 0) {
+          // 조용히 드롭하지 않고 표면화(설계 §2.5) — 로그로 남겨 진단 가능하게.
+          console.warn("[automation] parse warnings:", errors.join("; "));
+        }
         for (const a of autos) {
           createAutomation({
             name: a.name,
@@ -1132,6 +1140,10 @@ export async function runMcpInvocation(
             targetId: chat.firmId ?? chat.agentId,
             promptTemplate: a.prompt,
             createdBy: "agent",
+            // 구조화 스케줄 + steps→그래프를 통과시켜 챗 생성 자동화가 graph_json/schedule_json을 저장.
+            scheduleJson: a.scheduleSpec ? JSON.stringify(a.scheduleSpec) : null,
+            timezone: a.tz && a.tz.trim() ? a.tz : null,
+            graphJson: a.graph ?? null,
           });
         }
         displayText = cleanedText;

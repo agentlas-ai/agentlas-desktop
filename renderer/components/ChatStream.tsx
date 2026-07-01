@@ -720,7 +720,8 @@ const QuestionBlock = memo(function QuestionBlock({
               value={otherText}
               onChange={(e) => setOtherText(e.target.value)}
               placeholder={t("ask.other_placeholder")}
-              disabled={disabled}
+              // 타이핑 자체는 항상 허용 — 실행이 끝나기 직전(busy)에도 답을 미리 작성할 수 있게.
+              // 실제 제출만 submitOther/answerQuestion 쪽 busy 가드로 통제한다.
               onKeyDown={(e) => {
                 if (e.nativeEvent.isComposing) return;
                 if (e.key === "Enter") {

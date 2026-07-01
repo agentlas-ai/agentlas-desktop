@@ -1,5 +1,6 @@
 // Oberon — 예제 브리프 프리셋. 영상/영화 문외한도 원클릭으로 시작.
 
+import type { Locale } from "@/lib/i18n";
 import type { FilmBrief } from "./types";
 
 export interface BriefPreset {
@@ -134,7 +135,7 @@ export const BRIEF_PRESETS: BriefPreset[] = [
   },
 ];
 
-export function emptyBrief(): FilmBrief {
+export function emptyBrief(locale: Locale = "ko"): FilmBrief {
   return {
     title: "",
     format: "commercial_30",
@@ -150,6 +151,143 @@ export function emptyBrief(): FilmBrief {
     setting: "",
     mustInclude: [],
     mustAvoid: [],
-    language: "ko",
+    language: locale,
   };
+}
+
+/** BRIEF_PRESETS의 영문 번역 — 콘텐츠(로그라인/시놉시스/캐릭터 등)까지 전부 번역한
+ *  별도 세트. 라벨/필드 이름은 BRIEF_PRESETS와 1:1 대응(같은 id 순서). */
+export const BRIEF_PRESETS_EN: BriefPreset[] = [
+  {
+    id: "agentlas_motion_ad",
+    label: "Agentlas Motion Ad",
+    emoji: "▣",
+    brief: {
+      title: "Agentlas Motion Ad",
+      format: "motion_graphics_30",
+      genre: "commercial",
+      aspect: "16:9",
+      durationSec: 30,
+      logline:
+        "Scattered prompts and agent work, unified into a single local production operating system.",
+      synopsis:
+        "It opens on the chaos of scattered prompt fragments, model choices, and output folders. Agentlas sorts it all into apps, agents, folder packages, and a render queue — a 30-second product motion-graphics ad for a subscription/CLI-based production studio you can run immediately.",
+      audience: "Founders and creators building product, ad, and agent workflows with AI",
+      tone: ["precise", "kinetic", "premium", "operational"],
+      visualReferences: ["premium SaaS product motion", "editorial motion graphics", "desktop command center"],
+      characters: [],
+      setting: "A local desktop production operating system",
+      brandOrProduct: "Agentlas Desktop",
+      mustInclude: ["prompt chaos", "local apps", "Oberon", "export folder", "Build agents as apps"],
+      mustAvoid: ["stock footage", "cartoon mascot", "fake dashboard text", "single-color purple gradient"],
+      language: "en",
+    },
+  },
+  {
+    id: "perfume_ad",
+    label: "Premium Perfume Ad",
+    emoji: "🌃",
+    brief: {
+      title: "MIDNIGHT BLOOM",
+      format: "commercial_30",
+      genre: "commercial",
+      aspect: "16:9",
+      durationSec: 30,
+      logline: "In the city at night, a woman finds her own light in the crowd with a single drop of perfume.",
+      synopsis:
+        "A rain-streaked street bleeding with neon. Amid a monochrome crowd, the moment the heroine applies the perfume, the world re-colors itself around her. Closes on a product close-up and the brand logo.",
+      audience: "Urban women 25-40, premium beauty consumers",
+      tone: ["cinematic", "neon", "sleek", "sensual"],
+      visualReferences: ["Blade Runner 2049 lighting", "Chanel No.5 film"],
+      characters: [
+        { name: "ELARA", role: "Lead", description: "Early 30s, shoulder-length black hair, silk slip dress, calm and confident gaze" },
+      ],
+      setting: "A neon-lit city street at midnight",
+      brandOrProduct: "MIDNIGHT BLOOM perfume (amber glass bottle, gold cap)",
+      mustInclude: ["perfume bottle close-up", "raindrops", "brand logo end card"],
+      mustAvoid: ["competitor logos", "excessive exposure"],
+      language: "en",
+    },
+  },
+  {
+    id: "scifi_trailer",
+    label: "Sci-Fi Short Trailer",
+    emoji: "🚀",
+    brief: {
+      title: "THE LAST SIGNAL",
+      format: "trailer",
+      genre: "scifi",
+      aspect: "2.39:1",
+      durationSec: 90,
+      logline: "At Earth's last communications outpost, an engineer sends humanity's final signal into space.",
+      synopsis:
+        "An abandoned space station. A lone engineer reboots the system as a storm closes in. Tension escalates as an unknown response signal is picked up, closing on the title card.",
+      audience: "Sci-fi fans, film festival audiences",
+      tone: ["cinematic", "cold", "epic", "tense"],
+      visualReferences: ["Interstellar", "Arrival", "Dune"],
+      characters: [
+        { name: "KAI", role: "Lead", description: "An engineer in his 40s, short gray hair, worn work coveralls, a look of weary resolve" },
+      ],
+      setting: "An abandoned deep-space communications outpost (interior/control room)",
+      mustInclude: ["holographic interface", "an approaching space storm", "title card"],
+      mustAvoid: ["existing film IP characters", "real people"],
+      language: "en",
+    },
+  },
+  {
+    id: "short_drama",
+    label: "Short Drama (Reunion)",
+    emoji: "☕",
+    brief: {
+      title: "Coffee on a Rainy Day",
+      format: "short_drama",
+      genre: "drama",
+      aspect: "16:9",
+      durationSec: 240,
+      logline:
+        "Two former lovers, crossing paths at a café after ten years, pick up the conversation they never finished.",
+      synopsis:
+        "A small café on a rainy afternoon. After an awkward hello, two people who meet by chance finally voice the feelings they'd buried. Between regret and forgiveness, they make a new choice.",
+      audience: "Drama viewers in their 20s-40s",
+      tone: ["warm", "melancholic", "cinematic"],
+      visualReferences: ["In the Mood for Love", "Before Sunset"],
+      characters: [
+        { name: "JIO", role: "Lead", description: "A man in his late 30s, a neat coat, calm but wavering eyes" },
+        { name: "SUA", role: "Lead", description: "A woman in her mid-30s, a beige knit sweater, a warm but guarded smile" },
+      ],
+      setting: "A cozy café on a rainy day (interior)",
+      mustInclude: ["rain outside the window", "two cups of coffee", "shot/reverse conversation"],
+      mustAvoid: ["excessive melodrama", "violence"],
+      language: "en",
+    },
+  },
+  {
+    id: "social_short",
+    label: "Social Short (Product Hook)",
+    emoji: "📱",
+    brief: {
+      title: "Mornings, 3 Seconds Faster",
+      format: "social_short",
+      genre: "commercial",
+      aspect: "9:16",
+      durationSec: 30,
+      logline: "On a hectic morning, one smart tumbler transforms the commute routine.",
+      synopsis:
+        "The alarm blares, the morning's chaotic. One press of the tumbler's button and the perfect coffee is ready — the hero steps out the door with time to spare. Fast cuts, caption-friendly pacing.",
+      audience: "Gen Z and millennial professionals",
+      tone: ["energetic", "sleek", "bright"],
+      visualReferences: ["Apple product films", "fast-cut TikTok ads"],
+      characters: [{ name: "MINA", role: "Lead", description: "Late 20s, casual office look, energetic expression" }],
+      setting: "A modern city studio-apartment kitchen",
+      brandOrProduct: "Smart tumbler (matte charcoal, one-touch button)",
+      mustInclude: ["1-second hook", "one-touch button close-up", "CTA caption"],
+      mustAvoid: ["slow intro", "competitor brands"],
+      language: "en",
+    },
+  },
+];
+
+/** 로케일에 맞는 브리프 프리셋 목록을 돌려준다 (기본 "ko" — 기존 호출부 호환). */
+export function getBriefPresets(locale: Locale = "ko"): BriefPreset[] {
+  return locale === "ko" ? BRIEF_PRESETS : BRIEF_PRESETS_EN;
 }

@@ -15,6 +15,7 @@ import path from "node:path";
 import { app } from "electron";
 import type { ChildProcess } from "node:child_process";
 import { withCliPath } from "../runtime/exec";
+import { currentUiLocale } from "../main";
 
 // bin/hephaestus 의 `run_python_module` 과 바이트 동일한 부트스트랩.
 // `python -c <BOOTSTRAP> <module> <args...>` 형태로 호출하면 sys.argv[0] 이 모듈명이 되고,
@@ -42,6 +43,8 @@ export interface HephaestusRunOptions {
   onStderr?: (line: string) => void;
   /** stdout 라인 스트림(라인 단위 출력 처리용). */
   onStdout?: (line: string) => void;
+  /** UI 표시 언어 — 에러 문자열을 이 언어로 낸다. 미지정 시 currentUiLocale() 스냅샷. */
+  locale?: "ko" | "en";
 }
 
 export interface HephaestusResult<T = unknown> {
@@ -287,6 +290,7 @@ export async function runHephaestus<T = unknown>(
   args: string[],
   opts: HephaestusRunOptions = {},
 ): Promise<HephaestusResult<T>> {
+  const ko = (opts.locale ?? currentUiLocale()) === "ko";
   const root = hephaestusRoot();
   if (!root) {
     return {
@@ -295,7 +299,7 @@ export async function runHephaestus<T = unknown>(
       json: null,
       stdout: "",
       stderr: "",
-      error: "Hephaestus 엔진을 찾을 수 없습니다(번들 누락).",
+      error: ko ? "Hephaestus 엔진을 찾을 수 없습니다(번들 누락)." : "Could not find the Hephaestus engine (bundle missing).",
     };
   }
   const py = await resolveHephaestusPython();
@@ -306,7 +310,9 @@ export async function runHephaestus<T = unknown>(
       json: null,
       stdout: "",
       stderr: "",
-      error: "Python 3.9+ 를 찾을 수 없습니다. python.org 또는 Homebrew(python3)로 설치 후 다시 시도하세요.",
+      error: ko
+        ? "Python 3.9+ 를 찾을 수 없습니다. python.org 또는 Homebrew(python3)로 설치 후 다시 시도하세요."
+        : "Could not find Python 3.9+. Install it from python.org or Homebrew (python3) and try again.",
     };
   }
 
@@ -354,7 +360,7 @@ export async function runHephaestus<T = unknown>(
       } catch {
         /* noop */
       }
-      finish({ ok: false, exitCode: null, json: null, stdout, stderr, error: "취소됨" });
+      finish({ ok: false, exitCode: null, json: null, stdout, stderr, error: ko ? "취소됨" : "Cancelled" });
     };
     const cleanup = () => {
       if (timer) clearTimeout(timer);
@@ -367,7 +373,7 @@ export async function runHephaestus<T = unknown>(
       } catch {
         /* noop */
       }
-      finish({ ok: false, exitCode: null, json: parseEngineJson<T>(stdout), stdout, stderr, error: "타임아웃" });
+      finish({ ok: false, exitCode: null, json: parseEngineJson<T>(stdout), stdout, stderr, error: ko ? "타임아웃" : "Timed out" });
     }, opts.timeoutMs ?? 900_000);
 
     if (opts.signal) {
@@ -410,7 +416,7 @@ export async function runHephaestus<T = unknown>(
       // close 경로에선 캐시를 비우지 않는다 — deps 문제는 경로 문제가 아니고, 재탐지 thrash를 막기 위함.
       const depError =
         code !== 0 && json === null && /ModuleNotFoundError|ImportError|No module named/.test(stderr)
-          ? "엔진 Python 의존성 누락 — 런타임 재설치 필요"
+          ? (ko ? "엔진 Python 의존성 누락 — 런타임 재설치 필요" : "Missing engine Python dependency — runtime needs reinstalling")
           : undefined;
       finish({
         ok: code === 0,
@@ -433,14 +439,15 @@ export interface HephaestusAvailability {
 }
 
 /** 엔진 가용성(번들 존재 + python) 확인. UI 게이트/설정 표시에 사용. */
-export async function hephaestusAvailable(): Promise<HephaestusAvailability> {
+export async function hephaestusAvailable(locale: "ko" | "en" = "ko"): Promise<HephaestusAvailability> {
+  const ko = locale === "ko";
   const root = hephaestusRoot();
   if (!root) {
-    return { available: false, reason: "엔진 번들 없음", root: null, python: null, version: null };
+    return { available: false, reason: ko ? "엔진 번들 없음" : "Engine bundle not found", root: null, python: null, version: null };
   }
   const py = await resolveHephaestusPython();
   if (!py) {
-    return { available: false, reason: "Python 3.9+ 없음", root, python: null, version: null };
+    return { available: false, reason: ko ? "Python 3.9+ 없음" : "Python 3.9+ not found", root, python: null, version: null };
   }
   return { available: true, root, python: py.python, version: py.version };
 }

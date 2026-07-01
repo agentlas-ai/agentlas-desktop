@@ -1,6 +1,7 @@
 "use client";
 
 import { ipc } from "@/lib/ipc";
+import { currentLocale } from "@/lib/i18n";
 import type { OberonAnimateJob, OberonKeyframeJob, OberonMotionAdJob, OberonRenderJob } from "@/lib/types";
 
 export type OberonBackgroundJobKind = "plan" | "keyframe" | "render" | "motion" | "animate";
@@ -78,7 +79,7 @@ export function startOberonPlanJob(title: string): OberonBackgroundJob {
     label: labelForKind("plan"),
     status: "running",
     percent: 8,
-    message: "기획안을 만들고 있습니다",
+    message: currentLocale() === "ko" ? "기획안을 만들고 있습니다" : "Drafting the plan",
     phase: "planning",
     createdAtMs: now,
     updatedAtMs: now,
@@ -93,7 +94,7 @@ export function finishOberonPlanJob(id: string, productionId: string, title: str
     title: title.trim() || "Oberon",
     status: "succeeded",
     percent: 100,
-    message: "기획안 생성 완료",
+    message: currentLocale() === "ko" ? "기획안 생성 완료" : "Plan generated",
     phase: "complete",
   });
 }
@@ -156,7 +157,13 @@ async function tickOberonBackgroundJobs(): Promise<void> {
           upsertJob({ ...snapshot, percent, updatedAtMs: now });
           changed = true;
         } else if (now - snapshot.createdAtMs > PLAN_STALE_MS) {
-          upsertJob({ ...snapshot, status: "failed", message: "기획 작업 연결이 끊겼습니다", phase: "failed", updatedAtMs: now });
+          upsertJob({
+            ...snapshot,
+            status: "failed",
+            message: currentLocale() === "ko" ? "기획 작업 연결이 끊겼습니다" : "Lost connection to the planning job",
+            phase: "failed",
+            updatedAtMs: now,
+          });
           changed = true;
         }
         continue;
@@ -170,7 +177,10 @@ async function tickOberonBackgroundJobs(): Promise<void> {
         upsertJob({
           ...snapshot,
           status: "failed",
-          message: "앱을 다시 시작해 작업 연결이 끊겼습니다",
+          message:
+            currentLocale() === "ko"
+              ? "앱을 다시 시작해 작업 연결이 끊겼습니다"
+              : "Lost the job connection — restart the app",
           phase: "failed",
           updatedAtMs: now,
         });
@@ -261,17 +271,18 @@ function progressPercent(job: OberonLiveJob): number {
 }
 
 function labelForKind(kind: OberonBackgroundJobKind): string {
+  const ko = currentLocale() === "ko";
   switch (kind) {
     case "plan":
-      return "기획 생성";
+      return ko ? "기획 생성" : "Plan generation";
     case "keyframe":
-      return "키프레임 생성";
+      return ko ? "키프레임 생성" : "Keyframe generation";
     case "render":
-      return "Veo 영상 렌더";
+      return ko ? "Veo 영상 렌더" : "Veo video render";
     case "motion":
-      return "모션그래픽 렌더";
+      return ko ? "모션그래픽 렌더" : "Motion graphics render";
     case "animate":
-      return "애니메이션 생성";
+      return ko ? "애니메이션 생성" : "Animation generation";
   }
 }
 

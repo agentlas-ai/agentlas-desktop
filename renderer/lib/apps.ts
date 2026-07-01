@@ -197,8 +197,16 @@ function normalizeSlashCommand(command: string): string {
   return command.trim().toLowerCase();
 }
 
-export function buildDocument(goal: string, mode: "report" | "paper" | "brief"): GeneratedDocument {
-  const normalized = goal.trim() || "대학교 리포트: AI native Apps가 지식 작업을 바꾸는 방식";
+export function buildDocument(
+  goal: string,
+  mode: "report" | "paper" | "brief",
+  locale: "ko" | "en" = "en",
+): GeneratedDocument {
+  const fallbackGoal =
+    locale === "ko"
+      ? "대학교 리포트: AI native Apps가 지식 작업을 바꾸는 방식"
+      : "University report: how AI-native Apps change knowledge work";
+  const normalized = goal.trim() || fallbackGoal;
   const title =
     mode === "paper"
       ? `Research Paper: ${normalized}`

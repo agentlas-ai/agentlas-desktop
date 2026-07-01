@@ -118,13 +118,20 @@ async function runNodeTurnSafe(
     });
     if (timedOut) {
       return {
-        text: `(${turn.node.name} 응답 실패: ${Math.round(NODE_TIMEOUT_MS / 1000)}초 동안 응답이 없어 자동 중단했습니다.)`,
+        text:
+          p.locale === "ko"
+            ? `(${turn.node.name} 응답 실패: ${Math.round(NODE_TIMEOUT_MS / 1000)}초 동안 응답이 없어 자동 중단했습니다.)`
+            : `(${turn.node.name} failed: no response for ${Math.round(NODE_TIMEOUT_MS / 1000)}s, auto-aborted.)`,
         delegations: [],
         ok: false,
       };
     }
     const msg = err instanceof Error ? err.message : String(err);
-    return { text: `(${turn.node.name} 응답 실패: ${msg})`, delegations: [], ok: false };
+    return {
+      text: p.locale === "ko" ? `(${turn.node.name} 응답 실패: ${msg})` : `(${turn.node.name} failed: ${msg})`,
+      delegations: [],
+      ok: false,
+    };
   } finally {
     clearTimeout(timer);
     link.dispose();

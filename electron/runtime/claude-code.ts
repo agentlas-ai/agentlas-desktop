@@ -352,7 +352,11 @@ export const runClaudeCode: Runner = async (
             if (!accCapped) {
               acc += (acc ? "\n" : "") + block.text;
               if (acc.length >= MAX_ACC) {
-                acc = acc.slice(0, MAX_ACC) + "\n\n[출력이 너무 길어 잘렸습니다 — 런어웨이 출력 메모리 보호]";
+                acc =
+                  acc.slice(0, MAX_ACC) +
+                  (req.locale === "ko"
+                    ? "\n\n[출력이 너무 길어 잘렸습니다 — 런어웨이 출력 메모리 보호]"
+                    : "\n\n[Output truncated — runaway output memory guard]");
                 accCapped = true;
               }
               const now = Date.now();

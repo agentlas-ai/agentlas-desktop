@@ -16,6 +16,7 @@ import type {
 } from "../../shared/types";
 import { readEnvVar } from "../secrets/vault";
 import { composeTitledDelivery } from "./titlecards";
+import { currentUiLocale } from "../main";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_MODEL = "veo-3.1-lite-generate-001";
@@ -34,6 +35,7 @@ class RenderCancelled extends Error {
 }
 
 export function startOberonRender(request: OberonRenderRequest): OberonRenderJob {
+  const ko = currentUiLocale() === "ko";
   const shots = selectShots(request);
   if (!shots.length) throw new Error("Oberon render requires at least one shot.");
 
@@ -59,7 +61,7 @@ export function startOberonRender(request: OberonRenderRequest): OberonRenderJob
     },
     clips,
     files: [],
-    message: "렌더 준비 중",
+    message: ko ? "렌더 준비 중" : "Preparing the render",
     warnings: [],
     createdAtMs: now,
     updatedAtMs: now,
@@ -77,10 +79,11 @@ export function getOberonRenderJob(id: string): OberonRenderJob | null {
 export function cancelOberonRenderJob(id: string): OberonRenderJob | null {
   const job = jobs.get(id);
   if (!job) return null;
+  const ko = currentUiLocale() === "ko";
   cancelledJobs.add(id);
   job.status = "cancelled";
   job.progress.phase = "cancelled";
-  job.message = "렌더 취소됨";
+  job.message = ko ? "렌더 취소됨" : "Render cancelled";
   job.updatedAtMs = Date.now();
   return snapshot(job);
 }
@@ -94,12 +97,13 @@ export async function openOberonRenderOutput(id: string): Promise<{ ok: boolean;
 }
 
 async function runRenderJob(id: string, request: OberonRenderRequest, shots: OberonRenderShotInput[]): Promise<void> {
+  const ko = currentUiLocale() === "ko";
   const job = requireJob(id);
   await fs.mkdir(job.outputDir, { recursive: true });
   const client = await createGoogleClient(job.provider);
   updateJob(job, {
     status: "running",
-    message: `Google Veo 렌더 시작 (${client.authLabel})`,
+    message: ko ? `Google Veo 렌더 시작 (${client.authLabel})` : `Starting Google Veo render (${client.authLabel})`,
     phase: "generating",
   });
 
@@ -109,7 +113,7 @@ async function runRenderJob(id: string, request: OberonRenderRequest, shots: Obe
     if (!shot) continue;
     clip.status = "generating";
     job.progress.currentShotId = shot.shotId;
-    job.message = `${shot.shotId} 생성 중`;
+    job.message = ko ? `${shot.shotId} 생성 중` : `Generating ${shot.shotId}`;
     job.updatedAtMs = Date.now();
 
     try {
@@ -137,14 +141,14 @@ async function runRenderJob(id: string, request: OberonRenderRequest, shots: Obe
 
   updateJob(job, {
     status: "running",
-    message: "클립을 이어붙이고 납품 파일을 만드는 중",
+    message: ko ? "클립을 이어붙이고 납품 파일을 만드는 중" : "Stitching clips and building delivery files",
     phase: "assembling",
   });
   const deliveryFiles = await assembleDeliveryFiles(job, readyClips, shots, request);
   job.files.push(...deliveryFiles);
   updateJob(job, {
     status: "succeeded",
-    message: "렌더 완료",
+    message: ko ? "렌더 완료" : "Render complete",
     phase: "complete",
   });
 }
@@ -230,6 +234,7 @@ async function assembleDeliveryFiles(
   shots: OberonRenderShotInput[],
   request: OberonRenderRequest,
 ): Promise<OberonRenderFile[]> {
+  const ko = currentUiLocale() === "ko";
   const ffmpeg = await findFfmpeg();
   if (!ffmpeg) {
     job.warnings.push("ffmpeg not found; only individual MP4 clips were saved.");
@@ -318,7 +323,7 @@ async function assembleDeliveryFiles(
       for (const w of titled.warnings) job.warnings.push(w);
       for (const f of titled.files) files.push(await makeRenderFile(f.kind, f.label, f.absPath, f.mime));
     } catch (error: unknown) {
-      job.warnings.push(`타이틀 번인 건너뜀: ${errorMessage(error)}`);
+      job.warnings.push(ko ? `타이틀 번인 건너뜀: ${errorMessage(error)}` : `Skipped title burn-in: ${errorMessage(error)}`);
     }
   }
 
@@ -446,10 +451,11 @@ function updateJob(
 function failJob(id: string, error: unknown): void {
   const job = jobs.get(id);
   if (!job) return;
+  const ko = currentUiLocale() === "ko";
   if (cancelledJobs.has(id) || error instanceof RenderCancelled) {
     job.status = "cancelled";
     job.progress.phase = "cancelled";
-    job.message = "렌더 취소됨";
+    job.message = ko ? "렌더 취소됨" : "Render cancelled";
   } else {
     job.status = "failed";
     job.progress.phase = "failed";

@@ -233,11 +233,33 @@ app.on("before-quit", () => {
   if (quitCleanupDone) return;
   quitCleanupDone = true;
   try { stopAutomationScheduler(); } catch {}
+  // 트리거 매니저 정지 — webhook 소켓/폴 상태/fs watcher 정리(설계 §3, P2). 동적 import라
+  // 미기동(헤드리스)이면 조용히 스킵.
+  void import("./triggers/manager").then((m) => {
+    try { m.stopTriggerManager(); } catch {}
+  }).catch(() => {});
   try { disposeAutoUpdater(); } catch {}
   try { disposeAppFactoryLaunches(); } catch {}
 });
 
 app.whenReady().then(async () => {
+  // ── 헤드리스 자동화 러너 진입점(설계 §2.6) ─────────────────────
+  // launchd LaunchAgent가 `--headless-automations` 플래그로 이 바이너리를 coarse 인터벌마다
+  // poke한다. 창을 만들지 않고 due 자동화를 1회 실행한 뒤 종료한다. 러너는 이미 렌더러를
+  // 안 건드리므로(sink no-op) 엔진 전체를 그대로 재사용한다. (full launchd 설치는 P1.)
+  if (process.argv.includes("--headless-automations")) {
+    try {
+      initStore();
+      const { runDueAutomationsNow } = await import("./automation-scheduler");
+      await runDueAutomationsNow();
+    } catch (err) {
+      console.error("[headless-automations] failed:", err);
+    } finally {
+      app.quit();
+    }
+    return;
+  }
+
   registerRendererProtocol();
   // [보안] 권한 deny — 우리 렌더러가 실제로 쓰는 건 clipboard(복사 버튼)뿐. device/sensor 류
   // (geolocation/media/usb/serial/hid/midi/display-capture 등)는 main-side에서 거부하고,
@@ -266,12 +288,23 @@ app.whenReady().then(async () => {
   await bootAuthFromKeychain();
   registerIpcHandlers();
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
+  // 조건 트리거 매니저(설계 §3) — fs 변경/체인 완료 이벤트를 리스너에 등록(유휴 0).
+  // 헤드리스 러너에서는 등록하지 않는다(위 early-return 분기). 스케줄러의 실행 함수를 주입.
+  try {
+    const { startTriggerManager } = await import("./triggers/manager");
+    const { runAutomationFromTrigger } = await import("./automation-scheduler");
+    startTriggerManager((id) => runAutomationFromTrigger(id));
+  } catch (err) {
+    console.error("[triggers] startTriggerManager failed:", err);
+  }
   await createWindow();
   // 네이티브 메뉴바도 인앱 언어 설정을 따른다. 초기값은 OS 로케일(app.getLocale),
   // 이후 렌더러가 menu:setLocale로 사용자 override를 통지하면 다시 그린다.
-  applyAppMenu(resolveMenuLocale());
+  _uiLocale = resolveMenuLocale();
+  applyAppMenu(_uiLocale);
   ipcMain.handle("menu:setLocale", (_e, locale: unknown) => {
-    applyAppMenu(resolveMenuLocale(typeof locale === "string" ? locale : undefined));
+    _uiLocale = resolveMenuLocale(typeof locale === "string" ? locale : undefined);
+    applyAppMenu(_uiLocale);
   });
   // 자동 업데이트는 production에서만. updater.ts 안에서 NODE_ENV 체크.
   initAutoUpdater();
@@ -281,6 +314,13 @@ app.whenReady().then(async () => {
 function resolveMenuLocale(pref?: string): "ko" | "en" {
   const v = (pref ?? app.getLocale() ?? "en").toLowerCase();
   return v.startsWith("ko") ? "ko" : "en";
+}
+
+// 렌더러가 menu:setLocale로 통지한 최신 표시 언어 스냅샷 — main 프로세스의 다른 코드(네이티브
+// 알림/다이얼로그 등, 특정 요청의 locale을 모르는 곳)가 currentUiLocale()로 읽어 쓴다.
+let _uiLocale: "ko" | "en" = "en";
+export function currentUiLocale(): "ko" | "en" {
+  return _uiLocale;
 }
 
 /** 주어진 언어로 네이티브 메뉴를 다시 빌드해 적용. */

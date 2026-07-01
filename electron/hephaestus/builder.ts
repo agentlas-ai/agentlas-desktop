@@ -101,13 +101,14 @@ export async function runHephaestusBuild(
   signal: AbortSignal,
   locale: RuntimeLocale = "ko",
 ): Promise<void> {
+  const ko = locale === "ko";
   const root = hephaestusRoot();
   if (!root) {
-    sink({ runId, kind: "error", text: "Hephaestus 엔진 번들을 찾을 수 없습니다." });
+    sink({ runId, kind: "error", text: ko ? "Hephaestus 엔진 번들을 찾을 수 없습니다." : "Could not find the Hephaestus engine bundle." });
     return;
   }
   if (!req.workspace || !fs.existsSync(req.workspace)) {
-    sink({ runId, kind: "error", text: "빌드 워크스페이스 폴더가 유효하지 않습니다." });
+    sink({ runId, kind: "error", text: ko ? "빌드 워크스페이스 폴더가 유효하지 않습니다." : "The build workspace folder is not valid." });
     return;
   }
 
@@ -116,7 +117,9 @@ export async function runHephaestusBuild(
     sink({
       runId,
       kind: "error",
-      text: "활성 런타임이 없습니다. 설정에서 Claude Code/Codex/Gemini 또는 API 키(BYOK)를 먼저 구성하세요.",
+      text: ko
+        ? "활성 런타임이 없습니다. 설정에서 Claude Code/Codex/Gemini 또는 API 키(BYOK)를 먼저 구성하세요."
+        : "No active runtime. Configure Claude Code/Codex/Gemini or an API key (BYOK) in Settings first.",
     });
     return;
   }
@@ -128,7 +131,9 @@ export async function runHephaestusBuild(
     runId,
     kind: "stage",
     stage: "build",
-    text: req.runtimeSessionId ? `빌더 이어서 진행 (${picked.label})` : `빌더 시작 (${picked.label})`,
+    text: req.runtimeSessionId
+      ? (ko ? `빌더 이어서 진행 (${picked.label})` : `Resuming builder (${picked.label})`)
+      : (ko ? `빌더 시작 (${picked.label})` : `Builder started (${picked.label})`),
   });
 
   // 대화형 인터뷰 history → 러너의 ChatHistoryEntry로 매핑(id/createdAt는 표시에 쓰이지 않음).
@@ -163,14 +168,14 @@ export async function runHephaestusBuild(
             sink({ runId, kind: "stage", stage: name, text: `${name} ${args.slice(0, 120)}`.trim() });
           } else if (isError) {
             const detail = typeof toolResult === "string" && toolResult ? ` — ${toolResult.slice(0, 120)}` : "";
-            sink({ runId, kind: "stage", stage: name, text: `도구 오류: ${name}${detail}` });
+            sink({ runId, kind: "stage", stage: name, text: `${ko ? "도구 오류" : "Tool error"}: ${name}${detail}` });
           }
         },
       },
     );
 
     // 빌드 후 정적 보안 스캔(워크스페이스) — 결과는 done 이벤트에 첨부.
-    sink({ runId, kind: "stage", stage: "security", text: "정적 보안 스캔" });
+    sink({ runId, kind: "stage", stage: "security", text: ko ? "정적 보안 스캔" : "Static security scan" });
     let scan: unknown = null;
     if (!signal.aborted) {
       try {
@@ -179,13 +184,13 @@ export async function runHephaestusBuild(
         if (scan === null) {
           // 스캔이 결과를 내지 못함 — 빈/클린 결과처럼 보이지 않게 명시한다.
           scan = { status: "unverified", reason: "security scan returned no result" };
-          sink({ runId, kind: "stage", stage: "security", text: "보안 스캔 미검증: 결과 없음 — 통과로 간주하지 말 것" });
+          sink({ runId, kind: "stage", stage: "security", text: ko ? "보안 스캔 미검증: 결과 없음 — 통과로 간주하지 말 것" : "Security scan unverified: no result — do not treat as passing" });
         }
       } catch (scanErr) {
         // 스캔 실패/타임아웃을 null(=클린처럼 보임)로 삼키지 않는다 — 미검증으로 표면화한다.
         const reason = scanErr instanceof Error ? scanErr.message : String(scanErr);
         scan = { status: "unverified", reason };
-        sink({ runId, kind: "stage", stage: "security", text: `보안 스캔 미검증: ${reason} — 통과로 간주하지 말 것` });
+        sink({ runId, kind: "stage", stage: "security", text: ko ? `보안 스캔 미검증: ${reason} — 통과로 간주하지 말 것` : `Security scan unverified: ${reason} — do not treat as passing` });
       }
     }
 
@@ -198,9 +203,9 @@ export async function runHephaestusBuild(
     });
   } catch (e) {
     if (signal.aborted) {
-      sink({ runId, kind: "error", text: "빌드 취소됨" });
+      sink({ runId, kind: "error", text: ko ? "빌드 취소됨" : "Build cancelled" });
     } else {
-      sink({ runId, kind: "error", text: `빌드 실패: ${(e as Error).message}` });
+      sink({ runId, kind: "error", text: ko ? `빌드 실패: ${(e as Error).message}` : `Build failed: ${(e as Error).message}` });
     }
   }
 }

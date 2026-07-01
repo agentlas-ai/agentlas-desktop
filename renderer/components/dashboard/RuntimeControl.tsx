@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type { RuntimeStatus } from "@/lib/types";
+import { cliModelTagLabel } from "@shared/models";
 
 type ModelRow = { id: string; label: string; tag?: string };
 
@@ -199,7 +200,7 @@ export function RuntimeControl() {
                 )}
                 {models.map((model) => (
                   <option key={model.id} value={model.id}>
-                    {model.label}{model.tag ? ` · ${model.tag}` : ""}
+                    {model.label}{model.tag ? ` · ${cliModelTagLabel(model.tag, locale)}` : ""}
                   </option>
                 ))}
               </select>

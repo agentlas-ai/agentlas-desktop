@@ -2,6 +2,7 @@
 // 에이전트가 장르·톤·설정·캐릭터·길이를 추론해 기획안 단계에서 채워둔다(거기서 수정/승인).
 // 실제 LLM 라우팅 시 이 휴리스틱을 대체하면 된다.
 
+import type { Locale } from "@/lib/i18n";
 import { FORMAT_DEFAULT_DURATION } from "./taxonomy";
 import { emptyBrief } from "./presets";
 import type { AspectRatio, FilmBrief, FilmFormat, Genre } from "./types";
@@ -81,10 +82,12 @@ function pickSetting(text: string): string {
   return "";
 }
 
-function extractCharacters(text: string): FilmBrief["characters"] {
+function extractCharacters(text: string, locale: Locale = "ko"): FilmBrief["characters"] {
   const stop = new Set(["AI", "CF", "MV", "OK", "TV", "API", "CEO", "SF", "UI", "UX"]);
   const caps = Array.from(new Set((text.match(/\b[A-Z][A-Z]{1,}\b/g) || []).filter((w) => !stop.has(w))));
-  return caps.slice(0, 3).map((name, i) => ({ name, role: i === 0 ? "주연" : "조연", description: "" }));
+  const leadRole = locale === "ko" ? "주연" : "Lead";
+  const supportRole = locale === "ko" ? "조연" : "Supporting";
+  return caps.slice(0, 3).map((name, i) => ({ name, role: i === 0 ? leadRole : supportRole, description: "" }));
 }
 
 export function inferBriefFromPrompt(input: {
@@ -93,7 +96,10 @@ export function inferBriefFromPrompt(input: {
   references: string[];
   /** 사용자가 명시한 포맷(미지정이면 프롬프트에서 추론). */
   format?: FilmFormat | "";
+  /** 생성되는 라벨 텍스트 및 기본 대사 언어의 로케일 (기본 "ko" — 기존 호출부 호환). */
+  locale?: Locale;
 }): FilmBrief {
+  const locale = input.locale ?? "ko";
   const prompt = input.prompt.trim();
   const text = `${input.title}\n${prompt}`;
   const format = input.format || pickFormat(text);
@@ -101,7 +107,7 @@ export function inferBriefFromPrompt(input: {
   const aspect: AspectRatio =
     format === "social_short" ? "9:16" : format === "cinematic_short" || format === "trailer" ? "2.39:1" : "16:9";
   return {
-    ...emptyBrief(),
+    ...emptyBrief(locale),
     title: input.title.trim() || "Untitled",
     format,
     genre,
@@ -112,10 +118,10 @@ export function inferBriefFromPrompt(input: {
     audience: "",
     tone: pickTone(text),
     visualReferences: input.references,
-    characters: extractCharacters(prompt),
+    characters: extractCharacters(prompt, locale),
     setting: pickSetting(prompt),
     mustInclude: [],
     mustAvoid: [],
-    language: "ko",
+    language: locale,
   };
 }

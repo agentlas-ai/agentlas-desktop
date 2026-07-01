@@ -2,6 +2,7 @@
 "use client";
 import type { FilmProduction } from "@/lib/oberon";
 import type { OberonMotionAdFile, OberonMotionAdJob } from "@/lib/types";
+import { useT } from "@/lib/i18n";
 import { Glyph } from "./icons";
 import { Card, GhostButton, Meter, PanelHead, PrimaryButton } from "./ui";
 
@@ -20,6 +21,7 @@ export function MotionGraphicsPanel({
   onReset: () => void;
   onOpenOutput?: (jobId: string) => void;
 }) {
+  const { locale } = useT();
   const files = job?.files ?? [];
   const mp4 = files.find((file) => file.kind === "motion_mp4");
   const preview = files.find((file) => file.kind === "html_preview");
@@ -33,19 +35,23 @@ export function MotionGraphicsPanel({
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 32px 72px" }}>
       <PanelHead
-        eyebrow="Step 05 · 모션그래픽"
-        title="코드 렌더 광고"
-        subtitle={`${production.brief.brandOrProduct || production.brief.title} · ${production.brief.durationSec || 30}초 · API 없는 로컬 렌더`}
+        eyebrow={locale === "ko" ? "Step 05 · 모션그래픽" : "Step 05 · Motion Graphics"}
+        title={locale === "ko" ? "코드 렌더 광고" : "Code-Rendered Ad"}
+        subtitle={
+          locale === "ko"
+            ? `${production.brief.brandOrProduct || production.brief.title} · ${production.brief.durationSec || 30}초 · API 없는 로컬 렌더`
+            : `${production.brief.brandOrProduct || production.brief.title} · ${production.brief.durationSec || 30}s · API-free local render`
+        }
         icon={<Glyph name="layers" size={18} />}
         right={
           job ? (
             <GhostButton onClick={onReset}>
-              <Glyph name="x" size={14} /> 리셋
+              <Glyph name="x" size={14} /> {locale === "ko" ? "리셋" : "Reset"}
             </GhostButton>
           ) : (
             <PrimaryButton onClick={onStart} disabled={generating}>
               <Glyph name="sparkle" size={14} />
-              {generating ? "렌더 중…" : "Motion Ad 렌더"}
+              {locale === "ko" ? (generating ? "렌더 중…" : "Motion Ad 렌더") : generating ? "Rendering…" : "Render Motion Ad"}
             </PrimaryButton>
           )
         }
@@ -69,14 +75,16 @@ export function MotionGraphicsPanel({
         <Card style={{ padding: 18 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
             <span style={{ width: 8, height: 8, borderRadius: "50%", background: statusTone }} />
-            <span style={{ fontSize: 14, fontWeight: 750, color: "var(--ob-ink)" }}>{job?.message ?? "대기 중"}</span>
+            <span style={{ fontSize: 14, fontWeight: 750, color: "var(--ob-ink)" }}>
+              {job?.message ?? (locale === "ko" ? "대기 중" : "Waiting")}
+            </span>
             <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--ob-muted)", fontVariantNumeric: "tabular-nums" }}>{job?.progress.percent ?? 0}%</span>
           </div>
           <Meter value={job?.progress.percent ?? 0} max={100} color={statusTone} />
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 16 }}>
-            <Metric label="엔진" value="Chromium" />
-            <Metric label="인코더" value="ffmpeg" />
-            <Metric label="길이" value={`${job?.durationSec ?? production.brief.durationSec ?? 30}s`} />
+            <Metric label={locale === "ko" ? "엔진" : "Engine"} value="Chromium" />
+            <Metric label={locale === "ko" ? "인코더" : "Encoder"} value="ffmpeg" />
+            <Metric label={locale === "ko" ? "길이" : "Length"} value={`${job?.durationSec ?? production.brief.durationSec ?? 30}s`} />
             <Metric label="API" value="0" />
           </div>
           {job?.error && <div style={{ marginTop: 12, fontSize: 12, color: "var(--ob-danger)", lineHeight: 1.45 }}>{job.error}</div>}
@@ -89,7 +97,7 @@ export function MotionGraphicsPanel({
           )}
           {job && onOpenOutput && (
             <GhostButton onClick={() => onOpenOutput(job.id)} style={{ marginTop: 14 }}>
-              출력 폴더 열기
+              {locale === "ko" ? "출력 폴더 열기" : "Open output folder"}
             </GhostButton>
           )}
         </Card>

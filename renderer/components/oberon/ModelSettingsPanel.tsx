@@ -8,6 +8,7 @@ import { ipc } from "@/lib/ipc";
 import { providersForModality, type MultimodalProvider } from "@shared/multimodal";
 import type { RuntimeStatus } from "@/lib/types";
 import type { ModelSettings } from "@/lib/oberon";
+import { useT, type Locale } from "@/lib/i18n";
 import { Glyph, OberonBadge } from "./icons";
 
 interface RuntimeOpt {
@@ -36,6 +37,7 @@ export function ModelSettingsPanel({
   value: ModelSettings;
   onChange: (next: ModelSettings) => void;
 }) {
+  const { locale } = useT();
   const [runtimes, setRuntimes] = useState<RuntimeOpt[]>(RUNTIME_FALLBACK);
   const [ready, setReady] = useState<Record<string, boolean>>({});
 
@@ -98,45 +100,64 @@ export function ModelSettingsPanel({
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
         <OberonBadge name="setup" color="#5b5bd6" size={26} glyphSize={15} />
         <div>
-          <div style={{ fontSize: 13, fontWeight: 800, color: "var(--ob-ink, #16171d)" }}>모델 스택</div>
-          <div style={{ fontSize: 10.5, color: "var(--ob-muted, #6b7280)" }}>단계별로 어떤 모델/CLI로 만들지 고릅니다 (BYOK)</div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: "var(--ob-ink, #16171d)" }}>
+            {locale === "ko" ? "모델 스택" : "Model Stack"}
+          </div>
+          <div style={{ fontSize: 10.5, color: "var(--ob-muted, #6b7280)" }}>
+            {locale === "ko" ? "단계별로 어떤 모델/CLI로 만들지 고릅니다 (BYOK)" : "Choose which model/CLI powers each step (BYOK)"}
+          </div>
         </div>
       </div>
 
-      <Row glyph="cli" color="#0b7285" title="대본 · 기획 엔진" hint="기획·대본·스토리보드를 쓰는 BYOK CLI">
+      <Row
+        glyph="cli"
+        color="#0b7285"
+        title={locale === "ko" ? "대본 · 기획 엔진" : "Script · Plan Engine"}
+        hint={locale === "ko" ? "기획·대본·스토리보드를 쓰는 BYOK CLI" : "The BYOK CLI that writes the plan, script, and storyboard"}
+      >
         {runtimes.map((r) => (
           <Pick
             key={r.kind}
             label={r.label}
-            sub={r.detected ? "감지됨" : undefined}
+            sub={r.detected ? (locale === "ko" ? "감지됨" : "Detected") : undefined}
             selected={value.textRuntime === r.kind}
             onClick={() => onChange({ ...value, textRuntime: r.kind, textRuntimeLabel: r.label })}
           />
         ))}
       </Row>
 
-      <Row glyph="keyframe" color="#e8590c" title="컷 · 이미지 엔진" hint="레퍼런스·키프레임 (병렬 생성)">
+      <Row
+        glyph="keyframe"
+        color="#e8590c"
+        title={locale === "ko" ? "컷 · 이미지 엔진" : "Cut · Image Engine"}
+        hint={locale === "ko" ? "레퍼런스·키프레임 (병렬 생성)" : "References and keyframes (parallel generation)"}
+      >
         {imageProviders.map((p) => (
           <Pick
             key={p.id}
-            label={p.labelKo}
-            sub={statusSub(ready, p)}
+            label={locale === "ko" ? p.labelKo : p.label}
+            sub={statusSub(ready, p, locale)}
             selected={value.imageProvider === p.id}
             onClick={() => onChange({ ...value, imageProvider: p.id })}
-            title={p.summaryKo}
+            title={locale === "ko" ? p.summaryKo : p.summary}
           />
         ))}
       </Row>
 
-      <Row glyph="video" color="#d6336c" title="영상 엔진 (복수 선택 · 병렬)" hint="샷을 선택한 엔진들에 병렬 분배">
+      <Row
+        glyph="video"
+        color="#d6336c"
+        title={locale === "ko" ? "영상 엔진 (복수 선택 · 병렬)" : "Video Engines (multi-select · parallel)"}
+        hint={locale === "ko" ? "샷을 선택한 엔진들에 병렬 분배" : "Distributes shots across the selected engines in parallel"}
+      >
         {videoProviders.map((p) => (
           <Pick
             key={p.id}
-            label={p.labelKo}
-            sub={statusSub(ready, p)}
+            label={locale === "ko" ? p.labelKo : p.label}
+            sub={statusSub(ready, p, locale)}
             selected={value.videoProviders.includes(p.id)}
             onClick={() => toggleVideo(p.id)}
-            title={p.summaryKo}
+            title={locale === "ko" ? p.summaryKo : p.summary}
             multi
           />
         ))}
@@ -145,9 +166,9 @@ export function ModelSettingsPanel({
   );
 }
 
-function statusSub(ready: Record<string, boolean>, p: MultimodalProvider): string | undefined {
-  if (Object.keys(ready).length === 0) return p.envKeys.length === 0 ? "구독" : undefined;
-  return ready[p.id] ? "키 등록됨" : "키 필요";
+function statusSub(ready: Record<string, boolean>, p: MultimodalProvider, locale: Locale): string | undefined {
+  if (Object.keys(ready).length === 0) return p.envKeys.length === 0 ? (locale === "ko" ? "구독" : "Subscription") : undefined;
+  return ready[p.id] ? (locale === "ko" ? "키 등록됨" : "Key added") : locale === "ko" ? "키 필요" : "Key required";
 }
 
 function Row({
