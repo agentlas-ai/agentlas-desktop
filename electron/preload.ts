@@ -57,6 +57,23 @@ const api: AgentlasIpc = {
     getCredits: () => ipcRenderer.invoke("billing:getCredits"),
     transferEarnings: (credits: number) => ipcRenderer.invoke("billing:transferEarnings", credits),
   },
+  promptHub: {
+    list: (params?: { q?: string; category?: string }) => ipcRenderer.invoke("promptHub:list", params),
+    get: (slug: string) => ipcRenderer.invoke("promptHub:get", slug),
+    unlock: (slug: string) => ipcRenderer.invoke("promptHub:unlock", slug),
+    taste: (slug: string) => ipcRenderer.invoke("promptHub:taste", slug),
+    tastes: () => ipcRenderer.invoke("promptHub:tastes"),
+    bookmarks: () => ipcRenderer.invoke("promptHub:bookmarks"),
+    bookmarkAdd: (slug: string) => ipcRenderer.invoke("promptHub:bookmarkAdd", slug),
+    bookmarkRemove: (slug: string) => ipcRenderer.invoke("promptHub:bookmarkRemove", slug),
+  },
+  quests: {
+    list: () => ipcRenderer.invoke("quests:list"),
+    claim: (questId: string) => ipcRenderer.invoke("quests:claim", questId),
+  },
+  agentMemory: {
+    entries: (agentId: string, limit?: number) => ipcRenderer.invoke("agentMemory:entries", agentId, limit),
+  },
   confirm: {
     listPending: () => ipcRenderer.invoke("confirm:listPending"),
   },

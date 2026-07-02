@@ -117,6 +117,18 @@ import { checkSafely as updaterCheck, getUpdaterState, quitAndInstall as updater
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
 import { getAuthSession, signInWithBrowser, signInWithGoogle, signOut } from "./auth";
 import { getBillingCredits, transferEarnings } from "./billing";
+import {
+  addHubPromptBookmark,
+  getHubPrompt,
+  listHubPromptBookmarks,
+  listHubPrompts,
+  listHubPromptTastes,
+  removeHubPromptBookmark,
+  tasteHubPrompt,
+  unlockHubPrompt,
+} from "./prompts-hub";
+import { claimQuest, listQuests } from "./quests";
+import { listMemoryEntriesForAgentUi } from "./memory/store";
 import { getUsageSnapshot } from "./usage";
 import { listPendingConfirmations } from "./confirm";
 import { addProjectOntologySource, getProjectOntologyStatus } from "./ontology/project-runtime";
@@ -593,6 +605,25 @@ export function registerIpcHandlers(): void {
   // ── billing (Agentlas Hub 크레딧 — 구독/렌트수익 2계좌 + 일방 전송) ─────
   ipcMain.handle("billing:getCredits", () => getBillingCredits());
   ipcMain.handle("billing:transferEarnings", (_e, credits: number) => transferEarnings(credits));
+
+  // ── 프롬프트 저장소 — 웹 /api/prompts 프록시(쿠키+Origin, billing 패턴) ──────
+  ipcMain.handle("promptHub:list", (_e, params?: { q?: string; category?: string }) => listHubPrompts(params));
+  ipcMain.handle("promptHub:get", (_e, slug: string) => getHubPrompt(slug));
+  ipcMain.handle("promptHub:unlock", (_e, slug: string) => unlockHubPrompt(slug));
+  ipcMain.handle("promptHub:taste", (_e, slug: string) => tasteHubPrompt(slug));
+  ipcMain.handle("promptHub:tastes", () => listHubPromptTastes());
+  ipcMain.handle("promptHub:bookmarks", () => listHubPromptBookmarks());
+  ipcMain.handle("promptHub:bookmarkAdd", (_e, slug: string) => addHubPromptBookmark(slug));
+  ipcMain.handle("promptHub:bookmarkRemove", (_e, slug: string) => removeHubPromptBookmark(slug));
+
+  // ── 퀘스트 — 대시보드 신규 유저 튜토리얼(온보딩 대체) ──────────────────────
+  ipcMain.handle("quests:list", () => listQuests());
+  ipcMain.handle("quests:claim", (_e, questId: string) => claimQuest(questId));
+
+  // ── 에이전트 durable 메모리 — 런타임 큐레이터 DB를 자가진화/타임라인 UI로 ────
+  ipcMain.handle("agentMemory:entries", (_e, agentId: string, limit?: number) =>
+    listMemoryEntriesForAgentUi(agentId, Math.min(Math.max(Number(limit) || 100, 1), 300)),
+  );
 
   // ── confirm (확인 요청 — 챗에서 사용자 결정 대기) ────────
   ipcMain.handle("confirm:listPending", () => listPendingConfirmations());

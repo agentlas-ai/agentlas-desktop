@@ -233,6 +233,19 @@ export function hasEquivalentMemory(
   return Boolean(row);
 }
 
+/** 에이전트 상세 UI용 — 이 에이전트가 남긴 모든 활성 메모리(프로젝트 무관), 최신순.
+ *  런타임 큐레이터가 쌓는 durable 메모리를 자가진화/타임라인 화면에 보이게 하는 읽기 경로. */
+export function listMemoryEntriesForAgentUi(agentId: string, limit = 100): MemoryEntry[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM memory_entries
+       WHERE superseded_at IS NULL AND agent_id = ?
+       ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(agentId, limit) as Row[];
+  return rows.map(toEntry);
+}
+
 export function countMemory(): number {
   const r = getDb().prepare("SELECT COUNT(*) AS n FROM memory_entries").get() as { n: number };
   return r.n;

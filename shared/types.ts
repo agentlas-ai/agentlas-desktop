@@ -2800,6 +2800,121 @@ export interface EarningsTransferResult {
   error?: string;
 }
 
+// ── 프롬프트 저장소 (웹 /api/prompts 프록시 — electron/prompts-hub.ts) ─────────
+/** 카탈로그/상세 공통 프롬프트 요약. body/tips는 절대 카탈로그에 오지 않는다. */
+export interface HubPromptSummary {
+  id: string;
+  slug: string;
+  category?: string;
+  titleKo?: string;
+  titleEn?: string;
+  summaryKo?: string;
+  summaryEn?: string;
+  models?: string[];
+  /** 필요한 입력물 안내(사진/문서 등) — "써보기" 전에 반드시 표시할 것. */
+  inputsKo?: string;
+  inputsEn?: string;
+  exampleImages?: string[];
+  exampleResultKo?: string;
+  exampleResultEn?: string;
+  tags?: string[];
+  authorName?: string;
+  unlockCount?: number;
+  viewCount?: number;
+  // 로그인 사용자 전용 플래그
+  unlocked?: boolean;
+  tasted?: boolean;
+  bookmarked?: boolean;
+  mine?: boolean;
+}
+
+export interface HubPromptViewer {
+  signedIn: boolean;
+  /** 유료 구독(free 아님 + active/trialing/past_due) — 전 프롬프트 무제한 열람+저장. */
+  paidAccess: boolean;
+}
+
+export interface HubPromptCatalog {
+  ok: boolean;
+  prompts: HubPromptSummary[];
+  viewer: HubPromptViewer | null;
+  error?: string;
+}
+
+export interface HubPromptDetailResult {
+  ok: boolean;
+  prompt?: HubPromptSummary & { body?: string; tipsKo?: string; tipsEn?: string; paidAccess?: boolean | null };
+  error?: string;
+}
+
+/** 언락/맛보기 공통 결과 — code: subscription_required / already_tasted / unauthenticated / network. */
+export interface HubPromptOpenResult {
+  ok: boolean;
+  body?: string;
+  tipsKo?: string;
+  tipsEn?: string;
+  alreadyUnlocked?: boolean;
+  tasted?: boolean;
+  code?: string;
+  error?: string;
+  upgradeUrl?: string;
+}
+
+export interface HubPromptTastesResult {
+  ok: boolean;
+  count: number;
+  slugs: string[];
+  code?: string;
+}
+
+export interface HubPromptBookmarkResult {
+  ok: boolean;
+  bookmarked?: boolean;
+  code?: string;
+  error?: string;
+}
+
+// ── 퀘스트 (온보딩 대체 신규 유저 튜토리얼 — 웹 /api/quests 프록시) ────────────
+export interface QuestInfo {
+  id: string;
+  titleKo: string;
+  titleEn: string;
+  descKo: string;
+  descEn: string;
+  rewardCredits: number;
+  verification: "server" | "client-attested";
+  claimed: boolean;
+  claimedAt: string | null;
+}
+
+export interface QuestListResult {
+  ok: boolean;
+  authenticated: boolean;
+  quests: QuestInfo[];
+  error?: string;
+}
+
+export interface QuestClaimResult {
+  ok: boolean;
+  questId?: string;
+  rewardCredits?: number;
+  code?: string;
+  error?: string;
+}
+
+// ── 에이전트 durable 메모리(런타임 큐레이터 DB) — 자가진화/타임라인 UI 소스 ────
+export interface AgentMemoryEntryUi {
+  id: string;
+  scope: string;
+  kind: string;
+  content: string;
+  confidence: "high" | "medium" | "low";
+  evidence: string[];
+  chatId: string | null;
+  projectPath: string | null;
+  createdAt: string;
+}
+
 export interface AgentlasIpc {
   /** Electron 메인이 알려주는 OS 환경 정보 (Apple/Codex/Claude 데스크톱과 동일 패턴) */
   app: {
@@ -2859,6 +2974,26 @@ export interface AgentlasIpc {
   billing: {
     getCredits: () => Promise<HubCreditBalance>;
     transferEarnings: (credits: number) => Promise<EarningsTransferResult>;
+  };
+  /** 프롬프트 저장소 — 웹 프롬프트 카탈로그 탐색/열람/맛보기/저장(북마크). Hub 메뉴와 동형. */
+  promptHub: {
+    list: (params?: { q?: string; category?: string }) => Promise<HubPromptCatalog>;
+    get: (slug: string) => Promise<HubPromptDetailResult>;
+    unlock: (slug: string) => Promise<HubPromptOpenResult>;
+    taste: (slug: string) => Promise<HubPromptOpenResult>;
+    tastes: () => Promise<HubPromptTastesResult>;
+    bookmarks: () => Promise<{ ok: boolean; slugs: string[]; code?: string }>;
+    bookmarkAdd: (slug: string) => Promise<HubPromptBookmarkResult>;
+    bookmarkRemove: (slug: string) => Promise<HubPromptBookmarkResult>;
+  };
+  /** 퀘스트 — 대시보드 신규 유저 튜토리얼(온보딩 대체). 클레임 성공 시 크레딧 지급. */
+  quests: {
+    list: () => Promise<QuestListResult>;
+    claim: (questId: string) => Promise<QuestClaimResult>;
+  };
+  /** 에이전트 durable 메모리(런타임 큐레이터가 쌓는 DB) — 자가진화/타임라인 UI 소스. */
+  agentMemory: {
+    entries: (agentId: string, limit?: number) => Promise<AgentMemoryEntryUi[]>;
   };
   /** 확인 요청 — 에이전트가 챗에서 사용자 결정을 기다리는 채팅 목록(미답변 질문 fence 기준). */
   confirm: {
