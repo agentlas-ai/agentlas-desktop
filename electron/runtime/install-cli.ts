@@ -318,7 +318,11 @@ export function openCliLogin(kind: InstallableCli): CliActionResult {
   const plan = CLI_PLAN[kind];
   if (!plan) return { ok: false, message: `Unknown CLI: ${kind}` };
   const [, ...loginArgs] = plan.loginCmd.split(" ");
-  const abs = resolveBinary(plan.bin);
+  // "gemini" 슬롯의 런타임은 agy(Antigravity)지만, 사용량/로그인 만료 판정은 공식 gemini-cli의
+  // ~/.gemini/oauth_creds.json 기준이다 — agy 로그인은 이 파일을 갱신하지 못해 "재로그인해도
+  // 영원히 만료" 루프가 생긴다. 공식 gemini CLI가 있으면 그걸 먼저 연다(그 파일의 실소유자).
+  const abs =
+    kind === "gemini" ? (resolveBinary("gemini") ?? resolveBinary(plan.bin)) : resolveBinary(plan.bin);
   if (!abs) {
     // 설치가 안 된 상태로 터미널부터 여는 건 금지 — 렌더러가 이 메시지로 실패를 표면화한다.
     return {
@@ -328,7 +332,11 @@ export function openCliLogin(kind: InstallableCli): CliActionResult {
     };
   }
   // 절대경로 실행 — 셸 PATH 무관. 경로 공백/특수문자는 플랫폼별로 인용.
-  const posixCmd = [`'${abs.replace(/'/g, "'\\''")}'`, ...loginArgs].join(" ");
+  // 터미널만 덜렁 뜨면 사용자가 뭘 해야 하는지 모른다 — 안내 한 줄을 먼저 찍는다.
+  const guide =
+    "== Agentlas: complete the login below (a browser window may open). When it says you are logged in, close this window. / 아래에서 로그인을 완료하세요(브라우저 창이 뜰 수 있습니다). 완료되면 이 창을 닫으면 됩니다. ==";
+  const runCmd = [`'${abs.replace(/'/g, "'\\''")}'`, ...loginArgs].join(" ");
+  const posixCmd = `echo '${guide}'; ${runCmd}`;
   const winCmd = [`"${abs}"`, ...loginArgs].join(" ");
   try {
     if (process.platform === "darwin") {

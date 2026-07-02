@@ -52,6 +52,30 @@ function describeFetchError(err: unknown): string {
   return err.message;
 }
 
+/** 타임아웃 있는 form-encoded POST(JSON 응답). non-2xx면 throw — OAuth 토큰 갱신용. */
+export async function postForm(
+  url: string,
+  form: Record<string, string>,
+  timeoutMs = 12000,
+): Promise<unknown> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await pickFetch()(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+      body: new URLSearchParams(form).toString(),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    throw new Error(describeFetchError(err));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 타임아웃 있는 JSON GET. non-2xx면 throw. */
 export async function getJson(
   url: string,
