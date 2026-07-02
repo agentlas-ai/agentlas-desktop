@@ -1,6 +1,6 @@
 // 회사 상세 — 접고 펴기 가능한 왼쪽 사이드바 조직도 + 오른쪽 에이전트 상세 통제 센터 (메모리 큐레이션, 프롬프트 에디터, 스킬 주입, 클라우드 싱크)
 "use client";
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
@@ -10,6 +10,7 @@ import { navigate } from "@/lib/navigation";
 import { parseMemoryMarkdown, serializeMemoryMarkdown } from "@/lib/agent-memory";
 import { classifyAgent } from "@/lib/ownership";
 import type { Chat, InstalledAgent, InstalledFirm, ResolvedOrg, ResolvedNode, WorkspaceNode } from "@/lib/types";
+import type { AgentMemoryEntryUi } from "@shared/types";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import {
   IconBuilding,
@@ -29,6 +30,37 @@ import {
   IconPaperclip,
   IconRoute
 } from "@/components/Icon";
+
+// ── 런타임 durable 메모리(큐레이터 DB) 표시 헬퍼 — library/agents/page.tsx 와 동일 규칙(병렬 편집 제약으로 로컬 복제) ──
+// createdAt(ISO) → 타임라인 timestamp 자리의 상대시간. 오래된 항목은 toLocaleString 포맷 폴백.
+function formatMemoryEntryTime(iso: string, locale: Locale): string {
+  const ts = new Date(iso).getTime();
+  if (!Number.isFinite(ts)) return iso;
+  const diffMin = Math.round((Date.now() - ts) / 60000);
+  if (diffMin < 1) return locale === "ko" ? "방금 전" : "just now";
+  if (diffMin < 60) return locale === "ko" ? `${diffMin}분 전` : `${diffMin}m ago`;
+  const diffHour = Math.round(diffMin / 60);
+  if (diffHour < 24) return locale === "ko" ? `${diffHour}시간 전` : `${diffHour}h ago`;
+  const diffDay = Math.round(diffHour / 24);
+  if (diffDay < 7) return locale === "ko" ? `${diffDay}일 전` : `${diffDay}d ago`;
+  return new Date(ts).toLocaleString(locale === "en" ? "en-US" : "ko-KR", { month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" });
+}
+
+// DB kind(raw 문자열) → 기존 타임라인 colorMap 타입 매핑. 미지의 kind 는 sync 색으로 안전 강등.
+function memoryKindToTimelineType(kind: string): "skill" | "sync" | "evolution" | "resolve" {
+  const k = (kind || "").toLowerCase();
+  if (k === "decision") return "resolve";
+  if (k === "gotcha") return "evolution";
+  if (k === "procedure") return "skill";
+  return "sync";
+}
+
+// 신뢰도 배지 색 — high=green, medium=amber, low=muted.
+function memoryConfidenceColor(confidence: "high" | "medium" | "low"): string {
+  if (confidence === "high") return "var(--green-deep)";
+  if (confidence === "medium") return "var(--amber-deep)";
+  return "var(--muted-deep)";
+}
 
 export default function FirmDetailWrapper() {
   return (
@@ -61,6 +93,8 @@ function FirmDetailPage() {
 
   // 파일 핸들링 및 상태
   const [agentFiles, setAgentFiles] = useState<WorkspaceNode[]>([]);
+  // 런타임 durable 메모리(큐레이터가 실행 후 DB에 적재) — memory.md 와 별개의 실측 학습 소스.
+  const [memoryEntries, setMemoryEntries] = useState<AgentMemoryEntryUi[]>([]);
   const [memoryContent, setMemoryContent] = useState("");
   const [memoryParsed, setMemoryParsed] = useState<{
     decisions: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[];
@@ -236,6 +270,28 @@ function FirmDetailPage() {
       cancelled = true;
     };
   }, [selectedNode, agents]);
+
+  // 런타임 durable 메모리(큐레이터 DB) 로드 — 파일 로드와 독립·비차단, 에이전트 전환 시 취소.
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !selectedNode?.agentId) {
+      setMemoryEntries([]);
+      return;
+    }
+    let cancelled = false;
+    setMemoryEntries([]);
+    // 구버전 preload(agentMemory 미노출)에서도 죽지 않게 옵셔널 호출.
+    Promise.resolve(api.agentMemory?.entries?.(selectedNode.agentId, 100))
+      .then((rows) => {
+        if (!cancelled) setMemoryEntries(Array.isArray(rows) ? rows : []);
+      })
+      .catch(() => {
+        if (!cancelled) setMemoryEntries([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedNode]);
 
   async function startCeoChat() {
     const api = ipc();
@@ -598,6 +654,7 @@ function FirmDetailPage() {
             onTabChange={setActiveTab}
             onBackToOverview={() => setSelectedNode(null)}
             memoryParsed={memoryParsed}
+            memoryEntries={memoryEntries}
             onSaveMemory={saveMemory}
             promptContent={promptContent}
             promptDraft={promptDraft}
@@ -1126,6 +1183,8 @@ interface AgentDetailViewProps {
   onSetOntologyInbox: (v: any) => void;
   showToast: (msg: string) => void;
   agentFiles: WorkspaceNode[];
+  /** 런타임 durable 메모리(큐레이터 DB) — memory.md 없이도 진화 타임라인을 채우는 실측 소스. */
+  memoryEntries: AgentMemoryEntryUi[];
 }
 
 function AgentDetailView({
@@ -1135,6 +1194,7 @@ function AgentDetailView({
   onTabChange,
   onBackToOverview,
   memoryParsed,
+  memoryEntries,
   onSaveMemory,
   promptContent,
   promptDraft,
@@ -1181,6 +1241,23 @@ function AgentDetailView({
     : "";
   const hasPendingEvolution = learnedRules.length > 0;
   const evolutionDiff = { old: promptContent, new: promptContent + evolutionAppendix };
+
+  // 런타임 durable 메모리(큐레이터 DB) → 타임라인 행(최신순) 합류 — memory.md 없이도 실제 학습이 보인다.
+  const displayTimelineEvents = useMemo(() => {
+    const dbRows: Array<{ id: string; timestamp: string; title: string; desc: string; type: "skill" | "sync" | "evolution" | "resolve"; kind?: string; confidence?: "high" | "medium" | "low" }> = [...memoryEntries]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .map((entry) => ({
+        id: `db-${entry.id}`,
+        timestamp: formatMemoryEntryTime(entry.createdAt, locale),
+        title: locale === "ko" ? "런타임 학습 수집" : "Runtime learning captured",
+        desc: entry.content,
+        type: memoryKindToTimelineType(entry.kind),
+        kind: entry.kind,
+        confidence: entry.confidence,
+      }));
+    const merged: typeof dbRows = [...timelineEvents, ...dbRows];
+    return merged;
+  }, [memoryEntries, timelineEvents, locale]);
 
   // 프롬프트 복사 핸들러
   const handleCopyPrompt = () => {
@@ -2000,14 +2077,17 @@ function AgentDetailView({
                 </h4>
                 
                 <div style={{ display: "flex", flexDirection: "column", gap: 16, position: "relative", paddingLeft: 16, borderLeft: "2px solid var(--paper-edge)", marginLeft: 6 }}>
-                  {timelineEvents.map((evt) => {
+                  {displayTimelineEvents.map((evt) => {
                     const colorMap = {
                       skill: "var(--purple-deep)",
                       sync: "var(--accent)",
                       evolution: "var(--amber-deep)",
                       resolve: "var(--green-deep)"
                     };
-                    
+                    // DB 유래 행(kind 有)은 본문을 2줄로 접고 클릭 시 펼친다.
+                    const isDbEntry = Boolean(evt.kind);
+                    const expanded = !!expandedItems[evt.id];
+
                     return (
                       <div key={evt.id} style={{ position: "relative" }}>
                         {/* 타임라인 점 */}
@@ -2022,16 +2102,39 @@ function AgentDetailView({
                           border: `3px solid ${colorMap[evt.type]}`,
                           zIndex: 2
                         }} />
-                        
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2, flexWrap: "wrap" }}>
                           <span style={{ fontSize: 10, fontWeight: 700, color: "var(--muted-deep)", fontFamily: "var(--font-mono)" }}>
                             {evt.timestamp}
                           </span>
                           <span style={{ fontSize: 11.5, fontWeight: 700, color: colorMap[evt.type] }}>
                             {evt.title}
                           </span>
+                          {evt.kind && (
+                            <span style={{ fontSize: 9.5, padding: "1px 6px", borderRadius: 999, background: "var(--fill-1)", color: colorMap[evt.type], fontWeight: 700, fontFamily: "var(--font-mono)" }}>
+                              {evt.kind}
+                            </span>
+                          )}
+                          {evt.confidence && (
+                            <span style={{ fontSize: 9.5, padding: "1px 6px", borderRadius: 999, border: "1px solid var(--paper-edge)", color: memoryConfidenceColor(evt.confidence), fontWeight: 700 }}>
+                              {evt.confidence}
+                            </span>
+                          )}
                         </div>
-                        <p style={{ margin: 0, fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.4 }}>
+                        <p
+                          onClick={isDbEntry ? () => toggleItemExpand(evt.id) : undefined}
+                          title={isDbEntry ? (locale === "ko" ? "클릭하여 펼치기/접기" : "Click to expand/collapse") : undefined}
+                          style={{
+                            margin: 0,
+                            fontSize: 11.5,
+                            color: "var(--ink-soft)",
+                            lineHeight: 1.4,
+                            ...(isDbEntry ? { cursor: "pointer" } : {}),
+                            ...(isDbEntry && !expanded
+                              ? { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" as const, overflow: "hidden" }
+                              : {}),
+                          }}
+                        >
                           {evt.desc}
                         </p>
                       </div>
@@ -2342,7 +2445,7 @@ function AgentDetailView({
                 </div>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
                   <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>{locale === "ko" ? "진화·활동 이력 (Events)" : "Evolution & activity log (Events)"}</div>
-                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--peach-ink)" }}>{timelineEvents.length}</div>
+                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--peach-ink)" }}>{displayTimelineEvents.length}</div>
                 </div>
               </div>
 

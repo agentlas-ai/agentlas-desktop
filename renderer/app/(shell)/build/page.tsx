@@ -520,7 +520,7 @@ export default function BuildPage() {
                 <span>ready</span>
               </div>
               <ArtifactPreview workspace={result.workspace} ko={ko} />
-              <VerifyGate scan={result.securityScan} ko={ko} />
+              <SecurityScanBlock initialScan={result.securityScan} folder={result.workspace} ko={ko} />
               <div className="build-result-actions">
                 <span>
                   <IconCheck size={15} />{" "}
@@ -697,6 +697,50 @@ function parseScan(scan: unknown): {
   const pass = items.length - blocker - warn;
   const tone = blocker > 0 ? "block" : warn > 0 ? "warn" : "ok";
   return { unknown: false, tone, pass, warn, blocker, items };
+}
+
+/** 검증 게이트 + 수동 재스캔 — 빌드 결과의 정적 보안 스캔을 사용자가 원할 때 다시 돌린다.
+ *  (기존엔 hephaestus.securityScan IPC가 렌더러에서 한 번도 호출되지 않았다 — 결과 표시 전용.) */
+function SecurityScanBlock({ initialScan, folder, ko }: { initialScan: unknown; folder: string; ko: boolean }) {
+  const [scan, setScan] = useState<unknown>(initialScan);
+  const [busy, setBusy] = useState(false);
+  const rescan = async () => {
+    const api = ipc();
+    if (!api) return;
+    setBusy(true);
+    try {
+      const res = await api.hephaestus.securityScan({ folder, strict: true });
+      // HephaestusCommandResult — json 필드가 스캔 결과. 없으면 원본 유지(표시 파서가 unknown 처리).
+      const next = (res as { json?: unknown })?.json ?? res;
+      setScan(next);
+    } catch {
+      // 엔진 미가용 — 기존 결과 유지
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div>
+      <VerifyGate scan={scan} ko={ko} />
+      <button
+        onClick={() => void rescan()}
+        disabled={busy}
+        className="titlebar-nodrag"
+        style={{
+          marginTop: 6,
+          padding: "6px 10px",
+          borderRadius: "var(--radius-md)",
+          border: "1px solid var(--paper-edge)",
+          background: "var(--paper)",
+          fontSize: 11.5,
+          fontWeight: 600,
+          color: "var(--ink-soft)",
+        }}
+      >
+        {busy ? (ko ? "스캔 중…" : "Scanning…") : ko ? "보안 재스캔" : "Re-run security scan"}
+      </button>
+    </div>
+  );
 }
 
 function VerifyGate({ scan, ko }: { scan: unknown; ko: boolean }) {

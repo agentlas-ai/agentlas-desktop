@@ -12,6 +12,7 @@ import { navigate } from "@/lib/navigation";
 import { parseMemoryMarkdown, serializeMemoryMarkdown } from "@/lib/agent-memory";
 import { classifyAgent } from "@/lib/ownership";
 import { cliModelTagLabel } from "@shared/models";
+import type { AgentMemoryEntryUi } from "@shared/types";
 import type {
   AgentRuntimeOverride,
   AgentRuntimeOverrideScope,
@@ -48,6 +49,40 @@ import {
 } from "@/components/Icon";
 
 type ManageView = "general" | "published";
+
+// ── 런타임 durable 메모리(큐레이터 DB) 표시 헬퍼 ──
+// createdAt(ISO) → 타임라인 timestamp 자리의 상대시간. 오래된 항목은 채팅 목록과 동일한 toLocaleString 포맷 폴백.
+function formatMemoryEntryTime(iso: string, locale: Locale): string {
+  const ts = new Date(iso).getTime();
+  if (!Number.isFinite(ts)) return iso;
+  const diffMin = Math.round((Date.now() - ts) / 60000);
+  if (diffMin < 1) return locale === "ko" ? "방금 전" : "just now";
+  if (diffMin < 60) return locale === "ko" ? `${diffMin}분 전` : `${diffMin}m ago`;
+  const diffHour = Math.round(diffMin / 60);
+  if (diffHour < 24) return locale === "ko" ? `${diffHour}시간 전` : `${diffHour}h ago`;
+  const diffDay = Math.round(diffHour / 24);
+  if (diffDay < 7) return locale === "ko" ? `${diffDay}일 전` : `${diffDay}d ago`;
+  return new Date(ts).toLocaleString(locale === "en" ? "en-US" : "ko-KR", { month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" });
+}
+
+// DB kind(raw 문자열) → 기존 타임라인 colorMap 타입 매핑. 미지의 kind 는 sync 색으로 안전 강등.
+function memoryKindToTimelineType(kind: string): "skill" | "sync" | "evolution" | "resolve" {
+  const k = (kind || "").toLowerCase();
+  if (k === "decision") return "resolve";
+  if (k === "gotcha") return "evolution";
+  if (k === "procedure") return "skill";
+  return "sync";
+}
+
+// 신뢰도 배지 색 — high=green, medium=amber, low=muted.
+function memoryConfidenceColor(confidence: "high" | "medium" | "low"): string {
+  if (confidence === "high") return "var(--green-deep)";
+  if (confidence === "medium") return "var(--amber-deep)";
+  return "var(--muted-deep)";
+}
+
+// 프롬프트 진화 후보로 승격 가능한 DB kind — 규칙성 있는 학습만(사실/가설 제외).
+const EVOLUTION_CANDIDATE_KINDS = new Set(["decision", "gotcha", "procedure"]);
 
 export default function LibraryAgentsPage() {
   return (
@@ -93,6 +128,8 @@ function LibraryAgentsView() {
 
   // 파일 핸들링 및 상태
   const [agentFiles, setAgentFiles] = useState<WorkspaceNode[]>([]);
+  // 런타임 durable 메모리(큐레이터가 실행 후 DB에 적재) — memory.md 와 별개의 실측 학습 소스.
+  const [memoryEntries, setMemoryEntries] = useState<AgentMemoryEntryUi[]>([]);
   const [memoryContent, setMemoryContent] = useState("");
   const [memoryParsed, setMemoryParsed] = useState<{
     decisions: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[];
@@ -360,6 +397,28 @@ function LibraryAgentsView() {
       cancelled = true;
     };
   }, [selectedNode, agents]);
+
+  // 런타임 durable 메모리(큐레이터 DB) 로드 — 파일 로드와 독립·비차단, 에이전트 전환 시 취소.
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !selectedNode?.agentId) {
+      setMemoryEntries([]);
+      return;
+    }
+    let cancelled = false;
+    setMemoryEntries([]);
+    // 구버전 preload(agentMemory 미노출)에서도 죽지 않게 옵셔널 호출.
+    Promise.resolve(api.agentMemory?.entries?.(selectedNode.agentId, 100))
+      .then((rows) => {
+        if (!cancelled) setMemoryEntries(Array.isArray(rows) ? rows : []);
+      })
+      .catch(() => {
+        if (!cancelled) setMemoryEntries([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedNode]);
 
 
   // 프롬프트 수정 반영
@@ -998,6 +1057,7 @@ function LibraryAgentsView() {
             onTabChange={setActiveTab}
             onBackToOverview={() => setSelectedNode(null)}
             memoryParsed={memoryParsed}
+            memoryEntries={memoryEntries}
             onSaveMemory={saveMemory}
             promptContent={promptContent}
             promptDraft={promptDraft}
@@ -2089,6 +2149,8 @@ interface AgentDetailViewProps {
     gotchas: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[];
     openQuestions: { id: string; title: string; content: string }[];
   };
+  /** 런타임 durable 메모리(큐레이터 DB) — memory.md 없이도 타임라인/진화 후보를 채우는 실측 소스. */
+  memoryEntries: AgentMemoryEntryUi[];
   onSaveMemory: (updater: (prev: any) => any) => Promise<void>;
   promptContent: string;
   promptDraft: string;
@@ -2119,6 +2181,7 @@ function AgentDetailView({
   onTabChange,
   onBackToOverview,
   memoryParsed,
+  memoryEntries,
   onSaveMemory,
   promptContent,
   promptDraft,
@@ -2183,8 +2246,49 @@ function AgentDetailView({
     : "";
   const hasPendingEvolution = learnedRules.length > 0;
   const evolutionDiff = { old: promptContent, new: promptContent + evolutionAppendix };
+
+  // 런타임 학습(자동 수집) — 큐레이터 DB durable 메모리 중 아직 프롬프트에 반영되지 않은 진화 후보.
+  // 반영 여부는 trim 된 본문이 프롬프트에 그대로 포함되는지로 판정(아래 반영 액션이 본문을 그대로 append 하므로 자기 일관적).
+  const runtimeEvolutionCandidates = useMemo(
+    () =>
+      memoryEntries.filter((entry) => {
+        const body = entry.content.trim();
+        return (
+          EVOLUTION_CANDIDATE_KINDS.has((entry.kind || "").toLowerCase()) &&
+          (entry.confidence === "high" || entry.confidence === "medium") &&
+          body.length > 0 &&
+          !promptContent.includes(body)
+        );
+      }),
+    [memoryEntries, promptContent],
+  );
+  const [selectedRuntimeIds, setSelectedRuntimeIds] = useState<Record<string, boolean>>({});
+  const selectedRuntimeEntries = runtimeEvolutionCandidates.filter((e) => selectedRuntimeIds[e.id]);
+
+  // 선택한 DB 학습을 기존 evolutionAppendix 와 같은 방식(프롬프트 부록 append + onSaveEvolution)으로 반영.
+  const applyRuntimeEntries = async () => {
+    if (selectedRuntimeEntries.length === 0) return;
+    const appendix =
+      "\n\n## Runtime learnings (auto-collected)\n" +
+      selectedRuntimeEntries.map((e) => `- [${e.kind}] ${e.content.trim()}`).join("\n");
+    await onSaveEvolution(promptContent + appendix);
+    setSelectedRuntimeIds({});
+    setTimelineEvents((prev) => [
+      {
+        id: `timeline-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        title: locale === "ko" ? "런타임 학습 프롬프트 반영" : "Runtime learnings folded into prompt",
+        desc: locale === "ko"
+          ? `자동 수집된 학습 ${selectedRuntimeEntries.length}건을 시스템 프롬프트 부록으로 반영했습니다.`
+          : `Folded ${selectedRuntimeEntries.length} auto-collected learnings into the system prompt appendix.`,
+        type: "evolution",
+      },
+      ...prev,
+    ]);
+  };
+
   const observedTimelineEvents = useMemo(() => {
-    const derived: Array<{ id: string; timestamp: string; title: string; desc: string; type: "skill" | "sync" | "evolution" | "resolve" }> = [];
+    const derived: Array<{ id: string; timestamp: string; title: string; desc: string; type: "skill" | "sync" | "evolution" | "resolve"; kind?: string; confidence?: "high" | "medium" | "low" }> = [];
     if (agentFiles.length > 0) {
       derived.push({
         id: "observed-files",
@@ -2219,8 +2323,21 @@ function AgentDetailView({
         type: "sync",
       });
     }
-    return [...timelineEvents, ...derived];
-  }, [agentFiles.length, memoryParsed.decisions.length, memoryParsed.gotchas.length, memoryParsed.openQuestions.length, promptContent, timelineEvents, locale]);
+    // 런타임 durable 메모리(큐레이터 DB) → 실제 학습 타임라인 행(최신순). 파일 파생 이벤트와 나란히 합류.
+    const dbRows = [...memoryEntries]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .map((entry) => ({
+        id: `db-${entry.id}`,
+        timestamp: formatMemoryEntryTime(entry.createdAt, locale),
+        title: locale === "ko" ? "런타임 학습 수집" : "Runtime learning captured",
+        desc: entry.content,
+        type: memoryKindToTimelineType(entry.kind),
+        kind: entry.kind,
+        confidence: entry.confidence,
+      }));
+    const merged: typeof derived = [...timelineEvents, ...dbRows, ...derived];
+    return merged;
+  }, [agentFiles.length, memoryEntries, memoryParsed.decisions.length, memoryParsed.gotchas.length, memoryParsed.openQuestions.length, promptContent, timelineEvents, locale]);
 
   // 프롬프트 복사 핸들러
   const handleCopyPrompt = () => {
@@ -3137,7 +3254,10 @@ function AgentDetailView({
                       evolution: "var(--amber-deep)",
                       resolve: "var(--green-deep)"
                     };
-                    
+                    // DB 유래 행(kind 有)은 본문을 2줄로 접고 클릭 시 펼친다.
+                    const isDbEntry = Boolean(evt.kind);
+                    const expanded = !!expandedItems[evt.id];
+
                     return (
                       <div key={evt.id} style={{ position: "relative" }}>
                         {/* 타임라인 점 */}
@@ -3152,16 +3272,39 @@ function AgentDetailView({
                           border: `3px solid ${colorMap[evt.type]}`,
                           zIndex: 2
                         }} />
-                        
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2, flexWrap: "wrap" }}>
                           <span style={{ fontSize: 10, fontWeight: 700, color: "var(--muted-deep)", fontFamily: "var(--font-mono)" }}>
                             {evt.timestamp}
                           </span>
                           <span style={{ fontSize: 11.5, fontWeight: 700, color: colorMap[evt.type] }}>
                             {evt.title}
                           </span>
+                          {evt.kind && (
+                            <span style={{ fontSize: 9.5, padding: "1px 6px", borderRadius: 999, background: "var(--fill-1)", color: colorMap[evt.type], fontWeight: 700, fontFamily: "var(--font-mono)" }}>
+                              {evt.kind}
+                            </span>
+                          )}
+                          {evt.confidence && (
+                            <span style={{ fontSize: 9.5, padding: "1px 6px", borderRadius: 999, border: "1px solid var(--paper-edge)", color: memoryConfidenceColor(evt.confidence), fontWeight: 700 }}>
+                              {evt.confidence}
+                            </span>
+                          )}
                         </div>
-                        <p style={{ margin: 0, fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.4 }}>
+                        <p
+                          onClick={isDbEntry ? () => toggleItemExpand(evt.id) : undefined}
+                          title={isDbEntry ? (locale === "ko" ? "클릭하여 펼치기/접기" : "Click to expand/collapse") : undefined}
+                          style={{
+                            margin: 0,
+                            fontSize: 11.5,
+                            color: "var(--ink-soft)",
+                            lineHeight: 1.4,
+                            ...(isDbEntry ? { cursor: "pointer" } : {}),
+                            ...(isDbEntry && !expanded
+                              ? { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" as const, overflow: "hidden" }
+                              : {}),
+                          }}
+                        >
                           {evt.desc}
                         </p>
                       </div>
@@ -3309,17 +3452,81 @@ function AgentDetailView({
                   <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 4, background: "rgba(245,201,122,0.16)", color: "var(--amber-deep)", fontWeight: 700 }}>
                     {evolutionApproved
                       ? (locale === "ko" ? "적용 완료" : "Applied")
-                      : hasPendingEvolution
+                      : hasPendingEvolution || runtimeEvolutionCandidates.length > 0
                         ? (locale === "ko" ? "업그레이드 대기" : "Upgrade pending")
                         : (locale === "ko" ? "최신 상태" : "Up to date")}
                   </span>
                 </div>
 
-                {!hasPendingEvolution && !evolutionApproved && (
+                {!hasPendingEvolution && !evolutionApproved && runtimeEvolutionCandidates.length === 0 && (
                   <div style={{ fontSize: 12, color: "var(--muted-deep)", padding: "12px 4px", lineHeight: 1.6 }}>
-                    {locale === "ko"
-                      ? "메모리의 활성 규칙이 모두 시스템 프롬프트에 반영되어 있습니다. 메모리 탭에서 새 결정·주의 규칙이 학습되면 여기에 프롬프트 진화 제안이 나타납니다."
-                      : "All active memory rules are already reflected in the system prompt. When new decision or gotcha rules are learned in the Memory tab, a prompt evolution proposal will appear here."}
+                    {memoryEntries.length === 0 && memoryParsed.decisions.length + memoryParsed.gotchas.length === 0
+                      ? (locale === "ko"
+                          ? "아직 축적된 학습이 없습니다 — 에이전트가 작업을 수행하면 여기에 쌓입니다."
+                          : "No learnings accumulated yet — they will build up here as the agent performs work.")
+                      : (locale === "ko"
+                          ? "메모리의 활성 규칙이 모두 시스템 프롬프트에 반영되어 있습니다. 메모리 탭에서 새 결정·주의 규칙이 학습되면 여기에 프롬프트 진화 제안이 나타납니다."
+                          : "All active memory rules are already reflected in the system prompt. When new decision or gotcha rules are learned in the Memory tab, a prompt evolution proposal will appear here.")}
+                  </div>
+                )}
+
+                {/* 런타임 학습(자동 수집) — 큐레이터 DB에서 온 진화 후보. memory.md 가 비어도 이 목록이 채워진다. */}
+                {runtimeEvolutionCandidates.length > 0 && (
+                  <div style={{ marginBottom: hasPendingEvolution || evolutionApproved ? 14 : 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                      <strong style={{ fontSize: 12 }}>
+                        {locale === "ko" ? "런타임 학습(자동 수집)" : "Runtime learnings (auto-collected)"}
+                      </strong>
+                      <span style={{ fontSize: 10, padding: "1px 7px", borderRadius: 999, background: "var(--accent-soft)", color: "var(--accent)", fontWeight: 700 }}>
+                        {runtimeEvolutionCandidates.length}
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {runtimeEvolutionCandidates.map((entry) => (
+                        <label key={entry.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 10px", border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)", cursor: "pointer" }}>
+                          <input
+                            type="checkbox"
+                            checked={!!selectedRuntimeIds[entry.id]}
+                            onChange={() => setSelectedRuntimeIds((prev) => ({ ...prev, [entry.id]: !prev[entry.id] }))}
+                            style={{ marginTop: 2, flexShrink: 0 }}
+                          />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2, flexWrap: "wrap" }}>
+                              <span style={{ fontSize: 9.5, padding: "1px 6px", borderRadius: 999, background: "var(--fill-1)", color: "var(--accent)", fontWeight: 700, fontFamily: "var(--font-mono)" }}>
+                                {entry.kind}
+                              </span>
+                              <span style={{ fontSize: 9.5, padding: "1px 6px", borderRadius: 999, border: "1px solid var(--paper-edge)", color: memoryConfidenceColor(entry.confidence), fontWeight: 700 }}>
+                                {entry.confidence}
+                              </span>
+                              <span style={{ fontSize: 10, color: "var(--muted-deep)", fontFamily: "var(--font-mono)" }}>
+                                {formatMemoryEntryTime(entry.createdAt, locale)}
+                              </span>
+                            </div>
+                            <div style={{ fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.45 }}>{entry.content}</div>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
+                      <button
+                        onClick={() => void applyRuntimeEntries()}
+                        disabled={selectedRuntimeEntries.length === 0 || saving}
+                        style={{
+                          padding: "7px 12px",
+                          background: selectedRuntimeEntries.length === 0 || saving ? "var(--paper-2)" : "var(--accent)",
+                          color: selectedRuntimeEntries.length === 0 || saving ? "var(--muted-deep)" : "#fff",
+                          border: "1px solid var(--paper-edge)",
+                          borderRadius: 6,
+                          fontSize: 11.5,
+                          fontWeight: 650,
+                          cursor: selectedRuntimeEntries.length === 0 || saving ? "default" : "pointer",
+                        }}
+                      >
+                        {locale === "ko"
+                          ? `선택한 학습 프롬프트에 반영 (${selectedRuntimeEntries.length})`
+                          : `Fold selected learnings into prompt (${selectedRuntimeEntries.length})`}
+                      </button>
+                    </div>
                   </div>
                 )}
 
