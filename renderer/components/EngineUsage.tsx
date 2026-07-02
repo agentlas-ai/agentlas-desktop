@@ -228,7 +228,8 @@ export function EngineUsage() {
       setBusy(null);
       setBusyStage(null);
     }
-    if (opened) void watchRecovery(e.id); // 터미널 로그인 완료를 감지해 자동 갱신
+    // 터미널 로그인 완료를 감지해 자동 갱신 — usage 어댑터가 있는 엔진만(그 외엔 성공 신호가 없어 헛폴링).
+    if (opened && ["claude-code", "codex", "gemini"].includes(e.id)) void watchRecovery(e.id);
   }
 
   function busyLabel(): string {
