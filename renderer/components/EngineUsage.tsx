@@ -217,11 +217,36 @@ export function EngineUsage() {
                 <span className="sr-only">{e.logoAlt}</span>
                 <div className="dashboard-engine-copy">
                   <div>{e.label}</div>
-                  <div>
+                  <div style={connected && u?.status === "error" ? { color: "var(--red-deep, #c0392b)" } : undefined}>
                     {connected ? statusText(e, u) : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected") : e.auth === "apikey" ? (ko ? "API 키 · 미연결" : "API key · not connected") : ko ? "미설치" : "not installed"}
                   </div>
                 </div>
-                {connected ? (
+                {connected && u?.status === "error" ? (
+                  // 조회 실패 — 막다른 골목 금지: 재시도 + (CLI) 재로그인 액션을 준다.
+                  <span style={{ display: "inline-flex", gap: 6, flexShrink: 0 }}>
+                    <button
+                      onClick={() => {
+                        void loadConnections();
+                        void loadUsage(true);
+                      }}
+                      disabled={busy === e.id}
+                      className="titlebar-nodrag"
+                      title={ko ? "사용량 조회 다시 시도" : "Retry usage fetch"}
+                    >
+                      {ko ? "다시 시도" : "Retry"}
+                    </button>
+                    {e.auth === "cli" && (
+                      <button
+                        onClick={() => void connectCli(e)}
+                        disabled={busy === e.id}
+                        className="titlebar-nodrag"
+                        title={ko ? "CLI 재로그인" : "Re-login CLI"}
+                      >
+                        {busy === e.id ? (ko ? "연결 중…" : "Connecting…") : ko ? "재로그인" : "Re-login"}
+                      </button>
+                    )}
+                  </span>
+                ) : connected ? (
                   <span className="dashboard-engine-check" aria-label={ko ? "연결됨" : "connected"}>✓</span>
                 ) : (
                   <button

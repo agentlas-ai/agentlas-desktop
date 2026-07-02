@@ -31,6 +31,18 @@ export function QuestBoard() {
   const [celebrate, setCelebrate] = useState<string | null>(null);
   const [signingIn, setSigningIn] = useState(false);
   const celebrateTimer = useRef<number | null>(null);
+  // 캐러셀 — 퀘스트를 한 장씩(좌측 위 고정 높이), 좌우 스와이프/화살표로 넘긴다.
+  // 세로 나열은 조직도를 화면 밖으로 밀어낸다(2026-07-02 사용자 피드백).
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const [slide, setSlide] = useState(0);
+  const initialSlideDone = useRef(false);
+
+  const goSlide = useCallback((i: number) => {
+    const el = trackRef.current;
+    if (!el) return;
+    const clamped = Math.max(0, Math.min(i, Math.max(0, el.children.length - 1)));
+    el.scrollTo({ left: clamped * el.clientWidth, behavior: "smooth" });
+  }, []);
 
   const load = useCallback(async () => {
     const api = ipc();
@@ -87,6 +99,20 @@ export function QuestBoard() {
     void load();
     void loadEvidence();
   }, [load, loadEvidence]);
+
+  // 최초 로드 시 첫 미수령 퀘스트로 스냅(수령 완료만 앞에 쌓여 있으면 스와이프 강요하지 않기).
+  useEffect(() => {
+    if (initialSlideDone.current || quests.length === 0) return;
+    initialSlideDone.current = true;
+    const firstOpen = quests.findIndex((q) => !q.claimed);
+    if (firstOpen > 0) {
+      const el = trackRef.current;
+      if (el) {
+        el.scrollTo({ left: firstOpen * el.clientWidth });
+        setSlide(firstOpen);
+      }
+    }
+  }, [quests]);
 
   useEffect(() => {
     return () => {
@@ -220,6 +246,33 @@ export function QuestBoard() {
             {ko ? `${claimedCount}/${total} 완료` : `${claimedCount}/${total} done`}
           </span>
         )}
+        {authenticated && total > 1 && (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+            <button
+              type="button"
+              onClick={() => goSlide(slide - 1)}
+              disabled={slide <= 0}
+              aria-label={ko ? "이전 퀘스트" : "Previous quest"}
+              style={navBtnStyle(slide <= 0)}
+              className="titlebar-nodrag"
+            >
+              ‹
+            </button>
+            <span style={{ fontSize: 10.5, fontVariantNumeric: "tabular-nums", color: "var(--dash-muted)", minWidth: 30, textAlign: "center" }}>
+              {slide + 1}/{total}
+            </span>
+            <button
+              type="button"
+              onClick={() => goSlide(slide + 1)}
+              disabled={slide >= total - 1}
+              aria-label={ko ? "다음 퀘스트" : "Next quest"}
+              style={navBtnStyle(slide >= total - 1)}
+              className="titlebar-nodrag"
+            >
+              ›
+            </button>
+          </span>
+        )}
       </div>
 
       {celebrate && (
@@ -251,21 +304,53 @@ export function QuestBoard() {
           {ko ? "표시할 퀘스트가 없어요." : "No quests to show."}
         </div>
       ) : (
-        quests.map((q, i) => (
-          <QuestRow
-            key={q.id}
-            quest={q}
-            ko={ko}
-            first={i === 0}
-            evidence={evidence[q.id]}
-            claiming={claimingId === q.id}
-            notice={notice?.id === q.id ? notice.text : null}
-            onClaim={() => void onClaim(q)}
-          />
-        ))
+        <div
+          ref={trackRef}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            if (el.clientWidth > 0) setSlide(Math.round(el.scrollLeft / el.clientWidth));
+          }}
+          style={{
+            display: "flex",
+            overflowX: "auto",
+            scrollSnapType: "x mandatory",
+            scrollbarWidth: "none",
+            overscrollBehaviorX: "contain",
+          }}
+        >
+          {quests.map((q) => (
+            <div key={q.id} style={{ flex: "0 0 100%", minWidth: 0, scrollSnapAlign: "start", scrollSnapStop: "always" }}>
+              <QuestRow
+                quest={q}
+                ko={ko}
+                first
+                evidence={evidence[q.id]}
+                claiming={claimingId === q.id}
+                notice={notice?.id === q.id ? notice.text : null}
+                onClaim={() => void onClaim(q)}
+              />
+            </div>
+          ))}
+        </div>
       )}
     </section>
   );
+}
+
+function navBtnStyle(disabled: boolean): React.CSSProperties {
+  return {
+    width: 20,
+    height: 20,
+    lineHeight: "18px",
+    borderRadius: 6,
+    border: `1px solid ${CARD_EDGE}`,
+    background: "rgba(255,255,255,0.65)",
+    color: disabled ? "var(--dash-line)" : "var(--dash-ink-soft)",
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: disabled ? "default" : "pointer",
+    padding: 0,
+  };
 }
 
 function QuestRow({
@@ -414,7 +499,7 @@ function UnauthedBody({
       </div>
       {quests.length > 0 && (
         <div style={{ display: "grid", gap: 4, marginTop: 2 }}>
-          {quests.map((q) => (
+          {quests.slice(0, 3).map((q) => (
             <div key={q.id} style={{ display: "flex", alignItems: "baseline", gap: 8, minWidth: 0 }}>
               <span
                 style={{
@@ -434,6 +519,11 @@ function UnauthedBody({
               </span>
             </div>
           ))}
+          {quests.length > 3 && (
+            <div style={{ fontSize: 10.5, color: "var(--dash-muted)" }}>
+              {ko ? `외 ${quests.length - 3}개 퀘스트` : `+${quests.length - 3} more quests`}
+            </div>
+          )}
         </div>
       )}
     </div>
