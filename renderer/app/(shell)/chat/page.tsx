@@ -26,6 +26,7 @@ import type {
 import type { Recommendation, RecExecChoice, RecRouterAgent, RecStage } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { extractQuestions } from "@/lib/ask-question";
+import { dropChatViewSnapshot, readChatViewSnapshot, saveChatViewSnapshot } from "@/lib/chat-view-cache";
 import { ChatInput } from "@/components/ChatInput";
 import type { SurfaceStatePatchHandler, WorkbenchSurface } from "@/components/WorkbenchPanel";
 import type { LiveAgent, NetTimelineItem } from "@/components/AgentNetworkPanel";
@@ -953,14 +954,35 @@ function ChatPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [closeRightPanel, rightPanelOpen]);
 
+  // 뷰 상태 미러 — 채팅 전환 effect가 이전 채팅의 마지막 렌더 상태를 스냅샷할 수 있게
+  // 매 렌더마다 갱신한다(전환 시점에 messages state는 아직 이전 채팅 것이다).
+  // 반드시 아래 전환-리셋 effect보다 먼저 선언되어야 한다(같은 커밋에서 먼저 실행).
+  const viewSnapshotRef = useRef<{ messages: StreamMessage[]; liveAgents: Record<string, LiveAgent>; netTimeline: NetTimelineItem[] }>({
+    messages: [],
+    liveAgents: {},
+    netTimeline: [],
+  });
+  useEffect(() => {
+    viewSnapshotRef.current = { messages, liveAgents, netTimeline };
+  });
+  const prevChatIdRef = useRef<string | null>(null);
+
   // 채팅 전환 시 이전 채팅의 진행 상태(busy/정지버튼/스트림)가 새 뷰로 새지 않게 리셋.
   // 메타데이터 effect는 번역/콜백 변화에도 다시 돌 수 있으므로, 전환 초기화는 chatId에만 묶는다.
   useEffect(() => {
     if (!chatId) return;
+    // 이전 채팅 뷰를 캐시에 저장 — 되돌아올 때 히스토리 로드를 기다리지 않고 즉시 복원.
+    const prevChatId = prevChatIdRef.current;
+    prevChatIdRef.current = chatId;
+    if (prevChatId && prevChatId !== chatId) {
+      saveChatViewSnapshot(prevChatId, viewSnapshotRef.current);
+    }
     // 이전 채팅의 메시지/스트림 드래프트를 즉시 비운다 — 안 그러면 이전 채팅이 실행 중일 때
     // (busy 드래프트가 남아) 메타데이터 로드의 hasLiveDraft 가드가 새 채팅에도 옛 세션을 계속
-    // 보여준다(다른 챗 눌러도 지금 세션이 뜨는 버그). 새 히스토리는 곧바로 이어서 로드된다.
-    setMessages([]);
+    // 보여준다(다른 챗 눌러도 지금 세션이 뜨는 버그). 캐시 히트면 스냅샷을 즉시 그려 빈 화면
+    // 플래시를 없애고, 히스토리 로드가 곧바로 이어서 최신본으로 교체한다(라이브 드래프트 없음).
+    const restored = readChatViewSnapshot(chatId);
+    setMessages(restored?.messages ?? []);
     setBusy(false);
     setCancelPending(false);
     runIdRef.current = null;
@@ -974,8 +996,8 @@ function ChatPage() {
     setMediaPreview(null);
     setRightPanelOpen(false);
     setRightPanelTab("agent");
-    setLiveAgents({});
-    setNetTimeline([]);
+    setLiveAgents(restored?.liveAgents ?? {});
+    setNetTimeline(restored?.netTimeline ?? []);
     setScaffoldedApps({});
     setScaffoldedTools({});
     setInstalledPlugins([]);
@@ -1870,6 +1892,7 @@ function ChatPage() {
       if (cmd === "/clear") {
         void api.invoke.clearHistory(chat.id).then(() => {
           setMessages([]);
+          dropChatViewSnapshot(chat.id);
           window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chat.id } }));
         });
       } else if (cmd === "/new") {
@@ -2012,6 +2035,7 @@ function ChatPage() {
     const removedId = chat.id;
     setChat(null);
     setMessages([]);
+    dropChatViewSnapshot(removedId);
     window.dispatchEvent(new CustomEvent("agentlas:chat-removed", { detail: { id: removedId } }));
     await api.chats.remove(chat.id);
     router.replace("/");

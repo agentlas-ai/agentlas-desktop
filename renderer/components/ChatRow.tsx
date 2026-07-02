@@ -5,6 +5,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
+import { dropChatViewSnapshot } from "@/lib/chat-view-cache";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type { Chat, InstalledAgent } from "@/lib/types";
 import { IconMoreHorizontal } from "./Icon";
@@ -84,6 +85,7 @@ export const ChatRow = memo(function ChatRow({
     if (!api) return;
     setMenuOpen(false);
     if (!confirm(t("chat.confirm_delete"))) return;
+    dropChatViewSnapshot(chat.id);
     window.dispatchEvent(new CustomEvent("agentlas:chat-removed", { detail: { id: chat.id } }));
     await api.chats.remove(chat.id);
     onChanged();
