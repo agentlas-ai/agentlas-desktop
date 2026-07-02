@@ -106,7 +106,7 @@ export default function TrexGalleryPage() {
 
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>⑥ Style DNA — 6개 디자인 유파 × 같은 콘텐츠(표지·목차·지표·구조·핵심·클로징)</h2>
       {STYLE_IDS.map((sid) => (
-        <Deck key={sid} label={`style=${sid} (${STYLES[sid].nameKo})  ·  ${STYLES[sid].hintKo}`} content={FULL} mode="editorial" styleId={sid} only={[0, 1, 2, 4, 6, 7]} />
+        <Deck key={sid} label={`style=${sid} (${STYLES[sid].nameKo})  ·  ${STYLES[sid].hintKo}`} content={FULL} mode="editorial" styleId={sid} only={[0, 1, 2, 4, 5, 7]} />
       ))}
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>⑦ Style DNA × 방향 — 세로/정사각 회귀</h2>
       <Deck label="swiss · story 9:16" content={FULL} mode="editorial" styleId="swiss" formatId="story" only={[0, 2, 4, 7]} />

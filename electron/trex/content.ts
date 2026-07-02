@@ -33,7 +33,8 @@ function buildPrompt(topic: string, count: number, mode?: string): string {
   return [
     "You are an expert presentation content designer. Output ONLY valid minified JSON — no markdown, no code fences, no prose before or after.",
     `TOPIC: ${topic}`,
-    'SCHEMA: {"title":str,"subtitle":str,"mode":"cinematic|editorial|diagrammatic|hybrid","styleId":"swiss|bauhaus|didot|vignelli|brutal|hara","slides":[ {"role":"agenda","title":str,"items":[str],"note":str,"img":str} | {"role":"metrics","title":str,"kpis":[{"value":str,"label":str}],"note":str,"img":str} | {"role":"comparison","title":str,"bars":[{"label":str,"value":int}],"note":str,"img":str} | {"role":"structure","title":str,"cards":[{"label":str,"text":str}],"note":str,"img":str} | {"role":"process","title":str,"steps":[{"label":str,"text":str}],"note":str,"img":str} | {"role":"highlight","title":str,"stat":{"value":str,"label":str},"text":str,"img":str} | {"role":"statement","text":str,"note":str,"img":str} ]}',
+    'SCHEMA: {"title":str,"subtitle":str,"mode":"cinematic|editorial|diagrammatic|hybrid","styleId":"swiss|bauhaus|didot|vignelli|brutal|hara","slides":[ {"role":"agenda","title":str,"items":[str],"note":str,"img":str} | {"role":"metrics","layout":"row|bento|asym","title":str,"kpis":[{"value":str,"label":str}],"note":str,"img":str} | {"role":"comparison","layout":"bars|asym","title":str,"bars":[{"label":str,"value":int}],"note":str,"img":str} | {"role":"structure","layout":"columns|bento|split|zigzag","title":str,"cards":[{"label":str,"text":str}],"note":str,"img":str} | {"role":"process","layout":"timeline|cards","title":str,"steps":[{"label":str,"text":str}],"note":str,"img":str} | {"role":"highlight","title":str,"stat":{"value":str,"label":str},"text":str,"img":str} | {"role":"statement","text":str,"note":str,"img":str} ]}',
+    '- "layout" = page architecture. VARY it — never repeat the same layout on consecutive slides: bento(hero cell + small cells, dashboard feel), split(text left + image right half), zigzag(image/text alternating rows), asym(30% hero number + 70% detail), timeline(horizontal roadmap line).',
     "RULES:",
     "- Write in the SAME language as the topic.",
     '- "styleId" = design school (art direction): swiss(Müller-Brockmann grid+Helvetica — tech/pitch/strategy), bauhaus(primary-color geometry — creative/education/design), didot(Vogue serif+ivory — fashion/luxury/culture), vignelli(bold bands+hierarchy — reports/finance/ops), brutal(raw borders+mono — gaming/street/hackathon), hara(emptiness+whitespace — minimal/philosophy/wellness). Pick what a top art director would choose for this topic.',
@@ -45,7 +46,7 @@ function buildPrompt(topic: string, count: number, mode?: string): string {
     '- cards/steps "text": 2 short sentences each (what it is + why it matters).',
     '- "img" (every slide) = a concrete photographable scene for an accompanying image, in English, no text/letters/numbers in the scene (e.g. "a delivery robot crossing a rainy Seoul crosswalk at dusk").',
     `- ${modeLine}`,
-    "- Titles under 40 chars CJK / 10 words. KPI labels under 20 chars.",
+    "- LINE RULES (typography): titles ≤ 24 chars CJK / 7 words (must fit 1 line, 2 max). KPI labels ≤ 18 chars. Never phrase a sentence so its last line would be a single dangling word — rebalance the wording (no orphans/widows).",
   ].join("\n");
 }
 

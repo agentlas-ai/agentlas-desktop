@@ -67,47 +67,64 @@ export interface StyleDna {
   /** 유파 사진 아트디렉션 — 이미지 생성 프롬프트에 접미되는 룩 규정(고흐 화풍의 사진 버전). */
   photoStyle: string;
   /**
-   * 타이포그래피 스케일 비율(typescale.com의 modular scale) — 폰트 크기를 감이 아니라
-   * base × ratio^n 의 수학적 비례로 만든다. 1.333=perfect fourth, 1.414=augmented fourth,
-   * 1.5=perfect fifth. 유파의 성격(조용함↔드라마)에 맞는 비율을 쓴다.
+   * 카드 처리 공식 — "테두리 대신 면(fill) 또는 부드러운 그림자(shadow)".
+   * border는 브루탈리즘처럼 보더 자체가 조형 언어인 유파만 쓴다.
    */
-  typeRatio: number;
+  cardStyle: "fill" | "shadow" | "border";
+  /**
+   * 커버 사진 공식 — panel(하프앤하프: 엣지-투-엣지 분할), bleed(풀블리드+스크림+밝은 글자),
+   * plate(중앙 플레이트, 소프트 엣지 페이드).
+   */
+  coverPhoto: "panel" | "bleed" | "plate";
+  /**
+   * 인포그래픽 도형 패널 룩 — 카드 배경으로 쓸 "디자인된 빈 패널" 이미지의 생성 규정.
+   * 중앙은 반드시 비워(텍스트 안전영역) 텍스트는 HTML로만 얹는다(굽지 않기 원칙).
+   */
+  graphicStyle: string;
 }
 
-/** modular scale의 이름 붙은 단계(cqw) — 모든 빌더가 이 단계만 쓴다(매직넘버 금지). */
+/**
+ * 타이포그래피 스케일(사용자 스펙 2026-07-02) — 비율 1.2(minor third) 고정 사다리.
+ * A4 기준 실측: h1 35.84pt · h2 29.86 · h3 24.89 · h4 20.74 · h5 17.28 · 주석 11pt.
+ * 역할 매핑: h1=표지 제목+본문 헤드라인 / h2=표지·상단 서브 헤드라인 / h3=박스·컨텐츠 제목 /
+ * h4=문단(리스트 행) 제목 / h5=박스 안 본문 / note=주석(킥커·푸터·캡션).
+ * 페이지 크기 연동: pt값을 캔버스 폭 기준 cqw로 환산 — A4 세로(595pt)에선 스펙 pt와 일치하고,
+ * 16:9(표준 960pt 폭)에선 같은 비례로 축소된다.
+ */
 export interface TypeScaleSteps {
-  /** 킥커·푸터·캡션 — s(-1) */
-  caption: number;
-  /** 본문·부제·인사이트 — base s(0) */
-  body: number;
-  /** 카드 라벨·강조 본문 — s(1) */
-  label: number;
-  /** 아젠다 행 제목·서브섹션 — s(2) */
+  /** 주석 — 킥커·푸터·pill·캡션(11pt급) */
+  note: number;
+  /** 본문 — 박스 안의 글·부제·인사이트(17.28pt급) */
+  h5: number;
+  /** 문단 제목 — 리스트 행 제목(20.74pt급) */
+  h4: number;
+  /** 컨텐츠(박스) 제목 — 카드 라벨(24.89pt급) */
+  h3: number;
+  /** 서브 헤드라인 — 표지 부제(29.86pt급) */
   h2: number;
-  /** 섹션(본문 슬라이드) 제목 — s(4), 슬라이드 실용 범위로 클램프 */
+  /** 헤드라인 — 표지 제목·본문 페이지 제목(35.84pt급) */
   h1: number;
-  /** 커버·스테이트먼트 제목 — s(5) 클램프 */
+  /** 표지/스테이트먼트 제목 — 스펙상 h1과 동일(레거시만 별도 값) */
   display: number;
-  /** KPI 히어로·포스터 커버 — s(5)×1.2 클램프 */
-  jumbo: number;
+  /** KPI 숫자 — 텍스트 위계 밖(데이터 표시), h1에서 두 단계 위(×1.44) */
+  kpi: number;
 }
 
-const TYPE_BASE = 1.4; // cqw — 본문 기준 크기(16:9에서 ≈ 26px @1920)
-
-/** dna.typeRatio → 이름 붙은 스케일 단계. 상한/하한은 16:9 슬라이드의 실용 범위. */
-export function typeScale(dna: StyleDna): TypeScaleSteps {
-  const r = dna.typeRatio;
-  const s = (n: number) => TYPE_BASE * Math.pow(r, n);
-  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
-  return {
-    caption: Math.max(0.95, s(-1)),
-    body: TYPE_BASE,
-    label: s(1),
-    h2: s(2),
-    h1: clamp(s(4), 3.8, 5.6),
-    display: clamp(s(5), 5.6, 8.6),
-    jumbo: clamp(s(5) * 1.2, 6.8, 10.5),
-  };
+/**
+ * 페이지 비율 연동 앵커 — h5 = 2.4 × √(높이/너비) cqw. 글자의 물리 크기를 페이지의
+ * 기하평균(√(w·h))에 비례시키는 연속식이라 어떤 판형이든 "비율대로" 스케일된다:
+ * 16:9 → 1.80(=17.28pt/960pt) · A4 세로 → 2.85(스펙 pt 실측과 일치) · 9:16 → 3.20 · 1:1 → 2.40.
+ * 나머지 단계는 전부 ×1.2 사다리(minor third) — 감으로 정한 크기 금지.
+ */
+export function typeScale(aspect: number): TypeScaleSteps {
+  const a = Number.isFinite(aspect) && aspect > 0 ? aspect : 9 / 16;
+  const h5 = Math.max(1.5, Math.min(3.4, 2.4 * Math.sqrt(a)));
+  const r = 1.2;
+  const h4 = h5 * r;
+  const h3 = h4 * r;
+  const h2 = h3 * r;
+  const h1 = h2 * r;
+  return { note: h5 * (11 / 17.28), h5, h4, h3, h2, h1, display: h1, kpi: h1 * r * r };
 }
 
 const HELVETICA = '"Helvetica Neue", Helvetica, Arial, Pretendard, "Apple SD Gothic Neo", sans-serif';
@@ -148,7 +165,10 @@ export const STYLES: Record<StyleId, StyleDna> = {
     coverComp: "poster",
     photoStyle:
       "Bold minimalist studio photography in the Swiss International Style: a single strong subject, off-white seamless background, vermilion-red and black accents, hard geometric shadows, high contrast, poster-like composition",
-    typeRatio: 1.414,
+    cardStyle: "fill",
+    coverPhoto: "panel",
+    graphicStyle:
+      "Flat off-white rectangular panel in Swiss International Style: one thin vermilion-red geometric accent line along the top edge and a small red square in the top-left corner, hard-edged, print-poster finish, the entire center completely empty and plain",
   },
   // 바우하우스 — 원색 기하 도형, Futura, 대각의 에너지.
   bauhaus: {
@@ -180,7 +200,10 @@ export const STYLES: Record<StyleId, StyleDna> = {
     coverComp: "poster",
     photoStyle:
       "Bauhaus-inspired abstract composition photograph: primary colors (red, yellow, blue), geometric wooden shapes, matte paper texture, warm cream background, museum catalog lighting",
-    typeRatio: 1.333,
+    cardStyle: "fill",
+    coverPhoto: "panel",
+    graphicStyle:
+      "Warm cream rectangular panel in Bauhaus print style: a small cluster of primary-color shapes (red circle, yellow triangle, blue bar) in the top-right corner only, matte paper texture, the entire center completely empty and plain",
   },
   // 패션 에디토리얼 — Didot, 아이보리, 헤어라인, 중앙 정렬의 품격.
   didot: {
@@ -202,7 +225,8 @@ export const STYLES: Record<StyleId, StyleDna> = {
     accent: "#8E1F2C",
     ink: "#171412",
     closeInk: "#F4EFE6",
-    coverBg: { kind: "solid", color: "#FAF7F0" },
+    coverInk: "#F4EFE6",
+    coverBg: { kind: "solid", color: "#181412" },
     bodyBg: { kind: "solid", color: "#FAF7F0" },
     closeBg: { kind: "solid", color: "#151210" },
     coverDeco: "didot-frame",
@@ -211,7 +235,10 @@ export const STYLES: Record<StyleId, StyleDna> = {
     coverComp: "centered",
     photoStyle:
       "Black-and-white high-fashion editorial photography, Vogue magazine style: dramatic chiaroscuro lighting, elegant composition, film grain, timeless and luxurious mood",
-    typeRatio: 1.5,
+    cardStyle: "shadow",
+    coverPhoto: "bleed",
+    graphicStyle:
+      "Ivory rectangular panel in vintage fashion-magazine style: a delicate thin double-line frame hugging the edges with tiny corner ornaments, letterpress finish, the entire center completely empty and plain",
   },
   // 마시모 비녤리 — 두꺼운 밴드, Helvetica 볼드, 무자비한 정보 위계.
   vignelli: {
@@ -243,7 +270,10 @@ export const STYLES: Record<StyleId, StyleDna> = {
     coverComp: "banner",
     photoStyle:
       "Clean modernist architectural photography: strong horizontal and vertical lines, white and red palette, precise composition, generous sky, documentary clarity",
-    typeRatio: 1.414,
+    cardStyle: "fill",
+    coverPhoto: "panel",
+    graphicStyle:
+      "Clean white rectangular panel in modernist style: a single bold red horizontal band along the very top edge, nothing else, precise and flat, the entire center completely empty and plain",
   },
   // 브루탈리즘 — 원시 보더, 모노스페이스, 콘크리트와 세이프티 오렌지.
   brutal: {
@@ -275,7 +305,10 @@ export const STYLES: Record<StyleId, StyleDna> = {
     coverComp: "poster",
     photoStyle:
       "Raw brutalist photography: harsh direct flash, high contrast, concrete textures, industrial subject, gritty street energy, desaturated with one safety-orange accent",
-    typeRatio: 1.5,
+    cardStyle: "border",
+    coverPhoto: "panel",
+    graphicStyle:
+      "Raw light-concrete textured rectangular panel in brutalist print style: a thick black border around the edges, slightly rough grain, the entire center completely empty and plain",
   },
   // 하라 켄야 — 비움(Emptiness). 여백이 콘텐츠를 받치는 그릇이 된다.
   hara: {
@@ -305,7 +338,10 @@ export const STYLES: Record<StyleId, StyleDna> = {
     coverComp: "centered",
     photoStyle:
       "Japanese minimalist still-life photography in the style of MUJI campaigns: vast empty horizon, soft diffused light, muted neutral palette, quiet zen composition, single small subject",
-    typeRatio: 1.333,
+    cardStyle: "shadow",
+    coverPhoto: "plate",
+    graphicStyle:
+      "Soft warm-white washi paper textured rectangular panel, zen minimal: a single tiny vermilion dot near the top-left corner, extremely quiet, the entire center completely empty and plain",
   },
 };
 

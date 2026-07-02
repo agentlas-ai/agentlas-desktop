@@ -613,7 +613,10 @@ function packageOutputDir(slug: string): string {
 
 function hashPackage(files: PackagedTextFile[]): string {
   const h = createHash("sha256");
-  for (const file of [...files].sort((a, b) => a.path.localeCompare(b.path))) {
+  // 코드포인트 정렬 — localeCompare 금지. 서버(register/route.ts hashPackage)·Python
+  // upload.py와 바이트 동일해야 한다. localeCompare는 ICU/로케일 의존이라 대소문자 혼합
+  // 경로에서 순서가 갈려 package_hash_mismatch를 유발한다(BUG1과 동일 계열, 2026-07-02).
+  for (const file of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
     h.update(file.path);
     h.update("\0");
     h.update(file.sha256);

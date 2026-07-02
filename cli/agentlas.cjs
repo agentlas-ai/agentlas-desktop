@@ -1320,7 +1320,10 @@ function cloudPackageDir(slug) {
 }
 function cloudHashPackage(files) {
   const h = crypto.createHash("sha256");
-  for (const file of files) {
+  // 서버(register/route.ts hashPackage)와 바이트 동일해야 한다: 경로 코드포인트 순 정렬.
+  // 정렬 없이 스캔 순서로 해시하면 대소문자 혼합 경로 패키지(AGENTS.md + agents/…)가
+  // 전부 package_hash_mismatch로 거절된다(2026-07-02 근본 수정).
+  for (const file of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
     h.update(file.path);
     h.update("\0");
     h.update(file.sha256);

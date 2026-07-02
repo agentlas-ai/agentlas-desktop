@@ -296,6 +296,7 @@ function BlockView({
           ...(displayFont ? { fontFamily: displayFont } : null),
           color: b.accent ? accent : ink,
           wordBreak: "keep-all",
+          textWrap: "balance" as never, // 2줄일 때 대칭/역삼각 — 과부(orphan) 방지
           textAlign: b.align ?? "left",
         }}
       >
@@ -306,42 +307,60 @@ function BlockView({
     inner = b.inline ? (
       <div style={{ display: "flex", alignItems: "baseline", gap: cqw(1.8), wordBreak: "keep-all" }}>
         {b.label && <span style={{ fontSize: cqw((b.size ?? 1.7) * 1.02), fontWeight: 800, color: accent, fontVariantNumeric: "tabular-nums", flexShrink: 0, letterSpacing: "-.01em" }}>{b.label}</span>}
-        <span {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.7), lineHeight: 1.28, color: withAlpha(ink, 0.92), fontWeight: 600 }}>{b.text}</span>
+        <span {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.7), lineHeight: 1.28, color: withAlpha(ink, 0.92), fontWeight: 600, wordBreak: "keep-all", textWrap: "pretty" as never }}>{b.text}</span>
       </div>
     ) : (
       <div style={{ wordBreak: "keep-all", textAlign: b.align ?? "left" }}>
         {b.label && <div style={{ fontSize: cqw(1.5), fontWeight: 800, color: accent, marginBottom: cqw(0.5) }}>{b.label}</div>}
-        <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.5), lineHeight: 1.5, color: b.kind === "subtitle" ? muted : withAlpha(ink, 0.86), fontWeight: 500 }}>{b.text}</div>
+        <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.5), lineHeight: 1.5, color: b.kind === "subtitle" ? muted : withAlpha(ink, 0.86), fontWeight: 500, textWrap: "pretty" as never }}>{b.text}</div>
       </div>
     );
   else if (b.kind === "card")
+    // 카드 공식: "테두리 대신 면(fill) 또는 부드러운 그림자(shadow)" — border는 브루탈처럼
+    // 보더가 조형 언어인 유파만. 패딩은 글자 크기의 1.5배 이상(숨 쉴 공간).
     inner = (
       <div
         style={{
           height: b.h ? "100%" : undefined,
           boxSizing: "border-box",
-          background: withAlpha(ink, 0.04),
-          border: dna ? `${0.14 * dna.borderScale}cqw solid ${withAlpha(ink, dna.borderScale > 1.5 ? 0.85 : 0.22)}` : `1px solid ${withAlpha(ink, 0.11)}`,
+          ...(dna
+            ? dna.cardStyle === "border"
+              ? {
+                  background: withAlpha(ink, 0.04),
+                  border: `${0.14 * dna.borderScale}cqw solid ${withAlpha(ink, 0.85)}`,
+                  ...(dna.hardShadow ? { boxShadow: `0.55cqw 0.55cqw 0 ${withAlpha(ink, 0.9)}` } : null),
+                }
+              : dna.cardStyle === "shadow"
+                ? { background: withAlpha(ink, 0.035), boxShadow: `0 0.9cqw 2.8cqw ${withAlpha("#000000", 0.09)}` }
+                : { background: withAlpha(ink, 0.055) }
+            : { background: withAlpha(ink, 0.04), border: `1px solid ${withAlpha(ink, 0.11)}` }),
           borderRadius: dna ? cqw(dna.radius) : cqw(1.3),
-          ...(dna?.hardShadow ? { boxShadow: `0.55cqw 0.55cqw 0 ${withAlpha(ink, 0.9)}` } : null),
-          padding: `${cqw(1.9)} ${cqw(1.7)}`,
+          padding: `${cqw(2.2)} ${cqw(2.2)}`,
           display: "flex",
           flexDirection: "column",
           gap: cqw(1),
           wordBreak: "keep-all",
           overflow: "hidden",
+          position: "relative", // 인포그래픽 패널 배경(생성 이미지) 아래 깔기용
         }}
       >
+        {b.src ? (
+          // 생성된 "디자인된 빈 패널"을 카드 배경으로 — 텍스트는 패딩 안전영역 위 HTML 오버레이(굽지 않기).
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={b.src} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 0 }} />
+        ) : null}
+        <div style={{ position: "relative", zIndex: 1, display: "flex", flexDirection: "column", gap: cqw(1), height: "100%", minHeight: 0 }}>
         {b.value ? (
           <div style={{ display: "flex", alignItems: "center", gap: cqw(1), marginBottom: cqw(0.2) }}>
-            <span style={{ fontSize: cqw(2), fontWeight: 800, color: accent, letterSpacing: "-.02em", lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>{b.value}</span>
+            <span style={{ fontSize: cqw(dna ? (b.size ?? 1.45) * 1.7 : 2), fontWeight: 800, color: accent, letterSpacing: "-.02em", lineHeight: 1, fontVariantNumeric: "tabular-nums", ...(displayFont ? { fontFamily: displayFont } : null) }}>{b.value}</span>
             <span style={{ flex: 1, height: cqw(0.22), background: withAlpha(accent, 0.35), borderRadius: 2 }} />
           </div>
         ) : (
           <span style={{ width: cqw(3.4), height: cqw(0.44), background: accent, borderRadius: 999, marginBottom: cqw(0.4) }} />
         )}
-        {b.label && <div {...ed("label")} style={{ fontSize: cqw((b.size ?? 1.45) + 0.35), fontWeight: 800, color: ink, lineHeight: 1.22, letterSpacing: "-.01em" }}>{b.label}</div>}
-        <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.45), lineHeight: 1.5, color: withAlpha(ink, 0.72), fontWeight: 500 }}>{b.text}</div>
+        {b.label && <div {...ed("label")} style={{ fontSize: cqw(dna ? (b.size ?? 1.45) * 1.44 : (b.size ?? 1.45) + 0.35), fontWeight: 800, color: ink, lineHeight: 1.22, letterSpacing: "-.01em", textWrap: "balance" as never }}>{b.label}</div>}
+        <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.45), lineHeight: 1.5, color: withAlpha(ink, 0.72), fontWeight: 500, textWrap: "pretty" as never }}>{b.text}</div>
+        </div>
       </div>
     );
   else if (b.kind === "rule") inner = <div style={{ height: cqw(dna && dna.borderScale > 1 ? 0.32 * dna.borderScale : 0.32), width: "100%", background: b.accent ? accent : muted, borderRadius: dna && dna.radius === 0 ? 0 : 2 }} />;
@@ -365,36 +384,60 @@ function BlockView({
     inner = (
       <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: cqw(1.2) }}>
         <span {...ed("label")} style={{ fontSize: cqw(b.size ?? 1.3), fontWeight: 700, color: ink, minWidth: cqw(8) }}>{b.label}</span>
-        <span style={{ height: cqw(2.4), background: withAlpha(ink, 0.1), borderRadius: barR, overflow: "hidden" }}><span style={{ display: "block", height: "100%", width: `${v}%`, background: accent, borderRadius: barR }} /></span>
+        <span style={{ height: cqw(2.4), background: withAlpha(ink, 0.06), borderRadius: barR, overflow: "hidden" }}><span style={{ display: "block", height: "100%", width: `${v}%`, background: accent, borderRadius: barR }} /></span>
         <span style={{ fontSize: cqw(1.35), fontWeight: 800, color: accent, ...(monoFont ? { fontFamily: monoFont } : null) }}>{v}%</span>
       </div>
     );
-  } else if (b.kind === "image")
+  } else if (b.kind === "image") {
     // 생성 이미지 패널 — src 없으면 생성중 플레이스홀더(맥박 점). SVG 장식이 아니라 실제 사진이 원칙.
+    // 공식① 풀블리드: scrim(다크 오버레이 40~60%)으로 위에 얹는 밝은 타이포 가독성 확보.
+    // 공식③ 소프트 엣지: fade 마스크로 한쪽을 배경에 녹인다(사각 프레임 탈출).
+    const bleed = !!b.scrim; // 풀블리드는 테두리/라운드 없이 화면에 붙는다
+    const fadeMask =
+      b.fade === "bottom"
+        ? "linear-gradient(to bottom, black 62%, transparent 100%)"
+        : b.fade === "left"
+          ? "linear-gradient(to left, black 62%, transparent 100%)"
+          : b.fade === "right"
+            ? "linear-gradient(to right, black 62%, transparent 100%)"
+            : undefined;
     inner = (
       <div
         style={{
           width: "100%",
           height: "100%",
+          position: "relative",
           overflow: "hidden",
-          borderRadius: dna ? cqw(dna.radius) : cqw(1.3),
-          border: dna && dna.borderScale > 1.5 ? `${0.14 * dna.borderScale}cqw solid ${withAlpha(ink, 0.85)}` : `1px solid ${withAlpha(ink, 0.1)}`,
-          ...(dna?.hardShadow ? { boxShadow: `0.55cqw 0.55cqw 0 ${withAlpha(ink, 0.9)}` } : null),
-          background: withAlpha(ink, 0.05),
+          borderRadius: bleed ? 0 : dna ? cqw(dna.radius) : cqw(1.3),
+          ...(bleed || fadeMask
+            ? null
+            : {
+                border: dna && dna.borderScale > 1.5 ? `${0.14 * dna.borderScale}cqw solid ${withAlpha(ink, 0.85)}` : `1px solid ${withAlpha(ink, 0.1)}`,
+                ...(dna?.hardShadow ? { boxShadow: `0.55cqw 0.55cqw 0 ${withAlpha(ink, 0.9)}` } : null),
+              }),
+          background: bleed ? "transparent" : withAlpha(ink, 0.05),
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
+          ...(fadeMask ? { WebkitMaskImage: fadeMask, maskImage: fadeMask } : null),
         }}
       >
         {b.src ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={b.src} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+          <>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={b.src} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+            {b.scrim && <span style={{ position: "absolute", inset: 0, background: "linear-gradient(180deg, rgba(8,6,5,.62), rgba(8,6,5,.34) 55%, rgba(8,6,5,.58))" }} />}
+          </>
         ) : (
-          <span className="trex-pulse" style={{ width: cqw(1.6), height: cqw(1.6), borderRadius: "50%", background: accent, display: "inline-block" }} />
+          <>
+            {/* 셔머 스켈레톤(하네스 §9) — 생성 중임을 살아있는 그라데이션으로. */}
+            <span className="trex-shimmer" style={{ position: "absolute", inset: 0, background: `linear-gradient(100deg, transparent 30%, ${withAlpha(ink, 0.07)} 50%, transparent 70%)`, backgroundSize: "220% 100%" }} />
+            <span className="trex-pulse" style={{ width: cqw(1.6), height: cqw(1.6), borderRadius: "50%", background: accent, display: "inline-block", position: "relative" }} />
+          </>
         )}
       </div>
     );
-  else if (b.kind === "footer")
+  } else if (b.kind === "footer")
     inner = (
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: `1px solid ${withAlpha(ink, 0.14)}`, paddingTop: cqw(1.2), fontSize: cqw(b.size ?? 1.05), color: muted, ...(monoFont ? { fontFamily: monoFont } : null) }}>
         <span {...ed("text")}>{b.text}</span><span style={{ fontWeight: 700, opacity: 0.7 }}>{b.value}</span>
@@ -421,6 +464,8 @@ export function GlobalStyle() {
       @keyframes trexspin { to { transform: rotate(360deg); } }
       .trex-pulse { animation: trexpulse 1.2s ease-in-out infinite; }
       @keyframes trexpulse { 0%,100% { opacity: .35; transform: scale(.8); } 50% { opacity: 1; transform: scale(1.15); } }
+      .trex-shimmer { animation: trexshimmer 1.6s ease-in-out infinite; }
+      @keyframes trexshimmer { 0% { background-position: 120% 0; } 100% { background-position: -120% 0; } }
       @media print {
         body.trex-printing * { visibility: hidden; }
         body.trex-printing .trex-print-slide, body.trex-printing .trex-print-slide * { visibility: visible; }

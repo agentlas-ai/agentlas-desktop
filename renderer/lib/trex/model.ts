@@ -81,6 +81,10 @@ export interface TrexBlock {
   src?: string;
   /** image 블록: 이미지 생성용 장면 설명(스타일 접미는 생성 시점에 dna.photoStyle로). */
   prompt?: string;
+  /** image 블록: 풀블리드 위 텍스트 가독성용 다크 스크림 오버레이(공식 ①). */
+  scrim?: boolean;
+  /** image 블록: 소프트 엣지 — 한쪽을 배경으로 페이드아웃(공식 ③, 마스크 그라데이션). */
+  fade?: "bottom" | "left" | "right";
 }
 
 export type SlideBg =
@@ -251,19 +255,44 @@ function footer(idx: number, total: number, ink: string): TrexBlock {
 interface BuildOpts {
   dna?: StyleDna | null;
   images?: boolean;
+  /** 페이지 비율(높이/너비) — 폰트 앵커를 판형에 연속 연동("비율대로"). */
+  aspect?: number;
 }
 
-// 레거시(스타일 미지정) 덱용 스케일 — 기존 크기 관행을 modular scale 형태로 정리한 값.
-const LEGACY_SCALE: TypeScaleSteps = { caption: 1.2, body: 1.45, label: 1.8, h2: 2.2, h1: 4.2, display: 6.6, jumbo: 8.5 };
+// 레거시(스타일 미지정) 덱용 스케일 — 기존 크기 관행을 새 사다리 필드명에 맞춰 정리한 값.
+const LEGACY_SCALE: TypeScaleSteps = { note: 1.2, h5: 1.45, h4: 2.2, h3: 2.2, h2: 3.2, h1: 4.2, display: 6.6, kpi: 8.5 };
 
-/** 빌더가 쓰는 타입 스케일 — dna 있으면 유파 비율, 없으면 레거시 관행. */
-function scaleOf(opts?: BuildOpts): TypeScaleSteps {
-  return opts?.dna ? typeScale(opts.dna) : LEGACY_SCALE;
+/** 빌더가 쓰는 타입 스케일 — dna 있으면 스펙 1.2 사다리(페이지 비율 연동), 없으면 레거시 관행. */
+function scaleOf(opts: BuildOpts | undefined, o: Orient): TypeScaleSteps {
+  if (!opts?.dna) return LEGACY_SCALE;
+  const aspect = opts.aspect ?? (o === "portrait" ? 16 / 9 : o === "square" ? 1 : 9 / 16);
+  return typeScale(aspect);
+}
+
+/** 부제(서브 헤드라인) 길이 적응 — h2가 커서 긴 문장은 줄여 3줄 초과를 막는다(제목 2줄 규칙의 부제판). */
+function fitSubSize(text: string, base: number): number {
+  const n = (text || "").length;
+  if (n <= 30) return base;
+  if (n <= 48) return base * 0.85;
+  return base * 0.72;
+}
+
+/**
+ * 스펙 사다리용 제목 길이 적응 — 축소를 늦게 시작해 h1이 부제 h2보다 항상 크게 유지한다
+ * (기존 fitTitleSize 임계는 옛 대형 base용이라 새 h1을 부제 아래로 떨어뜨리는 위계 역전 유발).
+ * 2줄 대칭은 text-wrap:balance가 담당 — 여기선 3줄 방지만 맡는다.
+ */
+function fitTitleSpec(text: string, base: number): number {
+  const n = (text || "").length;
+  if (n <= 26) return base;
+  if (n <= 38) return base * 0.88;
+  if (n <= 52) return base * 0.78;
+  return base * 0.68;
 }
 
 /** 이미지 패널 블록 — 생성 전엔 빈 src(렌더러가 생성중 표시), prompt에 장면 설명. */
-function imageBlock(rect: { x: number; y: number; w: number; h: number }, prompt: string): TrexBlock {
-  return { id: bid(), kind: "image", ...rect, src: "", prompt };
+function imageBlock(rect: { x: number; y: number; w: number; h: number }, prompt: string, fx?: { scrim?: boolean; fade?: "bottom" | "left" | "right" }): TrexBlock {
+  return { id: bid(), kind: "image", ...rect, src: "", prompt, ...(fx?.scrim ? { scrim: true } : {}), ...(fx?.fade ? { fade: fx.fade } : {}) };
 }
 
 /**
@@ -273,11 +302,11 @@ function imageBlock(rect: { x: number; y: number; w: number; h: number }, prompt
 function insightBlocks(c: SlideContent, o: Orient, locale: Locale, wPct = 88, opts?: BuildOpts): TrexBlock[] {
   if (!c.note) return [];
   const port = o === "portrait";
-  const ts = scaleOf(opts);
+  const ts = scaleOf(opts, o);
   const y = port ? 80 : 76;
   return [
     { id: bid(), kind: "rule", x: 6, y, w: wPct, accent: false },
-    { id: bid(), kind: "body", x: 6, y: y + 2.6, w: wPct, size: port ? ts.body * 1.1 : ts.body, label: locale === "ko" ? "핵심" : "INSIGHT", text: c.note, inline: true },
+    { id: bid(), kind: "body", x: 6, y: y + 2.6, w: wPct, size: ts.h5, label: locale === "ko" ? "핵심" : "INSIGHT", text: c.note, inline: true },
   ];
 }
 
@@ -314,6 +343,11 @@ export interface SlideContent {
   note?: string;
   /** 동반 사진의 장면 설명(LLM 작성, 텍스트 없는 이미지). */
   img?: string;
+  /**
+   * 레이아웃 아키타입(역할별 허용값) — 미지정이면 덱 안에서 자동 로테이션(연속 동일 금지).
+   * structure: columns|bento|split|zigzag · metrics: row|bento|asym · process: timeline|cards · comparison: bars|asym
+   */
+  layout?: string;
 }
 export interface DeckContent {
   title: string;
@@ -334,7 +368,7 @@ function coverSlide(theme: ModeTheme, total: number, o: Orient, title: string, s
   const sub = subtitle || (locale === "ko" ? "핵심을 한 줄로 요약하세요." : "Summarize the key idea in one line.");
   const comp = dna?.coverComp ?? "classic";
   const withImg = !!dna && opts?.images !== false;
-  const ts = scaleOf(opts);
+  const ts = scaleOf(opts, o);
   const coverPrompt = (coverImg || "").trim() || `A striking hero visual for a presentation titled "${deckTitle || title}"`;
   // Z-패턴 우상단 앵커 — 좌상단 킥커(로고 위치)와 짝을 이루는 메타(날짜).
   const meta = new Date().toLocaleDateString(locale === "ko" ? "ko-KR" : "en-US", { year: "numeric", month: "short" });
@@ -343,50 +377,63 @@ function coverSlide(theme: ModeTheme, total: number, o: Orient, title: string, s
   if (comp === "poster") {
     // 유파 포스터 구도(Z-패턴): 좌상 킥커 → 우상 메타 → 좌하 거대 제목 → 우하 페이지/CTA(푸터).
     const tw = withImg && !port ? 52 : port ? 88 : sq ? 86 : 82;
-    const base = port ? ts.jumbo * 1.05 : sq ? ts.jumbo * 0.95 : withImg ? ts.display : ts.jumbo * 0.85;
-    const tSize = fitTitleSize(title, base);
+    const base = ts.display; // 스펙: 맨 앞장 제목 = h1(본문 헤드라인과 동일 단계)
+    const tSize = (dna ? fitTitleSpec : fitTitleSize)(title, base);
     blocks = [
       ...(withImg
         ? [imageBlock(port ? { x: 0, y: 0, w: 100, h: 34 } : { x: 60, y: 0, w: 40, h: 100 }, coverPrompt)]
         : []),
-      { id: bid(), kind: "kicker", x: 6, y: port ? 38 : 8, w: 50, size: ts.caption, text: "T-REX · STUDIO" },
-      ...(!port && !withImg ? [{ id: bid(), kind: "kicker" as const, x: 54, y: 8, w: 40, size: ts.caption, text: meta, align: "right" as const }] : []),
-      { id: bid(), kind: "subtitle", x: 6, y: port ? 44 : 36, w: withImg && !port ? 46 : port ? 80 : sq ? 62 : 46, size: ts.body * 1.1, text: sub },
+      { id: bid(), kind: "kicker", x: 6, y: port ? 38 : 8, w: 50, size: ts.note, text: "T-REX · STUDIO" },
+      ...(!port && !withImg ? [{ id: bid(), kind: "kicker" as const, x: 54, y: 8, w: 40, size: ts.note, text: meta, align: "right" as const }] : []),
+      { id: bid(), kind: "subtitle", x: 6, y: port ? 44 : 36, w: withImg && !port ? 46 : port ? 80 : sq ? 62 : 46, size: fitSubSize(sub, ts.h2), text: sub },
       { id: bid(), kind: "rule", x: 6, y: port ? 54 : 50, w: port ? 14 : 10, accent: true },
       { id: bid(), kind: "title", x: 6, y: port ? 58 : 54, w: tw, size: tSize, text: title, weight: dna?.titleWeight ?? 800 },
       footer(0, total, ink),
     ];
-  } else if (comp === "centered") {
-    // 중앙 정렬의 품격(디도/하라) — 킥커 · 플레이트 사진 · 제목 · 부제의 세로 리듬.
-    const base = port ? ts.display : sq ? ts.display * 0.86 : withImg ? ts.display * 0.8 : ts.display * 0.86;
-    const tSize = fitTitleSize(title, base);
+  } else if (comp === "centered" && withImg && dna?.coverPhoto === "bleed") {
+    // 공식① 풀블리드 — 사진이 화면 전체, 다크 스크림 위 밝은 타이포(보그 커버 문법).
+    // 이미지 도착 전에도 성립: coverBg가 다크 필드라 밝은 잉크가 항상 읽힌다.
+    const tSize = fitTitleSpec(title, ts.display);
     blocks = [
-      { id: bid(), kind: "kicker", x: 10, y: port ? 7 : 8, w: 80, size: ts.caption, text: "T-REX · STUDIO", align: "center" },
+      imageBlock({ x: 0, y: 0, w: 100, h: 100 }, coverPrompt, { scrim: true }),
+      { id: bid(), kind: "kicker", x: 10, y: port ? 7 : 8, w: 80, size: ts.note, text: "T-REX · STUDIO", align: "center" },
+      { id: bid(), kind: "title", x: 8, y: port ? 36 : 38, w: 84, size: tSize, text: title, weight: dna?.titleWeight ?? 600, align: "center" },
+      { id: bid(), kind: "rule", x: 46, y: port ? 62 : 66, w: 8, accent: true },
+      { id: bid(), kind: "subtitle", x: port ? 12 : 20, y: port ? 68 : 72, w: port ? 76 : 60, size: fitSubSize(sub, ts.h2), text: sub, align: "center" },
+      footer(0, total, ink),
+    ];
+  } else if (comp === "centered") {
+    // 중앙 정렬의 품격(하라 등) — 킥커 · 플레이트 사진(소프트 엣지 페이드) · 제목 · 부제.
+    const base = ts.display;
+    const tSize = (dna ? fitTitleSpec : fitTitleSize)(title, base);
+    const fade = dna?.coverPhoto === "plate" ? ("bottom" as const) : undefined;
+    blocks = [
+      { id: bid(), kind: "kicker", x: 10, y: port ? 7 : 8, w: 80, size: ts.note, text: "T-REX · STUDIO", align: "center" },
       ...(withImg
-        ? [imageBlock(port ? { x: 14, y: 13, w: 72, h: 30 } : { x: 31, y: 16, w: 38, h: 36 }, coverPrompt)]
+        ? [imageBlock(port ? { x: 14, y: 13, w: 72, h: 30 } : { x: 31, y: 16, w: 38, h: 36 }, coverPrompt, { fade })]
         : [{ id: bid(), kind: "rule" as const, x: 46, y: port ? 22 : 26, w: 8, accent: true }]),
       { id: bid(), kind: "title", x: 8, y: withImg ? (port ? 48 : 58) : port ? 34 : 36, w: 84, size: tSize, text: title, weight: dna?.titleWeight ?? 600, align: "center" },
-      { id: bid(), kind: "subtitle", x: port ? 12 : 20, y: withImg ? (port ? 72 : 80) : port ? 66 : 68, w: port ? 76 : 60, size: ts.body * 1.05, text: sub, align: "center" },
+      { id: bid(), kind: "subtitle", x: port ? 12 : 20, y: withImg ? (port ? 72 : 80) : port ? 66 : 68, w: port ? 76 : 60, size: fitSubSize(sub, ts.h2), text: sub, align: "center" },
       footer(0, total, ink),
     ];
   } else if (comp === "banner") {
     // 비녤리 밴드 구도(Z-패턴 변형) — 상단 잉크 밴드 아래 볼드 제목 + 우측 사진 패널.
-    const base = port ? ts.display : sq ? ts.display * 0.9 : withImg ? ts.display * 0.78 : ts.display * 0.84;
-    const tSize = fitTitleSize(title, base);
+    const base = ts.display;
+    const tSize = (dna ? fitTitleSpec : fitTitleSize)(title, base);
     blocks = [
       ...(withImg
         ? [imageBlock(port ? { x: 6, y: 44, w: 88, h: 34 } : { x: 60, y: 12, w: 34, h: 74 }, coverPrompt)]
         : []),
-      { id: bid(), kind: "kicker", x: 6, y: port ? 3.4 : 4.2, w: 70, size: ts.caption, text: "T-REX · STUDIO", accent: false },
-      ...(!port && !withImg ? [{ id: bid(), kind: "kicker" as const, x: 54, y: 4.2, w: 40, size: ts.caption, text: meta, align: "right" as const }] : []),
+      { id: bid(), kind: "kicker", x: 6, y: port ? 3.4 : 4.2, w: 70, size: ts.note, text: "T-REX · STUDIO", accent: false },
+      ...(!port && !withImg ? [{ id: bid(), kind: "kicker" as const, x: 54, y: 4.2, w: 40, size: ts.note, text: meta, align: "right" as const }] : []),
       { id: bid(), kind: "title", x: 6, y: port ? 14 : 22, w: withImg && !port ? 50 : port ? 88 : 84, size: tSize, text: title, weight: dna?.titleWeight ?? 800 },
       { id: bid(), kind: "rule", x: 6, y: port ? 40 : 60, w: port ? 20 : 14, accent: true },
-      { id: bid(), kind: "subtitle", x: 6, y: port ? 82 : 68, w: withImg && !port ? 48 : port ? 84 : 52, size: ts.body * 1.1, text: sub },
+      { id: bid(), kind: "subtitle", x: 6, y: port ? 82 : 68, w: withImg && !port ? 48 : port ? 84 : 52, size: fitSubSize(sub, ts.h2), text: sub },
       footer(0, total, ink),
     ];
   } else {
     const base = theme.mode === "hybrid" ? (port ? 9.5 : sq ? 7.2 : 6.6) : port ? 8.5 : sq ? 6.5 : 5.4;
-    const tSize = fitTitleSize(title, base);
+    const tSize = (dna ? fitTitleSpec : fitTitleSize)(title, base);
     blocks = [
       { id: bid(), kind: "kicker", x: 6, y: port ? 8 : 12, w: 70, size: port ? 1.7 : 1.4, text: "T-REX · STUDIO" },
       { id: bid(), kind: "rule", x: 6, y: port ? 42 : 40, w: port ? 12 : 9, accent: true },
@@ -406,10 +453,10 @@ function coverSlide(theme: ModeTheme, total: number, o: Orient, title: string, s
 function headerBlocks(theme: ModeTheme, idx: number, total: number, no: string, titleText: string, o: Orient, opts?: BuildOpts): TrexBlock[] {
   const port = o === "portrait";
   const sq = o === "square";
-  const ts = scaleOf(opts);
+  const ts = scaleOf(opts, o);
   return [
-    { id: bid(), kind: "pill", x: 6, y: 8, w: 30, size: ts.caption, text: no },
-    { id: bid(), kind: "title", x: 6, y: 16, w: port ? 88 : 84, size: fitTitleSize(titleText, port ? ts.h1 * 1.25 : sq ? ts.h1 * 1.05 : ts.h1), text: titleText, weight: 800 },
+    { id: bid(), kind: "pill", x: 6, y: 8, w: 30, size: ts.note, text: no },
+    { id: bid(), kind: "title", x: 6, y: 16, w: port ? 88 : 84, size: (opts?.dna ? fitTitleSpec : fitTitleSize)(titleText, ts.h1), text: titleText, weight: 800 },
     { id: bid(), kind: "rule", x: 6, y: port ? 32 : 36, w: port ? 9 : 6, accent: true },
     footer(idx, total, theme.ink),
   ];
@@ -417,7 +464,7 @@ function headerBlocks(theme: ModeTheme, idx: number, total: number, no: string, 
 
 function kpiSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "ko", opts?: BuildOpts): TrexSlide {
   const port = o === "portrait";
-  const ts = scaleOf(opts);
+  const ts = scaleOf(opts, o);
   // 개수 적응형(2~4). 3열 고정이면 2개는 왼쪽 쏠림·4개는 유실 → 열을 개수에 맞춰 분배.
   const defaults =
     locale === "ko"
@@ -429,24 +476,55 @@ function kpiSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent,
   // 60-30-10: 지표가 여럿일 땐 값을 잉크색으로 — 전부 액센트면 "주인공"이 사라진다.
   // 단독 지표(히어로)만 액센트를 허용한다. 액센트는 밑줄 바가 담당(10%).
   const hero = n === 1;
-  const kpis: TrexBlock[] = data.map((k, i) =>
-    port
-      ? { id: bid(), kind: "kpi" as const, x: 6, y: (n > 3 ? 34 : 38) + i * (n > 3 ? 11 : n < 3 ? 20 : 15), w: 88, size: fitKpiSize(k.value, Math.min(n > 3 ? 6.4 : 8, ts.jumbo)), value: k.value, label: k.label, accent: hero }
-      : { id: bid(), kind: "kpi" as const, x: 6 + i * (88 / n), y: 44, w: cw, size: fitKpiSize(k.value, Math.min(cw * (o === "square" ? 0.25 : 0.225), ts.jumbo)), value: k.value, label: k.label, accent: hero },
-  );
   const pillNo = locale === "ko" ? `${idx} · 한눈에` : `${idx} · At A Glance`;
   const title = c.title || (locale === "ko" ? "핵심 지표" : "Key Metrics");
+  const head = headerBlocks(theme, idx, total, pillNo, title, o, opts);
+  const layout = !port && opts?.dna ? c.layout || "row" : "row";
+  const hasNote = !!c.note;
+  const H = hasNote ? 30 : 40; // 콘텐츠 밴드 높이(y44~)
+
+  let kpis: TrexBlock[];
+  let noteInHero = false;
+  if (layout === "bento" && n === 3) {
+    // 벤토 그리드(지표 3개 전용) — 히어로 셀 + 우측 2행. 셀 최소높이(패딩+value+label≈17%h)
+    // 제약상 4개 이상은 row로 폴백. note는 히어로 셀 본문으로 흡수(인사이트 바 생략 = 무손실).
+    noteInHero = true;
+    const BH = 40;
+    const half = (BH - 3) / 2;
+    const cell = (k: KpiItem, r: { x: number; y: number; w: number; h: number }, big: boolean, text?: string): TrexBlock => ({
+      id: bid(), kind: "card" as const, ...r, size: big ? ts.h5 * 1.35 : ts.h5 * 0.95, value: k.value, label: k.label, text: text ?? "",
+    });
+    kpis = [
+      cell(data[0], { x: 6, y: 44, w: 43, h: BH }, true, c.note || ""),
+      cell(data[1], { x: 51, y: 44, w: 43, h: half }, false),
+      cell(data[2], { x: 51, y: 44 + half + 3, w: 43, h: half }, false),
+    ];
+  } else if (layout === "asym" && n >= 2) {
+    // 비대칭 1:2 — 좌 30% 히어로 지표(이 페이지의 주인공), 우 70% 나머지 지표 행.
+    const rest = data.slice(1);
+    const step = H / rest.length;
+    kpis = [
+      { id: bid(), kind: "kpi" as const, x: 6, y: 46, w: 26, size: fitKpiSize(data[0].value, ts.kpi * 1.2), value: data[0].value, label: data[0].label, accent: true },
+      ...rest.map((k, i) => ({ id: bid(), kind: "kpi" as const, x: 38, y: 44 + i * step, w: 56, size: fitKpiSize(k.value, Math.min(ts.kpi * 0.7, step * 0.9)), value: k.value, label: k.label, accent: false })),
+    ];
+  } else {
+    kpis = data.map((k, i) =>
+      port
+        ? { id: bid(), kind: "kpi" as const, x: 6, y: (n > 3 ? 34 : 38) + i * (n > 3 ? 11 : n < 3 ? 20 : 15), w: 88, size: fitKpiSize(k.value, ts.kpi * (n > 3 ? 0.9 : 1)), value: k.value, label: k.label, accent: hero }
+        : { id: bid(), kind: "kpi" as const, x: 6 + i * (88 / n), y: 44, w: cw, size: fitKpiSize(k.value, Math.min(cw * (o === "square" ? 0.25 : 0.225), ts.kpi)), value: k.value, label: k.label, accent: hero },
+    );
+  }
   return {
     id: bid(),
     bg: theme.bodyBg,
     ink: theme.ink,
     scene: "none",
-    blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts), ...kpis, ...insightBlocks(c, o, locale, 88, opts)],
+    blocks: [...head, ...kpis, ...(noteInHero ? [] : insightBlocks(c, o, locale, 88, opts))],
   };
 }
 
 function barSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "ko", opts?: BuildOpts): TrexSlide {
-  const ts = scaleOf(opts);
+  const ts = scaleOf(opts, o);
   const defaults =
     locale === "ko"
       ? [{ label: "항목 A", value: 82 }, { label: "항목 B", value: 64 }, { label: "항목 C", value: 48 }]
@@ -457,22 +535,27 @@ function barSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent,
   const step = port ? 10 : 8;
   const pillNo = locale === "ko" ? `${idx} · 비교` : `${idx} · Comparison`;
   const title = c.title || (locale === "ko" ? "어디에 집중할 것인가" : "Where To Focus");
+  const layout = !port && opts?.dna ? c.layout || "bars" : "bars";
+  const body: TrexBlock[] =
+    layout === "asym" && data.length >= 2
+      ? [
+          // 비대칭 1:2 — 좌측에 1위 항목을 히어로 수치로(주인공), 우측에 전체 비교 바.
+          { id: bid(), kind: "kpi" as const, x: 6, y: 46, w: 26, size: fitKpiSize(`${data[0].value}%`, ts.kpi * 1.1), value: `${data[0].value}%`, label: data[0].label, accent: true },
+          ...data.map((b, i) => ({ id: bid(), kind: "bar" as const, x: 38, y: 44 + i * 8, w: 56, size: ts.h5 * 0.95, label: b.label, value: String(b.value) })),
+        ]
+      : data.map((b, i) => ({ id: bid(), kind: "bar" as const, x: 6, y: startY + i * step, w: 88, size: ts.h5, label: b.label, value: String(b.value) }));
   return {
     id: bid(),
     bg: theme.bodyBg,
     ink: theme.ink,
     scene: "none",
-    blocks: [
-      ...headerBlocks(theme, idx, total, pillNo, title, o, opts),
-      ...data.map((b, i) => ({ id: bid(), kind: "bar" as const, x: 6, y: startY + i * step, w: 88, size: port ? ts.body * 1.2 : ts.body, label: b.label, value: String(b.value) })),
-      ...insightBlocks(c, o, locale, 88, opts),
-    ],
+    blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts), ...body, ...insightBlocks(c, o, locale, 88, opts)],
   };
 }
 
 function cardsSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "ko", opts?: BuildOpts): TrexSlide {
   const port = o === "portrait";
-  const ts = scaleOf(opts);
+  const ts = scaleOf(opts, o);
   // 개수 적응형(2~4). 고정 3열이면 2개 쏠림·4개 유실 → 열 분배. 좌측 정렬선 x=6 통일(정렬의 법칙).
   const elementLabel = (i: number) => (locale === "ko" ? `요소 ${i + 1}` : `Element ${i + 1}`);
   const defaults =
@@ -483,13 +566,65 @@ function cardsSlide(theme: ModeTheme, idx: number, total: number, c: SlideConten
   const n = data.length;
   const hasNote = !!c.note;
   const cardH = hasNote ? 30 : 36;
-  const cards: TrexBlock[] = data.map((cd, i) =>
-    port
-      ? { id: bid(), kind: "card" as const, x: 6, y: (n > 3 ? 34 : 38) + i * (n > 3 ? 11 : 13.5), w: 88, h: n > 3 ? 9.5 : 12, size: ts.body * 1.1, text: cd.text, label: cd.label || elementLabel(i) }
-      : { id: bid(), kind: "card" as const, x: 6 + i * (88 / n), y: 44, w: 88 / n - 3, h: cardH, size: n > 3 ? ts.body * 0.9 : ts.body, text: cd.text, label: cd.label || elementLabel(i) },
-  );
+  // 인포그래픽 도형 패널 — 슬라이드당 1장 생성해 전 카드가 배경으로 공유(텍스트는 HTML 오버레이).
+  const panel = !!opts?.dna && opts?.images !== false;
   const pillNo = locale === "ko" ? `${idx} · 구조` : `${idx} · Structure`;
   const title = c.title || (locale === "ko" ? "세 갈래로 나뉜다" : "Three Pillars");
+  const withImg = !!opts?.dna && opts?.images !== false;
+  const layout = !port && opts?.dna ? c.layout || "columns" : "columns";
+  const label = (cd: CardItem, i: number) => cd.label || elementLabel(i);
+
+  // ── 2분할(하프앤하프): 좌 텍스트 스택 + 우 엣지-투-엣지 이미지 ──
+  if (layout === "split" && withImg) {
+    const head = headerBlocks(theme, idx, total, pillNo, title, o, opts).map((b) =>
+      b.kind === "title" ? { ...b, w: 42 } : b.kind === "footer" ? { ...b, w: 42 } : b,
+    );
+    const top = 44;
+    const bottom = hasNote ? 74 : 86;
+    const step = (bottom - top) / n;
+    const rows: TrexBlock[] = [imageBlock({ x: 52, y: 0, w: 48, h: 100 }, imgPromptOf(c, title))];
+    data.forEach((cd, i) => {
+      const y = top + i * step;
+      rows.push({ id: bid(), kind: "rule", x: 6, y, w: 40 });
+      rows.push({ id: bid(), kind: "body", x: 6, y: y + 1.8, w: 40, size: ts.h5, label: label(cd, i), text: cd.text });
+    });
+    return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [...head, ...rows, ...insightBlocks(c, o, locale, 42, opts)] };
+  }
+
+  // ── 벤토 그리드: 첫 카드 히어로 + 작은 셀 맞물림 ──
+  if (layout === "bento" && n >= 3) {
+    const H = hasNote ? 30 : 38;
+    const half = (H - 3) / 2;
+    const cell = (cd: CardItem, i: number, r: { x: number; y: number; w: number; h: number }, big: boolean): TrexBlock => ({
+      // 작은 셀(h<15%)엔 본문이 물리적으로 안 들어간다(패딩+라벨+2문장≈22%h) → 라벨만(벤토 문법).
+      id: bid(), kind: "card" as const, ...r, size: big ? ts.h5 : ts.h5 * 0.85, label: label(cd, i), text: r.h < 15 ? "" : cd.text, ...(panel ? { prompt: "panel", src: "" } : {}),
+    });
+    const cards =
+      n >= 4
+        ? [cell(data[0], 0, { x: 6, y: 44, w: 43, h: H }, true), cell(data[1], 1, { x: 51, y: 44, w: 43, h: half }, false), cell(data[2], 2, { x: 51, y: 44 + half + 3, w: 20, h: half }, false), cell(data[3], 3, { x: 74, y: 44 + half + 3, w: 20, h: half }, false)]
+        : [cell(data[0], 0, { x: 6, y: 44, w: 43, h: H }, true), cell(data[1], 1, { x: 51, y: 44, w: 43, h: half }, false), cell(data[2], 2, { x: 51, y: 44 + half + 3, w: 43, h: half }, false)];
+    return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts), ...cards, ...insightBlocks(c, o, locale, 88, opts)] };
+  }
+
+  // ── 지그재그: [이미지|텍스트] 좌우 교차 — 리듬감 ──
+  if (layout === "zigzag" && withImg && n <= 3) {
+    const top = 42;
+    const step = (hasNote ? 33 : 45) / n;
+    const rows: TrexBlock[] = [];
+    data.forEach((cd, i) => {
+      const y = top + i * step;
+      const imgLeft = i % 2 === 0;
+      rows.push(imageBlock({ x: imgLeft ? 6 : 66, y, w: 28, h: step - 2.5 }, `${cd.label || ""} ${cd.text}`.trim()));
+      rows.push({ id: bid(), kind: "body", x: imgLeft ? 38 : 6, y: y + 1, w: 56, size: ts.h5, label: label(cd, i), text: cd.text });
+    });
+    return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts), ...rows, ...insightBlocks(c, o, locale, 88, opts)] };
+  }
+
+  const cards: TrexBlock[] = data.map((cd, i) =>
+    port
+      ? { id: bid(), kind: "card" as const, x: 6, y: (n > 3 ? 34 : 38) + i * (n > 3 ? 11 : 13.5), w: 88, h: n > 3 ? 9.5 : 12, size: ts.h5, text: cd.text, label: label(cd, i), ...(panel ? { prompt: "panel", src: "" } : {}) }
+      : { id: bid(), kind: "card" as const, x: 6 + i * (88 / n), y: 44, w: 88 / n - 3, h: cardH, size: n > 3 ? ts.h5 * 0.85 : ts.h5, text: cd.text, label: label(cd, i), ...(panel ? { prompt: "panel", src: "" } : {}) },
+  );
   return {
     id: bid(),
     bg: theme.bodyBg,
@@ -501,7 +636,7 @@ function cardsSlide(theme: ModeTheme, idx: number, total: number, c: SlideConten
 
 function calloutSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "ko", opts?: BuildOpts): TrexSlide {
   const port = o === "portrait";
-  const ts = scaleOf(opts);
+  const ts = scaleOf(opts, o);
   const headline = locale === "ko" ? "이 한 가지가 결정한다" : "The One Thing That Matters";
   const val = c.stat?.value || "76%";
   const lab = c.stat?.label || c.title || (locale === "ko" ? "핵심 수치" : "The Key Number");
@@ -511,18 +646,18 @@ function calloutSlide(theme: ModeTheme, idx: number, total: number, c: SlideCont
   const body: TrexBlock[] = port
     ? [
         ...(withImg ? [imageBlock({ x: 6, y: 38, w: 88, h: 22 }, imgPromptOf(c, lab))] : []),
-        { id: bid(), kind: "kpi", x: 6, y: withImg ? 64 : 40, w: 88, size: fitKpiSize(val, withImg ? ts.jumbo * 1.1 : ts.jumbo * 1.5), value: val, label: lab, accent: true },
-        { id: bid(), kind: "subtitle", x: 6, y: withImg ? 82 : 68, w: 88, size: ts.body * 1.2, text: note },
+        { id: bid(), kind: "kpi", x: 6, y: withImg ? 64 : 40, w: 88, size: fitKpiSize(val, withImg ? ts.kpi : ts.kpi * 1.2), value: val, label: lab, accent: true },
+        { id: bid(), kind: "subtitle", x: 6, y: withImg ? 82 : 68, w: 88, size: ts.h5, text: note },
       ]
     : withImg
       ? [
-          { id: bid(), kind: "kpi", x: 6, y: 46, w: 30, size: fitKpiSize(val, Math.min(o === "square" ? 9.5 : 8.5, ts.jumbo)), value: val, label: lab, accent: true },
-          { id: bid(), kind: "subtitle", x: 38, y: 48, w: 25, size: ts.body, text: note },
+          { id: bid(), kind: "kpi", x: 6, y: 46, w: 30, size: fitKpiSize(val, ts.kpi), value: val, label: lab, accent: true },
+          { id: bid(), kind: "subtitle", x: 38, y: 48, w: 25, size: ts.h5, text: note },
           imageBlock({ x: 66, y: 44, w: 28, h: 42 }, imgPromptOf(c, lab)),
         ]
       : [
-          { id: bid(), kind: "kpi", x: 6, y: 48, w: 40, size: fitKpiSize(val, Math.min(o === "square" ? 11 : 9, ts.jumbo)), value: val, label: lab, accent: true },
-          { id: bid(), kind: "subtitle", x: 52, y: 54, w: 42, size: ts.body * 1.2, text: note },
+          { id: bid(), kind: "kpi", x: 6, y: 48, w: 40, size: fitKpiSize(val, ts.kpi * 1.2), value: val, label: lab, accent: true },
+          { id: bid(), kind: "subtitle", x: 52, y: 54, w: 42, size: ts.h5, text: note },
         ];
   const pillNo = locale === "ko" ? `${idx} · 핵심` : `${idx} · Highlight`;
   return {
@@ -541,7 +676,7 @@ function calloutSlide(theme: ModeTheme, idx: number, total: number, c: SlideCont
 
 function agendaSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "ko", opts?: BuildOpts): TrexSlide {
   const port = o === "portrait";
-  const ts = scaleOf(opts);
+  const ts = scaleOf(opts, o);
   const defaultItems = locale === "ko" ? ["항목 1", "항목 2", "항목 3"] : ["Item 1", "Item 2", "Item 3"];
   const items = (c.items && c.items.length ? c.items : defaultItems).slice(0, 6);
   const n = items.length;
@@ -552,7 +687,7 @@ function agendaSlide(theme: ModeTheme, idx: number, total: number, c: SlideConte
   const top = port ? 34 : 36;
   const bottom = port ? 90 : 88;
   const step = (bottom - top) / n;
-  const size = n >= 5 ? ts.h2 * 0.86 : ts.h2;
+  const size = n >= 5 ? ts.h4 * 0.9 : ts.h4; // 문단(행) 제목 = h4
   const rows: TrexBlock[] = [];
   items.forEach((raw, i) => {
     // "제목 — 한 줄 설명" 분해 → 2줄 행. 근접성의 법칙: 제목-설명(그룹 내)은 붙이고,
@@ -567,7 +702,7 @@ function agendaSlide(theme: ModeTheme, idx: number, total: number, c: SlideConte
     // step<10(행 5개 이상, 세로형 제외)이면 설명 생략 — 겹칠 바엔 제목만.
     if (desc && (port ? step >= 8 : step >= 10)) {
       const titleH = size * (port ? 1 : 1.78) * 1.35; // 폰트 cqw → 슬라이드 높이% (+행간)
-      rows.push({ id: bid(), kind: "subtitle", x: port ? 12 : 11.4, y: y + step * 0.1 + titleH, w: port ? 82 : 82.6, size: ts.body * 0.95, text: desc });
+      rows.push({ id: bid(), kind: "subtitle", x: port ? 12 : 11.4, y: y + step * 0.1 + titleH, w: port ? 82 : 82.6, size: ts.h5, text: desc });
     }
   });
   return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [...head, ...rows] };
@@ -575,7 +710,7 @@ function agendaSlide(theme: ModeTheme, idx: number, total: number, c: SlideConte
 
 function processSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "ko", opts?: BuildOpts): TrexSlide {
   const port = o === "portrait";
-  const ts = scaleOf(opts);
+  const ts = scaleOf(opts, o);
   const stepText = (i: number) => (locale === "ko" ? `단계 ${i + 1}` : `Step ${i + 1}`);
   const defaults =
     locale === "ko"
@@ -590,13 +725,31 @@ function processSlide(theme: ModeTheme, idx: number, total: number, c: SlideCont
   const num = (i: number) => `0${i + 1}`;
   const n = data.length;
   const hasNote = !!c.note;
-  const steps: TrexBlock[] = data.map((s, i) =>
-    port
-      ? { id: bid(), kind: "card" as const, x: 6, y: 38 + i * (n > 3 ? 11 : 13.5), w: 88, h: n > 3 ? 9.5 : 12, size: ts.body * 1.1, value: num(i), label: heading(s.label, i), text: s.text }
-      : { id: bid(), kind: "card" as const, x: 6 + i * (88 / n), y: 44, w: 88 / n - 3, h: hasNote ? 30 : 36, size: ts.body * 0.95, value: num(i), label: heading(s.label, i), text: s.text },
-  );
+  const panel = !!opts?.dna && opts?.images !== false;
   const pillNo = locale === "ko" ? `${idx} · 과정` : `${idx} · Process`;
   const title = c.title || (locale === "ko" ? "이렇게 진행된다" : "How This Unfolds");
+  const layout = !port && opts?.dna ? c.layout || "timeline" : "cards";
+
+  // ── 타임라인: 세그먼트 텍스트(위) + 가로 진행선/노드(아래) — 연혁·로드맵 공식.
+  // 위/아래 교차 배치는 텍스트 높이를 예측할 수 없어(2~3문장 변동) 인사이트와 충돌한다 →
+  // 텍스트존을 위로 몰고 라인을 바닥 고정점으로 쓰는 안전 구조.
+  if (layout === "timeline") {
+    const segW = 88 / n;
+    const lineY = hasNote ? 71 : 82;
+    const rows: TrexBlock[] = [{ id: bid(), kind: "rule", x: 6, y: lineY, w: 88 }];
+    data.forEach((st, i) => {
+      const x = 6 + i * segW;
+      rows.push({ id: bid(), kind: "pill", x, y: lineY - 3.6, w: 8, size: ts.note, text: num(i) });
+      rows.push({ id: bid(), kind: "body", x, y: 44, w: segW - 4, size: ts.h5 * 0.92, label: heading(st.label, i), text: st.text });
+    });
+    return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts), ...rows, ...insightBlocks(c, o, locale, 88, opts)] };
+  }
+
+  const steps: TrexBlock[] = data.map((s, i) =>
+    port
+      ? { id: bid(), kind: "card" as const, x: 6, y: 38 + i * (n > 3 ? 11 : 13.5), w: 88, h: n > 3 ? 9.5 : 12, size: ts.h5, value: num(i), label: heading(s.label, i), text: s.text, ...(panel ? { prompt: "panel", src: "" } : {}) }
+      : { id: bid(), kind: "card" as const, x: 6 + i * (88 / n), y: 44, w: 88 / n - 3, h: hasNote ? 30 : 36, size: n > 3 ? ts.h5 * 0.85 : ts.h5, value: num(i), label: heading(s.label, i), text: s.text, ...(panel ? { prompt: "panel", src: "" } : {}) },
+  );
   return {
     id: bid(),
     bg: theme.bodyBg,
@@ -617,7 +770,7 @@ function statementSlide(theme: ModeTheme, idx: number, total: number, c: SlideCo
   const msg = c.text || c.title || (locale === "ko" ? "핵심 메시지" : "The Key Message");
   const kickerText = locale === "ko" ? `${idx} · 핵심 메시지` : `${idx} · Key Message`;
   const withImg = !!dna && opts?.images !== false;
-  const ts = scaleOf(opts);
+  const ts = scaleOf(opts, o);
   const tw = withImg && !port ? 46 : port ? 88 : 82;
   return {
     id: bid(),
@@ -627,11 +780,11 @@ function statementSlide(theme: ModeTheme, idx: number, total: number, c: SlideCo
     blocks: [
       ...(withImg ? [imageBlock(port ? { x: 6, y: 58, w: 88, h: 26 } : { x: 56, y: 14, w: 38, h: 62 }, imgPromptOf(c, msg))] : []),
       // 키커는 accent 색 대신 ink(muted)로 — editorial의 진한 빨강 액센트는 다크 배경에서 저대비.
-      { id: bid(), kind: "kicker", x: 6, y: port ? 12 : 16, w: 50, size: ts.caption, text: kickerText },
-      { id: bid(), kind: "title", x: 6, y: port ? 22 : 28, w: tw, size: fitTitleSize(msg, port ? ts.display * 0.9 : withImg ? ts.display * 0.72 : ts.display * 0.78), text: msg, weight: dna?.titleWeight ?? 800 },
+      { id: bid(), kind: "kicker", x: 6, y: port ? 12 : 16, w: 50, size: ts.note, text: kickerText },
+      { id: bid(), kind: "title", x: 6, y: port ? 22 : 28, w: tw, size: (dna ? fitTitleSpec : fitTitleSize)(msg, ts.display), text: msg, weight: dna?.titleWeight ?? 800 },
       { id: bid(), kind: "rule", x: 6, y: port ? 48 : 60, w: 10, accent: true },
       ...(c.note
-        ? [{ id: bid(), kind: "subtitle" as const, x: 6, y: port ? 51 : 64, w: withImg && !port ? 44 : port ? 88 : 60, size: ts.body * 1.05, text: c.note }]
+        ? [{ id: bid(), kind: "subtitle" as const, x: 6, y: port ? 51 : 64, w: withImg && !port ? 44 : port ? 88 : 60, size: ts.h5, text: c.note }]
         : []),
       footer(idx, total, ink),
     ],
@@ -704,7 +857,8 @@ export function buildDeckFromContent(content: DeckContent, formatArg?: string, l
   const mode: ArtMode = content.mode && MODE_THEMES[content.mode] ? content.mode : "editorial";
   // styleArg: string=명시 스타일, null=명시적 "기본 룩"(LLM styleId도 무시), undefined=콘텐츠에 위임.
   const dna = styleArg === null ? null : styleById(styleArg ?? content.styleId);
-  const opts: BuildOpts = { dna, images: imagesArg };
+  const fmt = formatById(formatArg);
+  const opts: BuildOpts = { dna, images: imagesArg, aspect: fmt.h / fmt.w };
   // Style DNA가 있으면 팔레트/배경을 유파 것으로 덮는다 — 레이아웃 빌더는 동일하게 재사용.
   const theme: ModeTheme = dna
     ? { ...MODE_THEMES[mode], accent: dna.accent, ink: dna.ink, coverBg: dna.coverBg, bodyBg: dna.bodyBg, closeBg: dna.closeBg, coverScene: "none", closeScene: "none" }
@@ -714,10 +868,26 @@ export function buildDeckFromContent(content: DeckContent, formatArg?: string, l
   const mids = (content.slides || []).filter((s): s is SlideContent => !!s && (s.role in LAYOUTS));
   const total = mids.length + 1; // 커버 + 본문. 클로징("감사합니다") 장표는 폐기.
 
+  // 레이아웃 아키타입 로테이션 — LLM이 layout을 안 정했으면 덱 안에서 역할별 변형을 순환시켜
+  // "매 장이 같은 3분할" 문제를 없앤다(전역 mid 인덱스로 섞어 한 덱 안에서 다양하게).
+  const LAYOUT_ROTATION: Record<string, string[]> = {
+    structure: imagesArg && dna ? ["columns", "bento", "split", "zigzag"] : ["columns", "bento"],
+    metrics: ["row", "bento", "asym"],
+    process: ["timeline", "cards"],
+    comparison: ["bars", "asym"],
+  };
+  // 입력 객체를 mutate하지 않는다 — 같은 content로 여러 덱을 빌드해도(갤러리/재생성)
+  // 로테이션이 눌러붙지 않게 복사본에 layout을 부여한다.
+  const midsL = mids.map((m, i) => {
+    if (m.layout) return m;
+    const options = LAYOUT_ROTATION[m.role];
+    return options ? { ...m, layout: options[i % options.length] } : m;
+  });
+
   // 커버 이미지 장면: 첫 슬라이드의 img를 쓰거나 덱 제목에서 유도(LLM이 coverImg를 따로 주지 않으므로).
   const coverImg = (content.slides || []).map((s) => s?.img).find((v) => !!v);
   const slides: TrexSlide[] = [coverSlide(theme, total, o, title, content.subtitle, locale, opts, title, coverImg)];
-  mids.forEach((c, i) => slides.push(LAYOUTS[c.role](theme, i + 1, total, c, o, locale, opts)));
+  midsL.forEach((c, i) => slides.push(LAYOUTS[c.role](theme, i + 1, total, c, o, locale, opts)));
   slides.forEach((s, i) => {
     const f = s.blocks.find((b) => b.kind === "footer");
     if (f) f.value = `${i + 1 < 10 ? "0" : ""}${i + 1} / ${total < 10 ? "0" : ""}${total}`;

@@ -70,6 +70,31 @@ export default function TrexPage() {
   const [selected, setSelected] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [imagePending, setImagePending] = useState<Set<string>>(new Set());
+  // 병렬 에이전트 활동 피드 — 콘텐츠/이미지 에이전트의 라이브 상태(멈춤 아님을 보여주는 창구).
+  const [agentJobs, setAgentJobs] = useState<AgentJob[]>([]);
+  const [, setJobTick] = useState(0); // 경과초 1s 갱신
+
+  const patchJob = useCallback((j: AgentJobPatch) => {
+    setAgentJobs((prev) => {
+      const now = Date.now();
+      const ex = prev.find((p) => p.key === j.key);
+      if (ex) return prev.map((p) => (p.key === j.key ? { ...p, ...j, ...(j.status !== "running" ? { endedAt: now } : {}) } : p));
+      return [...prev, { ...j, startedAt: now, ...(j.status !== "running" ? { endedAt: now } : {}) }];
+    });
+  }, []);
+
+  // 실행 중 작업이 있으면 1초마다 경과초 리렌더, 전부 끝나면 8초 후 피드 정리.
+  useEffect(() => {
+    const anyRunning = agentJobs.some((j) => j.status === "running");
+    if (anyRunning) {
+      const t = window.setInterval(() => setJobTick((v) => v + 1), 1000);
+      return () => window.clearInterval(t);
+    }
+    if (agentJobs.length > 0) {
+      const t = window.setTimeout(() => setAgentJobs([]), 8000);
+      return () => window.clearTimeout(t);
+    }
+  }, [agentJobs]);
 
   useEffect(() => {
     try {
@@ -90,7 +115,7 @@ export default function TrexPage() {
         slides: d.slides.map((s) => ({
           ...s,
           bg: s.bg.kind === "image" && s.bg.src.startsWith("data:") ? { kind: "solid" as const, color: "#111" } : s.bg,
-          blocks: s.blocks.map((b) => (b.kind === "image" && (b.src || "").startsWith("data:") ? { ...b, src: "" } : b)),
+          blocks: s.blocks.map((b) => ((b.kind === "image" || b.kind === "card") && (b.src || "").startsWith("data:") ? { ...b, src: "" } : b)),
         })),
       }));
       localStorage.setItem(RECENTS_KEY, JSON.stringify(slim));
@@ -133,16 +158,27 @@ export default function TrexPage() {
                   return nn;
                 });
               }).finally(() => setImagePending(new Set()));
-              void fillBlockImages(d, imageModel, (slideId, blockId, src) => {
-                setDeck((cur) => (cur && cur.id === d.id ? patchBlockSrc(cur, slideId, blockId, src) : cur));
-              });
+              void fillBlockImages(
+                d,
+                imageModel,
+                (slideId, blockId, src) => {
+                  setDeck((cur) =>
+                    cur && cur.id === d.id
+                      ? blockId.startsWith("__panel__")
+                        ? patchPanelSrc(cur, slideId, src)
+                        : patchBlockSrc(cur, slideId, blockId, src)
+                      : cur,
+                  );
+                },
+                patchJob,
+              );
             }
           }, 360);
         }
       };
       window.setTimeout(tick, 300);
     },
-    [imageModel, persistRecents, recents],
+    [imageModel, persistRecents, recents, patchJob],
   );
 
   // 실시간 생성 — AI(agy/codex)가 슬라이드별 실제 내용을 쓰고, 완성되면 렌더. 미가용 시 스캐폴드.
@@ -156,22 +192,27 @@ export default function TrexPage() {
         setDeck(null);
         setView("generating");
         setAiWriting(true);
+        setAgentJobs([]);
+        patchJob({ key: "content", label: ko ? "콘텐츠 에이전트 — 카피·수치 작성" : "Content agent — writing copy & figures", status: "running" });
         const withImages = imageModel !== "none";
         let d: TrexDeck;
+        let contentOk = false;
         try {
           const r = await gc({ topic: p, count: n, mode: modeOverride ?? undefined });
           const parsed = r?.ok && r.text ? parseDeckContent(r.text) : null;
+          contentOk = !!parsed;
           d = parsed ? buildDeckFromContent(parsed, formatId, locale, styleId, withImages) : generateDeck(p, modeOverride ?? undefined, n, formatId, locale, styleId, withImages);
         } catch {
           d = generateDeck(p, modeOverride ?? undefined, n, formatId, locale, styleId, withImages);
         }
+        patchJob({ key: "content", label: ko ? "콘텐츠 에이전트 — 카피·수치 작성" : "Content agent — writing copy & figures", status: contentOk ? "done" : "failed", engine: contentOk ? "agy/codex" : undefined });
         setAiWriting(false);
         revealDeck(d);
       } else {
         revealDeck(generateDeck(p, modeOverride ?? undefined, n, formatId, locale, styleId, imageModel !== "none"));
       }
     },
-    [aiContent, modeOverride, styleOverride, formatId, revealDeck, locale, imageModel],
+    [aiContent, modeOverride, styleOverride, formatId, revealDeck, locale, imageModel, ko, patchJob],
   );
 
   const updateDeck = useCallback((updater: (d: TrexDeck) => TrexDeck) => {
@@ -273,6 +314,32 @@ export default function TrexPage() {
   return (
     <div style={shell}>
       <GlobalStyle />
+      {/* 병렬 에이전트 활동 피드 — 덱이 만들어지는 동안 무엇이 돌고 있는지 라이브로 보여준다. */}
+      {agentJobs.length > 0 && view !== "home" && (
+        <aside style={agentFeedWrap} aria-live="polite">
+          <div style={agentFeedHead}>
+            {agentJobs.some((j) => j.status === "running") ? (
+              <span className="trex-spin" style={agentFeedSpin} />
+            ) : (
+              <IconCheck size={12} />
+            )}
+            {ko ? "에이전트 활동" : "Agent activity"}
+          </div>
+          {agentJobs.map((j) => {
+            const secs = Math.max(0, Math.round(((j.endedAt ?? Date.now()) - j.startedAt) / 1000));
+            return (
+              <div key={j.key} style={agentFeedRow}>
+                <span style={{ flexShrink: 0, width: 14, textAlign: "center" }}>
+                  {j.status === "running" ? <span className="trex-spin" style={agentFeedSpin} /> : j.status === "done" ? "✓" : "✗"}
+                </span>
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{j.label}</span>
+                {j.engine && <span style={agentFeedEngine}>{j.engine}</span>}
+                <span style={{ opacity: 0.55, fontVariantNumeric: "tabular-nums" }}>{secs}s</span>
+              </div>
+            );
+          })}
+        </aside>
+      )}
       {deck && (
         <style
           dangerouslySetInnerHTML={{
@@ -418,28 +485,85 @@ async function maybeFetchScenes(deck: TrexDeck, model: ImageModel, onImage: (sli
   }
 }
 
+/** 에이전트 활동 피드 항목 — 병렬 생성이 "멈추지 않았다"는 라이브 피드백용. */
+interface AgentJob {
+  key: string;
+  label: string;
+  status: "running" | "done" | "failed";
+  engine?: string;
+  startedAt: number;
+  endedAt?: number;
+}
+type AgentJobPatch = Pick<AgentJob, "key" | "label" | "status"> & { engine?: string };
+
 /**
  * Style DNA 덱의 이미지 블록 채우기 — 각 블록의 장면 설명 + 유파 사진 룩(dna.photoStyle)으로
- * 실제 이미지를 생성한다(auto면 codex↔나노바나나 자동 페일오버). 커버부터 순차 생성해
- * 첫 화면이 가장 먼저 완성되게 한다.
+ * 실제 이미지를 생성한다(auto면 codex↔나노바나나 자동 페일오버). **병렬 워커 2개**가
+ * 배열 순서(커버 우선)대로 작업을 집어가며 동시에 그린다 — 활동은 onJob으로 피드에 중계.
  */
-async function fillBlockImages(deck: TrexDeck, model: ImageModel, onImage: (slideId: string, blockId: string, src: string) => void): Promise<void> {
+async function fillBlockImages(
+  deck: TrexDeck,
+  model: ImageModel,
+  onImage: (slideId: string, blockId: string, src: string) => void,
+  onJob?: (j: AgentJobPatch) => void,
+): Promise<void> {
   const gen = ipc()?.trex?.generateImage;
   if (!gen || model === "none") return;
   const dna = styleById(deck.styleId);
-  for (const s of deck.slides) {
+  const tasks: Array<{ slideId: string; blockId: string; label: string; prompt: string }> = [];
+  deck.slides.forEach((s, si) => {
     for (const b of s.blocks) {
       if (b.kind !== "image" || b.src) continue;
       const scene = (b.prompt || "").trim() || `An evocative editorial photograph for a presentation titled "${deck.title}"`;
-      const prompt = `${scene}. ${dna?.photoStyle ?? "Clean professional editorial photography"}. Absolutely no text, no letters, no numbers, no watermark.`;
+      tasks.push({
+        slideId: s.id,
+        blockId: b.id,
+        label: si === 0 ? "표지 이미지" : `슬라이드 ${si + 1} 이미지`,
+        prompt: `${scene}. ${dna?.photoStyle ?? "Clean professional editorial photography"}. Absolutely no text, no letters, no numbers, no watermark.`,
+      });
+    }
+    // 인포그래픽 도형 패널 — 슬라이드당 1장 생성해 카드들이 배경으로 공유(텍스트는 HTML 오버레이).
+    if (dna && s.blocks.some((b) => b.kind === "card" && b.prompt === "panel" && !b.src)) {
+      tasks.push({
+        slideId: s.id,
+        blockId: `__panel__:${s.id}`,
+        label: `슬라이드 ${si + 1} 도형 패널`,
+        prompt: `${dna.graphicStyle}. Landscape rectangular panel. Absolutely no text, no letters, no numbers, no watermark, nothing in the center.`,
+      });
+    }
+  });
+  if (!tasks.length) return;
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= tasks.length) return;
+      const t = tasks[i];
+      onJob?.({ key: t.blockId, label: t.label, status: "running" });
       try {
-        const r = await gen({ model, prompt });
-        if (r?.ok && r.src) onImage(s.id, b.id, r.src);
+        const r = await gen({ model, prompt: t.prompt });
+        if (r?.ok && r.src) {
+          onImage(t.slideId, t.blockId, r.src);
+          onJob?.({ key: t.blockId, label: t.label, status: "done", engine: r.engine });
+        } else {
+          onJob?.({ key: t.blockId, label: t.label, status: "failed" });
+        }
       } catch {
-        /* 블록은 생성중 표시 유지 — 다음 블록 계속 */
+        onJob?.({ key: t.blockId, label: t.label, status: "failed" });
       }
     }
-  }
+  };
+  await Promise.all([worker(), worker()]);
+}
+
+/** 슬라이드의 panel 카드 전부에 같은 도형 패널 이미지를 배경으로 심는다. */
+function patchPanelSrc(deck: TrexDeck, slideId: string, src: string): TrexDeck {
+  return {
+    ...deck,
+    slides: deck.slides.map((s) =>
+      s.id === slideId ? { ...s, blocks: s.blocks.map((b) => (b.kind === "card" && b.prompt === "panel" ? { ...b, src } : b)) } : s,
+    ),
+  };
 }
 
 function patchBlockSrc(deck: TrexDeck, slideId: string, blockId: string, src: string): TrexDeck {
@@ -725,6 +849,13 @@ const recentMeta: CSSProperties = { fontSize: 11, color: "var(--muted-deep)" };
 const scrollStage: CSSProperties = { flex: 1, minHeight: 0, overflowY: "auto", padding: "32px 28px 64px" };
 const genHint: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 9, alignSelf: "center", fontSize: 12.5, fontWeight: 800, color: "var(--muted-deep)", background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: 999, padding: "7px 14px", marginBottom: 4 };
 const spinner: CSSProperties = { width: 13, height: 13, borderRadius: "50%", border: "2px solid var(--paper-edge)", borderTopColor: "var(--accent)", display: "inline-block" };
+// 에이전트 활동 피드 — 우하단 고정 미니 패널(생성 병렬 작업의 라이브 상태).
+const agentFeedWrap: CSSProperties = { position: "fixed", right: 16, bottom: 16, zIndex: 60, width: 264, maxHeight: 220, overflowY: "auto", background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: 10, boxShadow: "0 10px 30px rgba(0,0,0,.14)", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 6 };
+const agentFeedHead: CSSProperties = { display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 800, color: "var(--ink)", letterSpacing: ".04em", textTransform: "uppercase", marginBottom: 2 };
+const agentFeedRow: CSSProperties = { display: "flex", alignItems: "center", gap: 7, fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.3 };
+const agentFeedSpin: CSSProperties = { width: 10, height: 10, borderRadius: "50%", border: "2px solid var(--paper-edge)", borderTopColor: "var(--accent)", display: "inline-block" };
+const agentFeedEngine: CSSProperties = { flexShrink: 0, fontSize: 9.5, fontWeight: 800, color: "var(--accent)", border: "1px solid var(--paper-edge)", borderRadius: 4, padding: "0 4px" };
+
 const aiWritingWrap: CSSProperties = { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, padding: 40, textAlign: "center" };
 const aiWritingSpinner: CSSProperties = { width: 34, height: 34, borderRadius: "50%", border: "3px solid var(--paper-edge)", borderTopColor: "var(--accent)", display: "inline-block" };
 const aiWritingText: CSSProperties = { fontSize: 16, fontWeight: 800, color: "var(--ink)" };
