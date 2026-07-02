@@ -288,6 +288,13 @@ app.whenReady().then(async () => {
   await bootAuthFromKeychain();
   registerIpcHandlers();
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
+  // 유휴 드리밍 큐레이션 — 옵트인(기본 OFF). 5분마다 조건만 확인(유휴/슬롯/쿨다운), 발화는 드묾.
+  try {
+    const { startDreamingScheduler } = await import("./memory/dreaming");
+    startDreamingScheduler();
+  } catch (err) {
+    console.error("[dreaming] scheduler start failed:", err);
+  }
   // 조건 트리거 매니저(설계 §3) — fs 변경/체인 완료 이벤트를 리스너에 등록(유휴 0).
   // 헤드리스 러너에서는 등록하지 않는다(위 early-return 분기). 스케줄러의 실행 함수를 주입.
   try {

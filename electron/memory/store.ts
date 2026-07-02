@@ -246,6 +246,52 @@ export function listMemoryEntriesForAgentUi(agentId: string, limit = 100): Memor
   return rows.map(toEntry);
 }
 
+/** 드리밍 통합이 흡수한 원본 엔트리들을 superseded 처리(파괴 아님 — 복구 가능 이력 유지). */
+export function supersedeMemoryEntries(ids: string[]): void {
+  if (ids.length === 0) return;
+  const now = new Date().toISOString();
+  const stmt = getDb().prepare("UPDATE memory_entries SET superseded_at = ? WHERE id = ? AND superseded_at IS NULL");
+  const tx = getDb().transaction((list: string[]) => {
+    for (const id of list) stmt.run(now, id);
+  });
+  tx(ids);
+}
+
+/** 결정론 dedup — scope+kind+content(정규화)가 완전히 같은 live 엔트리 중 최신만 남기고 supersede.
+ *  드리밍 1단계(무LLM). 반환: 정리된 개수. */
+export function dedupExactDuplicateMemories(): number {
+  const rows = getDb()
+    .prepare(
+      `SELECT id FROM memory_entries m
+       WHERE superseded_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM memory_entries n
+           WHERE n.superseded_at IS NULL
+             AND n.scope = m.scope AND n.kind = m.kind
+             AND lower(trim(n.content)) = lower(trim(m.content))
+             AND (n.project_path IS m.project_path)
+             AND (n.agent_id IS m.agent_id)
+             AND (n.created_at > m.created_at OR (n.created_at = m.created_at AND n.id > m.id))
+         )`,
+    )
+    .all() as Array<{ id: string }>;
+  supersedeMemoryEntries(rows.map((r) => r.id));
+  return rows.length;
+}
+
+/** 드리밍 2단계 대상 — live agent_repo 메모리가 minCount 이상 쌓인 에이전트 목록. */
+export function listAgentIdsWithLiveMemory(minCount = 8): Array<{ agentId: string; count: number }> {
+  const rows = getDb()
+    .prepare(
+      `SELECT agent_id AS agentId, COUNT(*) AS count FROM memory_entries
+       WHERE superseded_at IS NULL AND agent_id IS NOT NULL AND scope = 'agent_repo'
+       GROUP BY agent_id HAVING COUNT(*) >= ?
+       ORDER BY count DESC`,
+    )
+    .all(minCount) as Array<{ agentId: string; count: number }>;
+  return rows;
+}
+
 export function countMemory(): number {
   const r = getDb().prepare("SELECT COUNT(*) AS n FROM memory_entries").get() as { n: number };
   return r.n;

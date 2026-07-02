@@ -33,7 +33,7 @@ import type { LiveAgent, NetTimelineItem } from "@/components/AgentNetworkPanel"
 import { ChatRightPanel, type ChatRightPanelTab } from "@/components/ChatRightPanel";
 import { ProjectFolderBar } from "@/components/ProjectFolderBar";
 import { AgentPicker } from "@/components/AgentPicker";
-import type { CodeArtifact, MediaArtifact } from "@/components/Markdown";
+import { firstMediaArtifactInText, type CodeArtifact, type MediaArtifact } from "@/components/Markdown";
 import type { WorkspaceFilePreview } from "@/components/WorkspacePanel";
 import { IconBuilding, IconClose, IconFolder, IconLayers, IconNetwork, IconPanelRight, IconSparkles, IconTrash } from "@/components/Icon";
 import { buildAppRoutePrompt, INSTALLED_APPS, parseAppSlashRoute } from "@/lib/apps";
@@ -887,6 +887,18 @@ function ChatPage() {
         partialTextRef.current = "";
         subRef.current?.();
         subRef.current = null;
+        // 산출물 자동 패널 오픈 — 답변에 이미지 산출물이 있으면(사용자가 패널을 명시적으로
+        // 닫아두지 않았다면) 우측 패널에 바로 띄운다. 클릭을 기다리지 않는 능동적 패널 활용.
+        const autoMedia = firstMediaArtifactInText(ev.text ?? "");
+        if (autoMedia) {
+          const pref = readRightPanelPreference();
+          if (!pref || pref.open) {
+            setSurface(null);
+            setArtifact(null);
+            setMediaPreview(workspacePreviewFromMedia(autoMedia));
+            openPanelTab("panel");
+          }
+        }
         // 첫 메시지였으면 main이 자동 제목 생성 → 갱신해서 사이드바도 반영
         const api = ipc();
         void api?.chats.get(chatId).then((c) => {

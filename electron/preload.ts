@@ -74,6 +74,10 @@ const api: AgentlasIpc = {
   agentMemory: {
     entries: (agentId: string, limit?: number) => ipcRenderer.invoke("agentMemory:entries", agentId, limit),
   },
+  memoryDreaming: {
+    status: () => ipcRenderer.invoke("memoryDreaming:status"),
+    setEnabled: (enabled: boolean) => ipcRenderer.invoke("memoryDreaming:setEnabled", enabled),
+  },
   confirm: {
     listPending: () => ipcRenderer.invoke("confirm:listPending"),
   },

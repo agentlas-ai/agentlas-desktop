@@ -2995,6 +2995,11 @@ export interface AgentlasIpc {
   agentMemory: {
     entries: (agentId: string, limit?: number) => Promise<AgentMemoryEntryUi[]>;
   };
+  /** 유휴 드리밍 큐레이션 — 옵트인(기본 OFF). 유휴+슬롯 완전 유휴+쿨다운 가드로 메모리 통합. */
+  memoryDreaming: {
+    status: () => Promise<{ enabled: boolean; lastRunAt: string | null; running: boolean }>;
+    setEnabled: (enabled: boolean) => Promise<{ enabled: boolean; lastRunAt: string | null; running: boolean }>;
+  };
   /** 확인 요청 — 에이전트가 챗에서 사용자 결정을 기다리는 채팅 목록(미답변 질문 fence 기준). */
   confirm: {
     listPending: () => Promise<PendingConfirmation[]>;

@@ -719,6 +719,33 @@ function inline(text: string, onOpenMedia?: (a: MediaArtifact) => void): React.R
   return out;
 }
 
+/** 산출물 자동 패널 오픈용 — 답변 텍스트에서 첫 이미지 산출물을 찾아 MediaArtifact로 만든다.
+ *  renderInlineImage와 동일한 매칭(마크다운 이미지 + plain 로컬 이미지 경로)을 전역 1회 수행.
+ *  final 답변에 산출물이 있으면 챗 페이지가 우측 패널을 자동으로 열어 보여준다. */
+export function firstMediaArtifactInText(text: string): MediaArtifact | null {
+  const mdImg = text.match(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/);
+  const plain = text.match(
+    /(?:file:\/\/[^\s`'"<>)]*?|\/[^\s`'"<>)]*?)\.(?:png|jpe?g|gif|webp|avif|svg)(?=$|[\s).,;:])/i,
+  );
+  let rawSrc: string | null = null;
+  let alt = "";
+  if (mdImg && (!plain || (mdImg.index ?? 0) <= (plain.index ?? 0))) {
+    alt = mdImg[1];
+    rawSrc = mdImg[2].trim();
+  } else if (plain) {
+    rawSrc = plain[0].trim();
+  }
+  if (!rawSrc) return null;
+  const src = normalizeImageSrc(rawSrc);
+  return {
+    id: `media:${src}`,
+    kind: "image",
+    src,
+    path: localPathFromImageSrc(rawSrc),
+    name: alt || imageNameFromSrc(rawSrc),
+  };
+}
+
 function renderInlineImage(
   key: number,
   rawSrc: string,

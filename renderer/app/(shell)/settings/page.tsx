@@ -777,9 +777,159 @@ export default function SettingsPage() {
           </div>
         ))}
 
+        <MemoryDiagnosticsPanel />
+
         <MigrationPanel />
       </section>
     </div>
+  );
+}
+
+/** 메모리 & 진단 — 유휴 드리밍 큐레이션 토글(옵트인) + Hephaestus 엔진 진단/슈퍼바이저.
+ *  드리밍: 자리를 비운 유휴 시간에만 큐레이터 메모리를 통합(dedup+LLM 요약). 기본 OFF. */
+function MemoryDiagnosticsPanel() {
+  const { t, locale } = useT();
+  const ko = locale !== "en";
+  const [dreaming, setDreaming] = useState<{ enabled: boolean; lastRunAt: string | null; running: boolean } | null>(null);
+  const [supervisor, setSupervisor] = useState<boolean | null>(null);
+  const [doctorOut, setDoctorOut] = useState<string | null>(null);
+  const [doctorBusy, setDoctorBusy] = useState(false);
+
+  useEffect(() => {
+    const api = ipc();
+    if (!api) return;
+    void api.memoryDreaming.status().then(setDreaming).catch(() => {});
+    void api.hephaestus.getSupervisor().then((s) => setSupervisor(s.enabled)).catch(() => {});
+  }, []);
+
+  const toggleDreaming = async () => {
+    const api = ipc();
+    if (!api || !dreaming) return;
+    const next = await api.memoryDreaming.setEnabled(!dreaming.enabled);
+    setDreaming(next);
+  };
+
+  const toggleSupervisor = async () => {
+    const api = ipc();
+    if (!api || supervisor == null) return;
+    try {
+      await api.hephaestus.setSupervisor(!supervisor);
+      setSupervisor(!supervisor);
+    } catch {
+      // 엔진 미가용 — 상태 유지
+    }
+  };
+
+  const runDoctor = async () => {
+    const api = ipc();
+    if (!api) return;
+    setDoctorBusy(true);
+    setDoctorOut(null);
+    try {
+      const res = await api.hephaestus.doctor();
+      const text = typeof res === "string" ? res : JSON.stringify(res, null, 2);
+      setDoctorOut(text.length > 4000 ? `${text.slice(0, 4000)}…` : text);
+    } catch (e) {
+      setDoctorOut(String(e));
+    } finally {
+      setDoctorBusy(false);
+    }
+  };
+
+  const rowStyle: CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "12px 14px",
+    borderRadius: "var(--radius-md)",
+    background: "var(--paper)",
+    border: "1px solid var(--paper-edge)",
+    marginBottom: 8,
+  };
+  const btnStyle: CSSProperties = {
+    padding: "7px 12px",
+    borderRadius: "var(--radius-md)",
+    background: "var(--paper)",
+    border: "1px solid var(--paper-edge)",
+    boxShadow: "var(--neu-raised)",
+    fontSize: 12,
+    fontWeight: 600,
+    color: "var(--ink)",
+  };
+
+  return (
+    <>
+      <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "28px 0 12px" }}>
+        {ko ? "메모리 & 진단" : "Memory & Diagnostics"}
+      </h2>
+
+      <div style={rowStyle}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>
+            {ko ? "유휴 드리밍 메모리 정리" : "Idle dreaming memory curation"}
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted-deep)", marginTop: 2 }}>
+            {ko
+              ? "자리를 비운 유휴 시간에만 에이전트 메모리를 자동 통합합니다 (10분 유휴 + 실행 없음 + 6시간 쿨다운). 작업 중에는 절대 켜지지 않습니다."
+              : "Consolidates agent memory only while you're away (10min idle + no runs + 6h cooldown). Never fires while you work."}
+            {dreaming?.lastRunAt
+              ? ` · ${ko ? "마지막 실행" : "Last run"}: ${new Date(dreaming.lastRunAt).toLocaleString()}`
+              : ""}
+          </div>
+        </div>
+        <button onClick={() => void toggleDreaming()} style={{ ...btnStyle, minWidth: 64 }} disabled={!dreaming}>
+          {dreaming ? (dreaming.enabled ? "ON" : "OFF") : "…"}
+        </button>
+      </div>
+
+      <div style={rowStyle}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>
+            {ko ? "Hephaestus 슈퍼바이저" : "Hephaestus supervisor"}
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted-deep)", marginTop: 2 }}>
+            {ko ? "Stormbreaker 견고-실행 감독 레이어" : "Stormbreaker robust-execution supervision layer"}
+          </div>
+        </div>
+        <button onClick={() => void toggleSupervisor()} style={{ ...btnStyle, minWidth: 64 }} disabled={supervisor == null}>
+          {supervisor == null ? "…" : supervisor ? "ON" : "OFF"}
+        </button>
+      </div>
+
+      <div style={{ ...rowStyle, flexDirection: "column", alignItems: "stretch" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>
+              {ko ? "Hephaestus 엔진 진단" : "Hephaestus engine doctor"}
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--muted-deep)", marginTop: 2 }}>
+              {ko ? "번들 엔진/Python/라우팅 자가진단을 실행합니다" : "Runs the bundled engine self-diagnostics"}
+            </div>
+          </div>
+          <button onClick={() => void runDoctor()} style={btnStyle} disabled={doctorBusy}>
+            {doctorBusy ? (ko ? "진단 중…" : "Running…") : ko ? "진단 실행" : "Run doctor"}
+          </button>
+        </div>
+        {doctorOut && (
+          <pre
+            style={{
+              margin: "10px 0 0",
+              padding: 10,
+              borderRadius: "var(--radius-md)",
+              background: "var(--paper-2)",
+              border: "1px solid var(--paper-edge)",
+              fontSize: 11,
+              maxHeight: 260,
+              overflow: "auto",
+              whiteSpace: "pre-wrap",
+            }}
+          >
+            {doctorOut}
+          </pre>
+        )}
+      </div>
+    </>
   );
 }
 

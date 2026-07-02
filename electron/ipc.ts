@@ -129,6 +129,7 @@ import {
 } from "./prompts-hub";
 import { claimQuest, listQuests } from "./quests";
 import { listMemoryEntriesForAgentUi } from "./memory/store";
+import { getDreamingStatus, setDreamingEnabled } from "./memory/dreaming";
 import { getUsageSnapshot } from "./usage";
 import { listPendingConfirmations } from "./confirm";
 import { addProjectOntologySource, getProjectOntologyStatus } from "./ontology/project-runtime";
@@ -624,6 +625,13 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("agentMemory:entries", (_e, agentId: string, limit?: number) =>
     listMemoryEntriesForAgentUi(agentId, Math.min(Math.max(Number(limit) || 100, 1), 300)),
   );
+
+  // ── 유휴 드리밍 큐레이션 — 옵트인 설정(기본 OFF) + 상태 ─────────────────────
+  ipcMain.handle("memoryDreaming:status", () => getDreamingStatus());
+  ipcMain.handle("memoryDreaming:setEnabled", (_e, enabled: unknown) => {
+    setDreamingEnabled(enabled === true);
+    return getDreamingStatus();
+  });
 
   // ── confirm (확인 요청 — 챗에서 사용자 결정 대기) ────────
   ipcMain.handle("confirm:listPending", () => listPendingConfirmations());
