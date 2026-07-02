@@ -4,7 +4,6 @@ import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
-import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type { Automation, InstalledAgent, InstalledFirm } from "@/lib/types";
 import { IconBolt, IconBuilding, IconTrash } from "@/components/Icon";
@@ -51,8 +50,9 @@ function AutomationDetailPage() {
           name: firm ? pickLocalized(firm, locale).name : locale === "en" ? "(removed firm)" : "(삭제된 회사)",
         });
       } else {
+        // 전체 목록에서 해석 — 시스템 에이전트 타깃이 "(삭제된 에이전트)"로 표시되던 버그.
         const agents: InstalledAgent[] = await api.team.list();
-        const a = visibleAgents(agents).find((x) => x.id === found.targetId);
+        const a = agents.find((x) => x.id === found.targetId);
         setTarget({
           kind: "agent",
           name: a ? pickLocalized(a, locale).name : locale === "en" ? "(removed agent)" : "(삭제된 에이전트)",

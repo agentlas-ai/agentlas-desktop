@@ -49,6 +49,10 @@ export interface ParsedAutomation {
   /** daily-HH:MM | weekday-HH:MM | weekly-<mon..sun>-HH:MM | monthly-<day>-HH:MM (레거시 미러) */
   schedule: string;
   prompt: string;
+  /** 이 자동화를 실행할 에이전트(id/slug/표시명). 미지정이면 현재 챗 타깃.
+   *  오케스트레이터 챗에서 만든 자동화가 항상 오케스트레이터에 묶여 매 실행
+   *  라우팅 홉을 타던 문제의 해결(해석은 client.ts). */
+  agent?: string;
   /** 구조화 스케줄 spec(있으면 schedule_json으로 저장, 레거시 토큰보다 우선). */
   scheduleSpec?: ScheduleSpec | null;
   /** IANA 타임존. */
@@ -78,10 +82,17 @@ export const AUTOMATION_PROTOCOL = [
   "```json",
   '[ { "name": "<short name>",',
   '    "prompt": "<exactly what to do on each run>",',
+  '    "agent": "<installed agent name/slug/id that should RUN this — set it whenever a specific agent (not you) owns the job; omit to run on yourself>",',
   '    "schedule": { "preset": "daily|weekday|weekly|monthly|hourly", "time": "09:00", "tz": "Asia/Seoul" } } ]',
   "```",
   "",
   'For irregular cadence use raw cron instead: "schedule": { "cron": "*/30 9-18 * * 1-5", "tz": "Asia/Seoul" }.',
+  "Registering is idempotent by name: emitting a block with the SAME \"name\" UPDATES the existing",
+  "automation instead of creating a new one. When you refine a job you already registered, reuse the",
+  "exact same name — NEVER register a second automation for the same job under a new name.",
+  "STRONGLY prefer steps[] whenever the job has phases (gather → draft → check → publish → report):",
+  "steps become an editable visual workflow the user can inspect; a single monolithic prompt is a",
+  "last resort for genuinely one-step jobs.",
   "You MAY also break the run into steps that become a visual workflow graph. Steps can run in",
   "PARALLEL: give each step an `id`, and list `deps` (ids that must finish first). Multiple steps",
   "depending on the same upstream fan OUT (run in parallel); a step with several `deps` (or a",
@@ -336,6 +347,7 @@ export function parseAutomations(text: string): ParseAutomationsResult {
             const o = d as Record<string, unknown>;
             const name = typeof o.name === "string" ? o.name.trim() : "";
             const prompt = typeof o.prompt === "string" ? o.prompt.trim() : "";
+            const agent = typeof o.agent === "string" ? o.agent.trim() : "";
 
             const { spec, token, tz } = resolveSchedule(o.schedule, errors);
 
@@ -365,6 +377,7 @@ export function parseAutomations(text: string): ParseAutomationsResult {
               name,
               schedule: token,
               prompt,
+              ...(agent ? { agent } : {}),
               scheduleSpec: spec,
               tz,
               steps,

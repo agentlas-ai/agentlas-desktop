@@ -2,14 +2,15 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
-import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type { Automation, InstalledAgent, InstalledFirm } from "@/lib/types";
 import { IconBolt, IconBuilding, IconPlus, IconTrash } from "@/components/Icon";
 
 export default function AutomationListPage() {
   const { t, locale } = useT();
+  const router = useRouter();
   const [items, setItems] = useState<Automation[]>([]);
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
@@ -32,7 +33,9 @@ export default function AutomationListPage() {
         api.firms.list(),
       ]);
       setItems(list);
-      setAgents(visibleAgents(ag));
+      // 라벨 해석은 전체 목록으로 — 오케스트레이터 등 시스템 에이전트를 타깃으로 한 자동화가
+      // "(삭제된 에이전트)"로 잘못 표시되던 버그(visibleAgents는 픽커용 필터).
+      setAgents(ag);
       setFirms(fm);
     } catch (err) {
       setMessage(locale === "en" ? `Automations could not be loaded. Existing schedules were not changed. ${String(err)}` : `자동화를 불러오지 못했습니다. 기존 예약은 그대로 둡니다. ${String(err)}`);
@@ -53,6 +56,17 @@ export default function AutomationListPage() {
     } catch (err) {
       setMessage(locale === "en" ? `Status did not change. ${String(err)}` : `상태를 바꾸지 못했습니다. ${String(err)}`);
     }
+  }
+
+  // "지금 실행" — 스케줄 무관 즉시 1회 테스트 실행을 발사하고, 캔버스로 이동해 라이브로 지켜본다.
+  // 실행 완료를 여기서 기다리지 않는다(수 분 걸릴 수 있음) — 진행/실패는 캔버스 오버레이가 보여준다.
+  function runNow(id: string) {
+    const api = ipc();
+    if (!api) return;
+    api.automations.runNow(id).catch((err) => {
+      setMessage(locale === "en" ? `Test run failed to start. ${String(err)}` : `테스트 실행을 시작하지 못했습니다. ${String(err)}`);
+    });
+    router.push(`/automation/flow?id=${encodeURIComponent(id)}`);
   }
 
   async function remove(id: string) {
@@ -217,6 +231,22 @@ export default function AutomationListPage() {
                   }}
                 >
                   {a.enabled ? t("auto.on") : t("auto.off")}
+                </button>
+                <button
+                  onClick={() => runNow(a.id)}
+                  className="titlebar-nodrag"
+                  title={t("auto.list.run_hint")}
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: "var(--accent)",
+                    padding: "4px 10px",
+                    borderRadius: 999,
+                    border: "1px solid var(--paper-edge)",
+                    background: "var(--paper-2)",
+                  }}
+                >
+                  {t("auto.list.run")}
                 </button>
                 <Link
                   href={`/automation/new?id=${encodeURIComponent(a.id)}`}

@@ -605,6 +605,8 @@ const dict = {
     "auto.edit.title": "자동화 편집",
     "auto.edit.save": "변경 저장",
     "auto.list.edit": "편집",
+    "auto.list.run": "지금 실행",
+    "auto.list.run_hint": "스케줄과 무관하게 지금 1회 테스트 실행하고 캔버스에서 지켜봅니다.",
     // 트리거 종류
     "auto.trigger.type": "트리거 종류",
     "auto.trigger.schedule": "시간(스케줄)",
@@ -1539,6 +1541,8 @@ const dict = {
     "auto.edit.title": "Edit automation",
     "auto.edit.save": "Save changes",
     "auto.list.edit": "Edit",
+    "auto.list.run": "Run now",
+    "auto.list.run_hint": "Run once right now regardless of schedule and watch it live on the canvas.",
     // Trigger types
     "auto.trigger.type": "Trigger type",
     "auto.trigger.schedule": "Time (schedule)",

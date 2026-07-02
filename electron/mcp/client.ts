@@ -61,7 +61,7 @@ import { SURFACE_PROTOCOL, parseSurfaces, type SurfaceManifestDiagnostic } from 
 import { runHandsFreeAgentOs, shouldRunHandsFreeAgentOs } from "../agent-os/hands-free";
 import { prepareCreativeAdPackManifest } from "../creative-pack/surface";
 import { prepareEcommerceOpsManifest } from "../ecommerce-pack/surface";
-import { createAutomation, listAutomations } from "../store/automations";
+import { createAutomation, listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { recordAgentSurface } from "../store/agent-surfaces";
 import { getAgentApp } from "../store/agent-apps";
 import { autoSelectMcpTools, buildMcpAutoSelectionPrompt } from "../mcp-tools/auto-select";
@@ -82,6 +82,24 @@ import type {
 } from "../../shared/types";
 
 type EventSink = (ev: McpInvocationEvent) => void;
+
+/** 방출된 "agent" 필드(id/slug/표시명, 대소문자 무시)를 설치 에이전트로 해석. 못 찾으면 null. */
+function resolveInstalledAgentLoose(query: string): InstalledAgent | null {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return null;
+  const direct = getAgentById(query.trim());
+  if (direct) return direct;
+  const all = listInstalledAgents();
+  return (
+    all.find((ag) => ag.slug.toLowerCase() === needle) ??
+    all.find(
+      (ag) =>
+        ag.name.trim().toLowerCase() === needle ||
+        (ag.nameEn ?? "").trim().toLowerCase() === needle,
+    ) ??
+    null
+  );
+}
 
 function cleanPathCandidate(raw: string | undefined): string | null {
   const cleaned = raw?.trim().replace(/^`|`$/g, "").replace(/[),.;]+$/g, "");
@@ -1166,18 +1184,44 @@ export async function runMcpInvocation(
           console.warn("[automation] parse warnings:", errors.join("; "));
         }
         for (const a of autos) {
-          createAutomation({
-            name: a.name,
-            scheduleHuman: a.schedule,
-            targetType: chat.firmId ? "firm" : "agent",
-            targetId: chat.firmId ?? chat.agentId,
-            promptTemplate: a.prompt,
-            createdBy: "agent",
-            // 구조화 스케줄 + steps→그래프를 통과시켜 챗 생성 자동화가 graph_json/schedule_json을 저장.
-            scheduleJson: a.scheduleSpec ? JSON.stringify(a.scheduleSpec) : null,
-            timezone: a.tz && a.tz.trim() ? a.tz : null,
-            graphJson: a.graph ?? null,
-          });
+          // 모델이 "agent" 필드로 실행 주체를 지정하면 설치 에이전트로 해석(id → slug → 표시명).
+          // 미지정/미해석이면 기존처럼 현재 챗 타깃 — 오케스트레이터 챗에서 만든 자동화가 항상
+          // 오케스트레이터에 묶여 매 실행 라우팅 홉을 타던 문제의 수정.
+          const named = a.agent ? resolveInstalledAgentLoose(a.agent) : null;
+          const targetType: "agent" | "firm" = named ? "agent" : chat.firmId ? "firm" : "agent";
+          const targetId = named ? named.id : (chat.firmId ?? chat.agentId);
+          // 이름 기준 idempotent 등록: 같은 이름이 이미 있으면 갱신 — 모델이 다음 턴에 다듬어
+          // 재방출할 때 같은 작업이 중복 등록되던 문제의 수정(프로토콜에도 명시).
+          const dup = listAutomations().find(
+            (x) => x.name.trim().toLowerCase() === a.name.trim().toLowerCase(),
+          );
+          if (dup) {
+            updateAutomation(dup.id, {
+              scheduleHuman: a.schedule,
+              targetType,
+              targetId,
+              promptTemplate: a.prompt,
+              // schedule_json은 항상 방출값으로 — stale spec이 새 토큰을 덮는 것 방지.
+              scheduleJson: a.scheduleSpec ? JSON.stringify(a.scheduleSpec) : null,
+              // tz는 방출됐을 때만 갱신(미방출 재방출이 기존 tz를 시스템 tz로 되돌리지 않게).
+              ...(a.tz && a.tz.trim() ? { timezone: a.tz } : {}),
+            });
+            // 그래프는 방출됐을 때만 교체 — 사용자가 캔버스에서 편집한 그래프를 지우지 않는다.
+            if (a.graph) updateAutomationGraph(dup.id, a.graph);
+          } else {
+            createAutomation({
+              name: a.name,
+              scheduleHuman: a.schedule,
+              targetType,
+              targetId,
+              promptTemplate: a.prompt,
+              createdBy: "agent",
+              // 구조화 스케줄 + steps→그래프를 통과시켜 챗 생성 자동화가 graph_json/schedule_json을 저장.
+              scheduleJson: a.scheduleSpec ? JSON.stringify(a.scheduleSpec) : null,
+              timezone: a.tz && a.tz.trim() ? a.tz : null,
+              graphJson: a.graph ?? null,
+            });
+          }
         }
         displayText = cleanedText;
       } catch (err) {
