@@ -276,6 +276,88 @@ async function autoRegister(workspace: string) {
   commit();
 }
 
+// ── 완료 신호 누락 자동 복구 ──────────────────────────────────────────────
+// 인터뷰 1묶음 이후 BUILD_COMPLETE 없이 턴이 끝나면: (a) 디스크에 패키지 마커가 있으면 완료로
+// 승격, (b) 없으면 "질문 금지·기본값으로 완성" 지시로 자동 계속(최대 3회), (c) 한도 초과 시
+// 에러로 표면화. 어떤 경우에도 빈 질문 카드로 사용자를 붙잡지 않는다.
+const AUTO_CONTINUE_MAX = 3;
+let autoContinues = 0;
+
+const PKG_MARKERS = new Set(["agentlas.json", "AGENTS.md", ".agentlas"]);
+
+/** 워크스페이스(또는 1단계 하위 폴더)에서 생성된 패키지 루트를 찾는다. 없으면 null. */
+async function findPackageRoot(workspace: string): Promise<string | null> {
+  const api = ipc();
+  if (!api) return null;
+  try {
+    const listing = await api.fs.listDirectory(workspace, true);
+    const entries = listing?.entries ?? [];
+    if (entries.some((n) => PKG_MARKERS.has(n.name))) return workspace;
+    const dirs = entries.filter((n) => n.kind === "dir" && !n.name.startsWith(".") && !n.name.startsWith("_")).slice(0, 20);
+    for (const dir of dirs) {
+      const sub = await api.fs.listDirectory(dir.path, true);
+      if ((sub?.entries ?? []).some((n) => PKG_MARKERS.has(n.name))) return dir.path;
+    }
+  } catch {
+    /* 디스크 확인 실패 — 자동 계속으로 폴백 */
+  }
+  return null;
+}
+
+/** 빌드를 완료 상태로 전환하고 조직도 자동 등록까지 수행한다. */
+function finalizeBuild(pkgRoot: string, scan: unknown, note: string | null): void {
+  const ko = currentLocale() === "ko";
+  state.reached = STAGE_COUNT;
+  state.result = { workspace: pkgRoot, securityScan: scan };
+  state.awaitingReply = false;
+  state.pendingQuestions = [];
+  if (note) pushLog("log", note);
+  pushLog("done", ko ? "빌드 완료 — 패키지 생성됨" : "Build complete — package created");
+  state.phase = "done";
+  commit();
+  if (JUNK_WS.test(wsBasename(pkgRoot))) {
+    pushLog(
+      "log",
+      ko
+        ? "자동 등록 생략(공용 폴더) — '조직도에서 열기'로 생성된 패키지 폴더만 직접 추가하세요."
+        : "Skipped auto-registration (shared folder) — add only the generated package folder via \"Open in org chart\".",
+    );
+    commit();
+  } else {
+    void autoRegister(pkgRoot);
+  }
+}
+
+async function resolveTurnWithoutSignal(workspace: string, scan: unknown): Promise<void> {
+  const ko = currentLocale() === "ko";
+  const pkgRoot = await findPackageRoot(workspace);
+  if (pkgRoot) {
+    finalizeBuild(
+      pkgRoot,
+      scan,
+      ko
+        ? "완료 신호가 누락됐지만 디스크에서 패키지를 확인했습니다 — 완료로 처리합니다."
+        : "Completion signal was missing but the package exists on disk — finalizing.",
+    );
+    return;
+  }
+  if (autoContinues < AUTO_CONTINUE_MAX) {
+    autoContinues += 1;
+    pushLog("stage", ko ? `자동 진행 ${autoContinues}/${AUTO_CONTINUE_MAX} — 추가 질문 없이 빌드 계속` : `Auto-continue ${autoContinues}/${AUTO_CONTINUE_MAX} — building without further questions`);
+    commit();
+    await runTurn(
+      ko
+        ? "추가 질문 없이 계속 진행하세요. 남은 결정은 전부 합리적 기본값으로 정해 work-brief에 assumption으로 기록하고, 패키지를 끝까지 완성한 뒤 마지막 줄에 'BUILD_COMPLETE: <패키지 폴더명>'을 출력하세요."
+        : "Continue WITHOUT asking any further questions. Decide every remaining choice with sensible defaults (record them as assumptions in the work-brief), finish the complete package, and end with 'BUILD_COMPLETE: <package folder name>'.",
+    );
+    return;
+  }
+  state.errored = true;
+  state.phase = "error";
+  pushLog("error", ko ? "빌더가 완료 신호 없이 멈췄습니다 — '새 빌드'로 다시 시도하세요." : "The builder stopped without a completion signal — retry with 'New build'.");
+  commit();
+}
+
 /** 한 번의 빌드/인터뷰 턴을 실행한다. input = 이번 턴 사용자 입력. */
 async function runTurn(input: string): Promise<void> {
   const api = ipc();
@@ -365,22 +447,25 @@ async function runTurn(input: string): Promise<void> {
         return;
       }
 
-      // 인터뷰 일시정지 — 질문 파싱 후 사용자 답변 대기.
+      // 인터뷰는 정확히 1묶음 — 첫 턴의 구조화된 질문 묶음만 사용자에게 보여준다.
+      // 그 외(2번째 이후 질문·질문 없는 마무리 멘트·완료 신호 누락)는 사용자를 붙잡지 않고
+      // 디스크 검사→자동 계속으로 스스로 해결한다. "CLI와 대화하는" 빈 배치 카드 재발 방지.
       const parsed = extractQuestions(assistantText, `t${state.turn}`);
       cleanLastPartial(parsed.text);
-      state.pendingQuestions = parsed.questions;
-      state.awaitingReply = true;
-      state.phase = "interview";
+      if (state.turn === 0 && parsed.questions.length > 0) {
+        state.pendingQuestions = parsed.questions;
+        state.awaitingReply = true;
+        state.phase = "interview";
+        state.turn += 1;
+        state.reached = Math.max(state.reached, 1);
+        pushLog("log", ko ? "딥인터뷰 — 질문 묶음에 한 번에 답해 주세요." : "Deep interview — answer the batch of questions in one go.");
+        rememberInterviewCheckpoint();
+        commit();
+        return;
+      }
       state.turn += 1;
-      state.reached = Math.max(state.reached, 1);
-      pushLog(
-        "log",
-        parsed.questions.length
-          ? (ko ? "딥인터뷰 — 질문 묶음에 한 번에 답해 주세요." : "Deep interview — answer the batch of questions in one go.")
-          : (ko ? "어시스턴트가 추가 정보를 기다립니다 — 아래에 답해 주세요." : "The assistant is waiting for more detail — reply below."),
-      );
-      rememberInterviewCheckpoint();
-      commit();
+      const scanFromEvent = (e.result as { securityScan?: unknown } | undefined)?.securityScan ?? null;
+      void resolveTurnWithoutSignal(workspace, scanFromEvent);
       return;
     } else if (e.kind === "error") {
       state.errored = true;
@@ -399,6 +484,7 @@ export async function startBuild(): Promise<void> {
   history = [];
   interviewCheckpoints = [];
   runtimeSessionId = null;
+  autoContinues = 0;
   state.turn = 0;
   state.reached = 0;
   state.result = null;
@@ -461,6 +547,7 @@ export function cancelBuild() {
   state.pendingQuestions = [];
   interviewCheckpoints = [];
   runtimeSessionId = null;
+  autoContinues = 0;
   detach();
   commit();
 }
@@ -480,5 +567,6 @@ export function resetBuild() {
   history = [];
   interviewCheckpoints = [];
   runtimeSessionId = null;
+  autoContinues = 0;
   commit();
 }

@@ -157,6 +157,68 @@ function assertLocalTime(iso, expected) {
 
     const originalRunMcpInvocation = mcpClient.runMcpInvocation;
     try {
+      const { runGraph } = require("../dist/electron/workflow/run-graph.js");
+      const { getOrCreateAutomationSession } = require("../dist/electron/store/chats.js");
+      const graphCalls = [];
+      mcpClient.runMcpInvocation = async (payload) => {
+        graphCalls.push(payload);
+        return { finalText: "GATE_OK\nready", stormbreakerContinueRequested: false };
+      };
+      const graphRun = createAutomation({
+        name: "Graph Session Unified",
+        scheduleHuman: "daily-09:00",
+        targetType: "agent",
+        targetId: "agent-1",
+        promptTemplate: "fallback",
+        graphJson: {
+          version: 1,
+          nodes: [
+            { id: "trg", type: "trigger", position: { x: 0, y: 0 }, config: {} },
+            {
+              id: "gate",
+              type: "agent",
+              position: { x: 280, y: 0 },
+              config: { ref: "agent-1", produces: "gate", prompt: "gate prompt" },
+            },
+          ],
+          edges: [{ id: "e0", source: "trg", target: "gate" }],
+        },
+      });
+      const graph = getAutomation(graphRun.id).graph;
+      const graphResult = await runGraph(graphRun, graph, { runId: "graph-session-unified" });
+      assert.equal(graphResult.ok, true, "graph run should succeed with a non-empty assistant result");
+      const unifiedChat = getOrCreateAutomationSession({ automationId: graphRun.id, agentId: "agent-1" });
+      assert.equal(graphCalls.length, 1, "graph should call the runner once");
+      assert.equal(graphCalls[0].chatId, unifiedChat.id, "same-target graph nodes should write into the automation result session");
+      const splitRows = getDb()
+        .prepare("SELECT COUNT(*) as n FROM chats WHERE title = ?")
+        .get(`⟦automation⟧${graphRun.id}::a:agent-1`);
+      assert.equal(splitRows.n, 0, "same-target graph nodes should not create a split node session");
+
+      mcpClient.runMcpInvocation = async () => ({ finalText: "   ", stormbreakerContinueRequested: false });
+      const emptyGraphRun = createAutomation({
+        name: "Graph Empty Result Fails",
+        scheduleHuman: "daily-09:00",
+        targetType: "agent",
+        targetId: "agent-1",
+        promptTemplate: "fallback",
+        graphJson: {
+          version: 1,
+          nodes: [
+            { id: "trg", type: "trigger", position: { x: 0, y: 0 }, config: {} },
+            { id: "node", type: "agent", position: { x: 280, y: 0 }, config: { prompt: "empty" } },
+          ],
+          edges: [{ id: "e0", source: "trg", target: "node" }],
+        },
+      });
+      const emptyResult = await runGraph(emptyGraphRun, getAutomation(emptyGraphRun.id).graph, { runId: "graph-empty-result" });
+      assert.equal(emptyResult.ok, false, "empty assistant result must fail the graph run");
+      const emptySnapshot = getDb()
+        .prepare("SELECT status, node_states_json FROM automation_runs WHERE id = ?")
+        .get("graph-empty-result");
+      assert.equal(emptySnapshot.status, "error", "empty-result graph snapshot should be error");
+      assert.match(emptySnapshot.node_states_json, /"node":"failed"/, "empty-result graph node should be failed");
+
       const schedulerCalls = [];
       mcpClient.runMcpInvocation = async (payload) => {
         schedulerCalls.push(payload);

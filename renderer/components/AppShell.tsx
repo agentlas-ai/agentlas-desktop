@@ -16,6 +16,7 @@ import { registerRouter } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
 import { IconLayers } from "./Icon";
 import { PageTour, replayCurrentPageTour } from "./PageTour";
+import { BuildDoneToast } from "./BuildDoneToast";
 import {
   isOberonBackgroundJobActive,
   startOberonBackgroundJobMonitor,
@@ -149,6 +150,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>
       </main>
       <PageTour pathname={pathname} />
+      <BuildDoneToast />
       <BackgroundWorkPill
         jobs={oberonJobs}
         avoidComposer={pathname.startsWith("/chat")}

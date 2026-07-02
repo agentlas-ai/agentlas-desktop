@@ -32,6 +32,7 @@ import { workflowNodeTypes, type NodeStrings, type WorkflowNodeData } from "@/co
 import { NODE_ACCENT } from "@/components/automation/nodes/nodeShared";
 import { NodePalette, type PaletteNodeSeed } from "@/components/automation/NodePalette";
 import { NodeConfigPanel } from "@/components/automation/NodeConfigPanel";
+import { RunHistoryPanel } from "@/components/automation/RunHistoryPanel";
 import { IconBolt } from "@/components/Icon";
 
 export default function AutomationFlowWrapper() {
@@ -423,10 +424,12 @@ function AutomationFlowPage() {
     const api = ipc();
     if (!api || !automation) return;
     setRunning(true);
-    setMessage("");
+    setMessage(locale === "en" ? "Starting background run..." : "백그라운드 실행을 시작하는 중입니다...");
     try {
       await api.automations.runNow(automation.id);
-      setMessage(locale === "en" ? "Run started in the background." : "백그라운드에서 실행을 시작했습니다.");
+      setMessage(locale === "en" ? "Run started. Watch node status and history on the right." : "실행을 시작했습니다. 오른쪽에서 노드 상태와 기록을 확인하세요.");
+      const snap = await api.automations.latestRun(automation.id);
+      if (snap?.nodeStates) setRunStates(snap.nodeStates);
     } catch (err) {
       setMessage(locale === "en" ? `Run did not start. ${String(err)}` : `실행을 시작하지 못했습니다. ${String(err)}`);
     } finally {
@@ -500,7 +503,7 @@ function AutomationFlowPage() {
               {running ? t("auto.flow.running") : t("auto.flow.run_now")}
             </button>
             <button onClick={() => void toggleEnabled()} className="titlebar-nodrag" style={pillBtn(automation.enabled)}>
-              {automation.enabled ? t("auto.on") : t("auto.flow.activate")}
+              {automation.enabled ? t("auto.action.disable") : t("auto.action.enable")}
             </button>
           </>
         )}
@@ -613,6 +616,10 @@ function AutomationFlowPage() {
           />
         ) : selectedNode ? (
           <NodeInspector node={selectedNode} onClose={() => setSelectedNodeId(null)} t={t} />
+        ) : !editing ? (
+          <aside style={{ width: 328, flexShrink: 0, borderLeft: "var(--hairline)", background: "var(--paper)", overflowY: "auto" }}>
+            <RunHistoryPanel automation={automation} locale={locale} />
+          </aside>
         ) : null}
       </div>
     </div>

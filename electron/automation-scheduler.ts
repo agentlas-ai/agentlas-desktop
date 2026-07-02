@@ -1,7 +1,7 @@
 // 자동화 스케줄러 — 앱이 켜져 있는 동안 60초마다 due 자동화를 점검해 실행한다.
 // 실행 = 타깃(firm/agent)의 백그라운드(division) chat을 만들어 runMcpInvocation로 promptTemplate을 돌린다.
 // (M1: 인프로세스 타이머. 앱이 꺼져 있으면 안 돎 — launchd persistent 데몬은 후속 작업.)
-import { Notification } from "electron";
+import { app, Notification } from "electron";
 import type { Automation } from "../shared/types";
 import {
   dueAutomations,
@@ -10,6 +10,9 @@ import {
   toggleAutomation,
   claimAutomationRun,
   releaseAutomationRun,
+  startGraphRun,
+  updateGraphRunNode,
+  finishGraphRun,
 } from "./store/automations";
 import { getOrCreateAutomationSession } from "./store/chats";
 import { runMcpInvocation } from "./mcp/client";
@@ -53,6 +56,7 @@ async function runWithConcurrency<T>(
 /** 완료 시 OS 알림(설계 §2.7 한계 #10 — 결과 미표출 해소). Notification 미지원이면 조용히 무시. */
 function notifyDone(a: Automation, ok: boolean, error?: string): void {
   try {
+    if (!app.isReady()) return;
     if (!Notification.isSupported()) return;
     new Notification({
       title: ok ? `Automation ran: ${a.name}` : `Automation failed: ${a.name}`,
@@ -92,20 +96,59 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
       output = outVals.length ? outVals[outVals.length - 1] : undefined;
     } else {
       // 레거시 단일 프롬프트 경로(완전 backward-compat).
+      const runId = `run-${a.id}-${Date.now()}`;
+      const emitLegacyState = (nodeId: string, nodeState: "pending" | "running" | "done" | "failed" | "skipped"): void => {
+        try {
+          updateGraphRunNode(runId, nodeId, nodeState);
+        } catch {
+          /* 스냅샷 실패는 실행을 막지 않는다 */
+        }
+        broadcastLiveRun(a.id, { kind: "partial", nodeId, nodeState, agentId: nodeId });
+      };
+      try {
+        // flow/page.tsx의 synthesizeLegacyGraph 노드 id와 맞춰 단일 프롬프트 자동화도
+        // 캔버스/상태 패널에서 즉시 보이게 한다.
+        startGraphRun({ runId, automationId: a.id, nodeIds: ["n0", "n1"] });
+        emitLegacyState("n0", "done");
+        emitLegacyState("n1", "running");
+      } catch {
+        /* 스냅샷 시작 실패는 무시 */
+      }
       const chat = getOrCreateAutomationSession({
         automationId: a.id,
         ...(a.targetType === "firm" ? { firmId: a.targetId } : { agentId: a.targetId }),
       });
-      const result = await runMcpInvocation(
-        { chatId: chat.id, userPrompt: a.promptTemplate, permissions: "write" },
-        () => {
-          /* 백그라운드 실행 — UI 싱크 없음. 결과는 chat 메시지에 영속됨. */
-        },
-        controller.signal,
-      );
-      output = result.finalText;
-      if (isStormbreakerLongRunPrompt(a.promptTemplate) && !result.stormbreakerContinueRequested) {
-        toggleAutomation(a.id, false);
+      try {
+        let runnerError: string | null = null;
+        const result = await runMcpInvocation(
+          { chatId: chat.id, userPrompt: a.promptTemplate, permissions: "write" },
+          (ev) => {
+            if (ev.kind === "error") {
+              runnerError = ev.error?.message || "runner failed";
+            }
+          },
+          controller.signal,
+        );
+        output = result.finalText;
+        if (runnerError) throw new Error(runnerError);
+        if (!output?.trim()) throw new Error("Automation finished without an assistant result");
+        emitLegacyState("n1", "done");
+        try {
+          finishGraphRun(runId, "ok");
+        } catch {
+          /* ignore */
+        }
+        if (isStormbreakerLongRunPrompt(a.promptTemplate) && !result.stormbreakerContinueRequested) {
+          toggleAutomation(a.id, false);
+        }
+      } catch (err) {
+        emitLegacyState("n1", "failed");
+        try {
+          finishGraphRun(runId, "error");
+        } catch {
+          /* ignore */
+        }
+        throw err;
       }
     }
   } catch (err) {

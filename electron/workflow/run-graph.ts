@@ -200,6 +200,12 @@ export async function runGraph(
   const chatForNode = (node: WorkflowNode): typeof chat => {
     const ref = str(node.config, "ref");
     if (!ref) return chat;
+    if (
+      (automation.targetType === "agent" && ref === automation.targetId) ||
+      (automation.targetType === "firm" && ref === automation.targetId)
+    ) {
+      return chat;
+    }
     const cached = nodeChatCache.get(ref);
     if (cached) return cached;
     let resolved = chat;
@@ -307,12 +313,20 @@ export async function runGraph(
         try {
           // agent 노드는 config.ref가 가리키는 에이전트/회사 세션에서 실행(멀티에이전트 그래프).
           const nodeChat = node.type === "agent" ? chatForNode(node) : chat;
+          let runnerError: string | null = null;
           const result = await runMcpInvocation(
             { chatId: nodeChat.id, userPrompt: prompt, permissions: "write" },
-            (ev) => sink({ ...ev, agentId: ev.agentId ?? node.id, nodeId: node.id }),
+            (ev) => {
+              if (ev.kind === "error") {
+                runnerError = ev.error?.message || "runner failed";
+              }
+              sink({ ...ev, agentId: ev.agentId ?? node.id, nodeId: node.id });
+            },
             opts.signal,
           );
           const text = result.finalText ?? "";
+          if (runnerError) throw new Error(runnerError);
+          if (!text.trim()) throw new Error(`Node "${node.label || node.id}" finished without an assistant result`);
           outputs[node.id] = text;
           const produces = str(node.config, "produces");
           if (produces) vars[produces] = text; // 병렬 노드는 서로 독립(deps로 분리)이라 vars 경합 없음

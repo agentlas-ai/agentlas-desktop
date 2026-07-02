@@ -237,7 +237,7 @@ export function EngineUsage() {
     return ko ? "연결 중…" : "Connecting…";
   }
 
-  // 기본(활성) 엔진 선택 — 세팅의 detected 목록에서 대시보드로 이관(엔진 관리 일원화).
+  // 기본 엔진 선택 — 연결/사용량과 "기본으로 쓸 엔진" 상태를 분리해 표시한다.
   function runtimeFor(e: EngineDef): RuntimeStatus | undefined {
     if (e.auth === "cli") return runtimes.find((r) => r.kind === e.cliKind);
     if (e.auth === "local") return runtimes.find((r) => r.kind === "ollama");
@@ -352,32 +352,23 @@ export function EngineUsage() {
                   </span>
                 ) : connected ? (
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                    <span className="dashboard-engine-connected">
+                      {ko ? "연결됨" : "Connected"}
+                    </span>
                     {rt?.active ? (
-                      <span
-                        style={{
-                          fontSize: 10,
-                          fontWeight: 800,
-                          color: "#fff",
-                          background: "var(--accent)",
-                          borderRadius: 999,
-                          padding: "2px 8px",
-                          whiteSpace: "nowrap",
-                        }}
-                        title={ko ? "기본 엔진" : "Default engine"}
-                      >
-                        {ko ? "활성" : "active"}
+                      <span className="dashboard-engine-default" title={ko ? "기본 실행 엔진" : "Default run engine"}>
+                        {ko ? "기본" : "Default"}
                       </span>
                     ) : rt ? (
                       <button
                         onClick={() => void activateEngine(e, rt)}
                         disabled={busy === e.id}
                         className="titlebar-nodrag"
-                        title={ko ? "이 엔진을 기본 엔진으로" : "Make this the default engine"}
+                        title={ko ? "이 엔진을 기본 실행 엔진으로" : "Make this the default run engine"}
                       >
-                        {ko ? "활성화" : "Activate"}
+                        {ko ? "기본으로" : "Use default"}
                       </button>
                     ) : null}
-                    <span className="dashboard-engine-check" aria-label={ko ? "연결됨" : "connected"}>✓</span>
                   </span>
                 ) : (
                   <button

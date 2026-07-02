@@ -103,7 +103,9 @@ export function stageAttachments(workspace: string, attachments: NonNullable<Hep
 }
 
 /** 빌더 시스템 프롬프트 조립: 캐논 AGENTS.md + (모드 빌더 또는 mode-map + 3 빌더) + 출력 지침. */
-function composeBuilderPrompt(root: string, req: HephaestusBuildRequest): string {
+function composeBuilderPrompt(root: string, req: HephaestusBuildRequest, locale: RuntimeLocale): string {
+  const ko = locale === "ko";
+  const uiLang = ko ? "Korean" : "English";
   const parts: string[] = [];
   const canonical = readIf(root, "AGENTS.md");
   if (canonical) parts.push("# Hephaestus Canonical Core (AGENTS.md)\n", canonical, "\n");
@@ -134,28 +136,27 @@ function composeBuilderPrompt(root: string, req: HephaestusBuildRequest): string
       "## DEEP INTERVIEW FIRST (this is the core of the builder — do not skip it)",
       "This Build runs as a CONVERSATION. The desktop relays your questions to the user and sends their",
       "answers back as the next turn, so you CAN and MUST interview before building.",
-      "- BEFORE writing any file, run the Builder Interview and Research Gate. Do NOT accept a vague",
-      "  one-line idea as the final spec. Interview the user until the target user, recurring tasks,",
-      "  inputs, outputs, tools/plugins, concrete examples, failure modes, memory policy, and evaluation",
-      "  rubric are all clear.",
-      "- Ask clarifying questions as a BATCH. In the first interview reply, emit 4-8",
+      `- INTERVIEW LANGUAGE: the app UI language is ${uiLang}. Write EVERY question, option label,`,
+      `  description, summary, and confirmation in ${uiLang} — even if the user's request or answers`,
+      "  arrive in another language.",
+      `- PACKAGE LANGUAGE: also write the CONTENTS of every generated file (AGENTS.md, agent.md,`,
+      `  prompts, docs, briefs, comments) in ${uiLang}, unless the user explicitly asks for another`,
+      "  language or the package's own end users clearly need one (then say so and confirm first).",
+      "- BEFORE writing any file, ask ONE interview batch. In the first reply, emit 4-8",
       "  `<<agentlas-ask>>` fenced JSON blocks together, covering the key unknowns: target user,",
       "  recurring jobs, inputs, outputs, tools/plugins, concrete examples, memory policy, and quality bar.",
       "  Then STOP and wait for the single combined answer.",
-      "- Do NOT drip-feed one question per turn. Ask a follow-up turn only when the user's batch answer",
-      "  exposes a real blocker that cannot be decided by a sensible default.",
+      "- ONE BATCH ONLY (hard rule): the interview is EXACTLY ONE batch. After the user's combined",
+      "  answer, NEVER ask again — no follow-up batches, no coverage question ('did we miss anything?'),",
+      "  no 'shall I start building?' confirmation, no 'reply if you want changes' closers. Decide every",
+      "  remaining unknown with a sensible default, record it in the work-brief as an assumption (or",
+      "  deferred), and build the COMPLETE package in that same turn, ending with the BUILD_COMPLETE line.",
       "- Open-ended questions still use a fence with likely options plus an 'Other / let me type' option.",
-      "- Do NOT write files and do NOT print 'BUILD_COMPLETE' during the interview phase.",
-      "- Question discipline (briefing interview engine): pick questions from four lens groups —",
+      "- Do NOT write files and do NOT print 'BUILD_COMPLETE' in the interview-batch reply.",
+      "- Question discipline (briefing interview engine): compose the single batch from four lens groups —",
       "  scope (what NOT to do / smallest version / done signal), system (dependencies / existing assets),",
-      "  intent (goal-behind-the-goal / audience), challenge (pre-mortem / stop criterion). Three lenses are",
-      "  REQUIRED before building: anti-scope ('비슷해 보여도 이건 하면 안 된다'가 있나요?), done-signal",
-      "  (뭘 보면 됐다고 판단하나요?), stop-criterion (어떤 결과면 그만두나요?). If an answer reveals a",
-      "  contradiction or an unverified assumption, follow that thread before returning to your plan.",
-      "- Stop rule: keep interviewing until the goal, constraints, success criteria and fit-with-existing-assets",
-      "  are each specific enough that a stranger reading them would produce the same package (ambiguity ~<= 0.2),",
-      "  and that held across your last two assessments. Then ask ONE coverage question ('빠진 주제가 있나요?'),",
-      "  restate the goal as ONE sentence for confirmation, and only then start building.",
+      "  intent (goal-behind-the-goal / audience), challenge (pre-mortem / stop criterion). Include the",
+      "  anti-scope, done-signal, and stop-criterion lenses INSIDE this one batch.",
       "- 'decide later' is a valid answer — record it as deferred, never re-ask it.",
       "",
       "## THEN BUILD (only after the interview)",
@@ -168,6 +169,9 @@ function composeBuilderPrompt(root: string, req: HephaestusBuildRequest): string
       "  routing cards derive anti_triggers from this verbatim), assumptions with source tags, deferred topics.",
       "- When the package is fully written, print a final summary line beginning with 'BUILD_COMPLETE:'",
       "  followed by the package root folder name you created. Print this ONLY when truly done building.",
+      "- The message that reports completion MUST itself contain the BUILD_COMPLETE line — do NOT hold it",
+      "  back waiting for the user to finish manual setup steps (logins, filling briefs). List such steps",
+      "  AFTER the BUILD_COMPLETE line instead; without it the app stays stuck in interview mode.",
       "- Do not embed any reference to the desktop app inside the generated package — it must be a clean,",
       "  portable Agentlas package.",
     ].join("\n"),
@@ -226,8 +230,11 @@ export async function runHephaestusBuild(
     }
   }
 
-  const agentPrompt = composeBuilderPrompt(root, req);
-  const systemPrompt = wrapSystemPrompt(agentPrompt, locale, "full", userPrompt, true);
+  const agentPrompt = composeBuilderPrompt(root, req, locale);
+  // userPrompt 를 넘기지 않는다(의도적) — wrapSystemPrompt의 언어 가이드가 "이번 입력 언어"를
+  // 따라가면, 사용자가 한국어 옵션을 고르기만 해도 영어 UI에서 인터뷰가 한국어로 고착된다.
+  // 빌드 인터뷰는 항상 UI locale로 진행한다. surface 게이트는 forceSurface=true 로 이미 켜져 있다.
+  const systemPrompt = wrapSystemPrompt(agentPrompt, locale, "full", undefined, true);
 
   sink({
     runId,

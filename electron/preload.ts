@@ -265,6 +265,7 @@ const api: AgentlasIpc = {
     listRuns: (id: string, limit?: number) => ipcRenderer.invoke("automations:listRuns", id, limit),
     liveRunChannel: (automationId: string) => `automations:liveRun:${automationId}`,
     latestRun: (automationId: string) => ipcRenderer.invoke("automations:latestRun", automationId),
+    getSession: (automationId: string) => ipcRenderer.invoke("automations:getSession", automationId),
   },
   launchd: {
     status: () => ipcRenderer.invoke("launchd:status"),

@@ -7,6 +7,7 @@ import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type { Automation, InstalledAgent, InstalledFirm } from "@/lib/types";
 import { IconBolt, IconBuilding, IconTrash } from "@/components/Icon";
+import { RunHistoryPanel } from "@/components/automation/RunHistoryPanel";
 
 export default function AutomationDetailWrapper() {
   return (
@@ -154,7 +155,7 @@ function AutomationDetailPage() {
             color: automation.enabled ? "var(--accent)" : "var(--muted-deep)",
           }}
         >
-          {automation.enabled ? t("auto.on") : t("auto.off")}
+          {automation.enabled ? t("auto.action.disable") : t("auto.action.enable")}
         </button>
         <button
           onClick={() => void remove()}
@@ -186,6 +187,7 @@ function AutomationDetailPage() {
           }
         />
         <Row label={t("auto.detail.last_run")} value={automation.lastRunAt ?? t("auto.detail.never")} />
+        <RunHistoryPanel automation={automation} locale={locale} compact />
         <Row
           label={t("auto.detail.prompt")}
           value={

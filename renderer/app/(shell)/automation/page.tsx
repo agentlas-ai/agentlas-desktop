@@ -63,6 +63,7 @@ export default function AutomationListPage() {
   function runNow(id: string) {
     const api = ipc();
     if (!api) return;
+    setMessage(locale === "en" ? "Starting the run. Opening the live flow..." : "실행을 시작하고 라이브 플로우를 엽니다...");
     api.automations.runNow(id).catch((err) => {
       setMessage(locale === "en" ? `Test run failed to start. ${String(err)}` : `테스트 실행을 시작하지 못했습니다. ${String(err)}`);
     });
@@ -230,7 +231,7 @@ export default function AutomationListPage() {
                     color: a.enabled ? "var(--accent)" : "var(--muted-deep)",
                   }}
                 >
-                  {a.enabled ? t("auto.on") : t("auto.off")}
+                  {a.enabled ? t("auto.action.disable") : t("auto.action.enable")}
                 </button>
                 <button
                   onClick={() => runNow(a.id)}

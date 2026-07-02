@@ -154,7 +154,11 @@ export function ChatStream({
       onScroll={handleScroll}
       style={{
         flex: 1,
+        minWidth: 0,
         overflowY: messages.length === 0 ? "hidden" : "auto",
+        // 좁은 pane에서 넓은 콘텐츠(코드블록·표·긴 URL)가 챗창 전체를 옆으로 밀어 깨뜨리지
+        // 않게 가로 오버플로는 여기서 차단 — 스크롤은 각 블록(pre/table)이 자체 처리한다.
+        overflowX: "hidden",
         padding: messages.length === 0 ? "20px 28px" : "24px 32px",
         background: "var(--paper)",
         display: "flex",
@@ -330,16 +334,20 @@ const Bubble = memo(function Bubble({
             {message.streaming && <BlinkingCursor />}
           </div>
         )}
-        {message.questions && message.questions.length > 0 && (
+        {/* 질문은 이제 바텀 시트(ChatQuestionSheet)에서 답한다 — 스트림에는 답변이 끝난
+            질문만 잠긴 기록으로 남긴다. ("—"는 시트에서 스킵된 질문의 잠금 마커라 숨김.) */}
+        {message.questions && message.questions.some((q) => q.answer && q.answer.length > 0 && q.answer[0] !== "—") && (
           <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 10 }}>
-            {message.questions.map((q) => (
-              <QuestionBlock
-                key={q.id}
-                question={q}
-                disabled={message.busy === true || interactionBusy}
-                onAnswer={(answers) => onAnswerQuestion?.(message.id, q.id, answers)}
-              />
-            ))}
+            {message.questions
+              .filter((q) => q.answer && q.answer.length > 0 && q.answer[0] !== "—")
+              .map((q) => (
+                <QuestionBlock
+                  key={q.id}
+                  question={q}
+                  disabled
+                  onAnswer={(answers) => onAnswerQuestion?.(message.id, q.id, answers)}
+                />
+              ))}
           </div>
         )}
         {message.text && !message.busy && (

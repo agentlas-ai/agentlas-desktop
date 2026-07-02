@@ -3263,6 +3263,8 @@ export interface AgentlasIpc {
     liveRunChannel: (automationId: string) => string;
     /** 이 자동화의 최근 실행 스냅샷(per-node 상태). 라이브 오버레이 초기 하이드레이트용. */
     latestRun: (automationId: string) => Promise<WorkflowRunSnapshot | null>;
+    /** 자동화 결과가 누적되는 숨김 실행 세션. 사용자가 원하면 채팅 화면에서 열 수 있다. */
+    getSession: (automationId: string) => Promise<Chat>;
   };
   /** launchd LaunchAgent — 앱이 꺼져도 자동화를 도는 macOS 영속성(opt-in, 설계 §2.6). */
   launchd: {

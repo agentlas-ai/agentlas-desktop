@@ -63,7 +63,7 @@ export function DashboardAutomations() {
         <span>{ko ? "자동화" : "Automations"}</span>
         {items && items.length > 0 && (
           <span className="dashboard-module-meta">
-            {ko ? `${activeCount}개 활성` : `${activeCount} on`}
+            {ko ? `${activeCount}개 켜짐` : `${activeCount} on`}
           </span>
         )}
       </div>
@@ -92,7 +92,7 @@ export function DashboardAutomations() {
               className="titlebar-nodrag"
               data-toggle-state={a.enabled ? "on" : "off"}
             >
-              {a.enabled ? (ko ? "켜짐" : "On") : ko ? "꺼짐" : "Off"}
+              {a.enabled ? (ko ? "끄기" : "Turn off") : ko ? "켜기" : "Turn on"}
             </button>
           </div>
         ))

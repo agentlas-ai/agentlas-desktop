@@ -580,7 +580,7 @@ export function ChatInput({
   return (
     <footer
       data-popover-root
-      className="titlebar-nodrag"
+      className="titlebar-nodrag chat-input-footer"
       style={{
         borderTop: "var(--hairline)",
         padding: "10px 16px 14px",
@@ -1186,50 +1186,34 @@ export function ChatInput({
               </div>
             )}
             
-            {/* 모드 칩 — Plan */}
-            <button
-              className="chat-input-chip chat-input-mode-chip"
-              onClick={() => setPlanMode((v) => !v)}
-              disabled={disabled}
-              title={t("chatinput.plan_mode")}
-              style={{
-                ...toolBtnStyle(planMode),
-                width: "auto",
-                padding: "0 10px",
-                gap: 6,
-                fontSize: 11,
-                fontWeight: 600,
-                color: planMode ? "var(--accent)" : "var(--muted-deep)",
-              }}
-            >
-              <IconRoute size={13} />
-              <span className="chat-input-chip-label chat-input-action-label">
-                {t("chatinput.plan_mode")}
-              </span>
-            </button>
-
-            {/* 모드 칩 — Goal */}
-            <button
-              className="chat-input-chip chat-input-mode-chip"
-              onClick={() => setGoalMode((v) => !v)}
-              disabled={disabled}
-              title={t("chatinput.goal_mode")}
-              style={{
-                ...toolBtnStyle(goalMode),
-                width: "auto",
-                padding: "0 10px",
-                gap: 6,
-                fontSize: 11,
-                fontWeight: 600,
-                color: goalMode ? "var(--accent)" : "var(--muted-deep)",
-              }}
-            >
-              <IconTarget size={13} />
-              <span className="chat-input-chip-label chat-input-action-label">
-                {t("chatinput.goal_mode")}
-              </span>
-            </button>
-
+            {/* Plan/Goal 모드 토글은 툴바에서 숨김 — + 메뉴(PlusMenu)의 ToggleRow로만 노출.
+                켜져 있으면 아래 활성 칩(chat-input-active-modes)이 상태를 보여준다. */}
+            {(planMode || goalMode) && (
+              <div style={{ display: "flex", gap: 4 }}>
+                {planMode && (
+                  <button
+                    className="chat-input-chip"
+                    onClick={() => setPlanMode(false)}
+                    title={t("chatinput.plan_mode")}
+                    style={{ ...toolBtnStyle(true), width: "auto", padding: "0 8px", gap: 4, fontSize: 10.5, fontWeight: 600, color: "var(--accent)" }}
+                  >
+                    <IconRoute size={12} />
+                    <span className="chat-input-chip-label">{t("chatinput.plan_mode")}</span> ✕
+                  </button>
+                )}
+                {goalMode && (
+                  <button
+                    className="chat-input-chip"
+                    onClick={() => setGoalMode(false)}
+                    title={t("chatinput.goal_mode")}
+                    style={{ ...toolBtnStyle(true), width: "auto", padding: "0 8px", gap: 4, fontSize: 10.5, fontWeight: 600, color: "var(--accent)" }}
+                  >
+                    <IconTarget size={12} />
+                    <span className="chat-input-chip-label">{t("chatinput.goal_mode")}</span> ✕
+                  </button>
+                )}
+              </div>
+            )}
 
             {/* 보내기 / 정지 — 실행 중(busy)이고 onStop이 있으면 정지 버튼으로 변신 */}
             {(() => {

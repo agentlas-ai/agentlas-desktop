@@ -134,6 +134,7 @@ export default function BuildPage() {
   const [folderMsg, setFolderMsg] = useState<string | null>(null);
   const [reply, setReply] = useState("");
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
+  const [questionNotes, setQuestionNotes] = useState<Record<string, string>>({});
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
@@ -159,8 +160,8 @@ export default function BuildPage() {
   const pendingQuestionKey = pendingQuestions.map((q) => q.id).join("|");
   const selectedCount = pendingQuestions.reduce((sum, q) => sum + (selectedOptions[q.id]?.length ?? 0), 0);
   const composedReply = useMemo(
-    () => composeInterviewReply(pendingQuestions, selectedOptions, reply),
-    [pendingQuestions, reply, selectedOptions],
+    () => composeInterviewReply(pendingQuestions, selectedOptions, questionNotes, reply, ko),
+    [pendingQuestions, reply, selectedOptions, questionNotes, ko],
   );
 
   const sendReply = (text: string) => {
@@ -178,9 +179,14 @@ export default function BuildPage() {
     });
   };
 
+  const setQuestionNote = (questionId: string, value: string) => {
+    setQuestionNotes((prev) => ({ ...prev, [questionId]: value }));
+  };
+
   const confirmInterviewReply = () => {
     if (!composedReply.trim()) return;
     setSelectedOptions({});
+    setQuestionNotes({});
     sendReply(composedReply);
   };
 
@@ -193,6 +199,7 @@ export default function BuildPage() {
   }, [log]);
   useEffect(() => {
     setSelectedOptions({});
+    setQuestionNotes({});
     setReply("");
   }, [pendingQuestionKey]);
 
@@ -508,7 +515,7 @@ export default function BuildPage() {
             )}
           </section>
 
-          {awaitingReply && (
+          {awaitingReply && pendingQuestions.length > 0 && (
             <section className="build-card build-interview-card">
               <div className="build-card-head build-interview-head">
                 <span>{ko ? `딥인터뷰 · 질문 묶음 ${turn}` : `Deep interview · question batch ${turn}`}</span>
@@ -527,8 +534,8 @@ export default function BuildPage() {
               </div>
               <p className="build-interview-hint">
                 {ko
-                  ? "필요한 질문을 한 번에 모았습니다. 모두 선택한 뒤 확인을 눌러 한 번에 보냅니다."
-                  : "The needed questions are grouped here. Choose everything, then press Confirm once."}
+                  ? "필요한 질문을 한 번에 모았습니다. 질문마다 선택하거나 직접 답변을 적은 뒤, 확인을 눌러 한 번에 보냅니다."
+                  : "The needed questions are grouped here. Pick options or type an answer under each question, then press Confirm once."}
               </p>
               {pendingQuestions.map((q) => (
                 <div key={q.id} className="build-interview-q">
@@ -558,6 +565,16 @@ export default function BuildPage() {
                       );
                     })}
                   </div>
+                  <textarea
+                    value={questionNotes[q.id] ?? ""}
+                    onChange={(e) => setQuestionNote(q.id, e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) confirmInterviewReply();
+                    }}
+                    rows={1}
+                    placeholder={ko ? "이 질문에 직접 답변…" : "Type your own answer to this question…"}
+                    className="build-interview-input build-interview-qinput titlebar-nodrag"
+                  />
                 </div>
               ))}
               <div className="build-interview-reply">
@@ -568,7 +585,7 @@ export default function BuildPage() {
                     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) confirmInterviewReply();
                   }}
                   rows={2}
-                  placeholder={ko ? "직접 답변을 추가로 입력… (⌘↵ 확인)" : "Add a note… (⌘↵ to confirm)"}
+                  placeholder={ko ? "묶음 전체에 대한 추가 메모… (⌘↵ 확인)" : "Extra note for the whole batch… (⌘↵ to confirm)"}
                   className="build-interview-input titlebar-nodrag"
                 />
                 <button
@@ -640,23 +657,30 @@ export default function BuildPage() {
   );
 }
 
+// 답장 스캐폴딩은 반드시 UI locale 을 따른다 — 영어 모드에서 "질문:/선택:"으로 조립해 보내면
+// 런타임 언어 가이드가 한국어 입력으로 판정해 다음 턴부터 인터뷰가 한국어로 고착된다.
 function composeInterviewReply(
   questions: ChatQuestion[],
   selectedOptions: Record<string, string[]>,
-  manualReply: string,
+  questionNotes: Record<string, string>,
+  batchNote: string,
+  ko: boolean,
 ): string {
   const chunks: string[] = [];
   for (const q of questions) {
     const selected = selectedOptions[q.id] ?? [];
-    if (!selected.length) continue;
-    chunks.push([
-      `질문: ${q.question}`,
-      "선택:",
-      ...selected.map((label, index) => `${index + 1}. ${label}`),
-    ].join("\n"));
+    const note = (questionNotes[q.id] ?? "").trim();
+    if (!selected.length && !note) continue;
+    const lines = [`${ko ? "질문" : "Question"}: ${q.question}`];
+    if (selected.length) {
+      lines.push(ko ? "선택:" : "Selected:");
+      selected.forEach((label, index) => lines.push(`${index + 1}. ${label}`));
+    }
+    if (note) lines.push(`${ko ? "답변" : "Answer"}: ${note}`);
+    chunks.push(lines.join("\n"));
   }
-  const manual = manualReply.trim();
-  if (manual) chunks.push(manual);
+  const manual = batchNote.trim();
+  if (manual) chunks.push(`${ko ? "추가 메모" : "Additional note"}: ${manual}`);
   return chunks.join("\n\n");
 }
 

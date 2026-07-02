@@ -158,6 +158,7 @@ import {
   setChatWorkingFolder,
   switchChatAgent,
   unarchiveChat,
+  getOrCreateAutomationSession,
 } from "./store/chats";
 import { getAgentConcurrencyInfo, setAgentConcurrency } from "./store/concurrency";
 import { getInterviewMode, setInterviewMode, type InterviewMode } from "./store/interview-mode";
@@ -1074,10 +1075,22 @@ export function registerIpcHandlers(): void {
     updateAutomationGraph(id, graph),
   );
   ipcMain.handle("automations:runNow", async (_e, id: string) => {
+    const automation = getAutomation(id);
+    if (!automation) throw new Error(`Automation not found: ${id}`);
     const { runAutomationNow } = await import("./automation-scheduler");
-    await runAutomationNow(id);
+    void runAutomationNow(id).catch((err) => {
+      console.error(`[automation] run-now failed (${id}):`, err);
+    });
   });
   ipcMain.handle("automations:latestRun", (_e, id: string) => getLatestGraphRun(id));
+  ipcMain.handle("automations:getSession", (_e, id: string) => {
+    const automation = getAutomation(id);
+    if (!automation) throw new Error(`Automation not found: ${id}`);
+    return getOrCreateAutomationSession({
+      automationId: automation.id,
+      ...(automation.targetType === "firm" ? { firmId: automation.targetId } : { agentId: automation.targetId }),
+    });
+  });
 
   // ── schedule 문법 헬퍼(렌더러 스케줄 빌더용 — croner는 메인에서만) ──
   ipcMain.handle("schedule:validateCron", async (_e, expr: string) => {

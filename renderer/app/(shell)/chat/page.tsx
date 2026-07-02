@@ -25,6 +25,7 @@ import type {
 } from "@/lib/types";
 import type { Recommendation, RecExecChoice, RecRouterAgent, RecStage } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
+import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
 import { extractQuestions } from "@/lib/ask-question";
 import { dropChatViewSnapshot, readChatViewSnapshot, saveChatViewSnapshot } from "@/lib/chat-view-cache";
 import { ChatInput } from "@/components/ChatInput";
@@ -1518,35 +1519,64 @@ function ChatPage() {
   const switchEffort = (effort: string) => void applySelection({ effort });
 
   /**
-   * 에이전트가 emit한 질문(<<agentlas-ask>>)에 사용자가 답함.
-   * — 해당 메시지의 questions 배열에서 그 질문을 'answered'로 표시(잠금)
-   * — 답변 라벨을 user 메시지로 즉시 전송하여 에이전트에 컨텍스트 전달
+   * 에이전트가 emit한 질문(<<agentlas-ask>>) 묶음에 사용자가 답함 — 바텀 시트에서 전부 답하고
+   * 한 번에 전송한다. (예전: 질문 하나 답할 때마다 그 라벨이 즉시 user 프롬프트로 전송돼
+   * 질문이 꼬리를 물었다 — 그 per-question 자동 전송은 폐기.)
+   * 시트에서 안 고른 질문도 잠금("—")해 시트가 다시 뜨지 않게 한다.
    */
-  const answerQuestion = useCallback(
-    (messageId: string, questionId: string, answers: string[]) => {
+  const answerQuestionBatch = useCallback(
+    (messageId: string, reply: string, perQuestion: QuestionSheetAnswer[]) => {
       if (busy) return;
       setMessages((m) =>
         m.map((msg) =>
           msg.id === messageId
             ? {
                 ...msg,
-                questions: msg.questions?.map((q) =>
-                  q.id === questionId ? { ...q, answer: answers } : q,
-                ),
+                questions: msg.questions?.map((q) => {
+                  const hit = perQuestion.find((p) => p.questionId === q.id);
+                  if (hit && hit.answers.length) return { ...q, answer: hit.answers };
+                  return q.answer && q.answer.length ? q : { ...q, answer: ["—"] };
+                }),
               }
             : msg,
         ),
       );
-      // 사용자의 선택을 자연어로 묶어 user 메시지로 보냄
-      const reply = answers.length === 1 ? answers[0] : answers.map((a) => `• ${a}`).join("\n");
-      void send(reply, {
-        permissions: inferPermissionFromAnswer(answers) ?? DEFAULT_PERMISSION,
-      });
+      const perms = perQuestion.map((p) => inferPermissionFromAnswer(p.answers)).find(Boolean);
+      void send(reply, { permissions: perms ?? DEFAULT_PERMISSION });
     },
     // send는 동일 useCallback에 의존
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [busy, send],
   );
+
+  /** 질문 시트 × 닫기 — 이 배치의 미답 질문을 잠가("—") 시트를 접는다. 전송 없음. */
+  const dismissQuestionBatch = useCallback((messageId: string) => {
+    setMessages((m) =>
+      m.map((msg) =>
+        msg.id === messageId
+          ? {
+              ...msg,
+              questions: msg.questions?.map((q) =>
+                q.answer && q.answer.length ? q : { ...q, answer: ["—"] },
+              ),
+            }
+          : msg,
+      ),
+    );
+  }, []);
+
+  // 바텀 시트에 올릴 질문 묶음 — 가장 최근에 질문을 낸 어시스턴트 메시지 하나만 본다.
+  // (더 오래된 미답 질문은 stale — 대화가 이미 지나갔으므로 다시 묻지 않는다.)
+  const pendingQuestionSheet = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === "agent" && m.questions && m.questions.length > 0) {
+        const unanswered = m.questions.filter((q) => !q.answer || q.answer.length === 0);
+        return unanswered.length > 0 ? { messageId: m.id, questions: unanswered } : null;
+      }
+    }
+    return null;
+  }, [messages]);
 
   const handleSurfaceAction = useCallback(
     async (activeSurface: WorkbenchSurface, action: AgentlasSurfaceAction) => {
@@ -2436,11 +2466,21 @@ function ChatPage() {
           }}
           onOpenWorkflow={() => setNetworkOpenPersisted(true)}
           onStop={stop}
-          onAnswerQuestion={answerQuestion}
           interactionBusy={busy}
           stopRequested={cancelPending}
         />
       </div>
+      {/* 에이전트 질문 바텀 시트 — 인라인 카드 대신 여기 모아 전부 답하고 1회 전송 */}
+      {pendingQuestionSheet && (
+        <ChatQuestionSheet
+          questions={pendingQuestionSheet.questions}
+          busy={busy}
+          onConfirm={(reply, perQuestion) =>
+            answerQuestionBatch(pendingQuestionSheet.messageId, reply, perQuestion)
+          }
+          onDismiss={() => dismissQuestionBatch(pendingQuestionSheet.messageId)}
+        />
+      )}
       {/* Codex식: 이 대화가 폴더(프로젝트)에서 작업하는지 / 전역 대화인지 선택 */}
       <div style={{ padding: "6px 16px 0", display: "flex", alignItems: "center", gap: 8 }}>
         <ProjectFolderBar
