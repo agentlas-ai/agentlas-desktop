@@ -14,7 +14,7 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { usePathname } from "next/navigation";
 import { registerRouter } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
-import { IconChat, IconLayers } from "./Icon";
+import { IconLayers } from "./Icon";
 import { PageTour, replayCurrentPageTour } from "./PageTour";
 import {
   isOberonBackgroundJobActive,
@@ -169,7 +169,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       />
       <GuideFab
         avoidComposer={pathname.startsWith("/chat")}
-        onReplayOnboarding={() => router.push("/onboarding")}
         onReplayTour={replayCurrentPageTour}
       />
     </div>
@@ -251,14 +250,12 @@ function AttentionNudge({
   );
 }
 
-// 우측 하단 상시 가이드 버튼 — 언제든 처음 설정/메뉴 투어를 다시 부른다.
+// 우측 하단 상시 가이드 버튼 — 언제든 메뉴 투어를 다시 부른다.
 function GuideFab({
   avoidComposer,
-  onReplayOnboarding,
   onReplayTour,
 }: {
   avoidComposer?: boolean;
-  onReplayOnboarding: () => void;
   onReplayTour: () => void;
 }) {
   const { locale } = useT();
@@ -338,14 +335,6 @@ function GuideFab({
               ×
             </button>
           </div>
-          <FabItem
-            icon={<IconChat size={15} />}
-            label={ko ? "처음 설정 다시 보기" : "Replay setup"}
-            onClick={() => {
-              setOpen(false);
-              onReplayOnboarding();
-            }}
-          />
           <FabItem
             icon={<IconLayers size={15} />}
             label={ko ? "앱 기능 다시 둘러보기" : "Take the tour again"}

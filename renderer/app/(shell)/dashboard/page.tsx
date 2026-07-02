@@ -4,6 +4,7 @@
 // 데이터는 전부 실제 IPC.
 "use client";
 import { useT } from "@/lib/i18n";
+import { QuestBoard } from "@/components/dashboard/QuestBoard";
 import { OrgTree } from "@/components/dashboard/OrgTree";
 import { FleetSummaryStrip } from "@/components/dashboard/FleetSummaryStrip";
 import { HubBorrowRoom } from "@/components/dashboard/HubBorrowRoom";
@@ -26,7 +27,9 @@ export default function DashboardPage() {
           <FleetSummaryStrip />
 
           <div className="dashboard-workspace">
-            <div className="dashboard-org-column" data-tour-id="dashboard.org">
+            {/* 퀘스트 보드가 왼쪽 위 — 조직도는 그 아래로 살짝 내려간다. */}
+            <div className="dashboard-org-column" data-tour-id="dashboard.org" style={{ display: "grid", gap: 14 }}>
+              <QuestBoard />
               <OrgTree />
             </div>
             <div className="dashboard-flow-column">
