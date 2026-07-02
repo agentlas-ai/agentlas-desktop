@@ -111,8 +111,10 @@ export function ScheduleBuilder({
     } else if (value.kind === "cron") {
       setTz(value.tz || "UTC");
       // 프리셋 역추론(간단): 표준형이면 프리셋 모드, 아니면 cron 모드.
+      // 시(hour)도 순수 숫자 또는 "*"여야 한다 — "0 */2 * * *" 같은 간격 cron이
+      // daily로 오판돼 하이드레이트만으로 스케줄이 망가지던 버그.
       const f = value.expr.trim().split(/\s+/);
-      if (f.length === 5 && /^\d+$/.test(f[0])) {
+      if (f.length === 5 && /^\d+$/.test(f[0]) && (/^\d+$/.test(f[1]) || f[1] === "*")) {
         const [m, h, dom, , dw] = f;
         setTime(`${(h === "*" ? 0 : parseInt(h, 10)).toString().padStart(2, "0")}:${parseInt(m, 10).toString().padStart(2, "0")}`);
         if (h === "*") setPreset("hourly");

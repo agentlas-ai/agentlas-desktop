@@ -609,6 +609,7 @@ function AutomationFlowPage() {
             onLabel={labelSelected}
             onDelete={deleteSelected}
             onClose={() => setSelectedNodeId(null)}
+            timezone={automation?.timezone ?? null}
           />
         ) : selectedNode ? (
           <NodeInspector node={selectedNode} onClose={() => setSelectedNodeId(null)} t={t} />

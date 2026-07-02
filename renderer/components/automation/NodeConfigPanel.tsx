@@ -18,12 +18,56 @@ import { ScheduleBuilder } from "./ScheduleBuilder";
 import { NODE_ACCENT } from "./nodes/nodeShared";
 import { IconClose } from "@/components/Icon";
 
+/**
+ * 레거시 스케줄 토큰("cron:…", "daily-HH:MM", "weekday-HH:MM", "weekly-<dow>-HH:MM",
+ * "monthly-<D>-HH:MM", "hourly") → ScheduleSpec 복원. 챗 생성/레거시 그래프의 트리거는
+ * scheduleSpec 없이 토큰만 갖는데, 복원 없이는 빌더가 daily-09:00 기본값으로 마운트되며
+ * 즉시 onChange를 방출해 — 트리거 노드를 클릭만 해도 기존 cron 스케줄이 덮어써졌다.
+ */
+const LEGACY_DOW = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+function specFromLegacyToken(token: string, tz: string): ScheduleSpec | null {
+  const s = token.trim();
+  if (!s) return null;
+  if (s.startsWith("cron:")) {
+    const expr = s.slice(5).trim();
+    return expr ? { kind: "cron", expr, tz } : null;
+  }
+  if (s === "hourly") return { kind: "cron", expr: "0 * * * *", tz };
+  const hm = (v: string): { h: number; m: number } | null => {
+    const m = v.match(/^(\d{1,2}):(\d{2})$/);
+    return m ? { h: parseInt(m[1], 10), m: parseInt(m[2], 10) } : null;
+  };
+  let m = s.match(/^daily-(.+)$/);
+  if (m) {
+    const t = hm(m[1]);
+    return t ? { kind: "cron", expr: `${t.m} ${t.h} * * *`, tz } : null;
+  }
+  m = s.match(/^weekday-(.+)$/);
+  if (m) {
+    const t = hm(m[1]);
+    return t ? { kind: "cron", expr: `${t.m} ${t.h} * * 1-5`, tz } : null;
+  }
+  m = s.match(/^weekly-([a-z]{3})-(.+)$/);
+  if (m) {
+    const dow = LEGACY_DOW.indexOf(m[1]);
+    const t = hm(m[2]);
+    return dow >= 0 && t ? { kind: "cron", expr: `${t.m} ${t.h} * * ${dow}`, tz } : null;
+  }
+  m = s.match(/^monthly-(\d{1,2})-(.+)$/);
+  if (m) {
+    const t = hm(m[2]);
+    return t ? { kind: "cron", expr: `${t.m} ${t.h} ${parseInt(m[1], 10)} * *`, tz } : null;
+  }
+  return null;
+}
+
 export function NodeConfigPanel({
   node,
   onPatch,
   onLabel,
   onDelete,
   onClose,
+  timezone,
 }: {
   node: WorkflowNode;
   /** config 부분 갱신(머지). 부모가 그래프 노드에 반영 + dirty 표시. */
@@ -32,6 +76,8 @@ export function NodeConfigPanel({
   onLabel: (label: string) => void;
   onDelete: () => void;
   onClose: () => void;
+  /** 자동화 행의 타임존 — 레거시 토큰 복원 시 cron 해석 존(노드 config엔 tz가 없다). */
+  timezone?: string | null;
 }) {
   const { t, locale } = useT();
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
@@ -59,14 +105,16 @@ export function NodeConfigPanel({
   const cfg = node.config ?? {};
   const s = (k: string): string => (typeof cfg[k] === "string" ? (cfg[k] as string) : "");
 
-  // trigger 노드의 기존 spec(config.scheduleSpec가 있으면 하이드레이트).
+  // trigger 노드의 기존 spec — scheduleSpec 우선, 없으면 레거시 토큰(config.schedule)에서 복원.
   const triggerSpec = useMemo<ScheduleSpec | null>(() => {
     const raw = cfg.scheduleSpec;
     if (raw && typeof raw === "object" && typeof (raw as { kind?: unknown }).kind === "string") {
       return raw as ScheduleSpec;
     }
-    return null;
-  }, [cfg.scheduleSpec]);
+    const token = typeof cfg.schedule === "string" ? cfg.schedule : "";
+    const tz = timezone && timezone.trim() ? timezone : Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    return specFromLegacyToken(token, tz);
+  }, [cfg.scheduleSpec, cfg.schedule, timezone]);
 
   return (
     <aside
