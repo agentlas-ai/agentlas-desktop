@@ -184,6 +184,7 @@ export function ChatInput({
   onToggleContinuous,
   onToggleSwarm,
   queuedCount = 0,
+  prefillText = null,
 }: {
   onSend: (text: string, opts?: SendOptions) => void;
   /** 슬래시 커맨드(/new, /clear, /help …) 실행 — 텍스트 삽입이 아니라 액션 */
@@ -223,11 +224,22 @@ export function ChatInput({
   onToggleSwarm?: () => void;
   /** 실행 중 steering 큐에 대기 중인 메시지 수 — 0보다 크면 "대기 중" 표시. */
   queuedCount?: number;
+  /** 외부 프리필(프롬프트 저장소 seedOnly) — 입력창이 비었을 때 1회 주입, 전송은 사용자가. */
+  prefillText?: string | null;
 }) {
   const { t, locale } = useT();
   const [input, setInput] = useState("");
   const [images, setImages] = useState<PreviewedImage[]>([]);
   const [plusOpen, setPlusOpen] = useState(false);
+
+  // 외부 프리필 — 입력창이 비어있을 때만 채운다(입력 중 내용 덮어쓰기 금지).
+  useEffect(() => {
+    if (prefillText && prefillText.trim() && !input.trim()) {
+      setInput(prefillText);
+    }
+    // input을 deps에 넣지 않는다 — 프리필 값이 바뀔 때만 1회 시도.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefillText]);
   const [plusSubmenu, setPlusSubmenu] = useState<"plugins" | null>(null);
   const [planMode, setPlanMode] = useState(false);
   const [goalMode, setGoalMode] = useState(false);

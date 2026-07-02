@@ -1,10 +1,11 @@
 "use client";
-import { Suspense, useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { Suspense, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import type {
+  HephaestusCommandResult,
   MarketplaceListing,
   MarketplaceSourceStatus,
 } from "@/lib/types";
@@ -56,6 +57,46 @@ function orderListingsForHub(listings: MarketplaceListing[], hubLive: boolean): 
   });
 }
 
+/** 카드 필터와 hep-search 폴백 판정이 같은 기준을 쓰도록 공용 predicate로 추출. */
+function listingMatchesQuery(l: MarketplaceListing, normalizedQuery: string): boolean {
+  if (!normalizedQuery) return true;
+  return [l.slug, l.name, l.nameEn, l.tagline, l.taglineEn, l.ownerName, l.category, l.developer]
+    .join(" ")
+    .toLowerCase()
+    .includes(normalizedQuery);
+}
+
+// ── hep-search 폴백 — Hub 검색 0건(또는 실패) 시 엔진(hephaestus search) 후보를 보조 표기 ──
+type HepFallbackItem = { slug: string; name: string; description: string; scope: string };
+type HepFallbackState = { query: string; status: "loading" | "done"; items: HepFallbackItem[] };
+
+/** hephaestus.search.v1 JSON(sections.cloud/bookmarks/hub[].results)을 단순 리스트로 정규화. */
+function parseHepSearchResult(res: HephaestusCommandResult): HepFallbackItem[] {
+  const json = res?.json as { sections?: Record<string, { results?: unknown[] }> } | null;
+  const sections = json?.sections;
+  if (!sections || typeof sections !== "object") return [];
+  const items: HepFallbackItem[] = [];
+  for (const key of ["cloud", "bookmarks", "hub"]) {
+    const results = sections[key]?.results;
+    if (!Array.isArray(results)) continue;
+    for (const raw of results) {
+      if (!raw || typeof raw !== "object") continue;
+      const it = raw as Record<string, unknown>;
+      const slug = typeof it.slug === "string" ? it.slug : "";
+      if (!slug) continue;
+      items.push({
+        slug,
+        name: typeof it.name === "string" && it.name ? it.name : slug,
+        description: typeof it.description === "string" ? it.description : "",
+        scope: key,
+      });
+    }
+  }
+  // 섹션 간 중복 slug 제거 후 상위 8개만.
+  const seen = new Set<string>();
+  return items.filter((i) => (seen.has(i.slug) ? false : (seen.add(i.slug), true))).slice(0, 8);
+}
+
 export default function MarketplacePageWrapper() {
   return (
     <Suspense fallback={null}>
@@ -80,6 +121,9 @@ function MarketplacePage() {
   const [installing, setInstalling] = useState<string | null>(null);
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
   const [installReview, setInstallReview] = useState<PendingInstallReview | null>(null);
+  // Hub 검색 0건/실패 시 hep-search(엔진) 보조 후보 — 카드와 별도의 단순 리스트로 표시.
+  const [hepFallback, setHepFallback] = useState<HepFallbackState | null>(null);
+  const hepSeqRef = useRef(0);
 
   // 좌측 사이드바 검색 등 외부에서 ?q= 로 진입하면 검색어를 반영.
   useEffect(() => {
@@ -129,13 +173,50 @@ function MarketplacePage() {
     const api = ipc();
     if (!api) return;
     const t = setTimeout(() => {
-      void api.marketplace.search(q).then(async (results) => {
-        setListings(Array.isArray(results) ? results : []);
-        setSourceStatus(await api.marketplace.status());
-      });
+      const query = q.trim();
+      void api.marketplace.search(q)
+        .then(async (results) => {
+          const arr = Array.isArray(results) ? results : [];
+          setListings(arr);
+          setSourceStatus(await api.marketplace.status());
+          return arr;
+        })
+        .catch(() => null) // 검색 실패 — 목록은 유지, 폴백 판단용으로만 null
+        .then((arr) => {
+          // hep-search 폴백: 검색어가 있는데 Hub 결과 0건이거나 검색이 던졌을 때만.
+          if (!query) {
+            setHepFallback(null);
+            return;
+          }
+          const hasHubMatch = Array.isArray(arr)
+            && arr.filter(isLiveHubListing).some((l) => listingMatchesQuery(l, query.toLowerCase()));
+          if (hasHubMatch) {
+            setHepFallback(null);
+            return;
+          }
+          void runHepFallback(query);
+        });
     }, 150);
     return () => clearTimeout(t);
   }, [q]);
+
+  async function runHepFallback(query: string) {
+    const api = ipc();
+    if (!api?.hephaestus?.search) {
+      setHepFallback(null);
+      return;
+    }
+    const seq = ++hepSeqRef.current;
+    setHepFallback({ query, status: "loading", items: [] });
+    try {
+      const res = await api.hephaestus.search({ query, limit: 8 });
+      if (hepSeqRef.current !== seq) return; // 더 새 검색이 이미 시작됨
+      setHepFallback({ query, status: "done", items: parseHepSearchResult(res) });
+    } catch {
+      if (hepSeqRef.current !== seq) return;
+      setHepFallback({ query, status: "done", items: [] });
+    }
+  }
 
   async function installOne(slug: string) {
     const api = ipc();
@@ -193,22 +274,10 @@ function MarketplacePage() {
   const hubLive = sourceStatus ? sourceStatus.online && !sourceStatus.usingFallback && !sourceStatus.lastError : false;
   const hubAvailable = Boolean(sourceStatus?.online && !sourceStatus.usingFallback);
 
-  const matchingListings = orderListingsForHub(listings.filter(isLiveHubListing).filter((l) => {
-    if (!normalizedQuery) return true;
-    return [
-      l.slug,
-      l.name,
-      l.nameEn,
-      l.tagline,
-      l.taglineEn,
-      l.ownerName,
-      l.category,
-      l.developer,
-    ]
-      .join(" ")
-      .toLowerCase()
-      .includes(normalizedQuery);
-  }), hubLive);
+  const matchingListings = orderListingsForHub(
+    listings.filter(isLiveHubListing).filter((l) => listingMatchesQuery(l, normalizedQuery)),
+    hubLive,
+  );
 
   // 허브 메뉴 단순화(요청): 상단 카테고리 섹션 제거 — 검색 + 카드 리스트 + 페이지네이션만.
   const activeListings = matchingListings;
@@ -352,6 +421,58 @@ function MarketplacePage() {
                 </div>
               )}
             </section>
+
+          {/* hep-search 폴백 — Hub 검색 0건일 때만 엔진 후보를 단순 리스트로 보조 표기 */}
+          {normalizedQuery.length > 0 && activeListings.length === 0 && hepFallback && hepFallback.query === q.trim() && (
+            <section className="portal-panel" aria-label={ko ? "Hephaestus 보조 검색 결과" : "Hephaestus fallback results"}>
+              <div className="card" style={{ padding: 14, display: "grid", gap: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <RdTag dashed size="s">{ko ? "Hephaestus 검색" : "Hephaestus search"}</RdTag>
+                  <span style={{ fontSize: 12, color: "var(--rd-ink-3)" }}>
+                    {hepFallback.status === "loading"
+                      ? ko ? "Hub 검색 0건 · 엔진에서 후보를 찾는 중…" : "No Hub hits · searching the engine…"
+                      : ko ? "Hub 검색 0건 · 엔진(hep-search) 후보" : "No Hub results · engine (hep-search) candidates"}
+                  </span>
+                </div>
+                {hepFallback.status === "done" && hepFallback.items.length === 0 && (
+                  <div style={{ fontSize: 12.5, color: "var(--rd-ink-3)" }}>
+                    {ko ? "엔진 검색에서도 후보를 찾지 못했습니다." : "The engine search found no candidates either."}
+                  </div>
+                )}
+                {hepFallback.items.map((item) => (
+                  <div
+                    key={item.slug}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      flexWrap: "wrap",
+                      padding: "8px 10px",
+                      borderRadius: 8,
+                      border: "1px solid var(--rd-hair)",
+                      background: "var(--rd-surface-2)",
+                    }}
+                  >
+                    <div style={{ flex: 1, minWidth: 180 }}>
+                      <div style={{ fontSize: 13, fontWeight: 650, color: "var(--rd-ink)" }}>{item.name}</div>
+                      {item.description && (
+                        <div style={{ fontSize: 12, color: "var(--rd-ink-3)", lineHeight: 1.45 }}>{item.description}</div>
+                      )}
+                    </div>
+                    <RdTag dashed size="s">{item.scope}</RdTag>
+                    <RdTag className="hub-command-chip" dashed size="s">{`/hep-call ${item.slug}`}</RdTag>
+                    <button
+                      type="button"
+                      className="btn sm"
+                      onClick={() => void navigator.clipboard.writeText(`/hep-call ${item.slug}`)}
+                    >
+                      {ko ? "명령 복사" : "Copy command"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
 
           {totalPages > 1 && (
             <nav className="hub-pager" aria-label={ko ? "페이지" : "Pagination"}>

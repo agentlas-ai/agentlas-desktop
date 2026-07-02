@@ -501,6 +501,8 @@ function ChatPage() {
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const runIdRef = useRef<string | null>(null);
   const lastRunIdRef = useRef<string | null>(null);
+  // 프롬프트 저장소 seedOnly 프리필 — 자동 전송 없이 입력창에만 채울 텍스트.
+  const [composerPrefill, setComposerPrefill] = useState<string | null>(null);
   // 델타 partial 누적 버퍼 — main이 증분만 보내므로 여기서 전문을 재조립한다.
   // 리셋 지점: 채팅 전환 / 새 실행 시작 / final·error / 전문(text) 이벤트 수신.
   const partialTextRef = useRef("");
@@ -1000,6 +1002,7 @@ function ChatPage() {
     runIdRef.current = null;
     lastRunIdRef.current = null;
     partialTextRef.current = "";
+    setComposerPrefill(null);
     cancelRequestedRef.current = false;
     steerQueueRef.current = [];
     setQueuedSteers([]);
@@ -1950,6 +1953,13 @@ function ChatPage() {
       handleCommand(seedCmd);
       router.replace(`/chat?id=${chatId}`);
     } else if (seedPrompt) {
+      // seedOnly=1 — 자동 전송하지 않고 입력창에만 채운다(프롬프트 저장소의 입력물 필요
+      // 프롬프트: 사용자가 사진/문서를 첨부한 뒤 직접 전송해야 결과가 정상).
+      if (searchParams.get("seedOnly") === "1") {
+        setComposerPrefill(seedPrompt);
+        router.replace(`/chat?id=${chatId}`);
+        return;
+      }
       if (seedPermission === "full" && !confirmFullPermissionFromUrl(locale)) {
         router.replace(`/chat?id=${chatId}`);
         return;
@@ -2457,6 +2467,7 @@ function ChatPage() {
             });
           }}
           queuedCount={queuedSteers.length}
+          prefillText={composerPrefill}
           onCommand={handleCommand}
           onCallAgent={(agentId) => void switchAgent(agentId)}
           onRecommendPreview={handleRecommendPreview}

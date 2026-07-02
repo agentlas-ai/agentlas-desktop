@@ -8,9 +8,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
+import { openPricing } from "./UpgradeCta";
 import type { HubCreditBalance } from "@/lib/types";
 
 const POLL_MS = 60_000;
+/** 구독 잔액이 이 값 미만이면 충전/구독 CTA 노출. */
+const LOW_BALANCE_THRESHOLD = 50;
 
 export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean }) {
   const { locale } = useT();
@@ -131,6 +134,31 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
           </>
         )}
       </button>
+
+      {/* 잔액 부족 CTA — 웹 결제 페이지(agentlas.cloud/pricing)를 외부 브라우저로 연다. */}
+      {!collapsed && remaining < LOW_BALANCE_THRESHOLD && (
+        <button
+          type="button"
+          onClick={openPricing}
+          title={ko ? "충전/구독 페이지 열기" : "Open top-up / subscription page"}
+          style={{
+            display: "block",
+            width: "100%",
+            marginTop: 2,
+            padding: "4px 8px",
+            borderRadius: 8,
+            border: "1px dashed var(--paper-edge)",
+            background: "transparent",
+            color: "var(--amber-deep, var(--accent))",
+            fontSize: 11,
+            fontWeight: 650,
+            textAlign: "left",
+            cursor: "pointer",
+          }}
+        >
+          {ko ? "크레딧이 얼마 없어요 · 충전/구독 →" : "Low credits · Top up / Subscribe →"}
+        </button>
+      )}
 
       {open && (
         <div

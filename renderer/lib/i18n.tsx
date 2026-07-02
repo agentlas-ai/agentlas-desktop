@@ -34,6 +34,7 @@ const dict = {
 
     // Sidebar sections
     "sidebar.new_chat": "새 채팅",
+    "sidebar.load_prompt": "프롬프트 불러오기",
     "sidebar.chats": "채팅",
     "sidebar.firms": "회사",
     "sidebar.projects": "프로젝트",
@@ -90,6 +91,7 @@ const dict = {
     "nav.automations": "자동화",
     "nav.group.hub": "마켓",
     "nav.agent_hub": "에이전트 받기",
+    "nav.prompts": "프롬프트",
     "nav.hub_regular_agents": "일반 에이전트",
     "nav.hub_visual_agents": "비주얼 에이전트",
     "nav.publish": "내 에이전트 올리기",
@@ -966,6 +968,7 @@ const dict = {
 
     // Sidebar sections
     "sidebar.new_chat": "New chat",
+    "sidebar.load_prompt": "Load prompt",
     "sidebar.chats": "Chats",
     "sidebar.firms": "Firms",
     "sidebar.projects": "Projects",
@@ -1022,6 +1025,7 @@ const dict = {
     "nav.automations": "Automations",
     "nav.group.hub": "Hub",
     "nav.agent_hub": "Agent Hub",
+    "nav.prompts": "Prompts",
     "nav.hub_regular_agents": "Regular agents",
     "nav.hub_visual_agents": "Visual agents",
     "nav.publish": "Publish",

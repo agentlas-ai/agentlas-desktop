@@ -30,6 +30,7 @@ import {
   IconSettings,
   IconChevronDown,
   IconSidebar,
+  IconSparkles,
 } from "./Icon";
 import type { ComponentType } from "react";
 
@@ -124,9 +125,10 @@ export function SideNav({
         label: t("nav.group.hub"),
         href: "/marketplace",
         icon: IconStore,
-        isActive: (p) => p.startsWith("/marketplace"),
+        isActive: (p) => p.startsWith("/marketplace") || p.startsWith("/prompts"),
         items: [
           { label: t("nav.agent_hub"), href: "/marketplace", icon: IconStore },
+          { label: t("nav.prompts"), href: "/prompts", icon: IconSparkles },
           { label: t("nav.publish"), href: "/cloud", icon: IconFileUp },
         ],
       },

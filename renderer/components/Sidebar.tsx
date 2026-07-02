@@ -22,8 +22,10 @@ import {
   IconMoon,
   IconPlus,
   IconSettings,
+  IconSparkles,
   IconSun,
 } from "./Icon";
+import { PromptPickerDialog } from "./PromptPickerDialog";
 import { PawLogo } from "./PawLogo";
 import { ChatRow } from "./ChatRow";
 import { AccountChip } from "./AccountChip";
@@ -100,6 +102,8 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   const [chatsCollapsed, setChatsCollapsed] = useState(false);
   const [chatListLimit, setChatListLimit] = useState(12);
   const [newChatDialogOpen, setNewChatDialogOpen] = useState(false);
+  // 프롬프트 저장소에서 북마크/소장 프롬프트를 골라 새 채팅을 시작하는 팝업.
+  const [promptPickerOpen, setPromptPickerOpen] = useState(false);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
   const refreshKey = refreshKeyProp + refreshTick;
@@ -312,6 +316,18 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
     />
   ) : null;
 
+  // 프롬프트 불러오기 — 선택한 프롬프트 body로 새 채팅을 만들고 이동(내부에서 처리).
+  const promptPickerDialog = promptPickerOpen ? (
+    <PromptPickerDialog
+      onClose={() => setPromptPickerOpen(false)}
+      onStarted={() => {
+        setPromptPickerOpen(false);
+        // soft navigation은 full reload가 없으므로 최근 채팅 목록을 명시적으로 갱신.
+        triggerRefresh();
+      }}
+    />
+  ) : null;
+
   // ── 접힘 모드: 아이콘만 ───────────────────────────────
   if (collapsed) {
     return (
@@ -438,6 +454,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         </footer>
       </aside>
       {newChatDialog}
+      {promptPickerDialog}
       </>
     );
   }
@@ -532,6 +549,25 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         >
           <IconPlus size={15} />
           {t("sidebar.new_chat")}
+        </button>
+        {/* 프롬프트 저장소의 북마크·소장 프롬프트로 바로 새 채팅 시작 */}
+        <button
+          onClick={() => setPromptPickerOpen(true)}
+          className="neu-btn"
+          style={{
+            width: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+            padding: "8px 12px",
+            marginTop: 6,
+            borderRadius: "var(--radius-md)",
+            fontSize: 12.5,
+          }}
+        >
+          <IconSparkles size={14} />
+          {t("sidebar.load_prompt")}
         </button>
       </div>
 
@@ -758,6 +794,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       </footer>
     </aside>
     {newChatDialog}
+    {promptPickerDialog}
     </>
   );
 }
