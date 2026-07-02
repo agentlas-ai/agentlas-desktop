@@ -23,7 +23,9 @@ import { getAgentById, listInstalledAgents } from "./registry";
 import {
   autoRouteStatus,
   autoRouteSystemPreamble,
+  isEscalationWorthyPrompt,
   isGlobalOrchestrator,
+  isPlainConversationalPrompt,
   selectAutoRoutedAgent,
   type AutoRouteChoice,
 } from "../agents/auto-router";
@@ -636,9 +638,12 @@ export async function runMcpInvocation(
   }
 
   const installedAgents = listInstalledAgents();
+  // plain 대화(인사/맞장구)는 라우팅 전체를 건너뛰고 기본 LLM이 즉답 — 전문 에이전트로
+  // 잘못 위임되거나 아래 Hephaestus 에스컬레이션 선지연을 무는 엣지케이스를 없앤다.
+  const plainConversation = !req.appsGenerateMode && !isTargetAppEdit && isPlainConversationalPrompt(req.userPrompt);
   const autoRoute = isTargetAppEdit
     ? selectAppBuilderForExistingAppEdit(installedAgents, locale)
-    : req.appsGenerateMode || isGlobalOrchestrator(agent)
+    : !plainConversation && (req.appsGenerateMode || isGlobalOrchestrator(agent))
       ? selectAutoRoutedAgent(effectiveUserPrompt, installedAgents, locale)
       : null;
   if (autoRoute) {
@@ -657,13 +662,20 @@ export async function runMcpInvocation(
   const workingFolder = targetAppWorkingFolder ?? existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
 
   // ── Hephaestus Router Agent 에스컬레이션 판단 ──
+  // 이전에는 기본 채팅(글로벌 오케스트레이터)의 모든 메시지가 이 동기 호출을 최대 15초까지
+  // 기다렸다 — 짧은 단일 작업까지 선지연을 물던 주범. 멀티도메인/파이프라인 신호가 있는
+  // 복합 요청에만 에스컬레이션하고 타임아웃도 4초로 줄인다(실패/타임아웃 시 조용히 진행).
   let routerAgent = req.routerAgent;
-  if (!routerAgent && (req.appsGenerateMode || isGlobalOrchestrator(agent))) {
+  if (
+    !routerAgent &&
+    (req.appsGenerateMode ||
+      (isGlobalOrchestrator(agent) && isEscalationWorthyPrompt(req.userPrompt)))
+  ) {
     try {
       const routeRes = await routeOnly(effectiveUserPrompt, {
         project: workingFolder ?? undefined,
         allowLocal: true,
-        timeoutMs: 15_000,
+        timeoutMs: 4_000,
       });
       const norm = normalizeRecommendation(routeRes.json, effectiveUserPrompt);
       if (norm.routerAgent) {

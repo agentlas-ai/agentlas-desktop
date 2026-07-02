@@ -93,6 +93,37 @@ export function isGlobalOrchestrator(agent: InstalledAgent | null | undefined): 
   return agent?.slug === GLOBAL_ORCHESTRATOR_SLUG;
 }
 
+// ── plain 대화 감지 — "엣지케이스 없는 라우팅"의 1단계 ─────────────────────────
+// 인사/맞장구/감사/짧은 확인처럼 전문 에이전트 라우팅이 오히려 이상한 메시지는
+// 스코어러·Hephaestus 에스컬레이션을 전부 건너뛰고 기본 LLM이 즉답한다(선지연 0).
+// 보수적으로: 목록에 확실히 걸리는 것만 plain. 애매하면 기존 라우팅 경로 유지.
+const PLAIN_CONVERSATION_RE =
+  /^(안녕(하세요)?|하이|헬로|반가워요?|고마워요?|감사(합니다|해요?)?|잘\s?자요?|수고(했어|하세요)?요?|응|넵?|네|예|좋아요?|오케이|okay|ok|ㅇㅋ|ㄱㅅ|ㅋ+|ㅎ+|hi|hello|hey|thanks?|thank you|good (morning|night|evening)|bye|잘가요?|화이팅|파이팅|테스트|test)[!.~^\s]*$/i;
+
+/** 라우팅이 불필요한 일상 대화인지 판정. true면 스코어러/routeOnly를 건너뛴다. */
+export function isPlainConversationalPrompt(prompt: string): boolean {
+  const p = prompt.trim();
+  if (!p) return true;
+  if (p.length > 40) return false; // 긴 메시지는 항상 라우팅 후보
+  return PLAIN_CONVERSATION_RE.test(p);
+}
+
+// 멀티도메인 신호 — 병렬/팀/파이프라인 의도가 보이면 Hephaestus 에스컬레이션 가치가 있다.
+const MULTI_INTENT_RE =
+  /여러|각각|동시에?|병렬|팀으로|나눠서|파이프라인|워크플로우?|단계별|순서대로|multiple|in parallel|as a team|pipeline|workflow|step by step|divide|split/i;
+
+/**
+ * Hephaestus routeOnly(라우터 에이전트 에스컬레이션)를 호출할 가치가 있는 프롬프트인지.
+ * 기본 채팅의 모든 메시지가 15초 타임아웃 라우팅을 동기로 기다리던 선지연을 없앤다 —
+ * 멀티도메인/파이프라인 신호가 있거나 충분히 복합적인 요청에만 에스컬레이션한다.
+ */
+export function isEscalationWorthyPrompt(prompt: string): boolean {
+  const p = prompt.trim();
+  if (isPlainConversationalPrompt(p)) return false;
+  if (MULTI_INTENT_RE.test(p)) return true;
+  return p.length >= 80; // 복합 요청은 대체로 길다 — 짧은 단일 작업은 로컬 스코어러로 충분
+}
+
 function normalize(value: string): string {
   return value.toLowerCase().replace(/[_/]+/g, "-");
 }
