@@ -14,7 +14,7 @@ import fs from "node:fs/promises";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
-import { agentRunCwd, probeCliVersion, spawnCli } from "./exec";
+import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { readEnvVar } from "../secrets/vault";
 
 const CANDIDATES = [
@@ -202,15 +202,16 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
   return await new Promise<RunnerResult>((resolve, reject) => {
     let child: ReturnType<typeof spawnCli>;
     try {
-      child = spawnCli(bin, args, { stdio: ["ignore", "pipe", "pipe"], env, cwd });
+      child = spawnCli(bin, args, { stdio: ["ignore", "pipe", "pipe"], env, cwd, ...detachedSpawnOpts() });
     } catch (e) {
       reject(e instanceof Error ? e : new Error(String(e)));
       return;
     }
+    trackRunChild(child);
 
-    const onAbort = () => child.kill();
+    const onAbort = () => killCliTree(child);
     if (req.signal) {
-      if (req.signal.aborted) child.kill();
+      if (req.signal.aborted) killCliTree(child);
       else req.signal.addEventListener("abort", onAbort, { once: true });
     }
 

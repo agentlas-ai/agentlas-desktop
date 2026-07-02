@@ -161,6 +161,72 @@ function runProbeCliVersion(command: string, timeoutMs: number): Promise<string 
   });
 }
 
+/** POSIX에서 프로세스 그룹 킬이 가능하도록 detached 스폰 옵션(런 자식용). Windows는 미지원. */
+export function detachedSpawnOpts(): { detached?: boolean } {
+  return process.platform !== "win32" ? { detached: true } : {};
+}
+
+/**
+ * LLM 실행 자식 트리 종료 — POSIX는 프로세스 그룹 SIGTERM → graceMs 후 SIGKILL 승격.
+ * 단일 child.kill()은 CLI가 띄운 손자(MCP 서버·빌드 프로세스)를 고아로 남기던 문제를 막는다.
+ * Windows/그룹킬 실패 시 단일 kill 폴백. detachedSpawnOpts()와 짝으로 사용.
+ */
+export function killCliTree(child: ChildProcess, graceMs = 4000): void {
+  if (process.platform !== "win32" && child.pid) {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+      const sigkill = setTimeout(() => {
+        try {
+          process.kill(-child.pid!, "SIGKILL");
+        } catch {
+          // already exited
+        }
+      }, graceMs);
+      sigkill.unref?.();
+      return;
+    } catch {
+      // fall through to direct child kill
+    }
+  }
+  try {
+    child.kill();
+  } catch {
+    // already exited
+  }
+}
+
+// 살아있는 LLM 실행 자식 추적 — 앱 종료 시 전부 트리킬해 고아 CLI/MCP 프로세스를 남기지 않는다.
+const liveRunChildren = new Set<ChildProcess>();
+let quitHookInstalled = false;
+
+/**
+ * LLM 실행 자식 등록: 종료 시 자동 해제 + 앱 will-quit 일괄 트리킬 + 낮은 우선순위(nice 5).
+ * 우선순위는 손자(빌드/MCP)에도 상속돼 장시간 에이전트 작업 중에도 UI가 응답성을 유지한다.
+ */
+export function trackRunChild(child: ChildProcess): void {
+  liveRunChildren.add(child);
+  child.once("close", () => liveRunChildren.delete(child));
+  child.once("error", () => liveRunChildren.delete(child));
+  if (child.pid != null) {
+    try {
+      os.setPriority(child.pid, 5);
+    } catch {
+      // 이미 종료됐거나 권한 문제 — 무시
+    }
+  }
+  if (!quitHookInstalled) {
+    quitHookInstalled = true;
+    try {
+      app.once("will-quit", () => {
+        for (const c of liveRunChildren) killCliTree(c, 500);
+        liveRunChildren.clear();
+      });
+    } catch {
+      // 테스트 등 app 부재 환경 — 무시
+    }
+  }
+}
+
 function terminateProbeProcess(child: ChildProcess): void {
   if (process.platform !== "win32" && child.pid) {
     try {

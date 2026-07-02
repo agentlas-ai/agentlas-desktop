@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
-import { agentRunCwd, probeCliVersion, spawnCli, writeStdin } from "./exec";
+import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import {
   clearRuntimeSession,
   getRuntimeSession,
@@ -150,11 +150,13 @@ function runCodexProcess(
       env: req.env ?? process.env,
       // 사용자가 지정한 프로젝트 폴더에서 실행 — 미지정이면 전용 폴더.
       cwd: req.cwd ?? agentRunCwd(),
+      ...detachedSpawnOpts(),
     });
+    trackRunChild(child);
 
-    const onAbort = () => child.kill();
+    const onAbort = () => killCliTree(child);
     if (req.signal) {
-      if (req.signal.aborted) child.kill();
+      if (req.signal.aborted) killCliTree(child);
       else req.signal.addEventListener("abort", onAbort, { once: true });
     }
     writeStdin(child, stdinPayload);

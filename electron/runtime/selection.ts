@@ -15,7 +15,37 @@ import { runCodex } from "./codex";
 import { runGemini } from "./gemini";
 import { runGrok } from "./grok";
 import { runOllama } from "./ollama";
+import { acquireRunSlot } from "./run-slots";
 import type { Runner } from "./runner";
+
+/**
+ * CLI 러너를 전역 실행 슬롯으로 래핑 — 챗·firm·swarm·워크플로우·자동화가 각자 캡으로
+ * 곱셈 스폰해도 동시 CLI 자식 수가 사용자 슬라이더(getAgentConcurrency)를 못 넘는다.
+ * 슬롯이 차면 FIFO 대기(+상태 줄 표시), abort 시 즉시 이탈. HTTP 런타임(BYOK/Ollama)은
+ * 로컬 CPU를 거의 안 쓰므로 래핑하지 않는다.
+ * 주의: 러너 내부 재시도(runClaudeCode의 세션 복구 재귀)는 래핑 밖이라 이중 획득이 없다.
+ */
+function withRunSlot(runner: Runner): Runner {
+  return async (req, events) => {
+    const release = await acquireRunSlot(req.signal, () => {
+      events.onStatus(
+        req.locale === "ko"
+          ? "다른 에이전트 실행이 끝나기를 기다리는 중... (동시 실행 한도)"
+          : "Waiting for a free run slot... (concurrency limit)",
+      );
+    });
+    try {
+      return await runner(req, events);
+    } finally {
+      release();
+    }
+  };
+}
+
+const runClaudeCodeSlotted = withRunSlot(runClaudeCode);
+const runCodexSlotted = withRunSlot(runCodex);
+const runGeminiSlotted = withRunSlot(runGemini);
+const runGrokSlotted = withRunSlot(runGrok);
 
 const RUNNER_LABEL: Record<string, string> = {
   "claude-code": "Claude Code CLI",
@@ -40,11 +70,11 @@ export interface RuntimeChoice {
 }
 
 export function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | null {
-  if (active.kind === "claude-code") return { runner: runClaudeCode, label: RUNNER_LABEL["claude-code"] };
-  if (active.kind === "codex") return { runner: runCodex, label: RUNNER_LABEL.codex };
-  if (active.kind === "gemini") return { runner: runGemini, label: RUNNER_LABEL.gemini };
+  if (active.kind === "claude-code") return { runner: runClaudeCodeSlotted, label: RUNNER_LABEL["claude-code"] };
+  if (active.kind === "codex") return { runner: runCodexSlotted, label: RUNNER_LABEL.codex };
+  if (active.kind === "gemini") return { runner: runGeminiSlotted, label: RUNNER_LABEL.gemini };
   if (active.kind === "grok")
-    return { runner: runGrok, label: `Grok CLI${active.model ? ` · ${active.model}` : ""}` };
+    return { runner: runGrokSlotted, label: `Grok CLI${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "ollama")
     return { runner: runOllama, label: `Ollama${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "byok") {

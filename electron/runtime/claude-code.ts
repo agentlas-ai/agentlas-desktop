@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
-import { agentRunCwd, probeCliVersion, spawnCli, writeStdin } from "./exec";
+import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import {
   clearRuntimeSession,
   getRuntimeSession,
@@ -275,13 +275,16 @@ export const runClaudeCode: Runner = async (
       // 사용자가 워킹 폴더(프로젝트)를 지정했으면 거기서 실행 — 빌드/파일 생성이 프로젝트에 일어난다.
       // 미지정이면 쓰기 가능한 전용 폴더(packaged 앱은 cwd가 비쓰기/루트라 claude가 exit 1).
       cwd: req.cwd ?? agentRunCwd(),
+      // POSIX 그룹킬 대상 — 취소/앱종료 시 CLI가 띄운 MCP 서버·빌드 손자까지 정리.
+      ...detachedSpawnOpts(),
     });
+    trackRunChild(child);
     writeStdin(child, flatUser);
 
-    // 취소 — 사용자가 Stop을 누르면 자식 프로세스 종료. 병렬 세션 각각 독립 취소.
-    const onAbort = () => child.kill();
+    // 취소 — 사용자가 Stop을 누르면 자식 프로세스 트리 종료. 병렬 세션 각각 독립 취소.
+    const onAbort = () => killCliTree(child);
     if (req.signal) {
-      if (req.signal.aborted) child.kill();
+      if (req.signal.aborted) killCliTree(child);
       else req.signal.addEventListener("abort", onAbort, { once: true });
     }
 
