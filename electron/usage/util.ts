@@ -25,6 +25,33 @@ export function toResetMs(v: unknown): number | null {
   return null;
 }
 
+// Electron net.fetch 우선 — Chromium 네트워크 스택은 시스템 프록시·OS 신뢰 인증서를 따른다.
+// (터미널 CLI는 되는데 GUI 앱의 Node fetch만 "fetch failed" 나는 프록시/보안장비 머신 대응.)
+// 헤드리스/테스트 등 electron 미가용 환경은 전역 fetch 폴백.
+type JsonFetch = (url: string, init?: RequestInit) => Promise<Response>;
+function pickFetch(): JsonFetch {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { net } = require("electron") as typeof import("electron");
+    if (net && typeof net.fetch === "function") return (url, init) => net.fetch(url, init);
+  } catch {
+    // electron 밖(스크립트 실행 등)
+  }
+  return (url, init) => fetch(url, init);
+}
+
+/** 네트워크 실패의 숨은 원인(err.cause)을 메시지로 승격 — "fetch failed"만으론 진단 불가. */
+function describeFetchError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause && typeof cause === "object") {
+    const c = cause as { code?: string; message?: string };
+    const detail = c.code || c.message;
+    if (detail) return `${err.message} (${detail})`;
+  }
+  return err.message;
+}
+
 /** 타임아웃 있는 JSON GET. non-2xx면 throw. */
 export async function getJson(
   url: string,
@@ -34,9 +61,11 @@ export async function getJson(
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { headers, signal: ctrl.signal });
+    const res = await pickFetch()(url, { headers, signal: ctrl.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
+  } catch (err) {
+    throw new Error(describeFetchError(err));
   } finally {
     clearTimeout(timer);
   }

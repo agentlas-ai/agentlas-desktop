@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { detectRuntimes, setActiveRuntime } from "./runtime/detect";
 import { listRuntimeModels } from "./runtime/providers";
-import { installCli, openCliLogin, type InstallableCli } from "./runtime/install-cli";
+import { installCli, openCliLogin, updateCli, type InstallableCli } from "./runtime/install-cli";
 import { listRuntimeCommands } from "./runtime/commands";
 import { installAgentlasCli } from "./runtime/install-agentlas-cli";
 import {
@@ -649,6 +649,7 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle("runtime:installCli", (_e, kind: InstallableCli) => installCli(kind));
   ipcMain.handle("runtime:openCliLogin", (_e, kind: InstallableCli) => openCliLogin(kind));
+  ipcMain.handle("runtime:updateCli", (_e, kind: InstallableCli) => updateCli(kind));
   ipcMain.handle("runtime:listCommands", () => listRuntimeCommands());
   ipcMain.handle(
     "runtime:listModels",

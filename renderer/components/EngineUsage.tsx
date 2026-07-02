@@ -5,7 +5,7 @@
 // 미연결 엔진은 [연결] 버튼 — CLI는 자동설치+로그인창, API키는 인라인 입력 후 저장.
 // 카드 헤더로 접기/펼치기(상태는 localStorage).
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
@@ -131,6 +131,36 @@ export function EngineUsage() {
   }, [loadUsage, loadConnections]);
   useVisibleInterval(() => void loadUsage(), POLL_MS);
 
+  // 재로그인은 터미널에서 끝난다 — 완료 시점을 앱이 폴링으로 감지해 자동 반영(5초 × 36 = 3분).
+  const pollGen = useRef(0);
+  useEffect(() => () => {
+    pollGen.current++; // 언마운트 시 진행 중 폴링 중단
+  }, []);
+  const watchRecovery = useCallback(
+    async (providerId: string) => {
+      const api = ipc();
+      if (!api) return;
+      const gen = ++pollGen.current;
+      for (let i = 0; i < 36; i++) {
+        await new Promise((r) => setTimeout(r, 5000));
+        if (pollGen.current !== gen) return;
+        try {
+          const s = await api.usage.snapshot({ force: true });
+          if (pollGen.current !== gen) return;
+          setSnap(s);
+          const p = s.providers.find((x) => x.provider === providerId);
+          if (p && p.status !== "error") {
+            void loadConnections();
+            return;
+          }
+        } catch {
+          // 다음 틱 재시도
+        }
+      }
+    },
+    [loadConnections],
+  );
+
   function toggleCollapsed() {
     setCollapsed((c) => {
       const next = !c;
@@ -157,10 +187,44 @@ export function EngineUsage() {
     if (!api || !e.cliKind || busy) return;
     setBusy(e.id);
     try {
-      await api.runtime.installCli(e.cliKind); // 자동설치(이미 있으면 no-op)
+      const inst = await api.runtime.installCli(e.cliKind); // 자동설치(이미 있으면 no-op)
+      if (inst?.message?.startsWith("already installed")) {
+        // 기존 설치본만 최신으로(버전 불일치 자동 해소) — 방금 설치한 건 이미 최신. 실패해도 로그인은 진행.
+        try {
+          await api.runtime.updateCli?.(e.cliKind);
+        } catch {
+          // best-effort
+        }
+      }
       await api.runtime.openCliLogin(e.cliKind); // 로그인창/터미널
       await loadConnections();
       await loadUsage(true);
+    } finally {
+      setBusy(null);
+    }
+    void watchRecovery(e.id); // 터미널 로그인 완료를 감지해 자동 갱신
+  }
+
+  // 기본(활성) 엔진 선택 — 세팅의 detected 목록에서 대시보드로 이관(엔진 관리 일원화).
+  function runtimeFor(e: EngineDef): RuntimeStatus | undefined {
+    if (e.auth === "cli") return runtimes.find((r) => r.kind === e.cliKind);
+    if (e.auth === "local") return runtimes.find((r) => r.kind === "ollama");
+    return undefined; // API키형(BYOK)은 모델 선택이 필요해 세팅의 BYOK 패널이 담당
+  }
+  async function activateEngine(e: EngineDef, rt: RuntimeStatus) {
+    const api = ipc();
+    if (!api || busy) return;
+    setBusy(e.id);
+    try {
+      const updated = await api.runtime.setActive({
+        kind: rt.kind,
+        backend: rt.backend,
+        source: rt.source,
+        model: rt.model ?? undefined,
+      });
+      setRuntimes(updated);
+    } catch {
+      // 실패 시 이전 활성 유지
     } finally {
       setBusy(null);
     }
@@ -183,7 +247,11 @@ export function EngineUsage() {
   function statusText(e: EngineDef, u: ProviderUsage | undefined): string {
     if (e.auth === "apikey") return ko ? "키 과금" : "key-billed";
     if (e.auth === "local") return ko ? "로컬 · 무제한" : "local · unlimited";
-    if (u?.status === "error") return ko ? "조회 실패" : "fetch failed";
+    if (u?.status === "error") {
+      return /auth_expired|HTTP 40[13]/i.test(u.error ?? "")
+        ? ko ? "로그인 만료 — 재로그인 필요" : "login expired — re-login"
+        : ko ? "조회 실패" : "fetch failed";
+    }
     if (u?.status === "no_quota") return ko ? "연결됨 · 사용량 곧" : "connected · usage soon";
     return ko ? "연결됨" : "connected";
   }
@@ -207,6 +275,7 @@ export function EngineUsage() {
         ENGINES.map((e) => {
           const u = usageFor(e.id);
           const connected = isConnected(e);
+          const rt = runtimeFor(e);
           const hasBars = connected && (u?.windows.length ?? 0) > 0;
           return (
             <div key={e.id} className="dashboard-engine-row" data-connected={connected ? "true" : "false"}>
@@ -217,7 +286,10 @@ export function EngineUsage() {
                 <span className="sr-only">{e.logoAlt}</span>
                 <div className="dashboard-engine-copy">
                   <div>{e.label}</div>
-                  <div style={connected && u?.status === "error" ? { color: "var(--red-deep, #c0392b)" } : undefined}>
+                  <div
+                    style={connected && u?.status === "error" ? { color: "var(--red-deep, #c0392b)" } : undefined}
+                    title={u?.status === "error" ? u.error ?? undefined : undefined}
+                  >
                     {connected ? statusText(e, u) : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected") : e.auth === "apikey" ? (ko ? "API 키 · 미연결" : "API key · not connected") : ko ? "미설치" : "not installed"}
                   </div>
                 </div>
@@ -247,7 +319,34 @@ export function EngineUsage() {
                     )}
                   </span>
                 ) : connected ? (
-                  <span className="dashboard-engine-check" aria-label={ko ? "연결됨" : "connected"}>✓</span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                    {rt?.active ? (
+                      <span
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 800,
+                          color: "#fff",
+                          background: "var(--accent)",
+                          borderRadius: 999,
+                          padding: "2px 8px",
+                          whiteSpace: "nowrap",
+                        }}
+                        title={ko ? "기본 엔진" : "Default engine"}
+                      >
+                        {ko ? "활성" : "active"}
+                      </span>
+                    ) : rt ? (
+                      <button
+                        onClick={() => void activateEngine(e, rt)}
+                        disabled={busy === e.id}
+                        className="titlebar-nodrag"
+                        title={ko ? "이 엔진을 기본 엔진으로" : "Make this the default engine"}
+                      >
+                        {ko ? "활성화" : "Activate"}
+                      </button>
+                    ) : null}
+                    <span className="dashboard-engine-check" aria-label={ko ? "연결됨" : "connected"}>✓</span>
+                  </span>
                 ) : (
                   <button
                     onClick={() => (e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))}

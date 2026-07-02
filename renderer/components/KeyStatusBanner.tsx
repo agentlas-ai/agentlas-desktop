@@ -82,7 +82,7 @@ export function KeyStatusBanner({ mode = "banner" }: { mode?: "banner" | "pill" 
       <button
         type="button"
         className="titlebar-nodrag"
-        onClick={() => navigate("/settings")}
+        onClick={() => navigate("/dashboard")} // 엔진 연결·사용량·키는 대시보드가 관리(세팅 아님)
         style={{
           marginLeft: "auto",
           flexShrink: 0,

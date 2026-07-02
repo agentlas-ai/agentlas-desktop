@@ -162,7 +162,10 @@ function installAntigravityViaScript(): Promise<CliActionResult> {
 }
 
 /** `npm i -g <pkg>` 실행. node/npm이 없거나 권한 문제면 ok:false + 직접 실행할 명령 안내. */
-export function installCli(kind: InstallableCli): Promise<CliActionResult> {
+export function installCli(
+  kind: InstallableCli,
+  opts?: { force?: boolean },
+): Promise<CliActionResult> {
   const plan = CLI_PLAN[kind];
   if (!plan) return Promise.resolve({ ok: false, message: `Unknown CLI: ${kind}` });
   // sudo 없이 항상 성공하도록 유저 prefix(~/.agentlas/npm)로 설치한다 — 시스템 전역 prefix(/opt/homebrew 등)는
@@ -171,8 +174,9 @@ export function installCli(kind: InstallableCli): Promise<CliActionResult> {
   const command = `npm install -g ${plan.pkg} --prefix ${userPrefix}`;
 
   // 이미 설치돼 있으면 npm을 건드리지 않는다 — 네이티브 설치본(~/.local/bin/claude 등)도 인정.
+  // force = 우리 prefix 관리본을 최신으로 재설치(updateCli 경로).
   const existing = resolveBinary(plan.bin);
-  if (existing) {
+  if (existing && !opts?.force) {
     return Promise.resolve({ ok: true, message: `already installed: ${existing}` });
   }
 
@@ -239,6 +243,66 @@ export function installCli(kind: InstallableCli): Promise<CliActionResult> {
       else done({ ok: false, message: (err || out).slice(-800).trim(), command });
     });
   });
+}
+
+/** 바이너리를 헤드리스로 실행하고 결과를 모은다 (self-updater 실행용). */
+function runBinary(bin: string, args: string[], timeoutMs: number): Promise<CliActionResult> {
+  const command = `${path.basename(bin)} ${args.join(" ")}`;
+  return new Promise<CliActionResult>((resolve) => {
+    let settled = false;
+    const done = (r: CliActionResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    let out = "";
+    let err = "";
+    let child: ReturnType<typeof spawnCli>;
+    try {
+      child = spawnCli(bin, args, { stdio: ["ignore", "pipe", "pipe"], env: augmentedEnv() });
+    } catch (e) {
+      done({ ok: false, message: e instanceof Error ? e.message : String(e), command });
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+      done({ ok: false, message: `timed out after ${Math.round(timeoutMs / 60000)} min`, command });
+    }, timeoutMs);
+    child.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
+    child.stderr?.on("data", (c: Buffer) => (err += c.toString("utf8")));
+    child.on("error", (e) => done({ ok: false, message: e.message, command }));
+    child.on("close", (code) => {
+      if (code === 0) done({ ok: true, message: out.slice(-400).trim() || "updated" });
+      else done({ ok: false, message: (err || out).slice(-800).trim(), command });
+    });
+  });
+}
+
+/**
+ * CLI를 최신으로 — 재로그인/연결 시 버전 불일치를 자동 해소한다.
+ *   · 미설치 → installCli(설치가 곧 최신)
+ *   · 우리 npm prefix(~/.agentlas/npm) 관리본 → npm 재설치(force)
+ *   · claude-code 네이티브 설치본 → 공식 self-updater `claude update`
+ *   · gemini(agy)/grok → 공식 install.sh 재실행(멱등, 최신 설치)
+ *   · 그 외(사용자 자체 관리본) → 건드리지 않는다
+ */
+export function updateCli(kind: InstallableCli): Promise<CliActionResult> {
+  const plan = CLI_PLAN[kind];
+  if (!plan) return Promise.resolve({ ok: false, message: `Unknown CLI: ${kind}` });
+  const existing = resolveBinary(plan.bin);
+  if (!existing) return installCli(kind);
+  if (existing.startsWith(path.join(os.homedir(), ".agentlas", "npm"))) {
+    return installCli(kind, { force: true });
+  }
+  if (kind === "claude-code") return runBinary(existing, ["update"], 2 * 60 * 1000);
+  if (kind === "gemini" && process.platform !== "win32") return installAntigravityViaScript();
+  if (kind === "grok" && process.platform !== "win32") return installGrokViaScript();
+  return Promise.resolve({ ok: true, message: `self-managed install: ${existing} — update skipped` });
 }
 
 /**

@@ -15,8 +15,17 @@ import { getJson, toPercent, toResetMs } from "./util";
 const execFileP = promisify(execFile);
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 
-async function readClaudeToken(): Promise<string | null> {
-  const candidates: Array<Record<string, unknown>> = [];
+interface TokenCandidate {
+  token: string;
+  /** epoch ms, 알 수 없으면 null */
+  expiresAt: number | null;
+  source: string;
+}
+
+// 후보 전부 수집(keychain 우선, 파일 폴백) — 첫 후보만 쓰면 파일에 남은 옛 만료 토큰이
+// keychain의 새 토큰을 영원히 가리는 함정("재로그인해도 fetch failed")이 생긴다.
+async function readClaudeTokens(): Promise<TokenCandidate[]> {
+  const items: Array<{ item: Record<string, unknown>; source: string }> = [];
   if (process.platform === "darwin") {
     try {
       const { stdout } = await execFileP(
@@ -24,20 +33,22 @@ async function readClaudeToken(): Promise<string | null> {
         ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
         { timeout: 5000 },
       );
-      candidates.push(JSON.parse(stdout));
+      items.push({ item: JSON.parse(stdout), source: "keychain" });
     } catch {
-      // 키체인 항목 없음 — 파일 폴백
+      // 키체인 항목 없음/거부 — 파일 폴백
     }
   }
   for (const name of [".credentials.json", "credentials.json"]) {
     try {
       const raw = await readFile(path.join(os.homedir(), ".claude", name), "utf8");
-      candidates.push(JSON.parse(raw));
+      items.push({ item: JSON.parse(raw), source: name });
     } catch {
       // 없음
     }
   }
-  for (const item of candidates) {
+  const out: TokenCandidate[] = [];
+  const seen = new Set<string>();
+  for (const { item, source } of items) {
     const oauth = (item?.claudeAiOauth ?? item?.claude_ai_oauth) as
       | Record<string, unknown>
       | undefined;
@@ -46,9 +57,13 @@ async function readClaudeToken(): Promise<string | null> {
       (oauth?.access_token as string) ??
       (item?.accessToken as string) ??
       (item?.access_token as string);
-    if (typeof token === "string" && token) return token;
+    if (typeof token !== "string" || !token || seen.has(token)) continue;
+    seen.add(token);
+    const rawExp = oauth?.expiresAt ?? oauth?.expires_at ?? item?.expiresAt ?? item?.expires_at;
+    const exp = Number(rawExp);
+    out.push({ token, expiresAt: Number.isFinite(exp) && exp > 0 ? exp : null, source });
   }
-  return null;
+  return out;
 }
 
 // 안정 id → 영문 기본 라벨. 표시 로컬라이즈는 렌더러가 kind/model로 재계산.
@@ -61,9 +76,9 @@ const LABELS: Record<string, string> = {
 };
 
 export async function getClaudeUsage(): Promise<ProviderUsage | null> {
-  const token = await readClaudeToken();
+  const candidates = await readClaudeTokens();
   // 토큰 없음 = 미연결 → 스냅샷에서 제외 (연결 칩은 runtime.detect가 담당)
-  if (!token) return null;
+  if (!candidates.length) return null;
 
   const base = {
     provider: "claude-code",
@@ -71,7 +86,35 @@ export async function getClaudeUsage(): Promise<ProviderUsage | null> {
     label: "Claude Code",
     fetchedAt: Date.now(),
   };
-  try {
+
+  // 만료 안 된 후보만 — 전부 만료면 재로그인 안내(auth_expired).
+  const now = Date.now();
+  const fresh = candidates.filter((c) => c.expiresAt == null || c.expiresAt > now + 30_000);
+  if (!fresh.length) return { ...base, status: "error", windows: [], error: "auth_expired" };
+
+  let lastErr = "";
+  for (const cand of fresh) {
+    try {
+      return await fetchUsageWith(cand.token, base);
+    } catch (err) {
+      lastErr = err instanceof Error ? err.message : String(err);
+      // 401/403 = 이 토큰이 죽은 것 → 다음 후보. 그 외(네트워크 등)는 후보 무관 → 중단.
+      if (!/HTTP 40[13]/.test(lastErr)) break;
+    }
+  }
+  return {
+    ...base,
+    status: "error",
+    windows: [],
+    error: /HTTP 40[13]/.test(lastErr) ? "auth_expired" : lastErr,
+  };
+}
+
+async function fetchUsageWith(
+  token: string,
+  base: Omit<ProviderUsage, "status" | "windows">,
+): Promise<ProviderUsage> {
+  {
     const payload = (await getJson(CLAUDE_USAGE_URL, {
       Authorization: `Bearer ${token}`,
       "anthropic-beta": "oauth-2025-04-20",
@@ -119,12 +162,5 @@ export async function getClaudeUsage(): Promise<ProviderUsage | null> {
     windows.sort((a, b) => rank(a) - rank(b));
 
     return { ...base, status: windows.length ? "ok" : "no_quota", windows };
-  } catch (err) {
-    return {
-      ...base,
-      status: "error",
-      windows: [],
-      error: err instanceof Error ? err.message : String(err),
-    };
   }
 }

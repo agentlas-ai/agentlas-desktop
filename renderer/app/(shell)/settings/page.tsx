@@ -18,10 +18,10 @@ import type {
 import {
   type ByokBackend,
   BYOK_MODELS,
-  CONTEXT_MANAGED_BY,
   findByokModel,
   needsLongContextToggle,
 } from "@shared/models";
+import { navigate } from "@/lib/navigation";
 import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconRefresh, IconWand } from "@/components/Icon";
 import { MigrationPanel } from "@/components/MigrationPanel";
 
@@ -92,13 +92,6 @@ function backendKeyHint(b: ByokBackend, locale: string): string {
   return (locale === "ko" ? BACKEND_KEY_HINT_KO : BACKEND_KEY_HINT_EN)[b];
 }
 
-const RUNTIME_LABEL: Record<string, string> = {
-  "claude-code": "Claude Code CLI",
-  codex: "Codex CLI",
-  gemini: "Antigravity CLI",
-  grok: "Grok CLI",
-  ollama: "Ollama",
-};
 
 export default function SettingsPage() {
   const { t, pref, setPref, locale } = useT();
@@ -176,23 +169,6 @@ export default function SettingsPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
-
-  async function activateRuntime(runtime: RuntimeStatus) {
-    const api = ipc();
-    if (!api) return;
-    try {
-      const updated = await api.runtime.setActive({
-        kind: runtime.kind,
-        backend: runtime.backend,
-        source: runtime.source,
-        model: runtime.model ?? undefined,
-      });
-      setStatuses(updated);
-      setRuntimeMessage("");
-    } catch (err) {
-      setRuntimeMessage(locale === "ko" ? `런타임을 바꾸지 못했습니다. 이전 설정이 유지됩니다. ${String(err)}` : `Runtime did not change. The previous setting was kept. ${String(err)}`);
-    }
-  }
 
   // Ollama 모델 선택 — 같은 ollama 런타임을 model만 바꿔 활성화.
   async function activateOllamaModel(model: string) {
@@ -536,7 +512,7 @@ export default function SettingsPage() {
         <LaunchdPanel />
 
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
-          {t("settings.detected")}
+          {locale === "ko" ? "엔진" : "Engines"}
         </h2>
         {runtimeMessage && (
           <div
@@ -554,76 +530,44 @@ export default function SettingsPage() {
             {runtimeMessage}
           </div>
         )}
-        {statuses.length === 0 && (
-          <div
+        {/* 감지된 LLM 목록·활성화는 대시보드(엔진 사용량 카드)로 이관 — 엔진 관리 일원화. */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "12px 14px",
+            border: "1px solid var(--paper-edge)",
+            borderRadius: "var(--radius-md)",
+            background: "var(--paper)",
+            fontSize: 13,
+            color: "var(--ink-soft)",
+            marginBottom: 10,
+          }}
+        >
+          <span style={{ flex: 1, minWidth: 0 }}>
+            {locale === "ko"
+              ? "엔진 연결·사용량·기본 엔진 선택은 대시보드에서 관리합니다."
+              : "Engine connections, usage, and the default engine are managed on the dashboard."}
+          </span>
+          <button
+            type="button"
+            onClick={() => navigate("/dashboard")}
             style={{
-              padding: 12,
-              border: "1px dashed var(--paper-edge)",
-              borderRadius: "var(--radius-md)",
-              color: "var(--muted-deep)",
-              fontSize: 13,
+              flexShrink: 0,
+              border: "1px solid var(--paper-edge)",
+              borderRadius: 8,
+              background: "var(--paper-2)",
+              color: "var(--ink)",
+              padding: "6px 10px",
+              fontSize: 12,
+              fontWeight: 700,
             }}
           >
-            {t("settings.no_backends")}
-          </div>
-        )}
-        <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 8 }}>
-          {statuses.map((s) => (
-            <li
-              key={`${s.kind}-${s.backend}`}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 12,
-                padding: "10px 14px",
-                background: "var(--paper)",
-                border: "1px solid var(--paper-edge)",
-                borderRadius: "var(--radius-md)",
-              }}
-            >
-              <span
-                style={{
-                  width: 10,
-                  height: 10,
-                  borderRadius: "50%",
-                  background: s.active ? "var(--green-deep)" : "var(--paper-edge)",
-                }}
-              />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 600, fontSize: 13 }}>
-                  {(s.kind === "byok" ? t("settings.runtime.byok") : RUNTIME_LABEL[s.kind] ?? s.kind)} · {backendLabel(s.backend, locale)}
-                </div>
-                <div style={{ fontSize: 11, color: "var(--muted-deep)" }}>
-                  {s.source}
-                  {s.version && ` · v${s.version}`}
-                </div>
-                {/* 컨텍스트·압축을 누가 관리하는가 — CLI는 자동(런타임), BYOK/Ollama는 Agentlas */}
-                <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 2 }}>
-                  {CONTEXT_MANAGED_BY[s.kind] === "runtime"
-                    ? t("settings.runtime.managed_runtime")
-                    : t("settings.runtime.managed_agentlas")}
-                </div>
-              </div>
-              {!s.active && (
-                <button
-                  onClick={() => void activateRuntime(s)}
-                  style={{
-                    fontSize: 12,
-                    color: "var(--accent)",
-                    fontWeight: 600,
-                  }}
-                >
-                  {t("settings.active")}
-                </button>
-              )}
-              {s.active && (
-                <span style={{ fontSize: 11, color: "var(--green-deep)", fontWeight: 600 }}>
-                  {t("settings.activated")}
-                </span>
-              )}
-            </li>
-          ))}
-        </ul>        <MultimodalFallbackPanel
+            {locale === "ko" ? "대시보드 열기" : "Open dashboard"}
+          </button>
+        </div>
+        <MultimodalFallbackPanel
           providers={multimodalProviders}
           settings={multimodalSettings}
           status={multimodalStatus}

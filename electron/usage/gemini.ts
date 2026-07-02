@@ -10,12 +10,14 @@ import { toResetMs } from "./util";
 
 const CODE_ASSIST = "https://cloudcode-pa.googleapis.com/v1internal";
 
-async function readGeminiToken(): Promise<string | null> {
+async function readGeminiToken(): Promise<{ token: string; expiryDate: number | null } | null> {
   try {
     const raw = await readFile(path.join(os.homedir(), ".gemini", "oauth_creds.json"), "utf8");
     const creds = JSON.parse(raw) as Record<string, unknown>;
     const token = creds?.access_token;
-    return typeof token === "string" && token ? token : null;
+    if (typeof token !== "string" || !token) return null;
+    const exp = Number(creds?.expiry_date);
+    return { token, expiryDate: Number.isFinite(exp) && exp > 0 ? exp : null };
   } catch {
     return null;
   }
@@ -55,8 +57,8 @@ function prettyModel(model: string): string {
 }
 
 export async function getGeminiUsage(): Promise<ProviderUsage | null> {
-  const token = await readGeminiToken();
-  if (!token) return null; // 미연결
+  const cred = await readGeminiToken();
+  if (!cred) return null; // 미연결
 
   const base = {
     provider: "gemini",
@@ -64,6 +66,11 @@ export async function getGeminiUsage(): Promise<ProviderUsage | null> {
     label: "Gemini",
     fetchedAt: Date.now(),
   };
+  // 만료 토큰으로 네트워크 치지 않는다(refresh는 client secret 필요) — 재로그인 안내.
+  if (cred.expiryDate != null && cred.expiryDate <= Date.now() + 30_000) {
+    return { ...base, status: "error", windows: [], error: "auth_expired" };
+  }
+  const token = cred.token;
   try {
     const projectEnv =
       process.env.GOOGLE_CLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT_ID || "";
@@ -108,11 +115,12 @@ export async function getGeminiUsage(): Promise<ProviderUsage | null> {
     );
     return { ...base, status: windows.length ? "ok" : "no_quota", windows: windows.slice(0, 4) };
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     return {
       ...base,
       status: "error",
       windows: [],
-      error: err instanceof Error ? err.message : String(err),
+      error: /HTTP 40[13]/.test(msg) ? "auth_expired" : msg,
     };
   }
 }

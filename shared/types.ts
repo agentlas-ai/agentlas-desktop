@@ -3038,6 +3038,10 @@ export interface AgentlasIpc {
     openCliLogin: (
       kind: "claude-code" | "codex" | "gemini" | "grok",
     ) => Promise<{ ok: boolean; message: string; command?: string }>;
+    /** CLI를 최신으로 업데이트 — 미설치면 설치, npm 관리본은 재설치, claude는 self-updater. */
+    updateCli: (
+      kind: "claude-code" | "codex" | "gemini" | "grok",
+    ) => Promise<{ ok: boolean; message: string; command?: string }>;
     /** CLI(Claude/Codex/Gemini)의 커스텀 슬래시 명령을 스캔 — 매 호출마다 최신. */
     listCommands: () => Promise<RuntimeCommand[]>;
     /** 런타임의 모델 목록을 실시간 조회 — BYOK는 provider /models API, ollama는 동적, CLI는 카탈로그.
