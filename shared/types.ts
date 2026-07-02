@@ -2690,9 +2690,19 @@ export interface HephaestusBuildEvent {
   sessionId?: string;
   result?: unknown;
 }
+/** 빌드 지시문 첨부 — 사용자 디스크의 파일/폴더(기존 에이전트·스킬·이미지·문서 등). */
+export interface HephaestusBuildAttachment {
+  /** 절대 경로(파일 또는 폴더). 메인 프로세스가 stat으로 종류를 판별해 워크스페이스에 스테이징한다. */
+  path: string;
+  /** 표시용 이름(기본 basename). */
+  name?: string;
+}
+
 export interface HephaestusBuildRequest {
   /** 이번 턴의 사용자 입력(자연어). 1턴=원 요청, 인터뷰 답변 턴=사용자의 답변. */
   request: string;
+  /** 첨부 파일/폴더 — 첫 턴에만 유효. 워크스페이스 `_attachments/`로 복사되고 프롬프트에 참조가 주입된다. */
+  attachments?: HephaestusBuildAttachment[];
   /** single | team | package(repair) — 미지정 시 엔진 mode-classification 에 위임. */
   mode?: "single" | "team" | "package";
   /** 결과 패키지를 생성할 작업 폴더(워크스페이스). */

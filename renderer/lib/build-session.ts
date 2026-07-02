@@ -32,8 +32,19 @@ interface ChatMsg {
   text: string;
 }
 
+export interface BuildAttachment {
+  /** 절대 경로(파일 또는 폴더). */
+  path: string;
+  /** 표시용 이름(basename). */
+  name: string;
+  /** 출처 힌트 — 폴더 피커면 dir 확정, 파일 인풋이면 file 확정, 드롭은 unknown(메인이 stat). */
+  kind: "file" | "dir" | "unknown";
+}
+
 export interface BuildState {
   request: string;
+  /** 지시문 첨부(기존 에이전트 폴더·스킬·이미지·문서 등). 첫 턴에 워크스페이스로 스테이징된다. */
+  attachments: BuildAttachment[];
   mode: Mode | "";
   workspace: string | null;
   runtime: RuntimeSelection | null;
@@ -79,6 +90,7 @@ function restoreWorkspace(): string | null {
 
 const state: BuildState = {
   request: "",
+  attachments: [],
   mode: "",
   workspace: typeof window !== "undefined" ? restoreWorkspace() : null,
   runtime: null,
@@ -124,6 +136,20 @@ export function getSnapshot(): BuildState {
 
 export function setRequest(v: string) {
   state.request = v;
+  commit();
+}
+
+/** 첨부 추가(중복 경로 제거). */
+export function addAttachments(items: BuildAttachment[]): void {
+  const seen = new Set(state.attachments.map((a) => a.path));
+  const next = items.filter((a) => a.path && !seen.has(a.path));
+  if (next.length === 0) return;
+  state.attachments = [...state.attachments, ...next];
+  commit();
+}
+
+export function removeAttachment(index: number): void {
+  state.attachments = state.attachments.filter((_, i) => i !== index);
   commit();
 }
 export function setMode(v: Mode | "") {
@@ -273,6 +299,8 @@ async function runTurn(input: string): Promise<void> {
     workspace,
     runtime: state.runtime || undefined,
     runtimeSessionId: runtimeSessionId || undefined,
+    // 첨부는 첫 턴에만 스테이징 — 인터뷰 resume 턴은 세션이 맥락을 유지한다.
+    attachments: runtimeSessionId ? undefined : state.attachments.map((a) => ({ path: a.path, name: a.name })),
     history: [...history],
     locale: currentLocale(),
   });
@@ -382,6 +410,7 @@ export async function startBuild(): Promise<void> {
   pushLog("stage", ko ? "딥인터뷰 시작 — Hephaestus 빌더 에이전트 가동" : "Deep interview started — Hephaestus builder agent engaged");
   pushLog("log", ko ? `요청 길이 ${reqLen}자 · 모드 ${mode}` : `Request length ${reqLen} chars · mode ${mode}`);
   pushLog("log", ko ? `생성 폴더 ${state.workspace}` : `Output folder ${state.workspace}`);
+  if (state.attachments.length > 0) pushLog("log", ko ? `첨부 ${state.attachments.length}개: ${state.attachments.map((a) => a.name).join(", ").slice(0, 200)}` : `Attachments ${state.attachments.length}: ${state.attachments.map((a) => a.name).join(", ").slice(0, 200)}`);
   if (state.runtime) pushLog("log", `${ko ? "엔진" : "Engine"} ${state.runtime.kind}${state.runtime.model ? ` · ${state.runtime.model}` : ""}`);
   commit();
   await runTurn(state.request.trim());

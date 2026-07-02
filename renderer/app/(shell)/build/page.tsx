@@ -31,8 +31,12 @@ import {
   rewindBuildInterview,
   cancelBuild,
   resetBuild,
+  addAttachments,
+  removeAttachment,
   type Mode,
+  type BuildAttachment,
 } from "@/lib/build-session";
+import { pathForDroppedFile } from "@/lib/ipc";
 import type { ChatQuestion } from "@/components/ChatStream";
 
 type StageState = "pending" | "active" | "done" | "error";
@@ -134,7 +138,24 @@ export default function BuildPage() {
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
-  const { request, mode, workspace, runtime, phase, log, reached, errored, result, registered, pendingQuestions, awaitingReply, turn, canRewindInterview } = s;
+  const { request, mode, workspace, runtime, phase, log, reached, errored, result, registered, pendingQuestions, awaitingReply, turn, canRewindInterview, attachments } = s;
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // 드롭/파일 인풋 → 실제 디스크 경로(webUtils) → 스토어 첨부. 경로를 못 얻으면(브라우저 등) 스킵.
+  const addDroppedFiles = (files: FileList) => {
+    const items: BuildAttachment[] = [];
+    for (const f of Array.from(files)) {
+      const p = pathForDroppedFile(f);
+      if (!p) continue;
+      items.push({ path: p, name: f.name || p.split("/").pop() || p, kind: f.type !== "" || f.size > 0 ? "file" : "unknown" });
+    }
+    if (items.length > 0) addAttachments(items);
+  };
+
+  const attachFolder = async () => {
+    const dir = await ipc()?.fs.pickDirectory();
+    if (dir) addAttachments([{ path: dir, name: dir.split("/").pop() || dir, kind: "dir" }]);
+  };
   const pendingQuestionKey = pendingQuestions.map((q) => q.id).join("|");
   const selectedCount = pendingQuestions.reduce((sum, q) => sum + (selectedOptions[q.id]?.length ?? 0), 0);
   const composedReply = useMemo(
@@ -347,14 +368,63 @@ export default function BuildPage() {
                 </div>
               )}
 
-              <textarea
-                value={request}
-                onChange={(e) => setBuildRequest(e.target.value)}
-                disabled={busy}
-                placeholder={ko ? "무엇을 시킬까요? 예) 인스타그램 마케팅 운영 에이전트" : "What should it do? e.g. an Instagram marketing agent"}
-                rows={5}
-                className="build-request-input titlebar-nodrag"
-              />
+              <div
+                className="build-request-drop"
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "copy";
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (busy) return;
+                  addDroppedFiles(e.dataTransfer.files);
+                }}
+              >
+                <textarea
+                  value={request}
+                  onChange={(e) => setBuildRequest(e.target.value)}
+                  disabled={busy}
+                  placeholder={ko ? "무엇을 시킬까요? 예) 인스타그램 마케팅 운영 에이전트 — 참고할 파일·폴더는 아래 첨부나 드래그로" : "What should it do? e.g. an Instagram marketing agent — drop reference files/folders below"}
+                  rows={5}
+                  className="build-request-input titlebar-nodrag"
+                />
+                <div className="build-attach-row">
+                  <button type="button" className="build-attach-button titlebar-nodrag" disabled={busy} onClick={() => fileInputRef.current?.click()}>
+                    📎 {ko ? "파일 첨부" : "Attach files"}
+                  </button>
+                  <button type="button" className="build-attach-button titlebar-nodrag" disabled={busy} onClick={() => void attachFolder()}>
+                    <IconFolder size={12} /> {ko ? "폴더 첨부" : "Attach folder"}
+                  </button>
+                  <span className="build-attach-hint">
+                    {ko ? "기존 에이전트·스킬 폴더, 이미지, 문서 등 — 빌더가 읽고 반영합니다" : "Existing agent/skill folders, images, docs — the builder reads them"}
+                  </span>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      if (e.target.files) addDroppedFiles(e.target.files);
+                      e.target.value = "";
+                    }}
+                  />
+                </div>
+                {attachments.length > 0 && (
+                  <div className="build-attach-chips">
+                    {attachments.map((a, i) => (
+                      <span key={a.path} className="build-attach-chip" title={a.path}>
+                        {a.kind === "dir" ? <IconFolder size={11} /> : <span className="build-artifact-filedot" />}
+                        <span className="build-attach-chip-name">{a.name}</span>
+                        {!busy && (
+                          <button type="button" className="build-attach-chip-x titlebar-nodrag" aria-label={ko ? "첨부 제거" : "Remove attachment"} onClick={() => removeAttachment(i)}>
+                            ✕
+                          </button>
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
 
               <div className="build-model-row">
                 <label className="build-model-label" htmlFor="build-model-select">

@@ -32,6 +32,76 @@ function readIf(root: string, rel: string): string | null {
   }
 }
 
+// ── 첨부 스테이징 ─────────────────────────────────────────────────────────
+// 사용자가 빌드 지시문에 붙인 파일/폴더(기존 에이전트·스킬·이미지·문서)를 워크스페이스의
+// `_attachments/`로 복사한다 — 빌더 CLI 에이전트의 cwd가 워크스페이스라 상대경로로 바로 읽힌다.
+const ATTACH_DIR = "_attachments";
+const ATTACH_SKIP = new Set(["node_modules", ".git", ".next", "dist", "__pycache__", ".DS_Store", ".venv"]);
+const ATTACH_MAX_TOTAL = 200 * 1024 * 1024; // 총 200MB 상한(무한 복사 가드)
+
+function uniqueDest(dir: string, name: string): string {
+  let dest = path.join(dir, name);
+  if (!fs.existsSync(dest)) return dest;
+  const ext = path.extname(name);
+  const base = path.basename(name, ext);
+  for (let i = 2; i < 100; i += 1) {
+    dest = path.join(dir, `${base}-${i}${ext}`);
+    if (!fs.existsSync(dest)) return dest;
+  }
+  return dest;
+}
+
+function describeSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`;
+  return `${bytes}B`;
+}
+
+/** 첨부를 워크스페이스로 스테이징하고 프롬프트에 붙일 참조 라인들을 반환한다. */
+export function stageAttachments(workspace: string, attachments: NonNullable<HephaestusBuildRequest["attachments"]>): { lines: string[]; errors: string[] } {
+  const lines: string[] = [];
+  const errors: string[] = [];
+  const destRoot = path.join(workspace, ATTACH_DIR);
+  let copied = 0;
+  for (const att of attachments) {
+    try {
+      const src = path.resolve(att.path || "");
+      const st = fs.statSync(src);
+      fs.mkdirSync(destRoot, { recursive: true });
+      const name = (att.name || path.basename(src)).replace(/[/\\]/g, "_");
+      const dest = uniqueDest(destRoot, name);
+      if (st.isDirectory()) {
+        fs.cpSync(src, dest, {
+          recursive: true,
+          filter: (p2) => {
+            if (ATTACH_SKIP.has(path.basename(p2))) return false;
+            if (copied > ATTACH_MAX_TOTAL) return false;
+            try {
+              const s2 = fs.statSync(p2);
+              if (s2.isFile()) copied += s2.size;
+            } catch { /* 통과 */ }
+            return true;
+          },
+        });
+        lines.push(`- ${ATTACH_DIR}/${path.basename(dest)}/ (folder — likely an existing agent/skill package; explore its files)`);
+      } else {
+        if (copied + st.size > ATTACH_MAX_TOTAL) {
+          errors.push(`${name}: size cap exceeded`);
+          continue;
+        }
+        copied += st.size;
+        fs.copyFileSync(src, dest);
+        const ext = path.extname(name).toLowerCase();
+        const kind = [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(ext) ? "image — open it with your file-read tool" : "file";
+        lines.push(`- ${ATTACH_DIR}/${path.basename(dest)} (${kind}, ${describeSize(st.size)})`);
+      }
+    } catch (err) {
+      errors.push(`${att.name || att.path}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return { lines, errors };
+}
+
 /** 빌더 시스템 프롬프트 조립: 캐논 AGENTS.md + (모드 빌더 또는 mode-map + 3 빌더) + 출력 지침. */
 function composeBuilderPrompt(root: string, req: HephaestusBuildRequest): string {
   const parts: string[] = [];
@@ -138,8 +208,26 @@ export async function runHephaestusBuild(
     return;
   }
 
+  // 첨부 스테이징(첫 턴만) — 인터뷰 resume 턴에는 이미 스테이징돼 있고 세션이 맥락을 유지한다.
+  let userPrompt = req.request;
+  if (!req.runtimeSessionId && req.attachments && req.attachments.length > 0) {
+    sink({ runId, kind: "stage", stage: "attach", text: ko ? `첨부 자료 준비 (${req.attachments.length}개)` : `Preparing attachments (${req.attachments.length})` });
+    const staged = stageAttachments(req.workspace, req.attachments);
+    if (staged.lines.length > 0) {
+      userPrompt +=
+        "\n\n[User attachments]\n" +
+        (ko
+          ? "사용자가 이 빌드에 참고 자료를 첨부했습니다. 인터뷰와 빌드 전에 아래 파일/폴더를 반드시 읽고 반영하세요. 첨부된 기존 에이전트/스킬 폴더는 구조·컨벤션의 기준으로 삼으세요. 단, 생성 패키지 안에 _attachments 폴더 자체를 포함하지는 마세요.\n"
+          : "The user attached reference material for this build. Read these files/folders before interviewing and building; treat attached agent/skill folders as structural references. Do NOT include the _attachments folder itself inside the generated package.\n") +
+        staged.lines.join("\n");
+    }
+    for (const e of staged.errors) {
+      sink({ runId, kind: "log", text: (ko ? "첨부 실패: " : "Attachment failed: ") + e });
+    }
+  }
+
   const agentPrompt = composeBuilderPrompt(root, req);
-  const systemPrompt = wrapSystemPrompt(agentPrompt, locale, "full", req.request, true);
+  const systemPrompt = wrapSystemPrompt(agentPrompt, locale, "full", userPrompt, true);
 
   sink({
     runId,
@@ -164,7 +252,7 @@ export async function runHephaestusBuild(
       {
         systemPrompt,
         history: historyEntries,
-        userPrompt: req.request,
+        userPrompt,
         backendLabel: picked.label,
         permission: "full",
         cwd: req.workspace,

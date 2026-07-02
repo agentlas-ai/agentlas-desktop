@@ -2370,6 +2370,30 @@ button[data-toggle-state="on"] {
   line-height: 1.5;
 }
 
+
+/* ── 빌드 지시문 첨부(파일·폴더·이미지) ───────────────────────────── */
+.build-request-drop { display: flex; flex-direction: column; gap: 8px; }
+.build-attach-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.build-attach-button {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 26px; padding: 0 10px; border-radius: 7px;
+  border: 1px dashed var(--paper-edge); background: var(--paper);
+  color: var(--ink-soft); font-size: 11.5px; font-weight: 700; cursor: pointer;
+}
+.build-attach-button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.build-attach-button:disabled { opacity: .5; cursor: default; }
+.build-attach-hint { font-size: 11px; color: var(--muted-deep); }
+.build-attach-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.build-attach-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 260px;
+  padding: 3px 8px; border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--paper));
+  border: 1px solid var(--paper-edge); font-size: 11.5px; color: var(--ink-soft);
+}
+.build-attach-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.build-attach-chip-x { color: var(--muted-deep); font-size: 10px; padding: 0 2px; cursor: pointer; }
+.build-attach-chip-x:hover { color: var(--accent); }
+
 .build-request-input::placeholder {
   color: var(--rd-ink-4);
 }
