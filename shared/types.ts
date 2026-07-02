@@ -3341,6 +3341,11 @@ export interface AgentlasIpc {
     /** preview를 실제 적용 (dryRun이면 적용 없이 결과 형태만) */
     import: (opts: MigrationOptions) => Promise<MigrationResult>;
   };
+  /** 브리핑 인터뷰 모드 — 모호한 실행형 요청 앞 배치 질문 게이트 설정. */
+  interview: {
+    getMode: () => Promise<"smart" | "build-only" | "off">;
+    setMode: (mode: "smart" | "build-only" | "off") => Promise<"smart" | "build-only" | "off">;
+  };
   /** invoke:run의 chatId가 firm 채팅인지 일반 채팅인지로 자동 라우팅 */
   invoke: {
     run: (req: McpInvocationRequest) => Promise<{ runId: string }>;

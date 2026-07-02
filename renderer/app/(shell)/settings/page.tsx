@@ -132,6 +132,7 @@ export default function SettingsPage() {
   const [multimodalDraft, setMultimodalDraft] = useState<Record<string, string>>({});
   const [runtimeMessage, setRuntimeMessage] = useState("");
   const [concurrency, setConcurrency] = useState<AgentConcurrencyInfo | null>(null);
+  const [interviewMode, setInterviewMode] = useState<"smart" | "build-only" | "off">("build-only");
 
   const refresh = useCallback(async () => {
     const api = ipc();
@@ -153,6 +154,7 @@ export default function SettingsPage() {
         api.multimodal.status(),
       ]);
     api.system?.concurrencyInfo().then(setConcurrency).catch(() => {});
+    api.interview?.getMode().then(setInterviewMode).catch(() => {});
     setStatuses(s);
     setHasKey({
       anthropic: a,
@@ -483,6 +485,53 @@ export default function SettingsPage() {
             </div>
           </>
         )}
+
+        {/* 브리핑 인터뷰 모드 — 모호한 요청 앞에 배치 질문을 강제할지 (smart/build-only/off) */}
+        <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
+          {locale === "ko" ? "브리핑 인터뷰" : "Briefing interview"}
+        </h2>
+        <div
+          style={{
+            padding: 14,
+            marginBottom: 12,
+            border: "1px solid var(--paper-edge)",
+            borderRadius: "var(--radius-md)",
+            background: "var(--paper)",
+          }}
+        >
+          <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 12px" }}>
+            {locale === "ko"
+              ? "요청이 모호하면 실행 전에 3–5개 질문으로 스코프를 먼저 확정합니다. 명확하거나 사소한 요청엔 질문하지 않아요."
+              : "When a request is ambiguous, the agent locks scope with 3–5 questions before executing. Clear or trivial requests are never questioned."}
+          </p>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {([
+              { id: "smart", ko: "스마트 (챗에서도)", en: "Smart (chat too)" },
+              { id: "build-only", ko: "빌드에서만 (기본)", en: "Build only (default)" },
+              { id: "off", ko: "끔", en: "Off" },
+            ] as const).map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => {
+                  void ipc()?.interview?.setMode(opt.id).then((m) => setInterviewMode(m));
+                }}
+                style={{
+                  fontSize: 12,
+                  padding: "6px 14px",
+                  borderRadius: 999,
+                  border: "1px solid var(--paper-edge)",
+                  background: interviewMode === opt.id ? "var(--accent)" : "var(--paper-2)",
+                  color: interviewMode === opt.id ? "#fff" : "var(--ink)",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                {locale === "ko" ? opt.ko : opt.en}
+              </button>
+            ))}
+          </div>
+        </div>
 
         <LaunchdPanel />
 

@@ -160,6 +160,7 @@ import {
   unarchiveChat,
 } from "./store/chats";
 import { getAgentConcurrencyInfo, setAgentConcurrency } from "./store/concurrency";
+import { getInterviewMode, setInterviewMode, type InterviewMode } from "./store/interview-mode";
 import {
   createAutomation,
   getAutomation,
@@ -698,6 +699,9 @@ export function registerIpcHandlers(): void {
 
   // ── 에이전트 동시성(스웜 크기) — 사양 기반 추천 + 사용자 슬라이더 ─────────
   ipcMain.handle("system:concurrencyInfo", () => getAgentConcurrencyInfo());
+  // 브리핑 인터뷰 모드 (smart / build-only / off)
+  ipcMain.handle("interview:getMode", () => getInterviewMode());
+  ipcMain.handle("interview:setMode", (_e, mode: InterviewMode) => setInterviewMode(mode));
   ipcMain.handle("system:setConcurrency", (_e, value: unknown) => {
     setAgentConcurrency(Number(value));
     return getAgentConcurrencyInfo();

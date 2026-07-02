@@ -345,6 +345,10 @@ const api: AgentlasIpc = {
     scan: () => ipcRenderer.invoke("migration:scan"),
     import: (opts: MigrationOptions) => ipcRenderer.invoke("migration:import", opts),
   },
+  interview: {
+    getMode: () => ipcRenderer.invoke("interview:getMode"),
+    setMode: (mode: "smart" | "build-only" | "off") => ipcRenderer.invoke("interview:setMode", mode),
+  },
   invoke: {
     run: (req: McpInvocationRequest) => ipcRenderer.invoke("invoke:run", req),
     eventChannel: (runId: string) => `invoke:event:${runId}`,

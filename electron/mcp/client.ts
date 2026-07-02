@@ -40,6 +40,7 @@ import {
   setChatWorkingFolder,
 } from "../store/chats";
 import { getProject } from "../store/projects";
+import { getInterviewMode, isTrivialPrompt } from "../store/interview-mode";
 import { getFirm } from "../store/firms";
 import { getResolvedOrg } from "../store/org-spec";
 import { runFirmInvocation } from "./firm-orchestrator";
@@ -947,6 +948,26 @@ export async function runMcpInvocation(
           ? `Router Agent 에스컬레이션 적용: ${routerAgentPreamble.loadedModuleIds.join(", ") || "core"}`
           : `Router Agent escalation applied: ${routerAgentPreamble.loadedModuleIds.join(", ") || "core"}`,
     });
+  }
+  // ── 브리핑 인터뷰 게이트(smart 모드 전용) ─────────────────────────────
+  // 모호한 실행형 요청이면 실행 전에 배치 질문(3-5)을 강제한다. 판단은 모델이 턴 안에서
+  // 인라인으로 수행(추가 LLM 콜/지연 0). trivial 프롬프트는 주입 자체를 건너뛴다(하드 어서션:
+  // 사소한 요청에 질문 0개). 기본 모드는 build-only라 챗에는 꺼져 있다.
+  if (
+    getInterviewMode() === "smart" &&
+    chat.kind !== "division" &&
+    !req.appsGenerateMode &&
+    !isTrivialPrompt(req.userPrompt)
+  ) {
+    systemPrompt =
+      `## Briefing gate (before executing)\n` +
+      `First judge silently: are the goal, constraints and success criteria of this request specific enough ` +
+      `that a stranger would produce the same result? If YES — proceed normally and ask NOTHING. ` +
+      `If NO (execution-shaped but ambiguous): ask ONE batch of 3-5 <<agentlas-ask>> questions covering the ` +
+      `weakest of: what NOT to do (anti-scope), smallest acceptable version, done signal, audience. ` +
+      `Then STOP and wait. After the answers arrive, restate the goal in one sentence and proceed — never ask a second batch; ` +
+      `record what is still open as explicit assumptions instead. 'decide later' is a valid answer (record as deferred). ` +
+      `Never use this gate for greetings, pure questions, or already-specific instructions.\n\n${systemPrompt}`;
   }
   if (chat.projectId) {
     const project = getProject(chat.projectId);

@@ -160,8 +160,30 @@ export function normalizeRecommendation(json: unknown, query: string): Recommend
   }
 
   // ── clarify → 되물음 ──
+  // 후보(candidates/suggestions)를 함께 실어 UI가 '수동 텍스트'가 아니라 클릭 가능한
+  // 선택지로 승격할 수 있게 한다 — 답이 borrowAgents/에이전트 전환으로 바로 되돌아간다.
   if (action === "clarify") {
-    return base({ mode: "clarify", clarifyQuestion: str(decision.clarify_question) });
+    const clarifyAgents: RecAgent[] = [];
+    const seen = new Set<string>();
+    for (const raw of [...asArr(decision.candidates), ...asArr(decision.suggestions)]) {
+      const o = asObj(raw);
+      const id = str(o.id) ?? str(o.slug);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const isLocal = id.startsWith("local/") || Boolean(str(o.id));
+      clarifyAgents.push({
+        id,
+        name: str(o.name_ko) ?? str(o.name) ?? str(o.nameEn) ?? id,
+        source: isLocal && !str(o.slug) ? "local" : "hub",
+        estCredits: numOrNull(o.perCallCredits ?? o.per_call_credits),
+      });
+      if (clarifyAgents.length >= 5) break;
+    }
+    return base({
+      mode: "clarify",
+      clarifyQuestion: str(decision.clarify_question),
+      agents: clarifyAgents,
+    });
   }
 
   // ── propose_new / refuse / hub_fallback / 기타 → 추천 없음(그냥 보내기 폴백) ──

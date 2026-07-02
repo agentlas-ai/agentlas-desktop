@@ -1712,6 +1712,56 @@ function RecommendationSheet({
         <div style={{ fontSize: 12.5, padding: "4px 2px 10px" }}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>{t("chatinput.rec.clarify")}</div>
           <div style={{ color: "var(--ink-soft)" }}>{preview.clarifyQuestion ?? ""}</div>
+          {/* 후보가 있으면 클릭 가능한 선택지로 승격 — 수동 재타이핑 대신 바로 그 에이전트로 실행 */}
+          {(preview.agents ?? []).length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
+              {preview.agents.map((a) => (
+                <button
+                  key={a.id}
+                  type="button"
+                  onClick={() =>
+                    onPick(
+                      a.source === "hub"
+                        ? { kind: "network", agents: [a.id], routerAgent: preview.routerAgent }
+                        : { kind: "agent", agentId: a.id, routerAgent: preview.routerAgent },
+                    )
+                  }
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    fontSize: 12.5,
+                    padding: "7px 10px",
+                    borderRadius: 8,
+                    border: "1px solid var(--paper-edge)",
+                    background: "var(--paper-2)",
+                    cursor: "pointer",
+                    textAlign: "left",
+                  }}
+                >
+                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>
+                    {a.name}
+                  </span>
+                  <span
+                    style={{
+                      flexShrink: 0,
+                      fontSize: 10.5,
+                      fontWeight: 700,
+                      color: "var(--ink-soft)",
+                      border: "1px solid var(--paper-edge)",
+                      padding: "0 5px",
+                      borderRadius: 3,
+                    }}
+                  >
+                    {sourceLabel(a.source)}
+                  </span>
+                  <span style={{ marginLeft: "auto", flexShrink: 0, color: "var(--ink-soft)", fontSize: 11.5 }}>
+                    {locale === "ko" ? "이 에이전트로 →" : "run with →"}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       ) : mode === "pipeline" ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
