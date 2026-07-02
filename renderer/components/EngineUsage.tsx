@@ -90,6 +90,8 @@ export function EngineUsage() {
   const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
   const [envKeys, setEnvKeys] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>(null);
+  const [busyStage, setBusyStage] = useState<"install" | "login" | null>(null);
+  const [notice, setNotice] = useState<{ id: string; text: string; command?: string } | null>(null);
   const [keyFor, setKeyFor] = useState<string | null>(null);
   const [keyVal, setKeyVal] = useState("");
   const [collapsed, setCollapsed] = useState(false);
@@ -186,9 +188,21 @@ export function EngineUsage() {
     const api = ipc();
     if (!api || !e.cliKind || busy) return;
     setBusy(e.id);
+    setNotice(null);
+    let opened = false;
     try {
-      const inst = await api.runtime.installCli(e.cliKind); // 자동설치(이미 있으면 no-op)
-      if (inst?.message?.startsWith("already installed")) {
+      // 1) 설치 — 없으면 깔고, 실패하면 터미널을 열지 않고 이유+수동 명령을 보여준다.
+      setBusyStage("install");
+      const inst = await api.runtime.installCli(e.cliKind);
+      if (!inst?.ok) {
+        setNotice({
+          id: e.id,
+          text: ko ? `CLI 설치에 실패했습니다: ${inst?.message ?? ""}` : `CLI install failed: ${inst?.message ?? ""}`,
+          command: inst?.command,
+        });
+        return;
+      }
+      if (inst.message?.startsWith("already installed")) {
         // 기존 설치본만 최신으로(버전 불일치 자동 해소) — 방금 설치한 건 이미 최신. 실패해도 로그인은 진행.
         try {
           await api.runtime.updateCli?.(e.cliKind);
@@ -196,13 +210,30 @@ export function EngineUsage() {
           // best-effort
         }
       }
-      await api.runtime.openCliLogin(e.cliKind); // 로그인창/터미널
+      // 2) 로그인 — 절대경로 실행(셸 PATH 무관). 실패도 표면화.
+      setBusyStage("login");
+      const login = await api.runtime.openCliLogin(e.cliKind);
+      if (!login?.ok) {
+        setNotice({
+          id: e.id,
+          text: ko ? `로그인 창을 열지 못했습니다: ${login?.message ?? ""}` : `Could not open login: ${login?.message ?? ""}`,
+          command: login?.command,
+        });
+        return;
+      }
+      opened = true;
       await loadConnections();
       await loadUsage(true);
     } finally {
       setBusy(null);
+      setBusyStage(null);
     }
-    void watchRecovery(e.id); // 터미널 로그인 완료를 감지해 자동 갱신
+    if (opened) void watchRecovery(e.id); // 터미널 로그인 완료를 감지해 자동 갱신
+  }
+
+  function busyLabel(): string {
+    if (busyStage === "install") return ko ? "설치 중…" : "Installing…";
+    return ko ? "연결 중…" : "Connecting…";
   }
 
   // 기본(활성) 엔진 선택 — 세팅의 detected 목록에서 대시보드로 이관(엔진 관리 일원화).
@@ -314,7 +345,7 @@ export function EngineUsage() {
                         className="titlebar-nodrag"
                         title={ko ? "CLI 재로그인" : "Re-login CLI"}
                       >
-                        {busy === e.id ? (ko ? "연결 중…" : "Connecting…") : ko ? "재로그인" : "Re-login"}
+                        {busy === e.id ? busyLabel() : ko ? "재로그인" : "Re-login"}
                       </button>
                     )}
                   </span>
@@ -353,10 +384,35 @@ export function EngineUsage() {
                     disabled={busy === e.id}
                     className="titlebar-nodrag"
                   >
-                    {busy === e.id ? (ko ? "연결 중…" : "Connecting…") : ko ? "연결" : "Connect"}
+                    {busy === e.id ? busyLabel() : ko ? "연결" : "Connect"}
                   </button>
                 )}
               </div>
+
+              {notice?.id === e.id && (
+                <div
+                  role="alert"
+                  style={{
+                    fontSize: 11,
+                    lineHeight: 1.5,
+                    color: "var(--red-deep, #c0392b)",
+                    background: "var(--paper)",
+                    border: "1px solid var(--paper-edge)",
+                    borderRadius: 8,
+                    padding: "6px 9px",
+                    marginTop: 6,
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {notice.text}
+                  {notice.command && (
+                    <>
+                      {" "}
+                      {ko ? "터미널에서 직접 실행:" : "Run manually:"} <code>{notice.command}</code>
+                    </>
+                  )}
+                </div>
+              )}
 
               {hasBars && u!.windows.map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
 

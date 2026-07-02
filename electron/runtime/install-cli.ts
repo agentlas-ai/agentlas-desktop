@@ -308,29 +308,46 @@ export function updateCli(kind: InstallableCli): Promise<CliActionResult> {
 /**
  * 시스템 터미널에서 CLI 로그인 명령을 연다 — 사용자는 거기서 브라우저 로그인만 하면 된다.
  * loginCmd는 고정값이라 셸 인젝션 위험 없음.
+ *
+ * 함정 2개를 여기서 막는다:
+ *  · CLI가 정말 없으면(설치 실패) 터미널을 열지 않는다 — "command not found" 경험 금지.
+ *  · 앱이 설치한 CLI(~/.agentlas/npm/bin 등)는 사용자 셸 PATH에 없을 수 있다 →
+ *    bare 이름 대신 절대경로로 실행한다.
  */
 export function openCliLogin(kind: InstallableCli): CliActionResult {
   const plan = CLI_PLAN[kind];
   if (!plan) return { ok: false, message: `Unknown CLI: ${kind}` };
-  const cmd = plan.loginCmd;
+  const [, ...loginArgs] = plan.loginCmd.split(" ");
+  const abs = resolveBinary(plan.bin);
+  if (!abs) {
+    // 설치가 안 된 상태로 터미널부터 여는 건 금지 — 렌더러가 이 메시지로 실패를 표면화한다.
+    return {
+      ok: false,
+      message: `${plan.bin} is not installed`,
+      command: `npm install -g ${plan.pkg} --prefix ${path.join(os.homedir(), ".agentlas", "npm")}`,
+    };
+  }
+  // 절대경로 실행 — 셸 PATH 무관. 경로 공백/특수문자는 플랫폼별로 인용.
+  const posixCmd = [`'${abs.replace(/'/g, "'\\''")}'`, ...loginArgs].join(" ");
+  const winCmd = [`"${abs}"`, ...loginArgs].join(" ");
   try {
     if (process.platform === "darwin") {
-      // Terminal.app에서 실행 + 활성화. cmd는 상수.
+      // Terminal.app에서 실행 + 활성화. 경로는 위에서 단일인용으로 고정.
       spawn("osascript", [
         "-e",
-        `tell application "Terminal" to do script "${cmd}"`,
+        `tell application "Terminal" to do script "${posixCmd.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`,
         "-e",
         `tell application "Terminal" to activate`,
       ]);
     } else if (process.platform === "win32") {
-      // 새 cmd 창에서 실행 후 유지(/k).
-      spawn("cmd", ["/c", "start", "cmd", "/k", cmd], { shell: true });
+      // 새 cmd 창에서 실행 후 유지(/k). start의 첫 따옴표 인자는 창 제목으로 먹히므로 "" 선행.
+      spawn("cmd", ["/c", "start", '""', "cmd", "/k", winCmd], { shell: true });
     } else {
       // Linux best-effort — 대표 터미널 에뮬레이터.
-      spawn("x-terminal-emulator", ["-e", cmd]);
+      spawn("x-terminal-emulator", ["-e", [abs, ...loginArgs].join(" ")]);
     }
-    return { ok: true, message: cmd };
+    return { ok: true, message: [abs, ...loginArgs].join(" ") };
   } catch (e) {
-    return { ok: false, message: e instanceof Error ? e.message : String(e), command: cmd };
+    return { ok: false, message: e instanceof Error ? e.message : String(e), command: plan.loginCmd };
   }
 }
