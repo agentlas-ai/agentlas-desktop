@@ -663,7 +663,11 @@ export async function runMcpInvocation(
   const autoRoute = isTargetAppEdit
     ? selectAppBuilderForExistingAppEdit(installedAgents, locale)
     : !plainConversation && (req.appsGenerateMode || isGlobalOrchestrator(agent))
-      ? selectAutoRoutedAgent(effectiveUserPrompt, installedAgents, locale)
+      ? // 앱 생성 모드만 무매치 폴백 허용 — 일반 챗은 확신(이름/힌트급 매치) 없으면 위임하지 않고
+        // 오케스트레이터가 그냥 답한다("사용 에이전트: PM Soul" 소음/오배정 반복 제거).
+        selectAutoRoutedAgent(effectiveUserPrompt, installedAgents, locale, {
+          allowFallback: req.appsGenerateMode === true,
+        })
       : null;
   if (autoRoute) {
     sink({ kind: "tool-use", status: autoRouteStatus(autoRoute, locale) });

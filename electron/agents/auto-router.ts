@@ -388,10 +388,21 @@ function scoreAgent(prompt: string, promptTerms: string[], agent: InstalledAgent
   return { score, reason, terms: uniqueTerms };
 }
 
+// 전문 에이전트로 위임하려면 이 점수 이상이어야 한다. 근거: 직접 이름 언급 +20,
+// 큐레이션된 ROUTE_HINT 매치 +12부터 — 즉 이름/힌트급 증거가 있어야 위임한다.
+// 설명문 단어 몇 개가 스치는 정도(+2~3/개)로는 위임하지 않는다 — "사진 프롬프트가
+// 댓글 시더로 라우팅"되던 저신뢰 오배정과, 일상 대화가 매번 에이전트를 부르던 소음의 근원.
+const MIN_SPECIALIST_SCORE = 10;
+
 export function selectAutoRoutedAgent(
   userPrompt: string,
   agents: InstalledAgent[],
   locale: RuntimeLocale,
+  opts?: {
+    /** true면(앱 생성 모드 등) 무매치여도 기본 조율 에이전트로 폴백한다. 기본 false —
+     *  확신 없는 라우팅 대신 null을 돌려주고, 호출부가 현재(오케스트레이터) 경로로 즉답한다. */
+    allowFallback?: boolean;
+  },
 ): AutoRouteChoice | null {
   const candidates = agents.filter((agent) => !isGlobalOrchestrator(agent));
   if (!candidates.length) return null;
@@ -402,9 +413,11 @@ export function selectAutoRoutedAgent(
     .sort((a, b) => b.score - a.score);
 
   const best = ranked[0];
-  if (best && best.score > 0) {
+  if (best && best.score >= MIN_SPECIALIST_SCORE) {
     return { agent: best.agent, reason: best.reason, matchedTerms: best.terms };
   }
+
+  if (!opts?.allowFallback) return null;
 
   const fallback =
     candidates.find((agent) => agent.slug === "agentlas-pm-soul") ??

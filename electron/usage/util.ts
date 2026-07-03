@@ -86,7 +86,11 @@ export async function getJson(
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await pickFetch()(url, { headers, signal: ctrl.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      // 429는 Retry-After를 메시지에 실어 상위(스냅샷 백오프)가 서버 지시대로 쉬게 한다.
+      const retryAfter = res.status === 429 ? res.headers.get("retry-after") : null;
+      throw new Error(`HTTP ${res.status}${retryAfter ? ` retry-after=${retryAfter}` : ""}`);
+    }
     return await res.json();
   } catch (err) {
     throw new Error(describeFetchError(err));

@@ -276,13 +276,22 @@ export function EngineUsage() {
     }
   }
 
+  function isRateLimited(u: ProviderUsage | undefined): boolean {
+    return u?.status === "error" && /HTTP 429/.test(u.error ?? "");
+  }
+
   function statusText(e: EngineDef, u: ProviderUsage | undefined): string {
     if (e.auth === "apikey") return ko ? "키 과금" : "key-billed";
     if (e.auth === "local") return ko ? "로컬 · 무제한" : "local · unlimited";
     if (u?.status === "error") {
-      return /auth_expired|HTTP 40[13]/i.test(u.error ?? "")
-        ? ko ? "로그인 만료 — 재로그인 필요" : "login expired — re-login"
-        : ko ? "조회 실패" : "fetch failed";
+      if (/auth_expired|HTTP 40[13]/i.test(u.error ?? "")) {
+        return ko ? "로그인 만료 — 재로그인 필요" : "login expired — re-login";
+      }
+      if (isRateLimited(u)) {
+        // 429 = 연결·로그인 문제가 아님. 재로그인을 유도하면 오진이라 라벨부터 구분한다.
+        return ko ? "일시 제한(429) — 자동 재시도 중" : "rate-limited (429) — retrying";
+      }
+      return ko ? "조회 실패" : "fetch failed";
     }
     if (u?.status === "no_quota") return ko ? "연결됨 · 사용량 곧" : "connected · usage soon";
     return ko ? "연결됨" : "connected";
@@ -325,8 +334,9 @@ export function EngineUsage() {
                     {connected ? statusText(e, u) : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected") : e.auth === "apikey" ? (ko ? "API 키 · 미연결" : "API key · not connected") : ko ? "미설치" : "not installed"}
                   </div>
                 </div>
-                {connected && u?.status === "error" ? (
+                {connected && u?.status === "error" && !isRateLimited(u) ? (
                   // 조회 실패 — 막다른 골목 금지: 재시도 + (CLI) 재로그인 액션을 준다.
+                  // (429는 제외 — 로그인 문제가 아니고, 누를수록 제한이 길어진다. 백오프가 자동 재시도.)
                   <span style={{ display: "inline-flex", gap: 6, flexShrink: 0 }}>
                     <button
                       onClick={() => {

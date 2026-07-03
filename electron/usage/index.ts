@@ -8,6 +8,8 @@
 // API 키형(DeepSeek·GLM·Grok·Pi 등)은 구독 rate-limit 창이 없어(키 과금) 여기서 다루지 않고,
 // 로컬(Ollama)은 무제한 — 둘 다 대시보드 "연결" 칩은 runtime.detect가 담당한다.
 // 향후 프로바이더는 이 배열에 어댑터만 추가하면 됨.
+import fs from "node:fs";
+import path from "node:path";
 import type { ProviderUsage, UsageSnapshot } from "../../shared/types";
 import { getClaudeUsage } from "./claude";
 import { getCodexUsage } from "./codex";
@@ -15,7 +17,7 @@ import { getGeminiUsage } from "./gemini";
 
 const TTL_MS = 60_000;
 const FORCE_MIN_MS = 10_000; // force여도 프로바이더당 최소 재조회 간격
-const LAST_GOOD_MAX_MS = 30 * 60_000; // 일시 장애 시 정상 스냅샷을 대신 보여줄 최대 나이
+const LAST_GOOD_MAX_MS = 2 * 60 * 60_000; // 일시 장애 시 정상 스냅샷을 대신 보여줄 최대 나이(재시작·장기 429 커버)
 const BACKOFF_429_MS = 5 * 60_000; // rate-limit 맞으면 그 프로바이더만 쉰다
 // 인증 문제(auth_expired)는 일시 장애가 아니다 — 그건 그대로 표면화해 재로그인 액션을 준다.
 const TRANSIENT_RE = /HTTP (408|425|429|5\d\d)|fetch failed|timed? ?out|abort|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network/i;
@@ -24,6 +26,46 @@ let cache: { snapshot: UsageSnapshot; at: number } | null = null;
 const lastResult = new Map<string, { usage: ProviderUsage; at: number }>();
 const lastGood = new Map<string, { usage: ProviderUsage; at: number }>();
 const backoffUntil = new Map<string, number>();
+
+// ── last-good 디스크 영속화 ────────────────────────────────────────────────
+// 메모리 전용이면 앱 재시작 직후 첫 조회가 429/네트워크 장애를 맞을 때 보여줄 게 없어
+// "조회 실패"부터 뜬다. 마지막 정상 수치를 userData에 남겨 재시작을 건너 유지한다.
+function lastGoodFile(): string | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { app } = require("electron") as typeof import("electron");
+    return path.join(app.getPath("userData"), "usage-last-good.json");
+  } catch {
+    return null; // electron 밖(헤드리스 스크립트) — 영속화 생략
+  }
+}
+let lastGoodLoaded = false;
+function loadLastGood(): void {
+  if (lastGoodLoaded) return;
+  lastGoodLoaded = true;
+  const file = lastGoodFile();
+  if (!file) return;
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<
+      string,
+      { usage: ProviderUsage; at: number }
+    >;
+    for (const [id, entry] of Object.entries(raw)) {
+      if (entry?.usage && typeof entry.at === "number") lastGood.set(id, entry);
+    }
+  } catch {
+    // 없음/손상 — 무시
+  }
+}
+function saveLastGood(): void {
+  const file = lastGoodFile();
+  if (!file) return;
+  try {
+    fs.writeFileSync(file, JSON.stringify(Object.fromEntries(lastGood)), "utf8");
+  } catch {
+    // best-effort
+  }
+}
 
 const ADAPTERS: Array<{ id: string; fn: () => Promise<ProviderUsage | null> }> = [
   { id: "claude-code", fn: getClaudeUsage },
@@ -50,7 +92,12 @@ async function fetchProvider(
   if (!usage) return null; // 미연결 — 스냅샷에서 제외
 
   if (usage.status === "error" && usage.error && TRANSIENT_RE.test(usage.error)) {
-    if (/HTTP 429/.test(usage.error)) backoffUntil.set(id, now + BACKOFF_429_MS);
+    if (/HTTP 429/.test(usage.error)) {
+      // 서버가 Retry-After를 주면 그대로(±최소 1분/최대 15분), 없으면 기본 5분.
+      const ra = Number(/retry-after=(\d+)/.exec(usage.error)?.[1]);
+      const waitMs = Number.isFinite(ra) && ra > 0 ? Math.min(Math.max(ra * 1000, 60_000), 15 * 60_000) : BACKOFF_429_MS;
+      backoffUntil.set(id, now + waitMs);
+    }
     const good = lastGood.get(id);
     if (good && now - good.at < LAST_GOOD_MAX_MS) {
       // 일시 장애 — 에러 UI 대신 마지막 정상 수치를 유지(다음 주기에 자연 회복).
@@ -61,12 +108,14 @@ async function fetchProvider(
   if (usage.status === "ok" || usage.status === "no_quota") {
     lastGood.set(id, { usage, at: now });
     backoffUntil.delete(id);
+    saveLastGood();
   }
   lastResult.set(id, { usage, at: now });
   return usage;
 }
 
 export async function getUsageSnapshot(opts?: { force?: boolean }): Promise<UsageSnapshot> {
+  loadLastGood();
   const now = Date.now();
   if (!opts?.force && cache && now - cache.at < TTL_MS) {
     return cache.snapshot;
