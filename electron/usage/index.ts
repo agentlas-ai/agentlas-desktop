@@ -10,14 +10,19 @@
 // 향후 프로바이더는 이 배열에 어댑터만 추가하면 됨.
 import fs from "node:fs";
 import path from "node:path";
-import type { ProviderUsage, UsageSnapshot } from "../../shared/types";
+import type { ProviderUsage, UsageSnapshot, UsageWindow } from "../../shared/types";
 import { getClaudeUsage } from "./claude";
 import { getCodexUsage } from "./codex";
 import { getGeminiUsage } from "./gemini";
+import { localTokensFor } from "./local-logs";
 
-// 여러 위젯(EngineUsage·KeyStatusBanner·FleetSummaryStrip)이 각자 폴링해도 이 캐시로 묶여
-// 실제 네트워크 조회는 TTL당 프로바이더별 1회로 수렴한다. usage %는 분 단위로만 변하니 넉넉히.
-const TTL_MS = 120_000;
+// 하이브리드 사용량(ccusage + agentcat 절충):
+//  - 서버 usage API = 정확한 리밋 %·리셋 시각. 단 rate limit이 짜서 자주 못 친다.
+//  - 로컬 로그(local-logs) = rate-limit 0의 실시간 토큰. 단 "한도 대비 %"는 모른다.
+// 평상시 서버 조회는 10분 간격으로 급감시켜 429를 예방하고(그 사이 last-good 재사용),
+// 서버가 완전히 죽었을 때만(429/네트워크 + last-good 만료) 로컬 토큰으로 폴백해 빈손을 막는다.
+const TTL_MS = 120_000; // 전체 스냅샷 캐시(여러 위젯이 공유)
+const SERVER_MIN_INTERVAL_MS = 10 * 60_000; // 프로바이더별 실제 서버 재조회 최소 간격(비-force)
 const FORCE_MIN_MS = 10_000; // force여도 프로바이더당 최소 재조회 간격
 const LAST_GOOD_MAX_MS = 2 * 60 * 60_000; // 일시 장애 시 정상 스냅샷을 대신 보여줄 최대 나이(재시작·장기 429 커버)
 const BACKOFF_429_MS = 5 * 60_000; // rate-limit 맞으면 그 프로바이더만 쉰다
@@ -75,14 +80,47 @@ const ADAPTERS: Array<{ id: string; fn: () => Promise<ProviderUsage | null> }> =
   { id: "gemini", fn: getGeminiUsage },
 ];
 
+/** 로컬 로그 토큰만으로 구성한 폴백 ProviderUsage. 서버가 아예 안 될 때만 쓴다.
+ *  usedPercent는 알 수 없어(로컬엔 한도 없음) 서버 last-good %를 빌려 근사, 없으면 0(토큰 절대량 표시). */
+function localFallback(id: string, base: ProviderUsage | null, now: number): ProviderUsage | null {
+  const local = localTokensFor(id);
+  if (!local || local.lastActivity == null || (local.fiveHour === 0 && local.sevenDay === 0)) return null;
+  const goodWindows = base?.windows ?? [];
+  const pctOf = (kind: string) => goodWindows.find((w) => w.kind === kind)?.usedPercent ?? 0;
+  const mk = (kind: UsageWindow["kind"], label: string, tokens: number): UsageWindow => ({
+    id: `${id}-local-${kind}`,
+    label,
+    kind,
+    usedPercent: pctOf(kind),
+    used: tokens,
+    unit: "tokens",
+  });
+  return {
+    provider: id,
+    backend: base?.backend,
+    label: base?.label ?? id,
+    status: "ok",
+    fetchedAt: now,
+    error: "local_estimate", // status=ok라 UI엔 에러 아님 — 렌더가 '로컬 추정' 배지로만 쓴다
+    windows: [mk("5h", "Last 5h (local)", local.fiveHour), mk("7d", "Last 7d (local)", local.sevenDay)],
+  };
+}
+
 async function fetchProvider(
   id: string,
   fn: () => Promise<ProviderUsage | null>,
   now: number,
+  force: boolean,
 ): Promise<ProviderUsage | null> {
   const last = lastResult.get(id);
   if ((backoffUntil.get(id) ?? 0) > now && last) return last.usage;
   if (last && now - last.at < FORCE_MIN_MS) return last.usage;
+  // 평상시(비-force)엔 서버를 10분에 한 번만 친다 — 그 사이 last-good을 그대로 재사용해 429 예방.
+  const good = lastGood.get(id);
+  if (!force && good && now - good.at < SERVER_MIN_INTERVAL_MS) {
+    lastResult.set(id, { usage: good.usage, at: now });
+    return good.usage;
+  }
 
   let usage: ProviderUsage | null = null;
   try {
@@ -100,11 +138,16 @@ async function fetchProvider(
       const waitMs = Number.isFinite(ra) && ra > 0 ? Math.min(Math.max(ra * 1000, 60_000), 15 * 60_000) : BACKOFF_429_MS;
       backoffUntil.set(id, now + waitMs);
     }
-    const good = lastGood.get(id);
     if (good && now - good.at < LAST_GOOD_MAX_MS) {
       // 일시 장애 — 에러 UI 대신 마지막 정상 수치를 유지(다음 주기에 자연 회복).
       lastResult.set(id, { usage: good.usage, at: now });
       return good.usage;
+    }
+    // last-good도 없다 — 로컬 로그로라도 표시(빈 "조회 실패" 방지). 로컬조차 없으면 원래 에러.
+    const fb = localFallback(id, good?.usage ?? null, now);
+    if (fb) {
+      lastResult.set(id, { usage: fb, at: now });
+      return fb;
     }
   }
   if (usage.status === "ok" || usage.status === "no_quota") {
@@ -122,7 +165,7 @@ export async function getUsageSnapshot(opts?: { force?: boolean }): Promise<Usag
   if (!opts?.force && cache && now - cache.at < TTL_MS) {
     return cache.snapshot;
   }
-  const results = await Promise.allSettled(ADAPTERS.map((a) => fetchProvider(a.id, a.fn, now)));
+  const results = await Promise.allSettled(ADAPTERS.map((a) => fetchProvider(a.id, a.fn, now, opts?.force === true)));
   const providers: ProviderUsage[] = [];
   for (const r of results) {
     if (r.status === "fulfilled" && r.value) providers.push(r.value);

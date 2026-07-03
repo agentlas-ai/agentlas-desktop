@@ -47,6 +47,7 @@ const ENGINES: EngineDef[] = [
 
 function windowLabel(w: UsageWindow, ko: boolean): string {
   if (w.kind === "monthly") return ko ? "추가 크레딧" : "Extra credits";
+  if (w.id.includes("-local-")) return ko ? (w.kind === "5h" ? "최근 5시간(로컬)" : "최근 7일(로컬)") : w.kind === "5h" ? "Last 5h (local)" : "Last 7d (local)";
   if (w.kind === "5h") return ko ? "5시간" : "5-hour";
   if (w.kind === "daily") return w.label || (ko ? "일일" : "Daily");
   if (w.model === "opus") return ko ? "Opus 7일" : "Opus 7d";
@@ -69,8 +70,29 @@ function formatReset(resetAt: number | null | undefined, ko: boolean): string {
   return `${pre}${Math.round(hrs / 24)}${ko ? "일" : "d"}`;
 }
 
+function formatTokens(n: number): string {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)}K`;
+  return String(n);
+}
+
 function UsageBar({ w, ko }: { w: UsageWindow; ko: boolean }) {
+  // 로컬 추정 창(unit="tokens", 서버 % 없음) — %바 대신 토큰 절대량을 보여준다.
+  const isLocalTokens = w.unit === "tokens" && w.used != null;
   const pct = Math.round(w.usedPercent);
+  if (isLocalTokens && pct === 0) {
+    return (
+      <div className="dashboard-usage-bar" data-local="true">
+        <span>{windowLabel(w, ko)}</span>
+        <div><div style={{ width: "0%" }} /></div>
+        <span title={ko ? "로컬 로그 기준 실사용 토큰(서버 리밋 조회 대기)" : "tokens from local logs (server limit pending)"}>
+          {formatTokens(w.used ?? 0)} {ko ? "토큰" : "tok"}
+        </span>
+        <span />
+      </div>
+    );
+  }
   const warn = pct >= WARN_PCT;
   const fill = warn ? "var(--red-deep, #c0392b)" : "var(--accent)";
   return (
@@ -300,6 +322,8 @@ export function EngineUsage() {
       return ko ? "조회 실패" : "fetch failed";
     }
     if (u?.status === "no_quota") return ko ? "연결됨 · 사용량 곧" : "connected · usage soon";
+    // 서버 리밋 조회가 잠시 막혀 로컬 로그로 표시 중(status=ok, error 마커) — 정직하게 알린다.
+    if (u?.error === "local_estimate") return ko ? "연결됨 · 로컬 추정" : "connected · local estimate";
     return ko ? "연결됨" : "connected";
   }
 
