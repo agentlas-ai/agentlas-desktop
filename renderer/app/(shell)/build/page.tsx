@@ -761,7 +761,7 @@ function ArtifactPreview({ workspace, ko }: { workspace: string; ko: boolean }) 
 }
 
 // ── 검증 게이트 — 엔진의 실제 보안 스캔 결과(done.result.securityScan)를 비개발자 어휘로 표시. ──
-function parseScan(scan: unknown): {
+function parseScan(scan: unknown, ko: boolean): {
   unknown: boolean;
   tone: "ok" | "warn" | "block";
   pass: number;
@@ -780,7 +780,7 @@ function parseScan(scan: unknown): {
       : [];
   const items = (raw as Record<string, unknown>[]).map((f) => ({
     severity: String(f?.severity ?? "info"),
-    message: String(f?.message ?? f?.id ?? "항목"),
+    message: String(f?.message ?? f?.id ?? (ko ? "항목" : "finding")),
     file: typeof f?.file === "string" ? (f.file as string) : undefined,
   }));
   if (items.length === 0) {
@@ -838,7 +838,7 @@ function SecurityScanBlock({ initialScan, folder, ko }: { initialScan: unknown; 
 }
 
 function VerifyGate({ scan, ko }: { scan: unknown; ko: boolean }) {
-  const p = parseScan(scan);
+  const p = parseScan(scan, ko);
   return (
     <div className="build-verify" data-tone={p.tone}>
       <div className="build-verify-head">

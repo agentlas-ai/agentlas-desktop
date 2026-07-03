@@ -1675,6 +1675,7 @@ function flowFromAoGraph(graph: unknown, node: ResolvedNode): { upstream: string
 }
 
 function InformationFlowMapper({ node }: { node: ResolvedNode }) {
+  const { locale } = useT();
   const fallback = flowHeuristic(node.role);
   const [flow, setFlow] = useState<{ upstream: string; downstream: string }>(fallback);
   const [fromEngine, setFromEngine] = useState(false);
@@ -1716,7 +1717,7 @@ function InformationFlowMapper({ node }: { node: ResolvedNode }) {
       gap: 6
     }}>
       <div style={{ fontSize: 10, fontWeight: 700, color: "var(--muted-deep)", textTransform: "uppercase", letterSpacing: 0.6, fontFamily: "var(--font-mono)", display: "flex", alignItems: "center", gap: 8 }}>
-        <span>정보 흐름 연결 맵 (Information Flow Mapper)</span>
+        <span>{locale === "ko" ? "정보 흐름 연결 맵 (Information Flow Mapper)" : "Information Flow Mapper"}</span>
         {fromEngine && (
           <span style={{ fontSize: 8.5, padding: "1px 6px", borderRadius: 999, background: "rgba(12,166,120,0.12)", color: "var(--green-deep, #0ca678)", letterSpacing: 0.3 }}>
             AO GRAPH

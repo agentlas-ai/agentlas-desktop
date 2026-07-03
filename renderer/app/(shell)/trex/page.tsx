@@ -4,7 +4,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
-import { useT } from "@/lib/i18n";
+import { currentLocale, useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import {
   generateDeck,
@@ -509,6 +509,8 @@ async function fillBlockImages(
 ): Promise<void> {
   const gen = ipc()?.trex?.generateImage;
   if (!gen || model === "none") return;
+  // 모듈 함수라 훅을 못 쓴다 — 활동 피드 라벨용 locale 스냅샷(build-session.ts와 같은 패턴).
+  const ko = currentLocale() === "ko";
   const dna = styleById(deck.styleId);
   const tasks: Array<{ slideId: string; blockId: string; label: string; prompt: string }> = [];
   deck.slides.forEach((s, si) => {
@@ -518,7 +520,7 @@ async function fillBlockImages(
       tasks.push({
         slideId: s.id,
         blockId: b.id,
-        label: si === 0 ? "표지 이미지" : `슬라이드 ${si + 1} 이미지`,
+        label: si === 0 ? (ko ? "표지 이미지" : "Cover image") : ko ? `슬라이드 ${si + 1} 이미지` : `Slide ${si + 1} image`,
         prompt: `${scene}. ${dna?.photoStyle ?? "Clean professional editorial photography"}. Absolutely no text, no letters, no numbers, no watermark.`,
       });
     }
@@ -527,7 +529,7 @@ async function fillBlockImages(
       tasks.push({
         slideId: s.id,
         blockId: `__panel__:${s.id}`,
-        label: `슬라이드 ${si + 1} 도형 패널`,
+        label: ko ? `슬라이드 ${si + 1} 도형 패널` : `Slide ${si + 1} shape panel`,
         prompt: `${dna.graphicStyle}. Landscape rectangular panel. Absolutely no text, no letters, no numbers, no watermark, nothing in the center.`,
       });
     }
