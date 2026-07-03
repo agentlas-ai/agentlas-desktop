@@ -80,6 +80,8 @@ export interface McpConfigResult {
 export interface McpConfigBuildOptions {
   /** Playwright MCP persistent profile key. Used by automations to avoid sharing the interactive browser profile lock. */
   browserProfileKey?: string;
+  /** When present, serialize only these selected catalog ids for the current run. */
+  catalogIds?: string[];
 }
 
 function safeProfileKey(value: string): string {
@@ -104,10 +106,17 @@ function argsWithBrowserProfile(key: string, args: string[], opts?: McpConfigBui
 /**
  * 설치·활성 MCP 서버를 .mcp.json 으로 써서 경로를 반환. 서버가 하나도 없으면 null.
  * stdio 서버는 command/args/env, sse·http 서버는 type/url 형태로 직렬화한다.
+ * opts.catalogIds가 있으면 자동 선택된 도구만 직렬화한다. 예: computer-use 모드에서는
+ * Playwright가 설치돼 있어도 config/allowedTools에 싣지 않아 브라우저 우회를 막는다.
  */
 export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<McpConfigResult | null> {
   ensureDefaultMcpPluginsInstalled();
-  const servers = listInstalledServers().filter((s) => s.enabled);
+  const scopedCatalogIds = opts?.catalogIds ? new Set(opts.catalogIds.filter(Boolean)) : null;
+  const servers = listInstalledServers().filter((s) => {
+    if (!s.enabled) return false;
+    if (!scopedCatalogIds) return true;
+    return Boolean((s.catalogId && scopedCatalogIds.has(s.catalogId)) || scopedCatalogIds.has(s.id));
+  });
   if (servers.length === 0) return null;
 
   const mcpServers: Record<string, unknown> = {};

@@ -692,9 +692,10 @@ export async function runMcpInvocation(
           },
         });
       }
-      const cfg = await buildMcpConfigFile(
-        req.mcpBrowserProfileKey ? { browserProfileKey: req.mcpBrowserProfileKey } : undefined,
-      );
+      const cfg = await buildMcpConfigFile({
+        ...(req.mcpBrowserProfileKey ? { browserProfileKey: req.mcpBrowserProfileKey } : {}),
+        catalogIds: installedTools.map((tool) => tool.id),
+      });
       if (cfg) {
         mcpConfigPath = cfg.configPath;
         mcpAllowedTools = cfg.allowedTools;
