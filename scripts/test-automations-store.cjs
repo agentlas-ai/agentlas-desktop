@@ -112,6 +112,7 @@ function assertLocalTime(iso, expected) {
     assert.equal(created.targetType, "agent");
     assert.equal(created.targetId, "agent-1");
     assert.equal(created.promptTemplate, "Summarize the inbox");
+    assert.equal(created.toolMode, "auto", "non-web automations should keep auto mode");
     assert.ok(created.nextRunAt, "nextRunAt should be set on create");
     assert.equal(listAutomations().length, 1);
 
@@ -122,6 +123,25 @@ function assertLocalTime(iso, expected) {
     const enabled = toggleAutomation(created.id, true);
     assert.equal(enabled.enabled, true);
     assert.ok(enabled.nextRunAt, "nextRunAt should be recomputed when re-enabled");
+
+    const redditAutomation = createAutomation({
+      name: "Reddit daily comments",
+      scheduleHuman: "daily-09:00",
+      targetType: "agent",
+      targetId: "agent-1",
+      promptTemplate: "Search Reddit, pick relevant threads, and post comments",
+    });
+    assert.equal(redditAutomation.toolMode, "computer-use", "social/web action automations should default to computer-use");
+
+    const explicitBrowserAutomation = createAutomation({
+      name: "Explicit browser smoke",
+      scheduleHuman: "daily-09:00",
+      targetType: "agent",
+      targetId: "agent-1",
+      promptTemplate: "Search Reddit in the browser",
+      toolMode: "browser",
+    });
+    assert.equal(explicitBrowserAutomation.toolMode, "browser", "explicit browser choice should be preserved");
 
     getDb()
       .prepare("UPDATE automations SET next_run_at = ? WHERE id = ?")

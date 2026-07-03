@@ -20,6 +20,33 @@ function expandHome(arg: string): string {
   return arg;
 }
 
+function bundledComputerUseClient(): string | null {
+  const candidates = [
+    path.join(
+      os.homedir(),
+      ".codex",
+      "computer-use",
+      "Codex Computer Use.app",
+      "Contents",
+      "SharedSupport",
+      "SkyComputerUseClient.app",
+      "Contents",
+      "MacOS",
+      "SkyComputerUseClient",
+    ),
+    "/Applications/Codex.app/Contents/Resources/plugins/openai-bundled/plugins/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient",
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
+}
+
+function resolveStdioCommand(s: InstalledMcpServer): string {
+  const command = expandHome(s.command ?? "");
+  if (s.catalogId === "cua-driver" && (command === "cua-driver" || !fs.existsSync(command))) {
+    return bundledComputerUseClient() ?? command;
+  }
+  return command;
+}
+
 /** MCP tool 이름 mcp__<key>__<tool> 의 key — 안전한 슬러그. */
 function mcpKey(s: InstalledMcpServer): string {
   return (s.catalogId || s.name || s.id).toLowerCase().replace(/[^a-z0-9_-]/g, "-");
@@ -90,6 +117,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   for (const s of servers) {
     const key = mcpKey(s);
     if (s.transport === "stdio" && s.command) {
+      const command = resolveStdioCommand(s);
       const env: Record<string, string> = {};
       for (const k of s.envKeys) {
         const v = await readEnvVar(k);
@@ -97,11 +125,11 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       }
       const args = argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
       mcpServers[key] = {
-        command: expandHome(s.command),
+        command,
         args,
         ...(Object.keys(env).length ? { env } : {}),
       };
-      pushCodexConfig(codexConfigArgs, key, "command", tomlString(expandHome(s.command)));
+      pushCodexConfig(codexConfigArgs, key, "command", tomlString(command));
       pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(args));
       if (Object.keys(env).length > 0) {
         pushCodexConfig(codexConfigArgs, key, "env", tomlInlineStringTable(env));

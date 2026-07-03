@@ -1,7 +1,17 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { MCP_TOOL_CATALOG } from "./catalog";
 import { installFromCatalog, listInstalledServers } from "./registry";
 import { readEnvVar } from "../secrets/vault";
-import type { AutomationHubMode, AutomationToolMode, McpToolCatalogEntry } from "../../shared/types";
+import { getSource as getMarketSource } from "../marketplace";
+import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
+import type {
+  AutomationHubMode,
+  AutomationToolMode,
+  MarketplaceListing,
+  McpToolCatalogEntry,
+} from "../../shared/types";
 
 export interface AutoSelectedMcpTool {
   id: string;
@@ -9,6 +19,25 @@ export interface AutoSelectedMcpTool {
   reason: string;
   installed: boolean;
   missingEnv: string[];
+}
+
+export interface HubPluginCandidate {
+  slug: string;
+  name: string;
+  reason: string;
+  installCli?: string;
+  manifestUrl?: string;
+  category?: string;
+  score: number;
+}
+
+export interface AutoSelectedMcpContext {
+  tools: AutoSelectedMcpTool[];
+  localInventory: string[];
+  localPluginCount: number;
+  hubPluginCount: number;
+  hubPlugins: HubPluginCandidate[];
+  hubPluginError?: string;
 }
 
 const KEYWORD_HINTS: Record<string, string[]> = {
@@ -65,8 +94,134 @@ const KEYWORD_HINTS: Record<string, string[]> = {
   shadcn: ["shadcn", "ui component", "component library"],
 };
 
+const HUB_PLUGIN_LOOKUP_TIMEOUT_MS = 8_000;
+const HUB_PLUGIN_CANDIDATE_LIMIT = 8;
+
+const HUB_PLUGIN_NEEDS: Array<{
+  need: string;
+  requestHints: string[];
+  pluginHints: string[];
+}> = [
+  {
+    need: "computer-use",
+    requestHints: [
+      "computer use",
+      "cua",
+      "screen",
+      "desktop",
+      "mac",
+      "blocked",
+      "permission",
+      "컴퓨터 유즈",
+      "화면",
+      "데스크탑",
+      "권한",
+    ],
+    pluginHints: ["computer-use", "computer use", "cua"],
+  },
+  {
+    need: "browser automation",
+    requestHints: [
+      "browser",
+      "chrome",
+      "web",
+      "click",
+      "login",
+      "upload",
+      "post",
+      "comment",
+      "브라우저",
+      "크롬",
+      "클릭",
+      "로그인",
+      "업로드",
+      "게시",
+      "댓글",
+    ],
+    pluginHints: ["browser", "chrome", "browserbase", "playwright", "computer-use"],
+  },
+  {
+    need: "reddit",
+    requestHints: ["reddit", "subreddit", "레딧"],
+    pluginHints: ["reddit"],
+  },
+  {
+    need: "social posting",
+    requestHints: [
+      "instagram",
+      "twitter",
+      "x.com",
+      "facebook",
+      "linkedin",
+      "social",
+      "post",
+      "comment",
+      "인스타",
+      "소셜",
+      "게시",
+      "댓글",
+    ],
+    pluginHints: ["instagram", "twitter", "linkedin", "reddit", "social", "canva"],
+  },
+  {
+    need: "github",
+    requestHints: ["github", "pull request", "repo", "repository", "issue", "깃허브", "리포", "이슈"],
+    pluginHints: ["github"],
+  },
+  {
+    need: "notion",
+    requestHints: ["notion", "노션"],
+    pluginHints: ["notion"],
+  },
+  {
+    need: "slack",
+    requestHints: ["slack", "channel", "message", "슬랙"],
+    pluginHints: ["slack"],
+  },
+  {
+    need: "image generation",
+    requestHints: ["image", "generate", "photo", "creative", "이미지", "사진", "생성"],
+    pluginHints: ["image", "fal", "creative", "product-design"],
+  },
+  {
+    need: "analytics",
+    requestHints: ["analytics", "metric", "dashboard", "report", "분석", "지표", "리포트"],
+    pluginHints: ["analytics", "google-analytics", "axiom", "honeycomb", "new-relic"],
+  },
+];
+
+const LOCAL_PLUGIN_SCAN_DIRS = [
+  path.join(os.homedir(), ".codex", "plugins", "cache"),
+  path.join(os.homedir(), ".claude", "plugins", "cache"),
+  path.join(os.homedir(), ".claude", "plugins", "marketplaces"),
+  path.join(os.homedir(), ".agentlas", "plugins"),
+];
+
 function normalize(text: string): string {
   return text.toLowerCase();
+}
+
+function splitTokens(text: string): string[] {
+  return normalize(text)
+    .split(/[^a-z0-9가-힣_+-]+/i)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 4);
+}
+
+function includesAny(haystack: string, needles: string[]): boolean {
+  return needles.some((needle) => haystack.includes(normalize(needle)));
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Hub plugin lookup timed out after ${timeoutMs}ms`)), timeoutMs);
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 function scoreEntry(entry: McpToolCatalogEntry, haystack: string): number {
@@ -112,6 +267,121 @@ async function missingRequiredEnv(entry: McpToolCatalogEntry): Promise<string[]>
   return missing;
 }
 
+function readDirectoryNames(dir: string): string[] {
+  try {
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .filter((name) => !name.startsWith("."));
+  } catch {
+    return [];
+  }
+}
+
+function listLocalPluginInventory(installed: Set<string>): string[] {
+  const inventory = new Set<string>();
+  for (const entry of MCP_TOOL_CATALOG) inventory.add(entry.id);
+  for (const id of installed) inventory.add(id);
+  for (const dir of LOCAL_PLUGIN_SCAN_DIRS) {
+    for (const name of readDirectoryNames(dir)) inventory.add(name);
+  }
+  return Array.from(inventory).sort((a, b) => a.localeCompare(b));
+}
+
+function isHubPluginListing(listing: MarketplaceListing): boolean {
+  return listing.entityKind === "plugin" || listing.source === "hub-plugin" || listing.kind === "hub-plugin";
+}
+
+function hubListingText(listing: MarketplaceListing): string {
+  return normalize(
+    [
+      listing.slug,
+      listing.name,
+      listing.nameEn,
+      listing.tagline,
+      listing.taglineEn,
+      listing.ownerName,
+      listing.category,
+      listing.developer,
+      listing.installCli,
+    ]
+      .filter(Boolean)
+      .join(" "),
+  );
+}
+
+function scoreHubPlugin(listing: MarketplaceListing, haystack: string): { score: number; reasons: string[] } {
+  const listingText = hubListingText(listing);
+  const reasons = new Set<string>();
+  let score = 0;
+
+  for (const token of splitTokens(listingText)) {
+    if (haystack.includes(token)) {
+      score += 2;
+      if (reasons.size < 2) reasons.add(`matched "${token}"`);
+    }
+  }
+
+  for (const need of HUB_PLUGIN_NEEDS) {
+    if (includesAny(haystack, need.requestHints) && includesAny(listingText, need.pluginHints)) {
+      score += 12;
+      reasons.add(`matched ${need.need} need`);
+    }
+  }
+
+  if (haystack.includes("plugin") || haystack.includes("플러그인") || haystack.includes("hub") || haystack.includes("허브")) {
+    score += 1;
+  }
+
+  return { score, reasons: Array.from(reasons) };
+}
+
+async function resolveHubPluginCandidates(input: {
+  haystack: string;
+  hubAllowed: boolean;
+}): Promise<Pick<AutoSelectedMcpContext, "hubPluginCount" | "hubPlugins" | "hubPluginError">> {
+  if (!input.hubAllowed) {
+    return { hubPluginCount: 0, hubPlugins: [] };
+  }
+
+  try {
+    const listings = await withTimeout(getMarketSource().searchAgents(""), HUB_PLUGIN_LOOKUP_TIMEOUT_MS);
+    const plugins = listings.filter(isHubPluginListing);
+    const candidates = plugins
+      .map((listing) => {
+        const scored = scoreHubPlugin(listing, input.haystack);
+        return { listing, ...scored };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return a.listing.slug.localeCompare(b.listing.slug);
+      })
+      .slice(0, HUB_PLUGIN_CANDIDATE_LIMIT)
+      .map(({ listing, score, reasons }): HubPluginCandidate => ({
+        slug: listing.slug,
+        name: listing.nameEn || listing.name || listing.slug,
+        reason: reasons.length > 0 ? reasons.join("; ") : "matched Hub plugin catalog",
+        installCli: listing.installCli,
+        manifestUrl: listing.manifestUrl || listing.detailUrl,
+        category: listing.category,
+        score,
+      }));
+
+    return {
+      hubPluginCount: plugins.length,
+      hubPlugins: candidates,
+    };
+  } catch (err) {
+    return {
+      hubPluginCount: 0,
+      hubPlugins: [],
+      hubPluginError: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 export async function autoSelectMcpTools(input: {
   userPrompt: string;
   systemPrompt: string;
@@ -119,19 +389,26 @@ export async function autoSelectMcpTools(input: {
   workingFolder?: string | null;
   toolMode?: AutomationToolMode;
   hubMode?: AutomationHubMode;
-}): Promise<AutoSelectedMcpTool[]> {
+}): Promise<AutoSelectedMcpContext> {
   const haystack = normalize(
     [input.userPrompt, input.systemPrompt, input.agentName, input.workingFolder ?? ""].join("\n"),
   );
+  const effectiveToolMode = resolveAutomationToolMode({
+    toolMode: input.toolMode,
+    name: input.agentName,
+    promptTemplate: input.userPrompt,
+    targetLabel: input.workingFolder,
+  });
   const installed = new Set(
     listInstalledServers()
       .map((server) => server.catalogId)
       .filter((id): id is string => Boolean(id)),
   );
   const hubAllowed = input.hubMode !== "local-only";
+  const localInventory = listLocalPluginInventory(installed);
   const picked = MCP_TOOL_CATALOG.map((entry) => ({
     entry,
-    score: scoreWithAutomationPolicy(entry, scoreEntry(entry, haystack), input.toolMode),
+    score: scoreWithAutomationPolicy(entry, scoreEntry(entry, haystack), effectiveToolMode),
   }))
     .filter((item) => {
       if (item.entry.id === "hephaestus-network") return hubAllowed;
@@ -153,10 +430,12 @@ export async function autoSelectMcpTools(input: {
       id: entry.id,
       name: entry.nameEn || entry.name,
       reason:
-        input.toolMode === "browser" && entry.id === "playwright"
+        effectiveToolMode === "browser" && entry.id === "playwright"
           ? "user-selected Browser plugin for this automation"
-          : input.toolMode === "computer-use" && entry.id === "cua-driver"
-            ? "user-selected Computer Use for this automation"
+          : effectiveToolMode === "computer-use" && entry.id === "cua-driver"
+            ? input.toolMode === "computer-use"
+              ? "user-selected Computer Use for this automation"
+              : "Agentlas policy selected Computer Use for human web/social automation"
             : score > 0
               ? `matched request/tool need score ${score}`
               : "always available routing/plugin resolver",
@@ -164,16 +443,22 @@ export async function autoSelectMcpTools(input: {
       missingEnv,
     });
   }
-  return result;
+  const hub = await resolveHubPluginCandidates({ haystack, hubAllowed });
+  return {
+    tools: result,
+    localInventory,
+    localPluginCount: localInventory.length,
+    ...hub,
+  };
 }
 
 export function buildMcpAutoSelectionPrompt(
-  selected: AutoSelectedMcpTool[],
+  selected: AutoSelectedMcpContext,
   opts?: { toolMode?: AutomationToolMode; hubMode?: AutomationHubMode },
 ): string {
-  if (selected.length === 0) return "";
-  const installed = selected.filter((tool) => tool.installed);
-  const blocked = selected.filter((tool) => !tool.installed && tool.missingEnv.length > 0);
+  if (selected.tools.length === 0 && selected.hubPluginCount === 0) return "";
+  const installed = selected.tools.filter((tool) => tool.installed);
+  const blocked = selected.tools.filter((tool) => !tool.installed && tool.missingEnv.length > 0);
   const modeLine =
     opts?.toolMode === "browser"
       ? "This automation explicitly selected Browser plugin mode; use Playwright/browser tools for web work."
@@ -188,15 +473,35 @@ export function buildMcpAutoSelectionPrompt(
         : opts?.hubMode === "local-only"
           ? "This automation is local-only: do not use Agentlas Hub routing or borrowed Hub agents."
           : "";
+  const hubCandidates =
+    selected.hubPlugins.length > 0
+      ? `Relevant Hub plugin candidates: ${selected.hubPlugins
+          .map((plugin) =>
+            `${plugin.slug} (${plugin.name}; ${plugin.reason}${plugin.installCli ? `; install: ${plugin.installCli}` : ""})`,
+          )
+          .join("; ")}.`
+      : selected.hubPluginCount > 0
+        ? "Hub plugin catalog is available; resolve plugin needs dynamically before declaring a tool unavailable."
+        : selected.hubPluginError
+          ? `Hub plugin catalog lookup failed for this run: ${selected.hubPluginError}.`
+          : "";
+  const inventoryPreview = selected.localInventory.slice(0, 24).join(", ");
+  const inventoryMore = selected.localInventory.length > 24 ? `, +${selected.localInventory.length - 24} more` : "";
   return [
     "Agentlas MCP plugin auto-selection is active.",
+    `Agentlas plugin universe is active: ${selected.localPluginCount} local plugin/tool entries + ${selected.hubPluginCount} Hub plugins.`,
     modeLine,
     hubLine,
+    selected.localInventory.length > 0
+      ? `Local inventory for Hub plugin resolution: ${inventoryPreview}${inventoryMore}.`
+      : "",
     installed.length > 0
       ? `Installed/enabled tools available this run: ${installed.map((tool) => `${tool.id} (${tool.name})`).join(", ")}.`
       : "No additional installable local tools were available for this run.",
+    hubCandidates,
     "Use the available MCP tools directly when they are relevant. Do not ask the user to install a tool that is already listed as available.",
-    "For Hub/public agents and broader plugin discovery, prefer the hephaestus-network MCP tools; they resolve Agentlas Hub bundles and plugin needs from the Hub catalog.",
+    "Before saying a tool/plugin is unavailable, resolve against both local inventory and Agentlas Hub. If an agentlas_resolve_plugins MCP tool is exposed, call it with the needed capabilities and localInventory. Otherwise use the Hephaestus Network MCP tools to route Hub specialists/plugins.",
+    "Only ask the user when the selected Hub plugin requires login, OAuth, credentials, paid/credit approval, or a macOS/browser permission. Include the exact plugin slug or install command in that question.",
     blocked.length > 0
       ? `Tools matched but need credentials before use: ${blocked
           .map((tool) => `${tool.id} missing ${tool.missingEnv.join(", ")}`)

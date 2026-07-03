@@ -23,6 +23,7 @@ import type {
 } from "@/lib/types";
 import { ScheduleBuilder, type ScheduleBuilderValue } from "@/components/automation/ScheduleBuilder";
 import { IconBuilding, IconSparkles } from "@/components/Icon";
+import { shouldPreferComputerUseForAutomation } from "@shared/automation-tool-policy";
 
 type TargetType = "agent" | "firm" | "hub";
 
@@ -53,6 +54,7 @@ function NewAutomationPage() {
   const [error, setError] = useState("");
   const [triggerType, setTriggerType] = useState<TriggerKind>("schedule");
   const [toolMode, setToolMode] = useState<AutomationToolMode>("auto");
+  const [toolModeTouched, setToolModeTouched] = useState(false);
   const [hubMode, setHubMode] = useState<AutomationHubMode>("hub-allowed");
   const [fsPath, setFsPath] = useState("");
   const [fsOn, setFsOn] = useState<"create" | "modify" | "delete">("create");
@@ -85,6 +87,7 @@ function NewAutomationPage() {
           setTargetId(existing.targetId);
           setTriggerType(existing.triggerType ?? "schedule");
           setToolMode(existing.toolMode ?? "auto");
+          setToolModeTouched(true);
           setHubMode(existing.hubMode ?? "hub-allowed");
           setInitialSpec(existing.scheduleSpec ?? null);
           if (existing.trigger?.kind === "fs") {
@@ -110,6 +113,13 @@ function NewAutomationPage() {
       }
     })();
   }, [editId]);
+
+  useEffect(() => {
+    if (editId || toolModeTouched || toolMode !== "auto") return;
+    if (shouldPreferComputerUseForAutomation(`${name}\n${prompt}`)) {
+      setToolMode("computer-use");
+    }
+  }, [editId, name, prompt, toolMode, toolModeTouched]);
 
   // targetType 바뀌면 그 타입의 첫 항목 자동 선택(편집 로드 이후엔 사용자 선택 우선).
   useEffect(() => {
@@ -341,19 +351,28 @@ function NewAutomationPage() {
           <div style={choiceGridStyle}>
             <ChoiceBtn
               active={toolMode === "auto"}
-              onClick={() => setToolMode("auto")}
+              onClick={() => {
+                setToolModeTouched(true);
+                setToolMode("auto");
+              }}
               label={locale === "ko" ? "자동 선택" : "Auto"}
               detail={locale === "ko" ? "Agentlas가 작업에 맞춰 고름" : "Agentlas picks per task"}
             />
             <ChoiceBtn
               active={toolMode === "browser"}
-              onClick={() => setToolMode("browser")}
+              onClick={() => {
+                setToolModeTouched(true);
+                setToolMode("browser");
+              }}
               label={locale === "ko" ? "브라우저" : "Browser"}
               detail={locale === "ko" ? "웹 로그인·게시·검색" : "Web login, post, search"}
             />
             <ChoiceBtn
               active={toolMode === "computer-use"}
-              onClick={() => setToolMode("computer-use")}
+              onClick={() => {
+                setToolModeTouched(true);
+                setToolMode("computer-use");
+              }}
               label={locale === "ko" ? "컴퓨터 유즈" : "Computer Use"}
               detail={locale === "ko" ? "Mac 화면·앱 조작" : "Mac screen and apps"}
             />

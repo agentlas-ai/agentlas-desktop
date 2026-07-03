@@ -645,7 +645,7 @@ export async function runMcpInvocation(
   const runtimeCanUseMcp = active.kind === "claude-code" || active.kind === "codex";
   if (runtimeCanUseMcp) {
     try {
-      const selectedTools = await autoSelectMcpTools({
+      const selectedContext = await autoSelectMcpTools({
         userPrompt: effectiveUserPrompt,
         systemPrompt: agent.systemPrompt,
         agentName: agent.nameEn || agent.name,
@@ -653,10 +653,35 @@ export async function runMcpInvocation(
         toolMode: req.toolMode,
         hubMode: req.hubMode,
       });
-      mcpAutoSelectionPrompt = buildMcpAutoSelectionPrompt(selectedTools, {
+      mcpAutoSelectionPrompt = buildMcpAutoSelectionPrompt(selectedContext, {
         toolMode: req.toolMode,
         hubMode: req.hubMode,
       });
+      if (selectedContext.hubPluginCount > 0 || selectedContext.localPluginCount > 0) {
+        const hubCandidates =
+          selectedContext.hubPlugins.length > 0
+            ? `\nHub candidates: ${selectedContext.hubPlugins
+                .map((plugin) => `${plugin.slug}: ${plugin.reason}`)
+                .join("\n")}`
+            : "";
+        sink({
+          kind: "tool-use",
+          tool: {
+            name: "Agentlas Plugins · universe",
+            result: `${selectedContext.localPluginCount} local plugin/tool entries + ${selectedContext.hubPluginCount} Hub plugins${hubCandidates}`,
+          },
+        });
+      }
+      if (selectedContext.hubPluginError) {
+        sink({
+          kind: "tool-use",
+          tool: {
+            name: "Agentlas Plugins · Hub lookup",
+            result: selectedContext.hubPluginError,
+          },
+        });
+      }
+      const selectedTools = selectedContext.tools;
       const installedTools = selectedTools.filter((tool) => tool.installed);
       if (installedTools.length > 0) {
         sink({

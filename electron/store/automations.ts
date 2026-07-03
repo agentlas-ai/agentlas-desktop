@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
 import { nextRun, specFromStored, defaultTz } from "./schedule";
+import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import type {
   Automation,
   AutomationHubMode,
@@ -208,7 +209,12 @@ export function createAutomation(input: {
       input.maxRuns ?? null,
       triggerType,
       triggerJson,
-      normalizeToolMode(input.toolMode),
+      resolveAutomationToolMode({
+        toolMode: normalizeToolMode(input.toolMode),
+        name: input.name,
+        promptTemplate: input.promptTemplate,
+        targetLabel: input.targetType,
+      }),
       normalizeHubMode(input.hubMode),
     );
   return getAutomation(id) as Automation;
@@ -229,7 +235,12 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
   const targetType = patch.targetType ?? row.target_type;
   const targetId = patch.targetId ?? row.target_id;
   const promptTemplate = patch.promptTemplate ?? row.prompt_template;
-  const toolMode = normalizeToolMode(patch.toolMode ?? row.tool_mode);
+  const toolMode = resolveAutomationToolMode({
+    toolMode: normalizeToolMode(patch.toolMode ?? row.tool_mode),
+    name,
+    promptTemplate,
+    targetLabel: targetType,
+  });
   const hubMode = normalizeHubMode(patch.hubMode ?? row.hub_mode);
   const timezone = patch.timezone !== undefined ? patch.timezone : row.timezone;
   const tz = timezone || defaultTz();

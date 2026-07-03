@@ -854,8 +854,8 @@ export function initStore(): void {
   }
 
   // ── v35 → v36: 자동화 실행 도구 + Hub 사용 정책 ───────────────
-  // tool_mode: auto | browser | computer-use. 브라우저 자동화가 Playwright/CUA 중
-  // 어느 길로 갈지 조용히 추측하지 않고 사용자가 저장한 선택을 따른다.
+  // tool_mode: auto | browser | computer-use. 명시 선택을 우선하고, 웹/소셜 조작 자동화는
+  // 생성 정책에서 computer-use로 승격해 Playwright fingerprint 차단을 기본 회피한다.
   // hub_mode: hub-allowed | hub-first | local-only. 로컬 카탈로그 밖 Hub 후보까지 빌려 쓸지
   // 자동화별로 명시한다.
   if (userVersion < 36) {
