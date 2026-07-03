@@ -10,8 +10,11 @@ import { getDb } from "./db";
 import { nextRun, specFromStored, defaultTz } from "./schedule";
 import type {
   Automation,
+  AutomationHubMode,
+  AutomationTargetType,
   WorkflowGraph,
   AutomationRunRecord,
+  AutomationToolMode,
   AutomationUpdatePatch,
   Trigger,
   TriggerKind,
@@ -23,9 +26,11 @@ interface AutomationRow {
   id: string;
   name: string;
   schedule: string;
-  target_type: "agent" | "firm";
+  target_type: AutomationTargetType;
   target_id: string;
   prompt_template: string;
+  tool_mode: string | null;
+  hub_mode: string | null;
   enabled: number;
   created_by: "user" | "agent";
   last_run_at: string | null;
@@ -77,6 +82,14 @@ function parseTrigger(raw: string | null): Trigger | null {
   return null;
 }
 
+function normalizeToolMode(value: string | null | undefined): AutomationToolMode {
+  return value === "browser" || value === "computer-use" || value === "auto" ? value : "auto";
+}
+
+function normalizeHubMode(value: string | null | undefined): AutomationHubMode {
+  return value === "hub-first" || value === "local-only" || value === "hub-allowed" ? value : "hub-allowed";
+}
+
 function toAutomation(row: AutomationRow): Automation {
   const tz = row.timezone || defaultTz();
   const spec = specFromStored(row.schedule_json ?? row.schedule, tz);
@@ -88,6 +101,8 @@ function toAutomation(row: AutomationRow): Automation {
     targetType: row.target_type,
     targetId: row.target_id,
     promptTemplate: row.prompt_template,
+    toolMode: normalizeToolMode(row.tool_mode),
+    hubMode: normalizeHubMode(row.hub_mode),
     enabled: !!row.enabled,
     createdBy: row.created_by,
     createdAt: row.created_at,
@@ -136,7 +151,7 @@ export function getAutomation(id: string): Automation | null {
 export function createAutomation(input: {
   name: string;
   scheduleHuman: string;
-  targetType: "agent" | "firm";
+  targetType: AutomationTargetType;
   targetId: string;
   promptTemplate: string;
   createdBy?: "user" | "agent";
@@ -147,6 +162,8 @@ export function createAutomation(input: {
   maxRuns?: number | null;
   triggerType?: TriggerKind;
   trigger?: Trigger | null;
+  toolMode?: AutomationToolMode;
+  hubMode?: AutomationHubMode;
 }): Automation {
   const id = randomUUID();
   const now = new Date();
@@ -171,8 +188,8 @@ export function createAutomation(input: {
       `INSERT INTO automations
          (id, name, schedule, target_type, target_id, prompt_template, enabled, created_by,
           last_run_at, next_run_at, created_at, graph_json, schedule_json, timezone, end_at, max_runs, run_count,
-          trigger_type, trigger_json)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+          trigger_type, trigger_json, tool_mode, hub_mode)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -191,6 +208,8 @@ export function createAutomation(input: {
       input.maxRuns ?? null,
       triggerType,
       triggerJson,
+      normalizeToolMode(input.toolMode),
+      normalizeHubMode(input.hubMode),
     );
   return getAutomation(id) as Automation;
 }
@@ -210,6 +229,8 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
   const targetType = patch.targetType ?? row.target_type;
   const targetId = patch.targetId ?? row.target_id;
   const promptTemplate = patch.promptTemplate ?? row.prompt_template;
+  const toolMode = normalizeToolMode(patch.toolMode ?? row.tool_mode);
+  const hubMode = normalizeHubMode(patch.hubMode ?? row.hub_mode);
   const timezone = patch.timezone !== undefined ? patch.timezone : row.timezone;
   const tz = timezone || defaultTz();
   const scheduleJson =
@@ -232,6 +253,7 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
   db.prepare(
     `UPDATE automations SET
        name = ?, schedule = ?, target_type = ?, target_id = ?, prompt_template = ?,
+       tool_mode = ?, hub_mode = ?,
        schedule_json = ?, timezone = ?, end_at = ?, max_runs = ?, trigger_type = ?, trigger_json = ?,
        next_run_at = ?
      WHERE id = ?`,
@@ -241,6 +263,8 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
     targetType,
     targetId,
     promptTemplate,
+    toolMode,
+    hubMode,
     scheduleJson,
     tz,
     endAt,
@@ -430,7 +454,7 @@ export function listRunHistory(automationId: string, limit = 50): AutomationRunR
 export function markAutomationRun(
   id: string,
   at: Date = new Date(),
-  opts?: { status?: "ok" | "error"; error?: string | null; advanceSchedule?: boolean },
+  opts?: { status?: "ok" | "error" | "skipped"; error?: string | null; advanceSchedule?: boolean },
 ): void {
   const db = getDb();
   const row = db.prepare("SELECT * FROM automations WHERE id = ?").get(id) as AutomationRow | undefined;

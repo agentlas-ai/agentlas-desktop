@@ -190,7 +190,9 @@ export async function runGraph(
     automationId: automation.id,
     ...(automation.targetType === "firm"
       ? { firmId: automation.targetId }
-      : { agentId: automation.targetId }),
+      : automation.targetType === "agent"
+        ? { agentId: automation.targetId }
+        : {}),
   });
 
   // 노드별 타깃 세션 — agent 노드의 config.ref(에이전트/회사/그룹 id)를 그 타깃에 바인딩된
@@ -202,7 +204,8 @@ export async function runGraph(
     if (!ref) return chat;
     if (
       (automation.targetType === "agent" && ref === automation.targetId) ||
-      (automation.targetType === "firm" && ref === automation.targetId)
+      (automation.targetType === "firm" && ref === automation.targetId) ||
+      (automation.targetType === "hub" && ref === automation.targetId)
     ) {
       return chat;
     }
@@ -215,9 +218,19 @@ export async function runGraph(
       resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::f:${ref}`, firmId: ref });
     } else if (getAgentGroup(ref)) {
       resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::g:${ref}`, agentGroupId: ref });
+    } else if (str(node.config, "targetType") === "hub") {
+      resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::h:${ref}` });
     }
     nodeChatCache.set(ref, resolved);
     return resolved;
+  };
+
+  const hubBorrowForNode = (node: WorkflowNode): string[] | undefined => {
+    const ref = str(node.config, "ref");
+    if (node.type === "agent" && str(node.config, "targetType") === "hub" && ref) return [ref];
+    if (node.type !== "agent" && automation.targetType === "hub") return [automation.targetId];
+    if (node.type === "agent" && !ref && automation.targetType === "hub") return [automation.targetId];
+    return undefined;
   };
 
   const ordered = topoSort(graph);
@@ -315,7 +328,15 @@ export async function runGraph(
           const nodeChat = node.type === "agent" ? chatForNode(node) : chat;
           let runnerError: string | null = null;
           const result = await runMcpInvocation(
-            { chatId: nodeChat.id, userPrompt: prompt, permissions: "write" },
+            {
+              chatId: nodeChat.id,
+              userPrompt: prompt,
+              permissions: "write",
+              borrowAgents: hubBorrowForNode(node),
+              mcpBrowserProfileKey: `automation-${automation.id}`,
+              toolMode: automation.toolMode ?? "auto",
+              hubMode: automation.hubMode ?? "hub-allowed",
+            },
             (ev) => {
               if (ev.kind === "error") {
                 runnerError = ev.error?.message || "runner failed";

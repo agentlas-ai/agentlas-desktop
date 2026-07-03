@@ -20,6 +20,7 @@ import { runGraph } from "./workflow/run-graph";
 import { broadcastLiveRun } from "./workflow/live-run";
 import { isStormbreakerLongRunPrompt } from "./hephaestus/loop-engineering";
 import { emitAutomationDone } from "./triggers/chain-bus";
+import { classifyAutomationOutput, type AutomationResultStatus } from "./automation-result";
 
 let timer: ReturnType<typeof setInterval> | null = null;
 const running = new Set<string>();
@@ -54,13 +55,15 @@ async function runWithConcurrency<T>(
 }
 
 /** 완료 시 OS 알림(설계 §2.7 한계 #10 — 결과 미표출 해소). Notification 미지원이면 조용히 무시. */
-function notifyDone(a: Automation, ok: boolean, error?: string): void {
+function notifyDone(a: Automation, status: AutomationResultStatus, error?: string): void {
   try {
     if (!app.isReady()) return;
     if (!Notification.isSupported()) return;
+    const ok = status === "ok";
+    const skipped = status === "skipped";
     new Notification({
-      title: ok ? `Automation ran: ${a.name}` : `Automation failed: ${a.name}`,
-      body: ok ? "Completed successfully." : error ? error.slice(0, 200) : "See run history.",
+      title: ok ? `Automation ran: ${a.name}` : skipped ? `Automation skipped: ${a.name}` : `Automation failed: ${a.name}`,
+      body: ok ? "Completed successfully." : error ? error.slice(0, 200) : skipped ? "Nothing was eligible to run." : "See run history.",
       silent: true,
     }).show();
   } catch (err) {
@@ -74,7 +77,7 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
   // 발사는 클레임을 건너뛴다(사용자/이벤트가 의도한 즉시 실행이므로 GUI/headless 경합 무관).
   if (opts?.claim && !claimAutomationRun(a.id, LEASE_OWNER)) return;
   running.add(a.id);
-  let ok = true;
+  let runStatus: AutomationResultStatus = "ok";
   let runError: string | null = null;
   let output: string | undefined;
   try {
@@ -89,11 +92,16 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
           if (ev.nodeState) broadcastLiveRun(a.id, ev);
         },
       });
-      ok = result.ok;
+      runStatus = result.ok ? "ok" : "error";
       runError = result.error ?? null;
       // 그래프 outputs 중 마지막 노드 출력을 체인 페이로드로 노출.
       const outVals = Object.values(result.outputs ?? {});
       output = outVals.length ? outVals[outVals.length - 1] : undefined;
+      if (runStatus === "ok") {
+        const classified = classifyAutomationOutput(output);
+        runStatus = classified.status;
+        runError = classified.reason;
+      }
     } else {
       // 레거시 단일 프롬프트 경로(완전 backward-compat).
       const runId = `run-${a.id}-${Date.now()}`;
@@ -116,12 +124,20 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
       }
       const chat = getOrCreateAutomationSession({
         automationId: a.id,
-        ...(a.targetType === "firm" ? { firmId: a.targetId } : { agentId: a.targetId }),
+        ...(a.targetType === "firm" ? { firmId: a.targetId } : a.targetType === "agent" ? { agentId: a.targetId } : {}),
       });
       try {
         let runnerError: string | null = null;
         const result = await runMcpInvocation(
-          { chatId: chat.id, userPrompt: a.promptTemplate, permissions: "write" },
+          {
+            chatId: chat.id,
+            userPrompt: a.promptTemplate,
+            permissions: "write",
+            borrowAgents: a.targetType === "hub" ? [a.targetId] : undefined,
+            mcpBrowserProfileKey: `automation-${a.id}`,
+            toolMode: a.toolMode ?? "auto",
+            hubMode: a.targetType === "hub" ? "hub-first" : (a.hubMode ?? "hub-allowed"),
+          },
           (ev) => {
             if (ev.kind === "error") {
               runnerError = ev.error?.message || "runner failed";
@@ -132,12 +148,16 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
         output = result.finalText;
         if (runnerError) throw new Error(runnerError);
         if (!output?.trim()) throw new Error("Automation finished without an assistant result");
-        emitLegacyState("n1", "done");
+        const classified = classifyAutomationOutput(output);
+        runStatus = classified.status;
+        runError = classified.reason;
+        emitLegacyState("n1", runStatus === "error" ? "failed" : runStatus === "skipped" ? "skipped" : "done");
         try {
-          finishGraphRun(runId, "ok");
+          finishGraphRun(runId, runStatus === "error" ? "error" : "ok");
         } catch {
           /* ignore */
         }
+        if (runStatus === "error") throw new Error(runError ?? "Automation result was classified as failed");
         if (isStormbreakerLongRunPrompt(a.promptTemplate) && !result.stormbreakerContinueRequested) {
           toggleAutomation(a.id, false);
         }
@@ -152,7 +172,7 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
       }
     }
   } catch (err) {
-    ok = false;
+    runStatus = "error";
     runError = err instanceof Error ? err.message : String(err);
     console.error(`[automation] run failed (${a.name}):`, err);
   } finally {
@@ -162,7 +182,7 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
     // run_history 기록·run_count·종료 정책은 어느 경우든 동일하게 적용한다.
     try {
       markAutomationRun(a.id, new Date(), {
-        status: ok ? "ok" : "error",
+        status: runStatus,
         error: runError,
         advanceSchedule: opts?.advanceSchedule ?? true,
       });
@@ -174,11 +194,11 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
     } catch {
       /* best-effort 리스 해제 */
     }
-    notifyDone(a, ok, runError ?? undefined);
+    notifyDone(a, runStatus, runError ?? undefined);
     running.delete(a.id);
     // 체인 트리거용 완료 이벤트 방출(설계 §3.4 Tier 0 #2). 인프로세스 EventEmitter.
     try {
-      emitAutomationDone({ automationId: a.id, ok, output, at: new Date().toISOString() });
+      emitAutomationDone({ automationId: a.id, ok: runStatus === "ok", output, at: new Date().toISOString() });
     } catch {
       /* best-effort */
     }

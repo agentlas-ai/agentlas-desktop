@@ -17,12 +17,40 @@ export function AccountChip() {
   const [popoverOpen, setPopoverOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
-  // 마운트 시 1회 조회
+  // 마운트 시 조회 + 이메일이 아직 안 채워졌으면 재조회.
+  // main은 부팅 시 keychain에서 세션을 먼저 복원하고 이메일/이름은 백그라운드로 가져오므로,
+  // 1회 조회만 하면 "?" 아바타 + '계정' 라벨로 영영 남는다. 채워질 때까지(최대 2분) 폴링하고
+  // 창 포커스 때마다 한 번 더 동기화한다.
   useEffect(() => {
     const api = ipc();
     if (!api) return;
-    void api.auth.getSession().then(setSession);
+    let stopped = false;
+    let attempts = 0;
+    const load = async () => {
+      const next = await api.auth.getSession();
+      if (!stopped) setSession(next);
+      return next;
+    };
+    void load();
+    const timer = setInterval(() => {
+      attempts += 1;
+      void load().then((next) => {
+        if ((next.signedIn && next.email) || !next.signedIn || attempts >= 24) clearInterval(timer);
+      });
+    }, 5000);
+    const onFocus = () => void load();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
   }, []);
+
+  // 크레딧 위젯 등 다른 세션 소비자와 상태를 맞추기 위한 브로드캐스트.
+  function announceAuthChanged() {
+    window.dispatchEvent(new Event("agentlas:auth-changed"));
+  }
 
   // 외부 클릭으로 popover 닫기
   useEffect(() => {
@@ -43,6 +71,7 @@ export function AccountChip() {
     try {
       const next = await api.auth.signInWithGoogle();
       setSession(next);
+      announceAuthChanged();
     } finally {
       setBusy(false);
     }
@@ -57,10 +86,12 @@ export function AccountChip() {
       const next = await api.auth.signInWithBrowser();
       if (next.signedIn) {
         setSession(next);
+        announceAuthChanged();
         return;
       }
       const fallback = await api.auth.signInWithGoogle();
       setSession(fallback);
+      announceAuthChanged();
     } finally {
       setBusy(false);
     }
@@ -72,6 +103,7 @@ export function AccountChip() {
     await api.auth.signOut();
     setSession({ signedIn: false });
     setPopoverOpen(false);
+    announceAuthChanged();
   }
 
   const initial = (session.email ?? session.name ?? "?").charAt(0).toUpperCase();

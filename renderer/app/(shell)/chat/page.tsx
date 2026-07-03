@@ -27,6 +27,7 @@ import type { Recommendation, RecExecChoice, RecRouterAgent, RecStage } from "@s
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
 import { extractQuestions } from "@/lib/ask-question";
+import { stripMultimodalSetup } from "@/lib/multimodal-setup";
 import { dropChatViewSnapshot, readChatViewSnapshot, saveChatViewSnapshot } from "@/lib/chat-view-cache";
 import { ChatInput } from "@/components/ChatInput";
 import type { SurfaceStatePatchHandler, WorkbenchSurface } from "@/components/WorkbenchPanel";
@@ -58,6 +59,26 @@ function workspacePreviewFromMedia(media: MediaArtifact): WorkspaceFilePreview {
     truncated: false,
     reason: "binary",
   };
+}
+
+function parentFolder(absPath: string | null): string | null {
+  if (!absPath) return null;
+  const clean = absPath.replace(/[\\/]+$/, "");
+  const idx = Math.max(clean.lastIndexOf("/"), clean.lastIndexOf("\\"));
+  if (idx <= 0) return null;
+  return clean.slice(0, idx);
+}
+
+function mediaBasePathCandidates(...paths: Array<string | null | undefined>): string[] {
+  const out: string[] = [];
+  for (const raw of paths) {
+    const value = raw?.trim();
+    if (!value) continue;
+    for (const candidate of [value, parentFolder(value)]) {
+      if (candidate && !out.includes(candidate)) out.push(candidate);
+    }
+  }
+  return out;
 }
 
 function scaffoldResultFromRecord(record: AppFactoryAppRecord): AppFactoryScaffoldResult {
@@ -317,11 +338,13 @@ function historyEntryToStreamMessage(entry: { id: string; role: string; text: st
     return { id: entry.id, role, text: entry.text };
   }
   const parsed = extractQuestions(entry.text, entry.id);
+  const setup = stripMultimodalSetup(parsed.text);
   return {
     id: entry.id,
     role,
-    text: parsed.text,
+    text: setup.text,
     questions: parsed.questions.length > 0 ? parsed.questions : undefined,
+    needsMultimodalSetup: setup.needsSetup || undefined,
   };
 }
 
@@ -539,6 +562,11 @@ function ChatPage() {
   // ContinuityReceipt(복원 배너)용 — 채팅 진입 시 ipc().workspace.get으로 복원된 마지막 작업 폴더.
   // 기기 간 클라우드 복원 여부는 백엔드 미확인이므로, 실제로 알 수 있는 사실(로컬 복원 경로)만 보여준다.
   const [restoredFolder, setRestoredFolder] = useState<string | null>(null);
+  const [defaultRunFolder, setDefaultRunFolder] = useState<string | null>(null);
+  const mediaBasePaths = useMemo(
+    () => mediaBasePathCandidates(restoredFolder, defaultRunFolder),
+    [restoredFolder, defaultRunFolder],
+  );
 
   // 사용자가 직접 패널을 접고/펴면 선호값을 영속화 (자동 노출과 구분).
   const setWorkspaceOpenPersisted = useCallback((open: boolean) => {
@@ -570,6 +598,20 @@ function ChatPage() {
     setRightPanelOpen(false);
     writeRightPanelPreference(false, rightPanelTab);
   }, [rightPanelTab]);
+
+  useEffect(() => {
+    const api = ipc();
+    if (!api) return;
+    let cancelled = false;
+    void api.workspace.defaultRunFolder().then((folder) => {
+      if (!cancelled) setDefaultRunFolder(folder);
+    }).catch(() => {
+      if (!cancelled) setDefaultRunFolder(null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const resizeRightPanel = useCallback((width: number) => {
     const next = clampRightPanelWidth(width);
     setRightPanelWidth(next);
@@ -826,7 +868,14 @@ function ChatPage() {
                 m.map((msg) => {
                   if (msg.id !== placeholderId) return msg;
                   const { text, questions } = extractQuestions(snapText, msg.id);
-                  return { ...msg, text, streaming: true, questions: questions.length > 0 ? questions : msg.questions };
+                  const setup = stripMultimodalSetup(text);
+                  return {
+                    ...msg,
+                    text: setup.text,
+                    streaming: true,
+                    questions: questions.length > 0 ? questions : msg.questions,
+                    needsMultimodalSetup: setup.needsSetup || msg.needsMultimodalSetup,
+                  };
                 }),
               );
             });
@@ -842,11 +891,13 @@ function ChatPage() {
           m.map((msg) => {
             if (msg.id !== placeholderId) return msg;
             const { text, questions } = extractQuestions(raw, msg.id);
+            const setup = stripMultimodalSetup(text);
             return {
               ...msg,
-              text,
+              text: setup.text,
               streaming: true,
               questions: questions.length > 0 ? questions : msg.questions,
+              needsMultimodalSetup: setup.needsSetup || msg.needsMultimodalSetup,
             };
           }),
         );
@@ -857,11 +908,13 @@ function ChatPage() {
             if (msg.id !== placeholderId) return msg;
             const raw = ev.text ?? "";
             const { text, questions } = extractQuestions(raw, msg.id);
+            const setup = stripMultimodalSetup(text);
             return {
               ...msg,
-              text,
+              text: setup.text,
               busy: false,
               streaming: false,
+              needsMultimodalSetup: setup.needsSetup || msg.needsMultimodalSetup,
               tokens: ev.tokens ?? msg.tokens,
               pipeline: completePipeline(msg.pipeline),
               steps: [
@@ -892,7 +945,7 @@ function ChatPage() {
         subRef.current = null;
         // 산출물 자동 패널 오픈 — 답변에 이미지 산출물이 있으면(사용자가 패널을 명시적으로
         // 닫아두지 않았다면) 우측 패널에 바로 띄운다. 클릭을 기다리지 않는 능동적 패널 활용.
-        const autoMedia = firstMediaArtifactInText(ev.text ?? "");
+        const autoMedia = firstMediaArtifactInText(ev.text ?? "", mediaBasePaths);
         if (autoMedia) {
           const pref = readRightPanelPreference();
           if (!pref || pref.open) {
@@ -927,7 +980,7 @@ function ChatPage() {
         subRef.current = null;
       }
     },
-    [agent, agentGroup, chatId, locale, openPanelTab, t],
+    [agent, agentGroup, chatId, locale, mediaBasePaths, openPanelTab, t],
   );
 
   // consumeEvent를 ref로 미러 — subscribeRun/메타데이터 effect가 consumeEvent identity 변화(agent·
@@ -2465,9 +2518,11 @@ function ChatPage() {
             openPanelTab("panel");
           }}
           onOpenWorkflow={() => setNetworkOpenPersisted(true)}
+          onOpenMultimodalSetup={() => router.push("/settings#multimodal")}
           onStop={stop}
           interactionBusy={busy}
           stopRequested={cancelPending}
+          mediaBasePaths={mediaBasePaths}
         />
       </div>
       {/* 에이전트 질문 바텀 시트 — 인라인 카드 대신 여기 모아 전부 답하고 1회 전송 */}

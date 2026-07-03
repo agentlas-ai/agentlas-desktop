@@ -1163,18 +1163,24 @@ export function ChatInput({
             {/* Context volume indicator */}
             {tokensUsage && (
               <div 
+                className="chat-input-context-pill"
                 title={`${contextOwnerDescription} · ${Math.round(tokensUsage.current/1000)}k / ${Math.round(tokensUsage.limit/1000)}k`}
                 style={{ 
                   display: "flex", alignItems: "center", gap: 6,
                   padding: "0 8px", height: 26, borderRadius: 13,
                   background: "var(--fill-1)", border: "1px solid var(--paper-edge)",
-                  fontSize: 10, fontWeight: 600, color: "var(--muted-deep)"
+                  fontSize: 10, fontWeight: 600, color: "var(--muted-deep)",
+                  minWidth: 0,
+                  flex: "0 1 auto",
                 }}
               >
-                <span style={{ color: contextManagedByRuntime ? "var(--muted-deep)" : "var(--accent)" }}>
+                <span
+                  className="chat-input-context-owner"
+                  style={{ color: contextManagedByRuntime ? "var(--muted-deep)" : "var(--accent)" }}
+                >
                   {contextOwnerLabel}
                 </span>
-                <div style={{ width: 40, height: 4, borderRadius: 2, background: "var(--fill-3)", overflow: "hidden" }}>
+                <div className="chat-input-context-meter" style={{ width: 40, height: 4, borderRadius: 2, background: "var(--fill-3)", overflow: "hidden" }}>
                   <div style={{ 
                     height: "100%", 
                     width: `${contextPercent}%`,
@@ -1182,7 +1188,7 @@ export function ChatInput({
                     transition: "width 0.3s"
                   }} />
                 </div>
-                <span>{contextPercent}%</span>
+                <span className="chat-input-context-percent">{contextPercent}%</span>
               </div>
             )}
             

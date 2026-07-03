@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.1 — 2026-07-03
+
+### Added
+
+- **Multimodal engine auto-resolve.** Image/video/audio generation now picks a connected
+  engine automatically instead of making the agent reason about it at runtime. Default is
+  **Auto**: keyless engines first (Codex CLI image_gen, Nano Banana via Antigravity CLI),
+  then API-key providers. The chosen engine + readiness is resolved before the run and
+  passed to the agent, so it uses it directly. If nothing is connected, the chat shows an
+  **"Open multimodal settings"** button instead of the agent flailing with account signup.
+
+### Changed
+
+- **Accumulated fixes from parallel work streams** bundled into this release: automation
+  supervisor/health audit, upload Cloud/Hub target selection, chat question sheet, i18n
+  leaks, and related desktop UI polish.
+
 ## 0.5.9 — 2026-07-01
 
 ### Added

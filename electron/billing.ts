@@ -28,6 +28,8 @@ export async function getBillingCredits(): Promise<HubCreditBalance> {
     const res = await timedFetch(`${webBaseUrl()}/api/billing/credits`, {
       headers: { cookie },
     });
+    // 401 = 세션 무효 — "로그인 안 됐는데 크레딧 표시" 불일치를 막기 위해 미인증으로 강등.
+    if (res.status === 401) return { authenticated: false };
     if (!res.ok) return { authenticated: true, error: `http_${res.status}` };
     return (await res.json()) as HubCreditBalance;
   } catch {

@@ -53,6 +53,8 @@ export interface ParsedAutomation {
    *  오케스트레이터 챗에서 만든 자동화가 항상 오케스트레이터에 묶여 매 실행
    *  라우팅 홉을 타던 문제의 해결(해석은 client.ts). */
   agent?: string;
+  /** Agentlas Hub 에이전트 slug. 있으면 로컬 agent 해석 대신 Hub borrow 대상으로 실행. */
+  hubAgent?: string;
   /** 구조화 스케줄 spec(있으면 schedule_json으로 저장, 레거시 토큰보다 우선). */
   scheduleSpec?: ScheduleSpec | null;
   /** IANA 타임존. */
@@ -83,6 +85,7 @@ export const AUTOMATION_PROTOCOL = [
   '[ { "name": "<short name>",',
   '    "prompt": "<exactly what to do on each run>",',
   '    "agent": "<installed agent name/slug/id that should RUN this — set it whenever a specific agent (not you) owns the job; omit to run on yourself>",',
+  '    "hubAgent": "<optional Agentlas Hub agent slug to RUN this without local install>",',
   '    "schedule": { "preset": "daily|weekday|weekly|monthly|hourly", "time": "09:00", "tz": "Asia/Seoul" } } ]',
   "```",
   "",
@@ -296,7 +299,7 @@ function defaultNodeLabel(type: WorkflowNodeType, step: EmittedStep): string {
 export function synthesizeLegacyGraph(automation: {
   scheduleHuman: string;
   promptTemplate: string;
-  targetType: "agent" | "firm";
+  targetType: "agent" | "firm" | "hub";
   targetId: string;
 }): WorkflowGraph {
   return {
@@ -318,7 +321,7 @@ export function synthesizeLegacyGraph(automation: {
           targetType: automation.targetType,
           prompt: automation.promptTemplate,
         },
-        label: automation.targetType === "firm" ? "Firm" : "Agent",
+        label: automation.targetType === "firm" ? "Firm" : automation.targetType === "hub" ? "Hub Agent" : "Agent",
       },
     ],
     edges: [{ id: "e0-1", source: "n0", target: "n1" }],
@@ -348,6 +351,7 @@ export function parseAutomations(text: string): ParseAutomationsResult {
             const name = typeof o.name === "string" ? o.name.trim() : "";
             const prompt = typeof o.prompt === "string" ? o.prompt.trim() : "";
             const agent = typeof o.agent === "string" ? o.agent.trim() : "";
+            const hubAgent = typeof o.hubAgent === "string" ? o.hubAgent.trim() : "";
 
             const { spec, token, tz } = resolveSchedule(o.schedule, errors);
 
@@ -378,6 +382,7 @@ export function parseAutomations(text: string): ParseAutomationsResult {
               schedule: token,
               prompt,
               ...(agent ? { agent } : {}),
+              ...(hubAgent ? { hubAgent } : {}),
               scheduleSpec: spec,
               tz,
               steps,

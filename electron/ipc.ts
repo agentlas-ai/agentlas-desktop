@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { clearDetectCache, detectRuntimes, setActiveRuntime } from "./runtime/detect";
+import { agentRunCwd } from "./runtime/exec";
 import { listRuntimeModels } from "./runtime/providers";
 import { installCli, openCliLogin, updateCli, type InstallableCli } from "./runtime/install-cli";
 import { listRuntimeCommands } from "./runtime/commands";
@@ -151,6 +152,7 @@ import {
   listChatsByFirm,
   listChatsByProject,
   listRecentChats,
+  removeAutomationSessions,
   removeChat,
   renameChat,
   setChatContinuousMode,
@@ -592,6 +594,13 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("workspace:set", (_e, chatId: string, absPath: string | null) =>
     setChatWorkingFolder(chatId, absPath),
   );
+  ipcMain.handle("workspace:defaultRunFolder", () => {
+    try {
+      return agentRunCwd();
+    } catch {
+      return null;
+    }
+  });
 
   // ── auth (agentlas.cloud 구글 로그인) ───────────────────
   ipcMain.handle("auth:getSession", () => getAuthSession());
@@ -1077,6 +1086,7 @@ export function registerIpcHandlers(): void {
     return next;
   });
   ipcMain.handle("automations:remove", async (_e, id: string) => {
+    removeAutomationSessions(id);
     removeAutomation(id);
     await resyncTriggers();
   });
@@ -1099,7 +1109,11 @@ export function registerIpcHandlers(): void {
     if (!automation) throw new Error(`Automation not found: ${id}`);
     return getOrCreateAutomationSession({
       automationId: automation.id,
-      ...(automation.targetType === "firm" ? { firmId: automation.targetId } : { agentId: automation.targetId }),
+      ...(automation.targetType === "firm"
+        ? { firmId: automation.targetId }
+        : automation.targetType === "agent"
+          ? { agentId: automation.targetId }
+          : {}),
     });
   });
 

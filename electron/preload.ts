@@ -43,6 +43,7 @@ const api: AgentlasIpc = {
     get: (chatId: string) => ipcRenderer.invoke("workspace:get", chatId),
     set: (chatId: string, absPath: string | null) =>
       ipcRenderer.invoke("workspace:set", chatId, absPath),
+    defaultRunFolder: () => ipcRenderer.invoke("workspace:defaultRunFolder"),
   },
   auth: {
     getSession: () => ipcRenderer.invoke("auth:getSession"),

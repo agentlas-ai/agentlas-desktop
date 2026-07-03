@@ -2,13 +2,14 @@ import {
   DEFAULT_MULTIMODAL_SETTINGS,
   MULTIMODAL_PROVIDERS,
   normalizeMultimodalSettings,
-  selectedMultimodalProviders,
+  type MultimodalModality,
   type MultimodalProvider,
   type MultimodalProviderStatus,
   type MultimodalSettings,
 } from "../../shared/multimodal";
 import { hasEnvVar } from "../secrets/vault";
 import { getMeta, setMeta } from "../store/meta";
+import { resolveActiveProvider } from "./availability";
 
 const META_KEY = "multimodal_settings";
 
@@ -39,18 +40,22 @@ export function saveMultimodalSettings(input: Partial<MultimodalSettings>): Mult
 
 export async function getMultimodalStatus(): Promise<MultimodalProviderStatus[]> {
   const settings = getMultimodalSettings();
-  const providers = selectedMultimodalProviders(settings);
-  return Promise.all(
-    providers.map(async (provider) => {
-      const env = await Promise.all(
-        provider.envKeys.map(async (key) => ({ key, hasValue: await hasEnvVar(key) })),
-      );
-      return {
-        modality: provider.modality,
-        provider,
-        env,
-        ready: env.every((entry) => entry.hasValue),
-      };
-    }),
-  );
+  const modalities: MultimodalModality[] = ["image", "video", "audio"];
+  const out: MultimodalProviderStatus[] = [];
+  for (const modality of modalities) {
+    // auto면 실제 가용성 기준으로 확정된 엔진을 status로 보여준다("자동 → codex(준비됨)").
+    const resolved = await resolveActiveProvider(modality, settings);
+    if (!resolved.provider) continue;
+    const env = await Promise.all(
+      resolved.provider.envKeys.map(async (key) => ({ key, hasValue: await hasEnvVar(key) })),
+    );
+    out.push({
+      modality,
+      provider: resolved.provider,
+      env,
+      ready: resolved.ready,
+      auto: resolved.via === "auto",
+    });
+  }
+  return out;
 }

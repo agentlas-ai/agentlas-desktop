@@ -50,11 +50,35 @@ export interface McpConfigResult {
   codexConfigArgs: string[];
 }
 
+export interface McpConfigBuildOptions {
+  /** Playwright MCP persistent profile key. Used by automations to avoid sharing the interactive browser profile lock. */
+  browserProfileKey?: string;
+}
+
+function safeProfileKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "default";
+}
+
+function argsWithBrowserProfile(key: string, args: string[], opts?: McpConfigBuildOptions): string[] {
+  if (key !== "playwright" || !opts?.browserProfileKey) return args;
+  const profileDir = path.join(app.getPath("userData"), "mcp", "browser-profiles", safeProfileKey(opts.browserProfileKey));
+  fs.mkdirSync(profileDir, { recursive: true });
+  const next = args.slice();
+  const flagIndex = next.findIndex((arg) => arg === "--user-data-dir" || arg.startsWith("--user-data-dir="));
+  if (flagIndex < 0) return [...next, "--user-data-dir", profileDir];
+  if (next[flagIndex] === "--user-data-dir") {
+    next[flagIndex + 1] = profileDir;
+  } else {
+    next[flagIndex] = `--user-data-dir=${profileDir}`;
+  }
+  return next;
+}
+
 /**
  * 설치·활성 MCP 서버를 .mcp.json 으로 써서 경로를 반환. 서버가 하나도 없으면 null.
  * stdio 서버는 command/args/env, sse·http 서버는 type/url 형태로 직렬화한다.
  */
-export async function buildMcpConfigFile(): Promise<McpConfigResult | null> {
+export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<McpConfigResult | null> {
   ensureDefaultMcpPluginsInstalled();
   const servers = listInstalledServers().filter((s) => s.enabled);
   if (servers.length === 0) return null;
@@ -71,13 +95,14 @@ export async function buildMcpConfigFile(): Promise<McpConfigResult | null> {
         const v = await readEnvVar(k);
         if (v) env[k] = v;
       }
+      const args = argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
       mcpServers[key] = {
         command: expandHome(s.command),
-        args: (s.args ?? []).map(expandHome),
+        args,
         ...(Object.keys(env).length ? { env } : {}),
       };
       pushCodexConfig(codexConfigArgs, key, "command", tomlString(expandHome(s.command)));
-      pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray((s.args ?? []).map(expandHome)));
+      pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(args));
       if (Object.keys(env).length > 0) {
         pushCodexConfig(codexConfigArgs, key, "env", tomlInlineStringTable(env));
       }
@@ -87,7 +112,7 @@ export async function buildMcpConfigFile(): Promise<McpConfigResult | null> {
     } else {
       continue;
     }
-    allowedTools.push(`mcp__${key}`);
+    allowedTools.push(`mcp__${key}`, `mcp__${key}__*`);
   }
 
   if (Object.keys(mcpServers).length === 0) return null;

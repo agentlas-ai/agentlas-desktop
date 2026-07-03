@@ -35,7 +35,15 @@ export interface MultimodalProviderStatus {
   provider: MultimodalProvider;
   env: Array<{ key: string; hasValue: boolean }>;
   ready: boolean;
+  /** 이 status가 "auto"(자동 선택) 해석 결과일 때 true — 패널의 자동 카드에 매칭한다. */
+  auto?: boolean;
 }
+
+/**
+ * "auto" = 지정 없이 가용한 엔진을 자동으로 고르라는 뜻.
+ * 우선순위는 키 없는(구독/OAuth) 엔진 먼저 → 유료 API 순서(아래 *_PROVIDER_LADDER).
+ */
+export const AUTO_PROVIDER = "auto";
 
 export const MULTIMODAL_PROVIDERS: MultimodalProvider[] = [
   {
@@ -51,6 +59,20 @@ export const MULTIMODAL_PROVIDERS: MultimodalProvider[] = [
     billing: "subscription",
     summary: "Uses the user's logged-in Codex/OpenAI subscription runtime when available.",
     summaryKo: "로그인된 Codex/OpenAI 구독 런타임을 우선 사용합니다.",
+  },
+  {
+    id: "nanobanana-image",
+    modality: "image",
+    label: "Nano Banana (Antigravity CLI)",
+    labelKo: "나노바나나 (Antigravity CLI)",
+    mode: "cli-subscription",
+    defaultModel: "gemini-image",
+    envKeys: [],
+    setupUrl: "https://antigravity.google/",
+    docsUrl: "https://antigravity.google/",
+    billing: "subscription",
+    summary: "Keyless Gemini image (Nano Banana) via the logged-in Antigravity CLI (agy). No API key needed.",
+    summaryKo: "로그인된 Antigravity CLI(agy)로 키 없이 Gemini 이미지(나노바나나)를 생성합니다. API 키 불필요.",
   },
   {
     id: "openai-image",
@@ -265,10 +287,34 @@ export const MULTIMODAL_PROVIDERS: MultimodalProvider[] = [
 ];
 
 export const DEFAULT_MULTIMODAL_SETTINGS: MultimodalSettings = {
-  imageProvider: "codex-cli-image",
+  // 기본값 = auto. 사용자가 따로 고르지 않으면 가용한 엔진(키리스 우선)을 자동 선택한다.
+  imageProvider: AUTO_PROVIDER,
   videoProvider: "google-veo",
   audioProvider: "openai-audio",
 };
+
+/**
+ * "auto"일 때 시도 순서 — 키 없는(구독/OAuth) 엔진 먼저, 그다음 유료 API.
+ * 런타임 가용성(bin/키 존재)은 electron 쪽 resolveActiveProvider가 이 순서대로 검사한다.
+ */
+export const PROVIDER_LADDERS: Record<MultimodalModality, string[]> = {
+  image: [
+    "codex-cli-image",
+    "nanobanana-image",
+    "openai-image",
+    "google-image",
+    "stability-image",
+    "adobe-firefly",
+  ],
+  video: ["google-veo", "runway-video", "openai-sora", "replicate-video"],
+  audio: ["openai-audio", "elevenlabs-audio", "deepgram-audio"],
+};
+
+export function providerLadder(modality: MultimodalModality): MultimodalProvider[] {
+  return PROVIDER_LADDERS[modality]
+    .map((id) => getMultimodalProvider(id))
+    .filter((p): p is MultimodalProvider => Boolean(p));
+}
 
 export function providersForModality(modality: MultimodalModality): MultimodalProvider[] {
   return MULTIMODAL_PROVIDERS.filter((provider) => provider.modality === modality);
@@ -322,6 +368,7 @@ export function selectedMultimodalEnvRequirements(settings: MultimodalSettings):
 }
 
 function validProvider(id: string | undefined, modality: MultimodalModality, fallback: string): string {
+  if (id === AUTO_PROVIDER) return AUTO_PROVIDER;
   if (id && MULTIMODAL_PROVIDERS.some((provider) => provider.id === id && provider.modality === modality)) {
     return id;
   }

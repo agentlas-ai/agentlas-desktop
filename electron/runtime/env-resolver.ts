@@ -2,9 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { app } from "electron";
-import { selectedMultimodalEnvKeys } from "../../shared/multimodal";
 import type { InstalledAgent } from "../../shared/types";
 import { agentFolderPath } from "../agents/files";
+import { resolveActiveProvider } from "../multimodal/availability";
 import { getMultimodalSettings } from "../multimodal/settings";
 import { readEnvVar } from "../secrets/vault";
 
@@ -43,8 +43,19 @@ export async function buildRunnerEnv(
       if (req.key) vaultKeys.add(req.key);
     }
   }
-  for (const key of selectedMultimodalEnvKeys(getMultimodalSettings())) {
-    vaultKeys.add(key);
+
+  // 멀티모달 엔진을 실행 전에 결정적으로 확정한다(런타임 LLM이 사다리를 되짚지 않게).
+  // auto면 키리스 우선 순서로 첫 가용 엔진을 고르고, 그 엔진의 키만 주입한다.
+  const settings = getMultimodalSettings();
+  const [image, video, audio] = await Promise.all([
+    resolveActiveProvider("image", settings),
+    resolveActiveProvider("video", settings),
+    resolveActiveProvider("audio", settings),
+  ]);
+  for (const resolved of [image, video, audio]) {
+    if (resolved.provider) {
+      for (const key of resolved.provider.envKeys) vaultKeys.add(key);
+    }
   }
 
   for (const key of vaultKeys) {
@@ -56,10 +67,13 @@ export async function buildRunnerEnv(
     }
   }
 
-  const settings = getMultimodalSettings();
-  env.AGENTLAS_MULTIMODAL_IMAGE_PROVIDER = settings.imageProvider;
-  env.AGENTLAS_MULTIMODAL_VIDEO_PROVIDER = settings.videoProvider;
-  env.AGENTLAS_MULTIMODAL_AUDIO_PROVIDER = settings.audioProvider;
+  // 확정된 엔진 id + 준비 여부를 env로 넘긴다. 에이전트는 이 값을 "그대로 써라"만 하면 된다.
+  env.AGENTLAS_MULTIMODAL_IMAGE_PROVIDER = image.provider?.id ?? "none";
+  env.AGENTLAS_MULTIMODAL_IMAGE_READY = image.ready ? "1" : "0";
+  env.AGENTLAS_MULTIMODAL_VIDEO_PROVIDER = video.provider?.id ?? "none";
+  env.AGENTLAS_MULTIMODAL_VIDEO_READY = video.ready ? "1" : "0";
+  env.AGENTLAS_MULTIMODAL_AUDIO_PROVIDER = audio.provider?.id ?? "none";
+  env.AGENTLAS_MULTIMODAL_AUDIO_READY = audio.ready ? "1" : "0";
 
   return { env, injectedKeys: [...injected].sort() };
 }

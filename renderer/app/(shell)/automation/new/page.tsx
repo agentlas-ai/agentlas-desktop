@@ -10,11 +10,21 @@ import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
-import type { InstalledAgent, InstalledFirm, ScheduleSpec, Trigger, TriggerKind, Automation } from "@/lib/types";
+import type {
+  Automation,
+  AutomationHubMode,
+  AutomationToolMode,
+  InstalledAgent,
+  InstalledFirm,
+  MarketplaceListing,
+  ScheduleSpec,
+  Trigger,
+  TriggerKind,
+} from "@/lib/types";
 import { ScheduleBuilder, type ScheduleBuilderValue } from "@/components/automation/ScheduleBuilder";
 import { IconBuilding, IconSparkles } from "@/components/Icon";
 
-type TargetType = "agent" | "firm";
+type TargetType = "agent" | "firm" | "hub";
 
 export default function NewAutomationWrapper() {
   return (
@@ -38,9 +48,12 @@ function NewAutomationPage() {
   const [targetId, setTargetId] = useState<string>("");
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
+  const [hubAgents, setHubAgents] = useState<MarketplaceListing[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [triggerType, setTriggerType] = useState<TriggerKind>("schedule");
+  const [toolMode, setToolMode] = useState<AutomationToolMode>("auto");
+  const [hubMode, setHubMode] = useState<AutomationHubMode>("hub-allowed");
   const [fsPath, setFsPath] = useState("");
   const [fsOn, setFsOn] = useState<"create" | "modify" | "delete">("create");
   const [chainAfter, setChainAfter] = useState("");
@@ -51,11 +64,17 @@ function NewAutomationPage() {
     const api = ipc();
     if (!api) return;
     void (async () => {
-      const [ag, fm, autos] = await Promise.all([api.team.list(), api.firms.list(), api.automations.list()]);
+      const [ag, fm, autos, hub] = await Promise.all([
+        api.team.list(),
+        api.firms.list(),
+        api.automations.list(),
+        api.marketplace.search("").catch(() => []),
+      ]);
       const visible = visibleAgents(ag);
       setAgents(visible);
       setFirms(fm);
       setAllAutomations(autos);
+      setHubAgents(hub);
 
       if (editId) {
         const existing = autos.find((a) => a.id === editId);
@@ -65,6 +84,8 @@ function NewAutomationPage() {
           setTargetType(existing.targetType);
           setTargetId(existing.targetId);
           setTriggerType(existing.triggerType ?? "schedule");
+          setToolMode(existing.toolMode ?? "auto");
+          setHubMode(existing.hubMode ?? "hub-allowed");
           setInitialSpec(existing.scheduleSpec ?? null);
           if (existing.trigger?.kind === "fs") {
             setFsPath(existing.trigger.path);
@@ -83,6 +104,9 @@ function NewAutomationPage() {
       } else if (visible[0]) {
         setTargetType("agent");
         setTargetId(visible[0].id);
+      } else if (hub[0]) {
+        setTargetType("hub");
+        setTargetId(hub[0].slug);
       }
     })();
   }, [editId]);
@@ -91,7 +115,17 @@ function NewAutomationPage() {
   useEffect(() => {
     if (editId && !loaded) return;
     setError("");
-  }, [targetType, editId, loaded]);
+    const valid =
+      targetType === "firm"
+        ? firms.some((f) => f.id === targetId)
+        : targetType === "hub"
+          ? hubAgents.some((a) => a.slug === targetId)
+          : agents.some((a) => a.id === targetId);
+    if (valid) return;
+    if (targetType === "firm" && firms[0]) setTargetId(firms[0].id);
+    if (targetType === "agent" && agents[0]) setTargetId(agents[0].id);
+    if (targetType === "hub" && hubAgents[0]) setTargetId(hubAgents[0].slug);
+  }, [targetType, targetId, agents, firms, hubAgents, editId, loaded]);
 
   function buildTrigger(): Trigger | null {
     if (triggerType === "fs") {
@@ -109,7 +143,12 @@ function NewAutomationPage() {
   async function submit(blankCanvas = false) {
     const api = ipc();
     if (!api || !name.trim() || busy) return;
-    const validTarget = targetType === "firm" ? firms.some((f) => f.id === targetId) : agents.some((a) => a.id === targetId);
+    const validTarget =
+      targetType === "firm"
+        ? firms.some((f) => f.id === targetId)
+        : targetType === "hub"
+          ? hubAgents.some((a) => a.slug === targetId)
+          : agents.some((a) => a.id === targetId);
     if (!validTarget) {
       setError(locale === "ko" ? "선택한 대상이 없습니다. 다른 대상 탭을 선택하세요." : "No valid target is selected. Choose another target tab.");
       return;
@@ -131,6 +170,8 @@ function NewAutomationPage() {
         targetType,
         targetId,
         promptTemplate: prompt.trim() || (locale === "ko" ? "오늘 할 일 요약해줘" : "Summarize today's tasks"),
+        toolMode,
+        hubMode,
         scheduleJson: triggerType === "schedule" ? scheduleJson : null,
         triggerType,
         trigger: buildTrigger(),
@@ -250,8 +291,9 @@ function NewAutomationPage() {
           <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
             <TabBtn active={targetType === "firm"} onClick={() => setTargetType("firm")} icon={<IconBuilding size={13} />} label={`${t("auto.target.firm")} (${firms.length})`} disabled={firms.length === 0} />
             <TabBtn active={targetType === "agent"} onClick={() => setTargetType("agent")} icon={<IconSparkles size={13} />} label={`${t("auto.target.agent")} (${agents.length})`} disabled={agents.length === 0} />
+            <TabBtn active={targetType === "hub"} onClick={() => setTargetType("hub")} icon={<IconSparkles size={13} />} label={`Hub (${hubAgents.length})`} disabled={hubAgents.length === 0} />
           </div>
-          {targetType === "firm" ? (
+          {targetType === "firm" && (
             firms.length === 0 ? (
               <Empty>{t("auto.empty_firms")}</Empty>
             ) : (
@@ -263,20 +305,82 @@ function NewAutomationPage() {
                 ))}
               </select>
             )
-          ) : agents.length === 0 ? (
-            <Empty>{t("auto.empty_agents")}</Empty>
-          ) : (
-            <select value={targetId} onChange={(e) => setTargetId(e.target.value)} style={inputStyle}>
-              {agents.map((a) => {
-                const loc = pickLocalized(a, locale);
-                return (
-                  <option key={a.id} value={a.id}>
-                    {loc.name} — {loc.tagline}
-                  </option>
-                );
-              })}
-            </select>
           )}
+          {targetType === "agent" && (
+            agents.length === 0 ? (
+              <Empty>{t("auto.empty_agents")}</Empty>
+            ) : (
+              <select value={targetId} onChange={(e) => setTargetId(e.target.value)} style={inputStyle}>
+                {agents.map((a) => {
+                  const loc = pickLocalized(a, locale);
+                  return (
+                    <option key={a.id} value={a.id}>
+                      {loc.name} — {loc.tagline}
+                    </option>
+                  );
+                })}
+              </select>
+            )
+          )}
+          {targetType === "hub" && (
+            hubAgents.length === 0 ? (
+              <Empty>{locale === "ko" ? "Hub 에이전트를 불러오지 못했습니다." : "No Hub agents are available."}</Empty>
+            ) : (
+              <select value={targetId} onChange={(e) => setTargetId(e.target.value)} style={inputStyle}>
+                {hubAgents.map((a) => (
+                  <option key={a.slug} value={a.slug}>
+                    {pickLocalized(a, locale).name} — Hub
+                  </option>
+                ))}
+              </select>
+            )
+          )}
+        </Field>
+
+        <Field label={locale === "ko" ? "실행 도구" : "Run tool"}>
+          <div style={choiceGridStyle}>
+            <ChoiceBtn
+              active={toolMode === "auto"}
+              onClick={() => setToolMode("auto")}
+              label={locale === "ko" ? "자동 선택" : "Auto"}
+              detail={locale === "ko" ? "Agentlas가 작업에 맞춰 고름" : "Agentlas picks per task"}
+            />
+            <ChoiceBtn
+              active={toolMode === "browser"}
+              onClick={() => setToolMode("browser")}
+              label={locale === "ko" ? "브라우저" : "Browser"}
+              detail={locale === "ko" ? "웹 로그인·게시·검색" : "Web login, post, search"}
+            />
+            <ChoiceBtn
+              active={toolMode === "computer-use"}
+              onClick={() => setToolMode("computer-use")}
+              label={locale === "ko" ? "컴퓨터 유즈" : "Computer Use"}
+              detail={locale === "ko" ? "Mac 화면·앱 조작" : "Mac screen and apps"}
+            />
+          </div>
+        </Field>
+
+        <Field label={locale === "ko" ? "Hub 사용" : "Hub usage"}>
+          <div style={choiceGridStyle}>
+            <ChoiceBtn
+              active={hubMode === "hub-allowed"}
+              onClick={() => setHubMode("hub-allowed")}
+              label={locale === "ko" ? "로컬 우선" : "Local first"}
+              detail={locale === "ko" ? "부족하면 Hub 후보 연결" : "Use Hub when local falls short"}
+            />
+            <ChoiceBtn
+              active={hubMode === "hub-first"}
+              onClick={() => setHubMode("hub-first")}
+              label={locale === "ko" ? "Hub 우선" : "Hub first"}
+              detail={locale === "ko" ? "Hub 전문가부터 찾음" : "Resolve Hub specialists first"}
+            />
+            <ChoiceBtn
+              active={hubMode === "local-only"}
+              onClick={() => setHubMode("local-only")}
+              label={locale === "ko" ? "로컬만" : "Local only"}
+              detail={locale === "ko" ? "설치된 도구만 사용" : "Use installed tools only"}
+            />
+          </div>
         </Field>
 
         <Field label={t("auto.field.prompt")} hint={t("auto.field.prompt.hint")}>
@@ -310,6 +414,28 @@ function NewAutomationPage() {
         </div>
       </section>
     </div>
+  );
+}
+
+function ChoiceBtn({ active, onClick, label, detail }: { active: boolean; onClick: () => void; label: string; detail: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        minHeight: 64,
+        padding: "10px 12px",
+        borderRadius: "var(--radius-md)",
+        background: active ? "var(--fill-1)" : "var(--paper)",
+        color: active ? "var(--accent)" : "var(--ink-soft)",
+        border: active ? "1px solid var(--accent-soft)" : "1px solid var(--paper-edge)",
+        cursor: "pointer",
+        textAlign: "left",
+      }}
+    >
+      <span style={{ display: "block", fontSize: 13, fontWeight: 700, marginBottom: 4 }}>{label}</span>
+      <span style={{ display: "block", fontSize: 11, lineHeight: 1.35, color: active ? "var(--accent)" : "var(--muted-deep)" }}>{detail}</span>
+    </button>
   );
 }
 
@@ -391,6 +517,12 @@ const inputStyle: React.CSSProperties = {
   background: "var(--paper)",
   fontSize: 13,
   outline: "none",
+};
+
+const choiceGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+  gap: 8,
 };
 
 const errorStyle: React.CSSProperties = {

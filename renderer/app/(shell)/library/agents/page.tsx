@@ -1,6 +1,7 @@
 // 회사 상세 — 접고 펴기 가능한 왼쪽 사이드바 조직도 + 오른쪽 에이전트 상세 통제 센터 (메모리 큐레이션, 프롬프트 에디터, 스킬 주입, 클라우드 싱크)
 "use client";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
@@ -79,6 +80,24 @@ function memoryConfidenceColor(confidence: "high" | "medium" | "low"): string {
   if (confidence === "high") return "var(--green-deep)";
   if (confidence === "medium") return "var(--amber-deep)";
   return "var(--muted-deep)";
+}
+
+const rosterNameStyle: CSSProperties = {
+  display: "-webkit-box",
+  overflow: "hidden",
+  WebkitBoxOrient: "vertical",
+  WebkitLineClamp: 2,
+  lineHeight: 1.22,
+};
+
+function readableRoleLabel(role: string | undefined, displayName: string, agentSlug?: string): string | null {
+  const label = role?.trim();
+  if (!label) return null;
+  const normalized = label.toLowerCase();
+  if (normalized === displayName.trim().toLowerCase()) return null;
+  if (agentSlug && normalized === agentSlug.toLowerCase()) return null;
+  if (/^[a-z0-9]+(?:-[a-z0-9]+)+$/.test(normalized)) return null;
+  return label;
 }
 
 // 프롬프트 진화 후보로 승격 가능한 DB kind — 규칙성 있는 학습만(사실/가설 제외).
@@ -771,11 +790,11 @@ function LibraryAgentsView() {
                   {!sidebarCollapsed && (
                     <div
                       onClick={() => setFirmCollapsed(prev => ({ ...prev, [firm.id]: !isCollapsed }))}
-                      style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", cursor: "pointer", borderRadius: "var(--radius-sm)", background: "var(--paper-2)", marginBottom: 8 }}
+                      style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", cursor: "pointer", borderRadius: "var(--radius-sm)", background: "var(--paper-2)", marginBottom: 8, minWidth: 0 }}
                     >
                       <IconChevronDown size={14} style={{ transform: isCollapsed ? "rotate(-90deg)" : "none", transition: "transform 0.2s" }} />
                       <IconBuilding size={14} style={{ color: "var(--accent)" }} />
-                      <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--font-head)" }}>{fLoc.name}</span>
+                      <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--font-head)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{fLoc.name}</span>
                     </div>
                   )}
                   {(!isCollapsed || sidebarCollapsed) && (
@@ -1324,12 +1343,14 @@ function OrgGroupLabel({ node }: { node: ResolvedNode }) {
 
 function OrgNodeCard({ node, tier, active, onClick }: { node: ResolvedNode; tier: 1 | 2 | 3; active: boolean; onClick: () => void }) {
   const isCeo = tier === 1;
+  const roleLabel = readableRoleLabel(node.role, node.name);
   return (
     <div
       onClick={onClick}
+      title={[node.name, roleLabel].filter(Boolean).join(" - ")}
       style={{
         display: "flex",
-        alignItems: "center",
+        alignItems: "flex-start",
         gap: 8,
         padding: "8px 10px",
         background: active ? "var(--accent-soft)" : isCeo ? "var(--fill-1)" : "var(--paper)",
@@ -1357,13 +1378,13 @@ function OrgNodeCard({ node, tier, active, onClick }: { node: ResolvedNode; tier
         {node.name.slice(0, 1).toUpperCase()}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
-          <strong style={{ fontSize: tier === 3 ? 11.5 : 12.5, color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 3, minWidth: 0 }}>
+          <strong style={{ ...rosterNameStyle, fontSize: tier === 3 ? 11.5 : 12.5, color: "var(--ink)", fontWeight: 750 }}>
             {node.name}
           </strong>
-          {node.role && node.role !== node.name && (
-            <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 999, background: "var(--paper-2)", color: "var(--muted-deep)", whiteSpace: "nowrap" }}>
-              {node.role}
+          {roleLabel && (
+            <span style={{ maxWidth: "100%", fontSize: 9, padding: "1px 5px", borderRadius: 999, background: "var(--paper-2)", color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {roleLabel}
             </span>
           )}
         </div>
@@ -1416,6 +1437,7 @@ function OrgChart({
     const isCeo = node.reportsTo === null;
     const active = selectedId === node.agentSlug;
     const displayName = agentLoc?.name ?? node.role;
+    const roleLabel = readableRoleLabel(node.role, displayName, agent?.slug ?? node.agentSlug);
 
     const resolved: ResolvedNode = {
       id: node.agentSlug,
@@ -1428,9 +1450,10 @@ function OrgChart({
       <div key={node.agentSlug} style={{ marginTop: depth === 0 ? 0 : 6 }}>
         <div
           onClick={() => onSelect(resolved)}
+          title={[displayName, roleLabel].filter(Boolean).join(" - ")}
           style={{
             display: "flex",
-            alignItems: "center",
+            alignItems: "flex-start",
             gap: 8,
             padding: "8px 10px",
             background: active ? "var(--accent-soft)" : isCeo ? "var(--fill-1)" : "var(--paper)",
@@ -1458,13 +1481,15 @@ function OrgChart({
             {displayName.slice(0, 1).toUpperCase()}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-              <strong style={{ fontSize: 12, color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 3, minWidth: 0 }}>
+              <strong style={{ ...rosterNameStyle, fontSize: 12, color: "var(--ink)", fontWeight: 750 }}>
                 {displayName}
               </strong>
-              <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 999, background: "var(--paper-2)", color: "var(--muted-deep)", whiteSpace: "nowrap" }}>
-                {node.role}
-              </span>
+              {roleLabel && (
+                <span style={{ maxWidth: "100%", fontSize: 9, padding: "1px 5px", borderRadius: 999, background: "var(--paper-2)", color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {roleLabel}
+                </span>
+              )}
             </div>
           </div>
         </div>

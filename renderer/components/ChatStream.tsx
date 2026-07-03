@@ -85,6 +85,8 @@ export interface StreamMessage {
   tokens?: number;
   /** 파이프라인 단계 계획 — 있으면 메시지 상단에 스테퍼로 표시(PRD→배포 가시화). */
   pipeline?: PipelineStage[];
+  /** 멀티모달 엔진 미연결 — 본문 아래에 "설정으로 가기" 버튼을 렌더한다. */
+  needsMultimodalSetup?: boolean;
 }
 
 export interface ChatEmptyDirectory {
@@ -106,9 +108,11 @@ export function ChatStream({
   onOpenMedia,
   onOpenWorkflow,
   onAnswerQuestion,
+  onOpenMultimodalSetup,
   onStop,
   interactionBusy = false,
   stopRequested = false,
+  mediaBasePaths = [],
 }: {
   messages: StreamMessage[];
   agentName: string;
@@ -120,9 +124,12 @@ export function ChatStream({
   onStop?: () => void;
   /** 사용자가 질문에 답함 — 부모가 user 메시지로 전송 */
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
+  /** 멀티모달 설정 화면으로 이동 — 엔진 미연결 CTA 버튼 클릭 시 */
+  onOpenMultimodalSetup?: () => void;
   /** 다른 메시지가 실행 중이면 오래된 질문 카드도 전송하지 않는다. */
   interactionBusy?: boolean;
   stopRequested?: boolean;
+  mediaBasePaths?: string[];
 }) {
   const { t } = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -177,8 +184,10 @@ export function ChatStream({
           onOpenWorkflow={onOpenWorkflow}
           onStop={onStop}
           onAnswerQuestion={onAnswerQuestion}
+          onOpenMultimodalSetup={onOpenMultimodalSetup}
           interactionBusy={interactionBusy}
           stopRequested={stopRequested}
+          mediaBasePaths={mediaBasePaths}
         />
       ))}
     </div>
@@ -194,9 +203,11 @@ const Bubble = memo(function Bubble({
   onOpenMedia,
   onOpenWorkflow,
   onAnswerQuestion,
+  onOpenMultimodalSetup,
   interactionBusy,
   onStop,
   stopRequested,
+  mediaBasePaths,
 }: {
   message: StreamMessage;
   agentName: string;
@@ -206,8 +217,10 @@ const Bubble = memo(function Bubble({
   onOpenWorkflow?: () => void;
   onStop?: () => void;
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
+  onOpenMultimodalSetup?: () => void;
   interactionBusy: boolean;
   stopRequested: boolean;
+  mediaBasePaths: string[];
 }) {
   const { t, locale } = useT();
   if (message.role === "user") {
@@ -314,6 +327,7 @@ const Bubble = memo(function Bubble({
             onOpenArtifact={onOpenArtifact}
             onOpenMedia={onOpenMedia}
             messageId={message.id}
+            mediaBasePaths={mediaBasePaths}
           />
         )}
         {message.text && !message.busy && (
@@ -330,6 +344,7 @@ const Bubble = memo(function Bubble({
               messageId={message.id}
               onOpenArtifact={onOpenArtifact}
               onOpenMedia={onOpenMedia}
+              mediaBasePaths={mediaBasePaths}
             />
             {message.streaming && <BlinkingCursor />}
           </div>
@@ -348,6 +363,29 @@ const Bubble = memo(function Bubble({
                   onAnswer={(answers) => onAnswerQuestion?.(message.id, q.id, answers)}
                 />
               ))}
+          </div>
+        )}
+        {message.needsMultimodalSetup && !message.busy && (
+          <div style={{ marginTop: 12 }}>
+            <button
+              onClick={() => onOpenMultimodalSetup?.()}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "9px 16px",
+                borderRadius: 12,
+                border: "1px solid var(--accent)",
+                background: "var(--accent)",
+                color: "var(--on-accent, #fff)",
+                fontWeight: 700,
+                fontSize: 13,
+                boxShadow: "var(--neu-raised)",
+              }}
+            >
+              <span aria-hidden style={{ fontSize: 14 }}>🎨</span>
+              {locale === "ko" ? "멀티모달 설정으로 가기" : "Open multimodal settings"}
+            </button>
           </div>
         )}
         {message.text && !message.busy && (
@@ -382,12 +420,14 @@ function LiveOutputPanel({
   messageId,
   onOpenArtifact,
   onOpenMedia,
+  mediaBasePaths,
 }: {
   text: string;
   streaming?: boolean;
   messageId: string;
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
+  mediaBasePaths: string[];
 }) {
   return (
     <div
@@ -400,9 +440,21 @@ function LiveOutputPanel({
       }}
     >
       {streaming ? (
-        <StreamingMarkdown text={text} messageId={messageId} onOpenArtifact={onOpenArtifact} onOpenMedia={onOpenMedia} />
+        <StreamingMarkdown
+          text={text}
+          messageId={messageId}
+          onOpenArtifact={onOpenArtifact}
+          onOpenMedia={onOpenMedia}
+          mediaBasePaths={mediaBasePaths}
+        />
       ) : (
-        <Markdown text={text} messageId={messageId} onOpenArtifact={onOpenArtifact} onOpenMedia={onOpenMedia} />
+        <Markdown
+          text={text}
+          messageId={messageId}
+          onOpenArtifact={onOpenArtifact}
+          onOpenMedia={onOpenMedia}
+          mediaBasePaths={mediaBasePaths}
+        />
       )}
       {streaming && <BlinkingCursor />}
     </div>

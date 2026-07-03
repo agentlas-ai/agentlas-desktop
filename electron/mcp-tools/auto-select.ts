@@ -1,7 +1,7 @@
 import { MCP_TOOL_CATALOG } from "./catalog";
 import { installFromCatalog, listInstalledServers } from "./registry";
 import { readEnvVar } from "../secrets/vault";
-import type { McpToolCatalogEntry } from "../../shared/types";
+import type { AutomationHubMode, AutomationToolMode, McpToolCatalogEntry } from "../../shared/types";
 
 export interface AutoSelectedMcpTool {
   id: string;
@@ -86,6 +86,22 @@ function scoreEntry(entry: McpToolCatalogEntry, haystack: string): number {
   return score;
 }
 
+function scoreWithAutomationPolicy(
+  entry: McpToolCatalogEntry,
+  score: number,
+  toolMode: AutomationToolMode | undefined,
+): number {
+  if (toolMode === "browser") {
+    if (entry.id === "playwright") return Math.max(score, 100);
+    if (entry.id === "cua-driver") return 0;
+  }
+  if (toolMode === "computer-use") {
+    if (entry.id === "cua-driver") return Math.max(score, 100);
+    if (entry.id === "playwright") return 0;
+  }
+  return score;
+}
+
 async function missingRequiredEnv(entry: McpToolCatalogEntry): Promise<string[]> {
   const missing: string[] = [];
   for (const requirement of entry.envRequirements) {
@@ -101,6 +117,8 @@ export async function autoSelectMcpTools(input: {
   systemPrompt: string;
   agentName: string;
   workingFolder?: string | null;
+  toolMode?: AutomationToolMode;
+  hubMode?: AutomationHubMode;
 }): Promise<AutoSelectedMcpTool[]> {
   const haystack = normalize(
     [input.userPrompt, input.systemPrompt, input.agentName, input.workingFolder ?? ""].join("\n"),
@@ -110,8 +128,15 @@ export async function autoSelectMcpTools(input: {
       .map((server) => server.catalogId)
       .filter((id): id is string => Boolean(id)),
   );
-  const picked = MCP_TOOL_CATALOG.map((entry) => ({ entry, score: scoreEntry(entry, haystack) }))
-    .filter((item) => item.score >= 3 || item.entry.id === "hephaestus-network")
+  const hubAllowed = input.hubMode !== "local-only";
+  const picked = MCP_TOOL_CATALOG.map((entry) => ({
+    entry,
+    score: scoreWithAutomationPolicy(entry, scoreEntry(entry, haystack), input.toolMode),
+  }))
+    .filter((item) => {
+      if (item.entry.id === "hephaestus-network") return hubAllowed;
+      return item.score >= 3;
+    })
     .sort((a, b) => b.score - a.score)
     .slice(0, 8);
 
@@ -127,7 +152,14 @@ export async function autoSelectMcpTools(input: {
     result.push({
       id: entry.id,
       name: entry.nameEn || entry.name,
-      reason: score > 0 ? `matched request/tool need score ${score}` : "always available routing/plugin resolver",
+      reason:
+        input.toolMode === "browser" && entry.id === "playwright"
+          ? "user-selected Browser plugin for this automation"
+          : input.toolMode === "computer-use" && entry.id === "cua-driver"
+            ? "user-selected Computer Use for this automation"
+            : score > 0
+              ? `matched request/tool need score ${score}`
+              : "always available routing/plugin resolver",
       installed: installedNow,
       missingEnv,
     });
@@ -135,12 +167,31 @@ export async function autoSelectMcpTools(input: {
   return result;
 }
 
-export function buildMcpAutoSelectionPrompt(selected: AutoSelectedMcpTool[]): string {
+export function buildMcpAutoSelectionPrompt(
+  selected: AutoSelectedMcpTool[],
+  opts?: { toolMode?: AutomationToolMode; hubMode?: AutomationHubMode },
+): string {
   if (selected.length === 0) return "";
   const installed = selected.filter((tool) => tool.installed);
   const blocked = selected.filter((tool) => !tool.installed && tool.missingEnv.length > 0);
+  const modeLine =
+    opts?.toolMode === "browser"
+      ? "This automation explicitly selected Browser plugin mode; use Playwright/browser tools for web work."
+      : opts?.toolMode === "computer-use"
+        ? "This automation explicitly selected Computer Use mode; use desktop/screen tools for UI work."
+        : "";
+  const hubLine =
+    opts?.hubMode === "hub-first"
+      ? "This automation is Hub-first: prefer Agentlas Hub specialists/plugins through hephaestus-network before local fallbacks."
+      : opts?.hubMode === "hub-allowed"
+        ? "This automation may use Agentlas Hub specialists/plugins through hephaestus-network when local tools are insufficient."
+        : opts?.hubMode === "local-only"
+          ? "This automation is local-only: do not use Agentlas Hub routing or borrowed Hub agents."
+          : "";
   return [
     "Agentlas MCP plugin auto-selection is active.",
+    modeLine,
+    hubLine,
     installed.length > 0
       ? `Installed/enabled tools available this run: ${installed.map((tool) => `${tool.id} (${tool.name})`).join(", ")}.`
       : "No additional installable local tools were available for this run.",

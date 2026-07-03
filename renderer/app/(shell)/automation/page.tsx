@@ -73,9 +73,16 @@ export default function AutomationListPage() {
   async function remove(id: string) {
     const api = ipc();
     if (!api) return;
-    if (!confirm(t("auto.confirm_delete"))) return;
+    const automation = items.find((item) => item.id === id);
+    const name = automation?.name ?? (locale === "en" ? "this automation" : "이 자동화");
+    const message =
+      locale === "en"
+        ? `Delete '${name}'?\n\nThis removes the automation and also deletes its linked run chat and messages.`
+        : `'${name}' 자동화를 삭제할까요?\n\n자동화가 사라지며, 이 자동화가 사용하던 실행 채팅과 메시지도 같이 삭제됩니다.`;
+    if (!confirm(message)) return;
     try {
       await api.automations.remove(id);
+      window.dispatchEvent(new CustomEvent("agentlas:automation-changed", { detail: { id } }));
       await refresh();
     } catch (err) {
       setMessage(locale === "en" ? `Automation was not deleted. ${String(err)}` : `자동화를 삭제하지 못했습니다. ${String(err)}`);
@@ -88,6 +95,12 @@ export default function AutomationListPage() {
       return {
         icon: <IconBuilding size={11} style={{ color: "var(--accent)" }} />,
         name: f ? pickLocalized(f, locale).name : locale === "en" ? "(removed firm)" : "(삭제된 회사)",
+      };
+    }
+    if (a.targetType === "hub") {
+      return {
+        icon: <IconBolt size={11} style={{ color: "var(--accent)" }} />,
+        name: `Hub · ${a.targetId}`,
       };
     }
     const ag = agents.find((x) => x.id === a.targetId);

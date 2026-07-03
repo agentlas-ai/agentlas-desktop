@@ -28,6 +28,7 @@ import {
   type AutoRouteChoice,
 } from "../agents/auto-router";
 import { assembleSystemPrompt } from "../system-agents/assemble";
+import { AUTOMATION_SUPERVISOR_SYSTEM_AGENT } from "../system-agents/automation-supervisor";
 import { ROUTER_AGENT_ID, ROUTER_SYSTEM_AGENT } from "../system-agents/router";
 import {
   appendChatMessage,
@@ -518,6 +519,58 @@ export async function runMcpInvocation(
   const targetAppWorkingFolder = targetApp ? path.resolve(targetApp.rootPath) : null;
   const workingFolder = targetAppWorkingFolder ?? existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
 
+  // 자동화 Hub 정책: 사용자가 "Hub까지 사용"을 켜둔 경우, 로컬 타깃만 고집하지 않고
+  // 실행 전에 Hephaestus Network 라우터로 Hub 후보를 찾아 BYOM bundle 지시를 프롬프트에 붙인다.
+  // local-only는 명시적으로 이 경로를 막는다.
+  if (
+    req.hubMode &&
+    req.hubMode !== "local-only" &&
+    borrowedAgentSlugs.length === 0 &&
+    !plainConversation &&
+    !isTargetAppEdit
+  ) {
+    try {
+      const routeRes = await routeOnly(effectiveUserPrompt, {
+        project: workingFolder ?? undefined,
+        runtime: "desktop-automation",
+        ...(req.hubMode === "hub-first"
+          ? { hubOnly: true, scope: "network" as const }
+          : { allowLocal: true }),
+        timeoutMs: req.hubMode === "hub-first" ? 12_000 : 6_000,
+      });
+      const norm = normalizeRecommendation(routeRes.json, effectiveUserPrompt);
+      const hubSlugs = norm.agents
+        .filter((candidate) => candidate.source === "hub")
+        .map((candidate) => candidate.id.trim())
+        .filter(Boolean)
+        .slice(0, 3);
+      if (hubSlugs.length > 0) {
+        sink({
+          kind: "tool-use",
+          status:
+            locale === "ko"
+              ? `Hub 후보를 자동화에 연결합니다: ${hubSlugs.join(", ")}`
+              : `Connecting Hub candidates to automation: ${hubSlugs.join(", ")}`,
+        });
+        effectiveUserPrompt = await buildBorrowDirective(
+          hubSlugs,
+          effectiveUserPrompt,
+          workingFolder,
+          locale,
+        );
+      }
+    } catch (err) {
+      console.error("[automation] Hub resolver failed:", err);
+      sink({
+        kind: "tool-use",
+        status:
+          locale === "ko"
+            ? "Hub 후보 확인에 실패해 로컬 도구로 계속합니다."
+            : "Hub candidate lookup failed; continuing with local tools.",
+      });
+    }
+  }
+
   // ── Hephaestus Router Agent 에스컬레이션 판단 ──
   // 이전에는 기본 채팅(글로벌 오케스트레이터)의 모든 메시지가 이 동기 호출을 최대 15초까지
   // 기다렸다 — 짧은 단일 작업까지 선지연을 물던 주범. 멀티도메인/파이프라인 신호가 있는
@@ -597,8 +650,13 @@ export async function runMcpInvocation(
         systemPrompt: agent.systemPrompt,
         agentName: agent.nameEn || agent.name,
         workingFolder,
+        toolMode: req.toolMode,
+        hubMode: req.hubMode,
       });
-      mcpAutoSelectionPrompt = buildMcpAutoSelectionPrompt(selectedTools);
+      mcpAutoSelectionPrompt = buildMcpAutoSelectionPrompt(selectedTools, {
+        toolMode: req.toolMode,
+        hubMode: req.hubMode,
+      });
       const installedTools = selectedTools.filter((tool) => tool.installed);
       if (installedTools.length > 0) {
         sink({
@@ -609,7 +667,9 @@ export async function runMcpInvocation(
           },
         });
       }
-      const cfg = await buildMcpConfigFile();
+      const cfg = await buildMcpConfigFile(
+        req.mcpBrowserProfileKey ? { browserProfileKey: req.mcpBrowserProfileKey } : undefined,
+      );
       if (cfg) {
         mcpConfigPath = cfg.configPath;
         mcpAllowedTools = cfg.allowedTools;
@@ -853,6 +913,21 @@ export async function runMcpInvocation(
   // 모든 대화에 메모리 이벤트 emitter를 동봉 → 큐레이터가 전역적으로 기억을 관리.
   systemPrompt = `${systemPrompt}\n\n${MEMORY_EMITTER_BLOCK}`;
   if (mcpAutoSelectionPrompt) systemPrompt = `${systemPrompt}\n\n${mcpAutoSelectionPrompt}`;
+  if (chat.kind === "division" && (req.toolMode || req.hubMode)) {
+    const supervisor = assembleSystemPrompt(
+      AUTOMATION_SUPERVISOR_SYSTEM_AGENT,
+      [effectiveUserPrompt, req.toolMode ?? "", req.hubMode ?? ""].join("\n"),
+      { threshold: 0.6, maxModules: 3 },
+    );
+    systemPrompt = `${systemPrompt}\n\n${supervisor.systemPrompt}`;
+    sink({
+      kind: "tool-use",
+      status:
+        locale === "ko"
+          ? `Automation Supervisor 적용: ${supervisor.loadedModuleIds.join(", ") || "core"}`
+          : `Automation Supervisor applied: ${supervisor.loadedModuleIds.join(", ") || "core"}`,
+    });
+  }
   // Stormbreaker Loop — 일반 채팅과 백그라운드 자동화 모두 같은 목표 분해/연속 실행 계약을 공유한다.
   systemPrompt = `${systemPrompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`;
   // 사용자 채팅에서만 자동화 생성 protocol 주입 (백그라운드 automation 실행 세션은 제외 → 재귀 방지)
@@ -998,8 +1073,9 @@ export async function runMcpInvocation(
           // 미지정/미해석이면 기존처럼 현재 챗 타깃 — 오케스트레이터 챗에서 만든 자동화가 항상
           // 오케스트레이터에 묶여 매 실행 라우팅 홉을 타던 문제의 수정.
           const named = a.agent ? resolveInstalledAgentLoose(a.agent) : null;
-          const targetType: "agent" | "firm" = named ? "agent" : chat.firmId ? "firm" : "agent";
-          const targetId = named ? named.id : (chat.firmId ?? chat.agentId);
+          const hubAgent = a.hubAgent?.trim();
+          const targetType = hubAgent ? "hub" : named ? "agent" : chat.firmId ? "firm" : "agent";
+          const targetId = hubAgent || (named ? named.id : (chat.firmId ?? chat.agentId));
           // 이름 기준 idempotent 등록: 같은 이름이 이미 있으면 갱신 — 모델이 다음 턴에 다듬어
           // 재방출할 때 같은 작업이 중복 등록되던 문제의 수정(프로토콜에도 명시).
           const dup = listAutomations().find(

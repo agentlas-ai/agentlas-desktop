@@ -11,6 +11,7 @@ import type {
   ScheduleSpec,
   InstalledAgent,
   InstalledFirm,
+  MarketplaceListing,
   McpToolCatalogEntry,
   RuntimeStatus,
 } from "@/lib/types";
@@ -82,6 +83,7 @@ export function NodeConfigPanel({
   const { t, locale } = useT();
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
+  const [hubAgents, setHubAgents] = useState<MarketplaceListing[]>([]);
   const [tools, setTools] = useState<McpToolCatalogEntry[]>([]);
   const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
 
@@ -89,16 +91,18 @@ export function NodeConfigPanel({
     const api = ipc();
     if (!api) return;
     void (async () => {
-      const [ag, fm, tl, rt] = await Promise.all([
+      const [ag, fm, tl, rt, hub] = await Promise.all([
         api.team.list(),
         api.firms.list(),
         api.mcpTools.listCatalog(),
         api.runtime.detect(),
+        api.marketplace.search("").catch(() => []),
       ]);
       setAgents(visibleAgents(ag));
       setFirms(fm);
       setTools(tl);
       setRuntimes(rt);
+      setHubAgents(hub);
     })();
   }, []);
 
@@ -165,7 +169,20 @@ export function NodeConfigPanel({
       {node.type === "agent" && (
         <>
           <Field label={t("auto.cfg.ref")}>
-            <select value={s("ref")} onChange={(e) => onPatch({ ref: e.target.value, targetType: firmMatch(firms, e.target.value) ? "firm" : "agent" })} style={inp}>
+            <select
+              value={s("ref")}
+              onChange={(e) =>
+                onPatch({
+                  ref: e.target.value,
+                  targetType: firmMatch(firms, e.target.value)
+                    ? "firm"
+                    : hubMatch(hubAgents, e.target.value)
+                      ? "hub"
+                      : "agent",
+                })
+              }
+              style={inp}
+            >
               <option value="">—</option>
               <optgroup label={t("auto.target.firm")}>
                 {firms.map((f) => (
@@ -178,6 +195,13 @@ export function NodeConfigPanel({
                 {agents.map((a) => (
                   <option key={a.id} value={a.id}>
                     {pickLocalized(a, locale).name}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="Hub">
+                {hubAgents.map((a) => (
+                  <option key={a.slug} value={a.slug}>
+                    {pickLocalized(a, locale).name} — Hub
                   </option>
                 ))}
               </optgroup>
@@ -311,6 +335,10 @@ export function NodeConfigPanel({
 
 function firmMatch(firms: InstalledFirm[], id: string): boolean {
   return firms.some((f) => f.id === id);
+}
+
+function hubMatch(agents: MarketplaceListing[], slug: string): boolean {
+  return agents.some((a) => a.slug === slug);
 }
 
 function dedupeRuntimes(runtimes: RuntimeStatus[]): string[] {

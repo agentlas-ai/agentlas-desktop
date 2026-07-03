@@ -44,7 +44,12 @@ function AutomationDetailPage() {
         return;
       }
       setAutomation(found);
-      if (found.targetType === "firm") {
+      if (found.targetType === "hub") {
+        setTarget({
+          kind: "agent",
+          name: `Hub · ${found.targetId}`,
+        });
+      } else if (found.targetType === "firm") {
         const firm = await api.firms.get(found.targetId);
         setTarget({
           kind: "firm",
@@ -84,9 +89,14 @@ function AutomationDetailPage() {
   async function remove() {
     const api = ipc();
     if (!api || !automation) return;
-    if (!confirm(t("auto.confirm_delete"))) return;
+    const message =
+      locale === "en"
+        ? `Delete '${automation.name}'?\n\nThis removes the automation and also deletes its linked run chat and messages.`
+        : `'${automation.name}' 자동화를 삭제할까요?\n\n자동화가 사라지며, 이 자동화가 사용하던 실행 채팅과 메시지도 같이 삭제됩니다.`;
+    if (!confirm(message)) return;
     try {
       await api.automations.remove(automation.id);
+      window.dispatchEvent(new CustomEvent("agentlas:automation-changed", { detail: { id: automation.id } }));
       router.replace("/automation");
     } catch (err) {
       setError(locale === "en" ? `Automation was not deleted. ${String(err)}` : `자동화를 삭제하지 못했습니다. ${String(err)}`);
@@ -174,7 +184,13 @@ function AutomationDetailPage() {
       >
         <Row label={t("auto.detail.schedule")} value={automation.scheduleHuman} />
         <Row
-          label={target?.kind === "firm" ? t("auto.detail.firm_label") : t("auto.detail.agent_label")}
+          label={
+            automation.targetType === "hub"
+              ? "Hub"
+              : target?.kind === "firm"
+                ? t("auto.detail.firm_label")
+                : t("auto.detail.agent_label")
+          }
           value={
             <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
               {target?.kind === "firm" ? (
@@ -185,6 +201,14 @@ function AutomationDetailPage() {
               {target?.name ?? "…"}
             </span>
           }
+        />
+        <Row
+          label={locale === "en" ? "Run tool" : "실행 도구"}
+          value={toolModeLabel(automation.toolMode, locale)}
+        />
+        <Row
+          label={locale === "en" ? "Hub usage" : "Hub 사용"}
+          value={hubModeLabel(automation.hubMode, locale)}
         />
         <Row label={t("auto.detail.last_run")} value={automation.lastRunAt ?? t("auto.detail.never")} />
         <RunHistoryPanel automation={automation} locale={locale} compact />
@@ -254,4 +278,16 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
       <div style={{ fontSize: 13, color: "var(--ink)" }}>{value}</div>
     </div>
   );
+}
+
+function toolModeLabel(mode: Automation["toolMode"], locale: "ko" | "en") {
+  if (mode === "browser") return locale === "en" ? "Browser plugin" : "브라우저 플러그인";
+  if (mode === "computer-use") return locale === "en" ? "Computer Use" : "컴퓨터 유즈";
+  return locale === "en" ? "Auto" : "자동 선택";
+}
+
+function hubModeLabel(mode: Automation["hubMode"], locale: "ko" | "en") {
+  if (mode === "hub-first") return locale === "en" ? "Hub first" : "Hub 우선";
+  if (mode === "local-only") return locale === "en" ? "Local only" : "로컬만";
+  return locale === "en" ? "Local first, Hub fallback" : "로컬 우선, Hub fallback";
 }

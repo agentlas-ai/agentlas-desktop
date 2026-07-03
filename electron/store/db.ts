@@ -10,7 +10,7 @@ import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 35;
+const SCHEMA_VERSION = 36;
 
 export function initStore(): void {
   if (_db) return;
@@ -849,8 +849,27 @@ export function initStore(): void {
         node_states_json TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_automation_runs_auto
-        ON automation_runs(automation_id, started_at);
+      ON automation_runs(automation_id, started_at);
     `);
+  }
+
+  // ── v35 → v36: 자동화 실행 도구 + Hub 사용 정책 ───────────────
+  // tool_mode: auto | browser | computer-use. 브라우저 자동화가 Playwright/CUA 중
+  // 어느 길로 갈지 조용히 추측하지 않고 사용자가 저장한 선택을 따른다.
+  // hub_mode: hub-allowed | hub-first | local-only. 로컬 카탈로그 밖 Hub 후보까지 빌려 쓸지
+  // 자동화별로 명시한다.
+  if (userVersion < 36) {
+    const db = _db; // 클로저에서 mutable 모듈 변수의 non-null 내로잉이 풀리지 않게 고정
+    const autoCols = db
+      .prepare("PRAGMA table_info(automations)")
+      .all() as Array<{ name: string }>;
+    const addAutoCol = (name: string, ddl: string): void => {
+      if (!autoCols.some((c) => c.name === name)) {
+        db.exec(`ALTER TABLE automations ADD COLUMN ${ddl}`);
+      }
+    };
+    addAutoCol("tool_mode", "tool_mode TEXT NOT NULL DEFAULT 'auto'");
+    addAutoCol("hub_mode", "hub_mode TEXT NOT NULL DEFAULT 'hub-allowed'");
   }
 
   _db.pragma(`user_version = ${SCHEMA_VERSION}`);

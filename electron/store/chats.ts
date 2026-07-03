@@ -246,6 +246,15 @@ export function removeChat(id: string): void {
   getDb().prepare("DELETE FROM chats WHERE id = ?").run(id);
 }
 
+/** 자동화 삭제 시 연결된 숨김 실행 세션도 같이 삭제한다.
+ * 그래프 러너는 타깃별 세션을 `⟦automation⟧<id>::...` 형식으로 만들 수 있으므로 prefix까지 정리한다. */
+export function removeAutomationSessions(automationId: string): void {
+  const marker = `⟦automation⟧${automationId}`;
+  getDb()
+    .prepare("DELETE FROM chats WHERE kind = 'division' AND (title = ? OR title LIKE ?)")
+    .run(marker, `${marker}::%`);
+}
+
 // ── working folder (워크스페이스 패널) ──────────────────────
 // 각 채팅별로 사용자가 마지막에 연 로컬 폴더를 기억. 다음 진입 시 자동 복원.
 export function getChatWorkingFolder(chatId: string): string | null {

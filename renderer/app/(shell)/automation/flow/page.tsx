@@ -56,7 +56,7 @@ function synthesizeLegacyGraph(a: Automation): WorkflowGraph {
         type: "agent",
         position: { x: 280, y: 120 },
         config: { ref: a.targetId, targetType: a.targetType, prompt: a.promptTemplate },
-        label: a.targetType === "firm" ? "Firm" : "Agent",
+        label: a.targetType === "firm" ? "Firm" : a.targetType === "hub" ? "Hub Agent" : "Agent",
       },
     ],
     edges: [{ id: "e0-1", source: "n0", target: "n1" }],
@@ -392,6 +392,19 @@ function AutomationFlowPage() {
     };
   }
 
+  function autoLayoutCanvas() {
+    const graph = toGraph();
+    const laidOut = layoutGraph(graph);
+    const positions = new Map(laidOut.map((n) => [n.id, n.position] as const));
+    setRfNodes((nodes) =>
+      nodes.map((n) => ({
+        ...n,
+        position: positions.get(n.id) ?? n.position,
+      })),
+    );
+    setDirty(true);
+  }
+
   async function save() {
     const api = ipc();
     if (!api || !automation) return;
@@ -477,6 +490,9 @@ function AutomationFlowPage() {
           <>
             <button onClick={() => setPaletteOpen((v) => !v)} className="titlebar-nodrag" style={pillBtn(paletteOpen)}>
               {t("auto.flow.add_node")}
+            </button>
+            <button onClick={autoLayoutCanvas} className="titlebar-nodrag" style={pillBtn(false)}>
+              {locale === "en" ? "Auto layout" : "자동 정렬"}
             </button>
             <button
               onClick={() => void save()}

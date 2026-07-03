@@ -13,6 +13,7 @@ import type {
   InstalledFirm,
   AgentGroup,
   McpToolCatalogEntry,
+  MarketplaceListing,
 } from "@/lib/types";
 import {
   IconBolt,
@@ -43,22 +44,25 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
   const [groups, setGroups] = useState<AgentGroup[]>([]);
+  const [hubAgents, setHubAgents] = useState<MarketplaceListing[]>([]);
   const [tools, setTools] = useState<McpToolCatalogEntry[]>([]);
 
   useEffect(() => {
     const api = ipc();
     if (!api) return;
     void (async () => {
-      const [ag, fm, gr, tl] = await Promise.all([
+      const [ag, fm, gr, tl, hub] = await Promise.all([
         api.team.list(),
         api.firms.list(),
         api.agentGroups.list(),
         api.mcpTools.listCatalog(),
+        api.marketplace.search("").catch(() => []),
       ]);
       setAgents(visibleAgents(ag));
       setFirms(fm);
       setGroups(gr);
       setTools(tl);
+      setHubAgents(hub);
     })();
   }, []);
 
@@ -67,8 +71,9 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
       ...firms.map((f) => ({ label: `${pickLocalized(f, locale).name} — CEO`, ref: f.id, targetType: "firm" as const })),
       ...agents.map((a) => ({ label: pickLocalized(a, locale).name, ref: a.id, targetType: "agent" as const })),
       ...groups.map((g) => ({ label: g.name, ref: g.id, targetType: "agent" as const })),
+      ...hubAgents.map((a) => ({ label: `${pickLocalized(a, locale).name} — Hub`, ref: a.slug, targetType: "hub" as const })),
     ],
-    [agents, firms, groups, locale],
+    [agents, firms, groups, hubAgents, locale],
   );
 
   return (
@@ -105,7 +110,7 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
       <Section title={t("auto.palette.section.agents")}>
         {agentSeeds.map((a) => (
           <Item
-            key={a.ref}
+            key={`${a.targetType}:${a.ref}`}
             icon={a.targetType === "firm" ? <IconBuilding size={13} /> : <IconSparkles size={13} />}
             label={a.label}
             onClick={() => onAdd({ type: "agent", config: { ref: a.ref, targetType: a.targetType }, label: a.label })}

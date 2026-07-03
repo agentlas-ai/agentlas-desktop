@@ -61,6 +61,13 @@ interface Props {
 type RosterNode = { key: string; name: string; role: string; tier: 1 | 2 | 3 };
 type RosterDivision = RosterNode & { specialists: RosterNode[] };
 type Roster = { ceo: RosterNode | null; divisions: RosterDivision[] };
+type SoloWaterfallItem = {
+  key: string;
+  kind: NetTimelineItem["kind"];
+  label: string;
+  text: string;
+  toolName?: string;
+};
 
 export function AgentNetworkPanel({
   firm,
@@ -299,6 +306,7 @@ function SoloAgentSummary({
   locale: "ko" | "en";
 }) {
   const latest = latestSoloTimelineText(timeline, locale, busy);
+  const waterfall = soloWaterfallItems(timeline, locale);
   return (
     <section style={soloWrapStyle}>
       <div style={soloLineStyle}>
@@ -313,8 +321,53 @@ function SoloAgentSummary({
           {latestUserPrompt.length > 150 ? `${latestUserPrompt.slice(0, 149)}…` : latestUserPrompt}
         </p>
       )}
+      <div style={soloWaterfallStyle}>
+        <div style={soloWaterfallHeaderStyle}>
+          <span>{locale === "ko" ? "작업 단계" : "Work steps"}</span>
+          <span>{waterfall.length}</span>
+        </div>
+        {waterfall.length === 0 ? (
+          <div style={soloWaterfallEmptyStyle}>
+            {locale === "ko" ? "툴 요청, 스킬 사용, 실행 상태가 여기에 시간순으로 표시됩니다." : "Tool requests, skill use, and execution states appear here in order."}
+          </div>
+        ) : (
+          waterfall.map((item, index) => (
+            <article key={item.key} style={soloWaterfallRowStyle}>
+              <span style={soloWaterfallIndexStyle(item.kind === "tool")}>{String(index + 1).padStart(2, "0")}</span>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={soloWaterfallTitleStyle}>
+                  {item.label}
+                  {item.toolName && <span style={soloWaterfallToolStyle}>{item.toolName}</span>}
+                </div>
+                <div style={soloWaterfallTextStyle}>{item.text}</div>
+              </div>
+            </article>
+          ))
+        )}
+      </div>
     </section>
   );
+}
+
+function soloWaterfallItems(timeline: NetTimelineItem[], locale: "ko" | "en"): SoloWaterfallItem[] {
+  return timeline
+    .slice(-14)
+    .map<SoloWaterfallItem | null>((item) => {
+      const text = cleanSoloStatus(item.text, locale, true);
+      if (!text) return null;
+      const label =
+        item.kind === "tool"
+          ? locale === "ko" ? "툴 액션" : "Tool action"
+          : item.kind === "handoff"
+            ? locale === "ko" ? "위임" : "Handoff"
+            : /skill|스킬/i.test(item.text)
+              ? locale === "ko" ? "스킬 사용" : "Skill use"
+              : /완료|done|completed/i.test(item.text)
+                ? locale === "ko" ? "완료" : "Complete"
+                : locale === "ko" ? "상태" : "Status";
+      return { key: item.key, kind: item.kind, label, text, toolName: item.toolName };
+    })
+    .filter((item): item is SoloWaterfallItem => item !== null);
 }
 
 function latestSoloTimelineText(timeline: NetTimelineItem[], locale: "ko" | "en", busy: boolean): string {
@@ -913,6 +966,92 @@ const soloPromptStyle: CSSProperties = {
   color: "var(--muted-deep)",
   fontSize: 11.2,
   lineHeight: 1.5,
+  overflowWrap: "anywhere",
+};
+
+const soloWaterfallStyle: CSSProperties = {
+  display: "grid",
+  gap: 7,
+  marginTop: 2,
+};
+
+const soloWaterfallHeaderStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  color: "var(--muted-deep)",
+  fontSize: 10,
+  fontFamily: "var(--font-mono)",
+  textTransform: "uppercase",
+  letterSpacing: 0.6,
+  padding: "2px 1px",
+};
+
+const soloWaterfallEmptyStyle: CSSProperties = {
+  border: "1px dashed var(--paper-edge)",
+  borderRadius: 8,
+  padding: "10px 11px",
+  color: "var(--muted-deep)",
+  fontSize: 11.5,
+  lineHeight: 1.5,
+  background: "color-mix(in srgb, var(--paper-2) 72%, transparent)",
+};
+
+const soloWaterfallRowStyle: CSSProperties = {
+  display: "flex",
+  gap: 9,
+  alignItems: "flex-start",
+  border: "1px solid var(--paper-edge)",
+  borderRadius: 8,
+  background: "var(--paper)",
+  padding: "9px 10px",
+  boxShadow: "0 1px 2px rgba(11, 11, 15, 0.03)",
+};
+
+function soloWaterfallIndexStyle(active: boolean): CSSProperties {
+  return {
+    width: 26,
+    height: 22,
+    borderRadius: 7,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+    background: active ? "color-mix(in srgb, var(--accent) 12%, var(--paper-2))" : "var(--paper-2)",
+    color: active ? "var(--accent)" : "var(--muted-deep)",
+    fontFamily: "var(--font-mono)",
+    fontSize: 10,
+    fontWeight: 800,
+  };
+}
+
+const soloWaterfallTitleStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  minWidth: 0,
+  color: "var(--ink)",
+  fontSize: 11.8,
+  fontWeight: 780,
+  lineHeight: 1.3,
+};
+
+const soloWaterfallToolStyle: CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "var(--accent)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 9.5,
+  fontWeight: 700,
+};
+
+const soloWaterfallTextStyle: CSSProperties = {
+  marginTop: 3,
+  color: "var(--muted-deep)",
+  fontSize: 11,
+  lineHeight: 1.45,
   overflowWrap: "anywhere",
 };
 

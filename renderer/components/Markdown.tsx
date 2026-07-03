@@ -30,6 +30,7 @@ export function Markdown({
   messageId,
   onOpenArtifact,
   onOpenMedia,
+  mediaBasePaths = [],
 }: {
   text: string;
   /** 안정적 artifact id 생성용 */
@@ -38,12 +39,14 @@ export function Markdown({
   onOpenArtifact?: (a: CodeArtifact) => void;
   /** 이미지/영상 산출물을 우측 패널로 열기 */
   onOpenMedia?: (a: MediaArtifact) => void;
+  /** 상대 이미지 경로를 해석할 로컬 기준 폴더들. */
+  mediaBasePaths?: string[];
 }) {
   const { t } = useT();
   const blocks = useMemo(() => parseBlocks(text, messageId), [text, messageId]);
   return (
     <div style={{ fontSize: 14, lineHeight: 1.65, fontFamily: "var(--font-body)", overflowWrap: "anywhere" }}>
-      {blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia))}
+      {blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia, mediaBasePaths))}
     </div>
   );
 }
@@ -54,13 +57,23 @@ const MarkdownSegment = memo(function MarkdownSegment({
   messageId,
   onOpenArtifact,
   onOpenMedia,
+  mediaBasePaths = [],
 }: {
   text: string;
   messageId: string;
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
+  mediaBasePaths?: string[];
 }) {
-  return <Markdown text={text} messageId={messageId} onOpenArtifact={onOpenArtifact} onOpenMedia={onOpenMedia} />;
+  return (
+    <Markdown
+      text={text}
+      messageId={messageId}
+      onOpenArtifact={onOpenArtifact}
+      onOpenMedia={onOpenMedia}
+      mediaBasePaths={mediaBasePaths}
+    />
+  );
 });
 
 /** 스트리밍 전용 마크다운 — 누적 전문을 빈 줄 경계(펜스 밖)로 세그먼트화해, 완결 세그먼트는
@@ -71,11 +84,13 @@ export function StreamingMarkdown({
   messageId,
   onOpenArtifact,
   onOpenMedia,
+  mediaBasePaths = [],
 }: {
   text: string;
   messageId: string;
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
+  mediaBasePaths?: string[];
 }) {
   // 콜백 identity를 고정 — 부모가 매 렌더 새 함수를 넘겨도 memo 세그먼트가 깨지지 않게.
   const artifactRef = useRef(onOpenArtifact);
@@ -98,6 +113,7 @@ export function StreamingMarkdown({
           messageId={`${messageId}-s${i}`}
           onOpenArtifact={stableArtifact}
           onOpenMedia={stableMedia}
+          mediaBasePaths={mediaBasePaths}
         />
       ))}
     </>
@@ -282,6 +298,7 @@ function renderBlock(
   onOpenArtifact?: (a: CodeArtifact) => void,
   t?: ReturnType<typeof useT>["t"],
   onOpenMedia?: (a: MediaArtifact) => void,
+  mediaBasePaths: string[] = [],
 ) {
   switch (b.type) {
     case "code":
@@ -298,7 +315,7 @@ function renderBlock(
             color: "var(--ink)",
           }}
         >
-          {inline(b.text, onOpenMedia)}
+          {inline(b.text, onOpenMedia, mediaBasePaths)}
         </h1>
       );
     case "h2":
@@ -313,7 +330,7 @@ function renderBlock(
             color: "var(--ink)",
           }}
         >
-          {inline(b.text, onOpenMedia)}
+          {inline(b.text, onOpenMedia, mediaBasePaths)}
         </h2>
       );
     case "h3":
@@ -328,7 +345,7 @@ function renderBlock(
             color: "var(--ink)",
           }}
         >
-          {inline(b.text, onOpenMedia)}
+          {inline(b.text, onOpenMedia, mediaBasePaths)}
         </h3>
       );
     case "ul":
@@ -336,7 +353,7 @@ function renderBlock(
         <ul key={i} style={{ paddingLeft: 22, margin: "6px 0" }}>
           {b.items.map((it, j) => (
             <li key={j} style={{ marginBottom: 2 }}>
-              {inline(it, onOpenMedia)}
+              {inline(it, onOpenMedia, mediaBasePaths)}
             </li>
           ))}
         </ul>
@@ -346,13 +363,13 @@ function renderBlock(
         <ol key={i} style={{ paddingLeft: 22, margin: "6px 0" }}>
           {b.items.map((it, j) => (
             <li key={j} style={{ marginBottom: 2 }}>
-              {inline(it, onOpenMedia)}
+              {inline(it, onOpenMedia, mediaBasePaths)}
             </li>
           ))}
         </ol>
       );
     case "table":
-      return <TableBlock key={i} block={b} onOpenMedia={onOpenMedia} />;
+      return <TableBlock key={i} block={b} onOpenMedia={onOpenMedia} mediaBasePaths={mediaBasePaths} />;
     case "quote":
       return (
         <blockquote
@@ -368,14 +385,14 @@ function renderBlock(
           }}
         >
           {b.text.split("\n").map((line, j) => (
-            <div key={j}>{inline(line, onOpenMedia)}</div>
+            <div key={j}>{inline(line, onOpenMedia, mediaBasePaths)}</div>
           ))}
         </blockquote>
       );
     case "p":
       return (
         <p key={i} style={{ margin: "6px 0" }}>
-          {inline(b.text, onOpenMedia)}
+          {inline(b.text, onOpenMedia, mediaBasePaths)}
         </p>
       );
   }
@@ -385,9 +402,11 @@ function renderBlock(
 function TableBlock({
   block,
   onOpenMedia,
+  mediaBasePaths = [],
 }: {
   block: { type: "table"; header: string[]; align: TableAlign[]; rows: string[][] };
   onOpenMedia?: (a: MediaArtifact) => void;
+  mediaBasePaths?: string[];
 }) {
   const alignToCss = (a: TableAlign): React.CSSProperties["textAlign"] => {
     if (a === "default") return undefined;
@@ -428,7 +447,7 @@ function TableBlock({
                   whiteSpace: "nowrap",
                 }}
                 >
-                  {inline(h, onOpenMedia)}
+                  {inline(h, onOpenMedia, mediaBasePaths)}
                 </th>
             ))}
           </tr>
@@ -454,7 +473,7 @@ function TableBlock({
                     whiteSpace: "nowrap",
                   }}
                 >
-                  {inline(cell, onOpenMedia)}
+                  {inline(cell, onOpenMedia, mediaBasePaths)}
                 </td>
               ))}
             </tr>
@@ -616,7 +635,7 @@ function CodeBlock({
 }
 
 // ── 인라인 마크다운: code, bold, italic, link ─────────────────
-function inline(text: string, onOpenMedia?: (a: MediaArtifact) => void): React.ReactNode {
+function inline(text: string, onOpenMedia?: (a: MediaArtifact) => void, mediaBasePaths: string[] = []): React.ReactNode {
   // 토큰화 — `code` > **bold** > *italic* > [text](url) 순서대로 처리
   const out: React.ReactNode[] = [];
   let remaining = text;
@@ -631,30 +650,36 @@ function inline(text: string, onOpenMedia?: (a: MediaArtifact) => void): React.R
       {
         // 이미지: ![alt](src) — http/https/data는 그대로, 로컬 경로는 agentlas://localfile로 서빙
         regex: /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/,
-        render: (m) => renderInlineImage(key++, m[2].trim(), m[1], onOpenMedia),
+        render: (m) => renderInlineImage(key++, m[2].trim(), m[1], onOpenMedia, mediaBasePaths),
       },
       {
         // 모델/CLI가 "created at /abs/path.png"처럼 plain path만 답해도 즉시 이미지로 보여준다.
-        regex: /^(file:\/\/[^\s`'"<>)]*?\.(?:png|jpe?g|gif|webp|avif|svg)|\/[^\s`'"<>)]*?\.(?:png|jpe?g|gif|webp|avif|svg))(?=$|[\s).,;:])/i,
-        render: (m) => renderInlineImage(key++, m[1].trim(), imageNameFromSrc(m[1]), onOpenMedia),
+        regex: /^((?:file:\/\/[^\s`'"<>)]*?|\/[^\s`'"<>)]*?|(?:\.{1,2}\/)?[A-Za-z0-9_. -]+(?:\/[^\s`'"<>)]*)?)\.(?:png|jpe?g|gif|webp|avif|svg))(?=$|[\s).,;:])/i,
+        render: (m) => renderInlineImage(key++, m[1].trim(), imageNameFromSrc(m[1], mediaBasePaths), onOpenMedia, mediaBasePaths),
       },
       {
         regex: /^`([^`]+)`/,
-        render: (m) => (
-          <code
-            key={key++}
-            style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: "0.9em",
-              padding: "1px 5px",
-              borderRadius: 4,
-              background: "var(--fill-1)",
-              color: "var(--accent)",
-            }}
-          >
-            {m[1]}
-          </code>
-        ),
+        render: (m) => {
+          const codeText = m[1].trim();
+          if (isImageLikePath(codeText)) {
+            return renderInlineImage(key++, codeText, imageNameFromSrc(codeText, mediaBasePaths), onOpenMedia, mediaBasePaths);
+          }
+          return (
+            <code
+              key={key++}
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "0.9em",
+                padding: "1px 5px",
+                borderRadius: 4,
+                background: "var(--fill-1)",
+                color: "var(--accent)",
+              }}
+            >
+              {m[1]}
+            </code>
+          );
+        },
       },
       {
         regex: /^\*\*([^*]+)\*\*/,
@@ -702,7 +727,7 @@ function inline(text: string, onOpenMedia?: (a: MediaArtifact) => void): React.R
     if (matched) continue;
 
     // 다음 특수 문자 위치 (! 는 이미지 ![]() 시작용)
-    const next = remaining.search(/file:|[`*![\/]/);
+    const next = remaining.search(/file:|[`*![\/]|(?:^|[\s(])(?:\.{1,2}\/)?[A-Za-z0-9_. -]+(?:\/[^\s`'"<>)]*)?\.(?:png|jpe?g|gif|webp|avif|svg)/i);
     if (next < 0) {
       out.push(remaining);
       break;
@@ -722,27 +747,33 @@ function inline(text: string, onOpenMedia?: (a: MediaArtifact) => void): React.R
 /** 산출물 자동 패널 오픈용 — 답변 텍스트에서 첫 이미지 산출물을 찾아 MediaArtifact로 만든다.
  *  renderInlineImage와 동일한 매칭(마크다운 이미지 + plain 로컬 이미지 경로)을 전역 1회 수행.
  *  final 답변에 산출물이 있으면 챗 페이지가 우측 패널을 자동으로 열어 보여준다. */
-export function firstMediaArtifactInText(text: string): MediaArtifact | null {
+export function firstMediaArtifactInText(text: string, mediaBasePaths: string[] = []): MediaArtifact | null {
   const mdImg = text.match(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/);
   const plain = text.match(
-    /(?:file:\/\/[^\s`'"<>)]*?|\/[^\s`'"<>)]*?)\.(?:png|jpe?g|gif|webp|avif|svg)(?=$|[\s).,;:])/i,
+    /(?:file:\/\/[^\s`'"<>)]*?|\/[^\s`'"<>)]*?|(?:\.{1,2}\/)?[A-Za-z0-9_. -]+(?:\/[^\s`'"<>)]*)?)\.(?:png|jpe?g|gif|webp|avif|svg)(?=$|[\s).,;:])/i,
   );
+  const codeImage = text.match(/`([^`]+\.(?:png|jpe?g|gif|webp|avif|svg))`/i);
   let rawSrc: string | null = null;
   let alt = "";
-  if (mdImg && (!plain || (mdImg.index ?? 0) <= (plain.index ?? 0))) {
+  const mdIdx = mdImg?.index ?? Number.POSITIVE_INFINITY;
+  const plainIdx = plain?.index ?? Number.POSITIVE_INFINITY;
+  const codeIdx = codeImage?.index ?? Number.POSITIVE_INFINITY;
+  if (mdImg && mdIdx <= plainIdx && mdIdx <= codeIdx) {
     alt = mdImg[1];
     rawSrc = mdImg[2].trim();
+  } else if (codeImage && codeIdx <= plainIdx) {
+    rawSrc = codeImage[1].trim();
   } else if (plain) {
     rawSrc = plain[0].trim();
   }
   if (!rawSrc) return null;
-  const src = normalizeImageSrc(rawSrc);
+  const src = normalizeImageSrc(rawSrc, mediaBasePaths);
   return {
     id: `media:${src}`,
     kind: "image",
     src,
-    path: localPathFromImageSrc(rawSrc),
-    name: alt || imageNameFromSrc(rawSrc),
+    path: localPathFromImageSrc(rawSrc, mediaBasePaths),
+    name: alt || imageNameFromSrc(rawSrc, mediaBasePaths),
   };
 }
 
@@ -751,14 +782,15 @@ function renderInlineImage(
   rawSrc: string,
   alt: string,
   onOpenMedia?: (a: MediaArtifact) => void,
+  mediaBasePaths: string[] = [],
 ): React.ReactNode {
-  const src = normalizeImageSrc(rawSrc);
-  const name = alt || imageNameFromSrc(rawSrc);
+  const src = normalizeImageSrc(rawSrc, mediaBasePaths);
+  const name = alt || imageNameFromSrc(rawSrc, mediaBasePaths);
   const media: MediaArtifact = {
     id: `media:${src}`,
     kind: "image",
     src,
-    path: localPathFromImageSrc(rawSrc),
+    path: localPathFromImageSrc(rawSrc, mediaBasePaths),
     name,
   };
   const image = (
@@ -802,45 +834,40 @@ function renderInlineImage(
 
 /** 이미지 src 정규화 — 원격(http/data)은 그대로, 로컬 절대경로·file://는 커스텀 프로토콜로 서빙.
  *  (webSecurity:true라 file:// 직접 로드는 차단되므로 agentlas://localfile 경유.) */
-function normalizeImageSrc(src: string): string {
+function normalizeImageSrc(src: string, mediaBasePaths: string[] = []): string {
   if (/^(https?:|data:|agentlas:|blob:)/i.test(src)) return src;
-  let abs = src;
-  if (src.startsWith("file://")) {
-    try {
-      abs = decodeURIComponent(new URL(src).pathname);
-    } catch {
-      abs = src.replace(/^file:\/\//, "");
-    }
-  }
-  if (abs.startsWith("/") || /^[A-Za-z]:[\\/]/.test(abs)) {
-    return `agentlas://localfile/?p=${encodeURIComponent(abs)}`;
-  }
-  return src; // 상대경로 등 — 렌더 못 할 수 있음
+  const local = localPathFromImageSrc(src, mediaBasePaths);
+  if (local) return `agentlas://localfile/?p=${encodeURIComponent(local)}`;
+  return src; // 알 수 없는 상대경로 등 — 렌더 못 할 수 있음
 }
 
-function localPathFromImageSrc(src: string): string | undefined {
-  if (/^agentlas:/i.test(src)) {
+function localPathFromImageSrc(src: string, mediaBasePaths: string[] = []): string | undefined {
+  const cleaned = src.trim();
+  if (/^agentlas:/i.test(cleaned)) {
     try {
-      const url = new URL(src);
+      const url = new URL(cleaned);
       const p = url.searchParams.get("p");
       return p || undefined;
     } catch {
       return undefined;
     }
   }
-  if (src.startsWith("file://")) {
+  if (cleaned.startsWith("file://")) {
     try {
-      return decodeURIComponent(new URL(src).pathname);
+      return decodeURIComponent(new URL(cleaned).pathname);
     } catch {
-      return src.replace(/^file:\/\//, "");
+      return cleaned.replace(/^file:\/\//, "");
     }
   }
-  if (src.startsWith("/") || /^[A-Za-z]:[\\/]/.test(src)) return src;
+  if (cleaned.startsWith("/") || /^[A-Za-z]:[\\/]/.test(cleaned)) return cleaned;
+  if (isImageLikePath(cleaned) && mediaBasePaths.length > 0) {
+    return joinLocalPath(mediaBasePaths[0], cleaned);
+  }
   return undefined;
 }
 
-function imageNameFromSrc(src: string): string {
-  const local = localPathFromImageSrc(src);
+function imageNameFromSrc(src: string, mediaBasePaths: string[] = []): string {
+  const local = localPathFromImageSrc(src, mediaBasePaths);
   if (local) {
     const part = local.split(/[\\/]/).pop();
     if (part) return part;
@@ -854,4 +881,14 @@ function imageNameFromSrc(src: string): string {
     }
   }
   return "generated image";
+}
+
+function isImageLikePath(value: string): boolean {
+  return /\.(png|jpe?g|gif|webp|avif|svg)$/i.test(value.trim());
+}
+
+function joinLocalPath(base: string, rel: string): string {
+  const cleanBase = base.replace(/[\\/]+$/, "");
+  const cleanRel = rel.trim().replace(/^\.?[\\/]+/, "");
+  return `${cleanBase}/${cleanRel}`;
 }

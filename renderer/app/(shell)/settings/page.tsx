@@ -21,6 +21,7 @@ import {
   findByokModel,
   needsLongContextToggle,
 } from "@shared/models";
+import { AUTO_PROVIDER } from "@shared/multimodal";
 import { navigate } from "@/lib/navigation";
 import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconRefresh, IconWand } from "@/components/Icon";
 import { MigrationPanel } from "@/components/MigrationPanel";
@@ -958,7 +959,7 @@ function MultimodalFallbackPanel({
 
   return (
     <>
-      <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "32px 0 12px" }}>
+      <h2 id="multimodal" style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "32px 0 12px", scrollMarginTop: 24 }}>
         {t("settings.multimodal.title")}
       </h2>
       <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 12px", lineHeight: 1.55 }}>
@@ -967,6 +968,16 @@ function MultimodalFallbackPanel({
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {modalities.map((modality) => {
           const items = providers.filter((provider) => provider.modality === modality.id);
+          // 값이 없거나 알 수 없으면 auto로 취급(기본값이 auto).
+          const isAuto =
+            selected[modality.id] === AUTO_PROVIDER ||
+            !items.some((p) => p.id === selected[modality.id]);
+          const autoStatus = status.find((s) => s.modality === modality.id && s.auto);
+          const autoResolvedName = autoStatus
+            ? locale === "en"
+              ? autoStatus.provider.label
+              : autoStatus.provider.labelKo
+            : null;
           return (
             <div key={modality.id} style={multimodalGroupStyle}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
@@ -974,6 +985,47 @@ function MultimodalFallbackPanel({
                 <strong style={{ fontSize: 13 }}>{modality.label}</strong>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <button
+                  key="auto"
+                  onClick={() => onSelect(modality.id, AUTO_PROVIDER)}
+                  style={{
+                    ...multimodalProviderStyle,
+                    borderColor: isAuto ? "var(--accent)" : "var(--paper-edge)",
+                    boxShadow: isAuto ? "var(--neu-raised)" : "none",
+                  }}
+                >
+                  <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: "1 1 220px" }}>
+                    {isAuto && <IconCheck size={14} style={{ color: "var(--green-deep)", flexShrink: 0 }} />}
+                    <span style={{ fontWeight: 700, color: "var(--ink)", lineHeight: 1.25, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {locale === "en" ? "Auto (recommended)" : "자동 선택 (권장)"}
+                    </span>
+                  </span>
+                  <span style={{ color: "var(--muted-deep)", fontSize: 11, lineHeight: 1.35, minWidth: 0, flex: "2 1 280px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {locale === "en"
+                      ? "Pick a connected engine automatically — keyless (Codex / Nano Banana) first, then API."
+                      : "연결된 엔진을 자동으로 사용 — 키 없는 것(Codex / 나노바나나) 우선, 그다음 API."}
+                  </span>
+                  {isAuto && autoResolvedName && (
+                    <span
+                      style={{
+                        ...multimodalEnvRowStyle,
+                        justifyContent: "flex-start",
+                        flex: "0 1 auto",
+                        minWidth: 0,
+                        overflow: "hidden",
+                        color: autoStatus?.ready ? "var(--green-deep)" : "var(--peach-ink)",
+                        fontWeight: 700,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {autoStatus?.ready
+                        ? `→ ${autoResolvedName}`
+                        : locale === "en"
+                          ? "no engine connected"
+                          : "연결된 엔진 없음"}
+                    </span>
+                  )}
+                </button>
                 {items.map((provider) => {
                   const active = selected[modality.id] === provider.id;
                   const providerStatus = statusByProvider.get(provider.id);

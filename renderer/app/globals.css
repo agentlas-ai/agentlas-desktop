@@ -3643,7 +3643,8 @@ button[data-toggle-state="on"] {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  width: 100%;
   min-width: 0;
   overflow: visible;
 }
@@ -3653,17 +3654,17 @@ button[data-toggle-state="on"] {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: nowrap;
   min-width: 0;
 }
 
 .chat-input-tools-left {
-  flex: 1 1 240px;
-  flex-wrap: wrap;
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
 .chat-input-tools-right {
-  flex: 1 1 220px;
-  flex-wrap: wrap;
+  flex: 0 0 auto;
   justify-content: flex-end;
   margin-left: auto;
 }
@@ -3737,6 +3738,21 @@ button[data-toggle-state="on"] {
   margin-left: auto;
 }
 
+.chat-input-context-pill {
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.chat-input-context-owner,
+.chat-input-context-percent {
+  flex: 0 0 auto;
+}
+
+.chat-input-context-meter {
+  flex: 0 1 40px;
+  min-width: 22px;
+}
+
 @media (max-width: 920px) {
   .chat-input-action-label {
     display: none;
@@ -3751,15 +3767,8 @@ button[data-toggle-state="on"] {
 }
 
 @media (max-width: 760px) {
-  .chat-input-tools-right {
-    flex: 1 1 100%;
-    margin-left: 0;
-  }
   .chat-input-mode-chip {
     flex: 0 1 auto;
-  }
-  .chat-input-send-button {
-    margin-left: auto;
   }
 }
 
@@ -3781,12 +3790,21 @@ button[data-toggle-state="on"] {
   }
 }
 @container (max-width: 560px) {
-  .chat-input-tools-right {
-    flex: 1 1 100%;
-    margin-left: 0;
+  .chat-input-context-owner {
+    display: none;
   }
-  .chat-input-send-button {
-    margin-left: auto;
+  .chat-input-context-meter {
+    width: 30px !important;
+    flex-basis: 30px;
+  }
+}
+@container (max-width: 420px) {
+  .chat-input-tools-left .chat-input-chip-label {
+    display: none;
+  }
+  .chat-input-chip,
+  .chat-input-model-chip {
+    max-width: 44px;
   }
 }
 

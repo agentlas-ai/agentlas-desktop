@@ -5,6 +5,8 @@ import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { IconCheck, IconFileUp } from "@/components/Icon";
 
+type Visibility = "private-link" | "marketplace";
+
 type UploadIssue = {
   severity: string;
   message: string;
@@ -17,12 +19,14 @@ type UploadResult = {
   title: string;
   issues: UploadIssue[];
   detail?: string;
+  link?: string;
 };
 
 export default function CloudAgentPublishPage() {
   const { locale } = useT();
   const ko = locale !== "en";
   const [rootPath, setRootPath] = useState("");
+  const [visibility, setVisibility] = useState<Visibility>("private-link");
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
 
@@ -51,23 +55,37 @@ export default function CloudAgentPublishPage() {
     setRunning(true);
     setResult(null);
     try {
-      const res = await api.hephaestus.publish({ folder, visibility: "private-link" });
+      const res = await api.hephaestus.publish({ folder, visibility });
+      const json = isRecord(res.json) ? res.json : null;
       const issues = extractIssues(res.json);
-      const detail = [res.error, res.stderr, res.stdout].filter(Boolean).join("\n").trim();
-      const friendly = friendlyUploadMessage(detail, ko);
+      if (res.ok) {
+        const registration = json && isRecord(json.registration) ? json.registration : null;
+        const link = registration && typeof registration.url === "string" ? registration.url : undefined;
+        setResult({
+          ok: true,
+          title:
+            visibility === "marketplace"
+              ? ko ? "Agentlas Hub에 공개 등록되었습니다" : "Published to Agentlas Hub"
+              : ko ? "Agentlas Cloud 보관함에 업로드되었습니다" : "Uploaded to Agentlas Cloud",
+          issues,
+          link,
+        });
+        return;
+      }
+      const classified = classifyUploadFailure(json, res.error, res.stderr, ko);
       setResult({
-        ok: Boolean(res.ok),
-        title: res.ok ? (ko ? "업로드 완료" : "Upload complete") : friendly.title,
-        issues: issues.length > 0 ? issues : friendly.issue ? [friendly.issue] : [],
-        detail: detail ? detail.slice(0, 1600) : undefined,
+        ok: false,
+        title: classified.title,
+        issues: issues.length > 0 ? issues : classified.issue ? [classified.issue] : [],
+        detail: buildFailureDetail(json, res.error, res.stderr, res.stdout),
       });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      const friendly = friendlyUploadMessage(detail, ko);
+      const classified = classifyUploadFailure(null, detail, "", ko);
       setResult({
         ok: false,
-        title: friendly.title,
-        issues: friendly.issue ? [friendly.issue] : [],
+        title: classified.title,
+        issues: classified.issue ? [classified.issue] : [],
         detail,
       });
     } finally {
@@ -95,6 +113,23 @@ export default function CloudAgentPublishPage() {
             <IconFileUp size={14} />
           </button>
 
+          <div role="radiogroup" aria-label={ko ? "업로드 대상" : "Upload destination"} style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <DestinationCard
+              selected={visibility === "private-link"}
+              disabled={running}
+              onSelect={() => setVisibility("private-link")}
+              title={ko ? "Agentlas Cloud" : "Agentlas Cloud"}
+              subtitle={ko ? "비공개 링크 · 내 보관함" : "Private link · my storage"}
+            />
+            <DestinationCard
+              selected={visibility === "marketplace"}
+              disabled={running}
+              onSelect={() => setVisibility("marketplace")}
+              title={ko ? "Agentlas Hub" : "Agentlas Hub"}
+              subtitle={ko ? "마켓플레이스 공개 · 라우팅 카드 필요" : "Public marketplace · routing card required"}
+            />
+          </div>
+
           <button onClick={() => void upload()} disabled={running || !rootPath.trim()} style={{ ...uploadButton, opacity: running || !rootPath.trim() ? 0.55 : 1 }}>
             <IconFileUp size={15} />
             {running ? (ko ? "검사 및 업로드 중..." : "Checking and uploading...") : ko ? "업로드" : "Upload"}
@@ -112,7 +147,19 @@ export default function CloudAgentPublishPage() {
               </h2>
             </div>
 
-            <div style={{ marginTop: 14 }}>
+            {result.link && (
+              <button
+                onClick={() => window.open(result.link, "_blank", "noopener,noreferrer")}
+                style={linkButton}
+              >
+                {ko ? "업로드한 페이지 열기" : "Open uploaded page"}
+                <span style={{ color: "var(--muted-deep)", fontSize: 11, fontFamily: "var(--font-mono)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {result.link}
+                </span>
+              </button>
+            )}
+
+            <div style={{ marginTop: 4 }}>
               {result.issues.length === 0 ? (
                 <div style={notice}>{result.ok ? (ko ? "문제 없음" : "No issues found") : (ko ? "검사 결과가 비어 있습니다." : "No review details returned.")}</div>
               ) : (
@@ -131,6 +178,45 @@ export default function CloudAgentPublishPage() {
         )}
       </section>
     </div>
+  );
+}
+
+function DestinationCard({
+  selected,
+  disabled,
+  onSelect,
+  title,
+  subtitle,
+}: {
+  selected: boolean;
+  disabled: boolean;
+  onSelect: () => void;
+  title: string;
+  subtitle: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      disabled={disabled}
+      onClick={onSelect}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "flex-start",
+        gap: 3,
+        padding: "10px 12px",
+        borderRadius: "var(--radius-md)",
+        border: selected ? "2px solid var(--accent)" : "1px solid var(--paper-edge)",
+        background: "var(--paper)",
+        cursor: disabled ? "default" : "pointer",
+        textAlign: "left",
+      }}
+    >
+      <span style={{ fontSize: 13, fontWeight: 800, color: "var(--ink)" }}>{title}</span>
+      <span style={{ fontSize: 11, color: "var(--muted-deep)", lineHeight: 1.4 }}>{subtitle}</span>
+    </button>
   );
 }
 
@@ -171,36 +257,62 @@ function extractIssues(json: unknown): UploadIssue[] {
   });
 }
 
-function friendlyUploadMessage(detail: string, ko: boolean): { title: string; issue?: UploadIssue } {
-  const raw = detail.trim();
-  const lower = raw.toLowerCase();
+/** 실패 원인 분류 — 엔진의 구조화 JSON을 우선하고, 텍스트 스니핑은 error/stderr에만 한다.
+ *  stdout에는 패키지 번들(base64 포함)이 통째로 실려 오므로 절대 분류에 쓰지 않는다
+ *  (예전엔 "author" 같은 substring이 "auth"에 걸려 가짜 "로그인이 필요합니다"가 떴다). */
+function classifyUploadFailure(
+  json: Record<string, unknown> | null,
+  error: string | undefined,
+  stderr: string,
+  ko: boolean,
+): { title: string; issue?: UploadIssue } {
   const baseTitle = ko ? "업로드 중단" : "Upload stopped";
-  if (!raw) return { title: baseTitle };
-  if (lower.includes("sign in") || lower.includes("login") || lower.includes("auth") || lower.includes("unauthorized") || lower.includes("401")) {
+  const jsonError = json && typeof json.error === "string" ? json.error : "";
+  const signal = [error ?? "", stderr, jsonError].join("\n").toLowerCase();
+
+  if (/sign[\s-]?in|signed[_\s-]?out|unauthorized|http 401|\b401\b|auth login/.test(signal)) {
     return {
-      title: ko ? "로그인이 필요합니다" : "Sign in required",
+      title: ko ? "Agentlas 로그인이 필요합니다" : "Agentlas sign-in required",
       issue: {
         severity: "warning",
         message: ko ? "업로드는 시작되지 않았고 로컬 파일은 그대로입니다." : "Upload did not start and local files were not changed.",
-        remediation: ko ? "Agentlas 계정으로 다시 로그인한 뒤 같은 폴더로 재시도하세요." : "Sign in to Agentlas again, then retry with the same folder.",
-      },
-    };
-  }
-  if (lower.includes("routing_card_required")) {
-    return {
-      title: ko ? "라우팅 정보가 필요합니다" : "Routing metadata required",
-      issue: {
-        severity: "warning",
-        message: ko
-          ? "Hub나 Cloud가 이 패키지를 어떻게 실행할지 알 수 없습니다."
-          : "Hub or Cloud cannot tell how this package should run.",
         remediation: ko
-          ? "routing-card.json 또는 agentlas.json의 라우팅 정보를 보강한 뒤 다시 업로드하세요."
-          : "Add routing-card.json or routing metadata in agentlas.json, then retry.",
+          ? "업로드 로그인 창(브라우저)이 열리면 완료한 뒤 같은 폴더로 재시도하세요."
+          : "Complete the browser sign-in that opens during upload, then retry with the same folder.",
       },
     };
   }
-  if (lower.includes("unsafe_path")) {
+  if (json && json.status === "blocked") {
+    const findings = isRecord(json.review) && Array.isArray(json.review.findings) ? json.review.findings : [];
+    const onlyRoutingCard =
+      findings.length > 0 &&
+      findings.every((f) => isRecord(f) && typeof f.id === "string" && f.id.startsWith("routing-card"));
+    if (onlyRoutingCard) {
+      return {
+        title: ko ? "Hub 공개에는 라우팅 카드가 필요합니다" : "Hub publishing needs a routing card",
+        issue: {
+          severity: "warning",
+          message: ko
+            ? "Hub 마켓플레이스 공개는 .agentlas/routing-card.json이 있어야 합니다. Cloud(비공개 링크) 업로드는 카드 없이도 가능합니다."
+            : "Hub marketplace publishing requires .agentlas/routing-card.json. Cloud (private link) uploads work without one.",
+          remediation: ko
+            ? "빌드 화면에서 라우팅 카드를 생성하거나, 대상을 Agentlas Cloud로 바꿔 업로드하세요."
+            : "Generate a routing card from the Build screen, or switch the destination to Agentlas Cloud.",
+        },
+      };
+    }
+    return {
+      title: ko ? "업로드 전 검사에서 막혔습니다" : "Pre-upload review blocked the package",
+      issue:
+        findings.length > 0
+          ? undefined
+          : {
+              severity: "error",
+              message: ko ? "패키지 검사에서 차단 사유가 보고되었습니다." : "The package review reported blocking findings.",
+            },
+    };
+  }
+  if (signal.includes("unsafe_path")) {
     return {
       title: ko ? "안전하지 않은 파일 경로가 있습니다" : "Unsafe file path",
       issue: {
@@ -214,7 +326,7 @@ function friendlyUploadMessage(detail: string, ko: boolean): { title: string; is
       },
     };
   }
-  if (lower.includes("manifest_missing") || lower.includes("agentlas.json")) {
+  if (signal.includes("manifest_missing") || signal.includes("agent folder not found")) {
     return {
       title: ko ? "agentlas.json을 먼저 고쳐야 합니다" : "Fix agentlas.json first",
       issue: {
@@ -224,7 +336,7 @@ function friendlyUploadMessage(detail: string, ko: boolean): { title: string; is
       },
     };
   }
-  if (lower.includes("needs-review") || lower.includes("acknowledge")) {
+  if (signal.includes("needs-review") || signal.includes("acknowledge")) {
     return {
       title: ko ? "검토가 필요한 경고가 있습니다" : "Review required",
       issue: {
@@ -234,7 +346,7 @@ function friendlyUploadMessage(detail: string, ko: boolean): { title: string; is
       },
     };
   }
-  if (lower.includes("quota") || lower.includes("credit")) {
+  if (signal.includes("quota") || signal.includes("credit")) {
     return {
       title: ko ? "크레딧 또는 사용량 확인이 필요합니다" : "Credit or quota check needed",
       issue: {
@@ -252,6 +364,24 @@ function friendlyUploadMessage(detail: string, ko: boolean): { title: string; is
       remediation: ko ? "세부 정보가 길면 기술 상세를 펼쳐 원인을 확인한 뒤 같은 폴더로 다시 시도하세요." : "Use the technical details below for diagnosis, then retry with the same folder.",
     },
   };
+}
+
+/** 기술 상세 — error/stderr/엔진 요약만. 번들 JSON(stdout)은 엔진 JSON 파싱 실패 시에만 꼬리를 보여준다. */
+function buildFailureDetail(
+  json: Record<string, unknown> | null,
+  error: string | undefined,
+  stderr: string,
+  stdout: string,
+): string | undefined {
+  const parts = [error, stderr.trim()];
+  if (json) {
+    if (typeof json.error === "string") parts.push(json.error);
+    if (typeof json.summary === "string") parts.push(json.summary);
+  } else if (stdout.trim()) {
+    parts.push(stdout.trim().slice(-1200));
+  }
+  const detail = parts.filter(Boolean).join("\n").trim();
+  return detail ? detail.slice(0, 1600) : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -317,6 +447,22 @@ const uploadButton: CSSProperties = {
   fontSize: 14,
   fontWeight: 800,
   cursor: "pointer",
+};
+
+const linkButton: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  minWidth: 0,
+  padding: "9px 12px",
+  borderRadius: "var(--radius-md)",
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+  color: "var(--ink)",
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: "pointer",
+  textAlign: "left",
 };
 
 const statusIcon: CSSProperties = {

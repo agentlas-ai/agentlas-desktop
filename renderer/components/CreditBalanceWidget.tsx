@@ -42,6 +42,20 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
   }, [refresh]);
   useVisibleInterval(() => void refresh(), POLL_MS);
 
+  // 로그인/로그아웃 직후(AccountChip 브로드캐스트) 즉시 동기화 — 60초 폴링을 기다리며
+  // "로그아웃했는데 크레딧이 그대로" 같은 불일치가 보이지 않게 한다.
+  useEffect(() => {
+    const onAuthChanged = () => {
+      const api = ipc();
+      if (!api?.billing) return;
+      // 로그아웃 직후 stale 잔액이 남지 않도록 먼저 지우고 다시 조회한다.
+      setBal(null);
+      void refresh();
+    };
+    window.addEventListener("agentlas:auth-changed", onAuthChanged);
+    return () => window.removeEventListener("agentlas:auth-changed", onAuthChanged);
+  }, [refresh]);
+
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {

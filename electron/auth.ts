@@ -67,10 +67,13 @@ function decodeSessionCookie(value: string): {
   }
 }
 
-/** cookie value로 백엔드 me endpoint 호출 — 없으면 조용히 null (이메일/이름 미표시 fallback) */
-async function fetchAccountMeta(cookieValue: string): Promise<{ email?: string; name?: string } | null> {
+/** cookie value로 세션 조회 — 실제 엔드포인트는 GET /api/auth/session.
+ *  (예전의 /api/account/me 는 웹에 존재하지 않아 404 → 이메일이 영영 안 채워지고
+ *   계정 칩이 "?"로 표시되는 버그가 있었다.)
+ *  반환: meta | "invalid"(서버가 미인증이라고 답함 — 세션 폐기 대상) | null(네트워크/기타 실패). */
+async function fetchAccountMeta(cookieValue: string): Promise<{ email?: string; name?: string } | "invalid" | null> {
   try {
-    const url = `${webBaseUrl()}/api/account/me`;
+    const url = `${webBaseUrl()}/api/auth/session`;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 8000);
     try {
@@ -78,15 +81,40 @@ async function fetchAccountMeta(cookieValue: string): Promise<{ email?: string; 
         headers: { cookie: `${COOKIE_NAME}=${cookieValue}` },
         signal: ctrl.signal,
       });
-      if (!res.ok) return null;
-      const json = (await res.json()) as { email?: string; name?: string };
-      return { email: json.email, name: json.name };
+      if (!res.ok) return null; // 429/5xx 등은 판단 보류 — 다음 시도에서 재확인
+      const json = (await res.json()) as {
+        authenticated?: boolean;
+        user?: { email?: string };
+        workspace?: { name?: string };
+      };
+      if (json.authenticated === false) return "invalid";
+      return { email: json.user?.email, name: json.workspace?.name };
     } finally {
       clearTimeout(timer);
     }
   } catch {
     return null;
   }
+}
+
+/** 세션은 있는데 이메일이 아직 비어 있으면 백그라운드로 다시 채운다(30초 스로틀).
+ *  서버가 "미인증"이라고 답하면 세션을 폐기해 크레딧 위젯/계정 칩 상태가 어긋나지 않게 한다. */
+let _metaRefreshAt = 0;
+function scheduleMetaRefresh(): void {
+  const cache = _cache;
+  if (!cache || cache.email) return;
+  const now = Date.now();
+  if (now - _metaRefreshAt < 30_000) return;
+  _metaRefreshAt = now;
+  void fetchAccountMeta(cache.cookieValue).then((meta) => {
+    if (!_cache || _cache.cookieValue !== cache.cookieValue) return;
+    if (meta === "invalid") {
+      _cache = null;
+      void keytar.deletePassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT);
+      return;
+    }
+    if (meta) _cache = { ..._cache, email: meta.email, name: meta.name };
+  });
 }
 
 /** 부팅 시 keytar에서 cookie를 복원 — TTL이 만료됐으면 null. */
@@ -106,11 +134,8 @@ export async function bootAuthFromKeychain(): Promise<void> {
       workspaceId: decoded.workspaceId,
       expiresAt: decoded.expiresAt,
     };
-    // 이메일/이름은 백그라운드로 fetch (실패해도 무방)
-    void fetchAccountMeta(stored).then((meta) => {
-      if (!_cache || !meta) return;
-      _cache = { ..._cache, email: meta.email, name: meta.name };
-    });
+    // 이메일/이름은 백그라운드로 fetch (실패해도 무방; 실패 시 getAuthSession 폴링이 재시도)
+    scheduleMetaRefresh();
   } catch (err) {
     console.warn("[auth] boot from keychain failed", err);
   }
@@ -123,6 +148,7 @@ export function getAuthSession(): AuthSession {
     void keytar.deletePassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT);
     return { signedIn: false };
   }
+  scheduleMetaRefresh();
   return {
     signedIn: true,
     email: _cache.email,
@@ -147,7 +173,7 @@ async function persistSession(value: string): Promise<AuthSession> {
     expiresAt: decoded.expiresAt,
   };
   const meta = await fetchAccountMeta(value);
-  if (meta && _cache) {
+  if (meta && meta !== "invalid" && _cache) {
     _cache = { ..._cache, email: meta.email, name: meta.name };
   }
   return getAuthSession();

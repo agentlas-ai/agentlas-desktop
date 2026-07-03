@@ -672,18 +672,26 @@ export interface AutomationRunRecord {
   error: string | null;
 }
 
+export type AutomationToolMode = "auto" | "browser" | "computer-use";
+export type AutomationHubMode = "hub-allowed" | "hub-first" | "local-only";
+export type AutomationTargetType = "agent" | "firm" | "hub";
+
 // ── 자동화 — SQLite 영속 + 앱 실행 중 백그라운드 스케줄러 ────────────
 export interface Automation {
   id: string;
   name: string;
   /** "매일 9시", "매주 월 14:00" 같은 사용자 친화 텍스트 */
   scheduleHuman: string;
-  /** 자동화 타깃: "agent"면 agentId, "firm"이면 firmId (CEO 호출) */
-  targetType: "agent" | "firm";
-  /** targetType에 따라 installed_agents.id 또는 installed_firms.id */
+  /** 자동화 타깃: agent=로컬 에이전트, firm=로컬 회사/팀, hub=Agentlas Hub 에이전트 slug */
+  targetType: AutomationTargetType;
+  /** targetType에 따라 installed_agents.id, installed_firms.id, 또는 Hub agent slug */
   targetId: string;
   /** 실행 시 사용자 입력 대신 들어갈 프롬프트 템플릿 */
   promptTemplate: string;
+  /** 자동화가 웹/화면 조작을 해야 할 때 선호하는 실행 도구. */
+  toolMode?: AutomationToolMode;
+  /** 로컬 도구만 쓸지, Agentlas Hub 후보까지 빌려 쓸지. */
+  hubMode?: AutomationHubMode;
   enabled: boolean;
   /** 'user'(폼에서 사람이 생성) | 'agent'(채팅에서 에이전트가 `## Automation` 블록으로 생성) */
   createdBy: "user" | "agent";
@@ -707,9 +715,11 @@ export interface Automation {
 export interface AutomationUpdatePatch {
   name?: string;
   scheduleHuman?: string;
-  targetType?: "agent" | "firm";
+  targetType?: AutomationTargetType;
   targetId?: string;
   promptTemplate?: string;
+  toolMode?: AutomationToolMode;
+  hubMode?: AutomationHubMode;
   scheduleJson?: string | null;
   timezone?: string | null;
   endAt?: string | null;
@@ -2116,6 +2126,12 @@ export interface McpInvocationRequest {
   locale?: "ko" | "en";
   /** 도구 사용 권한 수준 (ChatInput 권한 칩) — 런타임 권한 모드로 매핑 */
   permissions?: "read" | "write" | "full";
+  /** 자동화 등 백그라운드 실행에서 Playwright persistent profile lock을 피하기 위한 MCP 브라우저 프로필 키. */
+  mcpBrowserProfileKey?: string;
+  /** 자동화가 저장한 실행 도구 선호도. */
+  toolMode?: AutomationToolMode;
+  /** 자동화가 저장한 Hub 사용 정책. */
+  hubMode?: AutomationHubMode;
   /** 계획 모드 — 실행 전에 사용자에게 읽히는 작업 계획과 검증 기준을 먼저 세운다. */
   planMode?: boolean;
   /** 목표 추진 모드 — 사용자의 요청을 지속 가능한 목표로 구조화한다. */
@@ -2962,6 +2978,8 @@ export interface AgentlasIpc {
   workspace: {
     get: (chatId: string) => Promise<string | null>;
     set: (chatId: string, absPath: string | null) => Promise<void>;
+    /** CLI 실행 기본 폴더(userData/agent-cwd). 채팅 working_folder가 없을 때 산출물 상대경로 해석에 사용. */
+    defaultRunFolder: () => Promise<string | null>;
     /** 네이티브 폴더 선택 다이얼로그 → 선택한 절대경로(취소 시 null) */
     selectFolder: () => Promise<string | null>;
   };

@@ -10,6 +10,7 @@ import { navigate } from "@/lib/navigation";
 import type {
   Chat,
   AgentGroupResolved,
+  Automation,
   InstalledAgent,
   Project,
   RuntimeStatus,
@@ -17,6 +18,7 @@ import type {
 import {
   IconChat,
   IconChevronRight,
+  IconBolt,
   IconFolder,
   IconHome,
   IconMoon,
@@ -24,6 +26,7 @@ import {
   IconSettings,
   IconSparkles,
   IconSun,
+  IconTrash,
 } from "./Icon";
 import { PromptPickerDialog } from "./PromptPickerDialog";
 import { PawLogo } from "./PawLogo";
@@ -35,6 +38,7 @@ import { useTheme } from "@/lib/theme";
 
 const COLLAPSE_KEY = "agentlas.sidebar.collapsed";
 const CHATS_SECTION_COLLAPSE_KEY = "agentlas.sidebar.section.chats.collapsed";
+const AUTOMATIONS_SECTION_COLLAPSE_KEY = "agentlas.sidebar.section.automations.collapsed";
 const WIDTH_KEY = "agentlas.sidebar.width";
 const COLLAPSED_WIDTH = 60;
 const EXPANDED_WIDTH = 248;
@@ -47,6 +51,7 @@ function clampSidebarWidth(width: number): number {
 interface SidebarData {
   chats: Chat[];
   projects: Project[];
+  automations: Automation[];
   agents: InstalledAgent[];
   agentGroups: AgentGroupResolved[];
   runtime: RuntimeStatus | null;
@@ -55,6 +60,7 @@ interface SidebarData {
 const EMPTY: SidebarData = {
   chats: [],
   projects: [],
+  automations: [],
   agents: [],
   agentGroups: [],
   runtime: null,
@@ -100,6 +106,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   const [sidebarWidth, setSidebarWidth] = useState(EXPANDED_WIDTH);
   const [resizing, setResizing] = useState(false);
   const [chatsCollapsed, setChatsCollapsed] = useState(false);
+  const [automationsCollapsed, setAutomationsCollapsed] = useState(false);
   const [chatListLimit, setChatListLimit] = useState(12);
   const [newChatDialogOpen, setNewChatDialogOpen] = useState(false);
   // 프롬프트 저장소에서 북마크/소장 프롬프트를 골라 새 채팅을 시작하는 팝업.
@@ -130,6 +137,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   useEffect(() => {
     try {
       setChatsCollapsed(window.localStorage.getItem(CHATS_SECTION_COLLAPSE_KEY) === "1");
+      setAutomationsCollapsed(window.localStorage.getItem(AUTOMATIONS_SECTION_COLLAPSE_KEY) === "1");
     } catch {
       // ignore
     }
@@ -143,9 +151,11 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
     }
     window.addEventListener("agentlas:chat-removed", onRemoved);
     window.addEventListener("agentlas:chat-changed", onChanged);
+    window.addEventListener("agentlas:automation-changed", onChanged);
     return () => {
       window.removeEventListener("agentlas:chat-removed", onRemoved);
       window.removeEventListener("agentlas:chat-changed", onChanged);
+      window.removeEventListener("agentlas:automation-changed", onChanged);
     };
   }, []);
 
@@ -154,6 +164,18 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       const next = !prev;
       try {
         window.localStorage.setItem(CHATS_SECTION_COLLAPSE_KEY, next ? "1" : "0");
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }
+
+  function toggleAutomationsCollapsed() {
+    setAutomationsCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(AUTOMATIONS_SECTION_COLLAPSE_KEY, next ? "1" : "0");
       } catch {
         // ignore
       }
@@ -240,15 +262,16 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
     void Promise.all([
       api.chats.listRecent(20),
       api.projects.list(),
+      api.automations.list(),
       api.team.list(),
       api.agentGroups.listResolved(),
       api.runtime.detect(),
-    ]).then(([chats, projects, agents, agentGroups, runtimes]) => {
+    ]).then(([chats, projects, automations, agents, agentGroups, runtimes]) => {
       if (cancelled) return;
       const active = runtimes.find((r) => r.active) ?? runtimes[0] ?? null;
-      setData({ chats, projects, agents, agentGroups, runtime: active });
+      setData({ chats, projects, automations, agents, agentGroups, runtime: active });
     }).catch(() => {
-      if (!cancelled) setData((prev) => ({ ...prev, projects: [] }));
+      if (!cancelled) setData((prev) => ({ ...prev, projects: [], automations: [] }));
     }).finally(() => {
       if (!cancelled) setProjectsLoaded(true);
     });
@@ -297,6 +320,31 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       return;
     }
     void createNewChat(null);
+  }
+
+  async function openAutomationChat(automation: Automation) {
+    const api = ipc();
+    if (!api) return;
+    const chat = await api.automations.getSession(automation.id);
+    window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chat.id } }));
+    navigate(`/chat?id=${chat.id}`);
+  }
+
+  async function deleteAutomation(automation: Automation) {
+    const api = ipc();
+    if (!api) return;
+    const message =
+      locale === "ko"
+        ? `'${automation.name}' 자동화를 삭제할까요?\n\n자동화가 사라지며, 이 자동화가 사용하던 실행 채팅과 기록도 같이 삭제됩니다.`
+        : `Delete '${automation.name}'?\n\nThis removes the automation and also deletes its linked run chat and messages.`;
+    if (!window.confirm(message)) return;
+    await api.automations.remove(automation.id);
+    setData((prev) => ({
+      ...prev,
+      automations: prev.automations.filter((item) => item.id !== automation.id),
+    }));
+    window.dispatchEvent(new CustomEvent("agentlas:automation-changed", { detail: { id: automation.id } }));
+    if (pathname.startsWith("/automation") && currentAutomationId === automation.id) navigate("/automation");
   }
 
   const newChatDialog = newChatDialogOpen ? (
@@ -424,7 +472,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
             gap: 4,
           }}
         >
-          <CollapsedNav
+        <CollapsedNav
             pathname={pathname}
           />
         </nav>
@@ -700,6 +748,45 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           )}
         </SidebarSection>
 
+        <SidebarSection
+          title={t("sidebar.automations")}
+          icon={<IconBolt size={12} />}
+          collapsible
+          collapsed={automationsCollapsed}
+          onToggle={toggleAutomationsCollapsed}
+          action={
+            <Link
+              href="/automation/new"
+              style={{ color: "var(--muted-deep)", display: "inline-flex" }}
+              title={locale === "en" ? "New automation" : "새 자동화"}
+            >
+              <IconPlus size={12} />
+            </Link>
+          }
+        >
+          {data.automations.length === 0 ? (
+            <EmptyHint>
+              <Link href="/automation/new" style={{ color: "var(--accent)", fontWeight: 600 }}>
+                + {locale === "en" ? "Create automation" : "자동화 만들기"}
+              </Link>
+            </EmptyHint>
+          ) : (
+            data.automations.slice(0, 8).map((automation) => {
+              const active = pathname.startsWith("/automation") && currentAutomationId === automation.id;
+              return (
+                <AutomationRow
+                  key={automation.id}
+                  automation={automation}
+                  active={active}
+                  locale={locale}
+                  onOpen={() => void openAutomationChat(automation)}
+                  onDelete={() => void deleteAutomation(automation)}
+                />
+              );
+            })
+          )}
+        </SidebarSection>
+
 
       </nav>
 
@@ -912,6 +999,118 @@ function SidebarLink({
       {children}
     </Link>
   );
+}
+
+function AutomationRow({
+  automation,
+  active,
+  locale,
+  onOpen,
+  onDelete,
+}: {
+  automation: Automation;
+  active: boolean;
+  locale: "ko" | "en";
+  onOpen: () => void;
+  onDelete: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const nextRun = formatAutomationTime(automation.nextRunAt, locale);
+  const state = automation.enabled
+    ? nextRun || (locale === "ko" ? "활성" : "Active")
+    : locale === "ko" ? "꺼짐" : "Off";
+  return (
+    <div
+      style={{ position: "relative", margin: "0 4px" }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <button
+        type="button"
+        onClick={onOpen}
+        title={automation.name}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "6px 10px",
+          paddingRight: hovered ? 32 : 10,
+          borderRadius: 8,
+          border: "none",
+          background: active ? "var(--fill-2)" : "transparent",
+          color: active ? "var(--ink)" : "var(--ink-soft)",
+          fontSize: 12.5,
+          fontWeight: active ? 650 : 500,
+          textAlign: "left",
+          cursor: "pointer",
+        }}
+      >
+        <span
+          aria-hidden
+          style={{
+            flexShrink: 0,
+            width: 7,
+            height: 7,
+            borderRadius: "50%",
+            background: automation.enabled ? "var(--green-deep)" : "var(--muted)",
+            boxShadow: automation.enabled
+              ? "0 0 0 3px color-mix(in srgb, var(--green-deep) 12%, transparent)"
+              : undefined,
+          }}
+        />
+        <span style={{ flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {automation.name}
+        </span>
+        <span style={{ flexShrink: 0, fontSize: 10, color: "var(--muted)", maxWidth: 78, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {state}
+        </span>
+      </button>
+      {hovered && (
+        <button
+          type="button"
+          aria-label={locale === "ko" ? "자동화 삭제" : "Delete automation"}
+          title={locale === "ko" ? "자동화 삭제" : "Delete automation"}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onDelete();
+          }}
+          style={{
+            position: "absolute",
+            right: 6,
+            top: "50%",
+            transform: "translateY(-50%)",
+            width: 22,
+            height: 22,
+            borderRadius: 6,
+            border: "none",
+            background: "transparent",
+            color: "var(--red-deep)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "pointer",
+          }}
+        >
+          <IconTrash size={12} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function formatAutomationTime(value: string | null, locale: "ko" | "en"): string {
+  if (!value) return "";
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return "";
+  const formatter = new Intl.DateTimeFormat(locale === "ko" ? "ko-KR" : "en-US", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return formatter.format(new Date(time));
 }
 
 function EmptyHint({ children }: { children: React.ReactNode }) {
@@ -1216,6 +1415,12 @@ function CollapsedNav({
       label: t("sidebar.projects"),
       icon: <IconFolder size={16} />,
       isActive: pathname.startsWith("/project"),
+    },
+    {
+      href: "/automation",
+      label: t("sidebar.automations"),
+      icon: <IconBolt size={16} />,
+      isActive: pathname.startsWith("/automation"),
     },
   ];
   return (

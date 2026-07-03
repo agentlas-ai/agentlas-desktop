@@ -4,3 +4,4 @@ export * from "./types";
 export { Bm25, tokenize } from "./bm25";
 export { selectModules, type SelectOptions } from "./discovery";
 export { assembleSystemPrompt, type AssembleResult } from "./assemble";
+export { AUTOMATION_SUPERVISOR_SYSTEM_AGENT } from "./automation-supervisor";

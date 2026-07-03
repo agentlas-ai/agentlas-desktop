@@ -71,13 +71,14 @@ export function TriggerNode({ data, selected }: NodeProps) {
 export function AgentNode({ data, selected }: NodeProps) {
   const d = data as WorkflowNodeData;
   const isFirm = cfgStr(d.config, "targetType") === "firm";
+  const isHub = cfgStr(d.config, "targetType") === "hub";
   const ref = cfgStr(d.config, "ref");
   const prompt = cfgStr(d.config, "prompt");
   return (
     <NodeCard
       type="agent"
       icon={isFirm ? <IconBuilding size={13} /> : <IconSparkles size={13} />}
-      title={d.label || (isFirm ? d.strings.firm : d.strings.agent)}
+      title={d.label || (isFirm ? d.strings.firm : isHub ? "Hub" : d.strings.agent)}
       subtitle={prompt || ref || summaryProduces(d)}
       selected={selected}
       connectable={d.connectable}
