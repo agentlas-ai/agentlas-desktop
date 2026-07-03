@@ -11,7 +11,7 @@ export interface RunnerRequest {
   systemPrompt: string;
   history: ChatHistoryEntry[];
   userPrompt: string;
-  /** 첨부 이미지 — BYOK 멀티모달에만 사용, CLI는 무시 */
+  /** 첨부 이미지 — BYOK/Ollama는 멀티모달, CLI는 로컬 파일로 스테이징 */
   images?: ImageAttachment[];
   /** 사용자에게 보일 라벨 — "Claude Code CLI" / "Anthropic API" / "Ollama · llama3.1" */
   backendLabel: string;

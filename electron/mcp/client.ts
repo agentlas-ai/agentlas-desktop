@@ -3,7 +3,6 @@
 // chatId 기반 — chat에서 agent + project 컨텍스트 lookup.
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
 // Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
 import { superviseStormbreaker, type StormbreakerHandle } from "../hephaestus/stormbreaker-supervisor";
@@ -16,7 +15,6 @@ import {
   STORMBREAKER_LONG_RUN_SCHEDULE,
   STORMBREAKER_LOOP_PROTOCOL,
   STORMBREAKER_MAX_EXECUTION_PASSES,
-  STORMBREAKER_MAX_REPAIR_PASSES,
   stripStormbreakerContinueMarker,
 } from "../hephaestus/loop-engineering";
 import { getAgentById, listInstalledAgents } from "./registry";
@@ -57,12 +55,8 @@ import { curateReply } from "../memory/curator";
 import { MEMORY_EMITTER_BLOCK } from "../architecture/manifest";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
-import { SURFACE_PROTOCOL, parseSurfaces, type SurfaceManifestDiagnostic } from "../surface-emitter";
-import { runHandsFreeAgentOs, shouldRunHandsFreeAgentOs } from "../agent-os/hands-free";
-import { prepareCreativeAdPackManifest } from "../creative-pack/surface";
-import { prepareEcommerceOpsManifest } from "../ecommerce-pack/surface";
+import { parseSurfaces } from "../surface-emitter";
 import { createAutomation, listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
-import { recordAgentSurface } from "../store/agent-surfaces";
 import { getAgentApp } from "../store/agent-apps";
 import { autoSelectMcpTools, buildMcpAutoSelectionPrompt } from "../mcp-tools/auto-select";
 import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
@@ -120,32 +114,6 @@ function inferWorkingFolderFromPrompt(prompt: string): string | null {
     console.error("[workspace] failed to create inferred working folder:", err);
     return null;
   }
-}
-
-function buildAppsGenerateUserPrompt(prompt: string, locale: "ko" | "en"): string {
-  const guide =
-    locale === "ko"
-      ? [
-          "Agentlas Apps Generate 모드가 켜져 있다.",
-          "사용자의 목표를 Agentlas Desktop Apps 목록에 등록되는 하나의 로컬 웹앱으로 만들어라.",
-          "반드시 Agentlas Surface Manifest를 emit하라: <<agentlas-surface>> JSON 블록을 포함하고, layout은 service-app 또는 creative-studio, app.routes/connectors/tools, launch 체크리스트, scaffold-app action, operate-app action을 선언한다.",
-          "사용자 앱 UI는 Agentlas Desktop renderer 안에 만들지 마라. 구현 파일 생성은 Agentlas App Factory가 surface manifest를 받아 처리하고, 실행은 `http://localhost:3000` 같은 launchUrl 로컬 웹앱에서 이뤄진다.",
-          "Apps는 generated app 목록, 실행 링크, 파일 경로, 작업 ledger를 보관하는 런처다. 실제 앱 UI/UX와 웹 런타임은 로컬 브라우저 기반으로 설계한다.",
-          "자산, vault 자격증명, MCP 서버, 로컬 파일, 생성물은 Apps 자체가 아니라 Apps를 구동하기 위한 장치이자 부산물로 취급한다.",
-          "사용자가 이미 쓰는 Agentlas 채팅의 어떤 AI와 대화하더라도 설치된 Apps를 호출할 수 있게 설계하라.",
-          "응답은 사용자의 언어로 짧게 요약하고, 숨은 사고 과정은 노출하지 않는다.",
-        ].join("\n")
-      : [
-          "Agentlas Apps Generate mode is enabled.",
-          "Turn the user's goal into one local web app registered in the Agentlas Desktop Apps list.",
-          "You MUST emit an Agentlas Surface Manifest: include a <<agentlas-surface>> JSON block, use layout service-app or creative-studio, and declare app.routes/connectors/tools, a launch checklist, a scaffold-app action, and an operate-app action.",
-          "Do not build the user app UI inside the Agentlas Desktop renderer. Agentlas App Factory creates implementation files from the surface manifest, and execution happens through a launchUrl local web app such as http://localhost:3000.",
-          "Apps is the generated-app registry, launcher, file-path surface, and operations ledger. Design the actual app UI/UX and web runtime for a local browser.",
-          "Assets, vault credentials, MCP servers, local files, and generated artifacts are support devices or byproducts for running the App, not separate top-level products.",
-          "Design it so any AI used in Agentlas Desktop chat can call installed Apps.",
-          "Keep the visible reply concise, match the user's language, and do not expose hidden chain-of-thought.",
-        ].join("\n");
-  return `${guide}\n\nUser goal:\n${prompt}`;
 }
 
 function buildAppEditUserPrompt(prompt: string, appRecord: AppFactoryAppRecord, locale: "ko" | "en"): string {
@@ -369,19 +337,6 @@ function selectAppBuilderForExistingAppEdit(
   };
 }
 
-function appendAppsGenerateCta(text: string, prompt: string, locale: "ko" | "en"): string {
-  if (/\/apps\/[a-z0-9-]+/i.test(text)) return text;
-  const wantsDocumentApp =
-    /document|docstudio|report|paper|writer|text|문서|리포트|논문|글쓰기/i.test(prompt);
-  const appPath = wantsDocumentApp ? "/apps/document-studio" : "/apps";
-  const label = locale === "ko" ? "Apps에서 확인하기" : "Open in Apps";
-  const note =
-    locale === "ko"
-      ? "생성된 App은 Agentlas Desktop의 Apps 표면에서 열 수 있습니다."
-      : "The generated App can be opened from the Agentlas Desktop Apps surface.";
-  return `${text.trim()}\n\n---\n${note}\n\n[${label}](${appPath})`;
-}
-
 function buildRouterAgentEscalationPrompt(input: {
   routerAgent: RecRouterAgent;
   userPrompt: string;
@@ -451,126 +406,6 @@ function buildRouterAgentSystemPreamble(input: {
   return { preamble, loadedModuleIds: assembled.loadedModuleIds };
 }
 
-function buildSurfaceRepairPrompt(
-  invalidText: string,
-  errors: string[],
-  diagnostics: SurfaceManifestDiagnostic[] = [],
-): string {
-  return [
-    "Repair the Agentlas Surface Manifest in the prior assistant output.",
-    "Return a short natural-language sentence plus exactly one corrected <<agentlas-surface>> JSON block.",
-    "Do not add new facts, prices, citations, credentials, code, HTML, JavaScript, CSS, or scripts.",
-    "Preserve the user's visible answer intent, but fix only the manifest structure.",
-    "",
-    "Validation errors:",
-    ...errors.map((error) => `- ${error}`),
-    ...(diagnostics.length > 0
-      ? [
-          "",
-          "Structured diagnostics JSON:",
-          JSON.stringify(
-            diagnostics.map((diagnostic) => ({
-              code: diagnostic.code,
-              severity: diagnostic.severity,
-              path: diagnostic.path,
-              message: diagnostic.message,
-              repairHint: diagnostic.repairHint,
-            })),
-            null,
-            2,
-          ),
-        ]
-      : []),
-    "",
-    SURFACE_PROTOCOL,
-    "",
-    "Invalid assistant output:",
-    invalidText,
-  ].join("\n");
-}
-
-async function runLocalAgentOsIntent(
-  input: {
-    req: McpInvocationRequest;
-    chat: Chat;
-    agent: InstalledAgent;
-    workingFolder?: string | null;
-    reason: string;
-  },
-  sink: EventSink,
-): Promise<boolean> {
-  if (input.chat.kind === "division") return false;
-  const ecommerceManifest = prepareEcommerceOpsManifest({
-    prompt: input.req.userPrompt,
-  });
-  const manifest =
-    ecommerceManifest ??
-    (await prepareCreativeAdPackManifest({
-      prompt: input.req.userPrompt,
-      images: input.req.images,
-    }));
-  if (!manifest || !shouldRunHandsFreeAgentOs(manifest)) return false;
-
-  const history = listChatMessages(input.chat.id, 80);
-  appendChatMessage(input.chat.id, "user", input.req.userPrompt);
-  if (history.length === 0) autoTitleFromFirstMessage(input.chat.id, input.req.userPrompt);
-
-  sink({
-    kind: "thinking",
-    status: `Local Agentlas OS meta-agent is preparing a ${manifest.domain} surface`,
-  });
-  const surfaceId = randomUUID();
-  recordAgentSurface({
-    id: surfaceId,
-    chatId: input.chat.id,
-    projectId: input.chat.projectId,
-    agentId: input.agent.id,
-    manifest,
-  });
-  sink({ kind: "surface", surfaceId, surface: manifest });
-
-  try {
-    const osResult = await runHandsFreeAgentOs({
-      chat: input.chat,
-      surfaceId,
-      manifest,
-      workingFolder: input.workingFolder,
-      sink,
-    });
-    const lifecycleLabel =
-      manifest.domain === "ecommerce"
-        ? "created the commerce agent team/app lifecycle"
-        : manifest.domain === "creative"
-          ? "materialized the creative asset pack/app lifecycle"
-          : "materialized the domain app lifecycle";
-    let displayText = [
-      "Agentlas local meta-agent handled this without a hosted model runtime.",
-      `Reason: ${input.reason}`,
-      `It created the declarative ${manifest.domain} Agentlas OS surface, ${lifecycleLabel}, and operated the generated app through reversible OS actions.`,
-      `Agentlas OS: ${osResult.summary}`,
-    ].join("\n\n");
-    try {
-      const { cleanedText } = curateReply(displayText, {
-        projectPath: null,
-        projectId: input.chat.projectId ?? null,
-        agentId: input.agent.id,
-        chatId: input.chat.id,
-        cwdAtRequest: input.workingFolder,
-      });
-      displayText = cleanedText || displayText;
-    } catch (err) {
-      console.error("[architecture] curateReply failed for local Agent OS:", err);
-    }
-    appendChatMessage(input.chat.id, "assistant", displayText);
-    sink({ kind: "final", text: displayText });
-    return true;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    sink({ kind: "error", error: { code: "local-agent-os-failed", message } });
-    return true;
-  }
-}
-
 /** 활성 런타임 + 러너를 한 번에 선택 (오케스트레이터/리졸버 공용). */
 export async function pickActiveRunner(): Promise<
   { runner: Runner; label: string; active: RuntimeStatus } | null
@@ -626,8 +461,6 @@ export async function runMcpInvocation(
   }
   let effectiveUserPrompt = isTargetAppEdit && targetApp
     ? buildAppEditUserPrompt(req.userPrompt, targetApp, locale)
-    : req.appsGenerateMode
-    ? buildAppsGenerateUserPrompt(req.userPrompt, locale)
     : req.goalMode
       ? buildGoalUserPrompt(req.userPrompt, locale)
       : req.planMode
@@ -659,14 +492,14 @@ export async function runMcpInvocation(
   const installedAgents = listInstalledAgents();
   // plain 대화(인사/맞장구)는 라우팅 전체를 건너뛰고 기본 LLM이 즉답 — 전문 에이전트로
   // 잘못 위임되거나 아래 Hephaestus 에스컬레이션 선지연을 무는 엣지케이스를 없앤다.
-  const plainConversation = !req.appsGenerateMode && !isTargetAppEdit && isPlainConversationalPrompt(req.userPrompt);
+  const plainConversation = !isTargetAppEdit && isPlainConversationalPrompt(req.userPrompt);
   const autoRoute = isTargetAppEdit
     ? selectAppBuilderForExistingAppEdit(installedAgents, locale)
-    : !plainConversation && (req.appsGenerateMode || isGlobalOrchestrator(agent))
+    : !plainConversation && isGlobalOrchestrator(agent)
       ? // 앱 생성 모드만 무매치 폴백 허용 — 일반 챗은 확신(이름/힌트급 매치) 없으면 위임하지 않고
         // 오케스트레이터가 그냥 답한다("사용 에이전트: PM Soul" 소음/오배정 반복 제거).
         selectAutoRoutedAgent(effectiveUserPrompt, installedAgents, locale, {
-          allowFallback: req.appsGenerateMode === true,
+          allowFallback: false,
         })
       : null;
   if (autoRoute) {
@@ -691,8 +524,8 @@ export async function runMcpInvocation(
   let routerAgent = req.routerAgent;
   if (
     !routerAgent &&
-    (req.appsGenerateMode ||
-      (isGlobalOrchestrator(agent) && isEscalationWorthyPrompt(req.userPrompt)))
+    isGlobalOrchestrator(agent) &&
+    isEscalationWorthyPrompt(req.userPrompt)
   ) {
     try {
       const routeRes = await routeOnly(effectiveUserPrompt, {
@@ -715,17 +548,6 @@ export async function runMcpInvocation(
     { scope: "firm", targetId: chat.firmId },
   ]);
   if (!runtimeChoice) {
-    const handled = await runLocalAgentOsIntent(
-      {
-        req,
-        chat,
-        agent,
-        workingFolder,
-        reason: "No local CLI/BYOK runtime is active, so the built-in Agentlas OS meta-agent took over.",
-      },
-      sink,
-    );
-    if (handled) return { stormbreakerContinueRequested: false };
     sink({
       kind: "error",
       error: { code: "no-runtime", message: tStatus(locale, "errNoRuntime") },
@@ -746,17 +568,6 @@ export async function runMcpInvocation(
   const active = runtimeChoice.active;
   const picked = runtimeChoice.picked;
   if (!picked) {
-    const handled = await runLocalAgentOsIntent(
-      {
-        req,
-        chat,
-        agent,
-        workingFolder,
-        reason: `Runtime ${active.kind} is available but has no supported runner, so the built-in Agentlas OS meta-agent took over.`,
-      },
-      sink,
-    );
-    if (handled) return { stormbreakerContinueRequested: false };
     sink({
       kind: "error",
       error: {
@@ -947,7 +758,7 @@ export async function runMcpInvocation(
     systemPrompt = `${autoRouteSystemPreamble(
       autoRoute,
       locale,
-      isTargetAppEdit ? "app-edit" : req.appsGenerateMode ? "apps-generate" : "default",
+      isTargetAppEdit ? "app-edit" : "default",
     )}\n\n${systemPrompt}`;
   }
   const routerAgentPreamble = routerAgent
@@ -978,7 +789,6 @@ export async function runMcpInvocation(
   if (
     getInterviewMode() === "smart" &&
     chat.kind !== "division" &&
-    !req.appsGenerateMode &&
     !isTrivialPrompt(req.userPrompt)
   ) {
     systemPrompt =
@@ -1078,7 +888,7 @@ export async function runMcpInvocation(
       longContext: active.longContextEnabled ?? false,
       effort: active.effort ?? undefined,
       signal,
-      permission: req.appsGenerateMode ? "read" : req.permissions,
+      permission: req.permissions,
       // 세션 resume 키 — CLI 러너가 (chatId, kind)별 세션을 재사용해
       // 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
       chatId: chat.id,
@@ -1090,7 +900,7 @@ export async function runMcpInvocation(
       // 활성화(2회 방문) 게이팅과 무관하게, 폴더가 지정돼 있으면 즉시 cwd로 사용한다.
       cwd: workingFolder ?? undefined,
       locale,
-      forceSurface: req.appsGenerateMode || undefined,
+      forceSurface: undefined,
     };
     const runnerEvents = {
       onStatus: (status: string) => sink({ kind: "tool-use", status }),
@@ -1166,14 +976,9 @@ export async function runMcpInvocation(
       }
     }
 
-    // 2차 패스(모델 판단 surface 게이트): 1차에서 무거운 SURFACE_PROTOCOL을 안 줬는데 모델이
-    // "이건 surface가 낫다"고 판단해 마커만 냈으면 → 풀 프로토콜을 강제 주입(forceSurface)하고 재호출.
-    // 사용자가 "대시보드"라 말 안 해도 와우모먼트가 뜬다(키워드 의존 X). 단순/일회성은 마커가 안 와 1패스로 끝.
-    if (chat.kind !== "division" && result.text.trim().includes(SURFACE_INTENT_MARKER)) {
-      sink({ kind: "thinking", status: tStatus(locale, "thinking", { agent: agent.name }) });
-      activeRunnerReq = { ...runnerReq, forceSurface: true };
-      result = await picked.runner(activeRunnerReq, runnerEvents);
-    }
+    // Chat must not auto-escalate into App/Workbench generation. If a model emits
+    // the legacy surface-intent marker, strip it below instead of doing a second
+    // app/surface pass.
 
     // 항상-켜진 큐레이터: 답변 끝의 "## Memory Events" 블록을 파싱해 안전·스코프·중복 처리 후
     // 내구 메모리에 기록하고, 사용자에게 보이는 텍스트에서는 그 블록을 제거한다(추가 LLM 호출 없음).
@@ -1234,132 +1039,12 @@ export async function runMcpInvocation(
     }
     try {
       let surfaceParse = parseSurfaces(displayText);
-      let surfaceText = displayText;
-      let surfaceVisibleText = surfaceParse.cleanedText || displayText;
-      let repairRuntimeSessionId = result.sessionId;
-      for (let repairAttempt = 1; repairAttempt <= STORMBREAKER_MAX_REPAIR_PASSES; repairAttempt += 1) {
-        const needsRepair =
-          surfaceParse.surfaces.length === 0 &&
-          surfaceParse.errors.length > 0 &&
-          surfaceText.includes("<<agentlas-surface>>");
-        if (!needsRepair) break;
-        try {
-          const reason = surfaceParse.errors.slice(0, 2).join("; ") || "surface manifest validation failed";
-          stormbreaker?.repair({
-            stage: "Agentlas surface manifest",
-            reason,
-            attempt: repairAttempt,
-          });
-          sink({ kind: "tool-use", status: `Repairing Agentlas surface manifest (${repairAttempt}/${STORMBREAKER_MAX_REPAIR_PASSES})` });
-          const repaired = await picked.runner(
-            {
-              ...activeRunnerReq,
-              history,
-              userPrompt: buildSurfaceRepairPrompt(surfaceText, surfaceParse.errors, surfaceParse.diagnostics),
-              images: undefined,
-              runtimeSessionId: repairRuntimeSessionId,
-            },
-            {
-              onStatus: (status) => sink({ kind: "tool-use", status }),
-              onPartial: () => {},
-              onTool: (name, args, result, id, isError) =>
-                sink({ kind: "tool-use", tool: { name, args, result, id, isError } }),
-            },
-          );
-          if (repaired.sessionId) repairRuntimeSessionId = repaired.sessionId;
-          const repairedText = repaired.text.split(SURFACE_INTENT_MARKER).join("").trim();
-          const repairedParse = parseSurfaces(repairedText);
-          if (repairedParse.surfaces.length > 0) {
-            surfaceParse = repairedParse;
-            surfaceVisibleText = repairedParse.cleanedText || surfaceVisibleText;
-            break;
-          }
-          surfaceText = repairedText;
-          surfaceParse = repairedParse;
-        } catch (err) {
-          console.error("[surface] repair failed:", err);
-          break;
-        }
-      }
-      displayText = surfaceParse.surfaces.length > 0 ? (surfaceParse.cleanedText || surfaceVisibleText) : surfaceVisibleText;
-      if (surfaceParse.surfaces.length === 0) {
-        const seededEcommerceSurface = prepareEcommerceOpsManifest({
-          prompt: req.userPrompt,
-        });
-        if (seededEcommerceSurface) {
-          sink({ kind: "tool-use", status: "Preparing Ecommerce OS surface from business intent" });
-          surfaceParse = {
-            surfaces: [{ manifest: seededEcommerceSurface }],
-            cleanedText: displayText,
-            errors: [],
-            diagnostics: [],
-          };
-          displayText = [
-            displayText.trim(),
-            "Prepared an Ecommerce OS surface from the business intent. Review the storefront, payment/database delegation, image budget, and operating dashboard in the Workbench.",
-          ]
-            .filter(Boolean)
-            .join("\n\n");
-        }
-      }
-      if (surfaceParse.surfaces.length === 0) {
-        const seededCreativeSurface = await prepareCreativeAdPackManifest({
-          prompt: req.userPrompt,
-          images: req.images,
-        });
-        if (seededCreativeSurface) {
-          sink({ kind: "tool-use", status: "Preparing Creative Studio surface from product input" });
-          surfaceParse = {
-            surfaces: [{ manifest: seededCreativeSurface }],
-            cleanedText: displayText,
-            errors: [],
-            diagnostics: [],
-          };
-          displayText = [
-            displayText.trim(),
-            "Prepared a Creative Studio surface from the product input. Review the storyboard, trust labels, assets, and export pack in the Workbench.",
-          ]
-            .filter(Boolean)
-            .join("\n\n");
-        }
-      }
-      const handsFreeSummaries: string[] = [];
-      for (const s of surfaceParse.surfaces) {
-        const surfaceId = randomUUID();
-        recordAgentSurface({
-          id: surfaceId,
-          chatId: chat.id,
-          projectId: chat.projectId,
-          agentId: agent.id,
-          manifest: s.manifest,
-        });
-        sink({
-          kind: "surface",
-          surfaceId,
-          surface: s.manifest,
-        });
-        if (shouldRunHandsFreeAgentOs(s.manifest)) {
-          try {
-            const osResult = await runHandsFreeAgentOs({
-              chat,
-              surfaceId,
-              manifest: s.manifest,
-              workingFolder,
-              sink,
-            });
-            if (osResult.ran) handsFreeSummaries.push(osResult.summary);
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            console.error("[agent-os] hands-free run failed:", err);
-            sink({ kind: "tool-use", status: `Agentlas OS paused for review: ${message}` });
-            handsFreeSummaries.push(`Agentlas OS prepared the surface, but app operation needs review: ${message}`);
-          }
-        }
-      }
-      if (handsFreeSummaries.length > 0) {
-        displayText = [displayText.trim(), ...handsFreeSummaries.map((summary) => `Agentlas OS: ${summary}`)]
-          .filter(Boolean)
-          .join("\n\n");
+      if (surfaceParse.surfaces.length > 0 || surfaceParse.errors.length > 0) {
+        displayText =
+          surfaceParse.cleanedText.trim() ||
+          (locale === "ko"
+            ? "앱/패널 자동 생성은 꺼져 있습니다. 채팅 답변만 표시합니다."
+            : "Automatic App/workbench generation is disabled. Showing chat output only.");
       }
     } catch (err) {
       console.error("[surface] parseSurfaces failed:", err);
@@ -1377,9 +1062,8 @@ export async function runMcpInvocation(
       console.error("[architecture] curateReply failed:", err);
     }
 
-    if (req.appsGenerateMode) {
-      displayText = appendAppsGenerateCta(displayText, req.userPrompt, locale);
-    }
+    // App generation from chat is disabled: do not append Apps CTAs or route
+    // ordinary chat output into installed/generated App surfaces.
 
     // Stormbreaker 최종 게이트 — 답변 표출 직전 리뷰/증거 게이트(비차단·실패-무해).
     if (stormbreaker) {

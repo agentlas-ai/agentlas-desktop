@@ -28,6 +28,7 @@ const DICT = {
     thinking: "{agent}가 생각 중...",
     sending: "전송 중...",
     callingBackend: "{backend} 호출 중...",
+    cliImageReady: "첨부 이미지 {count}개를 파일로 준비했습니다 — {backend}가 해당 경로를 읽습니다",
     cliNoImage: "{backend}은 이미지 첨부 미지원 — 텍스트만 전송됩니다",
     cliNoImageClaude:
       "{backend}은 이미지 첨부 미지원 — 텍스트만 전송됩니다 (BYOK API로 전환하면 멀티모달 가능)",
@@ -78,6 +79,7 @@ const DICT = {
     thinking: "{agent} is thinking...",
     sending: "Sending...",
     callingBackend: "Calling {backend}...",
+    cliImageReady: "Prepared {count} attached image file(s) — {backend} will read those paths",
     cliNoImage: "{backend} does not support image attachments — sending text only",
     cliNoImageClaude:
       "{backend} does not support image attachments — sending text only (switch to BYOK API for multimodal)",

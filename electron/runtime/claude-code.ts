@@ -11,6 +11,7 @@ import type { Runner, RunnerRequest, RunnerEvents, RunnerResult } from "./runner
 import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
+import { stageCliImageAttachments } from "./image-attachments";
 import {
   clearRuntimeSession,
   getRuntimeSession,
@@ -173,31 +174,37 @@ export const runClaudeCode: Runner = async (
     throw new Error(tStatus(req.locale, "errCliMissingClaude"));
   }
 
-  const systemPrompt = wrapSystemPrompt(req.systemPrompt, req.locale, req.permission, req.userPrompt, req.forceSurface);
-  const fingerprint = req.chatId ? systemFingerprint(req) : null;
-  const savedSession = req.chatId ? getRuntimeSession(req.chatId, KIND) : null;
+  const stagedImages = await stageCliImageAttachments(req);
+  const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
+
+  const systemPrompt = wrapSystemPrompt(runReq.systemPrompt, runReq.locale, runReq.permission, runReq.userPrompt, runReq.forceSurface);
+  const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
+  const savedSession = runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
   const storedSessionId =
     savedSession && fingerprint && savedSession.fingerprint === fingerprint
       ? savedSession.sessionId
       : null;
-  if (req.chatId && savedSession && fingerprint && savedSession.fingerprint !== fingerprint) {
-    clearRuntimeSession(req.chatId, KIND);
+  if (runReq.chatId && savedSession && fingerprint && savedSession.fingerprint !== fingerprint) {
+    clearRuntimeSession(runReq.chatId, KIND);
   }
-  const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
-  const flatUser = resumeSessionId ? req.userPrompt : flattenHistory(req);
+  const resumeSessionId = runReq.runtimeSessionId ?? storedSessionId;
+  const flatUser = resumeSessionId ? runReq.userPrompt : flattenHistory(runReq);
 
-  if (req.images && req.images.length > 0) {
+  if (stagedImages.images.length > 0) {
     events.onStatus(
-      tStatus(req.locale, "cliNoImageClaude", { backend: req.backendLabel }),
+      tStatus(runReq.locale, "cliImageReady", {
+        backend: runReq.backendLabel,
+        count: stagedImages.images.length,
+      }),
     );
   } else if (resumeSessionId) {
     events.onStatus(
-      req.locale === "ko"
-        ? `${req.backendLabel} 세션 이어가는 중...`
-        : `Resuming ${req.backendLabel} session...`,
+      runReq.locale === "ko"
+        ? `${runReq.backendLabel} 세션 이어가는 중...`
+        : `Resuming ${runReq.backendLabel} session...`,
     );
   } else {
-    events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
+    events.onStatus(tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
   }
 
   // 권한 칩 → claude 권한 모드. read=기본(헤드리스에서 위험 툴 자동 거부), write=편집 허용, full=전체.

@@ -32,8 +32,8 @@ function seedAgent() {
       "agent-local-chat-smoke",
       "local-chat-smoke",
       "Local Chat Smoke Agent",
-      "Uses built-in Agentlas OS when no model runtime is active",
-      "If a business intent can be handled by Agentlas OS primitives, create and operate it locally.",
+      "Does not auto-call Agentlas Apps when no model runtime is active",
+      "Reply through the selected runtime only. Do not create Apps, Workbench surfaces, or Agentlas OS operations automatically.",
       "[]",
       "A",
       now,
@@ -63,30 +63,23 @@ function seedAgent() {
       (event) => events.push(event),
     );
 
-    assert.equal(events.some((event) => event.kind === "error"), false);
-    assert.equal(events.some((event) => event.kind === "surface" && event.surface?.domain === "ecommerce"), true);
-    assert.equal(events.some((event) => event.kind === "final" && /local meta-agent/i.test(event.text || "")), true);
+    assert.equal(events.some((event) => event.kind === "error" && event.error?.code === "no-runtime"), true);
+    assert.equal(events.some((event) => event.kind === "surface"), false);
+    assert.equal(events.some((event) => event.kind === "final"), false);
 
     const messages = listChatMessages(chat.id);
-    assert.equal(messages.some((message) => message.role === "user" && /쇼핑몰 사업/.test(message.text)), true);
-    assert.equal(messages.some((message) => message.role === "system" && /hands-free/i.test(message.text)), true);
-    assert.equal(messages.some((message) => message.role === "assistant" && /Agentlas local meta-agent/.test(message.text)), true);
+    assert.equal(messages.some((message) => message.role === "assistant" && /Agentlas local meta-agent|Agentlas OS|Workbench|Creative Studio/i.test(message.text)), false);
 
     const surfaces = listAgentSurfaces(chat.id);
-    assert.equal(surfaces.length, 1);
-    assert.equal(surfaces[0].layout, "service-app");
+    assert.equal(surfaces.length, 0);
 
     const apps = listAgentApps(chat.id);
-    assert.equal(apps.length, 1);
-    assert.equal(apps[0].status, "tool-published");
-    assert.ok(fs.existsSync(apps[0].previewPath));
-    assert.ok(fs.existsSync(path.join(apps[0].rootPath, "data", "operations.json")));
+    assert.equal(apps.length, 0);
 
     const firms = listFirms();
-    assert.equal(firms.length, 1);
-    assert.equal(firms[0].orgChart.length, 13);
+    assert.equal(firms.length, 0);
 
-    console.log("chat-local-agent-os smoke passed");
+    console.log("chat no-auto-app-routing smoke passed");
   } finally {
     fs.rmSync(baseDir, { recursive: true, force: true });
   }

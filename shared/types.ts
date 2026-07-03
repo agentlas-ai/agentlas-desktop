@@ -736,6 +736,8 @@ export interface LaunchdStatus {
 export interface ImageAttachment {
   /** "image/png" | "image/jpeg" | "image/gif" | "image/webp" */
   mediaType: string;
+  /** 원본 파일명. CLI 런타임에서 임시 파일로 스테이징할 때 사용자 맥락 보존용. */
+  name?: string;
   /** base64 (data: 접두사 없이 순수 인코딩) */
   data: string;
 }
@@ -2107,7 +2109,7 @@ export interface McpInvocationRequest {
   /** 새 모델: chatId 기반. 에이전트는 chat에서 lookup */
   chatId: string;
   userPrompt: string;
-  /** 첨부 이미지 — BYOK API는 멀티모달로 전송. CLI는 무시 (warning 추가) */
+  /** 첨부 이미지 — BYOK/Ollama는 멀티모달로, CLI는 읽을 수 있는 로컬 파일로 스테이징해 전송. */
   images?: ImageAttachment[];
   /** UI 사용자 locale — main이 emit하는 상태/오류 메시지가 이 언어로 나옴.
    *  영어 사용자에게 한국어 status가 새지 않도록 renderer가 항상 동봉. */

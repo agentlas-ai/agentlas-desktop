@@ -10,6 +10,7 @@ import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner
 import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
+import { stageCliImageAttachments } from "./image-attachments";
 import {
   clearRuntimeSession,
   getRuntimeSession,
@@ -126,36 +127,43 @@ export const runGemini: Runner = async (
   // `--extensions`·`--session-id`/`--resume`를 지원하지 않는다("flags provided but not defined").
   // → agy면 세션 인자/확장 인자를 끄고, 매 호출 full prompt(컨텍스트 포함)로 보낸다.
   const isAgy = /(^|[/\\])agy(\.exe)?$/.test(bin);
+  const stagedImages = await stageCliImageAttachments(req);
+  const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
 
-  const fingerprint = req.chatId ? systemFingerprint(req) : null;
-  const savedSession = req.chatId ? getRuntimeSession(req.chatId, KIND) : null;
+  const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
+  const savedSession = runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
   const storedSessionId =
     savedSession && fingerprint && savedSession.fingerprint === fingerprint
       ? savedSession.sessionId
       : null;
-  if (req.chatId && savedSession && fingerprint && savedSession.fingerprint !== fingerprint) {
-    clearRuntimeSession(req.chatId, KIND);
+  if (runReq.chatId && savedSession && fingerprint && savedSession.fingerprint !== fingerprint) {
+    clearRuntimeSession(runReq.chatId, KIND);
   }
-  const resumeSessionId = isAgy ? null : (req.runtimeSessionId ?? storedSessionId);
+  const resumeSessionId = isAgy ? null : (runReq.runtimeSessionId ?? storedSessionId);
   const createSessionId = isAgy
     ? undefined
-    : !resumeSessionId && (req.chatId || req.runtimeSessionId)
+    : !resumeSessionId && (runReq.chatId || runReq.runtimeSessionId)
       ? randomUUID()
       : undefined;
 
-  if (req.images && req.images.length > 0) {
-    events.onStatus(tStatus(req.locale, "cliNoImage", { backend: req.backendLabel }));
+  if (stagedImages.images.length > 0) {
+    events.onStatus(
+      tStatus(runReq.locale, "cliImageReady", {
+        backend: runReq.backendLabel,
+        count: stagedImages.images.length,
+      }),
+    );
   } else if (resumeSessionId) {
     events.onStatus(
-      req.locale === "ko"
-        ? `${req.backendLabel} 세션 이어가는 중...`
-        : `Resuming ${req.backendLabel} session...`,
+      runReq.locale === "ko"
+        ? `${runReq.backendLabel} 세션 이어가는 중...`
+        : `Resuming ${runReq.backendLabel} session...`,
     );
   } else {
-    events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
+    events.onStatus(tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
   }
 
-  const prompt = resumeSessionId ? req.userPrompt : buildPrompt(req);
+  const prompt = resumeSessionId ? runReq.userPrompt : buildPrompt(runReq);
 
   return new Promise<RunnerResult>((resolve, reject) => {
     // Gemini CLI 비대화형(헤드리스) 모드 — `-p ""`로 헤드리스를 트리거하고 실제 프롬프트는

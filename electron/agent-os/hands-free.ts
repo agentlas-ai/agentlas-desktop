@@ -45,6 +45,7 @@ export interface HandsFreeAgentOsRequest {
   manifest: AgentlasSurfaceManifest;
   workingFolder?: string | null;
   sink?: EventSink;
+  locale?: "ko" | "en";
 }
 
 export function shouldRunHandsFreeAgentOs(manifest: AgentlasSurfaceManifest): boolean {
@@ -174,12 +175,17 @@ export async function runHandsFreeAgentOs(
   );
 
   const operatedApp = getAgentAppBySurface(input.chat.id, input.surfaceId) ?? appRecord;
+  const locale = input.locale ?? "en";
   const completed = autopilot.steps.filter((step) => step.status === "completed").length;
   const operatorName = team?.firm.name ?? input.manifest.app?.name ?? input.manifest.title;
   const summary =
     autopilot.status === "operated"
-      ? `Agentlas OS operated ${operatorName}, scaffolded ${scaffold.appName}, completed ${completed} operating step(s), packaged a preview, and published the app as a reusable tool.`
-      : `Agentlas OS prepared ${operatorName} and ${scaffold.appName}, then paused on ${autopilot.waitingOn.join(", ") || "review"}.`;
+      ? locale === "ko"
+        ? `Agentlas OS가 ${operatorName}를 실행했고, ${scaffold.appName} 앱 준비와 ${completed}개 운영 단계를 완료해 재사용 가능한 도구로 게시했습니다.`
+        : `Agentlas OS operated ${operatorName}, scaffolded ${scaffold.appName}, completed ${completed} operating step(s), packaged a preview, and published the app as a reusable tool.`
+      : locale === "ko"
+        ? `Agentlas OS가 ${operatorName}와 ${scaffold.appName}을 준비했고, ${formatWaitingOn(autopilot.waitingOn, locale)} 단계에서 멈췄습니다.`
+        : `Agentlas OS prepared ${operatorName} and ${scaffold.appName}, then paused on ${formatWaitingOn(autopilot.waitingOn, locale)}.`;
 
   appendChatMessage(
     input.chat.id,
@@ -205,6 +211,27 @@ export async function runHandsFreeAgentOs(
     autopilot,
     summary,
   };
+}
+
+function formatWaitingOn(waitingOn: string[], locale: "ko" | "en"): string {
+  const labels = waitingOn.map((item) => waitingOnLabel(item, locale));
+  const unique = Array.from(new Set(labels.filter(Boolean)));
+  if (unique.length === 0) return locale === "ko" ? "사용자 검토" : "review";
+  return unique.join(locale === "ko" ? ", " : ", ");
+}
+
+function waitingOnLabel(code: string, locale: "ko" | "en"): string {
+  const normalized = code.trim().toLowerCase();
+  if (locale === "ko") {
+    if (normalized === "secure-provider-input") return "보안 제공자 로그인/승인";
+    if (normalized === "credential-vault-input") return "자격 증명 Vault 연결";
+    if (normalized === "payment-approval") return "결제 승인";
+    return "사용자 검토";
+  }
+  if (normalized === "secure-provider-input") return "secure provider login/approval";
+  if (normalized === "credential-vault-input") return "credential vault connection";
+  if (normalized === "payment-approval") return "payment approval";
+  return "review";
 }
 
 function findAction(

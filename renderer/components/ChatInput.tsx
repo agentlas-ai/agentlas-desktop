@@ -468,7 +468,7 @@ export function ChatInput({
   /** 현재 첨부/모드 상태로 SendOptions 를 합성. */
   function currentSendOptions(): SendOptions {
     const attachments =
-      images.length > 0 ? images.map(({ mediaType, data }) => ({ mediaType, data })) : undefined;
+      images.length > 0 ? images.map(({ mediaType, data, name }) => ({ mediaType, data, name })) : undefined;
     return {
       images: attachments,
       planMode: planMode || undefined,

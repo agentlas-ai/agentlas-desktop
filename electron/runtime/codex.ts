@@ -11,6 +11,7 @@ import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner
 import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
+import { stageCliImageAttachments } from "./image-attachments";
 import {
   clearRuntimeSession,
   getRuntimeSession,
@@ -286,31 +287,39 @@ export const runCodex: Runner = async (
     throw new Error(tStatus(req.locale, "errCliMissingCodex"));
   }
 
-  if (req.images && req.images.length > 0) {
-    events.onStatus(tStatus(req.locale, "cliNoImage", { backend: req.backendLabel }));
+  const stagedImages = await stageCliImageAttachments(req);
+  const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
+
+  if (stagedImages.images.length > 0) {
+    events.onStatus(
+      tStatus(runReq.locale, "cliImageReady", {
+        backend: runReq.backendLabel,
+        count: stagedImages.images.length,
+      }),
+    );
   } else {
-    events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
+    events.onStatus(tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
   }
 
-  const permArgs = permissionArgs(req.permission);
+  const permArgs = permissionArgs(runReq.permission);
   const mcpArgs =
-    req.mcpCodexConfigArgs && req.mcpCodexConfigArgs.length > 0 ? req.mcpCodexConfigArgs : [];
+    runReq.mcpCodexConfigArgs && runReq.mcpCodexConfigArgs.length > 0 ? runReq.mcpCodexConfigArgs : [];
 
   // 세션 resume 가능 여부 — chatId 저장 세션 또는 Build 같은 호출자가 직접 넘긴 세션 id.
-  const fingerprint = req.chatId ? systemFingerprint(req) : null;
-  const existing = req.chatId ? getRuntimeSession(req.chatId, KIND) : null;
+  const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
+  const existing = runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
   const storedSessionId =
     existing && fingerprint && existing.fingerprint === fingerprint
       ? existing.sessionId
       : null;
-  const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
+  const resumeSessionId = runReq.runtimeSessionId ?? storedSessionId;
   const canResume = !!resumeSessionId;
 
   // RESUME: 새 user 턴만 stdin으로 — 시스템 프롬프트/히스토리는 세션이 이미 갖고 있다.
   // (`--sandbox`는 resume 서브명령에 없으므로 생략. write/full만 bypass 플래그.)
   if (canResume) {
     const resumePerm =
-      req.permission === "write" || req.permission === "full"
+      runReq.permission === "write" || runReq.permission === "full"
         ? ["--dangerously-bypass-approvals-and-sandbox"]
         : [];
     const args = [
@@ -323,25 +332,25 @@ export const runCodex: Runner = async (
       resumeSessionId!,
       "-",
     ];
-    const r = await runCodexProcess(bin, args, req.userPrompt, req, events);
-    if (req.signal?.aborted) throw new Error(tStatus(req.locale, "aborted"));
+    const r = await runCodexProcess(bin, args, runReq.userPrompt, runReq, events);
+    if (runReq.signal?.aborted) throw new Error(tStatus(runReq.locale, "aborted"));
     if (r.code === 0) {
-      if (req.chatId && fingerprint && r.threadId) {
-        saveRuntimeSession(req.chatId, KIND, r.threadId, fingerprint);
+      if (runReq.chatId && fingerprint && r.threadId) {
+        saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint);
       }
       return { text: r.text.trim(), sessionId: r.threadId ?? resumeSessionId, tokens: r.tokens };
     }
     // resume 실패(세션 만료/손상 등) → 세션 버리고 아래 CREATE로 폴백.
-    if (req.chatId) clearRuntimeSession(req.chatId, KIND);
+    if (runReq.chatId) clearRuntimeSession(runReq.chatId, KIND);
   }
 
   // CREATE: 시스템 프롬프트 + 히스토리 + user를 stdin으로 보내 새 세션을 시드한다.
   const createArgs = ["exec", "--json", "--skip-git-repo-check", ...permArgs, ...mcpArgs, "-"];
-  const created = await runCodexProcess(bin, createArgs, buildPrompt(req), req, events);
-  if (req.signal?.aborted) throw new Error(tStatus(req.locale, "aborted"));
+  const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events);
+  if (runReq.signal?.aborted) throw new Error(tStatus(runReq.locale, "aborted"));
   if (created.code === 0) {
-    if (req.chatId && fingerprint && created.threadId) {
-      saveRuntimeSession(req.chatId, KIND, created.threadId, fingerprint);
+    if (runReq.chatId && fingerprint && created.threadId) {
+      saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint);
     }
     return { text: created.text.trim(), sessionId: created.threadId ?? undefined, tokens: created.tokens };
   }

@@ -583,9 +583,9 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         }}
       >
 
-        <SidebarLink href="/dashboard" active={pathname === "/dashboard"}>
-          <IconHome size={14} style={{ flexShrink: 0, color: "var(--muted-deep)" }} />
-          <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+        <SidebarLink href="/dashboard" active={pathname === "/dashboard"} prominent>
+          <IconHome size={14} style={{ flexShrink: 0, color: "currentColor" }} />
+          <span style={{ minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {locale === "en" ? "Dashboard" : "대시보드"}
           </span>
         </SidebarLink>
@@ -879,28 +879,34 @@ function SidebarSection({
 function SidebarLink({
   href,
   active,
+  prominent,
   children,
 }: {
   href: string;
   active?: boolean;
+  prominent?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <Link
       href={href}
+      className={prominent ? "neu-btn-primary" : undefined}
       style={{
         display: "flex",
         alignItems: "center",
+        justifyContent: prominent ? "center" : undefined,
         gap: 8,
-        padding: "6px 10px",
+        padding: prominent ? "9px 12px" : "6px 10px",
         margin: "0 4px",
-        borderRadius: 8,
-        fontSize: 12.5,
-        color: active ? "var(--ink)" : "var(--ink-soft)",
-        background: active ? "var(--fill-1)" : "transparent",
+        borderRadius: prominent ? "var(--radius-md)" : 8,
+        fontSize: prominent ? 13 : 12.5,
+        color: prominent || active ? "var(--ink)" : "var(--ink-soft)",
+        background: prominent ? "var(--paper)" : active ? "var(--fill-1)" : "transparent",
+        border: prominent ? "1px solid var(--paper-edge)" : "none",
+        boxShadow: prominent ? "var(--neu-raised-strong)" : undefined,
         textDecoration: "none",
-        fontWeight: active ? 600 : 500,
-        transition: "background 0.12s",
+        fontWeight: prominent || active ? 600 : 500,
+        transition: "background 0.12s, box-shadow 0.13s ease, transform 0.05s ease",
       }}
     >
       {children}
@@ -1190,12 +1196,14 @@ function CollapsedNav({
     icon: React.ReactNode;
     isActive: boolean;
     badge?: string | number;
+    prominent?: boolean;
   }> = [
     {
       href: "/dashboard",
       label: "Dashboard",
       icon: <IconHome size={16} />,
       isActive: pathname === "/dashboard",
+      prominent: true,
     },
     {
       href: "/chat",
@@ -1218,7 +1226,19 @@ function CollapsedNav({
           href={it.href}
           aria-label={it.label}
           title={it.label}
-          style={{ position: "relative", ...iconBtnStyle(it.isActive), textDecoration: "none" }}
+          style={{
+            position: "relative",
+            ...iconBtnStyle(it.isActive),
+            ...(it.prominent
+              ? {
+                  background: "var(--paper)",
+                  color: it.isActive ? "var(--ink)" : "var(--ink-soft)",
+                  border: "1px solid var(--paper-edge)",
+                  boxShadow: "var(--neu-raised)",
+                }
+              : {}),
+            textDecoration: "none",
+          }}
         >
           {it.icon}
           {it.badge !== undefined && (

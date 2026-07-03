@@ -551,6 +551,7 @@ async function runChatAttachmentSurface(browser, baseUrl, evidence) {
   const imageCall = await page.evaluate(() => window.__qa.calls.find((call) => call.name === "invoke.run"));
   assert.equal(imageCall.payload.images.length, 1);
   assert.equal(imageCall.payload.images[0].mediaType, "image/png");
+  assert.equal(imageCall.payload.images[0].name, "qa-small.png");
   assert.ok(imageCall.payload.images[0].data.length > 10);
 
   const alertMessage = await new Promise(async (resolve) => {
@@ -583,6 +584,7 @@ async function runChatPasteDropAttachmentSurface(browser, baseUrl, evidence) {
   const pasteCall = await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "invoke.run")[0]);
   assert.equal(pasteCall.payload.images.length, 1);
   assert.equal(pasteCall.payload.images[0].mediaType, "image/png");
+  assert.equal(pasteCall.payload.images[0].name, "qa-paste.png");
 
   await page.waitForTimeout(100);
   await dispatchImageDrop(page, "qa-drop.png");
@@ -592,6 +594,7 @@ async function runChatPasteDropAttachmentSurface(browser, baseUrl, evidence) {
   const dropCall = await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "invoke.run")[1]);
   assert.equal(dropCall.payload.images.length, 1);
   assert.equal(dropCall.payload.images[0].mediaType, "image/png");
+  assert.equal(dropCall.payload.images[0].name, "qa-drop.png");
 
   await finishPage(context, page, errors, evidence, "chat-paste-drop-attachments-surface");
 }
