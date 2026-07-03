@@ -8,7 +8,7 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { ProviderUsage, UsageWindow } from "../../shared/types";
-import { postForm, toResetMs } from "./util";
+import { postForm, postJson, toResetMs } from "./util";
 
 const CODE_ASSIST = "https://cloudcode-pa.googleapis.com/v1internal";
 // gemini-cli가 배포하는 공개 installed-app OAuth 클라이언트 상수.
@@ -90,26 +90,13 @@ async function refreshGeminiToken(creds: GeminiCreds): Promise<string | null> {
   }
 }
 
+// net.fetch 경유(postJson) — raw Node fetch는 GUI 프로세스에서 시스템 프록시를 안 타
+// 터미널은 되는데 앱만 "fetch failed" 나는 머신이 있다(usage/util getJson과 동일 함정).
 async function post(method: string, body: unknown, token: string): Promise<Record<string, unknown>> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 15000);
-  try {
-    const res = await fetch(`${CODE_ASSIST}:${method}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "User-Agent": "Agentlas/1.0",
-      },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return (await res.json()) as Record<string, unknown>;
-  } finally {
-    clearTimeout(timer);
-  }
+  return (await postJson(`${CODE_ASSIST}:${method}`, body, {
+    Authorization: `Bearer ${token}`,
+    "User-Agent": "Agentlas/1.0",
+  })) as Record<string, unknown>;
 }
 
 function prettyModel(model: string): string {

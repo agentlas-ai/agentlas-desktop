@@ -24,18 +24,25 @@ interface TokenCandidate {
 
 // 후보 전부 수집(keychain 우선, 파일 폴백) — 첫 후보만 쓰면 파일에 남은 옛 만료 토큰이
 // keychain의 새 토큰을 영원히 가리는 함정("재로그인해도 fetch failed")이 생긴다.
-async function readClaudeTokens(): Promise<TokenCandidate[]> {
+async function readClaudeTokens(): Promise<{ candidates: TokenCandidate[]; keychainBlocked: boolean }> {
   const items: Array<{ item: Record<string, unknown>; source: string }> = [];
+  // "항목이 없다"(=진짜 미로그인)와 "GUI 프로세스가 키체인 접근을 거부당함/응답 못 받음"을 구분한다 —
+  // 후자를 null(미연결)로 삼키면 대시보드가 영원히 "연결됨"만 보여주고 사용량 바가 안 뜬다.
+  let keychainBlocked = false;
   if (process.platform === "darwin") {
     try {
       const { stdout } = await execFileP(
         "security",
         ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
-        { timeout: 5000 },
+        // GUI 앱 최초 접근은 macOS 키체인 허용 다이얼로그가 뜬다 — 5초 타임아웃이면 사용자가
+        // "허용"을 누르기 전에 죽어 영구 실패처럼 보인다. 다이얼로그 응답 여유를 준다.
+        { timeout: 20_000 },
       );
       items.push({ item: JSON.parse(stdout), source: "keychain" });
-    } catch {
-      // 키체인 항목 없음/거부 — 파일 폴백
+    } catch (err) {
+      // exit 44("could not be found") = 항목 없음(정상 미로그인). 그 외(거부/타임아웃/잠김)는 접근 차단.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/could not be found/i.test(msg)) keychainBlocked = true;
     }
   }
   for (const name of [".credentials.json", "credentials.json"]) {
@@ -63,7 +70,7 @@ async function readClaudeTokens(): Promise<TokenCandidate[]> {
     const exp = Number(rawExp);
     out.push({ token, expiresAt: Number.isFinite(exp) && exp > 0 ? exp : null, source });
   }
-  return out;
+  return { candidates: out, keychainBlocked };
 }
 
 // 안정 id → 영문 기본 라벨. 표시 로컬라이즈는 렌더러가 kind/model로 재계산.
@@ -76,9 +83,7 @@ const LABELS: Record<string, string> = {
 };
 
 export async function getClaudeUsage(): Promise<ProviderUsage | null> {
-  const candidates = await readClaudeTokens();
-  // 토큰 없음 = 미연결 → 스냅샷에서 제외 (연결 칩은 runtime.detect가 담당)
-  if (!candidates.length) return null;
+  const { candidates, keychainBlocked } = await readClaudeTokens();
 
   const base = {
     provider: "claude-code",
@@ -86,6 +91,12 @@ export async function getClaudeUsage(): Promise<ProviderUsage | null> {
     label: "Claude Code",
     fetchedAt: Date.now(),
   };
+  // 토큰 후보 0 + 키체인 접근 차단 = 미연결이 아니라 "조회 불가" — 정직하게 표면화(재시도/재로그인 액션).
+  if (!candidates.length && keychainBlocked) {
+    return { ...base, status: "error", windows: [], error: "keychain_blocked" };
+  }
+  // 토큰 없음 = 미연결 → 스냅샷에서 제외 (연결 칩은 runtime.detect가 담당)
+  if (!candidates.length) return null;
 
   // 만료 안 된 후보만 — 전부 만료면 재로그인 안내(auth_expired).
   const now = Date.now();

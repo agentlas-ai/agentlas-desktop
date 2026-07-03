@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { detectRuntimes, setActiveRuntime } from "./runtime/detect";
+import { clearDetectCache, detectRuntimes, setActiveRuntime } from "./runtime/detect";
 import { listRuntimeModels } from "./runtime/providers";
 import { installCli, openCliLogin, updateCli, type InstallableCli } from "./runtime/install-cli";
 import { listRuntimeCommands } from "./runtime/commands";
@@ -130,7 +130,7 @@ import {
 import { claimQuest, listQuests } from "./quests";
 import { listMemoryEntriesForAgentUi } from "./memory/store";
 import { getDreamingStatus, setDreamingEnabled } from "./memory/dreaming";
-import { getUsageSnapshot } from "./usage";
+import { getUsageSnapshot, invalidateUsage } from "./usage";
 import { listPendingConfirmations } from "./confirm";
 import { addProjectOntologySource, getProjectOntologyStatus } from "./ontology/project-runtime";
 import {
@@ -604,6 +604,11 @@ export function registerIpcHandlers(): void {
 
   // ── usage (LLM 엔진 사용량 — 프로바이더 OAuth usage) ─────
   ipcMain.handle("usage:snapshot", (_e, opts?: { force?: boolean }) => getUsageSnapshot(opts));
+  // 재로그인/재시도 시 렌더러가 명시 무효화 — 낡은 lastResult·429 백오프가 새 토큰 조회를 가리지 않게.
+  ipcMain.handle("usage:invalidate", (_e, providerId?: string) => {
+    invalidateUsage(typeof providerId === "string" && providerId ? providerId : undefined);
+    clearDetectCache();
+  });
 
   // ── billing (Agentlas Hub 크레딧 — 구독/렌트수익 2계좌 + 일방 전송) ─────
   ipcMain.handle("billing:getCredits", () => getBillingCredits());
@@ -649,7 +654,13 @@ export function registerIpcHandlers(): void {
     setActiveRuntime(selection),
   );
   ipcMain.handle("runtime:installCli", (_e, kind: InstallableCli) => installCli(kind));
-  ipcMain.handle("runtime:openCliLogin", (_e, kind: InstallableCli) => openCliLogin(kind));
+  ipcMain.handle("runtime:openCliLogin", (_e, kind: InstallableCli) => {
+    // 로그인 터미널을 여는 시점에 감지/사용량 캐시를 즉시 무효화 — 로그인 완료가
+    // watchRecovery 폴링(및 그 이후 일반 폴링)에 재시작 없이 바로 반영되게 한다.
+    clearDetectCache();
+    if (kind === "claude-code" || kind === "codex" || kind === "gemini") invalidateUsage(kind);
+    return openCliLogin(kind);
+  });
   ipcMain.handle("runtime:updateCli", (_e, kind: InstallableCli) => updateCli(kind));
   ipcMain.handle("runtime:listCommands", () => listRuntimeCommands());
   ipcMain.handle(

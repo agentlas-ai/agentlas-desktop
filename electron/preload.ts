@@ -52,6 +52,7 @@ const api: AgentlasIpc = {
   },
   usage: {
     snapshot: (opts?: { force?: boolean }) => ipcRenderer.invoke("usage:snapshot", opts),
+    invalidate: (providerId?: string) => ipcRenderer.invoke("usage:invalidate", providerId),
   },
   billing: {
     getCredits: () => ipcRenderer.invoke("billing:getCredits"),

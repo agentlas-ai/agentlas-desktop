@@ -52,6 +52,7 @@ import { resolveAgentGroupForRuntime } from "../store/agent-groups";
 import { recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
 import { curateReply } from "../memory/curator";
+import { harvestCompactionSummaries } from "../memory/compaction-harvest";
 import { MEMORY_EMITTER_BLOCK } from "../architecture/manifest";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
@@ -1060,6 +1061,27 @@ export async function runMcpInvocation(
       displayText = cleanedText || displayText;
     } catch (err) {
       console.error("[architecture] curateReply failed:", err);
+    }
+
+    // 컴팩션 요약 수집 — Claude Code가 이번 세션에서 컨텍스트를 자동 압축했다면 그 요약을
+    // 큐레이터 인테이크(session/hypothesis) 티어로만 흘려보낸다. 심사·승격은 Curator 에이전트 몫.
+    // 실패-무해: 트랜스크립트가 없거나(다른 런타임) 요약이 없으면 조용히 0건.
+    try {
+      if (result.sessionId) {
+        harvestCompactionSummaries({
+          sessionId: result.sessionId,
+          cwd: workingFolder,
+          ctx: {
+            projectPath: activePath,
+            projectId: chat.projectId ?? null,
+            agentId: chat.agentId,
+            chatId: chat.id,
+            cwdAtRequest: workingFolder,
+          },
+        });
+      }
+    } catch (err) {
+      console.error("[architecture] harvestCompactionSummaries failed:", err);
     }
 
     // App generation from chat is disabled: do not append Apps CTAs or route

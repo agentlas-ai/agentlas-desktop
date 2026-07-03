@@ -11,6 +11,7 @@ import { getDb } from "../store/db";
 import { setRoute, listRoutes, type RuntimeLabel } from "./routes";
 import { upsertLocalTeamFirm } from "../store/firms";
 import { analyzeFolder } from "./org-resolver";
+import { scanAgentFolder, type FolderScan, type ScanMember } from "./folder-scan";
 import { saveResolvedOrg } from "../store/org-spec";
 import { detectEnvRequirementsFromFolder } from "./env-detect";
 import type { FirmOrgNode, InstalledAgent, InstalledFirm, ResolvedOrg } from "../../shared/types";
@@ -419,6 +420,7 @@ function registerTeamAsFirm(
   name: string,
   tagline: string,
   divisions?: ResolvedOrg["divisions"],
+  scanMembers?: ScanMember[],
 ): InstalledFirm | null {
   // 최후 방어선: 정크/공유 폴더(trash 등)는 명시적 팀 마커가 없으면 회사로 등록하지 않는다.
   if (JUNK_DIRS.test(path.basename(dir).toLowerCase()) && !hasTeamMarkers(dir)) {
@@ -434,6 +436,12 @@ function registerTeamAsFirm(
         orgChart.push({ agentSlug: `${dSlug}-${s.id}`, agentId: "", role: s.role || s.name, reportsTo: dSlug });
       }
     }
+  } else if (scanMembers && scanMembers.length > 0) {
+    // 결정적 스캐너가 찾은 구성원 — LLM 없이도 조직도에 구성원이 반드시 들어간다.
+    orgChart = [
+      { agentSlug: slug, agentId, role: "CEO", reportsTo: null },
+      ...scanMembers.map((m) => ({ agentSlug: `${slug}-${m.id}`, agentId: "", role: m.role || m.name, reportsTo: slug })),
+    ];
   } else {
     const depts = readTeamDepartments(dir);
     orgChart = [
@@ -462,11 +470,16 @@ export async function importLocalFolder(
   // 그 자체로 에이전트/팀이 아니면 재귀로 실제 루트(들)를 찾는다.
   const roots = locateAgentRoots(selected);
   if (roots.length === 0) {
-    throw new Error(
-      ko
-        ? "이 폴더 안에서 에이전트를 찾지 못했어요. 에이전트 폴더나 그 상위 폴더를 골라 주세요."
-        : "Couldn't find an agent inside this folder. Pick an agent folder or its parent folder.",
-    );
+    // 최후 폴백: 규격 마커는 없지만 최상위에 마크다운이 있으면 "싱글 에이전트, 엔트리=최상위 md"로 수용.
+    const loose = scanAgentFolder(selected);
+    if (!loose.entryFile && loose.members.length === 0) {
+      throw new Error(
+        ko
+          ? "이 폴더 안에서 에이전트를 찾지 못했어요. 에이전트 폴더나 그 상위 폴더를 골라 주세요."
+          : "Couldn't find an agent inside this folder. Pick an agent folder or its parent folder.",
+      );
+    }
+    roots.push(selected);
   }
   const selectedIsAgenty = isAgentyDir(selected);
   const junky = JUNK_DIRS.test(path.basename(selected).toLowerCase());
@@ -477,11 +490,17 @@ export async function importLocalFolder(
 
   const labels = detectRuntimeLabels(dir);
   const runtime = labels[0];
-  const name = readName(dir);
+  // 결정적 스캐너: manifest roster → 컨테이너 디렉토리 → 정의 하위폴더 → 중첩 → 싱글 폴백.
+  // LLM 유무와 무관하게 구성원/엔트리를 반드시 찾아내는 기반 계층.
+  const scan: FolderScan = scanAgentFolder(dir);
+  // 팀 이름: manifest name → 정체성 파일 헤딩 → 폴더명 (CLAUDE.md 어댑터 헤딩은 최후순위로 걸러짐)
+  const name = scan.manifestName || readName(dir);
   // 활성 LLM(CLI/BYOK)으로 폴더를 인식 — 단일 에이전트 vs 팀 + 3-tier 구조. 하드코딩 폴더명 매칭 아님.
-  // 런타임이 없거나 실패하면 null → 휴리스틱(detectKind)으로 폴백.
+  // 런타임이 없거나 실패하면 null → 결정적 스캐너/휴리스틱(detectKind)으로 폴백.
   const analysis = await analyzeFolder(dir, name).catch(() => null);
-  let kind = analysis ? analysis.kind : detectKind(dir);
+  let kind = analysis ? analysis.kind : scan.kind === "team" ? "team" : detectKind(dir);
+  // 결정적 스캔이 구성원 2+를 찾았으면 팀으로 확정 (LLM이 "agent"로 오판해도 구성원을 버리지 않는다).
+  if (scan.members.length >= 2) kind = "team";
   // 근본 가드: 정크/공유 폴더(trash 등)가 단지 ≥2개의 에이전트를 담고 있다는 이유만으로 회사로
   // 잡히는 걸 막는다. 명시적 팀 마커(TEAM.md/ceo 등)가 없으면 회사가 아니라 단일 에이전트로 본다.
   // (analysis.kind가 detectKind 가드를 우회하므로 여기 결정 지점에서 한 번 더 막아야 한다.)
@@ -494,7 +513,9 @@ export async function importLocalFolder(
   // 단일 에이전트 실체가 있으면 에이전트로 격하, 그마저 없으면 명확한 메시지로 중단한다.
   if (kind === "team") {
     const teamHasMembers =
-      (analysis?.divisions?.length ?? 0) > 0 || readTeamDepartments(dir).length > 0;
+      (analysis?.divisions?.length ?? 0) > 0 ||
+      scan.members.length > 0 ||
+      readTeamDepartments(dir).length > 0;
     if (!teamHasMembers) {
       if (hasAgentSubstance(dir)) {
         kind = "agent";
@@ -512,6 +533,7 @@ export async function importLocalFolder(
     kind === "team"
       ? buildTeamSystemPrompt(dir, name)
       : readFirst(dir, ["system-prompt.md", "soul.md", "AGENT.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md"]) ||
+        (scan.entryFile ? readFirst(dir, [scan.entryFile]) : "") ||
         `You are ${name}, a locally imported agent.`;
   const envRequirements = detectEnvRequirementsFromFolder(dir, systemPrompt);
   const envReqsJson = JSON.stringify(envRequirements);
@@ -571,14 +593,27 @@ export async function importLocalFolder(
 
   // 팀이면 FIRMS에도 등록 → 사이드바 FIRMS 목록에 뜨고 "Command CEO" 가능.
   if (kind === "team") {
-    const firm = registerTeamAsFirm(dir, id, slug, name, tagline, analysis?.divisions);
+    const firm = registerTeamAsFirm(dir, id, slug, name, tagline, analysis?.divisions, scan.members);
     // LLM이 구조를 인식했으면 ResolvedOrg로 저장 → 오케스트레이터/조직도가 즉시 진짜 3-tier로 동작.
+    // LLM 분석이 없어도 결정적 스캔 구성원으로 ResolvedOrg를 저장한다 — 재임포트 시 과거의
+    // 빈/스테일 orgspec 캐시를 덮어써 "구성원 없음"이 남지 않게 한다.
     // 원본 폴더는 절대 수정하지 않는다 (앱 설정 + .agentlas sidecar에만 기록).
-    if (firm && analysis && analysis.divisions.length > 0) {
+    const divisions: ResolvedOrg["divisions"] =
+      analysis && analysis.divisions.length > 0
+        ? analysis.divisions
+        : scan.members.map((m) => ({
+            id: m.id,
+            name: m.name,
+            role: m.role,
+            prompt: m.promptFileRef ? readFirst(dir, [m.promptFileRef], 8000) || undefined : undefined,
+            promptFileRef: m.promptFileRef,
+            specialists: [],
+          }));
+    if (firm && divisions.length > 0) {
       const org: ResolvedOrg = {
         source: "resolver",
         ceo: { id, name, role: "CEO", agentId: id, prompt: systemPrompt },
-        divisions: analysis.divisions,
+        divisions,
         sourcePath: dir,
         resolvedAt: now,
       };

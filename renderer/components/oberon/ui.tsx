@@ -46,7 +46,7 @@ export const OB_VARS: CSSProperties = {
   ["--shadow-1" as never]: "0 1px 0 rgba(11,11,15,0.04), 0 1px 2px rgba(11,11,15,0.03)",
   ["--neu-raised" as never]: "none",
   ["--font-display" as never]:
-    "'Inter Tight', 'Pretendard Variable', 'Pretendard', 'SF Pro Display', -apple-system, 'Noto Sans KR', system-ui, sans-serif",
+    "'Inter Tight', 'Pretendard Variable', 'Pretendard', 'SF Pro Display', -apple-system, 'Segoe UI Variable Display', 'Segoe UI', 'Noto Sans KR', 'Malgun Gothic', system-ui, sans-serif",
   color: "#0B0B0F",
   background: "#FBFBFD",
 };

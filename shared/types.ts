@@ -2980,6 +2980,9 @@ export interface AgentlasIpc {
    *  5시간·주간(7일)·모델별·월 크레딧 조회. main에서 60초 캐시; force로 강제 갱신. */
   usage: {
     snapshot: (opts?: { force?: boolean }) => Promise<UsageSnapshot>;
+    /** 재로그인/재시도 직후 캐시(lastResult·429 백오프·감지 캐시) 명시 무효화 — 새 토큰 즉시 반영.
+     *  (구 preload 호환을 위해 optional.) */
+    invalidate?: (providerId?: string) => Promise<void>;
   };
   /** Agentlas Hub 크레딧 — 구독(사용 가능) 잔액과 렌트수익(이동 가능) 잔액을 함께 조회하고,
    *  렌트수익 → 구독 일방 전송을 수행한다. 세션 쿠키로 Hub HTTP API를 main에서 호출. */

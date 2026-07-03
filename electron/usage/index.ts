@@ -106,6 +106,21 @@ function localFallback(id: string, base: ProviderUsage | null, now: number): Pro
   };
 }
 
+/** 재로그인 등 자격증명이 바뀐 직후 호출 — 스냅샷 캐시와 프로바이더별 lastResult/backoff를
+ *  즉시 무효화해, 다음 조회(force든 일반 폴링이든)가 새 토큰으로 서버를 실제로 다시 치게 한다.
+ *  (이게 없으면 429 백오프(최대 15분)·lastResult 체인이 로그인 성공을 가려 "앱 재시작해야 반영"이 된다.)
+ *  lastGood(마지막 정상 수치)은 지우지 않는다 — 여전히 유효한 표시 폴백이다. */
+export function invalidateUsage(providerId?: string): void {
+  cache = null;
+  if (providerId) {
+    lastResult.delete(providerId);
+    backoffUntil.delete(providerId);
+  } else {
+    lastResult.clear();
+    backoffUntil.clear();
+  }
+}
+
 async function fetchProvider(
   id: string,
   fn: () => Promise<ProviderUsage | null>,

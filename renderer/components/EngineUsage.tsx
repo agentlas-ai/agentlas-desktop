@@ -311,7 +311,17 @@ export function EngineUsage() {
   function statusText(e: EngineDef, u: ProviderUsage | undefined): string {
     if (e.auth === "apikey") return ko ? "키 과금" : "key-billed";
     if (e.auth === "local") return ko ? "로컬 · 무제한" : "local · unlimited";
+    // gemini 슬롯이 Antigravity(agy)로만 연결된 경우: agy는 ~/.gemini/oauth_creds.json을 만들지 않아
+    // usage 어댑터가 구조적으로 조회할 수 없다 — "연결됨"과 구분되는 정직한 라벨로 알린다.
+    // (스냅샷 로딩 전 깜빡임 방지를 위해 snap 수신 후에만.)
+    if (e.id === "gemini" && snap && !u) {
+      return ko ? "연결됨 · 사용량 미제공(Antigravity)" : "connected · usage n/a (Antigravity)";
+    }
     if (u?.status === "error") {
+      if (u.error === "keychain_blocked") {
+        // macOS 키체인 접근이 거부/차단됨 — 로그인 문제가 아니라 앱→키체인 권한 문제.
+        return ko ? "키체인 접근 차단 — 허용 필요" : "keychain access blocked — allow access";
+      }
       if (/auth_expired|HTTP 40[13]/i.test(u.error ?? "")) {
         return ko ? "로그인 만료 — 재로그인 필요" : "login expired — re-login";
       }
@@ -370,6 +380,8 @@ export function EngineUsage() {
                   <span style={{ display: "inline-flex", gap: 6, flexShrink: 0 }}>
                     <button
                       onClick={() => {
+                        // 명시 무효화 후 조회 — 낡은 lastResult/백오프가 재시도를 가리지 않게.
+                        void ipc()?.usage.invalidate?.(e.id)?.catch(() => undefined);
                         void loadConnections();
                         void loadUsage(true);
                       }}

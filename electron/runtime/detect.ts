@@ -38,7 +38,8 @@ function cloneRuntimeStatuses(list: RuntimeStatus[]): RuntimeStatus[] {
   }));
 }
 
-function clearDetectCache(): void {
+/** 감지 캐시 무효화 — 활성 런타임 변경·CLI 재로그인 직후 등 "연결" 칩이 낡으면 안 되는 시점에 호출. */
+export function clearDetectCache(): void {
   detectCache = null;
 }
 

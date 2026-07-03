@@ -76,6 +76,33 @@ export async function postForm(
   }
 }
 
+/** 타임아웃 있는 JSON POST(JSON 본문/응답). non-2xx면 throw.
+ *  net.fetch 경유(pickFetch) — Gemini 어댑터가 raw Node fetch를 쓰면 프록시/보안장비 머신에서
+ *  GUI만 "fetch failed"가 나는 함정(getJson과 동일 근본원인)이 재발한다. */
+export async function postJson(
+  url: string,
+  body: unknown,
+  headers: Record<string, string>,
+  timeoutMs = 15000,
+): Promise<unknown> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await pickFetch()(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json", ...headers },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    throw new Error(describeFetchError(err));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 타임아웃 있는 JSON GET. non-2xx면 throw. */
 export async function getJson(
   url: string,
