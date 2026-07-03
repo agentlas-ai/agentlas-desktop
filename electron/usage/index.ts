@@ -15,7 +15,9 @@ import { getClaudeUsage } from "./claude";
 import { getCodexUsage } from "./codex";
 import { getGeminiUsage } from "./gemini";
 
-const TTL_MS = 60_000;
+// 여러 위젯(EngineUsage·KeyStatusBanner·FleetSummaryStrip)이 각자 폴링해도 이 캐시로 묶여
+// 실제 네트워크 조회는 TTL당 프로바이더별 1회로 수렴한다. usage %는 분 단위로만 변하니 넉넉히.
+const TTL_MS = 120_000;
 const FORCE_MIN_MS = 10_000; // force여도 프로바이더당 최소 재조회 간격
 const LAST_GOOD_MAX_MS = 2 * 60 * 60_000; // 일시 장애 시 정상 스냅샷을 대신 보여줄 최대 나이(재시작·장기 429 커버)
 const BACKOFF_429_MS = 5 * 60_000; // rate-limit 맞으면 그 프로바이더만 쉰다

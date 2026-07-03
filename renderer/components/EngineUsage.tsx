@@ -17,7 +17,9 @@ import type {
   UsageWindow,
 } from "@/lib/types";
 
-const POLL_MS = 60_000;
+// 사용량 %는 몇 분 단위로만 변하고, 이 조회 엔드포인트는 rate limit이 짜다 —
+// 평상시 폴링은 넉넉히 잡아 429를 예방한다(수동 새로고침 버튼은 즉시 조회 유지).
+const POLL_MS = 180_000;
 const WARN_PCT = 80;
 const COLLAPSE_KEY = "agentlas.dash.usageCollapsed";
 
@@ -143,15 +145,19 @@ export function EngineUsage() {
       const api = ipc();
       if (!api) return;
       const gen = ++pollGen.current;
-      for (let i = 0; i < 36; i++) {
-        await new Promise((r) => setTimeout(r, 5000));
+      // 재로그인 완료 감지 폴링 — 예전엔 5초×36(3분간 usage 엔드포인트 폭격)이라 이 조회 자체가
+      // 429를 유발했다. 로그인 브라우저 왕복은 보통 20초+ 걸리므로 15초 간격으로 충분하고,
+      // 총 커버 시간(약 3분)은 유지하되 조회 횟수를 1/3로 줄인다.
+      for (let i = 0; i < 12; i++) {
+        await new Promise((r) => setTimeout(r, 15_000));
         if (pollGen.current !== gen) return;
         try {
           const s = await api.usage.snapshot({ force: true });
           if (pollGen.current !== gen) return;
           setSnap(s);
           const p = s.providers.find((x) => x.provider === providerId);
-          if (p && p.status !== "error") {
+          // 429(일시 제한)는 '아직 로그인 안 됨'이 아니다 — 계속 폴링하면 제한만 길어지니 멈춘다.
+          if (p && (p.status !== "error" || /HTTP 429/.test(p.error ?? ""))) {
             void loadConnections();
             return;
           }
