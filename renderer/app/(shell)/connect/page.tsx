@@ -10,6 +10,7 @@ import {
   IconNetwork,
   IconRefresh,
   IconRoute,
+  IconSettings,
   IconTrash,
   IconUsers,
 } from "@/components/Icon";
@@ -28,6 +29,7 @@ import type {
 type TargetKind = "group" | "org" | "multi" | "single";
 type SessionMode = "shared_chat" | "per_user";
 type ConnectLogTone = "info" | "success" | "error";
+type Translate = ReturnType<typeof useT>["t"];
 
 interface ConnectTarget {
   id: string;
@@ -50,33 +52,33 @@ interface ConnectLogRow {
   tone: ConnectLogTone;
 }
 
-function kindLabel(kind: TargetKind, ko: boolean) {
-  if (kind === "group") return ko ? "저장한 조합" : "Saved group";
-  if (kind === "org") return ko ? "조직도" : "Organization";
-  if (kind === "multi") return ko ? "팀 에이전트" : "Team agent";
-  return ko ? "개별 에이전트" : "Single agent";
+function kindLabel(kind: TargetKind, t: Translate) {
+  if (kind === "group") return t("connect.kind.group");
+  if (kind === "org") return t("connect.kind.org");
+  if (kind === "multi") return t("connect.kind.multi");
+  return t("connect.kind.single");
 }
 
-function modeLabel(target: ConnectTarget | undefined, ko: boolean) {
-  if (!target) return ko ? "대상을 고르세요" : "Choose a target";
-  if (target.kind === "single") return ko ? "이 에이전트 전용 봇 포트" : "Dedicated bot port";
-  return ko ? "오케스트레이터 봇 포트" : "Orchestrator bot port";
+function modeLabel(target: ConnectTarget | undefined, t: Translate) {
+  if (!target) return t("connect.mode.choose");
+  if (target.kind === "single") return t("connect.mode.single");
+  return t("connect.mode.orchestrator");
 }
 
-function routeModeLabel(target: ConnectTarget, ko: boolean) {
-  if (target.kind === "single") return ko ? "전용 봇" : "Dedicated bot";
-  return ko ? "오케스트레이터" : "Orchestrator";
+function routeModeLabel(target: ConnectTarget, t: Translate) {
+  if (target.kind === "single") return t("connect.route.single");
+  return t("connect.route.orchestrator");
 }
 
-function statusLabel(status: TelegramConnectStatus, enabled: boolean, ko: boolean) {
-  if (!enabled) return ko ? "꺼짐" : "Off";
-  if (status === "waiting_for_chat") return ko ? "Telegram 방 기다림" : "Waiting for chat";
-  if (status === "chat_paired") return ko ? "방 연결됨" : "Chat paired";
-  if (status === "test_passed") return ko ? "테스트 통과" : "Test passed";
-  if (status === "running") return ko ? "켜짐" : "Running";
-  if (status === "failed") return ko ? "확인 필요" : "Needs attention";
-  if (status === "bot_verified") return ko ? "봇 확인됨" : "Bot verified";
-  return ko ? "준비 중" : "Draft";
+function statusLabel(status: TelegramConnectStatus, enabled: boolean, t: Translate) {
+  if (!enabled) return t("connect.status.off");
+  if (status === "waiting_for_chat") return t("connect.status.waiting");
+  if (status === "chat_paired") return t("connect.status.chat_paired");
+  if (status === "test_passed") return t("connect.status.test_passed");
+  if (status === "running") return t("connect.status.running");
+  if (status === "failed") return t("connect.status.failed");
+  if (status === "bot_verified") return t("connect.status.bot_verified");
+  return t("connect.status.draft");
 }
 
 function statusTone(status: TelegramConnectStatus, enabled: boolean) {
@@ -87,12 +89,12 @@ function statusTone(status: TelegramConnectStatus, enabled: boolean) {
   return "waiting";
 }
 
-function sessionLabel(binding: TelegramConnectBinding, ko: boolean) {
-  if (!binding.enabled) return ko ? "세션 꺼짐" : "Session off";
-  if (!binding.hasToken) return ko ? "비밀문자 없음" : "Missing token";
-  if (binding.sessionRunning) return ko ? "세션 켜짐" : "Session on";
-  if (binding.status === "failed") return ko ? "복구 필요" : "Needs restart";
-  return ko ? "세션 준비 중" : "Starting";
+function sessionLabel(binding: TelegramConnectBinding, t: Translate) {
+  if (!binding.enabled) return t("connect.session.off");
+  if (!binding.hasToken) return t("connect.session.missing_token");
+  if (binding.sessionRunning) return t("connect.session.on");
+  if (binding.status === "failed") return t("connect.session.needs_restart");
+  return t("connect.session.starting");
 }
 
 function sessionTone(binding: TelegramConnectBinding) {
@@ -102,10 +104,10 @@ function sessionTone(binding: TelegramConnectBinding) {
   return "waiting";
 }
 
-function sessionToggleLabel(binding: TelegramConnectBinding, ko: boolean) {
-  if (binding.enabled && binding.sessionRunning) return ko ? "끄기" : "Stop";
-  if (binding.enabled) return ko ? "다시 켜기" : "Restart";
-  return ko ? "켜기" : "Start";
+function sessionToggleLabel(binding: TelegramConnectBinding, t: Translate) {
+  if (binding.enabled && binding.sessionRunning) return t("connect.toggle.stop");
+  if (binding.enabled) return t("connect.toggle.restart");
+  return t("connect.toggle.start");
 }
 
 function friendlyError(err: unknown) {
@@ -127,8 +129,7 @@ function logId() {
 }
 
 export default function ConnectPage() {
-  const { locale } = useT();
-  const ko = locale === "ko";
+  const { locale, t } = useT();
   const tokenInputRef = useRef<HTMLInputElement | null>(null);
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
@@ -196,14 +197,12 @@ export default function ConnectPage() {
         targetId: group.id,
         kind: "group",
         name: group.name,
-        subtitle: ko ? "이미 묶어둔 에이전트 조합" : "Saved agent group",
+        subtitle: t("connect.target.group.subtitle"),
         description:
           group.description ||
-          (ko
-            ? "한 Telegram 방에서 여러 에이전트가 역할을 나눠 답합니다."
-            : "Several agents share one Telegram room and split the work."),
-        source: ko ? "저장한 조합" : "Saved group",
-        routeHint: ko ? "대표 봇 하나가 메시지를 받고 팀 안에서 알아서 나눕니다." : "One bot receives messages and the group routes them internally.",
+          t("connect.target.group.description"),
+        source: t("connect.target.group.source"),
+        routeHint: t("connect.target.group.route"),
         sessionMode: "shared_chat",
         readiness: group.warningCount > 0 ? "review" : "ready",
       });
@@ -217,14 +216,12 @@ export default function ConnectPage() {
         targetId: firm.id,
         kind: "org",
         name: loc.name,
-        subtitle: ko ? "대시보드 조직도 그대로 연결" : "Connect the dashboard org chart",
+        subtitle: t("connect.target.org.subtitle"),
         description:
           loc.tagline ||
-          (ko
-            ? "회사처럼 나뉜 역할을 Telegram 방 하나에 연결합니다."
-            : "Connect a company-style team to one Telegram room."),
-        source: ko ? "조직도" : "Organization",
-        routeHint: ko ? "오케스트레이터가 먼저 보고 필요한 에이전트에게 넘깁니다." : "The orchestrator receives first, then hands off to the right agent.",
+          t("connect.target.org.description"),
+        source: t("connect.target.org.source"),
+        routeHint: t("connect.target.org.route"),
         sessionMode: "shared_chat",
         readiness: "ready",
       });
@@ -241,24 +238,12 @@ export default function ConnectPage() {
         targetId: agent.id,
         kind: isTeam ? "multi" : "single",
         name: loc.name,
-        subtitle: isTeam ? (ko ? "에이전트 팀" : "Agent team") : (ko ? "에이전트 하나" : "One agent"),
+        subtitle: isTeam ? t("connect.target.team.subtitle") : t("connect.target.single.subtitle"),
         description:
           loc.tagline ||
-          (isTeam
-            ? ko
-              ? "이 팀을 Telegram 방에 연결합니다."
-              : "Connect this team to a Telegram room."
-            : ko
-              ? "이 에이전트만 답하는 Telegram 봇을 만듭니다."
-              : "Create a Telegram bot that only routes to this agent."),
-        source: agent.localPath ? (ko ? "가져온 에이전트" : "Imported") : (ko ? "내 에이전트" : "Installed"),
-        routeHint: isTeam
-          ? ko
-            ? "팀 안에서 알아서 역할을 나눕니다."
-            : "The team splits the work internally."
-          : ko
-            ? "모든 메시지가 이 에이전트에게 갑니다."
-            : "Every message goes to this agent.",
+          (isTeam ? t("connect.target.team.description") : t("connect.target.single.description")),
+        source: agent.localPath ? t("connect.target.imported") : t("connect.target.installed"),
+        routeHint: isTeam ? t("connect.target.team.route") : t("connect.target.single.route"),
         sessionMode: isTeam ? "shared_chat" : "per_user",
         readiness: "ready",
       });
@@ -266,7 +251,7 @@ export default function ConnectPage() {
 
     const order: Record<TargetKind, number> = { org: 0, group: 1, multi: 2, single: 3 };
     return rows.sort((a, b) => order[a.kind] - order[b.kind] || a.name.localeCompare(b.name));
-  }, [agents, firms, groups, ko, locale]);
+  }, [agents, firms, groups, locale, t]);
 
   useEffect(() => {
     if (!targets.length) {
@@ -289,27 +274,27 @@ export default function ConnectPage() {
 
   const targetSections = useMemo(() => {
     const labels: Array<{ key: TargetKind; label: string }> = [
-      { key: "org", label: ko ? "조직도" : "Organizations" },
-      { key: "group", label: ko ? "저장한 조합" : "Saved groups" },
-      { key: "multi", label: ko ? "팀 에이전트" : "Team agents" },
-      { key: "single", label: ko ? "개별 에이전트" : "Single agents" },
+      { key: "org", label: t("connect.section.org") },
+      { key: "group", label: t("connect.section.group") },
+      { key: "multi", label: t("connect.section.multi") },
+      { key: "single", label: t("connect.section.single") },
     ];
     return labels
       .map((section) => ({ ...section, rows: targets.filter((target) => target.kind === section.key) }))
       .filter((section) => section.rows.length > 0);
-  }, [ko, targets]);
+  }, [t, targets]);
 
   const openManualToken = useCallback(() => {
     setManualOpen(true);
     window.setTimeout(() => tokenInputRef.current?.focus(), 0);
-    setToast(ko ? "고급 입력을 열었습니다. 보통은 자동 연결만 누르면 됩니다." : "Advanced input opened. Auto connect is usually enough.");
-  }, [ko]);
+    setToast(t("connect.toast.advanced_open"));
+  }, [t]);
 
   const handleAutoConnect = useCallback(async () => {
     const api = ipc();
     if (!api || !selected) return;
     setBusy("auto");
-    appendLog(ko ? `${selected.name} Telegram 자동 연결을 시작했습니다.` : `Started Telegram auto-connect for ${selected.name}.`);
+    appendLog(t("connect.log.auto_start", { name: selected.name }));
     try {
       const result = await api.telegram.autoConnect({
         targetKind: selected.targetKind,
@@ -325,17 +310,13 @@ export default function ConnectPage() {
     } finally {
       setBusy(null);
     }
-  }, [appendLog, ko, refresh, selected]);
+  }, [appendLog, refresh, selected, t]);
 
   const focusTokenInput = useCallback(() => {
     setManualOpen(true);
     tokenInputRef.current?.focus();
-    setToast(
-      ko
-        ? "대상을 고르고 BotFather 비밀문자를 붙여넣으면 바로 연결됩니다."
-        : "Choose a target, paste the BotFather token, and Agentlas will connect it.",
-    );
-  }, [ko]);
+    setToast(t("connect.toast.manual_hint"));
+  }, [t]);
 
   const handleStart = useCallback(async () => {
     const api = ipc();
@@ -346,7 +327,7 @@ export default function ConnectPage() {
       return;
     }
     setBusy("start");
-    appendLog(ko ? `${selected.name}에 비밀문자 직접 연결을 시작했습니다.` : `Started token setup for ${selected.name}.`);
+    appendLog(t("connect.log.manual_start", { name: selected.name }));
     try {
       const result = await api.telegram.start({
         targetKind: selected.targetKind,
@@ -364,10 +345,10 @@ export default function ConnectPage() {
     } finally {
       setBusy(null);
     }
-  }, [appendLog, botToken, focusTokenInput, ko, refresh, selected]);
+  }, [appendLog, botToken, focusTokenInput, refresh, selected, t]);
 
   const handleBindingAction = useCallback(
-    async (binding: TelegramConnectBinding, action: "open" | "test" | "resume" | "stop" | "remove") => {
+    async (binding: TelegramConnectBinding, action: "open" | "test" | "settings" | "resume" | "stop" | "remove") => {
       const api = ipc();
       if (!api) return;
       setBusy(`${action}:${binding.id}`);
@@ -377,32 +358,34 @@ export default function ConnectPage() {
           setToast(result.message);
           appendLog(result.message, "success");
         } else if (action === "test") {
-          appendLog(ko ? `${binding.targetName} 포트로 테스트 메시지를 보냅니다.` : `Sending a test through ${binding.targetName}.`);
+          appendLog(t("connect.log.test_start", { name: binding.targetName }));
           const result = await api.telegram.sendTest(binding.id);
           setToast(result.message);
           appendLog(result.message, "success");
           await refresh();
+        } else if (action === "settings") {
+          appendLog(t("connect.msg.bot_settings_start", { name: binding.targetName }));
+          const result = await api.telegram.configureBotSettings(binding.id);
+          setToast(result.message);
+          appendLog(result.message, result.ok ? "success" : "info");
+          await refresh();
         } else if (action === "resume") {
           const next = await api.telegram.resume(binding.id);
           const message = next.sessionRunning
-            ? ko
-              ? "Telegram 세션을 켰습니다. 이제 들어오는 메시지를 받을 수 있습니다."
-              : "Telegram session is on. Incoming messages can now be received."
-            : ko
-              ? "Telegram 세션을 켜려고 했지만 아직 준비 중입니다. 잠시 후 새로고침해보세요."
-              : "Telegram session is starting. Refresh in a moment.";
+            ? t("connect.msg.session_on")
+            : t("connect.msg.session_starting");
           setToast(message);
           appendLog(message, next.sessionRunning ? "success" : "info");
           await refresh();
         } else if (action === "stop") {
           await api.telegram.stop(binding.id);
-          const message = ko ? "이 Telegram 세션을 껐습니다." : "Telegram session turned off.";
+          const message = t("connect.msg.session_off");
           setToast(message);
           appendLog(message, "success");
           await refresh();
         } else {
           await api.telegram.remove(binding.id);
-          const message = ko ? "이 Telegram 포트를 삭제했습니다." : "Telegram port removed.";
+          const message = t("connect.msg.port_removed");
           setToast(message);
           appendLog(message, "success");
           await refresh();
@@ -415,7 +398,7 @@ export default function ConnectPage() {
         setBusy(null);
       }
     },
-    [appendLog, ko, refresh],
+    [appendLog, refresh, t],
   );
 
   return (
@@ -429,16 +412,12 @@ export default function ConnectPage() {
                 <IconAtSign size={16} />
                 Telegram
               </span>
-              <h1 id="connect-title">{ko ? "Telegram 연결" : "Telegram Connect"}</h1>
-              <p>
-                {ko
-                  ? "왼쪽에서 에이전트나 조직도를 고르면 오른쪽에 Telegram 봇 포트가 생깁니다. 로그인과 승인만 하면 나머지는 Agentlas가 처리합니다."
-                  : "Choose an agent or org chart on the left, then create a Telegram bot port on the right. You only log in and approve."}
-              </p>
+              <h1 id="connect-title">{t("connect.title")}</h1>
+              <p>{t("connect.intro")}</p>
             </div>
             <button className="connect-btn" type="button" onClick={() => void refresh()} disabled={loading}>
               <IconRefresh size={16} />
-              {ko ? "새로고침" : "Refresh"}
+              {t("connect.refresh")}
             </button>
           </section>
 
@@ -446,10 +425,10 @@ export default function ConnectPage() {
             <section className="connect-directory" aria-labelledby="connect-directory-title">
               <div className="connect-section-head">
                 <div>
-                  <p className="connect-kicker">{ko ? "선택" : "Choose"}</p>
-                  <h2 id="connect-directory-title">{ko ? "연결할 에이전트/조직도" : "Agents and org charts"}</h2>
+                  <p className="connect-kicker">{t("connect.choose.kicker")}</p>
+                  <h2 id="connect-directory-title">{t("connect.choose.title")}</h2>
                 </div>
-                <span>{loading ? (ko ? "불러오는 중" : "Loading") : ko ? `${targets.length}개` : `${targets.length} targets`}</span>
+                <span>{loading ? t("connect.loading") : t("connect.count.targets", { n: targets.length })}</span>
               </div>
 
               <div className="connect-directory-list">
@@ -472,10 +451,10 @@ export default function ConnectPage() {
                           <small>{target.description}</small>
                         </span>
                         <span className="connect-row-meta">
-                          <span>{kindLabel(target.kind, ko)}</span>
-                          <span>{routeModeLabel(target, ko)}</span>
+                          <span>{kindLabel(target.kind, t)}</span>
+                          <span>{routeModeLabel(target, t)}</span>
                         </span>
-                        <span className="connect-row-action">{selected?.id === target.id ? (ko ? "선택됨" : "Selected") : ko ? "선택" : "Choose"}</span>
+                        <span className="connect-row-action">{selected?.id === target.id ? t("connect.row.selected") : t("connect.row.choose")}</span>
                       </button>
                     ))}
                   </div>
@@ -483,8 +462,8 @@ export default function ConnectPage() {
                 {!loading && targets.length === 0 ? (
                   <div className="connect-empty">
                     <IconUsers size={22} />
-                    <strong>{ko ? "연결할 에이전트가 아직 없습니다." : "No connectable agents yet."}</strong>
-                    <span>{ko ? "먼저 Agent 화면에서 에이전트나 조합을 만들어주세요." : "Create an agent or group from the Agent page first."}</span>
+                    <strong>{t("connect.empty.title")}</strong>
+                    <span>{t("connect.empty.body")}</span>
                   </div>
                 ) : null}
               </div>
@@ -493,16 +472,16 @@ export default function ConnectPage() {
             <aside className="connect-port-panel" aria-labelledby="connect-port-title">
               <div className="connect-section-head">
                 <div>
-                  <p className="connect-kicker">{ko ? "포트" : "Ports"}</p>
-                  <h2 id="connect-port-title">{ko ? "연결된 Telegram 포트" : "Connected Telegram ports"}</h2>
+                  <p className="connect-kicker">{t("connect.ports.kicker")}</p>
+                  <h2 id="connect-port-title">{t("connect.ports.title")}</h2>
                 </div>
-                <span>{ko ? `${visibleBindings.length}개` : `${visibleBindings.length} ports`}</span>
+                <span>{t("connect.count.ports", { n: visibleBindings.length })}</span>
               </div>
 
               <div className="connect-selected-strip">
-                <span>{ko ? "지금 선택" : "Selected"}</span>
-                <strong>{selected?.name ?? (ko ? "대상을 고르세요" : "Choose a target")}</strong>
-                <small>{selected ? `${modeLabel(selected, ko)} · ${selected.routeHint}` : modeLabel(selected, ko)}</small>
+                <span>{t("connect.selected.label")}</span>
+                <strong>{selected?.name ?? t("connect.mode.choose")}</strong>
+                <small>{selected ? `${modeLabel(selected, t)} · ${selected.routeHint}` : modeLabel(selected, t)}</small>
               </div>
 
               <button
@@ -512,7 +491,7 @@ export default function ConnectPage() {
                 disabled={!selected || busy === "auto"}
               >
                 <IconBolt size={16} />
-                {busy === "auto" ? (ko ? "자동 연결 중" : "Auto-connecting") : ko ? "선택한 대상으로 봇 포트 만들기" : "Create bot port for selected target"}
+                {busy === "auto" ? t("connect.action.auto_busy") : t("connect.action.create_port")}
               </button>
 
               <div className="connect-port-list">
@@ -521,31 +500,50 @@ export default function ConnectPage() {
                     <div className="connect-port-route">
                       <span className="connect-port-bot">
                         <IconAtSign size={15} />
-                        {binding.botUsername ? `@${binding.botUsername}` : binding.hasToken ? (ko ? "봇 준비됨" : "Bot ready") : (ko ? "봇 준비 필요" : "Needs bot")}
+                        {binding.botUsername ? `@${binding.botUsername}` : binding.hasToken ? t("connect.bot.ready") : t("connect.bot.needs")}
                       </span>
                       <IconRoute size={16} />
                       <strong>{binding.targetName}</strong>
                     </div>
                     <div className="connect-port-meta">
-                      <span>{sessionLabel(binding, ko)}</span>
-                      <span>{statusLabel(binding.status, binding.enabled, ko)}</span>
-                      <span>{binding.telegramChatTitle || (ko ? "Telegram 방 대기 중" : "Waiting for Telegram chat")}</span>
+                      <span>{sessionLabel(binding, t)}</span>
+                      <span>{statusLabel(binding.status, binding.enabled, t)}</span>
+                      <span>{binding.telegramChatTitle || t("connect.chat.waiting")}</span>
+                      {binding.automationReportEnabled ? <span>{t("connect.meta.automation_report")}</span> : null}
                     </div>
+                    {binding.botUsername ? (
+                      <div className="connect-bot-settings">
+                        <IconSettings size={15} />
+                        <span>
+                          <strong>{t("connect.bot_settings.title")}</strong>
+                          <small>{t("connect.bot_settings.body")}</small>
+                        </span>
+                      </div>
+                    ) : null}
                     <div className="connect-port-actions">
                       <button type="button" onClick={() => void handleBindingAction(binding, "open")} disabled={!binding.botUsername || busy === `open:${binding.id}`}>
-                        {ko ? "열기" : "Open"}
+                        {t("connect.action.open")}
                       </button>
                       <button type="button" onClick={() => void handleBindingAction(binding, "test")} disabled={!binding.telegramChatId || busy === `test:${binding.id}`}>
-                        {ko ? "테스트" : "Test"}
+                        {t("connect.action.test")}
+                      </button>
+                      <button
+                        type="button"
+                        title={t("connect.bot_settings.button_title")}
+                        onClick={() => void handleBindingAction(binding, "settings")}
+                        disabled={!binding.botUsername || busy === `settings:${binding.id}`}
+                      >
+                        <IconSettings size={13} />
+                        {t("connect.action.bot_settings")}
                       </button>
                       <button
                         type="button"
                         onClick={() => void handleBindingAction(binding, binding.enabled && binding.sessionRunning ? "stop" : "resume")}
                         disabled={busy === `resume:${binding.id}` || busy === `stop:${binding.id}`}
                       >
-                        {sessionToggleLabel(binding, ko)}
+                        {sessionToggleLabel(binding, t)}
                       </button>
-                      <button type="button" onClick={() => void handleBindingAction(binding, "remove")} disabled={busy === `remove:${binding.id}`} aria-label={ko ? "포트 삭제" : "Remove port"}>
+                      <button type="button" onClick={() => void handleBindingAction(binding, "remove")} disabled={busy === `remove:${binding.id}`} aria-label={t("connect.action.remove_port")}>
                         <IconTrash size={13} />
                       </button>
                     </div>
@@ -555,20 +553,20 @@ export default function ConnectPage() {
                 {!loading && visibleBindings.length === 0 ? (
                   <div className="connect-port-empty">
                     <IconAtSign size={20} />
-                    <strong>{ko ? "아직 Telegram 포트가 없습니다." : "No Telegram ports yet."}</strong>
-                    <span>{ko ? "왼쪽에서 하나 고르고 위 버튼을 누르면 여기에 포트가 생깁니다." : "Choose one on the left and press the button above."}</span>
+                    <strong>{t("connect.port_empty.title")}</strong>
+                    <span>{t("connect.port_empty.body")}</span>
                   </div>
                 ) : null}
               </div>
 
               <button className="connect-manual-toggle" type="button" onClick={manualOpen ? () => setManualOpen(false) : openManualToken}>
-                {manualOpen ? (ko ? "고급 입력 닫기" : "Hide advanced input") : ko ? "고급: BotFather 비밀문자로 직접 연결" : "Advanced: connect with BotFather token"}
+                {manualOpen ? t("connect.manual.hide") : t("connect.manual.show")}
               </button>
 
               {manualOpen ? (
                 <>
                   <label className="connect-secret-box">
-                    <span>{ko ? "BotFather 비밀문자" : "BotFather token"}</span>
+                    <span>{t("connect.secret.label")}</span>
                     <input
                       ref={tokenInputRef}
                       type="password"
@@ -576,13 +574,9 @@ export default function ConnectPage() {
                       onChange={(event) => setBotToken(event.target.value)}
                       autoComplete="off"
                       spellCheck={false}
-                      placeholder={ko ? "비밀문자를 붙여넣기" : "Paste token"}
+                      placeholder={t("connect.secret.placeholder")}
                     />
-                    <small>
-                      {ko
-                        ? "자동 연결이 막힐 때만 쓰는 고급 입력입니다. 저장 후 다시 보여주지 않습니다."
-                        : "Advanced fallback only. Agentlas stores it securely and does not show it again."}
-                    </small>
+                    <small>{t("connect.secret.help")}</small>
                   </label>
 
                   <button
@@ -592,7 +586,7 @@ export default function ConnectPage() {
                     disabled={!selected || !botToken.trim() || busy === "start"}
                   >
                     <IconKey size={16} />
-                    {busy === "start" ? (ko ? "봇 확인 중" : "Checking bot") : ko ? "비밀문자로 연결" : "Connect with token"}
+                    {busy === "start" ? t("connect.action.checking_bot") : t("connect.action.connect_token")}
                   </button>
                 </>
               ) : null}
@@ -602,8 +596,8 @@ export default function ConnectPage() {
           <section className="connect-log-panel" aria-labelledby="connect-log-title">
             <div className="connect-section-head">
               <div>
-                <p className="connect-kicker">{ko ? "진행 상황" : "Progress"}</p>
-                <h2 id="connect-log-title">{ko ? "연결 로그" : "Connection log"}</h2>
+                <p className="connect-kicker">{t("connect.log.kicker")}</p>
+                <h2 id="connect-log-title">{t("connect.log.title")}</h2>
               </div>
             </div>
             <div className="connect-log-list" role="log" aria-live="polite">
@@ -617,11 +611,7 @@ export default function ConnectPage() {
               ) : (
                 <div className="connect-log-empty">
                   <IconCheck size={16} />
-                  <span>
-                    {ko
-                      ? "자동 연결을 누르면 Telegram 창 열기, 로그인 확인, 테스트 전송 결과가 여기에 쌓입니다."
-                      : "Press auto-connect to see Telegram opening, login checks, and test-send results here."}
-                  </span>
+                  <span>{t("connect.log.empty")}</span>
                 </div>
               )}
             </div>

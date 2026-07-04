@@ -116,6 +116,15 @@ const desktopInit = () => {
     fs: { pickDirectory: async () => "/tmp/agentlas-hub-parity" },
     team: { list: async () => [agent], install: async () => agent, importLocalFolder: async () => agent },
     firms: { list: async () => [firm], install: async () => firm, getResolvedOrg: async () => ({ firmId: firm.id, ceo: { name: "Builder Agent", agentId: agent.id }, divisions: [] }) },
+    agentGroups: {
+      list: async () => [],
+      listResolved: async () => [],
+      getResolved: async () => null,
+      create: async (input) => ({ id: "group-1", ...input, members: input.members ?? [], createdAt: now, updatedAt: now }),
+      update: async (id, patch) => ({ id, name: patch.name ?? "QA Group", description: patch.description ?? "", orchestratorName: patch.orchestratorName ?? "QA Group Orchestrator", members: patch.members ?? [], createdAt: now, updatedAt: now }),
+      removeMember: async () => ({ id: "group-1", name: "QA Group", description: "", orchestratorName: "QA Group Orchestrator", members: [], createdAt: now, updatedAt: now }),
+      remove: async () => {},
+    },
     mcpTools: {
       listCatalog: async () => plugins,
       listInstalled: async () => [],

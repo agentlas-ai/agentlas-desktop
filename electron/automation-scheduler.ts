@@ -26,6 +26,7 @@ import {
   tryRecordFailureEvent,
   tryRecordRunEvent,
 } from "./store/run-events";
+import { notifyTelegramAutomationDone } from "./telegram/connect";
 
 let timer: ReturnType<typeof setInterval> | null = null;
 const running = new Set<string>();
@@ -234,6 +235,13 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
       /* best-effort 리스 해제 */
     }
     notifyDone(a, runStatus, runError ?? undefined);
+    void notifyTelegramAutomationDone(a, runStatus, {
+      error: runError,
+      output,
+      at: new Date().toISOString(),
+    }).catch((err) => {
+      console.error("[automation] telegram report failed:", err);
+    });
     running.delete(a.id);
     // 체인 트리거용 완료 이벤트 방출(설계 §3.4 Tier 0 #2). 인프로세스 EventEmitter.
     try {

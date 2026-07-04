@@ -88,6 +88,7 @@ interface TelegramWebState {
   token: string | null;
   hasComposer: boolean;
   hasBotFather: boolean;
+  botFatherBlocked: boolean;
   href: string;
 }
 
@@ -367,6 +368,84 @@ export async function openTelegramBot(id: string): Promise<{ ok: boolean; messag
   return { ok: true, message: `https://t.me/${row.bot_username}` };
 }
 
+export async function configureTelegramBotSettings(id: string): Promise<{ ok: boolean; message: string }> {
+  const row = getBindingRow(id);
+  if (!row) throw new Error(`Telegram binding not found: ${id}`);
+  if (!row.bot_username) {
+    return {
+      ok: false,
+      message: currentUiLocale() === "ko" ? "아직 봇 이름을 모릅니다. 먼저 봇 포트를 만들어주세요." : "Bot username is not known yet. Create the bot port first.",
+    };
+  }
+
+  const win = createTelegramWebWindow(
+    currentUiLocale() === "ko" ? "Agentlas Telegram 봇 설정" : "Agentlas Telegram Bot Settings",
+  );
+  try {
+    await win.loadURL(BOTFATHER_WEB_URL);
+    const ready = await waitForBotFatherReady(win, 12_000).catch(() => null);
+    if (!ready) return botFatherManualSettingsMessage();
+    if (await isBotFatherMessagingBlocked(win)) return botFatherBlockedMessage();
+    const sentPrivacyCommand = await settleWithin(sendTelegramWebMessage(win, "/setprivacy").then(() => true), 8_000, false);
+    if (!sentPrivacyCommand) return botFatherManualSettingsMessage();
+    await sleep(1200);
+    if (await isBotFatherMessagingBlocked(win)) return botFatherBlockedMessage();
+
+    const botLabels = [
+      row.bot_username,
+      `@${row.bot_username}`,
+      row.bot_display_name ?? "",
+      row.bot_display_name ? `${row.bot_display_name} bot` : "",
+    ].filter(Boolean);
+    const selectedBot = await clickTelegramButtonByText(win, botLabels, 5_000);
+    if (!selectedBot) {
+      const sentBotName = await settleWithin(sendTelegramWebMessage(win, row.bot_username).then(() => true), 8_000, false);
+      if (!sentBotName) return botFatherManualSettingsMessage();
+      await sleep(1200);
+    }
+    if (await isBotFatherMessagingBlocked(win)) return botFatherBlockedMessage();
+
+    let disabledPrivacy = await clickTelegramButtonByText(
+      win,
+      ["Disable", "Turn off", "Off", "비활성", "해제", "끄기"],
+      5_000,
+    );
+    if (!disabledPrivacy) {
+      const openedSettings = await clickTelegramButtonByText(win, ["Bot Settings", "Settings", "봇 설정", "설정"], 3_000);
+      if (openedSettings) {
+        await sleep(1000);
+        await clickTelegramButtonByText(win, ["Group Privacy", "Privacy", "Privacy Mode", "그룹 개인정보", "개인정보"], 3_000);
+        await sleep(1000);
+        disabledPrivacy = await clickTelegramButtonByText(
+          win,
+          ["Turn off", "Disable", "Off", "비활성", "해제", "끄기"],
+          3_000,
+        );
+      }
+    }
+    const ko = currentUiLocale() === "ko";
+    if (disabledPrivacy) {
+      await sleep(1200);
+      closeBotFatherWindow(win);
+      return {
+        ok: true,
+        message: ko
+          ? "그룹 전체 메시지 받기를 켰습니다. 이미 초대한 그룹은 봇을 빼고 다시 초대해야 적용될 수 있고, 반영에 몇 분 걸릴 수 있습니다."
+          : "Group-wide message receiving was requested. If the bot is already in a group, remove and re-add it; Telegram may take a few minutes to apply it.",
+      };
+    }
+    return {
+      ok: false,
+      message: ko
+        ? "BotFather 설정 창을 열어두었습니다. 화면에 보이는 Disable 버튼을 누르면 그룹 전체 메시지 받기가 켜집니다."
+        : "BotFather settings are open. Press the visible Disable button to let the bot receive group-wide messages.",
+    };
+  } catch (err) {
+    if (!win.isDestroyed()) win.focus();
+    throw new Error(maskTelegramSecrets(err instanceof Error ? err.message : String(err)));
+  }
+}
+
 export async function sendTelegramTest(id: string): Promise<TelegramConnectActionResult> {
   const row = getBindingRow(id);
   if (!row) throw new Error(`Telegram binding not found: ${id}`);
@@ -511,6 +590,13 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
 
   const clean = cleanTelegramPrompt(binding, text);
   if (!clean) return;
+  if (isAutomationReportStatusRequest(clean)) {
+    await telegramApi(poller.token, "sendMessage", {
+      chat_id: chatId,
+      text: automationReportStatusText(binding),
+    }).catch(() => undefined);
+    return;
+  }
   if (isAutomationReportDisableRequest(clean)) {
     setAutomationReportEnabled(binding.id, false);
     await telegramApi(poller.token, "sendMessage", {
@@ -601,6 +687,46 @@ function cleanTelegramPrompt(binding: TelegramBindingRow, text: string): string 
   return out.replace(/^\/start\b/i, "테스트").trim();
 }
 
+function isAutomationReportEnableRequest(text: string): boolean {
+  const lower = text.toLowerCase();
+  const mentionsAutomation = /자동화|automation|scheduled job|background job/i.test(text);
+  const wantsNotification =
+    /보고|알림|알려|말해|보내|띄워|전달|브리핑|notify|notification|report|tell|send|post|brief/i.test(text);
+  const completion =
+    /끝나|끝났|끝날|끝나고|끝나면|완료|마치|complete|completed|done|finish|finished|after/i.test(text);
+  const future =
+    /앞으로|이제부터|계속|마다|될 때|할 때|whenever|from now|future|every time/i.test(text);
+  const thisChat =
+    /여기|이 방|이방|이 채팅|텔레|telegram|dm|나한테|this chat|here|to me/i.test(lower);
+  return mentionsAutomation && wantsNotification && (completion || future || thisChat);
+}
+
+function isAutomationReportDisableRequest(text: string): boolean {
+  return /자동화|automation/i.test(text) && /보고|알림|notify|notification|report/i.test(text) && /꺼|끄|중지|그만|stop|off|disable/i.test(text);
+}
+
+function isAutomationReportStatusRequest(text: string): boolean {
+  return /자동화|automation/i.test(text) && /보고|알림|notify|notification|report/i.test(text) && /상태|켜져|켜짐|꺼져|확인|status|on|off/i.test(text);
+}
+
+function automationReportStatusText(binding: TelegramBindingRow): string {
+  const ko = currentUiLocale() === "ko";
+  if (binding.automation_report_enabled === 1) {
+    return ko
+      ? "자동화 완료 보고가 이 Telegram 방으로 오도록 켜져 있습니다. 끄려면 “자동화 보고 꺼”라고 말하면 됩니다."
+      : "Automation completion reports are on for this Telegram chat. Say “turn off automation reports” to stop them.";
+  }
+  return ko
+    ? "자동화 완료 보고는 아직 꺼져 있습니다. “자동화 끝나면 여기에 보고해”라고 말하면 켤 수 있습니다."
+    : "Automation completion reports are off. Say “report automation completions here” to turn them on.";
+}
+
+function setAutomationReportEnabled(bindingId: string, enabled: boolean): void {
+  getDb()
+    .prepare("UPDATE telegram_bindings SET automation_report_enabled = ?, updated_at = ? WHERE id = ?")
+    .run(enabled ? 1 : 0, nowIso(), bindingId);
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -666,6 +792,65 @@ async function sendLongMessage(token: string, chatId: string, text: string): Pro
   }
 }
 
+export async function notifyTelegramAutomationDone(
+  automation: Automation,
+  status: "ok" | "error" | "skipped",
+  detail?: { error?: string | null; output?: string; at?: string },
+): Promise<void> {
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM telegram_bindings
+       WHERE enabled = 1
+         AND automation_report_enabled = 1
+         AND telegram_chat_id IS NOT NULL`,
+    )
+    .all() as TelegramBindingRow[];
+  if (!rows.length) return;
+  const text = formatAutomationReport(automation, status, detail);
+  const sent = new Set<string>();
+  for (const row of rows) {
+    const key = `${row.id}:${row.telegram_chat_id}`;
+    if (sent.has(key) || !row.telegram_chat_id) continue;
+    const token = await readSecret(secretKey(row.id));
+    if (!token) {
+      markBindingFailed(row.id, "Telegram bot secret is missing from Keychain.");
+      continue;
+    }
+    await sendLongMessage(token, row.telegram_chat_id, text);
+    sent.add(key);
+  }
+}
+
+function formatAutomationReport(
+  automation: Automation,
+  status: "ok" | "error" | "skipped",
+  detail?: { error?: string | null; output?: string; at?: string },
+): string {
+  const ko = currentUiLocale() === "ko";
+  const at = detail?.at ? new Date(detail.at) : new Date();
+  const when = at.toLocaleString(ko ? "ko-KR" : "en-US", { dateStyle: "short", timeStyle: "short" });
+  const title = ko ? `자동화 보고: ${automation.name}` : `Automation report: ${automation.name}`;
+  const statusText = status === "ok"
+    ? ko ? "완료" : "Completed"
+    : status === "skipped"
+      ? ko ? "건너뜀" : "Skipped"
+      : ko ? "실패" : "Failed";
+  const lines = [
+    title,
+    ko ? `상태: ${statusText}` : `Status: ${statusText}`,
+    ko ? `시간: ${when}` : `Time: ${when}`,
+  ];
+  if (detail?.error) lines.push(ko ? `오류: ${clipForTelegram(detail.error, 800)}` : `Error: ${clipForTelegram(detail.error, 800)}`);
+  else if (detail?.output?.trim()) lines.push(ko ? `요약: ${clipForTelegram(detail.output, 1200)}` : `Summary: ${clipForTelegram(detail.output, 1200)}`);
+  return lines.join("\n");
+}
+
+function clipForTelegram(value: string, max: number): string {
+  const clean = value.replace(/\s+\n/g, "\n").trim();
+  if (clean.length <= max) return clean;
+  return `${clean.slice(0, max - 1)}…`;
+}
+
 function chunkText(text: string, size: number): string[] {
   const out: string[] = [];
   let rest = text;
@@ -693,14 +878,14 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-async function captureBotFatherToken(targetName: string): Promise<BotFatherCapture> {
+function createTelegramWebWindow(title: string): BrowserWindow {
   const ses = electronSession.fromPartition(TELEGRAM_WEB_PARTITION);
   const win = new BrowserWindow({
     width: 1120,
     height: 820,
     minWidth: 900,
     minHeight: 640,
-    title: currentUiLocale() === "ko" ? "Agentlas Telegram 연결" : "Agentlas Telegram Connect",
+    title,
     backgroundColor: "#ffffff",
     autoHideMenuBar: true,
     webPreferences: {
@@ -720,6 +905,13 @@ async function captureBotFatherToken(targetName: string): Promise<BotFatherCaptu
     if (closeRequested) win.close();
   });
 
+  return win;
+}
+
+async function captureBotFatherToken(targetName: string): Promise<BotFatherCapture> {
+  const win = createTelegramWebWindow(
+    currentUiLocale() === "ko" ? "Agentlas Telegram 연결" : "Agentlas Telegram Connect",
+  );
   await win.loadURL(BOTFATHER_WEB_URL);
   const ready = await waitForBotFatherReady(win, 180_000);
   if (ready.token) {
@@ -735,7 +927,7 @@ async function waitForBotFatherReady(win: BrowserWindow, timeoutMs: number): Pro
   while (Date.now() - start < timeoutMs) {
     assertWindowOpen(win);
     const state = await readTelegramWebState(win);
-    if (state.token || (state.hasComposer && state.hasBotFather)) return state;
+    if (state.token || state.botFatherBlocked || (state.hasComposer && state.hasBotFather)) return state;
     await sleep(1000);
   }
   throw new Error(
@@ -747,7 +939,7 @@ async function waitForBotFatherReady(win: BrowserWindow, timeoutMs: number): Pro
 
 async function readTelegramWebState(win: BrowserWindow): Promise<TelegramWebState> {
   try {
-    const state = await win.webContents.executeJavaScript(
+    const state = await settleWithin(win.webContents.executeJavaScript(
       `(() => {
         const text = document.body && document.body.innerText ? document.body.innerText : "";
         const matches = text.match(/\\b\\d{8,12}:[A-Za-z0-9_-]{30,}\\b/g) || [];
@@ -761,20 +953,48 @@ async function readTelegramWebState(win: BrowserWindow): Promise<TelegramWebStat
           token: matches.length ? matches[matches.length - 1] : null,
           hasComposer: visibleEditors.length > 0,
           hasBotFather: /BotFather/i.test(text) || location.href.toLowerCase().includes("botfather"),
+          botFatherBlocked: /Only Premium users can message BotFather/i.test(text),
           href: location.href
         };
       })()`,
       true,
-    ) as TelegramWebState;
+    ) as Promise<TelegramWebState>, 2500, null as TelegramWebState | null);
+    if (!state) return { token: null, hasComposer: false, hasBotFather: false, botFatherBlocked: false, href: "" };
     return {
       token: typeof state.token === "string" ? state.token : null,
       hasComposer: Boolean(state.hasComposer),
       hasBotFather: Boolean(state.hasBotFather),
+      botFatherBlocked: Boolean(state.botFatherBlocked),
       href: typeof state.href === "string" ? state.href : "",
     };
   } catch {
-    return { token: null, hasComposer: false, hasBotFather: false, href: "" };
+    return { token: null, hasComposer: false, hasBotFather: false, botFatherBlocked: false, href: "" };
   }
+}
+
+async function isBotFatherMessagingBlocked(win: BrowserWindow): Promise<boolean> {
+  const state = await readTelegramWebState(win);
+  return state.botFatherBlocked;
+}
+
+function botFatherBlockedMessage(): { ok: boolean; message: string } {
+  const ko = currentUiLocale() === "ko";
+  return {
+    ok: false,
+    message: ko
+      ? "Telegram이 현재 계정에서 BotFather 메시지를 막고 있습니다. 열린 BotFather 창에서 제한이 풀린 계정으로 로그인하거나 Telegram 데스크톱/모바일에서 직접 설정해야 합니다."
+      : "Telegram is blocking BotFather messages for this account. Use the opened BotFather window with an account that can message BotFather, or set it in Telegram Desktop/mobile.",
+  };
+}
+
+function botFatherManualSettingsMessage(): { ok: boolean; message: string } {
+  const ko = currentUiLocale() === "ko";
+  return {
+    ok: false,
+    message: ko
+      ? "BotFather 창을 열어두었습니다. 로그인 후 /setprivacy를 보내고 이 봇을 고른 뒤 Disable을 누르면 그룹 전체 메시지 받기가 켜집니다."
+      : "BotFather is open. After logging in, send /setprivacy, choose this bot, then press Disable to let it receive group-wide messages.",
+  };
 }
 
 async function createBotWithBotFather(win: BrowserWindow, targetName: string): Promise<string> {
@@ -858,9 +1078,41 @@ async function clickTelegramStartButton(win: BrowserWindow): Promise<boolean> {
   ).catch(() => false));
 }
 
+async function clickTelegramButtonByText(win: BrowserWindow, labels: string[], timeoutMs: number): Promise<boolean> {
+  const needles = labels.map((label) => label.trim().toLowerCase()).filter(Boolean);
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    assertWindowOpen(win);
+    const clicked = await settleWithin(win.webContents.executeJavaScript(
+      `(() => {
+        const needles = ${JSON.stringify(needles)};
+        const normalize = (value) => String(value || "").replace(/\\s+/g, " ").trim().toLowerCase();
+        const elements = Array.from(document.querySelectorAll('button, .Button, [role="button"], .reply-markup-button, .KeyboardButton, span.reply-markup-button-text'));
+        for (const el of elements) {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          if (rect.width < 12 || rect.height < 10 || style.display === "none" || style.visibility === "hidden") continue;
+          const text = normalize(el.textContent || el.getAttribute("aria-label") || el.getAttribute("title"));
+          if (!text) continue;
+          if (needles.some((needle) => text.includes(needle))) {
+            const target = el.closest('button, .Button, [role="button"], .reply-markup-button, .KeyboardButton') || el;
+            target.click();
+            return true;
+          }
+        }
+        return false;
+      })()`,
+      true,
+    ) as Promise<boolean>, 1800, false);
+    if (clicked) return true;
+    await sleep(900);
+  }
+  return false;
+}
+
 async function sendTelegramWebMessage(win: BrowserWindow, text: string): Promise<void> {
   assertWindowOpen(win);
-  const inserted = await win.webContents.executeJavaScript(
+  const inserted = await settleWithin(win.webContents.executeJavaScript(
     `(() => {
       const text = ${JSON.stringify(text)};
       const candidates = Array.from(document.querySelectorAll('div[contenteditable="true"], [contenteditable="true"], textarea, input[type="text"]'));
@@ -883,12 +1135,12 @@ async function sendTelegramWebMessage(win: BrowserWindow, text: string): Promise
       return true;
     })()`,
     true,
-  ).catch(() => false);
+  ) as Promise<boolean>, 3500, false);
   if (!inserted) {
     throw new Error(currentUiLocale() === "ko" ? "Telegram 입력창을 찾지 못했습니다." : "Could not find the Telegram message box.");
   }
   await sleep(250);
-  const clicked = await win.webContents.executeJavaScript(
+  const clicked = await settleWithin(win.webContents.executeJavaScript(
     `(() => {
       const buttons = Array.from(document.querySelectorAll('button, .Button, [role="button"]'));
       const button = buttons.find((el) => /send|보내기/i.test(el.getAttribute("aria-label") || "") || /btn-send|send/i.test(String(el.className || "")));
@@ -897,7 +1149,7 @@ async function sendTelegramWebMessage(win: BrowserWindow, text: string): Promise
       return true;
     })()`,
     true,
-  ).catch(() => false);
+  ) as Promise<boolean>, 2500, false);
   if (!clicked) {
     win.webContents.sendInputEvent({ type: "keyDown", keyCode: "Enter" });
     win.webContents.sendInputEvent({ type: "keyUp", keyCode: "Enter" });
@@ -947,4 +1199,11 @@ function maskTelegramSecrets(message: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function settleWithin<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    promise.catch(() => fallback),
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
 }
