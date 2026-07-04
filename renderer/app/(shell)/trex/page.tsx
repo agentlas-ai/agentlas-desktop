@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
 import { currentLocale, useT } from "@/lib/i18n";
-import { ipc } from "@/lib/ipc";
+import { ipc, pathForDroppedFile } from "@/lib/ipc";
 import {
   generateDeck,
   buildDeckFromContent,
@@ -57,6 +57,52 @@ export default function TrexPage() {
   const [modeOverride, setModeOverride] = useState<ArtMode | null>(null);
   // Style DNA — null=자동(주제 라우팅, 매치 없으면 레거시 모드 룩), "legacy"=명시적 기본 룩.
   const [styleOverride, setStyleOverride] = useState<StyleId | "legacy" | null>(null);
+  // 소스 파일 — 프롬프트 대신(또는 함께) 첨부해 덱의 재료로 쓴다. 텍스트 파일은 본문 추출,
+  // 이미지/기타는 이름만 힌트로. 첨부가 있으면 주제 없이도 생성 가능.
+  const [sources, setSources] = useState<{ name: string; text: string; kind: "text" | "image" | "other" }[]>([]);
+  const [attaching, setAttaching] = useState(false);
+
+  const TEXT_EXT = /\.(md|markdown|txt|text|json|csv|tsv|log|tex|rtf|html?|ya?ml|xml|srt|vtt)$/i;
+  const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i;
+  const addFiles = useCallback(async (files: File[]) => {
+    if (!files.length) return;
+    setAttaching(true);
+    const api = ipc();
+    const next: { name: string; text: string; kind: "text" | "image" | "other" }[] = [];
+    for (const file of files.slice(0, 12)) {
+      const name = file.name;
+      if (IMAGE_EXT.test(name)) {
+        next.push({ name, text: "", kind: "image" });
+        continue;
+      }
+      const path = pathForDroppedFile(file);
+      let text = "";
+      if (path && api?.fs?.readTextFile && TEXT_EXT.test(name)) {
+        try {
+          const preview = await api.fs.readTextFile(path);
+          // readTextFile은 binary/too-large면 reason을 준다 — 텍스트일 때만 content 사용.
+          if (preview && !preview.reason && preview.content) text = preview.content;
+        } catch {
+          text = "";
+        }
+      }
+      next.push({ name, text: text.slice(0, 12_000), kind: text ? "text" : "other" });
+    }
+    setSources((prev) => [...prev, ...next].slice(0, 12));
+    setAttaching(false);
+  }, []);
+  const removeSource = useCallback((name: string) => setSources((prev) => prev.filter((s) => s.name !== name)), []);
+
+  // 첨부 소스 → 프롬프트 주입용 텍스트. 텍스트는 본문, 이미지/기타는 파일명 힌트.
+  const buildSourcesText = useCallback((): string => {
+    const parts: string[] = [];
+    for (const s of sources) {
+      if (s.kind === "text" && s.text) parts.push(`### ${s.name}\n${s.text}`);
+      else if (s.kind === "image") parts.push(`### ${s.name} (image attached — reference this visual/chart)`);
+      else parts.push(`### ${s.name} (binary file attached — name only)`);
+    }
+    return parts.join("\n\n");
+  }, [sources]);
 
   useEffect(() => {
     const api = ipc();
@@ -184,9 +230,11 @@ export default function TrexPage() {
   // 실시간 생성 — AI(agy/codex)가 슬라이드별 실제 내용을 쓰고, 완성되면 렌더. 미가용 시 스캐폴드.
   const runGenerate = useCallback(
     async (text: string, n: number) => {
-      const p = text.trim() || (ko ? EXAMPLE : EXAMPLE_EN);
-      // 스타일 결정 — 명시 선택 > 자동(주제 라우팅) > LLM 위임(undefined) > "legacy"=명시적 기본 룩(null).
-      const styleId = styleOverride === "legacy" ? null : styleOverride ?? routeStyle(p) ?? undefined;
+      const sourcesText = buildSourcesText();
+      // 소스 파일이 있으면 주제가 비어도 생성(소스가 재료). 둘 다 없으면 예시로 폴백.
+      const p = text.trim() || (sourcesText ? "" : ko ? EXAMPLE : EXAMPLE_EN);
+      // 스타일 결정 — 명시 선택 > 자동(주제/소스 라우팅) > LLM 위임(undefined) > "legacy"=명시적 기본 룩(null).
+      const styleId = styleOverride === "legacy" ? null : styleOverride ?? routeStyle(p || sourcesText) ?? undefined;
       const gc = ipc()?.trex?.generateContent;
       if (aiContent && gc) {
         setDeck(null);
@@ -198,7 +246,7 @@ export default function TrexPage() {
         let d: TrexDeck;
         let contentOk = false;
         try {
-          const r = await gc({ topic: p, count: n, mode: modeOverride ?? undefined });
+          const r = await gc({ topic: p, count: n, mode: modeOverride ?? undefined, sources: sourcesText || undefined });
           const parsed = r?.ok && r.text ? parseDeckContent(r.text) : null;
           contentOk = !!parsed;
           d = parsed ? buildDeckFromContent(parsed, formatId, locale, styleId, withImages) : generateDeck(p, modeOverride ?? undefined, n, formatId, locale, styleId, withImages);
@@ -212,7 +260,7 @@ export default function TrexPage() {
         revealDeck(generateDeck(p, modeOverride ?? undefined, n, formatId, locale, styleId, imageModel !== "none"));
       }
     },
-    [aiContent, modeOverride, styleOverride, formatId, revealDeck, locale, imageModel, ko, patchJob],
+    [aiContent, modeOverride, styleOverride, formatId, revealDeck, locale, imageModel, ko, patchJob, buildSourcesText],
   );
 
   const updateDeck = useCallback((updater: (d: TrexDeck) => TrexDeck) => {
@@ -406,6 +454,10 @@ export default function TrexPage() {
           styleOverride={styleOverride}
           setStyleOverride={setStyleOverride}
           recents={recents}
+          sources={sources}
+          attaching={attaching}
+          onAddFiles={addFiles}
+          onRemoveSource={removeSource}
           onGenerate={() => runGenerate(prompt, count)}
           onOpen={(d) => { setDeck(d); setActiveSlide(0); setView("view"); }}
         />
@@ -583,7 +635,7 @@ function patchSlideBg(deck: TrexDeck, slideId: string, src: string): TrexDeck {
 
 /* ─────────────── 랜딩 ─────────────── */
 function Home({
-  ko, prompt, setPrompt, count, setCount, formatId, setFormatId, imageModel, setImageModel, providers, aiContent, setAiContent, contentEngines, routedMode, modeOverride, setModeOverride, routedStyle, styleOverride, setStyleOverride, recents, onGenerate, onOpen,
+  ko, prompt, setPrompt, count, setCount, formatId, setFormatId, imageModel, setImageModel, providers, aiContent, setAiContent, contentEngines, routedMode, modeOverride, setModeOverride, routedStyle, styleOverride, setStyleOverride, recents, sources, attaching, onAddFiles, onRemoveSource, onGenerate, onOpen,
 }: {
   ko: boolean; prompt: string; setPrompt: (v: string) => void; count: number; setCount: (n: number) => void;
   formatId: string; setFormatId: (id: string) => void;
@@ -591,7 +643,12 @@ function Home({
   aiContent: boolean; setAiContent: (v: boolean) => void; contentEngines: { agy: boolean; codex: boolean };
   routedMode: ArtMode; modeOverride: ArtMode | null; setModeOverride: (m: ArtMode | null) => void;
   routedStyle: StyleId | null; styleOverride: StyleId | "legacy" | null; setStyleOverride: (s: StyleId | "legacy" | null) => void;
-  recents: TrexDeck[]; onGenerate: () => void; onOpen: (d: TrexDeck) => void;
+  recents: TrexDeck[];
+  sources: { name: string; text: string; kind: "text" | "image" | "other" }[];
+  attaching: boolean;
+  onAddFiles: (files: File[]) => void;
+  onRemoveSource: (name: string) => void;
+  onGenerate: () => void; onOpen: (d: TrexDeck) => void;
 }) {
   return (
     <div style={homeWrap}>
@@ -600,21 +657,53 @@ function Home({
         <h1 style={homeTitle}>{ko ? "무엇을 발표할까요?" : "What are you presenting?"}</h1>
         <p style={homeSub}>{ko ? "한 줄로 적고 엔터하면, 목적에 맞춰 실시간으로 덱을 만듭니다." : "Type one line and hit enter — a deck builds itself, art-directed to your purpose."}</p>
 
-        <div style={promptBox}>
+        <div
+          style={promptBox}
+          onDragOver={(e) => { e.preventDefault(); }}
+          onDrop={(e) => {
+            e.preventDefault();
+            const files = Array.from(e.dataTransfer?.files ?? []);
+            if (files.length) onAddFiles(files);
+          }}
+        >
           <IconSparkles size={16} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 3 }} />
           <textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onGenerate(); } }}
-            placeholder={ko ? `예: ${EXAMPLE}` : `e.g. ${EXAMPLE_EN}`}
+            placeholder={ko ? `예: ${EXAMPLE} — 또는 파일을 끌어다 놓아 소스로` : `e.g. ${EXAMPLE_EN} — or drop files to use as source`}
             rows={2}
             style={promptInput}
             aria-label={ko ? "발표 주제" : "Deck prompt"}
           />
+          <label style={attachBtn} title={ko ? "파일 첨부 (md·txt·doc·png 등)" : "Attach files (md, txt, doc, png…)"}>
+            <IconFileUp size={17} />
+            <input
+              type="file"
+              multiple
+              accept=".md,.markdown,.txt,.text,.json,.csv,.tsv,.log,.tex,.rtf,.html,.htm,.yaml,.yml,.xml,.srt,.vtt,.doc,.docx,.pdf,.png,.jpg,.jpeg,.gif,.webp,.svg,.avif"
+              onChange={(e) => { const files = Array.from(e.target.files ?? []); if (files.length) onAddFiles(files); e.currentTarget.value = ""; }}
+              style={{ display: "none" }}
+            />
+          </label>
           <button type="button" onClick={onGenerate} style={genBtn} aria-label={ko ? "생성" : "Generate"}>
             <IconChevronRight size={18} />
           </button>
         </div>
+
+        {(sources.length > 0 || attaching) && (
+          <div style={sourceChips}>
+            {attaching && <span style={sourceChipMuted}>{ko ? "읽는 중…" : "Reading…"}</span>}
+            {sources.map((s) => (
+              <span key={s.name} style={sourceChip} title={s.kind === "text" ? `${s.text.length.toLocaleString()}자` : s.kind}>
+                <IconFileUp size={11} />
+                <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span>
+                {s.kind !== "text" && <em style={{ color: "var(--muted-deep)", fontStyle: "normal", fontSize: 10 }}>{s.kind === "image" ? (ko ? "이미지" : "img") : (ko ? "이름만" : "name")}</em>}
+                <button type="button" onClick={() => onRemoveSource(s.name)} style={sourceChipX} aria-label={ko ? "제거" : "Remove"}>×</button>
+              </span>
+            ))}
+          </div>
+        )}
 
         <div style={controlRow}>
           {/* 장 수 지정 */}
@@ -833,6 +922,11 @@ const homeSub: CSSProperties = { margin: "10px 0 26px", fontSize: 14, lineHeight
 const promptBox: CSSProperties = { width: "100%", display: "flex", alignItems: "flex-start", gap: 10, padding: "14px 14px 14px 16px", border: "1px solid var(--paper-edge)", borderRadius: 16, background: "var(--paper)", boxShadow: "var(--rd-shadow-1, 0 4px 16px rgba(0,0,0,.05))" };
 const promptInput: CSSProperties = { flex: 1, minWidth: 0, border: "none", outline: "none", background: "transparent", resize: "none", color: "var(--ink)", fontSize: 15, lineHeight: 1.5, fontFamily: "inherit" };
 const genBtn: CSSProperties = { width: 40, height: 40, flexShrink: 0, border: "none", borderRadius: 12, background: "var(--accent)", color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" };
+const attachBtn: CSSProperties = { width: 40, height: 40, flexShrink: 0, border: "1px solid var(--paper-edge)", borderRadius: 12, background: "var(--paper)", color: "var(--muted-deep)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" };
+const sourceChips: CSSProperties = { display: "flex", flexWrap: "wrap", gap: 7, marginTop: 10, width: "100%" };
+const sourceChip: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 6px 4px 9px", borderRadius: 999, border: "1px solid var(--paper-edge)", background: "var(--fill-1)", color: "var(--ink-soft)", fontSize: 12, fontWeight: 600 };
+const sourceChipMuted: CSSProperties = { display: "inline-flex", alignItems: "center", padding: "4px 10px", borderRadius: 999, background: "var(--fill-1)", color: "var(--muted-deep)", fontSize: 12 };
+const sourceChipX: CSSProperties = { width: 18, height: 18, border: "none", borderRadius: "50%", background: "transparent", color: "var(--muted-deep)", cursor: "pointer", fontSize: 14, lineHeight: 1, display: "inline-flex", alignItems: "center", justifyContent: "center" };
 const controlRow: CSSProperties = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginTop: 16 };
 const stepper: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 4, border: "1px solid var(--paper-edge)", borderRadius: 999, padding: "3px 5px", background: "var(--paper)" };
 function stepBtn(disabled: boolean): CSSProperties { return { width: 26, height: 26, borderRadius: 999, border: "none", background: "transparent", color: disabled ? "var(--paper-edge)" : "var(--ink)", fontSize: 15, fontWeight: 900, cursor: disabled ? "default" : "pointer" }; }

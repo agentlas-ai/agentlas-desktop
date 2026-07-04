@@ -26,13 +26,17 @@ function resolveBin(name: string, extra: string[]): string | null {
   return null;
 }
 
-function buildPrompt(topic: string, count: number, mode?: string): string {
+function buildPrompt(topic: string, count: number, mode?: string, sources?: string): string {
   // 클로징("감사합니다") 장표 폐기 — 덱 = 커버 1장 + 본문 (count-1)장, 마지막은 statement로 닫는다.
   const middle = Math.max(3, Math.min(13, count - 1));
   const modeLine = mode ? `Set "mode" to ${mode}.` : `Pick "mode" by topic: cinematic(narrative), editorial(business), diagrammatic(academic), hybrid(sports/data).`;
+  const src = (sources || "").trim();
   return [
     "You are an expert presentation content designer. Output ONLY valid minified JSON — no markdown, no code fences, no prose before or after.",
     `TOPIC: ${topic}`,
+    src
+      ? `SOURCE MATERIAL (build the deck FROM these attached documents — use their real facts, figures, names, and structure; do NOT invent content that contradicts them; the TOPIC above is the framing/angle):\n${src}`
+      : "",
     'SCHEMA: {"title":str,"subtitle":str,"mode":"cinematic|editorial|diagrammatic|hybrid","styleId":"consulting|swiss|bauhaus|didot|vignelli|brutal|hara","slides":[ {"role":"agenda","title":str,"items":[str],"note":str,"img":str} | {"role":"metrics","dek":str,"src":str,"layout":"row|bento|asym","title":str,"kpis":[{"value":str,"label":str}],"note":str,"img":str} | {"role":"comparison","dek":str,"src":str,"layout":"bars|asym","title":str,"bars":[{"label":str,"value":int}],"note":str,"img":str} | {"role":"structure","dek":str,"src":str,"layout":"columns|bento|split|zigzag|twopanel","title":str,"cards":[{"label":str,"text":str}],"panels":[{"title":str,"rows":[{"label":str,"text":str,"sub":str}]}],"note":str,"img":str} | {"role":"process","dek":str,"src":str,"layout":"timeline|cards","title":str,"steps":[{"label":str,"text":str}],"note":str,"img":str} | {"role":"highlight","dek":str,"src":str,"title":str,"stat":{"value":str,"label":str},"text":str,"img":str} | {"role":"statement","text":str,"note":str,"img":str} ]}',
     '- "layout" = page architecture. VARY it — never repeat the same layout on consecutive slides: bento(hero cell + small cells, dashboard feel), split(text left + image right half), zigzag(image/text alternating rows), asym(30% hero number + 70% detail), timeline(horizontal roadmap line), twopanel(two titled side-by-side panels with dense chip rows — the DENSEST, consulting/gov-report grammar for 실적/성과, 현황/개선 etc).',
     "RULES:",
@@ -50,8 +54,11 @@ function buildPrompt(topic: string, count: number, mode?: string): string {
     '- cards "text": 2 short sentences each (what it is + why it matters). steps "text": ONE tight sentence ≤ 45 chars CJK / ≤ 90 chars latin — timeline columns are narrow and longer text overflows.',
     '- "img" (every slide) = a concrete photographable scene for an accompanying image, in English, no text/letters/numbers in the scene (e.g. "a delivery robot crossing a rainy Seoul crosswalk at dusk").',
     `- ${modeLine}`,
+    src ? "- Prioritize the SOURCE MATERIAL for all facts/figures/quotes; keep the deck faithful to it." : "",
     "- LINE RULES (typography): titles ≤ 24 chars CJK / 7 words (must fit 1 line, 2 max). KPI labels ≤ 18 chars. Never phrase a sentence so its last line would be a single dangling word — rebalance the wording (no orphans/widows).",
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function runViaStdin(bin: string, args: string[], prompt: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<string | null> {
@@ -99,10 +106,11 @@ function runViaStdin(bin: string, args: string[], prompt: string, env: NodeJS.Pr
   });
 }
 
-export async function generateDeckContent(topic: string, count: number, mode?: string): Promise<TrexContentResult> {
+export async function generateDeckContent(topic: string, count: number, mode?: string, sources?: string): Promise<TrexContentResult> {
   const clean = (topic || "").trim().slice(0, 500);
-  if (!clean) return { ok: false, reason: "empty-topic" };
-  const prompt = buildPrompt(clean, count, mode);
+  const src = (sources || "").trim().slice(0, 24_000); // 첨부 파일 본문(캡). 소스가 있으면 주제 없이도 생성 가능.
+  if (!clean && !src) return { ok: false, reason: "empty-topic" };
+  const prompt = buildPrompt(clean || "(see source material)", count, mode, src);
 
   // 1) Antigravity CLI(agy) — 깔끔한 JSON. 워크스페이스 신뢰 우회 + 헤드리스 --print + stdin.
   const agy = resolveBin("agy", [path.join(os.homedir(), ".local/bin/agy"), "/opt/homebrew/bin/agy", "/usr/local/bin/agy"]);

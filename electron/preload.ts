@@ -24,7 +24,7 @@ const api: AgentlasIpc = {
   trex: {
     generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => ipcRenderer.invoke("trex:generateImage", payload),
     imageProviders: () => ipcRenderer.invoke("trex:imageProviders"),
-    generateContent: (payload: { topic: string; count?: number; mode?: string }) => ipcRenderer.invoke("trex:generateContent", payload),
+    generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string }) => ipcRenderer.invoke("trex:generateContent", payload),
     contentAvailable: () => ipcRenderer.invoke("trex:contentAvailable"),
   },
   document: {
@@ -253,6 +253,7 @@ const api: AgentlasIpc = {
     remove: (id: string) => ipcRenderer.invoke("telegram:remove", id),
     sendTest: (id: string) => ipcRenderer.invoke("telegram:sendTest", id),
     openBot: (id: string) => ipcRenderer.invoke("telegram:openBot", id),
+    configureBotSettings: (id: string) => ipcRenderer.invoke("telegram:configureBotSettings", id),
   },
   projects: {
     list: () => ipcRenderer.invoke("projects:list"),
