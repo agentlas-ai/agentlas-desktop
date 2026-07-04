@@ -1524,6 +1524,10 @@ function ChatPage() {
     if (cancelRequestedRef.current) return;
     setCancelPending(true);
     cancelRequestedRef.current = true;
+    // 정지 = 인플라이트 전부 취소. 대기 중이던 steering 메시지도 비워 busy→false 시 자동
+    // 발사되지 않게 한다(정지했는데 큐가 알아서 날아가던 버그).
+    steerQueueRef.current = [];
+    setQueuedSteers([]);
     // runId가 아직 안 왔으면(invoke:run 왕복 중) 취소 의사만 기록 → 도착 즉시 취소된다.
     const runId = runIdRef.current ?? lastRunIdRef.current;
     if (!runId) return;
