@@ -259,6 +259,7 @@ import {
 } from "./store/agent-groups";
 import {
   autoConnectTelegram,
+  configureTelegramBotSettings,
   listTelegramBindings,
   openTelegramBot,
   removeTelegramConnection,
@@ -574,9 +575,9 @@ export function registerIpcHandlers(): void {
     return trexImageProviders();
   });
   // T-rex 슬라이드 "내용" 생성 — 연결된 LLM(agy/codex)이 슬라이드별 실제 카피·수치를 JSON으로 작성.
-  ipcMain.handle("trex:generateContent", async (_e, payload: { topic?: string; count?: number; mode?: string }) => {
+  ipcMain.handle("trex:generateContent", async (_e, payload: { topic?: string; count?: number; mode?: string; sources?: string }) => {
     const { generateDeckContent } = await import("./trex/content");
-    return generateDeckContent(String(payload?.topic ?? ""), Number(payload?.count ?? 7), payload?.mode);
+    return generateDeckContent(String(payload?.topic ?? ""), Number(payload?.count ?? 7), payload?.mode, payload?.sources);
   });
   ipcMain.handle("trex:contentAvailable", async () => {
     const { trexContentAvailable } = await import("./trex/content");
@@ -1108,6 +1109,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("telegram:remove", (_e, id: string) => removeTelegramConnection(id));
   ipcMain.handle("telegram:sendTest", (_e, id: string) => sendTelegramTest(id));
   ipcMain.handle("telegram:openBot", (_e, id: string) => openTelegramBot(id));
+  ipcMain.handle("telegram:configureBotSettings", (_e, id: string) => configureTelegramBotSettings(id));
 
   // ── projects ───────────────────────────────────────────
   ipcMain.handle("projects:list", () => listProjects());

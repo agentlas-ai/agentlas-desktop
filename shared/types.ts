@@ -3126,7 +3126,7 @@ export interface AgentlasIpc {
   trex: {
     generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => Promise<{ ok: boolean; src?: string; reason?: string; engine?: "codex" | "gemini" }>;
     imageProviders: () => Promise<{ codex: boolean; gemini: boolean }>;
-    generateContent: (payload: { topic: string; count?: number; mode?: string }) => Promise<{ ok: boolean; text?: string; engine?: "agy" | "codex"; reason?: string }>;
+    generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string }) => Promise<{ ok: boolean; text?: string; engine?: "agy" | "codex"; reason?: string }>;
     contentAvailable: () => Promise<{ agy: boolean; codex: boolean }>;
   };
   /** 문서 스튜디오 내용 생성/개정 — 연결된 LLM(agy/codex), no-fallback. */
@@ -3437,6 +3437,7 @@ export interface AgentlasIpc {
     remove: (id: string) => Promise<void>;
     sendTest: (id: string) => Promise<TelegramConnectActionResult>;
     openBot: (id: string) => Promise<{ ok: boolean; message: string }>;
+    configureBotSettings: (id: string) => Promise<{ ok: boolean; message: string }>;
   };
   projects: {
     list: () => Promise<Project[]>;
