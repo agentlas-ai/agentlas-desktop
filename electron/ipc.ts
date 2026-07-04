@@ -259,6 +259,7 @@ import {
 } from "./store/agent-groups";
 import {
   autoConnectTelegram,
+  cloneTelegramConnection,
   configureTelegramBotSettings,
   listTelegramBindings,
   openTelegramBot,
@@ -1104,6 +1105,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("telegram:listBindings", () => listTelegramBindings());
   ipcMain.handle("telegram:autoConnect", (_e, input) => autoConnectTelegram(input));
   ipcMain.handle("telegram:start", (_e, input) => startTelegramConnection(input));
+  ipcMain.handle("telegram:clone", (_e, input) => cloneTelegramConnection(input));
   ipcMain.handle("telegram:resume", (_e, id: string) => resumeTelegramConnection(id));
   ipcMain.handle("telegram:stop", (_e, id: string) => stopTelegramConnection(id));
   ipcMain.handle("telegram:remove", (_e, id: string) => removeTelegramConnection(id));

@@ -596,6 +596,12 @@ export interface TelegramConnectStartInput {
   botToken: string;
 }
 
+export interface TelegramConnectCloneInput {
+  sourceBindingId: string;
+  targetKind?: TelegramConnectTargetKind;
+  targetId?: string;
+}
+
 export interface TelegramConnectAutoInput {
   targetKind: TelegramConnectTargetKind;
   targetId: string;
@@ -3432,6 +3438,7 @@ export interface AgentlasIpc {
     listBindings: () => Promise<TelegramConnectBinding[]>;
     autoConnect: (input: TelegramConnectAutoInput) => Promise<TelegramConnectActionResult>;
     start: (input: TelegramConnectStartInput) => Promise<TelegramConnectActionResult>;
+    clone: (input: TelegramConnectCloneInput) => Promise<TelegramConnectActionResult>;
     resume: (id: string) => Promise<TelegramConnectBinding>;
     stop: (id: string) => Promise<TelegramConnectBinding>;
     remove: (id: string) => Promise<void>;

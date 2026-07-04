@@ -71,6 +71,19 @@ function applyDockIcon(): void {
 
 let mainWindow: BrowserWindow | null = null;
 
+const allowMultiInstance = process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
+const singleInstanceLock = allowMultiInstance || app.requestSingleInstanceLock();
+if (!singleInstanceLock) {
+  app.exit(0);
+}
+
+app.on("second-instance", () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
+
 function resolveRendererFile(url: string): string {
   const rendererRoot = path.resolve(__dirname, "../renderer");
   const parsed = new URL(url);

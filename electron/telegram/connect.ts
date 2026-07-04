@@ -15,6 +15,7 @@ import type {
   TelegramConnectActionResult,
   TelegramConnectAutoInput,
   TelegramConnectBinding,
+  TelegramConnectCloneInput,
   TelegramConnectStartInput,
   TelegramConnectStatus,
   TelegramConnectTargetKind,
@@ -86,6 +87,7 @@ const TOKEN_RE = /\b\d{8,12}:[A-Za-z0-9_-]{30,}\b/g;
 
 interface TelegramWebState {
   token: string | null;
+  tokens: string[];
   hasComposer: boolean;
   hasBotFather: boolean;
   botFatherBlocked: boolean;
@@ -96,6 +98,103 @@ interface BotFatherCapture {
   token: string;
   source: "existing" | "created";
   window: BrowserWindow;
+}
+
+const TELEGRAM_COPY = {
+  ko: {
+    "auto.existing_confirmed": "이미 연결된 Telegram 방을 확인했고 테스트 메시지도 보냈습니다.",
+    "auto.chat_connected": "Telegram 방까지 연결했습니다. 이제 그 방에서 말하면 Agentlas가 선택한 에이전트에게 보냅니다.",
+    "auto.bot_ready": "봇은 준비됐습니다. 열린 Telegram 창에서 시작을 누르면 방 연결이 끝납니다.",
+    "start.bot_verified": "봇 확인 완료. 이제 Telegram에서 봇에게 메시지를 보내면 이 연결이 방을 기억합니다.",
+    "clone.bot_verified": "같은 봇으로 새 방 포트를 만들었습니다. Telegram 방에서 시작 메시지를 보내면 연결됩니다.",
+    "open.title": "Agentlas Telegram 열기",
+    "open.success": "Telegram 창을 열었습니다: @{username}",
+    "settings.title": "Agentlas Telegram 봇 설정",
+    "settings.bot_username_unknown": "아직 봇 이름을 모릅니다. 먼저 봇 포트를 만들어주세요.",
+    "settings.group_enabled": "그룹 전체 메시지 받기를 켰습니다. 이미 초대한 그룹은 봇을 빼고 다시 초대해야 적용될 수 있고, 반영에 몇 분 걸릴 수 있습니다.",
+    "settings.manual_disable": "BotFather 설정 창을 열어두었습니다. 화면에 보이는 Disable 버튼을 누르면 그룹 전체 메시지 받기가 켜집니다.",
+    "test.message": "Agentlas 연결 테스트입니다. 이 메시지에 답장하거나 봇을 불러 작업을 맡겨보세요.",
+    "test.sent": "테스트 메시지를 보냈습니다.",
+    "pair.connected": "Agentlas에 연결되었습니다. 이제 메시지로 실행할 수 있어요.",
+    "automation.disable_done": "알겠습니다. 앞으로 자동화 완료 보고는 이 Telegram 방으로 보내지 않을게요.",
+    "automation.enable_done": "좋아요. 앞으로 Agentlas 자동화가 끝나면 이 Telegram 방에 보고할게요. 끄려면 \"자동화 보고 꺼\"라고 말하면 됩니다.",
+    "automation.status_on": "자동화 완료 보고가 이 Telegram 방으로 오도록 켜져 있습니다. 끄려면 \"자동화 보고 꺼\"라고 말하면 됩니다.",
+    "automation.status_off": "자동화 완료 보고는 아직 꺼져 있습니다. \"자동화 끝나면 여기에 보고해\"라고 말하면 켤 수 있습니다.",
+    "automation.report_title": "자동화 보고: {name}",
+    "automation.status_label": "상태: {status}",
+    "automation.time_label": "시간: {time}",
+    "automation.error_label": "오류: {error}",
+    "automation.summary_label": "요약: {summary}",
+    "automation.status_completed": "완료",
+    "automation.status_skipped": "건너뜀",
+    "automation.status_failed": "실패",
+    "botfather.connect_title": "Agentlas Telegram 연결",
+    "botfather.login_timeout": "Telegram 로그인이 끝나지 않았습니다. 열린 창에서 로그인한 뒤 다시 시도해주세요.",
+    "botfather.blocked": "Telegram이 현재 계정에서 BotFather 메시지를 막고 있습니다. 열린 BotFather 창에서 제한이 풀린 계정으로 로그인하거나 Telegram 데스크톱/모바일에서 직접 설정해야 합니다.",
+    "botfather.manual_settings": "BotFather 창을 열어두었습니다. 로그인 후 /setprivacy를 보내고 이 봇을 고른 뒤 Disable을 누르면 그룹 전체 메시지 받기가 켜집니다.",
+    "botfather.create_failed": "BotFather가 새 봇을 만들지 못했습니다. Telegram 창의 안내를 확인해주세요.",
+    "error.bot_username_unknown": "아직 봇 이름을 모릅니다. 먼저 봇 포트를 만들어주세요.",
+    "error.chat_not_paired": "Telegram 방이 아직 연결되지 않았습니다.",
+    "error.message_box_missing": "Telegram 입력창을 찾지 못했습니다.",
+    "error.missing_keychain": "Telegram 봇 비밀문자가 macOS 비밀 금고에 없습니다.",
+    "error.no_reply": "Agentlas가 보낼 답을 만들지 못했습니다.",
+    "error.open_chat_failed": "Telegram 봇 채팅을 열지 못했습니다.",
+    "error.run_failed": "Agentlas 실행 실패: {message}",
+    "error.token_not_bot": "Telegram 비밀문자가 봇용이 아닙니다.",
+    "error.token_required": "Telegram 봇 비밀문자가 필요합니다.",
+    "error.window_closed": "Telegram 연결 창이 닫혔습니다.",
+  },
+  en: {
+    "auto.existing_confirmed": "Existing Telegram chat confirmed. A test message was sent.",
+    "auto.chat_connected": "Telegram chat connected. Messages in that chat now route to the selected Agentlas target.",
+    "auto.bot_ready": "Bot is ready. Press Start in the Telegram window to finish pairing the chat.",
+    "start.bot_verified": "Bot verified. Send a Telegram message to the bot and this connection will remember that chat.",
+    "clone.bot_verified": "Created another chat port with the same bot. Send the start message in Telegram to pair it.",
+    "open.title": "Agentlas Telegram",
+    "open.success": "Telegram window opened: @{username}",
+    "settings.title": "Agentlas Telegram Bot Settings",
+    "settings.bot_username_unknown": "Bot username is not known yet. Create the bot port first.",
+    "settings.group_enabled": "Group-wide message receiving was requested. If the bot is already in a group, remove and re-add it; Telegram may take a few minutes to apply it.",
+    "settings.manual_disable": "BotFather settings are open. Press the visible Disable button to let the bot receive group-wide messages.",
+    "test.message": "Agentlas connection test. Reply to this message or mention the bot to assign work.",
+    "test.sent": "Test message sent.",
+    "pair.connected": "Connected to Agentlas. You can now run it by messaging here.",
+    "automation.disable_done": "Done. Automation completion reports will no longer be sent to this Telegram chat.",
+    "automation.enable_done": "Got it. Agentlas automation completions will be reported to this Telegram chat. Say \"turn off automation reports\" to stop.",
+    "automation.status_on": "Automation completion reports are on for this Telegram chat. Say \"turn off automation reports\" to stop them.",
+    "automation.status_off": "Automation completion reports are off. Say \"report automation completions here\" to turn them on.",
+    "automation.report_title": "Automation report: {name}",
+    "automation.status_label": "Status: {status}",
+    "automation.time_label": "Time: {time}",
+    "automation.error_label": "Error: {error}",
+    "automation.summary_label": "Summary: {summary}",
+    "automation.status_completed": "Completed",
+    "automation.status_skipped": "Skipped",
+    "automation.status_failed": "Failed",
+    "botfather.connect_title": "Agentlas Telegram Connect",
+    "botfather.login_timeout": "Telegram login did not finish. Log in in the opened window, then try again.",
+    "botfather.blocked": "Telegram is blocking BotFather messages for this account. Use the opened BotFather window with an account that can message BotFather, or set it in Telegram Desktop/mobile.",
+    "botfather.manual_settings": "BotFather is open. After logging in, send /setprivacy, choose this bot, then press Disable to let it receive group-wide messages.",
+    "botfather.create_failed": "BotFather could not create a new bot. Check the Telegram window for its message.",
+    "error.bot_username_unknown": "Bot username is not known yet. Create the bot port first.",
+    "error.chat_not_paired": "Telegram chat is not paired yet.",
+    "error.message_box_missing": "Could not find the Telegram message box.",
+    "error.missing_keychain": "Telegram bot secret is missing from Keychain.",
+    "error.no_reply": "Agentlas did not produce a reply.",
+    "error.open_chat_failed": "Could not open the Telegram bot chat.",
+    "error.run_failed": "Agentlas run failed: {message}",
+    "error.token_not_bot": "Telegram token does not belong to a bot.",
+    "error.token_required": "Telegram bot secret is required.",
+    "error.window_closed": "Telegram connect window was closed.",
+  },
+} as const;
+
+type TelegramCopyKey = keyof typeof TELEGRAM_COPY.en;
+
+function tg(key: TelegramCopyKey, vars: Record<string, string | number> = {}): string {
+  const locale = currentUiLocale() === "ko" ? "ko" : "en";
+  const template = TELEGRAM_COPY[locale][key] ?? TELEGRAM_COPY.en[key];
+  return template.replace(/\{(\w+)\}/g, (_match, name) => String(vars[name] ?? ""));
 }
 
 function nowIso(): string {
@@ -208,7 +307,7 @@ async function telegramApi<T>(
 
 async function verifyBotToken(token: string): Promise<TelegramUser> {
   const me = await telegramApi<TelegramUser>(token, "getMe", {});
-  if (!me.is_bot) throw new Error("Telegram token does not belong to a bot.");
+  if (!me.is_bot) throw new Error(tg("error.token_not_bot"));
   return me;
 }
 
@@ -219,10 +318,7 @@ export async function autoConnectTelegram(input: TelegramConnectAutoInput): Prom
     const result = await sendTelegramTest(existing.id);
     return {
       binding: result.binding,
-      message:
-        currentUiLocale() === "ko"
-          ? "이미 연결된 Telegram 방을 확인했고 테스트 메시지도 보냈습니다."
-          : "Existing Telegram chat confirmed. A test message was sent.",
+      message: tg("auto.existing_confirmed"),
     };
   }
 
@@ -247,16 +343,11 @@ export async function autoConnectTelegram(input: TelegramConnectAutoInput): Prom
 
     closeBotFatherWindow(capture.window);
     capture = null;
-    const ko = currentUiLocale() === "ko";
     return {
       binding,
       message: paired
-        ? ko
-          ? "Telegram 방까지 연결했습니다. 이제 그 방에서 말하면 Agentlas가 선택한 에이전트에게 보냅니다."
-          : "Telegram chat connected. Messages in that chat now route to the selected Agentlas target."
-        : ko
-          ? "봇은 준비됐습니다. 열린 Telegram 창에서 시작을 누르면 방 연결이 끝납니다."
-          : "Bot is ready. Press Start in the Telegram window to finish pairing the chat.",
+        ? tg("auto.chat_connected")
+        : tg("auto.bot_ready"),
     };
   } catch (err) {
     if (capture?.window) closeBotFatherWindow(capture.window);
@@ -286,7 +377,7 @@ async function findReusableTargetBinding(
 export async function startTelegramConnection(input: TelegramConnectStartInput): Promise<TelegramConnectActionResult> {
   resolveTarget(input.targetKind, input.targetId, true);
   const token = input.botToken.trim();
-  if (!token) throw new Error("Telegram bot secret is required.");
+  if (!token) throw new Error(tg("error.token_required"));
   const me = await verifyBotToken(token);
   const id = randomUUID();
   const now = nowIso();
@@ -312,10 +403,44 @@ export async function startTelegramConnection(input: TelegramConnectStartInput):
   const binding = await toBinding(getBindingRow(id) as TelegramBindingRow);
   return {
     binding,
-    message:
-      currentUiLocale() === "ko"
-        ? "봇 확인 완료. 이제 Telegram에서 봇에게 메시지를 보내면 이 연결이 방을 기억합니다."
-        : "Bot verified. Send a Telegram message to the bot and this connection will remember that chat.",
+    message: tg("start.bot_verified"),
+  };
+}
+
+export async function cloneTelegramConnection(input: TelegramConnectCloneInput): Promise<TelegramConnectActionResult> {
+  const source = getBindingRow(input.sourceBindingId);
+  if (!source) throw new Error(`Telegram binding not found: ${input.sourceBindingId}`);
+  const targetKind = input.targetKind ?? source.target_kind;
+  const targetId = input.targetId ?? source.target_id;
+  resolveTarget(targetKind, targetId, true);
+  const token = await readSecret(secretKey(source.id));
+  if (!token) throw new Error(tg("error.missing_keychain"));
+  const me = await verifyBotToken(token);
+  const id = randomUUID();
+  const now = nowIso();
+  getDb()
+    .prepare(
+      `INSERT INTO telegram_bindings
+       (id, target_kind, target_id, bot_user_id, bot_username, bot_display_name, status, enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'waiting_for_chat', 1, ?, ?)`,
+    )
+    .run(
+      id,
+      targetKind,
+      targetId,
+      me.id,
+      me.username ?? source.bot_username ?? null,
+      me.first_name ?? source.bot_display_name ?? null,
+      now,
+      now,
+    );
+  await setSecret(secretKey(id), token);
+  await telegramApi<boolean>(token, "deleteWebhook", { drop_pending_updates: false }).catch(() => false);
+  await reconcileTelegramWorkers();
+  const binding = await toBinding(getBindingRow(id) as TelegramBindingRow);
+  return {
+    binding,
+    message: tg("clone.bot_verified"),
   };
 }
 
@@ -334,9 +459,11 @@ export async function resumeTelegramConnection(id: string): Promise<TelegramConn
   if (!row) throw new Error(`Telegram binding not found: ${id}`);
   const token = await readSecret(secretKey(id));
   if (!token) {
-    markBindingFailed(id, "Telegram bot secret is missing from Keychain.");
+    markBindingFailed(id, tg("error.missing_keychain"));
     return toBinding(getBindingRow(id) as TelegramBindingRow);
   }
+  const wasStopped = row.enabled === 0 || row.status === "disabled";
+  const canDropPending = wasStopped && !(await hasOtherActiveBindingForToken(id, token));
   const nextStatus: TelegramConnectStatus =
     row.telegram_chat_id
       ? row.status === "disabled" || row.status === "failed"
@@ -346,13 +473,25 @@ export async function resumeTelegramConnection(id: string): Promise<TelegramConn
   getDb()
     .prepare("UPDATE telegram_bindings SET enabled = 1, status = ?, last_error = NULL, updated_at = ? WHERE id = ?")
     .run(nextStatus, nowIso(), id);
-  await telegramApi<boolean>(token, "deleteWebhook", { drop_pending_updates: false }).catch((err) => {
+  await telegramApi<boolean>(token, "deleteWebhook", { drop_pending_updates: canDropPending }).catch((err) => {
     const message = err instanceof Error ? err.message : String(err);
     markBindingFailed(id, message);
     throw err;
   });
   await reconcileTelegramWorkers();
   return toBinding(getBindingRow(id) as TelegramBindingRow);
+}
+
+async function hasOtherActiveBindingForToken(bindingId: string, token: string): Promise<boolean> {
+  const tokenHash = tokenKey(token);
+  const rows = getDb()
+    .prepare("SELECT id FROM telegram_bindings WHERE enabled = 1 AND id <> ?")
+    .all(bindingId) as Array<{ id: string }>;
+  for (const row of rows) {
+    const other = await readSecret(secretKey(row.id));
+    if (other && tokenKey(other) === tokenHash) return true;
+  }
+  return false;
 }
 
 export async function removeTelegramConnection(id: string): Promise<void> {
@@ -363,9 +502,13 @@ export async function removeTelegramConnection(id: string): Promise<void> {
 
 export async function openTelegramBot(id: string): Promise<{ ok: boolean; message: string }> {
   const row = getBindingRow(id);
-  if (!row?.bot_username) return { ok: false, message: "Bot username is not known yet." };
-  await shell.openExternal(`https://t.me/${row.bot_username}`);
-  return { ok: true, message: `https://t.me/${row.bot_username}` };
+  if (!row?.bot_username) return { ok: false, message: tg("error.bot_username_unknown") };
+  const win = createTelegramWebWindow(tg("open.title"));
+  await loadTelegramWebUrl(win, `https://web.telegram.org/k/#@${encodeURIComponent(row.bot_username)}`, "open bot");
+  return {
+    ok: true,
+    message: tg("open.success", { username: row.bot_username }),
+  };
 }
 
 export async function configureTelegramBotSettings(id: string): Promise<{ ok: boolean; message: string }> {
@@ -374,15 +517,13 @@ export async function configureTelegramBotSettings(id: string): Promise<{ ok: bo
   if (!row.bot_username) {
     return {
       ok: false,
-      message: currentUiLocale() === "ko" ? "아직 봇 이름을 모릅니다. 먼저 봇 포트를 만들어주세요." : "Bot username is not known yet. Create the bot port first.",
+      message: tg("settings.bot_username_unknown"),
     };
   }
 
-  const win = createTelegramWebWindow(
-    currentUiLocale() === "ko" ? "Agentlas Telegram 봇 설정" : "Agentlas Telegram Bot Settings",
-  );
+  const win = createTelegramWebWindow(tg("settings.title"));
   try {
-    await win.loadURL(BOTFATHER_WEB_URL);
+    await loadTelegramWebUrl(win, BOTFATHER_WEB_URL, "bot settings");
     const ready = await waitForBotFatherReady(win, 12_000).catch(() => null);
     if (!ready) return botFatherManualSettingsMessage();
     if (await isBotFatherMessagingBlocked(win)) return botFatherBlockedMessage();
@@ -399,12 +540,21 @@ export async function configureTelegramBotSettings(id: string): Promise<{ ok: bo
     ].filter(Boolean);
     const selectedBot = await clickTelegramButtonByText(win, botLabels, 5_000);
     if (!selectedBot) {
-      const sentBotName = await settleWithin(sendTelegramWebMessage(win, row.bot_username).then(() => true), 8_000, false);
+      const sentBotName = await settleWithin(sendTelegramWebMessage(win, `@${row.bot_username}`).then(() => true), 8_000, false);
       if (!sentBotName) return botFatherManualSettingsMessage();
       await sleep(1200);
     }
     if (await isBotFatherMessagingBlocked(win)) return botFatherBlockedMessage();
 
+    if (await telegramLatestIncomingIncludes(win, ["Current status is: DISABLED", "status is: DISABLED"])) {
+      closeBotFatherWindow(win);
+      return {
+        ok: true,
+        message: tg("settings.group_enabled"),
+      };
+    }
+    await clickTelegramButtonByText(win, ["Open", "열기"], 2_000);
+    await sleep(700);
     let disabledPrivacy = await clickTelegramButtonByText(
       win,
       ["Disable", "Turn off", "Off", "비활성", "해제", "끄기"],
@@ -423,22 +573,24 @@ export async function configureTelegramBotSettings(id: string): Promise<{ ok: bo
         );
       }
     }
-    const ko = currentUiLocale() === "ko";
+    if (!disabledPrivacy) {
+      disabledPrivacy = await settleWithin(sendTelegramWebMessage(win, "Disable").then(() => true), 8_000, false);
+      if (disabledPrivacy) {
+        await sleep(1800);
+        disabledPrivacy = await telegramLatestIncomingIncludes(win, ["DISABLED", "disabled", "has been disabled"]);
+      }
+    }
     if (disabledPrivacy) {
       await sleep(1200);
       closeBotFatherWindow(win);
       return {
         ok: true,
-        message: ko
-          ? "그룹 전체 메시지 받기를 켰습니다. 이미 초대한 그룹은 봇을 빼고 다시 초대해야 적용될 수 있고, 반영에 몇 분 걸릴 수 있습니다."
-          : "Group-wide message receiving was requested. If the bot is already in a group, remove and re-add it; Telegram may take a few minutes to apply it.",
+        message: tg("settings.group_enabled"),
       };
     }
     return {
       ok: false,
-      message: ko
-        ? "BotFather 설정 창을 열어두었습니다. 화면에 보이는 Disable 버튼을 누르면 그룹 전체 메시지 받기가 켜집니다."
-        : "BotFather settings are open. Press the visible Disable button to let the bot receive group-wide messages.",
+      message: tg("settings.manual_disable"),
     };
   } catch (err) {
     if (!win.isDestroyed()) win.focus();
@@ -446,24 +598,33 @@ export async function configureTelegramBotSettings(id: string): Promise<{ ok: bo
   }
 }
 
+async function telegramLatestIncomingIncludes(win: BrowserWindow, needles: string[]): Promise<boolean> {
+  return Boolean(await win.webContents.executeJavaScript(
+    `(() => {
+      const bubbles = Array.from(document.querySelectorAll(".bubble.is-in"));
+      const text = (bubbles[bubbles.length - 1]?.textContent || document.body?.innerText || "");
+      const needles = ${JSON.stringify(needles)};
+      return needles.some((needle) => text.includes(needle));
+    })()`,
+    true,
+  ).catch(() => false));
+}
+
 export async function sendTelegramTest(id: string): Promise<TelegramConnectActionResult> {
   const row = getBindingRow(id);
   if (!row) throw new Error(`Telegram binding not found: ${id}`);
-  if (!row.telegram_chat_id) throw new Error("Telegram chat is not paired yet.");
+  if (!row.telegram_chat_id) throw new Error(tg("error.chat_not_paired"));
   const token = await readSecret(secretKey(id));
-  if (!token) throw new Error("Telegram bot secret is missing from Keychain.");
+  if (!token) throw new Error(tg("error.missing_keychain"));
   if (row.enabled === 1) await reconcileTelegramWorkers();
-  const text =
-    currentUiLocale() === "ko"
-      ? "Agentlas 연결 테스트입니다. 이 메시지에 답장하거나 봇을 불러 작업을 맡겨보세요."
-      : "Agentlas connection test. Reply to this message or mention the bot to assign work.";
+  const text = tg("test.message");
   await telegramApi(token, "sendMessage", { chat_id: row.telegram_chat_id, text });
   getDb()
     .prepare("UPDATE telegram_bindings SET last_test_at = ?, status = 'test_passed', updated_at = ? WHERE id = ?")
     .run(nowIso(), nowIso(), id);
   return {
     binding: await toBinding(getBindingRow(id) as TelegramBindingRow),
-    message: currentUiLocale() === "ko" ? "테스트 메시지를 보냈습니다." : "Test message sent.",
+    message: tg("test.sent"),
   };
 }
 
@@ -475,7 +636,7 @@ async function activeBindingSecrets(): Promise<Array<{ row: TelegramBindingRow; 
   for (const row of rows) {
     const token = await readSecret(secretKey(row.id));
     if (token) out.push({ row, token });
-    else markBindingFailed(row.id, "Telegram bot secret is missing from Keychain.");
+    else markBindingFailed(row.id, tg("error.missing_keychain"));
   }
   return out;
 }
@@ -576,15 +737,17 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
   if (!binding) {
     // 보안: 선착순 귀속 금지. `/start <bindingId>` 토큰이 일치하는 미페어링 바인딩만 귀속한다.
     // bindingId는 randomUUID(추측 불가)이고 앱의 텔레그램 세션만 이 토큰을 실어 보낸다.
-    binding = tryPairBindingWithToken([...poller.bindingIds], message, text);
+    binding =
+      tryPairBindingWithToken([...poller.bindingIds], message, text) ??
+      tryPairFreshPrivateBinding([...poller.bindingIds], message);
     if (binding) {
       // 페어링 확정 — 이 핸드셰이크 메시지는 실행하지 않고 확인만 보낸다.
       await telegramApi(poller.token, "sendMessage", {
         chat_id: chatId,
-        text: currentUiLocale() === "ko" ? "Agentlas에 연결되었습니다. 이제 메시지로 실행할 수 있어요." : "Connected to Agentlas. You can now run it by messaging here.",
+        text: tg("pair.connected"),
       }).catch(() => undefined);
     }
-    return;
+    if (!binding || /^\/start(?:@\w+)?(?:\s|$)/i.test(text)) return;
   }
   if (!shouldHandleMessage(binding, message, text)) return;
 
@@ -601,10 +764,7 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     setAutomationReportEnabled(binding.id, false);
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
-      text:
-        currentUiLocale() === "ko"
-          ? "알겠습니다. 앞으로 자동화 완료 보고는 이 Telegram 방으로 보내지 않을게요."
-          : "Done. Automation completion reports will no longer be sent to this Telegram chat.",
+      text: tg("automation.disable_done"),
     }).catch(() => undefined);
     return;
   }
@@ -612,10 +772,7 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     setAutomationReportEnabled(binding.id, true);
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
-      text:
-        currentUiLocale() === "ko"
-          ? "좋아요. 앞으로 Agentlas 자동화가 끝나면 이 Telegram 방에 보고할게요. 끄려면 “자동화 보고 꺼”라고 말하면 됩니다."
-          : "Got it. Agentlas automation completions will be reported to this Telegram chat. Say “turn off automation reports” to stop.",
+      text: tg("automation.enable_done"),
     }).catch(() => undefined);
     return;
   }
@@ -632,7 +789,7 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     markBindingFailed(binding.id, msg);
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
-      text: currentUiLocale() === "ko" ? `Agentlas 실행 실패: ${msg}` : `Agentlas run failed: ${msg}`,
+      text: tg("error.run_failed", { message: msg }),
     }).catch(() => undefined);
   }
 }
@@ -656,6 +813,29 @@ function tryPairBindingWithToken(bindingIds: string[], message: TelegramMessage,
     .prepare(`SELECT * FROM telegram_bindings WHERE id = ? AND telegram_chat_id IS NULL AND enabled = 1`)
     .get(token) as TelegramBindingRow | undefined;
   if (!row) return null;
+  return pairBindingToMessage(row, message);
+}
+
+function tryPairFreshPrivateBinding(bindingIds: string[], message: TelegramMessage): TelegramBindingRow | null {
+  if (bindingIds.length === 0 || message.chat.type !== "private") return null;
+  const placeholders = bindingIds.map(() => "?").join(",");
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM telegram_bindings
+       WHERE id IN (${placeholders})
+         AND telegram_chat_id IS NULL
+         AND enabled = 1
+         AND status = 'waiting_for_chat'
+       ORDER BY created_at DESC`,
+    )
+    .all(...bindingIds) as TelegramBindingRow[];
+  if (rows.length !== 1) return null;
+  const createdAt = Date.parse(rows[0].created_at);
+  if (!Number.isFinite(createdAt) || Date.now() - createdAt > 30 * 60 * 1000) return null;
+  return pairBindingToMessage(rows[0], message);
+}
+
+function pairBindingToMessage(row: TelegramBindingRow, message: TelegramMessage): TelegramBindingRow | null {
   const title = chatTitle(message.chat);
   getDb()
     .prepare(
@@ -673,10 +853,41 @@ function chatTitle(chat: TelegramChat): string {
 
 function shouldHandleMessage(binding: TelegramBindingRow, message: TelegramMessage, text: string): boolean {
   if (message.chat.type === "private") return true;
-  const username = binding.bot_username ? `@${binding.bot_username.toLowerCase()}` : "";
-  if (username && text.toLowerCase().includes(username)) return true;
-  if (/\bagentlas\b/i.test(text) || /에이전트라스|에이전틀라스/i.test(text)) return true;
-  return Boolean(binding.bot_user_id && message.reply_to_message?.from?.id === binding.bot_user_id);
+  const chatBindings = listEnabledBindingsForChat(String(message.chat.id));
+  const lower = text.toLowerCase();
+  const mentionedBindings = chatBindings.filter((row) => {
+    const username = row.bot_username ? `@${row.bot_username.toLowerCase()}` : "";
+    return Boolean(username && lower.includes(username));
+  });
+  if (mentionedBindings.length > 0) {
+    return mentionedBindings.some((row) => row.id === binding.id);
+  }
+
+  const repliedBotId = message.reply_to_message?.from?.id;
+  if (repliedBotId) {
+    const repliedBinding = chatBindings.find((row) => row.bot_user_id === repliedBotId);
+    if (repliedBinding) return repliedBinding.id === binding.id;
+  }
+
+  if (chatBindings.length <= 1) return true;
+
+  const orchestrators = chatBindings.filter((row) => row.target_kind === "firm" || row.target_kind === "group");
+  if (orchestrators.length === 1 && orchestrators[0].id === binding.id) {
+    return true;
+  }
+
+  return false;
+}
+
+function listEnabledBindingsForChat(chatId: string): TelegramBindingRow[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM telegram_bindings
+       WHERE telegram_chat_id = ?
+         AND enabled = 1
+       ORDER BY target_kind = 'agent' ASC, updated_at DESC`,
+    )
+    .all(chatId) as TelegramBindingRow[];
 }
 
 function cleanTelegramPrompt(binding: TelegramBindingRow, text: string): string {
@@ -710,15 +921,10 @@ function isAutomationReportStatusRequest(text: string): boolean {
 }
 
 function automationReportStatusText(binding: TelegramBindingRow): string {
-  const ko = currentUiLocale() === "ko";
   if (binding.automation_report_enabled === 1) {
-    return ko
-      ? "자동화 완료 보고가 이 Telegram 방으로 오도록 켜져 있습니다. 끄려면 “자동화 보고 꺼”라고 말하면 됩니다."
-      : "Automation completion reports are on for this Telegram chat. Say “turn off automation reports” to stop them.";
+    return tg("automation.status_on");
   }
-  return ko
-    ? "자동화 완료 보고는 아직 꺼져 있습니다. “자동화 끝나면 여기에 보고해”라고 말하면 켤 수 있습니다."
-    : "Automation completion reports are off. Say “report automation completions here” to turn them on.";
+  return tg("automation.status_off");
 }
 
 function setAutomationReportEnabled(bindingId: string, enabled: boolean): void {
@@ -746,7 +952,7 @@ async function runBindingInvocation(binding: TelegramBindingRow, message: Telegr
     permissions: "read",
   }, (_event: McpInvocationEvent) => undefined);
   if (!result.finalText?.trim()) {
-    throw new Error(currentUiLocale() === "ko" ? "Agentlas가 보낼 답을 만들지 못했습니다." : "Agentlas did not produce a reply.");
+    throw new Error(tg("error.no_reply"));
   }
   return result.finalText.trim();
 }
@@ -813,7 +1019,7 @@ export async function notifyTelegramAutomationDone(
     if (sent.has(key) || !row.telegram_chat_id) continue;
     const token = await readSecret(secretKey(row.id));
     if (!token) {
-      markBindingFailed(row.id, "Telegram bot secret is missing from Keychain.");
+      markBindingFailed(row.id, tg("error.missing_keychain"));
       continue;
     }
     await sendLongMessage(token, row.telegram_chat_id, text);
@@ -829,19 +1035,19 @@ function formatAutomationReport(
   const ko = currentUiLocale() === "ko";
   const at = detail?.at ? new Date(detail.at) : new Date();
   const when = at.toLocaleString(ko ? "ko-KR" : "en-US", { dateStyle: "short", timeStyle: "short" });
-  const title = ko ? `자동화 보고: ${automation.name}` : `Automation report: ${automation.name}`;
+  const title = tg("automation.report_title", { name: automation.name });
   const statusText = status === "ok"
-    ? ko ? "완료" : "Completed"
+    ? tg("automation.status_completed")
     : status === "skipped"
-      ? ko ? "건너뜀" : "Skipped"
-      : ko ? "실패" : "Failed";
+      ? tg("automation.status_skipped")
+      : tg("automation.status_failed");
   const lines = [
     title,
-    ko ? `상태: ${statusText}` : `Status: ${statusText}`,
-    ko ? `시간: ${when}` : `Time: ${when}`,
+    tg("automation.status_label", { status: statusText }),
+    tg("automation.time_label", { time: when }),
   ];
-  if (detail?.error) lines.push(ko ? `오류: ${clipForTelegram(detail.error, 800)}` : `Error: ${clipForTelegram(detail.error, 800)}`);
-  else if (detail?.output?.trim()) lines.push(ko ? `요약: ${clipForTelegram(detail.output, 1200)}` : `Summary: ${clipForTelegram(detail.output, 1200)}`);
+  if (detail?.error) lines.push(tg("automation.error_label", { error: clipForTelegram(detail.error, 800) }));
+  else if (detail?.output?.trim()) lines.push(tg("automation.summary_label", { summary: clipForTelegram(detail.output, 1200) }));
   return lines.join("\n");
 }
 
@@ -908,15 +1114,17 @@ function createTelegramWebWindow(title: string): BrowserWindow {
   return win;
 }
 
+async function loadTelegramWebUrl(win: BrowserWindow, url: string, context: string): Promise<void> {
+  await win.loadURL(url).catch((err) => {
+    console.warn(`[telegram] ${context} window load failed:`, err instanceof Error ? err.message : err);
+  });
+}
+
 async function captureBotFatherToken(targetName: string): Promise<BotFatherCapture> {
-  const win = createTelegramWebWindow(
-    currentUiLocale() === "ko" ? "Agentlas Telegram 연결" : "Agentlas Telegram Connect",
-  );
-  await win.loadURL(BOTFATHER_WEB_URL);
+  const win = createTelegramWebWindow(tg("botfather.connect_title"));
+  await loadTelegramWebUrl(win, BOTFATHER_WEB_URL, "botfather");
   const ready = await waitForBotFatherReady(win, 180_000);
-  if (ready.token) {
-    return { token: ready.token, source: "existing", window: win };
-  }
+  if (ready.botFatherBlocked) throw new Error(tg("botfather.blocked"));
 
   const createdToken = await createBotWithBotFather(win, targetName);
   return { token: createdToken, source: "created", window: win };
@@ -927,13 +1135,11 @@ async function waitForBotFatherReady(win: BrowserWindow, timeoutMs: number): Pro
   while (Date.now() - start < timeoutMs) {
     assertWindowOpen(win);
     const state = await readTelegramWebState(win);
-    if (state.token || state.botFatherBlocked || (state.hasComposer && state.hasBotFather)) return state;
+    if (state.botFatherBlocked || (state.hasComposer && state.hasBotFather)) return state;
     await sleep(1000);
   }
   throw new Error(
-    currentUiLocale() === "ko"
-      ? "Telegram 로그인이 끝나지 않았습니다. 열린 창에서 로그인한 뒤 다시 시도해주세요."
-      : "Telegram login did not finish. Log in in the opened window, then try again.",
+    tg("botfather.login_timeout"),
   );
 }
 
@@ -951,6 +1157,7 @@ async function readTelegramWebState(win: BrowserWindow): Promise<TelegramWebStat
         });
         return {
           token: matches.length ? matches[matches.length - 1] : null,
+          tokens: matches,
           hasComposer: visibleEditors.length > 0,
           hasBotFather: /BotFather/i.test(text) || location.href.toLowerCase().includes("botfather"),
           botFatherBlocked: /Only Premium users can message BotFather/i.test(text),
@@ -959,16 +1166,17 @@ async function readTelegramWebState(win: BrowserWindow): Promise<TelegramWebStat
       })()`,
       true,
     ) as Promise<TelegramWebState>, 2500, null as TelegramWebState | null);
-    if (!state) return { token: null, hasComposer: false, hasBotFather: false, botFatherBlocked: false, href: "" };
+    if (!state) return { token: null, tokens: [], hasComposer: false, hasBotFather: false, botFatherBlocked: false, href: "" };
     return {
       token: typeof state.token === "string" ? state.token : null,
+      tokens: Array.isArray(state.tokens) ? state.tokens.filter((token) => typeof token === "string") : [],
       hasComposer: Boolean(state.hasComposer),
       hasBotFather: Boolean(state.hasBotFather),
       botFatherBlocked: Boolean(state.botFatherBlocked),
       href: typeof state.href === "string" ? state.href : "",
     };
   } catch {
-    return { token: null, hasComposer: false, hasBotFather: false, botFatherBlocked: false, href: "" };
+    return { token: null, tokens: [], hasComposer: false, hasBotFather: false, botFatherBlocked: false, href: "" };
   }
 }
 
@@ -978,52 +1186,61 @@ async function isBotFatherMessagingBlocked(win: BrowserWindow): Promise<boolean>
 }
 
 function botFatherBlockedMessage(): { ok: boolean; message: string } {
-  const ko = currentUiLocale() === "ko";
   return {
     ok: false,
-    message: ko
-      ? "Telegram이 현재 계정에서 BotFather 메시지를 막고 있습니다. 열린 BotFather 창에서 제한이 풀린 계정으로 로그인하거나 Telegram 데스크톱/모바일에서 직접 설정해야 합니다."
-      : "Telegram is blocking BotFather messages for this account. Use the opened BotFather window with an account that can message BotFather, or set it in Telegram Desktop/mobile.",
+    message: tg("botfather.blocked"),
   };
 }
 
 function botFatherManualSettingsMessage(): { ok: boolean; message: string } {
-  const ko = currentUiLocale() === "ko";
   return {
     ok: false,
-    message: ko
-      ? "BotFather 창을 열어두었습니다. 로그인 후 /setprivacy를 보내고 이 봇을 고른 뒤 Disable을 누르면 그룹 전체 메시지 받기가 켜집니다."
-      : "BotFather is open. After logging in, send /setprivacy, choose this bot, then press Disable to let it receive group-wide messages.",
+    message: tg("botfather.manual_settings"),
   };
 }
 
 async function createBotWithBotFather(win: BrowserWindow, targetName: string): Promise<string> {
   const displayName = botDisplayName(targetName);
+  const knownTokens = new Set((await readTelegramWebState(win)).tokens);
   await sendTelegramWebMessage(win, "/newbot");
   await sleep(1400);
   await sendTelegramWebMessage(win, displayName);
   await sleep(1400);
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    await sendTelegramWebMessage(win, botUsername());
-    const token = await waitForToken(win, 18_000);
+    const username = botUsername();
+    await sendTelegramWebMessage(win, username);
+    const token = await waitForTokenForBot(win, 18_000, knownTokens, username);
     if (token) return token;
+    for (const existing of (await readTelegramWebState(win)).tokens) knownTokens.add(existing);
     await sleep(800);
   }
 
   throw new Error(
-    currentUiLocale() === "ko"
-      ? "BotFather가 새 봇을 만들지 못했습니다. Telegram 창의 안내를 확인해주세요."
-      : "BotFather could not create a new bot. Check the Telegram window for its message.",
+    tg("botfather.create_failed"),
   );
 }
 
-async function waitForToken(win: BrowserWindow, timeoutMs: number): Promise<string | null> {
+async function waitForTokenForBot(
+  win: BrowserWindow,
+  timeoutMs: number,
+  knownTokens: Set<string>,
+  expectedUsername: string,
+): Promise<string | null> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     assertWindowOpen(win);
     const state = await readTelegramWebState(win);
-    if (state.token) return state.token;
+    for (const token of state.tokens) {
+      if (knownTokens.has(token)) continue;
+      try {
+        const me = await verifyBotToken(token);
+        if (me.username?.toLowerCase() === expectedUsername.toLowerCase()) return token;
+      } catch {
+        // Ignore non-bot or stale tokens surfaced in BotFather history.
+      }
+      knownTokens.add(token);
+    }
     await sleep(900);
   }
   return null;
@@ -1031,7 +1248,7 @@ async function waitForToken(win: BrowserWindow, timeoutMs: number): Promise<stri
 
 async function openBotAndSendStart(win: BrowserWindow, botUsername: string, bindingId: string): Promise<TelegramConnectBinding | null> {
   assertWindowOpen(win);
-  await win.loadURL(`https://web.telegram.org/k/#@${encodeURIComponent(botUsername)}`);
+  await loadTelegramWebUrl(win, `https://web.telegram.org/k/#@${encodeURIComponent(botUsername)}`, "pair bot");
   await waitForTelegramChatReady(win, 90_000);
   // 페어링 토큰을 반드시 실어 보낸다 — poller는 `/start <bindingId>`가 일치할 때만 귀속한다.
   // (Start 버튼은 페이로드 없는 /start만 보내므로, 토큰이 실린 텍스트 메시지를 직접 보낸다.)
@@ -1062,7 +1279,7 @@ async function waitForTelegramChatReady(win: BrowserWindow, timeoutMs: number): 
     if (ready) return;
     await sleep(1000);
   }
-  throw new Error(currentUiLocale() === "ko" ? "Telegram 봇 채팅을 열지 못했습니다." : "Could not open the Telegram bot chat.");
+  throw new Error(tg("error.open_chat_failed"));
 }
 
 async function clickTelegramStartButton(win: BrowserWindow): Promise<boolean> {
@@ -1112,38 +1329,59 @@ async function clickTelegramButtonByText(win: BrowserWindow, labels: string[], t
 
 async function sendTelegramWebMessage(win: BrowserWindow, text: string): Promise<void> {
   assertWindowOpen(win);
-  const inserted = await settleWithin(win.webContents.executeJavaScript(
+  const focused = await settleWithin(win.webContents.executeJavaScript(
     `(() => {
-      const text = ${JSON.stringify(text)};
       const candidates = Array.from(document.querySelectorAll('div[contenteditable="true"], [contenteditable="true"], textarea, input[type="text"]'));
       const visible = candidates.filter((el) => {
         const rect = el.getBoundingClientRect();
         const style = window.getComputedStyle(el);
         return rect.width > 24 && rect.height > 12 && style.display !== "none" && style.visibility !== "hidden";
       });
-      const el = visible[visible.length - 1];
+      const scored = visible
+        .filter((el) => !String(el.className || "").includes("fake") && !el.closest(".input-field-input-fake"))
+        .map((el) => {
+          const className = String(el.className || "");
+          let score = 0;
+          if (el.matches('textarea, input[type="text"]')) score += 20;
+          if (el.matches('[data-peer-id]')) score += 40;
+          if (className.includes("input-message-input")) score += 30;
+          if (el.getAttribute("role") === "textbox") score += 10;
+          return { el, score };
+        })
+        .sort((a, b) => a.score - b.score);
+      const el = scored[scored.length - 1]?.el || visible[visible.length - 1];
       if (!el) return false;
       el.focus();
       if ("value" in el) {
-        el.value = text;
+        el.value = "";
         el.dispatchEvent(new Event("input", { bubbles: true }));
       } else {
-        el.textContent = "";
-        document.execCommand("insertText", false, text);
-        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        document.execCommand("delete", false);
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward", data: null }));
       }
       return true;
     })()`,
     true,
   ) as Promise<boolean>, 3500, false);
-  if (!inserted) {
-    throw new Error(currentUiLocale() === "ko" ? "Telegram 입력창을 찾지 못했습니다." : "Could not find the Telegram message box.");
+  if (!focused) {
+    throw new Error(tg("error.message_box_missing"));
   }
+  await win.webContents.insertText(text);
   await sleep(250);
   const clicked = await settleWithin(win.webContents.executeJavaScript(
     `(() => {
       const buttons = Array.from(document.querySelectorAll('button, .Button, [role="button"]'));
-      const button = buttons.find((el) => /send|보내기/i.test(el.getAttribute("aria-label") || "") || /btn-send|send/i.test(String(el.className || "")));
+      const button = buttons.find((el) => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        if (rect.width < 10 || rect.height < 10 || style.display === "none" || style.visibility === "hidden") return false;
+        return /send|보내기/i.test(el.getAttribute("aria-label") || "") || /btn-send|send/i.test(String(el.className || ""));
+      });
       if (!button) return false;
       button.click();
       return true;
@@ -1179,7 +1417,7 @@ function botUsername(): string {
 
 function assertWindowOpen(win: BrowserWindow): void {
   if (win.isDestroyed()) {
-    throw new Error(currentUiLocale() === "ko" ? "Telegram 연결 창이 닫혔습니다." : "Telegram connect window was closed.");
+    throw new Error(tg("error.window_closed"));
   }
 }
 

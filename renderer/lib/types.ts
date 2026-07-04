@@ -200,6 +200,7 @@ export type {
   TelegramConnectActionResult,
   TelegramConnectAutoInput,
   TelegramConnectBinding,
+  TelegramConnectCloneInput,
   TelegramConnectStartInput,
   TelegramConnectStatus,
   TelegramConnectTargetKind,

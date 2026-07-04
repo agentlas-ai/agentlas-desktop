@@ -71,6 +71,7 @@ release-signing/
 release-local/
 # large demo/verification outputs
 artifacts/
+evidence/
 # generated Playwright QA screenshots/reports
 output/playwright/
 
