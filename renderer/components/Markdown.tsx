@@ -22,6 +22,7 @@ export interface MediaArtifact {
   kind: "image" | "video";
   src: string;
   path?: string;
+  paths?: string[];
   name: string;
 }
 
@@ -767,14 +768,7 @@ export function firstMediaArtifactInText(text: string, mediaBasePaths: string[] 
     rawSrc = plain[0].trim();
   }
   if (!rawSrc) return null;
-  const src = normalizeImageSrc(rawSrc, mediaBasePaths);
-  return {
-    id: `media:${src}`,
-    kind: "image",
-    src,
-    path: localPathFromImageSrc(rawSrc, mediaBasePaths),
-    name: alt || imageNameFromSrc(rawSrc, mediaBasePaths),
-  };
+  return mediaArtifactFromImage(rawSrc, alt, mediaBasePaths);
 }
 
 function renderInlineImage(
@@ -784,15 +778,8 @@ function renderInlineImage(
   onOpenMedia?: (a: MediaArtifact) => void,
   mediaBasePaths: string[] = [],
 ): React.ReactNode {
-  const src = normalizeImageSrc(rawSrc, mediaBasePaths);
-  const name = alt || imageNameFromSrc(rawSrc, mediaBasePaths);
-  const media: MediaArtifact = {
-    id: `media:${src}`,
-    kind: "image",
-    src,
-    path: localPathFromImageSrc(rawSrc, mediaBasePaths),
-    name,
-  };
+  const media = mediaArtifactFromImage(rawSrc, alt, mediaBasePaths);
+  const { src, name } = media;
   const image = (
     // eslint-disable-next-line @next/next/no-img-element
     <img
@@ -832,38 +819,66 @@ function renderInlineImage(
   );
 }
 
+function mediaArtifactFromImage(rawSrc: string, alt: string, mediaBasePaths: string[] = []): MediaArtifact {
+  const src = normalizeImageSrc(rawSrc, mediaBasePaths);
+  const paths = localPathsFromImageSrc(rawSrc, mediaBasePaths);
+  return {
+    id: `media:${src}`,
+    kind: "image",
+    src,
+    path: paths[0],
+    paths,
+    name: alt || imageNameFromSrc(rawSrc, mediaBasePaths),
+  };
+}
+
 /** 이미지 src 정규화 — 원격(http/data)은 그대로, 로컬 절대경로·file://는 커스텀 프로토콜로 서빙.
  *  (webSecurity:true라 file:// 직접 로드는 차단되므로 agentlas://localfile 경유.) */
 function normalizeImageSrc(src: string, mediaBasePaths: string[] = []): string {
   if (/^(https?:|data:|agentlas:|blob:)/i.test(src)) return src;
-  const local = localPathFromImageSrc(src, mediaBasePaths);
+  const local = localPathsFromImageSrc(src, mediaBasePaths)[0];
   if (local) return `agentlas://localfile/?p=${encodeURIComponent(local)}`;
   return src; // 알 수 없는 상대경로 등 — 렌더 못 할 수 있음
 }
 
 function localPathFromImageSrc(src: string, mediaBasePaths: string[] = []): string | undefined {
-  const cleaned = src.trim();
+  return localPathsFromImageSrc(src, mediaBasePaths)[0];
+}
+
+function localPathsFromImageSrc(src: string, mediaBasePaths: string[] = []): string[] {
+  const cleaned = cleanImageSrcCandidate(src);
+  const out: string[] = [];
+  const push = (value: string | undefined) => {
+    const next = value?.trim();
+    if (next && !out.includes(next)) out.push(next);
+  };
   if (/^agentlas:/i.test(cleaned)) {
     try {
       const url = new URL(cleaned);
       const p = url.searchParams.get("p");
-      return p || undefined;
+      push(p || undefined);
+      return out;
     } catch {
-      return undefined;
+      return out;
     }
   }
   if (cleaned.startsWith("file://")) {
     try {
-      return decodeURIComponent(new URL(cleaned).pathname);
+      push(decodeURIComponent(new URL(cleaned).pathname));
+      return out;
     } catch {
-      return cleaned.replace(/^file:\/\//, "");
+      push(cleaned.replace(/^file:\/\//, ""));
+      return out;
     }
   }
-  if (cleaned.startsWith("/") || /^[A-Za-z]:[\\/]/.test(cleaned)) return cleaned;
-  if (isImageLikePath(cleaned) && mediaBasePaths.length > 0) {
-    return joinLocalPath(mediaBasePaths[0], cleaned);
+  if (cleaned.startsWith("/") || /^[A-Za-z]:[\\/]/.test(cleaned)) {
+    push(cleaned);
+    return out;
   }
-  return undefined;
+  if (isImageLikePath(cleaned) && mediaBasePaths.length > 0) {
+    for (const base of mediaBasePaths) push(joinLocalPath(base, cleaned));
+  }
+  return out;
 }
 
 function imageNameFromSrc(src: string, mediaBasePaths: string[] = []): string {
@@ -885,6 +900,10 @@ function imageNameFromSrc(src: string, mediaBasePaths: string[] = []): string {
 
 function isImageLikePath(value: string): boolean {
   return /\.(png|jpe?g|gif|webp|avif|svg)$/i.test(value.trim());
+}
+
+function cleanImageSrcCandidate(value: string): string {
+  return value.trim().replace(/^[\s(]+/, "").replace(/[).,;:]+$/, "");
 }
 
 function joinLocalPath(base: string, rel: string): string {

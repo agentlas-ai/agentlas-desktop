@@ -47,6 +47,7 @@ export interface WorkspaceFilePreview {
   viewerKind: "markdown" | "json" | "text" | "browser" | "image" | "video" | "pdf" | "document" | "binary";
   fileUrl: string;
   browserUrl?: string;
+  openTargets?: string[];
   content?: string;
   truncated?: boolean;
   reason?: TextFilePreview["reason"];

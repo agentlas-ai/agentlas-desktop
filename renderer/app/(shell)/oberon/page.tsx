@@ -55,10 +55,11 @@ import { ShotBoard } from "@/components/oberon/ShotBoard";
 import { AssetBible } from "@/components/oberon/AssetBible";
 import { KeyframeStep } from "@/components/oberon/KeyframeStep";
 import { AnimatePanel } from "@/components/oberon/AnimatePanel";
+import { MotionGraphicsPanel } from "@/components/oberon/MotionGraphicsPanel";
 import { TimelineEditor, DeliveryPanel } from "@/components/oberon/panels";
 import { Stepper } from "@/components/oberon/Stepper";
 import { Glyph, OberonBadge } from "@/components/oberon/icons";
-import { Card, OB_GRID, OB_VARS, StatChip, formatCost, formatDuration } from "@/components/oberon/ui";
+import { OB_GRID, OB_VARS, StatChip, formatCost, formatDuration } from "@/components/oberon/ui";
 import type {
   JsonObject,
   OberonKeyframeJob,
@@ -242,6 +243,7 @@ export default function OberonPage() {
     setKfProgress(hasKeyframes ? prod.keyframeAssets?.length ?? 0 : hasTakes ? prod.shots.length : 0);
     setKfDone(hasKeyframes || hasTakes);
     setVideoMode(hasMotionOutput ? "motion_ad" : "veo");
+    setStudio("animation");
     setProduction(normalizedProd);
     setStepState(ss);
     setActive(hasEdl || hasMotionOutput ? "delivery" : motionFormat || hasKeyframes || hasTakes ? "video" : hasShots ? "keyframe" : "plan");
@@ -1100,7 +1102,16 @@ export default function OberonPage() {
       case "video":
         return (
           <StepFrame>
-            {studio === "animation" ? (
+            {isMotionFormat(production.brief.format) || videoMode === "motion_ad" ? (
+              <MotionGraphicsPanel
+                production={production}
+                generating={motionGenerating}
+                job={motionJob}
+                onStart={startMotionAd}
+                onReset={resetMotionAd}
+                onOpenOutput={(jobId) => void ipc()?.oberon.openMotionAdOutput(jobId)}
+              />
+            ) : (
               <AnimatePanel
                 production={production}
                 generating={animateGenerating}
@@ -1123,8 +1134,6 @@ export default function OberonPage() {
                   if (s) setAnimateKey(s);
                 }}
               />
-            ) : (
-              <MotionMovedPanel title={production.brief.title} locale={locale} />
             )}
             {isDone("video") && (
               <ApproveBar
@@ -1147,33 +1156,6 @@ export default function OberonPage() {
         return null;
     }
   }
-}
-
-function MotionMovedPanel({ title, locale }: { title: string; locale: Locale }) {
-  return (
-    <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 32px 72px" }}>
-      <Card style={{ padding: 22, maxWidth: 760 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-          <span style={{ display: "inline-flex", width: 38, height: 38, alignItems: "center", justifyContent: "center", borderRadius: 12, background: "var(--ob-accent-soft)", color: "var(--ob-accent-text)" }}>
-            <Glyph name="layers" size={18} />
-          </span>
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: ".08em", color: "var(--ob-muted)", textTransform: "uppercase" }}>Motion graphics moved</div>
-            <h2 style={{ margin: "2px 0 0", fontSize: 20, lineHeight: 1.15, color: "var(--ob-ink)" }}>{title}</h2>
-          </div>
-        </div>
-        <p style={{ margin: "0 0 16px", color: "var(--ob-ink-soft)", fontSize: 13.5, lineHeight: 1.55 }}>
-          {locale === "ko"
-            ? "모션그래픽은 이제 영화/애니메이션 파이프라인이 아니라 별도 Agent App에서 실행합니다."
-            : "Motion graphics now runs as a separate Agent App instead of the film/animation pipeline."}
-        </p>
-        <Link href="/oberon-motion" className="studio-open studio-open--primary">
-          {locale === "ko" ? "Oberon Motiongraphic Studio 열기" : "Open Oberon Motiongraphic Studio"}
-          <Glyph name="chevron" size={12} />
-        </Link>
-      </Card>
-    </div>
-  );
 }
 
 function VideoModeSwitch({

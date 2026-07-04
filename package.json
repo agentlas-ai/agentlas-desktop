@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -84,7 +84,6 @@
     "smoke:surface": "npm run build:electron && node scripts/smoke-surface-emitter.cjs",
     "smoke:multimodal": "npm run build:electron && node scripts/smoke-multimodal-settings.cjs",
     "smoke:oberon-motion": "npm run build:electron && electron scripts/smoke-oberon-motion-ad.cjs",
-    "smoke:oberon-motion-app": "npm run build && node scripts/smoke-desktop-oberon-motion-app.mjs",
     "typecheck": "tsc -p electron/tsconfig.json --noEmit && node -e \"require('fs').rmSync('renderer/.next',{recursive:true,force:true,maxRetries:5,retryDelay:100})\" && cd renderer && tsc --noEmit",
     "lint": "next lint --dir renderer",
     "clean": "node -e \"['dist','out','release','renderer/.next','renderer/out'].forEach(d=>require('fs').rmSync(d,{recursive:true,force:true}))\""

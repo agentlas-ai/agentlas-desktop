@@ -51,12 +51,10 @@ export function BriefWizard({
   const [title, setTitle] = useState(initial?.title ?? "");
   const [prompt, setPrompt] = useState(initial?.synopsis || initial?.logline || "");
   const [refs, setRefs] = useState<string[]>(initial?.visualReferences ?? []);
-  const [format, setFormat] = useState<FilmFormat | "">(
-    initial?.format ?? (studio === "motion" ? "motion_graphics_30" : ""),
-  );
+  const [format, setFormat] = useState<FilmFormat | "">(initial?.format ?? "");
   const [premium, setPremium] = useState(true);
   const [loadOpen, setLoadOpen] = useState(false);
-  // 모션그래픽 스튜디오 전용 입력 — 고객 브랜드/로고.
+  // 모션그래픽 포맷 전용 입력 — 고객 브랜드/로고.
   const [brandName, setBrandName] = useState(initial?.brandOrProduct ?? "");
   const [logoSrc, setLogoSrc] = useState(initial?.logoSource ?? "");
 
@@ -71,11 +69,12 @@ export function BriefWizard({
 
   const canPlan = !!title.trim() && !!prompt.trim() && !planning;
   const tpl = format ? GENRE_TEMPLATES[format] : null;
+  const isMotionFormat = format === "motion_graphics_30" || format === "motion_graphics_60";
 
   function generate() {
     const base = inferBriefFromPrompt({ title, prompt, references: refs, format, locale });
     const brief =
-      studio === "motion"
+      isMotionFormat
         ? { ...base, brandOrProduct: brandName.trim() || base.brandOrProduct, logoSource: logoSrc.trim() || undefined }
         : base;
     onPlan(brief, premium);
@@ -84,31 +83,11 @@ export function BriefWizard({
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 32px 56px" }}>
       <PanelHead
-        eyebrow={
-          locale === "ko"
-            ? studio === "motion"
-              ? "모션그래픽 · 시작"
-              : studio === "animation"
-                ? "애니메이션 · 시작"
-                : "Step 00 · 시작"
-            : studio === "motion"
-              ? "Motion Graphics · Start"
-              : studio === "animation"
-                ? "Animation · Start"
-                : "Step 00 · Start"
-        }
+        eyebrow={locale === "ko" ? "제작 · 시작" : "Production · Start"}
         title={
           locale === "ko"
-            ? studio === "motion"
-              ? "어떤 모션그래픽을 만들까요?"
-              : studio === "animation"
-                ? "어떤 애니메이션을 만들까요?"
-                : "무엇을 만들까요?"
-            : studio === "motion"
-              ? "What motion graphics should we make?"
-              : studio === "animation"
-                ? "What animation should we make?"
-                : "What should we make?"
+            ? "무엇을 만들까요?"
+            : "What should we make?"
         }
         subtitle={
           locale === "ko"
@@ -200,7 +179,7 @@ export function BriefWizard({
           )}
         </Field>
 
-        {studio === "motion" && (
+        {isMotionFormat && (
           <>
             <Field label={locale === "ko" ? "브랜드명" : "Brand name"}>
               <input style={inputStyle} value={brandName} placeholder={locale === "ko" ? "예: 원코치" : "e.g. Oncoach"} onChange={(e) => setBrandName(e.target.value)} />

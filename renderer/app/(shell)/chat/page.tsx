@@ -49,16 +49,27 @@ function uid(): string {
 }
 
 function workspacePreviewFromMedia(media: MediaArtifact): WorkspaceFilePreview {
+  const openTargets = uniqueStrings([media.path, ...(media.paths ?? []), media.src]);
   return {
-    path: media.path || media.src,
+    path: media.path || media.paths?.[0] || media.src,
     name: media.name,
     size: 0,
     viewerKind: media.kind,
     fileUrl: media.src,
+    openTargets,
     content: "",
     truncated: false,
     reason: "binary",
   };
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  const out: string[] = [];
+  for (const raw of values) {
+    const value = raw?.trim();
+    if (value && !out.includes(value)) out.push(value);
+  }
+  return out;
 }
 
 function parentFolder(absPath: string | null): string | null {

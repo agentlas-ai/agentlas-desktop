@@ -295,14 +295,20 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
   const typeLabel = viewerKindLabel(file.viewerKind, ko);
   const openExternal = async () => {
     setOpenError(null);
-    const target = file.viewerKind === "browser" && file.browserUrl ? file.browserUrl : file.path;
+    const targets = externalOpenTargets(file);
     const bridge = ipc();
     if (bridge?.fs?.openPath) {
-      const result = await bridge.fs.openPath(target).catch((error) => ({
-        ok: false,
-        message: error instanceof Error ? error.message : String(error),
-      }));
-      if (!result.ok) setOpenError(result.message || (ko ? "파일을 열지 못했습니다." : "Could not open the file."));
+      let lastMessage = "";
+      for (const target of targets) {
+        if (/^(data:|blob:)/i.test(target)) continue;
+        const result = await bridge.fs.openPath(target).catch((error) => ({
+          ok: false,
+          message: error instanceof Error ? error.message : String(error),
+        }));
+        if (result.ok) return;
+        lastMessage = result.message || lastMessage;
+      }
+      setOpenError(lastMessage || (ko ? "OS로 열 실제 파일 경로를 찾지 못했습니다." : "Could not find a local file path to open."));
       return;
     }
     window.open(file.browserUrl || file.fileUrl, "_blank", "noopener,noreferrer");
@@ -359,6 +365,22 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
       </div>
     </section>
   );
+}
+
+function externalOpenTargets(file: WorkspaceFilePreview): string[] {
+  const candidates = [
+    file.viewerKind === "browser" ? file.browserUrl : undefined,
+    ...(file.openTargets ?? []),
+    file.path,
+    file.fileUrl,
+    file.browserUrl,
+  ];
+  const out: string[] = [];
+  for (const raw of candidates) {
+    const value = raw?.trim();
+    if (value && !out.includes(value)) out.push(value);
+  }
+  return out;
 }
 
 function MarkdownFileViewer({ file }: { file: WorkspaceFilePreview }) {

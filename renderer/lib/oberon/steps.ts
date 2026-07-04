@@ -25,9 +25,8 @@ export type OberonStepId =
 
 export type StepState = "locked" | "active" | "done";
 
-// 오베론 본체는 애니메이션 스튜디오만 담당한다.
-// 모션그래픽은 Agent Apps의 /oberon-motion으로 분리되어 별도 HQ가 운영한다.
-export type OberonStudio = "motion" | "animation";
+// 오베론 본체는 제작 콘솔 하나에서 애니메이션과 모션그래픽 포맷을 함께 담당한다.
+export type OberonStudio = "animation";
 
 export interface OberonStudioDef {
   id: OberonStudio;
@@ -46,14 +45,14 @@ export interface OberonStudioDef {
 export const OBERON_STUDIOS: OberonStudioDef[] = [
   {
     id: "animation",
-    title: "애니메이션",
-    titleEn: "Animation",
-    tagline: "이미지 · 영상",
-    taglineEn: "Image · Video",
+    title: "제작",
+    titleEn: "Production",
+    tagline: "이미지 · 영상 · 모션",
+    taglineEn: "Image · Video · Motion",
     glyph: "sparkle",
-    blurb: "이미지를 생성해 영상으로 만드는 애니메이션.",
-    blurbEn: "Animation that generates images and turns them into video.",
-    steps: ["setup", "keyframe", "video", "delivery"],
+    blurb: "기획부터 납품까지 한 프로젝트로 이어지는 오베론 제작 흐름.",
+    blurbEn: "The Oberon production flow from planning through delivery in one project.",
+    steps: ["setup", "plan", "storyboard", "assets", "keyframe", "video", "delivery"],
   },
 ];
 
