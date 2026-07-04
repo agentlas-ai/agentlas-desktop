@@ -13,29 +13,30 @@
   --rd-f-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI Variable Display", "Segoe UI", "Inter Tight", "Pretendard Variable", "Pretendard", "Malgun Gothic", system-ui, sans-serif;
   --rd-f-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", "Inter", "Pretendard Variable", "Pretendard", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
   --rd-f-mono: "JetBrains Mono", "SF Mono", "Cascadia Mono", "Consolas", ui-monospace, monospace;
-  /* ── 브랜드 팔레트(고정) — DESIGN.md 단일 팔레트. 배경=화이트, 텍스트=Navy,
-     강조=Steel Blue, 보조=Light Blue, 경고=Tan, 오류=Wine. 이 색 밖은 쓰지 않는다. */
-  --rd-bg: #ffffff;          /* White — 페이지 캔버스(기본 배경) */
-  --rd-bg-soft: #eaf2f8;     /* Pale blue — 연한 캔버스 */
-  --rd-surface: #ffffff;     /* White 카드 */
-  --rd-surface-2: #f1f6fb;   /* 연한 blue — 인풋/리세스 면 */
-  --rd-ink: #0a2342;         /* Navy(deep) — 본문 텍스트 */
-  --rd-ink-2: rgba(10, 35, 66, 0.72);
-  --rd-ink-3: rgba(10, 35, 66, 0.58);
-  --rd-ink-4: rgba(10, 35, 66, 0.36);
-  --rd-hair: rgba(10, 35, 66, 0.12);   /* navy-tinted hairline(≈#D6D6D6 톤) */
-  --rd-hair-2: rgba(10, 35, 66, 0.20);
-  --rd-accent: #2c6e9b;      /* Steel Blue — 주 액센트 */
-  --rd-accent-2: #6ea8da;    /* Light Blue — 보조 */
-  --rd-accent-3: #2c6cb0;    /* Bright Blue — 정보 */
-  --rd-accent-text: #1d3557; /* Navy(slate) — 밝은 배경 위 액센트 텍스트(대비 확보) */
-  --rd-accent-2-text: #235a80;
-  --rd-accent-3-text: #1d3557;
+  /* ── 브랜드 팔레트(고정) ── Sea Foam·Moss·Citronella·Midnight + 뉴트럴 그레이.
+     페이지 캔버스는 퓨어 화이트, 보조 표면에만 Mirrorball/Hourglass 톤을 쓴다. 텍스트=Midnight,
+     강조=Moss(올리브), 보조=Sea Foam, 하이라이트=Citronella. */
+  --rd-bg: #ffffff;          /* 퓨어 화이트 — 페이지 캔버스 */
+  --rd-bg-soft: #efeee9;     /* Linen-ish */
+  --rd-surface: #ffffff;     /* 화이트 카드(캔버스 위에서 뜨게) */
+  --rd-surface-2: #f3f2ed;   /* 연한 warm — 인풋/리세스 면 */
+  --rd-ink: #001519;         /* Midnight */
+  --rd-ink-2: rgba(0, 21, 25, 0.72);
+  --rd-ink-3: rgba(0, 21, 25, 0.62);
+  --rd-ink-4: rgba(0, 21, 25, 0.34);
+  --rd-hair: rgba(0, 21, 25, 0.10);
+  --rd-hair-2: rgba(0, 21, 25, 0.18);
+  --rd-accent: #6b6e52;      /* Moss — 브랜드 강조 */
+  --rd-accent-2: #b6c8c7;    /* Sea Foam — 보조 */
+  --rd-accent-3: #6b6e52;    /* Moss */
+  --rd-accent-text: #474a35; /* 진한 Moss(밝은 배경 위 텍스트) */
+  --rd-accent-2-text: #3c534f; /* 진한 Sea Foam */
+  --rd-accent-3-text: #474a35;
   --rd-accent-soft: color-mix(in oklch, var(--rd-accent) 16%, transparent);
-  --rd-peach-soft: color-mix(in oklch, #c8a27a 24%, transparent);  /* Tan wash */
-  --rd-ok: #2c6cb0;          /* Blue(팔레트에 초록 없음 → 긍정=블루) */
-  --rd-warn: #c8a27a;        /* Tan/Gold(상태=주의) */
-  --rd-err: #8b1e3f;         /* Wine(상태=오류·위험) */
+  --rd-peach-soft: color-mix(in oklch, var(--rd-accent-2) 22%, transparent);
+  --rd-ok: #6c7050;          /* Moss-dark(상태=정상) */
+  --rd-warn: #9c8430;        /* Citronella-dark(상태=주의) */
+  --rd-err: #9a5a4c;         /* 팔레트 톤에 맞춘 muted brick(상태=오류) */
   --rd-r-xs: 8px;
   --rd-r-sm: 10px;
   --rd-r-md: 14px;
@@ -47,38 +48,38 @@
   --rd-shadow-2: 0 4px 10px -2px rgba(20, 22, 45, 0.06), 0 18px 44px -12px rgba(20, 22, 45, 0.16);
   --rd-shadow-3: 0 8px 18px -4px rgba(20, 22, 45, 0.08), 0 36px 80px -16px rgba(20, 22, 45, 0.22);
 
-  /* ── Color (레거시 토큰 — DESIGN.md 팔레트로 매핑) ──────────── */
-  --ink: #0a2342;            /* Navy(deep) */
-  --ink-soft: #40587a;       /* muted navy */
-  --paper: #ffffff;          /* White — 사이드바·챗 등 chrome 표면 */
-  --paper-2: #eaf2f8;        /* Pale blue near-white */
-  --paper-edge: #d6d6d6;     /* Gray 헤어라인 */
-  --muted: #9fb2c4;          /* light navy-gray */
-  --muted-deep: #5a7086;     /* navy-gray */
+  /* ── Color (브랜드 팔레트로 매핑) ───────────────────────── */
+  --ink: #001519;            /* Midnight */
+  --ink-soft: #51504e;       /* Eve */
+  --paper: #ffffff;          /* 화이트 — 사이드바·챗 등 chrome 표면 */
+  --paper-2: #f6f5f2;        /* 따뜻한 near-white */
+  --paper-edge: #eae9e3;     /* 아주 연한 warm 헤어라인 */
+  --muted: #b8bbbf;          /* Disco */
+  --muted-deep: #868483;     /* Cheers */
 
-  --accent: #2c6e9b;         /* Steel Blue */
-  --accent-soft: rgba(44, 110, 155, 0.14);
-  --accent-strong: #1d3557;  /* Navy(slate) */
-  --fill-1: rgba(44, 110, 155, 0.09);
-  --fill-2: rgba(44, 110, 155, 0.18);
+  --accent: #6b6e52;         /* Moss */
+  --accent-soft: rgba(107, 110, 82, 0.14);
+  --accent-strong: #55583f;
+  --fill-1: rgba(107, 110, 82, 0.09);
+  --fill-2: rgba(107, 110, 82, 0.18);
 
-  /* 장식/카테고리 색 — 팔레트 안에서만 구분(navy↔blue↔light-blue↔tan↔wine). */
-  --peach: #c8a27a;          /* Tan */
-  --peach-soft: #f2e6d6;     /* Tan wash */
-  --peach-ink: #8a6a3e;      /* deep tan */
+  /* 장식/카테고리 색 — 팔레트 안에서 색상만 구분(채도는 낮게). */
+  --peach: #c7b27e;          /* muted gold(Citronella 계열) */
+  --peach-soft: #fff4ce;     /* Citronella */
+  --peach-ink: #8a6f2e;
 
-  --blue: #6ea8da;           /* Light Blue */
-  --blue-deep: #2c6e9b;      /* Steel Blue */
-  --teal: #6ea8da;           /* (팔레트 통합 — light blue) */
-  --teal-deep: #2c6cb0;      /* Bright Blue */
-  --green: #6ea8da;          /* (초록 없음 → blue) */
-  --green-deep: #2c6cb0;     /* 긍정=blue */
-  --purple: #6b8bb0;         /* navy-blue tint */
-  --purple-deep: #1d3557;    /* Navy(slate) */
-  --amber: #d7b48c;          /* light Tan */
-  --amber-deep: #c8a27a;     /* Tan */
-  --red: #c07189;            /* light Wine */
-  --red-deep: #8b1e3f;       /* Wine */
+  --blue: #b6c8c7;           /* Sea Foam */
+  --blue-deep: #5d7a76;
+  --teal: #6aa8a3;
+  --teal-deep: #24635f;
+  --green: #a7b08c;          /* light Moss */
+  --green-deep: #6c7050;
+  --purple: #aeb4ac;         /* sage gray */
+  --purple-deep: #6f7464;
+  --amber: #e8d9a0;          /* light Citronella */
+  --amber-deep: #9c8430;
+  --red: #c39a90;            /* muted clay */
+  --red-deep: #9a5a4c;
 
   /* ── Glass (Apple-style frosted surfaces) ──────────────── */
   --glass-bg: rgba(255, 255, 255, 0.66);
@@ -133,69 +134,69 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  /* backgrounds — Navy 캔버스 elevation ramp (DESIGN.md 팔레트) */
-  --rd-bg: #0a2342;                 /* Navy(deep) — 다크 캔버스 */
-  --rd-bg-soft: #0e2a4e;
-  --rd-surface: #16335a;
-  --rd-surface-2: #20406b;
-  --rd-surface-3: #2a4d78;          /* popovers / menus / topmost float */
-  --rd-ink: #eaf2f8;                /* Pale blue — 텍스트 */
-  --rd-ink-2: rgba(234, 242, 248, 0.74);
-  --rd-ink-3: rgba(234, 242, 248, 0.56);
-  --rd-ink-4: rgba(234, 242, 248, 0.40);
-  --rd-hair: rgba(234, 242, 248, 0.12);
-  --rd-hair-2: rgba(234, 242, 248, 0.20);
-  --rd-edge: rgba(234, 242, 248, 0.07);     /* 1px inset top-highlight */
+  /* backgrounds — monotonic elevation ramp (no-slop dark redesign) */
+  --rd-bg: #0a0b0e;
+  --rd-bg-soft: #0f1014;
+  --rd-surface: #16171d;
+  --rd-surface-2: #1d1f26;
+  --rd-surface-3: #262932;          /* popovers / menus / topmost float */
+  --rd-ink: #f3f4f8;
+  --rd-ink-2: rgba(243, 244, 248, 0.72);
+  --rd-ink-3: rgba(243, 244, 248, 0.55);
+  --rd-ink-4: rgba(243, 244, 248, 0.40);   /* was 0.28 — invisible placeholders */
+  --rd-hair: rgba(255, 255, 255, 0.09);
+  --rd-hair-2: rgba(255, 255, 255, 0.16);
+  --rd-edge: rgba(255, 255, 255, 0.06);     /* 1px inset top-highlight */
   --rd-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px -6px rgba(0, 0, 0, 0.45);
   --rd-shadow-2: 0 6px 16px -4px rgba(0, 0, 0, 0.4), 0 22px 52px -12px rgba(0, 0, 0, 0.6);
   --rd-shadow-3: 0 10px 24px -6px rgba(0, 0, 0, 0.5), 0 40px 90px -18px rgba(0, 0, 0, 0.72);
 
   /* accent — FILL vs TEXT split. Dark block uses a brighter fill while the light
      theme keeps the quieter moss brand accent. */
-  --rd-accent: #6ea8da;             /* Light Blue — 네이비 위 액센트 fill */
-  --rd-accent-2: #8fbfe4;           /* 더 밝은 blue — secondary */
-  --rd-accent-3: #6ea8da;
-  --rd-accent-text: #8fbfe4;        /* accent AS TEXT on navy */
-  --rd-accent-2-text: #a9cef0;
-  --rd-accent-3-text: #8fbfe4;
-  --rd-accent-soft: rgba(110, 168, 218, 0.18);
-  --rd-peach-soft: rgba(200, 162, 122, 0.20);   /* Tan wash */
+  --rd-accent: #7c7cff;             /* fill behind white text (≈4.8:1) */
+  --rd-accent-2: #5ad1c0;           /* secondary / live·connected */
+  --rd-accent-3: #7c7cff;
+  --rd-accent-text: #a5a3ff;        /* accent AS TEXT on dark (≈7:1) */
+  --rd-accent-2-text: #6fe0cf;
+  --rd-accent-3-text: #a5a3ff;
+  --rd-accent-soft: rgba(124, 124, 255, 0.16);
+  --rd-peach-soft: rgba(90, 209, 192, 0.18);
 
-  /* status — 팔레트 안에서(ok=blue, warn=tan, err=wine) */
-  --rd-ok: #6ea8da;
-  --rd-warn: #d7b48c;
-  --rd-err: #c25a72;
+  /* status — re-tuned for dark (were inheriting light olive/brick) */
+  --rd-ok: #3fb37f;
+  --rd-warn: #e0a93a;
+  --rd-err: #f0726a;
 
-  --ink: #eaf2f8;            /* Pale blue text */
-  --ink-soft: #a9c3dc;
-  --paper: #16335a;          /* Navy surface */
-  --paper-2: #20406b;
-  --paper-edge: rgba(234, 242, 248, 0.14);
-  --muted: #7f9bb5;
-  --muted-deep: #a9c3dc;
+  --ink: #f3f4f8;
+  --ink-soft: #b6b6c0;
+  --paper: #131419;
+  --paper-2: #1c1d24;
+  --paper-edge: #2c2d36;
+  --muted: #8b8b96;
+  --muted-deep: #a6a6b2;
 
-  --accent: #6ea8da;         /* Light Blue */
-  --accent-soft: rgba(110, 168, 218, 0.20);
-  --accent-strong: #8fbfe4;
-  --fill-1: rgba(110, 168, 218, 0.14);
-  --fill-2: rgba(110, 168, 218, 0.24);
+  --accent: #7c7cff;
+  --accent-soft: rgba(124, 124, 255, 0.20);
+  --accent-strong: #9a98ff;
+  --fill-1: rgba(124, 124, 255, 0.12);
+  --fill-2: rgba(124, 124, 255, 0.22);
 
-  --peach: #d7b48c;          /* Tan */
-  --peach-soft: rgba(200, 162, 122, 0.22);
-  --peach-ink: #e0c19f;
+  --peach: #ff8a64;
+  --peach-soft: rgba(255, 122, 85, 0.22);
+  --peach-ink: #ff9d7a;
 
-  --blue: #6ea8da;
-  --blue-deep: #8fbfe4;
-  --teal: #6ea8da;
-  --teal-deep: #8fbfe4;
-  --green: #6ea8da;          /* 초록 없음 → blue */
-  --green-deep: #8fbfe4;
-  --purple: #8fa9cc;
-  --purple-deep: #a9c3dc;
-  --amber: #d7b48c;
-  --amber-deep: #e0c19f;
-  --red: #c25a72;            /* light Wine */
-  --red-deep: #d47e91;
+  --blue: #9a96f0;
+  --blue-deep: #8a86e8;
+  --teal: #5cc7bd;
+  --teal-deep: #7bded5;
+  --green: #9bd98f;
+  --green-deep: #7fc46f;
+  --purple: #cbb0ff;
+  --purple-deep: #b79aff;
+  --amber: #f5cd84;
+  --amber-deep: #e3b56a;
+  --red: #ff9a9a;
+  --red-deep: #ff7d7d;
 
   --glass-bg: rgba(28, 28, 32, 0.66);
   --glass-bg-strong: rgba(28, 28, 32, 0.85);
@@ -2735,7 +2736,7 @@ button[data-toggle-state="on"] {
 
 /* 딥인터뷰 답변 패널 */
 .build-interview-card {
-  border: 1px solid color-mix(in oklch, var(--rd-accent, #2c6e9b) 35%, var(--rd-hair));
+  border: 1px solid color-mix(in oklch, var(--rd-accent, #6b6e52) 35%, var(--rd-hair));
 }
 .build-interview-head {
   align-items: center;
@@ -6041,8 +6042,8 @@ button[data-toggle-state="on"] {
   text-overflow: ellipsis;
 }
 .library-roster-tab[data-active="true"] {
-  background: var(--accent, #2c6e9b);
-  border-color: var(--accent, #2c6e9b);
+  background: var(--accent, #6b6e52);
+  border-color: var(--accent, #6b6e52);
   color: #fff;
 }
 
@@ -6232,8 +6233,8 @@ button[data-toggle-state="on"] {
   font-weight: 500;
   padding: 5px 12px;
   border-radius: 7px;
-  border: 1px solid var(--rd-accent, #2c6e9b);
-  background: var(--rd-accent, #2c6e9b);
+  border: 1px solid var(--rd-accent, #6b6e52);
+  background: var(--rd-accent, #6b6e52);
   color: #fff;
   cursor: pointer;
 }
@@ -6276,7 +6277,7 @@ button[data-toggle-state="on"] {
   cursor: pointer;
 }
 .build-starter-chip:hover {
-  border-color: var(--rd-accent, #2c6e9b);
+  border-color: var(--rd-accent, #6b6e52);
   color: var(--rd-accent-text, var(--rd-accent));
 }
 
@@ -7919,35 +7920,6 @@ button[data-toggle-state="on"] {
   background: var(--connect-surface-2);
   color: var(--connect-muted);
   font: 700 11px/1 var(--rd-f-body);
-}
-
-.connect-bot-settings {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
-  gap: 8px;
-  align-items: start;
-  padding: 9px;
-  border: 1px solid rgba(34, 158, 217, 0.18);
-  border-radius: 8px;
-  background: rgba(34, 158, 217, 0.06);
-  color: #126994;
-}
-
-.connect-bot-settings span {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-
-.connect-bot-settings strong {
-  color: var(--connect-ink);
-  font: 760 12px/1.25 var(--rd-f-body);
-}
-
-.connect-bot-settings small {
-  color: var(--connect-muted);
-  font: 500 11px/1.35 var(--rd-f-body);
 }
 
 .connect-port-actions {
