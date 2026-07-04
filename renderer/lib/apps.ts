@@ -19,14 +19,6 @@ export interface AgentlasAppDefinition {
   launchCommand?: string;
 }
 
-export interface GeneratedDocument {
-  title: string;
-  subtitle: string;
-  body: string;
-  figureCaption: string;
-  cta: string;
-}
-
 export const INSTALLED_APPS: AgentlasAppDefinition[] = [
   {
     id: "trex",
@@ -180,67 +172,4 @@ export function buildAppRoutePrompt(
 
 function normalizeSlashCommand(command: string): string {
   return command.trim().toLowerCase();
-}
-
-export function buildDocument(
-  goal: string,
-  mode: "report" | "paper" | "brief",
-  locale: "ko" | "en" = "en",
-): GeneratedDocument {
-  const fallbackGoal =
-    locale === "ko"
-      ? "대학교 리포트: AI native Apps가 지식 작업을 바꾸는 방식"
-      : "University report: how AI-native Apps change knowledge work";
-  const normalized = goal.trim() || fallbackGoal;
-  const title =
-    mode === "paper"
-      ? `Research Paper: ${normalized}`
-      : mode === "brief"
-        ? `Executive Brief: ${normalized}`
-        : `Document Studio Report: ${normalized}`;
-  const subtitle =
-    mode === "paper"
-      ? "Structured academic draft with claim, method, figure, and references"
-      : mode === "brief"
-        ? "Decision-ready narrative with evidence blocks and next actions"
-        : "Long-form editable document generated as an Agentlas App artifact";
-  const framing =
-    mode === "brief"
-      ? "This brief turns the request into a concrete operating decision."
-      : "This draft treats the prompt as a researchable document goal and produces a polished first pass.";
-  const body = [
-    subtitle,
-    "",
-    "1. Thesis",
-    `${framing} The central claim is that the user does not need another passive text surface; they need an App that can hold its own interface, source context, generated assets, and follow-up edits in one place.`,
-    "",
-    "2. Context",
-    `The requested topic is: ${normalized}. Document Studio keeps the writing canvas, source highlights, citation style, generated visual plan, and revision controls inside Agentlas rather than scattering them across a chat transcript and loose files (Agentlas Apps Architecture, 2026).`,
-    "",
-    "3. Draft Structure",
-    "- Opening: state the problem in plain language.",
-    "- Evidence: group claims into source-ready sections and mark weak citation points.",
-    "- Visual: generate an academic figure or explanatory diagram plan.",
-    "- Revision: keep the full text editable inside the App.",
-    "- Handoff: leave a CTA so the chat can reopen the finished artifact in Apps.",
-    "",
-    "4. Figure Plan",
-    "A three-lane diagram: user goal -> App engine -> editable document artifact. The middle lane shows vault credentials, MCP engines, and generated assets as support systems, not top-level products.",
-    "",
-    "5. References",
-    "- Agentlas Desktop Apps architecture note.",
-    "- Local user prompt and generated App state.",
-    "- Future source connectors attached through Plugins.",
-    "- Local source highlight and citation style state.",
-    "",
-    "6. Next Revision",
-    "Ask an Agentlas AI to expand a section, add citations, or convert the draft into a presentation. The same installed App remains callable from chat.",
-  ].join("\n");
-  return {
-    title,
-    subtitle,
-    body,
-    figureCaption: "Figure: Agentlas Apps turn chat goals into editable app artifacts with supporting engines underneath.",
-    cta: "Open in Apps",
-  };
 }

@@ -214,6 +214,12 @@ export interface MarketplaceListing {
   installCli?: string;
 }
 
+export interface HubAgentBookmark {
+  slug: string;
+  listing: MarketplaceListing;
+  bookmarkedAt: string;
+}
+
 export interface MarketplaceSourceStatus {
   mode: "mcp" | "memory";
   baseUrl: string | null;
@@ -378,7 +384,7 @@ export interface AgentGroupMember {
 
 export interface AgentGroupResolvedMember extends AgentGroupMember {
   status: AgentGroupMemberStatus;
-  warnings: Array<"agent_missing" | "hub_missing" | "route_missing" | "route_changed">;
+  warnings: Array<"agent_missing" | "hub_missing" | "route_missing" | "route_changed" | "unsupported_multi">;
   /** Latest display/routing metadata, re-resolved from installed agents/org chart/Hub. */
   current?: AgentGroupMemberSnapshot;
 }
@@ -546,6 +552,58 @@ export interface ChatHistoryEntry {
   createdAt: string;
   /** 사용자 메시지에 첨부된 이미지 — 영구화는 V1, 현재는 in-flight만 */
   imageDataUrls?: string[];
+}
+
+export type TelegramConnectTargetKind = "agent" | "firm" | "group";
+export type TelegramConnectStatus =
+  | "draft"
+  | "bot_verified"
+  | "waiting_for_chat"
+  | "chat_paired"
+  | "test_passed"
+  | "running"
+  | "failed"
+  | "disabled";
+
+export interface TelegramConnectBinding {
+  id: string;
+  targetKind: TelegramConnectTargetKind;
+  targetId: string;
+  targetName: string;
+  status: TelegramConnectStatus;
+  enabled: boolean;
+  sessionRunning: boolean;
+  automationReportEnabled: boolean;
+  hasToken: boolean;
+  tokenPreview: string | null;
+  botUserId: number | null;
+  botUsername: string | null;
+  botDisplayName: string | null;
+  telegramChatId: string | null;
+  telegramChatTitle: string | null;
+  chatSessionId: string | null;
+  lastUpdateId: number;
+  lastError: string | null;
+  lastTestAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TelegramConnectStartInput {
+  targetKind: TelegramConnectTargetKind;
+  targetId: string;
+  /** BotFather token. Stored in Keychain by main; never returned to renderer. */
+  botToken: string;
+}
+
+export interface TelegramConnectAutoInput {
+  targetKind: TelegramConnectTargetKind;
+  targetId: string;
+}
+
+export interface TelegramConnectActionResult {
+  binding: TelegramConnectBinding;
+  message: string;
 }
 
 // ── 스케줄 트리거 spec — 저장/문법/표시 분리(설계 §2.1) ───────────
@@ -2409,6 +2467,14 @@ export interface OberonRenderShotInput {
     imageBytes?: string;
     mimeType: string;
   };
+  /** END 프레임 — Veo가 이 이미지로 정확히 끝나도록 보간(START/END 체이닝). firstFrame이 있을 때만 적용. */
+  lastFrame?: {
+    absPath?: string;
+    imageBytes?: string;
+    mimeType: string;
+  };
+  /** 이 샷의 첫 프레임이 직전 샷(id)의 END 프레임에서 이어짐 — 프롬프트에 연속성 지시로 반영. */
+  chainedFromShotId?: string;
 }
 
 export interface OberonRenderRequest {
@@ -2539,7 +2605,7 @@ export interface OberonMotionAdJob {
 }
 
 // ── Oberon image-to-video (애니메이션 스튜디오) ──────────────
-export type OberonAnimateProvider = "runway" | "luma";
+export type OberonAnimateProvider = "runway" | "luma" | "veo" | "seedance" | "kling";
 export type OberonAnimateJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export interface OberonAnimateRequest {
@@ -2591,6 +2657,9 @@ export interface OberonAnimateJob {
 export interface OberonAnimateKeyStatus {
   runway: boolean;
   luma: boolean;
+  veo: boolean;
+  seedance: boolean;
+  kling: boolean;
 }
 
 // ── Oberon text planning jobs ──────────────────────────────────
@@ -2619,6 +2688,8 @@ export interface OberonPlanResult {
 export type OberonKeyframeProvider = "codex-imagegen-cli" | "google-imagen";
 export type OberonKeyframeJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
+export type OberonKeyframeAssetKind = "first_frame" | "last_frame" | "master_sheet" | "storyboard_sheet";
+
 export interface OberonKeyframeShotInput {
   shotId: string;
   index: number;
@@ -2627,6 +2698,10 @@ export interface OberonKeyframeShotInput {
   negativePrompt?: string;
   cameraSize?: string;
   continuityRefs?: string[];
+  /** START/END 프레임 체이닝 — "last"면 샷의 END 프레임을 생성(파일명·자산 kind 반영). 기본 "first". */
+  frameRole?: "first" | "last";
+  /** 자산 종류 오버라이드 — 마스터 시트/콘티 시트 생성 시 사용. */
+  assetKind?: OberonKeyframeAssetKind;
 }
 
 export interface OberonKeyframeRequest {
@@ -2643,7 +2718,7 @@ export interface OberonKeyframeRequest {
 export interface OberonKeyframeAsset {
   id: string;
   shotId: string;
-  kind: "first_frame";
+  kind: OberonKeyframeAssetKind;
   provider: OberonKeyframeProvider;
   model: string;
   prompt: string;
@@ -2677,6 +2752,33 @@ export interface OberonKeyframeJob {
   warnings: string[];
   createdAtMs: number;
   updatedAtMs: number;
+}
+
+// ── Oberon 시트 생성 (마스터 시트 · 콘티 시트 · 컷 분해 시트) ──
+// 프롬프트는 shared/oberon-sheets.ts 빌더로 만들고, 생성은 키프레임 엔진을 재사용한다.
+export type OberonSheetKindInput =
+  | "master_sheet_v1"
+  | "master_sheet_v2"
+  | "storyboard_overview"
+  | "cut_breakdown";
+
+export interface OberonSheetItemInput {
+  /** 시트 id — 캐릭터 시트면 reference id, 콘티면 "storyboard_overview" 등. */
+  id: string;
+  kind: OberonSheetKindInput;
+  /** shared/oberon-sheets 빌더가 만든 완성 프롬프트. */
+  prompt: string;
+  /** normalizeAspect 입력 기준 비율 (기본: kind별 sheetAspect). */
+  aspectRatio?: string;
+}
+
+export interface OberonSheetRequest {
+  productionId: string;
+  title: string;
+  sheets: OberonSheetItemInput[];
+  provider?: OberonKeyframeProvider;
+  model?: string;
+  imageSize?: "1K" | "2K";
 }
 
 // ── Hephaestus 엔진 브리지 ──────────────────────────────────────────────────
@@ -2943,6 +3045,75 @@ export interface AgentMemoryEntryUi {
   createdAt: string;
 }
 
+export interface RunEventUi {
+  id: string;
+  runId: string;
+  seq: number;
+  ts: string;
+  kind: string;
+  chatId?: string;
+  automationId?: string;
+  nodeId?: string;
+  agentId?: string;
+  payload: Record<string, unknown>;
+}
+
+export interface FailureEventUi {
+  id: string;
+  runId?: string;
+  ts: string;
+  source: string;
+  chatId?: string;
+  automationId?: string;
+  nodeId?: string;
+  agentId?: string;
+  errorCode?: string;
+  errorMessage: string;
+  payload: Record<string, unknown>;
+}
+
+export type AgentEvolutionProposalStatus =
+  | "candidate"
+  | "approved"
+  | "rejected"
+  | "applied"
+  | "measured"
+  | "rolled_back"
+  | "apply_failed";
+
+export interface AgentEvolutionProposalUi {
+  id: string;
+  agentId: string;
+  proposalType: "rule" | "playbook" | "skill" | "setup_doc" | "plugin";
+  summary: string;
+  targetPath: string;
+  beforeHash: string;
+  afterHash: string;
+  risk: "low" | "medium" | "high";
+  status: AgentEvolutionProposalStatus;
+  source: Record<string, unknown>;
+  decisionNote?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt?: string;
+  appliedAt?: string;
+  measuredAt?: string;
+  rolledBackAt?: string;
+}
+
+export interface CreatePromptEvolutionProposalInput {
+  agentId: string;
+  targetPath: string;
+  currentContent: string;
+  proposedContent: string;
+  proposalType?: AgentEvolutionProposalUi["proposalType"];
+  summary?: string;
+  risk?: AgentEvolutionProposalUi["risk"];
+  source?: Record<string, unknown>;
+  decisionNote?: string;
+}
+
 export interface AgentlasIpc {
   /** Electron 메인이 알려주는 OS 환경 정보 (Apple/Codex/Claude 데스크톱과 동일 패턴) */
   app: {
@@ -2957,6 +3128,26 @@ export interface AgentlasIpc {
     imageProviders: () => Promise<{ codex: boolean; gemini: boolean }>;
     generateContent: (payload: { topic: string; count?: number; mode?: string }) => Promise<{ ok: boolean; text?: string; engine?: "agy" | "codex"; reason?: string }>;
     contentAvailable: () => Promise<{ agy: boolean; codex: boolean }>;
+  };
+  /** 문서 스튜디오 내용 생성/개정 — 연결된 LLM(agy/codex), no-fallback. */
+  document: {
+    generate: (payload: {
+      goal: string;
+      mode?: "report" | "paper" | "brief";
+      locale?: "ko" | "en";
+      sources?: { authors?: string; title: string; year?: string; container?: string }[];
+    }) => Promise<{
+      ok: boolean;
+      doc?: { title: string; subtitle: string; body: string; figureCaption: string };
+      engine?: "agy" | "codex";
+      reason?: string;
+    }>;
+    revise: (payload: {
+      text: string;
+      action: "expand" | "rewrite" | "shorten" | "improve" | "formal" | "casual";
+      locale?: "ko" | "en";
+    }) => Promise<{ ok: boolean; text?: string; engine?: "agy" | "codex"; reason?: string }>;
+    available: () => Promise<{ agy: boolean; codex: boolean }>;
   };
   /** 네이티브 macOS 메뉴바 제어 — 인앱 언어 설정을 메인 프로세스로 전달해 메뉴를 다시 그린다. */
   menu: {
@@ -3029,6 +3220,18 @@ export interface AgentlasIpc {
   /** 에이전트 durable 메모리(런타임 큐레이터가 쌓는 DB) — 자가진화/타임라인 UI 소스. */
   agentMemory: {
     entries: (agentId: string, limit?: number) => Promise<AgentMemoryEntryUi[]>;
+  };
+  /** 실행/실패 원장 — 긴 원문 없이 runId, 노드, 도구, 오류 메타데이터만 조회한다. */
+  runLedger: {
+    events: (runId: string, limit?: number) => Promise<RunEventUi[]>;
+    failures: (input?: { runId?: string; automationId?: string; chatId?: string; limit?: number }) => Promise<FailureEventUi[]>;
+  };
+  /** 에이전트 자가진화 proposal 원장 — 제안/승인/적용/측정/롤백 상태를 로컬 DB에 남긴다. */
+  agentEvolution: {
+    list: (agentId: string, limit?: number) => Promise<AgentEvolutionProposalUi[]>;
+    createAndApplyPrompt: (input: CreatePromptEvolutionProposalInput) => Promise<AgentEvolutionProposalUi>;
+    markMeasured: (proposalId: string, note?: string) => Promise<AgentEvolutionProposalUi>;
+    rollback: (proposalId: string) => Promise<AgentEvolutionProposalUi>;
   };
   /** 유휴 드리밍 큐레이션 — 옵트인(기본 OFF). 유휴+슬롯 완전 유휴+쿨다운 가드로 메모리 통합. */
   memoryDreaming: {
@@ -3122,6 +3325,8 @@ export interface AgentlasIpc {
   oberon: {
     planWithCli: (request: OberonPlanRequest) => Promise<OberonPlanResult>;
     startKeyframes: (request: OberonKeyframeRequest) => Promise<OberonKeyframeJob>;
+    /** 마스터 시트/콘티 시트 생성 — 키프레임 잡을 재사용하므로 조회/취소는 keyframe API로. */
+    startSheets: (request: OberonSheetRequest) => Promise<OberonKeyframeJob>;
     getKeyframeJob: (id: string) => Promise<OberonKeyframeJob | null>;
     cancelKeyframes: (id: string) => Promise<OberonKeyframeJob | null>;
     openKeyframeOutput: (id: string) => Promise<{ ok: boolean; message: string }>;
@@ -3196,6 +3401,9 @@ export interface AgentlasIpc {
     status: () => Promise<MarketplaceSourceStatus>;
     /** 로그인 사용자가 agentlas.cloud에서 만든 내 에이전트 목록. 미로그인/오프라인이면 [] */
     listMine: () => Promise<MarketplaceListing[]>;
+    bookmarks: () => Promise<HubAgentBookmark[]>;
+    bookmarkAdd: (listing: MarketplaceListing) => Promise<HubAgentBookmark>;
+    bookmarkRemove: (slug: string) => Promise<void>;
   };
   /** Publish local agent/team packages to Agentlas Cloud. Review runs locally on the submitter machine. */
   cloudAgents: {
@@ -3219,6 +3427,16 @@ export interface AgentlasIpc {
     update: (id: string, patch: AgentGroupUpdateInput) => Promise<AgentGroup>;
     removeMember: (groupId: string, memberId: string) => Promise<AgentGroup>;
     remove: (id: string) => Promise<void>;
+  };
+  telegram: {
+    listBindings: () => Promise<TelegramConnectBinding[]>;
+    autoConnect: (input: TelegramConnectAutoInput) => Promise<TelegramConnectActionResult>;
+    start: (input: TelegramConnectStartInput) => Promise<TelegramConnectActionResult>;
+    resume: (id: string) => Promise<TelegramConnectBinding>;
+    stop: (id: string) => Promise<TelegramConnectBinding>;
+    remove: (id: string) => Promise<void>;
+    sendTest: (id: string) => Promise<TelegramConnectActionResult>;
+    openBot: (id: string) => Promise<{ ok: boolean; message: string }>;
   };
   projects: {
     list: () => Promise<Project[]>;

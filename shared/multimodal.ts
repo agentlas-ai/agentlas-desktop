@@ -159,20 +159,6 @@ export const MULTIMODAL_PROVIDERS: MultimodalProvider[] = [
     summaryKo: "Google Cloud Agent Platform ADC 인증으로 Veo 영상을 생성합니다.",
   },
   {
-    id: "openai-sora",
-    modality: "video",
-    label: "OpenAI Sora API",
-    labelKo: "OpenAI Sora API",
-    mode: "api-key",
-    defaultModel: "sora",
-    envKeys: ["OPENAI_API_KEY"],
-    setupUrl: "https://platform.openai.com/api-keys",
-    docsUrl: "https://developers.openai.com/api/docs/guides/video-generation",
-    billing: "paid-api",
-    summary: "OpenAI video generation fallback when the account has Sora API access.",
-    summaryKo: "계정에 Sora API 접근 권한이 있을 때 OpenAI 영상 생성 fallback으로 사용합니다.",
-  },
-  {
     id: "higgsfield-video",
     modality: "video",
     label: "Higgsfield",
@@ -306,7 +292,7 @@ export const PROVIDER_LADDERS: Record<MultimodalModality, string[]> = {
     "stability-image",
     "adobe-firefly",
   ],
-  video: ["google-veo", "runway-video", "openai-sora", "replicate-video"],
+  video: ["google-veo", "kling-video", "seedance-video", "runway-video", "luma-video", "replicate-video"],
   audio: ["openai-audio", "elevenlabs-audio", "deepgram-audio"],
 };
 

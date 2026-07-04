@@ -11,7 +11,7 @@
 
 import type { SlideBg } from "./model";
 
-export type StyleId = "swiss" | "bauhaus" | "didot" | "vignelli" | "brutal" | "hara";
+export type StyleId = "swiss" | "bauhaus" | "didot" | "vignelli" | "brutal" | "hara" | "consulting";
 
 /** 장식 모티프 레이어 — DeckStage의 Deco 컴포넌트가 그린다(블록 뒤, 비인터랙티브). */
 export type DecoKind =
@@ -81,6 +81,15 @@ export interface StyleDna {
    * 중앙은 반드시 비워(텍스트 안전영역) 텍스트는 HTML로만 얹는다(굽지 않기 원칙).
    */
   graphicStyle: string;
+  // ── 컨설팅·보고서 문법(중기부 업무보고·MBB 벤치마크, 2026-07-04) ──
+  /** 상단 챕터 밴드(네이비 사선 밴드 + 번호 칩 + 챕터명) — 본문 장 헤더를 밴드형으로. */
+  chapterBand?: boolean;
+  /** 밴드·헤더바 패널의 솔리드 색(없으면 ink). 중기부 네이비 #0B3675. */
+  band?: string;
+  /** 본문 `**강조**`의 형광펜 색(불투명). 없으면 accent 16% 틴트. */
+  highlight?: string;
+  /** 리스트 행 라벨을 아웃라인 필 칩으로(중기부 "기술혁신/수출/창업" 문법). */
+  listChip?: boolean;
 }
 
 /**
@@ -133,6 +142,8 @@ const AVENIR = '"Avenir Next", Avenir, Pretendard, "Apple SD Gothic Neo", sans-s
 const DIDOT = 'Didot, "Bodoni 72", "Playfair Display", Georgia, "AppleMyungjo", "Nanum Myeongjo", serif';
 const GEORGIA = 'Georgia, "Iowan Old Style", "AppleMyungjo", "Nanum Myeongjo", serif';
 const MONO = '"SF Mono", Menlo, "IBM Plex Mono", monospace';
+// 한국 보고서 표준 고딕 — 시스템 우선(Pretendard→Apple SD→맑은고딕), 라틴은 시스템 산세리프.
+const GOTHIC = 'Pretendard, "Apple SD Gothic Neo", "Malgun Gothic", -apple-system, "Segoe UI", sans-serif';
 
 export const STYLES: Record<StyleId, StyleDna> = {
   // 요제프 뮐러-브로크만 — 수학적 그리드, 좌측 정렬 거대 활자, 빨강/검정/백지.
@@ -343,9 +354,50 @@ export const STYLES: Record<StyleId, StyleDna> = {
     graphicStyle:
       "Soft warm-white washi paper textured rectangular panel, zen minimal: a single tiny vermilion dot near the top-left corner, extremely quiet, the entire center completely empty and plain",
   },
+  // 컨설팅·보고서 — 한국 정부 업무보고/MBB 문법: 네이비 챕터 밴드, 헤더바 패널,
+  // 아웃라인 필 칩 행, 노란 형광펜, 파랑 강조 제목, 출처 풋라인 (벤치마크: 중기부 업무보고 2025).
+  consulting: {
+    id: "consulting",
+    nameKo: "컨설팅 보고서",
+    nameEn: "Consulting Report",
+    hintKo: "정부 업무보고·MBB — 챕터 밴드, 패널, 형광펜, 출처",
+    hintEn: "Gov briefing & MBB — chapter band, panels, highlighter, sources",
+    displayFont: GOTHIC,
+    bodyFont: GOTHIC,
+    monoFont: GOTHIC,
+    titleWeight: 800,
+    titleTracking: "-.025em",
+    titleTransform: "none",
+    titleLineHeight: 1.16,
+    kickerTracking: ".06em",
+    radius: 0.5,
+    borderScale: 1,
+    accent: "#1B64C2",
+    accent2: "#FFE94A",
+    ink: "#15181D",
+    coverInk: "#0B3675",
+    closeInk: "#FFFFFF",
+    coverBg: { kind: "gradient", from: "#EEF2F8", to: "#D8E1EE", angle: 160 },
+    bodyBg: { kind: "solid", color: "#FFFFFF" },
+    closeBg: { kind: "solid", color: "#0B3675" },
+    coverDeco: "none",
+    bodyDeco: "none",
+    closeDeco: "none",
+    coverComp: "centered",
+    photoStyle:
+      "Clean Korean corporate report photography: soft blue-grey gradient light, subtle upward arrows or light rays, professional and restrained, government briefing aesthetic, no clutter",
+    cardStyle: "shadow",
+    coverPhoto: "plate",
+    graphicStyle:
+      "Flat white rectangular corporate panel with a thin navy top border line and a very pale blue-grey header strip, Korean government report style, crisp and formal, the entire center completely empty and plain",
+    chapterBand: true,
+    band: "#0B3675",
+    highlight: "#FFE94A",
+    listChip: true,
+  },
 };
 
-export const STYLE_IDS: StyleId[] = ["swiss", "bauhaus", "didot", "vignelli", "brutal", "hara"];
+export const STYLE_IDS: StyleId[] = ["swiss", "bauhaus", "didot", "vignelli", "brutal", "hara", "consulting"];
 
 export function styleById(id: string | undefined | null): StyleDna | null {
   if (!id) return null;
@@ -354,12 +406,14 @@ export function styleById(id: string | undefined | null): StyleDna | null {
 
 // 주제 → 스타일 라우터(아트디렉션 라우터의 스타일 축 확장). 명시 선택이 항상 우선.
 const STYLE_HINTS: Array<{ id: StyleId; rx: RegExp }> = [
+  // 비즈니스·보고서 계열은 컨설팅 문법이 1순위(벤치마크: 중기부 업무보고·혁신의숲 IR).
+  { id: "consulting", rx: /보고|업무보고|IR|사업계획|재무|분기|실적|컨설팅|운영|지표|전략|투자|정부|부처|정책|리뷰|report|briefing|business plan|finance|quarterly|earnings|consult|operations|kpi|strategy|invest|policy|review/i },
   { id: "didot", rx: /패션|뷰티|럭셔리|명품|브랜딩|매거진|문화|예술|전시|웨딩|fashion|beauty|luxury|magazine|culture|art|gallery|wedding|couture/i },
   { id: "bauhaus", rx: /디자인|교육|워크숍|창의|아이디어|건축|스튜디오|design|education|workshop|creative|architecture|studio|maker/i },
   { id: "brutal", rx: /게임|스트리트|힙합|이스포츠|해커톤|크립토|밈|스타트업 위크|game|street|hip.?hop|esports|hackathon|crypto|meme|rave/i },
   { id: "hara", rx: /미니멀|철학|에세이|명상|웰니스|공예|차분|minimal|philosophy|essay|meditation|wellness|craft|calm|zen/i },
-  { id: "vignelli", rx: /보고|재무|분기|실적|컨설팅|운영|지표|로드맵|report|finance|quarterly|earnings|consult|operations|kpi|roadmap/i },
-  { id: "swiss", rx: /피치|투자|전략|테크|제품|런칭|컨퍼런스|세미나|pitch|invest|strategy|tech|product|launch|conference|seminar|keynote/i },
+  { id: "vignelli", rx: /사이니지|타임테이블|시각체계|signage|timetable|grid system/i },
+  { id: "swiss", rx: /피치|테크|제품|런칭|컨퍼런스|세미나|pitch|tech|product|launch|conference|seminar|keynote/i },
 ];
 
 /**

@@ -1,7 +1,8 @@
 // Stormbreaker 슈퍼바이저 상태.
 //
-// Stormbreaker는 내부 실행 규율이다. 사용자가 UI에서 켜고 끄는 기능이 아니며,
-// 이전 빌드에서 저장된 off 값이 있더라도 현재 빌드에서는 항상 활성으로 취급한다.
+// 기본값은 ON(안전한 실행 규율). 다만 Settings 토글은 실제로 동작해야 한다 —
+// 사용자가 OFF로 두면 존중한다(가짜 토글 금지). 슈퍼바이저 finish 게이트는 매 write턴을
+// 지연시키므로, 끄는 선택은 정당한 사용자 트레이드오프다(감사 지적 반영).
 import fs from "node:fs";
 import path from "node:path";
 import { app } from "electron";
@@ -41,12 +42,12 @@ function persist(next: HephaestusSettings): void {
   }
 }
 
-/** Stormbreaker 슈퍼바이저 활성 여부. 현재는 항상 ON. */
+/** Stormbreaker 슈퍼바이저 활성 여부. 저장된 사용자 선택을 존중(기본 ON). */
 export function isSupervisorEnabled(): boolean {
-  return true;
+  return load().supervisorEnabled;
 }
 
 export function setSupervisorEnabled(enabled: boolean): { enabled: boolean } {
-  persist({ ...load(), supervisorEnabled: true });
-  return { enabled: true };
+  persist({ ...load(), supervisorEnabled: enabled });
+  return { enabled };
 }

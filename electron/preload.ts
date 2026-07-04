@@ -27,6 +27,17 @@ const api: AgentlasIpc = {
     generateContent: (payload: { topic: string; count?: number; mode?: string }) => ipcRenderer.invoke("trex:generateContent", payload),
     contentAvailable: () => ipcRenderer.invoke("trex:contentAvailable"),
   },
+  document: {
+    generate: (payload: {
+      goal: string;
+      mode?: "report" | "paper" | "brief";
+      locale?: "ko" | "en";
+      sources?: { authors?: string; title: string; year?: string; container?: string }[];
+    }) => ipcRenderer.invoke("document:generate", payload),
+    revise: (payload: { text: string; action: "expand" | "rewrite" | "shorten" | "improve" | "formal" | "casual"; locale?: "ko" | "en" }) =>
+      ipcRenderer.invoke("document:revise", payload),
+    available: () => ipcRenderer.invoke("document:available"),
+  },
   menu: {
     setLocale: (locale: "ko" | "en") => ipcRenderer.invoke("menu:setLocale", locale),
   },
@@ -141,6 +152,7 @@ const api: AgentlasIpc = {
   oberon: {
     planWithCli: (request) => ipcRenderer.invoke("oberon:planWithCli", request),
     startKeyframes: (request) => ipcRenderer.invoke("oberon:startKeyframes", request),
+    startSheets: (request) => ipcRenderer.invoke("oberon:startSheets", request),
     getKeyframeJob: (id: string) => ipcRenderer.invoke("oberon:getKeyframeJob", id),
     cancelKeyframes: (id: string) => ipcRenderer.invoke("oberon:cancelKeyframes", id),
     openKeyframeOutput: (id: string) => ipcRenderer.invoke("oberon:openKeyframeOutput", id),
@@ -173,6 +185,21 @@ const api: AgentlasIpc = {
     write: (agentId: string, absPath: string, content: string) =>
       ipcRenderer.invoke("agentFiles:write", agentId, absPath, content),
   },
+  runLedger: {
+    events: (runId: string, limit?: number) => ipcRenderer.invoke("runLedger:events", runId, limit),
+    failures: (input?: { runId?: string; automationId?: string; chatId?: string; limit?: number }) =>
+      ipcRenderer.invoke("runLedger:failures", input),
+  },
+  agentEvolution: {
+    list: (agentId: string, limit?: number) =>
+      ipcRenderer.invoke("agentEvolution:list", agentId, limit),
+    createAndApplyPrompt: (input) =>
+      ipcRenderer.invoke("agentEvolution:createAndApplyPrompt", input),
+    markMeasured: (proposalId: string, note?: string) =>
+      ipcRenderer.invoke("agentEvolution:markMeasured", proposalId, note),
+    rollback: (proposalId: string) =>
+      ipcRenderer.invoke("agentEvolution:rollback", proposalId),
+  },
   skills: {
     listCatalog: () => ipcRenderer.invoke("skills:listCatalog"),
   },
@@ -193,6 +220,9 @@ const api: AgentlasIpc = {
     listFirms: () => ipcRenderer.invoke("marketplace:listFirms"),
     status: () => ipcRenderer.invoke("marketplace:status"),
     listMine: () => ipcRenderer.invoke("marketplace:listMine"),
+    bookmarks: () => ipcRenderer.invoke("marketplace:bookmarks"),
+    bookmarkAdd: (listing) => ipcRenderer.invoke("marketplace:bookmarkAdd", listing),
+    bookmarkRemove: (slug: string) => ipcRenderer.invoke("marketplace:bookmarkRemove", slug),
   },
   cloudAgents: {
     publish: (input) => ipcRenderer.invoke("cloudAgents:publish", input),
@@ -214,6 +244,16 @@ const api: AgentlasIpc = {
     removeMember: (groupId, memberId) =>
       ipcRenderer.invoke("agentGroups:removeMember", groupId, memberId),
     remove: (id) => ipcRenderer.invoke("agentGroups:remove", id),
+  },
+  telegram: {
+    listBindings: () => ipcRenderer.invoke("telegram:listBindings"),
+    autoConnect: (input) => ipcRenderer.invoke("telegram:autoConnect", input),
+    start: (input) => ipcRenderer.invoke("telegram:start", input),
+    resume: (id: string) => ipcRenderer.invoke("telegram:resume", id),
+    stop: (id: string) => ipcRenderer.invoke("telegram:stop", id),
+    remove: (id: string) => ipcRenderer.invoke("telegram:remove", id),
+    sendTest: (id: string) => ipcRenderer.invoke("telegram:sendTest", id),
+    openBot: (id: string) => ipcRenderer.invoke("telegram:openBot", id),
   },
   projects: {
     list: () => ipcRenderer.invoke("projects:list"),

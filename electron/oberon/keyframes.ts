@@ -187,14 +187,15 @@ async function runCodexKeyframeJob(
   await fs.access(runner);
   const jobsPath = path.join(job.outputDir, "codex-image-jobs.jsonl");
   const rows = shots.map((shot) => {
-    const fileName = `${String(shot.index + 1).padStart(3, "0")}_${safeSlug(shot.shotId)}_first_frame.png`;
+    const fileName = `${String(shot.index + 1).padStart(3, "0")}_${safeSlug(shot.shotId)}_${assetKindOf(shot)}.png`;
     return JSON.stringify({
-      id: shot.shotId,
+      // 같은 샷의 first/last 두 항목이 배치 안에서 충돌하지 않게 고유 키 사용.
+      id: batchRowKey(shot),
       prompt: buildImagePrompt(request, shot),
       output: fileName,
       shotId: shot.shotId,
       title: request.title,
-      aspectRatio: normalizeAspect(request.aspectRatio || shot.aspectRatio),
+      aspectRatio: normalizeAspect(shot.aspectRatio || request.aspectRatio),
       route: "oberon-keyframe",
     });
   });
@@ -213,10 +214,10 @@ async function runCodexKeyframeJob(
   const byId = new Map(summary.results.map((item) => [String(item.id || ""), item]));
   for (const shot of shots) {
     assertNotCancelled(job.id);
-    const item = byId.get(shot.shotId);
+    const item = byId.get(batchRowKey(shot));
     if (item?.status === "complete" && item.image_path) {
       const prompt = buildImagePrompt(request, shot);
-      job.assets.push(await makeKeyframeAsset(job, shot.shotId, prompt, item.image_path, "image/png"));
+      job.assets.push(await makeKeyframeAsset(job, shot, prompt, item.image_path, "image/png"));
     } else {
       job.warnings.push(`${shot.shotId}: ${item?.error || "Codex image_gen did not return an image."}`);
     }
@@ -244,7 +245,8 @@ async function generateKeyframe(
     prompt,
     config: {
       numberOfImages: 1,
-      aspectRatio: normalizeAspect(request.aspectRatio || shot.aspectRatio),
+      // 샷별 비율 우선 — 시트(세로 바이블 등)는 프로덕션 기본 비율과 다를 수 있다.
+      aspectRatio: normalizeAspect(shot.aspectRatio || request.aspectRatio),
       imageSize: request.imageSize ?? "1K",
       personGeneration: PersonGeneration.ALLOW_ADULT,
     },
@@ -253,15 +255,26 @@ async function generateKeyframe(
   const bytes = image?.imageBytes;
   if (!bytes) throw new Error("Imagen returned no image bytes.");
 
-  const fileName = `${String(shot.index + 1).padStart(3, "0")}_${safeSlug(shot.shotId)}_first_frame.png`;
+  const fileName = `${String(shot.index + 1).padStart(3, "0")}_${safeSlug(shot.shotId)}_${assetKindOf(shot)}.png`;
   const absPath = path.join(job.outputDir, fileName);
   await fs.writeFile(absPath, Buffer.from(bytes, "base64"));
-  return makeKeyframeAsset(job, shot.shotId, prompt, absPath, image?.mimeType || "image/png");
+  return makeKeyframeAsset(job, shot, prompt, absPath, image?.mimeType || "image/png");
+}
+
+// 자산 종류: 시트 생성이면 assetKind 오버라이드, START/END 체이닝이면 frameRole 반영.
+function assetKindOf(shot: OberonKeyframeShotInput): OberonKeyframeAsset["kind"] {
+  if (shot.assetKind) return shot.assetKind;
+  return shot.frameRole === "last" ? "last_frame" : "first_frame";
+}
+
+// Codex 배치 jsonl의 행 키 — 같은 샷의 first/last 항목을 구분한다.
+function batchRowKey(shot: OberonKeyframeShotInput): string {
+  return shot.frameRole === "last" ? `${shot.shotId}:last` : shot.shotId;
 }
 
 async function makeKeyframeAsset(
   job: OberonKeyframeJob,
-  shotId: string,
+  shot: OberonKeyframeShotInput,
   prompt: string,
   absPath: string,
   mime: string,
@@ -269,8 +282,8 @@ async function makeKeyframeAsset(
   const stat = await fs.stat(absPath);
   return {
     id: randomUUID(),
-    shotId,
-    kind: "first_frame",
+    shotId: shot.shotId,
+    kind: assetKindOf(shot),
     provider: job.provider,
     model: job.model,
     prompt,
@@ -437,9 +450,14 @@ function selectShots(request: OberonKeyframeRequest): OberonKeyframeShotInput[] 
 }
 
 function buildImagePrompt(request: OberonKeyframeRequest, shot: OberonKeyframeShotInput): string {
+  // 시트(마스터/콘티)는 빌더가 만든 완성 프롬프트 — 키프레임 보일러플레이트를 덧대지 않는다.
+  if (shot.assetKind === "master_sheet" || shot.assetKind === "storyboard_sheet") {
+    return shot.prompt.slice(0, 3900);
+  }
+  const role = shot.frameRole === "last" ? "last-frame (END of the action, ready for the next cut)" : "first-frame";
   const parts = [
     shot.prompt,
-    `Create one production-ready first-frame keyframe for "${request.title}".`,
+    `Create one production-ready ${role} keyframe for "${request.title}".`,
     `Shot id: ${shot.shotId}. Camera size: ${shot.cameraSize || "cinematic"}.`,
     "No subtitles, no visible watermarks, no UI overlays, no distorted text.",
   ];

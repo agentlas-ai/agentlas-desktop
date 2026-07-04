@@ -252,6 +252,28 @@ function Scene({ kind, accent }: { kind: SceneKind; accent: string }) {
   );
 }
 
+/**
+ * 리치 강조 — 텍스트 안 `**구간**`을 강조로 렌더(컨설팅 덱 문법: 제목=액센트 컬러 구간,
+ * 본문=볼드+형광펜). LLM이 슬라이드당 1~2개만 마킹한다. 마커가 없으면 원문 그대로.
+ */
+function rich(text: string | undefined, mode: "title" | "body", accent: string, ink: string, hl?: string): React.ReactNode {
+  const t = text ?? "";
+  if (!t.includes("**")) return t;
+  const parts = t.split(/\*\*(.+?)\*\*/g);
+  return parts.map((p, i) =>
+    i % 2 === 1 ? (
+      mode === "title" ? (
+        <span key={i} style={{ color: accent }}>{p}</span>
+      ) : (
+        // 형광펜: 유파가 불투명 하이라이트 색을 규정하면(컨설팅=노랑) 그 색, 아니면 액센트 틴트.
+        <span key={i} style={{ fontWeight: 800, color: ink, background: hl ?? withAlpha(accent, 0.16), padding: "0 0.15em", borderRadius: 2, boxDecorationBreak: "clone" as never, WebkitBoxDecorationBreak: "clone" as never }}>{p}</span>
+      )
+    ) : (
+      p
+    ),
+  );
+}
+
 function BlockView({
   b, accent, ink, dna, editable, selected, editing, onPointerDown, onDoubleClick, onResize, onText,
 }: {
@@ -300,19 +322,50 @@ function BlockView({
           textAlign: b.align ?? "left",
         }}
       >
-        {b.text}
+        {rich(b.text, "title", accent, ink)}
       </div>
     );
   else if (b.kind === "subtitle" || b.kind === "body")
     inner = b.inline ? (
       <div style={{ display: "flex", alignItems: "baseline", gap: cqw(1.8), wordBreak: "keep-all" }}>
-        {b.label && <span style={{ fontSize: cqw((b.size ?? 1.7) * 1.02), fontWeight: 800, color: accent, fontVariantNumeric: "tabular-nums", flexShrink: 0, letterSpacing: "-.01em" }}>{b.label}</span>}
-        <span {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.7), lineHeight: 1.28, color: withAlpha(ink, 0.92), fontWeight: 600, wordBreak: "keep-all", textWrap: "pretty" as never }}>{b.text}</span>
+        {b.label &&
+          (dna?.listChip ? (
+            // 아웃라인 필 칩 라벨(중기부 "기술혁신/수출/창업" 행 문법) — 밴드색 테두리 라운드 칩.
+            <span style={{ fontSize: cqw((b.size ?? 1.7) * 0.72), fontWeight: 800, color: dna.band ?? accent, border: `0.16cqw solid ${dna.band ?? accent}`, borderRadius: 999, padding: `${cqw(0.22)} ${cqw(1)}`, flexShrink: 0, lineHeight: 1.4, letterSpacing: ".02em", background: "#fff" }}>{b.label}</span>
+          ) : (
+            <span style={{ fontSize: cqw((b.size ?? 1.7) * 1.02), fontWeight: 800, color: accent, fontVariantNumeric: "tabular-nums", flexShrink: 0, letterSpacing: "-.01em" }}>{b.label}</span>
+          ))}
+        <span {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.7), lineHeight: 1.28, color: withAlpha(ink, 0.92), fontWeight: 600, wordBreak: "keep-all", textWrap: "pretty" as never }}>{rich(b.text, "body", accent, ink, dna?.highlight)}</span>
       </div>
     ) : (
       <div style={{ wordBreak: "keep-all", textAlign: b.align ?? "left" }}>
-        {b.label && <div style={{ fontSize: cqw(1.5), fontWeight: 800, color: accent, marginBottom: cqw(0.5) }}>{b.label}</div>}
-        <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.5), lineHeight: 1.5, color: b.kind === "subtitle" ? muted : withAlpha(ink, 0.86), fontWeight: 500, textWrap: "pretty" as never }}>{b.text}</div>
+        {b.label &&
+          (dna?.listChip ? (
+            <div style={{ marginBottom: cqw(0.7) }}><span style={{ display: "inline-block", fontSize: cqw(1.3), fontWeight: 800, color: dna.band ?? accent, border: `0.16cqw solid ${dna.band ?? accent}`, borderRadius: 999, padding: `${cqw(0.2)} ${cqw(1)}`, lineHeight: 1.4, background: "#fff" }}>{b.label}</span></div>
+          ) : (
+            <div style={{ fontSize: cqw(1.5), fontWeight: 800, color: accent, marginBottom: cqw(0.5) }}>{b.label}</div>
+          ))}
+        <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.5), lineHeight: 1.5, color: b.kind === "subtitle" ? muted : withAlpha(ink, 0.86), fontWeight: 500, textWrap: "pretty" as never }}>{rich(b.text, "body", accent, ink, dna?.highlight)}</div>
+      </div>
+    );
+  else if (b.kind === "card" && b.bar)
+    // 헤더 바 패널(컨설팅 문법) — 솔리드 잉크 바에 패널 제목, 본문은 면 위에.
+    // 중기부 업무보고·MBB 덱의 "실적/성과" 패널 그 자체. 앵커 숫자 대신 바가 위계를 만든다.
+    inner = (
+      <div
+        style={{
+          height: b.h ? "100%" : undefined,
+          boxSizing: "border-box",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+          background: withAlpha(ink, 0.035),
+          borderRadius: dna ? cqw(Math.min(dna.radius, 0.8)) : cqw(0.8),
+          ...(dna?.hardShadow ? { boxShadow: `0.55cqw 0.55cqw 0 ${withAlpha(ink, 0.9)}` } : { boxShadow: `0 0.5cqw 1.8cqw ${withAlpha("#000000", 0.07)}` }),
+        }}
+      >
+        <div {...ed("label")} style={{ background: dna?.band ?? ink, color: "#ffffff", padding: `${cqw(0.9)} ${cqw(1.8)}`, fontSize: cqw((b.size ?? 1.45) * 1.1), fontWeight: 800, letterSpacing: ".02em", textAlign: "center", flexShrink: 0 }}>{b.label}</div>
+        <div {...ed("text")} style={{ padding: `${cqw(1.6)} ${cqw(1.8)}`, fontSize: cqw(b.size ?? 1.45), lineHeight: 1.55, color: withAlpha(ink, 0.85), fontWeight: 500, wordBreak: "keep-all", textWrap: "pretty" as never, minHeight: 0 }}>{rich(b.text, "body", accent, ink, dna?.highlight)}</div>
       </div>
     );
   else if (b.kind === "card")
@@ -352,40 +405,76 @@ function BlockView({
         <div style={{ position: "relative", zIndex: 1, display: "flex", flexDirection: "column", gap: cqw(1), height: "100%", minHeight: 0 }}>
         {b.value ? (
           <div style={{ display: "flex", alignItems: "center", gap: cqw(1), marginBottom: cqw(0.2) }}>
-            <span style={{ fontSize: cqw(dna ? (b.size ?? 1.45) * 1.7 : 2), fontWeight: 800, color: accent, letterSpacing: "-.02em", lineHeight: 1, fontVariantNumeric: "tabular-nums", ...(displayFont ? { fontFamily: displayFont } : null) }}>{b.value}</span>
-            <span style={{ flex: 1, height: cqw(0.22), background: withAlpha(accent, 0.35), borderRadius: 2 }} />
+            {/* 원포인트 강조: accent === false인 카드 값은 잉크색 — 숫자가 여럿일 때 전부 빨강 방지 */}
+            <span style={{ fontSize: cqw(dna ? (b.size ?? 1.45) * 1.7 : 2), fontWeight: 800, color: b.accent === false ? ink : accent, letterSpacing: "-.02em", lineHeight: 1, fontVariantNumeric: "tabular-nums", ...(displayFont ? { fontFamily: displayFont } : null) }}>{b.value}</span>
+            <span style={{ flex: 1, height: cqw(0.22), background: withAlpha(b.accent === false ? ink : accent, 0.35), borderRadius: 2 }} />
           </div>
         ) : (
           <span style={{ width: cqw(3.4), height: cqw(0.44), background: accent, borderRadius: 999, marginBottom: cqw(0.4) }} />
         )}
         {b.label && <div {...ed("label")} style={{ fontSize: cqw(dna ? (b.size ?? 1.45) * 1.44 : (b.size ?? 1.45) + 0.35), fontWeight: 800, color: ink, lineHeight: 1.22, letterSpacing: "-.01em", textWrap: "balance" as never }}>{b.label}</div>}
-        <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.45), lineHeight: 1.5, color: withAlpha(ink, 0.72), fontWeight: 500, textWrap: "pretty" as never }}>{b.text}</div>
+        <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.45), lineHeight: 1.5, color: withAlpha(ink, 0.72), fontWeight: 500, textWrap: "pretty" as never }}>{rich(b.text, "body", accent, ink, dna?.highlight)}</div>
         </div>
       </div>
     );
-  else if (b.kind === "rule") inner = <div style={{ height: cqw(dna && dna.borderScale > 1 ? 0.32 * dna.borderScale : 0.32), width: "100%", background: b.accent ? accent : muted, borderRadius: dna && dna.radius === 0 ? 0 : 2 }} />;
+  else if (b.kind === "rule")
+    inner = b.h ? (
+      // 세로 룰 — h가 있으면 수직 바: 액센트=에지 바(두껍게), 비액센트=컬럼 헤어라인.
+      <div style={{ width: cqw(b.accent ? 0.7 : 0.16), height: "100%", background: b.accent ? accent : withAlpha(ink, 0.16), borderRadius: dna && dna.radius === 0 ? 0 : 2 }} />
+    ) : (
+      <div style={{ height: cqw(dna && dna.borderScale > 1 ? 0.32 * dna.borderScale : 0.32), width: "100%", background: b.accent ? accent : muted, borderRadius: dna && dna.radius === 0 ? 0 : 2 }} />
+    );
   else if (b.kind === "pill")
     inner = (
       <span {...ed("text")} style={{ display: "inline-block", fontSize: cqw(b.size ?? 1.2), fontWeight: 800, letterSpacing: ".06em", color: accent, background: withAlpha(accent, 0.14), padding: `${cqw(0.5)} ${cqw(1.1)}`, borderRadius: dna && dna.radius === 0 ? 0 : 999, ...(monoFont ? { fontFamily: monoFont } : null) }}>
         {b.text}
       </span>
     );
-  else if (b.kind === "kpi")
-    inner = (
+  else if (b.kind === "kpi") {
+    const kpiInner = (
       <div>
-        <div {...ed("value")} style={{ fontSize: cqw(b.size ?? 6), fontWeight: dna ? Math.max(dna.titleWeight, 600) : 800, letterSpacing: dna?.titleTracking ?? "-.03em", lineHeight: 0.9, color: b.accent ? accent : ink, ...(displayFont ? { fontFamily: displayFont } : null) }}>{b.value}</div>
+        <div {...ed("value")} style={{ fontSize: cqw(b.size ?? 6), fontWeight: dna ? Math.max(dna.titleWeight, 600) : 800, letterSpacing: dna?.titleTracking ?? "-.03em", lineHeight: 0.9, color: b.accent ? accent : ink, fontVariantNumeric: "tabular-nums", ...(displayFont ? { fontFamily: displayFont } : null) }}>{b.value}</div>
         <div style={{ height: cqw(0.26), width: cqw(3), background: accent, margin: `${cqw(1.1)} 0 ${cqw(0.9)}` }} />
         <div {...ed("label")} style={{ fontSize: cqw(1.25), color: muted, fontWeight: 600, lineHeight: 1.4 }}>{b.label}</div>
       </div>
     );
+    // 스탯 콜아웃 서피스 — 맨몸 숫자가 허공에 뜨지 않도록 카드 면 위에(컨테이너 강제).
+    inner = b.surface ? (
+      <div
+        style={{
+          height: b.h ? "100%" : undefined,
+          boxSizing: "border-box",
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "center",
+          padding: `${cqw(2)} ${cqw(2.2)}`,
+          overflow: "hidden",
+          ...(dna
+            ? dna.cardStyle === "border"
+              ? { background: withAlpha(ink, 0.04), border: `${0.14 * dna.borderScale}cqw solid ${withAlpha(ink, 0.85)}`, ...(dna.hardShadow ? { boxShadow: `0.55cqw 0.55cqw 0 ${withAlpha(ink, 0.9)}` } : null) }
+              : dna.cardStyle === "shadow"
+                ? { background: withAlpha(ink, 0.035), boxShadow: `0 0.9cqw 2.8cqw ${withAlpha("#000000", 0.09)}` }
+                : { background: withAlpha(ink, 0.055) }
+            : { background: withAlpha(ink, 0.04), border: `1px solid ${withAlpha(ink, 0.11)}` }),
+          borderRadius: dna ? cqw(dna.radius) : cqw(1.3),
+        }}
+      >
+        {kpiInner}
+      </div>
+    ) : (
+      kpiInner
+    );
+  }
   else if (b.kind === "bar") {
     const v = Math.max(0, Math.min(100, Number(b.value) || 0));
     const barR = dna && dna.radius === 0 ? 0 : 999;
+    // 데이터-잉크 규율: 주인공(accent) 막대 1개만 액센트색, 나머지는 잉크 톤 — 전부 빨강이면 주인공이 없다.
+    const fill = b.accent === false ? withAlpha(ink, 0.3) : accent;
     inner = (
       <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: cqw(1.2) }}>
-        <span {...ed("label")} style={{ fontSize: cqw(b.size ?? 1.3), fontWeight: 700, color: ink, minWidth: cqw(8) }}>{b.label}</span>
-        <span style={{ height: cqw(2.4), background: withAlpha(ink, 0.06), borderRadius: barR, overflow: "hidden" }}><span style={{ display: "block", height: "100%", width: `${v}%`, background: accent, borderRadius: barR }} /></span>
-        <span style={{ fontSize: cqw(1.35), fontWeight: 800, color: accent, ...(monoFont ? { fontFamily: monoFont } : null) }}>{v}%</span>
+        <span {...ed("label")} style={{ fontSize: cqw(b.size ?? 1.3), fontWeight: 700, color: b.accent === false ? withAlpha(ink, 0.78) : ink, minWidth: cqw(8) }}>{b.label}</span>
+        <span style={{ height: cqw(2.4), background: withAlpha(ink, 0.06), borderRadius: barR, overflow: "hidden" }}><span style={{ display: "block", height: "100%", width: `${v}%`, background: fill, borderRadius: barR }} /></span>
+        <span style={{ fontSize: cqw(1.35), fontWeight: 800, color: b.accent === false ? muted : accent, fontVariantNumeric: "tabular-nums", ...(monoFont ? { fontFamily: monoFont } : null) }}>{v}%</span>
       </div>
     );
   } else if (b.kind === "image") {
@@ -430,11 +519,64 @@ function BlockView({
           </>
         ) : (
           <>
-            {/* 셔머 스켈레톤(하네스 §9) — 생성 중임을 살아있는 그라데이션으로. */}
-            <span className="trex-shimmer" style={{ position: "absolute", inset: 0, background: `linear-gradient(100deg, transparent 30%, ${withAlpha(ink, 0.07)} 50%, transparent 70%)`, backgroundSize: "220% 100%" }} />
-            <span className="trex-pulse" style={{ width: cqw(1.6), height: cqw(1.6), borderRadius: "50%", background: accent, display: "inline-block", position: "relative" }} />
+            {/* 셔머 스켈레톤(하네스 §9) — 생성 중임을 살아있는 그라데이션으로.
+                점·라벨은 ink 기반: accent는 커버(같은 색 배경)에서 안 보인다. */}
+            <span className="trex-shimmer" style={{ position: "absolute", inset: 0, background: `linear-gradient(100deg, transparent 30%, ${withAlpha(ink, 0.1)} 50%, transparent 70%)`, backgroundSize: "220% 100%" }} />
+            <span style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", gap: cqw(1) }}>
+              <span className="trex-pulse" style={{ width: cqw(1.6), height: cqw(1.6), borderRadius: "50%", background: withAlpha(ink, 0.6), display: "inline-block" }} />
+              <span style={{ fontSize: cqw(0.95), fontWeight: 700, letterSpacing: ".22em", color: withAlpha(ink, 0.5), textTransform: "uppercase", ...(monoFont ? { fontFamily: monoFont } : null) }}>Generating</span>
+            </span>
           </>
         )}
+      </div>
+    );
+  } else if (b.kind === "panel") {
+    // 실적/성과 헤더 바 패널 — 헤더(밴드색 바 + 흰 제목) + 조밀한 행(칩 라벨·굵은 주장·부연).
+    const bandC = dna?.band ?? ink;
+    const chip = !!dna?.listChip;
+    const rows = b.rows ?? [];
+    const rsize = b.size ?? 1.45;
+    // 빌더가 넘긴 본문 허용 줄수(value) — 렌더단 line-clamp 하드 안전망(빌더 추정이 빗나가도 안 넘침).
+    const textLines = Math.max(1, Number(b.value) || 2);
+    const clampN = (n: number): CSSProperties => ({ display: "-webkit-box", WebkitLineClamp: n, WebkitBoxOrient: "vertical", overflow: "hidden" } as never);
+    inner = (
+      <div style={{ height: "100%", boxSizing: "border-box", display: "flex", flexDirection: "column", overflow: "hidden", border: `1px solid ${withAlpha(ink, 0.12)}`, borderRadius: dna ? cqw(Math.min(dna.radius, 0.6)) : cqw(0.6), background: "#fff" }}>
+        <div style={{ background: bandC, color: "#fff", textAlign: "center", fontWeight: 800, fontSize: cqw(rsize * 1.12), letterSpacing: ".03em", padding: `${cqw(0.8)} ${cqw(1)}`, flexShrink: 0, ...clampN(1) }}>{b.label}</div>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", justifyContent: "space-evenly", padding: `${cqw(1.2)} ${cqw(1.6)}`, overflow: "hidden" }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "baseline", gap: cqw(1.1), wordBreak: "keep-all", minHeight: 0 }}>
+              {r.label &&
+                (chip ? (
+                  <span style={{ flexShrink: 0, fontSize: cqw(rsize * 0.82), fontWeight: 800, color: bandC, border: `0.14cqw solid ${bandC}`, borderRadius: 999, padding: `${cqw(0.16)} ${cqw(0.85)}`, lineHeight: 1.35, background: "#fff", whiteSpace: "nowrap" }}>{r.label}</span>
+                ) : (
+                  <span style={{ flexShrink: 0, fontSize: cqw(rsize * 0.95), fontWeight: 800, color: accent }}>{r.label}</span>
+                ))}
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: cqw(rsize), lineHeight: 1.4, color: withAlpha(ink, 0.9), fontWeight: 500, ...clampN(textLines) }}>{rich(r.text, "body", accent, ink, dna?.highlight)}</div>
+                {r.sub ? <div style={{ fontSize: cqw(rsize * 0.86), lineHeight: 1.3, color: withAlpha(ink, 0.6), fontWeight: 400, marginTop: cqw(0.2), ...clampN(1) }}>{r.sub}</div> : null}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  } else if (b.kind === "band") {
+    // 챕터 밴드(컨설팅·업무보고 문법) — 네이비 사선 밴드 + 흰 테두리 번호 칩 + 챕터명.
+    const bandC = dna?.band ?? ink;
+    inner = (
+      <div style={{ position: "relative", width: "100%", height: "100%" }}>
+        <div
+          style={{
+            position: "absolute", left: 0, top: "24%", height: "76%", width: "70%",
+            background: `linear-gradient(180deg, ${bandC}, ${withAlpha(bandC, 0.88)})`,
+            clipPath: "polygon(0 0, 100% 0, calc(100% - 2.4cqw) 100%, 0 100%)",
+            display: "flex", alignItems: "center", gap: cqw(1.6), paddingLeft: cqw(2.4), boxSizing: "border-box",
+          }}
+        >
+          <span {...ed("value")} style={{ border: "0.16cqw solid rgba(255,255,255,.85)", color: "#fff", fontWeight: 800, fontSize: cqw((b.size ?? 1.2) * 1.1), padding: `${cqw(0.12)} ${cqw(0.8)}`, lineHeight: 1.35, fontVariantNumeric: "tabular-nums" }}>{b.value}</span>
+          <span {...ed("text")} style={{ color: "#fff", fontWeight: 800, fontSize: cqw((b.size ?? 1.2) * 1.2), letterSpacing: ".05em" }}>{b.text}</span>
+        </div>
+        <span style={{ position: "absolute", right: cqw(3), top: "42%", color: withAlpha(ink, 0.45), fontWeight: 800, fontSize: cqw(1), letterSpacing: ".24em" }}>T-REX · STUDIO</span>
       </div>
     );
   } else if (b.kind === "footer")

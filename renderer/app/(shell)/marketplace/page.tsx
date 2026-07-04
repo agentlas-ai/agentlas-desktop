@@ -3,21 +3,13 @@ import { Suspense, useEffect, useRef, useState, type CSSProperties, type ReactNo
 import { useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
+import { classifyHubEntity, entityClassLabel } from "@/lib/agent-entity-kind";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import type {
   HephaestusCommandResult,
   MarketplaceListing,
   MarketplaceSourceStatus,
 } from "@/lib/types";
-import { IconCheck } from "@/components/Icon";
-
-type PendingInstallReview = {
-  title: string;
-  body: string;
-  items: string[];
-  confirmLabel: string;
-  onConfirm: () => Promise<void>;
-};
 
 const TEAM_CALL_CREDITS = 10;
 const AGENT_CALL_CREDITS = 3;
@@ -36,8 +28,9 @@ function isLiveHubListing(listing: MarketplaceListing): boolean {
 }
 
 function hubCategoryFor(listing: MarketplaceListing): HubCategory {
-  if (listing.entityKind === "plugin" || listing.source === "hub-plugin") return "plugin";
-  if (listing.entityKind === "team") return "team";
+  const entityClass = classifyHubEntity(listing);
+  if (entityClass === "plugin") return "plugin";
+  if (entityClass === "multi") return "team";
   return "agent";
 }
 
@@ -116,11 +109,11 @@ function MarketplacePage() {
   const [importNotice, setImportNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [listings, setListings] = useState<MarketplaceListing[]>([]);
   const [installedAgentSlugs, setInstalledAgentSlugs] = useState<Set<string>>(new Set());
+  const [bookmarkedSlugs, setBookmarkedSlugs] = useState<Set<string>>(new Set());
   const [sourceStatus, setSourceStatus] = useState<MarketplaceSourceStatus | null>(null);
   const [q, setQ] = useState(() => searchParams.get("q") ?? "");
-  const [installing, setInstalling] = useState<string | null>(null);
+  const [bookmarking, setBookmarking] = useState<string | null>(null);
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
-  const [installReview, setInstallReview] = useState<PendingInstallReview | null>(null);
   // Hub 검색 0건/실패 시 hep-search(엔진) 보조 후보 — 카드와 별도의 단순 리스트로 표시.
   const [hepFallback, setHepFallback] = useState<HepFallbackState | null>(null);
   const hepSeqRef = useRef(0);
@@ -151,16 +144,18 @@ function MarketplacePage() {
   async function refresh() {
     const api = ipc();
     if (!api) return;
-    const [ls, ag, session] = await Promise.all([
+    const [ls, ag, session, bookmarks] = await Promise.all([
       api.marketplace.search(""),
       api.team.list(),
       api.auth.getSession(),
+      api.marketplace.bookmarks?.().catch(() => []),
     ]);
     // status는 위 Hub 호출(listBundles/listFirms/search)이 setStatus를 갱신한 "뒤"에 읽어야 정확하다.
     // 병렬로 읽으면 첫 로드 때 갱신 전 초기값(미연결)을 잡거나 race가 난다.
     const status = await api.marketplace.status();
     setListings(Array.isArray(ls) ? ls : []);
     setInstalledAgentSlugs(new Set(visibleAgents(ag).map((a) => a.slug)));
+    setBookmarkedSlugs(new Set((bookmarks ?? []).map((bookmark) => bookmark.slug)));
     setSourceStatus(status);
     setSignedIn(session.signedIn);
   }
@@ -218,55 +213,25 @@ function MarketplacePage() {
     }
   }
 
-  async function installOne(slug: string) {
+  async function bookmarkOne(listing: MarketplaceListing) {
     const api = ipc();
-    if (!api) return;
-    if (!(await ensureSignedIn())) return;
-    setInstalling(slug);
+    if (!api?.marketplace?.bookmarkAdd) return;
+    setBookmarking(listing.slug);
     try {
-      await api.team.install(slug);
-      await refresh();
+      const bookmark = await api.marketplace.bookmarkAdd(listing);
+      setBookmarkedSlugs((prev) => new Set(prev).add(bookmark.slug));
+      setImportNotice({
+        tone: "ok",
+        text: ko ? "Hub 북마크에 추가했습니다." : "Added to Hub bookmarks.",
+      });
     } catch (err) {
-      setImportNotice({ tone: "error", text: ko ? `설치하지 못했습니다. 이미 설치됐는지 Library에서 확인한 뒤 다시 시도하세요. ${String(err)}` : `Install failed. Check Library to see whether it was already installed, then try again. ${String(err)}` });
+      setImportNotice({
+        tone: "error",
+        text: ko ? `북마크하지 못했습니다. ${String(err)}` : `Bookmark failed. ${String(err)}`,
+      });
     } finally {
-      setInstalling(null);
+      setBookmarking(null);
     }
-  }
-
-  function requestAgentInstall(listing: MarketplaceListing) {
-    const trust = listing.trustGrade ?? "unknown";
-    const pkg = listing.cloudPackage;
-    const needsReview = trust !== "A" || Boolean(pkg);
-    if (!needsReview) {
-      void installOne(listing.slug);
-      return;
-    }
-    setInstallReview({
-      title: ko ? `${listing.name} 설치 전 확인` : `Review ${listing.nameEn} before install`,
-      body: ko
-        ? "이 설치는 로컬 실행에 영향을 줄 수 있어 먼저 Trust와 패키지 정보를 확인합니다."
-        : "This install can affect local execution, so review trust and package details first.",
-      items: [
-        ko ? `Trust ${trust} · ${trust === "B" ? "검토 권장" : trust === "A" ? "표준" : "주의 필요"}` : `Trust ${trust}`,
-        pkg
-          ? ko
-            ? `로컬 패키지 파일 ${pkg.fileCount}개 · ${formatBytes(pkg.totalBytes)}`
-            : `Local package ${pkg.fileCount} files · ${formatBytes(pkg.totalBytes)}`
-          : ko ? "원격 manifest 기반 설치" : "Manifest-based install",
-        pkg?.runtimeLabels?.length
-          ? ko ? `런타임: ${pkg.runtimeLabels.join(", ")}` : `Runtime: ${pkg.runtimeLabels.join(", ")}`
-          : ko ? "키/계정 권한은 설치만으로 자동 부여되지 않습니다." : "Install does not automatically grant keys or account access.",
-      ],
-      confirmLabel: ko ? "검토 후 설치" : "Review and install",
-      onConfirm: () => installOne(listing.slug),
-    });
-  }
-
-  async function confirmInstallReview() {
-    const current = installReview;
-    if (!current) return;
-    setInstallReview(null);
-    await current.onConfirm();
   }
 
   const normalizedQuery = q.trim().toLowerCase();
@@ -405,7 +370,15 @@ function MarketplacePage() {
               {pagedListings.length > 0 ? (
                 <div className="market-card-grid">
                   {pagedListings.map((listing) => (
-                    <AgentCard key={`${hubCategoryFor(listing)}-${listing.slug}`} listing={listing} locale={locale} installed={installedAgentSlugs.has(listing.slug)} installing={installing === listing.slug} onInstall={() => requestAgentInstall(listing)} />
+                    <AgentCard
+                      key={`${hubCategoryFor(listing)}-${listing.slug}`}
+                      listing={listing}
+                      locale={locale}
+                      installed={installedAgentSlugs.has(listing.slug)}
+                      bookmarked={bookmarkedSlugs.has(listing.slug)}
+                      bookmarking={bookmarking === listing.slug}
+                      onBookmark={() => void bookmarkOne(listing)}
+                    />
                   ))}
                 </div>
               ) : (
@@ -484,14 +457,6 @@ function MarketplacePage() {
               <button type="button" className="hub-pager-btn" disabled={safePage >= totalPages} onClick={() => setPage(Math.min(totalPages, safePage + 1))}>{ko ? "다음" : "Next"}</button>
             </nav>
           )}
-          {installReview && (
-            <InstallReviewDialog
-              review={installReview}
-              ko={ko}
-              onCancel={() => setInstallReview(null)}
-              onConfirm={() => void confirmInstallReview()}
-            />
-          )}
               </div>
             </main>
           </div>
@@ -531,67 +496,46 @@ function RdTag({
   );
 }
 
-function InstallReviewDialog({
-  review,
-  ko,
-  onCancel,
-  onConfirm,
+function AgentCard({
+  listing,
+  locale,
+  installed,
+  bookmarked,
+  bookmarking,
+  onBookmark,
 }: {
-  review: PendingInstallReview;
-  ko: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
+  listing: MarketplaceListing;
+  locale: Locale;
+  installed: boolean;
+  bookmarked: boolean;
+  bookmarking: boolean;
+  onBookmark: () => void;
 }) {
-  return (
-    <div style={reviewOverlay} role="dialog" aria-modal="true" aria-label={review.title}>
-      <div style={reviewDialog}>
-        <div style={{ display: "grid", gap: 5 }}>
-          <div style={{ fontFamily: "var(--rd-f-display)", fontSize: 19, color: "var(--rd-ink)" }}>{review.title}</div>
-          <div style={{ fontSize: 12.5, lineHeight: 1.55, color: "var(--rd-ink-2)" }}>{review.body}</div>
-        </div>
-        <div style={{ display: "grid", gap: 7 }}>
-          {review.items.map((item) => (
-            <div key={item} style={reviewItem}>
-              <IconCheck size={13} />
-              <span>{item}</span>
-            </div>
-          ))}
-        </div>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          <button type="button" className="btn sm" onClick={onCancel}>
-            {ko ? "취소" : "Cancel"}
-          </button>
-          <button type="button" className="btn sm primary" onClick={onConfirm}>
-            {review.confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AgentCard({ listing, locale, installed, installing, onInstall }: any) {
   const loc = pickLocalized(listing, locale);
   const ko = locale === "ko";
-  const needsReview = (listing.trustGrade ?? "unknown") !== "A" || Boolean(listing.cloudPackage);
-  const entityKind = hubCategoryFor(listing);
+  const entityKind = classifyHubEntity(listing);
   const plugin = entityKind === "plugin";
   const perCallCredits = typeof listing.perCallCredits === "number" && Number.isFinite(listing.perCallCredits)
     ? listing.perCallCredits
-    : entityKind === "team" ? TEAM_CALL_CREDITS : plugin ? 0 : AGENT_CALL_CREDITS;
+    : entityKind === "multi" ? TEAM_CALL_CREDITS : plugin ? 0 : AGENT_CALL_CREDITS;
   const author = listing.ownerName ? (ko ? `${listing.ownerName} 제공` : `by ${listing.ownerName}`) : "Agentlas Hub";
   const command = plugin ? (listing.installCli || `npx agentlas@latest plugin add ${listing.slug}`) : `/hep-call ${listing.slug}`;
+  const cardLabel = entityClassLabel(entityKind, locale);
   return (
-    <div className="card portal-entity-card hub-entity-card">
+    <div className="card portal-entity-card hub-entity-card" data-entity-kind={entityKind}>
       <div className="hub-card-head">
         <div className="hub-card-main">
           <div className="hub-card-kicker">
-            {plugin ? (ko ? "허브 플러그인" : "HUB PLUGIN") : entityKind === "team" ? (ko ? "허브 팀" : "HUB TEAM") : (ko ? "허브 에이전트" : "HUB AGENT")}
+            {plugin
+              ? (ko ? "허브 플러그인" : "HUB PLUGIN")
+              : entityKind === "multi"
+                ? (ko ? "Hub · 멀티 에이전트 팀" : "Hub · multi-agent team")
+                : (ko ? "Hub · 싱글 에이전트" : "Hub · single agent")}
           </div>
           <div className="portal-card-title hub-card-title">{loc.name}</div>
           <div className="hub-card-author">{author}</div>
         </div>
-        <RdTag className="hub-credit-tag" bg={plugin ? C.peach : entityKind === "team" ? C.purple : C.green}>{plugin ? (ko ? "도구" : "Tool") : ko ? `크레딧 ${perCallCredits}` : `${perCallCredits} credits`}</RdTag>
+        <RdTag className="hub-credit-tag" bg={plugin ? C.peach : entityKind === "multi" ? C.purple : C.green}>{plugin ? (ko ? "도구" : "Tool") : ko ? `크레딧 ${perCallCredits}` : `${perCallCredits} credits`}</RdTag>
       </div>
       <div className="hub-card-copy">{loc.tagline}</div>
       <div className="portal-chip-row hub-card-meta">
@@ -599,26 +543,25 @@ function AgentCard({ listing, locale, installed, installing, onInstall }: any) {
         {listing.cloudPackage && (
           <RdTag dashed>{ko ? `로컬 파일 ${listing.cloudPackage.fileCount}개` : `${listing.cloudPackage.fileCount} local files`}</RdTag>
         )}
-        <RdTag dashed>{plugin ? (listing.category || (ko ? "플러그인" : "Plugin")) : entityKind === "team" ? (ko ? "팀" : "Team") : (ko ? "단일 에이전트" : "Single agent")}</RdTag>
+        <RdTag dashed bg={plugin ? C.peach : entityKind === "multi" ? C.purple : C.green}>{plugin ? (listing.category || cardLabel) : cardLabel}</RdTag>
+        {installed && !plugin ? <RdTag dashed>{ko ? "보유" : "Owned"}</RdTag> : null}
         {listing.totalBorrows ? <RdTag dashed>{ko ? `호출 ${listing.totalBorrows}회` : `${listing.totalBorrows} calls`}</RdTag> : null}
         <RdTag className="hub-command-chip" dashed>{command}</RdTag>
       </div>
       <div className="hub-card-actions">
         <button
           type="button"
-          className={"btn sm" + (installed ? "" : " primary")}
-          onClick={plugin ? () => void navigator.clipboard.writeText(command) : installed ? undefined : onInstall}
-          disabled={!plugin && (installing || installed)}
+          className={"btn sm" + (!plugin && !bookmarked ? " primary" : "")}
+          onClick={plugin ? () => void navigator.clipboard.writeText(command) : bookmarked ? undefined : onBookmark}
+          disabled={!plugin && (bookmarking || bookmarked)}
         >
           {plugin
             ? (ko ? "설치 명령 복사" : "Copy install command")
-            : installing
-              ? (ko ? "설치 중" : "Installing")
-              : installed
-                ? (ko ? "설치됨" : "Installed")
-                : needsReview
-                  ? (ko ? "검토 후 설치" : "Review install")
-                  : (ko ? "설치" : "Install")}
+            : bookmarking
+              ? (ko ? "북마크 중…" : "Bookmarking…")
+              : bookmarked
+                ? (ko ? "북마크됨" : "Bookmarked")
+                : (ko ? "북마크" : "Bookmark")}
         </button>
       </div>
     </div>
@@ -638,45 +581,3 @@ function TrustTag({ trustGrade, ko }: { trustGrade?: string; ko: boolean }) {
     </RdTag>
   );
 }
-
-function formatBytes(bytes: number | undefined): string {
-  const value = typeof bytes === "number" && Number.isFinite(bytes) ? bytes : 0;
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
-}
-
-const reviewOverlay: CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  zIndex: 90,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  padding: 20,
-  background: "rgba(20, 24, 32, 0.28)",
-};
-
-const reviewDialog: CSSProperties = {
-  width: "min(520px, 100%)",
-  borderRadius: 8,
-  border: "1px solid var(--rd-hair)",
-  background: "var(--rd-surface)",
-  boxShadow: "0 18px 60px rgba(20, 24, 32, 0.24)",
-  display: "grid",
-  gap: 14,
-  padding: 16,
-};
-
-const reviewItem: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  padding: "8px 9px",
-  borderRadius: 8,
-  background: "var(--rd-surface-2)",
-  border: "1px solid var(--rd-hair)",
-  color: "var(--rd-ink-2)",
-  fontSize: 12,
-  lineHeight: 1.35,
-};

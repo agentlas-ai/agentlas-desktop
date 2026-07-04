@@ -10,7 +10,7 @@ import { navigate } from "@/lib/navigation";
 import { parseMemoryMarkdown, serializeMemoryMarkdown } from "@/lib/agent-memory";
 import { classifyAgent } from "@/lib/ownership";
 import type { Chat, InstalledAgent, InstalledFirm, ResolvedOrg, ResolvedNode, WorkspaceNode } from "@/lib/types";
-import type { AgentMemoryEntryUi } from "@shared/types";
+import type { AgentEvolutionProposalUi, AgentMemoryEntryUi } from "@shared/types";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import {
   IconBuilding,
@@ -95,6 +95,7 @@ function FirmDetailPage() {
   const [agentFiles, setAgentFiles] = useState<WorkspaceNode[]>([]);
   // 런타임 durable 메모리(큐레이터가 실행 후 DB에 적재) — memory.md 와 별개의 실측 학습 소스.
   const [memoryEntries, setMemoryEntries] = useState<AgentMemoryEntryUi[]>([]);
+  const [evolutionProposals, setEvolutionProposals] = useState<AgentEvolutionProposalUi[]>([]);
   const [memoryContent, setMemoryContent] = useState("");
   const [memoryParsed, setMemoryParsed] = useState<{
     decisions: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[];
@@ -293,6 +294,26 @@ function FirmDetailPage() {
     };
   }, [selectedNode]);
 
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !selectedNode?.agentId) {
+      setEvolutionProposals([]);
+      return;
+    }
+    let cancelled = false;
+    setEvolutionProposals([]);
+    Promise.resolve(api.agentEvolution?.list?.(selectedNode.agentId, 50))
+      .then((rows) => {
+        if (!cancelled) setEvolutionProposals(Array.isArray(rows) ? rows : []);
+      })
+      .catch(() => {
+        if (!cancelled) setEvolutionProposals([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedNode]);
+
   async function startCeoChat() {
     const api = ipc();
     if (!api || !firm) return;
@@ -355,7 +376,18 @@ function FirmDetailPage() {
         (e) => e.name.toLowerCase() === "agent.md" || e.name.toLowerCase() === "system-prompt.md"
       );
       const path = promptFile ? promptFile.path : "AGENT.md";
-      await api.agentFiles.write(selectedNode.agentId, path, newPromptContent);
+      const proposal = await api.agentEvolution.createAndApplyPrompt({
+        agentId: selectedNode.agentId,
+        targetPath: path,
+        currentContent: promptContent,
+        proposedContent: newPromptContent,
+        proposalType: "rule",
+        risk: "medium",
+        summary: locale === "ko" ? "프롬프트 자가진화 승인 적용" : "Approved prompt self-evolution",
+        source: { surface: "desktop.firm.agent_detail" },
+        decisionNote: locale === "ko" ? "사용자가 데스크탑 firm 상세에서 승인 및 적용을 눌렀습니다." : "User approved and applied from desktop firm detail.",
+      });
+      setEvolutionProposals((prev) => [proposal, ...prev.filter((item) => item.id !== proposal.id)]);
       setPromptContent(newPromptContent);
       setPromptDraft(newPromptContent);
       showToast(locale === "ko" ? "자가 진화 제안이 성공적으로 프롬프트에 병합되었습니다." : "Self-evolution suggestion merged into the prompt successfully.");
@@ -655,6 +687,7 @@ function FirmDetailPage() {
             onBackToOverview={() => setSelectedNode(null)}
             memoryParsed={memoryParsed}
             memoryEntries={memoryEntries}
+            evolutionProposals={evolutionProposals}
             onSaveMemory={saveMemory}
             promptContent={promptContent}
             promptDraft={promptDraft}
@@ -1185,6 +1218,7 @@ interface AgentDetailViewProps {
   agentFiles: WorkspaceNode[];
   /** 런타임 durable 메모리(큐레이터 DB) — memory.md 없이도 진화 타임라인을 채우는 실측 소스. */
   memoryEntries: AgentMemoryEntryUi[];
+  evolutionProposals: AgentEvolutionProposalUi[];
 }
 
 function AgentDetailView({
@@ -1195,6 +1229,7 @@ function AgentDetailView({
   onBackToOverview,
   memoryParsed,
   memoryEntries,
+  evolutionProposals,
   onSaveMemory,
   promptContent,
   promptDraft,
@@ -1255,9 +1290,20 @@ function AgentDetailView({
         kind: entry.kind,
         confidence: entry.confidence,
       }));
-    const merged: typeof dbRows = [...timelineEvents, ...dbRows];
+    const proposalRows: typeof dbRows = [...evolutionProposals]
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+      .map((proposal) => ({
+        id: `proposal-${proposal.id}`,
+        timestamp: formatMemoryEntryTime(proposal.appliedAt || proposal.updatedAt, locale),
+        title: locale === "ko" ? "자가진화 proposal 원장 기록" : "Self-evolution proposal recorded",
+        desc: locale === "ko"
+          ? `${proposal.status} · ${proposal.summary} · ${proposal.targetPath}`
+          : `${proposal.status} · ${proposal.summary} · ${proposal.targetPath}`,
+        type: "evolution",
+      }));
+    const merged: typeof dbRows = [...timelineEvents, ...proposalRows, ...dbRows];
     return merged;
-  }, [memoryEntries, timelineEvents, locale]);
+  }, [evolutionProposals, memoryEntries, timelineEvents, locale]);
 
   // 프롬프트 복사 핸들러
   const handleCopyPrompt = () => {

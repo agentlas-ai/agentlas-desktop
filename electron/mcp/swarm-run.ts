@@ -5,8 +5,9 @@
 import type { McpInvocationEvent } from "../../shared/types";
 import { appendChatMessage } from "../store/chats";
 import { getAgentConcurrency } from "../store/concurrency";
+import { tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
 import type { BorrowedTaskForceParams } from "./borrowed-task-force";
-import { runSwarm, type SwarmBoard, type SwarmTask } from "./swarm-engine";
+import { runSwarm, type SwarmBoard, type SwarmEvent, type SwarmTask } from "./swarm-engine";
 
 // 총 작업 수/라운드 안전 상한 — 무한 스폰·무한루프로부터 컴/지갑을 지키는 최후 방어선(엔진이 강제).
 // 각 작업 = 실 LLM 호출이라 비용이 나가므로 보수적으로. (동시 실행 수는 별개로 슬라이더가 제어)
@@ -82,8 +83,86 @@ export function parseSwarmOutput(text: string): {
 /** 스웜 실행 엔트리 — runMcpInvocation이 호출. 최종 텍스트를 반환하고 채팅에 저장한다. */
 export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ finalText: string }> {
   const goal = p.req.userPrompt;
+  const runId = p.req.runId ?? `swarm-${Date.now()}`;
   const emit = (task: SwarmTask, ev: McpInvocationEvent): void =>
     p.sink({ ...ev, agentId: task.id, agentName: task.title, role: task.role ?? "worker" });
+  const recordSwarmEvent = (ev: SwarmEvent): void => {
+    switch (ev.kind) {
+      case "task-start":
+      case "task-done":
+        tryRecordRunEvent({
+          runId,
+          kind: `swarm_${ev.kind}`,
+          chatId: p.chat.id,
+          nodeId: ev.task.id,
+          agentId: ev.task.id,
+          payload: {
+            title: ev.task.title,
+            role: ev.task.role,
+            status: ev.task.status,
+            spawnedBy: ev.task.spawnedBy,
+          },
+        });
+        break;
+      case "task-failed":
+        tryRecordRunEvent({
+          runId,
+          kind: "swarm_task_failed",
+          chatId: p.chat.id,
+          nodeId: ev.task.id,
+          agentId: ev.task.id,
+          payload: { title: ev.task.title, role: ev.task.role, reason: ev.reason },
+        });
+        tryRecordFailureEvent({
+          runId,
+          source: "swarm_task",
+          chatId: p.chat.id,
+          nodeId: ev.task.id,
+          agentId: ev.task.id,
+          errorCode: ev.reason ?? "task_failed",
+          errorMessage: ev.reason ? `Swarm task failed: ${ev.reason}` : "Swarm task failed",
+          payload: { title: ev.task.title, role: ev.task.role, spawnedBy: ev.task.spawnedBy },
+        });
+        break;
+      case "spawn":
+        tryRecordRunEvent({
+          runId,
+          kind: "swarm_spawn",
+          chatId: p.chat.id,
+          nodeId: ev.parent,
+          payload: { spawnedTaskIds: ev.tasks.map((task) => task.id), count: ev.tasks.length },
+        });
+        break;
+      case "capped":
+        tryRecordRunEvent({
+          runId,
+          kind: "swarm_capped",
+          chatId: p.chat.id,
+          payload: { reason: ev.reason },
+        });
+        if (ev.reason !== "aborted") {
+          tryRecordFailureEvent({
+            runId,
+            source: "swarm",
+            chatId: p.chat.id,
+            errorCode: ev.reason,
+            errorMessage: `Swarm stopped by ${ev.reason} guard`,
+          });
+        }
+        break;
+      case "synthesize":
+        tryRecordRunEvent({ runId, kind: "swarm_synthesize", chatId: p.chat.id });
+        break;
+      case "round":
+        break;
+    }
+  };
+  tryRecordRunEvent({
+    runId,
+    kind: "swarm_started",
+    chatId: p.chat.id,
+    payload: { maxTasks: SWARM_MAX_TASKS, maxRounds: SWARM_MAX_ROUNDS, concurrency: getAgentConcurrency() },
+  });
 
   // 한 작업을 활성 런타임으로 실행 → 텍스트 → `## Spawn` 파싱.
   const runOneTask = async (task: SwarmTask, board: SwarmBoard, signal?: AbortSignal) => {
@@ -154,27 +233,48 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
   };
 
   let idCounter = 0;
-  const { final, aborted, doneCount } = await runSwarm(
-    goal,
-    // 시드: 목표 자체를 첫 작업으로 — 첫 워커가 분해해서 `## Spawn`으로 그래프를 키운다.
-    [{ title: goal.slice(0, 80), brief: goal }],
-    { concurrency: getAgentConcurrency(), maxTasks: SWARM_MAX_TASKS, maxRounds: SWARM_MAX_ROUNDS },
-    {
-      nextId: () => `swarm-${++idCounter}`,
-      runTask: runOneTask,
-      synthesize,
-      onEvent: () => {
-        /* 진행 이벤트는 runOneTask/synthesize 안에서 sink로 직접 흘린다 */
+  let swarmResult: Awaited<ReturnType<typeof runSwarm>>;
+  try {
+    swarmResult = await runSwarm(
+      goal,
+      // 시드: 목표 자체를 첫 작업으로 — 첫 워커가 분해해서 `## Spawn`으로 그래프를 키운다.
+      [{ title: goal.slice(0, 80), brief: goal }],
+      { concurrency: getAgentConcurrency(), maxTasks: SWARM_MAX_TASKS, maxRounds: SWARM_MAX_ROUNDS },
+      {
+        nextId: () => `swarm-${++idCounter}`,
+        runTask: runOneTask,
+        synthesize,
+        onEvent: (ev) => {
+          /* 진행 이벤트는 runOneTask/synthesize 안에서 sink로 직접 흘리고, 원장에는 축약 메타만 남긴다. */
+          recordSwarmEvent(ev);
+        },
       },
-    },
-    p.signal,
-  );
+      p.signal,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    tryRecordFailureEvent({
+      runId,
+      source: "swarm",
+      chatId: p.chat.id,
+      errorCode: "swarm_threw",
+      errorMessage: message,
+    });
+    throw error;
+  }
+  const { board, final, aborted, doneCount } = swarmResult;
 
   const finalText = aborted
     ? p.locale === "ko"
       ? `스웜을 멈췄어요. (완료 ${doneCount}개)`
       : `Swarm stopped. (${doneCount} tasks done)`
     : final || (p.locale === "ko" ? "스웜이 완료할 작업을 찾지 못했습니다." : "The swarm found no work to complete.");
+  tryRecordRunEvent({
+    runId,
+    kind: "swarm_finished",
+    chatId: p.chat.id,
+    payload: { aborted, doneCount, taskCount: board.tasks.length },
+  });
   // 채팅에 먼저 저장 → 그 다음 final 이벤트(정상 종료 경로와 동일 순서, 재접속 시 유실 방지).
   appendChatMessage(p.chat.id, "assistant", finalText);
   p.sink({ kind: "final", text: finalText });

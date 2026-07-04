@@ -2,16 +2,17 @@
 // 출처 카테고리(로컬·클라우드·허브) > firm > HQ(division) > agent.
 //   - 멀티/싱글 토글: 멀티=회사 계층, 싱글=에이전트 평면.
 //   - 로컬 판별: agent.localPath 유무. 회사는 CEO 에이전트의 localPath로 판별.
-//   - 허브(북마크)는 아직 저장소가 없어 빈 카테고리(placeholder).
+//   - 허브(북마크)는 로컬 설치와 별개인 Hub 라우팅 참조.
 //   - 가져오기: 폴더 선택 → team.importLocalFolder → 리로드.
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
+import { classifyHubEntity, entityClassShortLabel } from "@/lib/agent-entity-kind";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { isVisibleAgent, isUserFacingAgentText } from "@/lib/agent-visibility";
 import { IconBuilding, IconFileUp, IconLayers, IconSearch } from "@/components/Icon";
-import type { AgentGroupResolved, InstalledAgent, InstalledFirm, MarketplaceListing, ResolvedNode, ResolvedOrg } from "@/lib/types";
+import type { AgentGroupResolved, HubAgentBookmark, InstalledAgent, InstalledFirm, MarketplaceListing, ResolvedNode, ResolvedOrg } from "@/lib/types";
 
 type Mode = "multi" | "single";
 type Source = "local" | "cloud" | "hub";
@@ -39,6 +40,7 @@ export function OrgTree() {
   const [agentGroups, setAgentGroups] = useState<AgentGroupResolved[]>([]);
   // 로그인한 계정의 실제 서버 클라우드(cargo) 에이전트 — "클라우드" 카테고리에 리스트업.
   const [cloudListings, setCloudListings] = useState<MarketplaceListing[]>([]);
+  const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -58,22 +60,25 @@ export function OrgTree() {
       return;
     }
     try {
-      const [a, f, groups, mine] = await Promise.all([
+      const [a, f, groups, mine, bookmarks] = await Promise.all([
         api.team.list(),
         api.firms.list(),
         api.agentGroups.listResolved(),
         api.marketplace.listMine().catch(() => [] as MarketplaceListing[]),
+        api.marketplace.bookmarks().catch(() => [] as HubAgentBookmark[]),
       ]);
       setAgents(dedupById(a).filter(isVisibleAgent));
       setFirms(f);
       setAgentGroups(groups);
       setCloudListings(mine);
+      setHubBookmarks(bookmarks);
       setLoadError("");
     } catch {
       setAgents([]);
       setFirms([]);
       setAgentGroups([]);
       setCloudListings([]);
+      setHubBookmarks([]);
       setLoadError(ko ? "조직도를 불러오지 못했습니다. 설치된 항목은 바뀌지 않았습니다." : "Org chart could not be loaded. Installed items were not changed.");
     } finally {
       setLoading(false);
@@ -93,6 +98,25 @@ export function OrgTree() {
     for (const f of firms) for (const n of f.orgChart) s.add(n.agentId);
     return s;
   }, [firms]);
+  const firmKindById = useMemo(() => {
+    const out = new Map<string, "single" | "multi">();
+    for (const f of firms) {
+      const userNodes = f.orgChart.filter((n) => {
+        const agent = agentById.get(n.agentId);
+        return isUserFacingAgentText(agent?.name ?? n.role, n.role);
+      });
+      out.set(f.id, userNodes.length > 1 ? "multi" : "single");
+    }
+    return out;
+  }, [agentById, firms]);
+  const singleFirmByAgentId = useMemo(() => {
+    const out = new Map<string, InstalledFirm>();
+    for (const f of firms) {
+      if (firmKindById.get(f.id) !== "single") continue;
+      for (const n of f.orgChart) out.set(n.agentId, f);
+    }
+    return out;
+  }, [firmKindById, firms]);
 
   const agentSource = (a: InstalledAgent): Source => (a.localPath ? "local" : "cloud");
   // firm 출처: CEO 에이전트의 localPath가 1차. CEO가 visible 필터에서 빠져 map에 없을 수 있으므로
@@ -170,7 +194,8 @@ export function OrgTree() {
   async function removeGroup(src: Source, label: string) {
     const api = ipc();
     if (!api || busy) return;
-    const gFirms = firms.filter((f) => firmSource(f) === src);
+    const targetFirmKind = mode === "multi" ? "multi" : "single";
+    const gFirms = firms.filter((f) => firmSource(f) === src && firmKindById.get(f.id) === targetFirmKind);
     const gAgents = agents.filter((a) => agentSource(a) === src && !firmAgentIds.has(a.id));
     const total = gFirms.length + gAgents.length;
     if (total === 0) return;
@@ -207,12 +232,12 @@ export function OrgTree() {
     { key: "hub", label: ko ? "허브 · 북마크" : "Hub · bookmarks" },
   ];
 
-  // 멀티 = 회사(firm) 계층만. 싱글 = 회사에 속하지 않은 개별 에이전트만. (두 모드는 서로 겹치지 않음 → 중복 없음)
+  // 멀티 = 실제 구성원이 2명 이상인 회사(firm). 싱글 = 개별 에이전트 + 1명짜리 firm 포장.
   function bySource(src: Source) {
-    const f = mode === "multi" ? firms.filter((x) => firmSource(x) === src) : [];
+    const f = mode === "multi" ? firms.filter((x) => firmSource(x) === src && firmKindById.get(x.id) === "multi") : [];
     const indiv =
       mode === "single"
-        ? agents.filter((a) => agentSource(a) === src && !firmAgentIds.has(a.id))
+        ? agents.filter((a) => agentSource(a) === src && (!firmAgentIds.has(a.id) || singleFirmByAgentId.has(a.id)))
         : [];
     return { firms: f, agents: indiv };
   }
@@ -247,7 +272,7 @@ export function OrgTree() {
               <button
                 key={group.id}
                 onClick={() => navigate("/library/agent-groups")}
-                className="dashboard-org-row dashboard-org-agent dashboard-org-agent-mid"
+                className="dashboard-org-row dashboard-org-agent dashboard-org-agent-mid dashboard-org-agent-multi"
               >
                 <Dot />
                 <span className="dashboard-org-label">{group.name}</span>
@@ -266,7 +291,13 @@ export function OrgTree() {
             cat.key === "cloud" && mode === "single"
               ? cloudListings.filter((m) => !installedSlugs.has(m.slug) && matches(ko ? m.name : m.nameEn || m.name))
               : [];
-          const count = cf.length + ca.length + cloudOnly.length;
+          const hubOnly =
+            cat.key === "hub"
+              ? hubBookmarks
+                .filter((bookmark) => classifyHubEntity(bookmark.listing) === (mode === "multi" ? "multi" : "single"))
+                .filter((bookmark) => matches(ko ? bookmark.listing.name : bookmark.listing.nameEn || bookmark.listing.name))
+              : [];
+          const count = cf.length + ca.length + cloudOnly.length + hubOnly.length;
           const open = openCats[cat.key];
           return (
             <div key={cat.key}>
@@ -294,9 +325,9 @@ export function OrgTree() {
                 )}
               </div>
 
-              {open && cat.key === "hub" && (
+              {open && cat.key === "hub" && hubOnly.length === 0 && (
                 <div className="dashboard-org-empty dashboard-org-nested">
-                  {ko ? "북마크한 허브 에이전트가 여기 모입니다." : "Bookmarked hub agents appear here."}
+                  {ko ? "이 모드에 맞는 Hub 북마크가 없습니다." : "No Hub bookmarks match this mode."}
                 </div>
               )}
 
@@ -313,6 +344,7 @@ export function OrgTree() {
                         <span className="dashboard-org-label">
                           {dn(f)}
                         </span>
+                        <span className="dashboard-org-count">{ko ? "멀티" : "multi"}</span>
                       </button>
                       <button
                         type="button"
@@ -332,18 +364,23 @@ export function OrgTree() {
                 ca.filter((a) => matches(dn(a))).map((a) => (
                   <div key={a.id} className="dashboard-org-rowwrap">
                     <button
-                      onClick={() => navigate(agentLibraryRoute({ agentId: a.id }))}
-                      className="dashboard-org-row dashboard-org-agent"
+                      onClick={() => navigate(agentLibraryRoute({ agentId: a.id, firmId: singleFirmByAgentId.get(a.id)?.id }))}
+                      className="dashboard-org-row dashboard-org-agent dashboard-org-agent-single"
                     >
                       <Dot />
                       <span className="dashboard-org-label">{dn(a)}</span>
+                      <span className="dashboard-org-count">{ko ? "싱글" : "single"}</span>
                     </button>
                     <button
                       type="button"
                       className="dashboard-org-remove"
                       title={ko ? "제거" : "Remove"}
                       aria-label={ko ? "제거" : "Remove"}
-                      onClick={() => void removeAgent(a.id, dn(a))}
+                      onClick={() => {
+                        const singleFirm = singleFirmByAgentId.get(a.id);
+                        if (singleFirm) void removeFirm(singleFirm.id, dn(singleFirm));
+                        else void removeAgent(a.id, dn(a));
+                      }}
                     >
                       ×
                     </button>
@@ -355,14 +392,31 @@ export function OrgTree() {
                   <button
                     key={`cloud:${m.slug}`}
                     onClick={() => navigate("/cloud")}
-                    className="dashboard-org-row dashboard-org-agent"
+                    className="dashboard-org-row dashboard-org-agent dashboard-org-agent-single"
                     title={ko ? "서버 클라우드에 있는 에이전트 — 클라우드에서 관리" : "On your server cloud — manage in Cloud"}
                   >
                     <Dot />
                     <span className="dashboard-org-label">{ko ? m.name : m.nameEn || m.name}</span>
-                    <span className="dashboard-org-count">{ko ? "클라우드" : "cloud"}</span>
+                    <span className="dashboard-org-count">{ko ? "싱글" : "single"}</span>
                   </button>
                 ))}
+
+              {open &&
+                hubOnly.map(({ slug, listing }) => {
+                  const entityClass = classifyHubEntity(listing);
+                  return (
+                    <button
+                      key={`hub:${slug}`}
+                      onClick={() => navigate(`/marketplace?q=${encodeURIComponent(slug)}`)}
+                      className={`dashboard-org-row dashboard-org-agent dashboard-org-agent-${entityClass}`}
+                      title={ko ? "Hub 북마크 — Marketplace에서 관리" : "Hub bookmark — manage in Marketplace"}
+                    >
+                      <Dot />
+                      <span className="dashboard-org-label">{ko ? listing.name : listing.nameEn || listing.name}</span>
+                      <span className="dashboard-org-count">{entityClassShortLabel(entityClass, locale)}</span>
+                    </button>
+                  );
+                })}
             </div>
           );
         })}

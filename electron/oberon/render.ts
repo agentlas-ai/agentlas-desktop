@@ -15,6 +15,7 @@ import type {
   OberonRenderShotInput,
 } from "../../shared/types";
 import { readEnvVar } from "../secrets/vault";
+import { mergeContinuityNegative } from "../../shared/oberon-sheets";
 import { composeTitledDelivery } from "./titlecards";
 import { currentUiLocale } from "../main";
 
@@ -164,10 +165,18 @@ async function generateClip(
   const clipPath = path.join(job.outputDir, clipName);
   const durationSeconds = normalizeDuration(shot.durationSec, request.resolution);
   const prompt = buildVeoPrompt(request, shot, durationSeconds);
-  const firstFrame = await loadFirstFrame(shot).catch((error: unknown) => {
+  const firstFrame = await loadFrame(shot.firstFrame).catch((error: unknown) => {
     job.warnings.push(`${shot.shotId}: first frame skipped (${errorMessage(error)})`);
     return null;
   });
+  // END 프레임 보간(START/END 체이닝) — Veo lastFrame은 image-to-video일 때만 지원되므로
+  // firstFrame이 실제로 실렸을 때만 함께 싣는다.
+  const lastFrame = firstFrame
+    ? await loadFrame(shot.lastFrame).catch((error: unknown) => {
+        job.warnings.push(`${shot.shotId}: last frame skipped (${errorMessage(error)})`);
+        return null;
+      })
+    : null;
 
   const videoRequest: {
     model: string;
@@ -183,6 +192,7 @@ async function generateClip(
       generateAudio?: boolean;
       personGeneration: "allow_adult" | "allow_all";
       seed?: number;
+      lastFrame?: { imageBytes: string; mimeType: string };
     };
   } = {
     model: job.model,
@@ -192,7 +202,8 @@ async function generateClip(
       durationSeconds,
       aspectRatio: normalizeAspect(request.aspectRatio || shot.aspectRatio),
       resolution: request.resolution ?? DEFAULT_RESOLUTION,
-      negativePrompt: shot.negativePrompt,
+      // 연속성 네거티브 캐논(드리프트·플리커·AI결함) 병합 — 세계가 샷 중간에 표류하는 것을 막는다.
+      negativePrompt: mergeContinuityNegative(shot.negativePrompt),
       enhancePrompt: true,
       personGeneration: firstFrame ? "allow_adult" : "allow_all",
     },
@@ -202,6 +213,7 @@ async function generateClip(
     videoRequest.config.seed = stableSeed(`${request.productionId}:${shot.shotId}:${clip.attempt}`);
   }
   if (firstFrame) videoRequest.image = firstFrame;
+  if (lastFrame) videoRequest.config.lastFrame = lastFrame;
 
   let operation: GenerateVideosOperation = await ai.models.generateVideos(videoRequest);
 
@@ -400,7 +412,14 @@ function buildVeoPrompt(request: OberonRenderRequest, shot: OberonRenderShotInpu
     `Create one self-contained cinematic clip for production "${request.title}".`,
     `Target duration: ${durationSeconds} seconds. Camera moves and subject action must resolve to a clean, stable final frame for the editorial cut.`,
     "Preserve continuity with the shot description: same characters, wardrobe, lighting and screen direction.",
+    // 순차 메모리 체인 — 이 샷은 직전 샷의 END 프레임에서 픽셀 단위로 이어진다.
+    shot.chainedFromShotId
+      ? `This shot continues DIRECTLY from where shot ${shot.chainedFromShotId} ended — same characters in the same positions, same lighting, same screen direction; do not reset the scene.`
+      : "",
     shot.firstFrame ? "Use the provided first-frame image as the exact opening composition, then animate from it." : "",
+    shot.lastFrame
+      ? "Resolve the motion so the clip ends EXACTLY on the provided last-frame image — same framing, pose and lighting — so the next cut can continue from it."
+      : "",
     // Veo 3.1은 네이티브 동기 오디오를 생성한다 — 위에 기술된 대사/앰비언스/SFX를 정확히 동기화.
     "Generate synchronized native audio (dialogue, ambience, SFX) exactly as described above; keep any dialogue precisely lip-synced.",
     // 글자는 후반 번인 — 프레임 안에 텍스트를 그리지 않는다.
@@ -409,20 +428,20 @@ function buildVeoPrompt(request: OberonRenderRequest, shot: OberonRenderShotInpu
   return parts.join("\n").slice(0, 3900);
 }
 
-async function loadFirstFrame(
-  shot: OberonRenderShotInput,
+async function loadFrame(
+  frame: OberonRenderShotInput["firstFrame"],
 ): Promise<{ imageBytes: string; mimeType: string } | null> {
-  if (shot.firstFrame?.imageBytes) {
+  if (frame?.imageBytes) {
     return {
-      imageBytes: shot.firstFrame.imageBytes,
-      mimeType: shot.firstFrame.mimeType || "image/png",
+      imageBytes: frame.imageBytes,
+      mimeType: frame.mimeType || "image/png",
     };
   }
-  if (!shot.firstFrame?.absPath) return null;
-  const bytes = await fs.readFile(shot.firstFrame.absPath);
+  if (!frame?.absPath) return null;
+  const bytes = await fs.readFile(frame.absPath);
   return {
     imageBytes: bytes.toString("base64"),
-    mimeType: shot.firstFrame.mimeType || "image/png",
+    mimeType: frame.mimeType || "image/png",
   };
 }
 

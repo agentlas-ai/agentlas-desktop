@@ -288,6 +288,12 @@ app.whenReady().then(async () => {
   await bootAuthFromKeychain();
   registerIpcHandlers();
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
+  try {
+    const { reconcileTelegramWorkers } = await import("./telegram/connect");
+    await reconcileTelegramWorkers();
+  } catch (err) {
+    console.error("[telegram] worker restore failed:", err);
+  }
   // 유휴 드리밍 큐레이션 — 옵트인(기본 OFF). 5분마다 조건만 확인(유휴/슬롯/쿨다운), 발화는 드묾.
   try {
     const { startDreamingScheduler } = await import("./memory/dreaming");
@@ -315,6 +321,15 @@ app.whenReady().then(async () => {
   });
   // 자동 업데이트는 production에서만. updater.ts 안에서 NODE_ENV 체크.
   initAutoUpdater();
+});
+
+app.on("before-quit", async () => {
+  try {
+    const { stopTelegramWorkers } = await import("./telegram/connect");
+    stopTelegramWorkers();
+  } catch {
+    // ignore shutdown cleanup errors
+  }
 });
 
 /** OS 로케일 또는 렌더러가 통지한 표시 언어를 ko/en으로 정규화. */

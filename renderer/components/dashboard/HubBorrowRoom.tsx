@@ -1,13 +1,11 @@
-// 허브 빌려쓰기 방 — 검증된 남의 에이전트를 찾아 내 함대에 들인다(가치1: 네트워크).
-// 기획안: hub 에이전트는 "원격 게스트(borrowed)"로, 내 라이브러리에 추가하면 "내 직원(owned)"이 된다.
-// owned/borrowed 를 외형이 아니라 사실로 가른다 — 추가 전엔 로컬 파일 없음(원격), 추가 후엔 내 자산.
+// 허브 빌려쓰기 방 — 검증된 Hub 에이전트를 찾아 북마크한다(가치1: 네트워크).
+// 북마크는 로컬 설치가 아니라 Hub 라우팅 참조다. 설치/소유와 섞지 않는다.
 //
 // 실측 원칙: marketplace.search(실제 허브 검색) + marketplace.status(소스 온라인=게시자 가용성 proxy).
-// 현재 런타임이 제공하는 실제 동작은 "내 라이브러리에 추가(team.install)"다. 존재하지 않는 별도의
-// '호출형 전용 빌림'을 지어내지 않는다 — 추가하면 owned-cloud 가 된다고 정직하게 표기한다.
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
+import { classifyHubEntity, entityClassLabel } from "@/lib/agent-entity-kind";
 import { useT } from "@/lib/i18n";
 import { IconSearch, IconCheck } from "@/components/Icon";
 import type { MarketplaceListing, MarketplaceSourceStatus } from "@/lib/types";
@@ -18,7 +16,7 @@ export function HubBorrowRoom() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<MarketplaceListing[] | null>(null);
   const [status, setStatus] = useState<MarketplaceSourceStatus | null>(null);
-  const [installed, setInstalled] = useState<Set<string>>(new Set());
+  const [bookmarked, setBookmarked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -47,9 +45,8 @@ export function HubBorrowRoom() {
 
   useEffect(() => {
     void search("");
-    // 이미 설치된 슬러그는 owned 로 표시.
-    ipc()?.team.list()
-      .then((a) => setInstalled(new Set(a.map((x) => x.slug))))
+    ipc()?.marketplace.bookmarks()
+      .then((items) => setBookmarked(new Set(items.map((item) => item.slug))))
       .catch(() => {});
   }, [search]);
 
@@ -61,16 +58,16 @@ export function HubBorrowRoom() {
     };
   }, [query, search]);
 
-  async function addToLibrary(slug: string) {
+  async function bookmarkListing(listing: MarketplaceListing) {
     const api = ipc();
-    if (!api || busy) return;
-    setBusy(slug);
+    if (!api?.marketplace?.bookmarkAdd || busy) return;
+    setBusy(listing.slug);
     try {
-      await api.team.install(slug);
-      setInstalled((prev) => new Set(prev).add(slug));
-      setMessage(ko ? "내 팀에 추가했습니다. 이제 Library에서 확인할 수 있습니다." : "Added to your team. You can check it in Library.");
+      const bookmark = await api.marketplace.bookmarkAdd(listing);
+      setBookmarked((prev) => new Set(prev).add(bookmark.slug));
+      setMessage(ko ? "Hub 북마크에 추가했습니다. 조합 화면에서는 싱글 에이전트 북마크만 후보로 씁니다." : "Added to Hub bookmarks. Agent groups use bookmarked single agents only.");
     } catch {
-      setMessage(ko ? "추가하지 못했습니다. 일부 설치됐는지 Library에서 확인한 뒤 다시 시도하세요." : "Could not add it. Check Library for a partial install, then try again.");
+      setMessage(ko ? "북마크하지 못했습니다. Hub 연결 상태를 확인한 뒤 다시 시도하세요." : "Could not bookmark it. Check the Hub connection, then try again.");
     } finally {
       setBusy(null);
     }
@@ -103,13 +100,14 @@ export function HubBorrowRoom() {
       ) : (
         <div className="hub-borrow-carousel" role="list">
           {results.slice(0, 6).map((r) => {
-            const owned = installed.has(r.slug);
+            const entityClass = classifyHubEntity(r);
+            const isBookmarked = bookmarked.has(r.slug);
             return (
-              <div key={r.slug} className="hub-borrow-card" role="listitem">
+              <div key={r.slug} className="hub-borrow-card" role="listitem" data-entity-kind={entityClass}>
                 <div className="hub-borrow-card-top">
                   <span className="hub-borrow-trust" data-grade={r.trustGrade}>Trust {r.trustGrade}</span>
-                  <span className="agent-ownership-badge" data-owned={owned ? "true" : "false"}>
-                    {owned ? (ko ? "owned" : "owned") : ko ? "borrowed" : "borrowed"}
+                  <span className="agent-entity-badge" data-entity-kind={entityClass}>
+                    {entityClassLabel(entityClass, locale)}
                   </span>
                 </div>
                 <div className="hub-borrow-card-name" title={ko ? r.name : r.nameEn || r.name}>
@@ -125,19 +123,19 @@ export function HubBorrowRoom() {
                       {ko ? "회" : ""}
                     </span>
                   )}
-                  {owned ? (
+                  {isBookmarked ? (
                     <span className="hub-borrow-owned">
-                      <IconCheck size={12} /> {ko ? "보유" : "owned"}
+                      <IconCheck size={12} /> {ko ? "북마크됨" : "bookmarked"}
                     </span>
                   ) : (
                     <button
-                      onClick={() => addToLibrary(r.slug)}
+                      onClick={() => bookmarkListing(r)}
                       disabled={busy === r.slug}
                       className="titlebar-nodrag hub-borrow-card-add"
                       data-dashboard-action="true"
-                      title={ko ? "내 라이브러리에 추가하면 내 자산(owned)이 됩니다" : "Adding makes it yours (owned)"}
+                      title={ko ? "Hub 북마크에 추가" : "Add to Hub bookmarks"}
                     >
-                      {busy === r.slug ? (ko ? "추가 중…" : "Adding…") : ko ? "내 팀에 추가" : "Add"}
+                      {busy === r.slug ? (ko ? "북마크 중…" : "Bookmarking…") : ko ? "북마크" : "Bookmark"}
                     </button>
                   )}
                 </div>
@@ -150,8 +148,8 @@ export function HubBorrowRoom() {
         {message
           ? message
           : ko
-          ? "허브 에이전트는 원격 게스트입니다 — 내 팀에 추가하면 내 라이브러리(owned)가 되어 게시자와 무관하게 동작합니다."
-          : "Hub agents are remote guests — adding to your team makes them owned, independent of the publisher."}
+          ? "Hub 북마크는 설치가 아닙니다. 싱글 에이전트와 멀티 에이전트 팀은 색으로 구분되며, 조합 후보는 싱글 북마크만 씁니다."
+          : "Hub bookmarks are not installs. Single agents and multi-agent teams are color-coded; groups use single bookmarks only."}
       </div>
     </div>
   );

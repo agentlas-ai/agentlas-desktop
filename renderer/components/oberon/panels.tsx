@@ -30,7 +30,7 @@ import {
   IconLayers,
   IconFilm,
 } from "@/components/Icon";
-import { Card, Chip, GhostButton, Meter, PanelHead, PrimaryButton, SizeBadge, Tag, formatCost, formatDuration, providerColor } from "./ui";
+import { Card, Chip, GhostButton, Meter, PanelHead, PrimaryButton, SizeBadge, Tag, formatCost, formatDuration, providerColor, toLocalMediaSrc } from "./ui";
 
 // ── Script / Beat Board ──────────────────────────────────
 
@@ -491,23 +491,6 @@ const ASPECT_OUTPUTS: { aspect: string; platform: string; platformEn: string; ra
   { aspect: "1:1", platform: "Instagram 피드", platformEn: "Instagram Feed", ratio: "1 / 1" },
   { aspect: "2.39:1", platform: "시네마 스코프", platformEn: "Cinema Scope", ratio: "2.39 / 1" },
 ];
-
-// file:// 절대경로를 데스크톱 셸의 agentlas:// 미디어 프로토콜로 변환한다.
-// webSecurity:true 에서 <video src="file://">는 차단되므로 인-앱 재생에 필수.
-function toLocalMediaSrc(url: string): string {
-  if (!url) return url;
-  let abs = url;
-  if (url.startsWith("file://")) {
-    try {
-      abs = decodeURIComponent(new URL(url).pathname);
-    } catch {
-      return url;
-    }
-  } else if (!url.startsWith("/")) {
-    return url; // 이미 http(s)/agentlas/blob 등 로드 가능한 URL.
-  }
-  return `agentlas://localfile/?p=${encodeURIComponent(abs)}`;
-}
 
 export function DeliveryPanel({ production }: { production: FilmProduction }) {
   const { locale } = useT();

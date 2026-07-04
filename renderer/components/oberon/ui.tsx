@@ -8,6 +8,24 @@
 import type { CSSProperties, ReactNode } from "react";
 import { SHOT_SIZES } from "@/lib/oberon";
 
+// file:// 절대경로를 데스크톱 셸의 agentlas:// 미디어 프로토콜로 변환한다.
+// webSecurity:true 에서 <img src="file://">·<video src="file://">는 차단되므로
+// 인-앱 썸네일/재생에 필수. (이미 로드 가능한 http(s)/agentlas/blob 은 그대로 통과.)
+export function toLocalMediaSrc(url?: string | null): string | undefined {
+  if (!url) return undefined;
+  let abs = url;
+  if (url.startsWith("file://")) {
+    try {
+      abs = decodeURIComponent(new URL(url).pathname);
+    } catch {
+      return url;
+    }
+  } else if (!url.startsWith("/")) {
+    return url; // 이미 http(s)/agentlas/blob 등 로드 가능한 URL.
+  }
+  return `agentlas://localfile/?p=${encodeURIComponent(abs)}`;
+}
+
 // ── 디자인 토큰 (단일 소스) — Oberon 루트에 주입. agentlas --rd-* 기준 ──
 export const OB_VARS: CSSProperties = {
   ["--ob-bg" as never]: "#FBFBFD",
@@ -130,7 +148,7 @@ export function FilmFrame({
     >
       {imageUrl && state === "ready" && (
         <img
-          src={imageUrl}
+          src={toLocalMediaSrc(imageUrl)}
           alt=""
           style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
         />

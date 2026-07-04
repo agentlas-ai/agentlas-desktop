@@ -127,6 +127,9 @@ const desktopInit = () => {
       search: async () => [agent],
       status: async () => ({ mode: "mcp", baseUrl: "mock", online: true, usingFallback: false, lastError: null, lastCheckedAt: now }),
       listMine: async () => [],
+      bookmarks: async () => [],
+      bookmarkAdd: async (listing) => ({ slug: listing.slug, listing, bookmarkedAt: now }),
+      bookmarkRemove: async () => {},
     },
     hephaestus: {
       status: async () => ({ available: true, version: "0.0.0-proof" }),

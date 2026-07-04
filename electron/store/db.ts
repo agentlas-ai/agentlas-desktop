@@ -10,7 +10,7 @@ import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 36;
+const SCHEMA_VERSION = 41;
 
 export function initStore(): void {
   if (_db) return;
@@ -870,6 +870,154 @@ export function initStore(): void {
     };
     addAutoCol("tool_mode", "tool_mode TEXT NOT NULL DEFAULT 'auto'");
     addAutoCol("hub_mode", "hub_mode TEXT NOT NULL DEFAULT 'hub-allowed'");
+  }
+
+  // ── v36 → v37: 에이전트 자가진화 proposal 원장 ─────────────────────
+  // 화면의 "승인 및 적용" 버튼을 단순 파일 write가 아니라
+  // candidate → approved → applied / measured / rolled_back 상태 흐름으로 남긴다.
+  if (userVersion < 37) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_evolution_proposals (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        proposal_type TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        target_path TEXT NOT NULL,
+        before_hash TEXT NOT NULL,
+        after_hash TEXT NOT NULL,
+        before_content TEXT NOT NULL,
+        after_content TEXT NOT NULL,
+        risk TEXT NOT NULL,
+        status TEXT NOT NULL,
+        source_json TEXT NOT NULL DEFAULT '{}',
+        decision_note TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        approved_at TEXT,
+        applied_at TEXT,
+        measured_at TEXT,
+        rolled_back_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_evolution_agent_status
+        ON agent_evolution_proposals(agent_id, status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_agent_evolution_created
+        ON agent_evolution_proposals(created_at DESC);
+    `);
+  }
+
+  // ── v37 → v38: 실행 이벤트 + 실패 원장 ─────────────────────────────
+  // run_history는 자동화 스케줄 이력, automation_runs는 그래프 라이브 스냅샷이다.
+  // 이 테이블들은 런타임/그래프/스웜 실패를 재현 가능한 최소 메타데이터로 남기는 append-only 원장이다.
+  if (userVersion < 38) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS run_events (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        ts TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        chat_id TEXT,
+        automation_id TEXT,
+        node_id TEXT,
+        agent_id TEXT,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        UNIQUE(run_id, seq)
+      );
+      CREATE INDEX IF NOT EXISTS idx_run_events_run_seq
+        ON run_events(run_id, seq);
+      CREATE INDEX IF NOT EXISTS idx_run_events_ts
+        ON run_events(ts DESC);
+      CREATE INDEX IF NOT EXISTS idx_run_events_automation
+        ON run_events(automation_id, ts DESC);
+
+      CREATE TABLE IF NOT EXISTS failure_events (
+        id TEXT PRIMARY KEY,
+        run_id TEXT,
+        ts TEXT NOT NULL,
+        source TEXT NOT NULL,
+        chat_id TEXT,
+        automation_id TEXT,
+        node_id TEXT,
+        agent_id TEXT,
+        error_code TEXT,
+        error_message TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}'
+      );
+      CREATE INDEX IF NOT EXISTS idx_failure_events_ts
+        ON failure_events(ts DESC);
+      CREATE INDEX IF NOT EXISTS idx_failure_events_run
+        ON failure_events(run_id, ts DESC);
+      CREATE INDEX IF NOT EXISTS idx_failure_events_automation
+        ON failure_events(automation_id, ts DESC);
+    `);
+  }
+
+  // ── v38 → v39: Telegram Connect bindings ─────────────────────────────
+  // Secrets stay in Keychain; this table stores only routing metadata, state,
+  // and Telegram ids needed to resume polling after app restart.
+  if (userVersion < 39) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS telegram_bindings (
+        id TEXT PRIMARY KEY,
+        target_kind TEXT NOT NULL CHECK(target_kind IN ('agent','firm','group')),
+        target_id TEXT NOT NULL,
+        telegram_chat_id TEXT,
+        telegram_chat_title TEXT,
+        bot_user_id INTEGER,
+        bot_username TEXT,
+        bot_display_name TEXT,
+        chat_session_id TEXT REFERENCES chats(id) ON DELETE SET NULL,
+        status TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        last_update_id INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        last_test_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_telegram_bindings_target
+        ON telegram_bindings(target_kind, target_id);
+      CREATE INDEX IF NOT EXISTS idx_telegram_bindings_chat
+        ON telegram_bindings(telegram_chat_id);
+      CREATE INDEX IF NOT EXISTS idx_telegram_bindings_enabled
+        ON telegram_bindings(enabled, status);
+    `);
+  }
+
+  // ── v39 → v40: Hub agent bookmarks ─────────────────────────────
+  // Hub bookmarks are routing references, not local installs. Store the last
+  // seen marketplace card so bookmarked agents remain visible while offline.
+  if (userVersion < 40) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS hub_agent_bookmarks (
+        slug TEXT PRIMARY KEY,
+        entity_kind TEXT NOT NULL DEFAULT 'agent',
+        listing_json TEXT NOT NULL,
+        bookmarked_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_hub_agent_bookmarks_time
+        ON hub_agent_bookmarks(bookmarked_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_hub_agent_bookmarks_kind
+        ON hub_agent_bookmarks(entity_kind, bookmarked_at DESC);
+    `);
+  }
+
+  // ── v40 → v41: Telegram automation report destination ────────────────
+  // A connected Telegram chat can opt in to receive completion reports for
+  // background automations. The bot token remains in Keychain; this flag only
+  // marks the paired chat as a notification destination.
+  if (userVersion < 41) {
+    const telegramCols = _db
+      .prepare("PRAGMA table_info(telegram_bindings)")
+      .all() as Array<{ name: string }>;
+    if (!telegramCols.some((c) => c.name === "automation_report_enabled")) {
+      _db.exec("ALTER TABLE telegram_bindings ADD COLUMN automation_report_enabled INTEGER NOT NULL DEFAULT 0");
+    }
+    _db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_telegram_bindings_automation_report
+        ON telegram_bindings(automation_report_enabled, enabled, telegram_chat_id);
+    `);
   }
 
   _db.pragma(`user_version = ${SCHEMA_VERSION}`);

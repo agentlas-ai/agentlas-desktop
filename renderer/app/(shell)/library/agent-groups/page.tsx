@@ -16,20 +16,20 @@ import {
   IconTrash,
 } from "@/components/Icon";
 import { ipc } from "@/lib/ipc";
-import { mapWithConcurrency } from "@/lib/concurrency";
+import { entityClassLabel, isSingleHubAgent, isSingleInstalledAgent } from "@/lib/agent-entity-kind";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { visibleAgents } from "@/lib/agent-visibility";
 import type {
   AgentGroupMember,
+  AgentGroupMemberSnapshot,
   AgentGroupResolved,
+  HubAgentBookmark,
   InstalledAgent,
   InstalledFirm,
-  MarketplaceListing,
-  ResolvedNode,
 } from "@/lib/types";
 
-type SourceKind = "org" | "installed" | "hub";
+type SourceKind = "installed" | "hub";
 type SourceItem = {
   key: string;
   kind: SourceKind;
@@ -46,8 +46,7 @@ export default function AgentGroupsPage() {
   const ko = locale === "ko";
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
-  const [resolvedNodes, setResolvedNodes] = useState<Record<string, ResolvedNode[]>>({});
-  const [hubAgents, setHubAgents] = useState<MarketplaceListing[]>([]);
+  const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
   const [groups, setGroups] = useState<AgentGroupResolved[]>([]);
   const [hubStatus, setHubStatus] = useState<"loading" | "online" | "offline">("loading");
   const [query, setQuery] = useState("");
@@ -65,36 +64,17 @@ export default function AgentGroupsPage() {
     setBusy(true);
     setHubStatus("loading");
     try {
-      const [agentRows, firmRows, groupRows] = await Promise.all([
+      const [agentRows, firmRows, bookmarkRows, groupRows] = await Promise.all([
         api.team.list(),
         api.firms.list(),
+        api.marketplace.bookmarks().catch(() => [] as HubAgentBookmark[]),
         api.agentGroups.listResolved(),
       ]);
       const visible = visibleAgents(agentRows);
       setAgents(visible);
       setFirms(firmRows);
+      setHubBookmarks(bookmarkRows);
       setGroups(groupRows);
-
-      // 무제한 병렬 → 동시성 3으로 제한(동작·결과 동일, 순서 보존). 실패한 firm 만 누락되도록 worker 내부에서 null 반환.
-      const nextResolved: Record<string, ResolvedNode[]> = {};
-      const resolvedPairs = await mapWithConcurrency(firmRows, 3, async (firm) => {
-        const org = await api.firms.getResolvedOrg(firm.id).catch(() => null);
-        if (!org) return null;
-        return [
-          firm.id,
-          [
-            org.ceo,
-            ...org.divisions.flatMap((division) => [division, ...division.specialists]),
-          ] as ResolvedNode[],
-        ] as [string, ResolvedNode[]];
-      });
-      for (const pair of resolvedPairs) {
-        if (pair) nextResolved[pair[0]] = pair[1];
-      }
-      setResolvedNodes(nextResolved);
-
-      const hub = await api.marketplace.search("").catch(() => []);
-      setHubAgents(hub);
       const status = await api.marketplace.status().catch(() => null);
       setHubStatus(status?.online ? "online" : "offline");
     } catch (err) {
@@ -116,73 +96,27 @@ export default function AgentGroupsPage() {
   }, [toast]);
 
   const sourceItems = useMemo(() => {
-    const agentMap = new Map(agents.map((agent) => [agent.id, agent]));
-    const inFirm = new Set<string>();
+    const multiFirmAgentIds = new Set<string>();
     const items: SourceItem[] = [];
 
     for (const firm of firms) {
-      const firmLoc = pickLocalized(firm, locale);
-      const resolved = resolvedNodes[firm.id];
-      if (resolved?.length) {
-        for (const node of resolved) {
-          if (!node.agentId) continue;
-          const agent = agentMap.get(node.agentId);
-          if (!agent) continue;
-          inFirm.add(agent.id);
-          const loc = pickLocalized(agent, locale);
-          items.push({
-            key: `org:${firm.id}:${node.id}:${agent.id}`,
-            kind: "org",
-            title: loc.name,
-            subtitle: node.role,
-            route: `${firmLoc.name} / ${node.role}`,
-            badge: ko ? "조직도" : "Org",
-            tone: agent.tone,
-            member: makeMember({
-              source: "firm-node",
-              agent,
-              routeLabel: `${firmLoc.name} / ${node.role}`,
-              firm,
-              node,
-            }),
-          });
-        }
-      } else {
-        for (const node of firm.orgChart) {
-          const agent = agentMap.get(node.agentId);
-          if (!agent) continue;
-          inFirm.add(agent.id);
-          const loc = pickLocalized(agent, locale);
-          items.push({
-            key: `org:${firm.id}:${node.agentSlug}:${agent.id}`,
-            kind: "org",
-            title: loc.name,
-            subtitle: node.role,
-            route: `${firmLoc.name} / ${node.role}`,
-            badge: ko ? "조직도" : "Org",
-            tone: agent.tone,
-            member: makeMember({
-              source: "firm-node",
-              agent,
-              routeLabel: `${firmLoc.name} / ${node.role}`,
-              firm,
-              node: { id: node.agentSlug, name: loc.name, role: node.role, agentId: agent.id },
-            }),
-          });
-        }
+      if (firm.orgChart.length <= 1) continue;
+      for (const node of firm.orgChart) {
+        multiFirmAgentIds.add(node.agentId);
       }
     }
 
     for (const agent of agents) {
-      if (inFirm.has(agent.id)) continue;
+      if (!isSingleInstalledAgent(agent)) continue;
+      if (multiFirmAgentIds.has(agent.id)) continue;
       const loc = pickLocalized(agent, locale);
       items.push({
         key: `installed:${agent.id}`,
         kind: "installed",
         title: loc.name,
         subtitle: loc.tagline,
-        route: ko ? "설치됨" : "Installed",
-        badge: agent.kind === "team" ? (ko ? "팀" : "Team") : (ko ? "로컬" : "Local"),
+        route: ko ? "로컬" : "Local",
+        badge: ko ? "싱글 · 로컬" : "Single · local",
         tone: agent.tone,
         member: makeMember({
           source: "installed",
@@ -192,15 +126,17 @@ export default function AgentGroupsPage() {
       });
     }
 
-    for (const hub of hubAgents) {
+    for (const bookmark of hubBookmarks) {
+      const hub = bookmark.listing;
+      if (!isSingleHubAgent(hub)) continue;
       const loc = pickLocalized(hub, locale);
       items.push({
         key: `hub:${hub.slug}`,
         kind: "hub",
         title: loc.name,
         subtitle: loc.tagline,
-        route: "Hub",
-        badge: hub.entityKind === "team" ? (ko ? "Hub 팀" : "Hub team") : "Hub",
+        route: ko ? "Hub 북마크" : "Hub bookmark",
+        badge: ko ? "싱글 · 북마크" : "Single · bookmark",
         member: {
           id: crypto.randomUUID(),
           source: "hub",
@@ -211,9 +147,9 @@ export default function AgentGroupsPage() {
             nameEn: hub.nameEn,
             tagline: hub.tagline,
             taglineEn: hub.taglineEn,
-            routeLabel: "Hub",
+            routeLabel: ko ? "Hub 북마크" : "Hub bookmark",
             trustGrade: hub.trustGrade,
-            entityKind: hub.entityKind ?? hub.kind,
+            entityKind: "agent",
             routingStatus: hub.routingStatus ?? null,
           },
           addedAt: new Date().toISOString(),
@@ -226,7 +162,7 @@ export default function AgentGroupsPage() {
     return items.filter((item) =>
       `${item.title} ${item.subtitle} ${item.route} ${item.badge}`.toLowerCase().includes(q),
     );
-  }, [agents, firms, hubAgents, ko, locale, query, resolvedNodes]);
+  }, [agents, firms, hubBookmarks, ko, locale, query]);
 
   function addMember(item: SourceItem) {
     setDraftMembers((prev) => {
@@ -309,8 +245,9 @@ export default function AgentGroupsPage() {
   }
 
   const draftSnapshots = draftMembers.map((member) => member.snapshot);
-  const orgCount = sourceItems.filter((item) => item.kind === "org").length;
-  const hubCount = hubAgents.length;
+  const localSingleCount = sourceItems.filter((item) => item.kind === "installed").length;
+  const hubCount = sourceItems.filter((item) => item.kind === "hub").length;
+  const blockedHubMultiCount = hubBookmarks.filter((bookmark) => !isSingleHubAgent(bookmark.listing)).length;
 
   return (
     <main className="agent-groups-page">
@@ -320,11 +257,11 @@ export default function AgentGroupsPage() {
             <IconLayers size={14} />
             <span>{ko ? "에이전트 조합" : "Agent group"}</span>
           </div>
-          <h2>{ko ? "자주 쓰는 조합을 상위 오케스트레이터로 묶기" : "Compose frequent agent sets into one orchestrator"}</h2>
+          <h2>{ko ? "싱글 에이전트만 안전하게 조합하기" : "Safely compose single agents only"}</h2>
         </div>
         <div className="agent-groups-metrics" aria-label={ko ? "에이전트 조합 상태" : "Agent group status"}>
-          <Metric label={ko ? "조직도 후보" : "Org routes"} value={String(orgCount)} />
-          <Metric label="Hub" value={hubStatus === "loading" ? "..." : String(hubCount)} tone={hubStatus} />
+          <Metric label={ko ? "로컬 싱글" : "Local singles"} value={String(localSingleCount)} />
+          <Metric label={ko ? "Hub 북마크" : "Hub bookmarks"} value={hubStatus === "loading" ? "..." : String(hubCount)} tone={hubStatus} />
           <Metric label={ko ? "저장된 조합" : "Saved groups"} value={String(groups.length)} />
         </div>
       </section>
@@ -342,9 +279,14 @@ export default function AgentGroupsPage() {
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder={ko ? "조직도, 로컬, Hub 검색" : "Search org, local, Hub"}
+              placeholder={ko ? "로컬 싱글, Hub 북마크 검색" : "Search local singles, Hub bookmarks"}
             />
           </label>
+          <div className="agent-groups-rule">
+            {ko
+              ? `멀티 에이전트 팀과 조직도 조각은 조합 후보에서 제외됩니다${blockedHubMultiCount > 0 ? ` · 멀티 북마크 ${blockedHubMultiCount}개 제외` : ""}.`
+              : `Multi-agent teams and org fragments are excluded${blockedHubMultiCount > 0 ? ` · ${blockedHubMultiCount} multi bookmark(s) hidden` : ""}.`}
+          </div>
           <div className="agent-source-list">
             {sourceItems.map((item) => (
               <button
@@ -432,7 +374,7 @@ export default function AgentGroupsPage() {
             {draftMembers.length === 0 ? (
               <div className="drop-empty">
                 <IconPlus size={18} />
-                <strong>{ko ? "여기에 에이전트를 놓기" : "Drop agents here"}</strong>
+                <strong>{ko ? "싱글 에이전트를 여기에 놓기" : "Drop single agents here"}</strong>
               </div>
             ) : (
               <div className="draft-member-grid">
@@ -444,6 +386,9 @@ export default function AgentGroupsPage() {
                       <div>
                         <strong>{pickName(snapshot, locale)}</strong>
                         <small>{snapshot.routeLabel || pickTagline(snapshot, locale)}</small>
+                        <span className="member-kind" data-entity-kind={memberEntityClass(snapshot)}>
+                          {entityClassLabel(memberEntityClass(snapshot), locale)}
+                        </span>
                       </div>
                       <button type="button" className="icon-btn" onClick={() => removeDraftMember(member.id)} title={ko ? "제거" : "Remove"}>
                         <IconClose size={14} />
@@ -497,6 +442,9 @@ export default function AgentGroupsPage() {
                         <div>
                           <strong>{pickName(display, locale)}</strong>
                           <small>{member.status === "ok" ? display.routeLabel || pickTagline(display, locale) : warningLabel(member.warnings, ko)}</small>
+                          <span className="member-kind" data-entity-kind={memberEntityClass(display)}>
+                            {entityClassLabel(memberEntityClass(display), locale)}
+                          </span>
                         </div>
                         <button type="button" className="icon-btn" onClick={() => void removeGroupMember(group.id, member.id)} title={ko ? "이 에이전트만 삭제" : "Remove this agent"}>
                           <IconClose size={13} />
@@ -528,21 +476,15 @@ export default function AgentGroupsPage() {
 }
 
 function makeMember(input: {
-  source: "installed" | "firm-node";
+  source: "installed";
   agent: InstalledAgent;
   routeLabel: string;
-  firm?: InstalledFirm;
-  node?: ResolvedNode;
 }): AgentGroupMember {
   return {
     id: crypto.randomUUID(),
     source: input.source,
     agentId: input.agent.id,
     agentSlug: input.agent.slug,
-    firmId: input.firm?.id,
-    firmSlug: input.firm?.slug,
-    nodeId: input.node?.id,
-    role: input.node?.role,
     snapshot: {
       name: input.agent.name,
       nameEn: input.agent.nameEn,
@@ -576,11 +518,18 @@ function pickTagline(value: { tagline?: string; taglineEn?: string }, locale: "k
 }
 
 function warningLabel(warnings: string[], ko: boolean) {
+  if (warnings.includes("unsupported_multi")) return ko ? "멀티/부분 조직은 조합 불가" : "Multi/org fragment unsupported";
   if (warnings.includes("hub_missing")) return ko ? "Hub에서 찾을 수 없음" : "Missing from Hub";
   if (warnings.includes("route_changed")) return ko ? "조직도 위치 변경됨" : "Org route changed";
   if (warnings.includes("route_missing")) return ko ? "조직도 위치 없음" : "Org route missing";
   if (warnings.includes("agent_missing")) return ko ? "설치 에이전트 없음" : "Installed agent missing";
   return ko ? "확인 필요" : "Needs review";
+}
+
+function memberEntityClass(snapshot: AgentGroupMemberSnapshot): "single" | "multi" | "plugin" {
+  if (snapshot.entityKind === "plugin") return "plugin";
+  if (snapshot.entityKind === "team") return "multi";
+  return "single";
 }
 
 function Metric({ label, value, tone }: { label: string; value: string; tone?: string }) {
@@ -724,6 +673,12 @@ function AgentGroupsStyles() {
         font: inherit;
         min-width: 0;
       }
+      .agent-groups-rule {
+        margin: -2px 12px 10px;
+        color: var(--muted-deep);
+        font-size: 11.5px;
+        line-height: 1.45;
+      }
       .agent-source-list,
       .saved-groups-list {
         flex: 1;
@@ -791,6 +746,27 @@ function AgentGroupsStyles() {
       .agent-source-card[data-kind="hub"] .source-badge {
         background: var(--accent-soft);
         color: var(--accent-strong);
+      }
+      .member-kind {
+        width: fit-content;
+        margin-top: 2px;
+        border-radius: 999px;
+        padding: 2px 7px;
+        font-size: 10px;
+        font-weight: 850;
+        line-height: 1.2;
+      }
+      .member-kind[data-entity-kind="single"] {
+        background: color-mix(in oklch, var(--green) 42%, var(--paper));
+        color: var(--green-deep);
+      }
+      .member-kind[data-entity-kind="multi"] {
+        background: color-mix(in oklch, var(--accent-soft) 72%, var(--paper));
+        color: var(--accent-strong);
+      }
+      .member-kind[data-entity-kind="plugin"] {
+        background: var(--peach-soft);
+        color: var(--amber-deep);
       }
       .agent-groups-builder {
         padding: 16px;
