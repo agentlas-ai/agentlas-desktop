@@ -534,6 +534,9 @@ export interface FilmProduction {
   shots: ShotSpec[];
   /** Step 04에서 실제 이미지 엔진으로 저장한 첫 프레임들. */
   keyframeAssets?: OberonKeyframeAsset[];
+  /** 마스터 시트(캐릭터/제품 정체성 락)·콘티 시트(전체 흐름 락) 이미지들.
+   *  id 규약: 캐릭터/제품 시트 = reference id, 전체 콘티 = "storyboard_overview". */
+  sheetAssets?: OberonKeyframeAsset[];
   /** 생성된 테이크들 (생성 큐 진행에 따라 채워짐). */
   takes: Take[];
   edl: EditDecision[];

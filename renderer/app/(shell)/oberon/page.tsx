@@ -11,6 +11,8 @@ import {
   INITIAL_STEP_STATE,
   buildEdl,
   buildTitleSpec,
+  cameraPhrase,
+  composeKeyframePrompt,
   defaultModelSettings,
   loadProduction,
   planProduction,
@@ -29,6 +31,11 @@ import {
   type Take,
   type OberonStudio,
 } from "@/lib/oberon";
+import {
+  buildMasterSheetV2Prompt,
+  buildStoryboardOverviewPrompt,
+  type OberonStoryboardCell,
+} from "@shared/oberon-sheets";
 import {
   clearOberonBackgroundJobsForProduction,
   failOberonBackgroundJob,
@@ -61,12 +68,15 @@ import type {
   OberonKeyframeRequest,
   OberonAnimateJob,
   OberonAnimateKeyStatus,
+  OberonAnimateProvider,
   OberonAnimateRequest,
   OberonMotionAdJob,
   OberonMotionAdRequest,
   OberonPlanResult,
   OberonRenderJob,
   OberonRenderRequest,
+  OberonSheetItemInput,
+  OberonSheetRequest,
 } from "@/lib/types";
 
 export default function OberonPage() {
@@ -90,6 +100,9 @@ export default function OberonPage() {
   const [kfDone, setKfDone] = useState(false);
   const [keyframeJob, setKeyframeJob] = useState<OberonKeyframeJob | null>(null);
   const keyframePoll = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 마스터 시트/콘티 시트 생성 (키프레임 잡 인프라 재사용)
+  const [sheetGenerating, setSheetGenerating] = useState(false);
+  const sheetPoll = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // 실제 영상 렌더
   const [videoMode, setVideoMode] = useState<"veo" | "motion_ad">("veo");
@@ -104,24 +117,70 @@ export default function OberonPage() {
   const [animateJob, setAnimateJob] = useState<OberonAnimateJob | null>(null);
   const animatePoll = useRef<ReturnType<typeof setInterval> | null>(null);
   const [animateKey, setAnimateKey] = useState<OberonAnimateKeyStatus | null>(null);
+  // 글로벌 멀티모달 설정의 영상 provider(예: google-veo). 애니메이션 스튜디오는
+  // 이 설정을 존중해야 한다 — 키 존재 여부로만 Runway를 고르면 Veo 사용자가 막힌다.
+  const [videoProviderSetting, setVideoProviderSetting] = useState<string>("");
   const [backgroundJobs, setBackgroundJobs] = useState<OberonBackgroundJob[]>([]);
   const attachedBackgroundJobs = useRef({ keyframe: "", render: "", motion: "", animate: "" });
 
   useEffect(() => () => {
     if (keyframePoll.current) clearInterval(keyframePoll.current);
+    if (sheetPoll.current) clearInterval(sheetPoll.current);
     if (renderPoll.current) clearInterval(renderPoll.current);
     if (motionPoll.current) clearInterval(motionPoll.current);
     if (animatePoll.current) clearInterval(animatePoll.current);
   }, []);
 
-  // 애니메이션 스튜디오 진입 시 i2v BYOK 키 상태 조회.
+  // 애니메이션 스튜디오 진입 시 i2v BYOK 키 상태 + 영상 provider 설정 조회.
   useEffect(() => {
     if (studio !== "animation") return;
-    void ipc()?.oberon
+    const bridge = ipc();
+    void bridge?.oberon
       .animateKeyStatus()
       .then((s) => setAnimateKey(s))
-      .catch(() => setAnimateKey({ runway: false, luma: false }));
+      .catch(() => setAnimateKey({ runway: false, luma: false, veo: false, seedance: false, kling: false }));
+    void bridge?.multimodal
+      ?.getSettings()
+      .then((s) => setVideoProviderSetting(s?.videoProvider ?? ""))
+      .catch(() => setVideoProviderSetting(""));
   }, [studio]);
+
+  // 애니메이션 스튜디오 i2v provider 확정 — "무조건 Veo"가 아니라 **실제 연결/키 있는**
+  // 멀티모달 영상 엔진을 연다. 우선순위:
+  //  1) 사용자가 명시 선택한 provider가 animate 지원(veo/runway/luma)이고 준비됐으면 그대로.
+  //  2) 아니면 실제 준비된 것 중 멀티모달 영상 사다리 순서(veo→runway→luma)로 첫 ready.
+  //  3) 아무것도 준비 안 됨: 의도(또는 사다리 머리)로 두고 백엔드가 명확한 키 안내 에러.
+  const resolveAnimateProvider = useCallback((): OberonAnimateProvider => {
+    // 멀티모달 영상 provider id → animate 지원 provider. 지원 밖(replicate 등)은 null.
+    const v = (videoProviderSetting || "").toLowerCase();
+    const wanted: OberonAnimateProvider | null =
+      v.includes("veo") || v.includes("google")
+        ? "veo"
+        : v.includes("kling")
+          ? "kling"
+          : v.includes("seedance")
+            ? "seedance"
+            : v.includes("luma")
+              ? "luma"
+              : v.includes("runway")
+                ? "runway"
+                : null;
+    const ready: Record<OberonAnimateProvider, boolean> = {
+      veo: Boolean(animateKey?.veo),
+      kling: Boolean(animateKey?.kling),
+      seedance: Boolean(animateKey?.seedance),
+      runway: Boolean(animateKey?.runway),
+      luma: Boolean(animateKey?.luma),
+    };
+    if (wanted && ready[wanted]) return wanted; // 명시 선택이 실제 준비됨 → 존중
+    // 사다리 우선순위(멀티모달 video ladder)대로 실제 준비된 엔진 채택.
+    if (ready.veo) return "veo";
+    if (ready.kling) return "kling";
+    if (ready.seedance) return "seedance";
+    if (ready.runway) return "runway";
+    if (ready.luma) return "luma";
+    return wanted ?? "veo"; // 미준비 — 백엔드가 어떤 키를 넣어야 하는지 안내
+  }, [videoProviderSetting, animateKey]);
 
   const isDone = (id: OberonStepId) => stepState[id] === "done";
 
@@ -453,10 +512,18 @@ export default function OberonPage() {
   const materializeKeyframeJob = useCallback((job: OberonKeyframeJob) => {
     setProduction((p) => {
       if (!p) return p;
-      const byShot = new Map(job.assets.map((asset) => [asset.shotId, asset]));
+      // START/END 체이닝 — 같은 shotId에 first_frame과 last_frame 자산이 함께 올 수 있다.
+      const firstByShot = new Map(job.assets.filter((a) => a.kind !== "last_frame").map((asset) => [asset.shotId, asset]));
+      const lastByShot = new Map(job.assets.filter((a) => a.kind === "last_frame").map((asset) => [asset.shotId, asset]));
       const shots = p.shots.map((shot) => {
-        const asset = byShot.get(shot.shotId);
-        return asset ? { ...shot, firstFrameAssetId: asset.id } : shot;
+        const first = firstByShot.get(shot.shotId);
+        const last = lastByShot.get(shot.shotId);
+        if (!first && !last) return shot;
+        return {
+          ...shot,
+          firstFrameAssetId: first ? first.id : shot.firstFrameAssetId,
+          lastFrameAssetId: last ? last.id : shot.lastFrameAssetId,
+        };
       });
       const next: FilmProduction = {
         ...p,
@@ -522,11 +589,11 @@ export default function OberonPage() {
       return;
     }
     const keyframeProvider = model.imageProvider === "google-image" ? "google-imagen" : "codex-imagegen-cli";
-    const request: OberonKeyframeRequest = {
-      productionId: production.id,
-      title: production.brief.title,
-      aspectRatio: production.brief.aspect,
-      shots: production.shots.map((shot) => ({
+    // START/END 체이닝 — 다른 샷이 이 샷의 END 프레임에서 이어받는 샷(체인 소스)은
+    // first에 더해 last 프레임도 생성한다 (Veo lastFrame 보간 + 다음 샷 first 소스).
+    const chainSources = new Set(production.shots.map((s) => s.chainFromShotId).filter(Boolean) as string[]);
+    const shotInputs = production.shots.flatMap((shot) => {
+      const base = {
         shotId: shot.shotId,
         index: shot.index,
         aspectRatio: production.brief.aspect,
@@ -534,8 +601,31 @@ export default function OberonPage() {
         negativePrompt: shot.negativePrompt,
         cameraSize: shot.camera.size,
         continuityRefs: shot.continuityRefs,
-      })),
-      maxShots: production.shots.length,
+      };
+      if (!chainSources.has(shot.shotId)) return [base];
+      const refs = production.bible.references.filter((r) => shot.continuityRefs.includes(r.id));
+      return [
+        base,
+        {
+          ...base,
+          frameRole: "last" as const,
+          prompt: composeKeyframePrompt({
+            which: "last",
+            shotAction: shot.action,
+            camera: shot.camera,
+            refs,
+            bible: production.bible,
+            aspect: production.brief.aspect,
+          }),
+        },
+      ];
+    });
+    const request: OberonKeyframeRequest = {
+      productionId: production.id,
+      title: production.brief.title,
+      aspectRatio: production.brief.aspect,
+      shots: shotInputs,
+      maxShots: shotInputs.length,
       provider: keyframeProvider,
       model: keyframeProvider === "google-imagen" ? "imagen-4.0-generate-001" : "image_gen.imagegen",
       imageSize: "1K",
@@ -565,6 +655,125 @@ export default function OberonPage() {
       });
   }, [locale, model.imageProvider, pollKeyframeJob, production]);
 
+  // 04b 마스터 시트/콘티 시트 — 정체성과 흐름을 이미지로 잠근다 (키프레임 잡 인프라 재사용).
+  const pollSheetJob = useCallback((jobId: string) => {
+    if (sheetPoll.current) clearInterval(sheetPoll.current);
+    sheetPoll.current = setInterval(() => {
+      (async () => {
+        const job = await ipc()?.oberon.getKeyframeJob(jobId);
+        if (!job) return;
+        trackOberonLiveJob("keyframe", job);
+        if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
+          if (sheetPoll.current) clearInterval(sheetPoll.current);
+          sheetPoll.current = null;
+          setSheetGenerating(false);
+          if (job.assets.length > 0) {
+            setProduction((p) => {
+              if (!p) return p;
+              // 같은 시트 id는 새 생성으로 교체, 나머지는 유지.
+              const incoming = new Set(job.assets.map((a) => a.shotId));
+              const kept = (p.sheetAssets ?? []).filter((a) => !incoming.has(a.shotId));
+              const next: FilmProduction = { ...p, sheetAssets: [...kept, ...job.assets] };
+              saveProduction(next);
+              return next;
+            });
+          }
+        }
+      })().catch(() => {
+        if (sheetPoll.current) clearInterval(sheetPoll.current);
+        sheetPoll.current = null;
+        setSheetGenerating(false);
+      });
+    }, 1200);
+  }, []);
+
+  const startSheets = useCallback(
+    (scope: "master" | "storyboard") => {
+      if (!production) return;
+      const bridge = ipc();
+      if (!bridge?.oberon?.startSheets) return;
+      const sheets: OberonSheetItemInput[] = [];
+      if (scope === "master") {
+        // 캐릭터 마스터 시트 V2 — 정면·3/4·측면·전신·표정 클린 그리드 (얼굴 일관성 락).
+        const characters = production.bible.references.filter((r) => r.kind === "character");
+        characters.forEach((r, i) => {
+          const briefChar = production.brief.characters[i];
+          sheets.push({
+            id: r.id,
+            kind: "master_sheet_v2",
+            prompt: buildMasterSheetV2Prompt({
+              mode: "character",
+              name: r.name,
+              description: briefChar ? `${briefChar.role}. ${briefChar.description}` : r.lockedTraits.join(", ") || r.name,
+              vibe: production.bible.visualDirection,
+            }),
+          });
+        });
+        // 히어로 제품 시트 — 360 + 디테일 (제품 형태·라벨 락).
+        const product = production.bible.references.find((r) => r.kind === "prop" && r.id === "prod_01");
+        if (product) {
+          sheets.push({
+            id: product.id,
+            kind: "master_sheet_v2",
+            prompt: buildMasterSheetV2Prompt({
+              mode: "product",
+              name: product.name,
+              description: product.lockedTraits.join(", ") || product.name,
+              vibe: production.bible.visualDirection,
+            }),
+          });
+        }
+      } else {
+        // 전체 콘티 한 장 — 컷당 ACTION/CAMERA/DIALOGUE 3줄 그리드 (흐름 락 + 승인 게이트 자료).
+        const cells: OberonStoryboardCell[] = production.shots.slice(0, 16).map((shot, i) => ({
+          index: i + 1,
+          action: shot.action,
+          camera: cameraPhrase(shot.camera),
+          dialogue: shot.dialogue,
+        }));
+        if (cells.length) {
+          const lockedCharacter = production.bible.references
+            .filter((r) => r.kind === "character")
+            .map((r) => `${r.name}: ${r.lockedTraits.slice(0, 3).join(", ")}`)
+            .join(" · ");
+          sheets.push({
+            id: "storyboard_overview",
+            kind: "storyboard_overview",
+            prompt: buildStoryboardOverviewPrompt({
+              title: production.brief.title,
+              brand: production.brief.brandOrProduct,
+              runtimeSec: production.brief.durationSec,
+              cells,
+              lockedCharacter: lockedCharacter || undefined,
+              lockedProduct: production.brief.brandOrProduct,
+              world: production.brief.setting,
+              artStyle: production.bible.visualDirection,
+            }),
+          });
+        }
+      }
+      if (!sheets.length) return;
+      const keyframeProvider = model.imageProvider === "google-image" ? "google-imagen" : "codex-imagegen-cli";
+      const request: OberonSheetRequest = {
+        productionId: production.id,
+        title: production.brief.title,
+        sheets,
+        provider: keyframeProvider,
+        model: keyframeProvider === "google-imagen" ? "imagen-4.0-generate-001" : "image_gen.imagegen",
+        imageSize: "2K",
+      };
+      setSheetGenerating(true);
+      void bridge.oberon
+        .startSheets(request)
+        .then((job) => {
+          trackOberonLiveJob("keyframe", job);
+          pollSheetJob(job.id);
+        })
+        .catch(() => setSheetGenerating(false));
+    },
+    [model.imageProvider, pollSheetJob, production],
+  );
+
   // 05 실제 영상 렌더 — Electron main이 Google Veo 호출과 파일 저장을 담당한다.
   const startVideo = useCallback(() => {
     if (!production) return;
@@ -581,27 +790,33 @@ export default function OberonPage() {
       setVideoGenerating(false);
       return;
     }
-    const keyframesByShot = new Map((production.keyframeAssets ?? []).map((asset) => [asset.shotId, asset]));
+    // START/END 체이닝 — first_frame과 last_frame 자산을 분리 매핑.
+    const kfAssets = production.keyframeAssets ?? [];
+    const firstByShot = new Map(kfAssets.filter((a) => a.kind !== "last_frame").map((asset) => [asset.shotId, asset]));
+    const lastByShot = new Map(kfAssets.filter((a) => a.kind === "last_frame").map((asset) => [asset.shotId, asset]));
     const request: OberonRenderRequest = {
       productionId: production.id,
       title: production.brief.title,
       aspectRatio: production.brief.aspect,
-      shots: production.shots.map((shot) => ({
-        shotId: shot.shotId,
-        index: shot.index,
-        durationSec: shot.durationSec,
-        aspectRatio: production.brief.aspect,
-        prompt: shot.generationPrompt,
-        negativePrompt: shot.negativePrompt,
-        providerId: shot.providerId,
-        providerMode: shot.providerMode,
-        firstFrame: keyframesByShot.get(shot.shotId)
-          ? {
-              absPath: keyframesByShot.get(shot.shotId)!.absPath,
-              mimeType: keyframesByShot.get(shot.shotId)!.mime,
-            }
-          : undefined,
-      })),
+      shots: production.shots.map((shot) => {
+        // 체인 샷: 자기 first가 없으면 직전 샷의 END 프레임을 첫 프레임으로 이어받는다(픽셀 단위 연속).
+        const chainedFirst = shot.chainFromShotId ? lastByShot.get(shot.chainFromShotId) : undefined;
+        const first = firstByShot.get(shot.shotId) ?? chainedFirst;
+        const last = lastByShot.get(shot.shotId);
+        return {
+          shotId: shot.shotId,
+          index: shot.index,
+          durationSec: shot.durationSec,
+          aspectRatio: production.brief.aspect,
+          prompt: shot.generationPrompt,
+          negativePrompt: shot.negativePrompt,
+          providerId: shot.providerId,
+          providerMode: shot.providerMode,
+          firstFrame: first ? { absPath: first.absPath, mimeType: first.mime } : undefined,
+          lastFrame: last ? { absPath: last.absPath, mimeType: last.mime } : undefined,
+          chainedFromShotId: shot.chainFromShotId && chainedFirst ? shot.chainFromShotId : undefined,
+        };
+      }),
       maxShots: 3,
       takesPerShot: 1,
       provider: "google-enterprise-veo",
@@ -853,7 +1068,7 @@ export default function OberonPage() {
         id: `local-error-${now}`,
         productionId: production.id,
         title: production.brief.title,
-        provider: animateKey?.runway ? "runway" : "luma",
+        provider: resolveAnimateProvider(),
         model: "",
         status: "failed",
         outputDir: "",
@@ -878,7 +1093,7 @@ export default function OberonPage() {
     const prompt =
       [shot?.generationPrompt, production.brief.logline, production.brief.synopsis].filter(Boolean).join(" ").slice(0, 400) ||
       production.brief.title;
-    const provider = animateKey?.runway ? "runway" : "luma";
+    const provider = resolveAnimateProvider();
     const request: OberonAnimateRequest = {
       productionId: production.id,
       title: production.brief.title || "Oberon Animation",
@@ -1042,7 +1257,14 @@ export default function OberonPage() {
       case "storyboard":
         return (
           <StepFrame>
-            <ShotBoard production={production} editable={!isDone("storyboard")} onUpdateShots={updateShots} />
+            <ShotBoard
+              production={production}
+              editable={!isDone("storyboard")}
+              onUpdateShots={updateShots}
+              sheetGenerating={sheetGenerating}
+              storyboardSheet={(production.sheetAssets ?? []).find((a) => a.shotId === "storyboard_overview")}
+              onGenerateSheet={() => startSheets("storyboard")}
+            />
             <ApproveBar
               label={
                 locale === "ko"
@@ -1059,7 +1281,16 @@ export default function OberonPage() {
           </StepFrame>
         );
       case "assets":
-        return <AssetBible production={production} model={model} approved={isDone("assets")} onApprove={approveAssets} />;
+        return (
+          <AssetBible
+            production={production}
+            model={model}
+            approved={isDone("assets")}
+            onApprove={approveAssets}
+            sheetGenerating={sheetGenerating}
+            onGenerateSheets={() => startSheets("master")}
+          />
+        );
       case "keyframe":
         return (
           <KeyframeStep

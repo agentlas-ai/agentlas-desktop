@@ -94,6 +94,14 @@ export const VIDEO_NEGATIVE_TEMPORAL = [
   "temporal artifacts",
   "object permanence failure",
   "crossed eye-line",
+  // 연속성 캐논 — 시간·조명 드리프트와 의상 플리커 (세계가 샷 중간에 표류하는 실패 모드).
+  "sudden day-to-night jump",
+  "inconsistent shadow direction",
+  "shadow direction flip",
+  "wardrobe color change mid-shot",
+  "fabric texture shift",
+  "accessory appearing or disappearing",
+  "waxy complexion",
 ];
 
 /** 영상 생성 기본 네거티브 (이미지 + 템포럴). */
@@ -218,7 +226,9 @@ export function composeReferencePrompt(args: {
   const { kind, name, description, tone, visualDirection } = args;
   const mood = moodPhrase(tone);
   if (kind === "character") {
-    return `Character reference sheet for ${name}: ${description}. Three views (front, 3/4, profile), neutral studio lighting, consistent facial features and wardrobe, full body and close-up insets. ${mood}. ${visualDirection}. Photorealistic, identity-locked, 2K detail.`;
+    // 마스터 시트 V2 규격 — 클린 그리드(정면·3/4·측면·전신·표정), 패널 ≤6,
+    // 이미지 안 텍스트는 패널 헤더만. 얼굴/의상 일관성이 시트의 존재 이유.
+    return `Photoreal CHARACTER MASTER SHEET for ${name}: ${description}. Clean editorial multi-panel grid on a soft neutral background — 6 panels or fewer: 정면(FRONT) large portrait, 3/4 three-quarter view, 측면(SIDE) profile, 전신(FULL BODY) in the locked main outfit head to shoe, 표정(EXPRESSION) row of 2-3 head close-ups. Identical face, hair, outfit and lighting in EVERY panel. ONLY panel header labels printed (Korean + English in parentheses) — no other in-image text, no hex codes, no long captions. ${mood}. ${visualDirection}. Natural soft light, identity-locked, NO Japanese text, NO watermark, 2K detail.`;
   }
   if (kind === "location") {
     return `Establishing reference of ${name}: ${description}. Wide empty plate plus key angles, consistent architecture and props, ${mood}. ${visualDirection}. Photorealistic depth, accurate spatial layout.`;

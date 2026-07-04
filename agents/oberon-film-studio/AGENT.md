@@ -170,3 +170,38 @@ on-screen text** (titles/subtitles burned in post) to avoid distorted text artif
   shell — a friendly wrapper that replaces the raw `electron <script> + env soup + hand-written
   JSON`. Manifest authoring follows the "assistant = orchestrator" scheme: a human or
   `agentlas run oberon-film-studio "<brief>"` fills the shot prompts.
+
+## 10. Continuity-First Sheet Workflow (2026-07-03 — reference-kit driven)
+
+Short-form AI video fails when **the world drifts** (wardrobe color changes, golden hour jumps
+to night, the location morphs), not when individual shots look bad. The pipeline therefore locks
+identity → flow → frame boundaries **as image artefacts** before any expensive video call:
+
+1. **Master sheet (identity lock, Step 03).** Per character/hero product, generate ONE clean
+   multi-panel sheet — 정면(FRONT) · 3/4 · 측면(SIDE) · 전신(FULL BODY) · 표정(EXPRESSION), ≤6
+   panels, in-image text = panel headers only (no hex, no captions — text-dense sheets glitch).
+   Same face/hair/outfit/lighting in every panel. `shared/oberon-sheets.ts
+   buildMasterSheetV2Prompt` (a detail-rich V1 "bible" variant exists for worldbuilding:
+   `buildMasterSheetV1Prompt` — vertical magazine, wardrobe multi-set + HEX palette).
+2. **Storyboard overview sheet (flow lock, Step 02).** The WHOLE spot as one grid sheet — a cut
+   per cell (①②③…), 3 metadata lines per cell (`ACTION` Korean / `CAMERA` English / `DIALOGUE`
+   Korean), cream background, final cell = product + slogan key visual for commercials. Runtime
+   → cut count: ≤8s=6, ≤12s=9, 15s=12, ≥20s=16. `buildStoryboardOverviewPrompt`.
+3. **Cut breakdown (frame-boundary lock, hero cuts only).** One cut → S1–S6 shots, each row
+   specifying **START FRAME / END FRAME** + a unique camera (no adjacent angle repeats) + SFX,
+   dark-navy sheet. `buildCutBreakdownPrompt`. The START→END pairs become the keyframe chain.
+4. **START/END keyframe chaining (Step 04→05).** Chain-source shots render BOTH first and last
+   frame stills (`frameRole: "last"`); Veo receives `image` + `config.lastFrame` so the clip
+   ends pixel-exact where the next shot begins. A chained shot with no own first frame inherits
+   the prior shot's END frame (`chainedFromShotId` → prompt: "continues DIRECTLY from…").
+5. **Continuity negative canon (every render).** `mergeContinuityNegative` appends the drift
+   taxonomy to each shot's negative prompt: 시간·조명 드리프트 (day-to-night jump, shadow flip),
+   의상 플리커 (wardrobe color change mid-shot, accessory pop-in), AI 결함 (plastic skin, waxy
+   complexion), 얼굴 결함 (face morph, extra fingers).
+6. **Hook doctrine (planner).** First 1.5s = stinger (0–0.5s) → dissonance (0.5–1.5s) → payoff.
+   Commercials default to **NO BGM** (dialogue + ambient SFX only) and always end on the
+   product + slogan key visual.
+
+Sheet rules everywhere: Korean labels + English in parentheses, NO Japanese text, NO watermark,
+NO real brands. Sheets are generated through the keyframe engine (`oberon:startSheets` →
+keyframe job; assets carry `kind: master_sheet | storyboard_sheet`).

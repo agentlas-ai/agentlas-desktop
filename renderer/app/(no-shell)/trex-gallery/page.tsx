@@ -21,11 +21,11 @@ const FULL: DeckContent = {
   subtitle: "시장 규모 분석, 경쟁 구도 대응 및 단계별 상용화 로드맵",
   slides: [
     { role: "agenda", title: "시장 주도권 확보를 위한 네 가지 흐름", items: ["2,500억 배달 시장 기회 분석 — 규제 완화 이후 실수요가 열리는 구간을 짚는다", "대기업·스타트업 3파전 경쟁 구도 — 플랫폼·제조·통신 진영별 강점 비교", "규제 완화 맞춘 3단계 상용화 — 거점 검증에서 전국 확산까지의 로드맵", "초기 시장 안착 파트너십 구축 — 배달 플랫폼·지자체 제휴 우선순위"] },
-    { role: "metrics", title: "규제 완화와 인건비 상승이 수요를 밀어올린다", kpis: [{ value: "2,500억원", label: "2026년 국내 시장 규모" }, { value: "+150%", label: "전년 대비 서비스 도입률" }, { value: "1,800원", label: "건당 배달 비용 절감액" }], note: "인건비 대비 절감폭이 임계점을 넘었다 — 도입을 미룰수록 경쟁사에 단가 우위를 내준다.", img: "a delivery robot crossing a rainy Seoul crosswalk at dusk" },
-    { role: "comparison", title: "어느 세그먼트에 먼저 집중할 것인가", bars: [{ label: "대학·대단지", value: 82 }, { label: "도심 상권", value: 61 }, { label: "교외 지역", value: 39 }], note: "대학·대단지가 규제·수요·주행환경 3박자를 모두 갖춘 유일한 세그먼트다." },
-    { role: "structure", title: "3대 핵심 플레이어가 시장을 과점하고 있다", cards: [{ label: "플랫폼 대기업", text: "배달 앱 연동 및 대규모 주문 인프라 장악. 트래픽을 쥐고 있어 제휴 협상력이 가장 세다." }, { label: "로봇 전문 제조사", text: "자율주행 하드웨어 개발 및 솔루션 공급. 원가 절감의 열쇠를 쥔 축이다." }, { label: "통신·IT 기업", text: "5G 기반 실시간 관제 및 정밀 지도 제공. 안전 규제 대응의 필수 파트너다." }], note: "세 진영 중 두 곳 이상과 동시 제휴해야 교섭력이 생긴다 — 단독 진입은 원가·트래픽 양쪽에서 진다." },
-    { role: "process", title: "단계적 도입 시나리오로 운영 리스크 최소화", steps: [{ label: "1단계: 거점 검증", text: "규제 특구 내 시범 운영 및 데이터 확보. 사고율·완주율 기준선을 만든다." }, { label: "2단계: 제휴 확장", text: "배달 플랫폼 연동 및 서비스 커버리지 확대. 주문 밀도가 손익분기를 결정한다." }, { label: "3단계: 전국 상용화", text: "양산화를 통한 비용 절감 및 전면 개시. 대당 운영비를 절반으로 낮춘다." }], note: "각 단계의 관문 지표(사고율·주문밀도·대당비용)를 통과해야 다음 투자를 집행한다." },
-    { role: "highlight", title: "한 가지가 성패를 가른다", stat: { value: "76%", label: "규제 샌드박스 통과율" }, text: "규제 대응 속도가 시장 선점의 결정 변수다. 심사 리드타임을 아는 팀이 6개월을 번다.", img: "a small autonomous delivery robot waiting at a university campus gate in warm morning light" },
+    { role: "metrics", title: "규제 완화와 **인건비 상승**이 수요를 밀어올린다", src: "출처: 중소벤처기업부 창업실태조사, 2025", dek: "2026년 실외이동로봇 보도 통행 전면 허용 이후 첫 수요 사이클", kpis: [{ value: "2,500억원", label: "2026년 국내 시장 규모" }, { value: "+150%", label: "전년 대비 서비스 도입률" }, { value: "1,800원", label: "건당 배달 비용 절감액" }], note: "인건비 대비 절감폭이 임계점을 넘었다 — **도입을 미룰수록 경쟁사에 단가 우위**를 내준다.", img: "a delivery robot crossing a rainy Seoul crosswalk at dusk" },
+    { role: "comparison", title: "**대학·대단지**에 먼저 집중한다", src: "출처: 내부 스코어링 모델, 2026.01", dek: "규제·수요밀도·주행환경 3개 축 가중 평가(내부 스코어링)", bars: [{ label: "대학·대단지", value: 82 }, { label: "도심 상권", value: 61 }, { label: "교외 지역", value: 39 }], note: "대학·대단지가 규제·수요·주행환경 3박자를 모두 갖춘 유일한 세그먼트다." },
+    { role: "structure", title: "3대 핵심 플레이어가 시장을 **과점**하고 있다", dek: "상위 3개 진영이 배달 주문의 91%를 처리한다", cards: [{ label: "플랫폼 대기업", text: "배달 앱 연동 및 대규모 주문 인프라 장악. **트래픽을 쥐고 있어 제휴 협상력이 가장 세다.**" }, { label: "로봇 전문 제조사", text: "자율주행 하드웨어 개발 및 솔루션 공급. 원가 절감의 열쇠를 쥔 축이다." }, { label: "통신·IT 기업", text: "5G 기반 실시간 관제 및 정밀 지도 제공. 안전 규제 대응의 필수 파트너다." }], note: "세 진영 중 두 곳 이상과 동시 제휴해야 교섭력이 생긴다 — 단독 진입은 원가·트래픽 양쪽에서 진다." },
+    { role: "process", title: "단계적 도입 시나리오로 운영 리스크 최소화", dek: "각 단계는 관문 지표 통과 시에만 다음 투자를 집행", steps: [{ label: "1단계: 거점 검증", text: "규제 특구 내 시범 운영 및 데이터 확보. 사고율·완주율 기준선을 만든다." }, { label: "2단계: 제휴 확장", text: "배달 플랫폼 연동 및 서비스 커버리지 확대. 주문 밀도가 손익분기를 결정한다." }, { label: "3단계: 전국 상용화", text: "양산화를 통한 비용 절감 및 전면 개시. 대당 운영비를 절반으로 낮춘다." }], note: "각 단계의 관문 지표(사고율·주문밀도·대당비용)를 통과해야 다음 투자를 집행한다." },
+    { role: "highlight", title: "한 가지가 성패를 가른다", dek: "심사 리드타임 평균 4.2개월 — 준비팀은 6주로 단축", stat: { value: "76%", label: "규제 샌드박스 통과율" }, text: "규제 대응 속도가 시장 선점의 결정 변수다. 심사 리드타임을 아는 팀이 6개월을 번다.", img: "a small autonomous delivery robot waiting at a university campus gate in warm morning light" },
     { role: "statement", text: "결국 실행 속도가 시장의 승자를 결정한다", note: "완벽한 계획보다 검증된 거점 하나가 협상 테이블에서 더 세다.", img: "an empty pedestrian road stretching toward the horizon at dawn" },
   ],
 };
@@ -89,6 +89,14 @@ export default function TrexGalleryPage() {
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>③ 긴 텍스트 스트레스 — 클리핑/오버플로 임계(LLM 변동 대비)</h2>
       <Deck label="STRESS editorial  ·  9장 전체" content={STRESS} mode="editorial" />
       <Deck label="STRESS story 9:16  ·  표지·구조·과정" content={STRESS} mode="editorial" formatId="story" only={[0, 4, 5]} />
+      <Deck label="STRESS timeline · swiss · 4단계 긴 텍스트 + note(번호핀 겹침 회귀)" content={{ title: "타임라인 겹침 스트레스", subtitle: "4단계 × 2문장 + 하단 인사이트", slides: [
+        { role: "process", title: "4단계 로드맵으로 시장을 점유합니다", layout: "timeline", dek: "빌더 생태계에서 엔터프라이즈 매출로 넘어가는 18개월 계획", steps: [
+          { label: "빌더 확보", text: "글로벌 개발자 해커톤을 개최합니다. **초기 핵심 에이전트 1,000개** 확보가 목표입니다." },
+          { label: "에코시스템", text: "평가 및 평판 시스템을 도입합니다. 우수한 에이전트가 자연스럽게 상위에 노출되도록 유도합니다." },
+          { label: "비즈니스", text: "엔터프라이즈 전용 패키지를 출시합니다. 대기업의 기간계 시스템과 연동하는 솔루션을 제공합니다." },
+          { label: "스케일업", text: "글로벌 솔루션 파트너십을 체결합니다. 전 세계 엔터프라이즈 시장으로 판매망을 동시 다발적으로 확장합니다." },
+        ], note: "개발자 생태계 구축을 시작으로 엔터프라이즈 매출처를 다변화하여 시장 리더십을 굳히겠습니다." },
+      ] }} mode="editorial" styleId="swiss" only={[1]} />
 
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>④ 개수 적응형 — KPI/카드 2개·4개(LLM은 2~4개 반환)</h2>
       <Deck label="KPI 2개 / 카드 2개" content={{ title: "개수 적응형 검증 — 두 항목", subtitle: "2개일 때 가운데 분배되는지", slides: [
@@ -96,9 +104,9 @@ export default function TrexGalleryPage() {
         { role: "structure", title: "두 축으로 나뉜다", cards: [{ label: "첫 번째 축", text: "이 축이 다루는 범위와 핵심 역할에 대한 설명" }, { label: "두 번째 축", text: "다른 축이 담당하는 영역과 그 중요성 설명" }] },
       ] }} mode="editorial" only={[1, 2]} />
       <Deck label="KPI 4개 / 카드 4개" content={{ title: "개수 적응형 검증 — 네 항목", subtitle: "4개일 때 유실 없이 4열로", slides: [
-        { role: "metrics", title: "네 지표를 한눈에", kpis: [{ value: "1,240억", label: "시장 규모" }, { value: "+38%", label: "성장률" }, { value: "6.2배", label: "ROI" }, { value: "94점", label: "만족도" }] },
-        { role: "structure", title: "네 갈래 구조", cards: [{ label: "첫째 축", text: "첫 번째 영역 설명 텍스트" }, { label: "둘째 축", text: "두 번째 영역 설명 텍스트" }, { label: "셋째 축", text: "세 번째 영역 설명 텍스트" }, { label: "넷째 축", text: "네 번째 영역 설명 텍스트" }] },
-      ] }} mode="editorial" only={[1, 2]} />
+        { role: "metrics", title: "네 지표를 한눈에", layout: "row", dek: "4분기 연속 개선 — 시장·성장·수익·품질 전 축 상승", kpis: [{ value: "1,240억", label: "시장 규모" }, { value: "+38%", label: "성장률" }, { value: "6.2배", label: "ROI" }, { value: "94점", label: "만족도" }] },
+        { role: "structure", title: "네 갈래 구조", layout: "columns", dek: "네 축이 서로 다른 KPI를 책임진다", cards: [{ label: "첫째 축", text: "첫 번째 영역 설명 텍스트" }, { label: "둘째 축", text: "두 번째 영역 설명 텍스트" }, { label: "셋째 축", text: "세 번째 영역 설명 텍스트" }, { label: "넷째 축", text: "네 번째 영역 설명 텍스트" }] },
+      ] }} mode="editorial" styleId="vignelli" only={[1, 2]} />
 
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>⑤ 장수 극단 — 결정적 생성기(스캐폴드)</h2>
       <Deck label="count=3 (MIN)  ·  deterministic" deck={generateDeck("최소 장수 테스트 — 핵심만", "editorial", 3)} />
@@ -106,8 +114,44 @@ export default function TrexGalleryPage() {
 
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>⑥ Style DNA — 6개 디자인 유파 × 같은 콘텐츠(표지·목차·지표·구조·핵심·클로징)</h2>
       {STYLE_IDS.map((sid) => (
-        <Deck key={sid} label={`style=${sid} (${STYLES[sid].nameKo})  ·  ${STYLES[sid].hintKo}`} content={FULL} mode="editorial" styleId={sid} only={[0, 1, 2, 4, 5, 7]} />
+        <Deck key={sid} label={`style=${sid} (${STYLES[sid].nameKo})  ·  ${STYLES[sid].hintKo}`} content={FULL} mode="editorial" styleId={sid} only={[0, 1, 2, 3, 4, 5, 6, 7]} />
       ))}
+      <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>⑥-b 컨설팅 고밀도 2패널(실적→성과) — 중기부 업무보고 밀도</h2>
+      <Deck label="consulting · twopanel · 실적/성과 각 4행 + 화살표 + 인사이트" content={{ title: "규제 완화로 **초기 수요**가 실제로 열렸다", slides: [
+        { role: "structure", layout: "twopanel", title: "규제 완화로 **초기 수요**가 실제로 열렸다", dek: "2026년 실외이동로봇 보도 통행 전면 허용 이후 6개월", src: "출처: 내부 파일럿 데이터, 2026.06", panels: [
+          { title: "실적", rows: [
+            { label: "규제", text: "보도 통행 **전면 허용** 시행", sub: "실외이동로봇법 개정, 2026.01" },
+            { label: "파일럿", text: "규제 특구 3곳에서 **누적 12만 건** 배달 수행", sub: "대학·대단지 중심, 완주율 97.4%" },
+            { label: "제휴", text: "배달 플랫폼 2사와 **API 연동** 완료", sub: "주문 인입 자동 라우팅" },
+            { label: "단가", text: "건당 운영비 **1,800원 절감** 달성", sub: "인건비 대비 임계점 돌파" },
+          ] },
+          { title: "성과", rows: [
+            { label: "수요", text: "월 주문량 **전월비 +38%** 성장 지속", sub: "3개월 연속 두 자릿수" },
+            { label: "만족", text: "이용자 재사용률 **71%** 기록", sub: "N=2,400, 2026.05" },
+            { label: "안전", text: "사고율 **0.02%** 이하 유지", sub: "보험 손해율 업계 최저" },
+            { label: "확장", text: "다음 분기 **거점 5곳 추가** 확정", sub: "비수도권 3곳 포함" },
+          ] },
+        ], note: "규제·수요·안전 3개 관문을 모두 통과했다 — **전국 확산 투자를 집행할 근거**가 확보됐다." },
+      ] }} mode="editorial" styleId="consulting" />
+      <Deck label="consulting · twopanel STRESS · 5행 + 긴 문장 + 긴 부연(오버플로 방어 회귀)" content={{ title: "긴 문장에서도 패널이 넘치지 않아야 한다", slides: [
+        { role: "structure", layout: "twopanel", title: "긴 문장에서도 패널이 넘치지 않아야 한다", dek: "행 수가 많고 각 문장이 길어질 때의 오버플로 임계 검증", src: "출처: 스트레스 테스트 픽스처, 2026", panels: [
+          { title: "현황 — 다층 공급망의 구조적 취약성", rows: [
+            { label: "가시성", text: "다단계 공급망 전 구간에 걸친 실시간 데이터 연계가 부재하여 **예외 상황 감지가 지연**되고 있다", sub: "1~3차 협력사 데이터 연계율 34%에 불과, 나머지는 수기 취합 의존" },
+            { label: "재고정책", text: "수요예측 정확도가 낮아 안전재고를 과다 보유하면서도 **결품이 반복**되는 이중 손실 구조", sub: "평균 현금전환주기 127일로 운전자본 부담 과중" },
+            { label: "소싱", text: "핵심 부품의 단일 소싱 의존도가 높아 특정 지역 교란에 **전 라인이 멈추는 리스크**에 노출", sub: "상위 5개 부품 중 4개가 단일 공급사" },
+            { label: "거버넌스", text: "유사시 의사결정 권한과 에스컬레이션 경로가 사전에 정의되지 않아 **초기 대응이 느리다**", sub: "72시간 골든타임 내 대체계획 실행률 41%" },
+            { label: "가시성2", text: "협력사 재무건전성 모니터링 체계가 없어 **공급 중단을 선제적으로 예측하지 못한다**", sub: "최근 2년 공급 중단 사고 9건 전부 사후 인지" },
+          ] },
+          { title: "개선 — 18개월 회복탄력성 내재화", rows: [
+            { label: "진단", text: "핵심 품목의 다단계 공급망을 매핑하고 **리스크 익스포저를 정량화**하는 초기 6개월", sub: "데이터 연계 기반 우선 구축" },
+            { label: "이중화", text: "우선순위 품목부터 대체 소싱과 지역 이중화를 실행하고 **안전재고 정책을 재설계**", sub: "중기 6개월, 총소유비용 기준 판단" },
+            { label: "자동화", text: "시나리오 시뮬레이션을 상시화하고 **조기경보 자동화**와 협업 체계를 정착", sub: "후기 6개월, 디지털 트윈 활용" },
+            { label: "협업", text: "공급업체와 리스크 정보를 공유하고 **공동 대응 프로토콜**을 표준화한다", sub: "핵심 40개사 우선 적용" },
+            { label: "성과목표", text: "정시납품률을 회복하고 대체계획 실행 리드타임을 **72시간에서 24시간으로 단축**", sub: "18개월 후 KPI 목표" },
+          ] },
+        ], note: "가시성·유연성·거버넌스 3축을 동시에 강화해야 **불확실성 시대의 생존 역량**이 확보된다." },
+      ] }} mode="editorial" styleId="consulting" />
+
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>⑦ Style DNA × 방향 — 세로/정사각 회귀</h2>
       <Deck label="swiss · story 9:16" content={FULL} mode="editorial" styleId="swiss" formatId="story" only={[0, 2, 4, 7]} />
       <Deck label="didot · ig-square 1:1" content={FULL} mode="editorial" styleId="didot" formatId="ig-square" only={[0, 2, 4, 7]} />

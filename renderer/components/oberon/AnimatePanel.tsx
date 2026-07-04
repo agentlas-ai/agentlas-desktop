@@ -8,7 +8,26 @@ import type { FilmProduction } from "@/lib/oberon";
 import type { OberonAnimateFile, OberonAnimateJob, OberonAnimateKeyStatus } from "@/lib/types";
 import { useT } from "@/lib/i18n";
 import { Glyph } from "./icons";
-import { Card, GhostButton, Meter, PanelHead, PrimaryButton } from "./ui";
+import { Card, GhostButton, Meter, PanelHead, PrimaryButton, toLocalMediaSrc } from "./ui";
+
+const PROVIDER_LABELS: Record<string, string> = {
+  veo: "Google Veo",
+  kling: "Kling",
+  seedance: "Seedance",
+  runway: "Runway",
+  luma: "Luma",
+};
+
+// 실행 중이면 job.provider, 아니면 준비된 키 중 사다리 우선순위로 표시할 엔진.
+function providerLabel(jobProvider: string | undefined, keyStatus?: OberonAnimateKeyStatus | null): string {
+  if (jobProvider && PROVIDER_LABELS[jobProvider]) return PROVIDER_LABELS[jobProvider];
+  if (keyStatus?.veo) return PROVIDER_LABELS.veo;
+  if (keyStatus?.kling) return PROVIDER_LABELS.kling;
+  if (keyStatus?.seedance) return PROVIDER_LABELS.seedance;
+  if (keyStatus?.runway) return PROVIDER_LABELS.runway;
+  if (keyStatus?.luma) return PROVIDER_LABELS.luma;
+  return PROVIDER_LABELS.veo;
+}
 
 export function AnimatePanel({
   production,
@@ -33,7 +52,9 @@ export function AnimatePanel({
 }) {
   const { locale } = useT();
   const mp4 = (job?.files ?? []).find((f) => f.kind === "animation_mp4");
-  const hasKey = Boolean(keyStatus?.runway || keyStatus?.luma);
+  const hasKey = Boolean(
+    keyStatus?.runway || keyStatus?.luma || keyStatus?.veo || keyStatus?.seedance || keyStatus?.kling,
+  );
   const [keyDraft, setKeyDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const statusTone =
@@ -140,7 +161,7 @@ export function AnimatePanel({
         <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, 1.25fr) minmax(260px, 0.85fr)", gap: 16, alignItems: "start" }}>
           <Card style={{ padding: 16 }}>
             {mp4 ? (
-              <video controls src={mp4.url} style={{ width: "100%", borderRadius: 10, background: "#111", aspectRatio: ratio, objectFit: "contain" }} />
+              <video controls src={toLocalMediaSrc(mp4.url)} style={{ width: "100%", borderRadius: 10, background: "#111", aspectRatio: ratio, objectFit: "contain" }} />
             ) : (
               <div style={{ aspectRatio: ratio, borderRadius: 10, background: "var(--ob-surface)", border: "1px solid var(--ob-edge)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--ob-muted)", fontSize: 13 }}>
                 {generating
@@ -162,7 +183,7 @@ export function AnimatePanel({
             </div>
             <Meter value={job?.progress.percent ?? 0} max={100} color={statusTone} />
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 16 }}>
-              <Metric label="provider" value={keyStatus?.runway ? "Runway" : "Luma"} />
+              <Metric label="provider" value={providerLabel(job?.provider, keyStatus)} />
               <Metric label={locale === "ko" ? "길이" : "Length"} value={`${clampLen(production.brief.durationSec)}s`} />
             </div>
             {job?.error && <div style={{ marginTop: 12, fontSize: 12, color: "var(--ob-danger)", lineHeight: 1.45 }}>{job.error}</div>}

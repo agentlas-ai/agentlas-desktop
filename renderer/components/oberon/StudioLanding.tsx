@@ -38,14 +38,24 @@ export function StudioLanding({ onPick }: { onPick: (studio: OberonStudio) => vo
               </span>
             </button>
           ))}
-        </div>
 
-        <Link href="/oberon-motion" style={motionLink}>
-          {locale === "ko"
-            ? "모션그래픽은 Oberon Motiongraphic Studio에서 열기"
-            : "Open motion graphics in Oberon Motiongraphic Studio"}{" "}
-          <Glyph name="chevron" size={12} />
-        </Link>
+          {/* 모션그래픽 — 애니메이션과 동등한 카드로 노출(별도 /oberon-motion 스튜디오). */}
+          <Link href="/oberon-motion" className="oberon-studio-card" style={{ ...card, textDecoration: "none" }}>
+            <span style={cardIcon}>
+              <Glyph name="layers" size={20} />
+            </span>
+            <span style={cardTagline}>{locale === "ko" ? "코드 렌더 · API 불필요" : "Code render · No API"}</span>
+            <span style={cardTitle}>{locale === "ko" ? "모션그래픽" : "Motion graphics"}</span>
+            <span style={cardBlurb}>
+              {locale === "ko"
+                ? "아이디어를 적고 렌더를 누르면 로컬에서 모션그래픽 광고 MP4를 만듭니다."
+                : "Describe an idea and render a motion-graphic ad MP4 locally."}
+            </span>
+            <span style={cardCta}>
+              {locale === "ko" ? "시작하기" : "Get started"} <Glyph name="chevron" size={12} />
+            </span>
+          </Link>
+        </div>
       </div>
 
       <style
@@ -175,20 +185,4 @@ const cardCta: CSSProperties = {
   fontSize: 13,
   fontWeight: 650,
   color: "var(--ob-accent-text)",
-};
-
-const motionLink: CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 5,
-  marginTop: 18,
-  minHeight: 34,
-  padding: "0 12px",
-  borderRadius: "var(--rd-r-sm, 10px)",
-  border: "1px solid var(--ob-edge)",
-  color: "var(--ob-accent-text)",
-  background: "var(--ob-paper)",
-  fontSize: 13,
-  fontWeight: 650,
-  textDecoration: "none",
 };

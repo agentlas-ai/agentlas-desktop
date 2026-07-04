@@ -19,6 +19,7 @@ import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
 import { getAgentGroup } from "../store/agent-groups";
 import { getAgentConcurrency } from "../store/concurrency";
+import { tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -183,6 +184,13 @@ export async function runGraph(
     } catch {
       /* 영속화 실패는 무시(라이브 emit이 우선) */
     }
+    tryRecordRunEvent({
+      runId,
+      kind: "workflow_node_state",
+      automationId: automation.id,
+      nodeId,
+      payload: { state },
+    });
     sink({ kind: "partial", nodeId, nodeState: state, agentId: nodeId });
   };
 
@@ -236,6 +244,12 @@ export async function runGraph(
   const ordered = topoSort(graph);
   try {
     startGraphRun({ runId, automationId: automation.id, nodeIds: graph.nodes.map((n) => n.id) });
+    tryRecordRunEvent({
+      runId,
+      kind: "workflow_graph_started",
+      automationId: automation.id,
+      payload: { nodeCount: graph.nodes.length, edgeCount: graph.edges.length },
+    });
   } catch {
     /* 스냅샷 시작 실패는 무시 */
   }
@@ -354,9 +368,20 @@ export async function runGraph(
           emitNodeState(node.id, "done");
           status.set(node.id, "done");
         } catch (nodeErr) {
+          const message = nodeErr instanceof Error ? nodeErr.message : String(nodeErr);
           emitNodeState(node.id, "failed");
           status.set(node.id, "failed");
-          if (error === undefined) error = nodeErr instanceof Error ? nodeErr.message : String(nodeErr);
+          tryRecordFailureEvent({
+            runId,
+            source: "workflow_node",
+            automationId: automation.id,
+            nodeId: node.id,
+            agentId: node.id,
+            errorCode: "node_failed",
+            errorMessage: message,
+            payload: { nodeType: node.type, nodeLabel: node.label },
+          });
+          if (error === undefined) error = message;
           ok = false;
         }
         return;
@@ -374,6 +399,13 @@ export async function runGraph(
     if (opts.signal?.aborted) {
       ok = false;
       error = error ?? "aborted";
+      tryRecordFailureEvent({
+        runId,
+        source: "workflow_graph",
+        automationId: automation.id,
+        errorCode: "aborted",
+        errorMessage: "Workflow graph aborted",
+      });
       break;
     }
     // 스킵 전파(고정점): inbound가 전부 blocked/skipped인 노드는 실행 없이 skip.
@@ -412,6 +444,14 @@ export async function runGraph(
       }
       ok = false;
       error = error ?? "graph did not converge (cycle or unreachable node)";
+      tryRecordFailureEvent({
+        runId,
+        source: "workflow_graph",
+        automationId: automation.id,
+        errorCode: "graph_not_converged",
+        errorMessage: error,
+        payload: { pendingNodeIds: ordered.filter((n) => status.get(n.id) === "failed").map((n) => n.id) },
+      });
       break;
     }
     await Promise.race(running.values());
@@ -422,6 +462,12 @@ export async function runGraph(
 
   try {
     finishGraphRun(runId, ok ? "ok" : "error");
+    tryRecordRunEvent({
+      runId,
+      kind: "workflow_graph_finished",
+      automationId: automation.id,
+      payload: { ok, error },
+    });
   } catch {
     /* 스냅샷 종료 실패 무시 */
   }

@@ -138,6 +138,21 @@ function uniqueMembers(members: AgentGroupMember[]): AgentGroupMember[] {
   return out;
 }
 
+function isSingleSnapshot(snapshot: AgentGroupMemberSnapshot): boolean {
+  return snapshot.entityKind !== "team" && snapshot.entityKind !== "plugin";
+}
+
+function isSingleHubListing(listing: MarketplaceListing): boolean {
+  if (listing.source === "hub-plugin" || listing.entityKind === "plugin") return false;
+  if (listing.entityKind === "team") return false;
+  if (typeof listing.agentCount === "number" && listing.agentCount > 1) return false;
+  return true;
+}
+
+function allowedGroupMembersForSave(members: AgentGroupMember[]): AgentGroupMember[] {
+  return uniqueMembers(members).filter((member) => member.source !== "firm-node" && isSingleSnapshot(member.snapshot));
+}
+
 export function listAgentGroups(): AgentGroup[] {
   const rows = getDb()
     .prepare("SELECT * FROM agent_groups ORDER BY updated_at DESC")
@@ -148,7 +163,7 @@ export function listAgentGroups(): AgentGroup[] {
 export function createAgentGroup(input: AgentGroupCreateInput): AgentGroup {
   const name = input.name.trim();
   if (!name) throw new Error("Agent group name is required.");
-  const members = uniqueMembers(input.members ?? []);
+  const members = allowedGroupMembersForSave(input.members ?? []);
   if (members.length === 0) throw new Error("Agent group needs at least one agent.");
   const now = new Date().toISOString();
   const id = randomUUID();
@@ -181,7 +196,7 @@ export function updateAgentGroup(id: string, patch: AgentGroupUpdateInput): Agen
       patch.orchestratorName !== undefined
         ? patch.orchestratorName.trim() || `${current.name} Orchestrator`
         : current.orchestratorName,
-    members: patch.members !== undefined ? uniqueMembers(patch.members) : current.members,
+    members: patch.members !== undefined ? allowedGroupMembersForSave(patch.members) : current.members,
     updatedAt: new Date().toISOString(),
   };
   if (!next.name) throw new Error("Agent group name is required.");
@@ -290,42 +305,15 @@ function resolveMember(
       warnings.push("hub_missing");
     } else {
       current = displaySnapshotFromHub(hub);
+      if (!isSingleHubListing(hub)) {
+        status = "missing";
+        warnings.push("unsupported_multi");
+      }
     }
   } else if (member.source === "firm-node") {
-    const candidates = nodeCandidates(firms, agents);
-    const exact = candidates.find(
-      ({ firm, node, rawNodeId }) =>
-        (member.firmId ? firm.id === member.firmId : firm.slug === member.firmSlug) &&
-        (node.id === member.nodeId || rawNodeId === member.nodeId),
-    );
-    if (exact) {
-      const agent = exact.node.agentId ? agentById.get(exact.node.agentId) : null;
-      if (agent) {
-        current = displaySnapshotFromAgent(agent, `${exact.firm.name} / ${exact.node.role}`);
-        if (member.agentId && member.agentId !== exact.node.agentId) {
-          status = "moved";
-          warnings.push("route_changed");
-        }
-      } else {
-        status = "missing";
-        warnings.push("agent_missing");
-      }
-    } else {
-      const moved = candidates.find(
-        ({ firm, node }) =>
-          (member.firmId ? firm.id === member.firmId : firm.slug === member.firmSlug) &&
-          Boolean(member.agentId && node.agentId === member.agentId),
-      );
-      if (moved) {
-        const agent = moved.node.agentId ? agentById.get(moved.node.agentId) : null;
-        current = agent ? displaySnapshotFromAgent(agent, `${moved.firm.name} / ${moved.node.role}`) : undefined;
-        status = "moved";
-        warnings.push("route_changed");
-      } else {
-        status = "missing";
-        warnings.push("route_missing");
-      }
-    }
+    current = member.snapshot;
+    status = "missing";
+    warnings.push("unsupported_multi");
   } else {
     const agent = (member.agentId ? agentById.get(member.agentId) : undefined) || agentBySlug.get(member.agentSlug || "");
     if (!agent) {
@@ -333,6 +321,10 @@ function resolveMember(
       warnings.push("agent_missing");
     } else {
       current = displaySnapshotFromAgent(agent, "Installed");
+      if (agent.kind === "team") {
+        status = "missing";
+        warnings.push("unsupported_multi");
+      }
     }
   }
 
@@ -438,6 +430,16 @@ export async function resolveAgentGroupForRuntime(id: string): Promise<AgentGrou
   const skipped: AgentGroupRuntimeResolution["skipped"] = [];
 
   for (const member of group.members) {
+    if (member.source === "firm-node") {
+      skipped.push({
+        id: member.id,
+        name: pickSnapshotName(member.snapshot),
+        source: member.source,
+        warnings: ["unsupported_multi"],
+      });
+      continue;
+    }
+
     if (member.source === "hub") {
       const slug = member.hubSlug || member.agentSlug || "";
       const hub = hubBySlug.get(slug);
@@ -447,6 +449,15 @@ export async function resolveAgentGroupForRuntime(id: string): Promise<AgentGrou
           name: pickSnapshotName(member.snapshot),
           source: member.source,
           warnings: ["hub_missing"],
+        });
+        continue;
+      }
+      if (!isSingleHubListing(hub)) {
+        skipped.push({
+          id: member.id,
+          name: hub.nameEn || hub.name || pickSnapshotName(member.snapshot),
+          source: member.source,
+          warnings: ["unsupported_multi"],
         });
         continue;
       }
@@ -469,6 +480,15 @@ export async function resolveAgentGroupForRuntime(id: string): Promise<AgentGrou
         name: pickSnapshotName(member.snapshot),
         source: member.source,
         warnings: resolved.warnings,
+      });
+      continue;
+    }
+    if (resolved.agent.kind === "team") {
+      skipped.push({
+        id: member.id,
+        name: resolved.agent.nameEn || resolved.agent.name,
+        source: member.source,
+        warnings: ["unsupported_multi"],
       });
       continue;
     }

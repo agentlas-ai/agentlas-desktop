@@ -39,7 +39,11 @@ await win.evaluate(() => {
   window.location.href = "/apps";
 });
 await win.waitForLoadState("domcontentloaded").catch(() => {});
-await win.getByText(/Oberon 모션그래픽 스튜디오|Oberon Motiongraphic Studio/).first().waitFor({ timeout: 20_000 });
+await win.getByText(/에이전트 앱 4개|4 agent apps/).waitFor({ timeout: 20_000 });
+const motionMenuVisible = (await win.getByText(/Oberon 모션그래픽 스튜디오|Oberon Motiongraphic Studio/).count()) > 0;
+if (motionMenuVisible) {
+  errors.push("Oberon Motiongraphic Studio is still visible in the Apps menu.");
+}
 await win.screenshot({ path: path.join(OUT, "01-apps-catalog.png"), fullPage: true });
 
 await win.evaluate(() => {
@@ -52,11 +56,8 @@ if (oldMotionCardVisible) {
   errors.push("Legacy Oberon motion graphics card is still visible.");
 }
 await win.evaluate(() => {
-  window.location.href = "/apps";
+  window.location.href = "/oberon-motion";
 });
-await win.getByText(/Oberon 모션그래픽 스튜디오|Oberon Motiongraphic Studio/).first().waitFor({ timeout: 20_000 });
-
-await win.getByText(/Oberon 모션그래픽 스튜디오|Oberon Motiongraphic Studio/).first().click();
 await win.getByRole("heading", { name: /Oberon Motiongraphic Studio/ }).waitFor({ timeout: 20_000 });
 await win.screenshot({ path: path.join(OUT, "02-motion-app.png"), fullPage: true });
 
@@ -86,7 +87,8 @@ const renderPassVisible = /Preview QA[\s\S]{0,80}pass/i.test(text);
 await app.close().catch(() => {});
 
 const result = {
-  ok: errors.length === 0 && selectedVisible && renderPassVisible,
+  ok: errors.length === 0 && !motionMenuVisible && selectedVisible && renderPassVisible,
+  motionMenuVisible,
   selectedVisible,
   renderPassVisible,
   errors,

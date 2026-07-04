@@ -13,6 +13,7 @@ import type { RuntimeBackend } from "../../shared/types";
 const SERVICE = "com.agentlas.desktop";
 const BYOK_PREFIX = "byok:";
 const ENV_PREFIX = "env:";
+const SECRET_PREFIX = "secret:";
 
 // ── BYOK LLM API ────────────────────────────────────────────
 function byokAccount(backend: RuntimeBackend): string {
@@ -103,4 +104,33 @@ export async function listEnvKeys(): Promise<string[]> {
     .map((c) => c.account)
     .filter((a) => a.startsWith(ENV_PREFIX))
     .map((a) => a.slice(ENV_PREFIX.length));
+}
+
+function secretAccount(key: string): string {
+  return `${SECRET_PREFIX}${key}`;
+}
+
+export async function setSecret(key: string, value: string): Promise<void> {
+  const trimmedKey = key.trim();
+  if (!trimmedKey) throw new Error("secret key cannot be empty");
+  const trimmedValue = value.trim();
+  if (!trimmedValue) {
+    await keytar.deletePassword(SERVICE, secretAccount(trimmedKey));
+    return;
+  }
+  await keytar.setPassword(SERVICE, secretAccount(trimmedKey), trimmedValue);
+}
+
+export async function readSecret(key: string): Promise<string | null> {
+  return keytar.getPassword(SERVICE, secretAccount(key));
+}
+
+export async function deleteSecret(key: string): Promise<void> {
+  await keytar.deletePassword(SERVICE, secretAccount(key));
+}
+
+export async function previewSecret(key: string): Promise<string | null> {
+  const v = await readSecret(key);
+  if (typeof v !== "string" || v.length === 0) return null;
+  return maskSecret(v);
 }

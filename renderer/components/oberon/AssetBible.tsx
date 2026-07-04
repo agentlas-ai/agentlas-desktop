@@ -3,10 +3,11 @@
 // (reference 이미지 = 정체성, seed = 재현성. 얼굴 클로즈업이 가장 강한 정체성 앵커.)
 "use client";
 import { providerById, routeImageProvider, type FilmProduction, type ModelSettings, type ReferenceEntry } from "@/lib/oberon";
+import type { OberonKeyframeAsset } from "@shared/types";
 import { getMultimodalProvider } from "@shared/multimodal";
 import { useT, type Locale } from "@/lib/i18n";
 import { Glyph, OberonBadge, type GlyphName } from "./icons";
-import { CHARCOAL, Card, Eyebrow, PanelHead, PrimaryButton, Tag } from "./ui";
+import { CHARCOAL, Card, Eyebrow, PanelHead, PrimaryButton, Tag, toLocalMediaSrc } from "./ui";
 
 const CATEGORY_ORDER: { kind: ReferenceEntry["kind"]; label: string; labelEn: string; glyph: GlyphName }[] = [
   { kind: "character", label: "인물", labelEn: "Characters", glyph: "character" },
@@ -40,11 +41,17 @@ export function AssetBible({
   model,
   approved,
   onApprove,
+  sheetGenerating,
+  onGenerateSheets,
 }: {
   production: FilmProduction;
   model?: ModelSettings;
   approved: boolean;
   onApprove: () => void;
+  /** 마스터 시트 이미지 생성 중인가 (키프레임 잡 재사용). */
+  sheetGenerating?: boolean;
+  /** 캐릭터/제품 마스터 시트(V2 클린 그리드) 실제 생성 트리거. */
+  onGenerateSheets?: () => void;
 }) {
   const { locale } = useT();
   const imgProviderId = model?.imageProvider;
@@ -52,6 +59,7 @@ export function AssetBible({
   const imgLabel = imgProvider ? (locale === "ko" ? imgProvider.labelKo : imgProvider.label) : undefined;
   const refs = production.bible.references;
   const cats = CATEGORY_ORDER.filter((c) => refs.some((r) => r.kind === c.kind));
+  const sheetById = new Map((production.sheetAssets ?? []).map((a) => [a.shotId, a]));
 
   return (
     <div style={panelStyle}>
@@ -77,7 +85,7 @@ export function AssetBible({
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(330px, 1fr))", gap: 16 }}>
               {items.map((r, i) => (
-                <BundleCard key={r.id} entry={r} index={i} model={model} locale={locale} />
+                <BundleCard key={r.id} entry={r} index={i} model={model} locale={locale} sheet={sheetById.get(r.id)} />
               ))}
             </div>
           </div>
@@ -85,6 +93,17 @@ export function AssetBible({
       })}
 
       <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 12 }}>
+        {onGenerateSheets && (
+          <PrimaryButton onClick={onGenerateSheets} disabled={sheetGenerating}>
+            {sheetGenerating
+              ? locale === "ko"
+                ? "마스터 시트 생성 중…"
+                : "Generating master sheets…"
+              : locale === "ko"
+                ? "마스터 시트 이미지 생성 (정체성 락)"
+                : "Generate Master Sheet Images (Identity Lock)"}
+          </PrimaryButton>
+        )}
         {approved ? (
           <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, color: "var(--ob-success)" }}>
             <Glyph name="check" size={16} strokeWidth={2.4} />{" "}
@@ -105,11 +124,14 @@ function BundleCard({
   index,
   model,
   locale,
+  sheet,
 }: {
   entry: ReferenceEntry;
   index: number;
   model?: ModelSettings;
   locale: Locale;
+  /** 실제 생성된 마스터 시트 이미지 (있으면 슬롯 자리에 표시). */
+  sheet?: OberonKeyframeAsset;
 }) {
   const slots = (locale === "ko" ? BUNDLE_SLOTS : BUNDLE_SLOTS_EN)[entry.kind] ?? (locale === "ko" ? ["메인", "디테일"] : ["Main", "Detail"]);
   const route = routeImageProvider(entry.kind === "character" ? "character" : entry.kind === "prop" ? "product" : "keyframe");
@@ -123,6 +145,15 @@ function BundleCard({
         <code style={{ fontSize: 11.5, fontFamily: "var(--font-mono)", fontWeight: 600, color: "var(--ob-ink-soft)", letterSpacing: 0.2 }}>{stableId}</code>
         <span style={{ fontSize: 14, fontWeight: 600, color: "var(--ob-ink)", flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{entry.name}</span>
       </div>
+
+      {/* 실제 생성된 마스터 시트 — 정면·3/4·측면·전신·표정 클린 그리드 한 장 */}
+      {sheet && (
+        <img
+          src={toLocalMediaSrc(sheet.url)}
+          alt={`${entry.name} master sheet`}
+          style={{ width: "100%", borderRadius: 6, border: "1px solid var(--ob-edge)", marginBottom: 10, display: "block" }}
+        />
+      )}
 
       {/* 멀티앵글 번들 슬롯 */}
       <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(slots.length, 6)}, 1fr)`, gap: 6, marginBottom: 12 }}>

@@ -39,6 +39,11 @@ export async function planOberonWithCli(request: OberonPlanRequest): Promise<Obe
             "Your job is to improve the user's film brief, not to generate files.",
             "Think like a working DP + screenwriter: a sharp logline, a concrete visual direction (lighting, palette, lens feel, references), tone words that map to real cinematography, and named characters with lockable identity traits.",
             "Favour coverage-driven, multi-shot storytelling over single long takes; respect the format's pacing and runtime.",
+            // 연속성 우선(continuity-first) 독트린 — 개별 샷 품질보다 "샷끼리 실제로 이어지는가"가 승부처다.
+            "CONTINUITY FIRST: short-form AI video fails when the world drifts (wardrobe color changes, golden hour jumps to night, the location morphs). Write character descriptions as LOCKABLE specs — exact wardrobe colors/materials, hair, one signature visual detail — and pin the setting to one concrete time of day, weather and light direction.",
+            "HOOK: structure the opening 1.5 seconds as stinger (0-0.5s, one arresting visual) → dissonance (0.5-1.5s, a single detail that feels off) → payoff begins. Bake this into the synopsis.",
+            "For commercials, the final beat is always the product + slogan key visual. Audio for commercials defaults to NO BGM — dialogue plus ambient SFX only; put that in mustInclude/mustAvoid when relevant.",
+            "Vary camera language across beats — no two adjacent beats share the same angle/composition.",
             "Where dialogue or narration helps, keep lines short, speakable, and in the brief's language so they can be lip-synced and captioned downstream.",
             "Keep the output compact and safe for deterministic downstream planning.",
           ].join("\n"),

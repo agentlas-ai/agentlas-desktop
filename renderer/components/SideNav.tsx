@@ -21,6 +21,7 @@ import {
   IconFileUp,
   IconHome,
   IconChat,
+  IconAtSign,
   IconBuilding,
   IconApps,
   IconBolt,
@@ -91,6 +92,7 @@ export function SideNav({
     () => [
       { label: t("nav.dashboard"), href: "/dashboard", icon: IconHome },
       { label: t("nav.workspace"), href: "/chat", icon: IconChat },
+      { label: t("nav.connect"), href: "/connect", icon: IconAtSign },
     ],
     [t],
   );

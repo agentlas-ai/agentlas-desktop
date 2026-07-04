@@ -17,17 +17,27 @@ import {
 } from "@/lib/oberon";
 import type { Locale } from "@/lib/i18n";
 import { useT } from "@/lib/i18n";
+import type { OberonKeyframeAsset } from "@/lib/types";
 import { IconChevronDown, IconChevronRight, IconLayers, IconRoute, IconRefresh, IconTrash } from "@/components/Icon";
-import { CHARCOAL, Card, Chip, PanelHead, Tag, aspectCss, formatCost } from "./ui";
+import { CHARCOAL, Card, Chip, PanelHead, Tag, aspectCss, formatCost, toLocalMediaSrc } from "./ui";
 
 export function ShotBoard({
   production,
   editable,
   onUpdateShots,
+  sheetGenerating,
+  storyboardSheet,
+  onGenerateSheet,
 }: {
   production: FilmProduction;
   editable?: boolean;
   onUpdateShots?: (mutate: (shots: ShotSpec[]) => ShotSpec[]) => void;
+  /** 콘티 시트(한 장 전체 그리드) 이미지 생성 중인가. */
+  sheetGenerating?: boolean;
+  /** 생성된 전체 콘티 시트 이미지 (id="storyboard_overview"). */
+  storyboardSheet?: OberonKeyframeAsset;
+  /** 전체 콘티 시트 이미지 생성 트리거 — 전체 흐름을 한 장으로 잠근다. */
+  onGenerateSheet?: () => void;
 }) {
   const { locale } = useT();
   const [sceneFilter, setSceneFilter] = useState<string>("all");
@@ -83,6 +93,39 @@ export function ShotBoard({
 
       {/* 연속성 메모리 스레드 (목표 4) */}
       <ContinuityThread spans={continuitySpans} locale={locale} />
+
+      {/* 전체 콘티 시트 — 컷당 ACTION/CAMERA/DIALOGUE 그리드 한 장 (흐름 락) */}
+      {(onGenerateSheet || storyboardSheet) && (
+        <div style={{ marginBottom: 18 }}>
+          {storyboardSheet && (
+            <img
+              src={toLocalMediaSrc(storyboardSheet.url)}
+              alt={locale === "ko" ? "전체 콘티 시트" : "Storyboard overview sheet"}
+              style={{ width: "100%", maxWidth: 980, borderRadius: 8, border: "1px solid var(--ob-edge)", display: "block", marginBottom: 10 }}
+            />
+          )}
+          {onGenerateSheet && (
+            <button
+              type="button"
+              onClick={onGenerateSheet}
+              disabled={sheetGenerating}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 7, minHeight: 36, padding: "0 14px",
+                borderRadius: 999, fontSize: 13, fontWeight: 600, cursor: sheetGenerating ? "not-allowed" : "pointer",
+                background: "var(--ob-fill)", color: "var(--ob-ink)", border: "1px solid var(--ob-edge)",
+                opacity: sheetGenerating ? 0.55 : 1,
+              }}
+            >
+              <IconLayers size={14} />
+              {sheetGenerating
+                ? locale === "ko" ? "콘티 시트 생성 중…" : "Generating the storyboard sheet…"
+                : storyboardSheet
+                  ? locale === "ko" ? "콘티 시트 다시 생성" : "Regenerate storyboard sheet"
+                  : locale === "ko" ? "전체 콘티 시트 이미지 생성 (한 장)" : "Generate one-sheet storyboard image"}
+            </button>
+          )}
+        </div>
+      )}
 
       {/* 씬 필터 */}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 18 }}>

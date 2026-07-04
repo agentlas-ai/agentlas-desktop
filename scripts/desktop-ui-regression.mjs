@@ -145,8 +145,10 @@ async function checkCloudUpload(page) {
 
 async function checkApps(page) {
   await page.getByText("Agent Apps", { exact: true }).waitFor();
-  await page.getByText(/에이전트 앱 5개|5 agent apps/).waitFor();
-  await page.getByText(/Oberon 모션그래픽 스튜디오|Oberon Motiongraphic Studio/).first().waitFor();
+  await page.getByText(/에이전트 앱 4개|4 agent apps/).waitFor();
+  if ((await page.getByText(/Oberon 모션그래픽 스튜디오|Oberon Motiongraphic Studio/).count()) > 0) {
+    throw new Error("Oberon Motiongraphic Studio should not be visible in the Apps menu.");
+  }
   await page.getByText(/스타트업 창업자 스튜디오|Startup Founder Studio/).first().waitFor();
   await page.getByRole("button", { name: /런타임 점검|Check runtime/ }).click();
   await page.getByText(/런타임 준비됨|Runtime ready/).waitFor();
@@ -326,6 +328,9 @@ function mockAgentlasBridge() {
       search: async () => [{ slug: "research-agent", name: "Research Agent", nameEn: "Research Agent", tagline: "조사 전문 에이전트", taglineEn: "Research specialist", trustGrade: "A", installCount: 12, manifestUrl: "mock" }],
       status: async () => ({ mode: "mcp", baseUrl: "mock", online: true, usingFallback: false, lastError: null, lastCheckedAt: now }),
       listMine: async () => [],
+      bookmarks: async () => [],
+      bookmarkAdd: async (listing) => ({ slug: listing.slug, listing, bookmarkedAt: now }),
+      bookmarkRemove: async () => {},
     },
     firms: {
       list: async () => [firm],

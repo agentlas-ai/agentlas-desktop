@@ -4,7 +4,7 @@ import type { FilmProduction } from "@/lib/oberon";
 import type { OberonMotionAdFile, OberonMotionAdJob } from "@/lib/types";
 import { useT } from "@/lib/i18n";
 import { Glyph } from "./icons";
-import { Card, GhostButton, Meter, PanelHead, PrimaryButton } from "./ui";
+import { Card, GhostButton, Meter, PanelHead, PrimaryButton, toLocalMediaSrc } from "./ui";
 
 export function MotionGraphicsPanel({
   production,
@@ -60,7 +60,7 @@ export function MotionGraphicsPanel({
       <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, 1.25fr) minmax(260px, 0.85fr)", gap: 16, alignItems: "start" }}>
         <Card style={{ padding: 16 }}>
           {mp4 ? (
-            <video controls src={mp4.url} style={{ width: "100%", borderRadius: 10, background: "#111", aspectRatio: production.brief.aspect === "9:16" ? "9 / 16" : "16 / 9", objectFit: "contain" }} />
+            <video controls src={toLocalMediaSrc(mp4.url)} style={{ width: "100%", borderRadius: 10, background: "#111", aspectRatio: production.brief.aspect === "9:16" ? "9 / 16" : "16 / 9", objectFit: "contain" }} />
           ) : (
             <div style={{ aspectRatio: production.brief.aspect === "9:16" ? "9 / 16" : "16 / 9", borderRadius: 10, background: "linear-gradient(135deg,#f7f7f2,#eef2ed 52%,#f6f1e8)", border: "1px solid var(--ob-edge)", position: "relative", overflow: "hidden" }}>
               <div style={{ position: "absolute", inset: 18, borderRadius: 14, border: "1px solid rgba(16,24,32,0.12)", background: "rgba(255,255,255,0.74)", boxShadow: "0 24px 70px rgba(16,24,32,0.14)" }} />

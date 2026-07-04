@@ -24,6 +24,7 @@ import {
   startOberonKeyframes,
 } from "./oberon/keyframes";
 import { planOberonWithCli } from "./oberon/planner";
+import { startOberonSheets } from "./oberon/sheets";
 import {
   cancelOberonRenderJob,
   getOberonRenderJob,
@@ -81,6 +82,12 @@ import {
   uninstallFirm,
 } from "./store/firms";
 import { listAgentFiles, readAgentFile, writeAgentFile } from "./agents/files";
+import {
+  createAndApplyPromptEvolutionProposal,
+  listAgentEvolutionProposals,
+  markAgentEvolutionProposalMeasured,
+  rollbackAgentEvolutionProposal,
+} from "./agents/evolution";
 import { importLocalFolder } from "./agents/import-local";
 import { getDb } from "./store/db";
 import { getResolvedOrg } from "./store/org-spec";
@@ -112,6 +119,7 @@ import type {
   AgentGroupUpdateInput,
   HephaestusBuildEvent,
   HephaestusBuildRequest,
+  CreatePromptEvolutionProposalInput,
   SkillCatalogEntry,
 } from "../shared/types";
 import { checkSafely as updaterCheck, getUpdaterState, quitAndInstall as updaterInstall } from "./updater";
@@ -128,9 +136,21 @@ import {
   tasteHubPrompt,
   unlockHubPrompt,
 } from "./prompts-hub";
+import {
+  addHubAgentBookmark,
+  listHubAgentBookmarks,
+  removeHubAgentBookmark,
+} from "./store/hub-bookmarks";
 import { claimQuest, listQuests } from "./quests";
 import { listMemoryEntriesForAgentUi } from "./memory/store";
 import { getDreamingStatus, setDreamingEnabled } from "./memory/dreaming";
+import {
+  listFailureEvents,
+  listRunEvents,
+  recordMcpInvocationEvent,
+  tryRecordFailureEvent,
+  tryRecordRunEvent,
+} from "./store/run-events";
 import { getUsageSnapshot, invalidateUsage } from "./usage";
 import { listPendingConfirmations } from "./confirm";
 import { addProjectOntologySource, getProjectOntologyStatus } from "./ontology/project-runtime";
@@ -238,6 +258,16 @@ import {
   updateAgentGroup,
 } from "./store/agent-groups";
 import {
+  autoConnectTelegram,
+  listTelegramBindings,
+  openTelegramBot,
+  removeTelegramConnection,
+  resumeTelegramConnection,
+  sendTelegramTest,
+  startTelegramConnection,
+  stopTelegramConnection,
+} from "./telegram/connect";
+import {
   archiveAppPackage,
   activateLocalCommerceStack,
   approveProviderPayment,
@@ -292,6 +322,7 @@ import type {
   OberonKeyframeRequest,
   OberonPlanRequest,
   OberonRenderRequest,
+  OberonSheetRequest,
   Project,
   RuntimeBackend,
   RuntimeKind,
@@ -550,6 +581,38 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("trex:contentAvailable", async () => {
     const { trexContentAvailable } = await import("./trex/content");
     return trexContentAvailable();
+  });
+
+  // ── 문서 스튜디오 "내용" 생성 — 연결된 LLM(agy/codex)이 실제 문서 초안을 JSON으로 작성 ──
+  ipcMain.handle(
+    "document:generate",
+    async (
+      _e,
+      payload: {
+        goal?: string;
+        mode?: string;
+        locale?: string;
+        sources?: { authors?: string; title: string; year?: string; container?: string }[];
+      },
+    ) => {
+      const { generateDocumentContent } = await import("./document/generate");
+      const mode = payload?.mode === "paper" ? "paper" : payload?.mode === "brief" ? "brief" : "report";
+      const locale = payload?.locale === "ko" ? "ko" : "en";
+      const sources = Array.isArray(payload?.sources) ? payload!.sources : [];
+      return generateDocumentContent(String(payload?.goal ?? ""), mode, locale, sources);
+    },
+  );
+  // 선택 텍스트 개정(AI 편집 툴바).
+  ipcMain.handle("document:revise", async (_e, payload: { text?: string; action?: string; locale?: string }) => {
+    const { reviseDocumentText } = await import("./document/generate");
+    const actions = ["expand", "rewrite", "shorten", "improve", "formal", "casual"] as const;
+    const action = (actions as readonly string[]).includes(String(payload?.action)) ? (payload!.action as (typeof actions)[number]) : "improve";
+    const locale = payload?.locale === "ko" ? "ko" : "en";
+    return reviseDocumentText(String(payload?.text ?? ""), action, locale);
+  });
+  ipcMain.handle("document:available", async () => {
+    const { documentContentAvailable } = await import("./document/generate");
+    return documentContentAvailable();
   });
 
   // ── updater (electron-updater) ──────────────────────────
@@ -832,6 +895,10 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("oberon:startKeyframes", (_e, request: OberonKeyframeRequest) =>
     startOberonKeyframes(request),
   );
+  // 마스터 시트/콘티 시트 — 키프레임 잡 재사용 (조회/취소는 keyframe 채널로).
+  ipcMain.handle("oberon:startSheets", (_e, request: OberonSheetRequest) =>
+    startOberonSheets(request),
+  );
   ipcMain.handle("oberon:getKeyframeJob", (_e, id: string) => getOberonKeyframeJob(id));
   ipcMain.handle("oberon:cancelKeyframes", (_e, id: string) => cancelOberonKeyframes(id));
   ipcMain.handle("oberon:openKeyframeOutput", (_e, id: string) => openOberonKeyframeOutput(id));
@@ -866,6 +933,30 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle("agentFiles:write", (_e, agentId: string, absPath: string, content: string) =>
     writeAgentFile(agentId, absPath, content),
+  );
+
+  // ── runLedger (실행/실패 원장 — 실패 메모리·자가진화 평가 입력) ──
+  ipcMain.handle("runLedger:events", (_e, runId: string, limit?: number) =>
+    listRunEvents(runId, limit),
+  );
+  ipcMain.handle(
+    "runLedger:failures",
+    (_e, input?: { runId?: string; automationId?: string; chatId?: string; limit?: number }) =>
+      listFailureEvents(input),
+  );
+
+  // ── agentEvolution (자가진화 proposal 원장 — 승인 흐름을 durable DB에 기록) ──
+  ipcMain.handle("agentEvolution:list", (_e, agentId: string, limit?: number) =>
+    listAgentEvolutionProposals(agentId, limit),
+  );
+  ipcMain.handle("agentEvolution:createAndApplyPrompt", (_e, input: CreatePromptEvolutionProposalInput) =>
+    createAndApplyPromptEvolutionProposal(input),
+  );
+  ipcMain.handle("agentEvolution:markMeasured", (_e, proposalId: string, note?: string) =>
+    markAgentEvolutionProposalMeasured(proposalId, note),
+  );
+  ipcMain.handle("agentEvolution:rollback", (_e, proposalId: string) =>
+    rollbackAgentEvolutionProposal(proposalId),
   );
 
   // ── skills (주입 가능한 스킬 카탈로그 — 엔진 skills/ 디렉토리 실측) ──
@@ -936,6 +1027,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("marketplace:search", (_e, q: string) => getMarketSource().searchAgents(q));
   ipcMain.handle("marketplace:listFirms", () => getMarketSource().listFirms());
   ipcMain.handle("marketplace:status", () => getMarketSourceStatus());
+  ipcMain.handle("marketplace:bookmarks", () => listHubAgentBookmarks());
+  ipcMain.handle("marketplace:bookmarkAdd", (_e, listing) => addHubAgentBookmark(listing));
+  ipcMain.handle("marketplace:bookmarkRemove", (_e, slug: string) => removeHubAgentBookmark(slug));
   // 내 에이전트(cargo) — 미로그인/오프라인/실패면 빈 배열(팝업이 안내 처리).
   ipcMain.handle("marketplace:listMine", async () => {
     try {
@@ -977,6 +1071,16 @@ export function registerIpcHandlers(): void {
     removeAgentGroupMember(groupId, memberId),
   );
   ipcMain.handle("agentGroups:remove", (_e, id: string) => removeAgentGroup(id));
+
+  // ── Telegram Connect (Bot API polling + Agentlas invocation bridge) ─────
+  ipcMain.handle("telegram:listBindings", () => listTelegramBindings());
+  ipcMain.handle("telegram:autoConnect", (_e, input) => autoConnectTelegram(input));
+  ipcMain.handle("telegram:start", (_e, input) => startTelegramConnection(input));
+  ipcMain.handle("telegram:resume", (_e, id: string) => resumeTelegramConnection(id));
+  ipcMain.handle("telegram:stop", (_e, id: string) => stopTelegramConnection(id));
+  ipcMain.handle("telegram:remove", (_e, id: string) => removeTelegramConnection(id));
+  ipcMain.handle("telegram:sendTest", (_e, id: string) => sendTelegramTest(id));
+  ipcMain.handle("telegram:openBot", (_e, id: string) => openTelegramBot(id));
 
   // ── projects ───────────────────────────────────────────
   ipcMain.handle("projects:list", () => listProjects());
@@ -1522,6 +1626,7 @@ export function registerIpcHandlers(): void {
     // 구독하고 있으므로 런타임이 즉시 emit하는 초기 이벤트도 놓치지 않는다(subscribe-before-trigger).
     // 안 넘겼으면(자동화/구버전 호출) 기존처럼 main이 생성(하위호환).
     const runId = req.runId ?? randomUUID();
+    const runReq: McpInvocationRequest = { ...req, runId };
     const channel = `invoke:event:${runId}`;
     const win = BrowserWindow.fromWebContents(event.sender);
 
@@ -1530,9 +1635,24 @@ export function registerIpcHandlers(): void {
     const record: RunRecord = { controller, chatId: req.chatId, events: [], partialText: "" };
     activeRuns.set(runId, record);
     broadcastActiveChats();
+    tryRecordRunEvent({
+      runId,
+      kind: "invoke_started",
+      chatId: runReq.chatId,
+      payload: {
+        permissions: runReq.permissions,
+        toolMode: runReq.toolMode,
+        hubMode: runReq.hubMode,
+        borrowAgents: runReq.borrowAgents,
+        hasImages: Boolean(runReq.images?.length),
+        planMode: runReq.planMode,
+        goalMode: runReq.goalMode,
+        appsGenerateMode: runReq.appsGenerateMode,
+      },
+    });
 
     void runMcpInvocation(
-      req,
+      runReq,
       (rawEv) => {
         // 런어웨이 출력 보호 — partial 텍스트가 과도하면 잘라 렌더러/버퍼 메모리를 바운드한다
         // (모든 런타임 공통). 정상 응답엔 영향 없고 2MB 초과분만 절단.
@@ -1542,7 +1662,7 @@ export function registerIpcHandlers(): void {
                 ...rawEv,
                 text:
                   rawEv.text.slice(0, MAX_PARTIAL_CHARS) +
-                  (pickLocale(req) === "ko"
+                  (pickLocale(runReq) === "ko"
                     ? "\n\n[출력이 너무 길어 잘렸습니다 — 런어웨이 출력 메모리 보호]"
                     : "\n\n[Output truncated — runaway output memory guard]"),
               }
@@ -1579,6 +1699,7 @@ export function registerIpcHandlers(): void {
         if (record.events.length > MAX_BUFFERED_EVENTS) {
           record.events.splice(0, record.events.length - MAX_BUFFERED_EVENTS);
         }
+        recordMcpInvocationEvent(runId, runReq, ev);
         // 창이 닫힌 뒤(닫기와 스트림 종료가 겹치는 경우) send는 throw하므로 destroyed 가드.
         if (win && !win.isDestroyed()) {
           try { win.webContents.send(channel, wireEv); } catch {}
@@ -1590,7 +1711,22 @@ export function registerIpcHandlers(): void {
         }
       },
       controller.signal,
-    ).finally(() => {
+    ).catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      tryRecordRunEvent({
+        runId,
+        kind: "invoke_threw",
+        chatId: runReq.chatId,
+        payload: { errorMessage: message },
+      });
+      tryRecordFailureEvent({
+        runId,
+        source: "invoke",
+        chatId: runReq.chatId,
+        errorCode: "invoke_threw",
+        errorMessage: message,
+      });
+    }).finally(() => {
       // 위 sink에서 이미 지워졌으면(정상 종료) no-op — abort/throw로 종료 이벤트가 없던 경우만 정리.
       if (activeRuns.delete(runId)) broadcastActiveChats();
     });

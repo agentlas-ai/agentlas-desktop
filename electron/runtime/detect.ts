@@ -169,6 +169,8 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     glmByok,
     kimiByok,
     deepseekByok,
+    upstageByok,
+    customByok,
     claudeEfforts,
   ] = await Promise.all([
     probeClaudeCode(),
@@ -182,6 +184,8 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     hasApiKey("glm"),
     hasApiKey("kimi"),
     hasApiKey("deepseek"),
+    hasApiKey("upstage"),
+    hasApiKey("custom"),
     probeClaudeEfforts(),
   ]);
 
@@ -290,13 +294,17 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     });
   }
 
-  // Anthropic 호환 서드파티(GLM/Kimi/DeepSeek) — 키가 저장돼 있으면 엔진으로 노출. base URL은 프리셋 자동.
-  const compatFlags: Record<"glm" | "kimi" | "deepseek", boolean> = {
+  // Anthropic/OpenAI 호환 서드파티(GLM/Kimi/DeepSeek/Upstage) + custom(사용자 base URL) —
+  // 키가 저장돼 있으면 엔진으로 노출한다. upstage/custom을 빠뜨리면 Settings에서 고를 수 있어도
+  // detect가 목록에 안 넣어 선택이 조용히 되돌려진다(감사 P0 데드코드).
+  const compatFlags: Record<"glm" | "kimi" | "deepseek" | "upstage" | "custom", boolean> = {
     glm: glmByok,
     kimi: kimiByok,
     deepseek: deepseekByok,
+    upstage: upstageByok,
+    custom: customByok,
   };
-  for (const backend of ["glm", "kimi", "deepseek"] as const) {
+  for (const backend of ["glm", "kimi", "deepseek", "upstage", "custom"] as const) {
     if (!compatFlags[backend]) continue;
     list.push({
       kind: "byok",

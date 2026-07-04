@@ -21,6 +21,11 @@ import { broadcastLiveRun } from "./workflow/live-run";
 import { isStormbreakerLongRunPrompt } from "./hephaestus/loop-engineering";
 import { emitAutomationDone } from "./triggers/chain-bus";
 import { classifyAutomationOutput, type AutomationResultStatus } from "./automation-result";
+import {
+  recordMcpInvocationEvent,
+  tryRecordFailureEvent,
+  tryRecordRunEvent,
+} from "./store/run-events";
 
 let timer: ReturnType<typeof setInterval> | null = null;
 const running = new Set<string>();
@@ -80,11 +85,13 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
   let runStatus: AutomationResultStatus = "ok";
   let runError: string | null = null;
   let output: string | undefined;
+  let currentRunId: string | null = null;
   try {
     const controller = new AbortController();
     if (a.graph && a.graph.nodes.length > 0) {
       // 그래프 경로 — 위상 러너로 실행. per-node 상태를 라이브 채널로 방송해 캔버스가 애니메이션.
       const runId = `run-${a.id}-${Date.now()}`;
+      currentRunId = runId;
       const result = await runGraph(a, a.graph, {
         signal: controller.signal,
         runId,
@@ -105,12 +112,26 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
     } else {
       // 레거시 단일 프롬프트 경로(완전 backward-compat).
       const runId = `run-${a.id}-${Date.now()}`;
+      currentRunId = runId;
+      tryRecordRunEvent({
+        runId,
+        kind: "automation_legacy_started",
+        automationId: a.id,
+        payload: { targetType: a.targetType, toolMode: a.toolMode, hubMode: a.hubMode },
+      });
       const emitLegacyState = (nodeId: string, nodeState: "pending" | "running" | "done" | "failed" | "skipped"): void => {
         try {
           updateGraphRunNode(runId, nodeId, nodeState);
         } catch {
           /* 스냅샷 실패는 실행을 막지 않는다 */
         }
+        tryRecordRunEvent({
+          runId,
+          kind: "automation_legacy_node_state",
+          automationId: a.id,
+          nodeId,
+          payload: { state: nodeState },
+        });
         broadcastLiveRun(a.id, { kind: "partial", nodeId, nodeState, agentId: nodeId });
       };
       try {
@@ -128,20 +149,22 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
       });
       try {
         let runnerError: string | null = null;
+        const req = {
+          chatId: chat.id,
+          userPrompt: a.promptTemplate,
+          permissions: "write" as const,
+          borrowAgents: a.targetType === "hub" ? [a.targetId] : undefined,
+          mcpBrowserProfileKey: `automation-${a.id}`,
+          toolMode: a.toolMode ?? "auto",
+          hubMode: a.targetType === "hub" ? "hub-first" as const : (a.hubMode ?? "hub-allowed"),
+        };
         const result = await runMcpInvocation(
-          {
-            chatId: chat.id,
-            userPrompt: a.promptTemplate,
-            permissions: "write",
-            borrowAgents: a.targetType === "hub" ? [a.targetId] : undefined,
-            mcpBrowserProfileKey: `automation-${a.id}`,
-            toolMode: a.toolMode ?? "auto",
-            hubMode: a.targetType === "hub" ? "hub-first" : (a.hubMode ?? "hub-allowed"),
-          },
+          req,
           (ev) => {
             if (ev.kind === "error") {
               runnerError = ev.error?.message || "runner failed";
             }
+            recordMcpInvocationEvent(runId, req, ev);
           },
           controller.signal,
         );
@@ -162,7 +185,16 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
           toggleAutomation(a.id, false);
         }
       } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
         emitLegacyState("n1", "failed");
+        tryRecordFailureEvent({
+          runId,
+          source: "automation_legacy",
+          automationId: a.id,
+          nodeId: "n1",
+          errorCode: "automation_failed",
+          errorMessage: message,
+        });
         try {
           finishGraphRun(runId, "error");
         } catch {
@@ -174,6 +206,13 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
   } catch (err) {
     runStatus = "error";
     runError = err instanceof Error ? err.message : String(err);
+    tryRecordFailureEvent({
+      runId: currentRunId,
+      source: "automation",
+      automationId: a.id,
+      errorCode: "automation_failed",
+      errorMessage: runError,
+    });
     console.error(`[automation] run failed (${a.name}):`, err);
   } finally {
     // 스케줄 전진은 (1) trigger_type==="schedule"이고 (2) 이번 실행이 실제 예약 발사일 때만.

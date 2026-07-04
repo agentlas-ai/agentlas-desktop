@@ -60,7 +60,14 @@ export function formatRatio(f: DeckFormat): string {
   return `${f.w} / ${f.h}`;
 }
 
-export type BlockKind = "kicker" | "title" | "subtitle" | "body" | "rule" | "pill" | "kpi" | "bar" | "footer" | "card" | "image";
+export type BlockKind = "kicker" | "title" | "subtitle" | "body" | "rule" | "pill" | "kpi" | "bar" | "footer" | "card" | "image" | "band" | "panel";
+
+/** 패널 안 한 행 — 칩 라벨 + 굵은 주장 + (옵션) 부연 한 줄. 중기부 "실적/성과" 행 밀도. */
+export interface PanelRow {
+  label?: string;
+  text: string;
+  sub?: string;
+}
 
 export interface TrexBlock {
   id: string;
@@ -76,6 +83,12 @@ export interface TrexBlock {
   accent?: boolean;
   weight?: number;
   h?: number; // % of slide height — 고정 높이 블록(카드 등)을 균등하게 채운다
+  /** kpi 블록: 카드 서피스(면) 위에 올린다 — 맨몸 숫자가 떠 보이는 것 방지(h 필수). */
+  surface?: boolean;
+  /** card 블록: 헤더 바 패널(솔리드 잉크 바 제목 + 면 본문 — 컨설팅 패널 문법). */
+  bar?: boolean;
+  /** panel 블록: 헤더 바(label) + 조밀한 다중 행(중기부 실적/성과 패널). h 필수. */
+  rows?: PanelRow[];
   inline?: boolean; // body: 번호(label)+텍스트를 한 줄에(목차 등)
   /** image 블록: 생성된 이미지(dataURL). 비어 있으면 렌더러가 생성중 플레이스홀더를 그린다. */
   src?: string;
@@ -223,7 +236,7 @@ function fitKpiSize(value: string | undefined, base: number): number {
 
 /** 제목 길이에 맞춰 폰트 크기를 줄여 ~2줄 안에 들어오게(겹침 방지 자동맞춤). */
 function fitTitleSize(text: string, base: number): number {
-  const n = text.length;
+  const n = plain(text).length;
   if (n <= 16) return base;
   if (n <= 26) return base * 0.82;
   if (n <= 38) return base * 0.66;
@@ -246,9 +259,15 @@ function derivePoints(prompt: string, want: number, locale: Locale = "ko"): stri
   return out.slice(0, want).map((s) => (s.length > 24 ? `${s.slice(0, 22)}…` : s));
 }
 
-function footer(idx: number, total: number, ink: string): TrexBlock {
+function footer(idx: number, total: number, ink: string, src?: string): TrexBlock {
   const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
-  return { id: bid(), kind: "footer", x: 6, y: 90, w: 88, size: 1.05, text: "Agentlas · T-rex", value: `${pad(idx + 1)} / ${pad(total)}` };
+  // 컨설팅 표준 풋라인: 수치가 있는 장은 좌측에 출처를 밝힌다(신뢰 신호). 없으면 브랜드.
+  return { id: bid(), kind: "footer", x: 6, y: 90, w: 88, size: 1.05, text: src ? `${src} · Agentlas T-rex` : "Agentlas · T-rex", value: `${pad(idx + 1)} / ${pad(total)}` };
+}
+
+/** `**강조**` 마커 제거 — 길이 기반 폰트 적응/줄수 추정은 렌더 문자 수 기준이어야 한다. */
+function plain(t: string | undefined): string {
+  return (t || "").replace(/\*\*/g, "");
 }
 
 /** 빌더 옵션 — Style DNA + 이미지 패널 사용 여부(끄면 텍스트 전용 레이아웃 유지). */
@@ -271,7 +290,7 @@ function scaleOf(opts: BuildOpts | undefined, o: Orient): TypeScaleSteps {
 
 /** 부제(서브 헤드라인) 길이 적응 — h2가 커서 긴 문장은 줄여 3줄 초과를 막는다(제목 2줄 규칙의 부제판). */
 function fitSubSize(text: string, base: number): number {
-  const n = (text || "").length;
+  const n = plain(text).length;
   if (n <= 30) return base;
   if (n <= 48) return base * 0.85;
   return base * 0.72;
@@ -283,7 +302,7 @@ function fitSubSize(text: string, base: number): number {
  * 2줄 대칭은 text-wrap:balance가 담당 — 여기선 3줄 방지만 맡는다.
  */
 function fitTitleSpec(text: string, base: number): number {
-  const n = (text || "").length;
+  const n = plain(text).length;
   if (n <= 26) return base;
   if (n <= 38) return base * 0.88;
   if (n <= 52) return base * 0.78;
@@ -329,6 +348,8 @@ export function orientationOf(f: DeckFormat): Orient {
 export interface KpiItem { value: string; label: string }
 export interface BarItem { label: string; value: number }
 export interface CardItem { label: string; text: string }
+/** 2패널(실적/성과) — 헤더 제목 + 조밀한 행 묶음. 중기부 업무보고 밀도. */
+export interface PanelSpec { title: string; rows: PanelRow[] }
 export interface SlideContent {
   role: SlideRole;
   title?: string;
@@ -337,8 +358,14 @@ export interface SlideContent {
   bars?: BarItem[];
   cards?: CardItem[];
   steps?: CardItem[];
+  /** 2패널 좌우 배치(실적→성과). 있으면 structure가 고밀도 2패널로 렌더. */
+  panels?: PanelSpec[];
   stat?: KpiItem;
   text?: string;
+  /** 수치 출처 한 줄(풋노트) — "출처: 중기부, 2025" 등. 컨설팅 표준: 모든 수치엔 출처. */
+  src?: string;
+  /** 제목 아래 스탠드퍼스트(리드) 한 줄 — 제목·note와 겹치지 않는 새 정보. 헤더 데드존을 정보로 채운다. */
+  dek?: string;
   /** 슬라이드 하단 인사이트 문장(밀도·결론 — "So what"). */
   note?: string;
   /** 동반 사진의 장면 설명(LLM 작성, 텍스트 없는 이미지). */
@@ -404,15 +431,19 @@ function coverSlide(theme: ModeTheme, total: number, o: Orient, title: string, s
     ];
   } else if (comp === "centered") {
     // 중앙 정렬의 품격(하라 등) — 킥커 · 플레이트 사진(소프트 엣지 페이드) · 제목 · 부제.
+    // 컨설팅(챕터 밴드) 덱은 정부 보고서 표지 문법: 제목 상하 헤어라인(중기부 커버).
     const base = ts.display;
     const tSize = (dna ? fitTitleSpec : fitTitleSize)(title, base);
     const fade = dna?.coverPhoto === "plate" ? ("bottom" as const) : undefined;
+    const gov = !!dna?.chapterBand && !port && plain(title).length <= 26; // 2줄 제목이면 헤어라인 생략(겹침 방지)
     blocks = [
       { id: bid(), kind: "kicker", x: 10, y: port ? 7 : 8, w: 80, size: ts.note, text: "T-REX · STUDIO", align: "center" },
       ...(withImg
         ? [imageBlock(port ? { x: 14, y: 13, w: 72, h: 30 } : { x: 31, y: 16, w: 38, h: 36 }, coverPrompt, { fade })]
         : [{ id: bid(), kind: "rule" as const, x: 46, y: port ? 22 : 26, w: 8, accent: true }]),
+      ...(gov ? [{ id: bid(), kind: "rule" as const, x: 14, y: withImg ? 54 : 32, w: 72, accent: false }] : []),
       { id: bid(), kind: "title", x: 8, y: withImg ? (port ? 48 : 58) : port ? 34 : 36, w: 84, size: tSize, text: title, weight: dna?.titleWeight ?? 600, align: "center" },
+      ...(gov ? [{ id: bid(), kind: "rule" as const, x: 14, y: withImg ? 72 : 50, w: 72, accent: true }] : []),
       { id: bid(), kind: "subtitle", x: port ? 12 : 20, y: withImg ? (port ? 72 : 80) : port ? 66 : 68, w: port ? 76 : 60, size: fitSubSize(sub, ts.h2), text: sub, align: "center" },
       footer(0, total, ink),
     ];
@@ -450,15 +481,32 @@ function coverSlide(theme: ModeTheme, total: number, o: Orient, title: string, s
  * 크기는 전부 modular scale 단계(typescale.com)에서 온다 — 감으로 정한 숫자 금지.
  * 세로 리듬은 4% 그리드(8pt 법칙의 슬라이드 등가): pill 8 · 제목 16 · 룰 36 · 콘텐츠 44.
  */
-function headerBlocks(theme: ModeTheme, idx: number, total: number, no: string, titleText: string, o: Orient, opts?: BuildOpts): TrexBlock[] {
+function headerBlocks(theme: ModeTheme, idx: number, total: number, no: string, titleText: string, o: Orient, opts?: BuildOpts, dek?: string, dekW?: number, src?: string): TrexBlock[] {
   const port = o === "portrait";
   const sq = o === "square";
   const ts = scaleOf(opts, o);
+  // 데드존 킬: 제목이 1줄(≤26자)이면 제목~콘텐츠 사이 빈 밴드를 dek(스탠드퍼스트)로 채운다.
+  // 2줄 제목은 밴드를 제목이 이미 차지 → dek 생략(겹침 방지).
+  const showDek = !!dek && !port && plain(titleText).length <= 26;
+  // 컨설팅 문법(중기부 업무보고): 킥커 필 대신 네이비 사선 챕터 밴드 + 번호 칩.
+  if (opts?.dna?.chapterBand && !port) {
+    const roleLabel = (no.split("·")[1] || no).trim();
+    return [
+      { id: bid(), kind: "band", x: 0, y: 0, w: 100, h: 9, size: ts.note, value: String(idx), text: roleLabel },
+      { id: bid(), kind: "title", x: 6, y: 14, w: 84, size: (opts?.dna ? fitTitleSpec : fitTitleSize)(titleText, ts.h1), text: titleText, weight: 800 },
+      ...(showDek ? [{ id: bid(), kind: "subtitle" as const, x: 6, y: 25, w: dekW ?? 64, size: ts.h5, text: dek }] : []),
+      { id: bid(), kind: "rule", x: 6, y: 36, w: 6, accent: true },
+      footer(idx, total, theme.ink, src),
+    ];
+  }
   return [
+    // 좌측 에지 액센트 바 — 전 본문 장 공통의 시스템 요소("한 벌로 설계됨" 신호).
+    ...(opts?.dna && !port ? [{ id: bid(), kind: "rule" as const, x: 0, y: 0, w: 1, h: 100, accent: true }] : []),
     { id: bid(), kind: "pill", x: 6, y: 8, w: 30, size: ts.note, text: no },
     { id: bid(), kind: "title", x: 6, y: 16, w: port ? 88 : 84, size: (opts?.dna ? fitTitleSpec : fitTitleSize)(titleText, ts.h1), text: titleText, weight: 800 },
+    ...(showDek ? [{ id: bid(), kind: "subtitle" as const, x: 6, y: 26, w: dekW ?? 64, size: ts.h5, text: dek }] : []),
     { id: bid(), kind: "rule", x: 6, y: port ? 32 : 36, w: port ? 9 : 6, accent: true },
-    footer(idx, total, theme.ink),
+    footer(idx, total, theme.ink, src),
   ];
 }
 
@@ -478,7 +526,7 @@ function kpiSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent,
   const hero = n === 1;
   const pillNo = locale === "ko" ? `${idx} · 한눈에` : `${idx} · At A Glance`;
   const title = c.title || (locale === "ko" ? "핵심 지표" : "Key Metrics");
-  const head = headerBlocks(theme, idx, total, pillNo, title, o, opts);
+  const head = headerBlocks(theme, idx, total, pillNo, title, o, opts, c.dek, undefined, c.src);
   const layout = !port && opts?.dna ? c.layout || "row" : "row";
   const hasNote = !!c.note;
   const H = hasNote ? 30 : 40; // 콘텐츠 밴드 높이(y44~)
@@ -487,15 +535,17 @@ function kpiSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent,
   let noteInHero = false;
   if (layout === "bento" && n === 3) {
     // 벤토 그리드(지표 3개 전용) — 히어로 셀 + 우측 2행. 셀 최소높이(패딩+value+label≈17%h)
-    // 제약상 4개 이상은 row로 폴백. note는 히어로 셀 본문으로 흡수(인사이트 바 생략 = 무손실).
-    noteInHero = true;
-    const BH = 40;
+    // 제약상 4개 이상은 row로 폴백. note는 짧을 때만 히어로 셀 본문으로 흡수(길면 카드 하단
+    // 클리핑으로 문장이 잘려 보인다 → 인사이트 바 유지).
+    noteInHero = !!c.note && c.note.length <= 90;
+    const BH = noteInHero || !hasNote ? 40 : 30;
     const half = (BH - 3) / 2;
     const cell = (k: KpiItem, r: { x: number; y: number; w: number; h: number }, big: boolean, text?: string): TrexBlock => ({
-      id: bid(), kind: "card" as const, ...r, size: big ? ts.h5 * 1.35 : ts.h5 * 0.95, value: k.value, label: k.label, text: text ?? "",
+      // 원포인트 강조: 히어로 셀 값만 액센트, 소셀 값은 잉크(60-30-10 — 숫자 전부 빨강 금지).
+      id: bid(), kind: "card" as const, ...r, size: big ? ts.h5 * 1.1 : ts.h5 * 0.95, value: k.value, label: k.label, text: text ?? "", accent: big,
     });
     kpis = [
-      cell(data[0], { x: 6, y: 44, w: 43, h: BH }, true, c.note || ""),
+      cell(data[0], { x: 6, y: 44, w: 43, h: BH }, true, noteInHero ? c.note || "" : ""),
       cell(data[1], { x: 51, y: 44, w: 43, h: half }, false),
       cell(data[2], { x: 51, y: 44 + half + 3, w: 43, h: half }, false),
     ];
@@ -508,10 +558,12 @@ function kpiSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent,
       ...rest.map((k, i) => ({ id: bid(), kind: "kpi" as const, x: 38, y: 44 + i * step, w: 56, size: fitKpiSize(k.value, Math.min(ts.kpi * 0.7, step * 0.9)), value: k.value, label: k.label, accent: false })),
     ];
   } else {
+    // 스탯 콜아웃 행 — 서피스 카드에 담고(플로팅 숫자 금지), 액센트는 첫 지표 하나만(원포인트).
+    const surface = !port && !!opts?.dna;
     kpis = data.map((k, i) =>
       port
         ? { id: bid(), kind: "kpi" as const, x: 6, y: (n > 3 ? 34 : 38) + i * (n > 3 ? 11 : n < 3 ? 20 : 15), w: 88, size: fitKpiSize(k.value, ts.kpi * (n > 3 ? 0.9 : 1)), value: k.value, label: k.label, accent: hero }
-        : { id: bid(), kind: "kpi" as const, x: 6 + i * (88 / n), y: 44, w: cw, size: fitKpiSize(k.value, Math.min(cw * (o === "square" ? 0.25 : 0.225), ts.kpi)), value: k.value, label: k.label, accent: hero },
+        : { id: bid(), kind: "kpi" as const, x: 6 + i * (88 / n), y: 44, w: cw, ...(surface ? { h: H, surface: true } : {}), size: fitKpiSize(k.value, Math.min(cw * (o === "square" ? 0.25 : surface ? 0.19 : 0.225), ts.kpi)), value: k.value, label: k.label, accent: hero || (surface && i === 0) },
     );
   }
   return {
@@ -536,20 +588,23 @@ function barSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent,
   const pillNo = locale === "ko" ? `${idx} · 비교` : `${idx} · Comparison`;
   const title = c.title || (locale === "ko" ? "어디에 집중할 것인가" : "Where To Focus");
   const layout = !port && opts?.dna ? c.layout || "bars" : "bars";
+  // 데이터-잉크 규율(원포인트): 최대값 막대 하나만 액센트, 나머지는 잉크 톤(dna 덱 한정 — 레거시 유지).
+  const maxIdx = data.reduce((m, b, i) => (b.value > data[m].value ? i : m), 0);
+  const barAccent = (i: number): { accent?: boolean } => (opts?.dna ? { accent: i === maxIdx } : {});
   const body: TrexBlock[] =
     layout === "asym" && data.length >= 2
       ? [
           // 비대칭 1:2 — 좌측에 1위 항목을 히어로 수치로(주인공), 우측에 전체 비교 바.
           { id: bid(), kind: "kpi" as const, x: 6, y: 46, w: 26, size: fitKpiSize(`${data[0].value}%`, ts.kpi * 1.1), value: `${data[0].value}%`, label: data[0].label, accent: true },
-          ...data.map((b, i) => ({ id: bid(), kind: "bar" as const, x: 38, y: 44 + i * 8, w: 56, size: ts.h5 * 0.95, label: b.label, value: String(b.value) })),
+          ...data.map((b, i) => ({ id: bid(), kind: "bar" as const, x: 38, y: 44 + i * 8, w: 56, size: ts.h5 * 0.95, label: b.label, value: String(b.value), ...barAccent(i) })),
         ]
-      : data.map((b, i) => ({ id: bid(), kind: "bar" as const, x: 6, y: startY + i * step, w: 88, size: ts.h5, label: b.label, value: String(b.value) }));
+      : data.map((b, i) => ({ id: bid(), kind: "bar" as const, x: 6, y: startY + i * step, w: 88, size: ts.h5, label: b.label, value: String(b.value), ...barAccent(i) }));
   return {
     id: bid(),
     bg: theme.bodyBg,
     ink: theme.ink,
     scene: "none",
-    blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts), ...body, ...insightBlocks(c, o, locale, 88, opts)],
+    blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts, c.dek, undefined, c.src), ...body, ...insightBlocks(c, o, locale, 88, opts)],
   };
 }
 
@@ -571,12 +626,71 @@ function cardsSlide(theme: ModeTheme, idx: number, total: number, c: SlideConten
   const pillNo = locale === "ko" ? `${idx} · 구조` : `${idx} · Structure`;
   const title = c.title || (locale === "ko" ? "세 갈래로 나뉜다" : "Three Pillars");
   const withImg = !!opts?.dna && opts?.images !== false;
-  const layout = !port && opts?.dna ? c.layout || "columns" : "columns";
+  let layout = !port && opts?.dna ? c.layout || "columns" : "columns";
+  // 컨설팅(챕터 밴드) 문법: 구조는 사진 교차(zigzag/split)가 아니라 패널이 표준 —
+  // 칩 라벨이 행 높이를 키워 zigzag에서 이미지와 겹치기도 한다(벤치마크에도 사진 구조 장 없음).
+  if (opts?.dna?.chapterBand && (layout === "zigzag" || layout === "split")) layout = "columns";
   const label = (cd: CardItem, i: number) => cd.label || elementLabel(i);
+
+  // ── 2패널(실적→성과): 중기부 업무보고 밀도 — 좌/우 헤더 바 패널 + 조밀 행 + 사이 화살표 ──
+  // c.panels가 있으면 그대로, 없어도 컨설팅 구조 슬라이드면 cards를 좌우로 갈라 패널화(고밀도 강제).
+  const wantPanels = !port && !!opts?.dna?.chapterBand && (c.panels?.length || (layout === "twopanel"));
+  if (wantPanels) {
+    const head = headerBlocks(theme, idx, total, pillNo, title, o, opts, c.dek, undefined, c.src);
+    const top = c.dek ? 34 : 30;
+    const floor = hasNote ? 74 : 86;
+    const h = floor - top;
+    let specs: PanelSpec[] = c.panels && c.panels.length ? c.panels.slice(0, 2) : [];
+    if (specs.length === 0) {
+      // 폴백: cards를 2개 그룹으로 갈라 각 카드=한 행(라벨 칩 + 두 문장). 최소 밀도라도 2패널 유지.
+      const half = Math.ceil(data.length / 2);
+      const mk = (arr: CardItem[]): PanelRow[] => arr.map((cd, i) => ({ label: label(cd, i), text: cd.text }));
+      const t1 = locale === "ko" ? "실적" : "What We Did";
+      const t2 = locale === "ko" ? "성과" : "Results";
+      specs = [{ title: t1, rows: mk(data.slice(0, half)) }, { title: t2, rows: mk(data.slice(half)) }];
+    }
+    const blocks: TrexBlock[] = [...head];
+    const pw = specs.length === 2 ? 43 : 88;
+    // ── 오버플로 방어: 행 수·문장 길이에 맞춰 폰트를 실측 축소하고, 그래도 넘치면 말줄임.
+    // (한글 글리프 폭 ≈ 1em, 본문 줄간 1.4·부연 1.3 — DeckStage panel 렌더 기준)
+    const aspect = opts?.aspect ?? 9 / 16; // h/w
+    const rowN = Math.max(1, ...specs.map((sp) => sp.rows.length));
+    const headerCqw = ts.h5 * 1.12 * 1.4 + 1.6; // 헤더 바(폰트×줄간+패딩) 대략 높이(cqw)
+    const contentCqw = h * aspect - headerCqw - 1.6; // 패널 내부 세로 여유(cqw)
+    const slotCqw = contentCqw / rowN; // 행당 세로 예산(cqw)
+    const colCqw = pw - 3.4; // 패널 내부 가로 폭(cqw)
+    // 5행 이상이면 본문 1줄+부연 1줄로 고정(벤치마크 밀도), 4행 이하는 본문 2줄 허용.
+    const textLines = rowN >= 5 ? 1 : 2;
+    const rowNeed = (f: number, hasSub: boolean) => textLines * f * 1.4 + (hasSub ? f * 0.86 * 1.3 : 0);
+    let font = ts.h5;
+    for (const k of [1, 0.92, 0.85, 0.78, 0.72]) {
+      font = ts.h5 * k;
+      if (rowNeed(font, specs.some((sp) => sp.rows.some((r) => r.sub))) <= slotCqw) break;
+    }
+    // 칩 라벨이 차지하는 인라인 폭을 뺀 본문 CPL로 말줄임 상한 산출.
+    const clampRow = (r: PanelRow): PanelRow => {
+      const chipCqw = r.label ? Math.min(plain(r.label).length * font * 0.82 + 2.4, colCqw * 0.5) : 0;
+      const cpl = Math.max(6, Math.floor((colCqw - chipCqw) / font));
+      const tcap = cpl * textLines;
+      const t = plain(r.text);
+      const text = t.length <= tcap ? r.text : `${t.slice(0, Math.max(0, tcap - 1)).trimEnd()}…`;
+      let sub = r.sub;
+      const subCpl = Math.max(6, Math.floor(colCqw / (font * 0.86)));
+      if (sub && plain(sub).length > subCpl) sub = `${plain(sub).slice(0, subCpl - 1).trimEnd()}…`;
+      return { label: r.label, text, sub };
+    };
+    specs.forEach((sp, i) => {
+      const x = specs.length === 2 ? (i === 0 ? 6 : 51) : 6;
+      blocks.push({ id: bid(), kind: "panel", x, y: top, w: pw, h, size: font, label: sp.title, rows: sp.rows.slice(0, 6).map(clampRow), value: String(textLines) });
+    });
+    // 실적→성과 화살표(두 패널 사이) — 벤치마크의 파란 삼각 커넥터.
+    if (specs.length === 2) blocks.push({ id: bid(), kind: "pill", x: 48.5, y: top + h / 2 - 2.5, w: 3, size: ts.h4, text: "▶", accent: true });
+    return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [...blocks, ...insightBlocks(c, o, locale, 88, opts)] };
+  }
 
   // ── 2분할(하프앤하프): 좌 텍스트 스택 + 우 엣지-투-엣지 이미지 ──
   if (layout === "split" && withImg) {
-    const head = headerBlocks(theme, idx, total, pillNo, title, o, opts).map((b) =>
+    const head = headerBlocks(theme, idx, total, pillNo, title, o, opts, c.dek, 42, c.src).map((b) =>
       b.kind === "title" ? { ...b, w: 42 } : b.kind === "footer" ? { ...b, w: 42 } : b,
     );
     const top = 44;
@@ -603,7 +717,7 @@ function cardsSlide(theme: ModeTheme, idx: number, total: number, c: SlideConten
       n >= 4
         ? [cell(data[0], 0, { x: 6, y: 44, w: 43, h: H }, true), cell(data[1], 1, { x: 51, y: 44, w: 43, h: half }, false), cell(data[2], 2, { x: 51, y: 44 + half + 3, w: 20, h: half }, false), cell(data[3], 3, { x: 74, y: 44 + half + 3, w: 20, h: half }, false)]
         : [cell(data[0], 0, { x: 6, y: 44, w: 43, h: H }, true), cell(data[1], 1, { x: 51, y: 44, w: 43, h: half }, false), cell(data[2], 2, { x: 51, y: 44 + half + 3, w: 43, h: half }, false)];
-    return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts), ...cards, ...insightBlocks(c, o, locale, 88, opts)] };
+    return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts, c.dek, undefined, c.src), ...cards, ...insightBlocks(c, o, locale, 88, opts)] };
   }
 
   // ── 지그재그: [이미지|텍스트] 좌우 교차 — 리듬감 ──
@@ -617,20 +731,23 @@ function cardsSlide(theme: ModeTheme, idx: number, total: number, c: SlideConten
       rows.push(imageBlock({ x: imgLeft ? 6 : 66, y, w: 28, h: step - 2.5 }, `${cd.label || ""} ${cd.text}`.trim()));
       rows.push({ id: bid(), kind: "body", x: imgLeft ? 38 : 6, y: y + 1, w: 56, size: ts.h5, label: label(cd, i), text: cd.text });
     });
-    return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts), ...rows, ...insightBlocks(c, o, locale, 88, opts)] };
+    return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts, c.dek, undefined, c.src), ...rows, ...insightBlocks(c, o, locale, 88, opts)] };
   }
 
+  // columns(가로+dna) = 헤더 바 패널(컨설팅 "실적/성과" 문법) — 바가 위계를 만들므로 도형 패널 배경은 생략.
   const cards: TrexBlock[] = data.map((cd, i) =>
     port
       ? { id: bid(), kind: "card" as const, x: 6, y: (n > 3 ? 34 : 38) + i * (n > 3 ? 11 : 13.5), w: 88, h: n > 3 ? 9.5 : 12, size: ts.h5, text: cd.text, label: label(cd, i), ...(panel ? { prompt: "panel", src: "" } : {}) }
-      : { id: bid(), kind: "card" as const, x: 6 + i * (88 / n), y: 44, w: 88 / n - 3, h: cardH, size: n > 3 ? ts.h5 * 0.85 : ts.h5, text: cd.text, label: label(cd, i), ...(panel ? { prompt: "panel", src: "" } : {}) },
+      : opts?.dna
+        ? { id: bid(), kind: "card" as const, x: 6 + i * (88 / n), y: 44, w: 88 / n - 3, h: cardH, size: n > 3 ? ts.h5 * 0.85 : ts.h5, text: cd.text, label: label(cd, i), bar: true }
+        : { id: bid(), kind: "card" as const, x: 6 + i * (88 / n), y: 44, w: 88 / n - 3, h: cardH, size: n > 3 ? ts.h5 * 0.85 : ts.h5, text: cd.text, label: label(cd, i), ...(panel ? { prompt: "panel", src: "" } : {}) },
   );
   return {
     id: bid(),
     bg: theme.bodyBg,
     ink: theme.ink,
     scene: "none",
-    blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts), ...cards, ...insightBlocks(c, o, locale, 88, opts)],
+    blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts, c.dek, undefined, c.src), ...cards, ...insightBlocks(c, o, locale, 88, opts)],
   };
 }
 
@@ -665,7 +782,7 @@ function calloutSlide(theme: ModeTheme, idx: number, total: number, c: SlideCont
     bg: theme.bodyBg,
     ink: theme.ink,
     scene: "none",
-    blocks: [...headerBlocks(theme, idx, total, pillNo, c.title || headline, o, opts), ...body, ...(c.text && c.note && c.note !== note ? insightBlocks(c, o, locale, withImg && !port ? 56 : 88, opts) : [])],
+    blocks: [...headerBlocks(theme, idx, total, pillNo, c.title || headline, o, opts, c.dek, undefined, c.src), ...body, ...(c.text && c.note && c.note !== note ? insightBlocks(c, o, locale, withImg && !port ? 56 : 88, opts) : [])],
   };
 }
 
@@ -683,12 +800,15 @@ function agendaSlide(theme: ModeTheme, idx: number, total: number, c: SlideConte
   // 헤더의 뜬 밑줄(rule)은 제거 — 죽은 공간의 주범. 대신 각 행 위 구분선으로 리듬을 준다.
   const pillNo = locale === "ko" ? `${idx} · 목차` : `${idx} · Agenda`;
   const title = c.title || (locale === "ko" ? "이 발표의 흐름" : "What We'll Cover");
-  const head = headerBlocks(theme, idx, total, pillNo, title, o, opts).filter((b) => b.kind !== "rule");
+  const head = headerBlocks(theme, idx, total, pillNo, title, o, opts).filter((b) => b.kind !== "rule" || b.h); // 가로 룰만 제거(세로 에지 바는 유지)
   const top = port ? 34 : 36;
   const bottom = port ? 90 : 88;
   const step = (bottom - top) / n;
   const size = n >= 5 ? ts.h4 * 0.9 : ts.h4; // 문단(행) 제목 = h4
-  const rows: TrexBlock[] = [];
+  // 우측 이미지 레일 — 행이 짧아 우측 1/3이 죽는 목차의 고질을 사진으로 채운다(덩그라니 금지).
+  const rail = !!opts?.dna && opts?.images !== false && !port && n <= 5;
+  const rowW = rail ? 53 : 88;
+  const rows: TrexBlock[] = rail ? [imageBlock({ x: 64, y: top, w: 30, h: bottom - top }, imgPromptOf(c, title))] : [];
   items.forEach((raw, i) => {
     // "제목 — 한 줄 설명" 분해 → 2줄 행. 근접성의 법칙: 제목-설명(그룹 내)은 붙이고,
     // 다음 행(그룹 간)과는 넓게 — within(0.36·step) < between(0.52·step).
@@ -696,13 +816,13 @@ function agendaSlide(theme: ModeTheme, idx: number, total: number, c: SlideConte
     const t = (m[0] || raw).trim();
     const desc = m.length > 1 ? m.slice(1).join(" ").trim() : "";
     const y = top + i * step;
-    rows.push({ id: bid(), kind: "rule", x: 6, y, w: 88 }); // 행 위 얇은 구분선(비강조)
-    rows.push({ id: bid(), kind: "body", x: 6, y: y + step * 0.1, w: 88, size, label: `0${i + 1}`, text: t, inline: true });
+    rows.push({ id: bid(), kind: "rule", x: 6, y, w: rowW }); // 행 위 얇은 구분선(비강조)
+    rows.push({ id: bid(), kind: "body", x: 6, y: y + step * 0.1, w: rowW, size, label: `0${i + 1}`, text: t, inline: true });
     // 제목 텍스트의 실제 세로 점유(cqw→높이%: 16:9에서 ×1.78) 아래에 설명을 놓아야 겹치지 않는다.
     // step<10(행 5개 이상, 세로형 제외)이면 설명 생략 — 겹칠 바엔 제목만.
     if (desc && (port ? step >= 8 : step >= 10)) {
       const titleH = size * (port ? 1 : 1.78) * 1.35; // 폰트 cqw → 슬라이드 높이% (+행간)
-      rows.push({ id: bid(), kind: "subtitle", x: port ? 12 : 11.4, y: y + step * 0.1 + titleH, w: port ? 82 : 82.6, size: ts.h5, text: desc });
+      rows.push({ id: bid(), kind: "subtitle", x: port ? 12 : 11.4, y: y + step * 0.1 + titleH, w: port ? 82 : rail ? 47.6 : 82.6, size: ts.h5, text: desc });
     }
   });
   return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [...head, ...rows] };
@@ -730,19 +850,46 @@ function processSlide(theme: ModeTheme, idx: number, total: number, c: SlideCont
   const title = c.title || (locale === "ko" ? "이렇게 진행된다" : "How This Unfolds");
   const layout = !port && opts?.dna ? c.layout || "timeline" : "cards";
 
-  // ── 타임라인: 세그먼트 텍스트(위) + 가로 진행선/노드(아래) — 연혁·로드맵 공식.
-  // 위/아래 교차 배치는 텍스트 높이를 예측할 수 없어(2~3문장 변동) 인사이트와 충돌한다 →
-  // 텍스트존을 위로 몰고 라인을 바닥 고정점으로 쓰는 안전 구조.
+  // ── 타임라인(로드맵 레일): 컬럼 상단 번호 칩 → 단계명 → 본문, 컬럼 사이 세로 헤어라인.
+  // 번호를 텍스트 아래(라인 위)에 두는 교차 배치는 텍스트 높이 예측 불가로 겹침 사고의 근원 —
+  // 번호를 맨 위로 올리면 아래로는 인사이트 바까지 전부 텍스트 예산이라 충돌이 구조적으로 없다.
   if (layout === "timeline") {
     const segW = 88 / n;
-    const lineY = hasNote ? 71 : 82;
-    const rows: TrexBlock[] = [{ id: bid(), kind: "rule", x: 6, y: lineY, w: 88 }];
+    const colW = segW - 4; // 본문 컬럼 폭(cqw)
+    const chipY = 42;
+    const textY = 48.5;
+    const floorY = hasNote ? 74 : 86; // 인사이트 룰(76) 또는 푸터 위 안전선
+    // 겹침 방지: 본문 가용 높이를 실측 추정해 폰트를 줄이고, 그래도 넘치면 문장을 잘라낸다.
+    // (한글 글리프 폭 ≈ 1em, 줄간 1.5 — DeckStage 렌더 기준)
+    const aspect = opts?.aspect ?? 9 / 16; // h/w — timeline은 가로형 전용
+    const availCqw = (floorY - textY) * aspect; // %h → cqw
+    const labelCqw = (lbl: string) => Math.ceil(lbl.length / Math.max(1, Math.floor(colW / 1.55))) * 1.5 * 1.35 + 0.5;
+    const needCqw = (st: CardItem, i: number, f: number) => {
+      const cpl = Math.max(1, Math.floor(colW / f));
+      return labelCqw(heading(st.label, i)) + Math.ceil(plain(st.text).length / cpl) * f * 1.5;
+    };
+    let font = ts.h5 * 0.92;
+    for (const k of [1, 0.92, 0.85, 0.78]) {
+      font = ts.h5 * 0.92 * k;
+      if (Math.max(...data.map((st, i) => needCqw(st, i, font))) <= availCqw) break;
+    }
+    const clamp = (st: CardItem, i: number) => {
+      const cpl = Math.max(1, Math.floor(colW / font));
+      const maxLines = Math.max(1, Math.floor((availCqw - labelCqw(heading(st.label, i))) / (font * 1.5)));
+      const cap = maxLines * cpl;
+      const t = plain(st.text);
+      return t.length <= cap ? st.text || "" : `${t.slice(0, Math.max(0, cap - 1)).trimEnd()}…`;
+    };
+    const rows: TrexBlock[] = [];
+    const chipMerge = !!opts?.dna?.listChip; // 컨설팅: 번호를 칩 라벨에 합쳐 이중 뱃지 방지
     data.forEach((st, i) => {
       const x = 6 + i * segW;
-      rows.push({ id: bid(), kind: "pill", x, y: lineY - 3.6, w: 8, size: ts.note, text: num(i) });
-      rows.push({ id: bid(), kind: "body", x, y: 44, w: segW - 4, size: ts.h5 * 0.92, label: heading(st.label, i), text: st.text });
+      // 컬럼 사이 세로 헤어라인(매거진 컬럼 문법) — 첫 컬럼 앞엔 없음.
+      if (i > 0) rows.push({ id: bid(), kind: "rule", x: x - 2.2, y: chipY, w: 1, h: floorY - chipY, accent: false });
+      if (!chipMerge) rows.push({ id: bid(), kind: "pill", x, y: chipY, w: 8, size: ts.note, text: num(i) });
+      rows.push({ id: bid(), kind: "body", x, y: chipMerge ? chipY + 0.5 : textY, w: colW, size: font, label: chipMerge ? `${num(i)} · ${heading(st.label, i)}` : heading(st.label, i), text: clamp(st, i) });
     });
-    return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts), ...rows, ...insightBlocks(c, o, locale, 88, opts)] };
+    return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts, c.dek, undefined, c.src), ...rows, ...insightBlocks(c, o, locale, 88, opts)] };
   }
 
   const steps: TrexBlock[] = data.map((s, i) =>
@@ -755,7 +902,7 @@ function processSlide(theme: ModeTheme, idx: number, total: number, c: SlideCont
     bg: theme.bodyBg,
     ink: theme.ink,
     scene: "none",
-    blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts), ...steps, ...insightBlocks(c, o, locale, 88, opts)],
+    blocks: [...headerBlocks(theme, idx, total, pillNo, title, o, opts, c.dek, undefined, c.src), ...steps, ...insightBlocks(c, o, locale, 88, opts)],
   };
 }
 

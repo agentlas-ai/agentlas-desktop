@@ -179,7 +179,8 @@ export function KeyframeStep({
       {started ? (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(132px, 1fr))", gap: 12, marginBottom: 24 }}>
           {shots.map((shot, i) => {
-            const asset = production.keyframeAssets?.find((item) => item.shotId === shot.shotId);
+            // START/END 체이닝으로 last_frame 자산이 섞여 있어도 갤러리는 첫 프레임을 보여준다.
+            const asset = production.keyframeAssets?.find((item) => item.shotId === shot.shotId && item.kind !== "last_frame");
             const ready = !!asset || i < progress;
             return (
               <FilmFrame

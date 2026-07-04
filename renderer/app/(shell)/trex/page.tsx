@@ -812,7 +812,7 @@ function clamp(n: number, lo: number, hi: number): number { return Math.max(lo, 
 function blockLabel(k: BlockKind, ko: boolean): string {
   const map: Record<BlockKind, [string, string]> = {
     title: ["제목", "Title"], subtitle: ["부제", "Subtitle"], body: ["본문", "Body"], card: ["카드", "Card"], image: ["이미지", "Image"], kicker: ["라벨", "Kicker"],
-    pill: ["태그", "Pill"], kpi: ["숫자", "KPI"], bar: ["막대", "Bar"], rule: ["선", "Rule"], footer: ["푸터", "Footer"],
+    pill: ["태그", "Pill"], kpi: ["숫자", "KPI"], bar: ["막대", "Bar"], rule: ["선", "Rule"], footer: ["푸터", "Footer"], band: ["챕터 밴드", "Chapter Band"], panel: ["패널", "Panel"],
   };
   return ko ? map[k][0] : map[k][1];
 }

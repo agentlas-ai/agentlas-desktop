@@ -16,7 +16,6 @@ import {
   IconFilm,
   IconFileUp,
   IconSearch,
-  IconSparkles,
 } from "@/components/Icon";
 import type { CSSProperties, ReactNode } from "react";
 
@@ -38,7 +37,6 @@ function tintFor(id: string): CSSProperties {
   const map: Record<string, [string, string]> = {
     trex: ["var(--accent)", "var(--accent-strong)"],
     "startup-founder-studio": ["var(--accent)", "var(--accent-strong)"],
-    "oberon-motiongraphic-studio": ["var(--teal)", "var(--teal-deep)"],
     oberon: ["var(--blue)", "var(--blue-deep)"],
     "document-studio": ["var(--purple)", "var(--purple-deep)"],
   };
@@ -88,8 +86,6 @@ export default function AppsPage() {
           icon:
             app.id === "startup-founder-studio" ? (
               <StudioBotLogo size={18} />
-            ) : app.id === "oberon-motiongraphic-studio" ? (
-              <IconSparkles size={16} />
             ) : app.id === "document-studio" ? (
               <IconFileUp size={16} />
             ) : app.id === "oberon" ? (
@@ -102,7 +98,7 @@ export default function AppsPage() {
     [locale],
   );
 
-  const studioOrder = ["startup-founder-studio", "oberon-motiongraphic-studio", "oberon", "document-studio"];
+  const studioOrder = ["startup-founder-studio", "oberon", "document-studio"];
   const studioTiles = useMemo<StudioTile[]>(() => {
     const ordered = studioOrder
       .map((id) => installedTiles.find((tile) => tile.id === id))
