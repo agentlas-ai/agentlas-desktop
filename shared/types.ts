@@ -2968,6 +2968,8 @@ export interface AgentlasIpc {
     pickDirectory: () => Promise<string | null>;
     listDirectory: (absPath: string, showHidden?: boolean, rootPath?: string) => Promise<DirListing>;
     readTextFile: (absPath: string, rootPath?: string) => Promise<TextFilePreview>;
+    /** 로컬 파일/폴더 또는 http(s) URL을 OS 기본 앱/브라우저로 연다. */
+    openPath: (target: string) => Promise<{ ok: boolean; message?: string }>;
     /** 네이티브 저장 다이얼로그로 텍스트를 디스크에 쓴다(산출물 내보내기). 취소 시 canceled=true. */
     saveTextFile: (
       suggestedName: string,

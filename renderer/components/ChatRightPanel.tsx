@@ -18,6 +18,7 @@ import {
 import type { InstalledAgent, InstalledFirm, ResolvedOrg } from "@/lib/types";
 import { IconClose, IconFileUp, IconFilm, IconFolder, IconImage, IconLayers, IconNetwork, IconPanelRight } from "./Icon";
 import { useT } from "@/lib/i18n";
+import { ipc } from "@/lib/ipc";
 
 export type ChatRightPanelTab = "file" | "agent" | "panel";
 type PanelViewerSource = "workbench" | "file";
@@ -290,8 +291,22 @@ function FileTab({
 function FileViewer({ file }: { file: WorkspaceFilePreview }) {
   const { locale } = useT();
   const ko = locale === "ko";
+  const [openError, setOpenError] = useState<string | null>(null);
   const typeLabel = viewerKindLabel(file.viewerKind, ko);
-  const openExternal = () => window.open(file.fileUrl, "_blank", "noopener,noreferrer");
+  const openExternal = async () => {
+    setOpenError(null);
+    const target = file.viewerKind === "browser" && file.browserUrl ? file.browserUrl : file.path;
+    const bridge = ipc();
+    if (bridge?.fs?.openPath) {
+      const result = await bridge.fs.openPath(target).catch((error) => ({
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      }));
+      if (!result.ok) setOpenError(result.message || (ko ? "파일을 열지 못했습니다." : "Could not open the file."));
+      return;
+    }
+    window.open(file.browserUrl || file.fileUrl, "_blank", "noopener,noreferrer");
+  };
   return (
     <section style={fileViewerStyle}>
       <header style={fileViewerHeaderStyle}>
@@ -304,6 +319,7 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
           {ko ? "외부 열기" : "Open"}
         </button>
       </header>
+      {openError && <div style={fileNoticeStyle}>{openError}</div>}
       <div style={fileViewerBodyStyle}>
         {file.viewerKind === "browser" ? (
           <BrowserViewer file={file} />

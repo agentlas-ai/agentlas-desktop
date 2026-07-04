@@ -567,6 +567,33 @@ export function registerIpcHandlers(): void {
     listDirectory(absPath, showHidden ?? false, rootPath),
   );
   ipcMain.handle("fs:readTextFile", (_e, absPath: string, rootPath?: string) => readTextFilePreview(absPath, rootPath));
+  ipcMain.handle("fs:openPath", async (_e, target: string): Promise<{ ok: boolean; message?: string }> => {
+    const raw = String(target || "").trim();
+    if (!raw) return { ok: false, message: "No file or URL was provided." };
+    try {
+      if (/^https?:\/\//i.test(raw)) {
+        await shell.openExternal(raw);
+        return { ok: true };
+      }
+      let localPath = raw;
+      if (raw.startsWith("file://")) {
+        localPath = fileURLToPath(raw);
+      } else if (raw.startsWith("agentlas://localfile/")) {
+        const parsed = new URL(raw);
+        localPath = parsed.searchParams.get("p") || "";
+      }
+      if (!path.isAbsolute(localPath)) {
+        return { ok: false, message: "Only absolute local paths can be opened." };
+      }
+      if (!fs.existsSync(localPath)) {
+        return { ok: false, message: `File does not exist: ${localPath}` };
+      }
+      const message = await shell.openPath(localPath);
+      return message ? { ok: false, message } : { ok: true };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  });
   // 산출물 내보내기 — 네이티브 저장 다이얼로그로 사용자가 고른 위치에 텍스트를 쓴다(lock-in 없음).
   ipcMain.handle(
     "fs:saveTextFile",
