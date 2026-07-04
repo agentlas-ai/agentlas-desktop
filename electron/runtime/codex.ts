@@ -333,7 +333,11 @@ export const runCodex: Runner = async (
       "-",
     ];
     const r = await runCodexProcess(bin, args, runReq.userPrompt, runReq, events);
-    if (runReq.signal?.aborted) throw new Error(tStatus(runReq.locale, "aborted"));
+    if (runReq.signal?.aborted) {
+      // 취소여도 스레드가 생겼으면 저장 → steering 메시지가 이 세션을 resume해 문맥 유지.
+      if (runReq.chatId && fingerprint && r.threadId) saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint);
+      throw new Error(tStatus(runReq.locale, "aborted"));
+    }
     if (r.code === 0) {
       if (runReq.chatId && fingerprint && r.threadId) {
         saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint);
@@ -347,7 +351,10 @@ export const runCodex: Runner = async (
   // CREATE: 시스템 프롬프트 + 히스토리 + user를 stdin으로 보내 새 세션을 시드한다.
   const createArgs = ["exec", "--json", "--skip-git-repo-check", ...permArgs, ...mcpArgs, "-"];
   const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events);
-  if (runReq.signal?.aborted) throw new Error(tStatus(runReq.locale, "aborted"));
+  if (runReq.signal?.aborted) {
+    if (runReq.chatId && fingerprint && created.threadId) saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint);
+    throw new Error(tStatus(runReq.locale, "aborted"));
+  }
   if (created.code === 0) {
     if (runReq.chatId && fingerprint && created.threadId) {
       saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint);

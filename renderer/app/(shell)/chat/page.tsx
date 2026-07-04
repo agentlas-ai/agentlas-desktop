@@ -543,6 +543,9 @@ function ChatPage() {
   const partialTextRef = useRef("");
   // runId가 도착하기 전(invoke:run 왕복 중)에 Stop을 누른 경우를 기억 — 도착 즉시 취소한다.
   const cancelRequestedRef = useRef(false);
+  // 스티어링으로 인한 취소인지 구분 — 이 취소는 "aborted" 에러 버블을 띄우지 않고,
+  // 저장된 세션을 이어받아(resume) 큐의 스티어 메시지로 계속한다(코덱스식 실행중 방향전환).
+  const steerCancelRef = useRef(false);
   // 실행 중 steering — busy일 때 엔터로 들어온 메시지를 큐에 쌓고, 현재 턴이 끝나면 순서대로 전송한다.
   const steerQueueRef = useRef<
     Array<{
@@ -973,11 +976,19 @@ function ChatPage() {
           window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chatId } }));
         });
       } else if (ev.kind === "error") {
-        pushWorkflow("status", ev.error?.message ?? t("chat.err.unknown"));
-        setMessages((m) => [
-          ...m.filter((msg) => msg.id !== placeholderId),
-          { id: uid(), role: "system", text: `⚠️ ${ev.error?.message ?? t("chat.err.unknown")}` },
-        ]);
+        // 스티어링 취소면 에러 버블을 띄우지 않는다 — placeholder만 걷어내고, busy→false 시
+        // drain 이펙트가 큐의 스티어 메시지를 저장된 세션 resume으로 이어보낸다.
+        const wasSteer = steerCancelRef.current;
+        steerCancelRef.current = false;
+        if (wasSteer) {
+          setMessages((m) => m.filter((msg) => msg.id !== placeholderId));
+        } else {
+          pushWorkflow("status", ev.error?.message ?? t("chat.err.unknown"));
+          setMessages((m) => [
+            ...m.filter((msg) => msg.id !== placeholderId),
+            { id: uid(), role: "system", text: `⚠️ ${ev.error?.message ?? t("chat.err.unknown")}` },
+          ]);
+        }
         setBusy(false);
         setCancelPending(false);
         cancelRequestedRef.current = false;
@@ -1551,6 +1562,13 @@ function ChatPage() {
       if (busy) {
         steerQueueRef.current.push({ text, opts });
         setQueuedSteers(steerQueueRef.current.map((q) => q.text));
+        // 코덱스식 스티어링 — 현재 실행을 즉시 취소하고, abort 시 저장된 세션을 이어받아(resume)
+        // 이 메시지로 계속한다. Stop 버튼과 달리 큐를 비우지 않고, 취소 에러 버블도 억제한다.
+        const runId = runIdRef.current ?? lastRunIdRef.current;
+        if (runId) {
+          steerCancelRef.current = true;
+          void ipc()?.invoke.cancel(runId);
+        }
         return;
       }
       void send(text, opts);

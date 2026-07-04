@@ -444,6 +444,11 @@ export const runClaudeCode: Runner = async (
       cleanupSysFile();
       req.signal?.removeEventListener("abort", onAbort);
       if (req.signal?.aborted) {
+        // 취소여도 CLI가 이미 세션을 디스크에 남겼으면 저장한다 → 사용자가 이어서 보내는
+        // steering 메시지가 이 세션을 resume해 "실행 중 방향 전환"처럼 문맥을 유지한다.
+        if (req.chatId && fingerprint && sessionId) {
+          saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint);
+        }
         reject(new Error(tStatus(req.locale, "aborted")));
         return;
       }
