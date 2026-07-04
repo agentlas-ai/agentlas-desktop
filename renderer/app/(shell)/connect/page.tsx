@@ -8,6 +8,7 @@ import {
   IconKey,
   IconLayers,
   IconNetwork,
+  IconPlus,
   IconRefresh,
   IconRoute,
   IconSettings,
@@ -348,7 +349,7 @@ export default function ConnectPage() {
   }, [appendLog, botToken, focusTokenInput, refresh, selected, t]);
 
   const handleBindingAction = useCallback(
-    async (binding: TelegramConnectBinding, action: "open" | "test" | "settings" | "resume" | "stop" | "remove") => {
+    async (binding: TelegramConnectBinding, action: "open" | "test" | "settings" | "clone" | "resume" | "stop" | "remove") => {
       const api = ipc();
       if (!api) return;
       setBusy(`${action}:${binding.id}`);
@@ -368,6 +369,12 @@ export default function ConnectPage() {
           const result = await api.telegram.configureBotSettings(binding.id);
           setToast(result.message);
           appendLog(result.message, result.ok ? "success" : "info");
+          await refresh();
+        } else if (action === "clone") {
+          appendLog(t("connect.log.clone_start", { name: binding.targetName }));
+          const result = await api.telegram.clone({ sourceBindingId: binding.id });
+          setToast(result.message);
+          appendLog(result.message, "success");
           await refresh();
         } else if (action === "resume") {
           const next = await api.telegram.resume(binding.id);
@@ -526,6 +533,15 @@ export default function ConnectPage() {
                       </button>
                       <button type="button" onClick={() => void handleBindingAction(binding, "test")} disabled={!binding.telegramChatId || busy === `test:${binding.id}`}>
                         {t("connect.action.test")}
+                      </button>
+                      <button
+                        type="button"
+                        title={t("connect.action.clone_title")}
+                        onClick={() => void handleBindingAction(binding, "clone")}
+                        disabled={!binding.hasToken || busy === `clone:${binding.id}`}
+                      >
+                        <IconPlus size={13} />
+                        {t("connect.action.clone")}
                       </button>
                       <button
                         type="button"
