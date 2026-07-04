@@ -120,98 +120,168 @@ export default function OberonMotionPage() {
 
   return (
     <main className="motion-app-page">
-      <section className="motion-app-hero">
-        <div className="motion-app-kicker">
-          <IconSparkles size={14} />
-          Agent App · /oberon-motion
-        </div>
-        <div className="motion-app-title-row">
-          <div>
-            <h1>Oberon Motiongraphic Studio</h1>
-            <p>
-              {locale === "ko"
-                ? "제품 화면 증거를 중심으로 모션그래픽 팀을 실행합니다."
-                : "Runs a motion-graphics team built around real product-screen evidence."}
-            </p>
+      <section className="motion-command">
+        <Link href="/apps" className="motion-app-link">
+          <IconChevronRight size={14} style={{ transform: "rotate(180deg)" }} />
+          Apps
+        </Link>
+        <div className="motion-title-block">
+          <div className="motion-app-kicker">
+            <IconSparkles size={14} />
+            Agent App · /oberon-motion
           </div>
-          <Link href="/apps" className="motion-app-link">
-            Apps
-            <IconChevronRight size={14} />
-          </Link>
+          <h1>Oberon Motiongraphic Studio</h1>
+          <p>
+            {locale === "ko"
+              ? "실제 제품 화면을 증거로 잡고, 30초 모션그래픽을 렌더 가능한 순서로 조립합니다."
+              : "Turns real product-screen proof into a render-ready 30-second motion graphic."}
+          </p>
+        </div>
+        <div className="motion-command-stats" aria-label="Motion studio status">
+          <span>
+            <strong>30s</strong>
+            runtime
+          </span>
+          <span>
+            <strong>4</strong>
+            beats
+          </span>
+          <span>
+            <strong>5</strong>
+            QA gates
+          </span>
         </div>
       </section>
 
       <section className="motion-app-grid">
-        <div className="motion-app-preview" aria-label="Motion preview">
-          <div className="motion-frame">
-            <div className="motion-frame-top">
-              <span />
-              <span />
-              <span />
+        <div className="motion-proof-board" aria-label="Motion proof board">
+          <div className="motion-board-head">
+            <div>
+              <span>Proof board</span>
+              <strong>Product screen choreography</strong>
             </div>
-            <div className="motion-frame-body">
-              <div className="motion-proof-window">
-                <div className="motion-proof-rail" />
-                <div className="motion-proof-main">
-                  <div className="motion-proof-chip">Agentlas Desktop</div>
-                  <div className="motion-proof-title">Build → Route → Render</div>
-                  <div className="motion-proof-bars">
+            <p>{locale === "ko" ? "화면 → 카피 → 움직임 → 납품" : "Surface → copy → motion → delivery"}</p>
+          </div>
+
+          <div className="motion-proof-stage">
+            <div className="motion-screen">
+              <div className="motion-screen-top">
+                <span />
+                <span />
+                <span />
+                <strong>Agentlas Desktop</strong>
+              </div>
+              <div className="motion-screen-body">
+                <div className="motion-screen-rail">
+                  <span />
+                  <span />
+                  <span />
+                  <span />
+                </div>
+                <div className="motion-screen-main">
+                  <div className="motion-proof-chip">live surface</div>
+                  <div className="motion-proof-title">Build · Route · Render</div>
+                  <div className="motion-proof-grid">
+                    <span />
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                  <div className="motion-copy-bars">
                     <span />
                     <span />
                     <span />
                   </div>
                 </div>
               </div>
-              <div className="motion-lottie-mark" />
-              <div className="motion-caption">product proof first</div>
             </div>
+            <div className="motion-proof-aside">
+              <span>Remotion</span>
+              <strong>Timeline locked before export</strong>
+              <p>
+                {locale === "ko"
+                  ? "텍스트 안전영역과 실제 UI 증거를 먼저 검수한 뒤 MP4/매니페스트로 넘깁니다."
+                  : "Text safe areas and real UI proof are checked before MP4 and manifest handoff."}
+              </p>
+            </div>
+          </div>
+
+          <div className="motion-evidence-track">
+            {beats.map((beat) => (
+              <div key={beat.t} className="motion-evidence-card">
+                <span>{beat.t}</span>
+                <strong>{beat.label}</strong>
+                <p>{locale === "ko" ? beat.copy.ko : beat.copy.en}</p>
+              </div>
+            ))}
           </div>
         </div>
 
         <aside className="motion-app-panel">
-          <div className="motion-panel-head">
-            <IconRoute size={15} />
-            <span>Live route test</span>
+          <div className="motion-panel-block">
+            <div className="motion-panel-head">
+              <IconRoute size={15} />
+              <span>Live route test</span>
+            </div>
+            <button className="motion-primary" type="button" onClick={checkRoute} disabled={routeState === "running"}>
+              {locale === "ko"
+                ? routeState === "running"
+                  ? "라우팅 확인 중"
+                  : "Hephaestus 라우팅 확인"
+                : routeState === "running"
+                  ? "Checking route..."
+                  : "Check Hephaestus routing"}
+            </button>
+            <StatusLine label="Route" state={routeState} />
+            {selected && <ResultLine label="selected" value={selected} />}
+            {receipt && <ResultLine label="receipt" value={receipt} />}
+            {routeError && <div className="motion-error">{routeError}</div>}
           </div>
-          <button className="motion-primary" type="button" onClick={checkRoute} disabled={routeState === "running"}>
-            {locale === "ko"
-              ? routeState === "running"
-                ? "라우팅 확인 중"
-                : "Hephaestus 라우팅 확인"
-              : routeState === "running"
-                ? "Checking route..."
-                : "Check Hephaestus routing"}
-          </button>
-          <StatusLine label="Route" state={routeState} />
-          {selected && <ResultLine label="selected" value={selected} />}
-          {receipt && <ResultLine label="receipt" value={receipt} />}
-          {routeError && <div className="motion-error">{routeError}</div>}
 
-          <div className="motion-divider" />
+          <div className="motion-panel-block">
+            <div className="motion-panel-head">
+              <IconFilm size={15} />
+              <span>Render check</span>
+            </div>
+            <button className="motion-secondary" type="button" onClick={runRenderCheck} disabled={renderState === "running"}>
+              {locale === "ko"
+                ? renderState === "running"
+                  ? "테스트 중"
+                  : "샘플 렌더 테스트"
+                : renderState === "running"
+                  ? "Testing..."
+                  : "Run sample render test"}
+            </button>
+            <div className="motion-meter" aria-label="render progress">
+              <span style={{ width: `${progress}%` }} />
+            </div>
+            <StatusLine label="Preview QA" state={renderState} />
+          </div>
 
-          <div className="motion-panel-head">
-            <IconFilm size={15} />
-            <span>Render check</span>
+          <div className="motion-panel-block motion-panel-block--quiet">
+            <div className="motion-panel-head">
+              <IconLayers size={15} />
+              <span>Export package</span>
+            </div>
+            <div className="motion-package-row">
+              <span>master.mp4</span>
+              <strong>pending</strong>
+            </div>
+            <div className="motion-package-row">
+              <span>storyboard.json</span>
+              <strong>ready</strong>
+            </div>
+            <div className="motion-package-row">
+              <span>qa-report.md</span>
+              <strong>ready</strong>
+            </div>
           </div>
-          <button className="motion-secondary" type="button" onClick={runRenderCheck} disabled={renderState === "running"}>
-            {locale === "ko"
-              ? renderState === "running"
-                ? "테스트 중"
-                : "샘플 렌더 테스트"
-              : renderState === "running"
-                ? "Testing..."
-                : "Run sample render test"}
-          </button>
-          <div className="motion-meter" aria-label="render progress">
-            <span style={{ width: `${progress}%` }} />
-          </div>
-          <StatusLine label="Preview QA" state={renderState} />
         </aside>
       </section>
 
       <section className="motion-app-lower">
-        <div className="motion-app-table">
-          <h2>Storyboard</h2>
+        <div className="motion-app-table motion-app-table--wide">
+          <h2>Run order</h2>
           {beats.map((beat) => (
             <div key={beat.t} className="motion-beat-row">
               <span>{beat.t}</span>

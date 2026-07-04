@@ -149,6 +149,7 @@ async function runKeyframeJob(
   for (const shot of shots) {
     assertNotCancelled(job.id);
     job.progress.currentShotId = shot.shotId;
+    job.progress.percent = Math.max(job.progress.percent, 1);
     job.message = ko ? `${shot.shotId} 첫 프레임 생성 중` : `Generating first frame for ${shot.shotId}`;
     job.updatedAtMs = Date.now();
     try {
@@ -343,6 +344,10 @@ async function runImageBatchProcess(
     // 취소(cancelOberonKeyframes)·종료 정리가 이 자식에 도달할 수 있게 job id로 추적.
     runningChildren.set(job.id, child);
     let stderr = "";
+    const progressTimer = setInterval(() => {
+      void refreshCodexBatchProgress(job, shotCount);
+    }, 1_000);
+    progressTimer.unref?.();
     // 타임아웃 시에도 자식 단독이 아니라 프로세스 그룹째 종료(고아 codex 방지).
     const timer = setTimeout(() => killChildGroup(child), 15 * 60 * 1000);
     child.stderr?.on("data", (chunk: Buffer) => {
@@ -350,15 +355,45 @@ async function runImageBatchProcess(
     });
     child.on("error", (error) => {
       clearTimeout(timer);
+      clearInterval(progressTimer);
       runningChildren.delete(job.id);
       reject(error);
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      clearInterval(progressTimer);
+      void refreshCodexBatchProgress(job, shotCount);
       runningChildren.delete(job.id);
       resolve({ code, stderr: stderr.trim() });
     });
   });
+}
+
+async function refreshCodexBatchProgress(job: OberonKeyframeJob, shotCount: number): Promise<void> {
+  const summaryPath = path.join(job.outputDir, "codex-exec-image-results.json");
+  const summary = await readJsonFile<{
+    complete?: number;
+    failed?: number;
+    pending?: number;
+    results?: Array<{ status?: string }>;
+  }>(summaryPath).catch(() => null);
+  if (!summary) return;
+  const completed =
+    typeof summary.complete === "number"
+      ? summary.complete
+      : (summary.results ?? []).filter((item) => item.status === "complete").length;
+  const failed =
+    typeof summary.failed === "number"
+      ? summary.failed
+      : (summary.results ?? []).filter((item) => item.status === "failed").length;
+  const done = Math.max(0, Math.min(shotCount, completed + failed));
+  job.progress.completedImages = completed;
+  job.progress.percent = Math.max(job.progress.percent, done > 0 ? percent(done, shotCount) : 1);
+  job.message =
+    currentUiLocale() === "ko"
+      ? `Codex image_gen 키프레임 생성 중 (${completed}/${shotCount})`
+      : `Generating Codex image_gen keyframes (${completed}/${shotCount})`;
+  job.updatedAtMs = Date.now();
 }
 
 function codexImageBatchRunnerPath(): string {
@@ -429,7 +464,8 @@ function updateJob(
   job.status = status;
   job.message = message;
   job.progress.phase = phase;
-  job.progress.percent = percent(job.progress.completedImages, job.progress.totalImages);
+  const computedPercent = percent(job.progress.completedImages, job.progress.totalImages);
+  job.progress.percent = status === "running" && computedPercent === 0 ? Math.max(job.progress.percent, 1) : computedPercent;
   job.updatedAtMs = Date.now();
 }
 

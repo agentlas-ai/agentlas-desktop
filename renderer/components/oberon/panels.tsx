@@ -181,11 +181,11 @@ export function ApprovalGate({ production, onApprove, approved }: { production: 
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 28px 60px" }}>
       <PanelHead
-        title={locale === "ko" ? "Approval Gate — 비용·권리·세이프티 승인" : "Approval Gate — Cost, Rights & Safety Approval"}
+        title={locale === "ko" ? "Approval Gate — API 노출·권리·세이프티 승인" : "Approval Gate — API Exposure, Rights & Safety Approval"}
         subtitle={
           locale === "ko"
-            ? "비싼 영상 생성 전에 사람이 한 번 승인합니다. 7개 품질 게이트와 예산을 확인하고, 통과하면 생성 큐가 열립니다."
-            : "A human approves once before any expensive video generation. Check the 7 quality gates and the budget — once they pass, the generation queue opens."
+            ? "외부 영상 API를 호출하기 전에 사람이 한 번 승인합니다. 품질 게이트와 확인된 공개 단가 기준 노출액을 확인하고, 통과하면 생성 큐가 열립니다."
+            : "A human approves before any external video API call. Check the quality gates and verified public-rate exposure; once they pass, the generation queue opens."
         }
         icon={<IconShield size={18} />}
       />
@@ -210,12 +210,12 @@ export function ApprovalGate({ production, onApprove, approved }: { production: 
 
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <Card style={{ padding: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 800, color: "var(--ink)", marginBottom: 10 }}>{locale === "ko" ? "예상 비용" : "Estimated Cost"}</div>
+            <div style={{ fontSize: 12, fontWeight: 800, color: "var(--ink)", marginBottom: 10 }}>{locale === "ko" ? "이번 실행 외부 API 노출" : "Next-run External API Exposure"}</div>
             <div style={{ fontSize: 28, fontWeight: 800, color: cost.withinBudget ? "var(--ink)" : "var(--red-deep)", lineHeight: 1 }}>{formatCost(cost.totalUsd)}</div>
             <div style={{ fontSize: 11, color: "var(--muted-deep)", margin: "4px 0 10px" }}>
               {locale === "ko"
-                ? `예산 ${formatCost(cost.budgetUsd)} · 영상 ${formatCost(cost.videoCostUsd)} + 이미지 ${formatCost(cost.imageCostUsd)}`
-                : `Budget ${formatCost(cost.budgetUsd)} · Video ${formatCost(cost.videoCostUsd)} + Image ${formatCost(cost.imageCostUsd)}`}
+                ? `확인 단가만 반영 · 영상 ${formatCost(cost.videoCostUsd)} + 이미지 ${formatCost(cost.imageCostUsd)}`
+                : `Verified rates only · video ${formatCost(cost.videoCostUsd)} + image ${formatCost(cost.imageCostUsd)}`}
             </div>
             <Meter value={cost.totalUsd} max={cost.budgetUsd} color={cost.withinBudget ? "var(--accent)" : "var(--red-deep)"} />
           </Card>

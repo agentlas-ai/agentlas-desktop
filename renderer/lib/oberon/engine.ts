@@ -30,7 +30,6 @@ import {
 } from "./prompt-craft";
 import {
   providerById,
-  routeImageProvider,
   routeVideoProvider,
 } from "./providers";
 import { COVERAGE_PATTERNS, FORMAT_DEFAULT_DURATION, GENRE_TEMPLATES, MOVEMENTS } from "./taxonomy";
@@ -260,6 +259,11 @@ function timeOfDayLabel(idx: number, locale: Locale): string {
 export interface PlanOptions {
   premium?: boolean; // 최고 품질 우선 (비용 무시)
   budgetUsd?: number;
+  imageProviderId?: string;
+  videoProviderIds?: string[];
+  billableKeyframeShots?: number;
+  billableVideoShots?: number;
+  videoTakesPerShot?: number;
   /** 생성되는 라벨/설명 텍스트의 UI 로케일 (기본 "ko" — 기존 호출부 호환). */
   locale?: Locale;
 }
@@ -478,7 +482,14 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
   });
 
   // 5) 비용 레저
-  const cost = buildCostLedger(shotsArr, bible, opts.budgetUsd);
+  const cost = buildCostLedger(shotsArr, bible, opts.budgetUsd, {
+    imageProviderId: opts.imageProviderId,
+    videoProviderIds: opts.videoProviderIds,
+    billableKeyframeShots: opts.billableKeyframeShots,
+    billableVideoShots: opts.billableVideoShots,
+    videoTakesPerShot: opts.videoTakesPerShot,
+    costBasis: "next-run",
+  });
 
   // 6) 통계
   const totalDur = shotsArr.reduce((a, s) => a + s.durationSec, 0);
@@ -636,39 +647,130 @@ function enrichShots(args: {
 }
 
 // ── 비용 ─────────────────────────────────────────────────
-// 총비용 = 영상(샷 × 테이크 수) + 이미지(레퍼런스 + 키프레임).
-// 헤더·머니게이트·코스트 레저가 모두 이 totalUsd를 쓴다.
+// 외부 API 노출 추정 = 확인된 공급자 단가 × 이번 실행에서 실제 보낼 범위.
+// 구독/CLI 경로와 공개 단가 미확인 공급자는 임의 달러 비용으로 부풀리지 않는다.
 
-/** 샷당 생성할 후보 테이크 수. 비용·생성 모두 이 값을 공유. */
-export const TAKES_PER_SHOT = 3;
+/** 현재 데스크톱 실렌더가 한 번에 외부 영상 API로 보내는 안전 상한. */
+export const LIVE_KEYFRAME_MAX_SHOTS = 12;
+export const LIVE_RENDER_MAX_SHOTS = 3;
+export const LIVE_RENDER_TAKES_PER_SHOT = 1;
+export const TAKES_PER_SHOT = LIVE_RENDER_TAKES_PER_SHOT;
+
+export interface CostEstimateOptions {
+  imageProviderId?: string;
+  videoProviderIds?: string[];
+  billableKeyframeShots?: number;
+  billableVideoShots?: number;
+  videoTakesPerShot?: number;
+  costBasis?: CostLedger["costBasis"];
+}
 
 export function recomputeCost(
   shots: ShotSpec[],
   imageCostUsd: number,
   budgetUsd?: number,
+  opts: CostEstimateOptions = {},
 ): CostLedger {
-  const lines: CostLine[] = shots.map((s) => ({ shotId: s.shotId, providerId: s.providerId, attempts: 1, costUsd: s.estCostUsd }));
+  const billableVideoShots = Math.max(
+    0,
+    Math.min(opts.billableVideoShots ?? LIVE_RENDER_MAX_SHOTS, shots.length),
+  );
+  const takesPerShot = Math.max(1, Math.min(opts.videoTakesPerShot ?? LIVE_RENDER_TAKES_PER_SHOT, 4));
+  const videoRate = videoRatePerSecond(opts.videoProviderIds);
+  const lines: CostLine[] = shots.slice(0, billableVideoShots).map((s) => ({
+    shotId: s.shotId,
+    providerId: videoRate.providerId,
+    attempts: takesPerShot,
+    costUsd: videoRate.usdPerSecond == null ? 0 : Number((s.durationSec * videoRate.usdPerSecond).toFixed(2)),
+  }));
   const videoCost = Number(lines.reduce((a, l) => a + l.costUsd, 0).toFixed(2));
-  const total = Number((videoCost * TAKES_PER_SHOT + imageCostUsd).toFixed(2));
-  const budget = budgetUsd ?? Math.max(60, Math.ceil((total * 1.35) / 10) * 10);
+  const total = Number((videoCost + imageCostUsd).toFixed(2));
+  const budget = budgetUsd ?? Math.max(10, Math.ceil((Math.max(total, 1) * 1.35) / 5) * 5);
+  const noteParts = [videoRate.note].filter(Boolean);
   return {
     lines,
     imageCostUsd: Number(imageCostUsd.toFixed(2)),
     videoCostUsd: videoCost,
-    takesPerShot: TAKES_PER_SHOT,
+    takesPerShot,
+    billableVideoShots,
+    costBasis: opts.costBasis ?? "next-run",
+    externalCostNote: noteParts.join(" · ") || undefined,
     totalUsd: total,
     budgetUsd: budget,
     withinBudget: total <= budget,
   };
 }
 
-function buildCostLedger(shots: ShotSpec[], bible: ContinuityBible, budgetUsd?: number): CostLedger {
+function buildCostLedger(
+  shots: ShotSpec[],
+  bible: ContinuityBible,
+  budgetUsd?: number,
+  opts: CostEstimateOptions = {},
+): CostLedger {
   // 이미지: 레퍼런스 시트(~3컷) + 실제 영상 전에 확인할 첫 프레임.
-  const keyframeCount = shots.filter((s) => s.requiresKeyframe).length;
-  const refImageCount = bible.references.length * 3;
-  const imgUnit = providerById(routeImageProvider("keyframe").providerId)?.approxCostUsd ?? 0.04;
-  const imageCost = (keyframeCount + refImageCount) * imgUnit;
-  return recomputeCost(shots, imageCost, budgetUsd);
+  const imageCost = estimateImageExternalCostUsd(shots, bible, opts.imageProviderId, opts.billableKeyframeShots);
+  return recomputeCost(shots, imageCost, budgetUsd, opts);
+}
+
+export function recomputeProductionCost(
+  production: FilmProduction,
+  modelSettings = production.modelSettings,
+): CostLedger {
+  return buildCostLedger(production.shots, production.bible, production.cost.budgetUsd, {
+    imageProviderId: modelSettings?.imageProvider,
+    videoProviderIds: modelSettings?.videoProviders,
+    billableKeyframeShots: LIVE_KEYFRAME_MAX_SHOTS,
+    billableVideoShots: LIVE_RENDER_MAX_SHOTS,
+    videoTakesPerShot: LIVE_RENDER_TAKES_PER_SHOT,
+    costBasis: "next-run",
+  });
+}
+
+function estimateImageExternalCostUsd(
+  shots: ShotSpec[],
+  bible: ContinuityBible,
+  imageProviderId = "codex-cli-image",
+  billableKeyframeShots = LIVE_KEYFRAME_MAX_SHOTS,
+): number {
+  const keyframeCount = Math.min(billableKeyframeShots, shots.filter((s) => s.requiresKeyframe).length);
+  const count = keyframeCount + bible.references.length * 3;
+  switch (imageProviderId) {
+    case "codex-cli-image":
+    case "nanobanana-image":
+      return 0;
+    case "google-image":
+      return Number((count * 0.04).toFixed(2));
+    default:
+      return 0;
+  }
+}
+
+function videoRatePerSecond(videoProviderIds: string[] | undefined): {
+  providerId: string;
+  usdPerSecond?: number;
+  note?: string;
+} {
+  const ids = videoProviderIds?.length ? videoProviderIds : ["google-veo"];
+  for (const id of ids) {
+    switch (id) {
+      case "google-veo":
+        return { providerId: id, usdPerSecond: 0.05, note: "Veo 3.1 Lite 720p audio upper-bound" };
+      case "runway-video":
+        return { providerId: id, usdPerSecond: 0.12, note: "Runway Gen-4.5 credit rate" };
+      case "seedance-video":
+        return { providerId: id, usdPerSecond: 0.3034, note: "fal Seedance 2.0 720p audio" };
+      case "openai-sora":
+        return { providerId: id, usdPerSecond: 0.1, note: "OpenAI Sora 2 720p" };
+      case "luma-video":
+      case "higgsfield-video":
+      case "kling-video":
+      case "replicate-video":
+        return { providerId: id, note: "public per-second price not verified" };
+      default:
+        break;
+    }
+  }
+  return { providerId: ids[0] ?? "unknown", note: "public per-second price not verified" };
 }
 
 // ── 내러티브 템플릿 (결정적) ─────────────────────────────

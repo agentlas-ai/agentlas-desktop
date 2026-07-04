@@ -267,7 +267,14 @@ function withFailedLiveJob(job: OberonLiveJob | undefined, message: string): Obe
 }
 
 function progressPercent(job: OberonLiveJob): number {
-  return clampPercent(job.progress?.percent ?? 0);
+  const raw = clampPercent(job.progress?.percent ?? 0);
+  if (raw > 0 || terminalStatuses.has(job.status)) return raw;
+  if (job.status === "queued" || job.status === "running") {
+    const elapsedMs = Math.max(0, Date.now() - (job.createdAtMs || Date.now()));
+    const floor = job.status === "queued" ? 1 : 2 + Math.floor(elapsedMs / 3_000);
+    return clampPercent(Math.min(12, floor));
+  }
+  return raw;
 }
 
 function labelForKind(kind: OberonBackgroundJobKind): string {

@@ -128,7 +128,7 @@ export function BriefWizard({
               }
               style={{
                 display: "inline-flex", alignItems: "center", gap: 6, minHeight: 38, padding: "0 14px",
-                borderRadius: 999, fontSize: 13, fontWeight: 600, cursor: "pointer",
+                borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer",
                 background: premium ? "var(--ob-accent-soft)" : "var(--ob-surface)",
                 color: premium ? "var(--ob-accent-text)" : "var(--ob-ink-soft)",
                 border: `1px solid ${premium ? "transparent" : "var(--ob-edge-strong)"}`,
@@ -253,7 +253,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 const inputStyle: React.CSSProperties = {
   width: "100%",
   padding: "11px 14px",
-  borderRadius: 12,
+  borderRadius: 8,
   border: "1px solid var(--ob-edge-strong)",
   background: "var(--ob-paper)",
   color: "var(--ob-ink)",
@@ -314,7 +314,7 @@ function TagField({
         style={{
           border: `1.5px dashed ${over ? "var(--ob-accent)" : "var(--ob-edge-strong)"}`,
           background: over ? "var(--ob-accent-soft)" : "var(--ob-surface)",
-          borderRadius: 14,
+          borderRadius: 8,
           padding: 12,
           transition: "all 0.14s",
         }}
@@ -347,7 +347,7 @@ function TagField({
                 key={v}
                 style={{
                   display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 8px 5px 12px",
-                  borderRadius: 999, fontSize: 12.5, background: "var(--ob-paper)",
+                  borderRadius: 7, fontSize: 12.5, background: "var(--ob-paper)",
                   color: "var(--ob-ink-soft)", border: "1px solid var(--ob-edge)",
                 }}
               >

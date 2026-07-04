@@ -12,8 +12,12 @@ import {
   buildEdl,
   buildTitleSpec,
   defaultModelSettings,
+  LIVE_KEYFRAME_MAX_SHOTS,
+  LIVE_RENDER_MAX_SHOTS,
+  LIVE_RENDER_TAKES_PER_SHOT,
   loadProduction,
   planProduction,
+  recomputeProductionCost,
   recomputeCost,
   saveProduction,
   scoreTake,
@@ -156,7 +160,15 @@ export default function OberonPage() {
         planningRun = fallbackPlanResult(model, "Electron planner bridge is unavailable. Local deterministic planner was used.");
       }
       const plannedBrief = planningRun.ok ? mergeBriefWithPlan(brief, planningRun.patch, locale) : brief;
-      const prod = planProduction(plannedBrief, { premium, locale });
+      const prod = planProduction(plannedBrief, {
+        premium,
+        locale,
+        imageProviderId: model.imageProvider,
+        videoProviderIds: model.videoProviders,
+        billableKeyframeShots: LIVE_KEYFRAME_MAX_SHOTS,
+        billableVideoShots: LIVE_RENDER_MAX_SHOTS,
+        videoTakesPerShot: LIVE_RENDER_TAKES_PER_SHOT,
+      });
       prod.modelSettings = model;
       prod.planningRun = planningRun;
       return prod;
@@ -202,13 +214,20 @@ export default function OberonPage() {
     setRenderJob(null);
     setMotionJob(null);
     setAnimateJob(null);
+    const nextModel = prod.modelSettings ?? model;
     if (prod.modelSettings) setModel(prod.modelSettings);
-    const hasShots = prod.shots.length > 0;
-    const hasKeyframes = (prod.keyframeAssets?.length ?? 0) > 0;
-    const hasTakes = prod.takes.length > 0;
-    const hasEdl = prod.edl.length > 0;
-    const hasMotionOutput = (prod.renderOutputs ?? []).some((file) => file.kind === "motion_mp4");
-    const motionFormat = isMotionFormat(prod.brief.format);
+    const normalizedCost = recomputeProductionCost(prod, nextModel);
+    const normalizedProd: FilmProduction = {
+      ...prod,
+      cost: normalizedCost,
+      stats: { ...prod.stats, estTotalCostUsd: normalizedCost.totalUsd },
+    };
+    const hasShots = normalizedProd.shots.length > 0;
+    const hasKeyframes = (normalizedProd.keyframeAssets?.length ?? 0) > 0;
+    const hasTakes = normalizedProd.takes.length > 0;
+    const hasEdl = normalizedProd.edl.length > 0;
+    const hasMotionOutput = (normalizedProd.renderOutputs ?? []).some((file) => file.kind === "motion_mp4");
+    const motionFormat = isMotionFormat(normalizedProd.brief.format);
     const ss: Record<OberonStepId, StepState> = { ...INITIAL_STEP_STATE, setup: "done" };
     if (hasShots) {
       ss.plan = "done";
@@ -223,10 +242,10 @@ export default function OberonPage() {
     setKfProgress(hasKeyframes ? prod.keyframeAssets?.length ?? 0 : hasTakes ? prod.shots.length : 0);
     setKfDone(hasKeyframes || hasTakes);
     setVideoMode(hasMotionOutput ? "motion_ad" : "veo");
-    setProduction(prod);
+    setProduction(normalizedProd);
     setStepState(ss);
     setActive(hasEdl || hasMotionOutput ? "delivery" : motionFormat || hasKeyframes || hasTakes ? "video" : hasShots ? "keyframe" : "plan");
-  }, []);
+  }, [model]);
 
   // 01 기획 편집 영속 (로그라인/트리트먼트 등)
   const patchBrief = useCallback((patch: Partial<FilmBrief>) => {
@@ -276,7 +295,12 @@ export default function OberonPage() {
     setProduction((p) => {
       if (!p) return p;
       const shots = mutate(p.shots);
-      const cost = recomputeCost(shots, p.cost.imageCostUsd, p.cost.budgetUsd);
+      const cost = recomputeCost(shots, p.cost.imageCostUsd, p.cost.budgetUsd, {
+        videoProviderIds: p.modelSettings?.videoProviders ?? model.videoProviders,
+        billableVideoShots: LIVE_RENDER_MAX_SHOTS,
+        videoTakesPerShot: LIVE_RENDER_TAKES_PER_SHOT,
+        costBasis: "next-run",
+      });
       const totalDur = Number(shots.reduce((a, s) => a + s.durationSec, 0).toFixed(1));
       const next: FilmProduction = {
         ...p,
@@ -287,7 +311,7 @@ export default function OberonPage() {
       saveProduction(next);
       return next;
     });
-  }, []);
+  }, [model.videoProviders]);
 
   // 05 수동 테이크 선택 — 클릭한 테이크를 selected, EDL 갱신
   const selectTake = useCallback((shotId: string, takeId: string) => {
@@ -453,7 +477,8 @@ export default function OberonPage() {
   const materializeKeyframeJob = useCallback((job: OberonKeyframeJob) => {
     setProduction((p) => {
       if (!p) return p;
-      const byShot = new Map(job.assets.map((asset) => [asset.shotId, asset]));
+      const mergedAssets = [...(p.keyframeAssets ?? []).filter((asset) => !job.assets.some((next) => next.shotId === asset.shotId)), ...job.assets];
+      const byShot = new Map(mergedAssets.map((asset) => [asset.shotId, asset]));
       const shots = p.shots.map((shot) => {
         const asset = byShot.get(shot.shotId);
         return asset ? { ...shot, firstFrameAssetId: asset.id } : shot;
@@ -461,13 +486,13 @@ export default function OberonPage() {
       const next: FilmProduction = {
         ...p,
         shots,
-        keyframeAssets: job.assets,
+        keyframeAssets: mergedAssets,
       };
       saveProduction(next);
       return next;
     });
     setKfProgress(job.assets.length);
-    setKfDone(job.assets.length === job.progress.totalImages);
+    setKfDone(job.assets.length > 0);
   }, []);
 
   const pollKeyframeJob = useCallback(
@@ -522,11 +547,14 @@ export default function OberonPage() {
       return;
     }
     const keyframeProvider = model.imageProvider === "google-image" ? "google-imagen" : "codex-imagegen-cli";
+    const existingKeyframes = new Set((production.keyframeAssets ?? []).map((asset) => asset.shotId));
+    const missingShots = production.shots.filter((shot) => !existingKeyframes.has(shot.shotId));
+    const batchShots = (missingShots.length ? missingShots : production.shots).slice(0, LIVE_KEYFRAME_MAX_SHOTS);
     const request: OberonKeyframeRequest = {
       productionId: production.id,
       title: production.brief.title,
       aspectRatio: production.brief.aspect,
-      shots: production.shots.map((shot) => ({
+      shots: batchShots.map((shot) => ({
         shotId: shot.shotId,
         index: shot.index,
         aspectRatio: production.brief.aspect,
@@ -535,7 +563,7 @@ export default function OberonPage() {
         cameraSize: shot.camera.size,
         continuityRefs: shot.continuityRefs,
       })),
-      maxShots: production.shots.length,
+      maxShots: batchShots.length,
       provider: keyframeProvider,
       model: keyframeProvider === "google-imagen" ? "imagen-4.0-generate-001" : "image_gen.imagegen",
       imageSize: "1K",
@@ -549,12 +577,6 @@ export default function OberonPage() {
       .then((job) => {
         trackOberonLiveJob("keyframe", job);
         setKeyframeJob(job);
-        setProduction((p) => {
-          if (!p) return p;
-          const next = { ...p, keyframeAssets: [] };
-          saveProduction(next);
-          return next;
-        });
         pollKeyframeJob(job.id);
       })
       .catch((error) => {
@@ -602,8 +624,8 @@ export default function OberonPage() {
             }
           : undefined,
       })),
-      maxShots: 3,
-      takesPerShot: 1,
+      maxShots: LIVE_RENDER_MAX_SHOTS,
+      takesPerShot: LIVE_RENDER_TAKES_PER_SHOT,
       provider: "google-enterprise-veo",
       model: "veo-3.1-lite-generate-001",
       resolution: "720p",
@@ -975,7 +997,7 @@ export default function OberonPage() {
             <StatChip label={locale === "ko" ? "샷" : "Shots"} value={production.stats.shotCount} />
             <StatChip label={locale === "ko" ? "씬" : "Scenes"} value={production.stats.sceneCount} />
             <StatChip label={locale === "ko" ? "길이" : "Length"} value={formatDuration(production.stats.totalDurationSec)} />
-            <StatChip label={locale === "ko" ? "예상" : "Est."} value={formatCost(production.stats.estTotalCostUsd)} />
+            <StatChip label={locale === "ko" ? "API 노출" : "API"} value={formatCost(production.stats.estTotalCostUsd)} />
             <button onClick={newProject} style={newBtn}>
               <Glyph name="plus" size={13} strokeWidth={2.2} /> {locale === "ko" ? "새 프로젝트" : "New Project"}
             </button>
@@ -1345,7 +1367,7 @@ function ApproveBar({ label, onApprove, done }: { label: string; onApprove: () =
         justifyContent: "flex-end",
       }}
     >
-      <button onClick={onApprove} style={{ display: "inline-flex", alignItems: "center", gap: 8, minHeight: 44, padding: "0 22px", borderRadius: 999, fontSize: 14, fontWeight: 700, background: "var(--ob-accent)", color: "#fff", border: "none", cursor: "pointer" }}>
+      <button onClick={onApprove} style={{ display: "inline-flex", alignItems: "center", gap: 8, minHeight: 44, padding: "0 22px", borderRadius: 8, fontSize: 14, fontWeight: 700, background: "var(--ob-accent)", color: "#fff", border: "none", cursor: "pointer" }}>
         {label} <Glyph name="chevron" size={14} strokeWidth={2.3} />
       </button>
     </div>

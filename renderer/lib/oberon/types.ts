@@ -488,6 +488,12 @@ export interface CostLedger {
   videoCostUsd: number;
   /** 샷당 생성할 후보 테이크 수 (총비용 = videoCostUsd × takesPerShot + imageCostUsd). */
   takesPerShot: number;
+  /** 이번 실행에서 실제 외부 API에 보낼 영상 클립 수. 전체 샷 수와 다를 수 있다. */
+  billableVideoShots?: number;
+  /** 비용 숫자가 어떤 기준인지 명시한다. next-run은 다음 실행 노출액, full-plan은 전체 계획 추정치. */
+  costBasis?: "next-run" | "full-plan";
+  /** 구독/크레딧 포함분처럼 달러 숫자로 확정하면 안 되는 경우 UI 보조 문구. */
+  externalCostNote?: string;
   totalUsd: number;
   budgetUsd: number;
   withinBudget: boolean;

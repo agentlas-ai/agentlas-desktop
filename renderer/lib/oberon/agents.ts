@@ -316,7 +316,7 @@ export const QUALITY_GATES: QualityGateI18n[] = [
   { key: "shot", name: "샷 게이트", nameEn: "Shot Gate", passCondition: "각 비트에 필요한 coverage가 있음", passConditionEn: "Each beat has the coverage it needs" },
   { key: "continuity", name: "컨티뉴이티 게이트", nameEn: "Continuity Gate", passCondition: "인물·의상·공간·소품 레퍼런스가 있음", passConditionEn: "Character, wardrobe, location, and prop references exist" },
   { key: "keyframe", name: "키프레임 게이트", nameEn: "Keyframe Gate", passCondition: "first/last frame 또는 reference set 승인됨", passConditionEn: "First/last frame or reference set is approved" },
-  { key: "cost", name: "코스트 게이트", nameEn: "Cost Gate", passCondition: "예상 생성 비용이 프로젝트 한도 안", passConditionEn: "Estimated generation cost is within the project budget" },
+  { key: "cost", name: "API 노출 게이트", nameEn: "API Exposure Gate", passCondition: "이번 실행의 확인된 외부 API 노출액이 한도 안", passConditionEn: "Verified external API exposure for this run is within the limit" },
   { key: "safety", name: "세이프티·권리 게이트", nameEn: "Safety/Rights Gate", passCondition: "실존 인물·IP·음악·상표 리스크 정리됨", passConditionEn: "Real-person, IP, music, and trademark risks are resolved" },
 ];
 

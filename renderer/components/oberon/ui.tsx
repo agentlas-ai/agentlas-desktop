@@ -1,7 +1,7 @@
 // Oberon 스튜디오 — 공유 UI 프리미티브 + 디자인 토큰.
 //
 // 미감: agentlas hub/use-cases 디자인 시스템(--rd-*)에 맞춤.
-// 쿨 뉴트럴 + 단일 인디고 액센트(#5A56DC, 브랜드색). 필 버튼/칩, 라운드 카드,
+// 쿨 뉴트럴 + 단일 인디고 액센트(#5A56DC, 브랜드색). 작업 콘솔형 카드,
 // accent-soft 하이라이트, 휴머니스트 산세리프 디스플레이, 넉넉한 여백, 절제된 그림자.
 // 무지개·보라그라데이션·이모지·모노 대문자 남발 금지.
 "use client";
@@ -181,7 +181,7 @@ export function Chip({
         gap: 6,
         minHeight: 34,
         padding: "0 14px",
-        borderRadius: 999,
+        borderRadius: 8,
         fontSize: 13,
         fontWeight: 600,
         lineHeight: 1.2,
@@ -207,7 +207,7 @@ export function Tag({ children, color }: { children: ReactNode; color?: string }
         alignItems: "center",
         gap: 4,
         padding: "5px 9px",
-        borderRadius: 999,
+        borderRadius: 7,
         fontSize: 11.5,
         fontWeight: 600,
         lineHeight: 1,
@@ -315,7 +315,7 @@ export function PrimaryButton({
       disabled={disabled}
       style={{
         display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
-        minHeight: 44, padding: "0 20px", borderRadius: 999, fontSize: 14, fontWeight: 700,
+        minHeight: 44, padding: "0 20px", borderRadius: 8, fontSize: 14, fontWeight: 700,
         background: "var(--ob-accent)", color: "#fff", border: "1px solid transparent",
         opacity: disabled ? 0.5 : 1, cursor: disabled ? "not-allowed" : "pointer",
         transition: "transform 0.15s ease, background 0.15s ease",
@@ -344,7 +344,7 @@ export function GhostButton({
       onClick={onClick}
       style={{
         display: "inline-flex", alignItems: "center", gap: 8,
-        minHeight: 40, padding: "0 16px", borderRadius: 999, fontSize: 13.5, fontWeight: 600,
+        minHeight: 40, padding: "0 16px", borderRadius: 8, fontSize: 13.5, fontWeight: 600,
         background: active ? "var(--ob-accent-soft)" : "var(--ob-surface)",
         color: active ? "var(--ob-accent-text)" : "var(--ob-ink)",
         border: `1px solid ${active ? "transparent" : "var(--ob-edge-strong)"}`,
@@ -362,7 +362,7 @@ export function Card({ children, style, onClick }: { children: ReactNode; style?
     <div
       onClick={onClick}
       style={{
-        borderRadius: 16,
+        borderRadius: 8,
         background: "var(--ob-surface)",
         border: "1px solid var(--ob-edge)",
         boxShadow: "var(--shadow-1)",

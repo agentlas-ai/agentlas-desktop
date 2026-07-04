@@ -22,9 +22,9 @@ export function Stepper({
         display: "flex",
         alignItems: "flex-start",
         width: "100%",
-        padding: "16px 40px 14px",
+        padding: "12px 32px",
         borderBottom: "1px solid var(--ob-edge)",
-        background: "var(--ob-surface)",
+        background: "var(--ob-paper)",
         boxSizing: "border-box",
       }}
     >
@@ -43,8 +43,8 @@ export function Stepper({
                   flex: 1,
                   minWidth: 16,
                   height: 2,
-                  marginTop: 14,
-                  borderRadius: 2,
+                  marginTop: 16,
+                  borderRadius: 1,
                   background: prevDone ? "var(--ob-accent)" : "var(--ob-edge-strong)",
                   transition: "background 0.25s",
                 }}
@@ -57,11 +57,11 @@ export function Stepper({
               title={step.about}
               style={{
                 flexShrink: 0,
-                width: 92,
+                width: 112,
                 display: "flex",
                 flexDirection: "column",
                 alignItems: "center",
-                gap: 8,
+                gap: 7,
                 padding: 0,
                 border: "none",
                 background: "transparent",
@@ -77,6 +77,7 @@ export function Stepper({
                   lineHeight: 1.2,
                   textAlign: "center",
                   letterSpacing: 0,
+                  minHeight: 30,
                 }}
               >
                 {step.title}
@@ -93,7 +94,6 @@ function Node({ state, isActive, index }: { state: StepState; isActive: boolean;
   const done = state === "done";
   const locked = state === "locked";
 
-  // done = 인디고 채움+체크 · current = 인디고 채움+번호+soft 글로우 · upcoming/locked = 아웃라인
   const filled = done || isActive;
   const bg = filled ? "var(--ob-accent)" : "var(--ob-surface)";
   const fg = filled ? "#fff" : locked ? "var(--ob-muted)" : "var(--ob-ink-soft)";
@@ -102,9 +102,10 @@ function Node({ state, isActive, index }: { state: StepState; isActive: boolean;
   return (
     <span
       style={{
-        width: 30,
+        minWidth: 38,
         height: 30,
-        borderRadius: "50%",
+        padding: "0 8px",
+        borderRadius: 7,
         background: bg,
         border: `${filled ? 0 : 1.5}px solid ${border}`,
         display: "inline-flex",
@@ -115,7 +116,7 @@ function Node({ state, isActive, index }: { state: StepState; isActive: boolean;
         fontWeight: 700,
         fontFamily: "var(--font-mono)",
         fontVariantNumeric: "tabular-nums",
-        boxShadow: isActive ? "0 0 0 4px var(--ob-accent-soft)" : "none",
+        boxShadow: isActive ? "0 0 0 3px var(--ob-accent-soft)" : "none",
         transition: "all 0.18s ease",
       }}
     >
