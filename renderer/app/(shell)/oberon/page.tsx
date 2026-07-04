@@ -66,6 +66,7 @@ import type {
   OberonKeyframeRequest,
   OberonAnimateJob,
   OberonAnimateKeyStatus,
+  OberonAnimateProvider,
   OberonAnimateRequest,
   OberonMotionAdJob,
   OberonMotionAdRequest,
@@ -109,6 +110,7 @@ export default function OberonPage() {
   const [animateJob, setAnimateJob] = useState<OberonAnimateJob | null>(null);
   const animatePoll = useRef<ReturnType<typeof setInterval> | null>(null);
   const [animateKey, setAnimateKey] = useState<OberonAnimateKeyStatus | null>(null);
+  const [videoProviderSetting, setVideoProviderSetting] = useState<string>("");
   const [backgroundJobs, setBackgroundJobs] = useState<OberonBackgroundJob[]>([]);
   const attachedBackgroundJobs = useRef({ keyframe: "", render: "", motion: "", animate: "" });
 
@@ -119,14 +121,43 @@ export default function OberonPage() {
     if (animatePoll.current) clearInterval(animatePoll.current);
   }, []);
 
-  // 애니메이션 스튜디오 진입 시 i2v BYOK 키 상태 조회.
+  // 애니메이션 스튜디오 진입 시 i2v BYOK 키 상태 + 영상 provider 설정 조회.
   useEffect(() => {
     if (studio !== "animation") return;
-    void ipc()?.oberon
+    const bridge = ipc();
+    void bridge?.oberon
       .animateKeyStatus()
       .then((s) => setAnimateKey(s))
-      .catch(() => setAnimateKey({ runway: false, luma: false }));
+      .catch(() => setAnimateKey({ runway: false, luma: false, veo: false, seedance: false, kling: false }));
+    void bridge?.multimodal
+      ?.getSettings()
+      .then((s) => setVideoProviderSetting(s?.videoProvider ?? ""))
+      .catch(() => setVideoProviderSetting(""));
   }, [studio]);
+
+  // "무조건 Veo"가 아니라 실제 연결/키 있는 멀티모달 영상 엔진을 연다. 명시 선택이 준비됐으면
+  // 존중, 아니면 준비된 것 중 사다리순(veo→kling→seedance→runway→luma)으로 첫 ready.
+  const resolveAnimateProvider = useCallback((): OberonAnimateProvider => {
+    const v = (videoProviderSetting || "").toLowerCase();
+    const wanted: OberonAnimateProvider | null =
+      v.includes("veo") || v.includes("google") ? "veo"
+      : v.includes("kling") ? "kling"
+      : v.includes("seedance") ? "seedance"
+      : v.includes("luma") ? "luma"
+      : v.includes("runway") ? "runway"
+      : null;
+    const ready: Record<OberonAnimateProvider, boolean> = {
+      veo: Boolean(animateKey?.veo), kling: Boolean(animateKey?.kling), seedance: Boolean(animateKey?.seedance),
+      runway: Boolean(animateKey?.runway), luma: Boolean(animateKey?.luma),
+    };
+    if (wanted && ready[wanted]) return wanted;
+    if (ready.veo) return "veo";
+    if (ready.kling) return "kling";
+    if (ready.seedance) return "seedance";
+    if (ready.runway) return "runway";
+    if (ready.luma) return "luma";
+    return wanted ?? "veo";
+  }, [videoProviderSetting, animateKey]);
 
   const isDone = (id: OberonStepId) => stepState[id] === "done";
 
@@ -877,7 +908,7 @@ export default function OberonPage() {
         id: `local-error-${now}`,
         productionId: production.id,
         title: production.brief.title,
-        provider: animateKey?.runway ? "runway" : "luma",
+        provider: resolveAnimateProvider(),
         model: "",
         status: "failed",
         outputDir: "",
@@ -902,7 +933,7 @@ export default function OberonPage() {
     const prompt =
       [shot?.generationPrompt, production.brief.logline, production.brief.synopsis].filter(Boolean).join(" ").slice(0, 400) ||
       production.brief.title;
-    const provider = animateKey?.runway ? "runway" : "luma";
+    const provider = resolveAnimateProvider();
     const request: OberonAnimateRequest = {
       productionId: production.id,
       title: production.brief.title || "Oberon Animation",
