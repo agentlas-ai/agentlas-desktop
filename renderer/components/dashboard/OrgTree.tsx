@@ -17,6 +17,7 @@ import type { AgentGroupResolved, HubAgentBookmark, InstalledAgent, InstalledFir
 
 type Mode = "multi" | "single";
 type Source = "local" | "cloud" | "hub";
+type OrgTreeTranslate = ReturnType<typeof useT>["t"];
 
 function agentLibraryRoute(input: { agentId?: string; nodeId?: string; firmId?: string }): string {
   const params = new URLSearchParams();
@@ -28,7 +29,7 @@ function agentLibraryRoute(input: { agentId?: string; nodeId?: string; firmId?: 
 }
 
 export function OrgTree() {
-  const { locale } = useT();
+  const { locale, t } = useT();
   const ko = locale === "ko";
   const [mode, setMode] = useState<Mode>("multi");
   const [query, setQuery] = useState("");
@@ -76,11 +77,11 @@ export function OrgTree() {
       setAgentGroups([]);
       setCloudListings([]);
       setHubBookmarks([]);
-      setLoadError(ko ? "조직도를 불러오지 못했습니다. 설치된 항목은 바뀌지 않았습니다." : "Org chart could not be loaded. Installed items were not changed.");
+      setLoadError(t("org.load_error"));
     } finally {
       setLoading(false);
     }
-  }, [ko]);
+  }, [t]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -118,7 +119,7 @@ export function OrgTree() {
         await load();
         setImportMessage({
           tone: "ok",
-          text: ko ? `${agent.name || agent.slug} 가져오기 완료` : `Imported ${agent.name || agent.slug}`,
+          text: t("org.import.success", { name: agent.name || agent.slug }),
         });
       }
     } catch (err) {
@@ -127,9 +128,7 @@ export function OrgTree() {
         text:
           err instanceof Error
             ? err.message
-            : ko
-              ? "가져오기에 실패했습니다. 폴더 구조와 권한을 확인하세요."
-              : "Import failed. Check the folder structure and permissions.",
+            : t("org.import.failed"),
       });
     } finally {
       setBusy(false);
@@ -140,12 +139,12 @@ export function OrgTree() {
   async function removeAgent(id: string, name: string) {
     const api = ipc();
     if (!api || busy) return;
-    if (!window.confirm(ko ? `'${name}' 에이전트를 제거할까요?` : `Remove agent '${name}'?`)) return;
+    if (!window.confirm(t("org.confirm.remove_agent", { name }))) return;
     setBusy(true);
     try {
       await api.team.uninstall(id);
     } catch (err) {
-      setImportMessage({ tone: "error", text: ko ? `제거하지 못했습니다. 그대로 남아 있습니다. ${String(err)}` : `Could not remove it. It is still installed. ${String(err)}` });
+      setImportMessage({ tone: "error", text: t("org.error.remove_agent", { error: String(err) }) });
     } finally {
       await load();
       setBusy(false);
@@ -154,12 +153,12 @@ export function OrgTree() {
   async function removeFirm(id: string, name: string) {
     const api = ipc();
     if (!api || busy) return;
-    if (!window.confirm(ko ? `회사 '${name}'을(를) 제거할까요?` : `Remove company '${name}'?`)) return;
+    if (!window.confirm(t("org.confirm.remove_firm", { name }))) return;
     setBusy(true);
     try {
       await api.firms.uninstall(id);
     } catch (err) {
-      setImportMessage({ tone: "error", text: ko ? `회사를 제거하지 못했습니다. 그대로 남아 있습니다. ${String(err)}` : `Could not remove the firm. It is still installed. ${String(err)}` });
+      setImportMessage({ tone: "error", text: t("org.error.remove_firm", { error: String(err) }) });
     } finally {
       await load();
       setBusy(false);
@@ -172,13 +171,13 @@ export function OrgTree() {
     const gAgents = (mode === "multi" ? roster.standaloneMultiAgents : roster.standaloneSingleAgents).filter((a) => agentSource(a) === src);
     const total = gFirms.length + gAgents.length;
     if (total === 0) return;
-    if (!window.confirm(ko ? `'${label}' 그룹의 ${total}개 항목을 모두 제거할까요?` : `Remove all ${total} items in '${label}'?`)) return;
+    if (!window.confirm(t("org.confirm.remove_group", { name: label, count: total }))) return;
     setBusy(true);
     try {
       for (const f of gFirms) await api.firms.uninstall(f.id);
       for (const a of gAgents) await api.team.uninstall(a.id);
     } catch (err) {
-      setImportMessage({ tone: "error", text: ko ? `일부 항목이 남아 있을 수 있습니다. 목록을 확인한 뒤 다시 시도하세요. ${String(err)}` : `Some items may still remain. Check the list, then try again. ${String(err)}` });
+      setImportMessage({ tone: "error", text: t("org.error.remove_group", { error: String(err) }) });
     } finally {
       await load();
       setBusy(false);
@@ -194,15 +193,15 @@ export function OrgTree() {
         const org = await api.firms.getResolvedOrg(id);
         setOrgs((p) => ({ ...p, [id]: org }));
       } catch (err) {
-        setImportMessage({ tone: "error", text: ko ? `하위 조직도를 열지 못했습니다. ${String(err)}` : `Could not open the nested org chart. ${String(err)}` });
+        setImportMessage({ tone: "error", text: t("org.error.open_nested", { error: String(err) }) });
       }
     }
   }
 
   const cats: Array<{ key: Source; label: string }> = [
-    { key: "local", label: ko ? "로컬" : "Local" },
-    { key: "cloud", label: ko ? "클라우드" : "Cloud" },
-    { key: "hub", label: ko ? "허브 · 북마크" : "Hub · bookmarks" },
+    { key: "local", label: t("org.source.local") },
+    { key: "cloud", label: t("org.source.cloud") },
+    { key: "hub", label: t("org.source.hub") },
   ];
 
   // 멀티 = 실제 구성원이 2명 이상인 회사(firm). 싱글 = 개별 에이전트 + 1명짜리 firm 포장.
@@ -216,16 +215,16 @@ export function OrgTree() {
 
   if (loading) {
     return (
-      <Shell mode={mode} setMode={setMode} query={query} setQuery={setQuery} onImport={importFolder} busy={busy} ko={ko} importMessage={importMessage}>
+      <Shell mode={mode} setMode={setMode} query={query} setQuery={setQuery} onImport={importFolder} busy={busy} t={t} importMessage={importMessage}>
         <div className="dashboard-org-empty">
-          {ko ? "불러오는 중…" : "Loading…"}
+          {t("org.loading")}
         </div>
       </Shell>
     );
   }
 
   return (
-    <Shell mode={mode} setMode={setMode} query={query} setQuery={setQuery} onImport={importFolder} busy={busy} ko={ko} importMessage={importMessage}>
+    <Shell mode={mode} setMode={setMode} query={query} setQuery={setQuery} onImport={importFolder} busy={busy} t={t} importMessage={importMessage}>
       {loadError && <div className="dashboard-org-empty">{loadError}</div>}
       <div className="dashboard-org-list">
         {visibleAgentGroups.length > 0 && (
@@ -236,7 +235,7 @@ export function OrgTree() {
             >
               <IconLayers size={13} />
               <span className="dashboard-org-label">
-                {ko ? "에이전트 조합" : "Agent groups"}
+                {t("org.agent_groups")}
               </span>
               <span className="dashboard-org-count">{visibleAgentGroups.length}</span>
             </button>
@@ -288,18 +287,18 @@ export function OrgTree() {
                   <button
                     type="button"
                     className="dashboard-org-remove dashboard-org-remove-group"
-                    title={ko ? "그룹 전체 제거" : "Remove all in group"}
-                    aria-label={ko ? "그룹 전체 제거" : "Remove all in group"}
+                    title={t("org.action.remove_group")}
+                    aria-label={t("org.action.remove_group")}
                     onClick={() => void removeGroup(cat.key, String(cat.label))}
                   >
-                    {ko ? "전체 제거" : "Clear"}
+                    {t("org.action.clear")}
                   </button>
                 )}
               </div>
 
               {open && cat.key === "hub" && hubOnly.length === 0 && (
                 <div className="dashboard-org-empty dashboard-org-nested">
-                  {ko ? "이 모드에 맞는 Hub 북마크가 없습니다." : "No Hub bookmarks match this mode."}
+                  {t("org.no_hub_for_mode")}
                 </div>
               )}
 
@@ -316,19 +315,19 @@ export function OrgTree() {
                         <span className="dashboard-org-label">
                           {dn(f)}
                         </span>
-                        <span className="dashboard-org-count">{ko ? "멀티" : "multi"}</span>
+                        <span className="dashboard-org-count">{t("org.kind.multi")}</span>
                       </button>
                       <button
                         type="button"
                         className="dashboard-org-remove"
-                        title={ko ? "제거" : "Remove"}
-                        aria-label={ko ? "제거" : "Remove"}
+                        title={t("org.action.remove")}
+                        aria-label={t("org.action.remove")}
                         onClick={() => void removeFirm(f.id, dn(f))}
                       >
                         ×
                       </button>
                     </div>
-                    {openFirms[f.id] && <FirmBody org={orgs[f.id]} firmId={f.id} ko={ko} />}
+                    {openFirms[f.id] && <FirmBody org={orgs[f.id]} firmId={f.id} t={t} />}
                   </div>
                 ))}
 
@@ -345,11 +344,11 @@ export function OrgTree() {
                         <span className="dashboard-org-label">{dn(a)}</span>
                         <span className="dashboard-org-count">{entityClassShortLabel(entityClass, locale)}</span>
                       </button>
-                      <button
+                    <button
                         type="button"
                         className="dashboard-org-remove"
-                        title={ko ? "제거" : "Remove"}
-                        aria-label={ko ? "제거" : "Remove"}
+                        title={t("org.action.remove")}
+                        aria-label={t("org.action.remove")}
                         onClick={() => {
                           const singleFirm = singleFirmByAgentId.get(a.id);
                           if (singleFirm) void removeFirm(singleFirm.id, dn(singleFirm));
@@ -368,11 +367,11 @@ export function OrgTree() {
                     key={`cloud:${m.slug}`}
                     onClick={() => navigate("/cloud")}
                     className="dashboard-org-row dashboard-org-agent dashboard-org-agent-single"
-                    title={ko ? "서버 클라우드에 있는 에이전트 — 클라우드에서 관리" : "On your server cloud — manage in Cloud"}
+                    title={t("org.cloud_only.title")}
                   >
                     <Dot />
                     <span className="dashboard-org-label">{ko ? m.name : m.nameEn || m.name}</span>
-                    <span className="dashboard-org-count">{ko ? "싱글" : "single"}</span>
+                    <span className="dashboard-org-count">{t("org.kind.single")}</span>
                   </button>
                 ))}
 
@@ -384,7 +383,7 @@ export function OrgTree() {
                       key={`hub:${slug}`}
                       onClick={() => navigate(`/marketplace?q=${encodeURIComponent(slug)}`)}
                       className={`dashboard-org-row dashboard-org-agent dashboard-org-agent-${entityClass}`}
-                      title={ko ? "Hub 북마크 — Marketplace에서 관리" : "Hub bookmark — manage in Marketplace"}
+                      title={t("org.hub_bookmark.title")}
                     >
                       <Dot />
                       <span className="dashboard-org-label">{ko ? listing.name : listing.nameEn || listing.name}</span>
@@ -408,7 +407,7 @@ function Shell({
   setQuery,
   onImport,
   busy,
-  ko,
+  t,
   importMessage,
 }: {
   children: React.ReactNode;
@@ -418,7 +417,7 @@ function Shell({
   setQuery: (s: string) => void;
   onImport: () => void;
   busy: boolean;
-  ko: boolean;
+  t: OrgTreeTranslate;
   importMessage?: { tone: "ok" | "error"; text: string } | null;
 }) {
   return (
@@ -426,7 +425,7 @@ function Shell({
       className="dashboard-org-tree"
     >
       <div className="dashboard-org-title">
-        <span>{ko ? "조직도" : "Org chart"}</span>
+        <span>{t("org.title")}</span>
         <span>{mode === "multi" ? "HQ" : "1:1"}</span>
       </div>
       <div className="dashboard-org-segmented">
@@ -437,7 +436,7 @@ function Shell({
             className="dashboard-org-mode"
             data-active={mode === m ? "true" : "false"}
           >
-            {m === "multi" ? (ko ? "멀티" : "Multi") : ko ? "싱글" : "Single"}
+            {m === "multi" ? t("org.mode.multi") : t("org.mode.single")}
           </button>
         ))}
       </div>
@@ -446,7 +445,7 @@ function Shell({
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder={ko ? "조직·에이전트 검색" : "Search org, agents"}
+          placeholder={t("org.search.placeholder")}
         />
       </label>
       <button
@@ -456,7 +455,7 @@ function Shell({
         data-dashboard-import="true"
       >
         <IconFileUp size={14} />
-        {busy ? (ko ? "가져오는 중…" : "Importing…") : ko ? "에이전트 가져오기" : "Import agents"}
+        {busy ? t("org.import.busy") : t("org.import.action")}
       </button>
       {importMessage && (
         <div
@@ -492,11 +491,11 @@ function Dot() {
 //   · 시스템/인프라 노드(오케스트레이터·PM 소울·큐레이터·폴리시게이트·Eval QA 등)는 제거.
 //   · 본부(division)에 하위 에이전트(specialists)가 있을 때만 "HQ"로 표시하고 그 아래 에이전트를 분해.
 //   · 하위가 없는 노드는 HQ가 아니라 회사 직속 "에이전트"로 표시(HQ 태그 없음).
-function FirmBody({ org, firmId, ko }: { org: ResolvedOrg | null | undefined; firmId: string; ko: boolean }) {
+function FirmBody({ org, firmId, t }: { org: ResolvedOrg | null | undefined; firmId: string; t: OrgTreeTranslate }) {
   if (org === undefined) {
     return (
       <div className="dashboard-org-empty dashboard-org-deep">
-        {ko ? "불러오는 중…" : "Loading…"}
+        {t("org.loading")}
       </div>
     );
   }
@@ -514,7 +513,7 @@ function FirmBody({ org, firmId, ko }: { org: ResolvedOrg | null | undefined; fi
   if (hqs.length === 0 && direct.length === 0) {
     return (
       <div className="dashboard-org-empty dashboard-org-deep">
-        {ko ? "구성원 없음" : "No members"}
+        {t("org.no_members")}
       </div>
     );
   }
