@@ -253,9 +253,11 @@ const api: AgentlasIpc = {
     resume: (id: string) => ipcRenderer.invoke("telegram:resume", id),
     stop: (id: string) => ipcRenderer.invoke("telegram:stop", id),
     remove: (id: string) => ipcRenderer.invoke("telegram:remove", id),
+    resetConversation: (id: string) => ipcRenderer.invoke("telegram:resetConversation", id),
     sendTest: (id: string) => ipcRenderer.invoke("telegram:sendTest", id),
     openBot: (id: string) => ipcRenderer.invoke("telegram:openBot", id),
     configureBotSettings: (id: string) => ipcRenderer.invoke("telegram:configureBotSettings", id),
+    pruneOrphans: () => ipcRenderer.invoke("telegram:pruneOrphans"),
   },
   projects: {
     list: () => ipcRenderer.invoke("projects:list"),

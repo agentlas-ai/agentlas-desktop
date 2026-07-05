@@ -14,6 +14,36 @@ const SERVICE = "com.agentlas.desktop";
 const BYOK_PREFIX = "byok:";
 const ENV_PREFIX = "env:";
 const SECRET_PREFIX = "secret:";
+const USE_MEMORY_VAULT = process.env.AGENTLAS_E2E === "1" && process.env.AGENTLAS_E2E_KEYCHAIN !== "1";
+const memoryVault = new Map<string, string>();
+const keychainCache = new Map<string, string | null>();
+let envKeyCache: string[] | null = null;
+
+async function getPassword(account: string): Promise<string | null> {
+  if (USE_MEMORY_VAULT) return memoryVault.get(account) ?? null;
+  if (keychainCache.has(account)) return keychainCache.get(account) ?? null;
+  const value = await keytar.getPassword(SERVICE, account);
+  keychainCache.set(account, value);
+  return value;
+}
+
+async function setPassword(account: string, value: string): Promise<void> {
+  if (USE_MEMORY_VAULT) {
+    memoryVault.set(account, value);
+  } else {
+    await keytar.setPassword(SERVICE, account, value);
+  }
+  keychainCache.set(account, value);
+}
+
+async function deletePassword(account: string): Promise<void> {
+  if (USE_MEMORY_VAULT) {
+    memoryVault.delete(account);
+  } else {
+    await keytar.deletePassword(SERVICE, account);
+  }
+  keychainCache.delete(account);
+}
 
 // ── BYOK LLM API ────────────────────────────────────────────
 function byokAccount(backend: RuntimeBackend): string {
@@ -23,24 +53,24 @@ function byokAccount(backend: RuntimeBackend): string {
 export async function saveApiKey(backend: RuntimeBackend, key: string): Promise<void> {
   const trimmed = key.trim();
   if (!trimmed) {
-    await keytar.deletePassword(SERVICE, byokAccount(backend));
+    await deletePassword(byokAccount(backend));
     return;
   }
-  await keytar.setPassword(SERVICE, byokAccount(backend), trimmed);
+  await setPassword(byokAccount(backend), trimmed);
 }
 
 export async function hasApiKey(backend: RuntimeBackend): Promise<boolean> {
-  const v = await keytar.getPassword(SERVICE, byokAccount(backend));
+  const v = await getPassword(byokAccount(backend));
   return typeof v === "string" && v.length > 0;
 }
 
 export async function deleteApiKey(backend: RuntimeBackend): Promise<void> {
-  await keytar.deletePassword(SERVICE, byokAccount(backend));
+  await deletePassword(byokAccount(backend));
 }
 
 /** main 내부 사용 — MCP 호출 시 자식 env에 주입. renderer 노출 X */
 export async function readApiKey(backend: RuntimeBackend): Promise<string | null> {
-  return keytar.getPassword(SERVICE, byokAccount(backend));
+  return getPassword(byokAccount(backend));
 }
 
 // ── 글로벌 env (외부 통합 API 키) ───────────────────────────
@@ -53,24 +83,27 @@ export async function setEnvVar(key: string, value: string): Promise<void> {
   if (!trimmedKey) throw new Error("env key cannot be empty");
   const trimmedValue = value.trim();
   if (!trimmedValue) {
-    await keytar.deletePassword(SERVICE, envAccount(trimmedKey));
+    await deletePassword(envAccount(trimmedKey));
+    if (envKeyCache) envKeyCache = envKeyCache.filter((item) => item !== trimmedKey);
     return;
   }
-  await keytar.setPassword(SERVICE, envAccount(trimmedKey), trimmedValue);
+  await setPassword(envAccount(trimmedKey), trimmedValue);
+  if (envKeyCache && !envKeyCache.includes(trimmedKey)) envKeyCache = [...envKeyCache, trimmedKey].sort();
 }
 
 export async function hasEnvVar(key: string): Promise<boolean> {
-  const v = await keytar.getPassword(SERVICE, envAccount(key));
+  const v = await getPassword(envAccount(key));
   return typeof v === "string" && v.length > 0;
 }
 
 export async function deleteEnvVar(key: string): Promise<void> {
-  await keytar.deletePassword(SERVICE, envAccount(key));
+  await deletePassword(envAccount(key));
+  if (envKeyCache) envKeyCache = envKeyCache.filter((item) => item !== key);
 }
 
 /** main 내부 — MCP 서버 spawn 시 envRequirements 매칭해 자식 env로 주입 (M1) */
 export async function readEnvVar(key: string): Promise<string | null> {
-  return keytar.getPassword(SERVICE, envAccount(key));
+  return getPassword(envAccount(key));
 }
 
 /**
@@ -92,18 +125,22 @@ export function maskSecret(value: string): string {
 
 /** renderer 노출용 — 저장된 값의 마스킹 미리보기. 미저장이면 null. 전체 값은 안 나간다. */
 export async function previewEnvVar(key: string): Promise<string | null> {
-  const v = await keytar.getPassword(SERVICE, envAccount(key));
+  const v = await getPassword(envAccount(key));
   if (typeof v !== "string" || v.length === 0) return null;
   return maskSecret(v);
 }
 
 /** keychain에 저장된 env 키 전체 — keytar.findCredentials로 prefix filter */
 export async function listEnvKeys(): Promise<string[]> {
-  const creds = await keytar.findCredentials(SERVICE);
-  return creds
+  if (envKeyCache) return envKeyCache;
+  const creds = USE_MEMORY_VAULT
+    ? [...memoryVault.keys()].map((account) => ({ account, password: memoryVault.get(account) ?? "" }))
+    : await keytar.findCredentials(SERVICE);
+  envKeyCache = creds
     .map((c) => c.account)
     .filter((a) => a.startsWith(ENV_PREFIX))
     .map((a) => a.slice(ENV_PREFIX.length));
+  return envKeyCache;
 }
 
 function secretAccount(key: string): string {
@@ -115,18 +152,18 @@ export async function setSecret(key: string, value: string): Promise<void> {
   if (!trimmedKey) throw new Error("secret key cannot be empty");
   const trimmedValue = value.trim();
   if (!trimmedValue) {
-    await keytar.deletePassword(SERVICE, secretAccount(trimmedKey));
+    await deletePassword(secretAccount(trimmedKey));
     return;
   }
-  await keytar.setPassword(SERVICE, secretAccount(trimmedKey), trimmedValue);
+  await setPassword(secretAccount(trimmedKey), trimmedValue);
 }
 
 export async function readSecret(key: string): Promise<string | null> {
-  return keytar.getPassword(SERVICE, secretAccount(key));
+  return getPassword(secretAccount(key));
 }
 
 export async function deleteSecret(key: string): Promise<void> {
-  await keytar.deletePassword(SERVICE, secretAccount(key));
+  await deletePassword(secretAccount(key));
 }
 
 export async function previewSecret(key: string): Promise<string | null> {

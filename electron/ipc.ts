@@ -263,7 +263,9 @@ import {
   configureTelegramBotSettings,
   listTelegramBindings,
   openTelegramBot,
+  pruneOrphanedTelegramBindings,
   removeTelegramConnection,
+  resetTelegramConversation,
   resumeTelegramConnection,
   sendTelegramTest,
   startTelegramConnection,
@@ -1109,9 +1111,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("telegram:resume", (_e, id: string) => resumeTelegramConnection(id));
   ipcMain.handle("telegram:stop", (_e, id: string) => stopTelegramConnection(id));
   ipcMain.handle("telegram:remove", (_e, id: string) => removeTelegramConnection(id));
+  ipcMain.handle("telegram:resetConversation", (_e, id: string) => resetTelegramConversation(id));
   ipcMain.handle("telegram:sendTest", (_e, id: string) => sendTelegramTest(id));
   ipcMain.handle("telegram:openBot", (_e, id: string) => openTelegramBot(id));
   ipcMain.handle("telegram:configureBotSettings", (_e, id: string) => configureTelegramBotSettings(id));
+  ipcMain.handle("telegram:pruneOrphans", () => pruneOrphanedTelegramBindings());
 
   // ── projects ───────────────────────────────────────────
   ipcMain.handle("projects:list", () => listProjects());

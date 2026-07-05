@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { BrowserWindow, session as electronSession, shell } from "electron";
 import { currentUiLocale } from "../main";
 import { runMcpInvocation } from "../mcp/client";
@@ -8,9 +10,11 @@ import { resolveAgentGroupForRuntime } from "../store/agent-groups";
 import { createChat, getChat } from "../store/chats";
 import { getDb } from "../store/db";
 import { getFirm } from "../store/firms";
-import { deleteSecret, previewSecret, readSecret, setSecret } from "../secrets/vault";
+import { agentRunCwd } from "../runtime/exec";
+import { deleteSecret, readSecret, setSecret } from "../secrets/vault";
 import type {
   Automation,
+  ImageAttachment,
   McpInvocationEvent,
   TelegramConnectActionResult,
   TelegramConnectAutoInput,
@@ -34,6 +38,8 @@ interface TelegramBindingRow {
   status: TelegramConnectStatus;
   enabled: number;
   automation_report_enabled: number;
+  token_saved: number;
+  token_fingerprint: string | null;
   last_update_id: number;
   last_error: string | null;
   last_test_at: string | null;
@@ -62,9 +68,48 @@ interface TelegramMessage {
   from?: TelegramUser;
   chat: TelegramChat;
   text?: string;
+  caption?: string;
+  photo?: TelegramPhotoSize[];
+  document?: TelegramFileDescriptor;
+  video?: TelegramFileDescriptor;
+  animation?: TelegramFileDescriptor;
+  audio?: TelegramFileDescriptor;
+  voice?: TelegramFileDescriptor;
   reply_to_message?: {
     from?: TelegramUser;
   };
+}
+
+interface TelegramPhotoSize {
+  file_id: string;
+  file_unique_id?: string;
+  width: number;
+  height: number;
+  file_size?: number;
+}
+
+interface TelegramFileDescriptor {
+  file_id: string;
+  file_unique_id?: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+}
+
+interface TelegramFileInfo {
+  file_id: string;
+  file_unique_id?: string;
+  file_size?: number;
+  file_path?: string;
+}
+
+interface TelegramRuntimeAttachment {
+  path: string;
+  name: string;
+  mediaType: string;
+  kind: string;
+  size: number;
+  image?: ImageAttachment;
 }
 
 interface TelegramUpdate {
@@ -83,6 +128,9 @@ const TELEGRAM_SECRET_SCOPE = "telegram.bot-token";
 const TELEGRAM_WEB_PARTITION = "persist:agentlas-telegram-connect";
 const BOTFATHER_WEB_URL = "https://web.telegram.org/k/#@BotFather";
 const pollers = new Map<string, Poller>();
+let reconcileInFlight: Promise<void> | null = null;
+const TELEGRAM_INVOCATION_TIMEOUT_MS = 15 * 60 * 1000;
+const TELEGRAM_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 const TOKEN_RE = /\b\d{8,12}:[A-Za-z0-9_-]{30,}\b/g;
 
 interface TelegramWebState {
@@ -116,6 +164,12 @@ const TELEGRAM_COPY = {
     "test.message": "Agentlas 연결 테스트입니다. 이 메시지에 답장하거나 봇을 불러 작업을 맡겨보세요.",
     "test.sent": "테스트 메시지를 보냈습니다.",
     "pair.connected": "Agentlas에 연결되었습니다. 이제 메시지로 실행할 수 있어요.",
+    "run.started": "시작했어요. 웹/파일 제작은 몇 분 걸릴 수 있습니다. 끝나면 이 방에 결과 경로와 여는 방법을 보냅니다.",
+    "run.timeout": "작업이 너무 오래 걸려 자동으로 멈췄습니다. 이 방에 \"계속 진행해\"라고 보내면 같은 세션에서 이어갈 수 있습니다.",
+    "attachment.default_prompt": "첨부 파일을 확인해줘.",
+    "attachment.too_large": "첨부 파일이 너무 큽니다: {name}. Telegram에서 받을 수 있는 안전 한도는 {limit}MB입니다.",
+    "attachment.download_failed": "첨부 파일을 내려받지 못했습니다: {message}",
+    "target.deleted": "이 Telegram 연결의 대상이 삭제되었습니다. Agentlas의 Telegram 연결 화면에서 새 에이전트 그룹을 선택해 다시 연결해주세요.",
     "automation.disable_done": "알겠습니다. 앞으로 자동화 완료 보고는 이 Telegram 방으로 보내지 않을게요.",
     "automation.enable_done": "좋아요. 앞으로 Agentlas 자동화가 끝나면 이 Telegram 방에 보고할게요. 끄려면 \"자동화 보고 꺼\"라고 말하면 됩니다.",
     "automation.status_on": "자동화 완료 보고가 이 Telegram 방으로 오도록 켜져 있습니다. 끄려면 \"자동화 보고 꺼\"라고 말하면 됩니다.",
@@ -136,7 +190,7 @@ const TELEGRAM_COPY = {
     "error.bot_username_unknown": "아직 봇 이름을 모릅니다. 먼저 봇 포트를 만들어주세요.",
     "error.chat_not_paired": "Telegram 방이 아직 연결되지 않았습니다.",
     "error.message_box_missing": "Telegram 입력창을 찾지 못했습니다.",
-    "error.missing_keychain": "Telegram 봇 비밀문자가 macOS 비밀 금고에 없습니다.",
+    "error.missing_keychain": "Telegram 봇 비밀문자가 로컬 비밀 저장소에 없습니다.",
     "error.no_reply": "Agentlas가 보낼 답을 만들지 못했습니다.",
     "error.open_chat_failed": "Telegram 봇 채팅을 열지 못했습니다.",
     "error.run_failed": "Agentlas 실행 실패: {message}",
@@ -159,6 +213,12 @@ const TELEGRAM_COPY = {
     "test.message": "Agentlas connection test. Reply to this message or mention the bot to assign work.",
     "test.sent": "Test message sent.",
     "pair.connected": "Connected to Agentlas. You can now run it by messaging here.",
+    "run.started": "Started. Website/file creation can take a few minutes. I will send the result path and how to open it here when it finishes.",
+    "run.timeout": "The run took too long and was stopped automatically. Send \"continue\" in this chat to resume the same session.",
+    "attachment.default_prompt": "Please inspect the attached file.",
+    "attachment.too_large": "The attachment is too large: {name}. The safe Telegram download limit is {limit}MB.",
+    "attachment.download_failed": "Could not download the attachment: {message}",
+    "target.deleted": "The target for this Telegram connection was deleted. Open Telegram Connect in Agentlas and choose a new agent group to reconnect.",
     "automation.disable_done": "Done. Automation completion reports will no longer be sent to this Telegram chat.",
     "automation.enable_done": "Got it. Agentlas automation completions will be reported to this Telegram chat. Say \"turn off automation reports\" to stop.",
     "automation.status_on": "Automation completion reports are on for this Telegram chat. Say \"turn off automation reports\" to stop them.",
@@ -179,7 +239,7 @@ const TELEGRAM_COPY = {
     "error.bot_username_unknown": "Bot username is not known yet. Create the bot port first.",
     "error.chat_not_paired": "Telegram chat is not paired yet.",
     "error.message_box_missing": "Could not find the Telegram message box.",
-    "error.missing_keychain": "Telegram bot secret is missing from Keychain.",
+    "error.missing_keychain": "Telegram bot secret is missing from the local secret store.",
     "error.no_reply": "Agentlas did not produce a reply.",
     "error.open_chat_failed": "Could not open the Telegram bot chat.",
     "error.run_failed": "Agentlas run failed: {message}",
@@ -190,6 +250,13 @@ const TELEGRAM_COPY = {
 } as const;
 
 type TelegramCopyKey = keyof typeof TELEGRAM_COPY.en;
+type TelegramInvocationMode = {
+  permissions: "read" | "write";
+  goalMode: boolean;
+  instruction: string;
+};
+
+class TelegramInvocationTimeoutError extends Error {}
 
 function tg(key: TelegramCopyKey, vars: Record<string, string | number> = {}): string {
   const locale = currentUiLocale() === "ko" ? "ko" : "en";
@@ -209,6 +276,35 @@ function tokenKey(token: string): string {
   return createHash("sha256").update(token).digest("hex").slice(0, 24);
 }
 
+function markTokenAvailable(id: string, token: string): void {
+  getDb()
+    .prepare("UPDATE telegram_bindings SET token_saved = 1, token_fingerprint = ?, updated_at = ? WHERE id = ?")
+    .run(tokenKey(token), nowIso(), id);
+}
+
+function markTokenMissing(id: string): void {
+  getDb()
+    .prepare("UPDATE telegram_bindings SET token_saved = 0, status = 'failed', last_error = ?, updated_at = ? WHERE id = ?")
+    .run(tg("error.missing_keychain").slice(0, 1000), nowIso(), id);
+}
+
+async function readBindingSecret(id: string): Promise<string | null> {
+  try {
+    const token = await readSecret(secretKey(id));
+    if (token) {
+      markTokenAvailable(id, token);
+      return token;
+    }
+  } catch (err) {
+    getDb()
+      .prepare("UPDATE telegram_bindings SET token_saved = 0, status = 'failed', last_error = ?, updated_at = ? WHERE id = ?")
+      .run((err instanceof Error ? err.message : String(err)).slice(0, 1000), nowIso(), id);
+    return null;
+  }
+  markTokenMissing(id);
+  return null;
+}
+
 function isBindingSessionRunning(bindingId: string): boolean {
   for (const poller of pollers.values()) {
     if (!poller.controller.signal.aborted && poller.bindingIds.has(bindingId)) return true;
@@ -222,7 +318,10 @@ function bindingFromRow(row: TelegramBindingRow, hasToken: boolean, tokenPreview
     id: row.id,
     targetKind: row.target_kind,
     targetId: row.target_id,
-    targetName: target?.name ?? row.target_id,
+    // Deleted target → keep the last known chat title (or a short id) instead of a raw UUID,
+    // and flag it so the UI can warn + offer cleanup.
+    targetName: target?.name ?? row.telegram_chat_title ?? `#${row.target_id.slice(0, 8)}`,
+    targetMissing: target === null,
     status: row.status,
     enabled: row.enabled === 1,
     sessionRunning: isBindingSessionRunning(row.id),
@@ -256,14 +355,12 @@ function listBindingRows(): TelegramBindingRow[] {
     .all() as TelegramBindingRow[];
 }
 
-async function toBinding(row: TelegramBindingRow): Promise<TelegramConnectBinding> {
-  const preview = await previewSecret(secretKey(row.id));
-  return bindingFromRow(row, Boolean(preview), preview);
+function toBinding(row: TelegramBindingRow): TelegramConnectBinding {
+  return bindingFromRow(row, row.token_saved === 1, null);
 }
 
-export async function listTelegramBindings(): Promise<TelegramConnectBinding[]> {
-  await reconcileTelegramWorkers();
-  return Promise.all(listBindingRows().map(toBinding));
+export function listTelegramBindings(): TelegramConnectBinding[] {
+  return listBindingRows().map(toBinding);
 }
 
 function resolveTarget(
@@ -368,7 +465,7 @@ async function findReusableTargetBinding(
     )
     .all(targetKind, targetId) as TelegramBindingRow[];
   for (const row of rows) {
-    const token = await readSecret(secretKey(row.id));
+    const token = await readBindingSecret(row.id);
     if (token && row.bot_username) return row;
   }
   return null;
@@ -379,13 +476,14 @@ export async function startTelegramConnection(input: TelegramConnectStartInput):
   const token = input.botToken.trim();
   if (!token) throw new Error(tg("error.token_required"));
   const me = await verifyBotToken(token);
+  const fingerprint = tokenKey(token);
   const id = randomUUID();
   const now = nowIso();
   getDb()
     .prepare(
       `INSERT INTO telegram_bindings
-       (id, target_kind, target_id, bot_user_id, bot_username, bot_display_name, status, enabled, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'waiting_for_chat', 1, ?, ?)`,
+       (id, target_kind, target_id, bot_user_id, bot_username, bot_display_name, status, enabled, token_saved, token_fingerprint, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'waiting_for_chat', 1, 1, ?, ?, ?)`,
     )
     .run(
       id,
@@ -394,6 +492,7 @@ export async function startTelegramConnection(input: TelegramConnectStartInput):
       me.id,
       me.username ?? null,
       me.first_name ?? null,
+      fingerprint,
       now,
       now,
     );
@@ -413,16 +512,17 @@ export async function cloneTelegramConnection(input: TelegramConnectCloneInput):
   const targetKind = input.targetKind ?? source.target_kind;
   const targetId = input.targetId ?? source.target_id;
   resolveTarget(targetKind, targetId, true);
-  const token = await readSecret(secretKey(source.id));
+  const token = await readBindingSecret(source.id);
   if (!token) throw new Error(tg("error.missing_keychain"));
   const me = await verifyBotToken(token);
+  const fingerprint = tokenKey(token);
   const id = randomUUID();
   const now = nowIso();
   getDb()
     .prepare(
       `INSERT INTO telegram_bindings
-       (id, target_kind, target_id, bot_user_id, bot_username, bot_display_name, status, enabled, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'waiting_for_chat', 1, ?, ?)`,
+       (id, target_kind, target_id, bot_user_id, bot_username, bot_display_name, status, enabled, token_saved, token_fingerprint, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'waiting_for_chat', 1, 1, ?, ?, ?)`,
     )
     .run(
       id,
@@ -431,10 +531,14 @@ export async function cloneTelegramConnection(input: TelegramConnectCloneInput):
       me.id,
       me.username ?? source.bot_username ?? null,
       me.first_name ?? source.bot_display_name ?? null,
+      fingerprint,
       now,
       now,
     );
   await setSecret(secretKey(id), token);
+  getDb()
+    .prepare("UPDATE telegram_bindings SET token_saved = 1, token_fingerprint = ?, updated_at = ? WHERE id = ?")
+    .run(fingerprint, nowIso(), source.id);
   await telegramApi<boolean>(token, "deleteWebhook", { drop_pending_updates: false }).catch(() => false);
   await reconcileTelegramWorkers();
   const binding = await toBinding(getBindingRow(id) as TelegramBindingRow);
@@ -457,13 +561,12 @@ export async function stopTelegramConnection(id: string): Promise<TelegramConnec
 export async function resumeTelegramConnection(id: string): Promise<TelegramConnectBinding> {
   const row = getBindingRow(id);
   if (!row) throw new Error(`Telegram binding not found: ${id}`);
-  const token = await readSecret(secretKey(id));
+  const token = await readBindingSecret(id);
   if (!token) {
-    markBindingFailed(id, tg("error.missing_keychain"));
     return toBinding(getBindingRow(id) as TelegramBindingRow);
   }
   const wasStopped = row.enabled === 0 || row.status === "disabled";
-  const canDropPending = wasStopped && !(await hasOtherActiveBindingForToken(id, token));
+  const canDropPending = wasStopped && !hasOtherActiveBindingForToken(id, token);
   const nextStatus: TelegramConnectStatus =
     row.telegram_chat_id
       ? row.status === "disabled" || row.status === "failed"
@@ -482,22 +585,56 @@ export async function resumeTelegramConnection(id: string): Promise<TelegramConn
   return toBinding(getBindingRow(id) as TelegramBindingRow);
 }
 
-async function hasOtherActiveBindingForToken(bindingId: string, token: string): Promise<boolean> {
+function hasOtherActiveBindingForToken(bindingId: string, token: string): boolean {
   const tokenHash = tokenKey(token);
-  const rows = getDb()
-    .prepare("SELECT id FROM telegram_bindings WHERE enabled = 1 AND id <> ?")
-    .all(bindingId) as Array<{ id: string }>;
-  for (const row of rows) {
-    const other = await readSecret(secretKey(row.id));
-    if (other && tokenKey(other) === tokenHash) return true;
-  }
-  return false;
+  const row = getDb()
+    .prepare("SELECT id FROM telegram_bindings WHERE enabled = 1 AND id <> ? AND token_fingerprint = ? LIMIT 1")
+    .get(bindingId, tokenHash) as { id: string } | undefined;
+  return Boolean(row);
 }
 
 export async function removeTelegramConnection(id: string): Promise<void> {
   getDb().prepare("DELETE FROM telegram_bindings WHERE id = ?").run(id);
   await deleteSecret(secretKey(id));
   await reconcileTelegramWorkers();
+}
+
+export async function resetTelegramConversation(id: string): Promise<TelegramConnectBinding> {
+  const row = getBindingRow(id);
+  if (!row) throw new Error(`Telegram binding not found: ${id}`);
+  if (!resolveTarget(row.target_kind, row.target_id, false)) {
+    disableMissingTargetBinding(id);
+    await reconcileTelegramWorkers();
+    return toBinding(getBindingRow(id) as TelegramBindingRow);
+  }
+  const nextStatus: TelegramConnectStatus =
+    row.enabled === 0 || row.status === "disabled"
+      ? "disabled"
+      : row.telegram_chat_id
+        ? "chat_paired"
+        : "waiting_for_chat";
+  getDb()
+    .prepare("UPDATE telegram_bindings SET chat_session_id = NULL, status = ?, last_error = NULL, updated_at = ? WHERE id = ?")
+    .run(nextStatus, nowIso(), id);
+  return toBinding(getBindingRow(id) as TelegramBindingRow);
+}
+
+/**
+ * Remove every binding whose target agent/firm/group no longer exists.
+ * These are dangling "ports" left behind when the user deletes the underlying
+ * agent/team/group — they can never run again, so we prune them on request.
+ */
+export async function pruneOrphanedTelegramBindings(): Promise<{ removed: number }> {
+  const orphans = listBindingRows().filter(
+    (row) => resolveTarget(row.target_kind, row.target_id, false) === null,
+  );
+  const db = getDb();
+  for (const row of orphans) {
+    db.prepare("DELETE FROM telegram_bindings WHERE id = ?").run(row.id);
+    await deleteSecret(secretKey(row.id));
+  }
+  if (orphans.length > 0) await reconcileTelegramWorkers();
+  return { removed: orphans.length };
 }
 
 export async function openTelegramBot(id: string): Promise<{ ok: boolean; message: string }> {
@@ -614,9 +751,8 @@ export async function sendTelegramTest(id: string): Promise<TelegramConnectActio
   const row = getBindingRow(id);
   if (!row) throw new Error(`Telegram binding not found: ${id}`);
   if (!row.telegram_chat_id) throw new Error(tg("error.chat_not_paired"));
-  const token = await readSecret(secretKey(id));
+  const token = await readBindingSecret(id);
   if (!token) throw new Error(tg("error.missing_keychain"));
-  if (row.enabled === 1) await reconcileTelegramWorkers();
   const text = tg("test.message");
   await telegramApi(token, "sendMessage", { chat_id: row.telegram_chat_id, text });
   getDb()
@@ -630,18 +766,30 @@ export async function sendTelegramTest(id: string): Promise<TelegramConnectActio
 
 async function activeBindingSecrets(): Promise<Array<{ row: TelegramBindingRow; token: string }>> {
   const rows = getDb()
-    .prepare("SELECT * FROM telegram_bindings WHERE enabled = 1")
+    .prepare(
+      `SELECT * FROM telegram_bindings
+       WHERE enabled = 1
+         AND token_saved = 1
+         AND status <> 'failed'`,
+    )
     .all() as TelegramBindingRow[];
   const out: Array<{ row: TelegramBindingRow; token: string }> = [];
   for (const row of rows) {
-    const token = await readSecret(secretKey(row.id));
+    const token = await readBindingSecret(row.id);
     if (token) out.push({ row, token });
-    else markBindingFailed(row.id, tg("error.missing_keychain"));
   }
   return out;
 }
 
 export async function reconcileTelegramWorkers(): Promise<void> {
+  if (reconcileInFlight) return reconcileInFlight;
+  reconcileInFlight = reconcileTelegramWorkersOnce().finally(() => {
+    reconcileInFlight = null;
+  });
+  return reconcileInFlight;
+}
+
+async function reconcileTelegramWorkersOnce(): Promise<void> {
   const active = await activeBindingSecrets();
   const byToken = new Map<string, { token: string; bindingIds: Set<string> }>();
   for (const item of active) {
@@ -730,8 +878,8 @@ function markUpdateSeen(bindingIds: string[], updateId: number): void {
 
 async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Promise<void> {
   const message = update.message;
-  const text = message?.text?.trim();
-  if (!message || !text) return;
+  const text = message ? telegramMessageText(message) : "";
+  if (!message || (!text && !hasTelegramAttachment(message))) return;
   const chatId = String(message.chat.id);
   let binding = findBindingForChat([...poller.bindingIds], chatId);
   if (!binding) {
@@ -749,9 +897,18 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     }
     if (!binding || /^\/start(?:@\w+)?(?:\s|$)/i.test(text)) return;
   }
+  if (!resolveTarget(binding.target_kind, binding.target_id, false)) {
+    disableMissingTargetBinding(binding.id);
+    await telegramApi(poller.token, "sendMessage", {
+      chat_id: chatId,
+      text: tg("target.deleted"),
+    }).catch(() => undefined);
+    await reconcileTelegramWorkers();
+    return;
+  }
   if (!shouldHandleMessage(binding, message, text)) return;
 
-  const clean = cleanTelegramPrompt(binding, text);
+  const clean = cleanTelegramPrompt(binding, text) || tg("attachment.default_prompt");
   if (!clean) return;
   if (isAutomationReportStatusRequest(clean)) {
     await telegramApi(poller.token, "sendMessage", {
@@ -777,20 +934,41 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     return;
   }
   await telegramApi(poller.token, "sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => undefined);
+  let attachments: TelegramRuntimeAttachment[] = [];
   try {
-    const finalText = await runBindingInvocation(binding, message, clean);
+    attachments = await downloadTelegramAttachments(poller.token, binding, message);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    markBindingFailed(binding.id, msg);
+    await telegramApi(poller.token, "sendMessage", {
+      chat_id: chatId,
+      text: tg("attachment.download_failed", { message: msg }),
+    }).catch(() => undefined);
+    return;
+  }
+  const cleanWithAttachments = appendTelegramAttachmentGuide(clean, attachments);
+  const mode = telegramInvocationMode(cleanWithAttachments);
+  getDb()
+    .prepare("UPDATE telegram_bindings SET status = 'running', last_error = NULL, updated_at = ? WHERE id = ?")
+    .run(nowIso(), binding.id);
+  if (mode.goalMode) {
+    await telegramApi(poller.token, "sendMessage", {
+      chat_id: chatId,
+      text: tg("run.started"),
+    }).catch(() => undefined);
+  }
+  try {
+    const finalText = await runBindingInvocation(binding, message, cleanWithAttachments, mode, attachments);
     await sendLongMessage(poller.token, chatId, finalText);
-    const nextStatus: TelegramConnectStatus = /테스트|test/i.test(clean) ? "test_passed" : "running";
+    const nextStatus: TelegramConnectStatus = /테스트|test/i.test(clean) ? "test_passed" : "chat_paired";
     getDb()
       .prepare("UPDATE telegram_bindings SET status = ?, last_error = NULL, last_test_at = COALESCE(last_test_at, ?), updated_at = ? WHERE id = ?")
       .run(nextStatus, nextStatus === "test_passed" ? nowIso() : null, nowIso(), binding.id);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     markBindingFailed(binding.id, msg);
-    await telegramApi(poller.token, "sendMessage", {
-      chat_id: chatId,
-      text: tg("error.run_failed", { message: msg }),
-    }).catch(() => undefined);
+    const text = err instanceof TelegramInvocationTimeoutError ? msg : tg("error.run_failed", { message: msg });
+    await telegramApi(poller.token, "sendMessage", { chat_id: chatId, text }).catch(() => undefined);
   }
 }
 
@@ -849,6 +1027,189 @@ function pairBindingToMessage(row: TelegramBindingRow, message: TelegramMessage)
 
 function chatTitle(chat: TelegramChat): string {
   return chat.title || [chat.first_name, chat.last_name].filter(Boolean).join(" ").trim() || chat.username || String(chat.id);
+}
+
+function telegramMessageText(message: TelegramMessage): string {
+  return (message.text ?? message.caption ?? "").trim();
+}
+
+function hasTelegramAttachment(message: TelegramMessage): boolean {
+  return Boolean(
+    message.photo?.length ||
+      message.document ||
+      message.video ||
+      message.animation ||
+      message.audio ||
+      message.voice,
+  );
+}
+
+function bestTelegramPhoto(message: TelegramMessage): TelegramPhotoSize | null {
+  const photos = message.photo ?? [];
+  if (!photos.length) return null;
+  return [...photos].sort((a, b) => (b.file_size ?? 0) - (a.file_size ?? 0))[0] ?? null;
+}
+
+function telegramAttachmentDescriptors(message: TelegramMessage): Array<{
+  kind: string;
+  fileId: string;
+  name?: string;
+  mediaType?: string;
+  size?: number;
+}> {
+  const out: Array<{ kind: string; fileId: string; name?: string; mediaType?: string; size?: number }> = [];
+  const photo = bestTelegramPhoto(message);
+  if (photo) {
+    out.push({
+      kind: "photo",
+      fileId: photo.file_id,
+      name: `telegram-photo-${message.message_id}.jpg`,
+      mediaType: "image/jpeg",
+      size: photo.file_size,
+    });
+  }
+  const addFile = (kind: string, file: TelegramFileDescriptor | undefined, fallbackName: string) => {
+    if (!file?.file_id) return;
+    out.push({
+      kind,
+      fileId: file.file_id,
+      name: file.file_name || fallbackName,
+      mediaType: file.mime_type,
+      size: file.file_size,
+    });
+  };
+  addFile("document", message.document, `telegram-document-${message.message_id}`);
+  addFile("video", message.video, `telegram-video-${message.message_id}.mp4`);
+  addFile("animation", message.animation, `telegram-animation-${message.message_id}.mp4`);
+  addFile("audio", message.audio, `telegram-audio-${message.message_id}`);
+  addFile("voice", message.voice, `telegram-voice-${message.message_id}.ogg`);
+  return out;
+}
+
+function sanitizeTelegramFilename(name: string, fallback: string): string {
+  const base = path.basename(name || fallback);
+  return (base.replace(/[^\w.\-()가-힣 ]+/g, "_").replace(/\s+/g, " ").trim() || fallback).slice(0, 96);
+}
+
+function extensionForMediaType(mediaType: string | undefined, fallback = ".bin"): string {
+  const type = (mediaType ?? "").toLowerCase();
+  if (type === "image/jpeg" || type === "image/jpg") return ".jpg";
+  if (type === "image/png") return ".png";
+  if (type === "image/webp") return ".webp";
+  if (type === "image/gif") return ".gif";
+  if (type === "application/pdf") return ".pdf";
+  if (type.includes("text/plain")) return ".txt";
+  if (type.includes("json")) return ".json";
+  if (type.includes("csv")) return ".csv";
+  if (type.includes("markdown")) return ".md";
+  if (type.startsWith("video/")) return ".mp4";
+  if (type.startsWith("audio/")) return ".audio";
+  return fallback;
+}
+
+function ensureNameExtension(name: string, mediaType: string | undefined): string {
+  if (path.extname(name)) return name;
+  return `${name}${extensionForMediaType(mediaType)}`;
+}
+
+async function downloadTelegramAttachments(
+  token: string,
+  binding: TelegramBindingRow,
+  message: TelegramMessage,
+): Promise<TelegramRuntimeAttachment[]> {
+  const descriptors = telegramAttachmentDescriptors(message);
+  if (!descriptors.length) return [];
+  const runId = `${binding.id.slice(0, 8)}-${message.message_id}-${Date.now()}`;
+  const dir = path.join(agentRunCwd(), ".agentlas", "chat-attachments", "telegram", runId);
+  await fs.mkdir(dir, { recursive: true });
+  const out: TelegramRuntimeAttachment[] = [];
+  for (const [index, descriptor] of descriptors.entries()) {
+    const fileInfo = await telegramApi<TelegramFileInfo>(token, "getFile", { file_id: descriptor.fileId });
+    const size = descriptor.size ?? fileInfo.file_size ?? 0;
+    const fallbackName = `telegram-${descriptor.kind}-${index + 1}`;
+    const safeName = ensureNameExtension(
+      sanitizeTelegramFilename(descriptor.name || fallbackName, fallbackName),
+      descriptor.mediaType,
+    );
+    if (size > TELEGRAM_ATTACHMENT_MAX_BYTES) {
+      throw new Error(
+        tg("attachment.too_large", {
+          name: safeName,
+          limit: Math.round(TELEGRAM_ATTACHMENT_MAX_BYTES / 1024 / 1024),
+        }),
+      );
+    }
+    if (!fileInfo.file_path) {
+      throw new Error(`Telegram file path is missing for ${safeName}`);
+    }
+    const url = `https://api.telegram.org/file/bot${token}/${fileInfo.file_path}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Telegram file download failed (${res.status})`);
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (bytes.byteLength > TELEGRAM_ATTACHMENT_MAX_BYTES) {
+      throw new Error(
+        tg("attachment.too_large", {
+          name: safeName,
+          limit: Math.round(TELEGRAM_ATTACHMENT_MAX_BYTES / 1024 / 1024),
+        }),
+      );
+    }
+    const filePath = path.join(dir, `${String(index + 1).padStart(2, "0")}-${safeName}`);
+    await fs.writeFile(filePath, bytes);
+    const mediaType = descriptor.mediaType || mediaTypeFromFilename(safeName);
+    out.push({
+      path: filePath,
+      name: safeName,
+      mediaType,
+      kind: descriptor.kind,
+      size: bytes.byteLength,
+      image: mediaType.startsWith("image/")
+        ? { mediaType, name: safeName, data: bytes.toString("base64") }
+        : undefined,
+    });
+  }
+  return out;
+}
+
+function mediaTypeFromFilename(name: string): string {
+  const ext = path.extname(name).toLowerCase();
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".png") return "image/png";
+  if (ext === ".webp") return "image/webp";
+  if (ext === ".gif") return "image/gif";
+  if (ext === ".pdf") return "application/pdf";
+  if (ext === ".txt") return "text/plain";
+  if (ext === ".md") return "text/markdown";
+  if (ext === ".json") return "application/json";
+  if (ext === ".csv") return "text/csv";
+  if ([".mp4", ".mov", ".webm", ".m4v"].includes(ext)) return "video/mp4";
+  if ([".ogg", ".mp3", ".wav", ".m4a"].includes(ext)) return "audio/mpeg";
+  return "application/octet-stream";
+}
+
+function appendTelegramAttachmentGuide(prompt: string, attachments: TelegramRuntimeAttachment[]): string {
+  if (!attachments.length) return prompt;
+  const ko = currentUiLocale() === "ko";
+  const list = attachments
+    .map((att, index) => {
+      const sizeMb = (att.size / 1024 / 1024).toFixed(att.size > 1024 * 1024 ? 1 : 3);
+      return `${index + 1}. ${att.path} (${att.kind}, ${att.mediaType}, ${sizeMb}MB, original: ${att.name})`;
+    })
+    .join("\n");
+  const guide = ko
+    ? [
+        "[Telegram 첨부 파일]",
+        `사용자가 Telegram 메시지에 파일 ${attachments.length}개를 첨부했습니다. Agentlas가 읽을 수 있도록 아래 경로에 저장했습니다.`,
+        list,
+        "이미지는 먼저 열어서 확인하고, 문서/파일은 위 정확한 경로를 읽으세요. 다운로드 폴더나 최근 파일을 추측하지 마세요.",
+      ].join("\n")
+    : [
+        "[Telegram attachments]",
+        `The user attached ${attachments.length} file(s) in Telegram. Agentlas saved them at these readable paths:`,
+        list,
+        "Open images first and read documents/files from these exact paths. Do not guess via Downloads or recent files.",
+      ].join("\n");
+  return prompt.trim() ? `${prompt}\n\n${guide}` : guide;
 }
 
 function shouldHandleMessage(binding: TelegramBindingRow, message: TelegramMessage, text: string): boolean {
@@ -933,24 +1294,72 @@ function setAutomationReportEnabled(bindingId: string, enabled: boolean): void {
     .run(enabled ? 1 : 0, nowIso(), bindingId);
 }
 
+function telegramInvocationMode(userText: string): TelegramInvocationMode {
+  const asksToMakeSomething =
+    /만들|제작|구현|개발|코딩|빌드|생성|작성|수정|고쳐|고치|배포|웹|웹사이트|사이트|랜딩|페이지|앱|대시보드|프로토타입|자동화|create|make|build|implement|code|write|edit|fix|deploy|website|web\s*app|site|landing|page|dashboard|prototype|automation/i.test(
+      userText,
+    );
+  if (!asksToMakeSomething) {
+    return { permissions: "read", goalMode: false, instruction: "" };
+  }
+  const ko = currentUiLocale() === "ko";
+  return {
+    permissions: "write",
+    goalMode: true,
+    instruction: ko
+      ? [
+          "Telegram 전용 실행이다.",
+          "사용자는 데스크톱 채팅창을 열지 않고 이 Telegram 대화만으로 결과를 받길 기대한다.",
+          "웹/앱/파일 제작 요청이면 실제 파일을 만들거나 수정하고, 완료 후 Telegram에 결과 경로, 실행 방법, 다음에 보낼 수 있는 수정 문장을 짧게 보고하라.",
+          "폴더가 명시되지 않았으면 현재 Agentlas 기본 작업 폴더 아래에 목표를 알 수 있는 새 폴더를 만들어 진행하라.",
+        ].join("\n")
+      : [
+          "This is a Telegram-only execution.",
+          "The user expects to drive the work from this Telegram chat without opening the desktop chat UI.",
+          "For website/app/file creation requests, actually create or edit files, then report the artifact path, how to run it, and the next Telegram edit they can send.",
+          "If no folder is specified, create a clearly named folder under the current Agentlas default working folder.",
+        ].join("\n"),
+  };
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-async function runBindingInvocation(binding: TelegramBindingRow, message: TelegramMessage, userText: string): Promise<string> {
+async function runBindingInvocation(
+  binding: TelegramBindingRow,
+  message: TelegramMessage,
+  userText: string,
+  mode = telegramInvocationMode(userText),
+  attachments: TelegramRuntimeAttachment[] = [],
+): Promise<string> {
   const chat = await ensureBindingChat(binding);
   const prompt = [
     `Telegram chat: ${binding.telegram_chat_title || chatTitle(message.chat)} (${message.chat.type})`,
     message.from?.username ? `From: @${message.from.username}` : "",
+    mode.instruction,
     "",
     userText,
   ].filter(Boolean).join("\n");
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, TELEGRAM_INVOCATION_TIMEOUT_MS);
   const result = await runMcpInvocation({
     chatId: chat.id,
     userPrompt: prompt,
+    images: attachments.map((attachment) => attachment.image).filter((image): image is ImageAttachment => Boolean(image)),
     locale: currentUiLocale(),
-    permissions: "read",
-  }, (_event: McpInvocationEvent) => undefined);
+    permissions: mode.permissions,
+    goalMode: mode.goalMode,
+  }, (_event: McpInvocationEvent) => undefined, controller.signal).finally(() => {
+    clearTimeout(timer);
+  });
+  if (timedOut) {
+    throw new TelegramInvocationTimeoutError(tg("run.timeout"));
+  }
   if (!result.finalText?.trim()) {
     throw new Error(tg("error.no_reply"));
   }
@@ -1017,9 +1426,8 @@ export async function notifyTelegramAutomationDone(
   for (const row of rows) {
     const key = `${row.id}:${row.telegram_chat_id}`;
     if (sent.has(key) || !row.telegram_chat_id) continue;
-    const token = await readSecret(secretKey(row.id));
+    const token = await readBindingSecret(row.id);
     if (!token) {
-      markBindingFailed(row.id, tg("error.missing_keychain"));
       continue;
     }
     await sendLongMessage(token, row.telegram_chat_id, text);
@@ -1072,6 +1480,12 @@ function markBindingFailed(id: string, message: string): void {
   getDb()
     .prepare("UPDATE telegram_bindings SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?")
     .run(message.slice(0, 1000), nowIso(), id);
+}
+
+function disableMissingTargetBinding(id: string): void {
+  getDb()
+    .prepare("UPDATE telegram_bindings SET enabled = 0, status = 'failed', last_error = ?, updated_at = ? WHERE id = ?")
+    .run(tg("target.deleted").slice(0, 1000), nowIso(), id);
 }
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {

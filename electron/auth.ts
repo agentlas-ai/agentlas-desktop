@@ -4,12 +4,13 @@
 //   1. signInWithGoogle()이 호출되면 별도 partition session의 BrowserWindow 띄움
 //   2. 사용자가 그 안에서 구글 로그인 → 백엔드(POST /api/auth/google)가 agentlas_session cookie 설정
 //   3. did-navigate-in-page / did-frame-finish-load 시점에 partition session.cookies에서 추출
-//   4. cookie value를 macOS Keychain(keytar)에 저장
+//   4. cookie value를 Electron safeStorage 암호화 파일에 저장
 //   5. BrowserWindow 닫고 사용자 메타데이터(userId/workspaceId/email)를 main 메모리에 캐시
 //
 // 보안:
 //   - partition은 영구가 아닌 in-memory 형태 — 윈도우가 닫히면 사라짐 (재로그인 시 새 인증)
-//   - 실제 인증값은 Keychain에만. 디스크 직저장 X.
+//   - 실제 인증값은 OS-backed safeStorage로 암호화해 앱 데이터 폴더에 저장.
+//     앱 시작 때 macOS Keychain 허용 팝업이 반복되지 않게 keytar는 로그인 세션에 쓰지 않는다.
 //   - signature 검증은 안 함 — 서버를 신뢰하고 cookie value를 그대로 보관/재첨부
 //
 // 백엔드 가정:
@@ -17,15 +18,17 @@
 //   - cookie value 포맷: base64url({ userId, workspaceId, exp }).<HMAC>
 //   - 성공 redirect 형태: /account?auth=google (POST /api/auth/google 응답의 redirectTo)
 //   - 사용자 메타(email, name) 조회 endpoint: /api/account/me (없으면 cookie payload만 표시)
-import { BrowserWindow, session as electronSession, shell } from "electron";
+import { app, BrowserWindow, safeStorage, session as electronSession, shell } from "electron";
+import fs from "node:fs/promises";
 import http from "node:http";
-import keytar from "keytar";
+import path from "node:path";
 import type { AuthSession } from "../shared/types";
 
 const COOKIE_NAME = "agentlas_session";
-const KEYTAR_SERVICE = "Agentlas Session";
-const KEYTAR_ACCOUNT = "default";
 const AUTH_PARTITION = "persist:agentlas-auth";
+const USE_MEMORY_AUTH = process.env.AGENTLAS_E2E === "1" && process.env.AGENTLAS_E2E_KEYCHAIN !== "1";
+const USE_E2E_SESSION = USE_MEMORY_AUTH && process.env.AGENTLAS_E2E_AUTH === "1";
+let memoryAuthCookie: string | null = null;
 
 export function webBaseUrl(): string {
   const fromEnv = process.env.AGENTLAS_WEB_BASE_URL?.trim();
@@ -33,7 +36,7 @@ export function webBaseUrl(): string {
   return "https://agentlas.cloud";
 }
 
-/** main 메모리에 보관하는 세션 — 디스크는 keytar만, 메타데이터는 매 부팅 시 cookie payload + me endpoint로 재구성 */
+/** main 메모리에 보관하는 세션 — 디스크에는 암호화 cookie만, 메타데이터는 매 부팅 시 cookie payload + session endpoint로 재구성 */
 interface SessionCache {
   cookieValue: string;
   email?: string;
@@ -44,6 +47,67 @@ interface SessionCache {
 }
 
 let _cache: SessionCache | null = null;
+
+interface StoredAuthCookie {
+  version: 1;
+  encoding: "safeStorage/base64";
+  value: string;
+  updatedAt: string;
+}
+
+function authCookiePath(): string {
+  return path.join(app.getPath("userData"), "auth", "session-cookie.v1.json");
+}
+
+async function readStoredSessionCookie(): Promise<string | null> {
+  if (USE_MEMORY_AUTH) return memoryAuthCookie;
+  try {
+    const raw = await fs.readFile(authCookiePath(), "utf8");
+    const parsed = JSON.parse(raw) as Partial<StoredAuthCookie>;
+    if (parsed.version !== 1 || parsed.encoding !== "safeStorage/base64" || typeof parsed.value !== "string") {
+      return null;
+    }
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    return safeStorage.decryptString(Buffer.from(parsed.value, "base64"));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn("[auth] local session read failed", err);
+    }
+    return null;
+  }
+}
+
+async function writeStoredSessionCookie(value: string): Promise<void> {
+  if (USE_MEMORY_AUTH) {
+    memoryAuthCookie = value;
+    return;
+  }
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error("safeStorage encryption is not available");
+  }
+  const encrypted = safeStorage.encryptString(value).toString("base64");
+  const file = authCookiePath();
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const payload: StoredAuthCookie = {
+    version: 1,
+    encoding: "safeStorage/base64",
+    value: encrypted,
+    updatedAt: new Date().toISOString(),
+  };
+  await fs.writeFile(file, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
+}
+
+async function deleteStoredSessionCookie(): Promise<void> {
+  if (USE_MEMORY_AUTH) {
+    memoryAuthCookie = null;
+    return;
+  }
+  try {
+    await fs.rm(authCookiePath(), { force: true });
+  } catch (err) {
+    console.warn("[auth] local session delete failed", err);
+  }
+}
 
 /** cookie value의 body 부분만 base64url decode — signature 검증 안 함 (서버 신뢰). */
 function decodeSessionCookie(value: string): {
@@ -110,22 +174,23 @@ function scheduleMetaRefresh(): void {
     if (!_cache || _cache.cookieValue !== cache.cookieValue) return;
     if (meta === "invalid") {
       _cache = null;
-      void keytar.deletePassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT);
+      void deleteStoredSessionCookie();
       return;
     }
     if (meta) _cache = { ..._cache, email: meta.email, name: meta.name };
   });
 }
 
-/** 부팅 시 keytar에서 cookie를 복원 — TTL이 만료됐으면 null. */
+/** 부팅 시 로컬 암호화 저장소에서 cookie를 복원 — TTL이 만료됐으면 null.
+ *  함수명은 기존 호출부 호환을 위해 유지한다. */
 export async function bootAuthFromKeychain(): Promise<void> {
   try {
-    const stored = await keytar.getPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT);
+    const stored = await readStoredSessionCookie();
     if (!stored) return;
     const decoded = decodeSessionCookie(stored);
     if (decoded.expiresAt && decoded.expiresAt < Date.now()) {
       // 만료 — 정리하고 끝.
-      await keytar.deletePassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT);
+      await deleteStoredSessionCookie();
       return;
     }
     _cache = {
@@ -142,10 +207,18 @@ export async function bootAuthFromKeychain(): Promise<void> {
 }
 
 export function getAuthSession(): AuthSession {
+  if (USE_E2E_SESSION && !_cache) {
+    return {
+      signedIn: true,
+      email: "e2e@agentlas.local",
+      name: "Agentlas E2E",
+      workspaceId: "e2e",
+    };
+  }
   if (!_cache) return { signedIn: false };
   if (_cache.expiresAt && _cache.expiresAt < Date.now()) {
     _cache = null;
-    void keytar.deletePassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT);
+    void deleteStoredSessionCookie();
     return { signedIn: false };
   }
   scheduleMetaRefresh();
@@ -158,12 +231,12 @@ export function getAuthSession(): AuthSession {
   };
 }
 
-/** cookie value를 keytar + 메모리 캐시에 영구화하고 메타를 채운다. 두 로그인 경로(창/브라우저)가 공유. */
+/** cookie value를 로컬 암호화 저장소 + 메모리 캐시에 영구화하고 메타를 채운다. 두 로그인 경로(창/브라우저)가 공유. */
 async function persistSession(value: string): Promise<AuthSession> {
   try {
-    await keytar.setPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT, value);
+    await writeStoredSessionCookie(value);
   } catch (err) {
-    console.warn("[auth] keytar set failed — keeping session in memory only", err);
+    console.warn("[auth] local session save failed — keeping session in memory only", err);
   }
   const decoded = decodeSessionCookie(value);
   _cache = {
@@ -351,9 +424,9 @@ function callbackHtml(ok: boolean): string {
 export async function signOut(): Promise<void> {
   _cache = null;
   try {
-    await keytar.deletePassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT);
+    await deleteStoredSessionCookie();
   } catch (err) {
-    console.warn("[auth] keytar delete failed", err);
+    console.warn("[auth] local session delete failed", err);
   }
   // 로그인 partition의 쿠키도 모두 비움 — 다음 signIn 시 깨끗한 상태에서 시작
   try {

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconAtSign,
@@ -15,7 +16,8 @@ import {
   IconTrash,
   IconUsers,
 } from "@/components/Icon";
-import { visibleAgents } from "@/lib/agent-visibility";
+import { classifyInstalledAgent } from "@/lib/agent-entity-kind";
+import { buildAgentRoster, visibleRosterAgents } from "@/lib/agent-roster";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type {
@@ -111,6 +113,31 @@ function sessionToggleLabel(binding: TelegramConnectBinding, t: Translate) {
   return t("connect.toggle.start");
 }
 
+function targetLivePolicy(target: ConnectTarget | undefined, t: Translate) {
+  if (!target) return t("connect.policy.choose_first");
+  if (target.readiness === "review") return t("connect.policy.review_group");
+  if (target.kind === "single") return t("connect.policy.single_live");
+  return t("connect.policy.orchestrator_live");
+}
+
+function bindingPolicy(binding: TelegramConnectBinding, t: Translate) {
+  if (binding.targetMissing) return t("connect.policy.deleted_action");
+  if (!binding.chatSessionId) return t("connect.policy.new_session");
+  return t("connect.policy.live_existing");
+}
+
+function bindingErrorLabel(binding: TelegramConnectBinding, t: Translate) {
+  if (!binding.lastError) return "";
+  if (
+    /keychain/i.test(binding.lastError) ||
+    binding.lastError.includes("비밀 금고") ||
+    binding.lastError.includes("비밀문자")
+  ) {
+    return t("connect.error.missing_local_secret");
+  }
+  return binding.lastError;
+}
+
 function friendlyError(err: unknown) {
   const raw = err instanceof Error ? err.message : String(err);
   return raw
@@ -165,7 +192,7 @@ export default function ConnectPage() {
         api.agentGroups.listResolved(),
         api.telegram.listBindings(),
       ]);
-      setAgents(visibleAgents(agentRows));
+      setAgents(visibleRosterAgents(agentRows));
       setFirms(firmRows);
       setGroups(groupRows);
       setBindings(bindingRows);
@@ -191,6 +218,8 @@ export default function ConnectPage() {
   const targets = useMemo<ConnectTarget[]>(() => {
     const rows: ConnectTarget[] = [];
 
+    const roster = buildAgentRoster(agents, firms);
+
     for (const group of groups) {
       rows.push({
         id: `group:${group.id}`,
@@ -211,28 +240,30 @@ export default function ConnectPage() {
 
     for (const firm of firms) {
       const loc = pickLocalized(firm, locale);
+      const single = roster.firmKindById.get(firm.id) === "single";
       rows.push({
         id: `org:${firm.id}`,
         targetKind: "firm",
         targetId: firm.id,
-        kind: "org",
+        // One-member orgs appear like single agents, while the binding still targets the firm.
+        kind: single ? "single" : "org",
         name: loc.name,
-        subtitle: t("connect.target.org.subtitle"),
+        subtitle: single ? t("connect.target.single.subtitle") : t("connect.target.org.subtitle"),
         description:
           loc.tagline ||
-          t("connect.target.org.description"),
+          (single ? t("connect.target.single.description") : t("connect.target.org.description")),
         source: t("connect.target.org.source"),
-        routeHint: t("connect.target.org.route"),
-        sessionMode: "shared_chat",
+        routeHint: single ? t("connect.target.single.route") : t("connect.target.org.route"),
+        sessionMode: single ? "per_user" : "shared_chat",
         readiness: "ready",
       });
     }
 
-    const firmAgentIds = new Set(firms.flatMap((firm) => firm.orgChart.map((node) => node.agentId)));
-    for (const agent of agents) {
-      if (firmAgentIds.has(agent.id)) continue;
+    for (const agent of roster.standaloneAgents) {
+      // Agents represented by a firm row stay out of the standalone list.
       const loc = pickLocalized(agent, locale);
-      const isTeam = agent.kind === "team";
+      // Keep team/single classification aligned with the shared entity classifier.
+      const isTeam = classifyInstalledAgent(agent) === "multi";
       rows.push({
         id: `agent:${agent.id}`,
         targetKind: "agent",
@@ -263,15 +294,16 @@ export default function ConnectPage() {
       const connectedTarget = targets.find((target) =>
         bindings.some((binding) => binding.targetKind === target.targetKind && binding.targetId === target.targetId),
       );
-      setSelectedId((connectedTarget ?? targets[0]).id);
+      setSelectedId(connectedTarget?.id ?? "");
     }
   }, [bindings, selectedId, targets]);
 
-  const selected = targets.find((target) => target.id === selectedId) ?? targets[0];
+  const selected = targets.find((target) => target.id === selectedId);
   const visibleBindings = useMemo(
     () => [...bindings].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
     [bindings],
   );
+  const orphanCount = useMemo(() => visibleBindings.filter((b) => b.targetMissing).length, [visibleBindings]);
 
   const targetSections = useMemo(() => {
     const labels: Array<{ key: TargetKind; label: string }> = [
@@ -296,6 +328,7 @@ export default function ConnectPage() {
     if (!api || !selected) return;
     setBusy("auto");
     appendLog(t("connect.log.auto_start", { name: selected.name }));
+    appendLog(t("connect.log.telegram_login_hint"));
     try {
       const result = await api.telegram.autoConnect({
         targetKind: selected.targetKind,
@@ -312,6 +345,31 @@ export default function ConnectPage() {
       setBusy(null);
     }
   }, [appendLog, refresh, selected, t]);
+
+  const handlePruneOrphans = useCallback(async () => {
+    const api = ipc();
+    if (!api) return;
+    const orphanCount = bindings.filter((b) => b.targetMissing).length;
+    if (orphanCount === 0) {
+      setToast(t("connect.prune.none"));
+      return;
+    }
+    if (!window.confirm(t("connect.prune.confirm", { n: orphanCount }))) return;
+    setBusy("prune");
+    try {
+      const result = await api.telegram.pruneOrphans();
+      const message = t("connect.prune.done", { n: result.removed });
+      setToast(message);
+      appendLog(message, "success");
+      await refresh();
+    } catch (err) {
+      const message = friendlyError(err);
+      setToast(message);
+      appendLog(message, "error");
+    } finally {
+      setBusy(null);
+    }
+  }, [appendLog, bindings, refresh, t]);
 
   const focusTokenInput = useCallback(() => {
     setManualOpen(true);
@@ -349,9 +407,10 @@ export default function ConnectPage() {
   }, [appendLog, botToken, focusTokenInput, refresh, selected, t]);
 
   const handleBindingAction = useCallback(
-    async (binding: TelegramConnectBinding, action: "open" | "test" | "settings" | "clone" | "resume" | "stop" | "remove") => {
+    async (binding: TelegramConnectBinding, action: "open" | "test" | "settings" | "clone" | "reset" | "resume" | "stop" | "remove") => {
       const api = ipc();
       if (!api) return;
+      if (action === "reset" && !window.confirm(t("connect.action.reset_confirm"))) return;
       setBusy(`${action}:${binding.id}`);
       try {
         if (action === "open") {
@@ -375,6 +434,12 @@ export default function ConnectPage() {
           const result = await api.telegram.clone({ sourceBindingId: binding.id });
           setToast(result.message);
           appendLog(result.message, "success");
+          await refresh();
+        } else if (action === "reset") {
+          const next = await api.telegram.resetConversation(binding.id);
+          const message = t("connect.msg.conversation_reset", { name: next.targetName });
+          setToast(message);
+          appendLog(message, "success");
           await refresh();
         } else if (action === "resume") {
           const next = await api.telegram.resume(binding.id);
@@ -457,11 +522,15 @@ export default function ConnectPage() {
                           <strong>{target.name}</strong>
                           <small>{target.description}</small>
                         </span>
-                        <span className="connect-row-meta">
-                          <span>{kindLabel(target.kind, t)}</span>
-                          <span>{routeModeLabel(target, t)}</span>
+                        <span className="connect-target-meta">
+                          <span data-tone={target.readiness === "review" ? "warning" : undefined}>
+                            {target.readiness === "review" ? t("connect.badge.review") : kindLabel(target.kind, t)}
+                          </span>
+                          <small>{routeModeLabel(target, t)}</small>
                         </span>
-                        <span className="connect-row-action">{selected?.id === target.id ? t("connect.row.selected") : t("connect.row.choose")}</span>
+                        <span className="connect-row-action" aria-hidden="true">
+                          {selected?.id === target.id ? <IconCheck size={14} /> : null}
+                        </span>
                       </button>
                     ))}
                   </div>
@@ -471,6 +540,10 @@ export default function ConnectPage() {
                     <IconUsers size={22} />
                     <strong>{t("connect.empty.title")}</strong>
                     <span>{t("connect.empty.body")}</span>
+                    <div className="connect-empty-actions">
+                      <Link href="/library/agent-groups">{t("connect.empty.create_orchestrator")}</Link>
+                      <Link href="/library/agents">{t("connect.empty.create_agent")}</Link>
+                    </div>
                   </div>
                 ) : null}
               </div>
@@ -485,87 +558,163 @@ export default function ConnectPage() {
                 <span>{t("connect.count.ports", { n: visibleBindings.length })}</span>
               </div>
 
-              <div className="connect-selected-strip">
-                <span>{t("connect.selected.label")}</span>
-                <strong>{selected?.name ?? t("connect.mode.choose")}</strong>
-                <small>{selected ? `${modeLabel(selected, t)} · ${selected.routeHint}` : modeLabel(selected, t)}</small>
-              </div>
+              <div className="connect-port-setup">
+                <div className="connect-selected-strip" data-empty={selected ? undefined : "true"}>
+                  <div className="connect-selected-main">
+                    <span>{t("connect.selected.label")}</span>
+                    <strong>{selected?.name ?? t("connect.mode.choose")}</strong>
+                  </div>
+                  <p>{selected ? `${modeLabel(selected, t)} · ${targetLivePolicy(selected, t)}` : targetLivePolicy(selected, t)}</p>
+                </div>
 
-              <button
-                className="connect-btn primary wide"
+                <button
+                className="connect-btn primary connect-port-create"
                 type="button"
                 onClick={() => void handleAutoConnect()}
-                disabled={!selected || busy === "auto"}
+                disabled={!selected || selected.readiness === "review" || busy === "auto"}
               >
-                <IconBolt size={16} />
-                {busy === "auto" ? t("connect.action.auto_busy") : t("connect.action.create_port")}
-              </button>
+                  <IconBolt size={15} />
+                  {busy === "auto" ? t("connect.action.auto_busy") : t("connect.action.create_port")}
+                </button>
+              </div>
+
+              {busy === "auto" ? (
+                <div className="connect-login-wait">
+                  <IconKey size={16} />
+                  <div>
+                    <strong>{t("connect.login_wait.title")}</strong>
+                    <span>{t("connect.login_wait.body")}</span>
+                  </div>
+                </div>
+              ) : null}
+
+              {orphanCount > 0 ? (
+                <div className="connect-orphan-strip">
+                  <span>{t("connect.badge.deleted_title")}</span>
+                  <button type="button" onClick={() => void handlePruneOrphans()} disabled={busy === "prune"}>
+                    <IconTrash size={13} />
+                    {t("connect.prune.button")} ({orphanCount})
+                  </button>
+                </div>
+              ) : null}
 
               <div className="connect-port-list">
-                {visibleBindings.map((binding) => (
-                  <div className="connect-port-row" data-status={sessionTone(binding)} key={binding.id}>
-                    <div className="connect-port-route">
-                      <span className="connect-port-bot">
-                        <IconAtSign size={15} />
-                        {binding.botUsername ? `@${binding.botUsername}` : binding.hasToken ? t("connect.bot.ready") : t("connect.bot.needs")}
-                      </span>
-                      <IconRoute size={16} />
-                      <strong>{binding.targetName}</strong>
-                    </div>
-                    <div className="connect-port-meta">
-                      <span>{sessionLabel(binding, t)}</span>
-                      <span>{statusLabel(binding.status, binding.enabled, t)}</span>
-                      <span>{binding.telegramChatTitle || t("connect.chat.waiting")}</span>
-                      {binding.automationReportEnabled ? <span>{t("connect.meta.automation_report")}</span> : null}
-                    </div>
-                    {binding.botUsername ? (
-                      <div className="connect-bot-settings">
-                        <IconSettings size={15} />
-                        <span>
-                          <strong>{t("connect.bot_settings.title")}</strong>
-                          <small>{t("connect.bot_settings.body")}</small>
+                {visibleBindings.map((binding) => {
+                  const missing = binding.targetMissing;
+                  return (
+                    <div
+                      className="connect-port-row"
+                      data-status={missing ? "off" : sessionTone(binding)}
+                      data-missing={missing ? "true" : undefined}
+                      key={binding.id}
+                    >
+                      <div className="connect-port-head">
+                        <span className="connect-port-bot">
+                          <IconAtSign size={14} />
+                          {binding.botUsername ? `@${binding.botUsername}` : binding.hasToken ? t("connect.bot.ready") : t("connect.bot.needs")}
                         </span>
+                        <span className="connect-port-arrow" aria-hidden="true">
+                          <IconRoute size={14} />
+                        </span>
+                        <strong className="connect-port-target" title={binding.targetName}>
+                          {binding.targetName}
+                        </strong>
+                        {missing ? (
+                          <span className="connect-port-badge deleted" title={t("connect.badge.deleted_title")}>
+                            {t("connect.badge.deleted")}
+                          </span>
+                        ) : (
+                          <span className="connect-port-badge" data-tone={sessionTone(binding)}>
+                            {statusLabel(binding.status, binding.enabled, t)}
+                          </span>
+                        )}
                       </div>
-                    ) : null}
-                    <div className="connect-port-actions">
-                      <button type="button" onClick={() => void handleBindingAction(binding, "open")} disabled={!binding.botUsername || busy === `open:${binding.id}`}>
-                        {t("connect.action.open")}
-                      </button>
-                      <button type="button" onClick={() => void handleBindingAction(binding, "test")} disabled={!binding.telegramChatId || busy === `test:${binding.id}`}>
-                        {t("connect.action.test")}
-                      </button>
-                      <button
-                        type="button"
-                        title={t("connect.action.clone_title")}
-                        onClick={() => void handleBindingAction(binding, "clone")}
-                        disabled={!binding.hasToken || busy === `clone:${binding.id}`}
-                      >
-                        <IconPlus size={13} />
-                        {t("connect.action.clone")}
-                      </button>
-                      <button
-                        type="button"
-                        title={t("connect.bot_settings.button_title")}
-                        onClick={() => void handleBindingAction(binding, "settings")}
-                        disabled={!binding.botUsername || busy === `settings:${binding.id}`}
-                      >
-                        <IconSettings size={13} />
-                        {t("connect.action.bot_settings")}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleBindingAction(binding, binding.enabled && binding.sessionRunning ? "stop" : "resume")}
-                        disabled={busy === `resume:${binding.id}` || busy === `stop:${binding.id}`}
-                      >
-                        {sessionToggleLabel(binding, t)}
-                      </button>
-                      <button type="button" onClick={() => void handleBindingAction(binding, "remove")} disabled={busy === `remove:${binding.id}`} aria-label={t("connect.action.remove_port")}>
-                        <IconTrash size={13} />
-                      </button>
+                      <div className="connect-port-sub">
+                        <span className="connect-port-chat">{binding.telegramChatTitle || t("connect.chat.waiting")}</span>
+                        {!missing ? <span className="connect-port-dot">·</span> : null}
+                        {!missing ? <span>{sessionLabel(binding, t)}</span> : null}
+                        {binding.automationReportEnabled ? (
+                          <>
+                            <span className="connect-port-dot">·</span>
+                            <span>{t("connect.meta.automation_report")}</span>
+                          </>
+                        ) : null}
+                      </div>
+                      <p className="connect-port-policy">{bindingPolicy(binding, t)}</p>
+                      <div className="connect-port-actions">
+                        {missing ? (
+                          <button
+                            type="button"
+                            className="danger"
+                            onClick={() => void handleBindingAction(binding, "remove")}
+                            disabled={busy === `remove:${binding.id}`}
+                          >
+                            <IconTrash size={13} />
+                            {t("connect.action.remove_port")}
+                          </button>
+                        ) : (
+                          <>
+                            <div className="connect-port-primary-actions">
+                              <button type="button" onClick={() => void handleBindingAction(binding, "open")} disabled={!binding.botUsername || busy === `open:${binding.id}`}>
+                                {t("connect.action.open")}
+                              </button>
+                              <button type="button" onClick={() => void handleBindingAction(binding, "test")} disabled={!binding.telegramChatId || busy === `test:${binding.id}`}>
+                                {t("connect.action.test")}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleBindingAction(binding, binding.enabled && binding.sessionRunning ? "stop" : "resume")}
+                                disabled={busy === `resume:${binding.id}` || busy === `stop:${binding.id}`}
+                              >
+                                {sessionToggleLabel(binding, t)}
+                              </button>
+                            </div>
+                            <div className="connect-port-secondary-actions">
+                              <button
+                                type="button"
+                                title={t("connect.action.reset_title")}
+                                aria-label={t("connect.action.reset_conversation")}
+                                onClick={() => void handleBindingAction(binding, "reset")}
+                                disabled={!binding.chatSessionId || busy === `reset:${binding.id}`}
+                              >
+                                <IconRefresh size={13} />
+                              </button>
+                              <button
+                                type="button"
+                                title={t("connect.action.clone_title")}
+                                aria-label={t("connect.action.clone")}
+                                onClick={() => void handleBindingAction(binding, "clone")}
+                                disabled={!binding.hasToken || busy === `clone:${binding.id}`}
+                              >
+                                <IconPlus size={13} />
+                              </button>
+                              <button
+                                type="button"
+                                title={t("connect.bot_settings.button_title")}
+                                aria-label={t("connect.action.bot_settings")}
+                                onClick={() => void handleBindingAction(binding, "settings")}
+                                disabled={!binding.botUsername || busy === `settings:${binding.id}`}
+                              >
+                                <IconSettings size={13} />
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost-icon"
+                                onClick={() => void handleBindingAction(binding, "remove")}
+                                disabled={busy === `remove:${binding.id}`}
+                                aria-label={t("connect.action.remove_port")}
+                                title={t("connect.action.remove_port")}
+                              >
+                                <IconTrash size={13} />
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                      {bindingErrorLabel(binding, t) && !missing ? <p className="connect-binding-error">{bindingErrorLabel(binding, t)}</p> : null}
                     </div>
-                    {binding.lastError ? <p className="connect-binding-error">{binding.lastError}</p> : null}
-                  </div>
-                ))}
+                  );
+                })}
                 {!loading && visibleBindings.length === 0 ? (
                   <div className="connect-port-empty">
                     <IconAtSign size={20} />

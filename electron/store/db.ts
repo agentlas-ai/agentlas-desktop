@@ -10,7 +10,7 @@ import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 41;
+const SCHEMA_VERSION = 45;
 
 export function initStore(): void {
   if (_db) return;
@@ -1018,6 +1018,88 @@ export function initStore(): void {
       CREATE INDEX IF NOT EXISTS idx_telegram_bindings_automation_report
         ON telegram_bindings(automation_report_enabled, enabled, telegram_chat_id);
     `);
+  }
+
+  // ── v41 → v42: installed_agents.entity_kind ──────────────
+  // Persist whether an installed agent is a single agent or a multi-agent team,
+  // captured from the marketplace listing (entityKind / agentCount) at install
+  // time. Previously "team-ness" was only derivable from the local-import route
+  // file, so Hub/cloud-installed teams were misclassified as single agents.
+  // Backfill for existing rows runs at boot (registry.backfillEntityKinds).
+  if (userVersion < 42) {
+    const cols = _db
+      .prepare("PRAGMA table_info(installed_agents)")
+      .all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "entity_kind")) {
+      _db.exec("ALTER TABLE installed_agents ADD COLUMN entity_kind TEXT");
+    }
+  }
+
+  // ── v42 → v43: Telegram token presence metadata ──────────────
+  // Listing/badging must not read Keychain. This flag only says "a bot secret
+  // was saved for this binding"; the secret itself stays outside SQLite.
+  if (userVersion < 43) {
+    const cols = _db
+      .prepare("PRAGMA table_info(telegram_bindings)")
+      .all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "token_saved")) {
+      _db.exec("ALTER TABLE telegram_bindings ADD COLUMN token_saved INTEGER NOT NULL DEFAULT 0");
+      _db
+        .prepare("UPDATE telegram_bindings SET token_saved = 1 WHERE bot_user_id IS NOT NULL OR bot_username IS NOT NULL")
+        .run();
+    }
+    if (!cols.some((c) => c.name === "token_fingerprint")) {
+      _db.exec("ALTER TABLE telegram_bindings ADD COLUMN token_fingerprint TEXT");
+    }
+  }
+
+  // ── v43 → v44: clean stale Telegram missing-token flags ─────────────
+  // v43 prevents future list/refresh Keychain reads, but older rows may still
+  // say token_saved=1 after a previous "missing Keychain" failure. Correct the
+  // metadata so the UI does not show those ports as credential-ready.
+  if (userVersion < 44) {
+    const cols = _db
+      .prepare("PRAGMA table_info(telegram_bindings)")
+      .all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === "token_saved")) {
+      _db
+        .prepare(
+          `UPDATE telegram_bindings
+           SET token_saved = 0
+           WHERE status = 'failed'
+             AND last_error IS NOT NULL
+             AND (
+               lower(last_error) LIKE '%keychain%'
+               OR last_error LIKE '%비밀 금고%'
+               OR last_error LIKE '%비밀문자%'
+             )`,
+        )
+        .run();
+    }
+  }
+
+  // ── v44 → v45: hide old Telegram missing-token wording ─────────────
+  // The UI now treats token absence as local port state. Drop older persisted
+  // error copy so stale rows do not keep showing implementation details.
+  if (userVersion < 45) {
+    const cols = _db
+      .prepare("PRAGMA table_info(telegram_bindings)")
+      .all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === "last_error")) {
+      _db
+        .prepare(
+          `UPDATE telegram_bindings
+           SET last_error = NULL
+           WHERE status = 'failed'
+             AND last_error IS NOT NULL
+             AND (
+               lower(last_error) LIKE '%keychain%'
+               OR last_error LIKE '%비밀 금고%'
+               OR last_error LIKE '%비밀문자%'
+             )`,
+        )
+        .run();
+    }
   }
 
   _db.pragma(`user_version = ${SCHEMA_VERSION}`);

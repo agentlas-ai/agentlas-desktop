@@ -7,7 +7,8 @@ import { useSearchParams } from "next/navigation";
 
 import { ipc } from "@/lib/ipc";
 import { mapWithConcurrency } from "@/lib/concurrency";
-import { isVisibleAgent, isUserFacingAgentText, visibleAgents } from "@/lib/agent-visibility";
+import { isUserFacingAgentText } from "@/lib/agent-visibility";
+import { buildAgentRoster, isRosterVisibleAgent, visibleRosterAgents } from "@/lib/agent-roster";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { parseMemoryMarkdown, serializeMemoryMarkdown } from "@/lib/agent-memory";
@@ -240,7 +241,7 @@ function LibraryAgentsView() {
       api.agentGroups?.listResolved ? api.agentGroups.listResolved().catch(() => []) : Promise.resolve([]),
     ]);
     setFirms(fList);
-    setAgents(visibleAgents(agList));
+    setAgents(visibleRosterAgents(agList));
     setAgentGroups(groupRows);
     setRuntimeStatuses(runtimes);
     setRuntimeOverrides(overrides);
@@ -593,7 +594,8 @@ function LibraryAgentsView() {
     }
   }
 
-  const agentMap = new Map(agents.map((a) => [a.id, a]));
+  const roster = useMemo(() => buildAgentRoster(agents, firms), [agents, firms]);
+  const agentMap = roster.agentById;
   const installedAgentSlugs = new Set(agents.map((a) => a.slug));
   const selectedContext = useMemo(
     () => (selectedNode ? findSelectedNodeContext(selectedNode, firms, resolvedOrgs) : null),
@@ -813,7 +815,7 @@ function LibraryAgentsView() {
               </div>
             )}
 
-            {(sidebarCollapsed || rosterTab === "multi") && firms.map(firm => {
+            {(sidebarCollapsed || rosterTab === "multi") && roster.multiFirms.map(firm => {
               const rOrg = resolvedOrgs[firm.id];
               const fLoc = pickLocalized(firm, locale);
               const isCollapsed = firmCollapsed[firm.id];
@@ -882,23 +884,64 @@ function LibraryAgentsView() {
               );
             })}
 
+            {(sidebarCollapsed || rosterTab === "multi") && roster.standaloneMultiAgents.length > 0 && (
+              <div style={{ marginTop: 8 }}>
+                {!sidebarCollapsed && (
+                  <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-deep)", textTransform: "uppercase", padding: "0 12px", marginBottom: 8 }}>
+                    {t("library.agents.team_section")}
+                  </div>
+                )}
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingLeft: sidebarCollapsed ? 0 : 12, alignItems: sidebarCollapsed ? "center" : "stretch" }}>
+                  {roster.standaloneMultiAgents.map((a) => {
+                    const loc = pickLocalized(a, locale);
+                    const isAct = selectedNode?.agentId === a.id;
+                    if (sidebarCollapsed) {
+                      return <MiniNodeAvatar key={a.id} node={{ name: loc.name, role: loc.tagline }} active={isAct} onClick={() => {
+                        setSelectedNode({ id: a.id, name: loc.name, role: loc.tagline, agentId: a.id });
+                        setActiveTab("identity");
+                      }} />;
+                    }
+                    return (
+                      <div
+                        key={a.id}
+                        onClick={() => {
+                          setSelectedNode({ id: a.id, name: loc.name, role: loc.tagline, agentId: a.id });
+                          setActiveTab("identity");
+                        }}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", cursor: "pointer",
+                          borderRadius: "var(--radius-md)", background: isAct ? "var(--fill-1)" : "transparent",
+                          border: isAct ? "1px solid var(--accent)" : "1px solid transparent"
+                        }}
+                      >
+                        <AgentAvatar name={loc.name} tone={a.tone} size={28} />
+                        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                          <span style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</span>
+                          <span style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.tagline}</span>
+                        </div>
+                        <IconLayers size={14} style={{ color: "var(--accent)" }} />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Independent Agents (싱글 탭) */}
             {(sidebarCollapsed || rosterTab === "single") && (
             <div style={{ marginTop: 8 }}>
-              {!sidebarCollapsed && agents.filter(a => !firms.some(f => f.orgChart.some(n => n.agentId === a.id))).length === 0 && (
+              {!sidebarCollapsed && roster.singleModeAgents.length === 0 && (
                 <div style={{ fontSize: 12, color: "var(--muted-deep)", padding: "8px 12px" }}>
-                  {locale === "ko"
-                    ? "싱글 에이전트가 없습니다. 허브에서 받거나 빌드로 만들어 보세요."
-                    : "No single agents yet. Get one from the Hub or build one."}
+                  {t("library.agents.single_empty")}
                 </div>
               )}
-              {!sidebarCollapsed && agents.filter(a => !firms.some(f => f.orgChart.some(n => n.agentId === a.id))).length > 0 && (
+              {!sidebarCollapsed && roster.singleModeAgents.length > 0 && (
                 <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-deep)", textTransform: "uppercase", padding: "0 12px", marginBottom: 8 }}>
-                  {t("library.agents.subtitle") || "Independent Agents"}
+                  {t("library.agents.single_section")}
                 </div>
               )}
               <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingLeft: sidebarCollapsed ? 0 : 12, alignItems: sidebarCollapsed ? "center" : "stretch" }}>
-                {agents.filter(a => !firms.some(f => f.orgChart.some(n => n.agentId === a.id))).map(a => {
+                {roster.singleModeAgents.map(a => {
                   const loc = pickLocalized(a, locale);
                   const isAct = selectedNode?.agentId === a.id;
                   if (sidebarCollapsed) {
@@ -1430,7 +1473,7 @@ function isVisibleResolvedNode(node: ResolvedNode, agentMap: Map<string, Install
   if (!isUserFacingAgentText(node.name, node.role)) return false;
   if (!node.agentId) return true;
   const agent = agentMap.get(node.agentId);
-  return Boolean(agent && isVisibleAgent(agent));
+  return Boolean(agent && isRosterVisibleAgent(agent));
 }
 
 function isVisibleFirmOrgNode(
@@ -1439,7 +1482,7 @@ function isVisibleFirmOrgNode(
 ): boolean {
   if (!isUserFacingAgentText(node.agentSlug, node.role)) return false;
   const agent = agentMap.get(node.agentId);
-  return Boolean(agent && isVisibleAgent(agent));
+  return Boolean(agent && isRosterVisibleAgent(agent));
 }
 
 // ── 일반 트리 재귀 렌더 (사이드바 내부) ─────────────────

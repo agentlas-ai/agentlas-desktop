@@ -711,7 +711,7 @@ export async function runMcpInvocation(
   // ── Agent Group 오케스트레이션 ───────────────────────────
   // 저장된 그룹은 firm/division보다 상위의 라우팅 묶음이다. 실행 직전에
   // installed agents, org chart, live Hub catalog/bundle을 다시 풀어서 최신 경로로 호출한다.
-  if (chat.agentGroupId && chat.kind !== "division") {
+  if (chat.agentGroupId) {
     try {
       const groupRun = await buildAgentGroupTaskForceSpecs({
         groupId: chat.agentGroupId,

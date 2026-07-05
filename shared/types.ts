@@ -384,7 +384,9 @@ export interface AgentGroupMember {
 
 export interface AgentGroupResolvedMember extends AgentGroupMember {
   status: AgentGroupMemberStatus;
-  warnings: Array<"agent_missing" | "hub_missing" | "route_missing" | "route_changed" | "unsupported_multi">;
+  warnings: Array<
+    "agent_missing" | "hub_missing" | "route_missing" | "route_changed" | "unsupported_multi" | "unsupported_plugin"
+  >;
   /** Latest display/routing metadata, re-resolved from installed agents/org chart/Hub. */
   current?: AgentGroupMemberSnapshot;
 }
@@ -570,6 +572,8 @@ export interface TelegramConnectBinding {
   targetKind: TelegramConnectTargetKind;
   targetId: string;
   targetName: string;
+  /** True when the bound agent/firm/group no longer exists (deleted target → orphaned port). */
+  targetMissing: boolean;
   status: TelegramConnectStatus;
   enabled: boolean;
   sessionRunning: boolean;
@@ -3442,9 +3446,11 @@ export interface AgentlasIpc {
     resume: (id: string) => Promise<TelegramConnectBinding>;
     stop: (id: string) => Promise<TelegramConnectBinding>;
     remove: (id: string) => Promise<void>;
+    resetConversation: (id: string) => Promise<TelegramConnectBinding>;
     sendTest: (id: string) => Promise<TelegramConnectActionResult>;
     openBot: (id: string) => Promise<{ ok: boolean; message: string }>;
     configureBotSettings: (id: string) => Promise<{ ok: boolean; message: string }>;
+    pruneOrphans: () => Promise<{ removed: number }>;
   };
   projects: {
     list: () => Promise<Project[]>;

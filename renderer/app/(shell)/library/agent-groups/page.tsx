@@ -7,6 +7,7 @@ import {
   IconChat,
   IconCheck,
   IconClose,
+  IconEdit,
   IconLayers,
   IconPlus,
   IconRefresh,
@@ -16,10 +17,10 @@ import {
   IconTrash,
 } from "@/components/Icon";
 import { ipc } from "@/lib/ipc";
-import { entityClassLabel, isSingleHubAgent, isSingleInstalledAgent } from "@/lib/agent-entity-kind";
+import { classifyHubEntity, classifyInstalledAgent, entityClassLabel, entityClassShortLabel } from "@/lib/agent-entity-kind";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
-import { visibleAgents } from "@/lib/agent-visibility";
+import { visibleRosterAgents } from "@/lib/agent-roster";
 import type {
   AgentGroupMember,
   AgentGroupMemberSnapshot,
@@ -29,10 +30,12 @@ import type {
   InstalledFirm,
 } from "@/lib/types";
 
-type SourceKind = "installed" | "hub";
+type SourceKind = "installed" | "firm-node" | "hub";
+type Translate = ReturnType<typeof useT>["t"];
 type SourceItem = {
   key: string;
   kind: SourceKind;
+  entityClass: "single" | "multi" | "plugin";
   title: string;
   subtitle: string;
   route: string;
@@ -42,16 +45,17 @@ type SourceItem = {
 };
 
 export default function AgentGroupsPage() {
-  const { locale } = useT();
-  const ko = locale === "ko";
+  const { locale, t } = useT();
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
   const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
   const [groups, setGroups] = useState<AgentGroupResolved[]>([]);
   const [hubStatus, setHubStatus] = useState<"loading" | "online" | "offline">("loading");
   const [query, setQuery] = useState("");
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [groupName, setGroupName] = useState("");
   const [groupDescription, setGroupDescription] = useState("");
+  const [groupOrchestratorName, setGroupOrchestratorName] = useState("");
   const [draftMembers, setDraftMembers] = useState<AgentGroupMember[]>([]);
   const [draggingKey, setDraggingKey] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
@@ -70,7 +74,7 @@ export default function AgentGroupsPage() {
         api.marketplace.bookmarks().catch(() => [] as HubAgentBookmark[]),
         api.agentGroups.listResolved(),
       ]);
-      const visible = visibleAgents(agentRows);
+      const visible = visibleRosterAgents(agentRows);
       setAgents(visible);
       setFirms(firmRows);
       setHubBookmarks(bookmarkRows);
@@ -96,47 +100,69 @@ export default function AgentGroupsPage() {
   }, [toast]);
 
   const sourceItems = useMemo(() => {
-    const multiFirmAgentIds = new Set<string>();
+    const agentById = new Map(agents.map((agent) => [agent.id, agent]));
     const items: SourceItem[] = [];
 
-    for (const firm of firms) {
-      if (firm.orgChart.length <= 1) continue;
-      for (const node of firm.orgChart) {
-        multiFirmAgentIds.add(node.agentId);
-      }
-    }
-
     for (const agent of agents) {
-      if (!isSingleInstalledAgent(agent)) continue;
-      if (multiFirmAgentIds.has(agent.id)) continue;
       const loc = pickLocalized(agent, locale);
+      const entityClass = classifyInstalledAgent(agent);
       items.push({
         key: `installed:${agent.id}`,
         kind: "installed",
+        entityClass,
         title: loc.name,
         subtitle: loc.tagline,
-        route: ko ? "로컬" : "Local",
-        badge: ko ? "싱글 · 로컬" : "Single · local",
+        route: t("agentGroups.route.local"),
+        badge: `${entityClassShortLabel(entityClass, locale)} · ${t("agentGroups.route.local")}`,
         tone: agent.tone,
-        member: makeMember({
+        member: makeInstalledMember({
           source: "installed",
           agent,
-          routeLabel: ko ? "설치됨" : "Installed",
+          routeLabel: t("agentGroups.route.installed"),
         }),
       });
     }
 
+    for (const firm of firms) {
+      const firmLoc = pickLocalized(firm, locale);
+      for (const node of firm.orgChart) {
+        const agent = agentById.get(node.agentId);
+        if (!agent) continue;
+        const agentLoc = pickLocalized(agent, locale);
+        const entityClass = classifyInstalledAgent(agent);
+        const routeLabel = `${firmLoc.name} / ${node.role}`;
+        items.push({
+          key: `firm-node:${firm.id}:${node.agentSlug}`,
+          kind: "firm-node",
+          entityClass,
+          title: `${node.role} · ${agentLoc.name}`,
+          subtitle: agentLoc.tagline || firmLoc.tagline,
+          route: routeLabel,
+          badge: `${entityClassShortLabel(entityClass, locale)} · ${t("agentGroups.route.org")}`,
+          tone: agent.tone,
+          member: makeFirmNodeMember({
+            firm,
+            agent,
+            node,
+            routeLabel,
+          }),
+        });
+      }
+    }
+
     for (const bookmark of hubBookmarks) {
       const hub = bookmark.listing;
-      if (!isSingleHubAgent(hub)) continue;
+      const entityClass = classifyHubEntity(hub);
+      if (entityClass === "plugin") continue;
       const loc = pickLocalized(hub, locale);
       items.push({
         key: `hub:${hub.slug}`,
         kind: "hub",
+        entityClass,
         title: loc.name,
         subtitle: loc.tagline,
-        route: ko ? "Hub 북마크" : "Hub bookmark",
-        badge: ko ? "싱글 · 북마크" : "Single · bookmark",
+        route: t("agentGroups.route.hub_bookmark"),
+        badge: `${entityClassShortLabel(entityClass, locale)} · ${t("agentGroups.route.hub_bookmark")}`,
         member: {
           id: crypto.randomUUID(),
           source: "hub",
@@ -147,9 +173,9 @@ export default function AgentGroupsPage() {
             nameEn: hub.nameEn,
             tagline: hub.tagline,
             taglineEn: hub.taglineEn,
-            routeLabel: ko ? "Hub 북마크" : "Hub bookmark",
+            routeLabel: t("agentGroups.route.hub_bookmark"),
             trustGrade: hub.trustGrade,
-            entityKind: "agent",
+            entityKind: entityClass === "multi" ? "team" : "agent",
             routingStatus: hub.routingStatus ?? null,
           },
           addedAt: new Date().toISOString(),
@@ -162,7 +188,7 @@ export default function AgentGroupsPage() {
     return items.filter((item) =>
       `${item.title} ${item.subtitle} ${item.route} ${item.badge}`.toLowerCase().includes(q),
     );
-  }, [agents, firms, hubBookmarks, ko, locale, query]);
+  }, [agents, firms, hubBookmarks, locale, query, t]);
 
   function addMember(item: SourceItem) {
     setDraftMembers((prev) => {
@@ -176,23 +202,44 @@ export default function AgentGroupsPage() {
     setDraftMembers((prev) => prev.filter((member) => member.id !== id));
   }
 
-  async function createGroup() {
+  function resetBuilder() {
+    setEditingGroupId(null);
+    setGroupName("");
+    setGroupDescription("");
+    setGroupOrchestratorName("");
+    setDraftMembers([]);
+  }
+
+  function editGroup(group: AgentGroupResolved) {
+    setEditingGroupId(group.id);
+    setGroupName(group.name);
+    setGroupDescription(group.description);
+    setGroupOrchestratorName(group.orchestratorName);
+    setDraftMembers(group.members.map(toEditableMember));
+  }
+
+  async function saveGroup() {
     const api = ipc();
     const name = groupName.trim();
     if (!api || !name || draftMembers.length === 0) return;
     setBusy(true);
     try {
-      await api.agentGroups.create({
+      const payload = {
         name,
         description: groupDescription.trim(),
-        orchestratorName: `${name} Orchestrator`,
+        orchestratorName: groupOrchestratorName.trim() || `${name} Orchestrator`,
         members: draftMembers,
-      });
-      setGroupName("");
-      setGroupDescription("");
-      setDraftMembers([]);
-      setGroups(await api.agentGroups.listResolved());
-      setToast(ko ? "에이전트 조합을 만들었습니다." : "Agent group created.");
+      };
+      if (editingGroupId) {
+        await api.agentGroups.update(editingGroupId, payload);
+        setGroups(await api.agentGroups.listResolved());
+        setToast(t("agentGroups.toast.updated"));
+      } else {
+        await api.agentGroups.create(payload);
+        resetBuilder();
+        setGroups(await api.agentGroups.listResolved());
+        setToast(t("agentGroups.toast.created"));
+      }
     } catch (err) {
       setToast(String(err));
     } finally {
@@ -205,14 +252,18 @@ export default function AgentGroupsPage() {
     if (!api) return;
     await api.agentGroups.removeMember(groupId, memberId);
     setGroups(await api.agentGroups.listResolved());
+    if (editingGroupId === groupId) {
+      setDraftMembers((members) => members.filter((member) => member.id !== memberId));
+    }
   }
 
   async function removeGroup(id: string) {
     const api = ipc();
     if (!api) return;
-    if (!window.confirm(ko ? "이 에이전트 조합을 삭제할까요?" : "Delete this agent group?")) return;
+    if (!window.confirm(t("agentGroups.delete_confirm"))) return;
     await api.agentGroups.remove(id);
     setGroups(await api.agentGroups.listResolved());
+    if (editingGroupId === id) resetBuilder();
   }
 
   async function startGroupChat(group: AgentGroupResolved) {
@@ -245,9 +296,11 @@ export default function AgentGroupsPage() {
   }
 
   const draftSnapshots = draftMembers.map((member) => member.snapshot);
-  const localSingleCount = sourceItems.filter((item) => item.kind === "installed").length;
+  const localCount = sourceItems.filter((item) => item.kind === "installed").length;
+  const firmNodeCount = sourceItems.filter((item) => item.kind === "firm-node").length;
   const hubCount = sourceItems.filter((item) => item.kind === "hub").length;
-  const blockedHubMultiCount = hubBookmarks.filter((bookmark) => !isSingleHubAgent(bookmark.listing)).length;
+  const blockedPluginCount = hubBookmarks.filter((bookmark) => classifyHubEntity(bookmark.listing) === "plugin").length;
+  const selectedGroup = editingGroupId ? groups.find((group) => group.id === editingGroupId) : null;
 
   return (
     <main className="agent-groups-page">
@@ -255,22 +308,23 @@ export default function AgentGroupsPage() {
         <div>
           <div className="agent-groups-kicker">
             <IconLayers size={14} />
-            <span>{ko ? "에이전트 조합" : "Agent group"}</span>
+            <span>{t("agentGroups.kicker")}</span>
           </div>
-          <h2>{ko ? "싱글 에이전트만 안전하게 조합하기" : "Safely compose single agents only"}</h2>
+          <h2>{t("agentGroups.title")}</h2>
         </div>
-        <div className="agent-groups-metrics" aria-label={ko ? "에이전트 조합 상태" : "Agent group status"}>
-          <Metric label={ko ? "로컬 싱글" : "Local singles"} value={String(localSingleCount)} />
-          <Metric label={ko ? "Hub 북마크" : "Hub bookmarks"} value={hubStatus === "loading" ? "..." : String(hubCount)} tone={hubStatus} />
-          <Metric label={ko ? "저장된 조합" : "Saved groups"} value={String(groups.length)} />
+        <div className="agent-groups-metrics" aria-label={t("agentGroups.status_label")}>
+          <Metric label={t("agentGroups.metric.local")} value={String(localCount)} />
+          <Metric label={t("agentGroups.metric.org")} value={String(firmNodeCount)} />
+          <Metric label={t("agentGroups.metric.hub")} value={hubStatus === "loading" ? "..." : String(hubCount)} tone={hubStatus} />
+          <Metric label={t("agentGroups.metric.saved")} value={String(groups.length)} />
         </div>
       </section>
 
       <section className="agent-groups-workbench">
         <aside className="agent-groups-source">
           <div className="agent-groups-panel-head">
-            <strong>{ko ? "에이전트 소스" : "Agent sources"}</strong>
-            <button type="button" className="icon-btn" onClick={() => void refresh()} disabled={busy} title={ko ? "새로고침" : "Refresh"}>
+            <strong>{t("agentGroups.source.title")}</strong>
+            <button type="button" className="icon-btn" onClick={() => void refresh()} disabled={busy} title={t("agentGroups.refresh")}>
               <IconRefresh size={15} />
             </button>
           </div>
@@ -279,13 +333,13 @@ export default function AgentGroupsPage() {
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder={ko ? "로컬 싱글, Hub 북마크 검색" : "Search local singles, Hub bookmarks"}
+              placeholder={t("agentGroups.search")}
             />
           </label>
           <div className="agent-groups-rule">
-            {ko
-              ? `멀티 에이전트 팀과 조직도 조각은 조합 후보에서 제외됩니다${blockedHubMultiCount > 0 ? ` · 멀티 북마크 ${blockedHubMultiCount}개 제외` : ""}.`
-              : `Multi-agent teams and org fragments are excluded${blockedHubMultiCount > 0 ? ` · ${blockedHubMultiCount} multi bookmark(s) hidden` : ""}.`}
+            {blockedPluginCount > 0
+              ? t("agentGroups.rule_hidden", { n: blockedPluginCount })
+              : t("agentGroups.rule")}
           </div>
           <div className="agent-source-list">
             {sourceItems.map((item) => (
@@ -298,6 +352,7 @@ export default function AgentGroupsPage() {
                 onClick={() => addMember(item)}
                 className="agent-source-card"
                 data-kind={item.kind}
+                data-entity-class={item.entityClass}
                 data-dragging={draggingKey === item.key ? "true" : "false"}
               >
                 <AgentAvatar name={item.title} tone={item.tone ?? "blue"} size={30} />
@@ -311,7 +366,7 @@ export default function AgentGroupsPage() {
             ))}
             {!sourceItems.length && (
               <div className="agent-groups-empty">
-                {ko ? "표시할 에이전트가 없습니다." : "No agents to show."}
+                {t("agentGroups.empty_sources")}
               </div>
             )}
           </div>
@@ -330,34 +385,51 @@ export default function AgentGroupsPage() {
           <div className="builder-title-row">
             <div>
               <span className="builder-step">01</span>
-              <h3>{ko ? "새 조합" : "New group"}</h3>
+              <h3>{editingGroupId ? t("agentGroups.builder.edit") : t("agentGroups.builder.new")}</h3>
+              {selectedGroup ? <small className="builder-editing-note">{selectedGroup.name}</small> : null}
             </div>
-            <button
-              type="button"
-              className="primary-btn"
-              onClick={() => void createGroup()}
-              disabled={busy || !groupName.trim() || draftMembers.length === 0}
-            >
-              <IconBolt size={15} />
-              {ko ? "그룹 만들기" : "Create group"}
-            </button>
+            <div className="builder-actions">
+              {editingGroupId ? (
+                <button type="button" className="ghost-btn" onClick={resetBuilder} disabled={busy}>
+                  <IconPlus size={14} />
+                  {t("agentGroups.action.new")}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="primary-btn"
+                onClick={() => void saveGroup()}
+                disabled={busy || !groupName.trim() || draftMembers.length === 0}
+              >
+                <IconBolt size={15} />
+                {editingGroupId ? t("agentGroups.action.save") : t("agentGroups.action.create")}
+              </button>
+            </div>
           </div>
 
           <div className="group-form-grid">
             <label>
-              <span>{ko ? "이름" : "Name"}</span>
+              <span>{t("agentGroups.field.name")}</span>
               <input
                 value={groupName}
                 onChange={(event) => setGroupName(event.target.value)}
-                placeholder={ko ? "예: 출시 점검 조합" : "e.g. Launch review group"}
+                placeholder={t("agentGroups.placeholder.name")}
               />
             </label>
             <label>
-              <span>{ko ? "메모" : "Note"}</span>
+              <span>{t("agentGroups.field.note")}</span>
               <input
                 value={groupDescription}
                 onChange={(event) => setGroupDescription(event.target.value)}
-                placeholder={ko ? "짧은 목적" : "Short purpose"}
+                placeholder={t("agentGroups.placeholder.note")}
+              />
+            </label>
+            <label>
+              <span>{t("agentGroups.field.orchestrator")}</span>
+              <input
+                value={groupOrchestratorName}
+                onChange={(event) => setGroupOrchestratorName(event.target.value)}
+                placeholder={groupName.trim() ? `${groupName.trim()} Orchestrator` : t("agentGroups.placeholder.auto_name")}
               />
             </label>
           </div>
@@ -365,8 +437,8 @@ export default function AgentGroupsPage() {
           <div className="orchestrator-strip">
             <span className="orchestrator-mark"><IconRoute size={15} /></span>
             <div>
-              <strong>{groupName.trim() ? `${groupName.trim()} Orchestrator` : ko ? "오케스트레이터 이름 대기" : "Waiting for orchestrator name"}</strong>
-              <small>{ko ? "멤버는 최신 설치 목록과 Hub 카탈로그에서 다시 해석됩니다." : "Members re-resolve from installed agents and the live Hub catalog."}</small>
+              <strong>{groupOrchestratorName.trim() || (groupName.trim() ? `${groupName.trim()} Orchestrator` : t("agentGroups.orchestrator.waiting"))}</strong>
+              <small>{t("agentGroups.orchestrator.body")}</small>
             </div>
           </div>
 
@@ -374,7 +446,7 @@ export default function AgentGroupsPage() {
             {draftMembers.length === 0 ? (
               <div className="drop-empty">
                 <IconPlus size={18} />
-                <strong>{ko ? "싱글 에이전트를 여기에 놓기" : "Drop single agents here"}</strong>
+                <strong>{t("agentGroups.drop")}</strong>
               </div>
             ) : (
               <div className="draft-member-grid">
@@ -390,7 +462,7 @@ export default function AgentGroupsPage() {
                           {entityClassLabel(memberEntityClass(snapshot), locale)}
                         </span>
                       </div>
-                      <button type="button" className="icon-btn" onClick={() => removeDraftMember(member.id)} title={ko ? "제거" : "Remove"}>
+                      <button type="button" className="icon-btn" onClick={() => removeDraftMember(member.id)} title={t("agentGroups.action.remove")}>
                         <IconClose size={14} />
                       </button>
                     </div>
@@ -403,7 +475,7 @@ export default function AgentGroupsPage() {
 
         <aside className="agent-groups-saved">
           <div className="agent-groups-panel-head">
-            <strong>{ko ? "저장된 조합" : "Saved groups"}</strong>
+            <strong>{t("agentGroups.saved.title")}</strong>
             <span className="saved-count">{groups.length}</span>
           </div>
           <div className="saved-groups-list">
@@ -415,11 +487,15 @@ export default function AgentGroupsPage() {
                     <small>{group.orchestratorName}</small>
                   </div>
                   <div className="saved-group-actions">
+                    <button type="button" className="ghost-btn" onClick={() => editGroup(group)}>
+                      <IconEdit size={13} />
+                      {t("agentGroups.action.edit")}
+                    </button>
                     <button type="button" className="ghost-btn" onClick={() => void startGroupChat(group)}>
                       <IconChat size={13} />
-                      {ko ? "채팅 시작" : "Chat"}
+                      {t("agentGroups.action.chat")}
                     </button>
-                    <button type="button" className="icon-btn" onClick={() => void removeGroup(group.id)} title={ko ? "삭제" : "Delete"}>
+                    <button type="button" className="icon-btn" onClick={() => void removeGroup(group.id)} title={t("agentGroups.action.delete")}>
                       <IconTrash size={14} />
                     </button>
                   </div>
@@ -428,7 +504,7 @@ export default function AgentGroupsPage() {
                 {group.warningCount > 0 && (
                   <div className="warning-strip">
                     <IconShield size={14} />
-                    <span>{ko ? `${group.warningCount}개 라우팅 경고` : `${group.warningCount} routing warning(s)`}</span>
+                    <span>{t("agentGroups.warning_count", { n: group.warningCount })}</span>
                   </div>
                 )}
                 <div className="saved-member-list">
@@ -441,12 +517,12 @@ export default function AgentGroupsPage() {
                         </span>
                         <div>
                           <strong>{pickName(display, locale)}</strong>
-                          <small>{member.status === "ok" ? display.routeLabel || pickTagline(display, locale) : warningLabel(member.warnings, ko)}</small>
+                          <small>{member.status === "ok" ? display.routeLabel || pickTagline(display, locale) : warningLabel(member.warnings, t)}</small>
                           <span className="member-kind" data-entity-kind={memberEntityClass(display)}>
                             {entityClassLabel(memberEntityClass(display), locale)}
                           </span>
                         </div>
-                        <button type="button" className="icon-btn" onClick={() => void removeGroupMember(group.id, member.id)} title={ko ? "이 에이전트만 삭제" : "Remove this agent"}>
+                        <button type="button" className="icon-btn" onClick={() => void removeGroupMember(group.id, member.id)} title={t("agentGroups.action.remove_agent")}>
                           <IconClose size={13} />
                         </button>
                       </div>
@@ -454,7 +530,7 @@ export default function AgentGroupsPage() {
                   })}
                   {group.members.length === 0 && (
                     <div className="agent-groups-empty compact">
-                      {ko ? "멤버가 없습니다." : "No members."}
+                      {t("agentGroups.empty_members")}
                     </div>
                   )}
                 </div>
@@ -462,7 +538,7 @@ export default function AgentGroupsPage() {
             ))}
             {!groups.length && (
               <div className="agent-groups-empty">
-                {ko ? "아직 저장된 조합이 없습니다." : "No saved groups yet."}
+                {t("agentGroups.empty_groups")}
               </div>
             )}
           </div>
@@ -475,7 +551,7 @@ export default function AgentGroupsPage() {
   );
 }
 
-function makeMember(input: {
+function makeInstalledMember(input: {
   source: "installed";
   agent: InstalledAgent;
   routeLabel: string;
@@ -499,6 +575,51 @@ function makeMember(input: {
   };
 }
 
+function makeFirmNodeMember(input: {
+  firm: InstalledFirm;
+  agent: InstalledAgent;
+  node: InstalledFirm["orgChart"][number];
+  routeLabel: string;
+}): AgentGroupMember {
+  return {
+    id: crypto.randomUUID(),
+    source: "firm-node",
+    agentId: input.agent.id,
+    agentSlug: input.agent.slug,
+    firmId: input.firm.id,
+    firmSlug: input.firm.slug,
+    nodeId: input.node.agentSlug,
+    role: input.node.role,
+    snapshot: {
+      name: input.agent.name,
+      nameEn: input.agent.nameEn,
+      tagline: input.agent.tagline,
+      taglineEn: input.agent.taglineEn,
+      routeLabel: input.routeLabel,
+      trustGrade: input.agent.trustGrade,
+      runtimeLabel: input.agent.runtimeLabel,
+      entityKind: input.agent.kind,
+    },
+    addedAt: new Date().toISOString(),
+  };
+}
+
+function toEditableMember(member: AgentGroupResolved["members"][number]): AgentGroupMember {
+  return {
+    id: member.id,
+    source: member.source,
+    agentId: member.agentId,
+    agentSlug: member.agentSlug,
+    hubSlug: member.hubSlug,
+    firmId: member.firmId,
+    firmSlug: member.firmSlug,
+    nodeId: member.nodeId,
+    role: member.role,
+    snapshot: member.current ?? member.snapshot,
+    addedAt: member.addedAt,
+  };
+}
+
 function memberKey(member: AgentGroupMember): string {
   return [
     member.source,
@@ -517,13 +638,14 @@ function pickTagline(value: { tagline?: string; taglineEn?: string }, locale: "k
   return locale === "ko" ? value.tagline || "" : value.taglineEn || value.tagline || "";
 }
 
-function warningLabel(warnings: string[], ko: boolean) {
-  if (warnings.includes("unsupported_multi")) return ko ? "멀티/부분 조직은 조합 불가" : "Multi/org fragment unsupported";
-  if (warnings.includes("hub_missing")) return ko ? "Hub에서 찾을 수 없음" : "Missing from Hub";
-  if (warnings.includes("route_changed")) return ko ? "조직도 위치 변경됨" : "Org route changed";
-  if (warnings.includes("route_missing")) return ko ? "조직도 위치 없음" : "Org route missing";
-  if (warnings.includes("agent_missing")) return ko ? "설치 에이전트 없음" : "Installed agent missing";
-  return ko ? "확인 필요" : "Needs review";
+function warningLabel(warnings: string[], t: Translate) {
+  if (warnings.includes("unsupported_plugin")) return t("agentGroups.warning.plugin");
+  if (warnings.includes("unsupported_multi")) return t("agentGroups.warning.unsupported");
+  if (warnings.includes("hub_missing")) return t("agentGroups.warning.hub_missing");
+  if (warnings.includes("route_changed")) return t("agentGroups.warning.route_changed");
+  if (warnings.includes("route_missing")) return t("agentGroups.warning.route_missing");
+  if (warnings.includes("agent_missing")) return t("agentGroups.warning.agent_missing");
+  return t("agentGroups.warning.needs_review");
 }
 
 function memberEntityClass(snapshot: AgentGroupMemberSnapshot): "single" | "multi" | "plugin" {
@@ -574,9 +696,9 @@ function AgentGroupsStyles() {
       }
       .agent-groups-metrics {
         display: grid;
-        grid-template-columns: repeat(3, minmax(92px, 1fr));
+        grid-template-columns: repeat(4, minmax(86px, 1fr));
         gap: 8px;
-        min-width: 330px;
+        min-width: 420px;
       }
       .agent-groups-metric {
         border: 1px solid var(--paper-edge);
@@ -747,6 +869,13 @@ function AgentGroupsStyles() {
         background: var(--accent-soft);
         color: var(--accent-strong);
       }
+      .agent-source-card[data-kind="firm-node"] .source-badge {
+        background: color-mix(in oklch, var(--green) 30%, var(--paper));
+        color: var(--green-deep);
+      }
+      .agent-source-card[data-entity-class="multi"] {
+        border-color: color-mix(in oklch, var(--accent) 28%, var(--paper-edge));
+      }
       .member-kind {
         width: fit-content;
         margin-top: 2px;
@@ -790,11 +919,28 @@ function AgentGroupsStyles() {
         font-size: 18px;
         font-family: var(--font-head);
       }
+      .builder-editing-note {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted-deep);
+        font-size: 11px;
+        font-weight: 700;
+        max-width: 220px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       .builder-step {
         font-family: var(--font-mono);
         font-size: 11px;
         font-weight: 800;
         color: var(--accent-strong);
+      }
+      .builder-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        flex-shrink: 0;
       }
       .primary-btn {
         display: inline-flex;
@@ -963,6 +1109,10 @@ function AgentGroupsStyles() {
         background: var(--fill-1);
         color: var(--ink);
       }
+      .ghost-btn:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
       .saved-group header div {
         display: flex;
         flex-direction: column;
@@ -1059,8 +1209,14 @@ function AgentGroupsStyles() {
           align-items: stretch;
           flex-direction: column;
         }
+        .builder-actions {
+          width: 100%;
+        }
         .primary-btn {
           width: 100%;
+        }
+        .builder-actions .ghost-btn {
+          flex: 1;
         }
         .agent-source-card {
           grid-template-columns: auto minmax(0, 1fr);

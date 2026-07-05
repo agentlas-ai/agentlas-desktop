@@ -29,7 +29,13 @@ const isResourceLoad = (t) => /Failed to load resource|net::ERR|ERR_/i.test(t);
 const app = await electron.launch({
   args: [main],
   cwd: ROOT,
-  env: { ...process.env, NODE_ENV: "production", AGENTLAS_E2E: "1" },
+  env: {
+    ...process.env,
+    NODE_ENV: "production",
+    AGENTLAS_E2E: "1",
+    AGENTLAS_E2E_AUTH: "1",
+    AGENTLAS_ALLOW_MULTI_INSTANCE: "1",
+  },
   timeout: 30000,
 });
 const win = await app.firstWindow({ timeout: 30000 });
@@ -74,6 +80,16 @@ async function clickLink(href) {
     return false;
   }
 }
+async function openRoute(href) {
+  if (await clickLink(href)) return true;
+  await win
+    .evaluate((target) => {
+      window.location.href = target;
+    }, href)
+    .catch(() => {});
+  await win.waitForLoadState("domcontentloaded").catch(() => {});
+  return true;
+}
 async function openTile(name, shot) {
   await hover("Agent Apps");
   await clickLink("/apps");
@@ -87,24 +103,22 @@ async function openTile(name, shot) {
 }
 
 await snap("00-dashboard");
-await win.evaluate(() => {
-  window.location.href = "/automation";
-});
-await win.waitForLoadState("domcontentloaded").catch(() => {});
+await openRoute("/automation");
 await snap("00b-automation");
 await hover("Agent Forge");
-if (await clickLink("/build")) await snap("01-build");
+if (await openRoute("/build")) await snap("01-build");
 await hover("Agent Forge");
-if (await clickLink("/library/agents")) await snap("02-agents");
+if (await openRoute("/library/agents")) await snap("02-agents");
+if (await openRoute("/library/agent-groups")) await snap("02b-agent-groups");
 await openTile("스타트업 창업자 스튜디오", "03-startup-studio");
 await openTile("크리에이티브", "04-creative-studio");
 await openTile("커머스", "05-ecommerce");
 await hover("Hub");
-if (await clickLink("/marketplace")) await snap("06-marketplace");
+if (await openRoute("/marketplace")) await snap("06-marketplace");
 await hover("Hub");
-if (await clickLink("/cloud")) await snap("07-cloud");
-if (await clickLink("/settings")) await snap("08-settings");
-if (await clickLink("/library/env")) await snap("09-environment");
+if (await openRoute("/cloud")) await snap("07-cloud");
+if (await openRoute("/settings")) await snap("08-settings");
+if (await openRoute("/library/env")) await snap("09-environment");
 
 await app.close().catch(() => {});
 

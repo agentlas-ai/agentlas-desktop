@@ -19,6 +19,7 @@ import { initAutoUpdater, disposeAutoUpdater } from "./updater";
 import { disposeAppFactoryLaunches } from "./app-factory/operations";
 import { bootAuthFromKeychain } from "./auth";
 import { materializeAllAgents } from "./agents/files";
+import { backfillEntityKinds } from "./mcp/registry";
 import { seedBuiltinAgents } from "./architecture/seed";
 import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
 
@@ -70,6 +71,7 @@ function applyDockIcon(): void {
 }
 
 let mainWindow: BrowserWindow | null = null;
+let shellReadyForWindows = false;
 
 const allowMultiInstance = process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
 const singleInstanceLock = allowMultiInstance || app.requestSingleInstanceLock();
@@ -237,6 +239,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("activate", () => {
+  if (!shellReadyForWindows) return;
   if (BrowserWindow.getAllWindows().length === 0) void createWindow();
 });
 
@@ -287,6 +290,14 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => !DENIED_PERMISSIONS.has(permission));
   applyDockIcon();
   initStore();
+  registerIpcHandlers();
+  _uiLocale = resolveMenuLocale();
+  applyAppMenu(_uiLocale);
+  ipcMain.handle("menu:setLocale", (_e, locale: unknown) => {
+    _uiLocale = resolveMenuLocale(typeof locale === "string" ? locale : undefined);
+    applyAppMenu(_uiLocale);
+  });
+  shellReadyForWindows = true;
   ensureDefaultMcpPluginsInstalled();
   // Agentlas 아키텍처 — PM 소울/메모리 큐레이터/태스크 편향 큐레이터를 설치에 항상 동봉.
   // 버전 게이팅이라 평상시엔 거의 no-op. ARCHITECTURE_VERSION이 오르면 프롬프트만 재동기화.
@@ -295,11 +306,17 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error("[architecture] seedBuiltinAgents failed:", err);
   }
+  // single/team 종류 backfill — entity_kind가 빈 기존 설치 행을 route.kind/이름 표식으로 한 번 채운다.
+  // 이래야 Hub로 설치된 팀이 "개별 에이전트"로 오분류되지 않는다.
+  try {
+    backfillEntityKinds();
+  } catch (err) {
+    console.error("[architecture] backfillEntityKinds failed:", err);
+  }
   // 설치된 에이전트 폴더의 파일을 보장 — 라이브러리 우측 패널이 즉시 보여줄 수 있게.
   materializeAllAgents();
   // 키체인에서 저장된 세션 복원 — 메인 윈도우가 뜨자마자 getSession()이 정상 값을 반환하도록 await
   await bootAuthFromKeychain();
-  registerIpcHandlers();
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
   try {
     const { reconcileTelegramWorkers } = await import("./telegram/connect");
@@ -324,14 +341,6 @@ app.whenReady().then(async () => {
     console.error("[triggers] startTriggerManager failed:", err);
   }
   await createWindow();
-  // 네이티브 메뉴바도 인앱 언어 설정을 따른다. 초기값은 OS 로케일(app.getLocale),
-  // 이후 렌더러가 menu:setLocale로 사용자 override를 통지하면 다시 그린다.
-  _uiLocale = resolveMenuLocale();
-  applyAppMenu(_uiLocale);
-  ipcMain.handle("menu:setLocale", (_e, locale: unknown) => {
-    _uiLocale = resolveMenuLocale(typeof locale === "string" ? locale : undefined);
-    applyAppMenu(_uiLocale);
-  });
   // 자동 업데이트는 production에서만. updater.ts 안에서 NODE_ENV 체크.
   initAutoUpdater();
 });

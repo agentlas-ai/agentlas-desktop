@@ -7,19 +7,16 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
-import { classifyHubEntity, entityClassShortLabel } from "@/lib/agent-entity-kind";
+import { classifyHubEntity, classifyInstalledAgent, entityClassShortLabel } from "@/lib/agent-entity-kind";
+import { buildAgentRoster, visibleRosterAgents } from "@/lib/agent-roster";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
-import { isVisibleAgent, isUserFacingAgentText } from "@/lib/agent-visibility";
+import { isUserFacingAgentText } from "@/lib/agent-visibility";
 import { IconBuilding, IconFileUp, IconLayers, IconSearch } from "@/components/Icon";
 import type { AgentGroupResolved, HubAgentBookmark, InstalledAgent, InstalledFirm, MarketplaceListing, ResolvedNode, ResolvedOrg } from "@/lib/types";
 
 type Mode = "multi" | "single";
 type Source = "local" | "cloud" | "hub";
-
-function dedupById(list: InstalledAgent[]): InstalledAgent[] {
-  return Array.from(new Map(list.map((a) => [a.id, a])).values());
-}
 
 function agentLibraryRoute(input: { agentId?: string; nodeId?: string; firmId?: string }): string {
   const params = new URLSearchParams();
@@ -67,7 +64,7 @@ export function OrgTree() {
         api.marketplace.listMine().catch(() => [] as MarketplaceListing[]),
         api.marketplace.bookmarks().catch(() => [] as HubAgentBookmark[]),
       ]);
-      setAgents(dedupById(a).filter(isVisibleAgent));
+      setAgents(visibleRosterAgents(a));
       setFirms(f);
       setAgentGroups(groups);
       setCloudListings(mine);
@@ -92,31 +89,8 @@ export function OrgTree() {
     (o: { name: string; nameEn?: string }) => (ko ? o.name : o.nameEn || o.name),
     [ko],
   );
-  const agentById = useMemo(() => new Map(agents.map((a) => [a.id, a])), [agents]);
-  const firmAgentIds = useMemo(() => {
-    const s = new Set<string>();
-    for (const f of firms) for (const n of f.orgChart) s.add(n.agentId);
-    return s;
-  }, [firms]);
-  const firmKindById = useMemo(() => {
-    const out = new Map<string, "single" | "multi">();
-    for (const f of firms) {
-      const userNodes = f.orgChart.filter((n) => {
-        const agent = agentById.get(n.agentId);
-        return isUserFacingAgentText(agent?.name ?? n.role, n.role);
-      });
-      out.set(f.id, userNodes.length > 1 ? "multi" : "single");
-    }
-    return out;
-  }, [agentById, firms]);
-  const singleFirmByAgentId = useMemo(() => {
-    const out = new Map<string, InstalledFirm>();
-    for (const f of firms) {
-      if (firmKindById.get(f.id) !== "single") continue;
-      for (const n of f.orgChart) out.set(n.agentId, f);
-    }
-    return out;
-  }, [firmKindById, firms]);
+  const roster = useMemo(() => buildAgentRoster(agents, firms), [agents, firms]);
+  const { agentById, singleFirmByAgentId } = roster;
 
   const agentSource = (a: InstalledAgent): Source => (a.localPath ? "local" : "cloud");
   // firm 출처: CEO 에이전트의 localPath가 1차. CEO가 visible 필터에서 빠져 map에 없을 수 있으므로
@@ -194,9 +168,8 @@ export function OrgTree() {
   async function removeGroup(src: Source, label: string) {
     const api = ipc();
     if (!api || busy) return;
-    const targetFirmKind = mode === "multi" ? "multi" : "single";
-    const gFirms = firms.filter((f) => firmSource(f) === src && firmKindById.get(f.id) === targetFirmKind);
-    const gAgents = agents.filter((a) => agentSource(a) === src && !firmAgentIds.has(a.id));
+    const gFirms = (mode === "multi" ? roster.multiFirms : roster.singleFirms).filter((f) => firmSource(f) === src);
+    const gAgents = (mode === "multi" ? roster.standaloneMultiAgents : roster.standaloneSingleAgents).filter((a) => agentSource(a) === src);
     const total = gFirms.length + gAgents.length;
     if (total === 0) return;
     if (!window.confirm(ko ? `'${label}' 그룹의 ${total}개 항목을 모두 제거할까요?` : `Remove all ${total} items in '${label}'?`)) return;
@@ -234,11 +207,10 @@ export function OrgTree() {
 
   // 멀티 = 실제 구성원이 2명 이상인 회사(firm). 싱글 = 개별 에이전트 + 1명짜리 firm 포장.
   function bySource(src: Source) {
-    const f = mode === "multi" ? firms.filter((x) => firmSource(x) === src && firmKindById.get(x.id) === "multi") : [];
+    const f = mode === "multi" ? roster.multiFirms.filter((x) => firmSource(x) === src) : [];
+    const sourceAgents = mode === "multi" ? roster.standaloneMultiAgents : roster.singleModeAgents;
     const indiv =
-      mode === "single"
-        ? agents.filter((a) => agentSource(a) === src && (!firmAgentIds.has(a.id) || singleFirmByAgentId.has(a.id)))
-        : [];
+      sourceAgents.filter((a) => agentSource(a) === src);
     return { firms: f, agents: indiv };
   }
 
@@ -361,31 +333,34 @@ export function OrgTree() {
                 ))}
 
               {open &&
-                ca.filter((a) => matches(dn(a))).map((a) => (
-                  <div key={a.id} className="dashboard-org-rowwrap">
-                    <button
-                      onClick={() => navigate(agentLibraryRoute({ agentId: a.id, firmId: singleFirmByAgentId.get(a.id)?.id }))}
-                      className="dashboard-org-row dashboard-org-agent dashboard-org-agent-single"
-                    >
-                      <Dot />
-                      <span className="dashboard-org-label">{dn(a)}</span>
-                      <span className="dashboard-org-count">{ko ? "싱글" : "single"}</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="dashboard-org-remove"
-                      title={ko ? "제거" : "Remove"}
-                      aria-label={ko ? "제거" : "Remove"}
-                      onClick={() => {
-                        const singleFirm = singleFirmByAgentId.get(a.id);
-                        if (singleFirm) void removeFirm(singleFirm.id, dn(singleFirm));
-                        else void removeAgent(a.id, dn(a));
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
+                ca.filter((a) => matches(dn(a))).map((a) => {
+                  const entityClass = classifyInstalledAgent(a);
+                  return (
+                    <div key={a.id} className="dashboard-org-rowwrap">
+                      <button
+                        onClick={() => navigate(agentLibraryRoute({ agentId: a.id, firmId: singleFirmByAgentId.get(a.id)?.id }))}
+                        className={`dashboard-org-row dashboard-org-agent dashboard-org-agent-${entityClass}`}
+                      >
+                        <Dot />
+                        <span className="dashboard-org-label">{dn(a)}</span>
+                        <span className="dashboard-org-count">{entityClassShortLabel(entityClass, locale)}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="dashboard-org-remove"
+                        title={ko ? "제거" : "Remove"}
+                        aria-label={ko ? "제거" : "Remove"}
+                        onClick={() => {
+                          const singleFirm = singleFirmByAgentId.get(a.id);
+                          if (singleFirm) void removeFirm(singleFirm.id, dn(singleFirm));
+                          else void removeAgent(a.id, dn(a));
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  );
+                })}
 
               {open &&
                 cloudOnly.map((m) => (

@@ -37,6 +37,7 @@ interface AgentRow {
   builtin: number;
   role: string | null;
   visibility: AgentVisibility;
+  entity_kind: "agent" | "team" | null;
 }
 
 function toAgent(row: AgentRow): InstalledAgent {
@@ -48,6 +49,11 @@ function toAgent(row: AgentRow): InstalledAgent {
   }
   // 로컬 임포트 라우팅이 있으면 런타임 라벨/원본 경로/종류를 병합.
   const route = getRoute(row.id);
+  // single/team 종류는 로컬 route가 1차, 없으면 DB에 저장된 entity_kind가 권위 신호다.
+  // (Hub/클라우드 설치 팀은 route가 없어 이 컬럼이 유일한 신호 — 없으면 single 오분류됨.)
+  const persistedKind =
+    row.entity_kind === "team" ? "team" : row.entity_kind === "agent" ? "agent" : undefined;
+  const kind = route?.kind ?? persistedKind;
   return {
     id: row.id,
     slug: row.slug,
@@ -63,10 +69,46 @@ function toAgent(row: AgentRow): InstalledAgent {
     installedAt: row.installed_at,
     tone: row.tone as InstalledAgent["tone"],
     visibility: publicAgentVisibility(row),
-    ...(route
-      ? { runtimeLabel: route.runtime, localPath: route.path, kind: route.kind }
-      : {}),
+    ...(route ? { runtimeLabel: route.runtime, localPath: route.path } : {}),
+    ...(kind ? { kind } : {}),
   };
+}
+
+/** 마켓 리스팅의 entityKind/agentCount로 single/team을 결정. */
+function deriveEntityKind(listing: { entityKind?: string; agentCount?: number }): "agent" | "team" {
+  if (listing.entityKind === "team") return "team";
+  if (typeof listing.agentCount === "number" && listing.agentCount > 1) return "team";
+  return "agent";
+}
+
+/** 이름/슬러그에 팀 표식이 있는지(레거시 backfill 전용 폴백). */
+function looksLikeTeamName(...parts: Array<string | null | undefined>): boolean {
+  return /(\bteam\b|팀|\bhq\b|\bswarm\b|스웜)/i.test(parts.filter(Boolean).join(" "));
+}
+
+/**
+ * entity_kind가 비어 있는 기존 설치 행을 한 번 채운다(멱등: NULL만 갱신).
+ *   1) 로컬 임포트 route.kind
+ *   2) 이름/슬러그 팀 표식 휴리스틱(레거시 Hub 설치 폴백)
+ *   3) 그 외 single
+ * 부팅 시 seedBuiltinAgents 직후 호출.
+ */
+export function backfillEntityKinds(): void {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT id, slug, name, name_en FROM installed_agents WHERE entity_kind IS NULL")
+    .all() as Array<{ id: string; slug: string; name: string; name_en: string | null }>;
+  if (rows.length === 0) return;
+  const upd = db.prepare("UPDATE installed_agents SET entity_kind = ? WHERE id = ?");
+  const tx = db.transaction(() => {
+    for (const r of rows) {
+      const route = getRoute(r.id);
+      const kind: "agent" | "team" =
+        route?.kind === "team" || looksLikeTeamName(r.slug, r.name, r.name_en) ? "team" : "agent";
+      upd.run(kind, r.id);
+    }
+  });
+  tx();
 }
 
 export function listInstalledAgents(): InstalledAgent[] {
@@ -148,6 +190,7 @@ function autoRegisterAgentTools(listing: FullListing): void {
 function persistListing(slug: string, listing: FullListing): InstalledAgent {
   const envReqsJson = JSON.stringify(listing.envRequirements ?? []);
   const visibility = publicAgentVisibility(listing);
+  const entityKind = deriveEntityKind(listing);
 
   // 이 에이전트가 호출하는 외부 MCP/API를 external tools에 자동 등록.
   autoRegisterAgentTools(listing);
@@ -160,7 +203,7 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
     db.prepare(
       `UPDATE installed_agents
        SET system_prompt = ?, name = ?, name_en = ?, tagline = ?, tagline_en = ?,
-           env_requirements_json = ?, visibility = ?
+           env_requirements_json = ?, visibility = ?, entity_kind = ?
        WHERE slug = ?`,
     ).run(
       listing.systemPrompt,
@@ -170,6 +213,7 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
       listing.taglineEn,
       envReqsJson,
       visibility,
+      entityKind,
       slug,
     );
     if (!materializeCloudPackageFiles(existing.id, slug, listing)) {
@@ -186,6 +230,7 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
       builtin: existing.builtin ?? 0,
       role: existing.role ?? null,
       visibility,
+      entity_kind: entityKind,
     });
   }
 
@@ -194,8 +239,8 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
   db.prepare(
     `INSERT INTO installed_agents
      (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
-      env_requirements_json, preferred_backend, trust_grade, installed_at, tone, visibility)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      env_requirements_json, preferred_backend, trust_grade, installed_at, tone, visibility, entity_kind)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     slug,
@@ -211,6 +256,7 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
     now,
     listing.tone,
     visibility,
+    entityKind,
   );
 
   const cloudRoute = materializeCloudPackageFiles(id, slug, listing);
@@ -231,11 +277,11 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
     installedAt: now,
     tone: listing.tone,
     visibility,
+    kind: cloudRoute?.kind ?? entityKind,
     ...(cloudRoute
       ? {
           runtimeLabel: cloudRoute.labels[0],
           localPath: cloudRoute.path,
-          kind: cloudRoute.kind,
         }
       : {}),
   };

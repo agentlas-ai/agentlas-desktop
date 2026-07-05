@@ -138,19 +138,17 @@ function uniqueMembers(members: AgentGroupMember[]): AgentGroupMember[] {
   return out;
 }
 
-function isSingleSnapshot(snapshot: AgentGroupMemberSnapshot): boolean {
-  return snapshot.entityKind !== "team" && snapshot.entityKind !== "plugin";
+function isRunnableSnapshot(snapshot: AgentGroupMemberSnapshot): boolean {
+  return snapshot.entityKind !== "plugin";
 }
 
-function isSingleHubListing(listing: MarketplaceListing): boolean {
+function isRunnableHubListing(listing: MarketplaceListing): boolean {
   if (listing.source === "hub-plugin" || listing.entityKind === "plugin") return false;
-  if (listing.entityKind === "team") return false;
-  if (typeof listing.agentCount === "number" && listing.agentCount > 1) return false;
   return true;
 }
 
 function allowedGroupMembersForSave(members: AgentGroupMember[]): AgentGroupMember[] {
-  return uniqueMembers(members).filter((member) => member.source !== "firm-node" && isSingleSnapshot(member.snapshot));
+  return uniqueMembers(members).filter((member) => isRunnableSnapshot(member.snapshot));
 }
 
 export function listAgentGroups(): AgentGroup[] {
@@ -188,13 +186,14 @@ export function createAgentGroup(input: AgentGroupCreateInput): AgentGroup {
 export function updateAgentGroup(id: string, patch: AgentGroupUpdateInput): AgentGroup {
   const current = groupById(id);
   if (!current) throw new Error(`Agent group not found: ${id}`);
+  const nextName = patch.name !== undefined ? patch.name.trim() : current.name;
   const next: AgentGroup = {
     ...current,
-    name: patch.name !== undefined ? patch.name.trim() : current.name,
+    name: nextName,
     description: patch.description !== undefined ? patch.description.trim() : current.description,
     orchestratorName:
       patch.orchestratorName !== undefined
-        ? patch.orchestratorName.trim() || `${current.name} Orchestrator`
+        ? patch.orchestratorName.trim() || `${nextName} Orchestrator`
         : current.orchestratorName,
     members: patch.members !== undefined ? allowedGroupMembersForSave(patch.members) : current.members,
     updatedAt: new Date().toISOString(),
@@ -305,26 +304,28 @@ function resolveMember(
       warnings.push("hub_missing");
     } else {
       current = displaySnapshotFromHub(hub);
-      if (!isSingleHubListing(hub)) {
+      if (!isRunnableHubListing(hub)) {
         status = "missing";
-        warnings.push("unsupported_multi");
+        warnings.push("unsupported_plugin");
       }
     }
   } else if (member.source === "firm-node") {
-    current = member.snapshot;
-    status = "missing";
-    warnings.push("unsupported_multi");
+    const resolved = resolveRuntimeAgent(member, agents, firms);
+    if (!resolved.agent) {
+      status = "missing";
+      warnings.push(...resolved.warnings);
+    } else {
+      current = displaySnapshotFromAgent(resolved.agent, resolved.routeLabel);
+      warnings.push(...resolved.warnings);
+      if (resolved.warnings.includes("route_changed")) status = "moved";
+    }
   } else {
     const agent = (member.agentId ? agentById.get(member.agentId) : undefined) || agentBySlug.get(member.agentSlug || "");
     if (!agent) {
       status = "missing";
       warnings.push("agent_missing");
     } else {
-      current = displaySnapshotFromAgent(agent, "Installed");
-      if (agent.kind === "team") {
-        status = "missing";
-        warnings.push("unsupported_multi");
-      }
+      current = displaySnapshotFromAgent(agent, member.snapshot.routeLabel || "Installed");
     }
   }
 
@@ -430,16 +431,6 @@ export async function resolveAgentGroupForRuntime(id: string): Promise<AgentGrou
   const skipped: AgentGroupRuntimeResolution["skipped"] = [];
 
   for (const member of group.members) {
-    if (member.source === "firm-node") {
-      skipped.push({
-        id: member.id,
-        name: pickSnapshotName(member.snapshot),
-        source: member.source,
-        warnings: ["unsupported_multi"],
-      });
-      continue;
-    }
-
     if (member.source === "hub") {
       const slug = member.hubSlug || member.agentSlug || "";
       const hub = hubBySlug.get(slug);
@@ -452,12 +443,12 @@ export async function resolveAgentGroupForRuntime(id: string): Promise<AgentGrou
         });
         continue;
       }
-      if (!isSingleHubListing(hub)) {
+      if (!isRunnableHubListing(hub)) {
         skipped.push({
           id: member.id,
           name: hub.nameEn || hub.name || pickSnapshotName(member.snapshot),
           source: member.source,
-          warnings: ["unsupported_multi"],
+          warnings: ["unsupported_plugin"],
         });
         continue;
       }
@@ -480,15 +471,6 @@ export async function resolveAgentGroupForRuntime(id: string): Promise<AgentGrou
         name: pickSnapshotName(member.snapshot),
         source: member.source,
         warnings: resolved.warnings,
-      });
-      continue;
-    }
-    if (resolved.agent.kind === "team") {
-      skipped.push({
-        id: member.id,
-        name: resolved.agent.nameEn || resolved.agent.name,
-        source: member.source,
-        warnings: ["unsupported_multi"],
       });
       continue;
     }
