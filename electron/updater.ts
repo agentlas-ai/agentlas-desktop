@@ -77,6 +77,23 @@ function isNewerThanCurrent(version: string | undefined): boolean {
   return compareVersions(version, app.getVersion()) > 0;
 }
 
+function updateConfigPath(): string {
+  return path.join(process.resourcesPath, "app-update.yml");
+}
+
+function hasBundledUpdateConfig(): boolean {
+  try {
+    return fs.existsSync(updateConfigPath());
+  } catch {
+    return false;
+  }
+}
+
+function markUpdateConfigMissing(): void {
+  console.warn(`[updater] app-update.yml missing — skipping auto-update for this local build (${updateConfigPath()})`);
+  broadcast({ status: "not-available" });
+}
+
 function pendingUpdateDir(): string | null {
   if (process.platform !== "darwin") return null;
   return path.join(app.getPath("home"), "Library", "Caches", "agentlas-desktop-updater", "pending");
@@ -118,6 +135,10 @@ export function initAutoUpdater(): void {
   // QA 모드(별도 userData) — Playwright/release 검증용 빌드는 자동 업데이트 비활성.
   if (process.env.AGENTLAS_QA_USER_DATA_DIR?.trim()) {
     console.log("[updater] QA mode — skipping auto-update");
+    return;
+  }
+  if (!hasBundledUpdateConfig()) {
+    markUpdateConfigMissing();
     return;
   }
 
@@ -188,6 +209,10 @@ export function disposeAutoUpdater(): void {
 /** 사용자가 "지금 확인" 버튼을 누르거나 메뉴에서 호출. 실패해도 throw 안 함 (에러는 broadcast로). */
 export async function checkSafely(): Promise<void> {
   try {
+    if (!hasBundledUpdateConfig()) {
+      markUpdateConfigMissing();
+      return;
+    }
     pruneStalePendingUpdate();
     await autoUpdater.checkForUpdates();
   } catch (err) {
