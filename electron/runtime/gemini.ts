@@ -20,6 +20,20 @@ import {
 const KIND = "gemini";
 
 const CANDIDATES = [
+  // Windows: `.cmd`/`.exe`를 bare 이름보다 먼저(bare는 PATHEXT 해석 시 `.ps1`을 잡아
+  // PowerShell 실행정책에 막힐 수 있음 — antigravity `agy` 감지 실패의 원인). .cmd는 cmd.exe로 무관.
+  ...(process.platform === "win32"
+    ? [
+        "agy.cmd",
+        "agy.exe",
+        path.join(os.homedir(), ".local", "bin", "agy.exe"),
+        path.join(os.homedir(), ".local", "bin", "agy.cmd"),
+        "gemini.cmd",
+        "gemini.exe",
+        path.join(process.env.APPDATA ?? "", "npm", "gemini.cmd"),
+        path.join(process.env.LOCALAPPDATA ?? "", "npm", "gemini.cmd"),
+      ]
+    : []),
   // Antigravity CLI(agy) 우선 — 공식 install.sh가 ~/.local/bin/agy에 설치(Google OAuth · 키리스).
   "agy",
   path.join(os.homedir(), ".local/bin/agy"),
@@ -33,14 +47,6 @@ const CANDIDATES = [
   path.join(os.homedir(), ".gemini/bin/gemini"),
   "/opt/homebrew/bin/gemini",
   "/usr/local/bin/gemini",
-  // Windows — GUI 앱이 PATH를 못 받았을 때의 fallback.
-  ...(process.platform === "win32"
-    ? [
-        path.join(os.homedir(), ".local", "bin", "agy.exe"),
-        path.join(process.env.APPDATA ?? "", "npm", "gemini.cmd"),
-        path.join(process.env.LOCALAPPDATA ?? "", "npm", "gemini.cmd"),
-      ]
-    : []),
 ];
 
 async function firstExisting(paths: string[]): Promise<string | null> {

@@ -14,6 +14,7 @@ import {
   updateGraphRunNode,
   finishGraphRun,
 } from "./store/automations";
+import { checkComputerUsePermissions } from "./mac-permissions";
 import { getOrCreateAutomationSession } from "./store/chats";
 import { runMcpInvocation } from "./mcp/client";
 import { runGraph } from "./workflow/run-graph";
@@ -89,7 +90,17 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
   let currentRunId: string | null = null;
   try {
     const controller = new AbortController();
-    if (a.graph && a.graph.nodes.length > 0) {
+    // 컴퓨터유즈 자동화 preflight — macOS 접근성 권한이 없으면 실행하지 않고 '대기'로 스킵한다.
+    // (예전엔 권한 없이 실행돼 브라우저 자동화가 부분 실행 후 먹통/혼란. 이제 빠르게 감지 →
+    //  다음 예약에 자동 재시도, false-fail도 false-success도 아님.)
+    const cuaPerm = a.toolMode === "computer-use" ? checkComputerUsePermissions() : null;
+    if (cuaPerm && !cuaPerm.ok) {
+      runStatus = "skipped";
+      runError =
+        `macOS ${cuaPerm.missing.join(" · ")} 권한이 꺼져 있어 컴퓨터유즈 자동화를 건너뜁니다(먹통 방지). ` +
+        `시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에서 Agentlas를 켜세요. 켜면 다음 예약에 자동 재시도합니다.`;
+      console.warn(`[automation] CUA preflight skip (${a.name}): missing ${cuaPerm.missing.join(", ")}`);
+    } else if (a.graph && a.graph.nodes.length > 0) {
       // 그래프 경로 — 위상 러너로 실행. per-node 상태를 라이브 채널로 방송해 캔버스가 애니메이션.
       const runId = `run-${a.id}-${Date.now()}`;
       currentRunId = runId;

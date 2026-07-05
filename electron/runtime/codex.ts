@@ -21,19 +21,23 @@ import {
 const KIND = "codex";
 
 const CANDIDATES = [
+  // Windows: `.cmd`/`.exe`를 bare `codex`보다 먼저(bare는 PATHEXT 해석 시 `.ps1`을 잡아
+  // PowerShell 실행정책에 막힐 수 있음 — .cmd는 cmd.exe로 실행돼 무관).
+  ...(process.platform === "win32"
+    ? [
+        "codex.cmd",
+        "codex.exe",
+        path.join(process.env.APPDATA ?? "", "npm", "codex.cmd"),
+        path.join(process.env.LOCALAPPDATA ?? "", "npm", "codex.cmd"),
+        path.join(os.homedir(), ".local", "bin", "codex.exe"),
+      ]
+    : []),
   "codex",
   path.join(os.homedir(), ".agentlas/npm/bin/codex"), // 앱이 설치한 유저 prefix (sudo 불필요)
   path.join(os.homedir(), ".local/bin/codex"), // 네이티브 인스톨러 기본 위치
   path.join(os.homedir(), ".codex/bin/codex"),
   "/opt/homebrew/bin/codex",
   "/usr/local/bin/codex",
-  // Windows npm 전역 심 — GUI 앱이 PATH를 못 받았을 때의 fallback.
-  ...(process.platform === "win32"
-    ? [
-        path.join(process.env.APPDATA ?? "", "npm", "codex.cmd"),
-        path.join(process.env.LOCALAPPDATA ?? "", "npm", "codex.cmd"),
-      ]
-    : []),
 ];
 
 async function firstExisting(paths: string[]): Promise<string | null> {

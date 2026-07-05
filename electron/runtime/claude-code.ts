@@ -21,19 +21,26 @@ import {
 const KIND = "claude-code";
 
 const CANDIDATES = [
+  // Windows: `.cmd`/`.exe`를 bare `claude`보다 먼저 시도한다. bare `claude`는
+  // cross-spawn이 PATHEXT로 해석하다 `claude.ps1`을 잡으면 PowerShell 실행정책
+  // (Restricted/RemoteSigned)에 막혀 감지가 실패한다 — 정작 claude 자체는 정상(exit 0)인데도.
+  // `.cmd` 심은 cmd.exe로 실행돼 실행정책과 무관하고, `.exe`는 네이티브 인스톨러 산출물이다.
+  ...(process.platform === "win32"
+    ? [
+        "claude.cmd", // PATH의 npm .cmd 심 (실행정책 무관)
+        "claude.exe", // 네이티브 인스톨러 exe
+        path.join(process.env.APPDATA ?? "", "npm", "claude.cmd"),
+        path.join(process.env.LOCALAPPDATA ?? "", "npm", "claude.cmd"),
+        path.join(os.homedir(), ".local", "bin", "claude.exe"),
+        path.join(os.homedir(), ".local", "bin", "claude.cmd"),
+      ]
+    : []),
   "claude",
   path.join(os.homedir(), ".agentlas/npm/bin/claude"), // 앱이 설치한 유저 prefix (sudo 불필요)
   path.join(os.homedir(), ".local/bin/claude"), // 네이티브 인스톨러 기본 위치
   path.join(os.homedir(), ".claude/local/claude"),
   "/opt/homebrew/bin/claude",
   "/usr/local/bin/claude",
-  // Windows npm 전역 심 — GUI 앱이 PATH를 못 받았을 때의 fallback.
-  ...(process.platform === "win32"
-    ? [
-        path.join(process.env.APPDATA ?? "", "npm", "claude.cmd"),
-        path.join(process.env.LOCALAPPDATA ?? "", "npm", "claude.cmd"),
-      ]
-    : []),
 ];
 
 async function firstExisting(paths: string[]): Promise<string | null> {

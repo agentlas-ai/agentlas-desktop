@@ -18,18 +18,22 @@ import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli,
 import { readEnvVar } from "../secrets/vault";
 
 const CANDIDATES = [
+  // Windows: `.cmd`/`.exe`를 bare `grok`보다 먼저(bare는 PATHEXT 해석 시 `.ps1`을 잡아 막힐 수 있음).
+  ...(process.platform === "win32"
+    ? [
+        "grok.cmd",
+        "grok.exe",
+        path.join(process.env.APPDATA ?? "", "npm", "grok.cmd"),
+        path.join(process.env.LOCALAPPDATA ?? "", "npm", "grok.cmd"),
+        path.join(os.homedir(), ".local", "bin", "grok.exe"),
+      ]
+    : []),
   "grok",
   path.join(os.homedir(), ".grok/bin/grok"), // 공식 install.sh 기본 설치 경로
   path.join(os.homedir(), ".local/bin/grok"),
   path.join(os.homedir(), ".bun/bin/grok"), // bun add -g grok-dev
   "/opt/homebrew/bin/grok",
   "/usr/local/bin/grok",
-  ...(process.platform === "win32"
-    ? [
-        path.join(process.env.APPDATA ?? "", "npm", "grok.cmd"),
-        path.join(process.env.LOCALAPPDATA ?? "", "npm", "grok.cmd"),
-      ]
-    : []),
 ];
 
 async function firstExisting(paths: string[]): Promise<string | null> {
