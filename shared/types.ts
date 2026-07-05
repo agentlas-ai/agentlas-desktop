@@ -455,6 +455,14 @@ export interface ResolvedOrg {
   resolvedAt?: string;
 }
 
+/** standalone 팀 에이전트의 하위 서브에이전트 해석 결과. */
+export interface AgentTeamResolution {
+  /** LLM/구조 판정 종류 — 'agent'면 실제로는 싱글(다음 새로고침에 이동). */
+  kind: "agent" | "team";
+  /** 사용자 대면 서브에이전트(시스템 역할 제외). */
+  subAgents: Array<{ name: string; role: string }>;
+}
+
 // ── 프로젝트 / 채팅 (Claude Desktop / Codex 스타일) ──────────
 export interface Project {
   id: string;
@@ -3362,6 +3370,8 @@ export interface AgentlasIpc {
     uninstall: (id: string) => Promise<void>;
     /** 로컬 폴더(기존 에이전트/팀)를 임포트 — 런타임 감지·라벨링 후 라우팅 저장. */
     importLocalFolder: (absPath: string) => Promise<InstalledAgent>;
+    /** 팀 에이전트의 하위 서브에이전트 해석 — 즉시 결정적 + 백그라운드 LLM 정밀판정/자가교정. */
+    resolveSubAgents: (agentId: string) => Promise<AgentTeamResolution | null>;
   };
   /** 에이전트 폴더 파일 — 라이브러리 우측 패널의 파일 목록 + 에디터.
    *  폴더(userData/agents/<slug>/) 내부로만 접근 제한. system-prompt.md 편집은 즉시 적용. */

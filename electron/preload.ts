@@ -177,6 +177,7 @@ const api: AgentlasIpc = {
     uninstall: (id: string) => ipcRenderer.invoke("team:uninstall", id),
     importLocalFolder: (absPath: string) =>
       ipcRenderer.invoke("team:importLocalFolder", absPath),
+    resolveSubAgents: (agentId: string) => ipcRenderer.invoke("team:resolveSubAgents", agentId),
   },
   agentFiles: {
     list: (agentId: string) => ipcRenderer.invoke("agentFiles:list", agentId),

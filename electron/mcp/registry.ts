@@ -385,6 +385,11 @@ export function uninstallAgent(id: string): void {
   removeRoute(id);
 }
 
+/** 팀/싱글 종류 자가교정 — 리졸버(LLM)가 재판정한 kind를 영속화. */
+export function setAgentEntityKind(id: string, kind: "agent" | "team"): void {
+  getDb().prepare("UPDATE installed_agents SET entity_kind = ? WHERE id = ?").run(kind, id);
+}
+
 // chat history는 electron/store/chats.ts로 이동했음 (chat_id FK 기반)
 // 기존 import 경로 보호를 위해 deprecated re-export 남김 — V1에서 제거
 export {

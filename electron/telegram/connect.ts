@@ -1347,6 +1347,8 @@ async function runBindingInvocation(
     timedOut = true;
     controller.abort();
   }, TELEGRAM_INVOCATION_TIMEOUT_MS);
+  let finalFromEvents = "";
+  let errorFromEvents = "";
   const result = await runMcpInvocation({
     chatId: chat.id,
     userPrompt: prompt,
@@ -1354,16 +1356,24 @@ async function runBindingInvocation(
     locale: currentUiLocale(),
     permissions: mode.permissions,
     goalMode: mode.goalMode,
-  }, (_event: McpInvocationEvent) => undefined, controller.signal).finally(() => {
+  }, (event: McpInvocationEvent) => {
+    const text = event.kind === "final" ? event.text?.trim() : "";
+    if (text) {
+      finalFromEvents = text;
+    } else if (event.kind === "error" && event.error?.message) {
+      errorFromEvents = event.error.message;
+    }
+  }, controller.signal).finally(() => {
     clearTimeout(timer);
   });
   if (timedOut) {
     throw new TelegramInvocationTimeoutError(tg("run.timeout"));
   }
-  if (!result.finalText?.trim()) {
-    throw new Error(tg("error.no_reply"));
+  const finalText = result.finalText?.trim() || finalFromEvents.trim();
+  if (!finalText) {
+    throw new Error(errorFromEvents.trim() || tg("error.no_reply"));
   }
-  return result.finalText.trim();
+  return finalText;
 }
 
 async function ensureBindingChat(binding: TelegramBindingRow) {

@@ -118,6 +118,8 @@ function LibraryAgentsView() {
   const searchParams = useSearchParams();
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
   const [firmCollapsed, setFirmCollapsed] = useState<Record<string, boolean>>({});
+  const [teamExpanded, setTeamExpanded] = useState<Record<string, boolean>>({});
+  const [teamSubs, setTeamSubs] = useState<Record<string, { name: string; role: string }[] | "loading">>({});
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [chats, setChats] = useState<Chat[]>([]);
   const [resolving, setResolving] = useState(false);
@@ -596,6 +598,24 @@ function LibraryAgentsView() {
 
   const roster = useMemo(() => buildAgentRoster(agents, firms), [agents, firms]);
   const agentMap = roster.agentById;
+
+  // 팀 에이전트 펼치기 — 하위 서브에이전트를 백엔드(즉시 결정적 + 백그라운드 LLM)로 해석.
+  const toggleTeam = useCallback(
+    async (agentId: string) => {
+      setTeamExpanded((prev) => ({ ...prev, [agentId]: !prev[agentId] }));
+      if (teamSubs[agentId] !== undefined) return; // 이미 로드됨/로딩중
+      const api = ipc();
+      if (!api?.team?.resolveSubAgents) return;
+      setTeamSubs((prev) => ({ ...prev, [agentId]: "loading" }));
+      try {
+        const res = await api.team.resolveSubAgents(agentId);
+        setTeamSubs((prev) => ({ ...prev, [agentId]: res?.subAgents ?? [] }));
+      } catch {
+        setTeamSubs((prev) => ({ ...prev, [agentId]: [] }));
+      }
+    },
+    [teamSubs],
+  );
   const installedAgentSlugs = new Set(agents.map((a) => a.slug));
   const selectedContext = useMemo(
     () => (selectedNode ? findSelectedNodeContext(selectedNode, firms, resolvedOrgs) : null),
@@ -901,25 +921,63 @@ function LibraryAgentsView() {
                         setActiveTab("identity");
                       }} />;
                     }
+                    const expanded = !!teamExpanded[a.id];
+                    const subs = teamSubs[a.id];
                     return (
-                      <div
-                        key={a.id}
-                        onClick={() => {
-                          setSelectedNode({ id: a.id, name: loc.name, role: loc.tagline, agentId: a.id });
-                          setActiveTab("identity");
-                        }}
-                        style={{
-                          display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", cursor: "pointer",
-                          borderRadius: "var(--radius-md)", background: isAct ? "var(--fill-1)" : "transparent",
-                          border: isAct ? "1px solid var(--accent)" : "1px solid transparent"
-                        }}
-                      >
-                        <AgentAvatar name={loc.name} tone={a.tone} size={28} />
-                        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                          <span style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</span>
-                          <span style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.tagline}</span>
+                      <div key={a.id}>
+                        <div
+                          style={{
+                            display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", cursor: "pointer",
+                            borderRadius: "var(--radius-md)", background: isAct ? "var(--fill-1)" : "transparent",
+                            border: isAct ? "1px solid var(--accent)" : "1px solid transparent"
+                          }}
+                        >
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); void toggleTeam(a.id); }}
+                            title={expanded ? (locale === "ko" ? "접기" : "Collapse") : (locale === "ko" ? "하위 에이전트 펼치기" : "Show sub-agents")}
+                            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 18, height: 18, border: "none", background: "transparent", cursor: "pointer", color: "var(--muted-deep)" }}
+                          >
+                            <IconChevronDown size={13} style={{ transform: expanded ? "none" : "rotate(-90deg)", transition: "transform 0.2s" }} />
+                          </button>
+                          <div
+                            onClick={() => {
+                              setSelectedNode({ id: a.id, name: loc.name, role: loc.tagline, agentId: a.id });
+                              setActiveTab("identity");
+                            }}
+                            style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 10 }}
+                          >
+                            <AgentAvatar name={loc.name} tone={a.tone} size={28} />
+                            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                              <span style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</span>
+                              <span style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.tagline}</span>
+                            </div>
+                          </div>
+                          <IconLayers size={14} style={{ color: "var(--accent)" }} />
                         </div>
-                        <IconLayers size={14} style={{ color: "var(--accent)" }} />
+                        {expanded && (
+                          <div style={{ paddingLeft: 34, display: "flex", flexDirection: "column", gap: 3, marginTop: 2, marginBottom: 4 }}>
+                            {subs === "loading" || subs === undefined ? (
+                              <span style={{ fontSize: 11, color: "var(--muted-deep)", padding: "4px 0" }}>
+                                {locale === "ko" ? "하위 에이전트 확인 중…" : "Resolving sub-agents…"}
+                              </span>
+                            ) : subs.length === 0 ? (
+                              <span style={{ fontSize: 11, color: "var(--muted-deep)", padding: "4px 0" }}>
+                                {locale === "ko" ? "하위 에이전트가 없습니다 (실제로는 싱글일 수 있어요)" : "No sub-agents (may actually be single)"}
+                              </span>
+                            ) : (
+                              subs.map((s, i) => (
+                                <div key={`${a.id}-sub-${i}`} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
+                                  <span style={{ width: 20, textAlign: "center", color: "var(--muted-deep)", fontSize: 11 }}>└</span>
+                                  <span style={{ fontSize: 12, color: "var(--ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</span>
+                                  {s.role && s.role !== s.name ? (
+                                    <span style={{ fontSize: 10.5, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>· {s.role}</span>
+                                  ) : null}
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}

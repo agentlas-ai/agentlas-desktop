@@ -435,16 +435,28 @@ export async function runMcpInvocation(
   // 구독한 뒤에야 sink가 발화하도록 보장한다. 이게 없으면 동기 early-return(no-chat/no-agent)
   // 에러가 구독 전에 발화돼 렌더러가 종료 이벤트를 놓치고 busy(정지 버튼)가 영구 고착된다.
   await Promise.resolve();
+  const callerSink = sink;
+  let finalTextFromSink = "";
+  sink = (ev: McpInvocationEvent) => {
+    if (ev.kind === "final" && ev.text?.trim()) {
+      finalTextFromSink = ev.text.trim();
+    }
+    callerSink(ev);
+  };
+  const earlyResult = () => ({
+    finalText: finalTextFromSink || undefined,
+    stormbreakerContinueRequested: false,
+  });
   const locale = pickLocale(req);
   const chat = getChat(req.chatId);
   if (!chat) {
     sink({ kind: "error", error: { code: "no-chat", message: tStatus(locale, "errChatNotFound") } });
-    return { stormbreakerContinueRequested: false };
+    return earlyResult();
   }
   let agent = getAgentById(chat.agentId);
   if (!agent) {
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
-    return { stormbreakerContinueRequested: false };
+    return earlyResult();
   }
   const targetApp = req.targetAppId ? getAgentApp(req.targetAppId) : null;
   const isTargetAppEdit = Boolean(targetApp && req.targetAppAction === "edit");
@@ -459,7 +471,7 @@ export async function runMcpInvocation(
             : `Could not find the App to edit: ${req.targetAppId}`,
       },
     });
-    return { stormbreakerContinueRequested: false };
+    return earlyResult();
   }
   let effectiveUserPrompt = isTargetAppEdit && targetApp
     ? buildAppEditUserPrompt(req.userPrompt, targetApp, locale)
@@ -606,7 +618,7 @@ export async function runMcpInvocation(
       kind: "error",
       error: { code: "no-runtime", message: tStatus(locale, "errNoRuntime") },
     });
-    return { stormbreakerContinueRequested: false };
+    return earlyResult();
   }
 
   if (runtimeChoice.unavailableOverride) {
@@ -632,7 +644,7 @@ export async function runMcpInvocation(
         }),
       },
     });
-    return { stormbreakerContinueRequested: false };
+    return earlyResult();
   }
 
   // ── MCP 툴 브리지 ──────────────────────────────────────────
@@ -746,7 +758,7 @@ export async function runMcpInvocation(
       const msg = err instanceof Error ? err.message : String(err);
       sink({ kind: "error", error: { code: "agent-group-failed", message: msg } });
     }
-    return { stormbreakerContinueRequested: false };
+    return earlyResult();
   }
 
   // ── Hub borrowed task force ─────────────────────────────────
@@ -776,7 +788,7 @@ export async function runMcpInvocation(
       const msg = err instanceof Error ? err.message : String(err);
       sink({ kind: "error", error: { code: "swarm-failed", message: msg } });
     }
-    return { stormbreakerContinueRequested: false };
+    return earlyResult();
   }
 
   if (borrowedAgentSlugs.length > 1 && chat.kind !== "division") {
@@ -800,7 +812,7 @@ export async function runMcpInvocation(
       const msg = err instanceof Error ? err.message : String(err);
       sink({ kind: "error", error: { code: "borrowed-task-force-failed", message: msg } });
     }
-    return { stormbreakerContinueRequested: false };
+    return earlyResult();
   }
 
   // ── 멀티 에이전트 firm 오케스트레이션 ──
@@ -834,7 +846,7 @@ export async function runMcpInvocation(
           const msg = err instanceof Error ? err.message : String(err);
           sink({ kind: "error", error: { code: "firm-failed", message: msg } });
         }
-        return { stormbreakerContinueRequested: false };
+        return earlyResult();
       }
     }
   }
@@ -1200,6 +1212,6 @@ export async function runMcpInvocation(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     sink({ kind: "error", error: { code: "runner-failed", message: msg } });
-    return { stormbreakerContinueRequested: false };
+    return earlyResult();
   }
 }

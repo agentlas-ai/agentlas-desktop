@@ -1,7 +1,7 @@
 // Firm CRUD — 설치된 회사 레지스트리. 다국어(name_en, tagline_en) 지원.
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
-import { installAgent, getAgentById } from "../mcp/registry";
+import { installAgent, getAgentById, uninstallAgent } from "../mcp/registry";
 import { getSource as getMarketSource } from "../marketplace";
 import type { FirmOrgNode, InstalledFirm } from "../../shared/types";
 
@@ -109,7 +109,45 @@ export async function installFirm(slug: string): Promise<InstalledFirm> {
 }
 
 export function uninstallFirm(id: string): void {
-  getDb().prepare("DELETE FROM firms WHERE id = ?").run(id);
+  const db = getDb();
+  const firm = getFirm(id);
+  if (firm) {
+    // 조직을 지우면 이 조직에만 속한 멤버 에이전트 행(루트 + 하위)까지 정리한다.
+    // 예전엔 firm 행만 지워서 멤버 에이전트가 좀비로 남아 "팀 에이전트"로 오표시됐다.
+    // 다른 조직/조합에서도 참조되거나 builtin(아키텍처) 에이전트는 보존한다.
+    const referencedElsewhere = new Set<string>();
+    for (const row of db.prepare("SELECT org_chart_json FROM firms WHERE id != ?").all(id) as Array<{
+      org_chart_json: string;
+    }>) {
+      try {
+        for (const node of JSON.parse(row.org_chart_json) as Array<{ agentId: string }>) {
+          referencedElsewhere.add(node.agentId);
+        }
+      } catch {
+        /* 손상된 orgChart는 무시 */
+      }
+    }
+    for (const row of db.prepare("SELECT members_json FROM agent_groups").all() as Array<{
+      members_json: string;
+    }>) {
+      try {
+        for (const member of JSON.parse(row.members_json) as Array<{ agentId?: string }>) {
+          if (member.agentId) referencedElsewhere.add(member.agentId);
+        }
+      } catch {
+        /* 무시 */
+      }
+    }
+    for (const node of firm.orgChart) {
+      if (referencedElsewhere.has(node.agentId)) continue;
+      const meta = db
+        .prepare("SELECT builtin FROM installed_agents WHERE id = ?")
+        .get(node.agentId) as { builtin: number } | undefined;
+      if (meta?.builtin === 1) continue; // 아키텍처 에이전트는 보존(시드가 재생성)
+      uninstallAgent(node.agentId); // 행 + 로컬 route 정리 (원본 폴더는 안 건드림)
+    }
+  }
+  db.prepare("DELETE FROM firms WHERE id = ?").run(id);
 }
 
 /**

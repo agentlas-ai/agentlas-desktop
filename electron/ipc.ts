@@ -91,7 +91,7 @@ import {
 import { importLocalFolder } from "./agents/import-local";
 import { getDb } from "./store/db";
 import { getResolvedOrg } from "./store/org-spec";
-import { resolveTeamOrg } from "./agents/org-resolver";
+import { resolveTeamOrg, resolveAgentTeam } from "./agents/org-resolver";
 import { runMcpInvocation } from "./mcp/client";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
 import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot } from "./hephaestus/engine";
@@ -956,6 +956,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("team:uninstall", (_e, id: string) => uninstallAgent(id));
   // 로컬 폴더 임포트 — 런타임 감지 + 라우팅 저장 후 설치된 에이전트로 반환
   ipcMain.handle("team:importLocalFolder", async (_e, absPath: string) => (await importLocalFolder(absPath)).agent);
+  ipcMain.handle("team:resolveSubAgents", (_e, agentId: string) => resolveAgentTeam(agentId));
 
   // ── agentFiles (에이전트 폴더 파일 — 우측 패널 에디터) ──
   ipcMain.handle("agentFiles:list", (_e, agentId: string) => listAgentFiles(agentId));

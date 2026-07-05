@@ -5,12 +5,15 @@
 // 사용자의 원본 파일은 절대 수정하지 않는다.
 import fs from "node:fs";
 import path from "node:path";
-import type { ResolvedDivision, ResolvedNode, ResolvedOrg } from "../../shared/types";
+import type { AgentTeamResolution, ResolvedDivision, ResolvedNode, ResolvedOrg } from "../../shared/types";
 import { getFirm } from "../store/firms";
-import { getAgentById } from "../mcp/registry";
+import { getAgentById, setAgentEntityKind } from "../mcp/registry";
 import { saveResolvedOrg, getResolvedOrg } from "../store/org-spec";
 import { pickActiveRunner } from "../mcp/client";
 import { PROJECT_MEMORY_DIR } from "../architecture/manifest";
+import { getRoute } from "./routes";
+import { agentFolderPath } from "./files";
+import { getMeta, setMeta } from "../store/meta";
 
 const SKIP_DIRS = new Set([
   ".git",
@@ -319,4 +322,111 @@ export async function analyzeFolder(
     return { ...toNode(d), specialists };
   });
   return { kind, divisions };
+}
+
+// ── 팀 에이전트 하위 리졸버 ────────────────────────────────
+// 조직(firm)이 아닌 standalone 팀 에이전트의 서브에이전트를 해석한다.
+// 즉시엔 결정적(agents/ 스캔), 백그라운드로 LLM(analyzeFolder)이 정밀 재판정해
+// 캐시 + entity_kind 자가교정. 러너가 없으면 결정적 결과만 쓴다(엣지케이스 폴백).
+
+const SYSTEM_SUBAGENT_RE =
+  /(orchestrator|pm[\s-]?soul|memory[\s-]?curator|policy[\s-]?gate|eval[\s-]?qa|task[\s-]?bias|\bhq\b|governance)/i;
+
+function isUserFacingSubAgent(name?: string, role?: string): boolean {
+  return !SYSTEM_SUBAGENT_RE.test(`${name ?? ""} ${role ?? ""}`);
+}
+
+function agentSourceDir(agentId: string): string | null {
+  const agent = getAgentById(agentId);
+  if (!agent) return null;
+  const route = getRoute(agentId);
+  if (route?.path && fs.existsSync(route.path)) return route.path;
+  const materialized = agentFolderPath(agent.slug);
+  return fs.existsSync(materialized) ? materialized : null;
+}
+
+/** agents/ 하위 폴더를 결정적으로 스캔 — 즉시 표시 + 러너 없을 때 폴백. */
+function deterministicSubAgents(dir: string): Array<{ name: string; role: string }> {
+  const out: Array<{ name: string; role: string }> = [];
+  let entries: fs.Dirent[] = [];
+  try {
+    entries = fs.readdirSync(path.join(dir, "agents"), { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    // "50-research-worker" → "Research Worker"
+    const label = entry.name.replace(/^\d+[-_]?/, "").replace(/[-_]+/g, " ").trim();
+    if (!label) continue;
+    const titled = label.replace(/\b\w/g, (c) => c.toUpperCase());
+    if (!isUserFacingSubAgent(titled, entry.name)) continue;
+    out.push({ name: titled, role: titled });
+  }
+  return out;
+}
+
+const teamResolveInflight = new Set<string>();
+
+function refineTeamWithLlm(agentId: string, dir: string, name: string, cacheKey: string): void {
+  if (teamResolveInflight.has(agentId)) return;
+  teamResolveInflight.add(agentId);
+  void analyzeFolder(dir, name)
+    .then((llm) => {
+      if (!llm) return;
+      const subAgents: Array<{ name: string; role: string }> = [];
+      for (const division of llm.divisions) {
+        if (isUserFacingSubAgent(division.name, division.role)) {
+          subAgents.push({ name: division.name, role: division.role });
+        }
+        for (const specialist of division.specialists) {
+          if (isUserFacingSubAgent(specialist.name, specialist.role)) {
+            subAgents.push({ name: specialist.name, role: specialist.role });
+          }
+        }
+      }
+      const refined: AgentTeamResolution = { kind: llm.kind, subAgents };
+      setMeta(cacheKey, JSON.stringify(refined));
+      setAgentEntityKind(agentId, llm.kind); // 자가교정: LLM이 single이라 판정하면 다음 새로고침에 이동
+    })
+    .catch(() => {
+      /* LLM 실패는 결정적 결과 유지 */
+    })
+    .finally(() => {
+      teamResolveInflight.delete(agentId);
+    });
+}
+
+/**
+ * 팀 에이전트의 서브에이전트를 해석한다. 캐시(LLM 정밀판정) 있으면 즉시 반환,
+ * 없으면 결정적 결과를 즉시 주고 백그라운드로 LLM을 돌려 다음 번을 위해 캐시/자가교정한다.
+ */
+export async function resolveAgentTeam(agentId: string): Promise<AgentTeamResolution | null> {
+  const agent = getAgentById(agentId);
+  if (!agent) return null;
+  const dir = agentSourceDir(agentId);
+  if (!dir) return null;
+
+  const cacheKey = `agent_team:${agentId}`;
+  const cached = getMeta(cacheKey);
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached) as AgentTeamResolution;
+      if (parsed && (parsed.kind === "agent" || parsed.kind === "team")) return parsed;
+    } catch {
+      /* 손상 캐시 무시 */
+    }
+  }
+
+  const subAgents = deterministicSubAgents(dir);
+  if (subAgents.length > 0) {
+    // 표준 agents/ 레이아웃 — 구조가 명확하니 즉시 확정(LLM 불필요, 캐시+자가교정).
+    const result: AgentTeamResolution = { kind: "team", subAgents };
+    setMeta(cacheKey, JSON.stringify(result));
+    setAgentEntityKind(agentId, "team");
+    return result;
+  }
+  // 서브가 안 잡히는 비표준/애매 구조 → LLM이 임의 구조를 판정(엣지케이스 처리).
+  refineTeamWithLlm(agentId, dir, agent.name, cacheKey);
+  return { kind: "agent", subAgents: [] };
 }
