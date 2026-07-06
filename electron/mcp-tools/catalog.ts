@@ -256,6 +256,27 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     envRequirements: [],
   },
   {
+    id: "agentlas-browser",
+    name: "Agentlas 브라우저 (실제 로그인)",
+    nameEn: "Agentlas Browser (real login)",
+    description:
+      "사용자의 실제 로그인 Chrome 프로필로 웹 조작 — 신선 프로필이 봇/네트워크 보안에 차단될 때 우회 (범용, 키 불필요)",
+    descriptionEn:
+      "Drive the web using your real logged-in Chrome profile — bypasses bot/network-security blocks that hit fresh profiles (general, no key)",
+    category: "web",
+    transport: "stdio",
+    // ~/.agentlas/agentlas-browser-cdp.mjs 는 부팅 시 materializeBrowserCdpLauncher() 가 씀.
+    // 실제 로그인 프로필 사본을 원격 디버깅 포트로 띄우고 @playwright/mcp 를 CDP attach 한다.
+    command: "node",
+    args: ["~/.agentlas/agentlas-browser-cdp.mjs"],
+    trust: "official",
+    docsUrl: "https://github.com/microsoft/playwright-mcp",
+    brandColor: "#1D7E67",
+    mark: "AB",
+    // 키 없음 — 로컬 Chrome 을 CDP 로 띄워 동작. 개인 프로필은 로컬에서만 사용.
+    envRequirements: [],
+  },
+  {
     id: "brave-search",
     name: "Brave 검색",
     nameEn: "Brave Search",
