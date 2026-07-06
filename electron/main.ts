@@ -188,6 +188,30 @@ async function createWindow(): Promise<void> {
 
   mainWindow.once("ready-to-show", () => mainWindow?.show());
 
+  // 우클릭 컨텍스트 메뉴 — 잘라내기/복사/붙여넣기/전체선택. Electron은 기본 제공하지 않아
+  // 입력창에서 우클릭 복붙이 안 되던 문제를 해결한다(키보드 단축키는 앱 메뉴 role로 이미 동작).
+  mainWindow.webContents.on("context-menu", (_event, params) => {
+    const { editFlags, isEditable, selectionText } = params;
+    const items: Electron.MenuItemConstructorOptions[] = [];
+    if (isEditable) {
+      items.push(
+        { role: "undo", enabled: editFlags.canUndo },
+        { role: "redo", enabled: editFlags.canRedo },
+        { type: "separator" },
+        { role: "cut", enabled: editFlags.canCut },
+        { role: "copy", enabled: editFlags.canCopy },
+        { role: "paste", enabled: editFlags.canPaste },
+        { type: "separator" },
+        { role: "selectAll" },
+      );
+    } else if (selectionText && selectionText.trim().length > 0) {
+      items.push({ role: "copy", enabled: editFlags.canCopy }, { type: "separator" }, { role: "selectAll" });
+    }
+    if (items.length > 0 && mainWindow && !mainWindow.isDestroyed()) {
+      Menu.buildFromTemplate(items).popup({ window: mainWindow });
+    }
+  });
+
   // 외부 링크는 기본 브라우저로 — 데스크톱 안에서 임의 URL 열지 않는다 (PRD 6.2)
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith("http://") || url.startsWith("https://")) {
