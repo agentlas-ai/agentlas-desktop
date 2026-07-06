@@ -113,6 +113,7 @@ import { isSupervisorEnabled, setSupervisorEnabled } from "./hephaestus/supervis
 import { runHephaestusBuild } from "./hephaestus/builder";
 import { pickLocale } from "./runtime/status-i18n";
 import { currentUiLocale } from "./main";
+import { buildChatRecap, markChatRecapViewed } from "./chat/recap";
 import { startStudio, stopStudio } from "./hephaestus/studio";
 import type {
   AgentGroupCreateInput,
@@ -1207,6 +1208,11 @@ export function registerIpcHandlers(): void {
     switchChatAgent(id, agentId),
   );
   ipcMain.handle("chats:remove", (_e, id: string) => removeChat(id));
+  // 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(없으면 null).
+  ipcMain.handle("chats:recap", (_e, id: string) => buildChatRecap(id, currentUiLocale() === "ko" ? "ko" : "en"));
+  ipcMain.handle("chats:markViewed", (_e, id: string) => {
+    markChatRecapViewed(id);
+  });
   ipcMain.handle("chats:setContinuousMode", (_e, id: string, enabled: boolean) => {
     setChatContinuousMode(id, enabled);
     return getChat(id);

@@ -3535,6 +3535,10 @@ export interface AgentlasIpc {
     setContinuousMode: (id: string, enabled: boolean) => Promise<Chat>;
     /** 스웜 모드 on/off — 여러 워커가 목표를 분해해 병렬 협업. */
     setSwarmMode: (id: string, enabled: boolean) => Promise<Chat>;
+    /** 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(없으면 null). */
+    recap: (id: string) => Promise<{ summary: string; count: number; sinceIso: string } | null>;
+    /** 이 채팅을 방금 봤다고 기록(recap 기준점 갱신). */
+    markViewed: (id: string) => Promise<void>;
   };
   /** 시스템/하드웨어 설정 — 에이전트 동시성(스웜 크기) 슬라이더 등. */
   system: {

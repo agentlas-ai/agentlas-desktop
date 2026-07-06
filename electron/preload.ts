@@ -296,6 +296,8 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("chats:setContinuousMode", id, enabled),
     setSwarmMode: (id: string, enabled: boolean) =>
       ipcRenderer.invoke("chats:setSwarmMode", id, enabled),
+    recap: (id: string) => ipcRenderer.invoke("chats:recap", id),
+    markViewed: (id: string) => ipcRenderer.invoke("chats:markViewed", id),
   },
   system: {
     concurrencyInfo: () => ipcRenderer.invoke("system:concurrencyInfo"),

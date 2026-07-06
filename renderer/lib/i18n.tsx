@@ -1121,6 +1121,7 @@ const dict = {
     "chat.workspace_panel": "워크스페이스 패널",
     "chat.network_panel": "워크플로우",
     "chat.assistant_fallback": "어시스턴트",
+    "chat.recap.label": "그동안:",
 
     // Workflow panel (우측 실행 흐름 비주얼)
     "network.title": "워크플로우",
@@ -2276,6 +2277,7 @@ const dict = {
     "chat.workspace_panel": "Workspace panel",
     "chat.network_panel": "Workflow",
     "chat.assistant_fallback": "Assistant",
+    "chat.recap.label": "While you were away:",
 
     // Workflow panel (right-side execution flow visual)
     "network.title": "Workflow",

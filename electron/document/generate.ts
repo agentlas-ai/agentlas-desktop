@@ -209,7 +209,7 @@ export async function reviseDocumentText(
 }
 
 // agy → codex 공통 실행. 성공 시 {text, engine}, 실패 시 {reason}.
-async function runLlm(prompt: string): Promise<{ text?: string; engine?: "agy" | "codex"; reason?: string }> {
+export async function runLlm(prompt: string): Promise<{ text?: string; engine?: "agy" | "codex"; reason?: string }> {
   const agy = resolveBin("agy", AGY_PATHS);
   if (agy) {
     const env = { ...process.env, GEMINI_CLI_TRUST_WORKSPACE: "true" };

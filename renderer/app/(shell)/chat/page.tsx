@@ -576,6 +576,8 @@ function ChatPage() {
   // ContinuityReceipt(복원 배너)용 — 채팅 진입 시 ipc().workspace.get으로 복원된 마지막 작업 폴더.
   // 기기 간 클라우드 복원 여부는 백엔드 미확인이므로, 실제로 알 수 있는 사실(로컬 복원 경로)만 보여준다.
   const [restoredFolder, setRestoredFolder] = useState<string | null>(null);
+  // 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(있을 때만 배너).
+  const [recap, setRecap] = useState<{ summary: string; count: number } | null>(null);
   const [defaultRunFolder, setDefaultRunFolder] = useState<string | null>(null);
   const mediaBasePaths = useMemo(
     () => mediaBasePathCandidates(restoredFolder, defaultRunFolder),
@@ -1225,6 +1227,36 @@ function ChatPage() {
     // consumeEvent를 deps에서 제외(ref로 접근) — agent/agentGroup 세팅이 이 effect를 재실행시켜
     // attach가 중복 placeholder를 만들고 구독을 갈아치우던 churn을 없앤다. subscribeRun은 이제 안정적.
   }, [chatId, router, subscribeRun, t]);
+
+  // ── 세션 recap ──────────────────────────────────────────
+  // 기준점(last_viewed_at)은 이 채팅을 "떠날 때"(hidden/언마운트) 갱신하고, "돌아왔을 때"(visible)
+  // 그 이후 도착한 에이전트 응답을 평가한다. 이러면 내가 지켜본 메시지는 recap되지 않고,
+  // 자리를 비운 사이 백그라운드로 쌓인 응답만 한 줄 요약으로 뜬다.
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !chatId) return;
+    let cancelled = false;
+    setRecap(null); // 채팅 전환 시 이전 recap 제거
+    const evalRecap = async () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      const r = await api.chats.recap(chatId).catch(() => null);
+      if (!cancelled && r?.summary) setRecap({ summary: r.summary, count: r.count });
+    };
+    const markViewed = () => {
+      void api.chats.markViewed(chatId).catch(() => undefined);
+    };
+    void evalRecap();
+    const onVis = () => {
+      if (document.hidden) markViewed();
+      else void evalRecap();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVis);
+      markViewed(); // 이 채팅을 떠날 때 기준점을 지금으로 옮긴다
+    };
+  }, [chatId]);
 
   // Library > Generated surfaces can deep-link back to the originating chat and
   // reopen the durable Workbench surface without requiring a live invocation.
@@ -2103,13 +2135,34 @@ function ChatPage() {
     const folder = await api.workspace.get(chat.id).catch(() => null);
     try {
       return await api.hephaestus.routePreview({
-        query: text,
+        // 라우터가 후속 메시지를 맥락 없이 단독 해석하지 않도록 최근 대화를 함께 싣는다.
+        // (예: 사진 편집 진행 중 "여기다 이미지 보여줘야지"가 맥락을 잃고 엉뚱한 허브
+        //  에이전트로 라우팅되던 문제 방지.)
+        query: buildRoutingQueryWithContext(text),
         project: folder ?? undefined,
         allowLocal: true, // 로컬 카드 + 허브 혼합 추천
       });
     } catch {
       return null;
     }
+  }
+
+  // 현재 프롬프트에 이 채팅의 최근 대화 맥락(+현재 에이전트)을 덧붙여 라우팅 질의를 만든다.
+  // 히스토리가 없으면 원문 그대로 반환한다.
+  function buildRoutingQueryWithContext(text: string): string {
+    const recent = messages
+      .filter((m) => (m.role === "user" || m.role === "agent") && (m.text ?? "").trim())
+      .slice(-6)
+      .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${(m.text ?? "").replace(/\s+/g, " ").trim().slice(0, 240)}`);
+    if (recent.length === 0) return text;
+    const agentLine = agent?.name ? `Current agent in this chat: ${agent.name}\n` : "";
+    return [
+      `${agentLine}Recent conversation (for routing continuity):`,
+      recent.join("\n"),
+      "",
+      `New request to route: ${text}`,
+      "If this is a follow-up to the conversation above, prefer keeping the current agent/context over switching to an unrelated agent.",
+    ].join("\n");
   }
 
   // 추천 시트에서 고른 경로를 실제 실행으로 디스패치. 기존 send/switchAgent 경로를 그대로 재사용한다.
@@ -2464,6 +2517,57 @@ function ChatPage() {
       {/* ContinuityReceipt(복원 배너) — 실제로 알 수 있는 사실만: 마지막 작업 폴더가 로컬에서
           복원됐다는 점. 기기 간 클라우드 동기화는 백엔드 미확인이라 단정하지 않는다.
           복원할 폴더가 없으면 렌더하지 않는다. */}
+      {recap && (
+        <div
+          role="status"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            margin: "8px 16px 0",
+            padding: "7px 11px",
+            borderRadius: 8,
+            border: "1px solid var(--accent-soft)",
+            background: "var(--fill-1)",
+            color: "var(--muted-deep)",
+            fontSize: 11.5,
+            lineHeight: 1.4,
+            minWidth: 0,
+          }}
+        >
+          <IconSparkles size={13} style={{ color: "var(--accent)", flexShrink: 0 }} />
+          <span style={{ flexShrink: 0, color: "var(--ink-soft)", fontWeight: 700 }}>
+            {t("chat.recap.label")}
+          </span>
+          <span
+            style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--ink-soft)" }}
+            title={recap.summary}
+          >
+            {recap.summary}
+          </span>
+          <button
+            onClick={() => setRecap(null)}
+            title={locale === "ko" ? "배너 닫기" : "Dismiss"}
+            style={{
+              marginLeft: "auto",
+              flexShrink: 0,
+              width: 20,
+              height: 20,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              border: "none",
+              background: "transparent",
+              color: "var(--muted-deep)",
+              borderRadius: 6,
+              cursor: "pointer",
+            }}
+          >
+            <IconClose size={12} />
+          </button>
+        </div>
+      )}
+
       {restoredFolder && (
         <div
           role="status"

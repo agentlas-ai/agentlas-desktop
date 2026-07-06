@@ -10,7 +10,7 @@ import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 45;
+const SCHEMA_VERSION = 46;
 
 export function initStore(): void {
   if (_db) return;
@@ -1099,6 +1099,18 @@ export function initStore(): void {
              )`,
         )
         .run();
+    }
+  }
+
+  // ── v45 → v46: chats.last_viewed_at ────────────────────
+  // 세션 recap용 — 사용자가 이 채팅을 마지막으로 본 시각. 이후 도착한 에이전트 메시지가
+  // 있으면 돌아왔을 때 "그동안 뭐 했는지" 한 줄 요약(recap)을 띄운다.
+  if (userVersion < 46) {
+    const chatCols = _db
+      .prepare("PRAGMA table_info(chats)")
+      .all() as Array<{ name: string }>;
+    if (!chatCols.some((c) => c.name === "last_viewed_at")) {
+      _db.exec("ALTER TABLE chats ADD COLUMN last_viewed_at TEXT");
     }
   }
 

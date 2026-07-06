@@ -319,6 +319,27 @@ export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[
   return rows.map((r) => ({ id: r.id, role: r.role, text: r.text, createdAt: r.created_at }));
 }
 
+/** recap용 — 마지막으로 본 시각(last_viewed_at) 이후 도착한 에이전트(assistant) 메시지들.
+ *  last_viewed_at이 NULL(이 채팅을 아직 recap 대상으로 표시한 적 없음)이면 recap 생략 → 빈 배열. */
+export function getRecapSince(chatId: string): { lastViewedAt: string | null; messages: ChatHistoryEntry[] } {
+  const db = getDb();
+  const row = db.prepare("SELECT last_viewed_at AS lv FROM chats WHERE id = ?").get(chatId) as { lv: string | null } | undefined;
+  const lastViewedAt = row?.lv ?? null;
+  if (!lastViewedAt) return { lastViewedAt: null, messages: [] };
+  const rows = db
+    .prepare(
+      "SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? AND role = 'assistant' AND created_at > ? ORDER BY created_at ASC LIMIT 40",
+    )
+    .all(chatId, lastViewedAt) as MessageRow[];
+  return { lastViewedAt, messages: rows.map((r) => ({ id: r.id, role: r.role, text: r.text, createdAt: r.created_at })) };
+}
+
+/** recap용 — 이 채팅을 방금 봤다고 기록(last_viewed_at = now). 사이드바 정렬이 흔들리지
+ *  않도록 updated_at은 절대 건드리지 않는다. */
+export function markChatViewed(chatId: string): void {
+  getDb().prepare("UPDATE chats SET last_viewed_at = ? WHERE id = ?").run(new Date().toISOString(), chatId);
+}
+
 /** 채팅의 가장 마지막 메시지 1개 (확인 대기 판별용 — 마지막이 미답변 질문 fence면 pending). */
 export function getLastChatMessage(chatId: string): ChatHistoryEntry | null {
   const row = getDb()
