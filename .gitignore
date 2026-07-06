@@ -110,3 +110,6 @@ output/playwright/
 /studio-pack/web/public/generated/
 /studio-pack/web/public/studio-data.json
 /studio-pack/docs/dogfood/**/stitch/generated/
+
+# Heavy T-rex sample/capture images — regenerated locally, never shipped
+renderer/public/trex-samples/

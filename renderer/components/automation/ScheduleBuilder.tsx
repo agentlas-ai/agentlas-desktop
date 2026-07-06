@@ -220,7 +220,7 @@ export function ScheduleBuilder({
           </div>
           {preset !== "hourly" && preset !== "interval" && (
             <Row label={t("auto.sched.time")}>
-              <input type="time" value={time} onChange={(e) => setTime(e.target.value)} style={inputStyle} />
+              <input type="time" lang={locale === "ko" ? "ko" : "en"} value={time} onChange={(e) => setTime(e.target.value)} style={inputStyle} />
             </Row>
           )}
           {preset === "weekly" && (
@@ -287,7 +287,7 @@ export function ScheduleBuilder({
 
       {mode === "once" && (
         <Row label={t("auto.sched.once.at")}>
-          <input type="datetime-local" value={onceAt} onChange={(e) => setOnceAt(e.target.value)} style={inputStyle} />
+          <input type="datetime-local" lang={locale === "ko" ? "ko" : "en"} value={onceAt} onChange={(e) => setOnceAt(e.target.value)} style={inputStyle} />
         </Row>
       )}
 

@@ -165,6 +165,7 @@ const TELEGRAM_COPY = {
     "test.sent": "테스트 메시지를 보냈습니다.",
     "pair.connected": "Agentlas에 연결되었습니다. 이제 메시지로 실행할 수 있어요.",
     "run.started": "시작했어요. 웹/파일 제작은 몇 분 걸릴 수 있습니다. 끝나면 이 방에 결과 경로와 여는 방법을 보냅니다.",
+    "run.working": "받았어요. 지금 작업 중입니다 — 몇 분 걸릴 수 있어요. 끝나면 이 방에 결과를 보냅니다.",
     "run.timeout": "작업이 너무 오래 걸려 자동으로 멈췄습니다. 이 방에 \"계속 진행해\"라고 보내면 같은 세션에서 이어갈 수 있습니다.",
     "attachment.default_prompt": "첨부 파일을 확인해줘.",
     "attachment.too_large": "첨부 파일이 너무 큽니다: {name}. Telegram에서 받을 수 있는 안전 한도는 {limit}MB입니다.",
@@ -187,6 +188,7 @@ const TELEGRAM_COPY = {
     "botfather.blocked": "Telegram이 현재 계정에서 BotFather 메시지를 막고 있습니다. 열린 BotFather 창에서 제한이 풀린 계정으로 로그인하거나 Telegram 데스크톱/모바일에서 직접 설정해야 합니다.",
     "botfather.manual_settings": "BotFather 창을 열어두었습니다. 로그인 후 /setprivacy를 보내고 이 봇을 고른 뒤 Disable을 누르면 그룹 전체 메시지 받기가 켜집니다.",
     "botfather.create_failed": "BotFather가 새 봇을 만들지 못했습니다. Telegram 창의 안내를 확인해주세요.",
+    "delete.title": "Agentlas Telegram 봇 삭제",
     "error.bot_username_unknown": "아직 봇 이름을 모릅니다. 먼저 봇 포트를 만들어주세요.",
     "error.chat_not_paired": "Telegram 방이 아직 연결되지 않았습니다.",
     "error.message_box_missing": "Telegram 입력창을 찾지 못했습니다.",
@@ -214,6 +216,7 @@ const TELEGRAM_COPY = {
     "test.sent": "Test message sent.",
     "pair.connected": "Connected to Agentlas. You can now run it by messaging here.",
     "run.started": "Started. Website/file creation can take a few minutes. I will send the result path and how to open it here when it finishes.",
+    "run.working": "Got it. Working on it now — this can take a few minutes. I will send the result here when it's done.",
     "run.timeout": "The run took too long and was stopped automatically. Send \"continue\" in this chat to resume the same session.",
     "attachment.default_prompt": "Please inspect the attached file.",
     "attachment.too_large": "The attachment is too large: {name}. The safe Telegram download limit is {limit}MB.",
@@ -236,6 +239,7 @@ const TELEGRAM_COPY = {
     "botfather.blocked": "Telegram is blocking BotFather messages for this account. Use the opened BotFather window with an account that can message BotFather, or set it in Telegram Desktop/mobile.",
     "botfather.manual_settings": "BotFather is open. After logging in, send /setprivacy, choose this bot, then press Disable to let it receive group-wide messages.",
     "botfather.create_failed": "BotFather could not create a new bot. Check the Telegram window for its message.",
+    "delete.title": "Delete Agentlas Telegram Bot",
     "error.bot_username_unknown": "Bot username is not known yet. Create the bot port first.",
     "error.chat_not_paired": "Telegram chat is not paired yet.",
     "error.message_box_missing": "Could not find the Telegram message box.",
@@ -258,10 +262,17 @@ type TelegramInvocationMode = {
 
 class TelegramInvocationTimeoutError extends Error {}
 
-function tg(key: TelegramCopyKey, vars: Record<string, string | number> = {}): string {
-  const locale = currentUiLocale() === "ko" ? "ko" : "en";
+function tg(key: TelegramCopyKey, vars: Record<string, string | number> = {}, localeOverride?: "ko" | "en"): string {
+  const locale = localeOverride ?? (currentUiLocale() === "ko" ? "ko" : "en");
   const template = TELEGRAM_COPY[locale][key] ?? TELEGRAM_COPY.en[key];
   return template.replace(/\{(\w+)\}/g, (_match, name) => String(vars[name] ?? ""));
+}
+
+// 응답 언어는 앱 UI 로케일이 아니라 "사용자가 보낸 메시지의 언어"를 따른다.
+// 한글이 있으면 ko, 아니면 en(스캐폴딩·안내문 기준). 실제 응답 언어는 LLM에
+// "메시지와 같은 언어로 답하라" 지시로 임의 외국어까지 맞춘다.
+function detectReplyLocale(text: string): "ko" | "en" {
+  return /[가-힣]/.test(text) ? "ko" : "en";
 }
 
 function nowIso(): string {
@@ -419,6 +430,14 @@ export async function autoConnectTelegram(input: TelegramConnectAutoInput): Prom
     };
   }
 
+  // 이미 BotFather로 만들었지만 방 페어링이 끝나지 않은 봇이 있으면 그 봇을 재사용해
+  // 방 연결만 다시 시도한다. 매번 새 봇을 만들면 봇이 계속 남발되고 결국 텔레그램
+  // 계정의 봇 개수 한도에 걸려 "새 봇을 만들지 못했습니다"가 뜨던 문제를 막는다.
+  if (existing?.bot_username) {
+    const reused = await reuseExistingBotPairing(existing);
+    if (reused) return reused;
+  }
+
   let capture: BotFatherCapture | null = null;
   try {
     capture = await captureBotFatherToken(target?.name ?? "Agentlas");
@@ -448,6 +467,32 @@ export async function autoConnectTelegram(input: TelegramConnectAutoInput): Prom
     };
   } catch (err) {
     if (capture?.window) closeBotFatherWindow(capture.window);
+    throw new Error(maskTelegramSecrets(err instanceof Error ? err.message : String(err)));
+  }
+}
+
+// 이미 만들어진 봇(토큰 보유, 방 미페어링)으로 방 연결만 다시 시도한다.
+// 새 봇을 만들지 않으므로 봇 남발/봇 한도 초과를 유발하지 않는다.
+async function reuseExistingBotPairing(row: TelegramBindingRow): Promise<TelegramConnectActionResult | null> {
+  if (!row.bot_username) return null;
+  const token = await readBindingSecret(row.id);
+  if (!token) return null;
+  // /start 핸드셰이크로 방을 귀속하려면 이 봇의 poller가 살아 있어야 한다.
+  await telegramApi<boolean>(token, "deleteWebhook", { drop_pending_updates: false }).catch(() => false);
+  await reconcileTelegramWorkers();
+  const win = createTelegramWebWindow(tg("botfather.connect_title"));
+  try {
+    // Telegram 웹 로그인(QR)만 확보하면 된다 — BotFather 메시지는 보내지 않는다.
+    await loadTelegramWebUrl(win, BOTFATHER_WEB_URL, "reuse login");
+    await waitForBotFatherReady(win, 180_000).catch(() => null);
+    const paired = await openBotAndSendStart(win, row.bot_username, row.id);
+    closeBotFatherWindow(win);
+    return {
+      binding: paired ?? toBinding(getBindingRow(row.id) as TelegramBindingRow),
+      message: paired ? tg("auto.chat_connected") : tg("auto.bot_ready"),
+    };
+  } catch (err) {
+    closeBotFatherWindow(win);
     throw new Error(maskTelegramSecrets(err instanceof Error ? err.message : String(err)));
   }
 }
@@ -593,10 +638,64 @@ function hasOtherActiveBindingForToken(bindingId: string, token: string): boolea
   return Boolean(row);
 }
 
-export async function removeTelegramConnection(id: string): Promise<void> {
+export async function removeTelegramConnection(
+  id: string,
+  deleteBotInBotFather = false,
+): Promise<{ botDeleted: boolean }> {
+  const row = getBindingRow(id);
+  let botDeleted = false;
+  // 옵션이 켜졌고, 이 봇을 쓰는 다른 포트가 없을 때만 BotFather에서 실제 봇을 삭제한다.
+  // (clone 포트가 같은 봇 토큰을 공유하면 다른 포트가 깨지므로 공유 시엔 포트만 제거.)
+  if (deleteBotInBotFather && row?.bot_username && !botTokenSharedByOtherBinding(id, row.token_fingerprint)) {
+    botDeleted = await deleteBotViaBotFather(row.bot_username).catch(() => false);
+  }
   getDb().prepare("DELETE FROM telegram_bindings WHERE id = ?").run(id);
   await deleteSecret(secretKey(id));
   await reconcileTelegramWorkers();
+  return { botDeleted };
+}
+
+function botTokenSharedByOtherBinding(bindingId: string, tokenFingerprint: string | null): boolean {
+  if (!tokenFingerprint) return false;
+  const row = getDb()
+    .prepare("SELECT id FROM telegram_bindings WHERE id <> ? AND token_fingerprint = ? LIMIT 1")
+    .get(bindingId, tokenFingerprint) as { id: string } | undefined;
+  return Boolean(row);
+}
+
+// BotFather 웹을 구동해 `/deletebot`으로 실제 봇을 텔레그램 계정에서 영구 삭제한다.
+// 로그인(QR)만 확보되면 로그인 계정 소유 봇 목록에서 대상 봇을 골라 확인 문구를 보낸다.
+async function deleteBotViaBotFather(botUsername: string): Promise<boolean> {
+  const win = createTelegramWebWindow(tg("delete.title"));
+  try {
+    await loadTelegramWebUrl(win, BOTFATHER_WEB_URL, "delete bot");
+    const ready = await waitForBotFatherReady(win, 180_000).catch(() => null);
+    if (!ready || ready.botFatherBlocked) {
+      closeBotFatherWindow(win);
+      return false;
+    }
+    await sendTelegramWebMessage(win, "/deletebot");
+    await sleep(1400);
+    // 봇 선택 — reply 키보드 버튼 클릭, 실패 시 @username 직접 전송.
+    const labels = [`@${botUsername}`, botUsername];
+    const selected = await clickTelegramButtonByText(win, labels, 5_000);
+    if (!selected) {
+      await sendTelegramWebMessage(win, `@${botUsername}`);
+      await sleep(1400);
+    }
+    // 확인 — BotFather의 "Yes, I am totally sure." 버튼/문구.
+    const confirmed = await clickTelegramButtonByText(win, ["Yes, I am totally sure.", "Yes, I am totally sure"], 4_000);
+    if (!confirmed) {
+      await sendTelegramWebMessage(win, "Yes, I am totally sure.");
+    }
+    await sleep(1800);
+    const done = await telegramLatestIncomingIncludes(win, ["Done! The bot is gone", "bot is gone", "The bot is gone"]);
+    closeBotFatherWindow(win);
+    return done;
+  } catch {
+    closeBotFatherWindow(win);
+    return false;
+  }
 }
 
 export async function resetTelegramConversation(id: string): Promise<TelegramConnectBinding> {
@@ -948,17 +1047,22 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
   }
   const cleanWithAttachments = appendTelegramAttachmentGuide(clean, attachments);
   const mode = telegramInvocationMode(cleanWithAttachments);
+  // 응답 언어는 사용자가 보낸 메시지의 언어를 따른다(앱 UI 로케일 무시).
+  const replyLocale = detectReplyLocale(clean);
   getDb()
     .prepare("UPDATE telegram_bindings SET status = 'running', last_error = NULL, updated_at = ? WHERE id = ?")
     .run(nowIso(), binding.id);
-  if (mode.goalMode) {
-    await telegramApi(poller.token, "sendMessage", {
-      chat_id: chatId,
-      text: tg("run.started"),
-    }).catch(() => undefined);
-  }
+  // 접수 확인은 모든 메시지에 보낸다. 제작(goalMode)이면 상세 안내, 그 외(리서치·질문 등)는
+  // 가벼운 "작업 중" 확인. 예전엔 goalMode에만 보내서 리서치는 완료까지 무반응이라
+  // "되는 건지 안 되는 건지" 알 수 없었다. 안내문도 메시지 언어에 맞춘다.
+  await telegramApi(poller.token, "sendMessage", {
+    chat_id: chatId,
+    text: mode.goalMode ? tg("run.started", {}, replyLocale) : tg("run.working", {}, replyLocale),
+  }).catch(() => undefined);
+  // 실행 내내 typing(…) 표시를 살려둔다(텔레그램은 ~5초면 꺼지므로 주기적으로 재전송).
+  const stopTyping = startTypingKeepAlive(poller.token, chatId, poller.controller.signal);
   try {
-    const finalText = await runBindingInvocation(binding, message, cleanWithAttachments, mode, attachments);
+    const finalText = await runBindingInvocation(binding, message, cleanWithAttachments, mode, attachments, replyLocale);
     await sendLongMessage(poller.token, chatId, finalText);
     const nextStatus: TelegramConnectStatus = /테스트|test/i.test(clean) ? "test_passed" : "chat_paired";
     getDb()
@@ -967,9 +1071,25 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     markBindingFailed(binding.id, msg);
-    const text = err instanceof TelegramInvocationTimeoutError ? msg : tg("error.run_failed", { message: msg });
+    const text = err instanceof TelegramInvocationTimeoutError ? msg : tg("error.run_failed", { message: msg }, replyLocale);
     await telegramApi(poller.token, "sendMessage", { chat_id: chatId, text }).catch(() => undefined);
+  } finally {
+    stopTyping();
   }
+}
+
+// 실행이 끝날 때까지 typing 액션을 주기적으로 재전송한다. 텔레그램 typing은 약 5초 후
+// 자동으로 사라지므로 4.5초마다 갱신해 "작업 중" 표시가 끊기지 않게 한다.
+function startTypingKeepAlive(token: string, chatId: string, signal: AbortSignal): () => void {
+  let stopped = false;
+  const interval = setInterval(() => {
+    if (stopped || signal.aborted) return;
+    void telegramApi(token, "sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => undefined);
+  }, 4500);
+  return () => {
+    stopped = true;
+    clearInterval(interval);
+  };
 }
 
 function findBindingForChat(bindingIds: string[], chatId: string): TelegramBindingRow | null {
@@ -1332,11 +1452,19 @@ async function runBindingInvocation(
   userText: string,
   mode = telegramInvocationMode(userText),
   attachments: TelegramRuntimeAttachment[] = [],
+  replyLocale: "ko" | "en" = detectReplyLocale(userText),
 ): Promise<string> {
   const chat = await ensureBindingChat(binding);
+  // 언어 규칙: 앱 지침이 한국어여도, 사용자가 보낸 메시지의 언어로 답한다(영어면 영어,
+  // 그 외 외국어면 그 언어). LLM이 임의 언어까지 맞추도록 명시 지시.
+  const languageDirective =
+    "IMPORTANT language rule: reply in the SAME language the user wrote their message in. " +
+    "If the user's message is in English, answer in English; if Korean, answer in Korean; " +
+    "if in any other language, answer in that language. Do not default to the app's UI language.";
   const prompt = [
     `Telegram chat: ${binding.telegram_chat_title || chatTitle(message.chat)} (${message.chat.type})`,
     message.from?.username ? `From: @${message.from.username}` : "",
+    languageDirective,
     mode.instruction,
     "",
     userText,
@@ -1353,7 +1481,7 @@ async function runBindingInvocation(
     chatId: chat.id,
     userPrompt: prompt,
     images: attachments.map((attachment) => attachment.image).filter((image): image is ImageAttachment => Boolean(image)),
-    locale: currentUiLocale(),
+    locale: replyLocale,
     permissions: mode.permissions,
     goalMode: mode.goalMode,
   }, (event: McpInvocationEvent) => {
@@ -1367,11 +1495,11 @@ async function runBindingInvocation(
     clearTimeout(timer);
   });
   if (timedOut) {
-    throw new TelegramInvocationTimeoutError(tg("run.timeout"));
+    throw new TelegramInvocationTimeoutError(tg("run.timeout", {}, replyLocale));
   }
   const finalText = result.finalText?.trim() || finalFromEvents.trim();
   if (!finalText) {
-    throw new Error(errorFromEvents.trim() || tg("error.no_reply"));
+    throw new Error(errorFromEvents.trim() || tg("error.no_reply", {}, replyLocale));
   }
   return finalText;
 }
@@ -1640,9 +1768,26 @@ async function createBotWithBotFather(win: BrowserWindow, targetName: string): P
     await sleep(800);
   }
 
+  // BotFather가 왜 거부했는지(봇 개수 한도·레이트리밋·이름 중복 등)를 그대로 붙여
+  // 사용자가 원인을 알 수 있게 한다. 토큰은 마스킹.
+  const reason = maskTelegramSecrets(await telegramLatestIncomingText(win));
   throw new Error(
-    tg("botfather.create_failed"),
+    reason ? `${tg("botfather.create_failed")} — ${reason}` : tg("botfather.create_failed"),
   );
+}
+
+async function telegramLatestIncomingText(win: BrowserWindow): Promise<string> {
+  return String(
+    (await win.webContents
+      .executeJavaScript(
+        `(() => {
+          const bubbles = Array.from(document.querySelectorAll(".bubble.is-in"));
+          return (bubbles[bubbles.length - 1]?.textContent || "").trim().slice(0, 300);
+        })()`,
+        true,
+      )
+      .catch(() => "")) || "",
+  ).trim();
 }
 
 async function waitForTokenForBot(

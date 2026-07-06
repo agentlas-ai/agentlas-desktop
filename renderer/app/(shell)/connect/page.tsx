@@ -411,6 +411,15 @@ export default function ConnectPage() {
       const api = ipc();
       if (!api) return;
       if (action === "reset" && !window.confirm(t("connect.action.reset_confirm"))) return;
+      let deleteBotInBotFather = false;
+      if (action === "remove") {
+        if (!window.confirm(t("connect.remove.confirm"))) return;
+        if (binding.botUsername) {
+          deleteBotInBotFather = window.confirm(
+            t("connect.remove.delete_bot_confirm", { bot: binding.botUsername }),
+          );
+        }
+      }
       setBusy(`${action}:${binding.id}`);
       try {
         if (action === "open") {
@@ -456,10 +465,14 @@ export default function ConnectPage() {
           appendLog(message, "success");
           await refresh();
         } else {
-          await api.telegram.remove(binding.id);
-          const message = t("connect.msg.port_removed");
+          const result = await api.telegram.remove(binding.id, deleteBotInBotFather);
+          const message = !deleteBotInBotFather
+            ? t("connect.msg.port_removed")
+            : result?.botDeleted
+              ? t("connect.msg.port_and_bot_removed")
+              : t("connect.msg.bot_delete_failed");
           setToast(message);
-          appendLog(message, "success");
+          appendLog(message, deleteBotInBotFather && !result?.botDeleted ? "info" : "success");
           await refresh();
         }
       } catch (err) {
