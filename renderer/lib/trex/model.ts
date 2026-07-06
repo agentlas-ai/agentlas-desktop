@@ -1099,12 +1099,13 @@ function posterSlide(theme: ModeTheme, idx: number, total: number, c: SlideConte
   const cta = c.cta || (ko ? "지금 구매" : "SHOP NOW");
   const brand = shorten(deckTitle, 18);
   const imgPrompt = imgPromptOf(c, headline);
-  const kick = (x: number, y: number, w: number, col?: boolean): TrexBlock => ({ id: bid(), kind: "kicker", x, y, w, size: 1.4, text: brand, accent: col });
+  const kick = (x: number, y: number, w: number, col?: boolean): TrexBlock => ({ id: bid(), kind: "kicker", x, y, w, size: 1.7, text: brand, accent: col });
   // split·diagonal은 accent 배경 → 강조 단어를 흰 하이라이트 박스로(accent색이면 안 보임).
   const onAccentBg = arch === "split" || arch === "diagonal";
+  // 포스터 타이포는 히어로급 — cqw(가로폭%) 기준이라 세로 판형에선 크게 잡아야 이미지와 균형이 맞는다.
   const H = (x: number, y: number, w: number, size: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "title", x, y, w, size, text: headline, weight: 900, align, accent: false, ...(onAccentBg ? { emBox: true } : {}) });
-  const S = (x: number, y: number, w: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "subtitle", x, y, w, size: 1.7, text: sub, align });
-  const C = (x: number, y: number, w: number, h: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "cta", x, y, w, h, ctaStyle: "pill", text: cta, arrow: true, size: 1.9, align });
+  const S = (x: number, y: number, w: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "subtitle", x, y, w, size: 2.9, text: sub, align });
+  const C = (x: number, y: number, w: number, h: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "cta", x, y, w, h, ctaStyle: "pill", text: cta, arrow: true, size: 3, align });
   let bg: SlideBg;
   let pink: string;
   const blocks: TrexBlock[] = [];
@@ -1112,23 +1113,23 @@ function posterSlide(theme: ModeTheme, idx: number, total: number, c: SlideConte
   if (arch === "overlay") {
     bg = { kind: "solid", color: "#14131A" }; pink = "#FFFFFF";
     blocks.push(imageBlock({ x: 0, y: 0, w: 100, h: 100 }, imgPrompt, { scrim: true }));
-    blocks.push(kick(6, 6, 44), H(6, 54, 66, 6.4), S(6, 77, 58), { id: bid(), kind: "badge", x: 68, y: 7, w: 26, h: 26, badgeStyle: "burst", text: offer, size: 2.3, accent: true }, C(6, 87, 40, 9));
+    blocks.push(kick(6, 6, 50), H(6, 44, 84, 13), S(6, 74, 66), { id: bid(), kind: "badge", x: 62, y: 6, w: 32, h: 32, badgeStyle: "burst", text: offer, size: 3.6, accent: true }, C(6, 86, 46, 9.5));
   } else if (arch === "split") {
     bg = { kind: "gradient", from: accent, to: dna?.accent2 ?? accent, angle: 150 }; pink = "#FFFFFF";
     blocks.push(imageBlock({ x: 52, y: 0, w: 48, h: 100 }, imgPrompt));
-    blocks.push(kick(6, 8, 40), H(6, 26, 42, 5.6), S(6, 55, 40), { id: bid(), kind: "badge", x: 6, y: 66, w: 34, h: 13, badgeStyle: "tag", text: offer, size: 2, rotate: -8, accent: true }, C(6, 84, 36, 9));
+    blocks.push(kick(6, 8, 42), H(6, 20, 44, 11), S(6, 58, 42), { id: bid(), kind: "badge", x: 6, y: 70, w: 40, h: 15, badgeStyle: "tag", text: offer, size: 3, rotate: -8, accent: true }, C(6, 86, 42, 10));
   } else if (arch === "hero") {
     bg = { kind: "solid", color: light }; pink = ink;
-    blocks.push(imageBlock({ x: 24, y: 34, w: 52, h: 40 }, imgPrompt));
-    blocks.push(kick(40, 6, 20, true), H(8, 13, 84, 5.6, "center"), { id: bid(), kind: "badge", x: 66, y: 26, w: 28, h: 28, badgeStyle: "burst", text: offer, size: 2.3, accent: true }, S(14, 76, 72, "center"), C(32, 86, 36, 9, "center"));
+    blocks.push(imageBlock({ x: 22, y: 36, w: 56, h: 38 }, imgPrompt));
+    blocks.push(kick(40, 7, 20, true), H(6, 11, 88, 11.5, "center"), { id: bid(), kind: "badge", x: 64, y: 30, w: 32, h: 32, badgeStyle: "burst", text: offer, size: 3.4, accent: true }, S(12, 76, 76, "center"), C(32, 87, 36, 10, "center"));
   } else if (arch === "diagonal") {
     bg = { kind: "gradient", from: accent, to: dna?.accent2 ?? accent, angle: 135 }; pink = "#FFFFFF";
-    blocks.push(imageBlock({ x: 0, y: 56, w: 100, h: 44 }, imgPrompt, { fade: "bottom" }));
-    blocks.push(kick(8, 8, 40), H(8, 16, 66, 6), { id: bid(), kind: "badge", x: 60, y: 9, w: 32, h: 20, badgeStyle: "tag", text: offer, size: 2.2, rotate: -10, accent: true }, S(8, 40, 54), C(8, 47, 36, 9));
+    blocks.push(imageBlock({ x: 0, y: 58, w: 100, h: 42 }, imgPrompt, { fade: "bottom" }));
+    blocks.push(kick(8, 8, 42), H(8, 14, 70, 12), S(8, 42, 56), { id: bid(), kind: "badge", x: 58, y: 7, w: 34, h: 22, badgeStyle: "tag", text: offer, size: 3.2, rotate: -10, accent: true }, C(8, 49, 40, 10));
   } else {
     bg = { kind: "solid", color: light }; pink = ink;
-    blocks.push({ id: bid(), kind: "rule", x: 8, y: 8, w: 84, accent: true }, kick(40, 12, 20, true), H(10, 22, 80, 6.4, "center"), S(15, 46, 70, "center"), { id: bid(), kind: "badge", x: 34, y: 55, w: 32, h: 8, badgeStyle: "ribbon", text: offer, size: 1.9, accent: true }, C(33, 82, 34, 9, "center"), { id: bid(), kind: "rule", x: 8, y: 92, w: 84, accent: true });
-    if (imgPrompt) blocks.push(imageBlock({ x: 32, y: 64, w: 36, h: 15 }, imgPrompt));
+    blocks.push({ id: bid(), kind: "rule", x: 8, y: 9, w: 84, accent: true }, kick(40, 13, 20, true), H(8, 20, 84, 13, "center"), S(13, 46, 74, "center"), { id: bid(), kind: "badge", x: 33, y: 55, w: 34, h: 9, badgeStyle: "ribbon", text: offer, size: 2.6, accent: true }, C(32, 84, 36, 10, "center"), { id: bid(), kind: "rule", x: 8, y: 91, w: 84, accent: true });
+    if (imgPrompt) blocks.push(imageBlock({ x: 30, y: 64, w: 40, h: 15 }, imgPrompt));
   }
   return { id: bid(), bg, ink: pink, scene: "none", blocks };
 }
@@ -1170,7 +1171,7 @@ function cardnewsSlide(theme: ModeTheme, idx: number, total: number, c: SlideCon
     bg = { kind: "solid", color: "#FFFFFF" }; pink = ink;
     blocks.push(
       { id: bid(), kind: "kpi", x: 8, y: 12, w: 50, size: 16, value: `0${seq}`, label: "", accent: true },
-      { id: bid(), kind: "title", x: 8, y: 50, w: 84, size: 4.2, text: title, weight: 800, accent: false },
+      { id: bid(), kind: "title", x: 8, y: 50, w: 84, size: 5.2, text: title, weight: 800, accent: false },
       { id: bid(), kind: "subtitle", x: 8, y: 70, w: 84, size: 2, text: body },
       foot(false), page(false),
     );
@@ -1179,7 +1180,7 @@ function cardnewsSlide(theme: ModeTheme, idx: number, total: number, c: SlideCon
     bg = { kind: "solid", color: dna?.ink ?? "#1B1830" }; pink = "#FFFFFF";
     blocks.push(
       { id: bid(), kind: "title", x: 10, y: 12, w: 40, size: 12, text: "“", weight: 900, accent: true },
-      { id: bid(), kind: "title", x: 10, y: 32, w: 80, size: 4.2, text: title, weight: 700, accent: false },
+      { id: bid(), kind: "title", x: 10, y: 32, w: 80, size: 4.9, text: title, weight: 700, accent: false },
       { id: bid(), kind: "subtitle", x: 10, y: 80, w: 80, size: 1.8, text: body, align: "left" },
       foot(true), page(true),
     );
@@ -1187,7 +1188,7 @@ function cardnewsSlide(theme: ModeTheme, idx: number, total: number, c: SlideCon
   } else if (arch === "checklist") {
     bg = { kind: "solid", color: "#FFFFFF" }; pink = ink;
     const items = (c.items && c.items.length ? c.items : c.cards?.map((x) => x.label) || [title]).slice(0, 5);
-    blocks.push({ id: bid(), kind: "title", x: 8, y: 12, w: 84, size: 4.4, text: title, weight: 800, accent: false });
+    blocks.push({ id: bid(), kind: "title", x: 8, y: 12, w: 84, size: 5.2, text: title, weight: 800, accent: false });
     items.forEach((it, i) => blocks.push({ id: bid(), kind: "body", inline: true, x: 8, y: 34 + i * 12, w: 84, size: 2, label: "✓", text: shorten(it, 34) }));
     blocks.push(foot(false), page(false));
     if (!isLast) blocks.push(swipe(false));
@@ -1196,7 +1197,7 @@ function cardnewsSlide(theme: ModeTheme, idx: number, total: number, c: SlideCon
     bg = { kind: "solid", color: "#FFFFFF" }; pink = ink;
     blocks.push(imageBlock({ x: 0, y: 0, w: 100, h: 54 }, imgPrompt));
     blocks.push(
-      { id: bid(), kind: "title", x: 8, y: 60, w: 84, size: 4.2, text: title, weight: 800, accent: false },
+      { id: bid(), kind: "title", x: 8, y: 58, w: 84, size: 5.2, text: title, weight: 800, accent: false },
       { id: bid(), kind: "subtitle", x: 8, y: 80, w: 84, size: 2, text: body },
       foot(false), page(false),
     );
