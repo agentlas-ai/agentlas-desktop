@@ -14,7 +14,7 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { usePathname } from "next/navigation";
 import { registerRouter } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
-import { IconLayers } from "./Icon";
+import { IconLayers, IconBug, IconCheck } from "./Icon";
 import { PageTour, replayCurrentPageTour } from "./PageTour";
 import { BuildDoneToast } from "./BuildDoneToast";
 import {
@@ -264,6 +264,7 @@ function GuideFab({
   const ko = locale === "ko";
   const [open, setOpen] = useState(false);
   const [hidden, setHidden] = useState(false);
+  const [bugOpen, setBugOpen] = useState(false);
   const bottom = avoidComposer ? 102 : 20;
 
   useEffect(() => {
@@ -345,8 +346,17 @@ function GuideFab({
               onReplayTour();
             }}
           />
+          <FabItem
+            icon={<IconBug size={15} />}
+            label={ko ? "버그 신고하기" : "Report a bug"}
+            onClick={() => {
+              setOpen(false);
+              setBugOpen(true);
+            }}
+          />
         </div>
       )}
+      <BugReportModal open={bugOpen} onClose={() => setBugOpen(false)} />
       <div style={{ position: "relative", width: 46, height: 46 }}>
         <button
           onClick={() => setOpen((o) => !o)}
@@ -428,6 +438,294 @@ function FabItem({ icon, label, onClick }: { icon: React.ReactNode; label: strin
     </button>
   );
 }
+
+// 버그 신고 팝업 — 신고 내용을 웹 API(→MongoDB)로 보낸다. 앱 버전/플랫폼은 메인이 첨부.
+function BugReportModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { locale } = useT();
+  const ko = locale === "ko";
+  const pathname = usePathname() ?? "/";
+  const [message, setMessage] = useState("");
+  const [title, setTitle] = useState("");
+  const [email, setEmail] = useState("");
+  const [severity, setSeverity] = useState<"low" | "medium" | "high">("medium");
+  const [status, setStatus] = useState<"idle" | "sending" | "done" | "error">("idle");
+  const [errorMsg, setErrorMsg] = useState("");
+
+  // 열릴 때마다 폼 초기화.
+  useEffect(() => {
+    if (open) {
+      setMessage("");
+      setTitle("");
+      setEmail("");
+      setSeverity("medium");
+      setStatus("idle");
+      setErrorMsg("");
+    }
+  }, [open]);
+
+  if (!open) return null;
+
+  async function submit() {
+    const body = message.trim();
+    if (!body || status === "sending") return;
+    setStatus("sending");
+    setErrorMsg("");
+    try {
+      const res = await ipc()?.support.submitBugReport({
+        message: body,
+        title: title.trim() || undefined,
+        email: email.trim() || undefined,
+        severity,
+        page: pathname,
+        locale,
+      });
+      if (res?.ok) {
+        setStatus("done");
+        window.setTimeout(() => onClose(), 1400);
+      } else {
+        setStatus("error");
+        setErrorMsg(
+          res?.code === "network"
+            ? ko
+              ? "네트워크 오류로 전송하지 못했어요. 잠시 후 다시 시도해 주세요."
+              : "Couldn't reach the server. Please try again shortly."
+            : ko
+              ? "전송에 실패했어요. 잠시 후 다시 시도해 주세요."
+              : "Something went wrong. Please try again shortly.",
+        );
+      }
+    } catch {
+      setStatus("error");
+      setErrorMsg(ko ? "전송에 실패했어요." : "Something went wrong.");
+    }
+  }
+
+  const sevOptions: { key: "low" | "medium" | "high"; label: string }[] = [
+    { key: "low", label: ko ? "사소함" : "Low" },
+    { key: "medium", label: ko ? "보통" : "Medium" },
+    { key: "high", label: ko ? "심각함" : "High" },
+  ];
+
+  return (
+    <div
+      className="titlebar-nodrag"
+      role="dialog"
+      aria-modal="true"
+      aria-label={ko ? "버그 신고" : "Report a bug"}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 300,
+        background: "rgba(11,11,15,0.42)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 16,
+      }}
+    >
+      <div
+        style={{
+          width: "min(460px, calc(100vw - 32px))",
+          maxHeight: "calc(100vh - 32px)",
+          overflowY: "auto",
+          background: "var(--paper)",
+          border: "1px solid var(--paper-edge)",
+          borderRadius: 14,
+          boxShadow: "0 24px 64px rgba(0,0,0,0.28)",
+          padding: 20,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+          <span style={{ color: "var(--accent)", display: "inline-flex" }}>
+            <IconBug size={18} />
+          </span>
+          <strong style={{ fontSize: 16, color: "var(--ink)", flex: 1 }}>
+            {ko ? "버그 신고" : "Report a bug"}
+          </strong>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={ko ? "닫기" : "Close"}
+            style={{
+              width: 26,
+              height: 26,
+              borderRadius: 8,
+              border: "none",
+              background: "transparent",
+              color: "var(--muted-deep)",
+              cursor: "pointer",
+              fontSize: 18,
+              lineHeight: 1,
+            }}
+          >
+            ×
+          </button>
+        </div>
+        <p style={{ fontSize: 12.5, color: "var(--muted-deep)", margin: "0 0 14px" }}>
+          {ko
+            ? "무슨 일이 있었는지 알려주세요. 앱 버전과 사용 환경은 자동으로 함께 전송돼요."
+            : "Tell us what happened. Your app version and environment are attached automatically."}
+        </p>
+
+        {status === "done" ? (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "14px 12px",
+              borderRadius: 10,
+              background: "var(--green-soft, rgba(34,197,94,0.12))",
+              color: "var(--green-deep, #16794a)",
+              fontSize: 13.5,
+              fontWeight: 600,
+            }}
+          >
+            <IconCheck size={16} />
+            {ko ? "신고가 접수됐어요. 감사합니다!" : "Your report was received. Thank you!"}
+          </div>
+        ) : (
+          <>
+            <label style={{ display: "block", marginBottom: 12 }}>
+              <span style={bugLabelStyle}>{ko ? "심각도" : "Severity"}</span>
+              <div style={{ display: "flex", gap: 6 }}>
+                {sevOptions.map((opt) => {
+                  const active = severity === opt.key;
+                  return (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      onClick={() => setSeverity(opt.key)}
+                      style={{
+                        flex: 1,
+                        padding: "7px 0",
+                        borderRadius: 8,
+                        border: `1px solid ${active ? "var(--accent)" : "var(--paper-edge)"}`,
+                        background: active ? "var(--accent)" : "transparent",
+                        color: active ? "#fff" : "var(--ink)",
+                        fontSize: 12.5,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </label>
+
+            <label style={{ display: "block", marginBottom: 12 }}>
+              <span style={bugLabelStyle}>{ko ? "제목 (선택)" : "Title (optional)"}</span>
+              <input
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                maxLength={200}
+                placeholder={ko ? "한 줄 요약" : "One-line summary"}
+                style={bugInputStyle}
+              />
+            </label>
+
+            <label style={{ display: "block", marginBottom: 12 }}>
+              <span style={bugLabelStyle}>
+                {ko ? "무엇이 잘못됐나요?" : "What went wrong?"}
+                <span style={{ color: "var(--red-deep, #d64545)" }}> *</span>
+              </span>
+              <textarea
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                maxLength={8000}
+                rows={5}
+                autoFocus
+                placeholder={
+                  ko
+                    ? "무엇을 하려다 어떤 문제가 생겼는지 적어주세요."
+                    : "Describe what you were doing and what went wrong."
+                }
+                style={{ ...bugInputStyle, resize: "vertical", minHeight: 96, fontFamily: "inherit" }}
+              />
+            </label>
+
+            <label style={{ display: "block", marginBottom: 16 }}>
+              <span style={bugLabelStyle}>{ko ? "이메일 (선택 · 후속 연락용)" : "Email (optional · for follow-up)"}</span>
+              <input
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                type="email"
+                maxLength={200}
+                placeholder="you@example.com"
+                style={bugInputStyle}
+              />
+            </label>
+
+            {status === "error" && (
+              <div style={{ fontSize: 12.5, color: "var(--red-deep, #d64545)", marginBottom: 12 }}>{errorMsg}</div>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button
+                type="button"
+                onClick={onClose}
+                style={{
+                  padding: "9px 16px",
+                  borderRadius: 9,
+                  border: "1px solid var(--paper-edge)",
+                  background: "transparent",
+                  color: "var(--ink)",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                {ko ? "취소" : "Cancel"}
+              </button>
+              <button
+                type="button"
+                onClick={submit}
+                disabled={!message.trim() || status === "sending"}
+                style={{
+                  padding: "9px 18px",
+                  borderRadius: 9,
+                  border: "none",
+                  background: !message.trim() || status === "sending" ? "var(--paper-edge)" : "var(--accent)",
+                  color: "#fff",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  cursor: !message.trim() || status === "sending" ? "default" : "pointer",
+                }}
+              >
+                {status === "sending" ? (ko ? "보내는 중…" : "Sending…") : ko ? "신고 보내기" : "Send report"}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const bugLabelStyle: React.CSSProperties = {
+  display: "block",
+  fontSize: 12,
+  fontWeight: 600,
+  color: "var(--muted-deep)",
+  marginBottom: 6,
+};
+
+const bugInputStyle: React.CSSProperties = {
+  width: "100%",
+  padding: "9px 11px",
+  borderRadius: 9,
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper-2, var(--paper))",
+  color: "var(--ink)",
+  fontSize: 13.5,
+  outline: "none",
+  boxSizing: "border-box",
+};
 
 const TOUR_STEPS = [
   {

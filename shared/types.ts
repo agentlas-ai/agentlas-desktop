@@ -3132,6 +3132,28 @@ export interface CreatePromptEvolutionProposalInput {
   decisionNote?: string;
 }
 
+/** 버그 신고 입력 — 우측 하단 도움말(?) 메뉴의 신고 폼에서 전달. */
+export interface BugReportInput {
+  message: string;
+  title?: string;
+  severity?: "low" | "medium" | "high";
+  email?: string;
+  /** 신고 당시 화면 경로(예: "/chat") — 재현에 도움. */
+  page?: string;
+  /** 표시 언어(ko/en). */
+  locale?: string;
+}
+
+/** 버그 신고 결과 — 웹 API가 MongoDB에 적재. */
+export interface BugReportResult {
+  ok: boolean;
+  /** 저장된 신고 id(성공 시). */
+  id?: string;
+  /** 실패 코드: message_required / network / http_4xx / store_failed 등. */
+  code?: string;
+  error?: string;
+}
+
 export interface AgentlasIpc {
   /** Electron 메인이 알려주는 OS 환경 정보 (Apple/Codex/Claude 데스크톱과 동일 패턴) */
   app: {
@@ -3166,6 +3188,10 @@ export interface AgentlasIpc {
       locale?: "ko" | "en";
     }) => Promise<{ ok: boolean; text?: string; engine?: "agy" | "codex"; reason?: string }>;
     available: () => Promise<{ agy: boolean; codex: boolean }>;
+  };
+  /** 버그 신고 — 우측 하단 도움말(?) 메뉴에서 신고를 받아 웹 API(→MongoDB)로 적재. */
+  support: {
+    submitBugReport: (payload: BugReportInput) => Promise<BugReportResult>;
   };
   /** 네이티브 macOS 메뉴바 제어 — 인앱 언어 설정을 메인 프로세스로 전달해 메뉴를 다시 그린다. */
   menu: {
@@ -3455,7 +3481,7 @@ export interface AgentlasIpc {
     clone: (input: TelegramConnectCloneInput) => Promise<TelegramConnectActionResult>;
     resume: (id: string) => Promise<TelegramConnectBinding>;
     stop: (id: string) => Promise<TelegramConnectBinding>;
-    remove: (id: string) => Promise<void>;
+    remove: (id: string, deleteBot?: boolean) => Promise<{ botDeleted: boolean }>;
     resetConversation: (id: string) => Promise<TelegramConnectBinding>;
     sendTest: (id: string) => Promise<TelegramConnectActionResult>;
     openBot: (id: string) => Promise<{ ok: boolean; message: string }>;

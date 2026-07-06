@@ -3,6 +3,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AgentlasIpc,
+  BugReportInput,
   Automation,
   McpInvocationEvent,
   McpInvocationRequest,
@@ -37,6 +38,9 @@ const api: AgentlasIpc = {
     revise: (payload: { text: string; action: "expand" | "rewrite" | "shorten" | "improve" | "formal" | "casual"; locale?: "ko" | "en" }) =>
       ipcRenderer.invoke("document:revise", payload),
     available: () => ipcRenderer.invoke("document:available"),
+  },
+  support: {
+    submitBugReport: (payload: BugReportInput) => ipcRenderer.invoke("support:submitBugReport", payload),
   },
   menu: {
     setLocale: (locale: "ko" | "en") => ipcRenderer.invoke("menu:setLocale", locale),
@@ -253,7 +257,7 @@ const api: AgentlasIpc = {
     clone: (input) => ipcRenderer.invoke("telegram:clone", input),
     resume: (id: string) => ipcRenderer.invoke("telegram:resume", id),
     stop: (id: string) => ipcRenderer.invoke("telegram:stop", id),
-    remove: (id: string) => ipcRenderer.invoke("telegram:remove", id),
+    remove: (id: string, deleteBot?: boolean) => ipcRenderer.invoke("telegram:remove", id, deleteBot),
     resetConversation: (id: string) => ipcRenderer.invoke("telegram:resetConversation", id),
     sendTest: (id: string) => ipcRenderer.invoke("telegram:sendTest", id),
     openBot: (id: string) => ipcRenderer.invoke("telegram:openBot", id),

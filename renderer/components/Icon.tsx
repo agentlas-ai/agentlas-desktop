@@ -103,6 +103,11 @@ export const IconEdit = (p: Props) =>
 export const IconAtSign = (p: Props) =>
   svg("M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0zM16 12v1.5a2.5 2.5 0 0 0 5 0V12a9 9 0 1 0-3.5 7.1", p);
 export const IconSlash = (p: Props) => svg("M7 21 17 3", p);
+export const IconBug = (p: Props) =>
+  svg(
+    "M8 6a4 4 0 0 1 8 0M6 10h12M12 8v11M8 10v9M16 10v9M5 8l2 2M19 8l-2 2M4 14h2M18 14h2M5 20l2-2M19 20l-2-2",
+    p,
+  );
 export const IconLayers = (p: Props) =>
   svg("M12 2 3 7l9 5 9-5-9-5zM3 12l9 5 9-5M3 17l9 5 9-5", p);
 export const IconTarget = (p: Props) =>

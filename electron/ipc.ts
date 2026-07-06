@@ -619,6 +619,26 @@ export function registerIpcHandlers(): void {
     return documentContentAvailable();
   });
 
+  // ── 버그 신고 ────────────────────────────────────────────
+  // 우측 하단 도움말(?) 메뉴 → 신고 폼 → 웹 API(agentlas.cloud) → MongoDB 적재.
+  ipcMain.handle(
+    "support:submitBugReport",
+    async (
+      _e,
+      payload: { message?: string; title?: string; severity?: "low" | "medium" | "high"; email?: string; page?: string; locale?: string },
+    ) => {
+      const { submitBugReport } = await import("./support");
+      return submitBugReport({
+        message: String(payload?.message ?? ""),
+        title: payload?.title ? String(payload.title) : undefined,
+        severity: payload?.severity,
+        email: payload?.email ? String(payload.email) : undefined,
+        page: payload?.page ? String(payload.page) : undefined,
+        locale: payload?.locale ? String(payload.locale) : undefined,
+      });
+    },
+  );
+
   // ── updater (electron-updater) ──────────────────────────
   // renderer가 마운트되자마자 현재 상태를 동기 조회. broadcast 이전에 새 창이 열려도 onState로 캐치.
   ipcMain.handle("updater:getState", () => getUpdaterState());
@@ -1111,7 +1131,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("telegram:clone", (_e, input) => cloneTelegramConnection(input));
   ipcMain.handle("telegram:resume", (_e, id: string) => resumeTelegramConnection(id));
   ipcMain.handle("telegram:stop", (_e, id: string) => stopTelegramConnection(id));
-  ipcMain.handle("telegram:remove", (_e, id: string) => removeTelegramConnection(id));
+  ipcMain.handle("telegram:remove", (_e, id: string, deleteBot?: boolean) => removeTelegramConnection(id, deleteBot === true));
   ipcMain.handle("telegram:resetConversation", (_e, id: string) => resetTelegramConversation(id));
   ipcMain.handle("telegram:sendTest", (_e, id: string) => sendTelegramTest(id));
   ipcMain.handle("telegram:openBot", (_e, id: string) => openTelegramBot(id));
