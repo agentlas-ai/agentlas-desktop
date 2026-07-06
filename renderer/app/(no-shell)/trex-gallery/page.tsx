@@ -93,6 +93,32 @@ function PaletteStrip() {
   );
 }
 
+// advertise 장르 — 포스터 5 아키타입(overlay/split/hero/diagonal/frame).
+const AD: DeckContent = {
+  title: "MEGA BURGER",
+  genre: "advertise",
+  slides: [
+    { role: "statement", title: "메가버거 **오픈 특가**", text: "두툼한 패티 · 신선한 재료", offer: "1+1", cta: "주문하기", img: "a juicy gourmet cheeseburger on dark background, dramatic studio lighting" },
+    { role: "statement", title: "프리미엄 **가구** 신제품", text: "클래식을 담은 새 세대 디자인", offer: "30% 할인", cta: "쇼핑하기", img: "modern minimalist living room furniture, warm tones" },
+    { role: "statement", title: "주말 **디저트** 페어", text: "이번 주말 한정 스페셜", offer: "20% OFF", cta: "예약하기", img: "assorted colorful gourmet desserts on a marble table" },
+    { role: "statement", title: "연말 **댄스** 쇼케이스", text: "12월 31일 · 시티홀", offer: "티켓 오픈", cta: "예매하기", img: "ballet dancer silhouette on stage under a dramatic spotlight" },
+    { role: "statement", title: "발레 **클래스** 모집", text: "등록 문의 010-1234-5678", offer: "무료 체험", cta: "등록하기", img: "ballet class studio with soft natural light" },
+  ],
+};
+
+// cardnews 장르 — 인스타 캐러셀(4:5). 커버→콘텐츠→CTA.
+const CARDNEWS: DeckContent = {
+  title: "요즘 뜨는 배달로봇 5가지",
+  subtitle: "규제 완화 이후 시장이 열렸다",
+  genre: "cardnews",
+  slides: [
+    { role: "metrics", title: "2,500억 시장이 열렸다", text: "2026년 실외이동로봇 보도 통행 전면 허용", img: "a delivery robot crossing a city crosswalk at dusk" },
+    { role: "structure", title: "3대 진영이 과점 중이다", text: "플랫폼·제조·통신이 배달의 91%를 처리한다", img: "tech companies competing, abstract cityscape" },
+    { role: "statement", title: "결국 실행 속도가 승자를 가른다", text: "검증된 거점 하나가 협상 테이블에서 더 세다" },
+    { role: "process", title: "대학·대단지부터 공략한다", items: ["규제 특구 시범 검증", "배달 플랫폼 제휴 확장", "양산 통한 전국 상용화"], img: "university campus with a small delivery robot" },
+  ],
+};
+
 // 긴 텍스트 스트레스 — LLM이 길게 쓸 때 클리핑/오버플로 임계 검증.
 const STRESS: DeckContent = {
   title: "글로벌 공급망 리스크와 지정학적 불확실성 속에서 회복탄력성을 확보하기 위한 통합 전략 로드맵",
@@ -149,6 +175,12 @@ export default function TrexGalleryPage() {
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>①-e 장르 대분류 — 같은 콘텐츠, 피치(저밀도 에셋) vs 리포트(고밀도 고정)</h2>
       <Deck label="genre=pitch · aurora · 저밀도 차트+그림 (구조·지표·비교·과정)" content={{ ...FULL, genre: "pitch" }} mode="editorial" styleId="ocean" only={[0, 2, 3, 4, 5]} />
       <Deck label="genre=report · aurora · 고밀도 고정 레이아웃" content={{ ...FULL, genre: "report" }} mode="editorial" styleId="sapphire" only={[0, 2, 3, 4, 5]} />
+
+      <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>①-f advertise 포스터 — 5 아키타입 (overlay·split·hero·diagonal·frame)</h2>
+      <Deck label="genre=advertise · coral · story 9:16 · 메가버거/가구/디저트/댄스/발레" content={AD} mode="editorial" styleId="coral" formatId="story" />
+
+      <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>①-g 카드뉴스 — 인스타 캐러셀 4:5 (커버→콘텐츠→CTA)</h2>
+      <Deck label="genre=cardnews · azure · ig-portrait 4:5 · 배달로봇 5가지" content={CARDNEWS} mode="editorial" styleId="azure" formatId="ig-portrait" />
 
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>② 방향 인지 — 같은 콘텐츠, 세로/정사각</h2>
       <Deck label="story 9:16 (portrait)  ·  표지·구조·과정·클로징" content={FULL} mode="editorial" formatId="story" only={[0, 4, 5, 7]} />

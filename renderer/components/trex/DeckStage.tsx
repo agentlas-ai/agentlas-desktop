@@ -15,6 +15,16 @@ export function bgStyle(bg: SlideBg | undefined, accent: string): CSSProperties 
   if (bg.kind === "gradient") return { background: `linear-gradient(${bg.angle ?? 160}deg, ${bg.from}, ${bg.to})` };
   return { background: "#111", backgroundImage: `url(${bg.src})`, backgroundSize: "cover", backgroundPosition: "center" };
 }
+/** 스타버스트(뾰족한 원) 폴리곤 포인트 — 오퍼 뱃지 배경. */
+export function burstPoints(cx: number, cy: number, rOut: number, rIn: number, spikes: number): string {
+  const pts: string[] = [];
+  for (let i = 0; i < spikes * 2; i++) {
+    const r = i % 2 === 0 ? rOut : rIn;
+    const a = (Math.PI / spikes) * i - Math.PI / 2;
+    pts.push(`${(cx + r * Math.cos(a)).toFixed(1)},${(cy + r * Math.sin(a)).toFixed(1)}`);
+  }
+  return pts.join(" ");
+}
 export function withAlpha(hex: string, a: number): string {
   const m = hex.replace("#", "");
   if (m.length !== 6) return hex;
@@ -602,6 +612,29 @@ function BlockView({
         style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", minHeight: 0 }}
         dangerouslySetInnerHTML={{ __html: renderAsset(b.asset, palOf(dna, accent, ink)) }}
       />
+    );
+  else if (b.kind === "badge") {
+    // 오퍼 뱃지(advertise) — 팝컬러. burst=스타버스트, tag=각진태그, ribbon=리본, number=숫자히어로.
+    const pop = accent;
+    if (b.badgeStyle === "number")
+      inner = <div {...ed("text")} style={{ fontWeight: 900, fontSize: cqw(b.size ?? 9), color: pop, letterSpacing: "-.03em", lineHeight: 0.86, ...(displayFont ? { fontFamily: displayFont } : null), ...(useGrad ? gradText : null) }}>{b.text}</div>;
+    else if (b.badgeStyle === "tag")
+      inner = <div {...ed("text")} style={{ display: "inline-block", transform: `rotate(${b.rotate ?? -10}deg)`, background: useGrad ? gradCss : pop, color: "#fff", fontWeight: 800, fontSize: cqw(b.size ?? 2), padding: `${cqw(1)} ${cqw(1.9)}`, borderRadius: cqw(0.4), letterSpacing: "-.01em", boxShadow: glowSh ?? undefined }}>{b.text}</div>;
+    else if (b.badgeStyle === "ribbon")
+      inner = <div {...ed("text")} style={{ background: useGrad ? gradCss : pop, color: "#fff", fontWeight: 800, fontSize: cqw(b.size ?? 1.8), padding: `${cqw(0.9)} ${cqw(2.2)}`, clipPath: "polygon(7% 0,93% 0,100% 50%,93% 100%,7% 100%,0 50%)", textAlign: "center", whiteSpace: "nowrap" }}>{b.text}</div>;
+    else
+      inner = (
+        <div style={{ position: "relative", width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", filter: glowSh ? `drop-shadow(0 0.6cqw 1.4cqw ${withAlpha(accent, 0.35)})` : undefined }}>
+          <svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet" style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}><polygon points={burstPoints(50, 50, 49, 39, 14)} fill={pop} /></svg>
+          <span {...ed("text")} style={{ position: "relative", color: "#fff", fontWeight: 900, fontSize: cqw(b.size ?? 2.2), textAlign: "center", lineHeight: 1, padding: cqw(1.5), letterSpacing: "-.01em" }}>{b.text}</span>
+        </div>
+      );
+  } else if (b.kind === "cta")
+    // CTA 버튼(advertise) — 팝컬러 채움, 흰 글자, 옵션 화살표.
+    inner = (
+      <div {...ed("text")} style={{ display: "inline-flex", alignItems: "center", gap: cqw(0.8), background: useGrad ? gradCss : accent, color: "#fff", fontWeight: 800, fontSize: cqw(b.size ?? 1.9), padding: `${cqw(1.1)} ${cqw(2.4)}`, borderRadius: b.ctaStyle === "rect" ? cqw(0.7) : 999, letterSpacing: ".01em", whiteSpace: "nowrap", ...(glowSh ? { boxShadow: glowSh } : null) }}>
+        {b.text}{b.arrow && <span style={{ fontSize: cqw((b.size ?? 1.9) * 1.15), marginTop: "-0.1em" }}>→</span>}
+      </div>
     );
 
   return (

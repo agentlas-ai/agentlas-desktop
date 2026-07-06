@@ -22,6 +22,7 @@ import {
   formatRatio,
   type ArtMode,
   type BlockKind,
+  type DeckGenre,
   type DeckFormat,
   type FormatGroup,
   type SceneKind,
@@ -49,6 +50,7 @@ export default function TrexPage() {
   const [prompt, setPrompt] = useState("");
   const [count, setCount] = useState(5);
   const [formatId, setFormatId] = useState<string>(DEFAULT_FORMAT_ID);
+  const [genre, setGenre] = useState<DeckGenre | null>(null); // 덱 대분류(장르) — null=일반
   const [imageModel, setImageModel] = useState<ImageModel>("auto");
   const [providers, setProviders] = useState<{ codex: boolean; gemini: boolean }>({ codex: false, gemini: false });
   const [aiContent, setAiContent] = useState(true);
@@ -235,6 +237,9 @@ export default function TrexPage() {
       const p = text.trim() || (sourcesText ? "" : ko ? EXAMPLE : EXAMPLE_EN);
       // 스타일 결정 — 명시 선택 > 자동(주제/소스 라우팅) > LLM 위임(undefined) > "legacy"=명시적 기본 룩(null).
       const styleId = styleOverride === "legacy" ? null : styleOverride ?? routeStyle(p || sourcesText) ?? undefined;
+      // 장르가 카드뉴스/advertise면 판형을 자동 지정(4:5 / 9:16) — 그 외엔 사용자 선택 판형 유지.
+      const gFmt = genre === "cardnews" ? "ig-portrait" : genre === "advertise" ? "story" : formatId;
+      const gArg = genre ?? undefined;
       const gc = ipc()?.trex?.generateContent;
       if (aiContent && gc) {
         setDeck(null);
@@ -249,18 +254,18 @@ export default function TrexPage() {
           const r = await gc({ topic: p, count: n, mode: modeOverride ?? undefined, sources: sourcesText || undefined });
           const parsed = r?.ok && r.text ? parseDeckContent(r.text) : null;
           contentOk = !!parsed;
-          d = parsed ? buildDeckFromContent(parsed, formatId, locale, styleId, withImages) : generateDeck(p, modeOverride ?? undefined, n, formatId, locale, styleId, withImages);
+          d = parsed ? buildDeckFromContent({ ...parsed, genre: gArg ?? parsed.genre }, gFmt, locale, styleId, withImages) : generateDeck(p, modeOverride ?? undefined, n, gFmt, locale, styleId, withImages, gArg);
         } catch {
-          d = generateDeck(p, modeOverride ?? undefined, n, formatId, locale, styleId, withImages);
+          d = generateDeck(p, modeOverride ?? undefined, n, gFmt, locale, styleId, withImages, gArg);
         }
         patchJob({ key: "content", label: ko ? "콘텐츠 에이전트 — 카피·수치 작성" : "Content agent — writing copy & figures", status: contentOk ? "done" : "failed", engine: contentOk ? "agy/codex" : undefined });
         setAiWriting(false);
         revealDeck(d);
       } else {
-        revealDeck(generateDeck(p, modeOverride ?? undefined, n, formatId, locale, styleId, imageModel !== "none"));
+        revealDeck(generateDeck(p, modeOverride ?? undefined, n, gFmt, locale, styleId, imageModel !== "none", gArg));
       }
     },
-    [aiContent, modeOverride, styleOverride, formatId, revealDeck, locale, imageModel, ko, patchJob, buildSourcesText],
+    [aiContent, modeOverride, styleOverride, formatId, genre, revealDeck, locale, imageModel, ko, patchJob, buildSourcesText],
   );
 
   const updateDeck = useCallback((updater: (d: TrexDeck) => TrexDeck) => {
@@ -441,6 +446,8 @@ export default function TrexPage() {
           setCount={(n) => setCount(clampCount(n))}
           formatId={formatId}
           setFormatId={setFormatId}
+          genre={genre}
+          setGenre={setGenre}
           imageModel={imageModel}
           setImageModel={setImageModel}
           providers={providers}
@@ -635,10 +642,11 @@ function patchSlideBg(deck: TrexDeck, slideId: string, src: string): TrexDeck {
 
 /* ─────────────── 랜딩 ─────────────── */
 function Home({
-  ko, prompt, setPrompt, count, setCount, formatId, setFormatId, imageModel, setImageModel, providers, aiContent, setAiContent, contentEngines, routedMode, modeOverride, setModeOverride, routedStyle, styleOverride, setStyleOverride, recents, sources, attaching, onAddFiles, onRemoveSource, onGenerate, onOpen,
+  ko, prompt, setPrompt, count, setCount, formatId, setFormatId, genre, setGenre, imageModel, setImageModel, providers, aiContent, setAiContent, contentEngines, routedMode, modeOverride, setModeOverride, routedStyle, styleOverride, setStyleOverride, recents, sources, attaching, onAddFiles, onRemoveSource, onGenerate, onOpen,
 }: {
   ko: boolean; prompt: string; setPrompt: (v: string) => void; count: number; setCount: (n: number) => void;
   formatId: string; setFormatId: (id: string) => void;
+  genre: DeckGenre | null; setGenre: (g: DeckGenre | null) => void;
   imageModel: ImageModel; setImageModel: (m: ImageModel) => void; providers: { codex: boolean; gemini: boolean };
   aiContent: boolean; setAiContent: (v: boolean) => void; contentEngines: { agy: boolean; codex: boolean };
   routedMode: ArtMode; modeOverride: ArtMode | null; setModeOverride: (m: ArtMode | null) => void;
@@ -726,6 +734,12 @@ function Home({
               </optgroup>
             ))}
           </select>
+          <span style={dividerDot} />
+          <span style={{ fontSize: 11.5, color: "var(--muted-deep)", fontWeight: 700 }}>{ko ? "장르" : "Genre"}</span>
+          <button type="button" onClick={() => setGenre(null)} style={modeChip(genre === null)} title={ko ? "일반 덱(역할 기반 자동 레이아웃)" : "General deck"}>{ko ? "일반" : "General"}</button>
+          {([["pitch", ko ? "피치" : "Pitch", ko ? "저밀도 · 차트+그림 스토리" : "Low-density story"], ["report", ko ? "리포트" : "Report", ko ? "고밀도 · 고정 레이아웃" : "High-density fixed"], ["cardnews", ko ? "카드뉴스" : "Cardnews", ko ? "인스타 캐러셀 4:5 · 이미지 중심" : "IG carousel 4:5"], ["advertise", "advertise", ko ? "포스터 · 단일 오퍼 9:16" : "Poster · single offer"]] as [DeckGenre, string, string][]).map(([g, lab, hint]) => (
+            <button key={g} type="button" onClick={() => setGenre(g)} style={modeChip(genre === g)} title={hint}>{lab}</button>
+          ))}
           <span style={dividerDot} />
           <span style={{ fontSize: 11.5, color: "var(--muted-deep)", fontWeight: 700 }}>{ko ? "아트디렉션" : "Art"}</span>
           <button type="button" onClick={() => setModeOverride(null)} style={modeChip(modeOverride === null)}>
@@ -918,7 +932,7 @@ function clamp(n: number, lo: number, hi: number): number { return Math.max(lo, 
 function blockLabel(k: BlockKind, ko: boolean): string {
   const map: Record<BlockKind, [string, string]> = {
     title: ["제목", "Title"], subtitle: ["부제", "Subtitle"], body: ["본문", "Body"], card: ["카드", "Card"], image: ["이미지", "Image"], kicker: ["라벨", "Kicker"],
-    pill: ["태그", "Pill"], kpi: ["숫자", "KPI"], bar: ["막대", "Bar"], rule: ["선", "Rule"], footer: ["푸터", "Footer"], band: ["챕터 밴드", "Chapter Band"], panel: ["패널", "Panel"], asset: ["인포그래픽", "Infographic"],
+    pill: ["태그", "Pill"], kpi: ["숫자", "KPI"], bar: ["막대", "Bar"], rule: ["선", "Rule"], footer: ["푸터", "Footer"], band: ["챕터 밴드", "Chapter Band"], panel: ["패널", "Panel"], asset: ["인포그래픽", "Infographic"], badge: ["오퍼 뱃지", "Badge"], cta: ["CTA 버튼", "CTA"],
   };
   return ko ? map[k][0] : map[k][1];
 }

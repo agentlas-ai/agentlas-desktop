@@ -61,7 +61,7 @@ export function formatRatio(f: DeckFormat): string {
   return `${f.w} / ${f.h}`;
 }
 
-export type BlockKind = "kicker" | "title" | "subtitle" | "body" | "rule" | "pill" | "kpi" | "bar" | "footer" | "card" | "image" | "band" | "panel" | "asset";
+export type BlockKind = "kicker" | "title" | "subtitle" | "body" | "rule" | "pill" | "kpi" | "bar" | "footer" | "card" | "image" | "band" | "panel" | "asset" | "badge" | "cta";
 
 /** 패널 안 한 행 — 칩 라벨 + 굵은 주장 + (옵션) 부연 한 줄. 중기부 "실적/성과" 행 밀도. */
 export interface PanelRow {
@@ -101,6 +101,13 @@ export interface TrexBlock {
   fade?: "bottom" | "left" | "right";
   /** asset 블록: 결정적 SVG 인포그래픽(차트·다이어그램·플로우). graphics.ts renderAsset가 렌더. */
   asset?: AssetSpec;
+  /** badge 블록(advertise 오퍼 뱃지): burst(스타버스트 원)·tag(각진 태그)·ribbon(리본)·number(숫자-히어로). */
+  badgeStyle?: "burst" | "tag" | "ribbon" | "number";
+  /** cta 블록(advertise CTA 버튼): pill(라운드풀)·rect(라운드렉트). arrow=화살표 접미. */
+  ctaStyle?: "pill" | "rect";
+  arrow?: boolean;
+  /** 회전(deg) — 각진 태그/대각 요소용. */
+  rotate?: number;
 }
 
 export type SlideBg =
@@ -371,6 +378,10 @@ export interface SlideContent {
   dek?: string;
   /** 슬라이드 하단 인사이트 문장(밀도·결론 — "So what"). */
   note?: string;
+  /** advertise: CTA 버튼 문구(없으면 기본 동사). */
+  cta?: string;
+  /** advertise: 오퍼/가격 뱃지 문구(없으면 stat/kpi 또는 기본). */
+  offer?: string;
   /** 동반 사진의 장면 설명(LLM 작성, 텍스트 없는 이미지). */
   img?: string;
   /**
@@ -1068,6 +1079,128 @@ function assetHeroSlide(theme: ModeTheme, idx: number, total: number, c: SlideCo
   return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks };
 }
 
+// ── advertise 장르: 포스터 빌더(5 아키타입) ─────────────────────────
+// Rule of One: 제품1·오퍼1·CTA1. 저밀도·고임팩트. 필수 H/O/C/L. GENRE-SPECS.md 근거.
+const POSTER_ARCHETYPES = ["overlay", "split", "hero", "diagonal", "frame"] as const;
+type PosterArch = (typeof POSTER_ARCHETYPES)[number];
+
+function posterSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale, opts: BuildOpts | undefined, deckTitle: string): TrexSlide {
+  const dna = opts?.dna;
+  const accent = dna?.accent ?? theme.accent;
+  const ink = dna?.ink ?? theme.ink;
+  const light = dna?.bodyBg?.kind === "solid" ? dna.bodyBg.color : "#F7F7FB";
+  const ko = locale === "ko";
+  const arch = (c.layout && (POSTER_ARCHETYPES as readonly string[]).includes(c.layout) ? c.layout : POSTER_ARCHETYPES[(idx - 1) % POSTER_ARCHETYPES.length]) as PosterArch;
+  const headline = c.title || deckTitle;
+  const sub = c.text || c.note || "";
+  const offer = c.offer || c.stat?.value || (c.kpis && c.kpis[0]?.value) || (ko ? "30% 할인" : "30% OFF");
+  const cta = c.cta || (ko ? "지금 구매" : "SHOP NOW");
+  const brand = shorten(deckTitle, 18);
+  const imgPrompt = imgPromptOf(c, headline);
+  const kick = (x: number, y: number, w: number, col?: boolean): TrexBlock => ({ id: bid(), kind: "kicker", x, y, w, size: 1.4, text: brand, accent: col });
+  const H = (x: number, y: number, w: number, size: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "title", x, y, w, size, text: headline, weight: 900, align, accent: false });
+  const S = (x: number, y: number, w: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "subtitle", x, y, w, size: 1.7, text: sub, align });
+  const C = (x: number, y: number, w: number, h: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "cta", x, y, w, h, ctaStyle: "pill", text: cta, arrow: true, size: 1.9, align });
+  let bg: SlideBg;
+  let pink: string;
+  const blocks: TrexBlock[] = [];
+
+  if (arch === "overlay") {
+    bg = { kind: "solid", color: "#14131A" }; pink = "#FFFFFF";
+    blocks.push(imageBlock({ x: 0, y: 0, w: 100, h: 100 }, imgPrompt, { scrim: true }));
+    blocks.push(kick(6, 6, 44), H(6, 54, 66, 6.4), S(6, 77, 58), { id: bid(), kind: "badge", x: 68, y: 7, w: 26, h: 26, badgeStyle: "burst", text: offer, size: 2.3, accent: true }, C(6, 87, 40, 9));
+  } else if (arch === "split") {
+    bg = { kind: "gradient", from: accent, to: dna?.accent2 ?? accent, angle: 150 }; pink = "#FFFFFF";
+    blocks.push(imageBlock({ x: 52, y: 0, w: 48, h: 100 }, imgPrompt));
+    blocks.push(kick(6, 8, 40), H(6, 26, 42, 5.6), S(6, 55, 40), { id: bid(), kind: "badge", x: 6, y: 66, w: 34, h: 13, badgeStyle: "tag", text: offer, size: 2, rotate: -8, accent: true }, C(6, 84, 36, 9));
+  } else if (arch === "hero") {
+    bg = { kind: "solid", color: light }; pink = ink;
+    blocks.push(imageBlock({ x: 24, y: 34, w: 52, h: 40 }, imgPrompt));
+    blocks.push(kick(40, 6, 20, true), H(8, 13, 84, 5.6, "center"), { id: bid(), kind: "badge", x: 66, y: 26, w: 28, h: 28, badgeStyle: "burst", text: offer, size: 2.3, accent: true }, S(14, 76, 72, "center"), C(32, 86, 36, 9, "center"));
+  } else if (arch === "diagonal") {
+    bg = { kind: "gradient", from: accent, to: dna?.accent2 ?? accent, angle: 135 }; pink = "#FFFFFF";
+    blocks.push(imageBlock({ x: 0, y: 56, w: 100, h: 44 }, imgPrompt, { fade: "bottom" }));
+    blocks.push(kick(8, 8, 40), H(8, 16, 66, 6), { id: bid(), kind: "badge", x: 60, y: 9, w: 32, h: 20, badgeStyle: "tag", text: offer, size: 2.2, rotate: -10, accent: true }, S(8, 40, 54), C(8, 47, 36, 9));
+  } else {
+    bg = { kind: "solid", color: light }; pink = ink;
+    blocks.push({ id: bid(), kind: "rule", x: 8, y: 8, w: 84, accent: true }, kick(40, 12, 20, true), H(10, 22, 80, 6.4, "center"), S(15, 46, 70, "center"), { id: bid(), kind: "badge", x: 34, y: 55, w: 32, h: 8, badgeStyle: "ribbon", text: offer, size: 1.9, accent: true }, C(33, 82, 34, 9, "center"), { id: bid(), kind: "rule", x: 8, y: 92, w: 84, accent: true });
+    if (imgPrompt) blocks.push(imageBlock({ x: 32, y: 64, w: 36, h: 15 }, imgPrompt));
+  }
+  return { id: bid(), bg, ink: pink, scene: "none", blocks };
+}
+
+// ── cardnews 장르: 카드 빌더(6 아키타입) ────────────────────────────
+// 인스타 캐러셀. 한 카드 한 아이디어. 이미지 중심 + 스크림. GENRE-SPECS.md 근거.
+type CardArch = "cover" | "imagetext" | "bignum" | "quote" | "statement" | "checklist";
+
+function cardnewsSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale, opts: BuildOpts | undefined, deckTitle: string, seq: number): TrexSlide {
+  const dna = opts?.dna;
+  const accent = dna?.accent ?? theme.accent;
+  const ink = dna?.ink ?? theme.ink;
+  const ko = locale === "ko";
+  const handle = shorten(deckTitle, 20);
+  const title = c.title || deckTitle;
+  const body = c.text || c.note || "";
+  const imgPrompt = imgPromptOf(c, title);
+  const isCover = seq === 0;
+  const isLast = seq === total - 1;
+  const arch: CardArch = isCover ? "cover" : isLast ? "statement" : (c.layout as CardArch) || (["imagetext", "bignum", "imagetext", "quote", "checklist"][(seq - 1) % 5] as CardArch);
+  const counter = `${seq + 1} / ${total}`;
+  const foot = (dark: boolean): TrexBlock => ({ id: bid(), kind: "kicker", x: 6, y: 93, w: 50, size: 1.1, text: `@ ${handle}`, accent: !dark });
+  const page = (dark: boolean): TrexBlock => ({ id: bid(), kind: "footer", x: 44, y: 93, w: 50, size: 1.1, text: "", value: counter, accent: false });
+  const swipe = (dark: boolean): TrexBlock => ({ id: bid(), kind: "kicker", x: 90, y: 46, w: 8, size: 3, text: "→", accent: !dark, align: "center" });
+  const blocks: TrexBlock[] = [];
+  let bg: SlideBg; let pink: string;
+
+  if (arch === "cover" || arch === "statement") {
+    bg = { kind: "gradient", from: accent, to: dna?.accent2 ?? accent, angle: 145 }; pink = "#FFFFFF";
+    if (imgPrompt && arch === "cover") blocks.push(imageBlock({ x: 0, y: 0, w: 100, h: 100 }, imgPrompt, { scrim: true }));
+    blocks.push(
+      { id: bid(), kind: "kicker", x: 8, y: 12, w: 84, size: 1.6, text: isCover ? (ko ? "SWIPE →" : "SWIPE →") : (ko ? "저장하세요" : "SAVE THIS") },
+      { id: bid(), kind: "title", x: 8, y: 30, w: 84, size: 6.6, text: title, weight: 900, accent: false },
+    );
+    if (body) blocks.push({ id: bid(), kind: "subtitle", x: 8, y: 66, w: 80, size: 2, text: body });
+    blocks.push(foot(true), page(true));
+    if (!isLast) blocks.push(swipe(true));
+  } else if (arch === "bignum") {
+    bg = { kind: "solid", color: "#FFFFFF" }; pink = ink;
+    blocks.push(
+      { id: bid(), kind: "kpi", x: 8, y: 12, w: 50, size: 16, value: `0${seq}`, label: "", accent: true },
+      { id: bid(), kind: "title", x: 8, y: 50, w: 84, size: 4.2, text: title, weight: 800, accent: false },
+      { id: bid(), kind: "subtitle", x: 8, y: 70, w: 84, size: 2, text: body },
+      foot(false), page(false),
+    );
+    if (!isLast) blocks.push(swipe(false));
+  } else if (arch === "quote") {
+    bg = { kind: "solid", color: dna?.ink ?? "#1B1830" }; pink = "#FFFFFF";
+    blocks.push(
+      { id: bid(), kind: "title", x: 10, y: 12, w: 40, size: 12, text: "“", weight: 900, accent: true },
+      { id: bid(), kind: "title", x: 10, y: 32, w: 80, size: 4.2, text: title, weight: 700, accent: false },
+      { id: bid(), kind: "subtitle", x: 10, y: 80, w: 80, size: 1.8, text: body, align: "left" },
+      foot(true), page(true),
+    );
+    if (!isLast) blocks.push(swipe(true));
+  } else if (arch === "checklist") {
+    bg = { kind: "solid", color: "#FFFFFF" }; pink = ink;
+    const items = (c.items && c.items.length ? c.items : c.cards?.map((x) => x.label) || [title]).slice(0, 5);
+    blocks.push({ id: bid(), kind: "title", x: 8, y: 12, w: 84, size: 4.4, text: title, weight: 800, accent: false });
+    items.forEach((it, i) => blocks.push({ id: bid(), kind: "body", inline: true, x: 8, y: 34 + i * 12, w: 84, size: 2, label: "✓", text: shorten(it, 34) }));
+    blocks.push(foot(false), page(false));
+    if (!isLast) blocks.push(swipe(false));
+  } else {
+    // imagetext: 상단 이미지 + 하단 텍스트
+    bg = { kind: "solid", color: "#FFFFFF" }; pink = ink;
+    blocks.push(imageBlock({ x: 0, y: 0, w: 100, h: 54 }, imgPrompt));
+    blocks.push(
+      { id: bid(), kind: "title", x: 8, y: 60, w: 84, size: 4.2, text: title, weight: 800, accent: false },
+      { id: bid(), kind: "subtitle", x: 8, y: 80, w: 84, size: 2, text: body },
+      foot(false), page(false),
+    );
+    if (!isLast) blocks.push(swipe(false));
+  }
+  return { id: bid(), bg, ink: pink, scene: "none", blocks };
+}
+
 // ── 역할 기반 레이아웃 레지스트리 (연구: 내용 타입별 스마트 레이아웃) ──────
 export type SlideRole = "agenda" | "metrics" | "comparison" | "structure" | "process" | "highlight" | "statement";
 const LAYOUTS: Record<SlideRole, (t: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale?: Locale, opts?: BuildOpts) => TrexSlide> = {
@@ -1164,6 +1297,22 @@ export function buildDeckFromContent(content: DeckContent, formatArg?: string, l
   const mids = (content.slides || []).filter((s): s is SlideContent => !!s && (s.role in LAYOUTS));
   const total = mids.length + 1; // 커버 + 본문. 클로징("감사합니다") 장표는 폐기.
 
+  // advertise/cardnews 장르 — 역할 로테이션 대신 전용 빌더(포스터/카드). 커버·footer 자동추가 경로 우회.
+  if (content.genre === "advertise" || content.genre === "cardnews") {
+    const genreSlides: TrexSlide[] =
+      content.genre === "advertise"
+        ? (mids.length ? mids : [{ role: "statement" as SlideRole, title }]).map((c, i, arr) => posterSlide(theme, i + 1, arr.length, c, o, locale, opts, title))
+        : (() => {
+            const t = mids.length + 2; // 커버 + 콘텐츠 + CTA
+            const cover = cardnewsSlide(theme, 1, t, { role: "statement", title, text: content.subtitle }, o, locale, opts, title, 0);
+            const mid = mids.map((c, i) => cardnewsSlide(theme, i + 2, t, c, o, locale, opts, title, i + 1));
+            const cta = cardnewsSlide(theme, t, t, { role: "statement", title: locale === "ko" ? "저장하고 팔로우하세요" : "Save & Follow" }, o, locale, opts, title, t - 1);
+            return [cover, ...mid, cta];
+          })();
+    genreSlides.forEach((s) => hardClampBlocks(s.blocks, opts.aspect ?? 9 / 16));
+    return { id: `deck_${Date.now().toString(36)}`, title, prompt: content.title || title, mode, ...(dna ? { styleId: dna.id } : {}), accent: dna?.accent ?? theme.accent, formatId: formatArg ?? (content.genre === "cardnews" ? "ig-portrait" : "story"), createdAt: Date.now(), slides: genreSlides };
+  }
+
   // 레이아웃 아키타입 로테이션 — LLM이 layout을 안 정했으면 덱 안에서 역할별 변형을 순환시켜
   // "매 장이 같은 3분할" 문제를 없앤다(전역 mid 인덱스로 섞어 한 덱 안에서 다양하게).
   // 에셋 레이아웃(diagram/flow/chart)은 dna 덱에서만 로테이션에 참여 — SVG 인포그래픽 히어로.
@@ -1251,7 +1400,7 @@ export function parseDeckContent(raw: string): DeckContent | null {
  * 결정적 생성기 — 프롬프트 파생 스캐폴드 콘텐츠로 덱을 만든다(LLM 미사용/폴백).
  * 역할 기반 아크 + 방향 인지. LLM 경로는 buildDeckFromContent로 동일 레이아웃을 쓴다.
  */
-export function generateDeck(prompt: string, modeArg?: ArtMode, countArg?: number, formatArg?: string, locale: Locale = "ko", styleArg?: string | null, imagesArg = true): TrexDeck {
+export function generateDeck(prompt: string, modeArg?: ArtMode, countArg?: number, formatArg?: string, locale: Locale = "ko", styleArg?: string | null, imagesArg = true, genreArg?: DeckGenre): TrexDeck {
   const mode = modeArg ?? routeMode(prompt);
   const total = clampCount(countArg ?? 5);
   const pts = derivePoints(prompt, Math.max(6, total), locale);
@@ -1263,6 +1412,7 @@ export function generateDeck(prompt: string, modeArg?: ArtMode, countArg?: numbe
         ? "한 줄 프롬프트에서 시작한 덱 — 클릭해서 바로 편집할 수 있습니다."
         : "Built from a single prompt — click any block to start editing.",
     mode,
+    ...(genreArg ? { genre: genreArg } : {}),
     slides: roles.map((role, i) => scaffoldContent(role, i, pts, locale)),
   };
   return buildDeckFromContent(content, formatArg, locale, styleArg, imagesArg);
@@ -1297,6 +1447,10 @@ export function newBlock(kind: BlockKind, locale: Locale = "ko"): TrexBlock {
       return { ...base, w: 30, h: 36, src: "", prompt: "" };
     case "asset":
       return { ...base, w: 34, h: 40, asset: { kind: "donut" } };
+    case "badge":
+      return { ...base, w: 22, h: 22, badgeStyle: "burst", text: ko ? "30% 할인" : "30% OFF", size: 2.2, accent: true };
+    case "cta":
+      return { ...base, w: 30, h: 9, ctaStyle: "pill", text: ko ? "지금 구매" : "SHOP NOW", size: 1.9, arrow: true };
     case "footer":
       return { ...base, text: "Agentlas · T-rex", value: "01 / 05", w: 88, size: 1.05, x: 6, y: 90 };
     default:
