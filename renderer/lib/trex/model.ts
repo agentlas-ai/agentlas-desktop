@@ -990,6 +990,18 @@ const COMPARE_CHARTS: AssetKind[] = ["bar", "hbar", "dotPlot", "radar"];
 
 function shorten(t: string | undefined, n: number): string { const s = plain(t).trim(); return s.length > n ? s.slice(0, Math.max(0, n - 1)).trimEnd() + "…" : s; }
 
+/**
+ * 텍스트 색 규칙 — 배경 휘도로 자동 결정(포스터·카드뉴스 공통 엔진). 밝은 배경→어두운 글자, 어두운 배경→흰 글자.
+ * 손으로 흰색/검정을 지정하지 않는다. WCAG 상대휘도(임계 0.42 — 컬러 액센트에선 흰 글자를 선호).
+ */
+function contrastText(hex: string): string {
+  const c = (hex || "").replace("#", "");
+  if (c.length !== 6) return "#141018";
+  const lin = (v: number) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  const L = 0.2126 * lin(parseInt(c.slice(0, 2), 16)) + 0.7152 * lin(parseInt(c.slice(2, 4), 16)) + 0.0722 * lin(parseInt(c.slice(4, 6), 16));
+  return L < 0.42 ? "#FFFFFF" : "#141018";
+}
+
 function assetForProcess(steps: CardItem[], idx: number): AssetSpec {
   const kind = PROCESS_ASSETS[idx % PROCESS_ASSETS.length];
   const labels = steps.map((s) => s.label || s.text);
@@ -1100,10 +1112,11 @@ function posterSlide(theme: ModeTheme, idx: number, total: number, c: SlideConte
   const brand = shorten(deckTitle, 18);
   const imgPrompt = imgPromptOf(c, headline);
   const kick = (x: number, y: number, w: number, col?: boolean): TrexBlock => ({ id: bid(), kind: "kicker", x, y, w, size: 1.7, text: brand, accent: col });
-  // split·diagonal은 accent 배경 → 강조 단어를 흰 하이라이트 박스로(accent색이면 안 보임).
+  // 이미지 규칙: 무조건 크게(full 100% / half 50% / 상단 55%). 작은 이미지 금지. 텍스트색: contrastText(배경).
+  // 강조 하이라이트 박스는 accent 배경 + 흰 글자일 때만(밝은 accent에선 흰 박스가 안 보임).
   const onAccentBg = arch === "split" || arch === "diagonal";
-  // 포스터 타이포는 히어로급 — cqw(가로폭%) 기준이라 세로 판형에선 크게 잡아야 이미지와 균형이 맞는다.
-  const H = (x: number, y: number, w: number, size: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "title", x, y, w, size, text: headline, weight: 900, align, accent: false, ...(onAccentBg ? { emBox: true } : {}) });
+  const emBoxOn = onAccentBg && contrastText(accent) === "#FFFFFF";
+  const H = (x: number, y: number, w: number, size: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "title", x, y, w, size, text: headline, weight: 900, align, accent: false, ...(emBoxOn ? { emBox: true } : {}) });
   const S = (x: number, y: number, w: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "subtitle", x, y, w, size: 2.9, text: sub, align });
   const C = (x: number, y: number, w: number, h: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "cta", x, y, w, h, ctaStyle: "pill", text: cta, arrow: true, size: 3, align });
   let bg: SlideBg;
@@ -1111,25 +1124,29 @@ function posterSlide(theme: ModeTheme, idx: number, total: number, c: SlideConte
   const blocks: TrexBlock[] = [];
 
   if (arch === "overlay") {
+    // 이미지 풀블리드 + 하단 스크림, 텍스트는 스크림 위(흰색).
     bg = { kind: "solid", color: "#14131A" }; pink = "#FFFFFF";
     blocks.push(imageBlock({ x: 0, y: 0, w: 100, h: 100 }, imgPrompt, { scrim: true }));
     blocks.push(kick(6, 6, 50), H(6, 44, 84, 13), S(6, 74, 66), { id: bid(), kind: "badge", x: 62, y: 6, w: 32, h: 32, badgeStyle: "burst", text: offer, size: 3.6, accent: true }, C(6, 86, 46, 9.5));
   } else if (arch === "split") {
-    bg = { kind: "gradient", from: accent, to: dna?.accent2 ?? accent, angle: 150 }; pink = "#FFFFFF";
-    blocks.push(imageBlock({ x: 52, y: 0, w: 48, h: 100 }, imgPrompt));
-    blocks.push(kick(6, 8, 42), H(6, 20, 44, 11), S(6, 58, 42), { id: bid(), kind: "badge", x: 6, y: 70, w: 40, h: 15, badgeStyle: "tag", text: offer, size: 3, rotate: -8, accent: true }, C(6, 86, 42, 10));
+    // 좌 컬러블록(텍스트) + 우 이미지 절반.
+    bg = { kind: "gradient", from: accent, to: dna?.accent2 ?? accent, angle: 150 }; pink = contrastText(accent);
+    blocks.push(imageBlock({ x: 50, y: 0, w: 50, h: 100 }, imgPrompt));
+    blocks.push(kick(6, 8, 42), H(6, 20, 42, 11), S(6, 58, 40), { id: bid(), kind: "badge", x: 6, y: 70, w: 40, h: 15, badgeStyle: "tag", text: offer, size: 3, rotate: -8, accent: true }, C(6, 86, 40, 10));
   } else if (arch === "hero") {
-    bg = { kind: "solid", color: light }; pink = ink;
-    blocks.push(imageBlock({ x: 22, y: 36, w: 56, h: 38 }, imgPrompt));
-    blocks.push(kick(40, 7, 20, true), H(6, 11, 88, 11.5, "center"), { id: bid(), kind: "badge", x: 64, y: 30, w: 32, h: 32, badgeStyle: "burst", text: offer, size: 3.4, accent: true }, S(12, 76, 76, "center"), C(32, 87, 36, 10, "center"));
+    // 상단 이미지 55%(크게) + 하단 텍스트존. 뱃지는 이미지 하단 모서리에 걸침.
+    bg = { kind: "solid", color: light }; pink = contrastText(light);
+    blocks.push(imageBlock({ x: 0, y: 0, w: 100, h: 55 }, imgPrompt));
+    blocks.push(kick(6, 60, 88, true), H(6, 64, 88, 9.5, "center"), { id: bid(), kind: "badge", x: 65, y: 41, w: 30, h: 30, badgeStyle: "burst", text: offer, size: 3.2, accent: true }, S(12, 84, 76, "center"), C(32, 90, 36, 8.5, "center"));
   } else if (arch === "diagonal") {
-    bg = { kind: "gradient", from: accent, to: dna?.accent2 ?? accent, angle: 135 }; pink = "#FFFFFF";
-    blocks.push(imageBlock({ x: 0, y: 58, w: 100, h: 42 }, imgPrompt, { fade: "bottom" }));
+    // 하단 이미지 절반(페이드) + 상단 컬러블록 텍스트.
+    bg = { kind: "gradient", from: accent, to: dna?.accent2 ?? accent, angle: 135 }; pink = contrastText(accent);
+    blocks.push(imageBlock({ x: 0, y: 52, w: 100, h: 48 }, imgPrompt, { fade: "bottom" }));
     blocks.push(kick(8, 8, 42), H(8, 14, 70, 12), S(8, 42, 56), { id: bid(), kind: "badge", x: 58, y: 7, w: 34, h: 22, badgeStyle: "tag", text: offer, size: 3.2, rotate: -10, accent: true }, C(8, 49, 40, 10));
   } else {
-    bg = { kind: "solid", color: light }; pink = ink;
-    blocks.push({ id: bid(), kind: "rule", x: 8, y: 9, w: 84, accent: true }, kick(40, 13, 20, true), H(8, 20, 84, 13, "center"), S(13, 46, 74, "center"), { id: bid(), kind: "badge", x: 33, y: 55, w: 34, h: 9, badgeStyle: "ribbon", text: offer, size: 2.6, accent: true }, C(32, 84, 36, 10, "center"), { id: bid(), kind: "rule", x: 8, y: 91, w: 84, accent: true });
-    if (imgPrompt) blocks.push(imageBlock({ x: 30, y: 64, w: 40, h: 15 }, imgPrompt));
+    // frame: 타이포형(이미지 없음 — 작은 이미지 금지). 밝은 배경 + 큰 중앙 타이포 + 액센트 리본/룰.
+    bg = { kind: "solid", color: light }; pink = contrastText(light);
+    blocks.push({ id: bid(), kind: "rule", x: 32, y: 20, w: 36, accent: true }, kick(40, 25, 20, true), H(8, 32, 84, 13, "center"), S(13, 58, 74, "center"), { id: bid(), kind: "badge", x: 33, y: 69, w: 34, h: 9, badgeStyle: "ribbon", text: offer, size: 2.6, accent: true }, C(32, 83, 36, 10, "center"), { id: bid(), kind: "rule", x: 32, y: 92, w: 36, accent: true });
   }
   return { id: bid(), bg, ink: pink, scene: "none", blocks };
 }
@@ -1158,7 +1175,7 @@ function cardnewsSlide(theme: ModeTheme, idx: number, total: number, c: SlideCon
   let bg: SlideBg; let pink: string;
 
   if (arch === "cover" || arch === "statement") {
-    bg = { kind: "gradient", from: accent, to: dna?.accent2 ?? accent, angle: 145 }; pink = "#FFFFFF";
+    bg = { kind: "gradient", from: accent, to: dna?.accent2 ?? accent, angle: 145 }; pink = imgPrompt && arch === "cover" ? "#FFFFFF" : contrastText(accent);
     if (imgPrompt && arch === "cover") blocks.push(imageBlock({ x: 0, y: 0, w: 100, h: 100 }, imgPrompt, { scrim: true }));
     blocks.push(
       { id: bid(), kind: "kicker", x: 8, y: 12, w: 84, size: 1.6, text: isCover ? (ko ? "SWIPE →" : "SWIPE →") : (ko ? "저장하세요" : "SAVE THIS") },
@@ -1177,7 +1194,7 @@ function cardnewsSlide(theme: ModeTheme, idx: number, total: number, c: SlideCon
     );
     if (!isLast) blocks.push(swipe(false));
   } else if (arch === "quote") {
-    bg = { kind: "solid", color: dna?.ink ?? "#1B1830" }; pink = "#FFFFFF";
+    const qbg = dna?.ink ?? "#1B1830"; bg = { kind: "solid", color: qbg }; pink = contrastText(qbg);
     blocks.push(
       { id: bid(), kind: "title", x: 10, y: 12, w: 40, size: 12, text: "“", weight: 900, accent: true },
       { id: bid(), kind: "title", x: 10, y: 32, w: 80, size: 4.9, text: title, weight: 700, accent: false },
