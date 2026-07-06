@@ -9,6 +9,7 @@
 
 import type { Locale } from "@/lib/i18n";
 import { styleById, typeScale, type DecoKind, type StyleDna, type TypeScaleSteps } from "./styles";
+import { ASSET_ASPECT, type AssetKind, type AssetSpec } from "./graphics";
 
 export type ArtMode = "cinematic" | "editorial" | "diagrammatic" | "hybrid";
 export type SceneKind = "none" | "dusk" | "impact" | "pitch" | "field";
@@ -60,7 +61,7 @@ export function formatRatio(f: DeckFormat): string {
   return `${f.w} / ${f.h}`;
 }
 
-export type BlockKind = "kicker" | "title" | "subtitle" | "body" | "rule" | "pill" | "kpi" | "bar" | "footer" | "card" | "image" | "band" | "panel";
+export type BlockKind = "kicker" | "title" | "subtitle" | "body" | "rule" | "pill" | "kpi" | "bar" | "footer" | "card" | "image" | "band" | "panel" | "asset";
 
 /** 패널 안 한 행 — 칩 라벨 + 굵은 주장 + (옵션) 부연 한 줄. 중기부 "실적/성과" 행 밀도. */
 export interface PanelRow {
@@ -98,6 +99,8 @@ export interface TrexBlock {
   scrim?: boolean;
   /** image 블록: 소프트 엣지 — 한쪽을 배경으로 페이드아웃(공식 ③, 마스크 그라데이션). */
   fade?: "bottom" | "left" | "right";
+  /** asset 블록: 결정적 SVG 인포그래픽(차트·다이어그램·플로우). graphics.ts renderAsset가 렌더. */
+  asset?: AssetSpec;
 }
 
 export type SlideBg =
@@ -376,12 +379,19 @@ export interface SlideContent {
    */
   layout?: string;
 }
+/** 덱 대분류(장르) — 밀도·레이아웃 전략·에셋/이미지 비중을 결정. 자세한 스펙은 GENRE-SPECS.md. */
+export type DeckGenre = "pitch" | "report" | "cardnews" | "advertise";
+
 export interface DeckContent {
   title: string;
   subtitle?: string;
   mode?: ArtMode;
+  /** 덱 장르(대분류) — 피치(저밀도 차트+그림) · 리포트(고밀도 고정) · 카드뉴스 · advertise. */
+  genre?: DeckGenre;
   /** Style DNA id — LLM 또는 호출부가 지정(styles.ts). */
   styleId?: string;
+  /** 좌하단 출처 표기 옵션(기본 off) — 출처가 오히려 slop처럼 보일 수 있어 명시적으로 켤 때만 노출. */
+  sourceFooter?: boolean;
   slides: SlideContent[]; // 중간 슬라이드(agenda..statement). 커버·클로징은 빌드시 추가.
 }
 
@@ -588,6 +598,13 @@ function barSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent,
   const pillNo = locale === "ko" ? `${idx} · 비교` : `${idx} · Comparison`;
   const title = c.title || (locale === "ko" ? "어디에 집중할 것인가" : "Where To Focus");
   const layout = !port && opts?.dna ? c.layout || "bars" : "bars";
+
+  // 차트: 막대/가로막대/도트/레이더 SVG(4종 순환)로 — 좌측 항목 불릿과 격자 정렬.
+  if (layout === "chart") {
+    const spec = assetForComparison(data, idx);
+    const bullets: CardItem[] = data.map((b) => ({ label: b.label, text: `${b.label} — ${b.value}` }));
+    return assetHeroSlide(theme, idx, total, c, o, locale, opts, spec, pillNo, title, bullets);
+  }
   // 데이터-잉크 규율(원포인트): 최대값 막대 하나만 액센트, 나머지는 잉크 톤(dna 덱 한정 — 레거시 유지).
   const maxIdx = data.reduce((m, b, i) => (b.value > data[m].value ? i : m), 0);
   const barAccent = (i: number): { accent?: boolean } => (opts?.dna ? { accent: i === maxIdx } : {});
@@ -630,6 +647,12 @@ function cardsSlide(theme: ModeTheme, idx: number, total: number, c: SlideConten
   // 컨설팅(챕터 밴드) 문법: 구조는 사진 교차(zigzag/split)가 아니라 패널이 표준 —
   // 칩 라벨이 행 높이를 키워 zigzag에서 이미지와 겹치기도 한다(벤치마크에도 사진 구조 장 없음).
   if (opts?.dna?.chapterBand && (layout === "zigzag" || layout === "split")) layout = "columns";
+
+  // 다이어그램: 구성 요소를 SVG 인포그래픽(피라미드/허브/수렴/다이아몬드)으로 — 좌측 요소 불릿과 격자 정렬.
+  if (layout === "diagram") {
+    const spec = assetForStructure(data.map((s) => s.label || s.text), idx);
+    return assetHeroSlide(theme, idx, total, c, o, locale, opts, spec, pillNo, title, data);
+  }
   const label = (cd: CardItem, i: number) => cd.label || elementLabel(i);
 
   // ── 2패널(실적→성과): 중기부 업무보고 밀도 — 좌/우 헤더 바 패널 + 조밀 행 + 사이 화살표 ──
@@ -850,6 +873,12 @@ function processSlide(theme: ModeTheme, idx: number, total: number, c: SlideCont
   const title = c.title || (locale === "ko" ? "이렇게 진행된다" : "How This Unfolds");
   const layout = !port && opts?.dna ? c.layout || "timeline" : "cards";
 
+  // 플로우: 순서 단계를 SVG 인포그래픽(셰브론/계단/사이클/파이프라인/vStep 등 10종 순환)으로.
+  if (layout === "flow") {
+    const spec = assetForProcess(data.map((s, i) => ({ label: heading(s.label, i), text: s.text })), idx);
+    return assetHeroSlide(theme, idx, total, c, o, locale, opts, spec, pillNo, title, data);
+  }
+
   // ── 타임라인(로드맵 레일): 컬럼 상단 번호 칩 → 단계명 → 본문, 컬럼 사이 세로 헤어라인.
   // 번호를 텍스트 아래(라인 위)에 두는 교차 배치는 텍스트 높이 예측 불가로 겹침 사고의 근원 —
   // 번호를 맨 위로 올리면 아래로는 인사이트 바까지 전부 텍스트 예산이라 충돌이 구조적으로 없다.
@@ -938,6 +967,107 @@ function statementSlide(theme: ModeTheme, idx: number, total: number, c: SlideCo
   };
 }
 
+// ── SVG 에셋 슬라이드(인포그래픽 히어로) ─────────────────────────────
+// 다이어그램이 어울리는 역할(process/structure)·데이터(comparison)에 결정적 SVG 인포그래픽을 방출한다.
+// 텍스트와 블렌드: 좌측 번호 불릿(내용) + 우측 도형(같은 항목의 시각화) → 격자 정렬된 밀도.
+// (a) 자동 방출 로테이션 확대 — 역할별로 신규 30종을 포함한 넓은 풀에서 순환(덱마다 다른 인포그래픽).
+const PROCESS_ASSETS: AssetKind[] = ["chevronFlow", "stepsAscend", "cycle", "semiFan", "pipeline", "circleRow", "arrowStack", "ribbon", "vSteps", "spectrum"];
+const STRUCTURE_ASSETS: AssetKind[] = ["pyramid", "hub", "converge", "diamondGrid", "layers", "gears", "mindmap", "quadrant", "venn", "fishbone", "swot", "matrix"];
+const COMPARE_CHARTS: AssetKind[] = ["bar", "hbar", "dotPlot", "radar"];
+
+function shorten(t: string | undefined, n: number): string { const s = plain(t).trim(); return s.length > n ? s.slice(0, Math.max(0, n - 1)).trimEnd() + "…" : s; }
+
+function assetForProcess(steps: CardItem[], idx: number): AssetSpec {
+  const kind = PROCESS_ASSETS[idx % PROCESS_ASSETS.length];
+  const labels = steps.map((s) => s.label || s.text);
+  if (kind === "vSteps") return { kind, items: steps.slice(0, 4).map((s) => ({ label: shorten(s.label || s.text, 16), sub: shorten(s.text, 22) })) };
+  if (kind === "spectrum") return { kind, items: labels.slice(0, 5).map((l) => shorten(l, 8)) };
+  const cap = kind === "semiFan" ? 4 : 5;
+  return { kind, items: labels.slice(0, cap).map((l) => ({ label: shorten(l, 6) })) };
+}
+function assetForStructure(labels: string[], idx: number): AssetSpec {
+  const kind = STRUCTURE_ASSETS[idx % STRUCTURE_ASSETS.length];
+  const L = labels.filter(Boolean).map((l) => shorten(l, 6));
+  if (kind === "pyramid") return { kind, items: L.slice(0, 4).map((l) => ({ l })) };
+  if (kind === "hub" || kind === "diamondGrid" || kind === "mindmap") return { kind, items: L.slice(0, kind === "diamondGrid" ? 4 : 6).map((label) => ({ label })) };
+  // converge/layers/gears/quadrant/venn/fishbone/swot/matrix → string[]
+  const cap = kind === "venn" || kind === "matrix" ? 3 : kind === "quadrant" || kind === "swot" || kind === "layers" || kind === "gears" ? 4 : 6;
+  return { kind, items: L.slice(0, cap) };
+}
+function assetForComparison(bars: BarItem[], idx: number): AssetSpec {
+  const kind = COMPARE_CHARTS[idx % COMPARE_CHARTS.length];
+  return { kind, data: bars.map((b) => ({ l: shorten(b.label, 6), v: b.value })) };
+}
+
+/**
+ * 헤더 + 텍스트 불릿 + SVG 에셋 + 인사이트를 격자에 꽉 채우는 히어로.
+ * 핵심: 빈 공간 금지(격자 정렬 규칙) — 에셋을 자기 종횡비로 최대한 크게 잡고, 불릿이 남은 높이를 균등 분배.
+ *  · tall 에셋(도넛/허브/피라미드/사이클/퍼널/수렴): 2열 — 좌 불릿(높이 채움) + 우 에셋(높이 채움).
+ *  · wide 에셋(셰브론/계단/막대/타임라인): 풀폭 밴드 + 아래 번호 불릿 행(둘이 세로를 나눠 채움).
+ */
+function assetHeroSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale, opts: BuildOpts | undefined, spec: AssetSpec, pillNo: string, title: string, bullets?: CardItem[]): TrexSlide {
+  const port = o === "portrait";
+  const ts = scaleOf(opts, o);
+  const aspectSlide = opts?.aspect ?? (port ? 16 / 9 : 9 / 16); // 슬라이드 h/w
+  const assetAspect = ASSET_ASPECT[spec.kind]; // 에셋 h/w
+  const bul = (bullets || []).filter((b) => b.text || b.label);
+  const top = 30;
+  const floor = c.note ? 80 : 88; // 인사이트/푸터 위 안전선
+  const Hc = floor - top; // 콘텐츠 밴드 높이(%h)
+  const blocks: TrexBlock[] = [];
+  const bulletBlock = (b: CardItem, i: number, x: number, y: number, w: number, size: number) => {
+    const label = shorten(b.label, 14);
+    const desc = b.text && b.text !== b.label ? b.text : "";
+    return { id: bid(), kind: "body" as const, inline: true as const, x, y, w, size, label: `0${i + 1}`, text: shorten(desc ? `**${label}** ${desc}` : label, 46) };
+  };
+
+  if (port) {
+    // 세로형: 헤더 → 풀폭 에셋 밴드 → 불릿 스택.
+    blocks.push(...headerBlocks(theme, idx, total, pillNo, title, o, opts, c.dek, undefined, c.src));
+    const bandH = Math.min(Hc * 0.52, 84 * assetAspect * (1 / aspectSlide));
+    blocks.push({ id: bid(), kind: "asset", x: 8, y: top + 6, w: 84, h: bandH, asset: spec });
+    const by = top + 8 + bandH;
+    const nb = Math.min(bul.length, 4);
+    bul.slice(0, nb).forEach((b, i) => blocks.push(bulletBlock(b, i, 6, by + i * ((floor - by) / Math.max(nb, 1)), 88, ts.h5)));
+    blocks.push(...insightBlocks(c, o, locale, 88, opts));
+    return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks };
+  }
+
+  // 가로형: 에셋을 높이(Hc) 꽉 차게 만들 폭 Wa 계산 — Wa*assetAspect/aspectSlide = Hc.
+  const Wa = Math.min(90, (Hc * aspectSlide) / assetAspect);
+  blocks.push(...headerBlocks(theme, idx, total, pillNo, title, o, opts, c.dek, Wa <= 52 ? 46 : undefined, c.src));
+
+  if (Wa <= 52 && bul.length) {
+    // tall 에셋 → 2열. 우측 에셋(높이 채움) + 좌측 불릿(높이 균등 분배로 바닥까지 채움).
+    const aw = Math.max(34, Math.min(46, Wa));
+    blocks.push({ id: bid(), kind: "asset", x: 94 - aw, y: top, w: aw, h: Hc, asset: spec });
+    const bw = 88 - aw - 4;
+    const nb = Math.min(bul.length, 4);
+    const rowH = Hc / nb;
+    bul.slice(0, nb).forEach((b, i) => blocks.push(bulletBlock(b, i, 6, top + 1 + i * rowH, bw, ts.h5)));
+  } else {
+    // wide 에셋 → 풀폭 밴드 + 아래 번호 설명 행. 그룹을 본문에 세로 중앙 정렬해 상단 쏠림/하단 공백을 없앤다.
+    const natH = 88 * assetAspect * (1 / aspectSlide); // 풀폭일 때 자연 높이(%h)
+    const descH = bul.length ? 15 : 0; // 설명 행 예산
+    const bandH = Math.min(Hc - descH, natH); // 밴드+설명이 본문 높이를 넘지 않게
+    const groupH = bandH + descH;
+    const startY = top + Math.max(0, (Hc - groupH) / 2); // 세로 중앙 → 균형 잡힌 여백(빈 하단 방지)
+    blocks.push({ id: bid(), kind: "asset", x: 6, y: startY, w: 88, h: bandH, asset: spec });
+    if (bul.length) {
+      const by = startY + bandH + 3;
+      const n = Math.min(bul.length, 4);
+      const colW = 88 / n;
+      bul.slice(0, n).forEach((b, i) => {
+        const label = shorten(b.label, 12);
+        const desc = b.text && b.text !== b.label ? shorten(b.text, 40) : "";
+        blocks.push({ id: bid(), kind: "body", x: 6 + i * colW, y: by, w: colW - 2, size: ts.note * 1.05, label: `0${i + 1} ${label}`, text: desc, align: "left" });
+      });
+    }
+  }
+  blocks.push(...insightBlocks(c, o, locale, 88, opts));
+  return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks };
+}
+
 // ── 역할 기반 레이아웃 레지스트리 (연구: 내용 타입별 스마트 레이아웃) ──────
 export type SlideRole = "agenda" | "metrics" | "comparison" | "structure" | "process" | "highlight" | "statement";
 const LAYOUTS: Record<SlideRole, (t: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale?: Locale, opts?: BuildOpts) => TrexSlide> = {
@@ -999,6 +1129,25 @@ function scaffoldContent(role: SlideRole, i: number, pts: string[], locale: Loca
   }
 }
 
+/**
+ * 오버플로우 하드 가드 — 빌더의 역할별 맞춤을 마지막에 한 번 더 감싸는 안전망.
+ * 자유 텍스트 블록(subtitle/body)의 문자 수를 폭·높이 예산에서 계산한 상한으로 클램프한다.
+ * 상한은 빌더 예산보다 느슨해(10% 여유) 정상 덱엔 무영향 — LLM이 예외적으로 길게 쓴 경우만 …로 자른다.
+ * (한글 글리프 폭 ≈ 1em, 줄간 1.5 — DeckStage 렌더 기준. %height→cqw 환산 = %height × aspect(h/w).)
+ */
+function hardClampBlocks(blocks: TrexBlock[], aspect: number): void {
+  for (const b of blocks) {
+    if ((b.kind !== "subtitle" && b.kind !== "body") || b.inline || !b.text) continue;
+    const size = b.size ?? 1.5;
+    const cpl = Math.max(4, Math.floor(b.w / size)); // 줄당 글자수
+    const budgetPct = b.h ?? Math.max(6, Math.min(90 - b.y, b.kind === "subtitle" ? 20 : 34)); // %height 예산(h 없으면 푸터까지)
+    const maxLines = Math.max(1, Math.floor((budgetPct * aspect) / (size * 1.5)));
+    const cap = Math.ceil(cpl * maxLines * 1.1); // 10% 여유 — 경계 근처 정상 텍스트는 살린다
+    const t = plain(b.text);
+    if (t.length > cap) b.text = t.slice(0, Math.max(0, cap - 1)).trimEnd() + "…";
+  }
+}
+
 /** 콘텐츠(LLM 또는 스캐폴드) → 위치 기반 블록 덱. 커버·클로징 자동 추가, footer 번호 동기화. */
 export function buildDeckFromContent(content: DeckContent, formatArg?: string, locale: Locale = "ko", styleArg?: string | null, imagesArg = true): TrexDeck {
   const mode: ArtMode = content.mode && MODE_THEMES[content.mode] ? content.mode : "editorial";
@@ -1017,17 +1166,36 @@ export function buildDeckFromContent(content: DeckContent, formatArg?: string, l
 
   // 레이아웃 아키타입 로테이션 — LLM이 layout을 안 정했으면 덱 안에서 역할별 변형을 순환시켜
   // "매 장이 같은 3분할" 문제를 없앤다(전역 mid 인덱스로 섞어 한 덱 안에서 다양하게).
+  // 에셋 레이아웃(diagram/flow/chart)은 dna 덱에서만 로테이션에 참여 — SVG 인포그래픽 히어로.
   const LAYOUT_ROTATION: Record<string, string[]> = {
-    structure: imagesArg && dna ? ["columns", "bento", "split", "zigzag"] : ["columns", "bento"],
+    structure: imagesArg && dna ? ["columns", "diagram", "bento", "split", "zigzag"] : ["columns", "bento"],
     metrics: ["row", "bento", "asym"],
-    process: ["timeline", "cards"],
-    comparison: ["bars", "asym"],
+    process: dna ? ["timeline", "flow", "cards"] : ["timeline", "cards"],
+    comparison: dna ? ["bars", "chart", "asym"] : ["bars", "asym"],
   };
+  // 장르 대분류 — 로테이션/밀도 전략을 바꾼다(GENRE-SPECS.md).
+  //  · 피치: 저밀도 · 차트(에셋)+그림 중심 — 한 장 한 아이디어(dna 있을 때 에셋 히어로).
+  //  · 리포트: 고밀도 · 고정 레이아웃(좌우형/전체형) — 에셋 히어로(저밀도) 배제.
+  const GENRE_ROTATION: Partial<Record<DeckGenre, Record<string, string[]>>> = {
+    pitch: {
+      structure: dna && imagesArg ? ["diagram", "split", "zigzag"] : ["columns"],
+      metrics: dna ? ["chart", "row"] : ["row"],
+      process: dna ? ["flow"] : ["timeline"],
+      comparison: dna ? ["chart"] : ["bars"],
+    },
+    report: {
+      structure: ["twopanel", "columns", "bento"],
+      metrics: ["row", "bento"],
+      process: ["timeline", "cards"],
+      comparison: ["bars", "asym"],
+    },
+  };
+  const rotation = (content.genre && GENRE_ROTATION[content.genre]) || LAYOUT_ROTATION;
   // 입력 객체를 mutate하지 않는다 — 같은 content로 여러 덱을 빌드해도(갤러리/재생성)
   // 로테이션이 눌러붙지 않게 복사본에 layout을 부여한다.
   const midsL = mids.map((m, i) => {
     if (m.layout) return m;
-    const options = LAYOUT_ROTATION[m.role];
+    const options = rotation[m.role];
     return options ? { ...m, layout: options[i % options.length] } : m;
   });
 
@@ -1037,7 +1205,11 @@ export function buildDeckFromContent(content: DeckContent, formatArg?: string, l
   midsL.forEach((c, i) => slides.push(LAYOUTS[c.role](theme, i + 1, total, c, o, locale, opts)));
   slides.forEach((s, i) => {
     const f = s.blocks.find((b) => b.kind === "footer");
-    if (f) f.value = `${i + 1 < 10 ? "0" : ""}${i + 1} / ${total < 10 ? "0" : ""}${total}`;
+    if (f) {
+      f.value = `${i + 1 < 10 ? "0" : ""}${i + 1} / ${total < 10 ? "0" : ""}${total}`;
+      // 출처는 옵션(기본 off) — 끄면 브랜드만 남긴다("출처: …" 접두는 slop처럼 보일 수 있음).
+      if (!content.sourceFooter) f.text = "Agentlas · T-rex";
+    }
     if (dna) {
       // 장식 모티프 — 커버/본문/클로징별 DNA 데코 + 인덱스 텍스트(스위스 거대 번호 등).
       const v = i === 0 ? "cover" : i === slides.length - 1 ? "close" : "body";
@@ -1045,6 +1217,7 @@ export function buildDeckFromContent(content: DeckContent, formatArg?: string, l
       s.decoV = v;
       s.decoN = `${i + 1 < 10 ? "0" : ""}${i + 1}`;
     }
+    hardClampBlocks(s.blocks, opts.aspect ?? 9 / 16); // 오버플로우 하드 가드(안전망)
   });
 
   return {
@@ -1122,6 +1295,8 @@ export function newBlock(kind: BlockKind, locale: Locale = "ko"): TrexBlock {
       return { ...base, label: ko ? "카드 제목" : "Card title", text: ko ? "카드 설명을 입력하세요" : "Add a card description", w: 26, h: 34, size: 1.45 };
     case "image":
       return { ...base, w: 30, h: 36, src: "", prompt: "" };
+    case "asset":
+      return { ...base, w: 34, h: 40, asset: { kind: "donut" } };
     case "footer":
       return { ...base, text: "Agentlas · T-rex", value: "01 / 05", w: 88, size: 1.05, x: 6, y: 90 };
     default:

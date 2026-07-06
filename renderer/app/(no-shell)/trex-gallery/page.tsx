@@ -13,7 +13,8 @@ import {
   type DeckContent,
   type TrexDeck,
 } from "@/lib/trex/model";
-import { STYLES, STYLE_IDS, styleById } from "@/lib/trex/styles";
+import { STYLES, STYLE_IDS, styleById, PALETTES, paletteStyle } from "@/lib/trex/styles";
+import { ASSET_KINDS, palOf, renderAsset } from "@/lib/trex/graphics";
 
 // 전 역할을 커버하는 현실적 합성 콘텐츠(LLM 없이 렌더 품질만 검증).
 const FULL: DeckContent = {
@@ -52,6 +53,46 @@ function Deck({ label, content, deck: prebuilt, mode, formatId, styleId, only }:
   );
 }
 
+// 전체 에셋 50종을 aurora 팔레트로 직접 렌더(레이아웃 없이 순수 SVG 품질/파손 검증).
+function AssetGrid() {
+  const pal = palOf(styleById("aurora"));
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12, background: "#fff", padding: 14, borderRadius: 12 }}>
+      {ASSET_KINDS.map((k) => (
+        <div key={k} style={{ border: "1px solid #ececf2", borderRadius: 10, padding: 8, background: "#F8F8FC" }}>
+          <div style={{ fontSize: 10, fontWeight: 800, color: "#6B6880", marginBottom: 4, fontFamily: "monospace" }}>{k}</div>
+          <div style={{ height: 120, display: "flex", alignItems: "center", justifyContent: "center" }} dangerouslySetInnerHTML={{ __html: renderAsset({ kind: k }, pal) }} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// 색조합 팔레트 50종 스와치(gradient accent→accent2 + ink/bg).
+function PaletteStrip() {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+      {PALETTES.map((p) => {
+        const d = paletteStyle(p);
+        const bg = d.bodyBg.kind === "solid" ? d.bodyBg.color : "#fff";
+        return (
+          <div key={p.id} style={{ borderRadius: 10, overflow: "hidden", border: "1px solid #e2e1ea", background: bg }}>
+            <div style={{ height: 46, background: `linear-gradient(135deg, ${p.accent}, ${p.accent2})` }} />
+            <div style={{ padding: "7px 9px" }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: d.ink }}>{p.nameKo} <span style={{ color: "#9a97a8", fontWeight: 600 }}>{p.nameEn}</span></div>
+              <div style={{ display: "flex", gap: 4, marginTop: 5 }}>
+                <span style={{ width: 16, height: 16, borderRadius: 4, background: p.accent }} />
+                <span style={{ width: 16, height: 16, borderRadius: 4, background: p.accent2 }} />
+                <span style={{ fontSize: 9, color: "#9a97a8", fontFamily: "monospace", marginLeft: "auto" }}>{p.accent}</span>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // 긴 텍스트 스트레스 — LLM이 길게 쓸 때 클리핑/오버플로 임계 검증.
 const STRESS: DeckContent = {
   title: "글로벌 공급망 리스크와 지정학적 불확실성 속에서 회복탄력성을 확보하기 위한 통합 전략 로드맵",
@@ -63,6 +104,22 @@ const STRESS: DeckContent = {
     { role: "process", title: "18개월에 걸쳐 단계적으로 회복탄력성을 내재화하는 실행 로드맵의 세 국면", steps: [{ label: "1단계: 진단과 가시성 확보", text: "핵심 품목의 다단계 공급망을 매핑하고 리스크 익스포저를 정량화하며 데이터 연계 기반을 마련하는 초기 6개월" }, { label: "2단계: 이중화와 유연성 구축", text: "우선순위 품목부터 대체 소싱과 지역 이중화를 실행하고 안전재고 정책을 재설계하는 중기 6개월" }, { label: "3단계: 자동화와 지속개선", text: "시나리오 시뮬레이션을 상시화하고 조기경보 자동화와 공급업체 협업 체계를 정착시키는 후기 6개월" }] },
     { role: "highlight", title: "결국 모든 것을 좌우하는 단 하나의 결정 변수", stat: { value: "72시간", label: "교란 발생부터 대체 계획 실행까지의 대응 소요시간이 손실 규모를 결정한다" }, text: "가시성과 사전 정의된 대응 프로토콜이 이 골든타임을 좌우하며, 여기서 승부가 갈린다는 점을 잊어서는 안 된다" },
     { role: "statement", text: "회복탄력성은 비용이 아니라 불확실성의 시대에 기업의 생존을 담보하는 가장 확실한 전략적 투자다" },
+  ],
+};
+
+// SVG 인포그래픽 에셋 쇼케이스 — diagram/flow/chart 레이아웃을 명시해 전 종류를 강제 렌더(QA).
+const ASSET_SHOWCASE: DeckContent = {
+  title: "SVG 인포그래픽 에셋",
+  slides: [
+    { role: "structure", layout: "diagram", title: "구성 요소를 **허브앤스포크**로", dek: "중심 생태계와 위성 축", cards: [{ label: "투자", text: "성장 자본 조달" }, { label: "채용", text: "핵심 인재 확보" }, { label: "홍보", text: "브랜드 인지 확대" }, { label: "데이터", text: "의사결정 근거" }, { label: "제휴", text: "채널 파트너십" }] },
+    { role: "structure", layout: "diagram", title: "역량을 중심으로 **수렴**시킨다", dek: "바깥 자원이 하나의 코어로", cards: [{ label: "투자", text: "" }, { label: "채용", text: "" }, { label: "홍보", text: "" }, { label: "데이터", text: "" }, { label: "제휴", text: "" }] },
+    { role: "structure", layout: "diagram", title: "네 갈래 **다이아몬드** 구조", dek: "동등한 네 요소", cards: [{ label: "수집", text: "데이터 확보" }, { label: "분석", text: "성장 스코어링" }, { label: "협업", text: "교차 검증" }, { label: "실행", text: "선제 접촉" }] },
+    { role: "structure", layout: "diagram", title: "**피라미드**로 계층을 세운다", dek: "비전에서 실행까지", cards: [{ label: "비전", text: "지향점" }, { label: "전략", text: "우선순위" }, { label: "실행", text: "실무 과제" }] },
+    { role: "process", layout: "flow", title: "**계단 스텝**으로 성장 단계", dek: "인지→관심→전환→확장", steps: [{ label: "인지", text: "시장 진입 신호 포착" }, { label: "관심", text: "리드 확보·검증" }, { label: "전환", text: "유료 전환" }, { label: "확장", text: "재구매·확산" }] },
+    { role: "process", layout: "flow", title: "**사이클** 성장 루프", dek: "수집→분석→인사이트→확장", steps: [{ label: "수집", text: "데이터 수집" }, { label: "분석", text: "패턴 분석" }, { label: "인사이트", text: "의미 도출" }, { label: "확장", text: "적용 확대" }] },
+    { role: "process", layout: "flow", title: "**반원 팬**으로 네 축", dek: "01~04 방사 배치", steps: [{ label: "발굴", text: "기회 발굴" }, { label: "분석", text: "타당성 분석" }, { label: "협업", text: "파트너 협업" }, { label: "실행", text: "실행·검증" }] },
+    { role: "process", layout: "flow", title: "**셰브론** 화살표 플로우", dek: "발굴→분석→실행→검증", steps: [{ label: "발굴", text: "데이터 자동 수집" }, { label: "분석", text: "교차·시계열 스코어링" }, { label: "실행", text: "우선순위 딜 접촉" }, { label: "검증", text: "재무·리스크 확인" }] },
+    { role: "comparison", layout: "chart", title: "세그먼트별 **집중도**를 막대로", dek: "규제·수요·주행환경 가중 점수", bars: [{ label: "대학·대단지", value: 82 }, { label: "도심 상권", value: 61 }, { label: "교외 지역", value: 39 }, { label: "산업단지", value: 27 }] },
   ],
 };
 
@@ -80,6 +137,18 @@ export default function TrexGalleryPage() {
       {modes.map((m) => (
         <Deck key={m} label={`mode=${m}  ·  9장 전체`} content={FULL} mode={m} />
       ))}
+
+      <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>①-b SVG 인포그래픽 에셋 — diagram/flow/chart (aurora)</h2>
+      <Deck label="에셋 쇼케이스 · aurora · 허브·수렴·다이아몬드·피라미드·계단·사이클·반원팬·셰브론·막대" content={ASSET_SHOWCASE} mode="editorial" styleId="aurora" />
+
+      <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>①-c 전체 SVG 에셋 {ASSET_KINDS.length}종 (aurora 팔레트)</h2>
+      <AssetGrid />
+      <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>①-d 색조합 팔레트 {PALETTES.length}종</h2>
+      <PaletteStrip />
+
+      <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>①-e 장르 대분류 — 같은 콘텐츠, 피치(저밀도 에셋) vs 리포트(고밀도 고정)</h2>
+      <Deck label="genre=pitch · aurora · 저밀도 차트+그림 (구조·지표·비교·과정)" content={{ ...FULL, genre: "pitch" }} mode="editorial" styleId="ocean" only={[0, 2, 3, 4, 5]} />
+      <Deck label="genre=report · aurora · 고밀도 고정 레이아웃" content={{ ...FULL, genre: "report" }} mode="editorial" styleId="sapphire" only={[0, 2, 3, 4, 5]} />
 
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>② 방향 인지 — 같은 콘텐츠, 세로/정사각</h2>
       <Deck label="story 9:16 (portrait)  ·  표지·구조·과정·클로징" content={FULL} mode="editorial" formatId="story" only={[0, 4, 5, 7]} />

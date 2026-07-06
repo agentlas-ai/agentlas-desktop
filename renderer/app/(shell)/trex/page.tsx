@@ -31,7 +31,7 @@ import {
 } from "@/lib/trex/model";
 import { IconApps, IconSparkles, IconFileUp, IconEdit, IconChevronRight, IconCheck } from "@/components/Icon";
 import { DeckStage, GlobalStyle, bgStyle } from "@/components/trex/DeckStage";
-import { STYLES, STYLE_IDS, styleById, routeStyle, type StyleId } from "@/lib/trex/styles";
+import { STYLES, STYLE_IDS, styleById, routeStyle, PALETTES, type StyleId } from "@/lib/trex/styles";
 
 type ViewState = "home" | "generating" | "view" | "edit";
 // "auto"=codex↔나노바나나 자동 페일오버(사용량 부족 시 남는 엔진 사용). "none"=이미지 생성 끔.
@@ -56,7 +56,7 @@ export default function TrexPage() {
   const [contentEngines, setContentEngines] = useState<{ agy: boolean; codex: boolean }>({ agy: false, codex: false });
   const [modeOverride, setModeOverride] = useState<ArtMode | null>(null);
   // Style DNA — null=자동(주제 라우팅, 매치 없으면 레거시 모드 룩), "legacy"=명시적 기본 룩.
-  const [styleOverride, setStyleOverride] = useState<StyleId | "legacy" | null>(null);
+  const [styleOverride, setStyleOverride] = useState<string | null>(null); // StyleId·팔레트id·"legacy"·null(자동)
   // 소스 파일 — 프롬프트 대신(또는 함께) 첨부해 덱의 재료로 쓴다. 텍스트 파일은 본문 추출,
   // 이미지/기타는 이름만 힌트로. 첨부가 있으면 주제 없이도 생성 가능.
   const [sources, setSources] = useState<{ name: string; text: string; kind: "text" | "image" | "other" }[]>([]);
@@ -171,7 +171,7 @@ export default function TrexPage() {
   }, []);
 
   const routedMode = modeOverride ?? routeMode(prompt || EXAMPLE);
-  const routedStyle = styleOverride && styleOverride !== "legacy" ? styleOverride : routeStyle(prompt || EXAMPLE);
+  const routedStyle = routeStyle(prompt || EXAMPLE); // 주제 자동 라우팅(항상 StyleId|null — Auto 라벨 표시용)
 
   // 생성한 덱을 한 장씩 드러낸다. 시네마틱/하이브리드는 codex/agy 이미지가 있으면 배경 교체.
   const revealDeck = useCallback(
@@ -642,7 +642,7 @@ function Home({
   imageModel: ImageModel; setImageModel: (m: ImageModel) => void; providers: { codex: boolean; gemini: boolean };
   aiContent: boolean; setAiContent: (v: boolean) => void; contentEngines: { agy: boolean; codex: boolean };
   routedMode: ArtMode; modeOverride: ArtMode | null; setModeOverride: (m: ArtMode | null) => void;
-  routedStyle: StyleId | null; styleOverride: StyleId | "legacy" | null; setStyleOverride: (s: StyleId | "legacy" | null) => void;
+  routedStyle: StyleId | null; styleOverride: string | null; setStyleOverride: (s: string | null) => void;
   recents: TrexDeck[];
   sources: { name: string; text: string; kind: "text" | "image" | "other" }[];
   attaching: boolean;
@@ -751,6 +751,23 @@ function Home({
               {STYLES[sid][ko ? "nameKo" : "nameEn"]}
             </button>
           ))}
+        </div>
+
+        {/* (b) 색조합 팔레트 50종 선택기 — 그라데이션 스와치. styleById가 팔레트 id를 해석해 그대로 적용. */}
+        <div style={{ ...controlRow, alignItems: "flex-start" }}>
+          <span style={{ fontSize: 11.5, color: "var(--muted-deep)", fontWeight: 700, paddingTop: 4 }}>{ko ? "색조합" : "Palette"}</span>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, maxHeight: 88, overflowY: "auto" }}>
+            {PALETTES.map((p) => {
+              const on = styleOverride === p.id;
+              return (
+                <button key={p.id} type="button" onClick={() => setStyleOverride(p.id)} title={`${p.nameKo} · ${p.nameEn}`}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 8px 3px 4px", borderRadius: 999, cursor: "pointer", fontSize: 11, fontWeight: 700, color: on ? "#fff" : "var(--fg)", background: on ? `linear-gradient(135deg, ${p.accent}, ${p.accent2})` : "var(--chip-bg, #f2f2f6)", border: on ? "none" : "1px solid var(--border, #e2e1ea)" }}>
+                  <span style={{ display: "inline-block", width: 13, height: 13, borderRadius: 999, background: `linear-gradient(135deg, ${p.accent}, ${p.accent2})`, boxShadow: on ? "0 0 0 1.5px #fff" : "none" }} />
+                  {p.nameKo}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div style={controlRow}>
@@ -901,7 +918,7 @@ function clamp(n: number, lo: number, hi: number): number { return Math.max(lo, 
 function blockLabel(k: BlockKind, ko: boolean): string {
   const map: Record<BlockKind, [string, string]> = {
     title: ["제목", "Title"], subtitle: ["부제", "Subtitle"], body: ["본문", "Body"], card: ["카드", "Card"], image: ["이미지", "Image"], kicker: ["라벨", "Kicker"],
-    pill: ["태그", "Pill"], kpi: ["숫자", "KPI"], bar: ["막대", "Bar"], rule: ["선", "Rule"], footer: ["푸터", "Footer"], band: ["챕터 밴드", "Chapter Band"], panel: ["패널", "Panel"],
+    pill: ["태그", "Pill"], kpi: ["숫자", "KPI"], bar: ["막대", "Bar"], rule: ["선", "Rule"], footer: ["푸터", "Footer"], band: ["챕터 밴드", "Chapter Band"], panel: ["패널", "Panel"], asset: ["인포그래픽", "Infographic"],
   };
   return ko ? map[k][0] : map[k][1];
 }

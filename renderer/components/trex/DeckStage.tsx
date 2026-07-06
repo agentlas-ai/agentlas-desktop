@@ -4,6 +4,7 @@
 import { useRef, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import type { SceneKind, TrexBlock, TrexSlide } from "@/lib/trex/model";
 import type { StyleDna } from "@/lib/trex/styles";
+import { palOf, renderAsset } from "@/lib/trex/graphics";
 
 type SlideBg = TrexSlide["bg"];
 
@@ -298,6 +299,12 @@ function BlockView({
   const bodyFont = dna?.bodyFont;
   const monoFont = dna?.monoFont ?? dna?.bodyFont;
 
+  // 프리미엄 색시스템 — accent2→accent 그라데이션 + 컬러 글로우(유파가 opt-in). 없으면 기존 솔리드.
+  const useGrad = !!dna?.gradient;
+  const gradCss = `linear-gradient(135deg, ${dna?.accent2 ?? accent}, ${accent})`;
+  const glowSh = dna?.glow ? `0 0.9cqw 2.8cqw ${withAlpha(accent, 0.3)}` : null;
+  const gradText: CSSProperties = useGrad ? { background: gradCss, WebkitBackgroundClip: "text", backgroundClip: "text", WebkitTextFillColor: "transparent" } : {};
+
   let inner: React.ReactNode = null;
   if (b.kind === "kicker")
     inner = (
@@ -387,6 +394,7 @@ function BlockView({
                 ? { background: withAlpha(ink, 0.035), boxShadow: `0 0.9cqw 2.8cqw ${withAlpha("#000000", 0.09)}` }
                 : { background: withAlpha(ink, 0.055) }
             : { background: withAlpha(ink, 0.04), border: `1px solid ${withAlpha(ink, 0.11)}` }),
+          ...(glowSh ? { boxShadow: glowSh } : null),
           borderRadius: dna ? cqw(dna.radius) : cqw(1.3),
           padding: `${cqw(2.2)} ${cqw(2.2)}`,
           display: "flex",
@@ -406,11 +414,11 @@ function BlockView({
         {b.value ? (
           <div style={{ display: "flex", alignItems: "center", gap: cqw(1), marginBottom: cqw(0.2) }}>
             {/* 원포인트 강조: accent === false인 카드 값은 잉크색 — 숫자가 여럿일 때 전부 빨강 방지 */}
-            <span style={{ fontSize: cqw(dna ? (b.size ?? 1.45) * 1.7 : 2), fontWeight: 800, color: b.accent === false ? ink : accent, letterSpacing: "-.02em", lineHeight: 1, fontVariantNumeric: "tabular-nums", ...(displayFont ? { fontFamily: displayFont } : null) }}>{b.value}</span>
-            <span style={{ flex: 1, height: cqw(0.22), background: withAlpha(b.accent === false ? ink : accent, 0.35), borderRadius: 2 }} />
+            <span style={{ fontSize: cqw(dna ? (b.size ?? 1.45) * 1.7 : 2), fontWeight: 800, color: b.accent === false ? ink : accent, letterSpacing: "-.02em", lineHeight: 1, fontVariantNumeric: "tabular-nums", ...(displayFont ? { fontFamily: displayFont } : null), ...(useGrad && b.accent !== false ? gradText : null) }}>{b.value}</span>
+            <span style={{ flex: 1, height: cqw(0.22), background: b.accent === false ? withAlpha(ink, 0.35) : useGrad ? gradCss : withAlpha(accent, 0.35), borderRadius: 2 }} />
           </div>
         ) : (
-          <span style={{ width: cqw(3.4), height: cqw(0.44), background: accent, borderRadius: 999, marginBottom: cqw(0.4) }} />
+          <span style={{ width: cqw(3.4), height: cqw(0.44), background: useGrad ? gradCss : accent, borderRadius: 999, marginBottom: cqw(0.4) }} />
         )}
         {b.label && <div {...ed("label")} style={{ fontSize: cqw(dna ? (b.size ?? 1.45) * 1.44 : (b.size ?? 1.45) + 0.35), fontWeight: 800, color: ink, lineHeight: 1.22, letterSpacing: "-.01em", textWrap: "balance" as never }}>{b.label}</div>}
         <div {...ed("text")} style={{ fontSize: cqw(b.size ?? 1.45), lineHeight: 1.5, color: withAlpha(ink, 0.72), fontWeight: 500, textWrap: "pretty" as never }}>{rich(b.text, "body", accent, ink, dna?.highlight)}</div>
@@ -422,7 +430,8 @@ function BlockView({
       // 세로 룰 — h가 있으면 수직 바: 액센트=에지 바(두껍게), 비액센트=컬럼 헤어라인.
       <div style={{ width: cqw(b.accent ? 0.7 : 0.16), height: "100%", background: b.accent ? accent : withAlpha(ink, 0.16), borderRadius: dna && dna.radius === 0 ? 0 : 2 }} />
     ) : (
-      <div style={{ height: cqw(dna && dna.borderScale > 1 ? 0.32 * dna.borderScale : 0.32), width: "100%", background: b.accent ? accent : muted, borderRadius: dna && dna.radius === 0 ? 0 : 2 }} />
+      // 가로 헤어라인 — 비강조는 검정(muted 72%)이 아니라 얇은 회색선(0.5px 감성). 볼드 유파(borderScale>1)만 굵고 진하게.
+      <div style={{ height: cqw(dna && dna.borderScale > 1 ? 0.32 * dna.borderScale : 0.15), width: "100%", background: b.accent ? accent : withAlpha(ink, dna && dna.borderScale > 1 ? 0.55 : 0.12), borderRadius: dna && dna.radius === 0 ? 0 : 2 }} />
     );
   else if (b.kind === "pill")
     inner = (
@@ -433,8 +442,8 @@ function BlockView({
   else if (b.kind === "kpi") {
     const kpiInner = (
       <div>
-        <div {...ed("value")} style={{ fontSize: cqw(b.size ?? 6), fontWeight: dna ? Math.max(dna.titleWeight, 600) : 800, letterSpacing: dna?.titleTracking ?? "-.03em", lineHeight: 0.9, color: b.accent ? accent : ink, fontVariantNumeric: "tabular-nums", ...(displayFont ? { fontFamily: displayFont } : null) }}>{b.value}</div>
-        <div style={{ height: cqw(0.26), width: cqw(3), background: accent, margin: `${cqw(1.1)} 0 ${cqw(0.9)}` }} />
+        <div {...ed("value")} style={{ fontSize: cqw(b.size ?? 6), fontWeight: dna ? Math.max(dna.titleWeight, 600) : 800, letterSpacing: dna?.titleTracking ?? "-.03em", lineHeight: 0.9, color: b.accent ? accent : ink, fontVariantNumeric: "tabular-nums", ...(displayFont ? { fontFamily: displayFont } : null), ...(useGrad && b.accent ? gradText : null) }}>{b.value}</div>
+        <div style={{ height: cqw(0.26), width: cqw(3), background: useGrad ? gradCss : accent, margin: `${cqw(1.1)} 0 ${cqw(0.9)}` }} />
         <div {...ed("label")} style={{ fontSize: cqw(1.25), color: muted, fontWeight: 600, lineHeight: 1.4 }}>{b.label}</div>
       </div>
     );
@@ -456,6 +465,7 @@ function BlockView({
                 ? { background: withAlpha(ink, 0.035), boxShadow: `0 0.9cqw 2.8cqw ${withAlpha("#000000", 0.09)}` }
                 : { background: withAlpha(ink, 0.055) }
             : { background: withAlpha(ink, 0.04), border: `1px solid ${withAlpha(ink, 0.11)}` }),
+          ...(glowSh ? { boxShadow: glowSh } : null),
           borderRadius: dna ? cqw(dna.radius) : cqw(1.3),
         }}
       >
@@ -469,7 +479,7 @@ function BlockView({
     const v = Math.max(0, Math.min(100, Number(b.value) || 0));
     const barR = dna && dna.radius === 0 ? 0 : 999;
     // 데이터-잉크 규율: 주인공(accent) 막대 1개만 액센트색, 나머지는 잉크 톤 — 전부 빨강이면 주인공이 없다.
-    const fill = b.accent === false ? withAlpha(ink, 0.3) : accent;
+    const fill = b.accent === false ? withAlpha(ink, 0.3) : useGrad ? gradCss : accent;
     inner = (
       <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: cqw(1.2) }}>
         <span {...ed("label")} style={{ fontSize: cqw(b.size ?? 1.3), fontWeight: 700, color: b.accent === false ? withAlpha(ink, 0.78) : ink, minWidth: cqw(8) }}>{b.label}</span>
@@ -584,6 +594,14 @@ function BlockView({
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: `1px solid ${withAlpha(ink, 0.14)}`, paddingTop: cqw(1.2), fontSize: cqw(b.size ?? 1.05), color: muted, ...(monoFont ? { fontFamily: monoFont } : null) }}>
         <span {...ed("text")}>{b.text}</span><span style={{ fontWeight: 700, opacity: 0.7 }}>{b.value}</span>
       </div>
+    );
+  else if (b.kind === "asset" && b.asset)
+    // 결정적 SVG 인포그래픽 — 색은 dna에서 유도(hex 리졸브), viewBox 스케일로 블록 크기에 자동 맞춤.
+    inner = (
+      <div
+        style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", minHeight: 0 }}
+        dangerouslySetInnerHTML={{ __html: renderAsset(b.asset, palOf(dna, accent, ink)) }}
+      />
     );
 
   return (

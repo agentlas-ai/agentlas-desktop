@@ -11,7 +11,7 @@
 
 import type { SlideBg } from "./model";
 
-export type StyleId = "swiss" | "bauhaus" | "didot" | "vignelli" | "brutal" | "hara" | "consulting";
+export type StyleId = "swiss" | "bauhaus" | "didot" | "vignelli" | "brutal" | "hara" | "consulting" | "aurora";
 
 /** 장식 모티프 레이어 — DeckStage의 Deco 컴포넌트가 그린다(블록 뒤, 비인터랙티브). */
 export type DecoKind =
@@ -90,6 +90,11 @@ export interface StyleDna {
   highlight?: string;
   /** 리스트 행 라벨을 아웃라인 필 칩으로(중기부 "기술혁신/수출/창업" 문법). */
   listChip?: boolean;
+  // ── 프리미엄 색시스템(모던 SaaS/테크, 2026-07-06) ──
+  /** accent2→accent 그라데이션을 액센트 요소(바·KPI 값·룰)에 적용. */
+  gradient?: boolean;
+  /** 컬러 글로우 — 카드·패널 그림자를 강조색으로(검정 아님, 발광). */
+  glow?: boolean;
 }
 
 /**
@@ -395,13 +400,138 @@ export const STYLES: Record<StyleId, StyleDna> = {
     highlight: "#FFE94A",
     listChip: true,
   },
+  // 오로라 — 모던 SaaS/테크: 인디고→바이올렛 그라데이션 램프 + 컬러 글로우(Stripe/Linear 계열).
+  aurora: {
+    id: "aurora",
+    nameKo: "오로라",
+    nameEn: "Aurora",
+    hintKo: "모던 SaaS — 인디고→바이올렛 그라데이션 · 컬러 글로우",
+    hintEn: "Modern SaaS — indigo→violet gradient, colored glow",
+    displayFont: GOTHIC,
+    bodyFont: GOTHIC,
+    monoFont: MONO,
+    titleWeight: 800,
+    titleTracking: "-.02em",
+    titleTransform: "none",
+    titleLineHeight: 1.14,
+    kickerTracking: ".12em",
+    radius: 1.3,
+    borderScale: 1,
+    accent: "#4F46E5",
+    accent2: "#A855F7",
+    ink: "#1E1B2E",
+    coverInk: "#FFFFFF",
+    closeInk: "#FFFFFF",
+    coverBg: { kind: "gradient", from: "#4F46E5", to: "#7C3AED", angle: 135 },
+    bodyBg: { kind: "solid", color: "#F7F7FB" },
+    closeBg: { kind: "gradient", from: "#312E81", to: "#4C1D95", angle: 160 },
+    coverDeco: "none",
+    bodyDeco: "none",
+    closeDeco: "none",
+    coverComp: "centered",
+    photoStyle:
+      "Modern premium SaaS/tech visual: indigo-to-violet gradient, soft glow, subtle glassmorphism, aurora mesh background, clean vivid and dimensional",
+    cardStyle: "shadow",
+    coverPhoto: "bleed",
+    graphicStyle:
+      "Flat white rounded panel with a subtle indigo-violet gradient accent along the top edge and a soft colored glow, modern SaaS style, the entire center empty and plain",
+    gradient: true,
+    glow: true,
+  },
 };
 
-export const STYLE_IDS: StyleId[] = ["swiss", "bauhaus", "didot", "vignelli", "brutal", "hara", "consulting"];
+export const STYLE_IDS: StyleId[] = ["swiss", "bauhaus", "didot", "vignelli", "brutal", "hara", "consulting", "aurora"];
+
+// ── 모던 색조합 팔레트(50) ──────────────────────────────────────────
+// 유파(art-school) 대신 "색조합"으로 가는 방향. aurora의 구조(폰트·레이아웃·gradient·glow)를
+// 팩토리로 재사용하고 색만 스왑한다. ink/bg는 accent에서 자동 유도(응집된 톤) → 스펙 최소화.
+export interface Palette { id: string; nameKo: string; nameEn: string; accent: string; accent2: string; }
+
+function _hx(h: string): [number, number, number] { const c = h.replace("#", ""); return [parseInt(c.slice(0, 2), 16), parseInt(c.slice(2, 4), 16), parseInt(c.slice(4, 6), 16)]; }
+function _mix(a: string, b: string, t: number): string { const x = _hx(a), y = _hx(b); const f = (i: number) => ("0" + Math.round(x[i] + (y[i] - x[i]) * t).toString(16)).slice(-2); return "#" + f(0) + f(1) + f(2); }
+
+/** 팔레트 스펙 → 완전한 StyleDna(gradient+glow on). ink=딥틴트, bg=near-white 틴트, closeBg=딥 그라데이션. */
+export function paletteStyle(p: Palette): StyleDna {
+  const ink = _mix(p.accent, "#0A0A12", 0.86); // 살짝 색을 머금은 근-검정(본문 대비 확보)
+  const bg = _mix(p.accent, "#FFFFFF", 0.955); // near-white 틴트
+  const dk = (c: string) => _mix(c, "#0B0B16", 0.6); // 클로징용 딥 셰이드
+  return {
+    id: p.id as StyleId, nameKo: p.nameKo, nameEn: p.nameEn,
+    hintKo: `색조합 — ${p.nameKo}`, hintEn: `Palette — ${p.nameEn}`,
+    displayFont: GOTHIC, bodyFont: GOTHIC, monoFont: MONO,
+    titleWeight: 800, titleTracking: "-.02em", titleTransform: "none", titleLineHeight: 1.14, kickerTracking: ".12em",
+    radius: 1.3, borderScale: 1,
+    accent: p.accent, accent2: p.accent2, ink, coverInk: "#FFFFFF", closeInk: "#FFFFFF",
+    coverBg: { kind: "gradient", from: p.accent, to: p.accent2, angle: 135 },
+    bodyBg: { kind: "solid", color: bg },
+    closeBg: { kind: "gradient", from: dk(p.accent), to: dk(p.accent2), angle: 160 },
+    coverDeco: "none", bodyDeco: "none", closeDeco: "none", coverComp: "centered",
+    photoStyle: "Modern premium palette visual: soft gradient and colored glow, clean, vivid and dimensional",
+    cardStyle: "shadow", coverPhoto: "bleed",
+    graphicStyle: "Flat white rounded panel with a subtle gradient accent edge and soft colored glow, modern SaaS style, center empty and plain",
+    gradient: true, glow: true,
+  };
+}
+
+export const PALETTES: Palette[] = [
+  { id: "indigo", nameKo: "인디고", nameEn: "Indigo", accent: "#4F46E5", accent2: "#7C3AED" },
+  { id: "violet", nameKo: "바이올렛", nameEn: "Violet", accent: "#7C3AED", accent2: "#A855F7" },
+  { id: "purple", nameKo: "퍼플", nameEn: "Purple", accent: "#9333EA", accent2: "#C026D3" },
+  { id: "fuchsia", nameKo: "푸시아", nameEn: "Fuchsia", accent: "#C026D3", accent2: "#DB2777" },
+  { id: "pink", nameKo: "핑크", nameEn: "Pink", accent: "#DB2777", accent2: "#E11D48" },
+  { id: "rose", nameKo: "로즈", nameEn: "Rose", accent: "#E11D48", accent2: "#F43F5E" },
+  { id: "red", nameKo: "레드", nameEn: "Red", accent: "#DC2626", accent2: "#EA580C" },
+  { id: "orange", nameKo: "오렌지", nameEn: "Orange", accent: "#EA580C", accent2: "#F59E0B" },
+  { id: "amber", nameKo: "앰버", nameEn: "Amber", accent: "#D97706", accent2: "#EAB308" },
+  { id: "gold", nameKo: "골드", nameEn: "Gold", accent: "#CA8A04", accent2: "#84CC16" },
+  { id: "lime", nameKo: "라임", nameEn: "Lime", accent: "#65A30D", accent2: "#16A34A" },
+  { id: "green", nameKo: "그린", nameEn: "Green", accent: "#16A34A", accent2: "#10B981" },
+  { id: "emerald", nameKo: "에메랄드", nameEn: "Emerald", accent: "#059669", accent2: "#14B8A6" },
+  { id: "teal", nameKo: "틸", nameEn: "Teal", accent: "#0D9488", accent2: "#06B6D4" },
+  { id: "cyan", nameKo: "시안", nameEn: "Cyan", accent: "#0891B2", accent2: "#0EA5E9" },
+  { id: "sky", nameKo: "스카이", nameEn: "Sky", accent: "#0284C7", accent2: "#3B82F6" },
+  { id: "blue", nameKo: "블루", nameEn: "Blue", accent: "#2563EB", accent2: "#4F46E5" },
+  { id: "royal", nameKo: "로열블루", nameEn: "Royal", accent: "#1D4ED8", accent2: "#7C3AED" },
+  { id: "cobalt", nameKo: "코발트", nameEn: "Cobalt", accent: "#1E40AF", accent2: "#0EA5E9" },
+  { id: "ocean", nameKo: "오션", nameEn: "Ocean", accent: "#0369A1", accent2: "#0D9488" },
+  { id: "slate", nameKo: "슬레이트", nameEn: "Slate", accent: "#475569", accent2: "#64748B" },
+  { id: "graphite", nameKo: "그래파이트", nameEn: "Graphite", accent: "#334155", accent2: "#0EA5E9" },
+  { id: "midnight", nameKo: "미드나잇", nameEn: "Midnight", accent: "#312E81", accent2: "#6D28D9" },
+  { id: "grape", nameKo: "그레이프", nameEn: "Grape", accent: "#6D28D9", accent2: "#DB2777" },
+  { id: "plum", nameKo: "플럼", nameEn: "Plum", accent: "#86198F", accent2: "#BE185D" },
+  { id: "berry", nameKo: "베리", nameEn: "Berry", accent: "#9D174D", accent2: "#DB2777" },
+  { id: "crimson", nameKo: "크림슨", nameEn: "Crimson", accent: "#B91C1C", accent2: "#E11D48" },
+  { id: "sunset", nameKo: "선셋", nameEn: "Sunset", accent: "#EA580C", accent2: "#DB2777" },
+  { id: "coral", nameKo: "코랄", nameEn: "Coral", accent: "#F43F5E", accent2: "#FB923C" },
+  { id: "peach", nameKo: "피치", nameEn: "Peach", accent: "#FB7185", accent2: "#FBBF24" },
+  { id: "mustard", nameKo: "머스타드", nameEn: "Mustard", accent: "#A16207", accent2: "#65A30D" },
+  { id: "olive", nameKo: "올리브", nameEn: "Olive", accent: "#4D7C0F", accent2: "#0D9488" },
+  { id: "forest", nameKo: "포레스트", nameEn: "Forest", accent: "#166534", accent2: "#0D9488" },
+  { id: "jade", nameKo: "제이드", nameEn: "Jade", accent: "#047857", accent2: "#0891B2" },
+  { id: "mint", nameKo: "민트", nameEn: "Mint", accent: "#10B981", accent2: "#06B6D4" },
+  { id: "aqua", nameKo: "아쿠아", nameEn: "Aqua", accent: "#06B6D4", accent2: "#3B82F6" },
+  { id: "azure", nameKo: "애저", nameEn: "Azure", accent: "#0EA5E9", accent2: "#6366F1" },
+  { id: "sapphire", nameKo: "사파이어", nameEn: "Sapphire", accent: "#1E3A8A", accent2: "#2563EB" },
+  { id: "denim", nameKo: "데님", nameEn: "Denim", accent: "#3B5BDB", accent2: "#5C7CFA" },
+  { id: "periwinkle", nameKo: "페리윙클", nameEn: "Periwinkle", accent: "#6366F1", accent2: "#A855F7" },
+  { id: "lavender", nameKo: "라벤더", nameEn: "Lavender", accent: "#8B5CF6", accent2: "#EC4899" },
+  { id: "orchid", nameKo: "오키드", nameEn: "Orchid", accent: "#A21CAF", accent2: "#7C3AED" },
+  { id: "magenta", nameKo: "마젠타", nameEn: "Magenta", accent: "#DB2777", accent2: "#9333EA" },
+  { id: "wine", nameKo: "와인", nameEn: "Wine", accent: "#9F1239", accent2: "#BE123C" },
+  { id: "brick", nameKo: "브릭", nameEn: "Brick", accent: "#9A3412", accent2: "#C2410C" },
+  { id: "rust", nameKo: "러스트", nameEn: "Rust", accent: "#B45309", accent2: "#DC2626" },
+  { id: "terracotta", nameKo: "테라코타", nameEn: "Terracotta", accent: "#C2410C", accent2: "#E11D48" },
+  { id: "sage", nameKo: "세이지", nameEn: "Sage", accent: "#4D7C0F", accent2: "#059669" },
+  { id: "steel", nameKo: "스틸", nameEn: "Steel", accent: "#0F766E", accent2: "#1D4ED8" },
+  { id: "charcoal", nameKo: "차콜", nameEn: "Charcoal", accent: "#1F2937", accent2: "#4F46E5" },
+];
+
+const PALETTE_MAP: Record<string, StyleDna> = Object.fromEntries(PALETTES.map((p) => [p.id, paletteStyle(p)]));
+export const PALETTE_IDS: string[] = PALETTES.map((p) => p.id);
 
 export function styleById(id: string | undefined | null): StyleDna | null {
   if (!id) return null;
-  return (STYLES as Record<string, StyleDna>)[id] ?? null;
+  return (STYLES as Record<string, StyleDna>)[id] ?? PALETTE_MAP[id] ?? null;
 }
 
 // 주제 → 스타일 라우터(아트디렉션 라우터의 스타일 축 확장). 명시 선택이 항상 우선.
