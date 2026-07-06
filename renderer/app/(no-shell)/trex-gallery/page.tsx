@@ -31,8 +31,22 @@ const FULL: DeckContent = {
   ],
 };
 
-function Deck({ label, content, deck: prebuilt, mode, formatId, styleId, only, locale = "ko" }: { label: string; content?: DeckContent; deck?: TrexDeck; mode?: ArtMode; formatId?: string; styleId?: string; only?: number[]; locale?: "ko" | "en" }) {
-  const deck = prebuilt ?? buildDeckFromContent({ ...(content as DeckContent), mode: mode ?? content?.mode }, formatId, locale, styleId);
+function injectImages(deck: TrexDeck, images: (string | undefined)[]): TrexDeck {
+  return {
+    ...deck,
+    slides: deck.slides.map((s, i) => {
+      const url = images[i];
+      if (!url) return s;
+      let used = false;
+      const blocks = s.blocks.map((b) => (b.kind === "image" && !used ? ((used = true), { ...b, src: url }) : b));
+      const bg = s.bg.kind === "image" ? { ...s.bg, src: url } : s.bg;
+      return { ...s, blocks, bg };
+    }),
+  };
+}
+function Deck({ label, content, deck: prebuilt, mode, formatId, styleId, only, locale = "ko", images }: { label: string; content?: DeckContent; deck?: TrexDeck; mode?: ArtMode; formatId?: string; styleId?: string; only?: number[]; locale?: "ko" | "en"; images?: (string | undefined)[] }) {
+  const built = prebuilt ?? buildDeckFromContent({ ...(content as DeckContent), mode: mode ?? content?.mode }, formatId, locale, styleId);
+  const deck = images ? injectImages(built, images) : built;
   const fmt = formatById(prebuilt ? prebuilt.formatId : formatId);
   const ratio = formatRatio(fmt);
   const wide = fmt.w / fmt.h >= 1.25;
@@ -116,6 +130,38 @@ const CARDNEWS: DeckContent = {
     { role: "structure", title: "3대 진영이 과점 중이다", text: "플랫폼·제조·통신이 배달의 91%를 처리한다", img: "tech companies competing, abstract cityscape" },
     { role: "statement", title: "결국 실행 속도가 승자를 가른다", text: "검증된 거점 하나가 협상 테이블에서 더 세다" },
     { role: "process", title: "대학·대단지부터 공략한다", items: ["규제 특구 시범 검증", "배달 플랫폼 제휴 확장", "양산 통한 전국 상용화"], img: "university campus with a small delivery robot" },
+  ],
+};
+
+// PNG 출력용 샘플 — 리포트(고밀도, 이미지無)·카드뉴스·포스터(이미지 주입).
+const REPORT_SAMPLE: DeckContent = {
+  title: "국내 로봇 배달 시장 진입 전략 리포트",
+  subtitle: "규제 완화 이후 시장 구조와 3단계 상용화 로드맵",
+  genre: "report",
+  slides: [
+    { role: "metrics", title: "규제 완화로 **첫 수요 사이클**이 열렸다", dek: "2026년 실외이동로봇 보도 통행 전면 허용 이후", src: "출처: 중소벤처기업부, 2026", kpis: [{ value: "2,500억원", label: "2026년 국내 시장 규모" }, { value: "+150%", label: "전년 대비 서비스 도입률" }, { value: "1,800원", label: "건당 배달 비용 절감액" }], note: "인건비 대비 절감폭이 임계점을 넘었다 — 도입을 미룰수록 경쟁사에 단가 우위를 내준다." },
+    { role: "structure", title: "3대 진영이 시장을 **과점**한다", dek: "상위 3개 진영이 배달 주문의 91%를 처리한다", cards: [{ label: "플랫폼 대기업", text: "배달 앱 연동과 대규모 주문 인프라 장악. 트래픽을 쥐고 있어 제휴 협상력이 가장 세다." }, { label: "로봇 제조사", text: "자율주행 하드웨어 개발과 솔루션 공급. 원가 절감의 열쇠를 쥔 축이다." }, { label: "통신·IT", text: "5G 실시간 관제와 정밀 지도 제공. 안전 규제 대응의 필수 파트너다." }], note: "세 진영 중 두 곳 이상과 동시 제휴해야 교섭력이 생긴다 — 단독 진입은 원가·트래픽 양쪽에서 진다." },
+    { role: "comparison", title: "**대학·대단지**에 먼저 집중한다", dek: "규제·수요밀도·주행환경 3개 축 가중 평가", bars: [{ label: "대학·대단지", value: 82 }, { label: "도심 상권", value: 61 }, { label: "교외 지역", value: 39 }, { label: "산업단지", value: 27 }], note: "대학·대단지가 규제·수요·주행환경 3박자를 모두 갖춘 유일한 세그먼트다." },
+    { role: "process", title: "**3단계**로 운영 리스크를 최소화한다", dek: "각 단계는 관문 지표 통과 시에만 다음 투자를 집행", steps: [{ label: "거점 검증", text: "규제 특구 내 시범 운영으로 사고율·완주율 기준선을 만든다." }, { label: "제휴 확장", text: "배달 플랫폼 연동으로 주문 밀도를 손익분기 위로 올린다." }, { label: "전국 상용화", text: "양산으로 대당 운영비를 절반으로 낮춰 전면 개시한다." }], note: "관문 지표(사고율·주문밀도·대당비용)를 통과해야 다음 투자를 집행한다." },
+  ],
+};
+const CARDNEWS_SAMPLE: DeckContent = {
+  title: "요즘 뜨는 배달로봇 5가지",
+  subtitle: "규제 완화 이후 시장이 열렸다",
+  genre: "cardnews",
+  slides: [
+    { role: "metrics", title: "2,500억 시장이 열렸다", text: "2026년 실외이동로봇 보도 통행 전면 허용", img: "delivery robot on a city crosswalk" },
+    { role: "structure", title: "3대 진영이 과점 중이다", text: "플랫폼·제조·통신이 배달의 91%를 처리한다", img: "tech cityscape" },
+    { role: "process", title: "대학·대단지부터 공략한다", items: ["규제 특구 시범 검증", "배달 플랫폼 제휴 확장", "양산 통한 전국 상용화"], img: "campus robot" },
+  ],
+};
+const POSTER_SAMPLE: DeckContent = {
+  title: "MEGA BURGER",
+  genre: "advertise",
+  slides: [
+    { role: "statement", title: "메가버거 **오픈 특가**", text: "두툼한 패티 · 신선한 재료", offer: "1+1", cta: "주문하기", img: "burger", layout: "overlay" },
+    { role: "statement", title: "프리미엄 **가구** 신제품", text: "클래식을 담은 새 세대 디자인", offer: "30% 할인", cta: "쇼핑하기", img: "furniture", layout: "split" },
+    { role: "statement", title: "주말 **디저트** 페어", text: "이번 주말 한정 스페셜", offer: "20% OFF", cta: "예약하기", img: "dessert", layout: "hero" },
   ],
 };
 
@@ -205,6 +251,11 @@ export default function TrexGalleryPage() {
 
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>①-g 카드뉴스 — 인스타 캐러셀 4:5 (커버→콘텐츠→CTA)</h2>
       <Deck label="genre=cardnews · azure · ig-portrait 4:5 · 배달로봇 5가지" content={CARDNEWS} mode="editorial" styleId="azure" formatId="ig-portrait" />
+
+      <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>★ PNG 출력 — 리포트 5 · 카드뉴스 5 · 포스터 3 (실이미지 주입)</h2>
+      <div data-png="report"><Deck label="genre=report · indigo · 16:9 · 5장 (표지 풀블리드 이미지)" content={REPORT_SAMPLE} mode="editorial" styleId="indigo" formatId="widescreen" images={["/trex-samples/c1.png", undefined, undefined, undefined, undefined]} /></div>
+      <div data-png="cardnews"><Deck label="genre=cardnews · sky · 4:5 · 5장" content={CARDNEWS_SAMPLE} mode="editorial" styleId="sky" formatId="ig-portrait" images={["/trex-samples/c1.png", "/trex-samples/c2.png", undefined, "/trex-samples/c1.png", undefined]} /></div>
+      <div data-png="poster"><Deck label="genre=advertise · red · 9:16 · 3장" content={POSTER_SAMPLE} mode="editorial" styleId="red" formatId="story" images={["/trex-samples/p1.png", "/trex-samples/p2.png", "/trex-samples/p3.png"]} /></div>
 
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>①-h ENGLISH — advertise + cardnews (영어 타이포/오버플로)</h2>
       <Deck label="genre=advertise · EN · coral · story 9:16" content={AD_EN} mode="editorial" styleId="coral" formatId="story" locale="en" />

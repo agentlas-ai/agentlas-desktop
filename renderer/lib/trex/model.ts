@@ -414,11 +414,14 @@ function coverSlide(theme: ModeTheme, total: number, o: Orient, title: string, s
   const dna = opts?.dna;
   const port = o === "portrait";
   const sq = o === "square";
-  const ink = dna?.coverInk ?? dna?.ink ?? theme.ink;
-  const sub = subtitle || (locale === "ko" ? "핵심을 한 줄로 요약하세요." : "Summarize the key idea in one line.");
   const comp = dna?.coverComp ?? "classic";
   const withImg = !!dna && opts?.images !== false;
+  // 표지 배경 규칙: 단색 금지 → 이미지 있으면 풀블리드, 없으면 흰색(+어두운 글자).
+  const useWhiteCover = !!dna && !withImg;
+  const ink = useWhiteCover ? (dna?.ink ?? theme.ink) : (dna?.coverInk ?? dna?.ink ?? theme.ink);
+  const sub = subtitle || (locale === "ko" ? "핵심을 한 줄로 요약하세요." : "Summarize the key idea in one line.");
   const ts = scaleOf(opts, o);
+  const coverBoost = dna ? 1.5 : 1; // 표지 제목 1.5배(dna 덱)
   const coverPrompt = (coverImg || "").trim() || `A striking hero visual for a presentation titled "${deckTitle || title}"`;
   // Z-패턴 우상단 앵커 — 좌상단 킥커(로고 위치)와 짝을 이루는 메타(날짜).
   const meta = new Date().toLocaleDateString(locale === "ko" ? "ko-KR" : "en-US", { year: "numeric", month: "short" });
@@ -427,7 +430,7 @@ function coverSlide(theme: ModeTheme, total: number, o: Orient, title: string, s
   if (comp === "poster") {
     // 유파 포스터 구도(Z-패턴): 좌상 킥커 → 우상 메타 → 좌하 거대 제목 → 우하 페이지/CTA(푸터).
     const tw = withImg && !port ? 52 : port ? 88 : sq ? 86 : 82;
-    const base = ts.display; // 스펙: 맨 앞장 제목 = h1(본문 헤드라인과 동일 단계)
+    const base = ts.display * coverBoost; // 표지 제목 = h1 × 부스트(1.5)
     const tSize = (dna ? fitTitleSpec : fitTitleSize)(title, base);
     blocks = [
       ...(withImg
@@ -443,7 +446,7 @@ function coverSlide(theme: ModeTheme, total: number, o: Orient, title: string, s
   } else if (comp === "centered" && withImg && dna?.coverPhoto === "bleed") {
     // 공식① 풀블리드 — 사진이 화면 전체, 다크 스크림 위 밝은 타이포(보그 커버 문법).
     // 이미지 도착 전에도 성립: coverBg가 다크 필드라 밝은 잉크가 항상 읽힌다.
-    const tSize = fitTitleSpec(title, ts.display);
+    const tSize = fitTitleSpec(title, ts.display * coverBoost);
     blocks = [
       imageBlock({ x: 0, y: 0, w: 100, h: 100 }, coverPrompt, { scrim: true }),
       { id: bid(), kind: "kicker", x: 10, y: port ? 7 : 8, w: 80, size: ts.note, text: "T-REX · STUDIO", align: "center" },
@@ -455,7 +458,7 @@ function coverSlide(theme: ModeTheme, total: number, o: Orient, title: string, s
   } else if (comp === "centered") {
     // 중앙 정렬의 품격(하라 등) — 킥커 · 플레이트 사진(소프트 엣지 페이드) · 제목 · 부제.
     // 컨설팅(챕터 밴드) 덱은 정부 보고서 표지 문법: 제목 상하 헤어라인(중기부 커버).
-    const base = ts.display;
+    const base = ts.display * coverBoost;
     const tSize = (dna ? fitTitleSpec : fitTitleSize)(title, base);
     const fade = dna?.coverPhoto === "plate" ? ("bottom" as const) : undefined;
     const gov = !!dna?.chapterBand && !port && plain(title).length <= 26; // 2줄 제목이면 헤어라인 생략(겹침 방지)
@@ -472,7 +475,7 @@ function coverSlide(theme: ModeTheme, total: number, o: Orient, title: string, s
     ];
   } else if (comp === "banner") {
     // 비녤리 밴드 구도(Z-패턴 변형) — 상단 잉크 밴드 아래 볼드 제목 + 우측 사진 패널.
-    const base = ts.display;
+    const base = ts.display * coverBoost;
     const tSize = (dna ? fitTitleSpec : fitTitleSize)(title, base);
     blocks = [
       ...(withImg
@@ -486,7 +489,7 @@ function coverSlide(theme: ModeTheme, total: number, o: Orient, title: string, s
       footer(0, total, ink),
     ];
   } else {
-    const base = theme.mode === "hybrid" ? (port ? 9.5 : sq ? 7.2 : 6.6) : port ? 8.5 : sq ? 6.5 : 5.4;
+    const base = (theme.mode === "hybrid" ? (port ? 9.5 : sq ? 7.2 : 6.6) : port ? 8.5 : sq ? 6.5 : 5.4) * coverBoost;
     const tSize = (dna ? fitTitleSpec : fitTitleSize)(title, base);
     blocks = [
       { id: bid(), kind: "kicker", x: 6, y: port ? 8 : 12, w: 70, size: port ? 1.7 : 1.4, text: "T-REX · STUDIO" },
@@ -496,7 +499,13 @@ function coverSlide(theme: ModeTheme, total: number, o: Orient, title: string, s
       footer(0, total, theme.ink),
     ];
   }
-  return { id: bid(), bg: theme.coverBg, ink, scene: dna ? "none" : theme.coverScene, blocks };
+  // 표지 배경: 흰색(이미지 없음) · 다크 베이스(풀블리드 이미지 뒤 — 단색 액센트 금지) · 유파 지정(그 외).
+  const cbg: SlideBg = useWhiteCover
+    ? { kind: "solid", color: "#FFFFFF" }
+    : withImg && comp === "centered" && dna?.coverPhoto === "bleed"
+      ? { kind: "solid", color: "#141119" }
+      : theme.coverBg;
+  return { id: bid(), bg: cbg, ink, scene: dna ? "none" : theme.coverScene, blocks };
 }
 
 /**
