@@ -449,8 +449,9 @@ function BlockView({
       <div style={{ height: cqw(dna && dna.borderScale > 1 ? 0.32 * dna.borderScale : 0.15), width: "100%", background: b.accent ? accent : withAlpha(ink, dna && dna.borderScale > 1 ? 0.55 : 0.12), borderRadius: dna && dna.radius === 0 ? 0 : 2 }} />
     );
   else if (b.kind === "pill")
+    // 필 라벨 — 한글 글리프가 테두리에 닿지 않게 세로 패딩·line-height로 항상 여백을 둔다(글자 주위 여백 규칙).
     inner = (
-      <span {...ed("text")} style={{ display: "inline-block", fontSize: cqw(b.size ?? 1.2), fontWeight: 800, letterSpacing: ".06em", color: accent, background: withAlpha(accent, 0.14), padding: `${cqw(0.5)} ${cqw(1.1)}`, borderRadius: dna && dna.radius === 0 ? 0 : 999, ...(monoFont ? { fontFamily: monoFont } : null) }}>
+      <span {...ed("text")} style={{ display: "inline-block", fontSize: cqw(b.size ?? 1.2), fontWeight: 800, lineHeight: 1.35, letterSpacing: ".06em", color: accent, background: withAlpha(accent, 0.14), padding: `${cqw(0.62)} ${cqw(1.2)}`, borderRadius: dna && dna.radius === 0 ? 0 : 999, ...(monoFont ? { fontFamily: monoFont } : null) }}>
         {b.text}
       </span>
     );
