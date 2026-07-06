@@ -267,14 +267,19 @@ function Scene({ kind, accent }: { kind: SceneKind; accent: string }) {
  * 리치 강조 — 텍스트 안 `**구간**`을 강조로 렌더(컨설팅 덱 문법: 제목=액센트 컬러 구간,
  * 본문=볼드+형광펜). LLM이 슬라이드당 1~2개만 마킹한다. 마커가 없으면 원문 그대로.
  */
-function rich(text: string | undefined, mode: "title" | "body", accent: string, ink: string, hl?: string): React.ReactNode {
+function rich(text: string | undefined, mode: "title" | "body", accent: string, ink: string, hl?: string, emBox?: boolean): React.ReactNode {
   const t = text ?? "";
   if (!t.includes("**")) return t;
   const parts = t.split(/\*\*(.+?)\*\*/g);
   return parts.map((p, i) =>
     i % 2 === 1 ? (
       mode === "title" ? (
-        <span key={i} style={{ color: accent }}>{p}</span>
+        emBox ? (
+          // accent 배경(포스터) 대비 — 흰 반투명 하이라이트 박스 + 흰 글자.
+          <span key={i} style={{ color: "#fff", background: "rgba(255,255,255,.22)", padding: "0 0.18em", borderRadius: 3, boxDecorationBreak: "clone" as never, WebkitBoxDecorationBreak: "clone" as never }}>{p}</span>
+        ) : (
+          <span key={i} style={{ color: accent }}>{p}</span>
+        )
       ) : (
         // 형광펜: 유파가 불투명 하이라이트 색을 규정하면(컨설팅=노랑) 그 색, 아니면 액센트 틴트.
         <span key={i} style={{ fontWeight: 800, color: ink, background: hl ?? withAlpha(accent, 0.16), padding: "0 0.15em", borderRadius: 2, boxDecorationBreak: "clone" as never, WebkitBoxDecorationBreak: "clone" as never }}>{p}</span>
@@ -339,7 +344,7 @@ function BlockView({
           textAlign: b.align ?? "left",
         }}
       >
-        {rich(b.text, "title", accent, ink)}
+        {rich(b.text, "title", accent, ink, undefined, b.emBox)}
       </div>
     );
   else if (b.kind === "subtitle" || b.kind === "body")

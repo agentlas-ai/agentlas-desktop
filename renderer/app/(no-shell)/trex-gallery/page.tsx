@@ -31,8 +31,8 @@ const FULL: DeckContent = {
   ],
 };
 
-function Deck({ label, content, deck: prebuilt, mode, formatId, styleId, only }: { label: string; content?: DeckContent; deck?: TrexDeck; mode?: ArtMode; formatId?: string; styleId?: string; only?: number[] }) {
-  const deck = prebuilt ?? buildDeckFromContent({ ...(content as DeckContent), mode: mode ?? content?.mode }, formatId, "ko", styleId);
+function Deck({ label, content, deck: prebuilt, mode, formatId, styleId, only, locale = "ko" }: { label: string; content?: DeckContent; deck?: TrexDeck; mode?: ArtMode; formatId?: string; styleId?: string; only?: number[]; locale?: "ko" | "en" }) {
+  const deck = prebuilt ?? buildDeckFromContent({ ...(content as DeckContent), mode: mode ?? content?.mode }, formatId, locale, styleId);
   const fmt = formatById(prebuilt ? prebuilt.formatId : formatId);
   const ratio = formatRatio(fmt);
   const wide = fmt.w / fmt.h >= 1.25;
@@ -119,6 +119,30 @@ const CARDNEWS: DeckContent = {
   ],
 };
 
+// 영어 advertise + cardnews (영어 타이포/오버플로 검증).
+const AD_EN: DeckContent = {
+  title: "MEGA BURGER",
+  genre: "advertise",
+  slides: [
+    { role: "statement", title: "MEGA **BURGER** Deal", text: "Thick patty, fresh ingredients", offer: "BUY 1 GET 1", cta: "ORDER NOW", img: "a juicy gourmet cheeseburger on dark background, dramatic studio lighting" },
+    { role: "statement", title: "EXCLUSIVE **FURNITURE**", text: "Designs inspired by a classic touch", offer: "30% OFF", cta: "SHOP NOW", img: "modern minimalist living room furniture, warm tones" },
+    { role: "statement", title: "Weekend **Dessert** Fair", text: "This weekend only", offer: "20% OFF", cta: "RESERVE", img: "assorted colorful gourmet desserts on a marble table" },
+    { role: "statement", title: "YEAR-END **DANCE** SHOW", text: "Dec 31 · City Hall", offer: "TICKETS", cta: "BOOK NOW", img: "ballet dancer silhouette on stage under a dramatic spotlight" },
+    { role: "statement", title: "BALLET **CLASSES**", text: "Enroll now · 555-1234", offer: "FREE TRIAL", cta: "ENROLL", img: "ballet class studio with soft natural light" },
+  ],
+};
+const CARDNEWS_EN: DeckContent = {
+  title: "5 Rising Delivery Robots",
+  subtitle: "The market opened after deregulation",
+  genre: "cardnews",
+  slides: [
+    { role: "metrics", title: "A $250M market just opened", text: "2026 sidewalk access fully approved for delivery robots", img: "a delivery robot crossing a city crosswalk at dusk" },
+    { role: "structure", title: "Three camps dominate", text: "Platform, maker, and telco handle 91% of orders", img: "tech companies competing, abstract cityscape" },
+    { role: "statement", title: "Speed of execution decides the winner", text: "One proven site beats a perfect plan at the table" },
+    { role: "process", title: "Start with campuses and complexes", items: ["Pilot in a regulatory sandbox", "Expand platform partnerships", "Nationwide rollout at scale"], img: "university campus with a small delivery robot" },
+  ],
+};
+
 // 긴 텍스트 스트레스 — LLM이 길게 쓸 때 클리핑/오버플로 임계 검증.
 const STRESS: DeckContent = {
   title: "글로벌 공급망 리스크와 지정학적 불확실성 속에서 회복탄력성을 확보하기 위한 통합 전략 로드맵",
@@ -181,6 +205,10 @@ export default function TrexGalleryPage() {
 
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>①-g 카드뉴스 — 인스타 캐러셀 4:5 (커버→콘텐츠→CTA)</h2>
       <Deck label="genre=cardnews · azure · ig-portrait 4:5 · 배달로봇 5가지" content={CARDNEWS} mode="editorial" styleId="azure" formatId="ig-portrait" />
+
+      <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>①-h ENGLISH — advertise + cardnews (영어 타이포/오버플로)</h2>
+      <Deck label="genre=advertise · EN · coral · story 9:16" content={AD_EN} mode="editorial" styleId="coral" formatId="story" locale="en" />
+      <Deck label="genre=cardnews · EN · azure · ig-portrait 4:5" content={CARDNEWS_EN} mode="editorial" styleId="azure" formatId="ig-portrait" locale="en" />
 
       <h2 style={{ fontSize: 15, fontWeight: 900, margin: "24px 0 14px" }}>② 방향 인지 — 같은 콘텐츠, 세로/정사각</h2>
       <Deck label="story 9:16 (portrait)  ·  표지·구조·과정·클로징" content={FULL} mode="editorial" formatId="story" only={[0, 4, 5, 7]} />

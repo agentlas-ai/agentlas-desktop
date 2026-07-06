@@ -108,6 +108,8 @@ export interface TrexBlock {
   arrow?: boolean;
   /** 회전(deg) — 각진 태그/대각 요소용. */
   rotate?: number;
+  /** title 강조(**단어**)를 accent 색 대신 흰색 하이라이트 박스로 — accent 배경(포스터 split/diagonal) 대비 확보. */
+  emBox?: boolean;
 }
 
 export type SlideBg =
@@ -1098,7 +1100,9 @@ function posterSlide(theme: ModeTheme, idx: number, total: number, c: SlideConte
   const brand = shorten(deckTitle, 18);
   const imgPrompt = imgPromptOf(c, headline);
   const kick = (x: number, y: number, w: number, col?: boolean): TrexBlock => ({ id: bid(), kind: "kicker", x, y, w, size: 1.4, text: brand, accent: col });
-  const H = (x: number, y: number, w: number, size: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "title", x, y, w, size, text: headline, weight: 900, align, accent: false });
+  // split·diagonal은 accent 배경 → 강조 단어를 흰 하이라이트 박스로(accent색이면 안 보임).
+  const onAccentBg = arch === "split" || arch === "diagonal";
+  const H = (x: number, y: number, w: number, size: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "title", x, y, w, size, text: headline, weight: 900, align, accent: false, ...(onAccentBg ? { emBox: true } : {}) });
   const S = (x: number, y: number, w: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "subtitle", x, y, w, size: 1.7, text: sub, align });
   const C = (x: number, y: number, w: number, h: number, align?: "left" | "center"): TrexBlock => ({ id: bid(), kind: "cta", x, y, w, h, ctaStyle: "pill", text: cta, arrow: true, size: 1.9, align });
   let bg: SlideBg;
