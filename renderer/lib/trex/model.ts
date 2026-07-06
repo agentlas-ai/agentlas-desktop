@@ -1308,7 +1308,13 @@ function hardClampBlocks(blocks: TrexBlock[], aspect: number): void {
     const maxLines = Math.max(1, Math.floor((budgetPct * aspect) / (size * 1.5)));
     const cap = Math.ceil(cpl * maxLines * 1.1); // 10% 여유 — 경계 근처 정상 텍스트는 살린다
     const t = plain(b.text);
-    if (t.length > cap) b.text = t.slice(0, Math.max(0, cap - 1)).trimEnd() + "…";
+    if (t.length > cap) {
+      // 최후 안전망(콘텐츠가 예산 초과 시) — 중간이 아니라 단어 경계에서 자른다.
+      let cut = t.slice(0, Math.max(0, cap - 1));
+      const sp = cut.lastIndexOf(" ");
+      if (sp > cap * 0.6) cut = cut.slice(0, sp);
+      b.text = cut.trimEnd() + "…";
+    }
   }
 }
 
