@@ -17,7 +17,6 @@ files:
   # dist/shared/** holds runtime values (shared/models.ts). MUST be packaged or the app crashes.
   - dist/shared/**/*
   - dist/renderer/**/*
-  - cli/**/*
   - package.json
   - "!**/*.map"
 
@@ -90,14 +89,8 @@ mac:
   # NOTE: electron-builder 25.x writes latest-mac.yml referencing the .dmg even with both
   # targets, so scripts/fix-mac-latest-zip.mjs rewrites it to point at the .zip after build.
   target:
-    - target: dmg
-      arch:
-        - arm64
-        - x64
-    - target: zip
-      arch:
-        - arm64
-        - x64
+    - dmg
+    - zip
   icon: build-resources/icon.icns
   artifactName: "Agentlas-${version}-${arch}.${ext}"
 

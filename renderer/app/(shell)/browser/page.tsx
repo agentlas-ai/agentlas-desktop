@@ -1,12 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import type { BrowserStatus, BrowserSite, BrowserActionLog } from "@/lib/types";
 
 type Tab = "sites" | "logs";
 
 export default function BrowserPage() {
+  const { locale } = useT();
+  const ko = locale === "ko";
   const [status, setStatus] = useState<BrowserStatus | null>(null);
   const [sites, setSites] = useState<BrowserSite[]>([]);
   const [logs, setLogs] = useState<BrowserActionLog[]>([]);
@@ -50,56 +53,101 @@ export default function BrowserPage() {
     <div className="rd browser-root">
       <header className="browser-head">
         <div>
-          <div className="browser-kicker">브라우저</div>
-          <h1>로그인해 둔 사이트를 에이전트가 대신 조작해요</h1>
+          <div className="browser-kicker">{ko ? "브라우저" : "Browser"}</div>
+          <h1>
+            {ko
+              ? "로그인해 둔 사이트를 에이전트가 대신 조작해요"
+              : "Let agents operate the sites you sign in to"}
+          </h1>
         </div>
         <button className="browser-btn ghost" onClick={() => void refresh()}>
-          새로고침
+          {ko ? "새로고침" : "Refresh"}
         </button>
       </header>
 
-      {/* 쉬운 설명 — 비개발자용 */}
       <section className="browser-explain">
         <p className="lead">
-          Agentlas는 <b>전용 브라우저 프로필</b> 하나를 따로 만들어 씁니다. 여러분이 매일 쓰는 크롬은
-          건드리지 않아요. 아래에서 사이트에 <b>한 번만 로그인</b>해 두면, 그 세션을 기억했다가
-          에이전트가 그 자리에서 이어서 일합니다.
+          {ko ? (
+            <>
+              Agentlas는 <b>전용 브라우저 프로필</b> 하나를 따로 만들어 씁니다. 여러분이 매일 쓰는
+              크롬은 건드리지 않아요. 아래에서 사이트에 <b>한 번만 로그인</b>해 두면, 그 세션을
+              기억했다가 에이전트가 그 자리에서 이어서 일합니다.
+            </>
+          ) : (
+            <>
+              Agentlas uses a separate <b>dedicated browser profile</b>. It does not touch your everyday
+              Chrome profile. Sign in to a site <b>once</b> below, and agents can resume work from that
+              saved session.
+            </>
+          )}
         </p>
         <ul className="browser-points">
           <li>
-            <span className="dot ok" /> 여러분의 진짜 크롬·비밀번호는 그대로. 전용 프로필만 사용해요.
+            <span className="dot ok" />{" "}
+            {ko
+              ? "여러분의 진짜 크롬·비밀번호는 그대로. 전용 프로필만 사용해요."
+              : "Your real Chrome profile and passwords stay untouched. Agents only use the dedicated profile."}
           </li>
           <li>
-            <span className="dot ok" /> 비밀번호를 저장하면 <b>OS 금고(Keychain·Windows 자격증명)</b>에만
-            암호화되어 들어갑니다. 화면·에이전트엔 절대 안 보여요.
+            <span className="dot ok" />{" "}
+            {ko ? (
+              <>
+                비밀번호를 저장하면 <b>OS 금고(Keychain·Windows 자격증명)</b>에만 암호화되어
+                들어갑니다. 화면·에이전트엔 절대 안 보여요.
+              </>
+            ) : (
+              <>
+                Saved passwords are encrypted only in the <b>OS vault (Keychain or Windows Credential
+                Manager)</b>. They are never shown to the screen or to agents.
+              </>
+            )}
           </li>
           <li>
-            <span className="dot warn" /> 전송·게시·결제처럼 되돌릴 수 없는 행동은 <b>실행 전에 확인</b>을
-            받아요. (결제는 매번, 나머지는 “항상 승인”을 기억)
+            <span className="dot warn" />{" "}
+            {ko ? (
+              <>
+                전송·게시·결제처럼 되돌릴 수 없는 행동은 <b>실행 전에 확인</b>을 받아요. (결제는
+                매번, 나머지는 “항상 승인”을 기억)
+              </>
+            ) : (
+              <>
+                Irreversible actions like sending, posting, or payment require <b>confirmation before
+                execution</b>. Payments are always confirmed; other actions can remember “always allow.”
+              </>
+            )}
           </li>
         </ul>
       </section>
 
-      {/* 상태 */}
       <section className="browser-status">
         <div className="stat">
-          <span className="stat-label">브라우저 감지</span>
+          <span className="stat-label">{ko ? "브라우저 감지" : "Browser detection"}</span>
           <span className={`stat-val ${status?.chromeFound ? "ok" : "err"}`}>
-            {status ? (status.chromeFound ? "✓ Chrome 준비됨" : "✗ Chrome을 찾을 수 없음") : "확인 중…"}
+            {status
+              ? status.chromeFound
+                ? ko
+                  ? "✓ Chrome 준비됨"
+                  : "✓ Chrome ready"
+                : ko
+                  ? "✗ Chrome을 찾을 수 없음"
+                  : "✗ Chrome not found"
+              : ko
+                ? "확인 중…"
+                : "Checking…"}
           </span>
         </div>
         <div className="stat">
-          <span className="stat-label">전용 프로필</span>
+          <span className="stat-label">{ko ? "전용 프로필" : "Dedicated profile"}</span>
           <span className="stat-val mono">{status?.profilePath ?? "—"}</span>
         </div>
       </section>
 
       <nav className="browser-tabs">
         <button className={tab === "sites" ? "on" : ""} onClick={() => setTab("sites")}>
-          사이트 ({sites.length})
+          {ko ? "사이트" : "Sites"} ({sites.length})
         </button>
         <button className={tab === "logs" ? "on" : ""} onClick={() => setTab("logs")}>
-          사용 기록
+          {ko ? "사용 기록" : "Activity log"}
         </button>
       </nav>
 
@@ -107,12 +155,14 @@ export default function BrowserPage() {
         <section className="browser-sites">
           <div className="sites-toolbar">
             <button className="browser-btn accent" onClick={() => setEditing("new")}>
-              + 사이트 추가
+              {ko ? "+ 사이트 추가" : "+ Add site"}
             </button>
           </div>
           {sites.length === 0 && (
             <div className="browser-empty">
-              아직 등록한 사이트가 없어요. “사이트 추가”로 로그인해 둘 곳을 등록하세요.
+              {ko
+                ? "아직 등록한 사이트가 없어요. “사이트 추가”로 로그인해 둘 곳을 등록하세요."
+                : "No sites have been added yet. Use “Add site” to register a place to sign in."}
             </div>
           )}
           <div className="sites-grid">
@@ -123,19 +173,27 @@ export default function BrowserPage() {
                 onEdit={() => setEditing(s)}
                 onLogin={async () => {
                   const r = await api?.browser.openLogin(s.site);
-                  if (r?.ok) flash(`${s.site} 로그인 창을 열었어요. 로그인 후 창을 닫으면 저장됩니다.`);
-                  else flash(r?.error ?? "로그인 창을 열지 못했어요.");
+                  if (r?.ok) {
+                    flash(
+                      ko
+                        ? `${s.site} 로그인 창을 열었어요. 로그인 후 창을 닫으면 저장됩니다.`
+                        : `Opened the ${s.site} sign-in window. Sign in, then close it to save the session.`,
+                    );
+                  } else {
+                    flash(ko ? r?.error ?? "로그인 창을 열지 못했어요." : "Could not open the sign-in window.");
+                  }
                 }}
                 onCaptured={async () => {
                   await api?.browser.markSession(s.site, "valid");
-                  flash("로그인 세션을 저장했어요.");
+                  flash(ko ? "로그인 세션을 저장했어요." : "Saved the login session.");
                   void refresh();
                 }}
                 onDelete={async () => {
                   await api?.browser.deleteSite(s.site);
-                  flash(`${s.site} 삭제됨`);
+                  flash(ko ? `${s.site} 삭제됨` : `${s.site} removed`);
                   void refresh();
                 }}
+                ko={ko}
               />
             ))}
           </div>
@@ -144,7 +202,9 @@ export default function BrowserPage() {
 
       {tab === "logs" && (
         <section className="browser-logs">
-          {logsByDate.length === 0 && <div className="browser-empty">아직 기록이 없어요.</div>}
+          {logsByDate.length === 0 && (
+            <div className="browser-empty">{ko ? "아직 기록이 없어요." : "No activity yet."}</div>
+          )}
           {logsByDate.map(([day, items]) => (
             <div key={day} className="log-day">
               <div className="log-date">{day}</div>
@@ -152,10 +212,20 @@ export default function BrowserPage() {
                 {items.map((l) => (
                   <li key={l.id}>
                     <span className="log-time">{l.ts.slice(11, 19)}</span>
-                    <span className="log-action">{l.action}</span>
+                    <span className="log-action" title={l.action}>
+                      {formatBrowserLogAction(l.action, ko)}
+                    </span>
                     {l.site && <span className="log-site">{l.site}</span>}
-                    {l.result && <span className={`log-result ${l.result}`}>{l.result}</span>}
-                    {l.approval && <span className="log-approval">{l.approval}</span>}
+                    {l.result && (
+                      <span className={`log-result ${l.result}`} title={l.result}>
+                        {formatBrowserLogResult(l.result, ko)}
+                      </span>
+                    )}
+                    {l.approval && (
+                      <span className="log-approval" title={l.approval}>
+                        {formatBrowserApproval(l.approval, ko)}
+                      </span>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -171,9 +241,10 @@ export default function BrowserPage() {
           onSave={async (input) => {
             await api?.browser.saveSite(input);
             setEditing(null);
-            flash("저장했어요.");
+            flash(ko ? "저장했어요." : "Saved.");
             void refresh();
           }}
+          ko={ko}
         />
       )}
 
@@ -422,15 +493,28 @@ function SiteCard({
   onLogin,
   onCaptured,
   onDelete,
+  ko,
 }: {
   site: BrowserSite;
   onEdit: () => void;
   onLogin: () => void;
   onCaptured: () => void;
   onDelete: () => void;
+  ko: boolean;
 }) {
   const st = site.session.status;
-  const badge = st === "valid" ? "🟢 로그인됨" : st === "expired" ? "🟡 만료" : "⚪ 로그인 안 됨";
+  const badge =
+    st === "valid"
+      ? ko
+        ? "🟢 로그인됨"
+        : "🟢 Signed in"
+      : st === "expired"
+        ? ko
+          ? "🟡 만료"
+          : "🟡 Expired"
+        : ko
+          ? "⚪ 로그인 안 됨"
+          : "⚪ Not signed in";
   return (
     <div className="sc">
       <div className="sc-main">
@@ -438,7 +522,7 @@ function SiteCard({
         <div className="sc-sub">
           {site.site}
           {site.username ? ` · ${site.username}` : ""}
-          {site.hasPassword ? " · 🔑 비번 저장됨" : ""}
+          {site.hasPassword ? (ko ? " · 🔑 비번 저장됨" : " · 🔑 password saved") : ""}
         </div>
         <div className="sc-badge">
           {badge}
@@ -446,15 +530,21 @@ function SiteCard({
         </div>
       </div>
       <div className="sc-actions">
-        <button onClick={onLogin} title="전용 프로필로 로그인 창 열기">
-          로그인 창
+        <button
+          onClick={onLogin}
+          title={ko ? "전용 프로필로 로그인 창 열기" : "Open the sign-in window in the dedicated profile"}
+        >
+          {ko ? "로그인 창" : "Sign in"}
         </button>
-        <button onClick={onCaptured} title="지금 로그인돼 있으면 세션 저장">
-          세션 저장
+        <button
+          onClick={onCaptured}
+          title={ko ? "지금 로그인돼 있으면 세션 저장" : "Save the session if it is currently signed in"}
+        >
+          {ko ? "세션 저장" : "Save session"}
         </button>
-        <button onClick={onEdit}>수정</button>
+        <button onClick={onEdit}>{ko ? "수정" : "Edit"}</button>
         <button className="danger" onClick={onDelete}>
-          삭제
+          {ko ? "삭제" : "Delete"}
         </button>
       </div>
       <style jsx>{`
@@ -508,6 +598,7 @@ function SiteEditor({
   site,
   onClose,
   onSave,
+  ko,
 }: {
   site: BrowserSite | null;
   onClose: () => void;
@@ -517,6 +608,7 @@ function SiteEditor({
     username?: string | null;
     password?: string | null;
   }) => void;
+  ko: boolean;
 }) {
   const [siteAddr, setSiteAddr] = useState(site?.site ?? "");
   const [label, setLabel] = useState(site?.label ?? "");
@@ -526,9 +618,9 @@ function SiteEditor({
   return (
     <div className="be-backdrop" onClick={onClose}>
       <div className="be" onClick={(e) => e.stopPropagation()}>
-        <h2>{site ? "사이트 수정" : "사이트 추가"}</h2>
+        <h2>{site ? (ko ? "사이트 수정" : "Edit site") : ko ? "사이트 추가" : "Add site"}</h2>
         <label>
-          사이트 주소
+          {ko ? "사이트 주소" : "Site address"}
           <input
             value={siteAddr}
             disabled={Boolean(site)}
@@ -537,26 +629,38 @@ function SiteEditor({
           />
         </label>
         <label>
-          이름(선택)
-          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="인스타 계정" />
+          {ko ? "이름(선택)" : "Name (optional)"}
+          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={ko ? "인스타 계정" : "Instagram account"} />
         </label>
         <label>
-          아이디(선택)
+          {ko ? "아이디(선택)" : "Username (optional)"}
           <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="myid" />
         </label>
         <label>
-          비밀번호(선택 · 자동 재로그인용)
+          {ko ? "비밀번호(선택 · 자동 재로그인용)" : "Password (optional · for automatic re-login)"}
           <input
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder={site?.hasPassword ? "•••••• (저장됨 — 바꿀 때만 입력)" : "세션 만료 시 자동 로그인"}
+            placeholder={
+              site?.hasPassword
+                ? ko
+                  ? "•••••• (저장됨 — 바꿀 때만 입력)"
+                  : "•••••• (saved — enter only to change)"
+                : ko
+                  ? "세션 만료 시 자동 로그인"
+                  : "Auto sign-in if the session expires"
+            }
           />
-          <span className="hint">비밀번호는 OS 금고에만 암호화 저장됩니다. 화면·에이전트엔 안 보여요.</span>
+          <span className="hint">
+            {ko
+              ? "비밀번호는 OS 금고에만 암호화 저장됩니다. 화면·에이전트엔 안 보여요."
+              : "Passwords are encrypted only in the OS vault. They are never shown on screen or to agents."}
+          </span>
         </label>
         <div className="be-actions">
           <button className="ghost" onClick={onClose}>
-            취소
+            {ko ? "취소" : "Cancel"}
           </button>
           <button
             className="accent"
@@ -569,7 +673,7 @@ function SiteEditor({
               })
             }
           >
-            저장
+            {ko ? "저장" : "Save"}
           </button>
         </div>
       </div>
@@ -648,4 +752,59 @@ function SiteEditor({
       `}</style>
     </div>
   );
+}
+
+function formatBrowserLogAction(action: string, ko: boolean): string {
+  const labels: Record<string, [string, string]> = {
+    "vault.save": ["사이트 저장", "Site saved"],
+    "vault.delete": ["사이트 삭제", "Site removed"],
+    "session.capture": ["세션 캡처", "Session captured"],
+    "session.login_window": ["로그인 창 열림", "Sign-in window opened"],
+    "session.mark": ["세션 상태 변경", "Session status changed"],
+    send: ["메시지 전송", "Message sent"],
+    publish: ["게시/공개", "Published"],
+    post: ["게시", "Posted"],
+    submit: ["제출", "Submitted"],
+    delete: ["삭제", "Deleted"],
+    payment: ["결제", "Payment"],
+  };
+  const hit = labels[action];
+  if (hit) return ko ? hit[0] : hit[1];
+  return humanizeBrowserCode(action);
+}
+
+function formatBrowserLogResult(result: string, ko: boolean): string {
+  const labels: Record<string, [string, string]> = {
+    ok: ["정상", "OK"],
+    opened: ["열림", "Opened"],
+    valid: ["유효", "Valid"],
+    expired: ["만료", "Expired"],
+    none: ["없음", "None"],
+    auto: ["자동 승인", "Auto-approved"],
+    blocked: ["차단됨", "Blocked"],
+    approved: ["승인됨", "Approved"],
+    denied: ["거부됨", "Denied"],
+  };
+  const hit = labels[result];
+  if (hit) return ko ? hit[0] : hit[1];
+  return humanizeBrowserCode(result);
+}
+
+function formatBrowserApproval(approval: string, ko: boolean): string {
+  const labels: Record<string, [string, string]> = {
+    once: ["한 번만", "Once"],
+    always: ["항상 승인", "Always allow"],
+    deny: ["거부", "Denied"],
+  };
+  const hit = labels[approval];
+  if (hit) return ko ? hit[0] : hit[1];
+  return humanizeBrowserCode(approval);
+}
+
+function humanizeBrowserCode(value: string): string {
+  return value
+    .replace(/[._-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (m) => m.toUpperCase());
 }

@@ -1,9 +1,9 @@
 // Agentlas Architecture Manifest — the SINGLE SOURCE OF TRUTH for the built-in
-// agent architecture that ships with the app AND the terminal CLI.
+// agent architecture that ships with the desktop app.
 //
 // Why this file exists (read before editing):
 //   The Agentlas *web* product runs hosted builder/orchestration services. The Agentlas *desktop app*
-//   and *terminal CLI* instead run a local "architecture agent" (Hermes-style):
+//   instead runs a local "architecture agent" (Hermes-style):
 //   a small, always-present set of governance agents + a memory substrate that turn
 //   ordinary folders and chats into a continuity-preserving, bias-resistant workspace.
 //
@@ -27,14 +27,13 @@
 // UPGRADE CONTRACT (so research changes never corrupt installs):
 //   1. Edit the agent prompts / contract below.
 //   2. Bump ARCHITECTURE_VERSION (semver).
-//   3. On next app boot (or `agentlas` run), the seeder notices the version change and
+//   3. On next app boot, the seeder notices the version change and
 //      re-syncs the built-in agents' prompts in the DB — non-destructively (user chats,
 //      installed marketplace agents, and project memory are never touched).
-//   The compiled form of this file is what the CLI consumes: see
-//   scripts/gen-cli-architecture.mjs which emits cli/architecture.data.json.
+//   The compiled form of this file is consumed by desktop runtime scripts.
 //
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
-// so it compiles into dist/electron/** (packaged) and can be required by the JSON generator.
+// so it compiles into dist/electron/** (packaged).
 
 export const ARCHITECTURE_VERSION = "1.5.34";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";

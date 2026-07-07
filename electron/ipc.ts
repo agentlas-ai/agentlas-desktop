@@ -10,7 +10,6 @@ import { agentRunCwd } from "./runtime/exec";
 import { listRuntimeModels } from "./runtime/providers";
 import { installCli, openCliLogin, updateCli, type InstallableCli } from "./runtime/install-cli";
 import { listRuntimeCommands } from "./runtime/commands";
-import { installAgentlasCli } from "./runtime/install-agentlas-cli";
 import {
   getMultimodalSettings,
   getMultimodalStatus,
@@ -805,8 +804,6 @@ export function registerIpcHandlers(): void {
     (_e, sel: { kind: RuntimeKind; backend?: RuntimeBackend | null; availableModels?: string[] | null }) =>
       listRuntimeModels(sel.kind, sel.backend ?? null, sel.availableModels ?? null, Date.now()),
   );
-  ipcMain.handle("runtime:installAgentlasCli", () => installAgentlasCli());
-
   ipcMain.handle("agentRuntime:list", () => listAgentRuntimeOverrides());
   ipcMain.handle(
     "agentRuntime:get",

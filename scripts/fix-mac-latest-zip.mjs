@@ -7,7 +7,13 @@ import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 
 const root = resolve(new URL("..", import.meta.url).pathname);
-const releaseDir = join(root, "release");
+const args = new Map(
+  process.argv.slice(2).map((arg) => {
+    const [key, ...rest] = arg.split("=");
+    return [key, rest.length ? rest.join("=") : "1"];
+  }),
+);
+const releaseDir = resolve(root, String(args.get("--release-dir") || "release"));
 const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 
 const files = [];

@@ -5,19 +5,23 @@
 //  - 결제(payment)는 allowAlways=false → "항상 승인" 버튼을 숨겨 매번 확인.
 //  - "항상 승인"은 electron이 site+action 으로 기억 → 다음부터 스킵(동적 권한).
 import { useEffect, useState } from "react";
+import { useT } from "@/lib/i18n";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type { BrowserApprovalRequestEvent, BrowserApprovalDecision } from "@/lib/types";
 
-const ACTION_LABEL: Record<string, string> = {
-  send: "메시지 전송",
-  publish: "게시/공개",
-  delete: "삭제",
-  payment: "결제",
-  post: "게시",
-  submit: "제출",
+const ACTION_LABEL: Record<string, { ko: string; en: string }> = {
+  send: { ko: "메시지 전송", en: "Send message" },
+  publish: { ko: "게시/공개", en: "Publish" },
+  delete: { ko: "삭제", en: "Delete" },
+  payment: { ko: "결제", en: "Payment" },
+  post: { ko: "게시", en: "Post" },
+  submit: { ko: "제출", en: "Submit" },
+  action: { ko: "브라우저 작업", en: "Browser action" },
 };
 
 export function BrowserActionApprovalSheet() {
+  const { locale } = useT();
+  const ko = locale === "ko";
   const [req, setReq] = useState<BrowserApprovalRequestEvent | null>(null);
 
   useEffect(() => {
@@ -33,7 +37,7 @@ export function BrowserActionApprovalSheet() {
     setReq(null);
   };
 
-  const actionName = ACTION_LABEL[req.actionType] ?? req.actionType;
+  const actionName = browserActionName(req.actionType, ko);
   const isPayment = req.actionType === "payment";
 
   return (
@@ -44,17 +48,21 @@ export function BrowserActionApprovalSheet() {
           {req.site && <span className="baa-site">{req.site}</span>}
         </div>
         <div className="baa-summary">{req.summary}</div>
-        {isPayment && <div className="baa-note">결제는 안전을 위해 매번 확인합니다.</div>}
+        {isPayment && (
+          <div className="baa-note">
+            {ko ? "결제는 안전을 위해 매번 확인합니다." : "Payments are confirmed every time for safety."}
+          </div>
+        )}
         <div className="baa-actions">
           <button className="deny" onClick={() => resolve("deny")}>
-            거부
+            {ko ? "거부" : "Deny"}
           </button>
           <button className="once" onClick={() => resolve("once")}>
-            한 번만
+            {ko ? "한 번만" : "Allow once"}
           </button>
           {req.allowAlways && (
             <button className="always" onClick={() => resolve("always")}>
-              항상 승인
+              {ko ? "항상 승인" : "Always allow"}
             </button>
           )}
         </div>
@@ -158,4 +166,14 @@ export function BrowserActionApprovalSheet() {
       `}</style>
     </div>
   );
+}
+
+function browserActionName(actionType: string, ko: boolean): string {
+  const label = ACTION_LABEL[actionType];
+  if (label) return ko ? label.ko : label.en;
+  return actionType
+    .replace(/[._-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (m) => m.toUpperCase());
 }

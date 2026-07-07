@@ -87,7 +87,7 @@ const openLoginChildren = new Map<string, ReturnType<typeof spawn>>();
 export async function browserOpenLogin(site: string): Promise<{ ok: boolean; error?: string }> {
   const norm = normalizeSite(site);
   const exe = resolveChromeExe();
-  if (!exe) return { ok: false, error: "Chrome(또는 Edge) 실행 파일을 찾을 수 없습니다." };
+  if (!exe) return { ok: false, error: "Chrome or Edge executable could not be found." };
   const url = norm ? `https://${norm}` : "about:blank";
   const profile = browserCdpProfilePath();
   try {

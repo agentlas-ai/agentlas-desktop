@@ -121,7 +121,6 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("runtime:updateCli", kind),
     listCommands: () => ipcRenderer.invoke("runtime:listCommands"),
     listModels: (sel) => ipcRenderer.invoke("runtime:listModels", sel),
-    installAgentlasCli: () => ipcRenderer.invoke("runtime:installAgentlasCli"),
   },
   agentRuntime: {
     list: () => ipcRenderer.invoke("agentRuntime:list"),

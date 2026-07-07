@@ -3374,8 +3374,6 @@ export interface AgentlasIpc {
       backend?: RuntimeBackend | null;
       availableModels?: string[] | null;
     }) => Promise<Array<{ id: string; label: string; tag?: string }>>;
-    /** `agentlas` 터미널 CLI 설치 — PATH에 래퍼 스크립트를 둔다. */
-    installAgentlasCli: () => Promise<{ ok: boolean; path: string; message: string }>;
   };
   agentRuntime: {
     list: () => Promise<AgentRuntimeOverride[]>;

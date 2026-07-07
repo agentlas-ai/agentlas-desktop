@@ -134,17 +134,24 @@ rm -rf "$project_dir/release" "$local_release"
 mkdir -p "$local_release"
 cleanup_appledouble "$project_dir/dist"
 
+build_mac_arch() {
+  local arch="$1"
+  cleanup_appledouble "$project_dir/dist" "$project_dir/release" "$local_release"
+  COPYFILE_DISABLE=1 electron-builder \
+    --mac "--${arch}" \
+    --config electron-builder.mac-stable.yml \
+    --config.mac.notarize=false \
+    --config.directories.output="$local_release"
+}
+
 while true; do
   cleanup_appledouble "$project_dir/dist" "$project_dir/release" "$local_release"
   sleep 0.05
 done &
 cleaner_pid=$!
 
-COPYFILE_DISABLE=1 electron-builder \
-  --mac --arm64 --x64 \
-  --config electron-builder.mac-stable.yml \
-  --config.mac.notarize=false \
-  --config.directories.output="$local_release"
+build_mac_arch arm64
+build_mac_arch x64
 
 rm -rf "$project_dir/release"
 mkdir -p "$project_dir/release"

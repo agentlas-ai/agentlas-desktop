@@ -145,7 +145,7 @@ function profileSeeded(dst) {
 async function ensureChrome() {
   if (await portReady(PORT)) { log('CDP already up on', PORT); return; }
   const { userData, exe } = chromeInfo();
-  if (!fs.existsSync(exe)) throw new Error('Google Chrome 실행 파일을 찾을 수 없습니다: ' + exe);
+  if (!fs.existsSync(exe)) throw new Error('Google Chrome executable could not be found: ' + exe);
   // 전용 프로필은 영속이다. 매 실행마다 실프로필을 덮으면 사용자가 Browser 메뉴에서 직접
   // 로그인한 세션이 날아가므로, 시드는 (a) 전용 프로필이 비어있는 최초 1회이거나
   // (b) AGENTLAS_CDP_SEED=1 로 명시적으로 "내 크롬 로그인 가져오기"를 요청했을 때만 한다.
@@ -167,7 +167,7 @@ async function ensureChrome() {
   ], { detached: true, stdio: 'ignore' });
   child.unref();
   for (let i = 0; i < 40; i++) { if (await portReady(PORT)) { log('CDP ready'); return; } await new Promise((r) => setTimeout(r, 500)); }
-  throw new Error('Chrome CDP 포트가 열리지 않았습니다: ' + PORT);
+  throw new Error('Chrome CDP port did not open: ' + PORT);
 }
 
 // ── 승인 게이트 (되돌릴 수 없는 행동 인터셉트) ────────────────────
@@ -244,7 +244,7 @@ async function main() {
   const forward = (line) => { try { child.stdin.write(line + '\n'); } catch (e) {} };
   const denyResponse = (id, actionType) => {
     // 승인 거부를 JSON-RPC tool 결과(isError)로 client 에 돌려준다 — 행동은 실행하지 않는다.
-    const msg = { jsonrpc: '2.0', id: id, result: { content: [{ type: 'text', text: 'BLOCKED: 사용자가 이 ' + actionType + ' 작업을 승인하지 않았습니다. 이 동작을 실행하지 말고 다음 단계로 넘어가세요.' }], isError: true } };
+    const msg = { jsonrpc: '2.0', id: id, result: { content: [{ type: 'text', text: 'BLOCKED: The user did not approve this ' + actionType + ' browser action. Do not perform this action; move to a safe next step.' }], isError: true } };
     try { process.stdout.write(JSON.stringify(msg) + '\n'); } catch (e) {}
   };
 

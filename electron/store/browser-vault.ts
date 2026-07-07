@@ -88,7 +88,7 @@ export async function upsertBrowserSite(input: {
   password?: string | null;
 }): Promise<BrowserSiteRow> {
   const site = normalizeSite(input.site);
-  if (!site) throw new Error("사이트 주소가 비어 있습니다.");
+  if (!site) throw new Error("Site address is empty.");
   const db = getDb();
   const now = nowIso();
   const existing = db.prepare("SELECT id FROM browser_sites WHERE site = ?").get(site) as

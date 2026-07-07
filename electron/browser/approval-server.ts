@@ -55,7 +55,7 @@ export function startBrowserApprovalServer(): Promise<number> {
           const decision = await browserRequestApproval({
             site: parsed.site ?? "",
             actionType: parsed.actionType ?? "action",
-            summary: parsed.summary ?? "브라우저 작업 승인",
+            summary: parsed.summary ?? "Approve browser action",
             target: parsed.target,
           });
           res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ decision }));

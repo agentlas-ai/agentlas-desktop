@@ -16,7 +16,6 @@ files:
   # detect.ts/byok.ts value-import it, so it MUST be packaged or the app crashes at launch.
   - dist/shared/**/*
   - dist/renderer/**/*
-  - cli/**/*
   - package.json
   - "!**/*.map"
 
@@ -95,14 +94,8 @@ mac:
   # electron-builder 25.x still writes the .dmg into latest-mac.yml, so the mac pipeline
   # runs scripts/fix-mac-latest-zip.mjs to repoint the feed at the .zip after build.
   target:
-    - target: dmg
-      arch:
-        - arm64
-        - x64
-    - target: zip
-      arch:
-        - arm64
-        - x64
+    - dmg
+    - zip
   icon: build-resources/icon.icns
   artifactName: "Agentlas-${version}-${arch}.${ext}"
 

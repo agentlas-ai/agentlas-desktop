@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.19 — 2026-07-07
+
+### Changed
+
+- **Terminal CLI surface split out of Desktop.** Removes the bundled desktop terminal
+  CLI/runtime surface and its install/test hooks so the desktop app can ship without
+  the old in-app terminal install button path.
+- **Browser surface English localization.** The Browser page, site cards, add/edit
+  modal, activity log labels, approval sheet, and browser-action error outputs now
+  respect the active locale instead of leaking Korean into English sessions.
+- **Release feed cleanup.** Keeps the macOS packaging path focused on app artifacts
+  and update metadata after the terminal CLI removal.
+
 ## 0.7.17 — 2026-07-07
 
 ### Security
