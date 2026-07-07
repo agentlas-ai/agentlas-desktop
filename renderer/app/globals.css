@@ -1,17 +1,28 @@
 /* 웹 포털 paper tokens 기반 + Apple 글래스모피즘 레이어 */
+
+/* Pretendard Variable — 데스크탑에 번들(OFL). 단일 가변 폰트 하나가 45~920 전 굵기와
+   한글 11,172자 전부를 커버하므로, "부분 설치 시 글리프/굵기 섞임" 문제가 원천적으로 없다.
+   경로는 webpack(css-loader)이 처리해 _next/static/media로 해시 방출되고, export 빌드의
+   assetPrefix "./" 로 file:// 에서도 로드된다. 라이선스: fonts/pretendard/OFL.txt */
+@font-face {
+  font-family: "Pretendard Variable";
+  font-weight: 45 930;
+  font-style: normal;
+  font-display: swap;
+  src: url("./fonts/pretendard/PretendardVariable.woff2") format("woff2");
+}
+
 :root {
   color-scheme: light;
 
   /* Agentlas Web redesign tokens. Keep these in lockstep with
      agentlas/AgentsAtlas/app/src/app/redesign.css so Desktop Hub renders with
      the same paper, ink, hairline, radius, and elevation values as Web Hub. */
-  /* 데스크탑은 커스텀 웹폰트(NanumHuman/Gmarket/Pretendard)를 번들하지 않는다. 그 폰트들을
-     시스템 폰트보다 앞에 두면, 부분 설치된 사용자 환경에서 글리프/굵기가 뒤섞여 "텍스트가
-     깨져" 보인다. 그래서 데스크탑에선 시스템 폰트(SF)를 1순위로 두어 항상 또렷하게 렌더한다. */
-  /* Windows 폴백: Segoe UI Variable → Segoe UI → Malgun Gothic(한글) 를 명시해
-     저품질 폴백(굴림 등)으로 떨어지는 것을 막는다. macOS는 -apple-system이 선점. */
-  --rd-f-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI Variable Display", "Segoe UI", "Inter Tight", "Pretendard Variable", "Pretendard", "Malgun Gothic", system-ui, sans-serif;
-  --rd-f-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", "Inter", "Pretendard Variable", "Pretendard", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
+  /* Pretendard Variable을 번들(위 @font-face)하므로 1순위로 둔다 — Windows/macOS 모두 동일한
+     타이포그래피로 렌더된다(일관성이 번들의 목적). 시스템 폰트는 폰트 로드 전 스왑용 폴백으로 뒤에 유지.
+     macOS를 SF Pro로 되돌리려면 각 스택의 맨 앞 "Pretendard Variable"만 제거하면 된다. */
+  --rd-f-display: "Pretendard Variable", "Pretendard", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI Variable Display", "Segoe UI", "Inter Tight", "Malgun Gothic", system-ui, sans-serif;
+  --rd-f-body: "Pretendard Variable", "Pretendard", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", "Inter", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
   --rd-f-mono: "JetBrains Mono", "SF Mono", "Cascadia Mono", "Consolas", ui-monospace, monospace;
   /* ── 브랜드 팔레트(고정) ── Sea Foam·Moss·Citronella·Midnight + 뉴트럴 그레이.
      페이지 캔버스는 퓨어 화이트, 보조 표면에만 Mirrorball/Hourglass 톤을 쓴다. 텍스트=Midnight,
@@ -100,14 +111,16 @@
 
   /* ── Type ──────────────────────────────────────────────── */
   --font-body:
+    "Pretendard Variable", "Pretendard",
     -apple-system, BlinkMacSystemFont, "SF Pro Text",
     "Segoe UI Variable Text", "Segoe UI", "Inter",
-    "Pretendard Variable", "Pretendard", "Noto Sans KR", "Malgun Gothic",
+    "Noto Sans KR", "Malgun Gothic",
     system-ui, sans-serif;
   --font-head:
+    "Pretendard Variable", "Pretendard",
     "SF Pro Display", -apple-system, BlinkMacSystemFont,
     "Segoe UI Variable Display", "Segoe UI", "Inter Tight",
-    "Pretendard Variable", "Pretendard", "Inter", "Malgun Gothic",
+    "Inter", "Malgun Gothic",
     system-ui, sans-serif;
   --font-mono: "SF Mono", "JetBrains Mono", "Cascadia Mono", "Consolas", ui-monospace, monospace;
 
