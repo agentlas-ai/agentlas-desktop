@@ -978,16 +978,24 @@ function ChatPage() {
           window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chatId } }));
         });
       } else if (ev.kind === "error") {
-        // 스티어링 취소면 에러 버블을 띄우지 않는다 — placeholder만 걷어내고, busy→false 시
-        // drain 이펙트가 큐의 스티어 메시지를 저장된 세션 resume으로 이어보낸다.
+        // 스티어링 취소면 에러 버블을 띄우지 않는다 — busy→false 시 drain 이펙트가 큐의
+        // 스티어 메시지를 저장된 세션 resume으로 이어보낸다. 어느 경로든 이미 스트리밍된
+        // 텍스트는 지우지 않고 완료된 버블로 남긴다(치던 답이 사라지는 UX 방지) — main도
+        // abort 시 같은 partial을 히스토리에 영속화하므로 새로고침과도 일관된다.
         const wasSteer = steerCancelRef.current;
         steerCancelRef.current = false;
+        const keepPlaceholder = (m: StreamMessage[]) =>
+          m.flatMap((msg) => {
+            if (msg.id !== placeholderId) return [msg];
+            if (!msg.text || !msg.text.trim()) return [];
+            return [{ ...msg, busy: false, streaming: false, pipeline: completePipeline(msg.pipeline) }];
+          });
         if (wasSteer) {
-          setMessages((m) => m.filter((msg) => msg.id !== placeholderId));
+          setMessages(keepPlaceholder);
         } else {
           pushWorkflow("status", ev.error?.message ?? t("chat.err.unknown"));
           setMessages((m) => [
-            ...m.filter((msg) => msg.id !== placeholderId),
+            ...keepPlaceholder(m),
             { id: uid(), role: "system", text: `⚠️ ${ev.error?.message ?? t("chat.err.unknown")}` },
           ]);
         }
@@ -2243,7 +2251,8 @@ function ChatPage() {
       </div>
     );
   }
-  const displayAgents = visibleAgents(allAgents);
+  // 에이전트 선택기에는 팀(멀티에이전트)도 노출한다 — 팀 자체를 골라 대화할 수 있어야 한다.
+  const displayAgents = visibleAgents(allAgents, { includeTeams: true });
   const displayAgent = agent?.visibility === "background" ? null : agent;
   const latestUserPrompt = [...messages].reverse().find((message) => message.role === "user")?.text ?? "";
   // 현재(가장 최근) 에이전트 실행이 다단계 파이프라인(2+ stage)이면, 단일 에이전트라도 카드/네트워크 뷰를 켠다.

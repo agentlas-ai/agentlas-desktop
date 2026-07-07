@@ -172,6 +172,7 @@ import {
   listChatsByFirm,
   listChatsByProject,
   listRecentChats,
+  appendChatMessage,
   removeAutomationSessions,
   removeChat,
   renameChat,
@@ -1797,6 +1798,13 @@ export function registerIpcHandlers(): void {
         // 종료 이벤트는 즉시 레지스트리에서 제거 — 답변은 final emit 직전에 이미 영속화되므로(client.ts),
         // 재접속(attach)이 '끝난 실행'을 반환해 히스토리 행과 답변이 중복 렌더되는 창을 닫는다.
         if (ev.kind === "final" || ev.kind === "error") {
+          // 취소(정지/스티어링)로 끊긴 실행은 그때까지 스트리밍된 텍스트를 히스토리에 남긴다 —
+          // 렌더러가 부분 응답 버블을 유지하는 것과 새로고침 후 히스토리가 일치하게.
+          if (ev.kind === "error" && controller.signal.aborted && record.partialText.trim()) {
+            try {
+              appendChatMessage(runReq.chatId, "assistant", record.partialText);
+            } catch {}
+          }
           if (activeRuns.delete(runId)) broadcastActiveChats();
         }
       },

@@ -7,15 +7,20 @@ export function isUserFacingAgentText(name?: string | null, role?: string | null
   return !SYSTEM_AGENT_RE.test(`${name ?? ""} ${role ?? ""}`);
 }
 
-export function isVisibleAgent(agent: InstalledAgent): boolean {
+export interface VisibleAgentOptions {
+  /** 팀(멀티에이전트) 엔티티도 포함한다 — 에이전트 선택기처럼 팀을 골라야 하는 곳에서 true. */
+  includeTeams?: boolean;
+}
+
+export function isVisibleAgent(agent: InstalledAgent, opts?: VisibleAgentOptions): boolean {
   if (agent.visibility === "background" || agent.visibility === "private") return false;
-  if ((agent.kind ?? "agent") === "team") return false;
+  if (!opts?.includeTeams && (agent.kind ?? "agent") === "team") return false;
   if (!isUserFacingAgentText(agent.slug)) return false;
   if (!isUserFacingAgentText(agent.name, agent.nameEn)) return false;
   if (!isUserFacingAgentText(agent.tagline, agent.taglineEn)) return false;
   return true;
 }
 
-export function visibleAgents(agents: InstalledAgent[]): InstalledAgent[] {
-  return agents.filter(isVisibleAgent);
+export function visibleAgents(agents: InstalledAgent[], opts?: VisibleAgentOptions): InstalledAgent[] {
+  return agents.filter((agent) => isVisibleAgent(agent, opts));
 }

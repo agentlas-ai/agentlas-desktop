@@ -6,7 +6,7 @@
 //
 // 의도적으로 단순 — HTML 태그는 모두 escape, 사용자 입력 출처 X (LLM 출력만)이지만 안전 우선.
 "use client";
-import { memo, useCallback, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { splitStreamingSegments, type SegmentCache } from "@shared/streaming-segments";
 
@@ -101,9 +101,39 @@ export function StreamingMarkdown({
   const stableArtifact = useCallback((a: CodeArtifact) => artifactRef.current?.(a), []);
   const stableMedia = useCallback((a: MediaArtifact) => mediaRef.current?.(a), []);
 
+  // 타자기 리빌 — partial이 덩어리(메시지 블록·60ms 배치)로 도착해도 글자 단위로 드러낸다.
+  // 밀린 분량에 비례해 속도를 올려(백로그/20 per frame) 표시가 스트림보다 계속 뒤처지지 않고,
+  // 과대 백로그(재접속 리플레이·자동화 프렐류드 등 한 방 덩어리)는 크롤하지 않고 즉시 스냅한다.
+  // 과거 rAF 리빌 제거의 원인이던 "매 프레임 전체 재파싱"은 아래 세그먼트 memo가 이미 해소 —
+  // 프레임당 재파싱되는 것은 마지막 미완결 세그먼트뿐이다.
+  const [revealLen, setRevealLen] = useState(0);
+  const revealKeyRef = useRef(messageId);
+  if (revealKeyRef.current !== messageId) {
+    // 새 메시지로 전환 — 렌더 중 상태 리셋(React 공식 derived-state 패턴).
+    revealKeyRef.current = messageId;
+    setRevealLen(0);
+  }
+  const target = text.length;
+  const shownLen = Math.min(revealLen, target);
+  useEffect(() => {
+    if (revealLen >= target) return;
+    if (target - revealLen > 3000) {
+      setRevealLen(target);
+      return;
+    }
+    const raf = requestAnimationFrame(() => {
+      setRevealLen((len) => {
+        const backlog = target - len;
+        return backlog <= 0 ? len : len + Math.max(1, Math.ceil(backlog / 20));
+      });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [revealLen, target]);
+  const shownText = shownLen === text.length ? text : text.slice(0, shownLen);
+
   const cacheRef = useRef<{ msgId: string; cache: SegmentCache | null }>({ msgId: messageId, cache: null });
   if (cacheRef.current.msgId !== messageId) cacheRef.current = { msgId: messageId, cache: null };
-  const { segments, cache } = splitStreamingSegments(text, cacheRef.current.cache);
+  const { segments, cache } = splitStreamingSegments(shownText, cacheRef.current.cache);
   cacheRef.current.cache = cache;
   return (
     <>

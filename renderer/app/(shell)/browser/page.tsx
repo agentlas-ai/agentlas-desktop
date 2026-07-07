@@ -408,7 +408,7 @@ export default function BrowserPage() {
         }
         .browser-btn.accent {
           background: var(--rd-accent);
-          color: var(--rd-accent-text, #fff);
+          color: #fff;
           border-color: transparent;
         }
         .browser-btn.ghost {
@@ -746,7 +746,7 @@ function SiteEditor({
         }
         .be-actions button.accent {
           background: var(--rd-accent);
-          color: var(--rd-accent-text, #fff);
+          color: #fff;
           border-color: transparent;
         }
       `}</style>

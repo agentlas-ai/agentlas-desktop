@@ -117,7 +117,7 @@ export function BrowserActionApprovalSheet() {
           padding: 2px 9px;
           border-radius: 999px;
           background: var(--rd-accent, #7c7cff);
-          color: var(--rd-accent-text, #fff);
+          color: #fff;
         }
         .baa-tag.pay {
           background: var(--rd-err, #e5484d);
@@ -160,7 +160,7 @@ export function BrowserActionApprovalSheet() {
         }
         .baa-actions .always {
           background: var(--rd-accent, #7c7cff);
-          color: var(--rd-accent-text, #fff);
+          color: #fff;
           border-color: transparent;
         }
       `}</style>

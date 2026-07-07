@@ -68,9 +68,10 @@ export function resolveChromeExe(): string | null {
 }
 
 const LAUNCHER_SOURCE = String.raw`#!/usr/bin/env node
-// Agentlas Browser (CDP) — 범용. 실제 로그인 Chrome 프로필 사본을 원격 디버깅 포트로 띄우고
-// @playwright/mcp 를 CDP 로 붙여 MCP 브라우저 도구를 제공한다. 특정 사이트/계정 하드코딩 없음.
-// 의존성 0 (순수 node). 개인 데이터는 로컬에서만 사용, 어디로도 전송하지 않는다.
+// Agentlas Browser (CDP) — 범용 엔진. 실제 로그인 Chrome 전용 프로필을 원격 디버깅 포트로 띄우고
+// @playwright/mcp 를 CDP 로 붙여 MCP 브라우저 도구를 제공한다. 이 프로세스가 client ↔ @playwright/mcp
+// 사이를 stdio 로 프록시하며 (1) 되돌릴 수 없는 행동 승인 게이트, (2) learn-and-replay 스킬 레이어를 얹는다.
+// 의존성 0(순수 node). 개인 데이터는 로컬에서만 사용, 어디로도 전송하지 않는다.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -79,6 +80,8 @@ import http from 'node:http';
 
 const PORT = Number(process.env.AGENTLAS_CDP_PORT || 9222);
 const CDP_PROFILE = process.env.AGENTLAS_CDP_PROFILE || path.join(os.homedir(), '.agentlas', 'chrome-cdp-profile');
+const HEADLESS = String(process.env.AGENTLAS_CDP_HEADLESS || '').toLowerCase() === '1';
+const SKILLS_DIR = process.env.AGENTLAS_BROWSER_SKILLS_DIR || path.join(os.homedir(), '.agentlas', 'browser-skills');
 const log = (...a) => console.error('[agentlas-browser]', ...a);
 
 function chromeInfo() {
@@ -103,18 +106,10 @@ function chromeInfo() {
   return { userData: path.join(home, '.config', 'google-chrome'), exe: exes.find(fs.existsSync) || exes[0] };
 }
 
-// 실제 로그인 프로필의 세션 파일만 사본으로 복사(범용 — 어떤 사이트든 로그인 유지). best-effort.
-// 쿠키는 OS 자격저장소(mac Keychain / win DPAPI / linux keyring) 키로 복호화되며, 그 키는
-// 같은 OS 사용자에게 프로필-무관하게 공유되므로 사본에서도 복호화된다. (win Chrome v127+
-// app-bound 암호화면 일부 쿠키 복호화가 안 될 수 있음 — 그 경우 사용자가 사본 프로필에 1회 로그인.)
 function seedProfile(srcUserData, dst) {
   try {
     fs.mkdirSync(path.join(dst, 'Default'), { recursive: true });
-    const rels = [
-      'Local State',
-      'Default/Cookies', 'Default/Network/Cookies',
-      'Default/Login Data', 'Default/Web Data', 'Default/Preferences',
-    ];
+    const rels = ['Local State', 'Default/Cookies', 'Default/Network/Cookies', 'Default/Login Data', 'Default/Web Data', 'Default/Preferences'];
     for (const rel of rels) {
       const s = path.join(srcUserData, ...rel.split('/'));
       const d = path.join(dst, ...rel.split('/'));
@@ -128,100 +123,61 @@ function seedProfile(srcUserData, dst) {
 
 function portReady(port) {
   return new Promise((resolve) => {
-    const req = http.get({ host: '127.0.0.1', port, path: '/json/version', timeout: 1200 }, (res) => {
-      res.resume(); resolve(res.statusCode === 200);
-    });
+    const req = http.get({ host: '127.0.0.1', port, path: '/json/version', timeout: 1200 }, (res) => { res.resume(); resolve(res.statusCode === 200); });
     req.on('error', () => resolve(false));
     req.on('timeout', () => { req.destroy(); resolve(false); });
   });
 }
 
-// 전용 프로필이 이미 초기화됐는지(사용자가 여기 직접 로그인했을 수 있음).
 function profileSeeded(dst) {
-  return fs.existsSync(path.join(dst, 'Default', 'Cookies'))
-    || fs.existsSync(path.join(dst, 'Default', 'Network', 'Cookies'));
+  return fs.existsSync(path.join(dst, 'Default', 'Cookies')) || fs.existsSync(path.join(dst, 'Default', 'Network', 'Cookies'));
 }
 
 async function ensureChrome() {
   if (await portReady(PORT)) { log('CDP already up on', PORT); return; }
   const { userData, exe } = chromeInfo();
   if (!fs.existsSync(exe)) throw new Error('Google Chrome executable could not be found: ' + exe);
-  // 전용 프로필은 영속이다. 매 실행마다 실프로필을 덮으면 사용자가 Browser 메뉴에서 직접
-  // 로그인한 세션이 날아가므로, 시드는 (a) 전용 프로필이 비어있는 최초 1회이거나
-  // (b) AGENTLAS_CDP_SEED=1 로 명시적으로 "내 크롬 로그인 가져오기"를 요청했을 때만 한다.
   const force = process.env.AGENTLAS_CDP_SEED === '1';
-  if (force || !profileSeeded(CDP_PROFILE)) {
-    log(force ? 'seeding profile (forced import)' : 'seeding profile (first run)');
-    seedProfile(userData, CDP_PROFILE);
-  } else {
-    log('reusing persistent dedicated profile (no reseed)');
-  }
-  log('launching Chrome on port', PORT);
-  const child = spawn(exe, [
-    '--user-data-dir=' + CDP_PROFILE,
-    '--remote-debugging-port=' + PORT,
-    '--no-first-run', '--no-default-browser-check',
-    '--restore-last-session=false', '--disable-session-crashed-bubble',
-    '--disable-features=Translate',
-    'about:blank',
-  ], { detached: true, stdio: 'ignore' });
+  if (force || !profileSeeded(CDP_PROFILE)) { log(force ? 'seeding profile (forced import)' : 'seeding profile (first run)'); seedProfile(userData, CDP_PROFILE); }
+  else { log('reusing persistent dedicated profile (no reseed)'); }
+  const args = [
+    '--user-data-dir=' + CDP_PROFILE, '--remote-debugging-port=' + PORT,
+    '--no-first-run', '--no-default-browser-check', '--restore-last-session=false',
+    '--disable-session-crashed-bubble', '--disable-features=Translate',
+  ];
+  if (HEADLESS) args.push('--headless=new');
+  args.push('about:blank');
+  log('launching Chrome on port', PORT, HEADLESS ? '(headless)' : '');
+  const child = spawn(exe, args, { detached: true, stdio: 'ignore' });
   child.unref();
   for (let i = 0; i < 40; i++) { if (await portReady(PORT)) { log('CDP ready'); return; } await new Promise((r) => setTimeout(r, 500)); }
   throw new Error('Chrome CDP port did not open: ' + PORT);
 }
 
-// ── 승인 게이트 (되돌릴 수 없는 행동 인터셉트) ────────────────────
-// @playwright/mcp 는 이 프로세스가 stdio 로 프록시한다. client(런타임)→child 방향의 JSON-RPC
-// 'tools/call' 중 전송/게시/결제/삭제로 보이는 것을 앱의 승인 서버로 게이트한다.
+// ── 승인 게이트 ──────────────────────────────────────────────────
 const PAY_RE = /(checkout|\bpay(ment)?\b|purchase|\bbuy\b|\border\b|donate|subscrib|billing|결제|구매|주문|결재)/;
 const SEND_RE = /(publish|\bpost\b|\bsend\b|submit|tweet|retweet|\bshare\b|reply|\bcomment\b|delete|remove|confirm|전송|게시|삭제|제출|답글|댓글|공유|보내)/;
-
 function classifyAction(name, args) {
   let text = '';
   try { text = JSON.stringify(args || {}).toLowerCase(); } catch (e) { text = ''; }
-  if (name === 'browser_navigate' || name === 'browser_navigate_back') {
-    return PAY_RE.test(text) ? 'payment' : null;
-  }
+  if (name === 'browser_navigate' || name === 'browser_navigate_back') return PAY_RE.test(text) ? 'payment' : null;
   if (name === 'browser_click' || name === 'browser_file_upload' || name === 'browser_press_key') {
     if (PAY_RE.test(text)) return 'payment';
-    if (SEND_RE.test(text)) {
-      if (/publish|\bpost\b|게시/.test(text)) return 'publish';
-      if (/delete|remove|삭제/.test(text)) return 'delete';
-      return 'send';
-    }
+    if (SEND_RE.test(text)) { if (/publish|\bpost\b|게시/.test(text)) return 'publish'; if (/delete|remove|삭제/.test(text)) return 'delete'; return 'send'; }
   }
   return null;
 }
-
 function readApprovalInfo() {
-  try {
-    const p = path.join(os.homedir(), '.agentlas', 'browser-approval.json');
-    if (!fs.existsSync(p)) return null;
-    return JSON.parse(fs.readFileSync(p, 'utf8'));
-  } catch (e) { return null; }
+  try { const p = path.join(os.homedir(), '.agentlas', 'browser-approval.json'); if (!fs.existsSync(p)) return null; return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return null; }
 }
-
-// 승인 서버(앱)에 물어본다. 앱 미실행이면 autonomy 정책: 기본 'gated'(거부), 'trust'면 허용.
 function requestApproval(site, actionType, summary) {
   return new Promise((resolve) => {
     const autonomy = process.env.AGENTLAS_BROWSER_AUTONOMY || 'gated';
     const info = readApprovalInfo();
-    if (!info || !info.port) {
-      log('no approver (app not running); autonomy=' + autonomy + ' action=' + actionType);
-      return resolve(autonomy === 'trust' ? 'approved' : 'denied');
-    }
-    const payload = JSON.stringify({ site: site, actionType: actionType, summary: summary });
-    const req = http.request({
-      host: '127.0.0.1', port: info.port, path: '/approve', method: 'POST',
-      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'authorization': 'Bearer ' + info.token },
-      timeout: 125000,
-    }, (res) => {
-      let b = '';
-      res.on('data', (d) => { b += d; });
-      res.on('end', () => {
-        try { resolve(JSON.parse(b).decision === 'approved' ? 'approved' : 'denied'); }
-        catch (e) { resolve('denied'); }
-      });
+    if (!info || !info.port) { log('no approver (app not running); autonomy=' + autonomy + ' action=' + actionType); return resolve(autonomy === 'trust' ? 'approved' : 'denied'); }
+    const payload = JSON.stringify({ site, actionType, summary });
+    const req = http.request({ host: '127.0.0.1', port: info.port, path: '/approve', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'authorization': 'Bearer ' + info.token }, timeout: 125000 }, (res) => {
+      let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { resolve(JSON.parse(b).decision === 'approved' ? 'approved' : 'denied'); } catch (e) { resolve('denied'); } });
     });
     req.on('error', () => resolve(autonomy === 'trust' ? 'approved' : 'denied'));
     req.on('timeout', () => { req.destroy(); resolve('denied'); });
@@ -229,57 +185,132 @@ function requestApproval(site, actionType, summary) {
   });
 }
 
+// ── learn-and-replay 스킬 레이어 ─────────────────────────────────
+// 재생/기록 대상 액션 툴(읽기 전용 snapshot/screenshot 등은 제외).
+const RECORDABLE = new Set(['browser_navigate', 'browser_navigate_back', 'browser_click', 'browser_type', 'browser_fill', 'browser_fill_form', 'browser_select_option', 'browser_press_key', 'browser_hover', 'browser_file_upload', 'browser_drag']);
+const SKILL_TOOLS = [
+  { name: 'browser_skill_list', description: 'List saved Agentlas browser skills (learned action sequences).', inputSchema: { type: 'object', properties: {} } },
+  { name: 'browser_skill_save', description: 'Save the actions performed so far in this session as a reusable skill. Use after successfully completing a task (e.g. an Instagram upload) so it can be replayed deterministically next time.', inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'Skill name, e.g. "instagram-upload"' }, description: { type: 'string' } }, required: ['name'] } },
+  { name: 'browser_skill_replay', description: 'Replay a previously saved skill by name — re-runs its recorded action sequence deterministically (no reasoning needed).', inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
+];
+function skillPath(name) { return path.join(SKILLS_DIR, String(name).replace(/[^a-zA-Z0-9._-]/g, '_') + '.json'); }
+function listSkills() { try { return fs.readdirSync(SKILLS_DIR).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)); } catch (e) { return []; } }
+function saveSkill(name, steps, description) {
+  fs.mkdirSync(SKILLS_DIR, { recursive: true });
+  const doc = { name, description: description || '', steps, savedAt: new Date().toISOString() };
+  fs.writeFileSync(skillPath(name), JSON.stringify(doc, null, 2));
+  return doc;
+}
+function loadSkill(name) { const p = skillPath(name); if (!fs.existsSync(p)) return null; return JSON.parse(fs.readFileSync(p, 'utf8')); }
+
 async function main() {
   await ensureChrome();
   const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  // child stdio: client(우리) ↔ child 를 우리가 중계. stderr 는 그대로 흘려보낸다.
   const child = spawn(npx, ['-y', '@playwright/mcp@latest', '--cdp-endpoint', 'http://127.0.0.1:' + PORT], { stdio: ['pipe', 'pipe', 'inherit'] });
   child.on('error', (e) => { log('failed to start @playwright/mcp', String(e)); process.exit(1); });
   child.on('exit', (code) => process.exit(code == null ? 0 : code));
-  // server→client(응답)은 그대로 통과.
-  child.stdout.pipe(process.stdout);
 
+  const recording = [];            // 이 세션에서 성공한 액션 시퀀스
+  const pending = new Map();       // client 원본 tools/call: id -> {name, args}
+  const waiters = new Map();       // 내부(replay) tools/call: id -> resolve
   let currentUrl = '';
-  let buf = '';
-  const forward = (line) => { try { child.stdin.write(line + '\n'); } catch (e) {} };
-  const denyResponse = (id, actionType) => {
-    // 승인 거부를 JSON-RPC tool 결과(isError)로 client 에 돌려준다 — 행동은 실행하지 않는다.
-    const msg = { jsonrpc: '2.0', id: id, result: { content: [{ type: 'text', text: 'BLOCKED: The user did not approve this ' + actionType + ' browser action. Do not perform this action; move to a safe next step.' }], isError: true } };
-    try { process.stdout.write(JSON.stringify(msg) + '\n'); } catch (e) {}
+  let internalSeq = 0;
+  const writeClient = (obj) => { try { process.stdout.write(JSON.stringify(obj) + '\n'); } catch (e) {} };
+  const forwardRaw = (line) => { try { child.stdin.write(line + '\n'); } catch (e) {} };
+
+  // 승인 게이트 통과 여부 판정(공유). 통과=null, 거부=사유문자열.
+  const gate = async (name, args) => {
+    const actionType = classifyAction(name, args);
+    if (!actionType) return null;
+    let site = ''; try { site = new URL(currentUrl).host; } catch (e) { site = currentUrl; }
+    const decision = await requestApproval(site, actionType, actionType + ': ' + (args.element || args.url || name));
+    return decision === 'approved' ? null : actionType;
   };
 
-  const handleLine = (line) => {
-    if (!line.trim()) { forward(line); return; }
-    let msg;
-    try { msg = JSON.parse(line); } catch (e) { forward(line); return; }
+  // 내부에서 child 에 tools/call 을 보내고 응답을 받는다(replay 용).
+  const callChild = (name, args) => new Promise((resolve) => {
+    const id = 'agx-' + (++internalSeq);
+    waiters.set(id, resolve);
+    forwardRaw(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }));
+  });
+
+  const doReplay = async (name, replyId) => {
+    const skill = loadSkill(name);
+    if (!skill) { writeClient({ jsonrpc: '2.0', id: replyId, result: { content: [{ type: 'text', text: 'Skill not found: ' + name }], isError: true } }); return; }
+    const results = [];
+    for (const step of (skill.steps || [])) {
+      const denied = await gate(step.name, step.arguments || {});
+      if (denied) { results.push(step.name + ': BLOCKED(' + denied + ')'); writeClient({ jsonrpc: '2.0', id: replyId, result: { content: [{ type: 'text', text: 'Replay stopped — ' + denied + ' action needs approval (set AGENTLAS_BROWSER_AUTONOMY=trust for unattended replay).' }], isError: true } }); return; }
+      if (step.name === 'browser_navigate' && step.arguments && step.arguments.url) currentUrl = String(step.arguments.url);
+      const resp = await callChild(step.name, step.arguments || {});
+      const isErr = resp && resp.result && resp.result.isError;
+      results.push(step.name + (isErr ? ': error' : ': ok'));
+      if (isErr) { writeClient({ jsonrpc: '2.0', id: replyId, result: { content: [{ type: 'text', text: 'Replay failed at ' + step.name + '. The page may have changed — re-explore and re-save the skill.\n' + results.join('\n') }], isError: true } }); return; }
+    }
+    writeClient({ jsonrpc: '2.0', id: replyId, result: { content: [{ type: 'text', text: 'Replayed skill "' + name + '" (' + (skill.steps || []).length + ' steps):\n' + results.join('\n') }] } });
+  };
+
+  // client → child 방향
+  const handleClientLine = (line) => {
+    if (!line.trim()) { forwardRaw(line); return; }
+    let msg; try { msg = JSON.parse(line); } catch (e) { forwardRaw(line); return; }
     if (msg && msg.method === 'tools/call' && msg.params) {
       const name = msg.params.name || '';
       const args = msg.params.arguments || {};
+      // 스킬 툴은 로컬 처리(child 로 안 보냄).
+      if (name === 'browser_skill_list') { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: JSON.stringify(listSkills()) }] } }); return; }
+      if (name === 'browser_skill_save') {
+        try { const doc = saveSkill(args.name, recording.slice(), args.description); writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'Saved skill "' + doc.name + '" with ' + doc.steps.length + ' steps → ' + skillPath(doc.name) }] } }); }
+        catch (e) { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'Save failed: ' + String(e) }], isError: true } }); }
+        return;
+      }
+      if (name === 'browser_skill_replay') { doReplay(args.name, msg.id); return; }
+      // 일반 액션: 승인 게이트 + 기록.
       if (name === 'browser_navigate' && args.url) currentUrl = String(args.url);
       const actionType = classifyAction(name, args);
       if (actionType) {
-        let site = '';
-        try { site = new URL(currentUrl).host; } catch (e) { site = currentUrl; }
-        const summary = actionType + ': ' + (args.element || args.url || name);
-        log('gating ' + actionType + ' on ' + (site || '(unknown)'));
-        requestApproval(site, actionType, summary).then((decision) => {
-          if (decision === 'approved') forward(line);
-          else denyResponse(msg.id, actionType);
+        gate(name, args).then((denied) => {
+          if (denied) { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'BLOCKED: The user did not approve this ' + denied + ' browser action.' }], isError: true } }); return; }
+          if (RECORDABLE.has(name)) pending.set(msg.id, { name, arguments: args });
+          forwardRaw(line);
         });
         return;
       }
+      if (RECORDABLE.has(name)) pending.set(msg.id, { name, arguments: args });
     }
-    forward(line);
+    forwardRaw(line);
   };
 
-  process.stdin.on('data', (chunk) => {
-    buf += chunk.toString('utf8');
-    let idx;
-    while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx);
-      buf = buf.slice(idx + 1);
-      handleLine(line);
+  // child → client 방향 (응답 가로채기: replay waiter / 기록 / tools/list 주입)
+  const handleChildLine = (line) => {
+    if (!line.trim()) { process.stdout.write(line + '\n'); return; }
+    let msg; try { msg = JSON.parse(line); } catch (e) { process.stdout.write(line + '\n'); return; }
+    // 내부 replay 응답 → waiter 로, client 로는 안 보냄.
+    if (msg && typeof msg.id === 'string' && waiters.has(msg.id)) { const r = waiters.get(msg.id); waiters.delete(msg.id); r(msg); return; }
+    // client 원본 액션 응답 → 성공 시 기록.
+    if (msg && msg.id != null && pending.has(msg.id)) {
+      const call = pending.get(msg.id); pending.delete(msg.id);
+      const isErr = msg.result && msg.result.isError;
+      if (!isErr && !msg.error) recording.push(call);
     }
+    // tools/list 응답 → 스킬 툴 주입.
+    if (msg && msg.result && Array.isArray(msg.result.tools)) {
+      const have = new Set(msg.result.tools.map((t) => t.name));
+      for (const st of SKILL_TOOLS) if (!have.has(st.name)) msg.result.tools.push(st);
+      process.stdout.write(JSON.stringify(msg) + '\n'); return;
+    }
+    process.stdout.write(line + '\n');
+  };
+
+  let cbuf = '';
+  child.stdout.on('data', (chunk) => {
+    cbuf += chunk.toString('utf8'); let i;
+    while ((i = cbuf.indexOf('\n')) >= 0) { const line = cbuf.slice(0, i); cbuf = cbuf.slice(i + 1); handleChildLine(line); }
+  });
+  let buf = '';
+  process.stdin.on('data', (chunk) => {
+    buf += chunk.toString('utf8'); let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, idx); buf = buf.slice(idx + 1); handleClientLine(line); }
   });
   process.stdin.on('end', () => { try { child.stdin.end(); } catch (e) {} });
 }

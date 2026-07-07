@@ -408,6 +408,74 @@ function buildRouterAgentSystemPreamble(input: {
   return { preamble, loadedModuleIds: assembled.loadedModuleIds };
 }
 
+type AutomationRegistrationResult = {
+  action: "created" | "updated";
+  name: string;
+  schedule: string;
+  targetType: "agent" | "firm" | "hub";
+  targetId: string;
+  nextRunAt: string | null;
+  graph: boolean;
+};
+
+function automationActionLabel(action: AutomationRegistrationResult["action"], locale: "ko" | "en"): string {
+  if (locale === "ko") return action === "created" ? "등록" : "업데이트";
+  return action === "created" ? "created" : "updated";
+}
+
+function automationRegistrationToolName(action: AutomationRegistrationResult["action"]): string {
+  return action === "created" ? "automation.create" : "automation.update";
+}
+
+function automationRegistrationResultText(item: AutomationRegistrationResult, locale: "ko" | "en"): string {
+  const action = automationActionLabel(item.action, locale);
+  if (locale === "ko") {
+    return `${item.name} ${action} 완료 · ${item.schedule}${item.graph ? " · 워크플로우 그래프 포함" : ""}`;
+  }
+  return `${item.name} ${action} · ${item.schedule}${item.graph ? " · workflow graph included" : ""}`;
+}
+
+function automationFinalSummary(items: AutomationRegistrationResult[], locale: "ko" | "en"): string {
+  if (items.length === 0) return "";
+  const lines = items.map((item) => {
+    const action = automationActionLabel(item.action, locale);
+    const nextRun =
+      item.nextRunAt && locale === "ko"
+        ? ` · 다음 실행 ${item.nextRunAt}`
+        : item.nextRunAt
+          ? ` · next run ${item.nextRunAt}`
+          : "";
+    return `- ${item.name} · ${action} · ${item.schedule}${nextRun}`;
+  });
+  return locale === "ko"
+    ? [`자동화 ${items.length}개를 설정했습니다.`, ...lines, "자동화 화면에서 바로 확인할 수 있습니다."].join("\n")
+    : [`Set up ${items.length} automation${items.length === 1 ? "" : "s"}.`, ...lines, "You can review it in Automations."].join("\n");
+}
+
+function appendAutomationSummary(text: string, summary: string): string {
+  const trimmed = text.trim();
+  if (!summary.trim()) return trimmed;
+  if (!trimmed) return summary;
+  return `${trimmed}\n\n${summary}`;
+}
+
+function isAutomationSetupRequest(prompt: string): boolean {
+  const text = prompt.toLowerCase();
+  const explicitAutomation =
+    /자동화|오토메이션|예약|리마인드|반복|정기|cron|automation|automate|schedule|scheduled|recurring|reminder/.test(text);
+  const setupVerb =
+    /걸어|걸자|설정|등록|만들|추가|켜줘|해줘|해라|해놔|set\s*up|create|add|register|turn\s+on|remind/.test(text);
+  const recurringCadence =
+    /매일|매주|매월|매시간|매\s*아침|매\s*저녁|매\s*분기|daily|weekly|monthly|hourly|every\s+\w+|each\s+\w+/.test(text);
+  return (explicitAutomation && setupVerb) || (recurringCadence && setupVerb);
+}
+
+function automationLivePrelude(locale: "ko" | "en"): string {
+  return locale === "ko"
+    ? "자동화 요청을 확인하고 있습니다. 실행 주기와 작업 내용을 정리한 뒤 바로 등록까지 이어가겠습니다.\n\n"
+    : "Checking the automation request. I will resolve the schedule and task details, then register it.\n\n";
+}
+
 /** 활성 런타임 + 러너를 한 번에 선택 (오케스트레이터/리졸버 공용). */
 export async function pickActiveRunner(): Promise<
   { runner: Runner; label: string; active: RuntimeStatus } | null
@@ -978,6 +1046,9 @@ export async function runMcpInvocation(
   if (history.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
 
   sink({ kind: "thinking", status: tStatus(locale, "thinking", { agent: agent.name }) });
+  if (chat.kind !== "division" && isAutomationSetupRequest(req.userPrompt)) {
+    sink({ kind: "partial", text: automationLivePrelude(locale) });
+  }
 
   // Stormbreaker 슈퍼바이저 — 활성·가용하면 이 실행을 scope→route→gate 로 감독한다(비차단).
   // division(백그라운드 firm 하위) 세션은 제외(재귀/노이즈 방지). 실패/부재 시 null → no-op.
@@ -1099,12 +1170,22 @@ export async function runMcpInvocation(
     let displayText = result.text.split(SURFACE_INTENT_MARKER).join("").trim();
     // 에이전트가 "## Automation" 블록을 넣었으면 → 현재 chat의 타깃(firm/agent)으로 자동화 등록 + 블록 제거.
     // (백그라운드 automation 실행 세션은 제외 → 자동화가 자동화를 만드는 재귀 방지)
+    const automationRegistrations: AutomationRegistrationResult[] = [];
     if (chat.kind !== "division") {
       try {
         const { automations: autos, cleanedText, errors } = parseAutomations(displayText);
         if (errors.length > 0) {
           // 조용히 드롭하지 않고 표면화(설계 §2.5) — 로그로 남겨 진단 가능하게.
           console.warn("[automation] parse warnings:", errors.join("; "));
+        }
+        if (autos.length > 0) {
+          sink({
+            kind: "tool-use",
+            status:
+              locale === "ko"
+                ? `자동화 ${autos.length}개 설정 중`
+                : `Setting up ${autos.length} automation${autos.length === 1 ? "" : "s"}`,
+          });
         }
         for (const a of autos) {
           // 모델이 "agent" 필드로 실행 주체를 지정하면 설치 에이전트로 해석(id → slug → 표시명).
@@ -1120,7 +1201,7 @@ export async function runMcpInvocation(
             (x) => x.name.trim().toLowerCase() === a.name.trim().toLowerCase(),
           );
           if (dup) {
-            updateAutomation(dup.id, {
+            const updated = updateAutomation(dup.id, {
               scheduleHuman: a.schedule,
               targetType,
               targetId,
@@ -1131,9 +1212,33 @@ export async function runMcpInvocation(
               ...(a.tz && a.tz.trim() ? { timezone: a.tz } : {}),
             });
             // 그래프는 방출됐을 때만 교체 — 사용자가 캔버스에서 편집한 그래프를 지우지 않는다.
-            if (a.graph) updateAutomationGraph(dup.id, a.graph);
+            const updatedWithGraph = a.graph ? updateAutomationGraph(dup.id, a.graph) : updated;
+            const registration: AutomationRegistrationResult = {
+              action: "updated",
+              name: updatedWithGraph.name,
+              schedule: updatedWithGraph.scheduleHuman,
+              targetType: updatedWithGraph.targetType,
+              targetId: updatedWithGraph.targetId,
+              nextRunAt: updatedWithGraph.nextRunAt,
+              graph: Boolean(updatedWithGraph.graph),
+            };
+            automationRegistrations.push(registration);
+            sink({
+              kind: "tool-use",
+              tool: {
+                name: automationRegistrationToolName(registration.action),
+                args: JSON.stringify({
+                  name: registration.name,
+                  schedule: registration.schedule,
+                  targetType: registration.targetType,
+                  targetId: registration.targetId,
+                  graph: registration.graph,
+                }),
+                result: automationRegistrationResultText(registration, locale),
+              },
+            });
           } else {
-            createAutomation({
+            const created = createAutomation({
               name: a.name,
               scheduleHuman: a.schedule,
               targetType,
@@ -1145,12 +1250,39 @@ export async function runMcpInvocation(
               timezone: a.tz && a.tz.trim() ? a.tz : null,
               graphJson: a.graph ?? null,
             });
+            const registration: AutomationRegistrationResult = {
+              action: "created",
+              name: created.name,
+              schedule: created.scheduleHuman,
+              targetType: created.targetType,
+              targetId: created.targetId,
+              nextRunAt: created.nextRunAt,
+              graph: Boolean(created.graph),
+            };
+            automationRegistrations.push(registration);
+            sink({
+              kind: "tool-use",
+              tool: {
+                name: automationRegistrationToolName(registration.action),
+                args: JSON.stringify({
+                  name: registration.name,
+                  schedule: registration.schedule,
+                  targetType: registration.targetType,
+                  targetId: registration.targetId,
+                  graph: registration.graph,
+                }),
+                result: automationRegistrationResultText(registration, locale),
+              },
+            });
           }
         }
         displayText = cleanedText;
       } catch (err) {
         console.error("[automation] parseAutomations failed:", err);
       }
+    }
+    if (automationRegistrations.length > 0) {
+      displayText = appendAutomationSummary(displayText, automationFinalSummary(automationRegistrations, locale));
     }
     try {
       let surfaceParse = parseSurfaces(displayText);

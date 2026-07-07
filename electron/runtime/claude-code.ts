@@ -20,6 +20,10 @@ import {
 
 const KIND = "claude-code";
 
+// 구형 claude CLI가 --include-partial-messages를 거부하면 false로 전환해(프로세스 수명 동안
+// 1회 학습) 이후 실행은 플래그 없이 — 메시지 덩어리 스트리밍으로 — 동작한다.
+let includePartialMessagesSupported = true;
+
 const CANDIDATES = [
   // Windows: `.cmd`/`.exe`를 bare `claude`보다 먼저 시도한다. bare `claude`는
   // cross-spawn이 PATHEXT로 해석하다 `claude.ps1`을 잡으면 PowerShell 실행정책
@@ -255,6 +259,9 @@ export const runClaudeCode: Runner = async (
   return new Promise<RunnerResult>((resolve, reject) => {
     // stream-json + verbose: tool_use / 텍스트 / 토큰(usage) 이벤트를 NDJSON으로 받아
     // Claude Code식 tool-use 블록 + 토큰 표시를 가능하게 한다.
+    // --include-partial-messages: 텍스트를 메시지 블록 덩어리가 아니라 토큰 델타로 받아
+    // 타자기 스트리밍을 가능하게 한다(미지원 구형 CLI는 close 핸들러에서 자동 폴백).
+    const partialFlagArgs = includePartialMessagesSupported ? ["--include-partial-messages"] : [];
     const args = resumeSessionId
       ? [
           "--resume",
@@ -264,6 +271,7 @@ export const runClaudeCode: Runner = async (
           "--output-format",
           "stream-json",
           "--verbose",
+          ...partialFlagArgs,
           ...modelArgs,
           ...effortArgs,
           ...permArgs,
@@ -277,6 +285,7 @@ export const runClaudeCode: Runner = async (
           "--output-format",
           "stream-json",
           "--verbose",
+          ...partialFlagArgs,
           ...modelArgs,
           ...effortArgs,
           ...permArgs,
@@ -304,6 +313,9 @@ export const runClaudeCode: Runner = async (
 
     let buffer = "";
     let acc = "";
+    // 현재 메시지의 토큰 델타(stream_event) 누적분 — assistant 메시지 이벤트가 오면
+    // 그 권위 전문으로 acc에 폴드되고 비워진다(델타 누락/중복이 있어도 자가 교정).
+    let cur = "";
     let finalText = "";
     let tokens: number | undefined;
     let stderr = "";
@@ -314,6 +326,23 @@ export const runClaudeCode: Runner = async (
     // 메모리를 보호한다. acc를 무제한 누적 + 매 partial마다 전체를 렌더러로 보내면
     // 메인 문자열과 렌더러 DOM이 동시에 폭주해 앱이 OOM된다(수십 GB). 2MB로 상한.
     const MAX_ACC = 2 * 1024 * 1024;
+    const combined = () => (cur ? (acc ? acc + "\n" : "") + cur : acc);
+    const capCombined = () => {
+      if (accCapped || acc.length + cur.length < MAX_ACC) return;
+      acc =
+        combined().slice(0, MAX_ACC) +
+        (req.locale === "ko"
+          ? "\n\n[출력이 너무 길어 잘렸습니다 — 런어웨이 출력 메모리 보호]"
+          : "\n\n[Output truncated — runaway output memory guard]");
+      cur = "";
+      accCapped = true;
+    };
+    const emitPartial = () => {
+      const now = Date.now();
+      if (now - lastEmit <= 60) return;
+      events.onPartial(combined());
+      lastEmit = now;
+    };
 
     const toolNameById = new Map<string, string>();
 
@@ -359,28 +388,31 @@ export const runClaudeCode: Runner = async (
       };
       result?: unknown;
       usage?: { output_tokens?: number };
+      event?: { type?: string; delta?: { type?: string; text?: string } };
     }): void {
       if (typeof ev.session_id === "string" && ev.session_id) {
         sessionId = ev.session_id;
+      }
+      // --include-partial-messages: 토큰 델타를 즉시 이어붙여 글자 단위 스트리밍을 만든다.
+      // thinking/tool-input 델타는 무시(text_delta만 본문).
+      if (ev.type === "stream_event") {
+        const delta = ev.event?.type === "content_block_delta" ? ev.event.delta : undefined;
+        if (delta?.type === "text_delta" && delta.text && !accCapped) {
+          cur += delta.text;
+          capCombined();
+          emitPartial();
+        }
+        return;
       }
       if (ev.type === "assistant" && ev.message?.content) {
         for (const block of ev.message.content) {
           if (block.type === "text" && block.text) {
             if (!accCapped) {
+              // 메시지 완결 — 델타 누적분(cur)을 권위 전문으로 대체해 acc에 폴드.
+              cur = "";
               acc += (acc ? "\n" : "") + block.text;
-              if (acc.length >= MAX_ACC) {
-                acc =
-                  acc.slice(0, MAX_ACC) +
-                  (req.locale === "ko"
-                    ? "\n\n[출력이 너무 길어 잘렸습니다 — 런어웨이 출력 메모리 보호]"
-                    : "\n\n[Output truncated — runaway output memory guard]");
-                accCapped = true;
-              }
-              const now = Date.now();
-              if (now - lastEmit > 60) {
-                events.onPartial(acc);
-                lastEmit = now;
-              }
+              capCombined();
+              emitPartial();
             }
           } else if (block.type === "tool_use" && block.name) {
             let argStr = "";
@@ -460,12 +492,20 @@ export const runClaudeCode: Runner = async (
         return;
       }
       if (code === 0) {
-        if (acc) events.onPartial(finalText || acc);
+        const streamed = combined();
+        if (streamed) events.onPartial(finalText || streamed);
         if (req.chatId && fingerprint && sessionId) {
           saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint);
         }
-        resolve({ text: (finalText || acc).trim(), sessionId, tokens });
+        resolve({ text: (finalText || streamed).trim(), sessionId, tokens });
       } else {
+        // 구형 CLI가 --include-partial-messages를 모르면 그 플래그만 빼고 즉시 재시도 —
+        // 델타 스트리밍만 포기하고 채팅 자체는 살린다(전역 1회 학습).
+        if (includePartialMessagesSupported && /include-partial-messages/i.test(stderr)) {
+          includePartialMessagesSupported = false;
+          void runClaudeCode(req, events).then(resolve, reject);
+          return;
+        }
         if (resumeSessionId && req.chatId) clearRuntimeSession(req.chatId, KIND);
         if (resumeSessionId) {
           // 저장된 CLI 세션이 만료/손상되면 같은 턴을 full-context로 즉시 복구한다.

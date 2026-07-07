@@ -331,18 +331,33 @@ function SoloAgentSummary({
             {locale === "ko" ? "툴 요청, 스킬 사용, 실행 상태가 여기에 시간순으로 표시됩니다." : "Tool requests, skill use, and execution states appear here in order."}
           </div>
         ) : (
-          waterfall.map((item, index) => (
-            <article key={item.key} style={soloWaterfallRowStyle}>
-              <span style={soloWaterfallIndexStyle(item.kind === "tool")}>{String(index + 1).padStart(2, "0")}</span>
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={soloWaterfallTitleStyle}>
-                  {item.label}
-                  {item.toolName && <span style={soloWaterfallToolStyle}>{item.toolName}</span>}
+          waterfall.map((item, index) => {
+            // 실행 중이면 마지막 이벤트가 지금 하는 일 — 그 행만 활성으로, 이전 행은 완료(✓)로.
+            const isCurrent = busy && index === waterfall.length - 1;
+            return (
+              <article
+                key={item.key}
+                className={`agentlas-activity-card${isCurrent ? " is-running" : ""}`}
+                style={soloWaterfallRowStateStyle(isCurrent)}
+              >
+                <span style={soloWaterfallIndexStateStyle(isCurrent)}>
+                  {isCurrent ? String(index + 1).padStart(2, "0") : "✓"}
+                </span>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={soloWaterfallTitleStyle}>
+                    {item.label}
+                    {item.toolName && <span style={soloWaterfallToolStyle}>{item.toolName}</span>}
+                    {isCurrent && (
+                      <span style={soloWaterfallNowChipStyle}>
+                        {locale === "ko" ? "진행 중" : "In progress"}
+                      </span>
+                    )}
+                  </div>
+                  <div style={soloWaterfallTextStyle}>{item.text}</div>
                 </div>
-                <div style={soloWaterfallTextStyle}>{item.text}</div>
-              </div>
-            </article>
-          ))
+              </article>
+            );
+          })
         )}
       </div>
     </section>
@@ -386,68 +401,6 @@ function cleanSoloStatus(value: string, locale: "ko" | "en", busy: boolean): str
   }
   if (/^(완료|done|completed)$/i.test(text)) return busy ? text : "";
   return text.length > 110 ? `${text.slice(0, 109)}…` : text;
-}
-
-function WorkflowCard({
-  item,
-  live,
-  locale,
-}: {
-  item: NetTimelineItem;
-  live: boolean;
-  locale: "ko" | "en";
-}) {
-  const isHandoff = item.kind === "handoff";
-  const isComplete = /완료|done|completed/i.test(item.text);
-  const title = isHandoff
-    ? locale === "ko" ? `${item.name} 위임` : `${item.name} delegation`
-    : item.name;
-  const state = live
-    ? locale === "ko" ? "에이전트 시작됨" : "Agent started"
-    : isComplete
-      ? locale === "ko" ? "에이전트 작업 완료" : "Agent work completed"
-    : isHandoff
-      ? locale === "ko" ? "위임" : "Delegation"
-      : item.kind === "tool"
-        ? locale === "ko" ? "에이전트" : "Agent"
-        : locale === "ko" ? "상태" : "Status";
-  // ── 영수증 메타 — 실측값만. 없으면 해당 줄을 그리지 않는다(지어내지 않음). ──
-  const tokensText = formatTokens(item.tokens, locale);
-  const handoffTargets = isHandoff && item.delegateTo && item.delegateTo.length > 0 ? item.delegateTo : null;
-  return (
-    <article
-      className={`agentlas-activity-card${live ? " is-running" : ""}${isComplete ? " is-complete" : ""}`}
-      style={workflowCardStyle}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
-        <span aria-hidden style={workflowDotStyle(item.kind, live, isComplete)} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={workflowTitleStyle}>{title}</div>
-          <div style={workflowMetaStyle}>{item.role || state}</div>
-        </div>
-        <span style={workflowKindStyle(item.kind, isComplete)}>{state}</span>
-      </div>
-      <div style={workflowTextStyle}>
-        {isHandoff ? `↳ ${item.text}` : item.text}
-      </div>
-      {/* 구조화된 영수증 라인 — from→to(핸드오프), 사용 도구, 토큰. 실측 있을 때만. */}
-      {(handoffTargets || item.toolName || tokensText) && (
-        <div style={receiptMetaRowStyle}>
-          {handoffTargets && (
-            <span style={receiptChipStyle}>
-              {locale === "ko" ? "위임 →" : "to →"} {handoffTargets.join(", ")}
-            </span>
-          )}
-          {item.toolName && (
-            <span style={receiptChipStyle}>
-              {locale === "ko" ? "도구" : "tool"} · {item.toolName}
-            </span>
-          )}
-          {tokensText && <span style={receiptChipStyle}>{tokensText}</span>}
-        </div>
-      )}
-    </article>
-  );
 }
 
 /**
@@ -657,8 +610,10 @@ const RETRO = {
   bgGrid: "var(--paper-2)",
   card: "var(--paper)",
   cardRun: "color-mix(in srgb, #F59E0B 10%, var(--paper))",
+  cardDone: "color-mix(in srgb, #10B981 5%, var(--paper))",
   edge: "var(--paper-edge)",
   edgeRun: "color-mix(in srgb, #F59E0B 42%, var(--paper-edge))",
+  edgeDone: "color-mix(in srgb, #10B981 26%, var(--paper-edge))",
   ink: "var(--ink)",
   inkSoft: "var(--ink-soft)",
   muted: "var(--muted-deep)",
@@ -800,7 +755,7 @@ function AgentRow({
 }) {
   const ko = locale === "ko";
   const code = codenameFor(node.key);
-  const statusWord = status === "done" ? (ko ? "완료" : "done") : status === "running" ? (ko ? "작업 중" : "working") : (ko ? "대기" : "idle");
+  const statusWord = status === "done" ? (ko ? "✓ 완료" : "✓ done") : status === "running" ? (ko ? "작업 중" : "working") : (ko ? "대기" : "idle");
   const roleLabel =
     node.role ||
     (kind === "orchestrator"
@@ -997,18 +952,31 @@ const soloWaterfallEmptyStyle: CSSProperties = {
   background: "color-mix(in srgb, var(--paper-2) 72%, transparent)",
 };
 
-const soloWaterfallRowStyle: CSSProperties = {
-  display: "flex",
-  gap: 9,
-  alignItems: "flex-start",
-  border: "1px solid var(--paper-edge)",
-  borderRadius: 8,
-  background: "var(--paper)",
-  padding: "9px 10px",
-  boxShadow: "0 1px 2px rgba(11, 11, 15, 0.03)",
-};
+// 단계 행 — 현재(실행 중) 행은 액센트 하이라이트, 지나간 행은 옅은 그린(완료) 톤.
+// is-running 클래스의 스윕 애니메이션(::after)을 위해 relative + overflow hidden 필요.
+function soloWaterfallRowStateStyle(current: boolean): CSSProperties {
+  return {
+    position: "relative",
+    overflow: "hidden",
+    display: "flex",
+    gap: 9,
+    alignItems: "flex-start",
+    borderRadius: 8,
+    padding: "9px 10px",
+    border: current
+      ? "1px solid color-mix(in srgb, var(--accent) 38%, var(--paper-edge))"
+      : "1px solid var(--paper-edge)",
+    background: current
+      ? "color-mix(in srgb, var(--accent) 6%, var(--paper))"
+      : "color-mix(in srgb, var(--green-deep) 3%, var(--paper))",
+    boxShadow: current
+      ? "0 1px 2px rgba(11, 11, 15, 0.04), 0 8px 22px -18px color-mix(in srgb, var(--accent) 45%, transparent)"
+      : "0 1px 2px rgba(11, 11, 15, 0.03)",
+  };
+}
 
-function soloWaterfallIndexStyle(active: boolean): CSSProperties {
+// 단계 칩 — 현재 행은 번호(액센트 배경), 완료 행은 ✓(그린).
+function soloWaterfallIndexStateStyle(current: boolean): CSSProperties {
   return {
     width: 26,
     height: 22,
@@ -1017,13 +985,30 @@ function soloWaterfallIndexStyle(active: boolean): CSSProperties {
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
-    background: active ? "color-mix(in srgb, var(--accent) 12%, var(--paper-2))" : "var(--paper-2)",
-    color: active ? "var(--accent)" : "var(--muted-deep)",
     fontFamily: "var(--font-mono)",
-    fontSize: 10,
     fontWeight: 800,
+    ...(current
+      ? { background: "var(--accent)", color: "var(--paper)", fontSize: 10 }
+      : {
+          background: "color-mix(in srgb, var(--green-deep) 12%, var(--paper-2))",
+          color: "var(--green-deep)",
+          fontSize: 11,
+        }),
   };
 }
+
+// 현재 행 우측 "진행 중" 상태 칩.
+const soloWaterfallNowChipStyle: CSSProperties = {
+  flexShrink: 0,
+  marginLeft: "auto",
+  borderRadius: 999,
+  border: "1px solid color-mix(in srgb, var(--accent) 30%, var(--paper-edge))",
+  background: "color-mix(in srgb, var(--accent) 10%, var(--paper))",
+  color: "var(--accent-strong)",
+  padding: "1px 7px",
+  fontSize: 9.5,
+  fontWeight: 780,
+};
 
 const soloWaterfallTitleStyle: CSSProperties = {
   display: "flex",
@@ -1191,99 +1176,6 @@ function idleDotStyle(active: boolean): CSSProperties {
   };
 }
 
-const workflowCardStyle: CSSProperties = {
-  position: "relative",
-  overflow: "hidden",
-  borderRadius: 8,
-  border: "1px solid var(--paper-edge)",
-  background: "var(--paper)",
-  padding: "10px 11px",
-  boxShadow: "0 1px 2px rgba(11, 11, 15, 0.035)",
-};
-
-// 영수증 메타 칩 줄 — from→to / 도구 / 토큰. 실측 있을 때만 렌더.
-const receiptMetaRowStyle: CSSProperties = {
-  marginTop: 8,
-  display: "flex",
-  flexWrap: "wrap",
-  gap: 5,
-};
-
-const receiptChipStyle: CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  maxWidth: "100%",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  borderRadius: 999,
-  border: "1px solid var(--paper-edge)",
-  background: "var(--paper-2)",
-  color: "var(--muted-deep)",
-  padding: "2px 7px",
-  fontSize: 9.5,
-  fontWeight: 750,
-};
-
-const workflowTitleStyle: CSSProperties = {
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  color: "var(--ink)",
-  fontSize: 12,
-  fontWeight: 780,
-};
-
-const workflowMetaStyle: CSSProperties = {
-  marginTop: 1,
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  color: "var(--muted-deep)",
-  fontSize: 10.5,
-  fontWeight: 650,
-};
-
-const workflowTextStyle: CSSProperties = {
-  marginTop: 7,
-  color: "var(--ink-soft)",
-  fontSize: 11.3,
-  lineHeight: 1.48,
-  overflowWrap: "anywhere",
-  display: "-webkit-box",
-  WebkitLineClamp: 2,
-  WebkitBoxOrient: "vertical",
-  overflow: "hidden",
-};
-
-function workflowDotStyle(kind: NetTimelineItem["kind"], live: boolean, complete = false): CSSProperties {
-  const color = complete ? "var(--green-deep)" : kind === "handoff" ? "var(--accent)" : kind === "tool" ? "var(--blue-deep)" : "var(--muted-deep)";
-  return {
-    width: kind === "handoff" ? 10 : 9,
-    height: 9,
-    borderRadius: kind === "handoff" ? 3 : "50%",
-    flexShrink: 0,
-    background: live ? "var(--green-deep)" : color,
-    boxShadow: live ? "0 0 0 4px color-mix(in srgb, var(--green-deep) 13%, transparent)" : undefined,
-  };
-}
-
-function workflowKindStyle(kind: NetTimelineItem["kind"], complete = false): CSSProperties {
-  const color = complete ? "var(--green-deep)" : kind === "handoff" ? "var(--accent)" : kind === "tool" ? "var(--blue-deep)" : "var(--muted-deep)";
-  return {
-    flexShrink: 0,
-    borderRadius: 999,
-    border: "1px solid color-mix(in srgb, currentColor 22%, var(--paper-edge))",
-    background: "color-mix(in srgb, currentColor 7%, var(--paper))",
-    color,
-    padding: "2px 7px",
-    fontSize: 10,
-    fontWeight: 760,
-  };
-}
-
 // ── 오케스트레이션 트리 스타일 ──────────────────────────────
 const headerCountBadgeStyle: CSSProperties = {
   flexShrink: 0,
@@ -1371,18 +1263,30 @@ const orchWorkersStyle: CSSProperties = {
 
 function agentRowStyle(kind: "orchestrator" | "group" | "worker", status: OrchStatus): CSSProperties {
   const running = status === "running";
+  const done = status === "done";
   return {
     display: "flex",
     alignItems: "center",
     gap: 9,
     borderRadius: 9,
-    border: `1px solid ${kind === "orchestrator" ? RETRO.edgeRun : running ? RETRO.edgeRun : RETRO.edge}`,
+    // 상태 3단 구분: 실행 중=앰버, 완료=그린 톤, 대기=흐림 — 어느 단계인지 색만으로 읽히게.
+    border: `1px solid ${
+      kind === "orchestrator"
+        ? RETRO.edgeRun
+        : running
+          ? RETRO.edgeRun
+          : done
+            ? RETRO.edgeDone
+            : RETRO.edge
+    }`,
     background:
       kind === "orchestrator"
         ? "color-mix(in srgb, #F59E0B 12%, var(--paper))"
         : running
           ? RETRO.cardRun
-          : RETRO.card,
+          : done
+            ? RETRO.cardDone
+            : RETRO.card,
     padding: kind === "worker" ? "6px 8px" : "8px 9px",
     opacity: status === "pending" ? 0.6 : 1,
   };
