@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.17 — 2026-07-07
+
+### Security
+
+- **Enterprise upload content-safety gate.** Bundles the Hephaestus v1.1.6 engine
+  (up from v1.1.1), which hardens `hep-upload` against malicious agent packages.
+  The sanitizer now defeats modern prompt-injection obfuscation — homoglyphs,
+  leetspeak, zero-width/bidi characters, Unicode Tag-block smuggling,
+  separated-letter tricks, and injections split across lines — and detects
+  injection/exfiltration in English, Korean, Chinese/Japanese, and major
+  European languages, plus secret-exfiltration beacons and high-value credential
+  access. It removes only high-confidence attacker directives line-by-line while
+  keeping and flagging ambiguous, negated, quoted, or descriptive content, so
+  legitimate agent quality is preserved and packages still publish. Verified
+  against 139 adversarial vectors (100% stripped) with 0 false positives on 35
+  realistic benign samples.
+
 ## 0.7.1 — 2026-07-03
 
 ### Added
