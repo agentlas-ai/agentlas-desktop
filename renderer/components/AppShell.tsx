@@ -17,6 +17,7 @@ import { useT } from "@/lib/i18n";
 import { IconLayers, IconBug, IconCheck } from "./Icon";
 import { PageTour, replayCurrentPageTour } from "./PageTour";
 import { BuildDoneToast } from "./BuildDoneToast";
+import { BrowserActionApprovalSheet } from "./BrowserActionApprovalSheet";
 import {
   isOberonBackgroundJobActive,
   startOberonBackgroundJobMonitor,
@@ -151,6 +152,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </main>
       <PageTour pathname={pathname} />
       <BuildDoneToast />
+      <BrowserActionApprovalSheet />
       <BackgroundWorkPill
         jobs={oberonJobs}
         avoidComposer={pathname.startsWith("/chat")}

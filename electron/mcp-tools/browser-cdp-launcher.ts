@@ -23,6 +23,50 @@ export function browserCdpLauncherPath(): string {
   return path.join(os.homedir(), ".agentlas", BROWSER_CDP_LAUNCHER_BASENAME);
 }
 
+/** 전용 CDP 크롬 프로필 경로(MCP 런처와 로그인 창이 공유). */
+export function browserCdpProfilePath(): string {
+  return process.env.AGENTLAS_CDP_PROFILE || path.join(os.homedir(), ".agentlas", "chrome-cdp-profile");
+}
+
+/** 기본 CDP 포트(MCP 런처와 동일 기본값). */
+export function browserCdpPort(): number {
+  return Number(process.env.AGENTLAS_CDP_PORT || 9222);
+}
+
+/** 플랫폼별 Chrome 실행 파일 경로 해석(없으면 null). Edge 폴백 포함. */
+export function resolveChromeExe(): string | null {
+  const home = os.homedir();
+  let candidates: string[] = [];
+  if (process.platform === "darwin") {
+    candidates = [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      path.join(home, "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    ];
+  } else if (process.platform === "win32") {
+    const lad = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
+    const pf = process.env["PROGRAMFILES"] || "C:\\Program Files";
+    const pfx = process.env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)";
+    candidates = [
+      path.join(pf, "Google", "Chrome", "Application", "chrome.exe"),
+      path.join(pfx, "Google", "Chrome", "Application", "chrome.exe"),
+      path.join(lad, "Google", "Chrome", "Application", "chrome.exe"),
+      path.join(pf, "Microsoft", "Edge", "Application", "msedge.exe"),
+      path.join(pfx, "Microsoft", "Edge", "Application", "msedge.exe"),
+    ];
+  } else {
+    candidates = [
+      "/usr/bin/google-chrome",
+      "/usr/bin/google-chrome-stable",
+      "/opt/google/chrome/chrome",
+      "/usr/bin/chromium",
+      "/usr/bin/chromium-browser",
+      "/usr/bin/microsoft-edge",
+    ];
+  }
+  return candidates.find((p) => fs.existsSync(p)) || null;
+}
+
 const LAUNCHER_SOURCE = String.raw`#!/usr/bin/env node
 // Agentlas Browser (CDP) — 범용. 실제 로그인 Chrome 프로필 사본을 원격 디버깅 포트로 띄우고
 // @playwright/mcp 를 CDP 로 붙여 MCP 브라우저 도구를 제공한다. 특정 사이트/계정 하드코딩 없음.
@@ -92,13 +136,27 @@ function portReady(port) {
   });
 }
 
+// 전용 프로필이 이미 초기화됐는지(사용자가 여기 직접 로그인했을 수 있음).
+function profileSeeded(dst) {
+  return fs.existsSync(path.join(dst, 'Default', 'Cookies'))
+    || fs.existsSync(path.join(dst, 'Default', 'Network', 'Cookies'));
+}
+
 async function ensureChrome() {
   if (await portReady(PORT)) { log('CDP already up on', PORT); return; }
   const { userData, exe } = chromeInfo();
   if (!fs.existsSync(exe)) throw new Error('Google Chrome 실행 파일을 찾을 수 없습니다: ' + exe);
-  // 신선 사본이 없거나 오래됐으면 실제 프로필 세션을 다시 심는다(로그인 최신 유지).
-  seedProfile(userData, CDP_PROFILE);
-  log('launching Chrome (copied profile) on port', PORT);
+  // 전용 프로필은 영속이다. 매 실행마다 실프로필을 덮으면 사용자가 Browser 메뉴에서 직접
+  // 로그인한 세션이 날아가므로, 시드는 (a) 전용 프로필이 비어있는 최초 1회이거나
+  // (b) AGENTLAS_CDP_SEED=1 로 명시적으로 "내 크롬 로그인 가져오기"를 요청했을 때만 한다.
+  const force = process.env.AGENTLAS_CDP_SEED === '1';
+  if (force || !profileSeeded(CDP_PROFILE)) {
+    log(force ? 'seeding profile (forced import)' : 'seeding profile (first run)');
+    seedProfile(userData, CDP_PROFILE);
+  } else {
+    log('reusing persistent dedicated profile (no reseed)');
+  }
+  log('launching Chrome on port', PORT);
   const child = spawn(exe, [
     '--user-data-dir=' + CDP_PROFILE,
     '--remote-debugging-port=' + PORT,
@@ -112,13 +170,118 @@ async function ensureChrome() {
   throw new Error('Chrome CDP 포트가 열리지 않았습니다: ' + PORT);
 }
 
+// ── 승인 게이트 (되돌릴 수 없는 행동 인터셉트) ────────────────────
+// @playwright/mcp 는 이 프로세스가 stdio 로 프록시한다. client(런타임)→child 방향의 JSON-RPC
+// 'tools/call' 중 전송/게시/결제/삭제로 보이는 것을 앱의 승인 서버로 게이트한다.
+const PAY_RE = /(checkout|\bpay(ment)?\b|purchase|\bbuy\b|\border\b|donate|subscrib|billing|결제|구매|주문|결재)/;
+const SEND_RE = /(publish|\bpost\b|\bsend\b|submit|tweet|retweet|\bshare\b|reply|\bcomment\b|delete|remove|confirm|전송|게시|삭제|제출|답글|댓글|공유|보내)/;
+
+function classifyAction(name, args) {
+  let text = '';
+  try { text = JSON.stringify(args || {}).toLowerCase(); } catch (e) { text = ''; }
+  if (name === 'browser_navigate' || name === 'browser_navigate_back') {
+    return PAY_RE.test(text) ? 'payment' : null;
+  }
+  if (name === 'browser_click' || name === 'browser_file_upload' || name === 'browser_press_key') {
+    if (PAY_RE.test(text)) return 'payment';
+    if (SEND_RE.test(text)) {
+      if (/publish|\bpost\b|게시/.test(text)) return 'publish';
+      if (/delete|remove|삭제/.test(text)) return 'delete';
+      return 'send';
+    }
+  }
+  return null;
+}
+
+function readApprovalInfo() {
+  try {
+    const p = path.join(os.homedir(), '.agentlas', 'browser-approval.json');
+    if (!fs.existsSync(p)) return null;
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch (e) { return null; }
+}
+
+// 승인 서버(앱)에 물어본다. 앱 미실행이면 autonomy 정책: 기본 'gated'(거부), 'trust'면 허용.
+function requestApproval(site, actionType, summary) {
+  return new Promise((resolve) => {
+    const autonomy = process.env.AGENTLAS_BROWSER_AUTONOMY || 'gated';
+    const info = readApprovalInfo();
+    if (!info || !info.port) {
+      log('no approver (app not running); autonomy=' + autonomy + ' action=' + actionType);
+      return resolve(autonomy === 'trust' ? 'approved' : 'denied');
+    }
+    const payload = JSON.stringify({ site: site, actionType: actionType, summary: summary });
+    const req = http.request({
+      host: '127.0.0.1', port: info.port, path: '/approve', method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'authorization': 'Bearer ' + info.token },
+      timeout: 125000,
+    }, (res) => {
+      let b = '';
+      res.on('data', (d) => { b += d; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(b).decision === 'approved' ? 'approved' : 'denied'); }
+        catch (e) { resolve('denied'); }
+      });
+    });
+    req.on('error', () => resolve(autonomy === 'trust' ? 'approved' : 'denied'));
+    req.on('timeout', () => { req.destroy(); resolve('denied'); });
+    req.write(payload); req.end();
+  });
+}
+
 async function main() {
   await ensureChrome();
-  // @playwright/mcp 를 CDP 로 붙여 이 프로세스의 stdio 를 그대로 MCP 서버로 인계.
   const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  const mcp = spawn(npx, ['-y', '@playwright/mcp@latest', '--cdp-endpoint', 'http://127.0.0.1:' + PORT], { stdio: 'inherit' });
-  mcp.on('error', (e) => { log('failed to start @playwright/mcp', String(e)); process.exit(1); });
-  mcp.on('exit', (code) => process.exit(code == null ? 0 : code));
+  // child stdio: client(우리) ↔ child 를 우리가 중계. stderr 는 그대로 흘려보낸다.
+  const child = spawn(npx, ['-y', '@playwright/mcp@latest', '--cdp-endpoint', 'http://127.0.0.1:' + PORT], { stdio: ['pipe', 'pipe', 'inherit'] });
+  child.on('error', (e) => { log('failed to start @playwright/mcp', String(e)); process.exit(1); });
+  child.on('exit', (code) => process.exit(code == null ? 0 : code));
+  // server→client(응답)은 그대로 통과.
+  child.stdout.pipe(process.stdout);
+
+  let currentUrl = '';
+  let buf = '';
+  const forward = (line) => { try { child.stdin.write(line + '\n'); } catch (e) {} };
+  const denyResponse = (id, actionType) => {
+    // 승인 거부를 JSON-RPC tool 결과(isError)로 client 에 돌려준다 — 행동은 실행하지 않는다.
+    const msg = { jsonrpc: '2.0', id: id, result: { content: [{ type: 'text', text: 'BLOCKED: 사용자가 이 ' + actionType + ' 작업을 승인하지 않았습니다. 이 동작을 실행하지 말고 다음 단계로 넘어가세요.' }], isError: true } };
+    try { process.stdout.write(JSON.stringify(msg) + '\n'); } catch (e) {}
+  };
+
+  const handleLine = (line) => {
+    if (!line.trim()) { forward(line); return; }
+    let msg;
+    try { msg = JSON.parse(line); } catch (e) { forward(line); return; }
+    if (msg && msg.method === 'tools/call' && msg.params) {
+      const name = msg.params.name || '';
+      const args = msg.params.arguments || {};
+      if (name === 'browser_navigate' && args.url) currentUrl = String(args.url);
+      const actionType = classifyAction(name, args);
+      if (actionType) {
+        let site = '';
+        try { site = new URL(currentUrl).host; } catch (e) { site = currentUrl; }
+        const summary = actionType + ': ' + (args.element || args.url || name);
+        log('gating ' + actionType + ' on ' + (site || '(unknown)'));
+        requestApproval(site, actionType, summary).then((decision) => {
+          if (decision === 'approved') forward(line);
+          else denyResponse(msg.id, actionType);
+        });
+        return;
+      }
+    }
+    forward(line);
+  };
+
+  process.stdin.on('data', (chunk) => {
+    buf += chunk.toString('utf8');
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx);
+      buf = buf.slice(idx + 1);
+      handleLine(line);
+    }
+  });
+  process.stdin.on('end', () => { try { child.stdin.end(); } catch (e) {} });
 }
 main().catch((e) => { console.error('[agentlas-browser] fatal', e && e.stack || e); process.exit(1); });
 `;

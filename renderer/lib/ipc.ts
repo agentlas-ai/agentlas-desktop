@@ -1,5 +1,10 @@
 // preload.ts가 contextBridge로 노출한 window.agentlas / window.agentlasEvents 타이핑.
-import type { AgentlasIpc, AgentlasUpdaterEvents, McpInvocationEvent } from "./types";
+import type {
+  AgentlasIpc,
+  AgentlasUpdaterEvents,
+  McpInvocationEvent,
+  BrowserApprovalRequestEvent,
+} from "./types";
 
 interface AgentlasEvents {
   on: (
@@ -8,6 +13,8 @@ interface AgentlasEvents {
   ) => () => void;
   /** 실행 중 chatId 목록 방송 구독 — 사이드바 "실행 중" 인디케이터. unsubscribe 반환. */
   onActiveChats: (handler: (chatIds: string[]) => void) => () => void;
+  /** Browser 승인 요청 구독 — 경량 바텀시트. unsubscribe 반환. */
+  onBrowserApproval: (handler: (req: BrowserApprovalRequestEvent) => void) => () => void;
 }
 
 interface AgentlasFilesBridge {

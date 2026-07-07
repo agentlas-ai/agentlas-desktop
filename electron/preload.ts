@@ -3,6 +3,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AgentlasIpc,
+  BrowserApprovalRequestEvent,
   BugReportInput,
   Automation,
   McpInvocationEvent,
@@ -264,6 +265,20 @@ const api: AgentlasIpc = {
     configureBotSettings: (id: string) => ipcRenderer.invoke("telegram:configureBotSettings", id),
     pruneOrphans: () => ipcRenderer.invoke("telegram:pruneOrphans"),
   },
+  browser: {
+    status: () => ipcRenderer.invoke("browser:status"),
+    listSites: () => ipcRenderer.invoke("browser:listSites"),
+    saveSite: (input) => ipcRenderer.invoke("browser:saveSite", input),
+    deleteSite: (site: string) => ipcRenderer.invoke("browser:deleteSite", site),
+    openLogin: (site: string) => ipcRenderer.invoke("browser:openLogin", site),
+    markSession: (site: string, status) => ipcRenderer.invoke("browser:markSession", site, status),
+    listPermissions: () => ipcRenderer.invoke("browser:listPermissions"),
+    revokePermission: (site: string, actionType: string) =>
+      ipcRenderer.invoke("browser:revokePermission", site, actionType),
+    resolveApproval: (requestId: string, decision) =>
+      ipcRenderer.invoke("browser:resolveApproval", requestId, decision),
+    listLogs: (limit?: number) => ipcRenderer.invoke("browser:listLogs", limit),
+  },
   projects: {
     list: () => ipcRenderer.invoke("projects:list"),
     get: (id: string) => ipcRenderer.invoke("projects:get", id),
@@ -475,6 +490,13 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
     const wrapped = (_evt: Electron.IpcRendererEvent, chatIds: string[]) => handler(chatIds);
     ipcRenderer.on("invoke:activeChats", wrapped);
     return () => ipcRenderer.removeListener("invoke:activeChats", wrapped);
+  },
+  // Browser 승인 요청 — 되돌릴 수 없는 브라우저 행동 전 경량 바텀시트를 띄운다.
+  onBrowserApproval: (handler: (req: BrowserApprovalRequestEvent) => void) => {
+    const wrapped = (_evt: Electron.IpcRendererEvent, req: BrowserApprovalRequestEvent) =>
+      handler(req);
+    ipcRenderer.on("browser:approvalRequest", wrapped);
+    return () => ipcRenderer.removeListener("browser:approvalRequest", wrapped);
   },
 });
 

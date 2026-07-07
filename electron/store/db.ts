@@ -10,7 +10,7 @@ import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 46;
+const SCHEMA_VERSION = 47;
 
 export function initStore(): void {
   if (_db) return;
@@ -1112,6 +1112,58 @@ export function initStore(): void {
     if (!chatCols.some((c) => c.name === "last_viewed_at")) {
       _db.exec("ALTER TABLE chats ADD COLUMN last_viewed_at TEXT");
     }
+  }
+
+  // ── v46 → v47: Browser 자격증명 볼트 · 세션 · 권한 · 사용로그 ──────
+  // 범용 브라우저 조작(agentlas-browser CDP)을 위한 로컬 저장소.
+  //  - browser_sites: 사이트별 카드(전용 프로필 재사용). 비번은 여기 없음 → keytar(secret:browser.cred:<site>).
+  //  - browser_sessions: 캡처된 로그인 세션 상태(쿠키 자체는 크롬 프로필에, 여기엔 상태만).
+  //  - browser_permissions: 되돌릴 수 없는 행동 승인 기억(always만 영속). 결제는 저장 안 함.
+  //  - browser_action_logs: 날짜별 사용 로그(감사·신뢰).
+  if (userVersion < 47) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS browser_sites (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL UNIQUE,
+        label TEXT,
+        username TEXT,
+        has_password INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS browser_sessions (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'none',
+        captured_at TEXT,
+        note TEXT,
+        FOREIGN KEY(site) REFERENCES browser_sites(site) ON DELETE CASCADE
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_sessions_site ON browser_sessions(site);
+
+      CREATE TABLE IF NOT EXISTS browser_permissions (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_perm_site_action
+        ON browser_permissions(site, action_type);
+
+      CREATE TABLE IF NOT EXISTS browser_action_logs (
+        id TEXT PRIMARY KEY,
+        ts TEXT NOT NULL,
+        site TEXT,
+        action TEXT NOT NULL,
+        target TEXT,
+        result TEXT,
+        approval TEXT,
+        meta TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_browser_logs_ts ON browser_action_logs(ts DESC);
+    `);
   }
 
   _db.pragma(`user_version = ${SCHEMA_VERSION}`);

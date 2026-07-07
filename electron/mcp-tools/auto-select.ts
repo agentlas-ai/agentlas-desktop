@@ -247,7 +247,10 @@ function scoreWithAutomationPolicy(
   toolMode: AutomationToolMode | undefined,
 ): number {
   if (toolMode === "browser") {
-    if (entry.id === "playwright") return Math.max(score, 100);
+    // 브라우저 조작은 무조건 agentlas-browser(실로그인 CDP)로 — 신선 프로필 playwright는
+    // 봇/네트워크 보안에 차단되므로 최우선은 agentlas-browser, playwright는 폴백으로만.
+    if (entry.id === "agentlas-browser") return Math.max(score, 100);
+    if (entry.id === "playwright") return Math.max(score, 40);
     if (entry.id === "cua-driver") return 0;
   }
   if (toolMode === "computer-use") {
@@ -430,8 +433,8 @@ export async function autoSelectMcpTools(input: {
       id: entry.id,
       name: entry.nameEn || entry.name,
       reason:
-        effectiveToolMode === "browser" && entry.id === "playwright"
-          ? "user-selected Browser plugin for this automation"
+        effectiveToolMode === "browser" && entry.id === "agentlas-browser"
+          ? "Browser plugin (real-login CDP) for this automation"
           : effectiveToolMode === "computer-use" && entry.id === "cua-driver"
             ? input.toolMode === "computer-use"
               ? "user-selected Computer Use for this automation"

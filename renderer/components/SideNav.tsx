@@ -93,6 +93,7 @@ export function SideNav({
       { label: t("nav.dashboard"), href: "/dashboard", icon: IconHome },
       { label: t("nav.workspace"), href: "/chat", icon: IconChat },
       { label: t("nav.connect"), href: "/connect", icon: IconAtSign },
+      { label: t("nav.browser"), href: "/browser", icon: IconNetwork },
     ],
     [t],
   );

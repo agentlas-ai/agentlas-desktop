@@ -752,6 +752,57 @@ export type AutomationToolMode = "auto" | "browser" | "computer-use";
 export type AutomationHubMode = "hub-allowed" | "hub-first" | "local-only";
 export type AutomationTargetType = "agent" | "firm" | "hub";
 
+// ── Browser 기능 (자격증명 볼트 · 전용 프로필 · 승인 게이트 · 로그) ──
+export type BrowserSessionStatus = "valid" | "expired" | "none";
+export type BrowserApprovalDecision = "once" | "always" | "deny";
+
+export interface BrowserStatus {
+  chromeFound: boolean;
+  chromePath: string | null;
+  profilePath: string;
+  cdpPort: number;
+}
+export interface BrowserSite {
+  id: string;
+  site: string;
+  label: string | null;
+  username: string | null;
+  hasPassword: boolean;
+  session: { status: BrowserSessionStatus; capturedAt: string | null };
+  createdAt: string;
+  updatedAt: string;
+}
+export interface BrowserSiteInput {
+  site: string;
+  label?: string | null;
+  username?: string | null;
+  /** 문자열이면 keytar 저장, "" 이면 삭제, 생략/undefined 면 기존 유지. */
+  password?: string | null;
+}
+export interface BrowserPermissionEntry {
+  site: string;
+  actionType: string;
+  decision: BrowserApprovalDecision;
+}
+export interface BrowserActionLog {
+  id: string;
+  ts: string;
+  site: string | null;
+  action: string;
+  target: string | null;
+  result: string | null;
+  approval: string | null;
+}
+/** electron → renderer 로 밀리는 승인 요청(경량 바텀시트가 받는다). */
+export interface BrowserApprovalRequestEvent {
+  requestId: string;
+  site: string;
+  actionType: string;
+  summary: string;
+  target: string | null;
+  allowAlways: boolean;
+}
+
 // ── 자동화 — SQLite 영속 + 앱 실행 중 백그라운드 스케줄러 ────────────
 export interface Automation {
   id: string;
@@ -3487,6 +3538,18 @@ export interface AgentlasIpc {
     openBot: (id: string) => Promise<{ ok: boolean; message: string }>;
     configureBotSettings: (id: string) => Promise<{ ok: boolean; message: string }>;
     pruneOrphans: () => Promise<{ removed: number }>;
+  };
+  browser: {
+    status: () => Promise<BrowserStatus>;
+    listSites: () => Promise<BrowserSite[]>;
+    saveSite: (input: BrowserSiteInput) => Promise<BrowserSite>;
+    deleteSite: (site: string) => Promise<{ ok: true }>;
+    openLogin: (site: string) => Promise<{ ok: boolean; error?: string }>;
+    markSession: (site: string, status: BrowserSessionStatus) => Promise<{ ok: true }>;
+    listPermissions: () => Promise<BrowserPermissionEntry[]>;
+    revokePermission: (site: string, actionType: string) => Promise<{ ok: true }>;
+    resolveApproval: (requestId: string, decision: BrowserApprovalDecision) => Promise<{ ok: boolean }>;
+    listLogs: (limit?: number) => Promise<BrowserActionLog[]>;
   };
   projects: {
     list: () => Promise<Project[]>;

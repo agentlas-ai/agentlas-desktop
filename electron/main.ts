@@ -22,6 +22,7 @@ import { materializeAllAgents } from "./agents/files";
 import { backfillEntityKinds } from "./mcp/registry";
 import { seedBuiltinAgents } from "./architecture/seed";
 import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
+import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser/approval-server";
 
 const isDev = process.env.NODE_ENV === "development";
 
@@ -323,6 +324,11 @@ app.whenReady().then(async () => {
   });
   shellReadyForWindows = true;
   ensureDefaultMcpPluginsInstalled();
+  // Browser 승인 서버 — agentlas-browser 런처가 되돌릴 수 없는 행동 전에 이 로컬 엔드포인트로
+  // 사용자 승인을 받는다(포트+토큰은 ~/.agentlas/browser-approval.json).
+  void startBrowserApprovalServer().catch((err) =>
+    console.error("[browser] approval server failed:", err),
+  );
   // Agentlas 아키텍처 — PM 소울/메모리 큐레이터/태스크 편향 큐레이터를 설치에 항상 동봉.
   // 버전 게이팅이라 평상시엔 거의 no-op. ARCHITECTURE_VERSION이 오르면 프롬프트만 재동기화.
   try {
@@ -370,6 +376,11 @@ app.whenReady().then(async () => {
 });
 
 app.on("before-quit", async () => {
+  try {
+    stopBrowserApprovalServer();
+  } catch {
+    // ignore shutdown cleanup errors
+  }
   try {
     const { stopTelegramWorkers } = await import("./telegram/connect");
     stopTelegramWorkers();

@@ -273,6 +273,19 @@ import {
   stopTelegramConnection,
 } from "./telegram/connect";
 import {
+  getBrowserStatus,
+  browserListSites,
+  browserSaveSite,
+  browserDeleteSite,
+  browserOpenLogin,
+  browserMarkSession,
+  browserListPermissions,
+  browserRevokePermission,
+  browserResolveApproval,
+  browserListLogs,
+} from "./browser/connect";
+import type { BrowserPermissionDecision } from "./browser/connect";
+import {
   archiveAppPackage,
   activateLocalCommerceStack,
   approveProviderPayment,
@@ -1138,6 +1151,24 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("telegram:openBot", (_e, id: string) => openTelegramBot(id));
   ipcMain.handle("telegram:configureBotSettings", (_e, id: string) => configureTelegramBotSettings(id));
   ipcMain.handle("telegram:pruneOrphans", () => pruneOrphanedTelegramBindings());
+
+  // ── browser (자격증명 볼트 · 전용 프로필 · 승인 게이트 · 로그) ─
+  ipcMain.handle("browser:status", () => getBrowserStatus());
+  ipcMain.handle("browser:listSites", () => browserListSites());
+  ipcMain.handle("browser:saveSite", (_e, input) => browserSaveSite(input));
+  ipcMain.handle("browser:deleteSite", (_e, site: string) => browserDeleteSite(site));
+  ipcMain.handle("browser:openLogin", (_e, site: string) => browserOpenLogin(site));
+  ipcMain.handle("browser:markSession", (_e, site: string, status: "valid" | "expired" | "none") =>
+    browserMarkSession(site, status),
+  );
+  ipcMain.handle("browser:listPermissions", () => browserListPermissions());
+  ipcMain.handle("browser:revokePermission", (_e, site: string, actionType: string) =>
+    browserRevokePermission(site, actionType),
+  );
+  ipcMain.handle("browser:resolveApproval", (_e, requestId: string, decision: BrowserPermissionDecision) =>
+    browserResolveApproval(requestId, decision),
+  );
+  ipcMain.handle("browser:listLogs", (_e, limit?: number) => browserListLogs(limit));
 
   // ── projects ───────────────────────────────────────────
   ipcMain.handle("projects:list", () => listProjects());
