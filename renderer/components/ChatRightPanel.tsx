@@ -39,6 +39,7 @@ interface Props {
   artifact: CodeArtifact | null;
   surface: WorkbenchSurface | null;
   filePreview?: WorkspaceFilePreview | null;
+  linkedFiles?: WorkspaceFilePreview[];
   onSurfaceAction?: SurfaceActionHandler;
   onSurfaceStatePatch?: SurfaceStatePatchHandler;
   firm: InstalledFirm | null;
@@ -63,6 +64,7 @@ export function ChatRightPanel({
   artifact,
   surface,
   filePreview: externalFilePreview,
+  linkedFiles = [],
   onSurfaceAction,
   onSurfaceStatePatch,
   firm,
@@ -166,6 +168,7 @@ export function ChatRightPanel({
               onTabChange("panel");
             }}
             chatId={chatId}
+            linkedFiles={linkedFiles}
           />
         )}
         {activeTab === "agent" && (
@@ -221,15 +224,28 @@ function FileTab({
   onOpenPanel,
   onOpenFilePreview,
   chatId,
+  linkedFiles,
 }: {
   artifact: CodeArtifact | null;
   surface: WorkbenchSurface | null;
   onOpenPanel: () => void;
   onOpenFilePreview: (preview: WorkspaceFilePreview) => void;
   chatId: string | null;
+  linkedFiles: WorkspaceFilePreview[];
 }) {
   const { locale } = useT();
   const ko = locale === "ko";
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: WorkspaceFilePreview } | null>(null);
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [contextMenu]);
   const rawOutputRows: Array<OutputRow | null> = [
     surface
       ? {
@@ -281,6 +297,43 @@ function FileTab({
           </div>
         )}
       </section>
+      {linkedFiles.length > 0 && (
+        <section style={outputsStyle}>
+          <div style={sectionHeaderStyle}>
+            <span>{ko ? "링크된 파일" : "Linked files"}</span>
+            <span>{linkedFiles.length}</span>
+          </div>
+          <div style={outputListStyle}>
+            {linkedFiles.map((file) => (
+              <button
+                key={`${file.path}:${file.fileUrl}`}
+                type="button"
+                onClick={() => onOpenFilePreview(file)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setContextMenu({ x: event.clientX, y: event.clientY, file });
+                }}
+                style={outputRowStyle}
+                title={file.path}
+              >
+                <span style={outputIconStyle}>{iconForViewerKind(file.viewerKind)}</span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <strong style={outputTitleStyle}>{file.name}</strong>
+                  <span style={outputMetaStyle}>{previewMeta(file, ko)}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+          {contextMenu && (
+            <FileContextMenu
+              x={contextMenu.x}
+              y={contextMenu.y}
+              file={contextMenu.file}
+              onClose={() => setContextMenu(null)}
+            />
+          )}
+        </section>
+      )}
       <div style={workspaceWrapStyle}>
         <WorkspacePanel embedded chatId={chatId} onOpenFilePreview={onOpenFilePreview} />
       </div>
@@ -295,23 +348,13 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
   const typeLabel = viewerKindLabel(file.viewerKind, ko);
   const openExternal = async () => {
     setOpenError(null);
-    const targets = externalOpenTargets(file);
-    const bridge = ipc();
-    if (bridge?.fs?.openPath) {
-      let lastMessage = "";
-      for (const target of targets) {
-        if (/^(data:|blob:)/i.test(target)) continue;
-        const result = await bridge.fs.openPath(target).catch((error) => ({
-          ok: false,
-          message: error instanceof Error ? error.message : String(error),
-        }));
-        if (result.ok) return;
-        lastMessage = result.message || lastMessage;
-      }
-      setOpenError(lastMessage || (ko ? "OS로 열 실제 파일 경로를 찾지 못했습니다." : "Could not find a local file path to open."));
-      return;
-    }
-    window.open(file.browserUrl || file.fileUrl, "_blank", "noopener,noreferrer");
+    const message = await openWorkspaceFileExternal(file, ko);
+    if (message) setOpenError(message);
+  };
+  const revealInFolder = async () => {
+    setOpenError(null);
+    const message = await revealWorkspaceFile(file, ko);
+    if (message) setOpenError(message);
   };
   return (
     <section style={fileViewerStyle}>
@@ -324,6 +367,11 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
         <button type="button" onClick={openExternal} style={fileViewerOpenButtonStyle}>
           {ko ? "외부 열기" : "Open"}
         </button>
+        {canRevealWorkspaceFile(file) && (
+          <button type="button" onClick={revealInFolder} style={fileViewerOpenButtonStyle}>
+            {ko ? "Finder에서 보기" : "Show"}
+          </button>
+        )}
       </header>
       {openError && <div style={fileNoticeStyle}>{openError}</div>}
       <div style={fileViewerBodyStyle}>
@@ -381,6 +429,115 @@ function externalOpenTargets(file: WorkspaceFilePreview): string[] {
     if (value && !out.includes(value)) out.push(value);
   }
   return out;
+}
+
+async function openWorkspaceFileExternal(file: WorkspaceFilePreview, ko: boolean): Promise<string | null> {
+  const targets = externalOpenTargets(file);
+  const bridge = ipc();
+  if (bridge?.fs?.openPath) {
+    let lastMessage = "";
+    for (const target of targets) {
+      if (/^(data:|blob:)/i.test(target)) continue;
+      const result = await bridge.fs.openPath(target).catch((error) => ({
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      }));
+      if (result.ok) return null;
+      lastMessage = result.message || lastMessage;
+    }
+    return lastMessage || (ko ? "OS로 열 실제 파일 경로를 찾지 못했습니다." : "Could not find a local file path to open.");
+  }
+  window.open(file.browserUrl || file.fileUrl, "_blank", "noopener,noreferrer");
+  return null;
+}
+
+async function revealWorkspaceFile(file: WorkspaceFilePreview, ko: boolean): Promise<string | null> {
+  const bridge = ipc();
+  if (!bridge?.fs?.showItemInFolder) {
+    return ko ? "Finder에서 보기 기능을 사용할 수 없습니다." : "Show in folder is not available.";
+  }
+  let lastMessage = "";
+  for (const target of externalOpenTargets(file)) {
+    if (/^(https?:|data:|blob:)/i.test(target)) continue;
+    const result = await bridge.fs.showItemInFolder(target).catch((error) => ({
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    }));
+    if (result.ok) return null;
+    lastMessage = result.message || lastMessage;
+  }
+  return lastMessage || (ko ? "Finder에서 표시할 로컬 파일 경로를 찾지 못했습니다." : "Could not find a local file path to reveal.");
+}
+
+function canRevealWorkspaceFile(file: WorkspaceFilePreview): boolean {
+  return externalOpenTargets(file).some((target) => {
+    if (/^agentlas:\/\/localfile\//i.test(target) || target.startsWith("file://")) return true;
+    return target.startsWith("/") || /^[A-Za-z]:[\\/]/.test(target);
+  });
+}
+
+function previewMeta(file: WorkspaceFilePreview, ko: boolean): string {
+  const type = viewerKindLabel(file.viewerKind, ko);
+  const size = file.size > 0 ? formatBytes(file.size) : ko ? "로컬 파일" : "Local file";
+  return `${type} · ${size}`;
+}
+
+function firstCopyableFileTarget(file: WorkspaceFilePreview): string {
+  return externalOpenTargets(file).find((target) => !/^(data:|blob:)/i.test(target)) || file.path || file.fileUrl;
+}
+
+function FileContextMenu({
+  x,
+  y,
+  file,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  file: WorkspaceFilePreview;
+  onClose: () => void;
+}) {
+  const { locale } = useT();
+  const ko = locale === "ko";
+  const run = (fn: () => void) => {
+    fn();
+    onClose();
+  };
+  return (
+    <div
+      role="menu"
+      style={{
+        position: "fixed",
+        left: x,
+        top: y,
+        zIndex: 80,
+        minWidth: 190,
+        padding: 6,
+        borderRadius: 8,
+        border: "1px solid var(--paper-edge)",
+        background: "var(--paper)",
+        boxShadow: "0 14px 34px rgba(15, 23, 42, 0.18)",
+      }}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <button type="button" role="menuitem" style={contextMenuItemStyle} onClick={() => run(() => void openWorkspaceFileExternal(file, ko))}>
+        {ko ? "외부 앱으로 열기" : "Open externally"}
+      </button>
+      {canRevealWorkspaceFile(file) && (
+        <button type="button" role="menuitem" style={contextMenuItemStyle} onClick={() => run(() => void revealWorkspaceFile(file, ko))}>
+          {ko ? "Finder에서 보기" : "Show in folder"}
+        </button>
+      )}
+      <button
+        type="button"
+        role="menuitem"
+        style={contextMenuItemStyle}
+        onClick={() => run(() => void navigator.clipboard.writeText(firstCopyableFileTarget(file)))}
+      >
+        {ko ? "경로 복사" : "Copy path"}
+      </button>
+    </div>
+  );
 }
 
 function MarkdownFileViewer({ file }: { file: WorkspaceFilePreview }) {
@@ -943,4 +1100,20 @@ const viewerChipStyle: CSSProperties = {
   color: "var(--muted-deep)",
   fontSize: 11,
   fontWeight: 750,
+};
+
+const contextMenuItemStyle: CSSProperties = {
+  width: "100%",
+  display: "flex",
+  alignItems: "center",
+  minHeight: 28,
+  padding: "0 9px",
+  border: "none",
+  borderRadius: 6,
+  background: "transparent",
+  color: "var(--ink)",
+  fontSize: 12,
+  fontWeight: 650,
+  textAlign: "left",
+  cursor: "pointer",
 };

@@ -65,7 +65,7 @@ export function HubBorrowRoom() {
     try {
       const bookmark = await api.marketplace.bookmarkAdd(listing);
       setBookmarked((prev) => new Set(prev).add(bookmark.slug));
-      setMessage(ko ? "Hub 북마크에 추가했습니다. 조합 화면에서는 싱글 에이전트 북마크만 후보로 씁니다." : "Added to Hub bookmarks. Agent groups use bookmarked single agents only.");
+      setMessage(ko ? "Hub 북마크에 추가했습니다." : "Added to Hub bookmarks.");
     } catch {
       setMessage(ko ? "북마크하지 못했습니다. Hub 연결 상태를 확인한 뒤 다시 시도하세요." : "Could not bookmark it. Check the Hub connection, then try again.");
     } finally {
@@ -144,13 +144,7 @@ export function HubBorrowRoom() {
           })}
         </div>
       )}
-      <div className="hub-borrow-note">
-        {message
-          ? message
-          : ko
-          ? "Hub 북마크는 설치가 아닙니다. 싱글 에이전트와 멀티 에이전트 팀은 색으로 구분되며, 조합 후보는 싱글 북마크만 씁니다."
-          : "Hub bookmarks are not installs. Single agents and multi-agent teams are color-coded; groups use single bookmarks only."}
-      </div>
+      {message && <div className="hub-borrow-note">{message}</div>}
     </div>
   );
 }

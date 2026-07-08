@@ -52,6 +52,7 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("fs:listDirectory", absPath, showHidden ?? false, rootPath),
     readTextFile: (absPath: string, rootPath?: string) => ipcRenderer.invoke("fs:readTextFile", absPath, rootPath),
     openPath: (target: string) => ipcRenderer.invoke("fs:openPath", target),
+    showItemInFolder: (target: string) => ipcRenderer.invoke("fs:showItemInFolder", target),
     saveTextFile: (suggestedName: string, content: string) =>
       ipcRenderer.invoke("fs:saveTextFile", suggestedName, content),
   },

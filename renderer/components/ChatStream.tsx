@@ -5,7 +5,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProper
 import type { InstalledAgent, InstalledFirm, InstalledMcpServer, Project, RuntimeCommand } from "@/lib/types";
 import type { AgentlasAppDefinition } from "@/lib/apps";
 import { AgentAvatar } from "./AgentAvatar";
-import { Markdown, StreamingMarkdown, type CodeArtifact, type MediaArtifact } from "./Markdown";
+import { Markdown, StreamingMarkdown, type CodeArtifact, type LinkedFileArtifact, type MediaArtifact } from "./Markdown";
 import { useT } from "@/lib/i18n";
 
 /** 작업 중 패널에 누적되는 단일 단계. 새 이벤트마다 push (replace 아님). */
@@ -106,6 +106,7 @@ export function ChatStream({
   emptyDirectory,
   onOpenArtifact,
   onOpenMedia,
+  onOpenLinkedFile,
   onOpenWorkflow,
   onAnswerQuestion,
   onOpenMultimodalSetup,
@@ -120,6 +121,7 @@ export function ChatStream({
   emptyDirectory?: ChatEmptyDirectory;
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
+  onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   onOpenWorkflow?: () => void;
   onStop?: () => void;
   /** 사용자가 질문에 답함 — 부모가 user 메시지로 전송 */
@@ -181,6 +183,7 @@ export function ChatStream({
           agentTone={agentTone}
           onOpenArtifact={onOpenArtifact}
           onOpenMedia={onOpenMedia}
+          onOpenLinkedFile={onOpenLinkedFile}
           onOpenWorkflow={onOpenWorkflow}
           onStop={onStop}
           onAnswerQuestion={onAnswerQuestion}
@@ -201,6 +204,7 @@ const Bubble = memo(function Bubble({
   agentTone,
   onOpenArtifact,
   onOpenMedia,
+  onOpenLinkedFile,
   onOpenWorkflow,
   onAnswerQuestion,
   onOpenMultimodalSetup,
@@ -214,6 +218,7 @@ const Bubble = memo(function Bubble({
   agentTone: InstalledAgent["tone"];
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
+  onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   onOpenWorkflow?: () => void;
   onStop?: () => void;
   onAnswerQuestion?: (messageId: string, questionId: string, answers: string[]) => void;
@@ -326,6 +331,7 @@ const Bubble = memo(function Bubble({
             streaming={message.streaming}
             onOpenArtifact={onOpenArtifact}
             onOpenMedia={onOpenMedia}
+            onOpenLinkedFile={onOpenLinkedFile}
             messageId={message.id}
             mediaBasePaths={mediaBasePaths}
           />
@@ -344,6 +350,7 @@ const Bubble = memo(function Bubble({
               messageId={message.id}
               onOpenArtifact={onOpenArtifact}
               onOpenMedia={onOpenMedia}
+              onOpenLinkedFile={onOpenLinkedFile}
               mediaBasePaths={mediaBasePaths}
             />
             {message.streaming && <BlinkingCursor />}
@@ -420,6 +427,7 @@ function LiveOutputPanel({
   messageId,
   onOpenArtifact,
   onOpenMedia,
+  onOpenLinkedFile,
   mediaBasePaths,
 }: {
   text: string;
@@ -427,6 +435,7 @@ function LiveOutputPanel({
   messageId: string;
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
+  onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   mediaBasePaths: string[];
 }) {
   return (
@@ -445,6 +454,7 @@ function LiveOutputPanel({
           messageId={messageId}
           onOpenArtifact={onOpenArtifact}
           onOpenMedia={onOpenMedia}
+          onOpenLinkedFile={onOpenLinkedFile}
           mediaBasePaths={mediaBasePaths}
         />
       ) : (
@@ -453,6 +463,7 @@ function LiveOutputPanel({
           messageId={messageId}
           onOpenArtifact={onOpenArtifact}
           onOpenMedia={onOpenMedia}
+          onOpenLinkedFile={onOpenLinkedFile}
           mediaBasePaths={mediaBasePaths}
         />
       )}

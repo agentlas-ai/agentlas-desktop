@@ -35,7 +35,13 @@ import type { LiveAgent, NetTimelineItem } from "@/components/AgentNetworkPanel"
 import { ChatRightPanel, type ChatRightPanelTab } from "@/components/ChatRightPanel";
 import { ProjectFolderBar } from "@/components/ProjectFolderBar";
 import { AgentPicker } from "@/components/AgentPicker";
-import { firstMediaArtifactInText, type CodeArtifact, type MediaArtifact } from "@/components/Markdown";
+import {
+  firstMediaArtifactInText,
+  linkedFileArtifactsInText,
+  type CodeArtifact,
+  type LinkedFileArtifact,
+  type MediaArtifact,
+} from "@/components/Markdown";
 import type { WorkspaceFilePreview } from "@/components/WorkspacePanel";
 import { IconBuilding, IconClose, IconFolder, IconLayers, IconNetwork, IconPanelRight, IconSparkles, IconTrash } from "@/components/Icon";
 import { buildAppRoutePrompt, INSTALLED_APPS, parseAppSlashRoute } from "@/lib/apps";
@@ -61,6 +67,51 @@ function workspacePreviewFromMedia(media: MediaArtifact): WorkspaceFilePreview {
     truncated: false,
     reason: "binary",
   };
+}
+
+function workspacePreviewFromLinkedFile(file: LinkedFileArtifact): WorkspaceFilePreview {
+  const path = file.path || file.paths?.[0] || file.href;
+  const viewerKind = viewerKindFromName(file.name || path);
+  return {
+    path,
+    name: file.name || basename(path),
+    size: 0,
+    viewerKind,
+    fileUrl: file.fileUrl,
+    browserUrl: viewerKind === "browser" ? file.fileUrl : undefined,
+    openTargets: uniqueStrings([file.path, ...(file.paths ?? []), file.href, file.fileUrl]),
+    content: "",
+    truncated: false,
+    reason: "binary",
+  };
+}
+
+function viewerKindFromName(name: string): WorkspaceFilePreview["viewerKind"] {
+  const ext = extensionOf(name);
+  if ([".md", ".mdx"].includes(ext)) return "markdown";
+  if ([".json", ".jsonl"].includes(ext)) return "json";
+  if ([".html", ".htm", ".url", ".webloc"].includes(ext)) return "browser";
+  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg"].includes(ext)) return "image";
+  if ([".mp4", ".webm", ".mov", ".m4v", ".ogv"].includes(ext)) return "video";
+  if (ext === ".pdf") return "pdf";
+  if ([".doc", ".docx", ".rtf", ".pages", ".ppt", ".pptx", ".xls", ".xlsx"].includes(ext)) return "document";
+  return "text";
+}
+
+function extensionOf(name: string): string {
+  const base = basename(name).toLowerCase();
+  const dot = base.lastIndexOf(".");
+  return dot >= 0 ? base.slice(dot) : "";
+}
+
+function basename(p: string): string {
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  if (i < 0) return p;
+  return p.slice(i + 1) || p;
+}
+
+function isAbsoluteLocalPath(value: string): boolean {
+  return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value);
 }
 
 function uniqueStrings(values: Array<string | null | undefined>): string[] {
@@ -583,6 +634,21 @@ function ChatPage() {
     () => mediaBasePathCandidates(restoredFolder, defaultRunFolder),
     [restoredFolder, defaultRunFolder],
   );
+  const linkedFiles = useMemo(() => {
+    const out: WorkspaceFilePreview[] = [];
+    const seen = new Set<string>();
+    for (const message of messages) {
+      if (message.role !== "agent" || !message.text) continue;
+      for (const file of linkedFileArtifactsInText(message.text, mediaBasePaths)) {
+        const preview = workspacePreviewFromLinkedFile(file);
+        const key = preview.path || preview.fileUrl;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(preview);
+      }
+    }
+    return out;
+  }, [messages, mediaBasePaths]);
 
   // 사용자가 직접 패널을 접고/펴면 선호값을 영속화 (자동 노출과 구분).
   const setWorkspaceOpenPersisted = useCallback((open: boolean) => {
@@ -614,6 +680,33 @@ function ChatPage() {
     setRightPanelOpen(false);
     writeRightPanelPreference(false, rightPanelTab);
   }, [rightPanelTab]);
+  const openWorkspaceFilePreview = useCallback(async (preview: WorkspaceFilePreview) => {
+    let next = preview;
+    const api = ipc();
+    const shouldReadText =
+      api &&
+      isAbsoluteLocalPath(preview.path) &&
+      ["markdown", "json", "text", "browser"].includes(preview.viewerKind);
+    if (shouldReadText) {
+      const text = await api.fs.readTextFile(preview.path).catch(() => null);
+      if (text) {
+        next = {
+          ...preview,
+          size: text.size || preview.size,
+          content: text.content,
+          truncated: text.truncated,
+          reason: text.reason,
+        };
+      }
+    }
+    setSurface(null);
+    setArtifact(null);
+    setMediaPreview(next);
+    openPanelTab("panel");
+  }, [openPanelTab]);
+  const openLinkedFile = useCallback((file: LinkedFileArtifact) => {
+    void openWorkspaceFilePreview(workspacePreviewFromLinkedFile(file));
+  }, [openWorkspaceFilePreview]);
 
   useEffect(() => {
     const api = ipc();
@@ -2663,6 +2756,7 @@ function ChatPage() {
             setMediaPreview(workspacePreviewFromMedia(media));
             openPanelTab("panel");
           }}
+          onOpenLinkedFile={openLinkedFile}
           onOpenWorkflow={() => setNetworkOpenPersisted(true)}
           onOpenMultimodalSetup={() => router.push("/settings#multimodal")}
           onStop={stop}
@@ -2776,6 +2870,7 @@ function ChatPage() {
           artifact={artifact}
           surface={surface}
           filePreview={mediaPreview}
+          linkedFiles={linkedFiles}
           onSurfaceAction={handleSurfaceAction}
           onSurfaceStatePatch={handleSurfaceStatePatch}
           firm={firm}

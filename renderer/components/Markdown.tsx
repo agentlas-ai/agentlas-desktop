@@ -6,7 +6,8 @@
 //
 // 의도적으로 단순 — HTML 태그는 모두 escape, 사용자 입력 출처 X (LLM 출력만)이지만 안전 우선.
 "use client";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { splitStreamingSegments, type SegmentCache } from "@shared/streaming-segments";
 
@@ -26,11 +27,21 @@ export interface MediaArtifact {
   name: string;
 }
 
+export interface LinkedFileArtifact {
+  id: string;
+  name: string;
+  href: string;
+  path?: string;
+  paths?: string[];
+  fileUrl: string;
+}
+
 export function Markdown({
   text,
   messageId,
   onOpenArtifact,
   onOpenMedia,
+  onOpenLinkedFile,
   mediaBasePaths = [],
 }: {
   text: string;
@@ -40,14 +51,20 @@ export function Markdown({
   onOpenArtifact?: (a: CodeArtifact) => void;
   /** 이미지/영상 산출물을 우측 패널로 열기 */
   onOpenMedia?: (a: MediaArtifact) => void;
+  /** PDF/SVG/HTML 등 로컬 파일 링크를 우측 패널로 열기 */
+  onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   /** 상대 이미지 경로를 해석할 로컬 기준 폴더들. */
   mediaBasePaths?: string[];
 }) {
   const { t } = useT();
+  const resolvedMediaBasePaths = useMemo(
+    () => mediaBasePathsWithTextHints(text, mediaBasePaths),
+    [text, mediaBasePaths],
+  );
   const blocks = useMemo(() => parseBlocks(text, messageId), [text, messageId]);
   return (
     <div style={{ fontSize: 14, lineHeight: 1.65, fontFamily: "var(--font-body)", overflowWrap: "anywhere" }}>
-      {blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia, mediaBasePaths))}
+      {blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia, onOpenLinkedFile, resolvedMediaBasePaths))}
     </div>
   );
 }
@@ -58,12 +75,14 @@ const MarkdownSegment = memo(function MarkdownSegment({
   messageId,
   onOpenArtifact,
   onOpenMedia,
+  onOpenLinkedFile,
   mediaBasePaths = [],
 }: {
   text: string;
   messageId: string;
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
+  onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   mediaBasePaths?: string[];
 }) {
   return (
@@ -72,6 +91,7 @@ const MarkdownSegment = memo(function MarkdownSegment({
       messageId={messageId}
       onOpenArtifact={onOpenArtifact}
       onOpenMedia={onOpenMedia}
+      onOpenLinkedFile={onOpenLinkedFile}
       mediaBasePaths={mediaBasePaths}
     />
   );
@@ -85,12 +105,14 @@ export function StreamingMarkdown({
   messageId,
   onOpenArtifact,
   onOpenMedia,
+  onOpenLinkedFile,
   mediaBasePaths = [],
 }: {
   text: string;
   messageId: string;
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
+  onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   mediaBasePaths?: string[];
 }) {
   // 콜백 identity를 고정 — 부모가 매 렌더 새 함수를 넘겨도 memo 세그먼트가 깨지지 않게.
@@ -98,8 +120,11 @@ export function StreamingMarkdown({
   artifactRef.current = onOpenArtifact;
   const mediaRef = useRef(onOpenMedia);
   mediaRef.current = onOpenMedia;
+  const linkedFileRef = useRef(onOpenLinkedFile);
+  linkedFileRef.current = onOpenLinkedFile;
   const stableArtifact = useCallback((a: CodeArtifact) => artifactRef.current?.(a), []);
   const stableMedia = useCallback((a: MediaArtifact) => mediaRef.current?.(a), []);
+  const stableLinkedFile = useCallback((a: LinkedFileArtifact) => linkedFileRef.current?.(a), []);
 
   // 타자기 리빌 — partial이 덩어리(메시지 블록·60ms 배치)로 도착해도 글자 단위로 드러낸다.
   // 밀린 분량에 비례해 속도를 올려(백로그/20 per frame) 표시가 스트림보다 계속 뒤처지지 않고,
@@ -144,6 +169,7 @@ export function StreamingMarkdown({
           messageId={`${messageId}-s${i}`}
           onOpenArtifact={stableArtifact}
           onOpenMedia={stableMedia}
+          onOpenLinkedFile={stableLinkedFile}
           mediaBasePaths={mediaBasePaths}
         />
       ))}
@@ -329,6 +355,7 @@ function renderBlock(
   onOpenArtifact?: (a: CodeArtifact) => void,
   t?: ReturnType<typeof useT>["t"],
   onOpenMedia?: (a: MediaArtifact) => void,
+  onOpenLinkedFile?: (a: LinkedFileArtifact) => void,
   mediaBasePaths: string[] = [],
 ) {
   switch (b.type) {
@@ -346,7 +373,7 @@ function renderBlock(
             color: "var(--ink)",
           }}
         >
-          {inline(b.text, onOpenMedia, mediaBasePaths)}
+          {inline(b.text, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
         </h1>
       );
     case "h2":
@@ -361,7 +388,7 @@ function renderBlock(
             color: "var(--ink)",
           }}
         >
-          {inline(b.text, onOpenMedia, mediaBasePaths)}
+          {inline(b.text, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
         </h2>
       );
     case "h3":
@@ -376,7 +403,7 @@ function renderBlock(
             color: "var(--ink)",
           }}
         >
-          {inline(b.text, onOpenMedia, mediaBasePaths)}
+          {inline(b.text, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
         </h3>
       );
     case "ul":
@@ -384,7 +411,7 @@ function renderBlock(
         <ul key={i} style={{ paddingLeft: 22, margin: "6px 0" }}>
           {b.items.map((it, j) => (
             <li key={j} style={{ marginBottom: 2 }}>
-              {inline(it, onOpenMedia, mediaBasePaths)}
+              {inline(it, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
             </li>
           ))}
         </ul>
@@ -394,13 +421,13 @@ function renderBlock(
         <ol key={i} style={{ paddingLeft: 22, margin: "6px 0" }}>
           {b.items.map((it, j) => (
             <li key={j} style={{ marginBottom: 2 }}>
-              {inline(it, onOpenMedia, mediaBasePaths)}
+              {inline(it, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
             </li>
           ))}
         </ol>
       );
     case "table":
-      return <TableBlock key={i} block={b} onOpenMedia={onOpenMedia} mediaBasePaths={mediaBasePaths} />;
+      return <TableBlock key={i} block={b} onOpenMedia={onOpenMedia} onOpenLinkedFile={onOpenLinkedFile} mediaBasePaths={mediaBasePaths} />;
     case "quote":
       return (
         <blockquote
@@ -416,14 +443,14 @@ function renderBlock(
           }}
         >
           {b.text.split("\n").map((line, j) => (
-            <div key={j}>{inline(line, onOpenMedia, mediaBasePaths)}</div>
+            <div key={j}>{inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}</div>
           ))}
         </blockquote>
       );
     case "p":
       return (
         <p key={i} style={{ margin: "6px 0" }}>
-          {inline(b.text, onOpenMedia, mediaBasePaths)}
+          {inline(b.text, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
         </p>
       );
   }
@@ -433,10 +460,12 @@ function renderBlock(
 function TableBlock({
   block,
   onOpenMedia,
+  onOpenLinkedFile,
   mediaBasePaths = [],
 }: {
   block: { type: "table"; header: string[]; align: TableAlign[]; rows: string[][] };
   onOpenMedia?: (a: MediaArtifact) => void;
+  onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   mediaBasePaths?: string[];
 }) {
   const alignToCss = (a: TableAlign): React.CSSProperties["textAlign"] => {
@@ -478,7 +507,7 @@ function TableBlock({
                   whiteSpace: "nowrap",
                 }}
                 >
-                  {inline(h, onOpenMedia, mediaBasePaths)}
+                  {inline(h, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
                 </th>
             ))}
           </tr>
@@ -504,7 +533,7 @@ function TableBlock({
                     whiteSpace: "nowrap",
                   }}
                 >
-                  {inline(cell, onOpenMedia, mediaBasePaths)}
+                  {inline(cell, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
                 </td>
               ))}
             </tr>
@@ -666,7 +695,12 @@ function CodeBlock({
 }
 
 // ── 인라인 마크다운: code, bold, italic, link ─────────────────
-function inline(text: string, onOpenMedia?: (a: MediaArtifact) => void, mediaBasePaths: string[] = []): React.ReactNode {
+function inline(
+  text: string,
+  onOpenMedia?: (a: MediaArtifact) => void,
+  onOpenLinkedFile?: (a: LinkedFileArtifact) => void,
+  mediaBasePaths: string[] = [],
+): React.ReactNode {
   // 토큰화 — `code` > **bold** > *italic* > [text](url) 순서대로 처리
   const out: React.ReactNode[] = [];
   let remaining = text;
@@ -730,17 +764,7 @@ function inline(text: string, onOpenMedia?: (a: MediaArtifact) => void, mediaBas
       },
       {
         regex: /^\[([^\]]+)\]\(([^)]+)\)/,
-        render: (m) => (
-          <a
-            key={key++}
-            href={m[2]}
-            target="_blank"
-            rel="noreferrer"
-            style={{ color: "var(--accent)", textDecoration: "underline" }}
-          >
-            {m[1]}
-          </a>
-        ),
+        render: (m) => renderInlineLink(key++, m[1], m[2].trim(), onOpenLinkedFile, mediaBasePaths),
       },
     ];
 
@@ -779,6 +803,7 @@ function inline(text: string, onOpenMedia?: (a: MediaArtifact) => void, mediaBas
  *  renderInlineImage와 동일한 매칭(마크다운 이미지 + plain 로컬 이미지 경로)을 전역 1회 수행.
  *  final 답변에 산출물이 있으면 챗 페이지가 우측 패널을 자동으로 열어 보여준다. */
 export function firstMediaArtifactInText(text: string, mediaBasePaths: string[] = []): MediaArtifact | null {
+  const resolvedMediaBasePaths = mediaBasePathsWithTextHints(text, mediaBasePaths);
   const mdImg = text.match(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/);
   const plain = text.match(
     /(?:file:\/\/[^\s`'"<>)]*?|\/[^\s`'"<>)]*?|(?:\.{1,2}\/)?[A-Za-z0-9_. -]+(?:\/[^\s`'"<>)]*)?)\.(?:png|jpe?g|gif|webp|avif|svg)(?=$|[\s).,;:])/i,
@@ -798,7 +823,79 @@ export function firstMediaArtifactInText(text: string, mediaBasePaths: string[] 
     rawSrc = plain[0].trim();
   }
   if (!rawSrc) return null;
-  return mediaArtifactFromImage(rawSrc, alt, mediaBasePaths);
+  return mediaArtifactFromImage(rawSrc, alt, resolvedMediaBasePaths);
+}
+
+export function linkedFileArtifactsInText(text: string, mediaBasePaths: string[] = []): LinkedFileArtifact[] {
+  const resolvedMediaBasePaths = mediaBasePathsWithTextHints(text, mediaBasePaths);
+  const out: LinkedFileArtifact[] = [];
+  const seen = new Set<string>();
+  for (const ref of localFileRefsFromText(text)) {
+    const artifact = linkedFileArtifactFromRef(ref, "", resolvedMediaBasePaths);
+    const key = artifact.path || artifact.href;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(artifact);
+  }
+  return out;
+}
+
+function renderInlineLink(
+  key: number,
+  label: string,
+  rawHref: string,
+  onOpenLinkedFile?: (a: LinkedFileArtifact) => void,
+  mediaBasePaths: string[] = [],
+): React.ReactNode {
+  const href = cleanLinkHref(rawHref);
+  const localTargets = localPathsFromFileRef(href, mediaBasePaths);
+  const isLocalFile = localTargets.length > 0 || looksLikeLocalFileRef(href);
+  const handleClick = async (event: ReactMouseEvent<HTMLAnchorElement>) => {
+    if (!isLocalFile) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (onOpenLinkedFile) {
+      onOpenLinkedFile(linkedFileArtifactFromRef(href, label, mediaBasePaths));
+      return;
+    }
+    const bridge = ipc();
+    if (bridge?.fs?.openPath) {
+      const targets = uniqueStrings([...localTargets, href]);
+      for (const target of targets) {
+        const result = await bridge.fs.openPath(target).catch(() => ({ ok: false }));
+        if (result.ok) return;
+      }
+    }
+    const fallback = localTargets[0] ? fileUrlForLocalPath(localTargets[0]) : href;
+    window.open(fallback, "_blank", "noopener,noreferrer");
+  };
+  return (
+    <a
+      key={key}
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      onClick={handleClick}
+      style={{ color: "var(--accent)", textDecoration: "underline", cursor: isLocalFile ? "pointer" : undefined }}
+      title={isLocalFile && localTargets[0] ? localTargets[0] : href}
+    >
+      {label}
+    </a>
+  );
+}
+
+function linkedFileArtifactFromRef(rawRef: string, label: string, mediaBasePaths: string[]): LinkedFileArtifact {
+  const href = cleanLinkHref(rawRef);
+  const paths = localPathsFromFileRef(href, mediaBasePaths);
+  const path = paths[0];
+  return {
+    id: `file:${path || href}`,
+    name: label || fileNameFromRef(path || href),
+    href,
+    path,
+    paths,
+    fileUrl: fileUrlForLinkedFile(path || href),
+  };
 }
 
 function renderInlineImage(
@@ -866,7 +963,7 @@ function mediaArtifactFromImage(rawSrc: string, alt: string, mediaBasePaths: str
  *  (webSecurity:true라 file:// 직접 로드는 차단되므로 agentlas://localfile 경유.) */
 function normalizeImageSrc(src: string, mediaBasePaths: string[] = []): string {
   if (/^(https?:|data:|agentlas:|blob:)/i.test(src)) return src;
-  const local = localPathsFromImageSrc(src, mediaBasePaths)[0];
+  const local = localPathsFromFileRef(src, mediaBasePaths)[0];
   if (local) return `agentlas://localfile/?p=${encodeURIComponent(local)}`;
   return src; // 알 수 없는 상대경로 등 — 렌더 못 할 수 있음
 }
@@ -876,6 +973,10 @@ function localPathFromImageSrc(src: string, mediaBasePaths: string[] = []): stri
 }
 
 function localPathsFromImageSrc(src: string, mediaBasePaths: string[] = []): string[] {
+  return localPathsFromFileRef(src, mediaBasePaths);
+}
+
+function localPathsFromFileRef(src: string, mediaBasePaths: string[] = []): string[] {
   const cleaned = cleanImageSrcCandidate(src);
   const out: string[] = [];
   const push = (value: string | undefined) => {
@@ -905,8 +1006,8 @@ function localPathsFromImageSrc(src: string, mediaBasePaths: string[] = []): str
     push(cleaned);
     return out;
   }
-  if (isImageLikePath(cleaned) && mediaBasePaths.length > 0) {
-    for (const base of mediaBasePaths) push(joinLocalPath(base, cleaned));
+  if (looksLikeLocalFileRef(cleaned) && mediaBasePaths.length > 0) {
+    for (const base of orderedBasePathsForRef(cleaned, mediaBasePaths)) push(joinLocalPath(base, cleaned));
   }
   return out;
 }
@@ -928,12 +1029,163 @@ function imageNameFromSrc(src: string, mediaBasePaths: string[] = []): string {
   return "generated image";
 }
 
+function fileNameFromRef(ref: string): string {
+  const cleaned = cleanImageSrcCandidate(ref);
+  if (/^https?:/i.test(cleaned)) {
+    try {
+      const part = new URL(cleaned).pathname.split("/").filter(Boolean).pop();
+      if (part) return decodeURIComponent(part);
+    } catch {
+      // ignore
+    }
+  }
+  if (cleaned.startsWith("file://")) {
+    try {
+      const part = decodeURIComponent(new URL(cleaned).pathname).split(/[\\/]/).filter(Boolean).pop();
+      if (part) return part;
+    } catch {
+      // ignore
+    }
+  }
+  const part = cleaned.split(/[\\/]/).filter(Boolean).pop();
+  return part || "linked file";
+}
+
 function isImageLikePath(value: string): boolean {
   return /\.(png|jpe?g|gif|webp|avif|svg)$/i.test(value.trim());
 }
 
 function cleanImageSrcCandidate(value: string): string {
   return value.trim().replace(/^[\s(]+/, "").replace(/[).,;:]+$/, "");
+}
+
+function cleanLinkHref(value: string): string {
+  return value.trim().replace(/^<|>$/g, "");
+}
+
+const LOCAL_FILE_REF_EXT = /\.(png|jpe?g|gif|webp|avif|svg|pdf|html?|mdx?|jsonl?|txt|csv|tsv|docx?|xlsx?|pptx?|zip|mp4|webm|mov|m4v|ogv|mp3|wav|rtf|pages)$/i;
+
+function looksLikeLocalFileRef(value: string): boolean {
+  const cleaned = cleanImageSrcCandidate(value);
+  if (!cleaned) return false;
+  if (/^(https?:|data:|blob:|mailto:|tel:|#)/i.test(cleaned)) return false;
+  if (/^agentlas:\/\/localfile\//i.test(cleaned) || cleaned.startsWith("file://")) return true;
+  if (cleaned.startsWith("/") || /^[A-Za-z]:[\\/]/.test(cleaned)) return LOCAL_FILE_REF_EXT.test(cleaned);
+  return LOCAL_FILE_REF_EXT.test(cleaned) && !/^[a-z][a-z0-9+.-]*:/i.test(cleaned);
+}
+
+function orderedBasePathsForRef(ref: string, mediaBasePaths: string[]): string[] {
+  const cleaned = ref.trim().replace(/^\.?[\\/]+/, "");
+  const hasDirectory = /[\\/]/.test(cleaned);
+  if (hasDirectory) return mediaBasePaths;
+  const normalized = mediaBasePaths.map((base) => base.replace(/[\\/]+$/, ""));
+  const descendantBases = normalized.filter((base) =>
+    normalized.some((other) => base !== other && base.startsWith(`${other}/`)),
+  );
+  if (descendantBases.length === 0) return mediaBasePaths;
+  const descendantSet = new Set(descendantBases);
+  return [
+    ...descendantBases.sort((a, b) => b.length - a.length),
+    ...normalized.filter((base) => !descendantSet.has(base)),
+  ];
+}
+
+function mediaBasePathsWithTextHints(text: string, mediaBasePaths: string[]): string[] {
+  const out = uniqueStrings(mediaBasePaths);
+  const pushDir = (value: string | undefined) => {
+    const next = value?.trim().replace(/[\\/]+$/, "");
+    if (next && !out.includes(next)) out.push(next);
+  };
+  for (const ref of localDirectoryRefsFromText(text)) {
+    for (const dir of localPathsFromDirectoryRef(ref, mediaBasePaths)) pushDir(dir);
+  }
+  for (const ref of localFileRefsFromText(text)) {
+    for (const file of localPathsFromFileRef(ref, mediaBasePaths)) pushDir(parentLocalPath(file));
+  }
+  return out;
+}
+
+function localFileRefsFromText(text: string): string[] {
+  const refs: string[] = [];
+  const push = (value: string | undefined) => {
+    const next = value?.trim();
+    if (next && looksLikeLocalFileRef(next) && !refs.includes(next)) refs.push(next);
+  };
+  for (const match of text.matchAll(/!?\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)) push(match[1]);
+  const fileRef = /(?:^|[\s(`])((?:file:\/\/[^\s`'"<>)]*?|\/[^\s`'"<>)]*?|(?:\.{1,2}\/)?[A-Za-z0-9_. -]+(?:\/[^\s`'"<>)]*)?)\.(?:png|jpe?g|gif|webp|avif|svg|pdf|html?|mdx?|jsonl?|txt|csv|tsv|docx?|xlsx?|pptx?|zip|mp4|webm|mov|m4v|ogv|mp3|wav|rtf|pages))(?=$|[\s`).,;:])/gi;
+  for (const match of text.matchAll(fileRef)) push(match[1]);
+  return refs;
+}
+
+function localDirectoryRefsFromText(text: string): string[] {
+  const refs: string[] = [];
+  const push = (value: string | undefined) => {
+    const next = value?.trim();
+    if (next && looksLikeLocalDirectoryRef(next) && !refs.includes(next)) refs.push(next);
+  };
+  const dirRef = /(?:^|[\s(`])((?:file:\/\/[^\s`'"<>)]*?|\/[^\s`'"<>)]*?|(?:\.{1,2}\/)?[A-Za-z0-9_. -]+(?:\/[A-Za-z0-9_. -]+)+\/)(?=$|[\s`),;:]))/g;
+  for (const match of text.matchAll(dirRef)) push(match[1]);
+  return refs;
+}
+
+function looksLikeLocalDirectoryRef(value: string): boolean {
+  const cleaned = value.trim();
+  if (!cleaned || /^(https?:|data:|blob:|mailto:|tel:|#)/i.test(cleaned)) return false;
+  return cleaned.endsWith("/") && !/^[a-z][a-z0-9+.-]*:/i.test(cleaned.replace(/^file:\/\//i, ""));
+}
+
+function localPathsFromDirectoryRef(ref: string, mediaBasePaths: string[] = []): string[] {
+  const cleaned = ref.trim().replace(/[).,;:]+$/, "");
+  const out: string[] = [];
+  const push = (value: string | undefined) => {
+    const next = value?.trim().replace(/[\\/]+$/, "");
+    if (next && !out.includes(next)) out.push(next);
+  };
+  if (cleaned.startsWith("file://")) {
+    try {
+      push(decodeURIComponent(new URL(cleaned).pathname));
+    } catch {
+      push(cleaned.replace(/^file:\/\//, ""));
+    }
+    return out;
+  }
+  if (cleaned.startsWith("/") || /^[A-Za-z]:[\\/]/.test(cleaned)) {
+    push(cleaned);
+    return out;
+  }
+  for (const base of mediaBasePaths) push(joinLocalPath(base, cleaned));
+  return out;
+}
+
+function parentLocalPath(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const clean = value.replace(/[\\/]+$/, "");
+  const idx = Math.max(clean.lastIndexOf("/"), clean.lastIndexOf("\\"));
+  if (idx <= 0) return undefined;
+  return clean.slice(0, idx);
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  const out: string[] = [];
+  for (const raw of values) {
+    const value = raw?.trim();
+    if (value && !out.includes(value)) out.push(value);
+  }
+  return out;
+}
+
+function fileUrlForLocalPath(absPath: string): string {
+  const normalized = absPath.replace(/\\/g, "/");
+  const withSlash = normalized.startsWith("/") ? normalized : `/${normalized}`;
+  return `file://${encodeURI(withSlash).replace(/#/g, "%23").replace(/\?/g, "%3F")}`;
+}
+
+function fileUrlForLinkedFile(target: string): string {
+  if (/^(https?:|data:|blob:|agentlas:)/i.test(target)) return target;
+  if (target.startsWith("file://")) return target;
+  if (isImageLikePath(target)) return `agentlas://localfile/?p=${encodeURIComponent(target)}`;
+  if (target.startsWith("/") || /^[A-Za-z]:[\\/]/.test(target)) return fileUrlForLocalPath(target);
+  return target;
 }
 
 function joinLocalPath(base: string, rel: string): string {

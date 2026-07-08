@@ -695,6 +695,29 @@ export function registerIpcHandlers(): void {
       return { ok: false, message: err instanceof Error ? err.message : String(err) };
     }
   });
+  ipcMain.handle("fs:showItemInFolder", async (_e, target: string): Promise<{ ok: boolean; message?: string }> => {
+    const raw = String(target || "").trim();
+    if (!raw) return { ok: false, message: "No file or folder was provided." };
+    try {
+      let localPath = raw;
+      if (raw.startsWith("file://")) {
+        localPath = fileURLToPath(raw);
+      } else if (raw.startsWith("agentlas://localfile/")) {
+        const parsed = new URL(raw);
+        localPath = parsed.searchParams.get("p") || "";
+      }
+      if (!path.isAbsolute(localPath)) {
+        return { ok: false, message: "Only absolute local paths can be shown in folder." };
+      }
+      if (!fs.existsSync(localPath)) {
+        return { ok: false, message: `File does not exist: ${localPath}` };
+      }
+      shell.showItemInFolder(localPath);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  });
   // 산출물 내보내기 — 네이티브 저장 다이얼로그로 사용자가 고른 위치에 텍스트를 쓴다(lock-in 없음).
   ipcMain.handle(
     "fs:saveTextFile",
