@@ -135,6 +135,14 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # 렌더러 UI 스모크 — "팀이 에이전트 피커/사이드바에 안 뜨는" 계열 회귀 게이트.
+      # v0.7.20~21에서 typecheck만으로는 못 잡고 사용자에게 두 번 노출된 실사고
+      # (AgentPicker 내부 재필터의 팀 제거, Sidebar 팀 제외 기본값 — v0.7.22 수정).
+      - name: Renderer UI smoke (agent picker / sidebar teams)
+        run: |
+          npx playwright install chromium
+          npm run smoke:renderer-ui
+
       - name: Build, sign, notarize, and verify DMGs
         run: npm run package:mac
 

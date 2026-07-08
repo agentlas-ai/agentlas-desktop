@@ -623,6 +623,8 @@ export function ChatInput({
           setPlanMode={setPlanMode}
           goalMode={goalMode}
           setGoalMode={setGoalMode}
+          appsGenerateMode={appsGenerateMode}
+          onToggleAppsGenerate={requestAppsGenerateMode}
           onInsertSlash={() => {
             setInput((s) => `${s}${s.endsWith(" ") || s === "" ? "" : " "}/`);
             setPlusOpen(false);
@@ -708,7 +710,17 @@ export function ChatInput({
       )}
 
       {/* 권한 popover */}
-      {permOpen && <PermissionMenu value={permissions} setValue={setPermissions} t={t} />}
+      {permOpen && (
+        <PermissionMenu
+          value={permissions}
+          setValue={(value) => {
+            setPermissions(value);
+            setPermOpen(false);
+            setTimeout(() => textareaRef.current?.focus(), 0);
+          }}
+          t={t}
+        />
+      )}
 
       {/* 모델·작업량 popover */}
       {modelOpen && runtime && (
@@ -2122,6 +2134,8 @@ function PlusMenu({
   setPlanMode,
   goalMode,
   setGoalMode,
+  appsGenerateMode,
+  onToggleAppsGenerate,
   onInsertSlash,
   onInsertMention,
   hepToggles,
@@ -2143,6 +2157,8 @@ function PlusMenu({
   setPlanMode: (v: boolean) => void;
   goalMode: boolean;
   setGoalMode: (v: boolean) => void;
+  appsGenerateMode: boolean;
+  onToggleAppsGenerate: (v: boolean) => void;
   /** "/" 명령어 삽입 — 인라인 버튼을 + 메뉴로 통합(리사이즈 시 버튼 스캐터 방지). */
   onInsertSlash: () => void;
   /** "@" 에이전트 부르기 삽입. */
@@ -2230,6 +2246,12 @@ function PlusMenu({
         title={t("chatinput.goal_mode")}
         on={goalMode}
         onChange={setGoalMode}
+      />
+      <ToggleRow
+        icon={<IconApps size={14} />}
+        title={t("chatinput.apps_generate_mode")}
+        on={appsGenerateMode}
+        onChange={onToggleAppsGenerate}
       />
       {showModeToggles && (
         <>

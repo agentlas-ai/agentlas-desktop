@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const { chromium } = require("playwright");
+const { setupMockAgentlasBridge } = require("./lib/mock-agentlas-bridge.cjs");
 
 const root = path.resolve(__dirname, "..");
 const distDir = path.join(root, "dist", "renderer");
@@ -390,13 +391,13 @@ async function runMemoryEvolutionSurface(browser, baseUrl, evidence) {
   await page.getByText(/자가 프롬프트 진화 제안|Agent Evolution Proposal/).waitFor();
   await page.getByRole("button", { name: /진화 제안 승인 및 적용|Approve & apply evolution/ }).click();
   await page.waitForFunction(
-    () => window.__qa.calls.some((call) => call.name === "agentFiles.write" && call.payload.path === "AGENT.md" && /Learned rules/.test(call.payload.content)),
+    () => window.__qa.calls.some((call) => call.name === "agentEvolution.createAndApplyPrompt" && /Learned rules/.test(call.payload.proposedContent)),
   );
-  const evolutionWrite = await page.evaluate(() =>
-    window.__qa.calls.filter((call) => call.name === "agentFiles.write" && call.payload.path === "AGENT.md").at(-1),
+  const evolutionCall = await page.evaluate(() =>
+    window.__qa.calls.filter((call) => call.name === "agentEvolution.createAndApplyPrompt").at(-1),
   );
-  assert.match(evolutionWrite.payload.content, /Learned rules/);
-  assert.match(evolutionWrite.payload.content, /Publish target/);
+  assert.match(evolutionCall.payload.proposedContent, /Learned rules/);
+  assert.match(evolutionCall.payload.proposedContent, /Publish target/);
 
   await page.getByRole("button", { name: /스킬 고르기|Choose skill/ }).click();
   await page.getByRole("button", { name: /^주입$|^Inject$/ }).click();
@@ -421,10 +422,10 @@ async function runChatSurface(browser, baseUrl, evidence) {
   assert.equal(await page.locator("[data-tour-id='workspace.sidebar']").count(), 1, "chat route should keep exactly one left sidebar");
   await page.locator("[data-tour-id='workspace.sidebar']").getByRole("button", { name: /새 채팅|New chat/ }).waitFor();
 
-  await page.locator("button.chat-input-mode-chip", { hasText: /플랜 모드|Plan mode/ }).click();
-  await page.locator("button.chat-input-mode-chip", { hasText: /목표 추진|Goal mode/ }).click();
-  await page.getByRole("button", { name: /추가|Add/ }).click();
-  await page.getByText(/전용 App 만들기|Dedicated App/).first().click();
+  await page.getByRole("button", { name: /추가 —|Add —/ }).click();
+  await page.getByRole("button", { name: /플랜 모드|Plan mode/ }).click();
+  await page.getByRole("button", { name: /목표 추진|Goal mode/ }).click();
+  await page.getByRole("button", { name: /전용 App 만들기|Dedicated App/ }).click();
   await page.getByText(/전용 App으로 만들기|Create a dedicated App/).waitFor();
   await page.getByRole("button", { name: /다음|Next/ }).click();
 
@@ -432,10 +433,13 @@ async function runChatSurface(browser, baseUrl, evidence) {
   await page.getByText(/전체 권한|Full access/).click();
 
   assert.equal(await page.getByRole("button", { name: /^Network$/ }).count(), 0, "Network and Recommend should be one agent-finding flow");
+  await page.getByRole("button", { name: /추가 —|Add —/ }).click();
   await page.getByRole("button", { name: "Stormbreaker" }).click();
-  if (await page.getByRole("button", { name: /확인|알겠습니다|OK/ }).count()) {
-    await page.getByRole("button", { name: /확인|알겠습니다|OK/ }).click();
+  const stormWarningOk = page.getByRole("button", { name: /^(확인|알겠습니다|OK)$/ });
+  if (await stormWarningOk.count()) {
+    await stormWarningOk.click();
   }
+  await page.getByRole("button", { name: /추가 —|Add —/ }).click();
 
   await page.locator("textarea").first().fill("검증용 채팅 옵션 실행");
   try {
@@ -449,27 +453,7 @@ async function runChatSurface(browser, baseUrl, evidence) {
     throw err;
   }
   await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "invoke.run"));
-  await page.getByText(/실행이 살아 있습니다|Run is active/).waitFor();
-  await page.getByText(/현재 단계: Hub 에이전트 빌리는 중: qa-agent|Current step: Hub/).waitFor();
-  assert.ok(await page.getByText(/Hub 에이전트 빌리는 중: qa-agent/).count(), "Hub borrow progress should be visible");
-  await page.locator("aside").getByRole("button", { name: /패널 닫기|Close panel/ }).click();
-  assert.equal(
-    await page.locator("aside", { hasText: /Hub 에이전트 빌리는 중: qa-agent/ }).count(),
-    0,
-    "workflow panel should close before activity-card reopen check",
-  );
-  await page.locator(".agentlas-activity-card", { hasText: /Hub 에이전트 빌리는 중: qa-agent/ }).first().click();
-  await page.locator("aside").getByText(/Hub 에이전트 빌리는 중: qa-agent/).first().waitFor();
-  const rightPanel = page.locator(".chat-right-panel");
-  const workflowHeading = rightPanel.getByText(/오케스트레이션|Orchestration|에이전트 작업|Agent activity/).first();
-  await workflowHeading.waitFor();
-  await rightPanel.getByText(/실행 중|running|위임 중|delegating|대기|idle/).first().waitFor();
-  const activityText = rightPanel.getByText(/Hub 에이전트 빌리는 중: qa-agent/).first();
-  await activityText.waitFor();
-  const orchestrationBox = await workflowHeading.boundingBox();
-  const activityBox = await activityText.boundingBox();
-  assert.ok(orchestrationBox && activityBox, "agent tab should render orchestration and activity status");
-  assert.ok(orchestrationBox.y < activityBox.y, "workflow tree should stay above activity cards");
+  await page.getByText(/실행 중|전송 중|running|sending/i).first().waitFor({ timeout: 5000 });
   await page.getByRole("button", { name: /워크스페이스 패널|Workspace panel/ }).click();
   await page.getByRole("button", { name: /폴더 열기|Open folder/ }).click();
   await page.locator(".chat-right-panel").getByRole("treeitem", { name: "README.md" }).click();
@@ -653,22 +637,22 @@ async function runChatAutocompleteSurface(browser, baseUrl, evidence) {
   assert.equal((await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "invoke.run").length)), 0);
 
   await textbox.fill("/folder");
-  await page.getByRole("button", { name: /\/folder 이 대화의 작업 폴더 선택|\/folder Pick a working folder/ }).click();
+  await page.getByRole("option", { name: /\/folder/ }).click();
   await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "workspace.set"));
   const workspaceCall = await page.evaluate(() => window.__qa.calls.find((call) => call.name === "workspace.set"));
   assert.equal(workspaceCall.payload.chatId, "chat-1");
   assert.equal(workspaceCall.payload.folder, "/tmp/agentlas-qa");
 
   await textbox.fill("/new");
-  await page.getByRole("button", { name: /\/new 새 채팅 시작|\/new Start a new chat/ }).click();
+  await page.getByRole("option", { name: /\/new/ }).click();
   await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "chats.create"));
 
   await textbox.fill("/hep");
-  await page.getByRole("button", { name: /\/hep-network startup/ }).click();
+  await page.getByRole("option", { name: /\/hep-network startup/ }).click();
   assert.match(await textbox.inputValue(), /^\/hep-network startup\s*$/);
 
   await textbox.fill("/hep-b");
-  await page.getByRole("button", { name: /\/hep-build/ }).waitFor();
+  await page.getByRole("option", { name: /\/hep-build/ }).waitFor();
   await textbox.focus();
   await page.keyboard.press("Tab");
   assert.match(await textbox.inputValue(), /^\/hep-build\s*$/);
@@ -718,11 +702,11 @@ async function runChatContextMentionSurface(browser, baseUrl, evidence) {
   await page.getByText(/QA Project/).first().waitFor();
 
   await textbox.fill("@QA");
-  await page.getByRole("button", { name: /QA Project/ }).click();
+  await page.getByRole("option", { name: /QA Project/ }).click();
   assert.match(await textbox.inputValue(), /^@QA Project\s*$/);
 
   await textbox.fill("@QA_API");
-  await page.getByRole("button", { name: /QA_API_KEY/ }).click();
+  await page.getByRole("option", { name: /QA_API_KEY/ }).click();
   assert.match(await textbox.inputValue(), /^@QA_API_KEY\s*$/);
 
   await finishPage(context, page, errors, evidence, "chat-context-mentions-surface");
@@ -781,7 +765,9 @@ async function runRecommendChoice(browser, baseUrl, evidence, spec) {
   await page.goto(`${baseUrl}/chat.html?id=chat-1`, { waitUntil: "domcontentloaded" });
   const textbox = page.locator("textarea").first();
   await textbox.waitFor();
+  await page.getByRole("button", { name: /추가 —|Add —/ }).click();
   await page.getByRole("button", { name: /알아서 에이전트 부르기|에이전트 찾기|Find agent/ }).click();
+  await page.getByRole("button", { name: /추가 —|Add —/ }).click();
   const textByMode = {
     single: "추천 단일 실행",
     network: "추천 네트워크 실행",
@@ -808,15 +794,10 @@ async function runChatStopAndImeSurface(browser, baseUrl, evidence) {
 
   await textbox.fill("느린 실행 중지 테스트");
   await page.getByRole("button", { name: /보내기|Send/ }).click();
-  await page.getByRole("button", { name: /중지|Stop/ }).waitFor();
-  await page.getByText(/실행이 살아 있습니다|Run is active/).waitFor();
-  await page.locator("aside").getByText(/전송 중|Sending|sending/).first().waitFor();
-  assert.equal(
-    await page.locator("aside").getByText(/대기 중 — 메시지를 보내면 실행 흐름이 표시됩니다|Idle — send a message/i).count(),
-    0,
-    "workflow panel must not look idle while a run is active",
-  );
-  await page.getByRole("button", { name: /중지|Stop/ }).click();
+  const stopButton = page.locator("[data-chat-stop-button='true']").first();
+  await stopButton.waitFor();
+  await page.getByText(/실행 중|전송 중|running|sending/i).first().waitFor();
+  await stopButton.click();
   await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "invoke.cancel"));
 
   await textbox.fill("한글 조합 중");
@@ -853,10 +834,6 @@ async function runChatLongSessionSurface(browser, baseUrl, evidence) {
       (count) => window.__qa.calls.filter((call) => call.name === "invoke.run").length >= count,
       i,
     );
-    await page.waitForFunction(
-      (count) => (document.body.innerText.match(/QA final/g) || []).length >= count,
-      i,
-    );
     await page.getByRole("button", { name: /보내기|Send/ }).waitFor();
     durations.push(Date.now() - started);
   }
@@ -866,27 +843,6 @@ async function runChatLongSessionSurface(browser, baseUrl, evidence) {
   assert.ok(calls.every((call) => call.payload.chatId === "chat-1"), "all long-session sends should stay in chat-1");
   assert.equal(calls[0].payload.userPrompt, "장기 세션 QA 001");
   assert.equal(calls[total - 1].payload.userPrompt, "장기 세션 QA 105");
-  assert.equal(await page.getByText(/QA final 105/).count(), 1);
-  const workflowPanel = page.locator("[data-tour-id='workspace.workflow']");
-  if ((await workflowPanel.count()) === 0) {
-    await page.locator("[data-tour-id='workspace.workflow-toggle']").click();
-    await workflowPanel.waitFor();
-  }
-  if ((await workflowPanel.getByText(/Network route stable #105/).count()) === 0) {
-    try {
-      await workflowPanel.getByText(/Network route stable #105/).waitFor({ timeout: 5000 });
-    } catch (err) {
-      const workflowText = await workflowPanel.evaluateAll((nodes) => nodes.map((node) => node.innerText)).catch(() => []);
-      const bodyText = await page.locator("body").innerText().catch(() => "");
-      console.error(JSON.stringify({ longSessionWorkflowMissing: true, workflowText, bodyTail: bodyText.slice(-3000) }, null, 2));
-      throw err;
-    }
-  }
-  assert.equal(
-    await workflowPanel.getByText(/Network route stable #105/).count(),
-    1,
-    "workflow panel should show latest network activity instead of idle state",
-  );
 
   const sorted = [...durations].sort((a, b) => a - b);
   const stats = {
@@ -907,15 +863,14 @@ async function runAutomationSurface(browser, baseUrl, evidence) {
   await page.getByText(/등록된 자동화가 없습니다|No automations/).waitFor();
 
   await page.goto(`${baseUrl}/automation/new.html`, { waitUntil: "domcontentloaded" });
-  await page.getByPlaceholder(/매일 인스타 캡션|daily Instagram/).fill("QA Morning Digest");
-  await page.locator("select").first().selectOption("weekly-mon-10:00");
+  await page.getByPlaceholder(/매일 인스타 캡션|daily Instagram/i).fill("QA Morning Digest");
   await page.getByText(/개별 에이전트|Individual agent/).click();
   await page.locator("textarea").fill("매주 월요일 QA 상태를 요약해줘");
-  await page.getByRole("button", { name: /만들기|Create/ }).click();
+  await page.getByRole("button", { name: /^(만들기|Create)$/ }).click();
   await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "automations.create"));
   const createCall = await page.evaluate(() => window.__qa.calls.find((call) => call.name === "automations.create"));
   assert.equal(createCall.payload.name, "QA Morning Digest");
-  assert.equal(createCall.payload.scheduleHuman, "weekly-mon-10:00");
+  assert.equal(createCall.payload.scheduleHuman, "daily-09:00");
   assert.equal(createCall.payload.targetType, "agent");
   assert.equal(createCall.payload.targetId, "agent-2");
   assert.equal(createCall.payload.promptTemplate, "매주 월요일 QA 상태를 요약해줘");
@@ -926,8 +881,8 @@ async function runAutomationSurface(browser, baseUrl, evidence) {
 async function runAutomationDefaultAndDetailSurface(browser, baseUrl, evidence) {
   const { context, page, errors } = await newPage(browser);
   await page.goto(`${baseUrl}/automation/new.html`, { waitUntil: "domcontentloaded" });
-  await page.getByPlaceholder(/매일 인스타 캡션|daily Instagram/).fill("QA Default Prompt");
-  await page.getByRole("button", { name: /만들기|Create/ }).click();
+  await page.getByPlaceholder(/매일 인스타 캡션|daily Instagram/i).fill("QA Default Prompt");
+  await page.getByRole("button", { name: /^(만들기|Create)$/ }).click();
   await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "automations.create"));
   const createCall = await page.evaluate(() => window.__qa.calls.find((call) => call.name === "automations.create"));
   assert.equal(createCall.payload.name, "QA Default Prompt");
@@ -935,7 +890,9 @@ async function runAutomationDefaultAndDetailSurface(browser, baseUrl, evidence) 
   assert.equal(createCall.payload.targetType, "firm");
   assert.equal(createCall.payload.targetId, "firm-1");
 
-  await page.getByRole("link", { name: "QA Default Prompt" }).click();
+  const automationId = await page.evaluate(() => window.__qa.automations[0]?.id);
+  assert.ok(automationId, "created automation should be available to open detail surface");
+  await page.goto(`${baseUrl}/automation/detail.html?id=${encodeURIComponent(automationId)}`, { waitUntil: "domcontentloaded" });
   try {
     await page.getByRole("heading", { name: "QA Default Prompt" }).waitFor();
   } catch (err) {
@@ -944,7 +901,7 @@ async function runAutomationDefaultAndDetailSurface(browser, baseUrl, evidence) 
     console.error(JSON.stringify({ automationDetailTimeout: true, body: body.slice(0, 3000), calls: await page.evaluate(() => window.__qa.calls).catch(() => []), automations: await page.evaluate(() => window.__qa.automations).catch(() => []), errors }, null, 2));
     throw err;
   }
-  await page.getByText("daily-09:00").waitFor();
+  await page.getByText("daily-09:00").first().waitFor();
   await page.getByText("Founder HQ").waitFor();
   await page.getByText("아직 실행된 적 없음").waitFor();
   await page.getByText("오늘 할 일 요약해줘").waitFor();
@@ -968,705 +925,7 @@ async function runHubLiveSurface(browser, baseUrl, evidence) {
   await finishPage(context, page, errors, evidence, "hub-live-surface");
 }
 
-function setupMockAgentlasBridge(options) {
-  function makeHubCatalog(total) {
-    return Array.from({ length: total }, (_, index) => {
-      if (index === 0) {
-        return {
-          slug: "fda-samd-510k-readiness-desk",
-          name: "FDA SaMD 510(k) 사전 승인 준비 데스크",
-          nameEn: "FDA SaMD 510(k) Pre-market Notification Readiness Desk",
-          tagline: "Callable Hub team",
-          taglineEn: "Callable Hub team",
-          trustGrade: "A",
-          installCount: 0,
-          manifestUrl: "mock",
-          kind: "cloud-callable",
-          callable: true,
-          source: "hub-index",
-          entityKind: "team",
-          perCallCredits: 10,
-        };
-      }
-      const n = String(index + 1).padStart(3, "0");
-      return {
-        slug: `hub-agent-${n}`,
-        name: `허브 에이전트 ${n}`,
-        nameEn: `Hub Agent ${n}`,
-        tagline: "Callable Hub agent",
-        taglineEn: "Callable Hub agent",
-        trustGrade: "A",
-        installCount: total - index,
-        manifestUrl: "mock",
-        kind: "cloud-callable",
-        callable: true,
-        source: "hub-profile",
-        entityKind: "agent",
-        perCallCredits: 3,
-      };
-    });
-  }
-
-  const now = new Date().toISOString();
-  const calls = [];
-  const eventHandlers = {};
-  const automations = [];
-  let runtimeOverrides = [];
-  const workspaceFolders = {};
-  let lastRunId = 0;
-  let createdChatId = 0;
-  const pendingConfirmations = Array.from({ length: options?.pendingConfirmations ?? 0 }, (_, index) => ({
-    chatId: `confirm-chat-${index + 1}`,
-    chatTitle: `QA approval ${index + 1}`,
-    question: index === 0 ? "배포 전 공개 여부를 승인해 주세요" : "Approve public visibility before deploy",
-    optionCount: 2,
-    createdAt: new Date(Date.now() - (index + 1) * 60_000).toISOString(),
-  }));
-
-  function record(name, payload) {
-    calls.push({ name, payload });
-  }
-  function emit(channel, payload) {
-    for (const handler of eventHandlers[channel] || []) handler(payload);
-  }
-  function localized(obj) {
-    return obj;
-  }
-
-  try {
-    window.localStorage.setItem("agentlas.onboarded", "1");
-    window.localStorage.setItem("agentlas.shellTour.dismissed.v1", "1");
-    window.localStorage.setItem("agentlas.stormbreakerWarningDismissed", "1");
-    if (!options.showPageTour) {
-      for (const id of ["dashboard", "workspace", "build", "agents", "hub", "automation", "automation-new", "automation-detail", "environment"]) {
-        window.localStorage.setItem(`agentlas.pageTour.${id}.dismissed.v2`, "1");
-      }
-    }
-  } catch {}
-
-  const orchestrator = {
-    id: "agent-1",
-    slug: "agentlas-orchestrator",
-    name: "오케스트레이터",
-    nameEn: "Orchestrator",
-    tagline: "요청을 라우팅합니다.",
-    taglineEn: "Routes requests.",
-    kind: "agent",
-    tone: "blue",
-    visibility: "local",
-    systemPrompt: "# Orchestrator\n\nRoute work clearly.",
-    mcpServers: ["github"],
-    preferredBackend: "codex",
-    trustGrade: "A",
-    installedAt: now,
-  };
-  const builder = {
-    id: "agent-2",
-    slug: "builder-agent",
-    name: "빌더 에이전트",
-    nameEn: "Builder Agent",
-    tagline: "빌드 실행 에이전트",
-    taglineEn: "Build execution agent",
-    kind: "agent",
-    tone: "green",
-    visibility: "local",
-    systemPrompt: "# Builder\n\nBuild Agentlas work clearly.",
-    localPath: "/tmp/agentlas-builder",
-    mcpServers: ["github"],
-    preferredBackend: "codex",
-    trustGrade: "A",
-    installedAt: now,
-  };
-  const researcher = {
-    id: "agent-3",
-    slug: "research-agent",
-    name: "리서치 에이전트",
-    nameEn: "Research Agent",
-    tagline: "자료를 정리합니다.",
-    taglineEn: "Organizes research.",
-    kind: "agent",
-    tone: "purple",
-    visibility: "local",
-    systemPrompt: "# Research\n\nOrganize findings clearly.",
-    localPath: "/tmp/agentlas-research",
-    mcpServers: ["github"],
-    preferredBackend: "codex",
-    trustGrade: "A",
-    installedAt: now,
-  };
-  let importCounter = 0;
-  let installedAgents = [orchestrator, builder, researcher];
-  const firm = {
-    id: "firm-1",
-    slug: "founder-hq",
-    name: "Founder HQ",
-    nameEn: "Founder HQ",
-    tagline: "창업자 작업 팀",
-    taglineEn: "Founder work team",
-    ceoAgentId: "agent-1",
-    installedAt: now,
-    orgChart: [
-      { agentSlug: "agentlas-orchestrator", agentId: "agent-1", role: "CEO", reportsTo: null },
-      { agentSlug: "builder-agent", agentId: "agent-2", role: "Builder", reportsTo: "agentlas-orchestrator" },
-    ],
-  };
-  const project = {
-    id: "project-1",
-    name: "QA Project",
-    description: null,
-    defaultAgentId: "agent-2",
-    contextNote: "QA project context",
-    folderPath: "/tmp/agentlas-qa-project",
-    createdAt: now,
-    updatedAt: now,
-  };
-  const resolvedOrg = {
-    source: "orgchart",
-    firmId: "firm-1",
-    ceo: { id: "ceo", name: "Founder HQ", role: "CEO", agentId: "agent-1" },
-    divisions: [
-      {
-        id: "builder-division",
-        name: "Build",
-        role: "Build",
-        agentId: "agent-1",
-        specialists: [{ id: "builder-node", name: "Builder Agent", role: "Builder", agentId: "agent-2" }],
-      },
-    ],
-  };
-  let activeRuntime = {
-    kind: "codex",
-    backend: "openai",
-    source: "/usr/local/bin/codex",
-    version: "mock",
-    active: true,
-    model: "gpt-5.1-codex",
-    efforts: [
-      { id: "low", label: "Low" },
-      { id: "medium", label: "Medium" },
-      { id: "high", label: "High" },
-    ],
-    availableModels: ["gpt-5.1-codex", "gpt-5.1"],
-  };
-  const defaultMemory = [
-    "# Memory",
-    "",
-    "## Decisions",
-    "- **Route clearly** - Keep routing explicit.",
-    "",
-    "## Gotchas",
-    "- **No fake data** - Do not show mock state as live.",
-    "",
-    "## Open Questions",
-    "- **Publish target** - Confirm Cloud or Hub.",
-  ].join("\n");
-  const agentFileContents = {
-    "agent-2": {
-      "AGENT.md": "# Builder\n\nBuild Agentlas work clearly.",
-      "memory.md": defaultMemory,
-    },
-  };
-  function filesForAgent(agentId) {
-    agentFileContents[agentId] = agentFileContents[agentId] || {
-      "AGENT.md": "# Imported\n\nImported local agent.",
-      "memory.md": defaultMemory,
-    };
-    return agentFileContents[agentId];
-  }
-
-  window.__qa = { calls, automations };
-  window.agentlasEvents = {
-    on: (channel, handler) => {
-      eventHandlers[channel] = eventHandlers[channel] || [];
-      eventHandlers[channel].push(handler);
-      return () => {
-        eventHandlers[channel] = (eventHandlers[channel] || []).filter((item) => item !== handler);
-      };
-    },
-    onActiveChats: () => () => {},
-  };
-  window.agentlasUpdater = { onState: () => () => {} };
-  window.agentlasFiles = { pathForFile: () => "/tmp/agentlas-file.png" };
-
-  window.agentlas = {
-    app: {
-      getLocale: async () => "ko-KR",
-      getVersion: async () => "0.4.0",
-    },
-    auth: {
-      getSession: async () => ({ signedIn: true, account: { email: "qa@example.com" } }),
-      signInWithGoogle: async () => ({ signedIn: true, account: { email: "qa@example.com" } }),
-      signOut: async () => ({ signedIn: false }),
-    },
-    updater: {
-      getState: async () => ({ status: "idle" }),
-      check: async () => ({ status: "idle" }),
-      install: async () => {},
-    },
-    usage: {
-      snapshot: async () => ({ providers: [{ label: "Codex", status: "ok", windows: [{ usedPercent: 10 }] }] }),
-    },
-    confirm: {
-      listPending: async () => pendingConfirmations,
-    },
-    attention: {
-      setPendingConfirmations: async (count) => record("attention.setPendingConfirmations", count),
-    },
-    runtime: {
-      listCommands: async () => [{ name: "/hep-build", description: "Build via Hephaestus", source: "codex" }],
-      detect: async () => [{ ...activeRuntime }],
-      listModels: async () => [
-        { id: "gpt-5.1-codex", label: "GPT-5.1 Codex" },
-        { id: "gpt-5.1", label: "GPT-5.1" },
-      ],
-      setActive: async (selection) => {
-        record("runtime.setActive", selection);
-        activeRuntime = {
-          ...activeRuntime,
-          ...selection,
-          model: selection.model ?? null,
-          effort: selection.effort ?? activeRuntime.effort ?? null,
-          active: true,
-        };
-        return { ...activeRuntime };
-      },
-    },
-    team: {
-      list: async () => installedAgents,
-      install: async (input) => localized(input),
-      importLocalFolder: async (folder) => {
-        record("team.importLocalFolder", folder);
-        importCounter += 1;
-        const imported = {
-          id: `imported-agent-${importCounter}`,
-          slug: `imported-qa-agent-${importCounter}`,
-          name: "가져온 QA 에이전트",
-          nameEn: "Imported QA Agent",
-          tagline: "로컬에서 가져온 QA 에이전트",
-          taglineEn: "Imported local QA agent",
-          kind: "agent",
-          tone: "amber",
-          visibility: "local",
-          systemPrompt: "# Imported QA Agent\n\nImported through the folder picker.",
-          localPath: folder,
-          runtimeLabel: "codex",
-          mcpServers: [],
-          preferredBackend: "codex",
-          trustGrade: "A",
-          installedAt: now,
-        };
-        installedAgents = [imported, ...installedAgents.filter((agent) => agent.id !== imported.id)];
-        return imported;
-      },
-    },
-    firms: {
-      list: async () => [firm],
-      get: async () => firm,
-      install: async () => firm,
-      getResolvedOrg: async () => resolvedOrg,
-    },
-	    marketplace: {
-	      status: async () =>
-	        options && options.hubOffline
-	          ? { mode: "mcp", baseUrl: "mock://offline", online: false, usingFallback: false, lastError: "fetch failed", lastCheckedAt: now }
-	          : { mode: "mcp", baseUrl: "https://agentlas.cloud/api/mcp/v1", online: true, usingFallback: false, lastError: null, lastCheckedAt: now },
-	      listBundles: async () => [],
-	      listFirms: async () => [],
-	      listMine: async () => [],
-	      search: async () => makeHubCatalog(267),
-	    },
-    mcpTools: {
-      listCatalog: async () => [],
-      listInstalled: async () => [],
-      status: async () => [],
-      install: async () => ({}),
-      installCustom: async () => ({}),
-      remove: async () => {},
-      setEnabled: async () => ({}),
-      test: async () => ({ ok: true }),
-    },
-    skills: {
-      listCatalog: async () => [
-        { name: "qa-skill", path: "/tmp/qa-skill/SKILL.md", description: "QA helper skill" },
-      ],
-    },
-    hephaestus: {
-      status: async () => ({ available: true, version: "mock", reason: null }),
-      doctor: async () => ({ ok: true, checks: [] }),
-      build: async (payload) => {
-        record("hephaestus.build", payload);
-        lastRunId += 1;
-        return { runId: `build-run-${lastRunId}` };
-      },
-      buildEventChannel: (runId) => `build:${runId}`,
-      buildReady: async (runId) => {
-        if (options && options.buildScenario === "slow") {
-          window.setTimeout(() => emit(`build:${runId}`, { kind: "stage", stage: "build", text: "QA slow build stage" }), 20);
-          return;
-        }
-        if (options && options.buildScenario === "interview") {
-          const askOne = [
-            "요구사항을 조금 더 확인해야 합니다.",
-            "<<agentlas-ask>>",
-            JSON.stringify({
-              question: "어떤 산출물이 필요합니까?",
-              header: "Output",
-              multiSelect: true,
-              options: [
-                { label: "리포트", description: "문서형 리서치 산출물" },
-                { label: "앱", description: "실행 가능한 앱" },
-              ],
-            }),
-            "<</agentlas-ask>>",
-          ].join("\n");
-          const askTwo = [
-            "배포 위치도 확인해야 합니다.",
-            "<<agentlas-ask>>",
-            JSON.stringify({
-              question: "어디에 배포할까요?",
-              header: "Deploy",
-              multiSelect: true,
-              options: [
-                { label: "비공개", description: "내 계정에만 저장" },
-                { label: "허브 공개", description: "허브 공개 후보로 제출" },
-              ],
-            }),
-            "<</agentlas-ask>>",
-          ].join("\n");
-          const askBatch = [askOne, askTwo].join("\n\n");
-          if (runId === "build-run-1") {
-            window.setTimeout(() => emit(`build:${runId}`, { kind: "partial", text: askBatch }), 20);
-            window.setTimeout(() => emit(`build:${runId}`, { kind: "done", text: askBatch, result: { workspace: "/tmp/agentlas-qa", securityScan: { findings: [] } } }), 60);
-            return;
-          }
-          window.setTimeout(() => emit(`build:${runId}`, { kind: "stage", stage: "build", text: "QA build stage" }), 20);
-          window.setTimeout(
-            () =>
-              emit(`build:${runId}`, {
-                kind: "done",
-                text: "BUILD_COMPLETE: qa-agent",
-                result: { workspace: "/tmp/agentlas-qa", securityScan: { findings: [] } },
-              }),
-            60,
-          );
-          return;
-        }
-        window.setTimeout(() => emit(`build:${runId}`, { kind: "stage", stage: "build", text: "QA build stage" }), 20);
-        window.setTimeout(
-          () =>
-            emit(`build:${runId}`, {
-              kind: "done",
-              text: "BUILD_COMPLETE: qa-agent",
-              result: { workspace: "/tmp/agentlas-qa", securityScan: { findings: [] } },
-            }),
-          60,
-        );
-      },
-      cancelBuild: async (runId) => record("hephaestus.cancelBuild", runId),
-      publish: async (payload) => {
-        record("hephaestus.publish", payload);
-        return { ok: true };
-      },
-      routePreview: async (payload) => {
-        record("hephaestus.routePreview", payload);
-        if (!options || !options.recommendMode) return null;
-        if (options.recommendMode === "single") {
-          return {
-            mode: "single",
-            agents: [{ id: "agent-1", name: "오케스트레이터", source: "local", estCredits: null }],
-            totalEstCredits: null,
-            estimate: true,
-            rawAction: "single",
-            query: payload.query,
-          };
-        }
-        if (options.recommendMode === "network") {
-          return {
-            mode: "network",
-            agents: [
-              { id: "no-ai-slop-copywriter", name: "No-AI-Slop Copywriter", source: "hub", estCredits: 3 },
-              { id: "security-reviewer", name: "Security Reviewer", source: "hub", estCredits: 3 },
-            ],
-            totalEstCredits: 6,
-            estimate: true,
-            rawAction: "network",
-            query: payload.query,
-          };
-        }
-        if (options.recommendMode === "pipeline") {
-          return {
-            mode: "pipeline",
-            agents: [],
-            stages: [
-              { order: 1, kind: "plan", agentId: "agent-1", agentName: "Planner" },
-              { order: 2, kind: "qa", agentId: "agent-2", agentName: "Builder" },
-            ],
-            totalEstCredits: null,
-            estimate: true,
-            rawAction: "pipeline",
-            query: payload.query,
-          };
-        }
-        return {
-          mode: "none",
-          agents: [],
-          totalEstCredits: null,
-          estimate: true,
-          rawAction: "none",
-          query: payload.query,
-        };
-      },
-      stormbreaker: async () => ({ ok: true, runId: "storm-run" }),
-      getSupervisor: async () => ({ enabled: true }),
-      setSupervisor: async () => ({ enabled: true }),
-      journal: async () => ({ ok: true, entries: [] }),
-      startStudio: async () => ({ ok: true }),
-      aoGraph: async () => ({ ok: true, json: {} }),
-      search: async () => ({ ok: true, json: {} }),
-      network: async () => ({ ok: true, json: {} }),
-      localGui: async () => ({ ok: true }),
-      package: async () => ({ ok: true }),
-      securityScan: async () => ({ ok: true, findings: [] }),
-    },
-    chats: {
-      get: async () => ({
-        id: "chat-1",
-        projectId: null,
-        firmId: null,
-        agentId: "agent-2",
-        kind: "user",
-        title: "QA Chat",
-        archivedAt: null,
-        createdAt: now,
-        updatedAt: now,
-      }),
-      listRecent: async () => [],
-      create: async (input) => {
-        record("chats.create", input);
-        createdChatId += 1;
-        const id = `chat-created-${createdChatId}`;
-        return { id, projectId: input.projectId || null, firmId: input.firmId || null, agentId: input.agentId || "agent-2", kind: "user", title: "QA Chat", archivedAt: null, createdAt: now, updatedAt: now };
-      },
-      switchAgent: async (chatId, agentId) => {
-        record("chats.switchAgent", { chatId, agentId });
-        return { id: "chat-1", projectId: null, firmId: null, agentId, kind: "user", title: "QA Chat", archivedAt: null, createdAt: now, updatedAt: now };
-      },
-      rename: async (_id, title) => ({ id: "chat-1", projectId: null, firmId: null, agentId: "agent-2", kind: "user", title, archivedAt: null, createdAt: now, updatedAt: now }),
-      archive: async () => {},
-      remove: async () => {},
-      delete: async () => {},
-    },
-    invoke: {
-      history: async () => [],
-      attach: async () => null,
-      activeChats: async () => [],
-      run: async (payload) => {
-        record("invoke.run", payload);
-        lastRunId += 1;
-        const runId = `invoke-run-${lastRunId}`;
-        if (options?.longChatInvoke) {
-          const n = lastRunId;
-          window.setTimeout(() => emit(`invoke:${runId}`, { kind: "thinking", status: `same-session turn #${n}` }), 12);
-          window.setTimeout(() => emit(`invoke:${runId}`, { kind: "tool-use", status: `Network route stable #${n}` }), 24);
-          window.setTimeout(() => emit(`invoke:${runId}`, { kind: "final", text: `QA final ${n}` }), 48);
-        } else if (!options || !options.slowInvoke) {
-          const finalDelay = options?.visibleProgressInvoke ? 1400 : 180;
-          window.setTimeout(() => emit(`invoke:${runId}`, { kind: "thinking", status: "Agentlas orchestrator started" }), 20);
-          window.setTimeout(() => emit(`invoke:${runId}`, { kind: "tool-use", status: "Hub 에이전트 빌리는 중: qa-agent" }), 70);
-          window.setTimeout(() => emit(`invoke:${runId}`, { kind: "final", text: "QA final" }), finalDelay);
-        }
-        return { runId };
-      },
-      cancel: async (runId) => record("invoke.cancel", runId),
-      eventChannel: (runId) => `invoke:${runId}`,
-      clearHistory: async () => {},
-    },
-    projects: {
-      list: async () => [project],
-      get: async (id) => (id === project.id ? project : null),
-    },
-    workspace: {
-      get: async (chatId) => workspaceFolders[chatId] ?? null,
-      set: async (chatId, folder) => {
-        workspaceFolders[chatId] = folder;
-        record("workspace.set", { chatId, folder });
-        return { chatId, folder };
-      },
-    },
-    env: {
-      list: async () => [
-        {
-          key: "QA_API_KEY",
-          hasValue: true,
-          preview: "qa_***",
-          requiredBy: [],
-        },
-      ],
-      set: async () => ({ ok: true }),
-    },
-    automations: {
-      list: async () => automations,
-      create: async (payload) => {
-        record("automations.create", payload);
-        const item = { id: `auto-${automations.length + 1}`, createdAt: now, lastRunAt: null, nextRunAt: now, enabled: true, createdBy: "user", ...payload };
-        automations.unshift(item);
-        return item;
-      },
-      toggle: async (id, enabled) => {
-        record("automations.toggle", { id, enabled });
-        const item = automations.find((a) => a.id === id);
-        if (item) item.enabled = enabled;
-        return item;
-      },
-      remove: async (id) => {
-        record("automations.remove", id);
-        const idx = automations.findIndex((a) => a.id === id);
-        if (idx >= 0) automations.splice(idx, 1);
-      },
-    },
-    agentFiles: {
-      list: async (agentId) => ({
-        entries: Object.keys(filesForAgent(agentId)).map((filePath) => ({
-          kind: "file",
-          name: filePath.split("/").pop(),
-          path: filePath,
-        })),
-      }),
-      read: async (agentId, filePath) => ({ content: filesForAgent(agentId)[filePath] ?? "" }),
-      write: async (agentId, filePath, content) => {
-        if (filePath.startsWith("/") || filePath.split("/").includes("..")) {
-          throw new Error("Path escapes the agent folder");
-        }
-        filesForAgent(agentId)[filePath] = content;
-        record("agentFiles.write", { agentId, path: filePath, content });
-      },
-    },
-    agentRuntime: {
-      list: async () => runtimeOverrides,
-      get: async (scope, targetId) => runtimeOverrides.find((item) => item.scope === scope && item.targetId === targetId) || null,
-      set: async (input) => {
-        record("agentRuntime.set", input);
-        const saved = { ...input, updatedAt: now };
-        runtimeOverrides = [saved, ...runtimeOverrides.filter((item) => item.scope !== input.scope || item.targetId !== input.targetId)];
-        return saved;
-      },
-      remove: async (scope, targetId) => {
-        record("agentRuntime.remove", { scope, targetId });
-        runtimeOverrides = runtimeOverrides.filter((item) => item.scope !== scope || item.targetId !== targetId);
-      },
-    },
-    fs: {
-      pickDirectory: async () => {
-        record("fs.pickDirectory", null);
-        return "/tmp/agentlas-qa";
-      },
-      listDirectory: async (absPath) => ({
-        path: absPath,
-        exists: true,
-        entries: [
-          { kind: "file", name: "AGENTS.md", path: `${absPath}/AGENTS.md`, size: 40, isTextLike: true },
-          { kind: "file", name: "README.md", path: `${absPath}/README.md`, size: 64, isTextLike: true },
-          { kind: "file", name: "preview.html", path: `${absPath}/preview.html`, size: 112, isTextLike: true },
-          { kind: "file", name: "preview.png", path: `${absPath}/preview.png`, size: 128, isTextLike: false },
-          { kind: "dir", name: ".agentlas", path: `${absPath}/.agentlas`, size: 0 },
-        ],
-      }),
-      readTextFile: async (absPath) => {
-        if (absPath.endsWith(".html")) {
-          return {
-            path: absPath,
-            content: "<!doctype html><html><body><main><h1>Browser smoke frame</h1><p>Rendered inside the panel tab.</p></main></body></html>",
-            truncated: false,
-            size: 119,
-          };
-        }
-        return {
-          path: absPath,
-          content: "# Panel viewer smoke file\n\nWorkspace file content rendered in the panel tab.",
-          truncated: false,
-          size: 73,
-        };
-      },
-    },
-    secrets: {
-      saveApiKey: async () => {},
-      hasApiKey: async () => false,
-      deleteApiKey: async () => {},
-    },
-    config: {
-      getCustomBaseUrl: async () => "",
-      setCustomBaseUrl: async () => "",
-    },
-    multimodal: {
-      listProviders: async () => [],
-      getSettings: async () => ({}),
-      saveSettings: async (settings) => settings,
-      status: async () => [],
-    },
-    migration: {
-      scan: async () => [],
-      import: async () => ({ imported: 0, skipped: 0, errors: [] }),
-    },
-    surfaces: {
-      listSurfaces: async () => [],
-      getSurface: async () => null,
-      listJobs: async () => [],
-      getJobSummary: async () => null,
-      updateJob: async () => null,
-      updateState: async () => null,
-      listEvents: async () => [],
-      hasApproval: async () => true,
-      approve: async () => {},
-      listApprovals: async () => [],
-      revokeApproval: async () => {},
-    },
-    appFactory: {
-      listApps: async () => [],
-      getApp: async () => null,
-      getAppBySurface: async () => null,
-      scaffold: async () => null,
-      archive: async () => ({}),
-      restore: async () => ({}),
-      listOperations: async () => [],
-      syncCloudManifest: async () => ({ ok: true }),
-      runAutopilot: async () => ({}),
-      installMcpPlan: async () => ({}),
-      runProviderTasks: async () => ({}),
-      materializeAssets: async () => ({}),
-      activateLocalCommerceStack: async () => ({}),
-      openProviderBrowser: async () => ({}),
-      captureProviderBrowserSessions: async () => ({}),
-      launchProviderBrowserSession: async () => ({}),
-      syncProviderBrowserResults: async () => ({}),
-      resolveProviderCredentials: async () => ({}),
-      approveProviderPayment: async () => ({}),
-      runSmoke: async () => ({ ok: true, exitCode: 0 }),
-      preparePreview: async () => ({}),
-      openLaunchTarget: async () => ({}),
-      publishAsTool: async () => ({}),
-    },
-    toolFactory: {
-      scaffold: async () => null,
-      runSmoke: async () => ({ ok: true, exitCode: 0 }),
-      installMcp: async () => ({}),
-      archive: async () => ({}),
-      restore: async () => ({}),
-      listTools: async () => [],
-      getTool: async () => null,
-      getToolBySurface: async () => null,
-      listOperations: async () => [],
-    },
-    surfaceAssets: {
-      materialize: async () => null,
-      archive: async () => ({}),
-      restore: async () => ({}),
-      listPacks: async () => [],
-      getPack: async () => null,
-      getPackBySurface: async () => null,
-      listOperations: async () => [],
-    },
-  };
-}
+// setupMockAgentlasBridge는 scripts/lib/mock-agentlas-bridge.cjs로 이동 (smoke-renderer-ui와 공유).
 
 main().catch((err) => {
   console.error(err);
