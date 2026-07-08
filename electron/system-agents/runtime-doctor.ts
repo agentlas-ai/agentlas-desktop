@@ -9,6 +9,7 @@ import path from "node:path";
 
 export type DoctorFailureKind =
   | "mcp-oauth-unauthenticated" // 미인증 OAuth 원격 MCP가 런타임을 죽임
+  | "codex-config-invalid" // config.toml 스키마 위반(예: stdio 서버에 url 키)으로 codex 기동 실패
   | "cli-exit" // CLI가 0이 아닌 코드로 종료(원인 미상)
   | "timeout" // 장시간 무응답 자동 중단
   | "unknown";
@@ -40,10 +41,24 @@ function extractHosts(error: string): string[] {
   return [...hosts];
 }
 
-export function classifyAutomationFailure(error: string): { kind: DoctorFailureKind; hosts: string[] } {
+/** config.toml 스키마 위반이 지목한 mcp_servers 이름을 뽑는다(예: mcp_servers.agentlas). */
+function extractBadMcpServer(error: string): string | null {
+  const m = /mcp_servers\.([a-z0-9_.-]+)/i.exec(error || "");
+  return m ? m[1] : null;
+}
+
+export function classifyAutomationFailure(error: string): {
+  kind: DoctorFailureKind;
+  hosts: string[];
+  badServer?: string | null;
+} {
   const text = error || "";
   if (/authrequired|invalid_token|oauth-protected-resource|www_authenticate/i.test(text)) {
     return { kind: "mcp-oauth-unauthenticated", hosts: extractHosts(text) };
+  }
+  // codex config.toml 파싱 실패(예: stdio 서버에 url 키) → CLI가 아예 기동 못 함.
+  if (/error loading config\.toml|url is not supported for stdio|invalid config/i.test(text)) {
+    return { kind: "codex-config-invalid", hosts: [], badServer: extractBadMcpServer(text) };
   }
   if (/no response for \d+s|auto-aborted/i.test(text)) return { kind: "timeout", hosts: [] };
   if (/CLI exit \d+/i.test(text)) return { kind: "cli-exit", hosts: extractHosts(text) };
@@ -154,8 +169,20 @@ function disableCodexPlugin(pluginKey: string): boolean {
  * 부작용이 있는 수리는 반드시 백업을 남기고, 무엇을 왜 바꿨는지 actions로 보고한다.
  */
 export function runRuntimeDoctor(errorMessage: string): DoctorReport {
-  const { kind, hosts } = classifyAutomationFailure(errorMessage);
+  const { kind, hosts, badServer } = classifyAutomationFailure(errorMessage);
   const actions: DoctorAction[] = [];
+
+  if (kind === "codex-config-invalid") {
+    // 진단만 한다(자동 수리 안 함): 원격 MCP 항목이라 안전한 무손실 수리가 없고,
+    // 사용자가 어느 항목을 어떻게 고칠지 알아야 한다. 명확한 조치를 안내한다.
+    const where = badServer ? `[mcp_servers.${badServer}]` : "일부 [mcp_servers.*] 항목";
+    return {
+      kind,
+      summary: `codex의 ~/.codex/config.toml ${where} 이(가) 잘못돼 codex가 기동하지 못합니다(예: stdio 서버에 url 키). 다른 런타임(claude-code)으로 우회하거나 그 항목을 고치세요.`,
+      repaired: false,
+      actions,
+    };
+  }
 
   if (kind === "mcp-oauth-unauthenticated") {
     const hits = findOauthPluginsByHost(hosts);
