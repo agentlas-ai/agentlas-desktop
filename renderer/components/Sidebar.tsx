@@ -282,7 +282,9 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
     // 만들 때도 최근 목록이 갱신되도록. (hard navigation은 full reload라 자동 갱신됐음)
   }, [refreshKey, pathname, currentChatId]);
 
-  const displayAgents = visibleAgents(data.agents);
+  // 팀(멀티에이전트)도 좌측 목록에 노출한다 — 팀 채팅 진입점이 사이드바뿐인 사용자가
+  // "에이전트가 아무것도 안 보인다"고 겪은 실사고(0.7.21). 시스템/background만 숨긴다.
+  const displayAgents = visibleAgents(data.agents, { includeTeams: true });
   // ChatRow마다 O(n) find 대신 id→agent Map으로 O(1) 조회(채팅 많을수록 효과).
   const agentById = useMemo(() => new Map(displayAgents.map((a) => [a.id, a])), [displayAgents]);
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.22 — 2026-07-08
+
+### Fixed
+
+- **Stall watchdog for automations.** Runs that hang mid-way (process alive, no runner
+  events) previously showed nothing until the 30-minute node timeout. Both the legacy and
+  graph paths now auto-abort after 8 minutes of event silence (configurable via
+  `AGENTLAS_AUTOMATION_STALL_MS`), which routes the run into the failure feedback +
+  Runtime Doctor path immediately.
+- **Teams actually appear in the agent picker.** 0.7.20 fixed the page-level filter but
+  the picker component re-filtered teams out internally — team entries were still missing
+  from the top-left picker and its search. The internal re-filter now keeps teams;
+  callers decide inclusion.
+- **Teams appear in the sidebar agent list.** The left sidebar filtered out team
+  (multi-agent) entities entirely, leaving users who mostly install teams with an
+  empty-looking agent list.
+
 ## 0.7.21 — 2026-07-08
 
 ### Fixed

@@ -89,6 +89,11 @@ function notifyDone(a: Automation, status: AutomationResultStatus, error?: strin
 // 자동 일시정지, (4) 수리 못 한 반복 실패는 System Optimizer(LLM) 원샷 진단 발사.
 const FAILURE_PAUSE_THRESHOLD = 3;
 const OPTIMIZER_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 자동화당 최대 6시간에 1회
+// 무활동 워치독 — 러너 이벤트가 이 시간 이상 끊기면 행(hang)으로 판정하고 자동 중단한다.
+// 프로세스가 안 죽는 행은 실패 이벤트가 영영 안 와서 닥터/피드백 경로에 도달하지 못한다
+// (실사고: Run now 후 중간 무반응 — 사용자는 30분 auto-abort까지 아무것도 못 봄).
+// 긴 단일 툴 실행(빌드 등)도 있으므로 짧게 잡지 않는다. env로 조정 가능.
+const STALL_INACTIVITY_MS = Number(process.env.AGENTLAS_AUTOMATION_STALL_MS ?? 8 * 60 * 1000);
 const lastOptimizerRunAt = new Map<string, number>();
 const optimizerInFlight = new Set<string>();
 
@@ -227,15 +232,39 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
       // 그래프 경로 — 위상 러너로 실행. per-node 상태를 라이브 채널로 방송해 캔버스가 애니메이션.
       const runId = `run-${a.id}-${Date.now()}`;
       currentRunId = runId;
-      const result = await runGraph(a, a.graph, {
-        signal: controller.signal,
-        runId,
-        sink: (ev) => {
-          if (ev.nodeState) broadcastLiveRun(a.id, ev);
-        },
-      });
-      runStatus = result.ok ? "ok" : "error";
-      runError = result.error ?? null;
+      // 무활동 워치독 — 그래프 경로도 이벤트가 끊기면 행으로 판정한다(노드 자체 타임아웃
+      // 1800s보다 훨씬 먼저 사용자에게 실패 피드백이 가도록).
+      let lastGraphEventAt = Date.now();
+      let graphStalled = false;
+      const graphStallTimer = setInterval(() => {
+        if (Date.now() - lastGraphEventAt > STALL_INACTIVITY_MS) {
+          graphStalled = true;
+          controller.abort();
+        }
+      }, 30_000);
+      let result;
+      try {
+        result = await runGraph(a, a.graph, {
+          signal: controller.signal,
+          runId,
+          sink: (ev) => {
+            lastGraphEventAt = Date.now();
+            if (ev.nodeState) broadcastLiveRun(a.id, ev);
+          },
+        });
+      } catch (err) {
+        // abort로 runGraph가 던지면 스톨 메시지로 바꿔 닥터 timeout 분류에 태운다.
+        if (graphStalled) {
+          throw new Error(`no response for ${Math.round(STALL_INACTIVITY_MS / 1000)}s, auto-aborted (stall watchdog)`);
+        }
+        throw err;
+      } finally {
+        clearInterval(graphStallTimer);
+      }
+      runStatus = result.ok && !graphStalled ? "ok" : "error";
+      runError = graphStalled
+        ? `no response for ${Math.round(STALL_INACTIVITY_MS / 1000)}s, auto-aborted (stall watchdog)`
+        : result.error ?? null;
       // 그래프 outputs 중 마지막 노드 출력을 체인 페이로드로 노출.
       const outVals = Object.values(result.outputs ?? {});
       output = outVals.length ? outVals[outVals.length - 1] : undefined;
@@ -293,16 +322,39 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
           toolMode: a.toolMode ?? "auto",
           hubMode: a.targetType === "hub" ? "hub-first" as const : (a.hubMode ?? "hub-allowed"),
         };
-        const result = await runMcpInvocation(
-          req,
-          (ev) => {
-            if (ev.kind === "error") {
-              runnerError = ev.error?.message || "runner failed";
-            }
-            recordMcpInvocationEvent(runId, req, ev);
-          },
-          controller.signal,
-        );
+        // 무활동 워치독 — 이벤트가 STALL_INACTIVITY_MS 동안 없으면 행으로 판정, abort.
+        let lastEventAt = Date.now();
+        let stalled = false;
+        const stallTimer = setInterval(() => {
+          if (Date.now() - lastEventAt > STALL_INACTIVITY_MS) {
+            stalled = true;
+            controller.abort();
+          }
+        }, 30_000);
+        let result;
+        try {
+          result = await runMcpInvocation(
+            req,
+            (ev) => {
+              lastEventAt = Date.now();
+              if (ev.kind === "error") {
+                runnerError = ev.error?.message || "runner failed";
+              }
+              recordMcpInvocationEvent(runId, req, ev);
+            },
+            controller.signal,
+          );
+        } catch (err) {
+          if (stalled) {
+            throw new Error(`no response for ${Math.round(STALL_INACTIVITY_MS / 1000)}s, auto-aborted (stall watchdog)`);
+          }
+          throw err;
+        } finally {
+          clearInterval(stallTimer);
+        }
+        if (stalled) {
+          throw new Error(`no response for ${Math.round(STALL_INACTIVITY_MS / 1000)}s, auto-aborted (stall watchdog)`);
+        }
         output = result.finalText;
         if (runnerError) throw new Error(runnerError);
         if (!output?.trim()) throw new Error("Automation finished without an assistant result");

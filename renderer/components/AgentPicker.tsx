@@ -38,7 +38,10 @@ export function AgentPicker({
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
-  const displayAgents = useMemo(() => visibleAgents(agents), [agents]);
+  // 호출자가 이미 팀 포함 여부를 결정해 걸러 넘긴다 — 여기서 기본 옵션으로 재필터하면
+  // 팀이 도로 빠져 0.7.20의 "팀 선택 허용"이 무효가 된다(실사고: 팀 검색 0건·선택 불가).
+  // 내부 필터는 background/system 누출 방지용 안전망으로만 유지한다.
+  const displayAgents = useMemo(() => visibleAgents(agents, { includeTeams: true }), [agents]);
   const active = displayAgents.find((agent) => agent.id === activeId) ?? displayAgents[0] ?? null;
   const activeLoc = active ? pickLocalized(active, locale) : null;
 
