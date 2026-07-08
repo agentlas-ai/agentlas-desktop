@@ -86,10 +86,14 @@ if (restart) {
 }
 
 if (verifyUrl) {
+  // 기본 20분: env 적용이 Railway 풀 리빌드(reason: deploy)를 촉발하면 빌드+배포에
+  // 7분 이상 걸린다. 180초 창은 v0.7.21/v0.7.22에서 릴리스가 실제로 성공했는데도
+  // 이 단계만 두 번 연속 빨간 X를 만들었다(restart가 "not restartable"로 스킵된 뒤
+  // 리빌드가 끝나기 전에 창 만료).
   await waitForReleaseApi(verifyUrl, {
     version: values.AGENTLAS_DESKTOP_VERSION,
     tag: values.AGENTLAS_DESKTOP_RELEASE_TAG,
-    timeoutMs: Number(process.env.AGENTLAS_RELEASE_API_TIMEOUT_MS || 180_000),
+    timeoutMs: Number(process.env.AGENTLAS_RELEASE_API_TIMEOUT_MS || 1_200_000),
   });
 }
 
