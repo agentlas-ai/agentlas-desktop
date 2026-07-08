@@ -441,6 +441,23 @@ export function recordRun(input: {
     );
 }
 
+/**
+ * 최근 run_history에서 "연속" 실패 횟수 — 가장 최근 실행부터 거슬러 올라가며
+ * status='error'가 끊기지 않고 이어진 길이. 성공/스킵을 만나면 즉시 멈춘다.
+ * 스케줄러의 자동 일시정지(무한 동일 재시도 차단) 판정에 쓰인다.
+ */
+export function countConsecutiveFailures(automationId: string, lookback = 10): number {
+  const rows = getDb()
+    .prepare("SELECT status FROM run_history WHERE automation_id = ? ORDER BY ran_at DESC LIMIT ?")
+    .all(automationId, lookback) as Array<{ status: string | null }>;
+  let streak = 0;
+  for (const r of rows) {
+    if (r.status === "error") streak += 1;
+    else break;
+  }
+  return streak;
+}
+
 export function listRunHistory(automationId: string, limit = 50): AutomationRunRecord[] {
   const rows = getDb()
     .prepare("SELECT * FROM run_history WHERE automation_id = ? ORDER BY ran_at DESC LIMIT ?")

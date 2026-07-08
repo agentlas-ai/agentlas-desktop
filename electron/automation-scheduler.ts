@@ -13,9 +13,12 @@ import {
   startGraphRun,
   updateGraphRunNode,
   finishGraphRun,
+  countConsecutiveFailures,
 } from "./store/automations";
 import { checkComputerUsePermissions } from "./mac-permissions";
-import { getOrCreateAutomationSession } from "./store/chats";
+import { getOrCreateAutomationSession, appendChatMessage } from "./store/chats";
+import { runRuntimeDoctor, type DoctorReport } from "./system-agents/runtime-doctor";
+import { buildSystemOptimizerPrompt } from "./system-agents/system-optimizer";
 import { runMcpInvocation } from "./mcp/client";
 import { runGraph } from "./workflow/run-graph";
 import { broadcastLiveRun } from "./workflow/live-run";
@@ -75,6 +78,126 @@ function notifyDone(a: Automation, status: AutomationResultStatus, error?: strin
     }).show();
   } catch (err) {
     console.error("[automation] notification failed:", err);
+  }
+}
+
+// ── 실패 처리 정책(2026-07-08) ─────────────────────────────────────────────
+// 문제: 자동화가 실패해도 챗창에 아무 피드백이 없고(프롬프트만 복붙처럼 쌓임),
+// 같은 프롬프트를 매 스케줄마다 무한 재실행했다(시스템 원인이면 전부 실패).
+// 정책: 실패 시 (1) Runtime Doctor가 아는 시스템 원인은 즉시 수리, (2) 실패 원인을
+// 자동화 챗에 system 메시지로 표출, (3) 수리 못 했고 연속 실패가 임계에 닿으면
+// 자동 일시정지, (4) 수리 못 한 반복 실패는 System Optimizer(LLM) 원샷 진단 발사.
+const FAILURE_PAUSE_THRESHOLD = 3;
+const OPTIMIZER_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 자동화당 최대 6시간에 1회
+const lastOptimizerRunAt = new Map<string, number>();
+const optimizerInFlight = new Set<string>();
+
+function automationSessionInput(a: Automation): {
+  automationId: string;
+  agentId?: string;
+  firmId?: string | null;
+} {
+  return {
+    automationId: a.id,
+    ...(a.targetType === "firm" ? { firmId: a.targetId } : a.targetType === "agent" ? { agentId: a.targetId } : {}),
+  };
+}
+
+/** 실패 원인을 챗에 표출하고, 아는 원인은 수리하고, 반복 실패는 멈춘다. best-effort. */
+function handleAutomationFailure(a: Automation, error: string): void {
+  let doctor: DoctorReport | null = null;
+  try {
+    doctor = runRuntimeDoctor(error);
+  } catch (err) {
+    console.error("[automation] runtime doctor failed:", err);
+  }
+  let streak = 1;
+  try {
+    streak = Math.max(1, countConsecutiveFailures(a.id));
+  } catch {
+    /* run_history 조회 실패는 스트릭 1로 취급 */
+  }
+
+  const lines: string[] = [`⚠️ Automation failed (연속 ${streak}회): ${error.slice(0, 400)}`];
+  if (doctor?.summary) lines.push(`🩺 Runtime Doctor: ${doctor.summary}`);
+  for (const act of doctor?.actions ?? []) lines.push(`🔧 ${act.title} — ${act.detail}`);
+
+  let paused = false;
+  if (doctor?.repaired) {
+    lines.push("✅ 시스템 원인을 자동 수리했습니다. 다음 예약에 자동으로 재시도합니다.");
+  } else if (streak >= FAILURE_PAUSE_THRESHOLD) {
+    try {
+      toggleAutomation(a.id, false);
+      paused = true;
+      lines.push(
+        `⏸️ ${streak}회 연속 실패로 자동 일시정지했습니다(같은 프롬프트 무한 재실행 방지). 원인 해결 후 자동화 화면에서 다시 켜세요.`,
+      );
+    } catch (err) {
+      console.error("[automation] auto-pause failed:", err);
+    }
+  }
+
+  try {
+    const chat = getOrCreateAutomationSession(automationSessionInput(a));
+    appendChatMessage(chat.id, "system", lines.join("\n"));
+
+    // 결정론 수리가 못 잡은 반복 실패 → System Optimizer 원샷 진단(같은 챗에 기록됨).
+    const lastAt = lastOptimizerRunAt.get(a.id) ?? 0;
+    if (
+      !doctor?.repaired &&
+      streak >= 2 &&
+      !optimizerInFlight.has(a.id) &&
+      Date.now() - lastAt >= OPTIMIZER_MIN_INTERVAL_MS
+    ) {
+      lastOptimizerRunAt.set(a.id, Date.now());
+      optimizerInFlight.add(a.id);
+      const prompt = buildSystemOptimizerPrompt({
+        automationName: a.name,
+        errorMessage: error,
+        doctorSummary: doctor?.summary,
+        consecutiveFailures: streak,
+      });
+      const runId = `doctor-${a.id}-${Date.now()}`;
+      const req = {
+        chatId: chat.id,
+        userPrompt: prompt,
+        permissions: "write" as const,
+        toolMode: "auto" as const,
+        hubMode: a.hubMode ?? "hub-allowed",
+      };
+      tryRecordRunEvent({
+        runId,
+        kind: "system_optimizer_started",
+        automationId: a.id,
+        payload: { streak, paused, doctorKind: doctor?.kind ?? "unknown" },
+      });
+      void runMcpInvocation(req, (ev) => recordMcpInvocationEvent(runId, req, ev), new AbortController().signal)
+        .catch((err) => {
+          console.error("[automation] system optimizer run failed:", err);
+          try {
+            appendChatMessage(chat.id, "system", `⚠️ System Optimizer 진단 런 자체가 실패했습니다: ${err instanceof Error ? err.message : String(err)}`);
+          } catch {
+            /* best-effort */
+          }
+        })
+        .finally(() => optimizerInFlight.delete(a.id));
+    }
+  } catch (err) {
+    console.error("[automation] failure feedback failed:", err);
+  }
+
+  if (paused) {
+    try {
+      if (app.isReady() && Notification.isSupported()) {
+        new Notification({
+          title: `Automation paused: ${a.name}`,
+          body: `${streak}회 연속 실패로 자동 일시정지했습니다. 챗의 진단 메시지를 확인하세요.`,
+          silent: true,
+        }).show();
+      }
+    } catch {
+      /* best-effort */
+    }
   }
 }
 
@@ -239,6 +362,15 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
       });
     } catch (err) {
       console.error("[automation] markAutomationRun failed:", err);
+    }
+    // 실패 피드백·수리·자동 일시정지 — run_history 기록(markAutomationRun) 이후에 호출해야
+    // countConsecutiveFailures가 이번 실패를 포함한다.
+    if (runStatus === "error") {
+      try {
+        handleAutomationFailure(a, runError ?? "unknown error");
+      } catch (err) {
+        console.error("[automation] handleAutomationFailure failed:", err);
+      }
     }
     try {
       releaseAutomationRun(a.id);

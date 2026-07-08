@@ -308,6 +308,14 @@ export const runCodex: Runner = async (
   const permArgs = permissionArgs(runReq.permission);
   const mcpArgs =
     runReq.mcpCodexConfigArgs && runReq.mcpCodexConfigArgs.length > 0 ? runReq.mcpCodexConfigArgs : [];
+  // 모델/effort를 CLI에 명시 전달 — 예전엔 세션 지문에만 쓰고 인자로는 안 넘겨서, 앱이
+  // 뭘 선택했든 기기의 ~/.codex/config.toml(또는 codex 업데이트가 바꾼 내장 기본값)이
+  // 이겼다(2026-07-08: 다른 기기에서 지정한 적 없는 Spark 모델로 조용히 실행된 사고).
+  // 앱이 모델을 갖고 있으면 그 모델이 반드시 이긴다. 없으면 기기 설정을 따른다(BYOM 존중).
+  // `--model`/`-c`는 `exec`와 `exec resume` 둘 다 지원 확인됨(0.133+).
+  const modelArgs: string[] = [];
+  if (runReq.model) modelArgs.push("--model", runReq.model);
+  if (runReq.effort) modelArgs.push("-c", `model_reasoning_effort=${runReq.effort}`);
 
   // 세션 resume 가능 여부 — chatId 저장 세션 또는 Build 같은 호출자가 직접 넘긴 세션 id.
   const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
@@ -333,6 +341,7 @@ export const runCodex: Runner = async (
       "--skip-git-repo-check",
       ...resumePerm,
       ...mcpArgs,
+      ...modelArgs,
       resumeSessionId!,
       "-",
     ];
@@ -353,7 +362,7 @@ export const runCodex: Runner = async (
   }
 
   // CREATE: 시스템 프롬프트 + 히스토리 + user를 stdin으로 보내 새 세션을 시드한다.
-  const createArgs = ["exec", "--json", "--skip-git-repo-check", ...permArgs, ...mcpArgs, "-"];
+  const createArgs = ["exec", "--json", "--skip-git-repo-check", ...permArgs, ...mcpArgs, ...modelArgs, "-"];
   const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events);
   if (runReq.signal?.aborted) {
     if (runReq.chatId && fingerprint && created.threadId) saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint);
