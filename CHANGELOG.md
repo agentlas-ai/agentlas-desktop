@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.7.21 — 2026-07-08
+
+### Fixed
+
+- **Automations no longer fail silently or retry forever.** Every failed run now posts
+  the failure reason into the automation's chat as a system message. Three consecutive
+  failures auto-pause the automation (with an OS notification) instead of re-running the
+  same prompt on every schedule tick.
+- **Runtime Doctor: poisoned runtime plugin configs are auto-repaired.** A codex CLI
+  update silently auto-enabled curated plugins (e.g. Notion) whose unauthenticated OAuth
+  remote MCP servers made every codex run die with `AuthRequired` fatals / exit 1 —
+  killing all automations for users who never touched those services. The new
+  deterministic Runtime Doctor matches the failing host from stderr against the plugin
+  cache and disables exactly that plugin (with a config backup), then the automation
+  retries on its next slot.
+- **System Optimizer second-tier diagnosis.** Repeated failures the Doctor cannot
+  classify trigger a one-shot LLM diagnosis run (max once per 6h per automation) that
+  audits runtime CLIs, MCP/plugin config, macOS permissions, and environment, and
+  reports a structured repair plan into the same chat.
+- **Codex engine model pinning.** The app-selected model/effort is now passed to the
+  codex CLI explicitly (`--model` / `-c model_reasoning_effort=`). Previously it was
+  never forwarded, so machine config — or a codex update's changed built-in default —
+  silently decided which model ran.
+- **Chat streaming.** Token-delta typewriter reveal (adaptive rAF, snap guard for large
+  chunks), steering no longer wipes the in-flight assistant message, and aborted partial
+  output is persisted to the chat instead of vanishing.
+- **Outputs panel.** Generated files can be revealed in Finder/Explorer via a new
+  show-in-folder action; hidden `.agentlas/outputs` artifacts surface correctly.
+
 ## 0.7.19 — 2026-07-07
 
 ### Changed
