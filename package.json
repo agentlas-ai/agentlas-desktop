@@ -48,6 +48,7 @@
     "smoke:app-factory": "npm run build:electron && electron scripts/smoke-app-factory.cjs",
     "test:app-builder-routing": "npm run build:electron && node scripts/test-app-builder-routing.cjs",
     "test:app-builder-seed": "npm run build:electron && electron scripts/test-app-builder-seed.cjs",
+    "test:session-continuity": "node scripts/test-session-continuity-guards.cjs",
     "test:super-ontology-seed": "npm run build:electron && node scripts/test-super-ontology-seed.cjs",
     "test:cloud-app-manifest": "npm run build:electron && electron scripts/test-cloud-app-manifest.cjs",
     "test:cloud-agent-package": "npm run build:electron && electron scripts/test-cloud-agent-package.cjs",

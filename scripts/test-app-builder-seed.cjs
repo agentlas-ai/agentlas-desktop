@@ -53,7 +53,7 @@ try {
   assert.equal(choice.agent.slug, "agentlas-app-builder");
 
   const greetingChoice = selectAutoRoutedAgent("안녕", installed, "ko");
-  assert.notEqual(greetingChoice.agent.slug, "agentlas-app-builder", "greetings must not trigger App creation consent");
+  assert.equal(greetingChoice, null, "greetings must not trigger hidden auto-routing");
 
   console.log(`app-builder seed smoke passed (${rows.length} built-ins, v${ARCHITECTURE_VERSION})`);
 } catch (err) {

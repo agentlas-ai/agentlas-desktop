@@ -63,8 +63,7 @@ const negativeCases = [
 
 for (const item of negativeCases) {
   const choice = selectAutoRoutedAgent(item.prompt, installedAgents, item.locale);
-  assert.ok(choice, `expected a safe fallback route for: ${item.prompt}`);
-  assert.notEqual(choice.agent.slug, "agentlas-app-builder", `must not ask to create an App for: ${item.prompt}`);
+  assert.equal(choice, null, `expected no hidden auto-route for: ${item.prompt}`);
   assert.equal(isAppBuilderWorthyPrompt(item.prompt), false, `expected non-app-worthy prompt: ${item.prompt}`);
 }
 

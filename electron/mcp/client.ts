@@ -190,7 +190,7 @@ function buildAppEditUserPrompt(prompt: string, appRecord: AppFactoryAppRecord, 
 // 엉뚱한 에이전트로 위임되던 문제를 막는다 — 판단은 라우터 모델에 맡기되 컨텍스트를 준다.
 function buildContextualRoutingQuery(chatId: string, prompt: string): string {
   const recent = listChatMessages(chatId, 6)
-    .filter((m) => (m.text ?? "").trim())
+    .filter((m) => (m.role === "user" || m.role === "assistant") && (m.text ?? "").trim())
     .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${(m.text ?? "").replace(/\s+/g, " ").trim().slice(0, 240)}`);
   if (recent.length === 0) return prompt;
   return [
@@ -200,6 +200,12 @@ function buildContextualRoutingQuery(chatId: string, prompt: string): string {
     `New request to route: ${prompt}`,
     "If this is a follow-up to the conversation above (e.g. a question about work already done, or a small refinement), it can be answered in the current context — do NOT route to an unrelated new agent.",
   ].join("\n");
+}
+
+function hasPriorConversationContext(chatId: string): boolean {
+  return listChatMessages(chatId, 4).some(
+    (m) => (m.role === "user" || m.role === "assistant") && Boolean((m.text ?? "").trim()),
+  );
 }
 
 function buildGoalUserPrompt(prompt: string, locale: "ko" | "en"): string {
@@ -384,6 +390,22 @@ function selectAppBuilderForExistingAppEdit(
         ? "기존 Agentlas App 수정 요청이라 숨은 App Builder 라우트를 선택했습니다"
         : "the request edits an existing Agentlas App, so Agentlas selected the hidden App Builder route",
     matchedTerms: ["existing-app-edit"],
+  };
+}
+
+function selectAppBuilderForAppsGenerate(
+  agents: InstalledAgent[],
+  locale: "ko" | "en",
+): AutoRouteChoice | null {
+  const agent = agents.find((candidate) => candidate.slug === APP_BUILDER_SLUG);
+  if (!agent) return null;
+  return {
+    agent,
+    reason:
+      locale === "ko"
+        ? "사용자가 Apps Generate 모드를 명시적으로 켜서 숨은 App Builder 라우트를 선택했습니다"
+        : "the user explicitly enabled Apps Generate mode, so Agentlas selected the hidden App Builder route",
+    matchedTerms: ["apps-generate-mode"],
   };
 }
 
@@ -620,11 +642,16 @@ export async function runMcpInvocation(
   }
 
   const installedAgents = listInstalledAgents();
+  const hasPriorContext = hasPriorConversationContext(chat.id);
   // plain 대화(인사/맞장구)는 라우팅 전체를 건너뛰고 기본 LLM이 즉답 — 전문 에이전트로
   // 잘못 위임되거나 아래 Hephaestus 에스컬레이션 선지연을 무는 엣지케이스를 없앤다.
   const plainConversation = !isTargetAppEdit && isPlainConversationalPrompt(req.userPrompt);
   const autoRoute = isTargetAppEdit
     ? selectAppBuilderForExistingAppEdit(installedAgents, locale)
+    : req.appsGenerateMode
+      ? selectAppBuilderForAppsGenerate(installedAgents, locale)
+    : hasPriorContext
+      ? null
     : !plainConversation && isGlobalOrchestrator(agent)
       ? // 앱 생성 모드만 무매치 폴백 허용 — 일반 챗은 확신(이름/힌트급 매치) 없으면 위임하지 않고
         // 오케스트레이터가 그냥 답한다("사용 에이전트: PM Soul" 소음/오배정 반복 제거).
@@ -711,10 +738,12 @@ export async function runMcpInvocation(
   if (
     !routerAgent &&
     isGlobalOrchestrator(agent) &&
+    !hasPriorContext &&
     isEscalationWorthyPrompt(req.userPrompt)
   ) {
     try {
-      const routeRes = await routeOnly(effectiveUserPrompt, {
+      const routingQuery = buildContextualRoutingQuery(chat.id, effectiveUserPrompt);
+      const routeRes = await routeOnly(routingQuery, {
         project: workingFolder ?? undefined,
         allowLocal: true,
         timeoutMs: 4_000,
@@ -977,7 +1006,7 @@ export async function runMcpInvocation(
     systemPrompt = `${autoRouteSystemPreamble(
       autoRoute,
       locale,
-      isTargetAppEdit ? "app-edit" : "default",
+      isTargetAppEdit ? "app-edit" : req.appsGenerateMode ? "apps-generate" : "default",
     )}\n\n${systemPrompt}`;
   }
   const routerAgentPreamble = routerAgent

@@ -255,6 +255,7 @@ export function ChatInput({
     loading: boolean;
     preview: Recommendation | null;
     text: string;
+    chatId: string | null;
     opts: SendOptions;
   }>(null);
   const [appsGenerateMode, setAppsGenerateMode] = useState(false);
@@ -280,6 +281,11 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lastActiveAgentIdRef = useRef<string | null | undefined>(undefined);
   const autocompleteSignatureRef = useRef<string>("");
+  const activeChatIdRef = useRef<string | null>(activeChatId);
+
+  useEffect(() => {
+    activeChatIdRef.current = activeChatId;
+  }, [activeChatId]);
 
   // 세션 격리 — 채팅을 바꾸면 이전 세션의 실행 의도 상태(추천 시트·모드 토글·선택)를 버린다.
   // ChatInput은 채팅별로 remount되지 않아서, 이게 없으면 A에서 연 추천 바텀시트가 B로 넘어가
@@ -523,15 +529,24 @@ export function ChatInput({
   async function openRecSheet(text: string) {
     if (!onRecommendPreview) return;
     const opts = currentSendOptions();
-    setRecSheet({ loading: true, preview: null, text, opts });
+    const sheetChatId = activeChatIdRef.current;
+    setRecSheet({ loading: true, preview: null, text, chatId: sheetChatId, opts });
     const preview = await onRecommendPreview(text).catch(() => null);
-    // 사용자가 그새 취소했으면(또는 다른 텍스트로 다시 열었으면) 무시.
-    setRecSheet((cur) => (cur && cur.text === text ? { ...cur, loading: false, preview } : cur));
+    // 사용자가 그새 취소했거나, 다른 텍스트/다른 채팅에서 다시 열었으면 무시.
+    setRecSheet((cur) =>
+      cur && cur.text === text && cur.chatId === sheetChatId && activeChatIdRef.current === sheetChatId
+        ? { ...cur, loading: false, preview }
+        : cur,
+    );
   }
 
   function pickRec(choice: RecExecChoice) {
     const cur = recSheet;
     if (!cur) return;
+    if (activeChatIdRef.current !== cur.chatId) {
+      setRecSheet(null);
+      return;
+    }
     onRecommendExecute?.(choice, cur.text, cur.opts);
     setHepToggles((prev) => {
       const next = new Set(prev);
