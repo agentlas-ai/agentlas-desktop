@@ -186,6 +186,22 @@ function buildAppEditUserPrompt(prompt: string, appRecord: AppFactoryAppRecord, 
   ].join("\n");
 }
 
+// 라우팅 질의에 이 채팅의 최근 대화를 붙인다. 후속/되물음 메시지가 맥락 없이 단독 해석돼
+// 엉뚱한 에이전트로 위임되던 문제를 막는다 — 판단은 라우터 모델에 맡기되 컨텍스트를 준다.
+function buildContextualRoutingQuery(chatId: string, prompt: string): string {
+  const recent = listChatMessages(chatId, 6)
+    .filter((m) => (m.text ?? "").trim())
+    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${(m.text ?? "").replace(/\s+/g, " ").trim().slice(0, 240)}`);
+  if (recent.length === 0) return prompt;
+  return [
+    "Recent conversation (for routing continuity):",
+    recent.join("\n"),
+    "",
+    `New request to route: ${prompt}`,
+    "If this is a follow-up to the conversation above (e.g. a question about work already done, or a small refinement), it can be answered in the current context — do NOT route to an unrelated new agent.",
+  ].join("\n");
+}
+
 function buildGoalUserPrompt(prompt: string, locale: "ko" | "en"): string {
   const guide =
     locale === "ko"
@@ -642,7 +658,11 @@ export async function runMcpInvocation(
     !isTargetAppEdit
   ) {
     try {
-      const routeRes = await routeOnly(effectiveUserPrompt, {
+      // 라우터가 후속 메시지를 맥락 없이 단독 해석하지 않도록 최근 대화를 함께 싣는다 —
+      // "자동화 건거 맞지?" 같은 되물음은 앞 대화를 보면 새 에이전트 위임이 아니라 현재
+      // 맥락에서 답할 일임을 라우터 모델이 스스로 판단한다(키워드 분류 대신 컨텍스트 제공).
+      const routingQuery = buildContextualRoutingQuery(chat.id, effectiveUserPrompt);
+      const routeRes = await routeOnly(routingQuery, {
         project: workingFolder ?? undefined,
         runtime: "desktop-automation",
         ...(req.hubMode === "hub-first"
