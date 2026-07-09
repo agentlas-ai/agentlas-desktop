@@ -22,6 +22,7 @@ const CONTEXT_MAX_CHARS = 180;
 const CODEMAP_MODULES = 8;
 const CODEMAP_ENTRIES = 4;
 const CODEMAP_SYMBOLS = 6;
+const CAREER_GRAPH_SOURCES = 6;
 const codeMapTriggered = new Set<string>();
 
 function codeMapGenPath(): string | null {
@@ -109,6 +110,51 @@ function summarizeSitemap(projectPath: string): string | null {
   return `AI Sitemap: ${nodes.length} nodes (${parts.join(", ")}).`;
 }
 
+function summarizeCareerGraph(projectPath: string): string | null {
+  try {
+    const dir = path.join(projectPath, ".agentlas");
+    const configFile = path.join(dir, "career-graph.json");
+    const sourceManifestFile = path.join(dir, "career-graph-sources.json");
+    if (!fs.existsSync(configFile)) return null;
+    const config = JSON.parse(fs.readFileSync(configFile, "utf8")) as {
+      dbPath?: string;
+      sourceManifest?: string;
+      canonicalSourcePolicy?: { fallbackWhenStale?: string; sourceOfTruth?: string };
+    };
+    const dbPath = config.dbPath || path.join(dir, "career-graph.sqlite");
+    const dbExists = fs.existsSync(dbPath);
+    const canonical = [
+      "project-soul-memory.md",
+      "memory-log.jsonl",
+      "curator-decisions.jsonl",
+      "sitemap.json",
+      "code-map/project-map.json",
+      "ledgers/routing-decisions.jsonl",
+      "ledgers/executions.jsonl",
+      "ledgers/agent-evolution-proposals.jsonl",
+    ]
+      .map((rel) => `.agentlas/${rel}`)
+      .filter((rel) => fs.existsSync(path.join(projectPath, rel)))
+      .slice(0, CAREER_GRAPH_SOURCES);
+    const manifestPath = config.sourceManifest || sourceManifestFile;
+    const registered =
+      fs.existsSync(manifestPath)
+        ? (JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { sources?: unknown[] }).sources
+        : [];
+    const lines = [
+      `Career Graph: ${dbExists ? "indexed" : "configured, index pending"} (${path.relative(projectPath, dbPath) || dbPath}).`,
+      "Use it as a source-routing layer: prefer the listed canonical files before broad repo scans.",
+    ];
+    if (canonical.length) lines.push(`Canonical source refs: ${canonical.join(", ")}`);
+    if (Array.isArray(registered) && registered.length > 0) {
+      lines.push(`Registered source refs: ${registered.length} additional source(s).`);
+    }
+    return lines.join("\n");
+  } catch {
+    return null;
+  }
+}
+
 function entryLines(entries: MemoryEntry[]): string {
   return entries
     .slice(0, MAX_ENTRIES)
@@ -150,6 +196,8 @@ export function buildMemoryContext(
     }
     const sitemap = summarizeSitemap(projectPath);
     if (sitemap) sections.push(sitemap);
+    const careerGraph = summarizeCareerGraph(projectPath);
+    if (careerGraph) sections.push(careerGraph);
     // Code map: generate in background if missing, inject its seed if present.
     ensureCodeMap(projectPath);
     const codeMap = summarizeCodeMap(projectPath);

@@ -10,7 +10,7 @@ import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 47;
+const SCHEMA_VERSION = 48;
 
 export function initStore(): void {
   if (_db) return;
@@ -1164,6 +1164,14 @@ export function initStore(): void {
       );
       CREATE INDEX IF NOT EXISTS idx_browser_logs_ts ON browser_action_logs(ts DESC);
     `);
+  }
+
+  // v48: 빌린(고용한) 허브 에이전트를 채팅에 영속 — 추천 시트에서 고른 borrow가
+  // 다음 턴에 조용히 증발하던 문제(일회성 파라미터)의 저장 계층.
+  // JSON 배열: [{ slug, name?, source?, routeLabel?, hiredAt }]. 패키지 내용은 절대
+  // 저장하지 않는다(복사 방지 설계) — 메타데이터 카드만.
+  if (userVersion < 48) {
+    _db.exec(`ALTER TABLE chats ADD COLUMN hired_agents TEXT`);
   }
 
   _db.pragma(`user_version = ${SCHEMA_VERSION}`);

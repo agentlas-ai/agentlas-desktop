@@ -11,6 +11,7 @@ import type {
   Chat,
   AgentGroupResolved,
   Automation,
+  HiredRosterItem,
   InstalledAgent,
   Project,
   RuntimeStatus,
@@ -27,6 +28,7 @@ import {
   IconSparkles,
   IconSun,
   IconTrash,
+  IconUsers,
 } from "./Icon";
 import { PromptPickerDialog } from "./PromptPickerDialog";
 import { PawLogo } from "./PawLogo";
@@ -39,6 +41,7 @@ import { useTheme } from "@/lib/theme";
 const COLLAPSE_KEY = "agentlas.sidebar.collapsed";
 const CHATS_SECTION_COLLAPSE_KEY = "agentlas.sidebar.section.chats.collapsed";
 const AUTOMATIONS_SECTION_COLLAPSE_KEY = "agentlas.sidebar.section.automations.collapsed";
+const HIRED_SECTION_COLLAPSE_KEY = "agentlas.sidebar.section.hired.collapsed";
 const WIDTH_KEY = "agentlas.sidebar.width";
 const COLLAPSED_WIDTH = 60;
 const EXPANDED_WIDTH = 248;
@@ -107,6 +110,9 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   const [resizing, setResizing] = useState(false);
   const [chatsCollapsed, setChatsCollapsed] = useState(false);
   const [automationsCollapsed, setAutomationsCollapsed] = useState(false);
+  const [hiredCollapsed, setHiredCollapsed] = useState(false);
+  // 고용(빌림) 로스터 — 리스 캐시+기억 둥지. 데이터 로드 실패는 섹션 숨김으로 처리(사이드바를 죽이지 않음).
+  const [hiredAgents, setHiredAgents] = useState<HiredRosterItem[]>([]);
   const [chatListLimit, setChatListLimit] = useState(12);
   const [newChatDialogOpen, setNewChatDialogOpen] = useState(false);
   // 프롬프트 저장소에서 북마크/소장 프롬프트를 골라 새 채팅을 시작하는 팝업.
@@ -138,6 +144,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
     try {
       setChatsCollapsed(window.localStorage.getItem(CHATS_SECTION_COLLAPSE_KEY) === "1");
       setAutomationsCollapsed(window.localStorage.getItem(AUTOMATIONS_SECTION_COLLAPSE_KEY) === "1");
+      setHiredCollapsed(window.localStorage.getItem(HIRED_SECTION_COLLAPSE_KEY) === "1");
     } catch {
       // ignore
     }
@@ -164,6 +171,36 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       const next = !prev;
       try {
         window.localStorage.setItem(CHATS_SECTION_COLLAPSE_KEY, next ? "1" : "0");
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }
+
+  // 고용 로스터는 별도 로드 — hired API가 없는 환경(구 mock 등)에서도 사이드바 본체는 살아야 한다.
+  useEffect(() => {
+    const api = ipc();
+    if (!api?.hired?.list) return;
+    let cancelled = false;
+    api.hired
+      .list()
+      .then((items) => {
+        if (!cancelled && Array.isArray(items)) setHiredAgents(items);
+      })
+      .catch(() => {
+        if (!cancelled) setHiredAgents([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey, pathname]);
+
+  function toggleHiredCollapsed() {
+    setHiredCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(HIRED_SECTION_COLLAPSE_KEY, next ? "1" : "0");
       } catch {
         // ignore
       }
@@ -322,6 +359,29 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
       return;
     }
     void createNewChat(null);
+  }
+
+  /** 고용 로스터 클릭 → 그 에이전트를 고용한 새 채팅. 오케스트레이터가 기본 에이전트로 잡히고,
+   *  고용 카드가 바인딩되어 매 턴 borrow로 재주입된다 (활성 리스면 무과금·기억 이어짐). */
+  async function openHiredAgentChat(item: HiredRosterItem) {
+    const api = ipc();
+    if (!api) return;
+    try {
+      const agentId = defaultAgentIdFor(null);
+      const chat = await api.chats.create(agentId ? { agentId } : {});
+      await api.chats.setHiredAgents(chat.id, [
+        {
+          slug: item.slug,
+          name: (locale === "ko" ? item.nameKo : item.name) ?? item.name,
+          source: "hub",
+          hiredAt: new Date().toISOString(),
+        },
+      ]);
+      navigate(`/chat?id=${chat.id}`);
+      triggerRefresh();
+    } catch {
+      // 고용 채팅 생성 실패 — 조용히 무시(재클릭으로 재시도)
+    }
   }
 
   async function openAutomationChat(automation: Automation) {
@@ -789,6 +849,27 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           )}
         </SidebarSection>
 
+        {/* 고용 중 — 빌린(리스한) 허브 에이전트 로스터. 리스 표시 캐시 + 기억 둥지 기반.
+            클릭하면 그 에이전트를 고용한 새 채팅을 연다 (활성 리스면 재호출 무과금, 기억은 이어짐). */}
+        {hiredAgents.length > 0 && (
+          <SidebarSection
+            title={locale === "en" ? "Hired agents" : "고용 중"}
+            icon={<IconUsers size={12} />}
+            collapsible
+            collapsed={hiredCollapsed}
+            onToggle={toggleHiredCollapsed}
+          >
+            {hiredAgents.slice(0, 8).map((item) => (
+              <HiredAgentRow
+                key={item.slug}
+                item={item}
+                locale={locale}
+                onOpen={() => void openHiredAgentChat(item)}
+              />
+            ))}
+          </SidebarSection>
+        )}
+
 
       </nav>
 
@@ -1000,6 +1081,74 @@ function SidebarLink({
     >
       {children}
     </Link>
+  );
+}
+
+function HiredAgentRow({
+  item,
+  locale,
+  onOpen,
+}: {
+  item: HiredRosterItem;
+  locale: "ko" | "en";
+  onOpen: () => void;
+}) {
+  const name = (locale === "ko" ? item.nameKo : item.name) || item.name || item.slug;
+  let statusLine: string;
+  if (item.leaseActive && item.leasedUntil) {
+    const hoursLeft = Math.max(1, Math.round((Date.parse(item.leasedUntil) - Date.now()) / 3_600_000));
+    statusLine = locale === "ko" ? `리스 ${hoursLeft}시간 남음 · 무료 재호출` : `Lease ${hoursLeft}h left · free calls`;
+  } else if (item.hasMemory) {
+    statusLine = locale === "ko" ? "만료 — 재고용하면 기억 그대로" : "Expired — rehire resumes its memory";
+  } else {
+    statusLine = locale === "ko" ? "만료" : "Expired";
+  }
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      title={locale === "ko" ? `${name}을(를) 고용한 새 채팅 열기` : `Open a new chat with ${name} hired`}
+      style={{
+        display: "block",
+        width: "calc(100% - 8px)",
+        margin: "0 4px",
+        padding: "6px 8px",
+        borderRadius: 8,
+        border: 0,
+        background: "transparent",
+        color: "var(--ink)",
+        textAlign: "left",
+        cursor: "pointer",
+        opacity: item.leaseActive ? 1 : 0.66,
+      }}
+    >
+      <span
+        style={{
+          display: "block",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          fontSize: 12.5,
+          fontWeight: 650,
+        }}
+      >
+        {item.leaseActive ? "🤝 " : ""}
+        {name}
+      </span>
+      <span
+        style={{
+          display: "block",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          marginTop: 1,
+          color: "var(--muted-deep)",
+          fontSize: 10.5,
+        }}
+      >
+        {statusLine}
+      </span>
+    </button>
   );
 }
 

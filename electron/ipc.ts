@@ -120,6 +120,7 @@ import type {
   HephaestusBuildEvent,
   HephaestusBuildRequest,
   CreatePromptEvolutionProposalInput,
+  HiredAgentCard,
   SkillCatalogEntry,
 } from "../shared/types";
 import { checkSafely as updaterCheck, getUpdaterState, quitAndInstall as updaterInstall } from "./updater";
@@ -177,12 +178,14 @@ import {
   removeChat,
   renameChat,
   setChatContinuousMode,
+  setChatHiredAgents,
   setChatSwarmMode,
   setChatWorkingFolder,
   switchChatAgent,
   unarchiveChat,
   getOrCreateAutomationSession,
 } from "./store/chats";
+import { listHiredAgents } from "./agents/hired-agents";
 import { getAgentConcurrencyInfo, setAgentConcurrency } from "./store/concurrency";
 import { getInterviewMode, setInterviewMode, type InterviewMode } from "./store/interview-mode";
 import {
@@ -1273,6 +1276,12 @@ export function registerIpcHandlers(): void {
     setChatSwarmMode(id, enabled);
     return getChat(id);
   });
+  // 고용(빌림) 카드 채팅 바인딩 — 빈 배열이면 해고. 매 send에 자동 재주입되는 원본.
+  ipcMain.handle("chats:setHiredAgents", (_e, id: string, cards: HiredAgentCard[]) =>
+    setChatHiredAgents(id, Array.isArray(cards) ? cards : []),
+  );
+  // 사이드바 "고용 중" 로스터 — 리스 캐시 + 기억 둥지(~/.agentlas/networking) 스캔.
+  ipcMain.handle("hired:list", () => listHiredAgents());
 
   // ── automations (SQLite + scheduler) ───────────────────
   // 이벤트 트리거(fs/chain)를 가진 자동화가 바뀌면 트리거 매니저를 재동기화한다(리스너 갱신).

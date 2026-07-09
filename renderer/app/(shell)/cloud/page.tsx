@@ -14,12 +14,23 @@ type UploadIssue = {
   remediation?: string;
 };
 
+type CareerGraphProof = {
+  indexStatus?: string;
+  policy?: string;
+  counts?: Record<string, number>;
+  canonicalSources?: number;
+  staleSourceCount?: number;
+  nodeTypes?: Record<string, number>;
+  edgeTypes?: Record<string, number>;
+};
+
 type UploadResult = {
   ok: boolean;
   title: string;
   issues: UploadIssue[];
   detail?: string;
   link?: string;
+  careerGraph?: CareerGraphProof;
 };
 
 export default function CloudAgentPublishPage() {
@@ -58,6 +69,7 @@ export default function CloudAgentPublishPage() {
       const res = await api.hephaestus.publish({ folder, visibility });
       const json = isRecord(res.json) ? res.json : null;
       const issues = extractIssues(res.json);
+      const careerGraph = extractCareerGraph(json);
       if (res.ok) {
         const registration = json && isRecord(json.registration) ? json.registration : null;
         const link = registration && typeof registration.url === "string" ? registration.url : undefined;
@@ -69,6 +81,7 @@ export default function CloudAgentPublishPage() {
               : ko ? "Agentlas Cloud 보관함에 업로드되었습니다" : "Uploaded to Agentlas Cloud",
           issues,
           link,
+          careerGraph,
         });
         return;
       }
@@ -78,6 +91,7 @@ export default function CloudAgentPublishPage() {
         title: classified.title,
         issues: issues.length > 0 ? issues : classified.issue ? [classified.issue] : [],
         detail: buildFailureDetail(json, res.error, res.stderr, res.stdout),
+        careerGraph,
       });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -171,12 +185,65 @@ export default function CloudAgentPublishPage() {
               )}
             </div>
 
+            {result.careerGraph && <CareerGraphProofBox proof={result.careerGraph} ko={ko} />}
+
             {result.detail && (
               <pre style={detailBox}>{result.detail}</pre>
             )}
           </section>
         )}
       </section>
+    </div>
+  );
+}
+
+function CareerGraphProofBox({ proof, ko }: { proof: CareerGraphProof; ko: boolean }) {
+  const counts = proof.counts ?? {};
+  const topNodeTypes = topEntries(proof.nodeTypes, 4);
+  const topEdgeTypes = topEntries(proof.edgeTypes, 4);
+  return (
+    <section aria-label={ko ? "Career Graph 공개 증거" : "Career Graph public proof"} style={careerGraphBox}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <div>
+          <h3 style={{ margin: 0, fontSize: 13, fontWeight: 900, color: "var(--ink)" }}>
+            {ko ? "Career Graph 공개 증거" : "Career Graph proof"}
+          </h3>
+          <p style={{ margin: "4px 0 0", fontSize: 12, lineHeight: 1.45, color: "var(--muted-deep)" }}>
+            {ko
+              ? "로컬 원본은 제외하고 집계된 경력/실행 증거만 포함됩니다."
+              : "Only redacted aggregate career and execution evidence is included."}
+          </p>
+        </div>
+        <span style={careerGraphBadge}>{proof.indexStatus || "indexed"}</span>
+      </div>
+      <div style={careerGraphMetrics}>
+        <Metric label={ko ? "Sources" : "Sources"} value={counts.sources ?? proof.canonicalSources ?? 0} />
+        <Metric label={ko ? "Nodes" : "Nodes"} value={counts.nodes ?? 0} />
+        <Metric label={ko ? "Edges" : "Edges"} value={counts.edges ?? 0} />
+        <Metric label={ko ? "Stale" : "Stale"} value={proof.staleSourceCount ?? 0} />
+      </div>
+      {(topNodeTypes.length > 0 || topEdgeTypes.length > 0) && (
+        <div style={careerGraphTags}>
+          {[...topNodeTypes, ...topEdgeTypes].map(([label, value]) => (
+            <span key={label} style={careerGraphTag}>
+              {label}
+              <b>{value}</b>
+            </span>
+          ))}
+        </div>
+      )}
+      <div style={careerGraphPolicy}>
+        {proof.policy || "redacted_aggregate_projection"}
+      </div>
+    </section>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: number }) {
+  return (
+    <div style={metricBox}>
+      <strong>{Number.isFinite(value) ? value : 0}</strong>
+      <span>{label}</span>
     </div>
   );
 }
@@ -255,6 +322,40 @@ function extractIssues(json: unknown): UploadIssue[] {
       remediation: typeof item.remediation === "string" ? item.remediation : undefined,
     };
   });
+}
+
+function extractCareerGraph(json: Record<string, unknown> | null): CareerGraphProof | undefined {
+  const manifest = json && isRecord(json.manifest) ? json.manifest : null;
+  const bundle = json && isRecord(json.bundle) ? json.bundle : null;
+  const fromManifest = manifest && isRecord(manifest.careerGraph) ? manifest.careerGraph : null;
+  const fromBundle = bundle && isRecord(bundle.careerGraph) ? bundle.careerGraph : null;
+  const card = fromManifest ?? fromBundle;
+  if (!card || card.kind !== "agentlas-public-career-card") return undefined;
+  return {
+    indexStatus: typeof card.indexStatus === "string" ? card.indexStatus : undefined,
+    policy: typeof card.policy === "string" ? card.policy : undefined,
+    counts: numberRecord(card.counts),
+    canonicalSources: typeof card.canonicalSources === "number" ? card.canonicalSources : undefined,
+    staleSourceCount: typeof card.staleSourceCount === "number" ? card.staleSourceCount : undefined,
+    nodeTypes: numberRecord(card.nodeTypes),
+    edgeTypes: numberRecord(card.edgeTypes),
+  };
+}
+
+function numberRecord(value: unknown): Record<string, number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const next: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw === "number" && Number.isFinite(raw)) next[key] = raw;
+  }
+  return Object.keys(next).length ? next : undefined;
+}
+
+function topEntries(value: Record<string, number> | undefined, limit: number): Array<[string, number]> {
+  if (!value) return [];
+  return Object.entries(value)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, limit);
 }
 
 /** 실패 원인 분류 — 엔진의 구조화 JSON을 우선하고, 텍스트 스니핑은 error/stderr에만 한다.
@@ -484,6 +585,73 @@ const notice: CSSProperties = {
   background: "var(--paper)",
   color: "var(--ink-soft)",
   fontSize: 13,
+};
+
+const careerGraphBox: CSSProperties = {
+  marginTop: 2,
+  padding: 12,
+  borderRadius: "var(--radius-md)",
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 10,
+};
+
+const careerGraphBadge: CSSProperties = {
+  flexShrink: 0,
+  padding: "4px 8px",
+  borderRadius: 999,
+  background: "color-mix(in srgb, var(--green-deep) 12%, transparent)",
+  color: "var(--green-deep)",
+  fontSize: 11,
+  fontWeight: 900,
+  textTransform: "uppercase",
+};
+
+const careerGraphMetrics: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+  gap: 8,
+};
+
+const metricBox: CSSProperties = {
+  minWidth: 0,
+  padding: "8px 9px",
+  borderRadius: 8,
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
+};
+
+const careerGraphTags: CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 6,
+};
+
+const careerGraphTag: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  minWidth: 0,
+  maxWidth: "100%",
+  padding: "4px 7px",
+  borderRadius: 999,
+  border: "1px solid var(--paper-edge)",
+  color: "var(--ink-soft)",
+  fontSize: 11,
+};
+
+const careerGraphPolicy: CSSProperties = {
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "var(--muted-deep)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
 };
 
 const issueRow: CSSProperties = {

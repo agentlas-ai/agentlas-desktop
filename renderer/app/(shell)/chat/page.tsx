@@ -1585,7 +1585,15 @@ function ChatPage() {
       ]);
       setBusy(true);
       setCancelPending(false);
-      if (agentGroup || (opts?.borrowAgents?.length ?? 0) > 0 || (opts?.pipelineStages?.length ?? 0) > 1) {
+      // 고용 바인딩 자동 재주입 — 추천 확정 턴은 opts로 명시되고, 이후 턴은 채팅에
+      // 저장된 고용 카드가 이어받는다(증발 버그 수정). 재호출 과금은 허브 24h 리스가 0으로 접는다.
+      const effectiveBorrowAgents =
+        (opts?.borrowAgents?.length ?? 0) > 0
+          ? opts?.borrowAgents
+          : chat.hiredAgents?.length
+            ? chat.hiredAgents.map((card) => card.slug)
+            : undefined;
+      if (agentGroup || (effectiveBorrowAgents?.length ?? 0) > 0 || (opts?.pipelineStages?.length ?? 0) > 1) {
         setNetworkOpenPersisted(true);
       }
       cancelRequestedRef.current = false;
@@ -1632,7 +1640,7 @@ function ChatPage() {
           appsGenerateMode: opts?.appsGenerateMode || Boolean(appRoute),
           targetAppId: generatedAppRoute?.action === "edit" ? generatedAppRoute.app.id : undefined,
           targetAppAction: generatedAppRoute?.action === "edit" ? "edit" : undefined,
-          borrowAgents: opts?.borrowAgents,
+          borrowAgents: effectiveBorrowAgents,
           pipelineStages: opts?.pipelineStages,
           routerAgent: opts?.routerAgent,
         });
@@ -2292,6 +2300,10 @@ function ChatPage() {
       case "network":
         // 고른 Hub 에이전트를 borrow 해서 실행(BYOM). 선택이 없으면(혹시) 네트워크 라우팅 폴백.
         if (choice.agents && choice.agents.length > 0) {
+          // 고용 바인딩: 이 선택을 채팅에 영속해 다음 턴에도 자동 재주입 —
+          // "다음 메시지에서 조용히 원래 에이전트로 돌아가는" 증발 버그의 수정.
+          // 과금은 허브 24h 리스가 관리하므로(재호출 무과금) 여기선 UX 바인딩만 저장.
+          void hireAgents(choice.agents);
           void send(text, { ...sendOpts, borrowAgents: choice.agents });
         } else {
           void send(`hep-network ${text}`, sendOpts);
@@ -2309,6 +2321,39 @@ function ChatPage() {
       default:
         void send(text, sendOpts);
         break;
+    }
+  }
+
+  /** 고용 바인딩 저장 — 추천 확정 시 채팅에 카드 병합. 실패해도 이번 실행은 계속. */
+  async function hireAgents(slugs: string[]) {
+    const api = ipc();
+    if (!api || !chat) return;
+    const existing = chat.hiredAgents ?? [];
+    const now = new Date().toISOString();
+    const merged = [...existing];
+    for (const slug of slugs) {
+      const trimmed = slug.trim();
+      if (trimmed && !merged.some((card) => card.slug === trimmed)) {
+        merged.push({ slug: trimmed, source: "hub", hiredAt: now });
+      }
+    }
+    try {
+      const next = await api.chats.setHiredAgents(chat.id, merged);
+      setChat(next);
+    } catch {
+      // 바인딩 실패는 실행을 막지 않는다 — 다음 추천 확정에서 다시 시도된다.
+    }
+  }
+
+  /** 해고 — 이 채팅의 고용 바인딩 해제. (허브 리스 자체는 만료까지 유효 — 재고용 무과금.) */
+  async function dismissHiredAgents() {
+    const api = ipc();
+    if (!api || !chat) return;
+    try {
+      const next = await api.chats.setHiredAgents(chat.id, []);
+      setChat(next);
+    } catch {
+      // 무시 — 다음 시도에서 해제
     }
   }
 
@@ -2482,6 +2527,68 @@ function ChatPage() {
                 : undefined
             }
           />
+        )}
+        {(chat?.hiredAgents?.length ?? 0) > 0 && (
+          // 고용 동행 배지 — 빌린 에이전트가 이 채팅에 붙어 있음을 상시로 보여준다
+          // (0.7.2x 증발 버그의 가시성 해결). ×(해고)로 바인딩 해제.
+          <span
+            data-testid="hired-agents-badge"
+            title={
+              locale === "ko"
+                ? "빌린 에이전트가 이 채팅에 고용되어 다음 메시지에도 함께합니다. ×를 누르면 해고합니다."
+                : "Hired agents stay on this chat for every message. Press × to dismiss."
+            }
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              marginLeft: 8,
+              padding: "3px 6px 3px 10px",
+              borderRadius: 999,
+              background: "var(--fill-1)",
+              border: "1px solid var(--accent-soft)",
+              color: "var(--ink)",
+              fontSize: 11.5,
+              fontWeight: 650,
+              maxWidth: 260,
+              flexShrink: 0,
+            }}
+          >
+            <span aria-hidden="true">🤝</span>
+            <span
+              style={{
+                minWidth: 0,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {chat.hiredAgents.map((card) => card.name || card.slug).join(", ")}
+              {locale === "ko" ? " 함께 일하는 중" : " working with you"}
+            </span>
+            <button
+              type="button"
+              onClick={() => void dismissHiredAgents()}
+              aria-label={locale === "ko" ? "고용 해제" : "Dismiss hired agents"}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 16,
+                height: 16,
+                borderRadius: 999,
+                border: 0,
+                background: "transparent",
+                color: "var(--muted-deep)",
+                cursor: "pointer",
+                fontSize: 12,
+                lineHeight: 1,
+                padding: 0,
+              }}
+            >
+              ×
+            </button>
+          </span>
         )}
         <div style={{ flex: 1, minWidth: 0, marginLeft: 12 }}>
           {project && (

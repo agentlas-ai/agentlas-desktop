@@ -1,13 +1,16 @@
 import { app } from "electron";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { detectRuntimeLabels } from "../agents/import-local";
 import { getSessionCookieHeader } from "../auth";
+import { careerGraph } from "../hephaestus/commands";
 import { pickActiveRunner } from "../mcp/client";
 import type {
   CloudAgentPackageFile,
   CloudAgentPackageManifest,
+  CloudAgentPublicCareerGraph,
   CloudAgentPackageResult,
   CloudAgentPublishRequest,
   CloudAgentRegistrationResult,
@@ -108,12 +111,15 @@ export async function packageAndReviewCloudAgent(
   }
 
   const visibility = input.visibility ?? "marketplace";
+  const careerPrepareFindings = await preparePublicCareerGraphCard(rootPath);
   const scan = scanAgentFolder(rootPath);
+  scan.findings.unshift(...careerPrepareFindings);
   const routingCard = readRoutingCard(rootPath);
   if (routingCard.finding) scan.findings.push(routingCard.finding);
+  const careerGraphCard = readPublicCareerGraphCard(rootPath, visibility, scan.findings);
   const name = readName(rootPath);
   const tagline = readTagline(rootPath);
-  const slug = sanitizeSlug(input.slug || name || path.basename(rootPath));
+  const slug = sanitizeSlug(input.slug || readStableSlug(rootPath) || name || path.basename(rootPath));
   const packageHash = hashPackage(scan.included);
   const manifest: CloudAgentPackageManifest & { routingCard?: Record<string, unknown> } = {
     version: MANIFEST_VERSION,
@@ -137,6 +143,7 @@ export async function packageAndReviewCloudAgent(
     costOwner: input.reviewMode === "local-runtime" ? "submitter" : "none",
     security: summarizeSecurity(scan.findings),
     ...(routingCard.card ? { routingCard: routingCard.card } : {}),
+    ...(careerGraphCard ? { careerGraph: careerGraphCard } : {}),
   };
 
   const packageDir = packageOutputDir(slug);
@@ -156,6 +163,7 @@ export async function packageAndReviewCloudAgent(
           packagedAt: manifest.createdAt,
           costOwner: manifest.costOwner,
         },
+        ...(careerGraphCard ? { careerGraph: careerGraphCard } : {}),
       },
       null,
       2,
@@ -336,6 +344,118 @@ function scanAgentFolder(rootPath: string): StaticScanResult {
   }
 
   return { files, included, findings, totalBytes };
+}
+
+async function preparePublicCareerGraphCard(rootPath: string): Promise<CloudAgentSecurityFinding[]> {
+  const agentlasDir = path.join(rootPath, ".agentlas");
+  const publicCard = path.join(agentlasDir, "public-career-card.json");
+  if (fs.existsSync(publicCard)) return [];
+  const markers = [
+    path.join(agentlasDir, "career-graph.json"),
+    path.join(agentlasDir, "career-graph-sources.json"),
+    path.join(agentlasDir, "career-graph.sqlite"),
+  ];
+  if (!markers.some((marker) => fs.existsSync(marker))) return [];
+  try {
+    await careerGraph(["ingest"], { project: rootPath, cwd: rootPath, timeoutMs: 20_000 });
+    await careerGraph(["public-card", "--write"], { project: rootPath, cwd: rootPath, timeoutMs: 20_000 });
+    return [];
+  } catch {
+    return [
+      {
+        id: "career-card-auto-generate-failed",
+        severity: "info",
+        category: "review",
+        file: ".agentlas/public-career-card.json",
+        message: "Career Graph public card could not be generated during desktop packaging.",
+        remediation: "Run `career-graph ingest --project .` and `career-graph public-card --write --project .` before publishing.",
+      },
+    ];
+  }
+}
+
+function readPublicCareerGraphCard(
+  rootPath: string,
+  visibility: CloudAgentVisibility,
+  findings: CloudAgentSecurityFinding[],
+): CloudAgentPublicCareerGraph | undefined {
+  const rel = ".agentlas/public-career-card.json";
+  const abs = path.join(rootPath, rel);
+  if (!fs.existsSync(abs)) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(abs, "utf8"));
+  } catch {
+    findings.push({
+      id: "career-card-invalid-json",
+      severity: visibility === "marketplace" ? "blocker" : "high",
+      category: "structure",
+      file: rel,
+      message: "Career Graph public card is not valid JSON.",
+      remediation: "Regenerate it with `career-graph public-card --write --project .`.",
+    });
+    return undefined;
+  }
+  if (!isRecord(parsed) || parsed.kind !== "agentlas-public-career-card") {
+    findings.push({
+      id: "career-card-invalid-kind",
+      severity: visibility === "marketplace" ? "blocker" : "high",
+      category: "structure",
+      file: rel,
+      message: "Career Graph public card has an invalid kind.",
+      remediation: "Regenerate it with `career-graph public-card --write --project .`.",
+    });
+    return undefined;
+  }
+  const privacy = isRecord(parsed.privacy) ? parsed.privacy : {};
+  const privacyKeys = ["rawLocalPathsIncluded", "rawPromptsIncluded", "rawTranscriptsIncluded", "sourceTextIncluded"];
+  for (const key of privacyKeys) {
+    if (privacy[key] !== false) {
+      findings.push({
+        id: findingId(`career-card-privacy-${key}`, rel),
+        severity: visibility === "marketplace" ? "blocker" : "high",
+        category: "policy",
+        file: rel,
+        message: `Career Graph public card must set privacy.${key}=false.`,
+        remediation: "Do not publish raw local memory, prompts, transcripts, source text, or paths.",
+      });
+    }
+  }
+  const raw = JSON.stringify(parsed);
+  const sensitiveRoots = [path.resolve(rootPath), os.homedir()].filter(Boolean);
+  if (sensitiveRoots.some((root) => raw.includes(root))) {
+    findings.push({
+      id: findingId("career-card-local-path", rel),
+      severity: visibility === "marketplace" ? "blocker" : "high",
+      category: "policy",
+      file: rel,
+      message: "Career Graph public card contains a local absolute path.",
+      remediation: "Regenerate the redacted public card before publishing.",
+    });
+  }
+  if (findings.some((finding) => finding.id.startsWith("career-card-") && finding.severity === "blocker")) {
+    return undefined;
+  }
+  const allowed = new Set([
+    "schemaVersion",
+    "kind",
+    "generatedAt",
+    "projectName",
+    "indexStatus",
+    "policy",
+    "privacy",
+    "counts",
+    "canonicalSources",
+    "staleSourceCount",
+    "sourceKinds",
+    "nodeTypes",
+    "edgeTypes",
+  ]);
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (allowed.has(key)) sanitized[key] = value;
+  }
+  return sanitized as unknown as CloudAgentPublicCareerGraph;
 }
 
 function staticReview(findings: CloudAgentSecurityFinding[]): CloudAgentReviewResult {
@@ -563,12 +683,30 @@ async function registerCloudAgent(input: {
 }
 
 function readName(rootPath: string): string {
+  const manifest = readPackageJson(rootPath);
+  const explicit = firstString(
+    manifest.agentlas.displayName,
+    manifest.agentlas.name,
+    manifest.manifest.name,
+    manifest.agentCard.name,
+    manifest.routingCard.name,
+  );
+  if (explicit) return explicit.replace(/\s+/g, " ").slice(0, 80);
   const text = readFirst(rootPath, ["agent.md", "AGENT.md", "README.md", "CLAUDE.md", "AGENTS.md"], 2000);
   const heading = text.match(/^#\s+(.+)$/m)?.[1]?.trim();
   return (heading || path.basename(rootPath)).replace(/\s+/g, " ").slice(0, 80);
 }
 
 function readTagline(rootPath: string): string {
+  const manifest = readPackageJson(rootPath);
+  const explicit = firstString(
+    manifest.agentlas.summary,
+    manifest.agentlas.description,
+    manifest.manifest.description,
+    manifest.agentCard.summary,
+    manifest.routingCard.summary,
+  );
+  if (explicit) return explicit.replace(/\s+/g, " ").slice(0, 160);
   const text = readFirst(rootPath, ["README.md", "agent.md", "AGENT.md"], 3000);
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -576,6 +714,55 @@ function readTagline(rootPath: string): string {
     return trimmed.slice(0, 160);
   }
   return "Portable Agentlas cloud agent package.";
+}
+
+function readStableSlug(rootPath: string): string {
+  const manifest = readPackageJson(rootPath);
+  return firstString(
+    manifest.agentlas.slug,
+    manifest.agentlas.id,
+    manifest.manifest.package,
+    manifest.manifest.slug,
+    manifest.agentCard.slug,
+    manifest.agentCard.id,
+    nestedString(manifest.routingCard.agent_card_ref, "slug"),
+  );
+}
+
+function readPackageJson(rootPath: string): {
+  agentlas: Record<string, unknown>;
+  manifest: Record<string, unknown>;
+  agentCard: Record<string, unknown>;
+  routingCard: Record<string, unknown>;
+} {
+  return {
+    agentlas: readJsonObject(path.join(rootPath, "agentlas.json")),
+    manifest: readJsonObject(path.join(rootPath, "manifest.json")),
+    agentCard: readJsonObject(path.join(rootPath, ".agentlas", "agent-card.json")),
+    routingCard: readJsonObject(path.join(rootPath, ".agentlas", "routing-card.json")),
+  };
+}
+
+function readJsonObject(file: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function nestedString(value: unknown, key: string): string {
+  if (!isRecord(value)) return "";
+  const nested = value[key];
+  return typeof nested === "string" ? nested : "";
 }
 
 function readFirst(rootPath: string, names: string[], maxChars: number): string {

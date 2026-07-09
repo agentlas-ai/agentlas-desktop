@@ -6,7 +6,7 @@ import { getDb } from "./db";
 import { getAgentGroup } from "./agent-groups";
 import { getFirm } from "./firms";
 import { touchProject } from "./projects";
-import type { Chat, ChatHistoryEntry } from "../../shared/types";
+import type { Chat, ChatHistoryEntry, HiredAgentCard } from "../../shared/types";
 import { currentUiLocale } from "../main";
 
 interface ChatRow {
@@ -22,6 +22,27 @@ interface ChatRow {
   kind: string | null;
   continuous_mode: number | null;
   swarm_mode: number | null;
+  hired_agents: string | null;
+}
+
+function parseHiredAgents(raw: string | null): HiredAgentCard[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+      .filter((item) => typeof item.slug === "string" && item.slug.trim().length > 0)
+      .map((item) => ({
+        slug: String(item.slug).trim(),
+        name: typeof item.name === "string" ? item.name : undefined,
+        source: item.source === "hub" || item.source === "installed" || item.source === "firm-node" ? item.source : undefined,
+        routeLabel: typeof item.routeLabel === "string" ? item.routeLabel : undefined,
+        hiredAt: typeof item.hiredAt === "string" ? item.hiredAt : new Date().toISOString(),
+      }));
+  } catch {
+    return [];
+  }
 }
 
 function toChat(row: ChatRow): Chat {
@@ -38,6 +59,7 @@ function toChat(row: ChatRow): Chat {
     kind: row.kind === "division" ? "division" : "user",
     continuousMode: row.continuous_mode === 1,
     swarmMode: row.swarm_mode === 1,
+    hiredAgents: parseHiredAgents(row.hired_agents),
   };
 }
 
@@ -283,6 +305,23 @@ export function setChatSwarmMode(chatId: string, enabled: boolean): void {
   getDb()
     .prepare("UPDATE chats SET swarm_mode = ?, updated_at = ? WHERE id = ?")
     .run(enabled ? 1 : 0, new Date().toISOString(), chatId);
+}
+
+/** 고용(빌림) 카드 저장 — 빈 배열이면 해고(컬럼 비움). 메타데이터 카드만 저장한다. */
+export function setChatHiredAgents(chatId: string, cards: HiredAgentCard[]): Chat {
+  const deduped = new Map<string, HiredAgentCard>();
+  for (const card of cards) {
+    const slug = card.slug?.trim();
+    if (!slug) continue;
+    deduped.set(slug, { ...card, slug, hiredAt: card.hiredAt || new Date().toISOString() });
+  }
+  const value = deduped.size > 0 ? JSON.stringify([...deduped.values()]) : null;
+  getDb()
+    .prepare("UPDATE chats SET hired_agents = ?, updated_at = ? WHERE id = ?")
+    .run(value, new Date().toISOString(), chatId);
+  const chat = getChat(chatId);
+  if (!chat) throw new Error(`Chat ${chatId} not found`);
+  return chat;
 }
 
 // ── chat_messages ───────────────────────────────────────────

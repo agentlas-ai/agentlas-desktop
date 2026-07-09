@@ -208,14 +208,37 @@ function redactEventValue(value: string | undefined): string | undefined {
   return value;
 }
 
-function extractAgentDirective(raw: Record<string, unknown>): string {
-  return (
+export function extractAgentDirective(raw: Record<string, unknown>): string {
+  const direct =
     cleanString(raw.directive) ||
     cleanString(raw.systemPrompt) ||
     cleanString(raw.system_prompt) ||
     cleanString(raw.instructions) ||
-    cleanString(raw.prompt)
-  );
+    cleanString(raw.prompt);
+  if (direct) return direct;
+  // Hephaestus hub_invoke 레코드(agentlas_cloud call)의 실제 형태: 에이전트의 진짜 지시문은
+  // output.entry_excerpt, 프로젝트 attach+전역 둥지(기억) 참조 계약은 output.grounding,
+  // 리스/배지 계약은 output.next_step에 실려 온다. 이 형태를 못 읽으면 빌린 에이전트가
+  // 전문성·기억 없는 제네릭 3줄 프롬프트로 도는 결함으로 회귀한다 — 떨구지 말 것.
+  const output = asObject(raw.output);
+  const grounding = asObject(output.grounding);
+  const parts: string[] = [];
+  const entry = cleanString(output.entry_excerpt);
+  if (entry) parts.push(`### Hub entry instructions (excerpt)\n${entry}`);
+  const memoryRoot = cleanString(grounding.memory_root) || cleanString(asObject(raw.memory).memory_root);
+  const groundingDirective = cleanString(grounding.directive);
+  if (groundingDirective) {
+    parts.push(
+      `### Grounding\n${groundingDirective}${memoryRoot ? `\nThis agent's persistent memory root: ${memoryRoot}` : ""}`,
+    );
+  } else if (memoryRoot) {
+    parts.push(
+      `### Agent memory\nThis agent keeps persistent cross-project memory (skills and gotchas from past hires) at: ${memoryRoot}/project-soul-memory.md — consult it when the task needs deeper grounding.`,
+    );
+  }
+  const nextStep = cleanString(output.next_step);
+  if (nextStep) parts.push(`### Runtime contract\n${nextStep}`);
+  return parts.join("\n\n");
 }
 
 export function normalizeBorrowedAgentSpecs(slugs: string[], payload: unknown): BorrowedAgentSpec[] {
@@ -746,6 +769,8 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
       agentId: p.chat.agentId,
       chatId: p.chat.id,
       cwdAtRequest: p.workingFolder ?? null,
+      // 태스크포스에 참여한 빌린 에이전트들 — agent_repo 배움을 이들의 전역 둥지로 미러링.
+      borrowedAgentSlugs: p.req.borrowAgents,
     });
     displayText = redactSensitiveText(curated.cleanedText || displayText);
   } catch {

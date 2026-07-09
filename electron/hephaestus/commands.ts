@@ -213,6 +213,20 @@ export function aoQuery(query: string, opts: { dir?: string } & HephaestusRunOpt
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 60_000, ...opts });
 }
 
+/** Career Graph: rebuildable source-routing index over project memory, sitemap, code map, and ledgers. */
+export function careerGraph(
+  args: string[],
+  opts: { project?: string } & HephaestusRunOptions = {},
+): Promise<HephaestusResult> {
+  const finalArgs = [...args];
+  if (opts.project) finalArgs.push("--project", assertPositional(opts.project, "directory"));
+  return runHephaestus("career_graph", finalArgs, { timeoutMs: 60_000, cwd: opts.project ?? opts.cwd, ...opts });
+}
+
+export function careerGraphIngest(project: string, opts: HephaestusRunOptions = {}): Promise<HephaestusResult> {
+  return careerGraph(["ingest"], { project, timeoutMs: 20_000, ...opts });
+}
+
 /** 네트워크 상태(카드 수, 벤치 상태, 자동라우팅 게이트). */
 export function networkStatus(opts: HephaestusRunOptions = {}): Promise<HephaestusResult> {
   return runHephaestus("agentlas_cloud", ["network", "status"], { timeoutMs: 60_000, ...opts });

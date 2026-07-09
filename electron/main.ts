@@ -26,17 +26,22 @@ import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser
 
 const isDev = process.env.NODE_ENV === "development";
 
-protocol.registerSchemesAsPrivileged([
-  {
-    scheme: "agentlas",
-    privileges: {
-      standard: true,
-      secure: true,
-      supportFetchAPI: true,
-      corsEnabled: true,
+// 앱이 이미 ready면 스킵 — electron 스토어 테스트(scripts/test-*.cjs)가 whenReady 후에
+// store/chats.js → main.js를 require하는데, ready 이후 호출은 electron이 throw한다.
+// 프로덕션 부팅에선 main.js가 항상 ready 전에 로드되므로 동작 변화 없음.
+if (!app.isReady()) {
+  protocol.registerSchemesAsPrivileged([
+    {
+      scheme: "agentlas",
+      privileges: {
+        standard: true,
+        secure: true,
+        supportFetchAPI: true,
+        corsEnabled: true,
+      },
     },
-  },
-]);
+  ]);
+}
 
 // macOS dock 표시 이름 — productName이 "Agentlas"인 production 빌드와 일치시킴
 app.setName("Agentlas");

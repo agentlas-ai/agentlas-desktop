@@ -170,6 +170,20 @@ function runCallSiteGuard() {
   console.log("[guard] picker/sidebar visibleAgents call sites keep includeTeams: true");
 }
 
+function runCloudCareerGraphGuard() {
+  const rel = "renderer/app/(shell)/cloud/page.tsx";
+  const source = fs.readFileSync(path.join(root, rel), "utf8");
+  assert.ok(
+    source.includes("CareerGraphProofBox") && source.includes("extractCareerGraph"),
+    `${rel}: cloud upload result must render the redacted Career Graph proof section.`,
+  );
+  assert.ok(
+    /manifest\.careerGraph/.test(source) && /bundle\.careerGraph/.test(source),
+    `${rel}: cloud upload result must read careerGraph from both manifest and bundle payloads.`,
+  );
+  console.log("[guard] cloud upload renders Career Graph proof when present");
+}
+
 // ---------------------------------------------------------------------------
 // 3) ui — 빌드된 렌더러에서 피커 리스트/사이드바에 팀이 실제로 뜨는지
 // ---------------------------------------------------------------------------
@@ -299,6 +313,64 @@ async function runUiChecks() {
     assert.deepEqual(errors, [], "renderer UI smoke must not emit page errors");
     await context.close();
     console.log("[ui] team survives agent picker + sidebar on built renderer");
+
+    // ── 고용(24h 리스) 시나리오: 동행 배지 + 자동 재주입 + 사이드바 로스터 + 해고 ──
+    const hiredContext = await browser.newContext({ viewport: { width: 1440, height: 980 } });
+    await hiredContext.addInitScript(setupMockAgentlasBridge, { teamRoster: true, hiredRoster: true });
+    const hiredPage = await hiredContext.newPage();
+    const hiredErrors = [];
+    hiredPage.on("pageerror", (err) => hiredErrors.push(err.message));
+    hiredPage.on("console", (msg) => {
+      if (msg.type() === "error" && !/favicon|Failed to load resource/i.test(msg.text())) {
+        hiredErrors.push(msg.text());
+      }
+    });
+    await hiredPage.goto(`${baseUrl}/chat.html?id=chat-1`, { waitUntil: "domcontentloaded" });
+    await hiredPage.getByRole("textbox").first().waitFor();
+
+    // 동행 배지: 고용된 에이전트가 상시로 보인다 (조용한 증발 버그의 가시성 수정).
+    const badge = hiredPage.locator("[data-testid='hired-agents-badge']");
+    try {
+      await badge.waitFor({ timeout: 10000 });
+    } catch (err) {
+      await hiredPage.screenshot({ path: path.join(outDir, "hired-badge-missing.png"), fullPage: true }).catch(() => {});
+      console.error(JSON.stringify({ hiredBadgeMissing: true, errors: hiredErrors }, null, 2));
+      throw err;
+    }
+    await badge.getByText(/인스타 업로더/).waitFor();
+
+    // 자동 재주입: 추천 없이 그냥 보내도 고용 카드가 borrowAgents로 붙는다.
+    await hiredPage.locator("textarea").first().fill("고용 재주입 검증");
+    await hiredPage.getByRole("button", { name: /보내기|Send/ }).click();
+    await hiredPage.waitForFunction(() => window.__qa.calls.some((call) => call.name === "invoke.run"));
+    const hiredInvoke = await hiredPage.evaluate(() => window.__qa.calls.find((call) => call.name === "invoke.run"));
+    assert.deepEqual(
+      hiredInvoke.payload.borrowAgents,
+      ["instagram-uploader"],
+      "hired agents must be auto-reinjected as borrowAgents on every send",
+    );
+
+    // 사이드바 "고용 중" 로스터: 활성 리스(무료 재호출) + 만료(기억 보관) 카드.
+    const hiredSidebar = hiredPage.locator("[data-tour-id='workspace.sidebar']");
+    await hiredSidebar.getByText(/고용 중|Hired agents/).waitFor();
+    await hiredSidebar.getByText("인스타 업로더").waitFor();
+    await hiredSidebar.getByText(/무료 재호출|free calls/).waitFor();
+    await hiredSidebar.getByText("레딧 시더").waitFor();
+    await hiredSidebar.getByText(/기억 그대로|resumes its memory/).waitFor();
+
+    // 해고: × 클릭 → 빈 배열로 저장 → 배지 사라짐.
+    await badge.getByRole("button", { name: /고용 해제|Dismiss hired agents/ }).click();
+    await hiredPage.waitForFunction(() =>
+      window.__qa.calls.some(
+        (call) => call.name === "chats.setHiredAgents" && Array.isArray(call.payload.cards) && call.payload.cards.length === 0,
+      ),
+    );
+    await badge.waitFor({ state: "detached" });
+
+    await hiredPage.screenshot({ path: path.join(outDir, "renderer-ui-smoke-hired.png"), fullPage: true });
+    assert.deepEqual(hiredErrors, [], "hired scenario must not emit page errors");
+    await hiredContext.close();
+    console.log("[ui] hired agents: badge + auto-reinject + sidebar roster + dismiss");
   } finally {
     await browser.close().catch(() => {});
     server.close();
@@ -308,6 +380,7 @@ async function runUiChecks() {
 async function main() {
   runLogicChecks();
   runCallSiteGuard();
+  runCloudCareerGraphGuard();
   if (logicOnly) {
     console.log("renderer UI smoke (logic-only) passed");
     return;

@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { getDb } from "../store/db";
 import { tryRecordFailureEvent } from "../store/run-events";
 import { writeAgentFile } from "./files";
@@ -75,6 +77,54 @@ function toUi(row: AgentEvolutionProposalRow): AgentEvolutionProposalUi {
     measuredAt: row.measured_at ?? undefined,
     rolledBackAt: row.rolled_back_at ?? undefined,
   };
+}
+
+function sourceProjectPath(source: Record<string, unknown>): string | null {
+  for (const key of ["projectPath", "projectRoot", "workspacePath", "cwd"]) {
+    const value = source[key];
+    if (typeof value !== "string" || !value.trim()) continue;
+    return path.resolve(value);
+  }
+  return null;
+}
+
+function appendEvolutionProposalLedger(row: AgentEvolutionProposalRow, event: string): void {
+  const source = parseSource(row.source_json);
+  const projectPath = sourceProjectPath(source);
+  if (!projectPath) return;
+  try {
+    const ledgerDir = path.join(projectPath, ".agentlas", "ledgers");
+    fs.mkdirSync(ledgerDir, { recursive: true });
+    const record = {
+      kind: "agent_evolution_proposal",
+      event,
+      proposal_id: row.id,
+      agent_id: row.agent_id,
+      proposal_type: row.proposal_type,
+      summary: row.summary,
+      target_path: row.target_path,
+      before_hash: row.before_hash,
+      after_hash: row.after_hash,
+      risk: row.risk,
+      status: row.status,
+      source,
+      decision_note: row.decision_note,
+      last_error: row.last_error,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      approved_at: row.approved_at,
+      applied_at: row.applied_at,
+      measured_at: row.measured_at,
+      rolled_back_at: row.rolled_back_at,
+    };
+    fs.appendFileSync(
+      path.join(ledgerDir, "agent-evolution-proposals.jsonl"),
+      `${JSON.stringify(record)}\n`,
+      "utf8",
+    );
+  } catch (error) {
+    console.warn("[agent-evolution] failed to append project ledger:", error);
+  }
 }
 
 export function listAgentEvolutionProposals(agentId: string, limit?: number): AgentEvolutionProposalUi[] {
@@ -164,6 +214,7 @@ export function createAndApplyPromptEvolutionProposal(
   }
 
   const row = db.prepare("SELECT * FROM agent_evolution_proposals WHERE id = ?").get(id) as AgentEvolutionProposalRow;
+  appendEvolutionProposalLedger(row, "proposal_applied");
   return toUi(row);
 }
 
@@ -178,6 +229,7 @@ export function markAgentEvolutionProposalMeasured(proposalId: string, note?: st
     .run(measuredAt, note ?? null, measuredAt, proposalId);
   if (result.changes < 1) throw new Error("Proposal is not in an applied state");
   const row = getDb().prepare("SELECT * FROM agent_evolution_proposals WHERE id = ?").get(proposalId) as AgentEvolutionProposalRow;
+  appendEvolutionProposalLedger(row, "proposal_measured");
   return toUi(row);
 }
 
@@ -196,5 +248,6 @@ export function rollbackAgentEvolutionProposal(proposalId: string): AgentEvoluti
      WHERE id = ?`,
   ).run(rolledBackAt, rolledBackAt, proposalId);
   const updated = db.prepare("SELECT * FROM agent_evolution_proposals WHERE id = ?").get(proposalId) as AgentEvolutionProposalRow;
+  appendEvolutionProposalLedger(updated, "proposal_rolled_back");
   return toUi(updated);
 }

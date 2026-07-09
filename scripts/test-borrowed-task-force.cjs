@@ -57,6 +57,41 @@ async function main() {
   assert.equal(specs[1].name, "Builder");
   assert.equal(specs[1].directive, "Patch the implementation.");
 
+  // Hephaestus hub_invoke 레코드 형태(agentlas_cloud call 실응답): 진짜 지시문(entry_excerpt)·
+  // 전역 둥지 참조(grounding.memory_root)·리스/배지 계약(next_step)이 output 아래 실려 온다.
+  // 이 형태를 못 읽고 제네릭 폴백으로 떨어지면 빌린 에이전트가 전문성/기억 없이 도는 회귀.
+  const recordSpecs = mod.normalizeBorrowedAgentSpecs(
+    ["instagram-uploader"],
+    {
+      schema: "hephaestus.call.v1",
+      action: "agent_call",
+      agents: [
+        {
+          action: "hub_invoke",
+          status: "prepared",
+          slug: "instagram-uploader",
+          agent_id: "hub:instagram-uploader",
+          memory: { memory_root: "/Users/qa/.agentlas/networking/hub-agents/instagram-uploader/memory" },
+          lease: { active: true, leased_until: "2026-07-10T00:00:00Z", charged_credits: 0 },
+          output: {
+            entry_excerpt: "You are the Instagram upload specialist. Follow the posting checklist.",
+            grounding: {
+              directive: "Attach to the live codebase at project_dir first; consult this agent's memory only when needed.",
+              memory_root: "/Users/qa/.agentlas/networking/hub-agents/instagram-uploader/memory",
+            },
+            next_step: "While acting as this agent, begin each reply with the presence badge. Lease: active hire — this call was free.",
+          },
+        },
+      ],
+    },
+  );
+  assert.equal(recordSpecs.length, 1);
+  assert.match(recordSpecs[0].directive, /Instagram upload specialist/, "entry excerpt must survive into the directive");
+  assert.match(recordSpecs[0].directive, /Attach to the live codebase/, "grounding directive must survive");
+  assert.match(recordSpecs[0].directive, /hub-agents\/instagram-uploader\/memory/, "global nest memory root must be referenced");
+  assert.match(recordSpecs[0].directive, /presence badge/, "lease/badge runtime contract must survive");
+  assert.doesNotMatch(recordSpecs[0].directive, /borrowed Hub specialist "instagram-uploader"/, "must NOT fall back to the generic 3-line directive");
+
   const packets = mod.parseBorrowedInputPackets(`
 notes before
 ## Agent Input Packets

@@ -556,7 +556,27 @@ function setupMockAgentlasBridge(options) {
         archivedAt: null,
         createdAt: now,
         updatedAt: now,
+        // hiredRoster 옵션(smoke-renderer-ui): 고용 카드가 붙은 채팅 — 동행 배지/재주입 검증용.
+        hiredAgents:
+          options && options.hiredRoster
+            ? [{ slug: "instagram-uploader", name: "인스타 업로더", source: "hub", hiredAt: now }]
+            : [],
       }),
+      setHiredAgents: async (id, cards) => {
+        record("chats.setHiredAgents", { id, cards });
+        return {
+          id,
+          projectId: null,
+          firmId: null,
+          agentId: "agent-2",
+          kind: "user",
+          title: "QA Chat",
+          archivedAt: null,
+          createdAt: now,
+          updatedAt: now,
+          hiredAgents: Array.isArray(cards) ? cards : [],
+        };
+      },
       // teamRoster: 팀에 바인딩된 채팅 1건 — Sidebar가 agentById(visibleAgents 결과)로
       // 라벨을 찾으므로, 팀이 필터에서 빠지면 이 행의 팀 이름이 사라진다(0.7.21 증상).
       listRecent: async () =>
@@ -938,6 +958,34 @@ function setupMockAgentlasBridge(options) {
       getResolved: async () => null,
     };
   }
+
+  // 고용(빌림) 로스터 — 렌더러가 api.hired?.list 옵셔널 체이닝으로 부르므로 항상 제공해도
+  // 기존 스모크에 영향 없음. 데이터는 hiredRoster 옵션일 때만.
+  window.agentlas.hired = {
+    list: async () =>
+      options && options.hiredRoster
+        ? [
+            {
+              slug: "instagram-uploader",
+              name: "Instagram Uploader",
+              nameKo: "인스타 업로더",
+              leasedUntil: new Date(Date.now() + 23 * 3_600_000).toISOString(),
+              leaseActive: true,
+              hasMemory: true,
+              lastWorkedAt: now,
+            },
+            {
+              slug: "reddit-seeder",
+              name: "Reddit Seeder",
+              nameKo: "레딧 시더",
+              leasedUntil: new Date(Date.now() - 3_600_000).toISOString(),
+              leaseActive: false,
+              hasMemory: true,
+              lastWorkedAt: now,
+            },
+          ]
+        : [],
+  };
 }
 
 module.exports = { setupMockAgentlasBridge };

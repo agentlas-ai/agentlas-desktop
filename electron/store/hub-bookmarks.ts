@@ -7,25 +7,56 @@ interface HubBookmarkRow {
   bookmarked_at: string;
 }
 
+const WEB_MASTER_SLUG = "web-master";
+const WEB_MASTER_LEGACY_SLUG = "web-app-design-master";
+const WEB_MASTER_NAME_KO = "웹앱 디자인 마스터";
+const WEB_MASTER_NAME_EN = "Web App Design Master";
+const WEB_MASTER_TAGLINE_KO =
+  "기존 Web_master를 덮어쓰는 디자인·프런트엔드 전문 팀. 리서치, 디자인 시스템, React/HTML/CSS 구현, 모바일 UI, 카피, 브라우저 검증을 한 번에 묶는다.";
+const WEB_MASTER_TAGLINE_EN =
+  "A design and frontend specialist team replacing the old Web_master package: research, design systems, React/HTML/CSS implementation, mobile UI, copy, and browser proof in one workflow.";
+
+function normalizeWebMasterListing(input: MarketplaceListing): MarketplaceListing {
+  const slug = String(input.slug || "").trim();
+  if (slug !== WEB_MASTER_SLUG && slug !== WEB_MASTER_LEGACY_SLUG) return input;
+  return {
+    ...input,
+    slug: WEB_MASTER_SLUG,
+    name: WEB_MASTER_NAME_KO,
+    nameEn: WEB_MASTER_NAME_EN,
+    tagline: WEB_MASTER_TAGLINE_KO,
+    taglineEn: WEB_MASTER_TAGLINE_EN,
+    kind: input.kind || "cloud-callable",
+    callable: input.callable ?? true,
+    routingReady: input.routingReady ?? true,
+    routingStatus: input.routingStatus || "public-profile",
+    source: input.source || "hub-profile",
+    entityKind: "team",
+    perCallCredits: typeof input.perCallCredits === "number" ? input.perCallCredits : 10,
+    manifestUrl: input.manifestUrl || `https://agentlas.cloud/p/${WEB_MASTER_SLUG}`,
+  };
+}
+
 function normalizeListing(input: MarketplaceListing): MarketplaceListing {
+  const normalized = normalizeWebMasterListing(input);
   const entityKind =
-    input.source === "hub-plugin" || input.entityKind === "plugin"
+    normalized.source === "hub-plugin" || normalized.entityKind === "plugin"
       ? "plugin"
-      : input.entityKind === "team" || (typeof input.agentCount === "number" && input.agentCount > 1)
+      : normalized.entityKind === "team" || (typeof normalized.agentCount === "number" && normalized.agentCount > 1)
         ? "team"
         : "agent";
   return {
-    ...input,
+    ...normalized,
     entityKind,
   };
 }
 
 function rowToBookmark(row: HubBookmarkRow): HubAgentBookmark | null {
   try {
-    const listing = JSON.parse(row.listing_json) as MarketplaceListing;
+    const listing = normalizeListing(JSON.parse(row.listing_json) as MarketplaceListing);
     if (!listing?.slug) return null;
     return {
-      slug: row.slug,
+      slug: listing.slug,
       listing,
       bookmarkedAt: row.bookmarked_at,
     };
@@ -38,7 +69,12 @@ export function listHubAgentBookmarks(): HubAgentBookmark[] {
   const rows = getDb()
     .prepare("SELECT slug, listing_json, bookmarked_at FROM hub_agent_bookmarks ORDER BY bookmarked_at DESC")
     .all() as HubBookmarkRow[];
-  return rows.map(rowToBookmark).filter((item): item is HubAgentBookmark => Boolean(item));
+  const bookmarks = rows.map(rowToBookmark).filter((item): item is HubAgentBookmark => Boolean(item));
+  const bySlug = new Map<string, HubAgentBookmark>();
+  for (const bookmark of bookmarks) {
+    if (!bySlug.has(bookmark.slug)) bySlug.set(bookmark.slug, bookmark);
+  }
+  return Array.from(bySlug.values());
 }
 
 export function addHubAgentBookmark(input: MarketplaceListing): HubAgentBookmark {

@@ -5,8 +5,13 @@
 //
 // These are intentionally plain files: portable, diff-able, and visible to the user.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
+  CAREER_GRAPH_CONFIG_FILE,
+  CAREER_GRAPH_DB_FILE,
+  CAREER_GRAPH_INBOX_DIR,
+  CAREER_GRAPH_SOURCE_MANIFEST_FILE,
   CURATOR_DECISIONS_FILE,
   LOCAL_CREDENTIALS_MAP_FILE,
   MEMORY_LOG_FILE,
@@ -189,6 +194,45 @@ function ontologySourceManifestSkeleton(projectPath: string): string {
     {
       schemaVersion: "1.0",
       kind: "agentlas-ontology-source-manifest",
+      projectRoot: projectPath,
+      sources: [],
+    },
+    null,
+    2,
+  );
+}
+
+function careerGraphSkeleton(projectPath: string, projectName: string): string {
+  const dir = path.join(projectPath, PROJECT_MEMORY_DIR);
+  return JSON.stringify(
+    {
+      schemaVersion: "1.0",
+      kind: "agentlas-career-graph",
+      state: "active",
+      model: "ledger_first_derived_index",
+      projectRoot: projectPath,
+      projectName,
+      dbPath: path.join(dir, CAREER_GRAPH_DB_FILE),
+      inboxPath: path.join(dir, CAREER_GRAPH_INBOX_DIR),
+      sourceManifest: path.join(dir, CAREER_GRAPH_SOURCE_MANIFEST_FILE),
+      canonicalSourcePolicy: {
+        sourceOfTruth: "markdown_jsonl_json",
+        graphIsRebuildable: true,
+        fallbackWhenStale: "read_canonical_files",
+        neverScanHomeDirectory: true,
+        neverScanSiblingProjects: true,
+      },
+    },
+    null,
+    2,
+  );
+}
+
+function careerGraphSourceManifestSkeleton(projectPath: string): string {
+  return JSON.stringify(
+    {
+      schemaVersion: "1.0",
+      kind: "agentlas-career-graph-source-manifest",
       projectRoot: projectPath,
       sources: [],
     },
@@ -4154,6 +4198,19 @@ export function ensureProjectMemory(
       fs.writeFileSync(ontologySources, ontologySourceManifestSkeleton(projectPath), "utf8");
     }
 
+    const careerGraphInbox = path.join(dir, CAREER_GRAPH_INBOX_DIR);
+    if (!fs.existsSync(careerGraphInbox)) fs.mkdirSync(careerGraphInbox, { recursive: true });
+
+    const careerGraphConfig = path.join(dir, CAREER_GRAPH_CONFIG_FILE);
+    if (!fs.existsSync(careerGraphConfig)) {
+      fs.writeFileSync(careerGraphConfig, careerGraphSkeleton(projectPath, name), "utf8");
+    }
+
+    const careerGraphSources = path.join(dir, CAREER_GRAPH_SOURCE_MANIFEST_FILE);
+    if (!fs.existsSync(careerGraphSources)) {
+      fs.writeFileSync(careerGraphSources, careerGraphSourceManifestSkeleton(projectPath), "utf8");
+    }
+
     const skillTrials = path.join(dir, SKILL_TRIALS_FILE);
     if (!fs.existsSync(skillTrials)) fs.writeFileSync(skillTrials, "", "utf8");
 
@@ -4458,5 +4515,42 @@ export function appendSoulMemory(
     fs.writeFileSync(soulPath, content.replace(/\s*$/, "\n") + block, "utf8");
   } catch {
     // best-effort
+  }
+}
+
+// 빌린(고용한) 허브 에이전트의 전역 기억 둥지:
+//   ~/.agentlas/networking/hub-agents/<slug>/memory/project-soul-memory.md
+// 이건 프로젝트 폴더가 아니라 에이전트 단위·기계 전역이라, 여기 적힌 배움은 다음 대여 때
+// (다른 프로젝트여도) Hephaestus 엔진이 "이 에이전트의 로컬 메모리 참조" 지시로 실어준다.
+// 프로젝트 격리 유지: 오직 agent_repo 스코프(= 에이전트 기술·경험, 프로젝트 고유 정보 아님)
+// 배움만 커레이터가 이리로 미러링한다. 시크릿/경로 redaction은 커레이터가 이미 마쳤다.
+function hubAgentNestSoulPath(slug: string): string | null {
+  // Hephaestus 대여 엔진의 _norm_slug와 반드시 동일한 정규화 — 안 그러면 커레이터가 쓴
+  // 둥지와 엔진이 대여 시 읽는 둥지가 다른 폴더가 되어 배움이 유실된다.
+  // (engine: re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-"))
+  const norm = slug.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!norm) return null;
+  return path.join(os.homedir(), ".agentlas", "networking", "hub-agents", norm, "memory", PROJECT_SOUL_FILE);
+}
+
+/** agent_repo 배움을 빌린 에이전트의 전역 둥지 soul에 append. 둥지가 없으면 생성. best-effort. */
+export function appendAgentNestSoulMemory(slug: string, lines: string[]): boolean {
+  if (lines.length === 0) return false;
+  const soulPath = hubAgentNestSoulPath(slug);
+  if (!soulPath) return false;
+  try {
+    fs.mkdirSync(path.dirname(soulPath), { recursive: true });
+    let content = "";
+    try {
+      content = fs.readFileSync(soulPath, "utf8");
+    } catch {
+      content = `# ${slug} — Agent Memory\n\nDurable skills and gotchas this agent learned across projects.\n`;
+    }
+    if (!content.includes(AUTO_SECTION)) content += `\n${AUTO_SECTION}\n`;
+    const block = lines.map((l) => `- ${l}`).join("\n") + "\n";
+    fs.writeFileSync(soulPath, content.replace(/\s*$/, "\n") + block, "utf8");
+    return true;
+  } catch {
+    return false; // 둥지 쓰기 실패가 사용자 작업을 막지 않는다
   }
 }

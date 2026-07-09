@@ -6,7 +6,7 @@ import path from "node:path";
 import { detectRuntimes } from "../runtime/detect";
 // Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
 import { superviseStormbreaker, type StormbreakerHandle } from "../hephaestus/stormbreaker-supervisor";
-import { hepCall, routeOnly } from "../hephaestus/commands";
+import { careerGraphIngest, hepCall, routeOnly } from "../hephaestus/commands";
 import { normalizeRecommendation } from "../hephaestus/recommendation";
 import {
   buildStormbreakerLongRunPrompt,
@@ -44,6 +44,7 @@ import { getFirm } from "../store/firms";
 import { getResolvedOrg } from "../store/org-spec";
 import { runFirmInvocation } from "./firm-orchestrator";
 import {
+  extractAgentDirective,
   normalizeBorrowedAgentSpecs,
   runBorrowedTaskForceInvocation,
   type BorrowedAgentSpec,
@@ -78,6 +79,7 @@ import type {
 } from "../../shared/types";
 
 type EventSink = (ev: McpInvocationEvent) => void;
+const careerGraphRefreshTriggered = new Set<string>();
 
 /** 방출된 "agent" 필드(id/slug/표시명, 대소문자 무시)를 설치 에이전트로 해석. 못 찾으면 null. */
 function resolveInstalledAgentLoose(query: string): InstalledAgent | null {
@@ -116,6 +118,32 @@ function inferWorkingFolderFromPrompt(prompt: string): string | null {
     console.error("[workspace] failed to create inferred working folder:", err);
     return null;
   }
+}
+
+function refreshCareerGraphInBackground(projectPath: string, sink: EventSink, locale: "ko" | "en"): void {
+  let key: string;
+  try {
+    key = path.resolve(projectPath);
+  } catch {
+    return;
+  }
+  if (careerGraphRefreshTriggered.has(key)) return;
+  careerGraphRefreshTriggered.add(key);
+  void careerGraphIngest(key, { cwd: key, timeoutMs: 20_000 })
+    .then((res) => {
+      if (!res.ok) return;
+      const counts = (res.json as { nodes?: number; edges?: number } | null) ?? {};
+      sink({
+        kind: "tool-use",
+        status:
+          locale === "ko"
+            ? `Career Graph 색인 갱신: nodes=${counts.nodes ?? "?"}, edges=${counts.edges ?? "?"}`
+            : `Career Graph refreshed: nodes=${counts.nodes ?? "?"}, edges=${counts.edges ?? "?"}`,
+      });
+    })
+    .catch(() => {
+      // Best-effort only. The canonical Markdown/JSONL files remain readable.
+    });
 }
 
 function buildAppEditUserPrompt(prompt: string, appRecord: AppFactoryAppRecord, locale: "ko" | "en"): string {
@@ -246,8 +274,12 @@ async function buildBorrowDirective(
       directive = top.trim();
     } else {
       const agents = Array.isArray(j?.agents) ? (j!.agents as Array<Record<string, unknown>>) : [];
-      const fromAgent = agents.map((a) => a?.directive).find((d) => typeof d === "string" && d.trim());
-      if (typeof fromAgent === "string") directive = fromAgent.trim();
+      // hub_invoke 레코드 형태 인지 추출 — 진짜 지시문(entry)·전역 둥지 참조(grounding)·
+      // 리스/배지 계약(next_step)을 살린다. 안 살리면 제네릭 폴백으로 전문성/기억이 증발.
+      directive = agents
+        .map((a) => extractAgentDirective(a ?? {}))
+        .filter(Boolean)
+        .join("\n\n---\n\n");
     }
   } catch {
     // 오프라인/허브 미연결 → 기본 지시로 폴백.
@@ -1010,6 +1042,7 @@ export async function runMcpInvocation(
       console.error("[architecture] recordFolderVisit failed:", err);
     }
   }
+  if (activePath) refreshCareerGraphInBackground(activePath, sink, locale);
   try {
     const memoryContext = buildMemoryContext(activePath);
     if (memoryContext) systemPrompt = `${systemPrompt}\n\n${memoryContext}`;
@@ -1303,6 +1336,8 @@ export async function runMcpInvocation(
         agentId: chat.agentId,
         chatId: chat.id,
         cwdAtRequest: workingFolder,
+        // 단일 borrow 실행 — 빌린 에이전트의 agent_repo 배움을 그 전역 둥지로 미러링.
+        borrowedAgentSlugs,
       });
       displayText = cleanedText || displayText;
     } catch (err) {

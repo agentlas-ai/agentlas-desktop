@@ -59,6 +59,70 @@ function writeAgent(root, extra = {}) {
     assert.ok(clean.manifest.packageHash.length >= 32);
     assert.ok(fs.existsSync(clean.bundlePath));
 
+    const stableRoot = path.join(tempDir, "stable-agent-folder");
+    writeAgent(stableRoot, {
+      "agentlas.json": JSON.stringify(
+        {
+          schemaVersion: "1.0",
+          slug: "stable-test-agent",
+          name: "Renamed Test Agent",
+          summary: "Stable identity should survive display-name changes.",
+        },
+        null,
+        2,
+      ) + "\n",
+    });
+    const stable = await packageAndReviewCloudAgent({
+      rootPath: stableRoot,
+      dryRun: true,
+      reviewMode: "static-only",
+    });
+    assert.equal(stable.manifest.slug, "stable-test-agent");
+    assert.equal(stable.manifest.name, "Renamed Test Agent");
+    assert.equal(stable.manifest.includedFileCount, 4);
+
+    const careerRoot = path.join(tempDir, "career-agent");
+    writeAgent(careerRoot);
+    fs.writeFileSync(
+      path.join(careerRoot, ".agentlas", "public-career-card.json"),
+      JSON.stringify(
+        {
+          schemaVersion: "1.0",
+          kind: "agentlas-public-career-card",
+          generatedAt: "2026-07-09T00:00:00Z",
+          projectName: "Career Agent",
+          indexStatus: "indexed",
+          policy: "redacted_aggregate_projection",
+          privacy: {
+            rawLocalPathsIncluded: false,
+            rawPromptsIncluded: false,
+            rawTranscriptsIncluded: false,
+            sourceTextIncluded: false,
+          },
+          counts: { sources: 1, nodes: 2, edges: 3 },
+          canonicalSources: 1,
+          staleSourceCount: 0,
+          nodeTypes: { Project: 1 },
+          writtenTo: "/tmp/should-not-leak",
+        },
+        null,
+        2,
+      ) + "\n",
+      "utf8",
+    );
+    const career = await packageAndReviewCloudAgent({
+      rootPath: careerRoot,
+      dryRun: true,
+      reviewMode: "static-only",
+    });
+    assert.equal(career.status, "dry-run");
+    assert.equal(career.manifest.careerGraph.kind, "agentlas-public-career-card");
+    assert.equal(career.manifest.careerGraph.counts.nodes, 2);
+    assert.equal(career.manifest.careerGraph.writtenTo, undefined);
+    const careerBundle = JSON.parse(fs.readFileSync(career.bundlePath, "utf8"));
+    assert.equal(careerBundle.careerGraph.kind, "agentlas-public-career-card");
+    assert.equal(JSON.stringify(careerBundle).includes("/tmp/should-not-leak"), false);
+
     const blockedRoot = path.join(tempDir, "blocked-agent");
     writeAgent(blockedRoot, { ".env": "OPENAI_API_KEY=NOT_A_REAL_OPENAI_KEY_FOR_TEST\n" });
     const blocked = await packageAndReviewCloudAgent({

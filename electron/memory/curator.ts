@@ -3,6 +3,7 @@
 // and durable persistence. The Memory Curator *agent* (LLM) remains available for explicit
 // deep curation; this is the always-on substrate that keeps memory flowing for every chat.
 import {
+  appendAgentNestSoulMemory,
   appendMemoryLog,
   appendSoulMemory,
 } from "./project-files";
@@ -30,6 +31,9 @@ export interface CurationContext {
   agentId: string | null;
   chatId: string | null;
   cwdAtRequest?: string | null;
+  /** 이 실행에 관여한 빌린(고용한) 허브 에이전트 슬러그. agent_repo 스코프 배움을
+   *  이 에이전트들의 전역 기억 둥지에도 미러링해, 다음 대여 때(다른 프로젝트여도) 실려온다. */
+  borrowedAgentSlugs?: string[];
 }
 
 export interface CurationReport {
@@ -135,6 +139,8 @@ export function curateEvents(
     discarded: 0,
   };
   const soulLines: string[] = [];
+  // agent_repo 스코프(에이전트 기술·경험) 배움 — 빌린 에이전트의 전역 둥지로 미러링할 후보.
+  const nestSoulLines: string[] = [];
 
   for (const ev of events) {
     if (ev.sensitivity === "secret" || looksSecret(ev.content)) {
@@ -204,10 +210,26 @@ export function curateEvents(
         soulLines.push(`(${ev.memory_kind}) ${ev.content}`);
       }
     }
+    // 에이전트 기술·경험(agent_repo) — 프로젝트 폴더 유무와 무관하게 빌린 에이전트의
+    // 전역 둥지로 미러링한다(크로스 프로젝트 축적). project 스코프와 달리 프로젝트 고유
+    // 정보가 아니므로 격리를 깨지 않는다.
+    if (scope === "agent_repo" && SOUL_KINDS.has(ev.memory_kind)) {
+      nestSoulLines.push(`(${ev.memory_kind}) ${ev.content}`);
+    }
   }
 
   if (ctx.projectPath && soulLines.length > 0) {
     appendSoulMemory(ctx.projectPath, soulLines);
+  }
+
+  // agent_repo 배움을 이 실행에 관여한 빌린 에이전트들의 전역 둥지에 미러링.
+  // 데스크탑 DB(agentId 기반 agent_repo)와 Hephaestus 대여 엔진이 읽는 둥지(slug 기반)를
+  // 잇는 배선 — 이게 없으면 배움이 DB에만 남고 다음 대여 때 엔진이 못 읽는다.
+  const nestSlugs = [...new Set((ctx.borrowedAgentSlugs ?? []).map((s) => s.trim()).filter(Boolean))];
+  if (nestSoulLines.length > 0 && nestSlugs.length > 0) {
+    for (const slug of nestSlugs) {
+      appendAgentNestSoulMemory(slug, nestSoulLines);
+    }
   }
 
   return report;

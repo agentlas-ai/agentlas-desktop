@@ -7,7 +7,7 @@
 //
 // 호출 방식: bin/hephaestus(bash) 래퍼를 거치지 않고, 그 래퍼와 동일한 runpy 부트스트랩을
 // python 인터프리터에 직접 주입한다. 덕분에 Windows(.cmd/bash 불필요)·macOS·Linux 에서
-// 동일하게 동작하고, 엔진은 `agentlas_cloud`/`ontology` 모듈로 실행된다.
+// 동일하게 동작하고, 엔진은 `agentlas_cloud`/`ontology`/`career_graph` 모듈로 실행된다.
 import crossSpawn from "cross-spawn";
 import fs from "node:fs";
 import os from "node:os";
@@ -19,7 +19,7 @@ import { currentUiLocale } from "../main";
 
 // bin/hephaestus 의 `run_python_module` 과 바이트 동일한 부트스트랩.
 // `python -c <BOOTSTRAP> <module> <args...>` 형태로 호출하면 sys.argv[0] 이 모듈명이 되고,
-// runpy 가 해당 패키지의 __main__ 을 실행한다(= agentlas_cloud.cli.main / ontology.cli).
+// runpy 가 해당 패키지의 __main__ 을 실행한다(= agentlas_cloud.cli.main / ontology.cli / career_graph.cli).
 const PY_BOOTSTRAP =
   "import os, runpy, sys; " +
   'cwd=os.getcwd(); root=os.environ["HEPHAESTUS_RUNTIME_ROOT"]; ' +
@@ -28,7 +28,7 @@ const PY_BOOTSTRAP =
   "sys.argv=sys.argv[1:]; " +
   'runpy.run_module(sys.argv[0], run_name="__main__", alter_sys=True)';
 
-export type HephaestusModule = "agentlas_cloud" | "ontology";
+export type HephaestusModule = "agentlas_cloud" | "ontology" | "career_graph";
 
 export interface HephaestusRunOptions {
   /** 엔진 실행 작업 디렉터리(보통 채팅 워크스페이스 폴더). 미지정 시 임시 안전 디렉터리. */

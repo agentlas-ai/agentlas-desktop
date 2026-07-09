@@ -35,7 +35,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged).
 
-export const ARCHITECTURE_VERSION = "1.5.34";
+export const ARCHITECTURE_VERSION = "1.5.35";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -117,6 +117,10 @@ export const ONTOLOGY_RUNTIME_FILE = "ontology-runtime.json";
 export const ONTOLOGY_SOURCE_MANIFEST_FILE = "ontology-sources.json";
 export const ONTOLOGY_INBOX_DIR = "ontology-inbox";
 export const ONTOLOGY_DB_FILE = "ontology-runtime.sqlite";
+export const CAREER_GRAPH_CONFIG_FILE = "career-graph.json";
+export const CAREER_GRAPH_SOURCE_MANIFEST_FILE = "career-graph-sources.json";
+export const CAREER_GRAPH_INBOX_DIR = "career-graph-inbox";
+export const CAREER_GRAPH_DB_FILE = "career-graph.sqlite";
 export const SUPER_ONTOLOGY_CONTRACT_FILE = "super-ontology-contract.json";
 export const SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE = "super-ontology-open-world-coverage.json";
 export const SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE = "super-ontology-consensus-coordination.json";

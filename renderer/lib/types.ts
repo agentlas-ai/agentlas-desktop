@@ -95,6 +95,8 @@ export type {
   HubCreditBalance,
   Chat,
   ChatHistoryEntry,
+  HiredAgentCard,
+  HiredRosterItem,
   CloudAgentPackageFile,
   CloudAgentPackageManifest,
   CloudAgentPackageResult,
