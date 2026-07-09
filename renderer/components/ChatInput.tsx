@@ -185,6 +185,7 @@ export function ChatInput({
   onToggleSwarm,
   queuedCount = 0,
   prefillText = null,
+  activeChatId = null,
 }: {
   onSend: (text: string, opts?: SendOptions) => void;
   /** 슬래시 커맨드(/new, /clear, /help …) 실행 — 텍스트 삽입이 아니라 액션 */
@@ -226,6 +227,8 @@ export function ChatInput({
   queuedCount?: number;
   /** 외부 프리필(프롬프트 저장소 seedOnly) — 입력창이 비었을 때 1회 주입, 전송은 사용자가. */
   prefillText?: string | null;
+  /** 현재 채팅 id — 바뀌면 세션 전용 실행 상태(추천 시트·모드 토글)를 리셋해 세션 간 누수 방지. */
+  activeChatId?: string | null;
 }) {
   const { t, locale } = useT();
   const [input, setInput] = useState("");
@@ -277,6 +280,28 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lastActiveAgentIdRef = useRef<string | null | undefined>(undefined);
   const autocompleteSignatureRef = useRef<string>("");
+
+  // 세션 격리 — 채팅을 바꾸면 이전 세션의 실행 의도 상태(추천 시트·모드 토글·선택)를 버린다.
+  // ChatInput은 채팅별로 remount되지 않아서, 이게 없으면 A에서 연 추천 바텀시트가 B로 넘어가
+  // "쓰기"를 누르면 B(지금 세션)로 엉뚱하게 에이전트가 콜된다. (드래프트 텍스트는 유지.)
+  const lastChatIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (lastChatIdRef.current === null) {
+      lastChatIdRef.current = activeChatId;
+      return;
+    }
+    if (lastChatIdRef.current === activeChatId) return;
+    lastChatIdRef.current = activeChatId;
+    setRecSheet(null);
+    setHepToggles(new Set());
+    setPlanMode(false);
+    setGoalMode(false);
+    setAppsGenerateMode(false);
+    setAppsGenerateQuestionOpen(false);
+    setAgentPickerOpen(false);
+    setSelectedAgentIds(new Set());
+    setTrigger(null);
+  }, [activeChatId]);
 
   // 입력 내용에 따라 textarea 높이를 늘린다(auto-grow) — 최대치까지 자라고 그 뒤엔 내부 스크롤.
   // 전송 후 비우기·자동완성 삽입 같은 프로그램적 변경도 input 값 변화로 함께 반영된다.

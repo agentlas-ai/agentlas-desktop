@@ -100,12 +100,26 @@ export function isGlobalOrchestrator(agent: InstalledAgent | null | undefined): 
 const PLAIN_CONVERSATION_RE =
   /^(안녕(하세요)?|하이|헬로|반가워요?|고마워요?|감사(합니다|해요?)?|잘\s?자요?|수고(했어|하세요)?요?|응|넵?|네|예|좋아요?|오케이|okay|ok|ㅇㅋ|ㄱㅅ|ㅋ+|ㅎ+|hi|hello|hey|thanks?|thank you|good (morning|night|evening)|bye|잘가요?|화이팅|파이팅|테스트|test)[!.~^\s]*$/i;
 
-/** 라우팅이 불필요한 일상 대화인지 판정. true면 스코어러/routeOnly를 건너뛴다. */
+// 짧은 상태확인·확인 질문("…맞지?", "…됐어?", "…한 거 맞아?")은 이전 작업에 대한 되물음이라
+// 전문 에이전트로 라우팅하면 오히려 엉뚱하다(현재 에이전트/기본 LLM이 답해야 함).
+// 단, 실제 작업 지시(걸어줘/만들어/올려줘 등 명령형)가 섞이면 plain 아님 — 라우팅 유지.
+const STATE_CHECK_TAIL_RE =
+  /(맞지|맞아|맞나|맞죠|맞음|됐어|됐지|됐나|됐죠|됐음|했어|했지|했나|한\s?거|된\s?거|건\s?거|되나요?|되었나요?|맞나요?|안\s?됐어|안\s?돼|right|done|set\s?up|finished)[\s?!.~]*$/i;
+// 명령형 지시만 제외한다 — 확인 어미로 끝나는 문장은 이미 "질문"이므로,
+// "생성 다 한 거 맞아?"처럼 동사 어간이 과거/명사로 쓰인 되물음까지 막지 않도록
+// "…해줘/올려줘/걸어줘/주세요" 같은 명령형 어미와 영어 명령문 시작만 액션으로 본다.
+const ACTION_VERB_RE =
+  /(줘|주세요|해라|하라|해줄래|please\s|^(make|create|upload|deploy|run|build|add|delete|schedule|set up)\b)/i;
+
+/** 라우팅이 불필요한 일상 대화/되물음인지 판정. true면 스코어러/routeOnly를 건너뛴다. */
 export function isPlainConversationalPrompt(prompt: string): boolean {
   const p = prompt.trim();
   if (!p) return true;
   if (p.length > 40) return false; // 긴 메시지는 항상 라우팅 후보
-  return PLAIN_CONVERSATION_RE.test(p);
+  if (PLAIN_CONVERSATION_RE.test(p)) return true;
+  // 짧은 상태확인 되물음: 확인 어미로 끝나고 명령형 동사가 없으면 즉답.
+  if (STATE_CHECK_TAIL_RE.test(p) && !ACTION_VERB_RE.test(p)) return true;
+  return false;
 }
 
 // 멀티도메인 신호 — 병렬/팀/파이프라인 의도가 보이면 Hephaestus 에스컬레이션 가치가 있다.

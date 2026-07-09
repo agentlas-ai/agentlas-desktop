@@ -2910,6 +2910,7 @@ function ChatPage() {
           }}
           queuedCount={queuedSteers.length}
           prefillText={composerPrefill}
+          activeChatId={chat.id}
           onCommand={handleCommand}
           onCallAgent={(agentId) => void switchAgent(agentId)}
           onRecommendPreview={handleRecommendPreview}
