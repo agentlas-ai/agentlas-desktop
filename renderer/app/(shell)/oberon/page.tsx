@@ -54,6 +54,7 @@ import { PlanStep } from "@/components/oberon/PlanStep";
 import { ShotBoard } from "@/components/oberon/ShotBoard";
 import { AssetBible } from "@/components/oberon/AssetBible";
 import { KeyframeStep } from "@/components/oberon/KeyframeStep";
+import { CinematicWorkflowPanel } from "@/components/oberon/CinematicWorkflowPanel";
 import { AnimatePanel } from "@/components/oberon/AnimatePanel";
 import { MotionGraphicsPanel } from "@/components/oberon/MotionGraphicsPanel";
 import { TimelineEditor, DeliveryPanel } from "@/components/oberon/panels";
@@ -1117,18 +1118,25 @@ export default function OberonPage() {
         return <AssetBible production={production} model={model} approved={isDone("assets")} onApprove={approveAssets} />;
       case "keyframe":
         return (
-          <KeyframeStep
-            production={production}
-            model={model}
-            progress={kfProgress}
-            generating={kfGenerating}
-            done={kfDone}
-            approved={isDone("keyframe")}
-            job={keyframeJob}
-            onStart={startKeyframes}
-            onApprove={() => complete("keyframe")}
-            onOpenOutput={(jobId) => void ipc()?.oberon.openKeyframeOutput(jobId)}
-          />
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <CinematicWorkflowPanel
+              productionId={production.id}
+              title={production.brief.title}
+              imageProvider={model.imageProvider}
+            />
+            <KeyframeStep
+              production={production}
+              model={model}
+              progress={kfProgress}
+              generating={kfGenerating}
+              done={kfDone}
+              approved={isDone("keyframe")}
+              job={keyframeJob}
+              onStart={startKeyframes}
+              onApprove={() => complete("keyframe")}
+              onOpenOutput={(jobId) => void ipc()?.oberon.openKeyframeOutput(jobId)}
+            />
+          </div>
         );
       case "video":
         return (

@@ -84,7 +84,7 @@
     "smoke:surface": "npm run build:electron && node scripts/smoke-surface-emitter.cjs",
     "smoke:multimodal": "npm run build:electron && node scripts/smoke-multimodal-settings.cjs",
     "smoke:oberon-motion": "npm run build:electron && electron scripts/smoke-oberon-motion-ad.cjs",
-    "test:oberon-cinematic-guide": "npm run build:electron && node scripts/test-oberon-cinematic-guide.cjs",
+    "test:oberon-cinematic": "npm run build:electron && node scripts/test-oberon-cinematic.cjs",
     "typecheck": "tsc -p electron/tsconfig.json --noEmit && node -e \"require('fs').rmSync('renderer/.next',{recursive:true,force:true,maxRetries:5,retryDelay:100})\" && cd renderer && tsc --noEmit",
     "parity:doctor": "bash -c '[ -f ../scripts/sync-runtime-doctor.sh ] && exec bash ../scripts/sync-runtime-doctor.sh; echo \"parity:doctor skipped (sibling scripts/ not present — CI checkout)\"'",
     "lint": "next lint --dir renderer",

@@ -45,11 +45,11 @@ export async function planOberonWithCli(request: OberonPlanRequest): Promise<Obe
             "For commercials, the final beat is always the product + slogan key visual. Audio for commercials defaults to NO BGM — dialogue plus ambient SFX only; put that in mustInclude/mustAvoid when relevant.",
             "Vary camera language across beats — no two adjacent beats share the same angle/composition.",
             "Where dialogue or narration helps, keep lines short, speakable, and in the brief's language so they can be lip-synced and captioned downstream.",
-            // 시네마틱 이미지 생성 가이드(율파파) 독트린 — 아래 인용 문장은 가이드 원문 그대로다.
-            // 전문 사본: docs/oberon-cinematic-guide/ch1~10.md, 빌더: shared/oberon-cinematic-guide.ts
-            "CINEMATIC GUIDE WORKFLOW (follow verbatim): 흐름은 단일 컷으로 의도 확인 → 3x3 그리드로 커버리지 → 개별 추출 → 수정 → 영상화·편집입니다. 그리드는 한 번에 완벽하게 나오지 않습니다. 쓸 만한 패널만 셀렉트하거나, 행별 샷을 지정해 재생성하세요. 추출 후에는 180도 법칙 위반 같은 세부 수정을 거쳐 편집으로 넘어갑니다.",
-            "CINEMATIC GUIDE SHOT ELEMENTS: 한 컷의 기본 요소는 네 가지 — 프레이밍(얼마나 가까이), 앵글(어디서), 조명(어떤 빛), 색감(어떤 톤). 프롬프트에 이 네 가지 정보가 들어가야 원하는 시네마틱 컷이 나옵니다. 장면의 감정은 네 개의 레버로 조절합니다 — 조명, 필름·질감, 구도·앵글, 색. 네 개를 전부 밀어붙이지 말고, 장면마다 한두 개만 확실히 밀어주세요.",
-            "CINEMATIC GUIDE PROMPT RULES: 하나의 프롬프트에는 하나의 순간만 담습니다. 감정은 조명, 색감, 프레이밍으로 번역해야 합니다. 구체적인 시각 정보(샷 사이즈, 조명 방향, 렌즈 느낌)가 추상적 품질 키워드보다 훨씬 효과적입니다. 'cinematic, photorealistic, film grain' 정도면 충분합니다. 처음에는 6하원칙(누가·언제·어디서·어떻게·무엇을·왜)으로 시작하세요.",
+            // 커버리지 워크플로우 독트린 — 표준 촬영 문법을 Oberon 자체 표현으로 정리한 것.
+            // 빌더/스캐폴드: shared/oberon-cinematic.ts
+            "COVERAGE WORKFLOW: 단일 컷으로 의도를 먼저 확인한 뒤 커버리지 그리드(또는 4단 스택)로 여러 샷을 한 번에 뽑고, 쓸 패널만 골라 개별 추출하고, 180도 법칙 같은 연속성 오류를 수정한 다음 영상화·편집으로 넘긴다. 그리드는 한 번에 완벽히 나오지 않으니 부분 셀렉트나 행별 샷 지정 재생성을 전제로 계획한다.",
+            "SHOT ELEMENTS: 각 컷은 프레이밍(샷 사이즈), 앵글, 조명, 색감 네 요소로 규정한다. 감정은 조명·질감·구도·색의 레버로 조절하되 한 장면에서 한두 레버만 확실히 밀어 과장을 피한다.",
+            "PROMPT RULES: 한 프롬프트에는 한 순간만 담는다. 감정은 조명·색감·프레이밍 같은 구체적 시각 정보로 번역하고, 추상적 품질 키워드 나열은 피한다. 장면은 6하원칙(누가·언제·어디서·어떻게·무엇을·왜)으로 분해해 시작한다.",
             "Keep the output compact and safe for deterministic downstream planning.",
           ].join("\n"),
           history: [],

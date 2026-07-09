@@ -22,7 +22,7 @@ export type OberonSheetKind =
   | "master_sheet_v2"
   | "storyboard_overview"
   | "cut_breakdown"
-  // 시네마틱 가이드(7장) 커버리지 워크플로우 — shared/oberon-cinematic-guide.ts 빌더가 프롬프트를 만든다.
+  // 커버리지 워크플로우 — shared/oberon-cinematic.ts 빌더가 프롬프트를 만든다.
   | "scene_grid_3x3"
   | "scene_stack_4"
   | "storyboard_sequence";
