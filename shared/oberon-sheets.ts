@@ -21,7 +21,11 @@ export type OberonSheetKind =
   | "master_sheet_v1"
   | "master_sheet_v2"
   | "storyboard_overview"
-  | "cut_breakdown";
+  | "cut_breakdown"
+  // 시네마틱 가이드(7장) 커버리지 워크플로우 — shared/oberon-cinematic-guide.ts 빌더가 프롬프트를 만든다.
+  | "scene_grid_3x3"
+  | "scene_stack_4"
+  | "storyboard_sequence";
 
 export type OberonSheetMode = "character" | "product";
 
@@ -291,5 +295,13 @@ export function sheetAspect(kind: OberonSheetKind): string {
 }
 
 export function sheetAssetKind(kind: OberonSheetKind): "master_sheet" | "storyboard_sheet" {
-  return kind === "storyboard_overview" || kind === "cut_breakdown" ? "storyboard_sheet" : "master_sheet";
+  // 시네마틱 가이드 커버리지 시트(그리드/스택/스토리보드 시퀀스)는 콘티 계열 —
+  // keyframes.buildImagePrompt가 완성 프롬프트를 가공 없이 통과시키는 경로를 탄다.
+  return kind === "storyboard_overview" ||
+    kind === "cut_breakdown" ||
+    kind === "scene_grid_3x3" ||
+    kind === "scene_stack_4" ||
+    kind === "storyboard_sequence"
+    ? "storyboard_sheet"
+    : "master_sheet";
 }

@@ -2880,7 +2880,11 @@ export type OberonSheetKindInput =
   | "master_sheet_v1"
   | "master_sheet_v2"
   | "storyboard_overview"
-  | "cut_breakdown";
+  | "cut_breakdown"
+  // 시네마틱 가이드(7장) 커버리지 워크플로우: 3x3 그리드 / 4단 스택 / 스토리보드 시퀀스.
+  | "scene_grid_3x3"
+  | "scene_stack_4"
+  | "storyboard_sequence";
 
 export interface OberonSheetItemInput {
   /** 시트 id — 캐릭터 시트면 reference id, 콘티면 "storyboard_overview" 등. */
