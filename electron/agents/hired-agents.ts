@@ -17,6 +17,21 @@ import { findCardForAgent } from "./routing-cards";
 const CACHE_TTL_MS = 30_000;
 let cache: { loadedAt: number; items: HiredRosterItem[] } | null = null;
 
+/**
+ * Agentlas-OS/Hephaestus 내부 시스템 에이전트인가.
+ * Stormbreaker·route·hep-network 가 사용자 요청을 처리하며 자기 인프라 에이전트
+ * (감사·리서치 코퍼스)를 후보로 빌리면 networking/hub-agents 에 둥지가 생긴다.
+ * 이들은 마켓플레이스 제품이 아니라 엔진 내부 부품이므로 사용자용 "고용 중"
+ * 로스터에 노출하면 안 된다.
+ *   - researcher-<번호>-*        : Agentlas-OS 리서치/감사 코퍼스(001~NNN)
+ *   - research-intelligence-desk : 그 코퍼스의 오케스트레이터
+ *   - hephaestus-*               : Hephaestus 엔진 인프라
+ */
+export function isInternalAgentSlug(slug: string): boolean {
+  const s = String(slug || "").toLowerCase();
+  return /^researcher-\d+/.test(s) || s === "research-intelligence-desk" || s.startsWith("hephaestus-");
+}
+
 function networkingRoot(): string {
   return path.join(os.homedir(), ".agentlas", "networking");
 }
@@ -71,6 +86,7 @@ export function listHiredAgents(): HiredRosterItem[] {
 
   const items: HiredRosterItem[] = [];
   for (const slug of slugs) {
+    if (isInternalAgentSlug(slug)) continue; // 엔진 내부 에이전트는 사용자 로스터에서 숨김
     const lease = leases[slug];
     const leasedUntil = typeof lease?.leased_until === "string" ? lease.leased_until : undefined;
     const leaseActive = Boolean(leasedUntil && Date.parse(leasedUntil) > now);
