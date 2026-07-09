@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.7.25",
+  "version": "0.7.26",
   "description": "Agentlas Desktop \u2014 local Apps OS for AI-native tools and agent teams. BYOC: \uc0ac\uc6a9\uc790 Claude/ChatGPT/Gemini \uad6c\ub3c5 \uadf8\ub300\ub85c.",
   "private": true,
   "license": "Apache-2.0",
