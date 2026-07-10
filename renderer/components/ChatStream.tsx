@@ -136,64 +136,470 @@ export function ChatStream({
   const { t } = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const scrollingToBottomRef = useRef(false);
+  const [awayFromBottom, setAwayFromBottom] = useState(false);
+  const [hasNewContent, setHasNewContent] = useState(false);
   const last = messages[messages.length - 1];
   const scrollSignal = last
     ? `${messages.length}:${last.id}:${last.text.length}:${last.busy ? 1 : 0}:${last.streaming ? 1 : 0}:${last.steps?.length ?? 0}`
     : "empty";
+  const previousScrollSignalRef = useRef(scrollSignal);
 
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el || !stickToBottomRef.current) return;
+    if (!el) return;
+    const contentChanged = previousScrollSignalRef.current !== scrollSignal;
+    previousScrollSignalRef.current = scrollSignal;
+
+    if (messages.length === 0) {
+      stickToBottomRef.current = true;
+      scrollingToBottomRef.current = false;
+      setAwayFromBottom(false);
+      setHasNewContent(false);
+      el.scrollTop = 0;
+      return;
+    }
+
+    if (!stickToBottomRef.current) {
+      if (contentChanged) setHasNewContent(true);
+      return;
+    }
+
+    setAwayFromBottom(false);
+    setHasNewContent(false);
     const handle = window.requestAnimationFrame(() => {
       el.scrollTop = el.scrollHeight;
     });
     return () => window.cancelAnimationFrame(handle);
-  }, [scrollSignal]);
+  }, [messages.length, scrollSignal]);
 
   function handleScroll() {
     const el = scrollRef.current;
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    stickToBottomRef.current = distanceFromBottom < 96;
+    const atBottom = distanceFromBottom < 96;
+    if (scrollingToBottomRef.current && !atBottom) return;
+    scrollingToBottomRef.current = false;
+    stickToBottomRef.current = atBottom;
+    setAwayFromBottom(!atBottom);
+    if (atBottom) setHasNewContent(false);
+  }
+
+  function cancelProgrammaticScroll() {
+    // A wheel/touch/pointer gesture during smooth scrolling is an explicit
+    // user takeover. Let the following scroll event recompute stickiness;
+    // otherwise scrollingToBottomRef can stay true forever after interruption.
+    scrollingToBottomRef.current = false;
+  }
+
+  function scrollToLatest() {
+    const el = scrollRef.current;
+    if (!el) return;
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    stickToBottomRef.current = true;
+    scrollingToBottomRef.current = !reduceMotion;
+    setHasNewContent(false);
+    if (reduceMotion) {
+      el.scrollTop = el.scrollHeight;
+      setAwayFromBottom(false);
+      return;
+    }
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }
 
   return (
     <div
-      ref={scrollRef}
-      onScroll={handleScroll}
+      className="agentlas-chat-stream"
       style={{
         flex: 1,
+        minHeight: 0,
         minWidth: 0,
-        overflowY: messages.length === 0 ? "hidden" : "auto",
-        // 좁은 pane에서 넓은 콘텐츠(코드블록·표·긴 URL)가 챗창 전체를 옆으로 밀어 깨뜨리지
-        // 않게 가로 오버플로는 여기서 차단 — 스크롤은 각 블록(pre/table)이 자체 처리한다.
-        overflowX: "hidden",
-        padding: messages.length === 0 ? "20px 28px" : "24px 32px",
-        background: "var(--paper)",
+        position: "relative",
         display: "flex",
-        flexDirection: "column",
-        gap: 16,
       }}
     >
-      {messages.map((m) => (
-        <Bubble
-          key={m.id}
-          message={m}
-          agentName={agentName}
-          agentTone={agentTone}
-          onOpenArtifact={onOpenArtifact}
-          onOpenMedia={onOpenMedia}
-          onOpenLinkedFile={onOpenLinkedFile}
-          onOpenWorkflow={onOpenWorkflow}
-          onStop={onStop}
-          onAnswerQuestion={onAnswerQuestion}
-          onOpenMultimodalSetup={onOpenMultimodalSetup}
-          interactionBusy={interactionBusy}
-          stopRequested={stopRequested}
-          mediaBasePaths={mediaBasePaths}
-        />
-      ))}
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        onWheel={cancelProgrammaticScroll}
+        onTouchStart={cancelProgrammaticScroll}
+        onPointerDown={cancelProgrammaticScroll}
+        className="agentlas-chat-stream-scroll"
+        style={{
+          flex: 1,
+          minHeight: 0,
+          overflowY: "auto",
+          // 좁은 pane에서 넓은 콘텐츠(코드블록·표·긴 URL)가 챗창 전체를 옆으로 밀어 깨뜨리지
+          // 않게 가로 오버플로는 여기서 차단 — 스크롤은 각 블록(pre/table)이 자체 처리한다.
+          overflowX: "hidden",
+          padding: messages.length === 0
+            ? "var(--chat-stream-empty-padding, 20px 28px)"
+            : "var(--chat-stream-padding, 24px 32px)",
+          background: "var(--paper)",
+          display: "flex",
+          flexDirection: "column",
+          gap: 16,
+        }}
+      >
+        {messages.length === 0 && (
+          <EmptyChatState agentName={agentName} directory={emptyDirectory} />
+        )}
+        {messages.map((m) => (
+          <Bubble
+            key={m.id}
+            message={m}
+            agentName={agentName}
+            agentTone={agentTone}
+            onOpenArtifact={onOpenArtifact}
+            onOpenMedia={onOpenMedia}
+            onOpenLinkedFile={onOpenLinkedFile}
+            onOpenWorkflow={onOpenWorkflow}
+            onStop={onStop}
+            onAnswerQuestion={onAnswerQuestion}
+            onOpenMultimodalSetup={onOpenMultimodalSetup}
+            interactionBusy={interactionBusy}
+            stopRequested={stopRequested}
+            mediaBasePaths={mediaBasePaths}
+          />
+        ))}
+      </div>
+
+      {messages.length > 0 && awayFromBottom && (
+        <button
+          type="button"
+          className="agentlas-chat-latest-button"
+          onClick={scrollToLatest}
+          aria-label={hasNewContent ? t("chatstream.new_messages") : t("chatstream.scroll_to_bottom")}
+        >
+          <span aria-hidden>↓</span>
+          <span>{hasNewContent ? t("chatstream.new_messages") : t("chatstream.scroll_to_bottom")}</span>
+        </button>
+      )}
+      <span className="sr-only" aria-live="polite">
+        {hasNewContent ? t("chatstream.new_messages") : ""}
+      </span>
+
+      <style jsx global>{`
+        .agentlas-chat-stream-scroll {
+          scrollbar-gutter: stable;
+        }
+        .agentlas-chat-empty {
+          width: min(820px, 100%);
+          margin: auto;
+          padding: 28px 0;
+        }
+        .agentlas-chat-empty-header {
+          max-width: 620px;
+          margin: 0 auto 24px;
+          text-align: center;
+        }
+        .agentlas-chat-empty-header h2 {
+          margin: 0;
+          color: var(--ink);
+          font-size: clamp(22px, 3vw, 30px);
+          font-weight: 720;
+          letter-spacing: -0.035em;
+          line-height: 1.16;
+        }
+        .agentlas-chat-empty-header p {
+          margin: 9px 0 0;
+          color: var(--muted-deep);
+          font-size: 13px;
+          line-height: 1.55;
+        }
+        .agentlas-chat-empty-directory {
+          border: 1px solid var(--paper-edge);
+          border-radius: 18px;
+          background: var(--paper-raised, var(--paper));
+          box-shadow: var(--shadow-sm);
+          overflow: hidden;
+        }
+        .agentlas-chat-empty-directory-intro {
+          padding: 16px 18px 14px;
+          border-bottom: 1px solid var(--paper-edge);
+        }
+        .agentlas-chat-empty-directory-intro strong {
+          display: block;
+          color: var(--ink);
+          font-size: 13px;
+          line-height: 1.3;
+        }
+        .agentlas-chat-empty-directory-intro span {
+          display: block;
+          margin-top: 4px;
+          color: var(--muted-deep);
+          font-size: 11.5px;
+          line-height: 1.45;
+        }
+        .agentlas-chat-empty-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 1px;
+          background: var(--paper-edge);
+        }
+        .agentlas-chat-empty-group {
+          min-width: 0;
+          padding: 15px 18px 17px;
+          background: var(--paper-raised, var(--paper));
+        }
+        .agentlas-chat-empty-group:last-child:nth-child(odd) {
+          grid-column: 1 / -1;
+        }
+        .agentlas-chat-empty-group h3 {
+          margin: 0 0 10px;
+          color: var(--muted-deep);
+          font: 650 10px/1.2 var(--font-mono);
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }
+        .agentlas-chat-empty-list {
+          display: grid;
+          gap: 7px;
+          margin: 0;
+          padding: 0;
+          list-style: none;
+        }
+        .agentlas-chat-empty-item {
+          min-width: 0;
+          display: grid;
+          grid-template-columns: minmax(86px, auto) minmax(0, 1fr);
+          align-items: baseline;
+          gap: 10px;
+        }
+        .agentlas-chat-empty-item code {
+          overflow: hidden;
+          color: var(--accent-strong, var(--accent));
+          font: 600 11px/1.45 var(--font-mono);
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .agentlas-chat-empty-item span {
+          overflow: hidden;
+          color: var(--ink-soft);
+          font-size: 11.5px;
+          line-height: 1.45;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .agentlas-chat-latest-button {
+          position: absolute;
+          z-index: 4;
+          left: 50%;
+          bottom: 14px;
+          transform: translateX(-50%);
+          display: inline-flex;
+          align-items: center;
+          gap: 7px;
+          min-height: 34px;
+          padding: 7px 12px;
+          border: 1px solid var(--paper-edge);
+          border-radius: 999px;
+          background: var(--paper-raised, var(--paper));
+          box-shadow: var(--shadow-md);
+          color: var(--ink);
+          font: 650 11.5px/1 var(--font-body);
+          cursor: pointer;
+        }
+        .agentlas-chat-latest-button:hover {
+          border-color: color-mix(in srgb, var(--accent) 36%, var(--paper-edge));
+          color: var(--accent-strong, var(--accent));
+        }
+        .agentlas-chat-latest-button:focus-visible {
+          outline: 2px solid var(--accent);
+          outline-offset: 2px;
+        }
+        .agentlas-chat-copy-button {
+          padding: 3px 10px;
+          border: 1px solid var(--paper-edge);
+          border-radius: 999px;
+          background: transparent;
+          color: var(--muted-deep);
+          font-size: 11px;
+          line-height: 1.35;
+          cursor: pointer;
+          transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+        }
+        .agentlas-chat-copy-button:hover {
+          border-color: color-mix(in srgb, var(--ink-soft) 28%, var(--paper-edge));
+          background: var(--fill-1);
+          color: var(--ink);
+        }
+        .agentlas-chat-copy-button:focus-visible {
+          outline: 2px solid var(--accent);
+          outline-offset: 2px;
+        }
+        .agentlas-chat-copy-button[data-copy-state="copied"] {
+          border-color: color-mix(in srgb, var(--green-deep) 34%, var(--paper-edge));
+          background: color-mix(in srgb, var(--green-deep) 8%, var(--paper));
+          color: var(--green-deep);
+        }
+        .agentlas-chat-copy-button[data-copy-state="error"] {
+          border-color: color-mix(in srgb, var(--red-deep) 32%, var(--paper-edge));
+          background: color-mix(in srgb, var(--red-deep) 7%, var(--paper));
+          color: var(--red-deep);
+        }
+        .agentlas-chat-streaming-cursor {
+          display: inline-block;
+          width: 7px;
+          height: 14px;
+          margin-left: 2px;
+          vertical-align: text-bottom;
+          border-radius: 1px;
+          background: var(--accent);
+          animation: agentlas-chat-cursor-blink 1s steps(1, end) infinite;
+        }
+        @keyframes agentlas-chat-cursor-blink {
+          0%, 46% { opacity: 0.68; }
+          47%, 100% { opacity: 0.12; }
+        }
+        @media (max-width: 640px) {
+          .agentlas-chat-stream {
+            --chat-stream-empty-padding: 16px;
+            --chat-stream-padding: 18px 16px 24px;
+          }
+          .agentlas-chat-empty {
+            padding: 12px 0 18px;
+          }
+          .agentlas-chat-empty-header {
+            margin-bottom: 18px;
+            text-align: left;
+          }
+          .agentlas-chat-empty-header h2 {
+            font-size: 23px;
+            line-height: 1.22;
+          }
+          .agentlas-chat-empty-grid {
+            grid-template-columns: 1fr;
+          }
+          .agentlas-chat-empty-group:last-child:nth-child(odd) {
+            grid-column: auto;
+          }
+          .agentlas-chat-latest-button {
+            bottom: 10px;
+            max-width: calc(100% - 32px);
+          }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .agentlas-chat-streaming-cursor {
+            animation: none;
+            opacity: 0.55;
+          }
+          .agentlas-chat-latest-button {
+            scroll-behavior: auto;
+          }
+          .agentlas-chat-copy-button {
+            transition: none;
+          }
+        }
+      `}</style>
     </div>
+  );
+}
+
+interface EmptyDirectoryItem {
+  id: string;
+  token: string;
+  label: string;
+}
+
+function EmptyChatState({
+  agentName,
+  directory,
+}: {
+  agentName: string;
+  directory?: ChatEmptyDirectory;
+}) {
+  const { t, locale } = useT();
+  const sections = useMemo(() => {
+    if (!directory) return [];
+    const apps: EmptyDirectoryItem[] = directory.apps.slice(0, 3).map((app) => ({
+      id: `app-${app.id}`,
+      token: app.slashCommands[0] ?? `/${app.slug}`,
+      label: locale === "en" ? app.nameEn || app.name : app.name,
+    }));
+    const commands: EmptyDirectoryItem[] = directory.commands.slice(0, 4).map((command) => ({
+      id: `command-${command.source}-${command.name}`,
+      token: command.name,
+      label: command.description || command.source,
+    }));
+    const mentions: EmptyDirectoryItem[] = [
+      ...directory.agents
+        .filter((agent) => agent.visibility !== "background" && agent.visibility !== "private")
+        .slice(0, 2)
+        .map((agent) => ({
+          id: `agent-${agent.id}`,
+          token: `@${locale === "en" ? agent.nameEn || agent.name : agent.name}`,
+          label: t("chatstream.empty_mention_agent"),
+        })),
+      ...directory.firms.slice(0, 1).map((firm) => ({
+        id: `firm-${firm.id}`,
+        token: `@${locale === "en" ? firm.nameEn || firm.name : firm.name}`,
+        label: t("chatstream.empty_mention_firm"),
+      })),
+      ...directory.projects.slice(0, 1).map((project) => ({
+        id: `project-${project.id}`,
+        token: `@${project.name}`,
+        label: t("chatstream.empty_mention_project"),
+      })),
+      ...directory.envKeys.slice(0, 1).map((key) => ({
+        id: `env-${key}`,
+        token: `@${key}`,
+        label: t("chatstream.empty_mention_env"),
+      })),
+    ];
+    const plugins: EmptyDirectoryItem[] = directory.plugins
+      .filter((plugin) => plugin.enabled)
+      .slice(0, 4)
+      .map((plugin) => ({
+        id: `plugin-${plugin.id}`,
+        token: locale === "en" ? plugin.nameEn || plugin.name : plugin.name,
+        label: plugin.transport.toUpperCase(),
+      }));
+
+    return [
+      { id: "apps", title: t("chatstream.empty_section.apps"), items: apps },
+      { id: "commands", title: t("chatstream.empty_section.commands"), items: commands },
+      { id: "context", title: t("chatstream.empty_section.context"), items: mentions },
+      { id: "plugins", title: t("chatstream.empty_section.plugins"), items: plugins },
+    ].filter((section) => section.items.length > 0);
+  }, [directory, locale, t]);
+
+  return (
+    <section className="agentlas-chat-empty" aria-labelledby="agentlas-chat-empty-title">
+      <header className="agentlas-chat-empty-header">
+        <h2 id="agentlas-chat-empty-title">{t("chatstream.empty_title", { name: agentName })}</h2>
+        <p>{t("chatstream.empty_hint")}</p>
+      </header>
+      {directory && (
+        <div className="agentlas-chat-empty-directory">
+          <div className="agentlas-chat-empty-directory-intro">
+            <strong>{t("chatstream.empty_commands_title")}</strong>
+            <span>{t("chatstream.empty_commands_hint")}</span>
+          </div>
+          {sections.length > 0 && (
+            <div className="agentlas-chat-empty-grid">
+              {sections.map((section) => (
+                <section
+                  key={section.id}
+                  className="agentlas-chat-empty-group"
+                  aria-label={section.title}
+                >
+                  <h3>{section.title}</h3>
+                  <ul className="agentlas-chat-empty-list">
+                    {section.items.map((item) => (
+                      <li key={item.id} className="agentlas-chat-empty-item" title={`${item.token} — ${item.label}`}>
+                        <code>{item.token}</code>
+                        <span>{item.label}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -227,7 +633,7 @@ const Bubble = memo(function Bubble({
   stopRequested: boolean;
   mediaBasePaths: string[];
 }) {
-  const { t, locale } = useT();
+  const { locale } = useT();
   if (message.role === "user") {
     return (
       <div style={{ alignSelf: "flex-end", maxWidth: "75%" }}>
@@ -397,18 +803,7 @@ const Bubble = memo(function Bubble({
         )}
         {message.text && !message.busy && (
           <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-            <button
-              onClick={() => void navigator.clipboard.writeText(message.text)}
-              style={{
-                fontSize: 11,
-                color: "var(--muted-deep)",
-                padding: "2px 10px",
-                borderRadius: 999,
-                border: "1px solid var(--paper-edge)",
-              }}
-            >
-              {t("chatstream.copy")}
-            </button>
+            <CopyMessageButton text={message.text} />
           </div>
         )}
       </div>
@@ -416,6 +811,50 @@ const Bubble = memo(function Bubble({
   );
 });
 Bubble.displayName = "Bubble";
+
+function CopyMessageButton({ text }: { text: string }) {
+  const { t } = useT();
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+    };
+  }, []);
+
+  async function copyMessage() {
+    if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+    resetTimerRef.current = setTimeout(() => setCopyState("idle"), 1_800);
+  }
+
+  const label = copyState === "copied"
+    ? t("chatstream.copied")
+    : copyState === "error"
+      ? t("chatstream.copy_failed")
+      : t("chatstream.copy");
+
+  return (
+    <button
+      type="button"
+      className="agentlas-chat-copy-button"
+      data-copy-state={copyState}
+      onClick={() => void copyMessage()}
+      aria-label={label}
+      aria-live="polite"
+      title={label}
+    >
+      {label}
+    </button>
+  );
+}
 
 // (이전의 rAF 기반 useSmoothReveal은 제거 — 매 프레임(60fps) setState + 전체 마크다운
 //  재파싱으로 긴 답변에서 스트리밍이 끊기는 주범이었다. 이제 partial 도착(≈60ms) 단위로만
@@ -1985,21 +2424,7 @@ function PulsingDot() {
 }
 
 function BlinkingCursor() {
-  return (
-    <span
-      aria-hidden
-      style={{
-        display: "inline-block",
-        width: 7,
-        height: 14,
-        marginLeft: 2,
-        verticalAlign: "text-bottom",
-        background: "var(--accent)",
-        opacity: 0.55,
-        borderRadius: 1,
-      }}
-    />
-  );
+  return <span aria-hidden className="agentlas-chat-streaming-cursor" />;
 }
 
 function useElapsedSeconds(startedAt: number | undefined, ticking: boolean): number {

@@ -6,7 +6,9 @@
 //   2. 슬러그 정규화가 엔진 _norm_slug와 일치한다 (instagram_uploader → instagram-uploader).
 //   3. 프로젝트 격리: project 스코프 배움은 둥지로 새지 않는다 (프로젝트 폴더에만).
 //   4. borrowedAgentSlugs가 없으면(설치 에이전트 실행) 둥지에 아무것도 안 쓴다.
-//   5. session/discard/시크릿 배움은 둥지로 가지 않는다.
+//   5. session/discard/시크릿 배움은 DB·프로젝트 soul·둥지 어디에도 가지 않는다.
+//      OpenAI sk-proj-/Anthropic sk-ant-의 base64url(-/_) 토큰 형태를 포함한다.
+//   6. 짧은 키 접두사 설명은 시크릿으로 오탐하지 않는다.
 //
 // 실행: npm run test:curator-nest-wiring
 const assert = require("node:assert/strict");
@@ -100,7 +102,7 @@ async function main() {
     }
   }
 
-  // ── 5: session/시크릿은 둥지로 안 간다 ────────────────────────────────────
+  // ── 5: session/시크릿은 어느 durable 저장소에도 안 간다 ───────────────────
   curateEvents(
     [
       ev("fact", "session", "임시 사실 — 둥지 금지."),
@@ -111,6 +113,48 @@ async function main() {
   const finalNest = readNest("instagram-uploader");
   assert.doesNotMatch(finalNest, /임시 사실/, "session-scoped learning must not reach the nest");
   assert.doesNotMatch(finalNest, /sk-secret1234567890/, "secret-bearing learning must be redacted, never in the nest");
+
+  // 실제 공급자 형식과 같은 base64url 문자(-/_)를 쓰되, 실키가 아닌 결정론적 픽스처다.
+  const openAiToken = ["sk", "proj", "AbCdEf12_34-GhIjKl56_MnOpQr78-StUvWx90_Yz"].join("-");
+  const anthropicToken = ["sk", "ant", "api03", "ZyXwVu98_76-TsRqPo54_NmLkJi32-HgFeDc10_Ba"].join("-");
+  const secretReport = curateEvents(
+    [
+      ev("decision", "project", `OpenAI key is ${openAiToken}`),
+      ev("procedure", "agent_repo", `Anthropic key is ${anthropicToken}`),
+    ],
+    { ...baseCtx, borrowedAgentSlugs: ["instagram_uploader"] },
+  );
+  assert.equal(secretReport.redacted, 2, "provider-shaped base64url tokens must both be redacted");
+  assert.equal(secretReport.written, 0, "redacted provider tokens must not reach the DB");
+
+  const durableDbText = JSON.stringify(
+    db.getDb().prepare("SELECT content, context_json FROM memory_entries").all(),
+  );
+  const projectSoulAfterSecrets = fs.readFileSync(
+    path.join(projectPath, ".agentlas", "project-soul-memory.md"),
+    "utf8",
+  );
+  const nestAfterSecrets = readNest("instagram-uploader") || "";
+  const memoryLogAfterSecrets = fs.readFileSync(
+    path.join(projectPath, ".agentlas", "memory-log.jsonl"),
+    "utf8",
+  );
+  for (const token of [openAiToken, anthropicToken]) {
+    assert.doesNotMatch(durableDbText, new RegExp(token), "provider token must not reach memory_entries");
+    assert.doesNotMatch(projectSoulAfterSecrets, new RegExp(token), "provider token must not reach project soul");
+    assert.doesNotMatch(nestAfterSecrets, new RegExp(token), "provider token must not reach the global agent nest");
+    assert.doesNotMatch(memoryLogAfterSecrets, new RegExp(token), "provider token must not reach the memory log");
+  }
+
+  // ── 6: 문서용 짧은 접두사 표현은 기존처럼 허용(오탐 방지) ─────────────────
+  const prefixDoc = "문서에는 키 접두사를 sk-proj- 또는 sk-ant-api03-처럼 표기한다.";
+  const falsePositiveReport = curateEvents(
+    [ev("procedure", "agent_repo", prefixDoc)],
+    { ...baseCtx, borrowedAgentSlugs: ["instagram_uploader"] },
+  );
+  assert.equal(falsePositiveReport.redacted, 0, "bare provider prefixes must not be treated as secrets");
+  assert.equal(falsePositiveReport.written, 1, "non-secret documentation must remain curatable");
+  assert.match(readNest("instagram-uploader") || "", /sk-proj-/, "non-secret prefix documentation must reach the nest");
 
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.rmSync(sandboxHome, { recursive: true, force: true });

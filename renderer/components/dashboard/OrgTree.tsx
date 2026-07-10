@@ -115,7 +115,7 @@ export function OrgTree() {
     try {
       const dir = await api.fs.pickDirectory();
       if (dir) {
-        const agent = await api.team.importLocalFolder(dir);
+        const agent = await api.team.importLocalFolder(dir.path);
         await load();
         setImportMessage({
           tone: "ok",

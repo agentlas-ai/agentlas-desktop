@@ -23,6 +23,7 @@ import { backfillEntityKinds } from "./mcp/registry";
 import { seedBuiltinAgents } from "./architecture/seed";
 import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
 import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser/approval-server";
+import { authorizeLocalMediaPath } from "./fs/access";
 
 const isDev = process.env.NODE_ENV === "development";
 
@@ -125,41 +126,22 @@ function resolveRendererFile(url: string): string {
   return path.join(rendererRoot, "404.html");
 }
 
-const LOCAL_IMAGE_EXTS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".webp",
-  ".gif",
-  ".svg",
-  ".avif",
-  ".bmp",
-]);
-
-// 인-앱 비디오 재생용 — 오베론 렌더/모션 출력(mp4 등)을 agentlas:// 로 서빙한다.
-const LOCAL_VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".m4v", ".ogv"]);
-
 function registerRendererProtocol(): void {
   protocol.handle("agentlas", (request) => {
     // 로컬 이미지 인라인 서빙 — agentlas://localfile/?p=<encoded abs path>.
     // 채팅에 에이전트가 생성한 이미지를 띄우기 위함 (webSecurity로 file:// 직접 로드는 차단됨).
-    // 안전: 이미지 확장자 + 절대경로 + 실제 파일만 서빙.
+    // 안전: main-authoritative root + media type + final realpath. Direct
+    // symlinks and ancestor symlink escapes are rejected by the shared policy.
     try {
       const url = new URL(request.url);
       if (url.hostname === "localfile") {
         const p = url.searchParams.get("p");
         if (p) {
-          const abs = path.normalize(decodeURIComponent(p));
-          const ext = path.extname(abs).toLowerCase();
-          if (
-            (LOCAL_IMAGE_EXTS.has(ext) || LOCAL_VIDEO_EXTS.has(ext)) &&
-            path.isAbsolute(abs) &&
-            fs.existsSync(abs) &&
-            fs.statSync(abs).isFile()
-          ) {
+          const approved = authorizeLocalMediaPath(p);
+          if (approved) {
             // 비디오 재생을 위해 Range 요청을 전달(seek 지원); 이미지엔 무해.
             const range = request.headers.get("range");
-            return net.fetch(pathToFileURL(abs).toString(), range ? { headers: { range } } : undefined);
+            return net.fetch(pathToFileURL(approved).toString(), range ? { headers: { range } } : undefined);
           }
         }
         return new Response("not found", { status: 404 });

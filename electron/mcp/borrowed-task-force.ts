@@ -441,6 +441,7 @@ function buildSynthesisSystemPrompt(
     BORROWED_SECRET_FILE_GUARD,
     "Resolve conflicts explicitly. Mention failed or weak specialist results only if they affect confidence.",
     "Do not expose hidden chain-of-thought. Summarize observable coordination, evidence, tradeoffs, and next steps.",
+    "A task-force synthesis has no single specialist owner. Never emit agent_repo memory from synthesis; use project scope for folder-specific learning or session otherwise.",
     locale === "ko" ? "Reply in Korean when the user wrote Korean." : "Reply in the user's language.",
   ].join("\n");
 }
@@ -769,8 +770,9 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
       agentId: p.chat.agentId,
       chatId: p.chat.id,
       cwdAtRequest: p.workingFolder ?? null,
-      // 태스크포스에 참여한 빌린 에이전트들 — agent_repo 배움을 이들의 전역 둥지로 미러링.
-      borrowedAgentSlugs: p.req.borrowAgents,
+      // 종합문은 여러 워커의 혼합 산출물이라 단일 borrowed-agent의 소유 학습으로 볼 수 없다.
+      // 결정론 큐레이터가 agent_repo 제안을 project/session으로 강등하고 출처를 기록한다.
+      sourceProvenance: "task-force-synthesis",
     });
     displayText = redactSensitiveText(curated.cleanedText || displayText);
   } catch {

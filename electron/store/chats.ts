@@ -1,7 +1,7 @@
 // Chat CRUD + chat_messages.
 // 사이드바 "최근 채팅" 섹션은 listRecent로 채운다.
 // 프로젝트 페이지는 listByProject로, 회사 페이지는 listByFirm으로 채운다.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { getDb } from "./db";
 import { getAgentGroup } from "./agent-groups";
 import { getFirm } from "./firms";
@@ -217,12 +217,32 @@ export function getOrCreateAutomationSession(input: {
   firmId?: string | null;
   agentGroupId?: string | null;
 }): Chat {
-  const marker = `⟦automation⟧${input.automationId}`;
+  const baseMarker = `⟦automation⟧${input.automationId}`;
+  const targetKind = input.agentGroupId ? "group" : input.firmId ? "firm" : input.agentId ? "agent" : "host";
+  const targetId = input.agentGroupId ?? input.firmId ?? input.agentId ?? "default";
+  const targetHash = createHash("sha256").update(targetKind).update("\0").update(targetId).digest("hex").slice(0, 16);
+  const marker = `${baseMarker}::target:${targetKind}:${targetHash}`;
   const db = getDb();
   const existing = db
     .prepare("SELECT * FROM chats WHERE kind = 'division' AND title = ? LIMIT 1")
     .get(marker) as ChatRow | undefined;
   if (existing) return toChat(existing);
+
+  // 기존 단일 marker 세션은 타깃 관계가 정확히 같은 경우에만 새 marker로 승격한다.
+  // 타깃이 바뀌었다면 과거 세션/기억을 보존한 채 별도 세션을 만든다.
+  const legacy = db
+    .prepare("SELECT * FROM chats WHERE kind = 'division' AND title = ? LIMIT 1")
+    .get(baseMarker) as ChatRow | undefined;
+  const legacyMatches = legacy && (
+    (targetKind === "group" && legacy.agent_group_id === input.agentGroupId) ||
+    (targetKind === "firm" && legacy.firm_id === input.firmId) ||
+    (targetKind === "agent" && !legacy.firm_id && !legacy.agent_group_id && legacy.agent_id === input.agentId)
+  );
+  if (legacy && legacyMatches) {
+    db.prepare("UPDATE chats SET title = ?, updated_at = ? WHERE id = ?")
+      .run(marker, new Date().toISOString(), legacy.id);
+    return toChat({ ...legacy, title: marker });
+  }
   return createChat({
     agentId: input.agentId,
     firmId: input.firmId ?? null,

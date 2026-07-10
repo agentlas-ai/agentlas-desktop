@@ -233,7 +233,7 @@ function startServer() {
 
 async function runUiChecks() {
   const { chromium } = require("playwright");
-  const { setupMockAgentlasBridge } = require("./lib/mock-agentlas-bridge.cjs");
+  const { setupMockAgentlasBridge, mockBridgeOptions } = require("./lib/mock-agentlas-bridge.cjs");
   if (!fs.existsSync(path.join(distDir, "chat.html"))) {
     console.error("dist/renderer is missing. Run npm run build:renderer first.");
     process.exit(2);
@@ -245,7 +245,7 @@ async function runUiChecks() {
   const browser = await chromium.launch();
   try {
     const context = await browser.newContext({ viewport: { width: 1440, height: 980 } });
-    await context.addInitScript(setupMockAgentlasBridge, { teamRoster: true });
+    await context.addInitScript(setupMockAgentlasBridge, mockBridgeOptions({ teamRoster: true }));
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", (err) => errors.push(err.message));
@@ -316,7 +316,7 @@ async function runUiChecks() {
 
     // ── 고용(24h 리스) 시나리오: 동행 배지 + 자동 재주입 + 사이드바 로스터 + 해고 ──
     const hiredContext = await browser.newContext({ viewport: { width: 1440, height: 980 } });
-    await hiredContext.addInitScript(setupMockAgentlasBridge, { teamRoster: true, hiredRoster: true });
+    await hiredContext.addInitScript(setupMockAgentlasBridge, mockBridgeOptions({ teamRoster: true, hiredRoster: true }));
     const hiredPage = await hiredContext.newPage();
     const hiredErrors = [];
     hiredPage.on("pageerror", (err) => hiredErrors.push(err.message));

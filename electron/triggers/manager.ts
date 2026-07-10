@@ -19,6 +19,8 @@ import { startWebhookServer, stopWebhookServer } from "./webhook-server";
 const fsUnsubs = new Map<string, Array<() => void>>();
 let chainUnsub: (() => void) | null = null;
 let started = false;
+// 동일한 잘못된 edge가 완료 이벤트마다 경고를 쏟지 않도록 프로세스 생명주기 동안 1회만 기록.
+const warnedCycleEdges = new Set<string>();
 
 /** 매니저가 발사할 때 호출할 실행 함수(스케줄러가 주입 — 정적 순환 회피). */
 type RunFn = (automationId: string, ctx?: { output?: string }) => Promise<void>;
@@ -51,13 +53,51 @@ function registerFs(a: Automation): void {
   fsUnsubs.set(a.id, list);
 }
 
+/**
+ * enabled chain들을 source(afterAutomationId) → target(automation id) 그래프로 보고,
+ * 지금 발사할 edge가 target에서 source로 돌아오는 경로를 닫는지 검사한다.
+ * self edge와 A↔B/장거리 순환을 같은 규칙으로 차단하고 DAG/fan-out은 허용한다.
+ */
+function closesChainCycle(sourceId: string, targetId: string, chained: Automation[]): boolean {
+  if (sourceId === targetId) return true;
+  const targetsBySource = new Map<string, string[]>();
+  for (const automation of chained) {
+    if (!automation.trigger || automation.trigger.kind !== "chain") continue;
+    const source = automation.trigger.afterAutomationId;
+    const targets = targetsBySource.get(source) ?? [];
+    targets.push(automation.id);
+    targetsBySource.set(source, targets);
+  }
+
+  const pending = [targetId];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const current = pending.pop() as string;
+    if (current === sourceId) return true;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const next of targetsBySource.get(current) ?? []) {
+      if (!visited.has(next)) pending.push(next);
+    }
+  }
+  return false;
+}
+
 function handleChain(completion: AutomationCompletion): void {
+  // 선행 실행이 성공했을 때만 체인(실패 전파 방지).
+  if (!completion.ok) return;
   // chain 트리거를 가진 enabled 자동화 중, afterAutomationId가 방금 끝난 것과 일치하는 것 발사.
   const chained = listEnabledByTrigger("chain");
   for (const a of chained) {
     if (a.trigger && a.trigger.kind === "chain" && a.trigger.afterAutomationId === completion.automationId) {
-      // 선행 실행이 성공했을 때만 체인(실패 전파 방지).
-      if (!completion.ok) continue;
+      if (closesChainCycle(completion.automationId, a.id, chained)) {
+        const edge = `${completion.automationId}->${a.id}`;
+        if (!warnedCycleEdges.has(edge)) {
+          warnedCycleEdges.add(edge);
+          console.warn(`[triggers] blocked cyclic chain edge ${edge}`);
+        }
+        continue;
+      }
       fire(a, { output: completion.output ?? "", ok: String(completion.ok) });
     }
   }
@@ -130,6 +170,7 @@ export function stopTriggerManager(): void {
   stopWebhookServer();
   clearPollStates();
   prevPollIds = new Set();
+  warnedCycleEdges.clear();
   started = false;
   runFn = null;
 }

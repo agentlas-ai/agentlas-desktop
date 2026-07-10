@@ -43,6 +43,7 @@ function setupMockAgentlasBridge(options) {
 
   const now = new Date().toISOString();
   const calls = [];
+  const missingBridgeCalls = [];
   const eventHandlers = {};
   function readStoredAutomations() {
     try {
@@ -206,6 +207,18 @@ function setupMockAgentlasBridge(options) {
     createdAt: now,
     updatedAt: now,
   };
+  const directoryGrant = (grantPath = "/tmp/agentlas-qa") => ({
+    path: grantPath,
+    kind: "directory",
+    durable: true,
+    scope: { kind: "capability", token: "00000000-0000-4000-8000-000000000001" },
+  });
+  const droppedFileGrant = {
+    path: "/tmp/agentlas-file.png",
+    kind: "file",
+    durable: false,
+    scope: { kind: "capability", token: "00000000-0000-4000-8000-000000000002" },
+  };
   const resolvedOrg = {
     source: "orgchart",
     firmId: "firm-1",
@@ -260,7 +273,7 @@ function setupMockAgentlasBridge(options) {
     return agentFileContents[agentId];
   }
 
-  window.__qa = { calls, automations };
+  window.__qa = { calls, automations, missingBridgeCalls };
   window.agentlasEvents = {
     on: (channel, handler) => {
       eventHandlers[channel] = eventHandlers[channel] || [];
@@ -275,7 +288,7 @@ function setupMockAgentlasBridge(options) {
     onBrowserApproval: () => () => {},
   };
   window.agentlasUpdater = { onState: () => () => {} };
-  window.agentlasFiles = { pathForFile: () => "/tmp/agentlas-file.png" };
+  window.agentlasFiles = { grantForFile: async () => ({ ...droppedFileGrant, scope: { ...droppedFileGrant.scope } }) };
 
   window.agentlas = {
     app: {
@@ -653,10 +666,18 @@ function setupMockAgentlasBridge(options) {
       get: async (chatId) => workspaceFolders[chatId] ?? null,
       // chat 페이지가 미디어 base path 후보 계산에 무조건 호출 — 없으면 chat 라우트가 죽는다.
       defaultRunFolder: async () => "/tmp/agentlas-qa-runs",
-      set: async (chatId, folder) => {
+      selectFolder: async () => directoryGrant(),
+      set: async (chatId, grant) => {
+        const folder = grant?.path ?? null;
         workspaceFolders[chatId] = folder;
         record("workspace.set", { chatId, folder });
-        return { chatId, folder };
+      },
+      setFromProject: async (chatId, projectId) => {
+        if (projectId !== project.id || !project.folderPath) throw new Error("Project folder not found");
+        workspaceFolders[chatId] = project.folderPath;
+        record("workspace.setFromProject", { chatId, projectId, folder: project.folderPath });
+        // Existing renderer smoke assertions observe the resulting workspace assignment.
+        record("workspace.set", { chatId, folder: project.folderPath });
       },
     },
     env: {
@@ -840,7 +861,7 @@ function setupMockAgentlasBridge(options) {
     fs: {
       pickDirectory: async () => {
         record("fs.pickDirectory", null);
-        return "/tmp/agentlas-qa";
+        return directoryGrant();
       },
       listDirectory: async (absPath) => ({
         path: absPath,
@@ -986,6 +1007,65 @@ function setupMockAgentlasBridge(options) {
           ]
         : [],
   };
+
+  // Preload 계약의 모든 leaf method를 물질화한다. 각 smoke가 아직 전용 fixture를 만들지 않은
+  // 새 API도 `undefined is not a function`으로 페이지 전체를 죽이지 않고 안전한 빈값을 반환하며,
+  // 호출 사실은 missingBridgeCalls에 남겨 다음 fixture 보강 대상을 추적할 수 있다.
+  for (const methodPath of options?.preloadMethodPaths ?? []) {
+    const parts = String(methodPath).split(".").filter(Boolean);
+    if (parts.length < 2) continue;
+    let cursor = window.agentlas;
+    for (const part of parts.slice(0, -1)) {
+      if (!cursor[part] || typeof cursor[part] !== "object") cursor[part] = {};
+      cursor = cursor[part];
+    }
+    const leaf = parts[parts.length - 1];
+    if (typeof cursor[leaf] === "function") continue;
+    cursor[leaf] = (...args) => {
+      missingBridgeCalls.push({ path: methodPath, args });
+      if (/Channel$/.test(leaf)) return `mock:${methodPath}:${String(args[0] ?? "")}`;
+      if (/^(list|search|events|failures|bookmarks|tastes)/i.test(leaf)) return Promise.resolve([]);
+      if (/^(has|validate|is)/i.test(leaf)) return Promise.resolve(false);
+      return Promise.resolve(null);
+    };
+  }
 }
 
-module.exports = { setupMockAgentlasBridge };
+function preloadMethodPaths(preloadFile) {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const ts = require("typescript");
+  const file = preloadFile || path.resolve(__dirname, "../../electron/preload.ts");
+  const source = fs.readFileSync(file, "utf8");
+  const sf = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let apiObject = null;
+  const visit = (node) => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.name.getText(sf) === "api" &&
+      node.initializer &&
+      ts.isObjectLiteralExpression(node.initializer)
+    ) apiObject = node.initializer;
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  if (!apiObject) throw new Error("Could not find preload api object");
+  const methods = [];
+  const walkObject = (object, prefix) => {
+    for (const prop of object.properties) {
+      if (!ts.isPropertyAssignment(prop)) continue;
+      const name = prop.name.getText(sf).replace(/^['"]|['"]$/g, "");
+      const next = [...prefix, name];
+      if (ts.isObjectLiteralExpression(prop.initializer)) walkObject(prop.initializer, next);
+      else if (ts.isArrowFunction(prop.initializer) || ts.isFunctionExpression(prop.initializer)) methods.push(next.join("."));
+    }
+  };
+  walkObject(apiObject, []);
+  return [...new Set(methods)].sort();
+}
+
+function mockBridgeOptions(options) {
+  return { ...(options || {}), preloadMethodPaths: preloadMethodPaths() };
+}
+
+module.exports = { setupMockAgentlasBridge, preloadMethodPaths, mockBridgeOptions };

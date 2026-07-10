@@ -10,6 +10,68 @@ import { readEnvVar } from "../secrets/vault";
 
 const DOTENV_FILES = [".env", ".env.local"];
 
+// 프로젝트/에이전트 dotenv는 작업에 필요한 API 키를 덮어쓸 수 있어야 하지만, 호스트 런타임의
+// 신원·설치·플러그인 탐색 루트까지 바꾸면 전역 skills/plugins가 사라지거나 다른 CLI/코드가
+// 실행될 수 있다. 이 값들은 Agentlas를 시작한 신뢰된 프로세스 환경에서만 상속한다.
+const PROTECTED_RUNNER_ENV_KEYS = new Set([
+  "HOME",
+  "PATH",
+  "PATHEXT",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "CODEX_HOME",
+  "CLAUDE_CONFIG_DIR",
+  "CLAUDE_CODE_SAFE_MODE",
+  "CLAUDE_CODE_SIMPLE",
+  "CLAUDE_PLUGIN_ROOT",
+  "CLAUDE_PLUGIN_DATA",
+  "CLAUDE_PROJECT_DIR",
+  "GEMINI_CLI_HOME",
+  "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
+  "GEMINI_CLI_USER_SETTINGS",
+  "GEMINI_CLI_TRUSTED_FOLDERS_PATH",
+  "GEMINI_CLI_TRUST_WORKSPACE",
+  "GEMINI_CLI_EXTENSION_REGISTRY_URI",
+  "HEPHAESTUS_RUNTIME_ROOT",
+  "HEPHAESTUS_RUNTIME_BASE",
+  "HEPHAESTUS_PYTHON",
+  "HEPHAESTUS_AUTO_UPDATE",
+  "HEPHAESTUS_UPDATE_CHECK",
+  "NPM_CONFIG_PREFIX",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "PYTHONHOME",
+  "PYTHONPATH",
+  "LD_PRELOAD",
+  "DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH",
+]);
+
+export function isProtectedRunnerEnvKey(key: string): boolean {
+  return PROTECTED_RUNNER_ENV_KEYS.has(key.trim().toUpperCase());
+}
+
+/** 보호 키를 제외하고 dotenv/vault 값을 병합. 반환값은 실제 주입된 키 목록이다. */
+export function mergeRunnerEnvValues(
+  target: NodeJS.ProcessEnv,
+  values: Record<string, string>,
+  overwrite: boolean,
+): string[] {
+  const injected: string[] = [];
+  for (const [key, value] of Object.entries(values)) {
+    if (!value || isProtectedRunnerEnvKey(key)) continue;
+    if (!overwrite && target[key]) continue;
+    target[key] = value;
+    injected.push(key);
+  }
+  return injected;
+}
+
 export interface RunnerEnvResolution {
   env: NodeJS.ProcessEnv;
   injectedKeys: string[];
@@ -22,12 +84,7 @@ export async function buildRunnerEnv(
   const env: NodeJS.ProcessEnv = { ...process.env };
   const injected = new Set<string>();
   const apply = (values: Record<string, string>, overwrite: boolean) => {
-    for (const [key, value] of Object.entries(values)) {
-      if (!value) continue;
-      if (!overwrite && env[key]) continue;
-      env[key] = value;
-      injected.add(key);
-    }
+    for (const key of mergeRunnerEnvValues(env, values, overwrite)) injected.add(key);
   };
 
   apply(readDotEnvFile(path.join(app.getPath("userData"), "credentials.env")), false);
@@ -59,7 +116,7 @@ export async function buildRunnerEnv(
   }
 
   for (const key of vaultKeys) {
-    if (env[key]) continue;
+    if (isProtectedRunnerEnvKey(key) || env[key]) continue;
     const value = await readEnvVar(key);
     if (value) {
       env[key] = value;

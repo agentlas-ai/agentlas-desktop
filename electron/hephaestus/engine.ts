@@ -62,14 +62,21 @@ let cachedRoot: string | null | undefined;
 let cachedPython: { python: string; version: string } | null | undefined;
 
 /**
- * 임베딩된 Hephaestus 루트 경로를 해석한다.
- * - dev:       <repo>/Hephaestus            (app.getAppPath() == repo)
- * - packaged:  <app>/Contents/Resources/Hephaestus  (extraResources 대상)
- * 둘 다 없으면 환경변수(HEPHAESTUS_RUNTIME_ROOT) 폴백 후 null.
+ * Hephaestus 루트 경로를 해석한다.
+ * 우선순위는 운영자가 명시한 오버라이드 > 전역 updater가 관리하는 current > 앱 번들이다.
+ * 그래야 `hephaestus update`가 전환한 런타임을 Desktop도 다음 실행부터 실제 사용하면서,
+ * 전역 설치가 없는 새 머신에서는 패키지된 엔진으로 안전하게 폴백한다.
  */
 export function hephaestusRoot(): string | null {
   if (cachedRoot !== undefined) return cachedRoot;
   const candidates: string[] = [];
+  // 운영자/테스트가 명시한 루트는 어떤 자동 선택보다 우선한다.
+  if (process.env.HEPHAESTUS_RUNTIME_ROOT) {
+    candidates.push(process.env.HEPHAESTUS_RUNTIME_ROOT);
+  }
+  // `hephaestus update`가 원자적으로 전환하는 전역 current. 앱 번들보다 먼저 봐야
+  // 업데이트가 CLI에만 적용되고 Desktop에는 반영되지 않는 split-brain을 피할 수 있다.
+  candidates.push(path.join(os.homedir(), ".agentlas", "runtime", "current"));
   // 패키지 빌드: process.resourcesPath/Hephaestus
   if (process.resourcesPath) {
     candidates.push(path.join(process.resourcesPath, "Hephaestus"));
@@ -88,10 +95,6 @@ export function hephaestusRoot(): string | null {
     candidates.push(path.join(process.cwd(), "Hephaestus"));
   } catch {
     // noop
-  }
-  // 명시적 오버라이드
-  if (process.env.HEPHAESTUS_RUNTIME_ROOT) {
-    candidates.push(process.env.HEPHAESTUS_RUNTIME_ROOT);
   }
   for (const c of candidates) {
     try {

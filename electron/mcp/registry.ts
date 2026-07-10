@@ -7,6 +7,7 @@ import { getSource as getMarketSource, getCargoSource } from "../marketplace";
 import { agentFolderPath, materializeAgentFiles } from "../agents/files";
 import { getRoute, removeRoute, setRoute, type RuntimeLabel } from "../agents/routes";
 import { isPrivateWebOnlyAgent, publicAgentVisibility } from "../agents/policy";
+import { deriveListingEntityKind, entityKindAfterRefresh } from "../agents/entity-kind";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { installFromCatalog } from "../mcp-tools/registry";
 import type { SeedListingFull } from "../marketplace/source";
@@ -75,12 +76,6 @@ function toAgent(row: AgentRow): InstalledAgent {
 }
 
 /** 마켓 리스팅의 entityKind/agentCount로 single/team을 결정. */
-function deriveEntityKind(listing: { entityKind?: string; agentCount?: number }): "agent" | "team" {
-  if (listing.entityKind === "team") return "team";
-  if (typeof listing.agentCount === "number" && listing.agentCount > 1) return "team";
-  return "agent";
-}
-
 /** 이름/슬러그에 팀 표식이 있는지(레거시 backfill 전용 폴백). */
 function looksLikeTeamName(...parts: Array<string | null | undefined>): boolean {
   return /(\bteam\b|팀|\bhq\b|\bswarm\b|스웜)/i.test(parts.filter(Boolean).join(" "));
@@ -190,7 +185,7 @@ function autoRegisterAgentTools(listing: FullListing): void {
 function persistListing(slug: string, listing: FullListing): InstalledAgent {
   const envReqsJson = JSON.stringify(listing.envRequirements ?? []);
   const visibility = publicAgentVisibility(listing);
-  const entityKind = deriveEntityKind(listing);
+  const listingEntityKind = deriveListingEntityKind(listing);
 
   // 이 에이전트가 호출하는 외부 MCP/API를 external tools에 자동 등록.
   autoRegisterAgentTools(listing);
@@ -200,6 +195,7 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
     .prepare("SELECT * FROM installed_agents WHERE slug = ?")
     .get(slug) as AgentRow | undefined;
   if (existing) {
+    const entityKind = entityKindAfterRefresh(existing.entity_kind, listing);
     db.prepare(
       `UPDATE installed_agents
        SET system_prompt = ?, name = ?, name_en = ?, tagline = ?, tagline_en = ?,
@@ -235,6 +231,7 @@ function persistListing(slug: string, listing: FullListing): InstalledAgent {
   }
 
   const id = randomUUID();
+  const entityKind = listingEntityKind;
   const now = new Date().toISOString();
   db.prepare(
     `INSERT INTO installed_agents
@@ -380,9 +377,29 @@ function sha256(value: Buffer | string): string {
 }
 
 export function uninstallAgent(id: string): void {
-  getDb().prepare("DELETE FROM installed_agents WHERE id = ?").run(id);
+  const db = getDb();
+  const firmRows = db
+    .prepare("SELECT id, name, ceo_agent_id, org_chart_json FROM firms")
+    .all() as Array<{ id: string; name: string; ceo_agent_id: string; org_chart_json: string }>;
+  const membership = firmRows.find((firm) => {
+    if (firm.ceo_agent_id === id) return true;
+    try {
+      return (JSON.parse(firm.org_chart_json) as Array<{ agentId?: string }>).some(
+        (node) => node.agentId === id,
+      );
+    } catch {
+      return false;
+    }
+  });
+  if (membership) {
+    throw new Error(
+      `Agent belongs to installed firm "${membership.name}". Remove the firm relationship first; the agent and its chats will stay installed.`,
+    );
+  }
+
+  const deleted = db.prepare("DELETE FROM installed_agents WHERE id = ?").run(id).changes > 0;
   // 로컬 임포트 라우팅도 정리 (원본 폴더는 건드리지 않음).
-  removeRoute(id);
+  if (deleted) removeRoute(id);
 }
 
 /** 팀/싱글 종류 자가교정 — 리졸버(LLM)가 재판정한 kind를 영속화. */

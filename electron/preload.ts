@@ -6,6 +6,8 @@ import type {
   BrowserApprovalRequestEvent,
   BugReportInput,
   Automation,
+  FsPathGrant,
+  FsReadScope,
   McpInvocationEvent,
   McpInvocationRequest,
   MigrationOptions,
@@ -48,9 +50,9 @@ const api: AgentlasIpc = {
   },
   fs: {
     pickDirectory: () => ipcRenderer.invoke("fs:pickDirectory"),
-    listDirectory: (absPath: string, showHidden?: boolean, rootPath?: string) =>
-      ipcRenderer.invoke("fs:listDirectory", absPath, showHidden ?? false, rootPath),
-    readTextFile: (absPath: string, rootPath?: string) => ipcRenderer.invoke("fs:readTextFile", absPath, rootPath),
+    listDirectory: (absPath: string, scope: FsReadScope, showHidden?: boolean) =>
+      ipcRenderer.invoke("fs:listDirectory", absPath, scope, showHidden ?? false),
+    readTextFile: (absPath: string, scope: FsReadScope) => ipcRenderer.invoke("fs:readTextFile", absPath, scope),
     openPath: (target: string) => ipcRenderer.invoke("fs:openPath", target),
     showItemInFolder: (target: string) => ipcRenderer.invoke("fs:showItemInFolder", target),
     saveTextFile: (suggestedName: string, content: string) =>
@@ -59,8 +61,10 @@ const api: AgentlasIpc = {
   workspace: {
     selectFolder: () => ipcRenderer.invoke("workspace:selectFolder"),
     get: (chatId: string) => ipcRenderer.invoke("workspace:get", chatId),
-    set: (chatId: string, absPath: string | null) =>
-      ipcRenderer.invoke("workspace:set", chatId, absPath),
+    set: (chatId: string, grant: FsPathGrant | null) =>
+      ipcRenderer.invoke("workspace:set", chatId, grant),
+    setFromProject: (chatId: string, projectId: string) =>
+      ipcRenderer.invoke("workspace:setFromProject", chatId, projectId),
     defaultRunFolder: () => ipcRenderer.invoke("workspace:defaultRunFolder"),
   },
   auth: {
@@ -283,7 +287,7 @@ const api: AgentlasIpc = {
     list: () => ipcRenderer.invoke("projects:list"),
     get: (id: string) => ipcRenderer.invoke("projects:get", id),
     create: (input) => ipcRenderer.invoke("projects:create", input),
-    update: (id: string, patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId" | "folderPath">>) =>
+    update: (id: string, patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId">> & { folderGrant?: FsPathGrant | null }) =>
       ipcRenderer.invoke("projects:update", id, patch),
     remove: (id: string) => ipcRenderer.invoke("projects:remove", id),
   },
@@ -462,14 +466,16 @@ const api: AgentlasIpc = {
 
 contextBridge.exposeInMainWorld("agentlas", api);
 
-// 드래그&드롭으로 들어온 File/폴더의 실제 디스크 경로를 얻는다 (Electron 32+ webUtils).
-// 샌드박스 렌더러는 fs 접근이 없으므로 경로만 얻어 IPC로 넘긴다.
+// 드래그&드롭으로 들어온 File/폴더의 실제 경로는 preload 안에서만 얻는다.
+// renderer에는 raw-path grant API 대신 main이 발급한 제한된 capability만 돌려준다.
 contextBridge.exposeInMainWorld("agentlasFiles", {
-  pathForFile: (file: File): string => {
+  grantForFile: async (file: File): Promise<FsPathGrant | null> => {
     try {
-      return webUtils.getPathForFile(file);
+      const droppedPath = webUtils.getPathForFile(file);
+      if (!droppedPath) return null;
+      return await ipcRenderer.invoke("fs:grantDroppedPath", droppedPath);
     } catch {
-      return "";
+      return null;
     }
   },
 });

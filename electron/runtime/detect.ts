@@ -2,6 +2,7 @@
 // PRD 3.1 FRE 6단계 — 사용자가 입력 안 해도 한 번 클릭으로 연결되도록.
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { probeCodex } from "./codex";
+import { readCodexModelIds } from "./codex-models";
 import { probeGemini } from "./gemini";
 import { probeGrok } from "./grok";
 import { probeOllama } from "./ollama";
@@ -13,7 +14,8 @@ import type {
   RuntimeSelection,
   RuntimeStatus,
 } from "../../shared/types";
-import { byokModels, cliModels, defaultByokModel, findByokModel } from "../../shared/models";
+import { byokModels, cliModels, defaultByokModel } from "../../shared/models";
+import { recallRuntimeSelection, rememberRuntimeSelection } from "./selection-memory";
 
 type ActiveRuntimeRow = {
   kind: RuntimeKind;
@@ -43,26 +45,36 @@ export function clearDetectCache(): void {
   detectCache = null;
 }
 
-/** BYOK 백엔드의 활성 모델 — 저장된 선택이 카탈로그에 있으면 그대로, 아니면 기본값. */
+/**
+ * BYOK 백엔드의 활성 모델. Picker는 provider /models의 라이브 ID를 저장할 수 있으므로
+ * 정적 카탈로그 포함 여부로 복원을 거부하면 안 된다. 현재 백엔드에 저장된 비어 있지 않은
+ * ID는 그대로 복원하고, 사용자가 아직 고른 적이 없을 때만 기본값을 쓴다.
+ */
 function byokModelOf(backend: RuntimeBackend, active: ActiveRuntimeRow | null): string | undefined {
-  if (active?.kind === "byok" && active.backend === backend && findByokModel(backend, active.model)) {
-    return active.model ?? undefined;
+  if (active?.kind === "byok" && active.backend === backend && active.model) {
+    return active.model;
   }
-  return defaultByokModel(backend);
+  return recallRuntimeSelection("byok", backend)?.model ?? defaultByokModel(backend);
 }
 
 /** BYOK 1M 토글 상태 — 활성 백엔드일 때만 저장값 반영, 그 외엔 off. */
 function byokLongOf(backend: RuntimeBackend, active: ActiveRuntimeRow | null): boolean {
-  return !!(active?.kind === "byok" && active.backend === backend && active.long_context);
+  if (active?.kind === "byok" && active.backend === backend) return !!active.long_context;
+  return recallRuntimeSelection("byok", backend)?.longContext ?? false;
 }
 
-/** CLI 런타임의 활성 모델 — 저장된 선택이 카탈로그에 있으면 그대로, 아니면 undefined(구독 기본). */
-function cliModelOf(kind: RuntimeKind, active: ActiveRuntimeRow | null): string | undefined {
-  const opts = cliModels(kind);
-  if (active?.kind === kind && active.model && opts.some((o) => o.id === active.model)) {
-    return active.model;
-  }
-  return undefined;
+/** CLI 런타임의 활성 모델 — 설치된 CLI가 실제 노출한 목록에 있으면 복원한다. */
+function cliModelOf(
+  kind: RuntimeKind,
+  active: ActiveRuntimeRow | null,
+  availableModels = cliModels(kind).map((model) => model.id),
+  backend?: RuntimeBackend,
+): string | undefined {
+  const candidate =
+    active?.kind === kind && (!backend || active.backend === backend)
+      ? active.model
+      : recallRuntimeSelection(kind, backend)?.model;
+  return candidate && availableModels.includes(candidate) ? candidate : undefined;
 }
 
 // 작업량(effort) 영속 — active_runtime 컬럼 추가(마이그레이션) 대신 meta(key/value) 테이블 사용.
@@ -115,17 +127,31 @@ function saveActiveRuntime(status: RuntimeStatus | RuntimeSelection): void {
     ("longContext" in status ? status.longContext : undefined) ??
     ("longContextEnabled" in status ? status.longContextEnabled : undefined) ??
     false;
-  getDb()
-    .prepare(
+  const db = getDb();
+  const outgoing = db
+    .prepare("SELECT kind, backend, source, model, long_context FROM active_runtime WHERE id = 1")
+    .get() as ActiveRuntimeRow | undefined;
+  db.transaction(() => {
+    // Seed an install that predates per-runtime memory before replacing id=1.
+    if (outgoing) {
+      rememberRuntimeSelection(
+        outgoing.kind,
+        outgoing.backend,
+        outgoing.model,
+        !!outgoing.long_context,
+      );
+    }
+    rememberRuntimeSelection(status.kind, status.backend, status.model, longCtx);
+    db.prepare(
       "INSERT OR REPLACE INTO active_runtime(id, kind, backend, source, model, long_context) VALUES (1, ?, ?, ?, ?, ?)",
-    )
-    .run(
+    ).run(
       status.kind,
       status.backend ?? null,
       status.source ?? null,
       status.model ?? null,
       longCtx ? 1 : 0,
     );
+  })();
 }
 
 /**
@@ -160,6 +186,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   const [
     cc,
     cx,
+    codexDiscoveredModels,
     gm,
     gr,
     ollama,
@@ -175,6 +202,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   ] = await Promise.all([
     probeClaudeCode(),
     probeCodex(),
+    readCodexModelIds(),
     probeGemini(),
     probeGrok(),
     probeOllama(),
@@ -199,7 +227,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       version: cc.version,
       active: false,
       // 컨텍스트는 CLI가 자동 관리하지만 모델은 --model로 선택 가능 (opus/sonnet/haiku).
-      model: cliModelOf("claude-code", active),
+      model: cliModelOf("claude-code", active, undefined, "anthropic"),
       availableModels: cliModels("claude-code").map((m) => m.id),
       // 작업량 — 현재 선택값 + 이 CLI가 지원하는 레벨(--help 파싱으로 자동 동기화).
       effort: getStoredEffort(),
@@ -207,6 +235,10 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     });
   }
   if (cx) {
+    const codexModels =
+      codexDiscoveredModels.length > 0
+        ? codexDiscoveredModels
+        : cliModels("codex").map((model) => model.id);
     list.push({
       kind: "codex",
       backend: "openai",
@@ -214,8 +246,8 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       version: cx.version,
       active: false,
       // Codex도 선택 모델을 저장·복원해야 --model이 다음 대화까지 유지된다.
-      model: cliModelOf("codex", active),
-      availableModels: cliModels("codex").map((m) => m.id),
+      model: cliModelOf("codex", active, codexModels, "openai"),
+      availableModels: codexModels,
     });
   }
   if (gm) {
@@ -230,10 +262,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   if (gr) {
     // 모델: `grok models` 라이브 목록 우선(새 모델 자동 반영) → 없으면 정적 카탈로그로 폴백.
     const grokModels = gr.models.length > 0 ? gr.models : cliModels("grok").map((m) => m.id);
-    const storedGrok =
-      active?.kind === "grok" && active.model && grokModels.includes(active.model)
-        ? active.model
-        : undefined;
+    const storedGrok = cliModelOf("grok", active, grokModels, "custom");
     list.push({
       kind: "grok",
       backend: "custom",
@@ -246,9 +275,13 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   }
   if (ollama) {
     // 활성 모델: 이전에 고른 모델이 아직 존재하면 그대로, 아니면 첫 모델로 폴백.
-    const preferred =
-      active?.kind === "ollama" && active.model && ollama.models.includes(active.model)
+    const rememberedOllama =
+      active?.kind === "ollama"
         ? active.model
+        : recallRuntimeSelection("ollama", "ollama")?.model;
+    const preferred =
+      rememberedOllama && ollama.models.includes(rememberedOllama)
+        ? rememberedOllama
         : ollama.models[0] ?? null;
     list.push({
       kind: "ollama",

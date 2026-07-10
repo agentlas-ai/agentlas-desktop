@@ -109,6 +109,7 @@ export function ChatQuestionSheet({
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     const inInput = (e.target as HTMLElement).tagName === "INPUT";
     if (!inInput) {
       const n = Number(e.key);

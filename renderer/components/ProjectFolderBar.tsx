@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import type { FsPathGrant } from "@/lib/types";
 import { IconChat, IconChevronDown, IconCheck, IconFolder } from "./Icon";
 
 function basename(p: string): string {
@@ -56,12 +57,13 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
   }, [open]);
 
   const apply = useCallback(
-    async (next: string | null) => {
+    async (next: FsPathGrant | null) => {
       const api = ipc();
       if (!api || !chatId) return;
       await api.workspace.set(chatId, next);
-      setFolder(next);
-      onChanged?.(next);
+      const nextPath = next?.path ?? null;
+      setFolder(nextPath);
+      onChanged?.(nextPath);
     },
     [chatId, onChanged],
   );

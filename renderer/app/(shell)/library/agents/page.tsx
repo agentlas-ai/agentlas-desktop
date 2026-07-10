@@ -563,7 +563,7 @@ function LibraryAgentsView() {
     try {
       const dir = await api.fs.pickDirectory();
       if (!dir) return;
-      const imported = await api.team.importLocalFolder(dir);
+      const imported = await api.team.importLocalFolder(dir.path);
       await refresh();
       const loc = pickLocalized(imported, locale);
       setSelectedNode({

@@ -46,7 +46,7 @@ export default function CloudAgentPublishPage() {
     if (!api || running) return;
     const dir = await api.fs.pickDirectory();
     if (dir) {
-      setRootPath(dir);
+      setRootPath(dir.path);
       setResult(null);
     }
   }

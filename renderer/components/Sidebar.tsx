@@ -343,7 +343,7 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         ...(agentId ? { agentId } : {}),
         ...(project ? { projectId: project.id } : {}),
       });
-      if (project?.folderPath) await api.workspace.set(chat.id, project.folderPath);
+      if (project?.folderPath) await api.workspace.setFromProject(chat.id, project.id);
       navigate(`/chat?id=${chat.id}`);
       // soft navigation은 full reload가 없으므로 명시적으로 최근 목록을 갱신한다.
       triggerRefresh();

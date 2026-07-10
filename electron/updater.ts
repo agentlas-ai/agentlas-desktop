@@ -14,6 +14,7 @@
 import { app, BrowserWindow } from "electron";
 import fs from "node:fs";
 import path from "node:path";
+import { compareSemVer, parseSemVer } from "../shared/semver";
 
 // electron-updater는 main 프로세스 ESM 호환 모듈. import는 CJS interop으로.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -54,27 +55,9 @@ export function getUpdaterState(): UpdateState {
   return currentState;
 }
 
-function versionTuple(value: string | undefined): number[] {
-  return String(value ?? "")
-    .replace(/^v/i, "")
-    .split(/[.-]/)
-    .map((part) => Number.parseInt(part.replace(/\D/g, ""), 10))
-    .map((part) => (Number.isFinite(part) ? part : 0));
-}
-
-function compareVersions(left: string | undefined, right: string | undefined): number {
-  const a = versionTuple(left);
-  const b = versionTuple(right);
-  const length = Math.max(a.length, b.length, 3);
-  for (let index = 0; index < length; index += 1) {
-    const delta = (a[index] ?? 0) - (b[index] ?? 0);
-    if (delta !== 0) return delta;
-  }
-  return 0;
-}
-
 function isNewerThanCurrent(version: string | undefined): boolean {
-  return compareVersions(version, app.getVersion()) > 0;
+  const comparison = compareSemVer(version, app.getVersion());
+  return comparison !== null && comparison > 0;
 }
 
 function updateConfigPath(): string {
@@ -103,8 +86,9 @@ function pendingUpdateVersion(pendingDir: string): string | null {
   try {
     const payload = JSON.parse(fs.readFileSync(path.join(pendingDir, "update-info.json"), "utf8"));
     const fileName = typeof payload.fileName === "string" ? payload.fileName : "";
-    const match = fileName.match(/Agentlas-([0-9]+(?:\.[0-9]+){1,3})-/);
-    return match?.[1] ?? null;
+    const match = fileName.match(/Agentlas-(\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)-(?:arm64|x64)/);
+    const candidate = match?.[1] ?? null;
+    return candidate && parseSemVer(candidate) ? candidate : null;
   } catch {
     return null;
   }

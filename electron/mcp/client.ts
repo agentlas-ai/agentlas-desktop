@@ -802,6 +802,7 @@ export async function runMcpInvocation(
   let mcpConfigPath: string | undefined;
   let mcpAllowedTools: string[] | undefined;
   let mcpCodexConfigArgs: string[] | undefined;
+  let mcpRuntimeEnv: Record<string, string> | undefined;
   let mcpAutoSelectionPrompt = "";
   const runtimeCanUseMcp = active.kind === "claude-code" || active.kind === "codex";
   if (runtimeCanUseMcp) {
@@ -861,6 +862,7 @@ export async function runMcpInvocation(
         mcpConfigPath = cfg.configPath;
         mcpAllowedTools = cfg.allowedTools;
         mcpCodexConfigArgs = cfg.codexConfigArgs;
+        mcpRuntimeEnv = cfg.runtimeEnv;
       }
     } catch (err) {
       console.error("[mcp] buildMcpConfigFile failed:", err);
@@ -868,6 +870,7 @@ export async function runMcpInvocation(
   }
 
   const runnerEnv = await buildRunnerEnv(agent, workingFolder ?? undefined);
+  if (mcpRuntimeEnv) Object.assign(runnerEnv.env, mcpRuntimeEnv);
 
   // ── Agent Group 오케스트레이션 ───────────────────────────
   // 저장된 그룹은 firm/division보다 상위의 라우팅 묶음이다. 실행 직전에

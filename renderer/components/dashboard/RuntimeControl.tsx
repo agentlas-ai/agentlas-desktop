@@ -10,7 +10,7 @@ type ModelRow = { id: string; label: string; tag?: string };
 const RUNTIME_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
-  gemini: "Antigravity",
+  gemini: "Gemini",
   grok: "Grok",
   byok: "BYOK API",
   ollama: "Ollama",
@@ -27,6 +27,9 @@ const BACKEND_LABEL: Record<string, string> = {
 
 function runtimeLabel(runtime: RuntimeStatus): string {
   if (runtime.kind === "byok") return `${BACKEND_LABEL[runtime.backend] ?? runtime.backend} API`;
+  if (runtime.kind === "gemini" && /(^|[/\\])agy(?:\.(?:exe|cmd))?$/.test(runtime.source ?? "")) {
+    return "Antigravity";
+  }
   return RUNTIME_LABEL[runtime.kind] ?? runtime.kind;
 }
 

@@ -12,7 +12,7 @@ import {
 } from "./byok";
 import { runClaudeCode } from "./claude-code";
 import { runCodex } from "./codex";
-import { runGemini } from "./gemini";
+import { isAgyBinaryPath, runGemini } from "./gemini";
 import { runGrok } from "./grok";
 import { runOllama } from "./ollama";
 import { acquireRunSlot } from "./run-slots";
@@ -50,7 +50,7 @@ const runGrokSlotted = withRunSlot(runGrok);
 const RUNNER_LABEL: Record<string, string> = {
   "claude-code": "Claude Code CLI",
   codex: "Codex CLI",
-  gemini: "Antigravity CLI",
+  gemini: "Gemini CLI",
   grok: "Grok CLI",
   "byok:anthropic": "Anthropic API",
   "byok:openai": "OpenAI API",
@@ -72,7 +72,12 @@ export interface RuntimeChoice {
 export function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | null {
   if (active.kind === "claude-code") return { runner: runClaudeCodeSlotted, label: RUNNER_LABEL["claude-code"] };
   if (active.kind === "codex") return { runner: runCodexSlotted, label: RUNNER_LABEL.codex };
-  if (active.kind === "gemini") return { runner: runGeminiSlotted, label: RUNNER_LABEL.gemini };
+  if (active.kind === "gemini") {
+    return {
+      runner: runGeminiSlotted,
+      label: isAgyBinaryPath(active.source) ? "Antigravity CLI" : RUNNER_LABEL.gemini,
+    };
+  }
   if (active.kind === "grok")
     return { runner: runGrokSlotted, label: `Grok CLI${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "ollama")

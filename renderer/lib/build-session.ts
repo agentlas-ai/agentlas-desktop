@@ -9,8 +9,9 @@
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { currentLocale } from "@/lib/i18n";
 import { extractQuestions } from "@/lib/ask-question";
+import { packagePathFromText } from "@/lib/build-path";
 import type { ChatQuestion } from "@/components/ChatStream";
-import type { HephaestusBuildEvent, RuntimeSelection } from "@/lib/types";
+import type { FsPathGrant, FsReadScope, HephaestusBuildEvent, RuntimeSelection } from "@/lib/types";
 
 export type Mode = "single" | "team" | "package";
 export type Phase = "idle" | "running" | "interview" | "done" | "error";
@@ -25,6 +26,7 @@ export interface LogLine {
 export interface BuildResult {
   workspace: string;
   securityScan: unknown;
+  readScope: FsReadScope;
 }
 
 interface ChatMsg {
@@ -47,6 +49,8 @@ export interface BuildState {
   attachments: BuildAttachment[];
   mode: Mode | "";
   workspace: string | null;
+  /** Native-picker authority for disk inspection; persisted as an opaque token. */
+  workspaceGrant: FsPathGrant | null;
   runtime: RuntimeSelection | null;
   phase: Phase;
   log: LogLine[];
@@ -62,17 +66,6 @@ export interface BuildState {
   awaitingReply: boolean;
   /** 진행된 인터뷰 턴 수(헤더 표시용). */
   turn: number;
-  /** 이전 인터뷰 답변 상태로 되돌릴 수 있는지. */
-  canRewindInterview: boolean;
-}
-
-interface InterviewCheckpoint {
-  turn: number;
-  pendingQuestions: ChatQuestion[];
-  log: LogLine[];
-  reached: number;
-  history: ChatMsg[];
-  runtimeSessionId: string | null;
 }
 
 // 빌드 파이프라인 단계 수 — 화면의 STAGES 배열과 일치(모드분류·인터뷰/리서치·생성·검증·배포).
@@ -80,19 +73,32 @@ export const STAGE_COUNT = 5;
 
 const WS_KEY = "agentlas.build.workspace";
 
-function restoreWorkspace(): string | null {
+function restoreWorkspace(): FsPathGrant | null {
   try {
-    return window.localStorage.getItem(WS_KEY);
+    const raw = window.localStorage.getItem(WS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<FsPathGrant>;
+    if (
+      typeof parsed.path !== "string" ||
+      parsed.kind !== "directory" ||
+      parsed.durable !== true ||
+      parsed.scope?.kind !== "capability" ||
+      typeof parsed.scope.token !== "string"
+    ) return null;
+    return parsed as FsPathGrant;
   } catch {
     return null;
   }
 }
 
+const restoredWorkspace = typeof window !== "undefined" ? restoreWorkspace() : null;
+
 const state: BuildState = {
   request: "",
   attachments: [],
   mode: "",
-  workspace: typeof window !== "undefined" ? restoreWorkspace() : null,
+  workspace: restoredWorkspace?.path ?? null,
+  workspaceGrant: restoredWorkspace,
   runtime: null,
   phase: "idle",
   log: [],
@@ -104,7 +110,6 @@ const state: BuildState = {
   pendingQuestions: [],
   awaitingReply: false,
   turn: 0,
-  canRewindInterview: false,
 };
 
 let snapshot: BuildState = { ...state };
@@ -113,14 +118,21 @@ let unsub: null | (() => void) = null;
 // 러너(claude-code)는 partial 이벤트에 "누적 텍스트"를 보낸다. 직전 누적분을 기억해 두고
 // 새로 늘어난 델타만 로그에 반영한다(안 그러면 텍스트가 중복 폭증한다). 턴마다 리셋.
 let lastAcc = "";
-// 대화 history(이번 턴 입력 이전까지) + 이번 턴 사용자 입력.
+// 대화 history(이번 턴 입력 이전까지).
 let history: ChatMsg[] = [];
-let currentInput = "";
-let interviewCheckpoints: InterviewCheckpoint[] = [];
 let runtimeSessionId: string | null = null;
+// 런타임이 sessionId를 반환하지 않는 BYOK/Ollama도 첨부는 한 빌드에서 정확히 한 번만 보낸다.
+let attachmentsSentForBuild = false;
+// Monotonic session token. Every async boundary and event callback checks it so
+// cancel/reset cannot be followed by a stale disk check or build event that
+// resurrects the previous run.
+let buildGeneration = 0;
+
+function isCurrentBuild(generation: number): boolean {
+  return generation === buildGeneration;
+}
 
 function commit() {
-  state.canRewindInterview = state.phase === "interview" && interviewCheckpoints.length > 1;
   snapshot = { ...state };
   for (const l of listeners) l();
 }
@@ -156,10 +168,12 @@ export function setMode(v: Mode | "") {
   state.mode = v;
   commit();
 }
-export function setWorkspace(v: string | null) {
-  state.workspace = v;
+export function setWorkspace(v: FsPathGrant | null) {
+  state.workspace = v?.path ?? null;
+  state.workspaceGrant = v;
   try {
-    if (v) window.localStorage.setItem(WS_KEY, v);
+    if (v) window.localStorage.setItem(WS_KEY, JSON.stringify(v));
+    else window.localStorage.removeItem(WS_KEY);
   } catch {
     /* ignore */
   }
@@ -179,19 +193,6 @@ const JUNK_WS = /^(trash|tmp|temp|downloads|desktop|documents|untitled|new folde
 function wsBasename(p: string): string {
   return p.replace(/\/+$/, "").split("/").pop() ?? p;
 }
-/** 'BUILD_COMPLETE: <folder>' 에서 생성된 패키지 하위 폴더 절대경로를 뽑는다. 없으면 null. */
-function packagePathFromText(workspace: string, assistantText: string): string | null {
-  const m = assistantText.match(/BUILD_COMPLETE:\s*(.+)/i);
-  if (!m) return null;
-  let name = m[1].trim().replace(/[`"']/g, "");
-  name = name.split(/\s/)[0]; // 폴더명 토큰만
-  if (!name || name === "." || name === "/" || name.includes("..")) return null;
-  if (name.startsWith("/")) return name; // 절대경로
-  name = name.replace(/^\.\//, "").replace(/\/+$/, "");
-  if (!name || wsBasename(workspace) === name) return null;
-  return `${workspace.replace(/\/+$/, "")}/${name}`;
-}
-
 /** 마지막 partial 로그(어시스턴트 출력)의 raw ask-fence를 정리된 텍스트로 교체. */
 function cleanLastPartial(cleanText: string) {
   for (let i = state.log.length - 1; i >= 0; i--) {
@@ -221,37 +222,6 @@ function stageFromEvent(ev: HephaestusBuildEvent, current: number): number {
 function detach() {
   unsub?.();
   unsub = null;
-}
-
-function cloneQuestions(questions: ChatQuestion[]): ChatQuestion[] {
-  return questions.map((q) => ({
-    ...q,
-    options: q.options.map((option) => ({ ...option })),
-    answer: q.answer ? [...q.answer] : undefined,
-  }));
-}
-
-function cloneLog(log: LogLine[]): LogLine[] {
-  return log.map((line) => ({ ...line }));
-}
-
-function cloneHistory(items: ChatMsg[]): ChatMsg[] {
-  return items.map((item) => ({ ...item }));
-}
-
-function rememberInterviewCheckpoint(): void {
-  const checkpoint: InterviewCheckpoint = {
-    turn: state.turn,
-    pendingQuestions: cloneQuestions(state.pendingQuestions),
-    log: cloneLog(state.log),
-    reached: state.reached,
-    history: cloneHistory(history),
-    runtimeSessionId,
-  };
-  interviewCheckpoints = [
-    ...interviewCheckpoints.filter((item) => item.turn !== checkpoint.turn),
-    checkpoint,
-  ];
 }
 
 /** 빌드 완료 시 결과 폴더를 라이브러리(조직도)에 자동 등록 — "조직도에 안 뜬다" 문제 해소. */
@@ -286,16 +256,19 @@ let autoContinues = 0;
 const PKG_MARKERS = new Set(["agentlas.json", "AGENTS.md", ".agentlas"]);
 
 /** 워크스페이스(또는 1단계 하위 폴더)에서 생성된 패키지 루트를 찾는다. 없으면 null. */
-async function findPackageRoot(workspace: string): Promise<string | null> {
+async function findPackageRoot(workspace: string, readScope: FsReadScope, generation: number): Promise<string | null> {
   const api = ipc();
-  if (!api) return null;
+  if (!api || !isCurrentBuild(generation)) return null;
   try {
-    const listing = await api.fs.listDirectory(workspace, true);
+    const listing = await api.fs.listDirectory(workspace, readScope, true);
+    if (!isCurrentBuild(generation)) return null;
     const entries = listing?.entries ?? [];
     if (entries.some((n) => PKG_MARKERS.has(n.name))) return workspace;
     const dirs = entries.filter((n) => n.kind === "dir" && !n.name.startsWith(".") && !n.name.startsWith("_")).slice(0, 20);
     for (const dir of dirs) {
-      const sub = await api.fs.listDirectory(dir.path, true);
+      if (!isCurrentBuild(generation)) return null;
+      const sub = await api.fs.listDirectory(dir.path, readScope, true);
+      if (!isCurrentBuild(generation)) return null;
       if ((sub?.entries ?? []).some((n) => PKG_MARKERS.has(n.name))) return dir.path;
     }
   } catch {
@@ -305,10 +278,10 @@ async function findPackageRoot(workspace: string): Promise<string | null> {
 }
 
 /** 빌드를 완료 상태로 전환하고 조직도 자동 등록까지 수행한다. */
-function finalizeBuild(pkgRoot: string, scan: unknown, note: string | null): void {
+function finalizeBuild(pkgRoot: string, scan: unknown, readScope: FsReadScope, note: string | null): void {
   const ko = currentLocale() === "ko";
   state.reached = STAGE_COUNT;
-  state.result = { workspace: pkgRoot, securityScan: scan };
+  state.result = { workspace: pkgRoot, securityScan: scan, readScope };
   state.awaitingReply = false;
   state.pendingQuestions = [];
   if (note) pushLog("log", note);
@@ -328,13 +301,20 @@ function finalizeBuild(pkgRoot: string, scan: unknown, note: string | null): voi
   }
 }
 
-async function resolveTurnWithoutSignal(workspace: string, scan: unknown): Promise<void> {
+async function resolveTurnWithoutSignal(
+  workspace: string,
+  scan: unknown,
+  readScope: FsReadScope,
+  generation: number,
+): Promise<void> {
   const ko = currentLocale() === "ko";
-  const pkgRoot = await findPackageRoot(workspace);
+  const pkgRoot = await findPackageRoot(workspace, readScope, generation);
+  if (!isCurrentBuild(generation)) return;
   if (pkgRoot) {
     finalizeBuild(
       pkgRoot,
       scan,
+      readScope,
       ko
         ? "완료 신호가 누락됐지만 디스크에서 패키지를 확인했습니다 — 완료로 처리합니다."
         : "Completion signal was missing but the package exists on disk — finalizing.",
@@ -349,6 +329,7 @@ async function resolveTurnWithoutSignal(workspace: string, scan: unknown): Promi
       ko
         ? "추가 질문 없이 계속 진행하세요. 남은 결정은 전부 합리적 기본값으로 정해 work-brief에 assumption으로 기록하고, 패키지를 끝까지 완성한 뒤 마지막 줄에 'BUILD_COMPLETE: <패키지 폴더명>'을 출력하세요."
         : "Continue WITHOUT asking any further questions. Decide every remaining choice with sensible defaults (record them as assumptions in the work-brief), finish the complete package, and end with 'BUILD_COMPLETE: <package folder name>'.",
+      generation,
     );
     return;
   }
@@ -359,38 +340,61 @@ async function resolveTurnWithoutSignal(workspace: string, scan: unknown): Promi
 }
 
 /** 한 번의 빌드/인터뷰 턴을 실행한다. input = 이번 턴 사용자 입력. */
-async function runTurn(input: string): Promise<void> {
+async function runTurn(input: string, generation = buildGeneration): Promise<void> {
   const api = ipc();
   const ev = ipcEvents();
-  if (!api || !ev || !state.workspace) return;
+  if (!api || !ev || !state.workspace || !state.workspaceGrant || !isCurrentBuild(generation)) return;
   const ko = currentLocale() === "ko";
 
   detach();
   lastAcc = "";
-  currentInput = input;
   state.phase = "running";
   state.errored = false;
   state.awaitingReply = false;
   state.pendingQuestions = [];
   const workspace = state.workspace;
+  const readScope = state.workspaceGrant.scope;
   commit();
 
-  const { runId } = await api.hephaestus.build({
-    request: input,
-    mode: state.mode || undefined,
-    workspace,
-    runtime: state.runtime || undefined,
-    runtimeSessionId: runtimeSessionId || undefined,
-    // 첨부는 첫 턴에만 스테이징 — 인터뷰 resume 턴은 세션이 맥락을 유지한다.
-    attachments: runtimeSessionId ? undefined : state.attachments.map((a) => ({ path: a.path, name: a.name })),
-    history: [...history],
-    locale: currentLocale(),
-  });
+  let runId: string;
+  try {
+    const started = await api.hephaestus.build({
+      request: input,
+      mode: state.mode || undefined,
+      workspace,
+      runtime: state.runtime || undefined,
+      runtimeSessionId: runtimeSessionId || undefined,
+      // 첨부는 런타임 sessionId 유무와 무관하게 한 빌드에서 정확히 한 번만 스테이징한다.
+      attachments: attachmentsSentForBuild
+        ? undefined
+        : state.attachments.map((a) => ({ path: a.path, name: a.name })),
+      history: [...history],
+      locale: currentLocale(),
+    });
+    if (!isCurrentBuild(generation)) return;
+    if (!started?.runId) throw new Error(ko ? "빌드 실행 ID를 받지 못했습니다." : "Build did not return a run ID.");
+    if (state.attachments.length > 0) attachmentsSentForBuild = true;
+    runId = started.runId;
+  } catch (error) {
+    if (!isCurrentBuild(generation)) return;
+    state.errored = true;
+    state.phase = "error";
+    state.runId = null;
+    pushLog(
+      "error",
+      ko
+        ? `빌드를 시작하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`
+        : `Could not start build: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    commit();
+    return;
+  }
   state.runId = runId;
   commit();
 
   const channel = api.hephaestus.buildEventChannel(runId);
   unsub = ev.on(channel, (raw) => {
+    if (!isCurrentBuild(generation) || state.runId !== runId) return;
     const e = raw as unknown as HephaestusBuildEvent;
     if (e.kind !== "done") state.reached = stageFromEvent(e, state.reached);
 
@@ -429,7 +433,7 @@ async function runTurn(input: string): Promise<void> {
         // 단 워크스페이스가 정크 폴더(trash/tmp 등)면 부모 전체가 회사로 잡히는 걸 막으려 자동등록 생략.
         const pkgPath = packagePathFromText(baseWs, assistantText);
         const registerPath = pkgPath ?? (JUNK_WS.test(wsBasename(baseWs)) ? null : baseWs);
-        state.result = { workspace: pkgPath ?? baseWs, securityScan: r?.securityScan ?? null };
+        state.result = { workspace: pkgPath ?? baseWs, securityScan: r?.securityScan ?? null, readScope };
         pushLog("done", ko ? "빌드 완료 — 패키지 생성됨" : "Build complete — package created");
         state.phase = "done";
         commit();
@@ -459,13 +463,12 @@ async function runTurn(input: string): Promise<void> {
         state.turn += 1;
         state.reached = Math.max(state.reached, 1);
         pushLog("log", ko ? "딥인터뷰 — 질문 묶음에 한 번에 답해 주세요." : "Deep interview — answer the batch of questions in one go.");
-        rememberInterviewCheckpoint();
         commit();
         return;
       }
       state.turn += 1;
       const scanFromEvent = (e.result as { securityScan?: unknown } | undefined)?.securityScan ?? null;
-      void resolveTurnWithoutSignal(workspace, scanFromEvent);
+      void resolveTurnWithoutSignal(workspace, scanFromEvent, readScope, generation);
       return;
     } else if (e.kind === "error") {
       state.errored = true;
@@ -475,16 +478,30 @@ async function runTurn(input: string): Promise<void> {
     }
     commit();
   });
-  void api.hephaestus.buildReady(runId);
+  void api.hephaestus.buildReady(runId).catch((error) => {
+    if (!isCurrentBuild(generation) || state.runId !== runId) return;
+    state.errored = true;
+    state.phase = "error";
+    pushLog(
+      "error",
+      ko
+        ? `빌드 이벤트 연결에 실패했습니다: ${error instanceof Error ? error.message : String(error)}`
+        : `Could not attach to build events: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    detach();
+    void api.hephaestus.cancelBuild(runId);
+    commit();
+  });
 }
 
 export async function startBuild(): Promise<void> {
-  if (!state.request.trim() || !state.workspace || state.phase === "running") return;
+  if (!state.request.trim() || !state.workspace || !state.workspaceGrant || state.phase === "running") return;
   // 새 빌드 — 대화/로그/단계 초기화.
   history = [];
-  interviewCheckpoints = [];
   runtimeSessionId = null;
+  attachmentsSentForBuild = false;
   autoContinues = 0;
+  const generation = ++buildGeneration;
   state.turn = 0;
   state.reached = 0;
   state.result = null;
@@ -499,7 +516,7 @@ export async function startBuild(): Promise<void> {
   if (state.attachments.length > 0) pushLog("log", ko ? `첨부 ${state.attachments.length}개: ${state.attachments.map((a) => a.name).join(", ").slice(0, 200)}` : `Attachments ${state.attachments.length}: ${state.attachments.map((a) => a.name).join(", ").slice(0, 200)}`);
   if (state.runtime) pushLog("log", `${ko ? "엔진" : "Engine"} ${state.runtime.kind}${state.runtime.model ? ` · ${state.runtime.model}` : ""}`);
   commit();
-  await runTurn(state.request.trim());
+  await runTurn(state.request.trim(), generation);
 }
 
 /** 인터뷰 답변 제출 — 다음 턴 실행. */
@@ -508,51 +525,27 @@ export async function answerBuild(reply: string): Promise<void> {
   const ko = currentLocale() === "ko";
   pushLog("log", `↳ ${ko ? "답변" : "Reply"}: ${reply.trim().slice(0, 240)}`);
   commit();
-  await runTurn(reply.trim());
-}
-
-/** 현재 딥인터뷰 대기 상태에서 바로 이전 답변 단계로 되돌린다. */
-export function rewindBuildInterview(): void {
-  if (state.phase !== "interview" || interviewCheckpoints.length < 2) return;
-  detach();
-  const target = interviewCheckpoints[interviewCheckpoints.length - 2];
-  interviewCheckpoints = interviewCheckpoints.slice(0, -1);
-  history = cloneHistory(target.history);
-  runtimeSessionId = target.runtimeSessionId;
-  currentInput = "";
-  state.phase = "interview";
-  state.errored = false;
-  state.awaitingReply = true;
-  state.pendingQuestions = cloneQuestions(target.pendingQuestions);
-  state.turn = target.turn;
-  state.reached = target.reached;
-  state.log = cloneLog(target.log);
-  state.result = null;
-  state.runId = null;
-  state.registered = false;
-  pushLog(
-    "log",
-    currentLocale() === "ko"
-      ? `${target.turn}번째 답변으로 돌아갔습니다 — 다시 선택해 주세요.`
-      : `Rewound to answer #${target.turn} — choose again.`,
-  );
-  commit();
+  await runTurn(reply.trim(), buildGeneration);
 }
 
 export function cancelBuild() {
-  if (state.runId) ipc()?.hephaestus.cancelBuild(state.runId);
+  const cancelledRunId = state.runId;
+  buildGeneration += 1;
+  if (cancelledRunId) ipc()?.hephaestus.cancelBuild(cancelledRunId);
   state.phase = "idle";
   state.reached = 0;
   state.awaitingReply = false;
   state.pendingQuestions = [];
-  interviewCheckpoints = [];
+  state.runId = null;
   runtimeSessionId = null;
+  attachmentsSentForBuild = false;
   autoContinues = 0;
   detach();
   commit();
 }
 
 export function resetBuild() {
+  buildGeneration += 1;
   state.phase = "idle";
   state.reached = 0;
   state.errored = false;
@@ -563,10 +556,9 @@ export function resetBuild() {
   state.awaitingReply = false;
   state.pendingQuestions = [];
   state.turn = 0;
-  state.canRewindInterview = false;
   history = [];
-  interviewCheckpoints = [];
   runtimeSessionId = null;
+  attachmentsSentForBuild = false;
   autoContinues = 0;
   commit();
 }

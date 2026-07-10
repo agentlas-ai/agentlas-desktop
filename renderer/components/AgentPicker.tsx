@@ -93,6 +93,7 @@ export function AgentPicker({
       className="titlebar-nodrag"
       style={{ position: "relative", display: "inline-flex", minWidth: 0 }}
       onKeyDown={(e) => {
+        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
         if (!open && (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ")) {
           e.preventDefault();
           setOpen(true);

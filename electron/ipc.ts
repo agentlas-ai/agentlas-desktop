@@ -10,6 +10,7 @@ import { agentRunCwd } from "./runtime/exec";
 import { listRuntimeModels } from "./runtime/providers";
 import { installCli, openCliLogin, updateCli, type InstallableCli } from "./runtime/install-cli";
 import { listRuntimeCommands } from "./runtime/commands";
+import { assertInvocationChatAvailable, resolveInvocationRunId } from "./runtime/run-id";
 import {
   getMultimodalSettings,
   getMultimodalStatus,
@@ -120,11 +121,14 @@ import type {
   HephaestusBuildEvent,
   HephaestusBuildRequest,
   CreatePromptEvolutionProposalInput,
+  FsPathGrant,
+  FsReadScope,
   HiredAgentCard,
   SkillCatalogEntry,
 } from "../shared/types";
 import { checkSafely as updaterCheck, getUpdaterState, quitAndInstall as updaterInstall } from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
+import { grantDroppedPath, pathFromGrant } from "./fs/access";
 import { getAuthSession, signInWithBrowser, signInWithGoogle, signOut } from "./auth";
 import { getBillingCredits, transferEarnings } from "./billing";
 import {
@@ -379,6 +383,9 @@ const activeRuns = new Map<string, RunRecord>();
 const activeBuilds = new Map<string, AbortController>();
 // runId → "렌더러 구독 완료" 신호. 구독 전 발생한 이벤트를 버퍼링하다 이 신호로 flush 한다.
 const buildReadySignals = new Map<string, () => void>();
+// 조기 실패가 렌더러의 invoke 응답보다 먼저 끝나도 terminal event를 잃지 않는다.
+// 렌더러가 사라진 비정상 경로만 유한 시간 뒤 정리한다.
+const BUILD_READY_GRACE_MS = 30_000;
 // tool 폭주하는 긴 실행/대형 firm 실행의 버퍼 무한증가 방지 상한 (재접속 리플레이는 최근 위주).
 const MAX_BUFFERED_EVENTS = 4000;
 // 단일 partial 텍스트 상한 — 런어웨이 출력(끝없이 스트리밍되는 GUI/서버 로그 등)이
@@ -520,7 +527,7 @@ async function openAppLaunchTarget(appRecord: AppFactoryAppRecord): Promise<AppF
     throw new Error(`No launch target is available for generated app: ${appRecord.appName}`);
   }
   if (target.mode === "external-url") {
-    await shell.openExternal(target.target);
+    await shell.openExternal(validateExternalHttpUrl(target.target));
   } else if (target.mode === "local-file") {
     const localPath = target.target.startsWith("file://") ? fileURLToPath(target.target) : target.target;
     await shell.openPath(localPath);
@@ -536,6 +543,23 @@ async function openAppLaunchTarget(appRecord: AppFactoryAppRecord): Promise<AppF
       ? `Opened generated app at ${target.target}.`
       : `Opened generated app package at ${target.target}.`,
   };
+}
+
+/** Generated/app-provided URLs may reach the OS protocol dispatcher. Only web URLs are allowed. */
+export function validateExternalHttpUrl(value: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(value || "").trim());
+  } catch {
+    throw new Error("External URL is invalid.");
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error(`External URL scheme is not allowed: ${parsed.protocol || "unknown"}`);
+  }
+  if (!parsed.hostname || parsed.username || parsed.password) {
+    throw new Error("External URL must use a credential-free web host.");
+  }
+  return parsed.toString();
 }
 
 function appLaunchTarget(appRecord: AppFactoryAppRecord): Pick<AppFactoryLaunchTargetResult, "target" | "mode"> | null {
@@ -667,10 +691,13 @@ export function registerIpcHandlers(): void {
     const win = BrowserWindow.fromWebContents(e.sender);
     return pickDirectory(win);
   });
-  ipcMain.handle("fs:listDirectory", (_e, absPath: string, showHidden?: boolean, rootPath?: string) =>
-    listDirectory(absPath, showHidden ?? false, rootPath),
+  ipcMain.handle("fs:listDirectory", (_e, absPath: string, scope: FsReadScope, showHidden?: boolean) =>
+    listDirectory(absPath, scope, showHidden ?? false),
   );
-  ipcMain.handle("fs:readTextFile", (_e, absPath: string, rootPath?: string) => readTextFilePreview(absPath, rootPath));
+  ipcMain.handle("fs:readTextFile", (_e, absPath: string, scope: FsReadScope) => readTextFilePreview(absPath, scope));
+  // This channel is intentionally absent from window.agentlas. Only the isolated
+  // preload bridge can pair webUtils.getPathForFile(File) with this grant call.
+  ipcMain.handle("fs:grantDroppedPath", (_e, droppedPath: string) => grantDroppedPath(droppedPath));
   ipcMain.handle("fs:openPath", async (_e, target: string): Promise<{ ok: boolean; message?: string }> => {
     const raw = String(target || "").trim();
     if (!raw) return { ok: false, message: "No file or URL was provided." };
@@ -740,14 +767,21 @@ export function registerIpcHandlers(): void {
   );
 
   // ── workspace (채팅별 working_folder) ───────────────────
-  ipcMain.handle("workspace:selectFolder", async () => {
-    const res = await dialog.showOpenDialog({ properties: ["openDirectory", "createDirectory"] });
-    return res.canceled || !res.filePaths.length ? null : res.filePaths[0];
+  ipcMain.handle("workspace:selectFolder", async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    return pickDirectory(win);
   });
   ipcMain.handle("workspace:get", (_e, chatId: string) => getChatWorkingFolder(chatId));
-  ipcMain.handle("workspace:set", (_e, chatId: string, absPath: string | null) =>
-    setChatWorkingFolder(chatId, absPath),
-  );
+  ipcMain.handle("workspace:set", (_e, chatId: string, grant: FsPathGrant | null) => {
+    setChatWorkingFolder(chatId, grant ? pathFromGrant(grant, "directory") : null);
+  });
+  ipcMain.handle("workspace:setFromProject", (_e, chatId: string, projectId: string) => {
+    const project = getProject(projectId);
+    if (!project?.folderPath) throw new Error("The project does not have a working folder.");
+    // Project paths can only be written by the grant-validating project handlers
+    // below. Existing rows are trusted main-owned migration state.
+    setChatWorkingFolder(chatId, project.folderPath);
+  });
   ipcMain.handle("workspace:defaultRunFolder", () => {
     try {
       return agentRunCwd();
@@ -1199,16 +1233,28 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("projects:get", (_e, id: string) => getProject(id));
   ipcMain.handle(
     "projects:create",
-    (_e, input: { name: string; defaultAgentId?: string | null; contextNote?: string | null; folderPath?: string | null }) =>
-      createProject(input),
+    (_e, input: { name: string; defaultAgentId?: string | null; contextNote?: string | null; folderGrant?: FsPathGrant | null }) =>
+      createProject({
+        name: input.name,
+        defaultAgentId: input.defaultAgentId,
+        contextNote: input.contextNote,
+        folderPath: input.folderGrant ? pathFromGrant(input.folderGrant, "directory") : null,
+      }),
   );
   ipcMain.handle(
     "projects:update",
     (
       _e,
       id: string,
-      patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId" | "folderPath">>,
-    ) => updateProject(id, patch),
+      patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId">> & { folderGrant?: FsPathGrant | null },
+    ) => updateProject(id, {
+      name: patch.name,
+      contextNote: patch.contextNote,
+      defaultAgentId: patch.defaultAgentId,
+      ...(patch.folderGrant !== undefined
+        ? { folderPath: patch.folderGrant ? pathFromGrant(patch.folderGrant, "directory") : null }
+        : {}),
+    }),
   );
   ipcMain.handle("projects:remove", (_e, id: string) => removeProject(id));
 
@@ -1531,8 +1577,11 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("appFactory:openProviderBrowser", async (_e, input: AppFactoryRootRequest) => {
     const result = await prepareProviderBrowserOpen(input);
-    for (const plan of result.opened) {
-      await shell.openExternal(plan.startUrl);
+    // Validate the complete batch before opening the first URL so a later
+    // javascript:/file:/custom-scheme value cannot cause a partial launch.
+    const safeUrls = result.opened.map((plan) => validateExternalHttpUrl(plan.startUrl));
+    for (const url of safeUrls) {
+      await shell.openExternal(url);
     }
     recordAppFactoryOperation(result.rootPath, "open-provider-browser", true, result, "operations-ready");
     return result;
@@ -1748,7 +1797,10 @@ export function registerIpcHandlers(): void {
     // 렌더러가 runId를 미리 넘기면 그대로 사용 — 렌더러가 invoke 왕복 전에 이 채널을 이미
     // 구독하고 있으므로 런타임이 즉시 emit하는 초기 이벤트도 놓치지 않는다(subscribe-before-trigger).
     // 안 넘겼으면(자동화/구버전 호출) 기존처럼 main이 생성(하위호환).
-    const runId = req.runId ?? randomUUID();
+    // renderer에는 채팅당 하나의 스트림/정지/재접속 surface만 있다. 같은 chat의 두 번째
+    // 실행을 허용하면 attach가 하나만 복원해 나머지 controller가 유실되므로 등록 전 거부한다.
+    assertInvocationChatAvailable(req.chatId, activeRuns.values());
+    const runId = resolveInvocationRunId(req.runId, (candidate) => activeRuns.has(candidate));
     const runReq: McpInvocationRequest = { ...req, runId };
     const channel = `invoke:event:${runId}`;
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -2031,6 +2083,7 @@ export function registerIpcHandlers(): void {
     // 이벤트를 버퍼링했다가 한 번에 flush 한다(첫 stage 틱 손실 방지).
     const pending: HephaestusBuildEvent[] = [];
     let ready = false;
+    let readyExpiry: NodeJS.Timeout | null = null;
     // 창이 닫힌 뒤 send는 throw하므로 destroyed 가드(빌드 종료와 닫기가 겹치는 경우).
     const sendToWin = (ev: HephaestusBuildEvent) => {
       if (win && !win.isDestroyed()) {
@@ -2047,12 +2100,23 @@ export function registerIpcHandlers(): void {
     buildReadySignals.set(runId, () => {
       if (ready) return;
       ready = true;
+      if (readyExpiry) clearTimeout(readyExpiry);
       for (const ev of pending) sendToWin(ev);
       pending.length = 0;
+      buildReadySignals.delete(runId);
     });
     void runHephaestusBuild(runId, req, emit, controller.signal, pickLocale(req)).finally(() => {
       activeBuilds.delete(runId);
-      buildReadySignals.delete(runId);
+      // If buildReady already fired, its callback removed the signal. Otherwise
+      // retain the buffered terminal event long enough for invoke() to resolve,
+      // the renderer to subscribe, and buildReady() to flush it.
+      if (!ready) {
+        readyExpiry = setTimeout(() => {
+          buildReadySignals.delete(runId);
+          pending.length = 0;
+        }, BUILD_READY_GRACE_MS);
+        readyExpiry.unref?.();
+      }
     });
     return { runId };
   });

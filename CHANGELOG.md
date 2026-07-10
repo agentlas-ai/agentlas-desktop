@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.7.28 — 2026-07-10
+
+### Added
+
+- **Current Codex/GPT model discovery.** Desktop reads the models exposed by the
+  signed-in Codex runtime—including current GPT family previews—then preserves
+  the chosen model and provider across refreshes without inventing unavailable
+  choices.
+- **Durable agent and project boundaries.** New run identities, project-scoped
+  memory selection, filesystem capabilities, and recovery metadata keep agent
+  work portable without leaking one project, task force, or secret into another.
+
+### Fixed
+
+- **Browser actions fail closed.** Payment and unsafe-code actions can no longer
+  bypass explicit approval when the approval surface is unavailable. Browser
+  passwords are never captured, personal Chrome profiles are never copied, and
+  failed legacy Keychain cleanup stays visible and retryable.
+- **Safe file access.** File reads require a picker, drop, project, or workspace
+  grant; real-path containment blocks traversal and symlink escapes, including
+  local media URLs.
+- **Data-preserving database repair.** Orphaned chats with messages, run history,
+  custom titles, or prior use are recovered under private placeholder agents;
+  only truly empty generated shells are removed. Foreign-key integrity remains
+  clean after migration and restart.
+- **Reliable updates and automation.** SemVer precedence, signed DMG continuity,
+  staged replacement/rollback, bounded downloads, finite scheduler settings,
+  leases, watchdogs, and visible failure feedback replace silent or unsafe paths.
+- **Chat and generated-app UX.** Empty-state guidance, attachment errors, drag
+  feedback, copy confirmation, scroll handoff, IME-safe submission, steering,
+  single-stop behavior, and generated-app routing now match the actual desktop
+  bridge on light, dark, desktop, and compact layouts.
+- **Build and borrow continuity.** Builder interviews survive cancel/failure,
+  borrowed task-force memory stays scoped, generated apps remain callable from
+  chat, and the mock bridge is checked against all 288 preload methods.
+- **Hephaestus v1.1.12 embedded.** Desktop release jobs pin the digest-verified,
+  rollback-safe Agent OS runtime used by Codex, Claude Code, Gemini, and other
+  supported hosts.
+
 ## 0.7.27 — 2026-07-10
 
 ### Added

@@ -117,6 +117,10 @@ function MarketplacePage() {
   // Hub 검색 0건/실패 시 hep-search(엔진) 보조 후보 — 카드와 별도의 단순 리스트로 표시.
   const [hepFallback, setHepFallback] = useState<HepFallbackState | null>(null);
   const hepSeqRef = useRef(0);
+  // IPC 검색 자체는 AbortSignal을 받지 않으므로, AbortController로 이전 요청을 폐기하고
+  // generation을 함께 확인해 늦은 search/status/fallback 응답이 최신 화면을 덮지 못하게 한다.
+  const marketplaceSearchGenerationRef = useRef(0);
+  const marketplaceSearchAbortRef = useRef<AbortController | null>(null);
 
   // 좌측 사이드바 검색 등 외부에서 ?q= 로 진입하면 검색어를 반영.
   useEffect(() => {
@@ -144,19 +148,13 @@ function MarketplacePage() {
   async function refresh() {
     const api = ipc();
     if (!api) return;
-    const [ls, ag, session, bookmarks] = await Promise.all([
-      api.marketplace.search(""),
+    const [ag, session, bookmarks] = await Promise.all([
       api.team.list(),
       api.auth.getSession(),
       api.marketplace.bookmarks?.().catch(() => []),
     ]);
-    // status는 위 Hub 호출(listBundles/listFirms/search)이 setStatus를 갱신한 "뒤"에 읽어야 정확하다.
-    // 병렬로 읽으면 첫 로드 때 갱신 전 초기값(미연결)을 잡거나 race가 난다.
-    const status = await api.marketplace.status();
-    setListings(Array.isArray(ls) ? ls : []);
     setInstalledAgentSlugs(new Set(visibleAgents(ag).map((a) => a.slug)));
     setBookmarkedSlugs(new Set((bookmarks ?? []).map((bookmark) => bookmark.slug)));
-    setSourceStatus(status);
     setSignedIn(session.signedIn);
   }
 
@@ -167,48 +165,75 @@ function MarketplacePage() {
   useEffect(() => {
     const api = ipc();
     if (!api) return;
-    const t = setTimeout(() => {
-      const query = q.trim();
-      void api.marketplace.search(q)
-        .then(async (results) => {
-          const arr = Array.isArray(results) ? results : [];
-          setListings(arr);
-          setSourceStatus(await api.marketplace.status());
-          return arr;
-        })
-        .catch(() => null) // 검색 실패 — 목록은 유지, 폴백 판단용으로만 null
-        .then((arr) => {
-          // hep-search 폴백: 검색어가 있는데 Hub 결과 0건이거나 검색이 던졌을 때만.
-          if (!query) {
-            setHepFallback(null);
-            return;
-          }
-          const hasHubMatch = Array.isArray(arr)
-            && arr.filter(isLiveHubListing).some((l) => listingMatchesQuery(l, query.toLowerCase()));
-          if (hasHubMatch) {
-            setHepFallback(null);
-            return;
-          }
-          void runHepFallback(query);
-        });
+    marketplaceSearchAbortRef.current?.abort();
+    const controller = new AbortController();
+    const generation = ++marketplaceSearchGenerationRef.current;
+    marketplaceSearchAbortRef.current = controller;
+    const query = q.trim();
+    // debounce 구간에도 이전 query의 fallback을 남겨두지 않는다.
+    setHepFallback(null);
+    const isCurrent = () =>
+      !controller.signal.aborted && marketplaceSearchGenerationRef.current === generation;
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        let results: MarketplaceListing[] | null = null;
+        try {
+          const response = await api.marketplace.search(q);
+          if (!isCurrent()) return;
+          results = Array.isArray(response) ? response : [];
+          setListings(results);
+          // status는 이 검색이 Hub source 상태를 갱신한 뒤 읽되, status가 늦게 와도
+          // 같은 generation일 때만 반영한다.
+          const status = await api.marketplace.status();
+          if (!isCurrent()) return;
+          setSourceStatus(status);
+        } catch {
+          if (!isCurrent()) return;
+          // 검색 실패 — 기존 목록은 유지하고 fallback 판정만 수행한다.
+        }
+
+        if (!isCurrent()) return;
+        // hep-search 폴백: 검색어가 있는데 Hub 결과 0건이거나 검색이 던졌을 때만.
+        if (!query) {
+          setHepFallback(null);
+          return;
+        }
+        const hasHubMatch = Array.isArray(results)
+          && results.filter(isLiveHubListing).some((l) => listingMatchesQuery(l, query.toLowerCase()));
+        if (hasHubMatch) {
+          setHepFallback(null);
+          return;
+        }
+        void runHepFallback(query, generation, controller.signal);
+      })();
     }, 150);
-    return () => clearTimeout(t);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+      if (marketplaceSearchAbortRef.current === controller) {
+        marketplaceSearchAbortRef.current = null;
+      }
+    };
   }, [q]);
 
-  async function runHepFallback(query: string) {
+  async function runHepFallback(query: string, generation: number, signal: AbortSignal) {
+    const isCurrent = () =>
+      !signal.aborted && marketplaceSearchGenerationRef.current === generation;
+    if (!isCurrent()) return;
     const api = ipc();
     if (!api?.hephaestus?.search) {
-      setHepFallback(null);
+      if (isCurrent()) setHepFallback(null);
       return;
     }
     const seq = ++hepSeqRef.current;
     setHepFallback({ query, status: "loading", items: [] });
     try {
       const res = await api.hephaestus.search({ query, limit: 8 });
-      if (hepSeqRef.current !== seq) return; // 더 새 검색이 이미 시작됨
+      if (!isCurrent() || hepSeqRef.current !== seq) return; // 더 새 검색이 이미 시작됨
       setHepFallback({ query, status: "done", items: parseHepSearchResult(res) });
     } catch {
-      if (hepSeqRef.current !== seq) return;
+      if (!isCurrent() || hepSeqRef.current !== seq) return;
       setHepFallback({ query, status: "done", items: [] });
     }
   }

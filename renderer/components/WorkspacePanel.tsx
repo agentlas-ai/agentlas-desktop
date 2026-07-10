@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
-import type { DirListing, TextFilePreview, WorkspaceNode } from "@/lib/types";
+import type { DirListing, FsReadScope, TextFilePreview, WorkspaceNode } from "@/lib/types";
 import {
   IconChevronRight,
   IconClose,
@@ -60,6 +60,7 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
   persistRef.current = persistence;
   const [width, setWidth] = useState<number>(DEFAULT_WIDTH);
   const [rootPath, setRootPath] = useState<string | null>(null);
+  const [readScope, setReadScope] = useState<FsReadScope | null>(null);
   const [rootListing, setRootListing] = useState<DirListing | null>(null);
   const [expanded, setExpanded] = useState<Map<string, DirListing>>(new Map());
   const [selected, setSelected] = useState<string | null>(null);
@@ -87,6 +88,7 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
     const api = ipc();
     if (!api || !chatId) {
       setRootPath(null);
+      setReadScope(null);
       setRootListing(null);
       setExpanded(new Map());
       setSelected(null);
@@ -102,11 +104,14 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
           : await api.workspace.get(chatId);
         if (cancelled) return;
         if (folder) {
+          const scope: FsReadScope = { kind: "chat-workspace", chatId };
           setRootPath(folder);
-          const listing = await api.fs.listDirectory(folder, false, folder);
+          setReadScope(scope);
+          const listing = await api.fs.listDirectory(folder, scope, false);
           if (!cancelled) setRootListing(listing);
         } else {
           setRootPath(null);
+          setReadScope(null);
           setRootListing(null);
         }
         setExpanded(new Map());
@@ -131,13 +136,14 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
       setError(null);
       const picked = await api.fs.pickDirectory();
       if (!picked) return;
-      setRootPath(picked);
-      const listing = await api.fs.listDirectory(picked, false, picked);
+      setRootPath(picked.path);
+      setReadScope(picked.scope);
+      const listing = await api.fs.listDirectory(picked.path, picked.scope, false);
       setRootListing(listing);
       setExpanded(new Map());
       setSelected(null);
       setPreview(null);
-      if (persistRef.current) await persistRef.current.save(picked);
+      if (persistRef.current) await persistRef.current.save(picked.path);
       else await api.workspace.set(chatId, picked);
     } catch (err) {
       setPanelError(err);
@@ -146,16 +152,16 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
 
   const refresh = useCallback(async () => {
     const api = ipc();
-    if (!api || !rootPath) return;
+    if (!api || !rootPath || !readScope) return;
     try {
       setError(null);
-      const listing = await api.fs.listDirectory(rootPath, false, rootPath);
+      const listing = await api.fs.listDirectory(rootPath, readScope, false);
       setRootListing(listing);
       // 펼쳐진 디렉터리들도 재요청
       const next = new Map<string, DirListing>();
       for (const [p] of expanded) {
         try {
-          next.set(p, await api.fs.listDirectory(p, false, rootPath));
+          next.set(p, await api.fs.listDirectory(p, readScope, false));
         } catch {
           // ignore stale expanded folders while keeping the root visible.
         }
@@ -164,13 +170,13 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
     } catch (err) {
       setPanelError(err);
     }
-  }, [rootPath, expanded, setPanelError]);
+  }, [rootPath, readScope, expanded, setPanelError]);
 
   const toggleDir = useCallback(
     async (node: WorkspaceNode) => {
       if (node.kind !== "dir") return;
       const api = ipc();
-      if (!api) return;
+      if (!api || !readScope) return;
       if (expanded.has(node.path)) {
         const next = new Map(expanded);
         next.delete(node.path);
@@ -179,7 +185,7 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
       }
       try {
         setError(null);
-        const listing = await api.fs.listDirectory(node.path, false, rootPath ?? undefined);
+        const listing = await api.fs.listDirectory(node.path, readScope, false);
         const next = new Map(expanded);
         next.set(node.path, listing);
         setExpanded(next);
@@ -187,12 +193,12 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
         setPanelError(err);
       }
     },
-    [expanded, rootPath, setPanelError],
+    [expanded, readScope, setPanelError],
   );
 
   const openFile = useCallback(async (node: WorkspaceNode) => {
     const api = ipc();
-    if (!api) return;
+    if (!api || !readScope) return;
     setSelected(node.path);
     setError(null);
     if (!node.isTextLike) {
@@ -202,13 +208,13 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
       return;
     }
     try {
-      const text = await api.fs.readTextFile(node.path, rootPath ?? undefined);
+      const text = await api.fs.readTextFile(node.path, readScope);
       setPreview(text);
       onOpenFilePreview?.(toWorkspaceFilePreview(node, text));
     } catch (err) {
       setPanelError(err);
     }
-  }, [onOpenFilePreview, rootPath, setPanelError]);
+  }, [onOpenFilePreview, readScope, setPanelError]);
 
   // 좌측 가장자리 드래그 핸들
   const onResizeStart = useCallback(

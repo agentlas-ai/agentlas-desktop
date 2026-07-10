@@ -4,12 +4,14 @@
 //   - 트리는 lazy expand. 한 번에 모든 자식만 (sub-tree 재귀는 클라이언트가 별 요청).
 //   - 숨김 파일(.git, .DS_Store)은 기본 제외, 옵션으로 노출 가능.
 //   - 파일 미리보기는 텍스트만, 사이즈 cap (256KB). 큰 텍스트는 앞부분만 보여준다.
-//   - 모든 path는 절대경로로 받고, rootPath가 있으면 realpath 기준으로 root 내부만 허용한다.
+//   - 모든 path는 절대경로로 받고, main이 해석한 scope의 realpath 내부만 허용한다.
 //   - 쓰기/삭제는 노출하지 않는다 (이번 단계 read-only).
 import { dialog, BrowserWindow } from "electron";
 import fs from "node:fs/promises";
 import { existsSync, Stats } from "node:fs";
 import path from "node:path";
+import type { FsPathGrant, FsReadScope } from "../../shared/types";
+import { grantPath, resolveFsReadPath, resolveMainOwnedReadPath } from "./access";
 
 const TEXT_PREVIEW_MAX = 256 * 1024;
 const TEXT_EXT = new Set([
@@ -74,41 +76,17 @@ function isTextLike(name: string): boolean {
   return hasTextLikeName(name);
 }
 
-async function realpathSafe(absPath: string): Promise<string | null> {
-  try {
-    return await fs.realpath(absPath);
-  } catch {
-    return null;
-  }
-}
-
-function isInsidePath(child: string, parent: string): boolean {
-  const rel = path.relative(parent, child);
-  return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel));
-}
-
-async function resolveScopedPath(absPath: string, rootPath?: string): Promise<string | null> {
-  const resolved = path.resolve(absPath);
-  if (!rootPath) return resolved;
-  const rootReal = await realpathSafe(path.resolve(rootPath));
-  const targetReal = await realpathSafe(resolved);
-  if (!rootReal || !targetReal || !isInsidePath(targetReal, rootReal)) return null;
-  return targetReal;
-}
-
 /** OS native picker — 사용자가 폴더를 직접 고른다. parent는 modal 부착용. */
-export async function pickDirectory(parent: BrowserWindow | null): Promise<string | null> {
+export async function pickDirectory(parent: BrowserWindow | null): Promise<FsPathGrant | null> {
   const res = await dialog.showOpenDialog(parent ?? undefined!, {
     properties: ["openDirectory", "showHiddenFiles"],
     title: "Choose a working folder",
   });
   if (res.canceled || res.filePaths.length === 0) return null;
-  return res.filePaths[0];
+  return grantPath(res.filePaths[0], { durable: true });
 }
 
-export async function listDirectory(absPath: string, showHidden = false, rootPath?: string): Promise<DirListing> {
-  const resolved = await resolveScopedPath(absPath, rootPath);
-  if (!resolved) return { path: path.resolve(absPath), exists: false, entries: [] };
+async function listDirectoryResolved(resolved: string, showHidden = false): Promise<DirListing> {
   if (!existsSync(resolved)) {
     return { path: resolved, exists: false, entries: [] };
   }
@@ -166,11 +144,15 @@ export async function listDirectory(absPath: string, showHidden = false, rootPat
   return { path: resolved, exists: true, entries };
 }
 
-export async function readTextFilePreview(absPath: string, rootPath?: string): Promise<TextFilePreview> {
-  const resolved = await resolveScopedPath(absPath, rootPath);
-  if (!resolved) {
-    return { path: path.resolve(absPath), content: "", truncated: false, size: 0, reason: "binary" };
-  }
+export async function listDirectory(absPath: string, scope: FsReadScope, showHidden = false): Promise<DirListing> {
+  return listDirectoryResolved(resolveFsReadPath(absPath, scope), showHidden);
+}
+
+export async function listDirectoryFromMainRoot(absPath: string, mainRoot: string, showHidden = false): Promise<DirListing> {
+  return listDirectoryResolved(resolveMainOwnedReadPath(absPath, mainRoot), showHidden);
+}
+
+async function readTextFilePreviewResolved(resolved: string): Promise<TextFilePreview> {
   let stat: Stats;
   try {
     stat = await fs.lstat(resolved);
@@ -201,4 +183,12 @@ export async function readTextFilePreview(absPath: string, rootPath?: string): P
     return { path: resolved, content: "", truncated: false, size: stat.size, reason: "binary" };
   }
   return { path: resolved, content: text, truncated: truncated || stat.size > TEXT_PREVIEW_MAX, size: stat.size };
+}
+
+export async function readTextFilePreview(absPath: string, scope: FsReadScope): Promise<TextFilePreview> {
+  return readTextFilePreviewResolved(resolveFsReadPath(absPath, scope));
+}
+
+export async function readTextFilePreviewFromMainRoot(absPath: string, mainRoot: string): Promise<TextFilePreview> {
+  return readTextFilePreviewResolved(resolveMainOwnedReadPath(absPath, mainRoot));
 }

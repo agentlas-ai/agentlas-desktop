@@ -12,7 +12,12 @@ import path from "node:path";
 import { app } from "electron";
 import { getDb } from "../store/db";
 import { getRoute } from "./routes";
-import { listDirectory, readTextFilePreview, type DirListing, type TextFilePreview } from "../fs/workspace";
+import {
+  listDirectoryFromMainRoot,
+  readTextFilePreviewFromMainRoot,
+  type DirListing,
+  type TextFilePreview,
+} from "../fs/workspace";
 
 interface AgentRow {
   id: string;
@@ -180,7 +185,7 @@ export async function listAgentFiles(agentId: string): Promise<DirListing> {
   if (!row) return { path: "", exists: false, entries: [] };
   const { dir, isLocal } = resolveDir(agentId, row.slug);
   if (!isLocal) materializeAgentFiles(agentId);
-  return listDirectory(dir, false);
+  return listDirectoryFromMainRoot(dir, dir, false);
 }
 
 export async function readAgentFile(agentId: string, absPath: string): Promise<TextFilePreview> {
@@ -194,7 +199,7 @@ export async function readAgentFile(agentId: string, absPath: string): Promise<T
   } catch {
     return { path: absPath, content: "", truncated: false, size: 0, reason: "binary" };
   }
-  return readTextFilePreview(safe);
+  return readTextFilePreviewFromMainRoot(safe, dir);
 }
 
 export function writeAgentFile(agentId: string, absPath: string, content: string): { ok: boolean } {

@@ -92,13 +92,13 @@ export default function BrowserPage() {
             <span className="dot ok" />{" "}
             {ko ? (
               <>
-                비밀번호를 저장하면 <b>OS 금고(Keychain·Windows 자격증명)</b>에만 암호화되어
-                들어갑니다. 화면·에이전트엔 절대 안 보여요.
+                비밀번호는 Agentlas에 저장하지 않습니다. <b>사이트의 실제 로그인 화면</b>에서 직접
+                입력하고, 이후에는 전용 프로필의 로그인 세션만 재사용합니다.
               </>
             ) : (
               <>
-                Saved passwords are encrypted only in the <b>OS vault (Keychain or Windows Credential
-                Manager)</b>. They are never shown to the screen or to agents.
+                Agentlas does not store site passwords. Enter them directly on the <b>provider&apos;s sign-in
+                page</b>; only the dedicated profile&apos;s signed-in session is reused afterward.
               </>
             )}
           </li>
@@ -176,8 +176,8 @@ export default function BrowserPage() {
                   if (r?.ok) {
                     flash(
                       ko
-                        ? `${s.site} 로그인 창을 열었어요. 로그인 후 창을 닫으면 저장됩니다.`
-                        : `Opened the ${s.site} sign-in window. Sign in, then close it to save the session.`,
+                        ? `${s.site} 로그인 창을 열었어요. 로그인 후 이 화면에서 ‘세션 저장’을 누르세요.`
+                        : `Opened the ${s.site} sign-in window. Sign in, then click Save session here.`,
                     );
                   } else {
                     flash(ko ? r?.error ?? "로그인 창을 열지 못했어요." : "Could not open the sign-in window.");
@@ -189,9 +189,17 @@ export default function BrowserPage() {
                   void refresh();
                 }}
                 onDelete={async () => {
-                  await api?.browser.deleteSite(s.site);
-                  flash(ko ? `${s.site} 삭제됨` : `${s.site} removed`);
-                  void refresh();
+                  try {
+                    await api?.browser.deleteSite(s.site);
+                    flash(ko ? `${s.site} 삭제됨` : `${s.site} removed`);
+                    void refresh();
+                  } catch {
+                    flash(
+                      ko
+                        ? `${s.site}의 보안 저장소 정리에 실패해 삭제하지 않았어요. 다시 시도해 주세요.`
+                        : `Could not clear ${s.site} from secure storage, so it was not removed. Try again.`,
+                    );
+                  }
                 }}
                 ko={ko}
               />
@@ -522,7 +530,6 @@ function SiteCard({
         <div className="sc-sub">
           {site.site}
           {site.username ? ` · ${site.username}` : ""}
-          {site.hasPassword ? (ko ? " · 🔑 비번 저장됨" : " · 🔑 password saved") : ""}
         </div>
         <div className="sc-badge">
           {badge}
@@ -606,14 +613,12 @@ function SiteEditor({
     site: string;
     label?: string | null;
     username?: string | null;
-    password?: string | null;
   }) => void;
   ko: boolean;
 }) {
   const [siteAddr, setSiteAddr] = useState(site?.site ?? "");
   const [label, setLabel] = useState(site?.label ?? "");
   const [username, setUsername] = useState(site?.username ?? "");
-  const [password, setPassword] = useState("");
 
   return (
     <div className="be-backdrop" onClick={onClose}>
@@ -636,28 +641,11 @@ function SiteEditor({
           {ko ? "아이디(선택)" : "Username (optional)"}
           <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="myid" />
         </label>
-        <label>
-          {ko ? "비밀번호(선택 · 자동 재로그인용)" : "Password (optional · for automatic re-login)"}
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder={
-              site?.hasPassword
-                ? ko
-                  ? "•••••• (저장됨 — 바꿀 때만 입력)"
-                  : "•••••• (saved — enter only to change)"
-                : ko
-                  ? "세션 만료 시 자동 로그인"
-                  : "Auto sign-in if the session expires"
-            }
-          />
-          <span className="hint">
-            {ko
-              ? "비밀번호는 OS 금고에만 암호화 저장됩니다. 화면·에이전트엔 안 보여요."
-              : "Passwords are encrypted only in the OS vault. They are never shown on screen or to agents."}
-          </span>
-        </label>
+        <p className="hint">
+          {ko
+            ? "저장 후 ‘로그인 창’을 열어 사이트에서 직접 로그인하세요. Agentlas는 비밀번호를 받거나 저장하지 않습니다."
+            : "After saving, open Sign in and authenticate on the provider page. Agentlas never receives or stores the password."}
+        </p>
         <div className="be-actions">
           <button className="ghost" onClick={onClose}>
             {ko ? "취소" : "Cancel"}
@@ -669,7 +657,6 @@ function SiteEditor({
                 site: siteAddr,
                 label: label || null,
                 username: username || null,
-                password: password.length > 0 ? password : undefined,
               })
             }
           >

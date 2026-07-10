@@ -10,7 +10,276 @@ import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 48;
+const SCHEMA_VERSION = 50;
+
+type SchemaColumn = {
+  name: string;
+  type: string;
+  notnull: number;
+  dflt_value: unknown;
+};
+
+type OrphanChatRow = Record<string, unknown> & {
+  id: string;
+  agent_id: string;
+  title?: string | null;
+  kind?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+function quoteSqlIdentifier(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function schemaColumns(db: Database.Database, table: string): SchemaColumn[] {
+  return db.prepare(`PRAGMA table_info(${quoteSqlIdentifier(table)})`).all() as SchemaColumn[];
+}
+
+function tableExists(db: Database.Database, table: string): boolean {
+  return Boolean(
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1").get(table),
+  );
+}
+
+function hasMeaningfulHiredAgents(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  const normalized = String(value).trim().toLowerCase();
+  return normalized !== "" && normalized !== "[]" && normalized !== "null";
+}
+
+function isDisposableUnusedTitle(value: unknown): boolean {
+  const title = String(value ?? "").trim().toLowerCase();
+  return title === "" || title === "새 채팅" || title === "new chat" || title.endsWith(" operations");
+}
+
+/**
+ * Finds any textual reference to a chat id outside chats.id itself. This is
+ * deliberately conservative: named FK columns, JSON payloads, metadata, and
+ * future TEXT reference columns all keep the chat on the recovery path.
+ */
+function firstChatReference(db: Database.Database, chatId: string): string | null {
+  const tables = db
+    .prepare(
+      `SELECT name
+       FROM sqlite_master
+       WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+       ORDER BY name`,
+    )
+    .all() as Array<{ name: string }>;
+
+  for (const { name: table } of tables) {
+    const columns = schemaColumns(db, table).filter((column) => {
+      if (table === "chats" && column.name === "id") return false;
+      const declared = String(column.type ?? "").toUpperCase();
+      return declared.includes("TEXT") || declared.includes("CHAR") || declared.includes("CLOB") || declared.includes("JSON");
+    });
+    if (columns.length === 0) continue;
+    const clauses = columns.map((column) => `instr(CAST(${quoteSqlIdentifier(column.name)} AS TEXT), ?) > 0`);
+    const found = db
+      .prepare(
+        `SELECT 1 AS found
+         FROM ${quoteSqlIdentifier(table)}
+         WHERE ${clauses.join(" OR ")}
+         LIMIT 1`,
+      )
+      .get(...columns.map(() => chatId)) as { found: number } | undefined;
+    if (found) return table;
+  }
+  return null;
+}
+
+const V50_REQUIRED_CHAT_COLUMNS = [
+  "id",
+  "agent_id",
+  "title",
+  "kind",
+  "project_id",
+  "firm_id",
+  "agent_group_id",
+  "parent_chat_id",
+  "created_at",
+  "updated_at",
+  "used_at",
+  "last_viewed_at",
+  "archived_at",
+  "working_folder",
+  "continuous_mode",
+  "swarm_mode",
+  "hired_agents",
+] as const;
+
+function orphanChatPreservationReasons(
+  db: Database.Database,
+  row: OrphanChatRow,
+  hasCanonicalChatShape: boolean,
+): string[] {
+  if (!hasCanonicalChatShape) return ["unknown-chat-schema"];
+  const reasons: string[] = [];
+  if (String(row.kind ?? "user") !== "user") reasons.push("non-standalone-kind");
+  for (const column of [
+    "project_id",
+    "firm_id",
+    "agent_group_id",
+    "parent_chat_id",
+    "used_at",
+    "last_viewed_at",
+    "archived_at",
+    "working_folder",
+  ] as const) {
+    const value = row[column];
+    if (value !== null && value !== undefined && String(value).trim() !== "") reasons.push(column);
+  }
+  if (Number(row.continuous_mode ?? 0) !== 0) reasons.push("continuous_mode");
+  if (Number(row.swarm_mode ?? 0) !== 0) reasons.push("swarm_mode");
+  if (hasMeaningfulHiredAgents(row.hired_agents)) reasons.push("hired_agents");
+  if (
+    typeof row.created_at === "string" && typeof row.updated_at === "string" &&
+    row.created_at !== row.updated_at
+  ) {
+    reasons.push("updated-after-create");
+  }
+  if (!isDisposableUnusedTitle(row.title)) reasons.push("custom-title");
+  const reference = firstChatReference(db, row.id);
+  if (reference) reasons.push(`referenced:${reference}`);
+  return [...new Set(reasons)];
+}
+
+function recoverySlug(db: Database.Database, missingAgentId: string): string {
+  const base = `recovered-orphan-${Buffer.from(missingAgentId, "utf8").toString("hex")}`;
+  let candidate = base;
+  let suffix = 1;
+  while (
+    db.prepare("SELECT 1 FROM installed_agents WHERE slug = ? AND id <> ? LIMIT 1").get(candidate, missingAgentId)
+  ) {
+    candidate = `${base}-${suffix++}`;
+  }
+  return candidate;
+}
+
+function insertRecoveryAgent(
+  db: Database.Database,
+  missingAgentId: string,
+  earliestChatAt: string | null,
+): void {
+  const columns = new Set(schemaColumns(db, "installed_agents").map((column) => column.name));
+  if (!columns.has("id")) throw new Error("v50 recovery cannot repair installed_agents without an id column");
+  const shortId = missingAgentId.slice(0, 12) || "unknown";
+  const values: Record<string, unknown> = {
+    id: missingAgentId,
+    slug: columns.has("slug") ? recoverySlug(db, missingAgentId) : undefined,
+    name: `Recovered deleted agent ${shortId}`,
+    name_en: `Recovered deleted agent ${shortId}`,
+    tagline: "Preserved because local chat history or references still exist.",
+    tagline_en: "Preserved because local chat history or references still exist.",
+    system_prompt: "This is a read-only recovery placeholder for a deleted agent. Preserve the local chat history; do not perform autonomous actions.",
+    mcp_servers_json: "[]",
+    preferred_backend: null,
+    trust_grade: "unknown",
+    installed_at: earliestChatAt || new Date().toISOString(),
+    tone: "blue",
+    env_requirements_json: "[]",
+    builtin: 0,
+    role: "recovery-placeholder",
+    visibility: "private",
+    entity_kind: "agent",
+  };
+  const insertColumns = Object.keys(values).filter((column) => columns.has(column));
+  db.prepare(
+    `INSERT INTO installed_agents (${insertColumns.map(quoteSqlIdentifier).join(", ")})
+     VALUES (${insertColumns.map(() => "?").join(", ")})`,
+  ).run(...insertColumns.map((column) => values[column]));
+}
+
+function repairOrphanChatsV50(db: Database.Database): void {
+  if (!tableExists(db, "chats") || !tableExists(db, "installed_agents")) return;
+  const chatColumns = schemaColumns(db, "chats");
+  const chatColumnNames = new Set(chatColumns.map((column) => column.name));
+  if (!chatColumnNames.has("id") || !chatColumnNames.has("agent_id")) return;
+  const hasCanonicalChatShape = V50_REQUIRED_CHAT_COLUMNS.every((column) => chatColumnNames.has(column));
+  const orphanRows = db
+    .prepare(
+      `SELECT c.*
+       FROM chats c
+       LEFT JOIN installed_agents a ON a.id = c.agent_id
+       WHERE a.id IS NULL
+       ORDER BY c.rowid`,
+    )
+    .all() as OrphanChatRow[];
+  if (orphanRows.length === 0) return;
+
+  // Decide every row before mutating anything, so two orphan chats that refer
+  // to each other cannot become accidentally deletable based on iteration order.
+  const decisions = orphanRows.map((row) => ({
+    row,
+    reasons: orphanChatPreservationReasons(db, row, hasCanonicalChatShape),
+  }));
+  const deleted = decisions.filter((decision) => decision.reasons.length === 0);
+  const preserved = decisions.filter((decision) => decision.reasons.length > 0);
+  const recoveredAgentIds = [...new Set(preserved.map((decision) => decision.row.agent_id))];
+  const baselineOtherViolations = new Set(
+    (db.pragma("foreign_key_check") as Array<{ table: string; rowid: number | null; parent: string; fkid: number }>)
+      .filter((violation) => !(violation.table === "chats" && violation.parent === "installed_agents"))
+      .map((violation) => `${violation.table}:${violation.rowid ?? "null"}:${violation.parent}:${violation.fkid}`),
+  );
+
+  const migrate = db.transaction(() => {
+    for (const decision of deleted) {
+      db.prepare("DELETE FROM chats WHERE id = ?").run(decision.row.id);
+    }
+    for (const missingAgentId of recoveredAgentIds) {
+      const earliest = preserved
+        .filter((decision) => decision.row.agent_id === missingAgentId)
+        .map((decision) => decision.row.created_at)
+        .filter((value): value is string => typeof value === "string" && value.length > 0)
+        .sort()[0] ?? null;
+      insertRecoveryAgent(db, missingAgentId, earliest);
+    }
+
+    const remainingChatAgentViolations = (
+      db.pragma("foreign_key_check") as Array<{ table: string; rowid: number | null; parent: string; fkid: number }>
+    ).filter((violation) => violation.table === "chats" && violation.parent === "installed_agents");
+    if (remainingChatAgentViolations.length > 0) {
+      throw new Error(`v50 orphan-chat repair left ${remainingChatAgentViolations.length} chat agent violation(s)`);
+    }
+    const newOtherViolations = (
+      db.pragma("foreign_key_check") as Array<{ table: string; rowid: number | null; parent: string; fkid: number }>
+    ).filter(
+      (violation) =>
+        !(violation.table === "chats" && violation.parent === "installed_agents") &&
+        !baselineOtherViolations.has(`${violation.table}:${violation.rowid ?? "null"}:${violation.parent}:${violation.fkid}`),
+    );
+    if (newOtherViolations.length > 0) {
+      throw new Error(`v50 orphan-chat repair introduced ${newOtherViolations.length} integrity violation(s)`);
+    }
+
+    if (tableExists(db, "meta")) {
+      const metaColumns = new Set(schemaColumns(db, "meta").map((column) => column.name));
+      if (metaColumns.has("key") && metaColumns.has("value")) {
+        db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(
+          "migration:v50:orphan-chat-repair",
+          JSON.stringify({
+            version: 50,
+            policy: "delete-only-contentless-unused-unreferenced-standalone; recover-placeholder-otherwise",
+            deleted: deleted.map((decision) => ({
+              chatId: decision.row.id,
+              missingAgentId: decision.row.agent_id,
+              title: decision.row.title ?? "",
+              createdAt: decision.row.created_at ?? null,
+            })),
+            preserved: preserved.map((decision) => ({
+              chatId: decision.row.id,
+              missingAgentId: decision.row.agent_id,
+              reasons: decision.reasons,
+            })),
+            recoveredAgentIds,
+          }),
+        );
+      }
+    }
+  });
+  migrate();
+}
 
 export function initStore(): void {
   if (_db) return;
@@ -110,7 +379,7 @@ export function initStore(): void {
         ceo_agent_id TEXT NOT NULL,
         org_chart_json TEXT NOT NULL,
         installed_at TEXT NOT NULL,
-        FOREIGN KEY(ceo_agent_id) REFERENCES installed_agents(id) ON DELETE CASCADE
+        FOREIGN KEY(ceo_agent_id) REFERENCES installed_agents(id) ON DELETE RESTRICT
       );
       CREATE INDEX IF NOT EXISTS idx_firms_installed ON firms(installed_at DESC);
     `);
@@ -1171,7 +1440,89 @@ export function initStore(): void {
   // JSON 배열: [{ slug, name?, source?, routeLabel?, hiredAt }]. 패키지 내용은 절대
   // 저장하지 않는다(복사 방지 설계) — 메타데이터 카드만.
   if (userVersion < 48) {
-    _db.exec(`ALTER TABLE chats ADD COLUMN hired_agents TEXT`);
+    // 이전 실행이 ALTER 뒤 user_version 갱신 전에 종료됐어도 재부팅이 가능해야 한다.
+    const chatColumns = _db
+      .prepare("PRAGMA table_info(chats)")
+      .all() as Array<{ name: string }>;
+    if (!chatColumns.some((column) => column.name === "hired_agents")) {
+      _db.exec(`ALTER TABLE chats ADD COLUMN hired_agents TEXT`);
+    }
+  }
+
+  // v49: deleting a firm's CEO must never cascade through the firm into chat
+  // history. Rebuild the table because SQLite cannot alter an FK action in
+  // place. Chat rows continue to reference the replacement `firms` table and
+  // keep their existing ON DELETE SET NULL behavior.
+  if (userVersion < 49) {
+    const ceoFk = (_db.prepare("PRAGMA foreign_key_list(firms)").all() as Array<{
+      from: string;
+      on_delete: string;
+    }>).find((fk) => fk.from === "ceo_agent_id");
+
+    if (ceoFk?.on_delete.toUpperCase() !== "RESTRICT") {
+      const existingViolations = new Set(
+        (_db.pragma("foreign_key_check") as Array<{
+          table: string;
+          rowid: number | null;
+          parent: string;
+          fkid: number;
+        }>).map((row) => `${row.table}:${row.rowid ?? "null"}:${row.parent}:${row.fkid}`),
+      );
+      _db.pragma("foreign_keys = OFF");
+      try {
+        const migrateFirmDeletePolicy = _db.transaction(() => {
+          _db!.exec(`
+            DROP TABLE IF EXISTS firms_v49;
+            CREATE TABLE firms_v49 (
+              id TEXT PRIMARY KEY,
+              slug TEXT UNIQUE NOT NULL,
+              name TEXT NOT NULL,
+              name_en TEXT NOT NULL DEFAULT '',
+              tagline TEXT NOT NULL,
+              tagline_en TEXT NOT NULL DEFAULT '',
+              persona TEXT NOT NULL,
+              ceo_agent_id TEXT NOT NULL,
+              org_chart_json TEXT NOT NULL,
+              installed_at TEXT NOT NULL,
+              FOREIGN KEY(ceo_agent_id) REFERENCES installed_agents(id) ON DELETE RESTRICT
+            );
+            INSERT INTO firms_v49
+              (id, slug, name, name_en, tagline, tagline_en, persona,
+               ceo_agent_id, org_chart_json, installed_at)
+            SELECT id, slug, name, name_en, tagline, tagline_en, persona,
+                   ceo_agent_id, org_chart_json, installed_at
+            FROM firms;
+            DROP TABLE firms;
+            ALTER TABLE firms_v49 RENAME TO firms;
+            CREATE INDEX idx_firms_installed ON firms(installed_at DESC);
+          `);
+
+          const newViolations = (_db!.pragma("foreign_key_check") as Array<{
+            table: string;
+            rowid: number | null;
+            parent: string;
+            fkid: number;
+          }>).filter(
+            (row) => !existingViolations.has(`${row.table}:${row.rowid ?? "null"}:${row.parent}:${row.fkid}`),
+          );
+          if (newViolations.length > 0) {
+            throw new Error(`v49 firm FK migration introduced ${newViolations.length} integrity violation(s)`);
+          }
+        });
+        migrateFirmDeletePolicy();
+      } finally {
+        _db.pragma("foreign_keys = ON");
+      }
+    }
+  }
+
+  // v50: repair chats whose agent was deleted while foreign-key enforcement
+  // was unavailable or interrupted. Deletion is intentionally narrow: only a
+  // pristine standalone shell with no use state and no textual reference in
+  // any table is removed. Anything ambiguous is retained under a private,
+  // non-operating recovery agent with the original missing id.
+  if (userVersion < 50) {
+    repairOrphanChatsV50(_db);
   }
 
   _db.pragma(`user_version = ${SCHEMA_VERSION}`);

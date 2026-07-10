@@ -4,6 +4,7 @@ import type {
   AgentlasUpdaterEvents,
   McpInvocationEvent,
   BrowserApprovalRequestEvent,
+  FsPathGrant,
 } from "./types";
 
 interface AgentlasEvents {
@@ -18,8 +19,8 @@ interface AgentlasEvents {
 }
 
 interface AgentlasFilesBridge {
-  /** 드래그&드롭/선택된 File(폴더 포함)의 실제 디스크 경로 */
-  pathForFile: (file: File) => string;
+  /** webUtils가 확인한 드롭 항목에 대해 main이 발급한 세션 권한. */
+  grantForFile: (file: File) => Promise<FsPathGrant | null>;
 }
 
 declare global {
@@ -50,8 +51,8 @@ export function updaterEvents(): AgentlasUpdaterEvents | null {
   return window.agentlasUpdater ?? null;
 }
 
-/** 드롭된 File의 디스크 경로를 얻는다 — 폴더 드래그 임포트용. */
-export function pathForDroppedFile(file: File): string | null {
+/** 드롭된 File에 대한 exact-file/폴더 권한을 얻는다. */
+export async function grantForDroppedFile(file: File): Promise<FsPathGrant | null> {
   if (typeof window === "undefined") return null;
-  return window.agentlasFiles?.pathForFile(file) ?? null;
+  return window.agentlasFiles?.grantForFile(file) ?? null;
 }

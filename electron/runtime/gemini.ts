@@ -19,56 +19,78 @@ import {
 
 const KIND = "gemini";
 
-const CANDIDATES = [
-  // Windows: `.cmd`/`.exe`를 bare 이름보다 먼저(bare는 PATHEXT 해석 시 `.ps1`을 잡아
-  // PowerShell 실행정책에 막힐 수 있음 — antigravity `agy` 감지 실패의 원인). .cmd는 cmd.exe로 무관.
-  ...(process.platform === "win32"
-    ? [
-        "agy.cmd",
-        "agy.exe",
-        path.join(os.homedir(), ".local", "bin", "agy.exe"),
-        path.join(os.homedir(), ".local", "bin", "agy.cmd"),
-        "gemini.cmd",
-        "gemini.exe",
-        path.join(process.env.APPDATA ?? "", "npm", "gemini.cmd"),
-        path.join(process.env.LOCALAPPDATA ?? "", "npm", "gemini.cmd"),
-      ]
-    : []),
-  // Antigravity CLI(agy) 우선 — 공식 install.sh가 ~/.local/bin/agy에 설치(Google OAuth · 키리스).
-  "agy",
-  path.join(os.homedir(), ".local/bin/agy"),
-  path.join(os.homedir(), ".agentlas/npm/bin/agy"),
-  "/opt/homebrew/bin/agy",
-  "/usr/local/bin/agy",
-  // 폴백: 기존 Gemini CLI — 이미 연결한 사용자 호환(점진 마이그레이션).
-  "gemini",
-  path.join(os.homedir(), ".agentlas/npm/bin/gemini"), // 앱이 설치한 유저 prefix (sudo 불필요)
-  path.join(os.homedir(), ".local/bin/gemini"), // 네이티브 인스톨러 기본 위치
-  path.join(os.homedir(), ".gemini/bin/gemini"),
-  "/opt/homebrew/bin/gemini",
-  "/usr/local/bin/gemini",
-];
+export function geminiCandidatePaths(
+  platform = process.platform,
+  home = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return [
+    // 공식 Gemini CLI 우선: 사용자 전역 extension/skills/MCP를 실제 로드한다.
+    ...(platform === "win32"
+      ? [
+          "gemini.cmd",
+          "gemini.exe",
+          path.join(env.APPDATA ?? "", "npm", "gemini.cmd"),
+          path.join(env.LOCALAPPDATA ?? "", "npm", "gemini.cmd"),
+        ]
+      : []),
+    "gemini",
+    path.join(home, ".local/bin/gemini"),
+    path.join(home, ".agentlas/npm/bin/gemini"),
+    path.join(home, ".gemini/bin/gemini"),
+    "/opt/homebrew/bin/gemini",
+    "/usr/local/bin/gemini",
+    // Antigravity(agy)는 공식 Gemini가 없는 기존 키리스 설치의 호환 폴백이다.
+    ...(platform === "win32"
+      ? [
+          "agy.cmd",
+          "agy.exe",
+          path.join(home, ".local", "bin", "agy.exe"),
+          path.join(home, ".local", "bin", "agy.cmd"),
+        ]
+      : []),
+    "agy",
+    path.join(home, ".local/bin/agy"),
+    path.join(home, ".agentlas/npm/bin/agy"),
+    "/opt/homebrew/bin/agy",
+    "/usr/local/bin/agy",
+  ];
+}
 
-async function firstExisting(paths: string[]): Promise<string | null> {
+const CANDIDATES = geminiCandidatePaths();
+
+export async function firstAvailableGeminiCandidate(
+  paths: string[],
+  available: (candidate: string) => Promise<boolean>,
+): Promise<string | null> {
   for (const p of paths) {
-    if (!path.isAbsolute(p)) {
-      // bare 커맨드명 — PATH(+Windows PATHEXT)로 해석. .cmd 심 포함.
-      if ((await probeCliVersion(p, 2000)) !== null) return p;
-      continue;
-    }
-    try {
-      await fs.access(p);
-      return p;
-    } catch {
-      continue;
-    }
+    if (await available(p)) return p;
   }
   return null;
+}
+
+async function firstExisting(paths: string[]): Promise<string | null> {
+  return firstAvailableGeminiCandidate(paths, async (candidate) => {
+    if (!path.isAbsolute(candidate)) {
+      // bare 커맨드명 — PATH(+Windows PATHEXT)로 해석. .cmd 심 포함.
+      return (await probeCliVersion(candidate, 2000)) !== null;
+    }
+    try {
+      await fs.access(candidate);
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 export interface GeminiProbe {
   path: string;
   version: string;
+}
+
+export function isAgyBinaryPath(binary: string | undefined): boolean {
+  return /(^|[/\\])agy(?:\.(?:exe|cmd))?$/.test(String(binary ?? ""));
 }
 
 export async function probeGemini(): Promise<GeminiProbe | null> {
@@ -121,6 +143,28 @@ function systemFingerprint(req: RunnerRequest): string {
     .digest("hex");
 }
 
+/**
+ * 공식 Gemini CLI는 사용자 전역 extension/skills/MCP를 기본값 그대로 로드한다.
+ * Antigravity(agy)는 Gemini의 세션 플래그를 지원하지 않으므로 그 둘만 제외하고,
+ * 공통 헤드리스 프롬프트/모델 인자는 유지한다.
+ */
+export function buildGeminiSpawnArgs(
+  isAgy: boolean,
+  resumeSessionId: string | null,
+  createSessionId: string | undefined,
+  model: string | undefined,
+): string[] {
+  const sessionArgs = isAgy
+    ? []
+    : resumeSessionId
+      ? ["--resume", resumeSessionId]
+      : createSessionId
+        ? ["--session-id", createSessionId]
+        : [];
+  const modelArgs = model && model.trim() ? ["--model", model.trim()] : [];
+  return [...sessionArgs, ...modelArgs, "--prompt", ""];
+}
+
 export const runGemini: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
@@ -130,9 +174,9 @@ export const runGemini: Runner = async (
     throw new Error(tStatus(req.locale, "errCliMissingGemini"));
   }
   // Antigravity CLI(agy)는 gemini-cli와 헤드리스 stdin(`--prompt ""`)은 동일하지만
-  // `--extensions`·`--session-id`/`--resume`를 지원하지 않는다("flags provided but not defined").
-  // → agy면 세션 인자/확장 인자를 끄고, 매 호출 full prompt(컨텍스트 포함)로 보낸다.
-  const isAgy = /(^|[/\\])agy(\.exe)?$/.test(bin);
+  // `--session-id`/`--resume`를 지원하지 않는다("flags provided but not defined").
+  // → agy면 세션 인자를 끄고, 매 호출 full prompt(컨텍스트 포함)로 보낸다.
+  const isAgy = isAgyBinaryPath(bin);
   const stagedImages = await stageCliImageAttachments(req);
   const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
 
@@ -176,24 +220,21 @@ export const runGemini: Runner = async (
     // stdin으로 싣는다(`-p`는 stdin 입력 뒤에 append됨). argv로 큰 프롬프트를 넘기면 Windows
     // cmd.exe 8191자 한계로 잘려 exit 1. GEMINI_CLI_TRUST_WORKSPACE: 비대화형은 신뢰-폴더
     // 프롬프트를 띄울 수 없어, 미설정 시 "not running in a trusted directory"로 죽는다(exit 55).
-    const sessionArgs = resumeSessionId
-      ? ["--resume", resumeSessionId]
-      : createSessionId
-        ? ["--session-id", createSessionId]
-        : [];
-    const modelArgs = req.model && req.model.trim() ? ["--model", req.model.trim()] : [];
     const env: NodeJS.ProcessEnv = { ...(req.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" };
     if (!env.TERM || env.TERM === "dumb") env.TERM = "xterm-256color";
     if (!env.COLORTERM) env.COLORTERM = "truecolor";
 
-    const extArgs = isAgy ? [] : ["--extensions", ""];
-    const child = spawnCli(bin, [...sessionArgs, ...modelArgs, ...extArgs, "--prompt", ""], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env,
-      // 사용자가 지정한 프로젝트 폴더에서 실행 — 미지정이면 전용 폴더.
-      cwd: req.cwd ?? agentRunCwd(),
-      ...detachedSpawnOpts(),
-    });
+    const child = spawnCli(
+      bin,
+      buildGeminiSpawnArgs(isAgy, resumeSessionId, createSessionId, req.model),
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        env,
+        // 사용자가 지정한 프로젝트 폴더에서 실행 — 미지정이면 전용 폴더.
+        cwd: req.cwd ?? agentRunCwd(),
+        ...detachedSpawnOpts(),
+      },
+    );
     trackRunChild(child);
     writeStdin(child, prompt);
 

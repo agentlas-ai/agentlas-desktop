@@ -15,6 +15,7 @@ import type { RuntimeLocale } from "../runtime/status-i18n";
 import type { HephaestusBuildEvent, HephaestusBuildRequest } from "../../shared/types";
 import { hephaestusRoot } from "./engine";
 import { securityScan } from "./commands";
+import { isCompletedBuildTurn } from "./build-turn";
 
 export type BuildSink = (ev: HephaestusBuildEvent) => void;
 
@@ -283,10 +284,11 @@ export async function runHephaestusBuild(
       },
     );
 
-    // 빌드 후 정적 보안 스캔(워크스페이스) — 결과는 done 이벤트에 첨부.
-    sink({ runId, kind: "stage", stage: "security", text: ko ? "정적 보안 스캔" : "Static security scan" });
+    // 인터뷰 turn은 질문만 반환하고 파일을 만들지 않는다. 완료 신호가 있는 실제 생성 턴에만
+    // security stage를 방출해야 UI가 답변 전에 3단계 완료로 뛰거나 무의미한 스캔을 하지 않는다.
     let scan: unknown = null;
-    if (!signal.aborted) {
+    if (!signal.aborted && isCompletedBuildTurn(result.text)) {
+      sink({ runId, kind: "stage", stage: "security", text: ko ? "정적 보안 스캔" : "Static security scan" });
       try {
         const scanRes = await securityScan(req.workspace, { signal, timeoutMs: 120_000 });
         scan = scanRes?.json ?? null;

@@ -16,28 +16,33 @@ import type { ChildProcess, SpawnOptions } from "node:child_process";
  * 최소(`/usr/bin:/bin:/usr/sbin:/sbin`)다. 그 결과 (1) bare 커맨드(claude/codex/gemini)
  * 감지가 실패하고, (2) node 기반 CLI(codex.js/gemini.js)가 셰뱅의 `env node`로 node를
  * 못 찾아 죽는다. 흔한 CLI/런타임 bin 디렉터리를 PATH 뒤에 덧붙여 둘 다 해결한다.
- * 기존 PATH 항목이 우선순위를 유지하도록 append(prepend 아님).
+ * 기존 로그인 셸 PATH 항목이 우선순위를 유지하도록 append(prepend 아님). 다만 Finder/Dock의
+ * 최소 PATH에 없는 보충 후보끼리는 사용자 standalone(~/.local/bin)을 Homebrew/npm보다 먼저
+ * 둬, 이미 최신 standalone이 있는데 오래된 전역 npm 심을 집는 일을 막는다.
  */
 function cliSearchDirs(): string[] {
   if (process.platform === "win32") {
     return [
+      path.join(os.homedir(), ".local", "bin"),
+      path.join(os.homedir(), ".agentlas", "npm"),
       path.join(process.env.APPDATA ?? "", "npm"),
       path.join(process.env.LOCALAPPDATA ?? "", "npm"),
     ].filter(Boolean);
   }
   const home = os.homedir();
   return [
-    "/opt/homebrew/bin",
-    "/opt/homebrew/sbin",
-    "/usr/local/bin",
-    "/usr/bin",
     path.join(home, ".local/bin"), // 네이티브 인스톨러: claude/codex/gemini
+    path.join(home, ".agentlas/npm/bin"), // Agentlas가 관리하는 최신 npm prefix
     path.join(home, ".codex/bin"),
     path.join(home, ".claude/local"),
     path.join(home, ".gemini/bin"),
     path.join(home, ".bun/bin"),
     path.join(home, ".volta/bin"),
     path.join(home, ".nvm/current/bin"),
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/bin",
   ];
 }
 

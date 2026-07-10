@@ -796,7 +796,6 @@ export interface BrowserSite {
   site: string;
   label: string | null;
   username: string | null;
-  hasPassword: boolean;
   session: { status: BrowserSessionStatus; capturedAt: string | null };
   createdAt: string;
   updatedAt: string;
@@ -805,8 +804,6 @@ export interface BrowserSiteInput {
   site: string;
   label?: string | null;
   username?: string | null;
-  /** 문자열이면 keytar 저장, "" 이면 삭제, 생략/undefined 면 기존 유지. */
-  password?: string | null;
 }
 export interface BrowserPermissionEntry {
   site: string;
@@ -830,6 +827,8 @@ export interface BrowserApprovalRequestEvent {
   summary: string;
   target: string | null;
   allowAlways: boolean;
+  /** Main-process fail-closed deadline; renderer auto-closes the stale sheet. */
+  expiresAt: number;
 }
 
 // ── 자동화 — SQLite 영속 + 앱 실행 중 백그라운드 스케줄러 ────────────
@@ -2409,6 +2408,20 @@ export interface TextFilePreview {
   reason?: "binary" | "too-large" | "not-text-ext";
 }
 
+/** Main-authoritative read scope. Renderer paths never act as their own roots. */
+export type FsReadScope =
+  | { kind: "capability"; token: string }
+  | { kind: "chat-workspace"; chatId: string }
+  | { kind: "chat-assets"; chatId: string };
+
+/** Opaque authority issued only after a native picker or trusted drop event. */
+export interface FsPathGrant {
+  path: string;
+  kind: "file" | "directory";
+  durable: boolean;
+  scope: Extract<FsReadScope, { kind: "capability" }>;
+}
+
 /** 로그인 세션 — 백엔드(agentlas.cloud)에서 cookie 기반으로 받아 main에 보관. renderer는 메타만. */
 export interface AuthSession {
   /** 로그인되어 있으면 true */
@@ -3306,9 +3319,9 @@ export interface AgentlasIpc {
   };
   /** 워킹 폴더 — 채팅 우측의 폴더 트리 패널이 사용. read-only. */
   fs: {
-    pickDirectory: () => Promise<string | null>;
-    listDirectory: (absPath: string, showHidden?: boolean, rootPath?: string) => Promise<DirListing>;
-    readTextFile: (absPath: string, rootPath?: string) => Promise<TextFilePreview>;
+    pickDirectory: () => Promise<FsPathGrant | null>;
+    listDirectory: (absPath: string, scope: FsReadScope, showHidden?: boolean) => Promise<DirListing>;
+    readTextFile: (absPath: string, scope: FsReadScope) => Promise<TextFilePreview>;
     /** 로컬 파일/폴더 또는 http(s) URL을 OS 기본 앱/브라우저로 연다. */
     openPath: (target: string) => Promise<{ ok: boolean; message?: string }>;
     /** 로컬 파일/폴더를 Finder/Explorer에서 표시한다. */
@@ -3322,11 +3335,13 @@ export interface AgentlasIpc {
   /** 채팅마다 마지막에 연 워킹 폴더 — SQLite에 저장. null이면 미설정. */
   workspace: {
     get: (chatId: string) => Promise<string | null>;
-    set: (chatId: string, absPath: string | null) => Promise<void>;
+    set: (chatId: string, grant: FsPathGrant | null) => Promise<void>;
+    /** Apply a main-owned project folder without accepting a renderer-supplied path. */
+    setFromProject: (chatId: string, projectId: string) => Promise<void>;
     /** CLI 실행 기본 폴더(userData/agent-cwd). 채팅 working_folder가 없을 때 산출물 상대경로 해석에 사용. */
     defaultRunFolder: () => Promise<string | null>;
     /** 네이티브 폴더 선택 다이얼로그 → 선택한 절대경로(취소 시 null) */
-    selectFolder: () => Promise<string | null>;
+    selectFolder: () => Promise<FsPathGrant | null>;
   };
   /** 로그인 — agentlas.cloud 구글 OAuth. BrowserWindow 열고 cookie 추출 → Keychain. */
   auth: {
@@ -3608,9 +3623,12 @@ export interface AgentlasIpc {
   };
   projects: {
     list: () => Promise<Project[]>;
-    create: (input: { name: string; defaultAgentId?: string | null; contextNote?: string | null; folderPath?: string | null }) => Promise<Project>;
+    create: (input: { name: string; defaultAgentId?: string | null; contextNote?: string | null; folderGrant?: FsPathGrant | null }) => Promise<Project>;
     get: (id: string) => Promise<Project | null>;
-    update: (id: string, patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId" | "folderPath">>) => Promise<Project>;
+    update: (
+      id: string,
+      patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId">> & { folderGrant?: FsPathGrant | null },
+    ) => Promise<Project>;
     remove: (id: string) => Promise<void>;
   };
   ontology: {

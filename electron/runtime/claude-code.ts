@@ -40,8 +40,8 @@ const CANDIDATES = [
       ]
     : []),
   "claude",
-  path.join(os.homedir(), ".agentlas/npm/bin/claude"), // 앱이 설치한 유저 prefix (sudo 불필요)
   path.join(os.homedir(), ".local/bin/claude"), // 네이티브 인스톨러 기본 위치
+  path.join(os.homedir(), ".agentlas/npm/bin/claude"), // 앱이 설치한 유저 prefix (sudo 불필요)
   path.join(os.homedir(), ".claude/local/claude"),
   "/opt/homebrew/bin/claude",
   "/usr/local/bin/claude",

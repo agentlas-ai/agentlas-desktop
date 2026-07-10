@@ -233,6 +233,8 @@ export function ChatInput({
   const { t, locale } = useT();
   const [input, setInput] = useState("");
   const [images, setImages] = useState<PreviewedImage[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [dragActive, setDragActive] = useState(false);
   const [plusOpen, setPlusOpen] = useState(false);
 
   // 외부 프리필 — 입력창이 비어있을 때만 채운다(입력 중 내용 덮어쓰기 금지).
@@ -279,6 +281,7 @@ export function ChatInput({
   const [activeIndex, setActiveIndex] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const dragDepthRef = useRef(0);
   const lastActiveAgentIdRef = useRef<string | null | undefined>(undefined);
   const autocompleteSignatureRef = useRef<string>("");
   const activeChatIdRef = useRef<string | null>(activeChatId);
@@ -307,6 +310,9 @@ export function ChatInput({
     setAgentPickerOpen(false);
     setSelectedAgentIds(new Set());
     setTrigger(null);
+    setAttachmentError(null);
+    dragDepthRef.current = 0;
+    setDragActive(false);
   }, [activeChatId]);
 
   // 입력 내용에 따라 textarea 높이를 늘린다(auto-grow) — 최대치까지 자라고 그 뒤엔 내부 스크롤.
@@ -318,10 +324,10 @@ export function ChatInput({
     el.style.height = `${Math.min(el.scrollHeight, 150)}px`;
   }, [input]);
 
-  // busy는 제외 — 실행 중에도 엔터로 메시지를 보낼 수 있게(steering). 부모가 busy면 큐에 쌓아
-  // 현재 턴이 끝나면 순서대로 전송한다. (실행 중 전송 버튼 자체는 여전히 정지 버튼으로 변신.)
+  // busy는 제외 — 실행 중에도 Enter/전송 버튼으로 steering 메시지를 보낼 수 있다. 부모가
+  // 큐에 쌓아 현재 턴 뒤에 전달한다. 중지 요청 뒤에만 새 지시를 잠시 막아 의도를 충돌시키지 않는다.
   const submitDisabled =
-    (!input.trim() && images.length === 0) || disabled;
+    (!input.trim() && images.length === 0) || disabled || (busy && stopRequested);
   // 활성 토글을 Hephaestus 지시 프리픽스로 합성. Network=허브 라우팅, Stormbreaker=견고-실행(--stormbreaker).
   // Network 칩은 하단에서 숨겼지만 /hep-network 직접 실행 및 내부 선택 경로를 위해 동작은 유지한다.
   function composeHepPrefix(text: string): string {
@@ -355,31 +361,33 @@ export function ChatInput({
   async function addFiles(files: FileList | File[]) {
     const accepted: PreviewedImage[] = [];
     const rejected: string[] = [];
+    const errors: string[] = [];
     for (const file of Array.from(files)) {
       if (!file.type.startsWith("image/")) {
         rejected.push(file.name);
         continue;
       }
       if (file.size > 5 * 1024 * 1024) {
-        alert(t("chatinput.image_too_large", { name: file.name }));
+        errors.push(t("chatinput.image_too_large", { name: file.name }));
         continue;
       }
-      const data = await fileToBase64(file);
-      accepted.push({
-        mediaType: file.type,
-        data,
-        dataUrl: `data:${file.type};base64,${data}`,
-        name: file.name,
-      });
+      try {
+        const data = await fileToBase64(file);
+        accepted.push({
+          mediaType: file.type,
+          data,
+          dataUrl: `data:${file.type};base64,${data}`,
+          name: file.name,
+        });
+      } catch {
+        errors.push(t("chatinput.image_read_failed", { name: file.name }));
+      }
     }
     if (accepted.length > 0) setImages((arr) => [...arr, ...accepted]);
     if (rejected.length > 0) {
-      alert(
-        locale === "ko"
-          ? `이미지 파일만 첨부할 수 있습니다: ${rejected.join(", ")}`
-          : `Only image files can be attached here: ${rejected.join(", ")}`,
-      );
+      errors.push(t("chatinput.only_images", { names: rejected.join(", ") }));
     }
+    setAttachmentError(errors.length > 0 ? errors.join(" ") : null);
   }
 
   function removeImage(i: number) {
@@ -610,6 +618,21 @@ export function ChatInput({
     return () => window.removeEventListener("mousedown", onDown);
   }, [plusOpen, permOpen, modelOpen, agentPickerOpen]);
 
+  // 자동완성은 footer 전체가 아니라 목록 자체만 "내부"로 본다. 그래서 입력창이나
+  // 채팅 본문을 누르면 닫히고, 목록 행을 누르는 동작은 그대로 onPick까지 전달된다.
+  // pointerdown을 쓰면 마우스뿐 아니라 터치 입력에서도 같은 규칙으로 동작한다.
+  useEffect(() => {
+    if (!trigger) return;
+    function onPointerDown(e: PointerEvent) {
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest('[data-popover-kind="autocomplete"]')) return;
+      setTrigger(null);
+    }
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [trigger]);
+
   // ── 플러그인 목록 (설치된 에이전트의 MCP 서버 dedupe) ─────
   const plugins = useMemo(() => {
     const set = new Set<string>();
@@ -627,15 +650,60 @@ export function ChatInput({
         background: "transparent",
         position: "relative",
       }}
+      onDragEnter={(e) => {
+        if (!Array.from(e.dataTransfer.types).includes("Files")) return;
+        e.preventDefault();
+        dragDepthRef.current += 1;
+        setDragActive(true);
+      }}
       onDragOver={(e) => {
         e.preventDefault();
         e.dataTransfer.dropEffect = "copy";
+        if (Array.from(e.dataTransfer.types).includes("Files")) setDragActive(true);
+      }}
+      onDragLeave={(e) => {
+        e.preventDefault();
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (dragDepthRef.current === 0) setDragActive(false);
       }}
       onDrop={(e) => {
         e.preventDefault();
+        dragDepthRef.current = 0;
+        setDragActive(false);
         if (e.dataTransfer.files.length > 0) void addFiles(e.dataTransfer.files);
       }}
+      onDragEnd={() => {
+        dragDepthRef.current = 0;
+        setDragActive(false);
+      }}
     >
+      {dragActive && (
+        <div
+          data-chat-drop-overlay="true"
+          role="status"
+          aria-live="polite"
+          style={{
+            position: "absolute",
+            inset: "4px 12px",
+            zIndex: 120,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 9,
+            border: "2px dashed var(--accent)",
+            borderRadius: 18,
+            background: "color-mix(in srgb, var(--paper) 94%, transparent)",
+            color: "var(--ink)",
+            fontSize: 13,
+            fontWeight: 700,
+            pointerEvents: "none",
+          }}
+        >
+          <IconFileUp size={17} style={{ color: "var(--accent)" }} />
+          <span>{t("chatinput.drop_images")}</span>
+        </div>
+      )}
+
       {/* 슬래시/멘션 자동완성 popover */}
       {trigger && context && (
         <AutocompletePopover
@@ -794,7 +862,7 @@ export function ChatInput({
             flexDirection: "column",
             gap: 8,
             border: "1px solid var(--paper-edge)",
-            background: "#fff",
+            background: "var(--paper)",
             padding: 12,
           }}
         >
@@ -889,6 +957,48 @@ export function ChatInput({
           WebkitBackdropFilter: "none",
         }}
       >
+        {attachmentError && (
+          <div
+            role="alert"
+            data-chat-attachment-error="true"
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 8,
+              padding: "8px 10px",
+              border: "1px solid color-mix(in srgb, var(--red-deep) 26%, var(--paper-edge))",
+              borderRadius: 10,
+              background: "color-mix(in srgb, var(--red-deep) 7%, var(--paper))",
+              color: "var(--red-deep)",
+              fontSize: 11.5,
+              lineHeight: 1.45,
+            }}
+          >
+            <span style={{ flex: 1, minWidth: 0 }}>{attachmentError}</span>
+            <button
+              type="button"
+              onClick={() => setAttachmentError(null)}
+              aria-label={t("common.close")}
+              title={t("common.close")}
+              style={{
+                flexShrink: 0,
+                width: 20,
+                height: 20,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                border: 0,
+                borderRadius: 6,
+                background: "transparent",
+                color: "currentColor",
+                cursor: "pointer",
+              }}
+            >
+              <IconClose size={12} />
+            </button>
+          </div>
+        )}
+
         {/* 이미지 미리보기 */}
         {images.length > 0 && (
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -1033,6 +1143,8 @@ export function ChatInput({
           placeholder={
             disabled
               ? t("chatinput.placeholder_disabled")
+              : busy
+                ? t("chatinput.placeholder_steering")
               : hepHint
                 ? `${hepHint} · ${locale === "ko" ? "요청을 입력하세요" : "describe the request"}`
               : t("chatinput.placeholder_rich")
@@ -1273,7 +1385,7 @@ export function ChatInput({
               </div>
             )}
 
-            {/* 보내기 / 정지 — 실행 중(busy)이고 onStop이 있으면 정지 버튼으로 변신 */}
+            {/* 실행 중에는 Stop을 하나만 유지하고, 원형 버튼은 추가 지시(steering) 전송에 쓴다. */}
             {(() => {
               const showStop = busy && !!onStop;
               const stopLabel = stopRequested
@@ -1288,12 +1400,9 @@ export function ChatInput({
                       type="button"
                       className="chat-input-stop-button"
                       data-chat-stop-button="true"
-                      onPointerDown={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
+                      onClick={() => {
                         if (!stopRequested) onStop?.();
                       }}
-                      onClick={stopRequested ? undefined : onStop}
                       disabled={stopRequested}
                       aria-label={stopLabel}
                       title={stopLabel}
@@ -1330,57 +1439,29 @@ export function ChatInput({
                     </button>
                   )}
                   <button
+                    type="button"
                     className="chat-input-send-button"
-                    data-chat-stop-button={showStop ? "true" : undefined}
-                    onPointerDown={
-                      showStop
-                        ? (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            if (!stopRequested) onStop?.();
-                          }
-                        : undefined
-                    }
-                    onClick={showStop ? (stopRequested ? undefined : onStop) : submit}
-                    disabled={showStop ? stopRequested : submitDisabled}
-                    aria-label={showStop ? stopLabel : t("chatinput.send")}
-                    title={showStop ? stopLabel : undefined}
+                    data-chat-steering-send={busy ? "true" : undefined}
+                    onClick={submit}
+                    disabled={submitDisabled}
+                    aria-label={busy ? t("chatinput.send_steering") : t("chatinput.send")}
+                    title={busy ? t("chatinput.send_steering") : undefined}
                     style={{
                       width: 32,
                       height: 32,
                       flexShrink: 0,
                       borderRadius: "50%",
-                      background: showStop || !submitDisabled ? "var(--paper)" : "var(--paper-2)",
-                      color: showStop
-                        ? "var(--red-deep)"
-                        : submitDisabled
-                          ? "var(--muted-deep)"
-                          : "var(--ink)",
+                      background: !submitDisabled ? "var(--paper)" : "var(--paper-2)",
+                      color: submitDisabled ? "var(--muted-deep)" : "var(--ink)",
                       border: "1px solid var(--paper-edge)",
                       display: "inline-flex",
                       alignItems: "center",
                       justifyContent: "center",
-                      boxShadow: showStop || !submitDisabled ? "var(--neu-raised)" : "none",
-                      cursor: showStop && !stopRequested ? "pointer" : undefined,
-                      opacity: showStop && stopRequested ? 0.72 : 1,
+                      boxShadow: !submitDisabled ? "var(--neu-raised)" : "none",
+                      cursor: submitDisabled ? "default" : "pointer",
                     }}
                   >
-                    {showStop ? (
-                      <span
-                        style={{
-                          width: 10,
-                          height: 10,
-                          background: "currentColor",
-                          borderRadius: 2,
-                          display: "inline-block",
-                        }}
-                        aria-hidden
-                      />
-                    ) : busy ? (
-                      <span className="agentlas-spinner" aria-hidden />
-                    ) : (
-                      <IconArrowUp size={15} />
-                    )}
+                    <IconArrowUp size={15} />
                   </button>
                 </>
               );
@@ -1429,7 +1510,7 @@ function BottomQuestionSheet({
         zIndex: 40,
         borderRadius: 0,
         border: "1px solid var(--paper-edge)",
-        background: "#fff",
+        background: "var(--paper)",
         boxShadow: "none",
         padding: 12,
       }}
@@ -1659,8 +1740,8 @@ function RecommendationSheet({
     fontWeight: 700,
     padding: "6px 14px",
     border: "1px solid var(--ink-soft)",
-    background: "var(--ink, #1a1a1a)",
-    color: "#fff",
+    background: "var(--ink)",
+    color: "var(--paper)",
     cursor: "pointer",
   };
   const ghostBtn: React.CSSProperties = {
@@ -1697,7 +1778,7 @@ function RecommendationSheet({
         margin: "0 auto",
         zIndex: 45,
         border: "1px solid var(--paper-edge)",
-        background: "#fff",
+        background: "var(--paper)",
         padding: 12,
       }}
       onKeyDown={(e) => {
@@ -1843,8 +1924,8 @@ function RecommendationSheet({
                     alignItems: "center",
                     justifyContent: "center",
                     border: "1px solid var(--paper-edge)",
-                    background: selected.has(a.id) ? "var(--ink, #1a1a1a)" : "#fff",
-                    color: "#fff",
+                    background: selected.has(a.id) ? "var(--ink)" : "var(--paper)",
+                    color: "var(--paper)",
                     fontSize: 10,
                     fontWeight: 800,
                     borderRadius: 3,
@@ -2110,11 +2191,22 @@ function AutocompletePopover({
   t: TFunction;
   onPick: (opt: AutocompleteOption) => void;
 }) {
+  const optionsRef = useRef<HTMLDivElement>(null);
   const title =
     trigger.kind === "slash" ? t("chatinput.slash_title") : t("chatinput.mention_title");
+
+  // 키보드로 목록 끝까지 이동해도 현재 행이 popover의 보이는 영역 안에 남게 한다.
+  // block/inline 모두 nearest라서 바깥 채팅 화면을 불필요하게 움직이지 않는다.
+  useEffect(() => {
+    const activeOption = optionsRef.current?.querySelector<HTMLElement>(
+      `[data-autocomplete-index="${activeIndex}"]`,
+    );
+    activeOption?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeIndex, options.length]);
+
   if (options.length === 0) {
     return (
-      <Popover title={title}>
+      <Popover title={title} dataKind="autocomplete" role="listbox">
         <EmptyHint>{t("chatinput.no_match")}</EmptyHint>
       </Popover>
     );
@@ -2123,24 +2215,26 @@ function AutocompletePopover({
   const seenGroups = new Set<string>();
   return (
     <Popover title={title} dataKind="autocomplete" role="listbox">
-      {options.map((opt, i) => {
-        const showHeader = opt.group && !seenGroups.has(opt.group);
-        if (opt.group) seenGroups.add(opt.group);
-        return (
-          <div key={opt.key}>
-            {showHeader && <GroupLabel>{opt.group}</GroupLabel>}
-            <Row
-              onClick={() => onPick(opt)}
-              onHover={() => onHover(i)}
-              active={i === activeIndex}
-              icon={kindIcon(opt.kind)}
-              title={opt.title}
-              subtitle={opt.subtitle}
-              autocompleteOption
-            />
-          </div>
-        );
-      })}
+      <div ref={optionsRef}>
+        {options.map((opt, i) => {
+          const showHeader = opt.group && !seenGroups.has(opt.group);
+          if (opt.group) seenGroups.add(opt.group);
+          return (
+            <div key={opt.key} data-autocomplete-index={i}>
+              {showHeader && <GroupLabel>{opt.group}</GroupLabel>}
+              <Row
+                onClick={() => onPick(opt)}
+                onHover={() => onHover(i)}
+                active={i === activeIndex}
+                icon={kindIcon(opt.kind)}
+                title={opt.title}
+                subtitle={opt.subtitle}
+                autocompleteOption
+              />
+            </div>
+          );
+        })}
+      </div>
     </Popover>
   );
 }

@@ -260,13 +260,13 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     name: "Agentlas 브라우저 (실제 로그인)",
     nameEn: "Agentlas Browser (real login)",
     description:
-      "사용자의 실제 로그인 Chrome 프로필로 웹 조작 — 신선 프로필이 봇/네트워크 보안에 차단될 때 우회 (범용, 키 불필요)",
+      "Agentlas 전용 Chrome에서 사용자가 직접 로그인한 세션으로 웹 조작 (개인 Chrome 프로필은 복사하지 않음, 키 불필요)",
     descriptionEn:
-      "Drive the web using your real logged-in Chrome profile — bypasses bot/network-security blocks that hit fresh profiles (general, no key)",
+      "Drive the web with sessions you sign in to inside Agentlas Chrome; your personal Chrome profile is never copied (general, no key)",
     category: "web",
     transport: "stdio",
     // ~/.agentlas/agentlas-browser-cdp.mjs 는 부팅 시 materializeBrowserCdpLauncher() 가 씀.
-    // 실제 로그인 프로필 사본을 원격 디버깅 포트로 띄우고 @playwright/mcp 를 CDP attach 한다.
+    // 전용 로그인 프로필을 원격 디버깅 포트로 띄우고 @playwright/mcp 를 CDP attach 한다.
     command: "node",
     args: ["~/.agentlas/agentlas-browser-cdp.mjs"],
     trust: "official",

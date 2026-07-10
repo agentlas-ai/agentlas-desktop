@@ -1,18 +1,19 @@
 // Agentlas Browser (CDP) 플러그인 런처 소스.
 //
-// 범용 브라우저 MCP 플러그인 — 특정 사이트/계정과 무관하다. 사용자의 "실제 로그인된 Chrome"
-// 프로필을 별도 사본으로 복사해 원격 디버깅 포트로 띄우고, @playwright/mcp 를 그 인스턴스에
-// CDP 로 붙여 표준 브라우저 도구(navigate/click/type/snapshot/evaluate…)를 제공한다.
+// 범용 브라우저 MCP 플러그인 — 특정 사이트/계정과 무관하다. 사용자가 직접 로그인한 Agentlas
+// 전용 Chrome 프로필을 원격 디버깅 포트로 띄우고, @playwright/mcp 를 그 인스턴스에 CDP 로 붙여
+// 표준 브라우저 도구(navigate/click/type/snapshot/evaluate…)를 제공한다.
 //
 // 왜: Playwright 기본(신선/빈 프로필)은 많은 사이트의 봇/네트워크 보안에 하드 차단된다.
-// 실제 로그인 프로필로 CDP attach 하면 사람이 쓰던 세션 그대로라 차단되지 않는다.
+// 전용 프로필의 실제 Chrome 로그인 세션을 CDP로 재사용하면 신선한 임시 프로필보다 안정적이다.
 //
-// 개인정보는 플러그인 패키지에 절대 들어가지 않는다 — 쿠키/프로필 복사는 100% 사용자 머신
-// 로컬에서 런타임에만 일어나고, 사본은 ~/.agentlas/chrome-cdp-profile 안에만 존재한다.
+// 개인정보는 플러그인 패키지에 절대 들어가지 않는다. 평소 쓰는 Chrome 프로필을 복사하지 않으며,
+// 사용자가 전용 창에서 직접 로그인한 세션만 ~/.agentlas/chrome-cdp-profile 안에 남는다.
 //
 // 이 파일은 문자열 소스를 ~/.agentlas/agentlas-browser-cdp.mjs 로 물질화(materialize)한다.
 // catalog 엔트리가 `node ~/.agentlas/agentlas-browser-cdp.mjs` 로 실행한다(의존성 0, 순수 node).
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
@@ -26,6 +27,65 @@ export function browserCdpLauncherPath(): string {
 /** 전용 CDP 크롬 프로필 경로(MCP 런처와 로그인 창이 공유). */
 export function browserCdpProfilePath(): string {
   return process.env.AGENTLAS_CDP_PROFILE || path.join(os.homedir(), ".agentlas", "chrome-cdp-profile");
+}
+
+/** Agentlas 전용 CDP Chrome 소유 표식. 임의의 기존 9222 프로세스에 붙지 않기 위한 로컬 증거. */
+export function browserCdpOwnerPath(): string {
+  return path.join(browserCdpProfilePath(), ".agentlas-cdp-owner.json");
+}
+
+export function writeBrowserCdpOwner(pid: number): void {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  const file = browserCdpOwnerPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(
+    file,
+    JSON.stringify({ pid, port: browserCdpPort(), profile: path.resolve(browserCdpProfilePath()) }),
+    { encoding: "utf8", mode: 0o600 },
+  );
+  try { fs.chmodSync(file, 0o600); } catch { /* best-effort */ }
+}
+
+export function clearBrowserCdpOwner(pid: number): void {
+  const file = browserCdpOwnerPath();
+  try {
+    const owner = JSON.parse(fs.readFileSync(file, "utf8")) as { pid?: number };
+    if (owner.pid === pid) fs.rmSync(file, { force: true });
+  } catch {
+    // 없거나 손상된 표식은 소유 증거가 아니므로 제거한다.
+    try { fs.rmSync(file, { force: true }); } catch { /* noop */ }
+  }
+}
+
+export function browserCdpOwnerIsLive(): boolean {
+  try {
+    const owner = JSON.parse(fs.readFileSync(browserCdpOwnerPath(), "utf8")) as {
+      pid?: number;
+      port?: number;
+      profile?: string;
+    };
+    if (
+      !Number.isInteger(owner.pid) ||
+      Number(owner.pid) <= 0 ||
+      owner.port !== browserCdpPort() ||
+      path.resolve(owner.profile ?? "") !== path.resolve(browserCdpProfilePath())
+    ) return false;
+    process.kill(Number(owner.pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function browserCdpPortReady(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.get(
+      { host: "127.0.0.1", port: browserCdpPort(), path: "/json/version", timeout: 1200 },
+      (res) => { res.resume(); resolve(res.statusCode === 200); },
+    );
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve(false); });
+  });
 }
 
 /** 기본 CDP 포트(MCP 런처와 동일 기본값). */
@@ -67,8 +127,84 @@ export function resolveChromeExe(): string | null {
   return candidates.find((p) => fs.existsSync(p)) || null;
 }
 
+/**
+ * Materialized launcher and regression tests share one classifier source so
+ * approval behavior cannot drift between the shipped script and its tests.
+ */
+export const BROWSER_APPROVAL_CLASSIFIER_SOURCE = String.raw`
+const PAY_RE = /(checkout|\bpay(ment)?\b|purchase|\bbuy\b|\border\b|donate|subscrib|billing|credit\s*card|debit\s*card|card\s*number|cvv|cvc|결제|구매|주문|결재|카드)/i;
+const SEND_RE = /(publish|\bpost\b|\bsend\b|submit|tweet|retweet|\bshare\b|reply|\bcomment\b|confirm|전송|게시|제출|답글|댓글|공유|보내|확인)/i;
+const PUBLISH_RE = /(publish|\bpost\b|tweet|retweet|게시|공개)/i;
+const DELETE_RE = /(delete|remove|destroy|unsubscribe|삭제|제거|탈퇴)/i;
+const SUBMIT_KEY_RE = /(?:^|[+\s])(enter|return|numpadenter)(?:$|[+\s])/i;
+
+function actionFromIntent(text, fallback = null) {
+  if (PAY_RE.test(text)) return 'payment';
+  if (DELETE_RE.test(text)) return 'delete';
+  if (PUBLISH_RE.test(text)) return 'publish';
+  if (SEND_RE.test(text)) return 'send';
+  return fallback;
+}
+
+function intentText(name, args, currentUrl = '') {
+  const input = args && typeof args === 'object' ? args : {};
+  const parts = [currentUrl, input.element, input.target, input.name, input.label, input.url];
+  if (name === 'browser_fill_form' && Array.isArray(input.fields)) {
+    for (const field of input.fields) parts.push(field && field.name, field && field.type);
+  }
+  return parts.filter((value) => typeof value === 'string').join(' ').toLowerCase();
+}
+
+function classifyAction(name, args, currentUrl = '') {
+  const input = args && typeof args === 'object' ? args : {};
+  const intent = intentText(name, input, currentUrl);
+  let allText = '';
+  try { allText = JSON.stringify(input).toLowerCase(); } catch (e) { allText = ''; }
+
+  if (name === 'browser_run_code' || name === 'browser_run_code_unsafe') return 'unsafe-code';
+
+  const submitByType = name === 'browser_type' && input.submit === true;
+  const submitByKey = name === 'browser_press_key' && SUBMIT_KEY_RE.test(String(input.key || ''));
+  if (submitByType || submitByKey) return actionFromIntent(intent, 'send');
+
+  if (name === 'browser_handle_dialog' && input.accept === true) {
+    return actionFromIntent(intent, 'send');
+  }
+
+  // Filling payment credentials is gated before secrets are exposed to the page.
+  // Ordinary text/form filling remains approval-free until an actual submit action.
+  if (name === 'browser_type' || name === 'browser_fill' || name === 'browser_fill_form') {
+    return PAY_RE.test(intent) ? 'payment' : null;
+  }
+
+  if (name === 'browser_navigate' || name === 'browser_navigate_back') {
+    return PAY_RE.test(allText) ? 'payment' : null;
+  }
+  if (name === 'browser_click' || name === 'browser_file_upload') {
+    return actionFromIntent(intent + ' ' + allText);
+  }
+  return null;
+}
+`;
+
+/** CDP 현재 페이지와 명시적 navigate 목적지 중 승인 사이트로 쓸 권위 URL을 고르는 순수 헬퍼. */
+export const BROWSER_APPROVAL_CONTEXT_SOURCE = String.raw`
+function extractCdpPageUrl(pages) {
+  if (!Array.isArray(pages)) return '';
+  const candidates = pages.filter((page) => page && page.type === 'page' && typeof page.url === 'string');
+  const active = candidates.find((page) => !/^(?:about:blank|chrome:\/\/newtab\/?|devtools:)/i.test(page.url));
+  return String((active || candidates[0] || {}).url || '');
+}
+
+function approvalContextUrl(name, args, observedUrl) {
+  const input = args && typeof args === 'object' ? args : {};
+  if (name === 'browser_navigate' && typeof input.url === 'string' && input.url.trim()) return input.url.trim();
+  return typeof observedUrl === 'string' ? observedUrl.trim() : '';
+}
+`;
+
 const LAUNCHER_SOURCE = String.raw`#!/usr/bin/env node
-// Agentlas Browser (CDP) — 범용 엔진. 실제 로그인 Chrome 전용 프로필을 원격 디버깅 포트로 띄우고
+// Agentlas Browser (CDP) — 범용 엔진. Agentlas 전용 Chrome 프로필을 원격 디버깅 포트로 띄우고
 // @playwright/mcp 를 CDP 로 붙여 MCP 브라우저 도구를 제공한다. 이 프로세스가 client ↔ @playwright/mcp
 // 사이를 stdio 로 프록시하며 (1) 되돌릴 수 없는 행동 승인 게이트, (2) learn-and-replay 스킬 레이어를 얹는다.
 // 의존성 0(순수 node). 개인 데이터는 로컬에서만 사용, 어디로도 전송하지 않는다.
@@ -80,6 +216,7 @@ import http from 'node:http';
 
 const PORT = Number(process.env.AGENTLAS_CDP_PORT || 9222);
 const CDP_PROFILE = process.env.AGENTLAS_CDP_PROFILE || path.join(os.homedir(), '.agentlas', 'chrome-cdp-profile');
+const OWNER_FILE = path.join(CDP_PROFILE, '.agentlas-cdp-owner.json');
 const HEADLESS = String(process.env.AGENTLAS_CDP_HEADLESS || '').toLowerCase() === '1';
 const SKILLS_DIR = process.env.AGENTLAS_BROWSER_SKILLS_DIR || path.join(os.homedir(), '.agentlas', 'browser-skills');
 const log = (...a) => console.error('[agentlas-browser]', ...a);
@@ -91,7 +228,7 @@ function chromeInfo() {
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
       path.join(home, 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
     ];
-    return { userData: path.join(home, 'Library/Application Support/Google/Chrome'), exe: exes.find(fs.existsSync) || exes[0] };
+    return { exe: exes.find(fs.existsSync) || exes[0] };
   }
   if (process.platform === 'win32') {
     const lad = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
@@ -100,25 +237,10 @@ function chromeInfo() {
       path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
       path.join(lad, 'Google', 'Chrome', 'Application', 'chrome.exe'),
     ];
-    return { userData: path.join(lad, 'Google', 'Chrome', 'User Data'), exe: exes.find(fs.existsSync) || exes[0] };
+    return { exe: exes.find(fs.existsSync) || exes[0] };
   }
   const exes = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/opt/google/chrome/chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'];
-  return { userData: path.join(home, '.config', 'google-chrome'), exe: exes.find(fs.existsSync) || exes[0] };
-}
-
-function seedProfile(srcUserData, dst) {
-  try {
-    fs.mkdirSync(path.join(dst, 'Default'), { recursive: true });
-    const rels = ['Local State', 'Default/Cookies', 'Default/Network/Cookies', 'Default/Login Data', 'Default/Web Data', 'Default/Preferences'];
-    for (const rel of rels) {
-      const s = path.join(srcUserData, ...rel.split('/'));
-      const d = path.join(dst, ...rel.split('/'));
-      if (fs.existsSync(s)) {
-        fs.mkdirSync(path.dirname(d), { recursive: true });
-        try { fs.copyFileSync(s, d); } catch (e) { log('copy skip', rel, String(e)); }
-      }
-    }
-  } catch (e) { log('seedProfile failed', String(e)); }
+  return { exe: exes.find(fs.existsSync) || exes[0] };
 }
 
 function portReady(port) {
@@ -129,17 +251,37 @@ function portReady(port) {
   });
 }
 
-function profileSeeded(dst) {
-  return fs.existsSync(path.join(dst, 'Default', 'Cookies')) || fs.existsSync(path.join(dst, 'Default', 'Network', 'Cookies'));
+function writeOwner(pid) {
+  fs.mkdirSync(path.dirname(OWNER_FILE), { recursive: true });
+  fs.writeFileSync(OWNER_FILE, JSON.stringify({ pid, port: PORT, profile: path.resolve(CDP_PROFILE) }), { encoding: 'utf8', mode: 0o600 });
+  try { fs.chmodSync(OWNER_FILE, 0o600); } catch (e) {}
+}
+function clearOwner(pid) {
+  try { const owner = JSON.parse(fs.readFileSync(OWNER_FILE, 'utf8')); if (owner.pid === pid) fs.rmSync(OWNER_FILE, { force: true }); }
+  catch (e) { try { fs.rmSync(OWNER_FILE, { force: true }); } catch (ignore) {} }
+}
+function ownedPortReady() {
+  try {
+    const owner = JSON.parse(fs.readFileSync(OWNER_FILE, 'utf8'));
+    if (owner.port !== PORT || path.resolve(owner.profile || '') !== path.resolve(CDP_PROFILE) || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+    process.kill(owner.pid, 0);
+    return true;
+  } catch (e) { return false; }
 }
 
 async function ensureChrome() {
-  if (await portReady(PORT)) { log('CDP already up on', PORT); return; }
-  const { userData, exe } = chromeInfo();
+  if (await portReady(PORT)) {
+    if (ownedPortReady()) { log('owned CDP already up on', PORT); return; }
+    throw new Error('CDP port ' + PORT + ' is occupied by a browser not owned by the Agentlas dedicated profile. Close it or choose AGENTLAS_CDP_PORT.');
+  }
+  const { exe } = chromeInfo();
   if (!fs.existsSync(exe)) throw new Error('Google Chrome executable could not be found: ' + exe);
-  const force = process.env.AGENTLAS_CDP_SEED === '1';
-  if (force || !profileSeeded(CDP_PROFILE)) { log(force ? 'seeding profile (forced import)' : 'seeding profile (first run)'); seedProfile(userData, CDP_PROFILE); }
-  else { log('reusing persistent dedicated profile (no reseed)'); }
+  // Never copy a live everyday-Chrome profile: SQLite/WAL files can be inconsistent while Chrome
+  // is running, and copying cookies/password stores would violate the dedicated-profile boundary.
+  // Users sign in directly in the Agentlas window; that dedicated profile is then reused as-is.
+  fs.mkdirSync(CDP_PROFILE, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(CDP_PROFILE, 0o700); } catch (e) {}
+  log('using persistent Agentlas dedicated profile (no personal-profile import)');
   const args = [
     '--user-data-dir=' + CDP_PROFILE, '--remote-debugging-port=' + PORT,
     '--no-first-run', '--no-default-browser-check', '--restore-last-session=false',
@@ -149,23 +291,27 @@ async function ensureChrome() {
   args.push('about:blank');
   log('launching Chrome on port', PORT, HEADLESS ? '(headless)' : '');
   const child = spawn(exe, args, { detached: true, stdio: 'ignore' });
+  writeOwner(child.pid);
+  child.once('exit', () => clearOwner(child.pid));
   child.unref();
   for (let i = 0; i < 40; i++) { if (await portReady(PORT)) { log('CDP ready'); return; } await new Promise((r) => setTimeout(r, 500)); }
+  clearOwner(child.pid);
   throw new Error('Chrome CDP port did not open: ' + PORT);
 }
 
 // ── 승인 게이트 ──────────────────────────────────────────────────
-const PAY_RE = /(checkout|\bpay(ment)?\b|purchase|\bbuy\b|\border\b|donate|subscrib|billing|결제|구매|주문|결재)/;
-const SEND_RE = /(publish|\bpost\b|\bsend\b|submit|tweet|retweet|\bshare\b|reply|\bcomment\b|delete|remove|confirm|전송|게시|삭제|제출|답글|댓글|공유|보내)/;
-function classifyAction(name, args) {
-  let text = '';
-  try { text = JSON.stringify(args || {}).toLowerCase(); } catch (e) { text = ''; }
-  if (name === 'browser_navigate' || name === 'browser_navigate_back') return PAY_RE.test(text) ? 'payment' : null;
-  if (name === 'browser_click' || name === 'browser_file_upload' || name === 'browser_press_key') {
-    if (PAY_RE.test(text)) return 'payment';
-    if (SEND_RE.test(text)) { if (/publish|\bpost\b|게시/.test(text)) return 'publish'; if (/delete|remove|삭제/.test(text)) return 'delete'; return 'send'; }
-  }
-  return null;
+${BROWSER_APPROVAL_CLASSIFIER_SOURCE}
+${BROWSER_APPROVAL_CONTEXT_SOURCE}
+function readCdpPageUrl() {
+  return new Promise((resolve) => {
+    const req = http.get({ host: '127.0.0.1', port: PORT, path: '/json/list', timeout: 1200 }, (res) => {
+      let body = '';
+      res.on('data', (chunk) => { if (body.length < 1024 * 1024) body += chunk; });
+      res.on('end', () => { try { resolve(extractCdpPageUrl(JSON.parse(body))); } catch (e) { resolve(''); } });
+    });
+    req.on('error', () => resolve(''));
+    req.on('timeout', () => { req.destroy(); resolve(''); });
+  });
 }
 function readApprovalInfo() {
   try { const p = path.join(os.homedir(), '.agentlas', 'browser-approval.json'); if (!fs.existsSync(p)) return null; return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return null; }
@@ -173,13 +319,16 @@ function readApprovalInfo() {
 function requestApproval(site, actionType, summary) {
   return new Promise((resolve) => {
     const autonomy = process.env.AGENTLAS_BROWSER_AUTONOMY || 'gated';
+    // trust는 일반 반복 작업만 무인 복구한다. 결제와 임의 코드는 환경값만으로
+    // 승인할 수 없는 secure checkpoint이며 승인 UI/서버가 없으면 fail-closed다.
+    const trustFallback = autonomy === 'trust' && actionType !== 'payment' && actionType !== 'unsafe-code';
     const info = readApprovalInfo();
-    if (!info || !info.port) { log('no approver (app not running); autonomy=' + autonomy + ' action=' + actionType); return resolve(autonomy === 'trust' ? 'approved' : 'denied'); }
+    if (!info || !info.port) { log('no approver (app not running); autonomy=' + autonomy + ' action=' + actionType); return resolve(trustFallback ? 'approved' : 'denied'); }
     const payload = JSON.stringify({ site, actionType, summary });
     const req = http.request({ host: '127.0.0.1', port: info.port, path: '/approve', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'authorization': 'Bearer ' + info.token }, timeout: 125000 }, (res) => {
       let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { resolve(JSON.parse(b).decision === 'approved' ? 'approved' : 'denied'); } catch (e) { resolve('denied'); } });
     });
-    req.on('error', () => resolve(autonomy === 'trust' ? 'approved' : 'denied'));
+    req.on('error', () => resolve(trustFallback ? 'approved' : 'denied'));
     req.on('timeout', () => { req.destroy(); resolve('denied'); });
     req.write(payload); req.end();
   });
@@ -220,10 +369,19 @@ async function main() {
 
   // 승인 게이트 통과 여부 판정(공유). 통과=null, 거부=사유문자열.
   const gate = async (name, args) => {
-    const actionType = classifyAction(name, args);
+    const observedUrl = await readCdpPageUrl();
+    const contextUrl = approvalContextUrl(name, args, observedUrl);
+    const actionType = classifyAction(name, args, contextUrl);
     if (!actionType) return null;
-    let site = ''; try { site = new URL(currentUrl).host; } catch (e) { site = currentUrl; }
-    const decision = await requestApproval(site, actionType, actionType + ': ' + (args.element || args.url || name));
+    // 민감 행동에서 현재 페이지를 확인할 수 없으면 stale currentUrl/권한 캐시로 진행하지 않는다.
+    if (!contextUrl) { log('blocked sensitive action: CDP current page unavailable', name); return 'unverified-site'; }
+    currentUrl = contextUrl;
+    let site = ''; try { site = new URL(contextUrl).host; } catch (e) { site = ''; }
+    if (!site) { log('blocked sensitive action: invalid approval URL', contextUrl); return 'unverified-site'; }
+    const detail = actionType === 'unsafe-code'
+      ? String(args.code || args.filename || name).slice(0, 240)
+      : (args.element || args.url || args.key || name);
+    const decision = await requestApproval(site, actionType, actionType + ': ' + detail);
     return decision === 'approved' ? null : actionType;
   };
 
@@ -240,7 +398,7 @@ async function main() {
     const results = [];
     for (const step of (skill.steps || [])) {
       const denied = await gate(step.name, step.arguments || {});
-      if (denied) { results.push(step.name + ': BLOCKED(' + denied + ')'); writeClient({ jsonrpc: '2.0', id: replyId, result: { content: [{ type: 'text', text: 'Replay stopped — ' + denied + ' action needs approval (set AGENTLAS_BROWSER_AUTONOMY=trust for unattended replay).' }], isError: true } }); return; }
+      if (denied) { results.push(step.name + ': BLOCKED(' + denied + ')'); writeClient({ jsonrpc: '2.0', id: replyId, result: { content: [{ type: 'text', text: 'Replay stopped — ' + denied + ' action needs approval. Trust mode may continue ordinary actions, but payment and arbitrary code always require explicit approval.' }], isError: true } }); return; }
       if (step.name === 'browser_navigate' && step.arguments && step.arguments.url) currentUrl = String(step.arguments.url);
       const resp = await callChild(step.name, step.arguments || {});
       const isErr = resp && resp.result && resp.result.isError;
@@ -265,12 +423,12 @@ async function main() {
         return;
       }
       if (name === 'browser_skill_replay') { doReplay(args.name, msg.id); return; }
-      // 일반 액션: 승인 게이트 + 기록.
-      if (name === 'browser_navigate' && args.url) currentUrl = String(args.url);
-      const actionType = classifyAction(name, args);
-      if (actionType) {
+      // 일반 액션: CDP의 실제 현재 페이지를 다시 읽은 뒤 승인 게이트 + 기록.
+      const gateable = RECORDABLE.has(name) || name === 'browser_handle_dialog' || name === 'browser_run_code' || name === 'browser_run_code_unsafe';
+      if (gateable) {
         gate(name, args).then((denied) => {
           if (denied) { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'BLOCKED: The user did not approve this ' + denied + ' browser action.' }], isError: true } }); return; }
+          if (name === 'browser_navigate' && args.url) currentUrl = String(args.url);
           if (RECORDABLE.has(name)) pending.set(msg.id, { name, arguments: args });
           forwardRaw(line);
         });
@@ -316,6 +474,11 @@ async function main() {
 }
 main().catch((e) => { console.error('[agentlas-browser] fatal', e && e.stack || e); process.exit(1); });
 `;
+
+/** Regression-only source view; does not materialize or launch Chrome. */
+export function browserCdpLauncherSourceForTest(): string {
+  return LAUNCHER_SOURCE;
+}
 
 /**
  * 런처 소스를 ~/.agentlas/agentlas-browser-cdp.mjs 로 쓴다(멱등, 내용 바뀌면 갱신).

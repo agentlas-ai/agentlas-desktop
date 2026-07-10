@@ -108,6 +108,8 @@ export type {
   CloudAgentSecurityFinding,
   CloudAgentVisibility,
   DirListing,
+  FsPathGrant,
+  FsReadScope,
   EnvVarMeta,
   FirmListing,
   FirmOrgNode,

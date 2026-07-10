@@ -33,8 +33,8 @@ const CANDIDATES = [
       ]
     : []),
   "codex",
-  path.join(os.homedir(), ".agentlas/npm/bin/codex"), // 앱이 설치한 유저 prefix (sudo 불필요)
   path.join(os.homedir(), ".local/bin/codex"), // 네이티브 인스톨러 기본 위치
+  path.join(os.homedir(), ".agentlas/npm/bin/codex"), // 앱이 설치한 유저 prefix (sudo 불필요)
   path.join(os.homedir(), ".codex/bin/codex"),
   "/opt/homebrew/bin/codex",
   "/usr/local/bin/codex",

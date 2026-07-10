@@ -1,11 +1,11 @@
-// Browser 자격증명 볼트 · 세션 · 권한 · 사용로그 접근자 (better-sqlite3, 동기).
+// Browser 세션 · 권한 · 사용로그 접근자 (better-sqlite3, 동기).
 //
-// 보안 모델(secrets/vault.ts와 동일): 비밀번호 평문은 keytar(OS 키체인)에만 저장하고,
-// DB/renderer 로는 절대 나가지 않는다. DB에는 has_password 불리언과 username 만 둔다.
-// 세션 쿠키 자체는 크롬 전용 프로필 안에 있고, 여기엔 상태(valid|expired|none)만 기록한다.
+// 보안 모델: Agentlas는 사이트 비밀번호를 받거나 자동 입력하지 않는다. 사용자가 제공자
+// 페이지에 직접 로그인하고, 세션 쿠키는 Chrome 전용 프로필 안에만 남는다. DB에는
+// 상태(valid|expired|none)와 표시용 username만 기록한다.
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
-import { setSecret, deleteSecret, readSecret } from "../secrets/vault";
+import { deleteSecret } from "../secrets/vault";
 
 export type BrowserSessionStatus = "valid" | "expired" | "none";
 export type BrowserPermissionDecision = "once" | "always" | "deny";
@@ -15,7 +15,6 @@ export interface BrowserSiteRow {
   site: string;
   label: string | null;
   username: string | null;
-  hasPassword: boolean;
   session: { status: BrowserSessionStatus; capturedAt: string | null };
   createdAt: string;
   updatedAt: string;
@@ -52,7 +51,7 @@ function credKey(site: string): string {
 export function listBrowserSites(): BrowserSiteRow[] {
   const rows = getDb()
     .prepare(
-      `SELECT s.id, s.site, s.label, s.username, s.has_password,
+      `SELECT s.id, s.site, s.label, s.username,
               s.created_at, s.updated_at,
               se.status AS sess_status, se.captured_at AS sess_captured
        FROM browser_sites s
@@ -65,7 +64,6 @@ export function listBrowserSites(): BrowserSiteRow[] {
     site: String(r.site),
     label: (r.label as string | null) ?? null,
     username: (r.username as string | null) ?? null,
-    hasPassword: Number(r.has_password) === 1,
     session: {
       status: ((r.sess_status as string | null) ?? "none") as BrowserSessionStatus,
       capturedAt: (r.sess_captured as string | null) ?? null,
@@ -80,12 +78,11 @@ export function getBrowserSite(site: string): BrowserSiteRow | null {
   return listBrowserSites().find((s) => s.site === norm) ?? null;
 }
 
-/** 사이트 카드 추가/수정. password 가 문자열이면 keytar 저장, null 이면 유지, "" 이면 삭제. */
+/** 사이트 카드 추가/수정. 자격증명은 받지 않으며 로그인은 제공자 페이지에서 직접 한다. */
 export async function upsertBrowserSite(input: {
   site: string;
   label?: string | null;
   username?: string | null;
-  password?: string | null;
 }): Promise<BrowserSiteRow> {
   const site = normalizeSite(input.site);
   if (!site) throw new Error("Site address is empty.");
@@ -95,33 +92,16 @@ export async function upsertBrowserSite(input: {
     | { id: string }
     | undefined;
 
-  // 비밀번호 처리(평문은 keytar 로만).
-  let hasPassword: boolean | null = null;
-  if (typeof input.password === "string") {
-    if (input.password.length > 0) {
-      await setSecret(credKey(site), input.password);
-      hasPassword = true;
-    } else {
-      await deleteSecret(credKey(site));
-      hasPassword = false;
-    }
-  }
-
   if (existing) {
-    const current = db
-      .prepare("SELECT has_password FROM browser_sites WHERE site = ?")
-      .get(site) as { has_password: number };
     db.prepare(
       `UPDATE browser_sites
        SET label = COALESCE(?, label),
            username = COALESCE(?, username),
-           has_password = ?,
            updated_at = ?
        WHERE site = ?`,
     ).run(
       input.label ?? null,
       input.username ?? null,
-      hasPassword === null ? current.has_password : hasPassword ? 1 : 0,
       now,
       site,
     );
@@ -134,7 +114,7 @@ export async function upsertBrowserSite(input: {
       site,
       input.label ?? null,
       input.username ?? null,
-      hasPassword ? 1 : 0,
+      0,
       now,
       now,
     );
@@ -145,15 +125,38 @@ export async function upsertBrowserSite(input: {
   return getBrowserSite(site)!;
 }
 
-export async function deleteBrowserSite(site: string): Promise<void> {
-  const norm = normalizeSite(site);
-  await deleteSecret(credKey(norm)).catch(() => {});
-  getDb().prepare("DELETE FROM browser_sites WHERE site = ?").run(norm);
+/**
+ * 구버전이 자동 재로그인을 표방하며 저장했던 사이트 비밀번호를 일회성 정리한다.
+ * Keychain 삭제가 성공한 행만 DB 표식을 내리므로 실패를 성공처럼 숨기지 않는다.
+ */
+export async function purgeLegacyBrowserPasswords(): Promise<number> {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT site FROM browser_sites WHERE has_password = 1")
+    .all() as Array<{ site: string }>;
+  let purged = 0;
+  for (const row of rows) {
+    await deleteSecret(credKey(row.site));
+    db.prepare("UPDATE browser_sites SET has_password = 0, updated_at = ? WHERE site = ?")
+      .run(nowIso(), row.site);
+    purged += 1;
+  }
+  return purged;
 }
 
-/** main 내부 전용 — 자동 재로그인 시 비번 주입. renderer 노출 금지. */
-export async function readBrowserPassword(site: string): Promise<string | null> {
-  return readSecret(credKey(normalizeSite(site)));
+export async function deleteBrowserSite(site: string): Promise<void> {
+  const norm = normalizeSite(site);
+  // 레거시 비밀번호 삭제가 실패했는데 사이트 행부터 지우면, 남은 Keychain
+  // 항목을 다시 찾거나 정리할 근거가 사라진다. 비밀 정리를 먼저 확정하고
+  // 실패 시 사이트/권한 행을 보존해 사용자가 재시도할 수 있게 한다.
+  await deleteSecret(credKey(norm));
+  const db = getDb();
+  db.transaction(() => {
+    // permissions에는 초기 스키마상 FK가 없으므로 사이트 카드 삭제 전에 명시 정리해야
+    // 같은 호스트를 다시 추가했을 때 과거 always/deny가 부활하지 않는다.
+    db.prepare("DELETE FROM browser_permissions WHERE site = ?").run(norm);
+    db.prepare("DELETE FROM browser_sites WHERE site = ?").run(norm);
+  })();
 }
 
 // ── 세션 ───────────────────────────────────────────────────────
@@ -178,12 +181,12 @@ export function setBrowserSession(site: string, status: BrowserSessionStatus): v
 }
 
 // ── 권한(승인 기억) ────────────────────────────────────────────
-/** 저장된 결정을 조회. 결제(payment)는 절대 캐시하지 않는다(항상 null → 매번 확인). */
+/** 저장된 결정을 조회. 결제/임의코드는 절대 캐시하지 않는다(항상 null → 매번 확인). */
 export function getBrowserPermission(
   site: string,
   actionType: string,
 ): BrowserPermissionDecision | null {
-  if (actionType === "payment") return null;
+  if (actionType === "payment" || actionType === "unsafe-code") return null;
   const norm = normalizeSite(site);
   const row = getDb()
     .prepare("SELECT decision FROM browser_permissions WHERE site = ? AND action_type = ?")
@@ -191,13 +194,13 @@ export function getBrowserPermission(
   return (row?.decision as BrowserPermissionDecision | undefined) ?? null;
 }
 
-/** "항상 승인" / "거부"만 영속. "한 번만"(once)과 결제는 저장하지 않는다. */
+/** "항상 승인" / "거부"만 영속. "한 번만"(once)과 결제/임의코드는 저장하지 않는다. */
 export function setBrowserPermission(
   site: string,
   actionType: string,
   decision: BrowserPermissionDecision,
 ): void {
-  if (actionType === "payment" || decision === "once") return;
+  if (actionType === "payment" || actionType === "unsafe-code" || decision === "once") return;
   const norm = normalizeSite(site);
   getDb()
     .prepare(

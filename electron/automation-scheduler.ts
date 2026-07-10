@@ -39,11 +39,25 @@ const running = new Set<string>();
 // claimed_at/lease_owner에 기록한다. 같은 due 행을 둘이 이중 실행하지 않게 한다.
 const LEASE_OWNER = `${process.pid}:${process.argv.includes("--headless-automations") ? "headless" : "gui"}`;
 
+function boundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === "") return fallback;
+  const parsed = Number(raw);
+  if (Number.isSafeInteger(parsed) && parsed >= min && parsed <= max) return parsed;
+  console.warn(
+    `[automation] ignoring invalid ${name}=${JSON.stringify(raw.slice(0, 64))}; using ${fallback}`,
+  );
+  return fallback;
+}
+
 // 한 번의 점검에서 동시에 돌릴 자동화 수 상한. due가 한꺼번에 많이 쌓여도(앱이 오래 꺼져
 // 있다 켜진 경우 등) 모든 에이전트 런을 동시에 띄우지 않게 막는다 — 저사양 기기에서
 // CPU/RAM 폭주 방지. 각 런은 내부에서 다시 CLI/엔진 프로세스를 띄우므로 N을 작게 둔다.
-const MAX_CONCURRENT_AUTOMATIONS = Number(
-  process.env.AGENTLAS_AUTOMATION_CONCURRENCY ?? 2,
+const MAX_CONCURRENT_AUTOMATIONS = boundedIntegerEnv(
+  "AGENTLAS_AUTOMATION_CONCURRENCY",
+  2,
+  1,
+  16,
 );
 
 /** 작업 배열을 최대 `limit`개씩만 동시 실행하는 경량 풀(외부 의존성 없음). */
@@ -53,7 +67,10 @@ async function runWithConcurrency<T>(
   worker: (item: T) => Promise<void>,
 ): Promise<void> {
   const queue = items.slice();
-  const size = Math.max(1, Math.min(limit, queue.length));
+  // 호출부가 나중에 늘어도 NaN/Infinity가 Array.from length=0으로 조용히 전량 스킵되지 않게
+  // 풀 자체에서도 한 번 더 방어한다. 빈 queue만 lane 0이 정상이다.
+  const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 1;
+  const size = Math.min(safeLimit, queue.length);
   const lanes = Array.from({ length: size }, async () => {
     while (queue.length > 0) {
       const next = queue.shift();
@@ -93,9 +110,33 @@ const OPTIMIZER_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 자동화당 최대 6�
 // 프로세스가 안 죽는 행은 실패 이벤트가 영영 안 와서 닥터/피드백 경로에 도달하지 못한다
 // (실사고: Run now 후 중간 무반응 — 사용자는 30분 auto-abort까지 아무것도 못 봄).
 // 긴 단일 툴 실행(빌드 등)도 있으므로 짧게 잡지 않는다. env로 조정 가능.
-const STALL_INACTIVITY_MS = Number(process.env.AGENTLAS_AUTOMATION_STALL_MS ?? 8 * 60 * 1000);
+const STALL_INACTIVITY_MS = boundedIntegerEnv(
+  "AGENTLAS_AUTOMATION_STALL_MS",
+  8 * 60 * 1000,
+  30_000,
+  2 * 60 * 60 * 1000,
+);
+const OPTIMIZER_TIMEOUT_MS = boundedIntegerEnv(
+  "AGENTLAS_AUTOMATION_OPTIMIZER_TIMEOUT_MS",
+  10 * 60 * 1000,
+  1_000,
+  30 * 60 * 1000,
+);
 const lastOptimizerRunAt = new Map<string, number>();
-const optimizerInFlight = new Set<string>();
+const optimizerControllers = new Map<string, AbortController>();
+
+/** 운영 진단/결정론 회귀용 — 실제로 적용된 유한 스케줄러 한계를 노출한다. */
+export function automationSchedulerDiagnostics(): {
+  maxConcurrentAutomations: number;
+  stallInactivityMs: number;
+  optimizerTimeoutMs: number;
+} {
+  return {
+    maxConcurrentAutomations: MAX_CONCURRENT_AUTOMATIONS,
+    stallInactivityMs: STALL_INACTIVITY_MS,
+    optimizerTimeoutMs: OPTIMIZER_TIMEOUT_MS,
+  };
+}
 
 function automationSessionInput(a: Automation): {
   automationId: string;
@@ -151,11 +192,12 @@ function handleAutomationFailure(a: Automation, error: string): void {
     if (
       !doctor?.repaired &&
       streak >= 2 &&
-      !optimizerInFlight.has(a.id) &&
+      !optimizerControllers.has(a.id) &&
       Date.now() - lastAt >= OPTIMIZER_MIN_INTERVAL_MS
     ) {
       lastOptimizerRunAt.set(a.id, Date.now());
-      optimizerInFlight.add(a.id);
+      const optimizerController = new AbortController();
+      optimizerControllers.set(a.id, optimizerController);
       const prompt = buildSystemOptimizerPrompt({
         automationName: a.name,
         errorMessage: error,
@@ -176,7 +218,37 @@ function handleAutomationFailure(a: Automation, error: string): void {
         automationId: a.id,
         payload: { streak, paused, doctorKind: doctor?.kind ?? "unknown" },
       });
-      void runMcpInvocation(req, (ev) => recordMcpInvocationEvent(runId, req, ev), new AbortController().signal)
+      let removeAbortListener = () => {};
+      const abortGate = new Promise<never>((_resolve, reject) => {
+        const onAbort = () => {
+          const reason = optimizerController.signal.reason;
+          reject(
+            reason instanceof Error
+              ? reason
+              : new Error(typeof reason === "string" ? reason : "System Optimizer cancelled"),
+          );
+        };
+        optimizerController.signal.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () => optimizerController.signal.removeEventListener("abort", onAbort);
+      });
+      const optimizerTimer = setTimeout(() => {
+        optimizerController.abort(
+          new Error(
+            `System Optimizer total timeout after ${Math.round(OPTIMIZER_TIMEOUT_MS / 1000)}s`,
+          ),
+        );
+      }, OPTIMIZER_TIMEOUT_MS);
+      if (optimizerTimer.unref) optimizerTimer.unref();
+      // Promise.resolve().then은 동기 throw까지 같은 실패 경로로 수렴시킨다. abortGate를
+      // race에 넣어 runner가 AbortSignal을 무시해도 cancel/timeout 시 lifecycle은 끝난다.
+      const optimizerRun = Promise.resolve().then(() =>
+        runMcpInvocation(
+          req,
+          (ev) => recordMcpInvocationEvent(runId, req, ev),
+          optimizerController.signal,
+        ),
+      );
+      void Promise.race([optimizerRun, abortGate])
         .catch((err) => {
           console.error("[automation] system optimizer run failed:", err);
           try {
@@ -185,7 +257,13 @@ function handleAutomationFailure(a: Automation, error: string): void {
             /* best-effort */
           }
         })
-        .finally(() => optimizerInFlight.delete(a.id));
+        .finally(() => {
+          clearTimeout(optimizerTimer);
+          removeAbortListener();
+          if (optimizerControllers.get(a.id) === optimizerController) {
+            optimizerControllers.delete(a.id);
+          }
+        });
     }
   } catch (err) {
     console.error("[automation] failure feedback failed:", err);
@@ -424,10 +502,14 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
         console.error("[automation] handleAutomationFailure failed:", err);
       }
     }
-    try {
-      releaseAutomationRun(a.id);
-    } catch {
-      /* best-effort 리스 해제 */
+    // 예약 경로에서 이 프로세스가 실제로 획득한 리스만 해제한다. Run now/이벤트 경로는
+    // 리스를 얻지 않았으므로 다른 프로세스의 due 클레임을 건드리지 않는다.
+    if (opts?.claim) {
+      try {
+        releaseAutomationRun(a.id, LEASE_OWNER);
+      } catch {
+        /* best-effort 리스 해제 */
+      }
     }
     notifyDone(a, runStatus, runError ?? undefined);
     void notifyTelegramAutomationDone(a, runStatus, {
@@ -502,5 +584,12 @@ export function stopAutomationScheduler(): void {
   if (timer) {
     clearInterval(timer);
     timer = null;
+  }
+  // 앱 종료/스케줄러 정지 시 보조 진단 런도 즉시 취소한다. runner가 신호를 무시해도
+  // abortGate가 lifecycle을 settle하므로 optimizer 슬롯과 watchdog timer가 남지 않는다.
+  for (const controller of optimizerControllers.values()) {
+    if (!controller.signal.aborted) {
+      controller.abort(new Error("System Optimizer cancelled because scheduler stopped"));
+    }
   }
 }

@@ -17,21 +17,25 @@ export type InstallableCli = "claude-code" | "codex" | "gemini" | "grok";
 const CLI_PLAN: Record<InstallableCli, { pkg: string; loginCmd: string; bin: string }> = {
   "claude-code": { pkg: "@anthropic-ai/claude-code", loginCmd: "claude", bin: "claude" },
   codex: { pkg: "@openai/codex", loginCmd: "codex login", bin: "codex" },
-  // "gemini" 슬롯 = Antigravity CLI(agy)로 대체. 설치는 공식 install.sh(curl), 로그인은 `agy`(Google OAuth · 1회).
-  // 키 불필요 — Antigravity OAuth로 채팅/에이전트 + 나노바나나(이미지)까지 키리스.
-  gemini: { pkg: "antigravity-cli", loginCmd: "agy", bin: "agy" },
+  // 공식 Gemini CLI가 Google OAuth + 전역 extension/skills/MCP를 모두 지원한다.
+  // 기존 Antigravity(agy)는 이미 설치된 머신의 호환 폴백으로만 감지한다.
+  gemini: { pkg: "@google/gemini-cli", loginCmd: "gemini", bin: "gemini" },
   // grok-cli는 xAI 키(XAI_API_KEY/GROK_API_KEY)로 동작 — 로그인 명령은 대화형 셸을 연다(키 설정·확인용).
   grok: { pkg: "grok-dev", loginCmd: "grok", bin: "grok" },
 };
 
+const AGENTLAS_NPM_PREFIX = path.join(os.homedir(), ".agentlas", "npm");
+const GEMINI_NPM_PACKAGE = "@google/gemini-cli";
+
 // GUI Electron은 Finder/dock에서 뜨면 로그인 셸 PATH(/opt/homebrew/bin 등)를 못 받는다 →
 // bare `npm`/`claude` spawn이 ENOENT로 실패. CLI 탐지/설치 모두에서 PATH를 보강한다.
 const EXTRA_BIN_DIRS = [
-  "/opt/homebrew/bin",
-  "/usr/local/bin",
-  "/usr/bin",
-  "/bin",
+  // 기존 process.env.PATH는 searchDirs()/augmentedEnv()에서 항상 먼저 유지한다.
+  // 그 PATH에 없는 보충 후보끼리는 최신 사용자 standalone/Agentlas 관리본을
+  // 오래된 Homebrew/npm 전역 심보다 먼저 찾는다.
   path.join(os.homedir(), ".local", "bin"),
+  path.join(AGENTLAS_NPM_PREFIX, "bin"),
+  AGENTLAS_NPM_PREFIX, // Windows npm prefix는 bin 하위가 아니라 prefix 루트에 .cmd를 둔다.
   path.join(os.homedir(), ".npm-global", "bin"),
   path.join(os.homedir(), "node_modules", ".bin"),
   path.join(os.homedir(), ".claude", "local"),
@@ -39,9 +43,10 @@ const EXTRA_BIN_DIRS = [
   path.join(os.homedir(), ".gemini", "bin"),
   path.join(os.homedir(), ".grok", "bin"),
   path.join(os.homedir(), ".bun", "bin"),
-  // 앱이 sudo 없이 설치한 CLI — 유저 npm prefix(~/.agentlas/npm). unix=…/bin, Windows=prefix 루트.
-  path.join(os.homedir(), ".agentlas", "npm", "bin"),
-  path.join(os.homedir(), ".agentlas", "npm"),
+  "/opt/homebrew/bin",
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
 ];
 
 function searchDirs(): string[] {
@@ -121,46 +126,6 @@ function installGrokViaScript(): Promise<CliActionResult> {
   });
 }
 
-/** Antigravity CLI 공식 install.sh 실행 (curl | bash). ~/.local/bin/agy에 바이너리 설치 — sudo 불필요. */
-function installAntigravityViaScript(): Promise<CliActionResult> {
-  const url = "https://antigravity.google/cli/install.sh";
-  const command = `curl -fsSL ${url} | bash`;
-  return new Promise<CliActionResult>((resolve) => {
-    let settled = false;
-    const done = (r: CliActionResult) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(r);
-    };
-    let out = "";
-    let err = "";
-    let child: ReturnType<typeof spawnCli>;
-    try {
-      // curl|bash 파이프는 셸이 필요 → bash -c. 고정 URL(공식 antigravity.google)이라 인젝션 위험 없음.
-      child = spawnCli("bash", ["-c", command], { stdio: ["ignore", "pipe", "pipe"], env: augmentedEnv() });
-    } catch (e) {
-      done({ ok: false, message: e instanceof Error ? e.message : String(e), command });
-      return;
-    }
-    const timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        // ignore
-      }
-      done({ ok: false, message: "timed out after 3 min", command });
-    }, 3 * 60 * 1000);
-    child.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
-    child.stderr?.on("data", (c: Buffer) => (err += c.toString("utf8")));
-    child.on("error", (e) => done({ ok: false, message: e.message, command }));
-    child.on("close", (code) => {
-      if (code === 0) done({ ok: true, message: out.slice(-400).trim() || "installed" });
-      else done({ ok: false, message: (err || out).slice(-800).trim(), command });
-    });
-  });
-}
-
 /** `npm i -g <pkg>` 실행. node/npm이 없거나 권한 문제면 ok:false + 직접 실행할 명령 안내. */
 export function installCli(
   kind: InstallableCli,
@@ -170,7 +135,7 @@ export function installCli(
   if (!plan) return Promise.resolve({ ok: false, message: `Unknown CLI: ${kind}` });
   // sudo 없이 항상 성공하도록 유저 prefix(~/.agentlas/npm)로 설치한다 — 시스템 전역 prefix(/opt/homebrew 등)는
   // 쓰기에 root가 필요해 `npm i -g`가 EACCES로 실패하는 머신이 많다. 유저 prefix는 항상 쓰기 가능.
-  const userPrefix = path.join(os.homedir(), ".agentlas", "npm");
+  const userPrefix = AGENTLAS_NPM_PREFIX;
   const command = `npm install -g ${plan.pkg} --prefix ${userPrefix}`;
 
   // 이미 설치돼 있으면 npm을 건드리지 않는다 — 네이티브 설치본(~/.local/bin/claude 등)도 인정.
@@ -184,11 +149,6 @@ export function installCli(
   // 머신(homebrew 등)에서 `npm i -g`가 실패하는 문제를 피한다. (Windows는 아래 npm 폴백.)
   if (kind === "grok" && process.platform !== "win32") {
     return installGrokViaScript();
-  }
-
-  // "gemini" 슬롯 = Antigravity CLI(agy) — 공식 install.sh(curl|bash, ~/.local/bin/agy)로 설치. npm 패키지가 아님.
-  if (kind === "gemini" && process.platform !== "win32") {
-    return installAntigravityViaScript();
   }
 
   // GUI에서도 npm을 찾도록 절대경로로 resolve(+PATH 보강). 못 찾으면 직접 실행 명령 안내.
@@ -283,24 +243,145 @@ function runBinary(bin: string, args: string[], timeoutMs: number): Promise<CliA
   });
 }
 
+function isPathWithin(candidate: string, root: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return (
+    relative === "" ||
+    (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
+  );
+}
+
+/** 심의 위치와 실제 대상을 함께 확인해 Agentlas가 소유한 npm 설치만 자동 변경한다. */
+function isAgentlasManagedNpmBinary(binary: string): boolean {
+  if (isPathWithin(binary, AGENTLAS_NPM_PREFIX)) return true;
+  try {
+    return isPathWithin(fs.realpathSync(binary), AGENTLAS_NPM_PREFIX);
+  } catch {
+    return false;
+  }
+}
+
+function updateAgentlasManagedGemini(): Promise<CliActionResult> {
+  const npmBin = resolveBinary("npm");
+  const command = `npm install -g ${GEMINI_NPM_PACKAGE}@latest --prefix ${AGENTLAS_NPM_PREFIX}`;
+  if (!npmBin) {
+    return Promise.resolve({
+      ok: false,
+      message: "npm not found on PATH. Install Node.js, then run the command below in a terminal.",
+      command,
+    });
+  }
+  return runBinary(
+    npmBin,
+    ["install", "-g", `${GEMINI_NPM_PACKAGE}@latest`, "--prefix", AGENTLAS_NPM_PREFIX],
+    5 * 60 * 1000,
+  );
+}
+
+export type GeminiInstallOwner =
+  | { kind: "npm"; prefix: string }
+  | { kind: "homebrew" }
+  | { kind: "unknown" };
+
+/** 실제 바이너리 경로로 설치 소유자를 판별한다. npm 설치는 원래 global prefix까지 보존한다. */
+export function classifyGeminiInstallOwner(
+  binary: string,
+  resolvedOverride?: string,
+): GeminiInstallOwner {
+  let resolved = binary;
+  if (resolvedOverride) {
+    resolved = resolvedOverride;
+  } else {
+    try {
+      resolved = fs.realpathSync(binary);
+    } catch {
+      // 끊어진 심 등은 표시 경로만 사용한다.
+    }
+  }
+  const normalized = resolved.replace(/\\/g, "/");
+  const lower = normalized.toLowerCase();
+  // npm -g가 /opt/homebrew/lib/node_modules 아래 설치되는 경우도 있으므로 node_modules를
+  // Homebrew formula보다 먼저 구분해야 패키지 관리자를 잘못 안내하지 않는다.
+  const unixMarker = "/lib/node_modules/";
+  const unixMarkerAt = lower.indexOf(unixMarker);
+  if (unixMarkerAt > 0) {
+    return { kind: "npm", prefix: normalized.slice(0, unixMarkerAt) };
+  }
+  const windowsMarker = "/node_modules/";
+  const windowsMarkerAt = lower.indexOf(windowsMarker);
+  if (windowsMarkerAt > 0 && lower.slice(0, windowsMarkerAt).endsWith("/npm")) {
+    return { kind: "npm", prefix: normalized.slice(0, windowsMarkerAt) };
+  }
+  if (lower.includes("/cellar/") || lower.includes("/homebrew/opt/gemini-cli/")) {
+    return { kind: "homebrew" };
+  }
+  return { kind: "unknown" };
+}
+
+/** 외부 설치도 고정된 원래 패키지 관리자만 사용해 최신화한다. 권한 실패는 수동 명령과 함께 표면화한다. */
+function updateSelfManagedGemini(binary: string): Promise<CliActionResult> {
+  const owner = classifyGeminiInstallOwner(binary);
+  if (owner.kind === "npm") {
+    const npmBin = resolveBinary("npm");
+    const command = `npm install -g ${GEMINI_NPM_PACKAGE}@latest --prefix ${owner.prefix}`;
+    if (!npmBin) {
+      return Promise.resolve({ ok: false, message: "npm not found on PATH", command });
+    }
+    return runBinary(
+      npmBin,
+      ["install", "-g", `${GEMINI_NPM_PACKAGE}@latest`, "--prefix", owner.prefix],
+      5 * 60 * 1000,
+    );
+  }
+  if (owner.kind === "homebrew") {
+    const brew = resolveBinary("brew");
+    const command = "brew upgrade gemini-cli";
+    if (!brew) return Promise.resolve({ ok: false, message: "Homebrew not found on PATH", command });
+    return runBinary(brew, ["upgrade", "gemini-cli"], 10 * 60 * 1000);
+  }
+  return Promise.resolve({
+    ok: false,
+    message: `Gemini CLI install owner could not be verified: ${binary}`,
+    command: `npm install -g ${GEMINI_NPM_PACKAGE}@latest`,
+  });
+}
+
 /**
  * CLI를 최신으로 — 재로그인/연결 시 버전 불일치를 자동 해소한다.
  *   · 미설치 → installCli(설치가 곧 최신)
  *   · 우리 npm prefix(~/.agentlas/npm) 관리본 → npm 재설치(force)
  *   · claude-code 네이티브 설치본 → 공식 self-updater `claude update`
- *   · gemini(agy)/grok → 공식 install.sh 재실행(멱등, 최신 설치)
+ *   · Codex standalone/네이티브 설치본 → 공식 self-updater `codex update`
+ *   · Antigravity(agy) → 자체 updater `agy update`
+ *   · Gemini CLI → Agentlas 관리 npm 또는 감지한 원래 npm/Homebrew로 최신화
+ *   · grok → 공식 install.sh 재실행(멱등, 최신 설치)
  *   · 그 외(사용자 자체 관리본) → 건드리지 않는다
  */
 export function updateCli(kind: InstallableCli): Promise<CliActionResult> {
   const plan = CLI_PLAN[kind];
   if (!plan) return Promise.resolve({ ok: false, message: `Unknown CLI: ${kind}` });
+
+  // Gemini 런타임 선택과 같은 순서(공식 gemini 우선, agy 호환 폴백)로 실제 실행
+  // 바이너리를 판별한다. 업데이트/로그인 UI가 실제 실행 바이너리와 달라지면 안 된다.
+  if (kind === "gemini") {
+    const gemini = resolveBinary("gemini");
+    if (gemini) {
+      if (isAgentlasManagedNpmBinary(gemini)) return updateAgentlasManagedGemini();
+      return updateSelfManagedGemini(gemini);
+    }
+
+    const antigravity = resolveBinary("agy");
+    if (antigravity) return runBinary(antigravity, ["update"], 5 * 60 * 1000);
+    return installCli(kind);
+  }
+
   const existing = resolveBinary(plan.bin);
   if (!existing) return installCli(kind);
-  if (existing.startsWith(path.join(os.homedir(), ".agentlas", "npm"))) {
+  if (isAgentlasManagedNpmBinary(existing)) {
     return installCli(kind, { force: true });
   }
   if (kind === "claude-code") return runBinary(existing, ["update"], 2 * 60 * 1000);
-  if (kind === "gemini" && process.platform !== "win32") return installAntigravityViaScript();
+  if (kind === "codex") return runBinary(existing, ["update"], 2 * 60 * 1000);
   if (kind === "grok" && process.platform !== "win32") return installGrokViaScript();
   return Promise.resolve({ ok: true, message: `self-managed install: ${existing} — update skipped` });
 }
@@ -318,17 +399,15 @@ export function openCliLogin(kind: InstallableCli): CliActionResult {
   const plan = CLI_PLAN[kind];
   if (!plan) return { ok: false, message: `Unknown CLI: ${kind}` };
   const [, ...loginArgs] = plan.loginCmd.split(" ");
-  // "gemini" 슬롯의 런타임은 agy(Antigravity)지만, 사용량/로그인 만료 판정은 공식 gemini-cli의
-  // ~/.gemini/oauth_creds.json 기준이다 — agy 로그인은 이 파일을 갱신하지 못해 "재로그인해도
-  // 영원히 만료" 루프가 생긴다. 공식 gemini CLI가 있으면 그걸 먼저 연다(그 파일의 실소유자).
+  // 실제 실행 순서와 동일하게 공식 Gemini를 먼저 열고, 없는 기존 머신에서만 agy로 폴백한다.
   const abs =
-    kind === "gemini" ? (resolveBinary("gemini") ?? resolveBinary(plan.bin)) : resolveBinary(plan.bin);
+    kind === "gemini" ? (resolveBinary("gemini") ?? resolveBinary("agy")) : resolveBinary(plan.bin);
   if (!abs) {
     // 설치가 안 된 상태로 터미널부터 여는 건 금지 — 렌더러가 이 메시지로 실패를 표면화한다.
     return {
       ok: false,
       message: `${plan.bin} is not installed`,
-      command: `npm install -g ${plan.pkg} --prefix ${path.join(os.homedir(), ".agentlas", "npm")}`,
+      command: `npm install -g ${plan.pkg} --prefix ${AGENTLAS_NPM_PREFIX}`,
     };
   }
   // 절대경로 실행 — 셸 PATH 무관. 경로 공백/특수문자는 플랫폼별로 인용.

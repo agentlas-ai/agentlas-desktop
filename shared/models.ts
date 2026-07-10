@@ -313,15 +313,16 @@ export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
   ],
   // Codex — `codex exec -m <model>`. 구독 기본 외 명시 모델.
   codex: [
-    // GPT-5.6은 Codex/API에서 제한적으로 제공되는 프리뷰다. 계정 권한은 Codex가 최종 확인한다.
+    // Modern Codex uses the GPT family directly. This is only an offline
+    // fallback/label catalog; detect.ts prefers the signed-in account's
+    // ~/.codex/models_cache.json and never invents a `gpt-5.6-codex` alias.
     { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", tag: "preview" },
     { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", tag: "preview" },
     { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", tag: "preview" },
-    { id: "gpt-5.5-codex", label: "GPT-5.5 Codex" },
     { id: "gpt-5.5", label: "GPT-5.5" },
-    { id: "gpt-5.1-codex", label: "GPT-5.1 Codex" },
-    { id: "gpt-5.1", label: "GPT-5.1" },
-    { id: "gpt-5-codex", label: "GPT-5 Codex" },
+    { id: "gpt-5.4", label: "GPT-5.4" },
+    { id: "gpt-5.4-mini", label: "GPT-5.4 Mini" },
+    { id: "gpt-5.3-codex-spark", label: "GPT-5.3 Codex Spark", tag: "legacy" },
   ],
   // Gemini — `gemini -m <model>`.
   gemini: [

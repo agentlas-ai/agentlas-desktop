@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const { chromium } = require("playwright");
-const { setupMockAgentlasBridge } = require("./lib/mock-agentlas-bridge.cjs");
+const { setupMockAgentlasBridge, mockBridgeOptions } = require("./lib/mock-agentlas-bridge.cjs");
 
 const root = path.resolve(__dirname, "..");
 const distDir = path.join(root, "dist", "renderer");
@@ -118,7 +118,7 @@ async function main() {
 
 async function newPage(browser, options = {}) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 980 } });
-  await context.addInitScript(setupMockAgentlasBridge, options);
+  await context.addInitScript(setupMockAgentlasBridge, mockBridgeOptions(options));
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (err) => errors.push(err.message));
@@ -165,7 +165,12 @@ async function runBuildSurface(browser, baseUrl, evidence) {
   await page.locator("#build-model-select").selectOption({ index: 1 });
   await page.getByRole("button", { name: /생성 폴더 선택|Choose output folder/ }).click();
   await page.getByText(/tmp\/agentlas-qa|agentlas-qa/).waitFor();
-  assert.equal(await page.evaluate(() => window.localStorage.getItem("agentlas.build.workspace")), "/tmp/agentlas-qa");
+  const storedWorkspaceGrant = JSON.parse(
+    await page.evaluate(() => window.localStorage.getItem("agentlas.build.workspace")),
+  );
+  assert.equal(storedWorkspaceGrant.path, "/tmp/agentlas-qa");
+  assert.equal(storedWorkspaceGrant.kind, "directory");
+  assert.equal(storedWorkspaceGrant.scope.kind, "capability");
   await page.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
   await page.goto(`${baseUrl}/build.html`, { waitUntil: "domcontentloaded" });
   await page.getByText(/tmp\/agentlas-qa|agentlas-qa/).waitFor();

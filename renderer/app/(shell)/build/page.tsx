@@ -14,11 +14,11 @@ import {
   IconStore,
   IconCheck,
 } from "@/components/Icon";
-import { ipc } from "@/lib/ipc";
+import { grantForDroppedFile, ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
 import { KeyStatusBanner } from "@/components/KeyStatusBanner";
-import type { DirListing, HephaestusStatus, RuntimeSelection, RuntimeStatus } from "@/lib/types";
+import type { DirListing, FsReadScope, HephaestusStatus, RuntimeSelection, RuntimeStatus } from "@/lib/types";
 import {
   subscribe as buildSubscribe,
   getSnapshot as getBuildSnapshot,
@@ -28,7 +28,6 @@ import {
   setRuntime as setBuildRuntime,
   startBuild,
   answerBuild,
-  rewindBuildInterview,
   cancelBuild,
   resetBuild,
   addAttachments,
@@ -36,7 +35,6 @@ import {
   type Mode,
   type BuildAttachment,
 } from "@/lib/build-session";
-import { pathForDroppedFile } from "@/lib/ipc";
 import type { ChatQuestion } from "@/components/ChatStream";
 
 type StageState = "pending" | "active" | "done" | "error";
@@ -139,23 +137,24 @@ export default function BuildPage() {
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
-  const { request, mode, workspace, runtime, phase, log, reached, errored, result, registered, pendingQuestions, awaitingReply, turn, canRewindInterview, attachments } = s;
+  const { request, mode, workspace, runtime, phase, log, reached, errored, result, registered, pendingQuestions, awaitingReply, turn, attachments } = s;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // 드롭/파일 인풋 → 실제 디스크 경로(webUtils) → 스토어 첨부. 경로를 못 얻으면(브라우저 등) 스킵.
-  const addDroppedFiles = (files: FileList) => {
+  const addDroppedFiles = async (files: FileList) => {
     const items: BuildAttachment[] = [];
     for (const f of Array.from(files)) {
-      const p = pathForDroppedFile(f);
-      if (!p) continue;
-      items.push({ path: p, name: f.name || p.split("/").pop() || p, kind: f.type !== "" || f.size > 0 ? "file" : "unknown" });
+      const grant = await grantForDroppedFile(f);
+      if (!grant) continue;
+      const p = grant.path;
+      items.push({ path: p, name: f.name || p.split("/").pop() || p, kind: grant.kind === "directory" ? "dir" : "file" });
     }
     if (items.length > 0) addAttachments(items);
   };
 
   const attachFolder = async () => {
     const dir = await ipc()?.fs.pickDirectory();
-    if (dir) addAttachments([{ path: dir, name: dir.split("/").pop() || dir, kind: "dir" }]);
+    if (dir) addAttachments([{ path: dir.path, name: dir.path.split("/").pop() || dir.path, kind: "dir" }]);
   };
   const pendingQuestionKey = pendingQuestions.map((q) => q.id).join("|");
   const selectedCount = pendingQuestions.reduce((sum, q) => sum + (selectedOptions[q.id]?.length ?? 0), 0);
@@ -520,15 +519,6 @@ export default function BuildPage() {
               <div className="build-card-head build-interview-head">
                 <span>{ko ? `딥인터뷰 · 질문 묶음 ${turn}` : `Deep interview · question batch ${turn}`}</span>
                 <div className="build-interview-head-actions">
-                  {canRewindInterview && (
-                    <button
-                      type="button"
-                      onClick={rewindBuildInterview}
-                      className="build-interview-back titlebar-nodrag"
-                    >
-                      {ko ? `${Math.max(1, turn - 1)}번째 답변으로 돌아가기` : `Back to answer ${Math.max(1, turn - 1)}`}
-                    </button>
-                  )}
                   <span className="build-live"><span className="forge-pulse" />{ko ? "답변 대기" : "awaiting"}</span>
                 </div>
               </div>
@@ -606,7 +596,7 @@ export default function BuildPage() {
                 <span>{ko ? "산출물" : "Artifacts"}</span>
                 <span>ready</span>
               </div>
-              <ArtifactPreview workspace={result.workspace} ko={ko} />
+              <ArtifactPreview workspace={result.workspace} readScope={result.readScope} ko={ko} />
               <SecurityScanBlock initialScan={result.securityScan} folder={result.workspace} ko={ko} />
               <div className="build-result-actions">
                 <span>
@@ -724,16 +714,16 @@ function StageRow({
 
 // ── 산출물 미리보기 — "무엇이·어디에 만들어졌나"를 실제 디스크에서 보여준다(소유의 물증). ──
 const KEY_ARTIFACTS = ["AGENTS.md", "AGENT.md", "agentlas.json", ".agentlas", "README.md", "system-prompt.md"];
-function ArtifactPreview({ workspace, ko }: { workspace: string; ko: boolean }) {
+function ArtifactPreview({ workspace, readScope, ko }: { workspace: string; readScope: FsReadScope; ko: boolean }) {
   const [listing, setListing] = useState<DirListing | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
-    ipc()?.fs.listDirectory(workspace, true)
+    ipc()?.fs.listDirectory(workspace, readScope, true)
       .then((d) => { if (alive) setListing(d); })
       .catch((e) => { if (alive) setErr(String(e)); });
     return () => { alive = false; };
-  }, [workspace]);
+  }, [readScope, workspace]);
   const entries = listing?.entries ?? [];
   return (
     <div className="build-artifact">

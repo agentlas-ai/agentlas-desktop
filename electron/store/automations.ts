@@ -580,7 +580,16 @@ export function claimAutomationRun(id: string, owner: string, now: Date = new Da
   return result.changes > 0;
 }
 
-/** 실행 종료 후 리스 해제(다음 due 슬롯에서 재클레임 가능하도록). */
-export function releaseAutomationRun(id: string): void {
-  getDb().prepare("UPDATE automations SET claimed_at = NULL, lease_owner = NULL WHERE id = ?").run(id);
+/**
+ * 실행 종료 후 자신이 획득한 리스만 해제한다. TTL 이후 다른 프로세스가 리스를 인계했거나
+ * Run now/이벤트 실행이 예약 러너와 겹쳐도 타 owner의 클레임을 지우면 안 된다.
+ * @returns 이 owner의 리스를 실제로 해제했으면 true.
+ */
+export function releaseAutomationRun(id: string, owner: string): boolean {
+  const result = getDb()
+    .prepare(
+      "UPDATE automations SET claimed_at = NULL, lease_owner = NULL WHERE id = ? AND lease_owner = ?",
+    )
+    .run(id, owner);
+  return result.changes > 0;
 }

@@ -491,10 +491,20 @@ function generatedAppAliases(app: AppFactoryAppRecord): string[] {
 
 function detectGeneratedAppAction(input: string): GeneratedAppChatRoute["action"] | null {
   const normalized = normalizeGeneratedAppText(input);
-  if (GENERATED_APP_ARCHIVE_TERMS.some((term) => normalized.includes(normalizeGeneratedAppText(term)))) {
+  const asciiTokens = new Set(normalized.split(/[\s-]+/).filter(Boolean));
+  const hasActionTerm = (term: string) => {
+    const candidate = normalizeGeneratedAppText(term);
+    // Short English verbs must be whole tokens: otherwise common app names such
+    // as "Credit" (edit) and "Prefix" (fix) are misrouted as edit requests.
+    // Korean action stems intentionally keep substring matching for 활용형.
+    return /^[a-z0-9]+$/.test(candidate)
+      ? asciiTokens.has(candidate)
+      : normalized.includes(candidate);
+  };
+  if (GENERATED_APP_ARCHIVE_TERMS.some(hasActionTerm)) {
     return "archive";
   }
-  if (GENERATED_APP_EDIT_TERMS.some((term) => normalized.includes(normalizeGeneratedAppText(term)))) {
+  if (GENERATED_APP_EDIT_TERMS.some(hasActionTerm)) {
     return "edit";
   }
   return null;
@@ -685,10 +695,11 @@ function ChatPage() {
     const api = ipc();
     const shouldReadText =
       api &&
+      Boolean(chatId) &&
       isAbsoluteLocalPath(preview.path) &&
       ["markdown", "json", "text", "browser"].includes(preview.viewerKind);
     if (shouldReadText) {
-      const text = await api.fs.readTextFile(preview.path).catch(() => null);
+      const text = await api.fs.readTextFile(preview.path, { kind: "chat-assets", chatId }).catch(() => null);
       if (text) {
         next = {
           ...preview,
@@ -703,7 +714,7 @@ function ChatPage() {
     setArtifact(null);
     setMediaPreview(next);
     openPanelTab("panel");
-  }, [openPanelTab]);
+  }, [chatId, openPanelTab]);
   const openLinkedFile = useCallback((file: LinkedFileArtifact) => {
     void openWorkspaceFilePreview(workspacePreviewFromLinkedFile(file));
   }, [openWorkspaceFilePreview]);
@@ -1011,6 +1022,9 @@ function ChatPage() {
           }),
         );
       } else if (ev.kind === "final") {
+        // 취소가 final로 종료되는 런타임도 있다. busy를 내리기 전에 반드시 비워야
+        // 다음 실행의 실제 error가 이전 steering 취소로 오인돼 삼켜지지 않는다.
+        steerCancelRef.current = false;
         pushWorkflow("status", locale === "ko" ? "완료" : "Done", { tokens: ev.tokens });
         setMessages((m) =>
           m.map((msg) => {
@@ -1183,6 +1197,7 @@ function ChatPage() {
     partialTextRef.current = "";
     setComposerPrefill(null);
     cancelRequestedRef.current = false;
+    steerCancelRef.current = false;
     steerQueueRef.current = [];
     setQueuedSteers([]);
     setArtifact(null);
@@ -1216,20 +1231,21 @@ function ChatPage() {
       }
       setChat(c);
       setTitleDraft(c.title);
-      const [agents, history, projectsAll, firmsAll, envVars, plugins] = await Promise.all([
+      const [agents, history, projectsAll, firmsAll, envVars, plugins, generatedApps] = await Promise.all([
         api.team.list(),
         api.invoke.history(chatId),
         api.projects.list(),
         api.firms.list(),
         api.env.list(),
         api.mcpTools.listInstalled(),
+        api.appFactory.listApps(chatId).catch(() => [] as AppFactoryAppRecord[]),
       ]);
       if (cancelled) return;
       setAllAgents(agents);
       setAllProjects(projectsAll);
       setAllFirms(firmsAll);
       setInstalledPlugins(plugins);
-      setAllGeneratedApps([]);
+      setAllGeneratedApps(generatedApps);
       // @ 멘션 popover에는 실제로 값이 저장된 키만 노출 — 비어있는 키를 멘션하면 invocation에서 빈 값이 주입돼 혼란.
       setAllEnvKeys(envVars.filter((e) => e.hasValue).map((e) => e.key));
       // CLI 슬래시 명령 스캔 (매 진입 시 최신) — 느려도 채팅 표시를 막지 않게 후속 로드.
@@ -1485,6 +1501,8 @@ function ChatPage() {
       const api = ipc();
       const events = ipcEvents();
       if (!api || !events || !chat || busy) return false;
+      // 새 실행은 이전 실행의 steering 취소 상태를 절대 상속하지 않는다.
+      steerCancelRef.current = false;
       setCancelPending(false);
       const goalPrompt = parseGoalSlash(userPrompt);
       const routeInput = goalPrompt ?? userPrompt;
@@ -1493,7 +1511,7 @@ function ChatPage() {
         router.push(appRoute.app.route);
         return true;
       }
-      const generatedAppRoute = appRoute ? null : parseGeneratedAppChatRoute(routeInput, []);
+      const generatedAppRoute = appRoute ? null : parseGeneratedAppChatRoute(routeInput, allGeneratedApps);
       if (generatedAppRoute?.action === "archive") {
         const appName = generatedAppDisplayName(generatedAppRoute.app);
         const placeholderId = uid();
@@ -1674,10 +1692,11 @@ function ChatPage() {
         runIdRef.current = null;
         lastRunIdRef.current = null;
         cancelRequestedRef.current = false;
+        steerCancelRef.current = false;
         return false;
       }
     },
-    [agent, agentGroup, chat, busy, locale, router, setNetworkOpenPersisted, t, subscribeRun],
+    [agent, agentGroup, allGeneratedApps, chat, busy, locale, router, setNetworkOpenPersisted, t, subscribeRun],
   );
 
   // 진행 중 실행 취소 — 입력창의 정지 버튼(전송 버튼이 busy일 때 변신) / Cmd/Ctrl+Esc.
@@ -1691,6 +1710,7 @@ function ChatPage() {
     // 발사되지 않게 한다(정지했는데 큐가 알아서 날아가던 버그).
     steerQueueRef.current = [];
     setQueuedSteers([]);
+    steerCancelRef.current = false;
     // runId가 아직 안 왔으면(invoke:run 왕복 중) 취소 의사만 기록 → 도착 즉시 취소된다.
     const runId = runIdRef.current ?? lastRunIdRef.current;
     if (!runId) return;
@@ -1881,6 +1901,7 @@ function ChatPage() {
           if (persisted) {
             const restored = scaffoldResultFromRecord(persisted);
             setScaffoldedApps((prev) => ({ ...prev, [activeSurface.id]: restored }));
+            setAllGeneratedApps((apps) => [persisted, ...apps.filter((app) => app.id !== persisted.id)]);
             return restored;
           }
           const result = await api.appFactory.scaffold({
@@ -1890,6 +1911,10 @@ function ChatPage() {
             manifest,
           });
           setScaffoldedApps((prev) => ({ ...prev, [activeSurface.id]: result }));
+          const record = result.record;
+          if (record) {
+            setAllGeneratedApps((apps) => [record, ...apps.filter((app) => app.id !== record.id)]);
+          }
           return result;
         };
         try {
@@ -2617,6 +2642,7 @@ function ChatPage() {
               onChange={(e) => setTitleDraft(e.target.value)}
               onBlur={() => void saveTitle()}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 if (e.key === "Enter") void saveTitle();
                 if (e.key === "Escape") {
                   setTitleDraft(chat.title);
@@ -2866,7 +2892,6 @@ function ChatPage() {
           onOpenLinkedFile={openLinkedFile}
           onOpenWorkflow={() => setNetworkOpenPersisted(true)}
           onOpenMultimodalSetup={() => router.push("/settings#multimodal")}
-          onStop={stop}
           interactionBusy={busy}
           stopRequested={cancelPending}
           mediaBasePaths={mediaBasePaths}
@@ -2925,7 +2950,7 @@ function ChatPage() {
             projects: allProjects,
             firms: allFirms,
             apps: INSTALLED_APPS,
-            generatedApps: [],
+            generatedApps: allGeneratedApps,
             envKeys: allEnvKeys,
             commands: cliCommands,
           }}

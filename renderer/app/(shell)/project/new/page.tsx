@@ -6,7 +6,7 @@ import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
-import type { InstalledAgent } from "@/lib/types";
+import type { FsPathGrant, InstalledAgent } from "@/lib/types";
 
 export default function NewProjectPage() {
   const router = useRouter();
@@ -15,6 +15,7 @@ export default function NewProjectPage() {
   const [contextNote, setContextNote] = useState("");
   const [defaultAgentId, setDefaultAgentId] = useState<string>("");
   const [folderPath, setFolderPath] = useState<string>("");
+  const [folderGrant, setFolderGrant] = useState<FsPathGrant | null>(null);
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -35,7 +36,7 @@ export default function NewProjectPage() {
         name: name.trim(),
         contextNote: contextNote.trim() || null,
         defaultAgentId: defaultAgentId || null,
-        folderPath: folderPath || null,
+        folderGrant,
       });
       navigate(`/project/detail?id=${project.id}`, "replace");
     } catch (err: unknown) {
@@ -128,7 +129,10 @@ export default function NewProjectPage() {
                 try {
                   setError("");
                   const picked = await api.workspace.selectFolder();
-                  if (picked) setFolderPath(picked);
+                  if (picked) {
+                    setFolderGrant(picked);
+                    setFolderPath(picked.path);
+                  }
                 } catch (err: unknown) {
                   setError(err instanceof Error ? err.message : String(err));
                 }
@@ -138,7 +142,7 @@ export default function NewProjectPage() {
               {locale === "ko" ? "선택…" : "Choose…"}
             </button>
             {folderPath && (
-              <button type="button" onClick={() => setFolderPath("")} style={pickBtnStyle}>
+              <button type="button" onClick={() => { setFolderPath(""); setFolderGrant(null); }} style={pickBtnStyle}>
                 {locale === "ko" ? "지우기" : "Clear"}
               </button>
             )}

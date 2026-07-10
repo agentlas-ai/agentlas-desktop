@@ -10,6 +10,8 @@ const repoRoot = path.resolve(new URL("..", import.meta.url).pathname);
 const dbPath = valueAfter("--db") ?? path.join(os.homedir(), "Library/Application Support/Agentlas/agentlas.sqlite");
 const watch = !args.has("--once");
 const intervalMs = Number(valueAfter("--interval-ms") ?? 15_000);
+const dueGraceMs = boundedMs(process.env.AGENTLAS_AUDIT_DUE_GRACE_MS, 5 * 60_000, 60_000, 60 * 60_000);
+const activeClaimGraceMs = boundedMs(process.env.AGENTLAS_AUDIT_CLAIM_GRACE_MS, 15 * 60_000, 60_000, 2 * 60 * 60_000);
 
 const ERROR_PATTERNS = [
   [/##\s*Automation\s+Intervention|type:\s*(tool-choice|login-required|permission-required|credential-required|hub-approval|human-review|workflow-patch)/i, "automation requires user intervention"],
@@ -31,6 +33,11 @@ const SKIPPED_PATTERNS = [
 function valueAfter(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+function boundedMs(raw, fallback, min, max) {
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= min && value <= max ? value : fallback;
 }
 
 function run(command, commandArgs, opts = {}) {
@@ -129,11 +136,28 @@ function latestAssistantByAutomation() {
   `);
 }
 
+function latestRunByAutomation() {
+  return sqlite(`
+    WITH ranked AS (
+      SELECT
+        automation_id,
+        status,
+        COALESCE(error, '') AS error,
+        ran_at,
+        row_number() OVER (PARTITION BY automation_id ORDER BY ran_at DESC) AS rn
+      FROM run_history
+    )
+    SELECT automation_id, status, error, ran_at FROM ranked WHERE rn = 1;
+  `);
+}
+
 function snapshot() {
   const now = new Date();
   const automationCols = tableColumns("automations");
   const hasToolMode = automationCols.includes("tool_mode");
   const hasHubMode = automationCols.includes("hub_mode");
+  const hasClaimedAt = automationCols.includes("claimed_at");
+  const hasLeaseOwner = automationCols.includes("lease_owner");
   const automations = sqlite(`
     SELECT
       id,
@@ -144,7 +168,9 @@ function snapshot() {
       run_count,
       prompt_template,
       ${hasToolMode ? "tool_mode" : "'auto' AS tool_mode"},
-      ${hasHubMode ? "hub_mode" : "'hub-allowed' AS hub_mode"}
+      ${hasHubMode ? "hub_mode" : "'hub-allowed' AS hub_mode"},
+      ${hasClaimedAt ? "claimed_at" : "NULL AS claimed_at"},
+      ${hasLeaseOwner ? "lease_owner" : "NULL AS lease_owner"}
     FROM automations
     ORDER BY created_at DESC;
   `);
@@ -160,6 +186,7 @@ function snapshot() {
     LIMIT 12;
   `);
   const latestText = new Map(latestAssistantByAutomation().map((row) => [row.automation_id, row]));
+  const latestRuns = new Map(latestRunByAutomation().map((row) => [row.automation_id, row]));
   const processes = inspectProcesses();
   const builds = inspectAppBuilds();
   const findings = [];
@@ -199,13 +226,15 @@ function snapshot() {
       });
     }
     const next = automation.next_run_at ? Date.parse(automation.next_run_at) : NaN;
-    if (Number.isFinite(next) && next <= now.getTime()) {
+    const claimedAt = automation.claimed_at ? Date.parse(automation.claimed_at) : NaN;
+    const activeClaim = Number.isFinite(claimedAt) && now.getTime() - claimedAt <= activeClaimGraceMs;
+    if (Number.isFinite(next) && now.getTime() - next > dueGraceMs && !activeClaim) {
       findings.push({ severity: "error", message: `Automation is due but not advanced: ${automation.name} (${automation.id}) next=${automation.next_run_at}` });
     }
     const latest = latestText.get(automation.id);
     if (!latest) continue;
     const classified = classify(latest.text);
-    const newestRun = runs.find((run) => run.automation_id === automation.id);
+    const newestRun = latestRuns.get(automation.id);
     if (classified.status === "error" && newestRun?.status === "ok") {
       findings.push({
         severity: "error",

@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
 import { currentLocale, useT } from "@/lib/i18n";
-import { ipc, pathForDroppedFile } from "@/lib/ipc";
+import { grantForDroppedFile, ipc } from "@/lib/ipc";
 import {
   generateDeck,
   buildDeckFromContent,
@@ -77,11 +77,11 @@ export default function TrexPage() {
         next.push({ name, text: "", kind: "image" });
         continue;
       }
-      const path = pathForDroppedFile(file);
+      const grant = await grantForDroppedFile(file);
       let text = "";
-      if (path && api?.fs?.readTextFile && TEXT_EXT.test(name)) {
+      if (grant && api?.fs?.readTextFile && TEXT_EXT.test(name)) {
         try {
-          const preview = await api.fs.readTextFile(path);
+          const preview = await api.fs.readTextFile(grant.path, grant.scope);
           // readTextFile은 binary/too-large면 reason을 준다 — 텍스트일 때만 content 사용.
           if (preview && !preview.reason && preview.content) text = preview.content;
         } catch {

@@ -1,13 +1,15 @@
 // MCP -> 런타임 브리지. 설치·활성화된 MCP 서버를 런타임별 설정으로 직렬화한다.
-// - Claude Code: `--mcp-config` JSON 파일
-// - Codex CLI: `-c mcp_servers.<name>...` config overrides
-// 값(시크릿)은 keychain vault에서 읽어 자식 env로 인라인.
+// - Claude Code: `--mcp-config` JSON 파일 (vault 값은 `${ENV_ALIAS}` 참조만 기록)
+// - Codex CLI: `-c mcp_servers.<name>...` config overrides (시크릿 값 없는 이름/경로만 전달)
+// 값(시크릿)은 keychain vault에서 읽어 런타임 env의 불투명 alias로만 전달한다. Codex MCP는
+// 작은 wrapper가 alias를 원래 키로 되돌린 뒤 서버를 spawn해, LLM CLI 인증 env와도 충돌하지 않는다.
 //
 // 이게 없으면 카탈로그의 Playwright(브라우저) 서버가 "설치"만 되고 채팅 중 호출되지 않았다.
 // 이제 에이전트가 실제로 브라우저를 띄워 회원가입/로그인/키 발급을 대신 해줄 수 있다.
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { app } from "electron";
 import { ensureDefaultMcpPluginsInstalled } from "./defaults";
 import { listInstalledServers } from "./registry";
@@ -73,8 +75,10 @@ export interface McpConfigResult {
   configPath: string;
   /** ["mcp__playwright", ...] — write/full 권한에서 --allowedTools 자동 승인용. */
   allowedTools: string[];
-  /** Codex CLI `exec`에 그대로 붙이는 runtime-local MCP config overrides. */
+  /** Codex CLI `exec`에 그대로 붙이는 runtime-local MCP config overrides. 시크릿 값은 포함하지 않는다. */
   codexConfigArgs: string[];
+  /** CLI 부모 환경에만 넣는 불투명 alias -> vault 값. 설정 파일/argv에는 값이 기록되지 않는다. */
+  runtimeEnv: Record<string, string>;
 }
 
 export interface McpConfigBuildOptions {
@@ -86,6 +90,98 @@ export interface McpConfigBuildOptions {
 
 function safeProfileKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "default";
+}
+
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const SECRET_ALIAS_PREFIX = "AGENTLAS_MCP_SECRET_";
+
+function validateEnvKey(value: string): string {
+  const key = value.trim();
+  if (!ENV_KEY_RE.test(key)) throw new Error(`Invalid MCP environment key: ${value}`);
+  return key;
+}
+
+function secretAlias(serverKey: string, envKey: string): string {
+  const digest = createHash("sha256").update(serverKey).update("\0").update(envKey).digest("hex");
+  return `${SECRET_ALIAS_PREFIX}${digest.slice(0, 32).toUpperCase()}`;
+}
+
+function envReference(alias: string): string {
+  return `\${${alias}}`;
+}
+
+const CODEX_SECRET_WRAPPER = `"use strict";
+const crossSpawn = require(process.argv[2]);
+
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+let mapping;
+try {
+  mapping = JSON.parse(process.argv[3] || "{}");
+} catch {
+  process.stderr.write("Agentlas MCP secret wrapper received invalid mapping.\\n");
+  process.exit(78);
+}
+const command = process.argv[4];
+const args = process.argv.slice(5);
+if (!command || !mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
+  process.stderr.write("Agentlas MCP secret wrapper received invalid launch arguments.\\n");
+  process.exit(78);
+}
+
+const env = { ...process.env };
+delete env.ELECTRON_RUN_AS_NODE;
+for (const [targetKey, alias] of Object.entries(mapping)) {
+  if (!ENV_KEY_RE.test(targetKey) || typeof alias !== "string" || !alias.startsWith("${SECRET_ALIAS_PREFIX}")) {
+    process.stderr.write("Agentlas MCP secret wrapper rejected an invalid environment mapping.\\n");
+    process.exit(78);
+  }
+  const value = process.env[alias];
+  if (typeof value !== "string" || value.length === 0) {
+    process.stderr.write("Agentlas MCP secret wrapper is missing a required vault value.\\n");
+    process.exit(78);
+  }
+  env[targetKey] = value;
+  delete env[alias];
+}
+
+const child = crossSpawn(command, args, { stdio: "inherit", env });
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    if (!child.killed) child.kill(signal);
+  });
+}
+child.once("error", (error) => {
+  process.stderr.write(String(error && error.message ? error.message : error) + "\\n");
+  process.exit(1);
+});
+child.once("exit", (code) => process.exit(typeof code === "number" ? code : 1));
+`;
+
+function ensurePrivateDir(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32") fs.chmodSync(dir, 0o700);
+}
+
+function writePrivateFile(file: string, content: string): void {
+  if (process.platform === "win32") {
+    fs.writeFileSync(file, content, { encoding: "utf8", mode: 0o600 });
+    return;
+  }
+  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temp, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    fs.renameSync(temp, file);
+    // rename 대상이 과거 0644 파일이어도 새 inode의 최소 권한을 다시 명시한다.
+    fs.chmodSync(file, 0o600);
+  } finally {
+    fs.rmSync(temp, { force: true });
+  }
+}
+
+function ensureCodexSecretWrapper(dir: string): string {
+  const wrapperPath = path.join(dir, "codex-mcp-secret-wrapper.cjs");
+  writePrivateFile(wrapperPath, CODEX_SECRET_WRAPPER);
+  return wrapperPath;
 }
 
 function argsWithBrowserProfile(key: string, args: string[], opts?: McpConfigBuildOptions): string[] {
@@ -111,37 +207,71 @@ function argsWithBrowserProfile(key: string, args: string[], opts?: McpConfigBui
  */
 export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<McpConfigResult | null> {
   ensureDefaultMcpPluginsInstalled();
+  const dir = path.join(app.getPath("userData"), "mcp");
+  const configPath = path.join(dir, "agentlas-mcp.json");
+  ensurePrivateDir(dir);
   const scopedCatalogIds = opts?.catalogIds ? new Set(opts.catalogIds.filter(Boolean)) : null;
   const servers = listInstalledServers().filter((s) => {
     if (!s.enabled) return false;
     if (!scopedCatalogIds) return true;
     return Boolean((s.catalogId && scopedCatalogIds.has(s.catalogId)) || scopedCatalogIds.has(s.id));
   });
-  if (servers.length === 0) return null;
+  if (servers.length === 0) {
+    // 구버전이 0644 JSON에 남긴 vault 평문을 선택 결과가 0개인 실행에서도 방치하지 않는다.
+    fs.rmSync(configPath, { force: true });
+    return null;
+  }
 
   const mcpServers: Record<string, unknown> = {};
   const allowedTools: string[] = [];
   const codexConfigArgs: string[] = [];
+  const runtimeEnv: Record<string, string> = {};
+  let codexSecretWrapper: string | null = null;
 
   for (const s of servers) {
     const key = mcpKey(s);
     if (s.transport === "stdio" && s.command) {
       const command = resolveStdioCommand(s);
-      const env: Record<string, string> = {};
-      for (const k of s.envKeys) {
-        const v = await readEnvVar(k);
-        if (v) env[k] = v;
+      const claudeEnv: Record<string, string> = {};
+      const secretAliases: Record<string, string> = {};
+      for (const rawKey of s.envKeys) {
+        const envKey = validateEnvKey(rawKey);
+        const value = await readEnvVar(envKey);
+        if (!value) continue;
+        const alias = secretAlias(key, envKey);
+        claudeEnv[envKey] = envReference(alias);
+        secretAliases[envKey] = alias;
+        runtimeEnv[alias] = value;
       }
       const args = argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
       mcpServers[key] = {
         command,
         args,
-        ...(Object.keys(env).length ? { env } : {}),
+        ...(Object.keys(claudeEnv).length ? { env: claudeEnv } : {}),
       };
-      pushCodexConfig(codexConfigArgs, key, "command", tomlString(command));
-      pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(args));
-      if (Object.keys(env).length > 0) {
-        pushCodexConfig(codexConfigArgs, key, "env", tomlInlineStringTable(env));
+      const aliases = Object.values(secretAliases);
+      if (aliases.length === 0) {
+        pushCodexConfig(codexConfigArgs, key, "command", tomlString(command));
+        pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(args));
+      } else {
+        codexSecretWrapper ??= ensureCodexSecretWrapper(dir);
+        const wrapperArgs = [
+          require.resolve("cross-spawn"),
+          JSON.stringify(secretAliases),
+          command,
+          ...args,
+        ];
+        // Codex는 `${VAR}` 보간을 지원하지 않는다. env_vars로 alias 값만 MCP wrapper에
+        // 전달하고 wrapper가 원래 키로 복원한다. 따라서 vault 값은 `-c` argv에 없다.
+        pushCodexConfig(codexConfigArgs, key, "command", tomlString(process.execPath));
+        pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray([codexSecretWrapper, ...wrapperArgs]));
+        pushCodexConfig(
+          codexConfigArgs,
+          key,
+          "env",
+          tomlInlineStringTable({ ELECTRON_RUN_AS_NODE: "1" }),
+        );
+        pushCodexConfig(codexConfigArgs, key, "env_vars", tomlStringArray(aliases));
       }
     } else if (s.url) {
       mcpServers[key] = { type: s.transport === "sse" ? "sse" : "http", url: s.url };
@@ -154,9 +284,6 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
 
   if (Object.keys(mcpServers).length === 0) return null;
 
-  const dir = path.join(app.getPath("userData"), "mcp");
-  fs.mkdirSync(dir, { recursive: true });
-  const configPath = path.join(dir, "agentlas-mcp.json");
-  fs.writeFileSync(configPath, JSON.stringify({ mcpServers }, null, 2), "utf8");
-  return { configPath, allowedTools, codexConfigArgs };
+  writePrivateFile(configPath, JSON.stringify({ mcpServers }, null, 2));
+  return { configPath, allowedTools, codexConfigArgs, runtimeEnv };
 }

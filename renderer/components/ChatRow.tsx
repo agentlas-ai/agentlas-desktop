@@ -114,6 +114,7 @@ export const ChatRow = memo(function ChatRow({
           onChange={(e) => setTitleDraft(e.target.value)}
           onBlur={() => void saveRename()}
           onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
             if (e.key === "Enter") void saveRename();
             if (e.key === "Escape") {
               setTitleDraft(chat.title);
