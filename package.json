@@ -81,6 +81,7 @@
     "test:external-url-gate": "node scripts/test-external-url-gate.cjs",
     "test:invocation-run-id": "npm run build:electron && node scripts/test-invocation-run-id.cjs",
     "test:runtime-update-resolution": "npm run build:electron && node scripts/test-runtime-update-resolution.cjs",
+    "test:mac-release-publish-boundary": "node scripts/test-mac-release-publish-boundary.cjs",
     "test:semver-precedence": "npm run build:electron && node scripts/test-semver-precedence.cjs",
     "test:mock-bridge-parity": "node scripts/test-mock-bridge-parity.cjs",
     "test:generated-app-chat-routing": "node scripts/test-generated-app-chat-routing.cjs",

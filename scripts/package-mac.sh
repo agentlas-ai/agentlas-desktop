@@ -141,6 +141,7 @@ build_mac_arch() {
     --mac "--${arch}" \
     --config electron-builder.mac-stable.yml \
     --config.mac.notarize=false \
+    --publish never \
     --config.directories.output="$local_release"
 }
 
