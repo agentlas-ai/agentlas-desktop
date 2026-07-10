@@ -133,7 +133,7 @@ export function ImportAgentsModal({
     try {
       const dir = await api.fs.pickDirectory();
       if (!dir) return;
-      const agent = await api.team.importLocalFolder(dir.path);
+      const agent = await api.team.importLocalFolder({ path: dir.path, scope: dir.scope });
       setStatus({
         tone: "ok",
         text: t("import.local_success", { name: agent.name || agent.slug }),

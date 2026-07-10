@@ -31,6 +31,23 @@ const api: AgentlasIpc = {
     generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string }) => ipcRenderer.invoke("trex:generateContent", payload),
     contentAvailable: () => ipcRenderer.invoke("trex:contentAvailable"),
   },
+  site: {
+    listProjects: () => ipcRenderer.invoke("site:listProjects"),
+    createProject: (payload: { name: string }) => ipcRenderer.invoke("site:createProject", payload),
+    deleteProject: (payload: { projectId: string }) => ipcRenderer.invoke("site:deleteProject", payload),
+    generateScreen: (payload: { projectId: string; brief: string; variants?: number; styleHint?: string; baseScreenId?: string; locale?: "ko" | "en" }) =>
+      ipcRenderer.invoke("site:generateScreen", payload),
+    editScreen: (payload: { projectId: string; screenId: string; instruction: string; selectionId?: string; locale?: "ko" | "en" }) =>
+      ipcRenderer.invoke("site:editScreen", payload),
+    readScreen: (payload: { projectId: string; screenId: string }) => ipcRenderer.invoke("site:readScreen", payload),
+    prepareRender: (payload: { projectId: string; screenId: string }) => ipcRenderer.invoke("site:prepareRender", payload),
+    renameScreen: (payload: { projectId: string; screenId: string; name: string }) => ipcRenderer.invoke("site:renameScreen", payload),
+    deleteScreen: (payload: { projectId: string; screenId: string }) => ipcRenderer.invoke("site:deleteScreen", payload),
+    captureRect: (payload: { x: number; y: number; width: number; height: number }) => ipcRenderer.invoke("site:captureRect", payload),
+    exportScreen: (payload: { projectId: string; screenId: string }) => ipcRenderer.invoke("site:exportScreen", payload),
+    exportProjectZip: (payload: { projectId: string }) => ipcRenderer.invoke("site:exportProjectZip", payload),
+    contentAvailable: () => ipcRenderer.invoke("site:contentAvailable"),
+  },
   document: {
     generate: (payload: {
       goal: string;
@@ -113,6 +130,8 @@ const api: AgentlasIpc = {
     getState: () => ipcRenderer.invoke("updater:getState"),
     check: () => ipcRenderer.invoke("updater:check"),
     install: () => ipcRenderer.invoke("updater:install"),
+    openManualDownload: () => ipcRenderer.invoke("updater:openManualDownload"),
+    revealRecoveryBackup: () => ipcRenderer.invoke("updater:revealRecoveryBackup"),
   },
   runtime: {
     detect: () => ipcRenderer.invoke("runtime:detect"),
@@ -184,8 +203,8 @@ const api: AgentlasIpc = {
     install: (slug: string) => ipcRenderer.invoke("team:install", slug),
     installMine: (id: string) => ipcRenderer.invoke("team:installMine", id),
     uninstall: (id: string) => ipcRenderer.invoke("team:uninstall", id),
-    importLocalFolder: (absPath: string) =>
-      ipcRenderer.invoke("team:importLocalFolder", absPath),
+    importLocalFolder: (input) =>
+      ipcRenderer.invoke("team:importLocalFolder", input),
     resolveSubAgents: (agentId: string) => ipcRenderer.invoke("team:resolveSubAgents", agentId),
   },
   agentFiles: {
@@ -194,6 +213,7 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("agentFiles:read", agentId, absPath),
     write: (agentId: string, absPath: string, content: string) =>
       ipcRenderer.invoke("agentFiles:write", agentId, absPath, content),
+    promptSource: (agentId: string) => ipcRenderer.invoke("agentFiles:promptSource", agentId),
   },
   runLedger: {
     events: (runId: string, limit?: number) => ipcRenderer.invoke("runLedger:events", runId, limit),
@@ -203,8 +223,12 @@ const api: AgentlasIpc = {
   agentEvolution: {
     list: (agentId: string, limit?: number) =>
       ipcRenderer.invoke("agentEvolution:list", agentId, limit),
-    createAndApplyPrompt: (input) =>
-      ipcRenderer.invoke("agentEvolution:createAndApplyPrompt", input),
+    createProposal: (input) =>
+      ipcRenderer.invoke("agentEvolution:createProposal", input),
+    approveAndApply: (proposalId: string, note?: string) =>
+      ipcRenderer.invoke("agentEvolution:approveAndApply", proposalId, note),
+    reject: (proposalId: string, note?: string) =>
+      ipcRenderer.invoke("agentEvolution:reject", proposalId, note),
     markMeasured: (proposalId: string, note?: string) =>
       ipcRenderer.invoke("agentEvolution:markMeasured", proposalId, note),
     rollback: (proposalId: string) =>
@@ -212,6 +236,7 @@ const api: AgentlasIpc = {
   },
   skills: {
     listCatalog: () => ipcRenderer.invoke("skills:listCatalog"),
+    readCatalog: (slug: string) => ipcRenderer.invoke("skills:readCatalog", slug),
   },
   mcpTools: {
     listCatalog: () => ipcRenderer.invoke("mcpTools:listCatalog"),
@@ -235,6 +260,8 @@ const api: AgentlasIpc = {
     bookmarkRemove: (slug: string) => ipcRenderer.invoke("marketplace:bookmarkRemove", slug),
   },
   cloudAgents: {
+    savePrivate: (input) => ipcRenderer.invoke("cloudAgents:savePrivate", input),
+    publishPublic: (input) => ipcRenderer.invoke("cloudAgents:publishPublic", input),
     publish: (input) => ipcRenderer.invoke("cloudAgents:publish", input),
   },
   firms: {
@@ -439,6 +466,8 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("invoke:clearHistory", chatId),
     activeChats: () => ipcRenderer.invoke("invoke:activeChats"),
     attach: (chatId: string) => ipcRenderer.invoke("invoke:attach", chatId),
+    receipt: (runId: string) => ipcRenderer.invoke("invoke:receipt", runId),
+    latestReceipt: (chatId: string) => ipcRenderer.invoke("invoke:latestReceipt", chatId),
   },
   hephaestus: {
     status: (locale) => ipcRenderer.invoke("hephaestus:status", locale),

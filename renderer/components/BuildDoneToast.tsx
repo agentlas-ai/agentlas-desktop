@@ -8,6 +8,7 @@ import { subscribe as buildSubscribe, getSnapshot as getBuildSnapshot } from "@/
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
+import { buildScanDisposition } from "@/lib/build-scan";
 import { IconBuilding, IconCheck, IconStore } from "@/components/Icon";
 
 export function BuildDoneToast() {
@@ -41,6 +42,9 @@ export function BuildDoneToast() {
 
   if (!open || s.phase !== "done" || !s.result) return null;
   const workspace = s.result.workspace;
+  const readScope = s.result.readScope;
+  const scanDisposition = buildScanDisposition(s.result.securityScan);
+  const deliveryBlocked = scanDisposition === "blocked" || scanDisposition === "unverified";
   const name = workspace.split("/").pop() || "package";
 
   const upload = async (visibility: "private-link" | "marketplace") => {
@@ -48,7 +52,7 @@ export function BuildDoneToast() {
     setBusy(true);
     setMsg(ko ? `${label} 업로드 중…` : `Uploading to ${label}…`);
     try {
-      const res = await ipc()?.hephaestus.publish({ folder: workspace, visibility });
+      const res = await ipc()?.hephaestus.publish({ folder: workspace, scope: readScope, visibility });
       const raw = res?.error ?? res?.stderr ?? "";
       setMsg(
         res?.ok
@@ -73,16 +77,21 @@ export function BuildDoneToast() {
       </div>
       <div className="build-done-toast-name" title={workspace}>{name}</div>
       <div className="build-done-toast-actions">
-        <button type="button" disabled={busy} onClick={() => void upload("private-link")}>
-          {ko ? "클라우드 업로드" : "Upload to Cloud"}
+        <button type="button" disabled={busy || deliveryBlocked} onClick={() => void upload("private-link")}>
+          {ko ? "Cloud에 비공개 저장" : "Save privately to Cloud"}
         </button>
-        <button type="button" disabled={busy} onClick={() => void upload("marketplace")}>
+        <button type="button" disabled={busy || deliveryBlocked} onClick={() => void upload("marketplace")}>
           <IconStore size={12} /> {ko ? "허브 업로드" : "Upload to Hub"}
         </button>
         <button type="button" onClick={() => navigate("/library/agents")}>
           <IconBuilding size={12} /> {ko ? "조직도 열기" : "Open org chart"}
         </button>
       </div>
+      {deliveryBlocked && (
+        <div className="build-done-toast-msg">
+          {ko ? "보안 검증을 확인한 뒤 설치·업로드할 수 있습니다." : "Verify the security scan before install or upload."}
+        </div>
+      )}
       {msg && <div className="build-done-toast-msg">{msg}</div>}
     </div>
   );

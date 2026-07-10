@@ -9,7 +9,8 @@
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { currentLocale } from "@/lib/i18n";
 import { extractQuestions } from "@/lib/ask-question";
-import { packagePathFromText } from "@/lib/build-path";
+import { buildScanDisposition } from "@/lib/build-scan";
+import { isCompletedBuildTurn } from "@shared/build-turn";
 import type { ChatQuestion } from "@/components/ChatStream";
 import type { FsPathGrant, FsReadScope, HephaestusBuildEvent, RuntimeSelection } from "@/lib/types";
 
@@ -37,6 +38,8 @@ interface ChatMsg {
 export interface BuildAttachment {
   /** 절대 경로(파일 또는 폴더). */
   path: string;
+  /** Native picker / trusted drop에서 발급된 main-process capability. */
+  grant: FsPathGrant;
   /** 표시용 이름(basename). */
   name: string;
   /** 출처 힌트 — 폴더 피커면 dir 확정, 파일 인풋이면 file 확정, 드롭은 unknown(메인이 stat). */
@@ -225,13 +228,13 @@ function detach() {
 }
 
 /** 빌드 완료 시 결과 폴더를 라이브러리(조직도)에 자동 등록 — "조직도에 안 뜬다" 문제 해소. */
-async function autoRegister(workspace: string) {
+async function autoRegister(workspace: string, readScope: FsReadScope) {
   const api = ipc();
   if (!api) return;
   const ko = currentLocale() === "ko";
   try {
     pushLog("stage", ko ? "조직도에 등록 중 — 라이브러리에 추가" : "Registering to org chart — adding to library");
-    const imported = await api.team.importLocalFolder(workspace);
+    const imported = await api.team.importLocalFolder({ path: workspace, scope: readScope });
     state.registered = true;
     const who = imported?.name || imported?.slug || (ko ? "에이전트" : "agent");
     pushLog("done", ko ? `조직도에 추가됨: ${who}` : `Added to org chart: ${who}`);
@@ -296,8 +299,16 @@ function finalizeBuild(pkgRoot: string, scan: unknown, readScope: FsReadScope, n
         : "Skipped auto-registration (shared folder) — add only the generated package folder via \"Open in org chart\".",
     );
     commit();
+  } else if (buildScanDisposition(scan) === "passed") {
+    void autoRegister(pkgRoot, readScope);
   } else {
-    void autoRegister(pkgRoot);
+    pushLog(
+      "log",
+      ko
+        ? "자동 등록 생략 — 보안 검증이 통과 상태가 아닙니다. 결과에서 재스캔 후 직접 설치하세요."
+        : "Skipped auto-registration — security verification has not passed. Re-scan the result before installing.",
+    );
+    commit();
   }
 }
 
@@ -361,13 +372,13 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
     const started = await api.hephaestus.build({
       request: input,
       mode: state.mode || undefined,
-      workspace,
+      workspaceGrant: state.workspaceGrant,
       runtime: state.runtime || undefined,
       runtimeSessionId: runtimeSessionId || undefined,
       // 첨부는 런타임 sessionId 유무와 무관하게 한 빌드에서 정확히 한 번만 스테이징한다.
       attachments: attachmentsSentForBuild
         ? undefined
-        : state.attachments.map((a) => ({ path: a.path, name: a.name })),
+        : state.attachments.map((a) => ({ grant: a.grant, name: a.name })),
       history: [...history],
       locale: currentLocale(),
     });
@@ -424,27 +435,30 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
       history.push({ role: "assistant", text: assistantText });
       detach();
 
-      const complete = /BUILD_COMPLETE/i.test(assistantText);
+      const complete = isCompletedBuildTurn(assistantText);
       if (complete) {
         state.reached = STAGE_COUNT;
         const r = e.result as { workspace?: string; securityScan?: unknown } | undefined;
-        const baseWs = r?.workspace ?? workspace;
-        // 등록 대상: BUILD_COMPLETE가 만든 하위 패키지 폴더(있으면 그것만). 없으면 워크스페이스 —
-        // 단 워크스페이스가 정크 폴더(trash/tmp 등)면 부모 전체가 회사로 잡히는 걸 막으려 자동등록 생략.
-        const pkgPath = packagePathFromText(baseWs, assistantText);
-        const registerPath = pkgPath ?? (JUNK_WS.test(wsBasename(baseWs)) ? null : baseWs);
-        state.result = { workspace: pkgPath ?? baseWs, securityScan: r?.securityScan ?? null, readScope };
+        // Main has already canonicalized and scope-checked the model-authored
+        // BUILD_COMPLETE target. Never reinterpret that path in the renderer.
+        const packageRoot = r?.workspace ?? workspace;
+        const registerPath = JUNK_WS.test(wsBasename(packageRoot)) ? null : packageRoot;
+        state.result = { workspace: packageRoot, securityScan: r?.securityScan ?? null, readScope };
         pushLog("done", ko ? "빌드 완료 — 패키지 생성됨" : "Build complete — package created");
         state.phase = "done";
         commit();
-        if (registerPath) {
-          void autoRegister(registerPath);
+        if (registerPath && buildScanDisposition(r?.securityScan ?? null) === "passed") {
+          void autoRegister(registerPath, readScope);
         } else {
           pushLog(
             "log",
-            ko
-              ? "자동 등록 생략(공용 폴더) — '조직도에서 열기'로 생성된 패키지 폴더만 직접 추가하세요."
-              : "Skipped auto-registration (shared folder) — add only the generated package folder via \"Open in org chart\".",
+            !registerPath
+              ? ko
+                ? "자동 등록 생략(공용 폴더) — '조직도에서 열기'로 생성된 패키지 폴더만 직접 추가하세요."
+                : "Skipped auto-registration (shared folder) — add only the generated package folder via \"Open in org chart\"."
+              : ko
+                ? "자동 등록 생략 — 보안 검증이 통과 상태가 아닙니다. 결과에서 재스캔 후 직접 설치하세요."
+                : "Skipped auto-registration — security verification has not passed. Re-scan the result before installing.",
           );
           commit();
         }
@@ -560,5 +574,12 @@ export function resetBuild() {
   runtimeSessionId = null;
   attachmentsSentForBuild = false;
   autoContinues = 0;
+  commit();
+}
+
+/** 수동 재스캔 결과를 전역 build session에 반영해 모든 결과/토스트 액션이 같은 게이트를 본다. */
+export function updateBuildSecurityScan(scan: unknown): void {
+  if (!state.result) return;
+  state.result = { ...state.result, securityScan: scan };
   commit();
 }

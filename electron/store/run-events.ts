@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
 import type {
   FailureEventUi,
+  InvocationRunReceipt,
   McpInvocationEvent,
   McpInvocationRequest,
   RunEventUi,
@@ -328,4 +329,109 @@ export function listFailureEvents(input: {
     .prepare(`SELECT * FROM failure_events ${where} ORDER BY datetime(ts) DESC LIMIT ?`)
     .all(...params, capped) as FailureEventRow[];
   return rows.map(failureRowToUi);
+}
+
+function stringPayload(payload: Record<string, unknown>, key: string): string | undefined {
+  const value = payload[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function stringArrayPayload(payload: Record<string, unknown>, key: string): string[] | undefined {
+  const value = payload[key];
+  if (!Array.isArray(value)) return undefined;
+  const normalized = value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return normalized.length ? normalized : undefined;
+}
+
+/** True once a renderer-selected run id has crossed the durable start gate. */
+export function hasInvocationRunReceipt(runId: string): boolean {
+  if (!runId) return false;
+  const row = getDb()
+    .prepare("SELECT 1 AS found FROM run_events WHERE run_id = ? AND kind = 'invoke_started' LIMIT 1")
+    .get(runId) as { found?: number } | undefined;
+  return row?.found === 1;
+}
+
+/**
+ * Rebuild a terminal/recovery receipt from the append-only run ledger.
+ * A started row without a terminal row is `interrupted` here: only main's
+ * in-memory registry may upgrade it to running/cancelling.
+ */
+export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | null {
+  if (!runId) return null;
+  const rows = getDb()
+    .prepare("SELECT * FROM run_events WHERE run_id = ? ORDER BY seq ASC")
+    .all(runId) as RunEventRow[];
+  const start = rows.find((row) => row.kind === "invoke_started");
+  if (!start) return null;
+
+  const startPayload = parsePayload(start.payload_json);
+  let status: InvocationRunReceipt["status"] = "interrupted";
+  let terminal: RunEventRow | undefined;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row.kind === "invoke_completed" || row.kind === "mcp_final") {
+      status = "completed";
+      terminal = row;
+      break;
+    }
+    if (row.kind === "invoke_cancelled") {
+      status = "cancelled";
+      terminal = row;
+      break;
+    }
+    if (row.kind === "invoke_failed" || row.kind === "invoke_threw" || row.kind === "mcp_error") {
+      status = "failed";
+      terminal = row;
+      break;
+    }
+  }
+
+  const latest = rows[rows.length - 1] ?? start;
+  const terminalPayload = terminal ? parsePayload(terminal.payload_json) : {};
+  const settledPayload = [...rows]
+    .reverse()
+    .map((row) => parsePayload(row.payload_json))
+    .find((payload) => stringPayload(payload, "resultFolder"));
+  const failure = getDb()
+    .prepare("SELECT * FROM failure_events WHERE run_id = ? ORDER BY datetime(ts) DESC, rowid DESC LIMIT 1")
+    .get(runId) as FailureEventRow | undefined;
+
+  return {
+    runId,
+    chatId: start.chat_id ?? stringPayload(startPayload, "chatId") ?? "",
+    status,
+    startedAt: start.ts,
+    updatedAt: latest.ts,
+    ...(terminal ? { finishedAt: terminal.ts } : {}),
+    eventCount: rows.length,
+    ...(settledPayload ? { resultFolder: stringPayload(settledPayload, "resultFolder") } : {}),
+    ...(typeof startPayload.hasImages === "boolean" ? { hasImages: startPayload.hasImages } : {}),
+    ...(stringArrayPayload(startPayload, "borrowAgents")
+      ? { borrowAgents: stringArrayPayload(startPayload, "borrowAgents") }
+      : {}),
+    ...(failure?.error_code ? { errorCode: failure.error_code } : {}),
+    ...(failure?.error_message
+      ? { errorMessage: failure.error_message }
+      : stringPayload(terminalPayload, "errorMessage")
+        ? { errorMessage: stringPayload(terminalPayload, "errorMessage") }
+        : {}),
+  };
+}
+
+export function getLatestInvocationRunReceipt(chatId: string): InvocationRunReceipt | null {
+  if (!chatId) return null;
+  const row = getDb()
+    .prepare(
+      `SELECT run_id
+       FROM run_events
+       WHERE chat_id = ? AND kind = 'invoke_started'
+       ORDER BY datetime(ts) DESC, rowid DESC
+       LIMIT 1`,
+    )
+    .get(chatId) as { run_id?: string } | undefined;
+  return row?.run_id ? getInvocationRunReceipt(row.run_id) : null;
 }

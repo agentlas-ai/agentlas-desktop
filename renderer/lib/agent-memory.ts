@@ -40,29 +40,83 @@ export function memorySlugId(s: string): string {
   );
 }
 
+type KnownMemorySection = "decisions" | "gotchas" | "open";
+
+type MarkdownLine = { text: string; eol: string; raw: string };
+
+function splitMarkdownLines(value: string): MarkdownLine[] {
+  const lines: MarkdownLine[] = [];
+  const pattern = /([^\r\n]*)(\r\n|\n|\r|$)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(value)) !== null) {
+    if (match[0] === "" && pattern.lastIndex === value.length) break;
+    lines.push({ text: match[1], eol: match[2], raw: match[0] });
+    if (match[2] === "") break;
+  }
+  return lines;
+}
+
+type MarkdownFence = { marker: "`" | "~"; length: number } | null;
+
+function advanceFence(line: string, current: MarkdownFence): MarkdownFence {
+  if (current) {
+    const escaped = current.marker === "`" ? "`" : "~";
+    const closing = new RegExp(`^ {0,3}${escaped}{${current.length},}\\s*$`);
+    return closing.test(line) ? null : current;
+  }
+  const opening = line.match(/^ {0,3}(`{3,}|~{3,})/);
+  if (!opening) return null;
+  return { marker: opening[1][0] as "`" | "~", length: opening[1].length };
+}
+
+function levelTwoHeading(line: string): string | null {
+  const trimmed = line.trim();
+  return /^##(?!#)(?:\s+|$)/.test(trimmed) ? trimmed : null;
+}
+
+function scanLevelTwoHeadings(lines: MarkdownLine[]): Array<{ index: number; kind: KnownMemorySection | null }> {
+  const headings: Array<{ index: number; kind: KnownMemorySection | null }> = [];
+  let fence: MarkdownFence = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const before = fence;
+    fence = advanceFence(lines[index].text, fence);
+    if (before || fence) continue;
+    const heading = levelTwoHeading(lines[index].text);
+    if (heading) headings.push({ index, kind: knownMemoryHeading(heading) });
+  }
+  return headings;
+}
+
+function knownMemoryHeading(value: string): KnownMemorySection | null {
+  const heading = value.trim();
+  if (/^##\s+(?:decisions?|의사결정|결정\s*사항)\s*$/i.test(heading)) return "decisions";
+  if (/^##\s+(?:gotchas?|주의\s*사항)\s*$/i.test(heading)) return "gotchas";
+  if (/^##\s+(?:open(?:\s+questions?)?|미결(?:\s+(?:과제|항목|질문))?)\s*$/i.test(heading)) return "open";
+  return null;
+}
+
 export function parseMemoryMarkdown(content: string): ParsedMemory {
   const decisions: MemoryItem[] = [];
   const gotchas: MemoryItem[] = [];
   const openQuestions: { id: string; title: string; content: string }[] = [];
 
-  const lines = content.split("\n");
+  const lines = splitMarkdownLines(content);
+  const headingByLine = new Map(scanLevelTwoHeadings(lines).map((heading) => [heading.index, heading.kind]));
   let currentSection: "decisions" | "gotchas" | "open" | null = null;
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("## Decisions") || trimmed.startsWith("## 의사결정") || trimmed.toLowerCase().includes("decisions")) {
-      currentSection = "decisions";
-      continue;
-    } else if (trimmed.startsWith("## Gotchas") || trimmed.startsWith("## 주의사항") || trimmed.toLowerCase().includes("gotchas")) {
-      currentSection = "gotchas";
-      continue;
-    } else if (trimmed.startsWith("## Open") || trimmed.startsWith("## 미결") || trimmed.toLowerCase().includes("open")) {
-      currentSection = "open";
-      continue;
-    } else if (trimmed.startsWith("##")) {
-      currentSection = null;
+  let fence: MarkdownFence = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].text;
+    const before = fence;
+    fence = advanceFence(line, fence);
+    if (headingByLine.has(index)) {
+      currentSection = headingByLine.get(index) ?? null;
       continue;
     }
+
+    // Bullets inside examples are documentation, not durable agent memory.
+    if (before || fence) continue;
+    const trimmed = line.trim();
 
     if (currentSection) {
       // Parse: - **Title**: Description
@@ -110,7 +164,7 @@ export function serializeMemoryMarkdown(
   decisions: MemoryItemLike[],
   gotchas: MemoryItemLike[],
   openQuestions: MemoryItemLike[],
-  opts?: { header?: string; locale?: "ko" | "en" }
+  opts?: { header?: string; locale?: "ko" | "en"; originalContent?: string }
 ): string {
   const line = (item: MemoryItemLike) => {
     let s = `- **${item.title}**: ${item.content}`;
@@ -119,12 +173,156 @@ export function serializeMemoryMarkdown(
     return s + `\n`;
   };
 
-  let md = opts?.header ?? (opts?.locale === "en" ? DEFAULT_MEMORY_HEADER_EN : DEFAULT_MEMORY_HEADER_KO);
-  md += `## Decisions\n\n`;
-  decisions.forEach((item) => { md += line(item); });
-  md += `\n## Gotchas\n\n`;
-  gotchas.forEach((item) => { md += line(item); });
-  md += `\n## Open\n\n`;
-  openQuestions.forEach((item) => { md += line(item); });
-  return md;
+  const rendered = {
+    decisions: decisions.map(line).join(""),
+    gotchas: gotchas.map(line).join(""),
+    open: openQuestions.map(line).join(""),
+  };
+  const original = opts?.originalContent;
+  if (!original?.trim()) {
+    let md = opts?.header ?? (opts?.locale === "en" ? DEFAULT_MEMORY_HEADER_EN : DEFAULT_MEMORY_HEADER_KO);
+    md += `## Decisions\n\n${rendered.decisions}`;
+    md += `\n## Gotchas\n\n${rendered.gotchas}`;
+    md += `\n## Open\n\n${rendered.open}`;
+    return md;
+  }
+
+  type KnownSection = keyof typeof rendered;
+
+  // Replace only the bodies of the three Agentlas-managed sections. Headers,
+  // comments, frontmatter, newline style, and every unknown/custom section stay
+  // byte-stable. Fenced code examples are not headings. Duplicate managed
+  // sections are removed as a whole so stale bullets cannot re-enter the parser.
+  const lines = splitMarkdownLines(original);
+  const headings = scanLevelTwoHeadings(lines);
+  const newline = lines.find((entry) => entry.eol)?.eol ?? "\n";
+  const renderedFor = (kind: KnownSection) => rendered[kind].trimEnd().replace(/\n/g, newline);
+  let out = "";
+  const seen = new Set<KnownSection>();
+  let cursor = 0;
+  for (let headingIndex = 0; headingIndex < headings.length; headingIndex += 1) {
+    const heading = headings[headingIndex];
+    const end = headings[headingIndex + 1]?.index ?? lines.length;
+    for (let index = cursor; index < heading.index; index += 1) out += lines[index].raw;
+    if (!heading.kind) {
+      for (let index = heading.index; index < end; index += 1) out += lines[index].raw;
+    } else if (!seen.has(heading.kind)) {
+      seen.add(heading.kind);
+      out += lines[heading.index].text + newline + newline;
+      const body = renderedFor(heading.kind);
+      if (body) out += body + newline;
+    }
+    cursor = end;
+  }
+  for (let index = cursor; index < lines.length; index += 1) out += lines[index].raw;
+
+  const missing: Array<[KnownSection, string]> = [
+    ["decisions", "## Decisions"],
+    ["gotchas", "## Gotchas"],
+    ["open", "## Open"],
+  ];
+  for (const [kind, heading] of missing) {
+    if (seen.has(kind)) continue;
+    if (out && !/(?:\r\n|\n|\r)$/.test(out)) out += newline;
+    if (out && !out.endsWith(newline + newline)) out += newline;
+    out += heading + newline + newline;
+    const body = renderedFor(kind);
+    if (body) out += body + newline;
+  }
+  return out;
+}
+
+type MemorySaveState = {
+  optimistic: ParsedMemory;
+  durable: ParsedMemory;
+  raw: string;
+  revision: number;
+  pending: number;
+  chain: Promise<void>;
+};
+
+export type AgentMemorySaveRequest = {
+  agentId: string;
+  updater: (previous: ParsedMemory) => ParsedMemory;
+  write: (content: string) => Promise<void>;
+  locale?: "ko" | "en";
+  header?: string;
+  onOptimistic?: (next: ParsedMemory) => void;
+  onDurable?: (next: ParsedMemory, raw: string) => void;
+  onRollback?: (durable: ParsedMemory, error: unknown) => void;
+  onPendingChange?: (pending: boolean) => void;
+};
+
+/**
+ * Per-agent ordered save queue for memory.md.
+ *
+ * React render timing is deliberately outside the source of truth: every
+ * updater is applied synchronously to that agent's latest optimistic snapshot,
+ * while writes are serialized against its latest durable raw markdown. A
+ * terminal failure rolls back only that agent and only when no newer intent is
+ * waiting behind it.
+ */
+export class AgentMemorySaveQueue {
+  private readonly states = new Map<string, MemorySaveState>();
+
+  hydrate(agentId: string, parsed: ParsedMemory, raw: string): ParsedMemory {
+    const existing = this.states.get(agentId);
+    if (existing?.pending) return existing.optimistic;
+    this.states.set(agentId, {
+      optimistic: parsed,
+      durable: parsed,
+      raw,
+      revision: existing?.revision ?? 0,
+      pending: 0,
+      chain: existing?.chain ?? Promise.resolve(),
+    });
+    return parsed;
+  }
+
+  current(agentId: string, fallback: ParsedMemory, raw = ""): ParsedMemory {
+    const existing = this.states.get(agentId);
+    return existing?.optimistic ?? this.hydrate(agentId, fallback, raw);
+  }
+
+  hasPending(agentId: string): boolean {
+    return (this.states.get(agentId)?.pending ?? 0) > 0;
+  }
+
+  enqueue(request: AgentMemorySaveRequest): { next: ParsedMemory; completion: Promise<void> } {
+    const state = this.states.get(request.agentId);
+    if (!state) throw new Error(`Memory save queue is not hydrated for ${request.agentId}`);
+    const next = request.updater(state.optimistic);
+    const revision = ++state.revision;
+    state.optimistic = next;
+    state.pending += 1;
+    request.onOptimistic?.(next);
+    request.onPendingChange?.(true);
+
+    const completion = state.chain
+      .catch(() => {})
+      .then(async () => {
+        const serialized = serializeMemoryMarkdown(next.decisions, next.gotchas, next.openQuestions, {
+          locale: request.locale,
+          header: request.header,
+          originalContent: state.raw,
+        });
+        await request.write(serialized);
+        state.raw = serialized;
+        state.durable = next;
+        request.onDurable?.(next, serialized);
+      })
+      .catch((error) => {
+        if (state.revision === revision) {
+          state.optimistic = state.durable;
+          request.onRollback?.(state.durable, error);
+        }
+        throw error;
+      })
+      .finally(() => {
+        state.pending = Math.max(0, state.pending - 1);
+        request.onPendingChange?.(state.pending > 0);
+      });
+    state.chain = completion.catch(() => {});
+    return { next, completion };
+  }
 }

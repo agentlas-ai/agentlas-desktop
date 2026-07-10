@@ -20,6 +20,7 @@ import {
 } from "../store/chats";
 import { curateReply } from "../memory/curator";
 import { getAgentConcurrency } from "../store/concurrency";
+import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -364,7 +365,7 @@ function buildPlannerSystemPrompt(
 ): string {
   const responseGuide = locale === "ko" ? "Visible status may be Korean, but the JSON keys must stay English." : "Use English for visible status and JSON keys.";
   return [
-    orchestrator.systemPrompt,
+    buildEffectiveAgentSystemPrompt(orchestrator.id, orchestrator.systemPrompt),
     "",
     "## Agentlas Task-Force Orchestrator",
     "You are coordinating Agentlas task-force agents. Do not answer the user yet.",
@@ -432,7 +433,7 @@ function buildSynthesisSystemPrompt(
   permission: RunnerRequest["permission"],
 ): string {
   return [
-    orchestrator.systemPrompt,
+    buildEffectiveAgentSystemPrompt(orchestrator.id, orchestrator.systemPrompt),
     "",
     "## Agentlas Task-Force Synthesis",
     `Current host permission mode: ${taskForcePermissionLabel(permission)}.`,

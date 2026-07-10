@@ -1,8 +1,10 @@
-// 에이전트 위치 라우팅 설정 — 로컬에서 임포트한 에이전트/팀이 "원본 폴더 어디에 있고,
-// 어떤 CLI 런타임(claude-code / codex / gemini / cursor / generic) 전용인지"를 영구 저장한다.
-// userData/agent-routes.json. 앱이 이 정보를 읽어 파일 패널·실행 라우팅에 사용한다.
+// 에이전트 위치 라우팅 설정 — 로컬에서 임포트한 원본과 Agent Cloud에서 복원한 실행 사본이
+// "어느 폴더에 있고, 어떤 CLI 런타임 전용인지"를 영구 저장한다. userData/agent-routes.json.
+// source/packageHash는 자산 출처와 복원 버전을 UI·진단에 전달하며, 구버전 레코드와의 호환을
+// 위해 optional이다(누락된 기존 route는 local-import로 해석).
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { app } from "electron";
 
 export type RuntimeLabel = "claude-code" | "codex" | "gemini" | "cursor" | "generic";
@@ -19,6 +21,10 @@ export interface AgentRoute {
   /** 단일 에이전트인지 팀인지 */
   kind: "agent" | "team";
   importedAt: string;
+  /** 파일의 권위 출처. 구버전에서 누락됐으면 local-import. */
+  source?: "local-import" | "agent-cloud" | "hub";
+  /** Agent Cloud에서 복원한 불변 package hash. */
+  packageHash?: string;
 }
 
 function routesFile(): string {
@@ -36,7 +42,46 @@ function readAll(): Record<string, AgentRoute> {
 }
 
 function writeAll(map: Record<string, AgentRoute>): void {
-  fs.writeFileSync(routesFile(), JSON.stringify(map, null, 2) + "\n", "utf8");
+  const target = routesFile();
+  const parent = path.dirname(target);
+  fs.mkdirSync(parent, { recursive: true });
+  const temp = path.join(parent, `.${path.basename(target)}.${randomUUID()}.tmp`);
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(
+      temp,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+    fs.writeFileSync(fd, JSON.stringify(map, null, 2) + "\n", "utf8");
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(temp, target);
+    fsyncDirectoryBestEffort(parent);
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+    try {
+      fs.unlinkSync(temp);
+    } catch {
+      // A successful rename consumes the temporary path. Failed cleanup is
+      // intentionally best-effort; the live routes file was never truncated.
+    }
+  }
+}
+
+function fsyncDirectoryBestEffort(directory: string): void {
+  try {
+    const fd = fs.openSync(directory, fs.constants.O_RDONLY);
+    try {
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    // Some supported filesystems do not allow directory fsync. The same-dir
+    // rename still guarantees readers see either the complete old or new map.
+  }
 }
 
 export function getRoute(agentId: string): AgentRoute | null {

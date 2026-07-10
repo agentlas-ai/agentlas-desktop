@@ -121,6 +121,7 @@ export type {
   HubAgentBookmark,
   ImageAttachment,
   InstalledAgent,
+  InvocationRunReceipt,
   InstalledFirm,
   MarketplaceListing,
   MetaAgentTeamFactoryFile,

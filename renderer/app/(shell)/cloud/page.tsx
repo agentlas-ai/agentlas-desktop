@@ -4,6 +4,7 @@ import type { CSSProperties } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { IconCheck, IconFileUp } from "@/components/Icon";
+import type { FsPathGrant } from "@shared/types";
 
 type Visibility = "private-link" | "marketplace";
 
@@ -28,6 +29,7 @@ type UploadResult = {
   ok: boolean;
   title: string;
   issues: UploadIssue[];
+  visibility?: Visibility;
   detail?: string;
   link?: string;
   careerGraph?: CareerGraphProof;
@@ -36,9 +38,8 @@ type UploadResult = {
 export default function CloudAgentPublishPage() {
   const { locale } = useT();
   const ko = locale !== "en";
-  const [rootPath, setRootPath] = useState("");
-  const [visibility, setVisibility] = useState<Visibility>("private-link");
-  const [running, setRunning] = useState(false);
+  const [rootGrant, setRootGrant] = useState<FsPathGrant | null>(null);
+  const [running, setRunning] = useState<Visibility | null>(null);
   const [result, setResult] = useState<UploadResult | null>(null);
 
   async function chooseFolder() {
@@ -46,16 +47,15 @@ export default function CloudAgentPublishPage() {
     if (!api || running) return;
     const dir = await api.fs.pickDirectory();
     if (dir) {
-      setRootPath(dir.path);
+      setRootGrant(dir);
       setResult(null);
     }
   }
 
-  async function upload() {
+  async function upload(visibility: Visibility) {
     const api = ipc();
-    const folder = rootPath.trim();
     if (!api) return;
-    if (!folder) {
+    if (!rootGrant) {
       setResult({
         ok: false,
         title: ko ? "폴더를 먼저 선택하세요." : "Choose a folder first.",
@@ -63,34 +63,39 @@ export default function CloudAgentPublishPage() {
       });
       return;
     }
-    setRunning(true);
+    setRunning(visibility);
     setResult(null);
     try {
-      const res = await api.hephaestus.publish({ folder, visibility });
-      const json = isRecord(res.json) ? res.json : null;
-      const issues = extractIssues(res.json);
+      const res = visibility === "marketplace"
+        ? await api.cloudAgents.publishPublic({ rootGrant })
+        : await api.cloudAgents.savePrivate({ rootGrant });
+      const json = res as unknown as Record<string, unknown>;
+      const issues = extractIssues(res);
       const careerGraph = extractCareerGraph(json);
-      if (res.ok) {
-        const registration = json && isRecord(json.registration) ? json.registration : null;
-        const link = registration && typeof registration.url === "string" ? registration.url : undefined;
+      if (res.status === "registered") {
+        const link = visibility === "marketplace"
+          ? res.registration?.marketplaceUrl ?? res.registration?.url
+          : res.registration?.url;
         setResult({
           ok: true,
           title:
             visibility === "marketplace"
               ? ko ? "Agentlas Hub에 공개 등록되었습니다" : "Published to Agentlas Hub"
-              : ko ? "Agentlas Cloud 보관함에 업로드되었습니다" : "Uploaded to Agentlas Cloud",
+              : ko ? "내 Agent Cloud에 비공개 저장되었습니다" : "Saved privately in my Agent Cloud",
           issues,
+          visibility,
           link,
           careerGraph,
         });
         return;
       }
-      const classified = classifyUploadFailure(json, res.error, res.stderr, ko);
+      const classified = classifyUploadFailure(json, undefined, "", ko);
       setResult({
         ok: false,
         title: classified.title,
         issues: issues.length > 0 ? issues : classified.issue ? [classified.issue] : [],
-        detail: buildFailureDetail(json, res.error, res.stderr, res.stdout),
+        visibility,
+        detail: buildFailureDetail(json, undefined, "", ""),
         careerGraph,
       });
     } catch (err) {
@@ -100,54 +105,66 @@ export default function CloudAgentPublishPage() {
         ok: false,
         title: classified.title,
         issues: classified.issue ? [classified.issue] : [],
+        visibility,
         detail,
       });
     } finally {
-      setRunning(false);
+      setRunning(null);
     }
   }
 
   return (
     <div style={{ height: "100%", overflowY: "auto", padding: "32px" }}>
       <section style={{ maxWidth: 760, margin: "0 auto", display: "flex", flexDirection: "column", gap: 18 }}>
-        <header style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <header style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
           <div style={iconPlate}>
             <IconFileUp size={18} />
           </div>
-          <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 22, lineHeight: 1.2 }}>
-            {ko ? "에이전트 업로드" : "Agent upload"}
-          </h1>
+          <div>
+            <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 22, lineHeight: 1.2 }}>
+              {ko ? "에이전트 저장 및 공개" : "Save or publish an agent"}
+            </h1>
+            <p style={{ margin: "6px 0 0", color: "var(--muted-deep)", fontSize: 13, lineHeight: 1.55 }}>
+              {ko
+                ? "기본은 내 Agent Cloud에 비공개 저장입니다. Hub 공개 발행은 별도 작업으로만 실행됩니다."
+                : "Private storage in your Agent Cloud is the default. Public Hub publishing is always a separate action."}
+            </p>
+          </div>
         </header>
 
         <div className="glass-thin" style={panel}>
-          <button onClick={chooseFolder} disabled={running} style={folderPicker}>
+          <button onClick={chooseFolder} disabled={Boolean(running)} style={folderPicker}>
             <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "left" }}>
-              {rootPath || (ko ? "업로드할 에이전트 폴더 선택" : "Choose an agent folder")}
+              {rootGrant?.path || (ko ? "저장할 에이전트 폴더 선택" : "Choose an agent folder")}
             </span>
             <IconFileUp size={14} />
           </button>
 
-          <div role="radiogroup" aria-label={ko ? "업로드 대상" : "Upload destination"} style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <DestinationCard
-              selected={visibility === "private-link"}
-              disabled={running}
-              onSelect={() => setVisibility("private-link")}
-              title={ko ? "Agentlas Cloud" : "Agentlas Cloud"}
-              subtitle={ko ? "비공개 링크 · 내 보관함" : "Private link · my storage"}
+          <div style={actionGrid}>
+            <CloudAction
+              title={ko ? "Agent Cloud 비공개 저장" : "Private Agent Cloud save"}
+              description={ko
+                ? "소유자 계정에만 저장합니다. 공개 심사와 라우팅 카드 없이, 로컬에서 비밀값·경로·파일 해시를 확인합니다."
+                : "Stores only for the owner. No public review or routing card; secrets, paths, and file hashes are checked locally."}
+              buttonLabel={ko ? "내 Cloud에 비공개 저장" : "Save privately to my Cloud"}
+              busyLabel={ko ? "안전 검사 후 저장 중..." : "Checking and saving..."}
+              busy={running === "private-link"}
+              disabled={Boolean(running) || !rootGrant}
+              primary
+              onClick={() => void upload("private-link")}
             />
-            <DestinationCard
-              selected={visibility === "marketplace"}
-              disabled={running}
-              onSelect={() => setVisibility("marketplace")}
-              title={ko ? "Agentlas Hub" : "Agentlas Hub"}
-              subtitle={ko ? "마켓플레이스 공개 · 라우팅 카드 필요" : "Public marketplace · routing card required"}
+            <CloudAction
+              title={ko ? "Agentlas Hub 공개 발행" : "Public Agentlas Hub publish"}
+              description={ko
+                ? "다른 사용자가 찾고 빌릴 수 있게 공개합니다. 공개 품질 검토와 유효한 라우팅 카드가 필요합니다."
+                : "Makes the agent discoverable and borrowable. Public quality review and a valid routing card are required."}
+              buttonLabel={ko ? "Hub에 공개 발행" : "Publish publicly to Hub"}
+              busyLabel={ko ? "공개 검사 후 발행 중..." : "Reviewing and publishing..."}
+              busy={running === "marketplace"}
+              disabled={Boolean(running) || !rootGrant}
+              onClick={() => void upload("marketplace")}
             />
           </div>
-
-          <button onClick={() => void upload()} disabled={running || !rootPath.trim()} style={{ ...uploadButton, opacity: running || !rootPath.trim() ? 0.55 : 1 }}>
-            <IconFileUp size={15} />
-            {running ? (ko ? "검사 및 업로드 중..." : "Checking and uploading...") : ko ? "업로드" : "Upload"}
-          </button>
         </div>
 
         {result && (
@@ -166,7 +183,9 @@ export default function CloudAgentPublishPage() {
                 onClick={() => window.open(result.link, "_blank", "noopener,noreferrer")}
                 style={linkButton}
               >
-                {ko ? "업로드한 페이지 열기" : "Open uploaded page"}
+                {result.visibility === "marketplace"
+                  ? ko ? "Hub 페이지 열기" : "Open Hub page"
+                  : ko ? "Agent Cloud에서 보기" : "View in Agent Cloud"}
                 <span style={{ color: "var(--muted-deep)", fontSize: 11, fontFamily: "var(--font-mono)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {result.link}
                 </span>
@@ -248,42 +267,50 @@ function Metric({ label, value }: { label: string; value: number }) {
   );
 }
 
-function DestinationCard({
-  selected,
-  disabled,
-  onSelect,
+function CloudAction({
   title,
-  subtitle,
+  description,
+  buttonLabel,
+  busyLabel,
+  busy,
+  disabled,
+  primary = false,
+  onClick,
 }: {
-  selected: boolean;
-  disabled: boolean;
-  onSelect: () => void;
   title: string;
-  subtitle: string;
+  description: string;
+  buttonLabel: string;
+  busyLabel: string;
+  busy: boolean;
+  disabled: boolean;
+  primary?: boolean;
+  onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={selected}
-      disabled={disabled}
-      onClick={onSelect}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "flex-start",
-        gap: 3,
-        padding: "10px 12px",
-        borderRadius: "var(--radius-md)",
-        border: selected ? "2px solid var(--accent)" : "1px solid var(--paper-edge)",
-        background: "var(--paper)",
-        cursor: disabled ? "default" : "pointer",
-        textAlign: "left",
-      }}
-    >
-      <span style={{ fontSize: 13, fontWeight: 800, color: "var(--ink)" }}>{title}</span>
-      <span style={{ fontSize: 11, color: "var(--muted-deep)", lineHeight: 1.4 }}>{subtitle}</span>
-    </button>
+    <section style={actionCard}>
+      <div style={{ flex: 1 }}>
+        <h2 style={{ margin: 0, fontSize: 14, color: "var(--ink)", fontWeight: 850 }}>{title}</h2>
+        <p style={{ margin: "6px 0 0", fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.55 }}>
+          {description}
+        </p>
+      </div>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={onClick}
+        style={{
+          ...actionButton,
+          border: primary ? "none" : "1px solid var(--paper-edge)",
+          background: primary ? "var(--ink)" : "var(--paper)",
+          color: primary ? "var(--paper)" : "var(--ink)",
+          opacity: disabled ? 0.55 : 1,
+          cursor: disabled ? "default" : "pointer",
+        }}
+      >
+        <IconFileUp size={14} />
+        {busy ? busyLabel : buttonLabel}
+      </button>
+    </section>
   );
 }
 
@@ -367,19 +394,49 @@ function classifyUploadFailure(
   stderr: string,
   ko: boolean,
 ): { title: string; issue?: UploadIssue } {
-  const baseTitle = ko ? "업로드 중단" : "Upload stopped";
+  const manifest = json && isRecord(json.manifest) ? json.manifest : null;
+  const publicHub = manifest?.visibility === "marketplace";
+  const baseTitle = ko ? "저장 또는 발행 중단" : "Save or publish stopped";
   const jsonError = json && typeof json.error === "string" ? json.error : "";
   const signal = [error ?? "", stderr, jsonError].join("\n").toLowerCase();
 
+  if (signal.includes("cloud_agent_revision_conflict") || signal.includes("changed on another machine")) {
+    return {
+      title: ko ? "다른 PC에서 이 에이전트가 먼저 변경되었습니다" : "This agent changed on another machine",
+      issue: {
+        severity: "warning",
+        message: ko
+          ? "서버의 최신 버전을 덮어쓰지 않았고, 이 PC의 로컬 파일도 그대로입니다."
+          : "The newer Cloud version was not overwritten, and this machine's local files remain unchanged.",
+        remediation: ko
+          ? "Agent Cloud에서 최신 사본을 복원해 차이를 확인한 뒤 다시 저장하세요."
+          : "Restore the latest Agent Cloud copy, review the differences, then save again.",
+      },
+    };
+  }
+  if (signal.includes("cloud_precondition_required")) {
+    return {
+      title: ko ? "최신 Cloud 버전을 먼저 복원해야 합니다" : "Restore the latest Cloud version first",
+      issue: {
+        severity: "warning",
+        message: ko
+          ? "이 폴더에는 안전한 업데이트에 필요한 Cloud revision 영수증이 없습니다."
+          : "This folder does not have the Cloud revision receipt required for a safe update.",
+        remediation: ko
+          ? "최신 사본을 복원한 뒤 편집하고 다시 저장하세요."
+          : "Restore the latest copy, edit it, then save again.",
+      },
+    };
+  }
   if (/sign[\s-]?in|signed[_\s-]?out|unauthorized|http 401|\b401\b|auth login/.test(signal)) {
     return {
       title: ko ? "Agentlas 로그인이 필요합니다" : "Agentlas sign-in required",
       issue: {
         severity: "warning",
-        message: ko ? "업로드는 시작되지 않았고 로컬 파일은 그대로입니다." : "Upload did not start and local files were not changed.",
+        message: ko ? "저장 또는 발행은 시작되지 않았고 로컬 파일은 그대로입니다." : "Save or publish did not start and local files were not changed.",
         remediation: ko
-          ? "업로드 로그인 창(브라우저)이 열리면 완료한 뒤 같은 폴더로 재시도하세요."
-          : "Complete the browser sign-in that opens during upload, then retry with the same folder.",
+          ? "Agentlas 로그인을 완료한 뒤 같은 폴더로 재시도하세요."
+          : "Complete Agentlas sign-in, then retry with the same folder.",
       },
     };
   }
@@ -394,22 +451,24 @@ function classifyUploadFailure(
         issue: {
           severity: "warning",
           message: ko
-            ? "Hub 마켓플레이스 공개는 .agentlas/routing-card.json이 있어야 합니다. Cloud(비공개 링크) 업로드는 카드 없이도 가능합니다."
-            : "Hub marketplace publishing requires .agentlas/routing-card.json. Cloud (private link) uploads work without one.",
+            ? "Hub 공개 발행은 .agentlas/routing-card.json이 있어야 합니다. 소유자 전용 Agent Cloud 저장에는 이 카드가 필요하지 않습니다."
+            : "Public Hub publishing requires .agentlas/routing-card.json. Owner-private Agent Cloud saves do not.",
           remediation: ko
-            ? "빌드 화면에서 라우팅 카드를 생성하거나, 대상을 Agentlas Cloud로 바꿔 업로드하세요."
-            : "Generate a routing card from the Build screen, or switch the destination to Agentlas Cloud.",
+            ? "라우팅 카드를 준비해 다시 공개 발행하거나, 별도 비공개 저장 버튼을 사용하세요."
+            : "Prepare a routing card and publish again, or use the separate private-save action.",
         },
       };
     }
     return {
-      title: ko ? "업로드 전 검사에서 막혔습니다" : "Pre-upload review blocked the package",
+      title: publicHub
+        ? ko ? "Hub 공개 심사에서 막혔습니다" : "Public Hub review blocked the package"
+        : ko ? "비공개 저장 안전 검사에서 막혔습니다" : "Private-save safety checks blocked the package",
       issue:
         findings.length > 0
           ? undefined
           : {
               severity: "error",
-              message: ko ? "패키지 검사에서 차단 사유가 보고되었습니다." : "The package review reported blocking findings.",
+              message: ko ? "로컬 패키지 검사에서 차단 사유가 보고되었습니다." : "Local package checks reported blocking findings.",
             },
     };
   }
@@ -419,8 +478,8 @@ function classifyUploadFailure(
       issue: {
         severity: "error",
         message: ko
-          ? "패키지 밖을 가리키는 경로가 있어 업로드를 멈췄습니다."
-          : "A path appears to escape the package folder, so upload stopped.",
+          ? "패키지 밖을 가리키는 경로가 있어 저장 또는 발행을 멈췄습니다."
+          : "A path appears to escape the package folder, so save or publish stopped.",
         remediation: ko
           ? "절대경로, .., 심볼릭 링크를 확인하고 패키지 폴더 안의 파일만 포함하세요."
           : "Check absolute paths, .. segments, and symlinks; include only files inside the package folder.",
@@ -461,7 +520,7 @@ function classifyUploadFailure(
     title: baseTitle,
     issue: {
       severity: "error",
-      message: ko ? "업로드가 끝나지 않았습니다. 로컬 파일은 그대로입니다." : "Upload did not finish. Local files were not changed.",
+      message: ko ? "저장 또는 발행이 끝나지 않았습니다. 로컬 파일은 그대로입니다." : "Save or publish did not finish. Local files were not changed.",
       remediation: ko ? "세부 정보가 길면 기술 상세를 펼쳐 원인을 확인한 뒤 같은 폴더로 다시 시도하세요." : "Use the technical details below for diagnosis, then retry with the same folder.",
     },
   };
@@ -535,16 +594,32 @@ const folderPicker: CSSProperties = {
   cursor: "pointer",
 };
 
-const uploadButton: CSSProperties = {
+const actionGrid: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))",
+  gap: 10,
+};
+
+const actionCard: CSSProperties = {
+  minWidth: 0,
+  minHeight: 170,
+  padding: 14,
+  borderRadius: "var(--radius-md)",
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 14,
+};
+
+const actionButton: CSSProperties = {
   height: 44,
+  width: "100%",
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
   gap: 8,
   borderRadius: "var(--radius-md)",
-  border: "none",
-  background: "var(--ink)",
-  color: "var(--paper)",
   fontSize: 14,
   fontWeight: 800,
   cursor: "pointer",

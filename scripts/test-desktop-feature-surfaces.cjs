@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
 const { chromium } = require("playwright");
 const { setupMockAgentlasBridge, mockBridgeOptions } = require("./lib/mock-agentlas-bridge.cjs");
 
@@ -78,28 +79,33 @@ async function main() {
   const browser = await chromium.launch();
   const evidence = [];
   try {
-    await runDashboardFirstVisitTourSurface(browser, baseUrl, evidence);
-    await runDashboardAttentionSurface(browser, baseUrl, evidence);
-    await runBuildSurface(browser, baseUrl, evidence);
-    await runBuildInterviewSurface(browser, baseUrl, evidence);
-    await runBuildCancelSurface(browser, baseUrl, evidence);
-    await runLibrarySurface(browser, baseUrl, evidence);
-    await runImportSurface(browser, baseUrl, evidence);
-    await runMemoryEvolutionSurface(browser, baseUrl, evidence);
-    await runChatSurface(browser, baseUrl, evidence);
-    await runNewChatScopeSurface(browser, baseUrl, evidence);
-    await runChatModelSurface(browser, baseUrl, evidence);
-    await runChatAttachmentSurface(browser, baseUrl, evidence);
-    await runChatPasteDropAttachmentSurface(browser, baseUrl, evidence);
-    await runChatAutocompleteSurface(browser, baseUrl, evidence);
-    await runChatMentionSurface(browser, baseUrl, evidence);
-    await runChatContextMentionSurface(browser, baseUrl, evidence);
-    await runChatRecommendSurface(browser, baseUrl, evidence);
-    await runChatStopAndImeSurface(browser, baseUrl, evidence);
-    await runChatLongSessionSurface(browser, baseUrl, evidence);
-    await runAutomationSurface(browser, baseUrl, evidence);
-    await runAutomationDefaultAndDetailSurface(browser, baseUrl, evidence);
-    await runHubLiveSurface(browser, baseUrl, evidence);
+    if (process.argv.includes("--memory-evolution-only")) {
+      await runMemoryEvolutionSurface(browser, baseUrl, evidence);
+      console.log("desktop memory/evolution surface smoke passed");
+      return;
+    }
+    await runSurface("dashboard-first-visit", () => runDashboardFirstVisitTourSurface(browser, baseUrl, evidence));
+    await runSurface("dashboard-attention", () => runDashboardAttentionSurface(browser, baseUrl, evidence));
+    await runSurface("build", () => runBuildSurface(browser, baseUrl, evidence));
+    await runSurface("build-interview", () => runBuildInterviewSurface(browser, baseUrl, evidence));
+    await runSurface("build-cancel", () => runBuildCancelSurface(browser, baseUrl, evidence));
+    await runSurface("library", () => runLibrarySurface(browser, baseUrl, evidence));
+    await runSurface("import", () => runImportSurface(browser, baseUrl, evidence));
+    await runSurface("memory-evolution", () => runMemoryEvolutionSurface(browser, baseUrl, evidence));
+    await runSurface("chat", () => runChatSurface(browser, baseUrl, evidence));
+    await runSurface("new-chat-scope", () => runNewChatScopeSurface(browser, baseUrl, evidence));
+    await runSurface("chat-model", () => runChatModelSurface(browser, baseUrl, evidence));
+    await runSurface("chat-attachment", () => runChatAttachmentSurface(browser, baseUrl, evidence));
+    await runSurface("chat-paste-drop", () => runChatPasteDropAttachmentSurface(browser, baseUrl, evidence));
+    await runSurface("chat-autocomplete", () => runChatAutocompleteSurface(browser, baseUrl, evidence));
+    await runSurface("chat-mention", () => runChatMentionSurface(browser, baseUrl, evidence));
+    await runSurface("chat-context-mention", () => runChatContextMentionSurface(browser, baseUrl, evidence));
+    await runSurface("chat-recommend", () => runChatRecommendSurface(browser, baseUrl, evidence));
+    await runSurface("chat-stop-ime", () => runChatStopAndImeSurface(browser, baseUrl, evidence));
+    await runSurface("chat-long-session", () => runChatLongSessionSurface(browser, baseUrl, evidence), 90_000);
+    await runSurface("automation", () => runAutomationSurface(browser, baseUrl, evidence));
+    await runSurface("automation-detail", () => runAutomationDefaultAndDetailSurface(browser, baseUrl, evidence));
+    await runSurface("hub-live", () => runHubLiveSurface(browser, baseUrl, evidence));
 
     const proof = {
       ok: true,
@@ -113,6 +119,22 @@ async function main() {
   } finally {
     await browser.close().catch(() => {});
     server.close();
+  }
+}
+
+async function runSurface(name, operation, timeoutMs = 45_000) {
+  process.stdout.write(`[surface] ${name} ... `);
+  let timeout;
+  try {
+    await Promise.race([
+      operation(),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${name} surface timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+    console.log("PASS");
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 }
 
@@ -192,16 +214,18 @@ async function runBuildSurface(browser, baseUrl, evidence) {
   }
   await page.getByText(/정적 보안 스캔 통과|Static security scan passed/).waitFor();
   await page.getByRole("button", { name: /내 클라우드 \(비공개\)|My Cloud \(private\)/ }).click();
-  await page.getByText(/업로드 완료|Uploaded/).waitFor();
+  await page.getByText(/내 Agent Cloud에 비공개 저장했습니다|Saved privately to your Agent Cloud|업로드 완료|Uploaded/).waitFor();
   await page.getByRole("button", { name: /허브 \(공개\)|Hub \(public\)/ }).click();
+  await page.getByText(/Hub 공개 제출 완료|Submitted to the public Hub|업로드 완료|Uploaded/).waitFor();
 
   const calls = await page.evaluate(() => window.__qa.calls);
   const buildCall = calls.find((call) => call.name === "hephaestus.build");
   assert.equal(buildCall.payload.mode, "single");
-  assert.equal(buildCall.payload.workspace, "/tmp/agentlas-qa");
+  assert.equal(buildCall.payload.workspaceGrant?.path, "/tmp/agentlas-qa");
+  assert.equal(buildCall.payload.workspaceGrant?.scope?.kind, "capability");
   assert.equal(buildCall.payload.request, "검증용 리서치 에이전트");
   assert.ok(buildCall.payload.runtime, "selected build runtime should be passed");
-  assert.ok(calls.some((call) => call.name === "team.importLocalFolder" && call.payload === "/tmp/agentlas-qa/qa-agent"));
+  assert.ok(calls.some((call) => call.name === "team.importLocalFolder" && call.payload?.path === "/tmp/agentlas-qa/qa-agent"));
   assert.ok(calls.some((call) => call.name === "hephaestus.publish" && call.payload.visibility === "private-link"));
   assert.ok(calls.some((call) => call.name === "hephaestus.publish" && call.payload.visibility === "marketplace"));
 
@@ -312,18 +336,27 @@ async function runLibrarySurface(browser, baseUrl, evidence) {
     window.__qa.calls.find((call) => call.name === "agentFiles.write" && call.payload.path === "memory.md"),
   );
   assert.match(memoryWrite.payload.content, /agentlas:disabled/);
+  assert.match(memoryWrite.payload.content, /## Private provenance\nKeep this operator-authored section byte-stable/, "memory edits must preserve unknown operator sections");
 
   await page.getByRole("button", { name: /정체성|Identity/ }).click();
   await page.getByRole("button", { name: /프롬프트 편집|Edit prompt/ }).click();
   const promptEditor = page.locator("textarea").first();
   await promptEditor.fill("# Builder\n\nUpdated prompt from QA.");
   await page.getByRole("button", { name: /반영하기|Apply/ }).click();
-  await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "agentFiles.write" && call.payload.path === "AGENT.md"));
-  const promptWrite = await page.evaluate(() =>
-    window.__qa.calls.find((call) => call.name === "agentFiles.write" && call.payload.path === "AGENT.md"),
+  await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "agentEvolution.createProposal" && /Updated prompt from QA/.test(call.payload.proposedContent)));
+  const promptProposal = await page.evaluate(() =>
+    window.__qa.calls.find((call) => call.name === "agentEvolution.createProposal" && /Updated prompt from QA/.test(call.payload.proposedContent)),
   );
-  assert.match(promptWrite.payload.content, /Updated prompt from QA/);
+  assert.match(promptProposal.payload.proposedContent, /Updated prompt from QA/);
+  assert.equal(
+    await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "agentEvolution.approveAndApply").length),
+    0,
+    "manual edit must stop at a durable review candidate",
+  );
+  await page.getByRole("button", { name: /검토 완료 · 승인 및 적용|Review complete · approve & apply/ }).click();
+  await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "agentEvolution.approveAndApply"));
 
+  await page.getByRole("button", { name: /정체성|Identity/ }).click();
   await page.locator("select").first().selectOption({ index: 1 });
   await page.getByRole("button", { name: /^저장$|^Save$/ }).click();
   await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "agentRuntime.set"));
@@ -343,7 +376,7 @@ async function runImportSurface(browser, baseUrl, evidence) {
 
   const calls = await page.evaluate(() => window.__qa.calls);
   assert.ok(calls.some((call) => call.name === "fs.pickDirectory"), "folder picker should open before import");
-  assert.ok(calls.some((call) => call.name === "team.importLocalFolder" && call.payload === "/tmp/agentlas-qa"), "picked folder should be imported");
+  assert.ok(calls.some((call) => call.name === "team.importLocalFolder" && call.payload?.path === "/tmp/agentlas-qa"), "picked folder should be imported");
 
   await finishPage(context, page, errors, evidence, "import-agent-surface");
 }
@@ -366,6 +399,7 @@ async function runMemoryEvolutionSurface(browser, baseUrl, evidence) {
   let latestMemory = memoryWrites.at(-1).payload.content;
   assert.match(latestMemory, /Route clearly.*agentlas:disabled/);
   assert.match(latestMemory, /No fake data.*agentlas:disabled/);
+  assert.match(latestMemory, /## Private provenance\nKeep this operator-authored section byte-stable/, "rapid memory edits must not erase unknown sections");
 
   await page.locator('button[title*="로컬 전용"], button[title*="Local-only"]').first().click();
   await page.waitForFunction(
@@ -385,35 +419,71 @@ async function runMemoryEvolutionSurface(browser, baseUrl, evidence) {
   await page.locator("textarea").first().fill("# Builder\n\nTemporary prompt from QA.");
   await page.getByRole("button", { name: /반영하기|Apply/ }).click();
   await page.waitForFunction(
-    () => window.__qa.calls.some((call) => call.name === "agentFiles.write" && call.payload.path === "AGENT.md" && /Temporary prompt from QA/.test(call.payload.content)),
+    () => window.__qa.calls.some((call) => call.name === "agentEvolution.createProposal" && /Temporary prompt from QA/.test(call.payload.proposedContent)),
   );
+  const manualCandidateApproveCount = await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "agentEvolution.approveAndApply").length);
+  assert.equal(manualCandidateApproveCount, 0, "candidate creation must not auto-approve");
+  await page.getByRole("button", { name: /검토 완료 · 승인 및 적용|Review complete · approve & apply/ }).click();
+  await page.waitForFunction((before) => window.__qa.calls.filter((call) => call.name === "agentEvolution.approveAndApply").length > before, manualCandidateApproveCount);
+
+  await page.getByRole("button", { name: /정체성|Identity/ }).click();
   await page.getByRole("button", { name: /기본값 재설정|Reset to default/ }).click();
   await page.waitForFunction(
-    () => window.__qa.calls.some((call) => call.name === "agentFiles.write" && call.payload.path === "AGENT.md" && /Build Agentlas work clearly/.test(call.payload.content)),
+    () => window.__qa.calls.some((call) => call.name === "agentEvolution.createProposal" && /Build Agentlas work clearly/.test(call.payload.proposedContent)),
   );
+  const resetCandidate = await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "agentEvolution.createProposal" && /Build Agentlas work clearly/.test(call.payload.proposedContent)).at(-1));
+  assert.ok(resetCandidate, "reset must create a reviewable diff instead of writing directly");
+  await page.getByRole("button", { name: /검토 완료 · 승인 및 적용|Review complete · approve & apply/ }).click();
+  await page.waitForFunction(() => window.__qa.calls.filter((call) => call.name === "agentEvolution.approveAndApply").length >= 2);
 
-  await page.getByRole("button", { name: /활동 및 자체 진화|Activity & Self-Evolution/ }).click();
-  await page.getByText(/자가 프롬프트 진화 제안|Agent Evolution Proposal/).waitFor();
-  await page.getByRole("button", { name: /진화 제안 승인 및 적용|Approve & apply evolution/ }).click();
+  await page.getByText(/에이전트 자산 진화 제안|Agent Asset Evolution Proposal/).waitFor();
+  await page.getByRole("button", { name: /diff 검토 후보 만들기|Create diff review candidate/ }).click();
   await page.waitForFunction(
-    () => window.__qa.calls.some((call) => call.name === "agentEvolution.createAndApplyPrompt" && /Learned rules/.test(call.payload.proposedContent)),
+    () => window.__qa.calls.some((call) => call.name === "agentEvolution.createProposal" && /Learned rules/.test(call.payload.proposedContent)),
   );
   const evolutionCall = await page.evaluate(() =>
-    window.__qa.calls.filter((call) => call.name === "agentEvolution.createAndApplyPrompt").at(-1),
+    window.__qa.calls.filter((call) => call.name === "agentEvolution.createProposal" && /Learned rules/.test(call.payload.proposedContent)).at(-1),
   );
   assert.match(evolutionCall.payload.proposedContent, /Learned rules/);
   assert.match(evolutionCall.payload.proposedContent, /Publish target/);
+  const beforeEvolutionApprove = await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "agentEvolution.approveAndApply").length);
+  await page.getByRole("button", { name: /검토 완료 · 승인 및 적용|Review complete · approve & apply/ }).click();
+  await page.waitForFunction((before) => window.__qa.calls.filter((call) => call.name === "agentEvolution.approveAndApply").length > before, beforeEvolutionApprove);
+  await page.getByText(/APPLY · asset v1→v2 · governed/).waitFor();
 
   await page.getByRole("button", { name: /스킬 고르기|Choose skill/ }).click();
   await page.getByRole("button", { name: /^주입$|^Inject$/ }).click();
   await page.waitForFunction(
-    () => window.__qa.calls.some((call) => call.name === "agentFiles.write" && call.payload.path === ".agentlas/skills/qa-skill/SKILL.md"),
+    () => window.__qa.calls.some((call) => call.name === "agentEvolution.createProposal" && call.payload.proposalType === "skill" && call.payload.targetPath === "skills/qa-skill/SKILL.md"),
   );
-  const skillWrite = await page.evaluate(() =>
-    window.__qa.calls.find((call) => call.name === "agentFiles.write" && call.payload.path === ".agentlas/skills/qa-skill/SKILL.md"),
+  const skillCandidate = await page.evaluate(() =>
+    window.__qa.calls.find((call) => call.name === "agentEvolution.createProposal" && call.payload.proposalType === "skill"),
   );
-  assert.match(skillWrite.payload.content, /QA helper skill/);
-  await page.getByText(/수동 스킬 주입|Manual skill injection/).waitFor();
+  const exactCatalogSkill = "---\nname: qa-skill\ndescription: QA helper skill\n---\n\n# Exact QA catalog body\n\nRun the full source instructions.\n";
+  assert.equal(skillCandidate.payload.proposedContent, exactCatalogSkill, "candidate must preserve the exact catalog SKILL.md source");
+  assert.equal(
+    skillCandidate.payload.source.catalogContentHash,
+    createHash("sha256").update(exactCatalogSkill).digest("hex"),
+    "candidate provenance must carry the main-owned catalog source hash",
+  );
+  assert.equal(
+    await page.evaluate(() => window.__qa.calls.some((call) => call.name === "skills.readCatalog" && call.payload.slug === "qa-skill")),
+    true,
+    "renderer must fetch the exact main-owned catalog asset before proposing injection",
+  );
+  assert.equal(
+    await page.evaluate(() => window.__qa.calls.some((call) => call.name === "agentFiles.write" && call.payload.path === "skills/qa-skill/SKILL.md")),
+    false,
+    "skill candidate must not write SKILL.md before explicit approval",
+  );
+  assert.equal(await page.getByText(/스킬 주입 완료|Skill injected/).count(), 0, "completion copy must not appear before approval");
+  const beforeSkillApprove = await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "agentEvolution.approveAndApply").length);
+  await page.getByRole("button", { name: /검토 완료 · 승인 및 적용|Review complete · approve & apply/ }).click();
+  await page.waitForFunction((before) => window.__qa.calls.filter((call) => call.name === "agentEvolution.approveAndApply").length > before, beforeSkillApprove);
+  await page.getByText(/스킬 주입 완료|Skill injected/).waitFor();
+  await page.getByRole("button", { name: /이 영수증으로 롤백|Rollback from this receipt/ }).click();
+  await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "agentEvolution.rollback"));
+  await page.getByText(/스킬 제거 롤백 완료|Skill removal rollback complete/).waitFor();
 
   await finishPage(context, page, errors, evidence, "memory-evolution-surface");
 }
@@ -543,18 +613,14 @@ async function runChatAttachmentSurface(browser, baseUrl, evidence) {
   assert.equal(imageCall.payload.images[0].name, "qa-small.png");
   assert.ok(imageCall.payload.images[0].data.length > 10);
 
-  const alertMessage = await new Promise(async (resolve) => {
-    page.once("dialog", async (dialog) => {
-      const msg = dialog.message();
-      await dialog.accept();
-      resolve(msg);
-    });
-    await page.locator('input[type="file"]').setInputFiles({
-      name: "qa-too-large.png",
-      mimeType: "image/png",
-      buffer: Buffer.alloc(5 * 1024 * 1024 + 1),
-    });
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "qa-too-large.png",
+    mimeType: "image/png",
+    buffer: Buffer.alloc(5 * 1024 * 1024 + 1),
   });
+  const attachmentAlert = page.locator('[data-chat-attachment-error="true"]');
+  await attachmentAlert.waitFor();
+  const alertMessage = await attachmentAlert.innerText();
   assert.match(alertMessage, /qa-too-large\.png/);
 
   await finishPage(context, page, errors, evidence, "chat-attachments-surface");
@@ -617,13 +683,13 @@ async function dispatchImageDrop(page, name) {
         bubbles: true,
         cancelable: true,
       });
-      Object.defineProperty(dragover, "dataTransfer", { value: { dropEffect: "none", files: [file] } });
+      Object.defineProperty(dragover, "dataTransfer", { value: { dropEffect: "none", files: [file], types: ["Files"] } });
       footer.dispatchEvent(dragover);
       const event = new Event("drop", {
         bubbles: true,
         cancelable: true,
       });
-      Object.defineProperty(event, "dataTransfer", { value: { files: [file] } });
+      Object.defineProperty(event, "dataTransfer", { value: { files: [file], types: ["Files"] } });
       footer.dispatchEvent(event);
     },
     { bytes: TINY_PNG_BYTES, fileName: name },
@@ -674,7 +740,7 @@ async function runChatMentionSurface(browser, baseUrl, evidence) {
 
   await textbox.fill("@research");
   try {
-    await page.getByText(/리서치 에이전트|Research Agent/).click();
+    await page.getByRole("option", { name: /리서치 에이전트|Research Agent/ }).click();
   } catch (err) {
     await page.screenshot({ path: path.join(outDir, "chat-mentions-timeout.png"), fullPage: true }).catch(() => {});
     const body = await page.locator("body").innerText().catch(() => "");
@@ -693,7 +759,7 @@ async function runChatMentionSurface(browser, baseUrl, evidence) {
   await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "chats.switchAgent" && call.payload.agentId === "agent-3"));
 
   await textbox.fill("@Founder");
-  await page.getByText("Founder HQ").click();
+  await page.getByRole("option", { name: /Founder HQ/ }).click();
   await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "chats.switchAgent" && call.payload.agentId === "agent-1"));
 
   await finishPage(context, page, errors, evidence, "chat-mentions-surface");
@@ -923,7 +989,10 @@ async function runHubLiveSurface(browser, baseUrl, evidence) {
   assert.equal(await page.locator(".hub-cat-chip").count(), 0, "Hub top category chips should stay removed");
   await page.getByText(/총 267개|267 total/).waitFor();
   await page.locator(".portal-input").fill("FDA");
-  await page.getByText(/FDA SaMD 510\(k\)|Pre-market Notification/).waitFor();
+  await page.getByRole("option", { name: /FDA SaMD 510\(k\)|Pre-market Notification/ }).waitFor();
+  await page.locator(".portal-card-title", { hasText: /FDA SaMD 510\(k\)|Pre-market Notification/ }).waitFor();
+  await page.screenshot({ path: path.join(outDir, "hub-live-autocomplete-surface.png"), fullPage: true });
+  evidence.push({ name: "hub-live-autocomplete-surface", status: "pass", url: page.url() });
   assert.equal(await page.getByText(/Shop Product Writer|상품설명 작가/).count(), 0);
   await page.locator(".portal-input").fill("");
   await page.getByText(/총 267개|267 total/).waitFor();

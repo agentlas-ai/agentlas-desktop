@@ -5940,6 +5940,11 @@ button[data-toggle-state="on"] {
 .sidenav-update-card[data-downloaded="false"] {
   grid-template-columns: auto minmax(0, 1fr);
 }
+.sidenav-update-card[data-action-required="true"] {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  border-color: color-mix(in oklch, var(--red-deep) 34%, var(--paper-edge));
+  background: color-mix(in oklch, var(--red-deep) 6%, var(--paper));
+}
 .sidenav-update-card[data-collapsed="true"] {
   grid-template-columns: 1fr;
   justify-items: center;

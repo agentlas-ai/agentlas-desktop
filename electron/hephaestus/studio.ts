@@ -12,7 +12,7 @@ import { app, session } from "electron";
 import type { ChildProcess } from "node:child_process";
 import { withCliPath } from "../runtime/exec";
 import { resolveHephaestusPython } from "./engine";
-import { currentUiLocale } from "../main";
+import { currentUiLocale } from "../ui-locale";
 
 let cachedRoot: string | null | undefined;
 let proc: ChildProcess | null = null;

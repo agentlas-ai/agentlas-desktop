@@ -14,7 +14,7 @@ import { execFile } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
 import { promisify } from "util";
-import { currentUiLocale } from "../main";
+import { currentUiLocale } from "../ui-locale";
 import {
   cardHtml,
   frameSizeFor,

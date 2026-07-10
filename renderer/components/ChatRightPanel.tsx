@@ -15,7 +15,7 @@ import {
   type SurfaceStatePatchHandler,
   type WorkbenchSurface,
 } from "./WorkbenchPanel";
-import type { InstalledAgent, InstalledFirm, ResolvedOrg } from "@/lib/types";
+import type { InstalledAgent, InstalledFirm, InvocationRunReceipt, ResolvedOrg } from "@/lib/types";
 import { IconClose, IconFileUp, IconFilm, IconFolder, IconImage, IconLayers, IconNetwork, IconPanelRight } from "./Icon";
 import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
@@ -172,19 +172,22 @@ export function ChatRightPanel({
           />
         )}
         {activeTab === "agent" && (
-          <AgentNetworkPanel
-            embedded
-            firm={firm}
-            org={org}
-            agent={agent}
-            agents={agents}
-            busy={busy}
-            liveAgents={liveAgents}
-            timeline={timeline}
-            chatTitle={chatTitle}
-            latestUserPrompt={latestUserPrompt}
-            hasPipeline={hasPipeline}
-          />
+          <div style={agentTabStyle}>
+            <AgentNetworkPanel
+              embedded
+              firm={firm}
+              org={org}
+              agent={agent}
+              agents={agents}
+              busy={busy}
+              liveAgents={liveAgents}
+              timeline={timeline}
+              chatTitle={chatTitle}
+              latestUserPrompt={latestUserPrompt}
+              hasPipeline={hasPipeline}
+            />
+            <RunReceiptCard chatId={chatId} busy={busy} />
+          </div>
         )}
         {activeTab === "panel" && (
           showFilePreview ? (
@@ -216,6 +219,85 @@ export function ChatRightPanel({
       </div>
     </aside>
   );
+}
+
+function RunReceiptCard({ chatId, busy }: { chatId: string | null; busy: boolean }) {
+  const { locale } = useT();
+  const ko = locale === "ko";
+  const [receipt, setReceipt] = useState<InvocationRunReceipt | null>(null);
+  const [openError, setOpenError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !chatId) {
+      setReceipt(null);
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      const next =
+        typeof api.invoke.latestReceipt === "function"
+          ? await api.invoke.latestReceipt(chatId).catch(() => null)
+          : null;
+      if (!cancelled) setReceipt(next);
+    };
+    void load();
+    const interval = busy ? window.setInterval(load, 1200) : null;
+    return () => {
+      cancelled = true;
+      if (interval != null) window.clearInterval(interval);
+    };
+  }, [busy, chatId]);
+
+  if (!receipt) return null;
+  const status = receiptStatus(receipt.status, ko);
+  const openResultFolder = async () => {
+    if (!receipt.resultFolder) return;
+    setOpenError(null);
+    const result = await ipc()?.fs.openPath(receipt.resultFolder).catch((error) => ({
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    }));
+    if (result && !result.ok) setOpenError(result.message || (ko ? "결과 폴더를 열 수 없습니다." : "Could not open the result folder."));
+  };
+
+  return (
+    <section aria-label={ko ? "실행 영수증" : "Run receipt"} style={receiptCardStyle}>
+      <div style={receiptHeaderStyle}>
+        <span>{ko ? "실행 영수증" : "Run receipt"}</span>
+        <span style={{ ...receiptStatusStyle, color: status.color }}>{status.label}</span>
+      </div>
+      <div style={receiptGridStyle}>
+        <span>{ko ? "실행 ID" : "Run ID"}</span>
+        <code title={receipt.runId}>{receipt.runId.slice(0, 12)}</code>
+        <span>{ko ? "이벤트" : "Events"}</span>
+        <strong>{receipt.eventCount}</strong>
+      </div>
+      {receipt.resultFolder && (
+        <button type="button" onClick={() => void openResultFolder()} title={receipt.resultFolder} style={receiptFolderButtonStyle}>
+          <IconFolder size={12} />
+          <span>{ko ? "결과 폴더 열기" : "Open result folder"}</span>
+          <code>{receipt.resultFolder}</code>
+        </button>
+      )}
+      {(receipt.errorMessage || openError) && (
+        <div role="status" style={receiptErrorStyle}>{openError || receipt.errorMessage}</div>
+      )}
+    </section>
+  );
+}
+
+function receiptStatus(status: InvocationRunReceipt["status"], ko: boolean): { label: string; color: string } {
+  const labels: Record<InvocationRunReceipt["status"], [string, string, string]> = {
+    running: ["실행 중", "Running", "var(--accent)"],
+    cancelling: ["종료 확인 중", "Stopping", "var(--amber-deep)"],
+    completed: ["완료", "Completed", "var(--green-deep)"],
+    failed: ["실패", "Failed", "var(--red-deep)"],
+    cancelled: ["취소됨", "Cancelled", "var(--muted-deep)"],
+    interrupted: ["중단 복구 필요", "Interrupted", "var(--amber-deep)"],
+  };
+  const entry = labels[status];
+  return { label: ko ? entry[0] : entry[1], color: entry[2] };
 }
 
 function FileTab({
@@ -795,6 +877,70 @@ const bodyStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
   overflow: "hidden",
+};
+
+const agentTabStyle: CSSProperties = {
+  flex: 1,
+  minHeight: 0,
+  display: "flex",
+  flexDirection: "column",
+  overflow: "hidden",
+};
+
+const receiptCardStyle: CSSProperties = {
+  flexShrink: 0,
+  display: "grid",
+  gap: 8,
+  padding: "10px 12px 12px",
+  borderTop: "1px solid var(--paper-edge)",
+  background: "var(--paper-2)",
+};
+
+const receiptHeaderStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+  color: "var(--ink-soft)",
+  fontSize: 11.5,
+  fontWeight: 800,
+};
+
+const receiptStatusStyle: CSSProperties = {
+  fontSize: 10.5,
+  fontWeight: 850,
+};
+
+const receiptGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "auto 1fr auto auto",
+  alignItems: "center",
+  gap: 6,
+  color: "var(--muted-deep)",
+  fontSize: 10.5,
+};
+
+const receiptFolderButtonStyle: CSSProperties = {
+  minWidth: 0,
+  display: "grid",
+  gridTemplateColumns: "auto auto minmax(0, 1fr)",
+  alignItems: "center",
+  gap: 6,
+  border: "1px solid var(--paper-edge)",
+  borderRadius: 7,
+  background: "var(--paper)",
+  color: "var(--ink-soft)",
+  padding: "7px 8px",
+  textAlign: "left",
+  cursor: "pointer",
+  fontSize: 10.5,
+};
+
+const receiptErrorStyle: CSSProperties = {
+  color: "var(--red-deep)",
+  fontSize: 10.5,
+  lineHeight: 1.45,
+  overflowWrap: "anywhere",
 };
 
 const fileTabStyle: CSSProperties = {

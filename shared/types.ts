@@ -6,6 +6,7 @@ import type {
   MultimodalSettings,
 } from "./multimodal";
 import type { OberonTitleSpec } from "./oberon-titles";
+import type { SiteProjectMeta, SiteScreenMeta } from "./site-studio";
 export type {
   OberonLowerThird,
   OberonSubtitleCue,
@@ -141,6 +142,10 @@ export interface InstalledAgent {
   runtimeLabel?: "claude-code" | "codex" | "gemini" | "cursor" | "generic";
   /** 로컬 임포트 원본 폴더 절대경로 (있으면 파일 패널이 이 폴더를 사용) */
   localPath?: string;
+  /** 실행 폴더의 권위 출처. Agent Cloud 복원본도 로컬 실행을 위해 localPath를 가진다. */
+  assetSource?: "local-import" | "agent-cloud" | "hub";
+  /** Agent Cloud 복원본의 검증된 불변 package hash. */
+  packageHash?: string;
   /** 단일 에이전트 / 팀 */
   kind?: "agent" | "team";
   /** UI/routing contract: visible user agent, background control agent, or private web-only agent. */
@@ -192,6 +197,8 @@ export interface MarketplaceListing {
   publishedAt?: string;
   visibility?: AgentVisibility;
   cloudPackage?: CloudAgentPackageDownload;
+  /** Owner restore baseline used only for optimistic Cloud writes. */
+  cloudRegistration?: CloudAgentRevisionIdentity;
   kind?: "cloud-callable" | "install-only" | string;
   callable?: boolean;
   routingReady?: boolean;
@@ -240,6 +247,21 @@ export interface SkillCatalogEntry {
   slug: string;
   name: string;
   description: string;
+}
+
+/** Main-owned exact SKILL.md source selected from the Hephaestus catalog. */
+export interface SkillCatalogAsset extends SkillCatalogEntry {
+  content: string;
+  contentHash: string;
+  byteLength: number;
+}
+
+export interface AgentFileTextSnapshotUi {
+  path: string;
+  relativePath: string;
+  exists: boolean;
+  content: string;
+  hash: string;
 }
 
 export interface McpToolCatalogEntry {
@@ -2054,12 +2076,12 @@ export type CloudAgentReviewMode = "static-only" | "local-runtime";
 export type CloudAgentVisibility = "private-link" | "marketplace";
 export type CloudAgentPackageStatus = "ready" | "blocked" | "registered" | "dry-run";
 
-export interface CloudAgentPublishRequest {
+export interface CloudAgentPackageRequest {
   /** Local agent/team/repo folder to package. */
   rootPath: string;
   /** Optional public slug. If omitted, derived from the folder/name. */
   slug?: string;
-  /** Default marketplace; private-link creates an unlisted package once server supports it. */
+  /** Defaults to owner-private Agent Cloud storage. Use marketplace only for an explicit public Hub publish. */
   visibility?: CloudAgentVisibility;
   /** true packages and reviews locally but does not call agentlas.cloud. */
   dryRun?: boolean;
@@ -2068,6 +2090,21 @@ export interface CloudAgentPublishRequest {
   /** Optional operator note stored with the registration request. */
   notes?: string;
 }
+
+/** Renderer-to-main request. The native picker capability, not a renderer path,
+ * authorizes which local package root may be read. */
+export type CloudAgentPublishRequest = Omit<CloudAgentPackageRequest, "rootPath"> & {
+  rootGrant: FsPathGrant;
+};
+
+/** Owner-only Agent Cloud save. Public routing cards and model review do not apply. */
+export type CloudAgentPrivateSaveRequest = Omit<
+  CloudAgentPublishRequest,
+  "visibility" | "reviewMode"
+>;
+
+/** Explicit public Agentlas Hub publish. Public routing and review gates apply. */
+export type CloudAgentHubPublishRequest = Omit<CloudAgentPublishRequest, "visibility">;
 
 export interface CloudAgentSecurityFinding {
   id: string;
@@ -2083,6 +2120,7 @@ export interface CloudAgentPackageFile {
   bytes: number;
   sha256: string;
   kind: "text" | "binary";
+  executable?: boolean;
   included: boolean;
   reason?: string;
 }
@@ -2092,15 +2130,39 @@ export interface CloudAgentPackageDownloadFile {
   bytes: number;
   sha256: string;
   contentBase64: string;
+  /** Portable execution bit. Raw host permission bits are never transferred. */
+  executable?: boolean;
+}
+
+export type CloudAgentPackageHashVersion = "path-sha256-v1" | "path-sha256-executable-v2";
+export type CloudAgentCloudScope = "owner-private" | "hub-public";
+
+/** Opaque optimistic-concurrency identity returned by Agent Cloud. Revisions
+ * are equality tokens only; clients must never infer ordering from them. */
+export interface CloudAgentRevisionIdentity {
+  cloudId: string;
+  slug: string;
+  scope: CloudAgentCloudScope;
+  packageHash: string;
+  packageHashVersion: CloudAgentPackageHashVersion;
+  revision: string;
+  updatedAt?: string;
 }
 
 export interface CloudAgentPackageDownload {
   packageHash: string;
+  /** Missing means legacy path-sha256-v1. New packages use executable-protected v2. */
+  packageHashVersion?: CloudAgentPackageHashVersion;
   fileCount: number;
   totalBytes: number;
   agentKind: "agent" | "team" | "repo";
   runtimeLabels: string[];
   files: CloudAgentPackageDownloadFile[];
+  /** Optional owner-restore CAS identity. Package bytes remain independently hashed. */
+  cloudId?: string;
+  scope?: CloudAgentCloudScope;
+  revision?: string;
+  updatedAt?: string;
 }
 
 export interface CloudAgentPublicCareerGraph {
@@ -2135,6 +2197,7 @@ export interface CloudAgentPackageManifest {
   visibility: CloudAgentVisibility;
   rootFingerprint: string;
   packageHash: string;
+  packageHashVersion: CloudAgentPackageHashVersion;
   fileCount: number;
   includedFileCount: number;
   totalBytes: number;
@@ -2164,10 +2227,17 @@ export interface CloudAgentReviewResult {
 export interface CloudAgentRegistrationResult {
   cloudId: string;
   slug: string;
+  scope: CloudAgentCloudScope;
+  packageHash: string;
+  packageHashVersion: CloudAgentPackageHashVersion;
+  revision: string;
+  etag: string;
   url?: string;
   marketplaceUrl?: string;
   registeredAt: string;
   dryRun: boolean;
+  /** False means the server commit succeeded but its local CAS receipt could not be persisted. */
+  localSyncStored?: boolean;
 }
 
 export interface CloudAgentPackageResult {
@@ -2502,6 +2572,30 @@ export interface PendingConfirmation {
 }
 
 /** electron-updater의 자동 업데이트 상태. main → renderer로 broadcast. */
+export type UpdaterErrorCode =
+  | "config-missing"
+  | "check-failed"
+  | "download-failed"
+  | "install-not-owned"
+  | "install-not-applied"
+  | "install-state-corrupt"
+  | "legacy-cleanup-failed"
+  | "install-start-failed"
+  | "continuity-backup-failed"
+  | "continuity-violation"
+  | "compatibility-metadata-missing"
+  | "minimum-app-version"
+  | "minimum-runtime-version"
+  | "minimum-schema-version";
+
+export interface UpdaterCompatibility {
+  minimumSourceAppVersion: string;
+  minimumRuntimeVersion: string;
+  minimumSchemaVersion: number;
+  targetSchemaVersion: number;
+  bundledRuntimeVersion: string;
+}
+
 export interface UpdaterState {
   status:
     | "idle"
@@ -2509,13 +2603,36 @@ export interface UpdaterState {
     | "available"
     | "downloading"
     | "downloaded"
+    | "installing"
+    | "updated"
     | "not-available"
+    | "manual-required"
+    | "incompatible"
+    | "recovery-required"
     | "error";
   /** update-available / update-downloaded 시 채워짐 */
   version?: string;
   /** download-progress의 백분율 (0-100). downloading 상태일 때만 의미 있음 */
   progress?: number;
+  /** renderer가 원문 오류를 추측하지 않고 안전한 복구 UI를 고를 수 있는 안정 코드. */
+  code?: UpdaterErrorCode;
+  /** 사용자에게 보여도 되는 짧은 설명. 내부 경로/토큰/스택은 포함하지 않는다. */
   error?: string;
+  /** 네트워크 등 일시 실패일 때만 true. 권한/호환성/연속성 실패는 false다. */
+  canRetry?: boolean;
+  /** 고정된 공식 다운로드 경로. renderer 입력으로 URL을 받지 않는다. */
+  manualDownloadUrl?: string;
+  /** 복구본이 있을 때만 true. 실제 경로는 main이 보관하고 reveal IPC로만 연다. */
+  recoveryBackupAvailable?: boolean;
+  /** 릴리스가 선언한 최소 호환 경계. */
+  compatibility?: UpdaterCompatibility;
+  /** 마지막으로 서버 확인이 끝난 시각(epoch ms). */
+  lastCheckedAt?: number;
+}
+
+export interface UpdaterActionResult {
+  accepted: boolean;
+  state: UpdaterState;
 }
 
 // ── 마이그레이션 (OpenClaw / Hermes → Agentlas) ──────────────
@@ -2949,8 +3066,8 @@ export interface HephaestusBuildEvent {
 }
 /** 빌드 지시문 첨부 — 사용자 디스크의 파일/폴더(기존 에이전트·스킬·이미지·문서 등). */
 export interface HephaestusBuildAttachment {
-  /** 절대 경로(파일 또는 폴더). 메인 프로세스가 stat으로 종류를 판별해 워크스페이스에 스테이징한다. */
-  path: string;
+  /** Native picker / trusted drop에서 발급된 opaque 파일 권한. Renderer 경로는 권한이 아니다. */
+  grant: FsPathGrant;
   /** 표시용 이름(기본 basename). */
   name?: string;
 }
@@ -2962,8 +3079,8 @@ export interface HephaestusBuildRequest {
   attachments?: HephaestusBuildAttachment[];
   /** single | team | package(repair) — 미지정 시 엔진 mode-classification 에 위임. */
   mode?: "single" | "team" | "package";
-  /** 결과 패키지를 생성할 작업 폴더(워크스페이스). */
-  workspace: string;
+  /** 결과 패키지 작업 폴더 권한. Main이 검증한 경로만 런타임 cwd가 된다. */
+  workspaceGrant: FsPathGrant;
   /** 사용할 런타임 선택(미지정 시 활성 런타임). */
   runtime?: RuntimeSelection;
   /** 이전 인터뷰 턴에서 받은 CLI 세션 id. 있으면 새 호출 대신 같은 대화를 resume한다. */
@@ -3209,14 +3326,66 @@ export interface FailureEventUi {
   payload: Record<string, unknown>;
 }
 
+export type InvocationRunStatus =
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+/**
+ * Durable execution receipt. Renderer busy state is deliberately not part of
+ * this contract: main's live registry owns running/cancelling, while the DB
+ * ledger owns terminal recovery and retry deduplication.
+ */
+export interface InvocationRunReceipt {
+  runId: string;
+  chatId: string;
+  status: InvocationRunStatus;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  eventCount: number;
+  resultFolder?: string;
+  hasImages?: boolean;
+  borrowAgents?: string[];
+  errorCode?: string;
+  errorMessage?: string;
+}
+
 export type AgentEvolutionProposalStatus =
   | "candidate"
   | "approved"
+  | "applying"
   | "rejected"
   | "applied"
   | "measured"
+  | "rolling_back"
   | "rolled_back"
-  | "apply_failed";
+  | "apply_failed"
+  | "conflicted"
+  | "recovery_required";
+
+export interface AgentEvolutionReceiptUi {
+  id: string;
+  proposalId: string;
+  agentId: string;
+  action: "apply" | "rollback";
+  targetPath: string;
+  versionBefore: number;
+  versionAfter: number;
+  targetHashBefore: string;
+  targetHashAfter: string;
+  /** Hash of governed prompt/skill/playbook assets, not the Agent Cloud bundle hash. */
+  governedAssetHashBefore: string;
+  governedAssetHashAfter: string;
+  /** @deprecated compatibility alias; use governedAssetHashBefore. */
+  packageHashBefore: string;
+  /** @deprecated compatibility alias; use governedAssetHashAfter. */
+  packageHashAfter: string;
+  createdAt: string;
+}
 
 export interface AgentEvolutionProposalUi {
   id: string;
@@ -3226,9 +3395,13 @@ export interface AgentEvolutionProposalUi {
   targetPath: string;
   beforeHash: string;
   afterHash: string;
+  /** Local-only diff payload used for explicit review and crash recovery. */
+  beforeContent: string;
+  afterContent: string;
   risk: "low" | "medium" | "high";
   status: AgentEvolutionProposalStatus;
   source: Record<string, unknown>;
+  receipts: AgentEvolutionReceiptUi[];
   decisionNote?: string;
   lastError?: string;
   createdAt: string;
@@ -3239,7 +3412,7 @@ export interface AgentEvolutionProposalUi {
   rolledBackAt?: string;
 }
 
-export interface CreatePromptEvolutionProposalInput {
+export interface CreateAgentEvolutionProposalInput {
   agentId: string;
   targetPath: string;
   currentContent: string;
@@ -3287,6 +3460,45 @@ export interface AgentlasIpc {
     imageProviders: () => Promise<{ codex: boolean; gemini: boolean }>;
     generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string }) => Promise<{ ok: boolean; text?: string; engine?: "agy" | "codex"; reason?: string }>;
     contentAvailable: () => Promise<{ agy: boolean; codex: boolean }>;
+  };
+  /**
+   * 사이트 디자인 스튜디오 — 디자인 전용(백엔드/실행 없음).
+   * 화면당 self-contained HTML 1문서, sandbox iframe 렌더 + select-to-edit.
+   * 디자인 두뇌 = Hub 에이전트 "웹앱 디자인 마스터"(web-master)를 hep-call(borrow)로 호출.
+   */
+  site: {
+    listProjects: () => Promise<SiteProjectMeta[]>;
+    createProject: (payload: { name: string }) => Promise<SiteProjectMeta>;
+    deleteProject: (payload: { projectId: string }) => Promise<{ ok: boolean }>;
+    /** 화면 생성 — variants(1~3)만큼 시안을 만든다(순차 — 프로젝트 세션 공유). */
+    generateScreen: (payload: {
+      projectId: string;
+      brief: string;
+      variants?: number;
+      styleHint?: string;
+      /** 스타일 참조 화면 — 같은 제품처럼 보이게 팔레트/타이포를 따라간다. */
+      baseScreenId?: string;
+      locale?: "ko" | "en";
+    }) => Promise<{ ok: boolean; screens?: SiteScreenMeta[]; engine?: string; reason?: string }>;
+    /** 선택 요소 부분 patch 우선 수정. selectionId = data-agentlas-id. */
+    editScreen: (payload: {
+      projectId: string;
+      screenId: string;
+      instruction: string;
+      selectionId?: string;
+      locale?: "ko" | "en";
+    }) => Promise<{ ok: boolean; screen?: SiteScreenMeta; engine?: string; mode?: "patch" | "full"; reason?: string }>;
+    readScreen: (payload: { projectId: string; screenId: string }) => Promise<{ ok: boolean; html?: string; reason?: string }>;
+    /** 렌더 직전 태깅+오버레이/CSP 주입 — iframe srcDoc으로 쓸 HTML과 nonce 반환. */
+    prepareRender: (payload: { projectId: string; screenId: string }) => Promise<{ ok: boolean; renderHtml?: string; nonce?: string; reason?: string }>;
+    renameScreen: (payload: { projectId: string; screenId: string; name: string }) => Promise<{ ok: boolean; screen?: SiteScreenMeta }>;
+    deleteScreen: (payload: { projectId: string; screenId: string }) => Promise<{ ok: boolean }>;
+    /** 창 좌표(rect, CSS px) 크롭 스크린샷 — 선택 요소 썸네일용. */
+    captureRect: (payload: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean; dataUrl?: string; reason?: string }>;
+    exportScreen: (payload: { projectId: string; screenId: string }) => Promise<{ ok: boolean; path?: string; canceled?: boolean; reason?: string }>;
+    exportProjectZip: (payload: { projectId: string }) => Promise<{ ok: boolean; path?: string; canceled?: boolean; reason?: string }>;
+    /** 활성 런타임 존재 여부 + 붙어 있는 Hub 에이전트 슬러그. */
+    contentAvailable: () => Promise<{ ready: boolean; agent: string }>;
   };
   /** 문서 스튜디오 내용 생성/개정 — 연결된 LLM(agy/codex), no-fallback. */
   document: {
@@ -3396,7 +3608,11 @@ export interface AgentlasIpc {
   /** 에이전트 자가진화 proposal 원장 — 제안/승인/적용/측정/롤백 상태를 로컬 DB에 남긴다. */
   agentEvolution: {
     list: (agentId: string, limit?: number) => Promise<AgentEvolutionProposalUi[]>;
-    createAndApplyPrompt: (input: CreatePromptEvolutionProposalInput) => Promise<AgentEvolutionProposalUi>;
+    /** Candidate collection only; this call never writes an agent package file. */
+    createProposal: (input: CreateAgentEvolutionProposalInput) => Promise<AgentEvolutionProposalUi>;
+    /** Explicit approval applies the already-reviewed candidate and creates a hash/version receipt. */
+    approveAndApply: (proposalId: string, note?: string) => Promise<AgentEvolutionProposalUi>;
+    reject: (proposalId: string, note?: string) => Promise<AgentEvolutionProposalUi>;
     markMeasured: (proposalId: string, note?: string) => Promise<AgentEvolutionProposalUi>;
     rollback: (proposalId: string) => Promise<AgentEvolutionProposalUi>;
   };
@@ -3417,10 +3633,14 @@ export interface AgentlasIpc {
   updater: {
     /** 마운트 직후 현재 상태 동기 조회. broadcast 이전에 새 창이 열려도 onState로 미스되지 않음. */
     getState: () => Promise<UpdaterState>;
-    /** 사용자가 "지금 확인" 누름 — 실패해도 throw 안 함 (에러는 broadcast로) */
-    check: () => Promise<void>;
-    /** "재시작 업데이트" 클릭. downloaded 상태에서만 실제로 동작 */
-    install: () => Promise<void>;
+    /** 사용자가 "지금 확인" 누름. 동시 호출은 하나로 합치고 최종 authoritative state를 반환한다. */
+    check: () => Promise<UpdaterState>;
+    /** "재시작 업데이트" 클릭. 백업·권한·버전 가드를 모두 통과해야 종료/설치를 시작한다. */
+    install: () => Promise<UpdaterActionResult>;
+    /** 권한/호환성 때문에 자동 적용하지 않은 경우 고정된 공식 다운로드 페이지를 연다. */
+    openManualDownload: () => Promise<UpdaterActionResult>;
+    /** 연속성 검증 실패 때 main이 보관한 복구본을 Finder/Explorer에서 연다. */
+    revealRecoveryBackup: () => Promise<UpdaterActionResult>;
   };
   runtime: {
     detect: () => Promise<RuntimeStatus[]>;
@@ -3516,7 +3736,7 @@ export interface AgentlasIpc {
     installMine: (id: string) => Promise<InstalledAgent>;
     uninstall: (id: string) => Promise<void>;
     /** 로컬 폴더(기존 에이전트/팀)를 임포트 — 런타임 감지·라벨링 후 라우팅 저장. */
-    importLocalFolder: (absPath: string) => Promise<InstalledAgent>;
+    importLocalFolder: (input: { path: string; scope: FsReadScope }) => Promise<InstalledAgent>;
     /** 팀 에이전트의 하위 서브에이전트 해석 — 즉시 결정적 + 백그라운드 LLM 정밀판정/자가교정. */
     resolveSubAgents: (agentId: string) => Promise<AgentTeamResolution | null>;
   };
@@ -3529,12 +3749,16 @@ export interface AgentlasIpc {
     read: (agentId: string, absPath: string) => Promise<TextFilePreview>;
     /** 폴더 내부 파일 저장 (system-prompt.md면 동작 프롬프트도 갱신) */
     write: (agentId: string, absPath: string, content: string) => Promise<{ ok: boolean }>;
+    /** Main-owned canonical runtime prompt source for this package. */
+    promptSource: (agentId: string) => Promise<AgentFileTextSnapshotUi | null>;
   };
   /** 스킬 카탈로그 — 엔진(Hephaestus)의 skills/ 디렉토리를 실제로 스캔해 반환한다.
    *  하드코딩 목록이 아니라 디스크의 SKILL.md 프론트매터에서 읽는다. */
   skills: {
     /** 주입 가능한 스킬 카탈로그 (엔진 skills/ 디렉토리 실측) */
     listCatalog: () => Promise<SkillCatalogEntry[]>;
+    /** allowlisted catalog slug의 실제 SKILL.md 원문과 sha256. */
+    readCatalog: (slug: string) => Promise<SkillCatalogAsset>;
   };
   /** 외부 MCP 툴 플러그인 — Slack/Discord/GitHub 등을 실제로 연결한다.
    *  env 값은 글로벌 vault(env)에서 가져와 stdio 자식 프로세스에 주입. */
@@ -3566,14 +3790,17 @@ export interface AgentlasIpc {
     search: (q: string) => Promise<MarketplaceListing[]>;
     listFirms: () => Promise<FirmListing[]>;
     status: () => Promise<MarketplaceSourceStatus>;
-    /** 로그인 사용자가 agentlas.cloud에서 만든 내 에이전트 목록. 미로그인/오프라인이면 [] */
+    /** 로그인 사용자의 실제 복원 가능한 Agent Cloud 패키지 목록. 미로그인/오프라인이면 [] */
     listMine: () => Promise<MarketplaceListing[]>;
     bookmarks: () => Promise<HubAgentBookmark[]>;
     bookmarkAdd: (listing: MarketplaceListing) => Promise<HubAgentBookmark>;
     bookmarkRemove: (slug: string) => Promise<void>;
   };
-  /** Publish local agent/team packages to Agentlas Cloud. Review runs locally on the submitter machine. */
+  /** Store owned packages privately in Agent Cloud or explicitly publish them to the public Hub. */
   cloudAgents: {
+    savePrivate: (input: CloudAgentPrivateSaveRequest) => Promise<CloudAgentPackageResult>;
+    publishPublic: (input: CloudAgentHubPublishRequest) => Promise<CloudAgentPackageResult>;
+    /** Compatibility surface. Omitted visibility now means private-link; marketplace remains an explicit flag. */
     publish: (input: CloudAgentPublishRequest) => Promise<CloudAgentPackageResult>;
   };
   firms: {
@@ -3813,6 +4040,10 @@ export interface AgentlasIpc {
     activeChats: () => Promise<string[]>;
     /** 채팅 진입 시 진행 중 실행에 재접속 — 그 chat의 runId + 지금까지 버퍼된 이벤트. 없으면 null. */
     attach: (chatId: string) => Promise<{ runId: string; events: McpInvocationEvent[] } | null>;
+    /** 실행 ID의 live+durable 상태. 앱 재시작 뒤 미종결 started receipt는 interrupted로 판정한다. */
+    receipt: (runId: string) => Promise<InvocationRunReceipt | null>;
+    /** 채팅의 가장 최근 실행 receipt — 결과 폴더/실패 진단 복원용. */
+    latestReceipt: (chatId: string) => Promise<InvocationRunReceipt | null>;
   };
   /** 임베딩된 Hephaestus 엔진 브리지. 데스크탑↔엔진 연결은 전부 이 도메인으로 흐른다.
    *  (Hephaestus 소스에는 데스크탑 흔적이 없다 — 엔진은 범용 CLI/JSON 으로만 호출됨.) */
@@ -3854,13 +4085,14 @@ export interface AgentlasIpc {
     /** 에이전트 폴더 → Cloud/Hub 업로드(실 패키징 + 보안 스캔 + publish). */
     publish: (input: {
       folder: string;
+      scope: FsReadScope;
       visibility: HephaestusUploadVisibility;
       dryRun?: boolean;
     }) => Promise<HephaestusCommandResult>;
     /** 업로드 전 패키징 + 정적 검토 리포트. */
-    package: (input: { folder: string; visibility?: HephaestusUploadVisibility }) => Promise<HephaestusCommandResult>;
+    package: (input: { folder: string; scope: FsReadScope; visibility?: HephaestusUploadVisibility }) => Promise<HephaestusCommandResult>;
     /** 정적 보안 스캔. */
-    securityScan: (input: { folder: string; strict?: boolean }) => Promise<HephaestusCommandResult>;
+    securityScan: (input: { folder: string; scope: FsReadScope; strict?: boolean }) => Promise<HephaestusCommandResult>;
     /** AO(에이전트 온톨로지) 그래프 — 정보 흐름 맵 백킹 데이터. */
     aoGraph: (input?: { agent?: string; dir?: string }) => Promise<HephaestusCommandResult>;
     /** 빌더(hep-build) 스트리밍 실행 — 데스크탑 런타임 + Hephaestus 빌더 에이전트. */

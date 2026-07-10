@@ -10,10 +10,12 @@ const i18n = fs.readFileSync(path.join(root, "renderer/lib/i18n.tsx"), "utf8");
 
 assert.match(stream, /<EmptyChatState agentName=\{agentName\} directory=\{emptyDirectory\}/,
   "empty chats must render the installed directory starter state");
-for (const collection of ["apps", "commands", "agents", "firms", "projects", "envKeys", "plugins"]) {
+for (const collection of ["commands", "agents", "hubBookmarks", "firms", "projects", "envKeys", "plugins"]) {
   assert.match(stream, new RegExp(`directory\\.${collection}`),
     `empty chat state must consume emptyDirectory.${collection}`);
 }
+assert.doesNotMatch(stream, /directory\.apps/,
+  "the personalized empty state must not advertise fixed bundled Apps");
 
 assert.match(input, /addEventListener\("pointerdown", onPointerDown\)/,
   "autocomplete must close on mouse and touch outside interaction");

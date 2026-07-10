@@ -1,6 +1,6 @@
 // 소유 vs 빌림을 "외형(CSS)"이 아니라 "사실"로 가르는 단일 분류기.
-// 기획안 원칙: owned = 내 디스크에 파일이 실재(안 죽음) / borrowed = 로컬에 파일 없는 원격 게스트
-// (게시자가 내리면 죽음). 경쟁사 스토어엔 이 구분 자체가 없다 — 이게 화면상 가장 강한 차별 증거다.
+// Agent Cloud 복원본은 로컬 실행 폴더를 가지지만 권위 출처는 Cloud다. localPath 유무만으로
+// 출처를 추측하면 복원 자산이 로컬 임포트로 오표시되므로 assetSource를 먼저 판정한다.
 import type { InstalledAgent } from "./types";
 
 export type OwnershipClass = "owned-local" | "owned-cloud" | "borrowed";
@@ -19,16 +19,36 @@ export interface OwnershipInfo {
   fragile: boolean;
 }
 
-/** 설치된 에이전트의 소유 클래스. localPath 가 있으면 내 디스크의 실제 폴더(owned-local),
- *  없으면 클라우드에서 내 라이브러리에 설치된 것(owned-cloud). 둘 다 내 자산이다. */
-export function classifyAgent(a: Pick<InstalledAgent, "localPath" | "slug">, locale: "ko" | "en" = "ko"): OwnershipInfo {
+/** 설치된 에이전트의 소유 클래스. Agent Cloud 복원본은 검증된 로컬 실행 사본을 함께 표시한다. */
+export function classifyAgent(
+  a: Pick<InstalledAgent, "localPath" | "slug" | "assetSource" | "packageHash">,
+  locale: "ko" | "en" = "ko",
+): OwnershipInfo {
   const ko = locale === "ko";
+  if (a.assetSource === "agent-cloud") {
+    // packageHash is immutable restore provenance. Current governed assets can
+    // evolve locally and are shown separately by evolution version/receipts.
+    const version = a.packageHash ? ` · ${ko ? "복원 원본 bundle" : "source bundle"} ${a.packageHash.slice(0, 12)}` : "";
+    return {
+      klass: "owned-cloud",
+      owned: true,
+      label: ko ? "내 자산" : "My asset",
+      origin: ko
+        ? `Agent Cloud에서 검증 복원된 실행 사본${version}`
+        : `Verified execution copy restored from Agent Cloud${version}`,
+      localPath: a.localPath,
+      fragile: false,
+    };
+  }
   if (a.localPath) {
+    const fromHub = a.assetSource === "hub";
     return {
       klass: "owned-local",
       owned: true,
-      label: ko ? "내 직원" : "My staff",
-      origin: a.localPath,
+      label: ko ? "내 자산" : "My asset",
+      origin: fromHub
+        ? (ko ? "Hub 패키지를 로컬 실행 사본으로 설치함" : "Hub package installed as a local execution copy")
+        : a.localPath,
       localPath: a.localPath,
       fragile: false,
     };
@@ -36,7 +56,7 @@ export function classifyAgent(a: Pick<InstalledAgent, "localPath" | "slug">, loc
   return {
     klass: "owned-cloud",
     owned: true,
-    label: ko ? "내 직원" : "My staff",
+    label: ko ? "내 자산" : "My asset",
     origin: ko ? "클라우드에서 내 라이브러리에 설치됨" : "Installed to my library from the cloud",
     fragile: false,
   };

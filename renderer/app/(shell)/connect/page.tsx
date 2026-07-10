@@ -274,7 +274,10 @@ export default function ConnectPage() {
         description:
           loc.tagline ||
           (isTeam ? t("connect.target.team.description") : t("connect.target.single.description")),
-        source: agent.localPath ? t("connect.target.imported") : t("connect.target.installed"),
+        source:
+          agent.localPath && agent.assetSource !== "agent-cloud" && agent.assetSource !== "hub"
+            ? t("connect.target.imported")
+            : t("connect.target.installed"),
         routeHint: isTeam ? t("connect.target.team.route") : t("connect.target.single.route"),
         sessionMode: isTeam ? "shared_chat" : "per_user",
         readiness: "ready",

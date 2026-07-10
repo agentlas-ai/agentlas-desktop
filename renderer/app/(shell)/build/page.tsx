@@ -32,9 +32,11 @@ import {
   resetBuild,
   addAttachments,
   removeAttachment,
+  updateBuildSecurityScan,
   type Mode,
   type BuildAttachment,
 } from "@/lib/build-session";
+import { buildScanDisposition, buildScanFindings, buildScanSeverityBucket } from "@/lib/build-scan";
 import type { ChatQuestion } from "@/components/ChatStream";
 
 type StageState = "pending" | "active" | "done" | "error";
@@ -137,7 +139,7 @@ export default function BuildPage() {
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
-  const { request, mode, workspace, runtime, phase, log, reached, errored, result, registered, pendingQuestions, awaitingReply, turn, attachments } = s;
+  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, result, registered, pendingQuestions, awaitingReply, turn, attachments } = s;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // 드롭/파일 인풋 → 실제 디스크 경로(webUtils) → 스토어 첨부. 경로를 못 얻으면(브라우저 등) 스킵.
@@ -147,14 +149,14 @@ export default function BuildPage() {
       const grant = await grantForDroppedFile(f);
       if (!grant) continue;
       const p = grant.path;
-      items.push({ path: p, name: f.name || p.split("/").pop() || p, kind: grant.kind === "directory" ? "dir" : "file" });
+      items.push({ path: p, grant, name: f.name || p.split("/").pop() || p, kind: grant.kind === "directory" ? "dir" : "file" });
     }
     if (items.length > 0) addAttachments(items);
   };
 
   const attachFolder = async () => {
     const dir = await ipc()?.fs.pickDirectory();
-    if (dir) addAttachments([{ path: dir.path, name: dir.path.split("/").pop() || dir.path, kind: "dir" }]);
+    if (dir) addAttachments([{ path: dir.path, grant: dir, name: dir.path.split("/").pop() || dir.path, kind: "dir" }]);
   };
   const pendingQuestionKey = pendingQuestions.map((q) => q.id).join("|");
   const selectedCount = pendingQuestions.reduce((sum, q) => sum + (selectedOptions[q.id]?.length ?? 0), 0);
@@ -243,9 +245,11 @@ export default function BuildPage() {
   };
 
   const installToLibrary = async () => {
-    if (!workspace) return;
+    const target = result?.workspace ?? workspace;
+    const scope = result?.readScope ?? workspaceGrant?.scope;
+    if (!target || !scope) return;
     try {
-      const imported = await ipc()?.team.importLocalFolder(workspace);
+      const imported = await ipc()?.team.importLocalFolder({ path: target, scope });
       if (imported?.id) navigate(`/library/agents?agentId=${imported.id}`);
     } catch (e) {
       setActionMsg((ko ? "설치 실패: " : "Install failed: ") + friendlyHephaestusMessage((e as Error).message, ko));
@@ -253,14 +257,18 @@ export default function BuildPage() {
   };
 
   const upload = async (visibility: "private-link" | "marketplace") => {
-    if (!workspace) return;
+    const target = result?.workspace ?? workspace;
+    const scope = result?.readScope ?? workspaceGrant?.scope;
+    if (!target || !scope) return;
     setActionMsg(ko ? `업로드 중 (${visibility === "marketplace" ? "Hub public" : "Cloud private"})…` : "Uploading…");
     try {
-      const res = await ipc()?.hephaestus.publish({ folder: workspace, visibility });
+      const res = await ipc()?.hephaestus.publish({ folder: target, scope, visibility });
       const raw = res?.error ?? res?.stderr ?? "";
       setActionMsg(
         res?.ok
-          ? (ko ? "업로드 완료. 공개/공유 상태는 Hub 또는 Cloud에서 한 번 더 확인하세요." : "Uploaded. Check Hub or Cloud once more for public/share status.")
+          ? visibility === "marketplace"
+            ? (ko ? "Hub 공개 제출 완료. Hub에서 실제 공개·호출 상태를 확인하세요." : "Submitted to the public Hub. Verify its live publish and call status in Hub.")
+            : (ko ? "내 Agent Cloud에 비공개 저장했습니다." : "Saved privately to your Agent Cloud.")
           : (ko ? "업로드 실패. 파일은 그대로입니다: " : "Upload failed. Files were not changed: ") + friendlyHephaestusMessage(raw, ko),
       );
     } catch (err) {
@@ -281,6 +289,8 @@ export default function BuildPage() {
         : null;
   // 파이프라인은 항상 표시 — idle 에선 딤된 프리뷰로 무엇을 할지 보여준다.
   const showPipeline = true;
+  const resultScanDisposition = result ? buildScanDisposition(result.securityScan) : "unverified";
+  const resultDeliveryBlocked = resultScanDisposition === "blocked" || resultScanDisposition === "unverified";
 
   return (
     <div className="rd build-root">
@@ -594,32 +604,47 @@ export default function BuildPage() {
             <section className="build-card build-artifact-card">
               <div className="build-card-head">
                 <span>{ko ? "산출물" : "Artifacts"}</span>
-                <span>ready</span>
+                <span>
+                  {resultScanDisposition === "passed"
+                    ? "ready"
+                    : resultScanDisposition === "warning"
+                      ? (ko ? "검토" : "review")
+                      : (ko ? "검증 필요" : "verification required")}
+                </span>
               </div>
               <ArtifactPreview workspace={result.workspace} readScope={result.readScope} ko={ko} />
-              <SecurityScanBlock initialScan={result.securityScan} folder={result.workspace} ko={ko} />
+              <SecurityScanBlock scan={result.securityScan} folder={result.workspace} scope={result.readScope} ko={ko} />
               <div className="build-result-actions">
                 <span>
                   <IconCheck size={15} />{" "}
                   {registered
                     ? ko ? "패키지 준비됨 · 조직도에 추가됨" : "Package ready · added to org chart"
-                    : ko ? "패키지 준비됨" : "Package ready"}
+                    : resultDeliveryBlocked
+                      ? ko ? "패키지 생성됨 · 검증 필요" : "Package created · verification required"
+                      : ko ? "패키지 준비됨" : "Package ready"}
                 </span>
-                <button onClick={installToLibrary} className="build-primary-button titlebar-nodrag">{ko ? "조직도에서 열기" : "Open in org chart"}</button>
+                <button disabled={resultDeliveryBlocked} onClick={installToLibrary} className="build-primary-button titlebar-nodrag">{ko ? "조직도에서 열기" : "Open in org chart"}</button>
               </div>
               <div className="build-upload-choice">
                 <div className="build-upload-choice-label">{ko ? "어디에 올릴까요?" : "Where to upload?"}</div>
                 <div className="build-upload-choice-grid">
-                  <button onClick={() => upload("private-link")} className="build-upload-option titlebar-nodrag">
+                  <button disabled={resultDeliveryBlocked} onClick={() => upload("private-link")} className="build-upload-option titlebar-nodrag">
                     <strong>{ko ? "내 클라우드 (비공개)" : "My Cloud (private)"}</strong>
-                    <span>{ko ? "로그인한 내 계정에만 저장 · 링크로만 공유" : "Stored to your account · share by link only"}</span>
+                    <span>{ko ? "내 계정에만 저장 · 공개 Hub와 분리" : "Owner-only storage · separate from the public Hub"}</span>
                   </button>
-                  <button onClick={() => upload("marketplace")} className="build-upload-option titlebar-nodrag">
+                  <button disabled={resultDeliveryBlocked} onClick={() => upload("marketplace")} className="build-upload-option titlebar-nodrag">
                     <strong>{ko ? "허브 (공개)" : "Hub (public)"}</strong>
                     <span>{ko ? "허브 레지스트리에 공개 후보로 제출" : "Submit to the public Hub registry"}</span>
                   </button>
                 </div>
               </div>
+              {resultDeliveryBlocked && (
+                <div role="alert" className="build-action-msg">
+                  {ko
+                    ? "보안 검증이 확인되기 전에는 설치·Cloud 저장·Hub 공개를 진행할 수 없습니다. 재스캔으로 확인하세요."
+                    : "Install, Cloud save, and Hub publish stay disabled until the security scan is verified. Re-run the scan to continue."}
+                </div>
+              )}
               {actionMsg && <div className="build-action-msg">{actionMsg}</div>}
             </section>
           )}
@@ -759,46 +784,43 @@ function parseScan(scan: unknown, ko: boolean): {
   blocker: number;
   items: { severity: string; message: string; file?: string }[];
 } {
-  if (!scan || typeof scan !== "object") {
-    return { unknown: true, tone: "ok", pass: 0, warn: 0, blocker: 0, items: [] };
-  }
-  const obj = scan as Record<string, unknown>;
-  const raw = Array.isArray(scan)
-    ? (scan as unknown[])
-    : Array.isArray(obj.findings)
-      ? (obj.findings as unknown[])
-      : [];
-  const items = (raw as Record<string, unknown>[]).map((f) => ({
-    severity: String(f?.severity ?? "info"),
-    message: String(f?.message ?? f?.id ?? (ko ? "항목" : "finding")),
-    file: typeof f?.file === "string" ? (f.file as string) : undefined,
+  const disposition = buildScanDisposition(scan);
+  const normalized = buildScanFindings(scan);
+  if (!normalized) return { unknown: true, tone: "warn", pass: 0, warn: 0, blocker: 0, items: [] };
+  const items = normalized.map((finding) => ({
+    severity: finding.severity,
+    message: finding.message || (ko ? "항목" : "finding"),
+    file: finding.file,
   }));
-  if (items.length === 0) {
-    return { unknown: false, tone: "ok", pass: 0, warn: 0, blocker: 0, items: [] };
-  }
-  const blocker = items.filter((i) => i.severity === "blocker" || i.severity === "high").length;
-  const warn = items.filter((i) => i.severity === "medium").length;
+  const blocker = items.filter((i) => buildScanSeverityBucket(i.severity) === "blocked").length;
+  const warn = items.filter((i) => buildScanSeverityBucket(i.severity) === "warning").length;
   const pass = items.length - blocker - warn;
-  const tone = blocker > 0 ? "block" : warn > 0 ? "warn" : "ok";
+  const tone = disposition === "blocked" ? "block" : disposition === "warning" ? "warn" : "ok";
   return { unknown: false, tone, pass, warn, blocker, items };
 }
 
 /** 검증 게이트 + 수동 재스캔 — 빌드 결과의 정적 보안 스캔을 사용자가 원할 때 다시 돌린다.
  *  (기존엔 hephaestus.securityScan IPC가 렌더러에서 한 번도 호출되지 않았다 — 결과 표시 전용.) */
-function SecurityScanBlock({ initialScan, folder, ko }: { initialScan: unknown; folder: string; ko: boolean }) {
-  const [scan, setScan] = useState<unknown>(initialScan);
+function SecurityScanBlock({ scan, folder, scope, ko }: { scan: unknown; folder: string; scope: FsReadScope; ko: boolean }) {
   const [busy, setBusy] = useState(false);
+  const [rescanError, setRescanError] = useState<string | null>(null);
   const rescan = async () => {
     const api = ipc();
     if (!api) return;
     setBusy(true);
+    setRescanError(null);
     try {
-      const res = await api.hephaestus.securityScan({ folder, strict: true });
+      const res = await api.hephaestus.securityScan({ folder, scope, strict: true });
       // HephaestusCommandResult — json 필드가 스캔 결과. 없으면 원본 유지(표시 파서가 unknown 처리).
       const next = (res as { json?: unknown })?.json ?? res;
-      setScan(next);
-    } catch {
-      // 엔진 미가용 — 기존 결과 유지
+      updateBuildSecurityScan(next);
+    } catch (error) {
+      // 엔진 미가용 — 기존 결과를 통과로 바꾸지 않고 사용자에게 다음 행동을 남긴다.
+      setRescanError(
+        ko
+          ? `재스캔을 완료하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`
+          : `Could not complete the re-scan: ${error instanceof Error ? error.message : String(error)}`,
+      );
     } finally {
       setBusy(false);
     }
@@ -823,6 +845,7 @@ function SecurityScanBlock({ initialScan, folder, ko }: { initialScan: unknown; 
       >
         {busy ? (ko ? "스캔 중…" : "Scanning…") : ko ? "보안 재스캔" : "Re-run security scan"}
       </button>
+      {rescanError && <div role="alert" className="build-action-msg">{rescanError}</div>}
     </div>
   );
 }
@@ -838,8 +861,8 @@ function VerifyGate({ scan, ko }: { scan: unknown; ko: boolean }) {
       {p.unknown ? (
         <p className="build-verify-note">
           {ko
-            ? "보안 스캔 결과를 확인할 수 없습니다 (엔진이 결과를 반환하지 않음). 설치 전 수동 검토를 권장합니다."
-            : "Security scan result unavailable (engine returned none). Manual review recommended before install."}
+            ? "보안 검증이 확인되지 않아 설치·Cloud 저장·Hub 공개가 잠겨 있습니다. 재스캔하거나 패키지를 수정해 다시 확인하세요."
+            : "Security verification is unavailable, so install, Cloud save, and Hub publish are locked. Re-scan or fix the package and verify again."}
         </p>
       ) : p.items.length === 0 ? (
         <p className="build-verify-note">{ko ? "정적 보안 스캔 통과 — 차단·주의 항목 없음." : "Static security scan passed — no blockers or warnings."}</p>
@@ -855,7 +878,7 @@ function VerifyGate({ scan, ko }: { scan: unknown; ko: boolean }) {
               {f.file ? ` (${f.file})` : ""}
             </div>
           ))}
-          <p className="build-verify-note">{ko ? "검증 통과·승인 후에만 설치/게시됩니다 — 자동 게시 없음." : "Installs/publishes only after passing and approval — no auto-publish."}</p>
+          <p className="build-verify-note">{ko ? "차단 항목이 없을 때만 사용자가 직접 설치·저장·공개할 수 있습니다 — 자동 게시 없음." : "Only packages without blocking findings can be installed, saved, or published by an explicit user action — no auto-publish."}</p>
         </>
       )}
     </div>

@@ -29,6 +29,7 @@ import { MEMORY_EMITTER_BLOCK } from "../architecture/manifest";
 import { buildDelegateProtocol, parseDelegations, type Delegation } from "./delegate";
 import { selectRuntimeForTargets } from "../runtime/selection";
 import { getAgentConcurrency } from "../store/concurrency";
+import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -207,7 +208,13 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
   }
 
   // 시스템 프롬프트 = 노드 프롬프트 + per-agent 메모리(node.id) + (리더면 위임) + 메모리 emitter
-  let systemPrompt = node.prompt?.trim() || `You are ${node.name}, the ${node.role} of this firm.`;
+  const firmRolePrompt = node.prompt?.trim() || `You are ${node.name}, the ${node.role} of this firm.`;
+  let systemPrompt = node.agentId
+    ? buildEffectiveAgentSystemPrompt(node.agentId, firmRolePrompt)
+    : firmRolePrompt;
+  if (node.agentId && node.prompt?.trim() && !systemPrompt.includes(node.prompt.trim())) {
+    systemPrompt += `\n\n## Firm role context\n${node.prompt.trim()}`;
+  }
   try {
     const mem = buildMemoryContext(activePath, node.id);
     if (mem) systemPrompt += `\n\n${mem}`;

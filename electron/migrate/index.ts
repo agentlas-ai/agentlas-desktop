@@ -9,7 +9,7 @@ import { getDb } from "../store/db";
 import { saveApiKey, setEnvVar } from "../secrets/vault";
 import { createProject } from "../store/projects";
 import { createAutomation } from "../store/automations";
-import { currentUiLocale } from "../main";
+import { currentUiLocale } from "../ui-locale";
 import {
   backendForEnvKey,
   looksLikeSecretKey,

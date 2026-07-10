@@ -10,7 +10,11 @@ import { agentRunCwd } from "./runtime/exec";
 import { listRuntimeModels } from "./runtime/providers";
 import { installCli, openCliLogin, updateCli, type InstallableCli } from "./runtime/install-cli";
 import { listRuntimeCommands } from "./runtime/commands";
-import { assertInvocationChatAvailable, resolveInvocationRunId } from "./runtime/run-id";
+import { resolveInvocationRunId } from "./runtime/run-id";
+import {
+  InvocationLifecycleRegistry,
+  registerDurableInvocationStart,
+} from "./runtime/invocation-lifecycle";
 import {
   getMultimodalSettings,
   getMultimodalStatus,
@@ -81,11 +85,13 @@ import {
   listFirms,
   uninstallFirm,
 } from "./store/firms";
-import { listAgentFiles, readAgentFile, writeAgentFile } from "./agents/files";
+import { listAgentFiles, readAgentFile, readAgentPromptSource, writeAgentFile } from "./agents/files";
 import {
-  createAndApplyPromptEvolutionProposal,
+  approveAndApplyAgentEvolutionProposal,
+  createAgentEvolutionProposal,
   listAgentEvolutionProposals,
   markAgentEvolutionProposalMeasured,
+  rejectAgentEvolutionProposal,
   rollbackAgentEvolutionProposal,
 } from "./agents/evolution";
 import { importLocalFolder } from "./agents/import-local";
@@ -95,6 +101,7 @@ import { resolveTeamOrg, resolveAgentTeam } from "./agents/org-resolver";
 import { runMcpInvocation } from "./mcp/client";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
 import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot } from "./hephaestus/engine";
+import { listSkillCatalog, readSkillCatalogAsset } from "./hephaestus/skill-catalog";
 import {
   aoGraph,
   hepNetwork,
@@ -111,8 +118,9 @@ import { normalizeRecommendation } from "./hephaestus/recommendation";
 import { confirmUpload, PathGuardError, resolveFolderArg } from "./hephaestus/path-guard";
 import { isSupervisorEnabled, setSupervisorEnabled } from "./hephaestus/supervisor";
 import { runHephaestusBuild } from "./hephaestus/builder";
+import { resolveHephaestusBuildRequest } from "./hephaestus/build-access";
 import { pickLocale } from "./runtime/status-i18n";
-import { currentUiLocale } from "./main";
+import { currentUiLocale } from "./ui-locale";
 import { buildChatRecap, markChatRecapViewed } from "./chat/recap";
 import { startStudio, stopStudio } from "./hephaestus/studio";
 import type {
@@ -120,15 +128,20 @@ import type {
   AgentGroupUpdateInput,
   HephaestusBuildEvent,
   HephaestusBuildRequest,
-  CreatePromptEvolutionProposalInput,
+  CreateAgentEvolutionProposalInput,
   FsPathGrant,
   FsReadScope,
   HiredAgentCard,
-  SkillCatalogEntry,
 } from "../shared/types";
-import { checkSafely as updaterCheck, getUpdaterState, quitAndInstall as updaterInstall } from "./updater";
+import {
+  checkSafely as updaterCheck,
+  getUpdaterState,
+  openManualDownload as updaterOpenManualDownload,
+  quitAndInstall as updaterInstall,
+  revealRecoveryBackup as updaterRevealRecoveryBackup,
+} from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
-import { grantDroppedPath, pathFromGrant } from "./fs/access";
+import { grantDroppedPath, pathFromGrant, resolveFsReadPath } from "./fs/access";
 import { getAuthSession, signInWithBrowser, signInWithGoogle, signOut } from "./auth";
 import { getBillingCredits, transferEarnings } from "./billing";
 import {
@@ -150,8 +163,12 @@ import { claimQuest, listQuests } from "./quests";
 import { listMemoryEntriesForAgentUi } from "./memory/store";
 import { getDreamingStatus, setDreamingEnabled } from "./memory/dreaming";
 import {
+  getInvocationRunReceipt,
+  getLatestInvocationRunReceipt,
+  hasInvocationRunReceipt,
   listFailureEvents,
   listRunEvents,
+  recordRunEvent,
   recordMcpInvocationEvent,
   tryRecordFailureEvent,
   tryRecordRunEvent,
@@ -316,6 +333,7 @@ import { archiveToolPackage, installToolMcp, restoreToolPackage } from "./tool-f
 import { runToolFactorySmoke, scaffoldAgentTool } from "./tool-factory/scaffold";
 import { createCommerceAgentTeam } from "./meta-agent/commerce-team";
 import { packageAndReviewCloudAgent } from "./cloud-agents/package";
+import { resolveCloudAgentPackageRequest } from "./cloud-agents/access";
 import { selectedMultimodalEnvRequirements } from "../shared/multimodal";
 import type {
   AppFactoryAppRecord,
@@ -337,7 +355,10 @@ import type {
   AgentRuntimeOverrideScope,
   AgentRuntimeOverrideSetInput,
   Automation,
+  CloudAgentHubPublishRequest,
+  CloudAgentPrivateSaveRequest,
   CloudAgentPublishRequest,
+  InvocationRunReceipt,
   McpInvocationEvent,
   McpInvocationRequest,
   MetaAgentTeamFactoryRequest,
@@ -374,11 +395,14 @@ import type {
 interface RunRecord {
   controller: AbortController;
   chatId: string;
+  startedAt: string;
+  cancelRequestedAt: string | null;
   events: McpInvocationEvent[];
   /** 메인 스트림(무-agentId) partial의 마지막 누적 전문 — 델타 계산 기준. */
   partialText: string;
+  resultFolder?: string;
 }
-const activeRuns = new Map<string, RunRecord>();
+const activeRuns = new InvocationLifecycleRegistry<RunRecord>();
 // Hephaestus 빌더(hep-build) 진행 중 실행 — 취소용 AbortController 레지스트리.
 const activeBuilds = new Map<string, AbortController>();
 // runId → "렌더러 구독 완료" 신호. 구독 전 발생한 이벤트를 버퍼링하다 이 신호로 flush 한다.
@@ -479,7 +503,33 @@ function applyPendingConfirmationAttention(win: BrowserWindow | null, rawCount: 
 
 /** 현재 실행 중인 chatId 목록(중복 제거). */
 function activeChatIds(): string[] {
-  return [...new Set([...activeRuns.values()].map((r) => r.chatId))];
+  return activeRuns.activeChatIds();
+}
+
+function invocationReceipt(runId: string): InvocationRunReceipt | null {
+  const record = activeRuns.get(runId);
+  const durable = getInvocationRunReceipt(runId);
+  if (!record) return durable;
+  return {
+    ...(durable ?? {
+      runId,
+      chatId: record.chatId,
+      startedAt: record.startedAt,
+      updatedAt: record.startedAt,
+      eventCount: record.events.length,
+    }),
+    status: record.cancelRequestedAt ? "cancelling" : "running",
+    updatedAt: record.cancelRequestedAt ?? durable?.updatedAt ?? record.startedAt,
+    eventCount: Math.max(durable?.eventCount ?? 0, record.events.length),
+    ...(record.resultFolder ? { resultFolder: record.resultFolder } : {}),
+  };
+}
+
+function latestInvocationReceipt(chatId: string): InvocationRunReceipt | null {
+  for (const [runId, record] of activeRuns.entries()) {
+    if (record.chatId === chatId) return invocationReceipt(runId);
+  }
+  return getLatestInvocationRunReceipt(chatId);
 }
 
 function recordAppFactoryOperation(
@@ -628,6 +678,199 @@ export function registerIpcHandlers(): void {
     return trexContentAvailable();
   });
 
+  // ── 사이트 디자인 스튜디오 — 디자인 전용(백엔드/실행 없음) ──────────
+  // 화면 = self-contained HTML 1문서. 렌더는 항상 prepareRender(태깅+CSP+오버레이 주입)를
+  // 거쳐 sandbox iframe(srcDoc)으로만 — surface-emitter의 선언형 정책과 별개 트랙이며,
+  // 스크립트 실행은 opaque-origin 격리 샌드박스 내 디자인 프리뷰로 한정된다.
+  ipcMain.handle("site:listProjects", async () => {
+    const { listSiteProjects } = await import("./site/store");
+    return listSiteProjects();
+  });
+  ipcMain.handle("site:createProject", async (_e, payload: { name?: string }) => {
+    const { createSiteProject } = await import("./site/store");
+    return createSiteProject(String(payload?.name ?? ""));
+  });
+  ipcMain.handle("site:deleteProject", async (_e, payload: { projectId?: string }) => {
+    const { deleteSiteProject } = await import("./site/store");
+    deleteSiteProject(String(payload?.projectId ?? ""));
+    return { ok: true };
+  });
+  ipcMain.handle(
+    "site:generateScreen",
+    async (_e, payload: { projectId?: string; brief?: string; variants?: number; styleHint?: string; baseScreenId?: string; locale?: string }) => {
+      try {
+        const { generateSiteScreen } = await import("./site/generate");
+        const { getSiteProject, readSiteScreenHtml, saveSiteScreen } = await import("./site/store");
+        const projectId = String(payload?.projectId ?? "");
+        const brief = String(payload?.brief ?? "");
+        const locale = payload?.locale === "en" ? ("en" as const) : ("ko" as const);
+        const variants = Math.max(1, Math.min(3, Number(payload?.variants ?? 1)));
+        getSiteProject(projectId); // 존재 검증
+        let baseHtml: string | null = null;
+        if (payload?.baseScreenId) {
+          try {
+            baseHtml = readSiteScreenHtml(projectId, String(payload.baseScreenId));
+          } catch {
+            baseHtml = null;
+          }
+        }
+        const labels = ["A", "B", "C"];
+        const variantGroup = variants > 1 ? randomUUID() : null;
+        // 시안은 순차 실행 — 프로젝트 division 세션(대화 맥락)을 공유하므로 동시 실행 금지.
+        const runs: Awaited<ReturnType<typeof generateSiteScreen>>[] = [];
+        for (let i = 0; i < variants; i += 1) {
+          runs.push(
+            await generateSiteScreen({
+              projectId,
+              brief,
+              baseHtml,
+              locale,
+              styleHint:
+                [payload?.styleHint, variants > 1 ? `Variant ${labels[i]}: take a distinctly different visual direction from the other variants.` : null]
+                  .filter(Boolean)
+                  .join(" ") || null,
+            }),
+          );
+        }
+        const okRuns = runs.filter((r) => r.ok && r.html);
+        if (!okRuns.length) {
+          return { ok: false, reason: runs[0]?.reason ?? "generation-failed" };
+        }
+        const baseName = brief.replace(/\s+/g, " ").trim().slice(0, 24) || "화면";
+        const screens = okRuns.map((r, i) =>
+          saveSiteScreen({
+            projectId,
+            name: okRuns.length > 1 ? `${baseName} · ${labels[i]}` : baseName,
+            html: r.html as string,
+            variantGroup,
+            variantLabel: okRuns.length > 1 ? labels[i] : null,
+          }),
+        );
+        return { ok: true, screens, engine: okRuns[0].engine };
+      } catch (err) {
+        return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+  ipcMain.handle(
+    "site:editScreen",
+    async (_e, payload: { projectId?: string; screenId?: string; instruction?: string; selectionId?: string; locale?: string }) => {
+      try {
+        const { editSiteScreen } = await import("./site/generate");
+        const { readSiteScreenHtml, updateSiteScreenHtml } = await import("./site/store");
+        const projectId = String(payload?.projectId ?? "");
+        const screenId = String(payload?.screenId ?? "");
+        const sourceHtml = readSiteScreenHtml(projectId, screenId);
+        const result = await editSiteScreen({
+          projectId,
+          sourceHtml,
+          instruction: String(payload?.instruction ?? ""),
+          selectionId: payload?.selectionId ? String(payload.selectionId) : null,
+          locale: payload?.locale === "en" ? "en" : "ko",
+        });
+        if (!result.ok || !result.html) {
+          return { ok: false, reason: result.reason ?? "edit-failed", engine: result.engine };
+        }
+        const screen = updateSiteScreenHtml(projectId, screenId, result.html);
+        return { ok: true, screen, engine: result.engine, mode: result.mode };
+      } catch (err) {
+        return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+  ipcMain.handle("site:readScreen", async (_e, payload: { projectId?: string; screenId?: string }) => {
+    try {
+      const { readSiteScreenHtml } = await import("./site/store");
+      const html = readSiteScreenHtml(String(payload?.projectId ?? ""), String(payload?.screenId ?? ""));
+      return { ok: true, html };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle("site:prepareRender", async (_e, payload: { projectId?: string; screenId?: string }) => {
+    try {
+      const { readSiteScreenHtml } = await import("./site/store");
+      const { prepareSiteRenderHtml } = await import("./site/html-tagger");
+      const html = readSiteScreenHtml(String(payload?.projectId ?? ""), String(payload?.screenId ?? ""));
+      const nonce = randomUUID();
+      const { renderHtml } = prepareSiteRenderHtml(html, nonce);
+      return { ok: true, renderHtml, nonce };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle("site:renameScreen", async (_e, payload: { projectId?: string; screenId?: string; name?: string }) => {
+    const { renameSiteScreen } = await import("./site/store");
+    const screen = renameSiteScreen(String(payload?.projectId ?? ""), String(payload?.screenId ?? ""), String(payload?.name ?? ""));
+    return { ok: true, screen };
+  });
+  ipcMain.handle("site:deleteScreen", async (_e, payload: { projectId?: string; screenId?: string }) => {
+    const { deleteSiteScreen } = await import("./site/store");
+    deleteSiteScreen(String(payload?.projectId ?? ""), String(payload?.screenId ?? ""));
+    return { ok: true };
+  });
+  // 선택 요소 썸네일 — 호스트 창을 창 좌표(rect, CSS px)로 크롭 캡처.
+  ipcMain.handle("site:captureRect", async (e, payload: { x?: number; y?: number; width?: number; height?: number }) => {
+    try {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      if (!win) return { ok: false, reason: "no-window" };
+      const [winW, winH] = win.getContentSize();
+      const x = Math.max(0, Math.floor(Number(payload?.x ?? 0)));
+      const y = Math.max(0, Math.floor(Number(payload?.y ?? 0)));
+      const width = Math.min(Math.ceil(Number(payload?.width ?? 0)), winW - x);
+      const height = Math.min(Math.ceil(Number(payload?.height ?? 0)), winH - y);
+      if (width < 2 || height < 2) return { ok: false, reason: "empty-rect" };
+      const image = await e.sender.capturePage({ x, y, width, height });
+      return { ok: true, dataUrl: image.toDataURL() };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle("site:exportScreen", async (e, payload: { projectId?: string; screenId?: string }) => {
+    try {
+      const { getSiteProject, readSiteScreenHtml } = await import("./site/store");
+      const projectId = String(payload?.projectId ?? "");
+      const screenId = String(payload?.screenId ?? "");
+      const meta = getSiteProject(projectId);
+      const screen = meta.screens.find((s) => s.id === screenId);
+      const html = readSiteScreenHtml(projectId, screenId);
+      const win = BrowserWindow.fromWebContents(e.sender);
+      const res = await dialog.showSaveDialog(win ?? undefined!, {
+        defaultPath: `${(screen?.name ?? "screen").replace(/[^\w가-힣 .-]+/g, "_")}.html`,
+        filters: [{ name: "HTML", extensions: ["html"] }],
+      });
+      if (res.canceled || !res.filePath) return { ok: false, canceled: true };
+      fs.writeFileSync(res.filePath, html, "utf8");
+      return { ok: true, path: res.filePath };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle("site:exportProjectZip", async (e, payload: { projectId?: string }) => {
+    try {
+      const { getSiteProject, listSiteScreenFiles } = await import("./site/store");
+      const { buildZipArchive } = await import("./site/zip-writer");
+      const projectId = String(payload?.projectId ?? "");
+      const meta = getSiteProject(projectId);
+      const files = listSiteScreenFiles(projectId);
+      if (!files.length) return { ok: false, reason: "no-screens" };
+      const win = BrowserWindow.fromWebContents(e.sender);
+      const res = await dialog.showSaveDialog(win ?? undefined!, {
+        defaultPath: `${meta.name.replace(/[^\w가-힣 .-]+/g, "_") || "site"}.zip`,
+        filters: [{ name: "ZIP", extensions: ["zip"] }],
+      });
+      if (res.canceled || !res.filePath) return { ok: false, canceled: true };
+      fs.writeFileSync(res.filePath, buildZipArchive(files));
+      return { ok: true, path: res.filePath };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle("site:contentAvailable", async () => {
+    const { siteEngineStatus } = await import("./site/generate");
+    return siteEngineStatus();
+  });
+
   // ── 문서 스튜디오 "내용" 생성 — 연결된 LLM(agy/codex)이 실제 문서 초안을 JSON으로 작성 ──
   ipcMain.handle(
     "document:generate",
@@ -685,6 +928,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("updater:getState", () => getUpdaterState());
   ipcMain.handle("updater:check", () => updaterCheck());
   ipcMain.handle("updater:install", () => updaterInstall());
+  ipcMain.handle("updater:openManualDownload", () => updaterOpenManualDownload());
+  ipcMain.handle("updater:revealRecoveryBackup", () => updaterRevealRecoveryBackup());
 
   // ── fs (워킹 폴더 패널 read-only) ───────────────────────
   ipcMain.handle("fs:pickDirectory", (e) => {
@@ -1047,7 +1292,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("team:installMine", (_e, id: string) => installMyAgent(id));
   ipcMain.handle("team:uninstall", (_e, id: string) => uninstallAgent(id));
   // 로컬 폴더 임포트 — 런타임 감지 + 라우팅 저장 후 설치된 에이전트로 반환
-  ipcMain.handle("team:importLocalFolder", async (_e, absPath: string) => (await importLocalFolder(absPath)).agent);
+  ipcMain.handle(
+    "team:importLocalFolder",
+    async (_e, input: { path: string; scope: FsReadScope }) =>
+      (await importLocalFolder(resolveFsReadPath(input.path, input.scope))).agent,
+  );
   ipcMain.handle("team:resolveSubAgents", (_e, agentId: string) => resolveAgentTeam(agentId));
 
   // ── agentFiles (에이전트 폴더 파일 — 우측 패널 에디터) ──
@@ -1058,6 +1307,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("agentFiles:write", (_e, agentId: string, absPath: string, content: string) =>
     writeAgentFile(agentId, absPath, content),
   );
+  ipcMain.handle("agentFiles:promptSource", (_e, agentId: string) => readAgentPromptSource(agentId));
 
   // ── runLedger (실행/실패 원장 — 실패 메모리·자가진화 평가 입력) ──
   ipcMain.handle("runLedger:events", (_e, runId: string, limit?: number) =>
@@ -1073,8 +1323,14 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("agentEvolution:list", (_e, agentId: string, limit?: number) =>
     listAgentEvolutionProposals(agentId, limit),
   );
-  ipcMain.handle("agentEvolution:createAndApplyPrompt", (_e, input: CreatePromptEvolutionProposalInput) =>
-    createAndApplyPromptEvolutionProposal(input),
+  ipcMain.handle("agentEvolution:createProposal", (_e, input: CreateAgentEvolutionProposalInput) =>
+    createAgentEvolutionProposal(input),
+  );
+  ipcMain.handle("agentEvolution:approveAndApply", (_e, proposalId: string, note?: string) =>
+    approveAndApplyAgentEvolutionProposal(proposalId, note),
+  );
+  ipcMain.handle("agentEvolution:reject", (_e, proposalId: string, note?: string) =>
+    rejectAgentEvolutionProposal(proposalId, note),
   );
   ipcMain.handle("agentEvolution:markMeasured", (_e, proposalId: string, note?: string) =>
     markAgentEvolutionProposalMeasured(proposalId, note),
@@ -1086,40 +1342,8 @@ export function registerIpcHandlers(): void {
   // ── skills (주입 가능한 스킬 카탈로그 — 엔진 skills/ 디렉토리 실측) ──
   // 하드코딩 목록이 아니라 디스크의 SKILL.md 프론트매터에서 name/description 을 읽는다.
   // SKILL.md 가 없는 디렉토리는 카탈로그에서 제외(추측 금지, 실측 원칙).
-  ipcMain.handle("skills:listCatalog", (): SkillCatalogEntry[] => {
-    const root = hephaestusRoot();
-    if (!root) return [];
-    const skillsDir = path.join(root, "skills");
-    let dirs: string[] = [];
-    try {
-      dirs = fs
-        .readdirSync(skillsDir, { withFileTypes: true })
-        .filter((d) => d.isDirectory())
-        .map((d) => d.name);
-    } catch {
-      return [];
-    }
-    const out: SkillCatalogEntry[] = [];
-    for (const slug of dirs) {
-      const md = path.join(skillsDir, slug, "SKILL.md");
-      let name = slug;
-      let description = "";
-      try {
-        const txt = fs.readFileSync(md, "utf8");
-        const fm = txt.match(/^---\s*([\s\S]*?)\s*---/);
-        const block = fm ? fm[1] : txt.slice(0, 600);
-        const nameM = block.match(/^name:\s*["']?(.+?)["']?\s*$/m);
-        const descM = block.match(/^description:\s*["']?([\s\S]+?)["']?\s*$/m);
-        if (nameM) name = nameM[1].trim();
-        if (descM) description = descM[1].trim().replace(/\s+/g, " ");
-      } catch {
-        continue;
-      }
-      out.push({ slug, name, description });
-    }
-    out.sort((a, b) => a.slug.localeCompare(b.slug));
-    return out;
-  });
+  ipcMain.handle("skills:listCatalog", () => listSkillCatalog());
+  ipcMain.handle("skills:readCatalog", (_event, slug: string) => readSkillCatalogAsset(slug));
 
   // ── mcpTools (외부 MCP 툴 플러그인 — Slack/Discord/GitHub 등) ─
   ipcMain.handle("mcpTools:listCatalog", () => MCP_TOOL_CATALOG);
@@ -1163,9 +1387,27 @@ export function registerIpcHandlers(): void {
     }
   });
 
-  // ── cloud agents (local package/review, then cloud registration) ─
+  // ── cloud agents ────────────────────────────────────────────
+  // Owner-private save is the default product action. It keeps local
+  // secret/path/hash safety checks but never opts into public Hub review.
+  ipcMain.handle("cloudAgents:savePrivate", async (_e, input: CloudAgentPrivateSaveRequest) =>
+    packageAndReviewCloudAgent({
+      ...resolveCloudAgentPackageRequest(input),
+      visibility: "private-link",
+      reviewMode: "static-only",
+    }),
+  );
+  // Public Hub publication is intentionally a separate, explicit action.
+  ipcMain.handle("cloudAgents:publishPublic", async (_e, input: CloudAgentHubPublishRequest) =>
+    packageAndReviewCloudAgent({
+      ...resolveCloudAgentPackageRequest(input),
+      visibility: "marketplace",
+    }),
+  );
+  // Compatibility surface for existing callers/flags. The packager defaults
+  // omitted visibility to private-link; explicit marketplace remains public.
   ipcMain.handle("cloudAgents:publish", async (_e, input: CloudAgentPublishRequest) =>
-    packageAndReviewCloudAgent(input),
+    packageAndReviewCloudAgent(resolveCloudAgentPackageRequest(input)),
   );
 
   // ── firms (설치된 회사) ────────────────────────────────
@@ -1797,35 +2039,63 @@ export function registerIpcHandlers(): void {
     // 렌더러가 runId를 미리 넘기면 그대로 사용 — 렌더러가 invoke 왕복 전에 이 채널을 이미
     // 구독하고 있으므로 런타임이 즉시 emit하는 초기 이벤트도 놓치지 않는다(subscribe-before-trigger).
     // 안 넘겼으면(자동화/구버전 호출) 기존처럼 main이 생성(하위호환).
-    // renderer에는 채팅당 하나의 스트림/정지/재접속 surface만 있다. 같은 chat의 두 번째
-    // 실행을 허용하면 attach가 하나만 복원해 나머지 controller가 유실되므로 등록 전 거부한다.
-    assertInvocationChatAvailable(req.chatId, activeRuns.values());
-    const runId = resolveInvocationRunId(req.runId, (candidate) => activeRuns.has(candidate));
+    // runId는 실행 idempotency key다. 이미 DB start gate를 지난 id를 재수신하면
+    // 완료/취소 여부와 무관하게 다시 실행하지 않는다(IPC 응답 유실·retry 이중 실행 방지).
+    if (typeof req.runId === "string" && hasInvocationRunReceipt(req.runId)) {
+      throw new Error("Invocation runId already has a durable receipt; use a new runId");
+    }
+    const runId = resolveInvocationRunId(
+      req.runId,
+      (candidate) => activeRuns.hasSeen(candidate) || hasInvocationRunReceipt(candidate),
+    );
     const runReq: McpInvocationRequest = { ...req, runId };
     const channel = `invoke:event:${runId}`;
     const win = BrowserWindow.fromWebContents(event.sender);
 
     // 실행마다 AbortController를 등록 — 병렬 실행이 서로 독립적으로 취소 가능.
     const controller = new AbortController();
-    const record: RunRecord = { controller, chatId: req.chatId, events: [], partialText: "" };
-    activeRuns.set(runId, record);
-    broadcastActiveChats();
-    tryRecordRunEvent({
+    const startedAt = new Date().toISOString();
+    const chat = getChat(req.chatId);
+    const projectFolder = chat?.projectId ? getProject(chat.projectId)?.folderPath ?? null : null;
+    const record: RunRecord = {
+      controller,
+      chatId: req.chatId,
+      startedAt,
+      cancelRequestedAt: null,
+      events: [],
+      partialText: "",
+      resultFolder: getChatWorkingFolder(req.chatId) ?? projectFolder ?? agentRunCwd(),
+    };
+    // chat당 단일 live-run 등록 + durable idempotency start는 하나의 pre-host
+    // 게이트다. DB write가 실패하면 등록을 되돌리고 아래 host adapter는 절대 호출하지 않는다.
+    registerDurableInvocationStart({
+      registry: activeRuns,
       runId,
-      kind: "invoke_started",
-      chatId: runReq.chatId,
-      payload: {
-        permissions: runReq.permissions,
-        toolMode: runReq.toolMode,
-        hubMode: runReq.hubMode,
-        borrowAgents: runReq.borrowAgents,
-        hasImages: Boolean(runReq.images?.length),
-        planMode: runReq.planMode,
-        goalMode: runReq.goalMode,
-        appsGenerateMode: runReq.appsGenerateMode,
-      },
+      record,
+      publishActiveState: broadcastActiveChats,
+      persistStart: () => recordRunEvent({
+        runId,
+        kind: "invoke_started",
+        chatId: runReq.chatId,
+        payload: {
+          permissions: runReq.permissions,
+          toolMode: runReq.toolMode,
+          hubMode: runReq.hubMode,
+          borrowAgents: runReq.borrowAgents,
+          hasImages: Boolean(runReq.images?.length),
+          planMode: runReq.planMode,
+          goalMode: runReq.goalMode,
+          appsGenerateMode: runReq.appsGenerateMode,
+        },
+      }),
     });
 
+    // This tracks an observed host terminal event, not a guaranteed DB write.
+    // The start row above is the hard idempotency gate. Terminal writes are
+    // best-effort because host work has already happened; if one fails, the
+    // durable start row intentionally recovers as `interrupted` after restart
+    // and still prevents the same runId from executing again.
+    let terminalObserved = false;
     void runMcpInvocation(
       runReq,
       (rawEv) => {
@@ -1889,11 +2159,42 @@ export function registerIpcHandlers(): void {
               appendChatMessage(runReq.chatId, "assistant", record.partialText);
             } catch {}
           }
-          if (activeRuns.delete(runId)) broadcastActiveChats();
+          const terminalKind =
+            ev.kind === "final"
+              ? "invoke_completed"
+              : controller.signal.aborted
+                ? "invoke_cancelled"
+                : "invoke_failed";
+          terminalObserved = true;
+          tryRecordRunEvent({
+            runId,
+            kind: terminalKind,
+            chatId: runReq.chatId,
+            payload: {
+              resultFolder: record.resultFolder,
+              errorCode: ev.error?.code,
+              errorMessage: ev.error?.message,
+            },
+          });
+          // final/error는 runMcpInvocation이 host adapter를 await한 뒤에만 도착한다.
+          // Abort 요청 시점이 아니라 이 terminal proof에서 다음 실행을 허용한다.
+          if (activeRuns.settle(runId)) broadcastActiveChats();
         }
       },
       controller.signal,
-    ).catch((err) => {
+    ).then((result) => {
+      record.resultFolder = result.resultFolder ?? record.resultFolder;
+      tryRecordRunEvent({
+        runId,
+        kind: "invoke_result",
+        chatId: runReq.chatId,
+        payload: {
+          resultFolder: record.resultFolder,
+          tokens: result.tokens,
+          hasFinalText: Boolean(result.finalText?.trim()),
+        },
+      });
+    }).catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       tryRecordRunEvent({
         runId,
@@ -1908,9 +2209,44 @@ export function registerIpcHandlers(): void {
         errorCode: "invoke_threw",
         errorMessage: message,
       });
+      if (!terminalObserved) {
+        terminalObserved = true;
+        if (controller.signal.aborted && record.partialText.trim()) {
+          try { appendChatMessage(runReq.chatId, "assistant", record.partialText); } catch {}
+        }
+        const ev: McpInvocationEvent = {
+          kind: "error",
+          error: {
+            code: controller.signal.aborted ? "cancelled" : "invoke-threw",
+            message,
+          },
+        };
+        record.events.push(ev);
+        recordMcpInvocationEvent(runId, runReq, ev);
+        if (win && !win.isDestroyed()) {
+          try { win.webContents.send(channel, ev); } catch {}
+        }
+        tryRecordRunEvent({
+          runId,
+          kind: controller.signal.aborted ? "invoke_cancelled" : "invoke_failed",
+          chatId: runReq.chatId,
+          payload: { resultFolder: record.resultFolder, errorMessage: message },
+        });
+      }
     }).finally(() => {
-      // 위 sink에서 이미 지워졌으면(정상 종료) no-op — abort/throw로 종료 이벤트가 없던 경우만 정리.
-      if (activeRuns.delete(runId)) broadcastActiveChats();
+      // 예상 밖 no-terminal 경로도 durable failure로 닫아 renderer가 무한 running에 남지 않게 한다.
+      if (!terminalObserved) {
+        tryRecordRunEvent({
+          runId,
+          kind: controller.signal.aborted ? "invoke_cancelled" : "invoke_failed",
+          chatId: runReq.chatId,
+          payload: {
+            resultFolder: record.resultFolder,
+            errorMessage: "Runtime settled without a terminal event",
+          },
+        });
+      }
+      if (activeRuns.settle(runId)) broadcastActiveChats();
     });
 
     return { runId };
@@ -1918,8 +2254,16 @@ export function registerIpcHandlers(): void {
 
   // 진행 중인 실행 취소 — CLI 자식 프로세스 kill / API fetch abort.
   ipcMain.handle("invoke:cancel", (_e, runId: string) => {
-    activeRuns.get(runId)?.controller.abort();
-    if (activeRuns.delete(runId)) broadcastActiveChats();
+    const result = activeRuns.requestCancel(runId);
+    if (result === "requested") {
+      const record = activeRuns.get(runId);
+      tryRecordRunEvent({
+        runId,
+        kind: "invoke_cancel_requested",
+        chatId: record?.chatId,
+        payload: { requestedAt: record?.cancelRequestedAt },
+      });
+    }
   });
 
   // 현재 실행 중인 chatId 목록 — 사이드바 인디케이터 초기 시드용.
@@ -1929,11 +2273,14 @@ export function registerIpcHandlers(): void {
   // 렌더러는 events를 리플레이해 진행 중 버블을 복원하고, runId 채널을 구독해 이후 스트림을 받는다.
   ipcMain.handle("invoke:attach", (_e, chatId: string) => {
     let found: { runId: string; events: McpInvocationEvent[] } | null = null;
-    for (const [runId, rec] of activeRuns) {
+    for (const [runId, rec] of activeRuns.entries()) {
       if (rec.chatId === chatId) found = { runId, events: rec.events.slice() };
     }
     return found;
   });
+
+  ipcMain.handle("invoke:receipt", (_e, runId: string) => invocationReceipt(runId));
+  ipcMain.handle("invoke:latestReceipt", (_e, chatId: string) => latestInvocationReceipt(chatId));
 
   ipcMain.handle("invoke:history", (_e, chatId: string) => listChatMessages(chatId));
   ipcMain.handle("invoke:clearHistory", (_e, chatId: string) => {
@@ -1996,12 +2343,12 @@ export function registerIpcHandlers(): void {
     "hephaestus:publish",
     async (
       event,
-      input: { folder: string; visibility: "private-link" | "marketplace"; dryRun?: boolean; locale?: "ko" | "en" },
+      input: { folder: string; scope: FsReadScope; visibility: "private-link" | "marketplace"; dryRun?: boolean; locale?: "ko" | "en" },
     ) => {
       const locale = input.locale ?? "ko";
       let folder: string;
       try {
-        folder = resolveFolderArg(input.folder, locale);
+        folder = resolveFsReadPath(input.folder, input.scope);
       } catch (e) {
         return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as PathGuardError).message };
       }
@@ -2025,11 +2372,11 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle(
     "hephaestus:package",
-    async (event, input: { folder: string; visibility?: "private-link" | "marketplace"; locale?: "ko" | "en" }) => {
+    async (event, input: { folder: string; scope: FsReadScope; visibility?: "private-link" | "marketplace"; locale?: "ko" | "en" }) => {
       const locale = input.locale ?? "ko";
       let folder: string;
       try {
-        folder = resolveFolderArg(input.folder, locale);
+        folder = resolveFsReadPath(input.folder, input.scope);
       } catch (e) {
         return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as PathGuardError).message };
       }
@@ -2049,10 +2396,10 @@ export function registerIpcHandlers(): void {
       return hepPackage(folder, { visibility: input.visibility });
     },
   );
-  ipcMain.handle("hephaestus:securityScan", (_e, input: { folder: string; strict?: boolean; locale?: "ko" | "en" }) => {
+  ipcMain.handle("hephaestus:securityScan", (_e, input: { folder: string; scope: FsReadScope; strict?: boolean; locale?: "ko" | "en" }) => {
     let folder: string;
     try {
-      folder = resolveFolderArg(input.folder, input.locale ?? "ko");
+      folder = resolveFsReadPath(input.folder, input.scope);
     } catch (e) {
       return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as PathGuardError).message };
     }
@@ -2073,6 +2420,9 @@ export function registerIpcHandlers(): void {
 
   // 빌더(hep-build) — 활성 런타임으로 Hephaestus 빌더 에이전트를 구동, 이벤트 스트리밍.
   ipcMain.handle("hephaestus:build", (event, req: HephaestusBuildRequest) => {
+    // Renderer가 보낸 절대경로는 권한이 아니다. Native picker / trusted drop이
+    // 발급한 capability를 main에서 다시 검증하고 그 경로만 builder에 전달한다.
+    const resolvedRequest = resolveHephaestusBuildRequest(req);
     const runId = randomUUID();
     const channel = `hephaestus:build:${runId}`;
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -2105,7 +2455,7 @@ export function registerIpcHandlers(): void {
       pending.length = 0;
       buildReadySignals.delete(runId);
     });
-    void runHephaestusBuild(runId, req, emit, controller.signal, pickLocale(req)).finally(() => {
+    void runHephaestusBuild(runId, resolvedRequest, emit, controller.signal, pickLocale(req)).finally(() => {
       activeBuilds.delete(runId);
       // If buildReady already fired, its callback removed the signal. Otherwise
       // retain the buffered terminal event long enough for invoke() to resolve,

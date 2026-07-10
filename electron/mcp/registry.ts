@@ -1,45 +1,29 @@
 // 설치된 에이전트 레지스트리 — SQLite-backed. 다국어 + envRequirements 지원.
-import fs from "node:fs";
-import path from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { getSource as getMarketSource, getCargoSource } from "../marketplace";
 import { agentFolderPath, materializeAgentFiles } from "../agents/files";
-import { getRoute, removeRoute, setRoute, type RuntimeLabel } from "../agents/routes";
+import { getRoute, removeRoute, type AgentRoute, type RuntimeLabel } from "../agents/routes";
 import { isPrivateWebOnlyAgent, publicAgentVisibility } from "../agents/policy";
 import { deriveListingEntityKind, entityKindAfterRefresh } from "../agents/entity-kind";
+import { readCloudAgentRestoreMarker } from "../cloud-agents/restore";
+import {
+  commitCloudRegistryPackage,
+  recoverCloudRegistryTransactions,
+  type CloudRegistryAgentRow,
+} from "../cloud-agents/registry-transaction";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { installFromCatalog } from "../mcp-tools/registry";
 import type { SeedListingFull } from "../marketplace/source";
 import type {
   AgentEnvRequirement,
-  AgentVisibility,
   InstalledAgent,
   MarketplaceListing,
-  RuntimeBackend,
 } from "../../shared/types";
 
 type FullListing = SeedListingFull & MarketplaceListing;
 
-interface AgentRow {
-  id: string;
-  slug: string;
-  name: string;
-  name_en: string;
-  tagline: string;
-  tagline_en: string;
-  system_prompt: string;
-  mcp_servers_json: string;
-  env_requirements_json: string;
-  preferred_backend: RuntimeBackend | null;
-  trust_grade: "A" | "B" | "C" | "unknown";
-  installed_at: string;
-  tone: string;
-  builtin: number;
-  role: string | null;
-  visibility: AgentVisibility;
-  entity_kind: "agent" | "team" | null;
-}
+type AgentRow = CloudRegistryAgentRow;
 
 function toAgent(row: AgentRow): InstalledAgent {
   let envReqs: AgentEnvRequirement[] = [];
@@ -50,6 +34,7 @@ function toAgent(row: AgentRow): InstalledAgent {
   }
   // 로컬 임포트 라우팅이 있으면 런타임 라벨/원본 경로/종류를 병합.
   const route = getRoute(row.id);
+  const asset = routeAssetState(route);
   // single/team 종류는 로컬 route가 1차, 없으면 DB에 저장된 entity_kind가 권위 신호다.
   // (Hub/클라우드 설치 팀은 route가 없어 이 컬럼이 유일한 신호 — 없으면 single 오분류됨.)
   const persistedKind =
@@ -70,9 +55,40 @@ function toAgent(row: AgentRow): InstalledAgent {
     installedAt: row.installed_at,
     tone: row.tone as InstalledAgent["tone"],
     visibility: publicAgentVisibility(row),
-    ...(route ? { runtimeLabel: route.runtime, localPath: route.path } : {}),
+    ...(route
+      ? {
+          runtimeLabel: route.runtime,
+          localPath: route.path,
+          assetSource: asset.source,
+          ...(asset.packageHash ? { packageHash: asset.packageHash } : {}),
+        }
+      : {}),
     ...(kind ? { kind } : {}),
   };
+}
+
+function routeAssetState(route: AgentRoute | null): {
+  source: NonNullable<InstalledAgent["assetSource"]>;
+  packageHash?: string;
+} {
+  if (!route) return { source: "local-import" };
+  const marker = readCloudAgentRestoreMarker(route.path);
+  if (route.source === "agent-cloud" || route.source === "hub" || marker) {
+    return {
+      source: route.source === "hub" ? "hub" : "agent-cloud",
+      // The marker is written with the exact swapped package and is therefore
+      // the disk-version authority. A stale route must never mask newer bytes.
+      ...(marker?.packageHash || route.packageHash
+        ? { packageHash: marker?.packageHash || route.packageHash }
+        : {}),
+    };
+  }
+  if (route.source === "local-import") {
+    return { source: "local-import", ...(route.packageHash ? { packageHash: route.packageHash } : {}) };
+  }
+  // Old route records predate source. A valid cloud marker is checked above;
+  // everything else was created by the local-folder import flow.
+  return { source: "local-import" };
 }
 
 /** 마켓 리스팅의 entityKind/agentCount로 single/team을 결정. */
@@ -89,6 +105,7 @@ function looksLikeTeamName(...parts: Array<string | null | undefined>): boolean 
  * 부팅 시 seedBuiltinAgents 직후 호출.
  */
 export function backfillEntityKinds(): void {
+  recoverCloudRegistryTransactions();
   const db = getDb();
   const rows = db
     .prepare("SELECT id, slug, name, name_en FROM installed_agents WHERE entity_kind IS NULL")
@@ -107,6 +124,7 @@ export function backfillEntityKinds(): void {
 }
 
 export function listInstalledAgents(): InstalledAgent[] {
+  recoverCloudRegistryTransactions();
   const rows = getDb()
     .prepare("SELECT * FROM installed_agents ORDER BY installed_at DESC")
     .all() as AgentRow[];
@@ -114,6 +132,7 @@ export function listInstalledAgents(): InstalledAgent[] {
 }
 
 export function getAgentById(id: string): InstalledAgent | null {
+  recoverCloudRegistryTransactions();
   const row = getDb()
     .prepare("SELECT * FROM installed_agents WHERE id = ?")
     .get(id) as AgentRow | undefined;
@@ -137,22 +156,22 @@ export async function installAgent(slug: string): Promise<InstalledAgent> {
     );
   }
 
-  return persistListing(slug, listing);
+  return persistListing(slug, listing, "hub");
 }
 
 /**
- * 내 에이전트(cargo) 설치 — 로그인 사용자가 agentlas.cloud에서 만든 draft.
- * 본인 소유라 trust 게이트는 건너뛴다(서버가 세션으로 소유권 확인).
+ * 내 에이전트(cargo) 설치 — owner-only cargo.restore_package로 실제 Agent Cloud
+ * 파일과 packageHash를 받은 뒤 원자 복원한다. draft manifest는 안전한 표시 메타데이터
+ * fallback일 뿐 파일/버전 권위가 아니다. 본인 소유라 trust 게이트는 건너뛴다.
  */
 export async function installMyAgent(id: string): Promise<InstalledAgent> {
   const source = getCargoSource();
   if (!source) throw new Error("Agentlas marketplace is not connected (memory mode).");
-  const listing = await source.getMyAgentManifest(id);
-  if (!listing) throw new Error(`Your agent was not found: ${id}`);
+  const listing = await source.restoreMyAgentPackage(id);
   if (isPrivateWebOnlyAgent(listing)) {
     throw new Error("This web-only agent is not available in Agentlas Desktop.");
   }
-  return persistListing(listing.slug, listing);
+  return persistListing(listing.slug, listing, "agent-cloud");
 }
 
 /**
@@ -182,183 +201,143 @@ function autoRegisterAgentTools(listing: FullListing): void {
   }
 }
 
-function persistListing(slug: string, listing: FullListing): InstalledAgent {
+function persistListing(
+  slug: string,
+  listing: FullListing,
+  packageSource: "agent-cloud" | "hub",
+): InstalledAgent {
+  recoverCloudRegistryTransactions();
   const envReqsJson = JSON.stringify(listing.envRequirements ?? []);
   const visibility = publicAgentVisibility(listing);
   const listingEntityKind = deriveListingEntityKind(listing);
-
-  // 이 에이전트가 호출하는 외부 MCP/API를 external tools에 자동 등록.
-  autoRegisterAgentTools(listing);
-
   const db = getDb();
   const existing = db
     .prepare("SELECT * FROM installed_agents WHERE slug = ?")
     .get(slug) as AgentRow | undefined;
-  if (existing) {
-    const entityKind = entityKindAfterRefresh(existing.entity_kind, listing);
-    db.prepare(
-      `UPDATE installed_agents
-       SET system_prompt = ?, name = ?, name_en = ?, tagline = ?, tagline_en = ?,
-           env_requirements_json = ?, visibility = ?, entity_kind = ?
-       WHERE slug = ?`,
-    ).run(
-      listing.systemPrompt,
-      listing.name,
-      listing.nameEn,
-      listing.tagline,
-      listing.taglineEn,
-      envReqsJson,
-      visibility,
-      entityKind,
-      slug,
-    );
-    if (!materializeCloudPackageFiles(existing.id, slug, listing)) {
-      materializeAgentFiles(existing.id);
-    }
-    return toAgent({
+  const id = existing?.id ?? randomUUID();
+  const entityKind = existing
+    ? entityKindAfterRefresh(existing.entity_kind, listing)
+    : listingEntityKind;
+  const now = new Date().toISOString();
+  const expectedRow: AgentRow = existing
+    ? {
       ...existing,
       system_prompt: listing.systemPrompt,
       name: listing.name,
       name_en: listing.nameEn,
       tagline: listing.tagline,
       tagline_en: listing.taglineEn,
+      mcp_servers_json: JSON.stringify(listing.mcpServers ?? []),
       env_requirements_json: envReqsJson,
+      trust_grade: listing.trustGrade,
+      tone: listing.tone,
       builtin: existing.builtin ?? 0,
       role: existing.role ?? null,
       visibility,
       entity_kind: entityKind,
-    });
-  }
+    }
+    : {
+        id,
+        slug,
+        name: listing.name,
+        name_en: listing.nameEn,
+        tagline: listing.tagline,
+        tagline_en: listing.taglineEn,
+        system_prompt: listing.systemPrompt,
+        mcp_servers_json: JSON.stringify(listing.mcpServers ?? []),
+        env_requirements_json: envReqsJson,
+        preferred_backend: null,
+        trust_grade: listing.trustGrade,
+        installed_at: now,
+        tone: listing.tone,
+        builtin: 0,
+        role: null,
+        visibility,
+        entity_kind: entityKind,
+      };
 
-  const id = randomUUID();
-  const entityKind = listingEntityKind;
-  const now = new Date().toISOString();
-  db.prepare(
-    `INSERT INTO installed_agents
-     (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
-      env_requirements_json, preferred_backend, trust_grade, installed_at, tone, visibility, entity_kind)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    id,
-    slug,
-    listing.name,
-    listing.nameEn,
-    listing.tagline,
-    listing.taglineEn,
-    listing.systemPrompt,
-    JSON.stringify(listing.mcpServers),
-    envReqsJson,
-    null,
-    listing.trustGrade,
-    now,
-    listing.tone,
-    visibility,
-    entityKind,
-  );
-
-  const cloudRoute = materializeCloudPackageFiles(id, slug, listing);
-  if (!cloudRoute) materializeAgentFiles(id);
-
-  return {
-    id,
-    slug,
-    name: listing.name,
-    nameEn: listing.nameEn,
-    tagline: listing.tagline,
-    taglineEn: listing.taglineEn,
-    systemPrompt: listing.systemPrompt,
-    mcpServers: listing.mcpServers,
-    envRequirements: listing.envRequirements ?? [],
-    preferredBackend: null,
-    trustGrade: listing.trustGrade,
-    installedAt: now,
-    tone: listing.tone,
-    visibility,
-    kind: cloudRoute?.kind ?? entityKind,
-    ...(cloudRoute
-      ? {
-          runtimeLabel: cloudRoute.labels[0],
-          localPath: cloudRoute.path,
-        }
-      : {}),
+  const mutateDb = () => {
+    if (existing) {
+      db.prepare(
+        `UPDATE installed_agents
+         SET system_prompt = ?, name = ?, name_en = ?, tagline = ?, tagline_en = ?,
+             mcp_servers_json = ?, env_requirements_json = ?, trust_grade = ?, tone = ?,
+             visibility = ?, entity_kind = ?
+         WHERE slug = ?`,
+      ).run(
+        expectedRow.system_prompt,
+        expectedRow.name,
+        expectedRow.name_en,
+        expectedRow.tagline,
+        expectedRow.tagline_en,
+        expectedRow.mcp_servers_json,
+        expectedRow.env_requirements_json,
+        expectedRow.trust_grade,
+        expectedRow.tone,
+        expectedRow.visibility,
+        expectedRow.entity_kind,
+        slug,
+      );
+      return;
+    }
+    db.prepare(
+      `INSERT INTO installed_agents
+       (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
+        env_requirements_json, preferred_backend, trust_grade, installed_at, tone, builtin, role,
+        visibility, entity_kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      expectedRow.id,
+      expectedRow.slug,
+      expectedRow.name,
+      expectedRow.name_en,
+      expectedRow.tagline,
+      expectedRow.tagline_en,
+      expectedRow.system_prompt,
+      expectedRow.mcp_servers_json,
+      expectedRow.env_requirements_json,
+      expectedRow.preferred_backend,
+      expectedRow.trust_grade,
+      expectedRow.installed_at,
+      expectedRow.tone,
+      expectedRow.builtin,
+      expectedRow.role,
+      expectedRow.visibility,
+      expectedRow.entity_kind,
+    );
   };
-}
 
-function materializeCloudPackageFiles(
-  agentId: string,
-  slug: string,
-  listing: FullListing,
-): { path: string; labels: RuntimeLabel[]; kind: "agent" | "team" } | null {
   const pkg = listing.cloudPackage;
-  if (!pkg?.files?.length) return null;
-  const dir = agentFolderPath(slug);
-  fs.mkdirSync(dir, { recursive: true });
+  if (pkg) {
+    const labels = detectCloudRuntimeLabels(pkg.files.map((file) => file.path));
+    const expectedRoute: AgentRoute = {
+      agentId: id,
+      path: agentFolderPath(slug),
+      runtime: labels[0],
+      labels,
+      kind: pkg.agentKind === "team" ? "team" : "agent",
+      importedAt: now,
+      source: packageSource,
+      packageHash: pkg.packageHash,
+    };
+    commitCloudRegistryPackage({
+      slug,
+      package: pkg,
+      previousRow: existing ?? null,
+      expectedRow,
+      expectedRoute,
+      registration: listing.cloudRegistration,
+      mutateDb,
+    });
+  } else {
+    mutateDb();
+    materializeAgentFiles(id);
+  }
 
-  const markerPath = path.join(dir, ".agentlas-cloud-package.json");
-  const currentHash = readPackageMarkerHash(markerPath);
-  const overwrite = currentHash !== pkg.packageHash;
-  for (const file of pkg.files) {
-    const target = resolvePackageFile(dir, file.path);
-    const bytes = Buffer.from(file.contentBase64, "base64");
-    if (bytes.length !== file.bytes || sha256(bytes) !== file.sha256.toLowerCase()) {
-      throw new Error(`Cloud package file failed integrity check: ${file.path}`);
-    }
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    if (overwrite || !fs.existsSync(target)) {
-      fs.writeFileSync(target, bytes);
-    }
-  }
-  fs.writeFileSync(
-    markerPath,
-    JSON.stringify(
-      {
-        packageHash: pkg.packageHash,
-        installedAt: new Date().toISOString(),
-        source: "agentlas-cloud",
-      },
-      null,
-      2,
-    ) + "\n",
-    "utf8",
-  );
-
-  const labels = detectCloudRuntimeLabels(pkg.files.map((file) => file.path));
-  const kind = pkg.agentKind === "team" ? "team" : "agent";
-  setRoute({
-    agentId,
-    path: dir,
-    runtime: labels[0],
-    labels,
-    kind,
-    importedAt: new Date().toISOString(),
-  });
-  return { path: dir, labels, kind };
-}
-
-function readPackageMarkerHash(markerPath: string): string | null {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(markerPath, "utf8")) as { packageHash?: string };
-    return typeof parsed.packageHash === "string" ? parsed.packageHash : null;
-  } catch {
-    return null;
-  }
-}
-
-function resolvePackageFile(root: string, relPath: string): string {
-  const normalized = relPath.replace(/\\/g, "/");
-  if (!normalized || normalized.startsWith("/") || normalized.includes("\0")) {
-    throw new Error(`Unsafe cloud package path: ${relPath}`);
-  }
-  const parts = normalized.split("/").filter((part) => part && part !== ".");
-  if (parts.length === 0 || parts.some((part) => part === "..")) {
-    throw new Error(`Unsafe cloud package path: ${relPath}`);
-  }
-  const target = path.resolve(root, ...parts);
-  const relative = path.relative(root, target);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error(`Cloud package path escapes agent folder: ${relPath}`);
-  }
-  return target;
+  // External-tool discovery is intentionally post-commit and best-effort. A
+  // catalog registration can neither split nor veto the package transaction.
+  autoRegisterAgentTools(listing);
+  return toAgent(expectedRow);
 }
 
 function detectCloudRuntimeLabels(paths: string[]): RuntimeLabel[] {
@@ -370,10 +349,6 @@ function detectCloudRuntimeLabels(paths: string[]): RuntimeLabel[] {
   if (normalized.some((file) => file.startsWith(".cursor/") || file === ".cursorrules")) labels.push("cursor");
   if (labels.length === 0) labels.push("generic");
   return labels;
-}
-
-function sha256(value: Buffer | string): string {
-  return createHash("sha256").update(value).digest("hex");
 }
 
 export function uninstallAgent(id: string): void {

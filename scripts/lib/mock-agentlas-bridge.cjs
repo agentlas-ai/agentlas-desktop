@@ -45,6 +45,50 @@ function setupMockAgentlasBridge(options) {
   const calls = [];
   const missingBridgeCalls = [];
   const eventHandlers = {};
+  let hubBookmarks = [];
+  try {
+    const savedBookmarks = JSON.parse(window.localStorage.getItem("agentlas.qa.hubBookmarks") || "[]");
+    if (Array.isArray(savedBookmarks)) hubBookmarks = savedBookmarks;
+  } catch {}
+  if (hubBookmarks.length === 0 && options?.hubBookmarks) {
+    const listing = makeHubCatalog(3)[1];
+    hubBookmarks = [{ slug: listing.slug, listing, bookmarkedAt: now }];
+  }
+  if (hubBookmarks.length === 0 && options?.hubBookmarkScenario === "mixed-callability") {
+    const callableOne = makeHubCatalog(4)[1];
+    const callableTwo = makeHubCatalog(4)[2];
+    const installOnly = {
+      slug: "install-only-agent",
+      name: "설치 전용 에이전트",
+      nameEn: "Install-only Agent",
+      tagline: "북마크로 볼 수 있지만 호출할 수 없음",
+      taglineEn: "Visible as a bookmark, unavailable for calls",
+      trustGrade: "A",
+      installCount: 2,
+      manifestUrl: "mock",
+      kind: "install-only",
+      callable: false,
+      routingReady: true,
+      source: "hub-index",
+      entityKind: "agent",
+    };
+    const localDuplicate = {
+      ...callableOne,
+      slug: "builder-agent",
+      name: "Hub 빌더 중복",
+      nameEn: "Hub Builder Duplicate",
+    };
+    hubBookmarks = [callableOne, installOnly, localDuplicate, callableTwo].map((listing, index) => ({
+      slug: listing.slug,
+      listing,
+      bookmarkedAt: new Date(Date.now() - index * 1000).toISOString(),
+    }));
+  }
+  function saveHubBookmarks() {
+    try {
+      window.localStorage.setItem("agentlas.qa.hubBookmarks", JSON.stringify(hubBookmarks));
+    } catch {}
+  }
   function readStoredAutomations() {
     try {
       const raw = window.localStorage.getItem("agentlas.qa.automations");
@@ -61,7 +105,14 @@ function setupMockAgentlasBridge(options) {
     } catch {}
   }
   let runtimeOverrides = [];
+  let chatHiredAgents =
+    options && options.hiredRoster
+      ? [{ slug: "instagram-uploader", name: "인스타 업로더", source: "hub", hiredAt: now }]
+      : [];
+  let hiredPersistenceFailuresRemaining = Math.max(0, Number(options?.hiredPersistenceFailures) || 0);
   const workspaceFolders = {};
+  const invokeReceipts = {};
+  const cancelledInvokeIds = new Set();
   let lastRunId = 0;
   let createdChatId = 0;
   const pendingConfirmations = Array.from({ length: options?.pendingConfirmations ?? 0 }, (_, index) => ({
@@ -258,6 +309,9 @@ function setupMockAgentlasBridge(options) {
     "",
     "## Open Questions",
     "- **Publish target** - Confirm Cloud or Hub.",
+    "",
+    "## Private provenance",
+    "Keep this operator-authored section byte-stable across memory card edits.",
   ].join("\n");
   const agentFileContents = {
     "agent-2": {
@@ -272,6 +326,7 @@ function setupMockAgentlasBridge(options) {
     };
     return agentFileContents[agentId];
   }
+  const evolutionProposals = [];
 
   window.__qa = { calls, automations, missingBridgeCalls };
   window.agentlasEvents = {
@@ -303,7 +358,9 @@ function setupMockAgentlasBridge(options) {
     updater: {
       getState: async () => ({ status: "idle" }),
       check: async () => ({ status: "idle" }),
-      install: async () => {},
+      install: async () => ({ accepted: false, state: { status: "idle" } }),
+      openManualDownload: async () => ({ accepted: true, state: { status: "idle" } }),
+      revealRecoveryBackup: async () => ({ accepted: false, state: { status: "idle" } }),
     },
     usage: {
       snapshot: async () => ({ providers: [{ label: "Codex", status: "ok", windows: [{ usedPercent: 10 }] }] }),
@@ -336,8 +393,8 @@ function setupMockAgentlasBridge(options) {
     team: {
       list: async () => installedAgents,
       install: async (input) => localized(input),
-      importLocalFolder: async (folder) => {
-        record("team.importLocalFolder", folder);
+      importLocalFolder: async (input) => {
+        record("team.importLocalFolder", input);
         importCounter += 1;
         const imported = {
           id: `imported-agent-${importCounter}`,
@@ -350,7 +407,7 @@ function setupMockAgentlasBridge(options) {
           tone: "amber",
           visibility: "local",
           systemPrompt: "# Imported QA Agent\n\nImported through the folder picker.",
-          localPath: folder,
+          localPath: input?.path,
           runtimeLabel: "codex",
           mcpServers: [],
           preferredBackend: "codex",
@@ -395,15 +452,39 @@ function setupMockAgentlasBridge(options) {
       listBundles: async () => [],
       listFirms: async () => [],
       listMine: async () => [],
-      bookmarks: async () => [],
+      bookmarks: async () => {
+        // Capture at call time so a delayed pre-add read can arrive after the
+        // durable add. OrgTree/HubBorrowRoom must reject this stale snapshot.
+        const snapshot = [...hubBookmarks];
+        if (snapshot.length === 0 && Number(options?.bookmarkEmptyReadDelayMs) > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, Number(options.bookmarkEmptyReadDelayMs)));
+        }
+        return snapshot;
+      },
       bookmarkAdd: async (listing) => {
         record("marketplace.bookmarkAdd", listing);
-        return { slug: listing?.slug ?? "mock-bookmark", listing, bookmarkedAt: now };
+        const bookmark = { slug: listing?.slug ?? "mock-bookmark", listing, bookmarkedAt: now };
+        hubBookmarks = [bookmark, ...hubBookmarks.filter((item) => item.slug !== bookmark.slug)];
+        saveHubBookmarks();
+        return bookmark;
       },
       bookmarkRemove: async (slug) => {
         record("marketplace.bookmarkRemove", slug);
+        hubBookmarks = hubBookmarks.filter((item) => item.slug !== slug);
+        saveHubBookmarks();
       },
-      search: async () => makeHubCatalog(267),
+      search: async (query) => {
+        const catalog = makeHubCatalog(267);
+        if (!options?.filterHubSearch) return catalog;
+        const q = String(query ?? "").trim().toLowerCase();
+        if (!q) return catalog;
+        return catalog.filter((listing) =>
+          [listing.slug, listing.name, listing.nameEn, listing.tagline, listing.taglineEn]
+            .join(" ")
+            .toLowerCase()
+            .includes(q),
+        );
+      },
     },
     mcpTools: {
       listCatalog: async () => [],
@@ -417,8 +498,16 @@ function setupMockAgentlasBridge(options) {
     },
     skills: {
       listCatalog: async () => [
-        { name: "qa-skill", path: "/tmp/qa-skill/SKILL.md", description: "QA helper skill" },
+        { slug: "qa-skill", name: "qa-skill", description: "QA helper skill" },
       ],
+      readCatalog: async (slug) => {
+        record("skills.readCatalog", { slug });
+        if (slug !== "qa-skill") throw new Error("Unknown mock skill");
+        const content = "---\nname: qa-skill\ndescription: QA helper skill\n---\n\n# Exact QA catalog body\n\nRun the full source instructions.\n";
+        const digest = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
+        const contentHash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+        return { slug, name: "qa-skill", description: "QA helper skill", content, contentHash, byteLength: new TextEncoder().encode(content).byteLength };
+      },
     },
     hephaestus: {
       status: async () => ({ available: true, version: "mock", reason: null }),
@@ -475,7 +564,7 @@ function setupMockAgentlasBridge(options) {
               emit(`build:${runId}`, {
                 kind: "done",
                 text: "BUILD_COMPLETE: qa-agent",
-                result: { workspace: "/tmp/agentlas-qa", securityScan: { findings: [] } },
+                result: { workspace: "/tmp/agentlas-qa/qa-agent", securityScan: { findings: [] } },
               }),
             60,
           );
@@ -487,7 +576,7 @@ function setupMockAgentlasBridge(options) {
             emit(`build:${runId}`, {
               kind: "done",
               text: "BUILD_COMPLETE: qa-agent",
-              result: { workspace: "/tmp/agentlas-qa", securityScan: { findings: [] } },
+            result: { workspace: "/tmp/agentlas-qa/qa-agent", securityScan: { findings: [] } },
             }),
           60,
         );
@@ -570,13 +659,18 @@ function setupMockAgentlasBridge(options) {
         createdAt: now,
         updatedAt: now,
         // hiredRoster 옵션(smoke-renderer-ui): 고용 카드가 붙은 채팅 — 동행 배지/재주입 검증용.
-        hiredAgents:
-          options && options.hiredRoster
-            ? [{ slug: "instagram-uploader", name: "인스타 업로더", source: "hub", hiredAt: now }]
-            : [],
+        hiredAgents: [...chatHiredAgents],
       }),
       setHiredAgents: async (id, cards) => {
         record("chats.setHiredAgents", { id, cards });
+        if (Number(options?.hiredPersistenceDelayMs) > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, Number(options.hiredPersistenceDelayMs)));
+        }
+        if (hiredPersistenceFailuresRemaining > 0) {
+          hiredPersistenceFailuresRemaining -= 1;
+          throw new Error("mock hired-roster persistence failure");
+        }
+        chatHiredAgents = Array.isArray(cards) ? [...cards] : [];
         return {
           id,
           projectId: null,
@@ -587,7 +681,7 @@ function setupMockAgentlasBridge(options) {
           archivedAt: null,
           createdAt: now,
           updatedAt: now,
-          hiredAgents: Array.isArray(cards) ? cards : [],
+          hiredAgents: [...chatHiredAgents],
         };
       },
       // teamRoster: 팀에 바인딩된 채팅 1건 — Sidebar가 agentById(visibleAgents 결과)로
@@ -620,7 +714,7 @@ function setupMockAgentlasBridge(options) {
       },
       switchAgent: async (chatId, agentId) => {
         record("chats.switchAgent", { chatId, agentId });
-        return { id: "chat-1", projectId: null, firmId: null, agentId, kind: "user", title: "QA Chat", archivedAt: null, createdAt: now, updatedAt: now };
+        return { id: "chat-1", projectId: null, firmId: null, agentId, kind: "user", title: "QA Chat", archivedAt: null, createdAt: now, updatedAt: now, hiredAgents: [...chatHiredAgents] };
       },
       rename: async (_id, title) => ({ id: "chat-1", projectId: null, firmId: null, agentId: "agent-2", kind: "user", title, archivedAt: null, createdAt: now, updatedAt: now }),
       // 에이전트 전환 시 chat 페이지가 동기 호출 — undefined면 TypeError가 그대로 pageerror가 된다.
@@ -636,26 +730,76 @@ function setupMockAgentlasBridge(options) {
     invoke: {
       history: async () => [],
       attach: async () => null,
-      activeChats: async () => [],
+      activeChats: async () => [
+        ...new Set(
+          Object.values(invokeReceipts)
+            .filter((receipt) => receipt.status === "running" || receipt.status === "cancelling")
+            .map((receipt) => receipt.chatId),
+        ),
+      ],
       run: async (payload) => {
         record("invoke.run", payload);
         lastRunId += 1;
-        const runId = `invoke-run-${lastRunId}`;
+        const runId = payload?.runId || `invoke-run-${lastRunId}`;
+        invokeReceipts[runId] = {
+          runId,
+          chatId: payload.chatId,
+          status: "running",
+          startedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          eventCount: 1,
+          resultFolder: workspaceFolders[payload.chatId] || "/tmp/agentlas-qa-runs",
+          hasImages: Boolean(payload.images?.length),
+          borrowAgents: payload.borrowAgents,
+        };
+        const finish = (text) => {
+          if (cancelledInvokeIds.has(runId)) return;
+          emit(`invoke:${runId}`, { kind: "final", text });
+          invokeReceipts[runId] = {
+            ...invokeReceipts[runId],
+            status: "completed",
+            updatedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+            eventCount: 2,
+          };
+        };
         if (options?.longChatInvoke) {
           const n = lastRunId;
           window.setTimeout(() => emit(`invoke:${runId}`, { kind: "thinking", status: `same-session turn #${n}` }), 12);
           window.setTimeout(() => emit(`invoke:${runId}`, { kind: "tool-use", status: `Network route stable #${n}` }), 24);
-          window.setTimeout(() => emit(`invoke:${runId}`, { kind: "final", text: `QA final ${n}` }), 48);
+          window.setTimeout(() => finish(`QA final ${n}`), 48);
         } else if (!options || !options.slowInvoke) {
           const finalDelay = options?.visibleProgressInvoke ? 1400 : 180;
           window.setTimeout(() => emit(`invoke:${runId}`, { kind: "thinking", status: "Agentlas orchestrator started" }), 20);
           window.setTimeout(() => emit(`invoke:${runId}`, { kind: "tool-use", status: "Hub 에이전트 빌리는 중: qa-agent" }), 70);
-          window.setTimeout(() => emit(`invoke:${runId}`, { kind: "final", text: "QA final" }), finalDelay);
+          window.setTimeout(() => finish("QA final"), finalDelay);
         }
         return { runId };
       },
-      cancel: async (runId) => record("invoke.cancel", runId),
+      cancel: async (runId) => {
+        record("invoke.cancel", runId);
+        cancelledInvokeIds.add(runId);
+        if (invokeReceipts[runId]) {
+          invokeReceipts[runId] = {
+            ...invokeReceipts[runId],
+            status: "cancelling",
+            updatedAt: new Date().toISOString(),
+          };
+          window.setTimeout(() => {
+            emit(`invoke:${runId}`, { kind: "error", error: { code: "cancelled", message: "Cancelled" } });
+            invokeReceipts[runId] = {
+              ...invokeReceipts[runId],
+              status: "cancelled",
+              updatedAt: new Date().toISOString(),
+              finishedAt: new Date().toISOString(),
+            };
+          }, 80);
+        }
+      },
       eventChannel: (runId) => `invoke:${runId}`,
+      receipt: async (runId) => invokeReceipts[runId] || null,
+      latestReceipt: async (chatId) =>
+        Object.values(invokeReceipts).reverse().find((receipt) => receipt.chatId === chatId) || null,
       clearHistory: async () => {},
     },
     projects: {
@@ -779,69 +923,118 @@ function setupMockAgentlasBridge(options) {
         filesForAgent(agentId)[filePath] = content;
         record("agentFiles.write", { agentId, path: filePath, content });
       },
+      promptSource: async (agentId) => {
+        const files = filesForAgent(agentId);
+        const priority = ["system-prompt.md", "soul.md", "agent.md", "claude.md", "agents.md", "gemini.md", "persona.md", "prompt.md"];
+        const relativePath = priority
+          .map((wanted) => Object.keys(files).find((filePath) => !filePath.includes("/") && filePath.toLowerCase() === wanted))
+          .find(Boolean);
+        if (!relativePath) return null;
+        return { path: relativePath, relativePath, exists: true, content: files[relativePath], hash: "mock-prompt-hash" };
+      },
     },
     agentMemory: {
       entries: async () => [],
     },
     agentEvolution: {
-      list: async () => [],
-      createAndApplyPrompt: async (input) => {
-        record("agentEvolution.createAndApplyPrompt", input);
-        filesForAgent(input.agentId)[input.targetPath || "AGENT.md"] = input.proposedContent;
-        return {
-          id: `proposal-${calls.filter((call) => call.name === "agentEvolution.createAndApplyPrompt").length}`,
+      list: async (agentId) => evolutionProposals.filter((proposal) => proposal.agentId === agentId),
+      createProposal: async (input) => {
+        record("agentEvolution.createProposal", input);
+        const targetPath = input.targetPath || "AGENT.md";
+        const targetExisted = Object.prototype.hasOwnProperty.call(filesForAgent(input.agentId), targetPath);
+        const proposal = {
+          id: `proposal-${evolutionProposals.length + 1}`,
           agentId: input.agentId,
           proposalType: input.proposalType || "rule",
           summary: input.summary || "Mock prompt evolution",
-          targetPath: input.targetPath || "AGENT.md",
+          targetPath,
           beforeHash: "mock-before",
           afterHash: "mock-after",
+          beforeContent: input.currentContent,
+          afterContent: input.proposedContent,
           risk: input.risk || "medium",
-          status: "applied",
-          source: input.source || {},
+          status: "candidate",
+          source: { ...(input.source || {}), _agentlasTargetExisted: targetExisted },
+          receipts: [],
           decisionNote: input.decisionNote,
           createdAt: now,
           updatedAt: now,
-          approvedAt: now,
-          appliedAt: now,
         };
+        evolutionProposals.unshift(proposal);
+        return proposal;
+      },
+      approveAndApply: async (proposalId, note) => {
+        record("agentEvolution.approveAndApply", { proposalId, note });
+        const proposal = evolutionProposals.find((item) => item.id === proposalId);
+        if (!proposal) throw new Error("Proposal not found");
+        filesForAgent(proposal.agentId)[proposal.targetPath] = proposal.afterContent;
+        proposal.status = "applied";
+        proposal.decisionNote = note || proposal.decisionNote;
+        proposal.approvedAt = now;
+        proposal.appliedAt = now;
+        proposal.receipts = [{
+          id: `receipt-${proposalId}-apply`,
+          proposalId,
+          agentId: proposal.agentId,
+          action: "apply",
+          targetPath: proposal.targetPath,
+          versionBefore: 1,
+          versionAfter: 2,
+          targetHashBefore: proposal.beforeHash,
+          targetHashAfter: proposal.afterHash,
+          packageHashBefore: "a".repeat(64),
+          packageHashAfter: "b".repeat(64),
+          governedAssetHashBefore: "a".repeat(64),
+          governedAssetHashAfter: "b".repeat(64),
+          createdAt: now,
+        }];
+        return proposal;
+      },
+      reject: async (proposalId, note) => {
+        record("agentEvolution.reject", { proposalId, note });
+        const proposal = evolutionProposals.find((item) => item.id === proposalId);
+        if (!proposal) throw new Error("Proposal not found");
+        proposal.status = "rejected";
+        proposal.decisionNote = note;
+        return proposal;
       },
       markMeasured: async (proposalId, note) => {
         record("agentEvolution.markMeasured", { proposalId, note });
-        return {
-          id: proposalId,
-          agentId: "agent-2",
-          proposalType: "rule",
-          summary: "Mock measured proposal",
-          targetPath: "AGENT.md",
-          beforeHash: "mock-before",
-          afterHash: "mock-after",
-          risk: "medium",
-          status: "measured",
-          source: {},
-          decisionNote: note,
-          createdAt: now,
-          updatedAt: now,
-          measuredAt: now,
-        };
+        const proposal = evolutionProposals.find((item) => item.id === proposalId);
+        if (!proposal) throw new Error("Proposal not found");
+        proposal.status = "measured";
+        proposal.decisionNote = note;
+        proposal.measuredAt = now;
+        return proposal;
       },
       rollback: async (proposalId) => {
         record("agentEvolution.rollback", proposalId);
-        return {
-          id: proposalId,
-          agentId: "agent-2",
-          proposalType: "rule",
-          summary: "Mock rolled back proposal",
-          targetPath: "AGENT.md",
-          beforeHash: "mock-before",
-          afterHash: "mock-after",
-          risk: "medium",
-          status: "rolled_back",
-          source: {},
+        const proposal = evolutionProposals.find((item) => item.id === proposalId);
+        if (!proposal) throw new Error("Proposal not found");
+        if (proposal.source._agentlasTargetExisted === false) {
+          delete filesForAgent(proposal.agentId)[proposal.targetPath];
+        } else {
+          filesForAgent(proposal.agentId)[proposal.targetPath] = proposal.beforeContent;
+        }
+        proposal.status = "rolled_back";
+        proposal.rolledBackAt = now;
+        proposal.receipts.push({
+          id: `receipt-${proposalId}-rollback`,
+          proposalId,
+          agentId: proposal.agentId,
+          action: "rollback",
+          targetPath: proposal.targetPath,
+          versionBefore: 2,
+          versionAfter: 3,
+          targetHashBefore: proposal.afterHash,
+          targetHashAfter: proposal.beforeHash,
+          packageHashBefore: "b".repeat(64),
+          packageHashAfter: "a".repeat(64),
+          governedAssetHashBefore: "b".repeat(64),
+          governedAssetHashAfter: "a".repeat(64),
           createdAt: now,
-          updatedAt: now,
-          rolledBackAt: now,
-        };
+        });
+        return proposal;
       },
     },
     agentRuntime: {
@@ -889,6 +1082,14 @@ function setupMockAgentlasBridge(options) {
           truncated: false,
           size: 73,
         };
+      },
+      openPath: async (target) => {
+        record("fs.openPath", target);
+        return { ok: true };
+      },
+      showItemInFolder: async (target) => {
+        record("fs.showItemInFolder", target);
+        return { ok: true };
       },
     },
     secrets: {

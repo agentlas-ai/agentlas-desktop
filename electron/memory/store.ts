@@ -219,6 +219,7 @@ export function hasEquivalentMemory(
   kind: MemoryKind,
   content: string,
   projectPath: string | null,
+  agentId: string | null,
 ): boolean {
   const norm = content.trim().toLowerCase();
   const row = getDb()
@@ -227,9 +228,10 @@ export function hasEquivalentMemory(
        WHERE scope = ? AND kind = ? AND lower(trim(content)) = ?
          AND superseded_at IS NULL
          AND (project_path IS ? OR project_path = ?)
+         AND (scope != 'agent_repo' OR agent_id IS ?)
        LIMIT 1`,
     )
-    .get(scope, kind, norm, projectPath, projectPath);
+    .get(scope, kind, norm, projectPath, projectPath, agentId);
   return Boolean(row);
 }
 

@@ -35,7 +35,7 @@ async function main() {
     const store = require("../dist/electron/store/db.js");
     assert.doesNotThrow(() => store.initStore());
     const db = store.getDb();
-    assert.equal(db.pragma("user_version", { simple: true }), 50);
+    assert.equal(db.pragma("user_version", { simple: true }), 51);
     const columns = db.prepare("PRAGMA table_info(chats)").all();
     assert.equal(columns.filter((column) => column.name === "hired_agents").length, 1);
     console.log(JSON.stringify({ ok: true, checks: 3 }, null, 2));

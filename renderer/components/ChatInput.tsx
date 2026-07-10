@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ImageAttachment,
+  HubAgentBookmark,
   AppFactoryAppRecord,
   InstalledAgent,
   InstalledFirm,
@@ -21,6 +22,7 @@ import { CONTEXT_MANAGED_BY } from "@shared/models";
 import type { Recommendation, RecExecChoice } from "@shared/types";
 import type { AgentlasAppDefinition } from "@/lib/apps";
 import { appDisplayName, appSlashCommands, appTagline } from "@/lib/apps";
+import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 
 type ModelOption = { id: string; label: string; tag?: string };
@@ -70,6 +72,8 @@ interface PreviewedImage extends ImageAttachment {
 
 interface MentionContext {
   agents: InstalledAgent[];
+  /** Saved public Hub routing references. They are borrowed, never presented as installed/owned. */
+  hubBookmarks?: HubAgentBookmark[];
   projects: Project[];
   firms: InstalledFirm[];
   apps: AgentlasAppDefinition[];
@@ -97,13 +101,15 @@ interface AutocompleteOption {
   title: string;
   subtitle?: string;
   /** 아이콘은 popover에서 일괄 매핑 (group으로 결정) */
-  kind: "cmd" | "app" | "agent" | "firm" | "project" | "env";
+  kind: "cmd" | "app" | "agent" | "hub" | "firm" | "project" | "env";
   /** 선택 시 입력창에 치환할 토큰 */
   replacement: string;
   /** true면 앱 액션 실행(/new·/clear·/help). false/undefined면 텍스트 삽입(멘션·CLI 슬래시). */
   appAction?: boolean;
   /** 멘션(@agent/@firm) 선택 시 이 에이전트로 활성 에이전트를 전환(=에이전트 콜). 있으면 텍스트 삽입 대신 전환. */
   switchAgentId?: string;
+  /** Hub bookmark selection binds this borrowed slug to the current chat. */
+  borrowAgentSlug?: string;
 }
 
 type PermissionLevel = "read" | "write" | "full";
@@ -164,6 +170,7 @@ interface BottomQuestionOption {
 export function ChatInput({
   onSend,
   onCallAgent,
+  onCallHubAgents,
   onCommand,
   onRecommendPreview,
   onRecommendExecute,
@@ -192,6 +199,8 @@ export function ChatInput({
   onCommand?: (cmd: string) => void;
   /** @멘션으로 에이전트/회사를 고르면 그 에이전트를 호출(활성 에이전트 전환). */
   onCallAgent?: (agentId: string) => void;
+  /** Hub 북마크를 고르면 설치로 가장하지 않고 이 채팅의 borrowed roster에 바인딩. */
+  onCallHubAgents?: (slugs: string[]) => void;
   /** 추천 토글 ON 시 보내기 전에 라우터 미리보기를 요청 — 정규화된 추천을 반환(없으면 null). */
   onRecommendPreview?: (text: string) => Promise<Recommendation | null>;
   /** 추천 시트에서 고른 실행 경로를 디스패치(에이전트 전환/네트워크/파이프라인/그냥보내기). */
@@ -465,6 +474,20 @@ export function ChatInput({
     const after = input.slice(caret);
 
     if (!fillOnly) {
+      // @Hub bookmark = 공개 Hub 라우팅 참조를 이 채팅에 고용 바인딩.
+      if (opt.borrowAgentSlug && onCallHubAgents) {
+        setInput(`${before}${after}`.trimStart());
+        setTrigger(null);
+        setRecSheet(null);
+        setHepToggles((prev) => {
+          const next = new Set(prev);
+          next.delete("recommend");
+          return next;
+        });
+        onCallHubAgents([opt.borrowAgentSlug]);
+        setTimeout(() => textareaRef.current?.focus(), 0);
+        return;
+      }
       // @agent / @firm 선택 = 그 에이전트 호출(활성 에이전트 전환) — 텍스트는 넣지 않고 토큰 제거.
       if (opt.switchAgentId && onCallAgent) {
         setInput(`${before}${after}`.trimStart());
@@ -786,6 +809,7 @@ export function ChatInput({
         <AgentPickerPopup
           agents={context.agents}
           firms={context.firms}
+          hubBookmarks={context.hubBookmarks ?? []}
           selected={selectedAgentIds}
           onToggle={(id) => {
             setSelectedAgentIds((prev) => {
@@ -796,15 +820,20 @@ export function ChatInput({
             });
           }}
           onConfirm={() => {
-            // 선택된 에이전트들을 호출
+            // 로컬 에이전트는 전환하고, Hub 북마크는 borrowed roster에 묶는다.
             setHepToggles((prev) => {
               const next = new Set(prev);
               next.delete("recommend");
               return next;
             });
-            for (const id of selectedAgentIds) {
+            const hubSlugs = [...selectedAgentIds]
+              .filter((id) => id.startsWith("hub:"))
+              .map((id) => id.slice("hub:".length))
+              .filter(Boolean);
+            for (const id of [...selectedAgentIds].filter((id) => !id.startsWith("hub:"))) {
               onCallAgent?.(id);
             }
+            if (hubSlugs.length > 0) onCallHubAgents?.(hubSlugs);
             setAgentPickerOpen(false);
             setSelectedAgentIds(new Set());
           }}
@@ -2102,6 +2131,13 @@ function buildAutocompleteOptions(
       return !q || loc.name.toLowerCase().includes(q) || a.slug.includes(q);
     })
     .slice(0, 5);
+  const hubBookmarks = callableHubBookmarks(context.hubBookmarks ?? [], context.agents)
+    .filter((bookmark) => {
+      const listing = bookmark.listing;
+      const loc = pickLocalized(listing, locale);
+      return !q || loc.name.toLowerCase().includes(q) || listing.slug.toLowerCase().includes(q);
+    })
+    .slice(0, 5);
   const firms = context.firms
     .filter((f) => {
       const loc = pickLocalized(f, locale);
@@ -2136,6 +2172,18 @@ function buildAutocompleteOptions(
       subtitle: loc.tagline,
       replacement: `@${loc.name}`,
       switchAgentId: a.id, // @agent = 그 에이전트 호출(활성 에이전트 전환)
+    });
+  }
+  for (const bookmark of hubBookmarks) {
+    const loc = pickLocalized(bookmark.listing, locale);
+    out.push({
+      key: `hub-${bookmark.slug}`,
+      group: locale === "en" ? "Hub bookmarks" : "Hub 북마크",
+      kind: "hub",
+      title: loc.name,
+      subtitle: loc.tagline,
+      replacement: `@${loc.name}`,
+      borrowAgentSlug: bookmark.slug,
     });
   }
   for (const f of firms) {
@@ -2249,6 +2297,8 @@ function kindIcon(kind: AutocompleteOption["kind"]) {
       return <IconApps size={13} style={{ color: "var(--accent)" }} />;
     case "agent":
       return <IconSparkles size={13} style={{ color: "var(--accent)" }} />;
+    case "hub":
+      return <IconRoute size={13} style={{ color: "var(--accent)" }} />;
     case "firm":
       return <IconBuilding size={13} style={{ color: "var(--accent)" }} />;
     case "project":
@@ -2831,6 +2881,7 @@ function toolBtnStyle(active: boolean): React.CSSProperties {
 function AgentPickerPopup({
   agents,
   firms,
+  hubBookmarks,
   selected,
   onToggle,
   onConfirm,
@@ -2840,6 +2891,7 @@ function AgentPickerPopup({
 }: {
   agents: InstalledAgent[];
   firms: InstalledFirm[];
+  hubBookmarks: HubAgentBookmark[];
   selected: Set<string>;
   onToggle: (id: string) => void;
   onConfirm: () => void;
@@ -2857,6 +2909,10 @@ function AgentPickerPopup({
   const filteredAgents = agents.filter((a) => {
     const loc = pickLocalized(a, locale);
     return !q || loc.name.toLowerCase().includes(q) || a.slug.includes(q);
+  });
+  const filteredHubBookmarks = callableHubBookmarks(hubBookmarks, agents).filter((bookmark) => {
+    const loc = pickLocalized(bookmark.listing, locale);
+    return !q || loc.name.toLowerCase().includes(q) || bookmark.slug.toLowerCase().includes(q);
   });
 
   const selectedCount = selected.size;
@@ -2982,7 +3038,7 @@ function AgentPickerPopup({
           padding: "4px 8px",
         }}
       >
-        {filteredFirms.length === 0 && filteredAgents.length === 0 ? (
+        {filteredFirms.length === 0 && filteredAgents.length === 0 && filteredHubBookmarks.length === 0 ? (
           <div
             style={{
               padding: "24px 12px",
@@ -3053,6 +3109,38 @@ function AgentPickerPopup({
                       icon={<IconSparkles size={14} style={{ color: "var(--accent)" }} />}
                       name={loc.name}
                       tagline={loc.tagline}
+                    />
+                  );
+                })}
+              </>
+            )}
+            {/* Hub 북마크 — 설치/소유 에이전트가 아니라 이 채팅에서 빌려 부를 라우팅 참조. */}
+            {filteredHubBookmarks.length > 0 && (
+              <>
+                <div
+                  style={{
+                    padding: "8px 10px 4px",
+                    fontSize: 10,
+                    fontFamily: "var(--font-mono)",
+                    textTransform: "uppercase",
+                    letterSpacing: 0.6,
+                    color: "var(--muted-deep)",
+                  }}
+                >
+                  {locale === "en" ? "Hub bookmarks" : "Hub 북마크"}
+                </div>
+                {filteredHubBookmarks.map((bookmark) => {
+                  const loc = pickLocalized(bookmark.listing, locale);
+                  const key = `hub:${bookmark.slug}`;
+                  return (
+                    <AgentPickerRow
+                      key={key}
+                      checked={selected.has(key)}
+                      onToggle={() => onToggle(key)}
+                      icon={<IconRoute size={14} style={{ color: "var(--accent)" }} />}
+                      name={loc.name}
+                      tagline={loc.tagline}
+                      badge="Hub"
                     />
                   );
                 })}

@@ -5,10 +5,11 @@
 //   - 허브(북마크)는 로컬 설치와 별개인 Hub 라우팅 참조.
 //   - 가져오기: 폴더 선택 → team.importLocalFolder → 리로드.
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { classifyHubEntity, classifyInstalledAgent, entityClassShortLabel } from "@/lib/agent-entity-kind";
 import { buildAgentRoster, visibleRosterAgents } from "@/lib/agent-roster";
+import { hubBookmarksWithoutLocalDuplicates, onHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { isUserFacingAgentText } from "@/lib/agent-visibility";
@@ -50,6 +51,23 @@ export function OrgTree() {
   });
   const [openFirms, setOpenFirms] = useState<Record<string, boolean>>({});
   const [orgs, setOrgs] = useState<Record<string, ResolvedOrg | null>>({});
+  // A full roster load can be slower than the local bookmark write that happens
+  // while it is in flight. Only the newest bookmark read may replace renderer
+  // state, so an old mount snapshot can never erase an optimistic add.
+  const hubBookmarkGenerationRef = useRef(0);
+
+  const refreshHubBookmarks = useCallback(async () => {
+    const api = ipc();
+    if (!api) return;
+    const generation = ++hubBookmarkGenerationRef.current;
+    try {
+      const bookmarks = await api.marketplace.bookmarks();
+      if (hubBookmarkGenerationRef.current === generation) setHubBookmarks(bookmarks);
+    } catch {
+      // Keep the last known/optimistic state. A local read failure is not proof
+      // that the durable bookmark row disappeared.
+    }
+  }, []);
 
   const load = useCallback(async () => {
     const api = ipc();
@@ -57,26 +75,28 @@ export function OrgTree() {
       setLoading(false);
       return;
     }
+    const bookmarkGeneration = ++hubBookmarkGenerationRef.current;
     try {
       const [a, f, groups, mine, bookmarks] = await Promise.all([
         api.team.list(),
         api.firms.list(),
         api.agentGroups.listResolved(),
         api.marketplace.listMine().catch(() => [] as MarketplaceListing[]),
-        api.marketplace.bookmarks().catch(() => [] as HubAgentBookmark[]),
+        api.marketplace.bookmarks().catch(() => null),
       ]);
       setAgents(visibleRosterAgents(a));
       setFirms(f);
       setAgentGroups(groups);
       setCloudListings(mine);
-      setHubBookmarks(bookmarks);
+      if (bookmarks && hubBookmarkGenerationRef.current === bookmarkGeneration) {
+        setHubBookmarks(bookmarks);
+      }
       setLoadError("");
     } catch {
       setAgents([]);
       setFirms([]);
       setAgentGroups([]);
       setCloudListings([]);
-      setHubBookmarks([]);
       setLoadError(t("org.load_error"));
     } finally {
       setLoading(false);
@@ -85,6 +105,25 @@ export function OrgTree() {
   useEffect(() => {
     void load();
   }, [load]);
+  useEffect(
+    () =>
+      onHubBookmarkChange((change) => {
+        if (change.action === "added") {
+          setHubBookmarks((previous) => [
+            change.bookmark,
+            ...previous.filter((bookmark) => bookmark.slug !== change.bookmark.slug),
+          ]);
+          setMode(classifyHubEntity(change.bookmark.listing) === "multi" ? "multi" : "single");
+          setOpenCats((previous) => ({ ...previous, hub: true }));
+        } else {
+          setHubBookmarks((previous) => previous.filter((bookmark) => bookmark.slug !== change.slug));
+        }
+        // Reconcile only the bookmark slice. A slow full roster/listMine load
+        // must not overwrite this event with a snapshot taken before the add.
+        void refreshHubBookmarks();
+      }),
+    [refreshHubBookmarks],
+  );
 
   const dn = useCallback(
     (o: { name: string; nameEn?: string }) => (ko ? o.name : o.nameEn || o.name),
@@ -92,14 +131,21 @@ export function OrgTree() {
   );
   const roster = useMemo(() => buildAgentRoster(agents, firms), [agents, firms]);
   const { agentById, singleFirmByAgentId } = roster;
+  const visibleHubBookmarks = useMemo(
+    () => hubBookmarksWithoutLocalDuplicates(hubBookmarks, agents),
+    [agents, hubBookmarks],
+  );
 
-  const agentSource = (a: InstalledAgent): Source => (a.localPath ? "local" : "cloud");
-  // firm 출처: CEO 에이전트의 localPath가 1차. CEO가 visible 필터에서 빠져 map에 없을 수 있으므로
+  const isLocalSource = (a: InstalledAgent | undefined) =>
+    Boolean(a?.localPath && a.assetSource !== "agent-cloud" && a.assetSource !== "hub");
+  const agentSource = (a: InstalledAgent): Source => (isLocalSource(a) ? "local" : "cloud");
+  // firm 출처: CEO 에이전트의 권위 출처가 1차. Cloud/Hub 복원본도 localPath를 가지므로
+  // 경로 유무만으로 local로 분류하지 않는다. CEO가 visible 필터에서 빠져 map에 없을 수 있으므로
   // 로컬 임포트 firm(slug: firm-local-*) 이거나 조직도의 어떤 에이전트라도 로컬이면 로컬로 본다.
   const firmSource = (f: InstalledFirm): Source => {
-    if (agentById.get(f.ceoAgentId)?.localPath) return "local";
+    if (isLocalSource(agentById.get(f.ceoAgentId))) return "local";
     if (f.slug?.startsWith("firm-local-")) return "local";
-    if (f.orgChart.some((n) => agentById.get(n.agentId)?.localPath)) return "local";
+    if (f.orgChart.some((n) => isLocalSource(agentById.get(n.agentId)))) return "local";
     return "cloud";
   };
 
@@ -115,7 +161,7 @@ export function OrgTree() {
     try {
       const dir = await api.fs.pickDirectory();
       if (dir) {
-        const agent = await api.team.importLocalFolder(dir.path);
+        const agent = await api.team.importLocalFolder({ path: dir.path, scope: dir.scope });
         await load();
         setImportMessage({
           tone: "ok",
@@ -264,7 +310,7 @@ export function OrgTree() {
               : [];
           const hubOnly =
             cat.key === "hub"
-              ? hubBookmarks
+              ? visibleHubBookmarks
                 .filter((bookmark) => classifyHubEntity(bookmark.listing) === (mode === "multi" ? "multi" : "single"))
                 .filter((bookmark) => matches(ko ? bookmark.listing.name : bookmark.listing.nameEn || bookmark.listing.name))
               : [];

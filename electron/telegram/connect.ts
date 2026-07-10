@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { BrowserWindow, session as electronSession, shell } from "electron";
-import { currentUiLocale } from "../main";
+import { currentUiLocale } from "../ui-locale";
 import { runMcpInvocation } from "../mcp/client";
 import { getAgentById, listInstalledAgents } from "../mcp/registry";
 import { getAgentGroup } from "../store/agent-groups";

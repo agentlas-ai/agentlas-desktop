@@ -179,14 +179,14 @@ export function getCargoSource(): McpSource | null {
   return _cargoSource;
 }
 
-/** 로그인 사용자의 published/cargo agent 목록. 세션 cookie별로 짧게 캐시해 Library 탭 전환 지연을 줄인다. */
+/** 로그인 사용자의 실제 복원 가능한 Agent Cloud 패키지 목록. 세션별로 짧게 캐시한다. */
 export async function listMyAgentsCached(): Promise<MarketplaceListing[]> {
   const source = getCargoSource();
   if (!source) return [];
   const cookie = getSessionCookieHeader();
   const cached = cacheFresh(_myAgentsCache ?? undefined);
   if (cached && cached.cookie === cookie) return cached.agents;
-  const agents = (await source.listMyAgents()).filter((agent) => isPublicDesktopAgent(agent));
+  const agents = (await source.listMyCloudPackages()).filter((agent) => isPublicDesktopAgent(agent));
   _myAgentsCache = { value: { cookie, agents }, at: Date.now() };
   return agents;
 }

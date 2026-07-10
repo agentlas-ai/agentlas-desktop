@@ -6,7 +6,7 @@
 // 없으면 클론한다. 이미 있으면 무엇도 변경하지 않는다(엔진 레포를 절대 더럽히지 않음).
 //
 // 환경변수:
-//   HEPHAESTUS_REPO   기본 https://github.com/agentlas-ai/Hephaestus.git
+//   HEPHAESTUS_REPO   기본 https://github.com/agentlas-ai/Agentlas-OS.git
 //   HEPHAESTUS_REF    기본 v1.1.12 (브랜치/태그/커밋)
 //   HEPHAESTUS_DIR    기본 <repo>/Hephaestus
 import { execFileSync } from "node:child_process";
@@ -18,7 +18,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const dir = process.env.HEPHAESTUS_DIR
   ? path.resolve(process.env.HEPHAESTUS_DIR)
   : path.join(repoRoot, "Hephaestus");
-const repo = process.env.HEPHAESTUS_REPO || "https://github.com/agentlas-ai/Hephaestus.git";
+const repo = process.env.HEPHAESTUS_REPO || "https://github.com/agentlas-ai/Agentlas-OS.git";
 const ref = process.env.HEPHAESTUS_REF || "v1.1.12";
 
 // 엔진 존재 판정: 런타임 진입 모듈이 있어야 "있다"로 본다(빈 폴더/부분 클론 방지).

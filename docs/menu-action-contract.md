@@ -15,7 +15,7 @@ Date: 2026-06-27
 ## Build (`/build`)
 
 - Purpose: 자연어 요청을 Hephaestus build request로 보내고 진행 단계, 산출물, 업로드 경로를 보여준다.
-- Build action: `hephaestus.build({ request, mode, workspace })`를 호출하고 build event stream을 표시한다.
+- Build action: native picker capability를 포함한 `hephaestus.build({ request, mode, workspaceGrant })`를 호출하고, main이 capability를 검증한 뒤 build event stream을 표시한다.
 - Upload action: private link는 검토용, marketplace는 공개 전 단계로 분리해 보여준다.
 - Cross screen: 산출물이 설치되면 Agents Library와 Chat 라우팅 후보에 반영된다.
 - Cross screen: Hub 업로드는 Hub/Marketplace에 보일 수 있는 상태로 이어지므로 signed-in 및 review 경계를 노출한다.

@@ -139,22 +139,32 @@ async function main() {
       });
     });
 
-    const setup = await page.evaluate(async ({ proofRoot, qaAgentA, qaAgentB }) => {
+    const grants = await app.evaluate((_, paths) => {
+      const path = require("node:path");
+      const { grantPath } = require(path.join(process.cwd(), "dist/electron/fs/access.js"));
+      return {
+        proofRoot: grantPath(paths.proofRoot, { durable: true }),
+        qaAgentA: grantPath(paths.qaAgentA, { durable: false }),
+        qaAgentB: grantPath(paths.qaAgentB, { durable: false }),
+      };
+    }, { proofRoot: PROOF_ROOT, qaAgentA: QA_AGENT_A, qaAgentB: QA_AGENT_B });
+
+    const setup = await page.evaluate(async ({ grants }) => {
       window.localStorage.setItem("agentlas.onboarded", "1");
       await window.agentlas.menu.setLocale("ko").catch(() => undefined);
-      await window.agentlas.team.importLocalFolder(qaAgentA).catch(() => undefined);
-      await window.agentlas.team.importLocalFolder(qaAgentB).catch(() => undefined);
+      await window.agentlas.team.importLocalFolder({ path: grants.qaAgentA.path, scope: grants.qaAgentA.scope }).catch(() => undefined);
+      await window.agentlas.team.importLocalFolder({ path: grants.qaAgentB.path, scope: grants.qaAgentB.scope }).catch(() => undefined);
       const allAgents = await window.agentlas.team.list();
       const agents = allAgents.filter((agent) => agent.visibility !== "background" && agent.kind !== "team");
       if (agents.length < 2) throw new Error(`Need at least two visible agents, got ${agents.length}`);
       const chat = await window.agentlas.chats.create({ agentId: agents[0].id, title: "QA routing states" });
-      await window.agentlas.workspace.set(chat.id, proofRoot);
+      await window.agentlas.workspace.set(chat.id, grants.proofRoot);
       return {
         chat,
         first: { id: agents[0].id, name: agents[0].name || agents[0].nameKo || agents[0].slug },
         second: { id: agents[1].id, name: agents[1].name || agents[1].nameKo || agents[1].slug },
       };
-    }, { proofRoot: PROOF_ROOT, qaAgentA: QA_AGENT_A, qaAgentB: QA_AGENT_B });
+    }, { grants });
 
     await page.evaluate((chatId) => {
       window.location.href = `/chat?id=${chatId}`;

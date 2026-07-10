@@ -15,7 +15,13 @@ import { registerIpcHandlers } from "./ipc";
 import { buildAppMenu } from "./menu";
 import { initStore } from "./store/db";
 import { startAutomationScheduler, stopAutomationScheduler } from "./automation-scheduler";
-import { initAutoUpdater, disposeAutoUpdater } from "./updater";
+import {
+  disposeAutoUpdater,
+  getUpdaterState,
+  handleUpdaterBootstrapFailure,
+  initAutoUpdater,
+  preflightUpdaterStartup,
+} from "./updater";
 import { disposeAppFactoryLaunches } from "./app-factory/operations";
 import { bootAuthFromKeychain } from "./auth";
 import { materializeAllAgents } from "./agents/files";
@@ -24,6 +30,9 @@ import { seedBuiltinAgents } from "./architecture/seed";
 import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
 import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser/approval-server";
 import { authorizeLocalMediaPath } from "./fs/access";
+import { setCurrentUiLocale } from "./ui-locale";
+
+export { currentUiLocale } from "./ui-locale";
 
 const isDev = process.env.NODE_ENV === "development";
 
@@ -271,11 +280,20 @@ app.on("before-quit", () => {
 });
 
 app.whenReady().then(async () => {
+  // Stage 1 (pre-mutation): a pending install must already have a valid,
+  // contained SQLite/agent/route recovery set before initStore can migrate.
+  const updatePreflight = preflightUpdaterStartup();
   // ── 헤드리스 자동화 러너 진입점(설계 §2.6) ─────────────────────
   // launchd LaunchAgent가 `--headless-automations` 플래그로 이 바이너리를 coarse 인터벌마다
   // poke한다. 창을 만들지 않고 due 자동화를 1회 실행한 뒤 종료한다. 러너는 이미 렌더러를
   // 안 건드리므로(sink no-op) 엔진 전체를 그대로 재사용한다. (full launchd 설치는 P1.)
   if (process.argv.includes("--headless-automations")) {
+    if (updatePreflight.pendingInstall) {
+      // The GUI launch owns post-migration continuity review. Never let a
+      // background runner mutate a just-updated store first.
+      app.quit();
+      return;
+    }
     try {
       initStore();
       const { runDueAutomationsNow } = await import("./automation-scheduler");
@@ -302,20 +320,24 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => !DENIED_PERMISSIONS.has(permission));
   applyDockIcon();
   initStore();
+  // Restore/decrypt the account before the post-migration continuity check.
+  await bootAuthFromKeychain();
+  // Stage 2 (post-migration, pre-bootstrap-writers): compare the live DB and
+  // managed assets against the recovery copies. Recovery-required stops here.
+  await initAutoUpdater();
   registerIpcHandlers();
-  _uiLocale = resolveMenuLocale();
-  applyAppMenu(_uiLocale);
+  setCurrentUiLocale(resolveMenuLocale());
+  applyAppMenu(resolveMenuLocale());
   ipcMain.handle("menu:setLocale", (_e, locale: unknown) => {
-    _uiLocale = resolveMenuLocale(typeof locale === "string" ? locale : undefined);
-    applyAppMenu(_uiLocale);
+    const nextLocale = resolveMenuLocale(typeof locale === "string" ? locale : undefined);
+    setCurrentUiLocale(nextLocale);
+    applyAppMenu(nextLocale);
   });
   shellReadyForWindows = true;
-  ensureDefaultMcpPluginsInstalled();
-  // Browser 승인 서버 — agentlas-browser 런처가 되돌릴 수 없는 행동 전에 이 로컬 엔드포인트로
-  // 사용자 승인을 받는다(포트+토큰은 ~/.agentlas/browser-approval.json).
-  void startBrowserApprovalServer().catch((err) =>
-    console.error("[browser] approval server failed:", err),
-  );
+  if (getUpdaterState().status === "recovery-required") {
+    await createWindow();
+    return;
+  }
   // Agentlas 아키텍처 — PM 소울/메모리 큐레이터/태스크 편향 큐레이터를 설치에 항상 동봉.
   // 버전 게이팅이라 평상시엔 거의 no-op. ARCHITECTURE_VERSION이 오르면 프롬프트만 재동기화.
   try {
@@ -332,8 +354,11 @@ app.whenReady().then(async () => {
   }
   // 설치된 에이전트 폴더의 파일을 보장 — 라이브러리 우측 패널이 즉시 보여줄 수 있게.
   materializeAllAgents();
-  // 키체인에서 저장된 세션 복원 — 메인 윈도우가 뜨자마자 getSession()이 정상 값을 반환하도록 await
-  await bootAuthFromKeychain();
+  ensureDefaultMcpPluginsInstalled();
+  // Browser 승인 서버 — continuity gate가 닫힌 뒤에만 로컬 작업 서버를 연다.
+  void startBrowserApprovalServer().catch((err) =>
+    console.error("[browser] approval server failed:", err),
+  );
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
   try {
     const { reconcileTelegramWorkers } = await import("./telegram/connect");
@@ -358,8 +383,15 @@ app.whenReady().then(async () => {
     console.error("[triggers] startTriggerManager failed:", err);
   }
   await createWindow();
-  // 자동 업데이트는 production에서만. updater.ts 안에서 NODE_ENV 체크.
-  initAutoUpdater();
+}).catch(async (error) => {
+  let handled = false;
+  try {
+    handled = await handleUpdaterBootstrapFailure(error);
+  } catch (recoveryError) {
+    console.error("[updater] native recovery fallback failed", recoveryError);
+  }
+  if (!handled) console.error("[main] startup failed", error);
+  app.exit(1);
 });
 
 app.on("before-quit", async () => {
@@ -382,12 +414,6 @@ function resolveMenuLocale(pref?: string): "ko" | "en" {
   return v.startsWith("ko") ? "ko" : "en";
 }
 
-// 렌더러가 menu:setLocale로 통지한 최신 표시 언어 스냅샷 — main 프로세스의 다른 코드(네이티브
-// 알림/다이얼로그 등, 특정 요청의 locale을 모르는 곳)가 currentUiLocale()로 읽어 쓴다.
-let _uiLocale: "ko" | "en" = "en";
-export function currentUiLocale(): "ko" | "en" {
-  return _uiLocale;
-}
 
 /** 주어진 언어로 네이티브 메뉴를 다시 빌드해 적용. */
 function applyAppMenu(locale: "ko" | "en"): void {

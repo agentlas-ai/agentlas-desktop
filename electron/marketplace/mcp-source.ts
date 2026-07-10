@@ -3,8 +3,17 @@
 //
 // Desktop Hub는 공개 Hub 프로필 전체 목록을 우선 읽고, 실패 시에만 live MCP 검색을 보조로 사용한다.
 // 응답 실패/타임아웃 시 하드코딩 카탈로그로 대체하지 않는다.
-import type { FirmListing, MarketplaceListing, TeamBundle } from "../../shared/types";
+import type {
+  AgentEnvRequirement,
+  CloudAgentPackageDownload,
+  CloudAgentPackageDownloadFile,
+  CloudAgentRevisionIdentity,
+  FirmListing,
+  MarketplaceListing,
+  TeamBundle,
+} from "../../shared/types";
 import type { MarketplaceSource, SeedListingFull } from "./source";
+import { readCanonicalPromptFromPackageFiles } from "../agents/prompt-authority";
 
 const PUBLIC_AGENT_CACHE_MS = 60_000;
 
@@ -16,6 +25,31 @@ export class PartialHubResultError<T> extends Error {
     super(message);
     this.name = "PartialHubResultError";
   }
+}
+
+export class OwnerPackageRestoreError extends Error {
+  constructor(
+    readonly code: string,
+    readonly detail?: string,
+  ) {
+    // Keep the server code as the exact Error.message so callers can branch on
+    // owner_only / no_cloud_package without parsing translated prose.
+    super(code);
+    this.name = "OwnerPackageRestoreError";
+  }
+}
+
+interface OwnerPackageRestorePayload {
+  schema: "agentlas.agent_cloud.restore.v1";
+  source: "cloud";
+  owner: true;
+  slug: string;
+  name: string;
+  nameEn: string;
+  tagline: string;
+  taglineEn: string;
+  registration: CloudAgentRevisionIdentity;
+  cloudPackage: CloudAgentPackageDownload;
 }
 
 interface McpSourceOptions {
@@ -45,6 +79,12 @@ function asArray<T>(raw: unknown, ...keys: string[]): T[] {
   return [];
 }
 
+function asRecord(raw: unknown): Record<string, unknown> | null {
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : null;
+}
+
 function cleanString(value: unknown, fallback = ""): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
@@ -59,6 +99,210 @@ function cleanIsoString(value: unknown): string | undefined {
 
 function trustGrade(value: unknown): MarketplaceListing["trustGrade"] {
   return value === "A" || value === "B" || value === "C" || value === "unknown" ? value : "unknown";
+}
+
+function restoreError(raw: Record<string, unknown>): never {
+  const code = cleanString(raw.error, "invalid_restore_contract");
+  throw new OwnerPackageRestoreError(code, cleanString(raw.message) || undefined);
+}
+
+function normalizeRestoreFile(raw: unknown): CloudAgentPackageDownloadFile | null {
+  const row = asRecord(raw);
+  if (!row) return null;
+  if (
+    typeof row.path !== "string" ||
+    typeof row.bytes !== "number" ||
+    typeof row.sha256 !== "string" ||
+    typeof row.contentBase64 !== "string"
+  ) {
+    return null;
+  }
+  return {
+    path: row.path,
+    bytes: row.bytes,
+    sha256: row.sha256,
+    contentBase64: row.contentBase64,
+    ...(typeof row.executable === "boolean" ? { executable: row.executable } : {}),
+  };
+}
+
+function normalizeOwnerRestorePayload(raw: unknown, expectedSlug: string): OwnerPackageRestorePayload {
+  const root = asRecord(raw);
+  if (!root) throw new OwnerPackageRestoreError("invalid_restore_contract");
+  if (typeof root.error === "string" && root.error.trim()) restoreError(root);
+  if (
+    root.schema !== "agentlas.agent_cloud.restore.v1" ||
+    root.source !== "cloud" ||
+    root.owner !== true
+  ) {
+    throw new OwnerPackageRestoreError("invalid_restore_contract");
+  }
+
+  const slug = cleanString(root.slug);
+  if (!slug) throw new OwnerPackageRestoreError("invalid_restore_contract");
+  if (slug !== expectedSlug) {
+    throw new OwnerPackageRestoreError("restore_slug_mismatch", `Requested ${expectedSlug}; received ${slug}.`);
+  }
+  const rawPackage = asRecord(root.cloudPackage);
+  if (!rawPackage || !Array.isArray(rawPackage.files)) {
+    throw new OwnerPackageRestoreError("invalid_restore_contract");
+  }
+  const files = rawPackage.files.map(normalizeRestoreFile);
+  if (files.some((file) => !file)) {
+    throw new OwnerPackageRestoreError("invalid_restore_contract");
+  }
+  const packageHash = cleanString(rawPackage.packageHash);
+  const packageHashVersionRaw = cleanString(rawPackage.packageHashVersion);
+  const packageHashVersion = packageHashVersionRaw || undefined;
+  const agentKind = rawPackage.agentKind;
+  const fileCount = rawPackage.fileCount;
+  const totalBytes = rawPackage.totalBytes;
+  const runtimeLabels = Array.isArray(rawPackage.runtimeLabels)
+    ? rawPackage.runtimeLabels.filter((label): label is string => typeof label === "string" && Boolean(label.trim()))
+    : [];
+  if (
+    !packageHash ||
+    (packageHashVersion !== undefined &&
+      packageHashVersion !== "path-sha256-v1" &&
+      packageHashVersion !== "path-sha256-executable-v2") ||
+    (agentKind !== "agent" && agentKind !== "team" && agentKind !== "repo") ||
+    typeof fileCount !== "number" ||
+    typeof totalBytes !== "number"
+  ) {
+    throw new OwnerPackageRestoreError("invalid_restore_contract");
+  }
+  const cloudId = cleanString(root.cloudId);
+  const scope = root.scope;
+  const revision = cleanString(root.revision);
+  const etag = cleanString(root.etag);
+  const updatedAt = cleanString(root.updatedAt);
+  if (
+    !/^[A-Za-z0-9_-]{8,128}$/.test(cloudId) ||
+    (scope !== "owner-private" && scope !== "hub-public") ||
+    !/^rev_[a-f0-9]{32}$/.test(revision) ||
+    etag !== `"${revision}"` ||
+    !updatedAt || !Number.isFinite(Date.parse(updatedAt)) ||
+    cleanString(rawPackage.cloudId) !== cloudId ||
+    rawPackage.scope !== scope ||
+    cleanString(rawPackage.revision) !== revision ||
+    cleanString(rawPackage.updatedAt) !== updatedAt ||
+    packageHashVersion === undefined
+  ) {
+    throw new OwnerPackageRestoreError("invalid_restore_contract", "Restore revision identity is missing or inconsistent.");
+  }
+  const registration: CloudAgentRevisionIdentity = {
+    cloudId,
+    slug,
+    scope,
+    packageHash,
+    packageHashVersion,
+    revision,
+    updatedAt,
+  };
+  if (
+    cleanString(root.packageHash) !== packageHash ||
+    cleanString(root.packageHashVersion) !== packageHashVersion ||
+    root.fileCount !== fileCount ||
+    root.totalBytes !== totalBytes ||
+    root.agentKind !== agentKind
+  ) {
+    throw new OwnerPackageRestoreError("invalid_restore_contract", "Restore envelope and cloudPackage disagree.");
+  }
+
+  return {
+    schema: "agentlas.agent_cloud.restore.v1",
+    source: "cloud",
+    owner: true,
+    slug,
+    name: cleanString(root.name, slug),
+    nameEn: cleanString(root.nameEn, cleanString(root.name, slug)),
+    tagline: cleanString(root.tagline, "Owned Agent Cloud asset"),
+    taglineEn: cleanString(root.taglineEn, cleanString(root.tagline, "Owned Agent Cloud asset")),
+    registration,
+    cloudPackage: {
+      packageHash,
+      ...(packageHashVersion ? { packageHashVersion } : {}),
+      fileCount,
+      totalBytes,
+      agentKind,
+      runtimeLabels,
+      files: files as CloudAgentPackageDownloadFile[],
+      cloudId,
+      scope,
+      revision,
+      updatedAt,
+    },
+  };
+}
+
+function restoredSystemPrompt(pkg: CloudAgentPackageDownload): string {
+  return readCanonicalPromptFromPackageFiles(pkg.files)?.content ?? "";
+}
+
+function safeMetadataForRestore(
+  metadata: (SeedListingFull & MarketplaceListing) | null,
+  slug: string,
+): (SeedListingFull & MarketplaceListing) | null {
+  return metadata && cleanString(metadata.slug) === slug ? metadata : null;
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+    : [];
+}
+
+function normalizeEnvRequirements(value: unknown): AgentEnvRequirement[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): AgentEnvRequirement[] => {
+    const row = asRecord(item);
+    const key = cleanString(row?.key);
+    if (!key) return [];
+    const label = cleanString(row?.label, key);
+    return [{
+      key,
+      label,
+      labelEn: cleanString(row?.labelEn, label),
+      required: row?.required === true,
+      ...(typeof row?.hint === "string" ? { hint: row.hint } : {}),
+      ...(typeof row?.hintEn === "string" ? { hintEn: row.hintEn } : {}),
+    }];
+  });
+}
+
+function restorePayloadToListing(
+  restored: OwnerPackageRestorePayload,
+  metadata: (SeedListingFull & MarketplaceListing) | null,
+  manifestUrl: string,
+): SeedListingFull & MarketplaceListing {
+  const safeMetadata = safeMetadataForRestore(metadata, restored.slug);
+  const tone = safeMetadata?.tone;
+  const safeTone = tone === "blue" || tone === "green" || tone === "purple" || tone === "amber" || tone === "peach"
+    ? tone
+    : "blue";
+  return {
+    slug: restored.slug,
+    name: restored.name,
+    nameEn: restored.nameEn,
+    tagline: restored.tagline,
+    taglineEn: restored.taglineEn,
+    trustGrade: safeMetadata ? trustGrade(safeMetadata.trustGrade) : "unknown",
+    installCount: safeMetadata ? cleanNumber(safeMetadata.installCount) : 0,
+    manifestUrl: safeMetadata ? cleanString(safeMetadata.manifestUrl, manifestUrl) : manifestUrl,
+    mcpServers: normalizeStringArray(safeMetadata?.mcpServers),
+    tone: safeTone,
+    // Package instructions are the immutable asset authority. Draft metadata is
+    // a fallback only when the uploaded package has no root instruction file.
+    systemPrompt: restoredSystemPrompt(restored.cloudPackage) || cleanString(safeMetadata?.systemPrompt),
+    envRequirements: normalizeEnvRequirements(safeMetadata?.envRequirements),
+    visibility: "visible",
+    source: "agent-cloud-owner-restore",
+    kind: "install-only",
+    callable: false,
+    entityKind: restored.cloudPackage.agentKind === "team" ? "team" : "agent",
+    cloudPackage: restored.cloudPackage,
+    cloudRegistration: restored.registration,
+  };
 }
 
 function normalizeListing(raw: MarketplaceListing): MarketplaceListing | null {
@@ -469,8 +713,47 @@ export class McpSource implements MarketplaceSource {
     return asArray<MarketplaceListing>(await this.call<unknown>("cargo.list_agents", {}), "agents", "listings");
   }
 
-  /** 내 에이전트 풀 매니페스트 (설치용). slug 또는 "cargo:<id>" 모두 허용. */
+  /** 실제 복원 가능한 소유 Agent Cloud 패키지 목록. 결과 slug는 cargo:<draftId>가 아니라 Cloud slug다. */
+  async listMyCloudPackages(): Promise<MarketplaceListing[]> {
+    const raw = await this.call<unknown>("cargo.search_agents", {
+      q: "",
+      limit: 20,
+      mine: true,
+      scope: "cloud",
+      verbose: true,
+    });
+    const rows = asArray<MarketplaceListing>(raw, "results", "agents", "listings")
+      .map((row) => ({
+        ...row,
+        source: typeof row.source === "string" && row.source ? row.source : "cloud",
+      }));
+    return normalizeListings(rows);
+  }
+
+  /** 내 Web draft 메타데이터. 파일 복원 권위가 아니며 slug 또는 "cargo:<id>"를 받는다. */
   getMyAgentManifest(id: string): Promise<(SeedListingFull & MarketplaceListing) | null> {
     return this.call<(SeedListingFull & MarketplaceListing) | null>("cargo.get_manifest", { id });
+  }
+
+  /**
+   * Owner-only Agent Cloud package restore. cargo.get_manifest is consulted only
+   * for safe display/tool metadata and optional id→slug resolution; package bytes,
+   * identity, version, and source always come from cargo.restore_package.
+   */
+  async restoreMyAgentPackage(idOrSlug: string): Promise<SeedListingFull & MarketplaceListing> {
+    const slug = cleanString(idOrSlug);
+    if (!slug) throw new OwnerPackageRestoreError("missing_slug");
+    // Restore authority first. owner_only/no_cloud_package must never be hidden
+    // by a best-effort draft metadata lookup.
+    const raw = await this.call<unknown>("cargo.restore_package", { slug });
+    const restored = normalizeOwnerRestorePayload(raw, slug);
+
+    let metadata: (SeedListingFull & MarketplaceListing) | null = null;
+    try {
+      metadata = await this.getMyAgentManifest(slug);
+    } catch {
+      // Optional draft metadata must never prevent an already-authorized restore.
+    }
+    return restorePayloadToListing(restored, metadata, `${this.opts.baseUrl}/tools/call`);
   }
 }

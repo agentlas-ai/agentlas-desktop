@@ -2,8 +2,8 @@
 // 작업 중 메시지는 Codex/Claude 데스크톱처럼 step log + 경과 시간을 실시간으로 보여준다.
 "use client";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import type { InstalledAgent, InstalledFirm, InstalledMcpServer, Project, RuntimeCommand } from "@/lib/types";
-import type { AgentlasAppDefinition } from "@/lib/apps";
+import type { HubAgentBookmark, InstalledAgent, InstalledFirm, InstalledMcpServer, Project, RuntimeCommand } from "@/lib/types";
+import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
 import { AgentAvatar } from "./AgentAvatar";
 import { Markdown, StreamingMarkdown, type CodeArtifact, type LinkedFileArtifact, type MediaArtifact } from "./Markdown";
 import { useT } from "@/lib/i18n";
@@ -90,8 +90,8 @@ export interface StreamMessage {
 }
 
 export interface ChatEmptyDirectory {
-  apps: AgentlasAppDefinition[];
   agents: InstalledAgent[];
+  hubBookmarks: HubAgentBookmark[];
   firms: InstalledFirm[];
   projects: Project[];
   envKeys: string[];
@@ -512,11 +512,6 @@ function EmptyChatState({
   const { t, locale } = useT();
   const sections = useMemo(() => {
     if (!directory) return [];
-    const apps: EmptyDirectoryItem[] = directory.apps.slice(0, 3).map((app) => ({
-      id: `app-${app.id}`,
-      token: app.slashCommands[0] ?? `/${app.slug}`,
-      label: locale === "en" ? app.nameEn || app.name : app.name,
-    }));
     const commands: EmptyDirectoryItem[] = directory.commands.slice(0, 4).map((command) => ({
       id: `command-${command.source}-${command.name}`,
       token: command.name,
@@ -535,6 +530,11 @@ function EmptyChatState({
         id: `firm-${firm.id}`,
         token: `@${locale === "en" ? firm.nameEn || firm.name : firm.name}`,
         label: t("chatstream.empty_mention_firm"),
+      })),
+      ...hubBookmarksWithoutLocalDuplicates(directory.hubBookmarks, directory.agents).slice(0, 2).map((bookmark) => ({
+        id: `hub-${bookmark.slug}`,
+        token: `@${locale === "en" ? bookmark.listing.nameEn || bookmark.listing.name : bookmark.listing.name}`,
+        label: t("chatstream.empty_mention_hub"),
       })),
       ...directory.projects.slice(0, 1).map((project) => ({
         id: `project-${project.id}`,
@@ -557,7 +557,6 @@ function EmptyChatState({
       }));
 
     return [
-      { id: "apps", title: t("chatstream.empty_section.apps"), items: apps },
       { id: "commands", title: t("chatstream.empty_section.commands"), items: commands },
       { id: "context", title: t("chatstream.empty_section.context"), items: mentions },
       { id: "plugins", title: t("chatstream.empty_section.plugins"), items: plugins },
@@ -570,14 +569,13 @@ function EmptyChatState({
         <h2 id="agentlas-chat-empty-title">{t("chatstream.empty_title", { name: agentName })}</h2>
         <p>{t("chatstream.empty_hint")}</p>
       </header>
-      {directory && (
+      {directory && sections.length > 0 && (
         <div className="agentlas-chat-empty-directory">
           <div className="agentlas-chat-empty-directory-intro">
             <strong>{t("chatstream.empty_commands_title")}</strong>
             <span>{t("chatstream.empty_commands_hint")}</span>
           </div>
-          {sections.length > 0 && (
-            <div className="agentlas-chat-empty-grid">
+          <div className="agentlas-chat-empty-grid">
               {sections.map((section) => (
                 <section
                   key={section.id}
@@ -595,8 +593,7 @@ function EmptyChatState({
                   </ul>
                 </section>
               ))}
-            </div>
-          )}
+          </div>
         </div>
       )}
     </section>

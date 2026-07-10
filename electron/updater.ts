@@ -1,64 +1,33 @@
-// 자동 업데이트 — electron-updater 래퍼.
-// production에서만 동작. dev 환경에선 dev-app-update.yml이 없으면 throw하므로 skip.
+// Agentlas Desktop production updater adapter.
 //
-// 흐름 (Claude Code / Codex 데스크톱과 동일 패턴):
-//   1. 앱 시작 후 N초 뒤 checkForUpdates() — 트래픽 부담 최소화
-//   2. 주기적으로 (1시간마다) 재확인
-//   3. update-available  → 자동 다운로드 (electron-updater 기본값)
-//   4. download-progress → renderer에 broadcast (%)
-//   5. update-downloaded → renderer에 "재시작 업데이트" 배지 노출
-//   6. 사용자가 클릭 → quitAndInstall()
-//
-// publish 채널은 electron-builder.yml의 publish:github 그대로.
-// 사용자 토큰 없이도 public release면 동작.
-import { app, BrowserWindow } from "electron";
+// The state machine lives in updater/controller.ts so permission, compatibility,
+// continuity, and retry behavior can be proven without launching or replacing a
+// real app. This adapter binds it to Electron's app/window/shell APIs.
+import { app, BrowserWindow, dialog, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
-import { compareSemVer, parseSemVer } from "../shared/semver";
+import type { UpdaterActionResult, UpdaterState } from "../shared/types";
+import { getAuthSession } from "./auth";
+import {
+  DesktopUpdaterController,
+  inspectInstallJournalFile,
+  type ContinuitySnapshot,
+} from "./updater/controller";
+import {
+  captureUpdaterContinuity,
+  readBundledRuntimeVersion,
+  readDatabaseSchemaVersion,
+  verifyUpdaterContinuity,
+  verifyUpdaterRecoveryCopies,
+} from "./updater/continuity";
 
-// electron-updater는 main 프로세스 ESM 호환 모듈. import는 CJS interop으로.
+// electron-updater is CommonJS in the main process bundle.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { autoUpdater } = require("electron-updater") as typeof import("electron-updater");
 
-const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1시간
-const INITIAL_DELAY_MS = 15 * 1000; // 15초
-
-export interface UpdateState {
-  status:
-    | "idle"
-    | "checking"
-    | "available"
-    | "downloading"
-    | "downloaded"
-    | "not-available"
-    | "error";
-  /** update-available / update-downloaded 시 채워짐 */
-  version?: string;
-  /** download-progress의 백분율 (0-100). downloading 상태일 때만 의미 있음 */
-  progress?: number;
-  error?: string;
-}
-
-let timer: NodeJS.Timeout | null = null;
-let currentState: UpdateState = { status: "idle" };
-
-/** main → renderer로 상태 broadcast. all-windows에 동시 전송 (창이 여러 개 열려 있어도 동기화). */
-function broadcast(state: UpdateState): void {
-  currentState = state;
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (win.webContents.isDestroyed()) continue;
-    win.webContents.send("updater:state", state);
-  }
-}
-
-export function getUpdaterState(): UpdateState {
-  return currentState;
-}
-
-function isNewerThanCurrent(version: string | undefined): boolean {
-  const comparison = compareSemVer(version, app.getVersion());
-  return comparison !== null && comparison > 0;
-}
+let controller: DesktopUpdaterController | null = null;
+let fallbackState: UpdaterState = { status: "idle" };
+let startupRecovery: { targetVersion?: string; backupPath?: string } | null = null;
 
 function updateConfigPath(): string {
   return path.join(process.resourcesPath, "app-update.yml");
@@ -72,153 +41,224 @@ function hasBundledUpdateConfig(): boolean {
   }
 }
 
-function markUpdateConfigMissing(): void {
-  console.warn(`[updater] app-update.yml missing — skipping auto-update for this local build (${updateConfigPath()})`);
-  broadcast({ status: "not-available" });
-}
-
-function pendingUpdateDir(): string | null {
-  if (process.platform !== "darwin") return null;
-  return path.join(app.getPath("home"), "Library", "Caches", "agentlas-desktop-updater", "pending");
-}
-
-function pendingUpdateVersion(pendingDir: string): string | null {
-  try {
-    const payload = JSON.parse(fs.readFileSync(path.join(pendingDir, "update-info.json"), "utf8"));
-    const fileName = typeof payload.fileName === "string" ? payload.fileName : "";
-    const match = fileName.match(/Agentlas-(\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)-(?:arm64|x64)/);
-    const candidate = match?.[1] ?? null;
-    return candidate && parseSemVer(candidate) ? candidate : null;
-  } catch {
-    return null;
+function broadcast(state: UpdaterState): void {
+  fallbackState = state;
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.webContents.isDestroyed()) win.webContents.send("updater:state", state);
   }
 }
 
-function pruneStalePendingUpdate(): void {
-  const pendingDir = pendingUpdateDir();
-  if (!pendingDir || !fs.existsSync(pendingDir)) return;
-  const pendingVersion = pendingUpdateVersion(pendingDir);
-  if (!pendingVersion || isNewerThanCurrent(pendingVersion)) return;
+function databasePath(): string {
+  return process.env.AGENTLAS_STORE_PATH?.trim() || path.join(app.getPath("userData"), "agentlas.sqlite");
+}
+
+function installJournalPath(userDataPath: string): string {
+  return path.join(userDataPath, "updater", "install-journal.v1.json");
+}
+
+function persistCorruptJournalHold(userDataPath: string): void {
+  const journal = installJournalPath(userDataPath);
+  if (!fs.existsSync(journal)) return;
+  const updaterDir = path.dirname(journal);
+  const marker = path.join(updaterDir, "install-journal-corrupt.v1.json");
+  const quarantine = `${journal}.corrupt-${Date.now()}`;
+  const temporary = `${marker}.${process.pid}.tmp`;
+  fs.mkdirSync(updaterDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    temporary,
+    `${JSON.stringify({
+      schemaVersion: 1,
+      detectedAt: new Date().toISOString(),
+      detectedAppVersion: app.getVersion(),
+    }, null, 2)}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
   try {
-    fs.rmSync(pendingDir, { recursive: true, force: true });
-    console.log(`[updater] removed stale pending update v${pendingVersion}; current is v${app.getVersion()}`);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn("[updater] failed to remove stale pending update", message);
+    fs.renameSync(journal, quarantine);
+    fs.renameSync(temporary, marker);
+  } catch (error) {
+    fs.rmSync(temporary, { force: true });
+    if (!fs.existsSync(journal) && fs.existsSync(quarantine)) fs.renameSync(quarantine, journal);
+    throw error;
   }
+}
+
+export interface UpdaterStartupPreflight {
+  pendingInstall: boolean;
+  targetVersion?: string;
+  recoveryBackupAvailable: boolean;
 }
 
 /**
- * production에서 호출. dev에서는 dev-app-update.yml이 없으면 throw하므로 NODE_ENV check 후 skip.
+ * Runs before initStore. It never opens the live DB: it only validates the
+ * durable journal and already-captured recovery copies so a migration cannot
+ * begin without a reachable fallback.
  */
-export function initAutoUpdater(): void {
+export function preflightUpdaterStartup(userDataPath = app.getPath("userData")): UpdaterStartupPreflight {
+  if (process.env.NODE_ENV === "development" || process.env.AGENTLAS_QA_USER_DATA_DIR?.trim()) {
+    return { pendingInstall: false, recoveryBackupAvailable: false };
+  }
+  const inspection = inspectInstallJournalFile(installJournalPath(userDataPath));
+  if (inspection.status === "none") {
+    startupRecovery = null;
+    return { pendingInstall: false, recoveryBackupAvailable: false };
+  }
+  if (inspection.status === "corrupt") {
+    persistCorruptJournalHold(userDataPath);
+    startupRecovery = {};
+    throw new Error("Updater install journal failed the pre-migration safety gate");
+  }
+  const snapshot: ContinuitySnapshot = inspection.journal.continuity;
+  startupRecovery = {
+    targetVersion: inspection.journal.targetVersion,
+    backupPath: snapshot.backupPath,
+  };
+  const recovery = verifyUpdaterRecoveryCopies({ snapshot, currentUserDataPath: userDataPath });
+  if (!recovery.ok) throw new Error("Updater recovery copies failed the pre-migration safety gate");
+  return {
+    pendingInstall: true,
+    targetVersion: inspection.journal.targetVersion,
+    recoveryBackupAvailable: true,
+  };
+}
+
+/** Native fallback used when migration/bootstrap fails before renderer recovery UI exists. */
+export async function handleUpdaterBootstrapFailure(error: unknown): Promise<boolean> {
+  if (!startupRecovery) return false;
+  console.error("[updater] guarded startup failed", error);
+  const backupAvailable = Boolean(startupRecovery.backupPath && fs.existsSync(startupRecovery.backupPath));
+  fallbackState = {
+    status: "recovery-required",
+    version: startupRecovery.targetVersion,
+    code: "continuity-violation",
+    error: "Agentlas stopped before background work because post-update local state could not be verified.",
+    canRetry: false,
+    recoveryBackupAvailable: backupAvailable,
+  };
+  const korean = app.getLocale().toLowerCase().startsWith("ko");
+  const buttons = backupAvailable
+    ? [korean ? "복구본 보기" : "Show recovery copy", korean ? "공식 설치 파일" : "Official installer", korean ? "종료" : "Quit"]
+    : [korean ? "공식 설치 파일" : "Official installer", korean ? "종료" : "Quit"];
+  const result = await dialog.showMessageBox({
+    type: "error",
+    title: korean ? "업데이트 복구가 필요합니다" : "Update recovery required",
+    message: korean
+      ? "업데이트 후 로컬 상태를 확인하기 전에 시작을 중단했습니다. 기존 복구본이나 공식 설치 파일을 사용하세요."
+      : "Startup stopped before post-update local state could be verified. Use the preserved recovery copy or official installer.",
+    buttons,
+    defaultId: 0,
+    cancelId: buttons.length - 1,
+    noLink: true,
+  });
+  if (backupAvailable && result.response === 0 && startupRecovery.backupPath) {
+    shell.showItemInFolder(startupRecovery.backupPath);
+  } else if ((!backupAvailable && result.response === 0) || (backupAvailable && result.response === 1)) {
+    await shell.openExternal("https://agentlas.cloud/desktop");
+  }
+  return true;
+}
+
+export function getUpdaterState(): UpdaterState {
+  return controller?.getState() ?? fallbackState;
+}
+
+/** Called only after initStore() and auth restoration have completed. */
+export async function initAutoUpdater(): Promise<void> {
   if (process.env.NODE_ENV === "development") {
     console.log("[updater] dev mode — skipping auto-update");
     return;
   }
-  // QA 모드(별도 userData) — Playwright/release 검증용 빌드는 자동 업데이트 비활성.
   if (process.env.AGENTLAS_QA_USER_DATA_DIR?.trim()) {
     console.log("[updater] QA mode — skipping auto-update");
     return;
   }
-  if (!hasBundledUpdateConfig()) {
-    markUpdateConfigMissing();
-    return;
-  }
+  const hasUpdateConfig = hasBundledUpdateConfig();
+  if (!hasUpdateConfig) console.warn(`[updater] app-update.yml missing — automatic checks are disabled (${updateConfigPath()})`);
+  if (controller) return;
 
-  pruneStalePendingUpdate();
-
-  // 사용자 동의 없이 자동 다운로드. 설치는 사용자가 "재시작 업데이트"를 눌렀을 때만
-  // 진행한다. autoInstallOnAppQuit=true면 root-owned /Applications 앱에서
-  // 종료할 때마다 ShipIt 권한 프롬프트가 반복될 수 있다.
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = false;
-
-  autoUpdater.on("checking-for-update", () => {
-    broadcast({ status: "checking" });
+  const userDataPath = app.getPath("userData");
+  const dbPath = databasePath();
+  const sourceRoot = path.resolve(__dirname, "../..");
+  controller = new DesktopUpdaterController({
+    updater: autoUpdater,
+    currentVersion: () => app.getVersion(),
+    platform: process.platform,
+    execPath: process.execPath,
+    resourcesPath: process.resourcesPath,
+    userDataPath,
+    homePath: app.getPath("home"),
+    uid: typeof process.getuid === "function" ? process.getuid() : null,
+    runtimeVersion: () => readBundledRuntimeVersion(process.resourcesPath, sourceRoot),
+    databaseSchemaVersion: () => readDatabaseSchemaVersion(dbPath),
+    captureContinuity: (targetVersion) => {
+      const account = getAuthSession();
+      return captureUpdaterContinuity({
+        userDataPath,
+        databasePath: dbPath,
+        targetVersion,
+        accountSignedIn: account.signedIn,
+        ...(account.expiresAt !== undefined ? { accountExpiresAt: account.expiresAt } : {}),
+      });
+    },
+    verifyContinuity: (snapshot) =>
+      verifyUpdaterContinuity({
+        snapshot,
+        currentUserDataPath: userDataPath,
+        currentDatabasePath: dbPath,
+        currentAccountSignedIn: getAuthSession().signedIn,
+      }),
+    broadcast,
+    openExternal: (url) => shell.openExternal(url),
+    revealPath: (filePath) => shell.showItemInFolder(filePath),
+    schedule: hasUpdateConfig,
   });
-
-  autoUpdater.on("update-available", (info) => {
-    broadcast({ status: "available", version: info.version });
-  });
-
-  autoUpdater.on("update-not-available", () => {
-    // idle로 되돌리지 않고 not-available로 한 번 알린 뒤 idle. UI는 노출 안 함.
-    broadcast({ status: "not-available" });
-  });
-
-  autoUpdater.on("download-progress", (p) => {
+  await controller.init();
+  // Keep the native fallback armed until a recovery-required renderer can be
+  // created. All other authoritative states have closed the preflight window.
+  if (controller.getState().status !== "recovery-required") startupRecovery = null;
+  if (!hasUpdateConfig && controller.getState().status === "idle") {
     broadcast({
-      status: "downloading",
-      progress: Math.round(p.percent),
-      version: currentState.version,
+      status: "error",
+      code: "config-missing",
+      error: "This build has no verified update channel. The installed app was left unchanged.",
+      canRetry: false,
     });
-  });
-
-  autoUpdater.on("update-downloaded", (info) => {
-    if (!isNewerThanCurrent(info.version)) {
-      pruneStalePendingUpdate();
-      broadcast({ status: "not-available" });
-      return;
-    }
-    broadcast({ status: "downloaded", version: info.version });
-  });
-
-  autoUpdater.on("error", (err) => {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn("[updater] error", message);
-    broadcast({ status: "error", error: message });
-  });
-
-  // 첫 체크는 시작 직후가 아니라 약간 늦춰 — 첫 윈도우 렌더 끝난 뒤
-  setTimeout(() => {
-    void checkSafely();
-  }, INITIAL_DELAY_MS);
-
-  // 주기적 재확인 — 앱이 며칠씩 켜져 있을 수 있으므로
-  timer = setInterval(() => {
-    void checkSafely();
-  }, CHECK_INTERVAL_MS);
-  // 이 타이머만으로 이벤트루프를 붙잡아 종료를 막지 않게(automation-scheduler 패턴과 동일).
-  if (timer.unref) timer.unref();
+  }
 }
 
 export function disposeAutoUpdater(): void {
-  if (timer) {
-    clearInterval(timer);
-    timer = null;
-  }
+  controller?.dispose();
+  controller = null;
 }
 
-/** 사용자가 "지금 확인" 버튼을 누르거나 메뉴에서 호출. 실패해도 throw 안 함 (에러는 broadcast로). */
-export async function checkSafely(): Promise<void> {
-  try {
+/** Manual and scheduled checks share one in-flight promise and return main-authoritative state. */
+export async function checkSafely(): Promise<UpdaterState> {
+  if (!controller) {
     if (!hasBundledUpdateConfig()) {
-      markUpdateConfigMissing();
-      return;
+      broadcast({
+        status: "error",
+        code: "config-missing",
+        error: "This build has no verified update channel. The installed app was left unchanged.",
+        canRetry: false,
+      });
     }
-    pruneStalePendingUpdate();
-    await autoUpdater.checkForUpdates();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn("[updater] checkForUpdates failed", message);
-    broadcast({ status: "error", error: message });
+    return fallbackState;
   }
+  return controller.check();
 }
 
-/** "재시작 업데이트" 버튼 핸들러. 다운로드 완료된 상태에서만 호출되어야 함. */
-export function quitAndInstall(): void {
-  if (currentState.status !== "downloaded") {
-    console.warn("[updater] quitAndInstall called but no update downloaded");
-    return;
-  }
-  if (!isNewerThanCurrent(currentState.version)) {
-    pruneStalePendingUpdate();
-    broadcast({ status: "not-available" });
-    console.warn("[updater] quitAndInstall ignored because downloaded version is not newer than current");
-    return;
-  }
-  // isSilent=false: 사용자에게 macOS 표준 설치 progress가 보임
-  // isForceRunAfter=true: 설치 후 자동 재실행
-  autoUpdater.quitAndInstall(false, true);
+/** The controller creates a verified SQLite recovery copy before this can quit the app. */
+export async function quitAndInstall(): Promise<UpdaterActionResult> {
+  if (!controller) return { accepted: false, state: fallbackState };
+  return controller.install();
+}
+
+export async function openManualDownload(): Promise<UpdaterActionResult> {
+  if (!controller) return { accepted: false, state: fallbackState };
+  return controller.openManualDownload();
+}
+
+export async function revealRecoveryBackup(): Promise<UpdaterActionResult> {
+  if (!controller) return { accepted: false, state: fallbackState };
+  return controller.revealRecoveryBackup();
 }

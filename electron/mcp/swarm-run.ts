@@ -8,6 +8,7 @@ import { getAgentConcurrency } from "../store/concurrency";
 import { tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
 import type { BorrowedTaskForceParams } from "./borrowed-task-force";
 import { runSwarm, type SwarmBoard, type SwarmEvent, type SwarmTask } from "./swarm-engine";
+import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 
 // 총 작업 수/라운드 안전 상한 — 무한 스폰·무한루프로부터 컴/지갑을 지키는 최후 방어선(엔진이 강제).
 // 각 작업 = 실 LLM 호출이라 비용이 나가므로 보수적으로. (동시 실행 수는 별개로 슬라이더가 제어)
@@ -169,7 +170,13 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
     emit(task, { kind: "thinking", status: p.locale === "ko" ? `${task.title}` : task.title });
     const result = await p.picked.runner(
       {
-        systemPrompt: swarmProtocol(goal, board, task),
+        // The canonical package prompt is authoritative, but the per-task
+        // swarm protocol is invocation context. Passing both as the fallback
+        // silently drops the protocol whenever a canonical prompt file exists.
+        systemPrompt: `${buildEffectiveAgentSystemPrompt(
+          p.orchestratorAgent.id,
+          p.orchestratorAgent.systemPrompt,
+        )}\n\n${swarmProtocol(goal, board, task)}`,
         history: [],
         userPrompt: task.brief || task.title,
         backendLabel: p.picked.label,
@@ -206,6 +213,11 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
     const result = await p.picked.runner(
       {
         systemPrompt: [
+          buildEffectiveAgentSystemPrompt(
+            p.orchestratorAgent.id,
+            p.orchestratorAgent.systemPrompt,
+          ),
+          "",
           "You are the synthesizer of an agent swarm. Below are the results your peers produced for the shared goal.",
           "Integrate them into ONE coherent final answer for the user. Reconcile overlaps, note anything incomplete.",
           "Do not just concatenate. Do not include a `## Spawn` block.",

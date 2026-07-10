@@ -15,7 +15,7 @@ Agentlas runs the same *research architectures* in two places, with different ho
 
 Both consume the **same source-of-truth agent repos**:
 
-- `agent_agentlas_core_engine_meta_agent` — single-agent/team/package meta-agent contract
+- `agentlas-ai/Agentlas-OS` — public core and single-agent/team/package contract
 - `agent_project_pm_soul` — per-project continuity + memory (PM Soul)
 - `agent_memory_curator_agent` — curated durable memory (Memory Curator)
 - `agentlas_task_bias` — AI Sitemap governance to reduce task-selection bias

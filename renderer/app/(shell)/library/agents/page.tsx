@@ -11,7 +11,7 @@ import { isUserFacingAgentText } from "@/lib/agent-visibility";
 import { buildAgentRoster, isRosterVisibleAgent, visibleRosterAgents } from "@/lib/agent-roster";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
-import { parseMemoryMarkdown, serializeMemoryMarkdown } from "@/lib/agent-memory";
+import { AgentMemorySaveQueue, parseMemoryMarkdown, type ParsedMemory } from "@/lib/agent-memory";
 import { classifyAgent } from "@/lib/ownership";
 import { cliModelTagLabel } from "@shared/models";
 import type { AgentEvolutionProposalUi, AgentMemoryEntryUi } from "@shared/types";
@@ -154,13 +154,12 @@ function LibraryAgentsView() {
   const [memoryEntries, setMemoryEntries] = useState<AgentMemoryEntryUi[]>([]);
   const [evolutionProposals, setEvolutionProposals] = useState<AgentEvolutionProposalUi[]>([]);
   const [memoryContent, setMemoryContent] = useState("");
-  const [memoryParsed, setMemoryParsed] = useState<{
-    decisions: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[];
-    gotchas: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[];
-    openQuestions: { id: string; title: string; content: string }[];
-  }>({ decisions: [], gotchas: [], openQuestions: [] });
+  const [memoryParsed, setMemoryParsed] = useState<ParsedMemory>({ decisions: [], gotchas: [], openQuestions: [] });
+  const memorySaveQueueRef = useRef(new AgentMemorySaveQueue());
+  const selectedMemoryAgentRef = useRef<string | null>(null);
 
   const [promptContent, setPromptContent] = useState("");
+  const [promptSourcePath, setPromptSourcePath] = useState("");
   const [editingPrompt, setEditingPrompt] = useState(false);
   const [promptDraft, setPromptDraft] = useState("");
   const [savingFiles, setSavingFiles] = useState(false);
@@ -364,18 +363,19 @@ function LibraryAgentsView() {
   useEffect(() => {
     const api = ipc();
     if (!api || !selectedNode || !selectedNode.agentId) {
+      selectedMemoryAgentRef.current = null;
       setAgentFiles([]);
       setMemoryContent("");
       setMemoryParsed({ decisions: [], gotchas: [], openQuestions: [] });
       setPromptContent("");
+      setPromptSourcePath("");
       setPromptDraft("");
       setEditingPrompt(false);
       return;
     }
+    selectedMemoryAgentRef.current = selectedNode.agentId;
 
     let cancelled = false;
-    // 여러 런타임 규약의 프롬프트 파일명(claude-code: CLAUDE.md, codex: AGENTS.md 등).
-    const PROMPT_FILES = ["agent.md", "system-prompt.md", "claude.md", "agents.md", "gemini.md", "soul.md", "persona.md", "prompt.md"];
     async function loadAgentAssets() {
       if (!selectedNode?.agentId || !api) return;
       // 메타데이터 systemPrompt를 먼저 기본값으로 — 파일 로드가 실패해도 "내용 없음"이 되지 않게.
@@ -395,19 +395,24 @@ function LibraryAgentsView() {
         if (memFile) {
           const m = await api.agentFiles.read(selectedNode.agentId, memFile.path);
           if (cancelled) return;
+          const parsed = parseMemoryMarkdown(m.content);
+          const visible = memorySaveQueueRef.current.hydrate(selectedNode.agentId, parsed, m.content);
           setMemoryContent(m.content);
-          setMemoryParsed(parseMemoryMarkdown(m.content));
+          setMemoryParsed(visible);
+        } else {
+          const empty: ParsedMemory = { decisions: [], gotchas: [], openQuestions: [] };
+          const visible = memorySaveQueueRef.current.hydrate(selectedNode.agentId, empty, "");
+          setMemoryContent("");
+          setMemoryParsed(visible);
         }
 
-        // 프롬프트 파일이 있으면 그 원문으로 덮어쓴다(메타데이터보다 정확).
-        const promptFile = fileEntries.find((e) => PROMPT_FILES.includes(e.name.toLowerCase()));
-        if (promptFile) {
-          const p = await api.agentFiles.read(selectedNode.agentId, promptFile.path);
-          if (cancelled) return;
-          if (p.content?.trim()) {
-            setPromptContent(p.content);
-            setPromptDraft(p.content);
-          }
+        // Import/restore/runtime과 동일한 main-owned canonical resolver.
+        const promptSource = await api.agentFiles.promptSource(selectedNode.agentId);
+        if (cancelled) return;
+        setPromptSourcePath(promptSource?.relativePath ?? "");
+        if (promptSource) {
+          setPromptContent(promptSource.content);
+          setPromptDraft(promptSource.content);
         }
       } catch (e) {
         // 파일 로드 실패 시에도 위에서 설정한 메타데이터 프롬프트가 남아있다.
@@ -466,89 +471,192 @@ function LibraryAgentsView() {
 
   // 프롬프트 수정 반영
   async function savePrompt() {
-    const api = ipc();
-    if (!api || !selectedNode || !selectedNode.agentId) return;
-    setSavingFiles(true);
-    try {
-      const promptFile = agentFiles.find(
-        (e) => e.name.toLowerCase() === "agent.md" || e.name.toLowerCase() === "system-prompt.md"
-      );
-      const path = promptFile ? promptFile.path : "AGENT.md";
-      await api.agentFiles.write(selectedNode.agentId, path, promptDraft);
-      setPromptContent(promptDraft);
-      setEditingPrompt(false);
-      showToast(locale === "ko" ? "시스템 프롬프트가 성공적으로 반영되었습니다." : "System prompt updated successfully.");
-    } catch (e) {
-      showToast((locale === "ko" ? "프롬프트 저장 실패: " : "Failed to save prompt: ") + String(e));
-    } finally {
-      setSavingFiles(false);
-    }
+    const proposal = await createEvolutionProposal(promptDraft, {
+      changeOrigin: "manual_prompt_editor",
+    });
+    if (!proposal) return;
+    setEditingPrompt(false);
+    setActiveTab("activity");
   }
 
-  // 자가 진화용 저장 기능
-  async function saveEvolution(newPromptContent: string) {
+  // 후보 생성은 파일을 쓰지 않는다. 승인/적용은 아래 별도 사용자 액션에서만 수행한다.
+  async function createEvolutionProposal(
+    newPromptContent: string,
+    source: Record<string, unknown> = {},
+  ): Promise<AgentEvolutionProposalUi | undefined> {
     const api = ipc();
     if (!api || !selectedNode || !selectedNode.agentId) return;
     setSavingFiles(true);
     try {
-      const promptFile = agentFiles.find(
-        (e) => e.name.toLowerCase() === "agent.md" || e.name.toLowerCase() === "system-prompt.md"
-      );
-      const path = promptFile ? promptFile.path : "AGENT.md";
-      const proposal = await api.agentEvolution.createAndApplyPrompt({
+      if (!promptSourcePath) throw new Error(locale === "ko" ? "런타임 프롬프트 원본 파일을 찾지 못했습니다." : "The runtime prompt source file could not be found.");
+      const path = promptSourcePath;
+      const proposal = await api.agentEvolution.createProposal({
         agentId: selectedNode.agentId,
         targetPath: path,
         currentContent: promptContent,
         proposedContent: newPromptContent,
         proposalType: "rule",
         risk: "medium",
-        summary: locale === "ko" ? "프롬프트 자가진화 승인 적용" : "Approved prompt self-evolution",
-        source: { surface: "desktop.library.agent_detail" },
-        decisionNote: locale === "ko" ? "사용자가 데스크탑에서 승인 및 적용을 눌렀습니다." : "User approved and applied from desktop.",
+        summary: locale === "ko" ? "프롬프트 진화 검토 후보" : "Prompt evolution review candidate",
+        source: { ...source, surface: "desktop.library.agent_detail" },
+        decisionNote: locale === "ko" ? "사용자가 검토 후보를 만들었습니다. 아직 적용되지 않았습니다." : "User created a review candidate. It is not applied yet.",
       });
       setEvolutionProposals((prev) => [proposal, ...prev.filter((item) => item.id !== proposal.id)]);
-      setPromptContent(newPromptContent);
-      setPromptDraft(newPromptContent);
-      showToast(locale === "ko" ? "자가 진화 제안이 성공적으로 프롬프트에 병합되었습니다." : "Self-evolution suggestion merged into the prompt successfully.");
+      showToast(locale === "ko" ? "검토 후보를 저장했습니다. 원본 프롬프트는 아직 바뀌지 않았습니다." : "Review candidate saved. The original prompt is unchanged.");
+      return proposal;
     } catch (e) {
-      showToast((locale === "ko" ? "진화 적용 실패: " : "Failed to apply evolution: ") + String(e));
+      showToast((locale === "ko" ? "진화 후보 생성 실패: " : "Failed to create evolution candidate: ") + String(e));
+      return undefined;
     } finally {
       setSavingFiles(false);
     }
   }
 
-  // 메모리 저장 직렬화 큐 + 최신-상태 ref — 빠른 연속 변이가 stale 클로저로 서로를 덮어쓰지 않게 한다.
-  const memorySaveChain = useRef<Promise<void>>(Promise.resolve());
-  const memoryParsedRef = useRef(memoryParsed);
-  useEffect(() => {
-    memoryParsedRef.current = memoryParsed;
-  }, [memoryParsed]);
+  async function createSkillEvolutionProposal(skill: { slug?: string; name: string; description: string }): Promise<boolean> {
+    const api = ipc();
+    if (!api || !selectedNode?.agentId) return false;
+    const slug = (skill.slug ?? skill.name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    const targetPath = `skills/${slug}/SKILL.md`;
+    setSavingFiles(true);
+    try {
+      const catalogAsset = await api.skills.readCatalog(slug);
+      const current = await api.agentFiles.read(selectedNode.agentId, targetPath).catch(() => ({ content: "" }));
+      const proposal = await api.agentEvolution.createProposal({
+        agentId: selectedNode.agentId,
+        targetPath,
+        currentContent: current.content ?? "",
+        proposedContent: catalogAsset.content,
+        proposalType: "skill",
+        risk: "medium",
+        summary: locale === "ko" ? `${skill.name} 수동 스킬 주입 검토` : `Review manual ${skill.name} skill injection`,
+        source: {
+          surface: "desktop.library.skill_catalog",
+          skillSlug: catalogAsset.slug,
+          catalogContentHash: catalogAsset.contentHash,
+          catalogByteLength: catalogAsset.byteLength,
+        },
+        decisionNote: locale === "ko" ? "사용자가 스킬 후보를 만들었습니다. 아직 파일은 생성되지 않았습니다." : "User created a skill candidate. No file has been created yet.",
+      });
+      setEvolutionProposals((prev) => [proposal, ...prev.filter((item) => item.id !== proposal.id)]);
+      setSkillDrawerOpen(false);
+      setActiveTab("activity");
+      showToast(locale === "ko" ? "스킬 diff 후보를 만들었습니다. 승인 전에는 주입되지 않습니다." : "Skill diff candidate created. It is not injected until approval.");
+      return true;
+    } catch (error) {
+      showToast((locale === "ko" ? "스킬 후보 생성 실패: " : "Failed to create skill candidate: ") + String(error));
+      return false;
+    } finally {
+      setSavingFiles(false);
+    }
+  }
 
-  // 메모리 데이터 저장 핸들러. updater 는 "최신" 상태를 받아 다음 상태를 만든다(stale prop 미사용).
-  // 다음 상태를 ref(최신 누적본) 기준으로 동기 계산해 낙관적 반영하고, 디스크 쓰기는 큐로
-  // 직렬화해 순서/원자성을 보장한다(lost update 방지).
+  async function approveEvolutionProposal(proposalId: string) {
+    const api = ipc();
+    if (!api) return;
+    setSavingFiles(true);
+    try {
+      const proposal = await api.agentEvolution.approveAndApply(
+        proposalId,
+        locale === "ko" ? "사용자가 diff와 해시를 검토하고 승인했습니다." : "User reviewed the diff and hashes, then approved.",
+      );
+      setEvolutionProposals((prev) => [proposal, ...prev.filter((item) => item.id !== proposal.id)]);
+      if (proposal.proposalType === "rule") {
+        setPromptContent(proposal.afterContent);
+        setPromptDraft(proposal.afterContent);
+      } else if (proposal.proposalType === "skill" && selectedNode?.agentId) {
+        const listing = await api.agentFiles.list(selectedNode.agentId);
+        setAgentFiles(listing.entries.filter((entry) => entry.kind === "file"));
+      }
+      const receipt = proposal.receipts.find((item) => item.action === "apply");
+      showToast(receipt
+        ? proposal.proposalType === "skill"
+          ? (locale === "ko" ? `스킬 주입 완료 · 자산 v${receipt.versionAfter} · ${receipt.governedAssetHashAfter.slice(0, 12)}` : `Skill injected · asset v${receipt.versionAfter} · ${receipt.governedAssetHashAfter.slice(0, 12)}`)
+          : (locale === "ko" ? `적용 완료 · 자산 v${receipt.versionAfter} · ${receipt.governedAssetHashAfter.slice(0, 12)}` : `Applied · asset v${receipt.versionAfter} · ${receipt.governedAssetHashAfter.slice(0, 12)}`)
+        : (locale === "ko" ? "적용은 완료됐지만 영수증을 확인할 수 없습니다." : "Applied, but no receipt was returned."));
+    } catch (e) {
+      showToast((locale === "ko" ? "승인 적용 실패: " : "Approval/apply failed: ") + String(e));
+    } finally {
+      setSavingFiles(false);
+    }
+  }
+
+  async function rejectEvolutionProposal(proposalId: string) {
+    const api = ipc();
+    if (!api) return;
+    setSavingFiles(true);
+    try {
+      const proposal = await api.agentEvolution.reject(
+        proposalId,
+        locale === "ko" ? "사용자가 검토 후 거절했습니다." : "User rejected after review.",
+      );
+      setEvolutionProposals((prev) => [proposal, ...prev.filter((item) => item.id !== proposal.id)]);
+      setPromptDraft(proposal.beforeContent);
+      showToast(locale === "ko" ? "후보를 거절했습니다. 파일은 변경되지 않았습니다." : "Candidate rejected. No file was changed.");
+    } catch (e) {
+      showToast((locale === "ko" ? "후보 거절 실패: " : "Failed to reject candidate: ") + String(e));
+    } finally {
+      setSavingFiles(false);
+    }
+  }
+
+  async function rollbackEvolutionProposal(proposalId: string) {
+    const api = ipc();
+    if (!api) return;
+    setSavingFiles(true);
+    try {
+      const proposal = await api.agentEvolution.rollback(proposalId);
+      setEvolutionProposals((prev) => [proposal, ...prev.filter((item) => item.id !== proposal.id)]);
+      if (proposal.proposalType === "rule") {
+        setPromptContent(proposal.beforeContent);
+        setPromptDraft(proposal.beforeContent);
+      } else if (proposal.proposalType === "skill" && selectedNode?.agentId) {
+        const listing = await api.agentFiles.list(selectedNode.agentId);
+        setAgentFiles(listing.entries.filter((entry) => entry.kind === "file"));
+      }
+      const receipt = proposal.receipts.find((item) => item.action === "rollback");
+      showToast(receipt
+        ? proposal.proposalType === "skill"
+          ? (locale === "ko" ? `스킬 제거 롤백 완료 · 자산 v${receipt.versionAfter}` : `Skill removal rollback complete · asset v${receipt.versionAfter}`)
+          : (locale === "ko" ? `롤백 완료 · 자산 v${receipt.versionAfter} · ${receipt.governedAssetHashAfter.slice(0, 12)}` : `Rolled back · asset v${receipt.versionAfter} · ${receipt.governedAssetHashAfter.slice(0, 12)}`)
+        : (locale === "ko" ? "롤백 완료" : "Rollback complete"));
+    } catch (e) {
+      showToast((locale === "ko" ? "롤백 차단/실패: " : "Rollback blocked/failed: ") + String(e));
+    } finally {
+      setSavingFiles(false);
+    }
+  }
+
+  // 공용 per-agent 저장 큐가 React 렌더보다 먼저 최신 상태를 누적하고, 각 에이전트의
+  // durable 원문을 기준으로 직렬화한다. 빠른 토글과 에이전트 전환이 서로 덮어쓰지 않는다.
   function saveMemory(updater: (prev: typeof memoryParsed) => typeof memoryParsed) {
-    const next = updater(memoryParsedRef.current);
-    memoryParsedRef.current = next; // 다음 동기 호출이 이 결과 위에 쌓이도록 즉시 갱신.
-    setMemoryParsed(next);
-    const run = memorySaveChain.current.then(async () => {
-      const api = ipc();
-      if (!api || !selectedNode || !selectedNode.agentId) return;
-      setSavingFiles(true);
-      try {
-        const serialized = serializeMemoryMarkdown(next.decisions, next.gotchas, next.openQuestions, { locale });
-        const memFile = agentFiles.find((e) => e.name.toLowerCase() === "memory.md");
-        const path = memFile ? memFile.path : "memory.md";
-        await api.agentFiles.write(selectedNode.agentId, path, serialized);
-        setMemoryContent(serialized);
-      } catch (e) {
-        showToast((locale === "ko" ? "메모리 갱신 실패: " : "Failed to update memory: ") + String(e));
-      } finally {
-        setSavingFiles(false);
+    const agentId = selectedNode?.agentId;
+    const api = ipc();
+    if (!agentId || !api) return Promise.resolve();
+    const memFile = agentFiles.find((entry) => entry.name.toLowerCase() === "memory.md");
+    const path = memFile?.path ?? "memory.md";
+    const { completion } = memorySaveQueueRef.current.enqueue({
+      agentId,
+      updater,
+      locale,
+      write: async (serialized) => { await api.agentFiles.write(agentId, path, serialized); },
+      onOptimistic: (next) => {
+        if (selectedMemoryAgentRef.current === agentId) setMemoryParsed(next);
+      },
+      onDurable: (_next, serialized) => {
+        if (selectedMemoryAgentRef.current === agentId) setMemoryContent(serialized);
+      },
+      onRollback: (durable) => {
+        if (selectedMemoryAgentRef.current === agentId) setMemoryParsed(durable);
+      },
+      onPendingChange: (pending) => {
+        if (selectedMemoryAgentRef.current === agentId) setSavingFiles(pending);
+      },
+    });
+    return completion.catch((error) => {
+      if (selectedMemoryAgentRef.current === agentId) {
+        showToast((locale === "ko" ? "메모리 갱신 실패: " : "Failed to update memory: ") + String(error));
       }
     });
-    memorySaveChain.current = run.catch(() => {});
-    return run;
   }
 
   function showToast(msg: string) {
@@ -563,7 +671,7 @@ function LibraryAgentsView() {
     try {
       const dir = await api.fs.pickDirectory();
       if (!dir) return;
-      const imported = await api.team.importLocalFolder(dir.path);
+      const imported = await api.team.importLocalFolder({ path: dir.path, scope: dir.scope });
       await refresh();
       const loc = pickLocalized(imported, locale);
       setSelectedNode({
@@ -1218,7 +1326,11 @@ function LibraryAgentsView() {
             editingPrompt={editingPrompt}
             onSetEditingPrompt={setEditingPrompt}
             onSavePrompt={savePrompt}
-            onSaveEvolution={saveEvolution}
+            onCreateEvolution={createEvolutionProposal}
+            onCreateSkillEvolution={createSkillEvolutionProposal}
+            onApproveEvolution={approveEvolutionProposal}
+            onRejectEvolution={rejectEvolutionProposal}
+            onRollbackEvolution={rollbackEvolutionProposal}
             saving={savingFiles}
             availableSkills={availableSkills}
             skillDrawerOpen={skillDrawerOpen}
@@ -2319,7 +2431,11 @@ interface AgentDetailViewProps {
   editingPrompt: boolean;
   onSetEditingPrompt: (v: boolean) => void;
   onSavePrompt: () => Promise<void>;
-  onSaveEvolution: (newPrompt: string) => Promise<void>;
+  onCreateEvolution: (newPrompt: string, source?: Record<string, unknown>) => Promise<AgentEvolutionProposalUi | undefined>;
+  onCreateSkillEvolution: (skill: { slug?: string; name: string; description: string }) => Promise<boolean>;
+  onApproveEvolution: (proposalId: string) => Promise<void>;
+  onRejectEvolution: (proposalId: string) => Promise<void>;
+  onRollbackEvolution: (proposalId: string) => Promise<void>;
   saving: boolean;
   availableSkills: { slug: string; name: string; description: string }[];
   skillDrawerOpen: boolean;
@@ -2351,7 +2467,11 @@ function AgentDetailView({
   editingPrompt,
   onSetEditingPrompt,
   onSavePrompt,
-  onSaveEvolution,
+  onCreateEvolution,
+  onCreateSkillEvolution,
+  onApproveEvolution,
+  onRejectEvolution,
+  onRollbackEvolution,
   saving,
   availableSkills,
   skillDrawerOpen,
@@ -2398,7 +2518,6 @@ function AgentDetailView({
 
   // 셀프에볼루션 — 실제 메모리(활성 결정·주의 규칙) 중 아직 시스템 프롬프트에 반영되지 않은
   // 학습 규칙을 프롬프트 부록으로 접어 넣는 실데이터 기반 진화 제안. (가짜 텍스트 아님)
-  const [evolutionApproved, setEvolutionApproved] = useState(false);
   const learnedRules = [...memoryParsed.decisions, ...memoryParsed.gotchas].filter(
     (r) => r.enabled !== false && r.title && !promptContent.includes(r.title),
   );
@@ -2408,6 +2527,17 @@ function AgentDetailView({
     : "";
   const hasPendingEvolution = learnedRules.length > 0;
   const evolutionDiff = { old: promptContent, new: promptContent + evolutionAppendix };
+  const pendingProposal = evolutionProposals.find((proposal) => proposal.status === "candidate") ?? null;
+  const recoveryProposal = evolutionProposals.find((proposal) => proposal.status === "recovery_required" || proposal.status === "conflicted") ?? null;
+  const latestReceiptedProposal = evolutionProposals.find((proposal) => proposal.receipts.length > 0) ?? null;
+  const displayedProposal = pendingProposal ?? recoveryProposal ?? latestReceiptedProposal;
+  const displayedEvolutionDiff = pendingProposal || recoveryProposal
+    ? { old: (pendingProposal ?? recoveryProposal)!.beforeContent, new: (pendingProposal ?? recoveryProposal)!.afterContent }
+    : hasPendingEvolution
+      ? evolutionDiff
+      : latestReceiptedProposal
+      ? { old: latestReceiptedProposal.beforeContent, new: latestReceiptedProposal.afterContent }
+      : evolutionDiff;
 
   // 런타임 학습(자동 수집) — 큐레이터 DB durable 메모리 중 아직 프롬프트에 반영되지 않은 진화 후보.
   // 반영 여부는 trim 된 본문이 프롬프트에 그대로 포함되는지로 판정(아래 반영 액션이 본문을 그대로 append 하므로 자기 일관적).
@@ -2416,6 +2546,8 @@ function AgentDetailView({
       memoryEntries.filter((entry) => {
         const body = entry.content.trim();
         return (
+          entry.scope === "agent_repo" &&
+          entry.projectPath === null &&
           EVOLUTION_CANDIDATE_KINDS.has((entry.kind || "").toLowerCase()) &&
           (entry.confidence === "high" || entry.confidence === "medium") &&
           body.length > 0 &&
@@ -2427,22 +2559,26 @@ function AgentDetailView({
   const [selectedRuntimeIds, setSelectedRuntimeIds] = useState<Record<string, boolean>>({});
   const selectedRuntimeEntries = runtimeEvolutionCandidates.filter((e) => selectedRuntimeIds[e.id]);
 
-  // 선택한 DB 학습을 기존 evolutionAppendix 와 같은 방식(프롬프트 부록 append + onSaveEvolution)으로 반영.
+  // 자동 수집은 검토 후보만 만든다. 승인 전에는 프롬프트/스킬/플레이북 파일을 쓰지 않는다.
   const applyRuntimeEntries = async () => {
     if (selectedRuntimeEntries.length === 0) return;
     const appendix =
       "\n\n## Runtime learnings (auto-collected)\n" +
       selectedRuntimeEntries.map((e) => `- [${e.kind}] ${e.content.trim()}`).join("\n");
-    await onSaveEvolution(promptContent + appendix);
+    const proposal = await onCreateEvolution(promptContent + appendix, {
+      changeOrigin: "runtime_memory_selection",
+      memoryEntryIds: selectedRuntimeEntries.map((entry) => entry.id),
+    });
+    if (!proposal) return;
     setSelectedRuntimeIds({});
     setTimelineEvents((prev) => [
       {
         id: `timeline-${Date.now()}`,
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        title: locale === "ko" ? "런타임 학습 프롬프트 반영" : "Runtime learnings folded into prompt",
+        title: locale === "ko" ? "런타임 학습 검토 후보 생성" : "Runtime learning review candidate created",
         desc: locale === "ko"
-          ? `자동 수집된 학습 ${selectedRuntimeEntries.length}건을 시스템 프롬프트 부록으로 반영했습니다.`
-          : `Folded ${selectedRuntimeEntries.length} auto-collected learnings into the system prompt appendix.`,
+          ? `자동 수집된 학습 ${selectedRuntimeEntries.length}건으로 후보를 만들었습니다. 승인 전에는 프롬프트가 바뀌지 않습니다.`
+          : `Created a candidate from ${selectedRuntimeEntries.length} auto-collected learnings. The prompt stays unchanged until approval.`,
         type: "evolution",
       },
       ...prev,
@@ -2524,34 +2660,21 @@ function AgentDetailView({
     const defaultVal = agent?.systemPrompt ?? "# Default Prompt\nNo default instruction available.";
     onPromptDraftChange(defaultVal);
     
-    const api = ipc();
-    if (api && node && node.agentId) {
-      try {
-        const promptFile = agentFiles.find(
-          (e) => e.name.toLowerCase() === "agent.md" || e.name.toLowerCase() === "system-prompt.md"
-        );
-        const path = promptFile ? promptFile.path : "AGENT.md";
-        await api.agentFiles.write(node.agentId, path, defaultVal);
-        await onSaveEvolution(defaultVal);
-        
-        setTimelineEvents(prev => [
-          {
-            id: `timeline-${Date.now()}`,
-            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-            title: locale === "ko" ? "시스템 프롬프트 초기화" : "System prompt reset",
-            desc: locale === "ko"
-              ? "프롬프트를 로컬 런타임 내의 에이전트 팩토리 기본 프로필로 강제 재설정했습니다."
-              : "Force-reset the prompt to the agent factory default profile in the local runtime.",
-            type: "evolution"
-          },
-          ...prev
-        ]);
-
-        showToast(locale === "ko" ? "프롬프트가 초기 사양으로 재설정되었습니다." : "Prompt reset to its initial specification.");
-      } catch (e) {
-        showToast((locale === "ko" ? "재설정 반영 실패: " : "Failed to apply reset: ") + String(e));
-      }
-    }
+    const proposal = await onCreateEvolution(defaultVal, { changeOrigin: "reset_to_default" });
+    if (!proposal) return;
+    onTabChange("activity");
+    setTimelineEvents(prev => [
+      {
+        id: `timeline-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        title: locale === "ko" ? "초기화 검토 후보 생성" : "Reset review candidate created",
+        desc: locale === "ko"
+          ? "기본 프로필과 현재 프롬프트의 diff를 검토한 뒤 승인할 수 있습니다. 원본은 아직 유지됩니다."
+          : "Review the default-profile diff before approval. The original remains intact.",
+        type: "evolution"
+      },
+      ...prev
+    ]);
   };
 
   const toggleItemExpand = (id: string) => {
@@ -2686,57 +2809,23 @@ function AgentDetailView({
       : `Learning suggestion '${target.title}' merged into memory.`);
   };
 
-  // 스킬 주입 — 에이전트 폴더에 실제 스킬 파일(.agentlas/skills/<slug>/SKILL.md)을 쓰고,
-  // 메모리·타임라인에도 기록한다. (writeAgentFile 이 중첩 디렉터리를 생성)
+  // 수동 스킬 주입도 먼저 durable candidate만 만든다. 파일/"완료" 메모리는
+  // 별도 diff 승인 뒤 main-process CAS + receipt가 성공해야 생긴다.
   const handleInjectSkill = async (skill: { slug?: string; name: string; description: string }) => {
-    const api = ipc();
-    const slug = (skill.slug ?? skill.name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-    let fileWritten = false;
-    if (api && node?.agentId) {
-      const skillMd = `# ${skill.name}\n\n${skill.description}\n\n## When to use\nInjected into this agent from the skill catalog. Apply this skill's guidance when the task matches its scope.\n`;
-      try {
-        await api.agentFiles.write(node.agentId, `.agentlas/skills/${slug}/SKILL.md`, skillMd);
-        fileWritten = true;
-      } catch (e) {
-        showToast(locale === "ko" ? `스킬 파일 작성 실패: ${String(e)}` : `Failed to write skill file: ${String(e)}`);
-      }
-    }
-
-    const newDecision = {
-      id: `skill-${slug}`,
-      title: locale === "ko" ? `${skill.name} 스킬 주입` : `${skill.name} skill injected`,
-      content: locale === "ko"
-        ? `${skill.description} — .agentlas/skills/${slug}/SKILL.md 로 주입됨.`
-        : `${skill.description} — injected as .agentlas/skills/${slug}/SKILL.md.`,
-      synced: globalHubSync,
-      enabled: true,
-    };
-    void onSaveMemory((prev: typeof memoryParsed) => ({
-      ...prev,
-      decisions: [...prev.decisions, newDecision],
-    }));
-    onSetSkillDrawerOpen(false);
-
+    const created = await onCreateSkillEvolution(skill);
+    if (!created) return;
     setTimelineEvents((prev) => [
       {
         id: `timeline-${Date.now()}`,
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        title: locale === "ko" ? "수동 스킬 주입 (Skill Injection)" : "Manual skill injection",
-        desc: fileWritten
-          ? (locale === "ko"
-              ? `'${skill.name}' 스킬을 .agentlas/skills/${slug}/SKILL.md 로 에이전트 폴더에 작성했습니다.`
-              : `Wrote the '${skill.name}' skill to the agent folder at .agentlas/skills/${slug}/SKILL.md.`)
-          : (locale === "ko"
-              ? `'${skill.name}' 스킬을 메모리에 기록했습니다(파일 작성은 건너뜀).`
-              : `Recorded the '${skill.name}' skill in memory (file write skipped).`),
+        title: locale === "ko" ? "스킬 주입 검토 후보" : "Skill injection review candidate",
+        desc: locale === "ko"
+          ? `'${skill.name}' diff 후보를 만들었습니다. 승인 전에는 SKILL.md가 생성되지 않습니다.`
+          : `Created a '${skill.name}' diff candidate. SKILL.md is not created before approval.`,
         type: "skill",
       },
       ...prev,
     ]);
-
-    showToast(fileWritten
-      ? (locale === "ko" ? `${skill.name} 스킬이 에이전트 폴더에 주입되었습니다.` : `${skill.name} skill injected into the agent folder.`)
-      : (locale === "ko" ? `${skill.name} 스킬을 메모리에 기록했습니다.` : `${skill.name} skill recorded in memory.`));
   };
 
 
@@ -3114,13 +3203,18 @@ function AgentDetailView({
                           <strong>{locale === "ko" ? "소유:" : "Ownership:"}</strong>{" "}
                           <span className="agent-ownership-badge" data-owned={own.owned ? "true" : "false"}>
                             {own.owned
-                              ? (locale === "ko" ? "내 직원 · owned" : "My staff · owned")
+                              ? `${own.label} · owned`
                               : (locale === "ko" ? "빌린 게스트 · borrowed" : "Borrowed guest · borrowed")}
                           </span>
-                          <div className="agent-ownership-path">{own.localPath ?? own.origin}</div>
+                          <div className="agent-ownership-path">{own.origin}</div>
+                          {own.localPath && own.origin !== own.localPath && (
+                            <div className="agent-ownership-path">{own.localPath}</div>
+                          )}
                           <div className="agent-ownership-note">
                             {own.owned
-                              ? own.localPath
+                              ? own.klass === "owned-cloud"
+                                ? (locale === "ko" ? "검증된 package hash의 로컬 실행 사본 — Cloud 원본과 버전을 구분해 복원합니다." : "A local execution copy of the verified package hash — restored with its Cloud origin and version intact.")
+                                : own.localPath
                                 ? (locale === "ko" ? "내 디스크의 실제 폴더 — 게시자가 사라져도 안 죽는다." : "A real folder on my disk — it survives even if the publisher disappears.")
                                 : (locale === "ko" ? "내 라이브러리에 설치됨 — 내 자산이다." : "Installed in my library — it's my asset.")
                               : (locale === "ko" ? "원격 게스트 — 게시자가 내리면 사용 불가. Fork 하면 내 것이 된다." : "Remote guest — unusable if the publisher takes it down. Fork it to make it yours.")}
@@ -3526,16 +3620,19 @@ function AgentDetailView({
                     <div><strong>Agent ID:</strong> {node.agentId ?? (locale === "ko" ? "미설치 노드" : "Uninstalled node")}</div>
                     <div><strong>{locale === "ko" ? "적용 런타임:" : "Active runtime:"}</strong> {effectiveRuntimeOverride ? selectionSummary(effectiveRuntimeOverride.selection, locale) : (locale === "ko" ? "런타임 자동 선택" : "Automatic runtime selection")}</div>
                     <div><strong>{locale === "ko" ? "신뢰 등급:" : "Trust grade:"}</strong> Trust {agent?.trustGrade ?? "B"}</div>
-                    {agent && (
-                      <div>
-                        <strong>{locale === "ko" ? "소유:" : "Ownership:"}</strong>{" "}
-                        <span className="agent-ownership-badge" data-owned={classifyAgent(agent).owned ? "true" : "false"}>
-                          {classifyAgent(agent).owned
-                            ? (locale === "ko" ? "내 직원 · owned" : "My staff · owned")
-                            : (locale === "ko" ? "빌린 게스트 · borrowed" : "Borrowed guest · borrowed")}
-                        </span>
-                      </div>
-                    )}
+                    {agent && (() => {
+                      const own = classifyAgent(agent, locale);
+                      return (
+                        <div>
+                          <strong>{locale === "ko" ? "소유:" : "Ownership:"}</strong>{" "}
+                          <span className="agent-ownership-badge" data-owned={own.owned ? "true" : "false"}>
+                            {own.owned
+                              ? `${own.label} · owned`
+                              : (locale === "ko" ? "빌린 게스트 · borrowed" : "Borrowed guest · borrowed")}
+                          </span>
+                        </div>
+                      );
+                    })()}
                     <div><strong>{locale === "ko" ? "호출 경로:" : "Invocation paths:"}</strong> {locale === "ko" ? "Chat 멘션, Team 라우팅, Hub 후보 검색" : "Chat mentions, Team routing, Hub candidate search"}</div>
                   </div>
                 </div>
@@ -3620,18 +3717,24 @@ function AgentDetailView({
                 <div style={{ display: "flex", justifyItems: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
                   <h4 style={{ margin: 0, fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
                     <IconWand size={14} style={{ color: "var(--accent)" }} />
-                    {locale === "ko" ? "자가 프롬프트 진화 제안 (Agent Evolution Proposal)" : "Agent Evolution Proposal"}
+                    {locale === "ko" ? "에이전트 자산 진화 제안 (Agent Asset Proposal)" : "Agent Asset Evolution Proposal"}
                   </h4>
                   <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 4, background: "rgba(245,201,122,0.16)", color: "var(--amber-deep)", fontWeight: 700 }}>
-                    {evolutionApproved
-                      ? (locale === "ko" ? "적용 완료" : "Applied")
+                    {pendingProposal
+                      ? (locale === "ko" ? "승인 대기" : "Awaiting approval")
+                      : recoveryProposal
+                        ? (locale === "ko" ? "수동 비교·복구 필요" : "Manual diff/recovery required")
+                      : displayedProposal?.status === "applied" || displayedProposal?.status === "measured"
+                        ? (locale === "ko" ? "적용됨 · 롤백 가능" : "Applied · rollback available")
+                        : displayedProposal?.status === "rolled_back"
+                          ? (locale === "ko" ? "롤백 완료" : "Rolled back")
                       : hasPendingEvolution || runtimeEvolutionCandidates.length > 0
-                        ? (locale === "ko" ? "업그레이드 대기" : "Upgrade pending")
+                        ? (locale === "ko" ? "후보 생성 가능" : "Candidate available")
                         : (locale === "ko" ? "최신 상태" : "Up to date")}
                   </span>
                 </div>
 
-                {!hasPendingEvolution && !evolutionApproved && runtimeEvolutionCandidates.length === 0 && (
+                {!hasPendingEvolution && !displayedProposal && runtimeEvolutionCandidates.length === 0 && (
                   <div style={{ fontSize: 12, color: "var(--muted-deep)", padding: "12px 4px", lineHeight: 1.6 }}>
                     {memoryEntries.length === 0 && memoryParsed.decisions.length + memoryParsed.gotchas.length === 0
                       ? (locale === "ko"
@@ -3645,7 +3748,7 @@ function AgentDetailView({
 
                 {/* 런타임 학습(자동 수집) — 큐레이터 DB에서 온 진화 후보. memory.md 가 비어도 이 목록이 채워진다. */}
                 {runtimeEvolutionCandidates.length > 0 && (
-                  <div style={{ marginBottom: hasPendingEvolution || evolutionApproved ? 14 : 0 }}>
+                  <div style={{ marginBottom: hasPendingEvolution || displayedProposal ? 14 : 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
                       <strong style={{ fontSize: 12 }}>
                         {locale === "ko" ? "런타임 학습(자동 수집)" : "Runtime learnings (auto-collected)"}
@@ -3674,6 +3777,9 @@ function AgentDetailView({
                               <span style={{ fontSize: 10, color: "var(--muted-deep)", fontFamily: "var(--font-mono)" }}>
                                 {formatMemoryEntryTime(entry.createdAt, locale)}
                               </span>
+                              <span style={{ fontSize: 9.5, color: "var(--muted-deep)" }}>
+                                {locale === "ko" ? "에이전트 전역 학습" : "Agent-global learning"}
+                              </span>
                             </div>
                             <div style={{ fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.45 }}>{entry.content}</div>
                           </div>
@@ -3683,27 +3789,27 @@ function AgentDetailView({
                     <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
                       <button
                         onClick={() => void applyRuntimeEntries()}
-                        disabled={selectedRuntimeEntries.length === 0 || saving}
+                        disabled={selectedRuntimeEntries.length === 0 || saving || !!pendingProposal}
                         style={{
                           padding: "7px 12px",
-                          background: selectedRuntimeEntries.length === 0 || saving ? "var(--paper-2)" : "var(--accent)",
-                          color: selectedRuntimeEntries.length === 0 || saving ? "var(--muted-deep)" : "#fff",
+                          background: selectedRuntimeEntries.length === 0 || saving || !!pendingProposal ? "var(--paper-2)" : "var(--accent)",
+                          color: selectedRuntimeEntries.length === 0 || saving || !!pendingProposal ? "var(--muted-deep)" : "#fff",
                           border: "1px solid var(--paper-edge)",
                           borderRadius: 6,
                           fontSize: 11.5,
                           fontWeight: 650,
-                          cursor: selectedRuntimeEntries.length === 0 || saving ? "default" : "pointer",
+                          cursor: selectedRuntimeEntries.length === 0 || saving || !!pendingProposal ? "default" : "pointer",
                         }}
                       >
                         {locale === "ko"
-                          ? `선택한 학습 프롬프트에 반영 (${selectedRuntimeEntries.length})`
-                          : `Fold selected learnings into prompt (${selectedRuntimeEntries.length})`}
+                          ? `선택한 학습으로 검토 후보 만들기 (${selectedRuntimeEntries.length})`
+                          : `Create review candidate (${selectedRuntimeEntries.length})`}
                       </button>
                     </div>
                   </div>
                 )}
 
-                {(hasPendingEvolution || evolutionApproved) && (
+                {(hasPendingEvolution || displayedProposal) && (
                 <>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-sm)", overflow: "hidden" }}>
                   {/* 기존 버젼 */}
@@ -3712,7 +3818,7 @@ function AgentDetailView({
                       {locale === "ko" ? "기존 버전 (Current)" : "Current"}
                     </div>
                     <pre style={{ margin: 0, padding: 12, fontSize: 10.5, fontFamily: "var(--font-mono)", lineHeight: 1.5, whiteSpace: "pre-wrap", maxHeight: 180, overflowY: "auto" }}>
-                      {evolutionDiff.old}
+                      {displayedEvolutionDiff.old}
                     </pre>
                   </div>
                   {/* 제안 버젼 */}
@@ -3721,30 +3827,18 @@ function AgentDetailView({
                       {locale === "ko" ? "개선 제안 (Evolved Draft)" : "Evolved Draft"}
                     </div>
                     <pre style={{ margin: 0, padding: 12, fontSize: 10.5, fontFamily: "var(--font-mono)", lineHeight: 1.5, whiteSpace: "pre-wrap", maxHeight: 180, overflowY: "auto" }}>
-                      {evolutionDiff.new}
+                      {displayedEvolutionDiff.new}
                     </pre>
                   </div>
                 </div>
 
-                {!evolutionApproved && hasPendingEvolution && (
+                {!pendingProposal && hasPendingEvolution && (
                   <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
                     <button
                       onClick={async () => {
-                        await onSaveEvolution(evolutionDiff.new);
-                        setEvolutionApproved(true);
-                        setTimelineEvents(prev => [
-                          {
-                            id: `timeline-${Date.now()}`,
-                            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-                            title: locale === "ko" ? "자가 프롬프트 진화 승인" : "Self-prompt evolution approved",
-                            desc: locale === "ko"
-                              ? "AI 개선 제안 드래프트를 에이전트 마스터 정의서(AGENT.md)에 정식 적용 및 저장했습니다."
-                              : "Officially applied and saved the AI improvement draft to the agent master definition (AGENT.md).",
-                            type: "evolution"
-                          },
-                          ...prev
-                        ]);
+                        await onCreateEvolution(evolutionDiff.new, { changeOrigin: "curated_memory_rules" });
                       }}
+                      disabled={saving}
                       style={{
                         padding: "8px 14px",
                         background: "var(--accent)",
@@ -3753,13 +3847,72 @@ function AgentDetailView({
                         borderRadius: 6,
                         fontSize: 12,
                         fontWeight: 600,
-                        cursor: "pointer"
+                        cursor: saving ? "default" : "pointer",
+                        opacity: saving ? 0.6 : 1,
                       }}
                     >
-                      {locale === "ko" ? "진화 제안 승인 및 적용" : "Approve & apply evolution"}
+                      {locale === "ko" ? "diff 검토 후보 만들기" : "Create diff review candidate"}
                     </button>
                   </div>
 	                )}
+
+                  {pendingProposal && (
+                    <div style={{ marginTop: 12, padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)" }}>
+                      <div style={{ fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.55, marginBottom: 10 }}>
+                        {locale === "ko"
+                          ? `후보 ${pendingProposal.id} · ${pendingProposal.targetPath} · before ${pendingProposal.beforeHash.slice(0, 12)} · after ${pendingProposal.afterHash.slice(0, 12)}. 승인 전에는 원본 파일과 패키지 버전이 유지됩니다.`
+                          : `Candidate ${pendingProposal.id} · ${pendingProposal.targetPath} · before ${pendingProposal.beforeHash.slice(0, 12)} · after ${pendingProposal.afterHash.slice(0, 12)}. The original file and package version remain unchanged until approval.`}
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                        <button
+                          type="button"
+                          onClick={() => void onRejectEvolution(pendingProposal.id)}
+                          disabled={saving}
+                          style={{ padding: "8px 12px", border: "1px solid var(--paper-edge)", borderRadius: 6, background: "var(--paper)", color: "var(--ink-soft)", fontSize: 12, fontWeight: 650, cursor: saving ? "default" : "pointer" }}
+                        >
+                          {locale === "ko" ? "후보 거절" : "Reject candidate"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void onApproveEvolution(pendingProposal.id)}
+                          disabled={saving}
+                          style={{ padding: "8px 14px", background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 650, cursor: saving ? "default" : "pointer", opacity: saving ? 0.6 : 1 }}
+                        >
+                          {locale === "ko" ? "검토 완료 · 승인 및 적용" : "Review complete · approve & apply"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {recoveryProposal?.lastError && (
+                    <div style={{ marginTop: 12, padding: 12, border: "1px solid var(--red-deep)", borderRadius: 8, background: "rgba(255,138,138,0.06)", color: "var(--red-deep)", fontSize: 11.5, lineHeight: 1.55 }}>
+                      {locale === "ko"
+                        ? `자동 덮어쓰기를 중단하고 현재 파일을 보존했습니다. Identity 탭의 현재 원문과 before/after hash를 직접 비교하세요. ${recoveryProposal.lastError}`
+                        : `Automatic overwrite stopped and the current file was preserved. Compare the current Identity source with the before/after hashes. ${recoveryProposal.lastError}`}
+                    </div>
+                  )}
+
+                  {displayedProposal && displayedProposal.receipts.length > 0 && (
+                    <div style={{ marginTop: 12, padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)" }}>
+                      {displayedProposal.receipts.map((receipt) => (
+                        <div key={receipt.id} style={{ fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.55, fontFamily: "var(--font-mono)", marginBottom: 6 }}>
+                          {receipt.action.toUpperCase()} · asset v{receipt.versionBefore}→v{receipt.versionAfter} · governed {receipt.governedAssetHashBefore.slice(0, 12)}→{receipt.governedAssetHashAfter.slice(0, 12)} · receipt {receipt.id}
+                        </div>
+                      ))}
+                      {(displayedProposal.status === "applied" || displayedProposal.status === "measured") && (
+                        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
+                          <button
+                            type="button"
+                            onClick={() => void onRollbackEvolution(displayedProposal.id)}
+                            disabled={saving}
+                            style={{ padding: "7px 12px", border: "1px solid var(--red-deep)", borderRadius: 6, background: "var(--paper)", color: "var(--red-deep)", fontSize: 11.5, fontWeight: 650, cursor: saving ? "default" : "pointer" }}
+                          >
+                            {locale === "ko" ? "이 영수증으로 롤백" : "Rollback from this receipt"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
 	                </>
 	                )}
 	              </div>

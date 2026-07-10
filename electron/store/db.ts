@@ -10,7 +10,7 @@ import { publicAgentVisibility } from "../agents/policy";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 50;
+const SCHEMA_VERSION = 51;
 
 type SchemaColumn = {
   name: string;
@@ -1523,6 +1523,80 @@ export function initStore(): void {
   // non-operating recovery agent with the original missing id.
   if (userVersion < 50) {
     repairOrphanChatsV50(_db);
+  }
+
+  // v51: governed agent evolution receipts + monotonic local asset versions.
+  // A candidate never changes package files. Every approved apply/rollback gets
+  // an append-only receipt containing target and package hashes before/after.
+  if (userVersion < 51) {
+    const evolutionCols = _db
+      .prepare("PRAGMA table_info(agent_evolution_proposals)")
+      .all() as Array<{ name: string }>;
+    if (evolutionCols.length === 0) {
+      // Defensive repair for historical/partially migrated stores.
+      _db.exec(`
+        CREATE TABLE agent_evolution_proposals (
+          id TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL,
+          proposal_type TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          target_path TEXT NOT NULL,
+          before_hash TEXT NOT NULL,
+          after_hash TEXT NOT NULL,
+          before_content TEXT NOT NULL,
+          after_content TEXT NOT NULL,
+          risk TEXT NOT NULL,
+          status TEXT NOT NULL,
+          source_json TEXT NOT NULL DEFAULT '{}',
+          operation_json TEXT,
+          decision_note TEXT,
+          last_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          approved_at TEXT,
+          applied_at TEXT,
+          measured_at TEXT,
+          rolled_back_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_evolution_agent_status
+          ON agent_evolution_proposals(agent_id, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_evolution_created
+          ON agent_evolution_proposals(created_at DESC);
+      `);
+    } else if (!evolutionCols.some((column) => column.name === "operation_json")) {
+      _db.exec("ALTER TABLE agent_evolution_proposals ADD COLUMN operation_json TEXT");
+    }
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_asset_versions (
+        agent_id TEXT PRIMARY KEY,
+        version INTEGER NOT NULL,
+        package_hash TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(agent_id) REFERENCES installed_agents(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_evolution_receipts (
+        id TEXT PRIMARY KEY,
+        proposal_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target_path TEXT NOT NULL,
+        version_before INTEGER NOT NULL,
+        version_after INTEGER NOT NULL,
+        target_hash_before TEXT NOT NULL,
+        target_hash_after TEXT NOT NULL,
+        package_hash_before TEXT NOT NULL,
+        package_hash_after TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(proposal_id) REFERENCES agent_evolution_proposals(id) ON DELETE CASCADE,
+        FOREIGN KEY(agent_id) REFERENCES installed_agents(id) ON DELETE CASCADE,
+        UNIQUE(proposal_id, action)
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_evolution_receipts_agent
+        ON agent_evolution_receipts(agent_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_agent_evolution_receipts_proposal
+        ON agent_evolution_receipts(proposal_id, created_at ASC);
+    `);
   }
 
   _db.pragma(`user_version = ${SCHEMA_VERSION}`);

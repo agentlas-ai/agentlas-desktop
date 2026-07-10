@@ -16,6 +16,8 @@ import type { HephaestusBuildEvent, HephaestusBuildRequest } from "../../shared/
 import { hephaestusRoot } from "./engine";
 import { securityScan } from "./commands";
 import { isCompletedBuildTurn } from "./build-turn";
+import { stageAttachments, type ResolvedHephaestusBuildAttachment } from "./build-attachments";
+import { verifiedCompletedPackageRoot } from "./build-result-path";
 
 export type BuildSink = (ev: HephaestusBuildEvent) => void;
 
@@ -25,6 +27,11 @@ const MODE_AGENT: Record<NonNullable<HephaestusBuildRequest["mode"]>, string> = 
   package: "agents/30-agentlas-packager/agent.md",
 };
 
+export interface ResolvedHephaestusBuildRequest extends Omit<HephaestusBuildRequest, "workspaceGrant" | "attachments"> {
+  workspace: string;
+  attachments?: ResolvedHephaestusBuildAttachment[];
+}
+
 function readIf(root: string, rel: string): string | null {
   try {
     return fs.readFileSync(path.join(root, rel), "utf8");
@@ -33,78 +40,8 @@ function readIf(root: string, rel: string): string | null {
   }
 }
 
-// ── 첨부 스테이징 ─────────────────────────────────────────────────────────
-// 사용자가 빌드 지시문에 붙인 파일/폴더(기존 에이전트·스킬·이미지·문서)를 워크스페이스의
-// `_attachments/`로 복사한다 — 빌더 CLI 에이전트의 cwd가 워크스페이스라 상대경로로 바로 읽힌다.
-const ATTACH_DIR = "_attachments";
-const ATTACH_SKIP = new Set(["node_modules", ".git", ".next", "dist", "__pycache__", ".DS_Store", ".venv"]);
-const ATTACH_MAX_TOTAL = 200 * 1024 * 1024; // 총 200MB 상한(무한 복사 가드)
-
-function uniqueDest(dir: string, name: string): string {
-  let dest = path.join(dir, name);
-  if (!fs.existsSync(dest)) return dest;
-  const ext = path.extname(name);
-  const base = path.basename(name, ext);
-  for (let i = 2; i < 100; i += 1) {
-    dest = path.join(dir, `${base}-${i}${ext}`);
-    if (!fs.existsSync(dest)) return dest;
-  }
-  return dest;
-}
-
-function describeSize(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`;
-  return `${bytes}B`;
-}
-
-/** 첨부를 워크스페이스로 스테이징하고 프롬프트에 붙일 참조 라인들을 반환한다. */
-export function stageAttachments(workspace: string, attachments: NonNullable<HephaestusBuildRequest["attachments"]>): { lines: string[]; errors: string[] } {
-  const lines: string[] = [];
-  const errors: string[] = [];
-  const destRoot = path.join(workspace, ATTACH_DIR);
-  let copied = 0;
-  for (const att of attachments) {
-    try {
-      const src = path.resolve(att.path || "");
-      const st = fs.statSync(src);
-      fs.mkdirSync(destRoot, { recursive: true });
-      const name = (att.name || path.basename(src)).replace(/[/\\]/g, "_");
-      const dest = uniqueDest(destRoot, name);
-      if (st.isDirectory()) {
-        fs.cpSync(src, dest, {
-          recursive: true,
-          filter: (p2) => {
-            if (ATTACH_SKIP.has(path.basename(p2))) return false;
-            if (copied > ATTACH_MAX_TOTAL) return false;
-            try {
-              const s2 = fs.statSync(p2);
-              if (s2.isFile()) copied += s2.size;
-            } catch { /* 통과 */ }
-            return true;
-          },
-        });
-        lines.push(`- ${ATTACH_DIR}/${path.basename(dest)}/ (folder — likely an existing agent/skill package; explore its files)`);
-      } else {
-        if (copied + st.size > ATTACH_MAX_TOTAL) {
-          errors.push(`${name}: size cap exceeded`);
-          continue;
-        }
-        copied += st.size;
-        fs.copyFileSync(src, dest);
-        const ext = path.extname(name).toLowerCase();
-        const kind = [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(ext) ? "image — open it with your file-read tool" : "file";
-        lines.push(`- ${ATTACH_DIR}/${path.basename(dest)} (${kind}, ${describeSize(st.size)})`);
-      }
-    } catch (err) {
-      errors.push(`${att.name || att.path}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-  return { lines, errors };
-}
-
 /** 빌더 시스템 프롬프트 조립: 캐논 AGENTS.md + (모드 빌더 또는 mode-map + 3 빌더) + 출력 지침. */
-function composeBuilderPrompt(root: string, req: HephaestusBuildRequest, locale: RuntimeLocale): string {
+function composeBuilderPrompt(root: string, req: ResolvedHephaestusBuildRequest, locale: RuntimeLocale): string {
   const ko = locale === "ko";
   const uiLang = ko ? "Korean" : "English";
   const parts: string[] = [];
@@ -185,7 +122,7 @@ function composeBuilderPrompt(root: string, req: HephaestusBuildRequest, locale:
  */
 export async function runHephaestusBuild(
   runId: string,
-  req: HephaestusBuildRequest,
+  req: ResolvedHephaestusBuildRequest,
   sink: BuildSink,
   signal: AbortSignal,
   locale: RuntimeLocale = "ko",
@@ -287,10 +224,24 @@ export async function runHephaestusBuild(
     // 인터뷰 turn은 질문만 반환하고 파일을 만들지 않는다. 완료 신호가 있는 실제 생성 턴에만
     // security stage를 방출해야 UI가 답변 전에 3단계 완료로 뛰거나 무의미한 스캔을 하지 않는다.
     let scan: unknown = null;
+    const completedPackage = isCompletedBuildTurn(result.text)
+      ? verifiedCompletedPackageRoot(req.workspace, result.text)
+      : { root: fs.realpathSync.native(req.workspace) };
+    const completedPackageRoot = completedPackage.root;
     if (!signal.aborted && isCompletedBuildTurn(result.text)) {
       sink({ runId, kind: "stage", stage: "security", text: ko ? "정적 보안 스캔" : "Static security scan" });
-      try {
-        const scanRes = await securityScan(req.workspace, { signal, timeoutMs: 120_000 });
+      if (completedPackage.error) {
+        scan = { status: "unverified", reason: completedPackage.error };
+        sink({
+          runId,
+          kind: "stage",
+          stage: "security",
+          text: ko
+            ? `보안 스캔 미검증: ${completedPackage.error} — 통과로 간주하지 말 것`
+            : `Security scan unverified: ${completedPackage.error} — do not treat as passing`,
+        });
+      } else try {
+        const scanRes = await securityScan(completedPackageRoot, { signal, timeoutMs: 120_000 });
         scan = scanRes?.json ?? null;
         if (scan === null) {
           // 스캔이 결과를 내지 못함 — 빈/클린 결과처럼 보이지 않게 명시한다.
@@ -310,7 +261,7 @@ export async function runHephaestusBuild(
       kind: "done",
       text: result.text,
       sessionId: result.sessionId,
-      result: { workspace: req.workspace, securityScan: scan },
+      result: { workspace: completedPackageRoot, securityScan: scan },
     });
   } catch (e) {
     if (signal.aborted) {

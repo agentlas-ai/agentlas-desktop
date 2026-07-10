@@ -10,7 +10,7 @@ import type {
   OberonMotionAdJob,
   OberonMotionAdRequest,
 } from "../../shared/types";
-import { currentUiLocale } from "../main";
+import { currentUiLocale } from "../ui-locale";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_DURATION = 30;

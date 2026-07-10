@@ -14,7 +14,7 @@ import type {
   OberonKeyframeShotInput,
 } from "../../shared/types";
 import { readEnvVar } from "../secrets/vault";
-import { currentUiLocale } from "../main";
+import { currentUiLocale } from "../ui-locale";
 
 const DEFAULT_PROVIDER: OberonKeyframeProvider = "codex-imagegen-cli";
 const DEFAULT_CODEX_MODEL = "image_gen.imagegen";

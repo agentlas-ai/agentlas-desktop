@@ -4,9 +4,14 @@
 // 빌드 직후 latest-mac.yml을 zip 기준으로 재작성한다. (없으면 "ZIP file not provided")
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = resolve(new URL("..", import.meta.url).pathname);
+const require = createRequire(import.meta.url);
+const { stampUpdateCompatibilityFile } = require("../build-resources/update-compatibility.cjs");
+
+const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const args = new Map(
   process.argv.slice(2).map((arg) => {
     const [key, ...rest] = arg.split("=");
@@ -44,5 +49,7 @@ const yml =
     `releaseDate: '${new Date().toISOString()}'`,
   ].join("\n") + "\n";
 
-writeFileSync(join(releaseDir, "latest-mac.yml"), yml, "utf8");
+const latestMacPath = join(releaseDir, "latest-mac.yml");
+writeFileSync(latestMacPath, yml, "utf8");
+stampUpdateCompatibilityFile(latestMacPath, join(root, "package.json"));
 console.log(`[fix-mac-latest-zip] latest-mac.yml -> ${primary.url} (${files.length} zip entries)`);

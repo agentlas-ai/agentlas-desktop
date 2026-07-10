@@ -107,12 +107,25 @@ jobs:
           for attempt in 1 2 3; do
             echo "::group::electron-builder attempt $attempt"
             if npx electron-builder ${{ matrix.builder_args }} --publish always; then
-              echo "::endgroup::"
-              exit 0
+              # electron-builder writes latest*.yml only after artifact-build hooks,
+              # so compatibility must be stamped after the builder process exits.
+              # Re-uploading only the feed with --clobber keeps installer publishing
+              # unchanged while making the final public feed authoritative.
+              node scripts/stamp-update-feeds.mjs --release-dir=release --require
+              mapfile -t update_feeds < <(find release -maxdepth 1 -type f -name 'latest*.yml' -print | sort)
+              tag="${{ github.event.inputs.tag || github.ref_name }}"
+              if gh release upload "$tag" \
+                --repo agentlas-ai/agentlas-desktop-releases \
+                --clobber \
+                "${update_feeds[@]}"; then
+                echo "::endgroup::"
+                exit 0
+              fi
+              echo "::warning::compatibility feed upload failed; retrying the release attempt"
             fi
             echo "::endgroup::"
-            echo "::warning::electron-builder attempt $attempt failed; retrying in 15s"
+            echo "::warning::release attempt $attempt failed; retrying in 15s"
             sleep 15
           done
-          echo "::error::electron-builder failed after 3 attempts"
+          echo "::error::build/publish/feed verification failed after 3 attempts"
           exit 1

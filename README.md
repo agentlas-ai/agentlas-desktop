@@ -192,9 +192,10 @@ A complete tour of what ships today.
 
 - **Projects** group related chats, apply a shared context note, and set a default
   agent so every new chat starts with the right context.
-- **Project Ontology panel** activates a project-local `.agentlas/ontology-inbox/`,
-  shows registered sources, and keeps the SQLite knowledge store inside that
-  project. It does not scan your home folder or sibling projects.
+- **Project-local ontology runtime** keeps `.agentlas/ontology-inbox/`, registered
+  sources, and the SQLite knowledge store inside that project. It runs as
+  background infrastructure for agents rather than a standalone project panel,
+  and does not scan your home folder or sibling projects.
 - **Chats** support rename, archive/unarchive, switching the bound agent, and full
   message history — all in **local SQLite**, nothing on a server.
 - **Image attachments** are sent as multimodal input on BYOK backends.

@@ -19,12 +19,17 @@ export function resolveFromOrgChart(firm: InstalledFirm): ResolvedOrg {
   const nodes = firm.orgChart;
   const toNode = (n: (typeof nodes)[number]): ResolvedNode => {
     const agent = n.agentId ? getAgentById(n.agentId) : null;
+    const name = agent?.name || n.role;
     return {
       id: n.agentId || n.agentSlug,
-      name: agent?.name || n.role,
+      name,
       role: n.role,
       agentId: n.agentId || undefined,
-      prompt: agent?.systemPrompt || undefined,
+      // Runtime prompt authority belongs to the agent package's canonical file.
+      // A derived org node contributes only its current organizational role;
+      // copying the registry fallback here would append stale prompt bytes after
+      // buildEffectiveAgentSystemPrompt() has already loaded the canonical file.
+      prompt: `You are ${name}, serving as ${n.role} in this firm. Apply the agent's canonical instructions within this organizational role.`,
     };
   };
 

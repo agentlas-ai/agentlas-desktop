@@ -1148,7 +1148,26 @@ function UpdatePanel() {
     await api.updater.install();
   }
 
+  async function openManualDownload() {
+    await ipc()?.updater.openManualDownload();
+  }
+
+  async function revealRecoveryBackup() {
+    await ipc()?.updater.revealRecoveryBackup();
+  }
+
+  async function retrySafetyAction() {
+    const api = ipc();
+    if (!api) return;
+    if (state.code === "continuity-backup-failed") await api.updater.install();
+    else await api.updater.check();
+  }
+
   const statusText = (() => {
+    if (state.code === "continuity-backup-failed") return t("settings.update.safety_backup_failed");
+    if (state.code === "legacy-cleanup-failed") return t("settings.update.cleanup_failed");
+    if (state.code === "compatibility-metadata-missing") return t("settings.update.metadata_missing");
+    if (state.code === "minimum-schema-version") return t("settings.update.schema_incompatible");
     switch (state.status) {
       case "checking":
         return t("settings.update.checking");
@@ -1161,8 +1180,18 @@ function UpdatePanel() {
         });
       case "downloaded":
         return t("settings.update.downloaded", { version: state.version ?? "?" });
+      case "installing":
+        return t("settings.update.installing", { version: state.version ?? "?" });
+      case "updated":
+        return t("settings.update.updated", { version: state.version ?? version ?? "?" });
       case "not-available":
         return t("settings.update.not_available");
+      case "manual-required":
+        return t("settings.update.manual_required");
+      case "incompatible":
+        return t("settings.update.incompatible");
+      case "recovery-required":
+        return t("settings.update.recovery_required");
       case "error":
         return t("settings.update.error", { message: state.error ?? "Unknown error" });
       default:
@@ -1212,10 +1241,61 @@ function UpdatePanel() {
           >
             {t("settings.update.install")}
           </button>
+        ) : (state.status === "manual-required" || state.status === "incompatible") && state.manualDownloadUrl ? (
+          <button
+            onClick={() => void openManualDownload()}
+            style={{
+              padding: "8px 14px",
+              borderRadius: "var(--radius-md)",
+              background: "var(--paper)",
+              color: "var(--ink)",
+              fontWeight: 700,
+              fontSize: 12,
+              border: "1px solid var(--paper-edge)",
+              boxShadow: "var(--neu-raised)",
+            }}
+          >
+            {t("settings.update.open_download")}
+          </button>
+        ) : (state.status === "manual-required" || state.status === "incompatible") && state.canRetry ? (
+          <button
+            onClick={() => void retrySafetyAction()}
+            style={{
+              padding: "8px 14px",
+              borderRadius: "var(--radius-md)",
+              background: "var(--paper)",
+              color: "var(--ink)",
+              fontWeight: 700,
+              fontSize: 12,
+              border: "1px solid var(--paper-edge)",
+              boxShadow: "var(--neu-raised)",
+            }}
+          >
+            {t("settings.update.retry")}
+          </button>
+        ) : state.status === "manual-required" || state.status === "incompatible" ? null
+        : state.status === "recovery-required" ? (
+          <button
+            onClick={() => void (state.recoveryBackupAvailable ? revealRecoveryBackup() : openManualDownload())}
+            style={{
+              padding: "8px 14px",
+              borderRadius: "var(--radius-md)",
+              background: "var(--paper)",
+              color: "var(--ink)",
+              fontWeight: 700,
+              fontSize: 12,
+              border: "1px solid var(--paper-edge)",
+              boxShadow: "var(--neu-raised)",
+            }}
+          >
+            {state.recoveryBackupAvailable
+              ? t("settings.update.reveal_recovery")
+              : t("settings.update.open_download")}
+          </button>
         ) : (
           <button
             onClick={() => void check()}
-            disabled={checking}
+            disabled={checking || state.status === "installing"}
             style={{
               padding: "8px 14px",
               borderRadius: "var(--radius-md)",
@@ -1227,7 +1307,11 @@ function UpdatePanel() {
               boxShadow: checking ? "none" : "var(--neu-raised)",
             }}
           >
-            {checking ? t("settings.update.checking") : t("settings.update.check")}
+            {state.status === "installing"
+              ? t("settings.update.installing", { version: state.version ?? "?" })
+              : checking
+                ? t("settings.update.checking")
+                : t("settings.update.check")}
           </button>
         )}
       </div>

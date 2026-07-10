@@ -15,7 +15,11 @@ import { scanAgentFolder, type FolderScan, type ScanMember } from "./folder-scan
 import { saveResolvedOrg } from "../store/org-spec";
 import { detectEnvRequirementsFromFolder } from "./env-detect";
 import type { FirmOrgNode, InstalledAgent, InstalledFirm, ResolvedOrg } from "../../shared/types";
-import { currentUiLocale } from "../main";
+import { currentUiLocale } from "../ui-locale";
+import { readCanonicalPromptFromDirectory } from "./prompt-authority";
+import { detectRuntimeLabels } from "./runtime-labels";
+
+export { detectRuntimeLabels } from "./runtime-labels";
 
 const TONES: InstalledAgent["tone"][] = ["blue", "green", "purple", "amber", "peach"];
 
@@ -34,17 +38,6 @@ function isDir(p: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** 폴더 안의 파일 단서로 런타임 라벨들을 감지. 우선순위 순으로 정렬해 반환. */
-export function detectRuntimeLabels(dir: string): RuntimeLabel[] {
-  const labels: RuntimeLabel[] = [];
-  if (exists(path.join(dir, "CLAUDE.md")) || isDir(path.join(dir, ".claude"))) labels.push("claude-code");
-  if (exists(path.join(dir, "AGENTS.md"))) labels.push("codex");
-  if (exists(path.join(dir, "GEMINI.md"))) labels.push("gemini");
-  if (isDir(path.join(dir, ".cursor")) || exists(path.join(dir, ".cursorrules"))) labels.push("cursor");
-  if (labels.length === 0) labels.push("generic");
-  return labels;
 }
 
 // 에이전트 1명을 정의하는 흔한 파일들 (하위 폴더가 에이전트인지 판별용).
@@ -532,7 +525,7 @@ export async function importLocalFolder(
   const systemPrompt =
     kind === "team"
       ? buildTeamSystemPrompt(dir, name)
-      : readFirst(dir, ["system-prompt.md", "soul.md", "AGENT.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md"]) ||
+      : readCanonicalPromptFromDirectory(dir)?.content ||
         (scan.entryFile ? readFirst(dir, [scan.entryFile]) : "") ||
         `You are ${name}, a locally imported agent.`;
   const envRequirements = detectEnvRequirementsFromFolder(dir, systemPrompt);

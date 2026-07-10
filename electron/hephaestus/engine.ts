@@ -1,6 +1,6 @@
 // Hephaestus 엔진 브리지 (코어).
 //
-// Hephaestus 는 별도 오픈소스 레포(github.com/agentlas-ai/Hephaestus)다. 데스크탑은
+// Hephaestus 는 Agentlas OS 오픈소스 레포(github.com/agentlas-ai/Agentlas-OS)의 엔진이다. 데스크탑은
 // 이 엔진을 "범용 CLI/JSON 인터페이스"로만 호출한다 — 즉 Hephaestus 소스에는 데스크탑
 // 흔적이 전혀 없고(엔진은 자기가 어디서 호출되는지 모른다), 데스크탑↔Hephaestus 연결
 // 코드는 오직 electron/hephaestus/* 안에만 존재한다. 이것이 목표 종료 조건의 핵심이다.
@@ -14,8 +14,11 @@ import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
 import type { ChildProcess } from "node:child_process";
-import { withCliPath } from "../runtime/exec";
-import { currentUiLocale } from "../main";
+import { detachedSpawnOpts, killCliTree, trackRunChild, withCliPath } from "../runtime/exec";
+import { currentUiLocale } from "../ui-locale";
+import { hephaestusRoot, resetHephaestusRootCache } from "./root";
+
+export { hephaestusRoot } from "./root";
 
 // bin/hephaestus 의 `run_python_module` 과 바이트 동일한 부트스트랩.
 // `python -c <BOOTSTRAP> <module> <args...>` 형태로 호출하면 sys.argv[0] 이 모듈명이 되고,
@@ -58,57 +61,7 @@ export interface HephaestusResult<T = unknown> {
   error?: string;
 }
 
-let cachedRoot: string | null | undefined;
 let cachedPython: { python: string; version: string } | null | undefined;
-
-/**
- * Hephaestus 루트 경로를 해석한다.
- * 우선순위는 운영자가 명시한 오버라이드 > 전역 updater가 관리하는 current > 앱 번들이다.
- * 그래야 `hephaestus update`가 전환한 런타임을 Desktop도 다음 실행부터 실제 사용하면서,
- * 전역 설치가 없는 새 머신에서는 패키지된 엔진으로 안전하게 폴백한다.
- */
-export function hephaestusRoot(): string | null {
-  if (cachedRoot !== undefined) return cachedRoot;
-  const candidates: string[] = [];
-  // 운영자/테스트가 명시한 루트는 어떤 자동 선택보다 우선한다.
-  if (process.env.HEPHAESTUS_RUNTIME_ROOT) {
-    candidates.push(process.env.HEPHAESTUS_RUNTIME_ROOT);
-  }
-  // `hephaestus update`가 원자적으로 전환하는 전역 current. 앱 번들보다 먼저 봐야
-  // 업데이트가 CLI에만 적용되고 Desktop에는 반영되지 않는 split-brain을 피할 수 있다.
-  candidates.push(path.join(os.homedir(), ".agentlas", "runtime", "current"));
-  // 패키지 빌드: process.resourcesPath/Hephaestus
-  if (process.resourcesPath) {
-    candidates.push(path.join(process.resourcesPath, "Hephaestus"));
-  }
-  // dev: 레포 루트/Hephaestus (app.getAppPath() == repo)
-  try {
-    candidates.push(path.join(app.getAppPath(), "Hephaestus"));
-  } catch {
-    // app 미가용
-  }
-  // __dirname 기반 폴백 — dist/electron/hephaestus/engine.js 기준 레포 루트로 올라감.
-  candidates.push(path.join(__dirname, "..", "..", "..", "Hephaestus"));
-  candidates.push(path.join(__dirname, "..", "..", "Hephaestus"));
-  // cwd 기반 폴백 — 비패키지 실행/테스트 컨텍스트.
-  try {
-    candidates.push(path.join(process.cwd(), "Hephaestus"));
-  } catch {
-    // noop
-  }
-  for (const c of candidates) {
-    try {
-      if (c && fs.existsSync(path.join(c, "agentlas_cloud", "__main__.py"))) {
-        cachedRoot = path.resolve(c);
-        return cachedRoot;
-      }
-    } catch {
-      // 다음 후보
-    }
-  }
-  cachedRoot = null;
-  return null;
-}
 
 /**
  * 데스크탑 앱에 번들된 standalone Python 경로(있으면). 엔진 폴더가 아니라 데스크탑 리소스에
@@ -221,7 +174,7 @@ export async function resolveHephaestusPython(): Promise<{ python: string; versi
 
 /** 캐시 무효화(런타임 설치 후 재탐지용). */
 export function resetHephaestusCache(): void {
-  cachedRoot = undefined;
+  resetHephaestusRootCache();
   cachedPython = undefined;
 }
 
@@ -337,7 +290,9 @@ export async function runHephaestus<T = unknown>(
         cwd: safeCwd(opts.cwd),
         env,
         stdio: ["ignore", "pipe", "pipe"],
+        ...detachedSpawnOpts(),
       });
+      trackRunChild(child);
     } catch (e) {
       resetHephaestusCache(); // 스폰 실패(경로/바이너리 문제) → 다음 호출에서 인터프리터/루트 재탐지
       resolve({ ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as Error).message });
@@ -349,6 +304,7 @@ export async function runHephaestus<T = unknown>(
     let stdoutBuf = "";
     let stderrBuf = "";
     let settled = false;
+    let terminationReason: "cancelled" | "timeout" | null = null;
 
     const finish = (res: HephaestusResult<T>) => {
       if (settled) return;
@@ -358,12 +314,12 @@ export async function runHephaestus<T = unknown>(
     };
 
     const onAbort = () => {
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        /* noop */
-      }
-      finish({ ok: false, exitCode: null, json: null, stdout, stderr, error: ko ? "취소됨" : "Cancelled" });
+      if (terminationReason) return;
+      terminationReason = "cancelled";
+      if (timer) clearTimeout(timer);
+      // Resolve only from child close below. AbortController is a request, not
+      // proof that the Python/Hub process tree has actually stopped.
+      killCliTree(child, 1_500);
     };
     const cleanup = () => {
       if (timer) clearTimeout(timer);
@@ -371,12 +327,9 @@ export async function runHephaestus<T = unknown>(
     };
 
     const timer = setTimeout(() => {
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        /* noop */
-      }
-      finish({ ok: false, exitCode: null, json: parseEngineJson<T>(stdout), stdout, stderr, error: ko ? "타임아웃" : "Timed out" });
+      if (terminationReason) return;
+      terminationReason = "timeout";
+      killCliTree(child, 1_500);
     }, opts.timeoutMs ?? 900_000);
 
     if (opts.signal) {
@@ -409,12 +362,38 @@ export async function runHephaestus<T = unknown>(
     });
     child.on("error", (e) => {
       resetHephaestusCache(); // spawn-level 오류(ENOENT/ETXTBSY 등) → 죽은 인터프리터/루트 캐시 무효화
-      finish({ ok: false, exitCode: null, json: null, stdout, stderr, error: e.message });
+      finish({
+        ok: false,
+        exitCode: null,
+        json: null,
+        stdout,
+        stderr,
+        error:
+          terminationReason === "cancelled"
+            ? (ko ? "취소됨" : "Cancelled")
+            : terminationReason === "timeout"
+              ? (ko ? "타임아웃" : "Timed out")
+              : e.message,
+      });
     });
     child.on("close", (code) => {
       if (opts.onStdout && stdoutBuf.trim()) opts.onStdout(stdoutBuf);
       if (opts.onStderr && stderrBuf.trim()) opts.onStderr(stderrBuf);
       const json = parseEngineJson<T>(stdout);
+      if (terminationReason) {
+        finish({
+          ok: false,
+          exitCode: code,
+          json,
+          stdout,
+          stderr,
+          error:
+            terminationReason === "cancelled"
+              ? (ko ? "취소됨" : "Cancelled")
+              : (ko ? "타임아웃" : "Timed out"),
+        });
+        return;
+      }
       // 비정상 종료 + JSON 없음 + 모듈 누락 패턴이면 actionable 오류로 분류(그 외엔 raw stderr 유지).
       // close 경로에선 캐시를 비우지 않는다 — deps 문제는 경로 문제가 아니고, 재탐지 thrash를 막기 위함.
       const depError =

@@ -4,6 +4,7 @@ import { useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { classifyHubEntity, entityClassLabel } from "@/lib/agent-entity-kind";
+import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import type {
   HephaestusCommandResult,
@@ -112,6 +113,8 @@ function MarketplacePage() {
   const [bookmarkedSlugs, setBookmarkedSlugs] = useState<Set<string>>(new Set());
   const [sourceStatus, setSourceStatus] = useState<MarketplaceSourceStatus | null>(null);
   const [q, setQ] = useState(() => searchParams.get("q") ?? "");
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const [bookmarking, setBookmarking] = useState<string | null>(null);
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
   // Hub 검색 0건/실패 시 hep-search(엔진) 보조 후보 — 카드와 별도의 단순 리스트로 표시.
@@ -121,6 +124,7 @@ function MarketplacePage() {
   // generation을 함께 확인해 늦은 search/status/fallback 응답이 최신 화면을 덮지 못하게 한다.
   const marketplaceSearchGenerationRef = useRef(0);
   const marketplaceSearchAbortRef = useRef<AbortController | null>(null);
+  const bookmarkStateGenerationRef = useRef(0);
 
   // 좌측 사이드바 검색 등 외부에서 ?q= 로 진입하면 검색어를 반영.
   useEffect(() => {
@@ -148,13 +152,16 @@ function MarketplacePage() {
   async function refresh() {
     const api = ipc();
     if (!api) return;
+    const bookmarkGeneration = ++bookmarkStateGenerationRef.current;
     const [ag, session, bookmarks] = await Promise.all([
       api.team.list(),
       api.auth.getSession(),
       api.marketplace.bookmarks?.().catch(() => []),
     ]);
     setInstalledAgentSlugs(new Set(visibleAgents(ag).map((a) => a.slug)));
-    setBookmarkedSlugs(new Set((bookmarks ?? []).map((bookmark) => bookmark.slug)));
+    if (bookmarkStateGenerationRef.current === bookmarkGeneration) {
+      setBookmarkedSlugs(new Set((bookmarks ?? []).map((bookmark) => bookmark.slug)));
+    }
     setSignedIn(session.signedIn);
   }
 
@@ -244,7 +251,9 @@ function MarketplacePage() {
     setBookmarking(listing.slug);
     try {
       const bookmark = await api.marketplace.bookmarkAdd(listing);
+      bookmarkStateGenerationRef.current += 1;
       setBookmarkedSlugs((prev) => new Set(prev).add(bookmark.slug));
+      announceHubBookmarkChange({ action: "added", bookmark });
       setImportNotice({
         tone: "ok",
         text: ko ? "Hub 북마크에 추가했습니다." : "Added to Hub bookmarks.",
@@ -271,6 +280,7 @@ function MarketplacePage() {
 
   // 허브 메뉴 단순화(요청): 상단 카테고리 섹션 제거 — 검색 + 카드 리스트 + 페이지네이션만.
   const activeListings = matchingListings;
+  const hubSuggestions = normalizedQuery ? matchingListings.slice(0, 6) : [];
 
   const activeTotal = activeListings.length;
   const totalPages = Math.max(1, Math.ceil(activeTotal / PAGE_SIZE));
@@ -317,14 +327,121 @@ function MarketplacePage() {
             </div>
             <main className="rd-page hub-web-content">
               <div className="hub-page-root">
-          <div className="card portal-search-panel rd-card-cream" data-tour-id="hub.search">
+          <div
+            className="card portal-search-panel rd-card-cream"
+            data-tour-id="hub.search"
+            style={{ position: "relative" }}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setSearchFocused(false);
+            }}
+          >
               <input
                 className="portal-input"
                 value={q}
-                onChange={(e) => setQ(e.target.value)}
+                onChange={(e) => {
+                  setQ(e.target.value);
+                  setSearchFocused(true);
+                  setSearchActiveIndex(0);
+                }}
+                onFocus={() => setSearchFocused(true)}
+                onKeyDown={(event) => {
+                  if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setSearchFocused(false);
+                    return;
+                  }
+                  if (hubSuggestions.length === 0) return;
+                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                    event.preventDefault();
+                    const delta = event.key === "ArrowDown" ? 1 : -1;
+                    setSearchActiveIndex((index) => (index + delta + hubSuggestions.length) % hubSuggestions.length);
+                  } else if (event.key === "Enter") {
+                    event.preventDefault();
+                    const selected = hubSuggestions[searchActiveIndex] ?? hubSuggestions[0];
+                    setQ(selected.slug);
+                    setSearchFocused(false);
+                  }
+                }}
                 placeholder={ko ? "에이전트, 팀, 플러그인 검색..." : "Search agents, teams, plugins..."}
                 aria-label={ko ? "허브 검색" : "Search the Hub"}
+                role="combobox"
+                aria-autocomplete="list"
+                aria-expanded={searchFocused && normalizedQuery.length > 0}
+                aria-controls="desktop-hub-search-suggestions"
+                aria-activedescendant={searchFocused && hubSuggestions.length > 0 ? `desktop-hub-option-${searchActiveIndex}` : undefined}
               />
+            {searchFocused && normalizedQuery.length > 0 && (
+              <div
+                id="desktop-hub-search-suggestions"
+                role="listbox"
+                aria-label={ko ? "Hub 자동완성" : "Hub suggestions"}
+                style={{
+                  position: "absolute",
+                  top: "calc(100% - 8px)",
+                  left: 16,
+                  right: 16,
+                  zIndex: 40,
+                  maxHeight: 320,
+                  overflowY: "auto",
+                  padding: 6,
+                  borderRadius: 12,
+                  background: "var(--rd-surface)",
+                  border: "1px solid var(--rd-hair)",
+                  boxShadow: "0 18px 46px rgba(11,11,15,0.16)",
+                }}
+              >
+                {hubSuggestions.length === 0 ? (
+                  <div style={{ padding: "10px 9px", fontSize: 12, color: "var(--rd-ink-3)" }}>
+                    {ko ? "입력 중 자동으로 찾고 있습니다. 일치 항목이 없으면 아래 Hephaestus 후보를 확인하세요." : "Searching as you type. If nothing matches, check the Hephaestus suggestions below."}
+                  </div>
+                ) : (
+                  hubSuggestions.map((listing, index) => {
+                    const loc = pickLocalized(listing, locale);
+                    const entityClass = classifyHubEntity(listing);
+                    return (
+                      <button
+                        id={`desktop-hub-option-${index}`}
+                        key={`${entityClass}-${listing.slug}`}
+                        type="button"
+                        role="option"
+                        aria-selected={index === searchActiveIndex}
+                        onMouseEnter={() => setSearchActiveIndex(index)}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => {
+                          setQ(listing.slug);
+                          setSearchFocused(false);
+                        }}
+                        style={{
+                          width: "100%",
+                          display: "grid",
+                          gridTemplateColumns: "minmax(0,1fr) auto",
+                          alignItems: "center",
+                          gap: 10,
+                          padding: "9px 10px",
+                          borderRadius: 8,
+                          background: index === searchActiveIndex ? "var(--rd-surface-2)" : "transparent",
+                          color: "var(--rd-ink)",
+                          textAlign: "left",
+                        }}
+                      >
+                        <span style={{ minWidth: 0 }}>
+                          <strong style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12.5 }}>
+                            {loc.name}
+                          </strong>
+                          <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, color: "var(--rd-ink-3)", marginTop: 2 }}>
+                            {loc.tagline || listing.slug}
+                          </span>
+                        </span>
+                        <span className="chip dashed" style={{ fontSize: 9.5 }}>
+                          {entityClassLabel(entityClass, locale)}
+                        </span>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            )}
             {sourceStatus && (
               <div className="hub-status-line" style={{ marginTop: 10 }}>
                 <span

@@ -209,7 +209,7 @@ export function curateEvents(
 
     const projectPath = scope === "project" ? ctx.projectPath : null;
     const requestContext = buildRequestContext(ev, ctx, projectPath);
-    if (hasEquivalentMemory(scope, ev.memory_kind, ev.content, projectPath)) {
+    if (hasEquivalentMemory(scope, ev.memory_kind, ev.content, projectPath, ctx.agentId)) {
       report.deduped += 1;
       continue;
     }

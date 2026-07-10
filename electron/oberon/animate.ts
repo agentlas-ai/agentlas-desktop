@@ -11,7 +11,7 @@ import path from "path";
 import { pathToFileURL } from "url";
 import { GoogleGenAI, type GenerateVideosOperation } from "@google/genai";
 import { readEnvVar, hasEnvVar } from "../secrets/vault";
-import { currentUiLocale } from "../main";
+import { currentUiLocale } from "../ui-locale";
 import type {
   OberonAnimateFile,
   OberonAnimateJob,

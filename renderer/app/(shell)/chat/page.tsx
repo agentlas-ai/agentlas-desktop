@@ -12,6 +12,7 @@ import type {
   AppFactoryAppRecord,
   AppFactoryScaffoldResult,
   ImageAttachment,
+  HubAgentBookmark,
   InstalledAgent,
   InstalledFirm,
   InstalledMcpServer,
@@ -23,7 +24,7 @@ import type {
   ToolFactoryScaffoldResult,
   ToolFactoryToolRecord,
 } from "@/lib/types";
-import type { Recommendation, RecExecChoice, RecRouterAgent, RecStage } from "@shared/types";
+import type { HiredAgentCard, InvocationRunReceipt, Recommendation, RecExecChoice, RecRouterAgent, RecStage } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
 import { extractQuestions } from "@/lib/ask-question";
@@ -49,9 +50,62 @@ import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { surfaceApprovalRequirement, type SurfaceApprovalRequirement } from "@/lib/surface-approval";
 import { KeyStatusBanner } from "@/components/KeyStatusBanner";
+import { onHubBookmarkChange } from "@/lib/hub-bookmark-events";
 
 function uid(): string {
   return Math.random().toString(36).slice(2);
+}
+
+function normalizeHiredAgentCards(cards: HiredAgentCard[]): HiredAgentCard[] {
+  const bySlug = new Map<string, HiredAgentCard>();
+  for (const card of cards) {
+    const slug = card.slug?.trim();
+    if (!slug) continue;
+    bySlug.set(slug.toLowerCase(), { ...card, slug });
+  }
+  return [...bySlug.values()];
+}
+
+function receiptRecoveryMessage(
+  receipt: InvocationRunReceipt | null,
+  locale: "ko" | "en",
+): StreamMessage | null {
+  if (!receipt || receipt.status === "completed" || receipt.status === "running" || receipt.status === "cancelling") {
+    return null;
+  }
+  if (receipt.status === "cancelled") {
+    return {
+      id: uid(),
+      role: "system",
+      text: locale === "ko" ? "실행이 취소되었습니다." : "The run was cancelled.",
+    };
+  }
+  if (receipt.status === "interrupted") {
+    return {
+      id: uid(),
+      role: "system",
+      text:
+        locale === "ko"
+          ? "⚠️ 이전 실행이 완료 영수증 없이 중단되었습니다. 새 실행으로 다시 시도하기 전에 결과 폴더와 실행 영수증을 확인하세요."
+          : "⚠️ The previous run was interrupted without a completion receipt. Check its result folder and run receipt before retrying.",
+    };
+  }
+  return {
+    id: uid(),
+    role: "system",
+    text: `⚠️ ${receipt.errorMessage || (locale === "ko" ? "실행에 실패했습니다." : "The run failed.")}`,
+  };
+}
+
+function receiptRecoveryStatus(receipt: InvocationRunReceipt | null, locale: "ko" | "en"): string {
+  if (!receipt) return locale === "ko" ? "종료됨" : "Ended";
+  if (receipt.status === "completed") return locale === "ko" ? "완료" : "Completed";
+  if (receipt.status === "cancelled") return locale === "ko" ? "취소됨" : "Cancelled";
+  if (receipt.status === "interrupted") return locale === "ko" ? "중단됨" : "Interrupted";
+  if (receipt.status === "failed") return receipt.errorMessage || (locale === "ko" ? "실패" : "Failed");
+  return receipt.status === "cancelling"
+    ? (locale === "ko" ? "종료 확인 중" : "Stopping")
+    : (locale === "ko" ? "실행 중" : "Running");
 }
 
 function workspacePreviewFromMedia(media: MediaArtifact): WorkspaceFilePreview {
@@ -563,6 +617,8 @@ function ChatPage() {
   const [chat, setChat] = useState<Chat | null>(null);
   const [agent, setAgent] = useState<InstalledAgent | null>(null);
   const [allAgents, setAllAgents] = useState<InstalledAgent[]>([]);
+  const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
+  const [hiredAgents, setHiredAgents] = useState<HiredAgentCard[]>([]);
   const [allFirms, setAllFirms] = useState<InstalledFirm[]>([]);
   const [allProjects, setAllProjects] = useState<Project[]>([]);
   const [allEnvKeys, setAllEnvKeys] = useState<string[]>([]);
@@ -591,6 +647,21 @@ function ChatPage() {
   const [titleDraft, setTitleDraft] = useState("");
   const subRef = useRef<(() => void) | null>(null);
   const seededRef = useRef<string>("");
+  // Hired roster is invocation state, so it cannot wait for an async SQLite
+  // round trip before the next Enter. The ref is the latest optimistic truth;
+  // persistence is serialized and reconciles only if its revision is current.
+  const hiredAgentsRef = useRef<HiredAgentCard[]>([]);
+  const hiredDurableAgentsRef = useRef<HiredAgentCard[]>([]);
+  const hiredRosterRevisionRef = useRef(0);
+  const hiredPersistChainRef = useRef<Promise<void>>(Promise.resolve());
+  const currentChatIdRef = useRef(chatId);
+  currentChatIdRef.current = chatId;
+  const applyHiredRoster = useCallback((cards: HiredAgentCard[], durable = false) => {
+    const normalized = normalizeHiredAgentCards(cards);
+    hiredAgentsRef.current = normalized;
+    if (durable) hiredDurableAgentsRef.current = normalized;
+    setHiredAgents(normalized);
+  }, []);
   // 활성 런타임/모델 — 헤더 칩 표시 + BYOK 인라인 모델 변경. 진행 중 실행의 runId(취소용).
   const [activeRuntime, setActiveRuntime] = useState<RuntimeStatus | null>(null);
   // 활성 런타임의 모델 목록 — 실시간 조회(BYOK는 provider API, ollama 동적, CLI 카탈로그).
@@ -1059,7 +1130,12 @@ function ChatPage() {
         setCancelPending(false);
         cancelRequestedRef.current = false;
         setLiveAgents((prev) =>
-          Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
+          Object.fromEntries(
+            Object.entries(prev).map(([k, v]) => [
+              k,
+              { ...v, active: false, status: locale === "ko" ? "완료" : "Completed" },
+            ]),
+          ),
         );
         runIdRef.current = null;
         lastRunIdRef.current = null;
@@ -1090,6 +1166,13 @@ function ChatPage() {
         // 텍스트는 지우지 않고 완료된 버블로 남긴다(치던 답이 사라지는 UX 방지) — main도
         // abort 시 같은 partial을 히스토리에 영속화하므로 새로고침과도 일관된다.
         const wasSteer = steerCancelRef.current;
+        const wasUserCancel = cancelRequestedRef.current && !wasSteer;
+        const terminalStatus = wasUserCancel
+          ? (locale === "ko" ? "취소됨" : "Cancelled")
+          : ev.error?.message || (locale === "ko" ? "실패" : "Failed");
+        const terminalMessage = wasUserCancel
+          ? (locale === "ko" ? "실행이 취소되었습니다." : "The run was cancelled.")
+          : `⚠️ ${ev.error?.message ?? t("chat.err.unknown")}`;
         steerCancelRef.current = false;
         const keepPlaceholder = (m: StreamMessage[]) =>
           m.flatMap((msg) => {
@@ -1100,17 +1183,28 @@ function ChatPage() {
         if (wasSteer) {
           setMessages(keepPlaceholder);
         } else {
-          pushWorkflow("status", ev.error?.message ?? t("chat.err.unknown"));
+          pushWorkflow("status", terminalStatus);
           setMessages((m) => [
             ...keepPlaceholder(m),
-            { id: uid(), role: "system", text: `⚠️ ${ev.error?.message ?? t("chat.err.unknown")}` },
+            { id: uid(), role: "system", text: terminalMessage },
           ]);
         }
         setBusy(false);
         setCancelPending(false);
         cancelRequestedRef.current = false;
         setLiveAgents((prev) =>
-          Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
+          Object.fromEntries(
+            Object.entries(prev).map(([k, v]) => [
+              k,
+              {
+                ...v,
+                active: false,
+                status: wasSteer
+                  ? (locale === "ko" ? "방향 전환" : "Steering")
+                  : terminalStatus,
+              },
+            ]),
+          ),
         );
         runIdRef.current = null;
         lastRunIdRef.current = null;
@@ -1178,6 +1272,8 @@ function ChatPage() {
   // 메타데이터 effect는 번역/콜백 변화에도 다시 돌 수 있으므로, 전환 초기화는 chatId에만 묶는다.
   useEffect(() => {
     if (!chatId) return;
+    hiredRosterRevisionRef.current += 1;
+    applyHiredRoster([], true);
     // 이전 채팅 뷰를 캐시에 저장 — 되돌아올 때 히스토리 로드를 기다리지 않고 즉시 복원.
     const prevChatId = prevChatIdRef.current;
     prevChatIdRef.current = chatId;
@@ -1216,7 +1312,7 @@ function ChatPage() {
       subRef.current?.();
       subRef.current = null;
     };
-  }, [chatId]);
+  }, [applyHiredRoster, chatId]);
 
   // 메타데이터 로드
   useEffect(() => {
@@ -1230,8 +1326,9 @@ function ChatPage() {
         return;
       }
       setChat(c);
+      applyHiredRoster(c.hiredAgents ?? [], true);
       setTitleDraft(c.title);
-      const [agents, history, projectsAll, firmsAll, envVars, plugins, generatedApps] = await Promise.all([
+      const [agents, history, projectsAll, firmsAll, envVars, plugins, generatedApps, bookmarks] = await Promise.all([
         api.team.list(),
         api.invoke.history(chatId),
         api.projects.list(),
@@ -1239,9 +1336,11 @@ function ChatPage() {
         api.env.list(),
         api.mcpTools.listInstalled(),
         api.appFactory.listApps(chatId).catch(() => [] as AppFactoryAppRecord[]),
+        api.marketplace.bookmarks().catch(() => [] as HubAgentBookmark[]),
       ]);
       if (cancelled) return;
       setAllAgents(agents);
+      setHubBookmarks(bookmarks);
       setAllProjects(projectsAll);
       setAllFirms(firmsAll);
       setInstalledPlugins(plugins);
@@ -1343,7 +1442,7 @@ function ChatPage() {
     };
     // consumeEvent를 deps에서 제외(ref로 접근) — agent/agentGroup 세팅이 이 effect를 재실행시켜
     // attach가 중복 placeholder를 만들고 구독을 갈아치우던 churn을 없앤다. subscribeRun은 이제 안정적.
-  }, [chatId, router, subscribeRun, t]);
+  }, [applyHiredRoster, chatId, router, subscribeRun, t]);
 
   // ── 세션 recap ──────────────────────────────────────────
   // 기준점(last_viewed_at)은 이 채팅을 "떠날 때"(hidden/언마운트) 갱신하고, "돌아왔을 때"(visible)
@@ -1401,6 +1500,7 @@ function ChatPage() {
     if (!api || !events || !chatId) return;
     return events.onActiveChats((ids) => {
       if (!runIdRef.current || ids.includes(chatId)) return;
+      const endedRunId = runIdRef.current;
       runIdRef.current = null;
       subRef.current?.();
       subRef.current = null;
@@ -1409,11 +1509,21 @@ function ChatPage() {
       setLiveAgents((prev) =>
         Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
       );
-      void api.invoke.history(chatId).then((h) => {
-        setMessages(restoreAnsweredQuestions(h.map(historyEntryToStreamMessage)));
+      const receiptPromise =
+        typeof api.invoke.receipt === "function"
+          ? api.invoke.receipt(endedRunId).catch(() => null)
+          : Promise.resolve(null);
+      void Promise.all([api.invoke.history(chatId), receiptPromise]).then(([h, receipt]) => {
+        const next = restoreAnsweredQuestions(h.map(historyEntryToStreamMessage));
+        const recovery = receiptRecoveryMessage(receipt, locale);
+        const status = receiptRecoveryStatus(receipt, locale);
+        setLiveAgents((prev) =>
+          Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false, status }])),
+        );
+        setMessages(recovery ? [...next, recovery] : next);
       });
     });
-  }, [chatId]);
+  }, [chatId, locale]);
 
   // 안전망 보강 (무한 '진행중' 방지) — onActiveChats 브로드캐스트를 놓치는 레이스(빠른/조기 종료 실행이
   // runId 설정·구독 전에 끝나 final/activeChats를 모두 놓친 경우)에 대비한다. busy 동안 main의 활성 실행
@@ -1431,6 +1541,7 @@ function ChatPage() {
         const ids = await api.invoke.activeChats();
         if (stopped || !runIdRef.current || ids.includes(chatId)) return;
         // main은 이 실행을 끝냈는데 UI는 여전히 진행중 → final/activeChats를 놓친 것. 화해.
+        const endedRunId = runIdRef.current;
         runIdRef.current = null;
         lastRunIdRef.current = null;
         subRef.current?.();
@@ -1440,8 +1551,21 @@ function ChatPage() {
         setLiveAgents((prev) =>
           Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
         );
-        const h = await api.invoke.history(chatId);
-        if (!stopped) setMessages(restoreAnsweredQuestions(h.map(historyEntryToStreamMessage)));
+        const [h, receipt] = await Promise.all([
+          api.invoke.history(chatId),
+          endedRunId && typeof api.invoke.receipt === "function"
+            ? api.invoke.receipt(endedRunId).catch(() => null)
+            : Promise.resolve(null),
+        ]);
+        if (!stopped) {
+          const next = restoreAnsweredQuestions(h.map(historyEntryToStreamMessage));
+          const recovery = receiptRecoveryMessage(receipt, locale);
+          const status = receiptRecoveryStatus(receipt, locale);
+          setLiveAgents((prev) =>
+            Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false, status }])),
+          );
+          setMessages(recovery ? [...next, recovery] : next);
+        }
       } catch {
         /* 무시 — 다음 틱에 재시도 */
       }
@@ -1454,7 +1578,7 @@ function ChatPage() {
       clearTimeout(first);
       clearInterval(iv);
     };
-  }, [busy, chatId]);
+  }, [busy, chatId, locale]);
 
   // 활성 런타임이 바뀌면 모델 목록을 실시간 조회 (BYOK provider API / ollama / CLI 카탈로그).
   useEffect(() => {
@@ -1608,8 +1732,8 @@ function ChatPage() {
       const effectiveBorrowAgents =
         (opts?.borrowAgents?.length ?? 0) > 0
           ? opts?.borrowAgents
-          : chat.hiredAgents?.length
-            ? chat.hiredAgents.map((card) => card.slug)
+          : hiredAgentsRef.current.length
+            ? hiredAgentsRef.current.map((card) => card.slug)
             : undefined;
       if (agentGroup || (effectiveBorrowAgents?.length ?? 0) > 0 || (opts?.pipelineStages?.length ?? 0) > 1) {
         setNetworkOpenPersisted(true);
@@ -2261,6 +2385,21 @@ function ChatPage() {
     setAgentGroup(null);
   }
 
+  useEffect(
+    () =>
+      onHubBookmarkChange((change) => {
+        if (change.action === "added") {
+          setHubBookmarks((previous) => [
+            change.bookmark,
+            ...previous.filter((bookmark) => bookmark.slug !== change.bookmark.slug),
+          ]);
+        } else {
+          setHubBookmarks((previous) => previous.filter((bookmark) => bookmark.slug !== change.slug));
+        }
+      }),
+    [],
+  );
+
   // 추천 토글 ON → 보내기 전 라우터 미리보기. routeOnly(실행 없음)를 정규화해 추천 시트에 넘긴다.
   // 실패/비가용 시에도 throw 하지 않고 null → 시트가 "그냥 보내기" 폴백을 보여준다.
   async function handleRecommendPreview(text: string): Promise<Recommendation | null> {
@@ -2349,37 +2488,77 @@ function ChatPage() {
     }
   }
 
-  /** 고용 바인딩 저장 — 추천 확정 시 채팅에 카드 병합. 실패해도 이번 실행은 계속. */
-  async function hireAgents(slugs: string[]) {
-    const api = ipc();
-    if (!api || !chat) return;
-    const existing = chat.hiredAgents ?? [];
-    const now = new Date().toISOString();
-    const merged = [...existing];
-    for (const slug of slugs) {
-      const trimmed = slug.trim();
-      if (trimmed && !merged.some((card) => card.slug === trimmed)) {
-        merged.push({ slug: trimmed, source: "hub", hiredAt: now });
+  /**
+   * Serialize roster writes so consecutive @ selections merge instead of
+   * racing as last-write-wins. A failed write reads the durable chat back (or
+   * falls back to the last acknowledged roster) and only reconciles if no
+   * newer optimistic revision exists.
+   */
+  function enqueueHiredRosterPersistence(
+    targetChatId: string,
+    cards: HiredAgentCard[],
+    revision: number,
+  ) {
+    const snapshot = normalizeHiredAgentCards(cards);
+    hiredPersistChainRef.current = hiredPersistChainRef.current.catch(() => undefined).then(async () => {
+      const api = ipc();
+      if (!api) {
+        if (currentChatIdRef.current === targetChatId && hiredRosterRevisionRef.current === revision) {
+          applyHiredRoster(hiredDurableAgentsRef.current, true);
+        }
+        return;
       }
+      try {
+        const persistedChat = await api.chats.setHiredAgents(targetChatId, snapshot);
+        if (currentChatIdRef.current !== targetChatId) return;
+        const persisted = normalizeHiredAgentCards(persistedChat.hiredAgents ?? snapshot);
+        hiredDurableAgentsRef.current = persisted;
+        if (hiredRosterRevisionRef.current === revision) applyHiredRoster(persisted, true);
+      } catch {
+        let durable = hiredDurableAgentsRef.current;
+        try {
+          const persistedChat = await api.chats.get(targetChatId);
+          if (persistedChat) durable = normalizeHiredAgentCards(persistedChat.hiredAgents ?? []);
+        } catch {
+          // The last acknowledged roster is the safest available fallback.
+        }
+        if (currentChatIdRef.current !== targetChatId) return;
+        hiredDurableAgentsRef.current = durable;
+        if (hiredRosterRevisionRef.current === revision) applyHiredRoster(durable, true);
+      }
+    });
+  }
+
+  /** 고용 바인딩 — renderer/ref는 즉시, SQLite는 순서대로 저장한다. */
+  function hireAgents(slugs: string[]) {
+    if (!chat) return;
+    const existing = hiredAgentsRef.current;
+    const merged = [...existing];
+    const now = new Date().toISOString();
+    for (const rawSlug of slugs) {
+      const slug = rawSlug.trim();
+      const slugKey = slug.toLowerCase();
+      if (!slug || merged.some((card) => card.slug.toLowerCase() === slugKey)) continue;
+      const bookmark = hubBookmarks.find((item) => item.slug.toLowerCase() === slugKey);
+      merged.push({
+        slug,
+        name: bookmark ? pickLocalized(bookmark.listing, locale).name : undefined,
+        source: "hub",
+        hiredAt: now,
+      });
     }
-    try {
-      const next = await api.chats.setHiredAgents(chat.id, merged);
-      setChat(next);
-    } catch {
-      // 바인딩 실패는 실행을 막지 않는다 — 다음 추천 확정에서 다시 시도된다.
-    }
+    if (merged.length === existing.length) return;
+    const revision = ++hiredRosterRevisionRef.current;
+    applyHiredRoster(merged);
+    enqueueHiredRosterPersistence(chat.id, merged, revision);
   }
 
   /** 해고 — 이 채팅의 고용 바인딩 해제. (허브 리스 자체는 만료까지 유효 — 재고용 무과금.) */
-  async function dismissHiredAgents() {
-    const api = ipc();
-    if (!api || !chat) return;
-    try {
-      const next = await api.chats.setHiredAgents(chat.id, []);
-      setChat(next);
-    } catch {
-      // 무시 — 다음 시도에서 해제
-    }
+  function dismissHiredAgents() {
+    if (!chat || hiredAgentsRef.current.length === 0) return;
+    const revision = ++hiredRosterRevisionRef.current;
+    applyHiredRoster([]);
+    enqueueHiredRosterPersistence(chat.id, [], revision);
   }
 
   async function saveTitle() {
@@ -2553,7 +2732,7 @@ function ChatPage() {
             }
           />
         )}
-        {(chat?.hiredAgents?.length ?? 0) > 0 && (
+        {hiredAgents.length > 0 && (
           // 고용 동행 배지 — 빌린 에이전트가 이 채팅에 붙어 있음을 상시로 보여준다
           // (0.7.2x 증발 버그의 가시성 해결). ×(해고)로 바인딩 해제.
           <span
@@ -2588,7 +2767,7 @@ function ChatPage() {
                 whiteSpace: "nowrap",
               }}
             >
-              {chat.hiredAgents.map((card) => card.name || card.slug).join(", ")}
+              {hiredAgents.map((card) => card.name || card.slug).join(", ")}
               {locale === "ko" ? " 함께 일하는 중" : " working with you"}
             </span>
             <button
@@ -2869,8 +3048,8 @@ function ChatPage() {
           agentName={agentGroup?.orchestratorName || (displayAgent ? pickLocalized(displayAgent, locale).name : t("chat.assistant_fallback"))}
           agentTone={agentGroup ? "green" : displayAgent?.tone ?? "blue"}
           emptyDirectory={{
-            apps: INSTALLED_APPS,
             agents: displayAgents,
+            hubBookmarks,
             firms: allFirms,
             projects: allProjects,
             envKeys: allEnvKeys,
@@ -2938,6 +3117,7 @@ function ChatPage() {
           activeChatId={chat.id}
           onCommand={handleCommand}
           onCallAgent={(agentId) => void switchAgent(agentId)}
+          onCallHubAgents={hireAgents}
           onRecommendPreview={handleRecommendPreview}
           onRecommendExecute={handleRecommendExecute}
           onStop={stop}
@@ -2947,6 +3127,7 @@ function ChatPage() {
           disabled={!agent}
           context={{
             agents: displayAgents,
+            hubBookmarks,
             projects: allProjects,
             firms: allFirms,
             apps: INSTALLED_APPS,

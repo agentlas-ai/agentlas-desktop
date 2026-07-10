@@ -2,6 +2,7 @@ import type { InstalledAgent } from "../../shared/types";
 import { APP_BUILDER_SLUG, GLOBAL_ORCHESTRATOR_SLUG } from "../architecture/manifest";
 import { cardScoreAdjustment, findCardForAgent } from "./routing-cards";
 import type { RuntimeLocale } from "../runtime/status-i18n";
+import { buildEffectiveAgentSystemPrompt } from "./files";
 
 export interface AutoRouteChoice {
   agent: InstalledAgent;
@@ -306,6 +307,13 @@ export function isAppBuilderWorthyPrompt(prompt: string): boolean {
 }
 
 function agentHaystack(agent: InstalledAgent): string {
+  let effectivePrompt = agent.systemPrompt;
+  try {
+    effectivePrompt = buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt);
+  } catch {
+    // Routing remains available; explicit invocation still fails closed on an
+    // invalid canonical package asset.
+  }
   return normalize(
     [
       agent.slug,
@@ -313,7 +321,7 @@ function agentHaystack(agent: InstalledAgent): string {
       agent.nameEn,
       agent.tagline,
       agent.taglineEn,
-      agent.systemPrompt.slice(0, 3500),
+      effectivePrompt.slice(0, 3500),
       agent.mcpServers.join(" "),
       agent.envRequirements.map((req) => req.key).join(" "),
     ].join("\n"),

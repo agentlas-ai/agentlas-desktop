@@ -4,6 +4,7 @@ import { listInstalledAgents } from "../mcp/registry";
 import { getResolvedOrg } from "./org-spec";
 import { getDb } from "./db";
 import { listFirms } from "./firms";
+import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import type {
   AgentGroup,
   AgentGroupCreateInput,
@@ -480,7 +481,7 @@ export async function resolveAgentGroupForRuntime(id: string): Promise<AgentGrou
       slug: `${member.source}:${resolved.agent.slug}`,
       name: resolved.agent.nameEn || resolved.agent.name,
       directive: [
-        resolved.agent.systemPrompt,
+        buildEffectiveAgentSystemPrompt(resolved.agent.id, resolved.agent.systemPrompt),
         "",
         "## Agentlas route",
         `Current route: ${label}`,

@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { classifyHubEntity, entityClassLabel } from "@/lib/agent-entity-kind";
+import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { useT } from "@/lib/i18n";
 import { IconSearch, IconCheck } from "@/components/Icon";
 import type { MarketplaceListing, MarketplaceSourceStatus } from "@/lib/types";
@@ -20,6 +21,7 @@ export function HubBorrowRoom() {
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bookmarkGenerationRef = useRef(0);
 
   // locale을 ref로 읽어 search 콜백 identity를 고정한다 — 언어 토글 시 search가 재생성돼
   // 마운트 effect가 재실행되며 현재 검색 결과가 초기화되던 글리치 방지.
@@ -45,9 +47,17 @@ export function HubBorrowRoom() {
 
   useEffect(() => {
     void search("");
+    const generation = ++bookmarkGenerationRef.current;
     ipc()?.marketplace.bookmarks()
-      .then((items) => setBookmarked(new Set(items.map((item) => item.slug))))
+      .then((items) => {
+        if (bookmarkGenerationRef.current === generation) {
+          setBookmarked(new Set(items.map((item) => item.slug)));
+        }
+      })
       .catch(() => {});
+    return () => {
+      if (bookmarkGenerationRef.current === generation) bookmarkGenerationRef.current += 1;
+    };
   }, [search]);
 
   useEffect(() => {
@@ -64,7 +74,9 @@ export function HubBorrowRoom() {
     setBusy(listing.slug);
     try {
       const bookmark = await api.marketplace.bookmarkAdd(listing);
+      bookmarkGenerationRef.current += 1;
       setBookmarked((prev) => new Set(prev).add(bookmark.slug));
+      announceHubBookmarkChange({ action: "added", bookmark });
       setMessage(ko ? "Hub 북마크에 추가했습니다." : "Added to Hub bookmarks.");
     } catch {
       setMessage(ko ? "북마크하지 못했습니다. Hub 연결 상태를 확인한 뒤 다시 시도하세요." : "Could not bookmark it. Check the Hub connection, then try again.");

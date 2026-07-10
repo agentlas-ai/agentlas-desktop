@@ -187,6 +187,11 @@ export function killCliTree(child: ChildProcess, graceMs = 4000): void {
           // already exited
         }
       }, graceMs);
+      // Do not leave a delayed negative-PID kill armed after the original
+      // process group exits. Apart from needless timers, a quickly reused PID
+      // could otherwise target an unrelated later process group.
+      child.once("close", () => clearTimeout(sigkill));
+      child.once("error", () => clearTimeout(sigkill));
       sigkill.unref?.();
       return;
     } catch {

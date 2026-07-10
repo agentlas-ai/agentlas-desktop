@@ -2,19 +2,20 @@ import { app } from "electron";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash, randomUUID } from "node:crypto";
-import { detectRuntimeLabels } from "../agents/import-local";
+import { createHash } from "node:crypto";
+import { detectRuntimeLabelsFromPaths } from "../agents/runtime-labels";
 import { getSessionCookieHeader } from "../auth";
-import { careerGraph } from "../hephaestus/commands";
-import { pickActiveRunner } from "../mcp/client";
+import { readCloudAgentRestoreMarker, writeCloudAgentRegistrationMarker } from "./restore";
 import type {
+  CloudAgentCloudScope,
   CloudAgentPackageFile,
   CloudAgentPackageManifest,
   CloudAgentPublicCareerGraph,
   CloudAgentPackageResult,
-  CloudAgentPublishRequest,
+  CloudAgentPackageRequest,
   CloudAgentRegistrationResult,
   CloudAgentReviewResult,
+  CloudAgentRevisionIdentity,
   CloudAgentSecurityFinding,
   CloudAgentVisibility,
 } from "../../shared/types";
@@ -23,19 +24,32 @@ const MAX_TOTAL_BYTES = 3 * 1024 * 1024;
 const MAX_FILE_BYTES = 512 * 1024;
 const MAX_FILES = 400;
 const MANIFEST_VERSION = "0.1" as const;
+const PACKAGE_HASH_VERSION = "path-sha256-executable-v2" as const;
 const ROUTING_CARD_PATH = ".agentlas/routing-card.json";
+const DESKTOP_RESTORE_MARKER_PATH = ".agentlas-cloud-package.json";
 const ROUTING_CARD_CAPABILITY_RE = /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/;
 const ROUTING_CARD_STATUSES = new Set(["draft", "searchable", "candidate", "routing_ready", "trusted"]);
 
 const TEXT_EXTENSIONS = new Set([
   ".cjs",
+  ".cfg",
+  ".cmd",
+  ".conf",
+  ".config",
   ".css",
   ".csv",
   ".js",
+  ".html",
+  ".jsx",
   ".json",
   ".jsonl",
   ".md",
   ".mjs",
+  ".ini",
+  ".properties",
+  ".ps1",
+  ".psd1",
+  ".psm1",
   ".py",
   ".sh",
   ".toml",
@@ -44,6 +58,8 @@ const TEXT_EXTENSIONS = new Set([
   ".txt",
   ".yaml",
   ".yml",
+  ".xml",
+  ".bat",
 ]);
 
 const AGENT_DEF_FILES = new Set([
@@ -82,44 +98,83 @@ const SECRET_PATTERNS: Array<{ id: string; re: RegExp; label: string }> = [
   { id: "private-key", re: /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/i, label: "private key material" },
   { id: "openai-key", re: /\bsk-[A-Za-z0-9_-]{20,}\b/, label: "OpenAI-style API key" },
   { id: "github-token", re: /\bgh[pousr]_[A-Za-z0-9_]{30,}\b/, label: "GitHub token" },
+  { id: "gitlab-token", re: /\bglpat-[A-Za-z0-9_-]{20,}\b/, label: "GitLab token" },
+  { id: "google-api-key", re: /\bAIza[0-9A-Za-z_-]{35}\b/, label: "Google API key" },
+  { id: "npm-token", re: /\bnpm_[A-Za-z0-9]{30,}\b/, label: "npm access token" },
+  { id: "stripe-secret", re: /\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b/, label: "Stripe secret key" },
   { id: "slack-token", re: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/, label: "Slack token" },
   { id: "aws-key", re: /\bAKIA[0-9A-Z]{16}\b/, label: "AWS access key" },
   { id: "generic-secret", re: /\b(?:api[_-]?key|secret|token|password)\s*[:=]\s*['"][^'"]{8,}['"]/i, label: "hard-coded credential" },
 ];
 
-interface PackagedTextFile {
+interface PackagedFile {
   path: string;
   bytes: number;
   sha256: string;
   contentBase64: string;
+  executable: boolean;
 }
 
 interface StaticScanResult {
   files: CloudAgentPackageFile[];
-  included: PackagedTextFile[];
+  included: PackagedFile[];
   findings: CloudAgentSecurityFinding[];
   totalBytes: number;
 }
 
+type PackageSnapshot = Map<string, PackagedFile>;
+
 export async function packageAndReviewCloudAgent(
-  input: CloudAgentPublishRequest,
+  input: CloudAgentPackageRequest,
 ): Promise<CloudAgentPackageResult> {
-  const rootPath = path.resolve(input.rootPath);
-  const stat = statSafe(rootPath);
-  if (!stat || !stat.isDirectory()) {
+  const requestedRoot = path.resolve(input.rootPath);
+  let rootPath: string;
+  try {
+    const rootStat = fs.lstatSync(requestedRoot);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("not a real directory");
+    rootPath = fs.realpathSync.native(requestedRoot);
+  } catch {
     throw new Error(`Cloud agent root is not a directory: ${input.rootPath}`);
   }
 
-  const visibility = input.visibility ?? "marketplace";
-  const careerPrepareFindings = await preparePublicCareerGraphCard(rootPath);
-  const scan = scanAgentFolder(rootPath);
-  scan.findings.unshift(...careerPrepareFindings);
-  const routingCard = readRoutingCard(rootPath);
-  if (routingCard.finding) scan.findings.push(routingCard.finding);
-  const careerGraphCard = readPublicCareerGraphCard(rootPath, visibility, scan.findings);
-  const name = readName(rootPath);
-  const tagline = readTagline(rootPath);
-  const slug = sanitizeSlug(input.slug || readStableSlug(rootPath) || name || path.basename(rootPath));
+  const visibility = input.visibility ?? "private-link";
+  const isPublicHubPublish = visibility === "marketplace";
+  const publicCareerPrepareFindings = isPublicHubPublish
+    ? await preparePublicCareerGraphCard(rootPath)
+    : [];
+  const restoreMarker = readCloudAgentRestoreMarker(rootPath);
+  const restoredExecutablePaths = new Set(
+    restoreMarker?.packageHashVersion === PACKAGE_HASH_VERSION
+      ? restoreMarker.executablePaths ?? []
+      : [],
+  );
+  const scan = scanAgentFolder(rootPath, restoredExecutablePaths);
+  const snapshot = packageSnapshot(scan.included);
+  let routingCard: ReturnType<typeof readRoutingCard> = {};
+  let careerGraphCard: CloudAgentPublicCareerGraph | undefined;
+  if (isPublicHubPublish) {
+    scan.findings.unshift(...publicCareerPrepareFindings);
+    routingCard = readRoutingCard(snapshot);
+    if (routingCard.finding) scan.findings.push(routingCard.finding);
+    careerGraphCard = readPublicCareerGraphCard(snapshot, visibility, scan.findings);
+    replacePublicCareerCardWithSanitizedSnapshot(scan, careerGraphCard);
+  }
+  const finalSnapshot = packageSnapshot(scan.included);
+  const name = readName(finalSnapshot, path.basename(rootPath));
+  const tagline = readTagline(finalSnapshot);
+  const slug = sanitizeSlug(input.slug || readStableSlug(finalSnapshot) || name || path.basename(rootPath));
+  const cloudScope = scopeForVisibility(visibility);
+  const markerRegistration = restoreMarker?.registrations?.[cloudScope];
+  const baseRegistration = markerRegistration?.slug === slug ? markerRegistration : undefined;
+  addSecretFindings(
+    JSON.stringify({ name, tagline, slug, routingCard: routingCard.card, careerGraph: careerGraphCard }),
+    "package.manifest.json",
+    scan.findings,
+  );
+  if (input.notes) addSecretFindings(input.notes, "registration.notes", scan.findings);
+  const packageFindings = isPublicHubPublish
+    ? scan.findings
+    : privateSaveSafetyFindings(scan.findings);
   const packageHash = hashPackage(scan.included);
   const manifest: CloudAgentPackageManifest & { routingCard?: Record<string, unknown> } = {
     version: MANIFEST_VERSION,
@@ -127,11 +182,13 @@ export async function packageAndReviewCloudAgent(
     slug,
     name,
     tagline,
-    agentKind: inferAgentKind(rootPath),
-    runtimeLabels: detectRuntimeLabels(rootPath),
+    agentKind: inferAgentKind(finalSnapshot),
+    runtimeLabels: detectRuntimeLabelsFromPaths(finalSnapshot.keys()),
     visibility,
-    rootFingerprint: sha256(rootPath),
+    // Content-derived only. Never upload a hash of the owner's absolute local path.
+    rootFingerprint: sha256(`agentlas-package-root:${packageHash}`),
     packageHash,
+    packageHashVersion: PACKAGE_HASH_VERSION,
     fileCount: scan.files.length,
     includedFileCount: scan.included.length,
     // 업로드되는 bundle은 included 파일만 담는다. 서버 register는 받은 bundle의
@@ -139,9 +196,9 @@ export async function packageAndReviewCloudAgent(
     // 한다. (scan.totalBytes는 제외 파일까지 포함한 전체 — MAX_TOTAL_BYTES 게이트용.)
     totalBytes: scan.included.reduce((sum, file) => sum + file.bytes, 0),
     createdAt: new Date().toISOString(),
-    billingMode: input.reviewMode === "local-runtime" ? "submitter-local-runtime" : "static-only",
-    costOwner: input.reviewMode === "local-runtime" ? "submitter" : "none",
-    security: summarizeSecurity(scan.findings),
+    billingMode: isPublicHubPublish && input.reviewMode === "local-runtime" ? "submitter-local-runtime" : "static-only",
+    costOwner: isPublicHubPublish && input.reviewMode === "local-runtime" ? "submitter" : "none",
+    security: summarizeSecurity(packageFindings),
     ...(routingCard.card ? { routingCard: routingCard.card } : {}),
     ...(careerGraphCard ? { careerGraph: careerGraphCard } : {}),
   };
@@ -172,10 +229,30 @@ export async function packageAndReviewCloudAgent(
   );
 
   const review =
-    input.reviewMode === "local-runtime"
-      ? await runSubmitterRuntimeReview(rootPath, manifest, scan.findings)
-      : staticReview(scan.findings);
-  const blocked = isBlocked(scan.findings, review);
+    isPublicHubPublish && input.reviewMode === "local-runtime"
+      ? await runSubmitterRuntimeReview(rootPath, manifest, packageFindings)
+      : staticReview(packageFindings, isPublicHubPublish ? "hub-public" : "owner-private");
+  manifest.security = summarizeSecurity(review.findings);
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+  fs.writeFileSync(
+    bundlePath,
+    JSON.stringify(
+      {
+        manifest,
+        files: scan.included,
+        source: {
+          packagedBy: "agentlas-desktop",
+          packagedAt: manifest.createdAt,
+          costOwner: manifest.costOwner,
+        },
+        ...(careerGraphCard ? { careerGraph: careerGraphCard } : {}),
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+  const blocked = isBlocked(packageFindings, review);
   const dryRun = input.dryRun ?? false;
 
   let registration: CloudAgentRegistrationResult | undefined;
@@ -187,7 +264,33 @@ export async function packageAndReviewCloudAgent(
       review,
       visibility,
       notes: input.notes,
+      baseRegistration,
     });
+    try {
+      writeCloudAgentRegistrationMarker({
+        rootPath,
+        slug,
+        packageHash: manifest.packageHash,
+        packageHashVersion: manifest.packageHashVersion,
+        fileCount: manifest.includedFileCount,
+        totalBytes: manifest.totalBytes,
+        executablePaths: scan.included.filter((file) => file.executable).map((file) => file.path),
+        registration,
+        savedAt: registration.registeredAt,
+      });
+      registration.localSyncStored = true;
+    } catch (error) {
+      registration.localSyncStored = false;
+      review.findings.push({
+        id: "cloud-revision-receipt-not-saved",
+        severity: "high",
+        category: "runtime",
+        message: "Agent Cloud committed the package, but Desktop could not save its local revision receipt.",
+        remediation:
+          "Restore the latest Cloud copy before editing or saving this slug again; otherwise optimistic concurrency will block the next write.",
+      });
+      console.warn("Agent Cloud revision receipt could not be saved", error instanceof Error ? error.message : String(error));
+    }
     status = "registered";
   }
 
@@ -197,31 +300,97 @@ export async function packageAndReviewCloudAgent(
     packageDir,
     bundlePath,
     manifestPath,
-    manifest: {
-      ...manifest,
-      security: summarizeSecurity([...scan.findings, ...review.findings]),
-    },
+    manifest,
     files: scan.files,
     review,
     registration,
     summary:
       status === "registered"
-        ? `Registered ${slug} on Agentlas Cloud.`
+        ? isPublicHubPublish
+          ? `Published ${slug} publicly to Agentlas Hub.`
+          : `Saved ${slug} privately in Agent Cloud.`
         : status === "blocked"
-          ? `Package blocked: ${review.summary}`
-          : `Package ready: ${slug}.`,
+          ? isPublicHubPublish
+            ? `Hub publish blocked: ${review.summary}`
+            : `Private Agent Cloud save blocked: ${review.summary}`
+          : isPublicHubPublish
+            ? `Hub package ready: ${slug}.`
+            : `Private Agent Cloud package ready: ${slug}.`,
   };
 }
 
-function scanAgentFolder(rootPath: string): StaticScanResult {
+function scanAgentFolder(rootPath: string, restoredExecutablePaths: ReadonlySet<string>): StaticScanResult {
   const files: CloudAgentPackageFile[] = [];
-  const included: PackagedTextFile[] = [];
+  const included: PackagedFile[] = [];
   const findings: CloudAgentSecurityFinding[] = [];
   let totalBytes = 0;
   let seenFiles = 0;
   let hasAgentDef = false;
+  const portableFiles = new Map<string, string>();
+  const portableDirectories = new Map<string, string>();
+
+  const isInsideRoot = (candidate: string): boolean => {
+    const relative = path.relative(rootPath, candidate);
+    return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+  };
+
+  const readStableFile = (file: string): { bytes: Buffer; executable: boolean } => {
+    const beforeReal = fs.realpathSync.native(file);
+    if (!isInsideRoot(beforeReal)) throw new Error("file resolves outside the approved package root");
+    const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    try {
+      const before = fs.fstatSync(fd);
+      if (!before.isFile()) throw new Error("package entry is not a regular file");
+      if (before.size > MAX_FILE_BYTES) throw new Error(`file exceeds ${MAX_FILE_BYTES} bytes`);
+      const chunks: Buffer[] = [];
+      let actualBytes = 0;
+      for (;;) {
+        const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, MAX_FILE_BYTES + 1 - actualBytes));
+        if (chunk.byteLength <= 0) throw new Error(`file exceeds ${MAX_FILE_BYTES} bytes`);
+        const read = fs.readSync(fd, chunk, 0, chunk.byteLength, null);
+        if (read === 0) break;
+        actualBytes += read;
+        if (actualBytes > MAX_FILE_BYTES) throw new Error(`file exceeds ${MAX_FILE_BYTES} bytes`);
+        chunks.push(chunk.subarray(0, read));
+      }
+      const after = fs.fstatSync(fd);
+      const afterReal = fs.realpathSync.native(file);
+      const pathStat = fs.statSync(file);
+      if (
+        !isInsideRoot(afterReal) ||
+        beforeReal !== afterReal ||
+        before.dev !== after.dev ||
+        before.ino !== after.ino ||
+        before.size !== after.size ||
+        before.mtimeMs !== after.mtimeMs ||
+        before.ctimeMs !== after.ctimeMs ||
+        before.mode !== after.mode ||
+        after.dev !== pathStat.dev ||
+        after.ino !== pathStat.ino ||
+        after.mode !== pathStat.mode ||
+        actualBytes !== after.size
+      ) {
+        throw new Error("package entry changed while it was being read");
+      }
+      return {
+        bytes: Buffer.concat(chunks, actualBytes),
+        executable: portableExecutableForHost(
+          process.platform,
+          after.mode,
+          restoredExecutablePaths.has(normalizeRelative(rootPath, file)),
+        ),
+      };
+    } finally {
+      fs.closeSync(fd);
+    }
+  };
 
   function walk(dir: string): void {
+    const directoryBefore = fs.lstatSync(dir);
+    const directoryRealBefore = fs.realpathSync.native(dir);
+    if (!directoryBefore.isDirectory() || directoryBefore.isSymbolicLink() || !isInsideRoot(directoryRealBefore)) {
+      throw new Error("package directory is not a stable directory inside the approved root");
+    }
     const relDir = normalizeRelative(rootPath, dir);
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (entry.name.startsWith("._")) continue;
@@ -241,7 +410,23 @@ function scanAgentFolder(rootPath: string): StaticScanResult {
       }
       if (entry.isDirectory()) {
         if (SKIP_DIRS.has(entry.name)) continue;
-        walk(abs);
+        try {
+          const realDirectory = fs.realpathSync.native(abs);
+          const current = fs.lstatSync(abs);
+          if (!current.isDirectory() || current.isSymbolicLink() || !isInsideRoot(realDirectory)) {
+            throw new Error("directory resolves outside the approved package root");
+          }
+          walk(realDirectory);
+        } catch (error) {
+          findings.push({
+            id: findingId("unsafe-directory", rel),
+            severity: "blocker",
+            category: "policy",
+            file: rel,
+            message: `Package directory could not be read safely: ${error instanceof Error ? error.message : String(error)}`,
+            remediation: "Remove linked or concurrently changing directories and retry.",
+          });
+        }
         continue;
       }
       if (!entry.isFile()) continue;
@@ -258,6 +443,37 @@ function scanAgentFolder(rootPath: string): StaticScanResult {
       }
       if (AGENT_DEF_FILES.has(entry.name)) hasAgentDef = true;
       const st = fs.statSync(abs);
+      const portablePathProblem = registerPortablePackagePath(rel, portableFiles, portableDirectories);
+      if (portablePathProblem) {
+        findings.push({
+          id: findingId(portablePathProblem.id, rel),
+          severity: "blocker",
+          category: "policy",
+          file: rel,
+          message: portablePathProblem.message,
+          remediation: "Rename the file or parent folder to one portable NFC path and retry.",
+        });
+        files.push({
+          path: rel,
+          bytes: st.size,
+          sha256: "",
+          kind: "binary",
+          included: false,
+          reason: portablePathProblem.id,
+        });
+        continue;
+      }
+      if (rel.toLowerCase() === DESKTOP_RESTORE_MARKER_PATH.toLowerCase()) {
+        files.push({
+          path: rel,
+          bytes: st.size,
+          sha256: "",
+          kind: "text",
+          included: false,
+          reason: "desktop-restore-marker-excluded",
+        });
+        continue;
+      }
       totalBytes += st.size;
       const blockedName = BLOCKED_FILE_PATTERNS.some((pattern) => pattern.test(entry.name));
       if (blockedName) {
@@ -269,40 +485,63 @@ function scanAgentFolder(rootPath: string): StaticScanResult {
           message: "Secret-bearing file names are not allowed in cloud packages.",
           remediation: "Remove credentials and publish only instructions or env key names.",
         });
-        files.push({ path: rel, bytes: st.size, sha256: hashFile(abs), kind: "binary", included: false, reason: "secret-file-blocked" });
+        files.push({ path: rel, bytes: st.size, sha256: "", kind: "binary", included: false, reason: "secret-file-blocked" });
         continue;
       }
       if (st.size > MAX_FILE_BYTES) {
         findings.push({
           id: findingId("large-file", rel),
-          severity: "high",
+          severity: "blocker",
           category: "size",
           file: rel,
           message: `File exceeds ${MAX_FILE_BYTES} bytes.`,
           remediation: "Move large assets to a documented external source or reduce the package.",
         });
-        files.push({ path: rel, bytes: st.size, sha256: hashFile(abs), kind: "binary", included: false, reason: "file-too-large" });
+        files.push({ path: rel, bytes: st.size, sha256: "", kind: "binary", included: false, reason: "file-too-large" });
         continue;
       }
       const ext = path.extname(entry.name).toLowerCase();
       const isText = TEXT_EXTENSIONS.has(ext) || AGENT_DEF_FILES.has(entry.name);
-      const digest = hashFile(abs);
-      if (!isText) {
-        files.push({ path: rel, bytes: st.size, sha256: digest, kind: "binary", included: false, reason: "binary-skipped" });
+      let bytes: Buffer;
+      let executable = false;
+      try {
+        const stable = readStableFile(abs);
+        bytes = stable.bytes;
+        executable = stable.executable;
+      } catch (error) {
+        findings.push({
+          id: findingId("unstable-file", rel),
+          severity: "blocker",
+          category: "policy",
+          file: rel,
+          message: `Package file could not be read safely: ${error instanceof Error ? error.message : String(error)}`,
+          remediation: "Remove linked or concurrently changing files and retry.",
+        });
+        files.push({ path: rel, bytes: st.size, sha256: "", kind: isText ? "text" : "binary", included: false, reason: "unstable-file" });
         continue;
       }
-      const text = fs.readFileSync(abs, "utf8");
-      for (const pattern of SECRET_PATTERNS) {
-        if (pattern.re.test(text)) {
-          findings.push({
-            id: findingId(pattern.id, rel),
-            severity: "blocker",
-            category: "secret",
-            file: rel,
-            message: `Possible ${pattern.label} found in package content.`,
-            remediation: "Remove the secret value and require users to configure their own key through Agentlas env/BYOK vault.",
-          });
-        }
+      totalBytes += bytes.length - st.size;
+      const digest = sha256(bytes);
+      addSecretFindingsFromBytes(bytes, rel, findings);
+      if (!isText) {
+        files.push({ path: rel, bytes: bytes.length, sha256: digest, kind: "binary", executable, included: true });
+        included.push({ path: rel, bytes: bytes.length, sha256: digest, contentBase64: bytes.toString("base64"), executable });
+        continue;
+      }
+      let text: string;
+      try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        findings.push({
+          id: findingId("invalid-utf8", rel),
+          severity: "blocker",
+          category: "policy",
+          file: rel,
+          message: "A text agent asset is not valid UTF-8.",
+          remediation: "Save the file as UTF-8 before storing or publishing the agent package.",
+        });
+        files.push({ path: rel, bytes: st.size, sha256: digest, kind: "text", included: false, reason: "invalid-utf8" });
+        continue;
       }
       if (/(?:curl|wget)[^\n|&;]+[|]\s*(?:sh|bash)/i.test(text)) {
         findings.push({
@@ -314,8 +553,29 @@ function scanAgentFolder(rootPath: string): StaticScanResult {
           remediation: "Replace curl|sh style commands with explicit, reviewable install steps.",
         });
       }
-      files.push({ path: rel, bytes: st.size, sha256: digest, kind: "text", included: true });
-      included.push({ path: rel, bytes: st.size, sha256: digest, contentBase64: Buffer.from(text, "utf8").toString("base64") });
+      files.push({ path: rel, bytes: bytes.length, sha256: digest, kind: "text", executable, included: true });
+      included.push({ path: rel, bytes: bytes.length, sha256: digest, contentBase64: bytes.toString("base64"), executable });
+    }
+    const directoryAfter = fs.lstatSync(dir);
+    const directoryRealAfter = fs.realpathSync.native(dir);
+    if (
+      !directoryAfter.isDirectory() ||
+      directoryAfter.isSymbolicLink() ||
+      !isInsideRoot(directoryRealAfter) ||
+      directoryRealBefore !== directoryRealAfter ||
+      directoryBefore.dev !== directoryAfter.dev ||
+      directoryBefore.ino !== directoryAfter.ino ||
+      directoryBefore.mtimeMs !== directoryAfter.mtimeMs ||
+      directoryBefore.ctimeMs !== directoryAfter.ctimeMs
+    ) {
+      findings.push({
+        id: findingId("unstable-directory", relDir),
+        severity: "blocker",
+        category: "policy",
+        file: relDir,
+        message: "Package directory changed while it was being scanned.",
+        remediation: "Stop concurrent package edits, remove links, and retry.",
+      });
     }
     if (relDir === ".") {
       files.sort((a, b) => a.path.localeCompare(b.path));
@@ -346,17 +606,282 @@ function scanAgentFolder(rootPath: string): StaticScanResult {
   return { files, included, findings, totalBytes };
 }
 
+export function portableExecutableForHost(
+  platform: NodeJS.Platform,
+  mode: number,
+  restoredMarkerValue: boolean,
+): boolean {
+  return platform === "win32" ? restoredMarkerValue : (mode & 0o111) !== 0;
+}
+
+function packageSnapshot(files: PackagedFile[]): PackageSnapshot {
+  return new Map(files.map((file) => [file.path, file]));
+}
+
+function registerPortablePackagePath(
+  relativePath: string,
+  files: Map<string, string>,
+  directories: Map<string, string>,
+): { id: string; message: string } | null {
+  const unsafe = portablePackagePathProblem(relativePath);
+  if (unsafe) return { id: "unsafe-path", message: unsafe };
+
+  const parts = relativePath.split("/");
+  const ancestors: string[] = [];
+  for (let index = 1; index < parts.length; index += 1) {
+    ancestors.push(parts.slice(0, index).join("/"));
+  }
+  for (const ancestor of ancestors) {
+    const key = portablePathKey(ancestor);
+    const existingDirectory = directories.get(key);
+    if (existingDirectory && existingDirectory !== ancestor) {
+      return {
+        id: "path-alias",
+        message: `Parent folders ${existingDirectory} and ${ancestor} collide on a supported desktop filesystem.`,
+      };
+    }
+    if (files.has(key)) {
+      return {
+        id: "path-type-collision",
+        message: `${ancestor} is used as both a file and a folder on a supported desktop filesystem.`,
+      };
+    }
+  }
+
+  const fileKey = portablePathKey(relativePath);
+  const existingFile = files.get(fileKey);
+  if (existingFile) {
+    return {
+      id: "duplicate-path",
+      message: `Files ${existingFile} and ${relativePath} collide on a supported desktop filesystem.`,
+    };
+  }
+  if (directories.has(fileKey)) {
+    return {
+      id: "path-type-collision",
+      message: `${relativePath} is used as both a file and a folder on a supported desktop filesystem.`,
+    };
+  }
+
+  for (const ancestor of ancestors) directories.set(portablePathKey(ancestor), ancestor);
+  files.set(fileKey, relativePath);
+  return null;
+}
+
+export function portablePackagePathProblem(value: string): string | null {
+  if (!value || value !== value.normalize("NFC")) return "Package paths must use Unicode NFC normalization.";
+  if (value.includes("\\") || value.includes("\0") || value.startsWith("/") || value.endsWith("/")) {
+    return "Package path is not a portable relative path.";
+  }
+  if (value.includes("//") || value.length > 260) return "Package path exceeds the supported portable path contract.";
+  for (const part of value.split("/")) {
+    if (!part || part === "." || part === "..") return "Package path contains an unsafe segment.";
+    if (/[<>:\"|?*\u0000-\u001f]/.test(part) || /[ .]$/.test(part)) {
+      return "Package path contains characters or a trailing suffix unsupported by a target desktop.";
+    }
+    if (part.length > 255 || Buffer.byteLength(part, "utf8") > 255) {
+      return "Package path component exceeds the supported desktop limit.";
+    }
+    if (hasUnpairedSurrogate(part)) return "Package path contains invalid Unicode.";
+    if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)) {
+      return "Package path uses a reserved desktop name.";
+    }
+  }
+  return null;
+}
+
+function portablePathKey(value: string): string {
+  return value.normalize("NFC").toLowerCase();
+}
+
+function hasUnpairedSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+      continue;
+    }
+    if (code >= 0xdc00 && code <= 0xdfff) return true;
+  }
+  return false;
+}
+
+function readSnapshotText(snapshot: PackageSnapshot, relativePath: string): string {
+  const file = snapshot.get(relativePath);
+  if (!file) return "";
+  return Buffer.from(file.contentBase64, "base64").toString("utf8");
+}
+
+function addSecretFindings(
+  text: string,
+  relativePath: string,
+  findings: CloudAgentSecurityFinding[],
+): void {
+  for (const pattern of SECRET_PATTERNS) {
+    if (!pattern.re.test(text)) continue;
+    const id = findingId(pattern.id, relativePath);
+    if (findings.some((finding) => finding.id === id)) continue;
+    findings.push({
+      id,
+      severity: "blocker",
+      category: "secret",
+      file: relativePath,
+      message: `Possible ${pattern.label} found in package content.`,
+      remediation: "Remove the secret value and require users to configure their own key through Agentlas env/BYOK vault.",
+    });
+  }
+  addStructuredCredentialFinding(text, relativePath, findings);
+}
+
+function addSecretFindingsFromBytes(
+  bytes: Buffer,
+  relativePath: string,
+  findings: CloudAgentSecurityFinding[],
+): void {
+  const candidates = new Set<string>([bytes.toString("utf8")]);
+  const utf16 = decodeUtf16CredentialText(bytes);
+  if (utf16) candidates.add(utf16);
+  for (const text of candidates) addSecretFindings(text, relativePath, findings);
+}
+
+function decodeUtf16CredentialText(bytes: Buffer): string | null {
+  if (bytes.length < 4) return null;
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return bytes.subarray(2, bytes.length - ((bytes.length - 2) % 2)).toString("utf16le");
+  }
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+    const body = Buffer.from(bytes.subarray(2, bytes.length - ((bytes.length - 2) % 2)));
+    body.swap16();
+    return body.toString("utf16le");
+  }
+  const sampleLength = Math.min(bytes.length - (bytes.length % 2), 4096);
+  if (sampleLength < 8) return null;
+  let oddNuls = 0;
+  let evenNuls = 0;
+  for (let index = 0; index < sampleLength; index += 2) {
+    if (bytes[index] === 0) evenNuls += 1;
+    if (bytes[index + 1] === 0) oddNuls += 1;
+  }
+  const pairs = sampleLength / 2;
+  const evenLength = bytes.length - (bytes.length % 2);
+  if (oddNuls / pairs > 0.3) return bytes.subarray(0, evenLength).toString("utf16le");
+  if (evenNuls / pairs > 0.3) {
+    const body = Buffer.from(bytes.subarray(0, evenLength));
+    body.swap16();
+    return body.toString("utf16le");
+  }
+  return null;
+}
+
+function addStructuredCredentialFinding(
+  text: string,
+  relativePath: string,
+  findings: CloudAgentSecurityFinding[],
+): void {
+  const assignment = /\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|secret|token|password|passwd|pwd)\b["']?\s*[:=]\s*(?:"([^"]*)"|'([^']*)'|([^\s#;,]+))/gi;
+  for (const match of text.matchAll(assignment)) {
+    const value = String(match[1] ?? match[2] ?? match[3] ?? "").trim();
+    if (!isLikelyRealCredentialValue(value)) continue;
+    pushSecretFinding("generic-unquoted-secret", "unquoted credential value", relativePath, findings);
+    break;
+  }
+  const urlQueryCredential = /[?&](?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|secret|token|password)=([^&#\s]+)/gi;
+  for (const match of text.matchAll(urlQueryCredential)) {
+    if (!isLikelyRealCredentialValue(String(match[1] ?? ""))) continue;
+    pushSecretFinding("url-query-credential", "credential embedded in a URL query", relativePath, findings);
+    break;
+  }
+  const urlCredential = /\bhttps?:\/\/[^/\s:@]+:([^@\s/]{8,})@/gi;
+  for (const match of text.matchAll(urlCredential)) {
+    if (!isLikelyRealCredentialValue(String(match[1] ?? ""))) continue;
+    pushSecretFinding("url-credential", "credential embedded in a URL", relativePath, findings);
+    break;
+  }
+}
+
+function isLikelyRealCredentialValue(value: string): boolean {
+  try {
+    value = decodeURIComponent(value);
+  } catch {
+    // Keep the original value when it is not URL encoded.
+  }
+  if (value.length < 8) return false;
+  if (/^(?:\$\{[^}]+\}|\$[A-Z_][A-Z0-9_]*|\{\{[^}]+\}\}|<[^>]+>)$/i.test(value)) return false;
+  if (/^(?:process\.env\.|os\.environ|env\(|secret\(|vault:)/i.test(value)) return false;
+  const compact = value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (/^(?:your|example|sample|dummy|placeholder|changeme|replaceme|replacewith|redacted|masked|none|null|undefined|x+|star+)(?:api)?(?:key|secret|token|password)?(?:here)?$/.test(compact)) {
+    return false;
+  }
+  if (/^(?:\*+|x+|_+|-+)$/.test(value)) return false;
+  if (/(?:placeholder|configure|replace[_-]?me|replace[_-]?with|your[_-]|example|sample|redacted|not[_-]?a[_-]?real|changeme|change[_-]?me)/i.test(value)) {
+    return false;
+  }
+  return true;
+}
+
+function pushSecretFinding(
+  kind: string,
+  label: string,
+  relativePath: string,
+  findings: CloudAgentSecurityFinding[],
+): void {
+  const id = findingId(kind, relativePath);
+  if (findings.some((finding) => finding.id === id)) return;
+  findings.push({
+    id,
+    severity: "blocker",
+    category: "secret",
+    file: relativePath,
+    message: `Possible ${label} found in package content.`,
+    remediation: "Replace the value with an environment/BYOK placeholder and keep the real credential in the OS keychain.",
+  });
+}
+
+function comparePaths(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function comparePackagedFiles(left: PackagedFile, right: PackagedFile): number {
+  return comparePaths(left.path, right.path);
+}
+
+function isRegularFileInsideRoot(rootPath: string, candidate: string): boolean {
+  try {
+    const stat = fs.lstatSync(candidate);
+    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    const real = fs.realpathSync.native(candidate);
+    const relative = path.relative(rootPath, real);
+    return !!relative && !relative.startsWith("..") && !path.isAbsolute(relative);
+  } catch {
+    return false;
+  }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
 async function preparePublicCareerGraphCard(rootPath: string): Promise<CloudAgentSecurityFinding[]> {
   const agentlasDir = path.join(rootPath, ".agentlas");
   const publicCard = path.join(agentlasDir, "public-career-card.json");
-  if (fs.existsSync(publicCard)) return [];
+  // Any existing entry (including a link) is left for the stable package scan
+  // to accept or block. Never invoke the generator through a linked card path.
+  try {
+    fs.lstatSync(publicCard);
+    return [];
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") return [];
+  }
   const markers = [
     path.join(agentlasDir, "career-graph.json"),
     path.join(agentlasDir, "career-graph-sources.json"),
     path.join(agentlasDir, "career-graph.sqlite"),
   ];
-  if (!markers.some((marker) => fs.existsSync(marker))) return [];
+  if (!markers.some((marker) => isRegularFileInsideRoot(rootPath, marker))) return [];
   try {
+    const { careerGraph } = await import("../hephaestus/commands");
     await careerGraph(["ingest"], { project: rootPath, cwd: rootPath, timeoutMs: 20_000 });
     await careerGraph(["public-card", "--write"], { project: rootPath, cwd: rootPath, timeoutMs: 20_000 });
     return [];
@@ -375,16 +900,16 @@ async function preparePublicCareerGraphCard(rootPath: string): Promise<CloudAgen
 }
 
 function readPublicCareerGraphCard(
-  rootPath: string,
+  snapshot: PackageSnapshot,
   visibility: CloudAgentVisibility,
   findings: CloudAgentSecurityFinding[],
 ): CloudAgentPublicCareerGraph | undefined {
   const rel = ".agentlas/public-career-card.json";
-  const abs = path.join(rootPath, rel);
-  if (!fs.existsSync(abs)) return undefined;
+  if (!snapshot.has(rel)) return undefined;
+  const text = readSnapshotText(snapshot, rel);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(fs.readFileSync(abs, "utf8"));
+    parsed = JSON.parse(text);
   } catch {
     findings.push({
       id: "career-card-invalid-json",
@@ -422,8 +947,7 @@ function readPublicCareerGraphCard(
     }
   }
   const raw = JSON.stringify(parsed);
-  const sensitiveRoots = [path.resolve(rootPath), os.homedir()].filter(Boolean);
-  if (sensitiveRoots.some((root) => raw.includes(root))) {
+  if (containsAbsoluteLocalPath(raw)) {
     findings.push({
       id: findingId("career-card-local-path", rel),
       severity: visibility === "marketplace" ? "blocker" : "high",
@@ -436,51 +960,150 @@ function readPublicCareerGraphCard(
   if (findings.some((finding) => finding.id.startsWith("career-card-") && finding.severity === "blocker")) {
     return undefined;
   }
-  const allowed = new Set([
-    "schemaVersion",
-    "kind",
-    "generatedAt",
-    "projectName",
-    "indexStatus",
-    "policy",
-    "privacy",
-    "counts",
-    "canonicalSources",
-    "staleSourceCount",
-    "sourceKinds",
-    "nodeTypes",
-    "edgeTypes",
-  ]);
-  const sanitized: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(parsed)) {
-    if (allowed.has(key)) sanitized[key] = value;
-  }
-  return sanitized as unknown as CloudAgentPublicCareerGraph;
+  return sanitizePublicCareerGraph(parsed);
 }
 
-function staticReview(findings: CloudAgentSecurityFinding[]): CloudAgentReviewResult {
+/**
+ * The generated public card is useful inside a borrowed package, but its raw
+ * source may contain generator-only fields. Replace the captured file itself,
+ * not only the manifest copy, so base64 bundle contents cannot bypass the
+ * public projection.
+ */
+function replacePublicCareerCardWithSanitizedSnapshot(
+  scan: StaticScanResult,
+  card: CloudAgentPublicCareerGraph | undefined,
+): void {
+  const rel = ".agentlas/public-career-card.json";
+  const existingIndex = scan.included.findIndex((file) => file.path === rel);
+  if (existingIndex >= 0) scan.included.splice(existingIndex, 1);
+
+  const fileRecord = scan.files.find((file) => file.path === rel);
+  if (!card) {
+    if (fileRecord) {
+      fileRecord.included = false;
+      fileRecord.reason = "public-career-card-blocked";
+    }
+    return;
+  }
+
+  const bytes = Buffer.from(`${JSON.stringify(card, null, 2)}\n`, "utf8");
+  const digest = sha256(bytes);
+  scan.included.push({
+    path: rel,
+    bytes: bytes.length,
+    sha256: digest,
+    contentBase64: bytes.toString("base64"),
+    executable: false,
+  });
+  scan.included.sort(comparePackagedFiles);
+  if (fileRecord) {
+    fileRecord.bytes = bytes.length;
+    fileRecord.sha256 = digest;
+    fileRecord.kind = "text";
+    fileRecord.executable = false;
+    fileRecord.included = true;
+    delete fileRecord.reason;
+  } else {
+    scan.files.push({ path: rel, bytes: bytes.length, sha256: digest, kind: "text", included: true });
+    scan.files.sort((a, b) => comparePaths(a.path, b.path));
+  }
+}
+
+function sanitizePublicCareerGraph(parsed: Record<string, unknown>): CloudAgentPublicCareerGraph {
+  const card: CloudAgentPublicCareerGraph = { kind: "agentlas-public-career-card" };
+  const copyString = (key: "schemaVersion" | "generatedAt" | "projectName" | "indexStatus" | "policy", max: number): void => {
+    const value = parsed[key];
+    if (typeof value === "string" && value.length <= max) card[key] = value;
+  };
+  copyString("schemaVersion", 80);
+  copyString("generatedAt", 80);
+  copyString("projectName", 200);
+  copyString("indexStatus", 80);
+  copyString("policy", 160);
+
+  card.privacy = {
+    rawLocalPathsIncluded: false,
+    rawPromptsIncluded: false,
+    rawTranscriptsIncluded: false,
+    sourceTextIncluded: false,
+  };
+  card.counts = sanitizeCountRecord(parsed.counts);
+  card.sourceKinds = sanitizeCountRecord(parsed.sourceKinds);
+  card.nodeTypes = sanitizeCountRecord(parsed.nodeTypes);
+  card.edgeTypes = sanitizeCountRecord(parsed.edgeTypes);
+  const canonicalSources = sanitizeCount(parsed.canonicalSources);
+  const staleSourceCount = sanitizeCount(parsed.staleSourceCount);
+  if (canonicalSources !== undefined) card.canonicalSources = canonicalSources;
+  if (staleSourceCount !== undefined) card.staleSourceCount = staleSourceCount;
+  return card;
+}
+
+function sanitizeCountRecord(value: unknown): Record<string, number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const result: Record<string, number> = {};
+  for (const [key, count] of Object.entries(value).slice(0, 200)) {
+    if (!/^[A-Za-z0-9_.:-]{1,80}$/.test(key)) continue;
+    const safeCount = sanitizeCount(count);
+    if (safeCount !== undefined) result[key] = safeCount;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function sanitizeCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function containsAbsoluteLocalPath(value: string): boolean {
+  const sensitiveRoots = [os.homedir()].filter(Boolean);
+  return (
+    sensitiveRoots.some((root) => value.includes(root)) ||
+    /(?:^|["'\s:(])\/(?:Users|home|var|tmp|private|Volumes|opt|etc)\//i.test(value) ||
+    /(?:^|["'\s:(])[A-Za-z]:[\\/]/.test(value) ||
+    /(?:^|["'\s:(])\\\\[^\\\s]+\\/.test(value)
+  );
+}
+
+function privateSaveSafetyFindings(
+  findings: CloudAgentSecurityFinding[],
+): CloudAgentSecurityFinding[] {
+  return findings.filter(
+    (finding) =>
+      (finding.severity === "blocker" && finding.id !== "missing-agent-definition") ||
+      finding.category === "secret" ||
+      finding.category === "size" ||
+      /symlink|unsafe[-_]?path|path[-_]?escape|duplicate[-_]?path|hash|integrity/i.test(finding.id),
+  );
+}
+
+function staticReview(
+  findings: CloudAgentSecurityFinding[],
+  scope: "owner-private" | "hub-public" = "hub-public",
+): CloudAgentReviewResult {
   const blockers = findings.filter((f) => f.severity === "blocker");
   const high = findings.filter((f) => f.severity === "high");
   const verdict = blockers.length > 0 ? "fail" : high.length > 0 ? "needs-review" : "pass";
+  const passedSummary =
+    scope === "owner-private"
+      ? "Private Agent Cloud safety checks passed."
+      : "Static public package review passed without blocker findings.";
   return {
     mode: "static-only",
     verdict,
     costOwner: "none",
     summary:
       verdict === "pass"
-        ? "Static package review passed without blocker findings."
+        ? passedSummary
         : `${blockers.length} blocker(s), ${high.length} high-risk finding(s).`,
     findings,
     reviewedAt: new Date().toISOString(),
   };
 }
 
-function readRoutingCard(rootPath: string): {
+function readRoutingCard(snapshot: PackageSnapshot): {
   card?: Record<string, unknown>;
   finding?: CloudAgentSecurityFinding;
 } {
-  const abs = path.join(rootPath, ROUTING_CARD_PATH);
-  if (!fs.existsSync(abs)) {
+  if (!snapshot.has(ROUTING_CARD_PATH)) {
     return {
       finding: {
         id: "routing-card-required",
@@ -493,7 +1116,7 @@ function readRoutingCard(rootPath: string): {
     };
   }
   try {
-    const parsed = JSON.parse(fs.readFileSync(abs, "utf8")) as unknown;
+    const parsed = JSON.parse(readSnapshotText(snapshot, ROUTING_CARD_PATH)) as unknown;
     if (!isRecord(parsed)) {
       return {
         finding: {
@@ -563,6 +1186,7 @@ async function runSubmitterRuntimeReview(
   manifest: CloudAgentPackageManifest,
   staticFindings: CloudAgentSecurityFinding[],
 ): Promise<CloudAgentReviewResult> {
+  const { pickActiveRunner } = await import("../mcp/client");
   const picked = await pickActiveRunner();
   if (!picked) {
     const finding: CloudAgentSecurityFinding = {
@@ -643,18 +1267,21 @@ async function registerCloudAgent(input: {
   review: CloudAgentReviewResult;
   visibility: CloudAgentVisibility;
   notes?: string;
+  baseRegistration?: CloudAgentRevisionIdentity;
 }): Promise<CloudAgentRegistrationResult> {
   const cookie = getSessionCookieHeader();
   if (!cookie) throw new Error("Sign in to agentlas.cloud before publishing a cloud agent.");
   const base = (process.env.AGENTLAS_WEB_BASE_URL || "https://agentlas.cloud").replace(/\/$/, "");
   const bundle = JSON.parse(fs.readFileSync(input.bundlePath, "utf8")) as unknown;
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    cookie,
+    origin: base,
+    ...cloudRegistrationPreconditionHeaders(input.baseRegistration),
+  };
   const response = await fetch(`${base}/api/cloud-agents/v1/register`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      cookie,
-      origin: base,
-    },
+    headers,
     body: JSON.stringify({
       manifest: input.manifest,
       bundle,
@@ -669,21 +1296,107 @@ async function registerCloudAgent(input: {
   });
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(`Agentlas Cloud register failed (${response.status}): ${body.slice(0, 300)}`);
+    throw cloudRegistrationError(response.status, body);
   }
-  const json = (await response.json()) as Partial<CloudAgentRegistrationResult>;
+  return validateCloudRegistrationReceipt(
+    await response.json(),
+    input.manifest,
+    input.visibility,
+    response.headers.get("etag"),
+  );
+}
+
+/** Build the write precondition independently from authentication headers so
+ * tests can prove that every register request is either an explicit create or
+ * an exact-revision update. */
+export function cloudRegistrationPreconditionHeaders(
+  baseRegistration?: CloudAgentRevisionIdentity,
+): Record<string, string> {
+  if (!baseRegistration) return { "if-none-match": "*" };
   return {
-    cloudId: json.cloudId || randomUUID(),
-    slug: json.slug || input.manifest.slug,
-    url: json.url,
-    marketplaceUrl: json.marketplaceUrl,
-    registeredAt: json.registeredAt || new Date().toISOString(),
+    "if-match": `"${baseRegistration.revision}"`,
+    "x-agentlas-cloud-id": baseRegistration.cloudId,
+  };
+}
+
+export function validateCloudRegistrationReceipt(
+  raw: unknown,
+  manifest: CloudAgentPackageManifest,
+  visibility: CloudAgentVisibility,
+  responseEtag: string | null,
+): CloudAgentRegistrationResult {
+  const json = isRecord(raw) ? raw : {};
+  const expectedSource = visibility === "marketplace" ? "hub" : "agent-cloud";
+  const expectedVisibility = visibility === "marketplace" ? "marketplace" : "owner-private";
+  const expectedScope = scopeForVisibility(visibility);
+  const revision = typeof json.revision === "string" ? json.revision : "";
+  const expectedEtag = revision ? `"${revision}"` : "";
+  if (
+    json.schema !== "agentlas.agent_cloud.registration.v1" ||
+    json.source !== expectedSource ||
+    json.visibility !== expectedVisibility ||
+    json.owner !== true ||
+    json.publicHubPublished !== (visibility === "marketplace") ||
+    json.dryRun !== false ||
+    typeof json.cloudId !== "string" ||
+    !json.cloudId.trim() ||
+    json.slug !== manifest.slug ||
+    json.scope !== expectedScope ||
+    json.packageHash !== manifest.packageHash ||
+    json.packageHashVersion !== manifest.packageHashVersion ||
+    !/^rev_[a-f0-9]{32}$/.test(revision) ||
+    responseEtag !== expectedEtag ||
+    typeof json.registeredAt !== "string" ||
+    !Number.isFinite(Date.parse(json.registeredAt))
+  ) {
+    throw new Error("Agentlas Cloud register returned an invalid or mismatched registration receipt.");
+  }
+  return {
+    cloudId: json.cloudId,
+    slug: json.slug,
+    scope: expectedScope,
+    packageHash: manifest.packageHash,
+    packageHashVersion: manifest.packageHashVersion,
+    revision,
+    etag: expectedEtag,
+    ...(typeof json.url === "string" ? { url: json.url } : {}),
+    ...(typeof json.marketplaceUrl === "string" ? { marketplaceUrl: json.marketplaceUrl } : {}),
+    registeredAt: json.registeredAt,
     dryRun: false,
   };
 }
 
-function readName(rootPath: string): string {
-  const manifest = readPackageJson(rootPath);
+function scopeForVisibility(visibility: CloudAgentVisibility): CloudAgentCloudScope {
+  return visibility === "marketplace" ? "hub-public" : "owner-private";
+}
+
+function cloudRegistrationError(status: number, body: string): Error {
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    const value = JSON.parse(body) as unknown;
+    parsed = isRecord(value) ? value : null;
+  } catch {
+    parsed = null;
+  }
+  const code = typeof parsed?.code === "string" ? parsed.code : "";
+  if (status === 412 && code === "cloud_agent_revision_conflict") {
+    const current = isRecord(parsed?.current) ? parsed.current : null;
+    const updatedAt = typeof current?.updatedAt === "string" ? ` Latest update: ${current.updatedAt}.` : "";
+    return new Error(
+      `cloud_agent_revision_conflict: This Agent Cloud asset changed on another machine.${updatedAt} ` +
+      "Your local files were not uploaded. Restore the latest Cloud copy, review the differences, then save again.",
+    );
+  }
+  if (status === 428 && code === "cloud_precondition_required") {
+    return new Error(
+      "cloud_precondition_required: Agent Cloud requires a saved revision receipt before updating this asset. Restore the latest Cloud copy, then retry.",
+    );
+  }
+  return new Error(`Agentlas Cloud register failed (${status}): ${body.slice(0, 300)}`);
+}
+
+function readName(snapshot: PackageSnapshot, fallbackName: string): string {
+  const manifest = readPackageJson(snapshot);
   const explicit = firstString(
     manifest.agentlas.displayName,
     manifest.agentlas.name,
@@ -692,13 +1405,13 @@ function readName(rootPath: string): string {
     manifest.routingCard.name,
   );
   if (explicit) return explicit.replace(/\s+/g, " ").slice(0, 80);
-  const text = readFirst(rootPath, ["agent.md", "AGENT.md", "README.md", "CLAUDE.md", "AGENTS.md"], 2000);
+  const text = readFirst(snapshot, ["agent.md", "AGENT.md", "README.md", "CLAUDE.md", "AGENTS.md"], 2000);
   const heading = text.match(/^#\s+(.+)$/m)?.[1]?.trim();
-  return (heading || path.basename(rootPath)).replace(/\s+/g, " ").slice(0, 80);
+  return (heading || fallbackName).replace(/\s+/g, " ").slice(0, 80);
 }
 
-function readTagline(rootPath: string): string {
-  const manifest = readPackageJson(rootPath);
+function readTagline(snapshot: PackageSnapshot): string {
+  const manifest = readPackageJson(snapshot);
   const explicit = firstString(
     manifest.agentlas.summary,
     manifest.agentlas.description,
@@ -707,7 +1420,7 @@ function readTagline(rootPath: string): string {
     manifest.routingCard.summary,
   );
   if (explicit) return explicit.replace(/\s+/g, " ").slice(0, 160);
-  const text = readFirst(rootPath, ["README.md", "agent.md", "AGENT.md"], 3000);
+  const text = readFirst(snapshot, ["README.md", "agent.md", "AGENT.md"], 3000);
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith(">")) continue;
@@ -716,8 +1429,8 @@ function readTagline(rootPath: string): string {
   return "Portable Agentlas cloud agent package.";
 }
 
-function readStableSlug(rootPath: string): string {
-  const manifest = readPackageJson(rootPath);
+function readStableSlug(snapshot: PackageSnapshot): string {
+  const manifest = readPackageJson(snapshot);
   return firstString(
     manifest.agentlas.slug,
     manifest.agentlas.id,
@@ -729,23 +1442,23 @@ function readStableSlug(rootPath: string): string {
   );
 }
 
-function readPackageJson(rootPath: string): {
+function readPackageJson(snapshot: PackageSnapshot): {
   agentlas: Record<string, unknown>;
   manifest: Record<string, unknown>;
   agentCard: Record<string, unknown>;
   routingCard: Record<string, unknown>;
 } {
   return {
-    agentlas: readJsonObject(path.join(rootPath, "agentlas.json")),
-    manifest: readJsonObject(path.join(rootPath, "manifest.json")),
-    agentCard: readJsonObject(path.join(rootPath, ".agentlas", "agent-card.json")),
-    routingCard: readJsonObject(path.join(rootPath, ".agentlas", "routing-card.json")),
+    agentlas: readJsonObject(snapshot, "agentlas.json"),
+    manifest: readJsonObject(snapshot, "manifest.json"),
+    agentCard: readJsonObject(snapshot, ".agentlas/agent-card.json"),
+    routingCard: readJsonObject(snapshot, ".agentlas/routing-card.json"),
   };
 }
 
-function readJsonObject(file: string): Record<string, unknown> {
+function readJsonObject(snapshot: PackageSnapshot, file: string): Record<string, unknown> {
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    const parsed = JSON.parse(readSnapshotText(snapshot, file)) as unknown;
     return isRecord(parsed) ? parsed : {};
   } catch {
     return {};
@@ -765,28 +1478,19 @@ function nestedString(value: unknown, key: string): string {
   return typeof nested === "string" ? nested : "";
 }
 
-function readFirst(rootPath: string, names: string[], maxChars: number): string {
+function readFirst(snapshot: PackageSnapshot, names: string[], maxChars: number): string {
   for (const name of names) {
-    const file = path.join(rootPath, name);
-    try {
-      const st = fs.statSync(file);
-      if (st.isFile() && st.size <= MAX_FILE_BYTES) return fs.readFileSync(file, "utf8").slice(0, maxChars);
-    } catch {
-      // continue
-    }
+    if (!snapshot.has(name)) continue;
+    return readSnapshotText(snapshot, name).slice(0, maxChars);
   }
   return "";
 }
 
-function inferAgentKind(rootPath: string): "agent" | "team" | "repo" {
+function inferAgentKind(snapshot: PackageSnapshot): "agent" | "team" | "repo" {
   for (const name of ["TEAM.md", "team.json", "agents", "team", "departments", "hr-departments"]) {
-    try {
-      if (fs.existsSync(path.join(rootPath, name))) return "team";
-    } catch {
-      // continue
-    }
+    if (snapshot.has(name) || Array.from(snapshot.keys()).some((entry) => entry.startsWith(`${name}/`))) return "team";
   }
-  if (readFirst(rootPath, ["AGENT.md", "agent.md", "CLAUDE.md", "AGENTS.md"], 2000)) return "agent";
+  if (readFirst(snapshot, ["AGENT.md", "agent.md", "CLAUDE.md", "AGENTS.md"], 2000)) return "agent";
   return "repo";
 }
 
@@ -798,7 +1502,7 @@ function packageOutputDir(slug: string): string {
   return path.join(root, `${slug}-${stamp}`);
 }
 
-function hashPackage(files: PackagedTextFile[]): string {
+function hashPackage(files: PackagedFile[]): string {
   const h = createHash("sha256");
   // 코드포인트 정렬 — localeCompare 금지. 서버(register/route.ts hashPackage)·Python
   // upload.py와 바이트 동일해야 한다. localeCompare는 ICU/로케일 의존이라 대소문자 혼합
@@ -807,6 +1511,8 @@ function hashPackage(files: PackagedTextFile[]): string {
     h.update(file.path);
     h.update("\0");
     h.update(file.sha256);
+    h.update("\0");
+    h.update(file.executable ? "x" : "-");
     h.update("\0");
   }
   return h.digest("hex");
@@ -900,18 +1606,6 @@ function sanitizeSlug(value: string): string {
 function normalizeRelative(rootPath: string, absPath: string): string {
   const rel = path.relative(rootPath, absPath);
   return rel ? rel.split(path.sep).join("/") : ".";
-}
-
-function statSafe(file: string): fs.Stats | null {
-  try {
-    return fs.statSync(file);
-  } catch {
-    return null;
-  }
-}
-
-function hashFile(file: string): string {
-  return sha256(fs.readFileSync(file));
 }
 
 function sha256(value: string | Buffer): string {

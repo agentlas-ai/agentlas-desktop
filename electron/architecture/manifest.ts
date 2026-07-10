@@ -19,7 +19,7 @@
 //   Agent/team creation itself routes to the built-in Agentlas Core Engine Meta-Agent.
 //   If the full public package is installed too, treat that package as the file-rich
 //   contract source. The public architecture/foldering origin is:
-//   agent_agentlas_core_engine_meta_agent with modes:
+//   agentlas-ai/Agentlas-OS with modes:
 //     - single-agent-creator
 //     - team-builder
 //     - agentlas-packager
@@ -35,7 +35,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged).
 
-export const ARCHITECTURE_VERSION = "1.5.35";
+export const ARCHITECTURE_VERSION = "1.5.36";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -336,7 +336,7 @@ Hermes, and other folder-based agent hosts.
 
 ## Source contract
 Mirror the public core architecture and foldering contract from
-agent_agentlas_core_engine_meta_agent. This built-in prompt is the local runtime
+agentlas-ai/Agentlas-OS. This built-in prompt is the local runtime
 distillation, not a forked original. If the full public core package is installed
 or available in the workspace, read and follow that package first.
 

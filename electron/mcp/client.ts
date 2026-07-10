@@ -18,6 +18,7 @@ import {
   stripStormbreakerContinueMarker,
 } from "../hephaestus/loop-engineering";
 import { getAgentById, listInstalledAgents } from "./registry";
+import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import {
   autoRouteStatus,
   autoRouteSystemPreamble,
@@ -64,6 +65,7 @@ import { getAgentApp } from "../store/agent-apps";
 import { autoSelectMcpTools, buildMcpAutoSelectionPrompt } from "../mcp-tools/auto-select";
 import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
 import { buildRunnerEnv } from "../runtime/env-resolver";
+import { agentRunCwd } from "../runtime/exec";
 import { type Runner, SURFACE_INTENT_MARKER } from "../runtime/runner";
 import { pickActive, pickRunner, selectRuntimeForTargets } from "../runtime/selection";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
@@ -80,6 +82,10 @@ import type {
 
 type EventSink = (ev: McpInvocationEvent) => void;
 const careerGraphRefreshTriggered = new Set<string>();
+
+function throwIfInvocationAborted(signal: AbortSignal | undefined, locale: "ko" | "en"): void {
+  if (signal?.aborted) throw new Error(tStatus(locale, "aborted"));
+}
 
 /** 방출된 "agent" 필드(id/slug/표시명, 대소문자 무시)를 설치 에이전트로 해석. 못 찾으면 null. */
 function resolveInstalledAgentLoose(query: string): InstalledAgent | null {
@@ -285,11 +291,12 @@ async function buildBorrowDirective(
   prompt: string,
   project: string | null,
   locale: "ko" | "en",
+  signal?: AbortSignal,
 ): Promise<string> {
   const list = slugs.join(", ");
   let directive = "";
   try {
-    const res = await hepCall(slugs.join(","), [prompt], { project: project ?? "." });
+    const res = await hepCall(slugs.join(","), [prompt], { project: project ?? ".", signal });
     const j = (res.json ?? null) as Record<string, unknown> | null;
     const top = j?.directive;
     if (typeof top === "string" && top.trim()) {
@@ -303,9 +310,11 @@ async function buildBorrowDirective(
         .filter(Boolean)
         .join("\n\n---\n\n");
     }
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error;
     // 오프라인/허브 미연결 → 기본 지시로 폴백.
   }
+  throwIfInvocationAborted(signal, locale);
   const header =
     locale === "ko"
       ? `[Hephaestus Network · 빌려온 Hub 에이전트: ${list}]`
@@ -324,6 +333,7 @@ async function buildAgentGroupTaskForceSpecs(input: {
   project: string | null;
   locale: "ko" | "en";
   sink: EventSink;
+  signal?: AbortSignal;
 }): Promise<{ groupName: string; orchestratorName: string; specs: BorrowedAgentSpec[] }> {
   const resolved = await resolveAgentGroupForRuntime(input.groupId);
   if (!resolved) {
@@ -346,11 +356,16 @@ async function buildAgentGroupTaskForceSpecs(input: {
   let hubSpecs = new Map<string, BorrowedAgentSpec>();
   if (hubSlugs.length > 0) {
     try {
-      const res = await hepCall(hubSlugs.join(","), [input.prompt], { project: input.project ?? "." });
+      const res = await hepCall(hubSlugs.join(","), [input.prompt], {
+        project: input.project ?? ".",
+        signal: input.signal,
+      });
       hubSpecs = new Map(normalizeBorrowedAgentSpecs(hubSlugs, res.json ?? null).map((spec) => [spec.slug, spec]));
-    } catch {
+    } catch (error) {
+      if (input.signal?.aborted) throw error;
       hubSpecs = new Map(normalizeBorrowedAgentSpecs(hubSlugs, null).map((spec) => [spec.slug, spec]));
     }
+    throwIfInvocationAborted(input.signal, input.locale);
   }
   const specs = resolved.members.map((member): BorrowedAgentSpec => {
     const hub = member.source === "hub" ? hubSpecs.get(member.slug) : null;
@@ -568,13 +583,14 @@ export async function runMcpInvocation(
   req: McpInvocationRequest,
   sink: EventSink,
   signal?: AbortSignal,
-): Promise<{ finalText?: string; tokens?: number; stormbreakerContinueRequested: boolean }> {
+): Promise<{ finalText?: string; tokens?: number; stormbreakerContinueRequested: boolean; resultFolder?: string }> {
   // 한 마이크로태스크 양보 — ipc:run 핸들러가 { runId }를 반환하고 렌더러가 이벤트 채널을
   // 구독한 뒤에야 sink가 발화하도록 보장한다. 이게 없으면 동기 early-return(no-chat/no-agent)
   // 에러가 구독 전에 발화돼 렌더러가 종료 이벤트를 놓치고 busy(정지 버튼)가 영구 고착된다.
   await Promise.resolve();
   const callerSink = sink;
   let finalTextFromSink = "";
+  let resolvedResultFolder: string | undefined;
   sink = (ev: McpInvocationEvent) => {
     if (ev.kind === "final" && ev.text?.trim()) {
       finalTextFromSink = ev.text.trim();
@@ -584,6 +600,7 @@ export async function runMcpInvocation(
   const earlyResult = () => ({
     finalText: finalTextFromSink || undefined,
     stormbreakerContinueRequested: false,
+    resultFolder: resolvedResultFolder,
   });
   const locale = pickLocale(req);
   const chat = getChat(req.chatId);
@@ -638,6 +655,7 @@ export async function runMcpInvocation(
       effectiveUserPrompt,
       getChatWorkingFolder(chat.id),
       locale,
+      signal,
     );
   }
 
@@ -673,6 +691,9 @@ export async function runMcpInvocation(
   if (inferredWorkingFolder) setChatWorkingFolder(chat.id, inferredWorkingFolder);
   const targetAppWorkingFolder = targetApp ? path.resolve(targetApp.rootPath) : null;
   const workingFolder = targetAppWorkingFolder ?? existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
+  // Even a global chat executes in a concrete local folder. Persist it in the
+  // run receipt so generated files do not become undiscoverable after reload.
+  resolvedResultFolder = workingFolder ?? agentRunCwd();
 
   // 자동화 Hub 정책: 사용자가 "Hub까지 사용"을 켜둔 경우, 로컬 타깃만 고집하지 않고
   // 실행 전에 Hephaestus Network 라우터로 Hub 후보를 찾아 BYOM bundle 지시를 프롬프트에 붙인다.
@@ -696,7 +717,9 @@ export async function runMcpInvocation(
           ? { hubOnly: true, scope: "network" as const }
           : { allowLocal: true }),
         timeoutMs: req.hubMode === "hub-first" ? 12_000 : 6_000,
+        signal,
       });
+      throwIfInvocationAborted(signal, locale);
       const norm = normalizeRecommendation(routeRes.json, effectiveUserPrompt);
       const hubSlugs = norm.agents
         .filter((candidate) => candidate.source === "hub")
@@ -716,9 +739,11 @@ export async function runMcpInvocation(
           effectiveUserPrompt,
           workingFolder,
           locale,
+          signal,
         );
       }
     } catch (err) {
+      throwIfInvocationAborted(signal, locale);
       console.error("[automation] Hub resolver failed:", err);
       sink({
         kind: "tool-use",
@@ -747,17 +772,21 @@ export async function runMcpInvocation(
         project: workingFolder ?? undefined,
         allowLocal: true,
         timeoutMs: 4_000,
+        signal,
       });
+      throwIfInvocationAborted(signal, locale);
       const norm = normalizeRecommendation(routeRes.json, effectiveUserPrompt);
       if (norm.routerAgent) {
         routerAgent = norm.routerAgent;
       }
     } catch (err) {
+      throwIfInvocationAborted(signal, locale);
       console.error("[routing] Dynamic Hephaestus routing check failed:", err);
     }
   }
 
   const runtimes = await detectRuntimes();
+  throwIfInvocationAborted(signal, locale);
   const runtimeChoice = selectRuntimeForTargets(runtimes, [
     { scope: "agent", targetId: agent.id },
     { scope: "firm", targetId: chat.firmId },
@@ -809,7 +838,7 @@ export async function runMcpInvocation(
     try {
       const selectedContext = await autoSelectMcpTools({
         userPrompt: effectiveUserPrompt,
-        systemPrompt: agent.systemPrompt,
+        systemPrompt: buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt),
         agentName: agent.nameEn || agent.name,
         workingFolder,
         toolMode: req.toolMode,
@@ -870,6 +899,7 @@ export async function runMcpInvocation(
   }
 
   const runnerEnv = await buildRunnerEnv(agent, workingFolder ?? undefined);
+  throwIfInvocationAborted(signal, locale);
   if (mcpRuntimeEnv) Object.assign(runnerEnv.env, mcpRuntimeEnv);
 
   // ── Agent Group 오케스트레이션 ───────────────────────────
@@ -883,6 +913,7 @@ export async function runMcpInvocation(
         project: workingFolder,
         locale,
         sink,
+        signal,
       });
       await runBorrowedTaskForceInvocation({
         req: { ...req, userPrompt: effectiveUserPrompt },
@@ -1004,7 +1035,7 @@ export async function runMcpInvocation(
   }
 
   // 프로젝트 컨텍스트 노트가 있으면 system prompt 뒤에 append
-  let systemPrompt = agent.systemPrompt;
+  let systemPrompt = buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt);
   if (autoRoute) {
     systemPrompt = `${autoRouteSystemPreamble(
       autoRoute,
@@ -1141,7 +1172,7 @@ export async function runMcpInvocation(
   if (chat.kind !== "division") {
     stormbreaker = superviseStormbreaker({
       query: req.userPrompt,
-      cwd: workingFolder ?? undefined,
+      cwd: resolvedResultFolder,
       emit: (tool) => sink({ kind: "tool-use", tool }),
       signal,
     });
@@ -1427,7 +1458,12 @@ export async function runMcpInvocation(
 
     appendChatMessage(chat.id, "assistant", displayText);
     sink({ kind: "final", text: displayText, tokens: result.tokens });
-    return { finalText: displayText, tokens: result.tokens, stormbreakerContinueRequested };
+    return {
+      finalText: displayText,
+      tokens: result.tokens,
+      stormbreakerContinueRequested,
+      resultFolder: resolvedResultFolder,
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     sink({ kind: "error", error: { code: "runner-failed", message: msg } });

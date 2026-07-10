@@ -7,7 +7,7 @@ import { getAgentGroup } from "./agent-groups";
 import { getFirm } from "./firms";
 import { touchProject } from "./projects";
 import type { Chat, ChatHistoryEntry, HiredAgentCard } from "../../shared/types";
-import { currentUiLocale } from "../main";
+import { currentUiLocale } from "../ui-locale";
 
 interface ChatRow {
   id: string;
@@ -207,6 +207,19 @@ export function getOrCreateDivisionSession(
     kind: "division",
     parentChatId,
   });
+}
+
+/** 사이트 디자인 스튜디오의 프로젝트별 숨김 지속 세션(division).
+ *  같은 프로젝트의 생성/수정 턴이 한 대화로 이어져 빌려온 웹앱 디자인 마스터가
+ *  프로젝트의 디자인 언어/결정 맥락을 기억한다. */
+export function getOrCreateSiteSession(projectId: string): Chat {
+  const marker = `⟦site⟧${projectId}`;
+  const db = getDb();
+  const existing = db
+    .prepare("SELECT * FROM chats WHERE kind = 'division' AND title = ? LIMIT 1")
+    .get(marker) as ChatRow | undefined;
+  if (existing) return toChat(existing);
+  return createChat({ title: marker, kind: "division" });
 }
 
 /** 자동화별 숨김 지속 세션을 찾거나 만든다.

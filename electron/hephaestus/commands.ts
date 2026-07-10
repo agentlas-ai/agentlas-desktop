@@ -4,7 +4,7 @@
 // 그대로 따른다(프로그래matic JSON 명령만 사용; hep-build 같은 LLM-라우팅 텍스트 surface 는
 // 데스크탑 런타임 + 빌더 에이전트 프롬프트로 별도 구동한다 — builder.ts 참조).
 import { runHephaestus, type HephaestusResult, type HephaestusRunOptions } from "./engine";
-import { currentUiLocale } from "../main";
+import { currentUiLocale } from "../ui-locale";
 
 export type UploadVisibility = "private-link" | "marketplace";
 

@@ -17,7 +17,7 @@ import type {
 import { readEnvVar } from "../secrets/vault";
 import { mergeContinuityNegative } from "../../shared/oberon-sheets";
 import { composeTitledDelivery } from "./titlecards";
-import { currentUiLocale } from "../main";
+import { currentUiLocale } from "../ui-locale";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_MODEL = "veo-3.1-lite-generate-001";

@@ -198,7 +198,7 @@ async function main() {
     store.initStore();
     const db = store.getDb();
 
-    assert.equal(db.pragma("user_version", { simple: true }), 50, "v48 store must migrate through v50");
+    assert.equal(db.pragma("user_version", { simple: true }), 51, "v48 store must migrate through v51");
     const ceoFk = db
       .prepare("PRAGMA foreign_key_list(firms)")
       .all()

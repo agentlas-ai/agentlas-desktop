@@ -41,8 +41,18 @@ export function VersionChip() {
         return `${state.progress ?? 0}%`;
       case "downloaded":
         return "ready";
+      case "installing":
+        return "installing";
+      case "updated":
+        return "updated";
       case "available":
         return "available";
+      case "manual-required":
+        return state.canRetry ? "retry" : state.manualDownloadUrl ? "manual update" : "paused";
+      case "incompatible":
+        return state.manualDownloadUrl ? "manual update" : state.canRetry ? "retry" : "compatibility";
+      case "recovery-required":
+        return "recovery";
       case "error":
         return "check failed";
       case "not-available":
@@ -82,7 +92,10 @@ export function VersionChip() {
         <span
           style={{
             color:
-              state.status === "error"
+              state.status === "error" ||
+              state.status === "manual-required" ||
+              state.status === "incompatible" ||
+              state.status === "recovery-required"
                 ? "var(--red-deep)"
                 : state.status === "downloaded" || state.status === "available"
                   ? "var(--accent)"

@@ -99,11 +99,11 @@ const server = http.createServer((req, res) => {
         sendJson(res, { result: { bundles: [] } });
         return;
       }
-      if (method === "cargo.list_agents") {
+      if (method === "cargo.search_agents") {
         hits.mine += 1;
         sendJson(res, {
           result: {
-            agents: [
+            results: [
               {
                 slug: "published-cache-smoke",
                 name: "Published Cache Smoke",
@@ -112,7 +112,7 @@ const server = http.createServer((req, res) => {
                 taglineEn: "Published agent",
                 kind: "cloud-callable",
                 callable: true,
-                source: "hub-profile",
+                source: "cloud",
                 trustGrade: "A",
                 manifestUrl: "mock",
                 installCount: 0,
