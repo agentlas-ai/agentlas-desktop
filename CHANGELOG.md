@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.27 — 2026-07-10
+
+### Added
+
+- **Current CLI model choices.** Adds friendly labels for Claude Fable 5,
+  GPT-5.6 Sol/Terra/Luna previews, and Grok 4.5 when the corresponding runtime
+  makes those models available.
+
+### Fixed
+
+- **Model pickers follow the signed-in CLI.** A non-empty discovered model list
+  is now the source of truth; the built-in catalog supplies labels and tags, and
+  is used as a fallback only when discovery is unavailable. This prevents a
+  model such as Grok 4.5 from appearing before the installed CLI advertises it.
+- **Codex model selection survives runtime refresh.** The saved Codex model is
+  restored into runtime state and its choices remain available after detection.
+
 ## 0.7.22 — 2026-07-08
 
 ### Fixed

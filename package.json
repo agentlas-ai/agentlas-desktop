@@ -1,7 +1,7 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.7.26",
-  "description": "Agentlas Desktop \u2014 local Apps OS for AI-native tools and agent teams. BYOC: \uc0ac\uc6a9\uc790 Claude/ChatGPT/Gemini \uad6c\ub3c5 \uadf8\ub300\ub85c.",
+  "version": "0.7.27",
+  "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
   "main": "dist/electron/main.js",
@@ -87,7 +87,7 @@
     "smoke:oberon-motion": "npm run build:electron && electron scripts/smoke-oberon-motion-ad.cjs",
     "test:oberon-cinematic": "npm run build:electron && node scripts/test-oberon-cinematic.cjs",
     "typecheck": "tsc -p electron/tsconfig.json --noEmit && node -e \"require('fs').rmSync('renderer/.next',{recursive:true,force:true,maxRetries:5,retryDelay:100})\" && cd renderer && tsc --noEmit",
-    "parity:doctor": "bash -c '[ -f ../scripts/sync-runtime-doctor.sh ] && exec bash ../scripts/sync-runtime-doctor.sh; echo \"parity:doctor skipped (sibling scripts/ not present \u2014 CI checkout)\"'",
+    "parity:doctor": "bash -c '[ -f ../scripts/sync-runtime-doctor.sh ] && exec bash ../scripts/sync-runtime-doctor.sh; echo \"parity:doctor skipped (sibling scripts/ not present — CI checkout)\"'",
     "lint": "next lint --dir renderer",
     "clean": "node -e \"['dist','out','release','renderer/.next','renderer/out'].forEach(d=>require('fs').rmSync(d,{recursive:true,force:true}))\""
   },
