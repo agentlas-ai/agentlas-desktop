@@ -107,7 +107,8 @@ export async function fetchByokModels(backend: ByokBackend, now: number): Promis
  * 런타임의 모델 옵션 목록 (picker용).
  *   - byok: provider 실시간 조회 (fallback = 카탈로그)
  *   - ollama: 호출부가 넘긴 availableModels
- *   - CLI: 카탈로그(별칭은 항상 최신이라 동기화 불필요) + 호출부가 넘긴 동적분
+ *   - CLI: 설치된 CLI가 발견한 목록을 우선한다.
+ *     정적 카탈로그는 label/tag 보강과 탐색 실패 시 fallback으로만 사용한다.
  */
 export async function listRuntimeModels(
   kind: string,
@@ -121,7 +122,11 @@ export async function listRuntimeModels(
   if (kind === "ollama") {
     return (availableModels ?? []).map((m) => ({ id: m, label: m }));
   }
-  return cliModels(kind);
+  const catalog = cliModels(kind);
+  const catalogById = new Map(catalog.map((model) => [model.id, model] as const));
+  const discoveredIds = [...new Set(availableModels ?? [])];
+  if (discoveredIds.length === 0) return catalog;
+  return discoveredIds.map((id) => catalogById.get(id) ?? { id, label: id });
 }
 
 /** 디버그/테스트용 — 캐시 비우기. */

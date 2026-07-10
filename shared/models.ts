@@ -276,7 +276,7 @@ export const CONTEXT_MANAGED_BY: Record<RuntimeKind, "runtime" | "agentlas"> = {
 // 헤드리스(-p) 한계: Claude Code의 인터랙티브 메뉴에 있는 "빠른 모드"와 `model[1m]`(1M) 변형은
 // CLI 플래그가 없어 옮길 수 없다. 대신 claude는 `--effort`(작업량)를 지원한다.
 /** 보조 표기 키. 라벨은 하드코딩하지 말고 cliModelTagLabel()로 로케일 변환. */
-export type CliModelTag = "legacy";
+export type CliModelTag = "legacy" | "preview";
 
 export interface CliModelOption {
   /** CLI 모델 플래그에 전달하는 값. claude는 opus/sonnet/haiku 별칭 또는 풀ID(claude-opus-4-7 등) */
@@ -289,6 +289,7 @@ export interface CliModelOption {
 // tag 키 → 로케일별 표시 라벨. IPC로는 키만 넘기고, 렌더러에서 로케일에 맞춰 변환.
 const CLI_MODEL_TAG_LABELS: Record<CliModelTag, { ko: string; en: string }> = {
   legacy: { ko: "레거시", en: "Legacy" },
+  preview: { ko: "프리뷰", en: "Preview" },
 };
 
 /** CLI 모델의 보조 표기(tag)를 로케일 라벨로. tag 없으면 빈 문자열. */
@@ -303,6 +304,7 @@ export function cliModelTagLabel(tag: string | undefined, locale: string): strin
 export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
   // Claude Code — `claude --model`. 별칭(opus/sonnet/haiku)은 항상 최신, 레거시는 풀ID.
   "claude-code": [
+    { id: "claude-fable-5", label: "Claude Fable 5" },
     { id: "opus", label: "Opus 4.8" },
     { id: "sonnet", label: "Sonnet 4.6" },
     { id: "haiku", label: "Haiku 4.5" },
@@ -311,6 +313,10 @@ export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
   ],
   // Codex — `codex exec -m <model>`. 구독 기본 외 명시 모델.
   codex: [
+    // GPT-5.6은 Codex/API에서 제한적으로 제공되는 프리뷰다. 계정 권한은 Codex가 최종 확인한다.
+    { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", tag: "preview" },
+    { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", tag: "preview" },
+    { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", tag: "preview" },
     { id: "gpt-5.5-codex", label: "GPT-5.5 Codex" },
     { id: "gpt-5.5", label: "GPT-5.5" },
     { id: "gpt-5.1-codex", label: "GPT-5.1 Codex" },
@@ -324,6 +330,7 @@ export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
   ],
   // Grok CLI — `grok --model <id>` (GROK_MODEL). 정적 폴백 — detect가 `grok models`로 라이브 목록을 덮어쓴다.
   grok: [
+    { id: "grok-4.5", label: "Grok 4.5" },
     { id: "grok-4.3", label: "Grok 4.3" },
     { id: "grok-4.20-non-reasoning", label: "Grok 4.20" },
   ],

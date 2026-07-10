@@ -213,6 +213,9 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       source: cx.path,
       version: cx.version,
       active: false,
+      // Codex도 선택 모델을 저장·복원해야 --model이 다음 대화까지 유지된다.
+      model: cliModelOf("codex", active),
+      availableModels: cliModels("codex").map((m) => m.id),
     });
   }
   if (gm) {
