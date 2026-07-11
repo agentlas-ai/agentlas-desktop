@@ -781,7 +781,14 @@ function assertLocalTime(iso, expected) {
     const synced = getAutomation(graphEdit.id);
     assert.equal(synced.scheduleHuman, "daily-18:00", "trigger edit should sync legacy token");
     assert.deepEqual(synced.scheduleSpec, editedSpec, "trigger edit should sync schedule_json");
-    assert.equal(new Date(synced.nextRunAt).getHours(), 18, "next_run_at should follow edited trigger schedule");
+    // 스케줄에 명시된 tz(Asia/Seoul) 기준으로 검증한다 — 실행 호스트 TZ에 의존하는
+    // getHours()는 CI(UTC)에서 18→9로 어긋난다. 글로벌 사용자·CI 어느 TZ에서도 통과해야 하고,
+    // 이렇게 해야 next_run_at이 사용자가 지정한 tz대로 계산됐는지 실제로 검증된다.
+    const editedTzHour = Number(
+      new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Seoul", hour: "numeric", hour12: false })
+        .format(new Date(synced.nextRunAt)),
+    );
+    assert.equal(editedTzHour, 18, "next_run_at should follow edited trigger schedule (in the schedule's tz)");
     // 이벤트 트리거는 시계 승격 금지 — 그래프 저장이 next_run_at을 만들면 안 된다.
     const fsTrig = createAutomation({
       name: "FS Trigger Graph Save",

@@ -114,6 +114,11 @@ jobs:
       - name: Linux migration and updater continuity gates
         if: runner.os == 'Linux'
         run: |
+          # Hosted Linux runners need electron's SUID sandbox helper owned by root
+          # (mode 4755), otherwise the chromium child aborts with SIGTRAP before any
+          # test runs (FATAL:setuid_sandbox_host.cc). This is env setup, not a code fix.
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
           xvfb-run -a npm run test:v52-automation-run-recovery
           xvfb-run -a npm run test:v53-hub-bookmark-sync
           xvfb-run -a npm run test:updater-production
