@@ -141,12 +141,14 @@ jobs:
         run: |
           npm run test:automation-scheduler-guards
           npm run test:runtime-stdin-epipe
+          # Site Studio overlay is itself a Playwright test, so a clean runner
+          # needs Chromium before any product UI gate starts.
+          npx playwright install chromium
           npm run test:build-session-contracts
           npm run test:local-import
           npm run test:site-studio
           npm run test:chat-session-reset
           npm run test:trex-locale
-          npx playwright install chromium
           npm run test:browser-approval-gate
           npm run test:browser-approval-concurrency
           npm run test:browser-legacy-credential-scrub
