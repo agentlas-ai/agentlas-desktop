@@ -162,6 +162,12 @@ function saveActiveRuntime(status: RuntimeStatus | RuntimeSelection): void {
 export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
   if (process.env.AGENTLAS_DISABLE_RUNTIME_PROBES === "1") return [];
   if (force) {
+    // A normal Dashboard/Sidebar probe may already be running. Reusing it would
+    // make the explicit "Run checks" action stale even after cache invalidation.
+    // Let that generation settle, then clear both layers again and start (or
+    // join) the first post-request generation.
+    const previousFlight = detectInFlight;
+    if (previousFlight) await previousFlight.catch(() => []);
     clearDetectCache();
     clearCliVersionProbeCache();
   }
