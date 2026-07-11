@@ -6,6 +6,12 @@ const os = require("node:os");
 const path = require("node:path");
 const { app } = require("electron");
 
+// Headless Linux CI: this gate runs a mock HTTP server + Hub resolve, so electron
+// stays alive long enough for its GPU process to race the xvfb X server and abort
+// with XIO/D-Bus errors. The test does no rendering, so drop hardware acceleration
+// (must be called before the app is ready).
+app.disableHardwareAcceleration();
+
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mcp-auto-select-"));
 process.env.AGENTLAS_STORE_PATH = path.join(tempDir, "agentlas.sqlite");
 app.setPath("userData", path.join(tempDir, "user-data"));
