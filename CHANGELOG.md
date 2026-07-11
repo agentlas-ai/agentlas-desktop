@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.7.43 — 2026-07-12
+
+### Fixed
+
+- **Chat routing QA is locale-independent.** Stable mode, stop-state, gate, and
+  destination-page contracts now verify Find agent and cancellation flows in
+  Korean and English without relying on translated button text.
+
+## 0.7.42 — 2026-07-12
+
+### Fixed
+
+- **Chat routing QA matches clean-device inventory.** Keyboard-to-pointer
+  autocomplete selection is verified with the agents actually present, rather
+  than depending on an unrelated third local item.
+
+## 0.7.41 — 2026-07-12
+
+### Fixed
+
+- **Prompts retry QA waits for the destination document.** The retained-prompt
+  assertion now waits for the new chat execution context, removing a clean-mac
+  navigation race without weakening the product contract.
+
+## 0.7.40 — 2026-07-12
+
+### Fixed
+
+- **Cross-platform release gates follow Electron 43's install contract.** Linux
+  CI installs the lazy Electron platform binary before configuring the SUID
+  sandbox helper, and fails closed instead of bypassing Chromium's sandbox.
+- **Startup Studio UI QA is locale-independent.** The new-idea handoff is
+  verified on clean English CI runners as well as Korean dogfood machines.
+
+## 0.7.39 — 2026-07-11
+
+### Added
+
+- **Oberon opens as a production console, not a marketing hero.** Seven real
+  production gates, execution boundaries, saved local projects, and one clear
+  start action replace the decorative demo surface. T-rex gains source-safe
+  attachments, resilient AI content generation, and select-to-edit.
+- **Official xAI Grok CLI is available as a text runtime.** Agentlas uses the
+  official OAuth-capable CLI contract, keeps prompts out of process arguments,
+  and parses streaming output without exposing private thought events.
+
+### Fixed
+
+- **Dashboard LLM connections stay visible above the fold.** A stale collapsed
+  preference can no longer hide the connection and usage panel.
+- **Browser explanations reflow and scroll correctly.** Long structured
+  explanations remain readable in narrow windows, and the browser surface
+  accepts normal wheel scrolling.
+- **Draft and retry paths preserve user work.** Document Studio restores local
+  drafts, Prompt Store retains failed starts for retry, Settings isolates
+  partial provider failures, and Startup Studio receives the idea entered on
+  launch.
+- **Chat no longer waits on unrelated metadata.** A slow Hub, MCP, generated-App,
+  or Keychain/env read cannot leave a valid local agent chat disabled, and a
+  delayed agent switch cannot undo a newer auto-routing choice.
+- **Telegram and updater transitions are bounded and recoverable.** Telegram
+  requests have finite deadlines and binding creation compensates Keychain/DB
+  failures; accepted Windows updates relaunch the app explicitly.
+- **Grok media is fail-closed.** The installed official CLI does not expose a
+  verifiable image/video capability, so T-rex, Oberon, and multimodal settings
+  no longer advertise Grok Imagine as ready. Grok text chat remains available.
+- **Desktop and Terminal keep an explicit product boundary.** Documentation and
+  regression gates point to the independent Agentlas Terminal repository
+  instead of the removed Desktop CLI mirror.
+- **The packaged shell is back on a supported security line.** Electron moves
+  from the end-of-life 33 line to 43.1.0, the packaging toolchain moves to
+  26.15.6, the SQLite binding moves to its Node 24-compatible line, and PostCSS
+  is pinned above the current escaping advisory.
+
 ## 0.7.34 — 2026-07-11
 
 ### Added

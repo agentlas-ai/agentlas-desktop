@@ -6,15 +6,16 @@
 
 ## 1. The three product surfaces
 
-Agentlas runs the same *research architectures* in two places, with different hosts:
+Agentlas carries related *research architectures* across three product surfaces,
+with different hosts and responsibilities:
 
 | Surface | Host | What runs |
 |---|---|---|
-| **agentlas.cloud (web)** | Hosted | Builder and orchestration services that run server-side. |
+| **agentlas.cloud (web)** | Hosted | Hub discovery/bookmarks, private Agent Cloud storage, groups, and account control-plane state. It does not replace the local LLM runtime. |
 | **Agentlas Desktop** | The user's machine (BYOC) | The local GUI runtime: built-in control agents, memory, tools, automation, and user-visible apps. |
 | **Agentlas Terminal** | The user's machine (BYOC) | An independent npm product and repository (`agentlas-ai/agentlas-terminal`). It interoperates with Desktop data when available, but is not generated from or bundled under this repo. |
 
-Both consume the **same source-of-truth agent repos**:
+The local runtimes consume the **same source-of-truth agent repos**:
 
 - `agentlas-ai/Agentlas-OS` — public core and single-agent/team/package contract
 - `agent_project_pm_soul` — per-project continuity + memory (PM Soul)

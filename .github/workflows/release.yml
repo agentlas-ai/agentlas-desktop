@@ -50,7 +50,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      HEPHAESTUS_REF: v1.1.13
+      HEPHAESTUS_REF: v1.1.14
 
     steps:
       - uses: actions/checkout@v4
@@ -107,6 +107,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Dependency security audit
+        run: npm audit --audit-level=high
+
       - name: Typecheck
         if: runner.os == 'Linux'
         run: npm run typecheck
@@ -119,11 +122,18 @@ jobs:
           # provided". E2E mode uses an in-memory vault and skips keytar entirely.
           AGENTLAS_E2E: "1"
         run: |
-          # Hosted Linux runners need electron's SUID sandbox helper owned by root
-          # (mode 4755), otherwise the chromium child aborts with SIGTRAP before any
-          # test runs (FATAL:setuid_sandbox_host.cc). This is env setup, not a code fix.
-          sudo chown root:root node_modules/electron/dist/chrome-sandbox
-          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+          # Electron 43 downloads its platform binary lazily. Install it before
+          # locating the Linux SUID helper, otherwise the first test downloads an
+          # unconfigured helper and Chromium aborts with SIGTRAP.
+          node node_modules/electron/install.js
+          sandbox_path="$(find node_modules/electron -maxdepth 4 -name chrome-sandbox -print -quit)"
+          if [ -z "$sandbox_path" ]; then
+            echo "::error::Electron Linux binary installed without the required chrome-sandbox helper."
+            exit 1
+          fi
+          sudo chown root:root "$sandbox_path"
+          sudo chmod 4755 "$sandbox_path"
+          echo "Configured Electron SUID sandbox helper: $sandbox_path"
           # Run the electron gates inside a real X (xvfb) AND a session bus
           # (dbus-run-session). Without a session bus, electron reads
           # DBUS_SESSION_BUS_ADDRESS=disabled and aborts with

@@ -1,6 +1,12 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
+// electron-builder uses the macOS product version in Info.plist, while
+// electron-updater compares its feed value to os.release() (Darwin kernel
+// SemVer). macOS 12 Monterey corresponds to Darwin 21.
+const MACOS_MINIMUM_SYSTEM_VERSION = "12.0";
+const MAC_UPDATE_MINIMUM_SYSTEM_VERSION = "21.0.0";
+
 const FIELDS = [
   "minimumSourceAppVersion",
   "minimumRuntimeVersion",
@@ -44,6 +50,31 @@ function withoutCompatibilityBlock(source) {
   return lines.join("\n").replace(/\n*$/, "\n");
 }
 
+function withoutTopLevelField(source, field) {
+  const lines = source.replace(/\r\n/g, "\n").split("\n");
+  const fieldPrefix = `${field}:`;
+  for (let index = 0; index < lines.length; ) {
+    if (!lines[index].startsWith(fieldPrefix)) {
+      index += 1;
+      continue;
+    }
+    let end = index + 1;
+    while (end < lines.length && (lines[end].startsWith("  ") || lines[end].trim() === "")) end += 1;
+    lines.splice(index, end - index);
+  }
+  return lines.join("\n").replace(/\n*$/, "\n");
+}
+
+function isMacUpdateFeed(filePath) {
+  return /^latest-mac(?:-[0-9A-Za-z._-]+)?\.yml$/.test(path.basename(filePath));
+}
+
+function systemCompatibilityYaml(filePath) {
+  return isMacUpdateFeed(filePath)
+    ? `minimumSystemVersion: '${MAC_UPDATE_MINIMUM_SYSTEM_VERSION}'\n`
+    : "";
+}
+
 function compatibilityYaml(compatibility) {
   return [
     "agentlasCompatibility:",
@@ -59,14 +90,27 @@ function compatibilityYaml(compatibility) {
 function stampUpdateCompatibilityFile(filePath, packageJsonPath) {
   const compatibility = loadUpdateCompatibility(packageJsonPath);
   const source = fs.readFileSync(filePath, "utf8");
-  fs.writeFileSync(filePath, `${withoutCompatibilityBlock(source)}${compatibilityYaml(compatibility)}`, "utf8");
+  const withoutCompatibility = withoutCompatibilityBlock(source);
+  const normalized = isMacUpdateFeed(filePath)
+    ? withoutTopLevelField(withoutCompatibility, "minimumSystemVersion")
+    : withoutCompatibility;
+  fs.writeFileSync(
+    filePath,
+    `${normalized}${systemCompatibilityYaml(filePath)}${compatibilityYaml(compatibility)}`,
+    "utf8",
+  );
   return compatibility;
 }
 
 module.exports = {
   FIELDS,
+  MACOS_MINIMUM_SYSTEM_VERSION,
+  MAC_UPDATE_MINIMUM_SYSTEM_VERSION,
   compatibilityYaml,
+  isMacUpdateFeed,
   loadUpdateCompatibility,
   stampUpdateCompatibilityFile,
+  systemCompatibilityYaml,
   withoutCompatibilityBlock,
+  withoutTopLevelField,
 };

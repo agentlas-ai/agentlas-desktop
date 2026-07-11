@@ -219,7 +219,6 @@ export async function generateDeckContent(
   const viaRuntime = await generateViaActiveRuntime(prompt, locale);
   if (viaRuntime) return { ok: true, text: viaRuntime, engine: "agent" };
   // 최후: 활성 런타임/에이전트가 없을 때만 로컬 CLI(agy/codex) 직접 spawn(PATH 보강됨).
-
   const agy = resolveBin("agy", [path.join(os.homedir(), ".local/bin/agy"), "/opt/homebrew/bin/agy", "/usr/local/bin/agy"]);
   const codex = resolveBin("codex", [path.join(os.homedir(), ".local/bin/codex"), "/opt/homebrew/bin/codex", "/usr/local/bin/codex"]);
 

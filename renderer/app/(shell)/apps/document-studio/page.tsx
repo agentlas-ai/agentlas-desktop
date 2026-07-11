@@ -21,6 +21,7 @@ import {
   saveDocumentDraft,
   saveReferences,
   saveStyle,
+  type DocumentDraftSaveResult,
   type DocumentStudioDraftInput,
 } from "@/lib/document-store";
 import {
@@ -78,6 +79,8 @@ export default function DocumentStudioPage() {
   const [aiAvailable, setAiAvailable] = useState<boolean | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [draftHydrated, setDraftHydrated] = useState(false);
+  const [draftSaving, setDraftSaving] = useState(false);
+  const [draftSaveResult, setDraftSaveResult] = useState<DocumentDraftSaveResult | null>(null);
 
   const [references, setReferences] = useState<Reference[]>([]);
   const [citationStyle, setCitationStyle] = useState<CitationStyle>("APA");
@@ -116,6 +119,19 @@ export default function DocumentStudioPage() {
         figureSrc: restored.figureSrc,
         figureCaption: restored.figureCaption,
       };
+      setDraftSaveResult(
+        restored.figurePersistence === "omitted-size" || restored.figurePersistence === "omitted-quota"
+          ? {
+              status: "saved-without-figure",
+              figurePersistence: restored.figurePersistence,
+              updatedAt: restored.updatedAt,
+            }
+          : {
+              status: "saved",
+              figurePersistence: restored.figurePersistence,
+              updatedAt: restored.updatedAt,
+            },
+      );
     }
     draftHydratedRef.current = true;
     setDraftHydrated(true);
@@ -133,7 +149,11 @@ export default function DocumentStudioPage() {
   // the final keystroke that is still inside this debounce window.
   useEffect(() => {
     if (!draftHydrated) return;
-    const timer = window.setTimeout(() => saveDocumentDraft(draftSnapshotRef.current), 250);
+    setDraftSaving(true);
+    const timer = window.setTimeout(() => {
+      setDraftSaveResult(saveDocumentDraft(draftSnapshotRef.current));
+      setDraftSaving(false);
+    }, 250);
     return () => window.clearTimeout(timer);
   }, [draftHydrated, title, documentText, figureSrc, figureCaption]);
 
@@ -163,6 +183,7 @@ export default function DocumentStudioPage() {
   const wordCount = documentText.trim() ? documentText.trim().split(/\s+/).filter(Boolean).length : 0;
   const readingMin = Math.max(1, Math.round(wordCount / 200));
   const sectionCount = (documentText.match(/^#{1,3}\s+/gm) || []).length;
+  const draftPersistence = draftPersistenceCopy(draftSaving, draftSaveResult, locale);
 
   function setError(text: string) {
     setStatusMsg({ kind: "error", text });
@@ -186,7 +207,7 @@ export default function DocumentStudioPage() {
       figureSrc: "",
       figureCaption: "",
     };
-    clearDocumentDraft();
+    const clearResult = clearDocumentDraft();
     draftSnapshotRef.current = emptyDraft;
     setTitle("");
     setDocumentText("");
@@ -198,6 +219,8 @@ export default function DocumentStudioPage() {
     setGenEngine(null);
     setStatusMsg(null);
     setExportStatus(null);
+    setDraftSaving(false);
+    setDraftSaveResult(clearResult.status === "failed" ? clearResult : null);
     selection.current = { start: 0, end: 0 };
   }
 
@@ -368,7 +391,12 @@ export default function DocumentStudioPage() {
   }
 
   return (
-    <div style={shell}>
+    <div
+      style={shell}
+      data-testid="document-studio-root"
+      data-draft-hydrated={draftHydrated ? "true" : "false"}
+      aria-busy={!draftHydrated}
+    >
       <style>{RESPONSIVE_CSS}</style>
       <header className="titlebar-drag document-studio-toolbar" style={topToolbar}>
         <Link href="/apps" className="titlebar-nodrag" style={backLink}>
@@ -525,6 +553,27 @@ export default function DocumentStudioPage() {
               <span>{sectionCount} {locale === "en" ? "sections" : "섹션"}</span>
               <span>{citationStyle}</span>
               {generatedAt ? <span>{genEngine ? `${genEngine} · ` : ""}{generatedAt}</span> : null}
+              {draftPersistence ? (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  data-testid="document-draft-save-status"
+                  data-state={draftPersistence.state}
+                  style={{
+                    ...draftPersistenceStatus,
+                    color:
+                      draftPersistence.state === "failed"
+                        ? "#c0392b"
+                        : draftPersistence.state === "degraded"
+                          ? "#9a6700"
+                          : draftPersistence.state === "saved"
+                            ? "var(--green-deep)"
+                            : "var(--muted-deep)",
+                  }}
+                >
+                  {draftPersistence.text}
+                </span>
+              ) : null}
             </div>
 
             {/* AI 편집 툴바 — 선택 텍스트(없으면 전체)를 개정 */}
@@ -705,6 +754,47 @@ function labelForMode(mode: Mode, locale: "ko" | "en") {
   return mode === "paper" ? "논문" : mode === "brief" ? "브리프" : "리포트";
 }
 
+function draftPersistenceCopy(
+  saving: boolean,
+  result: DocumentDraftSaveResult | null,
+  locale: "ko" | "en",
+): { state: "saving" | "saved" | "degraded" | "failed"; text: string } | null {
+  if (saving) {
+    return { state: "saving", text: locale === "en" ? "Saving locally…" : "로컬 저장 중…" };
+  }
+  if (!result || result.status === "cleared") return null;
+  if (result.status === "failed") {
+    return {
+      state: "failed",
+      text:
+        locale === "en"
+          ? "Local save failed · Current changes may not survive a restart"
+          : "로컬 저장 실패 · 현재 변경은 재시작 후 복원되지 않을 수 있습니다",
+    };
+  }
+  if (result.status === "saved-without-figure") {
+    const sizeReason = result.figurePersistence === "omitted-size";
+    return {
+      state: "degraded",
+      text:
+        locale === "en"
+          ? `Title and text saved · Figure ${sizeReason ? "exceeded the local size limit" : "could not fit in local storage"} and will not be restored after restart`
+          : `본문·제목 저장됨 · 도표 이미지가 ${sizeReason ? "로컬 크기 한도를 넘어" : "로컬 저장 공간에 들어가지 않아"} 재시작 후 복원되지 않습니다`,
+    };
+  }
+  return {
+    state: "saved",
+    text:
+      locale === "en"
+        ? result.figurePersistence === "stored"
+          ? "Draft and figure saved locally"
+          : "Draft saved locally"
+        : result.figurePersistence === "stored"
+          ? "초안과 도표 로컬 저장됨"
+          : "초안 로컬 저장됨",
+  };
+}
+
 function bibTitleFromMarkdown(md: string): string {
   const m = md.match(/^##\s+(.*)$/m);
   return m ? m[1] : "References";
@@ -833,6 +923,7 @@ const editorStage: CSSProperties = { minWidth: 0, minHeight: 0, overflowY: "auto
 const paper: CSSProperties = { width: "min(760px, 100%)", minHeight: "calc(100vh - 220px)", margin: "0 auto", background: "var(--paper)", border: "1px solid var(--paper-edge)", boxShadow: "0 20px 70px rgba(15,23,42,.08)", padding: "48px 60px" };
 const titleInput: CSSProperties = { width: "100%", border: "none", outline: "none", background: "transparent", resize: "none", overflow: "hidden", color: "var(--ink)", fontFamily: "var(--font-head)", fontSize: 26, lineHeight: 1.2, fontWeight: 900 };
 const docMeta: CSSProperties = { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10, color: "var(--muted-deep)", fontSize: 11.5, marginTop: 8 };
+const draftPersistenceStatus: CSSProperties = { fontWeight: 800, lineHeight: 1.4 };
 const editToolbar: CSSProperties = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginTop: 16, marginBottom: 8, paddingBottom: 12, borderBottom: "1px solid var(--paper-edge)" };
 const editToolbarLabel: CSSProperties = { color: "#7c5800", background: "#fff4bf", borderRadius: 6, padding: "3px 7px", fontSize: 10.5, fontWeight: 900 };
 const editToolbarBtn: CSSProperties = { border: "1px solid var(--paper-edge)", background: "#fff", color: "var(--ink-soft)", borderRadius: 999, padding: "5px 11px", fontSize: 12, fontWeight: 800, cursor: "pointer" };

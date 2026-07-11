@@ -64,6 +64,7 @@ writeFileSync(
     "Public macOS release.",
     "",
     "- Apple silicon and Intel DMGs are Developer ID signed, notarized, and Gatekeeper verified.",
+    "- Requires macOS 12 Monterey or newer. macOS 11 Big Sur stays on the last compatible release and does not receive this automatic update.",
     "- Installs approved Agentlas firms from agentlas.cloud.",
     "- Runs with user-selected BYOK APIs or local CLI runtimes.",
     "",

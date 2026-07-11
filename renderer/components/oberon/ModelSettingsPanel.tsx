@@ -31,8 +31,7 @@ const RUNTIME_LABEL: Record<string, string> = {
   grok: "Grok CLI",
 };
 const CLI_RUNTIMES = new Set(["claude-code", "codex", "gemini", "grok"]);
-// grok-cli-video(구독 키리스)를 포함 — Oberon 영상 엔진 선택지로 노출한다.
-const OBERON_VIDEO_PROVIDERS = new Set(["grok-cli-video", "google-veo", "kling-video", "seedance-video", "runway-video", "luma-video"]);
+const OBERON_VIDEO_PROVIDERS = new Set(["google-veo", "kling-video", "seedance-video", "runway-video", "luma-video"]);
 
 export function ModelSettingsPanel({
   value,

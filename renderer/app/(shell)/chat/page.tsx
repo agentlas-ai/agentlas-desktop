@@ -1353,29 +1353,45 @@ function ChatPage() {
       setChat(c);
       applyHiredRoster(c.hiredAgents ?? [], true);
       setTitleDraft(c.title);
-      const [agents, history, projectsAll, firmsAll, envVars, plugins, generatedApps, bookmarks] = await Promise.all([
-        api.team.list(),
-        api.invoke.history(chatId),
-        api.projects.list(),
-        api.firms.list(),
-        api.env.list(),
-        api.mcpTools.listInstalled(),
-        api.appFactory.listApps(chatId).catch(() => [] as AppFactoryAppRecord[]),
-        api.marketplace.bookmarks().catch(() => null as HubAgentBookmark[] | null),
-      ]);
+      // The local agent roster is the only metadata that gates composing a
+      // message. Hub, MCP, project, and generated-App reads are independent:
+      // one slow optional domain must never leave a valid local chat disabled.
+      const agents = await api.team.list();
       if (cancelled) return;
       if (agentRosterGenerationRef.current === rosterGeneration) {
         setAllAgents(agents);
-        setAllFirms(firmsAll);
       }
-      if (bookmarks && hubBookmarkGenerationRef.current === bookmarkGeneration) {
-        setHubBookmarks(bookmarks);
-      }
-      setAllProjects(projectsAll);
-      setInstalledPlugins(plugins);
-      setAllGeneratedApps(generatedApps);
-      // @ 멘션 popover에는 실제로 값이 저장된 키만 노출 — 비어있는 키를 멘션하면 invocation에서 빈 값이 주입돼 혼란.
-      setAllEnvKeys(envVars.filter((e) => e.hasValue).map((e) => e.key));
+      setAgent(agents.find((a) => a.id === c.agentId) ?? null);
+
+      void api.firms.list().then((firms) => {
+        if (!cancelled && agentRosterGenerationRef.current === rosterGeneration) setAllFirms(firms);
+      }).catch(() => undefined);
+      void api.projects.list().then((projects) => {
+        if (!cancelled) setAllProjects(projects);
+      }).catch(() => undefined);
+      void api.env.list().then((envVars) => {
+        if (!cancelled) {
+          // @ 멘션에는 실제 값이 있는 키만 노출한다.
+          setAllEnvKeys(envVars.filter((entry) => entry.hasValue).map((entry) => entry.key));
+        }
+      }).catch(() => undefined);
+      void api.mcpTools.listInstalled().then((plugins) => {
+        if (!cancelled) setInstalledPlugins(plugins);
+      }).catch(() => undefined);
+      void api.appFactory.listApps(chatId).then((generatedApps) => {
+        if (!cancelled) setAllGeneratedApps(generatedApps);
+      }).catch(() => undefined);
+      void api.marketplace.bookmarks().then((bookmarks) => {
+        if (!cancelled && hubBookmarkGenerationRef.current === bookmarkGeneration) setHubBookmarks(bookmarks);
+      }).catch(() => undefined);
+      void api.invoke.history(chatId).then((history) => {
+        if (cancelled) return;
+        const historyMessages: StreamMessage[] = restoreAnsweredQuestions(history.map(historyEntryToStreamMessage));
+        setMessages((current) => {
+          const hasLiveDraft = current.some((msg) => msg.busy || msg.streaming);
+          return hasLiveDraft ? current : historyMessages;
+        });
+      }).catch(() => undefined);
       // CLI 슬래시 명령 스캔 (매 진입 시 최신) — 느려도 채팅 표시를 막지 않게 후속 로드.
       void api.runtime.listCommands().then((cmds) => {
         if (!cancelled) setCliCommands(cmds);
@@ -1384,7 +1400,6 @@ function ChatPage() {
       void api.runtime.detect().then((list) => {
         if (!cancelled) setActiveRuntime(list.find((r) => r.active) ?? null);
       });
-      setAgent(agents.find((a) => a.id === c.agentId) ?? null);
       if (c.agentGroupId) {
         void api.agentGroups.getResolved(c.agentGroupId).then((group) => {
           if (!cancelled) setAgentGroup(group);
@@ -1394,9 +1409,9 @@ function ChatPage() {
       }
       // 패널 노출 결정: 사용자가 명시적으로 접고/편 선호값이 있으면 그것을 우선,
       // 없으면 working_folder가 저장돼 있을 때만 자동 노출.
-      const savedFolder = await api.workspace.get(chatId);
-      const rightPanelPreference = readRightPanelPreference();
-      if (!cancelled) {
+      void api.workspace.get(chatId).then((savedFolder) => {
+        if (cancelled) return;
+        const rightPanelPreference = readRightPanelPreference();
         if (rightPanelPreference?.open) {
           setRightPanelTab(rightPanelPreference.tab);
           setRightPanelOpen(true);
@@ -1408,14 +1423,16 @@ function ChatPage() {
         }
         // ContinuityReceipt — 복원된 작업 폴더가 있을 때만 배너를 띄운다(없으면 null → 렌더 안 함).
         setRestoredFolder(savedFolder ?? null);
-      }
+      }).catch(() => undefined);
       if (c.projectId) {
-        const p = await api.projects.get(c.projectId);
-        if (!cancelled) setProject(p);
+        void api.projects.get(c.projectId).then((projectRecord) => {
+          if (!cancelled) setProject(projectRecord);
+        }).catch(() => undefined);
       }
       if (c.firmId) {
-        const f = await api.firms.get(c.firmId);
-        if (!cancelled) setFirm(f);
+        void api.firms.get(c.firmId).then((firmRecord) => {
+          if (!cancelled) setFirm(firmRecord);
+        }).catch(() => undefined);
         // 네트워크 패널 명단용 — 정규화된 3-tier 조직 (리졸버 결과 또는 orgChart 파생)
         void api.firms.getResolvedOrg(c.firmId).then((o) => {
           if (!cancelled) setResolvedOrg(o);
@@ -1424,11 +1441,6 @@ function ChatPage() {
         setFirm(null);
         setResolvedOrg(null);
       }
-      const historyMessages: StreamMessage[] = restoreAnsweredQuestions(history.map(historyEntryToStreamMessage));
-      setMessages((current) => {
-        const hasLiveDraft = current.some((msg) => msg.busy || msg.streaming);
-        return hasLiveDraft ? current : historyMessages;
-      });
       // 진행 중 실행 재접속 — 이 채팅이 백그라운드로 돌고 있으면(다른 채팅 갔다 옴) 스트림·정지버튼 복구.
       // 버퍼된 이벤트를 리플레이해 진행 중 버블을 재구성하고, runId 채널을 구독해 이후 스트림을 받는다.
       const attached = await api.invoke.attach(chatId);
@@ -1465,7 +1477,15 @@ function ChatPage() {
         for (const ev of attached.events) consumeEventRef.current(ev, placeholderId, lastStatusRef);
         subscribeRun(attached.runId, placeholderId, lastStatusRef);
       }
-    })();
+    })().catch((error) => {
+      if (cancelled) return;
+      console.error("[chat] critical metadata load failed", error);
+      setSessionNotice(
+        locale === "ko"
+          ? "로컬 에이전트 목록을 불러오지 못했습니다. 새로고침 후 다시 시도하세요."
+          : "The local agent roster could not be loaded. Refresh and try again.",
+      );
+    });
     return () => {
       cancelled = true;
     };

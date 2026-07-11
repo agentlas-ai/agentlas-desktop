@@ -31,9 +31,19 @@ assert.equal(parseSemVer("1.0.0-01"), null);
 assert.equal(parseSemVer("01.0.0"), null);
 assert.equal(compareSemVer("not-a-version", "1.0.0"), null);
 
-const updater = fs.readFileSync(path.join(__dirname, "../electron/updater.ts"), "utf8");
-assert.match(updater, /compareSemVer\(version, app\.getVersion\(\)\)/);
-assert.match(updater, /parseSemVer\(candidate\)/);
-assert.doesNotMatch(updater, /function versionTuple/);
+const updaterAdapter = fs.readFileSync(path.join(__dirname, "../electron/updater.ts"), "utf8");
+const updaterController = fs.readFileSync(path.join(__dirname, "../electron/updater/controller.ts"), "utf8");
+assert.match(
+  updaterAdapter,
+  /currentVersion:\s*\(\)\s*=>\s*app\.getVersion\(\)/,
+  "the Electron adapter must supply the installed app version to the updater controller",
+);
+assert.match(
+  updaterController,
+  /compareSemVer\(version,\s*this\.deps\.currentVersion\(\)\)/,
+  "the updater controller must use SemVer precedence when deciding whether a release is newer",
+);
+assert.match(updaterController, /parseSemVer\(minimumSourceAppVersion\)/);
+assert.doesNotMatch(updaterController, /function versionTuple/);
 
 console.log("semver-precedence: PASS");

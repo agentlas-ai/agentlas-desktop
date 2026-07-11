@@ -78,6 +78,7 @@ async function main() {
 
     const url = `${baseUrl}/apps/document-studio.html`;
     await page.goto(url, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-testid="document-studio-root"][data-draft-hydrated="true"]').waitFor();
     const title = page.getByLabel(/Document title|문서 제목/);
     const body = page.getByLabel(/Document editor|문서 편집기/);
     const caption = page.getByLabel(/Figure note|도표 메모/);
@@ -94,6 +95,7 @@ async function main() {
     // Route away and back in the same renderer storage scope.
     await page.goto(`${baseUrl}/apps.html`, { waitUntil: "domcontentloaded" });
     await page.goto(url, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-testid="document-studio-root"][data-draft-hydrated="true"]').waitFor();
     assert.equal(await title.inputValue(), "영속되는 문서 제목");
     assert.match(await body.inputValue(), /화면을 옮겨도 유지/);
     assert.equal(await caption.inputValue(), "로컬과 클라우드 사이의 문서 흐름");
@@ -104,6 +106,7 @@ async function main() {
     page = await context.newPage();
     watch(page);
     await page.goto(url, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-testid="document-studio-root"][data-draft-hydrated="true"]').waitFor();
     assert.equal(await page.getByLabel(/Document title|문서 제목/).inputValue(), "영속되는 문서 제목");
     assert.match(await page.getByLabel(/Document editor|문서 편집기/).inputValue(), /탐색 중인 본문/);
     assert.equal(await page.getByLabel(/Figure note|도표 메모/).inputValue(), "로컬과 클라우드 사이의 문서 흐름");
@@ -124,7 +127,98 @@ async function main() {
       "new document must clear the generated chart",
     );
     await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator('[data-testid="document-studio-root"][data-draft-hydrated="true"]').waitFor();
     assert.equal(await page.getByLabel(/Document title|문서 제목/).inputValue(), "", "reset must survive restart");
+
+    // A generated 1536x1024 data URL above the deterministic storage bound
+    // must never compete with the title/body for localStorage quota.
+    await page.evaluate(() => {
+      const padding = "x".repeat(1_510_000);
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1536" height="1024"><rect width="1536" height="1024" fill="#108334"/><desc>${padding}</desc></svg>`;
+      window.agentlas.trex.generateImage = async () => ({
+        ok: true,
+        src: `data:image/svg+xml,${encodeURIComponent(svg)}`,
+        engine: "qa-oversized-image",
+      });
+    });
+    await page.getByLabel(/Document title|문서 제목/).fill("큰 도표가 있어도 저장되는 제목");
+    await page.getByLabel(/Document editor|문서 편집기/).fill("# 보존 본문\n\n도표보다 이 본문이 먼저 복원되어야 한다.");
+    await page.getByLabel(/Figure note|도표 메모/).fill("1536x1024 대형 도표");
+    await page.getByTitle(/Generate figure image from the note|메모로 도표 이미지 생성/).click();
+    await page.locator('img[alt="1536x1024 대형 도표"]').waitFor({ state: "attached" });
+    const oversizedWarning = page.getByTestId("document-draft-save-status");
+    await page.locator('[data-testid="document-draft-save-status"][data-state="degraded"]').waitFor();
+    assert.match(await oversizedWarning.textContent(), /본문·제목 저장됨|Title and text saved/);
+    assert.match(await oversizedWarning.textContent(), /재시작 후 복원되지 않습니다|will not be restored after restart/);
+    const boundedStored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key)), DRAFT_KEY);
+    assert.equal(boundedStored.title, "큰 도표가 있어도 저장되는 제목");
+    assert.match(boundedStored.body, /도표보다 이 본문이 먼저/);
+    assert.equal(boundedStored.figureCaption, "1536x1024 대형 도표");
+    assert.equal(boundedStored.figureSrc, "", "oversized figure must be omitted from the durable record");
+    assert.equal(boundedStored.figurePersistence, "omitted-size");
+
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator('[data-testid="document-studio-root"][data-draft-hydrated="true"]').waitFor();
+    assert.equal(await page.getByLabel(/Document title|문서 제목/).inputValue(), "큰 도표가 있어도 저장되는 제목");
+    assert.match(await page.getByLabel(/Document editor|문서 편집기/).inputValue(), /도표보다 이 본문이 먼저 복원/);
+    assert.equal(await page.getByLabel(/Figure note|도표 메모/).inputValue(), "1536x1024 대형 도표");
+    assert.equal(await page.locator('img[alt="1536x1024 대형 도표"]').count(), 0);
+    await page.locator('[data-testid="document-draft-save-status"][data-state="degraded"]').waitFor();
+    assert.match(
+      await page.getByTestId("document-draft-save-status").textContent(),
+      /재시작 후 복원되지 않습니다|will not be restored after restart/,
+      "the persisted omission warning must survive a restart",
+    );
+
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByTestId("document-studio-new-document").click();
+    await page.waitForFunction((key) => localStorage.getItem(key) === null, DRAFT_KEY);
+
+    // Exercise the real exception path separately: force the first record with
+    // a valid, under-bound figure to throw QuotaExceededError. The bounded
+    // retry must persist title/body/caption and a durable quota warning.
+    await page.evaluate((key) => {
+      const nativeSetItem = Storage.prototype.setItem;
+      Storage.prototype.setItem = function quotaFixture(storageKey, value) {
+        if (storageKey === key) {
+          const parsed = JSON.parse(String(value));
+          if (parsed?.figureSrc) {
+            throw new DOMException("QA localStorage quota", "QuotaExceededError");
+          }
+        }
+        return nativeSetItem.call(this, storageKey, value);
+      };
+      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="1536" height="1024"><rect width="1536" height="1024" fill="#184b36"/></svg>';
+      window.agentlas.trex.generateImage = async () => ({
+        ok: true,
+        src: `data:image/svg+xml,${encodeURIComponent(svg)}`,
+        engine: "qa-quota-image",
+      });
+    }, DRAFT_KEY);
+    await page.getByLabel(/Document title|문서 제목/).fill("quota 뒤에도 남는 제목");
+    await page.getByLabel(/Document editor|문서 편집기/).fill("# quota 본문\n\n이미지 저장 실패가 본문을 지우면 안 된다.");
+    await page.getByLabel(/Figure note|도표 메모/).fill("quota fallback 도표");
+    await page.getByTitle(/Generate figure image from the note|메모로 도표 이미지 생성/).click();
+    await page.locator('[data-testid="document-draft-save-status"][data-state="degraded"]').waitFor();
+    const quotaStored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key)), DRAFT_KEY);
+    assert.equal(quotaStored.title, "quota 뒤에도 남는 제목");
+    assert.match(quotaStored.body, /본문을 지우면 안 된다/);
+    assert.equal(quotaStored.figureCaption, "quota fallback 도표");
+    assert.equal(quotaStored.figureSrc, "");
+    assert.equal(quotaStored.figurePersistence, "omitted-quota");
+
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator('[data-testid="document-studio-root"][data-draft-hydrated="true"]').waitFor();
+    assert.equal(await page.getByLabel(/Document title|문서 제목/).inputValue(), "quota 뒤에도 남는 제목");
+    assert.match(await page.getByLabel(/Document editor|문서 편집기/).inputValue(), /이미지 저장 실패가 본문을 지우면 안 된다/);
+    assert.equal(await page.getByLabel(/Figure note|도표 메모/).inputValue(), "quota fallback 도표");
+    const restoredQuotaWarning = page.getByTestId("document-draft-save-status");
+    await page.locator('[data-testid="document-draft-save-status"][data-state="degraded"]').waitFor();
+    assert.match(await restoredQuotaWarning.textContent(), /저장 공간에 들어가지 않아|could not fit in local storage/);
+
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByTestId("document-studio-new-document").click();
+    await page.waitForFunction((key) => localStorage.getItem(key) === null, DRAFT_KEY);
     assert.deepEqual(errors, [], `renderer errors: ${errors.join("\n")}`);
     await context.close();
     console.log("test-document-studio-draft-persistence: PASS");

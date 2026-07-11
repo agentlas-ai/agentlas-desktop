@@ -314,8 +314,20 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dragDepthRef = useRef(0);
   const lastActiveAgentIdRef = useRef<string | null | undefined>(undefined);
+  const expectedAgentChangesRef = useRef<Map<string, number>>(new Map());
+  const expectedAgentChangeTokenRef = useRef(0);
   const autocompleteSignatureRef = useRef<string>("");
   const activeChatIdRef = useRef<string | null>(activeChatId);
+
+  function expectAgentChangeWithoutReset(agentId: string) {
+    const token = ++expectedAgentChangeTokenRef.current;
+    expectedAgentChangesRef.current.set(agentId, token);
+    window.setTimeout(() => {
+      if (expectedAgentChangesRef.current.get(agentId) === token) {
+        expectedAgentChangesRef.current.delete(agentId);
+      }
+    }, 10_000);
+  }
 
   useEffect(() => {
     activeChatIdRef.current = activeChatId;
@@ -344,6 +356,7 @@ export function ChatInput({
     setTrigger(null);
     setAttachmentError(null);
     setContextMenuOpen(false);
+    expectedAgentChangesRef.current.clear();
     dragDepthRef.current = 0;
     setDragActive(false);
   }, [activeChatId]);
@@ -474,6 +487,11 @@ export function ChatInput({
     const previous = lastActiveAgentIdRef.current;
     lastActiveAgentIdRef.current = activeAgentId;
     if (!previous || !activeAgentId || previous === activeAgentId) return;
+    if (expectedAgentChangesRef.current.has(activeAgentId)) {
+      expectedAgentChangesRef.current.delete(activeAgentId);
+      return;
+    }
+    expectedAgentChangesRef.current.clear();
     setGateSheet(null);
     setHepToggles((prev) => {
       if (!prev.has("recommend")) return prev;
@@ -516,6 +534,7 @@ export function ChatInput({
           next.delete("recommend");
           return next;
         });
+        expectAgentChangeWithoutReset(opt.switchAgentId);
         onCallAgent(opt.switchAgentId);
         setTimeout(() => textareaRef.current?.focus(), 0);
         return;
@@ -603,6 +622,7 @@ export function ChatInput({
       // 상황에 맞으면 여러 에이전트를 한 번에 고용(네트워크 TF).
       onRecommendExecute?.({ kind: "network", agents: hubSlugs, routerAgent }, text, opts);
     } else {
+      expectAgentChangeWithoutReset(top.id);
       onRecommendExecute?.({ kind: "agent", agentId: top.id, isFirm: top.isFirm, routerAgent }, text, opts);
     }
     finishComposerAfterSend();
@@ -888,6 +908,7 @@ export function ChatInput({
               .map((id) => id.slice("hub:".length))
               .filter(Boolean);
             for (const id of [...selectedAgentIds].filter((id) => !id.startsWith("hub:"))) {
+              expectAgentChangeWithoutReset(id);
               onCallAgent?.(id);
             }
             if (hubSlugs.length > 0) onCallHubAgents?.(hubSlugs);
@@ -1182,6 +1203,8 @@ export function ChatInput({
         {/* 텍스트 영역 */}
         <textarea
           ref={textareaRef}
+          data-chat-input="true"
+          aria-label={locale === "ko" ? "채팅 입력" : "Chat message"}
           value={input}
           onChange={onInputChange}
           onKeyDown={(e) => {
@@ -1320,6 +1343,7 @@ export function ChatInput({
                     key={tg.id}
                     type="button"
                     className="chat-input-hep-chip active"
+                    data-hep-toggle-id={tg.id}
                     onClick={() => {
                       setHepToggles((prev) => {
                         const next = new Set(prev);
@@ -2384,6 +2408,7 @@ function PlusMenu({
       {HEP_TOGGLES.map((tg) => (
         <ToggleRow
           key={tg.id}
+          hepToggleId={tg.id}
           icon={
             <span
               style={{
@@ -2691,16 +2716,20 @@ function ToggleRow({
   subtitle,
   on,
   onChange,
+  hepToggleId,
 }: {
   icon: React.ReactNode;
   title: string;
   subtitle?: string;
   on: boolean;
   onChange: (v: boolean) => void;
+  /** Locale-independent hook for Hephaestus mode controls and release QA. */
+  hepToggleId?: HepToggleId;
 }) {
   return (
     <button
       onClick={() => onChange(!on)}
+      data-hep-toggle-id={hepToggleId}
       style={{
         display: "flex",
         width: "100%",

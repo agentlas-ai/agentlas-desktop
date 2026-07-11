@@ -10,7 +10,11 @@ const root = path.resolve(__dirname, "..");
 const pkg = require(path.join(root, "package.json"));
 const manifest = require(path.join(root, "Hephaestus", "manifest.json"));
 const { parseUpdaterCompatibility } = require("../dist/electron/updater/controller.js");
-const { stampUpdateCompatibilityFile } = require("../build-resources/update-compatibility.cjs");
+const {
+  MACOS_MINIMUM_SYSTEM_VERSION,
+  MAC_UPDATE_MINIMUM_SYSTEM_VERSION,
+  stampUpdateCompatibilityFile,
+} = require("../build-resources/update-compatibility.cjs");
 
 const compatibility = pkg.agentlasUpdateCompatibility;
 assert.deepEqual(parseUpdaterCompatibility(compatibility), compatibility, "runtime parser must accept the release manifest exactly");
@@ -25,15 +29,27 @@ assert.ok(schemaMatch, "desktop database schema constant must remain discoverabl
 assert.equal(Number(schemaMatch[1]), compatibility.targetSchemaVersion, "release target schema must match the app migration target");
 
 for (const configName of ["electron-builder.yml", "electron-builder.mac-stable.yml"]) {
-  const config = fs.readFileSync(path.join(root, configName), "utf8");
+  const configSource = fs.readFileSync(path.join(root, configName), "utf8");
   assert.doesNotMatch(
-    config,
+    configSource,
     /afterAllArtifactBuild/,
     `${configName} must not rely on afterAllArtifactBuild because latest*.yml is written later`,
+  );
+  const config = yaml.load(configSource);
+  assert.equal(
+    config.mac.minimumSystemVersion,
+    MACOS_MINIMUM_SYSTEM_VERSION,
+    `${configName} must encode Electron's macOS 12 runtime floor in Info.plist`,
   );
 }
 const crossPlatformWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release.yml"), "utf8");
 const signedMacWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release-signed-mac.yml"), "utf8");
+const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+const publishMacSource = fs.readFileSync(path.join(root, "scripts", "publish-mac-release.mjs"), "utf8");
+assert.match(readme, /macOS 12 Monterey or newer/);
+assert.match(readme, /macOS 11 Big Sur:[\s\S]*?last compatible Agentlas release[\s\S]*?excluded/);
+assert.match(publishMacSource, /Requires macOS 12 Monterey or newer/);
+assert.match(publishMacSource, /macOS 11 Big Sur stays on the last compatible release/);
 
 function parsedWorkflow(source, name) {
   const parsed = yaml.load(source);
@@ -89,6 +105,31 @@ for (const [name, workflow] of workflowEntries) {
 
 const crossWorkflow = workflowEntries[0][1];
 const signedWorkflow = workflowEntries[1][1];
+const linuxContinuityStep = workflowSteps(crossWorkflow).find(
+  (step) => step.name === "Linux migration and updater continuity gates",
+);
+assert.ok(linuxContinuityStep, "cross-platform release must retain the Linux continuity gates");
+const linuxElectronInstallIndex = linuxContinuityStep.run.indexOf("node node_modules/electron/install.js");
+const linuxSandboxFindIndex = linuxContinuityStep.run.indexOf("find node_modules/electron -maxdepth 4 -name chrome-sandbox");
+assert.ok(
+  linuxElectronInstallIndex >= 0 && linuxSandboxFindIndex > linuxElectronInstallIndex,
+  "Linux setup must install Electron's lazy platform binary before looking for its SUID helper",
+);
+assert.match(
+  linuxContinuityStep.run,
+  /find node_modules\/electron -maxdepth 4 -name chrome-sandbox -print -quit/,
+  "Linux setup must discover Electron's SUID helper across package layouts",
+);
+assert.match(
+  linuxContinuityStep.run,
+  /if \[ -z "\$sandbox_path" \]; then[\s\S]*?exit 1[\s\S]*?chown root:root "\$sandbox_path"/,
+  "Linux setup must fail closed when the installed binary lacks its helper, then configure the discovered helper",
+);
+assert.doesNotMatch(
+  linuxContinuityStep.run,
+  /chown root:root node_modules\/electron\/dist\/chrome-sandbox/,
+  "Linux setup must not assume the pre-Electron-43 sandbox path",
+);
 const crossVerifyStep = workflowSteps(crossWorkflow).find((step) => step.name === "Verify tag matches package.json version");
 const signedResolveStep = workflowSteps(signedWorkflow).find((step) => step.name === "Resolve release inputs");
 for (const [name, step] of [["release.yml", crossVerifyStep], ["release-signed-mac.yml", signedResolveStep]]) {
@@ -119,6 +160,11 @@ assert.match(signedResolveStep.run, /version.*!=.*\$\{tag#v\}/s, "manual version
 
 const signedSteps = workflowSteps(signedWorkflow);
 const stepNamed = (name) => signedSteps.find((step) => step.name === name);
+for (const [name, workflow] of workflowEntries) {
+  const auditStep = workflowSteps(workflow).find((step) => step.name === "Dependency security audit");
+  assert.ok(auditStep, `${name} must block high-severity dependency vulnerabilities before packaging`);
+  assert.equal(auditStep.run, "npm audit --audit-level=high");
+}
 for (const name of [
   "Ensure embedded engine (Hephaestus)",
   "Install dependencies",
@@ -158,7 +204,26 @@ assert.ok(
     signedSteps.indexOf(stepNamed("Runtime, browser, and renderer UI regression gates")),
   "the signing certificate must not exist on disk during npm install or regression tests",
 );
-assert.match(stepNamed("Runtime, browser, and renderer UI regression gates").run, /npm run test:automations-store/);
+const signedRegressionRun = stepNamed("Runtime, browser, and renderer UI regression gates").run;
+for (const requiredGate of [
+  "npm run test:automations-store",
+  "npm run test:independent-terminal-boundary",
+  "npm run test:grok-runtime-contract",
+  "npm run test:grok-auth-source",
+  "npm run test:oberon-provider-routing",
+  "npm run test:telegram-connect-atomicity",
+  "npm run test:telegram-api-timeout",
+  "npm run test:document-studio-draft-persistence",
+  "npm run test:prompts-start-failure-ui",
+  "npm run test:settings-resilience-ui",
+  "npm run test:startup-founder-new-idea",
+  "npm run test:trex-ui",
+  "npm run test:trex-attachments-ui",
+  "node scripts/qa-chat-input-routing.cjs",
+  "npm run test:all-routes-ui",
+]) {
+  assert.match(signedRegressionRun, new RegExp(requiredGate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+}
 
 const publishStep = crossPlatformWorkflow.slice(crossPlatformWorkflow.indexOf("- name: Package and publish"));
 const builderIndex = publishStep.indexOf("electron-builder ${{ matrix.builder_args }} --publish always");
@@ -213,14 +278,24 @@ for (const scriptName of ["stamp-update-feeds.mjs", "fix-mac-latest-zip.mjs"]) {
     const latestMacSource = fs.readFileSync(latestMacPath, "utf8");
     const latestMac = yaml.load(latestMacSource);
     assert.deepEqual(latestMac.agentlasCompatibility, compatibility);
+    assert.equal(
+      latestMac.minimumSystemVersion,
+      MAC_UPDATE_MINIMUM_SYSTEM_VERSION,
+      "mac update feed must use the Darwin 21 kernel floor expected by electron-updater",
+    );
+    assert.deepEqual(
+      latestMac.files.map((file) => file.url).sort(),
+      [`Agentlas-${pkg.version}-arm64.zip`, `Agentlas-${pkg.version}-x64.zip`].sort(),
+      "mac compatibility stamping must preserve both architecture-specific zip artifacts",
+    );
     assert.ok(latestMac.files.every((file) => file.url.endsWith(".zip")), "mac update feed must use Squirrel-compatible zip files");
     assert.equal((latestMacSource.match(/^agentlasCompatibility:/gm) || []).length, 1);
+    assert.equal((latestMacSource.match(/^minimumSystemVersion:/gm) || []).length, 1);
     stampUpdateCompatibilityFile(latestMacPath, path.join(root, "package.json"));
-    assert.equal(
-      (fs.readFileSync(latestMacPath, "utf8").match(/^agentlasCompatibility:/gm) || []).length,
-      1,
-      "compatibility stamping must be idempotent",
-    );
+    const restampedMacSource = fs.readFileSync(latestMacPath, "utf8");
+    assert.equal((restampedMacSource.match(/^agentlasCompatibility:/gm) || []).length, 1, "compatibility stamping must be idempotent");
+    assert.equal((restampedMacSource.match(/^minimumSystemVersion:/gm) || []).length, 1, "system compatibility stamping must be idempotent");
+    assert.equal(yaml.load(restampedMacSource).minimumSystemVersion, MAC_UPDATE_MINIMUM_SYSTEM_VERSION);
 
     const crossDir = path.join(temp, "cross-platform");
     fs.mkdirSync(crossDir, { recursive: true });
@@ -235,10 +310,12 @@ for (const scriptName of ["stamp-update-feeds.mjs", "fix-mac-latest-zip.mjs"]) {
     );
     assert.equal(stamped.status, 0, stamped.stderr || stamped.stdout);
     for (const file of [latest, latestLinux]) {
-      assert.deepEqual(yaml.load(fs.readFileSync(file, "utf8")).agentlasCompatibility, compatibility);
+      const parsed = yaml.load(fs.readFileSync(file, "utf8"));
+      assert.deepEqual(parsed.agentlasCompatibility, compatibility);
+      assert.equal(parsed.minimumSystemVersion, undefined, "Darwin's kernel floor must not leak into Windows/Linux feeds");
     }
 
-    console.log("test-update-release-contract: PASS (mac zip + cross-platform compatibility feeds)");
+    console.log("test-update-release-contract: PASS (macOS 12/Darwin 21 + mac zip + cross-platform compatibility feeds)");
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
