@@ -125,8 +125,27 @@ async function main() {
     readyPage.setDefaultTimeout(8000);
     watch(readyPage);
     await readyPage.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
+    const llmPanel = readyPage.locator('[data-tour-id="dashboard.llm"]');
+    await llmPanel.getByText(/전역 오케스트레이터 모델|Global orchestrator model/).waitFor({ timeout: 10000 });
+    assert.match(
+      await llmPanel.locator("select").first().locator("option:checked").textContent(),
+      /Codex/,
+      "the detected LLM runtime must be visible in the primary control",
+    );
     const readyPanel = readyPage.locator(".dashboard-readiness");
     await readyPanel.locator('[data-readiness-overall="ready"]').waitFor({ timeout: 10000 });
+    assert.equal(
+      await readyPage.evaluate(() => {
+        const llm = document.querySelector('[data-tour-id="dashboard.llm"]');
+        const readiness = document.querySelector('[data-tour-id="dashboard.readiness"]');
+        if (!llm || !readiness) return false;
+        return Boolean(llm.compareDocumentPosition(readiness) & Node.DOCUMENT_POSITION_FOLLOWING);
+      }),
+      true,
+      "the primary LLM connection control must appear before the diagnostic readiness panel",
+    );
+    const llmBox = await llmPanel.boundingBox();
+    assert.ok(llmBox && llmBox.y < 1100, "the LLM connection control must be visible in the initial desktop viewport");
     assert.equal(await readyPanel.locator("[data-readiness-id]").count(), 6);
     assert.equal(await readyPanel.locator('[data-readiness-status="blocked"]').count(), 0);
     await readyPanel.getByRole("button", { name: /런타임 전체 다시 확인|Run all readiness checks again/ }).click();

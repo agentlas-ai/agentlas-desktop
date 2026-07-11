@@ -36,13 +36,15 @@ export default function DashboardPage() {
             <div className="dashboard-flow-column">
               {/* 승인 인박스 — 가장 먼저 눈에 띄도록 최상단 전체폭으로. 대기 시 빨간 강조(data-alert). */}
               <div className="dashboard-panel" data-tour-id="dashboard.approvals"><ConfirmRequests /></div>
-              <div className="dashboard-panel" data-tour-id="dashboard.readiness"><RuntimeReadiness /></div>
-              <div className="dashboard-panel" data-tour-id="dashboard.activity">
-                <DashboardActivity />
-              </div>
+              {/* 전역 LLM 연결/모델은 대시보드의 핵심 조작부다. 준비상태·활동보다
+                  먼저 보여 작은 창에서도 fold 아래로 밀리지 않게 유지한다. */}
               <div className="dashboard-panel dashboard-engine-panel" data-tour-id="dashboard.llm">
                 <RuntimeControl />
                 <EngineUsage />
+              </div>
+              <div className="dashboard-panel" data-tour-id="dashboard.readiness"><RuntimeReadiness /></div>
+              <div className="dashboard-panel" data-tour-id="dashboard.activity">
+                <DashboardActivity />
               </div>
               <div className="dashboard-panel" data-tour-id="dashboard.automations"><DashboardAutomations /></div>
               <div className="dashboard-panel" data-tour-id="dashboard.hub">
