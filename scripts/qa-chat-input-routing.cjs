@@ -235,11 +235,22 @@ async function main() {
     let activeRows = await autocompleteActiveRows(page);
     assert.equal(activeRows[1]?.active, true, `ArrowDown should keep second row active: ${JSON.stringify(activeRows)}`);
 
-    const third = page.locator('[data-popover-kind="autocomplete"] [data-autocomplete-option="true"]').nth(2);
-    await third.hover();
+    // A clean machine can legitimately have only the two agents seeded above.
+    // Hover a different existing row instead of assuming unrelated local
+    // inventory contributes a third option.
+    assert.ok(activeRows.length >= 2, `Need at least two autocomplete rows: ${JSON.stringify(activeRows)}`);
+    const hoverTargetIndex = 0;
+    const hoverTarget = page
+      .locator('[data-popover-kind="autocomplete"] [data-autocomplete-option="true"]')
+      .nth(hoverTargetIndex);
+    await hoverTarget.hover();
     await page.waitForTimeout(450);
     activeRows = await autocompleteActiveRows(page);
-    assert.equal(activeRows[2]?.active, true, `Mouse hover should keep third row active: ${JSON.stringify(activeRows)}`);
+    assert.equal(
+      activeRows[hoverTargetIndex]?.active,
+      true,
+      `Mouse hover should keep the targeted row active: ${JSON.stringify(activeRows)}`,
+    );
     await page.screenshot({ path: path.join(SHOTS, "01-autocomplete-stable.png"), fullPage: true });
 
     const sidebar = page.locator("[data-tour-id='workspace.sidebar']").first();

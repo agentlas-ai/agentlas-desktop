@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.42 — 2026-07-12
+
+### Fixed
+
+- **Chat routing QA matches clean-device inventory.** Keyboard-to-pointer
+  autocomplete selection is verified with the agents actually present, rather
+  than depending on an unrelated third local item.
+
 ## 0.7.41 — 2026-07-12
 
 ### Fixed
