@@ -51,6 +51,7 @@ import { pickLocalized, useT } from "@/lib/i18n";
 import { surfaceApprovalRequirement, type SurfaceApprovalRequirement } from "@/lib/surface-approval";
 import { KeyStatusBanner } from "@/components/KeyStatusBanner";
 import { onHubBookmarkChange } from "@/lib/hub-bookmark-events";
+import { onAgentRosterChange } from "@/lib/agent-roster-events";
 
 function uid(): string {
   return Math.random().toString(36).slice(2);
@@ -651,6 +652,7 @@ function ChatPage() {
   // Only the newest bookmark read may replace optimistic state, and a transient read failure
   // must not masquerade as an empty bookmark list.
   const hubBookmarkGenerationRef = useRef(0);
+  const agentRosterGenerationRef = useRef(0);
   const refreshHubBookmarks = useCallback(async () => {
     const api = ipc();
     if (!api) return;
@@ -693,6 +695,7 @@ function ChatPage() {
   // 스티어링으로 인한 취소인지 구분 — 이 취소는 "aborted" 에러 버블을 띄우지 않고,
   // 저장된 세션을 이어받아(resume) 큐의 스티어 메시지로 계속한다(코덱스식 실행중 방향전환).
   const steerCancelRef = useRef(false);
+  const recapGenerationRef = useRef(0);
   // 실행 중 steering — busy일 때 엔터로 들어온 메시지를 큐에 쌓고, 현재 턴이 끝나면 순서대로 전송한다.
   const steerQueueRef = useRef<
     Array<{
@@ -723,6 +726,8 @@ function ChatPage() {
   // ContinuityReceipt(복원 배너)용 — 채팅 진입 시 ipc().workspace.get으로 복원된 마지막 작업 폴더.
   // 기기 간 클라우드 복원 여부는 백엔드 미확인이므로, 실제로 알 수 있는 사실(로컬 복원 경로)만 보여준다.
   const [restoredFolder, setRestoredFolder] = useState<string | null>(null);
+  // /clear 뒤에 메시지를 다시 적재하지 않고도 실제 컨텍스트 리셋이 끝났음을 알려준다.
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   // 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(있을 때만 배너).
   const [recap, setRecap] = useState<{ summary: string; count: number } | null>(null);
   const [defaultRunFolder, setDefaultRunFolder] = useState<string | null>(null);
@@ -1323,6 +1328,7 @@ function ChatPage() {
     setInstalledPlugins([]);
     setAllGeneratedApps([]);
     setRestoredFolder(null);
+    setSessionNotice(null);
     return () => {
       subRef.current?.();
       subRef.current = null;
@@ -1336,6 +1342,7 @@ function ChatPage() {
     let cancelled = false;
     void (async () => {
       const bookmarkGeneration = ++hubBookmarkGenerationRef.current;
+      const rosterGeneration = ++agentRosterGenerationRef.current;
       const c = await api.chats.get(chatId);
       if (cancelled || !c) {
         if (!c) router.replace("/");
@@ -1355,12 +1362,14 @@ function ChatPage() {
         api.marketplace.bookmarks().catch(() => null as HubAgentBookmark[] | null),
       ]);
       if (cancelled) return;
-      setAllAgents(agents);
+      if (agentRosterGenerationRef.current === rosterGeneration) {
+        setAllAgents(agents);
+        setAllFirms(firmsAll);
+      }
       if (bookmarks && hubBookmarkGenerationRef.current === bookmarkGeneration) {
         setHubBookmarks(bookmarks);
       }
       setAllProjects(projectsAll);
-      setAllFirms(firmsAll);
       setInstalledPlugins(plugins);
       setAllGeneratedApps(generatedApps);
       // @ 멘션 popover에는 실제로 값이 저장된 키만 노출 — 비어있는 키를 멘션하면 invocation에서 빈 값이 주입돼 혼란.
@@ -1462,6 +1471,30 @@ function ChatPage() {
     // attach가 중복 placeholder를 만들고 구독을 갈아치우던 churn을 없앤다. subscribeRun은 이제 안정적.
   }, [applyHiredRoster, chatId, router, subscribeRun, t]);
 
+  useEffect(
+    () =>
+      onAgentRosterChange((change) => {
+        const generation = ++agentRosterGenerationRef.current;
+        setAllAgents((previous) => [
+          change.agent,
+          ...previous.filter((agent) => agent.id !== change.agent.id),
+        ]);
+        const api = ipc();
+        if (!api) return;
+        void Promise.all([api.team.list(), api.firms.list()])
+          .then(([agents, firms]) => {
+            if (agentRosterGenerationRef.current !== generation) return;
+            setAllAgents(agents);
+            setAllFirms(firms);
+          })
+          .catch(() => {
+            // The imported agent remains available from the durable success
+            // event even if a follow-up roster read is temporarily unavailable.
+          });
+      }),
+    [],
+  );
+
   // ── 세션 recap ──────────────────────────────────────────
   // 기준점(last_viewed_at)은 이 채팅을 "떠날 때"(hidden/언마운트) 갱신하고, "돌아왔을 때"(visible)
   // 그 이후 도착한 에이전트 응답을 평가한다. 이러면 내가 지켜본 메시지는 recap되지 않고,
@@ -1470,11 +1503,15 @@ function ChatPage() {
     const api = ipc();
     if (!api || !chatId) return;
     let cancelled = false;
+    recapGenerationRef.current += 1;
     setRecap(null); // 채팅 전환 시 이전 recap 제거
     const evalRecap = async () => {
       if (typeof document !== "undefined" && document.hidden) return;
+      const requestGeneration = ++recapGenerationRef.current;
       const r = await api.chats.recap(chatId).catch(() => null);
-      if (!cancelled && r?.summary) setRecap({ summary: r.summary, count: r.count });
+      if (!cancelled && requestGeneration === recapGenerationRef.current && r?.summary) {
+        setRecap({ summary: r.summary, count: r.count });
+      }
     };
     const markViewed = () => {
       void api.chats.markViewed(chatId).catch(() => undefined);
@@ -2329,14 +2366,35 @@ function ChatPage() {
       const api = ipc();
       if (!api || !chat) return;
       if (cmd === "/clear") {
+        if (busy) {
+          setSessionNotice(locale === "ko" ? "실행 중인 대화는 비울 수 없습니다. 먼저 실행을 멈춰 주세요." : "You cannot clear while this run is active. Stop it first.");
+          return;
+        }
+        // clear 요청이 main에서 판정되는 동안에도 stale steering/recap이 다시
+        // 발사되지 않게 renderer projection을 먼저 무효화한다.
+        steerQueueRef.current = [];
+        setQueuedSteers([]);
+        steerCancelRef.current = false;
+        cancelRequestedRef.current = false;
+        setCancelPending(false);
+        recapGenerationRef.current += 1;
+        setRecap(null);
         void api.invoke.clearHistory(chat.id).then(() => {
           setMessages([]);
+          setLiveAgents({});
+          setNetTimeline([]);
+          setArtifact(null);
+          setSurface(null);
+          setMediaPreview(null);
           dropChatViewSnapshot(chat.id);
+          setSessionNotice(locale === "ko" ? "대화 기록과 연결된 런타임 세션을 비웠습니다." : "Conversation history and its linked runtime session were cleared.");
           window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chat.id } }));
+        }).catch((error) => {
+          setSessionNotice(error instanceof Error ? error.message : String(error));
         });
       } else if (cmd === "/new") {
         void api.chats
-          .create({ agentId: chat.agentId, projectId: chat.projectId, firmId: chat.firmId, agentGroupId: chat.agentGroupId })
+          .create({ agentId: chat.agentId, projectId: chat.projectId, firmId: chat.firmId, agentGroupId: chat.agentGroupId, continueFromChatId: chat.id })
           .then((c) => router.push(`/chat?id=${c.id}`));
       } else if (cmd === "/folder") {
         void api.fs.pickDirectory().then((p) => {
@@ -2357,7 +2415,7 @@ function ChatPage() {
         void send(cmd, { permissions: DEFAULT_PERMISSION });
       }
     },
-    [chat, router, t, setWorkspaceOpenPersisted, send],
+    [busy, chat, locale, router, t, setWorkspaceOpenPersisted, send],
   );
 
   // 홈 composer에서 ?prompt=... 또는 앱의 ?cmd=...로 넘어왔을 때
@@ -3121,6 +3179,20 @@ function ChatPage() {
         {/* 계속 라이브로(continuousMode)·스웜(swarmMode) 토글은 입력창 + 메뉴로 통합됨.
             켜진 모드는 + 버튼 옆 컴팩트 칩으로 표시된다(ChatInput). */}
       </div>
+      {sessionNotice && (
+        <div
+          role="status"
+          data-chat-session-notice="true"
+          style={{
+            margin: "7px 16px 0", padding: "7px 10px", borderRadius: 8,
+            border: "1px solid color-mix(in srgb, var(--green-deep) 24%, var(--paper-edge))",
+            background: "color-mix(in srgb, var(--green-deep) 7%, var(--paper))",
+            color: "var(--ink-soft)", fontSize: 11.5, lineHeight: 1.4,
+          }}
+        >
+          {sessionNotice}
+        </div>
+      )}
       <div data-tour-id="workspace.input" style={{ flexShrink: 0, minWidth: 0 }}>
         <ChatInput
           onSend={(text, opts) => {

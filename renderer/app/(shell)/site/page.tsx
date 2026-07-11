@@ -5,13 +5,17 @@
 // 통신은 nonce 봉투 postMessage 단일 채널. docs/DESIGN.md: 토큰만, 강조 1개, inline CSSProperties.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
-import Link from "next/link";
-import { ipc } from "@/lib/ipc";
+import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { getSnapshot as getBuildSnapshot, prepareBuildHandoff } from "@/lib/build-session";
+import { navigate } from "@/lib/navigation";
 import { SITE_MESSAGE_KEY } from "@shared/site-studio";
 import type {
   SiteGuestMessage,
+  SiteActivityEvent,
+  SiteConversationEntry,
   SiteHostMessage,
+  SiteProjectOperation,
   SiteProjectMeta,
   SiteScreenMeta,
   SiteSelectionPayload,
@@ -25,6 +29,7 @@ const DEVICES: DevicePreset[] = [
 ];
 
 type Diagnostic = { level: "error" | "warn"; message: string };
+type LiveSiteActivity = { runId: string; status: string; feedback: string };
 
 function isImeSubmit(e: KeyboardEvent): boolean {
   return e.nativeEvent.isComposing || e.keyCode === 229;
@@ -57,6 +62,10 @@ export default function SiteStudioPage() {
   const [instruction, setInstruction] = useState("");
   const [editing, setEditing] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [conversation, setConversation] = useState<SiteConversationEntry[]>([]);
+  const [liveActivity, setLiveActivity] = useState<LiveSiteActivity | null>(null);
+  const [handingOff, setHandingOff] = useState(false);
+  const [remoteOperation, setRemoteOperation] = useState<SiteProjectOperation | null>(null);
 
   // ── 새 화면 인라인 폼 ───────────────────────────────────
   const [addOpen, setAddOpen] = useState(false);
@@ -71,10 +80,16 @@ export default function SiteStudioPage() {
   const activeScreenRef = useRef<string | null>(null);
   const scrollMapRef = useRef(new Map<string, { x: number; y: number }>());
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const conversationProjectRef = useRef<string | null>(null);
+  const conversationScrollRef = useRef<HTMLDivElement | null>(null);
+  // 생성·수정·Build handoff는 같은 프로젝트 snapshot을 읽고 쓴다. React state가
+  // 반영되기 전의 더블클릭까지 막기 위해 동기 ref를 단일 작업 mutex로 사용한다.
+  const operationRef = useRef<"generate" | "edit" | "handoff" | null>(null);
 
   const project = useMemo(() => projects.find((p) => p.id === projectId) ?? null, [projects, projectId]);
   const screens = project?.screens ?? [];
   const activeScreen = screens.find((s) => s.id === activeScreenId) ?? null;
+  const siteBusy = generating || editing || handingOff || remoteOperation !== null;
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -88,6 +103,38 @@ export default function SiteStudioPage() {
     return list;
   }, []);
 
+  const syncOperationStatus = useCallback(async (pid: string) => {
+    const operation = (await ipc()?.site?.operationStatus?.({ projectId: pid }).catch(() => null)) ?? null;
+    if (conversationProjectRef.current !== pid) return;
+    setRemoteOperation(operation);
+    if (operation) {
+      const status =
+        operation === "generate"
+          ? ko ? "새 화면을 생성하는 중…" : "Generating a new screen…"
+          : operation === "edit"
+            ? ko ? "화면 수정을 적용하는 중…" : "Applying screen edits…"
+            : ko ? "작업공간 리비전을 만드는 중…" : "Preparing a workspace revision…";
+      setLiveActivity((current) => current ?? { runId: `restored:${pid}`, status, feedback: "" });
+    } else {
+      setLiveActivity((current) => current?.runId === `restored:${pid}` ? null : current);
+    }
+  }, [ko]);
+
+  const loadConversation = useCallback(async (pid: string) => {
+    try {
+      const entries = (await ipc()?.site?.listConversation?.({ projectId: pid })) ?? [];
+      if (conversationProjectRef.current === pid) setConversation(entries);
+    } catch (error) {
+      if (conversationProjectRef.current !== pid) return;
+      setConversation([]);
+      showToast(
+        ko
+          ? `대화 기록을 읽지 못했습니다. 손상된 원본은 보존했습니다: ${error instanceof Error ? error.message : String(error)}`
+          : `Could not read the conversation. The damaged original was preserved: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }, [ko, showToast]);
+
   useEffect(() => {
     void refreshProjects();
     ipc()
@@ -95,6 +142,50 @@ export default function SiteStudioPage() {
       .then((a) => setAvail(a ?? { ready: false, agent: "web-master" }))
       .catch(() => setAvail({ ready: false, agent: "web-master" }));
   }, [refreshProjects]);
+
+  useEffect(() => {
+    const timeline = conversationScrollRef.current;
+    if (timeline) timeline.scrollTop = timeline.scrollHeight;
+  }, [conversation.length, editing, generating, liveActivity?.feedback, liveActivity?.status]);
+
+  useEffect(() => {
+    const unsubscribe = ipcEvents()?.onSiteActivity?.((event: SiteActivityEvent) => {
+      if (event.projectId !== conversationProjectRef.current) return;
+      if (event.type === "message") {
+        setConversation((prev) => (prev.some((entry) => entry.id === event.entry.id) ? prev : [...prev, event.entry]));
+        return;
+      }
+      if (event.type === "status") {
+        setLiveActivity((prev) =>
+          prev?.runId === event.runId
+            ? { ...prev, status: event.text }
+            : { runId: event.runId, status: event.text, feedback: "" },
+        );
+        return;
+      }
+      if (event.type === "feedback-reset") {
+        setLiveActivity((prev) => ({
+          runId: event.runId,
+          status: prev?.runId === event.runId ? prev.status : ko ? "디자인 피드백을 작성하는 중…" : "Writing design feedback…",
+          feedback: "",
+        }));
+        return;
+      }
+      if (event.type === "feedback-delta") {
+        setLiveActivity((prev) => ({
+          runId: event.runId,
+          status: prev?.runId === event.runId ? prev.status : ko ? "디자인 피드백을 작성하는 중…" : "Writing design feedback…",
+          feedback: `${prev?.runId === event.runId ? prev.feedback : ""}${event.delta}`,
+        }));
+        return;
+      }
+      if (event.type === "complete") {
+        setRemoteOperation(null);
+        setLiveActivity(null);
+      }
+    });
+    return () => unsubscribe?.();
+  }, [ko]);
 
   // ── 게스트(iframe) 통신 ─────────────────────────────────
   const postToGuest = useCallback((message: SiteHostMessage) => {
@@ -173,21 +264,25 @@ export default function SiteStudioPage() {
   }, []);
 
   const openScreen = useCallback(
-    async (pid: string, screenId: string) => {
+    async (pid: string, screenId: string, allowDuringOperation = false) => {
+      if (operationRef.current && !allowDuringOperation) return;
+      conversationProjectRef.current = pid;
+      setLiveActivity(null);
       setProjectId(pid);
       setActiveScreenId(screenId);
       activeScreenRef.current = screenId;
       setView("studio");
-      await loadRender(pid, screenId);
+      await Promise.all([loadConversation(pid), loadRender(pid, screenId), syncOperationStatus(pid)]);
     },
-    [loadRender],
+    [loadConversation, loadRender, syncOperationStatus],
   );
 
   // ── 생성/수정 흐름 ──────────────────────────────────────
   const runGenerate = useCallback(
     async (opts: { pid: string | null; briefText: string; variantCount: number; baseScreenId?: string }) => {
       const text = opts.briefText.trim();
-      if (!text || generating) return;
+      if (!text || siteBusy || operationRef.current) return;
+      operationRef.current = "generate";
       setGenerating(true);
       try {
         let pid = opts.pid;
@@ -210,27 +305,30 @@ export default function SiteStudioPage() {
           showToast((ko ? "생성 실패: " : "Generation failed: ") + (res?.reason ?? "unknown"));
           return;
         }
+        const generatedScreens = res.screens;
         await refreshProjects();
-        await openScreen(pid, res.screens[0].id);
+        await openScreen(pid, generatedScreens[0].id, true);
         showToast(
-          res.screens.length > 1
+          generatedScreens.length > 1
             ? ko
-              ? `시안 ${res.screens.length}개 생성 완료 (${res.engine})`
-              : `${res.screens.length} variants ready (${res.engine})`
+              ? `시안 ${generatedScreens.length}개 생성 완료 (${res.engine})`
+              : `${generatedScreens.length} variants ready (${res.engine})`
             : ko
               ? `화면 생성 완료 (${res.engine})`
               : `Screen ready (${res.engine})`,
         );
       } finally {
+        if (operationRef.current === "generate") operationRef.current = null;
         setGenerating(false);
       }
     },
-    [generating, ko, openScreen, refreshProjects, showToast],
+    [ko, openScreen, refreshProjects, showToast, siteBusy],
   );
 
   const runEdit = useCallback(async () => {
     const text = instruction.trim();
-    if (!text || editing || !projectId || !activeScreenId) return;
+    if (!text || siteBusy || operationRef.current || !projectId || !activeScreenId) return;
+    operationRef.current = "edit";
     setEditing(true);
     try {
       const res = await ipc()?.site?.editScreen?.({
@@ -238,6 +336,7 @@ export default function SiteStudioPage() {
         screenId: activeScreenId,
         instruction: text,
         selectionId: selection?.id,
+        selectionContext: selection ? selection.selector || selection.tagName : undefined,
         locale: ko ? "ko" : "en",
       });
       if (!res?.ok) {
@@ -247,6 +346,7 @@ export default function SiteStudioPage() {
       setInstruction("");
       await refreshProjects();
       await loadRender(projectId, activeScreenId);
+      await loadConversation(projectId);
       showToast(
         res.mode === "patch"
           ? ko
@@ -257,9 +357,10 @@ export default function SiteStudioPage() {
             : "Regenerated the full screen",
       );
     } finally {
+      if (operationRef.current === "edit") operationRef.current = null;
       setEditing(false);
     }
-  }, [activeScreenId, editing, instruction, ko, loadRender, projectId, refreshProjects, selection, showToast]);
+  }, [activeScreenId, instruction, ko, loadConversation, loadRender, projectId, refreshProjects, selection, showToast, siteBusy]);
 
   const fixWithAi = useCallback(
     (diag: Diagnostic) => {
@@ -271,6 +372,7 @@ export default function SiteStudioPage() {
   );
 
   const toggleSelectMode = useCallback(() => {
+    if (siteBusy || operationRef.current) return;
     setSelectMode((prev) => {
       const next = !prev;
       selectModeRef.current = next;
@@ -282,7 +384,7 @@ export default function SiteStudioPage() {
       }
       return next;
     });
-  }, [postToGuest]);
+  }, [postToGuest, siteBusy]);
 
   const clearSelection = useCallback(() => {
     setSelection(null);
@@ -292,58 +394,109 @@ export default function SiteStudioPage() {
 
   const deleteScreen = useCallback(
     async (screenId: string) => {
-      if (!projectId) return;
+      if (!projectId || siteBusy || operationRef.current) return;
       if (!window.confirm(ko ? "이 화면을 삭제할까요?" : "Delete this screen?")) return;
-      await ipc()?.site?.deleteScreen?.({ projectId, screenId });
-      const list = await refreshProjects();
-      const meta = list.find((p) => p.id === projectId);
-      if (activeScreenId === screenId) {
-        const nextScreen = meta?.screens[0];
-        if (nextScreen) await openScreen(projectId, nextScreen.id);
-        else {
-          setActiveScreenId(null);
-          setSrcDoc(null);
-          setView("home");
+      try {
+        await ipc()?.site?.deleteScreen?.({ projectId, screenId });
+        const list = await refreshProjects();
+        const meta = list.find((p) => p.id === projectId);
+        if (activeScreenId === screenId) {
+          const nextScreen = meta?.screens[0];
+          if (nextScreen) await openScreen(projectId, nextScreen.id);
+          else {
+            setActiveScreenId(null);
+            setSrcDoc(null);
+            setView("home");
+          }
         }
+      } catch (error) {
+        showToast((ko ? "화면을 삭제하지 못했습니다: " : "Could not delete the screen: ") + (error instanceof Error ? error.message : String(error)));
       }
     },
-    [activeScreenId, ko, openScreen, projectId, refreshProjects],
+    [activeScreenId, ko, openScreen, projectId, refreshProjects, showToast, siteBusy],
   );
 
   const commitRename = useCallback(async () => {
-    if (!projectId || !renamingId) return;
+    if (!projectId || !renamingId || siteBusy || operationRef.current) return;
     const name = renameDraft.trim();
     setRenamingId(null);
     if (!name) return;
-    await ipc()?.site?.renameScreen?.({ projectId, screenId: renamingId, name });
-    await refreshProjects();
-  }, [projectId, renameDraft, renamingId, refreshProjects]);
+    try {
+      await ipc()?.site?.renameScreen?.({ projectId, screenId: renamingId, name });
+      await refreshProjects();
+    } catch (error) {
+      showToast((ko ? "이름을 바꾸지 못했습니다: " : "Could not rename the screen: ") + (error instanceof Error ? error.message : String(error)));
+    }
+  }, [ko, projectId, renameDraft, renamingId, refreshProjects, showToast, siteBusy]);
 
   const exportScreen = useCallback(async () => {
-    if (!projectId || !activeScreenId) return;
+    if (!projectId || !activeScreenId || siteBusy || operationRef.current) return;
     const res = await ipc()?.site?.exportScreen?.({ projectId, screenId: activeScreenId });
     if (res?.ok && res.path) showToast((ko ? "저장됨: " : "Saved: ") + res.path);
-  }, [activeScreenId, ko, projectId, showToast]);
+  }, [activeScreenId, ko, projectId, showToast, siteBusy]);
 
   const exportZip = useCallback(async () => {
-    if (!projectId) return;
+    if (!projectId || siteBusy || operationRef.current) return;
     const res = await ipc()?.site?.exportProjectZip?.({ projectId });
     if (res?.ok && res.path) showToast((ko ? "ZIP 저장됨: " : "ZIP saved: ") + res.path);
     else if (res?.reason) showToast((ko ? "내보내기 실패: " : "Export failed: ") + res.reason);
-  }, [ko, projectId, showToast]);
+  }, [ko, projectId, showToast, siteBusy]);
+
+  const handoffToWorkspace = useCallback(async () => {
+    if (!projectId || siteBusy || operationRef.current) return;
+    const api = ipc();
+    if (!api) return;
+    const currentBuild = getBuildSnapshot();
+    if (currentBuild.phase === "running" || currentBuild.phase === "interview") {
+      showToast(ko ? "진행 중인 Build를 먼저 완료하거나 취소해 주세요." : "Finish or cancel the active Build before importing this design.");
+      return;
+    }
+    operationRef.current = "handoff";
+    setHandingOff(true);
+    try {
+      // 대상 폴더를 사용자가 매번 직접 선택한다. 이 capability 외 경로에는 쓰지 않는다.
+      const workspaceGrant = await api.fs.pickDirectory();
+      if (!workspaceGrant) return;
+      const res = await api.site.handoffToWorkspace({ projectId, workspaceGrant, locale: ko ? "ko" : "en" });
+      if (!res.ok || !res.handoff) {
+        showToast((ko ? "작업공간으로 가져오지 못했어요: " : "Could not import into the workspace: ") + (res.reason ?? "unknown"));
+        return;
+      }
+      const prepared = prepareBuildHandoff({ workspace: workspaceGrant, request: res.handoff.buildPrompt });
+      if (!prepared.ok) {
+        showToast(
+          ko
+            ? `디자인 리비전은 ${res.handoff.relativePath}에 저장했습니다. 진행 중인 Build를 마친 뒤 다시 연결해 주세요.`
+            : `The design revision was saved to ${res.handoff.relativePath}. Finish the active Build, then connect it again.`,
+        );
+        return;
+      }
+      navigate("/build");
+    } catch (err) {
+      showToast((ko ? "작업공간으로 가져오지 못했어요: " : "Could not import into the workspace: ") + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      if (operationRef.current === "handoff") operationRef.current = null;
+      setHandingOff(false);
+    }
+  }, [ko, projectId, showToast, siteBusy]);
 
   const deleteProject = useCallback(
     async (pid: string) => {
+      if ((projectId === pid && siteBusy) || operationRef.current) return;
       if (!window.confirm(ko ? "프로젝트와 모든 화면을 삭제할까요?" : "Delete this project and all screens?")) return;
-      await ipc()?.site?.deleteProject?.({ projectId: pid });
-      if (projectId === pid) {
-        setProjectId(null);
-        setActiveScreenId(null);
-        setSrcDoc(null);
+      try {
+        await ipc()?.site?.deleteProject?.({ projectId: pid });
+        if (projectId === pid) {
+          setProjectId(null);
+          setActiveScreenId(null);
+          setSrcDoc(null);
+        }
+        await refreshProjects();
+      } catch (error) {
+        showToast((ko ? "프로젝트를 삭제하지 못했습니다: " : "Could not delete the project: ") + (error instanceof Error ? error.message : String(error)));
       }
-      await refreshProjects();
     },
-    [ko, projectId, refreshProjects],
+    [ko, projectId, refreshProjects, showToast, siteBusy],
   );
 
   const noEngine = avail !== null && !avail.ready;
@@ -403,8 +556,8 @@ export default function SiteStudioPage() {
             <div style={{ flex: 1 }} />
             <button
               type="button"
-              style={{ ...primaryBtn, opacity: generating || !brief.trim() || noEngine ? 0.5 : 1 }}
-              disabled={generating || !brief.trim() || noEngine}
+              style={{ ...primaryBtn, opacity: siteBusy || !brief.trim() || noEngine ? 0.5 : 1 }}
+              disabled={siteBusy || !brief.trim() || noEngine}
               onClick={() => void runGenerate({ pid: null, briefText: brief, variantCount: variants })}
             >
               {generating ? (ko ? "디자인 중…" : "Designing…") : ko ? "화면 만들기" : "Create screen"}
@@ -435,6 +588,7 @@ export default function SiteStudioPage() {
                     <button
                       type="button"
                       style={projectRowMain}
+                      disabled={siteBusy}
                       onClick={() => {
                         if (p.screens.length) void openScreen(p.id, p.screens[0].id);
                         else {
@@ -452,6 +606,7 @@ export default function SiteStudioPage() {
                     <button
                       type="button"
                       style={ghostIconBtn}
+                      disabled={siteBusy}
                       title={ko ? "프로젝트 삭제" : "Delete project"}
                       onClick={() => void deleteProject(p.id)}
                     >
@@ -475,7 +630,9 @@ export default function SiteStudioPage() {
         <button
           type="button"
           style={backLink}
+          disabled={siteBusy}
           onClick={() => {
+            if (operationRef.current) return;
             setView("home");
             void refreshProjects();
           }}
@@ -483,7 +640,7 @@ export default function SiteStudioPage() {
           ← {ko ? "홈" : "Home"}
         </button>
         <span style={wordmark}>{project?.name ?? (ko ? "사이트" : "Site")}</span>
-        {activeScreen && <span style={{ fontSize: 12, color: "var(--muted-deep)" }}>/ {activeScreen.name}</span>}
+        {activeScreen && <span style={projectContext}>{ko ? `${screens.length}개 버전` : `${screens.length} versions`}</span>}
         <div style={{ flex: 1 }} />
         <div style={{ display: "inline-flex", gap: 4 }}>
           {DEVICES.map((d) => (
@@ -501,46 +658,247 @@ export default function SiteStudioPage() {
         <button
           type="button"
           onClick={toggleSelectMode}
+          disabled={siteBusy}
           style={{ ...ghostBtn, ...(selectMode ? { borderColor: "var(--accent)", color: "var(--accent)" } : null) }}
           aria-pressed={selectMode}
         >
           {ko ? "요소 선택" : "Select"}
         </button>
-        <button type="button" style={ghostBtn} onClick={() => void exportScreen()} disabled={!activeScreenId}>
+        <button type="button" style={ghostBtn} onClick={() => void exportScreen()} disabled={!activeScreenId || siteBusy}>
           HTML
         </button>
-        <button type="button" style={ghostBtn} onClick={() => void exportZip()}>
+        <button type="button" style={ghostBtn} onClick={() => void exportZip()} disabled={siteBusy}>
           ZIP
+        </button>
+        <button type="button" style={primaryBtn} onClick={() => void handoffToWorkspace()} disabled={!projectId || siteBusy}>
+          {handingOff ? (ko ? "가져오는 중…" : "Importing…") : (ko ? "바이브코딩으로" : "Use in Build")}
         </button>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-        {/* 좌: 화면 갤러리 */}
-        <div style={railStyle}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px 6px" }}>
-            <span style={metaLabel}>{ko ? "화면" : "Screens"}</span>
-            <button type="button" style={ghostIconBtn} title={ko ? "새 화면" : "New screen"} onClick={() => setAddOpen((v) => !v)}>
-              ＋
-            </button>
+      <div style={studioBody}>
+        {/* 좌: 생성·수정 지시를 한 흐름으로 이어가는 Site 대화창 */}
+        <aside style={chatPanel} aria-label={ko ? "사이트 디자인 대화" : "Site design conversation"}>
+          <div style={chatPanelHeader}>
+            <div>
+              <div style={metaLabel}>SITE COPILOT</div>
+              <strong style={chatPanelTitle}>{ko ? "사이트를 함께 다듬기" : "Refine this site together"}</strong>
+            </div>
+            <span style={chatStatus}>{siteBusy ? (ko ? "작업 중" : "Working") : ko ? "캔버스 연결됨" : "Canvas linked"}</span>
           </div>
+
+          <div ref={conversationScrollRef} style={chatTimeline}>
+            {conversation.length === 0 && (
+              <div style={{ ...chatBubble, ...assistantBubble }}>
+                {ko
+                  ? "원하는 변경을 말해 주세요. 캔버스에서 요소를 선택하면 그 부분만 정확히 다듬을 수 있습니다."
+                  : "Describe the change you want. Select an element on the canvas when you want a precise edit."}
+              </div>
+            )}
+            {conversation.map((item) => (
+              <div key={item.id} style={{ ...chatBubble, ...(item.role === "user" ? userBubble : assistantBubble) }}>
+                {item.context && <span style={conversationContext}>{item.context}</span>}
+                <span>{item.text}</span>
+              </div>
+            ))}
+            {liveActivity ? (
+              <div style={liveActivityCard} role="status" aria-live="polite">
+                <div style={liveActivityHeader}>
+                  <span style={livePulse} aria-hidden="true" />
+                  <strong>{liveActivity.status}</strong>
+                  <span style={liveBadge}>{ko ? "LIVE" : "LIVE"}</span>
+                </div>
+                {liveActivity.feedback && (
+                  <p style={liveFeedbackText}>
+                    {liveActivity.feedback}
+                    <span style={typingCursor} aria-hidden="true" />
+                  </p>
+                )}
+                <span style={liveActivityHint}>
+                  {liveActivity.feedback
+                    ? ko
+                      ? "디자인 마스터의 피드백을 입력하고 있습니다"
+                      : "The design master is typing feedback"
+                    : ko
+                      ? "현재 작업 단계를 실시간으로 표시합니다"
+                      : "Showing the current work stage in real time"}
+                </span>
+              </div>
+            ) : (
+              (generating || editing) && (
+                <div style={{ ...chatBubble, ...assistantBubble, color: "var(--muted-deep)" }}>
+                  {generating
+                    ? ko
+                      ? "웹앱디자인마스터와 연결하는 중…"
+                      : "Connecting to the design master…"
+                    : ko
+                      ? "수정 요청을 준비하는 중…"
+                      : "Preparing the edit request…"}
+                </div>
+              )
+            )}
+          </div>
+
+          {selection && (
+            <div style={selectionCard}>
+              <div style={selectionCardHeader}>
+                <span>{ko ? "선택한 요소" : "Selected element"}</span>
+                <button type="button" onClick={clearSelection} style={chipX} disabled={siteBusy} aria-label={ko ? "선택 해제" : "Clear selection"}>
+                  ✕
+                </button>
+              </div>
+              <div style={selectionCardBody}>
+                {selectionThumb && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={selectionThumb} alt="" style={selectionThumbStyle} />
+                )}
+                <span>{selection.selector || selection.tagName}</span>
+              </div>
+            </div>
+          )}
+
+          {diagnostics.length > 0 && (
+            <div style={diagnosticCard}>
+              <div style={selectionCardHeader}>
+                <span style={{ color: diagnostics[diagnostics.length - 1].level === "error" ? "#c0392b" : "#96690d" }}>
+                  {diagnostics[diagnostics.length - 1].level === "error" ? (ko ? "미리보기 오류" : "Preview error") : ko ? "미리보기 경고" : "Preview warning"}
+                </span>
+                <button type="button" onClick={() => setDiagnostics([])} style={chipX} aria-label={ko ? "닫기" : "Dismiss"}>
+                  ✕
+                </button>
+              </div>
+              <p style={diagnosticText}>{diagnostics[diagnostics.length - 1].message}</p>
+              <button type="button" style={{ ...ghostBtn, alignSelf: "flex-start" }} disabled={siteBusy} onClick={() => fixWithAi(diagnostics[diagnostics.length - 1])}>
+                {ko ? "대화에 가져오기" : "Bring into chat"}
+              </button>
+            </div>
+          )}
+
+          <div style={chatComposer}>
+            <textarea
+              value={instruction}
+              onChange={(e) => setInstruction(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  if (isImeSubmit(e)) return;
+                  e.preventDefault();
+                  void runEdit();
+                }
+              }}
+              placeholder={
+                selection
+                  ? ko
+                    ? "선택한 요소를 어떻게 바꿀까요?"
+                    : "How should the selected element change?"
+                  : ko
+                    ? "현재 버전에 대한 수정 지시를 입력하세요"
+                    : "Describe a change for the current version"
+              }
+              rows={3}
+              style={chatTextarea}
+              disabled={siteBusy || !activeScreenId}
+            />
+            <div style={chatComposerFooter}>
+              <span style={chatHint}>{ko ? "Enter 전송 · Shift+Enter 줄바꿈" : "Enter to send · Shift+Enter for a new line"}</span>
+              <button
+                type="button"
+                style={{ ...primaryBtn, opacity: siteBusy || !instruction.trim() || !activeScreenId ? 0.5 : 1 }}
+                disabled={siteBusy || !instruction.trim() || !activeScreenId}
+                onClick={() => void runEdit()}
+              >
+                {editing ? (ko ? "반영 중…" : "Applying…") : ko ? "보내기" : "Send"}
+              </button>
+            </div>
+          </div>
+        </aside>
+
+        {/* 우: 버전 탭 + 캔버스 */}
+        <section style={previewColumn}>
+          <div style={screenTabsBar}>
+            <span style={tabRailLabel}>{ko ? "사이트 버전" : "SITE VERSIONS"}</span>
+            <div style={screenTabs} role="tablist" aria-label={ko ? "사이트 버전" : "Site versions"}>
+              {screens.map((s) => {
+                const active = s.id === activeScreenId;
+                return (
+                  <div key={s.id} style={{ ...versionTab, ...(active ? versionTabActive : null) }}>
+                    {renamingId === s.id ? (
+                      <input
+                        autoFocus
+                        value={renameDraft}
+                        disabled={siteBusy}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onBlur={() => void commitRename()}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            if (isImeSubmit(e)) return;
+                            e.preventDefault();
+                            void commitRename();
+                          }
+                          if (e.key === "Escape") setRenamingId(null);
+                        }}
+                        style={tabRenameInput}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={active}
+                        disabled={siteBusy}
+                        style={{ ...versionTabMain, color: active ? "var(--accent)" : "var(--ink-soft)" }}
+                        onClick={() => projectId && void openScreen(projectId, s.id)}
+                        onDoubleClick={() => {
+                          if (operationRef.current) return;
+                          setRenamingId(s.id);
+                          setRenameDraft(s.name);
+                        }}
+                        title={ko ? "더블클릭: 이름 변경" : "Double-click to rename"}
+                      >
+                        {s.variantLabel ? `${ko ? "시안" : "Variant"} ${s.variantLabel}` : s.name}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      style={versionTabClose}
+                      disabled={siteBusy}
+                      title={ko ? "버전 삭제" : "Delete version"}
+                      aria-label={ko ? `${s.name} 삭제` : `Delete ${s.name}`}
+                      onClick={() => void deleteScreen(s.id)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                type="button"
+                style={{ ...versionAddTab, ...(addOpen ? versionTabActive : null) }}
+                title={ko ? "새 버전 만들기" : "Create a new version"}
+                aria-label={ko ? "새 버전 만들기" : "Create a new version"}
+                disabled={siteBusy}
+                onClick={() => setAddOpen((v) => !v)}
+              >
+                ＋
+              </button>
+            </div>
+          </div>
+
           {addOpen && (
-            <div style={{ padding: "0 12px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={newVersionBar}>
               <textarea
                 value={addBrief}
                 onChange={(e) => setAddBrief(e.target.value)}
-                rows={2}
-                placeholder={ko ? "예: 같은 제품의 로그인 화면" : "e.g. a login screen for the same product"}
-                style={{ ...briefInput, fontSize: 12, padding: 8 }}
-                disabled={generating}
+                rows={1}
+                placeholder={ko ? "새 버전에 담을 화면 또는 방향을 입력하세요" : "Describe the screen or direction for this new version"}
+                style={newVersionInput}
+                disabled={siteBusy}
               />
-              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "var(--ink-soft)" }}>
-                <input type="checkbox" checked={addSameStyle} onChange={(e) => setAddSameStyle(e.target.checked)} />
-                {ko ? "현재 화면과 같은 스타일" : "Match current screen style"}
+              <label style={newVersionCheckbox}>
+                <input type="checkbox" checked={addSameStyle} disabled={siteBusy} onChange={(e) => setAddSameStyle(e.target.checked)} />
+                {ko ? "현재 버전의 스타일 유지" : "Match current version"}
               </label>
               <button
                 type="button"
-                style={{ ...primaryBtn, height: 28, justifyContent: "center", opacity: generating || !addBrief.trim() ? 0.5 : 1 }}
-                disabled={generating || !addBrief.trim()}
+                style={{ ...primaryBtn, opacity: siteBusy || !addBrief.trim() ? 0.5 : 1 }}
+                disabled={siteBusy || !addBrief.trim()}
                 onClick={() => {
                   const text = addBrief;
                   setAddBrief("");
@@ -553,157 +911,38 @@ export default function SiteStudioPage() {
                   });
                 }}
               >
-                {generating ? (ko ? "디자인 중…" : "Designing…") : ko ? "추가" : "Add"}
+                {generating ? (ko ? "생성 중…" : "Creating…") : ko ? "새 버전" : "New version"}
               </button>
             </div>
           )}
-          <div style={{ flex: 1, overflowY: "auto", padding: "0 8px 12px", display: "flex", flexDirection: "column", gap: 6 }}>
-            {screens.map((s) => {
-              const active = s.id === activeScreenId;
-              return (
-                <div key={s.id} style={{ ...screenCard, ...(active ? screenCardOn : null) }}>
-                  {renamingId === s.id ? (
-                    <input
-                      autoFocus
-                      value={renameDraft}
-                      onChange={(e) => setRenameDraft(e.target.value)}
-                      onBlur={() => void commitRename()}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          if (isImeSubmit(e)) return;
-                          e.preventDefault();
-                          void commitRename();
-                        }
-                        if (e.key === "Escape") setRenamingId(null);
-                      }}
-                      style={{ ...briefInput, fontSize: 12, padding: "4px 6px" }}
-                    />
-                  ) : (
-                    <button
-                      type="button"
-                      style={screenCardMain}
-                      onClick={() => projectId && void openScreen(projectId, s.id)}
-                      onDoubleClick={() => {
-                        setRenamingId(s.id);
-                        setRenameDraft(s.name);
-                      }}
-                      title={ko ? "더블클릭: 이름 변경" : "Double-click to rename"}
-                    >
-                      <span style={{ fontSize: 12.5, fontWeight: 700, color: active ? "var(--accent)" : "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {s.name}
-                      </span>
-                      <span style={{ fontSize: 10.5, color: "var(--muted-deep)" }}>
-                        {s.variantLabel ? `${ko ? "시안" : "Variant"} ${s.variantLabel} · ` : ""}
-                        {new Date(s.updatedAt).toLocaleTimeString()}
-                      </span>
-                    </button>
-                  )}
-                  <button type="button" style={ghostIconBtn} title={ko ? "삭제" : "Delete"} onClick={() => void deleteScreen(s.id)}>
-                    ✕
-                  </button>
+
+          <div style={canvasWrap}>
+            {generating && (
+              <div style={busyOverlay}>
+                <div style={busyCard}>
+                  {ko ? "웹앱디자인마스터가 작업 중… (1~3분)" : "Design master at work… (1–3 min)"}
                 </div>
-              );
-            })}
-            {!screens.length && (
-              <p style={{ fontSize: 12, color: "var(--muted-deep)", padding: "8px 6px" }}>
-                {ko ? "아직 화면이 없습니다. ＋로 첫 화면을 만드세요." : "No screens yet — hit ＋ to create one."}
-              </p>
+              </div>
+            )}
+            {srcDoc ? (
+              <div style={{ ...frameHolder, width: device.width }}>
+                <iframe
+                  key={renderKey}
+                  ref={iframeRef}
+                  title="site-preview"
+                  sandbox="allow-scripts"
+                  srcDoc={srcDoc}
+                  style={{ ...frameStyle, cursor: selectMode ? "crosshair" : "auto" }}
+                />
+              </div>
+            ) : (
+              <div style={canvasEmptyState}>
+                {ko ? "상단 ＋ 탭에서 첫 사이트 버전을 만드세요." : "Create the first site version with the ＋ tab above."}
+              </div>
             )}
           </div>
-        </div>
-
-        {/* 우: 캔버스 */}
-        <div style={canvasWrap}>
-          {generating && (
-            <div style={busyOverlay}>
-              <div style={busyCard}>
-                {ko ? "웹앱디자인마스터가 작업 중… (1~3분)" : "Design master at work… (1–3 min)"}
-              </div>
-            </div>
-          )}
-          {srcDoc ? (
-            <div style={{ ...frameHolder, width: device.width }}>
-              <iframe
-                key={renderKey}
-                ref={iframeRef}
-                title="site-preview"
-                sandbox="allow-scripts"
-                srcDoc={srcDoc}
-                style={{ ...frameStyle, cursor: selectMode ? "crosshair" : "auto" }}
-              />
-            </div>
-          ) : (
-            <div style={{ margin: "auto", fontSize: 13, color: "var(--muted-deep)" }}>
-              {ko ? "왼쪽에서 화면을 선택하거나 새로 만드세요." : "Pick or create a screen on the left."}
-            </div>
-          )}
-        </div>
+        </section>
       </div>
-
-      {/* 하단: 수정 지시 바 */}
-      <div style={bottomBar}>
-        {selection && (
-          <span style={selectionChip}>
-            {selectionThumb && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={selectionThumb} alt="" style={{ height: 22, borderRadius: 4, display: "block" }} />
-            )}
-            <span style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {selection.selector || selection.tagName}
-            </span>
-            <button type="button" onClick={clearSelection} style={chipX} aria-label={ko ? "선택 해제" : "Clear selection"}>
-              ✕
-            </button>
-          </span>
-        )}
-        <input
-          value={instruction}
-          onChange={(e) => setInstruction(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              if (isImeSubmit(e)) return;
-              e.preventDefault();
-              void runEdit();
-            }
-          }}
-          placeholder={
-            selection
-              ? ko
-                ? "선택한 요소를 어떻게 바꿀까요? 예: 더 크게, 주황색으로"
-                : "How should the selected element change?"
-              : ko
-                ? "화면 전체에 대한 수정 지시 — 요소를 집으려면 위의 ‘요소 선택’을 켜세요"
-                : "Instruction for the whole screen — toggle Select to pick an element"
-          }
-          style={instructionInput}
-          disabled={editing || !activeScreenId}
-        />
-        <button
-          type="button"
-          style={{ ...primaryBtn, opacity: editing || !instruction.trim() || !activeScreenId ? 0.5 : 1 }}
-          disabled={editing || !instruction.trim() || !activeScreenId}
-          onClick={() => void runEdit()}
-        >
-          {editing ? (ko ? "반영 중…" : "Applying…") : ko ? "반영" : "Apply"}
-        </button>
-      </div>
-
-      {diagnostics.length > 0 && (
-        <div style={diagBar}>
-          <span style={{ fontWeight: 800, color: diagnostics[diagnostics.length - 1].level === "error" ? "#c0392b" : "#96690d" }}>
-            {diagnostics[diagnostics.length - 1].level === "error" ? (ko ? "오류" : "Error") : (ko ? "경고" : "Warning")}
-          </span>
-          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {diagnostics[diagnostics.length - 1].message}
-          </span>
-          <button type="button" style={ghostBtn} onClick={() => fixWithAi(diagnostics[diagnostics.length - 1])}>
-            {ko ? "AI로 고치기" : "Fix with AI"}
-          </button>
-          <button type="button" style={ghostIconBtn} onClick={() => setDiagnostics([])} aria-label={ko ? "닫기" : "Dismiss"}>
-            ✕
-          </button>
-        </div>
-      )}
 
       {toast && <div style={toastStyle}>{toast}</div>}
     </div>
@@ -715,6 +954,7 @@ const shell: CSSProperties = { flex: 1, minHeight: 0, display: "flex", flexDirec
 const topbar: CSSProperties = { minHeight: 44, borderBottom: "1px solid var(--paper-edge)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 8, padding: "6px 16px 6px 90px", flexShrink: 0 };
 const backLink: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 6, color: "var(--accent)", fontWeight: 800, fontSize: 12, background: "none", border: "none", cursor: "pointer", padding: 0 };
 const wordmark: CSSProperties = { fontSize: 13, fontWeight: 800, color: "var(--ink)" };
+const projectContext: CSSProperties = { fontSize: 11.5, color: "var(--muted-deep)" };
 const ghostBtn: CSSProperties = { height: 30, border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", color: "var(--ink-soft)", display: "inline-flex", alignItems: "center", gap: 6, padding: "0 11px", fontSize: 12, fontWeight: 800, cursor: "pointer" };
 const primaryBtn: CSSProperties = { height: 30, border: "none", borderRadius: 7, background: "var(--accent)", color: "#fff", display: "inline-flex", alignItems: "center", gap: 6, padding: "0 13px", fontSize: 12, fontWeight: 900, cursor: "pointer" };
 const ghostIconBtn: CSSProperties = { width: 24, height: 24, border: "none", borderRadius: 6, background: "transparent", color: "var(--muted-deep)", cursor: "pointer", fontSize: 12, lineHeight: "24px", flexShrink: 0 };
@@ -732,20 +972,53 @@ const warnNote: CSSProperties = { marginTop: 14, fontSize: 12.5, color: "#96690d
 const projectRow: CSSProperties = { display: "flex", alignItems: "center", gap: 6, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)", padding: "4px 8px 4px 4px" };
 const projectRowMain: CSSProperties = { flex: 1, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, background: "none", border: "none", cursor: "pointer", padding: "8px 10px", textAlign: "left" };
 
-const railStyle: CSSProperties = { width: 232, borderRight: "1px solid var(--paper-edge)", display: "flex", flexDirection: "column", minHeight: 0, flexShrink: 0, background: "var(--paper)" };
-const screenCard: CSSProperties = { display: "flex", alignItems: "center", gap: 4, border: "1px solid var(--paper-edge)", borderRadius: 9, padding: "2px 6px 2px 2px", background: "var(--paper)" };
-const screenCardOn: CSSProperties = { borderColor: "var(--accent)" };
-const screenCardMain: CSSProperties = { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 1, background: "none", border: "none", cursor: "pointer", padding: "7px 8px", textAlign: "left" };
+const studioBody: CSSProperties = { flex: 1, minHeight: 0, minWidth: 0, display: "flex" };
+const chatPanel: CSSProperties = { width: 336, minWidth: 280, flex: "0 1 336px", borderRight: "1px solid var(--paper-edge)", display: "flex", flexDirection: "column", minHeight: 0, background: "var(--paper)" };
+const chatPanelHeader: CSSProperties = { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "15px 16px 13px", borderBottom: "1px solid var(--paper-edge)", flexShrink: 0 };
+const chatPanelTitle: CSSProperties = { display: "block", marginTop: 5, color: "var(--ink)", fontSize: 14, lineHeight: 1.25 };
+const chatStatus: CSSProperties = { marginTop: 1, padding: "4px 7px", borderRadius: 999, background: "var(--fill-1, rgba(0,0,0,.035))", color: "var(--muted-deep)", fontSize: 10.5, fontWeight: 800, whiteSpace: "nowrap" };
+const chatTimeline: CSSProperties = { flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 9, padding: "16px 14px" };
+const chatBubble: CSSProperties = { maxWidth: "92%", padding: "10px 11px", borderRadius: 12, fontSize: 12.5, lineHeight: 1.52, whiteSpace: "pre-wrap" };
+const assistantBubble: CSSProperties = { alignSelf: "flex-start", background: "var(--fill-1, rgba(0,0,0,.035))", color: "var(--ink-soft)", border: "1px solid var(--paper-edge)" };
+const userBubble: CSSProperties = { alignSelf: "flex-end", background: "var(--accent)", color: "#fff" };
+const conversationContext: CSSProperties = { display: "block", width: "max-content", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 6, padding: "2px 5px", borderRadius: 4, background: "color-mix(in srgb, currentColor 14%, transparent)", fontSize: 10.5, fontWeight: 800 };
+const liveActivityCard: CSSProperties = { alignSelf: "flex-start", width: "100%", padding: 11, borderRadius: 12, border: "1px solid var(--accent)", background: "var(--fill-1, rgba(0,0,0,.035))", color: "var(--ink)" };
+const liveActivityHeader: CSSProperties = { display: "flex", alignItems: "center", gap: 7, fontSize: 11.5, lineHeight: 1.35 };
+const livePulse: CSSProperties = { width: 7, height: 7, borderRadius: 999, background: "var(--accent)", boxShadow: "0 0 0 4px color-mix(in srgb, var(--accent) 14%, transparent)", flexShrink: 0 };
+const liveBadge: CSSProperties = { marginLeft: "auto", padding: "2px 5px", borderRadius: 4, background: "color-mix(in srgb, var(--accent) 14%, transparent)", color: "var(--accent)", fontSize: 9.5, fontWeight: 900, letterSpacing: ".08em" };
+const liveFeedbackText: CSSProperties = { margin: "9px 0 5px", color: "var(--ink-soft)", fontSize: 12.5, lineHeight: 1.55, whiteSpace: "pre-wrap" };
+const typingCursor: CSSProperties = { display: "inline-block", width: 6, height: "1em", marginLeft: 2, verticalAlign: "-0.12em", borderRadius: 1, background: "var(--accent)" };
+const liveActivityHint: CSSProperties = { color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.35 };
+const selectionCard: CSSProperties = { margin: "0 14px 10px", padding: 10, border: "1px solid var(--accent)", borderRadius: 10, background: "var(--fill-1, rgba(0,0,0,.035))", flexShrink: 0 };
+const selectionCardHeader: CSSProperties = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, color: "var(--accent)", fontSize: 10.5, fontWeight: 900, letterSpacing: ".06em", textTransform: "uppercase" };
+const selectionCardBody: CSSProperties = { display: "flex", alignItems: "center", gap: 8, marginTop: 7, color: "var(--ink)", fontSize: 11.5, fontWeight: 700, minWidth: 0 };
+const selectionThumbStyle: CSSProperties = { width: 42, height: 26, objectFit: "cover", borderRadius: 5, border: "1px solid var(--paper-edge)", flexShrink: 0 };
+const diagnosticCard: CSSProperties = { margin: "0 14px 10px", padding: 10, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)", display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 };
+const diagnosticText: CSSProperties = { margin: 0, color: "var(--ink-soft)", fontSize: 11.5, lineHeight: 1.45, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" };
+const chatComposer: CSSProperties = { padding: "10px 12px 12px", borderTop: "1px solid var(--paper-edge)", background: "var(--paper)", flexShrink: 0 };
+const chatTextarea: CSSProperties = { width: "100%", minHeight: 72, resize: "vertical", border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)", color: "var(--ink)", padding: "9px 10px", fontSize: 12.5, lineHeight: 1.5, outline: "none", fontFamily: "inherit" };
+const chatComposerFooter: CSSProperties = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 8 };
+const chatHint: CSSProperties = { color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.25 };
 
-const canvasWrap: CSSProperties = { flex: 1, minWidth: 0, overflow: "auto", display: "flex", justifyContent: "center", alignItems: "stretch", padding: 18, background: "var(--fill-1, rgba(0,0,0,.035))", position: "relative" };
+const previewColumn: CSSProperties = { flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" };
+const screenTabsBar: CSSProperties = { minHeight: 48, display: "flex", alignItems: "center", gap: 12, padding: "7px 14px", borderBottom: "1px solid var(--paper-edge)", background: "var(--paper)", flexShrink: 0 };
+const tabRailLabel: CSSProperties = { flexShrink: 0, color: "var(--muted-deep)", fontSize: 10.5, fontWeight: 900, letterSpacing: ".12em", whiteSpace: "nowrap" };
+const screenTabs: CSSProperties = { minWidth: 0, flex: 1, overflowX: "auto", display: "flex", alignItems: "center", gap: 6, paddingBottom: 1 };
+const versionTab: CSSProperties = { maxWidth: 190, height: 32, display: "flex", alignItems: "center", gap: 2, padding: "0 4px 0 8px", border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper)", flexShrink: 0 };
+const versionTabActive: CSSProperties = { borderColor: "var(--accent)", background: "var(--fill-1, rgba(0,0,0,.035))" };
+const versionTabMain: CSSProperties = { minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", border: "none", background: "transparent", cursor: "pointer", padding: 0, fontSize: 11.5, fontWeight: 800, textAlign: "left" };
+const versionTabClose: CSSProperties = { width: 21, height: 21, border: "none", borderRadius: 5, background: "transparent", color: "var(--muted-deep)", cursor: "pointer", padding: 0, fontSize: 15, lineHeight: "18px", flexShrink: 0 };
+const versionAddTab: CSSProperties = { width: 32, height: 32, border: "1px dashed var(--paper-edge)", borderRadius: 8, background: "var(--paper)", color: "var(--accent)", cursor: "pointer", fontSize: 17, lineHeight: 1, flexShrink: 0 };
+const tabRenameInput: CSSProperties = { width: 128, minWidth: 0, border: "none", outline: "none", background: "transparent", color: "var(--ink)", fontSize: 11.5, fontWeight: 800, fontFamily: "inherit" };
+const newVersionBar: CSSProperties = { display: "flex", alignItems: "center", gap: 9, padding: "8px 14px", borderBottom: "1px solid var(--paper-edge)", background: "var(--paper)", flexShrink: 0 };
+const newVersionInput: CSSProperties = { flex: 1, minWidth: 130, height: 30, resize: "none", border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", color: "var(--ink)", padding: "6px 9px", fontSize: 12, lineHeight: 1.35, outline: "none", fontFamily: "inherit" };
+const newVersionCheckbox: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 5, color: "var(--ink-soft)", fontSize: 11, whiteSpace: "nowrap" };
+
+const canvasWrap: CSSProperties = { flex: 1, minWidth: 0, minHeight: 0, overflow: "auto", display: "flex", justifyContent: "center", alignItems: "stretch", padding: 18, background: "var(--fill-1, rgba(0,0,0,.035))", position: "relative" };
 const frameHolder: CSSProperties = { maxWidth: "100%", minHeight: 0, display: "flex", flexShrink: 0, margin: "0 auto" };
 const frameStyle: CSSProperties = { width: "100%", height: "100%", minHeight: 480, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "#fff", boxShadow: "var(--rd-shadow-1, 0 6px 24px rgba(0,0,0,.08))" };
 const busyOverlay: CSSProperties = { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "color-mix(in srgb, var(--paper) 55%, transparent)", zIndex: 5 };
 const busyCard: CSSProperties = { padding: "10px 18px", borderRadius: 10, background: "var(--paper)", border: "1px solid var(--paper-edge)", fontSize: 13, fontWeight: 800, color: "var(--ink)" };
-
-const bottomBar: CSSProperties = { display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", borderTop: "1px solid var(--paper-edge)", background: "var(--paper)", flexShrink: 0 };
-const selectionChip: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 7, padding: "4px 6px 4px 4px", borderRadius: 8, border: "1px solid var(--accent)", color: "var(--accent)", fontSize: 11.5, fontWeight: 800, background: "var(--fill-1, rgba(0,0,0,.03))", flexShrink: 0 };
+const canvasEmptyState: CSSProperties = { margin: "auto", color: "var(--muted-deep)", fontSize: 13, textAlign: "center" };
 const chipX: CSSProperties = { border: "none", background: "none", color: "inherit", cursor: "pointer", fontSize: 11, padding: 0 };
-const instructionInput: CSSProperties = { flex: 1, height: 34, border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper)", color: "var(--ink)", padding: "0 12px", fontSize: 13, outline: "none" };
-const diagBar: CSSProperties = { display: "flex", alignItems: "center", gap: 10, padding: "6px 14px", borderTop: "1px solid var(--paper-edge)", background: "var(--paper)", fontSize: 12, color: "var(--ink-soft)", flexShrink: 0 };
-const toastStyle: CSSProperties = { position: "absolute", bottom: 64, right: 18, padding: "9px 14px", borderRadius: 9, background: "var(--ink)", color: "var(--paper)", fontSize: 12, fontWeight: 700, zIndex: 20, maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+const toastStyle: CSSProperties = { position: "absolute", bottom: 18, right: 18, padding: "9px 14px", borderRadius: 9, background: "var(--ink)", color: "var(--paper)", fontSize: 12, fontWeight: 700, zIndex: 20, maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };

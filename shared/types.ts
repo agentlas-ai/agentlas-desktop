@@ -6,7 +6,7 @@ import type {
   MultimodalSettings,
 } from "./multimodal";
 import type { OberonTitleSpec } from "./oberon-titles";
-import type { SiteProjectMeta, SiteScreenMeta } from "./site-studio";
+import type { SiteConversationEntry, SiteProjectMeta, SiteProjectOperation, SiteScreenMeta, SiteWorkspaceHandoff } from "./site-studio";
 export type {
   OberonLowerThird,
   OberonSubtitleCue,
@@ -3468,6 +3468,10 @@ export interface AgentlasIpc {
    */
   site: {
     listProjects: () => Promise<SiteProjectMeta[]>;
+    /** Main-authoritative project mutex, used to restore busy UI after remount. */
+    operationStatus: (payload: { projectId: string }) => Promise<SiteProjectOperation | null>;
+    /** 사람이 읽는 Site Copilot 기록 — 내부 모델 프롬프트와 분리된 프로젝트별 영속 로그. */
+    listConversation: (payload: { projectId: string }) => Promise<SiteConversationEntry[]>;
     createProject: (payload: { name: string }) => Promise<SiteProjectMeta>;
     deleteProject: (payload: { projectId: string }) => Promise<{ ok: boolean }>;
     /** 화면 생성 — variants(1~3)만큼 시안을 만든다(순차 — 프로젝트 세션 공유). */
@@ -3479,15 +3483,17 @@ export interface AgentlasIpc {
       /** 스타일 참조 화면 — 같은 제품처럼 보이게 팔레트/타이포를 따라간다. */
       baseScreenId?: string;
       locale?: "ko" | "en";
-    }) => Promise<{ ok: boolean; screens?: SiteScreenMeta[]; engine?: string; reason?: string }>;
+    }) => Promise<{ ok: boolean; screens?: SiteScreenMeta[]; engine?: string; feedback?: string; reason?: string }>;
     /** 선택 요소 부분 patch 우선 수정. selectionId = data-agentlas-id. */
     editScreen: (payload: {
       projectId: string;
       screenId: string;
       instruction: string;
       selectionId?: string;
+      /** 사용자에게 보이는 선택 대상 식별자 — 내부 HTML 프롬프트와 분리해 대화 로그에만 저장. */
+      selectionContext?: string;
       locale?: "ko" | "en";
-    }) => Promise<{ ok: boolean; screen?: SiteScreenMeta; engine?: string; mode?: "patch" | "full"; reason?: string }>;
+    }) => Promise<{ ok: boolean; screen?: SiteScreenMeta; engine?: string; mode?: "patch" | "full"; feedback?: string; reason?: string }>;
     readScreen: (payload: { projectId: string; screenId: string }) => Promise<{ ok: boolean; html?: string; reason?: string }>;
     /** 렌더 직전 태깅+오버레이/CSP 주입 — iframe srcDoc으로 쓸 HTML과 nonce 반환. */
     prepareRender: (payload: { projectId: string; screenId: string }) => Promise<{ ok: boolean; renderHtml?: string; nonce?: string; reason?: string }>;
@@ -3497,6 +3503,12 @@ export interface AgentlasIpc {
     captureRect: (payload: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean; dataUrl?: string; reason?: string }>;
     exportScreen: (payload: { projectId: string; screenId: string }) => Promise<{ ok: boolean; path?: string; canceled?: boolean; reason?: string }>;
     exportProjectZip: (payload: { projectId: string }) => Promise<{ ok: boolean; path?: string; canceled?: boolean; reason?: string }>;
+    /** 사용자가 직접 고른 작업공간에 디자인 리비전을 기록하고 Build 입력으로 이어간다. */
+    handoffToWorkspace: (payload: {
+      projectId: string;
+      workspaceGrant: FsPathGrant;
+      locale?: "ko" | "en";
+    }) => Promise<{ ok: boolean; handoff?: SiteWorkspaceHandoff; reason?: string }>;
     /** 활성 런타임 존재 여부 + 붙어 있는 Hub 에이전트 슬러그. */
     contentAvailable: () => Promise<{ ready: boolean; agent: string }>;
   };
@@ -3883,6 +3895,8 @@ export interface AgentlasIpc {
       agentGroupId?: string | null;
       projectId?: string | null;
       title?: string;
+      /** 새 컨텍스트지만 기존 채팅의 main-owned 작업 폴더를 이어받는다. */
+      continueFromChatId?: string | null;
     }) => Promise<Chat>;
     rename: (id: string, title: string) => Promise<Chat>;
     /** 채팅의 에이전트 변경. firm 채팅이면 firm 해제 후 개별 에이전트 모드로 전환 */

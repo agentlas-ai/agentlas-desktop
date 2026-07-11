@@ -38,6 +38,48 @@ export type SiteProjectMeta = {
   screens: SiteScreenMeta[];
 };
 
+export type SiteProjectOperation = "generate" | "edit" | "handoff";
+
+/**
+ * 사람이 읽는 Site Copilot 대화 기록. 런타임에 넘기는 내부 HTML 프롬프트와 분리해
+ * 프로젝트 폴더에만 저장한다. 따라서 재시작 뒤에도 사용자에게는 짧은 피드백만 복원된다.
+ */
+export type SiteConversationEntry = {
+  id: string;
+  projectId: string;
+  role: "user" | "assistant";
+  text: string;
+  createdAt: string;
+  /** 사용자가 선택해 수정한 대상의 짧은 식별자. */
+  context?: string | null;
+};
+
+/**
+ * Site Studio에서 사용자가 고른 로컬 작업공간으로 넘긴 불변 디자인 리비전.
+ * 실제 경로는 선택한 워크스페이스 내부의 상대 경로만 공개해, Build 프롬프트가
+ * 어느 파일을 시각 기준으로 삼아야 하는지 명확히 한다.
+ */
+export type SiteWorkspaceHandoff = {
+  projectId: string;
+  revision: string;
+  /** 워크스페이스 루트 기준의 디자인 레퍼런스 폴더. */
+  relativePath: string;
+  screenCount: number;
+  /** Build 입력칸에 그대로 이어지는 사용자용 구현 요청. */
+  buildPrompt: string;
+};
+
+/**
+ * Site 실행 중 renderer로만 보내는 실시간 상태. 실제 처리 단계와 사용자용 피드백만
+ * 노출하며, 모델의 비공개 추론이나 내부 프롬프트/HTML은 담지 않는다.
+ */
+export type SiteActivityEvent =
+  | { type: "message"; projectId: string; runId: string; entry: SiteConversationEntry }
+  | { type: "status"; projectId: string; runId: string; text: string }
+  | { type: "feedback-reset"; projectId: string; runId: string }
+  | { type: "feedback-delta"; projectId: string; runId: string; delta: string }
+  | { type: "complete"; projectId: string; runId: string };
+
 export type SiteSelectionRect = {
   x: number;
   y: number;

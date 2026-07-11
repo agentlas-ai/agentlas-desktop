@@ -69,12 +69,12 @@ the [Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/rel
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
 
-- **2026-07-11 · v0.7.32 runtime stability** — automation watchdogs now
-  distinguish ordinary idle time from a known active tool, runtime child pipes
-  tolerate expected early close without an uncaught `EPIPE`, Hub bookmarks
-  reconcile into Chat without a delayed initial snapshot hiding them, and the
-  signed release passed macOS notarization/Gatekeeper plus Windows and Linux
-  packaging gates.
+- **2026-07-11 · v0.7.33 pre-mobile production hardening** — a passed Build now
+  becomes a durable local asset and appears in Dashboard, My Agents, and Chat
+  without reload; Site Studio adds persistent conversational design and a safe
+  Build handoff; Chat context reset, run receipts, automation watchdogs, browser
+  ownership, Hub bookmarks, and Runtime Readiness are covered by signed-release
+  regression gates.
 
 - **2026-06-30 · v0.5.5 Hephaestus v1.0.4 engine pin** — desktop builds now
   bundle the tagged Hephaestus `v1.0.4` router fix, excluding plugins from

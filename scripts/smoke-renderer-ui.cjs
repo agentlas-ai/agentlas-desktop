@@ -65,9 +65,19 @@ const seedSystem = {
   tagline: "요청을 라우팅합니다.",
   taglineEn: "Routes requests.",
   kind: "agent",
-  visibility: "local",
+  visibility: "background",
 };
-const seedRoster = [seedSystem, seedAgent, seedTeam, seedBackground];
+const seedUserNamedLikeSystem = {
+  id: "agent-user-orchestrator-1",
+  slug: "local-app-builder",
+  name: "My App Builder Orchestrator",
+  nameEn: "My App Builder Orchestrator",
+  tagline: "Governance and packaging assistant",
+  taglineEn: "Governance and packaging assistant",
+  kind: "agent",
+  visibility: "visible",
+};
+const seedRoster = [seedSystem, seedAgent, seedTeam, seedBackground, seedUserNamedLikeSystem];
 
 // ---------------------------------------------------------------------------
 // 1) logic — 실제 agent-visibility.ts를 트랜스파일해 실행 (사본 재구현 금지)
@@ -93,8 +103,8 @@ function runLogicChecks() {
   const withTeams = visibleAgents(seedRoster, { includeTeams: true });
   assert.deepEqual(
     withTeams.map((a) => a.id),
-    [seedAgent.id, seedTeam.id],
-    "visibleAgents({includeTeams:true}) must keep the team and the normal agent, and hide background/system agents",
+    [seedAgent.id, seedTeam.id, seedUserNamedLikeSystem.id],
+    "authoritative visibility must keep user assets even when their names contain internal-looking words",
   );
   assert.equal(isVisibleAgent(seedTeam, { includeTeams: true }), true, "team entity must be visible when includeTeams is true");
 
@@ -103,7 +113,7 @@ function runLogicChecks() {
   const defaults = visibleAgents(seedRoster);
   assert.deepEqual(
     defaults.map((a) => a.id),
-    [seedAgent.id],
+    [seedAgent.id, seedUserNamedLikeSystem.id],
     "default visibleAgents() excludes teams — call sites that need teams must opt in explicitly",
   );
 

@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.7.33 — 2026-07-11
+
+### Added
+
+- **Site Studio now keeps a durable design conversation.** Generate, inspect,
+  select, revise, and version screens with live user-facing feedback, then hand
+  an immutable design revision into Build without overwriting an active build.
+- **Agent Trust readiness is visible on Dashboard.** The runtime panel reports
+  the actual local engine, host runtimes, Cloud session, and Hub callability
+  boundaries without presenting package security grades as creator reputation.
+
+### Fixed
+
+- **A successful Build becomes a local asset immediately.** Registration no
+  longer waits on a second unbounded LLM classification. A passed package is
+  committed to the installed-agent registry and, for teams, its firm and org in
+  one transaction; Dashboard, My Agents, and Chat reconcile without reload in
+  both fast and delayed completion paths.
+- **Agent names are not mistaken for hidden system workers.** User-owned agents
+  named “Orchestrator”, “App Builder”, “Packager”, or “Governance” follow the
+  explicit visibility field. Background built-ins remain hidden.
+- **Re-import and security transitions stay consistent.** Concurrent automatic
+  and manual imports are single-flight, stale Build completions cannot mutate a
+  newer session, a passed re-scan resumes registration once, route rollback is
+  atomic, and team-to-single changes remove obsolete organization projections.
+- **Chat reset is an atomic context reset.** `/clear` removes messages and every
+  local runtime resume pointer together, rejects active runs, invalidates stale
+  recap/steering state, and keeps the approved working folder. Completed run
+  receipts collapse while failed or interrupted receipts remain open.
+- **Site and T-rex state survive real product transitions.** Site transcripts
+  use atomic replacement and surface corruption instead of overwriting it;
+  project operations remain locked across page remounts; T-rex labels and model
+  choices follow the selected language.
+- **Signed release gates cover the new contracts.** macOS release CI now blocks
+  on local import, Build roster synchronization, Site Studio durability, Chat
+  reset, T-rex locale, automation watchdog, browser ownership, Hub bookmark,
+  and Runtime Readiness regressions.
+
 ## 0.7.32 — 2026-07-11
 
 ### Fixed

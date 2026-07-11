@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import type { SiteActivityEvent } from "../shared/site-studio";
 import { clearDetectCache, detectRuntimes, setActiveRuntime } from "./runtime/detect";
 import { agentRunCwd } from "./runtime/exec";
 import { listRuntimeModels } from "./runtime/providers";
@@ -185,7 +186,7 @@ import {
 } from "./store/projects";
 import {
   archiveChat,
-  clearChatMessages,
+  clearChatContext,
   createChat,
   getChat,
   getChatWorkingFolder,
@@ -686,26 +687,59 @@ export function registerIpcHandlers(): void {
     const { listSiteProjects } = await import("./site/store");
     return listSiteProjects();
   });
+  ipcMain.handle("site:operationStatus", async (_e, payload: { projectId?: string }) => {
+    const { activeSiteProjectOperation } = await import("./site/operation-lock");
+    return activeSiteProjectOperation(String(payload?.projectId ?? ""));
+  });
+  ipcMain.handle("site:listConversation", async (_e, payload: { projectId?: string }) => {
+    const { listSiteConversation } = await import("./site/store");
+    return listSiteConversation(String(payload?.projectId ?? ""));
+  });
   ipcMain.handle("site:createProject", async (_e, payload: { name?: string }) => {
     const { createSiteProject } = await import("./site/store");
     return createSiteProject(String(payload?.name ?? ""));
   });
   ipcMain.handle("site:deleteProject", async (_e, payload: { projectId?: string }) => {
+    const projectId = String(payload?.projectId ?? "");
+    const { assertSiteProjectIdle } = await import("./site/operation-lock");
+    assertSiteProjectIdle(projectId);
     const { deleteSiteProject } = await import("./site/store");
-    deleteSiteProject(String(payload?.projectId ?? ""));
+    deleteSiteProject(projectId);
     return { ok: true };
   });
   ipcMain.handle(
     "site:generateScreen",
-    async (_e, payload: { projectId?: string; brief?: string; variants?: number; styleHint?: string; baseScreenId?: string; locale?: string }) => {
+    async (e, payload: { projectId?: string; brief?: string; variants?: number; styleHint?: string; baseScreenId?: string; locale?: string }) => {
+      const runId = randomUUID();
+      const projectId = String(payload?.projectId ?? "");
+      let releaseSiteOperation: (() => void) | null = null;
+      const emit = (event: SiteActivityEvent) => {
+        if (!e.sender.isDestroyed()) e.sender.send("site:activity", event);
+      };
+      const status = (text: string) => emit({ type: "status", projectId, runId, text });
       try {
+        const { tryAcquireSiteProjectOperation } = await import("./site/operation-lock");
+        releaseSiteOperation = tryAcquireSiteProjectOperation(projectId, "generate");
+        if (!releaseSiteOperation) {
+          return {
+            ok: false,
+            reason: payload?.locale === "en" ? "Another Site project operation is already running." : "이 Site 프로젝트에서 다른 작업이 진행 중입니다.",
+          };
+        }
         const { generateSiteScreen } = await import("./site/generate");
-        const { getSiteProject, readSiteScreenHtml, saveSiteScreen } = await import("./site/store");
-        const projectId = String(payload?.projectId ?? "");
+        const { appendSiteConversation, getSiteProject, readSiteScreenHtml, saveSiteScreen } = await import("./site/store");
         const brief = String(payload?.brief ?? "");
         const locale = payload?.locale === "en" ? ("en" as const) : ("ko" as const);
         const variants = Math.max(1, Math.min(3, Number(payload?.variants ?? 1)));
         getSiteProject(projectId); // 존재 검증
+        const userEntry = appendSiteConversation({
+          projectId,
+          role: "user",
+          text: brief,
+          context: payload?.baseScreenId ? (locale === "ko" ? "현재 버전을 바탕으로 새 버전" : "New version from the current version") : null,
+        });
+        emit({ type: "message", projectId, runId, entry: userEntry });
+        status(locale === "ko" ? "웹앱 디자인 마스터에 새 화면을 요청하는 중…" : "Sending the new screen request to the design master…");
         let baseHtml: string | null = null;
         if (payload?.baseScreenId) {
           try {
@@ -719,6 +753,15 @@ export function registerIpcHandlers(): void {
         // 시안은 순차 실행 — 프로젝트 division 세션(대화 맥락)을 공유하므로 동시 실행 금지.
         const runs: Awaited<ReturnType<typeof generateSiteScreen>>[] = [];
         for (let i = 0; i < variants; i += 1) {
+          status(
+            variants > 1
+              ? locale === "ko"
+                ? `시안 ${labels[i]}의 방향을 설계하는 중…`
+                : `Designing the direction for variant ${labels[i]}…`
+              : locale === "ko"
+                ? "제품의 시각 언어와 화면 구조를 설계하는 중…"
+                : "Designing the product's visual language and screen structure…",
+          );
           runs.push(
             await generateSiteScreen({
               projectId,
@@ -729,13 +772,26 @@ export function registerIpcHandlers(): void {
                 [payload?.styleHint, variants > 1 ? `Variant ${labels[i]}: take a distinctly different visual direction from the other variants.` : null]
                   .filter(Boolean)
                   .join(" ") || null,
+              activity: {
+                onStatus: status,
+                onFeedbackReset: () => emit({ type: "feedback-reset", projectId, runId }),
+                onFeedbackDelta: (delta) => emit({ type: "feedback-delta", projectId, runId, delta }),
+              },
             }),
           );
         }
         const okRuns = runs.filter((r) => r.ok && r.html);
         if (!okRuns.length) {
-          return { ok: false, reason: runs[0]?.reason ?? "generation-failed" };
+          const reason = runs[0]?.reason ?? "generation-failed";
+          const assistantEntry = appendSiteConversation({
+            projectId,
+            role: "assistant",
+            text: (locale === "ko" ? "시안을 만들지 못했습니다: " : "I could not create a version: ") + reason,
+          });
+          emit({ type: "message", projectId, runId, entry: assistantEntry });
+          return { ok: false, reason };
         }
+        status(locale === "ko" ? "생성 결과를 검증하고 버전 탭에 저장하는 중…" : "Validating the result and saving it to the version tabs…");
         const baseName = brief.replace(/\s+/g, " ").trim().slice(0, 24) || "화면";
         const screens = okRuns.map((r, i) =>
           saveSiteScreen({
@@ -746,35 +802,130 @@ export function registerIpcHandlers(): void {
             variantLabel: okRuns.length > 1 ? labels[i] : null,
           }),
         );
-        return { ok: true, screens, engine: okRuns[0].engine };
+        const feedback = okRuns
+          .map((run, index) => {
+            const label = okRuns.length > 1 ? `${locale === "ko" ? "시안" : "Variant"} ${labels[index]}` : null;
+            const text = run.feedback || (locale === "ko" ? "화면을 완성하고 렌더 계약을 통과했습니다." : "The screen is ready and passed the render contract.");
+            return label ? `${label}\n${text}` : text;
+          })
+          .join("\n\n");
+        const assistantEntry = appendSiteConversation({ projectId, role: "assistant", text: feedback });
+        emit({ type: "message", projectId, runId, entry: assistantEntry });
+        return { ok: true, screens, engine: okRuns[0].engine, feedback };
       } catch (err) {
-        return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+        const reason = err instanceof Error ? err.message : String(err);
+        try {
+          const { appendSiteConversation } = await import("./site/store");
+          const entry = appendSiteConversation({
+            projectId,
+            role: "assistant",
+            text: (payload?.locale === "en" ? "I could not create that version: " : "새 버전을 만들지 못했습니다: ") + reason,
+          });
+          emit({ type: "message", projectId, runId, entry });
+        } catch {
+          // 프로젝트 생성 전 오류처럼 대화 파일을 만들 수 없는 경우에는 원래 오류만 반환한다.
+        }
+        return { ok: false, reason };
+      } finally {
+        releaseSiteOperation?.();
+        emit({ type: "complete", projectId, runId });
       }
     },
   );
   ipcMain.handle(
     "site:editScreen",
-    async (_e, payload: { projectId?: string; screenId?: string; instruction?: string; selectionId?: string; locale?: string }) => {
+    async (e, payload: { projectId?: string; screenId?: string; instruction?: string; selectionId?: string; selectionContext?: string; locale?: string }) => {
+      const runId = randomUUID();
+      const projectId = String(payload?.projectId ?? "");
+      let releaseSiteOperation: (() => void) | null = null;
+      const emit = (event: SiteActivityEvent) => {
+        if (!e.sender.isDestroyed()) e.sender.send("site:activity", event);
+      };
+      const status = (text: string) => emit({ type: "status", projectId, runId, text });
       try {
+        const { tryAcquireSiteProjectOperation } = await import("./site/operation-lock");
+        releaseSiteOperation = tryAcquireSiteProjectOperation(projectId, "edit");
+        if (!releaseSiteOperation) {
+          return {
+            ok: false,
+            reason: payload?.locale === "en" ? "Another Site project operation is already running." : "이 Site 프로젝트에서 다른 작업이 진행 중입니다.",
+          };
+        }
         const { editSiteScreen } = await import("./site/generate");
-        const { readSiteScreenHtml, updateSiteScreenHtml } = await import("./site/store");
-        const projectId = String(payload?.projectId ?? "");
+        const { appendSiteConversation, readSiteScreenHtml, updateSiteScreenHtml } = await import("./site/store");
         const screenId = String(payload?.screenId ?? "");
+        const locale = payload?.locale === "en" ? "en" : "ko";
+        const instruction = String(payload?.instruction ?? "");
         const sourceHtml = readSiteScreenHtml(projectId, screenId);
+        const userEntry = appendSiteConversation({
+          projectId,
+          role: "user",
+          text: instruction,
+          context: payload?.selectionContext ?? null,
+        });
+        emit({ type: "message", projectId, runId, entry: userEntry });
+        status(
+          payload?.selectionId
+            ? locale === "ko"
+              ? "선택한 요소와 주변 레이아웃을 분석하는 중…"
+              : "Analyzing the selected element and its surrounding layout…"
+            : locale === "ko"
+              ? "현재 화면과 이전 피드백을 분석하는 중…"
+              : "Analyzing the current screen and prior feedback…",
+        );
         const result = await editSiteScreen({
           projectId,
           sourceHtml,
-          instruction: String(payload?.instruction ?? ""),
+          instruction,
           selectionId: payload?.selectionId ? String(payload.selectionId) : null,
-          locale: payload?.locale === "en" ? "en" : "ko",
+          locale,
+          activity: {
+            onStatus: status,
+            onFeedbackReset: () => emit({ type: "feedback-reset", projectId, runId }),
+            onFeedbackDelta: (delta) => emit({ type: "feedback-delta", projectId, runId, delta }),
+          },
         });
         if (!result.ok || !result.html) {
-          return { ok: false, reason: result.reason ?? "edit-failed", engine: result.engine };
+          const reason = result.reason ?? "edit-failed";
+          const assistantEntry = appendSiteConversation({
+            projectId,
+            role: "assistant",
+            text: (locale === "ko" ? "수정을 적용하지 못했습니다: " : "I could not apply that change: ") + reason,
+          });
+          emit({ type: "message", projectId, runId, entry: assistantEntry });
+          return { ok: false, reason, engine: result.engine };
         }
+        status(locale === "ko" ? "변경 사항을 검증하고 캔버스에 적용하는 중…" : "Validating the change and applying it to the canvas…");
         const screen = updateSiteScreenHtml(projectId, screenId, result.html);
-        return { ok: true, screen, engine: result.engine, mode: result.mode };
+        const feedback =
+          result.feedback ||
+          (result.mode === "patch"
+            ? locale === "ko"
+              ? "선택한 요소에만 요청을 반영했고, 나머지 화면의 시각 언어는 유지했습니다."
+              : "I applied the request only to the selected element and kept the rest of the visual language intact."
+            : locale === "ko"
+              ? "현재 화면 전체에 요청을 반영하고 렌더 계약을 다시 확인했습니다."
+              : "I applied the request across the current screen and rechecked the render contract.");
+        const assistantEntry = appendSiteConversation({ projectId, role: "assistant", text: feedback });
+        emit({ type: "message", projectId, runId, entry: assistantEntry });
+        return { ok: true, screen, engine: result.engine, mode: result.mode, feedback };
       } catch (err) {
-        return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+        const reason = err instanceof Error ? err.message : String(err);
+        try {
+          const { appendSiteConversation } = await import("./site/store");
+          const entry = appendSiteConversation({
+            projectId,
+            role: "assistant",
+            text: (payload?.locale === "en" ? "I could not apply that change: " : "수정을 적용하지 못했습니다: ") + reason,
+          });
+          emit({ type: "message", projectId, runId, entry });
+        } catch {
+          // 존재하지 않는 프로젝트/화면 오류는 원래 오류만 반환한다.
+        }
+        return { ok: false, reason };
+      } finally {
+        releaseSiteOperation?.();
+        emit({ type: "complete", projectId, runId });
       }
     },
   );
@@ -800,13 +951,19 @@ export function registerIpcHandlers(): void {
     }
   });
   ipcMain.handle("site:renameScreen", async (_e, payload: { projectId?: string; screenId?: string; name?: string }) => {
+    const projectId = String(payload?.projectId ?? "");
+    const { assertSiteProjectIdle } = await import("./site/operation-lock");
+    assertSiteProjectIdle(projectId);
     const { renameSiteScreen } = await import("./site/store");
-    const screen = renameSiteScreen(String(payload?.projectId ?? ""), String(payload?.screenId ?? ""), String(payload?.name ?? ""));
+    const screen = renameSiteScreen(projectId, String(payload?.screenId ?? ""), String(payload?.name ?? ""));
     return { ok: true, screen };
   });
   ipcMain.handle("site:deleteScreen", async (_e, payload: { projectId?: string; screenId?: string }) => {
+    const projectId = String(payload?.projectId ?? "");
+    const { assertSiteProjectIdle } = await import("./site/operation-lock");
+    assertSiteProjectIdle(projectId);
     const { deleteSiteScreen } = await import("./site/store");
-    deleteSiteScreen(String(payload?.projectId ?? ""), String(payload?.screenId ?? ""));
+    deleteSiteScreen(projectId, String(payload?.screenId ?? ""));
     return { ok: true };
   });
   // 선택 요소 썸네일 — 호스트 창을 창 좌표(rect, CSS px)로 크롭 캡처.
@@ -866,6 +1023,38 @@ export function registerIpcHandlers(): void {
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
   });
+  // Site 디자인을 실제 작업공간의 불변 레퍼런스 리비전으로 넘긴다. 렌더러가
+  // 전달한 경로는 신뢰하지 않고 네이티브 picker가 발급한 capability만 해석한다.
+  ipcMain.handle(
+    "site:handoffToWorkspace",
+    async (_e, payload: { projectId?: string; workspaceGrant?: import("../shared/types").FsPathGrant; locale?: string }) => {
+      let releaseSiteOperation: (() => void) | null = null;
+      try {
+        if (!payload?.workspaceGrant) throw new Error("작업공간 폴더를 먼저 선택해 주세요.");
+        const projectId = String(payload?.projectId ?? "");
+        const { tryAcquireSiteProjectOperation } = await import("./site/operation-lock");
+        releaseSiteOperation = tryAcquireSiteProjectOperation(projectId, "handoff");
+        if (!releaseSiteOperation) {
+          return {
+            ok: false,
+            reason: payload?.locale === "en" ? "Another Site project operation is already running." : "이 Site 프로젝트에서 다른 작업이 진행 중입니다.",
+          };
+        }
+        const workspacePath = pathFromGrant(payload.workspaceGrant, "directory");
+        const { handoffSiteProjectToWorkspace } = await import("./site/workspace-handoff");
+        const handoff = handoffSiteProjectToWorkspace({
+          projectId,
+          workspacePath,
+          locale: payload?.locale === "en" ? "en" : "ko",
+        });
+        return { ok: true, handoff };
+      } catch (err) {
+        return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+      } finally {
+        releaseSiteOperation?.();
+      }
+    },
+  );
   ipcMain.handle("site:contentAvailable", async () => {
     const { siteEngineStatus } = await import("./site/generate");
     return siteEngineStatus();
@@ -1543,6 +1732,7 @@ export function registerIpcHandlers(): void {
         agentGroupId?: string | null;
         projectId?: string | null;
         title?: string;
+        continueFromChatId?: string | null;
       },
     ) => createChat(input),
   );
@@ -2284,7 +2474,13 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle("invoke:history", (_e, chatId: string) => listChatMessages(chatId));
   ipcMain.handle("invoke:clearHistory", (_e, chatId: string) => {
-    clearChatMessages(chatId);
+    // Renderer busy는 projection일 뿐 권위가 아니다. attach가 끝나기 전의 창에서도
+    // main registry가 run/cancelling을 보유하면 clear를 거부해 terminal event가
+    // 빈 대화에 다시 쓰이는 race를 막는다.
+    if (activeChatIds().includes(chatId)) {
+      throw new Error("This conversation is still running. Stop it and wait for cancellation to finish before clearing it.");
+    }
+    clearChatContext(chatId);
   });
 
   // ── Hephaestus 엔진 브리지 ──────────────────────────────────────────────

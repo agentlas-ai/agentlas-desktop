@@ -126,6 +126,8 @@ export function createChat(input: {
   agentGroupId?: string | null;
   projectId?: string | null;
   title?: string;
+  /** 새 문맥을 시작하되, 기존 채팅이 승인받은 작업 폴더만 이어받는다. */
+  continueFromChatId?: string | null;
   /** 'user'(기본, 사이드바 노출) | 'division'(백그라운드 본부 세션, 숨김) */
   kind?: "user" | "division";
   /** 본부 세션 → 부모 firm 채팅 링크 */
@@ -156,14 +158,23 @@ export function createChat(input: {
     throw new Error(ko ? "새 채팅에는 agentId 또는 firmId가 필요합니다" : "A new chat needs an agentId or firmId");
   }
 
+  // renderer가 임의 경로를 넘기지 않는다. 이전 채팅에 main이 이미 저장한 작업 폴더만
+  // 복사해 새 세션도 같은 로컬 작업공간에서 바로 이어갈 수 있게 한다.
+  let continuedWorkingFolder: string | null = null;
+  if (input.continueFromChatId) {
+    const source = getChat(input.continueFromChatId);
+    if (!source) throw new Error(ko ? "이어갈 이전 채팅을 찾을 수 없습니다" : "Could not find the chat to continue from");
+    continuedWorkingFolder = getChatWorkingFolder(source.id);
+  }
+
   const id = randomUUID();
   const now = new Date().toISOString();
   // title은 빈 문자열로 저장 — UI 표시 시 locale에 따라 "새 채팅" / "New chat"으로 표시.
   // 첫 user 메시지 도착 시 autoTitleFromFirstMessage가 채움.
   getDb()
     .prepare(
-      `INSERT INTO chats (id, project_id, firm_id, agent_group_id, agent_id, title, kind, parent_chat_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO chats (id, project_id, firm_id, agent_group_id, agent_id, title, kind, parent_chat_id, working_folder, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -174,6 +185,7 @@ export function createChat(input: {
       input.title?.trim() ?? "",
       input.kind ?? "user",
       input.parentChatId ?? null,
+      continuedWorkingFolder,
       now,
       now,
     );
@@ -426,6 +438,21 @@ export function getLastChatMessage(chatId: string): ChatHistoryEntry | null {
 
 export function clearChatMessages(chatId: string): void {
   getDb().prepare("DELETE FROM chat_messages WHERE chat_id = ?").run(chatId);
+}
+
+/**
+ * 사용자가 /clear를 요청하면 화면 메시지와 CLI resume 포인터가 반드시 함께
+ * 사라져야 한다. 둘 중 하나만 지우면 빈 화면에서 이전 provider 세션을 다시
+ * 이어가는 거짓 성공이 되므로 같은 SQLite transaction으로 처리한다.
+ */
+export function clearChatContext(chatId: string): void {
+  const db = getDb();
+  const clear = db.transaction((targetChatId: string) => {
+    db.prepare("DELETE FROM chat_runtime_sessions WHERE chat_id = ?").run(targetChatId);
+    db.prepare("DELETE FROM chat_messages WHERE chat_id = ?").run(targetChatId);
+    db.prepare("UPDATE chats SET last_viewed_at = ? WHERE id = ?").run(new Date().toISOString(), targetChatId);
+  });
+  clear(chatId);
 }
 
 export function autoTitleFromFirstMessage(chatId: string, firstMessage: string): void {

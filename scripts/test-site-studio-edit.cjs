@@ -3,8 +3,10 @@
 // 검증: 선택 id → 소스 범위 재해석 → 모델 응답(부분 블록/전체 문서) 적용 → 계약 검증.
 // "선택한 버튼 텍스트 변경" 왕복이 splice 수준에서 정확함을 증명한다.
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 
-const { resolveSiteSelection, applySiteEditReply, extractElementBlockFromReply } = require("../dist/electron/site/generate.js");
+const { resolveSiteSelection, applySiteEditReply, extractElementBlockFromReply, extractSiteFeedbackFromReply } = require("../dist/electron/site/generate.js");
 const { tagSiteHtml } = require("../dist/electron/site/html-tagger.js");
 
 const SOURCE = [
@@ -52,6 +54,21 @@ const retagged = tagSiteHtml(patched.html);
 const retagIds = retagged.elements.map((e) => e.id);
 assert.equal(new Set(retagIds).size, retagIds.length, "patched html must retag with unique ids");
 
+// ── 사용자용 디자인 피드백 block ───────────────────────────
+const feedbackReply = [
+  "<agentlas-feedback>",
+  "CTA를 더 눈에 띄게 만들고, 기존 카드 여백은 유지했습니다.",
+  "이 변경은 전환 행동을 더 분명하게 만듭니다.",
+  "</agentlas-feedback>",
+  "```html",
+  '<button class="cta" style="font-size:18px;background:#e8590c">지금 시작하기</button>',
+  "```",
+].join("\n");
+assert.match(extractSiteFeedbackFromReply(feedbackReply), /CTA를 더 눈에 띄게/, "feedback block must be available for the visible Copilot transcript");
+const feedbackPatched = applySiteEditReply(SOURCE, selection, feedbackReply, "agy");
+assert.equal(feedbackPatched.ok, true, "feedback block before an HTML patch must not break the patch contract");
+assert.ok(feedbackPatched.html.includes("지금 시작하기"), "patch still applies after the feedback block");
+
 // ── 전체 문서 폴백 ──────────────────────────────────────────
 const FULL = "<!doctype html><html><head><style>body{margin:0}</style></head><body><h1>새 화면</h1></body></html>";
 const full = applySiteEditReply(SOURCE, selection, "전체를 다시 짰습니다.\n```html\n" + FULL + "\n```", "codex");
@@ -72,5 +89,9 @@ assert.equal(evil.ok, false, "patch that injects external resources must be reje
 assert.equal(extractElementBlockFromReply("```html\n<div>x</div>\n```", "button"), null, "wrong-tag block must not match");
 // 닫히지 않은 블록도 불성립.
 assert.equal(extractElementBlockFromReply("```html\n<button>x\n```", "button"), null, "unclosed block must not match");
+
+const generatorSource = fs.readFileSync(path.join(__dirname, "..", "electron/site/generate.ts"), "utf8");
+assert.doesNotMatch(generatorSource, /Now output the single fenced HTML document\./, "final generation instruction must not contradict the required feedback block");
+assert.match(generatorSource, /required feedback block followed by the single fenced HTML document/, "generation prompt must keep feedback and HTML in one consistent contract");
 
 console.log("site studio select-to-edit contract ok");

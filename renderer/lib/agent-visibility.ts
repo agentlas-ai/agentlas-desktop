@@ -15,9 +15,9 @@ export interface VisibleAgentOptions {
 export function isVisibleAgent(agent: InstalledAgent, opts?: VisibleAgentOptions): boolean {
   if (agent.visibility === "background" || agent.visibility === "private") return false;
   if (!opts?.includeTeams && (agent.kind ?? "agent") === "team") return false;
-  if (!isUserFacingAgentText(agent.slug)) return false;
-  if (!isUserFacingAgentText(agent.name, agent.nameEn)) return false;
-  if (!isUserFacingAgentText(agent.tagline, agent.taglineEn)) return false;
+  // Installed assets have an authoritative visibility column. Never hide a
+  // user-owned agent merely because its chosen name contains "orchestrator",
+  // "app builder", "governance", or another internal-looking word.
   return true;
 }
 

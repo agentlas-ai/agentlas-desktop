@@ -24,9 +24,8 @@ export function dedupeAgentsById(list: InstalledAgent[]): InstalledAgent[] {
 
 export function isRosterVisibleAgent(agent: InstalledAgent): boolean {
   if (agent.visibility === "background" || agent.visibility === "private") return false;
-  if (!isUserFacingAgentText(agent.slug)) return false;
-  if (!isUserFacingAgentText(agent.name, agent.nameEn)) return false;
-  if (!isUserFacingAgentText(agent.tagline, agent.taglineEn)) return false;
+  // The DB visibility flag is the authority for installed assets. Text-based
+  // filtering is reserved for generated org nodes that have no such metadata.
   return true;
 }
 

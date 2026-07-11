@@ -84,9 +84,17 @@ async function main() {
       console.log("desktop memory/evolution surface smoke passed");
       return;
     }
+    if (process.argv.includes("--build-roster-sync-only")) {
+      await runBuildRosterSyncSurface(browser, baseUrl, evidence);
+      await runBuildRosterReplaySurface(browser, baseUrl, evidence);
+      console.log("desktop Build roster sync surface smoke passed");
+      return;
+    }
     await runSurface("dashboard-first-visit", () => runDashboardFirstVisitTourSurface(browser, baseUrl, evidence));
     await runSurface("dashboard-attention", () => runDashboardAttentionSurface(browser, baseUrl, evidence));
     await runSurface("build", () => runBuildSurface(browser, baseUrl, evidence));
+    await runSurface("build-roster-sync", () => runBuildRosterSyncSurface(browser, baseUrl, evidence));
+    await runSurface("build-roster-replay", () => runBuildRosterReplaySurface(browser, baseUrl, evidence));
     await runSurface("build-interview", () => runBuildInterviewSurface(browser, baseUrl, evidence));
     await runSurface("build-cancel", () => runBuildCancelSurface(browser, baseUrl, evidence));
     await runSurface("library", () => runLibrarySurface(browser, baseUrl, evidence));
@@ -230,6 +238,56 @@ async function runBuildSurface(browser, baseUrl, evidence) {
   assert.ok(calls.some((call) => call.name === "hephaestus.publish" && call.payload.visibility === "marketplace"));
 
   await finishPage(context, page, errors, evidence, "build-surface");
+}
+
+async function runBuildRosterSyncSurface(browser, baseUrl, evidence) {
+  return runBuildRosterSurface(browser, baseUrl, evidence, {
+    importDelayMs: 1400,
+    evidenceName: "build-roster-sync",
+    waitForRegistrationBeforeNavigation: false,
+  });
+}
+
+async function runBuildRosterReplaySurface(browser, baseUrl, evidence) {
+  return runBuildRosterSurface(browser, baseUrl, evidence, {
+    importDelayMs: 0,
+    evidenceName: "build-roster-replay",
+    waitForRegistrationBeforeNavigation: true,
+  });
+}
+
+async function runBuildRosterSurface(browser, baseUrl, evidence, options) {
+  const { context, page, errors } = await newPage(browser, { importDelayMs: options.importDelayMs });
+  await page.goto(`${baseUrl}/build.html`, { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: /생성 폴더 선택|Choose output folder/ }).click();
+  await page.getByText(/tmp\/agentlas-qa|agentlas-qa/).waitFor();
+  await page.getByRole("button", { name: /단일 에이전트|Single agent/ }).click();
+  const textarea = page.locator("textarea").first();
+  await textarea.fill("즉시 등록 검증 에이전트");
+  await page.getByRole("button", { name: /딥인터뷰로 빌드 시작|Start build/ }).click();
+  await page.getByText(/패키지 준비됨|Package ready/).waitFor({ timeout: 7000 });
+  await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "team.importLocalFolder"));
+  if (options.waitForRegistrationBeforeNavigation) {
+    await page.getByText(/패키지 준비됨 · 조직도에 추가됨|Package ready · added to org chart/).waitFor({ timeout: 5000 });
+  }
+
+  const navigationEntriesBefore = await page.evaluate(() => performance.getEntriesByType("navigation").length);
+  await page.locator('a[href="/dashboard"]').first().click();
+  await page.waitForURL(/\/dashboard(?:\.html)?$/);
+  await page.getByText(/가져온 QA 에이전트|Imported QA Agent/).first().waitFor({ timeout: 5000 });
+  assert.equal(
+    await page.evaluate(() => performance.getEntriesByType("navigation").length),
+    navigationEntriesBefore,
+    "the mounted org chart must update after registration without a page reload",
+  );
+
+  await page.getByRole("button", { name: /에이전트 클라우드|Agent Cloud/ }).click();
+  const agentLink = page.locator('a[href="/library/agents"]').first();
+  await agentLink.click();
+  await page.waitForURL(/\/library\/agents/);
+  await page.getByText(/가져온 QA 에이전트|Imported QA Agent/).first().waitFor({ timeout: 5000 });
+  await expectDataActive(page.getByRole("button", { name: /싱글 · 에이전트|Single · agents/ }), "true");
+  await finishPage(context, page, errors, evidence, options.evidenceName);
 }
 
 async function runDashboardAttentionSurface(browser, baseUrl, evidence) {

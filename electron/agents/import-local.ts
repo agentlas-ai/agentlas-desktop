@@ -8,11 +8,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
-import { setRoute, listRoutes, type RuntimeLabel } from "./routes";
-import { upsertLocalTeamFirm } from "../store/firms";
-import { analyzeFolder } from "./org-resolver";
+import { removeRoute, replaceRoute, listRoutes, type RuntimeLabel } from "./routes";
+import { getFirmBySlug, upsertLocalTeamFirm } from "../store/firms";
 import { scanAgentFolder, type FolderScan, type ScanMember } from "./folder-scan";
-import { saveResolvedOrg } from "../store/org-spec";
+import { clearResolvedOrg, saveResolvedOrg } from "../store/org-spec";
 import { detectEnvRequirementsFromFolder } from "./env-detect";
 import type { FirmOrgNode, InstalledAgent, InstalledFirm, ResolvedOrg } from "../../shared/types";
 import { currentUiLocale } from "../ui-locale";
@@ -346,6 +345,8 @@ export interface LocalImportResult {
   labels: RuntimeLabel[];
   kind: "agent" | "team";
   path: string;
+  /** Team imports are not complete until the matching firm/org projection exists. */
+  firmId?: string;
 }
 
 /** 팀 폴더의 부서/멤버 목록 — 흔한 컨테이너 디렉토리, 없으면 에이전트 정의를 가진 하위 폴더.
@@ -442,18 +443,33 @@ function registerTeamAsFirm(
       ...depts.map((d) => ({ agentSlug: `${slug}-${d}`, agentId: "", role: deptLabel(d), reportsTo: slug })),
     ];
   }
-  try {
-    return upsertLocalTeamFirm({ slug: `firm-${slug}`, name, tagline, ceoAgentId: agentId, orgChart });
-  } catch (err) {
-    console.error("[import] registerTeamAsFirm failed:", err);
-    return null;
-  }
+  return upsertLocalTeamFirm({ slug: `firm-${slug}`, name, tagline, ceoAgentId: agentId, orgChart });
+}
+
+const localImportInFlight = new Map<string, Promise<LocalImportResult>>();
+
+/**
+ * 같은 폴더에 Build 자동 등록과 사용자의 수동 "조직도에서 열기"가 겹쳐도
+ * 하나의 durable commit만 수행한다.
+ */
+export function importLocalFolder(
+  absPath: string,
+  locale: "ko" | "en" = currentUiLocale(),
+): Promise<LocalImportResult> {
+  const key = path.resolve(absPath);
+  const existing = localImportInFlight.get(key);
+  if (existing) return existing;
+  const task = importLocalFolderOnce(key, locale).finally(() => {
+    if (localImportInFlight.get(key) === task) localImportInFlight.delete(key);
+  });
+  localImportInFlight.set(key, task);
+  return task;
 }
 
 /** 로컬 폴더를 분석·등록하고 라우팅 저장. 원본 파일은 건드리지 않는다. */
-export async function importLocalFolder(
+async function importLocalFolderOnce(
   absPath: string,
-  locale: "ko" | "en" = currentUiLocale(),
+  locale: "ko" | "en",
 ): Promise<LocalImportResult> {
   const ko = locale === "ko";
   const selected = path.resolve(absPath);
@@ -488,10 +504,10 @@ export async function importLocalFolder(
   const scan: FolderScan = scanAgentFolder(dir);
   // 팀 이름: manifest name → 정체성 파일 헤딩 → 폴더명 (CLAUDE.md 어댑터 헤딩은 최후순위로 걸러짐)
   const name = scan.manifestName || readName(dir);
-  // 활성 LLM(CLI/BYOK)으로 폴더를 인식 — 단일 에이전트 vs 팀 + 3-tier 구조. 하드코딩 폴더명 매칭 아님.
-  // 런타임이 없거나 실패하면 null → 결정적 스캐너/휴리스틱(detectKind)으로 폴백.
-  const analysis = await analyzeFolder(dir, name).catch(() => null);
-  let kind = analysis ? analysis.kind : scan.kind === "team" ? "team" : detectKind(dir);
+  // 등록은 로컬 DB 반영의 일부다. 여기서 활성 LLM을 다시 호출하면 Build가 이미 끝난
+  // 뒤에도 수분간 조직도 등록이 멈출 수 있다. 결정적 스캐너가 즉시 권위 판정을 내리고,
+  // 사용자가 명시적으로 조직 정밀 분석을 요청할 때만 org-resolver가 LLM으로 보강한다.
+  let kind = scan.kind === "team" ? "team" : detectKind(dir);
   // 결정적 스캔이 구성원 2+를 찾았으면 팀으로 확정 (LLM이 "agent"로 오판해도 구성원을 버리지 않는다).
   if (scan.members.length >= 2) kind = "team";
   // 근본 가드: 정크/공유 폴더(trash 등)가 단지 ≥2개의 에이전트를 담고 있다는 이유만으로 회사로
@@ -506,7 +522,6 @@ export async function importLocalFolder(
   // 단일 에이전트 실체가 있으면 에이전트로 격하, 그마저 없으면 명확한 메시지로 중단한다.
   if (kind === "team") {
     const teamHasMembers =
-      (analysis?.divisions?.length ?? 0) > 0 ||
       scan.members.length > 0 ||
       readTeamDepartments(dir).length > 0;
     if (!teamHasMembers) {
@@ -555,11 +570,6 @@ export async function importLocalFolder(
     id = row.id;
     slug = row.slug;
     tone = row.tone;
-    getDb()
-      .prepare(
-        "UPDATE installed_agents SET name = ?, name_en = ?, tagline = ?, tagline_en = ?, system_prompt = ?, env_requirements_json = ?, visibility = 'visible' WHERE id = ?",
-      )
-      .run(name, name, tagline, tagline, systemPrompt, envReqsJson, id);
   } else {
     const baseSlug =
       "local-" +
@@ -572,46 +582,77 @@ export async function importLocalFolder(
     slug = uniqueSlug(baseSlug);
     id = randomUUID();
     tone = TONES[Math.abs(hash(slug)) % TONES.length];
-    getDb()
-      .prepare(
-        `INSERT INTO installed_agents
-         (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
-          env_requirements_json, preferred_backend, trust_grade, installed_at, tone, visibility)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'visible')`,
-      )
-      .run(id, slug, name, name, tagline, tagline, systemPrompt, "[]", envReqsJson, null, "A", now, tone);
   }
+  let firmId: string | undefined;
+  const db = getDb();
+  const nextRoute = { agentId: id, path: dir, runtime, labels, kind, importedAt: now } as const;
+  const staleRouteIds = existing && existing.agentId !== id ? [existing.agentId] : [];
+  // routes.json uses atomic replacement. Persist it before the synchronous DB
+  // transaction so a route-write failure cannot leave a newly visible agent
+  // without its executable local path.
+  replaceRoute(nextRoute, staleRouteIds);
+  try {
+    db.transaction(() => {
+      if (existing && row) {
+        db.prepare(
+          "UPDATE installed_agents SET name = ?, name_en = ?, tagline = ?, tagline_en = ?, system_prompt = ?, env_requirements_json = ?, visibility = 'visible', entity_kind = ? WHERE id = ?",
+        ).run(name, name, tagline, tagline, systemPrompt, envReqsJson, kind, id);
+      } else {
+        db.prepare(
+          `INSERT INTO installed_agents
+           (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
+            env_requirements_json, preferred_backend, trust_grade, installed_at, tone, visibility, entity_kind)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'visible', ?)`,
+        ).run(id, slug, name, name, tagline, tagline, systemPrompt, "[]", envReqsJson, null, "A", now, tone, kind);
+      }
 
-  setRoute({ agentId: id, path: dir, runtime, labels, kind, importedAt: now });
-
-  // 팀이면 FIRMS에도 등록 → 사이드바 FIRMS 목록에 뜨고 "Command CEO" 가능.
-  if (kind === "team") {
-    const firm = registerTeamAsFirm(dir, id, slug, name, tagline, analysis?.divisions, scan.members);
-    // LLM이 구조를 인식했으면 ResolvedOrg로 저장 → 오케스트레이터/조직도가 즉시 진짜 3-tier로 동작.
-    // LLM 분석이 없어도 결정적 스캔 구성원으로 ResolvedOrg를 저장한다 — 재임포트 시 과거의
-    // 빈/스테일 orgspec 캐시를 덮어써 "구성원 없음"이 남지 않게 한다.
-    // 원본 폴더는 절대 수정하지 않는다 (앱 설정 + .agentlas sidecar에만 기록).
-    const divisions: ResolvedOrg["divisions"] =
-      analysis && analysis.divisions.length > 0
-        ? analysis.divisions
-        : scan.members.map((m) => ({
-            id: m.id,
-            name: m.name,
-            role: m.role,
-            prompt: m.promptFileRef ? readFirst(dir, [m.promptFileRef], 8000) || undefined : undefined,
-            promptFileRef: m.promptFileRef,
-            specialists: [],
-          }));
-    if (firm && divisions.length > 0) {
-      const org: ResolvedOrg = {
-        source: "resolver",
-        ceo: { id, name, role: "CEO", agentId: id, prompt: systemPrompt },
-        divisions,
-        sourcePath: dir,
-        resolvedAt: now,
-      };
-      saveResolvedOrg(firm.id, org);
+      // 팀이면 대표 agent + firm + resolved org가 하나의 SQLite commit이다. 어느 한
+      // 단계라도 실패하면 "조직도에 추가됨" 성공 영수증을 만들지 않는다.
+      if (kind === "team") {
+        const registeredFirm = registerTeamAsFirm(dir, id, slug, name, tagline, undefined, scan.members);
+        if (!registeredFirm) throw new Error(ko ? "팀 조직도를 등록하지 못했습니다." : "Could not register the team org chart.");
+        firmId = registeredFirm.id;
+        const divisions: ResolvedOrg["divisions"] = scan.members.map((m) => ({
+          id: m.id,
+          name: m.name,
+          role: m.role,
+          prompt: m.promptFileRef ? readFirst(dir, [m.promptFileRef], 8000) || undefined : undefined,
+          promptFileRef: m.promptFileRef,
+          specialists: [],
+        }));
+        if (divisions.length > 0) {
+          const org: ResolvedOrg = {
+            source: "resolver",
+            ceo: { id, name, role: "CEO", agentId: id, prompt: systemPrompt },
+            divisions,
+            sourcePath: dir,
+            resolvedAt: now,
+          };
+          saveResolvedOrg(registeredFirm.id, org);
+        } else {
+          // A previous richer resolve must not outlive the latest on-disk team
+          // structure. Fall back to the newly committed firm orgChart.
+          clearResolvedOrg(registeredFirm.id);
+        }
+      } else {
+        // The same user-owned folder may legitimately evolve from team to
+        // single. Remove only its organization projection; the agent and chats
+        // stay owned, and firm-linked chats detach through ON DELETE SET NULL.
+        const staleFirm = getFirmBySlug(`firm-${slug}`);
+        if (staleFirm) {
+          clearResolvedOrg(staleFirm.id);
+          db.prepare("DELETE FROM firms WHERE id = ?").run(staleFirm.id);
+        }
+      }
+    })();
+  } catch (error) {
+    try {
+      if (existing) replaceRoute(existing, [id]);
+      else removeRoute(id);
+    } catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], "Local agent registration and route rollback both failed");
     }
+    throw error;
   }
 
   const agent: InstalledAgent = {
@@ -631,8 +672,9 @@ export async function importLocalFolder(
     runtimeLabel: runtime,
     localPath: dir,
     kind,
+    visibility: "visible",
   };
-  return { agent, runtime, labels, kind, path: dir };
+  return { agent, runtime, labels, kind, path: dir, ...(firmId ? { firmId } : {}) };
 }
 
 function hash(s: string): number {

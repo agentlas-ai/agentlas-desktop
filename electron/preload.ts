@@ -19,6 +19,7 @@ import type {
   AutomationUpdatePatch,
   ScheduleSpec,
 } from "../shared/types";
+import type { SiteActivityEvent } from "../shared/site-studio";
 
 const api: AgentlasIpc = {
   app: {
@@ -33,11 +34,13 @@ const api: AgentlasIpc = {
   },
   site: {
     listProjects: () => ipcRenderer.invoke("site:listProjects"),
+    operationStatus: (payload: { projectId: string }) => ipcRenderer.invoke("site:operationStatus", payload),
+    listConversation: (payload: { projectId: string }) => ipcRenderer.invoke("site:listConversation", payload),
     createProject: (payload: { name: string }) => ipcRenderer.invoke("site:createProject", payload),
     deleteProject: (payload: { projectId: string }) => ipcRenderer.invoke("site:deleteProject", payload),
     generateScreen: (payload: { projectId: string; brief: string; variants?: number; styleHint?: string; baseScreenId?: string; locale?: "ko" | "en" }) =>
       ipcRenderer.invoke("site:generateScreen", payload),
-    editScreen: (payload: { projectId: string; screenId: string; instruction: string; selectionId?: string; locale?: "ko" | "en" }) =>
+    editScreen: (payload: { projectId: string; screenId: string; instruction: string; selectionId?: string; selectionContext?: string; locale?: "ko" | "en" }) =>
       ipcRenderer.invoke("site:editScreen", payload),
     readScreen: (payload: { projectId: string; screenId: string }) => ipcRenderer.invoke("site:readScreen", payload),
     prepareRender: (payload: { projectId: string; screenId: string }) => ipcRenderer.invoke("site:prepareRender", payload),
@@ -46,6 +49,8 @@ const api: AgentlasIpc = {
     captureRect: (payload: { x: number; y: number; width: number; height: number }) => ipcRenderer.invoke("site:captureRect", payload),
     exportScreen: (payload: { projectId: string; screenId: string }) => ipcRenderer.invoke("site:exportScreen", payload),
     exportProjectZip: (payload: { projectId: string }) => ipcRenderer.invoke("site:exportProjectZip", payload),
+    handoffToWorkspace: (payload: { projectId: string; workspaceGrant: import("../shared/types").FsPathGrant; locale?: "ko" | "en" }) =>
+      ipcRenderer.invoke("site:handoffToWorkspace", payload),
     contentAvailable: () => ipcRenderer.invoke("site:contentAvailable"),
   },
   document: {
@@ -537,6 +542,12 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
       handler(req);
     ipcRenderer.on("browser:approvalRequest", wrapped);
     return () => ipcRenderer.removeListener("browser:approvalRequest", wrapped);
+  },
+  // Site Copilot의 사용자용 상태/피드백 스트림. 내부 모델 추론이나 원문 HTML은 보내지 않는다.
+  onSiteActivity: (handler: (event: SiteActivityEvent) => void) => {
+    const wrapped = (_evt: Electron.IpcRendererEvent, event: SiteActivityEvent) => handler(event);
+    ipcRenderer.on("site:activity", wrapped);
+    return () => ipcRenderer.removeListener("site:activity", wrapped);
   },
 });
 

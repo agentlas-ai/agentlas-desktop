@@ -6,6 +6,7 @@ import type {
   BrowserApprovalRequestEvent,
   FsPathGrant,
 } from "./types";
+import type { SiteActivityEvent } from "@shared/site-studio";
 
 interface AgentlasEvents {
   on: (
@@ -16,6 +17,8 @@ interface AgentlasEvents {
   onActiveChats: (handler: (chatIds: string[]) => void) => () => void;
   /** Browser 승인 요청 구독 — 경량 바텀시트. unsubscribe 반환. */
   onBrowserApproval: (handler: (req: BrowserApprovalRequestEvent) => void) => () => void;
+  /** Site Copilot의 사용자용 처리 단계·타이핑 피드백 구독. */
+  onSiteActivity: (handler: (event: SiteActivityEvent) => void) => () => void;
 }
 
 interface AgentlasFilesBridge {

@@ -19,6 +19,7 @@ import type { InstalledAgent, InstalledFirm, InvocationRunReceipt, ResolvedOrg }
 import { IconClose, IconFileUp, IconFilm, IconFolder, IconImage, IconLayers, IconNetwork, IconPanelRight } from "./Icon";
 import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
+import { receiptAutoExpanded } from "@/lib/run-receipt-state";
 
 export type ChatRightPanelTab = "file" | "agent" | "panel";
 type PanelViewerSource = "workbench" | "file";
@@ -226,6 +227,7 @@ function RunReceiptCard({ chatId, busy }: { chatId: string | null; busy: boolean
   const ko = locale === "ko";
   const [receipt, setReceipt] = useState<InvocationRunReceipt | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     const api = ipc();
@@ -249,6 +251,20 @@ function RunReceiptCard({ chatId, busy }: { chatId: string | null; busy: boolean
     };
   }, [busy, chatId]);
 
+  // 완료 영수증은 평소에는 한 줄 요약만 남겨 작업 패널을 밀어내지 않는다.
+  // 실행 중·실패·중단 상태는 사용자가 즉시 원인을 볼 수 있게 펼친다.
+  useEffect(() => {
+    const next = receiptAutoExpanded(busy, receipt?.status);
+    if (next !== null) setExpanded(next);
+  }, [busy, receipt?.runId, receipt?.status]);
+  useEffect(() => {
+    setOpenError(null);
+  }, [receipt?.runId]);
+  useEffect(() => {
+    setExpanded(false);
+    setOpenError(null);
+  }, [chatId]);
+
   if (!receipt) return null;
   const status = receiptStatus(receipt.status, ko);
   const openResultFolder = async () => {
@@ -263,25 +279,35 @@ function RunReceiptCard({ chatId, busy }: { chatId: string | null; busy: boolean
 
   return (
     <section aria-label={ko ? "실행 영수증" : "Run receipt"} style={receiptCardStyle}>
-      <div style={receiptHeaderStyle}>
-        <span>{ko ? "실행 영수증" : "Run receipt"}</span>
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((open) => !open)}
+        style={receiptToggleStyle}
+      >
+        <span style={receiptHeaderStyle}>{ko ? "실행 영수증" : "Run receipt"}</span>
         <span style={{ ...receiptStatusStyle, color: status.color }}>{status.label}</span>
-      </div>
-      <div style={receiptGridStyle}>
-        <span>{ko ? "실행 ID" : "Run ID"}</span>
-        <code title={receipt.runId}>{receipt.runId.slice(0, 12)}</code>
-        <span>{ko ? "이벤트" : "Events"}</span>
-        <strong>{receipt.eventCount}</strong>
-      </div>
-      {receipt.resultFolder && (
-        <button type="button" onClick={() => void openResultFolder()} title={receipt.resultFolder} style={receiptFolderButtonStyle}>
-          <IconFolder size={12} />
-          <span>{ko ? "결과 폴더 열기" : "Open result folder"}</span>
-          <code>{receipt.resultFolder}</code>
-        </button>
-      )}
-      {(receipt.errorMessage || openError) && (
-        <div role="status" style={receiptErrorStyle}>{openError || receipt.errorMessage}</div>
+        <span style={receiptSummaryStyle}>{ko ? `${receipt.eventCount}개 이벤트` : `${receipt.eventCount} events`}</span>
+        <span aria-hidden style={receiptChevronStyle}>{expanded ? "⌃" : "⌄"}</span>
+      </button>
+      {expanded && (
+        <div style={receiptDetailsStyle}>
+          <div style={receiptGridStyle}>
+            <span>{ko ? "실행 ID" : "Run ID"}</span>
+            <code title={receipt.runId} style={receiptRunIdStyle}>{receipt.runId.slice(0, 12)}</code>
+            <span>{ko ? "이벤트" : "Events"}</span>
+            <strong>{receipt.eventCount}</strong>
+          </div>
+          {receipt.resultFolder && (
+            <button type="button" onClick={() => void openResultFolder()} title={receipt.resultFolder} style={receiptFolderButtonStyle}>
+              <IconFolder size={12} />
+              <span>{ko ? "결과 폴더 열기" : "Open result folder"}</span>
+            </button>
+          )}
+          {(receipt.errorMessage || openError) && (
+            <div role="status" style={receiptErrorStyle}>{openError || receipt.errorMessage}</div>
+          )}
+        </div>
       )}
     </section>
   );
@@ -889,21 +915,29 @@ const agentTabStyle: CSSProperties = {
 
 const receiptCardStyle: CSSProperties = {
   flexShrink: 0,
-  display: "grid",
-  gap: 8,
-  padding: "10px 12px 12px",
+  padding: "8px 12px 10px",
   borderTop: "1px solid var(--paper-edge)",
   background: "var(--paper-2)",
 };
 
 const receiptHeaderStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 8,
   color: "var(--ink-soft)",
   fontSize: 11.5,
   fontWeight: 800,
+};
+
+const receiptToggleStyle: CSSProperties = {
+  width: "100%",
+  minWidth: 0,
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) auto auto auto",
+  alignItems: "center",
+  gap: 7,
+  border: "none",
+  background: "transparent",
+  padding: 0,
+  textAlign: "left",
+  cursor: "pointer",
 };
 
 const receiptStatusStyle: CSSProperties = {
@@ -913,17 +947,46 @@ const receiptStatusStyle: CSSProperties = {
 
 const receiptGridStyle: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "auto 1fr auto auto",
+  gridTemplateColumns: "auto minmax(0, 1fr) auto auto",
   alignItems: "center",
   gap: 6,
   color: "var(--muted-deep)",
   fontSize: 10.5,
 };
 
+const receiptDetailsStyle: CSSProperties = {
+  display: "grid",
+  gap: 8,
+  marginTop: 8,
+};
+
+const receiptSummaryStyle: CSSProperties = {
+  flexShrink: 0,
+  color: "var(--muted-deep)",
+  fontSize: 10.5,
+  fontWeight: 650,
+  fontVariantNumeric: "tabular-nums",
+};
+
+const receiptChevronStyle: CSSProperties = {
+  flexShrink: 0,
+  color: "var(--muted-deep)",
+  fontSize: 13,
+  lineHeight: 1,
+};
+
+const receiptRunIdStyle: CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
 const receiptFolderButtonStyle: CSSProperties = {
   minWidth: 0,
-  display: "grid",
-  gridTemplateColumns: "auto auto minmax(0, 1fr)",
+  display: "inline-flex",
+  width: "fit-content",
+  maxWidth: "100%",
   alignItems: "center",
   gap: 6,
   border: "1px solid var(--paper-edge)",
@@ -934,6 +997,7 @@ const receiptFolderButtonStyle: CSSProperties = {
   textAlign: "left",
   cursor: "pointer",
   fontSize: 10.5,
+  whiteSpace: "nowrap",
 };
 
 const receiptErrorStyle: CSSProperties = {

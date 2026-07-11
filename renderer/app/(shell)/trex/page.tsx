@@ -703,7 +703,7 @@ function Home({
           <div style={sourceChips}>
             {attaching && <span style={sourceChipMuted}>{ko ? "읽는 중…" : "Reading…"}</span>}
             {sources.map((s) => (
-              <span key={s.name} style={sourceChip} title={s.kind === "text" ? `${s.text.length.toLocaleString()}자` : s.kind}>
+              <span key={s.name} style={sourceChip} title={s.kind === "text" ? `${s.text.length.toLocaleString()}${ko ? "자" : " chars"}` : s.kind}>
                 <IconFileUp size={11} />
                 <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span>
                 {s.kind !== "text" && <em style={{ color: "var(--muted-deep)", fontStyle: "normal", fontSize: 10 }}>{s.kind === "image" ? (ko ? "이미지" : "img") : (ko ? "이름만" : "name")}</em>}
@@ -774,10 +774,10 @@ function Home({
             {PALETTES.map((p) => {
               const on = styleOverride === p.id;
               return (
-                <button key={p.id} type="button" onClick={() => setStyleOverride(p.id)} title={`${p.nameKo} · ${p.nameEn}`}
+                <button key={p.id} type="button" onClick={() => setStyleOverride(p.id)} title={p[ko ? "nameKo" : "nameEn"]}
                   style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 8px 3px 4px", borderRadius: 999, cursor: "pointer", fontSize: 11, fontWeight: 700, color: on ? "#fff" : "var(--fg)", background: on ? `linear-gradient(135deg, ${p.accent}, ${p.accent2})` : "var(--chip-bg, #f2f2f6)", border: on ? "none" : "1px solid var(--border, #e2e1ea)" }}>
                   <span style={{ display: "inline-block", width: 13, height: 13, borderRadius: 999, background: `linear-gradient(135deg, ${p.accent}, ${p.accent2})`, boxShadow: on ? "0 0 0 1.5px #fff" : "none" }} />
-                  {p.nameKo}
+                  {p[ko ? "nameKo" : "nameEn"]}
                 </button>
               );
             })}
@@ -797,7 +797,7 @@ function Home({
           <select value={imageModel} onChange={(e) => setImageModel(e.target.value as ImageModel)} style={imageSelect} aria-label={ko ? "이미지 모델" : "Image model"}>
             <option value="auto">{ko ? "자동 (Codex ↔ 나노바나나)" : "Auto (Codex ↔ nano-banana)"}</option>
             <option value="codex">Codex image_gen{providers.codex ? "" : ko ? " · CLI 필요" : " · needs CLI"}</option>
-            <option value="gemini" disabled={!providers.gemini}>Antigravity 나노바나나{providers.gemini ? "" : ko ? " · 연결 필요" : " · connect Antigravity"}</option>
+            <option value="gemini" disabled={!providers.gemini}>{ko ? "Antigravity 나노바나나" : "Antigravity nano-banana"}{providers.gemini ? "" : ko ? " · 연결 필요" : " · connect Antigravity"}</option>
             <option value="none">{ko ? "이미지 끄기" : "No images"}</option>
           </select>
           <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>

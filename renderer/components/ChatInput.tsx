@@ -279,6 +279,8 @@ export function ChatInput({
   const [permissions, setPermissions] = useState<PermissionLevel>("write");
   const [permOpen, setPermOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
+  // 컨텍스트는 진단 지표가 아니라 다음 행동(새 세션/비우기)으로 바로 이어져야 한다.
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
   // / 슬래시 + @ 멘션 인라인 자동완성
   const [trigger, setTrigger] = useState<null | {
     kind: "slash" | "mention";
@@ -320,6 +322,7 @@ export function ChatInput({
     setSelectedAgentIds(new Set());
     setTrigger(null);
     setAttachmentError(null);
+    setContextMenuOpen(false);
     dragDepthRef.current = 0;
     setDragActive(false);
   }, [activeChatId]);
@@ -355,16 +358,10 @@ export function ChatInput({
     })
     .filter(Boolean)
     .join(" + ");
-  const contextManagedByRuntime = runtime ? CONTEXT_MANAGED_BY[runtime.kind] === "runtime" : true;
   const contextPercent = tokensUsage
     ? Math.min(100, Math.max(0, Math.round((tokensUsage.current / Math.max(1, tokensUsage.limit)) * 100)))
     : 0;
-  const contextOwnerLabel = contextManagedByRuntime
-    ? t("chatinput.context.runtime_short")
-    : t("chatinput.context.agentlas_short");
-  const contextOwnerDescription = contextManagedByRuntime
-    ? t("chatinput.context.runtime_desc")
-    : t("chatinput.context.agentlas_desc");
+  const contextTone = contextPercent >= 90 ? "var(--red)" : contextPercent >= 75 ? "var(--amber-deep)" : "var(--accent)";
 
   // ── 파일 첨부 ──────────────────────────────────────────
   async function addFiles(files: FileList | File[]) {
@@ -1353,35 +1350,74 @@ export function ChatInput({
           </div>
 
           <div className="chat-input-tools-right" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {/* Context volume indicator */}
+            {/* 컨텍스트 지표는 "Runtime" 상태표가 아니라 세션 전환/정리 진입점이다. */}
             {tokensUsage && (
-              <div 
-                className="chat-input-context-pill"
-                title={`${contextOwnerDescription} · ${Math.round(tokensUsage.current/1000)}k / ${Math.round(tokensUsage.limit/1000)}k`}
-                style={{ 
-                  display: "flex", alignItems: "center", gap: 6,
-                  padding: "0 8px", height: 26, borderRadius: 13,
-                  background: "var(--fill-1)", border: "1px solid var(--paper-edge)",
-                  fontSize: 10, fontWeight: 600, color: "var(--muted-deep)",
-                  minWidth: 0,
-                  flex: "0 1 auto",
-                }}
-              >
-                <span
-                  className="chat-input-context-owner"
-                  style={{ color: contextManagedByRuntime ? "var(--muted-deep)" : "var(--accent)" }}
+              <div style={{ position: "relative", flexShrink: 0 }}>
+                <button
+                  type="button"
+                  className="chat-input-context-pill"
+                  title={`${t("chatinput.context.menu_title")} · ${Math.round(tokensUsage.current / 1000)}k / ${Math.round(tokensUsage.limit / 1000)}k`}
+                  aria-label={t("chatinput.context.menu_title")}
+                  aria-expanded={contextMenuOpen}
+                  onClick={() => setContextMenuOpen((open) => !open)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 6,
+                    padding: "0 8px", height: 26, borderRadius: 13,
+                    background: "var(--fill-1)", border: "1px solid var(--paper-edge)",
+                    fontSize: 10, fontWeight: 650, color: "var(--muted-deep)",
+                    minWidth: 0, cursor: "pointer",
+                  }}
                 >
-                  {contextOwnerLabel}
-                </span>
-                <div className="chat-input-context-meter" style={{ width: 40, height: 4, borderRadius: 2, background: "var(--fill-3)", overflow: "hidden" }}>
-                  <div style={{ 
-                    height: "100%", 
-                    width: `${contextPercent}%`,
-                    background: tokensUsage.current > tokensUsage.limit * 0.9 ? "var(--red)" : "var(--accent)",
-                    transition: "width 0.3s"
-                  }} />
-                </div>
-                <span className="chat-input-context-percent">{contextPercent}%</span>
+                  <span>{t("chatinput.context.label")}</span>
+                  <div className="chat-input-context-meter" style={{ width: 40, height: 4, borderRadius: 2, background: "var(--fill-3)", overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${contextPercent}%`, background: contextTone, transition: "width 0.3s" }} />
+                  </div>
+                  <span className="chat-input-context-percent" style={{ color: contextTone }}>{contextPercent}%</span>
+                  <IconChevronDown size={10} style={{ opacity: 0.65 }} />
+                </button>
+                {contextMenuOpen && (
+                  <section
+                    role="dialog"
+                    aria-label={t("chatinput.context.menu_title")}
+                    data-chat-context-menu="true"
+                    style={{
+                      position: "absolute", right: 0, bottom: "calc(100% + 8px)", zIndex: 50,
+                      width: 286, padding: 10, display: "grid", gap: 8,
+                      border: "1px solid var(--paper-edge)", borderRadius: 10,
+                      background: "var(--paper)", boxShadow: "0 12px 28px rgba(15, 23, 42, 0.14)",
+                    }}
+                  >
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, color: "var(--ink)", fontSize: 12, fontWeight: 800 }}>
+                        <span>{t("chatinput.context.menu_title")}</span>
+                        <span style={{ color: contextTone }}>{contextPercent}%</span>
+                      </div>
+                      <p style={{ margin: "4px 0 0", color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.45 }}>
+                        {t("chatinput.context.menu_desc")}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => { setContextMenuOpen(false); onCommand?.("/new"); }}
+                      disabled={!onCommand}
+                      style={contextMenuActionStyle}
+                    >
+                      <span style={{ color: "var(--ink)", fontSize: 11.5, fontWeight: 780 }}>{t("chatinput.context.new")}</span>
+                      <span style={contextMenuActionDescStyle}>{t("chatinput.context.new_desc")}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setContextMenuOpen(false); onCommand?.("/clear"); }}
+                      disabled={!onCommand || busy}
+                      title={busy ? t("chatinput.context.clear_busy") : undefined}
+                      style={{ ...contextMenuActionStyle, opacity: busy ? 0.55 : 1, cursor: busy ? "not-allowed" : "pointer" }}
+                    >
+                      <span style={{ color: "var(--ink)", fontSize: 11.5, fontWeight: 780 }}>{t("chatinput.context.clear")}</span>
+                      <span style={contextMenuActionDescStyle}>{t("chatinput.context.clear_desc")}</span>
+                    </button>
+                    {busy && <p style={{ margin: 0, color: "var(--amber-deep)", fontSize: 10.5, lineHeight: 1.4 }}>{t("chatinput.context.clear_busy")}</p>}
+                  </section>
+                )}
               </div>
             )}
             
@@ -1501,6 +1537,26 @@ export function ChatInput({
     </footer>
   );
 }
+
+const contextMenuActionStyle = {
+  display: "grid",
+  gap: 2,
+  width: "100%",
+  minWidth: 0,
+  border: "1px solid var(--paper-edge)",
+  borderRadius: 8,
+  background: "var(--paper-2)",
+  padding: "8px 9px",
+  textAlign: "left" as const,
+  cursor: "pointer",
+};
+
+const contextMenuActionDescStyle = {
+  color: "var(--muted-deep)",
+  fontSize: 10.5,
+  lineHeight: 1.35,
+  overflowWrap: "anywhere" as const,
+};
 
 function BottomQuestionSheet({
   progress,

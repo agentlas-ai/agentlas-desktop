@@ -10,7 +10,7 @@ import { app } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { SiteProjectMeta, SiteScreenMeta } from "../../shared/site-studio";
+import type { SiteConversationEntry, SiteProjectMeta, SiteScreenMeta } from "../../shared/site-studio";
 
 function projectsRoot(): string {
   return path.join(app.getPath("userData"), "site-projects");
@@ -26,6 +26,10 @@ function screensDir(projectId: string): string {
 
 function projectMetaPath(projectId: string): string {
   return path.join(projectDir(projectId), "project.json");
+}
+
+function conversationPath(projectId: string): string {
+  return path.join(projectDir(safeId(projectId)), "conversation.json");
 }
 
 function safeId(id: string): string {
@@ -96,6 +100,100 @@ export function getSiteProject(projectId: string): SiteProjectMeta {
 
 export function deleteSiteProject(projectId: string): void {
   fs.rmSync(projectDir(safeId(projectId)), { recursive: true, force: true });
+}
+
+function readSiteConversation(projectId: string): SiteConversationEntry[] {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(conversationPath(projectId), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error("사이트 대화 기록이 손상되어 원본을 보존했습니다.", { cause: error });
+  }
+  if (!Array.isArray(parsed)) throw new Error("사이트 대화 기록 형식이 올바르지 않아 원본을 보존했습니다.");
+  const valid = parsed.every(
+    (entry): entry is SiteConversationEntry =>
+      Boolean(entry) &&
+      typeof entry === "object" &&
+      typeof (entry as SiteConversationEntry).id === "string" &&
+      (entry as SiteConversationEntry).projectId === projectId &&
+      ((entry as SiteConversationEntry).role === "user" || (entry as SiteConversationEntry).role === "assistant") &&
+      typeof (entry as SiteConversationEntry).text === "string" &&
+      typeof (entry as SiteConversationEntry).createdAt === "string",
+  );
+  if (!valid) throw new Error("사이트 대화 기록 항목이 손상되어 원본을 보존했습니다.");
+  return parsed.slice(-200);
+}
+
+function writeSiteConversation(projectId: string, entries: SiteConversationEntry[]): void {
+  const directory = projectDir(safeId(projectId));
+  const target = conversationPath(projectId);
+  const temp = path.join(directory, `.conversation.json.${randomUUID()}.tmp`);
+  fs.mkdirSync(directory, { recursive: true });
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(
+      temp,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+    fs.writeFileSync(fd, JSON.stringify(entries.slice(-200), null, 2), "utf8");
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(temp, target);
+    try {
+      const directoryFd = fs.openSync(directory, fs.constants.O_RDONLY);
+      try {
+        fs.fsyncSync(directoryFd);
+      } finally {
+        fs.closeSync(directoryFd);
+      }
+    } catch {
+      // Some supported filesystems reject directory fsync; same-dir rename
+      // still prevents readers from observing a partially written transcript.
+    }
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+    try {
+      fs.unlinkSync(temp);
+    } catch {
+      // Successful rename consumes the temp path; failed cleanup never touches
+      // the previous durable conversation.json.
+    }
+  }
+}
+
+export function listSiteConversation(projectId: string): SiteConversationEntry[] {
+  getSiteProject(projectId); // 프로젝트 존재와 id 형식을 함께 검증.
+  return readSiteConversation(projectId);
+}
+
+export function appendSiteConversation(input: {
+  projectId: string;
+  role: SiteConversationEntry["role"];
+  text: string;
+  context?: string | null;
+}): SiteConversationEntry {
+  getSiteProject(input.projectId);
+  const entry: SiteConversationEntry = {
+    id: randomUUID(),
+    projectId: input.projectId,
+    role: input.role,
+    text: input.text.trim().slice(0, 4_000),
+    createdAt: new Date().toISOString(),
+    context: input.context?.trim().slice(0, 300) || null,
+  };
+  const entries = readSiteConversation(input.projectId);
+  entries.push(entry);
+  writeSiteConversation(input.projectId, entries);
+  return entry;
 }
 
 export function readSiteScreenHtml(projectId: string, screenId: string): string {

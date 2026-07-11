@@ -141,6 +141,11 @@ jobs:
         run: |
           npm run test:automation-scheduler-guards
           npm run test:runtime-stdin-epipe
+          npm run test:build-session-contracts
+          npm run test:local-import
+          npm run test:site-studio
+          npm run test:chat-session-reset
+          npm run test:trex-locale
           npx playwright install chromium
           npm run test:browser-approval-gate
           npm run test:browser-approval-concurrency
@@ -149,6 +154,7 @@ jobs:
           npm run test:browser-password-boundary
           npm run test:browser-ui
           npm run smoke:renderer-ui
+          node scripts/test-desktop-feature-surfaces.cjs --build-roster-sync-only
           npm run test:hub-bookmark-ux
           node scripts/test-hub-bookmark-ui.cjs
           node scripts/test-runtime-readiness-ui.cjs

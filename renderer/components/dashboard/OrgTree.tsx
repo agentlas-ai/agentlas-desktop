@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { classifyHubEntity, classifyInstalledAgent, entityClassShortLabel } from "@/lib/agent-entity-kind";
 import { buildAgentRoster, visibleRosterAgents } from "@/lib/agent-roster";
+import { onAgentRosterChange } from "@/lib/agent-roster-events";
 import { hubBookmarksWithoutLocalDuplicates, onHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
@@ -55,6 +56,7 @@ export function OrgTree() {
   // while it is in flight. Only the newest bookmark read may replace renderer
   // state, so an old mount snapshot can never erase an optimistic add.
   const hubBookmarkGenerationRef = useRef(0);
+  const rosterLoadGenerationRef = useRef(0);
 
   const refreshHubBookmarks = useCallback(async () => {
     const api = ipc();
@@ -75,6 +77,7 @@ export function OrgTree() {
       setLoading(false);
       return;
     }
+    const generation = ++rosterLoadGenerationRef.current;
     const bookmarkGeneration = ++hubBookmarkGenerationRef.current;
     try {
       const [a, f, groups, mine, bookmarks] = await Promise.all([
@@ -84,6 +87,7 @@ export function OrgTree() {
         api.marketplace.listMine().catch(() => [] as MarketplaceListing[]),
         api.marketplace.bookmarks().catch(() => null),
       ]);
+      if (rosterLoadGenerationRef.current !== generation) return;
       setAgents(visibleRosterAgents(a));
       setFirms(f);
       setAgentGroups(groups);
@@ -93,13 +97,14 @@ export function OrgTree() {
       }
       setLoadError("");
     } catch {
+      if (rosterLoadGenerationRef.current !== generation) return;
       setAgents([]);
       setFirms([]);
       setAgentGroups([]);
       setCloudListings([]);
       setLoadError(t("org.load_error"));
     } finally {
-      setLoading(false);
+      if (rosterLoadGenerationRef.current === generation) setLoading(false);
     }
   }, [t]);
   useEffect(() => {
@@ -123,6 +128,20 @@ export function OrgTree() {
         void refreshHubBookmarks();
       }),
     [refreshHubBookmarks],
+  );
+  useEffect(
+    () =>
+      onAgentRosterChange((change) => {
+        // The import is already committed. Show the returned agent in the same
+        // frame, then reconcile the firm/org projection from the local DB.
+        setAgents((previous) =>
+          visibleRosterAgents([change.agent, ...previous.filter((agent) => agent.id !== change.agent.id)]),
+        );
+        setMode(classifyInstalledAgent(change.agent) === "multi" ? "multi" : "single");
+        setOpenCats((previous) => ({ ...previous, local: true }));
+        void load();
+      }),
+    [load],
   );
 
   const dn = useCallback(

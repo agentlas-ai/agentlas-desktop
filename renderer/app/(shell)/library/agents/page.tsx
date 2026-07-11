@@ -9,6 +9,7 @@ import { ipc } from "@/lib/ipc";
 import { mapWithConcurrency } from "@/lib/concurrency";
 import { isUserFacingAgentText } from "@/lib/agent-visibility";
 import { buildAgentRoster, isRosterVisibleAgent, visibleRosterAgents } from "@/lib/agent-roster";
+import { onAgentRosterChange } from "@/lib/agent-roster-events";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { AgentMemorySaveQueue, parseMemoryMarkdown, type ParsedMemory } from "@/lib/agent-memory";
@@ -121,6 +122,7 @@ function LibraryAgentsView() {
   const [teamExpanded, setTeamExpanded] = useState<Record<string, boolean>>({});
   const [teamSubs, setTeamSubs] = useState<Record<string, { name: string; role: string }[] | "loading">>({});
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
+  const rosterRefreshGenerationRef = useRef(0);
   const [chats, setChats] = useState<Chat[]>([]);
   const [resolving, setResolving] = useState(false);
   const [resolveMsg, setResolveMsg] = useState("");
@@ -234,6 +236,7 @@ function LibraryAgentsView() {
   const refresh = useCallback(async () => {
     const api = ipc();
     if (!api) return;
+    const generation = ++rosterRefreshGenerationRef.current;
     const [fList, agList, runtimes, overrides, groupRows] = await Promise.all([
       api.firms.list(),
       api.team.list(),
@@ -241,6 +244,7 @@ function LibraryAgentsView() {
       api.agentRuntime?.list ? api.agentRuntime.list().catch(() => []) : Promise.resolve([]),
       api.agentGroups?.listResolved ? api.agentGroups.listResolved().catch(() => []) : Promise.resolve([]),
     ]);
+    if (rosterRefreshGenerationRef.current !== generation) return;
     setFirms(fList);
     setAgents(visibleRosterAgents(agList));
     setAgentGroups(groupRows);
@@ -257,6 +261,7 @@ function LibraryAgentsView() {
         return null;
       }
     });
+    if (rosterRefreshGenerationRef.current !== generation) return;
     for (const pair of orgPairs) {
       if (pair) orgs[pair[0]] = pair[1];
     }
@@ -266,6 +271,20 @@ function LibraryAgentsView() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(
+    () =>
+      onAgentRosterChange((change) => {
+        // Do not wait for the slower firm/org resolution pass before showing a
+        // just-built local agent under My Agents.
+        setAgents((previous) =>
+          visibleRosterAgents([change.agent, ...previous.filter((agent) => agent.id !== change.agent.id)]),
+        );
+        setRosterTab((change.agent.kind ?? "agent") === "team" ? "multi" : "single");
+        void refresh();
+      }),
+    [refresh],
+  );
 
   const loadPublishedAgents = useCallback(async () => {
     const api = ipc();

@@ -52,7 +52,7 @@ function setupReadinessBridge(payload) {
   const scenario = payload.scenario;
   let authReads = 0;
   window.__runtimeReadiness = { calls };
-  window.agentlas.app.getVersion = async () => "0.7.32";
+  window.agentlas.app.getVersion = async () => "0.7.33";
   window.agentlas.auth.getSession = async () => {
     authReads += 1;
     if (scenario === "ready" || authReads === 1) {

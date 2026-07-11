@@ -14,8 +14,8 @@ app.setPath("userData", userDataDir);
 const { getDb, initStore } = require("../dist/electron/store/db.js");
 const { detectRuntimeLabels, importLocalFolder } = require("../dist/electron/agents/import-local.js");
 const { readAgentFile, writeAgentFile } = require("../dist/electron/agents/files.js");
-const { listRoutes } = require("../dist/electron/agents/routes.js");
-const { listFirms } = require("../dist/electron/store/firms.js");
+const { listRoutes, setRoute } = require("../dist/electron/agents/routes.js");
+const { getFirmBySlug, listFirms } = require("../dist/electron/store/firms.js");
 
 function writeFile(filePath, body) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -67,15 +67,47 @@ function writeFile(filePath, body) {
 
     const team = await importLocalFolder(teamRoot);
     assert.equal(team.kind, "team");
+    assert.ok(team.firmId, "team import receipt must include the durable firm projection");
     assert.equal(team.agent.name, "Proof Founder Team");
     assert.equal(team.agent.localPath, teamRoot);
+    assert.equal(
+      getDb().prepare("SELECT entity_kind FROM installed_agents WHERE id = ?").get(team.agent.id).entity_kind,
+      "team",
+      "team kind must survive even if the route projection is unavailable",
+    );
+    assert.ok(listRoutes().some((route) => route.agentId === team.agent.id && route.path === teamRoot && route.kind === "team"));
+    const teamFirms = listFirms();
+    assert.ok(teamFirms.some((firm) => firm.slug === `firm-${team.agent.slug}` && firm.ceoAgentId === team.agent.id));
+
+    const concurrentRoot = path.join(tempDir, "concurrent-agent");
+    writeFile(path.join(concurrentRoot, "AGENT.md"), "# Concurrent Agent\n\nSingle-flight import proof.\n");
+    const [concurrentA, concurrentB] = await Promise.all([
+      importLocalFolder(concurrentRoot),
+      importLocalFolder(concurrentRoot),
+    ]);
+    assert.equal(concurrentA.agent.id, concurrentB.agent.id, "concurrent import requests must share one durable commit");
+
+    const danglingRoot = path.join(tempDir, "dangling-route-agent");
+    writeFile(path.join(danglingRoot, "AGENT.md"), "# Dangling Route Agent\n\nRepair an orphaned route.\n");
+    setRoute({ agentId: "missing-agent-row", path: danglingRoot, runtime: "codex", labels: ["codex"], kind: "agent", importedAt: new Date().toISOString() });
+    const repaired = await importLocalFolder(danglingRoot);
+    assert.notEqual(repaired.agent.id, "missing-agent-row");
+    assert.equal(listRoutes().some((route) => route.agentId === "missing-agent-row"), false, "successful import must remove the dangling route identity");
+
+    fs.rmSync(path.join(teamRoot, "TEAM.md"), { force: true });
+    fs.rmSync(path.join(teamRoot, "ceo"), { recursive: true, force: true });
+    fs.rmSync(path.join(teamRoot, "agents"), { recursive: true, force: true });
+    writeFile(path.join(teamRoot, "AGENT.md"), "# Proof Founder Team\n\nNow intentionally a single agent.\n");
+    const convertedSingle = await importLocalFolder(teamRoot);
+    assert.equal(convertedSingle.agent.id, team.agent.id, "team-to-single conversion must preserve the owned agent identity");
+    assert.equal(convertedSingle.kind, "agent");
+    assert.equal(getFirmBySlug(`firm-${team.agent.slug}`), null, "team-to-single conversion must remove the stale firm projection");
 
     const routes = listRoutes();
     assert.ok(routes.some((route) => route.agentId === single.agent.id && route.path === agentRoot && route.kind === "agent"));
-    assert.ok(routes.some((route) => route.agentId === team.agent.id && route.path === teamRoot && route.kind === "team"));
+    assert.ok(routes.some((route) => route.agentId === team.agent.id && route.path === teamRoot && route.kind === "agent"));
 
     const firms = listFirms();
-    assert.ok(firms.some((firm) => firm.slug === `firm-${team.agent.slug}` && firm.ceoAgentId === team.agent.id));
 
     const beforeJunkFirmCount = listFirms().length;
     const junkRoot = path.join(tempDir, "trash");
@@ -97,7 +129,7 @@ function writeFile(filePath, body) {
           promptDbUpdated: true,
           escapeWriteBlocked: true,
           routes: routes.length,
-          firms: firms.length,
+          firms: teamFirms.length,
           storePath: process.env.AGENTLAS_STORE_PATH,
           userDataDir,
         },

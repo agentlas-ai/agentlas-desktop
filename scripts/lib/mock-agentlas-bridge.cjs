@@ -180,7 +180,7 @@ function setupMockAgentlasBridge(options) {
     taglineEn: "Routes requests.",
     kind: "agent",
     tone: "blue",
-    visibility: "local",
+    visibility: "background",
     systemPrompt: "# Orchestrator\n\nRoute work clearly.",
     mcpServers: ["github"],
     preferredBackend: "codex",
@@ -422,6 +422,8 @@ function setupMockAgentlasBridge(options) {
       install: async (input) => localized(input),
       importLocalFolder: async (input) => {
         record("team.importLocalFolder", input);
+        const importDelayMs = Math.max(0, Number(options?.importDelayMs) || 0);
+        if (importDelayMs > 0) await new Promise((resolve) => window.setTimeout(resolve, importDelayMs));
         importCounter += 1;
         const imported = {
           id: `imported-agent-${importCounter}`,

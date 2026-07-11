@@ -98,6 +98,18 @@ export function setRoute(route: AgentRoute): void {
   writeAll(map);
 }
 
+/**
+ * Atomically replace one route while removing stale identities for the same
+ * source folder. Used by local import so a repaired dangling route never
+ * survives beside the new installed-agent id.
+ */
+export function replaceRoute(route: AgentRoute, removeAgentIds: string[] = []): void {
+  const map = readAll();
+  for (const agentId of removeAgentIds) delete map[agentId];
+  map[route.agentId] = route;
+  writeAll(map);
+}
+
 export function removeRoute(agentId: string): void {
   const map = readAll();
   if (map[agentId]) {

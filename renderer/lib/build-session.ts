@@ -10,6 +10,7 @@ import { ipc, ipcEvents } from "@/lib/ipc";
 import { currentLocale } from "@/lib/i18n";
 import { extractQuestions } from "@/lib/ask-question";
 import { buildScanDisposition } from "@/lib/build-scan";
+import { announceAgentRosterChange } from "@/lib/agent-roster-events";
 import { isCompletedBuildTurn } from "@shared/build-turn";
 import type { ChatQuestion } from "@/components/ChatStream";
 import type { FsPathGrant, FsReadScope, HephaestusBuildEvent, RuntimeSelection } from "@/lib/types";
@@ -182,6 +183,34 @@ export function setWorkspace(v: FsPathGrant | null) {
   }
   commit();
 }
+
+/**
+ * Site Studio처럼 별도 제작 표면이 Build 입력을 넘길 때 쓰는 원자적 renderer
+ * 경계. 백그라운드 build/interview를 덮어쓰지 않고, 종료된 이전 결과·첨부·모드는
+ * 새 디자인 요청에 섞이지 않게 초기화한다.
+ */
+export function prepareBuildHandoff(input: {
+  workspace: FsPathGrant;
+  request: string;
+}): { ok: true } | { ok: false; phase: "running" | "interview" } {
+  if (state.phase === "running" || state.phase === "interview") {
+    return { ok: false, phase: state.phase };
+  }
+
+  resetBuild();
+  state.request = input.request;
+  state.attachments = [];
+  state.mode = "";
+  state.workspace = input.workspace.path;
+  state.workspaceGrant = input.workspace;
+  try {
+    window.localStorage.setItem(WS_KEY, JSON.stringify(input.workspace));
+  } catch {
+    /* persistence failure does not invalidate the live native capability */
+  }
+  commit();
+  return { ok: true };
+}
 export function setRuntime(v: RuntimeSelection | null) {
   state.runtime = v;
   commit();
@@ -194,7 +223,7 @@ function pushLog(kind: HephaestusBuildEvent["kind"], text: string) {
 // 워크스페이스 basename이 정크/공유 폴더면 부모 폴더 전체를 회사로 등록하면 안 된다(예: trash).
 const JUNK_WS = /^(trash|tmp|temp|downloads|desktop|documents|untitled|new folder|cache)$/i;
 function wsBasename(p: string): string {
-  return p.replace(/\/+$/, "").split("/").pop() ?? p;
+  return p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? p;
 }
 /** 마지막 partial 로그(어시스턴트 출력)의 raw ask-fence를 정리된 텍스트로 교체. */
 function cleanLastPartial(cleanText: string) {
@@ -227,18 +256,46 @@ function detach() {
   unsub = null;
 }
 
+const registrationInFlight = new Map<string, Promise<void>>();
+
+function isCurrentRegistration(generation: number, workspace: string): boolean {
+  return isCurrentBuild(generation) && state.result?.workspace === workspace;
+}
+
 /** 빌드 완료 시 결과 폴더를 라이브러리(조직도)에 자동 등록 — "조직도에 안 뜬다" 문제 해소. */
-async function autoRegister(workspace: string, readScope: FsReadScope) {
+function autoRegister(workspace: string, readScope: FsReadScope, generation: number): Promise<void> {
+  const key = `${generation}:${workspace}`;
+  const existing = registrationInFlight.get(key);
+  if (existing) return existing;
+
+  const task = performAutoRegister(workspace, readScope, generation).finally(() => {
+    if (registrationInFlight.get(key) === task) registrationInFlight.delete(key);
+  });
+  registrationInFlight.set(key, task);
+  return task;
+}
+
+async function performAutoRegister(workspace: string, readScope: FsReadScope, generation: number): Promise<void> {
   const api = ipc();
   if (!api) return;
   const ko = currentLocale() === "ko";
   try {
-    pushLog("stage", ko ? "조직도에 등록 중 — 라이브러리에 추가" : "Registering to org chart — adding to library");
+    if (isCurrentRegistration(generation, workspace)) {
+      pushLog("stage", ko ? "조직도에 등록 중 — 라이브러리에 추가" : "Registering to org chart — adding to library");
+      commit();
+    }
     const imported = await api.team.importLocalFolder({ path: workspace, scope: readScope });
+    // The IPC only returns after SQLite/route/(for a team) firm+org persistence.
+    // Always wake roster consumers, even if the user started another Build while
+    // this import was finishing. The asset exists; only the stale Build card must
+    // be prevented from mutating the new session.
+    announceAgentRosterChange({ action: "upserted", agent: imported, source: "build" });
+    if (!isCurrentRegistration(generation, workspace)) return;
     state.registered = true;
     const who = imported?.name || imported?.slug || (ko ? "에이전트" : "agent");
     pushLog("done", ko ? `조직도에 추가됨: ${who}` : `Added to org chart: ${who}`);
   } catch (e) {
+    if (!isCurrentRegistration(generation, workspace)) return;
     pushLog(
       "error",
       ko
@@ -246,7 +303,7 @@ async function autoRegister(workspace: string, readScope: FsReadScope) {
         : `Failed to register to org chart: ${(e as Error).message} — retry with "Install to library".`,
     );
   }
-  commit();
+  if (isCurrentRegistration(generation, workspace)) commit();
 }
 
 // ── 완료 신호 누락 자동 복구 ──────────────────────────────────────────────
@@ -281,7 +338,7 @@ async function findPackageRoot(workspace: string, readScope: FsReadScope, genera
 }
 
 /** 빌드를 완료 상태로 전환하고 조직도 자동 등록까지 수행한다. */
-function finalizeBuild(pkgRoot: string, scan: unknown, readScope: FsReadScope, note: string | null): void {
+function finalizeBuild(pkgRoot: string, scan: unknown, readScope: FsReadScope, note: string | null, generation: number): void {
   const ko = currentLocale() === "ko";
   state.reached = STAGE_COUNT;
   state.result = { workspace: pkgRoot, securityScan: scan, readScope };
@@ -300,7 +357,7 @@ function finalizeBuild(pkgRoot: string, scan: unknown, readScope: FsReadScope, n
     );
     commit();
   } else if (buildScanDisposition(scan) === "passed") {
-    void autoRegister(pkgRoot, readScope);
+    void autoRegister(pkgRoot, readScope, generation);
   } else {
     pushLog(
       "log",
@@ -329,6 +386,7 @@ async function resolveTurnWithoutSignal(
       ko
         ? "완료 신호가 누락됐지만 디스크에서 패키지를 확인했습니다 — 완료로 처리합니다."
         : "Completion signal was missing but the package exists on disk — finalizing.",
+      generation,
     );
     return;
   }
@@ -448,7 +506,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
         state.phase = "done";
         commit();
         if (registerPath && buildScanDisposition(r?.securityScan ?? null) === "passed") {
-          void autoRegister(registerPath, readScope);
+          void autoRegister(registerPath, readScope, generation);
         } else {
           pushLog(
             "log",
@@ -580,6 +638,15 @@ export function resetBuild() {
 /** 수동 재스캔 결과를 전역 build session에 반영해 모든 결과/토스트 액션이 같은 게이트를 본다. */
 export function updateBuildSecurityScan(scan: unknown): void {
   if (!state.result) return;
+  const previousDisposition = buildScanDisposition(state.result.securityScan);
   state.result = { ...state.result, securityScan: scan };
   commit();
+  if (
+    previousDisposition !== "passed" &&
+    buildScanDisposition(scan) === "passed" &&
+    !state.registered &&
+    !JUNK_WS.test(wsBasename(state.result.workspace))
+  ) {
+    void autoRegister(state.result.workspace, state.result.readScope, buildGeneration);
+  }
 }
