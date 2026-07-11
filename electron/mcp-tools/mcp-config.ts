@@ -14,7 +14,11 @@ import { app } from "electron";
 import { ensureDefaultMcpPluginsInstalled } from "./defaults";
 import { listInstalledServers } from "./registry";
 import { readEnvVar } from "../secrets/vault";
-import { isVaultBackedRemoteUrl } from "../opencrab/constants";
+import {
+  OPENCRAB_CATALOG_ID,
+  isOpenCrabCredentialUrl,
+  isVaultBackedRemoteUrl,
+} from "../opencrab/constants";
 import type { InstalledMcpServer } from "../../shared/types";
 
 function expandHome(arg: string): string {
@@ -179,6 +183,62 @@ function writePrivateFile(file: string, content: string): void {
   }
 }
 
+function overwriteAndRemovePrivateFile(file: string): void {
+  const fd = fs.openSync(file, "r+");
+  try {
+    const size = fs.fstatSync(fd).size;
+    const zeros = Buffer.alloc(64 * 1024);
+    for (let offset = 0; offset < size; offset += zeros.length) {
+      fs.writeSync(fd, zeros, 0, Math.min(zeros.length, size - offset), offset);
+    }
+    fs.ftruncateSync(fd, 0);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.rmSync(file, { force: true });
+}
+
+/**
+ * A pre-Keychain build could serialize an OpenCrab path credential into the
+ * generated Claude MCP config. Delete that derived file at startup; it will be
+ * recreated from the current registry on the next runtime invocation.
+ */
+export function scrubLegacyOpenCrabMcpConfig(): boolean {
+  const dir = path.join(app.getPath("userData"), "mcp");
+  if (!fs.existsSync(dir)) return false;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return false;
+  }
+  const names = entries.filter(
+    (name) => name === "agentlas-mcp.json" || /^agentlas-mcp\.json\.\d+\.[0-9a-f-]+\.tmp$/i.test(name),
+  );
+  let removed = false;
+  let failure: unknown;
+  for (const name of names) {
+    const candidate = path.join(dir, name);
+    try {
+      const stat = fs.lstatSync(candidate);
+      if (!stat.isFile() || stat.isSymbolicLink()) continue;
+      const raw = fs.readFileSync(candidate, "utf8");
+      const containsCredential = /ocm_[A-Za-z0-9_-]{12,}/.test(raw)
+        || /https:\/\/(?:[a-z0-9-]+\.)*opencrab\.sh(?::\d+)?(?:\/|["'\s])/i.test(raw);
+      if (!containsCredential) continue;
+      overwriteAndRemovePrivateFile(candidate);
+      removed = true;
+    } catch (error) {
+      // Keep scanning sibling derived files, then fail closed so startup logs
+      // that at least one candidate could not be proven clean.
+      failure ??= error;
+    }
+  }
+  if (failure) throw failure;
+  return removed;
+}
+
 function ensureCodexSecretWrapper(dir: string): string {
   const wrapperPath = path.join(dir, "codex-mcp-secret-wrapper.cjs");
   writePrivateFile(wrapperPath, CODEX_SECRET_WRAPPER);
@@ -216,7 +276,11 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     if (!s.enabled) return false;
     // URL 경로 자체가 credential인 서버는 Desktop main process 전용이다. Claude/Codex
     // 설정 파일이나 -c argv로 내보내면 Keychain 경계를 우회하게 되므로 항상 제외한다.
-    if (isVaultBackedRemoteUrl(s.url)) return false;
+    if (
+      s.catalogId === OPENCRAB_CATALOG_ID ||
+      isVaultBackedRemoteUrl(s.url) ||
+      isOpenCrabCredentialUrl(s.url)
+    ) return false;
     if (!scopedCatalogIds) return true;
     return Boolean((s.catalogId && scopedCatalogIds.has(s.catalogId)) || scopedCatalogIds.has(s.id));
   });

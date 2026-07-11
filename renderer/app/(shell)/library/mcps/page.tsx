@@ -43,10 +43,11 @@ export default function LibraryMcpsPage() {
   const [cUrl, setCUrl] = useState("");
   const [cEnv, setCEnv] = useState("");
   const [cBusy, setCBusy] = useState(false);
+  const customOpenCrabUrl = cTransport !== "stdio" && isOpenCrabCredentialUrl(cUrl);
 
   async function addCustom() {
     const api = ipc();
-    if (!api || !cName.trim()) return;
+    if (!api || !cName.trim() || customOpenCrabUrl) return;
     setCBusy(true);
     try {
       await api.mcpTools.installCustom({
@@ -134,9 +135,16 @@ export default function LibraryMcpsPage() {
     if (!api) return;
     setBusy(catalogId);
     try {
-      await api.mcpTools.install(catalogId);
+      const server = await api.mcpTools.install(catalogId);
       await refresh();
       setTab("installed");
+      if (catalogId === "opencrab" && server?.id) {
+        // Missing endpoint resolves immediately and exposes the existing
+        // Keychain setup CTA. A configured endpoint verifies in background.
+        void api.mcpTools.test(server.id).then((status) => {
+          setStatuses((current) => ({ ...current, [server.id]: status }));
+        }).catch(() => {});
+      }
     } finally {
       setBusy(null);
     }
@@ -433,6 +441,13 @@ export default function LibraryMcpsPage() {
                       <button type="button" onClick={() => setCTransport("sse")} style={detBtn(cTransport === "sse")}>SSE</button>
                     </div>
                   ) : null}
+                  {customOpenCrabUrl && (
+                    <div role="alert" style={{ fontSize: 11.5, lineHeight: 1.5, color: "var(--peach-ink)" }}>
+                      {locale === "en"
+                        ? "Private OpenCrab URLs contain a credential. Use the OpenCrab catalog card below so the URL stays in Keychain."
+                        : "OpenCrab 개인 URL에는 인증정보가 들어 있습니다. URL이 키체인에만 남도록 아래 OpenCrab 카탈로그 카드에서 연결하세요."}
+                    </div>
+                  )}
                 </>
               )}
               <input
@@ -443,7 +458,7 @@ export default function LibraryMcpsPage() {
               />
               <button
                 onClick={() => void addCustom()}
-                disabled={!cName.trim() || cBusy}
+                disabled={!cName.trim() || cBusy || customOpenCrabUrl}
                 style={{
                   alignSelf: "flex-start",
                   padding: "7px 16px",
@@ -451,9 +466,9 @@ export default function LibraryMcpsPage() {
                   fontSize: 12,
                   fontWeight: 700,
                   border: "1px solid var(--paper-edge)",
-                  boxShadow: cName.trim() && !cBusy ? "var(--neu-raised)" : "none",
-                  background: cName.trim() && !cBusy ? "var(--paper)" : "var(--paper-2)",
-                  color: cName.trim() && !cBusy ? "var(--ink)" : "var(--muted-deep)",
+                  boxShadow: cName.trim() && !cBusy && !customOpenCrabUrl ? "var(--neu-raised)" : "none",
+                  background: cName.trim() && !cBusy && !customOpenCrabUrl ? "var(--paper)" : "var(--paper-2)",
+                  color: cName.trim() && !cBusy && !customOpenCrabUrl ? "var(--ink)" : "var(--muted-deep)",
                 }}
               >
                 {cBusy ? t("mcps.testing") : t("mcps.custom.create")}
@@ -605,6 +620,18 @@ export default function LibraryMcpsPage() {
       </div>
     </section>
   );
+}
+
+function isOpenCrabCredentialUrl(value: string): boolean {
+  const raw = value.trim();
+  if (/ocm_[A-Za-z0-9_-]{12,}/.test(raw)) return true;
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    return host === "opencrab.sh" || host.endsWith(".opencrab.sh");
+  } catch {
+    return false;
+  }
 }
 
 function StatusLine({

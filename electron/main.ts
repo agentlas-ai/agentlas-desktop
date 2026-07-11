@@ -22,6 +22,7 @@ import {
   initAutoUpdater,
   preflightUpdaterStartup,
 } from "./updater";
+import { scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls } from "./updater/continuity";
 import { disposeAppFactoryLaunches } from "./app-factory/operations";
 import { bootAuthFromKeychain, onAuthSessionInvalidated } from "./auth";
 import {
@@ -33,6 +34,8 @@ import { materializeAllAgents } from "./agents/files";
 import { backfillEntityKinds } from "./mcp/registry";
 import { seedBuiltinAgents } from "./architecture/seed";
 import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
+import { scrubLegacyOpenCrabMcpConfig } from "./mcp-tools/mcp-config";
+import { scrubLegacyOpenCrabCredentialUrls } from "./mcp-tools/registry";
 import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser/approval-server";
 import { authorizeLocalMediaPath } from "./fs/access";
 import { setCurrentUiLocale } from "./ui-locale";
@@ -319,6 +322,15 @@ app.whenReady().then(async () => {
   // Stage 1 (pre-mutation): a pending install must already have a valid,
   // contained SQLite/agent/route recovery set before initStore can migrate.
   const updatePreflight = preflightUpdaterStartup();
+  // This file is derived runtime material, never recovery authority. Remove
+  // legacy credential copies before either GUI or headless pending-install exits.
+  try {
+    if (scrubLegacyOpenCrabMcpConfig()) {
+      console.warn("[opencrab] removed a legacy generated MCP config containing a credential URL");
+    }
+  } catch {
+    console.error("[opencrab] legacy generated MCP config scrub failed");
+  }
   // ── 헤드리스 자동화 러너 진입점(설계 §2.6) ─────────────────────
   // launchd LaunchAgent가 `--headless-automations` 플래그로 이 바이너리를 coarse 인터벌마다
   // poke한다. 창을 만들지 않고 due 자동화를 1회 실행한 뒤 종료한다. 러너는 이미 렌더러를
@@ -332,6 +344,10 @@ app.whenReady().then(async () => {
     }
     try {
       initStore();
+      const openCrabScrub = scrubLegacyOpenCrabCredentialUrls();
+      if (openCrabScrub.scrubbed > 0) {
+        console.warn(`[opencrab] disabled and scrubbed ${openCrabScrub.scrubbed} legacy credential URL row(s)`);
+      }
       const { runDueAutomationsNow } = await import("./automation-scheduler");
       await runDueAutomationsNow();
     } catch (err) {
@@ -361,6 +377,35 @@ app.whenReady().then(async () => {
   // Stage 2 (post-migration, pre-bootstrap-writers): compare the live DB and
   // managed assets against the recovery copies. Recovery-required stops here.
   await initAutoUpdater();
+  if (getUpdaterState().status !== "recovery-required") {
+    try {
+      const openCrabScrub = scrubLegacyOpenCrabCredentialUrls();
+      if (openCrabScrub.scrubbed > 0) {
+        console.warn(`[opencrab] disabled and scrubbed ${openCrabScrub.scrubbed} legacy credential URL row(s)`);
+      }
+    } catch {
+      console.error("[opencrab] live database credential URL scrub failed");
+    }
+    try {
+      // initAutoUpdater has either completed continuity verification and cleared
+      // its journal, or the helper below will observe the remaining journal and
+      // leave every recovery copy untouched. Never run this from the headless
+      // path, which deliberately does not own post-update verification.
+      const recoveryScrub = scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls({
+        userDataPath: app.getPath("userData"),
+      });
+      if (recoveryScrub.scrubbedDatabases > 0) {
+        console.warn(
+          `[opencrab] scrubbed ${recoveryScrub.scrubbedRows} legacy credential URL row(s) from ${recoveryScrub.scrubbedDatabases} inactive updater recovery database(s)`,
+        );
+      }
+      if (recoveryScrub.skippedUnsafe > 0) {
+        console.error("[opencrab] one or more inactive updater recovery databases could not be scrubbed safely");
+      }
+    } catch {
+      console.error("[opencrab] inactive updater recovery credential URL scrub failed");
+    }
+  }
   registerIpcHandlers();
   // DESKTOP_MOBILE_BRIDGE: Desktop main is the sole authority. Renderer IPC
   // can issue/revoke pairing, but never receives a persisted bearer token.

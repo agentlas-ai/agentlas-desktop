@@ -83,6 +83,9 @@ function tryParse(body: string, id: string): ChatQuestion | null {
   }
   if (options.length < 2) return null;
   return {
+    // IDs are always message-scoped. Model-authored JSON can never claim a
+    // reserved product-consent identity; main-owned supplemental questions use
+    // a separate typed event field instead of this parser.
     id,
     question,
     header: typeof o.header === "string" ? o.header : undefined,

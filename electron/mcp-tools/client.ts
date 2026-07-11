@@ -15,6 +15,8 @@ import { listInstalledServers, getServer } from "./registry";
 import { withCliPath } from "../runtime/exec";
 import {
   OPENCRAB_CATALOG_ID,
+  OPENCRAB_MCP_URL_KEY,
+  isOpenCrabCredentialUrl,
   validateOpenCrabMcpUrl,
   vaultUrlKey,
 } from "../opencrab/constants";
@@ -24,6 +26,11 @@ import type { InstalledMcpServer, McpServerStatus } from "../../shared/types";
 const CONNECT_TIMEOUT_MS = 45_000;
 const MAX_REMOTE_URL_CHARS = 4_096;
 const DEFAULT_TOOL_TEXT_LIMIT = 256_000;
+
+/** OpenCrab's allowlist applies to the exact validated endpoint. Never let a
+ *  30x response pivot the main process to localhost or another network host. */
+export const openCrabNoRedirectFetch: typeof globalThis.fetch = (input, init) =>
+  globalThis.fetch(input, { ...init, redirect: "error" });
 
 function expandHome(arg: string): string {
   if (arg === "~") return os.homedir();
@@ -75,10 +82,19 @@ function parseRemoteUrl(server: InstalledMcpServer, resolved: Record<string, str
   const raw = urlVaultKey ? resolved[urlVaultKey] : server.url;
   if (!raw) throw new Error("secure remote MCP endpoint is missing");
   if (raw.length > MAX_REMOTE_URL_CHARS) throw new Error("secure remote MCP endpoint is invalid");
+  const secureOpenCrab = server.catalogId === OPENCRAB_CATALOG_ID;
+  if (secureOpenCrab && urlVaultKey !== OPENCRAB_MCP_URL_KEY) {
+    throw new Error("secure remote MCP endpoint is invalid");
+  }
+  if (!secureOpenCrab && (isOpenCrabCredentialUrl(server.url) || isOpenCrabCredentialUrl(raw))) {
+    // A legacy/custom row must be migrated to the catalog+Keychain boundary.
+    // Never execute it with generic URL or redirect behavior.
+    throw new Error("secure remote MCP endpoint is invalid");
+  }
 
   let url: URL;
   try {
-    url = server.catalogId === OPENCRAB_CATALOG_ID ? validateOpenCrabMcpUrl(raw) : new URL(raw);
+    url = secureOpenCrab ? validateOpenCrabMcpUrl(raw) : new URL(raw);
   } catch {
     // URL 파서 오류에는 입력값이 포함될 수 있으므로 원래 예외를 전달하지 않는다.
     throw new Error("secure remote MCP endpoint is invalid");
@@ -145,7 +161,10 @@ function createTransport(server: InstalledMcpServer, resolved: Record<string, st
   }
   const { url, urlVaultKey } = parseRemoteUrl(server, resolved);
   const headers = buildRemoteHeaders(server.envKeys, resolved, urlVaultKey);
-  const init = Object.keys(headers).length ? { requestInit: { headers } } : undefined;
+  const init = {
+    ...(Object.keys(headers).length ? { requestInit: { headers } } : {}),
+    ...(server.catalogId === OPENCRAB_CATALOG_ID ? { fetch: openCrabNoRedirectFetch } : {}),
+  };
   return server.transport === "sse"
     ? new SSEClientTransport(url, init)
     : new StreamableHTTPClientTransport(url, init);

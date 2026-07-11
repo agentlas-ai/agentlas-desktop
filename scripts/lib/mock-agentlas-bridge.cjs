@@ -580,6 +580,12 @@ function setupMockAgentlasBridge(options) {
       setEnabled: async () => ({}),
       test: async () => ({ ok: true }),
     },
+    openCrab: {
+      readiness: async () =>
+        options?.openCrabReady
+          ? { state: "ready", installed: true, enabled: true, configured: true, connected: true }
+          : { state: "absent", installed: false, enabled: false, configured: false, connected: false, reason: "not_installed" },
+    },
     skills: {
       listCatalog: async () => [
         { slug: "qa-skill", name: "qa-skill", description: "QA helper skill" },
@@ -618,7 +624,7 @@ function setupMockAgentlasBridge(options) {
           window.setTimeout(() => emit(`build:${runId}`, { kind: "stage", stage: "build", text: "QA slow build stage" }), 20);
           return;
         }
-        if (options && options.buildScenario === "interview") {
+        if (options && (options.buildScenario === "interview" || options.buildScenario === "opencrab-interview")) {
           const askOne = [
             "요구사항을 조금 더 확인해야 합니다.",
             "<<agentlas-ask>>",
@@ -650,7 +656,25 @@ function setupMockAgentlasBridge(options) {
           const askBatch = [askOne, askTwo].join("\n\n");
           if (runId === "build-run-1") {
             window.setTimeout(() => emit(`build:${runId}`, { kind: "partial", text: askBatch }), 20);
-            window.setTimeout(() => emit(`build:${runId}`, { kind: "done", text: askBatch, result: { workspace: "/tmp/agentlas-qa", securityScan: { findings: [] } } }), 60);
+            const supplementalQuestion = options.buildScenario === "opencrab-interview"
+              ? {
+                  kind: "opencrab-ontology",
+                  question: "연결된 OpenCrab에서 이 빌드 요청과 관련된 지식이 있는지 확인할까요?",
+                  options: [
+                    { label: "관련성 확인하기", description: "온톨로지 원문 없이 관련성 신호만 사용" },
+                    { label: "사용하지 않기", description: "기존 빌드 흐름 유지" },
+                  ],
+                }
+              : undefined;
+            window.setTimeout(() => emit(`build:${runId}`, {
+              kind: "done",
+              text: askBatch,
+              result: {
+                workspace: "/tmp/agentlas-qa",
+                securityScan: { findings: [] },
+                ...(supplementalQuestion ? { supplementalQuestion } : {}),
+              },
+            }), 60);
             return;
           }
           window.setTimeout(() => emit(`build:${runId}`, { kind: "stage", stage: "build", text: "QA build stage" }), 20);

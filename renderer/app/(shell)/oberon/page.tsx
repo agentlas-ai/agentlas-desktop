@@ -76,6 +76,7 @@ import type {
   OberonMotionAdJob,
   OberonMotionAdRequest,
   OberonPlanResult,
+  OpenCrabReadiness,
   OberonRenderJob,
   OberonRenderRequest,
 } from "@/lib/types";
@@ -87,6 +88,8 @@ export default function OberonPage() {
   const [stepState, setStepState] = useState<Record<OberonStepId, StepState>>({ ...INITIAL_STEP_STATE });
   const [active, setActive] = useState<OberonStepId>("setup");
   const [planning, setPlanning] = useState(false);
+  const [openCrabReadiness, setOpenCrabReadiness] = useState<OpenCrabReadiness | null>(null);
+  const [useOpenCrab, setUseOpenCrab] = useState(false);
   // 진입 랜딩에서 고른 스튜디오. null이면 랜딩(스튜디오 선택)을 먼저 보여준다.
   const [studio, setStudio] = useState<OberonStudio | null>(null);
   // 스튜디오별 노출 단계(검토 게이트는 건너뜀). 미선택/불러오기 시 전체 7단계로 폴백.
@@ -118,6 +121,8 @@ export default function OberonPage() {
   const [videoProviderSetting, setVideoProviderSetting] = useState<string>("");
   const [backgroundJobs, setBackgroundJobs] = useState<OberonBackgroundJob[]>([]);
   const attachedBackgroundJobs = useRef({ keyframe: "", render: "", motion: "", animate: "" });
+  const activePlanJobId = useRef<string | null>(null);
+  const planStartGuard = useRef(false);
 
   useEffect(() => () => {
     if (keyframePoll.current) clearInterval(keyframePoll.current);
@@ -137,6 +142,16 @@ export default function OberonPage() {
       ?.getSettings()
       .then((s) => setVideoProviderSetting(s?.videoProvider ?? ""))
       .catch(() => setVideoProviderSetting(""));
+    void bridge?.openCrab
+      ?.readiness()
+      .then((value) => {
+        setOpenCrabReadiness(value);
+        if (value?.state !== "ready") setUseOpenCrab(false);
+      })
+      .catch(() => {
+        setOpenCrabReadiness(null);
+        setUseOpenCrab(false);
+      });
   }, []);
 
   // 명시 선택은 그대로 존중하고, auto는 실제 readiness가 확인된 provider만 사용한다.
@@ -191,6 +206,7 @@ export default function OberonPage() {
             runtime: model.textRuntime,
             runtimeLabel: model.textRuntimeLabel,
             premium,
+            useOpenCrab: useOpenCrab && openCrabReadiness?.state === "ready",
           });
         } catch (error) {
           planningRun = fallbackPlanResult(model, error instanceof Error ? error.message : String(error));
@@ -212,15 +228,31 @@ export default function OberonPage() {
       prod.planningRun = planningRun;
       return prod;
     },
-    [model, locale],
+    [model, locale, useOpenCrab, openCrabReadiness],
   );
 
   // 00 → CLI 기획 생성
   const handlePlan = useCallback(
     (brief: FilmBrief, premium: boolean) => {
-      const planJob = startOberonPlanJob(brief.title);
+      // startOberonPlanJob writes localStorage and synchronously dispatches the
+      // jobs event. Guard before that dispatch so an older completed plan
+      // cannot be loaded while the current job id is not assigned yet.
+      planStartGuard.current = true;
+      const planJob = (() => {
+        try {
+          const job = startOberonPlanJob(brief.title);
+          activePlanJobId.current = job.id;
+          return job;
+        } finally {
+          planStartGuard.current = false;
+        }
+      })();
       setPlanning(true);
-      void buildProductionWithPlanner(brief, premium)
+      const planningTask = buildProductionWithPlanner(brief, premium);
+      // Consent is per planning run. A later replan or a different project must
+      // opt in again instead of inheriting this external-data choice.
+      setUseOpenCrab(false);
+      void planningTask
         .then((prod) => {
           setProduction(prod);
           complete("setup");
@@ -230,13 +262,17 @@ export default function OberonPage() {
         .catch((error) => {
           failOberonBackgroundJob("plan", planJob.id, error instanceof Error ? error.message : String(error));
         })
-        .finally(() => setPlanning(false));
+        .finally(() => {
+          if (activePlanJobId.current === planJob.id) activePlanJobId.current = null;
+          setPlanning(false);
+        });
     },
     [buildProductionWithPlanner, complete],
   );
 
   // 저장된 프로젝트 불러오기 — 데이터가 있는 단계까지 잠금 해제
   const loadSaved = useCallback((prod: FilmProduction) => {
+    setUseOpenCrab(false);
     if (keyframePoll.current) clearInterval(keyframePoll.current);
     if (renderPoll.current) clearInterval(renderPoll.current);
     if (motionPoll.current) clearInterval(motionPoll.current);
@@ -899,10 +935,12 @@ export default function OberonPage() {
       const jobs = listOberonBackgroundJobs();
       setBackgroundJobs(jobs);
       if (!production) {
-        const loadable = jobs.find((job) => job.productionId);
-        if (loadable?.productionId) {
-          const saved = loadProduction(loadable.productionId);
-          if (saved) loadSaved(saved);
+        if (!planStartGuard.current && !activePlanJobId.current) {
+          const loadable = jobs.find((job) => job.productionId);
+          if (loadable?.productionId) {
+            const saved = loadProduction(loadable.productionId);
+            if (saved) loadSaved(saved);
+          }
         }
         return;
       }
@@ -993,6 +1031,9 @@ export default function OberonPage() {
   }, [animateKey, locale, pollAnimateJob, production]);
 
   const newProject = useCallback(() => {
+    setUseOpenCrab(false);
+    planStartGuard.current = false;
+    activePlanJobId.current = null;
     if (keyframePoll.current) clearInterval(keyframePoll.current);
     if (renderPoll.current) clearInterval(renderPoll.current);
     if (motionPoll.current) clearInterval(motionPoll.current);
@@ -1097,6 +1138,9 @@ export default function OberonPage() {
           studio={studio}
           onPlan={handlePlan}
           planning={planning}
+          openCrabReady={openCrabReadiness?.state === "ready"}
+          useOpenCrab={useOpenCrab}
+          onUseOpenCrabChange={setUseOpenCrab}
           onLoad={loadSaved}
           headerSlot={<ModelSettingsPanel value={model} onChange={setModel} />}
         />

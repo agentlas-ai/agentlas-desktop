@@ -38,7 +38,101 @@ permissions:
   contents: read
 
 jobs:
+  opencrab-security-preflight:
+    name: OpenCrab security preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      HEPHAESTUS_REF: v1.1.18
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Linux test dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev xvfb dbus-x11
+
+      - name: Verify preflight source and engine pin
+        shell: bash
+        env:
+          RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          tag="$RAW_TAG"
+          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+          if [[ ! "$tag" =~ $semver_tag_re ]]; then
+            echo "::error::Release tag must be strict SemVer with a leading v (received: $tag)."
+            exit 1
+          fi
+          tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}")" || {
+            echo "::error::Release tag $tag does not exist in refs/tags."
+            exit 1
+          }
+          head_commit="$(git rev-parse HEAD)"
+          if [ "$head_commit" != "$tagged_commit" ]; then
+            echo "::error::Checked-out HEAD $head_commit does not match $tag ($tagged_commit)."
+            exit 1
+          fi
+          version="${tag#v}"
+          pkgver=$(node -p "require('./package.json').version")
+          lockver=$(node -p "require('./package-lock.json').version")
+          lockrootver=$(node -p "require('./package-lock.json').packages[''].version")
+          runtimever=$(node -p "require('./package.json').agentlasUpdateCompatibility.bundledRuntimeVersion")
+          if [ "$pkgver" != "$version" ] || [ "$lockver" != "$version" ] || [ "$lockrootver" != "$version" ]; then
+            echo "::error::Tag $tag requires package.json/package-lock root version=$version (got package=$pkgver lock=$lockver root=$lockrootver)."
+            exit 1
+          fi
+          if [ "${HEPHAESTUS_REF#v}" != "$runtimever" ]; then
+            echo "::error::HEPHAESTUS_REF=$HEPHAESTUS_REF does not match bundledRuntimeVersion=$runtimever."
+            exit 1
+          fi
+          echo "Preflight source verified: $tag ($head_commit), Agentlas OS $HEPHAESTUS_REF"
+
+      - name: Ensure embedded engine (Hephaestus)
+        run: npm run ensure:engine
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Dependency security audit
+        run: npm audit --audit-level=high
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: OpenCrab security regression gates
+        env:
+          # Hosted Linux has no user Secret Service. The Electron tests must use
+          # the in-memory E2E vault rather than touching a runner keychain.
+          AGENTLAS_E2E: "1"
+        run: |
+          node node_modules/electron/install.js
+          sandbox_path="$(find node_modules/electron -maxdepth 4 -name chrome-sandbox -print -quit)"
+          if [ -z "$sandbox_path" ]; then
+            echo "::error::Electron Linux binary installed without the required chrome-sandbox helper."
+            exit 1
+          fi
+          sudo chown root:root "$sandbox_path"
+          sudo chmod 4755 "$sandbox_path"
+          echo "Configured Electron SUID sandbox helper: $sandbox_path"
+          xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
+            npm run test:opencrab-core
+            npm run test:opencrab-product
+            npm run test:opencrab-recovery-scrub
+            npm run test:mock-bridge-parity
+            npm run test:mcp-secret-isolation
+          '
+
   release:
+    needs: opencrab-security-preflight
     strategy:
       fail-fast: false
       matrix:
@@ -166,6 +260,9 @@ jobs:
             npm run test:borrowed-task-force
             npm run test:mcp-auto-select
             npm run test:mcp-secret-isolation
+            npm run test:opencrab-core
+            npm run test:opencrab-product
+            npm run test:mock-bridge-parity
             npm run test:hephaestus-sync
             npm run test:telegram-automation-report-fanout
           '

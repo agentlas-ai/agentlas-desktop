@@ -2958,12 +2958,33 @@ export interface OberonAnimateKeyStatus {
 // ── Oberon text planning jobs ──────────────────────────────────
 export type OberonPlanRuntime = "claude-code" | "codex" | "gemini";
 
+/** Optional, main-process-owned OpenCrab ontology enrichment. No endpoint or result body crosses IPC. */
+export interface OpenCrabReadiness {
+  state: "absent" | "needs-credential" | "disabled" | "ready" | "unreachable";
+  installed: boolean;
+  enabled: boolean;
+  configured: boolean;
+  connected: boolean;
+  reason?: string;
+}
+
+export interface OpenCrabEnrichment {
+  requested: boolean;
+  used: boolean;
+  reason?: string;
+  /** Main-owned safe projection. No ontology result text crosses IPC. */
+  evidenceCount?: number;
+  matchedQueryTerms?: string[];
+}
+
 export interface OberonPlanRequest {
   productionId?: string;
   brief: JsonObject;
   runtime?: OberonPlanRuntime | string;
   runtimeLabel?: string;
   premium?: boolean;
+  /** Explicit per-run consent. False/omitted preserves the current local-only planning flow. */
+  useOpenCrab?: boolean;
 }
 
 export interface OberonPlanResult {
@@ -2975,6 +2996,7 @@ export interface OberonPlanResult {
   error?: string;
   warnings: string[];
   createdAtMs: number;
+  openCrab?: OpenCrabEnrichment;
 }
 
 // ── Oberon keyframe image jobs ─────────────────────────────────
@@ -3108,6 +3130,19 @@ export interface HephaestusBuildEvent {
   sessionId?: string;
   result?: unknown;
 }
+
+/** Main-authored supplemental question. It never comes from model text. */
+export interface HephaestusBuildSupplementalQuestion {
+  kind: "opencrab-ontology";
+  question: string;
+  options: Array<{ label: string; description?: string }>;
+}
+
+export interface HephaestusBuildResult {
+  workspace: string;
+  securityScan: unknown;
+  supplementalQuestion?: HephaestusBuildSupplementalQuestion;
+}
 /** 빌드 지시문 첨부 — 사용자 디스크의 파일/폴더(기존 에이전트·스킬·이미지·문서 등). */
 export interface HephaestusBuildAttachment {
   /** Native picker / trusted drop에서 발급된 opaque 파일 권한. Renderer 경로는 권한이 아니다. */
@@ -3131,6 +3166,8 @@ export interface HephaestusBuildRequest {
   runtimeSessionId?: string;
   /** 대화형 딥인터뷰용 이전 대화(이번 턴 입력 이전까지). 빌더가 인터뷰 맥락을 이어간다. */
   history?: Array<{ role: "user" | "assistant"; text: string }>;
+  /** Explicit answer to the conditional OpenCrab interview question. */
+  openCrabOntology?: "use" | "skip";
   /** 렌더러 표시 언어. 빌더가 UI 노출 로그/상태 메시지를 이 언어로 낸다. 미지정 시 백엔드 기본. */
   locale?: "ko" | "en";
 }
@@ -3511,7 +3548,7 @@ export interface AgentlasIpc {
   trex: {
     generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => Promise<{ ok: boolean; src?: string; reason?: string; engine?: "codex" | "gemini" }>;
     imageProviders: () => Promise<{ codex: boolean; gemini: boolean }>;
-    generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string; locale?: "ko" | "en" }) => Promise<{ ok: boolean; text?: string; engine?: "agent" | "agy" | "codex"; reason?: string }>;
+    generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string; locale?: "ko" | "en"; useOpenCrab?: boolean }) => Promise<{ ok: boolean; text?: string; engine?: "agent" | "agy" | "codex"; reason?: string; openCrab?: OpenCrabEnrichment }>;
     contentAvailable: () => Promise<{ agy: boolean; codex: boolean }>;
     /** 선택 요소 LLM 수정(select-to-edit) — 현재 텍스트 + 지시 → 다시 쓴 텍스트. */
     refineText: (payload: { current: string; instruction: string; context?: string }) => Promise<{ ok: boolean; text?: string; reason?: string }>;
@@ -3853,6 +3890,10 @@ export interface AgentlasIpc {
     test: (id: string) => Promise<McpServerStatus>;
     /** 활성화된 모든 서버 상태 (env 부족분 포함) */
     status: () => Promise<McpServerStatus[]>;
+  };
+  /** Optional ontology context. Endpoint and returned context remain in Electron main. */
+  openCrab: {
+    readiness: () => Promise<OpenCrabReadiness>;
   };
   marketplace: {
     listBundles: () => Promise<TeamBundle[]>;

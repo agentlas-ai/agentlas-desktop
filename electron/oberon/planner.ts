@@ -6,11 +6,17 @@ import type {
   OberonPlanRequest,
   OberonPlanResult,
   OberonPlanRuntime,
+  OpenCrabEnrichment,
 } from "../../shared/types";
 import { runClaudeCode } from "../runtime/claude-code";
 import { runCodex } from "../runtime/codex";
 import { runGemini } from "../runtime/gemini";
 import type { Runner } from "../runtime/runner";
+import {
+  deriveOpenCrabMatchSignal,
+  queryOpenCrabContext,
+  type OpenCrabMatchSignal,
+} from "../opencrab/ontology";
 
 const RUNTIMES: Record<OberonPlanRuntime, { label: string; runner: Runner }> = {
   "claude-code": { label: "Claude Code", runner: runClaudeCode },
@@ -22,6 +28,25 @@ export async function planOberonWithCli(request: OberonPlanRequest): Promise<Obe
   const ordered = runtimeOrder(request.runtime);
   const warnings: string[] = [];
   const startedAt = Date.now();
+  let openCrab: OpenCrabEnrichment | undefined;
+  let openCrabSignal: OpenCrabMatchSignal | undefined;
+  if (request.useOpenCrab === true) {
+    const openCrabQuery = buildOpenCrabQuery(request.brief);
+    const enrichment = await queryOpenCrabContext(openCrabQuery, {
+      limit: 6,
+      timeoutMs: 12_000,
+      maxContextChars: 6_000,
+    });
+    openCrabSignal = enrichment.used
+      ? deriveOpenCrabMatchSignal(openCrabQuery, enrichment.context)
+      : undefined;
+    openCrab = {
+      requested: true,
+      used: Boolean(openCrabSignal?.evidenceCount),
+      reason: enrichment.reason,
+      ...(openCrabSignal ? openCrabSignal : {}),
+    };
+  }
 
   for (const runtime of ordered) {
     const entry = RUNTIMES[runtime];
@@ -53,7 +78,7 @@ export async function planOberonWithCli(request: OberonPlanRequest): Promise<Obe
             "Keep the output compact and safe for deterministic downstream planning.",
           ].join("\n"),
           history: [],
-          userPrompt: buildPrompt(request),
+          userPrompt: buildPrompt(request, openCrabSignal),
           backendLabel: runtime === request.runtime ? request.runtimeLabel || entry.label : entry.label,
           permission: "read",
           cwd,
@@ -78,6 +103,7 @@ export async function planOberonWithCli(request: OberonPlanRequest): Promise<Obe
         rawText,
         warnings,
         createdAtMs: startedAt,
+        ...(openCrab ? { openCrab } : {}),
       };
     } catch (error: unknown) {
       warnings.push(`${entry.label}: ${errorMessage(error)}`);
@@ -93,10 +119,11 @@ export async function planOberonWithCli(request: OberonPlanRequest): Promise<Obe
     error: "No configured CLI planner returned usable JSON.",
     warnings,
     createdAtMs: startedAt,
+    ...(openCrab ? { openCrab } : {}),
   };
 }
 
-function buildPrompt(request: OberonPlanRequest): string {
+function buildPrompt(request: OberonPlanRequest, openCrabSignal?: OpenCrabMatchSignal): string {
   return JSON.stringify(
     {
       task: "Improve this Oberon film brief. Return JSON with only these optional fields: title, format, genre, aspect, durationSec, logline, synopsis, audience, tone, visualReferences, characters, setting, brandOrProduct, mustInclude, mustAvoid, language.",
@@ -111,10 +138,58 @@ function buildPrompt(request: OberonPlanRequest): string {
       ],
       premium: request.premium === true,
       brief: request.brief,
+      ...(openCrabSignal?.evidenceCount
+        ? {
+            openCrabMatchSignal: openCrabSignal,
+            openCrabMatchSignalPolicy:
+              "Main-owned metadata only; no ontology text is included. Use only to prioritize verification of terms already present in the user's brief.",
+          }
+        : {}),
     },
     null,
     2,
   );
+}
+
+export function buildOpenCrabQuery(brief: JsonObject): string {
+  const source = brief as Record<string, unknown>;
+  const hasLocalPathShape = (value: string): boolean => {
+    const localPathPatterns = [
+      /\bfile:\/\//i,
+      /(?:^|[^A-Za-z0-9_])~[\\/]/,
+      /(?:^|[^A-Za-z0-9_])\.{1,2}[\\/]/,
+      /(?:^|[\s"'(<\[{=])\/\/[^\/\s]+\/[^\/\s]+/,
+      /(?:^|[\s"'(<\[{=:])\/(?![\/\s])[^\s,;)}\]]+/,
+      /(?:^|[\s"'(<\[{:=])\/(?:Applications|Library\/Application Support|Library|Users|home|Volumes|private|tmp|var|opt|etc|usr|bin|sbin|System|mnt|media|srv)(?:[\\/]|$)/i,
+      /\\\\[^\\/\s]+[\\/][^\\/\s]+/,
+      /\b[A-Za-z]:(?:[\\/]|[^\s,;)}\]]+[\\/])/,
+    ];
+    return localPathPatterns.some((pattern) => pattern.test(value));
+  };
+  const safeString = (value: unknown, max = 280): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const clean = value.replace(/\s+/g, " ").trim();
+    if (!clean) return undefined;
+    if (hasLocalPathShape(clean)) return undefined;
+    return clean.slice(0, max);
+  };
+  const safeList = (value: unknown): string[] | undefined => {
+    if (!Array.isArray(value)) return undefined;
+    const items = value.map((item) => safeString(item, 120)).filter((item): item is string => Boolean(item)).slice(0, 8);
+    return items.length ? items : undefined;
+  };
+  return JSON.stringify({
+    title: safeString(source.title, 160),
+    format: safeString(source.format, 80),
+    genre: safeString(source.genre, 80),
+    logline: safeString(source.logline, 320),
+    synopsis: safeString(source.synopsis, 420),
+    audience: safeString(source.audience, 180),
+    tone: safeList(source.tone),
+    setting: safeString(source.setting, 220),
+    brandOrProduct: safeString(source.brandOrProduct, 160),
+    mustInclude: safeList(source.mustInclude),
+  });
 }
 
 function runtimeOrder(runtime?: string): OberonPlanRuntime[] {

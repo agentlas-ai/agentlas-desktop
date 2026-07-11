@@ -73,6 +73,7 @@ export function PlanStep({
   const planningRun = production.planningRun;
   const cli = planningRun?.runtimeLabel || model?.textRuntimeLabel || "BYOK CLI";
   const usedCli = planningRun?.ok === true;
+  const openCrabApplied = planningRun?.ok === true && planningRun.openCrab?.used === true;
 
   return (
     <div style={panelStyle}>
@@ -103,6 +104,30 @@ export function PlanStep({
           </div>
         }
       />
+
+      {planningRun?.openCrab?.requested && (
+        <Card style={{ padding: "10px 13px", marginBottom: 16, background: "var(--ob-surface)" }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 7,
+              color: openCrabApplied ? "var(--ob-success)" : "var(--ob-muted)",
+              fontSize: 12,
+              fontWeight: 650,
+            }}
+          >
+            <Glyph name={openCrabApplied ? "check" : "layers"} size={13} />
+            {openCrabApplied
+              ? locale === "ko"
+                ? `OpenCrab 관련 근거 ${planningRun.openCrab?.evidenceCount ?? 0}개를 확인하고, 원문 대신 안전한 관련성 신호를 기획에 반영했습니다.`
+                : `Checked ${planningRun.openCrab?.evidenceCount ?? 0} relevant OpenCrab records and applied a safe relevance signal without ontology text.`
+              : locale === "ko"
+                ? "OpenCrab 보강은 건너뛰고 기존 기획 흐름으로 계속했습니다."
+                : "OpenCrab enrichment was skipped; the standard planning flow continued."}
+          </div>
+        </Card>
+      )}
 
       {planningRun && !planningRun.ok && (
         <Card style={{ padding: 14, marginBottom: 16, background: "var(--ob-surface)" }}>

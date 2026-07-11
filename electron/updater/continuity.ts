@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -8,6 +8,13 @@ import {
   type ContinuityVerification,
 } from "./controller";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
+import {
+  OPENCRAB_CATALOG_ID,
+  OPENCRAB_CREDENTIAL_PATTERN,
+  OPENCRAB_MCP_URL_KEY,
+  OPENCRAB_MCP_URL_SENTINEL,
+  isOpenCrabCredentialUrl,
+} from "../opencrab/constants";
 
 const CONTINUITY_TABLES = CONTINUITY_CORE_TABLES;
 const V52_AUTOMATION_RECOVERY_STALE_MS = MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS + 2 * 60 * 1000;
@@ -367,6 +374,341 @@ function pruneOldRecoveryCopies(root: string, keepPath: string): void {
   } catch {
     // Retention is best effort. Never fail a safe install because an older backup could not be pruned.
   }
+}
+
+const RECOVERY_DATABASE_NAME = "agentlas.sqlite";
+const MAX_INACTIVE_RECOVERY_DATABASES = 2;
+
+export interface InactiveRecoveryOpenCrabScrubResult {
+  scanned: number;
+  scrubbedDatabases: number;
+  scrubbedRows: number;
+  consolidatedRows: number;
+  skippedActive: boolean;
+  skippedUnsafe: number;
+}
+
+type RecoveryMcpRow = {
+  id: string;
+  catalog_id: string | null;
+  url: string;
+  enabled: number;
+  installed_at: string;
+};
+
+function tableHasColumns(db: Database.Database, table: string, required: string[]): boolean {
+  if (!tableExists(db, table)) return false;
+  const columns = new Set(
+    (db.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all() as TableColumn[]).map((column) => column.name),
+  );
+  return required.every((column) => columns.has(column));
+}
+
+function fileContainsPattern(file: string, pattern: RegExp): boolean {
+  if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return false;
+  const fd = fs.openSync(file, "r");
+  const chunk = Buffer.allocUnsafe(64 * 1024);
+  let carry = "";
+  try {
+    while (true) {
+      const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, null);
+      if (bytesRead <= 0) return false;
+      const text = carry + chunk.subarray(0, bytesRead).toString("latin1");
+      pattern.lastIndex = 0;
+      if (pattern.test(text)) return true;
+      carry = text.slice(-8_192);
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function fileContainsBytes(file: string, needle: string): boolean {
+  if (!needle || !fs.existsSync(file) || !fs.statSync(file).isFile()) return false;
+  const fd = fs.openSync(file, "r");
+  const target = Buffer.from(needle, "utf8");
+  const chunk = Buffer.allocUnsafe(64 * 1024);
+  let carry = Buffer.alloc(0);
+  try {
+    while (true) {
+      const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, null);
+      if (bytesRead <= 0) return false;
+      const current = Buffer.concat([carry, chunk.subarray(0, bytesRead)]);
+      if (current.indexOf(target) >= 0) return true;
+      carry = current.subarray(Math.max(0, current.length - Math.max(0, target.length - 1)));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function assertCheckpointComplete(db: Database.Database): void {
+  const rows = db.pragma("wal_checkpoint(TRUNCATE)") as Array<{ busy?: number }>;
+  if (rows.some((row) => Number(row.busy ?? 0) !== 0)) {
+    throw new Error("inactive recovery SQLite checkpoint is busy");
+  }
+}
+
+function fsyncFileAndDirectory(file: string): void {
+  const fileFd = fs.openSync(file, fs.constants.O_RDONLY);
+  try {
+    fs.fsyncSync(fileFd);
+  } finally {
+    fs.closeSync(fileFd);
+  }
+  try {
+    const directoryFd = fs.openSync(path.dirname(file), fs.constants.O_RDONLY);
+    try {
+      fs.fsyncSync(directoryFd);
+    } finally {
+      fs.closeSync(directoryFd);
+    }
+  } catch {
+    // Directory fsync is unavailable on some platforms; SQLite/file fsync still applies.
+  }
+}
+
+function writePrivateJsonAtomic(file: string, value: unknown): void {
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+    fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(temporary, file);
+    try {
+      fs.chmodSync(file, 0o600);
+    } catch {
+      // Windows inherits the private updater directory ACL.
+    }
+    fsyncFileAndDirectory(file);
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
+function resealRecoveryContinuityMetadata(databasePath: string): boolean {
+  const continuityPath = path.join(path.dirname(databasePath), "continuity.json");
+  if (!fs.existsSync(continuityPath)) return true;
+  try {
+    const stat = fs.lstatSync(continuityPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    const parsed = JSON.parse(fs.readFileSync(continuityPath, "utf8")) as Record<string, unknown>;
+    if (!parsed || parsed.schemaVersion !== 1 || typeof parsed.backupPath !== "string") return false;
+    if (fs.realpathSync(parsed.backupPath) !== fs.realpathSync(databasePath)) return false;
+
+    const db = new Database(databasePath, { readonly: true, fileMustExist: true });
+    let facts: ReturnType<typeof databaseFacts>;
+    try {
+      facts = databaseFacts(db);
+    } finally {
+      db.close();
+    }
+    writePrivateJsonAtomic(continuityPath, {
+      ...parsed,
+      databaseSchemaVersion: facts.databaseSchemaVersion,
+      rowCounts: facts.rowCounts,
+      tableIdentityHashes: facts.tableIdentityHashes,
+      sanitizedAt: new Date().toISOString(),
+      sanitizationVersion: "opencrab-url-credential-v1",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function scrubRecoveryDatabase(databasePath: string): {
+  changed: boolean;
+  scrubbedRows: number;
+  consolidatedRows: number;
+} {
+  let db: Database.Database | null = null;
+  let legacyUrls: string[] = [];
+  let scrubbedRows = 0;
+  let consolidatedRows = 0;
+  const sidecars = [`${databasePath}-wal`, `${databasePath}-shm`, `${databasePath}-journal`];
+  const rawCredentialBytesBefore = [databasePath, ...sidecars].some((file) =>
+    fileContainsPattern(file, OPENCRAB_CREDENTIAL_PATTERN),
+  );
+  try {
+    db = new Database(databasePath, { fileMustExist: true });
+    db.pragma("busy_timeout = 1000");
+    if (!tableHasColumns(db, "mcp_servers", [
+      "id", "catalog_id", "name", "name_en", "transport", "command",
+      "args_json", "url", "env_keys_json", "enabled", "installed_at",
+    ])) {
+      return { changed: false, scrubbedRows: 0, consolidatedRows: 0 };
+    }
+
+    const rows = db
+      .prepare(
+        "SELECT id, catalog_id, url, enabled, installed_at FROM mcp_servers WHERE url IS NOT NULL ORDER BY installed_at DESC",
+      )
+      .all() as RecoveryMcpRow[];
+    const legacy = rows.filter(
+      (row) => row.url !== OPENCRAB_MCP_URL_SENTINEL && isOpenCrabCredentialUrl(row.url),
+    );
+    legacyUrls = legacy.map((row) => row.url);
+    scrubbedRows = legacy.length;
+    if (legacy.length === 0 && !rawCredentialBytesBefore) {
+      return { changed: false, scrubbedRows: 0, consolidatedRows: 0 };
+    }
+
+    db.pragma("secure_delete = ON");
+    if (legacy.length > 0) {
+      const safeCatalogRows = rows.filter(
+        (row) => row.catalog_id === OPENCRAB_CATALOG_ID && row.url === OPENCRAB_MCP_URL_SENTINEL,
+      );
+      const canonical = safeCatalogRows.find((row) => row.enabled === 1) ?? safeCatalogRows[0] ?? legacy[0];
+      const openCrabRows = [...safeCatalogRows, ...legacy].filter(
+        (row, index, all) => all.findIndex((candidate) => candidate.id === row.id) === index,
+      );
+
+      db.transaction(() => {
+        db!.prepare(
+          `UPDATE mcp_servers
+           SET catalog_id = ?, name = ?, name_en = ?, transport = 'http', command = NULL,
+               args_json = '[]', url = ?, env_keys_json = ?
+           WHERE id = ?`,
+        ).run(
+          OPENCRAB_CATALOG_ID,
+          "OpenCrab 온톨로지",
+          "OpenCrab Ontology",
+          OPENCRAB_MCP_URL_SENTINEL,
+          JSON.stringify([OPENCRAB_MCP_URL_KEY]),
+          canonical.id,
+        );
+        if (!safeCatalogRows.some((row) => row.id === canonical.id)) {
+          db!.prepare("UPDATE mcp_servers SET enabled = 0 WHERE id = ?").run(canonical.id);
+        }
+
+        for (const row of openCrabRows) {
+          if (row.id === canonical.id) continue;
+          if (tableHasColumns(db!, "agent_mcp_servers", ["agent_id", "server_id"])) {
+            db!.prepare(
+              `INSERT OR IGNORE INTO agent_mcp_servers (agent_id, server_id)
+               SELECT agent_id, ? FROM agent_mcp_servers WHERE server_id = ?`,
+            ).run(canonical.id, row.id);
+          }
+          if (tableHasColumns(db!, "agent_tools", ["installed_server_id"])) {
+            db!.prepare("UPDATE agent_tools SET installed_server_id = ? WHERE installed_server_id = ?")
+              .run(canonical.id, row.id);
+          }
+          db!.prepare("DELETE FROM mcp_servers WHERE id = ?").run(row.id);
+          consolidatedRows += 1;
+        }
+      })();
+    }
+
+    // Even when the logical row was already scrubbed, an older value may remain
+    // in freelist pages. Rebuild the inactive copy and truncate its WAL before it
+    // can be retained as a user-visible recovery artifact.
+    assertCheckpointComplete(db);
+    db.exec("VACUUM");
+    assertCheckpointComplete(db);
+    const check = String(db.pragma("quick_check", { simple: true })).toLowerCase();
+    if (check !== "ok") throw new Error("inactive recovery SQLite failed quick_check after credential scrub");
+  } finally {
+    db?.close();
+  }
+
+  for (const sidecar of sidecars) fs.rmSync(sidecar, { force: true });
+  fsyncFileAndDirectory(databasePath);
+  if (
+    legacyUrls.some((value) => fileContainsBytes(databasePath, value)) ||
+    fileContainsPattern(databasePath, OPENCRAB_CREDENTIAL_PATTERN)
+  ) {
+    throw new Error("inactive recovery SQLite still contains an OpenCrab credential");
+  }
+  return { changed: true, scrubbedRows, consolidatedRows };
+}
+
+/**
+ * Scrub only retention copies that can no longer participate in updater
+ * continuity. Any live/corrupt install journal proves that recovery ownership
+ * is unresolved, so this function leaves every backup byte-for-byte untouched.
+ * Call only after updater reconciliation has verified continuity and cleared its
+ * durable journal.
+ */
+export function scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls(input: {
+  userDataPath: string;
+}): InactiveRecoveryOpenCrabScrubResult {
+  const result: InactiveRecoveryOpenCrabScrubResult = {
+    scanned: 0,
+    scrubbedDatabases: 0,
+    scrubbedRows: 0,
+    consolidatedRows: 0,
+    skippedActive: false,
+    skippedUnsafe: 0,
+  };
+  const updaterRoot = path.join(input.userDataPath, "updater");
+  const journalPath = path.join(updaterRoot, "install-journal.v1.json");
+  const corruptMarkerPath = path.join(updaterRoot, "install-journal-corrupt.v1.json");
+  if (fs.existsSync(journalPath) || fs.existsSync(corruptMarkerPath)) {
+    result.skippedActive = true;
+    return result;
+  }
+
+  const recoveryRoot = path.join(updaterRoot, "recovery");
+  if (!fs.existsSync(recoveryRoot)) return result;
+  let realRecoveryRoot: string;
+  try {
+    realRecoveryRoot = fs.realpathSync(recoveryRoot);
+  } catch {
+    result.skippedUnsafe += 1;
+    return result;
+  }
+
+  const candidates: Array<{ databasePath: string; mtimeMs: number }> = [];
+  try {
+    for (const entry of fs.readdirSync(recoveryRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      try {
+        const directory = path.join(recoveryRoot, entry.name);
+        candidates.push({
+          databasePath: path.join(directory, RECOVERY_DATABASE_NAME),
+          mtimeMs: fs.statSync(directory).mtimeMs,
+        });
+      } catch {
+        result.skippedUnsafe += 1;
+      }
+    }
+  } catch {
+    result.skippedUnsafe += 1;
+    return result;
+  }
+  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
+
+  for (const candidate of candidates.slice(0, MAX_INACTIVE_RECOVERY_DATABASES)) {
+    if (!fs.existsSync(candidate.databasePath)) continue;
+    result.scanned += 1;
+    try {
+      const stat = fs.lstatSync(candidate.databasePath);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("unsafe inactive recovery SQLite path");
+      const realDatabasePath = fs.realpathSync(candidate.databasePath);
+      if (!isInside(realRecoveryRoot, realDatabasePath) || !quickCheck(realDatabasePath)) {
+        throw new Error("unsafe inactive recovery SQLite copy");
+      }
+      const scrubbed = scrubRecoveryDatabase(realDatabasePath);
+      if (scrubbed.changed) result.scrubbedDatabases += 1;
+      result.scrubbedRows += scrubbed.scrubbedRows;
+      result.consolidatedRows += scrubbed.consolidatedRows;
+      if (scrubbed.changed && !resealRecoveryContinuityMetadata(realDatabasePath)) {
+        // The credential remains removed and the DB passed quick_check, but the
+        // preserved metadata can no longer be claimed as a verified snapshot.
+        result.skippedUnsafe += 1;
+      }
+    } catch {
+      // A malformed copy remains available for manual recovery. Never delete or
+      // replace user recovery material merely because credential scrub failed.
+      result.skippedUnsafe += 1;
+    }
+  }
+  return result;
 }
 
 export function readDatabaseSchemaVersion(databasePath: string): number | null {

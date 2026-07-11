@@ -36,6 +36,9 @@ export function BriefWizard({
   studio,
   onPlan,
   planning,
+  openCrabReady = false,
+  useOpenCrab = false,
+  onUseOpenCrabChange,
   onLoad,
   headerSlot,
 }: {
@@ -43,6 +46,9 @@ export function BriefWizard({
   studio?: OberonStudio | null;
   onPlan: (brief: FilmBrief, premium: boolean) => void;
   planning: boolean;
+  openCrabReady?: boolean;
+  useOpenCrab?: boolean;
+  onUseOpenCrabChange?: (value: boolean) => void;
   onLoad?: (prod: FilmProduction) => void;
   headerSlot?: ReactNode;
 }) {
@@ -197,6 +203,34 @@ export function BriefWizard({
           <IconSparkles size={16} />
           {planning ? (locale === "ko" ? "기획 만드는 중…" : "Drafting the plan…") : locale === "ko" ? "기획안 만들기" : "Create Plan"}
         </PrimaryButton>
+        {openCrabReady && onUseOpenCrabChange && (
+          <button
+            type="button"
+            onClick={() => onUseOpenCrabChange(!useOpenCrab)}
+            title={
+              locale === "ko"
+                ? "제목과 기획 요약(로그라인·대상·톤·배경·필수요소)을 OpenCrab에 검색합니다. 로컬 경로가 포함된 값과 로고 필드는 보내지 않습니다."
+                : "Searches OpenCrab with the title and planning summary (logline, audience, tone, setting, and must-haves). Values containing local paths and the logo field are omitted."
+            }
+            style={{
+              minHeight: 42,
+              padding: "0 14px",
+              borderRadius: 8,
+              border: `1px solid ${useOpenCrab ? "var(--ob-accent)" : "var(--ob-edge-strong)"}`,
+              background: useOpenCrab ? "var(--ob-accent-soft)" : "var(--ob-surface)",
+              color: useOpenCrab ? "var(--ob-accent-text)" : "var(--ob-ink-soft)",
+              fontSize: 12.5,
+              fontWeight: 650,
+              cursor: "pointer",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <Glyph name={useOpenCrab ? "check" : "layers"} size={13} />
+            {locale === "ko" ? "OpenCrab 근거" : "OpenCrab evidence"} {useOpenCrab ? "✓" : "○"}
+          </button>
+        )}
         {(!title.trim() || !prompt.trim()) && (
           <span style={{ fontSize: 12.5, color: "var(--ob-muted)" }}>
             {locale === "ko" ? "제목과 설명을 적어 주세요." : "Enter a title and description."}

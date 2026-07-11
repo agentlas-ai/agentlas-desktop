@@ -13,12 +13,15 @@ assert.equal(isCompletedBuildTurn("I will eventually output BUILD_COMPLETE: pack
 assert.equal(isCompletedBuildTurn("BUILD_COMPLETE: package-name\nBut first I need an answer."), false);
 
 const source = fs.readFileSync(path.join(__dirname, "../electron/hephaestus/builder.ts"), "utf8");
-const guardAt = source.indexOf("if (!signal.aborted && isCompletedBuildTurn(result.text))");
+const guardAt = source.indexOf("if (!signal.aborted && isCompletedBuildTurn(resultText))");
 const stageAt = source.indexOf('stage: "security"', guardAt);
 assert.ok(guardAt >= 0 && stageAt > guardAt, "security stage must be inside the completed-turn guard");
-assert.match(source, /verifiedCompletedPackageRoot\(req\.workspace, result\.text\)/);
+assert.match(source, /verifiedCompletedPackageRoot\(req\.workspace, resultText\)/);
 assert.match(source, /securityScan\(completedPackageRoot/);
-assert.match(source, /result: \{ workspace: completedPackageRoot, securityScan: scan \}/);
+assert.match(source, /workspace: completedPackageRoot/);
+assert.match(source, /securityScan: scan/);
+assert.match(source, /supplementalQuestion/);
+assert.match(source, /satisfies HephaestusBuildResult/);
 assert.match(source, /status: "unverified", reason: completedPackage\.error/);
 
 const resultPathSource = fs.readFileSync(path.join(__dirname, "../electron/hephaestus/build-result-path.ts"), "utf8");
@@ -26,7 +29,7 @@ assert.match(resultPathSource, /resolveMainOwnedReadPath\(signalled, canonicalWo
 
 const sessionSource = fs.readFileSync(path.join(__dirname, "../renderer/lib/build-session.ts"), "utf8");
 assert.doesNotMatch(sessionSource, /packagePathFromText/, "renderer must trust only the main-verified package root");
-assert.match(sessionSource, /const packageRoot = r\?\.workspace \?\? workspace/);
+assert.match(sessionSource, /const packageRoot = result\?\.workspace \?\? workspace/);
 assert.match(sessionSource, /const complete = isCompletedBuildTurn\(assistantText\)/);
 
-console.log(JSON.stringify({ ok: true, checks: 15 }, null, 2));
+console.log(JSON.stringify({ ok: true, checks: 18 }, null, 2));

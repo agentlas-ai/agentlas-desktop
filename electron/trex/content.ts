@@ -6,12 +6,19 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { withCliPath, writeStdin } from "../runtime/exec";
+import {
+  deriveOpenCrabMatchSignal,
+  queryOpenCrabContext,
+  type OpenCrabMatchSignal,
+} from "../opencrab/ontology";
+import type { OpenCrabEnrichment } from "../../shared/types";
 
 export interface TrexContentResult {
   ok: boolean;
   text?: string; // 원본 JSON 텍스트(렌더러가 parseDeckContent로 파싱)
   engine?: "agent" | "agy" | "codex";
   reason?: string;
+  openCrab?: OpenCrabEnrichment;
 }
 
 function resolveBin(name: string, extra: string[]): string | null {
@@ -27,7 +34,13 @@ function resolveBin(name: string, extra: string[]): string | null {
   return null;
 }
 
-function buildPrompt(topic: string, count: number, mode?: string, sources?: string): string {
+function buildPrompt(
+  topic: string,
+  count: number,
+  mode?: string,
+  sources?: string,
+  openCrabSignal?: OpenCrabMatchSignal,
+): string {
   // 클로징("감사합니다") 장표 폐기 — 덱 = 커버 1장 + 본문 (count-1)장, 마지막은 statement로 닫는다.
   const middle = Math.max(3, Math.min(13, count - 1));
   const modeLine = mode ? `Set "mode" to ${mode}.` : `Pick "mode" by topic: cinematic(narrative), editorial(business), diagrammatic(academic), hybrid(sports/data).`;
@@ -37,6 +50,9 @@ function buildPrompt(topic: string, count: number, mode?: string, sources?: stri
     `TOPIC: ${topic}`,
     src
       ? `SOURCE MATERIAL (build the deck FROM these attached documents — use their real facts, figures, names, and structure; do NOT invent content that contradicts them; the TOPIC above is the framing/angle):\n${src}`
+      : "",
+    openCrabSignal?.evidenceCount
+      ? `OPTIONAL OPENCRAB MATCH SIGNAL (main-owned metadata only; no ontology text is included; use it only to prioritize verification of user-authored terms):\n${JSON.stringify(openCrabSignal)}`
       : "",
     'SCHEMA: {"title":str,"subtitle":str,"mode":"cinematic|editorial|diagrammatic|hybrid","styleId":"consulting|swiss|bauhaus|didot|vignelli|brutal|hara","slides":[ {"role":"agenda","title":str,"items":[str],"note":str,"img":str} | {"role":"metrics","dek":str,"src":str,"layout":"row|bento|asym","title":str,"kpis":[{"value":str,"label":str}],"note":str,"img":str} | {"role":"comparison","dek":str,"src":str,"layout":"bars|asym","title":str,"bars":[{"label":str,"value":int}],"note":str,"img":str} | {"role":"structure","dek":str,"src":str,"layout":"columns|bento|split|zigzag|twopanel","title":str,"cards":[{"label":str,"text":str}],"panels":[{"title":str,"rows":[{"label":str,"text":str,"sub":str}]}],"note":str,"img":str} | {"role":"process","dek":str,"src":str,"layout":"timeline|cards","title":str,"steps":[{"label":str,"text":str}],"note":str,"img":str} | {"role":"highlight","dek":str,"src":str,"title":str,"stat":{"value":str,"label":str},"text":str,"img":str} | {"role":"statement","text":str,"note":str,"img":str} ]}',
     '- "layout" = page architecture. VARY it — never repeat the same layout on consecutive slides: bento(hero cell + small cells, dashboard feel), split(text left + image right half), zigzag(image/text alternating rows), asym(30% hero number + 70% detail), timeline(horizontal roadmap line), twopanel(two titled side-by-side panels with dense chip rows — the DENSEST, consulting/gov-report grammar for 실적/성과, 현황/개선 etc).',
@@ -135,11 +151,17 @@ export const TREX_SLIDE_AGENT_SLUG = "defect-driven-slide-studio";
  * 콘텐츠를 만들되, 출력 계약은 T-rex 인앱 편집기가 먹는 JSON 스키마(prompt)로 강제한다.
  * 실패(에이전트 미가용/미차용/무출력)면 null 반환 → 호출부가 로컬 CLI 폴백.
  */
-async function generateViaSlideAgent(prompt: string, locale: "ko" | "en"): Promise<string | null> {
+async function generateViaSlideAgent(
+  prompt: string,
+  locale: "ko" | "en",
+  openCrabOptIn: boolean,
+): Promise<string | null> {
   try {
     const { getOrCreateStudioSession } = await import("../store/chats");
     const { runMcpInvocation } = await import("../mcp/client");
-    const chat = getOrCreateStudioSession("trex");
+    // An opt-in run has a separate persistent runtime/session pointer. Turning
+    // OpenCrab off can therefore never resume or replay an earlier opt-in turn.
+    const chat = getOrCreateStudioSession(openCrabOptIn ? "trex-opencrab" : "trex");
     let finalText = "";
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 300_000);
@@ -206,18 +228,39 @@ export async function generateDeckContent(
   mode?: string,
   sources?: string,
   locale: "ko" | "en" = "ko",
+  useOpenCrab = false,
 ): Promise<TrexContentResult> {
   const clean = (topic || "").trim().slice(0, 500);
   const src = (sources || "").trim().slice(0, 24_000); // 첨부 파일 본문(캡). 소스가 있으면 주제 없이도 생성 가능.
   if (!clean && !src) return { ok: false, reason: "empty-topic" };
-  const prompt = buildPrompt(clean || "(see source material)", count, mode, src);
+  let openCrab: OpenCrabEnrichment | undefined;
+  let openCrabSignal: OpenCrabMatchSignal | undefined;
+  if (useOpenCrab) {
+    // Only the topic is sent. Attached source bodies are intentionally excluded
+    // from the external ontology query.
+    const enrichment = await queryOpenCrabContext(clean, {
+      limit: 6,
+      timeoutMs: 12_000,
+      maxContextChars: 6_000,
+    });
+    openCrabSignal = enrichment.used ? deriveOpenCrabMatchSignal(clean, enrichment.context) : undefined;
+    openCrab = {
+      requested: true,
+      used: Boolean(openCrabSignal?.evidenceCount),
+      reason: enrichment.reason,
+      ...(openCrabSignal ? openCrabSignal : {}),
+    };
+  }
+  const finish = (result: TrexContentResult): TrexContentResult =>
+    openCrab ? { ...result, openCrab } : result;
+  const prompt = buildPrompt(clean || "(see source material)", count, mode, src, openCrabSignal);
 
   // 1순위: 붙은 Hub 에이전트(Defect-Driven Slide Studio)를 borrow해 실행 — callable로 게시되면 자동 우선.
-  const viaAgent = await generateViaSlideAgent(prompt, locale);
-  if (viaAgent) return { ok: true, text: viaAgent, engine: "agent" };
+  const viaAgent = await generateViaSlideAgent(prompt, locale, useOpenCrab);
+  if (viaAgent) return finish({ ok: true, text: viaAgent, engine: "agent" });
   // 2순위: 활성 런타임(연결된 LLM)으로 실행 — 견고(런타임 레이어가 PATH/인증 처리), 패키지 앱에서도 됨.
   const viaRuntime = await generateViaActiveRuntime(prompt, locale);
-  if (viaRuntime) return { ok: true, text: viaRuntime, engine: "agent" };
+  if (viaRuntime) return finish({ ok: true, text: viaRuntime, engine: "agent" });
   // 최후: 활성 런타임/에이전트가 없을 때만 로컬 CLI(agy/codex) 직접 spawn(PATH 보강됨).
   const agy = resolveBin("agy", [path.join(os.homedir(), ".local/bin/agy"), "/opt/homebrew/bin/agy", "/usr/local/bin/agy"]);
   const codex = resolveBin("codex", [path.join(os.homedir(), ".local/bin/codex"), "/opt/homebrew/bin/codex", "/usr/local/bin/codex"]);
@@ -236,7 +279,7 @@ export async function generateDeckContent(
       engine: "codex",
       run: (signal) => runViaStdin(codex, ["exec", "-s", "read-only", "--skip-git-repo-check", "-"], prompt, process.env, 140_000, signal),
     });
-  if (!engines.length) return { ok: false, reason: "no-llm-runtime" };
+  if (!engines.length) return finish({ ok: false, reason: "no-llm-runtime" });
 
   // 병렬 레이스: agy·codex를 동시에 돌려 먼저 유효 JSON을 내는 쪽을 채택하고 나머지는 abort.
   // (예전엔 직렬 agy(≤140s)→codex(≤140s)라 한 엔진이 빈 결과로 140s를 통째로 먹으면 최대 280s가 걸려
@@ -252,13 +295,13 @@ export async function generateDeckContent(
           if (looksLikeDeckJson(out)) {
             settled = true;
             controller.abort(); // 진 엔진 즉시 종료
-            resolve({ ok: true, text: out as string, engine: e.engine });
+            resolve(finish({ ok: true, text: out as string, engine: e.engine }));
             return;
           }
           pending -= 1;
           if (pending === 0) {
             settled = true;
-            resolve({ ok: false, reason: "no-parseable-output" });
+            resolve(finish({ ok: false, reason: "no-parseable-output" }));
           }
         })
         .catch(() => {
@@ -266,7 +309,7 @@ export async function generateDeckContent(
           pending -= 1;
           if (pending === 0) {
             settled = true;
-            resolve({ ok: false, reason: "engine-error" });
+            resolve(finish({ ok: false, reason: "engine-error" }));
           }
         });
     }

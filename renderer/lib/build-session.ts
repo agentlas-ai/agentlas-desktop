@@ -13,7 +13,14 @@ import { buildScanDisposition } from "@/lib/build-scan";
 import { announceAgentRosterChange } from "@/lib/agent-roster-events";
 import { isCompletedBuildTurn } from "@shared/build-turn";
 import type { ChatQuestion } from "@/components/ChatStream";
-import type { FsPathGrant, FsReadScope, HephaestusBuildEvent, RuntimeSelection } from "@/lib/types";
+import type {
+  FsPathGrant,
+  FsReadScope,
+  HephaestusBuildEvent,
+  HephaestusBuildResult,
+  HephaestusBuildSupplementalQuestion,
+  RuntimeSelection,
+} from "@/lib/types";
 
 export type Mode = "single" | "team" | "package";
 export type Phase = "idle" | "running" | "interview" | "done" | "error";
@@ -76,6 +83,38 @@ export interface BuildState {
 export const STAGE_COUNT = 5;
 
 const WS_KEY = "agentlas.build.workspace";
+const OPENCRAB_QUESTION_ID = "opencrab-ontology";
+
+function mainOwnedOpenCrabQuestion(value: unknown): ChatQuestion | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<HephaestusBuildSupplementalQuestion>;
+  if (
+    candidate.kind !== OPENCRAB_QUESTION_ID ||
+    typeof candidate.question !== "string" ||
+    !candidate.question.trim() ||
+    !Array.isArray(candidate.options) ||
+    candidate.options.length !== 2
+  ) return null;
+  const options = candidate.options.map((option) => ({
+    label: typeof option?.label === "string" ? option.label.trim() : "",
+    description: typeof option?.description === "string" ? option.description.trim() : undefined,
+  }));
+  if (options.some((option) => !option.label)) return null;
+  return {
+    id: OPENCRAB_QUESTION_ID,
+    question: candidate.question.trim(),
+    header: "OpenCrab",
+    multiSelect: false,
+    options,
+  };
+}
+
+function questionHistorySuffix(question: ChatQuestion | null): string {
+  if (!question) return "";
+  return `\n\n[Agentlas supplemental question]\n${question.question}\n${question.options
+    .map((option, index) => `${index + 1}. ${option.label}`)
+    .join("\n")}`;
+}
 
 function restoreWorkspace(): FsPathGrant | null {
   try {
@@ -127,6 +166,9 @@ let history: ChatMsg[] = [];
 let runtimeSessionId: string | null = null;
 // 런타임이 sessionId를 반환하지 않는 BYOK/Ollama도 첨부는 한 빌드에서 정확히 한 번만 보낸다.
 let attachmentsSentForBuild = false;
+// Per-build, explicit OpenCrab consent. It is set only from the conditional
+// interview question and is never inferred from a free-form answer.
+let openCrabOntologyChoice: "use" | "skip" | undefined;
 // Monotonic session token. Every async boundary and event callback checks it so
 // cancel/reset cannot be followed by a stale disk check or build event that
 // resurrects the previous run.
@@ -426,6 +468,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
   commit();
 
   let runId: string;
+  const openCrabOntologyForTurn = openCrabOntologyChoice;
   try {
     const started = await api.hephaestus.build({
       request: input,
@@ -438,11 +481,15 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
         ? undefined
         : state.attachments.map((a) => ({ grant: a.grant, name: a.name })),
       history: [...history],
+      openCrabOntology: openCrabOntologyForTurn,
       locale: currentLocale(),
     });
     if (!isCurrentBuild(generation)) return;
     if (!started?.runId) throw new Error(ko ? "빌드 실행 ID를 받지 못했습니다." : "Build did not return a run ID.");
     if (state.attachments.length > 0) attachmentsSentForBuild = true;
+    if (openCrabOntologyChoice === openCrabOntologyForTurn) {
+      openCrabOntologyChoice = undefined;
+    }
     runId = started.runId;
   } catch (error) {
     if (!isCurrentBuild(generation)) return;
@@ -488,24 +535,27 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
       pushLog("log", e.text ?? "");
     } else if (e.kind === "done") {
       const assistantText = e.text ?? "";
+      const result = e.result as HephaestusBuildResult | undefined;
+      const supplementalQuestion = state.turn === 0
+        ? mainOwnedOpenCrabQuestion(result?.supplementalQuestion)
+        : null;
       if (e.sessionId) runtimeSessionId = e.sessionId;
       history.push({ role: "user", text: input });
-      history.push({ role: "assistant", text: assistantText });
+      history.push({ role: "assistant", text: assistantText + questionHistorySuffix(supplementalQuestion) });
       detach();
 
       const complete = isCompletedBuildTurn(assistantText);
       if (complete) {
         state.reached = STAGE_COUNT;
-        const r = e.result as { workspace?: string; securityScan?: unknown } | undefined;
         // Main has already canonicalized and scope-checked the model-authored
         // BUILD_COMPLETE target. Never reinterpret that path in the renderer.
-        const packageRoot = r?.workspace ?? workspace;
+        const packageRoot = result?.workspace ?? workspace;
         const registerPath = JUNK_WS.test(wsBasename(packageRoot)) ? null : packageRoot;
-        state.result = { workspace: packageRoot, securityScan: r?.securityScan ?? null, readScope };
+        state.result = { workspace: packageRoot, securityScan: result?.securityScan ?? null, readScope };
         pushLog("done", ko ? "빌드 완료 — 패키지 생성됨" : "Build complete — package created");
         state.phase = "done";
         commit();
-        if (registerPath && buildScanDisposition(r?.securityScan ?? null) === "passed") {
+        if (registerPath && buildScanDisposition(result?.securityScan ?? null) === "passed") {
           void autoRegister(registerPath, readScope, generation);
         } else {
           pushLog(
@@ -528,8 +578,11 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
       // 디스크 검사→자동 계속으로 스스로 해결한다. "CLI와 대화하는" 빈 배치 카드 재발 방지.
       const parsed = extractQuestions(assistantText, `t${state.turn}`);
       cleanLastPartial(parsed.text);
-      if (state.turn === 0 && parsed.questions.length > 0) {
-        state.pendingQuestions = parsed.questions;
+      const questions = supplementalQuestion
+        ? [...parsed.questions, supplementalQuestion]
+        : parsed.questions;
+      if (state.turn === 0 && questions.length > 0) {
+        state.pendingQuestions = questions;
         state.awaitingReply = true;
         state.phase = "interview";
         state.turn += 1;
@@ -539,7 +592,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
         return;
       }
       state.turn += 1;
-      const scanFromEvent = (e.result as { securityScan?: unknown } | undefined)?.securityScan ?? null;
+      const scanFromEvent = result?.securityScan ?? null;
       void resolveTurnWithoutSignal(workspace, scanFromEvent, readScope, generation);
       return;
     } else if (e.kind === "error") {
@@ -572,6 +625,7 @@ export async function startBuild(): Promise<void> {
   history = [];
   runtimeSessionId = null;
   attachmentsSentForBuild = false;
+  openCrabOntologyChoice = undefined;
   autoContinues = 0;
   const generation = ++buildGeneration;
   state.turn = 0;
@@ -592,8 +646,12 @@ export async function startBuild(): Promise<void> {
 }
 
 /** 인터뷰 답변 제출 — 다음 턴 실행. */
-export async function answerBuild(reply: string): Promise<void> {
+export async function answerBuild(
+  reply: string,
+  openCrabOntology?: "use" | "skip",
+): Promise<void> {
   if (!state.awaitingReply || !reply.trim()) return;
+  if (openCrabOntology) openCrabOntologyChoice = openCrabOntology;
   const ko = currentLocale() === "ko";
   pushLog("log", `↳ ${ko ? "답변" : "Reply"}: ${reply.trim().slice(0, 240)}`);
   commit();
@@ -611,6 +669,7 @@ export function cancelBuild() {
   state.runId = null;
   runtimeSessionId = null;
   attachmentsSentForBuild = false;
+  openCrabOntologyChoice = undefined;
   autoContinues = 0;
   detach();
   commit();
@@ -631,6 +690,7 @@ export function resetBuild() {
   history = [];
   runtimeSessionId = null;
   attachmentsSentForBuild = false;
+  openCrabOntologyChoice = undefined;
   autoContinues = 0;
   commit();
 }

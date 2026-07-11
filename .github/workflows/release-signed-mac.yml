@@ -174,6 +174,9 @@ jobs:
       # typecheck만으로 못 잡았던 Hub·Runtime Readiness UI 회귀를 함께 막는다.
       - name: Runtime, browser, and renderer UI regression gates
         run: |
+          # OpenCrab/Site/Browser UI gates launch Playwright. Fresh runners do
+          # not have a browser cache, so install before the first UI test.
+          npx playwright install chromium
           npm run test:automation-scheduler-guards
           npm run test:automation-trigger-safety
           npm run test:v52-automation-run-recovery
@@ -189,9 +192,11 @@ jobs:
           npm run test:borrowed-task-force
           npm run test:mcp-auto-select
           npm run test:mcp-secret-isolation
-          # Site Studio overlay is itself a Playwright test, so a clean runner
-          # needs Chromium before any product UI gate starts.
-          npx playwright install chromium
+          npm run test:opencrab-core
+          npm run test:opencrab-product
+          npm run test:opencrab-recovery-scrub
+          npm run test:mock-bridge-parity
+          npm run test:opencrab-ui
           npm run test:build-session-contracts
           npm run test:hephaestus-sync
           npm run test:local-import

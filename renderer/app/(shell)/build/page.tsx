@@ -40,6 +40,7 @@ import { buildScanDisposition, buildScanFindings, buildScanSeverityBucket } from
 import type { ChatQuestion } from "@/components/ChatStream";
 
 type StageState = "pending" | "active" | "done" | "error";
+const OPENCRAB_QUESTION_ID = "opencrab-ontology";
 
 const MODES: { id: Mode; label: string; labelEn: string; desc: string; descEn: string; icon: typeof IconBuilding }[] = [
   { id: "single", label: "단일 에이전트", labelEn: "Single agent", desc: "혼자 일하는 에이전트 하나 — 기억·기술·스스로 개선", descEn: "A single agent that works on its own — memory, skills, self-improvement", icon: IconWand },
@@ -165,17 +166,17 @@ export default function BuildPage() {
     [pendingQuestions, reply, selectedOptions, questionNotes, ko],
   );
 
-  const sendReply = (text: string) => {
-    const t = text.trim();
-    if (!t) return;
-    setReply("");
-    void answerBuild(t);
-  };
-
   const toggleInterviewOption = (questionId: string, label: string) => {
     setSelectedOptions((prev) => {
       const current = prev[questionId] ?? [];
-      const next = current.includes(label) ? current.filter((item) => item !== label) : [...current, label];
+      const question = pendingQuestions.find((item) => item.id === questionId);
+      const next = question?.multiSelect
+        ? current.includes(label)
+          ? current.filter((item) => item !== label)
+          : [...current, label]
+        : current.includes(label)
+          ? []
+          : [label];
       return { ...prev, [questionId]: next };
     });
   };
@@ -186,9 +187,21 @@ export default function BuildPage() {
 
   const confirmInterviewReply = () => {
     if (!composedReply.trim()) return;
+    const openCrabQuestion = pendingQuestions.find((q) => q.id === OPENCRAB_QUESTION_ID);
+    const openCrabSelection = selectedOptions[OPENCRAB_QUESTION_ID]?.[0];
+    // No answer is a privacy-safe skip. Only the first, main-authored option
+    // grants this build permission to send its request to OpenCrab.
+    const openCrabChoice = openCrabQuestion
+      ? openCrabSelection === openCrabQuestion.options[0]?.label
+        ? "use"
+        : "skip"
+      : undefined;
     setSelectedOptions({});
     setQuestionNotes({});
-    sendReply(composedReply);
+    const text = composedReply.trim();
+    if (!text) return;
+    setReply("");
+    void answerBuild(text, openCrabChoice);
   };
 
   useEffect(() => {

@@ -54,8 +54,54 @@ export interface OpenCrabContextResult {
   reason?: OpenCrabQueryReason;
 }
 
+export interface OpenCrabMatchSignal {
+  evidenceCount: number;
+  matchedQueryTerms: string[];
+}
+
+const QUERY_STOPWORDS = new Set([
+  "about", "and", "agent", "build", "create", "from", "into", "make", "please", "that", "the", "this", "use", "with",
+  "관련", "그리고", "만들어", "만들기", "사용", "에이전트", "위한", "이것", "저것", "해줘", "해주세요",
+]);
+
+/**
+ * Derive a prompt-safe signal without forwarding any OpenCrab-provided text.
+ * Remote content may only select terms already present in the user's query;
+ * every other value crossing into an LLM prompt is numeric and main-owned.
+ */
+export function deriveOpenCrabMatchSignal(query: string, ontologyContext: string): OpenCrabMatchSignal {
+  const evidenceCount = Math.min(
+    MAX_RESULT_LIMIT,
+    ontologyContext.split(/\r?\n/).filter((line) => /^\s*\d+\.\s+/.test(line)).length,
+  );
+  const corpus = ontologyContext.normalize("NFKC").toLocaleLowerCase("en-US");
+  const candidates = query.normalize("NFKC").match(/[\p{L}\p{N}][\p{L}\p{N}_+.-]{1,63}/gu) ?? [];
+  const matchedQueryTerms: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    const normalized = candidate.toLocaleLowerCase("en-US");
+    if (QUERY_STOPWORDS.has(normalized) || seen.has(normalized)) continue;
+    seen.add(normalized);
+    if (!corpus.includes(normalized)) continue;
+    matchedQueryTerms.push(candidate);
+    if (matchedQueryTerms.length >= 12) break;
+  }
+  return { evidenceCount, matchedQueryTerms };
+}
+
 function findOpenCrabServer(): InstalledMcpServer | null {
-  return listInstalledServers().find((server) => server.catalogId === OPENCRAB_CATALOG_ID) ?? null;
+  const servers = listInstalledServers().filter((server) => server.catalogId === OPENCRAB_CATALOG_ID);
+  return servers.find((server) => server.enabled) ?? servers[0] ?? null;
+}
+
+/** Local-only pre-consent check. It never opens a network connection. */
+export async function hasConfiguredOpenCrab(): Promise<boolean> {
+  try {
+    const server = findOpenCrabServer();
+    return Boolean(server?.enabled && (await hasEnvVar(OPENCRAB_MCP_URL_KEY)));
+  } catch {
+    return false;
+  }
 }
 
 function cleanText(value: unknown, maxChars: number): string {

@@ -75,6 +75,7 @@ import {
   setServerEnabled,
 } from "./mcp-tools/registry";
 import { statusAllServers, testServerById } from "./mcp-tools/client";
+import { getOpenCrabReadiness } from "./opencrab/ontology";
 import {
   getSource as getMarketSource,
   listMyAgentsCached,
@@ -616,9 +617,16 @@ export function registerIpcHandlers(): void {
     return trexImageProviders();
   });
   // T-rex 슬라이드 "내용" 생성 — 연결된 LLM(agy/codex)이 슬라이드별 실제 카피·수치를 JSON으로 작성.
-  ipcMain.handle("trex:generateContent", async (_e, payload: { topic?: string; count?: number; mode?: string; sources?: string; locale?: "ko" | "en" }) => {
+  ipcMain.handle("trex:generateContent", async (_e, payload: { topic?: string; count?: number; mode?: string; sources?: string; locale?: "ko" | "en"; useOpenCrab?: boolean }) => {
     const { generateDeckContent } = await import("./trex/content");
-    return generateDeckContent(String(payload?.topic ?? ""), Number(payload?.count ?? 7), payload?.mode, payload?.sources, payload?.locale ?? "ko");
+    return generateDeckContent(
+      String(payload?.topic ?? ""),
+      Number(payload?.count ?? 7),
+      payload?.mode,
+      payload?.sources,
+      payload?.locale ?? "ko",
+      payload?.useOpenCrab === true,
+    );
   });
   ipcMain.handle("trex:contentAvailable", async () => {
     const { trexContentAvailable } = await import("./trex/content");
@@ -1530,6 +1538,25 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle("mcpTools:test", (_e, id: string) => testServerById(id));
   ipcMain.handle("mcpTools:status", () => statusAllServers());
+  ipcMain.handle("openCrab:readiness", async () => {
+    const readiness = await getOpenCrabReadiness();
+    switch (readiness.reason) {
+      case "not_installed":
+        return { state: "absent", installed: false, enabled: false, configured: false, connected: false, reason: readiness.reason };
+      case "disabled":
+        return { state: "disabled", installed: true, enabled: false, configured: false, connected: false, reason: readiness.reason };
+      case "missing_endpoint":
+        return { state: "needs-credential", installed: true, enabled: true, configured: false, connected: false, reason: readiness.reason };
+      case "query_tool_unavailable":
+        return { state: "unreachable", installed: true, enabled: true, configured: true, connected: true, reason: readiness.reason };
+      case "unreachable":
+        return { state: "unreachable", installed: true, enabled: true, configured: true, connected: false, reason: readiness.reason };
+      default:
+        return readiness.available
+          ? { state: "ready", installed: true, enabled: true, configured: true, connected: true }
+          : { state: "unreachable", installed: true, enabled: true, configured: true, connected: false, reason: "unreachable" };
+    }
+  });
 
   // ── marketplace (agentlas.cloud Hub-only; no in-memory fallback catalog) ─
   ipcMain.handle("marketplace:listBundles", () => getMarketSource().listBundles());

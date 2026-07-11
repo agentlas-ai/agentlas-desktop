@@ -1,8 +1,16 @@
 // 외부 MCP 서버 레지스트리 — SQLite 영구화. 전역 공유(모든 에이전트·팀이 함께 사용).
 // 값(시크릿)은 keychain의 글로벌 env vault에만; 여기엔 어떤 env 키를 쓰는지만 저장.
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import { getDb } from "../store/db";
 import { getCatalogEntry } from "./catalog";
+import {
+  OPENCRAB_CATALOG_ID,
+  OPENCRAB_CREDENTIAL_PATTERN,
+  OPENCRAB_MCP_URL_KEY,
+  OPENCRAB_MCP_URL_SENTINEL,
+  isOpenCrabCredentialUrl,
+} from "../opencrab/constants";
 import type { InstalledMcpServer, McpTransport } from "../../shared/types";
 
 interface ServerRow {
@@ -107,6 +115,12 @@ export function installCustomServer(def: {
   if ((def.transport === "sse" || def.transport === "http") && !def.url?.trim()) {
     throw new Error("sse/http MCP server requires a URL");
   }
+  if ((def.transport === "sse" || def.transport === "http") && isOpenCrabCredentialUrl(def.url ?? "")) {
+    // OpenCrab credentials are embedded in the path. The generic custom-server
+    // path persists URLs to SQLite and runtime config, so it must fail before
+    // any write and direct the user to the vault-backed catalog path.
+    throw new Error(`Use the ${OPENCRAB_CATALOG_ID} catalog connection for private OpenCrab MCP URLs.`);
+  }
 
   const id = randomUUID();
   const now = new Date().toISOString();
@@ -128,6 +142,118 @@ export function installCustomServer(def: {
       now,
     );
   return getServer(id)!;
+}
+
+/**
+ * Older builds allowed path-credential OpenCrab URLs through the generic custom
+ * MCP form. Fail closed on startup: overwrite those SQLite cells with the safe
+ * vault sentinel and disable the row until the user reconnects via Keychain.
+ */
+function fileContainsOpenCrabCredential(file: string): boolean {
+  if (!file || !fs.existsSync(file) || !fs.statSync(file).isFile()) return false;
+  const fd = fs.openSync(file, "r");
+  const chunk = Buffer.allocUnsafe(64 * 1024);
+  let carry = "";
+  try {
+    while (true) {
+      const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, null);
+      if (bytesRead <= 0) return false;
+      const text = carry + chunk.subarray(0, bytesRead).toString("latin1");
+      OPENCRAB_CREDENTIAL_PATTERN.lastIndex = 0;
+      if (OPENCRAB_CREDENTIAL_PATTERN.test(text)) return true;
+      carry = text.slice(-8_192);
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function assertLiveCheckpointComplete(db: ReturnType<typeof getDb>): void {
+  const rows = db.pragma("wal_checkpoint(TRUNCATE)") as Array<{ busy?: number }>;
+  if (rows.some((row) => Number(row.busy ?? 0) !== 0)) {
+    throw new Error("live SQLite checkpoint is busy during OpenCrab credential scrub");
+  }
+}
+
+function overwriteAndRemoveFile(file: string): void {
+  if (!fs.existsSync(file)) return;
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("unsafe SQLite sidecar path");
+  const fd = fs.openSync(file, "r+");
+  try {
+    const zeros = Buffer.alloc(64 * 1024);
+    for (let offset = 0; offset < stat.size; offset += zeros.length) {
+      fs.writeSync(fd, zeros, 0, Math.min(zeros.length, stat.size - offset), offset);
+    }
+    fs.ftruncateSync(fd, 0);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.rmSync(file, { force: true });
+}
+
+export function scrubLegacyOpenCrabCredentialUrls(): { scrubbed: number } {
+  const db = getDb();
+  const databasePath = db.name;
+  const artifacts = [databasePath, `${databasePath}-wal`, `${databasePath}-shm`, `${databasePath}-journal`];
+  const residualBytesBefore = artifacts.some(fileContainsOpenCrabCredential);
+  const rows = db
+    .prepare("SELECT id, catalog_id, url, enabled, installed_at FROM mcp_servers WHERE url IS NOT NULL ORDER BY installed_at DESC")
+    .all() as Array<{ id: string; catalog_id: string | null; url: string; enabled: number; installed_at: string }>;
+  const legacy = rows.filter((row) => row.url !== OPENCRAB_MCP_URL_SENTINEL && isOpenCrabCredentialUrl(row.url));
+  if (legacy.length === 0 && !residualBytesBefore) return { scrubbed: 0 };
+
+  // secure_delete overwrites updated cells; VACUUM removes stale free pages and
+  // the truncated WAL prevents a previous URL value surviving beside the row.
+  db.pragma("secure_delete = ON");
+  if (legacy.length > 0) {
+    const safeCatalogRows = rows.filter(
+      (row) => row.catalog_id === OPENCRAB_CATALOG_ID && row.url === OPENCRAB_MCP_URL_SENTINEL,
+    );
+    const canonical = safeCatalogRows.find((row) => row.enabled === 1) ?? safeCatalogRows[0] ?? legacy[0];
+    const openCrabRows = [...safeCatalogRows, ...legacy].filter(
+      (row, index, all) => all.findIndex((candidate) => candidate.id === row.id) === index,
+    );
+    db.transaction(() => {
+      db.prepare(
+        `UPDATE mcp_servers
+         SET catalog_id = ?, name = ?, name_en = ?, transport = 'http', command = NULL,
+             args_json = '[]', url = ?, env_keys_json = ?
+         WHERE id = ?`,
+      ).run(
+        OPENCRAB_CATALOG_ID,
+        "OpenCrab 온톨로지",
+        "OpenCrab Ontology",
+        OPENCRAB_MCP_URL_SENTINEL,
+        JSON.stringify([OPENCRAB_MCP_URL_KEY]),
+        canonical.id,
+      );
+      if (!safeCatalogRows.some((row) => row.id === canonical.id)) {
+        db.prepare("UPDATE mcp_servers SET enabled = 0 WHERE id = ?").run(canonical.id);
+      }
+
+      for (const row of openCrabRows) {
+        if (row.id === canonical.id) continue;
+        db.prepare(
+          `INSERT OR IGNORE INTO agent_mcp_servers (agent_id, server_id)
+           SELECT agent_id, ? FROM agent_mcp_servers WHERE server_id = ?`,
+        ).run(canonical.id, row.id);
+        db.prepare("UPDATE agent_tools SET installed_server_id = ? WHERE installed_server_id = ?")
+          .run(canonical.id, row.id);
+        db.prepare("DELETE FROM mcp_servers WHERE id = ?").run(row.id);
+      }
+    })();
+  }
+  assertLiveCheckpointComplete(db);
+  db.exec("VACUUM");
+  assertLiveCheckpointComplete(db);
+  const journalPath = `${databasePath}-journal`;
+  if (fileContainsOpenCrabCredential(journalPath)) overwriteAndRemoveFile(journalPath);
+  if (artifacts.some(fileContainsOpenCrabCredential)) {
+    throw new Error("live SQLite artifacts still contain an OpenCrab credential");
+  }
+  return { scrubbed: legacy.length };
 }
 
 export function removeServer(id: string): void {

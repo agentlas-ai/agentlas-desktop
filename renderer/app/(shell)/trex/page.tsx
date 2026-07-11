@@ -33,6 +33,7 @@ import {
 import { IconApps, IconSparkles, IconFileUp, IconEdit, IconChevronRight, IconCheck } from "@/components/Icon";
 import { DeckStage, GlobalStyle, bgStyle } from "@/components/trex/DeckStage";
 import { STYLES, STYLE_IDS, styleById, routeStyle, PALETTES, type StyleId } from "@/lib/trex/styles";
+import type { OpenCrabReadiness } from "@/lib/types";
 
 type ViewState = "home" | "generating" | "view" | "edit";
 // "auto"=codex↔나노바나나 자동 페일오버(사용량 부족 시 남는 엔진 사용). "none"=이미지 생성 끔.
@@ -78,6 +79,8 @@ export default function TrexPage() {
   const [aiContent, setAiContent] = useState(true);
   const [aiWriting, setAiWriting] = useState(false);
   const [contentEngines, setContentEngines] = useState<{ agy: boolean; codex: boolean }>({ agy: false, codex: false });
+  const [openCrabReadiness, setOpenCrabReadiness] = useState<OpenCrabReadiness | null>(null);
+  const [useOpenCrab, setUseOpenCrab] = useState(false);
   const [modeOverride, setModeOverride] = useState<ArtMode | null>(null);
   // Style DNA — null=자동(주제 라우팅, 매치 없으면 레거시 모드 룩), "legacy"=명시적 기본 룩.
   const [styleOverride, setStyleOverride] = useState<string | null>(null); // StyleId·팔레트id·"legacy"·null(자동)
@@ -144,6 +147,15 @@ export default function TrexPage() {
         setAiContent(available.agy || available.codex);
       })
       .catch(() => { /* 브라우저/미지원 */ });
+    api?.openCrab?.readiness?.()
+      .then((value) => {
+        setOpenCrabReadiness(value);
+        if (value?.state !== "ready") setUseOpenCrab(false);
+      })
+      .catch(() => {
+        setOpenCrabReadiness(null);
+        setUseOpenCrab(false);
+      });
   }, []);
   const [deck, setDeck] = useState<TrexDeck | null>(null);
   // AI 콘텐츠 생성이 시도됐으나 실패해 스켈레톤으로 폴백했을 때의 사유 — 배너로 명확히 알리고 재시도 제공.
@@ -300,17 +312,49 @@ export default function TrexPage() {
         setAiWriting(true);
         setAgentJobs([]);
         patchJob({ key: "content", label: ko ? "콘텐츠 에이전트 — 카피·수치 작성" : "Content agent — writing copy & figures", status: "running" });
+        const openCrabEnabled = useOpenCrab && openCrabReadiness?.state === "ready";
+        if (openCrabEnabled) {
+          patchJob({ key: "opencrab", label: ko ? "OpenCrab 온톨로지 — 관련 근거 찾는 중" : "OpenCrab ontology — finding relevant evidence", status: "running" });
+        }
         const withImages = imageModel !== "none";
         let d: TrexDeck;
         let contentOk = false;
         let failReason: string | null = null;
         try {
-          const r = await gc({ topic: p, count: n, mode: modeOverride ?? undefined, sources: sourcesText || undefined, locale: ko ? "ko" : "en" });
+          const r = await gc({
+            topic: p,
+            count: n,
+            mode: modeOverride ?? undefined,
+            sources: sourcesText || undefined,
+            locale: ko ? "ko" : "en",
+            useOpenCrab: openCrabEnabled,
+          });
           const parsed = r?.ok && r.text ? parseDeckContent(r.text) : null;
+          if (openCrabEnabled) {
+            const applied = Boolean(parsed && r?.openCrab?.used);
+            patchJob({
+              key: "opencrab",
+              label: applied
+                ? (ko
+                    ? `OpenCrab 온톨로지 — 관련 근거 ${r?.openCrab?.evidenceCount ?? 0}개 확인`
+                    : `OpenCrab ontology — ${r?.openCrab?.evidenceCount ?? 0} relevant records checked`)
+                : (ko ? "OpenCrab 보강 건너뜀 — 기본 생성 계속" : "OpenCrab skipped — continuing standard generation"),
+              status: "done",
+              engine: applied ? "ontology" : "skipped",
+            });
+          }
           contentOk = !!parsed;
           if (!parsed) failReason = r?.reason || "parse-failed";
           d = parsed ? buildDeckFromContent({ ...parsed, genre: gArg ?? parsed.genre }, gFmt, locale, styleId, withImages) : generateDeck(p, modeOverride ?? undefined, n, gFmt, locale, styleId, withImages, gArg);
         } catch {
+          if (openCrabEnabled) {
+            patchJob({
+              key: "opencrab",
+              label: ko ? "OpenCrab 보강 건너뜀 — 기본 생성 계속" : "OpenCrab skipped — continuing standard generation",
+              status: "done",
+              engine: "skipped",
+            });
+          }
           failReason = "exception";
           d = generateDeck(p, modeOverride ?? undefined, n, gFmt, locale, styleId, withImages, gArg);
         }
@@ -326,7 +370,7 @@ export default function TrexPage() {
         revealDeck(generateDeck(p, modeOverride ?? undefined, n, gFmt, locale, styleId, imageModel !== "none", gArg));
       }
     },
-    [aiContent, modeOverride, styleOverride, formatId, genre, revealDeck, locale, imageModel, ko, patchJob, buildSourcesText],
+    [aiContent, modeOverride, styleOverride, formatId, genre, revealDeck, locale, imageModel, ko, patchJob, buildSourcesText, useOpenCrab, openCrabReadiness],
   );
 
   const updateDeck = useCallback((updater: (d: TrexDeck) => TrexDeck) => {
@@ -515,6 +559,9 @@ export default function TrexPage() {
           aiContent={aiContent}
           setAiContent={setAiContent}
           contentEngines={contentEngines}
+          openCrabReadiness={openCrabReadiness}
+          useOpenCrab={useOpenCrab}
+          setUseOpenCrab={setUseOpenCrab}
           routedMode={routedMode}
           modeOverride={modeOverride}
           setModeOverride={setModeOverride}
@@ -731,13 +778,14 @@ function patchSlideBg(deck: TrexDeck, slideId: string, src: string): TrexDeck {
 
 /* ─────────────── 랜딩 ─────────────── */
 function Home({
-  ko, prompt, setPrompt, count, setCount, formatId, setFormatId, genre, setGenre, imageModel, setImageModel, providers, aiContent, setAiContent, contentEngines, routedMode, modeOverride, setModeOverride, routedStyle, styleOverride, setStyleOverride, recents, sources, attaching, attachmentRejected, onAddFiles, onRemoveSource, onGenerate, onOpen, onDeleteRecent,
+  ko, prompt, setPrompt, count, setCount, formatId, setFormatId, genre, setGenre, imageModel, setImageModel, providers, aiContent, setAiContent, contentEngines, openCrabReadiness, useOpenCrab, setUseOpenCrab, routedMode, modeOverride, setModeOverride, routedStyle, styleOverride, setStyleOverride, recents, sources, attaching, attachmentRejected, onAddFiles, onRemoveSource, onGenerate, onOpen, onDeleteRecent,
 }: {
   ko: boolean; prompt: string; setPrompt: (v: string) => void; count: number; setCount: (n: number) => void;
   formatId: string; setFormatId: (id: string) => void;
   genre: DeckGenre | null; setGenre: (g: DeckGenre | null) => void;
   imageModel: ImageModel; setImageModel: (m: ImageModel) => void; providers: { codex: boolean; gemini: boolean };
   aiContent: boolean; setAiContent: (v: boolean) => void; contentEngines: { agy: boolean; codex: boolean };
+  openCrabReadiness: OpenCrabReadiness | null; useOpenCrab: boolean; setUseOpenCrab: (v: boolean) => void;
   routedMode: ArtMode; modeOverride: ArtMode | null; setModeOverride: (m: ArtMode | null) => void;
   routedStyle: StyleId | null; styleOverride: string | null; setStyleOverride: (s: string | null) => void;
   recents: TrexDeck[];
@@ -901,8 +949,30 @@ function Home({
         <div style={controlRow}>
           {(contentEngines.agy || contentEngines.codex) && (
             <>
-              <button type="button" onClick={() => setAiContent(!aiContent)} style={modeChip(aiContent)} title={ko ? "AI가 슬라이드별 실제 내용을 작성" : "AI writes real per-slide content"}>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !aiContent;
+                  setAiContent(next);
+                  if (!next) setUseOpenCrab(false);
+                }}
+                style={modeChip(aiContent)}
+                title={ko ? "AI가 슬라이드별 실제 내용을 작성" : "AI writes real per-slide content"}
+              >
                 ✦ {ko ? "AI 내용 작성" : "AI content"} {aiContent ? "✓" : "○"}
+              </button>
+              <span style={dividerDot} />
+            </>
+          )}
+          {aiContent && openCrabReadiness?.state === "ready" && (
+            <>
+              <button
+                type="button"
+                onClick={() => setUseOpenCrab(!useOpenCrab)}
+                style={modeChip(useOpenCrab)}
+                title={ko ? "발표 주제만 OpenCrab에 검색합니다. 첨부 파일 본문은 보내지 않습니다." : "Searches OpenCrab with the deck topic only. Attached source bodies are not sent."}
+              >
+                OpenCrab {useOpenCrab ? "✓" : "○"}
               </button>
               <span style={dividerDot} />
             </>

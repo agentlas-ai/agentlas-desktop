@@ -6,6 +6,23 @@ export const OPENCRAB_QUERY_TOOL = "ontology_query";
 
 const VAULT_URL_PREFIX = "vault://";
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const OPENCRAB_CREDENTIAL_PATTERN = /ocm_[A-Za-z0-9_-]{12,}/;
+
+/** Detect both official OpenCrab URLs and token-shaped malformed values before
+ *  URL parsing. Every persistence/config/runtime boundary uses this predicate. */
+export function isOpenCrabCredentialUrl(value: string | null | undefined): boolean {
+  const raw = value?.trim() ?? "";
+  if (!raw) return false;
+  OPENCRAB_CREDENTIAL_PATTERN.lastIndex = 0;
+  if (OPENCRAB_CREDENTIAL_PATTERN.test(raw)) return true;
+  try {
+    const parsed = new URL(raw);
+    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    return hostname === "opencrab.sh" || hostname.endsWith(".opencrab.sh");
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Return the Keychain env-vault key referenced by a remote MCP URL sentinel.

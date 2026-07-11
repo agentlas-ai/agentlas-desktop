@@ -35,7 +35,7 @@ const api: AgentlasIpc = {
   trex: {
     generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => ipcRenderer.invoke("trex:generateImage", payload),
     imageProviders: () => ipcRenderer.invoke("trex:imageProviders"),
-    generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string; locale?: "ko" | "en" }) => ipcRenderer.invoke("trex:generateContent", payload),
+    generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string; locale?: "ko" | "en"; useOpenCrab?: boolean }) => ipcRenderer.invoke("trex:generateContent", payload),
     contentAvailable: () => ipcRenderer.invoke("trex:contentAvailable"),
     refineText: (payload: { current: string; instruction: string; context?: string }) => ipcRenderer.invoke("trex:refineText", payload),
   },
@@ -265,6 +265,9 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("mcpTools:setEnabled", id, enabled),
     test: (id: string) => ipcRenderer.invoke("mcpTools:test", id),
     status: () => ipcRenderer.invoke("mcpTools:status"),
+  },
+  openCrab: {
+    readiness: () => ipcRenderer.invoke("openCrab:readiness"),
   },
   marketplace: {
     listBundles: () => ipcRenderer.invoke("marketplace:listBundles"),

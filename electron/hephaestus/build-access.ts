@@ -25,6 +25,7 @@ export function resolveHephaestusBuildRequest(
     runtimeSessionId: request.runtimeSessionId,
     attachments,
     history: request.history,
+    openCrabOntology: request.openCrabOntology === "use" ? "use" : request.openCrabOntology === "skip" ? "skip" : undefined,
     locale: request.locale,
   };
 }
