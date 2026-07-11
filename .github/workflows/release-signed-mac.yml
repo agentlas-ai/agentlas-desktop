@@ -135,10 +135,12 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      # 실제 장애가 난 Browser 소유권/스크롤과, typecheck만으로 못 잡았던
-      # 에이전트 피커·사이드바 렌더러 회귀를 릴리스 전에 함께 막는다.
-      - name: Browser and renderer UI regression gates
+      # 실제 장애가 난 Browser 소유권/스크롤, 자동화 파이프/watchdog와
+      # typecheck만으로 못 잡았던 Hub·Runtime Readiness UI 회귀를 함께 막는다.
+      - name: Runtime, browser, and renderer UI regression gates
         run: |
+          npm run test:automation-scheduler-guards
+          npm run test:runtime-stdin-epipe
           npx playwright install chromium
           npm run test:browser-approval-gate
           npm run test:browser-approval-concurrency
@@ -147,6 +149,9 @@ jobs:
           npm run test:browser-password-boundary
           npm run test:browser-ui
           npm run smoke:renderer-ui
+          npm run test:hub-bookmark-ux
+          node scripts/test-hub-bookmark-ui.cjs
+          node scripts/test-runtime-readiness-ui.cjs
 
       - name: Build, sign, notarize, and verify DMGs
         run: npm run package:mac
