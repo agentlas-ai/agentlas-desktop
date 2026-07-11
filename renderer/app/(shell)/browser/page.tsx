@@ -50,6 +50,17 @@ export default function BrowserPage() {
   }, [logs]);
 
   return (
+    <div
+      className="browser-scroll"
+      style={{
+        flex: 1,
+        minHeight: 0,
+        width: "100%",
+        overflowX: "hidden",
+        overflowY: "auto",
+        overscrollBehavior: "contain",
+      }}
+    >
     <div className="rd browser-root">
       <header className="browser-head">
         <div>
@@ -180,7 +191,7 @@ export default function BrowserPage() {
                         : `Opened the ${s.site} sign-in window. Sign in, then click Save session here.`,
                     );
                   } else {
-                    flash(ko ? r?.error ?? "로그인 창을 열지 못했어요." : "Could not open the sign-in window.");
+                    flash(r?.error ?? (ko ? "로그인 창을 열지 못했어요." : "Could not open the sign-in window."));
                   }
                 }}
                 onCaptured={async () => {
@@ -260,6 +271,7 @@ export default function BrowserPage() {
 
       <style jsx>{`
         .browser-root {
+          width: 100%;
           max-width: 920px;
           margin: 0 auto;
           padding: 28px 26px 80px;
@@ -491,6 +503,7 @@ export default function BrowserPage() {
           box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
         }
       `}</style>
+    </div>
     </div>
   );
 }

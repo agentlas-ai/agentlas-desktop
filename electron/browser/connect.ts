@@ -11,11 +11,10 @@ import { BrowserWindow } from "electron";
 import {
   browserCdpProfilePath,
   browserCdpPort,
-  browserCdpOwnerIsLive,
   browserCdpPortReady,
-  clearBrowserCdpOwner,
+  ensureBrowserCdpProfilePrivate,
+  reconcileBrowserCdpOwner,
   resolveChromeExe,
-  writeBrowserCdpOwner,
 } from "../mcp-tools/browser-cdp-launcher";
 import {
   listBrowserSites,
@@ -101,13 +100,14 @@ export async function browserDeleteSite(site: string): Promise<{ ok: true }> {
 
 // ── 전용 프로필 로그인 창 ───────────────────────────────────────
 // 전용 CDP 프로필로 크롬 창을 headful 로 열어(MCP 없이) 사용자가 직접 로그인하게 한다.
-// 창을 닫으면 세션을 valid 로 기록(쿠키는 전용 프로필에 영속 → 이후 자동화가 재사용).
+// 사용자가 명시적으로 세션 저장을 누르면 valid 로 기록(쿠키는 전용 프로필에 영속 → 이후 자동화가 재사용).
 const openLoginChildren = new Map<string, ReturnType<typeof spawn>>();
 
 export function browserLoginArgs(profile: string, url: string): string[] {
   return [
     `--user-data-dir=${profile}`,
     `--remote-debugging-port=${browserCdpPort()}`,
+    "--remote-debugging-address=127.0.0.1",
     "--no-first-run",
     "--no-default-browser-check",
     "--restore-last-session=false",
@@ -122,10 +122,10 @@ export async function browserOpenLogin(site: string): Promise<{ ok: boolean; err
   const exe = resolveChromeExe();
   if (!exe) return { ok: false, error: "Chrome or Edge executable could not be found." };
   const url = norm ? `https://${norm}` : "about:blank";
-  const profile = browserCdpProfilePath();
+  const profile = ensureBrowserCdpProfilePrivate();
   try {
     const portInUse = await browserCdpPortReady();
-    if (portInUse && !browserCdpOwnerIsLive()) {
+    if (portInUse && (await reconcileBrowserCdpOwner()).state !== "owned") {
       return {
         ok: false,
         error: `CDP port ${browserCdpPort()} is occupied by a browser outside the Agentlas dedicated profile.`,
@@ -136,12 +136,13 @@ export async function browserOpenLogin(site: string): Promise<{ ok: boolean; err
       browserLoginArgs(profile, url),
       { detached: true, stdio: "ignore" },
     );
-    // 이미 소유한 CDP 프로세스가 있으면 새 Chrome은 URL만 넘기고 즉시 끝날 수 있다.
-    // 그 임시 pid로 기존 소유 표식을 덮지 않는다.
-    const ownsMarker = !portInUse && Boolean(child.pid);
-    if (ownsMarker && child.pid) writeBrowserCdpOwner(child.pid);
+    let spawnError: Error | null = null;
     openLoginChildren.set(norm, child);
     setBrowserSession(norm, "none");
+    child.on("error", (error) => {
+      spawnError = error;
+      openLoginChildren.delete(norm);
+    });
     child.on("exit", (code, signal) => {
       // Chrome can hand the URL to an already-running shared-profile process
       // and immediately exit. Process exit is therefore never login proof.
@@ -152,10 +153,31 @@ export async function browserOpenLogin(site: string): Promise<{ ok: boolean; err
         action: "session.login_window_closed",
         result: code === 0 ? "closed" : `closed:${code ?? signal ?? "unknown"}`,
       });
-      if (ownsMarker && child.pid) clearBrowserCdpOwner(child.pid);
       openLoginChildren.delete(norm);
     });
     child.unref();
+    if (!portInUse) {
+      let ready = false;
+      let lastOwnershipReason = "listener-not-ready";
+      for (let attempt = 0; attempt < 40 && !spawnError; attempt += 1) {
+        if (await browserCdpPortReady()) {
+          const ownership = await reconcileBrowserCdpOwner();
+          lastOwnershipReason = ownership.reason;
+          if (ownership.state === "owned") {
+            ready = true;
+            break;
+          }
+          if (ownership.state === "foreign") {
+            throw new Error(`Chrome CDP listener ownership could not be verified (${ownership.reason}).`);
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      if (spawnError) throw spawnError;
+      if (!ready) {
+        throw new Error(`Chrome CDP listener ownership could not be verified (${lastOwnershipReason}).`);
+      }
+    }
     logBrowserAction({ site: norm, action: "session.login_window", target: url, result: "opened" });
     return { ok: true };
   } catch (err) {

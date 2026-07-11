@@ -16,6 +16,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { execFile } from "node:child_process";
 
 export const BROWSER_CDP_LAUNCHER_BASENAME = "agentlas-browser-cdp.mjs";
 
@@ -34,16 +35,188 @@ export function browserCdpOwnerPath(): string {
   return path.join(browserCdpProfilePath(), ".agentlas-cdp-owner.json");
 }
 
+export function ensureBrowserCdpProfilePrivate(): string {
+  const profile = browserCdpProfilePath();
+  fs.mkdirSync(profile, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(profile, 0o700); } catch { /* best-effort on non-POSIX filesystems */ }
+  return profile;
+}
+
+export interface BrowserCdpOwnerRecord {
+  pid: number;
+  port: number;
+  profile: string;
+}
+
+export interface BrowserCdpProcessSnapshot {
+  pid: number;
+  executable: string;
+  commandLine: string;
+  loopbackOnly: boolean;
+}
+
+export type BrowserCdpOwnershipState = "absent" | "owned" | "adoptable" | "foreign" | "unverifiable";
+
+export interface BrowserCdpOwnership {
+  state: BrowserCdpOwnershipState;
+  pid: number | null;
+  reason: string;
+  adopted?: boolean;
+}
+
+function canonicalProfilePath(value: string, platform = process.platform): string {
+  if (platform === "win32") {
+    return path.win32.resolve(value).replace(/[\\/]+$/, "").toLowerCase();
+  }
+  return path.resolve(value).replace(/\/+$/, "");
+}
+
+/** Extract an equals-form browser switch without splitting profile paths that contain spaces. */
+export function browserCdpCommandFlag(commandLine: string, flag: string): string | null {
+  const marker = `--${flag}=`;
+  const escapedFlag = flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const switchMatches = [...commandLine.matchAll(new RegExp(`(?:^|\\s)--${escapedFlag}=`, "g"))];
+  if (switchMatches.length !== 1) return null;
+  const switchMatch = switchMatches[0];
+  const markerOffset = switchMatch[0].lastIndexOf(marker);
+  const valueStart = switchMatch.index + markerOffset + marker.length;
+  const rest = commandLine.slice(valueStart);
+  if (rest.startsWith('"')) {
+    const end = rest.indexOf('"', 1);
+    return end >= 0 ? rest.slice(1, end) : null;
+  }
+  if (rest.startsWith("'")) {
+    const end = rest.indexOf("'", 1);
+    return end >= 0 ? rest.slice(1, end) : null;
+  }
+  const nextSwitch = rest.search(/\s+--[a-z0-9][a-z0-9-]*(?:=|\s|$)/i);
+  const value = (nextSwitch >= 0 ? rest.slice(0, nextSwitch) : rest.split(/\s+/u, 1)[0]).trim();
+  return value || null;
+}
+
+export function browserCdpExecutableCandidates(
+  platform = process.platform,
+  home = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const pathApi = platform === "win32" ? path.win32 : path;
+  if (platform === "darwin") {
+    return [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      pathApi.join(home, "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    ];
+  }
+  if (platform === "win32") {
+    const lad = env.LOCALAPPDATA || pathApi.join(home, "AppData", "Local");
+    const pf = env.PROGRAMFILES || "C:\\Program Files";
+    const pfx = env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)";
+    return [
+      pathApi.join(pf, "Google", "Chrome", "Application", "chrome.exe"),
+      pathApi.join(pfx, "Google", "Chrome", "Application", "chrome.exe"),
+      pathApi.join(lad, "Google", "Chrome", "Application", "chrome.exe"),
+      pathApi.join(pf, "Microsoft", "Edge", "Application", "msedge.exe"),
+      pathApi.join(pfx, "Microsoft", "Edge", "Application", "msedge.exe"),
+    ];
+  }
+  if (platform === "linux") {
+    return [
+      "/usr/bin/google-chrome",
+      "/usr/bin/google-chrome-stable",
+      "/opt/google/chrome/chrome",
+      "/usr/bin/chromium",
+      "/usr/bin/chromium-browser",
+      "/usr/bin/microsoft-edge",
+      "/usr/lib/chromium/chromium",
+      "/usr/lib/chromium-browser/chromium-browser",
+      "/opt/microsoft/msedge/msedge",
+      "/usr/lib/microsoft-edge/msedge",
+    ];
+  }
+  return [];
+}
+
+export function browserCdpExecutableAllowed(
+  executable: string,
+  platform = process.platform,
+  home = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const actual = canonicalProfilePath(executable, platform);
+  const allowed = new Set<string>();
+  for (const candidate of browserCdpExecutableCandidates(platform, home, env)) {
+    allowed.add(canonicalProfilePath(candidate, platform));
+    try { allowed.add(canonicalProfilePath(fs.realpathSync(candidate), platform)); } catch { /* not installed here */ }
+  }
+  if (allowed.has(actual)) return true;
+  return platform === "linux" && /^\/snap\/chromium\/(?:current|\d+)\/usr\/lib\/chromium(?:-browser)?\/(?:chrome|chromium)$/u.test(actual);
+}
+
+export function browserCdpProcessMatches(
+  snapshot: BrowserCdpProcessSnapshot,
+  profile = browserCdpProfilePath(),
+  port = browserCdpPort(),
+  platform = process.platform,
+): boolean {
+  if (!Number.isInteger(snapshot.pid) || snapshot.pid <= 0) return false;
+  if (snapshot.loopbackOnly !== true) return false;
+  if (!browserCdpExecutableAllowed(snapshot.executable, platform)) return false;
+  const commandProfile = browserCdpCommandFlag(snapshot.commandLine, "user-data-dir");
+  const commandPort = browserCdpCommandFlag(snapshot.commandLine, "remote-debugging-port");
+  if (!commandProfile || !commandPort || !/^\d+$/u.test(commandPort)) return false;
+  return (
+    canonicalProfilePath(commandProfile, platform) === canonicalProfilePath(profile, platform) &&
+    Number(commandPort) === port
+  );
+}
+
+export function classifyBrowserCdpOwnership(input: {
+  processes: BrowserCdpProcessSnapshot[];
+  marker: BrowserCdpOwnerRecord | null;
+  profile: string;
+  port: number;
+  platform?: NodeJS.Platform;
+}): BrowserCdpOwnership {
+  if (input.processes.length === 0) {
+    return { state: "absent", pid: null, reason: "no-listener" };
+  }
+  if (input.processes.length !== 1) {
+    return { state: "foreign", pid: null, reason: "ambiguous-listeners" };
+  }
+  const listener = input.processes[0];
+  if (!browserCdpProcessMatches(listener, input.profile, input.port, input.platform ?? process.platform)) {
+    return { state: "foreign", pid: listener.pid, reason: "listener-command-mismatch" };
+  }
+  const marker = input.marker;
+  const markerMatches = Boolean(
+    marker &&
+      marker.pid === listener.pid &&
+      marker.port === input.port &&
+      canonicalProfilePath(marker.profile, input.platform ?? process.platform) ===
+        canonicalProfilePath(input.profile, input.platform ?? process.platform),
+  );
+  return markerMatches
+    ? { state: "owned", pid: listener.pid, reason: "listener-and-marker-match" }
+    : { state: "adoptable", pid: listener.pid, reason: "verified-dedicated-listener" };
+}
+
 export function writeBrowserCdpOwner(pid: number): void {
   if (!Number.isInteger(pid) || pid <= 0) return;
+  ensureBrowserCdpProfilePrivate();
   const file = browserCdpOwnerPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(
-    file,
-    JSON.stringify({ pid, port: browserCdpPort(), profile: path.resolve(browserCdpProfilePath()) }),
-    { encoding: "utf8", mode: 0o600 },
-  );
-  try { fs.chmodSync(file, 0o600); } catch { /* best-effort */ }
+  const temp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    fs.writeFileSync(
+      temp,
+      JSON.stringify({ pid, port: browserCdpPort(), profile: path.resolve(browserCdpProfilePath()) }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    try { fs.chmodSync(temp, 0o600); } catch { /* best-effort */ }
+    fs.renameSync(temp, file);
+  } finally {
+    try { fs.rmSync(temp, { force: true }); } catch { /* best-effort */ }
+  }
 }
 
 export function clearBrowserCdpOwner(pid: number): void {
@@ -52,29 +225,187 @@ export function clearBrowserCdpOwner(pid: number): void {
     const owner = JSON.parse(fs.readFileSync(file, "utf8")) as { pid?: number };
     if (owner.pid === pid) fs.rmSync(file, { force: true });
   } catch {
-    // 없거나 손상된 표식은 소유 증거가 아니므로 제거한다.
-    try { fs.rmSync(file, { force: true }); } catch { /* noop */ }
+    // A missing/corrupt marker is not ownership proof. Do not unlink here: an
+    // atomic concurrent writer may have just replaced it after this read failed.
   }
 }
 
-export function browserCdpOwnerIsLive(): boolean {
+function readBrowserCdpOwner(): BrowserCdpOwnerRecord | null {
   try {
-    const owner = JSON.parse(fs.readFileSync(browserCdpOwnerPath(), "utf8")) as {
-      pid?: number;
-      port?: number;
-      profile?: string;
-    };
+    const owner = JSON.parse(fs.readFileSync(browserCdpOwnerPath(), "utf8")) as Partial<BrowserCdpOwnerRecord>;
     if (
       !Number.isInteger(owner.pid) ||
       Number(owner.pid) <= 0 ||
-      owner.port !== browserCdpPort() ||
-      path.resolve(owner.profile ?? "") !== path.resolve(browserCdpProfilePath())
-    ) return false;
-    process.kill(Number(owner.pid), 0);
-    return true;
+      !Number.isInteger(owner.port) ||
+      typeof owner.profile !== "string"
+    ) return null;
+    return { pid: Number(owner.pid), port: Number(owner.port), profile: owner.profile };
   } catch {
-    return false;
+    return null;
   }
+}
+
+function execFileText(executable: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      executable,
+      args,
+      { encoding: "utf8", timeout: 3_000, maxBuffer: 1024 * 1024, windowsHide: true },
+      (error, stdout) => {
+        if (error && (error as NodeJS.ErrnoException).code === "ENOENT") return reject(error);
+        if (error && (error as { killed?: boolean }).killed) return reject(error);
+        resolve(stdout);
+      },
+    );
+  });
+}
+
+function uniquePositivePids(values: number[]): number[] {
+  return [...new Set(values.filter((pid) => Number.isInteger(pid) && pid > 0))];
+}
+
+async function inspectDarwinCdpProcesses(port: number): Promise<BrowserCdpProcessSnapshot[]> {
+  const listenerOutput = await execFileText("/usr/sbin/lsof", [
+    "-nP", "-a", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpn",
+  ]);
+  const addressesByPid = new Map<number, string[]>();
+  let currentPid: number | null = null;
+  for (const line of listenerOutput.split(/\r?\n/u)) {
+    if (/^p\d+$/u.test(line)) {
+      currentPid = Number(line.slice(1));
+      if (!addressesByPid.has(currentPid)) addressesByPid.set(currentPid, []);
+    } else if (currentPid && line.startsWith("n")) {
+      addressesByPid.get(currentPid)?.push(line.slice(1));
+    }
+  }
+  const pids = uniquePositivePids([...addressesByPid.keys()]);
+  const snapshots: BrowserCdpProcessSnapshot[] = [];
+  for (const pid of pids) {
+    const [commandLine, textFiles] = await Promise.all([
+      execFileText("/bin/ps", ["-ww", "-p", String(pid), "-o", "command="]),
+      execFileText("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "txt", "-Fn"]),
+    ]);
+    const executable = textFiles.split(/\r?\n/u).find((line) => line.startsWith("n"))?.slice(1) ?? "";
+    const addresses = addressesByPid.get(pid) ?? [];
+    const loopbackOnly = addresses.length > 0 && addresses.every((address) =>
+      address === `127.0.0.1:${port}` || address === `[::1]:${port}` || address === `::1:${port}`,
+    );
+    snapshots.push({ pid, executable, commandLine: commandLine.trim(), loopbackOnly });
+  }
+  return snapshots;
+}
+
+function linuxListenerInodes(port: number): Map<string, boolean> {
+  const wantedPort = port.toString(16).toUpperCase().padStart(4, "0");
+  const inodes = new Map<string, boolean>();
+  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    let source = "";
+    try { source = fs.readFileSync(table, "utf8"); } catch { continue; }
+    for (const line of source.split(/\r?\n/u).slice(1)) {
+      const fields = line.trim().split(/\s+/u);
+      if (fields.length < 10 || fields[3] !== "0A") continue;
+      const localPort = fields[1]?.split(":").pop()?.toUpperCase();
+      if (localPort === wantedPort && fields[9]) {
+        const host = fields[1]?.split(":")[0]?.toUpperCase();
+        const loopback = host === "0100007F" || host === "00000000000000000000000001000000";
+        inodes.set(fields[9], loopback);
+      }
+    }
+  }
+  return inodes;
+}
+
+function linuxListenerPids(port: number): Array<{ pid: number; loopbackOnly: boolean }> {
+  const inodes = linuxListenerInodes(port);
+  if (inodes.size === 0) return [];
+  const pids = new Map<number, boolean>();
+  let entries: string[] = [];
+  try { entries = fs.readdirSync("/proc"); } catch { return []; }
+  for (const entry of entries) {
+    if (!/^\d+$/u.test(entry)) continue;
+    const pid = Number(entry);
+    try {
+      if (typeof process.getuid === "function" && fs.statSync(`/proc/${pid}`).uid !== process.getuid()) continue;
+      for (const fd of fs.readdirSync(`/proc/${pid}/fd`)) {
+        const target = fs.readlinkSync(`/proc/${pid}/fd/${fd}`);
+        const inode = target.match(/^socket:\[(\d+)\]$/u)?.[1];
+        if (inode && inodes.has(inode)) {
+          pids.set(pid, (pids.get(pid) ?? true) && inodes.get(inode) === true);
+        }
+      }
+    } catch {
+      // Process exited or a protected fd disappeared while inspecting it.
+    }
+  }
+  return uniquePositivePids([...pids.keys()]).map((pid) => ({ pid, loopbackOnly: pids.get(pid) === true }));
+}
+
+async function inspectLinuxCdpProcesses(port: number): Promise<BrowserCdpProcessSnapshot[]> {
+  const snapshots: BrowserCdpProcessSnapshot[] = [];
+  for (const { pid, loopbackOnly } of linuxListenerPids(port)) {
+    try {
+      const executable = fs.readlinkSync(`/proc/${pid}/exe`);
+      const commandLine = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean).join(" ");
+      snapshots.push({ pid, executable, commandLine, loopbackOnly });
+    } catch {
+      // Listener changed during inspection; the caller will retry/fail closed.
+    }
+  }
+  return snapshots;
+}
+
+async function inspectWindowsCdpProcesses(port: number): Promise<BrowserCdpProcessSnapshot[]> {
+  const script = [
+    `$connections = @(Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction Stop)`,
+    "$rows = @($connections | Group-Object OwningProcess | ForEach-Object { $pidValue = [int]$_.Name; $p = Get-CimInstance Win32_Process -Filter \"ProcessId = $pidValue\"; $addresses = @($_.Group | Select-Object -ExpandProperty LocalAddress -Unique); $nonLoopback = @($addresses | Where-Object { $_ -ne '127.0.0.1' -and $_ -ne '::1' }); if ($p) { [pscustomobject]@{ pid = [int]$p.ProcessId; executable = [string]$p.ExecutablePath; commandLine = [string]$p.CommandLine; loopbackOnly = [bool]($addresses.Count -gt 0 -and $nonLoopback.Count -eq 0) } } })",
+    "$rows | ConvertTo-Json -Compress",
+  ].join("; ");
+  const stdout = await execFileText("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
+  if (!stdout.trim()) return [];
+  const parsed = JSON.parse(stdout) as BrowserCdpProcessSnapshot | BrowserCdpProcessSnapshot[];
+  return (Array.isArray(parsed) ? parsed : [parsed]).filter((row) => Number.isInteger(row.pid));
+}
+
+export async function inspectBrowserCdpProcesses(port = browserCdpPort()): Promise<BrowserCdpProcessSnapshot[]> {
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("Invalid CDP port.");
+  if (process.platform === "darwin") return inspectDarwinCdpProcesses(port);
+  if (process.platform === "win32") return inspectWindowsCdpProcesses(port);
+  if (process.platform === "linux") return inspectLinuxCdpProcesses(port);
+  throw new Error(`CDP listener ownership inspection is unsupported on ${process.platform}.`);
+}
+
+export async function inspectBrowserCdpOwnership(): Promise<BrowserCdpOwnership> {
+  try {
+    return classifyBrowserCdpOwnership({
+      processes: await inspectBrowserCdpProcesses(),
+      marker: readBrowserCdpOwner(),
+      profile: browserCdpProfilePath(),
+      port: browserCdpPort(),
+    });
+  } catch (error) {
+    return {
+      state: "unverifiable",
+      pid: null,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Safely adopt a pre-marker Agentlas Chrome only after the listener PID, browser executable,
+ * canonical profile and exact CDP port all match. Any uncertainty remains fail-closed.
+ */
+export async function reconcileBrowserCdpOwner(): Promise<BrowserCdpOwnership> {
+  const before = await inspectBrowserCdpOwnership();
+  if (before.state !== "adoptable" || !before.pid) return before;
+  writeBrowserCdpOwner(before.pid);
+  const after = await inspectBrowserCdpOwnership();
+  if (after.state === "owned" && after.pid === before.pid) return { ...after, adopted: true };
+  return { ...after, reason: `adoption-race:${after.reason}` };
+}
+
+export async function browserCdpOwnerIsLive(): Promise<boolean> {
+  return (await reconcileBrowserCdpOwner()).state === "owned";
 }
 
 export function browserCdpPortReady(): Promise<boolean> {
@@ -95,36 +426,7 @@ export function browserCdpPort(): number {
 
 /** 플랫폼별 Chrome 실행 파일 경로 해석(없으면 null). Edge 폴백 포함. */
 export function resolveChromeExe(): string | null {
-  const home = os.homedir();
-  let candidates: string[] = [];
-  if (process.platform === "darwin") {
-    candidates = [
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      path.join(home, "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-    ];
-  } else if (process.platform === "win32") {
-    const lad = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
-    const pf = process.env["PROGRAMFILES"] || "C:\\Program Files";
-    const pfx = process.env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)";
-    candidates = [
-      path.join(pf, "Google", "Chrome", "Application", "chrome.exe"),
-      path.join(pfx, "Google", "Chrome", "Application", "chrome.exe"),
-      path.join(lad, "Google", "Chrome", "Application", "chrome.exe"),
-      path.join(pf, "Microsoft", "Edge", "Application", "msedge.exe"),
-      path.join(pfx, "Microsoft", "Edge", "Application", "msedge.exe"),
-    ];
-  } else {
-    candidates = [
-      "/usr/bin/google-chrome",
-      "/usr/bin/google-chrome-stable",
-      "/opt/google/chrome/chrome",
-      "/usr/bin/chromium",
-      "/usr/bin/chromium-browser",
-      "/usr/bin/microsoft-edge",
-    ];
-  }
-  return candidates.find((p) => fs.existsSync(p)) || null;
+  return browserCdpExecutableCandidates().find((candidate) => fs.existsSync(candidate)) || null;
 }
 
 /**
@@ -203,12 +505,226 @@ function approvalContextUrl(name, args, observedUrl) {
 }
 `;
 
+/**
+ * Dependency-free ownership attestation used by the materialized launcher.
+ * Keep this behavior aligned with classifyBrowserCdpOwnership above: an exact
+ * dedicated-profile listener may be adopted, while unknown listeners fail closed.
+ */
+export const BROWSER_CDP_OWNERSHIP_RUNTIME_SOURCE = String.raw`
+function canonicalProfile(value) {
+  if (process.platform === 'win32') return path.win32.resolve(value).replace(/[\\/]+$/, '').toLowerCase();
+  return path.resolve(value).replace(/\/+$/, '');
+}
+function commandFlag(commandLine, flag) {
+  const marker = '--' + flag + '=';
+  const escapedFlag = flag.replace(/[.*+?^\${}()|[\]\\]/g, '\\$&');
+  const switchMatches = [...commandLine.matchAll(new RegExp('(?:^|\\s)--' + escapedFlag + '=', 'g'))];
+  if (switchMatches.length !== 1) return null;
+  const switchMatch = switchMatches[0];
+  const markerOffset = switchMatch[0].lastIndexOf(marker);
+  const rest = commandLine.slice(switchMatch.index + markerOffset + marker.length);
+  if (rest.startsWith('"')) { const end = rest.indexOf('"', 1); return end >= 0 ? rest.slice(1, end) : null; }
+  if (rest.startsWith("'")) { const end = rest.indexOf("'", 1); return end >= 0 ? rest.slice(1, end) : null; }
+  const nextSwitch = rest.search(/\s+--[a-z0-9][a-z0-9-]*(?:=|\s|$)/i);
+  const value = (nextSwitch >= 0 ? rest.slice(0, nextSwitch) : rest.split(/\s+/, 1)[0]).trim();
+  return value || null;
+}
+function allowedExecutablePaths() {
+  const home = os.homedir();
+  if (process.platform === 'darwin') return [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    path.join(home, 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  ];
+  if (process.platform === 'win32') {
+    const lad = process.env.LOCALAPPDATA || path.win32.join(home, 'AppData', 'Local');
+    const pf = process.env.PROGRAMFILES || 'C:\\Program Files';
+    const pfx = process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
+    return [
+      path.win32.join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.win32.join(pfx, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.win32.join(lad, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.win32.join(pf, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      path.win32.join(pfx, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    ];
+  }
+  if (process.platform === 'linux') return [
+    '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/opt/google/chrome/chrome',
+    '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/microsoft-edge',
+    '/usr/lib/chromium/chromium', '/usr/lib/chromium-browser/chromium-browser',
+    '/opt/microsoft/msedge/msedge', '/usr/lib/microsoft-edge/msedge',
+  ];
+  return [];
+}
+function processMatches(snapshot) {
+  if (!snapshot || !Number.isInteger(snapshot.pid) || snapshot.pid <= 0) return false;
+  if (snapshot.loopbackOnly !== true) return false;
+  const actualExecutable = canonicalProfile(snapshot.executable || '');
+  const allowedExecutables = new Set();
+  for (const candidate of allowedExecutablePaths()) {
+    allowedExecutables.add(canonicalProfile(candidate));
+    try { allowedExecutables.add(canonicalProfile(fs.realpathSync(candidate))); } catch (e) {}
+  }
+  const snapChromium = process.platform === 'linux' && /^\/snap\/chromium\/(?:current|\d+)\/usr\/lib\/chromium(?:-browser)?\/(?:chrome|chromium)$/.test(actualExecutable);
+  if (!allowedExecutables.has(actualExecutable) && !snapChromium) return false;
+  const commandProfile = commandFlag(snapshot.commandLine || '', 'user-data-dir');
+  const commandPort = commandFlag(snapshot.commandLine || '', 'remote-debugging-port');
+  return Boolean(
+    commandProfile && commandPort && /^\d+$/.test(commandPort) &&
+    canonicalProfile(commandProfile) === canonicalProfile(CDP_PROFILE) && Number(commandPort) === PORT
+  );
+}
+function readOwner() {
+  try {
+    const owner = JSON.parse(fs.readFileSync(OWNER_FILE, 'utf8'));
+    if (!Number.isInteger(owner.pid) || owner.pid <= 0 || !Number.isInteger(owner.port) || typeof owner.profile !== 'string') return null;
+    return owner;
+  } catch (e) { return null; }
+}
+function writeOwner(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  fs.mkdirSync(path.dirname(OWNER_FILE), { recursive: true });
+  const temp = OWNER_FILE + '.' + process.pid + '.' + Date.now() + '.' + Math.random().toString(36).slice(2) + '.tmp';
+  try {
+    fs.writeFileSync(temp, JSON.stringify({ pid, port: PORT, profile: path.resolve(CDP_PROFILE) }), { encoding: 'utf8', mode: 0o600 });
+    try { fs.chmodSync(temp, 0o600); } catch (e) {}
+    fs.renameSync(temp, OWNER_FILE);
+  } finally { try { fs.rmSync(temp, { force: true }); } catch (e) {} }
+}
+function ensurePrivateProfile() {
+  fs.mkdirSync(CDP_PROFILE, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(CDP_PROFILE, 0o700); } catch (e) {}
+}
+function execFileText(executable, args) {
+  return new Promise((resolve, reject) => {
+    execFile(executable, args, { encoding: 'utf8', timeout: 3000, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => {
+      if (error && (error.code === 'ENOENT' || error.killed)) return reject(error);
+      resolve(stdout || '');
+    });
+  });
+}
+function uniquePositivePids(values) {
+  return [...new Set(values.filter((pid) => Number.isInteger(pid) && pid > 0))];
+}
+async function inspectDarwinProcesses() {
+  const listenerOutput = await execFileText('/usr/sbin/lsof', ['-nP', '-a', '-iTCP:' + PORT, '-sTCP:LISTEN', '-Fpn']);
+  const addressesByPid = new Map();
+  let currentPid = null;
+  for (const line of listenerOutput.split(/\r?\n/)) {
+    if (/^p\d+$/.test(line)) { currentPid = Number(line.slice(1)); if (!addressesByPid.has(currentPid)) addressesByPid.set(currentPid, []); }
+    else if (currentPid && line.startsWith('n')) addressesByPid.get(currentPid).push(line.slice(1));
+  }
+  const pids = uniquePositivePids([...addressesByPid.keys()]);
+  const snapshots = [];
+  for (const pid of pids) {
+    const [commandLine, textFiles] = await Promise.all([
+      execFileText('/bin/ps', ['-ww', '-p', String(pid), '-o', 'command=']),
+      execFileText('/usr/sbin/lsof', ['-a', '-p', String(pid), '-d', 'txt', '-Fn']),
+    ]);
+    const executableLine = textFiles.split(/\r?\n/).find((line) => line.startsWith('n'));
+    const addresses = addressesByPid.get(pid) || [];
+    const loopbackOnly = addresses.length > 0 && addresses.every((address) => address === '127.0.0.1:' + PORT || address === '[::1]:' + PORT || address === '::1:' + PORT);
+    snapshots.push({ pid, executable: executableLine ? executableLine.slice(1) : '', commandLine: commandLine.trim(), loopbackOnly });
+  }
+  return snapshots;
+}
+function linuxListenerInodes() {
+  const wantedPort = PORT.toString(16).toUpperCase().padStart(4, '0');
+  const inodes = new Map();
+  for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    let source = ''; try { source = fs.readFileSync(table, 'utf8'); } catch (e) { continue; }
+    for (const line of source.split(/\r?\n/).slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      if (fields.length < 10 || fields[3] !== '0A') continue;
+      const localPort = (fields[1] || '').split(':').pop().toUpperCase();
+      if (localPort === wantedPort && fields[9]) {
+        const host = (fields[1] || '').split(':')[0].toUpperCase();
+        inodes.set(fields[9], host === '0100007F' || host === '00000000000000000000000001000000');
+      }
+    }
+  }
+  return inodes;
+}
+function linuxListenerPids() {
+  const inodes = linuxListenerInodes();
+  if (inodes.size === 0) return [];
+  const pids = new Map();
+  let entries = []; try { entries = fs.readdirSync('/proc'); } catch (e) { return []; }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    const pid = Number(entry);
+    try {
+      if (typeof process.getuid === 'function' && fs.statSync('/proc/' + pid).uid !== process.getuid()) continue;
+      for (const fd of fs.readdirSync('/proc/' + pid + '/fd')) {
+        const target = fs.readlinkSync('/proc/' + pid + '/fd/' + fd);
+        const match = /^socket:\[(\d+)\]$/.exec(target);
+        if (match && inodes.has(match[1])) pids.set(pid, (pids.get(pid) ?? true) && inodes.get(match[1]) === true);
+      }
+    } catch (e) {}
+  }
+  return uniquePositivePids([...pids.keys()]).map((pid) => ({ pid, loopbackOnly: pids.get(pid) === true }));
+}
+async function inspectLinuxProcesses() {
+  const snapshots = [];
+  for (const entry of linuxListenerPids()) {
+    try {
+      snapshots.push({
+        pid: entry.pid,
+        executable: fs.readlinkSync('/proc/' + entry.pid + '/exe'),
+        commandLine: fs.readFileSync('/proc/' + entry.pid + '/cmdline', 'utf8').split('\0').filter(Boolean).join(' '),
+        loopbackOnly: entry.loopbackOnly,
+      });
+    } catch (e) {}
+  }
+  return snapshots;
+}
+async function inspectWindowsProcesses() {
+  const script = [
+    '$connections = @(Get-NetTCPConnection -State Listen -LocalPort ' + PORT + ' -ErrorAction Stop)',
+    '$rows = @($connections | Group-Object OwningProcess | ForEach-Object { $pidValue = [int]$_.Name; $p = Get-CimInstance Win32_Process -Filter "ProcessId = $pidValue"; $addresses = @($_.Group | Select-Object -ExpandProperty LocalAddress -Unique); $nonLoopback = @($addresses | Where-Object { $_ -ne "127.0.0.1" -and $_ -ne "::1" }); if ($p) { [pscustomobject]@{ pid = [int]$p.ProcessId; executable = [string]$p.ExecutablePath; commandLine = [string]$p.CommandLine; loopbackOnly = [bool]($addresses.Count -gt 0 -and $nonLoopback.Count -eq 0) } } })',
+    '$rows | ConvertTo-Json -Compress',
+  ].join('; ');
+  const stdout = await execFileText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
+  if (!stdout.trim()) return [];
+  const parsed = JSON.parse(stdout);
+  return (Array.isArray(parsed) ? parsed : [parsed]).filter((row) => Number.isInteger(row.pid));
+}
+async function inspectProcesses() {
+  if (process.platform === 'darwin') return inspectDarwinProcesses();
+  if (process.platform === 'linux') return inspectLinuxProcesses();
+  if (process.platform === 'win32') return inspectWindowsProcesses();
+  throw new Error('CDP listener ownership inspection is unsupported on ' + process.platform + '.');
+}
+function classifyOwnership(processes, marker) {
+  if (processes.length === 0) return { state: 'absent', pid: null, reason: 'no-listener' };
+  if (processes.length !== 1) return { state: 'foreign', pid: null, reason: 'ambiguous-listeners' };
+  const listener = processes[0];
+  if (!processMatches(listener)) return { state: 'foreign', pid: listener.pid, reason: 'listener-command-mismatch' };
+  const markerMatches = Boolean(marker && marker.pid === listener.pid && marker.port === PORT && canonicalProfile(marker.profile) === canonicalProfile(CDP_PROFILE));
+  return markerMatches
+    ? { state: 'owned', pid: listener.pid, reason: 'listener-and-marker-match' }
+    : { state: 'adoptable', pid: listener.pid, reason: 'verified-dedicated-listener' };
+}
+async function inspectOwnership() {
+  try { return classifyOwnership(await inspectProcesses(), readOwner()); }
+  catch (e) { return { state: 'unverifiable', pid: null, reason: e && e.message || String(e) }; }
+}
+async function reconcileOwner() {
+  const before = await inspectOwnership();
+  if (before.state !== 'adoptable' || !before.pid) return before;
+  writeOwner(before.pid);
+  const after = await inspectOwnership();
+  if (after.state === 'owned' && after.pid === before.pid) return Object.assign({ adopted: true }, after);
+  return Object.assign({}, after, { reason: 'adoption-race:' + after.reason });
+}
+`;
+
 const LAUNCHER_SOURCE = String.raw`#!/usr/bin/env node
 // Agentlas Browser (CDP) — 범용 엔진. Agentlas 전용 Chrome 프로필을 원격 디버깅 포트로 띄우고
 // @playwright/mcp 를 CDP 로 붙여 MCP 브라우저 도구를 제공한다. 이 프로세스가 client ↔ @playwright/mcp
 // 사이를 stdio 로 프록시하며 (1) 되돌릴 수 없는 행동 승인 게이트, (2) learn-and-replay 스킬 레이어를 얹는다.
 // 의존성 0(순수 node). 개인 데이터는 로컬에서만 사용, 어디로도 전송하지 않는다.
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -227,6 +743,7 @@ function chromeInfo() {
     const exes = [
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
       path.join(home, 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
     ];
     return { exe: exes.find(fs.existsSync) || exes[0] };
   }
@@ -236,10 +753,12 @@ function chromeInfo() {
       path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
       path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
       path.join(lad, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
     ];
     return { exe: exes.find(fs.existsSync) || exes[0] };
   }
-  const exes = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/opt/google/chrome/chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'];
+  const exes = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/opt/google/chrome/chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/microsoft-edge'];
   return { exe: exes.find(fs.existsSync) || exes[0] };
 }
 
@@ -251,27 +770,13 @@ function portReady(port) {
   });
 }
 
-function writeOwner(pid) {
-  fs.mkdirSync(path.dirname(OWNER_FILE), { recursive: true });
-  fs.writeFileSync(OWNER_FILE, JSON.stringify({ pid, port: PORT, profile: path.resolve(CDP_PROFILE) }), { encoding: 'utf8', mode: 0o600 });
-  try { fs.chmodSync(OWNER_FILE, 0o600); } catch (e) {}
-}
-function clearOwner(pid) {
-  try { const owner = JSON.parse(fs.readFileSync(OWNER_FILE, 'utf8')); if (owner.pid === pid) fs.rmSync(OWNER_FILE, { force: true }); }
-  catch (e) { try { fs.rmSync(OWNER_FILE, { force: true }); } catch (ignore) {} }
-}
-function ownedPortReady() {
-  try {
-    const owner = JSON.parse(fs.readFileSync(OWNER_FILE, 'utf8'));
-    if (owner.port !== PORT || path.resolve(owner.profile || '') !== path.resolve(CDP_PROFILE) || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
-    process.kill(owner.pid, 0);
-    return true;
-  } catch (e) { return false; }
-}
+${BROWSER_CDP_OWNERSHIP_RUNTIME_SOURCE}
 
 async function ensureChrome() {
+  ensurePrivateProfile();
   if (await portReady(PORT)) {
-    if (ownedPortReady()) { log('owned CDP already up on', PORT); return; }
+    const ownership = await reconcileOwner();
+    if (ownership.state === 'owned') { log('owned CDP already up on', PORT, ownership.adopted ? '(adopted)' : ''); return; }
     throw new Error('CDP port ' + PORT + ' is occupied by a browser not owned by the Agentlas dedicated profile. Close it or choose AGENTLAS_CDP_PORT.');
   }
   const { exe } = chromeInfo();
@@ -279,11 +784,10 @@ async function ensureChrome() {
   // Never copy a live everyday-Chrome profile: SQLite/WAL files can be inconsistent while Chrome
   // is running, and copying cookies/password stores would violate the dedicated-profile boundary.
   // Users sign in directly in the Agentlas window; that dedicated profile is then reused as-is.
-  fs.mkdirSync(CDP_PROFILE, { recursive: true, mode: 0o700 });
-  try { fs.chmodSync(CDP_PROFILE, 0o700); } catch (e) {}
   log('using persistent Agentlas dedicated profile (no personal-profile import)');
   const args = [
     '--user-data-dir=' + CDP_PROFILE, '--remote-debugging-port=' + PORT,
+    '--remote-debugging-address=127.0.0.1',
     '--no-first-run', '--no-default-browser-check', '--restore-last-session=false',
     '--disable-session-crashed-bubble', '--disable-features=Translate',
   ];
@@ -291,12 +795,17 @@ async function ensureChrome() {
   args.push('about:blank');
   log('launching Chrome on port', PORT, HEADLESS ? '(headless)' : '');
   const child = spawn(exe, args, { detached: true, stdio: 'ignore' });
-  writeOwner(child.pid);
-  child.once('exit', () => clearOwner(child.pid));
   child.unref();
-  for (let i = 0; i < 40; i++) { if (await portReady(PORT)) { log('CDP ready'); return; } await new Promise((r) => setTimeout(r, 500)); }
-  clearOwner(child.pid);
-  throw new Error('Chrome CDP port did not open: ' + PORT);
+  for (let i = 0; i < 40; i++) {
+    if (await portReady(PORT)) {
+      const ownership = await reconcileOwner();
+      if (ownership.state === 'owned') { log('CDP ready', ownership.pid); return; }
+      if (ownership.state === 'foreign') throw new Error('Chrome CDP listener ownership could not be verified (' + ownership.reason + ').');
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  const lastOwnership = await inspectOwnership();
+  throw new Error('Chrome CDP listener ownership could not be verified (' + lastOwnership.reason + ').');
 }
 
 // ── 승인 게이트 ──────────────────────────────────────────────────

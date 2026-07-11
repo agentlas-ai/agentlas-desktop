@@ -77,11 +77,15 @@ async function main() {
     );
 
     launcher.writeBrowserCdpOwner(process.pid);
-    assert.equal(launcher.browserCdpOwnerIsLive(), true);
+    const ownerFile = launcher.browserCdpOwnerPath();
+    const ownerRecord = JSON.parse(fs.readFileSync(ownerFile, "utf8"));
+    assert.equal(ownerRecord.pid, process.pid);
+    assert.equal(ownerRecord.port, Number(process.env.AGENTLAS_CDP_PORT));
+    assert.equal(fs.statSync(ownerFile).mode & 0o777, 0o600, "owner marker must remain private");
     launcher.clearBrowserCdpOwner(process.pid + 1);
-    assert.equal(launcher.browserCdpOwnerIsLive(), true, "another pid cannot clear the owner marker");
+    assert.equal(fs.existsSync(ownerFile), true, "another pid cannot clear the owner marker");
     launcher.clearBrowserCdpOwner(process.pid);
-    assert.equal(launcher.browserCdpOwnerIsLive(), false);
+    assert.equal(fs.existsSync(ownerFile), false);
 
     const sheet = fs.readFileSync(
       path.join(__dirname, "../renderer/components/BrowserActionApprovalSheet.tsx"),

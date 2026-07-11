@@ -20,14 +20,24 @@ assert.doesNotMatch(
   "materialized browser launcher must never copy a live personal Chrome profile",
 );
 assert.match(
-  launcher,
+  source,
   /fs\.mkdirSync\(CDP_PROFILE, \{ recursive: true, mode: 0o700 \}\)/,
   "launcher must initialize an isolated owner-only profile",
 );
 assert.match(
   launcher,
+  /async function ensureChrome\(\) \{\s+ensurePrivateProfile\(\);/,
+  "launcher must enforce private profile permissions before inspecting or spawning Chrome",
+);
+assert.match(
+  launcher,
   /no personal-profile import/,
   "launcher logs must make the profile boundary observable",
+);
+assert.match(
+  launcher,
+  /--remote-debugging-address=127\.0\.0\.1/,
+  "launcher must bind CDP to loopback explicitly",
 );
 assert.match(
   source,
