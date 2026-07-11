@@ -7,8 +7,42 @@
 // 각 항목의 envRequirements는 해당 MCP 서버 README 기준으로 맞춘 값이다(아래 주석 참고).
 // docsUrl(서버 문서) + setupUrl(키 발급 페이지)을 함께 제공해 정확성/편의를 높였다.
 import type { McpToolCatalogEntry } from "../../shared/types";
+import {
+  OPENCRAB_MCP_URL_KEY,
+  OPENCRAB_MCP_URL_SENTINEL,
+} from "../opencrab/constants";
 
 export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
+  // ── 선택형 지식 그래프 ─────────────────────────────────────
+  // OpenCrab hosted MCP는 연결 토큰이 URL 경로에 포함된다. 실제 URL은 절대 SQLite의
+  // catalog.url에 넣지 않고, 이 안전한 vault 포인터만 영구화한다. Desktop main process가
+  // 연결할 때에만 Keychain 값을 읽는다.
+  {
+    id: "opencrab",
+    name: "OpenCrab 온톨로지",
+    nameEn: "OpenCrab Ontology",
+    description: "연결한 온톨로지에서 관련 배경지식을 읽어오는 선택형 지식 소스",
+    descriptionEn: "Optional read-only context from your connected ontology",
+    category: "data",
+    transport: "http",
+    url: OPENCRAB_MCP_URL_SENTINEL,
+    trust: "community",
+    docsUrl: "https://github.com/AlexAI-MCP/OpenCrab",
+    setupUrl: "https://opencrab.sh/mcp",
+    brandColor: "#F97316",
+    mark: "OC",
+    envRequirements: [
+      {
+        key: OPENCRAB_MCP_URL_KEY,
+        label: "OpenCrab MCP 연결 URL",
+        labelEn: "OpenCrab MCP connection URL",
+        required: true,
+        hint: "OpenCrab에서 발급한 전체 MCP URL (macOS Keychain에만 저장)",
+        hintEn: "Full MCP URL issued by OpenCrab (stored only in macOS Keychain)",
+      },
+    ],
+  },
+
   // ── 커뮤니케이션 ──────────────────────────────────────────
   {
     id: "slack",

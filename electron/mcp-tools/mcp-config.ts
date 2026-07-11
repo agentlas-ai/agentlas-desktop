@@ -14,6 +14,7 @@ import { app } from "electron";
 import { ensureDefaultMcpPluginsInstalled } from "./defaults";
 import { listInstalledServers } from "./registry";
 import { readEnvVar } from "../secrets/vault";
+import { isVaultBackedRemoteUrl } from "../opencrab/constants";
 import type { InstalledMcpServer } from "../../shared/types";
 
 function expandHome(arg: string): string {
@@ -213,6 +214,9 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const scopedCatalogIds = opts?.catalogIds ? new Set(opts.catalogIds.filter(Boolean)) : null;
   const servers = listInstalledServers().filter((s) => {
     if (!s.enabled) return false;
+    // URL 경로 자체가 credential인 서버는 Desktop main process 전용이다. Claude/Codex
+    // 설정 파일이나 -c argv로 내보내면 Keychain 경계를 우회하게 되므로 항상 제외한다.
+    if (isVaultBackedRemoteUrl(s.url)) return false;
     if (!scopedCatalogIds) return true;
     return Boolean((s.catalogId && scopedCatalogIds.has(s.catalogId)) || scopedCatalogIds.has(s.id));
   });

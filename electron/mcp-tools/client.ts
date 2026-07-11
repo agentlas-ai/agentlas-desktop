@@ -13,10 +13,17 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { readEnvVar } from "../secrets/vault";
 import { listInstalledServers, getServer } from "./registry";
 import { withCliPath } from "../runtime/exec";
+import {
+  OPENCRAB_CATALOG_ID,
+  validateOpenCrabMcpUrl,
+  vaultUrlKey,
+} from "../opencrab/constants";
 import type { InstalledMcpServer, McpServerStatus } from "../../shared/types";
 
 /** npx 첫 다운로드까지 고려한 넉넉한 연결 타임아웃. */
 const CONNECT_TIMEOUT_MS = 45_000;
+const MAX_REMOTE_URL_CHARS = 4_096;
+const DEFAULT_TOOL_TEXT_LIMIT = 256_000;
 
 function expandHome(arg: string): string {
   if (arg === "~") return os.homedir();
@@ -39,15 +46,80 @@ async function resolveEnv(envKeys: string[]): Promise<{ resolved: Record<string,
 /**
  * 원격(sse/http) 서버의 envKeys→vault 값을 HTTP 요청 헤더로 매핑한다.
  * 헤더 이름은 envKey 그대로(예: `Authorization`), 값은 vault 값(예: `Bearer …`).
- * URL 경로에 토큰이 내장된 서버(예: opencrab)는 envKeys가 비어 헤더도 없이 붙는다.
+ * URL 경로에 토큰이 내장된 서버는 URL 자체를 vault에서 읽고 해당 키를 헤더에 넣지 않는다.
  */
-function buildRemoteHeaders(envKeys: string[], resolved: Record<string, string>): Record<string, string> {
+function buildRemoteHeaders(
+  envKeys: string[],
+  resolved: Record<string, string>,
+  urlVaultKey: string | null,
+): Record<string, string> {
   const headers: Record<string, string> = {};
   for (const k of envKeys) {
+    // URL vault 포인터는 인증 헤더가 아니다. 원격 요청에 키 이름/URL을 중복 노출하지 않는다.
+    if (k === urlVaultKey) continue;
     const v = resolved[k];
     if (v) headers[k] = v;
   }
   return headers;
+}
+
+function parseRemoteUrl(server: InstalledMcpServer, resolved: Record<string, string>): {
+  url: URL;
+  urlVaultKey: string | null;
+} {
+  if (!server.url) throw new Error("sse/http server has no url");
+  const urlVaultKey = vaultUrlKey(server.url);
+  if (urlVaultKey && !server.envKeys.includes(urlVaultKey)) {
+    throw new Error("secure remote MCP endpoint is missing");
+  }
+  const raw = urlVaultKey ? resolved[urlVaultKey] : server.url;
+  if (!raw) throw new Error("secure remote MCP endpoint is missing");
+  if (raw.length > MAX_REMOTE_URL_CHARS) throw new Error("secure remote MCP endpoint is invalid");
+
+  let url: URL;
+  try {
+    url = server.catalogId === OPENCRAB_CATALOG_ID ? validateOpenCrabMcpUrl(raw) : new URL(raw);
+  } catch {
+    // URL 파서 오류에는 입력값이 포함될 수 있으므로 원래 예외를 전달하지 않는다.
+    throw new Error("secure remote MCP endpoint is invalid");
+  }
+  // Existing explicit custom URLs retain their current localhost/http support.
+  // A vault-backed URL is credential material and must never use plaintext HTTP.
+  if (urlVaultKey && (url.protocol !== "https:" || url.username || url.password)) {
+    throw new Error("secure remote MCP endpoint is invalid");
+  }
+  return { url, urlVaultKey };
+}
+
+function redactResolvedSecrets(message: string, resolved: Record<string, string>): string {
+  let safe = message;
+  const candidates = new Set<string>();
+  for (const value of Object.values(resolved)) {
+    if (!value) continue;
+    candidates.add(value);
+    candidates.add(encodeURIComponent(value));
+    try {
+      const url = new URL(value);
+      if (url.pathname.length >= 8) candidates.add(url.pathname);
+      if (url.pathname.length >= 8) candidates.add(encodeURI(url.pathname));
+      for (const segment of url.pathname.split("/")) {
+        if (segment.length >= 8) {
+          candidates.add(segment);
+          candidates.add(encodeURIComponent(segment));
+        }
+      }
+      for (const value of url.searchParams.values()) {
+        if (value.length >= 8) candidates.add(value);
+      }
+    } catch {
+      // 일반 env secret은 정확한 전체 값만 가린다.
+    }
+  }
+  for (const candidate of [...candidates].sort((a, b) => b.length - a.length)) {
+    safe = safe.split(candidate).join("[redacted]");
+  }
+  // OpenCrab URL 토큰이 서버 오류에 단독으로 반사되는 경우까지 막는다.
+  return safe.replace(/ocm_[A-Za-z0-9_-]{12,}/g, "[redacted]");
 }
 
 /**
@@ -71,9 +143,8 @@ function createTransport(server: InstalledMcpServer, resolved: Record<string, st
       stderr: "ignore",
     });
   }
-  if (!server.url) throw new Error("sse/http server has no url");
-  const url = new URL(server.url);
-  const headers = buildRemoteHeaders(server.envKeys, resolved);
+  const { url, urlVaultKey } = parseRemoteUrl(server, resolved);
+  const headers = buildRemoteHeaders(server.envKeys, resolved, urlVaultKey);
   const init = Object.keys(headers).length ? { requestInit: { headers } } : undefined;
   return server.transport === "sse"
     ? new SSEClientTransport(url, init)
@@ -96,7 +167,10 @@ async function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void):
 }
 
 /** 한 서버에 붙어 tools/list 해보고 상태 반환. 연결은 즉시 닫는다(테스트 전용). */
-export async function testServerConnection(server: InstalledMcpServer): Promise<McpServerStatus> {
+export async function testServerConnection(
+  server: InstalledMcpServer,
+  options?: { timeoutMs?: number },
+): Promise<McpServerStatus> {
   const checkedAt = new Date().toISOString();
   const { resolved, missing } = await resolveEnv(server.envKeys);
 
@@ -114,13 +188,14 @@ export async function testServerConnection(server: InstalledMcpServer): Promise<
   try {
     transport = createTransport(server, resolved);
 
+    const timeoutMs = Math.max(250, Math.min(options?.timeoutMs ?? CONNECT_TIMEOUT_MS, CONNECT_TIMEOUT_MS));
     const tools = await withTimeout(
       (async () => {
         await client.connect(transport);
         const res = await client.listTools();
         return res.tools;
       })(),
-      CONNECT_TIMEOUT_MS,
+      timeoutMs,
       () => {
         void client.close().catch(() => {});
       },
@@ -130,7 +205,10 @@ export async function testServerConnection(server: InstalledMcpServer): Promise<
     return { id: server.id, connected: true, tools, error: null, missingEnv: [], checkedAt };
   } catch (err) {
     await client.close().catch(() => {});
-    const message = err instanceof Error ? err.message : String(err);
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    const message = server.catalogId === OPENCRAB_CATALOG_ID
+      ? "OpenCrab connection failed"
+      : redactResolvedSecrets(rawMessage, resolved);
     return {
       id: server.id,
       connected: false,
@@ -153,6 +231,7 @@ export async function callServerTool(
   server: InstalledMcpServer,
   toolName: string,
   args: Record<string, unknown>,
+  options?: { timeoutMs?: number; maxTextChars?: number },
 ): Promise<string | null> {
   const { resolved, missing } = await resolveEnv(server.envKeys);
   if (missing.length > 0) return null; // 자격증명 미충족 — 폴 스킵(needsCredential UI가 안내).
@@ -162,6 +241,8 @@ export async function callServerTool(
   try {
     transport = createTransport(server, resolved);
 
+    const timeoutMs = Math.max(250, Math.min(options?.timeoutMs ?? CONNECT_TIMEOUT_MS, CONNECT_TIMEOUT_MS));
+    const maxTextChars = Math.max(1, Math.min(options?.maxTextChars ?? DEFAULT_TOOL_TEXT_LIMIT, DEFAULT_TOOL_TEXT_LIMIT));
     const text = await withTimeout(
       (async () => {
         await client.connect(transport);
@@ -171,9 +252,10 @@ export async function callServerTool(
         const parts = (res.content ?? [])
           .filter((c) => c && c.type === "text" && typeof c.text === "string")
           .map((c) => c.text as string);
-        return parts.join("\n");
+        const joined = parts.join("\n");
+        return joined.length > maxTextChars ? joined.slice(0, maxTextChars) : joined;
       })(),
-      CONNECT_TIMEOUT_MS,
+      timeoutMs,
       () => {
         void client.close().catch(() => {});
       },
@@ -182,7 +264,12 @@ export async function callServerTool(
     return text;
   } catch (err) {
     await client.close().catch(() => {});
-    throw err;
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      server.catalogId === OPENCRAB_CATALOG_ID
+        ? "OpenCrab query failed"
+        : redactResolvedSecrets(rawMessage, resolved),
+    );
   }
 }
 
