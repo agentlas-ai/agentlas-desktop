@@ -105,6 +105,25 @@ for (const [name, workflow] of workflowEntries) {
 
 const crossWorkflow = workflowEntries[0][1];
 const signedWorkflow = workflowEntries[1][1];
+const linuxContinuityStep = workflowSteps(crossWorkflow).find(
+  (step) => step.name === "Linux migration and updater continuity gates",
+);
+assert.ok(linuxContinuityStep, "cross-platform release must retain the Linux continuity gates");
+assert.match(
+  linuxContinuityStep.run,
+  /find node_modules\/electron -maxdepth 4 -name chrome-sandbox -print -quit/,
+  "Linux setup must discover Electron's optional SUID helper across package layouts",
+);
+assert.match(
+  linuxContinuityStep.run,
+  /if \[ -n "\$sandbox_path" \]; then[\s\S]*?chown root:root "\$sandbox_path"/,
+  "Linux setup must only change SUID helper ownership when the helper exists",
+);
+assert.doesNotMatch(
+  linuxContinuityStep.run,
+  /chown root:root node_modules\/electron\/dist\/chrome-sandbox/,
+  "Linux setup must not assume the pre-Electron-43 sandbox path",
+);
 const crossVerifyStep = workflowSteps(crossWorkflow).find((step) => step.name === "Verify tag matches package.json version");
 const signedResolveStep = workflowSteps(signedWorkflow).find((step) => step.name === "Resolve release inputs");
 for (const [name, step] of [["release.yml", crossVerifyStep], ["release-signed-mac.yml", signedResolveStep]]) {
