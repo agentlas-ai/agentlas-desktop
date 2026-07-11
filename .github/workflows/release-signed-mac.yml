@@ -192,6 +192,7 @@ jobs:
           # needs Chromium before any product UI gate starts.
           npx playwright install chromium
           npm run test:build-session-contracts
+          npm run test:hephaestus-sync
           npm run test:local-import
           npm run test:site-studio
           npm run test:chat-session-reset

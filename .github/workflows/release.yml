@@ -165,6 +165,7 @@ jobs:
             npm run test:borrowed-task-force
             npm run test:mcp-auto-select
             npm run test:mcp-secret-isolation
+            npm run test:hephaestus-sync
           '
 
       - name: Build renderer + electron
