@@ -147,6 +147,95 @@ async function main() {
     );
     assert.equal(afterTool.mode, "idle", "a tool result must return the watchdog to the idle budget");
     assert.equal(afterTool.stalled, true);
+
+    // Parallel graph nodes can reuse provider-local tool ids. A terminal event from one node
+    // must only clear that node's tool state, otherwise another healthy long-running node is
+    // downgraded to the shorter idle budget and false-aborted at 480s.
+    const parallelState = watchdog.createAutomationWatchdogState(0);
+    watchdog.noteAutomationWatchdogEvent(
+      parallelState,
+      { kind: "tool-use", nodeId: "node-a", tool: { name: "build", id: "shared-tool-id", args: "{}" } },
+      10,
+    );
+    watchdog.noteAutomationWatchdogEvent(
+      parallelState,
+      { kind: "tool-use", nodeId: "node-b", tool: { name: "build", id: "shared-tool-id", args: "{}" } },
+      20,
+    );
+    watchdog.noteAutomationWatchdogEvent(parallelState, { kind: "final", nodeId: "node-a" }, 30);
+    assert.equal(
+      watchdog.evaluateAutomationWatchdog(
+        parallelState,
+        limits.stallInactivityMs,
+        limits.activeToolStallMs,
+        30 + 480_001,
+      ).mode,
+      "active-tool",
+      "one graph node finishing must not clear an active tool with the same id in another node",
+    );
+    watchdog.noteAutomationWatchdogEvent(
+      parallelState,
+      { kind: "tool-use", nodeId: "node-b", tool: { name: "build", id: "shared-tool-id", result: "done" } },
+      40,
+    );
+    assert.equal(
+      watchdog.evaluateAutomationWatchdog(
+        parallelState,
+        limits.stallInactivityMs,
+        limits.activeToolStallMs,
+        40,
+      ).mode,
+      "idle",
+      "the graph watchdog should return to idle after the remaining node's tool settles",
+    );
+
+    const anonymousParallelState = watchdog.createAutomationWatchdogState(0);
+    watchdog.noteAutomationWatchdogEvent(
+      anonymousParallelState,
+      { kind: "tool-use", nodeId: "node-a", tool: { name: "anonymous-a", args: "{}" } },
+      10,
+    );
+    watchdog.noteAutomationWatchdogEvent(
+      anonymousParallelState,
+      { kind: "tool-use", nodeId: "node-b", tool: { name: "anonymous-b", args: "{}" } },
+      20,
+    );
+    watchdog.noteAutomationWatchdogEvent(
+      anonymousParallelState,
+      { kind: "error", nodeId: "node-a", error: { code: "failed", message: "node a failed" } },
+      30,
+    );
+    assert.equal(
+      watchdog.evaluateAutomationWatchdog(
+        anonymousParallelState,
+        limits.stallInactivityMs,
+        limits.activeToolStallMs,
+        30,
+      ).mode,
+      "active-tool",
+      "anonymous active tools must also be isolated per graph node",
+    );
+
+    // The scheduler must have a finite lifecycle even if a runtime receives AbortSignal but
+    // never settles its own promise. The abort still reaches the runtime for normal child cleanup;
+    // this boundary only prevents the scheduler lease/history lifecycle from hanging forever.
+    const ignoredRunner = new Promise(() => {});
+    const boundaryController = new AbortController();
+    const boundedRunner = watchdog.awaitAutomationRunnerWithAbortGrace(
+      ignoredRunner,
+      boundaryController.signal,
+      20,
+    );
+    const boundaryRejected = assert.rejects(
+      boundedRunner,
+      /finite scheduler boundary/,
+      "scheduler wait must reject when its controller aborts even if the runner ignores the signal",
+    );
+    boundaryController.abort(new Error("finite scheduler boundary"));
+    await Promise.race([
+      boundaryRejected,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("abort boundary did not settle")), 250)),
+    ]);
   }
 
   if (

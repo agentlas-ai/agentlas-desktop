@@ -33,6 +33,7 @@ import {
 import { notifyTelegramAutomationDone } from "./telegram/connect";
 import {
   automationWatchdogError,
+  awaitAutomationRunnerWithAbortGrace,
   createAutomationWatchdogState,
   evaluateAutomationWatchdog,
   noteAutomationWatchdogEvent,
@@ -344,15 +345,22 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
         }
       }, 30_000);
       let result;
+      let acceptGraphEvents = true;
       try {
-        result = await runGraph(a, a.graph, {
-          signal: controller.signal,
-          runId,
-          sink: (ev) => {
-            noteAutomationWatchdogEvent(graphWatchdog, ev);
-            if (ev.nodeState) broadcastLiveRun(a.id, ev);
-          },
-        });
+        const graphRun = Promise.resolve().then(() =>
+          runGraph(a, a.graph!, {
+            signal: controller.signal,
+            runId,
+            sink: (ev) => {
+              // A cancellation-ignoring runtime may emit after the scheduler's finite abort
+              // boundary. Do not revive watchdog/live state after this run has been finalized.
+              if (!acceptGraphEvents) return;
+              noteAutomationWatchdogEvent(graphWatchdog, ev);
+              if (ev.nodeState) broadcastLiveRun(a.id, ev);
+            },
+          }),
+        );
+        result = await awaitAutomationRunnerWithAbortGrace(graphRun, controller.signal);
       } catch (err) {
         // abort로 runGraph가 던지면 스톨 메시지로 바꿔 닥터 timeout 분류에 태운다.
         if (graphStall) {
@@ -360,6 +368,7 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
         }
         throw err;
       } finally {
+        acceptGraphEvents = false;
         clearInterval(graphStallTimer);
       }
       runStatus = result.ok && !graphStall ? "ok" : "error";
@@ -438,24 +447,32 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
           }
         }, 30_000);
         let result;
+        let acceptInvocationEvents = true;
         try {
-          result = await runMcpInvocation(
-            req,
-            (ev) => {
-              noteAutomationWatchdogEvent(invocationWatchdog, ev);
-              if (ev.kind === "error") {
-                runnerError = ev.error?.message || "runner failed";
-              }
-              recordMcpInvocationEvent(runId, req, ev);
-            },
-            controller.signal,
+          const invocationRun = Promise.resolve().then(() =>
+            runMcpInvocation(
+              req,
+              (ev) => {
+                // Once the scheduler has crossed its abort boundary, ignore late callbacks from
+                // a broken cancellation-ignoring runtime (including writes after DB shutdown).
+                if (!acceptInvocationEvents) return;
+                noteAutomationWatchdogEvent(invocationWatchdog, ev);
+                if (ev.kind === "error") {
+                  runnerError = ev.error?.message || "runner failed";
+                }
+                recordMcpInvocationEvent(runId, req, ev);
+              },
+              controller.signal,
+            ),
           );
+          result = await awaitAutomationRunnerWithAbortGrace(invocationRun, controller.signal);
         } catch (err) {
           if (stallDecision) {
             throw new Error(automationWatchdogError(stallDecision));
           }
           throw err;
         } finally {
+          acceptInvocationEvents = false;
           clearInterval(stallTimer);
         }
         if (stallDecision) {
