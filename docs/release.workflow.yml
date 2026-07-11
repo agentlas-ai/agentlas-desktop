@@ -44,7 +44,8 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     env:
-      AGENTLAS_DESKTOP_GITHUB_REPO: ${{ github.repository }}
+      # Publish to the SEPARATE public releases repo (source repo is private).
+      AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -55,6 +56,7 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+      HEPHAESTUS_REF: v1.1.12
 
     steps:
       - uses: actions/checkout@v4
@@ -123,16 +125,35 @@ jobs:
           test -s "$cert_path"
           echo "CSC_LINK=$cert_path" >> "$GITHUB_ENV"
 
+      # Clone the git-ignored Hephaestus engine so the signed .app embeds it.
+      - name: Ensure embedded engine (Hephaestus)
+        run: npm run ensure:engine
+
       - name: Install dependencies
         run: npm ci
 
       - name: Typecheck
         run: npm run typecheck
 
+      # 실제 장애가 난 Browser 소유권/스크롤과, typecheck만으로 못 잡았던
+      # 에이전트 피커·사이드바 렌더러 회귀를 릴리스 전에 함께 막는다.
+      - name: Browser and renderer UI regression gates
+        run: |
+          npx playwright install chromium
+          npm run test:browser-approval-gate
+          npm run test:browser-approval-concurrency
+          npm run test:browser-legacy-credential-scrub
+          npm run test:browser-profile-isolation
+          npm run test:browser-password-boundary
+          npm run test:browser-ui
+          npm run smoke:renderer-ui
+
       - name: Build, sign, notarize, and verify DMGs
         run: npm run package:mac
 
-      - name: Publish verified GitHub release
+      # Publish notarized .dmg/.zip + latest-mac.yml to the public releases repo
+      # (AGENTLAS_DESKTOP_GITHUB_REPO) — this is the public download + update feed.
+      - name: Publish verified release (public releases repo)
         run: |
           args=(--tag="$RESOLVED_TAG" --version="$RESOLVED_VERSION")
           if [ "$RESOLVED_DRAFT" = "true" ]; then args+=(--draft); fi
@@ -151,5 +172,7 @@ jobs:
       - name: Apply Railway web release env
         if: env.RESOLVED_APPLY_WEB_ENV == 'true' && env.AGENTLAS_RAILWAY_RELEASE_READY == '1'
         run: |
-          railway link --project "$RAILWAY_PROJECT_ID" --environment production --service agentlas-web
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            railway link --project "$RAILWAY_PROJECT_ID" --environment production --service agentlas-web
+          fi
           npm run release:web-env -- --apply --restart --verify-url=https://agentlas.cloud/api/desktop/latest

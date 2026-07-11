@@ -13,12 +13,14 @@ import {
   browserCdpPort,
   browserCdpPortReady,
   ensureBrowserCdpProfilePrivate,
-  reconcileBrowserCdpOwner,
+  reconcileBrowserCdpOwnerWithRetry,
   resolveChromeExe,
+  type BrowserCdpOwnership,
 } from "../mcp-tools/browser-cdp-launcher";
 import {
   listBrowserSites,
   purgeLegacyBrowserPasswords,
+  scrubLegacyBrowserCredentialRows,
   upsertBrowserSite,
   deleteBrowserSite,
   setBrowserSession,
@@ -69,14 +71,30 @@ export function getBrowserStatus(): BrowserStatus {
 // ── 볼트 CRUD ──────────────────────────────────────────────────
 export async function browserListSites(): Promise<BrowserSiteRow[]> {
   try {
+    const scrubbed = await scrubLegacyBrowserCredentialRows();
+    const scrubbedRows = scrubbed.siteRowsRemoved
+      + scrubbed.sessionRowsRemoved
+      + scrubbed.permissionRowsRemoved
+      + scrubbed.auditRowsScrubbed;
+    if (scrubbedRows > 0 || scrubbed.keychainCleanupFailures > 0) {
+      logBrowserAction({
+        action: "vault.legacy_credential_rows_scrubbed",
+        result: scrubbed.keychainCleanupFailures > 0 ? "partial" : "ok",
+        meta: {
+          rows: scrubbedRows,
+          keychainCleanupFailures: scrubbed.keychainCleanupFailures,
+        },
+      });
+    }
     const purged = await purgeLegacyBrowserPasswords();
     if (purged > 0) {
       logBrowserAction({ action: "vault.legacy_passwords_purged", result: `ok:${purged}` });
     }
-  } catch (error) {
+  } catch {
     logBrowserAction({
       action: "vault.legacy_passwords_purge_failed",
-      result: error instanceof Error ? error.message : String(error),
+      result: "cleanup-failed",
+      meta: { reasonCode: "legacy-browser-cleanup-failed" },
     });
   }
   return listBrowserSites();
@@ -102,6 +120,35 @@ export async function browserDeleteSite(site: string): Promise<{ ok: true }> {
 // 전용 CDP 프로필로 크롬 창을 headful 로 열어(MCP 없이) 사용자가 직접 로그인하게 한다.
 // 사용자가 명시적으로 세션 저장을 누르면 valid 로 기록(쿠키는 전용 프로필에 영속 → 이후 자동화가 재사용).
 const openLoginChildren = new Map<string, ReturnType<typeof spawn>>();
+type BrowserOpenLoginResult = { ok: boolean; error?: string };
+const openLoginFlights = new Map<string, Promise<BrowserOpenLoginResult>>();
+let openLoginQueue: Promise<void> = Promise.resolve();
+
+function ownershipReasonCode(reason: string): string {
+  const known = new Set([
+    "no-listener",
+    "ambiguous-listeners",
+    "listener-command-mismatch",
+    "verified-dedicated-listener",
+    "listener-and-marker-match",
+    "not-inspected",
+    "listener-not-ready",
+  ]);
+  if (known.has(reason)) return reason;
+  if (reason.startsWith("adoption-race:")) {
+    const nested = reason.slice("adoption-race:".length);
+    return known.has(nested) ? `adoption-race:${nested}` : "adoption-race:inspection-error";
+  }
+  return "inspection-error";
+}
+
+function stopUnverifiedLoginChild(child: ReturnType<typeof spawn>): void {
+  try {
+    if (child.pid && !child.killed) child.kill("SIGTERM");
+  } catch {
+    // The transient Chrome process may already have handed off and exited.
+  }
+}
 
 export function browserLoginArgs(profile: string, url: string): string[] {
   return [
@@ -117,18 +164,57 @@ export function browserLoginArgs(profile: string, url: string): string[] {
   ];
 }
 
-export async function browserOpenLogin(site: string): Promise<{ ok: boolean; error?: string }> {
+/**
+ * Keep profile ownership inspection and Chrome hand-off serial. Repeated clicks
+ * for the same site share one result; different sites wait a few milliseconds
+ * instead of racing lsof/marker snapshots and spawning overlapping windows.
+ */
+export function browserOpenLogin(site: string): Promise<BrowserOpenLoginResult> {
+  const norm = normalizeSite(site);
+  if (!norm) {
+    return Promise.resolve({ ok: false, error: "A valid HTTP(S) site address is required." });
+  }
+  const active = openLoginFlights.get(norm);
+  if (active) return active;
+  const flight = openLoginQueue.then(() => browserOpenLoginOnce(norm));
+  openLoginQueue = flight.then(() => undefined, () => undefined);
+  openLoginFlights.set(norm, flight);
+  void flight.then(
+    () => { if (openLoginFlights.get(norm) === flight) openLoginFlights.delete(norm); },
+    () => { if (openLoginFlights.get(norm) === flight) openLoginFlights.delete(norm); },
+  );
+  return flight;
+}
+
+async function browserOpenLoginOnce(site: string): Promise<BrowserOpenLoginResult> {
   const norm = normalizeSite(site);
   const exe = resolveChromeExe();
   if (!exe) return { ok: false, error: "Chrome or Edge executable could not be found." };
   const url = norm ? `https://${norm}` : "about:blank";
   const profile = ensureBrowserCdpProfilePrivate();
+  let observedOwnership: BrowserCdpOwnership | null = null;
   try {
     const portInUse = await browserCdpPortReady();
-    if (portInUse && (await reconcileBrowserCdpOwner()).state !== "owned") {
+    const existingOwnership = portInUse ? await reconcileBrowserCdpOwnerWithRetry() : null;
+    observedOwnership = existingOwnership;
+    if (existingOwnership && existingOwnership.state !== "owned") {
+      logBrowserAction({
+        site: norm,
+        action: "session.login_window_blocked",
+        target: url,
+        result: "blocked",
+        meta: {
+          state: existingOwnership.state,
+          reasonCode: ownershipReasonCode(existingOwnership.reason),
+          pid: existingOwnership.pid,
+          port: browserCdpPort(),
+        },
+      });
       return {
         ok: false,
-        error: `CDP port ${browserCdpPort()} is occupied by a browser outside the Agentlas dedicated profile.`,
+        error: existingOwnership.state === "foreign"
+          ? `CDP port ${browserCdpPort()} is occupied by a browser outside the Agentlas dedicated profile (${existingOwnership.reason}).`
+          : `Agentlas could not verify the dedicated browser on CDP port ${browserCdpPort()} yet (${existingOwnership.reason}). Please try again.`,
       };
     }
     const child = spawn(
@@ -161,13 +247,15 @@ export async function browserOpenLogin(site: string): Promise<{ ok: boolean; err
       let lastOwnershipReason = "listener-not-ready";
       for (let attempt = 0; attempt < 40 && !spawnError; attempt += 1) {
         if (await browserCdpPortReady()) {
-          const ownership = await reconcileBrowserCdpOwner();
+          const ownership = await reconcileBrowserCdpOwnerWithRetry({ attempts: 2, delayMs: 50 });
+          observedOwnership = ownership;
           lastOwnershipReason = ownership.reason;
           if (ownership.state === "owned") {
             ready = true;
             break;
           }
           if (ownership.state === "foreign") {
+            stopUnverifiedLoginChild(child);
             throw new Error(`Chrome CDP listener ownership could not be verified (${ownership.reason}).`);
           }
         }
@@ -175,13 +263,29 @@ export async function browserOpenLogin(site: string): Promise<{ ok: boolean; err
       }
       if (spawnError) throw spawnError;
       if (!ready) {
+        stopUnverifiedLoginChild(child);
         throw new Error(`Chrome CDP listener ownership could not be verified (${lastOwnershipReason}).`);
       }
     }
     logBrowserAction({ site: norm, action: "session.login_window", target: url, result: "opened" });
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    const error = err instanceof Error ? err.message : String(err);
+    logBrowserAction({
+      site: norm,
+      action: "session.login_window_failed",
+      target: url,
+      result: "blocked",
+      meta: {
+        state: observedOwnership?.state ?? "spawn-error",
+        reasonCode: observedOwnership
+          ? ownershipReasonCode(observedOwnership.reason)
+          : "spawn-error",
+        pid: observedOwnership?.pid ?? null,
+        port: browserCdpPort(),
+      },
+    });
+    return { ok: false, error };
   }
 }
 
@@ -240,6 +344,15 @@ export async function browserRequestApproval(
   req: BrowserApprovalRequest,
 ): Promise<BrowserApprovalResult> {
   const site = normalizeSite(req.site);
+  if (!site) {
+    logBrowserAction({
+      action: req.actionType,
+      target: req.target,
+      result: "denied",
+      approval: "invalid-site",
+    });
+    return "denied";
+  }
   const stored = getBrowserPermission(site, req.actionType);
   if (stored === "always") {
     logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "always" });

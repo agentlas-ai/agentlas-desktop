@@ -30,17 +30,70 @@ export interface BrowserActionLogRow {
   approval: string | null;
 }
 
+export interface LegacyBrowserCredentialScrubResult {
+  siteRowsRemoved: number;
+  sessionRowsRemoved: number;
+  permissionRowsRemoved: number;
+  auditRowsScrubbed: number;
+  keychainCleanupFailures: number;
+}
+
+const REDACTED_USERINFO_URL = "[redacted-userinfo-url]";
+
 function nowIso(): string {
   return new Date().toISOString();
 }
 
+function parseHttpUrl(input: string, allowBareHost: boolean): URL | null {
+  const raw = input.trim();
+  if (!raw) return null;
+  try {
+    const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//iu.test(raw);
+    if (!hasScheme && !allowBareHost) return null;
+    const parsed = new URL(hasScheme ? raw : `https://${raw}`);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Detect URL credentials without returning or logging the credential-bearing value. */
+function siteHasUrlUserinfo(input: string): boolean {
+  const parsed = parseHttpUrl(input, true);
+  if (parsed && (parsed.username || parsed.password)) return true;
+  // Also fail closed for malformed legacy URLs that still visibly place an
+  // `@` inside an explicit HTTP(S) authority.
+  return /https?:\/\/[^\s/?#]*@[^\s/?#]+/iu.test(input);
+}
+
+/**
+ * Audit targets may be free-form descriptions, so only explicit HTTP(S) URLs
+ * are inspected. This avoids treating an ordinary email address as URL userinfo.
+ */
+function targetHasUrlUserinfo(input: string): boolean {
+  // An `@` inside the authority portion of an explicit HTTP(S) URL denotes
+  // userinfo. Stop at `/`, `?`, or `#` so ordinary email-like text in a path or
+  // query does not trigger redaction; the regex can still find a nested URL.
+  return /https?:\/\/[^\s/?#]*@[^\s/?#]+/iu.test(input);
+}
+
+function safeAuditTarget(input?: string | null): string | null {
+  if (input === undefined || input === null) return null;
+  return targetHasUrlUserinfo(input) ? REDACTED_USERINFO_URL : input;
+}
+
 /** 사이트 문자열 정규화 — 프로토콜/경로 제거, 소문자 호스트만(볼트 키 안정화). */
 export function normalizeSite(input: string): string {
-  let s = (input || "").trim().toLowerCase();
-  if (!s) return "";
-  s = s.replace(/^https?:\/\//, "").replace(/^www\./, "");
-  s = s.split("/")[0].split("?")[0].split("#")[0];
-  return s;
+  const raw = (input || "").trim();
+  if (!raw) return "";
+  const parsed = parseHttpUrl(raw, true);
+  if (!parsed) return "";
+  // Credentials belong only in the provider's own login page. Rejecting
+  // userinfo here also prevents accidental password material from entering
+  // site keys, activity targets, or diagnostic logs.
+  if (parsed.username || parsed.password) return "";
+  const host = parsed.host.toLowerCase().replace(/^www\./u, "");
+  return host && !/\s/u.test(host) ? host : "";
 }
 
 function credKey(site: string): string {
@@ -59,18 +112,20 @@ export function listBrowserSites(): BrowserSiteRow[] {
        ORDER BY s.updated_at DESC`,
     )
     .all() as Array<Record<string, unknown>>;
-  return rows.map((r) => ({
-    id: String(r.id),
-    site: String(r.site),
-    label: (r.label as string | null) ?? null,
-    username: (r.username as string | null) ?? null,
-    session: {
-      status: ((r.sess_status as string | null) ?? "none") as BrowserSessionStatus,
-      capturedAt: (r.sess_captured as string | null) ?? null,
-    },
-    createdAt: String(r.created_at),
-    updatedAt: String(r.updated_at),
-  }));
+  return rows
+    .filter((r) => !siteHasUrlUserinfo(String(r.site)))
+    .map((r) => ({
+      id: String(r.id),
+      site: String(r.site),
+      label: (r.label as string | null) ?? null,
+      username: (r.username as string | null) ?? null,
+      session: {
+        status: ((r.sess_status as string | null) ?? "none") as BrowserSessionStatus,
+        capturedAt: (r.sess_captured as string | null) ?? null,
+      },
+      createdAt: String(r.created_at),
+      updatedAt: String(r.updated_at),
+    }));
 }
 
 export function getBrowserSite(site: string): BrowserSiteRow | null {
@@ -144,6 +199,86 @@ export async function purgeLegacyBrowserPasswords(): Promise<number> {
   return purged;
 }
 
+/**
+ * One-time defense for rows written before normalizeSite rejected URL userinfo.
+ *
+ * Credential-bearing site identities are not converted to their host because
+ * doing so could merge an untrusted legacy permission/session into a valid
+ * site. Entity rows are deleted instead. Audit history is retained, but only
+ * the credential-bearing field is replaced with an explicit redaction marker.
+ * Normal site rows and normal audit fields are left byte-for-byte unchanged.
+ */
+export async function scrubLegacyBrowserCredentialRows(): Promise<LegacyBrowserCredentialScrubResult> {
+  const db = getDb();
+  const unsafeSiteRows = db
+    .prepare("SELECT site FROM browser_sites")
+    .all() as Array<{ site: string }>;
+  let keychainCleanupFailures = 0;
+
+  // Legacy builds may have used the raw site as the Keychain lookup key. Try
+  // that cleanup before removing the DB locator, but never retain plaintext URL
+  // credentials in SQLite merely because the OS Keychain is unavailable.
+  for (const row of unsafeSiteRows) {
+    if (!siteHasUrlUserinfo(row.site)) continue;
+    try {
+      await deleteSecret(credKey(row.site));
+    } catch {
+      keychainCleanupFailures += 1;
+    }
+  }
+
+  const counts = db.transaction(() => {
+    let siteRowsRemoved = 0;
+    let sessionRowsRemoved = 0;
+    let permissionRowsRemoved = 0;
+    let auditRowsScrubbed = 0;
+
+    const sessions = db
+      .prepare("SELECT id, site FROM browser_sessions")
+      .all() as Array<{ id: string; site: string }>;
+    const deleteSession = db.prepare("DELETE FROM browser_sessions WHERE id = ?");
+    for (const row of sessions) {
+      if (siteHasUrlUserinfo(row.site)) sessionRowsRemoved += deleteSession.run(row.id).changes;
+    }
+
+    const permissions = db
+      .prepare("SELECT id, site FROM browser_permissions")
+      .all() as Array<{ id: string; site: string }>;
+    const deletePermission = db.prepare("DELETE FROM browser_permissions WHERE id = ?");
+    for (const row of permissions) {
+      if (siteHasUrlUserinfo(row.site)) permissionRowsRemoved += deletePermission.run(row.id).changes;
+    }
+
+    const sites = db
+      .prepare("SELECT id, site FROM browser_sites")
+      .all() as Array<{ id: string; site: string }>;
+    const deleteSite = db.prepare("DELETE FROM browser_sites WHERE id = ?");
+    for (const row of sites) {
+      if (siteHasUrlUserinfo(row.site)) siteRowsRemoved += deleteSite.run(row.id).changes;
+    }
+
+    const logs = db
+      .prepare("SELECT id, site, target FROM browser_action_logs")
+      .all() as Array<{ id: string; site: string | null; target: string | null }>;
+    const updateLog = db.prepare(
+      "UPDATE browser_action_logs SET site = ?, target = ? WHERE id = ?",
+    );
+    for (const row of logs) {
+      const site = row.site && siteHasUrlUserinfo(row.site) ? REDACTED_USERINFO_URL : row.site;
+      const target = row.target && targetHasUrlUserinfo(row.target)
+        ? REDACTED_USERINFO_URL
+        : row.target;
+      if (site !== row.site || target !== row.target) {
+        auditRowsScrubbed += updateLog.run(site, target, row.id).changes;
+      }
+    }
+
+    return { siteRowsRemoved, sessionRowsRemoved, permissionRowsRemoved, auditRowsScrubbed };
+  })();
+
+  return { ...counts, keychainCleanupFailures };
+}
+
 export async function deleteBrowserSite(site: string): Promise<void> {
   const norm = normalizeSite(site);
   // 레거시 비밀번호 삭제가 실패했는데 사이트 행부터 지우면, 남은 Keychain
@@ -188,6 +323,7 @@ export function getBrowserPermission(
 ): BrowserPermissionDecision | null {
   if (actionType === "payment" || actionType === "unsafe-code") return null;
   const norm = normalizeSite(site);
+  if (!norm) return null;
   const row = getDb()
     .prepare("SELECT decision FROM browser_permissions WHERE site = ? AND action_type = ?")
     .get(norm, actionType) as { decision: string } | undefined;
@@ -202,6 +338,7 @@ export function setBrowserPermission(
 ): void {
   if (actionType === "payment" || actionType === "unsafe-code" || decision === "once") return;
   const norm = normalizeSite(site);
+  if (!norm) return;
   getDb()
     .prepare(
       `INSERT INTO browser_permissions (id, site, action_type, decision, created_at)
@@ -225,11 +362,13 @@ export function listBrowserPermissions(): Array<{
   const rows = getDb()
     .prepare("SELECT site, action_type, decision FROM browser_permissions ORDER BY created_at DESC")
     .all() as Array<{ site: string; action_type: string; decision: string }>;
-  return rows.map((r) => ({
-    site: r.site,
-    actionType: r.action_type,
-    decision: r.decision as BrowserPermissionDecision,
-  }));
+  return rows
+    .filter((r) => !siteHasUrlUserinfo(r.site))
+    .map((r) => ({
+      site: r.site,
+      actionType: r.action_type,
+      decision: r.decision as BrowserPermissionDecision,
+    }));
 }
 
 // ── 사용 로그 ──────────────────────────────────────────────────
@@ -241,6 +380,7 @@ export function logBrowserAction(input: {
   approval?: string | null;
   meta?: unknown;
 }): void {
+  const site = input.site ? normalizeSite(input.site) : "";
   getDb()
     .prepare(
       `INSERT INTO browser_action_logs (id, ts, site, action, target, result, approval, meta)
@@ -249,9 +389,9 @@ export function logBrowserAction(input: {
     .run(
       randomUUID(),
       nowIso(),
-      input.site ? normalizeSite(input.site) : null,
+      site || null,
       input.action,
-      input.target ?? null,
+      safeAuditTarget(input.target),
       input.result ?? null,
       input.approval ?? null,
       input.meta === undefined ? null : JSON.stringify(input.meta),
@@ -268,9 +408,11 @@ export function listBrowserActionLogs(limit = 500): BrowserActionLogRow[] {
   return rows.map((r) => ({
     id: String(r.id),
     ts: String(r.ts),
-    site: (r.site as string | null) ?? null,
+    site: typeof r.site === "string" && siteHasUrlUserinfo(r.site)
+      ? REDACTED_USERINFO_URL
+      : (r.site as string | null) ?? null,
     action: String(r.action),
-    target: (r.target as string | null) ?? null,
+    target: safeAuditTarget((r.target as string | null) ?? null),
     result: (r.result as string | null) ?? null,
     approval: (r.approval as string | null) ?? null,
   }));

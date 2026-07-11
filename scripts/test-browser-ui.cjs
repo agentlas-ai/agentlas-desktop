@@ -82,7 +82,11 @@ async function main() {
           listSites: async () => ${JSON.stringify(sites)},
           saveSite: async (input) => input,
           deleteSite: async () => ({ ok: true }),
-          openLogin: async () => ({ ok: false, error: "CDP ownership fixture detail" }),
+          openLogin: async () => {
+            window.__browserOpenLoginCalls = (window.__browserOpenLoginCalls || 0) + 1;
+            await new Promise((resolve) => setTimeout(resolve, 120));
+            return { ok: false, error: "CDP ownership fixture detail" };
+          },
           markSession: async () => ({ ok: true }),
           listPermissions: async () => [],
           revokePermission: async () => ({ ok: true }),
@@ -118,8 +122,27 @@ async function main() {
     assert.ok(after > before.scrollTop, "mouse wheel must move the Browser page scroll position");
     const lastSignIn = page.getByRole("button", { name: /Sign in|로그인 창/ }).last();
     await lastSignIn.scrollIntoViewIfNeeded();
-    await lastSignIn.click();
+    await lastSignIn.dblclick();
     await page.getByText("CDP ownership fixture detail", { exact: true }).waitFor();
+    assert.equal(
+      await page.evaluate(() => window.__browserOpenLoginCalls),
+      1,
+      "double-clicking Sign in while ownership is pending must make one bridge call",
+    );
+
+    await page.setViewportSize({ width: 900, height: 360 });
+    await page.getByRole("button", { name: /Add site|사이트 추가/ }).click();
+    const editor = page.locator(".be");
+    const editorMetrics = await editor.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      overflowY: getComputedStyle(element).overflowY,
+    }));
+    assert.equal(editorMetrics.overflowY, "auto", "short-window site editor must own its vertical scroll");
+    assert.ok(editorMetrics.scrollHeight > editorMetrics.clientHeight, "short-window site editor must be scrollable");
+    await editor.hover();
+    await page.mouse.wheel(0, 500);
+    await page.waitForFunction(() => (document.querySelector(".be")?.scrollTop || 0) > 0);
     await page.screenshot({ path: path.join(outDir, "browser-scroll-after-wheel.png") });
 
     assert.deepEqual(errors, [], `Browser page emitted errors: ${errors.join("\n")}`);

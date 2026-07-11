@@ -16,6 +16,7 @@ export default function BrowserPage() {
   const [tab, setTab] = useState<Tab>("sites");
   const [editing, setEditing] = useState<BrowserSite | "new" | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [openingSite, setOpeningSite] = useState<string | null>(null);
 
   const api = ipc();
 
@@ -181,17 +182,25 @@ export default function BrowserPage() {
               <SiteCard
                 key={s.id}
                 site={s}
+                opening={openingSite === s.site}
+                loginBusy={openingSite !== null}
                 onEdit={() => setEditing(s)}
                 onLogin={async () => {
-                  const r = await api?.browser.openLogin(s.site);
-                  if (r?.ok) {
-                    flash(
-                      ko
-                        ? `${s.site} 로그인 창을 열었어요. 로그인 후 이 화면에서 ‘세션 저장’을 누르세요.`
-                        : `Opened the ${s.site} sign-in window. Sign in, then click Save session here.`,
-                    );
-                  } else {
-                    flash(r?.error ?? (ko ? "로그인 창을 열지 못했어요." : "Could not open the sign-in window."));
+                  if (openingSite) return;
+                  setOpeningSite(s.site);
+                  try {
+                    const r = await api?.browser.openLogin(s.site);
+                    if (r?.ok) {
+                      flash(
+                        ko
+                          ? `${s.site} 로그인 창을 열었어요. 로그인 후 이 화면에서 ‘세션 저장’을 누르세요.`
+                          : `Opened the ${s.site} sign-in window. Sign in, then click Save session here.`,
+                      );
+                    } else {
+                      flash(r?.error ?? (ko ? "로그인 창을 열지 못했어요." : "Could not open the sign-in window."));
+                    }
+                  } finally {
+                    setOpeningSite(null);
                   }
                 }}
                 onCaptured={async () => {
@@ -510,6 +519,8 @@ export default function BrowserPage() {
 
 function SiteCard({
   site,
+  opening,
+  loginBusy,
   onEdit,
   onLogin,
   onCaptured,
@@ -517,6 +528,8 @@ function SiteCard({
   ko,
 }: {
   site: BrowserSite;
+  opening: boolean;
+  loginBusy: boolean;
   onEdit: () => void;
   onLogin: () => void;
   onCaptured: () => void;
@@ -552,9 +565,11 @@ function SiteCard({
       <div className="sc-actions">
         <button
           onClick={onLogin}
+          disabled={loginBusy}
+          aria-busy={opening}
           title={ko ? "전용 프로필로 로그인 창 열기" : "Open the sign-in window in the dedicated profile"}
         >
-          {ko ? "로그인 창" : "Sign in"}
+          {opening ? (ko ? "확인 중…" : "Checking…") : ko ? "로그인 창" : "Sign in"}
         </button>
         <button
           onClick={onCaptured}
@@ -605,6 +620,10 @@ function SiteCard({
           font-size: 12px;
           font-weight: 600;
           cursor: pointer;
+        }
+        .sc-actions button:disabled {
+          cursor: wait;
+          opacity: 0.55;
         }
         .sc-actions button.danger {
           color: var(--rd-err, #e5484d);
@@ -685,10 +704,14 @@ function SiteEditor({
           display: flex;
           align-items: center;
           justify-content: center;
+          padding: 16px;
+          overflow-y: auto;
           z-index: 70;
         }
         .be {
           width: min(440px, 92vw);
+          max-height: calc(100vh - 32px);
+          overflow-y: auto;
           background: var(--rd-bg);
           color: var(--rd-ink);
           border: 1px solid var(--rd-hair);
@@ -760,6 +783,8 @@ function formatBrowserLogAction(action: string, ko: boolean): string {
     "vault.delete": ["사이트 삭제", "Site removed"],
     "session.capture": ["세션 캡처", "Session captured"],
     "session.login_window": ["로그인 창 열림", "Sign-in window opened"],
+    "session.login_window_blocked": ["로그인 창 차단", "Sign-in window blocked"],
+    "session.login_window_failed": ["로그인 창 실패", "Sign-in window failed"],
     "session.mark": ["세션 상태 변경", "Session status changed"],
     send: ["메시지 전송", "Message sent"],
     publish: ["게시/공개", "Published"],

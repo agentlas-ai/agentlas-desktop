@@ -64,6 +64,13 @@ export interface BrowserCdpOwnership {
   adopted?: boolean;
 }
 
+export interface BrowserCdpOwnershipRetryOptions {
+  attempts?: number;
+  delayMs?: number;
+  reconcile?: () => Promise<BrowserCdpOwnership>;
+  sleep?: (delayMs: number) => Promise<void>;
+}
+
 function canonicalProfilePath(value: string, platform = process.platform): string {
   if (platform === "win32") {
     return path.win32.resolve(value).replace(/[\\/]+$/, "").toLowerCase();
@@ -245,15 +252,18 @@ function readBrowserCdpOwner(): BrowserCdpOwnerRecord | null {
   }
 }
 
-function execFileText(executable: string, args: string[]): Promise<string> {
+function execFileText(executable: string, args: string[], allowedExitCodes: number[] = []): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       executable,
       args,
       { encoding: "utf8", timeout: 3_000, maxBuffer: 1024 * 1024, windowsHide: true },
       (error, stdout) => {
-        if (error && (error as NodeJS.ErrnoException).code === "ENOENT") return reject(error);
-        if (error && (error as { killed?: boolean }).killed) return reject(error);
+        if (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code === "ENOENT" || (error as { killed?: boolean }).killed) return reject(error);
+          if (!allowedExitCodes.includes(Number(code))) return reject(error);
+        }
         resolve(stdout);
       },
     );
@@ -267,7 +277,7 @@ function uniquePositivePids(values: number[]): number[] {
 async function inspectDarwinCdpProcesses(port: number): Promise<BrowserCdpProcessSnapshot[]> {
   const listenerOutput = await execFileText("/usr/sbin/lsof", [
     "-nP", "-a", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpn",
-  ]);
+  ], [1]);
   const addressesByPid = new Map<number, string[]>();
   let currentPid: number | null = null;
   for (const line of listenerOutput.split(/\r?\n/u)) {
@@ -404,8 +414,48 @@ export async function reconcileBrowserCdpOwner(): Promise<BrowserCdpOwnership> {
   return { ...after, reason: `adoption-race:${after.reason}` };
 }
 
+/**
+ * OS listener inspection can briefly lose a process while Chrome is opening or
+ * handing a URL to an existing profile process. Retry the attestation without
+ * ever treating an uncertain/foreign result as owned. A persistent mismatch
+ * still fails closed and is returned with its exact reason for diagnostics.
+ */
+let browserCdpOwnershipRetryFlight: Promise<BrowserCdpOwnership> | null = null;
+
+async function runBrowserCdpOwnershipRetry(
+  options: BrowserCdpOwnershipRetryOptions = {},
+): Promise<BrowserCdpOwnership> {
+  const attempts = Math.max(1, Math.min(8, Math.trunc(options.attempts ?? 4)));
+  const delayMs = Math.max(0, Math.min(1_000, Math.trunc(options.delayMs ?? 90)));
+  const reconcile = options.reconcile ?? reconcileBrowserCdpOwner;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let ownership: BrowserCdpOwnership = { state: "unverifiable", pid: null, reason: "not-inspected" };
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    ownership = await reconcile();
+    if (ownership.state === "owned") return ownership;
+    if (attempt + 1 < attempts) await sleep(delayMs);
+  }
+  return ownership;
+}
+
+export function reconcileBrowserCdpOwnerWithRetry(
+  options: BrowserCdpOwnershipRetryOptions = {},
+): Promise<BrowserCdpOwnership> {
+  // Injected collaborators are only used by deterministic tests and must not
+  // join the live process-wide single-flight.
+  if (options.reconcile || options.sleep) return runBrowserCdpOwnershipRetry(options);
+  if (browserCdpOwnershipRetryFlight) return browserCdpOwnershipRetryFlight;
+  const flight = runBrowserCdpOwnershipRetry(options);
+  browserCdpOwnershipRetryFlight = flight;
+  void flight.then(
+    () => { if (browserCdpOwnershipRetryFlight === flight) browserCdpOwnershipRetryFlight = null; },
+    () => { if (browserCdpOwnershipRetryFlight === flight) browserCdpOwnershipRetryFlight = null; },
+  );
+  return flight;
+}
+
 export async function browserCdpOwnerIsLive(): Promise<boolean> {
-  return (await reconcileBrowserCdpOwner()).state === "owned";
+  return (await reconcileBrowserCdpOwnerWithRetry()).state === "owned";
 }
 
 export function browserCdpPortReady(): Promise<boolean> {
@@ -595,10 +645,13 @@ function ensurePrivateProfile() {
   fs.mkdirSync(CDP_PROFILE, { recursive: true, mode: 0o700 });
   try { fs.chmodSync(CDP_PROFILE, 0o700); } catch (e) {}
 }
-function execFileText(executable, args) {
+function execFileText(executable, args, allowedExitCodes = []) {
   return new Promise((resolve, reject) => {
     execFile(executable, args, { encoding: 'utf8', timeout: 3000, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => {
-      if (error && (error.code === 'ENOENT' || error.killed)) return reject(error);
+      if (error) {
+        if (error.code === 'ENOENT' || error.killed) return reject(error);
+        if (!allowedExitCodes.includes(Number(error.code))) return reject(error);
+      }
       resolve(stdout || '');
     });
   });
@@ -607,7 +660,7 @@ function uniquePositivePids(values) {
   return [...new Set(values.filter((pid) => Number.isInteger(pid) && pid > 0))];
 }
 async function inspectDarwinProcesses() {
-  const listenerOutput = await execFileText('/usr/sbin/lsof', ['-nP', '-a', '-iTCP:' + PORT, '-sTCP:LISTEN', '-Fpn']);
+  const listenerOutput = await execFileText('/usr/sbin/lsof', ['-nP', '-a', '-iTCP:' + PORT, '-sTCP:LISTEN', '-Fpn'], [1]);
   const addressesByPid = new Map();
   let currentPid = null;
   for (const line of listenerOutput.split(/\r?\n/)) {
@@ -717,6 +770,26 @@ async function reconcileOwner() {
   if (after.state === 'owned' && after.pid === before.pid) return Object.assign({ adopted: true }, after);
   return Object.assign({}, after, { reason: 'adoption-race:' + after.reason });
 }
+let reconcileOwnerRetryFlight = null;
+async function runReconcileOwnerWithRetry(attempts = 4, delayMs = 90) {
+  let ownership = { state: 'unverifiable', pid: null, reason: 'not-inspected' };
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    ownership = await reconcileOwner();
+    if (ownership.state === 'owned') return ownership;
+    if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return ownership;
+}
+function reconcileOwnerWithRetry(attempts = 4, delayMs = 90) {
+  if (reconcileOwnerRetryFlight) return reconcileOwnerRetryFlight;
+  const flight = runReconcileOwnerWithRetry(attempts, delayMs);
+  reconcileOwnerRetryFlight = flight;
+  flight.then(
+    () => { if (reconcileOwnerRetryFlight === flight) reconcileOwnerRetryFlight = null; },
+    () => { if (reconcileOwnerRetryFlight === flight) reconcileOwnerRetryFlight = null; },
+  );
+  return flight;
+}
 `;
 
 const LAUNCHER_SOURCE = String.raw`#!/usr/bin/env node
@@ -775,9 +848,9 @@ ${BROWSER_CDP_OWNERSHIP_RUNTIME_SOURCE}
 async function ensureChrome() {
   ensurePrivateProfile();
   if (await portReady(PORT)) {
-    const ownership = await reconcileOwner();
+    const ownership = await reconcileOwnerWithRetry();
     if (ownership.state === 'owned') { log('owned CDP already up on', PORT, ownership.adopted ? '(adopted)' : ''); return; }
-    throw new Error('CDP port ' + PORT + ' is occupied by a browser not owned by the Agentlas dedicated profile. Close it or choose AGENTLAS_CDP_PORT.');
+    throw new Error('CDP port ' + PORT + ' could not be verified as the Agentlas dedicated profile (' + ownership.state + ':' + ownership.reason + '). Close an unrelated listener or retry.');
   }
   const { exe } = chromeInfo();
   if (!fs.existsSync(exe)) throw new Error('Google Chrome executable could not be found: ' + exe);
@@ -798,7 +871,7 @@ async function ensureChrome() {
   child.unref();
   for (let i = 0; i < 40; i++) {
     if (await portReady(PORT)) {
-      const ownership = await reconcileOwner();
+      const ownership = await reconcileOwnerWithRetry(2, 50);
       if (ownership.state === 'owned') { log('CDP ready', ownership.pid); return; }
       if (ownership.state === 'foreign') throw new Error('Chrome CDP listener ownership could not be verified (' + ownership.reason + ').');
     }

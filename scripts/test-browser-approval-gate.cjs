@@ -9,6 +9,7 @@ const {
   browserCdpCommandFlag,
   browserCdpProcessMatches,
   classifyBrowserCdpOwnership,
+  reconcileBrowserCdpOwnerWithRetry,
   browserCdpLauncherSourceForTest,
 } = require("../dist/electron/mcp-tools/browser-cdp-launcher.js");
 
@@ -93,10 +94,19 @@ assert.ok(launcher.includes(BROWSER_APPROVAL_CLASSIFIER_SOURCE.trim()));
 assert.ok(launcher.includes(BROWSER_APPROVAL_CONTEXT_SOURCE.trim()));
 assert.ok(!launcher.includes("${BROWSER_APPROVAL_CLASSIFIER_SOURCE}"));
 assert.match(launcher, /path: '\/json\/list'/, "approval gate must re-read the live CDP page");
-assert.match(launcher, /occupied by a browser not owned/, "foreign CDP ports must be rejected");
+assert.match(
+  launcher,
+  /could not be verified as the Agentlas dedicated profile/,
+  "unverified CDP ports must be rejected with the attestation reason",
+);
 assert.ok(
   launcher.includes(BROWSER_CDP_OWNERSHIP_RUNTIME_SOURCE.trim()),
   "materialized launcher must use the listener-attested ownership runtime",
+);
+assert.match(
+  launcher,
+  /const ownership = await reconcileOwnerWithRetry\(\)/,
+  "materialized launcher must retry transient ownership inspection without bypassing attestation",
 );
 assert.doesNotMatch(launcher, /writeOwner\(child\.pid\)/, "transient launcher pids must never become owner proof");
 assert.doesNotMatch(launcher, /child\.once\('exit',[^\n]*clearOwner/, "transient launcher exit must not clear the real owner");
@@ -243,4 +253,38 @@ assert.equal(
 );
 assert.equal(linuxRuntimeSandbox.__runtimeProcessMatches({ ...linuxListener, executable: "/tmp/chromium" }), false);
 
-console.log("browser approval classifier passed");
+(async () => {
+  let calls = 0;
+  const recovered = await reconcileBrowserCdpOwnerWithRetry({
+    attempts: 4,
+    delayMs: 0,
+    reconcile: async () => {
+      calls += 1;
+      return calls < 3
+        ? { state: "unverifiable", pid: null, reason: "transient-process-snapshot" }
+        : { state: "owned", pid: 4242, reason: "listener-and-marker-match" };
+    },
+    sleep: async () => {},
+  });
+  assert.equal(calls, 3, "transient ownership inspection must be retried until owned");
+  assert.equal(recovered.state, "owned");
+
+  calls = 0;
+  const persistentForeign = await reconcileBrowserCdpOwnerWithRetry({
+    attempts: 3,
+    delayMs: 0,
+    reconcile: async () => {
+      calls += 1;
+      return { state: "foreign", pid: 9999, reason: "listener-command-mismatch" };
+    },
+    sleep: async () => {},
+  });
+  assert.equal(calls, 3, "a foreign listener may be rechecked but must never be adopted");
+  assert.equal(persistentForeign.state, "foreign");
+  assert.equal(persistentForeign.pid, 9999);
+
+  console.log("browser approval classifier passed");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

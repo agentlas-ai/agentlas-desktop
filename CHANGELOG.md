@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.31 — 2026-07-11
+
+### Fixed
+
+- **Reliable dedicated-browser login handoff.** Agentlas now settles transient
+  macOS process snapshots before classifying CDP port 9222, shares concurrent
+  ownership checks, serializes login-window requests, and only calls a listener
+  “external” after a persistent verified mismatch. Uncertain and foreign states
+  remain fail-closed; the immediate local error keeps the precise failure while
+  durable activity logs store only credential-safe reason codes. Legacy browser
+  rows containing URL userinfo are removed or redacted before they reach the UI.
+- **Browser screen interaction.** Sign-in buttons expose a pending state and
+  reject duplicate clicks. The add-site dialog owns its scroll area on short or
+  zoomed windows, while the main Browser screen keeps native wheel behavior.
+- **Compatible dependency security patches.** Updates the locked Hono, Next.js,
+  form-data, shell-quote, js-yaml, and temporary-file packages within their
+  existing supported ranges, removing the critical audit findings without a
+  forced Electron or packaging-stack major upgrade.
+
 ## 0.7.28 — 2026-07-10
 
 ### Added
