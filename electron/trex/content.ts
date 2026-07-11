@@ -5,12 +5,12 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { writeStdin } from "../runtime/exec";
+import { withCliPath, writeStdin } from "../runtime/exec";
 
 export interface TrexContentResult {
   ok: boolean;
   text?: string; // 원본 JSON 텍스트(렌더러가 parseDeckContent로 파싱)
-  engine?: "agy" | "codex";
+  engine?: "agent" | "agy" | "codex";
   reason?: string;
 }
 
@@ -102,7 +102,9 @@ function runViaStdin(
       return;
     }
     try {
-      child = spawn(bin, args, { env });
+      // 패키지 GUI 앱은 로그인 셸 PATH를 상속 못해 최소 PATH다 — agy/codex가 자기 의존성(node 등)을
+      // 못 찾아 조용히 실패하고 덱이 스켈레톤으로 떨어진다. withCliPath로 흔한 bin 디렉터리를 보강한다.
+      child = spawn(bin, args, { env: withCliPath(env) });
     } catch {
       resolve(null);
       return;
@@ -123,11 +125,100 @@ function looksLikeDeckJson(out: string | null): boolean {
   return !!out && out.includes("{") && out.includes("}");
 }
 
-export async function generateDeckContent(topic: string, count: number, mode?: string, sources?: string): Promise<TrexContentResult> {
+/** T-rex에 붙은 Hub 에이전트 — "Defect-Driven Slide Studio". Site의 web-master처럼 borrow해 실행한다.
+ *  편집기는 나중에 손으로 고치는 용도고, 최초 제작(사용자 선택+소스 → 실제 덱)은 이 에이전트가 한다. */
+export const TREX_SLIDE_AGENT_SLUG = "defect-driven-slide-studio";
+
+/**
+ * 붙은 Hub 에이전트를 활성 런타임(사용자 연결 LLM)으로 borrow 실행 — Site.generate.ts와 동일 경로라
+ * PATH/인증을 런타임 레이어가 처리한다(패키지 GUI 앱에서도 견고). 에이전트의 슬라이드 지능으로
+ * 콘텐츠를 만들되, 출력 계약은 T-rex 인앱 편집기가 먹는 JSON 스키마(prompt)로 강제한다.
+ * 실패(에이전트 미가용/미차용/무출력)면 null 반환 → 호출부가 로컬 CLI 폴백.
+ */
+async function generateViaSlideAgent(prompt: string, locale: "ko" | "en"): Promise<string | null> {
+  try {
+    const { getOrCreateStudioSession } = await import("../store/chats");
+    const { runMcpInvocation } = await import("../mcp/client");
+    const chat = getOrCreateStudioSession("trex");
+    let finalText = "";
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 300_000);
+    try {
+      const result = await runMcpInvocation(
+        {
+          chatId: chat.id,
+          userPrompt: prompt,
+          borrowAgents: [TREX_SLIDE_AGENT_SLUG],
+          permissions: "read",
+          locale,
+        },
+        (ev) => {
+          if (ev.kind === "final" && typeof ev.text === "string" && ev.text.trim()) finalText = ev.text.trim();
+        },
+        controller.signal,
+      );
+      const text = (result?.finalText || finalText || "").trim();
+      return looksLikeDeckJson(text) ? text : null;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 활성 런타임(사용자 연결 LLM: claude-code/codex/grok/gemini)으로 프롬프트 1회 실행.
+ * 챗과 동일한 러너 레이어(spawnCli + withCliPath)를 타므로 PATH/인증이 처리돼 패키지 GUI 앱에서도 견고하다.
+ * 붙은 에이전트가 아직 callable로 게시되지 않았을 때의 1급 폴백(T-rex 자체 콘텐츠 독트린을 그대로 실행).
+ */
+async function generateViaActiveRuntime(prompt: string, locale: "ko" | "en", signal?: AbortSignal): Promise<string | null> {
+  try {
+    const { detectRuntimes } = await import("../runtime/detect");
+    const { pickActive, pickRunner } = await import("../runtime/selection");
+    const active = pickActive(await detectRuntimes());
+    if (!active) return null;
+    const picked = pickRunner(active);
+    if (!picked) return null;
+    let out = "";
+    const result = await picked.runner(
+      {
+        systemPrompt: "",
+        history: [],
+        userPrompt: prompt,
+        backendLabel: picked.label,
+        permission: "read",
+        locale,
+        ...(signal ? { signal } : {}),
+      },
+      { onPartial: (c) => { out += c; }, onStatus: () => {} },
+    );
+    const text = (result?.text || out || "").trim();
+    return looksLikeDeckJson(text) ? text : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function generateDeckContent(
+  topic: string,
+  count: number,
+  mode?: string,
+  sources?: string,
+  locale: "ko" | "en" = "ko",
+): Promise<TrexContentResult> {
   const clean = (topic || "").trim().slice(0, 500);
   const src = (sources || "").trim().slice(0, 24_000); // 첨부 파일 본문(캡). 소스가 있으면 주제 없이도 생성 가능.
   if (!clean && !src) return { ok: false, reason: "empty-topic" };
   const prompt = buildPrompt(clean || "(see source material)", count, mode, src);
+
+  // 1순위: 붙은 Hub 에이전트(Defect-Driven Slide Studio)를 borrow해 실행 — callable로 게시되면 자동 우선.
+  const viaAgent = await generateViaSlideAgent(prompt, locale);
+  if (viaAgent) return { ok: true, text: viaAgent, engine: "agent" };
+  // 2순위: 활성 런타임(연결된 LLM)으로 실행 — 견고(런타임 레이어가 PATH/인증 처리), 패키지 앱에서도 됨.
+  const viaRuntime = await generateViaActiveRuntime(prompt, locale);
+  if (viaRuntime) return { ok: true, text: viaRuntime, engine: "agent" };
+  // 최후: 활성 런타임/에이전트가 없을 때만 로컬 CLI(agy/codex) 직접 spawn(PATH 보강됨).
 
   const agy = resolveBin("agy", [path.join(os.homedir(), ".local/bin/agy"), "/opt/homebrew/bin/agy", "/usr/local/bin/agy"]);
   const codex = resolveBin("codex", [path.join(os.homedir(), ".local/bin/codex"), "/opt/homebrew/bin/codex", "/usr/local/bin/codex"]);

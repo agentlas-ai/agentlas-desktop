@@ -2602,6 +2602,10 @@ export interface PendingConfirmation {
   header?: string;
   /** 선택지 개수 */
   optionCount: number;
+  /** Desktop 질문 카드와 Mobile이 공유하는 실제 안전한 선택지. */
+  options: Array<{ label: string; description?: string }>;
+  /** 여러 선택을 허용하는 질문인지 여부. */
+  multiSelect: boolean;
   agentId: string;
   firmId: string | null;
   /** 질문 메시지 시각(ISO) */
@@ -3506,7 +3510,7 @@ export interface AgentlasIpc {
   trex: {
     generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => Promise<{ ok: boolean; src?: string; reason?: string; engine?: "codex" | "gemini" }>;
     imageProviders: () => Promise<{ codex: boolean; gemini: boolean }>;
-    generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string }) => Promise<{ ok: boolean; text?: string; engine?: "agy" | "codex"; reason?: string }>;
+    generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string; locale?: "ko" | "en" }) => Promise<{ ok: boolean; text?: string; engine?: "agent" | "agy" | "codex"; reason?: string }>;
     contentAvailable: () => Promise<{ agy: boolean; codex: boolean }>;
     /** 선택 요소 LLM 수정(select-to-edit) — 현재 텍스트 + 지시 → 다시 쓴 텍스트. */
     refineText: (payload: { current: string; instruction: string; context?: string }) => Promise<{ ok: boolean; text?: string; reason?: string }>;

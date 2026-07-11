@@ -305,7 +305,7 @@ export default function TrexPage() {
         let contentOk = false;
         let failReason: string | null = null;
         try {
-          const r = await gc({ topic: p, count: n, mode: modeOverride ?? undefined, sources: sourcesText || undefined });
+          const r = await gc({ topic: p, count: n, mode: modeOverride ?? undefined, sources: sourcesText || undefined, locale: ko ? "ko" : "en" });
           const parsed = r?.ok && r.text ? parseDeckContent(r.text) : null;
           contentOk = !!parsed;
           if (!parsed) failReason = r?.reason || "parse-failed";

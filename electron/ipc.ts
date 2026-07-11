@@ -616,9 +616,9 @@ export function registerIpcHandlers(): void {
     return trexImageProviders();
   });
   // T-rex 슬라이드 "내용" 생성 — 연결된 LLM(agy/codex)이 슬라이드별 실제 카피·수치를 JSON으로 작성.
-  ipcMain.handle("trex:generateContent", async (_e, payload: { topic?: string; count?: number; mode?: string; sources?: string }) => {
+  ipcMain.handle("trex:generateContent", async (_e, payload: { topic?: string; count?: number; mode?: string; sources?: string; locale?: "ko" | "en" }) => {
     const { generateDeckContent } = await import("./trex/content");
-    return generateDeckContent(String(payload?.topic ?? ""), Number(payload?.count ?? 7), payload?.mode, payload?.sources);
+    return generateDeckContent(String(payload?.topic ?? ""), Number(payload?.count ?? 7), payload?.mode, payload?.sources, payload?.locale ?? "ko");
   });
   ipcMain.handle("trex:contentAvailable", async () => {
     const { trexContentAvailable } = await import("./trex/content");

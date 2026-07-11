@@ -35,7 +35,7 @@ const api: AgentlasIpc = {
   trex: {
     generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => ipcRenderer.invoke("trex:generateImage", payload),
     imageProviders: () => ipcRenderer.invoke("trex:imageProviders"),
-    generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string }) => ipcRenderer.invoke("trex:generateContent", payload),
+    generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string; locale?: "ko" | "en" }) => ipcRenderer.invoke("trex:generateContent", payload),
     contentAvailable: () => ipcRenderer.invoke("trex:contentAvailable"),
     refineText: (payload: { current: string; instruction: string; context?: string }) => ipcRenderer.invoke("trex:refineText", payload),
   },
@@ -556,6 +556,12 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
     const wrapped = (_evt: Electron.IpcRendererEvent, chatIds: string[]) => handler(chatIds);
     ipcRenderer.on("invoke:activeChats", wrapped);
     return () => ipcRenderer.removeListener("invoke:activeChats", wrapped);
+  },
+  // Mobile pairing lifecycle carries only a reason enum; QR nonces/tokens stay in main.
+  onMobileBridgeChanged: (handler: (event: { reason: string }) => void) => {
+    const wrapped = (_evt: Electron.IpcRendererEvent, event: { reason: string }) => handler(event);
+    ipcRenderer.on("mobileBridge:changed", wrapped);
+    return () => ipcRenderer.removeListener("mobileBridge:changed", wrapped);
   },
   // Browser 승인 요청 — 되돌릴 수 없는 브라우저 행동 전 경량 바텀시트를 띄운다.
   onBrowserApproval: (handler: (req: BrowserApprovalRequestEvent) => void) => {
