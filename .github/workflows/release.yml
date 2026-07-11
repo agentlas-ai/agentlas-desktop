@@ -113,6 +113,11 @@ jobs:
 
       - name: Linux migration and updater continuity gates
         if: runner.os == 'Linux'
+        env:
+          # Hosted Linux has no gnome-keyring/secret-service, so keytar-backed vault
+          # reads (mcp-auto-select) abort with "org.freedesktop.secrets was not
+          # provided". E2E mode uses an in-memory vault and skips keytar entirely.
+          AGENTLAS_E2E: "1"
         run: |
           # Hosted Linux runners need electron's SUID sandbox helper owned by root
           # (mode 4755), otherwise the chromium child aborts with SIGTRAP before any
