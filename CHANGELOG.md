@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.32 — 2026-07-11
+
+### Fixed
+
+- **Automation timeouts distinguish a hang from a long tool.** An idle runner still
+  stops after 480 seconds without events, while a known active tool gets a separate
+  1,200-second silence budget. This keeps genuine hangs visible without aborting a
+  healthy build, render, or browser action merely because the tool emits no interim
+  semantic events.
+- **Closed child pipes no longer crash the Electron main process.** Runtime prompt
+  delivery, Document Studio, T-rex, and the generated Browser MCP launcher now guard
+  early child exit and late stdin/stdout writes, including asynchronous `EPIPE`.
+- **Hub bookmarks stay callable in Chat immediately.** A delayed mount-time bookmark
+  snapshot or transient IPC read failure can no longer erase a bookmark event from
+  the `@` autocomplete list.
+
 ## 0.7.31 — 2026-07-11
 
 ### Fixed
