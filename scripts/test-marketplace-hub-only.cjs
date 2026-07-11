@@ -30,12 +30,14 @@ app.setPath("userData", path.join(tempDir, "user-data"));
 (async () => {
   let exitCode = 0;
   try {
-    const { getSource, getSourceStatus } = require("../dist/electron/marketplace/index.js");
+    const { getSource, refreshSourceStatus } = require("../dist/electron/marketplace/index.js");
     const source = getSource();
-    const firms = await source.listFirms();
-    const bundles = await source.listBundles();
-    const agents = await source.searchAgents("");
-    const status = getSourceStatus();
+    const [firms, bundles, agents, status] = await Promise.all([
+      source.listFirms(),
+      source.listBundles(),
+      source.searchAgents(""),
+      refreshSourceStatus(true),
+    ]);
 
     if (mode === "offline") {
       assert.equal(status.online, false, "offline mode must mark the live Hub source offline");

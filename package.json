@@ -64,6 +64,8 @@
     "test:cloud-agent-restore": "npm run build:electron && node scripts/test-cloud-agent-restore.cjs && electron scripts/test-cloud-agent-registry-restore.cjs",
     "test:marketplace-hub-only": "npm run build:electron && electron scripts/test-marketplace-hub-only.cjs",
     "test:marketplace-cache": "npm run build:electron && electron scripts/test-marketplace-cache.cjs",
+    "test:cli-version-parser": "npm run build:electron && node scripts/test-cli-version-parser.cjs",
+    "test:hephaestus-status-version": "npm run build:electron && electron scripts/test-hephaestus-status-version.cjs",
     "test:mcp-auto-select": "npm run build:electron && electron scripts/test-mcp-auto-select.cjs",
     "test:mcp-secret-isolation": "npm run build:electron && electron scripts/test-mcp-secret-isolation.cjs",
     "test:agent-groups": "npm run build:electron && electron scripts/test-agent-groups.cjs",

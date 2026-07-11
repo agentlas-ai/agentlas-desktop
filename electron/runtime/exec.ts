@@ -142,13 +142,33 @@ export function probeCliVersion(command: string, timeoutMs = 3000): Promise<stri
 
 const versionProbeCache = new Map<string, { at: number; promise: Promise<string | null> }>();
 
+/** 사용자가 명시적으로 전체 재확인을 요청했을 때 CLI 버전 증거도 새로 읽는다. */
+export function clearCliVersionProbeCache(): void {
+  versionProbeCache.clear();
+}
+
+/**
+ * CLI마다 `--version` 형식이 다르다. 예를 들어 Claude는
+ * `2.1.30 (Claude Code)`를 출력하므로 마지막 공백 토큰을 버전으로 취급하면
+ * 대시보드에 `vCode)`가 노출된다. 첫 SemVer 토큰만 정규화하고, 버전 없는
+ * 성공 출력은 호출 가능성 보존을 위해 `unknown`으로 구분한다.
+ */
+export function parseCliVersionOutput(output: string): string | null {
+  // Some CLIs colorize version output even when stdout is piped.
+  const text = output.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "").trim();
+  if (!text) return null;
+  const match = text.match(/(?:^|[^0-9A-Za-z])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=$|[^0-9A-Za-z])/);
+  return match?.[1] ?? null;
+}
+
 function runProbeCliVersion(command: string, timeoutMs: number): Promise<string | null> {
   return new Promise((resolve) => {
     let settled = false;
+    let timer: NodeJS.Timeout | undefined;
     const finish = (v: string | null) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       resolve(v);
     };
 
@@ -164,19 +184,28 @@ function runProbeCliVersion(command: string, timeoutMs: number): Promise<string 
       return;
     }
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       terminateProbeProcess(child);
       finish(null);
     }, timeoutMs);
 
     let out = "";
+    let err = "";
+    const appendBounded = (current: string, chunk: Buffer): string => {
+      if (current.length >= 16_384) return current;
+      return (current + chunk.toString("utf8")).slice(0, 16_384);
+    };
     child.stdout?.on("data", (chunk: Buffer) => {
-      out += chunk.toString("utf8");
+      out = appendBounded(out, chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      err = appendBounded(err, chunk);
     });
     child.on("error", () => finish(null));
     child.on("close", (code) => {
       if (code === 0) {
-        finish(out.trim().split(/\s+/).pop() ?? "unknown");
+        const combined = [out, err].filter((value) => value.trim()).join("\n");
+        finish(parseCliVersionOutput(combined) ?? (combined.trim() ? "unknown" : null));
       } else {
         finish(null);
       }

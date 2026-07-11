@@ -15,6 +15,7 @@ import type {
 
 const DEFAULT_BASE_URL = "https://agentlas.cloud/api/mcp/v1";
 const HUB_CACHE_TTL_MS = 5 * 60_000;
+const HUB_STATUS_FRESH_MS = 5_000;
 
 type TimedCache<T> = { value: T; at: number };
 type PrimaryAttempt<T> = { value: T; cacheable: boolean };
@@ -42,6 +43,22 @@ function setStatus(patch: Partial<MarketplaceSourceStatus>) {
   };
 }
 
+function statusIsFresh(now = Date.now()): boolean {
+  const checked = _status.lastCheckedAt ? Date.parse(_status.lastCheckedAt) : Number.NaN;
+  return Number.isFinite(checked) && now - checked < HUB_STATUS_FRESH_MS;
+}
+
+function resetStatus(baseUrl: string): void {
+  _status = {
+    mode: "mcp",
+    baseUrl,
+    online: false,
+    usingFallback: false,
+    lastError: null,
+    lastCheckedAt: null,
+  };
+}
+
 function publicListings<T extends MarketplaceListing>(listings: T[]): T[] {
   // 원격 소스가 배열이 아닌 응답을 줘도 깨지지 않도록 방어(listings.filter is not a function 방지).
   if (!Array.isArray(listings)) return [];
@@ -64,50 +81,30 @@ class HubOnlySource implements MarketplaceSource {
   private searchCache = new Map<string, TimedCache<MarketplaceListing[]>>();
   private listingCache = new Map<string, TimedCache<(SeedListingFull & MarketplaceListing) | null>>();
   private firmBySlugCache = new Map<string, TimedCache<FirmListing | null>>();
+  private searchInFlight = new Map<string, Promise<MarketplaceListing[]>>();
 
   constructor(
-    private primary: MarketplaceSource,
+    private primary: McpSource,
     private baseUrl: string,
   ) {}
 
   private async tryPrimary<T>(
-    fn: (s: MarketplaceSource) => Promise<T>,
+    fn: (s: McpSource) => Promise<T>,
     method: string,
     offlineValue: T,
   ): Promise<PrimaryAttempt<T>> {
     try {
       const result = await fn(this.primary);
-      setStatus({
-        mode: "mcp",
-        baseUrl: this.baseUrl,
-        online: true,
-        usingFallback: false,
-        lastError: null,
-      });
       return { value: result, cacheable: true };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (err instanceof PartialHubResultError) {
-        setStatus({
-          mode: "mcp",
-          baseUrl: this.baseUrl,
-          online: true,
-          usingFallback: false,
-          lastError: message,
-        });
         console.warn(
           `[marketplace] mcp(${this.baseUrl}) ${method} partially failed; showing live Hub partial result without caching:`,
           message,
         );
         return { value: err.partialValue as T, cacheable: false };
       }
-      setStatus({
-        mode: "mcp",
-        baseUrl: this.baseUrl,
-        online: false,
-        usingFallback: false,
-        lastError: message,
-      });
       console.warn(
         `[marketplace] mcp(${this.baseUrl}) ${method} failed; Hub-only mode returns an empty result:`,
         message,
@@ -137,16 +134,47 @@ class HubOnlySource implements MarketplaceSource {
     const key = q.trim().toLowerCase();
     const cached = cacheFresh(this.searchCache.get(key));
     if (cached) {
-      // 캐시 값은 직전 성공(tryPrimary)에서만 생성되므로 online 상태를 동기화한다 —
-      // 캐시 히트가 status를 갱신하지 않아 마켓 배지가 최대 5분간 stale로 굳는 버그 방지.
-      setStatus({ mode: "mcp", baseUrl: this.baseUrl, online: true, usingFallback: false, lastError: null });
+      // Cached data is useful but is not connectivity evidence. Preserve the
+      // last live check timestamp and mark the catalog as cached once stale.
+      if (!_status.online || !statusIsFresh()) _status = { ..._status, usingFallback: true };
       return Promise.resolve(cached);
     }
-    return this.tryPrimary((s) => s.searchAgents(q), "searchAgents", []).then(({ value, cacheable }) => {
-      const listings = publicListings(value);
-      if (cacheable) this.searchCache.set(key, { value: listings, at: Date.now() });
+    return this.startSearch(q);
+  }
+
+  private startSearch(q: string): Promise<MarketplaceListing[]> {
+    const key = q.trim().toLowerCase();
+    const existing = this.searchInFlight.get(key);
+    if (existing) return existing;
+    let request!: Promise<MarketplaceListing[]>;
+    request = this.tryPrimary(
+      (source) => source.searchAgents(q),
+      "searchAgents",
+      [],
+    ).then((attempt) => {
+      const listings = publicListings(attempt.value);
+      if (attempt.cacheable) this.searchCache.set(key, { value: listings, at: Date.now() });
       return listings;
+    }).finally(() => {
+      if (this.searchInFlight.get(key) === request) this.searchInFlight.delete(key);
     });
+    this.searchInFlight.set(key, request);
+    return request;
+  }
+
+  async refreshCatalogStatus(force: boolean): Promise<MarketplaceSourceStatus> {
+    if (!force && statusIsFresh()) return _status;
+    const configuredTimeout = Number(process.env.AGENTLAS_HUB_STATUS_TIMEOUT_MS ?? 5_000);
+    const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 5_000;
+    const probe = await this.primary.probePublicCatalog(timeoutMs);
+    setStatus({
+      mode: "mcp",
+      baseUrl: this.baseUrl,
+      online: probe.online,
+      usingFallback: false,
+      lastError: probe.error,
+    });
+    return _status;
   }
   getListingBySlug(slug: string): Promise<(SeedListingFull & MarketplaceListing) | null> {
     if (!isPublicDesktopAgent({ slug })) return Promise.resolve(null);
@@ -169,6 +197,8 @@ class HubOnlySource implements MarketplaceSource {
 }
 
 let _source: MarketplaceSource | null = null;
+let _hubSource: HubOnlySource | null = null;
+let _statusRefreshInFlight: Promise<MarketplaceSourceStatus> | null = null;
 // cargo.*(내 에이전트)는 인증 필수 + in-memory 폴백 금지 → raw McpSource를 따로 들고 있는다.
 let _cargoSource: McpSource | null = null;
 let _myAgentsCache: TimedCache<{ cookie: string | null; agents: MarketplaceListing[] }> | null = null;
@@ -207,18 +237,28 @@ export function getSource(): MarketplaceSource {
     cookieProvider: () => getSessionCookieHeader(),
   });
   _cargoSource = mcp;
-  setStatus({
-    mode: "mcp",
-    baseUrl,
-    online: false,
-    usingFallback: false,
-    lastError: null,
-  });
-  _source = new HubOnlySource(mcp, baseUrl);
+  resetStatus(baseUrl);
+  _hubSource = new HubOnlySource(mcp, baseUrl);
+  _source = _hubSource;
   return _source;
 }
 
 export function getSourceStatus(): MarketplaceSourceStatus {
   getSource();
   return _status;
+}
+
+/**
+ * Status is live evidence, not the default pre-probe value or a cached catalog
+ * read. Concurrent dashboard/status callers share one bounded probe.
+ */
+export function refreshSourceStatus(force = false): Promise<MarketplaceSourceStatus> {
+  getSource();
+  if (!force && statusIsFresh()) return Promise.resolve(_status);
+  if (_statusRefreshInFlight) return _statusRefreshInFlight;
+  _statusRefreshInFlight = (_hubSource?.refreshCatalogStatus(force) ?? Promise.resolve(_status))
+    .finally(() => {
+      _statusRefreshInFlight = null;
+    });
+  return _statusRefreshInFlight;
 }

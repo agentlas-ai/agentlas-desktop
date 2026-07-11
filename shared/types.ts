@@ -3086,6 +3086,7 @@ export interface HephaestusStatus {
   root: string | null;
   python: string | null;
   version: string | null;
+  pythonVersion: string | null;
 }
 /** 엔진 CLI 명령 결과(JSON 출력 + 원시 stdout/stderr). */
 export interface HephaestusCommandResult<T = unknown> {
@@ -3711,7 +3712,7 @@ export interface AgentlasIpc {
     revealRecoveryBackup: () => Promise<UpdaterActionResult>;
   };
   runtime: {
-    detect: () => Promise<RuntimeStatus[]>;
+    detect: (force?: boolean) => Promise<RuntimeStatus[]>;
     setActive: (selection: RuntimeSelection) => Promise<RuntimeStatus[]>;
     /** CLI 미설치 사용자용 — 고정 명령으로 `npm i -g <pkg>` 실행. 성공 후 detect()로 재인식. */
     installCli: (
@@ -3857,7 +3858,7 @@ export interface AgentlasIpc {
     listBundles: () => Promise<TeamBundle[]>;
     search: (q: string) => Promise<MarketplaceListing[]>;
     listFirms: () => Promise<FirmListing[]>;
-    status: () => Promise<MarketplaceSourceStatus>;
+    status: (force?: boolean) => Promise<MarketplaceSourceStatus>;
     /** 로그인 사용자의 실제 복원 가능한 Agent Cloud 패키지 목록. 미로그인/오프라인이면 [] */
     listMine: () => Promise<MarketplaceListing[]>;
     bookmarks: () => Promise<HubAgentBookmark[]>;

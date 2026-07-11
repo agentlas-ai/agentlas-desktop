@@ -16,6 +16,7 @@ import type {
 } from "../../shared/types";
 import { byokModels, cliModels, defaultByokModel } from "../../shared/models";
 import { recallRuntimeSelection, rememberRuntimeSelection } from "./selection-memory";
+import { clearCliVersionProbeCache } from "./exec";
 
 type ActiveRuntimeRow = {
   kind: RuntimeKind;
@@ -158,8 +159,12 @@ function saveActiveRuntime(status: RuntimeStatus | RuntimeSelection): void {
  * 모든 런타임을 병렬로 감지. 메인 프로세스에서만 호출.
  * - 로컬 CLI 3종 + BYOK API 키 3종 = 최대 6개 후보 반환
  */
-export async function detectRuntimes(): Promise<RuntimeStatus[]> {
+export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
   if (process.env.AGENTLAS_DISABLE_RUNTIME_PROBES === "1") return [];
+  if (force) {
+    clearDetectCache();
+    clearCliVersionProbeCache();
+  }
   const now = Date.now();
   if (detectCache && now - detectCache.at < runtimeDetectCacheMs()) {
     return cloneRuntimeStatuses(detectCache.list);

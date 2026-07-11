@@ -66,6 +66,11 @@ interface McpSourceOptions {
   cookieProvider?: () => string | null;
 }
 
+export interface HubCatalogProbeResult {
+  online: boolean;
+  error: string | null;
+}
+
 /** 원격 result를 배열로 정규화. 서버가 배열을 직접 주거나 {agents|firms|bundles|listings|items|results:[...]}
  *  로 감싸 주거나, 단일 객체를 줄 수 있다. 어떤 경우든 caller(.filter 등)가 깨지지 않도록 배열로 만든다. */
 function asArray<T>(raw: unknown, ...keys: string[]): T[] {
@@ -547,9 +552,27 @@ function matchesQuery(listing: MarketplaceListing, q: string): boolean {
     .includes(needle);
 }
 
+function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Hub catalog probe timed out after ${timeoutMs}ms`)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 export class McpSource implements MarketplaceSource {
   private publicAgentCache: { fetchedAt: number; listings: MarketplaceListing[] } | null = null;
   private publicPluginCache: { fetchedAt: number; listings: MarketplaceListing[] } | null = null;
+  private publicAgentInFlight: Promise<MarketplaceListing[]> | null = null;
+  private publicPluginInFlight: Promise<MarketplaceListing[]> | null = null;
 
   constructor(private opts: McpSourceOptions) {}
 
@@ -578,12 +601,22 @@ export class McpSource implements MarketplaceSource {
     }
   }
 
-  private async listPublicHubAgents(): Promise<MarketplaceListing[]> {
+  private listPublicHubAgents(force = false): Promise<MarketplaceListing[]> {
     const now = Date.now();
-    if (this.publicAgentCache && now - this.publicAgentCache.fetchedAt < PUBLIC_AGENT_CACHE_MS) {
-      return this.publicAgentCache.listings;
+    if (!force && this.publicAgentCache && now - this.publicAgentCache.fetchedAt < PUBLIC_AGENT_CACHE_MS) {
+      return Promise.resolve(this.publicAgentCache.listings);
     }
+    if (this.publicAgentInFlight) return this.publicAgentInFlight;
 
+    let request!: Promise<MarketplaceListing[]>;
+    request = this.fetchPublicHubAgents(now).finally(() => {
+      if (this.publicAgentInFlight === request) this.publicAgentInFlight = null;
+    });
+    this.publicAgentInFlight = request;
+    return request;
+  }
+
+  private async fetchPublicHubAgents(fetchedAt: number): Promise<MarketplaceListing[]> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.opts.timeoutMs ?? 15000);
     const url = this.opts.publicAgentsUrl || publicAgentsUrlFor(this.opts.baseUrl);
@@ -595,7 +628,7 @@ export class McpSource implements MarketplaceSource {
       if (!resp.ok) {
         if (resp.status === 404 && !this.opts.publicAgentsUrl) {
           const listings = await this.listMarketplacePageAgents(ctrl.signal);
-          this.publicAgentCache = { fetchedAt: now, listings };
+          this.publicAgentCache = { fetchedAt, listings };
           return listings;
         }
         throw new Error(`public marketplace agents ${resp.status}`);
@@ -603,7 +636,7 @@ export class McpSource implements MarketplaceSource {
       const json = (await resp.json()) as unknown;
       const rawAgents = asArray<Record<string, unknown>>(json, "agents", "listings");
       const listings = liveHubListings(rawAgents.map(marketPublicAgentToListing).filter((item): item is MarketplaceListing => Boolean(item)));
-      this.publicAgentCache = { fetchedAt: now, listings };
+      this.publicAgentCache = { fetchedAt, listings };
       return listings;
     } finally {
       clearTimeout(timer);
@@ -623,12 +656,22 @@ export class McpSource implements MarketplaceSource {
     return listings;
   }
 
-  private async listPublicHubPlugins(): Promise<MarketplaceListing[]> {
+  private listPublicHubPlugins(force = false): Promise<MarketplaceListing[]> {
     const now = Date.now();
-    if (this.publicPluginCache && now - this.publicPluginCache.fetchedAt < PUBLIC_AGENT_CACHE_MS) {
-      return this.publicPluginCache.listings;
+    if (!force && this.publicPluginCache && now - this.publicPluginCache.fetchedAt < PUBLIC_AGENT_CACHE_MS) {
+      return Promise.resolve(this.publicPluginCache.listings);
     }
+    if (this.publicPluginInFlight) return this.publicPluginInFlight;
 
+    let request!: Promise<MarketplaceListing[]>;
+    request = this.fetchPublicHubPlugins(now).finally(() => {
+      if (this.publicPluginInFlight === request) this.publicPluginInFlight = null;
+    });
+    this.publicPluginInFlight = request;
+    return request;
+  }
+
+  private async fetchPublicHubPlugins(fetchedAt: number): Promise<MarketplaceListing[]> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.opts.timeoutMs ?? 15000);
     const url = this.opts.publicPluginsUrl || publicPluginsUrlFor(this.opts.baseUrl);
@@ -641,7 +684,7 @@ export class McpSource implements MarketplaceSource {
       const json = (await resp.json()) as unknown;
       const rawPlugins = asArray<Record<string, unknown>>(json, "plugins", "items", "listings");
       const listings = normalizeListings(rawPlugins.map(marketPublicPluginToListing).filter((item): item is MarketplaceListing => Boolean(item)));
-      this.publicPluginCache = { fetchedAt: now, listings };
+      this.publicPluginCache = { fetchedAt, listings };
       return listings;
     } finally {
       clearTimeout(timer);
@@ -678,6 +721,29 @@ export class McpSource implements MarketplaceSource {
       throw new Error(`public marketplace unavailable: ${errors.join("; ")}`);
     }
     return filtered;
+  }
+
+  /**
+   * Force a real public-catalog read. Unlike `searchAgents`, callers use this
+   * only as connectivity evidence; the returned state never comes from cache.
+   * Endpoint-level single-flight still lets a simultaneous Dashboard search
+   * share the same network requests.
+   */
+  async probePublicCatalog(timeoutMs = 5_000): Promise<HubCatalogProbeResult> {
+    const results = await Promise.allSettled([
+      settleWithin(this.listPublicHubAgents(true), timeoutMs),
+      settleWithin(this.listPublicHubPlugins(true), timeoutMs),
+    ]);
+    const errors = results
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => (result.reason instanceof Error ? result.reason.message : String(result.reason)));
+    const online = results.some((result) => result.status === "fulfilled");
+    return {
+      online,
+      error: errors.length > 0
+        ? `public marketplace ${online ? "partial failure" : "unavailable"}: ${errors.join("; ")}`
+        : null,
+    };
   }
 
   /** 허브 에이전트 검색 — MCP marketplace.search_agents.

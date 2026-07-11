@@ -151,7 +151,7 @@ const api: AgentlasIpc = {
     revealRecoveryBackup: () => ipcRenderer.invoke("updater:revealRecoveryBackup"),
   },
   runtime: {
-    detect: () => ipcRenderer.invoke("runtime:detect"),
+    detect: (force?: boolean) => ipcRenderer.invoke("runtime:detect", force === true),
     setActive: (selection: RuntimeSelection) =>
       ipcRenderer.invoke("runtime:setActive", selection),
     installCli: (kind: "claude-code" | "codex" | "gemini" | "grok") =>
@@ -270,7 +270,7 @@ const api: AgentlasIpc = {
     listBundles: () => ipcRenderer.invoke("marketplace:listBundles"),
     search: (q: string) => ipcRenderer.invoke("marketplace:search", q),
     listFirms: () => ipcRenderer.invoke("marketplace:listFirms"),
-    status: () => ipcRenderer.invoke("marketplace:status"),
+    status: (force?: boolean) => ipcRenderer.invoke("marketplace:status", force === true),
     listMine: () => ipcRenderer.invoke("marketplace:listMine"),
     bookmarks: () => ipcRenderer.invoke("marketplace:bookmarks"),
     syncBookmarks: () => ipcRenderer.invoke("marketplace:bookmarksSync"),

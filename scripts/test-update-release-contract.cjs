@@ -130,6 +130,23 @@ assert.doesNotMatch(
   /chown root:root node_modules\/electron\/dist\/chrome-sandbox/,
   "Linux setup must not assume the pre-Electron-43 sandbox path",
 );
+for (const requiredGate of [
+  "npm run test:cli-version-parser",
+  "npm run test:hephaestus-status-version",
+  "npm run test:marketplace-cache",
+]) {
+  assert.match(
+    linuxContinuityStep.run,
+    new RegExp(requiredGate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    `Linux release must run ${requiredGate} before publishing`,
+  );
+}
+const windowsParserStep = workflowSteps(crossWorkflow).find(
+  (step) => step.name === "Windows runtime version parser gate",
+);
+assert.ok(windowsParserStep, "Windows release must retain the cross-platform CLI version parser gate");
+assert.equal(windowsParserStep.if, "runner.os == 'Windows'");
+assert.equal(windowsParserStep.run, "npm run test:cli-version-parser");
 const crossVerifyStep = workflowSteps(crossWorkflow).find((step) => step.name === "Verify tag matches package.json version");
 const signedResolveStep = workflowSteps(signedWorkflow).find((step) => step.name === "Resolve release inputs");
 for (const [name, step] of [["release.yml", crossVerifyStep], ["release-signed-mac.yml", signedResolveStep]]) {
@@ -207,6 +224,9 @@ assert.ok(
 const signedRegressionRun = stepNamed("Runtime, browser, and renderer UI regression gates").run;
 for (const requiredGate of [
   "npm run test:automations-store",
+  "npm run test:cli-version-parser",
+  "npm run test:hephaestus-status-version",
+  "npm run test:marketplace-cache",
   "npm run test:independent-terminal-boundary",
   "npm run test:grok-runtime-contract",
   "npm run test:grok-auth-source",
@@ -223,6 +243,19 @@ for (const requiredGate of [
   "npm run test:all-routes-ui",
 ]) {
   assert.match(signedRegressionRun, new RegExp(requiredGate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+}
+
+const afterPackSource = fs.readFileSync(path.join(root, "build-resources", "after-pack-clean.cjs"), "utf8");
+assert.match(afterPackSource, /packagedRoot[\s\S]*?Hephaestus/);
+assert.match(afterPackSource, /packagedManifest\.version !== sourceManifest\.version/);
+assert.match(afterPackSource, /agentlas_cloud[\s\S]*?__main__\.py/);
+for (const configName of ["electron-builder.yml", "electron-builder.mac-stable.yml"]) {
+  const config = yaml.load(fs.readFileSync(path.join(root, configName), "utf8"));
+  assert.equal(
+    config.afterPack,
+    "build-resources/after-pack-clean.cjs",
+    `${configName} must run the embedded Agentlas OS gate before publish`,
+  );
 }
 
 const publishStep = crossPlatformWorkflow.slice(crossPlatformWorkflow.indexOf("- name: Package and publish"));

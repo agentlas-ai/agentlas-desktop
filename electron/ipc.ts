@@ -77,8 +77,8 @@ import {
 import { statusAllServers, testServerById } from "./mcp-tools/client";
 import {
   getSource as getMarketSource,
-  getSourceStatus as getMarketSourceStatus,
   listMyAgentsCached,
+  refreshSourceStatus as refreshMarketSourceStatus,
 } from "./marketplace";
 import {
   getFirm,
@@ -1252,7 +1252,7 @@ export function registerIpcHandlers(): void {
   });
 
   // ── runtime ─────────────────────────────────────────────
-  ipcMain.handle("runtime:detect", () => detectRuntimes());
+  ipcMain.handle("runtime:detect", (_e, force?: boolean) => detectRuntimes(force === true));
   ipcMain.handle("runtime:setActive", (_e, selection: RuntimeSelection) =>
     setActiveRuntime(selection),
   );
@@ -1535,7 +1535,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("marketplace:listBundles", () => getMarketSource().listBundles());
   ipcMain.handle("marketplace:search", (_e, q: string) => getMarketSource().searchAgents(q));
   ipcMain.handle("marketplace:listFirms", () => getMarketSource().listFirms());
-  ipcMain.handle("marketplace:status", () => getMarketSourceStatus());
+  ipcMain.handle("marketplace:status", (_e, force?: boolean) => refreshMarketSourceStatus(force === true));
   ipcMain.handle("marketplace:bookmarks", () => listHubAgentBookmarks());
   ipcMain.handle("marketplace:bookmarksSync", () => syncHubBookmarks({ rerunIfBusy: true }));
   ipcMain.handle("marketplace:bookmarkAdd", (_e, listing) => {
