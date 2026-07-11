@@ -22,7 +22,7 @@
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
     "targetSchemaVersion": 53,
-    "bundledRuntimeVersion": "1.1.15"
+    "bundledRuntimeVersion": "1.1.16"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
