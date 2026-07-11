@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.40 — 2026-07-12
+
+### Fixed
+
+- **Cross-platform release gates follow Electron 43's install contract.** Linux
+  CI installs the lazy Electron platform binary before configuring the SUID
+  sandbox helper, and fails closed instead of bypassing Chromium's sandbox.
+- **Startup Studio UI QA is locale-independent.** The new-idea handoff is
+  verified on clean English CI runners as well as Korean dogfood machines.
+
 ## 0.7.39 — 2026-07-11
 
 ### Added

@@ -109,15 +109,21 @@ const linuxContinuityStep = workflowSteps(crossWorkflow).find(
   (step) => step.name === "Linux migration and updater continuity gates",
 );
 assert.ok(linuxContinuityStep, "cross-platform release must retain the Linux continuity gates");
-assert.match(
-  linuxContinuityStep.run,
-  /find node_modules\/electron -maxdepth 4 -name chrome-sandbox -print -quit/,
-  "Linux setup must discover Electron's optional SUID helper across package layouts",
+const linuxElectronInstallIndex = linuxContinuityStep.run.indexOf("node node_modules/electron/install.js");
+const linuxSandboxFindIndex = linuxContinuityStep.run.indexOf("find node_modules/electron -maxdepth 4 -name chrome-sandbox");
+assert.ok(
+  linuxElectronInstallIndex >= 0 && linuxSandboxFindIndex > linuxElectronInstallIndex,
+  "Linux setup must install Electron's lazy platform binary before looking for its SUID helper",
 );
 assert.match(
   linuxContinuityStep.run,
-  /if \[ -n "\$sandbox_path" \]; then[\s\S]*?chown root:root "\$sandbox_path"/,
-  "Linux setup must only change SUID helper ownership when the helper exists",
+  /find node_modules\/electron -maxdepth 4 -name chrome-sandbox -print -quit/,
+  "Linux setup must discover Electron's SUID helper across package layouts",
+);
+assert.match(
+  linuxContinuityStep.run,
+  /if \[ -z "\$sandbox_path" \]; then[\s\S]*?exit 1[\s\S]*?chown root:root "\$sandbox_path"/,
+  "Linux setup must fail closed when the installed binary lacks its helper, then configure the discovered helper",
 );
 assert.doesNotMatch(
   linuxContinuityStep.run,

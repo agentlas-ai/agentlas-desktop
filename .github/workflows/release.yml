@@ -122,17 +122,18 @@ jobs:
           # provided". E2E mode uses an in-memory vault and skips keytar entirely.
           AGENTLAS_E2E: "1"
         run: |
-          # Older Electron Linux bundles require a root-owned SUID helper. Newer
-          # package layouts may omit it and use the runner's namespace sandbox,
-          # so discover the helper instead of failing on one hard-coded path.
+          # Electron 43 downloads its platform binary lazily. Install it before
+          # locating the Linux SUID helper, otherwise the first test downloads an
+          # unconfigured helper and Chromium aborts with SIGTRAP.
+          node node_modules/electron/install.js
           sandbox_path="$(find node_modules/electron -maxdepth 4 -name chrome-sandbox -print -quit)"
-          if [ -n "$sandbox_path" ]; then
-            sudo chown root:root "$sandbox_path"
-            sudo chmod 4755 "$sandbox_path"
-            echo "Configured Electron SUID sandbox helper: $sandbox_path"
-          else
-            echo "::notice::Electron package has no chrome-sandbox helper; using the platform namespace sandbox."
+          if [ -z "$sandbox_path" ]; then
+            echo "::error::Electron Linux binary installed without the required chrome-sandbox helper."
+            exit 1
           fi
+          sudo chown root:root "$sandbox_path"
+          sudo chmod 4755 "$sandbox_path"
+          echo "Configured Electron SUID sandbox helper: $sandbox_path"
           # Run the electron gates inside a real X (xvfb) AND a session bus
           # (dbus-run-session). Without a session bus, electron reads
           # DBUS_SESSION_BUS_ADDRESS=disabled and aborts with

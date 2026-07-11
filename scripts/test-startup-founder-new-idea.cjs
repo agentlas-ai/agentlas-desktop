@@ -67,13 +67,16 @@ fs.writeFileSync(next, JSON.stringify(doc, null, 2));
     await page.waitForFunction(() => Boolean(window.agentlas));
     await page.evaluate(async () => {
       localStorage.setItem("agentlas.onboarded", "1");
+      localStorage.setItem("agentlas.locale", "ko");
       await window.agentlas.menu.setLocale("ko");
       window.location.href = "/startup-founder-studio";
     });
     await page.waitForFunction(() => location.pathname === "/startup-founder-studio");
-    await page.getByRole("button", { name: "새 아이디어" }).click();
-    await page.getByPlaceholder("창업 아이디어 한 줄").fill(IDEA);
-    await page.getByRole("button", { name: "시작", exact: true }).click();
+    // GitHub macOS runners boot in English, while local dogfood machines may
+    // boot in Korean. The workflow is identical in both locales.
+    await page.getByRole("button", { name: /^(새 아이디어|New Idea)$/ }).click();
+    await page.getByPlaceholder(/^(창업 아이디어 한 줄|Describe your startup idea in one line)$/).fill(IDEA);
+    await page.getByRole("button", { name: /^(시작|Start)$/ }).click();
 
     const requestPath = path.join(USER_DATA, "startup-studio", ".studio-runtime", "requests.jsonl");
     await poll(async () => {
