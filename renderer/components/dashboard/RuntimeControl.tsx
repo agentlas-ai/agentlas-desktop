@@ -36,8 +36,9 @@ function runtimeLabel(runtime: RuntimeStatus): string {
 function runtimeSubLabel(runtime: RuntimeStatus, ko: boolean): string {
   const model = runtime.model?.trim();
   const effort = runtime.effort?.trim();
+  const version = runtime.version && runtime.version !== "unknown" ? runtime.version : "";
   return [
-    runtime.version ? `v${runtime.version}` : runtime.source,
+    version ? `v${version}` : runtime.source,
     model || (runtime.kind === "byok" || runtime.kind === "ollama" ? "" : ko ? "구독 기본" : "subscription default"),
     effort ? `effort ${effort}` : "",
   ].filter(Boolean).join(" · ");

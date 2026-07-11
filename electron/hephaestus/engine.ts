@@ -417,7 +417,39 @@ export interface HephaestusAvailability {
   reason?: string;
   root: string | null;
   python: string | null;
+  /** Agentlas OS / Hephaestus package version from active runtime metadata. */
   version: string | null;
+  /** Interpreter version is diagnostic metadata, not the Agentlas OS version. */
+  pythonVersion: string | null;
+}
+
+function normalizeHephaestusVersion(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const match = value.trim().match(/^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$/);
+  return match?.[1] ?? null;
+}
+
+export function readHephaestusVersion(root: string | null): string | null {
+  if (!root) return null;
+  // Managed installs (`~/.agentlas/runtime/current`) expose RELEASE as their
+  // canonical version marker, while bundled Desktop resources expose a
+  // manifest. Keep package.json as a development-tree fallback only.
+  try {
+    const release = normalizeHephaestusVersion(fs.readFileSync(path.join(root, "RELEASE"), "utf8"));
+    if (release) return release;
+  } catch {
+    // Fall through to bundled/development metadata.
+  }
+  for (const fileName of ["manifest.json", "package.json"]) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(root, fileName), "utf8")) as { version?: unknown };
+      const version = normalizeHephaestusVersion(parsed.version);
+      if (version) return version;
+    } catch {
+      // Try the next canonical version file.
+    }
+  }
+  return null;
 }
 
 /** 엔진 가용성(번들 존재 + python) 확인. UI 게이트/설정 표시에 사용. */
@@ -425,13 +457,14 @@ export async function hephaestusAvailable(locale: "ko" | "en" = "ko"): Promise<H
   const ko = locale === "ko";
   const root = hephaestusRoot();
   if (!root) {
-    return { available: false, reason: ko ? "엔진 번들 없음" : "Engine bundle not found", root: null, python: null, version: null };
+    return { available: false, reason: ko ? "Agentlas OS 엔진 없음" : "Agentlas OS engine not found", root: null, python: null, version: null, pythonVersion: null };
   }
+  const version = readHephaestusVersion(root);
   const py = await resolveHephaestusPython();
   if (!py) {
-    return { available: false, reason: ko ? "Python 3.9+ 없음" : "Python 3.9+ not found", root, python: null, version: null };
+    return { available: false, reason: ko ? "Python 3.9+ 없음" : "Python 3.9+ not found", root, python: null, version, pythonVersion: null };
   }
-  return { available: true, root, python: py.python, version: py.version };
+  return { available: true, root, python: py.python, version, pythonVersion: py.version };
 }
 
 /** `doctor` — 엔진 자가진단(JSON). warn 상태도 동작 가능으로 본다. */

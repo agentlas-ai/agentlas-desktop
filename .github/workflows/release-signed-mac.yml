@@ -173,6 +173,9 @@ jobs:
           npm run test:updater-production
           npm run test:automations-store
           npm run test:runtime-stdin-epipe
+          npm run test:cli-version-parser
+          npm run test:hephaestus-status-version
+          npm run test:marketplace-cache
           npm run test:borrowed-task-force
           npm run test:mcp-auto-select
           npm run test:mcp-secret-isolation

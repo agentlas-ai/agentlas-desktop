@@ -50,38 +50,47 @@ function setupReadinessBridge(payload) {
   setupBase(payload.baseOptions);
   const calls = [];
   const scenario = payload.scenario;
+  const healthy = scenario !== "blocked";
   let authReads = 0;
   window.__runtimeReadiness = { calls };
   window.agentlas.app.getVersion = async () => "0.7.33";
   window.agentlas.auth.getSession = async () => {
     authReads += 1;
-    if (scenario === "ready" || authReads === 1) {
+    if (healthy || authReads === 1) {
       return { signedIn: true, email: "owner@example.com", workspaceId: "workspace-1" };
     }
     // AuthGate admits the shell with the first session read. A later expired
     // session must degrade only the account row instead of hiding the panel.
     return { signedIn: false };
   };
-  window.agentlas.runtime.detect = async () => [
-    { kind: "codex", backend: "openai", source: "/usr/local/bin/codex", version: "1.2.3", active: true },
-  ];
-  window.agentlas.hephaestus.status = async () => scenario === "ready"
-    ? { available: true, root: "/mock/agentlas-os", python: "/usr/bin/python3", version: "1.1.12" }
-    : { available: false, root: null, python: null, version: null, reason: "engine unavailable" };
+  window.agentlas.runtime.detect = async (force) => {
+    calls.push(`runtime.detect:${force === true}`);
+    return [
+      { kind: "codex", backend: "openai", source: "/usr/local/bin/codex", version: "1.2.3", active: true },
+    ];
+  };
+  window.agentlas.hephaestus.status = async () => healthy
+    ? { available: true, root: "/mock/agentlas-os", python: "/usr/bin/python3", version: "1.1.14", pythonVersion: "3.14.2" }
+    : { available: false, root: null, python: null, version: null, pythonVersion: null, reason: "engine unavailable" };
   window.agentlas.hephaestus.doctor = async () => {
     calls.push("doctor");
-    return { ok: scenario === "ready", exitCode: scenario === "ready" ? 0 : 1, json: {}, stdout: "", stderr: "" };
+    return { ok: healthy, exitCode: healthy ? 0 : 1, json: {}, stdout: "", stderr: "" };
   };
-  window.agentlas.marketplace.status = async () => scenario === "ready"
-    ? { mode: "mcp", baseUrl: "mock://hub", online: true, usingFallback: false, lastError: null, lastCheckedAt: new Date().toISOString() }
-    : { mode: "mcp", baseUrl: "mock://hub", online: false, usingFallback: false, lastError: "offline", lastCheckedAt: new Date().toISOString() };
-  window.agentlas.mcpTools.listInstalled = async () => scenario === "ready"
+  window.agentlas.marketplace.status = async (force) => {
+    calls.push(`marketplace.status:${force === true}`);
+    return healthy
+      ? scenario === "partial"
+        ? { mode: "mcp", baseUrl: "mock://hub", online: true, usingFallback: false, lastError: "plugins unavailable", lastCheckedAt: new Date().toISOString() }
+        : { mode: "mcp", baseUrl: "mock://hub", online: true, usingFallback: false, lastError: null, lastCheckedAt: new Date().toISOString() }
+      : { mode: "mcp", baseUrl: "mock://hub", online: false, usingFallback: false, lastError: "offline", lastCheckedAt: new Date().toISOString() };
+  };
+  window.agentlas.mcpTools.listInstalled = async () => healthy
     ? [{ id: "mcp-1", catalogId: "browser", name: "Browser", nameEn: "Browser", transport: "stdio", command: "node", args: [], url: null, envKeys: [], enabled: true, installedAt: new Date().toISOString() }]
     : [{ id: "mcp-1", catalogId: "browser", name: "Browser", nameEn: "Browser", transport: "stdio", command: "node", args: [], url: null, envKeys: [], enabled: true, installedAt: new Date().toISOString() }];
-  window.agentlas.mcpTools.status = async () => scenario === "ready"
+  window.agentlas.mcpTools.status = async () => healthy
     ? [{ id: "mcp-1", connected: true, tools: [{ name: "browser" }], error: null, missingEnv: [], checkedAt: new Date().toISOString() }]
     : [{ id: "mcp-1", connected: false, tools: [], error: "credential missing", missingEnv: ["BROWSER_TOKEN"], checkedAt: new Date().toISOString() }];
-  const updateState = scenario === "ready"
+  const updateState = healthy
     ? { status: "not-available", lastCheckedAt: Date.now() }
     : { status: "recovery-required", version: "0.7.33", code: "continuity-violation", recoveryBackupAvailable: true, error: "recovery check needed" };
   window.agentlas.updater.getState = async () => updateState;
@@ -139,6 +148,12 @@ async function main() {
     );
     const readyPanel = readyPage.locator(".dashboard-readiness");
     await readyPanel.locator('[data-readiness-overall="ready"]').waitFor({ timeout: 10000 });
+    await readyPanel.locator('[data-readiness-id="agentlas-os"]').getByText(/v1\.1\.14/).waitFor();
+    assert.equal(
+      await readyPanel.locator('[data-readiness-id="agentlas-os"]').getByText(/v3\.14\.2/).count(),
+      0,
+      "Python interpreter version must not be presented as the Agentlas OS version",
+    );
     assert.equal(
       await readyPage.evaluate(() => {
         const llm = document.querySelector('[data-tour-id="dashboard.llm"]');
@@ -165,10 +180,27 @@ async function main() {
     assert.equal(await readyPanel.locator("[data-readiness-id]").count(), 6);
     assert.equal(await readyPanel.locator('[data-readiness-status="blocked"]').count(), 0);
     await readyPanel.getByRole("button", { name: /런타임 전체 다시 확인|Run all readiness checks again/ }).click();
-    await readyPage.waitForFunction(() => window.__runtimeReadiness.calls.includes("doctor") && window.__runtimeReadiness.calls.includes("updater.check"));
+    await readyPage.waitForFunction(() => (
+      window.__runtimeReadiness.calls.includes("doctor")
+      && window.__runtimeReadiness.calls.includes("updater.check")
+      && window.__runtimeReadiness.calls.includes("runtime.detect:true")
+      && window.__runtimeReadiness.calls.includes("marketplace.status:true")
+    ));
     await readyPanel.getByText(/자가진단 통과|Self-check passed/).waitFor();
     await readyPage.screenshot({ path: path.join(outDir, "ready.png"), fullPage: true });
     await readyContext.close();
+
+    const partialContext = await newScenario(browser, setupSource, "partial");
+    const partialPage = await partialContext.newPage();
+    partialPage.setDefaultTimeout(8000);
+    watch(partialPage);
+    await partialPage.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
+    const partialPanel = partialPage.locator(".dashboard-readiness");
+    await partialPanel.locator('[data-readiness-overall="attention"]').waitFor({ timeout: 10000 });
+    await partialPanel.locator('[data-readiness-id="hub"][data-readiness-status="attention"]').waitFor();
+    await partialPanel.getByText(/Hub 카탈로그 일부만 확인됐습니다|Only part of the Hub catalog was verified/).waitFor();
+    await partialPage.screenshot({ path: path.join(outDir, "partial.png"), fullPage: true });
+    await partialContext.close();
 
     const blockedContext = await newScenario(browser, setupSource, "blocked");
     const blockedPage = await blockedContext.newPage();

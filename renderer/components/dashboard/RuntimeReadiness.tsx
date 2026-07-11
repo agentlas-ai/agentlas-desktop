@@ -34,9 +34,26 @@ const BLOCKING_UPDATER_STATES = new Set<UpdaterState["status"]>([
   "incompatible",
   "recovery-required",
 ]);
+const HUB_READINESS_TIMEOUT_MS = 6_000;
 
 function fulfilled<T>(result: PromiseSettledResult<T>): T | null {
   return result.status === "fulfilled" ? result.value : null;
+}
+
+function within<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`readiness check timed out after ${timeoutMs}ms`)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function activeRuntimeLabel(runtimes: RuntimeStatus[], ko: boolean): string {
@@ -51,7 +68,8 @@ function activeRuntimeLabel(runtimes: RuntimeStatus[], ko: boolean): string {
     ollama: "Ollama",
   };
   const model = active.model?.trim();
-  const detail = model || active.version || active.source;
+  const version = active.version && active.version !== "unknown" ? active.version : "";
+  const detail = model || version || active.source;
   return [labels[active.kind] ?? active.kind, detail].filter(Boolean).join(" · ");
 }
 
@@ -136,9 +154,9 @@ export function RuntimeReadiness() {
     const [versionResult, sessionResult, runtimeResult, engineResult, hubResult, installedResult, pluginResult, updaterResult] = await Promise.allSettled([
       api.app.getVersion(),
       api.auth.getSession(),
-      api.runtime.detect(),
+      api.runtime.detect(deep),
       api.hephaestus.status(locale),
-      api.marketplace.status(),
+      within(api.marketplace.status(deep), HUB_READINESS_TIMEOUT_MS),
       api.mcpTools.listInstalled(),
       api.mcpTools.status(),
       deep ? api.updater.check() : api.updater.getState(),
@@ -182,19 +200,21 @@ export function RuntimeReadiness() {
             ? (doctor?.ok
               ? (ko ? `자가진단 통과${engine.version ? ` · v${engine.version}` : ""}` : `Self-check passed${engine.version ? ` · v${engine.version}` : ""}`)
               : (ko ? "엔진은 있지만 자가진단을 통과하지 못했습니다." : "The engine exists but did not pass its self-check."))
-            : (ko ? `내장 엔진 사용 가능${engine.version ? ` · v${engine.version}` : ""}` : `Embedded engine available${engine.version ? ` · v${engine.version}` : ""}`))
-          : (engine?.reason || (ko ? "내장 Agentlas OS를 찾지 못했습니다." : "Embedded Agentlas OS was not found.")),
+            : (ko ? `Agentlas OS 엔진 사용 가능${engine.version ? ` · v${engine.version}` : ""}` : `Agentlas OS engine available${engine.version ? ` · v${engine.version}` : ""}`))
+          : (engine?.reason || (ko ? "Agentlas OS 엔진을 찾지 못했습니다." : "Agentlas OS engine was not found.")),
         status: engine?.available && (!deep || doctor?.ok) ? "ready" : "blocked",
       },
       {
         id: "hub",
         label: "Hub",
         detail: hub?.online
-          ? (hub.usingFallback
+          ? (hub.lastError
+            ? (ko ? "Hub 카탈로그 일부만 확인됐습니다. 다시 확인해 주세요." : "Only part of the Hub catalog was verified. Recheck the connection.")
+            : hub.usingFallback
             ? (ko ? "캐시된 목록을 사용 중입니다. 호출 전 연결을 다시 확인합니다." : "Using a cached catalog. Connectivity is rechecked before invocation.")
             : (ko ? "실시간 Hub 카탈로그에 연결됐습니다." : "Connected to the live Hub catalog."))
           : (ko ? "Hub가 오프라인입니다. 로컬 자산은 계속 실행할 수 있습니다." : "Hub is offline. Local assets can still run."),
-        status: hub?.online && !hub.usingFallback ? "ready" : "attention",
+        status: hub?.online && !hub.usingFallback && !hub.lastError ? "ready" : "attention",
       },
       {
         id: "plugins",
