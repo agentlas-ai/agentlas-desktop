@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.41 — 2026-07-12
+
+### Fixed
+
+- **Prompts retry QA waits for the destination document.** The retained-prompt
+  assertion now waits for the new chat execution context, removing a clean-mac
+  navigation race without weakening the product contract.
+
 ## 0.7.40 — 2026-07-12
 
 ### Fixed

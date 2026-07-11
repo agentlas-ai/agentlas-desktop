@@ -122,7 +122,14 @@ async function runScenario(browser, baseUrl, withInputs) {
     await detail.getByRole("button", { name: /다시 시도|Retry/ }).click();
   }
 
-  await page.waitForURL(/\/chat(?:\.html)?\?id=chat-created-1/, { timeout: 10000 });
+  await page.waitForURL(/\/chat(?:\.html)?\?id=chat-created-1/, {
+    timeout: 10000,
+    waitUntil: "domcontentloaded",
+  });
+  // waitForURL can observe the new URL while the previous execution context is
+  // still being destroyed. Read the cross-document counter only after the new
+  // init script has restored it from localStorage.
+  await page.waitForFunction(() => window.__promptStartQa?.attempts === 2, null, { timeout: 10000 });
   assert.equal(await page.evaluate(() => window.__promptStartQa.attempts), 2, "retry must reuse the retained prompt and create exactly one new chat");
   assert.deepEqual(errors, [], `renderer errors: ${errors.join("\n")}`);
   await context.close();
