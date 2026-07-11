@@ -10,6 +10,7 @@ import { FleetSummaryStrip } from "@/components/dashboard/FleetSummaryStrip";
 import { HubBorrowRoom } from "@/components/dashboard/HubBorrowRoom";
 import { EngineUsage } from "@/components/EngineUsage";
 import { RuntimeControl } from "@/components/dashboard/RuntimeControl";
+import { RuntimeReadiness } from "@/components/dashboard/RuntimeReadiness";
 import { ConfirmRequests } from "@/components/dashboard/ConfirmRequests";
 import { DashboardActivity } from "@/components/dashboard/DashboardActivity";
 import { DashboardAutomations } from "@/components/dashboard/DashboardAutomations";
@@ -35,6 +36,7 @@ export default function DashboardPage() {
             <div className="dashboard-flow-column">
               {/* 승인 인박스 — 가장 먼저 눈에 띄도록 최상단 전체폭으로. 대기 시 빨간 강조(data-alert). */}
               <div className="dashboard-panel" data-tour-id="dashboard.approvals"><ConfirmRequests /></div>
+              <div className="dashboard-panel" data-tour-id="dashboard.readiness"><RuntimeReadiness /></div>
               <div className="dashboard-panel" data-tour-id="dashboard.activity">
                 <DashboardActivity />
               </div>

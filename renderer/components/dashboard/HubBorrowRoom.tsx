@@ -7,6 +7,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { classifyHubEntity, entityClassLabel } from "@/lib/agent-entity-kind";
 import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
+import {
+  hubSecurityGradeExplanation,
+  hubSecurityGradeLabel,
+  hubVerificationFacts,
+  isCallableHubListing,
+} from "@/lib/hub-verification";
 import { useT } from "@/lib/i18n";
 import { IconSearch, IconCheck } from "@/components/Icon";
 import type { MarketplaceListing, MarketplaceSourceStatus } from "@/lib/types";
@@ -114,10 +120,18 @@ export function HubBorrowRoom() {
           {results.slice(0, 6).map((r) => {
             const entityClass = classifyHubEntity(r);
             const isBookmarked = bookmarked.has(r.slug);
+            const callable = isCallableHubListing(r);
+            const verificationFacts = hubVerificationFacts(r, locale).slice(0, 2);
             return (
               <div key={r.slug} className="hub-borrow-card" role="listitem" data-entity-kind={entityClass}>
                 <div className="hub-borrow-card-top">
-                  <span className="hub-borrow-trust" data-grade={r.trustGrade}>Trust {r.trustGrade}</span>
+                  <span
+                    className="hub-borrow-trust"
+                    data-grade={r.trustGrade}
+                    title={hubSecurityGradeExplanation(locale)}
+                  >
+                    {hubSecurityGradeLabel(r, locale)}
+                  </span>
                   <span className="agent-entity-badge" data-entity-kind={entityClass}>
                     {entityClassLabel(entityClass, locale)}
                   </span>
@@ -128,13 +142,13 @@ export function HubBorrowRoom() {
                 <div className="hub-borrow-card-tagline">
                   {(ko ? r.tagline : r.taglineEn || r.tagline) || ""}
                 </div>
+                <div className="hub-borrow-card-facts" aria-label={ko ? "검증 사실" : "Verification facts"}>
+                  <span data-callable={callable ? "true" : "false"}>
+                    {callable ? (ko ? "Hub 호출 가능" : "Hub callable") : (ko ? "설치 전용" : "Install only")}
+                  </span>
+                  {verificationFacts.map((fact) => <span key={fact}>{fact}</span>)}
+                </div>
                 <div className="hub-borrow-card-foot">
-                  {r.installCount > 0 && (
-                    <span className="hub-borrow-card-installs">
-                      {r.installCount}
-                      {ko ? "회" : ""}
-                    </span>
-                  )}
                   {isBookmarked ? (
                     <span className="hub-borrow-owned">
                       <IconCheck size={12} /> {ko ? "북마크됨" : "bookmarked"}

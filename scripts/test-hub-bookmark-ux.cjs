@@ -14,6 +14,7 @@ const sideNav = read("renderer/components/SideNav.tsx");
 const chat = read("renderer/app/(shell)/chat/page.tsx");
 const chatInput = read("renderer/components/ChatInput.tsx");
 const chatStream = read("renderer/components/ChatStream.tsx");
+const hubVerification = read("renderer/lib/hub-verification.ts");
 
 assert.match(events, /agentlas:hub-bookmarks-changed/, "bookmark changes need one renderer event contract");
 assert.match(events, /listing\.callable === true/, "Hub call candidates must fail closed unless explicitly callable");
@@ -57,5 +58,11 @@ assert.match(sideNav, /searchGenerationRef\.current !== generation/, "late autoc
 assert.match(sideNav, /searchSuggestionQuery === currentSearchQuery/, "rendered suggestions must be tagged to the current query");
 assert.match(market, /id="desktop-hub-search-suggestions"/, "Hub page needs visible autocomplete suggestions");
 assert.match(market, /hubSuggestions\.length/, "Hub page autocomplete must derive from live filtered results");
+assert.match(hubVerification, /static security scan result, not a creator reputation or user rating/, "security grade must not masquerade as creator reputation");
+assert.match(hubVerification, /listing\.callable === true[\s\S]*listing\.kind === "cloud-callable"/, "Hub command chips must fail closed on explicit callability");
+assert.match(market, /hubVerificationFacts\(listing, locale\)/, "Hub cards must render measured invocation facts");
+assert.doesNotMatch(market, />Trust \{/, "Hub cards must not present the package scan grade as generic Trust reputation");
+assert.match(room, /hubSecurityGradeLabel\(r, locale\)/, "Dashboard Hub cards must name the security scan honestly");
+assert.match(room, /data-callable=\{callable \? "true" : "false"\}/, "Dashboard Hub cards must expose callable versus install-only state");
 
 console.log("test-hub-bookmark-ux: PASS");

@@ -5,12 +5,17 @@
 <h1 align="center">Agentlas Desktop</h1>
 
 <p align="center">
-  <strong>Run AI-native Apps and agent teams on the Claude, ChatGPT, or Gemini plan you already pay for — locally.</strong>
+  <strong>We are Agent Trust. Your agent is not a program. It is an asset. — Agentlas —</strong>
 </p>
 
 <p align="center">
-  A local Apps OS for AI work that <strong>never hands your API keys or chat history to a hosting platform.</strong><br>
-  Bring your own Claude Code, Codex, or Gemini CLI (or any API key), install Apps over MCP, and run them on your own machine.
+  Build the agent you need, borrow a public Hub specialist, and run it through a supported LLM and computer you choose.<br>
+  Agentlas Desktop is the primary local GUI runtime: model calls, tool use, file access, and credentials stay under that host's permissions.
+</p>
+
+<p align="center">
+  Agent Cloud stores and restores your private, owner-scoped agent packages. Hub publication is a separate public action.<br>
+  <sub><strong>Agent Trust</strong> is a product principle for ownership and portability, not a financial, legal, custody, or fiduciary service.</sub>
 </p>
 
 <!-- ── Download (primary action) ───────────────────────────────────────── -->
@@ -29,7 +34,7 @@
   </a>
 </p>
 <p align="center">
-  <sub>Free · open source (Apache-2.0) · no Agentlas account needed to run · prefer the terminal? <a href="#install-from-the-terminal">one-line install ↓</a></sub>
+  <sub>Free · open source (Apache-2.0) · Agentlas sign-in connects the app, Cloud, and Hub · your LLM subscription and API credentials stay local · prefer the terminal? <a href="#install-from-the-terminal">one-line install ↓</a></sub>
 </p>
 
 <p align="center">
@@ -63,6 +68,13 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 the [Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest) (the public download/auto-update channel).
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
+
+- **2026-07-11 · v0.7.32 runtime stability** — automation watchdogs now
+  distinguish ordinary idle time from a known active tool, runtime child pipes
+  tolerate expected early close without an uncaught `EPIPE`, Hub bookmarks
+  reconcile into Chat without a delayed initial snapshot hiding them, and the
+  signed release passed macOS notarization/Gatekeeper plus Windows and Linux
+  packaging gates.
 
 - **2026-06-30 · v0.5.5 Hephaestus v1.0.4 engine pin** — desktop builds now
   bundle the tagged Hephaestus `v1.0.4` router fix, excluding plugins from
@@ -122,6 +134,8 @@ the current channel quickly.
 | **3 cloud providers** | Anthropic · OpenAI · Google, using *your* key |
 | **+$0 to your model bill** | Agentlas runs no model and never proxies a call |
 | **100% local** | keys in the OS keychain, chats & agents in local SQLite |
+| **Agent Trust assets** | owner scope · source · version · package hash · private/public boundary · restore receipt |
+| **Agent Cloud, optional** | explicitly save and restore private agent packages; it is not the LLM execution server |
 | **Agent teams, visible** | every firm renders as an org chart, not a black box |
 | **Stormbreaker loop** | big jobs get automatic scope, goals, work packets, plugin selection, continuation, repair, and final-gate evidence |
 | **Apps Store** | install Apps, agent firms, and supporting engines over the Model Context Protocol |
@@ -255,7 +269,8 @@ A complete tour of what ships today.
 - **First proof App.** **Document Studio** opens at `/apps/document-studio` as an
   AI document workspace with tabs, an editable generated draft, figure planning,
   and an "Open in Apps" CTA.
-- **Trust grades.** Listings carry a trust grade; sideloading unvetted agents is
+- **Package security grades.** Hub listings show the current package scan grade,
+  not a creator reputation or user rating; sideloading unvetted agents is
   gated.
 - **Hub-only catalog.** If the network or cloud is down, the marketplace shows an
   empty/error state instead of local hardcoded agents, so stale demo listings never

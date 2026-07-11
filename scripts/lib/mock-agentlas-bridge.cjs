@@ -5,6 +5,25 @@
 function setupMockAgentlasBridge(options) {
   function makeHubCatalog(total) {
     return Array.from({ length: total }, (_, index) => {
+      if (options?.includeInstallOnlyListing && index === total - 1) {
+        return {
+          slug: "install-only-agent",
+          name: "설치 전용 에이전트",
+          nameEn: "Install-only Agent",
+          tagline: "로컬에 설치한 뒤 실행하는 공개 패키지",
+          taglineEn: "A public package that runs after local installation",
+          trustGrade: "B",
+          installCount: 2,
+          verifiedInvocations: 0,
+          manifestUrl: "mock",
+          kind: "install-only",
+          callable: false,
+          routingReady: true,
+          source: "hub-index",
+          entityKind: "agent",
+          installCli: "npx agentlas@latest install install-only-agent",
+        };
+      }
       if (index === 0) {
         return {
           slug: "fda-samd-510k-readiness-desk",
@@ -20,6 +39,10 @@ function setupMockAgentlasBridge(options) {
           source: "hub-index",
           entityKind: "team",
           perCallCredits: 10,
+          verifiedInvocations: 14,
+          totalBorrows: 19,
+          lastRoutingSuccessAt: "2026-07-10T12:00:00.000Z",
+          recentFailureRate: 0,
         };
       }
       const n = String(index + 1).padStart(3, "0");
@@ -37,6 +60,10 @@ function setupMockAgentlasBridge(options) {
         source: "hub-profile",
         entityKind: "agent",
         perCallCredits: 3,
+        verifiedInvocations: Math.max(1, total - index),
+        totalBorrows: Math.max(1, total - index + 4),
+        lastRoutingSuccessAt: "2026-07-10T12:00:00.000Z",
+        recentFailureRate: index === 1 ? 0.04 : 0,
       };
     });
   }

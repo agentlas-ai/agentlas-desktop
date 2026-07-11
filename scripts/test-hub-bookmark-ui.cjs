@@ -69,7 +69,7 @@ async function main() {
     const dashboardContext = await browser.newContext({ viewport: { width: 1440, height: 980 } });
     await dashboardContext.addInitScript(
       setupMockAgentlasBridge,
-      mockBridgeOptions({ teamRoster: true, bookmarkEmptyReadDelayMs: 650, filterHubSearch: true }),
+      mockBridgeOptions({ teamRoster: true, bookmarkEmptyReadDelayMs: 650, filterHubSearch: true, includeInstallOnlyListing: true }),
     );
     const dashboardPage = await dashboardContext.newPage();
     watchErrors(dashboardPage);
@@ -79,6 +79,9 @@ async function main() {
     await roomSearch.fill("hub-agent-002");
     const roomCard = dashboardPage.locator(".hub-borrow-card").filter({ hasText: /허브 에이전트 002|Hub Agent 002/ });
     await roomCard.waitFor({ timeout: 10000 });
+    await roomCard.getByText(/보안 검사 A · 통과|Security scan A · passed/).waitFor();
+    await roomCard.getByText(/Hub 호출 가능|Hub callable/).waitFor();
+    await roomCard.getByText(/검증 성공 266회|266 verified successes/).waitFor();
     await roomCard.getByRole("button", { name: /북마크|Bookmark/ }).click();
     const orgTree = dashboardPage.locator(".dashboard-org-tree");
     await orgTree.getByText(/허브 에이전트 002|Hub Agent 002/, { exact: true }).waitFor({ timeout: 3000 });
@@ -103,7 +106,22 @@ async function main() {
     const hubSearch = dashboardPage.locator("input.portal-input");
     await hubSearch.fill("hub-agent-002");
     await dashboardPage.locator("#desktop-hub-search-suggestions [role='option']").first().waitFor({ timeout: 10000 });
+    const verifiedCard = dashboardPage.locator(".hub-entity-card").filter({ hasText: /허브 에이전트 002|Hub Agent 002/ });
+    await verifiedCard.getByText(/보안 검사 A · 통과|Security scan A · passed/).waitFor();
+    await verifiedCard.getByText(/최근 실패율 4%|Recent failure rate 4%/).waitFor();
     await dashboardPage.screenshot({ path: path.join(outDir, "hub-autocomplete.png"), fullPage: true });
+
+    await dashboardPage.goto(`${baseUrl}/marketplace.html?q=install-only-agent`, { waitUntil: "domcontentloaded" });
+    const installOnlyCard = dashboardPage.locator(".hub-entity-card").filter({ hasText: /설치 전용 에이전트|Install-only Agent/ });
+    await installOnlyCard.waitFor({ timeout: 10000 });
+    await installOnlyCard.getByText(/보안 검사 B · 경고 확인|Security scan B · review warnings/).waitFor();
+    await installOnlyCard.getByText(/설치 전용|Install only/).first().waitFor();
+    assert.equal(
+      await installOnlyCard.getByText("/hep-call install-only-agent", { exact: true }).count(),
+      0,
+      "install-only listings must not advertise a callable Hub command",
+    );
+    await dashboardPage.screenshot({ path: path.join(outDir, "hub-install-only-fail-closed.png"), fullPage: true });
     await dashboardContext.close();
 
     // Chat: its mount-time bookmark request captures an empty snapshot, then a

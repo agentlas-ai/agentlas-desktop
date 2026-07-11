@@ -5,6 +5,12 @@ import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { classifyHubEntity, entityClassLabel } from "@/lib/agent-entity-kind";
 import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
+import {
+  hubSecurityGradeExplanation,
+  hubSecurityGradeLabel,
+  hubVerificationFacts,
+  isCallableHubListing,
+} from "@/lib/hub-verification";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import type {
   HephaestusCommandResult,
@@ -614,6 +620,7 @@ function RdTag({
   size,
   className,
   style,
+  title,
   children,
 }: {
   dashed?: boolean;
@@ -621,11 +628,13 @@ function RdTag({
   size?: "s" | "m";
   className?: string;
   style?: CSSProperties;
+  title?: string;
   children: ReactNode;
 }) {
   return (
     <span
       className={["chip", dashed ? "dashed" : "", className || ""].filter(Boolean).join(" ")}
+      title={title}
       style={{
         background: bg,
         fontSize: size === "s" ? 10.5 : undefined,
@@ -657,12 +666,18 @@ function AgentCard({
   const ko = locale === "ko";
   const entityKind = classifyHubEntity(listing);
   const plugin = entityKind === "plugin";
+  const callable = !plugin && isCallableHubListing(listing);
   const perCallCredits = typeof listing.perCallCredits === "number" && Number.isFinite(listing.perCallCredits)
     ? listing.perCallCredits
     : entityKind === "multi" ? TEAM_CALL_CREDITS : plugin ? 0 : AGENT_CALL_CREDITS;
   const author = listing.ownerName ? (ko ? `${listing.ownerName} 제공` : `by ${listing.ownerName}`) : "Agentlas Hub";
-  const command = plugin ? (listing.installCli || `npx agentlas@latest plugin add ${listing.slug}`) : `/hep-call ${listing.slug}`;
+  const command = plugin
+    ? (listing.installCli || `npx agentlas@latest plugin add ${listing.slug}`)
+    : callable
+      ? `/hep-call ${listing.slug}`
+      : listing.installCli || null;
   const cardLabel = entityClassLabel(entityKind, locale);
+  const verificationFacts = hubVerificationFacts(listing, locale);
   return (
     <div className="card portal-entity-card hub-entity-card" data-entity-kind={entityKind}>
       <div className="hub-card-head">
@@ -677,24 +692,32 @@ function AgentCard({
           <div className="portal-card-title hub-card-title">{loc.name}</div>
           <div className="hub-card-author">{author}</div>
         </div>
-        <RdTag className="hub-credit-tag" bg={plugin ? C.peach : entityKind === "multi" ? C.purple : C.green}>{plugin ? (ko ? "도구" : "Tool") : ko ? `크레딧 ${perCallCredits}` : `${perCallCredits} credits`}</RdTag>
+        <RdTag className="hub-credit-tag" bg={plugin ? C.peach : entityKind === "multi" ? C.purple : C.green}>
+          {plugin
+            ? (ko ? "도구" : "Tool")
+            : callable
+              ? (ko ? `크레딧 ${perCallCredits}` : `${perCallCredits} credits`)
+              : (ko ? "설치 전용" : "Install only")}
+        </RdTag>
       </div>
       <div className="hub-card-copy">{loc.tagline}</div>
       <div className="portal-chip-row hub-card-meta">
-        {!plugin && <TrustTag trustGrade={listing.trustGrade} ko={ko} />}
+        {!plugin && <SecurityGradeTag listing={listing} locale={locale} />}
         {listing.cloudPackage && (
           <RdTag dashed>{ko ? `로컬 파일 ${listing.cloudPackage.fileCount}개` : `${listing.cloudPackage.fileCount} local files`}</RdTag>
         )}
         <RdTag dashed bg={plugin ? C.peach : entityKind === "multi" ? C.purple : C.green}>{plugin ? (listing.category || cardLabel) : cardLabel}</RdTag>
         {installed && !plugin ? <RdTag dashed>{ko ? "보유" : "Owned"}</RdTag> : null}
-        {listing.totalBorrows ? <RdTag dashed>{ko ? `호출 ${listing.totalBorrows}회` : `${listing.totalBorrows} calls`}</RdTag> : null}
-        <RdTag className="hub-command-chip" dashed>{command}</RdTag>
+        {listing.totalBorrows ? <RdTag dashed>{ko ? `전체 호출 ${listing.totalBorrows}회` : `${listing.totalBorrows} total calls`}</RdTag> : null}
+        {verificationFacts.map((fact) => <RdTag key={fact} dashed>{fact}</RdTag>)}
+        {command ? <RdTag className="hub-command-chip" dashed>{command}</RdTag> : null}
+        {!plugin && !callable ? <RdTag dashed>{ko ? "Hub 호출 불가" : "Hub call unavailable"}</RdTag> : null}
       </div>
       <div className="hub-card-actions">
         <button
           type="button"
           className={"btn sm" + (!plugin && !bookmarked ? " primary" : "")}
-          onClick={plugin ? () => void navigator.clipboard.writeText(command) : bookmarked ? undefined : onBookmark}
+          onClick={plugin ? () => command && void navigator.clipboard.writeText(command) : bookmarked ? undefined : onBookmark}
           disabled={!plugin && (bookmarking || bookmarked)}
         >
           {plugin
@@ -710,16 +733,15 @@ function AgentCard({
   );
 }
 
-function TrustTag({ trustGrade, ko }: { trustGrade?: string; ko: boolean }) {
-  const grade = trustGrade || "unknown";
-  const risky = grade !== "A";
+function SecurityGradeTag({ listing, locale }: { listing: MarketplaceListing; locale: Locale }) {
+  const risky = listing.trustGrade !== "A";
   return (
-    <RdTag dashed style={risky ? { color: "var(--amber-deep)", borderColor: "rgba(186,116,44,0.36)" } : undefined}>
-      {grade === "B"
-        ? ko ? "Trust B · 검토 권장" : "Trust B · review"
-        : grade === "A"
-          ? "Trust A"
-          : ko ? `Trust ${grade} · 확인 필요` : `Trust ${grade} · check`}
+    <RdTag
+      dashed
+      style={risky ? { color: "var(--amber-deep)", borderColor: "rgba(186,116,44,0.36)" } : undefined}
+      title={hubSecurityGradeExplanation(locale)}
+    >
+      {hubSecurityGradeLabel(listing, locale)}
     </RdTag>
   );
 }
