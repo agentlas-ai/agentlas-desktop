@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.43 — 2026-07-12
+
+### Fixed
+
+- **Chat routing QA is locale-independent.** Stable mode, stop-state, gate, and
+  destination-page contracts now verify Find agent and cancellation flows in
+  Korean and English without relying on translated button text.
+
 ## 0.7.42 — 2026-07-12
 
 ### Fixed

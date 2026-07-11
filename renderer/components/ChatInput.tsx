@@ -1343,6 +1343,7 @@ export function ChatInput({
                     key={tg.id}
                     type="button"
                     className="chat-input-hep-chip active"
+                    data-hep-toggle-id={tg.id}
                     onClick={() => {
                       setHepToggles((prev) => {
                         const next = new Set(prev);
@@ -2407,6 +2408,7 @@ function PlusMenu({
       {HEP_TOGGLES.map((tg) => (
         <ToggleRow
           key={tg.id}
+          hepToggleId={tg.id}
           icon={
             <span
               style={{
@@ -2714,16 +2716,20 @@ function ToggleRow({
   subtitle,
   on,
   onChange,
+  hepToggleId,
 }: {
   icon: React.ReactNode;
   title: string;
   subtitle?: string;
   on: boolean;
   onChange: (v: boolean) => void;
+  /** Locale-independent hook for Hephaestus mode controls and release QA. */
+  hepToggleId?: HepToggleId;
 }) {
   return (
     <button
       onClick={() => onChange(!on)}
+      data-hep-toggle-id={hepToggleId}
       style={{
         display: "flex",
         width: "100%",

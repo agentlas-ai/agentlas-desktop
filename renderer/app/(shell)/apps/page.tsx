@@ -130,7 +130,7 @@ export default function AppsPage() {
           : ko ? "런타임 점검" : "Check runtime";
 
   return (
-    <div className="studio-page">
+    <div className="studio-page" data-apps-page="true">
       <header className="studio-bar">
         <StudioBotLogo wordmark label="Agent Apps" size={22} />
         <button
