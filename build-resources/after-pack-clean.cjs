@@ -44,12 +44,14 @@ async function verifyEmbeddedAgentlasOs(context) {
     ? path.join(context.appOutDir, `${productFilename}.app`, "Contents", "Resources")
     : path.join(context.appOutDir, "resources");
   const sourceManifestPath = path.join(projectDir, "Hephaestus", "manifest.json");
+  const packagePath = path.join(projectDir, "package.json");
   const packagedRoot = path.join(resourcesDir, "Hephaestus");
   const packagedManifestPath = path.join(packagedRoot, "manifest.json");
 
-  const [sourceManifest, packagedManifest] = await Promise.all([
+  const [sourceManifest, packagedManifest, pkg] = await Promise.all([
     readFile(sourceManifestPath, "utf8").then(JSON.parse),
     readFile(packagedManifestPath, "utf8").then(JSON.parse),
+    readFile(packagePath, "utf8").then(JSON.parse),
     access(path.join(packagedRoot, "agentlas_cloud", "__main__.py")),
   ]);
   const semver = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
@@ -60,6 +62,20 @@ async function verifyEmbeddedAgentlasOs(context) {
     throw new Error(
       `[afterPack] embedded Agentlas OS version mismatch: expected ${sourceManifest.version}, got ${packagedManifest.version || "missing"}`,
     );
+  }
+  const compatibilityVersion = pkg.agentlasUpdateCompatibility?.bundledRuntimeVersion;
+  if (compatibilityVersion !== sourceManifest.version) {
+    throw new Error(
+      `[afterPack] update compatibility runtime mismatch: expected ${sourceManifest.version}, got ${compatibilityVersion || "missing"}`,
+    );
+  }
+  if (process.env.HEPHAESTUS_REF) {
+    const refMatch = process.env.HEPHAESTUS_REF.trim().match(/^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/);
+    if (!refMatch || refMatch[1] !== sourceManifest.version) {
+      throw new Error(
+        `[afterPack] HEPHAESTUS_REF mismatch: expected v${sourceManifest.version}, got ${process.env.HEPHAESTUS_REF}`,
+      );
+    }
   }
   console.log(`[afterPack] verified embedded Agentlas OS v${packagedManifest.version} (${context.electronPlatformName})`);
 }

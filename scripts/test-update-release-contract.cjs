@@ -8,6 +8,7 @@ const yaml = require("js-yaml");
 
 const root = path.resolve(__dirname, "..");
 const pkg = require(path.join(root, "package.json"));
+const lock = require(path.join(root, "package-lock.json"));
 const manifest = require(path.join(root, "Hephaestus", "manifest.json"));
 const { parseUpdaterCompatibility } = require("../dist/electron/updater/controller.js");
 const {
@@ -17,6 +18,26 @@ const {
 } = require("../build-resources/update-compatibility.cjs");
 
 const compatibility = pkg.agentlasUpdateCompatibility;
+assert.equal(lock.version, pkg.version, "package-lock version must match package.json before tagging");
+assert.equal(lock.packages[""].version, pkg.version, "package-lock root package version must match package.json");
+
+function versionTuple(spec) {
+  const match = String(spec || "").match(/(\d+)\.(\d+)\.(\d+)/);
+  assert.ok(match, `expected a semantic version in ${spec}`);
+  return match.slice(1).map(Number);
+}
+
+function assertVersionAtLeast(spec, minimum, label) {
+  const actual = versionTuple(spec);
+  const floor = versionTuple(minimum);
+  const comparison = actual[0] - floor[0] || actual[1] - floor[1] || actual[2] - floor[2];
+  assert.ok(comparison >= 0, `${label} must remain at or above ${minimum}; got ${spec}`);
+}
+
+assertVersionAtLeast(pkg.engines.node, "22.12.0", "Node runtime");
+assertVersionAtLeast(pkg.devDependencies.electron, "43.1.0", "Electron");
+assertVersionAtLeast(pkg.devDependencies["electron-builder"], "26.15.6", "electron-builder");
+assertVersionAtLeast(pkg.dependencies["better-sqlite3"], "12.11.1", "better-sqlite3");
 assert.deepEqual(parseUpdaterCompatibility(compatibility), compatibility, "runtime parser must accept the release manifest exactly");
 assert.equal(compatibility.minimumSourceAppVersion, "0.7.0", "known embedded-runtime update floor is desktop v0.7.0");
 assert.equal(compatibility.minimumRuntimeVersion, "1.0.4", "v0.7.0 shipped Hephaestus v1.0.4");
@@ -79,6 +100,13 @@ const secretEnvNames = new Set([
 ]);
 for (const [name, workflow] of workflowEntries) {
   for (const job of Object.values(workflow.jobs)) {
+    assert.equal(
+      job.env?.HEPHAESTUS_REF,
+      `v${compatibility.bundledRuntimeVersion}`,
+      `${name} must fetch the runtime version encoded in the update contract`,
+    );
+  }
+  for (const job of Object.values(workflow.jobs)) {
     for (const key of Object.keys(job.env ?? {})) {
       assert.equal(secretEnvNames.has(key), false, `${name} must not expose ${key} to the whole job`);
     }
@@ -134,6 +162,8 @@ for (const requiredGate of [
   "npm run test:cli-version-parser",
   "npm run test:hephaestus-status-version",
   "npm run test:marketplace-cache",
+  "npm run test:after-pack-runtime-contract",
+  "npm run test:mobile-bridge-contract",
 ]) {
   assert.match(
     linuxContinuityStep.run,
@@ -142,11 +172,13 @@ for (const requiredGate of [
   );
 }
 const windowsParserStep = workflowSteps(crossWorkflow).find(
-  (step) => step.name === "Windows runtime version parser gate",
+  (step) => step.name === "Windows runtime and mobile contracts",
 );
-assert.ok(windowsParserStep, "Windows release must retain the cross-platform CLI version parser gate");
+assert.ok(windowsParserStep, "Windows release must retain runtime and mobile contract gates");
 assert.equal(windowsParserStep.if, "runner.os == 'Windows'");
-assert.equal(windowsParserStep.run, "npm run test:cli-version-parser");
+assert.match(windowsParserStep.run, /npm run test:cli-version-parser/);
+assert.match(windowsParserStep.run, /npm run test:after-pack-runtime-contract/);
+assert.match(windowsParserStep.run, /npm run test:mobile-bridge-contract/);
 const crossVerifyStep = workflowSteps(crossWorkflow).find((step) => step.name === "Verify tag matches package.json version");
 const signedResolveStep = workflowSteps(signedWorkflow).find((step) => step.name === "Resolve release inputs");
 for (const [name, step] of [["release.yml", crossVerifyStep], ["release-signed-mac.yml", signedResolveStep]]) {
@@ -155,6 +187,9 @@ for (const [name, step] of [["release.yml", crossVerifyStep], ["release-signed-m
   assert.match(step.run, /refs\/tags\/\$\{tag\}\^\{commit\}/, `${name} must resolve an exact tag ref`);
   assert.match(step.run, /git rev-parse HEAD/, `${name} must compare the checkout with the tag commit`);
   assert.match(step.run, /head_commit.*tagged_commit/s, `${name} must fail when HEAD is not the tagged commit`);
+  assert.match(step.run, /package-lock\.json/, `${name} must validate package-lock release identity`);
+  assert.match(step.run, /lockrootver/, `${name} must validate the package-lock root package version`);
+  assert.match(step.run, /HEPHAESTUS_REF#v/, `${name} must pin the packaged runtime to the update contract`);
 
   const regexSource = step.run.match(/semver_tag_re='([^']+)'/)?.[1];
   assert.ok(regexSource, `${name} must expose a testable tag validation expression`);
@@ -227,6 +262,8 @@ for (const requiredGate of [
   "npm run test:cli-version-parser",
   "npm run test:hephaestus-status-version",
   "npm run test:marketplace-cache",
+  "npm run test:after-pack-runtime-contract",
+  "npm run test:mobile-bridge-contract",
   "npm run test:independent-terminal-boundary",
   "npm run test:grok-runtime-contract",
   "npm run test:grok-auth-source",
@@ -240,6 +277,7 @@ for (const requiredGate of [
   "npm run test:trex-ui",
   "npm run test:trex-attachments-ui",
   "node scripts/qa-chat-input-routing.cjs",
+  "AGENTLAS_QA_LOCALE=en node scripts/qa-chat-input-routing.cjs",
   "npm run test:all-routes-ui",
 ]) {
   assert.match(signedRegressionRun, new RegExp(requiredGate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -248,6 +286,8 @@ for (const requiredGate of [
 const afterPackSource = fs.readFileSync(path.join(root, "build-resources", "after-pack-clean.cjs"), "utf8");
 assert.match(afterPackSource, /packagedRoot[\s\S]*?Hephaestus/);
 assert.match(afterPackSource, /packagedManifest\.version !== sourceManifest\.version/);
+assert.match(afterPackSource, /compatibilityVersion !== sourceManifest\.version/);
+assert.match(afterPackSource, /HEPHAESTUS_REF mismatch/);
 assert.match(afterPackSource, /agentlas_cloud[\s\S]*?__main__\.py/);
 for (const configName of ["electron-builder.yml", "electron-builder.mac-stable.yml"]) {
   const config = yaml.load(fs.readFileSync(path.join(root, configName), "utf8"));

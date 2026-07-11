@@ -104,8 +104,15 @@ jobs:
             exit 1
           fi
           pkgver=$(node -p "require('./package.json').version")
-          if [ "$pkgver" != "$version" ]; then
-            echo "::error::Tag $tag implies version=$version but package.json is $pkgver. Bump package.json before tagging."
+          lockver=$(node -p "require('./package-lock.json').version")
+          lockrootver=$(node -p "require('./package-lock.json').packages[''].version")
+          runtimever=$(node -p "require('./package.json').agentlasUpdateCompatibility.bundledRuntimeVersion")
+          if [ "$pkgver" != "$version" ] || [ "$lockver" != "$version" ] || [ "$lockrootver" != "$version" ]; then
+            echo "::error::Tag $tag requires package.json/package-lock root version=$version (got package=$pkgver lock=$lockver root=$lockrootver)."
+            exit 1
+          fi
+          if [ "${HEPHAESTUS_REF#v}" != "$runtimever" ]; then
+            echo "::error::HEPHAESTUS_REF=$HEPHAESTUS_REF does not match bundledRuntimeVersion=$runtimever."
             exit 1
           fi
           {
@@ -176,6 +183,8 @@ jobs:
           npm run test:cli-version-parser
           npm run test:hephaestus-status-version
           npm run test:marketplace-cache
+          npm run test:after-pack-runtime-contract
+          npm run test:mobile-bridge-contract
           npm run test:borrowed-task-force
           npm run test:mcp-auto-select
           npm run test:mcp-secret-isolation
@@ -211,6 +220,7 @@ jobs:
           npm run test:trex-ui
           npm run test:trex-attachments-ui
           node scripts/qa-chat-input-routing.cjs
+          AGENTLAS_QA_LOCALE=en node scripts/qa-chat-input-routing.cjs
           npm run test:all-routes-ui
 
       - name: Restore mac signing certificate

@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.7.45 — 2026-07-12
+
+### Fixed
+
+- **The v0.7.44 mobile and studio work now ships with the full production
+  stabilization line.** Browser scrolling/profile ownership, durable drafts,
+  chat routing, updater continuity, Electron 43, and the signed-release gates
+  from v0.7.43 are integrated instead of being silently rolled back by the
+  parallel release history.
+- **Dashboard readiness reports real evidence.** Agentlas OS reads the active
+  runtime `RELEASE`/manifest version instead of showing Python, CLI versions are
+  parsed across Claude/Codex/Gemini/Grok output formats, and an explicit full
+  check bypasses stale runtime caches.
+- **Hub status no longer treats a five-minute catalog cache as a live
+  connection.** Bounded, single-flight catalog probes distinguish live,
+  partial, cached, and offline states without unrelated Firm/Bundle failures
+  overwriting the Dashboard result.
+- **Unverified Grok media stays fail-closed.** The official Grok CLI remains a
+  supported text runtime, while image/video options stay hidden until the CLI
+  exposes a verifiable production capability.
+- **Release identity is now atomic.** Tag, `package.json`, both package-lock
+  version fields, embedded Agentlas OS, update compatibility, and
+  `HEPHAESTUS_REF` must agree before any platform can publish.
+
+## 0.7.44 — 2026-07-12
+
+### Added
+
+- **Desktop-to-mobile pairing foundations** add a local TLS bridge, scoped
+  device authority, replay protection, sanitized projections, and Settings QR
+  management without moving the LLM runtime to Agentlas Cloud.
+- **T-rex and Oberon generation paths** gain stronger active-runtime routing
+  and preserve the supported Grok text model stack.
+
 ## 0.7.43 — 2026-07-12
 
 ### Fixed

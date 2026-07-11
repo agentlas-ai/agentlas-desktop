@@ -204,7 +204,7 @@ async function main() {
       "Retry must refresh only the multimodal domain",
     );
     assert.equal(await page.getByText("QA 이미지 프로바이더", { exact: true }).count(), 1);
-  const pairButton = page.getByRole("button", { name: "새 기기 연결" });
+    const pairButton = page.getByRole("button", { name: "새 기기 연결" });
     await pairButton.click();
     const pairingCard = page.getByTestId("mobile-bridge-pairing");
     await pairingCard.waitFor();
