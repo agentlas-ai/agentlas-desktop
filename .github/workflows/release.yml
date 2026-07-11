@@ -68,7 +68,7 @@ jobs:
       # keytar links against libsecret on Linux.
       - name: Install Linux build deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev xvfb
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev xvfb dbus-x11
 
       # Tag must match package.json version so the auto-update feed is consistent.
       - name: Verify tag matches package.json version
@@ -119,13 +119,19 @@ jobs:
           # test runs (FATAL:setuid_sandbox_host.cc). This is env setup, not a code fix.
           sudo chown root:root node_modules/electron/dist/chrome-sandbox
           sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
-          xvfb-run -a npm run test:v52-automation-run-recovery
-          xvfb-run -a npm run test:v53-hub-bookmark-sync
-          xvfb-run -a npm run test:updater-production
-          xvfb-run -a npm run test:automations-store
-          xvfb-run -a npm run test:borrowed-task-force
-          xvfb-run -a npm run test:mcp-auto-select
-          xvfb-run -a npm run test:mcp-secret-isolation
+          # Run the electron gates inside a real X (xvfb) AND a session bus
+          # (dbus-run-session). Without a session bus, electron reads
+          # DBUS_SESSION_BUS_ADDRESS=disabled and aborts with
+          # "Unknown or unsupported transport 'disabled'". One session for all gates.
+          xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
+            npm run test:v52-automation-run-recovery
+            npm run test:v53-hub-bookmark-sync
+            npm run test:updater-production
+            npm run test:automations-store
+            npm run test:borrowed-task-force
+            npm run test:mcp-auto-select
+            npm run test:mcp-secret-isolation
+          '
 
       - name: Build renderer + electron
         run: npm run build
