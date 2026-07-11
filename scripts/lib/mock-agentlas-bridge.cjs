@@ -4,7 +4,7 @@
 // (모듈 스코프 변수/클로저 참조 금지 — 함수 본문 안에서 모든 것을 정의).
 function setupMockAgentlasBridge(options) {
   function makeHubCatalog(total) {
-    return Array.from({ length: total }, (_, index) => {
+    const catalog = Array.from({ length: total }, (_, index) => {
       if (options?.includeInstallOnlyListing && index === total - 1) {
         return {
           slug: "install-only-agent",
@@ -66,12 +66,33 @@ function setupMockAgentlasBridge(options) {
         recentFailureRate: index === 1 ? 0.04 : 0,
       };
     });
+    if (options?.includeSameSlugEntityCollision) {
+      const base = {
+        slug: "same-slug-bookmark",
+        tagline: "Composite Hub bookmark identity fixture",
+        taglineEn: "Composite Hub bookmark identity fixture",
+        trustGrade: "A",
+        installCount: 1,
+        manifestUrl: "mock",
+        kind: "cloud-callable",
+        callable: true,
+        routingReady: true,
+        source: "hub-profile",
+        verifiedInvocations: 9,
+      };
+      catalog.push(
+        { ...base, name: "동일 슬러그 에이전트", nameEn: "Same Slug Agent", entityKind: "agent", perCallCredits: 3 },
+        { ...base, name: "동일 슬러그 팀", nameEn: "Same Slug Team", entityKind: "team", perCallCredits: 10, agentCount: 3 },
+      );
+    }
+    return catalog;
   }
 
   const now = new Date().toISOString();
   const calls = [];
   const missingBridgeCalls = [];
   const eventHandlers = {};
+  const hubBookmarkSnapshotHandlers = [];
   let hubBookmarks = [];
   try {
     const savedBookmarks = JSON.parse(window.localStorage.getItem("agentlas.qa.hubBookmarks") || "[]");
@@ -115,6 +136,12 @@ function setupMockAgentlasBridge(options) {
     try {
       window.localStorage.setItem("agentlas.qa.hubBookmarks", JSON.stringify(hubBookmarks));
     } catch {}
+  }
+  function hubBookmarkIdentity(item) {
+    const listing = item?.listing || item || {};
+    const entityKind = String(listing.entityKind || "agent").trim().toLowerCase() || "agent";
+    const slug = String(item?.slug || listing.slug || "").trim().toLowerCase();
+    return `${entityKind}:${slug}`;
   }
   function readStoredAutomations() {
     try {
@@ -355,7 +382,17 @@ function setupMockAgentlasBridge(options) {
   }
   const evolutionProposals = [];
 
-  window.__qa = { calls, automations, missingBridgeCalls };
+  window.__qa = {
+    calls,
+    automations,
+    missingBridgeCalls,
+    emitHubBookmarkSnapshot: (bookmarks) => {
+      hubBookmarks = Array.isArray(bookmarks) ? [...bookmarks] : [];
+      saveHubBookmarks();
+      const event = { bookmarks: [...hubBookmarks], syncedAt: new Date().toISOString() };
+      for (const handler of [...hubBookmarkSnapshotHandlers]) handler(event);
+    },
+  };
   window.agentlasEvents = {
     on: (channel, handler) => {
       eventHandlers[channel] = eventHandlers[channel] || [];
@@ -381,6 +418,7 @@ function setupMockAgentlasBridge(options) {
       getSession: async () => ({ signedIn: true, account: { email: "qa@example.com" } }),
       signInWithGoogle: async () => ({ signedIn: true, account: { email: "qa@example.com" } }),
       signOut: async () => ({ signedIn: false }),
+      onSessionChanged: () => () => {},
     },
     updater: {
       getState: async () => ({ status: "idle" }),
@@ -490,16 +528,32 @@ function setupMockAgentlasBridge(options) {
         }
         return snapshot;
       },
+      syncBookmarks: async () => {
+        record("marketplace.syncBookmarks");
+        return [...hubBookmarks];
+      },
+      onBookmarksSnapshot: (handler) => {
+        hubBookmarkSnapshotHandlers.push(handler);
+        return () => {
+          const index = hubBookmarkSnapshotHandlers.indexOf(handler);
+          if (index >= 0) hubBookmarkSnapshotHandlers.splice(index, 1);
+        };
+      },
       bookmarkAdd: async (listing) => {
         record("marketplace.bookmarkAdd", listing);
         const bookmark = { slug: listing?.slug ?? "mock-bookmark", listing, bookmarkedAt: now };
-        hubBookmarks = [bookmark, ...hubBookmarks.filter((item) => item.slug !== bookmark.slug)];
+        const identity = hubBookmarkIdentity(bookmark);
+        hubBookmarks = [bookmark, ...hubBookmarks.filter((item) => hubBookmarkIdentity(item) !== identity)];
         saveHubBookmarks();
         return bookmark;
       },
-      bookmarkRemove: async (slug) => {
-        record("marketplace.bookmarkRemove", slug);
-        hubBookmarks = hubBookmarks.filter((item) => item.slug !== slug);
+      bookmarkRemove: async (slug, entityKind) => {
+        record("marketplace.bookmarkRemove", { slug, entityKind });
+        const normalizedSlug = String(slug || "").trim().toLowerCase();
+        const identity = entityKind ? `${String(entityKind).trim().toLowerCase()}:${normalizedSlug}` : null;
+        hubBookmarks = hubBookmarks.filter((item) =>
+          identity ? hubBookmarkIdentity(item) !== identity : String(item.slug || "").trim().toLowerCase() !== normalizedSlug
+        );
         saveHubBookmarks();
       },
       search: async (query) => {
@@ -536,6 +590,17 @@ function setupMockAgentlasBridge(options) {
         const digest = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
         const contentHash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
         return { slug, name: "qa-skill", description: "QA helper skill", content, contentHash, byteLength: new TextEncoder().encode(content).byteLength };
+      },
+    },
+    billing: {
+      // 자동 라우팅 크레딧 게이트가 조회 — 기본은 넉넉한 잔액(페이월 미발동).
+      getCredits: async () => {
+        record("billing.getCredits", {});
+        return { authenticated: true, plan: "pro", remainingCredits: 1000, earningsCredits: 0 };
+      },
+      transferEarnings: async (credits) => {
+        record("billing.transferEarnings", credits);
+        return { ok: true, moved: credits, earningsCredits: 0, remainingCredits: 1000 };
       },
     },
     hephaestus: {

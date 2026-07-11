@@ -227,6 +227,11 @@ export interface HubAgentBookmark {
   bookmarkedAt: string;
 }
 
+export interface HubBookmarkSnapshotEvent {
+  bookmarks: HubAgentBookmark[];
+  syncedAt: string;
+}
+
 export interface MarketplaceSourceStatus {
   mode: "mcp" | "memory";
   baseUrl: string | null;
@@ -394,6 +399,8 @@ export interface AgentGroupMember {
   agentSlug?: string;
   /** Explicit Hub slug; kept separate so missing Hub catalog entries can warn. */
   hubSlug?: string;
+  /** Hub entity namespace. Optional so pre-v0.7.34 slug-only rows keep loading. */
+  hubEntityKind?: "agent" | "team";
   /** Firm/org-chart route where the agent was picked. */
   firmId?: string;
   firmSlug?: string;
@@ -668,6 +675,8 @@ export interface TelegramConnectCloneInput {
 export interface TelegramConnectAutoInput {
   targetKind: TelegramConnectTargetKind;
   targetId: string;
+  /** 사용자가 지정한 봇 표시 이름(텔레그램에 보이는 이름). 비우면 "Agentlas <타겟명>" 자동. */
+  botName?: string;
 }
 
 export interface TelegramConnectActionResult {
@@ -2855,7 +2864,7 @@ export interface OberonMotionAdJob {
 }
 
 // ── Oberon image-to-video (애니메이션 스튜디오) ──────────────
-export type OberonAnimateProvider = "runway" | "luma" | "veo" | "seedance" | "kling";
+export type OberonAnimateProvider = "runway" | "luma" | "veo" | "seedance" | "kling" | "grok";
 export type OberonAnimateJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export interface OberonAnimateRequest {
@@ -2910,6 +2919,8 @@ export interface OberonAnimateKeyStatus {
   veo: boolean;
   seedance: boolean;
   kling: boolean;
+  /** Grok CLI(Imagine) — API 키가 아니라 구독 로그인된 grok 바이너리 존재 여부. */
+  grok: boolean;
 }
 
 // ── Oberon text planning jobs ──────────────────────────────────
@@ -3094,7 +3105,7 @@ export interface HephaestusBuildRequest {
 // ── 추천 바텀시트(Recommendation) ──────────────────────────────────────────
 // routePreview 가 routeOnly(실행 없음) 결정 JSON 을 정규화해 렌더러에 넘기는 모양.
 // 렌더러는 엔진 내부 JSON 을 직접 파싱하지 않고 이 정규형만 소비한다.
-export type RecMode = "single" | "multi" | "network" | "pipeline" | "clarify" | "none";
+export type RecMode = "single" | "multi" | "network" | "pipeline" | "clarify" | "build" | "none";
 export type RecSource = "local" | "cloud" | "hub";
 export interface RecAgent {
   id: string;
@@ -3135,6 +3146,8 @@ export interface Recommendation {
   rawAction: string;
   /** action==="clarify" 일 때 되물을 질문. */
   clarifyQuestion?: string;
+  /** action==="propose_new"(적합 에이전트 없음 → 빌드 제안) 일 때 엔진이 준 사유. */
+  buildReason?: string;
   /** 원 요청 텍스트(시트가 실행할 때 사용). */
   query: string;
   /** 저신뢰(clarify/propose_new) 결정에 엔진이 붙인 Router Agent 에스컬레이션.
@@ -3456,8 +3469,8 @@ export interface AgentlasIpc {
   };
   /** T-rex 슬라이드 스튜디오 — 키리스 CLI 이미지 생성(codex image_gen / gemini). */
   trex: {
-    generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => Promise<{ ok: boolean; src?: string; reason?: string; engine?: "codex" | "gemini" }>;
-    imageProviders: () => Promise<{ codex: boolean; gemini: boolean }>;
+    generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => Promise<{ ok: boolean; src?: string; reason?: string; engine?: "codex" | "gemini" | "grok" }>;
+    imageProviders: () => Promise<{ codex: boolean; gemini: boolean; grok?: boolean }>;
     generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string }) => Promise<{ ok: boolean; text?: string; engine?: "agy" | "codex"; reason?: string }>;
     contentAvailable: () => Promise<{ agy: boolean; codex: boolean }>;
   };
@@ -3577,6 +3590,8 @@ export interface AgentlasIpc {
      *  웹앱이 desktop callback을 지원하지 않거나 180초 타임아웃 시 signedIn=false (창 방식으로 폴백). */
     signInWithBrowser: () => Promise<AuthSession>;
     signOut: () => Promise<void>;
+    /** Main-authoritative TTL/server invalidation notification. */
+    onSessionChanged?: (callback: (session: AuthSession) => void) => () => void;
   };
   /** LLM 엔진 사용량 — 프로바이더 OAuth usage 엔드포인트(Claude/Codex/Gemini)에서
    *  5시간·주간(7일)·모델별·월 크레딧 조회. main에서 60초 캐시; force로 강제 갱신. */
@@ -3805,8 +3820,12 @@ export interface AgentlasIpc {
     /** 로그인 사용자의 실제 복원 가능한 Agent Cloud 패키지 목록. 미로그인/오프라인이면 [] */
     listMine: () => Promise<MarketplaceListing[]>;
     bookmarks: () => Promise<HubAgentBookmark[]>;
+    /** Web account snapshot + local outbox reconciliation. No polling; callers trigger lifecycle sync. */
+    syncBookmarks: () => Promise<HubAgentBookmark[]>;
+    /** Main-owned full snapshot broadcast after local mutation or account sync. */
+    onBookmarksSnapshot: (handler: (event: HubBookmarkSnapshotEvent) => void) => () => void;
     bookmarkAdd: (listing: MarketplaceListing) => Promise<HubAgentBookmark>;
-    bookmarkRemove: (slug: string) => Promise<void>;
+    bookmarkRemove: (slug: string, entityKind?: string) => Promise<void>;
   };
   /** Store owned packages privately in Agent Cloud or explicitly publish them to the public Hub. */
   cloudAgents: {

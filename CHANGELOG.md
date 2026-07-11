@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.7.34 — 2026-07-11
+
+### Added
+
+- **Hub bookmarks now follow the signed-in Agentlas workspace.** Desktop keeps an
+  account-scoped local cache and offline outbox while the Web bookmark API remains
+  canonical. Fresh snapshots propagate immediately to Dashboard, the organization
+  tree, Marketplace, Agent Groups, and Chat without waiting for a remount or polling.
+
+### Fixed
+
+- **Hub calls fail closed against live authority.** A bookmark, stale registry row,
+  refused bundle, empty response, or partial task force can no longer be presented or
+  executed as a generic borrowed expert. Explicit borrowed agents and saved groups are
+  revalidated on every invocation, and remote package instructions stay in user input
+  rather than being promoted to a system prompt.
+- **Long automations keep an owned, recoverable lease.** Active runs renew their lease,
+  persist throttled progress, stop when ownership is lost, and recover only after more
+  than four hours of real silence. Removing an automation now removes its run
+  projections atomically; the v52 migration clears historical orphan rows and closes
+  abandoned running snapshots without touching live work.
+- **Updates capture continuity only after mutable background work settles.** New
+  automation dispatch and Hub bookmark sync are fenced and drained before the updater
+  snapshots the database. Cancelled or failed installs resume those writers; accepted
+  installs keep them quiesced through restart.
+- **Release jobs use exact tagged source and narrowly scoped credentials.** Manual and
+  tag releases validate strict SemVer, require `HEAD` to match the tag commit, disable
+  persisted checkout credentials, keep signing/Railway/publish secrets on only the
+  steps that need them, and use the dedicated cross-repository release token.
+- **Pre-mobile production regressions are executable gates.** v52/v53 migrations,
+  bookmark account switching, automation lease loss, updater continuity, borrowed Hub
+  refusal, child-process `EPIPE`, browser ownership/scroll, Build registration, and
+  renderer roster readiness run before signed packaging.
+
 ## 0.7.33 — 2026-07-11
 
 ### Added

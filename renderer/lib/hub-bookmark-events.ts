@@ -1,13 +1,40 @@
-import type { HubAgentBookmark, InstalledAgent } from "./types";
+import type { HubAgentBookmark, InstalledAgent, MarketplaceListing } from "./types";
 
 export const HUB_BOOKMARKS_CHANGED_EVENT = "agentlas:hub-bookmarks-changed";
 
 export type HubBookmarkChangeDetail =
   | { action: "added"; bookmark: HubAgentBookmark }
-  | { action: "removed"; slug: string };
+  | { action: "removed"; slug: string; entityKind?: string }
+  | { action: "synced"; bookmarks: HubAgentBookmark[]; syncedAt?: string };
 
 function normalizedSlug(value: string | null | undefined): string {
   return String(value ?? "").trim().toLowerCase();
+}
+
+function normalizedEntityKind(value: string | null | undefined): string {
+  return String(value || "agent").trim().toLowerCase() || "agent";
+}
+
+export function hubBookmarkIdentityKeyFromParts(slug: string, entityKind?: string | null): string {
+  return `${normalizedEntityKind(entityKind)}:${normalizedSlug(slug)}`;
+}
+
+export function hubListingIdentityKey(
+  listing: Pick<MarketplaceListing, "slug" | "entityKind" | "agentCount" | "source">,
+): string {
+  const entityKind = listing.source === "hub-plugin" || listing.entityKind === "plugin"
+    ? "plugin"
+    : listing.entityKind === "team" || (typeof listing.agentCount === "number" && listing.agentCount > 1)
+      ? "team"
+      : "agent";
+  return hubBookmarkIdentityKeyFromParts(listing.slug, entityKind);
+}
+
+export function hubBookmarkIdentityKey(bookmark: HubAgentBookmark): string {
+  return hubListingIdentityKey({
+    ...bookmark.listing,
+    slug: bookmark.slug || bookmark.listing.slug,
+  });
 }
 
 /**
@@ -37,8 +64,9 @@ export function hubBookmarksWithoutLocalDuplicates(
   const seen = new Set<string>();
   return bookmarks.filter((bookmark) => {
     const slug = normalizedSlug(bookmark.slug || bookmark.listing.slug);
-    if (!slug || localSlugs.has(slug) || seen.has(slug)) return false;
-    seen.add(slug);
+    const identity = hubBookmarkIdentityKey(bookmark);
+    if (!slug || localSlugs.has(slug) || seen.has(identity)) return false;
+    seen.add(identity);
     return true;
   });
 }
@@ -47,7 +75,26 @@ export function callableHubBookmarks(
   bookmarks: HubAgentBookmark[],
   localAgents: Array<Pick<InstalledAgent, "slug">> = [],
 ): HubAgentBookmark[] {
-  return hubBookmarksWithoutLocalDuplicates(bookmarks, localAgents).filter(isVerifiedCallableHubBookmark);
+  // Runtime invocation identity is globally slug-only today. The durable cache
+  // keeps (entityKind, slug) distinct so neither asset is lost, but an agent and
+  // team sharing one slug cannot be routed unambiguously. Exclude both from all
+  // call surfaces until the runtime protocol gains an entity-kind identity.
+  const entityKindsBySlug = new Map<string, Set<string>>();
+  for (const bookmark of bookmarks) {
+    const slug = normalizedSlug(bookmark.slug || bookmark.listing.slug);
+    if (!slug) continue;
+    const kinds = entityKindsBySlug.get(slug) ?? new Set<string>();
+    kinds.add(String(bookmark.listing.entityKind || "agent").toLowerCase());
+    entityKindsBySlug.set(slug, kinds);
+  }
+  const ambiguousSlugs = new Set(
+    [...entityKindsBySlug.entries()]
+      .filter(([, kinds]) => kinds.size > 1)
+      .map(([slug]) => slug),
+  );
+  return hubBookmarksWithoutLocalDuplicates(bookmarks, localAgents)
+    .filter((bookmark) => !ambiguousSlugs.has(normalizedSlug(bookmark.slug || bookmark.listing.slug)))
+    .filter(isVerifiedCallableHubBookmark);
 }
 
 /**

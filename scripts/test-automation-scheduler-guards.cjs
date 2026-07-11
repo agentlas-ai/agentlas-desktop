@@ -67,6 +67,9 @@ async function waitFor(predicate, timeoutMs = 2500) {
 
 async function main() {
   await app.whenReady();
+  if (process.env.AGENTLAS_TEST_FORCE_ASYNC_ASSERTION_FAILURE === "1") {
+    assert.fail("forced async assertion failure for exit-code contract");
+  }
   const db = require("../dist/electron/store/db.js");
   const automations = require("../dist/electron/store/automations.js");
   const scheduler = require("../dist/electron/automation-scheduler.js");
@@ -105,6 +108,7 @@ async function main() {
       stallInactivityMs: 8 * 60 * 1000,
       activeToolStallMs: 20 * 60 * 1000,
       optimizerTimeoutMs: 1000,
+      leaseHeartbeatMs: 60 * 1000,
     });
 
     const watchdog = require("../dist/electron/automation-watchdog.js");
@@ -312,5 +316,8 @@ main()
     }
     mcpClient.runMcpInvocation = originalRunMcpInvocation;
     fs.rmSync(tmp, { recursive: true, force: true });
-    app.quit();
+    // Electron's app.quit() can report a successful application exit even
+    // after an async assertion set process.exitCode. app.exit(code) preserves
+    // the test verdict for CI/release gates.
+    app.exit(process.exitCode ?? 0);
   });

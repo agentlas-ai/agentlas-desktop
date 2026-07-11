@@ -11,6 +11,7 @@ import { Glyph } from "./icons";
 import { Card, GhostButton, Meter, PanelHead, PrimaryButton, toLocalMediaSrc } from "./ui";
 
 const PROVIDER_LABELS: Record<string, string> = {
+  grok: "Grok Imagine",
   veo: "Google Veo",
   kling: "Kling",
   seedance: "Seedance",
@@ -19,8 +20,10 @@ const PROVIDER_LABELS: Record<string, string> = {
 };
 
 // 실행 중이면 job.provider, 아니면 준비된 키 중 사다리 우선순위로 표시할 엔진.
+// grok(구독 키리스)이 맨 앞 — page.tsx resolveAnimateProvider의 사다리와 순서를 맞춘다.
 function providerLabel(jobProvider: string | undefined, keyStatus?: OberonAnimateKeyStatus | null): string {
   if (jobProvider && PROVIDER_LABELS[jobProvider]) return PROVIDER_LABELS[jobProvider];
+  if (keyStatus?.grok) return PROVIDER_LABELS.grok;
   if (keyStatus?.veo) return PROVIDER_LABELS.veo;
   if (keyStatus?.kling) return PROVIDER_LABELS.kling;
   if (keyStatus?.seedance) return PROVIDER_LABELS.seedance;
@@ -53,7 +56,8 @@ export function AnimatePanel({
   const { locale } = useT();
   const mp4 = (job?.files ?? []).find((f) => f.kind === "animation_mp4");
   const hasKey = Boolean(
-    keyStatus?.runway || keyStatus?.luma || keyStatus?.veo || keyStatus?.seedance || keyStatus?.kling,
+    keyStatus?.runway || keyStatus?.luma || keyStatus?.veo || keyStatus?.seedance || keyStatus?.kling ||
+      keyStatus?.grok,
   );
   const [keyDraft, setKeyDraft] = useState("");
   const [saving, setSaving] = useState(false);

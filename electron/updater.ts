@@ -8,6 +8,8 @@ import fs from "node:fs";
 import path from "node:path";
 import type { UpdaterActionResult, UpdaterState } from "../shared/types";
 import { getAuthSession } from "./auth";
+import { quiesceAutomationSchedulerForUpdate } from "./automation-scheduler";
+import { quiesceHubBookmarkSyncForUpdate } from "./hub-bookmark-sync";
 import {
   DesktopUpdaterController,
   inspectInstallJournalFile,
@@ -190,6 +192,29 @@ export async function initAutoUpdater(): Promise<void> {
     uid: typeof process.getuid === "function" ? process.getuid() : null,
     runtimeVersion: () => readBundledRuntimeVersion(process.resourcesPath, sourceRoot),
     databaseSchemaVersion: () => readDatabaseSchemaVersion(dbPath),
+    quiesceWriters: async () => {
+      // Set both gates immediately, then wait for their current writes to
+      // settle before continuity copies/hash counts are captured.
+      const hubResumePromise = quiesceHubBookmarkSyncForUpdate();
+      let automationResume: (() => void) | undefined;
+      try {
+        automationResume = await quiesceAutomationSchedulerForUpdate();
+        const hubResume = await hubResumePromise;
+        return () => {
+          hubResume();
+          automationResume?.();
+        };
+      } catch (error) {
+        try {
+          const hubResume = await hubResumePromise;
+          hubResume();
+        } catch {
+          // The original quiescence error remains authoritative.
+        }
+        automationResume?.();
+        throw error;
+      }
+    },
     captureContinuity: (targetVersion) => {
       const account = getAuthSession();
       return captureUpdaterContinuity({

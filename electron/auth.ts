@@ -47,6 +47,35 @@ interface SessionCache {
 }
 
 let _cache: SessionCache | null = null;
+let _sessionGeneration = 0;
+let _cookieMutationChain: Promise<void> = Promise.resolve();
+
+export type AuthSessionInvalidationReason = "expired" | "server-invalid";
+
+export interface AuthSessionInvalidationEvent {
+  previousWorkspaceId?: string;
+  reason: AuthSessionInvalidationReason;
+}
+
+const sessionInvalidationListeners = new Set<(event: AuthSessionInvalidationEvent) => void>();
+
+function queueCookieMutation(mutation: () => Promise<void>): Promise<void> {
+  const next = _cookieMutationChain.then(mutation, mutation);
+  _cookieMutationChain = next.catch(() => {});
+  return next;
+}
+
+/**
+ * Main-process boundary for silent session loss. Explicit sign-in/sign-out IPC
+ * already owns its transition, but TTL expiry and server invalidation can happen
+ * while every renderer stays mounted.
+ */
+export function onAuthSessionInvalidated(
+  listener: (event: AuthSessionInvalidationEvent) => void,
+): () => void {
+  sessionInvalidationListeners.add(listener);
+  return () => sessionInvalidationListeners.delete(listener);
+}
 
 interface StoredAuthCookie {
   version: 1;
@@ -164,6 +193,35 @@ async function fetchAccountMeta(cookieValue: string): Promise<{ email?: string; 
 /** 세션은 있는데 이메일이 아직 비어 있으면 백그라운드로 다시 채운다(30초 스로틀).
  *  서버가 "미인증"이라고 답하면 세션을 폐기해 크레딧 위젯/계정 칩 상태가 어긋나지 않게 한다. */
 let _metaRefreshAt = 0;
+
+function invalidateCachedSession(reason: AuthSessionInvalidationReason): void {
+  const previous = _cache;
+  if (!previous) return;
+  _sessionGeneration += 1;
+  _cache = null;
+  _metaRefreshAt = 0;
+  void queueCookieMutation(deleteStoredSessionCookie);
+  const event: AuthSessionInvalidationEvent = {
+    previousWorkspaceId: previous.workspaceId,
+    reason,
+  };
+  for (const listener of sessionInvalidationListeners) {
+    try {
+      listener(event);
+    } catch (error) {
+      console.warn("[auth] session invalidation listener failed", error);
+    }
+  }
+}
+
+/** Exact-current authenticated APIs may use this after a definitive 401. */
+export function invalidateAuthSessionFromServer(expectedCookieHeader?: string): boolean {
+  if (!_cache) return false;
+  if (expectedCookieHeader && `${COOKIE_NAME}=${_cache.cookieValue}` !== expectedCookieHeader) return false;
+  invalidateCachedSession("server-invalid");
+  return true;
+}
+
 function scheduleMetaRefresh(): void {
   const cache = _cache;
   if (!cache || cache.email) return;
@@ -173,8 +231,7 @@ function scheduleMetaRefresh(): void {
   void fetchAccountMeta(cache.cookieValue).then((meta) => {
     if (!_cache || _cache.cookieValue !== cache.cookieValue) return;
     if (meta === "invalid") {
-      _cache = null;
-      void deleteStoredSessionCookie();
+      invalidateCachedSession("server-invalid");
       return;
     }
     if (meta) _cache = { ..._cache, email: meta.email, name: meta.name };
@@ -217,8 +274,7 @@ export function getAuthSession(): AuthSession {
   }
   if (!_cache) return { signedIn: false };
   if (_cache.expiresAt && _cache.expiresAt < Date.now()) {
-    _cache = null;
-    void deleteStoredSessionCookie();
+    invalidateCachedSession("expired");
     return { signedIn: false };
   }
   scheduleMetaRefresh();
@@ -233,11 +289,15 @@ export function getAuthSession(): AuthSession {
 
 /** cookie value를 로컬 암호화 저장소 + 메모리 캐시에 영구화하고 메타를 채운다. 두 로그인 경로(창/브라우저)가 공유. */
 async function persistSession(value: string): Promise<AuthSession> {
+  const generation = ++_sessionGeneration;
   try {
-    await writeStoredSessionCookie(value);
+    await queueCookieMutation(() => writeStoredSessionCookie(value));
   } catch (err) {
     console.warn("[auth] local session save failed — keeping session in memory only", err);
   }
+  // A newer login or logout owns both memory and durable state. Because cookie
+  // writes are serialized, its queued mutation will also be the final disk one.
+  if (generation !== _sessionGeneration) return getAuthSession();
   const decoded = decodeSessionCookie(value);
   _cache = {
     cookieValue: value,
@@ -246,7 +306,14 @@ async function persistSession(value: string): Promise<AuthSession> {
     expiresAt: decoded.expiresAt,
   };
   const meta = await fetchAccountMeta(value);
-  if (meta && meta !== "invalid" && _cache) {
+  if (generation !== _sessionGeneration || !_cache || _cache.cookieValue !== value) {
+    return getAuthSession();
+  }
+  if (meta === "invalid") {
+    invalidateAuthSessionFromServer(`${COOKIE_NAME}=${value}`);
+    return { signedIn: false };
+  }
+  if (meta) {
     _cache = { ..._cache, email: meta.email, name: meta.name };
   }
   return getAuthSession();
@@ -255,7 +322,10 @@ async function persistSession(value: string): Promise<AuthSession> {
 /** 마켓플레이스 fetch에 첨부할 cookie 헤더 값 — 미로그인이면 null. */
 export function getSessionCookieHeader(): string | null {
   if (!_cache) return null;
-  if (_cache.expiresAt && _cache.expiresAt < Date.now()) return null;
+  if (_cache.expiresAt && _cache.expiresAt < Date.now()) {
+    invalidateCachedSession("expired");
+    return null;
+  }
   return `${COOKIE_NAME}=${_cache.cookieValue}`;
 }
 
@@ -422,9 +492,10 @@ function callbackHtml(ok: boolean): string {
 }
 
 export async function signOut(): Promise<void> {
+  _sessionGeneration += 1;
   _cache = null;
   try {
-    await deleteStoredSessionCookie();
+    await queueCookieMutation(deleteStoredSessionCookie);
   } catch (err) {
     console.warn("[auth] local session delete failed", err);
   }

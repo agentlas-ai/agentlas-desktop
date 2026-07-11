@@ -160,6 +160,11 @@ import {
   listHubAgentBookmarks,
   removeHubAgentBookmark,
 } from "./store/hub-bookmarks";
+import {
+  broadcastHubBookmarkSnapshot,
+  failCloseActiveHubBookmarks,
+  syncHubBookmarks,
+} from "./hub-bookmark-sync";
 import { claimQuest, listQuests } from "./quests";
 import { listMemoryEntriesForAgentUi } from "./memory/store";
 import { getDreamingStatus, setDreamingEnabled } from "./memory/dreaming";
@@ -196,7 +201,6 @@ import {
   listChatsByProject,
   listRecentChats,
   appendChatMessage,
-  removeAutomationSessions,
   removeChat,
   renameChat,
   setChatContinuousMode,
@@ -214,7 +218,6 @@ import {
   createAutomation,
   getAutomation,
   listAutomations,
-  removeAutomation,
   toggleAutomation,
   updateAutomation,
   updateAutomationGraph,
@@ -1226,12 +1229,33 @@ export function registerIpcHandlers(): void {
 
   // ── auth (agentlas.cloud 구글 로그인) ───────────────────
   ipcMain.handle("auth:getSession", () => getAuthSession());
-  ipcMain.handle("auth:signInWithGoogle", (e) => {
+  ipcMain.handle("auth:signInWithGoogle", async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender);
-    return signInWithGoogle(win);
+    const session = await signInWithGoogle(win);
+    if (session.signedIn) {
+      // Replace any mounted previous-account slice immediately from B's local
+      // cache (often []); network reconciliation may take up to the timeout.
+      failCloseActiveHubBookmarks();
+      broadcastHubBookmarkSnapshot();
+      void syncHubBookmarks({ rerunIfBusy: true });
+    }
+    return session;
   });
-  ipcMain.handle("auth:signInWithBrowser", () => signInWithBrowser());
-  ipcMain.handle("auth:signOut", () => signOut());
+  ipcMain.handle("auth:signInWithBrowser", async () => {
+    const session = await signInWithBrowser();
+    if (session.signedIn) {
+      failCloseActiveHubBookmarks();
+      broadcastHubBookmarkSnapshot();
+      void syncHubBookmarks({ rerunIfBusy: true });
+    }
+    return session;
+  });
+  ipcMain.handle("auth:signOut", async () => {
+    await signOut();
+    failCloseActiveHubBookmarks();
+    broadcastHubBookmarkSnapshot();
+    void syncHubBookmarks();
+  });
 
   // ── usage (LLM 엔진 사용량 — 프로바이더 OAuth usage) ─────
   ipcMain.handle("usage:snapshot", (_e, opts?: { force?: boolean }) => getUsageSnapshot(opts));
@@ -1565,8 +1589,18 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("marketplace:listFirms", () => getMarketSource().listFirms());
   ipcMain.handle("marketplace:status", () => getMarketSourceStatus());
   ipcMain.handle("marketplace:bookmarks", () => listHubAgentBookmarks());
-  ipcMain.handle("marketplace:bookmarkAdd", (_e, listing) => addHubAgentBookmark(listing));
-  ipcMain.handle("marketplace:bookmarkRemove", (_e, slug: string) => removeHubAgentBookmark(slug));
+  ipcMain.handle("marketplace:bookmarksSync", () => syncHubBookmarks({ rerunIfBusy: true }));
+  ipcMain.handle("marketplace:bookmarkAdd", (_e, listing) => {
+    const bookmark = addHubAgentBookmark(listing);
+    broadcastHubBookmarkSnapshot();
+    void syncHubBookmarks({ rerunIfBusy: true });
+    return bookmark;
+  });
+  ipcMain.handle("marketplace:bookmarkRemove", (_e, slug: string, entityKind?: string) => {
+    removeHubAgentBookmark(slug, entityKind);
+    broadcastHubBookmarkSnapshot();
+    void syncHubBookmarks({ rerunIfBusy: true });
+  });
   // 내 에이전트(cargo) — 미로그인/오프라인/실패면 빈 배열(팝업이 안내 처리).
   ipcMain.handle("marketplace:listMine", async () => {
     try {
@@ -1791,8 +1825,8 @@ export function registerIpcHandlers(): void {
     return next;
   });
   ipcMain.handle("automations:remove", async (_e, id: string) => {
-    removeAutomationSessions(id);
-    removeAutomation(id);
+    const { removeAutomationSafely } = await import("./automation-removal");
+    removeAutomationSafely(id);
     await resyncTriggers();
   });
   ipcMain.handle("automations:get", (_e, id: string) => getAutomation(id));

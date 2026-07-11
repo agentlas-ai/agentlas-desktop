@@ -93,7 +93,7 @@ function freshStoreModule() {
 function assertMigrated(store, pass) {
   store.initStore();
   const db = store.getDb();
-  assert.equal(db.pragma("user_version", { simple: true }), 51, `${pass}: user_version`);
+  assert.ok(db.pragma("user_version", { simple: true }) >= 51, `${pass}: user_version`);
   const columns = db.prepare("PRAGMA table_info(agent_evolution_proposals)").all();
   assert.equal(columns.filter((column) => column.name === "operation_json").length, 1, `${pass}: operation_json once`);
   const afterRows = db.prepare(`
@@ -127,7 +127,7 @@ async function main() {
     app.quit();
     setTimeout(() => {
       fs.rmSync(tempDir, { recursive: true, force: true });
-      process.exit(0);
+      process.exit(process.exitCode ?? 0);
     }, 50).unref?.();
   }
 }

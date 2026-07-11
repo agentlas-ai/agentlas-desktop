@@ -5,9 +5,10 @@
 // 호출: grok --prompt "<prompt>" --directory <cwd> --format json
 //   → NDJSON 이벤트 스트림(step_start / text / tool_use / step_finish / error)
 //
-// ⚠ 검증 메모: grok-cli `--format json` 이벤트의 정확한 필드명과 프롬프트 전달 방식(-p arg vs stdin)은
-//    README 기준으로 구현했다. grok-cli 설치본(`npm i -g grok-dev`)으로 한 번 실측해 handle()의
-//    필드 매핑을 확정해야 100% 정확하다. (codex/claude-code 런너도 각 CLI 실측 포맷에 맞춰져 있음)
+// 검증 메모(2026-07-11, v1.1.7 실측): `-p/--prompt`, `--directory`, `--format text|json`,
+//    `--max-tool-rounds` 플래그 실재 확인. 내장 generate_image/generate_video 툴 보유(구독 키리스,
+//    출력은 <cwd>/.grok/generated-media/) — 멀티모달 배선은 shared/multimodal.ts + trex/imagegen.ts
+//    + oberon/animate.ts 참고. `--format json` NDJSON 이벤트 필드 매핑만 아직 실측 미확정.
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";

@@ -27,7 +27,7 @@ const compatibility = {
   minimumSourceAppVersion: "0.7.0",
   minimumRuntimeVersion: "1.0.4",
   minimumSchemaVersion: 35,
-  targetSchemaVersion: 51,
+  targetSchemaVersion: 53,
   bundledRuntimeVersion: "1.1.12",
 };
 
@@ -137,6 +137,7 @@ function makeController(layout, updater, options = {}) {
     uid: options.uid === undefined ? process.getuid() : options.uid,
     runtimeVersion: () => options.runtimeVersion === undefined ? "1.1.12" : options.runtimeVersion,
     databaseSchemaVersion: () => options.databaseSchemaVersion === undefined ? 51 : options.databaseSchemaVersion,
+    quiesceWriters: options.quiesceWriters,
     captureContinuity: options.captureContinuity || continuity.capture,
     verifyContinuity: options.verifyContinuity || (async () => ({ ok: true, violations: [] })),
     broadcast: (state) => states.push(structuredClone(state)),
@@ -222,6 +223,50 @@ async function installJournalStopsFailedApplyLoopAndReconcilesSuccess() {
   assert.equal(fs.existsSync(journalPath), false, "verified relaunch clears the install intent");
   assert.equal(fs.existsSync(backupPath), true, "verified recovery copy remains available after success");
   relaunched.controller.dispose();
+  fs.rmSync(layout.root, { recursive: true, force: true });
+}
+
+async function installQuiescesWritersBeforeContinuityCapture() {
+  const layout = makeLayout();
+  const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
+  const order = [];
+  const updater = new FakeUpdater({ updateInfo });
+  const continuity = mockContinuity(layout);
+  const successful = makeController(layout, updater, {
+    quiesceWriters: async () => {
+      order.push("quiesce");
+      return () => order.push("resume");
+    },
+    captureContinuity: async () => {
+      order.push("capture");
+      return continuity.capture();
+    },
+  });
+  await successful.controller.init();
+  await successful.controller.check();
+  assert.equal((await successful.controller.install()).accepted, true);
+  assert.deepEqual(order, ["quiesce", "capture"], "successful install must remain frozen after capture until app replacement");
+  successful.controller.dispose();
+
+  fs.rmSync(path.join(layout.userDataPath, "updater"), { recursive: true, force: true });
+  const failedOrder = [];
+  const failedUpdater = new FakeUpdater({ updateInfo });
+  const failed = makeController(layout, failedUpdater, {
+    quiesceWriters: async () => {
+      failedOrder.push("quiesce");
+      return () => failedOrder.push("resume");
+    },
+    captureContinuity: async () => {
+      failedOrder.push("capture");
+      throw new Error("synthetic backup failure");
+    },
+  });
+  await failed.controller.init();
+  await failed.controller.check();
+  assert.equal((await failed.controller.install()).accepted, false);
+  assert.deepEqual(failedOrder, ["quiesce", "capture", "resume"], "cancelled install must resume frozen writers");
+  assert.equal(failedUpdater.installCount, 0);
+  failed.controller.dispose();
   fs.rmSync(layout.root, { recursive: true, force: true });
 }
 
@@ -370,7 +415,7 @@ async function compatibilityBoundariesFailBeforeDownload() {
     { label: "old app", info: { version: "0.7.29", agentlasCompatibility: compatibility }, options: { currentVersion: "0.6.9" }, code: "minimum-app-version" },
     { label: "old runtime", info: { version: "0.7.29", agentlasCompatibility: compatibility }, options: { runtimeVersion: "1.0.3" }, code: "minimum-runtime-version" },
     { label: "old schema", info: { version: "0.7.29", agentlasCompatibility: compatibility }, options: { databaseSchemaVersion: 34 }, code: "minimum-schema-version" },
-    { label: "future schema", info: { version: "0.7.29", agentlasCompatibility: compatibility }, options: { databaseSchemaVersion: 52 }, code: "minimum-schema-version" },
+    { label: "future schema", info: { version: "0.7.29", agentlasCompatibility: compatibility }, options: { databaseSchemaVersion: 54 }, code: "minimum-schema-version" },
   ];
   for (const testCase of cases) {
     const layout = makeLayout();
@@ -494,6 +539,13 @@ async function realSqliteContinuityBackupIsVerifiedAndSecretSafe() {
     CREATE TABLE chat_messages (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, text TEXT NOT NULL);
     CREATE TABLE memory_entries (id TEXT PRIMARY KEY, content TEXT NOT NULL);
     CREATE TABLE automations (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+    CREATE TABLE automation_runs (
+      id TEXT PRIMARY KEY,
+      automation_id TEXT,
+      started_at TEXT,
+      status TEXT,
+      node_states_json TEXT
+    );
     PRAGMA user_version = 51;
   `);
   db.prepare("INSERT INTO installed_agents (id, slug) VALUES (?, ?)").run("a1", "alpha");
@@ -502,6 +554,38 @@ async function realSqliteContinuityBackupIsVerifiedAndSecretSafe() {
   db.prepare("INSERT INTO chat_messages (id, chat_id, text) VALUES (?, ?, ?)").run("m1", "c1", "keep this message");
   db.prepare("INSERT INTO memory_entries (id, content) VALUES (?, ?)").run("mem1", "keep this memory");
   db.prepare("INSERT INTO automations (id, name) VALUES (?, ?)").run("auto1", "keep this automation");
+  const insertAutomationRun = db.prepare(
+    "INSERT INTO automation_runs (id, automation_id, started_at, status, node_states_json) VALUES (?, ?, ?, ?, ?)",
+  );
+  insertAutomationRun.run(
+    "automation-run-orphan",
+    "deleted-parent",
+    "2026-07-01T00:00:00.000Z",
+    "running",
+    JSON.stringify({ trigger: "done", worker: "running" }),
+  );
+  insertAutomationRun.run(
+    "automation-run-recovered",
+    "auto1",
+    "2026-07-01T00:00:00.000Z",
+    "running",
+    JSON.stringify({ trigger: "done", worker: "running" }),
+  );
+  insertAutomationRun.run(
+    "automation-run-terminal",
+    "auto1",
+    "2026-07-01T00:00:00.000Z",
+    "ok",
+    JSON.stringify({ trigger: "done", worker: "done" }),
+  );
+  const freshRunStartedAt = new Date(1_800_000_000_000 - 60_000).toISOString();
+  insertAutomationRun.run(
+    "automation-run-fresh",
+    "auto1",
+    freshRunStartedAt,
+    "running",
+    JSON.stringify({ trigger: "done", worker: "running" }),
+  );
   db.close();
   fs.mkdirSync(path.join(layout.userDataPath, "agents", "alpha"), { recursive: true });
   fs.writeFileSync(path.join(layout.userDataPath, "agents", "alpha", "AGENT.md"), "original-agent-asset");
@@ -522,6 +606,7 @@ async function realSqliteContinuityBackupIsVerifiedAndSecretSafe() {
   assert.equal(snapshot.rowCounts.chat_messages, 1);
   assert.equal(snapshot.rowCounts.memory_entries, 1);
   assert.equal(snapshot.rowCounts.automations, 1);
+  assert.equal(snapshot.rowCounts.automation_runs, 4);
   assert.equal(snapshot.authCookiePresent, true);
   assert.equal(fs.existsSync(snapshot.backupPath), true);
   const recoveryFiles = fs.readdirSync(path.dirname(snapshot.backupPath)).sort();
@@ -563,6 +648,76 @@ async function realSqliteContinuityBackupIsVerifiedAndSecretSafe() {
     "natural session expiry must not be reported as updater data loss",
   );
   fs.writeFileSync(path.join(layout.userDataPath, "auth", "session-cookie.v1.json"), "encrypted-secret");
+
+  const migratedAutomationRuns = new Database(databasePath);
+  migratedAutomationRuns.prepare("DELETE FROM automation_runs WHERE id = ?").run("automation-run-orphan");
+  migratedAutomationRuns.prepare(
+    "UPDATE automation_runs SET status = 'error', node_states_json = ? WHERE id = ?",
+  ).run(JSON.stringify({ trigger: "done", worker: "failed" }), "automation-run-recovered");
+  migratedAutomationRuns.pragma("user_version = 52");
+  migratedAutomationRuns.close();
+  const approvedAutomationRunMigration = await verifyUpdaterContinuity({
+    snapshot,
+    currentUserDataPath: layout.userDataPath,
+    currentDatabasePath: databasePath,
+    currentAccountSignedIn: true,
+    now: () => 1_800_000_000_001,
+  });
+  assert.equal(
+    approvedAutomationRunMigration.ok,
+    true,
+    `v52 orphan/recovery migration must pass continuity: ${approvedAutomationRunMigration.violations.join(", ")}`,
+  );
+
+  const illegallyRecoveredFreshRun = new Database(databasePath);
+  illegallyRecoveredFreshRun.prepare(
+    "UPDATE automation_runs SET status = 'error', node_states_json = ? WHERE id = ?",
+  ).run(JSON.stringify({ trigger: "done", worker: "failed" }), "automation-run-fresh");
+  illegallyRecoveredFreshRun.close();
+  const freshRecoveryViolation = await verifyUpdaterContinuity({
+    snapshot,
+    currentUserDataPath: layout.userDataPath,
+    currentDatabasePath: databasePath,
+    currentAccountSignedIn: true,
+    now: () => 1_800_000_000_001,
+  });
+  assert.ok(
+    freshRecoveryViolation.violations.some((entry) =>
+      entry.startsWith("protected-value-changed:automation_runs:status:")
+    ),
+    "v52 continuity allowance must reject running→error for a fresh active run",
+  );
+  const restoreFreshRun = new Database(databasePath);
+  restoreFreshRun.prepare(
+    "UPDATE automation_runs SET status = 'running', node_states_json = ? WHERE id = ?",
+  ).run(JSON.stringify({ trigger: "done", worker: "running" }), "automation-run-fresh");
+  restoreFreshRun.close();
+
+  const illegalAutomationRunDelete = new Database(databasePath);
+  illegalAutomationRunDelete.prepare("DELETE FROM automation_runs WHERE id = ?").run("automation-run-terminal");
+  illegalAutomationRunDelete.close();
+  const missingProtectedAutomationRun = await verifyUpdaterContinuity({
+    snapshot,
+    currentUserDataPath: layout.userDataPath,
+    currentDatabasePath: databasePath,
+    currentAccountSignedIn: true,
+    now: () => 1_800_000_000_001,
+  });
+  assert.ok(
+    missingProtectedAutomationRun.violations.some((entry) => entry.startsWith("protected-row-missing:automation_runs:")),
+    "v52 allowance must not hide deletion of a terminal/live-parent snapshot",
+  );
+  const restoreProtectedAutomationRun = new Database(databasePath);
+  restoreProtectedAutomationRun.prepare(
+    "INSERT INTO automation_runs (id, automation_id, started_at, status, node_states_json) VALUES (?, ?, ?, ?, ?)",
+  ).run(
+    "automation-run-terminal",
+    "auto1",
+    "2026-07-01T00:00:00.000Z",
+    "ok",
+    JSON.stringify({ trigger: "done", worker: "done" }),
+  );
+  restoreProtectedAutomationRun.close();
 
   const otherDatabasePath = path.join(layout.userDataPath, "other.sqlite");
   fs.copyFileSync(databasePath, otherDatabasePath);
@@ -691,6 +846,126 @@ async function realSqliteContinuityBackupIsVerifiedAndSecretSafe() {
   fs.rmSync(layout.root, { recursive: true, force: true });
 }
 
+async function v53HubBookmarkKeyMigrationIsNarrowlyApproved() {
+  const layout = makeLayout();
+  const databasePath = path.join(layout.userDataPath, "agentlas.sqlite");
+  const db = new Database(databasePath);
+  db.exec(`
+    CREATE TABLE hub_agent_bookmarks (
+      slug TEXT PRIMARY KEY,
+      entity_kind TEXT NOT NULL DEFAULT 'agent',
+      listing_json TEXT NOT NULL,
+      bookmarked_at TEXT NOT NULL
+    );
+    INSERT INTO hub_agent_bookmarks (slug, entity_kind, listing_json, bookmarked_at)
+    VALUES ('hub-alpha', 'team', '{"slug":"hub-alpha","entityKind":"team"}', '2026-07-01T00:00:00.000Z');
+    PRAGMA user_version = 52;
+  `);
+  db.close();
+
+  const snapshot = await captureUpdaterContinuity({
+    userDataPath: layout.userDataPath,
+    databasePath,
+    targetVersion: "0.7.34",
+    accountSignedIn: false,
+    now: () => 1_800_000_000_000,
+  });
+
+  const migrated = new Database(databasePath);
+  migrated.transaction(() => {
+    migrated.exec(`
+      ALTER TABLE hub_agent_bookmarks RENAME TO hub_agent_bookmarks_v52;
+      CREATE TABLE hub_agent_bookmarks (
+        workspace_id TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        entity_kind TEXT NOT NULL,
+        listing_json TEXT NOT NULL,
+        bookmarked_at TEXT NOT NULL,
+        server_updated_at TEXT,
+        sync_state TEXT NOT NULL,
+        last_sync_error TEXT,
+        claim_workspace_id TEXT,
+        PRIMARY KEY(workspace_id, entity_kind, slug)
+      );
+      INSERT INTO hub_agent_bookmarks (
+        workspace_id, slug, entity_kind, listing_json, bookmarked_at,
+        server_updated_at, sync_state, last_sync_error, claim_workspace_id
+      )
+      SELECT '__device__', slug, entity_kind, listing_json, bookmarked_at,
+             NULL, 'clean', NULL, NULL
+      FROM hub_agent_bookmarks_v52;
+      DROP TABLE hub_agent_bookmarks_v52;
+      PRAGMA user_version = 53;
+    `);
+  })();
+  migrated.close();
+
+  const approved = await verifyUpdaterContinuity({
+    snapshot,
+    currentUserDataPath: layout.userDataPath,
+    currentDatabasePath: databasePath,
+    currentAccountSignedIn: false,
+    now: () => 1_800_000_000_001,
+  });
+  assert.equal(
+    approved.ok,
+    true,
+    `v53 device/composite-key migration must pass continuity: ${approved.violations.join(", ")}`,
+  );
+
+  const pendingDeleteMutation = new Database(databasePath);
+  pendingDeleteMutation.prepare("UPDATE hub_agent_bookmarks SET sync_state = 'pending_delete' WHERE slug = ?").run("hub-alpha");
+  pendingDeleteMutation.close();
+  const unsafeNewField = await verifyUpdaterContinuity({
+    snapshot,
+    currentUserDataPath: layout.userDataPath,
+    currentDatabasePath: databasePath,
+    currentAccountSignedIn: false,
+    now: () => 1_800_000_000_001,
+  });
+  assert.ok(
+    unsafeNewField.violations.some((entry) =>
+      entry.startsWith("protected-value-changed:hub_agent_bookmarks:sync_state:")
+    ),
+    "v53 allowance must reject a migration that turns a preserved bookmark into a delete outbox row",
+  );
+  const restoreCleanBookmark = new Database(databasePath);
+  restoreCleanBookmark.prepare("UPDATE hub_agent_bookmarks SET sync_state = 'clean' WHERE slug = ?").run("hub-alpha");
+  restoreCleanBookmark.close();
+
+  const changed = new Database(databasePath);
+  changed.prepare("UPDATE hub_agent_bookmarks SET listing_json = ? WHERE slug = ?").run('{"slug":"replaced"}', "hub-alpha");
+  changed.close();
+  const protectedValueChanged = await verifyUpdaterContinuity({
+    snapshot,
+    currentUserDataPath: layout.userDataPath,
+    currentDatabasePath: databasePath,
+    currentAccountSignedIn: false,
+    now: () => 1_800_000_000_001,
+  });
+  assert.ok(
+    protectedValueChanged.violations.some((entry) => entry.startsWith("protected-value-changed:hub_agent_bookmarks:listing_json:")),
+    "v53 allowance must not hide bookmark payload mutation",
+  );
+
+  const moved = new Database(databasePath);
+  moved.prepare("UPDATE hub_agent_bookmarks SET listing_json = ?, workspace_id = ? WHERE slug = ?")
+    .run('{"slug":"hub-alpha","entityKind":"team"}', "other-workspace", "hub-alpha");
+  moved.close();
+  const missingDeviceIdentity = await verifyUpdaterContinuity({
+    snapshot,
+    currentUserDataPath: layout.userDataPath,
+    currentDatabasePath: databasePath,
+    currentAccountSignedIn: false,
+    now: () => 1_800_000_000_001,
+  });
+  assert.ok(
+    missingDeviceIdentity.violations.some((entry) => entry.startsWith("protected-row-missing:hub_agent_bookmarks:")),
+    "v53 allowance must require the exact preserved device-scope identity",
+  );
+  fs.rmSync(layout.root, { recursive: true, force: true });
+}
+
 (async () => {
   await rootOwnedBundleFailsClosed();
   await legacyOrphanShipItStateIsClearedBeforeFreshCheck();
@@ -698,18 +973,18 @@ async function realSqliteContinuityBackupIsVerifiedAndSecretSafe() {
   await corruptInstallJournalFailsClosedAcrossRelaunch();
   await semanticallyDamagedJournalFailsClosed();
   await installJournalStopsFailedApplyLoopAndReconcilesSuccess();
+  await installQuiescesWritersBeforeContinuityCapture();
   await continuityViolationSurfacesRecovery();
   await compatibilityBoundariesFailBeforeDownload();
   await continuityBackupFailureRemainsVisibleAndRetryable();
   await transientFailuresAndConcurrencyPreserveTruth();
   await realSqliteContinuityBackupIsVerifiedAndSecretSafe();
+  await v53HubBookmarkKeyMigrationIsNarrowlyApproved();
   console.log("test-updater-production-contract: PASS (legacy-orphan, cleanup-fail-closed, root-owned, corrupt-journal, no-loop, protected-continuity, compatibility, concurrency)");
   clearTimeout(watchdog);
-  app.quit();
-  process.exit(0);
+  app.exit(0);
 })().catch((error) => {
   clearTimeout(watchdog);
   console.error(error);
-  app.quit();
-  process.exit(1);
+  app.exit(1);
 });

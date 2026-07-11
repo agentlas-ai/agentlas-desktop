@@ -118,6 +118,8 @@ export interface UpdaterControllerDependencies {
   uid: number | null;
   runtimeVersion: () => string | null;
   databaseSchemaVersion: () => number | null;
+  /** Stop mutable background writers and resolve only after their current work drains. */
+  quiesceWriters?: () => Promise<void | (() => void)>;
   captureContinuity: (targetVersion: string) => Promise<ContinuitySnapshot>;
   verifyContinuity: (snapshot: ContinuitySnapshot) => Promise<ContinuityVerification>;
   broadcast: (state: UpdaterState) => void;
@@ -880,47 +882,67 @@ export class DesktopUpdaterController {
       return { accepted: false, state: this.publish(this.manualState(version, "install-not-owned")) };
     }
 
-    let continuity: ContinuitySnapshot;
+    let resumeWriters: (() => void) | undefined;
     try {
-      continuity = await this.deps.captureContinuity(version);
-      this.recoveryBackupPath = continuity.backupPath;
+      resumeWriters = (await this.deps.quiesceWriters?.()) || undefined;
     } catch (error) {
-      this.logger.warn("[updater] continuity backup failed", error);
+      this.logger.warn("[updater] writer quiescence failed", error);
       return { accepted: false, state: this.publish(this.manualState(version, "continuity-backup-failed")) };
     }
 
-    const journal: InstallJournal = {
-      schemaVersion: JOURNAL_SCHEMA_VERSION,
-      phase: "install-requested",
-      sourceVersion: this.deps.currentVersion(),
-      targetVersion: version,
-      requestedAt: new Date(this.now()).toISOString(),
-      continuity,
-    };
+    let keepWritersQuiesced = false;
     try {
-      this.writeJournal(journal);
-    } catch (error) {
-      this.logger.warn("[updater] install journal write failed", error);
-      return { accepted: false, state: this.publish(this.manualState(version, "continuity-backup-failed")) };
-    }
+      let continuity: ContinuitySnapshot;
+      try {
+        continuity = await this.deps.captureContinuity(version);
+        this.recoveryBackupPath = continuity.backupPath;
+      } catch (error) {
+        this.logger.warn("[updater] continuity backup failed", error);
+        return { accepted: false, state: this.publish(this.manualState(version, "continuity-backup-failed")) };
+      }
 
-    this.publish({
-      status: "installing",
-      version,
-      progress: 100,
-      compatibility: this.state.compatibility,
-      recoveryBackupAvailable: true,
-    });
-    try {
-      this.deps.updater.quitAndInstall(false, true);
-      return { accepted: true, state: this.state };
-    } catch (error) {
-      this.logger.warn("[updater] quitAndInstall failed", error);
-      this.writeJournal({ ...journal, phase: "blocked", reasonCode: "install-start-failed" });
-      this.blockedTargetVersion = version;
-      this.blockedReasonCode = "install-start-failed";
-      if (!this.cleanupOrBlock(version)) return { accepted: false, state: this.state };
-      return { accepted: false, state: this.publish(this.manualState(version, "install-start-failed")) };
+      const journal: InstallJournal = {
+        schemaVersion: JOURNAL_SCHEMA_VERSION,
+        phase: "install-requested",
+        sourceVersion: this.deps.currentVersion(),
+        targetVersion: version,
+        requestedAt: new Date(this.now()).toISOString(),
+        continuity,
+      };
+      try {
+        this.writeJournal(journal);
+      } catch (error) {
+        this.logger.warn("[updater] install journal write failed", error);
+        return { accepted: false, state: this.publish(this.manualState(version, "continuity-backup-failed")) };
+      }
+
+      this.publish({
+        status: "installing",
+        version,
+        progress: 100,
+        compatibility: this.state.compatibility,
+        recoveryBackupAvailable: true,
+      });
+      try {
+        this.deps.updater.quitAndInstall(false, true);
+        keepWritersQuiesced = true;
+        return { accepted: true, state: this.state };
+      } catch (error) {
+        this.logger.warn("[updater] quitAndInstall failed", error);
+        this.writeJournal({ ...journal, phase: "blocked", reasonCode: "install-start-failed" });
+        this.blockedTargetVersion = version;
+        this.blockedReasonCode = "install-start-failed";
+        if (!this.cleanupOrBlock(version)) return { accepted: false, state: this.state };
+        return { accepted: false, state: this.publish(this.manualState(version, "install-start-failed")) };
+      }
+    } finally {
+      if (!keepWritersQuiesced) {
+        try {
+          resumeWriters?.();
+        } catch (error) {
+          this.logger.warn("[updater] failed to resume writers after cancelled install", error);
+        }
+      }
     }
   }
 

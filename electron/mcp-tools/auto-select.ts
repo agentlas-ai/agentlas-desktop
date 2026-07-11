@@ -446,6 +446,28 @@ export async function autoSelectMcpTools(input: {
       missingEnv,
     });
   }
+
+  // 사용자가 손수 등록한 커스텀 MCP(카탈로그에 없는 catalogId=null)는 위 MCP_TOOL_CATALOG
+  // 스캔에 잡히지 않아 채팅 런타임(.mcp.json)에서 늘 누락됐다 — 명시적으로 추가한 서버이므로
+  // 항상 후보에 포함한다. remote(헤더 없는 URL)는 envKeys가 비어 바로 사용 가능하고,
+  // 헤더/키가 필요한 서버는 vault에 값이 있을 때만 installed로 잡힌다.
+  for (const server of listInstalledServers()) {
+    if (!server.enabled || server.catalogId) continue;
+    if (result.some((tool) => tool.id === server.id)) continue;
+    const missingEnv: string[] = [];
+    for (const key of server.envKeys) {
+      const value = await readEnvVar(key);
+      if (!value) missingEnv.push(key);
+    }
+    result.push({
+      id: server.id,
+      name: server.nameEn || server.name,
+      reason: "user-added custom MCP (always available)",
+      installed: missingEnv.length === 0,
+      missingEnv,
+    });
+  }
+
   const hub = await resolveHubPluginCandidates({ haystack, hubAllowed });
   return {
     tools: result,

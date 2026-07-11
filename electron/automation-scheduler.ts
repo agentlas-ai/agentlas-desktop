@@ -9,11 +9,14 @@ import {
   markAutomationRun,
   toggleAutomation,
   claimAutomationRun,
+  renewAutomationRunLease,
   releaseAutomationRun,
   startGraphRun,
+  touchGraphRun,
   updateGraphRunNode,
   finishGraphRun,
   countConsecutiveFailures,
+  isAutomationRunParentMissingError,
 } from "./store/automations";
 import { checkComputerUsePermissions } from "./mac-permissions";
 import { getOrCreateAutomationSession, appendChatMessage } from "./store/chats";
@@ -32,6 +35,7 @@ import {
 } from "./store/run-events";
 import { notifyTelegramAutomationDone } from "./telegram/connect";
 import {
+  MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS,
   automationWatchdogError,
   awaitAutomationRunnerWithAbortGrace,
   createAutomationWatchdogState,
@@ -39,8 +43,11 @@ import {
   noteAutomationWatchdogEvent,
   type AutomationWatchdogDecision,
 } from "./automation-watchdog";
+import { recoverStaleAutomationRuns } from "./store/db";
 
 let timer: ReturnType<typeof setInterval> | null = null;
+let startupTimer: ReturnType<typeof setTimeout> | null = null;
+let installQuiescing = false;
 const running = new Set<string>();
 
 // 이 프로세스의 리스 소유자 식별자(설계 §2.6). headless launchd 러너 vs GUI를 구분해
@@ -131,7 +138,7 @@ const ACTIVE_TOOL_STALL_MS = boundedIntegerEnv(
   "AGENTLAS_AUTOMATION_ACTIVE_TOOL_STALL_MS",
   Math.max(STALL_INACTIVITY_MS, 20 * 60 * 1000),
   STALL_INACTIVITY_MS,
-  4 * 60 * 60 * 1000,
+  MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS,
 );
 const OPTIMIZER_TIMEOUT_MS = boundedIntegerEnv(
   "AGENTLAS_AUTOMATION_OPTIMIZER_TIMEOUT_MS",
@@ -139,8 +146,43 @@ const OPTIMIZER_TIMEOUT_MS = boundedIntegerEnv(
   1_000,
   30 * 60 * 1000,
 );
+const RUN_HEARTBEAT_INTERVAL_MS = 15_000;
+const AUTOMATION_LEASE_HEARTBEAT_MS = boundedIntegerEnv(
+  "AGENTLAS_AUTOMATION_LEASE_HEARTBEAT_MS",
+  60_000,
+  1_000,
+  5 * 60_000,
+);
 const lastOptimizerRunAt = new Map<string, number>();
 const optimizerControllers = new Map<string, AbortController>();
+
+export class AutomationActiveRemovalError extends Error {
+  readonly code = "automation_active_removal_blocked";
+
+  constructor(readonly automationId: string, readonly phase: "run" | "optimizer") {
+    super(
+      phase === "optimizer"
+        ? "Automation cleanup is still running. Wait for it to finish, then delete the automation."
+        : "Automation is currently running. Wait for it to finish, then delete the automation.",
+    );
+    this.name = "AutomationActiveRemovalError";
+  }
+}
+
+/**
+ * Deletion is destructive while a write-capable runtime owns this automation.
+ * Refuse instead of assuming AbortSignal compliance: a provider that ignores
+ * cancellation could otherwise keep performing external actions after its DB,
+ * chat, and user-visible parent were already deleted.
+ */
+export function assertAutomationRemovalSafe(automationId: string): void {
+  if (running.has(automationId)) {
+    throw new AutomationActiveRemovalError(automationId, "run");
+  }
+  if (optimizerControllers.has(automationId)) {
+    throw new AutomationActiveRemovalError(automationId, "optimizer");
+  }
+}
 
 /** 운영 진단/결정론 회귀용 — 실제로 적용된 유한 스케줄러 한계를 노출한다. */
 export function automationSchedulerDiagnostics(): {
@@ -148,12 +190,14 @@ export function automationSchedulerDiagnostics(): {
   stallInactivityMs: number;
   activeToolStallMs: number;
   optimizerTimeoutMs: number;
+  leaseHeartbeatMs: number;
 } {
   return {
     maxConcurrentAutomations: MAX_CONCURRENT_AUTOMATIONS,
     stallInactivityMs: STALL_INACTIVITY_MS,
     activeToolStallMs: ACTIVE_TOOL_STALL_MS,
     optimizerTimeoutMs: OPTIMIZER_TIMEOUT_MS,
+    leaseHeartbeatMs: AUTOMATION_LEASE_HEARTBEAT_MS,
   };
 }
 
@@ -304,6 +348,7 @@ function handleAutomationFailure(a: Automation, error: string): void {
 }
 
 async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?: boolean }): Promise<void> {
+  if (installQuiescing) return;
   if (running.has(a.id)) return; // 직전 실행이 아직 진행 중이면 건너뜀
   // due-폴링 경로만 크로스프로세스 리스로 클레임한다(설계 §2.6). 명시적 "Run now"/트리거
   // 발사는 클레임을 건너뛴다(사용자/이벤트가 의도한 즉시 실행이므로 GUI/headless 경합 무관).
@@ -313,8 +358,36 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
   let runError: string | null = null;
   let output: string | undefined;
   let currentRunId: string | null = null;
+  let parentMissing = false;
+  let leaseOwnershipLost = false;
+  let leaseHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let leaseRenewWarningEmitted = false;
   try {
     const controller = new AbortController();
+    if (opts?.claim) {
+      leaseHeartbeatTimer = setInterval(() => {
+        try {
+          const renewed = renewAutomationRunLease(a.id, LEASE_OWNER);
+          if (!renewed) {
+            leaseOwnershipLost = true;
+            controller.abort(new Error("Automation due lease ownership lost"));
+          } else {
+            leaseRenewWarningEmitted = false;
+          }
+        } catch (error) {
+          // A single SQLITE_BUSY/I/O renewal miss is not proof that another
+          // process owns the lease. Keep the run alive and retry next tick.
+          if (!leaseRenewWarningEmitted) {
+            leaseRenewWarningEmitted = true;
+            const code = error && typeof error === "object" && "code" in error
+              ? String((error as { code?: unknown }).code ?? "transient")
+              : "transient";
+            console.warn(`[automation] lease heartbeat deferred (${code.slice(0, 80)})`);
+          }
+        }
+      }, AUTOMATION_LEASE_HEARTBEAT_MS);
+      leaseHeartbeatTimer.unref?.();
+    }
     // 컴퓨터유즈 자동화 preflight — macOS 접근성 권한이 없으면 실행하지 않고 '대기'로 스킵한다.
     // (예전엔 권한 없이 실행돼 브라우저 자동화가 부분 실행 후 먹통/혼란. 이제 빠르게 감지 →
     //  다음 예약에 자동 재시도, false-fail도 false-success도 아님.)
@@ -332,6 +405,17 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
       // 무활동 워치독 — 그래프 경로도 이벤트가 끊기면 행으로 판정한다(노드 자체 타임아웃
       // 1800s보다 훨씬 먼저 사용자에게 실패 피드백이 가도록).
       const graphWatchdog = createAutomationWatchdogState();
+      let lastDurableHeartbeatAt = 0;
+      const persistGraphHeartbeat = (at = Date.now()): void => {
+        if (at - lastDurableHeartbeatAt < RUN_HEARTBEAT_INTERVAL_MS) return;
+        lastDurableHeartbeatAt = at;
+        try {
+          touchGraphRun(runId, new Date(at));
+        } catch {
+          // The live watchdog remains authoritative for this process. A later
+          // event/tick can retry the durable cross-process heartbeat.
+        }
+      };
       let graphStall: AutomationWatchdogDecision | null = null;
       const graphStallTimer = setInterval(() => {
         const decision = evaluateAutomationWatchdog(
@@ -356,6 +440,7 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
               // boundary. Do not revive watchdog/live state after this run has been finalized.
               if (!acceptGraphEvents) return;
               noteAutomationWatchdogEvent(graphWatchdog, ev);
+              persistGraphHeartbeat();
               if (ev.nodeState) broadcastLiveRun(a.id, ev);
             },
           }),
@@ -387,6 +472,16 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
       // 레거시 단일 프롬프트 경로(완전 backward-compat).
       const runId = `run-${a.id}-${Date.now()}`;
       currentRunId = runId;
+      let lastDurableHeartbeatAt = 0;
+      const persistLegacyHeartbeat = (at = Date.now()): void => {
+        if (at - lastDurableHeartbeatAt < RUN_HEARTBEAT_INTERVAL_MS) return;
+        lastDurableHeartbeatAt = at;
+        try {
+          touchGraphRun(runId, new Date(at));
+        } catch {
+          /* best-effort; the in-process watchdog still receives the event */
+        }
+      };
       tryRecordRunEvent({
         runId,
         kind: "automation_legacy_started",
@@ -414,7 +509,8 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
         startGraphRun({ runId, automationId: a.id, nodeIds: ["n0", "n1"] });
         emitLegacyState("n0", "done");
         emitLegacyState("n1", "running");
-      } catch {
+      } catch (snapshotError) {
+        if (isAutomationRunParentMissingError(snapshotError)) throw snapshotError;
         /* 스냅샷 시작 실패는 무시 */
       }
       const chat = getOrCreateAutomationSession({
@@ -457,6 +553,7 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
                 // a broken cancellation-ignoring runtime (including writes after DB shutdown).
                 if (!acceptInvocationEvents) return;
                 noteAutomationWatchdogEvent(invocationWatchdog, ev);
+                persistLegacyHeartbeat();
                 if (ev.kind === "error") {
                   runnerError = ev.error?.message || "runner failed";
                 }
@@ -516,31 +613,40 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
   } catch (err) {
     runStatus = "error";
     runError = err instanceof Error ? err.message : String(err);
-    tryRecordFailureEvent({
-      runId: currentRunId,
-      source: "automation",
-      automationId: a.id,
-      errorCode: "automation_failed",
-      errorMessage: runError,
-    });
-    console.error(`[automation] run failed (${a.name}):`, err);
+    parentMissing = isAutomationRunParentMissingError(err);
+    if (!parentMissing) {
+      tryRecordFailureEvent({
+        runId: currentRunId,
+        source: "automation",
+        automationId: a.id,
+        errorCode: "automation_failed",
+        errorMessage: runError,
+      });
+      console.error(`[automation] run failed (${a.name}):`, err);
+    }
   } finally {
+    if (leaseHeartbeatTimer) {
+      clearInterval(leaseHeartbeatTimer);
+      leaseHeartbeatTimer = null;
+    }
     // 스케줄 전진은 (1) trigger_type==="schedule"이고 (2) 이번 실행이 실제 예약 발사일 때만.
     // run-now·이벤트 트리거는 advanceSchedule=false로 전달돼 next_run_at을 건드리지 않는다
     // (예약 슬롯을 잡아먹거나 이벤트 자동화를 시계 스케줄로 승격하는 버그 방지).
     // run_history 기록·run_count·종료 정책은 어느 경우든 동일하게 적용한다.
-    try {
-      markAutomationRun(a.id, new Date(), {
-        status: runStatus,
-        error: runError,
-        advanceSchedule: opts?.advanceSchedule ?? true,
-      });
-    } catch (err) {
-      console.error("[automation] markAutomationRun failed:", err);
+    if (!leaseOwnershipLost) {
+      try {
+        markAutomationRun(a.id, new Date(), {
+          status: runStatus,
+          error: runError,
+          advanceSchedule: opts?.advanceSchedule ?? true,
+        });
+      } catch (err) {
+        console.error("[automation] markAutomationRun failed:", err);
+      }
     }
     // 실패 피드백·수리·자동 일시정지 — run_history 기록(markAutomationRun) 이후에 호출해야
     // countConsecutiveFailures가 이번 실패를 포함한다.
-    if (runStatus === "error") {
+    if (runStatus === "error" && !parentMissing && !leaseOwnershipLost) {
       try {
         handleAutomationFailure(a, runError ?? "unknown error");
       } catch (err) {
@@ -556,25 +662,30 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
         /* best-effort 리스 해제 */
       }
     }
-    notifyDone(a, runStatus, runError ?? undefined);
-    void notifyTelegramAutomationDone(a, runStatus, {
-      error: runError,
-      output,
-      at: new Date().toISOString(),
-    }).catch((err) => {
-      console.error("[automation] telegram report failed:", err);
-    });
+    if (!parentMissing && !leaseOwnershipLost) {
+      notifyDone(a, runStatus, runError ?? undefined);
+      void notifyTelegramAutomationDone(a, runStatus, {
+        error: runError,
+        output,
+        at: new Date().toISOString(),
+      }).catch((err) => {
+        console.error("[automation] telegram report failed:", err);
+      });
+    }
     running.delete(a.id);
     // 체인 트리거용 완료 이벤트 방출(설계 §3.4 Tier 0 #2). 인프로세스 EventEmitter.
-    try {
-      emitAutomationDone({ automationId: a.id, ok: runStatus === "ok", output, at: new Date().toISOString() });
-    } catch {
-      /* best-effort */
+    if (!parentMissing && !leaseOwnershipLost) {
+      try {
+        emitAutomationDone({ automationId: a.id, ok: runStatus === "ok", output, at: new Date().toISOString() });
+      } catch {
+        /* best-effort */
+      }
     }
   }
 }
 
 export async function runDueAutomationsNow(now: Date = new Date()): Promise<void> {
+  if (installQuiescing) return;
   let due: Automation[];
   try {
     due = dueAutomations(now);
@@ -588,6 +699,7 @@ export async function runDueAutomationsNow(now: Date = new Date()): Promise<void
 
 /** "Run now" — 스케줄 무관하게 지정 자동화를 즉시 1회 실행(enabled 여부 무시). */
 export async function runAutomationNow(id: string): Promise<void> {
+  if (installQuiescing) throw new Error("Automation execution is paused while an update is prepared");
   const a = getAutomation(id);
   if (!a) throw new Error(`Automation not found: ${id}`);
   await runOne(a, { advanceSchedule: false });
@@ -598,12 +710,22 @@ export async function runAutomationNow(id: string): Promise<void> {
  * 트리거 매니저에 주입되는 RunFn. 클레임 없이 실행(이벤트가 의도한 즉시 실행).
  */
 export async function runAutomationFromTrigger(id: string): Promise<void> {
+  if (installQuiescing) return;
   const a = getAutomation(id);
   if (!a) return;
   await runOne(a, { advanceSchedule: false });
 }
 
 function tick(): void {
+  if (installQuiescing) return;
+  // A GUI and the optional headless runner may share this DB. Recovery only
+  // closes snapshots that have been silent beyond the scheduler's absolute
+  // active-tool ceiling; recent progress from either process keeps a run live.
+  try {
+    recoverStaleAutomationRuns();
+  } catch (err) {
+    console.error("[automation] stale run recovery failed:", err);
+  }
   void runDueAutomationsNow();
   // 폴 트리거 구동(설계 §3.3) — 새 타이머 없이 같은 60초 틱에 얹는다. nextPollAt<=now인
   // poll 자동화만 검사(적응형 간격). 매니저 미기동(헤드리스 등)이면 no-op.
@@ -618,17 +740,25 @@ function tick(): void {
 }
 
 export function startAutomationScheduler(): void {
-  if (timer) return;
+  if (installQuiescing || timer) return;
   timer = setInterval(tick, 60_000);
   if (timer.unref) timer.unref();
   // 시작 직후 1회 점검 — 앱이 꺼져 있던 동안 놓친 due를 한 번 따라잡는다(누적 폭주 방지: markRun이 다음 미래로 전진).
-  setTimeout(tick, 5_000);
+  startupTimer = setTimeout(() => {
+    startupTimer = null;
+    tick();
+  }, 5_000);
+  startupTimer.unref?.();
 }
 
 export function stopAutomationScheduler(): void {
   if (timer) {
     clearInterval(timer);
     timer = null;
+  }
+  if (startupTimer) {
+    clearTimeout(startupTimer);
+    startupTimer = null;
   }
   // 앱 종료/스케줄러 정지 시 보조 진단 런도 즉시 취소한다. runner가 신호를 무시해도
   // abortGate가 lifecycle을 settle하므로 optimizer 슬롯과 watchdog timer가 남지 않는다.
@@ -637,4 +767,33 @@ export function stopAutomationScheduler(): void {
       controller.abort(new Error("System Optimizer cancelled because scheduler stopped"));
     }
   }
+}
+
+/**
+ * Freeze new automation dispatch and wait for current DB-writing lifecycles to
+ * finish before updater continuity is captured. A busy automation is not
+ * cancelled or consumed; the install attempt fails closed and can be retried.
+ */
+export async function quiesceAutomationSchedulerForUpdate(
+  timeoutMs = 12_000,
+): Promise<() => void> {
+  const shouldRestart = timer !== null || startupTimer !== null;
+  installQuiescing = true;
+  stopAutomationScheduler();
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  while (running.size > 0 || optimizerControllers.size > 0) {
+    if (Date.now() >= deadline) {
+      installQuiescing = false;
+      if (shouldRestart) startAutomationScheduler();
+      throw new Error("Active automation did not drain before update continuity capture");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  let resumed = false;
+  return () => {
+    if (resumed) return;
+    resumed = true;
+    installQuiescing = false;
+    if (shouldRestart) startAutomationScheduler();
+  };
 }

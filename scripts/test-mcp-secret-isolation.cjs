@@ -101,6 +101,65 @@ function codexProperty(args, serverKey, property) {
       assert.equal(fs.statSync(codexArgs[0]).mode & 0o077, 0, "Codex wrapper must be mode 0600");
     }
 
+    const remoteUrl = "https://mcp.example.test/stream";
+    const remote = installCustomServer({
+      name: "Remote HTTP Probe",
+      transport: "http",
+      url: remoteUrl,
+    });
+    const remoteCfg = await buildMcpConfigFile({ catalogIds: [remote.id] });
+    assert.ok(remoteCfg, "remote MCP selection should produce runtime configs");
+    const remoteJson = JSON.parse(fs.readFileSync(remoteCfg.configPath, "utf8"));
+    assert.deepEqual(
+      remoteJson.mcpServers["remote-http-probe"],
+      { type: "http", url: remoteUrl },
+      "Claude config must preserve Streamable HTTP transport",
+    );
+    assert.equal(
+      JSON.parse(codexProperty(remoteCfg.codexConfigArgs, "remote-http-probe", "url")),
+      remoteUrl,
+      "current Codex CLI must keep its supported remote MCP URL",
+    );
+
+    const remoteSecret = "remote-bearer-regression-secret";
+    await setEnvVar("Authorization", `Bearer ${remoteSecret}`);
+    const authenticatedRemote = installCustomServer({
+      name: "Authenticated Remote Probe",
+      transport: "http",
+      url: "https://mcp.example.test/authenticated",
+      envKeys: ["Authorization"],
+    });
+    const authenticatedCfg = await buildMcpConfigFile({ catalogIds: [authenticatedRemote.id] });
+    assert.ok(authenticatedCfg);
+    const authenticatedJson = JSON.parse(fs.readFileSync(authenticatedCfg.configPath, "utf8"));
+    const authenticatedServer = authenticatedJson.mcpServers["authenticated-remote-probe"];
+    assert.match(authenticatedServer.headers.Authorization, /^Bearer \$\{AGENTLAS_MCP_SECRET_[A-F0-9]{32}\}$/);
+    const remoteAlias = authenticatedServer.headers.Authorization.slice("Bearer ${".length, -1);
+    assert.equal(authenticatedCfg.runtimeEnv[remoteAlias], remoteSecret, "remote secret must travel only in runtime env");
+    assert.equal(
+      JSON.parse(codexProperty(authenticatedCfg.codexConfigArgs, "authenticated-remote-probe", "bearer_token_env_var")),
+      remoteAlias,
+      "Codex remote auth must reference the opaque bearer env alias",
+    );
+    assert.doesNotMatch(JSON.stringify(authenticatedJson), new RegExp(remoteSecret));
+    assert.doesNotMatch(JSON.stringify(authenticatedCfg.codexConfigArgs), new RegExp(remoteSecret));
+
+    const legacySse = installCustomServer({
+      name: "Legacy SSE Probe",
+      transport: "sse",
+      url: "https://mcp.example.test/legacy-sse",
+    });
+    const legacySseCfg = await buildMcpConfigFile({ catalogIds: [legacySse.id] });
+    assert.equal(JSON.parse(fs.readFileSync(legacySseCfg.configPath, "utf8")).mcpServers["legacy-sse-probe"].type, "sse");
+    assert.equal(
+      legacySseCfg.codexConfigArgs.some((value) => String(value).includes("mcp_servers.legacy-sse-probe.")),
+      false,
+      "legacy SSE must remain Claude-only because current Codex --url is Streamable HTTP",
+    );
+    const clientSource = fs.readFileSync(path.join(__dirname, "..", "electron", "mcp-tools", "client.ts"), "utf8");
+    assert.match(clientSource, /StreamableHTTPClientTransport/, "HTTP MCP must not be routed through legacy SSE");
+    assert.match(clientSource, /requestInit: \{ headers \}/, "remote transport requests must receive resolved vault headers");
+
     console.log(JSON.stringify({ ok: true, serverKey, configMode: fs.statSync(cfg.configPath).mode & 0o777 }, null, 2));
   } catch (error) {
     exitCode = 1;

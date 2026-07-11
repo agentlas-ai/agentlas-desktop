@@ -94,6 +94,11 @@ const api: AgentlasIpc = {
     signInWithGoogle: () => ipcRenderer.invoke("auth:signInWithGoogle"),
     signInWithBrowser: () => ipcRenderer.invoke("auth:signInWithBrowser"),
     signOut: () => ipcRenderer.invoke("auth:signOut"),
+    onSessionChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, session: Parameters<typeof callback>[0]) => callback(session);
+      ipcRenderer.on("auth:sessionChanged", listener);
+      return () => ipcRenderer.removeListener("auth:sessionChanged", listener);
+    },
   },
   usage: {
     snapshot: (opts?: { force?: boolean }) => ipcRenderer.invoke("usage:snapshot", opts),
@@ -261,8 +266,16 @@ const api: AgentlasIpc = {
     status: () => ipcRenderer.invoke("marketplace:status"),
     listMine: () => ipcRenderer.invoke("marketplace:listMine"),
     bookmarks: () => ipcRenderer.invoke("marketplace:bookmarks"),
+    syncBookmarks: () => ipcRenderer.invoke("marketplace:bookmarksSync"),
+    onBookmarksSnapshot: (handler) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, snapshot: Parameters<typeof handler>[0]) =>
+        handler(snapshot);
+      ipcRenderer.on("marketplace:bookmarksSnapshot", wrapped);
+      return () => ipcRenderer.removeListener("marketplace:bookmarksSnapshot", wrapped);
+    },
     bookmarkAdd: (listing) => ipcRenderer.invoke("marketplace:bookmarkAdd", listing),
-    bookmarkRemove: (slug: string) => ipcRenderer.invoke("marketplace:bookmarkRemove", slug),
+    bookmarkRemove: (slug: string, entityKind?: string) =>
+      ipcRenderer.invoke("marketplace:bookmarkRemove", slug, entityKind),
   },
   cloudAgents: {
     savePrivate: (input) => ipcRenderer.invoke("cloudAgents:savePrivate", input),

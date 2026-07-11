@@ -400,13 +400,22 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
         ? `'${automation.name}' 자동화를 삭제할까요?\n\n자동화가 사라지며, 이 자동화가 사용하던 실행 채팅과 기록도 같이 삭제됩니다.`
         : `Delete '${automation.name}'?\n\nThis removes the automation and also deletes its linked run chat and messages.`;
     if (!window.confirm(message)) return;
-    await api.automations.remove(automation.id);
-    setData((prev) => ({
-      ...prev,
-      automations: prev.automations.filter((item) => item.id !== automation.id),
-    }));
-    window.dispatchEvent(new CustomEvent("agentlas:automation-changed", { detail: { id: automation.id } }));
-    if (pathname.startsWith("/automation") && currentAutomationId === automation.id) navigate("/automation");
+    try {
+      await api.automations.remove(automation.id);
+      setData((prev) => ({
+        ...prev,
+        automations: prev.automations.filter((item) => item.id !== automation.id),
+      }));
+      window.dispatchEvent(new CustomEvent("agentlas:automation-changed", { detail: { id: automation.id } }));
+      if (pathname.startsWith("/automation") && currentAutomationId === automation.id) navigate("/automation");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      window.alert(
+        locale === "ko"
+          ? `자동화를 삭제하지 못했습니다. 실행 중이라면 완료된 뒤 다시 시도하세요.\n\n${detail}`
+          : `Automation was not deleted. If it is running, wait for it to finish and try again.\n\n${detail}`,
+      );
+    }
   }
 
   const newChatDialog = newChatDialogOpen ? (

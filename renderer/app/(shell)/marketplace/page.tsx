@@ -4,7 +4,13 @@ import { useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { classifyHubEntity, entityClassLabel } from "@/lib/agent-entity-kind";
-import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
+import {
+  announceHubBookmarkChange,
+  hubBookmarkIdentityKey,
+  hubBookmarkIdentityKeyFromParts,
+  hubListingIdentityKey,
+  onHubBookmarkChange,
+} from "@/lib/hub-bookmark-events";
 import {
   hubSecurityGradeExplanation,
   hubSecurityGradeLabel,
@@ -116,7 +122,7 @@ function MarketplacePage() {
   const [importNotice, setImportNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [listings, setListings] = useState<MarketplaceListing[]>([]);
   const [installedAgentSlugs, setInstalledAgentSlugs] = useState<Set<string>>(new Set());
-  const [bookmarkedSlugs, setBookmarkedSlugs] = useState<Set<string>>(new Set());
+  const [bookmarkedIdentities, setBookmarkedIdentities] = useState<Set<string>>(new Set());
   const [sourceStatus, setSourceStatus] = useState<MarketplaceSourceStatus | null>(null);
   const [q, setQ] = useState(() => searchParams.get("q") ?? "");
   const [searchFocused, setSearchFocused] = useState(false);
@@ -166,7 +172,7 @@ function MarketplacePage() {
     ]);
     setInstalledAgentSlugs(new Set(visibleAgents(ag).map((a) => a.slug)));
     if (bookmarkStateGenerationRef.current === bookmarkGeneration) {
-      setBookmarkedSlugs(new Set((bookmarks ?? []).map((bookmark) => bookmark.slug)));
+      setBookmarkedIdentities(new Set((bookmarks ?? []).map(hubBookmarkIdentityKey)));
     }
     setSignedIn(session.signedIn);
   }
@@ -174,6 +180,31 @@ function MarketplacePage() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  useEffect(
+    () => onHubBookmarkChange((change) => {
+      bookmarkStateGenerationRef.current += 1;
+      if (change.action === "synced") {
+        setBookmarkedIdentities(new Set(change.bookmarks.map(hubBookmarkIdentityKey)));
+      } else if (change.action === "added") {
+        setBookmarkedIdentities((previous) => new Set(previous).add(hubBookmarkIdentityKey(change.bookmark)));
+      } else {
+        setBookmarkedIdentities((previous) => {
+          const next = new Set(previous);
+          if (change.entityKind) {
+            next.delete(hubBookmarkIdentityKeyFromParts(change.slug, change.entityKind));
+          } else {
+            const slugSuffix = `:${change.slug.trim().toLowerCase()}`;
+            for (const identity of next) {
+              if (identity.endsWith(slugSuffix)) next.delete(identity);
+            }
+          }
+          return next;
+        });
+      }
+    }),
+    [],
+  );
 
   useEffect(() => {
     const api = ipc();
@@ -254,11 +285,12 @@ function MarketplacePage() {
   async function bookmarkOne(listing: MarketplaceListing) {
     const api = ipc();
     if (!api?.marketplace?.bookmarkAdd) return;
-    setBookmarking(listing.slug);
+    const listingIdentity = hubListingIdentityKey(listing);
+    setBookmarking(listingIdentity);
     try {
       const bookmark = await api.marketplace.bookmarkAdd(listing);
       bookmarkStateGenerationRef.current += 1;
-      setBookmarkedSlugs((prev) => new Set(prev).add(bookmark.slug));
+      setBookmarkedIdentities((prev) => new Set(prev).add(hubBookmarkIdentityKey(bookmark)));
       announceHubBookmarkChange({ action: "added", bookmark });
       setImportNotice({
         tone: "ok",
@@ -519,12 +551,12 @@ function MarketplacePage() {
                 <div className="market-card-grid">
                   {pagedListings.map((listing) => (
                     <AgentCard
-                      key={`${hubCategoryFor(listing)}-${listing.slug}`}
+                      key={hubListingIdentityKey(listing)}
                       listing={listing}
                       locale={locale}
                       installed={installedAgentSlugs.has(listing.slug)}
-                      bookmarked={bookmarkedSlugs.has(listing.slug)}
-                      bookmarking={bookmarking === listing.slug}
+                      bookmarked={bookmarkedIdentities.has(hubListingIdentityKey(listing))}
+                      bookmarking={bookmarking === hubListingIdentityKey(listing)}
                       onBookmark={() => void bookmarkOne(listing)}
                     />
                   ))}

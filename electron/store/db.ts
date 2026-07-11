@@ -7,16 +7,24 @@ import Database from "better-sqlite3";
 import path from "node:path";
 import { app } from "electron";
 import { publicAgentVisibility } from "../agents/policy";
+import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 51;
+const SCHEMA_VERSION = 53;
+
+// The scheduler checks an active tool every 30s and then gives a cancelled
+// runner 10s to settle. Two extra minutes keep recovery safely outside both
+// boundaries while still repairing abandoned rows on the next periodic tick.
+export const AUTOMATION_RUN_STALE_AFTER_MS =
+  MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS + 2 * 60 * 1000;
 
 type SchemaColumn = {
   name: string;
   type: string;
   notnull: number;
   dflt_value: unknown;
+  pk: number;
 };
 
 type OrphanChatRow = Record<string, unknown> & {
@@ -40,6 +48,99 @@ function tableExists(db: Database.Database, table: string): boolean {
   return Boolean(
     db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1").get(table),
   );
+}
+
+type RecoverableAutomationRunRow = {
+  id: string;
+  node_states_json: string | null;
+};
+
+function failRunningWorkflowNodes(raw: string | null): string | null {
+  if (!raw) return raw;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return raw;
+    let changed = false;
+    for (const [nodeId, state] of Object.entries(parsed)) {
+      if (state === "running") {
+        parsed[nodeId] = "failed";
+        changed = true;
+      }
+    }
+    return changed ? JSON.stringify(parsed) : raw;
+  } catch {
+    return raw;
+  }
+}
+
+function recoverStaleAutomationRunsInDb(db: Database.Database, now: Date): number {
+  if (!tableExists(db, "automation_runs") || !tableExists(db, "automations")) return 0;
+  const cutoff = new Date(now.getTime() - AUTOMATION_RUN_STALE_AFTER_MS).toISOString();
+  const hasRunEvents = tableExists(db, "run_events");
+  const hasFailureEvents = tableExists(db, "failure_events");
+  const quietClauses = [
+    "COALESCE(r.last_activity_at, r.started_at) IS NOT NULL",
+    "COALESCE(r.last_activity_at, r.started_at) <= @cutoff",
+    ...(hasRunEvents
+      ? ["NOT EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = r.id AND e.ts > @cutoff)"]
+      : []),
+    ...(hasFailureEvents
+      ? ["NOT EXISTS (SELECT 1 FROM failure_events f WHERE f.run_id = r.id AND f.ts > @cutoff)"]
+      : []),
+  ];
+  const quietSql = quietClauses.join(" AND ");
+
+  const recover = db.transaction(() => {
+    // Guarded inserts prevent this in the normal path, but a peer running an
+    // older binary may still commit a child just after parent deletion.
+    db.exec(`
+      DELETE FROM automation_runs
+      WHERE automation_id IS NULL
+         OR NOT EXISTS (SELECT 1 FROM automations a WHERE a.id = automation_runs.automation_id);
+      DELETE FROM run_history
+      WHERE automation_id IS NULL
+         OR NOT EXISTS (SELECT 1 FROM automations a WHERE a.id = run_history.automation_id);
+    `);
+    const candidates = db
+      .prepare(
+        `SELECT r.id, r.node_states_json
+         FROM automation_runs r
+         WHERE r.status = 'running'
+           AND r.automation_id IS NOT NULL
+           AND EXISTS (SELECT 1 FROM automations a WHERE a.id = r.automation_id)
+           AND ${quietSql}`,
+      )
+      .all({ cutoff }) as RecoverableAutomationRunRow[];
+    if (candidates.length === 0) return 0;
+
+    // Recheck silence and status in the UPDATE itself. If another process
+    // wrote progress or finalized between selection and write-lock acquisition,
+    // its current state wins and this recovery becomes a no-op.
+    const update = db.prepare(
+      `UPDATE automation_runs AS r
+       SET status = 'error', node_states_json = @nodeStatesJson
+       WHERE r.id = @id
+         AND r.status = 'running'
+         AND ${quietSql}`,
+    );
+    let recovered = 0;
+    for (const candidate of candidates) {
+      const result = update.run({
+        id: candidate.id,
+        cutoff,
+        nodeStatesJson: failRunningWorkflowNodes(candidate.node_states_json),
+      });
+      recovered += result.changes;
+    }
+    return recovered;
+  });
+  const previousBusyTimeout = Number(db.pragma("busy_timeout", { simple: true }) ?? 0);
+  db.pragma("busy_timeout = 0");
+  try {
+    return recover.immediate();
+  } finally {
+    db.pragma(`busy_timeout = ${Math.max(0, Math.floor(previousBusyTimeout))}`);
+  }
 }
 
 function hasMeaningfulHiredAgents(value: unknown): boolean {
@@ -1114,6 +1215,7 @@ export function initStore(): void {
         id TEXT PRIMARY KEY,
         automation_id TEXT,
         started_at TEXT,
+        last_activity_at TEXT,
         status TEXT,
         node_states_json TEXT
       );
@@ -1599,7 +1701,188 @@ export function initStore(): void {
     `);
   }
 
-  _db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  // v52: automation live snapshots are projections of an existing automation,
+  // not an append-only audit ledger. Historical schemas had no FK cascade, so
+  // deleting a parent left both canvas snapshots and run history unreachable.
+  if (userVersion < 52) {
+    const repairAutomationHistory = _db.transaction(() => {
+      if (tableExists(_db!, "automation_runs") && tableExists(_db!, "automations")) {
+        const automationRunColumns = schemaColumns(_db!, "automation_runs");
+        if (!automationRunColumns.some((column) => column.name === "last_activity_at")) {
+          _db!.exec("ALTER TABLE automation_runs ADD COLUMN last_activity_at TEXT");
+        }
+        _db!.exec("UPDATE automation_runs SET last_activity_at = started_at WHERE last_activity_at IS NULL");
+        _db!.exec(`
+          DELETE FROM automation_runs
+          WHERE automation_id IS NULL
+             OR NOT EXISTS (
+               SELECT 1 FROM automations a WHERE a.id = automation_runs.automation_id
+             );
+        `);
+      }
+      if (tableExists(_db!, "run_history") && tableExists(_db!, "automations")) {
+        _db!.exec(`
+          DELETE FROM run_history
+          WHERE automation_id IS NULL
+             OR NOT EXISTS (
+               SELECT 1 FROM automations a WHERE a.id = run_history.automation_id
+             );
+        `);
+      }
+    });
+    repairAutomationHistory();
+  }
+
+  // v53: Hub bookmarks become account-scoped durable cache + local outbox.
+  // Legacy slug-PK rows are preserved in device scope and claimed by the first
+  // successfully signed-in workspace; no auth state is consulted in migration.
+  if (userVersion < 53) {
+    const migrateHubBookmarks = _db.transaction(() => {
+      const requiredColumns = new Set([
+        "workspace_id",
+        "slug",
+        "entity_kind",
+        "listing_json",
+        "bookmarked_at",
+        "server_updated_at",
+        "sync_state",
+        "last_sync_error",
+        "claim_workspace_id",
+      ]);
+      const existingSchema = tableExists(_db!, "hub_agent_bookmarks")
+        ? schemaColumns(_db!, "hub_agent_bookmarks")
+        : [];
+      const existingColumns = new Set(existingSchema.map((column) => column.name));
+      const existingPrimaryKey = existingSchema
+        .filter((column) => column.pk > 0)
+        .sort((a, b) => a.pk - b.pk)
+        .map((column) => column.name);
+      const alreadyV53 =
+        [...requiredColumns].every((column) => existingColumns.has(column)) &&
+        existingPrimaryKey.join("\u0000") === ["workspace_id", "entity_kind", "slug"].join("\u0000");
+
+      if (!alreadyV53) {
+        _db!.exec(`
+          DROP INDEX IF EXISTS idx_hub_agent_bookmarks_time;
+          DROP INDEX IF EXISTS idx_hub_agent_bookmarks_kind;
+          DROP INDEX IF EXISTS idx_hub_agent_bookmarks_workspace_time;
+          DROP INDEX IF EXISTS idx_hub_agent_bookmarks_outbox;
+          DROP TABLE IF EXISTS hub_agent_bookmarks_v52;
+        `);
+        if (tableExists(_db!, "hub_agent_bookmarks")) {
+          _db!.exec("ALTER TABLE hub_agent_bookmarks RENAME TO hub_agent_bookmarks_v52");
+        }
+        _db!.exec(`
+          CREATE TABLE hub_agent_bookmarks (
+            workspace_id TEXT NOT NULL,
+            slug TEXT NOT NULL,
+            entity_kind TEXT NOT NULL DEFAULT 'agent',
+            listing_json TEXT NOT NULL,
+            bookmarked_at TEXT NOT NULL,
+            server_updated_at TEXT,
+            sync_state TEXT NOT NULL DEFAULT 'clean'
+              CHECK(sync_state IN ('clean','pending_upsert','pending_delete')),
+            last_sync_error TEXT,
+            claim_workspace_id TEXT,
+            PRIMARY KEY(workspace_id, entity_kind, slug)
+          );
+        `);
+        if (tableExists(_db!, "hub_agent_bookmarks_v52")) {
+          const legacyColumns = new Set(
+            schemaColumns(_db!, "hub_agent_bookmarks_v52").map((column) => column.name),
+          );
+          const hasV53Columns = [...requiredColumns].every((column) => legacyColumns.has(column));
+          if (hasV53Columns) {
+            _db!.exec(`
+              INSERT OR REPLACE INTO hub_agent_bookmarks (
+                workspace_id, slug, entity_kind, listing_json, bookmarked_at,
+                server_updated_at, sync_state, last_sync_error, claim_workspace_id
+              )
+              SELECT
+                workspace_id, slug,
+                CASE
+                  WHEN lower(trim(entity_kind)) = 'team' THEN 'team'
+                  WHEN lower(trim(entity_kind)) = 'plugin' THEN 'plugin'
+                  ELSE 'agent'
+                END,
+                listing_json, bookmarked_at, server_updated_at,
+                CASE
+                  WHEN sync_state IN ('clean','pending_upsert','pending_delete') THEN sync_state
+                  ELSE 'clean'
+                END,
+                last_sync_error, claim_workspace_id
+              FROM hub_agent_bookmarks_v52
+              ORDER BY bookmarked_at ASC, rowid ASC;
+            `);
+          } else if (
+            legacyColumns.has("slug") &&
+            legacyColumns.has("entity_kind") &&
+            legacyColumns.has("listing_json") &&
+            legacyColumns.has("bookmarked_at")
+          ) {
+            _db!.exec(`
+              INSERT INTO hub_agent_bookmarks (
+                workspace_id, slug, entity_kind, listing_json, bookmarked_at,
+                server_updated_at, sync_state, last_sync_error, claim_workspace_id
+              )
+              SELECT
+                '__device__', slug,
+                CASE
+                  WHEN lower(trim(entity_kind)) = 'team' THEN 'team'
+                  WHEN lower(trim(entity_kind)) = 'plugin' THEN 'plugin'
+                  ELSE 'agent'
+                END,
+                listing_json, bookmarked_at,
+                NULL, 'clean', NULL, NULL
+              FROM hub_agent_bookmarks_v52;
+            `);
+          }
+          _db!.exec("DROP TABLE hub_agent_bookmarks_v52");
+        }
+      }
+
+      _db!.exec(`
+        CREATE INDEX IF NOT EXISTS idx_hub_agent_bookmarks_workspace_time
+          ON hub_agent_bookmarks(workspace_id, bookmarked_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_hub_agent_bookmarks_outbox
+          ON hub_agent_bookmarks(workspace_id, sync_state, bookmarked_at ASC);
+      `);
+    });
+    migrateHubBookmarks();
+  }
+
+  // Run on every boot as well as the v52 upgrade. A hard process exit can
+  // happen on any future schema version; only rows silent beyond the absolute
+  // watchdog ceiling are terminalized, so a recent GUI/headless peer remains
+  // authoritative.
+  try {
+    const recoveredAutomationRuns = recoverStaleAutomationRunsInDb(_db, new Date());
+    if (recoveredAutomationRuns > 0) {
+      console.warn(`[automation] recovered ${recoveredAutomationRuns} abandoned run snapshot(s)`);
+    }
+  } catch (error) {
+    // Another GUI/headless writer may own the WAL during boot. Recovery is a
+    // repair projection, never a reason to block the whole application launch;
+    // the scheduler retries it on the next minute tick.
+    const code = typeof error === "object" && error !== null && "code" in error
+      ? String((error as { code?: unknown }).code ?? "busy")
+      : "busy";
+    console.warn(`[automation] boot run recovery deferred (${code})`);
+  }
+
+  // Never rewrite the version marker on an ordinary boot (avoids taking a WAL
+  // writer lock while a healthy peer is executing), and never downgrade a DB
+  // created by a newer binary.
+  if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
+}
+
+/**
+ * Periodic counterpart to boot recovery. This lets a crash-recent row age out
+ * without requiring another restart, while the silence/event checks protect a
+ * healthy run owned by the GUI or headless peer process.
+ */
+export function recoverStaleAutomationRuns(now: Date = new Date()): number {
+  return recoverStaleAutomationRunsInDb(getDb(), now);
 }
 
 export function getDb(): Database.Database {

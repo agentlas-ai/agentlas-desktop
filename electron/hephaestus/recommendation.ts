@@ -186,6 +186,17 @@ export function normalizeRecommendation(json: unknown, query: string): Recommend
     });
   }
 
-  // ── propose_new / refuse / hub_fallback / 기타 → 추천 없음(그냥 보내기 폴백) ──
+  // ── propose_new → 빌드 제안(라우팅할 적합 에이전트가 정말 없음). 렌더러가 빌드 바텀시트를 띄운다. ──
+  if (action === "propose_new") {
+    const reason =
+      str(decision.reason) ??
+      asArr(decision.reasons)
+        .map((r) => str(r))
+        .filter(Boolean)
+        .join("; ");
+    return base({ mode: "build", ...(reason ? { buildReason: reason } : {}) });
+  }
+
+  // ── refuse / hub_fallback / 기타 → 추천 없음(그냥 보내기 폴백) ──
   return base({ mode: "none" });
 }

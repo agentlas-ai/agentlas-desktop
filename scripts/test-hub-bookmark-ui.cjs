@@ -69,7 +69,13 @@ async function main() {
     const dashboardContext = await browser.newContext({ viewport: { width: 1440, height: 980 } });
     await dashboardContext.addInitScript(
       setupMockAgentlasBridge,
-      mockBridgeOptions({ teamRoster: true, bookmarkEmptyReadDelayMs: 650, filterHubSearch: true, includeInstallOnlyListing: true }),
+      mockBridgeOptions({
+        teamRoster: true,
+        bookmarkEmptyReadDelayMs: 650,
+        filterHubSearch: true,
+        includeInstallOnlyListing: true,
+        includeSameSlugEntityCollision: true,
+      }),
     );
     const dashboardPage = await dashboardContext.newPage();
     watchErrors(dashboardPage);
@@ -88,6 +94,57 @@ async function main() {
     await dashboardPage.waitForTimeout(800);
     await assert.doesNotReject(() => orgTree.getByText(/허브 에이전트 002|Hub Agent 002/, { exact: true }).waitFor({ timeout: 1000 }));
 
+    // Agent/team namespaces are independent even when the Hub slug collides.
+    // Adding one card must not mark the other card as bookmarked or reuse its
+    // React key/busy state.
+    await roomSearch.fill("same-slug-bookmark");
+    const sameSlugAgent = dashboardPage.locator(".hub-borrow-card").filter({ hasText: /동일 슬러그 에이전트|Same Slug Agent/ });
+    const sameSlugTeam = dashboardPage.locator(".hub-borrow-card").filter({ hasText: /동일 슬러그 팀|Same Slug Team/ });
+    await sameSlugAgent.waitFor({ timeout: 10000 });
+    await sameSlugTeam.waitFor({ timeout: 10000 });
+    await sameSlugAgent.getByRole("button", { name: /북마크|Bookmark/ }).click();
+    await sameSlugAgent.getByText(/북마크됨|bookmarked/).waitFor();
+    assert.equal(
+      await sameSlugTeam.getByRole("button", { name: /북마크|Bookmark/ }).count(),
+      1,
+      "bookmarking the agent identity must leave the same-slug team independently actionable",
+    );
+    await sameSlugTeam.getByRole("button", { name: /북마크|Bookmark/ }).click();
+    await sameSlugTeam.getByText(/북마크됨|bookmarked/).waitFor();
+    await dashboardPage.evaluate(() => {
+      window.dispatchEvent(new CustomEvent("agentlas:hub-bookmarks-changed", {
+        detail: { action: "removed", slug: "same-slug-bookmark", entityKind: "agent" },
+      }));
+    });
+    await sameSlugAgent.getByRole("button", { name: /북마크|Bookmark/ }).waitFor();
+    await sameSlugTeam.getByText(/북마크됨|bookmarked/).waitFor();
+
+    // Main→renderer full snapshots are authoritative for account switches and
+    // remote Web mutations. They must update and clear the mounted org tree
+    // without a page reload or a five-minute stale read.
+    await dashboardPage.evaluate(() => {
+      const listing = {
+        slug: "registry-team",
+        name: "레지스트리 팀",
+        nameEn: "Registry Team",
+        tagline: "웹 북마크에서 즉시 동기화된 단계형 팀",
+        taglineEn: "Phased team synced immediately from Web bookmarks",
+        trustGrade: "unknown",
+        installCount: 0,
+        manifestUrl: "mock",
+        kind: "install-only",
+        callable: false,
+        routingReady: false,
+        routingStatus: "bookmark_snapshot_unverified",
+        source: "bookmark",
+        entityKind: "team",
+      };
+      window.__qa.emitHubBookmarkSnapshot([{ slug: listing.slug, listing, bookmarkedAt: new Date().toISOString() }]);
+    });
+    await orgTree.getByText(/레지스트리 팀|Registry Team/, { exact: true }).waitFor({ timeout: 3000 });
+    await dashboardPage.evaluate(() => window.__qa.emitHubBookmarkSnapshot([]));
+    await orgTree.getByText(/레지스트리 팀|Registry Team/, { exact: true }).waitFor({ state: "detached", timeout: 3000 });
+
     // Global search: a new query must hide the previous query's candidates in
     // the debounce window, while normal autocomplete still needs no Enter.
     const globalSearch = dashboardPage.getByPlaceholder(/허브 검색|Search hub/).first();
@@ -101,9 +158,34 @@ async function main() {
     );
     await dashboardPage.screenshot({ path: path.join(outDir, "dashboard-bookmark-immediate.png"), fullPage: true });
 
+    // Seed only the agent namespace before loading Marketplace. Its team card
+    // must remain independently bookmarkable there too.
+    await dashboardPage.evaluate(async () => {
+      const rows = await window.agentlas.marketplace.search("same-slug-bookmark");
+      const listing = rows.find((row) => row.slug === "same-slug-bookmark" && row.entityKind === "agent");
+      if (!listing) throw new Error("same-slug agent fixture missing");
+      window.__qa.emitHubBookmarkSnapshot([{ slug: listing.slug, listing, bookmarkedAt: new Date().toISOString() }]);
+    });
+
     // Hub page: visible combobox suggestions also appear without submit.
     await dashboardPage.goto(`${baseUrl}/marketplace.html`, { waitUntil: "domcontentloaded" });
     const hubSearch = dashboardPage.locator("input.portal-input");
+    await hubSearch.fill("same-slug-bookmark");
+    const marketplaceAgent = dashboardPage.locator(".hub-entity-card").filter({ hasText: /동일 슬러그 에이전트|Same Slug Agent/ });
+    const marketplaceTeam = dashboardPage.locator(".hub-entity-card").filter({ hasText: /동일 슬러그 팀|Same Slug Team/ });
+    await marketplaceAgent.getByText(/북마크됨|Bookmarked/).waitFor({ timeout: 10000 });
+    await marketplaceTeam.getByRole("button", { name: /북마크|Bookmark/ }).waitFor({ timeout: 10000 });
+    await marketplaceTeam.getByRole("button", { name: /북마크|Bookmark/ }).click();
+    await marketplaceTeam.getByText(/북마크됨|Bookmarked/).waitFor();
+    await marketplaceAgent.getByText(/북마크됨|Bookmarked/).waitFor();
+    await dashboardPage.evaluate(() => {
+      window.dispatchEvent(new CustomEvent("agentlas:hub-bookmarks-changed", {
+        detail: { action: "removed", slug: "same-slug-bookmark", entityKind: "team" },
+      }));
+    });
+    await marketplaceTeam.getByRole("button", { name: /북마크|Bookmark/ }).waitFor();
+    await marketplaceAgent.getByText(/북마크됨|Bookmarked/).waitFor();
+
     await hubSearch.fill("hub-agent-002");
     await dashboardPage.locator("#desktop-hub-search-suggestions [role='option']").first().waitFor({ timeout: 10000 });
     const verifiedCard = dashboardPage.locator(".hub-entity-card").filter({ hasText: /허브 에이전트 002|Hub Agent 002/ });
@@ -154,6 +236,58 @@ async function main() {
     await chatRaceComposer.fill("");
     await chatRaceComposer.fill("@hub-agent-002");
     await chatRacePage.getByText(/허브 에이전트 002|Hub Agent 002/, { exact: true }).last().waitFor({ timeout: 1000 });
+
+    await chatRacePage.evaluate(() => {
+      const listing = {
+        slug: "registry-team",
+        name: "레지스트리 팀",
+        nameEn: "Registry Team",
+        tagline: "호출 가능한 최신 단계형 Hub 팀",
+        taglineEn: "Fresh callable phased Hub team",
+        trustGrade: "unknown",
+        installCount: 0,
+        manifestUrl: "mock",
+        kind: "cloud-callable",
+        callable: true,
+        routingReady: true,
+        routingStatus: "agentlas.teams.invoke",
+        source: "hub-team-registry",
+        entityKind: "team",
+      };
+      window.__qa.emitHubBookmarkSnapshot([{ slug: listing.slug, listing, bookmarkedAt: new Date().toISOString() }]);
+    });
+    await chatRaceComposer.fill("");
+    await chatRaceComposer.fill("@registry-team");
+    await chatRacePage.getByText(/레지스트리 팀|Registry Team/, { exact: true }).last().waitFor({ timeout: 3000 });
+    await chatRacePage.evaluate(() => window.__qa.emitHubBookmarkSnapshot([]));
+    await chatRaceComposer.fill("");
+    await chatRaceComposer.fill("@registry-team");
+    await chatRacePage.getByText(/일치 없음|No matches/).waitFor({ timeout: 3000 });
+    await chatRacePage.evaluate(() => {
+      const base = {
+        slug: "collision-slug",
+        name: "충돌 에이전트",
+        nameEn: "Collision Agent",
+        tagline: "Ambiguous runtime identity",
+        taglineEn: "Ambiguous runtime identity",
+        trustGrade: "unknown",
+        installCount: 0,
+        manifestUrl: "mock",
+        kind: "cloud-callable",
+        callable: true,
+        routingReady: true,
+        routingStatus: "public-profile",
+        source: "hub-profile",
+      };
+      const at = new Date().toISOString();
+      window.__qa.emitHubBookmarkSnapshot([
+        { slug: base.slug, listing: { ...base, entityKind: "agent" }, bookmarkedAt: at },
+        { slug: base.slug, listing: { ...base, name: "충돌 팀", nameEn: "Collision Team", entityKind: "team" }, bookmarkedAt: at },
+      ]);
+    });
+    await chatRaceComposer.fill("");
+    await chatRaceComposer.fill("@collision-slug");
+    await chatRacePage.getByText(/일치 없음|No matches/).waitFor({ timeout: 3000 });
     await chatRaceContext.close();
 
     // Chat gets callable, install-only, and local-duplicate bookmarks. Context

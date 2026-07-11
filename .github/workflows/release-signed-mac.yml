@@ -36,7 +36,7 @@ on:
           - "true"
 
 permissions:
-  contents: write
+  contents: read
   actions: read
 
 jobs:
@@ -47,19 +47,14 @@ jobs:
       # Publish to the SEPARATE public releases repo (source repo is private).
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      MAC_DEVELOPER_ID_CERTIFICATE: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE }}
-      CSC_KEY_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
-      GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
-      GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
       HEPHAESTUS_REF: v1.1.12
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -68,20 +63,44 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Resolve release inputs
+        env:
+          RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          RAW_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}
+          RAW_DRAFT: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || 'false' }}
+          RAW_APPLY_WEB_ENV: ${{ github.event_name == 'workflow_dispatch' && inputs.apply_web_env || 'true' }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag="${{ inputs.tag }}"
-            version="${{ inputs.version }}"
-            draft="${{ inputs.draft }}"
-            apply_web_env="${{ inputs.apply_web_env }}"
-          else
-            tag="${{ github.ref_name }}"
-            version="${tag#v}"
-            draft="false"
-            apply_web_env="true"
-          fi
+          tag="$RAW_TAG"
+          version="${RAW_VERSION:-${tag#v}}"
+          draft="$RAW_DRAFT"
+          apply_web_env="$RAW_APPLY_WEB_ENV"
           if [ -z "$version" ] || [ -z "$tag" ]; then
             echo "::error::version/tag could not be resolved (tag=$tag, version=$version)"
+            exit 1
+          fi
+          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+          if [[ ! "$tag" =~ $semver_tag_re ]]; then
+            echo "::error::Release tag must be strict SemVer with a leading v (received: $tag)."
+            exit 1
+          fi
+          if [ "$version" != "${tag#v}" ]; then
+            echo "::error::Version $version does not match release tag $tag."
+            exit 1
+          fi
+          if [ "$draft" != "true" ] && [ "$draft" != "false" ]; then
+            echo "::error::draft must be true or false."
+            exit 1
+          fi
+          if [ "$apply_web_env" != "true" ] && [ "$apply_web_env" != "false" ]; then
+            echo "::error::apply_web_env must be true or false."
+            exit 1
+          fi
+          tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}")" || {
+            echo "::error::Release tag $tag does not exist in refs/tags."
+            exit 1
+          }
+          head_commit="$(git rev-parse HEAD)"
+          if [ "$head_commit" != "$tagged_commit" ]; then
+            echo "::error::Checked-out HEAD $head_commit does not match $tag ($tagged_commit)."
             exit 1
           fi
           pkgver=$(node -p "require('./package.json').version")
@@ -99,6 +118,13 @@ jobs:
           echo "::notice::Releasing tag=$tag version=$version draft=$draft apply_web_env=$apply_web_env"
 
       - name: Assert required release secrets
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MAC_DEVELOPER_ID_CERTIFICATE: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
         run: |
           test -n "$APPLE_ID"
           test -n "$APPLE_APP_SPECIFIC_PASSWORD"
@@ -107,23 +133,22 @@ jobs:
           test -n "$CSC_KEY_PASSWORD"
           test -n "$GH_TOKEN"
 
+      - name: Install pinned Railway CLI
+        if: env.RESOLVED_APPLY_WEB_ENV == 'true'
+        run: npm install -g @railway/cli@5.26.0
+
       - name: Check Railway release credentials
         if: env.RESOLVED_APPLY_WEB_ENV == 'true'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
         run: |
-          npm install -g @railway/cli
           if [ -n "$RAILWAY_TOKEN" ] && [ -n "$RAILWAY_PROJECT_ID" ] && npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web; then
             echo "AGENTLAS_RAILWAY_RELEASE_READY=1" >> "$GITHUB_ENV"
           else
             echo "::warning::Railway release env credentials are missing or invalid. macOS release will still publish; apply desktop web env manually after release."
             echo "AGENTLAS_RAILWAY_RELEASE_READY=0" >> "$GITHUB_ENV"
           fi
-
-      - name: Restore mac signing certificate
-        run: |
-          cert_path="$RUNNER_TEMP/agentlas-developer-id.p12"
-          printf '%s' "$MAC_DEVELOPER_ID_CERTIFICATE" | base64 -D > "$cert_path"
-          test -s "$cert_path"
-          echo "CSC_LINK=$cert_path" >> "$GITHUB_ENV"
 
       # Clone the git-ignored Hephaestus engine so the signed .app embeds it.
       - name: Ensure embedded engine (Hephaestus)
@@ -140,7 +165,14 @@ jobs:
       - name: Runtime, browser, and renderer UI regression gates
         run: |
           npm run test:automation-scheduler-guards
+          npm run test:v52-automation-run-recovery
+          npm run test:v53-hub-bookmark-sync
+          npm run test:updater-production
+          npm run test:automations-store
           npm run test:runtime-stdin-epipe
+          npm run test:borrowed-task-force
+          npm run test:mcp-auto-select
+          npm run test:mcp-secret-isolation
           # Site Studio overlay is itself a Playwright test, so a clean runner
           # needs Chromium before any product UI gate starts.
           npx playwright install chromium
@@ -161,12 +193,29 @@ jobs:
           node scripts/test-hub-bookmark-ui.cjs
           node scripts/test-runtime-readiness-ui.cjs
 
+      - name: Restore mac signing certificate
+        env:
+          MAC_DEVELOPER_ID_CERTIFICATE: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE }}
+        run: |
+          cert_path="$RUNNER_TEMP/agentlas-developer-id.p12"
+          printf '%s' "$MAC_DEVELOPER_ID_CERTIFICATE" | base64 -D > "$cert_path"
+          test -s "$cert_path"
+          echo "CSC_LINK=$cert_path" >> "$GITHUB_ENV"
+
       - name: Build, sign, notarize, and verify DMGs
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
         run: npm run package:mac
 
       # Publish notarized .dmg/.zip + latest-mac.yml to the public releases repo
       # (AGENTLAS_DESKTOP_GITHUB_REPO) — this is the public download + update feed.
       - name: Publish verified release (public releases repo)
+        env:
+          GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
         run: |
           args=(--tag="$RESOLVED_TAG" --version="$RESOLVED_VERSION")
           if [ "$RESOLVED_DRAFT" = "true" ]; then args+=(--draft); fi
@@ -184,6 +233,9 @@ jobs:
 
       - name: Apply Railway web release env
         if: env.RESOLVED_APPLY_WEB_ENV == 'true' && env.AGENTLAS_RAILWAY_RELEASE_READY == '1'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
         run: |
           if [ -z "$RAILWAY_TOKEN" ]; then
             railway link --project "$RAILWAY_PROJECT_ID" --environment production --service agentlas-web

@@ -6,11 +6,15 @@
 //   ⚠️ no-fallback: 키 미설정/입력 부적합이면 조용히 떨어지지 않고 명시적으로 실패 보고한다.
 import { app, shell } from "electron";
 import { randomUUID } from "crypto";
+import { spawn } from "node:child_process";
+import { accessSync, constants as fsConstants, readdirSync, statSync, type Dirent } from "node:fs";
 import { promises as fs } from "fs";
+import os from "node:os";
 import path from "path";
 import { pathToFileURL } from "url";
 import { GoogleGenAI, type GenerateVideosOperation } from "@google/genai";
 import { readEnvVar, hasEnvVar } from "../secrets/vault";
+import { grokAuthReady } from "../multimodal/availability";
 import { currentUiLocale } from "../ui-locale";
 import type {
   OberonAnimateFile,
@@ -33,6 +37,8 @@ const PROVIDER_KEYS: Record<OberonAnimateProvider, string[]> = {
   veo: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
   seedance: ["FAL_KEY"],
   kling: ["PIAPI_KEY"],
+  // grok: API 키가 아니라 구독 로그인된 Grok CLI(bin)로 동작 — 키 목록은 비워둔다.
+  grok: [],
 };
 const DEFAULT_MODELS: Record<OberonAnimateProvider, string> = {
   runway: "gen4_turbo",
@@ -40,7 +46,30 @@ const DEFAULT_MODELS: Record<OberonAnimateProvider, string> = {
   veo: "veo-3.1-lite-generate-001",
   seedance: "fal-ai/bytedance/seedance/v1/pro/image-to-video",
   kling: "kling",
+  grok: "grok-imagine-video",
 };
+
+// Grok CLI(superagent-ai/grok-cli) — 공식 install.sh 경로를 PATH보다 먼저(PATH의 grok이 shim일 수 있음).
+const GROK_BIN_CANDIDATES = [
+  path.join(os.homedir(), ".grok/bin/grok"),
+  path.join(os.homedir(), ".local/bin/grok"),
+  path.join(os.homedir(), ".bun/bin/grok"),
+  "/opt/homebrew/bin/grok",
+  "/usr/local/bin/grok",
+];
+
+function resolveGrokBin(): string | null {
+  const fromPath = (process.env.PATH || "").split(":").filter(Boolean).map((d) => path.join(d, "grok"));
+  for (const candidate of [...GROK_BIN_CANDIDATES, ...fromPath]) {
+    try {
+      accessSync(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      /* keep looking */
+    }
+  }
+  return null;
+}
 const RUNWAY_BASE = "https://api.dev.runwayml.com";
 const RUNWAY_VERSION = "2024-11-06";
 const LUMA_BASE = "https://api.lumalabs.ai";
@@ -65,7 +94,9 @@ export async function animateKeyStatus(): Promise<OberonAnimateKeyStatus> {
     hasAnyEnvVar(PROVIDER_KEYS.seedance),
     hasAnyEnvVar(PROVIDER_KEYS.kling),
   ]);
-  return { runway, luma, veo, seedance, kling };
+  // grok = bin 존재 + 헤드리스 인증 수단(볼트 XAI/GROK 키·user-settings apiKey·OAuth) 확인.
+  const grok = !!resolveGrokBin() && (await grokAuthReady());
+  return { runway, luma, veo, seedance, kling, grok };
 }
 
 export function startOberonAnimate(request: OberonAnimateRequest): OberonAnimateJob {
@@ -131,6 +162,35 @@ async function runAnimateJob(id: string, request: OberonAnimateRequest): Promise
         ? "모션 프롬프트가 비어 있습니다. 무엇을 어떻게 움직일지 적어주세요."
         : "The motion prompt is empty. Describe what should move and how.",
     );
+  }
+
+  // grok은 CLI로 동작 — bin 존재 + 헤드리스 인증(볼트 XAI/GROK 키 등)을 검사한다.
+  if (job.provider === "grok") {
+    const bin = resolveGrokBin();
+    if (!bin) {
+      throw new Error(
+        ko
+          ? "Grok CLI가 설치돼 있지 않습니다 — 대시보드에서 Grok CLI를 연결하세요."
+          : "Grok CLI is not installed — connect the Grok CLI from the dashboard.",
+      );
+    }
+    if (!(await grokAuthReady())) {
+      throw new Error(
+        ko
+          ? "Grok CLI 인증이 없습니다 — Environment Keys에 XAI_API_KEY(GROK_API_KEY)를 추가하거나 grok CLI에 키를 저장하세요."
+          : "Grok CLI is not authenticated — add XAI_API_KEY (GROK_API_KEY) in Environment Keys or save a key in the grok CLI.",
+      );
+    }
+    await fs.mkdir(job.outputDir, { recursive: true });
+    updateJob(job, {
+      status: "running",
+      phase: "submitting",
+      message: ko ? "Grok Imagine 제출 중" : "Submitting to Grok Imagine",
+      percent: 5,
+    });
+    assertNotCancelled(id);
+    await runGrokCli(id, job, request, prompt, bin);
+    return;
   }
 
   // provider별 허용 키 목록에서 실제 존재하는 첫 키를 쓴다(멀티모달 연결 키 인식).
@@ -273,6 +333,153 @@ async function readFirstSecret(keys: string[]): Promise<string | null> {
     if (value) return value;
   }
   return null;
+}
+
+// ── Grok CLI (Imagine, 구독 키리스 — text/image-to-video) ─────
+//   grok -p "<instruction>" 헤드리스로 내장 generate_video 툴을 호출한다(1~15초, source=시작 프레임).
+//   output_path를 명시하고, 미저장 시 <outputDir>/.grok/generated-media의 최신 mp4를 수확(codex imagegen 패턴).
+async function runGrokCli(
+  id: string,
+  job: OberonAnimateJob,
+  request: OberonAnimateRequest,
+  prompt: string,
+  bin: string,
+): Promise<void> {
+  const ko = currentUiLocale() === "ko";
+  const name = `${safeSlug(job.title)}-${job.id.slice(0, 8)}.mp4`;
+  const absPath = path.join(job.outputDir, name);
+  const duration = Math.min(15, Math.max(1, Math.round(request.durationSec ?? 5)));
+  const aspect = request.aspectRatio === "9:16" ? "9:16" : request.aspectRatio === "1:1" ? "1:1" : "16:9";
+  // i2v 우선(로컬 경로 → 공개 URL). 이미지가 없으면 grok의 text-to-video로 생성한다.
+  const source =
+    request.imagePath || (request.imageUrl && /^https:\/\//i.test(request.imageUrl) ? request.imageUrl : null);
+  const instruction =
+    `Call your built-in generate_video tool exactly once with these arguments and do nothing else. ` +
+    `prompt: ${prompt}. ` +
+    (source ? `source: ${source} (use this image as the starting frame). ` : "") +
+    `duration: ${duration}. aspect_ratio: ${aspect}. output_path: ${absPath}. ` +
+    `Do not run any other tools. If video generation is unavailable print exactly NO_VIDEO_GEN.`;
+
+  const since = Date.now() - 3000;
+  updateJob(job, { phase: "generating", message: ko ? "Grok Imagine 생성 중" : "Grok Imagine generating", percent: 20 });
+
+  // 앱 볼트의 XAI_API_KEY 를 grok-cli 가 읽는 GROK_API_KEY 로 주입(runtime/grok.ts grokEnv 규약).
+  const vaultKey = (await readEnvVar("GROK_API_KEY")) || (await readEnvVar("XAI_API_KEY"));
+  const spawnEnv = { ...process.env };
+  if (vaultKey) {
+    spawnEnv.GROK_API_KEY = vaultKey;
+    spawnEnv.XAI_API_KEY = vaultKey;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    let done = false;
+    let killTimer: NodeJS.Timeout | null = null;
+    let cancelTimer: NodeJS.Timeout | null = null;
+    const finish = (err?: unknown) => {
+      if (done) return;
+      done = true;
+      if (killTimer) clearTimeout(killTimer);
+      if (cancelTimer) clearInterval(cancelTimer);
+      if (err) reject(err instanceof Error ? err : new Error(String(err)));
+      else resolve();
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      // stdin은 반드시 ignore — 파이프로 열려 있으면 CLI가 stdin EOF를 기다리며 영원히 블록된다(codex와 동일 함정).
+      child = spawn(
+        bin,
+        ["-p", instruction, "--directory", job.outputDir, "--format", "text", "--max-tool-rounds", "8"],
+        { cwd: job.outputDir, env: spawnEnv, stdio: ["ignore", "ignore", "ignore"] },
+      );
+    } catch (e) {
+      finish(e);
+      return;
+    }
+    // 영상 생성은 콜드 스타트 포함 수 분 — 15분 하드 킬.
+    killTimer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* ignore */
+      }
+    }, 15 * 60_000);
+    // 취소 감지 — cancelledJobs에 들어오면 자식 프로세스를 죽인다.
+    cancelTimer = setInterval(() => {
+      if (cancelledJobs.has(id)) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* ignore */
+        }
+      }
+    }, 2_000);
+    child.on("close", () => finish());
+    child.on("error", (e) => finish(e));
+  });
+
+  assertNotCancelled(id);
+
+  // output_path 미준수 대비 — cwd/.grok/generated-media의 최신 mp4를 수확한다.
+  if (!(await pathExists(absPath))) {
+    const harvested = newestMp4Since(path.join(job.outputDir, ".grok", "generated-media"), since);
+    if (!harvested) {
+      throw new Error(
+        ko
+          ? "Grok CLI가 영상을 생성하지 못했습니다 — grok 구독 로그인 상태를 확인하세요."
+          : "Grok CLI did not produce a video — check that grok is logged in with a subscription.",
+      );
+    }
+    await fs.copyFile(harvested, absPath);
+  }
+
+  const stat = await fs.stat(absPath);
+  job.files.push({
+    id: randomUUID(),
+    kind: "animation_mp4",
+    name,
+    absPath,
+    url: pathToFileURL(absPath).href,
+    mime: "video/mp4",
+    sizeBytes: stat.size,
+  });
+  updateJob(job, { status: "succeeded", phase: "complete", message: ko ? "애니메이션 완료" : "Animation complete", percent: 100 });
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** dir 하위(재귀)에서 since 이후 수정된 가장 최신 mp4 — grok generated-media 수확용. */
+function newestMp4Since(dir: string, since: number): string | null {
+  const out: Array<{ p: string; m: number }> = [];
+  const walk = (d: string) => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/\.mp4$/i.test(e.name)) {
+        try {
+          const m = statSync(p).mtimeMs;
+          if (m >= since) out.push({ p, m });
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  };
+  walk(dir);
+  out.sort((a, b) => b.m - a.m);
+  return out[0]?.p ?? null;
 }
 
 // ── Runway (gen4_turbo, image_to_video) ──────────────────────

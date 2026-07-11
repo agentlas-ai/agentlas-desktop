@@ -440,7 +440,7 @@ export async function autoConnectTelegram(input: TelegramConnectAutoInput): Prom
 
   let capture: BotFatherCapture | null = null;
   try {
-    capture = await captureBotFatherToken(target?.name ?? "Agentlas");
+    capture = await captureBotFatherToken(target?.name ?? "Agentlas", input.botName);
     const result = await startTelegramConnection({
       targetKind: input.targetKind,
       targetId: input.targetId,
@@ -1501,7 +1501,8 @@ async function runBindingInvocation(
   if (!finalText) {
     throw new Error(errorFromEvents.trim() || tg("error.no_reply", {}, replyLocale));
   }
-  return finalText;
+  // 엔진이 남긴 <<agentlas-ask>>·<<agentlas-multimodal-setup>> raw fence를 평문화한 뒤 전송.
+  return flattenSentinelsForTelegram(finalText, replyLocale);
 }
 
 async function ensureBindingChat(binding: TelegramBindingRow) {
@@ -1536,6 +1537,81 @@ async function ensureBindingChat(binding: TelegramBindingRow) {
     .prepare("UPDATE telegram_bindings SET chat_session_id = ?, updated_at = ? WHERE id = ?")
     .run(chat.id, nowIso(), binding.id);
   return chat;
+}
+
+// LLM 응답의 sentinel fence를 텔레그램용 평문으로 바꾼다.
+// 데스크톱 렌더러는 <<agentlas-ask>>를 질문 카드(ChatQuestionSheet)로,
+// <<agentlas-multimodal-setup>>을 설정 버튼으로 변환하지만(renderer/lib/ask-question.ts·
+// multimodal-setup.ts), 엔진(electron/mcp/client.ts)은 이 두 fence를 raw로 남긴 채
+// finalText를 반환한다. 텔레그램엔 그 UI가 없어 원문 마커가 그대로 노출됐다 —
+// 여기서 사람이 읽을 수 있는 텍스트로 평문화한다. fence 포맷은 ask-question.ts와 동일.
+const TG_ASK_OPEN = "<<agentlas-ask>>";
+const TG_ASK_CLOSE = "<</agentlas-ask>>";
+const TG_MULTIMODAL_MARKER = "<<agentlas-multimodal-setup>>";
+
+function flattenAskFenceBody(body: string, replyLocale: "ko" | "en"): string | null {
+  const stripped = body.replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim();
+  let obj: unknown;
+  try {
+    obj = JSON.parse(stripped);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== "object") return null;
+  const o = obj as Record<string, unknown>;
+  if (typeof o.question !== "string") return null;
+  const lines: string[] = [o.question.trim()];
+  const optionsRaw = Array.isArray(o.options) ? o.options : [];
+  let n = 0;
+  for (const opt of optionsRaw) {
+    if (!opt || typeof opt !== "object") continue;
+    const ob = opt as Record<string, unknown>;
+    if (typeof ob.label !== "string") continue;
+    const desc =
+      typeof ob.description === "string" && ob.description.trim() ? ` — ${ob.description.trim()}` : "";
+    lines.push(`${n + 1}. ${ob.label.trim()}${desc}`);
+    n++;
+  }
+  if (n > 0) {
+    lines.push(
+      replyLocale === "en"
+        ? "\nReply with the number (or the option) you want."
+        : "\n원하는 번호(또는 항목)를 답장으로 보내주세요.",
+    );
+  }
+  return lines.join("\n");
+}
+
+/** 텔레그램 아웃바운드 텍스트의 ask/멀티모달 sentinel fence를 평문화·제거한다. */
+function flattenSentinelsForTelegram(text: string, replyLocale: "ko" | "en"): string {
+  let out = text;
+  if (out.includes(TG_ASK_OPEN)) {
+    let result = "";
+    let rest = out;
+    for (;;) {
+      const open = rest.indexOf(TG_ASK_OPEN);
+      if (open < 0) {
+        result += rest;
+        break;
+      }
+      result += rest.slice(0, open);
+      const afterOpen = rest.slice(open + TG_ASK_OPEN.length);
+      const close = afterOpen.indexOf(TG_ASK_CLOSE);
+      if (close < 0) {
+        // 닫는 fence가 없으면(스트리밍 잔재) 열림 마커만 제거하고 본문은 보존
+        result += afterOpen;
+        break;
+      }
+      const flat = flattenAskFenceBody(afterOpen.slice(0, close), replyLocale);
+      result += flat ?? ""; // 파싱 실패 시 fence 통째 제거(raw 노출 방지)
+      rest = afterOpen.slice(close + TG_ASK_CLOSE.length);
+    }
+    out = result;
+  }
+  if (out.includes(TG_MULTIMODAL_MARKER)) {
+    out = out.split(TG_MULTIMODAL_MARKER).join("");
+  }
+  return out.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 async function sendLongMessage(token: string, chatId: string, text: string): Promise<void> {
@@ -1672,13 +1748,16 @@ async function loadTelegramWebUrl(win: BrowserWindow, url: string, context: stri
   });
 }
 
-async function captureBotFatherToken(targetName: string): Promise<BotFatherCapture> {
+async function captureBotFatherToken(
+  targetName: string,
+  customDisplayName?: string,
+): Promise<BotFatherCapture> {
   const win = createTelegramWebWindow(tg("botfather.connect_title"));
   await loadTelegramWebUrl(win, BOTFATHER_WEB_URL, "botfather");
   const ready = await waitForBotFatherReady(win, 180_000);
   if (ready.botFatherBlocked) throw new Error(tg("botfather.blocked"));
 
-  const createdToken = await createBotWithBotFather(win, targetName);
+  const createdToken = await createBotWithBotFather(win, targetName, customDisplayName);
   return { token: createdToken, source: "created", window: win };
 }
 
@@ -1751,8 +1830,15 @@ function botFatherManualSettingsMessage(): { ok: boolean; message: string } {
   };
 }
 
-async function createBotWithBotFather(win: BrowserWindow, targetName: string): Promise<string> {
-  const displayName = botDisplayName(targetName);
+async function createBotWithBotFather(
+  win: BrowserWindow,
+  targetName: string,
+  customDisplayName?: string,
+): Promise<string> {
+  // 사용자가 봇 표시 이름을 지정하면 그대로(공백 정리 + BotFather 64자 한도), 없으면
+  // "Agentlas <타겟명>" 자동. username(@…bot)은 전역 유니크 제약 탓에 항상 랜덤 유지한다.
+  const custom = customDisplayName?.replace(/\s+/g, " ").trim().slice(0, 62);
+  const displayName = custom || botDisplayName(targetName);
   const knownTokens = new Set((await readTelegramWebState(win)).tokens);
   await sendTelegramWebMessage(win, "/newbot");
   await sleep(1400);

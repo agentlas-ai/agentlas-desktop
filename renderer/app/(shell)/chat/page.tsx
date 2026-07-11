@@ -44,13 +44,13 @@ import {
   type MediaArtifact,
 } from "@/components/Markdown";
 import type { WorkspaceFilePreview } from "@/components/WorkspacePanel";
-import { IconBuilding, IconClose, IconFolder, IconLayers, IconNetwork, IconPanelRight, IconSparkles, IconTrash } from "@/components/Icon";
+import { IconBuilding, IconChevronDown, IconClose, IconFolder, IconLayers, IconNetwork, IconPanelRight, IconSparkles, IconTrash, IconUsers } from "@/components/Icon";
 import { buildAppRoutePrompt, INSTALLED_APPS, parseAppSlashRoute } from "@/lib/apps";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { surfaceApprovalRequirement, type SurfaceApprovalRequirement } from "@/lib/surface-approval";
 import { KeyStatusBanner } from "@/components/KeyStatusBanner";
-import { onHubBookmarkChange } from "@/lib/hub-bookmark-events";
+import { hubBookmarkIdentityKey, onHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { onAgentRosterChange } from "@/lib/agent-roster-events";
 
 function uid(): string {
@@ -620,6 +620,8 @@ function ChatPage() {
   const [allAgents, setAllAgents] = useState<InstalledAgent[]>([]);
   const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
   const [hiredAgents, setHiredAgents] = useState<HiredAgentCard[]>([]);
+  // 전역대화 옆 "에이전트 부르기" 필 — 증가할 때마다 ChatInput의 에이전트 피커를 연다.
+  const [agentPickerSignal, setAgentPickerSignal] = useState(0);
   const [allFirms, setAllFirms] = useState<InstalledFirm[]>([]);
   const [allProjects, setAllProjects] = useState<Project[]>([]);
   const [allEnvKeys, setAllEnvKeys] = useState<string[]>([]);
@@ -2466,13 +2468,19 @@ function ChatPage() {
       onHubBookmarkChange((change) => {
         // Invalidate any snapshot captured before this renderer-local mutation.
         hubBookmarkGenerationRef.current += 1;
-        if (change.action === "added") {
+        if (change.action === "synced") {
+          setHubBookmarks(change.bookmarks);
+          return;
+        } else if (change.action === "added") {
           setHubBookmarks((previous) => [
             change.bookmark,
-            ...previous.filter((bookmark) => bookmark.slug !== change.bookmark.slug),
+            ...previous.filter((bookmark) => hubBookmarkIdentityKey(bookmark) !== hubBookmarkIdentityKey(change.bookmark)),
           ]);
         } else {
-          setHubBookmarks((previous) => previous.filter((bookmark) => bookmark.slug !== change.slug));
+          setHubBookmarks((previous) => previous.filter((bookmark) =>
+            bookmark.slug !== change.slug ||
+            (change.entityKind && bookmark.listing.entityKind !== change.entityKind)
+          ));
         }
         void refreshHubBookmarks();
       }),
@@ -2529,7 +2537,9 @@ function ChatPage() {
       planMode: opts?.planMode,
       goalMode: opts?.goalMode,
       appsGenerateMode: opts?.appsGenerateMode,
-      routerAgent: choice.kind === "plain" ? undefined : choice.routerAgent,
+      // 자동 라우팅에선 plain도 에스컬레이션을 실어 보낸다 — 메인 LLM이 의도 기반으로
+      // 재랭킹·차용(codex hep-network 동작)할 수 있게 하는 경로라서다.
+      routerAgent: choice.routerAgent,
     };
     switch (choice.kind) {
       case "agent":
@@ -2537,7 +2547,10 @@ function ChatPage() {
         if (choice.isFirm) {
           void send(`hep-network ${text}`, sendOpts);
         } else {
-          void switchAgent(choice.agentId).then(() => send(text, sendOpts));
+          // 전환 실패(미설치 id 등)해도 메시지는 반드시 나간다 — 자동 라우팅이 조용히 삼키지 않게.
+          void switchAgent(choice.agentId)
+            .catch(() => undefined)
+            .then(() => send(text, sendOpts));
         }
         break;
       case "network":
@@ -3178,6 +3191,37 @@ function ChatPage() {
         />
         {/* 계속 라이브로(continuousMode)·스웜(swarmMode) 토글은 입력창 + 메뉴로 통합됨.
             켜진 모드는 + 버튼 옆 컴팩트 칩으로 표시된다(ChatInput). */}
+        {/* 클라우드·허브 에이전트 부르기 — 전역대화 필과 같은 모양. + 메뉴에서 이동해 왔다. */}
+        <button
+          type="button"
+          data-testid="workspace-agents-pill"
+          onClick={() => setAgentPickerSignal((v) => v + 1)}
+          disabled={!chat}
+          title={t("workspace.bar.agents_hint")}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            maxWidth: 280,
+            padding: "4px 8px",
+            borderRadius: 8,
+            border: "1px solid var(--paper-edge)",
+            background: hiredAgents.length > 0 ? "var(--fill-1)" : "transparent",
+            color: hiredAgents.length > 0 ? "var(--accent)" : "var(--muted-deep)",
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: chat ? "pointer" : "default",
+          }}
+        >
+          <IconUsers size={13} />
+          <span
+            style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            {t("workspace.bar.agents")}
+            {hiredAgents.length > 0 ? ` · ${hiredAgents.length}` : ""}
+          </span>
+          <IconChevronDown size={12} style={{ flexShrink: 0, opacity: 0.7 }} />
+        </button>
       </div>
       {sessionNotice && (
         <div
@@ -3208,6 +3252,7 @@ function ChatPage() {
           queuedCount={queuedSteers.length}
           prefillText={composerPrefill}
           activeChatId={chat.id}
+          agentPickerSignal={agentPickerSignal}
           onCommand={handleCommand}
           onCallAgent={(agentId) => void switchAgent(agentId)}
           onCallHubAgents={hireAgents}

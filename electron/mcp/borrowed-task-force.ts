@@ -21,6 +21,7 @@ import {
 import { curateReply } from "../memory/curator";
 import { getAgentConcurrency } from "../store/concurrency";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
+import { stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -36,6 +37,26 @@ export interface BorrowedAgentSpec {
   source?: "hub" | "installed" | "firm-node";
   routeLabel?: string;
   warnings?: string[];
+}
+
+export class BorrowedAgentUnavailableError extends Error {
+  readonly code = "borrowed-agent-unavailable";
+  readonly slugs: string[];
+  readonly reasons: string[];
+
+  constructor(slugs: string[], reasons: string[], locale: RuntimeLocale = "en") {
+    const cleanSlugs = uniqSlugs(slugs);
+    const cleanReasons = [...new Set(reasons.map(cleanString).filter(Boolean))];
+    const suffix = cleanReasons.length > 0 ? ` (${cleanReasons.join(", ")})` : "";
+    super(
+      locale === "ko"
+        ? `Hub 에이전트를 준비하지 못했습니다${suffix}. 실제 Hub 지시문이 없어 실행을 중단했습니다: ${cleanSlugs.join(", ")}`
+        : `Could not prepare the Hub agent(s)${suffix}. Execution stopped because no authoritative Hub directive was returned: ${cleanSlugs.join(", ")}`,
+    );
+    this.name = "BorrowedAgentUnavailableError";
+    this.slugs = cleanSlugs;
+    this.reasons = cleanReasons;
+  }
 }
 
 export interface BorrowedInputPacket {
@@ -99,12 +120,16 @@ function uniqSpecs(specs: BorrowedAgentSpec[] | undefined): BorrowedAgentSpec[] 
   for (const raw of specs ?? []) {
     const slug = cleanString(raw.slug);
     if (!slug || seen.has(slug)) continue;
+    const directive = cleanString(raw.directive);
+    if (!directive) {
+      throw new BorrowedAgentUnavailableError([slug], [`missing_directive:${slug}`]);
+    }
     seen.add(slug);
     out.push({
       ...raw,
       slug,
       name: cleanString(raw.name) || slug,
-      directive: cleanString(raw.directive) || `You are ${cleanString(raw.name) || slug}, an Agentlas task-force specialist.`,
+      directive,
     });
   }
   return out;
@@ -242,6 +267,55 @@ export function extractAgentDirective(raw: Record<string, unknown>): string {
   return parts.join("\n\n");
 }
 
+function canonicalBorrowSlug(value: unknown): string {
+  return cleanString(value)
+    .replace(/^@/, "")
+    .replace(/^(?:hub|network|cloud|bookmark|bookmarks):/i, "")
+    .toLowerCase();
+}
+
+function agentRecordSlug(raw: Record<string, unknown>): string {
+  return canonicalBorrowSlug(raw.slug || raw.id || raw.agent || raw.agent_id);
+}
+
+function hasAuthoritativeAgentInstructions(raw: Record<string, unknown>): boolean {
+  return Boolean(
+    cleanString(raw.directive) ||
+      cleanString(raw.systemPrompt) ||
+      cleanString(raw.system_prompt) ||
+      cleanString(raw.instructions) ||
+      cleanString(raw.prompt) ||
+      cleanString(asObject(raw.output).entry_excerpt),
+  );
+}
+
+function isExplicitAgentFailure(raw: Record<string, unknown>): boolean {
+  if (raw.ok === false || cleanString(raw.error)) return true;
+  const status = cleanString(raw.status).toLowerCase();
+  return Boolean(status && !["prepared", "ready", "bundle_ready", "ok", "success"].includes(status));
+}
+
+function borrowedFailureReasons(payload: unknown): string[] {
+  const root = asObject(payload);
+  const reasons: string[] = [];
+  const rootError = cleanString(root.error);
+  if (rootError) reasons.push(rootError);
+  const rootStatus = cleanString(root.status).toLowerCase();
+  if (rootStatus && !["prepared", "partial", "ready", "ok", "success"].includes(rootStatus)) {
+    reasons.push(rootStatus);
+  }
+  for (const raw of asArray(root.agents).map(asObject)) {
+    const slug = agentRecordSlug(raw) || "unknown";
+    const error = cleanString(raw.error);
+    const status = cleanString(raw.status).toLowerCase();
+    if (error) reasons.push(`${slug}:${error}`);
+    else if (status && !["prepared", "ready", "bundle_ready", "ok", "success"].includes(status)) {
+      reasons.push(`${slug}:${status}`);
+    }
+  }
+  return reasons;
+}
+
 export function normalizeBorrowedAgentSpecs(slugs: string[], payload: unknown): BorrowedAgentSpec[] {
   const root = asObject(payload);
   const topDirective =
@@ -252,23 +326,46 @@ export function normalizeBorrowedAgentSpecs(slugs: string[], payload: unknown): 
   const rawAgents = asArray(root.agents).map(asObject);
   const bySlug = new Map<string, Record<string, unknown>>();
   for (const raw of rawAgents) {
-    const slug = cleanString(raw.slug) || cleanString(raw.id) || cleanString(raw.agent);
+    const slug = agentRecordSlug(raw);
     if (slug) bySlug.set(slug, raw);
   }
-  return slugs.map((slug, index) => {
-    const raw = bySlug.get(slug) ?? rawAgents[index] ?? {};
+  const requested = uniqSlugs(slugs);
+  return requested.flatMap((slug, index): BorrowedAgentSpec[] => {
+    const canonicalSlug = canonicalBorrowSlug(slug);
+    const orderedFallback = rawAgents.length === requested.length && rawAgents.every((raw) => !agentRecordSlug(raw));
+    const raw = bySlug.get(canonicalSlug) ?? (orderedFallback ? rawAgents[index] : {});
+    if (isExplicitAgentFailure(raw)) return [];
     const name =
       cleanString(raw.name) ||
       cleanString(raw.nameEn) ||
       cleanString(raw.title) ||
       slug;
-    const directive = extractAgentDirective(raw) || topDirective || [
-      `You are the borrowed Hub specialist "${slug}".`,
-      "Use your published expertise only for the assigned packet.",
-      "Return evidence, assumptions, risks, and a compact deliverable for the orchestrator.",
-    ].join("\n");
-    return { slug, name, directive };
+    const directive = hasAuthoritativeAgentInstructions(raw) ? extractAgentDirective(raw) : topDirective;
+    if (!directive) return [];
+    return [{ slug, name, directive }];
   });
+}
+
+export function requireBorrowedAgentSpecs(
+  slugs: string[],
+  payload: unknown,
+  options: {
+    locale?: RuntimeLocale;
+    transportOk?: boolean;
+    transportError?: string;
+  } = {},
+): BorrowedAgentSpec[] {
+  const requested = uniqSlugs(slugs);
+  const specs = normalizeBorrowedAgentSpecs(requested, payload);
+  const resolved = new Set(specs.map((spec) => canonicalBorrowSlug(spec.slug)));
+  const missing = requested.filter((slug) => !resolved.has(canonicalBorrowSlug(slug)));
+  const reasons = borrowedFailureReasons(payload);
+  if (options.transportOk === false || missing.length > 0 || reasons.length > 0) {
+    if (options.transportOk === false) reasons.unshift(cleanString(options.transportError) || "hub_call_failed");
+    reasons.push(...missing.map((slug) => `missing_directive:${slug}`));
+    throw new BorrowedAgentUnavailableError(missing.length > 0 ? missing : requested, reasons, options.locale);
+  }
+  return specs;
 }
 
 export function parseBorrowedInputPackets(text: string): BorrowedInputPacket[] {
@@ -599,12 +696,23 @@ async function runBorrowedAgentTurn(
   }
 }
 
-async function fetchBorrowedSpecs(slugs: string[], userPrompt: string, project?: string | null): Promise<BorrowedAgentSpec[]> {
+async function fetchBorrowedSpecs(
+  slugs: string[],
+  userPrompt: string,
+  project: string | null | undefined,
+  locale: RuntimeLocale,
+  signal?: AbortSignal,
+): Promise<BorrowedAgentSpec[]> {
   try {
-    const res = await hepCall(slugs.join(","), [userPrompt], { project: project ?? "." });
-    return normalizeBorrowedAgentSpecs(slugs, res.json ?? null);
-  } catch {
-    return normalizeBorrowedAgentSpecs(slugs, null);
+    const res = await hepCall(slugs.join(","), [userPrompt], { project: project ?? ".", signal });
+    return requireBorrowedAgentSpecs(slugs, res.json ?? null, {
+      locale,
+      transportOk: res.ok,
+      transportError: res.error || (res.exitCode == null ? "hub_call_failed" : `hub_exit_${res.exitCode}`),
+    });
+  } catch (error) {
+    if (signal?.aborted || error instanceof BorrowedAgentUnavailableError) throw error;
+    throw new BorrowedAgentUnavailableError(slugs, ["hub_call_failed"], locale);
   }
 }
 
@@ -696,7 +804,9 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
     kind: "tool-use",
     status: taskForcePrepareStatus(p, slugs),
   });
-  const specs = overrideSpecs.length > 0 ? overrideSpecs : await fetchBorrowedSpecs(slugs, p.req.userPrompt, p.workingFolder);
+  const specs = overrideSpecs.length > 0
+    ? overrideSpecs
+    : await fetchBorrowedSpecs(slugs, p.req.userPrompt, p.workingFolder, p.locale, p.signal);
   const plan = await runPlanner(p, specs, history);
   const specBySlug = new Map(specs.map((spec) => [spec.slug, spec]));
   const results = await parallelCap(
@@ -763,7 +873,15 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
     },
   );
 
-  let displayText = redactSensitiveText(final.text);
+  const continuation = stripStormbreakerContinueMarker(redactSensitiveText(final.text));
+  let displayText = continuation.text;
+  if (continuation.shouldContinue) {
+    const boundaryNote = p.locale === "ko"
+      ? "안전 경계: 다중 Hub/에이전트 그룹 작업은 로컬 단일 에이전트 자동화로 대체하지 않습니다. 계속하려면 같은 조합으로 다시 실행해 모든 Hub bundle을 재검증해야 합니다."
+      : "Safety boundary: a multi-Hub or Agent Group run is never replaced by a local single-agent continuation. Resume with the same roster so every Hub bundle is revalidated.";
+    displayText = [displayText, boundaryNote].filter(Boolean).join("\n\n");
+    p.sink({ kind: "tool-use", status: boundaryNote });
+  }
   try {
     const curated = curateReply(displayText, {
       projectPath: p.workingFolder ?? null,

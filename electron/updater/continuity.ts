@@ -7,8 +7,10 @@ import {
   type ContinuitySnapshot,
   type ContinuityVerification,
 } from "./controller";
+import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 
 const CONTINUITY_TABLES = CONTINUITY_CORE_TABLES;
+const V52_AUTOMATION_RECOVERY_STALE_MS = MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS + 2 * 60 * 1000;
 
 type TableColumn = { name: string; pk: number };
 
@@ -178,12 +180,64 @@ function migrationApprovedDeletedChats(current: Database.Database): Set<string> 
   }
 }
 
+function v52RecoveredNodeStates(value: unknown): unknown {
+  if (typeof value !== "string" || !value) return value;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return value;
+    let changed = false;
+    for (const [nodeId, state] of Object.entries(parsed)) {
+      if (state === "running") {
+        parsed[nodeId] = "failed";
+        changed = true;
+      }
+    }
+    return changed ? JSON.stringify(parsed) : value;
+  } catch {
+    return value;
+  }
+}
+
+function isV52ApprovedDeletedAutomationRun(
+  backup: Database.Database,
+  before: Record<string, unknown>,
+): boolean {
+  if (!tableExists(backup, "automations")) return false;
+  const automationId = typeof before.automation_id === "string" ? before.automation_id : "";
+  if (!automationId) return true;
+  return !backup.prepare("SELECT 1 FROM automations WHERE id = ? LIMIT 1").get(automationId);
+}
+
+function isV52ApprovedRecoveredAutomationRun(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  comparableColumns: TableColumn[],
+  nowMs: number,
+): boolean {
+  if (before.status !== "running" || after.status !== "error") return false;
+  const lastActivity = before.last_activity_at ?? before.started_at;
+  const lastActivityMs = Date.parse(String(lastActivity ?? ""));
+  if (!Number.isFinite(lastActivityMs) || lastActivityMs > nowMs - V52_AUTOMATION_RECOVERY_STALE_MS) {
+    return false;
+  }
+  for (const column of comparableColumns) {
+    if (column.name === "status") continue;
+    const expected = column.name === "node_states_json"
+      ? v52RecoveredNodeStates(before[column.name])
+      : before[column.name];
+    if (valueKey(after[column.name]) !== valueKey(expected)) return false;
+  }
+  return true;
+}
+
 function verifyProtectedDatabaseRows(
   backup: Database.Database,
   current: Database.Database,
+  nowMs: number,
 ): string[] {
   const violations: string[] = [];
   const approvedDeletedChats = migrationApprovedDeletedChats(current);
+  const currentSchemaVersion = Number(current.pragma("user_version", { simple: true }) ?? 0);
   for (const table of CONTINUITY_TABLES) {
     if (!tableExists(backup, table)) continue;
     if (!tableExists(current, table)) {
@@ -203,20 +257,70 @@ function verifyProtectedDatabaseRows(
       continue;
     }
     const projection = comparableColumns.map((column) => quoteIdentifier(column.name)).join(", ");
+    const isV53HubBookmarkKeyMigration =
+      table === "hub_agent_bookmarks" &&
+      currentSchemaVersion >= 53 &&
+      !backupColumns.some((column) => column.name === "workspace_id") &&
+      currentColumnNames.has("workspace_id") &&
+      currentColumnNames.has("entity_kind");
+    const currentProjection = isV53HubBookmarkKeyMigration
+      ? `${projection}, sync_state, server_updated_at, last_sync_error, claim_workspace_id`
+      : projection;
     const currentLookup = current.prepare(
-      `SELECT ${projection} FROM ${quoteIdentifier(table)} WHERE ${primaryKeyColumns
-        .map((column) => `${quoteIdentifier(column.name)} = ?`)
-        .join(" AND ")} LIMIT 1`,
+      isV53HubBookmarkKeyMigration
+        ? `SELECT ${currentProjection} FROM ${quoteIdentifier(table)}
+           WHERE workspace_id = '__device__' AND slug = ? AND entity_kind = ? LIMIT 1`
+        : `SELECT ${currentProjection} FROM ${quoteIdentifier(table)} WHERE ${primaryKeyColumns
+            .map((column) => `${quoteIdentifier(column.name)} = ?`)
+            .join(" AND ")} LIMIT 1`,
     );
     const backupRows = backup.prepare(`SELECT ${projection} FROM ${quoteIdentifier(table)}`).iterate() as Iterable<Record<string, unknown>>;
     for (const before of backupRows) {
       const key = rowKey(before, primaryKeyColumns);
-      const after = currentLookup.get(...primaryKeyColumns.map((column) => before[column.name])) as Record<string, unknown> | undefined;
+      const after = currentLookup.get(
+        ...(isV53HubBookmarkKeyMigration
+          ? [
+              before.slug,
+              String(before.entity_kind ?? "").trim().toLowerCase() === "team"
+                ? "team"
+                : String(before.entity_kind ?? "").trim().toLowerCase() === "plugin"
+                  ? "plugin"
+                  : "agent",
+            ]
+          : primaryKeyColumns.map((column) => before[column.name])),
+      ) as Record<string, unknown> | undefined;
       if (!after) {
+        if (
+          table === "automation_runs" &&
+          currentSchemaVersion >= 52 &&
+          isV52ApprovedDeletedAutomationRun(backup, before)
+        ) {
+          continue;
+        }
         const chatId = table === "chats" && primaryKeyColumns.length === 1
           ? String(before[primaryKeyColumns[0].name] ?? "")
           : "";
         if (!chatId || !approvedDeletedChats.has(chatId)) violations.push(`protected-row-missing:${table}:${sha256(key)}`);
+        continue;
+      }
+      if (isV53HubBookmarkKeyMigration) {
+        const expectedNewFields: Record<string, unknown> = {
+          sync_state: "clean",
+          server_updated_at: null,
+          last_sync_error: null,
+          claim_workspace_id: null,
+        };
+        for (const [column, expected] of Object.entries(expectedNewFields)) {
+          if (valueKey(after[column]) !== valueKey(expected)) {
+            violations.push(`protected-value-changed:${table}:${column}:${sha256(key)}`);
+          }
+        }
+      }
+      if (
+        table === "automation_runs" &&
+        currentSchemaVersion >= 52 &&
+        isV52ApprovedRecoveredAutomationRun(before, after, comparableColumns, nowMs)
+      ) {
         continue;
       }
       for (const column of comparableColumns) {
@@ -481,15 +585,23 @@ export async function verifyUpdaterContinuity(input: {
       violations.push("database-schema-regressed");
     }
     for (const [table, expected] of Object.entries(input.snapshot.rowCounts)) {
+      // v52 intentionally prunes only orphan live projections and terminalizes
+      // abandoned ones. Row-level verification below proves every missing or
+      // changed pre-update identity matches that narrow migration contract.
+      if (table === "automation_runs" && current.databaseSchemaVersion >= 52) continue;
       if ((current.rowCounts[table] ?? 0) < expected) violations.push(`row-count-regressed:${table}`);
       if (
         (current.rowCounts[table] ?? 0) === expected &&
-        current.tableIdentityHashes[table] !== input.snapshot.tableIdentityHashes[table]
+        current.tableIdentityHashes[table] !== input.snapshot.tableIdentityHashes[table] &&
+        // v53 intentionally changes only this table's identity from slug to
+        // device/workspace + entity kind + slug. Row-level verification above
+        // still proves every pre-update value survived at its exact device key.
+        !(table === "hub_agent_bookmarks" && current.databaseSchemaVersion >= 53)
       ) {
         violations.push(`table-identity-changed:${table}`);
       }
     }
-    violations.push(...verifyProtectedDatabaseRows(backupDb, db));
+    violations.push(...verifyProtectedDatabaseRows(backupDb, db, (input.now ?? Date.now)()));
   } catch {
     violations.push("database-unavailable");
   } finally {

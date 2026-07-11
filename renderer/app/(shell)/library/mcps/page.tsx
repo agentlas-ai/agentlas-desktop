@@ -69,6 +69,30 @@ export default function LibraryMcpsPage() {
     }
   }
 
+  // URL을 붙여넣으면 원격 트랜스포트를 자동 감지하고 이름을 유추한다.
+  // (경로/쿼리에 sse가 있으면 레거시 SSE, 아니면 현대 표준 Streamable HTTP)
+  function onUrlChange(v: string) {
+    setCUrl(v);
+    const trimmed = v.trim();
+    if (!/^https?:\/\//i.test(trimmed)) return;
+    try {
+      const u = new URL(trimmed);
+      const isSse = /(^|[/?&#])sse($|[/?&#])/i.test(u.pathname + u.search);
+      setCTransport(isSse ? "sse" : "http");
+      if (!cName.trim()) {
+        // TLD가 포함된 완전한 호스트일 때만 이름 유추 — 한 글자씩 타이핑하는 도중
+        // "https://o" 같은 미완성 호스트("o")로 이름이 조기 확정되는 걸 막는다.
+        const host = u.hostname.replace(/^www\./, "");
+        if (host.includes(".")) {
+          const label = host.split(".")[0];
+          if (label) setCName(label);
+        }
+      }
+    } catch {
+      /* 아직 완성되지 않은 URL — 무시 */
+    }
+  }
+
   const refresh = useCallback(async () => {
     const api = ipc();
     if (!api) return;
@@ -370,18 +394,24 @@ export default function LibraryMcpsPage() {
                   {t("common.cancel")}
                 </button>
               </div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <input
-                  value={cName}
-                  onChange={(e) => setCName(e.target.value)}
-                  placeholder={t("mcps.custom.name")}
-                  style={{ ...customInput, flex: "1 1 160px" }}
-                />
-                <select value={cTransport} onChange={(e) => setCTransport(e.target.value as "stdio" | "sse" | "http")} style={customInput}>
-                  <option value="stdio">stdio (npx)</option>
-                  <option value="sse">SSE</option>
-                  <option value="http">HTTP</option>
-                </select>
+              <input
+                value={cName}
+                onChange={(e) => setCName(e.target.value)}
+                placeholder={t("mcps.custom.name")}
+                style={{ ...customInput, width: "100%" }}
+              />
+              {/* 로컬(명령) / 원격(URL) 세그먼트 — 원격 URL 진입로를 명확히 노출 */}
+              <div style={{ display: "flex", gap: 6 }}>
+                <button type="button" onClick={() => setCTransport("stdio")} style={segBtn(cTransport === "stdio")}>
+                  {t("mcps.custom.mode_local")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCTransport(cTransport === "stdio" ? "http" : cTransport)}
+                  style={segBtn(cTransport !== "stdio")}
+                >
+                  {t("mcps.custom.mode_remote")}
+                </button>
               </div>
               {cTransport === "stdio" ? (
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -389,9 +419,28 @@ export default function LibraryMcpsPage() {
                   <input value={cArgs} onChange={(e) => setCArgs(e.target.value)} placeholder={t("mcps.custom.args")} style={{ ...customInput, flex: "1 1 200px", fontFamily: "var(--font-mono)" }} />
                 </div>
               ) : (
-                <input value={cUrl} onChange={(e) => setCUrl(e.target.value)} placeholder={t("mcps.custom.url")} style={{ ...customInput, fontFamily: "var(--font-mono)" }} />
+                <>
+                  <input
+                    value={cUrl}
+                    onChange={(e) => onUrlChange(e.target.value)}
+                    placeholder={t("mcps.custom.url")}
+                    style={{ ...customInput, width: "100%", fontFamily: "var(--font-mono)" }}
+                  />
+                  {cUrl.trim() ? (
+                    <div style={{ fontSize: 11, color: "var(--muted-deep)", display: "flex", alignItems: "center", gap: 6 }}>
+                      <span>{t("mcps.custom.detected")}:</span>
+                      <button type="button" onClick={() => setCTransport("http")} style={detBtn(cTransport === "http")}>HTTP</button>
+                      <button type="button" onClick={() => setCTransport("sse")} style={detBtn(cTransport === "sse")}>SSE</button>
+                    </div>
+                  ) : null}
+                </>
               )}
-              <input value={cEnv} onChange={(e) => setCEnv(e.target.value)} placeholder={t("mcps.custom.env")} style={{ ...customInput, fontFamily: "var(--font-mono)" }} />
+              <input
+                value={cEnv}
+                onChange={(e) => setCEnv(e.target.value)}
+                placeholder={cTransport === "stdio" ? t("mcps.custom.env") : t("mcps.custom.header")}
+                style={{ ...customInput, width: "100%", fontFamily: "var(--font-mono)" }}
+              />
               <button
                 onClick={() => void addCustom()}
                 disabled={!cName.trim() || cBusy}
@@ -661,6 +710,36 @@ const customInput: React.CSSProperties = {
   fontSize: 12.5,
   outline: "none",
 };
+
+/** 로컬/원격 세그먼트 버튼 스타일 (active면 강조). */
+function segBtn(active: boolean): React.CSSProperties {
+  return {
+    flex: 1,
+    padding: "7px 12px",
+    fontSize: 12,
+    fontWeight: 600,
+    borderRadius: "var(--radius-md)",
+    border: active ? "1px solid var(--ink)" : "1px solid var(--paper-edge)",
+    background: active ? "var(--paper)" : "var(--paper-2)",
+    color: active ? "var(--ink)" : "var(--muted-deep)",
+    boxShadow: active ? "var(--neu-raised)" : "none",
+    cursor: "pointer",
+  };
+}
+
+/** 감지된 트랜스포트(HTTP/SSE) 배지 버튼 — 클릭으로 수동 오버라이드. */
+function detBtn(active: boolean): React.CSSProperties {
+  return {
+    padding: "2px 9px",
+    fontSize: 11,
+    fontWeight: 700,
+    borderRadius: 999,
+    border: active ? "1px solid var(--ink)" : "1px solid var(--paper-edge)",
+    background: active ? "var(--paper)" : "transparent",
+    color: active ? "var(--ink)" : "var(--muted-deep)",
+    cursor: "pointer",
+  };
+}
 
 function Empty({ text }: { text: string }) {
   return (

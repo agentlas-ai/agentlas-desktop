@@ -31,12 +31,18 @@ for (const methodPath of methods) {
 }
 
 assert.deepEqual(window.__qa.missingBridgeCalls, [], "bridge setup must not count missing APIs as calls");
+// billing은 자동 라우팅 크레딧 게이트가 쓰므로 이제 모델링된 표면이다 — 실제 잔액 모양을 반환해야 한다.
 assert.equal(typeof window.agentlas.billing.getCredits, "function");
+// 미모델 폴백 카나리아는 여전히 모델링 안 된 trex 그룹으로 검증한다.
+assert.equal(typeof window.agentlas.trex.imageProviders, "function");
 
-Promise.resolve(window.agentlas.billing.getCredits())
+Promise.resolve(window.agentlas.trex.imageProviders())
   .then(async (result) => {
     assert.equal(result, null, "unmodeled async methods must fail safely with a neutral value");
-    assert.deepEqual(window.__qa.missingBridgeCalls, [{ path: "billing.getCredits", args: [] }]);
+    assert.deepEqual(window.__qa.missingBridgeCalls, [{ path: "trex.imageProviders", args: [] }]);
+
+    const balance = await window.agentlas.billing.getCredits();
+    assert.equal(typeof balance.remainingCredits, "number", "modeled billing.getCredits must return a balance shape");
 
     assert.equal(typeof window.agentlasFiles?.grantForFile, "function", "mock must expose the isolated drop-grant bridge");
     const dropped = await window.agentlasFiles.grantForFile({ name: "agentlas-file.png" });
@@ -51,7 +57,7 @@ Promise.resolve(window.agentlas.billing.getCredits())
 
     await window.agentlas.workspace.setFromProject("project-chat", "project-1");
     assert.equal(await window.agentlas.workspace.get("project-chat"), "/tmp/agentlas-qa-project");
-    assert.deepEqual(window.__qa.missingBridgeCalls, [{ path: "billing.getCredits", args: [] }]);
+    assert.deepEqual(window.__qa.missingBridgeCalls, [{ path: "trex.imageProviders", args: [] }]);
     console.log(`mock bridge parity: ${methods.length} preload methods available; fallback telemetry verified`);
   })
   .catch((error) => {

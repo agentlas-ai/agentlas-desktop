@@ -32,7 +32,18 @@ declare module "@modelcontextprotocol/sdk/client/stdio.js" {
 
 declare module "@modelcontextprotocol/sdk/client/sse.js" {
   export class SSEClientTransport {
-    constructor(url: URL);
+    constructor(url: URL, opts?: {
+      eventSourceInit?: Record<string, unknown>;
+      requestInit?: RequestInit;
+      fetch?: typeof fetch;
+    });
+    close(): Promise<void>;
+  }
+}
+
+declare module "@modelcontextprotocol/sdk/client/streamableHttp.js" {
+  export class StreamableHTTPClientTransport {
+    constructor(url: URL, opts?: { requestInit?: RequestInit });
     close(): Promise<void>;
   }
 }

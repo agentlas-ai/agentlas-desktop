@@ -35,7 +35,7 @@ async function main() {
     const store = require("../dist/electron/store/db.js");
     assert.doesNotThrow(() => store.initStore());
     const db = store.getDb();
-    assert.equal(db.pragma("user_version", { simple: true }), 51);
+    assert.ok(db.pragma("user_version", { simple: true }) >= 48, "v48 guard must reach v48 or a later schema");
     const columns = db.prepare("PRAGMA table_info(chats)").all();
     assert.equal(columns.filter((column) => column.name === "hired_agents").length, 1);
     console.log(JSON.stringify({ ok: true, checks: 3 }, null, 2));
@@ -43,7 +43,7 @@ async function main() {
     app.quit();
     setTimeout(() => {
       fs.rmSync(tempDir, { recursive: true, force: true });
-      process.exit(0);
+      process.exit(process.exitCode ?? 0);
     }, 50).unref?.();
   }
 }

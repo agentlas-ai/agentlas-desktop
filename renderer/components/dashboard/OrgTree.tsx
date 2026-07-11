@@ -10,7 +10,7 @@ import { ipc } from "@/lib/ipc";
 import { classifyHubEntity, classifyInstalledAgent, entityClassShortLabel } from "@/lib/agent-entity-kind";
 import { buildAgentRoster, visibleRosterAgents } from "@/lib/agent-roster";
 import { onAgentRosterChange } from "@/lib/agent-roster-events";
-import { hubBookmarksWithoutLocalDuplicates, onHubBookmarkChange } from "@/lib/hub-bookmark-events";
+import { hubBookmarkIdentityKey, hubBookmarksWithoutLocalDuplicates, onHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { isUserFacingAgentText } from "@/lib/agent-visibility";
@@ -113,15 +113,29 @@ export function OrgTree() {
   useEffect(
     () =>
       onHubBookmarkChange((change) => {
+        hubBookmarkGenerationRef.current += 1;
+        if (change.action === "synced") {
+          setHubBookmarks(change.bookmarks);
+          if (change.bookmarks.length > 0) {
+            setOpenCats((previous) => ({ ...previous, hub: true }));
+            const classes = new Set(change.bookmarks.map((bookmark) => classifyHubEntity(bookmark.listing)));
+            if (classes.size === 1 && classes.has("multi")) setMode("multi");
+            else if (classes.size === 1 && classes.has("single")) setMode("single");
+          }
+          return;
+        }
         if (change.action === "added") {
           setHubBookmarks((previous) => [
             change.bookmark,
-            ...previous.filter((bookmark) => bookmark.slug !== change.bookmark.slug),
+            ...previous.filter((bookmark) => hubBookmarkIdentityKey(bookmark) !== hubBookmarkIdentityKey(change.bookmark)),
           ]);
           setMode(classifyHubEntity(change.bookmark.listing) === "multi" ? "multi" : "single");
           setOpenCats((previous) => ({ ...previous, hub: true }));
         } else {
-          setHubBookmarks((previous) => previous.filter((bookmark) => bookmark.slug !== change.slug));
+          setHubBookmarks((previous) => previous.filter((bookmark) =>
+            bookmark.slug !== change.slug ||
+            (change.entityKind && bookmark.listing.entityKind !== change.entityKind)
+          ));
         }
         // Reconcile only the bookmark slice. A slow full roster/listMine load
         // must not overwrite this event with a snapshot taken before the add.
@@ -445,7 +459,7 @@ export function OrgTree() {
                   const entityClass = classifyHubEntity(listing);
                   return (
                     <button
-                      key={`hub:${slug}`}
+                      key={`hub:${String(listing.entityKind || "agent")}:${slug}`}
                       onClick={() => navigate(`/marketplace?q=${encodeURIComponent(slug)}`)}
                       className={`dashboard-org-row dashboard-org-agent dashboard-org-agent-${entityClass}`}
                       title={t("org.hub_bookmark.title")}

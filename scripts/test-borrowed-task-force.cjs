@@ -92,6 +92,44 @@ async function main() {
   assert.match(recordSpecs[0].directive, /presence badge/, "lease/badge runtime contract must survive");
   assert.doesNotMatch(recordSpecs[0].directive, /borrowed Hub specialist "instagram-uploader"/, "must NOT fall back to the generic 3-line directive");
 
+  assert.deepEqual(
+    mod.normalizeBorrowedAgentSpecs(["missing-agent"], null),
+    [],
+    "an empty Hub response must not synthesize a generic specialist",
+  );
+  assert.throws(
+    () => mod.requireBorrowedAgentSpecs(["missing-agent"], null, { locale: "en", transportOk: true }),
+    (error) =>
+      error instanceof mod.BorrowedAgentUnavailableError &&
+      error.code === "borrowed-agent-unavailable" &&
+      error.reasons.includes("missing_directive:missing-agent"),
+    "missing runtime instructions must fail closed",
+  );
+  assert.throws(
+    () => mod.requireBorrowedAgentSpecs(
+      ["metered-agent"],
+      {
+        status: "failed",
+        agents: [{ slug: "metered-agent", status: "insufficient_credits" }],
+      },
+      { locale: "en", transportOk: true },
+    ),
+    (error) =>
+      error instanceof mod.BorrowedAgentUnavailableError &&
+      error.message.includes("insufficient_credits") &&
+      error.reasons.includes("metered-agent:insufficient_credits"),
+    "named Hub refusal must remain visible and must not become a fake directive",
+  );
+  assert.throws(
+    () => mod.requireBorrowedAgentSpecs(
+      ["engine-agent"],
+      { directive: "This must not bypass a failed transport." },
+      { locale: "en", transportOk: false, transportError: "hub_exit_7" },
+    ),
+    (error) => error instanceof mod.BorrowedAgentUnavailableError && error.reasons.includes("hub_exit_7"),
+    "a failed hep-call transport must fail even when stdout contains directive-shaped JSON",
+  );
+
   const packets = mod.parseBorrowedInputPackets(`
 notes before
 ## Agent Input Packets

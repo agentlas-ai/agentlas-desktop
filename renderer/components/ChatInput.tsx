@@ -18,12 +18,15 @@ import type {
   RuntimeCommand,
   RuntimeStatus,
 } from "@/lib/types";
+import { useRouter } from "next/navigation";
 import { CONTEXT_MANAGED_BY } from "@shared/models";
-import type { Recommendation, RecExecChoice } from "@shared/types";
+import type { Recommendation, RecExecChoice, RecRouterAgent } from "@shared/types";
 import type { AgentlasAppDefinition } from "@/lib/apps";
 import { appDisplayName, appSlashCommands, appTagline } from "@/lib/apps";
 import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
+import { ipc } from "@/lib/ipc";
+import { openPricing } from "@/components/UpgradeCta";
 
 type ModelOption = { id: string; label: string; tag?: string };
 
@@ -167,6 +170,19 @@ interface BottomQuestionOption {
   shortcut: string;
 }
 
+/** 자동 라우팅이 유일하게 멈춰 서는 두 게이트 — 크레딧 부족(paywall) / 적합 에이전트 없음(build). */
+interface AutoRouteGate {
+  kind: "paywall" | "build";
+  text: string;
+  opts: SendOptions;
+  routerAgent?: RecRouterAgent;
+  /** paywall: 필요/보유 크레딧. */
+  needed?: number;
+  have?: number | null;
+  /** build: 엔진이 준 사유. */
+  reason?: string;
+}
+
 export function ChatInput({
   onSend,
   onCallAgent,
@@ -193,6 +209,7 @@ export function ChatInput({
   queuedCount = 0,
   prefillText = null,
   activeChatId = null,
+  agentPickerSignal = 0,
 }: {
   onSend: (text: string, opts?: SendOptions) => void;
   /** 슬래시 커맨드(/new, /clear, /help …) 실행 — 텍스트 삽입이 아니라 액션 */
@@ -238,8 +255,11 @@ export function ChatInput({
   prefillText?: string | null;
   /** 현재 채팅 id — 바뀌면 세션 전용 실행 상태(추천 시트·모드 토글)를 리셋해 세션 간 누수 방지. */
   activeChatId?: string | null;
+  /** 전역대화 옆 "에이전트 부르기" 필에서 증가시키는 시그널 — 바뀔 때마다 에이전트 피커를 연다. */
+  agentPickerSignal?: number;
 }) {
   const { t, locale } = useT();
+  const router = useRouter();
   const [input, setInput] = useState("");
   const [images, setImages] = useState<PreviewedImage[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -261,18 +281,18 @@ export function ChatInput({
   const [hepToggles, setHepToggles] = useState<Set<HepToggleId>>(() => new Set());
   // Stormbreaker를 처음 켤 때 뜨는 비용/시간 경고 버블. dismiss하면 다시 안 뜸.
   const [showStormWarning, setShowStormWarning] = useState(false);
-  // 추천 토글 ON 시 보내기 전에 뜨는 추천 바텀시트. 픽 시 onRecommendExecute로 실제 실행.
-  const [recSheet, setRecSheet] = useState<null | {
-    loading: boolean;
-    preview: Recommendation | null;
-    text: string;
-    chatId: string | null;
-    opts: SendOptions;
-  }>(null);
+  // 자동 라우팅(알아서 에이전트 부르기) — 묻지 않고 바로 라우팅한다(codex hep-network 동작과 동일).
+  const [autoRouting, setAutoRouting] = useState(false);
+  // 게이트 바텀시트 — 유일하게 묻는 두 경우: 크레딧 부족(paywall) / 적합 에이전트 없음(build 제안).
+  const [gateSheet, setGateSheet] = useState<AutoRouteGate | null>(null);
   const [appsGenerateMode, setAppsGenerateMode] = useState(false);
   const [appsGenerateQuestionOpen, setAppsGenerateQuestionOpen] = useState(false);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
+  // 전역대화 옆 "에이전트 부르기" 필에서 오는 열기 시그널 — 0은 초기값이라 무시.
+  useEffect(() => {
+    if (agentPickerSignal > 0) setAgentPickerOpen(true);
+  }, [agentPickerSignal]);
   const [appsGenerateChoice, setAppsGenerateChoice] = useState<AppGenerateChoice>("dedicated");
   // 기본값을 write로 — 바이브코딩 앱에서 read-only 기본은 첫 "만들어줘"가 파일을 못 써 조용히 실패한다.
   // write는 cwd 파일 편집만 허용(셸·외부 자동호출은 차단)이라 안전한 기본값.
@@ -312,7 +332,8 @@ export function ChatInput({
     }
     if (lastChatIdRef.current === activeChatId) return;
     lastChatIdRef.current = activeChatId;
-    setRecSheet(null);
+    setAutoRouting(false);
+    setGateSheet(null);
     setHepToggles(new Set());
     setPlanMode(false);
     setGoalMode(false);
@@ -453,7 +474,7 @@ export function ChatInput({
     const previous = lastActiveAgentIdRef.current;
     lastActiveAgentIdRef.current = activeAgentId;
     if (!previous || !activeAgentId || previous === activeAgentId) return;
-    setRecSheet(null);
+    setGateSheet(null);
     setHepToggles((prev) => {
       if (!prev.has("recommend")) return prev;
       const next = new Set(prev);
@@ -475,7 +496,7 @@ export function ChatInput({
       if (opt.borrowAgentSlug && onCallHubAgents) {
         setInput(`${before}${after}`.trimStart());
         setTrigger(null);
-        setRecSheet(null);
+        setGateSheet(null);
         setHepToggles((prev) => {
           const next = new Set(prev);
           next.delete("recommend");
@@ -489,7 +510,7 @@ export function ChatInput({
       if (opt.switchAgentId && onCallAgent) {
         setInput(`${before}${after}`.trimStart());
         setTrigger(null);
-        setRecSheet(null);
+        setGateSheet(null);
         setHepToggles((prev) => {
           const next = new Set(prev);
           next.delete("recommend");
@@ -540,9 +561,10 @@ export function ChatInput({
   function submit() {
     if (submitDisabled) return;
     const text = input.trim();
-    // 추천 토글 ON → 즉시 전송 대신 추천 미리보기 시트. 텍스트/첨부는 시트가 들고 있다가 픽 시 실행한다.
+    // 추천 토글 ON → 묻지 않고 자동 라우팅(codex hep-network처럼 바로 상황에 맞는 에이전트를 부른다).
+    // 크레딧 부족·적합 에이전트 없음일 때만 게이트 시트가 뜬다.
     if (hepToggles.has("recommend") && text && onRecommendPreview) {
-      void openRecSheet(text);
+      void autoRouteAndSend(text);
       return;
     }
     const outgoingText = composeHepPrefix(text);
@@ -553,51 +575,94 @@ export function ChatInput({
     setTrigger(null);
   }
 
-  // ── 추천 바텀시트 흐름 ─────────────────────────────────
-  async function openRecSheet(text: string) {
-    if (!onRecommendPreview) return;
-    const opts = currentSendOptions();
-    const sheetChatId = activeChatIdRef.current;
-    setRecSheet({ loading: true, preview: null, text, chatId: sheetChatId, opts });
-    const preview = await onRecommendPreview(text).catch(() => null);
-    // 사용자가 그새 취소했거나, 다른 텍스트/다른 채팅에서 다시 열었으면 무시.
-    setRecSheet((cur) =>
-      cur && cur.text === text && cur.chatId === sheetChatId && activeChatIdRef.current === sheetChatId
-        ? { ...cur, loading: false, preview }
-        : cur,
-    );
-  }
-
-  function pickRec(choice: RecExecChoice) {
-    const cur = recSheet;
-    if (!cur) return;
-    if (activeChatIdRef.current !== cur.chatId) {
-      setRecSheet(null);
-      return;
-    }
-    onRecommendExecute?.(choice, cur.text, cur.opts);
-    setHepToggles((prev) => {
-      const next = new Set(prev);
-      next.delete("recommend");
-      return next;
-    });
-    setRecSheet(null);
+  // ── 자동 라우팅 흐름 ─────────────────────────────────
+  /** 전송 후 컴포저 정리 — 추천 토글은 유지한다(다음 메시지도 계속 알아서 라우팅). */
+  function finishComposerAfterSend() {
     setInput("");
     setImages([]);
     setTrigger(null);
     setTimeout(() => textareaRef.current?.focus(), 0);
   }
 
-  function cancelRec() {
-    // 텍스트는 입력창에 그대로 둔다 — 사용자가 다시 보내거나 추천 토글을 끌 수 있음.
-    setRecSheet(null);
-    setTimeout(() => textareaRef.current?.focus(), 0);
+  /** 추천을 실행 경로로 자동 디스패치. 라우터 에스컬레이션(routerAgent)은 항상 실어 보낸다. */
+  function execAutoChoice(preview: Recommendation, text: string, opts: SendOptions) {
+    const routerAgent = preview.routerAgent;
+    if (preview.mode === "pipeline") {
+      onRecommendExecute?.({ kind: "pipeline", stages: preview.stages, routerAgent }, text, opts);
+      finishComposerAfterSend();
+      return;
+    }
+    const top = preview.agents[0];
+    if (!top) {
+      onRecommendExecute?.({ kind: "plain", routerAgent }, text, opts);
+      finishComposerAfterSend();
+      return;
+    }
+    const hubSlugs = preview.agents.filter((a) => a.source !== "local").map((a) => a.id);
+    if (hubSlugs.length > 0) {
+      // 상황에 맞으면 여러 에이전트를 한 번에 고용(네트워크 TF).
+      onRecommendExecute?.({ kind: "network", agents: hubSlugs, routerAgent }, text, opts);
+    } else {
+      onRecommendExecute?.({ kind: "agent", agentId: top.id, isFirm: top.isFirm, routerAgent }, text, opts);
+    }
+    finishComposerAfterSend();
   }
 
-  function retryRec() {
-    const cur = recSheet;
-    if (!cur) return;
-    void openRecSheet(cur.text);
+  /**
+   * 자동 라우팅 — routeOnly 미리보기를 받아 묻지 않고 바로 실행한다(codex hep-network 동작).
+   *  - 엔진이 저신뢰 에스컬레이션(routerAgent)을 붙인 허브 후보는 키워드 랭킹 노이즈일 수 있어
+   *    선고용하지 않는다: routerAgent만 실어 보내 메인 LLM이 의도 기반으로 재랭킹·차용하게 한다.
+   *  - 크레딧 부족일 때만 paywall, 적합 에이전트가 정말 없을 때만 build 제안 시트를 띄운다.
+   */
+  async function autoRouteAndSend(text: string) {
+    if (!onRecommendPreview) return;
+    const opts = currentSendOptions();
+    const chatIdAtStart = activeChatIdRef.current;
+    setAutoRouting(true);
+    const preview = await onRecommendPreview(text).catch(() => null);
+    setAutoRouting(false);
+    // 그새 채팅이 바뀌었으면 이 세션에 콜하지 않는다(세션 격리).
+    if (activeChatIdRef.current !== chatIdAtStart) return;
+
+    // 1) 추천 없음/실패 → 그냥 보낸다(있다면 에스컬레이션만 동봉).
+    if (!preview || preview.mode === "none") {
+      onRecommendExecute?.({ kind: "plain", routerAgent: preview?.routerAgent }, text, opts);
+      finishComposerAfterSend();
+      return;
+    }
+    // 2) 적합 에이전트 없음 → 빌드 제안 시트(여기서만 묻는다).
+    if (preview.mode === "build") {
+      setGateSheet({ kind: "build", text, opts, reason: preview.buildReason, routerAgent: preview.routerAgent });
+      return;
+    }
+    // 3) 저신뢰 에스컬레이션 + 허브 후보/clarify → 선고용 금지, LLM 재랭킹 경로로 즉시 전송.
+    const hubAgents = preview.agents.filter((a) => a.source !== "local");
+    if (preview.routerAgent && (preview.mode === "clarify" || hubAgents.length > 0)) {
+      onRecommendExecute?.({ kind: "plain", routerAgent: preview.routerAgent }, text, opts);
+      finishComposerAfterSend();
+      return;
+    }
+    // 4) 크레딧 게이트 — 허브 고용 비용이 잔액을 넘을 때만 페이월. 잔액 조회 실패 시 서버 과금이 최종 심판.
+    const cost = preview.totalEstCredits ?? 0;
+    if (hubAgents.length > 0 && cost > 0) {
+      const balance = await ipc()?.billing.getCredits().catch(() => null);
+      if (activeChatIdRef.current !== chatIdAtStart) return;
+      const have = balance?.remainingCredits;
+      if (typeof have === "number" && have < cost) {
+        setGateSheet({ kind: "paywall", text, opts, needed: cost, have, routerAgent: preview.routerAgent });
+        return;
+      }
+    }
+    execAutoChoice(preview, text, opts);
+  }
+
+  /** 게이트 시트에서 "그냥/에이전트 없이 보내기" — 고용 없이 원문 전송. */
+  function gateSendPlain() {
+    const gate = gateSheet;
+    if (!gate) return;
+    setGateSheet(null);
+    onRecommendExecute?.({ kind: "plain", routerAgent: gate.routerAgent }, gate.text, gate.opts);
+    finishComposerAfterSend();
   }
 
   function requestAppsGenerateMode(next: boolean) {
@@ -781,11 +846,6 @@ export function ChatInput({
             setTimeout(() => textareaRef.current?.focus(), 0);
           }}
           locale={locale}
-          onOpenAgentPicker={() => {
-            setPlusOpen(false);
-            setPlusSubmenu(null);
-            setAgentPickerOpen(true);
-          }}
           showModeToggles={showModeToggles}
           continuousMode={continuousMode}
           swarmMode={swarmMode}
@@ -925,16 +985,52 @@ export function ChatInput({
         </div>
       )}
 
-      {/* 추천 바텀시트 — 추천 토글 ON 으로 보낼 때 라우터 미리보기 결과 */}
-      {recSheet && (
-        <RecommendationSheet
-          loading={recSheet.loading}
-          preview={recSheet.preview}
-          onPick={pickRec}
-          onCancel={cancelRec}
-          onRetry={retryRec}
+      {/* 자동 라우팅 진행 배지 — 시트 대신 컴팩트 상태만 보여준다(묻지 않음) */}
+      {autoRouting && (
+        <div
+          data-autoroute-busy="true"
+          style={{
+            position: "absolute",
+            left: 16,
+            bottom: "calc(100% + 8px)",
+            zIndex: 40,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "4px 10px",
+            borderRadius: 999,
+            border: "1px solid var(--paper-edge)",
+            background: "var(--paper)",
+            color: "var(--muted-deep)",
+            fontSize: 11.5,
+            fontWeight: 600,
+          }}
+        >
+          <span
+            aria-hidden
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: "var(--accent)",
+              display: "inline-block",
+              flexShrink: 0,
+            }}
+          />
+          {t("chatinput.autoroute.routing")}
+        </div>
+      )}
+      {/* 게이트 시트 — 크레딧 부족(paywall)·적합 에이전트 없음(build 제안)일 때만 */}
+      {gateSheet && (
+        <AutoRouteGateSheet
+          gate={gateSheet}
+          onPlain={gateSendPlain}
+          onBuild={() => {
+            setGateSheet(null);
+            router.push("/build");
+          }}
+          onClose={() => setGateSheet(null)}
           t={t}
-          locale={locale}
         />
       )}
 
@@ -1762,97 +1858,41 @@ function BottomQuestionSheet({
   );
 }
 
-// ── 추천 바텀시트 ──────────────────────────────────────
-// routePreview(정규화된 Recommendation)를 보고 싱글/네트워크TF/파이프라인을 예상 크레딧과 함께
-// 제시한다. BottomQuestionSheet 와 동일한 절대배치 바텀시트 스타일. 픽 시 onPick(choice)로 디스패치.
-function RecommendationSheet({
-  loading,
-  preview,
-  onPick,
-  onCancel,
-  onRetry,
+// ── 자동 라우팅 게이트 시트 ─────────────────────────────
+// 자동 라우팅은 원칙적으로 묻지 않는다. 유일한 예외 둘:
+//   paywall — 허브 고용 비용이 잔액을 넘을 때(크레딧 없을 때만 페이월).
+//   build   — 라우팅할 적합 에이전트가 정말 없을 때(에이전트 빌드 제안).
+function AutoRouteGateSheet({
+  gate,
+  onPlain,
+  onBuild,
+  onClose,
   t,
-  locale,
 }: {
-  loading: boolean;
-  preview: Recommendation | null;
-  onPick: (choice: RecExecChoice) => void;
-  onCancel: () => void;
-  onRetry: () => void;
+  gate: AutoRouteGate;
+  onPlain: () => void;
+  onBuild: () => void;
+  onClose: () => void;
   t: TFunction;
-  locale: Locale;
 }) {
-  const mode = preview?.mode ?? "none";
-  const routerAgent = preview?.routerAgent;
-  const selectable = mode === "network" || mode === "multi";
-  // 네트워크 모드: 빌릴 Hub 에이전트를 골라 담는다. 기본 전체 선택.
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  useEffect(() => {
-    if (preview && (preview.mode === "network" || preview.mode === "multi")) {
-      setSelected(new Set(preview.agents.map((a) => a.id)));
-    }
-  }, [preview]);
-  const toggleAgent = (id: string) =>
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-
-  const suffix = t("chatinput.rec.credits_suffix");
-  // 한 에이전트의 비용 라벨 — BYOC: Hub 만 실제 크레딧, 로컬/클라우드는 "내 구독"(별도 크레딧 없음).
-  const agentCost = (source: string, credits: number | null | undefined): string =>
-    source === "hub"
-      ? credits != null
-        ? `~${credits} ${suffix}`
-        : t("chatinput.rec.credits_unknown")
-      : t("chatinput.rec.byoc");
-  // 네트워크 합계는 "선택한" Hub 에이전트의 실제 크레딧 합(미정은 제외). 선택 0이면 null.
-  const selectedHubKnown = preview
-    ? preview.agents.filter(
-        (a) => (selectable ? selected.has(a.id) : true) && a.source === "hub" && a.estCredits != null,
-      )
-    : [];
-  const selectedHubTotal = selectedHubKnown.length
-    ? selectedHubKnown.reduce((s, a) => s + (a.estCredits ?? 0), 0)
-    : null;
-  const sourceLabel = (s: string): string =>
-    s === "hub" ? t("chatinput.rec.source.hub") : s === "cloud" ? t("chatinput.rec.source.cloud") : t("chatinput.rec.source.local");
-
-  const primaryBtn: React.CSSProperties = {
-    fontSize: 12,
-    fontWeight: 700,
-    padding: "6px 14px",
-    border: "1px solid var(--ink-soft)",
-    background: "var(--ink)",
-    color: "var(--paper)",
-    cursor: "pointer",
-  };
-  const ghostBtn: React.CSSProperties = {
+  const isPaywall = gate.kind === "paywall";
+  const title = isPaywall ? t("chatinput.autoroute.paywall_title") : t("chatinput.autoroute.build_title");
+  const desc = isPaywall
+    ? `${t("chatinput.autoroute.paywall_desc")} — ${t("chatinput.autoroute.paywall_needed")} ${gate.needed ?? 0}cr · ${t("chatinput.autoroute.paywall_have")} ${gate.have ?? 0}cr`
+    : gate.reason || t("chatinput.autoroute.build_desc");
+  const buttonBase: React.CSSProperties = {
+    padding: "6px 12px",
+    borderRadius: 8,
     fontSize: 12,
     fontWeight: 600,
-    padding: "6px 12px",
-    border: "1px solid var(--paper-edge)",
-    background: "var(--fill-1)",
-    color: "inherit",
     cursor: "pointer",
   };
-
-  const headerLabel =
-    mode === "single"
-      ? t("chatinput.rec.mode.single")
-      : mode === "network" || mode === "multi"
-        ? t("chatinput.rec.mode.network", { n: String(preview?.agents.length ?? 0) })
-        : mode === "pipeline"
-          ? t("chatinput.rec.mode.pipeline", { n: String(preview?.stages?.length ?? 0) })
-          : t("chatinput.rec.title");
-
   return (
     <section
       role="dialog"
       aria-modal="false"
-      aria-label={t("chatinput.rec.title")}
+      aria-label={title}
+      data-autoroute-gate={gate.kind}
       style={{
         position: "absolute",
         left: 0,
@@ -1861,7 +1901,7 @@ function RecommendationSheet({
         width: "calc(100% - 32px)",
         maxWidth: 980,
         margin: "0 auto",
-        zIndex: 45,
+        zIndex: 40,
         border: "1px solid var(--paper-edge)",
         background: "var(--paper)",
         padding: 12,
@@ -1869,232 +1909,39 @@ function RecommendationSheet({
       onKeyDown={(e) => {
         if (e.key === "Escape") {
           e.preventDefault();
-          onCancel();
+          onClose();
         }
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-        <span
-          style={{
-            flexShrink: 0,
-            borderRadius: 999,
-            background: "var(--fill-1)",
-            color: "var(--amber-deep)",
-            fontSize: 11,
-            fontWeight: 700,
-            padding: "2px 7px",
-          }}
-        >
-          {t("chatinput.rec.title")}
-        </span>
-        <strong style={{ fontSize: 13, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {loading ? t("chatinput.rec.loading") : headerLabel}
-        </strong>
+      <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--ink)" }}>{title}</div>
+      <div style={{ marginTop: 4, fontSize: 11.5, lineHeight: 1.5, color: "var(--muted-deep)" }}>{desc}</div>
+      <div style={{ marginTop: 10, display: "flex", gap: 8, justifyContent: "flex-end" }}>
         <button
           type="button"
-          onClick={onCancel}
-          aria-label={t("chatinput.agent_picker.cancel")}
-          title={t("chatinput.agent_picker.cancel")}
+          onClick={onPlain}
           style={{
-            width: 24,
-            height: 24,
-            flexShrink: 0,
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            border: "none",
+            ...buttonBase,
+            border: "1px solid var(--paper-edge)",
             background: "transparent",
             color: "var(--muted-deep)",
-            cursor: "pointer",
           }}
         >
-          <IconClose size={13} />
+          {isPaywall ? t("chatinput.autoroute.paywall_skip") : t("chatinput.autoroute.build_skip")}
+        </button>
+        <button
+          type="button"
+          onClick={isPaywall ? openPricing : onBuild}
+          style={{
+            ...buttonBase,
+            border: "1px solid var(--accent)",
+            background: "var(--accent)",
+            color: "var(--paper)",
+            fontWeight: 700,
+          }}
+        >
+          {isPaywall ? t("chatinput.autoroute.paywall_cta") : t("chatinput.autoroute.build_cta")}
         </button>
       </div>
-
-      {loading ? (
-        <div style={{ fontSize: 12, color: "var(--ink-soft)", padding: "8px 2px" }}>{t("chatinput.rec.loading")}</div>
-      ) : !preview || mode === "none" ? (
-        <div style={{ fontSize: 12.5, color: "var(--ink-soft)", padding: "4px 2px 10px" }}>{t("chatinput.rec.none")}</div>
-      ) : mode === "clarify" ? (
-        <div style={{ fontSize: 12.5, padding: "4px 2px 10px" }}>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>{t("chatinput.rec.clarify")}</div>
-          <div style={{ color: "var(--ink-soft)" }}>{preview.clarifyQuestion ?? ""}</div>
-          {/* 후보가 있으면 클릭 가능한 선택지로 승격 — 수동 재타이핑 대신 바로 그 에이전트로 실행 */}
-          {(preview.agents ?? []).length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
-              {preview.agents.map((a) => (
-                <button
-                  key={a.id}
-                  type="button"
-                  onClick={() =>
-                    onPick(
-                      a.source === "hub"
-                        ? { kind: "network", agents: [a.id], routerAgent: preview.routerAgent }
-                        : { kind: "agent", agentId: a.id, routerAgent: preview.routerAgent },
-                    )
-                  }
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    fontSize: 12.5,
-                    padding: "7px 10px",
-                    borderRadius: 8,
-                    border: "1px solid var(--paper-edge)",
-                    background: "var(--paper-2)",
-                    cursor: "pointer",
-                    textAlign: "left",
-                  }}
-                >
-                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>
-                    {a.name}
-                  </span>
-                  <span
-                    style={{
-                      flexShrink: 0,
-                      fontSize: 10.5,
-                      fontWeight: 700,
-                      color: "var(--ink-soft)",
-                      border: "1px solid var(--paper-edge)",
-                      padding: "0 5px",
-                      borderRadius: 3,
-                    }}
-                  >
-                    {sourceLabel(a.source)}
-                  </span>
-                  <span style={{ marginLeft: "auto", flexShrink: 0, color: "var(--ink-soft)", fontSize: 11.5 }}>
-                    {locale === "ko" ? "이 에이전트로 →" : "run with →"}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      ) : mode === "pipeline" ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
-          {(preview.stages ?? []).map((s) => (
-            <div key={s.order} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
-              <span style={{ flexShrink: 0, width: 18, color: "var(--ink-soft)", fontWeight: 700 }}>{s.order}.</span>
-              <span style={{ flexShrink: 0, fontWeight: 600 }}>{s.kind}</span>
-              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--ink-soft)" }}>
-                {s.agentName ?? s.agentId ?? ""}
-              </span>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
-          {preview.agents.map((a) => (
-            <div
-              key={a.id}
-              onClick={selectable ? () => toggleAgent(a.id) : undefined}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                fontSize: 12.5,
-                cursor: selectable ? "pointer" : "default",
-                opacity: selectable && !selected.has(a.id) ? 0.5 : 1,
-              }}
-            >
-              {selectable && (
-                <span
-                  aria-hidden
-                  style={{
-                    flexShrink: 0,
-                    width: 14,
-                    height: 14,
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    border: "1px solid var(--paper-edge)",
-                    background: selected.has(a.id) ? "var(--ink)" : "var(--paper)",
-                    color: "var(--paper)",
-                    fontSize: 10,
-                    fontWeight: 800,
-                    borderRadius: 3,
-                  }}
-                >
-                  {selected.has(a.id) ? "✓" : ""}
-                </span>
-              )}
-              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>
-                {a.name}
-              </span>
-              <span
-                style={{
-                  flexShrink: 0,
-                  fontSize: 10.5,
-                  fontWeight: 700,
-                  color: "var(--ink-soft)",
-                  border: "1px solid var(--paper-edge)",
-                  padding: "0 5px",
-                  borderRadius: 3,
-                }}
-              >
-                {sourceLabel(a.source)}
-              </span>
-              <span style={{ marginLeft: "auto", flexShrink: 0, color: "var(--ink-soft)", fontSize: 11.5 }}>
-                {agentCost(a.source, a.estCredits)}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {!loading && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
-          {preview && mode !== "none" && mode !== "clarify" && (
-            <span style={{ fontSize: 11, color: "var(--ink-soft)" }}>
-              {mode === "network" || mode === "multi"
-                ? selectedHubTotal != null
-                  ? `~${selectedHubTotal} ${suffix} · ${t("chatinput.rec.estimate_note")}`
-                  : t("chatinput.rec.credits_unknown")
-                : mode === "pipeline"
-                  ? t("chatinput.rec.pipeline_note")
-                  : t("chatinput.rec.byoc_note")}
-            </span>
-          )}
-          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-            <button type="button" onClick={onRetry} style={ghostBtn}>
-              {t("chatinput.rec.cancel")}
-            </button>
-            <button type="button" onClick={() => onPick({ kind: "plain" })} style={ghostBtn}>
-              {t("chatinput.rec.send_plain")}
-            </button>
-            {preview && mode === "single" && preview.agents[0] && (
-              <button
-                type="button"
-                onClick={() =>
-                  // Hub 단일 추천은 설치 에이전트가 아니므로 switchAgent 대신 borrow 경로로 실행.
-                  preview.agents[0].source === "hub"
-                    ? onPick({ kind: "network", agents: [preview.agents[0].id], routerAgent })
-                    : onPick({ kind: "agent", agentId: preview.agents[0].id, isFirm: preview.agents[0].isFirm, routerAgent })
-                }
-                style={primaryBtn}
-              >
-                {t("chatinput.rec.run_single")}
-              </button>
-            )}
-            {preview && (mode === "network" || mode === "multi") && (
-              <button
-                type="button"
-                onClick={() => onPick({ kind: "network", agents: [...selected], routerAgent })}
-                disabled={selected.size === 0}
-                style={{ ...primaryBtn, opacity: selected.size === 0 ? 0.5 : 1, cursor: selected.size === 0 ? "not-allowed" : "pointer" }}
-              >
-                {t("chatinput.rec.run_network")}
-              </button>
-            )}
-            {preview && mode === "pipeline" && (
-              <button type="button" onClick={() => onPick({ kind: "pipeline", stages: preview.stages, routerAgent })} style={primaryBtn}>
-                {t("chatinput.rec.run_pipeline")}
-              </button>
-            )}
-          </div>
-        </div>
-      )}
     </section>
   );
 }
@@ -2381,7 +2228,6 @@ function PlusMenu({
   hepToggles,
   onToggleHep,
   locale,
-  onOpenAgentPicker,
   showModeToggles,
   continuousMode,
   swarmMode,
@@ -2408,7 +2254,6 @@ function PlusMenu({
   /** Hephaestus 모드 토글(스톰브레이커 경고·포커스 등은 부모가 처리). */
   onToggleHep: (id: HepToggleId) => void;
   locale: string;
-  onOpenAgentPicker: () => void;
   /** 실행 모드 토글(계속 라이브로·스웜) 노출 여부. */
   showModeToggles: boolean;
   continuousMode: boolean;
@@ -2553,14 +2398,7 @@ function PlusMenu({
           onChange={() => onToggleHep(tg.id)}
         />
       ))}
-      <Divider />
-      <Row
-        onClick={onOpenAgentPicker}
-        icon={<IconUsers size={14} style={{ color: "var(--accent)" }} />}
-        title={t("chatinput.plus.agents")}
-        subtitle={t("chatinput.plus.agents_hint")}
-        right={<IconChevronRight size={11} style={{ color: "var(--muted)" }} />}
-      />
+      {/* "에이전트" 행은 전역대화 옆 "에이전트 부르기" 필 토글로 이동했다(chat/page.tsx). */}
     </Popover>
   );
 }

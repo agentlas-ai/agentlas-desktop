@@ -6,7 +6,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { classifyHubEntity, entityClassLabel } from "@/lib/agent-entity-kind";
-import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
+import {
+  announceHubBookmarkChange,
+  hubBookmarkIdentityKey,
+  hubBookmarkIdentityKeyFromParts,
+  hubListingIdentityKey,
+  onHubBookmarkChange,
+} from "@/lib/hub-bookmark-events";
 import {
   hubSecurityGradeExplanation,
   hubSecurityGradeLabel,
@@ -57,7 +63,7 @@ export function HubBorrowRoom() {
     ipc()?.marketplace.bookmarks()
       .then((items) => {
         if (bookmarkGenerationRef.current === generation) {
-          setBookmarked(new Set(items.map((item) => item.slug)));
+          setBookmarked(new Set(items.map(hubBookmarkIdentityKey)));
         }
       })
       .catch(() => {});
@@ -74,14 +80,40 @@ export function HubBorrowRoom() {
     };
   }, [query, search]);
 
+  useEffect(
+    () => onHubBookmarkChange((change) => {
+      bookmarkGenerationRef.current += 1;
+      if (change.action === "synced") {
+        setBookmarked(new Set(change.bookmarks.map(hubBookmarkIdentityKey)));
+      } else if (change.action === "added") {
+        setBookmarked((previous) => new Set(previous).add(hubBookmarkIdentityKey(change.bookmark)));
+      } else {
+        setBookmarked((previous) => {
+          const next = new Set(previous);
+          if (change.entityKind) {
+            next.delete(hubBookmarkIdentityKeyFromParts(change.slug, change.entityKind));
+          } else {
+            const slugSuffix = `:${change.slug.trim().toLowerCase()}`;
+            for (const identity of next) {
+              if (identity.endsWith(slugSuffix)) next.delete(identity);
+            }
+          }
+          return next;
+        });
+      }
+    }),
+    [],
+  );
+
   async function bookmarkListing(listing: MarketplaceListing) {
     const api = ipc();
     if (!api?.marketplace?.bookmarkAdd || busy) return;
-    setBusy(listing.slug);
+    const listingIdentity = hubListingIdentityKey(listing);
+    setBusy(listingIdentity);
     try {
       const bookmark = await api.marketplace.bookmarkAdd(listing);
       bookmarkGenerationRef.current += 1;
-      setBookmarked((prev) => new Set(prev).add(bookmark.slug));
+      setBookmarked((prev) => new Set(prev).add(hubBookmarkIdentityKey(bookmark)));
       announceHubBookmarkChange({ action: "added", bookmark });
       setMessage(ko ? "Hub 북마크에 추가했습니다." : "Added to Hub bookmarks.");
     } catch {
@@ -119,11 +151,12 @@ export function HubBorrowRoom() {
         <div className="hub-borrow-carousel" role="list">
           {results.slice(0, 6).map((r) => {
             const entityClass = classifyHubEntity(r);
-            const isBookmarked = bookmarked.has(r.slug);
+            const listingIdentity = hubListingIdentityKey(r);
+            const isBookmarked = bookmarked.has(listingIdentity);
             const callable = isCallableHubListing(r);
             const verificationFacts = hubVerificationFacts(r, locale).slice(0, 2);
             return (
-              <div key={r.slug} className="hub-borrow-card" role="listitem" data-entity-kind={entityClass}>
+              <div key={listingIdentity} className="hub-borrow-card" role="listitem" data-entity-kind={entityClass}>
                 <div className="hub-borrow-card-top">
                   <span
                     className="hub-borrow-trust"
@@ -156,12 +189,12 @@ export function HubBorrowRoom() {
                   ) : (
                     <button
                       onClick={() => bookmarkListing(r)}
-                      disabled={busy === r.slug}
+                      disabled={busy === listingIdentity}
                       className="titlebar-nodrag hub-borrow-card-add"
                       data-dashboard-action="true"
                       title={ko ? "Hub 북마크에 추가" : "Add to Hub bookmarks"}
                     >
-                      {busy === r.slug ? (ko ? "북마크 중…" : "Bookmarking…") : ko ? "북마크" : "Bookmark"}
+                      {busy === listingIdentity ? (ko ? "북마크 중…" : "Bookmarking…") : ko ? "북마크" : "Bookmark"}
                     </button>
                   )}
                 </div>

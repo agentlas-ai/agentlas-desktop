@@ -532,7 +532,7 @@ function EmptyChatState({
         label: t("chatstream.empty_mention_firm"),
       })),
       ...hubBookmarksWithoutLocalDuplicates(directory.hubBookmarks, directory.agents).slice(0, 2).map((bookmark) => ({
-        id: `hub-${bookmark.slug}`,
+        id: `hub-${String(bookmark.listing.entityKind || "agent")}-${bookmark.slug}`,
         token: `@${locale === "en" ? bookmark.listing.nameEn || bookmark.listing.name : bookmark.listing.name}`,
         label: t("chatstream.empty_mention_hub"),
       })),

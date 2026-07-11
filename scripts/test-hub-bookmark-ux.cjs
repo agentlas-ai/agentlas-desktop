@@ -15,10 +15,52 @@ const chat = read("renderer/app/(shell)/chat/page.tsx");
 const chatInput = read("renderer/components/ChatInput.tsx");
 const chatStream = read("renderer/components/ChatStream.tsx");
 const hubVerification = read("renderer/lib/hub-verification.ts");
+const ipcMain = read("electron/ipc.ts");
+const bookmarkSync = read("electron/hub-bookmark-sync.ts");
+const appShell = read("renderer/components/AppShell.tsx");
+const authMain = read("electron/auth.ts");
+const electronMain = read("electron/main.ts");
+const preload = read("electron/preload.ts");
+const accountChip = read("renderer/components/AccountChip.tsx");
+const agentGroupsPage = read("renderer/app/(shell)/library/agent-groups/page.tsx");
+const agentGroupsStore = read("electron/store/agent-groups.ts");
+const marketplaceSource = read("electron/marketplace/mcp-source.ts");
 
 assert.match(events, /agentlas:hub-bookmarks-changed/, "bookmark changes need one renderer event contract");
 assert.match(events, /listing\.callable === true/, "Hub call candidates must fail closed unless explicitly callable");
 assert.match(events, /hubBookmarksWithoutLocalDuplicates/, "local same-slug agents must win over Hub references");
+assert.match(events, /Runtime invocation identity is globally slug-only/, "agent/team slug collisions must document the runtime invariant");
+assert.match(events, /ambiguousSlugs/, "agent/team slug collisions must fail closed on call surfaces");
+assert.match(events, /hubBookmarkIdentityKey/, "display state must preserve same-slug agent/team composite identities");
+assert.match(room, /hubListingIdentityKey\(r\)/, "dashboard Hub cards must use a composite listing identity");
+assert.doesNotMatch(room, /bookmarked\.has\(r\.slug\)/, "dashboard bookmark state must not collapse to slug-only");
+assert.match(market, /bookmarkedIdentities\.has\(hubListingIdentityKey\(listing\)\)/, "Marketplace cards must use a composite bookmark identity");
+assert.doesNotMatch(market, /bookmarkedSlugs/, "Marketplace must not retain a slug-only bookmark state set");
+assert.match(
+  ipcMain,
+  /if \(session\.signedIn\) \{[\s\S]{0,260}broadcastHubBookmarkSnapshot\(\);[\s\S]{0,180}syncHubBookmarks\(\{ rerunIfBusy: true \}\)/,
+  "account switch must clear/replace the mounted old-account snapshot before slow network sync",
+);
+assert.match(bookmarkSync, /const latestContext = currentContext\(\)/, "every trailing pass must reacquire the latest auth context");
+assert.match(bookmarkSync, /active\.cookie === candidate\.cookie/, "cookie rotation must invalidate a delayed prior generation");
+assert.match(
+  read("electron/store/hub-bookmarks.ts"),
+  /ambiguousLiveSlugs/,
+  "a live agent/team slug collision must fail closed even when only one identity is bookmarked",
+);
+assert.match(read("electron/store/hub-bookmarks.ts"), /hub_slug_identity_ambiguous/);
+assert.match(ipcMain, /bookmarksSync[\s\S]{0,100}rerunIfBusy: true/, "focus/auth lifecycle IPC must request one trailing pass when busy");
+assert.match(appShell, /syncQueued[\s\S]{0,220}setTimeout/, "focus and visibility events must coalesce within one UI tick");
+assert.match(authMain, /onAuthSessionInvalidated/, "silent auth loss needs a main-owned invalidation event");
+assert.match(authMain, /invalidateCachedSession\("server-invalid"\)/, "server rejection must emit the auth boundary");
+assert.match(authMain, /invalidateCachedSession\("expired"\)/, "TTL expiry must emit the auth boundary");
+assert.match(
+  electronMain,
+  /onAuthSessionInvalidated\([\s\S]{0,260}failCloseActiveHubBookmarks\(\);[\s\S]{0,180}broadcastHubBookmarkSnapshot\(\);[\s\S]{0,180}broadcastSignedOutSession\(\)/,
+  "silent auth loss must fail-close and replace the mounted account slice immediately",
+);
+assert.match(preload, /onSessionChanged:[\s\S]{0,220}auth:sessionChanged/, "renderer needs a typed silent-auth notification");
+assert.match(accountChip, /api\.auth\.onSessionChanged/, "account UI must not stay signed in after silent expiry");
 assert.match(room, /announceHubBookmarkChange\(\{ action: "added", bookmark \}\)/, "dashboard bookmark must publish immediately");
 assert.match(market, /announceHubBookmarkChange\(\{ action: "added", bookmark \}\)/, "Hub page bookmark must publish immediately");
 assert.match(org, /onHubBookmarkChange/, "OrgTree must subscribe to bookmark changes");
@@ -64,5 +106,11 @@ assert.match(market, /hubVerificationFacts\(listing, locale\)/, "Hub cards must 
 assert.doesNotMatch(market, />Trust \{/, "Hub cards must not present the package scan grade as generic Trust reputation");
 assert.match(room, /hubSecurityGradeLabel\(r, locale\)/, "Dashboard Hub cards must name the security scan honestly");
 assert.match(room, /data-callable=\{callable \? "true" : "false"\}/, "Dashboard Hub cards must expose callable versus install-only state");
+assert.match(agentGroupsPage, /hubEntityKind,/, "Agent Group drafts must persist the selected Hub entity namespace");
+assert.match(agentGroupsPage, /callableHubBookmarks\(hubBookmarks, agents\)/, "Agent Group sources must hide non-callable and same-slug ambiguous Hub bookmarks");
+assert.match(agentGroupsStore, /listing\.callable !== true \|\| listing\.kind === "install-only" \|\| listing\.routingReady === false/, "Agent Group runtime must fail closed on non-callable Hub listings");
+assert.match(agentGroupsStore, /hubEntityKindForMember/, "Agent Group storage and resolution must retain Hub entity identity");
+assert.match(agentGroupsStore, /if \(candidates\.length > 1\) return null/, "slug-only Hub invocation must reject same-slug agent/team ambiguity");
+assert.match(marketplaceSource, /const byIdentity = new Map<string, MarketplaceListing>\(\)/, "Marketplace source dedupe must preserve same-slug agent/team listings");
 
 console.log("test-hub-bookmark-ux: PASS");

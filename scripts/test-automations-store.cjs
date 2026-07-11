@@ -8,9 +8,11 @@ const { app } = require("electron");
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-automation-store-"));
 const userDataDir = path.join(tempDir, "user-data");
 process.env.AGENTLAS_STORE_PATH = path.join(tempDir, "agentlas.sqlite");
+process.env.AGENTLAS_AUTOMATION_LEASE_HEARTBEAT_MS = "1000";
 app.setPath("userData", userDataDir);
 
-const { initStore, getDb } = require("../dist/electron/store/db.js");
+const { initStore, getDb, recoverStaleAutomationRuns } = require("../dist/electron/store/db.js");
+const automationStore = require("../dist/electron/store/automations.js");
 const {
   computeNextRun,
   createAutomation,
@@ -18,12 +20,19 @@ const {
   getAutomation,
   listAutomations,
   markAutomationRun,
+  claimAutomationRun,
+  renewAutomationRunLease,
+  releaseAutomationRun,
   removeAutomation,
+  startGraphRun,
+  touchGraphRun,
+  finishGraphRun,
   toggleAutomation,
-} = require("../dist/electron/store/automations.js");
+} = automationStore;
 const { parseAutomations } = require("../dist/electron/automation-emitter.js");
 const mcpClient = require("../dist/electron/mcp/client.js");
-const { runDueAutomationsNow } = require("../dist/electron/automation-scheduler.js");
+const { runDueAutomationsNow, runAutomationNow } = require("../dist/electron/automation-scheduler.js");
+const { removeAutomationSafely } = require("../dist/electron/automation-removal.js");
 const { getChat } = require("../dist/electron/store/chats.js");
 
 function assertLocalTime(iso, expected) {
@@ -59,6 +68,104 @@ function assertLocalTime(iso, expected) {
       );
 
     assert.equal(listAutomations().length, 0, "new store should start empty");
+
+    const leaseCase = createAutomation({
+      name: "Lease Heartbeat Contract",
+      scheduleHuman: "daily-09:00",
+      targetType: "agent",
+      targetId: "agent-1",
+      promptTemplate: "lease contract",
+    });
+    const leaseT0 = new Date("2026-06-01T00:00:00.000Z");
+    assert.equal(claimAutomationRun(leaseCase.id, "owner-a", leaseT0), true);
+    assert.equal(
+      renewAutomationRunLease(leaseCase.id, "owner-a", new Date(leaseT0.getTime() + 14 * 60_000)),
+      true,
+    );
+    assert.equal(
+      claimAutomationRun(leaseCase.id, "owner-b", new Date(leaseT0.getTime() + 16 * 60_000)),
+      false,
+      "a refreshed lease must reject a peer even after the original 15-minute claim window",
+    );
+    assert.equal(releaseAutomationRun(leaseCase.id, "owner-a"), true);
+    assert.equal(
+      claimAutomationRun(leaseCase.id, "owner-b", new Date(leaseT0.getTime() + 16 * 60_000)),
+      true,
+      "owner release must make the due lease immediately reclaimable",
+    );
+    assert.equal(releaseAutomationRun(leaseCase.id, "owner-b"), true);
+    removeAutomation(leaseCase.id);
+
+    const sleepingOwnerLease = createAutomation({
+      name: "Sleeping Mac live-owner guard",
+      scheduleHuman: "daily-09:00",
+      targetType: "agent",
+      targetId: "agent-1",
+      promptTemplate: "protect a paused heartbeat",
+    });
+    const liveOwner = `${process.pid}:gui`;
+    assert.equal(claimAutomationRun(sleepingOwnerLease.id, liveOwner, leaseT0), true);
+    assert.equal(
+      claimAutomationRun(sleepingOwnerLease.id, "peer-after-sleep", new Date(leaseT0.getTime() + 20 * 60_000)),
+      false,
+      "a sleeping Mac must not let a peer steal an expired heartbeat while the trusted owner PID is alive",
+    );
+    assert.equal(
+      claimAutomationRun(
+        sleepingOwnerLease.id,
+        "peer-after-hard-ceiling",
+        new Date(leaseT0.getTime() + automationStore.AUTOMATION_LIVE_OWNER_GUARD_MS + 1),
+      ),
+      true,
+      "the live-PID guard must remain bounded so PID reuse cannot create a permanent lease",
+    );
+    assert.equal(releaseAutomationRun(sleepingOwnerLease.id, "peer-after-hard-ceiling"), true);
+    removeAutomation(sleepingOwnerLease.id);
+
+    const deadOwnerLease = createAutomation({
+      name: "Dead lease owner recovery",
+      scheduleHuman: "daily-09:00",
+      targetType: "agent",
+      targetId: "agent-1",
+      promptTemplate: "recover a dead owner",
+    });
+    assert.equal(claimAutomationRun(deadOwnerLease.id, "2147483647:headless", leaseT0), true);
+    assert.equal(
+      claimAutomationRun(deadOwnerLease.id, "peer-after-crash", new Date(leaseT0.getTime() + 20 * 60_000)),
+      true,
+      "an expired lease with a dead trusted PID must remain reclaimable",
+    );
+    assert.equal(releaseAutomationRun(deadOwnerLease.id, "peer-after-crash"), true);
+    removeAutomation(deadOwnerLease.id);
+
+    const crossProcessRemoval = createAutomation({
+      name: "Cross-process removal guard",
+      scheduleHuman: "daily-09:00",
+      targetType: "agent",
+      targetId: "agent-1",
+      promptTemplate: "shared database guard",
+    });
+    assert.equal(claimAutomationRun(crossProcessRemoval.id, "2147483647:headless", new Date()), true);
+    assert.throws(
+      () => removeAutomationSafely(crossProcessRemoval.id),
+      (error) => error?.code === "automation_active_removal_blocked",
+      "a fresh lease owned by another process must block destructive removal",
+    );
+    assert.ok(getAutomation(crossProcessRemoval.id));
+    assert.equal(releaseAutomationRun(crossProcessRemoval.id, "2147483647:headless"), true);
+    startGraphRun({
+      runId: "cross-process-running-snapshot",
+      automationId: crossProcessRemoval.id,
+      nodeIds: ["worker"],
+    });
+    assert.throws(
+      () => removeAutomationSafely(crossProcessRemoval.id),
+      (error) => error?.code === "automation_active_removal_blocked",
+      "a fresh running snapshot must block removal even when this process has no in-memory run",
+    );
+    finishGraphRun("cross-process-running-snapshot", "error");
+    removeAutomationSafely(crossProcessRemoval.id);
+    assert.equal(getAutomation(crossProcessRemoval.id), null);
 
     const from = new Date(2026, 5, 26, 8, 30, 0, 0); // local Fri Jun 26 2026 08:30
     assert.equal(
@@ -115,6 +222,59 @@ function assertLocalTime(iso, expected) {
     assert.equal(created.toolMode, "auto", "non-web automations should keep auto mode");
     assert.ok(created.nextRunAt, "nextRunAt should be set on create");
     assert.equal(listAutomations().length, 1);
+
+    const heartbeatAutomation = createAutomation({
+      name: "Durable heartbeat",
+      scheduleHuman: "daily-09:00",
+      targetType: "agent",
+      targetId: "agent-1",
+      promptTemplate: "long healthy run",
+    });
+    const heartbeatRunId = "run-durable-heartbeat";
+    startGraphRun({
+      runId: heartbeatRunId,
+      automationId: heartbeatAutomation.id,
+      nodeIds: ["worker"],
+      startedAt: new Date(Date.now() - 8 * 60 * 60 * 1000).toISOString(),
+    });
+    assert.equal(touchGraphRun(heartbeatRunId), true);
+    assert.equal(
+      recoverStaleAutomationRuns(),
+      0,
+      "recent durable progress must protect a long-running peer from stale recovery",
+    );
+    assert.equal(
+      getDb().prepare("SELECT status FROM automation_runs WHERE id = ?").get(heartbeatRunId).status,
+      "running",
+    );
+    finishGraphRun(heartbeatRunId, "ok");
+    toggleAutomation(heartbeatAutomation.id, false);
+
+    assert.throws(
+      () => startGraphRun({ runId: "run-deleted-parent", automationId: "deleted-parent", nodeIds: ["worker"] }),
+      /Automation not found/,
+      "a peer with a deleted parent must not recreate an orphan snapshot",
+    );
+    getDb().prepare(
+      `INSERT INTO automation_runs
+         (id, automation_id, started_at, last_activity_at, status, node_states_json)
+       VALUES ('legacy-peer-orphan', 'legacy-deleted-parent', ?, ?, 'running', '{}')`,
+    ).run(new Date().toISOString(), new Date().toISOString());
+    getDb().prepare(
+      `INSERT INTO run_history
+         (id, automation_id, scheduled_for, ran_at, status, skipped_count, error)
+       VALUES ('legacy-peer-history', 'legacy-deleted-parent', NULL, ?, 'error', 0, 'legacy peer')`,
+    ).run(new Date().toISOString());
+    recoverStaleAutomationRuns();
+    assert.equal(
+      getDb().prepare("SELECT COUNT(*) AS n FROM automation_runs WHERE id = 'legacy-peer-orphan'").get().n,
+      0,
+      "periodic recovery must prune an orphan committed by an older peer",
+    );
+    assert.equal(
+      getDb().prepare("SELECT COUNT(*) AS n FROM run_history WHERE id = 'legacy-peer-history'").get().n,
+      0,
+    );
 
     const disabled = toggleAutomation(created.id, false);
     assert.equal(disabled.enabled, false);
@@ -179,6 +339,69 @@ function assertLocalTime(iso, expected) {
     try {
       const { runGraph } = require("../dist/electron/workflow/run-graph.js");
       const { getOrCreateAutomationSession } = require("../dist/electron/store/chats.js");
+      let deletedParentRuntimeCalls = 0;
+      mcpClient.runMcpInvocation = async () => {
+        deletedParentRuntimeCalls += 1;
+        return { finalText: "must not execute", stormbreakerContinueRequested: false };
+      };
+      const deletedGraph = createAutomation({
+        name: "Deleted graph must not run",
+        scheduleHuman: "daily-09:00",
+        targetType: "agent",
+        targetId: "agent-1",
+        promptTemplate: "must not execute",
+        graphJson: {
+          version: 1,
+          nodes: [{ id: "worker", type: "agent", position: { x: 0, y: 0 }, config: { prompt: "must not execute" } }],
+          edges: [],
+        },
+      });
+      const cachedDeletedGraph = getAutomation(deletedGraph.id);
+      removeAutomation(deletedGraph.id);
+      await assert.rejects(
+        runGraph(cachedDeletedGraph, cachedDeletedGraph.graph, { runId: "run-deleted-graph" }),
+        (error) => error?.code === "automation_parent_missing",
+        "a cached graph whose parent was deleted must stop before chat/runtime side effects",
+      );
+      assert.equal(deletedParentRuntimeCalls, 0);
+      assert.equal(
+        getDb().prepare("SELECT COUNT(*) AS n FROM chats WHERE title LIKE ?").get(`⟦automation⟧${deletedGraph.id}%`).n,
+        0,
+      );
+
+      const deletedLegacy = createAutomation({
+        name: "Deleted legacy must not run",
+        scheduleHuman: "daily-09:00",
+        targetType: "agent",
+        targetId: "agent-1",
+        promptTemplate: "must not execute legacy",
+      });
+      const originalStartGraphRun = automationStore.startGraphRun;
+      let deletedLegacyRuntimeCalls = 0;
+      mcpClient.runMcpInvocation = async () => {
+        deletedLegacyRuntimeCalls += 1;
+        return { finalText: "must not execute", stormbreakerContinueRequested: false };
+      };
+      automationStore.startGraphRun = (input) => {
+        if (input.automationId === deletedLegacy.id) removeAutomation(deletedLegacy.id);
+        return originalStartGraphRun(input);
+      };
+      try {
+        await runAutomationNow(deletedLegacy.id);
+      } finally {
+        automationStore.startGraphRun = originalStartGraphRun;
+      }
+      assert.equal(deletedLegacyRuntimeCalls, 0, "deleted cached legacy automation must stop before runtime dispatch");
+      assert.equal(getAutomation(deletedLegacy.id), null);
+      assert.equal(
+        getDb().prepare("SELECT COUNT(*) AS n FROM automation_runs WHERE automation_id = ?").get(deletedLegacy.id).n,
+        0,
+      );
+      assert.equal(
+        getDb().prepare("SELECT COUNT(*) AS n FROM chats WHERE title LIKE ?").get(`⟦automation⟧${deletedLegacy.id}%`).n,
+        0,
+      );
+
       const graphCalls = [];
       mcpClient.runMcpInvocation = async (payload) => {
         graphCalls.push(payload);
@@ -239,6 +462,121 @@ function assertLocalTime(iso, expected) {
       assert.equal(emptySnapshot.status, "error", "empty-result graph snapshot should be error");
       assert.match(emptySnapshot.node_states_json, /"node":"failed"/, "empty-result graph node should be failed");
 
+      let ignoredAbortRuntimeStarted;
+      const ignoredAbortRuntimeReady = new Promise((resolve) => {
+        ignoredAbortRuntimeStarted = resolve;
+      });
+      mcpClient.runMcpInvocation = async () => {
+        ignoredAbortRuntimeStarted();
+        return new Promise(() => {});
+      };
+      const ignoredAbortGraphRun = createAutomation({
+        name: "Abort-ignoring Graph Runtime",
+        scheduleHuman: "daily-09:00",
+        targetType: "agent",
+        targetId: "agent-1",
+        promptTemplate: "never settles",
+        graphJson: {
+          version: 1,
+          nodes: [
+            { id: "stuck", type: "agent", position: { x: 0, y: 0 }, config: { prompt: "never settles" } },
+          ],
+          edges: [],
+        },
+      });
+      const ignoredAbortController = new AbortController();
+      const ignoredAbortRunId = "graph-ignored-abort-runtime";
+      const ignoredAbortResultPromise = runGraph(
+        ignoredAbortGraphRun,
+        getAutomation(ignoredAbortGraphRun.id).graph,
+        {
+          runId: ignoredAbortRunId,
+          signal: ignoredAbortController.signal,
+          abortGraceMs: 20,
+        },
+      );
+      await Promise.race([
+        ignoredAbortRuntimeReady,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("stuck graph node did not start")), 250)),
+      ]);
+      ignoredAbortController.abort(new Error("caller aborted an uncooperative runtime"));
+      const ignoredAbortResult = await Promise.race([
+        ignoredAbortResultPromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("aborted graph did not terminalize")), 250)),
+      ]);
+      assert.equal(ignoredAbortResult.ok, false);
+      assert.equal(ignoredAbortResult.error, "aborted");
+      const ignoredAbortSnapshot = getDb()
+        .prepare("SELECT status, node_states_json FROM automation_runs WHERE id = ?")
+        .get(ignoredAbortRunId);
+      assert.equal(ignoredAbortSnapshot.status, "error", "abort must terminalize the graph snapshot");
+      assert.match(
+        ignoredAbortSnapshot.node_states_json,
+        /"stuck":"failed"/,
+        "terminalization must not leave the cancellation-ignoring node projected as running",
+      );
+
+      getDb().prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('agent_concurrency', '2')").run();
+      let siblingStarted = false;
+      let siblingAbortObserved = false;
+      mcpClient.runMcpInvocation = async (payload, _sink, signal) => {
+        if (payload.userPrompt !== "sibling side effect") {
+          return { finalText: "unexpected", stormbreakerContinueRequested: false };
+        }
+        siblingStarted = true;
+        return new Promise((_resolve, reject) => {
+          const abort = () => {
+            siblingAbortObserved = true;
+            reject(new Error("sibling aborted"));
+          };
+          if (signal?.aborted) abort();
+          else signal?.addEventListener("abort", abort, { once: true });
+        });
+      };
+      const unexpectedGraphRun = createAutomation({
+        name: "Unexpected Graph Finalization",
+        scheduleHuman: "daily-09:00",
+        targetType: "agent",
+        targetId: "agent-1",
+        promptTemplate: "fallback",
+        graphJson: {
+          version: 1,
+          nodes: [
+            { id: "trg", type: "trigger", position: { x: 0, y: 0 }, config: {} },
+            { id: "node", type: "agent", position: { x: 280, y: 0 }, config: { prompt: "never dispatched" } },
+            { id: "sibling", type: "agent", position: { x: 280, y: 180 }, config: { prompt: "sibling side effect" } },
+          ],
+          edges: [
+            { id: "e0", source: "trg", target: "node" },
+            { id: "e1", source: "trg", target: "sibling" },
+          ],
+        },
+      });
+      await assert.rejects(
+        runGraph(unexpectedGraphRun, getAutomation(unexpectedGraphRun.id).graph, {
+          runId: "graph-unexpected-finalization",
+          sink: (event) => {
+            if (event.nodeId === "node" && event.nodeState === "running") {
+              throw new Error("forced live sink failure");
+            }
+          },
+        }),
+        /forced live sink failure/,
+        "unexpected graph exceptions must preserve the caller-visible rejection",
+      );
+      assert.equal(siblingStarted, true, "parallel sibling must be active before the forced branch failure");
+      assert.equal(siblingAbortObserved, true, "unexpected branch failure must abort and drain its active sibling");
+      const unexpectedSnapshot = getDb()
+        .prepare("SELECT status, node_states_json FROM automation_runs WHERE id = ?")
+        .get("graph-unexpected-finalization");
+      assert.equal(unexpectedSnapshot.status, "error", "unexpected graph exit must terminalize its snapshot");
+      assert.match(
+        unexpectedSnapshot.node_states_json,
+        /"node":"failed"/,
+        "a terminal error must not leave a node projected as running",
+      );
+      assert.match(unexpectedSnapshot.node_states_json, /"sibling":"failed"/);
+
       const schedulerCalls = [];
       mcpClient.runMcpInvocation = async (payload) => {
         schedulerCalls.push(payload);
@@ -289,8 +627,95 @@ function assertLocalTime(iso, expected) {
       const secondTick = runDueAutomationsNow(new Date("2026-06-01T00:00:01.000Z"));
       await new Promise((resolve) => setImmediate(resolve));
       assert.equal(schedulerCalls.length, 1, "running automation should not invoke twice");
+      assert.throws(
+        () => removeAutomationSafely(duplicateGuard.id),
+        (error) => error?.code === "automation_active_removal_blocked" && error?.phase === "run",
+        "deleting a write-capable active automation must fail closed",
+      );
+      assert.ok(getAutomation(duplicateGuard.id), "blocked removal must preserve the automation parent");
+      assert.ok(
+        getDb().prepare("SELECT 1 FROM chats WHERE title LIKE ? LIMIT 1").get(`⟦automation⟧${duplicateGuard.id}::%`),
+        "blocked removal must preserve the active run chat",
+      );
+      const claimedBeforeHeartbeat = getDb()
+        .prepare("SELECT claimed_at FROM automations WHERE id = ?")
+        .get(duplicateGuard.id).claimed_at;
+      const originalRenewLease = automationStore.renewAutomationRunLease;
+      let renewAttempts = 0;
+      automationStore.renewAutomationRunLease = (...args) => {
+        renewAttempts += 1;
+        if (renewAttempts === 1) {
+          const busy = new Error("synthetic busy");
+          busy.code = "SQLITE_BUSY";
+          throw busy;
+        }
+        return originalRenewLease(...args);
+      };
+      await new Promise((resolve) => setTimeout(resolve, 2200));
+      automationStore.renewAutomationRunLease = originalRenewLease;
+      const claimedAfterHeartbeat = getDb()
+        .prepare("SELECT claimed_at FROM automations WHERE id = ?")
+        .get(duplicateGuard.id).claimed_at;
+      assert.ok(renewAttempts >= 2, "silent runner must renew its due lease on an independent timer");
+      assert.ok(
+        new Date(claimedAfterHeartbeat).getTime() > new Date(claimedBeforeHeartbeat).getTime(),
+        "a transient renewal error must retry and eventually advance claimed_at",
+      );
+      await assert.rejects(
+        require("../dist/electron/automation-scheduler.js").quiesceAutomationSchedulerForUpdate(50),
+        /did not drain/,
+        "an update must fail closed instead of snapshotting while an automation is still writing",
+      );
       resolveLongRun();
       await Promise.all([firstTick, secondTick]);
+      const resumeAfterUpdateAttempt = await require("../dist/electron/automation-scheduler.js")
+        .quiesceAutomationSchedulerForUpdate(100);
+      await assert.rejects(
+        runAutomationNow(duplicateGuard.id),
+        /paused while an update is prepared/,
+        "new immediate runs must remain blocked inside the continuity-capture window",
+      );
+      resumeAfterUpdateAttempt();
+      removeAutomationSafely(duplicateGuard.id);
+      assert.equal(getAutomation(duplicateGuard.id), null, "the same automation may be removed after its run settles");
+      assert.equal(
+        getDb().prepare("SELECT COUNT(*) AS n FROM chats WHERE title LIKE ?").get(`⟦automation⟧${duplicateGuard.id}::%`).n,
+        0,
+        "successful removal must delete its settled run chat",
+      );
+
+      let leaseLossAbortObserved = false;
+      mcpClient.runMcpInvocation = async (_payload, _onEvent, signal) => {
+        await new Promise((resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            leaseLossAbortObserved = true;
+            reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
+          }, { once: true });
+        });
+        return { finalText: "unreachable", stormbreakerContinueRequested: false };
+      };
+      const stolenLease = createAutomation({
+        name: "Stolen Lease Guard",
+        scheduleHuman: "daily-09:00",
+        targetType: "agent",
+        targetId: "agent-1",
+        promptTemplate: "Wait until lease ownership changes",
+      });
+      const stolenDueAt = new Date("2026-06-01T00:00:00.000Z").toISOString();
+      getDb().prepare("UPDATE automations SET next_run_at = ? WHERE id = ?").run(stolenDueAt, stolenLease.id);
+      const stolenRun = runDueAutomationsNow(new Date("2026-06-01T00:00:01.000Z"));
+      await new Promise((resolve) => setImmediate(resolve));
+      getDb().prepare("UPDATE automations SET lease_owner = ? WHERE id = ?").run("peer-owner", stolenLease.id);
+      await stolenRun;
+      assert.equal(leaseLossAbortObserved, true, "definitive owner mismatch must abort the local runner");
+      const stolenAfter = getDb()
+        .prepare("SELECT last_run_at, next_run_at, lease_owner FROM automations WHERE id = ?")
+        .get(stolenLease.id);
+      assert.equal(stolenAfter.last_run_at, null, "lost owner must not record/advance another owner's due run");
+      assert.equal(stolenAfter.next_run_at, stolenDueAt);
+      assert.equal(stolenAfter.lease_owner, "peer-owner", "owner-conditional release must not clear the peer lease");
+      assert.equal(releaseAutomationRun(stolenLease.id, "peer-owner"), true);
+      removeAutomation(stolenLease.id);
 
       schedulerCalls.length = 0;
       mcpClient.runMcpInvocation = async () => {
@@ -380,6 +805,16 @@ function assertLocalTime(iso, expected) {
     removeAutomation(created.id);
     for (const item of listAutomations()) removeAutomation(item.id);
     assert.equal(listAutomations().length, 0);
+    assert.equal(
+      getDb().prepare("SELECT COUNT(*) AS n FROM automation_runs").get().n,
+      0,
+      "automation deletion must remove every linked live snapshot",
+    );
+    assert.equal(
+      getDb().prepare("SELECT COUNT(*) AS n FROM run_history").get().n,
+      0,
+      "automation deletion must remove every linked run-history projection",
+    );
 
     console.log("automation store smoke passed");
   } catch (err) {
@@ -387,7 +822,6 @@ function assertLocalTime(iso, expected) {
     console.error(err);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
-    if (app && typeof app.quit === "function") app.quit();
-    process.exit(exitCode);
+    if (app && typeof app.exit === "function") app.exit(exitCode);
   }
 })();

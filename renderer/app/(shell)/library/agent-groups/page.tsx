@@ -21,6 +21,13 @@ import { classifyHubEntity, classifyInstalledAgent, entityClassLabel, entityClas
 import { pickLocalized, useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { visibleRosterAgents } from "@/lib/agent-roster";
+import {
+  callableHubBookmarks,
+  hubBookmarkIdentityKey,
+  hubBookmarkIdentityKeyFromParts,
+  hubListingIdentityKey,
+  onHubBookmarkChange,
+} from "@/lib/hub-bookmark-events";
 import type {
   AgentGroupMember,
   AgentGroupMemberSnapshot,
@@ -93,6 +100,31 @@ export default function AgentGroupsPage() {
     void refresh();
   }, [refresh]);
 
+  useEffect(
+    () => onHubBookmarkChange((change) => {
+      if (change.action === "synced") {
+        setHubBookmarks(change.bookmarks);
+      } else if (change.action === "added") {
+        const addedIdentity = hubBookmarkIdentityKey(change.bookmark);
+        setHubBookmarks((previous) => [
+          change.bookmark,
+          ...previous.filter((bookmark) => hubBookmarkIdentityKey(bookmark) !== addedIdentity),
+        ]);
+      } else {
+        const removedIdentity = change.entityKind
+          ? hubBookmarkIdentityKeyFromParts(change.slug, change.entityKind)
+          : null;
+        const normalizedSlug = change.slug.trim().toLowerCase();
+        setHubBookmarks((previous) => previous.filter((bookmark) =>
+          removedIdentity
+            ? hubBookmarkIdentityKey(bookmark) !== removedIdentity
+            : (bookmark.slug || bookmark.listing.slug).trim().toLowerCase() !== normalizedSlug
+        ));
+      }
+    }),
+    [],
+  );
+
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(""), 2800);
@@ -150,13 +182,14 @@ export default function AgentGroupsPage() {
       }
     }
 
-    for (const bookmark of hubBookmarks) {
+    for (const bookmark of callableHubBookmarks(hubBookmarks, agents)) {
       const hub = bookmark.listing;
       const entityClass = classifyHubEntity(hub);
       if (entityClass === "plugin") continue;
+      const hubEntityKind = entityClass === "multi" ? "team" : "agent";
       const loc = pickLocalized(hub, locale);
       items.push({
-        key: `hub:${hub.slug}`,
+        key: `hub:${hubListingIdentityKey(hub)}`,
         kind: "hub",
         entityClass,
         title: loc.name,
@@ -168,6 +201,7 @@ export default function AgentGroupsPage() {
           source: "hub",
           agentSlug: hub.slug,
           hubSlug: hub.slug,
+          hubEntityKind,
           snapshot: {
             name: hub.name,
             nameEn: hub.nameEn,
@@ -175,7 +209,7 @@ export default function AgentGroupsPage() {
             taglineEn: hub.taglineEn,
             routeLabel: t("agentGroups.route.hub_bookmark"),
             trustGrade: hub.trustGrade,
-            entityKind: entityClass === "multi" ? "team" : "agent",
+            entityKind: hubEntityKind,
             routingStatus: hub.routingStatus ?? null,
           },
           addedAt: new Date().toISOString(),
@@ -611,6 +645,7 @@ function toEditableMember(member: AgentGroupResolved["members"][number]): AgentG
     agentId: member.agentId,
     agentSlug: member.agentSlug,
     hubSlug: member.hubSlug,
+    hubEntityKind: member.hubEntityKind,
     firmId: member.firmId,
     firmSlug: member.firmSlug,
     nodeId: member.nodeId,
@@ -621,8 +656,12 @@ function toEditableMember(member: AgentGroupResolved["members"][number]): AgentG
 }
 
 function memberKey(member: AgentGroupMember): string {
+  const hubEntityKind = member.source === "hub"
+    ? member.hubEntityKind || (member.snapshot.entityKind === "team" ? "team" : "agent")
+    : "";
   return [
     member.source,
+    hubEntityKind,
     member.firmId || member.firmSlug || "",
     member.nodeId || "",
     member.agentId || "",

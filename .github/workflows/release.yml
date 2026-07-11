@@ -50,15 +50,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      # Publishing to the SEPARATE public releases repo requires a cross-repo PAT
-      # (the default GITHUB_TOKEN is scoped to this private source repo only).
-      # AGENTLAS_DESKTOP_RELEASE_TOKEN already exists in repo secrets.
-      GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
-      GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
       HEPHAESTUS_REF: v1.1.12
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -69,19 +68,36 @@ jobs:
       # keytar links against libsecret on Linux.
       - name: Install Linux build deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev xvfb
 
       # Tag must match package.json version so the auto-update feed is consistent.
       - name: Verify tag matches package.json version
         shell: bash
+        env:
+          RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="$RAW_TAG"
+          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+          if [[ ! "$tag" =~ $semver_tag_re ]]; then
+            echo "::error::Release tag must be strict SemVer with a leading v (received: $tag)."
+            exit 1
+          fi
+          tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}")" || {
+            echo "::error::Release tag $tag does not exist in refs/tags."
+            exit 1
+          }
+          head_commit="$(git rev-parse HEAD)"
+          if [ "$head_commit" != "$tagged_commit" ]; then
+            echo "::error::Checked-out HEAD $head_commit does not match $tag ($tagged_commit)."
+            exit 1
+          fi
           version="${tag#v}"
           pkgver=$(node -p "require('./package.json').version")
           if [ "$pkgver" != "$version" ]; then
             echo "::error::Tag $tag implies version=$version but package.json is $pkgver. Bump package.json before tagging."
             exit 1
           fi
+          echo "RESOLVED_TAG=$tag" >> "$GITHUB_ENV"
           echo "Releasing $tag (version $version)"
 
       # Clone the git-ignored Hephaestus engine so extraResources can embed it.
@@ -95,6 +111,17 @@ jobs:
         if: runner.os == 'Linux'
         run: npm run typecheck
 
+      - name: Linux migration and updater continuity gates
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a npm run test:v52-automation-run-recovery
+          xvfb-run -a npm run test:v53-hub-bookmark-sync
+          xvfb-run -a npm run test:updater-production
+          xvfb-run -a npm run test:automations-store
+          xvfb-run -a npm run test:borrowed-task-force
+          xvfb-run -a npm run test:mcp-auto-select
+          xvfb-run -a npm run test:mcp-secret-isolation
+
       - name: Build renderer + electron
         run: npm run build
 
@@ -103,6 +130,11 @@ jobs:
       # because installer creation flakes intermittently on hosted runners.
       - name: Package and publish
         shell: bash
+        env:
+          # Publishing to the separate public releases repo requires a cross-repo
+          # PAT. Keep it out of npm install, builds, and regression tests.
+          GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
         run: |
           for attempt in 1 2 3; do
             echo "::group::electron-builder attempt $attempt"
@@ -113,8 +145,7 @@ jobs:
               # unchanged while making the final public feed authoritative.
               node scripts/stamp-update-feeds.mjs --release-dir=release --require
               mapfile -t update_feeds < <(find release -maxdepth 1 -type f -name 'latest*.yml' -print | sort)
-              tag="${{ github.event.inputs.tag || github.ref_name }}"
-              if gh release upload "$tag" \
+              if gh release upload "$RESOLVED_TAG" \
                 --repo agentlas-ai/agentlas-desktop-releases \
                 --clobber \
                 "${update_feeds[@]}"; then

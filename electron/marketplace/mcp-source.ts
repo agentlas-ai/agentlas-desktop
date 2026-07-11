@@ -443,11 +443,17 @@ function extractSlugObjects(text: string): Record<string, unknown>[] {
 }
 
 function dedupeListings(listings: MarketplaceListing[]): MarketplaceListing[] {
-  const bySlug = new Map<string, MarketplaceListing>();
+  const byIdentity = new Map<string, MarketplaceListing>();
   for (const listing of listings) {
-    if (!bySlug.has(listing.slug)) bySlug.set(listing.slug, listing);
+    const entityKind = listing.entityKind === "plugin" || listing.source === "hub-plugin"
+      ? "plugin"
+      : listing.entityKind === "team" || (typeof listing.agentCount === "number" && listing.agentCount > 1)
+        ? "team"
+        : "agent";
+    const identity = `${entityKind}:${listing.slug.trim().toLowerCase()}`;
+    if (!byIdentity.has(identity)) byIdentity.set(identity, listing);
   }
-  return Array.from(bySlug.values());
+  return Array.from(byIdentity.values());
 }
 
 function marketPublicAgentToListing(raw: Record<string, unknown>): MarketplaceListing | null {

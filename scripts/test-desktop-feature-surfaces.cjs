@@ -842,9 +842,9 @@ async function runChatContextMentionSurface(browser, baseUrl, evidence) {
 }
 
 async function runChatRecommendSurface(browser, baseUrl, evidence) {
+  // 자동 라우팅 — 추천 토글 ON이면 시트 없이 즉시 라우팅·실행된다(codex hep-network 동작).
   await runRecommendChoice(browser, baseUrl, evidence, {
     mode: "single",
-    button: /이 에이전트 사용하기|Use this agent/,
     proofName: "chat-recommend-single-surface",
     assertCalls: (calls) => {
       assert.ok(calls.some((call) => call.name === "chats.switchAgent" && call.payload.agentId === "agent-1"));
@@ -853,9 +853,10 @@ async function runChatRecommendSurface(browser, baseUrl, evidence) {
   });
   await runRecommendChoice(browser, baseUrl, evidence, {
     mode: "network",
-    button: /선택한 에이전트 사용하기|Use selected agents/,
     proofName: "chat-recommend-network-surface",
     assertCalls: (calls) => {
+      // 허브 고용 전에 크레딧 게이트가 잔액을 조회해야 한다(부족할 때만 페이월).
+      assert.ok(calls.some((call) => call.name === "billing.getCredits"), "credit gate must check balance before hub hire");
       const call = calls.find((item) => item.name === "invoke.run");
       assert.deepEqual(call.payload.borrowAgents, ["no-ai-slop-copywriter", "security-reviewer"]);
       assert.equal(call.payload.userPrompt, "추천 네트워크 실행");
@@ -863,7 +864,6 @@ async function runChatRecommendSurface(browser, baseUrl, evidence) {
   });
   await runRecommendChoice(browser, baseUrl, evidence, {
     mode: "pipeline",
-    button: /이 파이프라인 사용하기|Use this pipeline/,
     proofName: "chat-recommend-pipeline-surface",
     assertCalls: (calls) => {
       const call = calls.find((item) => item.name === "invoke.run");
@@ -879,7 +879,6 @@ async function runChatRecommendSurface(browser, baseUrl, evidence) {
   });
   await runRecommendChoice(browser, baseUrl, evidence, {
     mode: "none",
-    button: /추천 없이 실행|Run without recommendation/,
     proofName: "chat-recommend-plain-surface",
     assertCalls: (calls) => {
       const call = calls.find((item) => item.name === "invoke.run");
@@ -905,10 +904,13 @@ async function runRecommendChoice(browser, baseUrl, evidence, spec) {
   };
   await textbox.fill(textByMode[spec.mode]);
   await page.getByRole("button", { name: /보내기|Send/ }).click();
-  await page.getByRole("dialog", { name: /알아서 에이전트 부르기|에이전트 찾기|Find agent/ }).waitFor();
-  await page.getByRole("button", { name: /다른 에이전트 찾기|Find another agent/ }).waitFor();
-  await page.getByRole("button", { name: spec.button }).click();
+  // 자동 라우팅 — 픽 시트 없이 곧바로 실행까지 간다.
   await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "invoke.run"));
+  assert.equal(
+    await page.getByRole("button", { name: /다른 에이전트 찾기|Find another agent/ }).count(),
+    0,
+    "auto routing must not show the manual pick sheet",
+  );
   const calls = await page.evaluate(() => window.__qa.calls);
   assert.ok(calls.some((call) => call.name === "hephaestus.routePreview"), "routePreview should run before recommendation execution");
   spec.assertCalls(calls);

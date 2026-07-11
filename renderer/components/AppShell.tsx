@@ -18,6 +18,7 @@ import { IconLayers, IconBug, IconCheck } from "./Icon";
 import { PageTour, replayCurrentPageTour } from "./PageTour";
 import { BuildDoneToast } from "./BuildDoneToast";
 import { BrowserActionApprovalSheet } from "./BrowserActionApprovalSheet";
+import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import {
   isOberonBackgroundJobActive,
   startOberonBackgroundJobMonitor,
@@ -46,6 +47,51 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     registerRouter(router);
     return () => registerRouter(null);
   }, [router]);
+
+  // Web↔Desktop Hub bookmark lifecycle sync. There is deliberately no polling:
+  // startup, account changes, and returning focus/visibility are the only
+  // automatic triggers. Main broadcasts the reconciled full snapshot so every
+  // mounted surface replaces the same account-isolated slice at once.
+  useEffect(() => {
+    const api = ipc();
+    if (!api?.marketplace?.syncBookmarks || !api.marketplace.onBookmarksSnapshot) return;
+    let syncQueued = false;
+    let syncTimer: number | null = null;
+    const requestSync = () => {
+      if (syncQueued) return;
+      syncQueued = true;
+      syncTimer = window.setTimeout(() => {
+        syncQueued = false;
+        syncTimer = null;
+        void api.marketplace.syncBookmarks().catch(() => {
+          // Offline keeps the last local cache/outbox; the next lifecycle trigger retries.
+        });
+      }, 0);
+    };
+    const unsubscribe = api.marketplace.onBookmarksSnapshot((snapshot) => {
+      announceHubBookmarkChange({
+        action: "synced",
+        bookmarks: snapshot.bookmarks,
+        syncedAt: snapshot.syncedAt,
+      });
+    });
+    const unsubscribeAuth = api.auth.onSessionChanged?.(() => requestSync());
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") requestSync();
+    };
+    requestSync();
+    window.addEventListener("focus", requestSync);
+    window.addEventListener("agentlas:auth-changed", requestSync);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      if (syncTimer !== null) window.clearTimeout(syncTimer);
+      unsubscribe();
+      unsubscribeAuth?.();
+      window.removeEventListener("focus", requestSync);
+      window.removeEventListener("agentlas:auth-changed", requestSync);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
 
   const syncAttention = useCallback(async () => {
     const api = ipc();

@@ -165,6 +165,7 @@ export default function ConnectPage() {
   const [bindings, setBindings] = useState<TelegramConnectBinding[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
   const [botToken, setBotToken] = useState("");
+  const [botName, setBotName] = useState("");
   const [manualOpen, setManualOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -336,6 +337,7 @@ export default function ConnectPage() {
       const result = await api.telegram.autoConnect({
         targetKind: selected.targetKind,
         targetId: selected.targetId,
+        botName: botName.trim() || undefined,
       });
       setToast(result.message);
       appendLog(result.message, "success");
@@ -347,7 +349,7 @@ export default function ConnectPage() {
     } finally {
       setBusy(null);
     }
-  }, [appendLog, refresh, selected, t]);
+  }, [appendLog, botName, refresh, selected, t]);
 
   const handlePruneOrphans = useCallback(async () => {
     const api = ipc();
@@ -582,6 +584,21 @@ export default function ConnectPage() {
                   </div>
                   <p>{selected ? `${modeLabel(selected, t)} · ${targetLivePolicy(selected, t)}` : targetLivePolicy(selected, t)}</p>
                 </div>
+
+                {selected ? (
+                  <label className="connect-secret-box">
+                    <span>{t("connect.bot_name.label")}</span>
+                    <input
+                      value={botName}
+                      onChange={(event) => setBotName(event.target.value)}
+                      autoComplete="off"
+                      spellCheck={false}
+                      maxLength={62}
+                      placeholder={t("connect.bot_name.placeholder")}
+                    />
+                    <small>{t("connect.bot_name.help")}</small>
+                  </label>
+                ) : null}
 
                 <button
                 className="connect-btn primary connect-port-create"

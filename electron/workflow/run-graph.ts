@@ -14,12 +14,18 @@ import type {
 } from "../../shared/types";
 import { runMcpInvocation } from "../mcp/client";
 import { getOrCreateAutomationSession } from "../store/chats";
-import { startGraphRun, updateGraphRunNode, finishGraphRun } from "../store/automations";
+import {
+  startGraphRun,
+  updateGraphRunNode,
+  finishGraphRun,
+  isAutomationRunParentMissingError,
+} from "../store/automations";
 import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
 import { getAgentGroup } from "../store/agent-groups";
 import { getAgentConcurrency } from "../store/concurrency";
 import { tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
+import { awaitAutomationRunnerWithAbortGrace } from "../automation-watchdog";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -28,6 +34,8 @@ export interface RunGraphOptions {
   signal?: AbortSignal;
   /** 이 실행의 안정 id — automation_runs 스냅샷 키(라이브 오버레이 재하이드레이트). */
   runId?: string;
+  /** Abort 후 취소를 무시하는 노드를 기다릴 정리 유예. 테스트는 짧게 주입한다. */
+  abortGraceMs?: number;
 }
 
 export interface RunGraphResult {
@@ -37,6 +45,33 @@ export interface RunGraphResult {
   /** produces 이름 → 값(변수 백 스냅샷). */
   vars: Record<string, unknown>;
   error?: string;
+}
+
+/**
+ * 다음 노드 완료 또는 실행 전체 abort 중 먼저 발생한 쪽을 기다린다.
+ *
+ * 단순 Promise.race(running.values())는 런타임이 AbortSignal을 무시하면 영원히
+ * pending이라 바깥 루프가 abort를 다시 확인하지 못한다. 이 gate는 abort 이벤트가
+ * 그 대기를 즉시 깨우되, 늦게 settle하는 노드 promise에는 rejection handler를
+ * 계속 붙여 unhandled rejection을 만들지 않는다.
+ */
+function waitForRunningNodeOrAbort(
+  running: ReadonlyMap<string, Promise<void>>,
+  signal: AbortSignal,
+): Promise<void> {
+  if (running.size === 0 || signal.aborted) return Promise.resolve();
+
+  const nextNode = Promise.race(running.values());
+  let detachAbort = () => {};
+  const aborted = new Promise<void>((resolve) => {
+    const onAbort = () => resolve();
+    signal.addEventListener("abort", onAbort, { once: true });
+    detachAbort = () => signal.removeEventListener("abort", onAbort);
+    // abort가 위의 선확인과 listener 등록 사이에 일어난 경우도 놓치지 않는다.
+    if (signal.aborted) onAbort();
+  });
+
+  return Promise.race([nextNode, aborted]).finally(detachAbort);
 }
 
 /** {{var}} 치환 — 변수 백에서 값을 읽어 문자열에 삽입. 미정의는 빈 문자열. */
@@ -176,6 +211,16 @@ export async function runGraph(
   const vars: Record<string, unknown> = {};
   const outputs: Record<string, string> = {};
   const runId = opts.runId ?? `run-${automation.id}-${Date.now()}`;
+  const runController = new AbortController();
+  let detachCallerAbort = () => {};
+  if (opts.signal?.aborted) {
+    runController.abort(opts.signal.reason);
+  } else if (opts.signal) {
+    const relayAbort = () => runController.abort(opts.signal?.reason);
+    opts.signal.addEventListener("abort", relayAbort, { once: true });
+    detachCallerAbort = () => opts.signal?.removeEventListener("abort", relayAbort);
+  }
+  const runSignal = runController.signal;
 
   // per-node 라이브 상태 — sink로 emit하고 automation_runs에 영속화(새로고침 후 재하이드레이트).
   const emitNodeState = (nodeId: string, state: WorkflowNodeRunState): void => {
@@ -194,6 +239,42 @@ export async function runGraph(
     sink({ kind: "partial", nodeId, nodeState: state, agentId: nodeId });
   };
 
+  const ordered = topoSort(graph);
+  let ok = true;
+  let error: string | undefined;
+  const running = new Map<string, Promise<void>>();
+  const drainRunning = async (): Promise<void> => {
+    const pending = [...running.values()];
+    if (pending.length === 0) return;
+    const drain = Promise.allSettled(pending);
+    if (!runSignal.aborted) {
+      await drain;
+      return;
+    }
+    try {
+      await awaitAutomationRunnerWithAbortGrace(drain, runSignal, opts.abortGraceMs);
+    } catch {
+      // A cancellation-ignoring sibling is detached after the shared bounded
+      // grace. Terminal CAS prevents any late callback from reviving the row.
+    }
+  };
+  try {
+    startGraphRun({ runId, automationId: automation.id, nodeIds: graph.nodes.map((n) => n.id) });
+    tryRecordRunEvent({
+      runId,
+      kind: "workflow_graph_started",
+      automationId: automation.id,
+      payload: { nodeCount: graph.nodes.length, edgeCount: graph.edges.length },
+    });
+  } catch (snapshotError) {
+    if (isAutomationRunParentMissingError(snapshotError)) {
+      detachCallerAbort();
+      throw snapshotError;
+    }
+    /* 스냅샷 시작 실패는 무시 */
+  }
+
+  try {
   const chat = getOrCreateAutomationSession({
     automationId: automation.id,
     ...(automation.targetType === "firm"
@@ -241,19 +322,6 @@ export async function runGraph(
     return undefined;
   };
 
-  const ordered = topoSort(graph);
-  try {
-    startGraphRun({ runId, automationId: automation.id, nodeIds: graph.nodes.map((n) => n.id) });
-    tryRecordRunEvent({
-      runId,
-      kind: "workflow_graph_started",
-      automationId: automation.id,
-      payload: { nodeCount: graph.nodes.length, edgeCount: graph.edges.length },
-    });
-  } catch {
-    /* 스냅샷 시작 실패는 무시 */
-  }
-
   // skipped: 실행하지 않기로 확정된 노드. blockedEdges: condition이 drop한 엣지 id.
   const skipped = new Set<string>();
   const blockedEdges = new Set<string>();
@@ -294,9 +362,6 @@ export async function runGraph(
   // 노드가 실행 가능한가? 모든 inbound 엣지가 blocked이거나 그 source가 settled여야(상류 완료).
   const inboundResolved = (nodeId: string): boolean =>
     (inbound.get(nodeId) ?? []).every((i) => blockedEdges.has(i.edgeId) || settled(i.source));
-
-  let ok = true;
-  let error: string | undefined;
 
   const runNode = async (node: (typeof ordered)[number]): Promise<void> => {
     switch (node.type) {
@@ -357,7 +422,7 @@ export async function runGraph(
               }
               sink({ ...ev, agentId: ev.agentId ?? node.id, nodeId: node.id });
             },
-            opts.signal,
+            runSignal,
           );
           const text = result.finalText ?? "";
           if (runnerError) throw new Error(runnerError);
@@ -394,9 +459,8 @@ export async function runGraph(
   };
 
   const concurrency = Math.max(1, Math.floor(getAgentConcurrency()));
-  const running = new Map<string, Promise<void>>();
   for (;;) {
-    if (opts.signal?.aborted) {
+    if (runSignal.aborted) {
       ok = false;
       error = error ?? "aborted";
       tryRecordFailureEvent({
@@ -454,22 +518,37 @@ export async function runGraph(
       });
       break;
     }
-    await Promise.race(running.values());
+    await waitForRunningNodeOrAbort(running, runSignal);
     await Promise.resolve(); // 마이크로태스크 flush — 완료 노드의 finally(running.delete) 반영
   }
   // 남은 실행 정리(취소/조기종료 시).
-  if (running.size > 0) await Promise.allSettled(running.values());
-
-  try {
-    finishGraphRun(runId, ok ? "ok" : "error");
+  await drainRunning();
+  } catch (unexpected) {
+    ok = false;
+    error = unexpected instanceof Error ? unexpected.message : String(unexpected);
+    if (!runSignal.aborted) runController.abort(unexpected);
+    await drainRunning();
+    tryRecordFailureEvent({
+      runId,
+      source: "workflow_graph",
+      automationId: automation.id,
+      errorCode: "workflow_graph_unexpected",
+      errorMessage: error,
+    });
+    throw unexpected;
+  } finally {
+    detachCallerAbort();
+    try {
+      finishGraphRun(runId, ok ? "ok" : "error");
+    } catch {
+      /* 스냅샷 종료 실패는 다음 boot/periodic recovery가 닫는다 */
+    }
     tryRecordRunEvent({
       runId,
       kind: "workflow_graph_finished",
       automationId: automation.id,
       payload: { ok, error },
     });
-  } catch {
-    /* 스냅샷 종료 실패 무시 */
   }
   return ok ? { ok: true, outputs, vars } : { ok: false, outputs, vars, error };
 }

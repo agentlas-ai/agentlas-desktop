@@ -6,9 +6,10 @@
 // 반환하며(null=미래 발생 없음 → 종료), markAutomationRun은 misfire coalesce 정책 + run_history
 // 기록 + max_runs/end_at 종료를 적용한다. graph_json/schedule_json/timezone은 additive.
 import { randomUUID } from "node:crypto";
-import { getDb } from "./db";
+import { AUTOMATION_RUN_STALE_AFTER_MS, getDb } from "./db";
 import { nextRun, specFromStored, defaultTz } from "./schedule";
 import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
+import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 import type {
   Automation,
   AutomationHubMode,
@@ -309,7 +310,22 @@ export function toggleAutomation(id: string, enabled: boolean): Automation {
 }
 
 export function removeAutomation(id: string): void {
-  getDb().prepare("DELETE FROM automations WHERE id = ?").run(id);
+  const db = getDb();
+  const remove = db.transaction(() => {
+    // These projection tables predate foreign-key cascades. Delete the hidden
+    // target-scoped chats and histories in the same commit as the parent so a
+    // removed automation cannot leave messages, unreachable history, or a
+    // forever-running canvas row behind.
+    const chatMarker = `⟦automation⟧${id}`;
+    const escapedChatMarker = chatMarker.replace(/[!%_]/g, (character) => `!${character}`);
+    db.prepare(
+      "DELETE FROM chats WHERE kind = 'division' AND (title = ? OR title LIKE ? ESCAPE '!')",
+    ).run(chatMarker, `${escapedChatMarker}::%`);
+    db.prepare("DELETE FROM automation_runs WHERE automation_id = ?").run(id);
+    db.prepare("DELETE FROM run_history WHERE automation_id = ?").run(id);
+    db.prepare("DELETE FROM automations WHERE id = ?").run(id);
+  });
+  remove.immediate();
 }
 
 /** 저장된 그래프를 갱신(그래프 편집/생성 경로). null이면 그래프 제거(단일 프롬프트로 복귀). */
@@ -350,8 +366,60 @@ interface AutomationRunSnapshotRow {
   id: string;
   automation_id: string | null;
   started_at: string | null;
+  last_activity_at: string | null;
   status: string | null;
   node_states_json: string | null;
+}
+
+export class AutomationRunParentMissingError extends Error {
+  readonly code = "automation_parent_missing";
+
+  constructor(readonly automationId: string) {
+    super(`Automation not found: ${automationId}`);
+    this.name = "AutomationRunParentMissingError";
+  }
+}
+
+export function isAutomationRunParentMissingError(error: unknown): error is AutomationRunParentMissingError {
+  return error instanceof AutomationRunParentMissingError ||
+    (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "automation_parent_missing");
+}
+
+/**
+ * Cross-process destructive guard. The GUI's in-memory `running` set cannot
+ * see an optional headless runner, so deletion also checks its durable lease
+ * and fresh running snapshot before removing the shared parent row.
+ */
+export function hasDurableActiveAutomationExecution(id: string, now: Date = new Date()): boolean {
+  const db = getDb();
+  const parent = db.prepare(
+    "SELECT claimed_at, lease_owner FROM automations WHERE id = ?",
+  ).get(id) as { claimed_at: string | null; lease_owner: string | null } | undefined;
+  if (!parent) return false;
+
+  if (parent.claimed_at != null) {
+    const claimedAtMs = Date.parse(parent.claimed_at);
+    if (!Number.isFinite(claimedAtMs)) return true;
+    const ageMs = now.getTime() - claimedAtMs;
+    if (ageMs <= AUTOMATION_LEASE_TTL_MS) return true;
+    const ownerPid = trustedAutomationLeasePid(parent.lease_owner);
+    if (ownerPid != null && ageMs <= AUTOMATION_LIVE_OWNER_GUARD_MS && isProcessAlive(ownerPid)) {
+      return true;
+    }
+  }
+
+  const activeRun = db.prepare(
+    `SELECT COALESCE(last_activity_at, started_at) AS active_at
+     FROM automation_runs
+     WHERE automation_id = ? AND status = 'running'
+     ORDER BY COALESCE(last_activity_at, started_at) DESC
+     LIMIT 1`,
+  ).get(id) as { active_at: string | null } | undefined;
+  if (!activeRun) return false;
+  if (!activeRun.active_at) return true;
+  const activeAtMs = Date.parse(activeRun.active_at);
+  if (!Number.isFinite(activeAtMs)) return true;
+  return now.getTime() - activeAtMs <= AUTOMATION_RUN_STALE_AFTER_MS;
 }
 
 /** 그래프 실행 시작 시 automation_runs 행 생성(상태 running). node_states는 초기 pending 맵. */
@@ -363,19 +431,30 @@ export function startGraphRun(input: {
 }): void {
   const nodeStates: Record<string, WorkflowNodeRunState> = {};
   for (const id of input.nodeIds) nodeStates[id] = "pending";
-  getDb()
+  const startedAt = input.startedAt ?? new Date().toISOString();
+  const inserted = getDb()
     .prepare(
-      `INSERT INTO automation_runs (id, automation_id, started_at, status, node_states_json)
-       VALUES (?, ?, ?, 'running', ?)`,
+      `INSERT INTO automation_runs
+         (id, automation_id, started_at, last_activity_at, status, node_states_json)
+       SELECT ?, ?, ?, ?, 'running', ?
+       WHERE EXISTS (SELECT 1 FROM automations WHERE id = ?)`,
     )
-    .run(input.runId, input.automationId, input.startedAt ?? new Date().toISOString(), JSON.stringify(nodeStates));
+    .run(
+      input.runId,
+      input.automationId,
+      startedAt,
+      startedAt,
+      JSON.stringify(nodeStates),
+      input.automationId,
+    );
+  if (inserted.changes !== 1) throw new AutomationRunParentMissingError(input.automationId);
 }
 
 /** 실행 중 노드 상태 갱신(running/done/failed/skipped). 행이 없으면 조용히 무시. */
 export function updateGraphRunNode(runId: string, nodeId: string, state: WorkflowNodeRunState): void {
   const db = getDb();
   const row = db
-    .prepare("SELECT node_states_json FROM automation_runs WHERE id = ?")
+    .prepare("SELECT node_states_json FROM automation_runs WHERE id = ? AND status = 'running'")
     .get(runId) as { node_states_json: string | null } | undefined;
   if (!row) return;
   let states: Record<string, WorkflowNodeRunState> = {};
@@ -385,12 +464,51 @@ export function updateGraphRunNode(runId: string, nodeId: string, state: Workflo
     states = {};
   }
   states[nodeId] = state;
-  db.prepare("UPDATE automation_runs SET node_states_json = ? WHERE id = ?").run(JSON.stringify(states), runId);
+  db.prepare(
+    "UPDATE automation_runs SET node_states_json = ?, last_activity_at = ? WHERE id = ? AND status = 'running'",
+  ).run(JSON.stringify(states), new Date().toISOString(), runId);
+}
+
+/** Persist throttled runtime progress even when the event is renderer-only partial output. */
+export function touchGraphRun(runId: string, at: Date = new Date()): boolean {
+  const result = getDb()
+    .prepare("UPDATE automation_runs SET last_activity_at = ? WHERE id = ? AND status = 'running'")
+    .run(at.toISOString(), runId);
+  return result.changes > 0;
 }
 
 /** 실행 종료 시 최종 상태(ok/error) 기록. */
 export function finishGraphRun(runId: string, status: "ok" | "error"): void {
-  getDb().prepare("UPDATE automation_runs SET status = ? WHERE id = ?").run(status, runId);
+  const db = getDb();
+  const finish = db.transaction(() => {
+    const row = db
+      .prepare("SELECT node_states_json FROM automation_runs WHERE id = ? AND status = 'running'")
+      .get(runId) as { node_states_json: string | null } | undefined;
+    if (!row) return;
+    let nodeStatesJson = row.node_states_json;
+    if (status === "error" && nodeStatesJson) {
+      try {
+        const parsed = JSON.parse(nodeStatesJson) as Record<string, unknown>;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          let changed = false;
+          for (const [nodeId, nodeState] of Object.entries(parsed)) {
+            if (nodeState === "running") {
+              parsed[nodeId] = "failed";
+              changed = true;
+            }
+          }
+          if (changed) nodeStatesJson = JSON.stringify(parsed);
+        }
+      } catch {
+        // A malformed historical payload must not prevent the terminal status
+        // itself from being committed. The renderer already treats it as {}.
+      }
+    }
+    db.prepare(
+      "UPDATE automation_runs SET status = ?, node_states_json = ?, last_activity_at = ? WHERE id = ? AND status = 'running'",
+    ).run(status, nodeStatesJson, new Date().toISOString(), runId);
+  });
+  finish.immediate();
 }
 
 /** 이 자동화의 최근 실행 스냅샷(per-node 상태). 라이브 오버레이 초기 하이드레이트용. */
@@ -561,7 +679,29 @@ export function listEnabledByTrigger(kind: TriggerKind): Automation[] {
 
 // 리스 만료 임계 — 헤드리스 러너가 실행 중 크래시하면 클레임이 고아가 되므로 이 시간이
 // 지나면 회수 가능(설계 §6 열린질문 #5). 자동화 실행은 길어야 수 분이라 넉넉히 15분.
-const LEASE_TTL_MS = 15 * 60 * 1000;
+export const AUTOMATION_LEASE_TTL_MS = 15 * 60 * 1000;
+// A sleeping Mac pauses the JS heartbeat timer. Protect a lease whose trusted
+// Desktop owner process is still alive for the longest legitimate tool window,
+// plus the same recovery margin used by durable automation-run recovery. The
+// hard ceiling prevents PID reuse from creating a permanent lock.
+export const AUTOMATION_LIVE_OWNER_GUARD_MS = MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS + 2 * 60 * 1000;
+
+function trustedAutomationLeasePid(owner: string | null): number | null {
+  const match = owner?.match(/^([1-9][0-9]*):(gui|headless)$/);
+  if (!match) return null;
+  const pid = Number(match[1]);
+  return Number.isSafeInteger(pid) && pid <= 2_147_483_647 ? pid : null;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM proves that a process exists even when this process cannot signal it.
+    return Boolean(error && typeof error === "object" && "code" in error && error.code === "EPERM");
+  }
+}
 
 /**
  * due 행을 원자적으로 클레임한다(설계 §2.6 크로스프로세스 리스). 헤드리스 launchd 러너와
@@ -570,13 +710,51 @@ const LEASE_TTL_MS = 15 * 60 * 1000;
  * @returns 이 프로세스가 실행 권한을 얻으면 true.
  */
 export function claimAutomationRun(id: string, owner: string, now: Date = new Date()): boolean {
-  const cutoff = new Date(now.getTime() - LEASE_TTL_MS).toISOString();
-  const result = getDb()
+  const db = getDb();
+  const row = db
+    .prepare("SELECT enabled, claimed_at, lease_owner FROM automations WHERE id = ?")
+    .get(id) as Pick<AutomationRow, "enabled" | "claimed_at" | "lease_owner"> | undefined;
+  if (!row || row.enabled !== 1) return false;
+
+  const nowMs = now.getTime();
+  const claimedAtMs = row.claimed_at == null ? Number.NaN : Date.parse(row.claimed_at);
+  if (row.claimed_at != null && Number.isFinite(claimedAtMs)) {
+    const ageMs = nowMs - claimedAtMs;
+    if (ageMs < AUTOMATION_LEASE_TTL_MS) return false;
+
+    const incumbentPid = trustedAutomationLeasePid(row.lease_owner);
+    if (
+      incumbentPid != null &&
+      ageMs <= AUTOMATION_LIVE_OWNER_GUARD_MS &&
+      isProcessAlive(incumbentPid)
+    ) {
+      return false;
+    }
+  }
+
+  // Compare-and-swap the exact lease observed above. A GUI/headless peer may
+  // renew or acquire it between SELECT and UPDATE; that peer must win.
+  const result = db
     .prepare(
       `UPDATE automations SET claimed_at = ?, lease_owner = ?
-         WHERE id = ? AND enabled = 1 AND (claimed_at IS NULL OR claimed_at < ?)`,
+         WHERE id = ? AND enabled = 1 AND claimed_at IS ? AND lease_owner IS ?`,
     )
-    .run(now.toISOString(), owner, id, cutoff);
+    .run(now.toISOString(), owner, id, row.claimed_at, row.lease_owner);
+  return result.changes > 0;
+}
+
+/**
+ * Extend a due-run lease only while this exact owner still holds it.
+ * false is a definitive ownership loss; SQLite busy/I/O errors throw so the
+ * scheduler can treat a transient renewal failure as retryable, not ownership loss.
+ */
+export function renewAutomationRunLease(id: string, owner: string, now: Date = new Date()): boolean {
+  const result = getDb()
+    .prepare(
+      `UPDATE automations SET claimed_at = ?
+       WHERE id = ? AND enabled = 1 AND lease_owner = ? AND claimed_at IS NOT NULL`,
+    )
+    .run(now.toISOString(), id, owner);
   return result.changes > 0;
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.7.33",
+  "version": "0.7.34",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -21,7 +21,7 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 51,
+    "targetSchemaVersion": 53,
     "bundledRuntimeVersion": "1.1.12"
   },
   "scripts": {
@@ -72,6 +72,8 @@
     "test:v48-migration-guard": "npm run build:electron && electron scripts/test-v48-migration-guard.cjs",
     "test:v50-orphan-chat-repair": "npm run build:electron && electron scripts/test-v50-orphan-chat-repair.cjs",
     "test:v51-evolution-migration": "npm run build:electron && electron scripts/test-v51-evolution-migration.cjs",
+    "test:v52-automation-run-recovery": "npm run build:electron && electron scripts/test-v52-automation-run-recovery.cjs",
+    "test:v53-hub-bookmark-sync": "npm run build:electron && electron scripts/test-v53-hub-bookmark-sync.cjs",
     "test:hired-agents": "npm run build:electron && electron scripts/test-hired-agents.cjs",
     "test:curator-nest-wiring": "npm run build:electron && electron scripts/test-curator-nest-wiring.cjs",
     "test:task-force-memory-boundary": "npm run build:electron && electron scripts/test-task-force-memory-boundary.cjs",
@@ -87,6 +89,7 @@
     "test:builder-interview-stages": "npm run build:electron && node scripts/test-builder-interview-stages.cjs",
     "test:build-session-contracts": "node scripts/test-build-session-contracts.cjs",
     "test:local-import": "npm run build:electron && electron scripts/smoke-local-import.cjs",
+    "test:hephaestus-sync": "npm run build:electron && electron scripts/test-hephaestus-sync.cjs",
     "test:ime-submit-guards": "node scripts/test-ime-submit-guards.cjs",
     "test:chat-ux-contracts": "node scripts/test-chat-ux-contracts.cjs",
     "test:chat-session-reset": "npm run build:electron && electron scripts/test-chat-session-reset.cjs",
@@ -113,7 +116,7 @@
     "test:updater-ui": "npm run build:renderer && node scripts/test-updater-ui.cjs",
     "test:mock-bridge-parity": "node scripts/test-mock-bridge-parity.cjs",
     "test:generated-app-chat-routing": "node scripts/test-generated-app-chat-routing.cjs",
-    "test:borrowed-task-force": "npm run build:electron && electron scripts/test-borrowed-task-force.cjs",
+    "test:borrowed-task-force": "npm run build:electron && electron scripts/test-borrowed-task-force.cjs && electron scripts/test-borrowed-agent-fail-closed.cjs",
     "test:owned-agent-runtime-prompts": "npm run build:electron && electron scripts/test-owned-agent-runtime-prompts.cjs",
     "test:studio-start": "npm run build:electron && electron scripts/test-studio-start.cjs",
     "test:site-studio": "npm run build:electron && node scripts/test-site-studio-tagging.cjs && node scripts/test-site-studio-edit.cjs && node scripts/test-site-studio-overlay.cjs && electron scripts/test-site-studio-store.cjs && electron scripts/test-site-workspace-handoff.cjs",

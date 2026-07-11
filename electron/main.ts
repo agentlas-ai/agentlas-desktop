@@ -23,7 +23,12 @@ import {
   preflightUpdaterStartup,
 } from "./updater";
 import { disposeAppFactoryLaunches } from "./app-factory/operations";
-import { bootAuthFromKeychain } from "./auth";
+import { bootAuthFromKeychain, onAuthSessionInvalidated } from "./auth";
+import {
+  broadcastHubBookmarkSnapshot,
+  failCloseActiveHubBookmarks,
+  syncHubBookmarks,
+} from "./hub-bookmark-sync";
 import { materializeAllAgents } from "./agents/files";
 import { backfillEntityKinds } from "./mcp/registry";
 import { seedBuiltinAgents } from "./architecture/seed";
@@ -35,6 +40,20 @@ import { setCurrentUiLocale } from "./ui-locale";
 export { currentUiLocale } from "./ui-locale";
 
 const isDev = process.env.NODE_ENV === "development";
+const AUTH_SESSION_CHANGED_CHANNEL = "auth:sessionChanged";
+let disposeAuthSessionInvalidation: (() => void) | null = null;
+
+function broadcastSignedOutSession(): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+      try {
+        window.webContents.send(AUTH_SESSION_CHANGED_CHANNEL, { signedIn: false });
+      } catch {
+        // A renderer may disappear while the main-process auth boundary runs.
+      }
+    }
+  }
+}
 
 // 앱이 이미 ready면 스킵 — electron 스토어 테스트(scripts/test-*.cjs)가 whenReady 후에
 // store/chats.js → main.js를 require하는데, ready 이후 호출은 electron이 throw한다.
@@ -277,6 +296,8 @@ app.on("before-quit", () => {
   }).catch(() => {});
   try { disposeAutoUpdater(); } catch {}
   try { disposeAppFactoryLaunches(); } catch {}
+  try { disposeAuthSessionInvalidation?.(); } catch {}
+  disposeAuthSessionInvalidation = null;
 });
 
 app.whenReady().then(async () => {
@@ -338,6 +359,19 @@ app.whenReady().then(async () => {
     await createWindow();
     return;
   }
+  // A session can expire by TTL or be rejected by the server while every
+  // renderer remains mounted. Switch the bookmark authority boundary and
+  // account UI immediately instead of waiting for a future focus event.
+  disposeAuthSessionInvalidation = onAuthSessionInvalidated(() => {
+    failCloseActiveHubBookmarks();
+    broadcastHubBookmarkSnapshot();
+    broadcastSignedOutSession();
+    void syncHubBookmarks({ rerunIfBusy: true });
+  });
+  // Continuity verification is complete. Persisted cards are display cache,
+  // not fresh invocation authority, so revoke callable bits before any normal
+  // renderer is created; live startup sync may promote exact records again.
+  failCloseActiveHubBookmarks();
   // Agentlas 아키텍처 — PM 소울/메모리 큐레이터/태스크 편향 큐레이터를 설치에 항상 동봉.
   // 버전 게이팅이라 평상시엔 거의 no-op. ARCHITECTURE_VERSION이 오르면 프롬프트만 재동기화.
   try {
@@ -382,7 +416,19 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error("[triggers] startTriggerManager failed:", err);
   }
+  // Hephaestus 로컬 등록 자동 반영 — 어느 런타임에서 빌드했든 trusted local 카드의
+  // 패키지를 라이브러리로 (시작 시 소급 드레인 + desktop-sync/pending 감시).
+  try {
+    const { startHephaestusSync } = await import("./agents/hephaestus-sync");
+    startHephaestusSync();
+  } catch (err) {
+    console.error("[hephaestus-sync] start failed:", err);
+  }
   await createWindow();
+  // Warm the account-isolated Hub bookmark cache after auth restore. This is
+  // intentionally non-blocking; AppShell also triggers/subscribes on mount so
+  // a renderer that was not ready for this first broadcast still reconciles.
+  void syncHubBookmarks();
 }).catch(async (error) => {
   let handled = false;
   try {

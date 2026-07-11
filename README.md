@@ -65,9 +65,16 @@
 ## Release log
 
 Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
-the [Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest) (the public download/auto-update channel).
+[Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest) (the public download/auto-update channel).
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
+
+- **2026-07-11 · v0.7.34 cloud-local stabilization** — Web bookmarks now sync
+  into an account-scoped Desktop cache and appear immediately across Dashboard,
+  the organization tree, Marketplace, Agent Groups, and Chat. Hub invocation
+  revalidates live callability and fails closed instead of fabricating a local
+  fallback; automation leases, orphan recovery, updater continuity, and release
+  credentials are hardened with production regression gates.
 
 - **2026-07-11 · v0.7.33 pre-mobile production hardening** — a passed Build now
   becomes a durable local asset and appears in Dashboard, My Agents, and Chat

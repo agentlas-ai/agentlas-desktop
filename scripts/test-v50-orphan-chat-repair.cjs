@@ -209,7 +209,7 @@ async function orchestrate() {
 
     const first = runWorker(fixturePath, path.join(tempDir, "user-data-first"));
     const second = runWorker(fixturePath, path.join(tempDir, "user-data-reboot"));
-    assert.equal(first.userVersion, 50);
+    assert.ok(first.userVersion >= 50, "v50 repair must reach v50 or a later schema");
     assert.equal(first.orphanChats, 0);
     assert.equal(first.chatAgentViolations, 0);
     assert.equal(first.foreignKeyViolations, 0);

@@ -1,5 +1,6 @@
 // 실제 MCP 클라이언트 — @modelcontextprotocol/sdk로 외부 서버에 붙어 tools/list.
-// stdio(npx) 또는 SSE 트랜스포트. 시크릿은 keychain 글로벌 vault에서 읽어 자식 env로 주입.
+// 트랜스포트 3종: stdio(npx) / SSE(레거시 원격) / Streamable HTTP(현대 원격 표준).
+// 시크릿은 keychain 글로벌 vault에서 읽어 stdio는 자식 env로, 원격은 HTTP 헤더로 주입.
 //
 // 현재 범위: 연결 테스트 + 툴 목록 조회(관리 화면용). 채팅 중 실제 tool-call 실행은
 // 다음 단계(런너의 function-calling 루프 + CLI mcp.json 주입)로 분리.
@@ -8,6 +9,7 @@ import { app } from "electron";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { readEnvVar } from "../secrets/vault";
 import { listInstalledServers, getServer } from "./registry";
 import { withCliPath } from "../runtime/exec";
@@ -32,6 +34,50 @@ async function resolveEnv(envKeys: string[]): Promise<{ resolved: Record<string,
     else missing.push(k);
   }
   return { resolved, missing };
+}
+
+/**
+ * 원격(sse/http) 서버의 envKeys→vault 값을 HTTP 요청 헤더로 매핑한다.
+ * 헤더 이름은 envKey 그대로(예: `Authorization`), 값은 vault 값(예: `Bearer …`).
+ * URL 경로에 토큰이 내장된 서버(예: opencrab)는 envKeys가 비어 헤더도 없이 붙는다.
+ */
+function buildRemoteHeaders(envKeys: string[], resolved: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const k of envKeys) {
+    const v = resolved[k];
+    if (v) headers[k] = v;
+  }
+  return headers;
+}
+
+/**
+ * 트랜스포트 팩토리 — stdio / sse / http 분기를 한 곳에.
+ * stdio는 resolved를 자식 env로, 원격은 HTTP 헤더로 주입한다.
+ * http는 현대 표준인 Streamable HTTP로, sse만 레거시 SSE로 연결한다(예전엔 둘 다 SSE라
+ * Streamable HTTP 전용 서버 연결이 깨졌다).
+ */
+function createTransport(server: InstalledMcpServer, resolved: Record<string, string>): unknown {
+  if (server.transport === "stdio") {
+    if (!server.command) throw new Error("stdio server has no command");
+    const baseEnv = withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" });
+    const stdioEnv = Object.fromEntries(
+      Object.entries(baseEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    );
+    return new StdioClientTransport({
+      command: expandHome(server.command),
+      args: (server.args ?? []).map(expandHome),
+      // getDefaultEnvironment()는 PATH/HOME 등 안전한 기본값 — 거기에 시크릿을 얹는다.
+      env: { ...stdioEnv, ...resolved },
+      stderr: "ignore",
+    });
+  }
+  if (!server.url) throw new Error("sse/http server has no url");
+  const url = new URL(server.url);
+  const headers = buildRemoteHeaders(server.envKeys, resolved);
+  const init = Object.keys(headers).length ? { requestInit: { headers } } : undefined;
+  return server.transport === "sse"
+    ? new SSEClientTransport(url, init)
+    : new StreamableHTTPClientTransport(url, init);
 }
 
 async function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
@@ -66,23 +112,7 @@ export async function testServerConnection(server: InstalledMcpServer): Promise<
 
   let transport: unknown;
   try {
-    if (server.transport === "stdio") {
-      if (!server.command) throw new Error("stdio server has no command");
-      const baseEnv = withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" });
-      const stdioEnv = Object.fromEntries(
-        Object.entries(baseEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-      );
-      transport = new StdioClientTransport({
-        command: expandHome(server.command),
-        args: (server.args ?? []).map(expandHome),
-        // getDefaultEnvironment()는 PATH/HOME 등 안전한 기본값 — 거기에 시크릿을 얹는다.
-        env: { ...stdioEnv, ...resolved },
-        stderr: "ignore",
-      });
-    } else {
-      if (!server.url) throw new Error("sse/http server has no url");
-      transport = new SSEClientTransport(new URL(server.url));
-    }
+    transport = createTransport(server, resolved);
 
     const tools = await withTimeout(
       (async () => {
@@ -130,22 +160,7 @@ export async function callServerTool(
   const client = new Client({ name: "agentlas-desktop", version: app.getVersion() }, { capabilities: {} });
   let transport: unknown;
   try {
-    if (server.transport === "stdio") {
-      if (!server.command) throw new Error("stdio server has no command");
-      const baseEnv = withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" });
-      const stdioEnv = Object.fromEntries(
-        Object.entries(baseEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-      );
-      transport = new StdioClientTransport({
-        command: expandHome(server.command),
-        args: (server.args ?? []).map(expandHome),
-        env: { ...stdioEnv, ...resolved },
-        stderr: "ignore",
-      });
-    } else {
-      if (!server.url) throw new Error("sse/http server has no url");
-      transport = new SSEClientTransport(new URL(server.url));
-    }
+    transport = createTransport(server, resolved);
 
     const text = await withTimeout(
       (async () => {

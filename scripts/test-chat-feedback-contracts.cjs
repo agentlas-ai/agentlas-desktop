@@ -28,7 +28,7 @@ assert.match(stream, /\.agentlas-chat-copy-button:hover/, "copy control must hav
 
 assert.doesNotMatch(input, /#fff(?:fff)?\b/i,
   "chat input sheets and controls must use theme tokens instead of hard-coded white");
-for (const surface of ["Stormbreaker", "BottomQuestionSheet", "RecommendationSheet"]) {
+for (const surface of ["Stormbreaker", "BottomQuestionSheet", "AutoRouteGateSheet"]) {
   assert.match(input, new RegExp(`${surface}[\\s\\S]*background: "var\\(--paper\\)"`),
     `${surface} must use the themed paper surface`);
 }

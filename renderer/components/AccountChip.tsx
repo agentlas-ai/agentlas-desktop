@@ -39,10 +39,17 @@ export function AccountChip() {
       });
     }, 5000);
     const onFocus = () => void load();
+    const unsubscribeSession = api.auth.onSessionChanged?.((next) => {
+      if (stopped) return;
+      setSession(next);
+      if (!next.signedIn) setPopoverOpen(false);
+      announceAuthChanged();
+    });
     window.addEventListener("focus", onFocus);
     return () => {
       stopped = true;
       clearInterval(timer);
+      unsubscribeSession?.();
       window.removeEventListener("focus", onFocus);
     };
   }, []);

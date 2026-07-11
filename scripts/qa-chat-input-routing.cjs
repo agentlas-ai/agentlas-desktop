@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const assert = require("node:assert/strict");
+const { randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -35,6 +36,36 @@ fs.writeFileSync(
   ].join("\n"),
 );
 
+// fs 그랜트 프리시드 — 앱의 durable 그랜트 저장 포맷(electron/fs/access.ts)을 launch 전에 써 두고
+// AGENTLAS_FS_GRANT_STORE 로 읽힌다. 같은 토큰으로 렌더러에 넘길 FsPathGrant 를 조립한다.
+const GRANT_STORE_PATH = path.join(PROOF_ROOT, "fs-read-grants.v1.json");
+const seededGrants = new Map();
+for (const raw of [PROOF_ROOT, QA_AGENT_A, QA_AGENT_B]) {
+  const real = fs.realpathSync.native(raw);
+  seededGrants.set(raw, {
+    token: randomUUID(),
+    path: real,
+    mode: "tree",
+    durable: true,
+    createdAt: new Date().toISOString(),
+  });
+}
+fs.writeFileSync(GRANT_STORE_PATH, `${JSON.stringify([...seededGrants.values()], null, 2)}\n`, {
+  encoding: "utf8",
+  mode: 0o600,
+});
+
+function grantFromSeed(rawPath) {
+  const record = seededGrants.get(rawPath);
+  if (!record) throw new Error(`No seeded grant for ${rawPath}`);
+  return {
+    path: record.path,
+    kind: "directory",
+    durable: true,
+    scope: { kind: "capability", token: record.token },
+  };
+}
+
 main().catch((err) => {
   console.error(err);
   process.exit(1);
@@ -50,6 +81,7 @@ async function main() {
       NODE_ENV: "production",
       AGENTLAS_QA_USER_DATA_DIR: USER_DATA_DIR,
       AGENTLAS_STORE_PATH: DB_PATH,
+      AGENTLAS_FS_GRANT_STORE: GRANT_STORE_PATH,
       AGENTLAS_DISABLE_RUNTIME_PROBES: "1",
     },
   });
@@ -62,6 +94,18 @@ async function main() {
     page.setDefaultTimeout(30_000);
     await page.setViewportSize({ width: 1320, height: 920 }).catch(() => undefined);
     await page.waitForLoadState("domcontentloaded");
+    await page.waitForFunction(() => Boolean(window.agentlas));
+    // 전역 로그인 게이트(AuthGate) 우회 — QA user-data엔 세션이 없어 랜딩에 갇힌다.
+    await app.evaluate(({ ipcMain }) => {
+      ipcMain.removeHandler("auth:getSession");
+      ipcMain.handle("auth:getSession", () => ({
+        signedIn: true,
+        email: "qa@agentlas.local",
+        name: "QA",
+        plan: "pro",
+      }));
+    });
+    await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => Boolean(window.agentlas));
     await page.evaluate(() => {
       try {
@@ -139,15 +183,15 @@ async function main() {
       });
     });
 
-    const grants = await app.evaluate((_, paths) => {
-      const path = require("node:path");
-      const { grantPath } = require(path.join(process.cwd(), "dist/electron/fs/access.js"));
-      return {
-        proofRoot: grantPath(paths.proofRoot, { durable: true }),
-        qaAgentA: grantPath(paths.qaAgentA, { durable: false }),
-        qaAgentB: grantPath(paths.qaAgentB, { durable: false }),
-      };
-    }, { proofRoot: PROOF_ROOT, qaAgentA: QA_AGENT_A, qaAgentB: QA_AGENT_B });
+    // Playwright evaluate 컨텍스트에서 모듈 로딩이 전면 차단돼(Electron 33+: require/mainModule/dynamic
+    // import 모두 없음) grantPath 를 앱 안에서 호출할 수 없다. 대신 launch 전에 프리시드한
+    // AGENTLAS_FS_GRANT_STORE(durable 그랜트 저장 포맷)를 앱이 읽게 하고, 같은 토큰으로
+    // FsPathGrant 모양(access.ts recordToGrant)을 스크립트에서 조립한다.
+    const grants = {
+      proofRoot: grantFromSeed(PROOF_ROOT),
+      qaAgentA: grantFromSeed(QA_AGENT_A),
+      qaAgentB: grantFromSeed(QA_AGENT_B),
+    };
 
     const setup = await page.evaluate(async ({ grants }) => {
       window.localStorage.setItem("agentlas.onboarded", "1");
@@ -198,7 +242,8 @@ async function main() {
 
     await page.keyboard.press("Escape");
     await textarea.fill("");
-    await page.getByText("알아서 에이전트 부르기").click();
+    // "알아서 에이전트 부르기" 토글은 + 메뉴 안에 있다 — 메뉴를 열고 토글 후 닫는다.
+    await toggleAutoRoute(page);
     await textarea.fill("@");
     await page.waitForSelector('[data-popover-kind="autocomplete"] [data-autocomplete-option="true"]');
     await page.keyboard.press("ArrowDown");
@@ -207,23 +252,21 @@ async function main() {
     const autoChipAfterMention = await autoRouteChipActive(page);
     assert.equal(autoChipAfterMention, false, "@ explicit agent selection must turn off auto routing");
 
-    await page.getByText("알아서 에이전트 부르기").click();
+    await toggleAutoRoute(page);
     await textarea.fill("이거 AI 처럼 나오지 않게 해줘");
     await page.locator(".chat-input-send-button").click();
     await waitForMainQa(app, (qa) => qa.routeCalls >= 1);
-    await page.getByText("쇼피파이").waitFor();
-    assert.equal((await mainQa(app)).routeCalls, 1);
-    await page.getByText("다른 에이전트 찾기").click();
-    await waitForMainQa(app, (qa) => qa.routeCalls >= 2);
-    await page.getByText("쇼피파이").waitFor();
-    await page.screenshot({ path: path.join(SHOTS, "02-recommendation-retry.png"), fullPage: true });
-
-    await page.getByText("추천 없이 실행").click();
+    // 자동 라우팅 — 추천 시트를 띄우지 않고 즉시 실행된다(codex hep-network 동작).
     await waitForMainQa(app, (qa) => qa.runs.length === 1);
+    assert.equal((await mainQa(app)).routeCalls, 1);
+    assert.equal(await page.getByText("추천 없이 실행").count(), 0, "auto routing must not show the pick sheet");
+    assert.equal(await page.getByText("다른 에이전트 찾기").count(), 0, "auto routing must not offer manual retry");
+    await page.screenshot({ path: path.join(SHOTS, "02-auto-route.png"), fullPage: true });
+
     const run = (await mainQa(app)).runs[0];
     assert.equal(run.userPrompt, "이거 AI 처럼 나오지 않게 해줘");
-    assert.equal(run.routerAgent, undefined, "plain execution must not forward routerAgent");
-    assert.equal(run.borrowAgents, undefined, "plain execution must not borrow recommended agents");
+    assert.ok(run.routerAgent, "auto-routed run must forward the routerAgent escalation");
+    assert.equal(run.borrowAgents, undefined, "local single route must not borrow hub agents");
 
     const stopButton = page.locator('[data-chat-stop-button="true"]').first();
     await stopButton.waitFor();
@@ -263,8 +306,8 @@ async function main() {
         "@ autocomplete ArrowDown remains on the second row after render churn",
         "@ autocomplete mouse hover remains on the hovered row",
         "explicit @ agent selection disables auto routing",
-        "Find another agent reruns recommendation without closing the sheet",
-        "Run without recommendation sends no routerAgent and no borrowed agents",
+        "Auto routing executes immediately without a pick sheet",
+        "Auto-routed run forwards routerAgent and borrows nothing for a local single route",
         "Stop is visible and transitions to stop-requested state",
         "Internal Stormbreaker loop status is hidden for plain single-agent runs",
         "Plain single-agent run renders no activity cards",
@@ -323,6 +366,19 @@ async function autocompleteActiveRows(page) {
       background: button.style.background,
     }));
   });
+}
+
+// "알아서 에이전트 부르기" 토글 — 꺼져 있으면 + 메뉴의 토글 행을, 켜져 있으면 바의 활성 칩을 누른다.
+async function toggleAutoRoute(page) {
+  const chip = page.locator(".chat-input-hep-chip", { hasText: "알아서 에이전트 부르기" });
+  if (await chip.count()) {
+    await chip.first().click();
+    return;
+  }
+  await page.getByRole("button", { name: /추가 —|Add —/ }).first().click();
+  await page.getByText("알아서 에이전트 부르기").click();
+  // 팝오버는 바깥 클릭으로 닫힌다 — 입력창을 눌러 닫고 포커스를 되돌린다.
+  await page.locator("textarea").first().click();
 }
 
 async function autoRouteChipActive(page) {

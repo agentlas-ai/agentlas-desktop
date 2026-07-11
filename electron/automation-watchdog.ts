@@ -1,5 +1,12 @@
 import type { McpInvocationEvent } from "../shared/types";
 
+/**
+ * Upper bound accepted by the scheduler for a silent but known-active tool.
+ * Durable run recovery reuses this exact ceiling so a second Desktop/headless
+ * process never mistakes a valid long-running tool for an abandoned run.
+ */
+export const MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS = 4 * 60 * 60 * 1000;
+
 export type AutomationWatchdogMode = "idle" | "active-tool";
 
 type AutomationWatchdogNodeScope = string | null;

@@ -8,6 +8,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
+import { grokAuthReady } from "../multimodal/availability";
+import { readEnvVar } from "../secrets/vault";
 
 export type TrexImageModel = "codex" | "gemini" | "auto";
 export interface TrexImageResult {
@@ -15,7 +17,7 @@ export interface TrexImageResult {
   src?: string;
   reason?: string;
   /** 실제 생성에 성공한 엔진(auto 페일오버 추적용). */
-  engine?: "codex" | "gemini";
+  engine?: "codex" | "gemini" | "grok";
 }
 
 function resolveBin(name: string, extra: string[]): string | null {
@@ -209,6 +211,84 @@ async function runAgyNanoBanana(prompt: string, target: string): Promise<boolean
   return fs.existsSync(target);
 }
 
+const GROK_BIN_EXTRA = [
+  path.join(os.homedir(), ".grok/bin/grok"), // 공식 install.sh — PATH의 grok이 서드파티 shim일 수 있어 우선
+  path.join(os.homedir(), ".local/bin/grok"),
+  path.join(os.homedir(), ".bun/bin/grok"),
+  "/opt/homebrew/bin/grok",
+  "/usr/local/bin/grok",
+];
+
+/**
+ * Grok CLI(Imagine) — 구독 로그인 키리스. 내장 generate_image 툴에 output_path를 지정해 생성하고,
+ * 미저장 시 <cwd>/.grok/generated-media 의 최신 PNG를 target으로 복사한다(codex 패턴과 동일).
+ */
+async function runGrokImage(prompt: string, target: string, cwd: string): Promise<boolean> {
+  const bin = resolveBin("grok", GROK_BIN_EXTRA);
+  if (!bin) return false;
+  // v1.1.7 실측: 헤드리스는 GROK_API_KEY(=XAI_API_KEY) 또는 저장된 apiKey 가 필요 — 없으면 시도 낭비.
+  if (!(await grokAuthReady())) return false;
+  const vaultKey = (await readEnvVar("GROK_API_KEY")) || (await readEnvVar("XAI_API_KEY"));
+  const env = { ...process.env };
+  if (vaultKey) {
+    env.GROK_API_KEY = vaultKey;
+    env.XAI_API_KEY = vaultKey;
+  }
+  const instruction =
+    `Use your built-in generate_image tool to generate exactly ONE image with output_path set to ${target} ` +
+    `(landscape). Prompt: ${prompt}. ` +
+    `Absolutely no text, no words, no letters, no numbers, no logo, no watermark. ` +
+    `Do not run any other tools. If you cannot generate images print exactly NO_IMAGE_GEN.`;
+  const since = Date.now() - 3000;
+  await new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    let child;
+    try {
+      // stdin ignore — codex와 동일한 stdin-EOF 대기 블록 방지.
+      child = spawn(bin, ["-p", instruction, "--directory", cwd, "--format", "text", "--max-tool-rounds", "8"], {
+        cwd,
+        env,
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+    } catch {
+      finish();
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        child?.kill("SIGKILL");
+      } catch {
+        /* ignore */
+      }
+      finish();
+    }, 300_000);
+    child.on("close", () => {
+      clearTimeout(timer);
+      finish();
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      finish();
+    });
+  });
+  if (fs.existsSync(target)) return true;
+  const found = newestPngSince(path.join(cwd, ".grok", "generated-media"), since);
+  if (found) {
+    try {
+      fs.copyFileSync(found, target);
+      return true;
+    } catch {
+      /* ignore */
+    }
+  }
+  return false;
+}
+
 /** gemini 경로 1회 시도 — agy 나노바나나(키리스) → GEMINI_API_KEY Imagen 폴백. */
 async function tryGemini(clean: string, target: string): Promise<boolean> {
   const agyOk = await runAgyNanoBanana(clean, target);
@@ -220,7 +300,7 @@ async function tryGemini(clean: string, target: string): Promise<boolean> {
 
 // auto 페일오버 상태 — 한 엔진이 실패(쿼터 소진/미설치)하면 세션 내 잠시 뒤로 미룬다(15분).
 // 매 이미지마다 죽은 엔진에 150초 타임아웃을 다시 태우는 낭비를 막는 소프트 쿨다운.
-const engineCooldown: Record<"codex" | "gemini", number> = { codex: 0, gemini: 0 };
+const engineCooldown: Record<"codex" | "gemini" | "grok", number> = { codex: 0, gemini: 0, grok: 0 };
 const COOLDOWN_MS = 15 * 60 * 1000;
 
 /**
@@ -237,17 +317,27 @@ export async function generateTrexImage(model: TrexImageModel, prompt: string): 
     const target = path.join(dir, `trex_${Date.now()}_${Math.floor(Math.random() * 1e6)}.png`);
 
     const now = Date.now();
-    const preferred: Array<"codex" | "gemini"> =
-      model === "gemini" ? ["gemini", "codex"] : model === "codex" ? ["codex", "gemini"] : ["codex", "gemini"];
+    // grok(Imagine, 구독 키리스)은 auto 페일오버의 3번째 엔진 — 명시 선택지는 codex/gemini 그대로.
+    const preferred: Array<"codex" | "gemini" | "grok"> =
+      model === "gemini"
+        ? ["gemini", "codex", "grok"]
+        : model === "codex"
+          ? ["codex", "gemini", "grok"]
+          : ["codex", "gemini", "grok"];
     // auto일 때만 쿨다운으로 순서 재배열(명시 모델은 사용자의 의도를 우선 존중).
     const order =
       model === "auto"
         ? [...preferred].sort((a, b) => (engineCooldown[a] > now ? 1 : 0) - (engineCooldown[b] > now ? 1 : 0))
         : preferred;
 
-    let engine: "codex" | "gemini" | null = null;
+    let engine: "codex" | "gemini" | "grok" | null = null;
     for (const e of order) {
-      const ok = e === "codex" ? await runCodexImage(clean, target, dir) : await tryGemini(clean, target);
+      const ok =
+        e === "codex"
+          ? await runCodexImage(clean, target, dir)
+          : e === "grok"
+            ? await runGrokImage(clean, target, dir)
+            : await tryGemini(clean, target);
       if (ok) {
         engine = e;
         engineCooldown[e] = 0;
@@ -264,8 +354,8 @@ export async function generateTrexImage(model: TrexImageModel, prompt: string): 
   }
 }
 
-/** 드롭다운 가용성 — codex bin 존재 / gemini 키 존재 여부를 렌더러에 알려준다. */
-export function trexImageProviders(): { codex: boolean; gemini: boolean } {
+/** 드롭다운 가용성 — codex bin 존재 / gemini 키 존재 / grok bin+인증 여부를 렌더러에 알려준다. */
+export async function trexImageProviders(): Promise<{ codex: boolean; gemini: boolean; grok: boolean }> {
   const codex = !!resolveBin("codex", [
     path.join(os.homedir(), ".local/bin/codex"),
     "/opt/homebrew/bin/codex",
@@ -278,5 +368,6 @@ export function trexImageProviders(): { codex: boolean; gemini: boolean } {
     "/usr/local/bin/agy",
   ]);
   const gemini = agy || !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
-  return { codex, gemini };
+  const grok = !!resolveBin("grok", GROK_BIN_EXTRA) && (await grokAuthReady());
+  return { codex, gemini, grok };
 }

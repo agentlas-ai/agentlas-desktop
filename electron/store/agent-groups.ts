@@ -30,12 +30,15 @@ interface AgentGroupRow {
   updated_at: string;
 }
 
+type HubGroupEntityKind = "agent" | "team";
+
 export interface AgentGroupRuntimeMember {
   id: string;
   slug: string;
   name: string;
   directive: string;
   source: AgentGroupMemberSource;
+  entityKind?: HubGroupEntityKind;
   routeLabel: string;
   warnings: AgentGroupResolvedMember["warnings"];
 }
@@ -77,12 +80,16 @@ function normalizeMember(member: AgentGroupMember): AgentGroupMember | null {
   const id = typeof member.id === "string" && member.id.trim() ? member.id : randomUUID();
   const addedAt = typeof member.addedAt === "string" && member.addedAt ? member.addedAt : new Date().toISOString();
   const snapshot = member.snapshot && typeof member.snapshot === "object" ? member.snapshot : fallbackSnapshot(member);
+  const hubEntityKind = source === "hub"
+    ? normalizeHubEntityKind(member.hubEntityKind) ?? normalizeHubEntityKind(snapshot.entityKind)
+    : undefined;
   return {
     id,
     source,
     agentId: clean(member.agentId),
     agentSlug: clean(member.agentSlug),
     hubSlug: clean(member.hubSlug),
+    hubEntityKind,
     firmId: clean(member.firmId),
     firmSlug: clean(member.firmSlug),
     nodeId: clean(member.nodeId),
@@ -94,6 +101,53 @@ function normalizeMember(member: AgentGroupMember): AgentGroupMember | null {
 
 function clean(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeSlug(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function normalizeHubEntityKind(value: unknown): HubGroupEntityKind | undefined {
+  if (value === "team") return "team";
+  if (value === "agent") return "agent";
+  return undefined;
+}
+
+function hubEntityKindForMember(member: AgentGroupMember): HubGroupEntityKind | undefined {
+  return normalizeHubEntityKind(member.hubEntityKind) ?? normalizeHubEntityKind(member.snapshot.entityKind);
+}
+
+function hubEntityKindForListing(listing: MarketplaceListing): HubGroupEntityKind {
+  if (listing.entityKind === "team") return "team";
+  if (listing.entityKind === "agent") return "agent";
+  return typeof listing.agentCount === "number" && listing.agentCount > 1 ? "team" : "agent";
+}
+
+function hubIdentity(slug: unknown, entityKind: HubGroupEntityKind): string {
+  return `${entityKind}:${normalizeSlug(slug)}`;
+}
+
+function resolveHubListing(member: AgentGroupMember, listings: MarketplaceListing[]): MarketplaceListing | null {
+  const slug = normalizeSlug(member.hubSlug || member.agentSlug);
+  if (!slug) return null;
+  const requestedKind = hubEntityKindForMember(member);
+  const byIdentity = new Map<string, MarketplaceListing>();
+  for (const listing of listings) {
+    const identity = hubIdentity(listing.slug, hubEntityKindForListing(listing));
+    if (!byIdentity.has(identity)) byIdentity.set(identity, listing);
+  }
+  const candidates = [...byIdentity.values()].filter((listing) => normalizeSlug(listing.slug) === slug);
+  // The Hub invocation contract is still slug-only. Even though storage keeps
+  // the selected namespace, a same-slug agent/team pair cannot be expressed to
+  // hep-call without risking the wrong directive. Fail both closed until that
+  // protocol accepts an entity kind.
+  if (candidates.length > 1) return null;
+  if (requestedKind) {
+    return byIdentity.get(hubIdentity(slug, requestedKind)) ?? null;
+  }
+  // Pre-v0.7.34 rows did not persist a Hub entity namespace. Preserve them
+  // only when the live catalog has one unambiguous identity.
+  return candidates[0] ?? null;
 }
 
 function toGroup(row: AgentGroupRow): AgentGroup {
@@ -127,10 +181,13 @@ function uniqueMembers(members: AgentGroupMember[]): AgentGroupMember[] {
     if (!normalized) continue;
     const key = [
       normalized.source,
+      normalized.source === "hub" ? hubEntityKindForMember(normalized) || "legacy" : "",
       normalized.firmId || normalized.firmSlug || "",
       normalized.nodeId || "",
       normalized.agentId || "",
-      normalized.agentSlug || normalized.hubSlug || "",
+      normalized.source === "hub"
+        ? normalizeSlug(normalized.hubSlug || normalized.agentSlug)
+        : normalized.agentSlug || normalized.hubSlug || "",
     ].join(":");
     if (seen.has(key)) continue;
     seen.add(key);
@@ -145,6 +202,7 @@ function isRunnableSnapshot(snapshot: AgentGroupMemberSnapshot): boolean {
 
 function isRunnableHubListing(listing: MarketplaceListing): boolean {
   if (listing.source === "hub-plugin" || listing.entityKind === "plugin") return false;
+  if (listing.callable !== true || listing.kind === "install-only" || listing.routingReady === false) return false;
   return true;
 }
 
@@ -294,12 +352,11 @@ function resolveMember(
   const warnings: AgentGroupResolvedMember["warnings"] = [];
   const agentById = new Map(agents.map((agent) => [agent.id, agent]));
   const agentBySlug = new Map(agents.map((agent) => [agent.slug, agent]));
-  const hubBySlug = new Map(hubAgents.map((agent) => [agent.slug, agent]));
   let status: AgentGroupResolvedMember["status"] = "ok";
   let current: AgentGroupResolvedMember["current"] | undefined;
 
   if (member.source === "hub") {
-    const hub = hubBySlug.get(member.hubSlug || member.agentSlug || "");
+    const hub = resolveHubListing(member, hubAgents);
     if (!hub) {
       status = "missing";
       warnings.push("hub_missing");
@@ -307,7 +364,7 @@ function resolveMember(
       current = displaySnapshotFromHub(hub);
       if (!isRunnableHubListing(hub)) {
         status = "missing";
-        warnings.push("unsupported_plugin");
+        warnings.push(hub.source === "hub-plugin" || hub.entityKind === "plugin" ? "unsupported_plugin" : "hub_missing");
       }
     }
   } else if (member.source === "firm-node") {
@@ -427,14 +484,14 @@ export async function resolveAgentGroupForRuntime(id: string): Promise<AgentGrou
   } catch {
     hubAgents = [];
   }
-  const hubBySlug = new Map(hubAgents.map((agent) => [agent.slug, agent]));
   const members: AgentGroupRuntimeMember[] = [];
   const skipped: AgentGroupRuntimeResolution["skipped"] = [];
 
   for (const member of group.members) {
     if (member.source === "hub") {
-      const slug = member.hubSlug || member.agentSlug || "";
-      const hub = hubBySlug.get(slug);
+      const savedSlug = member.hubSlug || member.agentSlug || "";
+      const hub = resolveHubListing(member, hubAgents);
+      const slug = hub?.slug || savedSlug;
       if (!slug || !hub) {
         skipped.push({
           id: member.id,
@@ -449,7 +506,7 @@ export async function resolveAgentGroupForRuntime(id: string): Promise<AgentGrou
           id: member.id,
           name: hub.nameEn || hub.name || pickSnapshotName(member.snapshot),
           source: member.source,
-          warnings: ["unsupported_plugin"],
+          warnings: [hub.source === "hub-plugin" || hub.entityKind === "plugin" ? "unsupported_plugin" : "hub_missing"],
         });
         continue;
       }
@@ -459,6 +516,7 @@ export async function resolveAgentGroupForRuntime(id: string): Promise<AgentGrou
         name: hub.nameEn || hub.name || slug,
         directive: `You are the Agentlas Hub specialist "${hub.nameEn || hub.name || slug}". ${hub.taglineEn || hub.tagline || ""}`.trim(),
         source: member.source,
+        entityKind: hubEntityKindForListing(hub),
         routeLabel: "Hub",
         warnings: [],
       });

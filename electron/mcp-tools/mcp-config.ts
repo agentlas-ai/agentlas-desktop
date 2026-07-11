@@ -274,8 +274,65 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         pushCodexConfig(codexConfigArgs, key, "env_vars", tomlStringArray(aliases));
       }
     } else if (s.url) {
-      mcpServers[key] = { type: s.transport === "sse" ? "sse" : "http", url: s.url };
-      pushCodexConfig(codexConfigArgs, key, "url", tomlString(s.url));
+      // Claude Code는 HTTP/SSE, 현재 Codex CLI는 Streamable HTTP URL을
+      // 네이티브로 지원한다. Codex 0.144.1의 `codex mcp add --help` 계약에
+      // 맞춰 legacy SSE와 임의 헤더 인증은 Claude-only로 둔다.
+      const headers: Record<string, string> = {};
+      let codexBearerAlias: string | null = null;
+      let codexRemoteSupported = s.transport === "http" && s.envKeys.length === 0;
+      for (const rawHeader of s.envKeys) {
+        const header = validateEnvKey(rawHeader);
+        const value = await readEnvVar(header);
+        if (!value) {
+          codexRemoteSupported = false;
+          continue;
+        }
+        const alias = secretAlias(key, header);
+        const bearer = header.toLowerCase() === "authorization"
+          ? value.match(/^Bearer\s+(.+)$/i)
+          : null;
+        if (bearer) {
+          runtimeEnv[alias] = bearer[1];
+          headers[header] = `Bearer ${envReference(alias)}`;
+          if (s.transport === "http" && s.envKeys.length === 1) {
+            codexBearerAlias = alias;
+            codexRemoteSupported = true;
+          }
+        } else {
+          runtimeEnv[alias] = value;
+          headers[header] = envReference(alias);
+          // Codex exposes only bearer_token_env_var for remote MCPs. A single
+          // raw token in Authorization is representable; arbitrary headers or
+          // auth schemes remain Claude-only instead of starting broken.
+          if (
+            s.transport === "http" &&
+            s.envKeys.length === 1 &&
+            header.toLowerCase() === "authorization" &&
+            !/\s/.test(value)
+          ) {
+            codexBearerAlias = alias;
+            codexRemoteSupported = true;
+          } else {
+            codexRemoteSupported = false;
+          }
+        }
+      }
+      mcpServers[key] = {
+        type: s.transport === "sse" ? "sse" : "http",
+        url: s.url,
+        ...(Object.keys(headers).length ? { headers } : {}),
+      };
+      if (codexRemoteSupported) {
+        pushCodexConfig(codexConfigArgs, key, "url", tomlString(s.url));
+        if (codexBearerAlias) {
+          pushCodexConfig(
+            codexConfigArgs,
+            key,
+            "bearer_token_env_var",
+            tomlString(codexBearerAlias),
+          );
+        }
+      }
     } else {
       continue;
     }

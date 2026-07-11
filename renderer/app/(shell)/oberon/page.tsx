@@ -129,7 +129,7 @@ export default function OberonPage() {
     void bridge?.oberon
       .animateKeyStatus()
       .then((s) => setAnimateKey(s))
-      .catch(() => setAnimateKey({ runway: false, luma: false, veo: false, seedance: false, kling: false }));
+      .catch(() => setAnimateKey({ runway: false, luma: false, veo: false, seedance: false, kling: false, grok: false }));
     void bridge?.multimodal
       ?.getSettings()
       .then((s) => setVideoProviderSetting(s?.videoProvider ?? ""))
@@ -137,21 +137,25 @@ export default function OberonPage() {
   }, [studio]);
 
   // "무조건 Veo"가 아니라 실제 연결/키 있는 멀티모달 영상 엔진을 연다. 명시 선택이 준비됐으면
-  // 존중, 아니면 준비된 것 중 사다리순(veo→kling→seedance→runway→luma)으로 첫 ready.
+  // 존중, 아니면 준비된 것 중 사다리순(grok→veo→kling→seedance→runway→luma)으로 첫 ready.
+  // grok(구독 키리스)이 유일하게 키가 필요 없어 맨 앞 — 연결만 돼 있으면 바로 동작한다.
   const resolveAnimateProvider = useCallback((): OberonAnimateProvider => {
     const v = (videoProviderSetting || "").toLowerCase();
     const wanted: OberonAnimateProvider | null =
-      v.includes("veo") || v.includes("google") ? "veo"
+      v.includes("grok") || v.includes("xai") ? "grok"
+      : v.includes("veo") || v.includes("google") ? "veo"
       : v.includes("kling") ? "kling"
       : v.includes("seedance") ? "seedance"
       : v.includes("luma") ? "luma"
       : v.includes("runway") ? "runway"
       : null;
     const ready: Record<OberonAnimateProvider, boolean> = {
+      grok: Boolean(animateKey?.grok),
       veo: Boolean(animateKey?.veo), kling: Boolean(animateKey?.kling), seedance: Boolean(animateKey?.seedance),
       runway: Boolean(animateKey?.runway), luma: Boolean(animateKey?.luma),
     };
     if (wanted && ready[wanted]) return wanted;
+    if (ready.grok) return "grok";
     if (ready.veo) return "veo";
     if (ready.kling) return "kling";
     if (ready.seedance) return "seedance";
