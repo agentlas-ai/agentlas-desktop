@@ -314,8 +314,20 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dragDepthRef = useRef(0);
   const lastActiveAgentIdRef = useRef<string | null | undefined>(undefined);
+  const expectedAgentChangesRef = useRef<Map<string, number>>(new Map());
+  const expectedAgentChangeTokenRef = useRef(0);
   const autocompleteSignatureRef = useRef<string>("");
   const activeChatIdRef = useRef<string | null>(activeChatId);
+
+  function expectAgentChangeWithoutReset(agentId: string) {
+    const token = ++expectedAgentChangeTokenRef.current;
+    expectedAgentChangesRef.current.set(agentId, token);
+    window.setTimeout(() => {
+      if (expectedAgentChangesRef.current.get(agentId) === token) {
+        expectedAgentChangesRef.current.delete(agentId);
+      }
+    }, 10_000);
+  }
 
   useEffect(() => {
     activeChatIdRef.current = activeChatId;
@@ -344,6 +356,7 @@ export function ChatInput({
     setTrigger(null);
     setAttachmentError(null);
     setContextMenuOpen(false);
+    expectedAgentChangesRef.current.clear();
     dragDepthRef.current = 0;
     setDragActive(false);
   }, [activeChatId]);
@@ -474,6 +487,11 @@ export function ChatInput({
     const previous = lastActiveAgentIdRef.current;
     lastActiveAgentIdRef.current = activeAgentId;
     if (!previous || !activeAgentId || previous === activeAgentId) return;
+    if (expectedAgentChangesRef.current.has(activeAgentId)) {
+      expectedAgentChangesRef.current.delete(activeAgentId);
+      return;
+    }
+    expectedAgentChangesRef.current.clear();
     setGateSheet(null);
     setHepToggles((prev) => {
       if (!prev.has("recommend")) return prev;
@@ -516,6 +534,7 @@ export function ChatInput({
           next.delete("recommend");
           return next;
         });
+        expectAgentChangeWithoutReset(opt.switchAgentId);
         onCallAgent(opt.switchAgentId);
         setTimeout(() => textareaRef.current?.focus(), 0);
         return;
@@ -603,6 +622,7 @@ export function ChatInput({
       // 상황에 맞으면 여러 에이전트를 한 번에 고용(네트워크 TF).
       onRecommendExecute?.({ kind: "network", agents: hubSlugs, routerAgent }, text, opts);
     } else {
+      expectAgentChangeWithoutReset(top.id);
       onRecommendExecute?.({ kind: "agent", agentId: top.id, isFirm: top.isFirm, routerAgent }, text, opts);
     }
     finishComposerAfterSend();
@@ -888,6 +908,7 @@ export function ChatInput({
               .map((id) => id.slice("hub:".length))
               .filter(Boolean);
             for (const id of [...selectedAgentIds].filter((id) => !id.startsWith("hub:"))) {
+              expectAgentChangeWithoutReset(id);
               onCallAgent?.(id);
             }
             if (hubSlugs.length > 0) onCallHubAgents?.(hubSlugs);
@@ -1182,6 +1203,8 @@ export function ChatInput({
         {/* 텍스트 영역 */}
         <textarea
           ref={textareaRef}
+          data-chat-input="true"
+          aria-label={locale === "ko" ? "채팅 입력" : "Chat message"}
           value={input}
           onChange={onInputChange}
           onKeyDown={(e) => {
@@ -1296,11 +1319,15 @@ export function ChatInput({
           <div className="chat-input-tools-left">
             {/* + 메뉴 */}
             <button
+              type="button"
               onClick={() => {
                 setPlusOpen((v) => !v);
                 setPlusSubmenu(null);
               }}
+              data-chat-plus-button="true"
               aria-label={t("chatinput.plus")}
+              aria-expanded={plusOpen}
+              aria-haspopup="menu"
               title={t("chatinput.plus")}
               disabled={disabled}
               style={toolBtnStyle(plusOpen)}
@@ -2297,7 +2324,7 @@ function PlusMenu({
     );
   }
   return (
-    <Popover>
+    <Popover dataKind="plus-menu" role="menu">
       <Row
         onClick={onAddFile}
         icon={<IconFileUp size={14} />}

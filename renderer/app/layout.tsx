@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 const THEME_BOOTSTRAP = `(function(){try{var p=localStorage.getItem('agentlas.theme');var d=p==='dark'||((!p||p==='system')&&window.matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.dataset.theme=d?'dark':'light';}catch(e){}})();`;
 
 // 루트 layout은 셸 없이 — 셸은 (shell)/layout.tsx에서 입힌다.
-// /onboarding은 (no-shell)/onboarding에 두어서 셸을 우회.
+// 캔버스/QA 전용 화면은 (no-shell)에 두고, 신규 사용자 안내는 대시보드 QuestBoard가 담당한다.
 export default function RootLayout({
   children,
 }: {

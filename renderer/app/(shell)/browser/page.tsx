@@ -95,38 +95,44 @@ export default function BrowserPage() {
         </p>
         <ul className="browser-points">
           <li>
-            <span className="dot ok" />{" "}
-            {ko
-              ? "여러분의 진짜 크롬·비밀번호는 그대로. 전용 프로필만 사용해요."
-              : "Your real Chrome profile and passwords stay untouched. Agents only use the dedicated profile."}
+            <span className="dot ok" aria-hidden="true" />
+            <span className="browser-point-copy">
+              {ko
+                ? "여러분의 진짜 크롬·비밀번호는 그대로. 전용 프로필만 사용해요."
+                : "Your real Chrome profile and passwords stay untouched. Agents only use the dedicated profile."}
+            </span>
           </li>
           <li>
-            <span className="dot ok" />{" "}
-            {ko ? (
-              <>
-                비밀번호는 Agentlas에 저장하지 않습니다. <b>사이트의 실제 로그인 화면</b>에서 직접
-                입력하고, 이후에는 전용 프로필의 로그인 세션만 재사용합니다.
-              </>
-            ) : (
-              <>
-                Agentlas does not store site passwords. Enter them directly on the <b>provider&apos;s sign-in
-                page</b>; only the dedicated profile&apos;s signed-in session is reused afterward.
-              </>
-            )}
+            <span className="dot ok" aria-hidden="true" />
+            <span className="browser-point-copy">
+              {ko ? (
+                <>
+                  비밀번호는 Agentlas에 저장하지 않습니다. <b>사이트의 실제 로그인 화면</b>에서 직접
+                  입력하고, 이후에는 전용 프로필의 로그인 세션만 재사용합니다.
+                </>
+              ) : (
+                <>
+                  Agentlas does not store site passwords. Enter them directly on the <b>provider&apos;s sign-in
+                  page</b>; only the dedicated profile&apos;s signed-in session is reused afterward.
+                </>
+              )}
+            </span>
           </li>
           <li>
-            <span className="dot warn" />{" "}
-            {ko ? (
-              <>
-                전송·게시·결제처럼 되돌릴 수 없는 행동은 <b>실행 전에 확인</b>을 받아요. (결제는
-                매번, 나머지는 “항상 승인”을 기억)
-              </>
-            ) : (
-              <>
-                Irreversible actions like sending, posting, or payment require <b>confirmation before
-                execution</b>. Payments are always confirmed; other actions can remember “always allow.”
-              </>
-            )}
+            <span className="dot warn" aria-hidden="true" />
+            <span className="browser-point-copy">
+              {ko ? (
+                <>
+                  전송·게시·결제처럼 되돌릴 수 없는 행동은 <b>실행 전에 확인</b>을 받아요. (결제는
+                  매번, 나머지는 “항상 승인”을 기억)
+                </>
+              ) : (
+                <>
+                  Irreversible actions like sending, posting, or payment require <b>confirmation before
+                  execution</b>. Payments are always confirmed; other actions can remember “always allow.”
+                </>
+              )}
+            </span>
           </li>
         </ul>
       </section>
@@ -335,6 +341,13 @@ export default function BrowserPage() {
           line-height: 1.55;
           color: var(--rd-ink);
           opacity: 0.92;
+        }
+        .browser-point-copy {
+          display: block;
+          flex: 1 1 auto;
+          min-width: 0;
+          word-break: keep-all;
+          overflow-wrap: break-word;
         }
         .dot {
           width: 8px;

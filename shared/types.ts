@@ -3469,10 +3469,11 @@ export interface AgentlasIpc {
   };
   /** T-rex 슬라이드 스튜디오 — 키리스 CLI 이미지 생성(codex image_gen / gemini). */
   trex: {
-    generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => Promise<{ ok: boolean; src?: string; reason?: string; engine?: "codex" | "gemini" | "grok" }>;
-    imageProviders: () => Promise<{ codex: boolean; gemini: boolean; grok?: boolean }>;
+    generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => Promise<{ ok: boolean; src?: string; reason?: string; engine?: "codex" | "gemini" }>;
+    imageProviders: () => Promise<{ codex: boolean; gemini: boolean }>;
     generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string }) => Promise<{ ok: boolean; text?: string; engine?: "agy" | "codex"; reason?: string }>;
     contentAvailable: () => Promise<{ agy: boolean; codex: boolean }>;
+    refineText: (payload: { current: string; instruction: string; context?: string }) => Promise<{ ok: boolean; text?: string; reason?: string }>;
   };
   /**
    * 사이트 디자인 스튜디오 — 디자인 전용(백엔드/실행 없음).
@@ -4137,7 +4138,7 @@ export interface AgentlasIpc {
     /** 진행 중 빌드 취소. */
     cancelBuild: (runId: string) => Promise<void>;
     /** Startup Founder Studio — 패키지의 실제 GUI 런처를 띄우고 iframe 용 로컬 URL 반환. */
-    startStudio: () => Promise<{ ok: boolean; url?: string; reason?: string }>;
+    startStudio: (input?: { idea?: string }) => Promise<{ ok: boolean; url?: string; reason?: string; ideaQueued?: boolean }>;
     stopStudio: () => Promise<void>;
   };
 }

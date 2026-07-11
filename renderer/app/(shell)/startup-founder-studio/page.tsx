@@ -46,17 +46,16 @@ export default function StartupFounderStudioPage() {
 
     let res: { ok: boolean; url?: string; reason?: string } | undefined;
     try {
-      res = await Promise.race([api?.hephaestus.startStudio() ?? Promise.resolve(undefined), timeout]);
+      res = await Promise.race([
+        api?.hephaestus.startStudio(trimmedIdea ? { idea: trimmedIdea } : undefined) ?? Promise.resolve(undefined),
+        timeout,
+      ]);
     } catch (e) {
       res = { ok: false, reason: (e as Error).message };
     }
 
     if (res?.ok && res.url) {
       const params = new URLSearchParams({ t: String(Date.now()) });
-      if (trimmedIdea) {
-        params.set("idea", trimmedIdea);
-        params.set("newIdea", "1");
-      }
       setUrl(`${res.url}?${params.toString()}`);
       setPhase("ready");
       loadWatchRef.current = setTimeout(() => {
@@ -91,7 +90,7 @@ export default function StartupFounderStudioPage() {
       // ignore
     }
     if (savedIdea && savedIdea !== "__skip__") setIdeaDraft(savedIdea);
-    void start(savedIdea === "__skip__" ? "" : savedIdea);
+    void start();
     return () => {
       if (loadWatchRef.current) clearTimeout(loadWatchRef.current);
     };

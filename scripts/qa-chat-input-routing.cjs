@@ -91,6 +91,7 @@ async function main() {
     page.on("console", (msg) => {
       if (msg.type() === "error") consoleErrors.push(msg.text());
     });
+    page.on("pageerror", (error) => consoleErrors.push(error.message));
     page.setDefaultTimeout(30_000);
     await page.setViewportSize({ width: 1320, height: 920 }).catch(() => undefined);
     await page.waitForLoadState("domcontentloaded");
@@ -163,24 +164,29 @@ async function main() {
       ipcMain.removeHandler("invoke:run");
       ipcMain.handle("invoke:run", (event, req) => {
         globalThis.__qaRouting.runs.push(req);
+        const runId = req.runId || "qa-run-1";
         setTimeout(() => {
-          event.sender.send("invoke:event:qa-run-1", {
+          event.sender.send(`invoke:event:${runId}`, {
             kind: "thinking",
             status: "루프 Stormbreaker Loop · armed/scope-lock/route",
           });
         }, 80);
-        return { runId: "qa-run-1" };
+        return { runId };
       });
       ipcMain.removeHandler("invoke:activeChats");
       ipcMain.handle("invoke:activeChats", () => {
         const run = globalThis.__qaRouting.runs[0];
-        if (!run || globalThis.__qaRouting.cancels.includes("qa-run-1")) return [];
+        if (!run || globalThis.__qaRouting.cancels.includes(run.runId || "qa-run-1")) return [];
         return [run.chatId];
       });
       ipcMain.removeHandler("invoke:cancel");
       ipcMain.handle("invoke:cancel", (_event, runId) => {
         globalThis.__qaRouting.cancels.push(runId);
       });
+      // Optional metadata is deliberately stalled. A valid local agent/chat
+      // must still become interactive without waiting for Keychain/env reads.
+      ipcMain.removeHandler("env:list");
+      ipcMain.handle("env:list", () => new Promise(() => {}));
     });
 
     // Playwright evaluate 컨텍스트에서 모듈 로딩이 전면 차단돼(Electron 33+: require/mainModule/dynamic
@@ -214,9 +220,13 @@ async function main() {
       window.location.href = `/chat?id=${chatId}`;
     }, setup.chat.id);
     await page.waitForFunction(() => location.pathname.includes("/chat"));
-    await page.waitForSelector("textarea");
+    await page.waitForSelector('[data-chat-input="true"]');
 
-    const textarea = page.locator("textarea").first();
+    const textarea = page.locator('[data-chat-input="true"]');
+    await page.waitForFunction(() => {
+      const input = document.querySelector('[data-chat-input="true"]');
+      return input instanceof HTMLTextAreaElement && !input.disabled;
+    }, null, { timeout: 10_000 });
 
     await textarea.fill("@");
     await page.waitForTimeout(350);
@@ -253,6 +263,11 @@ async function main() {
     assert.equal(autoChipAfterMention, false, "@ explicit agent selection must turn off auto routing");
 
     await toggleAutoRoute(page);
+    // The async agent switch selected above may settle after the user has
+    // deliberately re-enabled auto routing. A late active-agent update must
+    // not silently undo that newer intent.
+    await page.waitForTimeout(1_000);
+    assert.equal(await autoRouteChipActive(page), true, "manual auto-route re-enable must survive a late agent switch");
     await textarea.fill("이거 AI 처럼 나오지 않게 해줘");
     await page.locator(".chat-input-send-button").click();
     await waitForMainQa(app, (qa) => qa.routeCalls >= 1);
@@ -286,7 +301,7 @@ async function main() {
     assert.ok(rightPanelAfter.width > rightPanelBefore.width + 30, `right panel should resize wider: ${rightPanelBefore.width} -> ${rightPanelAfter.width}`);
     await page.screenshot({ path: path.join(SHOTS, "03-visible-stop.png"), fullPage: true });
     await stopButton.click();
-    await waitForMainQa(app, (qa) => qa.cancels.includes("qa-run-1"));
+    await waitForMainQa(app, (qa) => qa.cancels.includes(run.runId || "qa-run-1"));
     await page.getByRole("button", { name: "중지 요청됨" }).first().waitFor();
     await page.screenshot({ path: path.join(SHOTS, "04-stop-requested.png"), fullPage: true });
 
@@ -306,6 +321,8 @@ async function main() {
         "@ autocomplete ArrowDown remains on the second row after render churn",
         "@ autocomplete mouse hover remains on the hovered row",
         "explicit @ agent selection disables auto routing",
+        "manual auto-route re-enable survives the delayed explicit agent switch",
+        "a stalled optional env/Keychain read does not disable a valid local chat",
         "Auto routing executes immediately without a pick sheet",
         "Auto-routed run forwards routerAgent and borrows nothing for a local single route",
         "Stop is visible and transitions to stop-requested state",
@@ -322,7 +339,38 @@ async function main() {
   } catch (err) {
     if (page) {
       await page.screenshot({ path: path.join(SHOTS, "error.png"), fullPage: true }).catch(() => undefined);
-      const debug = await page.evaluate(() => ({
+      const debug = await page.evaluate(async () => {
+        const chatId = new URL(location.href).searchParams.get("id");
+        const bounded = (promise, name) => Promise.race([
+          promise,
+          new Promise((_, reject) => window.setTimeout(() => reject(new Error(`${name} timed out`)), 2_000)),
+        ]);
+        const [chatRecord, agentRoster] = await Promise.all([
+          chatId ? bounded(window.agentlas.chats.get(chatId), "chat").catch((error) => ({ error: String(error) })) : null,
+          bounded(window.agentlas.team.list(), "team").catch((error) => [{ error: String(error) }]),
+        ]);
+        const metadataSettled = chatId ? await Promise.allSettled([
+          bounded(window.agentlas.invoke.history(chatId), "history"),
+          bounded(window.agentlas.projects.list(), "projects"),
+          bounded(window.agentlas.firms.list(), "firms"),
+          bounded(window.agentlas.env.list(), "env"),
+          bounded(window.agentlas.mcpTools.listInstalled(), "mcpTools"),
+          bounded(window.agentlas.appFactory.listApps(chatId), "apps"),
+          bounded(window.agentlas.marketplace.bookmarks(), "bookmarks"),
+          bounded(window.agentlas.workspace.get(chatId), "workspace"),
+        ]) : [];
+        const metadataNames = ["history", "projects", "firms", "env", "mcpTools", "apps", "bookmarks", "workspace"];
+        const metadata = Object.fromEntries(metadataSettled.map((result, index) => [
+          metadataNames[index],
+          result.status === "fulfilled"
+            ? { ok: true, count: Array.isArray(result.value) ? result.value.length : null }
+            : { ok: false, error: String(result.reason) },
+        ]));
+        return {
+        url: location.href,
+        chatRecord,
+        metadata,
+        agentRoster: agentRoster.map((agent) => ({ id: agent.id, name: agent.name, visibility: agent.visibility, entityKind: agent.entityKind })),
         body: document.body.innerText.slice(0, 5000),
         autoChip: [...document.querySelectorAll("button")]
           .filter((node) => (node.textContent || "").includes("알아서 에이전트 부르기"))
@@ -344,15 +392,20 @@ async function main() {
               hitStop: hit?.closest?.('[data-chat-stop-button="true"]') != null,
             };
           }),
-      })).catch((debugErr) => ({ debugError: String(debugErr) }));
+      };
+      }).catch((debugErr) => ({ debugError: String(debugErr) }));
       debug.mainQa = await mainQa(app).catch((debugErr) => ({ debugError: String(debugErr) }));
+      debug.consoleErrors = consoleErrors;
       fs.writeFileSync(path.join(PROOF_ROOT, "error-debug.json"), `${JSON.stringify(debug, null, 2)}\n`);
       console.error(`QA failed. Proof root: ${PROOF_ROOT}`);
       console.error(JSON.stringify(debug, null, 2));
     }
     throw err;
   } finally {
-    await app.close().catch(() => undefined);
+    const child = app.process();
+    const close = app.close().catch(() => undefined);
+    await Promise.race([close, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   }
 }
 
@@ -368,25 +421,37 @@ async function autocompleteActiveRows(page) {
   });
 }
 
-// "알아서 에이전트 부르기" 토글 — 꺼져 있으면 + 메뉴의 토글 행을, 켜져 있으면 바의 활성 칩을 누른다.
+// "알아서 에이전트 부르기" 토글 — 꺼져 있으면 + 메뉴의 토글 행(button)을, 켜져 있으면 바의 활성 칩을 누른다.
 async function toggleAutoRoute(page) {
   const chip = page.locator(".chat-input-hep-chip", { hasText: "알아서 에이전트 부르기" });
   if (await chip.count()) {
     await chip.first().click();
     return;
   }
-  await page.getByRole("button", { name: /추가 —|Add —/ }).first().click();
-  await page.getByText("알아서 에이전트 부르기").click();
+  const plusButton = page.locator('[data-chat-plus-button="true"]').first();
+  const plusMenu = page.locator('[data-popover-kind="plus-menu"]');
+  if (!(await plusMenu.isVisible())) await plusButton.click();
+  try {
+    await plusMenu.waitFor({ state: "visible", timeout: 2_000 });
+  } catch {
+    const state = await plusButton.evaluate((button) => ({
+      expanded: button.getAttribute("aria-expanded"),
+      disabled: button.disabled,
+      connected: button.isConnected,
+      text: button.getAttribute("aria-label"),
+    }));
+    throw new Error(`Chat + menu did not open: ${JSON.stringify(state)}`);
+  }
+  await plusMenu.getByRole("button", { name: /알아서 에이전트 부르기/ }).click();
   // 팝오버는 바깥 클릭으로 닫힌다 — 입력창을 눌러 닫고 포커스를 되돌린다.
-  await page.locator("textarea").first().click();
+  await page.locator('[data-chat-input="true"]').click();
 }
 
 async function autoRouteChipActive(page) {
   return page.evaluate(() => {
-    const button = [...document.querySelectorAll("button")].find((node) =>
-      (node.textContent || "").includes("알아서 에이전트 부르기"),
-    );
-    return Boolean(button?.classList.contains("active") || button?.getAttribute("aria-pressed") === "true");
+    return [...document.querySelectorAll("button")]
+      .filter((node) => (node.textContent || "").includes("알아서 에이전트 부르기"))
+      .some((button) => button.classList.contains("active") || button.getAttribute("aria-pressed") === "true");
   });
 }
 

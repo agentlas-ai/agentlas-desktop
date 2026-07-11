@@ -1,17 +1,10 @@
-// Grok CLI — superagent-ai/grok-cli (npm `grok-dev`, 바이너리 `grok`).
-// xAI(Grok) API 키(GROK_API_KEY / 앱이 저장하는 XAI_API_KEY)로 도는 "에이전틱" CLI를
-// 데스크탑 런타임으로 spawn한다 — 단순 API 챗이 아니라 bash·파일편집·웹검색 도구를 쓰는 풀 에이전트.
-//
-// 호출: grok --prompt "<prompt>" --directory <cwd> --format json
-//   → NDJSON 이벤트 스트림(step_start / text / tool_use / step_finish / error)
-//
-// 검증 메모(2026-07-11, v1.1.7 실측): `-p/--prompt`, `--directory`, `--format text|json`,
-//    `--max-tool-rounds` 플래그 실재 확인. 내장 generate_image/generate_video 툴 보유(구독 키리스,
-//    출력은 <cwd>/.grok/generated-media/) — 멀티모달 배선은 shared/multimodal.ts + trex/imagegen.ts
-//    + oberon/animate.ts 참고. `--format json` NDJSON 이벤트 필드 매핑만 아직 실측 미확정.
+// Grok CLI text runtime — official xAI CLI (`x.ai/cli`, verified with grok 0.2.x).
+// Headless contract: --prompt-file + --cwd + --output-format streaming-json.
+// Authentication is normally OAuth (`grok login`); XAI/GROK_API_KEY remains a supported fallback.
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
@@ -29,13 +22,18 @@ const CANDIDATES = [
         path.join(os.homedir(), ".local", "bin", "grok.exe"),
       ]
     : []),
-  "grok",
   path.join(os.homedir(), ".grok/bin/grok"), // 공식 install.sh 기본 설치 경로
   path.join(os.homedir(), ".local/bin/grok"),
-  path.join(os.homedir(), ".bun/bin/grok"), // bun add -g grok-dev
+  "grok",
   "/opt/homebrew/bin/grok",
   "/usr/local/bin/grok",
+  path.join(os.homedir(), ".bun/bin/grok"), // legacy compatibility; official paths above win
 ];
+
+function grokCandidates(): string[] {
+  const override = process.env.AGENTLAS_GROK_BIN?.trim();
+  return override ? [override, ...CANDIDATES] : CANDIDATES;
+}
 
 async function firstExisting(paths: string[]): Promise<string | null> {
   for (const p of paths) {
@@ -121,7 +119,7 @@ export interface GrokProbe {
 }
 
 export async function probeGrok(): Promise<GrokProbe | null> {
-  const found = await firstExisting(CANDIDATES);
+  const found = await firstExisting(grokCandidates());
   if (!found) return null;
   const version = (await probeCliVersion(found)) ?? "unknown";
   const models = await listGrokModels(found).catch(() => []);
@@ -131,7 +129,7 @@ export async function probeGrok(): Promise<GrokProbe | null> {
 let cachedBin: string | null | undefined;
 async function getBin(): Promise<string | null> {
   if (cachedBin !== undefined) return cachedBin;
-  const found = await firstExisting(CANDIDATES);
+  const found = await firstExisting(grokCandidates());
   cachedBin = found;
   return cachedBin;
 }
@@ -173,6 +171,10 @@ type GrokEvent = {
   error?: unknown;
   is_error?: boolean;
   message?: string;
+  data?: unknown;
+  stopReason?: string;
+  sessionId?: string;
+  requestId?: string;
   usage?: { output_tokens?: number; completion_tokens?: number };
   tokens?: number;
 };
@@ -192,8 +194,14 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       env.XAI_API_KEY = key;
     }
   }
-  const args = ["--prompt", buildPrompt(req), "--directory", cwd, "--format", "json"];
+  // Prompt files keep system/history text out of argv/process listings and avoid Windows command-line limits.
+  const promptFile = path.join(os.tmpdir(), `agentlas-grok-${process.pid}-${randomUUID()}.txt`);
+  await fs.writeFile(promptFile, buildPrompt(req), { encoding: "utf8", mode: 0o600 });
+  const args = ["--prompt-file", promptFile, "--cwd", cwd, "--output-format", "streaming-json", "--no-subagents"];
   if (req.model) args.push("-m", req.model); // grok --help 확인: -m, --model <model>
+  if (req.effort) args.push("--effort", req.effort);
+  if (req.permission === "full") args.push("--permission-mode", "bypassPermissions");
+  else if (req.permission === "write") args.push("--permission-mode", "acceptEdits");
 
   const truncate = (s: string, max = 12000): string => (s.length > max ? `${s.slice(0, max)}…` : s);
   const stringify = (v: unknown): string => {
@@ -209,6 +217,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     try {
       child = spawnCli(bin, args, { stdio: ["ignore", "pipe", "pipe"], env, cwd, ...detachedSpawnOpts() });
     } catch (e) {
+      void fs.rm(promptFile, { force: true });
       reject(e instanceof Error ? e : new Error(String(e)));
       return;
     }
@@ -225,11 +234,17 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     let stderr = "";
     let tokens: number | undefined;
     let lastEmit = 0;
+    let thoughtActive = false;
 
     const handle = (ev: GrokEvent): void => {
       const type = ev.type ?? ev.event;
-      if (type === "text" || type === "assistant" || type === "message") {
-        const t = ev.text ?? ev.content ?? ev.delta ?? "";
+      if (type === "thought") {
+        // streaming-json exposes private reasoning deltas. Never render or persist them.
+        if (!thoughtActive) events.onStatus(tStatus(req.locale, "thinking", { agent: req.backendLabel }));
+        thoughtActive = true;
+      } else if (type === "text" || type === "assistant" || type === "message") {
+        thoughtActive = false;
+        const t = ev.text ?? ev.content ?? ev.delta ?? (typeof ev.data === "string" ? ev.data : "");
         if (typeof t === "string" && t) {
           text += t;
           const now = Date.now();
@@ -241,10 +256,12 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       } else if (type === "step_start") {
         const s = ev.name ?? ev.step ?? ev.title ?? ev.status;
         if (s) events.onStatus(String(s));
-      } else if (type === "tool_use" || type === "tool" || type === "tool_call") {
-        const name = ev.tool ?? ev.name ?? "tool";
-        const argPayload = ev.input ?? ev.args ?? ev.arguments ?? ev.parameters;
-        const resultPayload = ev.output ?? ev.result;
+      } else if (type === "tool_use" || type === "tool" || type === "tool_call" || type === "tool_start" || type === "tool_end") {
+        thoughtActive = false;
+        const data = ev.data && typeof ev.data === "object" ? (ev.data as Record<string, unknown>) : null;
+        const name = ev.tool ?? ev.name ?? (typeof data?.name === "string" ? data.name : "tool");
+        const argPayload = ev.input ?? ev.args ?? ev.arguments ?? ev.parameters ?? data?.input ?? data?.args;
+        const resultPayload = ev.output ?? ev.result ?? data?.output ?? data?.result;
         events.onTool?.(
           String(name),
           argPayload == null ? undefined : truncate(stringify(argPayload), 2000),
@@ -252,8 +269,9 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
           ev.id,
           ev.error != null || ev.is_error === true,
         );
-      } else if (type === "step_finish" || type === "done" || type === "final") {
-        const fin = ev.text ?? ev.content ?? ev.output;
+      } else if (type === "step_finish" || type === "done" || type === "final" || type === "end") {
+        thoughtActive = false;
+        const fin = ev.text ?? ev.content ?? ev.output ?? (typeof ev.data === "string" ? ev.data : undefined);
         if (typeof fin === "string" && fin && !text) text = fin;
         const tk = ev.usage?.output_tokens ?? ev.usage?.completion_tokens ?? ev.tokens;
         if (typeof tk === "number") tokens = tk;
@@ -287,6 +305,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
+      void fs.rm(promptFile, { force: true });
       reject(err);
     });
     child.on("close", (code) => {
@@ -294,6 +313,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
+      void fs.rm(promptFile, { force: true });
       if (req.signal?.aborted) {
         reject(new Error(tStatus(req.locale, "aborted")));
         return;

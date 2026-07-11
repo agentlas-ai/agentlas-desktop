@@ -412,7 +412,7 @@ function setupMockAgentlasBridge(options) {
   window.agentlas = {
     app: {
       getLocale: async () => "ko-KR",
-      getVersion: async () => "0.4.0",
+      getVersion: async () => options?.appVersion || "0.0.0",
     },
     auth: {
       getSession: async () => ({ signedIn: true, account: { email: "qa@example.com" } }),
@@ -1360,7 +1360,8 @@ function preloadMethodPaths(preloadFile) {
 }
 
 function mockBridgeOptions(options) {
-  return { ...(options || {}), preloadMethodPaths: preloadMethodPaths() };
+  const appVersion = require("../../package.json").version;
+  return { ...(options || {}), appVersion, preloadMethodPaths: preloadMethodPaths() };
 }
 
 module.exports = { setupMockAgentlasBridge, preloadMethodPaths, mockBridgeOptions };

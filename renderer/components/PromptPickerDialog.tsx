@@ -48,11 +48,17 @@ export function PromptInputsConfirmDialog({
   ko,
   onConfirm,
   onCancel,
+  busy = false,
+  error = null,
+  retry = false,
 }: {
   inputs: string;
   ko: boolean;
   onConfirm: () => void;
   onCancel: () => void;
+  busy?: boolean;
+  error?: string | null;
+  retry?: boolean;
 }) {
   return (
     <div
@@ -71,7 +77,7 @@ export function PromptInputsConfirmDialog({
         background: "rgba(0, 21, 25, 0.24)",
       }}
       onMouseDown={(e) => {
-        if (e.currentTarget === e.target) onCancel();
+        if (!busy && e.currentTarget === e.target) onCancel();
       }}
     >
       <div
@@ -109,10 +115,28 @@ export function PromptInputsConfirmDialog({
             ? "첨부 없이 시작하면 결과가 이상할 수 있어요."
             : "Starting without these attachments may produce odd results."}
         </p>
+        {error && (
+          <div
+            role="alert"
+            data-testid="prompt-start-error"
+            style={{
+              padding: "8px 10px",
+              borderRadius: 9,
+              border: "1px solid color-mix(in srgb, var(--red-deep) 28%, var(--paper-edge))",
+              background: "color-mix(in srgb, var(--red-deep) 7%, var(--paper))",
+              color: "var(--red-deep)",
+              fontSize: 12,
+              lineHeight: 1.5,
+            }}
+          >
+            {error}
+          </div>
+        )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button
             type="button"
             onClick={onCancel}
+            disabled={busy}
             style={{
               padding: "7px 12px",
               borderRadius: 9,
@@ -129,9 +153,14 @@ export function PromptInputsConfirmDialog({
             type="button"
             className="neu-btn-primary"
             onClick={onConfirm}
+            disabled={busy}
             style={{ padding: "7px 12px", borderRadius: 9, fontSize: 12.5 }}
           >
-            {ko ? "그래도 시작" : "Start anyway"}
+            {busy
+              ? ko ? "채팅 만드는 중…" : "Creating chat…"
+              : retry
+                ? ko ? "다시 시도" : "Retry"
+                : ko ? "그래도 시작" : "Start anyway"}
           </button>
         </div>
       </div>
@@ -162,7 +191,9 @@ export function PromptPickerDialog({
   const [q, setQ] = useState("");
   const [busySlug, setBusySlug] = useState<string | null>(null);
   const [notice, setNotice] = useState<PickerNotice | null>(null);
-  const [pendingStart, setPendingStart] = useState<{ body: string; inputs: string } | null>(null);
+  const [pendingStart, setPendingStart] = useState<{ body: string; inputs: string; slug: string } | null>(null);
+  const [startFailure, setStartFailure] = useState<{ body: string; seedOnly: boolean; slug: string } | null>(null);
+  const [startBusy, setStartBusy] = useState(false);
   const seqRef = useRef(0);
 
   // 목록 로드(검색 디바운스) — 서버 q 검색 + 내 북마크 slug 집합.
@@ -212,19 +243,31 @@ export function PromptPickerDialog({
   function maybeStart(p: HubPromptSummary, body: string) {
     const inputs = pickText(ko, p.inputsKo, p.inputsEn);
     if (inputs) {
-      setPendingStart({ body, inputs });
+      setPendingStart({ body, inputs, slug: p.slug });
+      setStartFailure(null);
       return;
     }
-    void startNow(body);
+    void startNow(body, false, p.slug);
   }
 
-  async function startNow(body: string, seedOnly?: boolean) {
-    setPendingStart(null);
-    // 입력물 필요 프롬프트는 자동 전송 대신 입력창 시드만 — 첨부를 붙일 기회를 준다.
-    const ok = await startChatWithPrompt(body, { seedOnly });
-    if (ok) {
-      onStarted?.();
-      onClose();
+  async function startNow(body: string, seedOnly = false, slug = "") {
+    if (startBusy) return;
+    setStartBusy(true);
+    setStartFailure(null);
+    try {
+      // 입력물 필요 프롬프트는 자동 전송 대신 입력창 시드만 — 첨부를 붙일 기회를 준다.
+      const ok = await startChatWithPrompt(body, { seedOnly });
+      if (ok) {
+        setPendingStart(null);
+        onStarted?.();
+        onClose();
+      } else {
+        // A taste body can be one-time-only. Retain the exact body and input
+        // notice locally so chat creation can retry without another Hub read.
+        setStartFailure({ body, seedOnly, slug });
+      }
+    } finally {
+      setStartBusy(false);
     }
   }
 
@@ -387,6 +430,40 @@ export function PromptPickerDialog({
             }}
           />
         </div>
+
+        {startFailure && !pendingStart && (
+          <div
+            role="alert"
+            data-testid="prompt-start-error"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "9px 11px",
+              borderRadius: 10,
+              border: "1px solid color-mix(in srgb, var(--red-deep) 28%, var(--paper-edge))",
+              background: "color-mix(in srgb, var(--red-deep) 7%, var(--paper))",
+              color: "var(--red-deep)",
+              fontSize: 12,
+              lineHeight: 1.5,
+            }}
+          >
+            <span style={{ flex: 1 }}>
+              {ko
+                ? "새 채팅을 만들지 못했습니다. 프롬프트는 그대로 유지됩니다."
+                : "Could not create the chat. Your prompt is still here."}
+            </span>
+            <button
+              type="button"
+              className="neu-btn-primary"
+              disabled={startBusy}
+              onClick={() => void startNow(startFailure.body, startFailure.seedOnly, startFailure.slug)}
+              style={{ padding: "6px 10px", borderRadius: 8, fontSize: 12, flexShrink: 0 }}
+            >
+              {startBusy ? (ko ? "재시도 중…" : "Retrying…") : ko ? "다시 시도" : "Retry"}
+            </button>
+          </div>
+        )}
 
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "grid", gap: 6, alignContent: "start" }}>
           {loading ? (
@@ -557,8 +634,17 @@ export function PromptPickerDialog({
         <PromptInputsConfirmDialog
           inputs={pendingStart.inputs}
           ko={ko}
-          onConfirm={() => void startNow(pendingStart.body, true)}
+          onConfirm={() => void startNow(pendingStart.body, true, pendingStart.slug)}
           onCancel={() => setPendingStart(null)}
+          busy={startBusy}
+          retry={startFailure?.body === pendingStart.body}
+          error={
+            startFailure?.body === pendingStart.body
+              ? ko
+                ? "새 채팅을 만들지 못했습니다. 프롬프트와 입력물 안내는 그대로 보존됐습니다."
+                : "Could not create the chat. Your prompt and required-input note were preserved."
+              : null
+          }
         />
       )}
     </div>

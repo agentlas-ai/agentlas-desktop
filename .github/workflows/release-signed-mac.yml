@@ -47,7 +47,7 @@ jobs:
       # Publish to the SEPARATE public releases repo (source repo is private).
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
-      HEPHAESTUS_REF: v1.1.13
+      HEPHAESTUS_REF: v1.1.14
 
     steps:
       - uses: actions/checkout@v4
@@ -157,6 +157,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Dependency security audit
+        run: npm audit --audit-level=high
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -192,6 +195,20 @@ jobs:
           npm run test:hub-bookmark-ux
           node scripts/test-hub-bookmark-ui.cjs
           node scripts/test-runtime-readiness-ui.cjs
+          npm run test:independent-terminal-boundary
+          npm run test:grok-runtime-contract
+          npm run test:grok-auth-source
+          npm run test:oberon-provider-routing
+          npm run test:telegram-connect-atomicity
+          npm run test:telegram-api-timeout
+          npm run test:document-studio-draft-persistence
+          npm run test:prompts-start-failure-ui
+          npm run test:settings-resilience-ui
+          npm run test:startup-founder-new-idea
+          npm run test:trex-ui
+          npm run test:trex-attachments-ui
+          node scripts/qa-chat-input-routing.cjs
+          npm run test:all-routes-ui
 
       - name: Restore mac signing certificate
         env:

@@ -4,28 +4,31 @@
 > **without breaking installs**. Read this before changing anything under
 > `electron/architecture/` or `electron/memory/`.
 
-## 1. The two runtimes (web vs app/terminal)
+## 1. The three product surfaces
 
-Agentlas runs the same *research architectures* in two places, with different hosts:
+Agentlas carries related *research architectures* across three product surfaces,
+with different hosts and responsibilities:
 
 | Surface | Host | What runs |
 |---|---|---|
-| **agentlas.cloud (web)** | Hosted | Builder and orchestration services that run server-side. |
-| **Desktop app + `agentlas` CLI** | The user's machine (BYOC) | A local **architecture agent** (Hermes-style): always-present built-in agents + a memory substrate, running on the user's own Claude/Codex/Gemini/BYOK runtime. |
+| **agentlas.cloud (web)** | Hosted | Hub discovery/bookmarks, private Agent Cloud storage, groups, and account control-plane state. It does not replace the local LLM runtime. |
+| **Agentlas Desktop** | The user's machine (BYOC) | The local GUI runtime: built-in control agents, memory, tools, automation, and user-visible apps. |
+| **Agentlas Terminal** | The user's machine (BYOC) | An independent npm product and repository (`agentlas-ai/agentlas-terminal`). It interoperates with Desktop data when available, but is not generated from or bundled under this repo. |
 
-Both consume the **same source-of-truth agent repos**:
+The local runtimes consume the **same source-of-truth agent repos**:
 
 - `agentlas-ai/Agentlas-OS` — public core and single-agent/team/package contract
 - `agent_project_pm_soul` — per-project continuity + memory (PM Soul)
 - `agent_memory_curator_agent` — curated durable memory (Memory Curator)
 - `agentlas_task_bias` — AI Sitemap governance to reduce task-selection bias
 
-The desktop/terminal **bakes condensed, operational versions** of these into every
-install. The canonical research lives in the repos; the app ships a runtime distillation.
+Desktop and Terminal each maintain their own tested runtime distillation of these
+contracts. The canonical research lives in the repos; neither local product is a
+generated subdirectory of the other.
 
-## 2. What ships on install (app + terminal)
+## 2. What ships in Agentlas Desktop
 
-On first launch (and on every CLI run), the app seeds the local **built-in agents**
+On first launch, the app seeds the local **built-in agents**
 (`installed_agents.builtin = 1`) and a **memory substrate**. Built-in agents are
 runtime control routes, so they ship as `background` and stay out of user-facing
 agent lists:
@@ -48,10 +51,12 @@ electron/memory/
   store.ts        ← memory_entries CRUD
   project-files.ts← .agentlas/ materialization (soul memory, sitemap, log)
   context.ts      ← builds the memory injected into each system prompt
-cli/
-  agentlas.cjs            ← terminal CLI (mirrors seeding + memory, CommonJS)
-  architecture.data.json  ← GENERATED from manifest.ts (do not hand-edit)
 ```
+
+The independent Terminal implementation lives in the separate
+[`agentlas-ai/agentlas-terminal`](https://github.com/agentlas-ai/agentlas-terminal)
+repository. Cross-surface behavior is maintained with explicit parity tests and
+architecture-sync checks, not by restoring a Desktop `cli/` folder.
 
 ### How a turn flows (app, `electron/mcp/client.ts`)
 1. Resolve agent + project. If the chat has a **working folder**, record a visit
@@ -66,8 +71,8 @@ cli/
    apply safety/scope/dedup **in code (no extra LLM call)**, persist durable items to
    `memory_entries` + `.agentlas/`, and **strip the block** from the visible answer.
 
-The CLI mirrors this for its API path (BYOK/Ollama); native CLI sessions (claude/codex/
-gemini) get memory context injected but keep their own session loop.
+The independent Agentlas Terminal implements the corresponding terminal flow in its
+own repository. Claude/Codex/Gemini child sessions keep their own session loops.
 
 ### Auto-activation
 One-off folders stay untouched. A folder a user **works in repeatedly** (≥2 chats with
@@ -104,21 +109,20 @@ To change agent prompts or the memory contract:
 
 1. Edit `electron/architecture/manifest.ts` (prompts, agents, contract constants).
 2. **Bump `ARCHITECTURE_VERSION`** (semver) in the same file.
-3. `npm run build:electron` — this recompiles AND regenerates `cli/architecture.data.json`
-   (via `scripts/gen-cli-architecture.mjs`). Never hand-edit the JSON.
-4. Ship. On next boot/CLI run, the seeder sees the new version and **re-syncs only the
+3. `npm run build:electron` — this recompiles the Desktop main-process runtime.
+4. Ship. On next Desktop boot, the seeder sees the new version and **re-syncs only the
    built-in agents' name/prompt/role**. It never touches user chats, marketplace agents,
    local imports, or project memory.
 
 To add a **new** built-in agent: add an entry to `BUILTIN_AGENTS` (stable `slug`) with
 `visibility: "background"`, bump the version, rebuild. `builtinAgentId(slug)` keeps the
-row id stable across app + CLI. User-facing agents should come from installed agent repos
+Desktop row id stable across upgrades. User-facing agents should come from installed agent repos
 or firms, not desktop built-ins.
 
 To change the **DB schema** (new memory field, new table): add a `userVersion < N` block
 in `electron/store/db.ts` (additive, guarded with column/`IF NOT EXISTS` checks like the
-existing ones) and bump `SCHEMA_VERSION`. The CLI does **not** migrate — it guards on
-schema readiness and waits for one app launch. Keep migrations backward-compatible.
+existing ones) and bump `SCHEMA_VERSION`. Keep migrations backward-compatible, then run
+the cross-surface schema/parity gates in the independent Terminal repository.
 
 To create, upload, sync, import, or seed an **agent**, apply the visibility contract in
 `docs/AGENT_VISIBILITY_CONTRACT.md`: every agent row must persist exactly one of

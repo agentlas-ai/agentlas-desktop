@@ -34,7 +34,7 @@
   </a>
 </p>
 <p align="center">
-  <sub>Free · open source (Apache-2.0) · Agentlas sign-in connects the app, Cloud, and Hub · your LLM subscription and API credentials stay local · prefer the terminal? <a href="#install-from-the-terminal">one-line install ↓</a></sub>
+  <sub>Free · open source (Apache-2.0) · Agentlas sign-in connects the app, Cloud, and Hub · your LLM subscription and API credentials stay local · prefer a standalone terminal? <a href="https://github.com/agentlas-ai/agentlas-terminal">Agentlas Terminal ↗</a></sub>
 </p>
 
 <p align="center">
@@ -390,8 +390,8 @@ Get the latest build from the [**Releases page**](https://github.com/agentlas-ai
 
 | OS | File | Notes |
 |----|------|-------|
-| macOS (Apple silicon) | `Agentlas-x.y.z-arm64.dmg` | M1 and newer |
-| macOS (Intel) | `Agentlas-x.y.z-x64.dmg` | Intel Macs |
+| macOS (Apple silicon) | `Agentlas-x.y.z-arm64.dmg` | M1 and newer · macOS 12 Monterey or newer |
+| macOS (Intel) | `Agentlas-x.y.z-x64.dmg` | Intel Macs · macOS 12 Monterey or newer |
 | Windows | `Agentlas-x.y.z-Windows-x64-Setup.exe` · `Agentlas-x.y.z-Windows-x64-Portable.exe` | Windows 10/11 (x64) |
 | Linux | `Agentlas-x.y.z-Linux-x64.AppImage` · `Agentlas-x.y.z-Linux-x64.deb` | x64 |
 
@@ -474,6 +474,8 @@ update"** badge (the same idea as Codex's update button). Click it to apply.
   The **portable** `.exe` does **not** self-update — re-download it to upgrade.
 - **macOS / Linux (AppImage):** self-update in place. The `.deb` updates via the
   same in-app flow.
+- **macOS 11 Big Sur:** stays on the last compatible Agentlas release and is
+  excluded from macOS 12+ automatic updates.
 
 ### First-time setup — opening the app the first time
 
@@ -578,7 +580,7 @@ in the same Settings panel.
 
 ## Build from source
 
-Requirements: Node.js 20+, npm. (macOS also needs Xcode Command Line Tools, and
+Requirements: Node.js 22.12+, npm. (macOS also needs Xcode Command Line Tools, and
 Linux needs `libsecret-1-dev`, for the native modules.)
 
 ```bash

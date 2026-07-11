@@ -7,7 +7,7 @@
 //
 // 환경변수:
 //   HEPHAESTUS_REPO   기본 https://github.com/agentlas-ai/Agentlas-OS.git
-//   HEPHAESTUS_REF    기본 v1.1.13 (브랜치/태그/커밋)
+//   HEPHAESTUS_REF    기본 v1.1.14 (브랜치/태그/커밋)
 //   HEPHAESTUS_DIR    기본 <repo>/Hephaestus
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -19,7 +19,7 @@ const dir = process.env.HEPHAESTUS_DIR
   ? path.resolve(process.env.HEPHAESTUS_DIR)
   : path.join(repoRoot, "Hephaestus");
 const repo = process.env.HEPHAESTUS_REPO || "https://github.com/agentlas-ai/Agentlas-OS.git";
-const ref = process.env.HEPHAESTUS_REF || "v1.1.13";
+const ref = process.env.HEPHAESTUS_REF || "v1.1.14";
 
 // 엔진 존재 판정: 런타임 진입 모듈이 있어야 "있다"로 본다(빈 폴더/부분 클론 방지).
 const sentinel = path.join(dir, "agentlas_cloud", "__main__.py");

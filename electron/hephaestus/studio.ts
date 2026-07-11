@@ -6,6 +6,7 @@
 import crossSpawn from "cross-spawn";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import { app, session } from "electron";
@@ -17,6 +18,7 @@ import { currentUiLocale } from "../ui-locale";
 let cachedRoot: string | null | undefined;
 let proc: ChildProcess | null = null;
 let activeUrl: string | null = null;
+let activeRequestToken: string | null = null;
 let mediaGuardInstalled = false;
 // 동시 startStudio() 호출을 하나의 spawn 으로 합류시키는 in-flight 락(고아 프로세스 누수 방지).
 let starting: Promise<StudioStartResult> | null = null;
@@ -262,16 +264,72 @@ export interface StudioStartResult {
   ok: boolean;
   url?: string;
   reason?: string;
+  ideaQueued?: boolean;
+}
+
+export interface StudioStartInput {
+  idea?: string;
+}
+
+async function queueStudioIdea(idea: string): Promise<{ ok: boolean; reason?: string }> {
+  const cleanIdea = idea.trim();
+  if (!cleanIdea) return { ok: true };
+  if (!activeUrl || !activeRequestToken) return { ok: false, reason: "Studio request bridge is not ready." };
+
+  const target = new URL("/__studio/request", activeUrl);
+  const payload = JSON.stringify({ kind: "init", idea: cleanIdea });
+  const deadline = Date.now() + 6_000;
+  let lastReason = "Studio runner is not ready.";
+
+  while (Date.now() < deadline) {
+    const result = await new Promise<{ ok: boolean; retryable?: boolean; reason?: string }>((resolve) => {
+      const req = http.request(
+        target,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(payload),
+            origin: target.origin,
+            "x-studio-token": activeRequestToken!,
+          },
+          timeout: 2_000,
+        },
+        (res) => {
+          res.resume();
+          res.once("end", () => {
+            const status = res.statusCode ?? 0;
+            if (status >= 200 && status < 300) resolve({ ok: true });
+            else resolve({ ok: false, retryable: status === 503, reason: `Studio request failed (${status || "no status"}).` });
+          });
+        },
+      );
+      req.once("timeout", () => req.destroy(new Error("Studio request timed out.")));
+      req.once("error", (error) => resolve({ ok: false, retryable: true, reason: error.message }));
+      req.end(payload);
+    });
+    if (result.ok) return { ok: true };
+    lastReason = result.reason ?? lastReason;
+    if (!result.retryable) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return { ok: false, reason: lastReason };
 }
 
 /** 스튜디오 런처를 띄우고(이미 떠있으면 재사용) iframe 용 로컬 URL 을 반환.
  *  동시 호출(빠른 새로고침/다시시도)은 하나의 spawn 으로 합류시켜 고아 프로세스 누수를 막는다. */
-export function startStudio(): Promise<StudioStartResult> {
-  if (starting) return starting;
-  starting = startStudioInner().finally(() => {
-    starting = null;
-  });
-  return starting;
+export async function startStudio(input?: StudioStartInput): Promise<StudioStartResult> {
+  if (!starting) {
+    starting = startStudioInner().finally(() => {
+      starting = null;
+    });
+  }
+  const started = await starting;
+  const idea = input?.idea?.trim() ?? "";
+  if (!started.ok || !idea) return started;
+  const queued = await queueStudioIdea(idea);
+  if (!queued.ok) return { ...started, ok: false, reason: queued.reason };
+  return { ...started, ideaQueued: true };
 }
 
 async function startStudioInner(): Promise<StudioStartResult> {
@@ -329,6 +387,7 @@ async function startStudioInner(): Promise<StudioStartResult> {
   // per-session 비밀 토큰을 런처에 전달 → 런처가 동일 origin SPA 에만 쿠키로 내려주고,
   // 외부 로컬 프로세스/브라우저 CSRF 는 토큰+Origin 게이트로 거부한다.
   const requestToken = crypto.randomBytes(32).toString("hex");
+  activeRequestToken = requestToken;
   // 데스크탑 임베드는 사용자 본인 머신에서 본인 엔진으로 돈다 → 크레딧 게이트 없이 무료 동작
   // (런처 계약: STUDIO_CREDITS=off 또는 owner 는 free). STUDIO_CREDITS 가 이미 설정돼 있으면 존중.
   const env = withCliPath({
@@ -346,6 +405,7 @@ async function startStudioInner(): Promise<StudioStartResult> {
   try {
     child = crossSpawn(py.python, args, { cwd: runRoot, env, stdio: ["ignore", "pipe", "pipe"] });
   } catch (e) {
+    activeRequestToken = null;
     return { ok: false, reason: (e as Error).message };
   }
   proc = child;
@@ -355,6 +415,7 @@ async function startStudioInner(): Promise<StudioStartResult> {
     if (proc === child) {
       proc = null;
       activeUrl = null;
+      activeRequestToken = null;
     }
   });
 
@@ -381,6 +442,7 @@ export function stopStudio(): void {
   }
   proc = null;
   activeUrl = null;
+  activeRequestToken = null;
 }
 
 // 앱 종료 시 런처 정리.

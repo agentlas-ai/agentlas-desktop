@@ -18,7 +18,6 @@ const routes = [
   { name: "startup-studio", path: "/startup-founder-studio", check: checkStartupStudio },
   { name: "agents", path: "/library/agents", check: checkAgents },
   { name: "chat", path: "/chat?id=chat-1", check: checkChat },
-  { name: "onboarding", path: "/onboarding", check: checkOnboarding },
 ];
 
 fs.rmSync(screenshotDir, { recursive: true, force: true });
@@ -172,10 +171,6 @@ async function checkChat(page) {
   await page.getByRole("textbox").waitFor();
   await page.getByRole("textbox").fill("검증용 에이전트 만들어줘");
   await page.getByText(/알아서 에이전트 부르기|에이전트 찾기|Find agents/).first().waitFor();
-}
-
-async function checkOnboarding(page) {
-  await page.getByText(/Agentlas에 오신 걸 환영해요|Welcome to Agentlas/).waitFor();
 }
 
 function mockAgentlasBridge() {

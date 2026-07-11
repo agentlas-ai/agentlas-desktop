@@ -33,28 +33,6 @@ const CLI_BINS: Record<string, { name: string; extra: string[] }> = {
       "/usr/local/bin/agy",
     ],
   },
-  // Grok CLI(superagent-ai/grok-cli) — 구독 로그인 재사용, generate_image/generate_video 내장.
-  // 공식 install.sh 경로(~/.grok/bin)를 PATH보다 먼저 — PATH의 grok이 서드파티 셔틀(shim)일 수 있다.
-  "grok-cli-image": {
-    name: "grok",
-    extra: [
-      path.join(os.homedir(), ".grok/bin/grok"),
-      path.join(os.homedir(), ".local/bin/grok"),
-      path.join(os.homedir(), ".bun/bin/grok"),
-      "/opt/homebrew/bin/grok",
-      "/usr/local/bin/grok",
-    ],
-  },
-  "grok-cli-video": {
-    name: "grok",
-    extra: [
-      path.join(os.homedir(), ".grok/bin/grok"),
-      path.join(os.homedir(), ".local/bin/grok"),
-      path.join(os.homedir(), ".bun/bin/grok"),
-      "/opt/homebrew/bin/grok",
-      "/usr/local/bin/grok",
-    ],
-  },
 };
 
 function resolveBin(name: string, extra: string[]): string | null {
@@ -71,27 +49,57 @@ function resolveBin(name: string, extra: string[]): string | null {
 }
 
 /**
- * grok CLI 인증 가용성 — v1.1.7 실측: 헤드리스(-p)는 GROK_API_KEY(=XAI_API_KEY) env 또는
- * ~/.grok/user-settings.json 의 apiKey 가 필요하다(코드엑스류 OAuth 세션 아님).
- * 앱 볼트의 XAI_API_KEY 는 spawn 시 GROK_API_KEY 로 주입된다(runtime/grok.ts grokEnv 와 동일 규약).
- * 향후 구독 OAuth(auth.json)가 생기면 그 존재도 인정한다.
+ * grok CLI 인증 가용성 — 공식 xAI CLI(grok 0.2.x) 실측 기준.
+ *  주 경로: 구독 OAuth 로그인(`grok login`) → ~/.grok/auth.json 에 OIDC 토큰(access+refresh) 저장.
+ *           auth_mode "oidc" 이고 만료 안 됐거나 refresh_token 이 있으면 ready(CLI가 자동 갱신).
+ *  폴백: GROK_API_KEY(=XAI_API_KEY) env / 앱 볼트(spawn 시 주입) / user-settings.json apiKey.
+ *  ⚠ 예전 superagent-ai grok-cli(v1.x)는 API 키만 썼지만, x.ai/cli/install.sh 공식 CLI는 OAuth 우선.
  */
-export async function grokAuthReady(): Promise<boolean> {
-  if (await hasEnvVar("XAI_API_KEY")) return true;
-  if (await hasEnvVar("GROK_API_KEY")) return true;
+export type GrokAuthSource = "oauth" | "api-key" | "unavailable";
+
+export async function grokAuthSource(): Promise<GrokAuthSource> {
+  if (grokOAuthReady()) return "oauth";
+  if (await hasEnvVar("XAI_API_KEY")) return "api-key";
+  if (await hasEnvVar("GROK_API_KEY")) return "api-key";
   try {
     const raw = fs.readFileSync(path.join(os.homedir(), ".grok/user-settings.json"), "utf8");
     const settings = JSON.parse(raw) as { apiKey?: unknown };
-    if (typeof settings.apiKey === "string" && settings.apiKey.trim()) return true;
+    if (typeof settings.apiKey === "string" && settings.apiKey.trim()) return "api-key";
   } catch {
     /* 설정 없음 */
   }
+  return "unavailable";
+}
+
+export async function grokAuthReady(): Promise<boolean> {
+  return (await grokAuthSource()) !== "unavailable";
+}
+
+/** ~/.grok/auth.json 에 유효한 OIDC 로그인이 있나? (access 미만료 또는 refresh_token 보유) */
+export function grokOAuthReady(
+  authPath = process.env.AGENTLAS_GROK_AUTH_FILE || path.join(os.homedir(), ".grok/auth.json"),
+  now = Date.now(),
+): boolean {
   try {
-    fs.accessSync(path.join(os.homedir(), ".grok/auth.json"));
-    return true;
+    const raw = fs.readFileSync(authPath, "utf8");
+    const store = JSON.parse(raw) as Record<string, unknown>;
+    for (const entry of Object.values(store)) {
+      if (!entry || typeof entry !== "object") continue;
+      const e = entry as { auth_mode?: unknown; refresh_token?: unknown; expires_at?: unknown; key?: unknown; oidc_issuer?: unknown };
+      const isOidc = e.auth_mode === "oidc" || (typeof e.oidc_issuer === "string" && typeof e.key === "string");
+      if (!isOidc) continue;
+      // refresh_token 이 있으면 access 만료돼도 CLI가 갱신하므로 ready.
+      if (typeof e.refresh_token === "string" && e.refresh_token.trim()) return true;
+      // refresh 없으면 access 만료 전까지만 ready.
+      if (typeof e.expires_at === "string") {
+        const exp = Date.parse(e.expires_at);
+        if (Number.isFinite(exp) && exp > now) return true;
+      }
+    }
   } catch {
-    return false;
+    /* 로그인 안 됨/파싱 실패 */
   }
+  return false;
 }
 
 /** 이 provider가 지금 바로 쓸 수 있나? (키리스=bin 존재 / 키필요=키 전부 존재) */
@@ -99,8 +107,6 @@ export async function isProviderReady(provider: MultimodalProvider): Promise<boo
   const cli = CLI_BINS[provider.id];
   if (cli) {
     if (!resolveBin(cli.name, cli.extra)) return false;
-    // grok 은 bin 만으로 부족 — 헤드리스 인증 수단(키/설정/OAuth)이 실제로 있어야 ready.
-    if (provider.id.startsWith("grok-cli")) return grokAuthReady();
     return true;
   }
   // 나노바나나는 agy 키리스가 우선이지만 GEMINI_API_KEY 폴백도 허용(trex와 동일).

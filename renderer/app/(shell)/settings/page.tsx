@@ -124,48 +124,66 @@ export default function SettingsPage() {
   const [multimodalSettings, setMultimodalSettings] = useState<MultimodalSettings | null>(null);
   const [multimodalStatus, setMultimodalStatus] = useState<MultimodalProviderStatus[]>([]);
   const [multimodalDraft, setMultimodalDraft] = useState<Record<string, string>>({});
+  const [multimodalLoadFailed, setMultimodalLoadFailed] = useState(false);
+  const [multimodalRefreshing, setMultimodalRefreshing] = useState(false);
   const [runtimeMessage, setRuntimeMessage] = useState("");
   const [concurrency, setConcurrency] = useState<AgentConcurrencyInfo | null>(null);
   const [interviewMode, setInterviewMode] = useState<"smart" | "build-only" | "off">("build-only");
 
-  const refresh = useCallback(async () => {
+  const refreshMultimodal = useCallback(async () => {
     const api = ipc();
-    if (!api) return;
-    const [s, a, o, g, u, c, glmK, kimiK, dsK, baseUrl, providers, mmSettings, mmStatus] =
-      await Promise.all([
-        api.runtime.detect(),
-        api.secrets.hasApiKey("anthropic"),
-        api.secrets.hasApiKey("openai"),
-        api.secrets.hasApiKey("google"),
-        api.secrets.hasApiKey("upstage"),
-        api.secrets.hasApiKey("custom"),
-        api.secrets.hasApiKey("glm"),
-        api.secrets.hasApiKey("kimi"),
-        api.secrets.hasApiKey("deepseek"),
-        api.config.getCustomBaseUrl(),
+    if (!api) return false;
+    setMultimodalRefreshing(true);
+    try {
+      const [providers, settings, status] = await Promise.allSettled([
         api.multimodal.listProviders(),
         api.multimodal.getSettings(),
         api.multimodal.status(),
       ]);
+      if (providers.status === "fulfilled") setMultimodalProviders(providers.value);
+      if (settings.status === "fulfilled") setMultimodalSettings(settings.value);
+      if (status.status === "fulfilled") setMultimodalStatus(status.value);
+      const failed = [providers, settings, status].some((result) => result.status === "rejected");
+      setMultimodalLoadFailed(failed);
+      return !failed;
+    } finally {
+      setMultimodalRefreshing(false);
+    }
+  }, []);
+
+  const refresh = useCallback(async () => {
+    const api = ipc();
+    if (!api) return;
     api.system?.concurrencyInfo().then(setConcurrency).catch(() => {});
     api.interview?.getMode().then(setInterviewMode).catch(() => {});
-    setStatuses(s);
-    setHasKey({
-      anthropic: a,
-      openai: o,
-      google: g,
-      upstage: u,
-      custom: c,
-      glm: glmK,
-      kimi: kimiK,
-      deepseek: dsK,
+    const runtimeRefresh = api.runtime.detect().then(setStatuses);
+    const keyRefresh = Promise.all([
+      api.secrets.hasApiKey("anthropic"),
+      api.secrets.hasApiKey("openai"),
+      api.secrets.hasApiKey("google"),
+      api.secrets.hasApiKey("upstage"),
+      api.secrets.hasApiKey("custom"),
+      api.secrets.hasApiKey("glm"),
+      api.secrets.hasApiKey("kimi"),
+      api.secrets.hasApiKey("deepseek"),
+      api.config.getCustomBaseUrl(),
+    ]).then(([a, o, g, u, c, glmK, kimiK, dsK, baseUrl]) => {
+      setHasKey({
+        anthropic: a,
+        openai: o,
+        google: g,
+        upstage: u,
+        custom: c,
+        glm: glmK,
+        kimi: kimiK,
+        deepseek: dsK,
+      });
+      setCustomBaseUrl(baseUrl);
+      setDraftCustomBaseUrl(baseUrl);
     });
-    setCustomBaseUrl(baseUrl);
-    setDraftCustomBaseUrl(baseUrl);
-    setMultimodalProviders(providers);
-    setMultimodalSettings(mmSettings);
-    setMultimodalStatus(mmStatus);
-  }, []);
+
+    await Promise.allSettled([runtimeRefresh, keyRefresh, refreshMultimodal()]);
+  }, [refreshMultimodal]);
 
   useEffect(() => {
     void refresh();
@@ -248,7 +266,7 @@ export default function SettingsPage() {
     try {
       const next = await api.multimodal.saveSettings({ ...multimodalSettings, ...patch });
       setMultimodalSettings(next);
-      setMultimodalStatus(await api.multimodal.status());
+      await refreshMultimodal();
       setRuntimeMessage("");
     } catch (err) {
       setRuntimeMessage(locale === "ko" ? `프로바이더를 바꾸지 못했습니다. 이전 설정이 유지됩니다. ${String(err)}` : `Provider did not change. The previous setting was kept. ${String(err)}`);
@@ -572,10 +590,13 @@ export default function SettingsPage() {
           providers={multimodalProviders}
           settings={multimodalSettings}
           status={multimodalStatus}
+          loadFailed={multimodalLoadFailed}
+          refreshing={multimodalRefreshing}
           drafts={multimodalDraft}
           onDraftChange={(key, value) => setMultimodalDraft((draft) => ({ ...draft, [key]: value }))}
           onSelect={(modality, providerId) => void saveMultimodalProvider(modality, providerId)}
           onSaveEnv={(key) => void saveMultimodalEnv(key)}
+          onRetry={() => void refreshMultimodal()}
         />
 
         {/* 로컬 모델 (Ollama) */}
@@ -931,18 +952,24 @@ function MultimodalFallbackPanel({
   providers,
   settings,
   status,
+  loadFailed,
+  refreshing,
   drafts,
   onDraftChange,
   onSelect,
   onSaveEnv,
+  onRetry,
 }: {
   providers: MultimodalProvider[];
   settings: MultimodalSettings | null;
   status: MultimodalProviderStatus[];
+  loadFailed: boolean;
+  refreshing: boolean;
   drafts: Record<string, string>;
   onDraftChange: (key: string, value: string) => void;
   onSelect: (modality: MultimodalModality, providerId: string) => void;
   onSaveEnv: (key: string) => void;
+  onRetry: () => void;
 }) {
   const { t, locale } = useT();
   const selected = {
@@ -965,6 +992,34 @@ function MultimodalFallbackPanel({
       <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 12px", lineHeight: 1.55 }}>
         {t("settings.multimodal.note")}
       </p>
+      {loadFailed && (
+        <div
+          role="alert"
+          data-testid="settings-multimodal-error"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "10px 12px",
+            marginBottom: 10,
+            border: "1px solid var(--peach-edge, #e8b99f)",
+            borderRadius: "var(--radius-md)",
+            background: "var(--peach-soft, #fff3ec)",
+            color: "var(--ink-soft)",
+            fontSize: 12,
+            lineHeight: 1.5,
+          }}
+        >
+          <span style={{ flex: 1 }}>
+            {locale === "en"
+              ? "Some multimodal connection details could not be loaded. Other settings are still available."
+              : "일부 멀티모달 연결 정보를 불러오지 못했습니다. 다른 설정은 그대로 사용할 수 있습니다."}
+          </span>
+          <button type="button" onClick={onRetry} disabled={refreshing} style={multimodalSecretButtonStyle}>
+            {refreshing ? (locale === "en" ? "Retrying…" : "다시 확인 중…") : locale === "en" ? "Retry" : "다시 시도"}
+          </button>
+        </div>
+      )}
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {modalities.map((modality) => {
           const items = providers.filter((provider) => provider.modality === modality.id);

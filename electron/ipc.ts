@@ -681,6 +681,10 @@ export function registerIpcHandlers(): void {
     const { trexContentAvailable } = await import("./trex/content");
     return trexContentAvailable();
   });
+  ipcMain.handle("trex:refineText", async (_e, payload: { current?: string; instruction?: string; context?: string }) => {
+    const { refineTrexText } = await import("./trex/content");
+    return refineTrexText(String(payload?.current ?? ""), String(payload?.instruction ?? ""), payload?.context);
+  });
 
   // ── 사이트 디자인 스튜디오 — 디자인 전용(백엔드/실행 없음) ──────────
   // 화면 = self-contained HTML 1문서. 렌더는 항상 prepareRender(태깅+CSP+오버레이 주입)를
@@ -2709,7 +2713,7 @@ export function registerIpcHandlers(): void {
   });
 
   // Startup Founder Studio — 패키지 자체 런처를 spawn 해 실제 SPA 를 로컬 서빙, iframe URL 반환.
-  ipcMain.handle("hephaestus:startStudio", () => startStudio());
+  ipcMain.handle("hephaestus:startStudio", (_event, input?: { idea?: string }) => startStudio(input));
   ipcMain.handle("hephaestus:stopStudio", () => {
     stopStudio();
   });

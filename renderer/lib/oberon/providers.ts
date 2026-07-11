@@ -142,27 +142,6 @@ export const PROVIDERS: ProviderProfileI18n[] = [
     status: "active",
   },
   {
-    id: "grok",
-    name: "Grok Imagine (Grok CLI)",
-    kind: "video",
-    models: [
-      { model: "grok-imagine-video", modes: ["text_to_video", "image_to_video"], maxDurationSec: 15, resolutions: ["480p", "720p"], notes: "구독 키리스(Grok CLI 로그인) · source 이미지=시작 프레임 · 1~15s", notesEn: "Subscription keyless (logged-in Grok CLI) · source image as starting frame · 1-15s" },
-    ],
-    supportsFirstLastFrame: false,
-    supportsRefImage: true,
-    refImageCount: 1,
-    nativeAudio: false,
-    strengths: ["API 키·추가 과금 없음(그록 구독 재사용)", "텍스트·이미지→비디오 겸용", "최대 15초", "로컬 CLI라 대량 드래프트에 부담 없음"],
-    strengthsEn: ["No API key or extra billing (reuses the Grok subscription)", "Both text- and image-to-video", "Up to 15 seconds", "Local CLI — cheap enough for bulk drafting"],
-    weaknesses: ["720p 캡(4K 없음)", "네이티브 오디오 없음", "first/last frame 정밀 연결 없음", "CLI 경유라 폴링·타임아웃 관리 필요"],
-    weaknessesEn: ["720p cap (no 4K)", "No native audio", "No first/last-frame precision continuity", "Runs via CLI — needs polling/timeout care"],
-    approxCostUsd: 0,
-    bestFor: "키 없이 바로 도는 드래프트·프리비즈, 구독만으로 영상이 필요한 모든 샷",
-    bestForEn: "Keyless instant drafts/previz — any shot that must work on subscription alone",
-    vaultKey: "",
-    status: "active",
-  },
-  {
     id: "nano_banana",
     name: "Nano Banana Pro (Gemini 3 Pro Image)",
     kind: "image",
@@ -368,8 +347,6 @@ const ROUTING_PROFILE: Record<string, RoutingProfile> = {
   runway: { quality: 0.8, control: 0.95, reliability: 0.9, latency: 0.7, continuity: 0.75, motion: 0.7, dialogue: 0.2 },
   // 빠르고 저렴·모션 최강, 화질·오디오는 약함.
   luma: { quality: 0.68, control: 0.7, reliability: 0.85, latency: 0.9, continuity: 0.6, motion: 0.95, dialogue: 0.1 },
-  // 구독 키리스(비용 0)·최대 15s가 강점. 화질 720p 캡·오디오 없음·정밀 연결 없음 → 드래프트/프리비즈 특화.
-  grok: { quality: 0.6, control: 0.5, reliability: 0.75, latency: 0.6, continuity: 0.5, motion: 0.65, dialogue: 0.05 },
 };
 
 const DIMENSIONS: RouteDimension[] = ["task_fit", "quality", "control", "reliability", "cost", "latency", "continuity"];

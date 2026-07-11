@@ -12,7 +12,18 @@ import {
   type Reference,
   type ReferenceType,
 } from "@/lib/citations";
-import { loadReferences, loadStyle, newReferenceId, saveReferences, saveStyle } from "@/lib/document-store";
+import {
+  clearDocumentDraft,
+  loadDocumentDraft,
+  loadReferences,
+  loadStyle,
+  newReferenceId,
+  saveDocumentDraft,
+  saveReferences,
+  saveStyle,
+  type DocumentDraftSaveResult,
+  type DocumentStudioDraftInput,
+} from "@/lib/document-store";
 import {
   IconApps,
   IconCheck,
@@ -67,6 +78,9 @@ export default function DocumentStudioPage() {
   const [statusMsg, setStatusMsg] = useState<{ kind: "ok" | "error" | "info"; text: string } | null>(null);
   const [aiAvailable, setAiAvailable] = useState<boolean | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
+  const [draftHydrated, setDraftHydrated] = useState(false);
+  const [draftSaving, setDraftSaving] = useState(false);
+  const [draftSaveResult, setDraftSaveResult] = useState<DocumentDraftSaveResult | null>(null);
 
   const [references, setReferences] = useState<Reference[]>([]);
   const [citationStyle, setCitationStyle] = useState<CitationStyle>("APA");
@@ -79,9 +93,48 @@ export default function DocumentStudioPage() {
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const selection = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
   const firstSave = useRef(true); // 초기 [] 로 저장된 소스를 덮어쓰지 않도록 첫 저장을 건너뛴다.
+  const draftHydratedRef = useRef(false);
+  const draftSnapshotRef = useRef<DocumentStudioDraftInput>({
+    title: "",
+    body: "",
+    figureSrc: "",
+    figureCaption: "",
+  });
 
-  // 초기 로드: 저장된 소스/스타일 + LLM 가용 여부.
+  if (draftHydrated) {
+    draftSnapshotRef.current = { title, body: documentText, figureSrc, figureCaption };
+  }
+
+  // 초기 로드: 작성 중인 초안 + 저장된 소스/스타일 + LLM 가용 여부.
   useEffect(() => {
+    const restored = loadDocumentDraft();
+    if (restored) {
+      setTitle(restored.title);
+      setDocumentText(restored.body);
+      setFigureSrc(restored.figureSrc);
+      setFigureCaption(restored.figureCaption);
+      draftSnapshotRef.current = {
+        title: restored.title,
+        body: restored.body,
+        figureSrc: restored.figureSrc,
+        figureCaption: restored.figureCaption,
+      };
+      setDraftSaveResult(
+        restored.figurePersistence === "omitted-size" || restored.figurePersistence === "omitted-quota"
+          ? {
+              status: "saved-without-figure",
+              figurePersistence: restored.figurePersistence,
+              updatedAt: restored.updatedAt,
+            }
+          : {
+              status: "saved",
+              figurePersistence: restored.figurePersistence,
+              updatedAt: restored.updatedAt,
+            },
+      );
+    }
+    draftHydratedRef.current = true;
+    setDraftHydrated(true);
     setReferences(loadReferences());
     const s = loadStyle();
     if (s && (CITATION_STYLES as string[]).includes(s)) setCitationStyle(s);
@@ -90,6 +143,26 @@ export default function DocumentStudioPage() {
       .then((st) => setAiAvailable(Boolean(st?.agy || st?.codex)))
       .catch(() => setAiAvailable(false));
   }, []);
+
+  // Synchronous localStorage writes are debounced while typing. The unmount
+  // boundary below flushes the ref immediately, so route changes cannot lose
+  // the final keystroke that is still inside this debounce window.
+  useEffect(() => {
+    if (!draftHydrated) return;
+    setDraftSaving(true);
+    const timer = window.setTimeout(() => {
+      setDraftSaveResult(saveDocumentDraft(draftSnapshotRef.current));
+      setDraftSaving(false);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [draftHydrated, title, documentText, figureSrc, figureCaption]);
+
+  useEffect(
+    () => () => {
+      if (draftHydratedRef.current) saveDocumentDraft(draftSnapshotRef.current);
+    },
+    [],
+  );
 
   // 소스 변경 시 영속. 첫 실행(초기 []) 은 건너뛰어 저장된 소스를 클로버하지 않는다.
   useEffect(() => {
@@ -110,9 +183,45 @@ export default function DocumentStudioPage() {
   const wordCount = documentText.trim() ? documentText.trim().split(/\s+/).filter(Boolean).length : 0;
   const readingMin = Math.max(1, Math.round(wordCount / 200));
   const sectionCount = (documentText.match(/^#{1,3}\s+/gm) || []).length;
+  const draftPersistence = draftPersistenceCopy(draftSaving, draftSaveResult, locale);
 
   function setError(text: string) {
     setStatusMsg({ kind: "error", text });
+  }
+
+  function startNewDocument() {
+    const hasDraft = Boolean(title || documentText || figureSrc || figureCaption);
+    if (
+      hasDraft &&
+      !window.confirm(
+        locale === "en"
+          ? "Start a new document? The current title, body, figure, and caption will be cleared."
+          : "새 문서를 시작할까요? 현재 제목, 본문, 도표, 캡션이 지워집니다.",
+      )
+    ) {
+      return;
+    }
+    const emptyDraft: DocumentStudioDraftInput = {
+      title: "",
+      body: "",
+      figureSrc: "",
+      figureCaption: "",
+    };
+    const clearResult = clearDocumentDraft();
+    draftSnapshotRef.current = emptyDraft;
+    setTitle("");
+    setDocumentText("");
+    setFigureSrc("");
+    setFigureCaption("");
+    setGoal(exampleGoal);
+    setMode("paper");
+    setGeneratedAt(null);
+    setGenEngine(null);
+    setStatusMsg(null);
+    setExportStatus(null);
+    setDraftSaving(false);
+    setDraftSaveResult(clearResult.status === "failed" ? clearResult : null);
+    selection.current = { start: 0, end: 0 };
   }
 
   async function generate() {
@@ -282,13 +391,28 @@ export default function DocumentStudioPage() {
   }
 
   return (
-    <div style={shell}>
+    <div
+      style={shell}
+      data-testid="document-studio-root"
+      data-draft-hydrated={draftHydrated ? "true" : "false"}
+      aria-busy={!draftHydrated}
+    >
       <style>{RESPONSIVE_CSS}</style>
       <header className="titlebar-drag document-studio-toolbar" style={topToolbar}>
         <Link href="/apps" className="titlebar-nodrag" style={backLink}>
           <IconApps size={15} />
           Apps
         </Link>
+        <button
+          type="button"
+          className="titlebar-nodrag"
+          data-testid="document-studio-new-document"
+          onClick={startNewDocument}
+          style={newDocumentButton}
+        >
+          <IconPlus size={13} />
+          {locale === "en" ? "New document" : "새 문서"}
+        </button>
         <div style={{ position: "relative", marginLeft: "auto" }} className="titlebar-nodrag">
           <button type="button" onClick={() => setCitationOpen((o) => !o)} style={citationButton} title={locale === "en" ? "Citation style" : "인용 스타일"}>
             {citationStyle}
@@ -429,6 +553,27 @@ export default function DocumentStudioPage() {
               <span>{sectionCount} {locale === "en" ? "sections" : "섹션"}</span>
               <span>{citationStyle}</span>
               {generatedAt ? <span>{genEngine ? `${genEngine} · ` : ""}{generatedAt}</span> : null}
+              {draftPersistence ? (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  data-testid="document-draft-save-status"
+                  data-state={draftPersistence.state}
+                  style={{
+                    ...draftPersistenceStatus,
+                    color:
+                      draftPersistence.state === "failed"
+                        ? "#c0392b"
+                        : draftPersistence.state === "degraded"
+                          ? "#9a6700"
+                          : draftPersistence.state === "saved"
+                            ? "var(--green-deep)"
+                            : "var(--muted-deep)",
+                  }}
+                >
+                  {draftPersistence.text}
+                </span>
+              ) : null}
             </div>
 
             {/* AI 편집 툴바 — 선택 텍스트(없으면 전체)를 개정 */}
@@ -609,6 +754,47 @@ function labelForMode(mode: Mode, locale: "ko" | "en") {
   return mode === "paper" ? "논문" : mode === "brief" ? "브리프" : "리포트";
 }
 
+function draftPersistenceCopy(
+  saving: boolean,
+  result: DocumentDraftSaveResult | null,
+  locale: "ko" | "en",
+): { state: "saving" | "saved" | "degraded" | "failed"; text: string } | null {
+  if (saving) {
+    return { state: "saving", text: locale === "en" ? "Saving locally…" : "로컬 저장 중…" };
+  }
+  if (!result || result.status === "cleared") return null;
+  if (result.status === "failed") {
+    return {
+      state: "failed",
+      text:
+        locale === "en"
+          ? "Local save failed · Current changes may not survive a restart"
+          : "로컬 저장 실패 · 현재 변경은 재시작 후 복원되지 않을 수 있습니다",
+    };
+  }
+  if (result.status === "saved-without-figure") {
+    const sizeReason = result.figurePersistence === "omitted-size";
+    return {
+      state: "degraded",
+      text:
+        locale === "en"
+          ? `Title and text saved · Figure ${sizeReason ? "exceeded the local size limit" : "could not fit in local storage"} and will not be restored after restart`
+          : `본문·제목 저장됨 · 도표 이미지가 ${sizeReason ? "로컬 크기 한도를 넘어" : "로컬 저장 공간에 들어가지 않아"} 재시작 후 복원되지 않습니다`,
+    };
+  }
+  return {
+    state: "saved",
+    text:
+      locale === "en"
+        ? result.figurePersistence === "stored"
+          ? "Draft and figure saved locally"
+          : "Draft saved locally"
+        : result.figurePersistence === "stored"
+          ? "초안과 도표 로컬 저장됨"
+          : "초안 로컬 저장됨",
+  };
+}
+
 function bibTitleFromMarkdown(md: string): string {
   const m = md.match(/^##\s+(.*)$/m);
   return m ? m[1] : "References";
@@ -701,6 +887,7 @@ const RESPONSIVE_CSS = `
 const shell: CSSProperties = { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--paper-edge)", color: "var(--ink)" };
 const topToolbar: CSSProperties = { minHeight: 42, borderBottom: "1px solid var(--paper-edge)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 6, padding: "6px 16px 6px 90px", flexShrink: 0 };
 const backLink: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 6, color: "var(--accent)", fontWeight: 800, fontSize: 12, textDecoration: "none" };
+const newDocumentButton: CSSProperties = { minHeight: 30, border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", color: "var(--ink-soft)", display: "inline-flex", alignItems: "center", gap: 5, padding: "0 9px", fontSize: 11.5, fontWeight: 800, cursor: "pointer" };
 const citationButton: CSSProperties = { height: 32, minWidth: 84, border: "1px solid var(--paper-edge)", borderRadius: 999, background: "var(--paper)", display: "inline-flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "0 12px", color: "var(--ink)", fontWeight: 800 };
 const citationMenu: CSSProperties = { position: "absolute", top: 38, right: 0, width: 200, maxHeight: 360, border: "1px solid #e2e5ea", borderRadius: 8, background: "var(--paper)", boxShadow: "0 18px 48px rgba(15,23,42,.16)", padding: 8, zIndex: 20 };
 const citationList: CSSProperties = { display: "grid", gap: 1, maxHeight: 320, overflowY: "auto" };
@@ -736,6 +923,7 @@ const editorStage: CSSProperties = { minWidth: 0, minHeight: 0, overflowY: "auto
 const paper: CSSProperties = { width: "min(760px, 100%)", minHeight: "calc(100vh - 220px)", margin: "0 auto", background: "var(--paper)", border: "1px solid var(--paper-edge)", boxShadow: "0 20px 70px rgba(15,23,42,.08)", padding: "48px 60px" };
 const titleInput: CSSProperties = { width: "100%", border: "none", outline: "none", background: "transparent", resize: "none", overflow: "hidden", color: "var(--ink)", fontFamily: "var(--font-head)", fontSize: 26, lineHeight: 1.2, fontWeight: 900 };
 const docMeta: CSSProperties = { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10, color: "var(--muted-deep)", fontSize: 11.5, marginTop: 8 };
+const draftPersistenceStatus: CSSProperties = { fontWeight: 800, lineHeight: 1.4 };
 const editToolbar: CSSProperties = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginTop: 16, marginBottom: 8, paddingBottom: 12, borderBottom: "1px solid var(--paper-edge)" };
 const editToolbarLabel: CSSProperties = { color: "#7c5800", background: "#fff4bf", borderRadius: 6, padding: "3px 7px", fontSize: 10.5, fontWeight: 900 };
 const editToolbarBtn: CSSProperties = { border: "1px solid var(--paper-edge)", background: "#fff", color: "var(--ink-soft)", borderRadius: 999, padding: "5px 11px", fontSize: 12, fontWeight: 800, cursor: "pointer" };

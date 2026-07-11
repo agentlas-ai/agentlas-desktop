@@ -50,7 +50,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      HEPHAESTUS_REF: v1.1.13
+      HEPHAESTUS_REF: v1.1.14
 
     steps:
       - uses: actions/checkout@v4
@@ -106,6 +106,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Dependency security audit
+        run: npm audit --audit-level=high
 
       - name: Typecheck
         if: runner.os == 'Linux'

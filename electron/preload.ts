@@ -31,6 +31,7 @@ const api: AgentlasIpc = {
     imageProviders: () => ipcRenderer.invoke("trex:imageProviders"),
     generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string }) => ipcRenderer.invoke("trex:generateContent", payload),
     contentAvailable: () => ipcRenderer.invoke("trex:contentAvailable"),
+    refineText: (payload: { current: string; instruction: string; context?: string }) => ipcRenderer.invoke("trex:refineText", payload),
   },
   site: {
     listProjects: () => ipcRenderer.invoke("site:listProjects"),
@@ -506,7 +507,7 @@ const api: AgentlasIpc = {
     buildEventChannel: (runId: string) => `hephaestus:build:${runId}`,
     buildReady: (runId: string) => ipcRenderer.invoke("hephaestus:buildReady", runId),
     cancelBuild: (runId: string) => ipcRenderer.invoke("hephaestus:cancelBuild", runId),
-    startStudio: () => ipcRenderer.invoke("hephaestus:startStudio"),
+    startStudio: (input) => ipcRenderer.invoke("hephaestus:startStudio", input),
     stopStudio: () => ipcRenderer.invoke("hephaestus:stopStudio"),
   },
 };

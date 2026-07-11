@@ -42,6 +42,28 @@ const EXAMPLE = "중견 제조사 디지털 전환 전략 — 진단과 12개월
 const EXAMPLE_EN = "Mid-market manufacturer digital transformation — diagnosis and a 12-month roadmap";
 const ALL_MODES: ArtMode[] = ["editorial", "cinematic", "diagrammatic", "hybrid"];
 const PALETTE: BlockKind[] = ["title", "subtitle", "body", "card", "image", "kicker", "pill", "kpi", "bar", "rule", "footer"];
+type TrexSource = { name: string; text: string };
+
+// electron/fs/workspace.ts가 실제 UTF-8 본문으로 읽는 형식 중, 이미지인 SVG를 제외한 소스 형식.
+// PDF·Word·이미지는 별도 파서가 생기기 전까지 파일명조차 모델 컨텍스트에 넣지 않는다.
+const TREX_TEXT_EXTENSIONS = [
+  ".txt", ".md", ".mdx", ".json", ".yml", ".yaml", ".toml", ".csv", ".tsv",
+  ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".rb", ".go", ".rs",
+  ".java", ".kt", ".swift", ".sh", ".bash", ".zsh", ".html", ".htm", ".css",
+  ".scss", ".sass", ".less", ".xml", ".url", ".webloc", ".vue", ".astro", ".sql",
+  ".env", ".gitignore", ".npmrc", ".editorconfig", ".prettierrc", ".eslintrc",
+  ".dockerfile", ".gradle", ".properties", ".ini", ".conf", ".log",
+] as const;
+const TREX_TEXT_EXTENSION_SET = new Set<string>(TREX_TEXT_EXTENSIONS);
+const TREX_EXTENSIONLESS_TEXT_FILES = new Set(["readme", "license", "makefile", "dockerfile"]);
+const TREX_TEXT_ACCEPT = TREX_TEXT_EXTENSIONS.join(",");
+
+function isReadableTrexTextSource(name: string): boolean {
+  const lower = name.trim().toLowerCase();
+  if (TREX_EXTENSIONLESS_TEXT_FILES.has(lower)) return true;
+  const dot = lower.lastIndexOf(".");
+  return dot >= 0 && TREX_TEXT_EXTENSION_SET.has(lower.slice(dot));
+}
 
 export default function TrexPage() {
   const { locale } = useT();
@@ -59,59 +81,74 @@ export default function TrexPage() {
   const [modeOverride, setModeOverride] = useState<ArtMode | null>(null);
   // Style DNA — null=자동(주제 라우팅, 매치 없으면 레거시 모드 룩), "legacy"=명시적 기본 룩.
   const [styleOverride, setStyleOverride] = useState<string | null>(null); // StyleId·팔레트id·"legacy"·null(자동)
-  // 소스 파일 — 프롬프트 대신(또는 함께) 첨부해 덱의 재료로 쓴다. 텍스트 파일은 본문 추출,
-  // 이미지/기타는 이름만 힌트로. 첨부가 있으면 주제 없이도 생성 가능.
-  const [sources, setSources] = useState<{ name: string; text: string; kind: "text" | "image" | "other" }[]>([]);
+  // 소스 파일 — 실제로 읽은 텍스트 본문만 덱의 재료로 쓴다. 읽지 못한 파일은 상태에도 넣지 않는다.
+  const [sources, setSources] = useState<TrexSource[]>([]);
   const [attaching, setAttaching] = useState(false);
+  const [attachmentRejected, setAttachmentRejected] = useState<string[]>([]);
 
-  const TEXT_EXT = /\.(md|markdown|txt|text|json|csv|tsv|log|tex|rtf|html?|ya?ml|xml|srt|vtt)$/i;
-  const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i;
   const addFiles = useCallback(async (files: File[]) => {
     if (!files.length) return;
     setAttaching(true);
+    setAttachmentRejected([]);
     const api = ipc();
-    const next: { name: string; text: string; kind: "text" | "image" | "other" }[] = [];
-    for (const file of files.slice(0, 12)) {
-      const name = file.name;
-      if (IMAGE_EXT.test(name)) {
-        next.push({ name, text: "", kind: "image" });
-        continue;
-      }
-      const grant = await grantForDroppedFile(file);
-      let text = "";
-      if (grant && api?.fs?.readTextFile && TEXT_EXT.test(name)) {
+    const next: TrexSource[] = [];
+    const rejected = files.slice(12).map((file) => file.name);
+    try {
+      for (const file of files.slice(0, 12)) {
+        const name = file.name;
+        if (!isReadableTrexTextSource(name)) {
+          rejected.push(name);
+          continue;
+        }
         try {
+          const grant = await grantForDroppedFile(file);
+          if (!grant || !api?.fs?.readTextFile) {
+            rejected.push(name);
+            continue;
+          }
           const preview = await api.fs.readTextFile(grant.path, grant.scope);
-          // readTextFile은 binary/too-large면 reason을 준다 — 텍스트일 때만 content 사용.
-          if (preview && !preview.reason && preview.content) text = preview.content;
+          // 확장자가 맞아도 binary/too-large/빈 파일이면 소스로 가장하지 않는다.
+          if (!preview || preview.reason || !preview.content.trim()) {
+            rejected.push(name);
+            continue;
+          }
+          next.push({ name, text: preview.content.slice(0, 12_000) });
         } catch {
-          text = "";
+          rejected.push(name);
         }
       }
-      next.push({ name, text: text.slice(0, 12_000), kind: text ? "text" : "other" });
+      if (next.length > 0) setSources((prev) => [...prev, ...next].slice(0, 12));
+      setAttachmentRejected(Array.from(new Set(rejected)));
+    } finally {
+      setAttaching(false);
     }
-    setSources((prev) => [...prev, ...next].slice(0, 12));
-    setAttaching(false);
   }, []);
   const removeSource = useCallback((name: string) => setSources((prev) => prev.filter((s) => s.name !== name)), []);
 
-  // 첨부 소스 → 프롬프트 주입용 텍스트. 텍스트는 본문, 이미지/기타는 파일명 힌트.
+  // 첨부 소스 → 프롬프트 주입용 텍스트. 검증을 통과해 읽힌 본문만 들어온다.
   const buildSourcesText = useCallback((): string => {
-    const parts: string[] = [];
-    for (const s of sources) {
-      if (s.kind === "text" && s.text) parts.push(`### ${s.name}\n${s.text}`);
-      else if (s.kind === "image") parts.push(`### ${s.name} (image attached — reference this visual/chart)`);
-      else parts.push(`### ${s.name} (binary file attached — name only)`);
-    }
-    return parts.join("\n\n");
+    return sources.map((source) => `### ${source.name}\n${source.text}`).join("\n\n");
   }, [sources]);
 
   useEffect(() => {
     const api = ipc();
-    api?.trex?.imageProviders?.().then(setProviders).catch(() => { /* 브라우저/미지원 */ });
-    api?.trex?.contentAvailable?.().then((c) => { setContentEngines(c); setAiContent(c.agy || c.codex); }).catch(() => { /* 브라우저/미지원 */ });
+    api?.trex?.imageProviders?.()
+      .then((value) => {
+        setProviders({ codex: value?.codex === true, gemini: value?.gemini === true });
+      })
+      .catch(() => { /* 브라우저/미지원 */ });
+    api?.trex?.contentAvailable?.()
+      .then((value) => {
+        const available = { agy: value?.agy === true, codex: value?.codex === true };
+        setContentEngines(available);
+        setAiContent(available.agy || available.codex);
+      })
+      .catch(() => { /* 브라우저/미지원 */ });
   }, []);
   const [deck, setDeck] = useState<TrexDeck | null>(null);
+  // AI 콘텐츠 생성이 시도됐으나 실패해 스켈레톤으로 폴백했을 때의 사유 — 배너로 명확히 알리고 재시도 제공.
+  // (조용히 프롬프트를 제목으로 박은 스켈레톤을 완성본처럼 보여주던 "장난하나" 버그의 UX 보정.)
+  const [contentError, setContentError] = useState<{ reason: string; text: string; count: number } | null>(null);
   const [recents, setRecents] = useState<TrexDeck[]>([]);
   const [revealed, setRevealed] = useState(0);
   const [activeSlide, setActiveSlide] = useState(0);
@@ -171,6 +208,21 @@ export default function TrexPage() {
       /* ignore */
     }
   }, []);
+
+  // 최근 작업(덱) 삭제 — recents에서 제거 + 영속. 현재 열려있는 덱이면 홈으로.
+  const deleteRecent = useCallback(
+    (id: string) => {
+      persistRecents(recents.filter((r) => r.id !== id));
+      setDeck((cur) => {
+        if (cur && cur.id === id) {
+          setView("home");
+          return null;
+        }
+        return cur;
+      });
+    },
+    [persistRecents, recents],
+  );
 
   const routedMode = modeOverride ?? routeMode(prompt || EXAMPLE);
   const routedStyle = routeStyle(prompt || EXAMPLE); // 주제 자동 라우팅(항상 StyleId|null — Auto 라벨 표시용)
@@ -243,6 +295,7 @@ export default function TrexPage() {
       const gc = ipc()?.trex?.generateContent;
       if (aiContent && gc) {
         setDeck(null);
+        setContentError(null);
         setView("generating");
         setAiWriting(true);
         setAgentJobs([]);
@@ -250,16 +303,24 @@ export default function TrexPage() {
         const withImages = imageModel !== "none";
         let d: TrexDeck;
         let contentOk = false;
+        let failReason: string | null = null;
         try {
           const r = await gc({ topic: p, count: n, mode: modeOverride ?? undefined, sources: sourcesText || undefined });
           const parsed = r?.ok && r.text ? parseDeckContent(r.text) : null;
           contentOk = !!parsed;
+          if (!parsed) failReason = r?.reason || "parse-failed";
           d = parsed ? buildDeckFromContent({ ...parsed, genre: gArg ?? parsed.genre }, gFmt, locale, styleId, withImages) : generateDeck(p, modeOverride ?? undefined, n, gFmt, locale, styleId, withImages, gArg);
         } catch {
+          failReason = "exception";
           d = generateDeck(p, modeOverride ?? undefined, n, gFmt, locale, styleId, withImages, gArg);
         }
         patchJob({ key: "content", label: ko ? "콘텐츠 에이전트 — 카피·수치 작성" : "Content agent — writing copy & figures", status: contentOk ? "done" : "failed", engine: contentOk ? "agy/codex" : undefined });
         setAiWriting(false);
+        // 콘텐츠 생성이 시도됐는데 실패했으면(런타임은 있으나 산출/파싱 실패), 스켈레톤을 완성본으로
+        // 위장하지 않고 배너로 알린다. 런타임 자체가 없으면(no-llm-runtime) 스켈레톤이 정상 폴백이라 조용히 둔다.
+        if (!contentOk && failReason && failReason !== "no-llm-runtime") {
+          setContentError({ reason: failReason, text, count: n });
+        }
         revealDeck(d);
       } else {
         revealDeck(generateDeck(p, modeOverride ?? undefined, n, gFmt, locale, styleId, imageModel !== "none", gArg));
@@ -463,10 +524,12 @@ export default function TrexPage() {
           recents={recents}
           sources={sources}
           attaching={attaching}
+          attachmentRejected={attachmentRejected}
           onAddFiles={addFiles}
           onRemoveSource={removeSource}
           onGenerate={() => runGenerate(prompt, count)}
           onOpen={(d) => { setDeck(d); setActiveSlide(0); setView("view"); }}
+          onDeleteRecent={deleteRecent}
         />
       )}
 
@@ -481,6 +544,32 @@ export default function TrexPage() {
       {(view === "generating" || view === "view") && deck && (
         <div style={scrollStage}>
           <div style={{ maxWidth: 900, margin: "0 auto", display: "flex", flexDirection: "column", gap: 22 }}>
+            {contentError && view !== "generating" && (
+              <div style={contentErrorBanner} role="alert">
+                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                  <strong style={{ fontSize: 13, color: "var(--rd-ink)" }}>
+                    {ko ? "AI가 기획안을 반영하지 못했어요" : "AI could not apply your brief"}
+                  </strong>
+                  <span style={{ fontSize: 12, color: "var(--rd-ink-3)", lineHeight: 1.5 }}>
+                    {ko
+                      ? "콘텐츠 생성이 실패해 기본 골격만 표시됩니다. 첨부한 소스는 그대로 있어요 — 다시 시도하세요."
+                      : "Content generation failed, so only the skeleton is shown. Your attached sources are kept — try again."}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  style={contentErrorRetryBtn}
+                  onClick={() => {
+                    const t = contentError.text;
+                    const c = contentError.count;
+                    setContentError(null);
+                    void runGenerate(t, c);
+                  }}
+                >
+                  {ko ? "다시 시도" : "Retry"}
+                </button>
+              </div>
+            )}
             {view === "generating" && (
               <div style={genHint}>
                 <span className="trex-spin" style={spinner} /> {ko ? "T-rex가 만드는 중" : "T-rex is building"} · {MODE_THEMES[deck.mode][ko ? "labelKo" : "labelEn"]} · {deck.slides.length}{ko ? "장" : ""}
@@ -642,7 +731,7 @@ function patchSlideBg(deck: TrexDeck, slideId: string, src: string): TrexDeck {
 
 /* ─────────────── 랜딩 ─────────────── */
 function Home({
-  ko, prompt, setPrompt, count, setCount, formatId, setFormatId, genre, setGenre, imageModel, setImageModel, providers, aiContent, setAiContent, contentEngines, routedMode, modeOverride, setModeOverride, routedStyle, styleOverride, setStyleOverride, recents, sources, attaching, onAddFiles, onRemoveSource, onGenerate, onOpen,
+  ko, prompt, setPrompt, count, setCount, formatId, setFormatId, genre, setGenre, imageModel, setImageModel, providers, aiContent, setAiContent, contentEngines, routedMode, modeOverride, setModeOverride, routedStyle, styleOverride, setStyleOverride, recents, sources, attaching, attachmentRejected, onAddFiles, onRemoveSource, onGenerate, onOpen, onDeleteRecent,
 }: {
   ko: boolean; prompt: string; setPrompt: (v: string) => void; count: number; setCount: (n: number) => void;
   formatId: string; setFormatId: (id: string) => void;
@@ -652,11 +741,13 @@ function Home({
   routedMode: ArtMode; modeOverride: ArtMode | null; setModeOverride: (m: ArtMode | null) => void;
   routedStyle: StyleId | null; styleOverride: string | null; setStyleOverride: (s: string | null) => void;
   recents: TrexDeck[];
-  sources: { name: string; text: string; kind: "text" | "image" | "other" }[];
+  sources: TrexSource[];
   attaching: boolean;
+  attachmentRejected: string[];
   onAddFiles: (files: File[]) => void;
   onRemoveSource: (name: string) => void;
   onGenerate: () => void; onOpen: (d: TrexDeck) => void;
+  onDeleteRecent: (id: string) => void;
 }) {
   return (
     <div style={homeWrap}>
@@ -679,17 +770,17 @@ function Home({
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onGenerate(); } }}
-            placeholder={ko ? `예: ${EXAMPLE} — 또는 파일을 끌어다 놓아 소스로` : `e.g. ${EXAMPLE_EN} — or drop files to use as source`}
+            placeholder={ko ? `예: ${EXAMPLE} — 또는 텍스트 파일을 소스로 추가` : `e.g. ${EXAMPLE_EN} — or add text files as sources`}
             rows={2}
             style={promptInput}
             aria-label={ko ? "발표 주제" : "Deck prompt"}
           />
-          <label style={attachBtn} title={ko ? "파일 첨부 (md·txt·doc·png 등)" : "Attach files (md, txt, doc, png…)"}>
+          <label style={attachBtn} title={ko ? "텍스트 소스 첨부 (md·txt·csv·json 등)" : "Attach text sources (md, txt, csv, json…)"}>
             <IconFileUp size={17} />
             <input
               type="file"
               multiple
-              accept=".md,.markdown,.txt,.text,.json,.csv,.tsv,.log,.tex,.rtf,.html,.htm,.yaml,.yml,.xml,.srt,.vtt,.doc,.docx,.pdf,.png,.jpg,.jpeg,.gif,.webp,.svg,.avif"
+              accept={TREX_TEXT_ACCEPT}
               onChange={(e) => { const files = Array.from(e.target.files ?? []); if (files.length) onAddFiles(files); e.currentTarget.value = ""; }}
               style={{ display: "none" }}
             />
@@ -703,13 +794,36 @@ function Home({
           <div style={sourceChips}>
             {attaching && <span style={sourceChipMuted}>{ko ? "읽는 중…" : "Reading…"}</span>}
             {sources.map((s) => (
-              <span key={s.name} style={sourceChip} title={s.kind === "text" ? `${s.text.length.toLocaleString()}${ko ? "자" : " chars"}` : s.kind}>
+              <span key={s.name} data-testid="trex-source-chip" style={sourceChip} title={`${s.text.length.toLocaleString()}${ko ? "자" : " chars"}`}>
                 <IconFileUp size={11} />
                 <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span>
-                {s.kind !== "text" && <em style={{ color: "var(--muted-deep)", fontStyle: "normal", fontSize: 10 }}>{s.kind === "image" ? (ko ? "이미지" : "img") : (ko ? "이름만" : "name")}</em>}
                 <button type="button" onClick={() => onRemoveSource(s.name)} style={sourceChipX} aria-label={ko ? "제거" : "Remove"}>×</button>
               </span>
             ))}
+          </div>
+        )}
+
+        {attachmentRejected.length > 0 && (
+          <div
+            role="alert"
+            data-testid="trex-attachment-error"
+            style={{
+              marginTop: 9,
+              padding: "9px 12px",
+              border: "1px solid rgba(185, 92, 48, .35)",
+              borderRadius: 10,
+              background: "rgba(255, 239, 229, .72)",
+              color: "var(--ink-soft)",
+              fontSize: 11.5,
+              lineHeight: 1.55,
+            }}
+          >
+            {ko
+              ? "PDF·Word·이미지 등 현재 본문을 읽을 수 없는 파일은 소스로 추가하지 않습니다. .txt, .md, .csv, .json 같은 텍스트 파일로 변환해 주세요."
+              : "PDF, Word, images, and other files whose contents cannot be read are not added as sources. Convert them to text such as .txt, .md, .csv, or .json."}
+            <div style={{ marginTop: 3, fontFamily: "var(--font-mono)", overflowWrap: "anywhere" }}>
+              {ko ? "제외: " : "Not added: "}{attachmentRejected.join(", ")}
+            </div>
           </div>
         )}
 
@@ -737,7 +851,7 @@ function Home({
           <span style={dividerDot} />
           <span style={{ fontSize: 11.5, color: "var(--muted-deep)", fontWeight: 700 }}>{ko ? "장르" : "Genre"}</span>
           <button type="button" onClick={() => setGenre(null)} style={modeChip(genre === null)} title={ko ? "일반 덱(역할 기반 자동 레이아웃)" : "General deck"}>{ko ? "일반" : "General"}</button>
-          {([["pitch", ko ? "피치" : "Pitch", ko ? "저밀도 · 차트+그림 스토리" : "Low-density story"], ["report", ko ? "리포트" : "Report", ko ? "고밀도 · 고정 레이아웃" : "High-density fixed"], ["cardnews", ko ? "카드뉴스" : "Cardnews", ko ? "인스타 캐러셀 4:5 · 이미지 중심" : "IG carousel 4:5"], ["advertise", "advertise", ko ? "포스터 · 단일 오퍼 9:16" : "Poster · single offer"]] as [DeckGenre, string, string][]).map(([g, lab, hint]) => (
+          {([["pitch", ko ? "피치" : "Pitch", ko ? "저밀도 · 차트+그림 스토리" : "Low-density story"], ["report", ko ? "리포트" : "Report", ko ? "고밀도 · 고정 레이아웃" : "High-density fixed"], ["cardnews", ko ? "카드뉴스" : "Cardnews", ko ? "인스타 캐러셀 4:5 · 이미지 중심" : "IG carousel 4:5"], ["advertise", ko ? "광고" : "Advertise", ko ? "포스터 · 단일 오퍼 9:16" : "Poster · single offer"]] as [DeckGenre, string, string][]).map(([g, lab, hint]) => (
             <button key={g} type="button" onClick={() => setGenre(g)} style={modeChip(genre === g)} title={hint}>{lab}</button>
           ))}
           <span style={dividerDot} />
@@ -814,13 +928,28 @@ function Home({
             <div style={recentsHead}>{ko ? "최근 작업" : "Recent"}</div>
             <div style={recentsGrid}>
               {recents.slice(0, 8).map((d) => (
-                <button key={d.id} type="button" onClick={() => onOpen(d)} className="trex-recent" style={recentCard}>
-                  <span style={{ ...recentThumb, aspectRatio: formatRatio(formatById(d.formatId)), ...bgStyle(d.slides[0]?.bg, d.accent) }}>
-                    <span style={recentMode}>{MODE_THEMES[d.mode][ko ? "labelKo" : "labelEn"]} · {d.slides.length}</span>
-                  </span>
-                  <span style={recentTitle}>{d.title}</span>
-                  <span style={recentMeta}>{new Date(d.createdAt).toLocaleDateString(ko ? "ko-KR" : "en-US")}</span>
-                </button>
+                <div key={d.id} className="trex-recent" style={recentCardWrap}>
+                  <button type="button" onClick={() => onOpen(d)} style={recentCard}>
+                    <span style={{ ...recentThumb, aspectRatio: formatRatio(formatById(d.formatId)), ...bgStyle(d.slides[0]?.bg, d.accent) }}>
+                      <span style={recentMode}>{MODE_THEMES[d.mode][ko ? "labelKo" : "labelEn"]} · {d.slides.length}</span>
+                    </span>
+                    <span style={recentTitle}>{d.title}</span>
+                    <span style={recentMeta}>{new Date(d.createdAt).toLocaleDateString(ko ? "ko-KR" : "en-US")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="trex-recent-del"
+                    style={recentDelBtn}
+                    title={ko ? "삭제" : "Delete"}
+                    aria-label={ko ? "이 작업 삭제" : "Delete this deck"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (window.confirm(ko ? `"${d.title}" 작업을 삭제할까요?` : `Delete "${d.title}"?`)) onDeleteRecent(d.id);
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
               ))}
             </div>
           </div>
@@ -843,6 +972,43 @@ function Editor({
 }) {
   const slide = deck.slides[activeSlide];
   const selBlock = selected ? slide.blocks.find((b) => b.id === selected) ?? null : null;
+
+  // 선택 요소 LLM 수정(select-to-edit) — 자연어 지시로 블록 텍스트를 다시 쓴다.
+  const [aiEdit, setAiEdit] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiErr, setAiErr] = useState(false);
+  // 블록의 주 텍스트 필드 판별(text > value > label) — refine 결과를 같은 필드로 되돌린다.
+  const aiField: "text" | "value" | "label" | null = selBlock
+    ? typeof (selBlock as { text?: unknown }).text === "string"
+      ? "text"
+      : typeof (selBlock as { value?: unknown }).value === "string"
+        ? "value"
+        : typeof (selBlock as { label?: unknown }).label === "string"
+          ? "label"
+          : null
+    : null;
+  const runAiEdit = async () => {
+    if (!selBlock || !aiField || !aiEdit.trim() || aiBusy) return;
+    const refine = ipc()?.trex?.refineText;
+    if (!refine) return;
+    setAiBusy(true);
+    setAiErr(false);
+    try {
+      const current = String((selBlock as unknown as Record<string, unknown>)[aiField] ?? "");
+      const context = `${slide.blocks.map((b) => (b as { text?: string }).text || (b as { value?: string }).value || "").filter(Boolean).join(" · ")}`;
+      const r = await refine({ current, instruction: aiEdit.trim(), context });
+      if (r?.ok && typeof r.text === "string" && r.text.trim()) {
+        patchBlock(slide.id, selBlock.id, { [aiField]: r.text.trim() } as Partial<TrexBlock>);
+        setAiEdit("");
+      } else {
+        setAiErr(true);
+      }
+    } catch {
+      setAiErr(true);
+    } finally {
+      setAiBusy(false);
+    }
+  };
 
   const onDrag = (id: string, dx: number, dy: number, mode: "move" | "resize") => {
     const b = slide.blocks.find((x) => x.id === id);
@@ -915,6 +1081,30 @@ function Editor({
             </button>
             <button type="button" onClick={duplicateBlock} style={{ ...ctrlWide, marginTop: 8 }}>{ko ? "블록 복제 (⌘D)" : "Duplicate (⌘D)"}</button>
             <button type="button" onClick={() => removeBlock(slide.id, selBlock.id)} style={{ ...ctrlWide, marginTop: 8, color: "#C0202A" }}>{ko ? "블록 삭제" : "Delete block"}</button>
+
+            {aiField && (
+              <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px dashed var(--paper-edge)" }}>
+                <span style={railLabel}>{ko ? "✦ AI로 수정" : "✦ Edit with AI"}</span>
+                <textarea
+                  value={aiEdit}
+                  onChange={(e) => setAiEdit(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault();
+                      void runAiEdit();
+                    }
+                  }}
+                  placeholder={ko ? "예: 더 임팩트 있게 · 수치를 강조 · 한 줄로 줄여" : "e.g. make it punchier · emphasize the number · shorten to one line"}
+                  rows={2}
+                  disabled={aiBusy}
+                  style={aiEditInput}
+                />
+                <button type="button" onClick={() => void runAiEdit()} disabled={aiBusy || !aiEdit.trim()} style={{ ...ctrlWide, marginTop: 8, opacity: aiBusy || !aiEdit.trim() ? 0.55 : 1 }}>
+                  {aiBusy ? (ko ? "AI가 고치는 중…" : "AI editing…") : ko ? "이 요소 AI로 수정 (⌘↵)" : "Edit this element with AI (⌘↵)"}
+                </button>
+                {aiErr && <div style={{ marginTop: 6, fontSize: 11.5, color: "#C0202A" }}>{ko ? "수정 실패 — 다시 시도하세요." : "Edit failed — try again."}</div>}
+              </div>
+            )}
           </div>
         ) : null}
 
@@ -967,13 +1157,18 @@ const imageSelect: CSSProperties = { height: 30, border: "1px solid var(--paper-
 function modeChip(active: boolean): CSSProperties { return { border: `1px solid ${active ? "var(--accent)" : "var(--paper-edge)"}`, borderRadius: 999, padding: "6px 12px", fontSize: 12, fontWeight: 800, background: active ? "var(--fill-1)" : "var(--paper)", color: active ? "var(--accent)" : "var(--ink-soft)", cursor: "pointer" }; }
 const recentsHead: CSSProperties = { fontSize: 11, fontWeight: 900, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted-deep)", textAlign: "left", marginBottom: 12 };
 const recentsGrid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 };
-const recentCard: CSSProperties = { display: "flex", flexDirection: "column", gap: 8, padding: 10, border: "1px solid var(--paper-edge)", borderRadius: 12, background: "var(--paper)", textAlign: "left", cursor: "pointer" };
+const recentCardWrap: CSSProperties = { position: "relative" };
+const recentCard: CSSProperties = { display: "flex", flexDirection: "column", gap: 8, padding: 10, border: "1px solid var(--paper-edge)", borderRadius: 12, background: "var(--paper)", textAlign: "left", cursor: "pointer", width: "100%" };
+// 삭제 × — 평소엔 반투명, 카드 hover 시 또렷(CSS 아래 globals의 .trex-recent:hover .trex-recent-del).
+const recentDelBtn: CSSProperties = { position: "absolute", top: 6, right: 6, width: 22, height: 22, borderRadius: 6, border: "1px solid var(--paper-edge)", background: "color-mix(in srgb, var(--paper) 82%, transparent)", color: "var(--muted-deep)", fontSize: 15, lineHeight: 1, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", opacity: 0.55 };
 const recentThumb: CSSProperties = { position: "relative", aspectRatio: "16 / 9", borderRadius: 8, overflow: "hidden", display: "block" };
 const recentMode: CSSProperties = { position: "absolute", left: 8, bottom: 8, fontSize: 9.5, fontWeight: 800, color: "#fff", background: "rgba(0,0,0,.45)", padding: "2px 6px", borderRadius: 999 };
 const recentTitle: CSSProperties = { fontSize: 12.5, fontWeight: 700, color: "var(--ink)", lineHeight: 1.35, wordBreak: "keep-all", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" };
 const recentMeta: CSSProperties = { fontSize: 11, color: "var(--muted-deep)" };
 
 const scrollStage: CSSProperties = { flex: 1, minHeight: 0, overflowY: "auto", padding: "32px 28px 64px" };
+const contentErrorBanner: CSSProperties = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, padding: "12px 16px", borderRadius: 12, border: "1px solid color-mix(in srgb, var(--red-deep, #d4483b) 30%, var(--paper-edge))", background: "color-mix(in srgb, var(--red-deep, #d4483b) 7%, var(--paper))" };
+const contentErrorRetryBtn: CSSProperties = { flexShrink: 0, padding: "8px 16px", borderRadius: 9, border: "1px solid var(--accent)", background: "var(--accent)", color: "var(--paper)", fontSize: 12.5, fontWeight: 700, cursor: "pointer" };
 const genHint: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 9, alignSelf: "center", fontSize: 12.5, fontWeight: 800, color: "var(--muted-deep)", background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: 999, padding: "7px 14px", marginBottom: 4 };
 const spinner: CSSProperties = { width: 13, height: 13, borderRadius: "50%", border: "2px solid var(--paper-edge)", borderTopColor: "var(--accent)", display: "inline-block" };
 // 에이전트 활동 피드 — 우하단 고정 미니 패널(생성 병렬 작업의 라이브 상태).
@@ -1004,3 +1199,4 @@ const paletteBtn: CSSProperties = { border: "1px solid var(--paper-edge)", borde
 const selName: CSSProperties = { fontSize: 14, fontWeight: 800, color: "var(--ink)", marginTop: 6 };
 const ctrlBtn: CSSProperties = { flex: 1, border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", color: "var(--ink)", fontSize: 12, fontWeight: 800, padding: "7px 0", cursor: "pointer" };
 const ctrlWide: CSSProperties = { width: "100%", border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", fontSize: 12, fontWeight: 800, padding: "8px 0", cursor: "pointer" };
+const aiEditInput: CSSProperties = { width: "100%", marginTop: 8, padding: "8px 10px", border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper)", color: "var(--ink)", fontSize: 12, fontFamily: "inherit", resize: "vertical", boxSizing: "border-box" };

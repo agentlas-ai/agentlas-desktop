@@ -63,44 +63,64 @@ function buildPrompt(topic: string, count: number, mode?: string, sources?: stri
     .join("\n");
 }
 
-function runViaStdin(bin: string, args: string[], prompt: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<string | null> {
+function runViaStdin(
+  bin: string,
+  args: string[],
+  prompt: string,
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<string | null> {
   return new Promise((resolve) => {
     // 청크를 Buffer로 모아 한 번에 UTF-8 디코딩한다. 청크마다 toString하면
     // 멀티바이트 문자(한글=3바이트)가 청크 경계에서 쪼개져 U+FFFD로 깨진다.
     const chunks: Buffer[] = [];
     const collected = () => Buffer.concat(chunks).toString("utf8").trim();
     let done = false;
-    const finish = (v: string | null) => {
-      if (done) return;
-      done = true;
-      resolve(v);
-    };
-    let child;
-    try {
-      child = spawn(bin, args, { env });
-    } catch {
-      finish(null);
-      return;
-    }
-    const timer = setTimeout(() => {
+    let child: ReturnType<typeof spawn> | undefined;
+    const kill = () => {
       try {
         child?.kill("SIGKILL");
       } catch {
         /* ignore */
       }
+    };
+    const finish = (v: string | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(v);
+    };
+    // 레이스에서 진 엔진은 abort로 즉시 죽인다 — 승자가 정해졌는데 140s 타임아웃까지 살아있는 낭비 방지.
+    const onAbort = () => {
+      kill();
+      finish(null);
+    };
+    if (signal?.aborted) {
+      resolve(null);
+      return;
+    }
+    try {
+      child = spawn(bin, args, { env });
+    } catch {
+      resolve(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      kill();
       finish(collected() || null);
     }, timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout?.on("data", (c: Buffer) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
-    child.on("close", () => {
-      clearTimeout(timer);
-      finish(collected() || null);
-    });
-    child.on("error", () => {
-      clearTimeout(timer);
-      finish(null);
-    });
+    child.on("close", () => finish(collected() || null));
+    child.on("error", () => finish(null));
     writeStdin(child, prompt);
   });
+}
+
+function looksLikeDeckJson(out: string | null): boolean {
+  return !!out && out.includes("{") && out.includes("}");
 }
 
 export async function generateDeckContent(topic: string, count: number, mode?: string, sources?: string): Promise<TrexContentResult> {
@@ -109,22 +129,138 @@ export async function generateDeckContent(topic: string, count: number, mode?: s
   if (!clean && !src) return { ok: false, reason: "empty-topic" };
   const prompt = buildPrompt(clean || "(see source material)", count, mode, src);
 
-  // 1) Antigravity CLI(agy) — 깔끔한 JSON. 워크스페이스 신뢰 우회 + 헤드리스 --print + stdin.
   const agy = resolveBin("agy", [path.join(os.homedir(), ".local/bin/agy"), "/opt/homebrew/bin/agy", "/usr/local/bin/agy"]);
-  if (agy) {
-    const env = { ...process.env, GEMINI_CLI_TRUST_WORKSPACE: "true" };
-    const out = await runViaStdin(agy, ["--print", ""], prompt, env, 140_000);
-    if (out && out.includes("{") && out.includes("}")) return { ok: true, text: out, engine: "agy" };
-  }
-
-  // 2) Codex — exec 헤드리스. 출력에 잡음이 섞일 수 있어 렌더러가 {…} 구간만 추출한다.
   const codex = resolveBin("codex", [path.join(os.homedir(), ".local/bin/codex"), "/opt/homebrew/bin/codex", "/usr/local/bin/codex"]);
-  if (codex) {
-    const out = await runViaStdin(codex, ["exec", "-s", "read-only", "--skip-git-repo-check", "-"], prompt, process.env, 140_000);
-    if (out && out.includes("{") && out.includes("}")) return { ok: true, text: out, engine: "codex" };
-  }
 
-  return { ok: false, reason: "no-llm-runtime" };
+  type Engine = { engine: "agy" | "codex"; run: (signal: AbortSignal) => Promise<string | null> };
+  const engines: Engine[] = [];
+  // agy(Antigravity) — 깔끔한 JSON. 워크스페이스 신뢰 우회 + 헤드리스 --print + stdin.
+  if (agy)
+    engines.push({
+      engine: "agy",
+      run: (signal) => runViaStdin(agy, ["--print", ""], prompt, { ...process.env, GEMINI_CLI_TRUST_WORKSPACE: "true" }, 140_000, signal),
+    });
+  // codex — exec 헤드리스. 출력에 잡음이 섞일 수 있어 렌더러가 {…} 구간만 추출한다.
+  if (codex)
+    engines.push({
+      engine: "codex",
+      run: (signal) => runViaStdin(codex, ["exec", "-s", "read-only", "--skip-git-repo-check", "-"], prompt, process.env, 140_000, signal),
+    });
+  if (!engines.length) return { ok: false, reason: "no-llm-runtime" };
+
+  // 병렬 레이스: agy·codex를 동시에 돌려 먼저 유효 JSON을 내는 쪽을 채택하고 나머지는 abort.
+  // (예전엔 직렬 agy(≤140s)→codex(≤140s)라 한 엔진이 빈 결과로 140s를 통째로 먹으면 최대 280s가 걸려
+  //  사용자가 못 기다리고 스켈레톤 폴백을 최종본으로 오인했다. 레이스는 느린/실패 엔진에 안 묶인다.)
+  const controller = new AbortController();
+  return await new Promise<TrexContentResult>((resolve) => {
+    let settled = false;
+    let pending = engines.length;
+    for (const e of engines) {
+      e.run(controller.signal)
+        .then((out) => {
+          if (settled) return;
+          if (looksLikeDeckJson(out)) {
+            settled = true;
+            controller.abort(); // 진 엔진 즉시 종료
+            resolve({ ok: true, text: out as string, engine: e.engine });
+            return;
+          }
+          pending -= 1;
+          if (pending === 0) {
+            settled = true;
+            resolve({ ok: false, reason: "no-parseable-output" });
+          }
+        })
+        .catch(() => {
+          if (settled) return;
+          pending -= 1;
+          if (pending === 0) {
+            settled = true;
+            resolve({ ok: false, reason: "engine-error" });
+          }
+        });
+    }
+  });
+}
+
+export interface TrexRefineResult {
+  ok: boolean;
+  text?: string;
+  reason?: string;
+}
+
+function buildRefinePrompt(current: string, instruction: string, context?: string): string {
+  return [
+    "You rewrite ONE slide text element. Output ONLY the rewritten text — no JSON, no quotes, no markdown, no code fences, no prose before or after, no explanation.",
+    "Keep it the SAME language as the current text. Keep it tight enough to fit a slide (one short line/phrase unless the instruction asks otherwise).",
+    "You MAY wrap the single most decision-critical phrase in **double asterisks** for emphasis (at most one).",
+    context ? `SLIDE CONTEXT (for tone/consistency, do not repeat): ${context.slice(0, 600)}` : "",
+    `CURRENT TEXT:\n${current.slice(0, 1200)}`,
+    `INSTRUCTION: ${instruction.slice(0, 500)}`,
+    "Rewritten text:",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * 선택한 슬라이드 텍스트 요소를 자연어 지시로 LLM이 다시 쓴다(사이트 스튜디오식 select-to-edit).
+ * JSON이 아니라 순수 텍스트를 반환 — 렌더러가 그대로 블록에 반영한다. agy·codex 병렬 레이스.
+ */
+export async function refineTrexText(current: string, instruction: string, context?: string): Promise<TrexRefineResult> {
+  const cur = (current || "").trim();
+  const ins = (instruction || "").trim();
+  if (!ins) return { ok: false, reason: "empty-instruction" };
+  const prompt = buildRefinePrompt(cur, ins, context);
+
+  const agy = resolveBin("agy", [path.join(os.homedir(), ".local/bin/agy"), "/opt/homebrew/bin/agy", "/usr/local/bin/agy"]);
+  const codex = resolveBin("codex", [path.join(os.homedir(), ".local/bin/codex"), "/opt/homebrew/bin/codex", "/usr/local/bin/codex"]);
+  type Engine = { run: (signal: AbortSignal) => Promise<string | null> };
+  const engines: Engine[] = [];
+  if (agy) engines.push({ run: (s) => runViaStdin(agy, ["--print", ""], prompt, { ...process.env, GEMINI_CLI_TRUST_WORKSPACE: "true" }, 90_000, s) });
+  if (codex) engines.push({ run: (s) => runViaStdin(codex, ["exec", "-s", "read-only", "--skip-git-repo-check", "-"], prompt, process.env, 90_000, s) });
+  if (!engines.length) return { ok: false, reason: "no-llm-runtime" };
+
+  const controller = new AbortController();
+  const clean = (out: string | null): string | null => {
+    if (!out) return null;
+    // 코드펜스/따옴표/라벨 잡음 제거 후 첫 유효 줄들을 취한다.
+    let t = out.replace(/```[a-z]*|```/gi, "").trim();
+    t = t.replace(/^(rewritten text|수정(된)?\s*텍스트)\s*[:：]\s*/i, "").trim();
+    if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) t = t.slice(1, -1).trim();
+    return t || null;
+  };
+
+  return await new Promise<TrexRefineResult>((resolve) => {
+    let settled = false;
+    let pending = engines.length;
+    for (const e of engines) {
+      e.run(controller.signal)
+        .then((out) => {
+          if (settled) return;
+          const t = clean(out);
+          if (t) {
+            settled = true;
+            controller.abort();
+            resolve({ ok: true, text: t });
+            return;
+          }
+          pending -= 1;
+          if (pending === 0) {
+            settled = true;
+            resolve({ ok: false, reason: "no-output" });
+          }
+        })
+        .catch(() => {
+          if (settled) return;
+          pending -= 1;
+          if (pending === 0) {
+            settled = true;
+            resolve({ ok: false, reason: "engine-error" });
+          }
+        });
+    }
+  });
 }
 
 /** 드롭다운/상태 표시용 — 내용 생성 LLM 가용 여부. */

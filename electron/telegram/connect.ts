@@ -130,6 +130,14 @@ const BOTFATHER_WEB_URL = "https://web.telegram.org/k/#@BotFather";
 const pollers = new Map<string, Poller>();
 let reconcileInFlight: Promise<void> | null = null;
 const TELEGRAM_INVOCATION_TIMEOUT_MS = 15 * 60 * 1000;
+const TELEGRAM_REQUEST_TIMEOUT_MS = readPositiveTimeoutMs(
+  process.env.AGENTLAS_TELEGRAM_REQUEST_TIMEOUT_MS,
+  30_000,
+);
+const TELEGRAM_LONG_POLL_GRACE_MS = readPositiveTimeoutMs(
+  process.env.AGENTLAS_TELEGRAM_LONG_POLL_GRACE_MS,
+  10_000,
+);
 const TELEGRAM_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 const TOKEN_RE = /\b\d{8,12}:[A-Za-z0-9_-]{30,}\b/g;
 
@@ -261,6 +269,13 @@ type TelegramInvocationMode = {
 };
 
 class TelegramInvocationTimeoutError extends Error {}
+class TelegramRequestTimeoutError extends Error {}
+
+function readPositiveTimeoutMs(raw: string | undefined, fallback: number): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.max(10, Math.floor(parsed));
+}
 
 function tg(key: TelegramCopyKey, vars: Record<string, string | number> = {}, localeOverride?: "ko" | "en"): string {
   const locale = localeOverride ?? (currentUiLocale() === "ko" ? "ko" : "en");
@@ -281,6 +296,28 @@ function nowIso(): string {
 
 function secretKey(bindingId: string): string {
   return `${TELEGRAM_SECRET_SCOPE}:${bindingId}`;
+}
+
+/**
+ * Keychain and SQLite cannot share one physical transaction. Commit the secret first,
+ * publish the binding row only after that succeeds, and compensate the secret if the
+ * database write fails. This keeps list/restart paths from ever observing a row whose
+ * token_saved=1 points at a missing Keychain entry.
+ */
+async function commitBindingWithSecret(id: string, token: string, insertRow: () => void): Promise<void> {
+  const key = secretKey(id);
+  try {
+    await setSecret(key, token);
+    insertRow();
+  } catch (err) {
+    try {
+      await deleteSecret(key);
+    } catch {
+      // Preserve the original failure. A failed insert cannot expose an orphaned secret
+      // through the UI because no binding row exists.
+    }
+    throw err;
+  }
 }
 
 function tokenKey(token: string): string {
@@ -400,17 +437,56 @@ async function telegramApi<T>(
   payload: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<T> {
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-    signal,
+  const longPollSeconds = method === "getUpdates" && typeof payload.timeout === "number"
+    ? Math.max(0, payload.timeout)
+    : 0;
+  const requestTimeoutMs = Math.max(
+    TELEGRAM_REQUEST_TIMEOUT_MS,
+    longPollSeconds * 1000 + (longPollSeconds > 0 ? TELEGRAM_LONG_POLL_GRACE_MS : 0),
+  );
+  const controller = new AbortController();
+  let rejectAbort: (reason: unknown) => void = () => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
   });
-  const json = await res.json().catch(() => null) as { ok?: boolean; result?: T; description?: string } | null;
-  if (!res.ok || !json?.ok) {
-    throw new Error(json?.description || `Telegram ${method} failed (${res.status})`);
+  const abort = (reason: unknown) => {
+    if (controller.signal.aborted) return;
+    const error = reason instanceof Error ? reason : new Error(String(reason || "Telegram request aborted"));
+    controller.abort(error);
+    // Promise.race makes the deadline finite even for a non-compliant fetch mock/adapter
+    // that ignores AbortSignal. Native fetch still receives the abort for socket cleanup.
+    rejectAbort(error);
+  };
+  const onOperationAbort = () => abort(signal?.reason);
+  if (signal?.aborted) onOperationAbort();
+  else signal?.addEventListener("abort", onOperationAbort, { once: true });
+  const timeoutError = new TelegramRequestTimeoutError(
+    `Telegram ${method} request timed out after ${requestTimeoutMs}ms`,
+  );
+  const timer = setTimeout(() => abort(timeoutError), requestTimeoutMs);
+
+  try {
+    const request = fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const res = await Promise.race([request, aborted]);
+    // Keep the same deadline while consuming the body. fetch() resolves at headers,
+    // so clearing the timer before json() would still allow a stalled body forever.
+    const json = await Promise.race([
+      res.json().catch(() => null),
+      aborted,
+    ]) as { ok?: boolean; result?: T; description?: string } | null;
+    if (!res.ok || !json?.ok) {
+      throw new Error(json?.description || `Telegram ${method} failed (${res.status})`);
+    }
+    return json.result as T;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onOperationAbort);
   }
-  return json.result as T;
 }
 
 async function verifyBotToken(token: string): Promise<TelegramUser> {
@@ -524,24 +600,25 @@ export async function startTelegramConnection(input: TelegramConnectStartInput):
   const fingerprint = tokenKey(token);
   const id = randomUUID();
   const now = nowIso();
-  getDb()
-    .prepare(
-      `INSERT INTO telegram_bindings
-       (id, target_kind, target_id, bot_user_id, bot_username, bot_display_name, status, enabled, token_saved, token_fingerprint, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'waiting_for_chat', 1, 1, ?, ?, ?)`,
-    )
-    .run(
-      id,
-      input.targetKind,
-      input.targetId,
-      me.id,
-      me.username ?? null,
-      me.first_name ?? null,
-      fingerprint,
-      now,
-      now,
-    );
-  await setSecret(secretKey(id), token);
+  await commitBindingWithSecret(id, token, () => {
+    getDb()
+      .prepare(
+        `INSERT INTO telegram_bindings
+         (id, target_kind, target_id, bot_user_id, bot_username, bot_display_name, status, enabled, token_saved, token_fingerprint, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'waiting_for_chat', 1, 1, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.targetKind,
+        input.targetId,
+        me.id,
+        me.username ?? null,
+        me.first_name ?? null,
+        fingerprint,
+        now,
+        now,
+      );
+  });
   await telegramApi<boolean>(token, "deleteWebhook", { drop_pending_updates: false }).catch(() => false);
   await reconcileTelegramWorkers();
   const binding = await toBinding(getBindingRow(id) as TelegramBindingRow);
@@ -563,24 +640,25 @@ export async function cloneTelegramConnection(input: TelegramConnectCloneInput):
   const fingerprint = tokenKey(token);
   const id = randomUUID();
   const now = nowIso();
-  getDb()
-    .prepare(
-      `INSERT INTO telegram_bindings
-       (id, target_kind, target_id, bot_user_id, bot_username, bot_display_name, status, enabled, token_saved, token_fingerprint, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'waiting_for_chat', 1, 1, ?, ?, ?)`,
-    )
-    .run(
-      id,
-      targetKind,
-      targetId,
-      me.id,
-      me.username ?? source.bot_username ?? null,
-      me.first_name ?? source.bot_display_name ?? null,
-      fingerprint,
-      now,
-      now,
-    );
-  await setSecret(secretKey(id), token);
+  await commitBindingWithSecret(id, token, () => {
+    getDb()
+      .prepare(
+        `INSERT INTO telegram_bindings
+         (id, target_kind, target_id, bot_user_id, bot_username, bot_display_name, status, enabled, token_saved, token_fingerprint, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'waiting_for_chat', 1, 1, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        targetKind,
+        targetId,
+        me.id,
+        me.username ?? source.bot_username ?? null,
+        me.first_name ?? source.bot_display_name ?? null,
+        fingerprint,
+        now,
+        now,
+      );
+  });
   getDb()
     .prepare("UPDATE telegram_bindings SET token_saved = 1, token_fingerprint = ?, updated_at = ? WHERE id = ?")
     .run(fingerprint, nowIso(), source.id);

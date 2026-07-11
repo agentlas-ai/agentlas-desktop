@@ -46,7 +46,7 @@ const DICT = {
     errCliMissingGemini:
       "gemini CLI를 찾지 못했습니다. `npm i -g @google/gemini-cli` 후 다시 시도하세요.",
     errCliMissingGrok:
-      "grok CLI를 찾지 못했습니다. `npm i -g grok-dev` 후 다시 시도하세요.",
+      "공식 xAI Grok CLI를 찾지 못했습니다. `curl -fsSL https://x.ai/cli/install.sh | bash` 후 다시 시도하세요.",
     errOllamaUnreachable:
       "로컬 Ollama 서버에 연결하지 못했습니다 ({host}). `ollama serve`가 실행 중인지 확인하세요.",
     errOllamaNoModel:
@@ -96,7 +96,7 @@ const DICT = {
     errCliMissingCodex: "codex CLI not found. Install with `npm i -g @openai/codex` and try again.",
     errCliMissingGemini:
       "gemini CLI not found. Install with `npm i -g @google/gemini-cli` and try again.",
-    errCliMissingGrok: "grok CLI not found. Install with `npm i -g grok-dev` and try again.",
+    errCliMissingGrok: "Official xAI Grok CLI not found. Install with `curl -fsSL https://x.ai/cli/install.sh | bash` and try again.",
     errOllamaUnreachable:
       "Couldn't reach the local Ollama server ({host}). Make sure `ollama serve` is running.",
     errOllamaNoModel:
