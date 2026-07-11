@@ -647,6 +647,21 @@ function ChatPage() {
   const [titleDraft, setTitleDraft] = useState("");
   const subRef = useRef<(() => void) | null>(null);
   const seededRef = useRef<string>("");
+  // A bookmark event can land while the initial chat metadata snapshot is still in flight.
+  // Only the newest bookmark read may replace optimistic state, and a transient read failure
+  // must not masquerade as an empty bookmark list.
+  const hubBookmarkGenerationRef = useRef(0);
+  const refreshHubBookmarks = useCallback(async () => {
+    const api = ipc();
+    if (!api) return;
+    const generation = ++hubBookmarkGenerationRef.current;
+    try {
+      const bookmarks = await api.marketplace.bookmarks();
+      if (hubBookmarkGenerationRef.current === generation) setHubBookmarks(bookmarks);
+    } catch {
+      // Preserve the last known/optimistic state until a later durable read succeeds.
+    }
+  }, []);
   // Hired roster is invocation state, so it cannot wait for an async SQLite
   // round trip before the next Enter. The ref is the latest optimistic truth;
   // persistence is serialized and reconciles only if its revision is current.
@@ -1320,6 +1335,7 @@ function ChatPage() {
     if (!api || !chatId) return;
     let cancelled = false;
     void (async () => {
+      const bookmarkGeneration = ++hubBookmarkGenerationRef.current;
       const c = await api.chats.get(chatId);
       if (cancelled || !c) {
         if (!c) router.replace("/");
@@ -1336,11 +1352,13 @@ function ChatPage() {
         api.env.list(),
         api.mcpTools.listInstalled(),
         api.appFactory.listApps(chatId).catch(() => [] as AppFactoryAppRecord[]),
-        api.marketplace.bookmarks().catch(() => [] as HubAgentBookmark[]),
+        api.marketplace.bookmarks().catch(() => null as HubAgentBookmark[] | null),
       ]);
       if (cancelled) return;
       setAllAgents(agents);
-      setHubBookmarks(bookmarks);
+      if (bookmarks && hubBookmarkGenerationRef.current === bookmarkGeneration) {
+        setHubBookmarks(bookmarks);
+      }
       setAllProjects(projectsAll);
       setAllFirms(firmsAll);
       setInstalledPlugins(plugins);
@@ -2388,6 +2406,8 @@ function ChatPage() {
   useEffect(
     () =>
       onHubBookmarkChange((change) => {
+        // Invalidate any snapshot captured before this renderer-local mutation.
+        hubBookmarkGenerationRef.current += 1;
         if (change.action === "added") {
           setHubBookmarks((previous) => [
             change.bookmark,
@@ -2396,8 +2416,9 @@ function ChatPage() {
         } else {
           setHubBookmarks((previous) => previous.filter((bookmark) => bookmark.slug !== change.slug));
         }
+        void refreshHubBookmarks();
       }),
-    [],
+    [refreshHubBookmarks],
   );
 
   // 추천 토글 ON → 보내기 전 라우터 미리보기. routeOnly(실행 없음)를 정규화해 추천 시트에 넘긴다.

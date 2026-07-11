@@ -106,6 +106,38 @@ async function main() {
     await dashboardPage.screenshot({ path: path.join(outDir, "hub-autocomplete.png"), fullPage: true });
     await dashboardContext.close();
 
+    // Chat: its mount-time bookmark request captures an empty snapshot, then a
+    // bookmark event lands while that read is delayed. The late empty result
+    // must not erase the @ candidate that was added optimistically.
+    const chatRaceContext = await browser.newContext({ viewport: { width: 1200, height: 820 } });
+    await chatRaceContext.addInitScript(
+      setupMockAgentlasBridge,
+      mockBridgeOptions({ teamRoster: true, bookmarkEmptyReadDelayMs: 650, filterHubSearch: true }),
+    );
+    const chatRacePage = await chatRaceContext.newPage();
+    watchErrors(chatRacePage);
+    await chatRacePage.goto(`${baseUrl}/chat.html?id=chat-1`, { waitUntil: "domcontentloaded" });
+    await chatRacePage.waitForFunction(() => Boolean(window.agentlas?.marketplace?.bookmarkAdd));
+    await chatRacePage.waitForTimeout(80);
+    await chatRacePage.evaluate(async () => {
+      const rows = await window.agentlas.marketplace.search("hub-agent-002");
+      const listing = rows.find((row) => row.slug === "hub-agent-002");
+      if (!listing) throw new Error("race fixture listing missing");
+      const bookmark = await window.agentlas.marketplace.bookmarkAdd(listing);
+      window.dispatchEvent(new CustomEvent("agentlas:hub-bookmarks-changed", {
+        detail: { action: "added", bookmark },
+      }));
+    });
+    const chatRaceComposer = chatRacePage.locator("textarea").first();
+    await chatRaceComposer.waitFor({ timeout: 10000 });
+    await chatRaceComposer.fill("@hub-agent-002");
+    await chatRacePage.getByText(/허브 에이전트 002|Hub Agent 002/, { exact: true }).last().waitFor({ timeout: 3000 });
+    await chatRacePage.waitForTimeout(800);
+    await chatRaceComposer.fill("");
+    await chatRaceComposer.fill("@hub-agent-002");
+    await chatRacePage.getByText(/허브 에이전트 002|Hub Agent 002/, { exact: true }).last().waitFor({ timeout: 1000 });
+    await chatRaceContext.close();
+
     // Chat gets callable, install-only, and local-duplicate bookmarks. Context
     // keeps the install-only bookmark visible, but action surfaces fail closed.
     const chatContext = await browser.newContext({ viewport: { width: 1440, height: 980 } });

@@ -29,6 +29,10 @@ assert.match(org, /void refreshHubBookmarks\(\);/, "OrgTree must reconcile only 
 assert.doesNotMatch(org, /Reconcile the optimistic[\s\S]{0,240}void load\(\);/, "bookmark events must not trigger a stale full-roster reload");
 
 assert.match(chat, /api\.marketplace\.bookmarks\(\)/, "chat metadata must load saved Hub bookmarks");
+assert.match(chat, /hubBookmarkGenerationRef/, "chat bookmark reads need a stale-response generation guard");
+assert.match(chat, /bookmarks && hubBookmarkGenerationRef\.current === bookmarkGeneration/, "late chat snapshots must not erase a bookmark event");
+assert.match(chat, /void refreshHubBookmarks\(\);/, "chat bookmark events must reconcile only the durable bookmark slice");
+assert.match(chat, /catch\(\(\) => null as HubAgentBookmark\[\] \| null\)/, "chat bookmark read failures must preserve the last known state");
 assert.match(chat, /hubBookmarks,/, "chat must pass Hub bookmarks to its context surfaces");
 assert.match(chat, /onCallHubAgents=\{hireAgents\}/, "chat selection must bind Hub slugs to the borrowed roster");
 assert.match(chat, /hiredAgentsRef\.current\.map\(\(card\) => card\.slug\)/, "send must use the latest optimistic borrowed roster");
