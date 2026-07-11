@@ -885,17 +885,22 @@ a:hover {
 .dashboard-workspace {
   display: grid;
   grid-template-columns: minmax(260px, 304px) minmax(0, 1fr);
+  grid-template-areas:
+    "org llm"
+    "org flow";
   gap: 14px;
   align-items: start;
 }
 
 .dashboard-org-column {
+  grid-area: org;
   min-width: 0;
   position: sticky;
   top: 8px;
 }
 
 .dashboard-flow-column {
+  grid-area: flow;
   min-width: 0;
   display: grid;
   gap: 14px;
@@ -1244,6 +1249,7 @@ button[data-dashboard-import="true"]:disabled {
 }
 
 .dashboard-engine-panel {
+  grid-area: llm;
   display: grid;
   gap: 10px;
 }
@@ -2016,6 +2022,10 @@ button[data-toggle-state="off"] {
 @media (max-width: 1120px) {
   .dashboard-workspace {
     grid-template-columns: 1fr;
+    grid-template-areas:
+      "llm"
+      "org"
+      "flow";
   }
 
   .dashboard-org-column {

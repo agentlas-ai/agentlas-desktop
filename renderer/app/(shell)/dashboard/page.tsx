@@ -28,18 +28,18 @@ export default function DashboardPage() {
           <FleetSummaryStrip />
 
           <div className="dashboard-workspace">
+            {/* 전역 LLM 연결은 창 폭과 무관하게 첫 조작부다. DOM에서도 먼저 두고,
+                데스크톱에서는 우측 상단·좁은 창에서는 전체폭 최상단에 배치한다. */}
+            <div className="dashboard-panel dashboard-engine-panel" data-tour-id="dashboard.llm">
+              <RuntimeControl />
+              <EngineUsage />
+            </div>
             {/* 퀘스트 보드가 왼쪽 위 — 조직도는 그 아래로 살짝 내려간다. */}
             <div className="dashboard-org-column" data-tour-id="dashboard.org" style={{ display: "grid", gap: 14 }}>
               <QuestBoard />
               <OrgTree />
             </div>
             <div className="dashboard-flow-column">
-              {/* LLM 연결은 대시보드의 상시 조작부다. 승인 목록의 크기와 무관하게
-                  첫 화면에서 바로 연결·전환할 수 있도록 우측 최상단에 고정한다. */}
-              <div className="dashboard-panel dashboard-engine-panel" data-tour-id="dashboard.llm">
-                <RuntimeControl />
-                <EngineUsage />
-              </div>
               {/* 승인 인박스 — 가장 먼저 눈에 띄도록 최상단 전체폭으로. 대기 시 빨간 강조(data-alert). */}
               <div className="dashboard-panel" data-tour-id="dashboard.approvals"><ConfirmRequests /></div>
               <div className="dashboard-panel" data-tour-id="dashboard.readiness"><RuntimeReadiness /></div>

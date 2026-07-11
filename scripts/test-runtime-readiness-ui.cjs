@@ -177,6 +177,20 @@ async function main() {
     await llmPanel.getByRole("button", { name: /연결|Connect/ }).first().waitFor();
     const llmBox = await llmPanel.boundingBox();
     assert.ok(llmBox && llmBox.y < 1100, "the LLM connection control must be visible in the initial desktop viewport");
+    await readyPage.screenshot({ path: path.join(outDir, "desktop-first-view.png") });
+
+    await readyPage.setViewportSize({ width: 960, height: 640 });
+    await readyPage.waitForFunction(() => window.innerWidth === 960);
+    const compactLlmBox = await llmPanel.boundingBox();
+    const compactOrgBox = await readyPage.locator('[data-tour-id="dashboard.org"]').boundingBox();
+    const compactConnectBox = await llmPanel.getByRole("button", { name: /연결|Connect/ }).first().boundingBox();
+    assert.ok(
+      compactLlmBox && compactOrgBox && compactConnectBox
+        && compactLlmBox.y < compactOrgBox.y
+        && compactConnectBox.y + compactConnectBox.height <= 640,
+      "LLM connection actions must stay above the organization tree and inside the initial compact viewport",
+    );
+    await readyPage.screenshot({ path: path.join(outDir, "compact-first-view.png") });
     assert.equal(await readyPanel.locator("[data-readiness-id]").count(), 6);
     assert.equal(await readyPanel.locator('[data-readiness-status="blocked"]').count(), 0);
     await readyPanel.getByRole("button", { name: /런타임 전체 다시 확인|Run all readiness checks again/ }).click();
