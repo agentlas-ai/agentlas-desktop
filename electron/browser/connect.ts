@@ -318,8 +318,47 @@ export type BrowserApprovalResult = "approved" | "denied";
 interface PendingApproval {
   resolve: (v: BrowserPermissionDecision | "timeout") => void;
   timer: NodeJS.Timeout;
+  request: BrowserApprovalLifecycleRequest;
 }
 const pendingApprovals = new Map<string, PendingApproval>();
+
+export interface BrowserApprovalLifecycleRequest {
+  requestId: string;
+  site: string;
+  actionType: string;
+  summary: string;
+  target: string | null;
+  allowAlways: boolean;
+  expiresAt: number;
+}
+
+export type BrowserApprovalLifecycleEvent =
+  | ({ status: "pending" } & BrowserApprovalLifecycleRequest)
+  | {
+      status: "resolved" | "expired";
+      requestId: string;
+      decision?: BrowserPermissionDecision;
+    };
+
+const approvalLifecycleListeners = new Set<(event: BrowserApprovalLifecycleEvent) => void>();
+
+/** DESKTOP_MOBILE_BRIDGE: renderer and authenticated phones observe one approval lifecycle. */
+export function onBrowserApprovalLifecycle(
+  listener: (event: BrowserApprovalLifecycleEvent) => void,
+): () => void {
+  approvalLifecycleListeners.add(listener);
+  return () => approvalLifecycleListeners.delete(listener);
+}
+
+function emitApprovalLifecycle(event: BrowserApprovalLifecycleEvent): void {
+  for (const listener of approvalLifecycleListeners) {
+    try {
+      listener(event);
+    } catch {
+      // Approval authority must remain fail-closed even if a projection drops.
+    }
+  }
+}
 
 function emitToRenderer(channel: string, payload: unknown): void {
   for (const w of BrowserWindow.getAllWindows()) {
@@ -366,21 +405,23 @@ export async function browserRequestApproval(
   const requestId = randomUUID();
   const timeoutMs = approvalTimeoutMs();
   const decision = await new Promise<BrowserPermissionDecision | "timeout">((resolve) => {
-    const timer = setTimeout(() => {
-      pendingApprovals.delete(requestId);
-      resolve("timeout"); // 이번 요청만 fail-closed; 영구 deny로 저장하지 않는다.
-    }, timeoutMs);
-    pendingApprovals.set(requestId, { resolve, timer });
-    emitToRenderer(APPROVAL_CHANNEL, {
+    const request: BrowserApprovalLifecycleRequest = {
       requestId,
       site,
       actionType: req.actionType,
       summary: req.summary,
       target: req.target ?? null,
       expiresAt: Date.now() + timeoutMs,
-      // 결제와 임의 코드 실행은 "항상 승인"할 수 없다(매번 확인 강제).
       allowAlways: req.actionType !== "payment" && req.actionType !== "unsafe-code",
-    });
+    };
+    const timer = setTimeout(() => {
+      pendingApprovals.delete(requestId);
+      emitApprovalLifecycle({ status: "expired", requestId });
+      resolve("timeout"); // 이번 요청만 fail-closed; 영구 deny로 저장하지 않는다.
+    }, timeoutMs);
+    pendingApprovals.set(requestId, { resolve, timer, request });
+    emitToRenderer(APPROVAL_CHANNEL, request);
+    emitApprovalLifecycle({ status: "pending", ...request });
   });
 
   if (decision === "timeout") {
@@ -416,6 +457,7 @@ export function browserResolveApproval(
   if (!pending) return { ok: false };
   clearTimeout(pending.timer);
   pendingApprovals.delete(requestId);
+  emitApprovalLifecycle({ status: "resolved", requestId, decision });
   pending.resolve(decision); // 원본 once/always/deny 그대로 → requestApproval이 기억/판정
   return { ok: true };
 }

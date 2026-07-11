@@ -100,6 +100,7 @@ import { getDb } from "./store/db";
 import { getResolvedOrg } from "./store/org-spec";
 import { resolveTeamOrg, resolveAgentTeam } from "./agents/org-resolver";
 import { runMcpInvocation } from "./mcp/client";
+import { invocationService } from "./invocation/service";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
 import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot } from "./hephaestus/engine";
 import { listSkillCatalog, readSkillCatalogAsset } from "./hephaestus/skill-catalog";
@@ -392,21 +393,7 @@ import type {
   ScheduleSpec,
 } from "../shared/types";
 
-// 진행 중인 실행 레지스트리 — runId → { 취소 컨트롤러, 대상 chatId, 방출 이벤트 버퍼 }.
-// 병렬 세션을 각각 독립 추적/취소하고, 채팅을 떠났다 돌아와도 진행 중 실행에 재접속할 수 있게
-// 이벤트를 버퍼링한다. 텍스트 partial은 누적 전체 텍스트라 마지막 것만 유지하지만
-// tool/thinking/agentId 이벤트는 누적되므로 MAX_BUFFERED_EVENTS로 상한을 둔다(오래된 것부터 폐기).
-interface RunRecord {
-  controller: AbortController;
-  chatId: string;
-  startedAt: string;
-  cancelRequestedAt: string | null;
-  events: McpInvocationEvent[];
-  /** 메인 스트림(무-agentId) partial의 마지막 누적 전문 — 델타 계산 기준. */
-  partialText: string;
-  resultFolder?: string;
-}
-const activeRuns = new InvocationLifecycleRegistry<RunRecord>();
+// DESKTOP_MOBILE_BRIDGE: live invocation authority moved to invocation/service.ts.
 // Hephaestus 빌더(hep-build) 진행 중 실행 — 취소용 AbortController 레지스트리.
 const activeBuilds = new Map<string, AbortController>();
 // runId → "렌더러 구독 완료" 신호. 구독 전 발생한 이벤트를 버퍼링하다 이 신호로 flush 한다.
@@ -414,11 +401,6 @@ const buildReadySignals = new Map<string, () => void>();
 // 조기 실패가 렌더러의 invoke 응답보다 먼저 끝나도 terminal event를 잃지 않는다.
 // 렌더러가 사라진 비정상 경로만 유한 시간 뒤 정리한다.
 const BUILD_READY_GRACE_MS = 30_000;
-// tool 폭주하는 긴 실행/대형 firm 실행의 버퍼 무한증가 방지 상한 (재접속 리플레이는 최근 위주).
-const MAX_BUFFERED_EVENTS = 4000;
-// 단일 partial 텍스트 상한 — 런어웨이 출력(끝없이 스트리밍되는 GUI/서버 로그 등)이
-// 매 60ms 누적 전체를 렌더러로 보내 렌더러를 OOM(수십 GB)시키는 걸 모든 런타임 공통으로 막는다.
-const MAX_PARTIAL_CHARS = 2 * 1024 * 1024;
 let pendingConfirmationCount = 0;
 let pendingConfirmationBounceId: number | null = null;
 let lastPendingConfirmationNoticeAt = 0;
@@ -505,37 +487,6 @@ function applyPendingConfirmationAttention(win: BrowserWindow | null, rawCount: 
   }
 }
 
-/** 현재 실행 중인 chatId 목록(중복 제거). */
-function activeChatIds(): string[] {
-  return activeRuns.activeChatIds();
-}
-
-function invocationReceipt(runId: string): InvocationRunReceipt | null {
-  const record = activeRuns.get(runId);
-  const durable = getInvocationRunReceipt(runId);
-  if (!record) return durable;
-  return {
-    ...(durable ?? {
-      runId,
-      chatId: record.chatId,
-      startedAt: record.startedAt,
-      updatedAt: record.startedAt,
-      eventCount: record.events.length,
-    }),
-    status: record.cancelRequestedAt ? "cancelling" : "running",
-    updatedAt: record.cancelRequestedAt ?? durable?.updatedAt ?? record.startedAt,
-    eventCount: Math.max(durable?.eventCount ?? 0, record.events.length),
-    ...(record.resultFolder ? { resultFolder: record.resultFolder } : {}),
-  };
-}
-
-function latestInvocationReceipt(chatId: string): InvocationRunReceipt | null {
-  for (const [runId, record] of activeRuns.entries()) {
-    if (record.chatId === chatId) return invocationReceipt(runId);
-  }
-  return getLatestInvocationRunReceipt(chatId);
-}
-
 function recordAppFactoryOperation(
   rootPath: string,
   operation: AppFactoryOperationKind,
@@ -565,14 +516,6 @@ function recordToolFactoryOperation(
   const toolRecord = getAgentToolByRoot(rootPath);
   if (!toolRecord) return;
   recordAgentToolOperation(toolRecord.id, operation, ok, result, status, installedServerId);
-}
-
-/** 사이드바 "실행 중" 인디케이터용 — 실행 시작/종료/취소 때마다 모든 창에 방송. */
-function broadcastActiveChats(): void {
-  const chatIds = activeChatIds();
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send("invoke:activeChats", chatIds);
-  }
 }
 
 async function openAppLaunchTarget(appRecord: AppFactoryAppRecord): Promise<AppFactoryLaunchTargetResult> {
@@ -680,6 +623,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("trex:contentAvailable", async () => {
     const { trexContentAvailable } = await import("./trex/content");
     return trexContentAvailable();
+  });
+  // 선택 요소 LLM 수정(select-to-edit) — 현재 텍스트 + 자연어 지시 → 다시 쓴 텍스트.
+  ipcMain.handle("trex:refineText", async (_e, payload: { current?: string; instruction?: string; context?: string }) => {
+    const { refineTrexText } = await import("./trex/content");
+    return refineTrexText(String(payload?.current ?? ""), String(payload?.instruction ?? ""), payload?.context);
   });
 
   // ── 사이트 디자인 스튜디오 — 디자인 전용(백엔드/실행 없음) ──────────
@@ -2258,260 +2206,36 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("migration:scan", () => scanMigrationSources());
   ipcMain.handle("migration:import", (_e, opts: MigrationOptions) => runMigration(opts));
 
-  // ── invoke (백엔드 라우터 — 스트리밍 실행) ─────────────
-  ipcMain.handle("invoke:run", async (event, req: McpInvocationRequest) => {
-    // 렌더러가 runId를 미리 넘기면 그대로 사용 — 렌더러가 invoke 왕복 전에 이 채널을 이미
-    // 구독하고 있으므로 런타임이 즉시 emit하는 초기 이벤트도 놓치지 않는다(subscribe-before-trigger).
-    // 안 넘겼으면(자동화/구버전 호출) 기존처럼 main이 생성(하위호환).
-    // runId는 실행 idempotency key다. 이미 DB start gate를 지난 id를 재수신하면
-    // 완료/취소 여부와 무관하게 다시 실행하지 않는다(IPC 응답 유실·retry 이중 실행 방지).
-    if (typeof req.runId === "string" && hasInvocationRunReceipt(req.runId)) {
-      throw new Error("Invocation runId already has a durable receipt; use a new runId");
-    }
-    const runId = resolveInvocationRunId(
-      req.runId,
-      (candidate) => activeRuns.hasSeen(candidate) || hasInvocationRunReceipt(candidate),
-    );
-    const runReq: McpInvocationRequest = { ...req, runId };
+  // ── invoke (renderer + Mobile Bridge가 공유하는 main-process 권위) ──────
+  // DESKTOP_MOBILE_BRIDGE: 실행 상태·스트림·steering 큐는 invocationService만 소유한다.
+  invocationService.onEvent(({ runId, event }) => {
     const channel = `invoke:event:${runId}`;
-    const win = BrowserWindow.fromWebContents(event.sender);
-
-    // 실행마다 AbortController를 등록 — 병렬 실행이 서로 독립적으로 취소 가능.
-    const controller = new AbortController();
-    const startedAt = new Date().toISOString();
-    const chat = getChat(req.chatId);
-    const projectFolder = chat?.projectId ? getProject(chat.projectId)?.folderPath ?? null : null;
-    const record: RunRecord = {
-      controller,
-      chatId: req.chatId,
-      startedAt,
-      cancelRequestedAt: null,
-      events: [],
-      partialText: "",
-      resultFolder: getChatWorkingFolder(req.chatId) ?? projectFolder ?? agentRunCwd(),
-    };
-    // chat당 단일 live-run 등록 + durable idempotency start는 하나의 pre-host
-    // 게이트다. DB write가 실패하면 등록을 되돌리고 아래 host adapter는 절대 호출하지 않는다.
-    registerDurableInvocationStart({
-      registry: activeRuns,
-      runId,
-      record,
-      publishActiveState: broadcastActiveChats,
-      persistStart: () => recordRunEvent({
-        runId,
-        kind: "invoke_started",
-        chatId: runReq.chatId,
-        payload: {
-          permissions: runReq.permissions,
-          toolMode: runReq.toolMode,
-          hubMode: runReq.hubMode,
-          borrowAgents: runReq.borrowAgents,
-          hasImages: Boolean(runReq.images?.length),
-          planMode: runReq.planMode,
-          goalMode: runReq.goalMode,
-          appsGenerateMode: runReq.appsGenerateMode,
-        },
-      }),
-    });
-
-    // This tracks an observed host terminal event, not a guaranteed DB write.
-    // The start row above is the hard idempotency gate. Terminal writes are
-    // best-effort because host work has already happened; if one fails, the
-    // durable start row intentionally recovers as `interrupted` after restart
-    // and still prevents the same runId from executing again.
-    let terminalObserved = false;
-    void runMcpInvocation(
-      runReq,
-      (rawEv) => {
-        // 런어웨이 출력 보호 — partial 텍스트가 과도하면 잘라 렌더러/버퍼 메모리를 바운드한다
-        // (모든 런타임 공통). 정상 응답엔 영향 없고 2MB 초과분만 절단.
-        const ev: McpInvocationEvent =
-          rawEv.kind === "partial" && typeof rawEv.text === "string" && rawEv.text.length > MAX_PARTIAL_CHARS
-            ? {
-                ...rawEv,
-                text:
-                  rawEv.text.slice(0, MAX_PARTIAL_CHARS) +
-                  (pickLocale(runReq) === "ko"
-                    ? "\n\n[출력이 너무 길어 잘렸습니다 — 런어웨이 출력 메모리 보호]"
-                    : "\n\n[Output truncated — runaway output memory guard]"),
-              }
-            : rawEv;
-        // 메인 스트림 partial은 델타로 전송 — 런타임이 60ms마다 누적 전문을 주므로 그대로 보내면
-        // IPC 페이로드가 O(전체)로 커져 긴 답변일수록 끊긴다. 여기서 증분만 잘라 보낸다.
-        // 버퍼(attach 리플레이)에는 항상 전문 스냅샷을 유지해 재접속 복원은 기존과 동일.
-        let wireEv = ev;
-        if (ev.kind === "partial" && !ev.agentId && typeof ev.text === "string") {
-          const full = ev.text;
-          const prev = record.partialText;
-          const probe = Math.min(32, prev.length);
-          const appended =
-            full.length >= prev.length &&
-            (probe === 0 || full.slice(prev.length - probe, prev.length) === prev.slice(-probe));
-          if (appended) {
-            const delta = full.slice(prev.length);
-            if (!delta) return; // 변화 없음(절단 안정 상태 등) — 전송/버퍼 갱신 불필요
-            wireEv = { ...ev, text: undefined, delta, textLen: full.length };
-          } else {
-            // append 불변식이 깨짐(절단 전환 등) — 전문 폴백, 렌더러는 text로 재동기화
-            wireEv = { ...ev, textLen: full.length };
-          }
-          record.partialText = full;
-        }
-        // 재접속용 버퍼링 — partial은 매번 누적 전체 텍스트라, 직전이 partial이면 교체해
-        // 메모리를 바운드한다(tool/thinking/agentId 이벤트는 누적 단계라 보존하되 상한 적용).
-        const last = record.events[record.events.length - 1];
-        if (ev.kind === "partial" && !ev.agentId && last && last.kind === "partial" && !last.agentId) {
-          record.events[record.events.length - 1] = ev;
-        } else {
-          record.events.push(ev);
-        }
-        if (record.events.length > MAX_BUFFERED_EVENTS) {
-          record.events.splice(0, record.events.length - MAX_BUFFERED_EVENTS);
-        }
-        recordMcpInvocationEvent(runId, runReq, ev);
-        // 창이 닫힌 뒤(닫기와 스트림 종료가 겹치는 경우) send는 throw하므로 destroyed 가드.
-        if (win && !win.isDestroyed()) {
-          try { win.webContents.send(channel, wireEv); } catch {}
-        }
-        // 종료 이벤트는 즉시 레지스트리에서 제거 — 답변은 final emit 직전에 이미 영속화되므로(client.ts),
-        // 재접속(attach)이 '끝난 실행'을 반환해 히스토리 행과 답변이 중복 렌더되는 창을 닫는다.
-        if (ev.kind === "final" || ev.kind === "error") {
-          // 취소(정지/스티어링)로 끊긴 실행은 그때까지 스트리밍된 텍스트를 히스토리에 남긴다 —
-          // 렌더러가 부분 응답 버블을 유지하는 것과 새로고침 후 히스토리가 일치하게.
-          if (ev.kind === "error" && controller.signal.aborted && record.partialText.trim()) {
-            try {
-              appendChatMessage(runReq.chatId, "assistant", record.partialText);
-            } catch {}
-          }
-          const terminalKind =
-            ev.kind === "final"
-              ? "invoke_completed"
-              : controller.signal.aborted
-                ? "invoke_cancelled"
-                : "invoke_failed";
-          terminalObserved = true;
-          tryRecordRunEvent({
-            runId,
-            kind: terminalKind,
-            chatId: runReq.chatId,
-            payload: {
-              resultFolder: record.resultFolder,
-              errorCode: ev.error?.code,
-              errorMessage: ev.error?.message,
-            },
-          });
-          // final/error는 runMcpInvocation이 host adapter를 await한 뒤에만 도착한다.
-          // Abort 요청 시점이 아니라 이 terminal proof에서 다음 실행을 허용한다.
-          if (activeRuns.settle(runId)) broadcastActiveChats();
-        }
-      },
-      controller.signal,
-    ).then((result) => {
-      record.resultFolder = result.resultFolder ?? record.resultFolder;
-      tryRecordRunEvent({
-        runId,
-        kind: "invoke_result",
-        chatId: runReq.chatId,
-        payload: {
-          resultFolder: record.resultFolder,
-          tokens: result.tokens,
-          hasFinalText: Boolean(result.finalText?.trim()),
-        },
-      });
-    }).catch((err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      tryRecordRunEvent({
-        runId,
-        kind: "invoke_threw",
-        chatId: runReq.chatId,
-        payload: { errorMessage: message },
-      });
-      tryRecordFailureEvent({
-        runId,
-        source: "invoke",
-        chatId: runReq.chatId,
-        errorCode: "invoke_threw",
-        errorMessage: message,
-      });
-      if (!terminalObserved) {
-        terminalObserved = true;
-        if (controller.signal.aborted && record.partialText.trim()) {
-          try { appendChatMessage(runReq.chatId, "assistant", record.partialText); } catch {}
-        }
-        const ev: McpInvocationEvent = {
-          kind: "error",
-          error: {
-            code: controller.signal.aborted ? "cancelled" : "invoke-threw",
-            message,
-          },
-        };
-        record.events.push(ev);
-        recordMcpInvocationEvent(runId, runReq, ev);
-        if (win && !win.isDestroyed()) {
-          try { win.webContents.send(channel, ev); } catch {}
-        }
-        tryRecordRunEvent({
-          runId,
-          kind: controller.signal.aborted ? "invoke_cancelled" : "invoke_failed",
-          chatId: runReq.chatId,
-          payload: { resultFolder: record.resultFolder, errorMessage: message },
-        });
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) {
+        try { window.webContents.send(channel, event); } catch {}
       }
-    }).finally(() => {
-      // 예상 밖 no-terminal 경로도 durable failure로 닫아 renderer가 무한 running에 남지 않게 한다.
-      if (!terminalObserved) {
-        tryRecordRunEvent({
-          runId,
-          kind: controller.signal.aborted ? "invoke_cancelled" : "invoke_failed",
-          chatId: runReq.chatId,
-          payload: {
-            resultFolder: record.resultFolder,
-            errorMessage: "Runtime settled without a terminal event",
-          },
-        });
-      }
-      if (activeRuns.settle(runId)) broadcastActiveChats();
-    });
-
-    return { runId };
-  });
-
-  // 진행 중인 실행 취소 — CLI 자식 프로세스 kill / API fetch abort.
-  ipcMain.handle("invoke:cancel", (_e, runId: string) => {
-    const result = activeRuns.requestCancel(runId);
-    if (result === "requested") {
-      const record = activeRuns.get(runId);
-      tryRecordRunEvent({
-        runId,
-        kind: "invoke_cancel_requested",
-        chatId: record?.chatId,
-        payload: { requestedAt: record?.cancelRequestedAt },
-      });
     }
   });
-
-  // 현재 실행 중인 chatId 목록 — 사이드바 인디케이터 초기 시드용.
-  ipcMain.handle("invoke:activeChats", () => activeChatIds());
-
-  // 채팅 진입 시 진행 중 실행에 재접속 — 그 chat의 최신 실행 runId + 버퍼된 이벤트를 돌려준다.
-  // 렌더러는 events를 리플레이해 진행 중 버블을 복원하고, runId 채널을 구독해 이후 스트림을 받는다.
-  ipcMain.handle("invoke:attach", (_e, chatId: string) => {
-    let found: { runId: string; events: McpInvocationEvent[] } | null = null;
-    for (const [runId, rec] of activeRuns.entries()) {
-      if (rec.chatId === chatId) found = { runId, events: rec.events.slice() };
+  invocationService.onActiveChats((chatIds) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) {
+        try { window.webContents.send("invoke:activeChats", chatIds); } catch {}
+      }
     }
-    return found;
   });
-
-  ipcMain.handle("invoke:receipt", (_e, runId: string) => invocationReceipt(runId));
-  ipcMain.handle("invoke:latestReceipt", (_e, chatId: string) => latestInvocationReceipt(chatId));
-
-  ipcMain.handle("invoke:history", (_e, chatId: string) => listChatMessages(chatId));
+  ipcMain.handle("invoke:run", (_event, req: McpInvocationRequest) => invocationService.start(req));
+  ipcMain.handle("invoke:steer", (_event, req: McpInvocationRequest) => invocationService.steer(req));
+  ipcMain.handle("invoke:cancel", (_event, runId: string) => invocationService.cancel(runId));
+  ipcMain.handle("invoke:activeChats", () => invocationService.activeChatIds());
+  ipcMain.handle("invoke:attach", (_event, chatId: string) => invocationService.attach(chatId));
+  ipcMain.handle("invoke:receipt", (_event, runId: string) => invocationService.receipt(runId));
+  ipcMain.handle("invoke:latestReceipt", (_event, chatId: string) => invocationService.latestReceipt(chatId));
+  ipcMain.handle("invoke:history", (_event, chatId: string) => invocationService.history(chatId));
   ipcMain.handle("invoke:clearHistory", (_e, chatId: string) => {
     // Renderer busy는 projection일 뿐 권위가 아니다. attach가 끝나기 전의 창에서도
     // main registry가 run/cancelling을 보유하면 clear를 거부해 terminal event가
     // 빈 대화에 다시 쓰이는 race를 막는다.
-    if (activeChatIds().includes(chatId)) {
+    if (invocationService.activeChatIds().includes(chatId)) {
       throw new Error("This conversation is still running. Stop it and wait for cancellation to finish before clearing it.");
     }
     clearChatContext(chatId);
@@ -2709,7 +2433,7 @@ export function registerIpcHandlers(): void {
   });
 
   // Startup Founder Studio — 패키지 자체 런처를 spawn 해 실제 SPA 를 로컬 서빙, iframe URL 반환.
-  ipcMain.handle("hephaestus:startStudio", () => startStudio());
+  ipcMain.handle("hephaestus:startStudio", (_event, input?: { idea?: string }) => startStudio(input));
   ipcMain.handle("hephaestus:stopStudio", () => {
     stopStudio();
   });

@@ -82,11 +82,11 @@ export const MULTIMODAL_PROVIDERS: MultimodalProvider[] = [
     mode: "cli-subscription",
     defaultModel: "grok-imagine-image",
     envKeys: [],
-    setupUrl: "https://github.com/superagent-ai/grok-cli",
-    docsUrl: "https://github.com/superagent-ai/grok-cli",
+    setupUrl: "https://x.ai/cli",
+    docsUrl: "https://x.ai/cli",
     billing: "subscription",
-    summary: "Keyless Grok Imagine image generation via the logged-in Grok CLI (generate_image). No API key needed.",
-    summaryKo: "로그인된 Grok CLI로 키 없이 Grok Imagine 이미지를 생성합니다(generate_image). API 키 불필요.",
+    summary: "Keyless Grok Imagine image generation via the logged-in official xAI Grok CLI (image_gen). No API key needed.",
+    summaryKo: "로그인된 공식 xAI Grok CLI로 키 없이 Grok Imagine 이미지를 생성합니다(image_gen). API 키 불필요.",
   },
   {
     id: "openai-image",
@@ -150,13 +150,13 @@ export const MULTIMODAL_PROVIDERS: MultimodalProvider[] = [
     label: "Grok CLI video (Imagine)",
     labelKo: "Grok CLI 영상 (Imagine)",
     mode: "cli-subscription",
-    defaultModel: "grok-imagine-video",
+    defaultModel: "grok-imagine-video-1.5-preview",
     envKeys: [],
-    setupUrl: "https://github.com/superagent-ai/grok-cli",
-    docsUrl: "https://github.com/superagent-ai/grok-cli",
+    setupUrl: "https://x.ai/cli",
+    docsUrl: "https://x.ai/cli",
     billing: "subscription",
-    summary: "Keyless Grok Imagine text/image-to-video via the logged-in Grok CLI (generate_video, 1-15s). No API key needed.",
-    summaryKo: "로그인된 Grok CLI로 키 없이 Grok Imagine 영상(텍스트·이미지→비디오, 1~15초)을 생성합니다(generate_video). API 키 불필요.",
+    summary: "Keyless Grok Imagine image-to-video via the logged-in official xAI Grok CLI (image_to_video, 1-15s). Requires a SuperGrok subscription. No API key needed.",
+    summaryKo: "로그인된 공식 xAI Grok CLI로 키 없이 Grok Imagine 영상(이미지→비디오, 1~15초)을 생성합니다(image_to_video). SuperGrok 구독 필요, API 키 불필요.",
   },
   {
     id: "runway-video",
@@ -303,7 +303,7 @@ export const MULTIMODAL_PROVIDERS: MultimodalProvider[] = [
 export const DEFAULT_MULTIMODAL_SETTINGS: MultimodalSettings = {
   // 기본값 = auto. 사용자가 따로 고르지 않으면 가용한 엔진(키리스 우선)을 자동 선택한다.
   imageProvider: AUTO_PROVIDER,
-  // 영상도 auto — Grok CLI(구독·키리스)가 연결돼 있으면 그걸 먼저, 없으면 키 있는 API 순.
+  // 영상도 auto — 실제 키/자격 증명이 확인된 provider만 선택한다.
   videoProvider: AUTO_PROVIDER,
   audioProvider: "openai-audio",
 };

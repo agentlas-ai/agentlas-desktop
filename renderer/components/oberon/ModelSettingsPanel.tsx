@@ -1,7 +1,7 @@
 // Oberon — 모델 설정 패널. 시작 창에서 "어떤 모델로 만들지" 고른다.
 //  · 대본·기획   → BYOK CLI 런타임 (runtime.detect)
 //  · 컷·이미지   → 멀티모달 image provider (codex-cli-image 등 — 병렬)
-//  · 영상(복수)  → 멀티모달 video provider (Higgsfield/Seedance/Veo … — 병렬)
+//  · 영상         → 실제 실행 가능한 멀티모달 video provider 한 개
 "use client";
 import { useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
@@ -21,14 +21,18 @@ const RUNTIME_FALLBACK: RuntimeOpt[] = [
   { kind: "claude-code", label: "Claude Code", detected: false },
   { kind: "codex", label: "Codex", detected: false },
   { kind: "gemini", label: "Gemini CLI", detected: false },
+  { kind: "grok", label: "Grok CLI", detected: false },
 ];
 
 const RUNTIME_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
   gemini: "Gemini CLI",
+  grok: "Grok CLI",
 };
-const CLI_RUNTIMES = new Set(["claude-code", "codex", "gemini"]);
+const CLI_RUNTIMES = new Set(["claude-code", "codex", "gemini", "grok"]);
+// grok-cli-video(구독 키리스)를 포함 — Oberon 영상 엔진 선택지로 노출한다.
+const OBERON_VIDEO_PROVIDERS = new Set(["grok-cli-video", "google-veo", "kling-video", "seedance-video", "runway-video", "luma-video"]);
 
 export function ModelSettingsPanel({
   value,
@@ -42,7 +46,7 @@ export function ModelSettingsPanel({
   const [ready, setReady] = useState<Record<string, boolean>>({});
 
   const imageProviders = providersForModality("image");
-  const videoProviders = providersForModality("video").filter((p) => p.id !== "openai-sora"); // Sora 제외(종료)
+  const videoProviders = providersForModality("video").filter((p) => OBERON_VIDEO_PROVIDERS.has(p.id));
 
   useEffect(() => {
     const api = ipc();
@@ -81,9 +85,7 @@ export function ModelSettingsPanel({
   }, []);
 
   function toggleVideo(id: string) {
-    const has = value.videoProviders.includes(id);
-    const next = has ? value.videoProviders.filter((x) => x !== id) : [...value.videoProviders, id];
-    onChange({ ...value, videoProviders: next.length ? next : value.videoProviders });
+    onChange({ ...value, videoProviders: [id] });
   }
 
   return (
@@ -147,8 +149,8 @@ export function ModelSettingsPanel({
       <Row
         glyph="video"
         color="#d6336c"
-        title={locale === "ko" ? "영상 엔진 (복수 선택 · 병렬)" : "Video Engines (multi-select · parallel)"}
-        hint={locale === "ko" ? "샷을 선택한 엔진들에 병렬 분배" : "Distributes shots across the selected engines in parallel"}
+        title={locale === "ko" ? "영상 엔진" : "Video Engine"}
+        hint={locale === "ko" ? "실제 렌더에 사용할 엔진 한 개" : "One engine used by the actual render"}
       >
         {videoProviders.map((p) => (
           <Pick
@@ -158,7 +160,6 @@ export function ModelSettingsPanel({
             selected={value.videoProviders.includes(p.id)}
             onClick={() => toggleVideo(p.id)}
             title={locale === "ko" ? p.summaryKo : p.summary}
-            multi
           />
         ))}
       </Row>
@@ -168,7 +169,9 @@ export function ModelSettingsPanel({
 
 function statusSub(ready: Record<string, boolean>, p: MultimodalProvider, locale: Locale): string | undefined {
   if (Object.keys(ready).length === 0) return p.envKeys.length === 0 ? (locale === "ko" ? "구독" : "Subscription") : undefined;
-  return ready[p.id] ? (locale === "ko" ? "키 등록됨" : "Key added") : locale === "ko" ? "키 필요" : "Key required";
+  if (ready[p.id]) return locale === "ko" ? "연결됨" : "Connected";
+  if (p.mode === "cli-subscription") return locale === "ko" ? "로그인 필요" : "Login required";
+  return locale === "ko" ? "키 필요" : "Key required";
 }
 
 function Row({

@@ -1,0 +1,11 @@
+schema_version: 1
+project: agentlas-desktop
+updated_at: 2026-07-11T00:00:00Z
+weights:
+  uncovered: 1.0
+  stale: 0.5
+  risk: 1.2
+  dependency: 0.8
+  recent_penalty: 1.5
+recent_window: 5
+exploration_floor: 0.15

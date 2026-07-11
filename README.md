@@ -34,7 +34,7 @@
   </a>
 </p>
 <p align="center">
-  <sub>Free · open source (Apache-2.0) · Agentlas sign-in connects the app, Cloud, and Hub · your LLM subscription and API credentials stay local · prefer the terminal? <a href="#install-from-the-terminal">one-line install ↓</a></sub>
+  <sub>Free · open source (Apache-2.0) · Agentlas sign-in connects the app, Cloud, and Hub · your LLM subscription and API credentials stay local · prefer a standalone terminal? <a href="https://github.com/agentlas-ai/agentlas-terminal">Agentlas Terminal ↗</a></sub>
 </p>
 
 <p align="center">

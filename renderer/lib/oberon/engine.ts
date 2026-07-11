@@ -753,6 +753,8 @@ function videoRatePerSecond(videoProviderIds: string[] | undefined): {
   const ids = videoProviderIds?.length ? videoProviderIds : ["google-veo"];
   for (const id of ids) {
     switch (id) {
+      case "grok-cli-video":
+        return { providerId: id, usdPerSecond: 0, note: "Grok Imagine — SuperGrok 구독(추가 과금 없음)" };
       case "google-veo":
         return { providerId: id, usdPerSecond: 0.05, note: "Veo 3.1 Lite 720p audio upper-bound" };
       case "runway-video":

@@ -77,6 +77,7 @@ async function main() {
     await context.addInitScript({
       content: `
         (${setupSource})(${JSON.stringify(options)});
+        window.localStorage.setItem("agentlas.locale", "ko");
         window.agentlas.browser = {
           status: async () => ({ chromeFound: true, chromePath: "/Applications/Google Chrome.app", profilePath: "/tmp/agentlas-browser-profile", cdpPort: 9222 }),
           listSites: async () => ${JSON.stringify(sites)},
@@ -104,6 +105,37 @@ async function main() {
     });
     await page.goto(`${baseUrl}/browser.html`, { waitUntil: "domcontentloaded" });
     await page.getByRole("button", { name: /Sites \(6\)|사이트 \(6\)/ }).waitFor({ timeout: 10000 });
+
+    await page.setViewportSize({ width: 760, height: 720 });
+    const pointRows = page.locator(".browser-points > li");
+    assert.equal(await pointRows.count(), 3, "Browser explanation must keep three semantic points");
+    const pointLayout = await pointRows.evaluateAll((rows) => rows.map((row) => {
+      const copy = row.querySelector(":scope > .browser-point-copy");
+      const emphasis = copy?.querySelector("b") ?? null;
+      const copyRect = copy?.getBoundingClientRect();
+      const rowRect = row.getBoundingClientRect();
+      return {
+        directClasses: Array.from(row.children).map((child) => child.className),
+        copyDisplay: copy ? getComputedStyle(copy).display : null,
+        emphasisInsideCopy: !emphasis || emphasis.parentElement === copy,
+        overflowsHorizontally: row.scrollWidth > row.clientWidth + 1,
+        copyInsideRow: Boolean(copyRect && copyRect.left >= rowRect.left && copyRect.right <= rowRect.right + 1),
+      };
+    }));
+    for (const point of pointLayout) {
+      assert.equal(point.directClasses.length, 2, "each explanation point must be dot + one complete copy block");
+      assert.match(String(point.directClasses[0]), /dot/, "the first point child must remain the marker");
+      assert.match(String(point.directClasses[1]), /\bbrowser-point-copy\b/, "inline emphasis must stay inside one copy block");
+      assert.equal(point.copyDisplay, "block");
+      assert.equal(point.emphasisInsideCopy, true, "bold phrases must not become sibling flex items");
+      assert.equal(point.overflowsHorizontally, false, "constrained explanation text must wrap without overflow");
+      assert.equal(point.copyInsideRow, true, "wrapped copy must remain inside its semantic row");
+    }
+    await page.locator(".browser-explain").screenshot({
+      path: path.join(outDir, "browser-explain-constrained.png"),
+    });
+
+    await page.setViewportSize({ width: 900, height: 600 });
 
     const scroll = page.locator(".browser-scroll");
     const before = await scroll.evaluate((element) => ({

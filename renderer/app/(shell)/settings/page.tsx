@@ -25,6 +25,9 @@ import { AUTO_PROVIDER } from "@shared/multimodal";
 import { navigate } from "@/lib/navigation";
 import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconRefresh, IconWand } from "@/components/Icon";
 import { MigrationPanel } from "@/components/MigrationPanel";
+import QRCode from "qrcode";
+import type { MobileBridgeDeviceSummary, MobileBridgeRuntimeStatus } from "@shared/types";
+import type { MobileBridgePairingPayload } from "@shared/mobile-bridge";
 
 // BYOK 백엔드 목록은 shared/models.ts의 ByokBackend(단일 출처)를 그대로 쓴다.
 const BYOK_BACKENDS: ByokBackend[] = [
@@ -124,48 +127,68 @@ export default function SettingsPage() {
   const [multimodalSettings, setMultimodalSettings] = useState<MultimodalSettings | null>(null);
   const [multimodalStatus, setMultimodalStatus] = useState<MultimodalProviderStatus[]>([]);
   const [multimodalDraft, setMultimodalDraft] = useState<Record<string, string>>({});
+  const [multimodalLoadFailed, setMultimodalLoadFailed] = useState(false);
+  const [multimodalRefreshing, setMultimodalRefreshing] = useState(false);
   const [runtimeMessage, setRuntimeMessage] = useState("");
   const [concurrency, setConcurrency] = useState<AgentConcurrencyInfo | null>(null);
   const [interviewMode, setInterviewMode] = useState<"smart" | "build-only" | "off">("build-only");
 
-  const refresh = useCallback(async () => {
+  const refreshMultimodal = useCallback(async () => {
     const api = ipc();
-    if (!api) return;
-    const [s, a, o, g, u, c, glmK, kimiK, dsK, baseUrl, providers, mmSettings, mmStatus] =
-      await Promise.all([
-        api.runtime.detect(),
-        api.secrets.hasApiKey("anthropic"),
-        api.secrets.hasApiKey("openai"),
-        api.secrets.hasApiKey("google"),
-        api.secrets.hasApiKey("upstage"),
-        api.secrets.hasApiKey("custom"),
-        api.secrets.hasApiKey("glm"),
-        api.secrets.hasApiKey("kimi"),
-        api.secrets.hasApiKey("deepseek"),
-        api.config.getCustomBaseUrl(),
+    if (!api) return false;
+    setMultimodalRefreshing(true);
+    try {
+      const [providers, settings, status] = await Promise.allSettled([
         api.multimodal.listProviders(),
         api.multimodal.getSettings(),
         api.multimodal.status(),
       ]);
+      if (providers.status === "fulfilled") setMultimodalProviders(providers.value);
+      if (settings.status === "fulfilled") setMultimodalSettings(settings.value);
+      if (status.status === "fulfilled") setMultimodalStatus(status.value);
+      const failed = [providers, settings, status].some((result) => result.status === "rejected");
+      setMultimodalLoadFailed(failed);
+      return !failed;
+    } finally {
+      setMultimodalRefreshing(false);
+    }
+  }, []);
+
+  const refresh = useCallback(async () => {
+    const api = ipc();
+    if (!api) return;
     api.system?.concurrencyInfo().then(setConcurrency).catch(() => {});
     api.interview?.getMode().then(setInterviewMode).catch(() => {});
-    setStatuses(s);
-    setHasKey({
-      anthropic: a,
-      openai: o,
-      google: g,
-      upstage: u,
-      custom: c,
-      glm: glmK,
-      kimi: kimiK,
-      deepseek: dsK,
+    const runtimeRefresh = api.runtime.detect().then(setStatuses);
+    const keyRefresh = Promise.all([
+      api.secrets.hasApiKey("anthropic"),
+      api.secrets.hasApiKey("openai"),
+      api.secrets.hasApiKey("google"),
+      api.secrets.hasApiKey("upstage"),
+      api.secrets.hasApiKey("custom"),
+      api.secrets.hasApiKey("glm"),
+      api.secrets.hasApiKey("kimi"),
+      api.secrets.hasApiKey("deepseek"),
+      api.config.getCustomBaseUrl(),
+    ]).then(([a, o, g, u, c, glmK, kimiK, dsK, baseUrl]) => {
+      setHasKey({
+        anthropic: a,
+        openai: o,
+        google: g,
+        upstage: u,
+        custom: c,
+        glm: glmK,
+        kimi: kimiK,
+        deepseek: dsK,
+      });
+      setCustomBaseUrl(baseUrl);
+      setDraftCustomBaseUrl(baseUrl);
     });
-    setCustomBaseUrl(baseUrl);
-    setDraftCustomBaseUrl(baseUrl);
-    setMultimodalProviders(providers);
-    setMultimodalSettings(mmSettings);
-    setMultimodalStatus(mmStatus);
-  }, []);
+
+    // 런타임·키·멀티모달은 서로 다른 설정 도메인이다. 한 도메인의 IPC 실패가
+    // 나머지 화면까지 초기화하지 못하게 만들지 않도록 각각 독립적으로 정착시킨다.
+    await Promise.allSettled([runtimeRefresh, keyRefresh, refreshMultimodal()]);
+  }, [refreshMultimodal]);
 
   useEffect(() => {
     void refresh();
@@ -248,7 +271,7 @@ export default function SettingsPage() {
     try {
       const next = await api.multimodal.saveSettings({ ...multimodalSettings, ...patch });
       setMultimodalSettings(next);
-      setMultimodalStatus(await api.multimodal.status());
+      await refreshMultimodal();
       setRuntimeMessage("");
     } catch (err) {
       setRuntimeMessage(locale === "ko" ? `프로바이더를 바꾸지 못했습니다. 이전 설정이 유지됩니다. ${String(err)}` : `Provider did not change. The previous setting was kept. ${String(err)}`);
@@ -296,6 +319,7 @@ export default function SettingsPage() {
       >
         <Banner />
         <UpdatePanel />
+        <MobileBridgePanel />
 
         {/* 언어 선택 */}
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
@@ -572,10 +596,13 @@ export default function SettingsPage() {
           providers={multimodalProviders}
           settings={multimodalSettings}
           status={multimodalStatus}
+          loadFailed={multimodalLoadFailed}
+          refreshing={multimodalRefreshing}
           drafts={multimodalDraft}
           onDraftChange={(key, value) => setMultimodalDraft((draft) => ({ ...draft, [key]: value }))}
           onSelect={(modality, providerId) => void saveMultimodalProvider(modality, providerId)}
           onSaveEnv={(key) => void saveMultimodalEnv(key)}
+          onRetry={() => void refreshMultimodal()}
         />
 
         {/* 로컬 모델 (Ollama) */}
@@ -779,6 +806,197 @@ export default function SettingsPage() {
   );
 }
 
+function MobileBridgePanel() {
+  const { locale } = useT();
+  const [status, setStatus] = useState<MobileBridgeRuntimeStatus | null>(null);
+  const [devices, setDevices] = useState<MobileBridgeDeviceSummary[]>([]);
+  const [pairing, setPairing] = useState<MobileBridgePairingPayload | null>(null);
+  const [qrDataUrl, setQrDataUrl] = useState("");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    const api = ipc();
+    if (!api) return;
+    try {
+      const [nextStatus, nextDevices] = await Promise.all([
+        api.mobileBridge.status(),
+        api.mobileBridge.listDevices(),
+      ]);
+      setStatus(nextStatus);
+      setDevices(nextDevices);
+      setMessage(nextStatus.error ?? "");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  async function issuePairing() {
+    const api = ipc();
+    if (!api || busy) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const payload = await api.mobileBridge.issuePairing();
+      const encoded = JSON.stringify(payload);
+      const image = await QRCode.toDataURL(encoded, {
+        errorCorrectionLevel: "L",
+        margin: 3,
+        width: 384,
+        color: { dark: "#111210", light: "#FFFFFF" },
+      });
+      setPairing(payload);
+      setQrDataUrl(image);
+      await refresh();
+    } catch (error) {
+      setPairing(null);
+      setQrDataUrl("");
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyPairing() {
+    if (!pairing) return;
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(pairing));
+      setMessage(locale === "ko" ? "1회용 연결 내용을 복사했습니다." : "One-time pairing payload copied.");
+    } catch {
+      setMessage(locale === "ko" ? "클립보드에 복사하지 못했습니다." : "Could not copy to the clipboard.");
+    }
+  }
+
+  async function revoke(device: MobileBridgeDeviceSummary) {
+    const api = ipc();
+    if (!api) return;
+    const confirmed = window.confirm(
+      locale === "ko"
+        ? `${device.name}의 모바일 연결을 해제할까요? 즉시 다시 인증해야 합니다.`
+        : `Disconnect ${device.name}? It will need to pair again.`,
+    );
+    if (!confirmed) return;
+    const result = await api.mobileBridge.revokeDevice(device.deviceId);
+    if (!result.ok) {
+      setMessage(locale === "ko" ? "이미 해제됐거나 찾을 수 없는 기기입니다." : "The device was already revoked or not found.");
+    }
+    await refresh();
+  }
+
+  const activeDevices = devices.filter((device) => device.revokedAt === null);
+  return (
+    <>
+      <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
+        {locale === "ko" ? "Agentlas Mobile 연결" : "Agentlas Mobile connection"}
+      </h2>
+      <div
+        style={{
+          padding: 16,
+          border: "1px solid var(--paper-edge)",
+          borderRadius: 18,
+          background: "var(--paper)",
+          boxShadow: "var(--neu-raised)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 280px", minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>
+              {status?.running
+                ? locale === "ko" ? "이 Desktop을 폰에서 제어할 수 있습니다" : "This Desktop is ready for Mobile"
+                : locale === "ko" ? "모바일 연결을 시작하지 못했습니다" : "Mobile connection is unavailable"}
+            </div>
+            <div style={{ marginTop: 4, color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5, overflowWrap: "anywhere" }}>
+              {status?.endpoint ?? (locale === "ko" ? "Desktop Bridge가 준비되지 않았습니다." : "Desktop Bridge is not ready.")}
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={!status?.running || busy}
+            onClick={() => void issuePairing()}
+            style={{
+              border: 0,
+              borderRadius: 999,
+              padding: "9px 16px",
+              background: status?.running && !busy ? "var(--ink)" : "var(--paper-2)",
+              color: status?.running && !busy ? "var(--paper)" : "var(--muted-deep)",
+              fontSize: 12,
+              fontWeight: 700,
+              boxShadow: status?.running && !busy ? "0 6px 16px -6px rgba(20,20,20,.5)" : "none",
+            }}
+          >
+            {busy
+              ? locale === "ko" ? "QR 만드는 중…" : "Creating QR…"
+              : locale === "ko" ? "새 기기 연결" : "Pair a device"}
+          </button>
+        </div>
+
+        {pairing && qrDataUrl && (
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(200px, 240px) 1fr", gap: 20, marginTop: 18, alignItems: "center" }}>
+            <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 18, background: "#fff", padding: 12 }}>
+              {/* The data URL is produced locally; the QR contains a two-minute nonce and public certificate only. */}
+              <img src={qrDataUrl} alt={locale === "ko" ? "Agentlas Mobile 연결 QR" : "Agentlas Mobile pairing QR"} style={{ display: "block", width: "100%", aspectRatio: "1" }} />
+            </div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>
+                {locale === "ko" ? "폰에서 이 QR을 스캔하세요" : "Scan this QR from your phone"}
+              </div>
+              <p style={{ margin: "6px 0 12px", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.6 }}>
+                {locale === "ko"
+                  ? "2분 후 만료되며 한 번만 쓸 수 있습니다. 장기 기기 키나 Desktop 비밀값은 QR에 들어가지 않습니다."
+                  : "It expires in two minutes and works once. The QR never contains a long-lived device key or Desktop secret."}
+              </p>
+              <button
+                type="button"
+                onClick={() => void copyPairing()}
+                style={{ border: "1px solid var(--paper-edge)", borderRadius: 999, padding: "7px 12px", background: "var(--paper-2)", color: "var(--ink)", fontSize: 11.5, fontWeight: 700 }}
+              >
+                {locale === "ko" ? "연결 내용 복사" : "Copy pairing payload"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {message && (
+          <div role="status" style={{ marginTop: 12, padding: "9px 11px", borderRadius: 10, background: "var(--paper-2)", color: "var(--ink-soft)", fontSize: 11.5, overflowWrap: "anywhere" }}>
+            {message}
+          </div>
+        )}
+
+        <div style={{ marginTop: 16, borderTop: "1px solid var(--paper-edge)", paddingTop: 14 }}>
+          <div style={{ color: "var(--muted-deep)", fontSize: 11, fontWeight: 700, marginBottom: 8 }}>
+            {locale === "ko" ? `연결된 모바일 ${activeDevices.length}대` : `${activeDevices.length} paired mobile device${activeDevices.length === 1 ? "" : "s"}`}
+          </div>
+          {activeDevices.length === 0 ? (
+            <div style={{ color: "var(--muted-deep)", fontSize: 12 }}>
+              {locale === "ko" ? "아직 연결된 기기가 없습니다." : "No mobile device is paired yet."}
+            </div>
+          ) : activeDevices.map((device) => (
+            <div key={device.deviceId} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 650 }}>{device.name}</div>
+                <div style={{ color: "var(--muted-deep)", fontSize: 10.5 }}>
+                  {device.platform.toUpperCase()} · {new Date(device.issuedAt).toLocaleString(locale === "ko" ? "ko-KR" : "en-US")}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void revoke(device)}
+                style={{ border: "1px solid var(--paper-edge)", borderRadius: 999, padding: "5px 10px", background: "transparent", color: "var(--red-deep, #b4533a)", fontSize: 11, fontWeight: 700 }}
+              >
+                {locale === "ko" ? "연결 해제" : "Revoke"}
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
 /** 메모리 & 진단 — 유휴 드리밍 큐레이션 토글(옵트인) + Hephaestus 엔진 진단/슈퍼바이저.
  *  드리밍: 자리를 비운 유휴 시간에만 큐레이터 메모리를 통합(dedup+LLM 요약). 기본 OFF. */
 function MemoryDiagnosticsPanel() {
@@ -931,18 +1149,24 @@ function MultimodalFallbackPanel({
   providers,
   settings,
   status,
+  loadFailed,
+  refreshing,
   drafts,
   onDraftChange,
   onSelect,
   onSaveEnv,
+  onRetry,
 }: {
   providers: MultimodalProvider[];
   settings: MultimodalSettings | null;
   status: MultimodalProviderStatus[];
+  loadFailed: boolean;
+  refreshing: boolean;
   drafts: Record<string, string>;
   onDraftChange: (key: string, value: string) => void;
   onSelect: (modality: MultimodalModality, providerId: string) => void;
   onSaveEnv: (key: string) => void;
+  onRetry: () => void;
 }) {
   const { t, locale } = useT();
   const selected = {
@@ -965,6 +1189,34 @@ function MultimodalFallbackPanel({
       <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 12px", lineHeight: 1.55 }}>
         {t("settings.multimodal.note")}
       </p>
+      {loadFailed && (
+        <div
+          role="alert"
+          data-testid="settings-multimodal-error"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "10px 12px",
+            marginBottom: 10,
+            border: "1px solid var(--peach-edge, #e8b99f)",
+            borderRadius: "var(--radius-md)",
+            background: "var(--peach-soft, #fff3ec)",
+            color: "var(--ink-soft)",
+            fontSize: 12,
+            lineHeight: 1.5,
+          }}
+        >
+          <span style={{ flex: 1 }}>
+            {locale === "en"
+              ? "Some multimodal connection details could not be loaded. Other settings are still available."
+              : "일부 멀티모달 연결 정보를 불러오지 못했습니다. 다른 설정은 그대로 사용할 수 있습니다."}
+          </span>
+          <button type="button" onClick={onRetry} disabled={refreshing} style={multimodalSecretButtonStyle}>
+            {refreshing ? (locale === "en" ? "Retrying…" : "다시 확인 중…") : locale === "en" ? "Retry" : "다시 시도"}
+          </button>
+        </div>
+      )}
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {modalities.map((modality) => {
           const items = providers.filter((provider) => provider.modality === modality.id);

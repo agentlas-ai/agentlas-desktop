@@ -44,7 +44,8 @@ export default function PromptStorePage() {
   const [tasteCount, setTasteCount] = useState(0);
   const [active, setActive] = useState<HubPromptSummary | null>(null);
   const [notice, setNotice] = useState<{ tone: "ok" | "error"; text: string; action?: "pricing" | "signin" } | null>(null);
-  const [pendingStart, setPendingStart] = useState<{ body: string; inputs: string } | null>(null);
+  const [pendingStart, setPendingStart] = useState<{ body: string; inputs: string; failed: boolean } | null>(null);
+  const [pendingStartBusy, setPendingStartBusy] = useState(false);
   const [bookmarkBusy, setBookmarkBusy] = useState<string | null>(null);
   const seqRef = useRef(0);
 
@@ -169,12 +170,34 @@ export default function PromptStorePage() {
   }
 
   // 써보기 — body 확보 후: 입력물 안내(있으면) → 새 채팅 시작(?prompt= 시드).
-  function handleStart(body: string, inputs: string) {
+  async function handleStart(body: string, inputs: string): Promise<boolean> {
     if (inputs.trim()) {
-      setPendingStart({ body, inputs: inputs.trim() });
-      return;
+      setPendingStart({ body, inputs: inputs.trim(), failed: false });
+      return true;
     }
-    void startChatWithPrompt(body);
+    return startChatWithPrompt(body);
+  }
+
+  async function confirmPendingStart() {
+    const request = pendingStart;
+    if (!request || pendingStartBusy) return;
+    setPendingStartBusy(true);
+    setPendingStart((current) => current ? { ...current, failed: false } : current);
+    try {
+      // Keep the exact one-time prompt body and required-input note mounted
+      // until chat creation succeeds. A failed create can therefore retry
+      // without re-unlocking or consuming another taste.
+      const ok = await startChatWithPrompt(request.body, { seedOnly: true });
+      if (ok) {
+        setPendingStart(null);
+      } else {
+        setPendingStart((current) =>
+          current && current.body === request.body ? { ...current, failed: true } : current,
+        );
+      }
+    } finally {
+      setPendingStartBusy(false);
+    }
   }
 
   const normalizedQuery = q.trim().toLowerCase();
@@ -355,13 +378,17 @@ export default function PromptStorePage() {
                   <PromptInputsConfirmDialog
                     inputs={pendingStart.inputs}
                     ko={ko}
-                    onConfirm={() => {
-                      const body = pendingStart.body;
-                      setPendingStart(null);
-                      // 입력물 필요 — 자동 전송 대신 입력창 시드만(첨부 기회 제공).
-                      void startChatWithPrompt(body, { seedOnly: true });
-                    }}
+                    onConfirm={() => void confirmPendingStart()}
                     onCancel={() => setPendingStart(null)}
+                    busy={pendingStartBusy}
+                    retry={pendingStart.failed}
+                    error={
+                      pendingStart.failed
+                        ? ko
+                          ? "새 채팅을 만들지 못했습니다. 프롬프트와 입력물 안내는 그대로 보존됐습니다."
+                          : "Could not create the chat. Your prompt and required-input note were preserved."
+                        : null
+                    }
                   />
                 )}
               </div>
@@ -500,7 +527,7 @@ function PromptDetailDialog({
   onPatched: (slug: string, patch: Partial<HubPromptSummary>) => void;
   onTasted: () => void;
   onSignIn: () => Promise<boolean>;
-  onStart: (body: string, inputs: string) => void;
+  onStart: (body: string, inputs: string) => Promise<boolean>;
 }) {
   const [detail, setDetail] = useState<PromptDetail | null>(null);
   const [body, setBody] = useState<string | null>(null);
@@ -508,6 +535,8 @@ function PromptDetailDialog({
   const [busy, setBusy] = useState<"unlock" | "taste" | null>(null);
   const [gate, setGate] = useState<"subscription" | "tasted-gone" | "unauthenticated" | "error" | null>(null);
   const [copied, setCopied] = useState(false);
+  const [startBusy, setStartBusy] = useState(false);
+  const [startFailed, setStartFailed] = useState(false);
 
   const merged: PromptDetail = { ...prompt, ...(detail ?? {}) };
   const title = pickText(ko, merged.titleKo, merged.titleEn) || merged.slug;
@@ -620,6 +649,18 @@ function PromptDetailDialog({
     }
   }
 
+  async function startFromDetail() {
+    if (!body || startBusy) return;
+    setStartBusy(true);
+    setStartFailed(false);
+    try {
+      const accepted = await onStart(body, inputs);
+      if (!accepted) setStartFailed(true);
+    } finally {
+      setStartBusy(false);
+    }
+  }
+
   const tastedGone = gate === "tasted-gone" || (!body && !paid && signedIn && merged.tasted === true);
 
   return (
@@ -710,12 +751,32 @@ function PromptDetailDialog({
                   : "This taste is shown only here. Once you close it, it cannot be reopened."}
               </div>
             )}
+            {startFailed && (
+              <div
+                role="alert"
+                data-testid="prompt-start-error"
+                style={{ ...detailBlock, color: "var(--rd-warn)" }}
+              >
+                {ko
+                  ? "새 채팅을 만들지 못했습니다. 프롬프트는 그대로 유지됩니다."
+                  : "Could not create the chat. Your prompt is still here."}
+              </div>
+            )}
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
               <button type="button" className="btn sm" onClick={() => void copyBody()}>
                 {copied ? (ko ? "복사됨" : "Copied") : ko ? "복사" : "Copy"}
               </button>
-              <button type="button" className="btn sm primary" onClick={() => onStart(body, inputs)}>
-                {ko ? "이 프롬프트로 새 채팅 시작" : "Start a new chat with this prompt"}
+              <button
+                type="button"
+                className="btn sm primary"
+                onClick={() => void startFromDetail()}
+                disabled={startBusy}
+              >
+                {startBusy
+                  ? ko ? "채팅 만드는 중…" : "Creating chat…"
+                  : startFailed
+                    ? ko ? "다시 시도" : "Retry"
+                    : ko ? "이 프롬프트로 새 채팅 시작" : "Start a new chat with this prompt"}
               </button>
             </div>
           </div>

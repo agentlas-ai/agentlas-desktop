@@ -17,5 +17,6 @@ assert.match(
 );
 assert.match(source, /\$\{ko \? "자" : " chars"\}/, "source character-count tooltip must follow the active locale");
 assert.match(source, /ko \? "Antigravity 나노바나나" : "Antigravity nano-banana"/, "Gemini image option must not leak Korean into English mode");
+assert.match(source, /ko \? "광고" : "Advertise"/, "advertise genre label must follow the active locale");
 
 console.log("T-rex palette locale contract ok");

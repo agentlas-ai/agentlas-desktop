@@ -12,7 +12,17 @@ import {
   type Reference,
   type ReferenceType,
 } from "@/lib/citations";
-import { loadReferences, loadStyle, newReferenceId, saveReferences, saveStyle } from "@/lib/document-store";
+import {
+  clearDocumentDraft,
+  loadDocumentDraft,
+  loadReferences,
+  loadStyle,
+  newReferenceId,
+  saveDocumentDraft,
+  saveReferences,
+  saveStyle,
+  type DocumentStudioDraftInput,
+} from "@/lib/document-store";
 import {
   IconApps,
   IconCheck,
@@ -67,6 +77,7 @@ export default function DocumentStudioPage() {
   const [statusMsg, setStatusMsg] = useState<{ kind: "ok" | "error" | "info"; text: string } | null>(null);
   const [aiAvailable, setAiAvailable] = useState<boolean | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
+  const [draftHydrated, setDraftHydrated] = useState(false);
 
   const [references, setReferences] = useState<Reference[]>([]);
   const [citationStyle, setCitationStyle] = useState<CitationStyle>("APA");
@@ -79,9 +90,35 @@ export default function DocumentStudioPage() {
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const selection = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
   const firstSave = useRef(true); // 초기 [] 로 저장된 소스를 덮어쓰지 않도록 첫 저장을 건너뛴다.
+  const draftHydratedRef = useRef(false);
+  const draftSnapshotRef = useRef<DocumentStudioDraftInput>({
+    title: "",
+    body: "",
+    figureSrc: "",
+    figureCaption: "",
+  });
 
-  // 초기 로드: 저장된 소스/스타일 + LLM 가용 여부.
+  if (draftHydrated) {
+    draftSnapshotRef.current = { title, body: documentText, figureSrc, figureCaption };
+  }
+
+  // 초기 로드: 작성 중인 초안 + 저장된 소스/스타일 + LLM 가용 여부.
   useEffect(() => {
+    const restored = loadDocumentDraft();
+    if (restored) {
+      setTitle(restored.title);
+      setDocumentText(restored.body);
+      setFigureSrc(restored.figureSrc);
+      setFigureCaption(restored.figureCaption);
+      draftSnapshotRef.current = {
+        title: restored.title,
+        body: restored.body,
+        figureSrc: restored.figureSrc,
+        figureCaption: restored.figureCaption,
+      };
+    }
+    draftHydratedRef.current = true;
+    setDraftHydrated(true);
     setReferences(loadReferences());
     const s = loadStyle();
     if (s && (CITATION_STYLES as string[]).includes(s)) setCitationStyle(s);
@@ -90,6 +127,22 @@ export default function DocumentStudioPage() {
       .then((st) => setAiAvailable(Boolean(st?.agy || st?.codex)))
       .catch(() => setAiAvailable(false));
   }, []);
+
+  // Synchronous localStorage writes are debounced while typing. The unmount
+  // boundary below flushes the ref immediately, so route changes cannot lose
+  // the final keystroke that is still inside this debounce window.
+  useEffect(() => {
+    if (!draftHydrated) return;
+    const timer = window.setTimeout(() => saveDocumentDraft(draftSnapshotRef.current), 250);
+    return () => window.clearTimeout(timer);
+  }, [draftHydrated, title, documentText, figureSrc, figureCaption]);
+
+  useEffect(
+    () => () => {
+      if (draftHydratedRef.current) saveDocumentDraft(draftSnapshotRef.current);
+    },
+    [],
+  );
 
   // 소스 변경 시 영속. 첫 실행(초기 []) 은 건너뛰어 저장된 소스를 클로버하지 않는다.
   useEffect(() => {
@@ -113,6 +166,39 @@ export default function DocumentStudioPage() {
 
   function setError(text: string) {
     setStatusMsg({ kind: "error", text });
+  }
+
+  function startNewDocument() {
+    const hasDraft = Boolean(title || documentText || figureSrc || figureCaption);
+    if (
+      hasDraft &&
+      !window.confirm(
+        locale === "en"
+          ? "Start a new document? The current title, body, figure, and caption will be cleared."
+          : "새 문서를 시작할까요? 현재 제목, 본문, 도표, 캡션이 지워집니다.",
+      )
+    ) {
+      return;
+    }
+    const emptyDraft: DocumentStudioDraftInput = {
+      title: "",
+      body: "",
+      figureSrc: "",
+      figureCaption: "",
+    };
+    clearDocumentDraft();
+    draftSnapshotRef.current = emptyDraft;
+    setTitle("");
+    setDocumentText("");
+    setFigureSrc("");
+    setFigureCaption("");
+    setGoal(exampleGoal);
+    setMode("paper");
+    setGeneratedAt(null);
+    setGenEngine(null);
+    setStatusMsg(null);
+    setExportStatus(null);
+    selection.current = { start: 0, end: 0 };
   }
 
   async function generate() {
@@ -289,6 +375,16 @@ export default function DocumentStudioPage() {
           <IconApps size={15} />
           Apps
         </Link>
+        <button
+          type="button"
+          className="titlebar-nodrag"
+          data-testid="document-studio-new-document"
+          onClick={startNewDocument}
+          style={newDocumentButton}
+        >
+          <IconPlus size={13} />
+          {locale === "en" ? "New document" : "새 문서"}
+        </button>
         <div style={{ position: "relative", marginLeft: "auto" }} className="titlebar-nodrag">
           <button type="button" onClick={() => setCitationOpen((o) => !o)} style={citationButton} title={locale === "en" ? "Citation style" : "인용 스타일"}>
             {citationStyle}
@@ -701,6 +797,7 @@ const RESPONSIVE_CSS = `
 const shell: CSSProperties = { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--paper-edge)", color: "var(--ink)" };
 const topToolbar: CSSProperties = { minHeight: 42, borderBottom: "1px solid var(--paper-edge)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 6, padding: "6px 16px 6px 90px", flexShrink: 0 };
 const backLink: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 6, color: "var(--accent)", fontWeight: 800, fontSize: 12, textDecoration: "none" };
+const newDocumentButton: CSSProperties = { minHeight: 30, border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", color: "var(--ink-soft)", display: "inline-flex", alignItems: "center", gap: 5, padding: "0 9px", fontSize: 11.5, fontWeight: 800, cursor: "pointer" };
 const citationButton: CSSProperties = { height: 32, minWidth: 84, border: "1px solid var(--paper-edge)", borderRadius: 999, background: "var(--paper)", display: "inline-flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "0 12px", color: "var(--ink)", fontWeight: 800 };
 const citationMenu: CSSProperties = { position: "absolute", top: 38, right: 0, width: 200, maxHeight: 360, border: "1px solid #e2e5ea", borderRadius: 8, background: "var(--paper)", boxShadow: "0 18px 48px rgba(15,23,42,.16)", padding: 8, zIndex: 20 };
 const citationList: CSSProperties = { display: "grid", gap: 1, maxHeight: 320, overflowY: "auto" };

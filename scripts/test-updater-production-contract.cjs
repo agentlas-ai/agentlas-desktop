@@ -43,6 +43,7 @@ class FakeUpdater extends EventEmitter {
     this.checkCount = 0;
     this.downloadCount = 0;
     this.installCount = 0;
+    this.installArgs = [];
   }
 
   async checkForUpdates() {
@@ -65,8 +66,9 @@ class FakeUpdater extends EventEmitter {
     return ["update.zip"];
   }
 
-  quitAndInstall() {
+  quitAndInstall(isSilent, isForceRunAfter) {
     this.installCount += 1;
+    this.installArgs.push([isSilent, isForceRunAfter]);
     if (this.installError) throw this.installError;
   }
 }
@@ -522,6 +524,11 @@ async function transientFailuresAndConcurrencyPreserveTruth() {
   assert.equal((await installOne).accepted, true);
   assert.equal(captureCount, 1);
   assert.equal(installUpdater.installCount, 1, "quitAndInstall must run exactly once");
+  assert.deepEqual(
+    installUpdater.installArgs,
+    [[true, true]],
+    "Windows updates must install silently and relaunch Agentlas",
+  );
   installing.controller.dispose();
   fs.rmSync(installLayout.root, { recursive: true, force: true });
 }

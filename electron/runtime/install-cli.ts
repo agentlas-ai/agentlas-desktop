@@ -20,8 +20,8 @@ const CLI_PLAN: Record<InstallableCli, { pkg: string; loginCmd: string; bin: str
   // 공식 Gemini CLI가 Google OAuth + 전역 extension/skills/MCP를 모두 지원한다.
   // 기존 Antigravity(agy)는 이미 설치된 머신의 호환 폴백으로만 감지한다.
   gemini: { pkg: "@google/gemini-cli", loginCmd: "gemini", bin: "gemini" },
-  // grok-cli는 xAI 키(XAI_API_KEY/GROK_API_KEY)로 동작 — 로그인 명령은 대화형 셸을 연다(키 설정·확인용).
-  grok: { pkg: "grok-dev", loginCmd: "grok", bin: "grok" },
+  // Official xAI Grok Build CLI. Primary auth is browser OAuth; API key remains a headless fallback.
+  grok: { pkg: "@xai-official/grok", loginCmd: "grok login", bin: "grok" },
 };
 
 const AGENTLAS_NPM_PREFIX = path.join(os.homedir(), ".agentlas", "npm");
@@ -86,9 +86,9 @@ export interface CliActionResult {
   command?: string;
 }
 
-/** grok-cli 공식 install.sh 실행 (curl | bash). ~/.grok/bin에 바이너리 설치 — sudo 불필요. */
+/** Official xAI Grok Build install.sh (curl | bash). Installs under ~/.grok/bin without sudo. */
 function installGrokViaScript(): Promise<CliActionResult> {
-  const url = "https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh";
+  const url = "https://x.ai/cli/install.sh";
   const command = `curl -fsSL ${url} | bash`;
   return new Promise<CliActionResult>((resolve) => {
     let settled = false;

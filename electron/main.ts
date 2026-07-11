@@ -36,6 +36,14 @@ import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
 import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser/approval-server";
 import { authorizeLocalMediaPath } from "./fs/access";
 import { setCurrentUiLocale } from "./ui-locale";
+import {
+  issueMobileBridgePairing,
+  listMobileBridgeDevices,
+  mobileBridgeRuntimeStatus,
+  revokeMobileBridgeDevice,
+  startAgentlasMobileBridge,
+  stopAgentlasMobileBridge,
+} from "./mobile-bridge/runtime";
 
 export { currentUiLocale } from "./ui-locale";
 
@@ -298,6 +306,9 @@ app.on("before-quit", () => {
   try { disposeAppFactoryLaunches(); } catch {}
   try { disposeAuthSessionInvalidation?.(); } catch {}
   disposeAuthSessionInvalidation = null;
+  void stopAgentlasMobileBridge().catch((error) => {
+    console.error("[mobile-bridge] shutdown failed", error);
+  });
 });
 
 app.whenReady().then(async () => {
@@ -347,6 +358,17 @@ app.whenReady().then(async () => {
   // managed assets against the recovery copies. Recovery-required stops here.
   await initAutoUpdater();
   registerIpcHandlers();
+  // DESKTOP_MOBILE_BRIDGE: Desktop main is the sole authority. Renderer IPC
+  // can issue/revoke pairing, but never receives a persisted bearer token.
+  ipcMain.handle("mobileBridge:status", () => mobileBridgeRuntimeStatus());
+  ipcMain.handle("mobileBridge:issuePairing", () => issueMobileBridgePairing());
+  ipcMain.handle("mobileBridge:listDevices", () => listMobileBridgeDevices());
+  ipcMain.handle("mobileBridge:revokeDevice", (_event, deviceId: unknown) => {
+    if (typeof deviceId !== "string" || !/^device_[a-f0-9]{32}$/.test(deviceId)) {
+      return { ok: false };
+    }
+    return revokeMobileBridgeDevice(deviceId);
+  });
   setCurrentUiLocale(resolveMenuLocale());
   applyAppMenu(resolveMenuLocale());
   ipcMain.handle("menu:setLocale", (_e, locale: unknown) => {
@@ -389,6 +411,17 @@ app.whenReady().then(async () => {
   // 설치된 에이전트 폴더의 파일을 보장 — 라이브러리 우측 패널이 즉시 보여줄 수 있게.
   materializeAllAgents();
   ensureDefaultMcpPluginsInstalled();
+  // Start only after update continuity and store bootstrap have passed. A
+  // bridge failure must not make Desktop unusable; Settings exposes the exact
+  // failure and can retry on the next launch.
+  try {
+    await startAgentlasMobileBridge({
+      userDataPath: app.getPath("userData"),
+      appVersion: app.getVersion(),
+    });
+  } catch (err) {
+    console.error("[mobile-bridge] start failed:", err);
+  }
   // Browser 승인 서버 — continuity gate가 닫힌 뒤에만 로컬 작업 서버를 연다.
   void startBrowserApprovalServer().catch((err) =>
     console.error("[browser] approval server failed:", err),

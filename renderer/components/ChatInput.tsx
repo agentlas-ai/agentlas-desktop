@@ -1296,11 +1296,15 @@ export function ChatInput({
           <div className="chat-input-tools-left">
             {/* + 메뉴 */}
             <button
+              type="button"
               onClick={() => {
                 setPlusOpen((v) => !v);
                 setPlusSubmenu(null);
               }}
+              data-chat-plus-button="true"
               aria-label={t("chatinput.plus")}
+              aria-expanded={plusOpen}
+              aria-haspopup="menu"
               title={t("chatinput.plus")}
               disabled={disabled}
               style={toolBtnStyle(plusOpen)}
@@ -2297,7 +2301,7 @@ function PlusMenu({
     );
   }
   return (
-    <Popover>
+    <Popover dataKind="plus-menu" role="menu">
       <Row
         onClick={onAddFile}
         icon={<IconFileUp size={14} />}

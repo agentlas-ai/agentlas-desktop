@@ -63,6 +63,24 @@ function orderListingsForHub(listings: MarketplaceListing[], hubLive: boolean): 
   });
 }
 
+/** 같은 slug이 "호출 가능" 카드와 "설치 전용" 카드로 이중 인덱싱될 때(동일 패키지의 그림자)
+ *  설치 전용 그림자를 숨긴다 — 호출 가능한 쪽이 상위호환(설치 없이 바로 실행)이라 중복 카드가 헷갈린다.
+ *  둘 다 호출 가능한 진짜 별개 엔티티(팀+에이전트 동일 slug)는 그대로 둘 다 남겨 북마크 정체성을 보존한다. */
+function dropInstallOnlyShadows(listings: MarketplaceListing[]): MarketplaceListing[] {
+  const callableSlugs = new Set<string>();
+  for (const l of listings) {
+    if (l.callable === true || l.kind === "cloud-callable") {
+      const slug = (l.slug || "").trim().toLowerCase();
+      if (slug) callableSlugs.add(slug);
+    }
+  }
+  return listings.filter((l) => {
+    if (l.callable === true || l.kind === "cloud-callable") return true;
+    const slug = (l.slug || "").trim().toLowerCase();
+    return !(slug && callableSlugs.has(slug));
+  });
+}
+
 /** 카드 필터와 hep-search 폴백 판정이 같은 기준을 쓰도록 공용 predicate로 추출. */
 function listingMatchesQuery(l: MarketplaceListing, normalizedQuery: string): boolean {
   if (!normalizedQuery) return true;
@@ -312,7 +330,9 @@ function MarketplacePage() {
   const hubAvailable = Boolean(sourceStatus?.online && !sourceStatus.usingFallback);
 
   const matchingListings = orderListingsForHub(
-    listings.filter(isLiveHubListing).filter((l) => listingMatchesQuery(l, normalizedQuery)),
+    dropInstallOnlyShadows(
+      listings.filter(isLiveHubListing).filter((l) => listingMatchesQuery(l, normalizedQuery)),
+    ),
     hubLive,
   );
 
@@ -564,12 +584,16 @@ function MarketplacePage() {
               ) : (
                 <div className="card portal-empty-panel" style={{ padding: 18 }}>
                   <div style={{ fontFamily: "var(--rd-f-display)", fontSize: 20, fontWeight: 400 }}>
-                    {ko ? "표시할 Hub 항목이 없습니다" : "No Hub items to show"}
+                    {!sourceStatus
+                      ? ko ? "Hub 불러오는 중…" : "Loading the Hub…"
+                      : ko ? "표시할 Hub 항목이 없습니다" : "No Hub items to show"}
                   </div>
                   <div style={{ fontSize: 13, color: "var(--rd-ink-3)", lineHeight: 1.55, marginTop: 6 }}>
-                    {hubLive
-                      ? ko ? "검색 조건에 맞는 Hub 항목이 없습니다." : "No Hub items match this search."
-                      : ko ? "Hub 연결이 복구되기 전에는 표시할 항목이 없습니다." : "No items are shown while Hub is unavailable."}
+                    {!sourceStatus
+                      ? ko ? "Hub 연결을 확인하는 중입니다…" : "Checking the Hub connection…"
+                      : hubLive
+                        ? ko ? "검색 조건에 맞는 Hub 항목이 없습니다." : "No Hub items match this search."
+                        : ko ? "Hub 연결이 복구되기 전에는 표시할 항목이 없습니다." : "No items are shown while Hub is unavailable."}
                   </div>
                 </div>
               )}

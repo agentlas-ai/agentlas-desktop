@@ -163,18 +163,19 @@ async function main() {
       ipcMain.removeHandler("invoke:run");
       ipcMain.handle("invoke:run", (event, req) => {
         globalThis.__qaRouting.runs.push(req);
+        const runId = req.runId || "qa-run-1";
         setTimeout(() => {
-          event.sender.send("invoke:event:qa-run-1", {
+          event.sender.send(`invoke:event:${runId}`, {
             kind: "thinking",
             status: "루프 Stormbreaker Loop · armed/scope-lock/route",
           });
         }, 80);
-        return { runId: "qa-run-1" };
+        return { runId };
       });
       ipcMain.removeHandler("invoke:activeChats");
       ipcMain.handle("invoke:activeChats", () => {
         const run = globalThis.__qaRouting.runs[0];
-        if (!run || globalThis.__qaRouting.cancels.includes("qa-run-1")) return [];
+        if (!run || globalThis.__qaRouting.cancels.includes(run.runId || "qa-run-1")) return [];
         return [run.chatId];
       });
       ipcMain.removeHandler("invoke:cancel");
@@ -286,7 +287,7 @@ async function main() {
     assert.ok(rightPanelAfter.width > rightPanelBefore.width + 30, `right panel should resize wider: ${rightPanelBefore.width} -> ${rightPanelAfter.width}`);
     await page.screenshot({ path: path.join(SHOTS, "03-visible-stop.png"), fullPage: true });
     await stopButton.click();
-    await waitForMainQa(app, (qa) => qa.cancels.includes("qa-run-1"));
+    await waitForMainQa(app, (qa) => qa.cancels.includes(run.runId || "qa-run-1"));
     await page.getByRole("button", { name: "중지 요청됨" }).first().waitFor();
     await page.screenshot({ path: path.join(SHOTS, "04-stop-requested.png"), fullPage: true });
 
@@ -368,15 +369,28 @@ async function autocompleteActiveRows(page) {
   });
 }
 
-// "알아서 에이전트 부르기" 토글 — 꺼져 있으면 + 메뉴의 토글 행을, 켜져 있으면 바의 활성 칩을 누른다.
+// "알아서 에이전트 부르기" 토글 — 꺼져 있으면 + 메뉴의 토글 행(button)을, 켜져 있으면 바의 활성 칩을 누른다.
 async function toggleAutoRoute(page) {
   const chip = page.locator(".chat-input-hep-chip", { hasText: "알아서 에이전트 부르기" });
   if (await chip.count()) {
     await chip.first().click();
     return;
   }
-  await page.getByRole("button", { name: /추가 —|Add —/ }).first().click();
-  await page.getByText("알아서 에이전트 부르기").click();
+  const plusButton = page.locator('[data-chat-plus-button="true"]').first();
+  const plusMenu = page.locator('[data-popover-kind="plus-menu"]');
+  if (!(await plusMenu.isVisible())) await plusButton.click();
+  try {
+    await plusMenu.waitFor({ state: "visible", timeout: 2_000 });
+  } catch {
+    const state = await plusButton.evaluate((button) => ({
+      expanded: button.getAttribute("aria-expanded"),
+      disabled: button.disabled,
+      connected: button.isConnected,
+      text: button.getAttribute("aria-label"),
+    }));
+    throw new Error(`Chat + menu did not open: ${JSON.stringify(state)}`);
+  }
+  await plusMenu.getByRole("button", { name: /알아서 에이전트 부르기/ }).click();
   // 팝오버는 바깥 클릭으로 닫힌다 — 입력창을 눌러 닫고 포커스를 되돌린다.
   await page.locator("textarea").first().click();
 }

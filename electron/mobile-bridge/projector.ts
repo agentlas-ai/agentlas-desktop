@@ -1,0 +1,358 @@
+import { listInstalledAgents } from "../mcp/registry";
+import { detectRuntimes } from "../runtime/detect";
+import { listAgentGroups, listResolvedAgentGroups } from "../store/agent-groups";
+import { listAutomations } from "../store/automations";
+import { listChatMessages, listRecentChats } from "../store/chats";
+import { listFirms } from "../store/firms";
+import { listProjects } from "../store/projects";
+import { listPendingConfirmations } from "../confirm";
+import { getUsageSnapshot } from "../usage";
+import type {
+  Automation,
+  Chat,
+  PendingConfirmation,
+  RuntimeStatus,
+  UsageSnapshot,
+} from "../../shared/types";
+
+import type { MobileBridgeHostIdentity } from "./pairing";
+
+import {
+  MOBILE_BRIDGE_PROTOCOL_VERSION,
+  type MobileBridgeAgentDto,
+  type MobileBridgeAgentGroupDto,
+  type MobileBridgeAutomationDto,
+  type MobileBridgeChatDto,
+  type MobileBridgeChatMessageDto,
+  type MobileBridgeFirmDto,
+  type MobileBridgeHostDto,
+  type MobileBridgePendingConfirmationDto,
+  type MobileBridgeProjectDto,
+  type MobileBridgeRuntimeDto,
+  type MobileBridgeSnapshot,
+  type MobileBridgeUsageProviderDto,
+} from "../../shared/mobile-bridge";
+
+export interface MobileBridgeProjectionOptions {
+  /** DESKTOP_MOBILE_BRIDGE: Loaded from userData/mobile-bridge/identity.json. */
+  hostIdentity: MobileBridgeHostIdentity;
+  displayName: string;
+  appVersion: string;
+  activeChatIds?: readonly string[];
+  includeMessagesForChatIds?: readonly string[];
+  maxMessagesPerChat?: number;
+  now?: Date;
+}
+
+function platform(): MobileBridgeHostDto["platform"] {
+  if (process.platform === "darwin") return "macos";
+  if (process.platform === "win32") return "windows";
+  return "linux";
+}
+
+function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
+  return {
+    id: options.hostIdentity.hostId,
+    displayName: options.displayName,
+    platform: platform(),
+    appVersion: options.appVersion,
+    protocolVersion: MOBILE_BRIDGE_PROTOCOL_VERSION,
+    online: true,
+    capabilities: [
+      "agents",
+      "firms",
+      "groups",
+      "projects",
+      "chats",
+      "chat-stream",
+      "steering",
+      "confirmations",
+      "browser-approvals",
+      "automations",
+      "usage",
+    ],
+  };
+}
+
+function agentsDto(): MobileBridgeAgentDto[] {
+  return listInstalledAgents().map((agent) => ({
+    id: agent.id,
+    slug: agent.slug,
+    name: agent.name,
+    nameEn: agent.nameEn,
+    tagline: agent.tagline,
+    taglineEn: agent.taglineEn,
+    trustGrade: agent.trustGrade,
+    installedAt: agent.installedAt,
+    tone: agent.tone,
+    runtimeLabel: agent.runtimeLabel ?? null,
+    assetSource: agent.assetSource ?? null,
+    kind: agent.kind === "team" ? "team" : "agent",
+    visibility: agent.visibility ?? "visible",
+    // DESKTOP_MOBILE_BRIDGE: Only a boolean crosses the bridge. env key names,
+    // hints, values, MCP config, prompts, package hashes, and local paths do not.
+    requiresSetup: agent.envRequirements.some((requirement) => requirement.required),
+  }));
+}
+
+function firmsDto(): MobileBridgeFirmDto[] {
+  return listFirms().map((firm) => ({
+    id: firm.id,
+    slug: firm.slug,
+    name: firm.name,
+    nameEn: firm.nameEn,
+    tagline: firm.tagline,
+    taglineEn: firm.taglineEn,
+    ceoAgentId: firm.ceoAgentId,
+    orgChart: firm.orgChart.map((node) => ({
+      agentId: node.agentId,
+      agentSlug: node.agentSlug,
+      role: node.role,
+      reportsTo: node.reportsTo,
+    })),
+    installedAt: firm.installedAt,
+  }));
+}
+
+async function groupsDto(): Promise<MobileBridgeAgentGroupDto[]> {
+  // `listResolvedAgentGroups` may consult live Hub metadata. If that lookup
+  // fails, preserve the real durable local rows but mark them missing rather
+  // than inventing group members.
+  let groups: Awaited<ReturnType<typeof listResolvedAgentGroups>>;
+  try {
+    groups = await listResolvedAgentGroups();
+  } catch {
+    groups = listAgentGroups().map((group) => ({
+      ...group,
+      warningCount: group.members.length,
+      members: group.members.map((member) => ({
+        ...member,
+        status: "missing" as const,
+        warnings: ["route_missing" as const],
+      })),
+    }));
+  }
+  return groups.map((group) => ({
+    id: group.id,
+    name: group.name,
+    description: group.description,
+    orchestratorName: group.orchestratorName,
+    warningCount: group.warningCount,
+    createdAt: group.createdAt,
+    updatedAt: group.updatedAt,
+    members: group.members.map((member) => {
+      const display = member.current ?? member.snapshot;
+      return {
+        id: member.id,
+        source: member.source,
+        agentId: member.agentId ?? null,
+        agentSlug: member.agentSlug ?? null,
+        hubSlug: member.hubSlug ?? null,
+        firmId: member.firmId ?? null,
+        nodeId: member.nodeId ?? null,
+        role: member.role ?? null,
+        name: display.name,
+        nameEn: display.nameEn,
+        routeLabel: display.routeLabel,
+        status: member.status,
+        warnings: [...member.warnings],
+      };
+    }),
+  }));
+}
+
+function projectsDto(): MobileBridgeProjectDto[] {
+  return listProjects().map((project) => ({
+    id: project.id,
+    name: project.name,
+    description: project.description,
+    defaultAgentId: project.defaultAgentId,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+    // DESKTOP_MOBILE_BRIDGE: contextNote and folderPath intentionally omitted.
+  }));
+}
+
+/** DESKTOP_MOBILE_BRIDGE: One canonical secret-free chat DTO for snapshots and RPC replies. */
+export function projectMobileBridgeChat(
+  chat: Chat,
+  active = false,
+): MobileBridgeChatDto {
+  return {
+    id: chat.id,
+    projectId: chat.projectId,
+    firmId: chat.firmId,
+    agentGroupId: chat.agentGroupId,
+    agentId: chat.agentId,
+    title: chat.title,
+    archivedAt: chat.archivedAt,
+    createdAt: chat.createdAt,
+    updatedAt: chat.updatedAt,
+    continuousMode: chat.continuousMode,
+    swarmMode: chat.swarmMode,
+    active,
+    hiredAgents: chat.hiredAgents.map((agent) => ({
+      slug: agent.slug,
+      name: agent.name ?? null,
+      source: agent.source ?? null,
+      routeLabel: agent.routeLabel ?? null,
+      hiredAt: agent.hiredAt,
+    })),
+  };
+}
+
+function chatsDto(activeChatIds: ReadonlySet<string>): MobileBridgeChatDto[] {
+  return listRecentChats(100).map((chat) =>
+    projectMobileBridgeChat(chat, activeChatIds.has(chat.id)),
+  );
+}
+
+function messagesDto(
+  chatIds: readonly string[],
+  maxMessagesPerChat: number,
+): Record<string, MobileBridgeChatMessageDto[]> {
+  const messages = Object.create(null) as Record<string, MobileBridgeChatMessageDto[]>;
+  for (const chatId of new Set(chatIds.filter((id) => id && id.length <= 256).slice(0, 20))) {
+    messages[chatId] = listChatMessages(chatId, maxMessagesPerChat).map((message) => ({
+      id: message.id,
+      role: message.role,
+      text: message.text,
+      createdAt: message.createdAt,
+    }));
+  }
+  return messages;
+}
+
+/** DESKTOP_MOBILE_BRIDGE: Chat questions expose display metadata, never the raw fence body. */
+export function projectMobileBridgeConfirmations(
+  confirmations: readonly PendingConfirmation[] = listPendingConfirmations(),
+): MobileBridgePendingConfirmationDto[] {
+  return confirmations.map((confirmation) => ({
+    chatId: confirmation.chatId,
+    chatTitle: confirmation.chatTitle,
+    question: confirmation.question,
+    header: confirmation.header ?? null,
+    optionCount: confirmation.optionCount,
+    agentId: confirmation.agentId,
+    firmId: confirmation.firmId,
+    createdAt: confirmation.createdAt,
+  }));
+}
+
+/** DESKTOP_MOBILE_BRIDGE: Automation prompts, graphs, triggers, and credentials stay on Desktop. */
+export function projectMobileBridgeAutomation(
+  automation: Automation,
+): MobileBridgeAutomationDto {
+  return {
+    id: automation.id,
+    name: automation.name,
+    scheduleHuman: automation.scheduleHuman,
+    targetType: automation.targetType,
+    targetId: automation.targetId,
+    enabled: automation.enabled,
+    createdBy: automation.createdBy,
+    createdAt: automation.createdAt,
+    lastRunAt: automation.lastRunAt,
+    nextRunAt: automation.nextRunAt,
+    timezone: automation.timezone ?? null,
+    triggerType: automation.triggerType ?? "schedule",
+    toolMode: automation.toolMode ?? "auto",
+    hubMode: automation.hubMode ?? "hub-allowed",
+    // DESKTOP_MOBILE_BRIDGE: promptTemplate, graph, webhook token, fs path,
+    // and poll-source configuration remain on the Desktop.
+  };
+}
+
+function automationsDto(): MobileBridgeAutomationDto[] {
+  return listAutomations().map(projectMobileBridgeAutomation);
+}
+
+/** DESKTOP_MOBILE_BRIDGE: Runtime source paths and credential locators are intentionally omitted. */
+export function projectMobileBridgeRuntimes(
+  runtimes: readonly RuntimeStatus[],
+): MobileBridgeRuntimeDto[] {
+  return runtimes.map((runtime) => ({
+    kind: runtime.kind,
+    backend: runtime.backend,
+    version: runtime.version,
+    active: runtime.active,
+    model: runtime.model ?? null,
+    effort: runtime.effort ?? null,
+    // DESKTOP_MOBILE_BRIDGE: source may be an absolute CLI path or provider
+    // locator and is intentionally omitted.
+  }));
+}
+
+/** DESKTOP_MOBILE_BRIDGE: Usage projection carries quota state, never provider credentials. */
+export function projectMobileBridgeUsage(
+  usage: UsageSnapshot,
+): MobileBridgeUsageProviderDto[] {
+  return usage.providers.map((provider) => ({
+    provider: provider.provider,
+    backend: provider.backend ?? null,
+    label: provider.label,
+    status: provider.status,
+    fetchedAt: provider.fetchedAt,
+    error:
+      provider.error === "local_estimate"
+        ? "local_estimate"
+        : provider.status === "error"
+          ? "unavailable"
+          : null,
+    windows: provider.windows.map((window) => ({
+      id: window.id,
+      label: window.label,
+      kind: window.kind,
+      usedPercent: Math.max(0, Math.min(100, window.usedPercent)),
+      resetAt: window.resetAt ?? null,
+      model: window.model ?? null,
+      used: window.used ?? null,
+      limit: window.limit ?? null,
+      unit: window.unit ?? null,
+    })),
+  }));
+}
+
+/**
+ * Build a secret-free projection from the currently initialized Desktop stores.
+ *
+ * DESKTOP_MOBILE_BRIDGE: This is an adapter, not a second source of truth. It
+ * never seeds, catches an empty store with sample rows, or reads SQLite directly.
+ * Active run ids must be supplied by the shared InvocationService authority.
+ */
+export async function projectMobileBridgeSnapshot(
+  options: MobileBridgeProjectionOptions,
+): Promise<MobileBridgeSnapshot> {
+  if (
+    options.hostIdentity.version !== MOBILE_BRIDGE_PROTOCOL_VERSION ||
+    !/^host_[a-f0-9]{32}$/.test(options.hostIdentity.hostId) ||
+    !Number.isFinite(Date.parse(options.hostIdentity.createdAt))
+  ) {
+    throw new Error("Invalid Mobile Bridge host identity");
+  }
+  if (!options.displayName.trim()) throw new Error("Mobile Bridge display name is required");
+  const activeChatIds = [...new Set(options.activeChatIds ?? [])];
+  const activeSet = new Set(activeChatIds);
+  const maxMessages = Math.max(1, Math.min(200, Math.floor(options.maxMessagesPerChat ?? 200)));
+  const [groups, runtimes, usage] = await Promise.all([
+    groupsDto(),
+    detectRuntimes(),
+    getUsageSnapshot(),
+  ]);
+  return {
+    schemaVersion: MOBILE_BRIDGE_PROTOCOL_VERSION,
+    generatedAt: (options.now ?? new Date()).toISOString(),
+    host: hostDto(options),
+    runtimes: projectMobileBridgeRuntimes(runtimes),
+    agents: agentsDto(),
+    firms: firmsDto(),
+    groups,
+    projects: projectsDto(),
+    chats: chatsDto(activeSet),
+    messages: messagesDto(options.includeMessagesForChatIds ?? [], maxMessages),
+    pendingConfirmations: projectMobileBridgeConfirmations(),
+    automations: automationsDto(),
+    usage: projectMobileBridgeUsage(usage),
+    activeChatIds,
+  };
+}

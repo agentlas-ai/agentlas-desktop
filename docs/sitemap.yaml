@@ -1,6 +1,6 @@
 version: 1
 project: agentlas-desktop
-updated_at: 2026-06-27
+updated_at: 2026-07-11
 nodes:
   chat:
     label: Chat
@@ -14,6 +14,46 @@ nodes:
       - toggle-hep-network
       - toggle-hep-build
       - toggle-hep-upload
+  mobile.mirror:
+    label: Mobile Mirror
+    route: mobile://home
+    priority: high
+    owner: Agentlas Desktop + Agentlas Mobile
+    status: active
+    children:
+      - mobile.chat
+      - mobile.transport
+      - mobile.approvals
+  mobile.chat:
+    label: Mobile Chat Mirror
+    route: mobile://chats
+    priority: high
+    owner: Agentlas Mobile
+    status: active
+    actions:
+      - send-message
+      - steer-active-run
+      - stop-active-run
+  mobile.transport:
+    label: Desktop Mobile Bridge
+    route: desktop://mobile-bridge
+    priority: high
+    owner: Agentlas Desktop
+    status: active
+    actions:
+      - pair-client
+      - stream-snapshot
+      - stream-events
+      - acknowledge-command
+  mobile.approvals:
+    label: Desktop-Origin Approvals
+    route: mobile://approvals
+    priority: high
+    owner: Agentlas Desktop
+    status: active
+    actions:
+      - list-desktop-requests
+      - resolve-desktop-request
   apps:
     label: Apps
     route: /apps

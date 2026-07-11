@@ -7,6 +7,7 @@ import type {
 } from "./multimodal";
 import type { OberonTitleSpec } from "./oberon-titles";
 import type { SiteConversationEntry, SiteProjectMeta, SiteProjectOperation, SiteScreenMeta, SiteWorkspaceHandoff } from "./site-studio";
+import type { MobileBridgePairingPayload } from "./mobile-bridge";
 export type {
   OberonLowerThird,
   OberonSubtitleCue,
@@ -2406,6 +2407,33 @@ export interface McpInvocationRequest {
   routerAgent?: RecRouterAgent;
 }
 
+/** Main-owned Codex-style steering acknowledgement shared by Desktop and Mobile. */
+export interface InvocationSteerResult {
+  accepted: true;
+  queued: boolean;
+  activeRunId?: string;
+  position?: number;
+  runId?: string;
+}
+
+export interface MobileBridgeDeviceSummary {
+  deviceId: string;
+  name: string;
+  platform: "ios" | "android";
+  appVersion: string | null;
+  issuedAt: string;
+  revokedAt: string | null;
+}
+
+export interface MobileBridgeRuntimeStatus {
+  running: boolean;
+  endpoint: string | null;
+  secure: boolean;
+  hostId: string | null;
+  devices: MobileBridgeDeviceSummary[];
+  error: string | null;
+}
+
 export interface McpInvocationEvent {
   kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface";
   status?: string;
@@ -3467,12 +3495,21 @@ export interface AgentlasIpc {
     /** package.json의 version — 사이드바 푸터 표기/디버그 용 */
     getVersion: () => Promise<string>;
   };
+  /** DESKTOP_MOBILE_BRIDGE: pairing UI only; tokens never cross renderer IPC. */
+  mobileBridge: {
+    status: () => Promise<MobileBridgeRuntimeStatus>;
+    issuePairing: () => Promise<MobileBridgePairingPayload>;
+    listDevices: () => Promise<MobileBridgeDeviceSummary[]>;
+    revokeDevice: (deviceId: string) => Promise<{ ok: boolean }>;
+  };
   /** T-rex 슬라이드 스튜디오 — 키리스 CLI 이미지 생성(codex image_gen / gemini). */
   trex: {
-    generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => Promise<{ ok: boolean; src?: string; reason?: string; engine?: "codex" | "gemini" | "grok" }>;
-    imageProviders: () => Promise<{ codex: boolean; gemini: boolean; grok?: boolean }>;
+    generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => Promise<{ ok: boolean; src?: string; reason?: string; engine?: "codex" | "gemini" }>;
+    imageProviders: () => Promise<{ codex: boolean; gemini: boolean }>;
     generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string }) => Promise<{ ok: boolean; text?: string; engine?: "agy" | "codex"; reason?: string }>;
     contentAvailable: () => Promise<{ agy: boolean; codex: boolean }>;
+    /** 선택 요소 LLM 수정(select-to-edit) — 현재 텍스트 + 지시 → 다시 쓴 텍스트. */
+    refineText: (payload: { current: string; instruction: string; context?: string }) => Promise<{ ok: boolean; text?: string; reason?: string }>;
   };
   /**
    * 사이트 디자인 스튜디오 — 디자인 전용(백엔드/실행 없음).
@@ -4064,6 +4101,8 @@ export interface AgentlasIpc {
   /** invoke:run의 chatId가 firm 채팅인지 일반 채팅인지로 자동 라우팅 */
   invoke: {
     run: (req: McpInvocationRequest) => Promise<{ runId: string }>;
+    /** Queue a follow-up, cancel the current turn, then resume this chat after terminal settlement. */
+    steer: (req: McpInvocationRequest) => Promise<InvocationSteerResult>;
     eventChannel: (runId: string) => string;
     /** 진행 중인 실행을 취소 — CLI 자식 프로세스 kill / API fetch abort. 병렬 세션 각각 독립 취소. */
     cancel: (runId: string) => Promise<void>;
@@ -4137,7 +4176,7 @@ export interface AgentlasIpc {
     /** 진행 중 빌드 취소. */
     cancelBuild: (runId: string) => Promise<void>;
     /** Startup Founder Studio — 패키지의 실제 GUI 런처를 띄우고 iframe 용 로컬 URL 반환. */
-    startStudio: () => Promise<{ ok: boolean; url?: string; reason?: string }>;
+    startStudio: (input?: { idea?: string }) => Promise<{ ok: boolean; url?: string; reason?: string; ideaQueued?: boolean }>;
     stopStudio: () => Promise<void>;
   };
 }

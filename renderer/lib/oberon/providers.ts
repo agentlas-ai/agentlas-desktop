@@ -143,10 +143,10 @@ export const PROVIDERS: ProviderProfileI18n[] = [
   },
   {
     id: "grok",
-    name: "Grok Imagine (Grok CLI)",
+    name: "Grok Imagine (not enabled)",
     kind: "video",
     models: [
-      { model: "grok-imagine-video", modes: ["text_to_video", "image_to_video"], maxDurationSec: 15, resolutions: ["480p", "720p"], notes: "구독 키리스(Grok CLI 로그인) · source 이미지=시작 프레임 · 1~15s", notesEn: "Subscription keyless (logged-in Grok CLI) · source image as starting frame · 1-15s" },
+      { model: "runtime-default", modes: ["text_to_video", "image_to_video"], maxDurationSec: 15, resolutions: ["480p", "720p"], notes: "공식 CLI에서 미디어 capability를 검증할 수 없어 현재 비활성", notesEn: "Disabled until the official CLI exposes a verifiable media capability" },
     ],
     supportsFirstLastFrame: false,
     supportsRefImage: true,
@@ -160,7 +160,7 @@ export const PROVIDERS: ProviderProfileI18n[] = [
     bestFor: "키 없이 바로 도는 드래프트·프리비즈, 구독만으로 영상이 필요한 모든 샷",
     bestForEn: "Keyless instant drafts/previz — any shot that must work on subscription alone",
     vaultKey: "",
-    status: "active",
+    status: "sunset",
   },
   {
     id: "nano_banana",

@@ -924,7 +924,9 @@ export class DesktopUpdaterController {
         recoveryBackupAvailable: true,
       });
       try {
-        this.deps.updater.quitAndInstall(false, true);
+        // Windows updates must reuse the existing installation without opening
+        // the NSIS setup wizard. The second flag relaunches Agentlas afterward.
+        this.deps.updater.quitAndInstall(true, true);
         keepWritersQuiesced = true;
         return { accepted: true, state: this.state };
       } catch (error) {

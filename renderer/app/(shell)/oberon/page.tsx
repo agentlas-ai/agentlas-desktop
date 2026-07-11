@@ -34,6 +34,10 @@ import {
   type OberonStudio,
 } from "@/lib/oberon";
 import {
+  resolveOberonAnimateProvider,
+  resolveOberonRenderProvider,
+} from "@shared/oberon-provider-routing";
+import {
   clearOberonBackgroundJobsForProduction,
   failOberonBackgroundJob,
   finishOberonPlanJob,
@@ -122,9 +126,8 @@ export default function OberonPage() {
     if (animatePoll.current) clearInterval(animatePoll.current);
   }, []);
 
-  // 애니메이션 스튜디오 진입 시 i2v BYOK 키 상태 + 영상 provider 설정 조회.
+  // 모든 스튜디오에서 provider readiness를 먼저 읽는다. 시네마틱/광고도 같은 render path를 사용한다.
   useEffect(() => {
-    if (studio !== "animation") return;
     const bridge = ipc();
     void bridge?.oberon
       .animateKeyStatus()
@@ -134,35 +137,34 @@ export default function OberonPage() {
       ?.getSettings()
       .then((s) => setVideoProviderSetting(s?.videoProvider ?? ""))
       .catch(() => setVideoProviderSetting(""));
-  }, [studio]);
+  }, []);
 
-  // "무조건 Veo"가 아니라 실제 연결/키 있는 멀티모달 영상 엔진을 연다. 명시 선택이 준비됐으면
-  // 존중, 아니면 준비된 것 중 사다리순(grok→veo→kling→seedance→runway→luma)으로 첫 ready.
-  // grok(구독 키리스)이 유일하게 키가 필요 없어 맨 앞 — 연결만 돼 있으면 바로 동작한다.
+  // 명시 선택은 그대로 존중하고, auto는 실제 readiness가 확인된 provider만 사용한다.
   const resolveAnimateProvider = useCallback((): OberonAnimateProvider => {
-    const v = (videoProviderSetting || "").toLowerCase();
-    const wanted: OberonAnimateProvider | null =
-      v.includes("grok") || v.includes("xai") ? "grok"
-      : v.includes("veo") || v.includes("google") ? "veo"
-      : v.includes("kling") ? "kling"
-      : v.includes("seedance") ? "seedance"
-      : v.includes("luma") ? "luma"
-      : v.includes("runway") ? "runway"
-      : null;
+    const selected = production?.modelSettings?.videoProviders?.[0] || model.videoProviders[0] || videoProviderSetting;
     const ready: Record<OberonAnimateProvider, boolean> = {
       grok: Boolean(animateKey?.grok),
       veo: Boolean(animateKey?.veo), kling: Boolean(animateKey?.kling), seedance: Boolean(animateKey?.seedance),
       runway: Boolean(animateKey?.runway), luma: Boolean(animateKey?.luma),
     };
-    if (wanted && ready[wanted]) return wanted;
-    if (ready.grok) return "grok";
-    if (ready.veo) return "veo";
-    if (ready.kling) return "kling";
-    if (ready.seedance) return "seedance";
-    if (ready.runway) return "runway";
-    if (ready.luma) return "luma";
-    return wanted ?? "veo";
-  }, [videoProviderSetting, animateKey]);
+    return resolveOberonAnimateProvider(selected, ready).provider;
+  }, [videoProviderSetting, animateKey, model.videoProviders, production?.modelSettings?.videoProviders]);
+
+  // 풀 시네마틱 렌더(다중 샷)는 현재 실제 검증된 Veo 경로만 연다.
+  const resolveRenderProvider = useCallback(():
+    | { ok: true; provider: "google-enterprise-veo"; model: string }
+    | { ok: false; reason: string } => {
+    const selected = production?.modelSettings?.videoProviders?.[0] || model.videoProviders[0] || videoProviderSetting || "google-veo";
+    const resolved = resolveOberonRenderProvider(selected);
+    if (resolved.ok) return resolved;
+    return {
+      ok: false,
+      reason:
+        locale === "ko"
+          ? `선택한 영상 엔진(${resolved.selected})은 다중 샷 렌더를 아직 지원하지 않습니다. Google Veo를 선택하세요.`
+          : `The selected video engine (${resolved.selected}) does not support multi-shot rendering yet. Choose Google Veo.`,
+    };
+  }, [locale, model.videoProviders, production?.modelSettings?.videoProviders, videoProviderSetting]);
 
   const isDone = (id: OberonStepId) => stepState[id] === "done";
 
@@ -395,7 +397,7 @@ export default function OberonPage() {
             attempt: clip.attempt,
             status: "ready",
             providerId: "google-veo",
-            providerMode: "text_to_video",
+            providerMode: shot?.providerMode === "image_to_video" ? "image_to_video" : "text_to_video",
             previewUrl: clip.url,
             thumbnailGradient: "linear-gradient(160deg,#2A2824,#3A3833)",
             costUsd: shot?.estCostUsd ?? 0,
@@ -641,6 +643,14 @@ export default function OberonPage() {
       setVideoGenerating(false);
       return;
     }
+    const renderProvider = resolveRenderProvider();
+    if (!renderProvider.ok) {
+      const failedJob = localRenderError(production, renderProvider.reason);
+      trackOberonLiveJob("render", failedJob);
+      setRenderJob(failedJob);
+      setVideoGenerating(false);
+      return;
+    }
     const keyframesByShot = new Map((production.keyframeAssets ?? []).map((asset) => [asset.shotId, asset]));
     const request: OberonRenderRequest = {
       productionId: production.id,
@@ -664,8 +674,8 @@ export default function OberonPage() {
       })),
       maxShots: LIVE_RENDER_MAX_SHOTS,
       takesPerShot: LIVE_RENDER_TAKES_PER_SHOT,
-      provider: "google-enterprise-veo",
-      model: "veo-3.1-lite-generate-001",
+      provider: renderProvider.provider,
+      model: renderProvider.model,
       resolution: "720p",
       // 타이틀/로어서드/자막 결정적 번인 — 타이포 키트가 있으면 *_titled.mp4 추가 생성
       // (master_mp4는 글자 없는 클린본으로 그대로 유지되므로 항상 additive).
@@ -692,7 +702,7 @@ export default function OberonPage() {
         setVideoGenerating(false);
         setRenderJob(failedJob);
       });
-  }, [locale, pollRenderJob, production]);
+  }, [locale, pollRenderJob, production, resolveRenderProvider]);
 
   const startMotionAd = useCallback(() => {
     if (!production) return;
@@ -1057,7 +1067,13 @@ export default function OberonPage() {
       ) : !studio && !production ? (
         /* 진입 랜딩 — 모션그래픽 / 애니메이션 스튜디오 선택 */
         <main style={{ flex: 1, minWidth: 0, display: "flex", minHeight: 0 }}>
-          <StudioLanding onPick={setStudio} />
+          <StudioLanding
+            onPick={setStudio}
+            onOpen={(productionId) => {
+              const saved = loadProduction(productionId);
+              if (saved) loadSaved(saved);
+            }}
+          />
         </main>
       ) : (
         <>
