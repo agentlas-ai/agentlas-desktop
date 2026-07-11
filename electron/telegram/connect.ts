@@ -1718,12 +1718,19 @@ export async function notifyTelegramAutomationDone(
   for (const row of rows) {
     const key = `${row.id}:${row.telegram_chat_id}`;
     if (sent.has(key) || !row.telegram_chat_id) continue;
-    const token = await readBindingSecret(row.id);
-    if (!token) {
-      continue;
+    try {
+      const token = await readBindingSecret(row.id);
+      if (!token) continue;
+      await sendLongMessage(token, row.telegram_chat_id, text);
+      sent.add(key);
+    } catch (error) {
+      // One revoked bot, transient Telegram outage, or broken chat must not
+      // starve every later destination. Keep the failure scoped to this port.
+      console.warn(
+        `[telegram] automation report failed for binding ${row.id}:`,
+        maskTelegramSecrets(error instanceof Error ? error.message : String(error)),
+      );
     }
-    await sendLongMessage(token, row.telegram_chat_id, text);
-    sent.add(key);
   }
 }
 

@@ -347,12 +347,18 @@ function handleAutomationFailure(a: Automation, error: string): void {
   }
 }
 
-async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?: boolean }): Promise<void> {
+async function runOne(
+  a: Automation,
+  opts?: { claim?: boolean; advanceSchedule?: boolean; allowDisabledLease?: boolean },
+): Promise<void> {
   if (installQuiescing) return;
   if (running.has(a.id)) return; // 직전 실행이 아직 진행 중이면 건너뜀
-  // due-폴링 경로만 크로스프로세스 리스로 클레임한다(설계 §2.6). 명시적 "Run now"/트리거
-  // 발사는 클레임을 건너뛴다(사용자/이벤트가 의도한 즉시 실행이므로 GUI/headless 경합 무관).
-  if (opts?.claim && !claimAutomationRun(a.id, LEASE_OWNER)) return;
+  // 모든 실행 경로가 같은 크로스프로세스 리스를 사용한다. GUI의 Run now나 이벤트 트리거도
+  // headless due 실행과 겹치면 외부 게시/결제 같은 부작용을 두 번 낼 수 있으므로 건너뛴다.
+  if (
+    opts?.claim &&
+    !claimAutomationRun(a.id, LEASE_OWNER, new Date(), { allowDisabled: opts.allowDisabledLease === true })
+  ) return;
   running.add(a.id);
   let runStatus: AutomationResultStatus = "ok";
   let runError: string | null = null;
@@ -367,10 +373,15 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
     if (opts?.claim) {
       leaseHeartbeatTimer = setInterval(() => {
         try {
-          const renewed = renewAutomationRunLease(a.id, LEASE_OWNER);
+          const renewed = renewAutomationRunLease(
+            a.id,
+            LEASE_OWNER,
+            new Date(),
+            { allowDisabled: opts.allowDisabledLease === true },
+          );
           if (!renewed) {
             leaseOwnershipLost = true;
-            controller.abort(new Error("Automation due lease ownership lost"));
+            controller.abort(new Error("Automation execution lease ownership lost"));
           } else {
             leaseRenewWarningEmitted = false;
           }
@@ -702,18 +713,20 @@ export async function runAutomationNow(id: string): Promise<void> {
   if (installQuiescing) throw new Error("Automation execution is paused while an update is prepared");
   const a = getAutomation(id);
   if (!a) throw new Error(`Automation not found: ${id}`);
-  await runOne(a, { advanceSchedule: false });
+  // Disabled automations remain manually runnable, but still acquire the same
+  // shared lease as every scheduled/headless execution.
+  await runOne(a, { claim: true, advanceSchedule: false, allowDisabledLease: true });
 }
 
 /**
  * 이벤트 트리거(fs/chain)가 발사할 때 호출 — 지정 자동화를 즉시 1회 실행한다.
- * 트리거 매니저에 주입되는 RunFn. 클레임 없이 실행(이벤트가 의도한 즉시 실행).
+ * 트리거 매니저에 주입되는 RunFn. due/Run now와 같은 리스를 획득해 중복 실행을 막는다.
  */
 export async function runAutomationFromTrigger(id: string): Promise<void> {
   if (installQuiescing) return;
   const a = getAutomation(id);
   if (!a) return;
-  await runOne(a, { advanceSchedule: false });
+  await runOne(a, { claim: true, advanceSchedule: false });
 }
 
 function tick(): void {

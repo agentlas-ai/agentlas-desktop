@@ -70,26 +70,41 @@ async function testLeaseOwnership(db, automations) {
   assert.equal(rowFor(db, a.id).lease_owner, "runner-new", "stale owner must not clobber a takeover lease");
   assert.equal(automations.releaseAutomationRun(a.id, "runner-new"), true);
 
-  // Run now and event-triggered executions never acquired the cross-process
-  // due lease, so their finally blocks must leave a headless runner's lease intact.
-  const immediate = automations.createAutomation(automationInput("Immediate paths preserve lease"));
-  assert.equal(automations.claimAutomationRun(immediate.id, "headless-owner", t0), true);
+  // Run now and event-triggered executions must respect a live peer lease. Otherwise
+  // a GUI click can duplicate the external side effects of a headless due run.
+  const immediate = automations.createAutomation(automationInput("Immediate paths respect lease"));
+  const peerClaimedAt = new Date();
+  const peerOwner = "2147483647:headless";
+  assert.equal(automations.claimAutomationRun(immediate.id, peerOwner, peerClaimedAt), true);
   const mcpClient = require("../dist/electron/mcp/client.js");
   const originalRunMcpInvocation = mcpClient.runMcpInvocation;
-  mcpClient.runMcpInvocation = async () => ({
-    finalText: "done",
-    stormbreakerContinueRequested: false,
-  });
+  let immediateCalls = 0;
+  mcpClient.runMcpInvocation = async () => {
+    immediateCalls += 1;
+    return { finalText: "done", stormbreakerContinueRequested: false };
+  };
   try {
     const scheduler = require("../dist/electron/automation-scheduler.js");
     await scheduler.runAutomationNow(immediate.id);
-    assert.equal(rowFor(db, immediate.id).lease_owner, "headless-owner", "Run now must not release a due lease");
+    assert.equal(immediateCalls, 0, "Run now must not execute while a headless peer owns the lease");
+    assert.equal(rowFor(db, immediate.id).lease_owner, peerOwner, "Run now must preserve the peer lease");
     await scheduler.runAutomationFromTrigger(immediate.id);
-    assert.equal(rowFor(db, immediate.id).lease_owner, "headless-owner", "trigger runs must not release a due lease");
+    assert.equal(immediateCalls, 0, "event triggers must not execute while a headless peer owns the lease");
+    assert.equal(rowFor(db, immediate.id).lease_owner, peerOwner, "trigger runs must preserve the peer lease");
+
+    assert.equal(automations.releaseAutomationRun(immediate.id, peerOwner), true);
+    await scheduler.runAutomationFromTrigger(immediate.id);
+    assert.equal(immediateCalls, 1, "an event trigger must run after it acquires the released lease");
+    assert.deepEqual(rowFor(db, immediate.id), { claimed_at: null, lease_owner: null });
+
+    const disabled = automations.createAutomation(automationInput("Disabled manual run"));
+    automations.toggleAutomation(disabled.id, false);
+    await scheduler.runAutomationNow(disabled.id);
+    assert.equal(immediateCalls, 2, "Run now must remain available for a disabled automation");
+    assert.deepEqual(rowFor(db, disabled.id), { claimed_at: null, lease_owner: null });
   } finally {
     mcpClient.runMcpInvocation = originalRunMcpInvocation;
   }
-  assert.equal(automations.releaseAutomationRun(immediate.id, "headless-owner"), true);
 }
 
 async function testChainCycles(automations) {

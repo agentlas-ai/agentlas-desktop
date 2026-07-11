@@ -154,6 +154,7 @@ jobs:
           # "Unknown or unsupported transport 'disabled'". One session for all gates.
           xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
             npm run test:v52-automation-run-recovery
+            npm run test:automation-trigger-safety
             npm run test:v53-hub-bookmark-sync
             npm run test:updater-production
             npm run test:automations-store
@@ -166,6 +167,7 @@ jobs:
             npm run test:mcp-auto-select
             npm run test:mcp-secret-isolation
             npm run test:hephaestus-sync
+            npm run test:telegram-automation-report-fanout
           '
 
       - name: Build renderer + electron

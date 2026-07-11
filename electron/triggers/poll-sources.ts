@@ -130,7 +130,7 @@ async function pollOne(a: Automation, trigger: Extract<Trigger, { kind: "poll" }
   }
 }
 
-/** fire — 트리거 매니저가 주입한 RunFn(스케줄러)으로 위임. 클레임 없이 즉시 1회 실행. */
+/** fire — 트리거 매니저가 주입한 RunFn(스케줄러)으로 위임. 스케줄러가 공유 리스를 잡고 실행. */
 type RunFn = (automationId: string) => Promise<void>;
 let runFn: RunFn | null = null;
 /** 폴 매니저에 실행 함수 주입(트리거 매니저 기동 시). */

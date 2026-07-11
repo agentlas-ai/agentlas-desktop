@@ -703,18 +703,28 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+export interface AutomationLeaseOptions {
+  /** Explicit Run now may execute a disabled automation, but it must still own the shared lease. */
+  allowDisabled?: boolean;
+}
+
 /**
- * due 행을 원자적으로 클레임한다(설계 §2.6 크로스프로세스 리스). 헤드리스 launchd 러너와
- * 열린 GUI가 같은 SQLite를 공유하므로, 같은 due 행을 둘 다 실행하지 않도록 한다.
+ * 자동화 실행을 원자적으로 클레임한다(설계 §2.6 크로스프로세스 리스). 헤드리스 launchd 러너와
+ * 열린 GUI가 같은 SQLite를 공유하므로 due/Run now/이벤트 발사가 같은 행을 겹쳐 실행하지 않는다.
  * claimed_at이 비었거나 TTL을 넘긴 경우에만 owner를 기록하며 잡는다.
  * @returns 이 프로세스가 실행 권한을 얻으면 true.
  */
-export function claimAutomationRun(id: string, owner: string, now: Date = new Date()): boolean {
+export function claimAutomationRun(
+  id: string,
+  owner: string,
+  now: Date = new Date(),
+  options: AutomationLeaseOptions = {},
+): boolean {
   const db = getDb();
   const row = db
     .prepare("SELECT enabled, claimed_at, lease_owner FROM automations WHERE id = ?")
     .get(id) as Pick<AutomationRow, "enabled" | "claimed_at" | "lease_owner"> | undefined;
-  if (!row || row.enabled !== 1) return false;
+  if (!row || (!options.allowDisabled && row.enabled !== 1)) return false;
 
   const nowMs = now.getTime();
   const claimedAtMs = row.claimed_at == null ? Number.NaN : Date.parse(row.claimed_at);
@@ -737,9 +747,12 @@ export function claimAutomationRun(id: string, owner: string, now: Date = new Da
   const result = db
     .prepare(
       `UPDATE automations SET claimed_at = ?, lease_owner = ?
-         WHERE id = ? AND enabled = 1 AND claimed_at IS ? AND lease_owner IS ?`,
+         WHERE id = ?
+           AND (? = 1 OR enabled = 1)
+           AND claimed_at IS ?
+           AND lease_owner IS ?`,
     )
-    .run(now.toISOString(), owner, id, row.claimed_at, row.lease_owner);
+    .run(now.toISOString(), owner, id, options.allowDisabled ? 1 : 0, row.claimed_at, row.lease_owner);
   return result.changes > 0;
 }
 
@@ -748,13 +761,21 @@ export function claimAutomationRun(id: string, owner: string, now: Date = new Da
  * false is a definitive ownership loss; SQLite busy/I/O errors throw so the
  * scheduler can treat a transient renewal failure as retryable, not ownership loss.
  */
-export function renewAutomationRunLease(id: string, owner: string, now: Date = new Date()): boolean {
+export function renewAutomationRunLease(
+  id: string,
+  owner: string,
+  now: Date = new Date(),
+  options: AutomationLeaseOptions = {},
+): boolean {
   const result = getDb()
     .prepare(
       `UPDATE automations SET claimed_at = ?
-       WHERE id = ? AND enabled = 1 AND lease_owner = ? AND claimed_at IS NOT NULL`,
+       WHERE id = ?
+         AND (? = 1 OR enabled = 1)
+         AND lease_owner = ?
+         AND claimed_at IS NOT NULL`,
     )
-    .run(now.toISOString(), id, owner);
+    .run(now.toISOString(), id, options.allowDisabled ? 1 : 0, owner);
   return result.changes > 0;
 }
 

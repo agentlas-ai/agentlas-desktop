@@ -175,6 +175,7 @@ jobs:
       - name: Runtime, browser, and renderer UI regression gates
         run: |
           npm run test:automation-scheduler-guards
+          npm run test:automation-trigger-safety
           npm run test:v52-automation-run-recovery
           npm run test:v53-hub-bookmark-sync
           npm run test:updater-production
@@ -214,6 +215,7 @@ jobs:
           npm run test:oberon-provider-routing
           npm run test:telegram-connect-atomicity
           npm run test:telegram-api-timeout
+          npm run test:telegram-automation-report-fanout
           npm run test:document-studio-draft-persistence
           npm run test:prompts-start-failure-ui
           npm run test:settings-resilience-ui
