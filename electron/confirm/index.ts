@@ -12,7 +12,13 @@ const CLOSE = "<</agentlas-ask>>";
 
 function firstQuestion(
   text: string,
-): { question: string; header?: string; optionCount: number } | null {
+): {
+  question: string;
+  header?: string;
+  optionCount: number;
+  options: Array<{ label: string; description?: string }>;
+  multiSelect: boolean;
+} | null {
   const open = text.indexOf(OPEN);
   if (open < 0) return null;
   const after = text.slice(open + OPEN.length);
@@ -26,15 +32,29 @@ function firstQuestion(
   try {
     const parsed = JSON.parse(body) as Record<string, unknown>;
     if (!parsed || typeof parsed !== "object") return null;
-    if (typeof parsed.question !== "string") return null;
+    const question = typeof parsed.question === "string" ? parsed.question.trim() : "";
+    if (!question) return null;
     const optionsRaw = Array.isArray(parsed.options) ? parsed.options : [];
-    const optionCount = optionsRaw.filter(
-      (o) => o && typeof o === "object" && typeof (o as Record<string, unknown>).label === "string",
-    ).length;
+    const options = optionsRaw
+      .flatMap((option) => {
+        if (!option || typeof option !== "object") return [];
+        const raw = option as Record<string, unknown>;
+        const label = typeof raw.label === "string" ? raw.label.trim() : "";
+        if (!label) return [];
+        const description = typeof raw.description === "string" ? raw.description.trim() : "";
+        return [{
+          label: label.slice(0, 200),
+          ...(description ? { description: description.slice(0, 1_000) } : {}),
+        }];
+      })
+      .slice(0, 8);
+    if (options.length < 2) return null;
     return {
-      question: parsed.question,
-      header: typeof parsed.header === "string" ? parsed.header : undefined,
-      optionCount,
+      question: question.slice(0, 4_000),
+      header: typeof parsed.header === "string" ? parsed.header.trim().slice(0, 200) || undefined : undefined,
+      optionCount: options.length,
+      options,
+      multiSelect: parsed.multiSelect === true,
     };
   } catch {
     return null;
@@ -57,6 +77,8 @@ export function listPendingConfirmations(): PendingConfirmation[] {
       question: q.question,
       header: q.header,
       optionCount: q.optionCount,
+      options: q.options,
+      multiSelect: q.multiSelect,
       agentId: c.agentId,
       firmId: c.firmId,
       createdAt: last.createdAt,

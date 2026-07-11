@@ -1,7 +1,7 @@
 // 설정 — BYOC 연결 관리. PRD 3.1 FRE 6단계 + 10번 리스크 "키 저장 위치 명시".
 "use client";
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
-import { ipc, updaterEvents } from "@/lib/ipc";
+import { ipc, ipcEvents, updaterEvents } from "@/lib/ipc";
 import { useT, type LocalePref } from "@/lib/i18n";
 import { useTheme, type ThemePref } from "@/lib/theme";
 import type {
@@ -813,6 +813,7 @@ function MobileBridgePanel() {
   const [pairing, setPairing] = useState<MobileBridgePairingPayload | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState("");
   const [message, setMessage] = useState("");
+  const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -825,15 +826,44 @@ function MobileBridgePanel() {
       ]);
       setStatus(nextStatus);
       setDevices(nextDevices);
-      setMessage(nextStatus.error ?? "");
+      setLoadError(nextStatus.error ?? "");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      setLoadError(error instanceof Error ? error.message : String(error));
     }
   }, []);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    const off = ipcEvents()?.onMobileBridgeChanged?.(({ reason }) => {
+      if (reason === "device-paired") {
+        setPairing(null);
+        setQrDataUrl("");
+        setMessage(locale === "ko" ? "새 모바일 기기가 연결됐습니다." : "A new mobile device is paired.");
+      } else if (reason === "challenge-expired" || reason === "challenge-invalidated") {
+        setPairing(null);
+        setQrDataUrl("");
+        setMessage(locale === "ko" ? "연결 QR이 만료됐습니다. 새 QR을 만들어 주세요." : "The pairing QR expired. Create a new one.");
+      }
+      void refresh();
+    });
+    return () => off?.();
+  }, [locale, refresh]);
+
+  useEffect(() => {
+    if (!pairing) return;
+    const expiresAt = Date.parse(pairing.expiresAt);
+    if (!Number.isFinite(expiresAt)) return;
+    const timer = window.setTimeout(() => {
+      setPairing(null);
+      setQrDataUrl("");
+      setMessage(locale === "ko" ? "연결 QR이 만료됐습니다. 새 QR을 만들어 주세요." : "The pairing QR expired. Create a new one.");
+      void refresh();
+    }, Math.max(0, expiresAt - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [locale, pairing, refresh]);
 
   async function issuePairing() {
     const api = ipc();
@@ -880,11 +910,15 @@ function MobileBridgePanel() {
         : `Disconnect ${device.name}? It will need to pair again.`,
     );
     if (!confirmed) return;
-    const result = await api.mobileBridge.revokeDevice(device.deviceId);
-    if (!result.ok) {
-      setMessage(locale === "ko" ? "이미 해제됐거나 찾을 수 없는 기기입니다." : "The device was already revoked or not found.");
+    try {
+      const result = await api.mobileBridge.revokeDevice(device.deviceId);
+      if (!result.ok) {
+        setMessage(locale === "ko" ? "이미 해제됐거나 찾을 수 없는 기기입니다." : "The device was already revoked or not found.");
+      }
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
     }
-    await refresh();
   }
 
   const activeDevices = devices.filter((device) => device.revokedAt === null);
@@ -935,7 +969,7 @@ function MobileBridgePanel() {
         </div>
 
         {pairing && qrDataUrl && (
-          <div style={{ display: "grid", gridTemplateColumns: "minmax(200px, 240px) 1fr", gap: 20, marginTop: 18, alignItems: "center" }}>
+          <div data-testid="mobile-bridge-pairing" style={{ display: "grid", gridTemplateColumns: "minmax(200px, 240px) 1fr", gap: 20, marginTop: 18, alignItems: "center" }}>
             <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 18, background: "#fff", padding: 12 }}>
               {/* The data URL is produced locally; the QR contains a two-minute nonce and public certificate only. */}
               <img src={qrDataUrl} alt={locale === "ko" ? "Agentlas Mobile 연결 QR" : "Agentlas Mobile pairing QR"} style={{ display: "block", width: "100%", aspectRatio: "1" }} />
@@ -960,14 +994,14 @@ function MobileBridgePanel() {
           </div>
         )}
 
-        {message && (
+        {(loadError || message) && (
           <div role="status" style={{ marginTop: 12, padding: "9px 11px", borderRadius: 10, background: "var(--paper-2)", color: "var(--ink-soft)", fontSize: 11.5, overflowWrap: "anywhere" }}>
-            {message}
+            {loadError || message}
           </div>
         )}
 
         <div style={{ marginTop: 16, borderTop: "1px solid var(--paper-edge)", paddingTop: 14 }}>
-          <div style={{ color: "var(--muted-deep)", fontSize: 11, fontWeight: 700, marginBottom: 8 }}>
+          <div data-testid="mobile-bridge-device-count" style={{ color: "var(--muted-deep)", fontSize: 11, fontWeight: 700, marginBottom: 8 }}>
             {locale === "ko" ? `연결된 모바일 ${activeDevices.length}대` : `${activeDevices.length} paired mobile device${activeDevices.length === 1 ? "" : "s"}`}
           </div>
           {activeDevices.length === 0 ? (

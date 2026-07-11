@@ -43,10 +43,12 @@ import {
   projectMobileBridgeAutomation,
   projectMobileBridgeChat,
   projectMobileBridgeConfirmations,
+  projectMobileBridgeHistory,
   projectMobileBridgeRuntimes,
   projectMobileBridgeSnapshot,
   projectMobileBridgeUsage,
 } from "./projector";
+import { sanitizeMobileBridgeText } from "./sanitize";
 import type {
   MobileBridgeAuthority,
   MobileBridgeAuthorityEvent,
@@ -56,11 +58,8 @@ import type {
 const REQUEST_ID_RE = /^[^\u0000-\u001f]{1,128}$/;
 const IDENTIFIER_RE = /^[^\u0000-\u001f]{1,256}$/;
 const RUN_ID_RE = /^[^\u0000-\u001f]{1,160}$/;
-const SECRET_RE = /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|\b(?:sk|rk|pk|xox[baprs]|gh[pousr])-[A-Za-z0-9_=-]{12,}\b|\b(?:api[_-]?key|token|secret|password|passwd|pwd|cookie|session|authorization)\b\s*[:=]\s*["']?[^,\s"'}`\]]{4,}|\bBearer\s+[A-Za-z0-9._~+\/-]{8,})/gi;
-const POSIX_ABSOLUTE_PATH_RE = /(?:file:\/\/)?\/(?:Users|home|private|var|tmp|Volumes|opt|etc|usr|Library)\/[A-Za-z0-9._~+@%/=-]+/g;
-const WINDOWS_ABSOLUTE_PATH_RE = /\b[A-Za-z]:\\(?:[^\\\r\n\t "'`<>|]+\\?)+/g;
-const EVENT_TEXT_MAX_CHARS = 200_000;
-const EVENT_DELTA_MAX_CHARS = 64_000;
+const EVENT_TEXT_MAX_BYTES = 200_000;
+const EVENT_DELTA_MAX_BYTES = 64_000;
 const TOOL_COUNT_CAP = 1_000;
 
 export interface AgentlasDesktopMobileBridgeAuthorityOptions {
@@ -246,13 +245,8 @@ function asJsonValue(value: unknown, label: string): MobileBridgeJsonValue {
   return decoded;
 }
 
-function boundedRedactedText(value: string, maxLength: number): string {
-  let safe = value
-    .replace(SECRET_RE, "[redacted-secret]")
-    .replace(POSIX_ABSOLUTE_PATH_RE, "[local-path]")
-    .replace(WINDOWS_ABSOLUTE_PATH_RE, "[local-path]");
-  if (safe.length > maxLength) safe = `${safe.slice(0, maxLength)}…[truncated]`;
-  return safe;
+function boundedRedactedText(value: string, maxBytes: number): string {
+  return sanitizeMobileBridgeText(value, maxBytes);
 }
 
 function requireChat(id: string): Chat {
@@ -357,15 +351,7 @@ function projectInvocationHistory(
   history: ReturnType<typeof invocationService.history>,
   limit: number,
 ): MobileBridgeJsonValue {
-  return asJsonValue(
-    history.slice(-limit).map((message) => ({
-      id: message.id,
-      role: message.role,
-      text: message.text,
-      createdAt: message.createdAt,
-    })),
-    "invoke.history",
-  );
+  return asJsonValue(projectMobileBridgeHistory(history, limit), "invoke.history");
 }
 
 /** DESKTOP_MOBILE_BRIDGE: resultFolder is a local absolute path and is never projected. */
@@ -438,11 +424,11 @@ export function projectMobileBridgeInvocationEvent(
     projected.status = boundedRedactedText(event.status, 1_000);
   }
   if (typeof event.text === "string") {
-    const text = boundedRedactedText(event.text, EVENT_TEXT_MAX_CHARS);
+    const text = boundedRedactedText(event.text, EVENT_TEXT_MAX_BYTES);
     projected.text = text;
     projected.textLen = text.length;
   } else if (typeof event.delta === "string") {
-    const delta = boundedRedactedText(event.delta, EVENT_DELTA_MAX_CHARS);
+    const delta = boundedRedactedText(event.delta, EVENT_DELTA_MAX_BYTES);
     projected.delta = delta;
     // A redacted or truncated delta no longer has the same cumulative length.
     // Omitting textLen forces the client to rely on attach/final resync instead
@@ -653,6 +639,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "invoke.cancel": {
         const params = guardedParams(request, ["runId"]);
         const result = invocationService.cancel(requiredIdentifier(params, "runId", RUN_ID_RE));
+        if (result === "not-found") throw new Error("Invocation run is no longer active");
         if (result === "requested") this.scheduleSnapshotUpdated();
         return result;
       }
@@ -697,7 +684,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           ["once", "always", "deny"] as const,
         ) as BrowserPermissionDecision;
         const result = browserResolveApproval(requestId, decision);
-        if (result.ok) this.scheduleSnapshotUpdated();
+        if (!result.ok) throw new Error("Browser approval is no longer pending");
+        this.scheduleSnapshotUpdated();
         return asJsonValue(result, request.method);
       }
 
@@ -847,9 +835,20 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     }
   }
 
-  /** DESKTOP_MOBILE_BRIDGE: pending/resolved/expired lifecycle is forwarded unchanged. */
+  /** DESKTOP_MOBILE_BRIDGE: approval identity is preserved; free-form copy is sanitized. */
   private forwardBrowserApproval(event: BrowserApprovalLifecycleEvent): void {
-    this.emit({ event: "browser.approval", payload: asJsonValue(event, "browser.approval") });
+    const projected = event.status === "pending"
+      ? {
+          ...event,
+          site: boundedRedactedText(event.site, 1_024),
+          actionType: boundedRedactedText(event.actionType, 512),
+          summary: boundedRedactedText(event.summary, 4_096),
+          target: typeof event.target === "string"
+            ? boundedRedactedText(event.target, 2_048)
+            : null,
+        }
+      : event;
+    this.emit({ event: "browser.approval", payload: asJsonValue(projected, "browser.approval") });
     if (event.status !== "pending") this.scheduleSnapshotUpdated();
   }
 

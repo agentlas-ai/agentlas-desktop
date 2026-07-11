@@ -106,7 +106,15 @@ export interface MobileBridgePairingManagerOptions {
   ttlMs?: number;
   maxAttempts?: number;
   now?: () => Date;
+  onChanged?: (reason: MobileBridgePairingChangeReason) => void;
 }
+
+export type MobileBridgePairingChangeReason =
+  | "challenge-issued"
+  | "challenge-expired"
+  | "challenge-invalidated"
+  | "device-paired"
+  | "device-revoked";
 
 interface ActiveChallenge {
   codeHash: Buffer;
@@ -421,7 +429,9 @@ export class MobileBridgePairingManager {
   private readonly ttlMs: number;
   private readonly maxAttempts: number;
   private readonly now: () => Date;
+  private readonly onChanged: (reason: MobileBridgePairingChangeReason) => void;
   private activeChallenge: ActiveChallenge | null = null;
+  private activeChallengeTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly userDataPath: string,
@@ -433,6 +443,7 @@ export class MobileBridgePairingManager {
       Math.min(DEFAULT_MAX_PAIRING_ATTEMPTS, options.maxAttempts ?? DEFAULT_MAX_PAIRING_ATTEMPTS),
     );
     this.now = options.now ?? (() => new Date());
+    this.onChanged = options.onChanged ?? (() => {});
   }
 
   /**
@@ -440,9 +451,19 @@ export class MobileBridgePairingManager {
    * explicit pairing UI. Only its SHA-256 hash remains in memory.
    */
   issueChallenge(): MobileBridgePairingChallenge {
+    this.clearChallengeTimer();
     const raw = randomBytes(16).toString("base64url");
     const expiresAtMs = this.now().getTime() + this.ttlMs;
-    this.activeChallenge = { codeHash: hashSecret(raw), expiresAtMs, attempts: 0 };
+    const challenge: ActiveChallenge = { codeHash: hashSecret(raw), expiresAtMs, attempts: 0 };
+    this.activeChallenge = challenge;
+    this.activeChallengeTimer = setTimeout(() => {
+      if (this.activeChallenge !== challenge) return;
+      this.activeChallenge = null;
+      this.activeChallengeTimer = null;
+      this.emitChanged("challenge-expired");
+    }, this.ttlMs);
+    this.activeChallengeTimer.unref?.();
+    this.emitChanged("challenge-issued");
     return { code: raw, expiresAt: new Date(expiresAtMs).toISOString() };
   }
 
@@ -459,16 +480,23 @@ export class MobileBridgePairingManager {
     const now = this.now();
     if (now.getTime() >= challenge.expiresAtMs) {
       this.activeChallenge = null;
+      this.clearChallengeTimer();
+      this.emitChanged("challenge-expired");
       throw new MobileBridgePairingError("pairing_expired", "Pairing code has expired");
     }
     const matches = timingSafeEqual(challenge.codeHash, hashSecret(request.code));
     if (!matches) {
       challenge.attempts += 1;
-      if (challenge.attempts >= this.maxAttempts) this.activeChallenge = null;
+      if (challenge.attempts >= this.maxAttempts) {
+        this.activeChallenge = null;
+        this.clearChallengeTimer();
+        this.emitChanged("challenge-invalidated");
+      }
       throw new MobileBridgePairingError("pairing_denied", "Pairing code was not accepted");
     }
     // Consume first: a write failure must not make the nonce reusable.
     this.activeChallenge = null;
+    this.clearChallengeTimer();
 
     const token = randomBytes(32).toString("base64url");
     const issuedAt = now.toISOString();
@@ -483,7 +511,13 @@ export class MobileBridgePairingManager {
     };
     const store = readDevices(this.userDataPath);
     store.devices.push(record);
-    writeDevices(this.userDataPath, store);
+    try {
+      writeDevices(this.userDataPath, store);
+    } catch (error) {
+      this.emitChanged("challenge-invalidated");
+      throw error;
+    }
+    this.emitChanged("device-paired");
     return { deviceId: record.deviceId, token, issuedAt };
   }
 
@@ -509,7 +543,26 @@ export class MobileBridgePairingManager {
     if (!record) return false;
     record.revokedAt = this.now().toISOString();
     writeDevices(this.userDataPath, store);
+    this.emitChanged("device-revoked");
     return true;
+  }
+
+  dispose(): void {
+    this.activeChallenge = null;
+    this.clearChallengeTimer();
+  }
+
+  private clearChallengeTimer(): void {
+    if (this.activeChallengeTimer) clearTimeout(this.activeChallengeTimer);
+    this.activeChallengeTimer = null;
+  }
+
+  private emitChanged(reason: MobileBridgePairingChangeReason): void {
+    try {
+      this.onChanged(reason);
+    } catch {
+      // A renderer notification must never change pairing authority behavior.
+    }
   }
 
   private publicMetadata(record: StoredMobileBridgeDevice): MobileBridgeDeviceMetadata {

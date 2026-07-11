@@ -3,8 +3,9 @@
  *
  * DESKTOP_MOBILE_BRIDGE: This file is intentionally dependency-free so the
  * Electron main process and Flutter protocol generator can share one strict
- * JSON contract. Secrets, absolute paths, prompts, environment values, cookies,
- * and provider session identifiers are never part of these DTOs.
+ * JSON contract. Secrets, absolute paths, private system/provider prompts,
+ * environment values, cookies, and provider session identifiers are never part
+ * of these DTOs. User-visible transcript text is sanitized and byte-bounded.
  */
 
 export const MOBILE_BRIDGE_PROTOCOL_VERSION = 1 as const;
@@ -50,6 +51,20 @@ export const MOBILE_BRIDGE_METHODS = [
 
 export type MobileBridgeMethod = (typeof MOBILE_BRIDGE_METHODS)[number];
 
+/** State-changing methods require durable replay protection in Desktop main. */
+export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
+  "chats.create",
+  "chats.rename",
+  "chats.archive",
+  "chats.unarchive",
+  "invoke.start",
+  "invoke.steer",
+  "invoke.cancel",
+  "browser.resolveApproval",
+  "automations.toggle",
+  "automations.runNow",
+]);
+
 export const MOBILE_BRIDGE_EVENT_NAMES = [
   "bridge.ready",
   "snapshot.updated",
@@ -67,6 +82,8 @@ export interface MobileBridgeRpcRequest {
   v: typeof MOBILE_BRIDGE_PROTOCOL_VERSION;
   type: "request";
   id: string;
+  /** Stable across retries. Legacy clients fall back to id, with conflict checks. */
+  idempotencyKey?: string;
   method: MobileBridgeMethod;
   params: MobileBridgeJsonObject;
 }
@@ -164,7 +181,12 @@ export interface MobileBridgeRpcErrorBody {
     | "invalid_params"
     | "duplicate_request"
     | "too_many_requests"
+    | "idempotency_conflict"
+    | "idempotency_in_progress"
+    | "idempotency_uncertain"
+    | "idempotency_unavailable"
     | "authority_error"
+    | "response_too_large"
     | "request_timeout";
   message: string;
   retryable: boolean;
@@ -364,6 +386,11 @@ export interface MobileBridgePendingConfirmationDto {
   question: string;
   header: string | null;
   optionCount: number;
+  multiSelect: boolean;
+  options: Array<{
+    label: string;
+    description: string | null;
+  }>;
   agentId: string;
   firmId: string | null;
   createdAt: string;
@@ -685,7 +712,7 @@ export function mobileBridgeFailure(
 
 /** DESKTOP_MOBILE_BRIDGE: All invalid or unknown envelopes fail closed. */
 export function parseMobileBridgeRequest(input: unknown): MobileBridgeRequestParseResult {
-  if (!isRecord(input) || !hasOnlyKeys(input, ["v", "type", "id", "method", "params"])) {
+  if (!isRecord(input) || !hasOnlyKeys(input, ["v", "type", "id", "idempotencyKey", "method", "params"])) {
     return { ok: false, error: mobileBridgeFailure(null, "invalid_envelope", "Invalid request envelope") };
   }
   const id = typeof input.id === "string" && input.id.length <= 128 ? input.id : null;
@@ -697,6 +724,16 @@ export function parseMobileBridgeRequest(input: unknown): MobileBridgeRequestPar
   }
   if (!id || /[\u0000-\u001f]/.test(id)) {
     return { ok: false, error: mobileBridgeFailure(null, "invalid_request_id", "Invalid request id") };
+  }
+  const idempotencyKey = input.idempotencyKey;
+  if (
+    idempotencyKey !== undefined &&
+    (typeof idempotencyKey !== "string" ||
+      idempotencyKey.length < 1 ||
+      idempotencyKey.length > 160 ||
+      /[\u0000-\u001f]/.test(idempotencyKey))
+  ) {
+    return { ok: false, error: mobileBridgeFailure(id, "invalid_envelope", "Invalid idempotency key") };
   }
   if (!isMobileBridgeMethod(input.method)) {
     return { ok: false, error: mobileBridgeFailure(id, "method_not_allowed", "Method is not allowlisted") };
@@ -714,6 +751,7 @@ export function parseMobileBridgeRequest(input: unknown): MobileBridgeRequestPar
       v: MOBILE_BRIDGE_PROTOCOL_VERSION,
       type: "request",
       id,
+      ...(typeof idempotencyKey === "string" ? { idempotencyKey } : {}),
       method: input.method,
       params: input.params as MobileBridgeJsonObject,
     },

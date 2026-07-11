@@ -97,24 +97,32 @@ async function main() {
   assert.equal(ready.payload.hostId, manifest.hostId);
   assert.equal(initialSnapshot.payload.host.id, manifest.hostId);
 
-  const [host, agents, chats, activeChats] = await Promise.all([
+  const [host, agents, chats, activeChats, automations, usage, runtimes] = await Promise.all([
     rpc("host.status"),
     rpc("team.list"),
     rpc("chats.listRecent", { limit: 100 }),
     rpc("invoke.activeChats"),
+    rpc("automations.list"),
+    rpc("usage.snapshot"),
+    rpc("runtime.detect"),
   ]);
   assert.equal(host.id, manifest.hostId);
   assert.equal(Array.isArray(agents), true);
   assert.equal(Array.isArray(chats), true);
   assert.equal(Array.isArray(activeChats), true);
+  assert.equal(Array.isArray(automations), true);
+  assert.equal(Array.isArray(usage), true);
+  assert.equal(Array.isArray(runtimes), true);
   assert.ok(agents.length > 0, "the live Desktop must expose at least one installed agent");
 
   const db = new Database(path.join(userData, "agentlas.sqlite"), { readonly: true, fileMustExist: true });
   try {
     const dbAgentIds = new Set(db.prepare("SELECT id FROM installed_agents").all().map((row) => row.id));
     const dbChatIds = new Set(db.prepare("SELECT id FROM chats WHERE archived_at IS NULL").all().map((row) => row.id));
+    const dbAutomationIds = new Set(db.prepare("SELECT id FROM automations").all().map((row) => row.id));
     assert.equal(agents.every((agent) => dbAgentIds.has(agent.id)), true);
     assert.equal(chats.every((chat) => dbChatIds.has(chat.id)), true);
+    assert.equal(automations.every((automation) => dbAutomationIds.has(automation.id)), true);
 
     const title = `[Mobile Bridge QA] ${new Date().toISOString()}`;
     const created = await rpc("chats.create", { agentId: agents[0].id, title });
@@ -178,6 +186,9 @@ async function main() {
       agents: agents.length,
       chats: chats.length,
       activeChats: activeChats.length,
+      automations: automations.length,
+      usageProviders: usage.length,
+      runtimes: runtimes.length,
       initialSeq: [ready.seq, initialSnapshot.seq],
       invocationStream: true,
       steeringQueued: steered,
@@ -192,7 +203,10 @@ async function main() {
 
 main()
   .finally(() => socket.close())
-  .catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
-  });
+  .then(
+    () => process.exit(0),
+    (error) => {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    },
+  );

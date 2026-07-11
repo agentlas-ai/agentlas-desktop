@@ -10,6 +10,7 @@ import { getUsageSnapshot } from "../usage";
 import type {
   Automation,
   Chat,
+  ChatHistoryEntry,
   PendingConfirmation,
   RuntimeStatus,
   UsageSnapshot,
@@ -32,6 +33,13 @@ import {
   type MobileBridgeSnapshot,
   type MobileBridgeUsageProviderDto,
 } from "../../shared/mobile-bridge";
+import {
+  MOBILE_BRIDGE_DISPLAY_TEXT_BYTES,
+  MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES,
+  MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES,
+  mobileBridgeJsonBytes,
+  sanitizeMobileBridgeText,
+} from "./sanitize";
 
 export interface MobileBridgeProjectionOptions {
   /** DESKTOP_MOBILE_BRIDGE: Loaded from userData/mobile-bridge/identity.json. */
@@ -44,6 +52,17 @@ export interface MobileBridgeProjectionOptions {
   now?: Date;
 }
 
+function displayText(value: string, maxBytes = MOBILE_BRIDGE_DISPLAY_TEXT_BYTES): string {
+  return sanitizeMobileBridgeText(value, maxBytes);
+}
+
+function optionalDisplayText(
+  value: string | null | undefined,
+  maxBytes = MOBILE_BRIDGE_DISPLAY_TEXT_BYTES,
+): string | null {
+  return typeof value === "string" ? displayText(value, maxBytes) : null;
+}
+
 function platform(): MobileBridgeHostDto["platform"] {
   if (process.platform === "darwin") return "macos";
   if (process.platform === "win32") return "windows";
@@ -53,7 +72,7 @@ function platform(): MobileBridgeHostDto["platform"] {
 function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
   return {
     id: options.hostIdentity.hostId,
-    displayName: options.displayName,
+    displayName: displayText(options.displayName, 512),
     platform: platform(),
     appVersion: options.appVersion,
     protocolVersion: MOBILE_BRIDGE_PROTOCOL_VERSION,
@@ -78,15 +97,15 @@ function agentsDto(): MobileBridgeAgentDto[] {
   return listInstalledAgents().map((agent) => ({
     id: agent.id,
     slug: agent.slug,
-    name: agent.name,
-    nameEn: agent.nameEn,
-    tagline: agent.tagline,
-    taglineEn: agent.taglineEn,
+    name: displayText(agent.name, 512),
+    nameEn: displayText(agent.nameEn, 512),
+    tagline: displayText(agent.tagline, 2_048),
+    taglineEn: displayText(agent.taglineEn, 2_048),
     trustGrade: agent.trustGrade,
     installedAt: agent.installedAt,
-    tone: agent.tone,
-    runtimeLabel: agent.runtimeLabel ?? null,
-    assetSource: agent.assetSource ?? null,
+    tone: displayText(agent.tone, 256),
+    runtimeLabel: optionalDisplayText(agent.runtimeLabel, 512),
+    assetSource: optionalDisplayText(agent.assetSource, 1_024),
     kind: agent.kind === "team" ? "team" : "agent",
     visibility: agent.visibility ?? "visible",
     // DESKTOP_MOBILE_BRIDGE: Only a boolean crosses the bridge. env key names,
@@ -99,15 +118,15 @@ function firmsDto(): MobileBridgeFirmDto[] {
   return listFirms().map((firm) => ({
     id: firm.id,
     slug: firm.slug,
-    name: firm.name,
-    nameEn: firm.nameEn,
-    tagline: firm.tagline,
-    taglineEn: firm.taglineEn,
+    name: displayText(firm.name, 512),
+    nameEn: displayText(firm.nameEn, 512),
+    tagline: displayText(firm.tagline, 2_048),
+    taglineEn: displayText(firm.taglineEn, 2_048),
     ceoAgentId: firm.ceoAgentId,
     orgChart: firm.orgChart.map((node) => ({
       agentId: node.agentId,
       agentSlug: node.agentSlug,
-      role: node.role,
+      role: displayText(node.role, 512),
       reportsTo: node.reportsTo,
     })),
     installedAt: firm.installedAt,
@@ -134,9 +153,9 @@ async function groupsDto(): Promise<MobileBridgeAgentGroupDto[]> {
   }
   return groups.map((group) => ({
     id: group.id,
-    name: group.name,
-    description: group.description,
-    orchestratorName: group.orchestratorName,
+    name: displayText(group.name, 512),
+    description: displayText(group.description, 2_048),
+    orchestratorName: displayText(group.orchestratorName, 512),
     warningCount: group.warningCount,
     createdAt: group.createdAt,
     updatedAt: group.updatedAt,
@@ -150,10 +169,10 @@ async function groupsDto(): Promise<MobileBridgeAgentGroupDto[]> {
         hubSlug: member.hubSlug ?? null,
         firmId: member.firmId ?? null,
         nodeId: member.nodeId ?? null,
-        role: member.role ?? null,
-        name: display.name,
-        nameEn: display.nameEn,
-        routeLabel: display.routeLabel,
+        role: optionalDisplayText(member.role, 512),
+        name: displayText(display.name, 512),
+        nameEn: displayText(display.nameEn, 512),
+        routeLabel: displayText(display.routeLabel, 1_024),
         status: member.status,
         warnings: [...member.warnings],
       };
@@ -164,8 +183,8 @@ async function groupsDto(): Promise<MobileBridgeAgentGroupDto[]> {
 function projectsDto(): MobileBridgeProjectDto[] {
   return listProjects().map((project) => ({
     id: project.id,
-    name: project.name,
-    description: project.description,
+    name: displayText(project.name, 512),
+    description: optionalDisplayText(project.description, 2_048),
     defaultAgentId: project.defaultAgentId,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
@@ -184,7 +203,7 @@ export function projectMobileBridgeChat(
     firmId: chat.firmId,
     agentGroupId: chat.agentGroupId,
     agentId: chat.agentId,
-    title: chat.title,
+    title: displayText(chat.title, 1_024),
     archivedAt: chat.archivedAt,
     createdAt: chat.createdAt,
     updatedAt: chat.updatedAt,
@@ -193,9 +212,9 @@ export function projectMobileBridgeChat(
     active,
     hiredAgents: chat.hiredAgents.map((agent) => ({
       slug: agent.slug,
-      name: agent.name ?? null,
+      name: optionalDisplayText(agent.name, 512),
       source: agent.source ?? null,
-      routeLabel: agent.routeLabel ?? null,
+      routeLabel: optionalDisplayText(agent.routeLabel, 1_024),
       hiredAt: agent.hiredAt,
     })),
   };
@@ -207,18 +226,58 @@ function chatsDto(activeChatIds: ReadonlySet<string>): MobileBridgeChatDto[] {
   );
 }
 
+export function projectMobileBridgeHistory(
+  history: readonly ChatHistoryEntry[],
+  limit: number,
+  budgetBytes = MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES,
+): MobileBridgeChatMessageDto[] {
+  const budget = Math.max(1_024, Math.min(MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES, Math.floor(budgetBytes)));
+  const out: MobileBridgeChatMessageDto[] = [];
+  const selected = history.slice(-Math.max(1, Math.min(200, Math.floor(limit))));
+  // Newest messages are authoritative when a byte budget forces a shorter page.
+  for (let index = selected.length - 1; index >= 0; index -= 1) {
+    const message = selected[index];
+    const shell: MobileBridgeChatMessageDto = {
+      id: message.id,
+      role: message.role,
+      text: "",
+      createdAt: message.createdAt,
+    };
+    const remaining = budget - mobileBridgeJsonBytes(out) - mobileBridgeJsonBytes(shell) - 16;
+    if (remaining <= 0) break;
+    const candidate: MobileBridgeChatMessageDto = {
+      ...shell,
+      text: sanitizeMobileBridgeText(
+        message.text,
+        Math.min(MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES, remaining),
+      ),
+    };
+    const next = [candidate, ...out];
+    if (mobileBridgeJsonBytes(next) > budget) break;
+    out.unshift(candidate);
+  }
+  return out;
+}
+
 function messagesDto(
   chatIds: readonly string[],
   maxMessagesPerChat: number,
+  budgetBytes: number,
 ): Record<string, MobileBridgeChatMessageDto[]> {
   const messages = Object.create(null) as Record<string, MobileBridgeChatMessageDto[]>;
-  for (const chatId of new Set(chatIds.filter((id) => id && id.length <= 256).slice(0, 20))) {
-    messages[chatId] = listChatMessages(chatId, maxMessagesPerChat).map((message) => ({
-      id: message.id,
-      role: message.role,
-      text: message.text,
-      createdAt: message.createdAt,
-    }));
+  const ids = [...new Set(chatIds.filter((id) => id && id.length <= 256).slice(0, 20))];
+  const totalBudget = Math.max(0, Math.floor(budgetBytes));
+  if (ids.length === 0 || totalBudget < 1_024) return messages;
+  const perChatBudget = Math.max(1_024, Math.floor(totalBudget / ids.length) - 256);
+  for (const chatId of ids) {
+    const projected = projectMobileBridgeHistory(
+      listChatMessages(chatId, maxMessagesPerChat),
+      maxMessagesPerChat,
+      perChatBudget,
+    );
+    const candidate = { ...messages, [chatId]: projected };
+    if (mobileBridgeJsonBytes(candidate) > totalBudget) break;
+    messages[chatId] = projected;
   }
   return messages;
 }
@@ -229,10 +288,15 @@ export function projectMobileBridgeConfirmations(
 ): MobileBridgePendingConfirmationDto[] {
   return confirmations.map((confirmation) => ({
     chatId: confirmation.chatId,
-    chatTitle: confirmation.chatTitle,
-    question: confirmation.question,
-    header: confirmation.header ?? null,
-    optionCount: confirmation.optionCount,
+    chatTitle: displayText(confirmation.chatTitle, 1_024),
+    question: displayText(confirmation.question, 4_096),
+    header: optionalDisplayText(confirmation.header, 512),
+    optionCount: confirmation.options.length,
+    multiSelect: confirmation.multiSelect,
+    options: confirmation.options.slice(0, 8).map((option) => ({
+      label: displayText(option.label, 512),
+      description: optionalDisplayText(option.description, 2_048),
+    })),
     agentId: confirmation.agentId,
     firmId: confirmation.firmId,
     createdAt: confirmation.createdAt,
@@ -245,8 +309,8 @@ export function projectMobileBridgeAutomation(
 ): MobileBridgeAutomationDto {
   return {
     id: automation.id,
-    name: automation.name,
-    scheduleHuman: automation.scheduleHuman,
+    name: displayText(automation.name, 1_024),
+    scheduleHuman: displayText(automation.scheduleHuman, 1_024),
     targetType: automation.targetType,
     targetId: automation.targetId,
     enabled: automation.enabled,
@@ -339,7 +403,7 @@ export async function projectMobileBridgeSnapshot(
     detectRuntimes(),
     getUsageSnapshot(),
   ]);
-  return {
+  const snapshot: MobileBridgeSnapshot = {
     schemaVersion: MOBILE_BRIDGE_PROTOCOL_VERSION,
     generatedAt: (options.now ?? new Date()).toISOString(),
     host: hostDto(options),
@@ -349,10 +413,23 @@ export async function projectMobileBridgeSnapshot(
     groups,
     projects: projectsDto(),
     chats: chatsDto(activeSet),
-    messages: messagesDto(options.includeMessagesForChatIds ?? [], maxMessages),
+    messages: {},
     pendingConfirmations: projectMobileBridgeConfirmations(),
     automations: automationsDto(),
     usage: projectMobileBridgeUsage(usage),
     activeChatIds,
   };
+  const baseBytes = mobileBridgeJsonBytes(snapshot);
+  if (baseBytes > MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES) {
+    throw new Error("Mobile Bridge snapshot metadata exceeds the safe wire budget");
+  }
+  snapshot.messages = messagesDto(
+    options.includeMessagesForChatIds ?? [],
+    maxMessages,
+    MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES - baseBytes,
+  );
+  if (mobileBridgeJsonBytes(snapshot) > MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES) {
+    throw new Error("Mobile Bridge snapshot exceeds the safe wire budget");
+  }
+  return snapshot;
 }

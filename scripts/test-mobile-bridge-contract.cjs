@@ -1,11 +1,13 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
 
 const {
   MOBILE_BRIDGE_MAX_MESSAGE_BYTES,
   MOBILE_BRIDGE_PAIR_EXCHANGE_PATH,
+  MOBILE_BRIDGE_WRITE_METHODS,
   parseMobileBridgePairExchangeRequest,
   parseMobileBridgeRequest,
 } = require("../dist/shared/mobile-bridge.js");
@@ -21,7 +23,23 @@ const {
   writeMobileBridgeEndpointManifest,
 } = require("../dist/electron/mobile-bridge/pairing.js");
 const { AgentlasMobileBridgeServer } = require("../dist/electron/mobile-bridge/server.js");
-const { loadOrCreateMobileBridgeTls } = require("../dist/electron/mobile-bridge/tls.js");
+const {
+  loadOrCreateMobileBridgeTls,
+  selectPreferredMobileBridgeHost,
+} = require("../dist/electron/mobile-bridge/tls.js");
+const {
+  MobileBridgeRequestReplayStore,
+  fingerprintMobileBridgeRequest,
+  mobileBridgeReplayStorePath,
+} = require("../dist/electron/mobile-bridge/replay.js");
+const {
+  MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES,
+  sanitizeMobileBridgeText,
+} = require("../dist/electron/mobile-bridge/sanitize.js");
+const {
+  projectMobileBridgeConfirmations,
+  projectMobileBridgeHistory,
+} = require("../dist/electron/mobile-bridge/projector.js");
 const {
   createMobileBridgeAuthority,
   projectMobileBridgeInvocationEvent,
@@ -40,6 +58,7 @@ function pairRequest(id, code, name = "Mason's iPhone") {
 
 async function testTlsIdentity() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mobile-bridge-tls-"));
+  const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mobile-bridge-tls-other-"));
   try {
     const first = await loadOrCreateMobileBridgeTls(root);
     const second = await loadOrCreateMobileBridgeTls(root);
@@ -55,8 +74,59 @@ async function testTlsIdentity() {
       assert.equal(fs.statSync(path.join(directory, "server-key.pem")).mode & 0o777, 0o600);
       assert.equal(fs.statSync(path.join(directory, "server-cert.pem")).mode & 0o777, 0o600);
     }
+
+    await loadOrCreateMobileBridgeTls(otherRoot);
+    fs.copyFileSync(
+      path.join(otherRoot, "mobile-bridge", "server-key.pem"),
+      path.join(root, "mobile-bridge", "server-key.pem"),
+    );
+    const recovered = await loadOrCreateMobileBridgeTls(root);
+    assert.notEqual(
+      recovered.certificateFingerprint,
+      first.certificateFingerprint,
+      "a mismatched key/certificate pair must rotate instead of becoming a persistent startup failure",
+    );
+    assert.doesNotThrow(() => https.createServer(recovered.serverOptions));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(otherRoot, { recursive: true, force: true });
+  }
+}
+
+function testAbsolutePathSanitization() {
+  const cases = [
+    "/Applications/Agentlas.app/Contents/Resources/app.asar",
+    "/System/Library/Keychains/SystemRootCertificates.keychain",
+    "/Users/mason/Library/Application Support/Agentlas/dev-bootstrap.json",
+    String.raw`C:\Program Files\Agentlas\resources\app.asar`,
+    String.raw`\\server\private-share\Agentlas\credential.json`,
+  ];
+  for (const absolutePath of cases) {
+    const projected = sanitizeMobileBridgeText(`Opened ${absolutePath}`, 64 * 1024);
+    assert.match(projected, /\[local-path\]/);
+    assert.equal(
+      projected.includes(absolutePath),
+      false,
+      `absolute path crossed the Mobile Bridge boundary: ${absolutePath}`,
+    );
+  }
+  const spaced = sanitizeMobileBridgeText(
+    "/Users/mason/Library/Application Support/Agentlas/dev-bootstrap.json",
+    64 * 1024,
+  );
+  assert.equal(spaced, "[local-path]", "a path with spaces must be redacted as one path");
+
+  for (const credential of [
+    `ghp_${"a".repeat(32)}`,
+    `github_pat_${"b".repeat(32)}`,
+    `sk_live_${"c".repeat(32)}`,
+    `ASIA${"D".repeat(16)}`,
+  ]) {
+    assert.equal(
+      sanitizeMobileBridgeText(credential, 64 * 1024),
+      "[redacted-secret]",
+      "known credential forms must not cross the Mobile Bridge boundary",
+    );
   }
 }
 
@@ -184,6 +254,27 @@ async function testWireParsers() {
     params: {},
   });
   assert.equal(valid.ok, true);
+  assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("automations.runNow"), true);
+
+  const idempotentWrite = parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "request_write_1",
+    idempotencyKey: "stable-mobile-write-1",
+    method: "automations.runNow",
+    params: { id: "automation_1" },
+  });
+  assert.equal(idempotentWrite.ok, true);
+  assert.equal(idempotentWrite.value.idempotencyKey, "stable-mobile-write-1");
+  const malformedIdempotency = parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "request_write_2",
+    idempotencyKey: "bad\nkey",
+    method: "automations.runNow",
+    params: { id: "automation_1" },
+  });
+  assert.equal(malformedIdempotency.ok, false);
 
   const unknownMethod = parseMobileBridgeRequest({
     v: 1,
@@ -312,6 +403,163 @@ function testInvocationEventProjection() {
   });
   assert.equal(Object.hasOwn(redactedDelta, "textLen"), false);
   assert.equal(JSON.stringify(redactedDelta).includes("anothersecretvalue"), false);
+
+  const dataUrl = projectMobileBridgeInvocationEvent({
+    kind: "final",
+    text: `preview data:image/png;base64,${"A".repeat(4096)}`,
+  });
+  assert.equal(JSON.stringify(dataUrl).includes("base64"), false);
+  assert.match(dataUrl.text, /\[redacted-data-url\]/);
+}
+
+function testTranscriptAndConfirmationProjection() {
+  const history = Array.from({ length: 40 }, (_, index) => ({
+    id: `message_${index}`,
+    role: index % 2 === 0 ? "user" : "assistant",
+    text:
+      `message ${index} token=supersecretvalue /Users/mason/private.txt ` +
+      `data:image/png;base64,${"A".repeat(90_000)}`,
+    createdAt: new Date(Date.parse("2026-07-11T00:00:00.000Z") + index * 1_000).toISOString(),
+  }));
+  const projected = projectMobileBridgeHistory(history, 40);
+  const encoded = JSON.stringify(projected);
+  assert.ok(Buffer.byteLength(encoded, "utf8") <= MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES);
+  assert.equal(encoded.includes("supersecretvalue"), false);
+  assert.equal(encoded.includes("/Users/mason"), false);
+  assert.equal(encoded.includes("data:image"), false);
+  assert.equal(projected.at(-1).id, "message_39", "newest transcript rows must survive byte paging");
+
+  const confirmations = projectMobileBridgeConfirmations([{
+    chatId: "chat_question_1",
+    chatTitle: "Design /Users/mason/private",
+    question: "Which token=hiddenvalue direction?",
+    header: "Direction",
+    optionCount: 2,
+    multiSelect: false,
+    options: [
+      { label: "Black and white", description: "Use /Users/mason/brand" },
+      { label: "Warm neutral", description: "Use token=anotherhiddenvalue" },
+    ],
+    agentId: "agent_1",
+    firmId: null,
+    createdAt: "2026-07-11T00:00:00.000Z",
+  }]);
+  assert.equal(confirmations[0].options.length, 2);
+  assert.equal(confirmations[0].options[0].label, "Black and white");
+  assert.match(confirmations[0].options[0].description, /\[local-path\]/);
+  assert.match(confirmations[0].options[1].description, /\[redacted-secret\]/);
+  assert.equal(confirmations[0].optionCount, 2);
+}
+
+function testLanAddressSelection() {
+  const selected = selectPreferredMobileBridgeHost([
+    { interfaceName: "docker0", address: "172.17.0.1", internal: false },
+    { interfaceName: "wlan0", address: "192.168.1.42", internal: false },
+    { interfaceName: "lo", address: "127.0.0.1", internal: true },
+  ]);
+  assert.equal(selected, "192.168.1.42");
+  assert.equal(
+    selectPreferredMobileBridgeHost([
+      { interfaceName: "en0", address: "fe80::1", internal: false },
+      { interfaceName: "en0", address: "fd12:3456:789a::42", internal: false },
+    ]),
+    "fd12:3456:789a::42",
+  );
+  assert.equal(
+    selectPreferredMobileBridgeHost([
+      { interfaceName: "docker0", address: "172.17.0.1", internal: false },
+      { interfaceName: "lo", address: "127.0.0.1", internal: true },
+    ]),
+    null,
+  );
+  assert.equal(
+    selectPreferredMobileBridgeHost([
+      { interfaceName: "en0", address: "2001:db8::42", internal: false },
+    ]),
+    null,
+    "global IPv6 must require an explicit operator bind override",
+  );
+}
+
+function testDurableReplayLedger() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mobile-bridge-replay-"));
+  const deviceId = "device_1234567890abcdef1234567890abcdef";
+  const request = {
+    v: 1,
+    type: "request",
+    id: "write_1",
+    idempotencyKey: "stable-write-1",
+    method: "automations.runNow",
+    params: { id: "automation_1" },
+  };
+  try {
+    const fingerprint = fingerprintMobileBridgeRequest(request);
+    const first = new MobileBridgeRequestReplayStore(root, { instanceId: "desktop-instance-1" });
+    assert.deepEqual(first.begin(deviceId, request.idempotencyKey, fingerprint), { kind: "execute" });
+    const response = {
+      v: 1,
+      type: "response",
+      id: request.id,
+      ok: true,
+      result: { accepted: true, automationId: "automation_1" },
+    };
+    first.complete(deviceId, request.idempotencyKey, fingerprint, response);
+
+    const restarted = new MobileBridgeRequestReplayStore(root, { instanceId: "desktop-instance-2" });
+    assert.deepEqual(restarted.begin(deviceId, request.idempotencyKey, fingerprint), {
+      kind: "replay",
+      response,
+    });
+    const changedFingerprint = fingerprintMobileBridgeRequest({
+      ...request,
+      params: { id: "automation_2" },
+    });
+    assert.deepEqual(restarted.begin(deviceId, request.idempotencyKey, changedFingerprint), {
+      kind: "conflict",
+    });
+
+    const pendingFingerprint = fingerprintMobileBridgeRequest({
+      ...request,
+      id: "write_2",
+      idempotencyKey: "stable-write-2",
+    });
+    assert.deepEqual(
+      restarted.begin(deviceId, "stable-write-2", pendingFingerprint),
+      { kind: "execute" },
+    );
+    const secondRestart = new MobileBridgeRequestReplayStore(root, { instanceId: "desktop-instance-3" });
+    assert.deepEqual(
+      secondRestart.begin(deviceId, "stable-write-2", pendingFingerprint),
+      { kind: "uncertain" },
+    );
+    const bounded = new MobileBridgeRequestReplayStore(root, {
+      instanceId: "desktop-instance-4",
+      maxEntries: 2,
+    });
+    assert.throws(
+      () => bounded.begin(
+        deviceId,
+        "stable-write-3",
+        fingerprintMobileBridgeRequest({
+          ...request,
+          id: "write_3",
+          idempotencyKey: "stable-write-3",
+        }),
+      ),
+      /ledger is full/,
+    );
+    assert.equal(fs.existsSync(mobileBridgeReplayStorePath(root)), true);
+    assert.equal(
+      fs.readFileSync(mobileBridgeReplayStorePath(root), "utf8").includes("stable-write"),
+      false,
+      "idempotency keys must be hashed at rest",
+    );
+    if (process.platform !== "win32") {
+      assert.equal(fs.statSync(mobileBridgeReplayStorePath(root)).mode & 0o777, 0o600);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 }
 
 async function testAuthoritySteerGuard() {
@@ -348,6 +596,32 @@ async function testAuthoritySteerGuard() {
       ),
       /expectedRunId/,
     );
+    await assert.rejects(
+      authority.request(
+        {
+          v: 1,
+          type: "request",
+          id: "authority_cancel_missing",
+          method: "invoke.cancel",
+          params: { runId: "run_missing" },
+        },
+        context,
+      ),
+      /no longer active/,
+    );
+    await assert.rejects(
+      authority.request(
+        {
+          v: 1,
+          type: "request",
+          id: "authority_browser_missing",
+          method: "browser.resolveApproval",
+          params: { requestId: "approval_missing", decision: "once" },
+        },
+        context,
+      ),
+      /no longer pending/,
+    );
   } finally {
     authority.dispose();
   }
@@ -377,15 +651,25 @@ async function testPairingLifecycle() {
       "pairing_unavailable",
     );
 
-    const expiring = new MobileBridgePairingManager(root, { now, ttlMs: 10_000 });
+    const expiryReasons = [];
+    const expiring = new MobileBridgePairingManager(root, {
+      now,
+      ttlMs: 10_000,
+      onChanged: (reason) => expiryReasons.push(reason),
+    });
     const expiredChallenge = expiring.issueChallenge();
     clockMs += 10_000;
     expectPairingError(
       () => expiring.exchange(pairRequest("expired", expiredChallenge.code)),
       "pairing_expired",
     );
+    assert.deepEqual(expiryReasons, ["challenge-issued", "challenge-expired"]);
 
-    const manager = new MobileBridgePairingManager(root, { now });
+    const pairingReasons = [];
+    const manager = new MobileBridgePairingManager(root, {
+      now,
+      onChanged: (reason) => pairingReasons.push(reason),
+    });
     const challenge = manager.issueChallenge();
     assert.match(challenge.code, /^[A-Za-z0-9_-]{22}$/);
 
@@ -414,6 +698,7 @@ async function testPairingLifecycle() {
     assert.equal(manager.authenticate("Z".repeat(43)), null);
     assert.equal(manager.revokeDevice(issued.deviceId), true);
     assert.equal(manager.authenticate(issued.token), null);
+    assert.deepEqual(pairingReasons, ["challenge-issued", "device-paired", "device-revoked"]);
 
     const manifestRaw = fs.readFileSync(mobileBridgeEndpointManifestPath(root), "utf8");
     assert.equal(manifestRaw.includes(issued.token), false);
@@ -473,6 +758,9 @@ async function testServerBoundary() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mobile-bridge-server-"));
   const hostId = "host_fedcba9876543210fedcba9876543210";
   const pairing = new MobileBridgePairingManager(root);
+  const replayStore = new MobileBridgeRequestReplayStore(root, {
+    instanceId: "server-boundary-instance",
+  });
   const calls = [];
   const errors = [];
   let eventListener = null;
@@ -496,6 +784,14 @@ async function testServerBoundary() {
         block.started.resolve();
         await block.release.promise;
       }
+      if (request.method === "invoke.history" && request.params.chatId === "chat_large") {
+        return [{
+          id: "message_large",
+          role: "assistant",
+          text: "x".repeat(MOBILE_BRIDGE_MAX_MESSAGE_BYTES + 1),
+          createdAt: "2026-07-11T00:00:00.000Z",
+        }];
+      }
       return { method: request.method, deviceId: context.deviceId };
     },
     subscribe(listener) {
@@ -512,6 +808,7 @@ async function testServerBoundary() {
   const server = new AgentlasMobileBridgeServer({
     authority,
     pairing,
+    replayStore,
     host: "127.0.0.1",
     port: 0,
     pingIntervalMs: 5_000,
@@ -583,6 +880,65 @@ async function testServerBoundary() {
     assert.equal(accepted.result.method, "team.list");
     assert.equal(accepted.result.deviceId, exchange.credential.deviceId);
     assert.equal(calls.length, 1);
+
+    const writeEnvelope = {
+      v: 1,
+      type: "request",
+      id: "automation_write_1",
+      idempotencyKey: "automation-stable-key-1",
+      method: "automations.runNow",
+      params: { id: "automation_1" },
+    };
+    socket.send(JSON.stringify(writeEnvelope));
+    const firstWrite = await nextMessage(
+      (message) => message.type === "response" && message.id === writeEnvelope.id,
+    );
+    assert.equal(firstWrite.ok, true);
+    assert.equal(calls.length, 2);
+
+    socket.send(JSON.stringify({ ...writeEnvelope, id: "automation_write_retry" }));
+    const replayedWrite = await nextMessage(
+      (message) => message.type === "response" && message.id === "automation_write_retry",
+    );
+    assert.equal(replayedWrite.ok, true);
+    assert.equal(replayedWrite.id, "automation_write_retry");
+    assert.equal(calls.length, 2, "replayed write must not re-enter Desktop authority");
+
+    socket.send(JSON.stringify({
+      ...writeEnvelope,
+      id: "automation_write_conflict",
+      params: { id: "automation_2" },
+    }));
+    const conflictedWrite = await nextMessage(
+      (message) => message.type === "response" && message.id === "automation_write_conflict",
+    );
+    assert.equal(conflictedWrite.ok, false);
+    assert.equal(conflictedWrite.error.code, "idempotency_conflict");
+    assert.equal(calls.length, 2);
+
+    socket.send(JSON.stringify({
+      v: 1,
+      type: "request",
+      id: "history_too_large",
+      method: "invoke.history",
+      params: { chatId: "chat_large", limit: 200 },
+    }));
+    const oversized = await nextMessage(
+      (message) => message.type === "response" && message.id === "history_too_large",
+    );
+    assert.equal(oversized.ok, false);
+    assert.equal(oversized.error.code, "response_too_large");
+    socket.send(JSON.stringify({
+      v: 1,
+      type: "request",
+      id: "still_connected",
+      method: "team.list",
+      params: {},
+    }));
+    const afterOversized = await nextMessage(
+      (message) => message.type === "response" && message.id === "still_connected",
+    );
+    assert.equal(afterOversized.ok, true, "oversized Desktop result must not close the socket");
 
     eventListener({ event: "invoke.activeChats", payload: { chatIds: ["chat_1"] } });
     const event = await nextMessage(
@@ -702,14 +1058,21 @@ async function testServerBoundary() {
 async function main() {
   await testWireParsers();
   await testTlsIdentity();
+  testAbsolutePathSanitization();
   testInvocationEventProjection();
+  testTranscriptAndConfirmationProjection();
+  testLanAddressSelection();
+  testDurableReplayLedger();
   await testAuthoritySteerGuard();
   await testPairingLifecycle();
   await testServerBoundary();
   console.log("Mobile Bridge contract, pairing, authenticated transport, event ordering, and safe projection tests passed.");
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main().then(
+  () => process.exit(0),
+  (error) => {
+    console.error(error);
+    process.exit(1);
+  },
+);

@@ -1,5 +1,6 @@
-import { X509Certificate } from "node:crypto";
+import { createPrivateKey, X509Certificate } from "node:crypto";
 import fs from "node:fs";
+import { isIP } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type https from "node:https";
@@ -48,15 +49,32 @@ function writePrivateFileAtomic(target: string, value: string): void {
   }
 }
 
-function publicNetworkAddresses(): string[] {
-  const addresses = new Set<string>();
-  for (const records of Object.values(os.networkInterfaces())) {
+export interface MobileBridgeNetworkAddress {
+  interfaceName: string;
+  address: string;
+  internal: boolean;
+}
+
+function networkAddressCandidates(): MobileBridgeNetworkAddress[] {
+  const candidates: MobileBridgeNetworkAddress[] = [];
+  for (const [interfaceName, records] of Object.entries(os.networkInterfaces())) {
     for (const record of records ?? []) {
-      if (record.internal) continue;
-      addresses.add(record.address.split("%", 1)[0]);
+      candidates.push({
+        interfaceName,
+        address: record.address.split("%", 1)[0],
+        internal: record.internal,
+      });
     }
   }
-  return [...addresses];
+  return candidates;
+}
+
+function publicNetworkAddresses(): string[] {
+  return [...new Set(
+    networkAddressCandidates()
+      .filter((candidate) => !candidate.internal)
+      .map((candidate) => candidate.address),
+  )];
 }
 
 function certificateNames(): Array<{ type: 2; value: string } | { type: 7; ip: string }> {
@@ -85,6 +103,10 @@ function materialFromPem(certificate: string, privateKey: string): MobileBridgeT
   const parsed = new X509Certificate(certificate);
   if (!parsed.ca) {
     throw new Error("Mobile Bridge TLS certificate must be its own pinned trust anchor");
+  }
+  const parsedPrivateKey = createPrivateKey(privateKey);
+  if (!parsed.checkPrivateKey(parsedPrivateKey)) {
+    throw new Error("Mobile Bridge TLS private key does not match its certificate");
   }
   const expiresAt = Date.parse(parsed.validTo);
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() + RENEW_BEFORE_MS) {
@@ -191,11 +213,58 @@ function isLanIpv4(address: string): boolean {
 
 /** Prefer a private LAN/Tailscale IPv4 address that a physical phone can use. */
 export function preferredMobileBridgeHost(): string {
-  const addresses = publicNetworkAddresses();
+  const selected = selectPreferredMobileBridgeHost(networkAddressCandidates());
+  if (!selected) {
+    throw new Error(
+      "No usable LAN address was found for Agentlas Mobile Bridge; connect this Desktop to the phone's LAN or set AGENTLAS_MOBILE_BRIDGE_HOST",
+    );
+  }
+  return selected;
+}
+
+const PHYSICAL_INTERFACE_RE = /^(?:en\d+|eth\d+|eno\d+|ens\d+|enp\w+|wlan\d+|wlp\w+|wi-?fi|ethernet)/i;
+const VIRTUAL_INTERFACE_RE = /^(?:awdl|llw|utun|tun\d*|tap\d*|docker|veth|br-|bridge|vmnet|vbox|virbr|vethernet|hyper-v|parallels|lo\d*)/i;
+
+function isUsablePrivateIpv6(address: string): boolean {
+  const normalized = address.toLowerCase();
   return (
-    addresses.find(isLanIpv4) ??
-    addresses.find(isPrivateIpv4) ??
-    addresses.find((address) => !address.includes(":")) ??
-    "127.0.0.1"
+    isIP(normalized) === 6 &&
+    /^f[cd][0-9a-f]{2}:/.test(normalized)
   );
+}
+
+/**
+ * Select an address a physical phone can actually route to. Interface class is
+ * retained so Docker/VM bridges cannot win merely because the OS enumerated
+ * their RFC1918 address first. Only IPv6 ULA addresses auto-bind; a global
+ * IPv6 bind remains available only through the explicit operator override.
+ */
+export function selectPreferredMobileBridgeHost(
+  candidates: readonly MobileBridgeNetworkAddress[],
+): string | null {
+  const scored = candidates.flatMap((candidate) => {
+    if (candidate.internal) return [];
+    const address = candidate.address.split("%", 1)[0];
+    const name = candidate.interfaceName.trim();
+    const tailscale = /tailscale/i.test(name) || /^100\.(?:6[4-9]|[789]\d|1[01]\d|12[0-7])\./.test(address);
+    const virtual = VIRTUAL_INTERFACE_RE.test(name) && !tailscale;
+    if (virtual) return [];
+    const physical = PHYSICAL_INTERFACE_RE.test(name);
+    let score: number | null = null;
+    if (physical && isLanIpv4(address)) score = 0;
+    else if (physical && isUsablePrivateIpv6(address)) score = 10;
+    else if (physical && isPrivateIpv4(address)) score = 20;
+    else if (tailscale && isPrivateIpv4(address)) score = 30;
+    else if (isLanIpv4(address)) score = 40;
+    else if (isUsablePrivateIpv6(address)) score = 50;
+    else if (isPrivateIpv4(address)) score = 60;
+    if (score === null) return [];
+    return [{ ...candidate, address, score }];
+  });
+  scored.sort((left, right) =>
+    left.score - right.score ||
+    left.interfaceName.localeCompare(right.interfaceName) ||
+    left.address.localeCompare(right.address),
+  );
+  return scored[0]?.address ?? null;
 }

@@ -402,6 +402,7 @@ function setupMockAgentlasBridge(options) {
       };
     },
     onActiveChats: () => () => {},
+    onMobileBridgeChanged: () => () => {},
     // Browser 승인 바텀시트(BrowserActionApprovalSheet)가 마운트 시 무조건 구독한다 —
     // 없으면 chat 라우트 전체가 client-side exception으로 죽는다.
     onBrowserApproval: () => () => {},

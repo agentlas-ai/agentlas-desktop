@@ -40,6 +40,7 @@ import {
   issueMobileBridgePairing,
   listMobileBridgeDevices,
   mobileBridgeRuntimeStatus,
+  onMobileBridgeStateChanged,
   revokeMobileBridgeDevice,
   startAgentlasMobileBridge,
   stopAgentlasMobileBridge,
@@ -50,6 +51,7 @@ export { currentUiLocale } from "./ui-locale";
 const isDev = process.env.NODE_ENV === "development";
 const AUTH_SESSION_CHANGED_CHANNEL = "auth:sessionChanged";
 let disposeAuthSessionInvalidation: (() => void) | null = null;
+let disposeMobileBridgeStateChange: (() => void) | null = null;
 
 function broadcastSignedOutSession(): void {
   for (const window of BrowserWindow.getAllWindows()) {
@@ -306,6 +308,8 @@ app.on("before-quit", () => {
   try { disposeAppFactoryLaunches(); } catch {}
   try { disposeAuthSessionInvalidation?.(); } catch {}
   disposeAuthSessionInvalidation = null;
+  try { disposeMobileBridgeStateChange?.(); } catch {}
+  disposeMobileBridgeStateChange = null;
   void stopAgentlasMobileBridge().catch((error) => {
     console.error("[mobile-bridge] shutdown failed", error);
   });
@@ -368,6 +372,12 @@ app.whenReady().then(async () => {
       return { ok: false };
     }
     return revokeMobileBridgeDevice(deviceId);
+  });
+  disposeMobileBridgeStateChange = onMobileBridgeStateChanged((reason) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
+      window.webContents.send("mobileBridge:changed", { reason });
+    }
   });
   setCurrentUiLocale(resolveMenuLocale());
   applyAppMenu(resolveMenuLocale());

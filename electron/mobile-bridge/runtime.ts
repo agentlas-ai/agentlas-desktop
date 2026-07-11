@@ -17,7 +17,9 @@ import {
   loadOrCreateMobileBridgeHostIdentity,
   writeMobileBridgeEndpointManifest,
   type MobileBridgeEndpointManifest,
+  type MobileBridgePairingChangeReason,
 } from "./pairing";
+import { MobileBridgeRequestReplayStore } from "./replay";
 import { AgentlasMobileBridgeServer } from "./server";
 import { loadOrCreateMobileBridgeTls, preferredMobileBridgeHost } from "./tls";
 
@@ -36,6 +38,24 @@ interface RunningBridge {
 
 let running: RunningBridge | null = null;
 let lastError: string | null = null;
+export type MobileBridgeStateChangeReason =
+  | MobileBridgePairingChangeReason
+  | "runtime-started"
+  | "runtime-stopped";
+const stateChangeListeners = new Set<(reason: MobileBridgeStateChangeReason) => void>();
+
+function emitMobileBridgeStateChange(reason: MobileBridgeStateChangeReason): void {
+  for (const listener of stateChangeListeners) {
+    try { listener(reason); } catch {}
+  }
+}
+
+export function onMobileBridgeStateChanged(
+  listener: (reason: MobileBridgeStateChangeReason) => void,
+): () => void {
+  stateChangeListeners.add(listener);
+  return () => stateChangeListeners.delete(listener);
+}
 
 function configuredPort(): number {
   const raw = process.env.AGENTLAS_MOBILE_BRIDGE_PORT?.trim();
@@ -61,7 +81,10 @@ export async function startAgentlasMobileBridge(
   if (running) return mobileBridgeRuntimeStatus();
   lastError = null;
   const identity = loadOrCreateMobileBridgeHostIdentity(options.userDataPath);
-  const pairing = new MobileBridgePairingManager(options.userDataPath);
+  const pairing = new MobileBridgePairingManager(options.userDataPath, {
+    onChanged: emitMobileBridgeStateChange,
+  });
+  const replayStore = new MobileBridgeRequestReplayStore(options.userDataPath);
   const displayName = (options.displayName?.trim() || os.hostname() || "Agentlas Desktop").slice(0, 160);
   const authority = createMobileBridgeAuthority({
     hostIdentity: identity,
@@ -80,6 +103,7 @@ export async function startAgentlasMobileBridge(
     server = new AgentlasMobileBridgeServer({
       authority,
       pairing,
+      replayStore,
       devBootstrapToken: devBootstrap,
       host: configuredHost(),
       port: configuredPort(),
@@ -103,11 +127,13 @@ export async function startAgentlasMobileBridge(
     };
     writeMobileBridgeEndpointManifest(options.userDataPath, manifest);
     running = { authority, pairing, server, manifest };
+    emitMobileBridgeStateChange("runtime-started");
     console.info(`[mobile-bridge] listening on ${address.url}`);
     return mobileBridgeRuntimeStatus();
   } catch (error) {
     lastError = error instanceof Error ? error.message : String(error);
     if (server) await server.close().catch(() => {});
+    pairing.dispose();
     authority.dispose();
     throw error;
   }
@@ -146,6 +172,11 @@ export async function stopAgentlasMobileBridge(): Promise<void> {
   const state = running;
   running = null;
   if (!state) return;
-  await state.server.close();
-  state.authority.dispose();
+  try {
+    await state.server.close();
+  } finally {
+    state.pairing.dispose();
+    state.authority.dispose();
+    emitMobileBridgeStateChange("runtime-stopped");
+  }
 }

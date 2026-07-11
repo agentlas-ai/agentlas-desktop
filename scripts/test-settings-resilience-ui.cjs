@@ -53,6 +53,10 @@ function installSettingsFixture(payload) {
   window.localStorage.setItem("agentlas.locale", "ko");
 
   const calls = { runtime: 0, key: 0, multimodalStatus: 0 };
+  const mobileCalls = { status: 0, list: 0, issue: 0, revoke: 0 };
+  let mobileDevices = [];
+  let mobilePairingExpiryDelay = 60_000;
+  let mobileBridgeChanged = null;
   const provider = {
     id: "qa-image-provider",
     modality: "image",
@@ -68,7 +72,65 @@ function installSettingsFixture(payload) {
     summaryKo: "설정 복원력 테스트용 프로바이더입니다.",
   };
 
-  window.__settingsResilienceQa = { calls };
+  window.__settingsResilienceQa = {
+    calls,
+    mobileCalls,
+    pairMobileDevice() {
+      mobileDevices = [{
+        deviceId: "device_1234567890abcdef1234567890abcdef",
+        name: "QA iPhone",
+        platform: "ios",
+        appVersion: "1.0.0",
+        issuedAt: new Date().toISOString(),
+        revokedAt: null,
+      }];
+      mobileBridgeChanged?.({ reason: "device-paired" });
+    },
+    expireNextPairingQuickly() {
+      mobilePairingExpiryDelay = 120;
+    },
+  };
+  window.agentlas.mobileBridge = {
+    status: async () => {
+      mobileCalls.status += 1;
+      return {
+        running: true,
+        endpoint: "wss://192.168.1.42:43123/v1/mobile",
+        secure: true,
+        hostId: "host_1234567890abcdef1234567890abcdef",
+        devices: [...mobileDevices],
+        error: null,
+      };
+    },
+    listDevices: async () => {
+      mobileCalls.list += 1;
+      return [...mobileDevices];
+    },
+    issuePairing: async () => {
+      mobileCalls.issue += 1;
+      return {
+        version: 1,
+        hostId: "host_1234567890abcdef1234567890abcdef",
+        displayName: "QA Desktop",
+        endpoint: "wss://192.168.1.42:43123/v1/mobile",
+        pairExchangeEndpoint: "https://192.168.1.42:43123/v1/mobile/pair/exchange",
+        code: "A".repeat(22),
+        expiresAt: new Date(Date.now() + mobilePairingExpiryDelay).toISOString(),
+        certificateFingerprint: "a".repeat(64),
+        certificateDer: "TUlJQg==",
+      };
+    },
+    revokeDevice: async () => {
+      mobileCalls.revoke += 1;
+      return { ok: true };
+    },
+  };
+  window.agentlasEvents.onMobileBridgeChanged = (handler) => {
+    mobileBridgeChanged = handler;
+    return () => {
+      if (mobileBridgeChanged === handler) mobileBridgeChanged = null;
+    };
+  };
   window.agentlas.app.getVersion = async () => "9.9.9";
   window.agentlas.runtime.detect = async () => {
     calls.runtime += 1;
@@ -142,6 +204,30 @@ async function main() {
       "Retry must refresh only the multimodal domain",
     );
     assert.equal(await page.getByText("QA 이미지 프로바이더", { exact: true }).count(), 1);
+
+    const pairButton = page.getByRole("button", { name: "새 기기 연결" });
+    await pairButton.click();
+    const pairingCard = page.getByTestId("mobile-bridge-pairing");
+    await pairingCard.waitFor();
+    await page.evaluate(() => window.__settingsResilienceQa.pairMobileDevice());
+    await pairingCard.waitFor({ state: "detached" });
+    await page.getByText("QA iPhone", { exact: true }).waitFor();
+    assert.match(await page.getByTestId("mobile-bridge-device-count").innerText(), /연결된 모바일 1대/);
+    assert.equal(
+      await page.getByText("새 모바일 기기가 연결됐습니다.", { exact: true }).count(),
+      1,
+      "pair exchange event must clear the consumed QR and refresh the device list",
+    );
+
+    await page.evaluate(() => window.__settingsResilienceQa.expireNextPairingQuickly());
+    await pairButton.click();
+    await pairingCard.waitFor();
+    await pairingCard.waitFor({ state: "detached" });
+    assert.equal(
+      await page.getByText("연결 QR이 만료됐습니다. 새 QR을 만들어 주세요.", { exact: true }).count(),
+      1,
+      "expired QR must not remain copyable or appear usable",
+    );
     assert.deepEqual(errors, [], `settings resilience UI emitted errors: ${errors.join("\n")}`);
     await page.screenshot({ path: path.join(outDir, "multimodal-recovered.png"), fullPage: true });
     await context.close();

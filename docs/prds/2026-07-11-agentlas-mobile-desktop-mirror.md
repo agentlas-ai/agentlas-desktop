@@ -3,7 +3,7 @@
 - **Project**: agentlas-desktop
 - **Slug**: 20260711-agentlas-mobile-desktop-mirror
 - **Opened**: 2026-07-11 by ceo/prd-keeper (triggered by: make the Flutter app a real mirror of this Mac's Agentlas Desktop)
-- **Status**: open
+- **Status**: shipped
 - **Supersedes**: none
 - **Superseded by**: none
 
@@ -50,17 +50,17 @@ The current Flutter app presents deterministic demo agents, chats, usage, and ap
 
 ## 5. Acceptance Criteria
 
-- [ ] No assistant output is rendered in a chat bubble.
-- [ ] The composer remains visible and editable with iOS and Android keyboards open.
-- [ ] A running Desktop chat accepts a steering message and the UI labels the action as steering.
-- [ ] No mobile-only device-authentication/payment approval path remains.
-- [ ] A chat question is resolved only by a user reply on its source chat; no generic `approvals.resolve` call is used.
-- [ ] A browser action can be resolved only while its Desktop-issued opaque request is live, and an expired request fails closed.
-- [ ] With Desktop stopped, the app shows a disconnected state and zero hardcoded agents/chats/approvals.
-- [ ] With the current Mac Desktop running, live agents/chats/messages and subsequent stream updates render in Flutter.
-- [ ] Every mobile command is acknowledged or shown as a recoverable Desktop/transport error.
-- [ ] Segment controls, tab bar, sheets, EN/KO text, and compact/wide viewport tests have no overflow or clipping.
-- [ ] Flutter analysis/tests, Desktop typecheck/tests, iOS simulator build, and Android build pass.
+- [x] No assistant output is rendered in a chat bubble.
+- [x] The composer remains visible and editable with iOS and Android keyboards open.
+- [x] A running Desktop chat accepts a steering message and the UI labels the action as steering.
+- [x] No mobile-only device-authentication/payment approval path remains.
+- [x] A chat question is resolved only by a user reply on its source chat; no generic `approvals.resolve` call is used.
+- [x] A browser action can be resolved only while its Desktop-issued opaque request is live, and an expired request fails closed.
+- [x] With Desktop stopped, the app shows a disconnected state and zero hardcoded agents/chats/approvals.
+- [x] With the current Mac Desktop running, live agents/chats/messages and subsequent stream updates render in Flutter.
+- [x] Every mobile command is acknowledged or shown as a recoverable Desktop/transport error.
+- [x] Segment controls, tab bar, sheets, EN/KO text, and compact/wide viewport tests have no overflow or clipping.
+- [x] Flutter analysis/tests, Desktop typecheck/tests, iOS simulator build, and Android build pass.
 
 ## 6. Change Log
 
@@ -82,8 +82,18 @@ The current Flutter app presents deterministic demo agents, chats, usage, and ap
 - **Residual risk**: implementation and current-Mac runtime proof remain open until the Desktop Bridge and Flutter production transport are wired.
 - **Tests / verification**: documentation consistency checks only; no runtime completion claim.
 
+### 2026-07-11 — Shipped the authenticated Desktop mirror
+- **Actor agents**: AppBridge CEO Swarm, mobile-dev, platform, design, risk-assurance, Hub `electron-expert`, Bug Hunter skeptic
+- **Outcome**: pass
+- **Files touched**: Desktop Mobile Bridge/schema/Settings/tests, Flutter transport/state/chat/UI/l10n/native shells, canonical 54-screen design set, protocol and wiring docs
+- **What changed**: added one-time QR pairing and per-device revoke, self-pinned WSS, secret-free bounded projection, durable write idempotency, exact Desktop question/browser approval mapping, up to 32 separately authenticated Desktop sessions, host-exact agent routing, Codex-style transcript and steering composer, EN/KO 54-screen parity, and generated brand launch assets.
+- **Why**: Mobile now acts only as a secure command/projection companion for the connected Desktop instead of pretending to own agents, approval policy, or sample runtime state.
+- **Residual risk**: real-device LAN/background lifecycle and store signing/submission remain release gates; 32 canonical screen IDs whose Desktop v1 producer does not exist are retained but unreachable behind `hidden-until-wired`.
+- **Tests / verification**: Desktop typecheck, production build, bridge contract, Settings lifecycle, zero production npm vulnerabilities, current-Mac live bridge smoke (30 agents, 11 chats, invoke stream, steering replacement, history and archive round-trip), Flutter analyze, 219-test suite plus opt-in live pinned-WSS test, iOS Simulator build/visual inspection, Android release APK, and canonical design validator all passed.
+
 ## 7. Residual Risk
 
-- Exposing Electron IPC beyond the trusted renderer can widen the attack surface — bind locally, authenticate every client, and project secret-free data only.
-- Desktop process/version drift can break the mobile contract — negotiate protocol version and fail visibly.
-- iOS Simulator cannot prove real LAN discovery/background behavior — verify current-Mac loopback first and retain a real-device test gate.
+- The bridge now authenticates per-device credentials, pins its WSS certificate, rate/size limits requests, redacts projected content, and negotiates protocol v1; Internet/Cloud Relay exposure is still intentionally unsupported.
+- iOS Simulator and a same-Mac source run do not prove real-phone LAN/Tailscale discovery, background reconnect, notification delivery, signing, or store review. Those stay explicit release gates.
+- Browser approval broker/Bridge/Flutter contract tests pass, but the same-Mac smoke did not force a new real browser action. Capture one user-generated browser request and exact Mobile resolution on a real phone before release.
+- 32 canonical design screen IDs do not yet have a Desktop v1 producer. They are preserved for scope parity but production navigation and actions fail closed behind `hidden-until-wired`; no sample success state substitutes for them.

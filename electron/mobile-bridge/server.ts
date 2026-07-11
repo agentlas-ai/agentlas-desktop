@@ -7,6 +7,7 @@ import {
   MOBILE_BRIDGE_MAX_MESSAGE_BYTES,
   MOBILE_BRIDGE_PAIR_EXCHANGE_PATH,
   MOBILE_BRIDGE_PROTOCOL_VERSION,
+  MOBILE_BRIDGE_WRITE_METHODS,
   isMobileBridgeEventName,
   isMobileBridgeJsonValue,
   mobileBridgeFailure,
@@ -23,6 +24,12 @@ import {
   type MobileBridgeServerMessage,
   type MobileBridgeSnapshot,
 } from "../../shared/mobile-bridge";
+import {
+  fingerprintMobileBridgeRequest,
+  type MobileBridgeReplayResponse,
+  type MobileBridgeRequestReplayStore,
+} from "./replay";
+import { mobileBridgeJsonBytes } from "./sanitize";
 
 // `ws` is currently present only as a transitive dependency of @google/genai.
 // DESKTOP_MOBILE_BRIDGE: package.json must declare `ws` directly before the
@@ -124,6 +131,8 @@ export interface MobileBridgePairingAuthority {
 export interface AgentlasMobileBridgeServerOptions {
   authority: MobileBridgeAuthority;
   pairing?: MobileBridgePairingAuthority;
+  /** Durable write-ahead request ledger. Production runtime always supplies it. */
+  replayStore?: MobileBridgeRequestReplayStore;
   /** DESKTOP_MOBILE_BRIDGE: Explicit current-Mac/dev bootstrap only. */
   devBootstrapToken?: string;
   host?: string;
@@ -215,6 +224,15 @@ function errorOf(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
 }
 
+function responseForRequest(
+  response: MobileBridgeReplayResponse,
+  requestId: string,
+): MobileBridgeReplayResponse {
+  return response.ok
+    ? { ...response, id: requestId }
+    : { ...response, id: requestId };
+}
+
 type PairingFailureCode = "pairing_denied" | "pairing_expired" | "pairing_unavailable";
 
 function pairingFailureCode(value: unknown): PairingFailureCode | null {
@@ -249,6 +267,7 @@ export class AgentlasMobileBridgeServer {
 
   private readonly authority: MobileBridgeAuthority;
   private readonly pairing?: MobileBridgePairingAuthority;
+  private readonly replayStore?: MobileBridgeRequestReplayStore;
   private readonly devBootstrapToken?: string;
   private readonly tls?: https.ServerOptions;
   private readonly pingIntervalMs: number;
@@ -281,6 +300,7 @@ export class AgentlasMobileBridgeServer {
     }
     this.authority = options.authority;
     this.pairing = options.pairing;
+    this.replayStore = options.replayStore;
     this.devBootstrapToken = options.devBootstrapToken;
     // DESKTOP_MOBILE_BRIDGE: localhost is the constructor default. Runtime may
     // opt into a concrete LAN address only when pinned TLS material is present.
@@ -581,6 +601,19 @@ export class AgentlasMobileBridgeServer {
       const snapshot = await this.authority.snapshot(state.context);
       if (!isMobileBridgeJsonValue(snapshot)) throw new Error("Mobile Bridge snapshot is not JSON-safe");
       if (state.revoked || !this.clients.has(state) || state.socket.readyState !== WS_OPEN) return;
+      const snapshotProbe: MobileBridgeEventEnvelope = {
+        v: MOBILE_BRIDGE_PROTOCOL_VERSION,
+        type: "event",
+        seq: 2,
+        event: "snapshot.updated",
+        occurredAt: new Date().toISOString(),
+        payload: snapshot as unknown as MobileBridgeJsonValue,
+      };
+      if (mobileBridgeJsonBytes(snapshotProbe) > MOBILE_BRIDGE_MAX_MESSAGE_BYTES) {
+        this.onError(new Error("Mobile Bridge initial snapshot exceeded the wire limit"));
+        state.socket.close(1009, "snapshot too large");
+        return;
+      }
       this.sendEvent(state, "bridge.ready", {
         protocolVersion: MOBILE_BRIDGE_PROTOCOL_VERSION,
         connectionId: state.context.connectionId,
@@ -663,27 +696,184 @@ export class AgentlasMobileBridgeServer {
 
   private async dispatch(state: ConnectionState, request: MobileBridgeRpcRequest): Promise<void> {
     if (state.revoked || !this.clients.has(state)) return;
-    try {
-      const result = await withTimeout(this.authority.request(request, state.context), this.requestTimeoutMs);
-      if (state.revoked || !this.clients.has(state)) return;
-      const json = result === undefined ? null : asWireJson(result);
-      if (json === null && result !== undefined && result !== null) {
-        throw new TypeError("Mobile Bridge authority returned a non-JSON result");
+    const writeRequest = MOBILE_BRIDGE_WRITE_METHODS.has(request.method);
+    const replayKey = request.idempotencyKey ?? request.id;
+    const replayFingerprint = writeRequest ? fingerprintMobileBridgeRequest(request) : null;
+    if (writeRequest) {
+      if (!this.replayStore || !replayFingerprint) {
+        this.send(
+          state,
+          mobileBridgeFailure(
+            request.id,
+            "idempotency_unavailable",
+            "Desktop write protection is unavailable; the command was not run",
+          ),
+        );
+        return;
       }
-      this.send(state, mobileBridgeSuccess(request.id, json));
-    } catch (error) {
+      try {
+        const replay = this.replayStore.begin(
+          state.context.deviceId,
+          replayKey,
+          replayFingerprint,
+        );
+        if (replay.kind === "replay") {
+          this.send(state, responseForRequest(replay.response, request.id));
+          return;
+        }
+        if (replay.kind !== "execute") {
+          const response = replay.kind === "conflict"
+            ? mobileBridgeFailure(
+                request.id,
+                "idempotency_conflict",
+                "Idempotency key was already used for a different command",
+              )
+            : replay.kind === "in-progress"
+              ? mobileBridgeFailure(
+                  request.id,
+                  "idempotency_in_progress",
+                  "The same Desktop command is still in progress",
+                  true,
+                )
+              : mobileBridgeFailure(
+                  request.id,
+                  "idempotency_uncertain",
+                  "Desktop cannot prove whether the earlier command completed; it will not run it again",
+                );
+          this.send(state, response);
+          return;
+        }
+      } catch (error) {
+        this.onError(errorOf(error));
+        this.send(
+          state,
+          mobileBridgeFailure(
+            request.id,
+            "idempotency_unavailable",
+            "Desktop could not establish durable write protection; the command was not run",
+          ),
+        );
+        return;
+      }
+    }
+
+    const authorityPromise = this.authority.request(request, state.context);
+    try {
+      const result = await withTimeout(authorityPromise, this.requestTimeoutMs);
+      let response = this.responseFromAuthority(request.id, result);
+      if (writeRequest && this.replayStore && replayFingerprint) {
+        response = this.completeReplay(
+          state.context.deviceId,
+          replayKey,
+          replayFingerprint,
+          response,
+          request.id,
+        );
+      }
       if (state.revoked || !this.clients.has(state)) return;
+      this.send(state, response);
+    } catch (error) {
       const normalized = errorOf(error);
       this.onError(normalized);
       const timeout = normalized.message === "Mobile Bridge authority request timed out";
-      this.send(
-        state,
-        mobileBridgeFailure(
+      if (timeout && writeRequest && this.replayStore && replayFingerprint) {
+        try {
+          this.replayStore.markUncertain(state.context.deviceId, replayKey, replayFingerprint);
+        } catch (ledgerError) {
+          this.onError(errorOf(ledgerError));
+        }
+        // The authority promise is deliberately not cancelled. If it eventually
+        // settles in this process, make its actual result replayable. A crash
+        // leaves the write-ahead entry uncertain and future retries fail closed.
+        void authorityPromise.then(
+          (result) => {
+            const response = this.responseFromAuthority(request.id, result);
+            this.completeReplay(
+              state.context.deviceId,
+              replayKey,
+              replayFingerprint,
+              response,
+              request.id,
+            );
+          },
+          () => {
+            this.completeReplay(
+              state.context.deviceId,
+              replayKey,
+              replayFingerprint,
+              mobileBridgeFailure(request.id, "authority_error", "Desktop rejected the request"),
+              request.id,
+            );
+          },
+        ).catch((ledgerError) => this.onError(errorOf(ledgerError)));
+      }
+      let response: MobileBridgeReplayResponse = mobileBridgeFailure(
+        request.id,
+        timeout ? "request_timeout" : "authority_error",
+        timeout ? "Desktop did not answer in time" : "Desktop rejected the request",
+        timeout,
+      );
+      if (!timeout && writeRequest && this.replayStore && replayFingerprint) {
+        response = this.completeReplay(
+          state.context.deviceId,
+          replayKey,
+          replayFingerprint,
+          response,
           request.id,
-          timeout ? "request_timeout" : "authority_error",
-          timeout ? "Desktop did not answer in time" : "Desktop rejected the request",
-          timeout,
-        ),
+        );
+      }
+      if (state.revoked || !this.clients.has(state)) return;
+      this.send(state, response);
+    }
+  }
+
+  private responseFromAuthority(
+    requestId: string,
+    result: MobileBridgeJsonValue | undefined,
+  ): MobileBridgeReplayResponse {
+    const json = result === undefined ? null : asWireJson(result);
+    if (json === null && result !== undefined && result !== null) {
+      throw new TypeError("Mobile Bridge authority returned a non-JSON result");
+    }
+    const response = mobileBridgeSuccess(requestId, json);
+    if (mobileBridgeJsonBytes(response) > MOBILE_BRIDGE_MAX_MESSAGE_BYTES) {
+      return mobileBridgeFailure(
+        requestId,
+        "response_too_large",
+        "Desktop response exceeds the Mobile Bridge wire budget",
+      );
+    }
+    return response;
+  }
+
+  private completeReplay(
+    deviceId: string,
+    key: string,
+    fingerprint: string,
+    response: MobileBridgeReplayResponse,
+    requestId: string,
+  ): MobileBridgeReplayResponse {
+    if (!this.replayStore) {
+      return mobileBridgeFailure(
+        requestId,
+        "idempotency_unavailable",
+        "Desktop could not persist the command result safely",
+      );
+    }
+    try {
+      this.replayStore.complete(deviceId, key, fingerprint, response);
+      return response;
+    } catch (error) {
+      this.onError(errorOf(error));
+      try {
+        this.replayStore.markUncertain(deviceId, key, fingerprint);
+      } catch (ledgerError) {
+        this.onError(errorOf(ledgerError));
+      }
+      return mobileBridgeFailure(
+        requestId,
+        "idempotency_unavailable",
+        "Desktop ran the command but could not persist its replay result; retry is blocked",
       );
     }
   }
