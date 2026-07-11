@@ -117,6 +117,7 @@
     "test:automations-store": "npm run build:electron && electron scripts/test-automations-store.cjs",
     "test:automation-trigger-safety": "npm run build:electron && electron scripts/test-automation-trigger-safety.cjs",
     "test:automation-scheduler-guards": "npm run build:electron && electron scripts/test-automation-scheduler-guards.cjs",
+    "test:runtime-stdin-epipe": "npm run build:electron && node scripts/test-runtime-stdin-epipe.cjs",
     "audit:automation": "node scripts/audit-automation-health.mjs --once",
     "test:automation-health-audit": "electron scripts/test-automation-health-audit.cjs",
     "watch:automation": "node scripts/audit-automation-health.mjs",

@@ -31,6 +31,13 @@ import {
   tryRecordRunEvent,
 } from "./store/run-events";
 import { notifyTelegramAutomationDone } from "./telegram/connect";
+import {
+  automationWatchdogError,
+  createAutomationWatchdogState,
+  evaluateAutomationWatchdog,
+  noteAutomationWatchdogEvent,
+  type AutomationWatchdogDecision,
+} from "./automation-watchdog";
 
 let timer: ReturnType<typeof setInterval> | null = null;
 const running = new Set<string>();
@@ -116,6 +123,15 @@ const STALL_INACTIVITY_MS = boundedIntegerEnv(
   30_000,
   2 * 60 * 60 * 1000,
 );
+// Tool start/result events let us distinguish a dead idle runner from a healthy long-running
+// single tool. Only the latter gets the wider silence budget; globally raising the idle timeout
+// would merely hide real hangs for longer.
+const ACTIVE_TOOL_STALL_MS = boundedIntegerEnv(
+  "AGENTLAS_AUTOMATION_ACTIVE_TOOL_STALL_MS",
+  Math.max(STALL_INACTIVITY_MS, 20 * 60 * 1000),
+  STALL_INACTIVITY_MS,
+  4 * 60 * 60 * 1000,
+);
 const OPTIMIZER_TIMEOUT_MS = boundedIntegerEnv(
   "AGENTLAS_AUTOMATION_OPTIMIZER_TIMEOUT_MS",
   10 * 60 * 1000,
@@ -129,11 +145,13 @@ const optimizerControllers = new Map<string, AbortController>();
 export function automationSchedulerDiagnostics(): {
   maxConcurrentAutomations: number;
   stallInactivityMs: number;
+  activeToolStallMs: number;
   optimizerTimeoutMs: number;
 } {
   return {
     maxConcurrentAutomations: MAX_CONCURRENT_AUTOMATIONS,
     stallInactivityMs: STALL_INACTIVITY_MS,
+    activeToolStallMs: ACTIVE_TOOL_STALL_MS,
     optimizerTimeoutMs: OPTIMIZER_TIMEOUT_MS,
   };
 }
@@ -312,12 +330,17 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
       currentRunId = runId;
       // 무활동 워치독 — 그래프 경로도 이벤트가 끊기면 행으로 판정한다(노드 자체 타임아웃
       // 1800s보다 훨씬 먼저 사용자에게 실패 피드백이 가도록).
-      let lastGraphEventAt = Date.now();
-      let graphStalled = false;
+      const graphWatchdog = createAutomationWatchdogState();
+      let graphStall: AutomationWatchdogDecision | null = null;
       const graphStallTimer = setInterval(() => {
-        if (Date.now() - lastGraphEventAt > STALL_INACTIVITY_MS) {
-          graphStalled = true;
-          controller.abort();
+        const decision = evaluateAutomationWatchdog(
+          graphWatchdog,
+          STALL_INACTIVITY_MS,
+          ACTIVE_TOOL_STALL_MS,
+        );
+        if (decision.stalled) {
+          graphStall = decision;
+          controller.abort(new Error(automationWatchdogError(decision)));
         }
       }, 30_000);
       let result;
@@ -326,22 +349,22 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
           signal: controller.signal,
           runId,
           sink: (ev) => {
-            lastGraphEventAt = Date.now();
+            noteAutomationWatchdogEvent(graphWatchdog, ev);
             if (ev.nodeState) broadcastLiveRun(a.id, ev);
           },
         });
       } catch (err) {
         // abort로 runGraph가 던지면 스톨 메시지로 바꿔 닥터 timeout 분류에 태운다.
-        if (graphStalled) {
-          throw new Error(`no response for ${Math.round(STALL_INACTIVITY_MS / 1000)}s, auto-aborted (stall watchdog)`);
+        if (graphStall) {
+          throw new Error(automationWatchdogError(graphStall));
         }
         throw err;
       } finally {
         clearInterval(graphStallTimer);
       }
-      runStatus = result.ok && !graphStalled ? "ok" : "error";
-      runError = graphStalled
-        ? `no response for ${Math.round(STALL_INACTIVITY_MS / 1000)}s, auto-aborted (stall watchdog)`
+      runStatus = result.ok && !graphStall ? "ok" : "error";
+      runError = graphStall
+        ? automationWatchdogError(graphStall)
         : result.error ?? null;
       // 그래프 outputs 중 마지막 노드 출력을 체인 페이로드로 노출.
       const outVals = Object.values(result.outputs ?? {});
@@ -401,12 +424,17 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
           hubMode: a.targetType === "hub" ? "hub-first" as const : (a.hubMode ?? "hub-allowed"),
         };
         // 무활동 워치독 — 이벤트가 STALL_INACTIVITY_MS 동안 없으면 행으로 판정, abort.
-        let lastEventAt = Date.now();
-        let stalled = false;
+        const invocationWatchdog = createAutomationWatchdogState();
+        let stallDecision: AutomationWatchdogDecision | null = null;
         const stallTimer = setInterval(() => {
-          if (Date.now() - lastEventAt > STALL_INACTIVITY_MS) {
-            stalled = true;
-            controller.abort();
+          const decision = evaluateAutomationWatchdog(
+            invocationWatchdog,
+            STALL_INACTIVITY_MS,
+            ACTIVE_TOOL_STALL_MS,
+          );
+          if (decision.stalled) {
+            stallDecision = decision;
+            controller.abort(new Error(automationWatchdogError(decision)));
           }
         }, 30_000);
         let result;
@@ -414,7 +442,7 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
           result = await runMcpInvocation(
             req,
             (ev) => {
-              lastEventAt = Date.now();
+              noteAutomationWatchdogEvent(invocationWatchdog, ev);
               if (ev.kind === "error") {
                 runnerError = ev.error?.message || "runner failed";
               }
@@ -423,15 +451,15 @@ async function runOne(a: Automation, opts?: { claim?: boolean; advanceSchedule?:
             controller.signal,
           );
         } catch (err) {
-          if (stalled) {
-            throw new Error(`no response for ${Math.round(STALL_INACTIVITY_MS / 1000)}s, auto-aborted (stall watchdog)`);
+          if (stallDecision) {
+            throw new Error(automationWatchdogError(stallDecision));
           }
           throw err;
         } finally {
           clearInterval(stallTimer);
         }
-        if (stalled) {
-          throw new Error(`no response for ${Math.round(STALL_INACTIVITY_MS / 1000)}s, auto-aborted (stall watchdog)`);
+        if (stallDecision) {
+          throw new Error(automationWatchdogError(stallDecision));
         }
         output = result.finalText;
         if (runnerError) throw new Error(runnerError);

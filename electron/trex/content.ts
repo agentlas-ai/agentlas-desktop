@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { writeStdin } from "../runtime/exec";
 
 export interface TrexContentResult {
   ok: boolean;
@@ -98,12 +99,7 @@ function runViaStdin(bin: string, args: string[], prompt: string, env: NodeJS.Pr
       clearTimeout(timer);
       finish(null);
     });
-    try {
-      child.stdin?.write(prompt, "utf8");
-      child.stdin?.end();
-    } catch {
-      /* ignore */
-    }
+    writeStdin(child, prompt);
   });
 }
 

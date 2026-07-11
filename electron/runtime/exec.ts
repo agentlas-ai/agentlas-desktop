@@ -82,9 +82,27 @@ export function spawnCli(
 export function writeStdin(child: ChildProcess, payload: string): void {
   const stdin = child.stdin;
   if (!stdin) return;
-  stdin.on("error", () => {});
-  stdin.write(payload);
-  stdin.end();
+  // try/catch alone cannot catch a later EPIPE event. Keep an error listener attached for the
+  // whole stream lifetime, and avoid scheduling a write after the child already closed stdin.
+  stdin.on("error", (error: NodeJS.ErrnoException) => {
+    if (
+      error.code !== "EPIPE" &&
+      error.code !== "ERR_STREAM_DESTROYED" &&
+      error.code !== "ERR_STREAM_WRITE_AFTER_END"
+    ) {
+      console.error("[runtime] child stdin failed:", error.message);
+    }
+  });
+  if (stdin.destroyed || stdin.writableEnded || stdin.writableFinished || !stdin.writable) return;
+  try {
+    // One end(payload) call leaves a smaller write-vs-exit race than write(payload) followed by end().
+    stdin.end(payload);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EPIPE" && code !== "ERR_STREAM_DESTROYED" && code !== "ERR_STREAM_WRITE_AFTER_END") {
+      console.error("[runtime] child stdin write failed:", error);
+    }
+  }
 }
 
 /**

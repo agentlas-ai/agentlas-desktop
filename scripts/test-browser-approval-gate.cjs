@@ -120,6 +120,26 @@ assert.doesNotMatch(
   /resolve\(autonomy === 'trust'/,
   "approval transport failures must use the action-aware trust policy",
 );
+assert.match(
+  launcher,
+  /observeWritable\(process\.stdout, 'client stdout'\)/,
+  "browser launcher must observe late stdout EPIPE events",
+);
+assert.match(
+  launcher,
+  /observeWritable\(child\.stdin, 'playwright stdin'\)/,
+  "browser launcher must observe late child-stdin EPIPE events",
+);
+assert.doesNotMatch(
+  launcher,
+  /process\.stdout\.write\(/,
+  "browser launcher output must go through the guarded writer",
+);
+assert.doesNotMatch(
+  launcher,
+  /child\.stdin\.write\(/,
+  "browser launcher input forwarding must go through the guarded writer",
+);
 
 const profile = "/Users/qa/Agentlas Profile";
 const listener = {

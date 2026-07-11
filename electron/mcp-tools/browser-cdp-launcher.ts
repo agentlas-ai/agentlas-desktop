@@ -941,13 +941,43 @@ async function main() {
   child.on('error', (e) => { log('failed to start @playwright/mcp', String(e)); process.exit(1); });
   child.on('exit', (code) => process.exit(code == null ? 0 : code));
 
+  const isClosedPipeError = (error) => {
+    const code = error && error.code;
+    return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || code === 'ERR_STREAM_WRITE_AFTER_END';
+  };
+  const observeWritable = (stream, label) => {
+    if (!stream || typeof stream.on !== 'function') return;
+    stream.on('error', (error) => {
+      if (!isClosedPipeError(error)) log(label + ' stream failed', String(error));
+    });
+  };
+  const safeWrite = (stream, value, label) => {
+    if (!stream || stream.destroyed || stream.writableEnded || stream.writableFinished || stream.writable === false) return false;
+    try {
+      stream.write(value, (error) => {
+        if (error && !isClosedPipeError(error)) log(label + ' write failed', String(error));
+      });
+      return true;
+    } catch (error) {
+      if (!isClosedPipeError(error)) log(label + ' write failed', String(error));
+      return false;
+    }
+  };
+  const safeEnd = (stream, label) => {
+    if (!stream || stream.destroyed || stream.writableEnded || stream.writableFinished) return;
+    try { stream.end(); } catch (error) { if (!isClosedPipeError(error)) log(label + ' end failed', String(error)); }
+  };
+  observeWritable(process.stdout, 'client stdout');
+  observeWritable(child.stdin, 'playwright stdin');
+
   const recording = [];            // 이 세션에서 성공한 액션 시퀀스
   const pending = new Map();       // client 원본 tools/call: id -> {name, args}
   const waiters = new Map();       // 내부(replay) tools/call: id -> resolve
   let currentUrl = '';
   let internalSeq = 0;
-  const writeClient = (obj) => { try { process.stdout.write(JSON.stringify(obj) + '\n'); } catch (e) {} };
-  const forwardRaw = (line) => { try { child.stdin.write(line + '\n'); } catch (e) {} };
+  const writeOutput = (line) => safeWrite(process.stdout, line + '\n', 'client stdout');
+  const writeClient = (obj) => writeOutput(JSON.stringify(obj));
+  const forwardRaw = (line) => safeWrite(child.stdin, line + '\n', 'playwright stdin');
 
   // 승인 게이트 통과 여부 판정(공유). 통과=null, 거부=사유문자열.
   const gate = async (name, args) => {
@@ -1023,8 +1053,8 @@ async function main() {
 
   // child → client 방향 (응답 가로채기: replay waiter / 기록 / tools/list 주입)
   const handleChildLine = (line) => {
-    if (!line.trim()) { process.stdout.write(line + '\n'); return; }
-    let msg; try { msg = JSON.parse(line); } catch (e) { process.stdout.write(line + '\n'); return; }
+    if (!line.trim()) { writeOutput(line); return; }
+    let msg; try { msg = JSON.parse(line); } catch (e) { writeOutput(line); return; }
     // 내부 replay 응답 → waiter 로, client 로는 안 보냄.
     if (msg && typeof msg.id === 'string' && waiters.has(msg.id)) { const r = waiters.get(msg.id); waiters.delete(msg.id); r(msg); return; }
     // client 원본 액션 응답 → 성공 시 기록.
@@ -1037,9 +1067,9 @@ async function main() {
     if (msg && msg.result && Array.isArray(msg.result.tools)) {
       const have = new Set(msg.result.tools.map((t) => t.name));
       for (const st of SKILL_TOOLS) if (!have.has(st.name)) msg.result.tools.push(st);
-      process.stdout.write(JSON.stringify(msg) + '\n'); return;
+      writeClient(msg); return;
     }
-    process.stdout.write(line + '\n');
+    writeOutput(line);
   };
 
   let cbuf = '';
@@ -1052,7 +1082,7 @@ async function main() {
     buf += chunk.toString('utf8'); let idx;
     while ((idx = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, idx); buf = buf.slice(idx + 1); handleClientLine(line); }
   });
-  process.stdin.on('end', () => { try { child.stdin.end(); } catch (e) {} });
+  process.stdin.on('end', () => safeEnd(child.stdin, 'playwright stdin'));
 }
 main().catch((e) => { console.error('[agentlas-browser] fatal', e && e.stack || e); process.exit(1); });
 `;

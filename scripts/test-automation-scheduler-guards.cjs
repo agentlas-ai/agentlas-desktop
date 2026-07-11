@@ -103,8 +103,50 @@ async function main() {
     assert.deepEqual(limits, {
       maxConcurrentAutomations: 2,
       stallInactivityMs: 8 * 60 * 1000,
+      activeToolStallMs: 20 * 60 * 1000,
       optimizerTimeoutMs: 1000,
     });
+
+    const watchdog = require("../dist/electron/automation-watchdog.js");
+    const state = watchdog.createAutomationWatchdogState(0);
+    assert.equal(
+      watchdog.evaluateAutomationWatchdog(state, limits.stallInactivityMs, limits.activeToolStallMs, 480_001).stalled,
+      true,
+      "an idle runner must still fail fast after eight silent minutes",
+    );
+    watchdog.noteAutomationWatchdogEvent(
+      state,
+      { kind: "tool-use", tool: { name: "long-build", id: "tool-1", args: "{}" } },
+      500_000,
+    );
+    assert.equal(
+      watchdog.evaluateAutomationWatchdog(state, limits.stallInactivityMs, limits.activeToolStallMs, 500_000 + 480_001).stalled,
+      false,
+      "a known active tool must not be mistaken for an idle runner at 480 seconds",
+    );
+    const activeTimeout = watchdog.evaluateAutomationWatchdog(
+      state,
+      limits.stallInactivityMs,
+      limits.activeToolStallMs,
+      500_000 + 1_200_001,
+    );
+    assert.equal(activeTimeout.stalled, true, "an active tool still needs a finite silence cap");
+    assert.equal(activeTimeout.mode, "active-tool");
+    assert.match(watchdog.automationWatchdogError(activeTimeout), /active tool produced no event for 1200s/);
+
+    watchdog.noteAutomationWatchdogEvent(
+      state,
+      { kind: "tool-use", tool: { name: "long-build", id: "tool-1", result: "done" } },
+      1_000_000,
+    );
+    const afterTool = watchdog.evaluateAutomationWatchdog(
+      state,
+      limits.stallInactivityMs,
+      limits.activeToolStallMs,
+      1_000_000 + 480_001,
+    );
+    assert.equal(afterTool.mode, "idle", "a tool result must return the watchdog to the idle budget");
+    assert.equal(afterTool.stalled, true);
   }
 
   if (
