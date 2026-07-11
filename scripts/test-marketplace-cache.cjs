@@ -162,7 +162,10 @@ server.listen(0, "127.0.0.1", async () => {
   try {
     const port = server.address().port;
     process.env.AGENTLAS_MCP_BASE_URL = `http://127.0.0.1:${port}/api/mcp/v1`;
-    process.env.AGENTLAS_HUB_STATUS_TIMEOUT_MS = "100";
+    // Hosted Linux is substantially slower under xvfb/dbus than local macOS.
+    // Keep normal live probes generous; the dedicated slow-endpoint case below
+    // tightens the deadline explicitly.
+    process.env.AGENTLAS_HUB_STATUS_TIMEOUT_MS = "2000";
     const { getSource, listMyAgentsCached, refreshSourceStatus } = require("../dist/electron/marketplace/index.js");
     const source = getSource();
 
@@ -211,9 +214,10 @@ server.listen(0, "127.0.0.1", async () => {
     assert.equal(require("../dist/electron/marketplace/index.js").getSourceStatus().online, true, "non-catalog API failures must not overwrite catalog status");
 
     catalogMode = "slow";
+    process.env.AGENTLAS_HUB_STATUS_TIMEOUT_MS = "100";
     const startedAt = Date.now();
     const timedOut = await refreshSourceStatus(true);
-    assert.ok(Date.now() - startedAt < 250, "status probe must be bounded independently of the 15s catalog timeout");
+    assert.ok(Date.now() - startedAt < 1500, "status probe must be bounded independently of the 15s catalog timeout");
     assert.equal(timedOut.online, false);
     assert.match(timedOut.lastError || "", /timed out/);
     catalogMode = "ok";

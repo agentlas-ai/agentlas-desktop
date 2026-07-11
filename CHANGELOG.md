@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.46 — 2026-07-12
+
+### Fixed
+
+- **The live Hub status regression gate is deterministic on hosted Linux.**
+  Normal loopback catalog responses use a CI-safe deadline, while the dedicated
+  slow-endpoint case still proves that production readiness checks remain
+  bounded well below the 15-second catalog request timeout.
+
 ## 0.7.45 — 2026-07-12
 
 ### Fixed
