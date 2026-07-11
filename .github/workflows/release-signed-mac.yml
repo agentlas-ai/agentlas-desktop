@@ -47,7 +47,7 @@ jobs:
       # Publish to the SEPARATE public releases repo (source repo is private).
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
-      HEPHAESTUS_REF: v1.1.17
+      HEPHAESTUS_REF: v1.1.18
 
     steps:
       - uses: actions/checkout@v4
