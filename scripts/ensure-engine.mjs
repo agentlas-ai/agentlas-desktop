@@ -3,14 +3,14 @@
 //
 // 데스크탑 레포는 비공개이고 Hephaestus/ 는 git-ignore 되어 있어, 깨끗한 클론에는 엔진이
 // 없다. 패키징(extraResources)이 엔진을 번들하려면 디스크에 엔진이 있어야 하므로, 이 스크립트가
-// 없으면 클론한다. 이미 있으면 무엇도 변경하지 않는다(엔진 레포를 절대 더럽히지 않음).
+// 없으면 클론한다. 이미 있으면 깨끗한 checkout만 요청 ref로 맞추며, 로컬 변경은 덮지 않고 실패한다.
 //
 // 환경변수:
 //   HEPHAESTUS_REPO   기본 https://github.com/agentlas-ai/Agentlas-OS.git
 //   HEPHAESTUS_REF    기본 v1.1.18 (브랜치/태그/커밋)
 //   HEPHAESTUS_DIR    기본 <repo>/Hephaestus
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,8 +28,69 @@ function run(cmd, args, opts = {}) {
   execFileSync(cmd, args, { stdio: "inherit", ...opts });
 }
 
+function capture(cmd, args) {
+  return execFileSync(cmd, args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+}
+
+function fail(message) {
+  console.error(`[ensure-engine] ERROR: ${message}`);
+  process.exit(1);
+}
+
+function verifyPinnedVersion() {
+  const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/.exec(ref);
+  if (!match) return;
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(path.join(dir, "manifest.json"), "utf8"));
+  } catch (error) {
+    fail(`could not read the pinned runtime manifest: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (`v${manifest?.version ?? ""}` !== ref) {
+    fail(`HEPHAESTUS_REF=${ref} does not match ${dir}/manifest.json version=${manifest?.version ?? "missing"}`);
+  }
+}
+
+function verifyReady() {
+  if (!existsSync(sentinel)) fail(`runtime entrypoint not found after preparation: ${sentinel}`);
+  const dirty = capture("git", ["-C", dir, "status", "--porcelain", "--untracked-files=normal"]);
+  if (dirty) fail(`embedded Agentlas OS checkout is dirty after preparation: ${dir}`);
+  verifyPinnedVersion();
+}
+
 if (existsSync(sentinel)) {
-  console.log(`[ensure-engine] Hephaestus already present at ${dir} — leaving untouched.`);
+  let insideWorktree = "";
+  try {
+    insideWorktree = capture("git", ["-C", dir, "rev-parse", "--is-inside-work-tree"]);
+  } catch {
+    fail(`runtime entrypoint exists but ${dir} is not a verifiable Git checkout`);
+  }
+  if (insideWorktree !== "true") fail(`${dir} is not a Git worktree`);
+
+  const dirty = capture("git", ["-C", dir, "status", "--porcelain", "--untracked-files=normal"]);
+  if (dirty) {
+    fail(`embedded Agentlas OS checkout has local changes; refusing to overwrite ${dir}`);
+  }
+
+  console.log(`[ensure-engine] Verifying existing Agentlas OS checkout against ${repo}@${ref}`);
+  try {
+    run("git", ["-C", dir, "fetch", "--quiet", "--depth", "1", repo, ref]);
+  } catch {
+    console.log("[ensure-engine] shallow ref fetch failed; retrying with a full ref fetch");
+    run("git", ["-C", dir, "fetch", "--quiet", repo, ref]);
+  }
+  const desired = capture("git", ["-C", dir, "rev-parse", "FETCH_HEAD^{commit}"]);
+  const current = capture("git", ["-C", dir, "rev-parse", "HEAD^{commit}"]);
+  if (current !== desired) {
+    run("git", ["-C", dir, "switch", "--detach", desired]);
+    console.log(`[ensure-engine] Updated embedded Agentlas OS ${current.slice(0, 8)} → ${desired.slice(0, 8)}.`);
+  } else {
+    console.log(`[ensure-engine] Embedded Agentlas OS already pinned at ${desired.slice(0, 8)}.`);
+  }
+  verifyReady();
   process.exit(0);
 }
 
@@ -43,8 +104,5 @@ try {
   run("git", ["-C", dir, "checkout", ref]);
 }
 
-if (!existsSync(sentinel)) {
-  console.error(`[ensure-engine] ERROR: clone completed but ${sentinel} not found. Aborting.`);
-  process.exit(1);
-}
+verifyReady();
 console.log("[ensure-engine] Hephaestus engine ready.");
