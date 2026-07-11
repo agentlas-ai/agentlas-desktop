@@ -93,6 +93,11 @@ function setupReadinessBridge(payload) {
 
 async function newScenario(browser, setupSource, scenario) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1100 } });
+  await context.addInitScript(() => {
+    // Old releases persisted this bit. The current dashboard must ignore it so
+    // connection actions cannot disappear after an update.
+    window.localStorage.setItem("agentlas.dash.usageCollapsed", "1");
+  });
   await context.addInitScript(setupReadinessBridge, {
     setupSource,
     baseOptions: { teamRoster: true },
@@ -137,13 +142,24 @@ async function main() {
     assert.equal(
       await readyPage.evaluate(() => {
         const llm = document.querySelector('[data-tour-id="dashboard.llm"]');
+        const approvals = document.querySelector('[data-tour-id="dashboard.approvals"]');
         const readiness = document.querySelector('[data-tour-id="dashboard.readiness"]');
-        if (!llm || !readiness) return false;
-        return Boolean(llm.compareDocumentPosition(readiness) & Node.DOCUMENT_POSITION_FOLLOWING);
+        if (!llm || !approvals || !readiness) return false;
+        return (
+          Boolean(llm.compareDocumentPosition(approvals) & Node.DOCUMENT_POSITION_FOLLOWING)
+          && Boolean(llm.compareDocumentPosition(readiness) & Node.DOCUMENT_POSITION_FOLLOWING)
+        );
       }),
       true,
-      "the primary LLM connection control must appear before the diagnostic readiness panel",
+      "the primary LLM connection control must appear before approvals and diagnostics",
     );
+    await llmPanel.getByText(/LLM 연결 · 사용량|LLM connections · usage/).waitFor();
+    assert.equal(
+      await llmPanel.locator('[data-dashboard-chevron]').count(),
+      0,
+      "LLM connection actions must not disappear behind persisted collapse state",
+    );
+    await llmPanel.getByRole("button", { name: /연결|Connect/ }).first().waitFor();
     const llmBox = await llmPanel.boundingBox();
     assert.ok(llmBox && llmBox.y < 1100, "the LLM connection control must be visible in the initial desktop viewport");
     assert.equal(await readyPanel.locator("[data-readiness-id]").count(), 6);

@@ -3,7 +3,8 @@
 //   · API키형(DeepSeek·Grok·GLM·Pi): 연결 시 "키 과금", 미연결 시 키 입력 팝업.
 //   · 로컬(Ollama): "무제한".
 // 미연결 엔진은 [연결] 버튼 — CLI는 자동설치+로그인창, API키는 인라인 입력 후 저장.
-// 카드 헤더로 접기/펼치기(상태는 localStorage).
+// 연결 액션은 대시보드에서 항상 보여야 한다. 사용자가 예전에 접은 상태 때문에
+// "LLM 연결이 사라진" 것처럼 보이지 않도록 이 표면은 접지 않는다.
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
@@ -21,8 +22,6 @@ import type {
 // 평상시 폴링은 넉넉히 잡아 429를 예방한다(수동 새로고침 버튼은 즉시 조회 유지).
 const POLL_MS = 180_000;
 const WARN_PCT = 80;
-const COLLAPSE_KEY = "agentlas.dash.usageCollapsed";
-
 type EngineAuth = "cli" | "apikey" | "local";
 interface EngineDef {
   id: string; // usage provider id와 일치(구독형)
@@ -118,15 +117,6 @@ export function EngineUsage() {
   const [notice, setNotice] = useState<{ id: string; text: string; command?: string } | null>(null);
   const [keyFor, setKeyFor] = useState<string | null>(null);
   const [keyVal, setKeyVal] = useState("");
-  const [collapsed, setCollapsed] = useState(false);
-
-  useEffect(() => {
-    try {
-      setCollapsed(window.localStorage.getItem(COLLAPSE_KEY) === "1");
-    } catch {
-      // ignore
-    }
-  }, []);
 
   const loadUsage = useCallback(async (force = false) => {
     const api = ipc();
@@ -190,18 +180,6 @@ export function EngineUsage() {
     },
     [loadConnections],
   );
-
-  function toggleCollapsed() {
-    setCollapsed((c) => {
-      const next = !c;
-      try {
-        window.localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0");
-      } catch {
-        // ignore
-      }
-      return next;
-    });
-  }
 
   function usageFor(id: string): ProviderUsage | undefined {
     return snap?.providers.find((p) => p.provider === id);
@@ -339,21 +317,12 @@ export function EngineUsage() {
 
   return (
     <div className="dashboard-engine-usage">
-      <div className="dashboard-module-head" data-collapsed={collapsed ? "true" : "false"}>
-        <button
-          onClick={toggleCollapsed}
-          className="titlebar-nodrag"
-          aria-label={ko ? "접기/펼치기" : "Toggle"}
-          data-dashboard-chevron={collapsed ? "closed" : "open"}
-        >
-          ▶
-        </button>
-        <span>{ko ? "엔진 사용량" : "Engine usage"}</span>
+      <div className="dashboard-module-head" data-collapsed="false">
+        <span>{ko ? "LLM 연결 · 사용량" : "LLM connections · usage"}</span>
         <button onClick={() => void loadUsage(true)} className="titlebar-nodrag dashboard-refresh-button" title={ko ? "새로고침" : "Refresh"}>↻</button>
       </div>
 
-      {!collapsed &&
-        ENGINES.map((e) => {
+      {ENGINES.map((e) => {
           const u = usageFor(e.id);
           const connected = isConnected(e);
           const rt = runtimeFor(e);
