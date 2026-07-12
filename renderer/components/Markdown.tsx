@@ -70,7 +70,9 @@ export function Markdown({
 }
 
 // 완결 세그먼트 렌더 — props가 안 바뀌면(텍스트 불변) 재파싱/재렌더를 통째로 건너뛴다.
-const MarkdownSegment = memo(function MarkdownSegment({
+// ChatStream의 인터리브 본문(SingleRunBody)도 완결 세그먼트에 이걸 써서 매 partial마다
+// 전체 본문이 재파싱되는 걸 막는다.
+export const MarkdownSegment = memo(function MarkdownSegment({
   text,
   messageId,
   onOpenArtifact,

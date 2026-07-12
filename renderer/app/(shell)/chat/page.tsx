@@ -394,6 +394,8 @@ function mergeToolStep(steps: StreamStep[], tool: ToolEvent, meta?: Partial<Stre
           result,
           resultIsError: tool.isError,
           activity: meta?.activity ?? s.activity ?? "tool",
+          // 인터리브 분할 앵커는 호출 시점 값이 진실 — 결과 병합이 뒤늦은 앵커로 덮지 않는다.
+          anchorTextLen: s.anchorTextLen ?? meta?.anchorTextLen,
           createdAt: Date.now(),
         }
       : s,
@@ -475,6 +477,20 @@ function restoreAnsweredQuestions(messages: StreamMessage[]): StreamMessage[] {
     if (i >= messages.length - 1) return msg; // 마지막 = 아직 답할 차례
     const nextUser = messages.slice(i + 1).find((m) => m.role === "user");
     const answerText = nextUser?.text?.trim() ?? "";
+    // 질문 시트 배치 스캐폴드("질문: …\n선택: …\n답변: …" 청크의 \n\n join —
+    // ChatQuestionSheet.composeQuestionReply와 짝)는 질문별로 파싱해 각 질문에 제 답만 넣는다.
+    // (예전처럼 전체 줄을 모든 질문에 주입하면 재로드 후 인용 카드가 오염된다)
+    const scaffold = parseQuestionBatchReply(answerText);
+    if (scaffold) {
+      return {
+        ...msg,
+        questions: msg.questions.map((q) => {
+          if (q.answer && q.answer.length) return q;
+          const match = scaffold.find((chunk) => chunk.question === q.question.trim());
+          return { ...q, answer: match && match.answers.length ? match.answers : ["—"] };
+        }),
+      };
+    }
     const answers = answerText
       ? answerText.split("\n").map((s) => s.replace(/^•\s*/, "").trim()).filter(Boolean)
       : ["✓"];
@@ -483,6 +499,34 @@ function restoreAnsweredQuestions(messages: StreamMessage[]): StreamMessage[] {
       questions: msg.questions.map((q) => (q.answer && q.answer.length ? q : { ...q, answer: answers })),
     };
   });
+}
+
+/** 배치 답장 스캐폴드 파서 — "질문:" 시작 청크마다 {question, answers(선택+답변)}로 분해.
+ *  스캐폴드 형식이 아니면 null → 기존 줄 분해 폴백. */
+function parseQuestionBatchReply(text: string): Array<{ question: string; answers: string[] }> | null {
+  const trimmed = text.trim();
+  if (!/^(질문|Question): /.test(trimmed)) return null;
+  const chunks = trimmed.split(/\n\n+/);
+  const parsed: Array<{ question: string; answers: string[] }> = [];
+  for (const chunk of chunks) {
+    const lines = chunk.split("\n");
+    const qLine = lines.find((l) => /^(질문|Question): /.test(l));
+    if (!qLine) continue;
+    const question = qLine.replace(/^(질문|Question): /, "").trim();
+    const answers: string[] = [];
+    for (const line of lines) {
+      const m = line.match(/^(선택|답변|Selected|Answer): (.*)$/);
+      if (!m) continue;
+      if (m[1] === "선택" || m[1] === "Selected") {
+        answers.push(...m[2].split(",").map((s) => s.trim()).filter(Boolean));
+      } else {
+        const note = m[2].trim();
+        if (note) answers.push(note);
+      }
+    }
+    parsed.push({ question, answers });
+  }
+  return parsed.length > 0 ? parsed : null;
 }
 
 type GeneratedAppChatRoute = {
@@ -692,6 +736,10 @@ function ChatPage() {
   // 델타 partial 누적 버퍼 — main이 증분만 보내므로 여기서 전문을 재조립한다.
   // 리셋 지점: 채팅 전환 / 새 실행 시작 / final·error / 전문(text) 이벤트 수신.
   const partialTextRef = useRef("");
+  // 표시 좌표계 본문 길이 — partial마다 extractQuestions+stripMultimodalSetup 적용 후 길이를
+  // 기록해 도구 인터리브 앵커(anchorTextLen)가 렌더 텍스트와 같은 좌표계를 쓰게 한다.
+  // (raw 버퍼 길이를 쓰면 ask fence/멀티모달 마커 제거만큼 앵커가 뒤로 밀린다)
+  const processedTextLenRef = useRef(0);
   // runId가 도착하기 전(invoke:run 왕복 중)에 Stop을 누른 경우를 기억 — 도착 즉시 취소한다.
   const cancelRequestedRef = useRef(false);
   // 스티어링으로 인한 취소인지 구분 — 이 취소는 "aborted" 에러 버블을 띄우지 않고,
@@ -986,19 +1034,62 @@ function ChatPage() {
         );
         return;
       }
+      if (ev.kind === "usage") {
+        // 라이브 누적 토큰 — 상태줄 "{N}s · {tokens} tokens" 실시간 갱신(단조 증가만 허용).
+        if (ev.tokens != null && ev.tokens > 0) {
+          const nextTokens = ev.tokens;
+          setMessages((m) =>
+            m.map((msg) =>
+              msg.id === placeholderId && (msg.liveTokens ?? 0) < nextTokens
+                ? { ...msg, liveTokens: nextTokens }
+                : msg,
+            ),
+          );
+        }
+        return;
+      }
+      if (ev.kind === "reasoning" && ev.reasoning) {
+        // thinking 구간 신호 — 상태줄 문구 회전("생각 중…")과 "N초 동안 생각함"의 근거.
+        const phase = ev.reasoning.phase;
+        const durationMs = ev.reasoning.durationMs;
+        setMessages((m) =>
+          m.map((msg) => {
+            if (msg.id !== placeholderId) return msg;
+            const th = msg.thinking ?? { active: false, cumMs: 0 };
+            if (phase === "start") {
+              return { ...msg, thinking: { active: true, startedAt: Date.now(), cumMs: th.cumMs } };
+            }
+            const dur = durationMs ?? (th.startedAt != null ? Date.now() - th.startedAt : 0);
+            return {
+              ...msg,
+              thinking: { active: false, cumMs: th.cumMs + dur, lastMs: dur },
+            };
+          }),
+        );
+        return;
+      }
       if (ev.kind === "tool-use" && ev.tool) {
         pushWorkflow("tool", ev.status?.trim() || toolWorkflowText(ev.tool, locale), {
           toolName: ev.tool.name,
           tokens: ev.tokens,
         });
+        // anchorTextLen: 이 도구 이벤트 도착 시점의 '표시 좌표계' 본문 길이 — ChatStream이
+        // 텍스트 사이에 도구 그룹을 영상처럼 끼워 넣는 분할 앵커로 쓴다.
+        const anchorTextLen = processedTextLenRef.current;
         setMessages((m) =>
           m.map((msg) =>
             msg.id === placeholderId
               ? {
                   ...msg,
+                  // 도구 활동 시작 — 직전 "N초 동안 생각함" 잔류 표시는 걷는다.
+                  thinking:
+                    msg.thinking && !msg.thinking.active && msg.thinking.lastMs != null
+                      ? { ...msg.thinking, lastMs: undefined }
+                      : msg.thinking,
                   steps: mergeToolStep(msg.steps ?? [], ev.tool!, {
                     ...fallbackStepMeta,
                     activity: "tool",
+                    anchorTextLen,
                   }),
                 }
               : msg,
@@ -1077,17 +1168,18 @@ function ChatPage() {
               const snapText = snap?.text;
               if (typeof snapText !== "string") return;
               partialTextRef.current = snapText;
+              const resync = extractQuestions(snapText, placeholderId);
+              const resyncSetup = stripMultimodalSetup(resync.text);
+              processedTextLenRef.current = resyncSetup.text.length;
               setMessages((m) =>
                 m.map((msg) => {
                   if (msg.id !== placeholderId) return msg;
-                  const { text, questions } = extractQuestions(snapText, msg.id);
-                  const setup = stripMultimodalSetup(text);
                   return {
                     ...msg,
-                    text: setup.text,
+                    text: resyncSetup.text,
                     streaming: true,
-                    questions: questions.length > 0 ? questions : msg.questions,
-                    needsMultimodalSetup: setup.needsSetup || msg.needsMultimodalSetup,
+                    questions: resync.questions.length > 0 ? resync.questions : msg.questions,
+                    needsMultimodalSetup: resyncSetup.needsSetup || msg.needsMultimodalSetup,
                   };
                 }),
               );
@@ -1100,15 +1192,22 @@ function ChatPage() {
           raw = ev.text ?? "";
           partialTextRef.current = raw;
         }
+        // 변환을 한 번만 수행 — 렌더 본문과 도구 앵커가 같은 좌표계를 공유한다.
+        const { text: extractedText, questions } = extractQuestions(raw, placeholderId);
+        const setup = stripMultimodalSetup(extractedText);
+        processedTextLenRef.current = setup.text.length;
         setMessages((m) =>
           m.map((msg) => {
             if (msg.id !== placeholderId) return msg;
-            const { text, questions } = extractQuestions(raw, msg.id);
-            const setup = stripMultimodalSetup(text);
             return {
               ...msg,
               text: setup.text,
               streaming: true,
+              // 새 텍스트 활동 — 직전 "N초 동안 생각함" 잔류 표시는 걷는다.
+              thinking:
+                msg.thinking && !msg.thinking.active && msg.thinking.lastMs != null
+                  ? { ...msg.thinking, lastMs: undefined }
+                  : msg.thinking,
               questions: questions.length > 0 ? questions : msg.questions,
               needsMultimodalSetup: setup.needsSetup || msg.needsMultimodalSetup,
             };
@@ -1130,6 +1229,8 @@ function ChatPage() {
               text: setup.text,
               busy: false,
               streaming: false,
+              finishedAt: Date.now(),
+              thinking: msg.thinking ? { ...msg.thinking, active: false } : msg.thinking,
               needsMultimodalSetup: setup.needsSetup || msg.needsMultimodalSetup,
               tokens: ev.tokens ?? msg.tokens,
               pipeline: completePipeline(msg.pipeline),
@@ -1162,6 +1263,7 @@ function ChatPage() {
         runIdRef.current = null;
         lastRunIdRef.current = null;
         partialTextRef.current = "";
+        processedTextLenRef.current = 0;
         subRef.current?.();
         subRef.current = null;
         // 산출물 자동 패널 오픈 — 답변에 이미지 산출물이 있으면(사용자가 패널을 명시적으로
@@ -1200,7 +1302,14 @@ function ChatPage() {
           m.flatMap((msg) => {
             if (msg.id !== placeholderId) return [msg];
             if (!msg.text || !msg.text.trim()) return [];
-            return [{ ...msg, busy: false, streaming: false, pipeline: completePipeline(msg.pipeline) }];
+            return [{
+              ...msg,
+              busy: false,
+              streaming: false,
+              finishedAt: Date.now(),
+              thinking: msg.thinking ? { ...msg.thinking, active: false } : msg.thinking,
+              pipeline: completePipeline(msg.pipeline),
+            }];
           });
         if (wasSteer) {
           setMessages(keepPlaceholder);
@@ -1231,6 +1340,7 @@ function ChatPage() {
         runIdRef.current = null;
         lastRunIdRef.current = null;
         partialTextRef.current = "";
+        processedTextLenRef.current = 0;
         subRef.current?.();
         subRef.current = null;
       }
@@ -1313,6 +1423,7 @@ function ChatPage() {
     runIdRef.current = null;
     lastRunIdRef.current = null;
     partialTextRef.current = "";
+    processedTextLenRef.current = 0;
     setComposerPrefill(null);
     cancelRequestedRef.current = false;
     steerCancelRef.current = false;
@@ -1446,7 +1557,9 @@ function ChatPage() {
       const attached = await api.invoke.attach(chatId);
       if (!cancelled && attached) {
         const placeholderId = uid();
-        const startedAt = Date.now();
+        // 원 실행 시작 시각을 우선 — 재진입 시 상태줄 경과가 0s부터 다시 세지 않게.
+        const attachedStartedAt = attached.startedAt ? Date.parse(attached.startedAt) : NaN;
+        const startedAt = Number.isFinite(attachedStartedAt) ? attachedStartedAt : Date.now();
         const reconnectAgent = agents.find((a) => a.id === c.agentId);
         const reconnectAgentName = reconnectAgent ? pickLocalized(reconnectAgent, locale).name : t("chat.assistant_fallback");
         setMessages((m) => [
@@ -1843,6 +1956,7 @@ function ChatPage() {
       runIdRef.current = runId;
       lastRunIdRef.current = runId;
       partialTextRef.current = "";
+      processedTextLenRef.current = 0;
       // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
       subscribeRun(runId, placeholderId);
       try {

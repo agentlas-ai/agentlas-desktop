@@ -230,7 +230,8 @@ export function tryRecordFailureEvent(input: RecordFailureEventInput): void {
 }
 
 export function recordMcpInvocationEvent(runId: string, req: McpInvocationRequest, ev: McpInvocationEvent): void {
-  if (ev.kind === "partial") return;
+  // 고빈도 라이브 신호(partial 델타·usage 카운터·reasoning 구간)는 UI 전용 — 원장에 남기지 않는다.
+  if (ev.kind === "partial" || ev.kind === "usage" || ev.kind === "reasoning") return;
   const payload = {
     eventKind: ev.kind,
     status: ev.status,

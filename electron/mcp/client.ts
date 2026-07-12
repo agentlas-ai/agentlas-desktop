@@ -1256,12 +1256,33 @@ export async function runMcpInvocation(
       locale,
       forceSurface: undefined,
     };
+    // 라이브 토큰은 러너 1회 실행 기준 누적치 — Stormbreaker 연속 패스에서 다음 패스가
+    // 0부터 다시 세도 표시가 뒤로 가지 않도록 이전 패스 최고치를 floor로 더한다.
+    let liveUsageFloor = 0;
+    let liveUsageHigh = 0;
+    // partial도 같은 문제 — 패스가 바뀌면 러너 누적이 0부터 다시 시작해 렌더러 본문이
+    // 통째로 줄고(전문 교체) 이전 패스 도구 카드 앵커가 붕괴한다. 이전 패스 전문을 floor로
+    // 접두해 본문/앵커 좌표계를 패스 전체에 걸쳐 단조로 유지한다. (continuousMode는 패스마다
+    // 별도 assistant 메시지를 남기므로 제외 — 접두하면 내용이 중복된다)
+    let partialFloor = "";
     const runnerEvents = {
       onStatus: (status: string) => sink({ kind: "tool-use", status }),
-      onPartial: (text: string) => sink({ kind: "partial", text }),
+      onPartial: (text: string) =>
+        sink({ kind: "partial", text: partialFloor ? `${partialFloor}\n${text}` : text }),
       // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
       onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean) =>
         sink({ kind: "tool-use", tool: { name, args, result, id, isError } }),
+      // 라이브 누적 토큰 — 상태줄 "{N}s · {tokens} tokens" 실시간 갱신.
+      onUsage: (tokens: number) => {
+        liveUsageHigh = Math.max(liveUsageHigh, liveUsageFloor + tokens);
+        sink({ kind: "usage", tokens: liveUsageHigh });
+      },
+      // reasoning(thinking) 구간 신호 — 상태줄 "생각 중…" 회전 + "N초 동안 생각함".
+      onThinking: (phase: "start" | "end", durationMs?: number) =>
+        sink({ kind: "reasoning", reasoning: { phase, durationMs } }),
+    };
+    const advanceUsageFloor = () => {
+      liveUsageFloor = liveUsageHigh;
     };
     // "계속 라이브로" 모드: 채팅에 켜져 있으면 짧은 상한(3턴)에서 멈춰 30분 간격 백그라운드로
     // 넘기지 않고, 같은 채팅에서 라이브 스트리밍을 계속 이어간다(사실상 무제한, 안전 상한만).
@@ -1269,6 +1290,7 @@ export async function runMcpInvocation(
     const maxPasses = continuousMode ? CONTINUOUS_MODE_MAX_PASSES : STORMBREAKER_MAX_EXECUTION_PASSES;
     let activeRunnerReq = runnerReq;
     let result = await picked.runner(activeRunnerReq, runnerEvents);
+    advanceUsageFloor();
     for (let pass = 2; pass <= maxPasses; pass += 1) {
       const continuation = stripStormbreakerContinueMarker(result.text);
       if (!continuation.shouldContinue || signal?.aborted) {
@@ -1276,6 +1298,11 @@ export async function runMcpInvocation(
         break;
       }
       result = { ...result, text: continuation.text };
+      if (!continuousMode && continuation.text.trim()) {
+        // 다음 패스가 확정된 순간에만 이전 패스 전문을 partial floor에 적립 —
+        // 단일 패스(대다수)는 floor가 비어 있어 기존 경로와 완전히 동일하다.
+        partialFloor = partialFloor ? `${partialFloor}\n${continuation.text}` : continuation.text;
+      }
       if (continuousMode) {
         // 이 턴의 완료된 결과를 즉시 별도 assistant 메시지로 남긴다 — 화면엔 새 말풍선이
         // 계속 이어 붙는 것처럼 보이고, 앱이 중간에 꺼져도 그때까지 기록은 남는다.
@@ -1302,6 +1329,7 @@ export async function runMcpInvocation(
         images: undefined,
       };
       result = await picked.runner(activeRunnerReq, runnerEvents);
+      advanceUsageFloor();
     }
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
     const stormbreakerContinueRequested = finalContinuation.shouldContinue;
@@ -1533,10 +1561,14 @@ export async function runMcpInvocation(
       await stormbreaker.finish({ workspace: workingFolder ?? undefined, permission: req.permissions });
     }
 
-    appendChatMessage(chat.id, "assistant", displayText);
-    sink({ kind: "final", text: displayText, tokens: result.tokens });
+    // 다중 패스(비-continuousMode)면 이전 패스 전문을 접두 — 라이브에서 보이던 본문/도구
+    // 앵커 좌표계가 final에서도 유지된다. 단일 패스는 floor가 비어 그대로.
+    const displayWithFloor = partialFloor ? `${partialFloor}\n${displayText}` : displayText;
+    appendChatMessage(chat.id, "assistant", displayWithFloor);
+    // 연속 패스에서 result.tokens는 마지막 패스만 반영 — 라이브 누적 최고치와 큰 쪽을 확정치로.
+    sink({ kind: "final", text: displayWithFloor, tokens: Math.max(result.tokens ?? 0, liveUsageHigh) || undefined });
     return {
-      finalText: displayText,
+      finalText: displayWithFloor,
       tokens: result.tokens,
       stormbreakerContinueRequested,
       resultFolder: resolvedResultFolder,

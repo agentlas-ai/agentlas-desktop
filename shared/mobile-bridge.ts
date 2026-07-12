@@ -244,7 +244,8 @@ export interface MobileBridgeInvocationToolDto {
 }
 
 export interface MobileBridgeInvocationEventDto {
-  kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface";
+  /** usage/reasoning: 데스크탑 ✳ 상태줄 라이브 신호 — 모바일 클라이언트는 미지원 kind를 무시한다. */
+  kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface" | "usage" | "reasoning";
   status?: string;
   text?: string;
   delta?: string;

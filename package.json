@@ -108,6 +108,7 @@
     "test:trex-ui": "npm run build:renderer && node scripts/test-trex-ui.cjs",
     "test:trex-attachments-ui": "npm run build:renderer && node scripts/test-trex-attachments-ui.cjs",
     "test:chat-feedback-contracts": "node scripts/test-chat-feedback-contracts.cjs",
+    "test:run-status-stream": "npm run build:electron && electron scripts/test-run-status-stream-contract.cjs",
     "test:hub-bookmark-ux": "node scripts/test-hub-bookmark-ux.cjs",
     "test:hub-bookmark-ui": "npm run build:renderer && node scripts/test-hub-bookmark-ui.cjs",
     "test:browser-approval-concurrency": "npm run build:electron && electron scripts/test-browser-approval-concurrency.cjs",

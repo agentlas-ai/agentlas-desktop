@@ -6,7 +6,7 @@
 //  · 전송은 배치 1회: 질문 하나 답할 때마다 프롬프트로 쏘지 않는다(질문 꼬리물기 방지)
 //  · 선택/입력은 로컬 상태 — 스트리밍 중에도 즉시 클릭 가능, 최종 전송만 busy에 묶인다
 //  · 답장 스캐폴딩은 UI locale — 입력 언어 고착 방지
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChatQuestion } from "@/components/ChatStream";
 import { useT } from "@/lib/i18n";
 
@@ -57,6 +57,7 @@ export function ChatQuestionSheet({
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [active, setActive] = useState(0);
   const [collapsed, setCollapsed] = useState(false);
+  const otherInputRef = useRef<HTMLInputElement | null>(null);
   const key = questions.map((q) => q.id).join("|");
 
   // 새 질문 묶음이 오면 로컬 상태 초기화.
@@ -118,6 +119,12 @@ export function ChatQuestionSheet({
         pick(q.options[n - 1].label);
         return;
       }
+      // "기타" 배지 번호 — 자유입력에 포커스(배지가 장식이 되지 않게).
+      if (n === q.options.length + 1) {
+        e.preventDefault();
+        otherInputRef.current?.focus();
+        return;
+      }
     }
     if (e.key === "Enter") {
       e.preventDefault();
@@ -125,12 +132,14 @@ export function ChatQuestionSheet({
     }
   };
 
-  const nextLabel = isLast ? (ko ? "보내기" : "Send") : ko ? "다음" : "Next";
+  const nextLabel = isLast ? (ko ? "제출" : "Submit") : ko ? "다음" : "Next";
 
   return (
     <div className="chat-qsheet titlebar-nodrag" role="dialog" tabIndex={-1} onKeyDown={onKeyDown}>
       <div className="chat-qsheet-head">
-        <span className="chat-qsheet-step">{active + 1}/{questions.length}</span>
+        {questions.length > 1 && (
+          <span className="chat-qsheet-step">{active + 1}/{questions.length}</span>
+        )}
         <strong className="chat-qsheet-question">{q.question}</strong>
         <button
           type="button"
@@ -179,6 +188,7 @@ export function ChatQuestionSheet({
               <kbd className="chat-qsheet-opt-key">{q.options.length + 1}</kbd>
             </div>
             <input
+              ref={otherInputRef}
               value={notes[q.id] ?? ""}
               onChange={(e) => setNotes((prev) => ({ ...prev, [q.id]: e.target.value }))}
               placeholder={ko ? "여기에 답변을 입력하세요" : "Type your answer here"}

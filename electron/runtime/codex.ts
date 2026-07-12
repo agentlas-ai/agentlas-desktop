@@ -172,6 +172,10 @@ function runCodexProcess(
     let tokens: number | undefined;
     let stderr = "";
     let lastEmit = 0;
+    // reasoning 구간/라이브 토큰 추정 상태 — 상태줄 실시간 표시용.
+    let reasoningDepth = 0;
+    let reasoningStartedAt = 0;
+    let estChars = 0;
 
     const truncateUi = (s: string, max = 12000): string =>
       s.length > max ? `${s.slice(0, max)}…` : s;
@@ -202,17 +206,38 @@ function runCodexProcess(
         output?: unknown;
         result?: unknown;
         error?: unknown;
+        /** codex 0.144+ command_execution 직렬화 필드 — output/result가 없고 이것만 온다. */
+        aggregated_output?: unknown;
+        exit_code?: number;
+        status?: string;
       };
       usage?: { output_tokens?: number };
     }): void => {
       if (ev.type === "thread.started" && typeof ev.thread_id === "string") {
         threadId = ev.thread_id;
+      } else if (ev.type === "item.started" && ev.item?.type === "reasoning") {
+        // reasoning 구간 신호 — 상태줄 "생각 중…" 회전의 근거 (Claude 경로와 동일 계약).
+        if (reasoningDepth === 0) {
+          reasoningStartedAt = Date.now();
+          events.onThinking?.("start");
+        }
+        reasoningDepth += 1;
+      } else if (ev.type === "item.completed" && ev.item?.type === "reasoning") {
+        if (reasoningDepth > 0) {
+          reasoningDepth -= 1;
+          if (reasoningDepth === 0) {
+            events.onThinking?.("end", Date.now() - reasoningStartedAt);
+          }
+        }
       } else if (
         ev.type === "item.completed" &&
         ev.item?.type === "agent_message" &&
         typeof ev.item.text === "string"
       ) {
         text += (text ? "\n" : "") + ev.item.text;
+        // 라이브 토큰 추정 — codex는 중간 usage가 없어 스트리밍 문자 수/4로 추정(단조 증가).
+        estChars += ev.item.text.length;
+        events.onUsage?.(Math.ceil(estChars / 4));
         const now = Date.now();
         if (now - lastEmit > 60) {
           events.onPartial(text);
@@ -229,21 +254,38 @@ function runCodexProcess(
           item.command != null
             ? { command: item.command }
             : (item.input ?? item.args ?? item.arguments);
-        const resultPayload = item.output ?? item.result ?? item.error;
+        // codex 0.144+의 command_execution은 output/result 없이 aggregated_output/exit_code만
+        // 직렬화한다 — completed에 result가 없으면 렌더러가 같은 도구를 2행으로 쌓으므로
+        // 어떤 형태로든 result를 채워 completed임을 보장한다.
+        const resultPayload = item.output ?? item.result ?? item.aggregated_output ?? item.error;
         const argsText = argPayload == null ? undefined : stringifyPayload(argPayload);
         const resultText =
-          ev.type === "item.completed" && resultPayload != null
-            ? truncateUi(stringifyPayload(resultPayload))
+          ev.type === "item.completed"
+            ? resultPayload != null
+              ? truncateUi(stringifyPayload(resultPayload))
+              : typeof item.exit_code === "number"
+                ? `exit ${item.exit_code}`
+                : (item.status ?? "completed")
             : undefined;
+        const isError =
+          item.error != null ||
+          item.status === "failed" ||
+          (typeof item.exit_code === "number" && item.exit_code !== 0);
+        // 도구 이벤트 전에 본문을 플러시 — 렌더러 인터리브 앵커가 최신 좌표를 본다.
+        if (text) {
+          events.onPartial(text);
+          lastEmit = Date.now();
+        }
         events.onTool?.(
           name,
           argsText && argsText.length > 2000 ? `${argsText.slice(0, 2000)}…` : argsText,
           resultText,
           item.id,
-          item.error != null,
+          isError,
         );
       } else if (ev.type === "turn.completed" && ev.usage?.output_tokens != null) {
         tokens = ev.usage.output_tokens;
+        events.onUsage?.(tokens);
       }
     };
 

@@ -337,11 +337,41 @@ export const runClaudeCode: Runner = async (
       cur = "";
       accCapped = true;
     };
-    const emitPartial = () => {
+    // force: 도구 이벤트 직전 강제 플러시 — 스로틀로 밀린 본문 꼬리가 도구 카드 아래로
+    // 밀리지 않게 앵커(anchorTextLen) 좌표를 최신으로 맞춘다. (중복 방출은 service의
+    // 빈-델타 가드가 걸러낸다)
+    const emitPartial = (force = false) => {
       const now = Date.now();
-      if (now - lastEmit <= 60) return;
+      if (!force && now - lastEmit <= 60) return;
       events.onPartial(combined());
       lastEmit = now;
+    };
+
+    // ── 라이브 토큰 카운트 — 상태줄 "{N}s · {tokens} tokens" 실시간 갱신용 ──
+    // message_delta의 usage.output_tokens(현재 메시지 누적 실측)를 우선하고, 실측이 아직
+    // 없는 스트리밍 구간은 델타 문자 수/4로 추정한다. 렌더러 표시는 단조 증가만 허용.
+    let usageBase = 0; // 완결된 메시지들의 output_tokens 합
+    let curMsgUsage = 0; // 현재 메시지의 마지막 usage 실측
+    let curMsgEstChars = 0; // 현재 메시지에서 스트리밍된 문자 수(텍스트+thinking) — 추정용
+    let lastUsageEmit = 0;
+    let lastUsageVal = 0;
+    const emitUsage = (force = false) => {
+      const val = usageBase + Math.max(curMsgUsage, Math.ceil(curMsgEstChars / 4));
+      if (val <= lastUsageVal) return;
+      const now = Date.now();
+      if (!force && now - lastUsageEmit < 500) return;
+      lastUsageVal = val;
+      lastUsageEmit = now;
+      events.onUsage?.(val);
+    };
+
+    // ── thinking 구간 추적 — 상태줄 "생각 중…" 회전과 "N초 동안 생각함"의 근거 ──
+    const thinkingBlocks = new Set<number>();
+    let thinkingStartedAt = 0;
+    const endThinking = () => {
+      if (thinkingBlocks.size === 0) return;
+      thinkingBlocks.clear();
+      events.onThinking?.("end", Date.now() - thinkingStartedAt);
     };
 
     const toolNameById = new Map<string, string>();
@@ -388,19 +418,61 @@ export const runClaudeCode: Runner = async (
       };
       result?: unknown;
       usage?: { output_tokens?: number };
-      event?: { type?: string; delta?: { type?: string; text?: string } };
+      event?: {
+        type?: string;
+        index?: number;
+        content_block?: { type?: string };
+        delta?: { type?: string; text?: string; thinking?: string };
+        usage?: { output_tokens?: number };
+      };
     }): void {
       if (typeof ev.session_id === "string" && ev.session_id) {
         sessionId = ev.session_id;
       }
       // --include-partial-messages: 토큰 델타를 즉시 이어붙여 글자 단위 스트리밍을 만든다.
-      // thinking/tool-input 델타는 무시(text_delta만 본문).
+      // 본문은 text_delta만. thinking 블록은 본문에 싣지 않되 시작/종료 신호와 문자 수(토큰
+      // 추정)는 소비한다 — 상태줄 "생각 중…" 회전의 근거 데이터.
       if (ev.type === "stream_event") {
-        const delta = ev.event?.type === "content_block_delta" ? ev.event.delta : undefined;
-        if (delta?.type === "text_delta" && delta.text && !accCapped) {
-          cur += delta.text;
-          capCombined();
-          emitPartial();
+        const se = ev.event;
+        if (se?.type === "message_start") {
+          curMsgUsage = 0;
+          curMsgEstChars = 0;
+        } else if (se?.type === "message_delta" && se.usage?.output_tokens != null) {
+          curMsgUsage = se.usage.output_tokens;
+          emitUsage(true);
+        } else if (se?.type === "message_stop") {
+          usageBase += Math.max(curMsgUsage, Math.ceil(curMsgEstChars / 4));
+          curMsgUsage = 0;
+          curMsgEstChars = 0;
+          endThinking();
+        } else if (se?.type === "content_block_start") {
+          const blockType = se.content_block?.type;
+          if ((blockType === "thinking" || blockType === "redacted_thinking") && se.index != null) {
+            if (thinkingBlocks.size === 0) {
+              thinkingStartedAt = Date.now();
+              events.onThinking?.("start");
+            }
+            thinkingBlocks.add(se.index);
+          }
+        } else if (se?.type === "content_block_stop") {
+          if (se.index != null && thinkingBlocks.has(se.index)) {
+            thinkingBlocks.delete(se.index);
+            if (thinkingBlocks.size === 0) {
+              events.onThinking?.("end", Date.now() - thinkingStartedAt);
+            }
+          }
+        } else if (se?.type === "content_block_delta") {
+          const delta = se.delta;
+          if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
+            curMsgEstChars += delta.thinking.length;
+            emitUsage();
+          } else if (delta?.type === "text_delta" && delta.text && !accCapped) {
+            cur += delta.text;
+            curMsgEstChars += delta.text.length;
+            capCombined();
+            emitPartial();
+            emitUsage();
+          }
         }
         return;
       }
@@ -422,6 +494,8 @@ export const runClaudeCode: Runner = async (
               argStr = "";
             }
             if (block.id) toolNameById.set(block.id, block.name);
+            // 도구 이벤트 전에 본문을 강제 플러시 — 렌더러 인터리브 앵커가 최신 좌표를 본다.
+            emitPartial(true);
             events.onTool?.(
               block.name,
               argStr.length > 2000 ? argStr.slice(0, 2000) + "…" : argStr,
@@ -492,12 +566,17 @@ export const runClaudeCode: Runner = async (
         return;
       }
       if (code === 0) {
+        // 표시 본문은 스트리밍 전사본(모든 assistant 메시지 \n-join) 우선 — result 이벤트의
+        // finalText는 '마지막 메시지'만 담아, 이걸 우선하면 도구 사이 중간 해설이 완료 순간
+        // 통째로 사라지고 인터리브 앵커가 전부 틀어진다. finalText는 델타 스트리밍이 전혀
+        // 없었던 폴백(구형 CLI 등)에서만 쓴다.
         const streamed = combined();
-        if (streamed) events.onPartial(finalText || streamed);
+        const display = streamed || finalText;
+        if (display) events.onPartial(display);
         if (req.chatId && fingerprint && sessionId) {
           saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint);
         }
-        resolve({ text: (finalText || streamed).trim(), sessionId, tokens });
+        resolve({ text: display.trim(), sessionId, tokens });
       } else {
         // 구형 CLI가 --include-partial-messages를 모르면 그 플래그만 빼고 즉시 재시도 —
         // 델타 스트리밍만 포기하고 채팅 자체는 살린다(전역 1회 학습).

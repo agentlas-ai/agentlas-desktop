@@ -63,6 +63,10 @@ export interface RunnerEvents {
   onStatus: (status: string) => void;
   /** 도구 호출/결과 — Claude Code식 tool-use/tool-result 블록 (이름 + 인자 JSON + 결과). 선택. */
   onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean) => void;
+  /** 라이브 누적 출력 토큰 — 스트리밍 중 "N tokens" 실시간 표시용. 단조 증가 값(usage 실측 + 추정). 선택. */
+  onUsage?: (tokens: number) => void;
+  /** reasoning(thinking) 구간 신호 — 구간 시작/종료. durationMs는 end에만(이번 구간 지속 ms). 선택. */
+  onThinking?: (phase: "start" | "end", durationMs?: number) => void;
 }
 
 export interface RunnerResult {

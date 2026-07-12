@@ -1,11 +1,11 @@
 // 메시지 스트림 렌더 — agent 메시지는 Markdown으로, 사용자 메시지는 plain.
 // 작업 중 메시지는 Codex/Claude 데스크톱처럼 step log + 경과 시간을 실시간으로 보여준다.
 "use client";
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { HubAgentBookmark, InstalledAgent, InstalledFirm, InstalledMcpServer, Project, RuntimeCommand } from "@/lib/types";
 import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
 import { AgentAvatar } from "./AgentAvatar";
-import { Markdown, StreamingMarkdown, type CodeArtifact, type LinkedFileArtifact, type MediaArtifact } from "./Markdown";
+import { Markdown, MarkdownSegment, StreamingMarkdown, type CodeArtifact, type LinkedFileArtifact, type MediaArtifact } from "./Markdown";
 import { useT } from "@/lib/i18n";
 
 /** 작업 중 패널에 누적되는 단일 단계. 새 이벤트마다 push (replace 아님). */
@@ -36,6 +36,9 @@ export interface StreamStep {
   activity?: "start" | "handoff" | "tool" | "complete" | "status";
   /** 이 단계가 화면에 들어온 시각. 긴 실행 중 마지막 활동 표시용. */
   createdAt?: number;
+  /** 이 도구 이벤트가 도착했을 때까지 스트리밍된 본문 길이 — 단일 실행에서 텍스트 사이에
+   *  도구 그룹을 영상처럼 끼워 넣는(interleave) 분할 앵커. 없으면 본문 앞에 몰아서 렌더. */
+  anchorTextLen?: number;
 }
 
 /** 에이전트가 사용자에게 옵션을 묻는 질문. Markdown에서 fence를 파싱해 채워진다. */
@@ -73,6 +76,8 @@ export interface StreamMessage {
   steps?: StreamStep[];
   /** 호출 시작 시각 ms — 경과 시간 표시 */
   startedAt?: number;
+  /** 호출 종료 시각 ms — 완료 후 상태줄의 총 경과 표시("50s · 175 tokens") */
+  finishedAt?: number;
   /** 토큰 partial이 도착하기 시작했는지. true면 본문 끝에 깜빡이는 커서. */
   streaming?: boolean;
   /** 진행 중인지 — true면 워킹 패널 노출, false면 일반 메시지 */
@@ -83,6 +88,11 @@ export interface StreamMessage {
   questions?: ChatQuestion[];
   /** 생성 토큰 수 — "N tokens" 표시 (Claude Code 스타일) */
   tokens?: number;
+  /** 라이브 누적 토큰(usage 이벤트, 단조 증가) — final 전 실시간 "N tokens" 표시 */
+  liveTokens?: number;
+  /** reasoning(thinking) 구간 상태 — 상태줄 문구 회전("생각 중…")과 "N초 동안 생각함"의 근거.
+   *  lastMs는 직전 구간 지속시간으로, 이후 새 활동(텍스트/도구)이 오면 지워진다. */
+  thinking?: { active: boolean; startedAt?: number; cumMs: number; lastMs?: number };
   /** 파이프라인 단계 계획 — 있으면 메시지 상단에 스테퍼로 표시(PRD→배포 가시화). */
   pipeline?: PipelineStage[];
   /** 멀티모달 엔진 미연결 — 본문 아래에 "설정으로 가기" 버튼을 렌더한다. */
@@ -409,9 +419,14 @@ export function ChatStream({
           outline-offset: 2px;
         }
         .agentlas-chat-copy-button {
-          padding: 3px 10px;
-          border: 1px solid var(--paper-edge);
-          border-radius: 999px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 26px;
+          height: 26px;
+          padding: 0;
+          border: 1px solid transparent;
+          border-radius: 7px;
           background: transparent;
           color: var(--muted-deep);
           font-size: 11px;
@@ -423,6 +438,15 @@ export function ChatStream({
           border-color: color-mix(in srgb, var(--ink-soft) 28%, var(--paper-edge));
           background: var(--fill-1);
           color: var(--ink);
+        }
+        /* 메시지 하단 액션(복사/읽어주기) — 영상처럼 호버/포커스 시에만 드러난다. */
+        .agentlas-msg-actions {
+          opacity: 0;
+          transition: opacity 130ms ease;
+        }
+        .agentlas-chat-turn:hover .agentlas-msg-actions,
+        .agentlas-msg-actions:focus-within {
+          opacity: 1;
         }
         .agentlas-chat-copy-button:focus-visible {
           outline: 2px solid var(--accent);
@@ -632,6 +656,15 @@ const Bubble = memo(function Bubble({
 }) {
   const { locale } = useT();
   if (message.role === "user") {
+    // 질문 시트 배치 답장(스캐폴드 "질문:/선택:/답변:")은 어시스턴트 턴의 인용 카드가
+    // 이미 질문+답을 보여준다 — 영상처럼 원문 버블은 숨긴다(첨부 이미지가 있으면 유지).
+    if (
+      message.text &&
+      isQuestionBatchReply(message.text) &&
+      !(message.imageDataUrls && message.imageDataUrls.length > 0)
+    ) {
+      return null;
+    }
     return (
       <div style={{ alignSelf: "flex-end", maxWidth: "75%" }}>
         {message.imageDataUrls && message.imageDataUrls.length > 0 && (
@@ -694,12 +727,12 @@ const Bubble = memo(function Bubble({
     );
   }
   // agent — Markdown 렌더링.
-  // 단일 실행은 한 줄 상태만 보여주고, 카드형 작업 패널은 실제 멀티/병렬 실행에서만 쓴다.
+  // 단일 실행은 영상형 인터리브 본문(텍스트 사이 도구 그룹) + 하단 ✳ 상태줄로,
+  // 카드형 작업 패널은 실제 멀티/병렬 실행에서만 쓴다.
   const hasProgress = Boolean(message.busy || message.status || (message.steps && message.steps.length > 0));
   const showParallelWork = hasProgress && isParallelWorkMessage(message);
-  const showInlineRun = hasProgress && !showParallelWork;
   return (
-    <div style={{ display: "flex", gap: 10, alignSelf: "stretch", maxWidth: 820 }}>
+    <div className="agentlas-chat-turn" style={{ display: "flex", gap: 10, alignSelf: "stretch", maxWidth: 820 }}>
       <div style={{ position: "relative", flexShrink: 0 }}>
         <AgentAvatar name={agentName} tone={agentTone} size={28} />
       </div>
@@ -719,16 +752,7 @@ const Bubble = memo(function Bubble({
             stopRequested={stopRequested}
           />
         )}
-        {showInlineRun && (
-          <InlineRunStatus
-            message={message}
-            locale={locale}
-            onOpenWorkflow={onOpenWorkflow}
-            onStop={message.busy ? onStop : undefined}
-            stopRequested={stopRequested}
-          />
-        )}
-        {message.text && message.busy && (
+        {showParallelWork && message.text && message.busy && (
           <LiveOutputPanel
             text={message.text}
             streaming={message.streaming}
@@ -739,13 +763,13 @@ const Bubble = memo(function Bubble({
             mediaBasePaths={mediaBasePaths}
           />
         )}
-        {message.text && !message.busy && (
+        {showParallelWork && message.text && !message.busy && (
           <div
             style={{
               color: "var(--ink)",
               fontSize: 14,
               lineHeight: 1.65,
-              marginTop: showParallelWork || showInlineRun ? 10 : 0,
+              marginTop: 10,
             }}
           >
             <Markdown
@@ -759,6 +783,17 @@ const Bubble = memo(function Bubble({
             {message.streaming && <BlinkingCursor />}
           </div>
         )}
+        {!showParallelWork && (
+          <SingleRunBody
+            message={message}
+            onOpenArtifact={onOpenArtifact}
+            onOpenMedia={onOpenMedia}
+            onOpenLinkedFile={onOpenLinkedFile}
+            onOpenWorkflow={onOpenWorkflow}
+            mediaBasePaths={mediaBasePaths}
+          />
+        )}
+        {!showParallelWork && <RunStatusLine message={message} onOpenWorkflow={onOpenWorkflow} />}
         {/* 질문은 이제 바텀 시트(ChatQuestionSheet)에서 답한다 — 스트림에는 답변이 끝난
             질문만 잠긴 기록으로 남긴다. ("—"는 시트에서 스킵된 질문의 잠금 마커라 숨김.) */}
         {message.questions && message.questions.some((q) => q.answer && q.answer.length > 0 && q.answer[0] !== "—") && (
@@ -799,8 +834,9 @@ const Bubble = memo(function Bubble({
           </div>
         )}
         {message.text && !message.busy && (
-          <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+          <div className="agentlas-msg-actions" style={{ display: "flex", gap: 4, marginTop: 6 }}>
             <CopyMessageButton text={message.text} />
+            <SpeakMessageButton text={message.text} />
           </div>
         )}
       </div>
@@ -848,7 +884,80 @@ function CopyMessageButton({ text }: { text: string }) {
       aria-live="polite"
       title={label}
     >
-      {label}
+      {copyState === "copied" ? (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M20 6 9 17l-5-5" />
+        </svg>
+      ) : (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <rect x="9" y="9" width="12" height="12" rx="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+/** 답변 읽어주기 — OS TTS(speechSynthesis) 토글. 영상의 소리 아이콘 액션. */
+function SpeakMessageButton({ text }: { text: string }) {
+  const { t, locale } = useT();
+  const [speaking, setSpeaking] = useState(false);
+  useEffect(() => {
+    return () => {
+      try {
+        window.speechSynthesis?.cancel();
+      } catch {
+        /* TTS 미지원 환경 무시 */
+      }
+    };
+  }, []);
+  const synthAvailable = typeof window !== "undefined" && "speechSynthesis" in window;
+  if (!synthAvailable) return null;
+  const label = speaking ? t("chatstream.speak_stop") : t("chatstream.speak");
+  const toggle = () => {
+    const synth = window.speechSynthesis;
+    if (speaking) {
+      synth.cancel();
+      setSpeaking(false);
+      return;
+    }
+    const spoken = text
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/[*_#>`|]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 4000);
+    if (!spoken) return;
+    const utterance = new SpeechSynthesisUtterance(spoken);
+    utterance.lang = locale === "ko" ? "ko-KR" : "en-US";
+    utterance.onend = () => setSpeaking(false);
+    utterance.onerror = () => setSpeaking(false);
+    synth.cancel();
+    synth.speak(utterance);
+    setSpeaking(true);
+  };
+  return (
+    <button
+      type="button"
+      className="agentlas-chat-copy-button"
+      data-speaking={speaking ? "true" : undefined}
+      onClick={toggle}
+      aria-label={label}
+      aria-pressed={speaking}
+      title={label}
+    >
+      {speaking ? (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M11 5 6 9H2v6h4l5 4V5z" />
+          <line x1="22" x2="16" y1="9" y2="15" />
+          <line x1="16" x2="22" y1="9" y2="15" />
+        </svg>
+      ) : (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M11 5 6 9H2v6h4l5 4V5z" />
+          <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+        </svg>
+      )}
     </button>
   );
 }
@@ -908,64 +1017,490 @@ function LiveOutputPanel({
   );
 }
 
-function InlineRunStatus({
+// ── 단일 실행 본문 — 영상형 인터리브: 텍스트 세그먼트 사이에 도구 그룹을 끼워 렌더 ──
+// 도구 이벤트가 도착한 시점의 본문 길이(anchorTextLen)를 분할 앵커로 쓰고, 마크다운이
+// 깨지지 않는 줄 경계로 스냅한다. 마지막 세그먼트만 타자기(StreamingMarkdown)로 흐른다.
+function SingleRunBody({
   message,
-  locale,
+  onOpenArtifact,
+  onOpenMedia,
+  onOpenLinkedFile,
   onOpenWorkflow,
-  onStop,
-  stopRequested,
+  mediaBasePaths,
 }: {
   message: StreamMessage;
-  locale: "ko" | "en";
+  onOpenArtifact?: (a: CodeArtifact) => void;
+  onOpenMedia?: (a: MediaArtifact) => void;
+  onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   onOpenWorkflow?: () => void;
-  onStop?: () => void;
-  stopRequested: boolean;
+  mediaBasePaths: string[];
 }) {
-  const elapsed = useElapsedSeconds(message.startedAt, Boolean(message.busy));
-  const done = !message.busy;
-  const label = done ? (locale === "ko" ? "실행됨" : "Done") : (locale === "ko" ? "실행 중" : "Running");
-  const detail = inlineRunDetail(message, locale, done);
+  const text = message.text ?? "";
+  const busy = Boolean(message.busy);
+  const toolSteps = useMemo(() => (message.steps ?? []).filter((s) => s.tool), [message.steps]);
+  const groups = useMemo(() => buildToolGroups(toolSteps, text), [toolSteps, text]);
+  // 콜백/배열 identity 고정 — 완결 세그먼트(MarkdownSegment memo)가 부모 재렌더마다
+  // 깨지지 않게 한다(StreamingMarkdown과 같은 패턴).
+  const artifactRef = useRef(onOpenArtifact);
+  artifactRef.current = onOpenArtifact;
+  const mediaRef = useRef(onOpenMedia);
+  mediaRef.current = onOpenMedia;
+  const linkedFileRef = useRef(onOpenLinkedFile);
+  linkedFileRef.current = onOpenLinkedFile;
+  const stableArtifact = useCallback((a: CodeArtifact) => artifactRef.current?.(a), []);
+  const stableMedia = useCallback((a: MediaArtifact) => mediaRef.current?.(a), []);
+  const stableLinkedFile = useCallback((a: LinkedFileArtifact) => linkedFileRef.current?.(a), []);
+  const basePathsKey = mediaBasePaths.join(" ");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const stableBasePaths = useMemo(() => mediaBasePaths.slice(), [basePathsKey]);
+  if (!text.trim() && toolSteps.length === 0) return null;
+
+  const segments: Array<{ key: string; text: string; group?: StreamStep[] }> = [];
+  let cursor = 0;
+  for (const g of groups) {
+    // key는 앵커 값이 아니라 그룹 첫 스텝 id — 앵커가 스냅으로 움직여도 그룹/세그먼트가
+    // 리마운트되지 않아 펼침 상태와 memo가 보존된다.
+    segments.push({ key: `seg-${g.steps[0]?.id ?? g.anchor}`, text: text.slice(cursor, g.anchor), group: g.steps });
+    cursor = g.anchor;
+  }
+  const tail = text.slice(cursor);
+  const lastGroup = groups[groups.length - 1];
+  const lastGroupLive =
+    busy && !!lastGroup && !tail.trim() && lastGroup.steps.some((s) => s.result == null);
+
+  const markdownProps = {
+    onOpenArtifact: stableArtifact,
+    onOpenMedia: stableMedia,
+    onOpenLinkedFile: stableLinkedFile,
+    mediaBasePaths: stableBasePaths,
+  };
   return (
-    <div style={inlineRunWrapStyle} role={message.busy ? "status" : undefined}>
+    <div
+      style={{
+        color: "var(--ink)",
+        fontSize: 14,
+        lineHeight: 1.65,
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+      }}
+    >
+      {segments.map((seg, i) => (
+        <Fragment key={seg.key}>
+          {seg.text.trim() && (
+            <div style={{ minWidth: 0 }}>
+              <MarkdownSegment text={seg.text} messageId={`${message.id}:${seg.key}`} {...markdownProps} />
+            </div>
+          )}
+          {seg.group && seg.group.length > 0 && (
+            <ToolGroupBlock
+              steps={seg.group}
+              live={lastGroupLive && i === segments.length - 1}
+              onOpenLinkedFile={onOpenLinkedFile}
+              onOpenWorkflow={onOpenWorkflow}
+            />
+          )}
+        </Fragment>
+      ))}
+      {tail.trim() && (
+        <div style={{ minWidth: 0 }}>
+          {busy && message.streaming ? (
+            <StreamingMarkdown text={tail} messageId={`${message.id}:t${cursor}`} {...markdownProps} />
+          ) : (
+            <Markdown text={tail} messageId={`${message.id}:t${cursor}`} {...markdownProps} />
+          )}
+          {message.streaming && <BlinkingCursor />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 도구 그룹 분할 앵커 계산 — 같은 스냅 지점에 도착한 연속 도구는 한 그룹으로 묶는다. */
+function buildToolGroups(
+  toolSteps: StreamStep[],
+  text: string,
+): Array<{ anchor: number; steps: StreamStep[] }> {
+  if (toolSteps.length === 0) return [];
+  const groups: Array<{ anchor: number; steps: StreamStep[] }> = [];
+  for (const s of toolSteps) {
+    const anchor = snapAnchor(text, s.anchorTextLen ?? 0);
+    const last = groups[groups.length - 1];
+    if (last && anchor <= last.anchor) last.steps.push(s);
+    else groups.push({ anchor, steps: [s] });
+  }
+  return groups;
+}
+
+/** 마크다운을 깨지 않는 분할 지점으로 스냅 — 줄 경계가 아니면 다음 줄 끝까지 전진하고
+ *  (partial 스로틀로 문장 꼬리가 도구 카드 아래로 떨어지는 것 방지), 코드펜스 안이면
+ *  펜스가 닫힌 뒤로 전진한다. */
+function snapAnchor(text: string, raw: number): number {
+  let anchor = Math.min(Math.max(raw, 0), text.length);
+  const atBoundary =
+    anchor === 0 || anchor === text.length || text[anchor - 1] === "\n" || text[anchor] === "\n";
+  if (!atBoundary) {
+    const next = text.indexOf("\n", anchor);
+    anchor = next < 0 ? text.length : next + 1;
+  }
+  const fences = (text.slice(0, anchor).match(/```/g) || []).length;
+  if (fences % 2 === 1) {
+    const close = text.indexOf("```", anchor);
+    if (close < 0) {
+      // 아직 닫히지 않은 펜스 — text.length를 반환하면 스트리밍 중 매 partial마다 앵커가
+      // 따라 움직여(chase) 리마운트 폭주가 된다. 펜스 시작 직전 줄 경계로 '뒤로' 고정.
+      const fenceStart = text.lastIndexOf("```", Math.max(0, anchor - 1));
+      if (fenceStart <= 0) return 0;
+      const back = text.lastIndexOf("\n", fenceStart - 1);
+      return back < 0 ? 0 : back + 1;
+    }
+    const after = text.indexOf("\n", close + 3);
+    anchor = after < 0 ? text.length : after + 1;
+  }
+  return anchor;
+}
+
+// ── 도구 그룹 카드 — 실행 중 "읽는 중 ›" 라이브 라벨, 완료 후
+//    "실행됨 명령 N개, 읽기 파일 N개 ›" 접힘 요약 → 클릭 시 행 카드 펼침 ──
+function ToolGroupBlock({
+  steps,
+  live,
+  onOpenLinkedFile,
+  onOpenWorkflow,
+}: {
+  steps: StreamStep[];
+  live: boolean;
+  onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
+  onOpenWorkflow?: () => void;
+}) {
+  const { locale } = useT();
+  const [open, setOpen] = useState(false);
+  if (live) {
+    const running = steps.filter((s) => s.result == null);
+    const cur = running[running.length - 1] ?? steps[steps.length - 1];
+    const view = toolView(cur.tool!, cur.args, locale);
+    return (
+      <div
+        role="status"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          fontSize: 13,
+          fontWeight: 550,
+          color: "var(--muted-deep)",
+        }}
+      >
+        <span>{progressiveToolVerb(view.group, locale)}</span>
+        <span aria-hidden style={{ color: "var(--muted)", fontSize: 14, lineHeight: 1 }}>›</span>
+      </div>
+    );
+  }
+  const counts: Record<ToolGroup, number> = { command: 0, read: 0, edit: 0, search: 0, other: 0 };
+  for (const s of steps) counts[toolView(s.tool!, s.args, locale).group] += 1;
+  const summary = buildToolSummary(counts, locale);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          alignSelf: "flex-start",
+          maxWidth: "100%",
+          border: "none",
+          background: "transparent",
+          padding: 0,
+          fontSize: 13,
+          fontWeight: 550,
+          color: "var(--muted-deep)",
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+      >
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {summary}
+        </span>
+        <span
+          aria-hidden
+          style={{
+            color: "var(--muted)",
+            fontSize: 14,
+            lineHeight: 1,
+            display: "inline-flex",
+            flexShrink: 0,
+            transform: open ? "rotate(90deg)" : "none",
+            transition: "transform .12s",
+          }}
+        >
+          ›
+        </span>
+      </button>
+      {open && (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            borderRadius: 10,
+            border: "1px solid var(--paper-edge)",
+            background: "var(--paper)",
+            overflow: "hidden",
+          }}
+        >
+          {steps.map((s, i) => (
+            <ToolGroupRow
+              key={s.id}
+              step={s}
+              divider={i > 0}
+              onOpenLinkedFile={onOpenLinkedFile}
+              onOpenWorkflow={onOpenWorkflow}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolGroupRow({
+  step,
+  divider,
+  onOpenLinkedFile,
+  onOpenWorkflow,
+}: {
+  step: StreamStep;
+  divider: boolean;
+  onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
+  onOpenWorkflow?: () => void;
+}) {
+  const { locale } = useT();
+  const [detailOpen, setDetailOpen] = useState(false);
+  const view = toolView(step.tool!, step.args, locale);
+  const filePath = toolStepFilePath(step);
+  const detailText = step.result?.trim() || (step.args && step.args !== "{}" ? prettyJson(step.args) : "");
+  const openFile = () => {
+    if (!filePath || !onOpenLinkedFile) return false;
+    onOpenLinkedFile({
+      id: `tool-${step.id}`,
+      name: baseName(filePath),
+      href: filePath,
+      path: filePath,
+      fileUrl: fileUrlFromPath(filePath),
+    });
+    return true;
+  };
+  const onActivate = () => {
+    if (openFile()) return;
+    if (detailText) setDetailOpen((v) => !v);
+    else onOpenWorkflow?.();
+  };
+  return (
+    <div style={{ borderTop: divider ? "1px solid var(--paper-edge)" : "none" }}>
+      <button
+        type="button"
+        onClick={onActivate}
+        title={
+          filePath
+            ? locale === "ko" ? "파일 뷰어로 열기" : "Open in file viewer"
+            : detailText
+              ? locale === "ko" ? "자세히 보기" : "Show details"
+              : undefined
+        }
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          width: "100%",
+          minWidth: 0,
+          border: "none",
+          background: "transparent",
+          padding: "10px 12px",
+          fontSize: 13,
+          cursor: "pointer",
+          textAlign: "left",
+          color: "var(--ink)",
+        }}
+      >
+        <span style={{ flexShrink: 0, color: "var(--muted-deep)", fontWeight: 550 }}>{view.verb}</span>
+        <span
+          style={{
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            fontWeight: 650,
+            color: step.resultIsError ? "var(--red-deep)" : "var(--ink)",
+          }}
+        >
+          {view.label || step.tool}
+        </span>
+        <span aria-hidden style={{ flexShrink: 0, color: "var(--muted)", fontSize: 14, lineHeight: 1 }}>›</span>
+      </button>
+      {detailOpen && detailText && (
+        <pre style={{ ...toolPre, margin: "0 12px 10px" }}>{detailText}</pre>
+      )}
+    </div>
+  );
+}
+
+/** 진행형 도구 동사 — 영상의 "읽는 중 ›" 라이브 라벨. */
+function progressiveToolVerb(group: ToolGroup, locale: "ko" | "en"): string {
+  const ko: Record<ToolGroup, string> = {
+    command: "실행 중",
+    read: "읽는 중",
+    edit: "쓰는 중",
+    search: "검색 중",
+    other: "작업 중",
+  };
+  const en: Record<ToolGroup, string> = {
+    command: "Running",
+    read: "Reading",
+    edit: "Writing",
+    search: "Searching",
+    other: "Working",
+  };
+  return (locale === "ko" ? ko : en)[group];
+}
+
+/** read/edit 도구의 대상 파일 절대경로 — 행 클릭 시 파일 뷰어로 열기.
+ *  POSIX(/...)와 Windows 드라이브 경로(C:\ / C:/) 모두 인정. */
+function toolStepFilePath(step: StreamStep): string | null {
+  if (!step.tool) return null;
+  const group = toolView(step.tool, step.args, "en").group;
+  if (group !== "read" && group !== "edit") return null;
+  const a = parseArgs(step.args);
+  const candidates = [a.file_path, a.path, a.notebook_path];
+  for (const c of candidates) {
+    if (typeof c === "string" && (c.startsWith("/") || /^[A-Za-z]:[\\/]/.test(c))) return c;
+  }
+  return null;
+}
+
+/** 로컬 절대경로 → file: URL (Windows 역슬래시/드라이브 문자 안전). */
+function fileUrlFromPath(p: string): string {
+  const normalized = p.replace(/\\/g, "/");
+  return normalized.startsWith("/") ? `file://${normalized}` : `file:///${normalized}`;
+}
+
+// ── ✳ 상태줄 — "{15s|2m 30s} · {N} tokens · {생각 문구}" (영상 재현) ──
+const RUN_GLYPHS = ["·", "✢", "✳", "✻", "✽", "✻", "✳", "✢"] as const;
+
+function GlyphSpinner({ active }: { active: boolean }) {
+  // 동작 줄이기 사용자는 프레임 애니메이션 없이 정적 ✳ — 인덱스 0("·")에 고정되면
+  // 실행 중이 완료보다 비어 보이는 역전이 생긴다.
+  const reducedMotion =
+    typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const [frame, setFrame] = useState(2);
+  useEffect(() => {
+    if (!active || reducedMotion) return;
+    const id = setInterval(() => setFrame((f) => (f + 1) % RUN_GLYPHS.length), 120);
+    return () => clearInterval(id);
+  }, [active, reducedMotion]);
+  return (
+    <span
+      aria-hidden
+      style={{
+        display: "inline-block",
+        width: "1.1em",
+        textAlign: "center",
+        flexShrink: 0,
+        color: "var(--run-accent, #d97757)",
+        fontSize: 15,
+        lineHeight: 1,
+        fontWeight: 700,
+      }}
+    >
+      {active ? (reducedMotion ? "✳" : RUN_GLYPHS[frame]) : "✳"}
+    </span>
+  );
+}
+
+function RunStatusLine({
+  message,
+  onOpenWorkflow,
+}: {
+  message: StreamMessage;
+  onOpenWorkflow?: () => void;
+}) {
+  const { t } = useT();
+  const busy = Boolean(message.busy);
+  const liveElapsed = useElapsedSeconds(message.startedAt, busy);
+  const thinkTick = useElapsedSeconds(
+    message.thinking?.active ? message.thinking.startedAt : undefined,
+    busy && Boolean(message.thinking?.active),
+  );
+  const doneElapsed =
+    message.startedAt != null && message.finishedAt != null
+      ? Math.max(0, Math.floor((message.finishedAt - message.startedAt) / 1000))
+      : null;
+  const elapsed = busy ? liveElapsed : doneElapsed;
+  if (elapsed == null || (!busy && message.startedAt == null)) return null;
+  const tokens = busy ? (message.liveTokens ?? message.tokens) : (message.tokens ?? message.liveTokens);
+  const phrase = busy ? runStatusPhrase(message.thinking, thinkTick, t) : "";
+  const parts = [formatElapsedShort(elapsed)];
+  if (tokens != null && tokens > 0) parts.push(`${formatTokens(tokens)} ${t("chatstream.tokens_unit")}`);
+  if (phrase) parts.push(phrase);
+  return (
+    <div
+      role={busy ? "status" : undefined}
+      style={{ display: "flex", alignItems: "center", gap: 9, marginTop: 12, minHeight: 18 }}
+    >
+      <GlyphSpinner active={busy} />
       <button
         type="button"
         onClick={onOpenWorkflow}
         disabled={!onOpenWorkflow}
-        style={inlineRunButtonStyle(Boolean(onOpenWorkflow))}
-        title={onOpenWorkflow ? (locale === "ko" ? "실행 로그 열기" : "Open run log") : undefined}
+        title={onOpenWorkflow ? t("chatstream.open_run_log") : undefined}
+        style={{
+          border: "none",
+          background: "transparent",
+          padding: 0,
+          fontSize: 12.5,
+          fontWeight: 550,
+          color: "var(--muted-deep)",
+          cursor: onOpenWorkflow ? "pointer" : "default",
+          textAlign: "left",
+        }}
       >
-        <span aria-hidden style={inlineRunDotStyle(Boolean(message.busy))} />
-        <span style={inlineRunLabelStyle(Boolean(message.busy))}>{label}</span>
-        {detail && <span style={inlineRunDetailStyle}>{detail}</span>}
-        <span style={inlineRunTimeStyle}>{formatElapsed(elapsed, locale)}</span>
-        {message.tokens != null && message.tokens > 0 && (
-          <span style={inlineRunTimeStyle}>{formatTokens(message.tokens)} tokens</span>
-        )}
-        {onOpenWorkflow && <span aria-hidden style={inlineRunChevronStyle}>›</span>}
+        {parts.join(" · ")}
       </button>
-      {onStop && (
-        <button
-          type="button"
-          data-chat-stop-button="true"
-          onPointerDown={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (!stopRequested) onStop?.();
-          }}
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (!stopRequested) onStop?.();
-          }}
-          disabled={stopRequested}
-          style={inlineStopButtonStyle(stopRequested)}
-        >
-          <span aria-hidden style={inlineStopIconStyle} />
-          {stopRequested ? (locale === "ko" ? "중지 중" : "Stopping") : (locale === "ko" ? "정지" : "Stop")}
-        </button>
-      )}
     </div>
   );
+}
+
+/** thinking 문구 회전 — 누적 thinking 시간 기반 에스컬레이션 + 종료 직후 "N초 동안 생각함". */
+function runStatusPhrase(
+  thinking: StreamMessage["thinking"],
+  activeElapsedSec: number,
+  t: ReturnType<typeof useT>["t"],
+): string {
+  if (!thinking) return "";
+  if (thinking.active) {
+    const cumSec = Math.floor(thinking.cumMs / 1000) + activeElapsedSec;
+    if (cumSec < 2) return t("chatstream.think_1");
+    if (cumSec < 15) return t("chatstream.think_2");
+    if (cumSec < 60) return t("chatstream.think_3");
+    return t("chatstream.think_4");
+  }
+  if (thinking.lastMs != null) {
+    return t("chatstream.thought_for", { sec: Math.max(1, Math.round(thinking.lastMs / 1000)) });
+  }
+  return "";
+}
+
+/** 영상 형식의 경과 표시 — 60초 미만 "43s", 이후 "2m 30s" (로케일 공통). */
+function formatElapsedShort(sec: number): string {
+  if (sec < 60) return `${sec}s`;
+  return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+}
+
+/** 질문 시트 배치 답장 스캐폴드 감지 — ChatQuestionSheet.composeQuestionReply 형식과 짝. */
+function isQuestionBatchReply(text: string): boolean {
+  const trimmed = text.trim();
+  return /^(질문|Question): /.test(trimmed) && /\n(선택|답변|Selected|Answer): /.test(trimmed);
 }
 
 function isInternalSystemNote(text: string) {
@@ -987,31 +1522,6 @@ function isParallelWorkMessage(message: StreamMessage): boolean {
   const uniqueAgents = new Set([...stepAgents, ...pipelineAgents]);
   const fanout = steps.some((step) => (step.delegateTo?.length ?? 0) > 1);
   return uniqueAgents.size > 1 || fanout;
-}
-
-function inlineRunDetail(message: StreamMessage, locale: "ko" | "en", done: boolean): string {
-  const candidates = [
-    ...(message.steps ?? []).slice().reverse().map((step) => step.text),
-    message.status,
-  ];
-  for (const candidate of candidates) {
-    const cleaned = cleanInlineStatus(candidate, locale, done);
-    if (cleaned) return cleaned;
-  }
-  return done ? "" : locale === "ko" ? "응답 준비 중" : "Preparing response";
-}
-
-function cleanInlineStatus(value: string | undefined, locale: "ko" | "en", done: boolean): string {
-  const trimmed = compactStatusText(value);
-  if (!trimmed) return "";
-  if (isInternalRunStatus(trimmed)) return done ? "" : locale === "ko" ? "처리 중" : "Working";
-  if (/^(완료|done|completed|에이전트 작업 완료|agent work completed)$/i.test(trimmed)) return "";
-  if (/^(메시지 전송 중|sending|전송 중)/i.test(trimmed)) return done ? "" : trimmed;
-  return trimmed;
-}
-
-function isInternalRunStatus(value: string): boolean {
-  return /stormbreaker|scope-lock|verifier-first|agentlas\s*오케스트레이터|orchestrator|루프\s*stormbreaker|loop\s*[·:]|armed|route\b/i.test(value);
 }
 
 // ── 질문 카드 ───────────────────────────────────────────
@@ -1061,6 +1571,28 @@ const QuestionBlock = memo(function QuestionBlock({
   function submit() {
     if (answered || disabled || picked.size === 0) return;
     onAnswer([...picked]);
+  }
+
+  // 답변 완료 — 영상의 인용 카드: 질문(회색 한 줄) + 답변(본문색) 컴팩트 기록.
+  if (answered) {
+    const answerText = (question.answer ?? []).filter((a) => a !== "—").join(", ");
+    return (
+      <div
+        style={{
+          border: "1px solid var(--paper-edge)",
+          borderRadius: 10,
+          background: "var(--paper)",
+          padding: "12px 14px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 5,
+          maxWidth: 640,
+        }}
+      >
+        <span style={{ fontSize: 13, color: "var(--muted-deep)", lineHeight: 1.5 }}>{question.question}</span>
+        <span style={{ fontSize: 13.5, color: "var(--ink)", fontWeight: 600, lineHeight: 1.5 }}>{answerText}</span>
+      </div>
+    );
   }
 
   return (
@@ -2000,104 +2532,6 @@ function liveStateDotStyle(tone: LiveStateTone): CSSProperties {
     boxShadow: `0 0 0 4px color-mix(in srgb, ${color} 14%, transparent)`,
   };
 }
-
-const inlineRunWrapStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  minWidth: 0,
-  padding: "1px 0 4px",
-  flexWrap: "wrap",
-};
-
-function inlineRunButtonStyle(clickable: boolean): CSSProperties {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 7,
-    minWidth: 0,
-    maxWidth: "100%",
-    border: "none",
-    background: "transparent",
-    padding: 0,
-    color: "var(--muted-deep)",
-    fontSize: 12.5,
-    lineHeight: 1.45,
-    cursor: clickable ? "pointer" : "default",
-    textAlign: "left",
-  };
-}
-
-function inlineRunDotStyle(active: boolean): CSSProperties {
-  return {
-    width: 7,
-    height: 7,
-    borderRadius: "50%",
-    flexShrink: 0,
-    background: active ? "var(--green-deep)" : "var(--muted)",
-    boxShadow: active ? "0 0 0 4px color-mix(in srgb, var(--green-deep) 13%, transparent)" : undefined,
-  };
-}
-
-function inlineRunLabelStyle(active: boolean): CSSProperties {
-  return {
-    flexShrink: 0,
-    fontWeight: 800,
-    color: active ? "transparent" : "var(--ink-soft)",
-    backgroundImage: active
-      ? "linear-gradient(90deg, var(--green-deep), var(--accent), var(--amber-deep))"
-      : undefined,
-    backgroundClip: active ? "text" : undefined,
-    WebkitBackgroundClip: active ? "text" : undefined,
-  };
-}
-
-const inlineRunDetailStyle: CSSProperties = {
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  color: "var(--ink-soft)",
-  fontWeight: 650,
-};
-
-const inlineRunTimeStyle: CSSProperties = {
-  flexShrink: 0,
-  color: "var(--muted)",
-  fontSize: 11,
-  fontWeight: 650,
-};
-
-const inlineRunChevronStyle: CSSProperties = {
-  flexShrink: 0,
-  color: "var(--muted)",
-  fontSize: 18,
-  lineHeight: 1,
-};
-
-function inlineStopButtonStyle(disabled: boolean): CSSProperties {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 5,
-    flexShrink: 0,
-    border: "none",
-    background: "transparent",
-    color: disabled ? "var(--muted)" : "#b42318",
-    padding: "0 2px",
-    fontSize: 11.5,
-    fontWeight: 800,
-    cursor: disabled ? "default" : "pointer",
-  };
-}
-
-const inlineStopIconStyle: CSSProperties = {
-  width: 7,
-  height: 7,
-  borderRadius: 2,
-  background: "currentColor",
-  flexShrink: 0,
-};
 
 const toolMiniButton: CSSProperties = {
   flexShrink: 0,

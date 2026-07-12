@@ -2435,7 +2435,7 @@ export interface MobileBridgeRuntimeStatus {
 }
 
 export interface McpInvocationEvent {
-  kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface";
+  kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface" | "usage" | "reasoning";
   status?: string;
   text?: string;
   /** partial 델타 스트리밍(무-agentId 메인 스트림 한정) — text(누적 전문) 대신 직전 partial
@@ -2450,8 +2450,11 @@ export interface McpInvocationEvent {
   surface?: AgentlasSurfaceManifest;
   /** 도구 호출/결과 이벤트 — Claude Code식 접기/펴기 블록용 (이름 + 인자 JSON + 결과) */
   tool?: { name: string; args?: string; result?: string; id?: string; isError?: boolean };
-  /** 생성 토큰 수 (final에 동봉) — "N tokens" 표시용 */
+  /** 생성 토큰 수 — final에 동봉. kind:"usage"면 실행 중 라이브 누적치(단조 증가, 추정 포함). */
   tokens?: number;
+  /** reasoning(thinking) 구간 신호(kind:"reasoning") — 상태줄 "생각 중…" 회전과
+   *  종료 후 "N초 동안 생각함" 표시의 근거. durationMs는 end에만 동봉. */
+  reasoning?: { phase: "start" | "end"; durationMs?: number };
   // ── 멀티 에이전트 속성 (firm 오케스트레이션) — 없으면 단일 CEO/에이전트 ──
   /** 이 이벤트를 낸 노드의 안정 id (ResolvedNode.id) — 네트워크 패널 per-agent 버킷 키 */
   agentId?: string;
@@ -4156,8 +4159,8 @@ export interface AgentlasIpc {
     clearHistory: (chatId: string) => Promise<void>;
     /** 현재 실행 중인 chatId 목록 — 사이드바 "실행 중" 인디케이터 초기 시드용. */
     activeChats: () => Promise<string[]>;
-    /** 채팅 진입 시 진행 중 실행에 재접속 — 그 chat의 runId + 지금까지 버퍼된 이벤트. 없으면 null. */
-    attach: (chatId: string) => Promise<{ runId: string; events: McpInvocationEvent[] } | null>;
+    /** 채팅 진입 시 진행 중 실행에 재접속 — 그 chat의 runId + 지금까지 버퍼된 이벤트 + 시작 시각. 없으면 null. */
+    attach: (chatId: string) => Promise<{ runId: string; events: McpInvocationEvent[]; startedAt?: string } | null>;
     /** 실행 ID의 live+durable 상태. 앱 재시작 뒤 미종결 started receipt는 interrupted로 판정한다. */
     receipt: (runId: string) => Promise<InvocationRunReceipt | null>;
     /** 채팅의 가장 최근 실행 receipt — 결과 폴더/실패 진단 복원용. */

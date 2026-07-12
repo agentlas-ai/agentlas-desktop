@@ -455,7 +455,7 @@ const dict = {
 
     // ChatInput
     "chatinput.placeholder": "에이전트에게 할 일을 적어 주세요 — Enter 전송 · Shift+Enter 줄바꿈 · 이미지 드래그",
-    "chatinput.placeholder_rich": "에이전트에게 할 일을 적어 주세요 — / 명령어(command) · @ 에이전트 부르기(agent call) · Enter 전송 · Shift+Enter 줄바꿈",
+    "chatinput.placeholder_rich": "명령어를 입력하려면 / 입력",
     "chatinput.placeholder_disabled": "설치된 App이 없습니다 — 에이전트에게 전용 App 생성을 요청하세요",
     "chatinput.placeholder_steering": "실행 중 — 추가 지시를 보내면 다음 차례에 반영됩니다",
     "chatinput.attach": "이미지 첨부 — 드래그·드롭·붙여넣기",
@@ -622,6 +622,16 @@ const dict = {
     "chatstream.panel": "패널 ↗",
     "chatstream.close_panel": "패널 닫기",
     "chatstream.close": "닫기 (Esc)",
+    // ✳ 상태줄 — thinking 문구 회전(누적 시간 에스컬레이션) + 종료 후 잔류 표시
+    "chatstream.think_1": "생각 중...",
+    "chatstream.think_2": "아직 생각 중...",
+    "chatstream.think_3": "더 생각 중...",
+    "chatstream.think_4": "거의 다 생각했어요...",
+    "chatstream.thought_for": "{sec}초 동안 생각함",
+    "chatstream.tokens_unit": "tokens",
+    "chatstream.open_run_log": "실행 로그 열기",
+    "chatstream.speak": "읽어주기",
+    "chatstream.speak_stop": "읽기 중지",
 
     // Settings
     "settings.title": "설정 — LLM 연결",
@@ -1681,7 +1691,7 @@ const dict = {
 
     // ChatInput
     "chatinput.placeholder": "Tell your agent what to do — Enter to send · Shift+Enter for newline · drag images",
-    "chatinput.placeholder_rich": "Tell your agent what to do — / command · @ agent call · Enter to send · Shift+Enter newline",
+    "chatinput.placeholder_rich": "Type / for commands",
     "chatinput.placeholder_disabled": "No App installed — ask an agent to create a dedicated App",
     "chatinput.placeholder_steering": "Running — send another instruction to steer the next turn",
     "chatinput.attach": "Attach image — drag, drop, or paste",
@@ -1848,6 +1858,16 @@ const dict = {
     "chatstream.panel": "Panel ↗",
     "chatstream.close_panel": "Close panel",
     "chatstream.close": "Close (Esc)",
+    // ✳ status line — thinking phrase escalation + post-thinking residue
+    "chatstream.think_1": "Thinking...",
+    "chatstream.think_2": "Still thinking...",
+    "chatstream.think_3": "Thinking more...",
+    "chatstream.think_4": "Almost done thinking...",
+    "chatstream.thought_for": "Thought for {sec}s",
+    "chatstream.tokens_unit": "tokens",
+    "chatstream.open_run_log": "Open run log",
+    "chatstream.speak": "Read aloud",
+    "chatstream.speak_stop": "Stop reading",
 
     // Settings
     "settings.title": "Settings — LLM",

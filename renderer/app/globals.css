@@ -39,6 +39,7 @@
   --rd-hair-2: rgba(0, 21, 25, 0.18);
   --rd-accent: #6b6e52;      /* Moss — 브랜드 강조 */
   --rd-accent-2: #b6c8c7;    /* Sea Foam — 보조 */
+  --run-accent: #d97757;     /* 실행 상태줄 ✳ 스피너 — 코럴(영상 재현) */
   --rd-accent-3: #6b6e52;    /* Moss */
   --rd-accent-text: #474a35; /* 진한 Moss(밝은 배경 위 텍스트) */
   --rd-accent-2-text: #3c534f; /* 진한 Sea Foam */
@@ -168,6 +169,7 @@
      theme keeps the quieter moss brand accent. */
   --rd-accent: #7c7cff;             /* fill behind white text (≈4.8:1) */
   --rd-accent-2: #5ad1c0;           /* secondary / live·connected */
+  --run-accent: #e08b6a;            /* 실행 상태줄 ✳ 스피너 — 다크에서 한 톤 밝게 */
   --rd-accent-3: #7c7cff;
   --rd-accent-text: #a5a3ff;        /* accent AS TEXT on dark (≈7:1) */
   --rd-accent-2-text: #6fe0cf;

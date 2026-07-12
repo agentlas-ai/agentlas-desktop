@@ -1468,7 +1468,10 @@ export function ChatInput({
               <IconChevronDown size={11} style={{ opacity: 0.6, flexShrink: 0 }} />
             </button>
 
-            {/* 모델·작업량 칩 — 활성 런타임이 모델 선택 또는 작업량을 지원할 때만 */}
+          </div>
+
+          <div className="chat-input-tools-right" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* 모델·작업량 칩 — 영상처럼 우측 정렬("Opus 4.8 · 엑스트라"). 지원 런타임만 */}
             {runtime &&
               ((modelOptions?.length ?? 0) > 0 || (runtime.efforts?.length ?? 0) > 0) && (
                 <button
@@ -1493,9 +1496,6 @@ export function ChatInput({
                   <IconChevronDown size={11} style={{ opacity: 0.6, flexShrink: 0 }} />
                 </button>
               )}
-          </div>
-
-          <div className="chat-input-tools-right" style={{ display: "flex", alignItems: "center", gap: 8 }}>
             {/* 컨텍스트 지표는 "Runtime" 상태표가 아니라 세션 전환/정리 진입점이다. */}
             {tokensUsage && (
               <div style={{ position: "relative", flexShrink: 0 }}>
@@ -1618,35 +1618,31 @@ export function ChatInput({
                       aria-label={stopLabel}
                       title={stopLabel}
                       style={{
+                        width: 32,
                         height: 32,
                         flexShrink: 0,
                         display: "inline-flex",
                         alignItems: "center",
                         justifyContent: "center",
-                        gap: 7,
-                        padding: "0 12px",
-                        borderRadius: 999,
-                        border: "1px solid color-mix(in srgb, var(--red-deep) 30%, var(--paper-edge))",
-                        background: "color-mix(in srgb, var(--red-deep) 8%, var(--paper))",
-                        color: stopRequested ? "var(--muted-deep)" : "var(--red-deep)",
-                        fontSize: 12,
-                        fontWeight: 750,
+                        borderRadius: 8,
+                        border: "1px solid var(--paper-edge)",
+                        background: "var(--paper)",
+                        color: stopRequested ? "var(--muted-deep)" : "var(--ink)",
                         opacity: stopRequested ? 0.72 : 1,
                         cursor: stopRequested ? "default" : "pointer",
                       }}
                     >
                       <span
                         style={{
-                          width: 9,
-                          height: 9,
-                          background: "currentColor",
-                          borderRadius: 2,
+                          width: 10,
+                          height: 10,
+                          border: "1.8px solid currentColor",
+                          borderRadius: 2.5,
                           display: "inline-block",
                           flexShrink: 0,
                         }}
                         aria-hidden
                       />
-                      <span>{stopLabel}</span>
                     </button>
                   )}
                   <button
@@ -2510,7 +2506,7 @@ function ModelMenu({
   const effortIcon = <IconRoute size={13} style={{ color: "var(--muted-deep)" }} />;
 
   return (
-    <Popover title={t("chatinput.model")}>
+    <Popover title={t("chatinput.model")} align="right">
       {allowDefaultModel && (
         <Row
           onClick={() => onSelectModel("")}
@@ -2566,11 +2562,14 @@ function Popover({
   children,
   dataKind,
   role,
+  align = "left",
 }: {
   title?: string;
   children: React.ReactNode;
   dataKind?: string;
   role?: React.AriaRole;
+  /** 트리거가 우측 그룹에 있으면 "right" — 메뉴가 트리거 반대편에 열리지 않게 한다. */
+  align?: "left" | "right";
 }) {
   return (
     <div
@@ -2581,7 +2580,7 @@ function Popover({
       style={{
         position: "absolute",
         bottom: "calc(100% - 4px)",
-        left: 16,
+        ...(align === "right" ? { right: 16 } : { left: 16 }),
         minWidth: 240,
         maxWidth: 320,
         maxHeight: 360,

@@ -39,6 +39,8 @@ export interface InvocationEventEnvelope {
 export interface InvocationAttachResult {
   runId: string;
   events: McpInvocationEvent[];
+  /** 실행 시작 시각(ISO) — 재접속한 렌더러가 상태줄 경과시간을 0s부터 다시 세지 않게 한다. */
+  startedAt?: string;
 }
 
 export interface InvocationStartResult {
@@ -165,8 +167,20 @@ class InvocationService {
         }
 
         const last = record.events[record.events.length - 1];
+        // partial(누적 전문)과 usage(단조 카운터)는 마지막 값만 의미 있다 — 연속이 아니어도
+        // 같은 kind의 직전 버퍼 항목을 교체해 버퍼가 고빈도 신호로 밀려나지 않게 한다.
         if (event.kind === "partial" && !event.agentId && last?.kind === "partial" && !last.agentId) {
           record.events[record.events.length - 1] = event;
+        } else if (event.kind === "usage") {
+          let prevUsageIdx = -1;
+          for (let i = record.events.length - 1; i >= 0; i -= 1) {
+            if (record.events[i].kind === "usage") {
+              prevUsageIdx = i;
+              break;
+            }
+          }
+          if (prevUsageIdx >= 0) record.events[prevUsageIdx] = event;
+          else record.events.push(event);
         } else {
           record.events.push(event);
         }
@@ -321,7 +335,9 @@ class InvocationService {
   attach(chatId: string): InvocationAttachResult | null {
     let found: InvocationAttachResult | null = null;
     for (const [runId, record] of this.activeRuns.entries()) {
-      if (record.chatId === chatId) found = { runId, events: record.events.slice() };
+      if (record.chatId === chatId) {
+        found = { runId, events: record.events.slice(), startedAt: record.startedAt };
+      }
     }
     return found;
   }
