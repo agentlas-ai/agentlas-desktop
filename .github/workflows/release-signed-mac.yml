@@ -257,7 +257,17 @@ jobs:
         run: |
           args=(--tag="$RESOLVED_TAG" --version="$RESOLVED_VERSION")
           if [ "$RESOLVED_DRAFT" = "true" ]; then args+=(--draft); fi
-          npm run release:mac:publish -- "${args[@]}"
+          for attempt in 1 2 3; do
+            if npm run release:mac:publish -- "${args[@]}"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::macOS release publish failed after $attempt attempts."
+              exit 1
+            fi
+            echo "Public release may still be settling after cross-platform uploads; retrying in 20 seconds ($attempt/3)."
+            sleep 20
+          done
 
       - name: Upload release evidence
         uses: actions/upload-artifact@v4
