@@ -18,6 +18,7 @@ import { readEnvVar } from "../secrets/vault";
 import { mergeContinuityNegative } from "../../shared/oberon-sheets";
 import { composeTitledDelivery } from "./titlecards";
 import { currentUiLocale } from "../ui-locale";
+import { runGrokImagine } from "../multimodal/grok-imagine";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_MODEL = "veo-3.1-lite-generate-001";
@@ -101,10 +102,17 @@ async function runRenderJob(id: string, request: OberonRenderRequest, shots: Obe
   const ko = currentUiLocale() === "ko";
   const job = requireJob(id);
   await fs.mkdir(job.outputDir, { recursive: true });
-  const client = await createGoogleClient(job.provider);
+  const client = job.provider === "grok-cli-video" ? null : await createGoogleClient(job.provider);
   updateJob(job, {
     status: "running",
-    message: ko ? `Google Veo 렌더 시작 (${client.authLabel})` : `Starting Google Veo render (${client.authLabel})`,
+    message:
+      job.provider === "grok-cli-video"
+        ? ko
+          ? "Grok Imagine 영상 렌더 시작"
+          : "Starting Grok Imagine video render"
+        : ko
+          ? `Google Veo 렌더 시작 (${client!.authLabel})`
+          : `Starting Google Veo render (${client!.authLabel})`,
     phase: "generating",
   });
 
@@ -118,7 +126,10 @@ async function runRenderJob(id: string, request: OberonRenderRequest, shots: Obe
     job.updatedAtMs = Date.now();
 
     try {
-      const file = await generateClip(client.ai, job, shot, clip, request);
+      const file =
+        job.provider === "grok-cli-video"
+          ? await generateGrokClip(job, shot, clip, request)
+          : await generateClip(client!.ai, job, shot, clip, request);
       clip.status = "ready";
       clip.absPath = file.absPath;
       clip.url = file.url;
@@ -138,7 +149,13 @@ async function runRenderJob(id: string, request: OberonRenderRequest, shots: Obe
 
   assertNotCancelled(job.id);
   const readyClips = job.clips.filter((clip) => clip.status === "ready" && clip.absPath);
-  if (!readyClips.length) throw new Error("Google Veo did not return any usable clips.");
+  if (!readyClips.length) {
+    throw new Error(
+      job.provider === "grok-cli-video"
+        ? "Grok Imagine did not return any usable clips."
+        : "Google Veo did not return any usable clips.",
+    );
+  }
 
   updateJob(job, {
     status: "running",
@@ -238,6 +255,77 @@ async function generateClip(
     throw new Error("Veo returned a video without uri or videoBytes.");
   }
   return makeRenderFile("clip_mp4", `Clip ${shot.shotId}`, clipPath, "video/mp4");
+}
+
+async function generateGrokClip(
+  job: OberonRenderJob,
+  shot: OberonRenderShotInput,
+  clip: OberonRenderClip,
+  request: OberonRenderRequest,
+): Promise<OberonRenderFile> {
+  const clipName = `${String(shot.index + 1).padStart(3, "0")}_${safeSlug(shot.shotId)}_take${clip.attempt}.mp4`;
+  const clipPath = path.join(job.outputDir, clipName);
+  const durationSeconds = normalizeDuration(shot.durationSec, request.resolution);
+  const inputFrame = await materializeGrokInputFrame(job, shot, clip).catch((error: unknown) => {
+    job.warnings.push(`${shot.shotId}: first frame skipped (${errorMessage(error)})`);
+    return null;
+  });
+  const prompt = buildGrokVideoPrompt(request, shot, durationSeconds, inputFrame);
+  const generated = await runGrokImagine({
+    prompt,
+    cwd: job.outputDir,
+    kind: "video",
+    targetPath: clipPath,
+    isCancelled: () => cancelledJobs.has(job.id),
+  });
+  if (!generated) throw new Error("Grok Imagine returned no usable video.");
+  return makeRenderFile("clip_mp4", `Clip ${shot.shotId}`, generated, "video/mp4");
+}
+
+async function materializeGrokInputFrame(
+  job: OberonRenderJob,
+  shot: OberonRenderShotInput,
+  clip: OberonRenderClip,
+): Promise<string | null> {
+  const frame = shot.firstFrame;
+  if (!frame?.absPath && !frame?.imageBytes) return null;
+  const inputDir = path.join(job.outputDir, "inputs");
+  await fs.mkdir(inputDir, { recursive: true });
+  const ext = imageExtension(frame.mimeType);
+  const target = path.join(inputDir, `${safeSlug(shot.shotId)}_take${clip.attempt}_first${ext}`);
+  if (frame.imageBytes) await fs.writeFile(target, Buffer.from(frame.imageBytes, "base64"));
+  else await fs.copyFile(frame.absPath!, target);
+  return path.relative(job.outputDir, target);
+}
+
+function buildGrokVideoPrompt(
+  request: OberonRenderRequest,
+  shot: OberonRenderShotInput,
+  durationSeconds: number,
+  inputFrame: string | null,
+): string {
+  return [
+    shot.prompt,
+    `Generate one cinematic ${durationSeconds}-second ${normalizeAspect(request.aspectRatio || shot.aspectRatio)} video clip for production "${request.title}".`,
+    inputFrame
+      ? `Use the local image file "${inputFrame}" as the exact first frame and animate naturally from it with image_to_video.`
+      : "Generate the clip directly with text_to_video.",
+    "Preserve the described character identity, wardrobe, lighting, art direction, camera movement, and screen direction for the full shot.",
+    shot.chainedFromShotId
+      ? `Continue directly from shot ${shot.chainedFromShotId}; do not reset the scene or character positions.`
+      : "",
+    shot.negativePrompt ? `Avoid: ${mergeContinuityNegative(shot.negativePrompt)}` : `Avoid: ${mergeContinuityNegative("")}`,
+    "Resolve to a clean stable final frame. No subtitles, titles, captions, watermarks, UI overlays, or distorted text.",
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, 3900);
+}
+
+function imageExtension(mimeType: string): string {
+  if (mimeType === "image/jpeg") return ".jpg";
+  if (mimeType === "image/webp") return ".webp";
+  return ".png";
 }
 
 async function assembleDeliveryFiles(

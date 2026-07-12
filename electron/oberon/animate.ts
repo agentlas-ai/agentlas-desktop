@@ -19,6 +19,8 @@ import type {
   OberonAnimateProvider,
   OberonAnimateRequest,
 } from "../../shared/types";
+import { grokAuthSource } from "../multimodal/availability";
+import { resolveGrokBin, runGrokImagine } from "../multimodal/grok-imagine";
 
 // provider별 허용 env 키 — 멀티모달 레지스트리(shared/multimodal.ts) 키명을 먼저,
 // 레거시/실동작 키명을 폴백으로. "멀티모달로 연결한 키"를 animate가 그대로 인식하도록 정렬.
@@ -62,15 +64,15 @@ async function hasAnyEnvVar(keys: string[]): Promise<boolean> {
 }
 
 export async function animateKeyStatus(): Promise<OberonAnimateKeyStatus> {
-  const [runway, luma, veo, seedance, kling] = await Promise.all([
+  const [runway, luma, veo, seedance, kling, grokAuth] = await Promise.all([
     hasAnyEnvVar(PROVIDER_KEYS.runway),
     hasAnyEnvVar(PROVIDER_KEYS.luma),
     hasAnyEnvVar(PROVIDER_KEYS.veo),
     hasAnyEnvVar(PROVIDER_KEYS.seedance),
     hasAnyEnvVar(PROVIDER_KEYS.kling),
+    grokAuthSource(),
   ]);
-  // 설치·OAuth만으로 media tool 권한을 증명할 수 없으므로 fail-closed.
-  return { runway, luma, veo, seedance, kling, grok: false };
+  return { runway, luma, veo, seedance, kling, grok: Boolean(resolveGrokBin()) && grokAuth === "oauth" };
 }
 
 export function startOberonAnimate(request: OberonAnimateRequest): OberonAnimateJob {
@@ -139,11 +141,8 @@ async function runAnimateJob(id: string, request: OberonAnimateRequest): Promise
   }
 
   if (job.provider === "grok") {
-    throw new Error(
-      ko
-        ? "현재 공식 Grok CLI는 이미지·영상 도구 가용성을 검증할 수 없어 Oberon 미디어 실행을 열지 않습니다."
-        : "The official Grok CLI cannot prove image/video tool availability, so Oberon keeps Grok media disabled.",
-    );
+    await runGrokAnimate(id, job, request, prompt);
+    return;
   }
 
   // provider별 허용 키 목록에서 실제 존재하는 첫 키를 쓴다(멀티모달 연결 키 인식).
@@ -187,6 +186,72 @@ async function runAnimateJob(id: string, request: OberonAnimateRequest): Promise
   const file = await downloadVideo(job, videoUrl);
   job.files.push(file);
   updateJob(job, { status: "succeeded", phase: "complete", message: ko ? "애니메이션 완료" : "Animation complete", percent: 100 });
+}
+
+async function runGrokAnimate(
+  id: string,
+  job: OberonAnimateJob,
+  request: OberonAnimateRequest,
+  prompt: string,
+): Promise<void> {
+  const ko = currentUiLocale() === "ko";
+  await fs.mkdir(job.outputDir, { recursive: true });
+  const inputFrame = await materializeGrokAnimateInput(job, request);
+  const name = `${safeSlug(job.title)}-${job.id.slice(0, 8)}.mp4`;
+  const absPath = path.join(job.outputDir, name);
+  updateJob(job, {
+    status: "running",
+    phase: "generating",
+    message: ko ? "Grok Imagine 영상 생성 중" : "Grok Imagine generating video",
+    percent: 20,
+  });
+  const generated = await runGrokImagine({
+    prompt: [
+      prompt,
+      `Generate a ${request.durationSec ?? 5}-second ${request.aspectRatio ?? "16:9"} cinematic image-to-video clip.`,
+      `Use the local image file "${inputFrame}" as the exact first frame and animate naturally from it.`,
+      "Preserve subject identity, composition, lighting, and art direction. End on a clean stable frame. No text or watermark.",
+    ].join("\n"),
+    cwd: job.outputDir,
+    kind: "video",
+    targetPath: absPath,
+    isCancelled: () => cancelledJobs.has(id),
+  });
+  assertNotCancelled(id);
+  if (!generated) throw new Error(ko ? "Grok Imagine이 사용 가능한 영상을 반환하지 않았습니다." : "Grok Imagine returned no usable video.");
+  const stat = await fs.stat(generated);
+  job.files.push({
+    id: randomUUID(),
+    kind: "animation_mp4",
+    name: path.basename(generated),
+    absPath: generated,
+    url: pathToFileURL(generated).href,
+    mime: "video/mp4",
+    sizeBytes: stat.size,
+  });
+  updateJob(job, { status: "succeeded", phase: "complete", message: ko ? "Grok 애니메이션 완료" : "Grok animation complete", percent: 100 });
+}
+
+async function materializeGrokAnimateInput(job: OberonAnimateJob, request: OberonAnimateRequest): Promise<string> {
+  const ko = currentUiLocale() === "ko";
+  const inputDir = path.join(job.outputDir, "inputs");
+  await fs.mkdir(inputDir, { recursive: true });
+  if (request.imagePath) {
+    const ext = path.extname(request.imagePath) || ".png";
+    const target = path.join(inputDir, `first-frame${ext}`);
+    await fs.copyFile(request.imagePath, target);
+    return path.relative(job.outputDir, target);
+  }
+  if (request.imageUrl && /^https:\/\//i.test(request.imageUrl)) {
+    const response = await fetch(request.imageUrl);
+    if (!response.ok) throw new Error(`Failed to fetch input image (HTTP ${response.status})`);
+    const mime = response.headers.get("content-type") || "image/png";
+    const ext = mime.includes("jpeg") ? ".jpg" : mime.includes("webp") ? ".webp" : ".png";
+    const target = path.join(inputDir, `first-frame${ext}`);
+    await fs.writeFile(target, Buffer.from(await response.arrayBuffer()));
+    return path.relative(job.outputDir, target);
+  }
+  throw new Error(ko ? "입력 이미지가 없습니다. Grok 컷 이미지를 먼저 생성하세요." : "No input image. Generate a Grok cut image first.");
 }
 
 // ── Veo (google-veo, image-to-video) ─────────────────────────

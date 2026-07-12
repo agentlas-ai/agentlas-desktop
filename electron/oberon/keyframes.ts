@@ -15,10 +15,12 @@ import type {
 } from "../../shared/types";
 import { readEnvVar } from "../secrets/vault";
 import { currentUiLocale } from "../ui-locale";
+import { runGrokImagine } from "../multimodal/grok-imagine";
 
 const DEFAULT_PROVIDER: OberonKeyframeProvider = "codex-imagegen-cli";
 const DEFAULT_CODEX_MODEL = "image_gen.imagegen";
 const DEFAULT_GOOGLE_MODEL = "imagen-4.0-generate-001";
+const DEFAULT_GROK_MODEL = "grok-imagine-image";
 const CODEX_IMAGE_BATCH_RUNNER_RELATIVE = path.join(
   ".codex",
   "plugins",
@@ -74,7 +76,13 @@ export function startOberonKeyframes(request: OberonKeyframeRequest): OberonKeyf
 
   const id = randomUUID();
   const provider = request.provider ?? DEFAULT_PROVIDER;
-  const model = request.model || (provider === "google-imagen" ? DEFAULT_GOOGLE_MODEL : DEFAULT_CODEX_MODEL);
+  const model =
+    request.model ||
+    (provider === "grok-cli-image"
+      ? DEFAULT_GROK_MODEL
+      : provider === "google-imagen"
+        ? DEFAULT_GOOGLE_MODEL
+        : DEFAULT_CODEX_MODEL);
   const outputDir = path.join(app.getPath("userData"), "oberon", `${safeSlug(request.title)}-${id.slice(0, 8)}`, "keyframes");
   const now = Date.now();
   const job: OberonKeyframeJob = {
@@ -140,6 +148,10 @@ async function runKeyframeJob(
   await fs.mkdir(job.outputDir, { recursive: true });
   if (job.provider === "codex-imagegen-cli") {
     await runCodexKeyframeJob(job, request, shots);
+    return;
+  }
+  if (job.provider === "grok-cli-image") {
+    await runGrokKeyframeJob(job, request, shots);
     return;
   }
 
@@ -233,6 +245,52 @@ async function runCodexKeyframeJob(
   updateJob(job, "succeeded", ko ? "키프레임 생성 완료" : "Keyframe generation complete", "complete");
 }
 
+async function runGrokKeyframeJob(
+  job: OberonKeyframeJob,
+  request: OberonKeyframeRequest,
+  shots: OberonKeyframeShotInput[],
+): Promise<void> {
+  const ko = currentUiLocale() === "ko";
+  updateJob(job, "running", ko ? "Grok Imagine 컷 이미지 생성 시작" : "Starting Grok Imagine cut images", "generating");
+
+  for (const shot of shots) {
+    assertNotCancelled(job.id);
+    job.progress.currentShotId = shot.shotId;
+    job.message = ko ? `${shot.shotId} Grok 컷 이미지 생성 중` : `Generating Grok image for ${shot.shotId}`;
+    job.updatedAtMs = Date.now();
+    const prompt = buildImagePrompt(request, shot);
+    const targetPath = path.join(
+      job.outputDir,
+      `${String(shot.index + 1).padStart(3, "0")}_${safeSlug(shot.shotId)}_${assetKindOf(shot)}.png`,
+    );
+    try {
+      const generated = await runGrokImagine({
+        prompt,
+        cwd: job.outputDir,
+        kind: "image",
+        targetPath,
+        preserveExtension: true,
+        isCancelled: () => cancelledJobs.has(job.id),
+      });
+      if (!generated) throw new Error("Grok Imagine returned no usable image.");
+      job.assets.push(await makeKeyframeAsset(job, shot, prompt, generated, await detectImageMime(generated)));
+    } catch (error: unknown) {
+      job.warnings.push(`${shot.shotId}: ${errorMessage(error)}`);
+    } finally {
+      job.progress.completedImages += 1;
+      job.progress.percent = percent(job.progress.completedImages, job.progress.totalImages);
+      job.updatedAtMs = Date.now();
+    }
+  }
+
+  assertNotCancelled(job.id);
+  if (!job.assets.length) throw new Error("Grok Imagine did not return any usable keyframes.");
+  if (job.assets.length < shots.length) {
+    throw new Error(`Grok Imagine generated ${job.assets.length}/${shots.length} keyframes. Retry the missing shots before video render.`);
+  }
+  updateJob(job, "succeeded", ko ? "Grok 컷 이미지 생성 완료" : "Grok cut images complete", "complete");
+}
+
 async function generateKeyframe(
   ai: GoogleGenAI,
   job: OberonKeyframeJob,
@@ -293,6 +351,14 @@ async function makeKeyframeAsset(
     sizeBytes: stat.size,
     createdAtMs: Date.now(),
   };
+}
+
+async function detectImageMime(absPath: string): Promise<string> {
+  const bytes = await fs.readFile(absPath);
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  return "application/octet-stream";
 }
 
 async function createGoogleClient(provider: OberonKeyframeProvider): Promise<{ ai: GoogleGenAI; authLabel: string }> {

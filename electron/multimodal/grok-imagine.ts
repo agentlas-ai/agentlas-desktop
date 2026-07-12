@@ -130,6 +130,8 @@ export interface GrokImagineOptions {
   kind: "image" | "video";
   /** Main-owned output path. Supplying it lets the helper remove the private Grok session immediately. */
   targetPath?: string;
+  /** Keep the generated image's real extension when copying into a caller-owned basename. */
+  preserveExtension?: boolean;
   timeoutMs?: number;
   isCancelled?: () => boolean;
 }
@@ -149,9 +151,12 @@ export async function runGrokImagine(opts: GrokImagineOptions): Promise<string |
   const sessionId = randomUUID();
   const promptFile = path.join(os.tmpdir(), `agentlas-grok-imagine-${sessionId}.txt`);
   const timeoutMs = opts.timeoutMs ?? (opts.kind === "video" ? 15 * 60_000 : 5 * 60_000);
-  const tools = opts.kind === "image" ? "image_gen" : "text_to_video,image_to_video";
   try {
-    fs.writeFileSync(promptFile, opts.prompt, { encoding: "utf8", mode: 0o600 });
+    const mediaInstruction =
+      opts.kind === "image"
+        ? "Agentlas media job: generate the requested IMAGE with image_gen. Do not run terminal commands or edit files."
+        : "Agentlas media job: generate the requested VIDEO with text_to_video or image_to_video. Do not run terminal commands or edit files.";
+    fs.writeFileSync(promptFile, `${mediaInstruction}\n\n${opts.prompt}`, { encoding: "utf8", mode: 0o600 });
   } catch {
     return null;
   }
@@ -184,8 +189,20 @@ export async function runGrokImagine(opts: GrokImagineOptions): Promise<string |
           opts.cwd,
           "--output-format",
           "json",
-          "--tools",
-          tools,
+          // Grok CLI 0.2.93 cannot create a session when --tools removes
+          // run_terminal_cmd: its internal background defaults become invalid.
+          // Keep the tool registered but kernel-sandbox the process and deny
+          // every shell/edit permission so only internal media tools can act.
+          "--sandbox",
+          "strict",
+          "--disallowed-tools",
+          "search_replace,web_search,web_fetch",
+          "--deny",
+          "Bash",
+          "--deny",
+          "Edit",
+          "--deny",
+          "Write",
           "--always-approve",
           "--disable-web-search",
           "--no-memory",
@@ -225,10 +242,13 @@ export async function runGrokImagine(opts: GrokImagineOptions): Promise<string |
   }
   if (!opts.targetPath) return harvested;
 
+  const targetPath = opts.preserveExtension
+    ? `${opts.targetPath.slice(0, opts.targetPath.length - path.extname(opts.targetPath).length)}${path.extname(harvested)}`
+    : opts.targetPath;
   try {
-    fs.mkdirSync(path.dirname(opts.targetPath), { recursive: true });
-    fs.copyFileSync(harvested, opts.targetPath);
-    return opts.targetPath;
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.copyFileSync(harvested, targetPath);
+    return targetPath;
   } catch {
     return null;
   } finally {

@@ -518,8 +518,8 @@ export function defaultModelSettings(): ModelSettings {
   return {
     textRuntime: "claude-code",
     textRuntimeLabel: "Claude Code",
-    imageProvider: "codex-cli-image",
-    videoProviders: ["google-veo"],
+    imageProvider: "grok-cli-image",
+    videoProviders: ["grok-cli-video"],
     audioProvider: "openai-audio",
   };
 }

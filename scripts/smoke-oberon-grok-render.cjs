@@ -20,8 +20,8 @@ async function main() {
     ],
     maxShots: 2,
     takesPerShot: 1,
-    provider: "grok-imagine",
-    model: "runtime-default",
+    provider: "grok-cli-video",
+    model: "grok-imagine-video",
     resolution: "720p",
   });
   console.log(`JOB=${job.id} provider=${job.provider} clips=${job.progress.totalClips}`);

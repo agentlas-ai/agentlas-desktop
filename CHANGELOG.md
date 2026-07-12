@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.4 — 2026-07-12
+
+### Fixed
+
+- **Oberon now uses Grok Imagine for the selected cut-image and video engines.**
+  Grok-generated keyframes flow into image-to-video rendering and the existing
+  clip assembly/delivery pipeline instead of being relabeled as Codex or blocked
+  behind the Veo-only renderer.
+- **Grok CLI 0.2.93 media jobs start reliably without widening host access.**
+  The broken headless tool allowlist is replaced by the strict OS sandbox plus
+  explicit shell/edit denials, while prompt files, session harvesting, cleanup,
+  OAuth-only subscription billing, and unrelated-secret isolation remain gated.
+
 ## 0.8.3 — 2026-07-12
 
 ### Added

@@ -2736,7 +2736,7 @@ export interface MigrationResult {
 }
 
 // ── Oberon real render jobs ───────────────────────────────────
-export type OberonRenderProvider = "google-gemini-veo" | "google-enterprise-veo";
+export type OberonRenderProvider = "google-gemini-veo" | "google-enterprise-veo" | "grok-cli-video";
 export type OberonRenderJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type OberonRenderFileKind =
   | "clip_mp4"
@@ -3003,7 +3003,7 @@ export interface OberonPlanResult {
 }
 
 // ── Oberon keyframe image jobs ─────────────────────────────────
-export type OberonKeyframeProvider = "codex-imagegen-cli" | "google-imagen";
+export type OberonKeyframeProvider = "codex-imagegen-cli" | "google-imagen" | "grok-cli-image";
 export type OberonKeyframeJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export type OberonKeyframeAssetKind = "first_frame" | "last_frame" | "master_sheet" | "storyboard_sheet";

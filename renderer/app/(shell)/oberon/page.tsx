@@ -78,6 +78,7 @@ import type {
   OberonPlanResult,
   OpenCrabReadiness,
   OberonRenderJob,
+  OberonRenderProvider,
   OberonRenderRequest,
 } from "@/lib/types";
 
@@ -165,9 +166,9 @@ export default function OberonPage() {
     return resolveOberonAnimateProvider(selected, ready).provider;
   }, [videoProviderSetting, animateKey, model.videoProviders, production?.modelSettings?.videoProviders]);
 
-  // 풀 시네마틱 렌더(다중 샷)는 현재 실제 검증된 Veo 경로만 연다.
+  // 풀 시네마틱 렌더(다중 샷)는 선택한 Grok Imagine 또는 Veo 실행기로 보낸다.
   const resolveRenderProvider = useCallback(():
-    | { ok: true; provider: "google-enterprise-veo"; model: string }
+    | { ok: true; provider: OberonRenderProvider; model: string }
     | { ok: false; reason: string } => {
     const selected = production?.modelSettings?.videoProviders?.[0] || model.videoProviders[0] || videoProviderSetting || "google-veo";
     const resolved = resolveOberonRenderProvider(selected);
@@ -432,7 +433,7 @@ export default function OberonPage() {
             shotId: clip.shotId,
             attempt: clip.attempt,
             status: "ready",
-            providerId: "google-veo",
+            providerId: job.provider === "grok-cli-video" ? "grok-cli-video" : "google-veo",
             providerMode: shot?.providerMode === "image_to_video" ? "image_to_video" : "text_to_video",
             previewUrl: clip.url,
             thumbnailGradient: "linear-gradient(160deg,#2A2824,#3A3833)",
@@ -606,7 +607,7 @@ export default function OberonPage() {
     [materializeKeyframeJob],
   );
 
-  // 04 실제 컷 이미지 생성 — Electron main이 Google Imagen 호출과 파일 저장을 담당한다.
+  // 04 실제 컷 이미지 생성 — Electron main이 선택된 Grok/Codex/Imagen 엔진과 파일 저장을 담당한다.
   const startKeyframes = useCallback(() => {
     if (!production) return;
     const bridge = ipc();
@@ -622,7 +623,12 @@ export default function OberonPage() {
       setKfGenerating(false);
       return;
     }
-    const keyframeProvider = model.imageProvider === "google-image" ? "google-imagen" : "codex-imagegen-cli";
+    const keyframeProvider =
+      model.imageProvider === "grok-cli-image"
+        ? "grok-cli-image"
+        : model.imageProvider === "google-image"
+          ? "google-imagen"
+          : "codex-imagegen-cli";
     const existingKeyframes = new Set((production.keyframeAssets ?? []).map((asset) => asset.shotId));
     const missingShots = production.shots.filter((shot) => !existingKeyframes.has(shot.shotId));
     const batchShots = (missingShots.length ? missingShots : production.shots).slice(0, LIVE_KEYFRAME_MAX_SHOTS);
@@ -641,7 +647,12 @@ export default function OberonPage() {
       })),
       maxShots: batchShots.length,
       provider: keyframeProvider,
-      model: keyframeProvider === "google-imagen" ? "imagen-4.0-generate-001" : "image_gen.imagegen",
+      model:
+        keyframeProvider === "grok-cli-image"
+          ? "grok-imagine-image"
+          : keyframeProvider === "google-imagen"
+            ? "imagen-4.0-generate-001"
+            : "image_gen.imagegen",
       imageSize: "1K",
     };
     setKfGenerating(true);
@@ -663,7 +674,7 @@ export default function OberonPage() {
       });
   }, [locale, model.imageProvider, pollKeyframeJob, production]);
 
-  // 05 실제 영상 렌더 — Electron main이 Google Veo 호출과 파일 저장을 담당한다.
+  // 05 실제 영상 렌더 — Electron main이 선택된 Grok Imagine/Veo 엔진과 파일 저장을 담당한다.
   const startVideo = useCallback(() => {
     if (!production) return;
     const bridge = ipc();

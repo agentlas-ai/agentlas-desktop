@@ -25,8 +25,7 @@ const cwd = arg("--cwd");
 const promptFile = arg("--prompt-file");
 const prompt = fs.readFileSync(promptFile, "utf8");
 const sessionId = arg("--session-id");
-const tools = arg("--tools");
-const kind = tools === "image_gen" ? "image" : "video";
+const kind = prompt.includes("Agentlas media job: generate the requested VIDEO") ? "video" : "image";
 fs.writeFileSync(path.join(cwd, "capture-" + kind + ".json"), JSON.stringify({
   args, promptFile, prompt, promptMode: fs.statSync(promptFile).mode & 0o777,
   hasUnrelatedSecret: Boolean(process.env.UNRELATED_PROVIDER_SECRET),
@@ -62,12 +61,12 @@ process.env.UNRELATED_PROVIDER_SECRET = "must-not-reach-child";
     const imageTarget = path.join(workDir, "result.jpg");
     assert.equal(await runGrokImagine({ prompt: "SAFE IMAGE", cwd: workDir, kind: "image", targetPath: imageTarget }), imageTarget);
     assert.equal(fs.existsSync(imageTarget), true);
-    assertContract("image", "image_gen", "SAFE IMAGE");
+    assertContract("image", "SAFE IMAGE");
 
     const videoTarget = path.join(workDir, "result.mp4");
     assert.equal(await runGrokImagine({ prompt: "SAFE VIDEO", cwd: workDir, kind: "video", targetPath: videoTarget }), videoTarget);
     assert.equal(fs.readFileSync(videoTarget).subarray(4, 8).toString("ascii"), "ftyp");
-    assertContract("video", "text_to_video,image_to_video", "SAFE VIDEO");
+    assertContract("video", "SAFE VIDEO");
 
     const corruptTarget = path.join(workDir, "corrupt.jpg");
     assert.equal(await runGrokImagine({ prompt: "CORRUPT", cwd: workDir, kind: "image", targetPath: corruptTarget }), null);
@@ -88,9 +87,9 @@ process.env.UNRELATED_PROVIDER_SECRET = "must-not-reach-child";
   (error) => { console.error(error); process.exit(1); },
 );
 
-function assertContract(kind, tools, prompt) {
+function assertContract(kind, prompt) {
   const row = JSON.parse(fs.readFileSync(path.join(workDir, `capture-${kind}.json`), "utf8"));
-  assert.equal(row.prompt, prompt);
+  assert.match(row.prompt, new RegExp(`${kind === "image" ? "IMAGE" : "VIDEO"}.*${prompt}`, "s"));
   assert.equal(row.promptMode, 0o600);
   assert.equal(row.args.includes("-p"), false);
   assert.equal(row.args.includes("--single"), false);
@@ -98,7 +97,13 @@ function assertContract(kind, tools, prompt) {
   assert.equal(row.args.includes("--always-approve"), true);
   assert.equal(row.args.includes("--no-memory"), true);
   assert.equal(row.args.includes("--no-subagents"), true);
-  assert.equal(row.args[row.args.indexOf("--tools") + 1], tools);
+  assert.equal(row.args.includes("--tools"), false, "broken Grok 0.2.93 tool allowlist must not be used");
+  assert.equal(row.args[row.args.indexOf("--sandbox") + 1], "strict");
+  assert.equal(row.args[row.args.indexOf("--disallowed-tools") + 1], "search_replace,web_search,web_fetch");
+  assert.equal(row.args.filter((value) => value === "--deny").length, 3);
+  assert.equal(row.args.includes("Bash"), true);
+  assert.equal(row.args.includes("Edit"), true);
+  assert.equal(row.args.includes("Write"), true);
   assert.equal(row.args.join(" ").includes(prompt), false, "prompt must stay out of argv");
   assert.equal(row.hasUnrelatedSecret, false, "unrelated secrets must not reach media child env");
   assert.equal(fs.existsSync(row.promptFile), false, "prompt file must be removed after execution");

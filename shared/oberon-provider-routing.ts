@@ -1,3 +1,5 @@
+import type { OberonRenderProvider } from "./types";
+
 export type OberonAnimateProviderId = "runway" | "luma" | "veo" | "seedance" | "kling" | "grok";
 
 export interface OberonVideoReadiness {
@@ -33,11 +35,14 @@ export function resolveOberonAnimateProvider(
 }
 
 export type OberonRenderProviderResolution =
-  | { ok: true; provider: "google-enterprise-veo"; model: string }
+  | { ok: true; provider: OberonRenderProvider; model: string }
   | { ok: false; selected: string };
 
 export function resolveOberonRenderProvider(selected: string | null | undefined): OberonRenderProviderResolution {
   const value = (selected || "google-veo").toLowerCase();
+  if (value.includes("grok") || value.includes("xai")) {
+    return { ok: true, provider: "grok-cli-video", model: "grok-imagine-video" };
+  }
   if (value.includes("veo") || value.includes("google") || value === "auto") {
     return { ok: true, provider: "google-enterprise-veo", model: "veo-3.1-lite-generate-001" };
   }
