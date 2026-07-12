@@ -2279,7 +2279,9 @@ function RuntimeAssignmentPanel({
         source: selectedRuntime.source,
         model: selectedModel || undefined,
         longContext: selectedRuntime.kind === "byok" ? selectedRuntime.longContextEnabled ?? false : undefined,
-        effort: selectedEffort || undefined,
+        // effort는 그 런타임이 실제 노출한 tier일 때만 저장 — claude의 "max"가 codex 오버라이드로
+        // 새어 codex를 exit 1 시키던 사고 차단(RuntimeControl.tsx와 동일한 kind 게이팅).
+        effort: effortOptions.some((option) => option.id === selectedEffort) ? selectedEffort : undefined,
       };
       await api.agentRuntime.set({
         scope: selectedTarget.scope,

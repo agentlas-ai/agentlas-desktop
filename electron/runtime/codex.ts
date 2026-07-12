@@ -357,7 +357,16 @@ export const runCodex: Runner = async (
   // `--model`/`-c`는 `exec`와 `exec resume` 둘 다 지원 확인됨(0.133+).
   const modelArgs: string[] = [];
   if (runReq.model) modelArgs.push("--model", runReq.model);
-  if (runReq.effort) modelArgs.push("-c", `model_reasoning_effort=${runReq.effort}`);
+  // codex는 none/minimal/low/medium/high/xhigh만 안다 — "max"(Claude/Opus 전용 tier)를
+  // 그대로 넘기면 codex가 models cache 파싱에서 `unknown variant max`로 exit 1 하며
+  // 자동화가 전멸한다(2026-07-12 사고: per-agent override에 남은 claude의 max가 codex
+  // 런에 새어들었다). codex 상한 xhigh로 clamp하고, 그 외 미지값은 아예 안 넘겨
+  // 기기의 ~/.codex 설정을 따른다(BYOM 존중).
+  if (runReq.effort) {
+    const CODEX_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+    const effort = runReq.effort === "max" ? "xhigh" : runReq.effort;
+    if (CODEX_EFFORTS.has(effort)) modelArgs.push("-c", `model_reasoning_effort=${effort}`);
+  }
 
   // 세션 resume 가능 여부 — chatId 저장 세션 또는 Build 같은 호출자가 직접 넘긴 세션 id.
   const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
