@@ -603,27 +603,44 @@ export function ChatInput({
     setTimeout(() => textareaRef.current?.focus(), 0);
   }
 
-  /** 추천을 실행 경로로 자동 디스패치. 라우터 에스컬레이션(routerAgent)은 항상 실어 보낸다. */
-  function execAutoChoice(preview: Recommendation, text: string, opts: SendOptions) {
+  /** 추천을 실행 경로로 자동 디스패치. 라우터 에스컬레이션(routerAgent)은 항상 실어 보낸다.
+   *  자동 개입(대시보드 토글, 기본 OFF)이 꺼져 있으면 Hub 자동 고용/스톰 파이프라인 대신
+   *  로컬 에이전트·plain 전송으로 강등한다 — 컴포저 칩/@멘션 같은 명시 실행은 이 함수와 무관. */
+  function execAutoChoice(
+    preview: Recommendation,
+    text: string,
+    opts: SendOptions,
+    engine?: { stormbreakerAuto: boolean; networkAuto: boolean } | null,
+  ) {
     const routerAgent = preview.routerAgent;
     if (preview.mode === "pipeline") {
-      onRecommendExecute?.({ kind: "pipeline", stages: preview.stages, routerAgent }, text, opts);
+      if (engine?.stormbreakerAuto === true) {
+        onRecommendExecute?.({ kind: "pipeline", stages: preview.stages, routerAgent }, text, opts);
+      } else {
+        // Stormbreaker 자동 OFF → 루프 개입 없이 일반 전송(에스컬레이션만 동봉).
+        onRecommendExecute?.({ kind: "plain", routerAgent }, text, opts);
+      }
       finishComposerAfterSend();
       return;
     }
+    const localTop = preview.agents.find((a) => a.source === "local");
     const top = preview.agents[0];
     if (!top) {
       onRecommendExecute?.({ kind: "plain", routerAgent }, text, opts);
       finishComposerAfterSend();
       return;
     }
-    const hubSlugs = preview.agents.filter((a) => a.source !== "local").map((a) => a.id);
+    const hubSlugs =
+      engine?.networkAuto === true ? preview.agents.filter((a) => a.source !== "local").map((a) => a.id) : [];
     if (hubSlugs.length > 0) {
       // 상황에 맞으면 여러 에이전트를 한 번에 고용(네트워크 TF).
       onRecommendExecute?.({ kind: "network", agents: hubSlugs, routerAgent }, text, opts);
+    } else if (localTop) {
+      expectAgentChangeWithoutReset(localTop.id);
+      onRecommendExecute?.({ kind: "agent", agentId: localTop.id, isFirm: localTop.isFirm, routerAgent }, text, opts);
     } else {
-      expectAgentChangeWithoutReset(top.id);
-      onRecommendExecute?.({ kind: "agent", agentId: top.id, isFirm: top.isFirm, routerAgent }, text, opts);
+      // Hub 후보뿐인데 자동 빌림 OFF → 고용 없이 원문 전송(에스컬레이션만 동봉).
+      onRecommendExecute?.({ kind: "plain", routerAgent }, text, opts);
     }
     finishComposerAfterSend();
   }
@@ -639,7 +656,11 @@ export function ChatInput({
     const opts = currentSendOptions();
     const chatIdAtStart = activeChatIdRef.current;
     setAutoRouting(true);
-    const preview = await onRecommendPreview(text).catch(() => null);
+    // 엔진 자동 개입 토글(대시보드, 기본 OFF) — Hub 자동 고용/스톰 파이프라인 디스패치를 게이트한다.
+    const [preview, engineToggles] = await Promise.all([
+      onRecommendPreview(text).catch(() => null),
+      ipc()?.hephaestus.getEngineToggles().catch(() => null) ?? Promise.resolve(null),
+    ]);
     setAutoRouting(false);
     // 그새 채팅이 바뀌었으면 이 세션에 콜하지 않는다(세션 격리).
     if (activeChatIdRef.current !== chatIdAtStart) return;
@@ -663,8 +684,9 @@ export function ChatInput({
       return;
     }
     // 4) 크레딧 게이트 — 허브 고용 비용이 잔액을 넘을 때만 페이월. 잔액 조회 실패 시 서버 과금이 최종 심판.
+    //    hep-network 자동 개입 OFF면 자동 고용 자체가 없으므로 페이월도 건너뛴다.
     const cost = preview.totalEstCredits ?? 0;
-    if (hubAgents.length > 0 && cost > 0) {
+    if (engineToggles?.networkAuto === true && hubAgents.length > 0 && cost > 0) {
       const balance = await ipc()?.billing.getCredits().catch(() => null);
       if (activeChatIdRef.current !== chatIdAtStart) return;
       const have = balance?.remainingCredits;
@@ -673,7 +695,7 @@ export function ChatInput({
         return;
       }
     }
-    execAutoChoice(preview, text, opts);
+    execAutoChoice(preview, text, opts, engineToggles);
   }
 
   /** 게이트 시트에서 "그냥/에이전트 없이 보내기" — 고용 없이 원문 전송. */

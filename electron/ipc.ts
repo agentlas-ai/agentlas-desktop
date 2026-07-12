@@ -119,7 +119,7 @@ import {
 } from "./hephaestus/commands";
 import { normalizeRecommendation } from "./hephaestus/recommendation";
 import { confirmUpload, PathGuardError, resolveFolderArg } from "./hephaestus/path-guard";
-import { isSupervisorEnabled, setSupervisorEnabled } from "./hephaestus/supervisor";
+import { getEngineToggles, isSupervisorEnabled, setEngineToggle, setSupervisorEnabled } from "./hephaestus/supervisor";
 import { runHephaestusBuild } from "./hephaestus/builder";
 import { resolveHephaestusBuildRequest } from "./hephaestus/build-access";
 import { pickLocale } from "./runtime/status-i18n";
@@ -2284,6 +2284,11 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle("hephaestus:getSupervisor", () => ({ enabled: isSupervisorEnabled() }));
   ipcMain.handle("hephaestus:setSupervisor", (_e, enabled: boolean) => setSupervisorEnabled(enabled));
+  // 엔진 자동 개입 토글(Stormbreaker 자동 / hep-network 자동) — 대시보드 스위치. 기본 둘 다 OFF.
+  ipcMain.handle("hephaestus:getEngineToggles", () => getEngineToggles());
+  ipcMain.handle("hephaestus:setEngineToggle", (_e, input: { id: "stormbreaker" | "network"; enabled: boolean }) =>
+    setEngineToggle(input.id, input.enabled),
+  );
   ipcMain.handle(
     "hephaestus:journal",
     (_e, input: { action: "status" | "verify" | "repair" | "gate"; runId?: string; project?: string }) =>

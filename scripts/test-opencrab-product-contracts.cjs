@@ -27,6 +27,12 @@ assert.match(mcpConfig, /scrubLegacyOpenCrabMcpConfig/);
 assert.match(mcpConfig, /overwriteAndRemovePrivateFile/);
 assert.match(mcpConfig, /s\.catalogId === OPENCRAB_CATALOG_ID/);
 assert.match(mcpConfig, /isOpenCrabCredentialUrl\(s\.url\)/);
+// vault:// sentinel URL은 keychain에서 해석해 불투명 alias 참조로만 직렬화하고,
+// Codex(argv 노출)에는 절대 싣지 않는다.
+assert.match(mcpConfig, /vaultUrlKey\(s\.url\)/);
+assert.match(mcpConfig, /!isVaultBackedRemoteUrl\(s\.url\) && isOpenCrabCredentialUrl\(s\.url\)/);
+assert.match(mcpConfig, /if \(vaultKey\) codexRemoteSupported = false;/);
+assert.match(mcpConfig, /serializedUrl = envReference\(alias\)/);
 assert.match(mcpConfig, /agentlas-mcp\\\.json\\\.\\d\+/);
 assert.match(mcpClient, /openCrabNoRedirectFetch/);
 assert.match(mcpClient, /redirect: "error"/);

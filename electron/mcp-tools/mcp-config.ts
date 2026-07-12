@@ -18,6 +18,8 @@ import {
   OPENCRAB_CATALOG_ID,
   isOpenCrabCredentialUrl,
   isVaultBackedRemoteUrl,
+  validateOpenCrabMcpUrl,
+  vaultUrlKey,
 } from "../opencrab/constants";
 import type { InstalledMcpServer } from "../../shared/types";
 
@@ -113,6 +115,22 @@ function secretAlias(serverKey: string, envKey: string): string {
 
 function envReference(alias: string): string {
   return `\${${alias}}`;
+}
+
+/**
+ * vault URL sentinel이 가리키는 실제 원격 URL. OpenCrab은 전용 검증기를 통과해야
+ * 하고, 그 외 vault URL은 https 원본만 허용한다. 검증 실패는 null(fail closed).
+ */
+function resolveVaultRemoteUrl(s: InstalledMcpServer, rawUrl: string): string | null {
+  try {
+    if (s.catalogId === OPENCRAB_CATALOG_ID || isOpenCrabCredentialUrl(rawUrl)) {
+      return validateOpenCrabMcpUrl(rawUrl).toString();
+    }
+    const url = new URL(rawUrl);
+    return url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 const CODEX_SECRET_WRAPPER = `"use strict";
@@ -274,13 +292,10 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const scopedCatalogIds = opts?.catalogIds ? new Set(opts.catalogIds.filter(Boolean)) : null;
   const servers = listInstalledServers().filter((s) => {
     if (!s.enabled) return false;
-    // URL 경로 자체가 credential인 서버는 Desktop main process 전용이다. Claude/Codex
-    // 설정 파일이나 -c argv로 내보내면 Keychain 경계를 우회하게 되므로 항상 제외한다.
-    if (
-      s.catalogId === OPENCRAB_CATALOG_ID ||
-      isVaultBackedRemoteUrl(s.url) ||
-      isOpenCrabCredentialUrl(s.url)
-    ) return false;
+    // 평문 credential URL(레거시 행)은 어떤 런타임 설정에도 싣지 않는다. vault://
+    // sentinel 서버는 아래 직렬화에서 실제 URL을 keychain에서 읽어 불투명 alias
+    // 참조(`${ALIAS}`)로만 기록하므로 Keychain 경계를 지킨 채 세션에 노출된다.
+    if (!isVaultBackedRemoteUrl(s.url) && isOpenCrabCredentialUrl(s.url)) return false;
     if (!scopedCatalogIds) return true;
     return Boolean((s.catalogId && scopedCatalogIds.has(s.catalogId)) || scopedCatalogIds.has(s.id));
   });
@@ -345,10 +360,26 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       // Claude Code는 HTTP/SSE, 현재 Codex CLI는 Streamable HTTP URL을
       // 네이티브로 지원한다. Codex 0.144.1의 `codex mcp add --help` 계약에
       // 맞춰 legacy SSE와 임의 헤더 인증은 Claude-only로 둔다.
+      // vault:// sentinel은 URL 전체가 credential이다. 실제 값은 keychain에서 읽어
+      // runtimeEnv의 불투명 alias로만 옮기고, 설정 파일에는 `${ALIAS}` 참조를 쓴다.
+      // Claude Code가 시작 시 자기 프로세스 env로 참조를 보간하므로 stdio vault
+      // secret과 동일하게 파일/argv에는 값이 남지 않는다.
+      const vaultKey = vaultUrlKey(s.url);
+      let serializedUrl = s.url;
+      if (vaultKey) {
+        const rawUrl = (await readEnvVar(vaultKey))?.trim();
+        const resolvedUrl = rawUrl ? resolveVaultRemoteUrl(s, rawUrl) : null;
+        if (!resolvedUrl) continue; // vault 값이 없거나 검증 실패면 서버를 싣지 않는다
+        const alias = secretAlias(key, vaultKey);
+        runtimeEnv[alias] = resolvedUrl;
+        serializedUrl = envReference(alias);
+      }
       const headers: Record<string, string> = {};
       let codexBearerAlias: string | null = null;
-      let codexRemoteSupported = s.transport === "http" && s.envKeys.length === 0;
-      for (const rawHeader of s.envKeys) {
+      // URL 자체의 vault 키는 헤더 자격증명이 아니므로 헤더 직렬화에서 제외한다.
+      const headerKeys = s.envKeys.filter((headerKey) => headerKey !== vaultKey);
+      let codexRemoteSupported = s.transport === "http" && headerKeys.length === 0;
+      for (const rawHeader of headerKeys) {
         const header = validateEnvKey(rawHeader);
         const value = await readEnvVar(header);
         if (!value) {
@@ -362,7 +393,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         if (bearer) {
           runtimeEnv[alias] = bearer[1];
           headers[header] = `Bearer ${envReference(alias)}`;
-          if (s.transport === "http" && s.envKeys.length === 1) {
+          if (s.transport === "http" && headerKeys.length === 1) {
             codexBearerAlias = alias;
             codexRemoteSupported = true;
           }
@@ -374,7 +405,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           // auth schemes remain Claude-only instead of starting broken.
           if (
             s.transport === "http" &&
-            s.envKeys.length === 1 &&
+            headerKeys.length === 1 &&
             header.toLowerCase() === "authorization" &&
             !/\s/.test(value)
           ) {
@@ -385,9 +416,12 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           }
         }
       }
+      // URL이 시크릿인 서버는 Claude-only로 남긴다: Codex는 `${VAR}` URL 보간이
+      // 없고, -c argv에 실제 URL을 실으면 프로세스 목록으로 노출되기 때문이다.
+      if (vaultKey) codexRemoteSupported = false;
       mcpServers[key] = {
         type: s.transport === "sse" ? "sse" : "http",
-        url: s.url,
+        url: serializedUrl,
         ...(Object.keys(headers).length ? { headers } : {}),
       };
       if (codexRemoteSupported) {

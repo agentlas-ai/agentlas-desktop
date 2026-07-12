@@ -6,6 +6,7 @@ import path from "node:path";
 import { detectRuntimes } from "../runtime/detect";
 // Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
 import { superviseStormbreaker, type StormbreakerHandle } from "../hephaestus/stormbreaker-supervisor";
+import { isNetworkAutoEnabled, isStormbreakerAutoEnabled } from "../hephaestus/supervisor";
 import { careerGraphIngest, hepCall, routeOnly } from "../hephaestus/commands";
 import { normalizeRecommendation } from "../hephaestus/recommendation";
 import {
@@ -795,6 +796,7 @@ export async function runMcpInvocation(
   let routerAgent = req.routerAgent;
   if (
     !routerAgent &&
+    isNetworkAutoEnabled() && // hep-network 자동 개입 — 대시보드 토글(기본 OFF)일 때만 자동 에스컬레이션
     isGlobalOrchestrator(agent) &&
     !hasPriorContext &&
     isEscalationWorthyPrompt(req.userPrompt)
@@ -1190,8 +1192,16 @@ export async function runMcpInvocation(
           : `Automation Supervisor applied: ${supervisor.loadedModuleIds.join(", ") || "core"}`,
     });
   }
-  // Stormbreaker Loop — 일반 채팅과 백그라운드 자동화 모두 같은 목표 분해/연속 실행 계약을 공유한다.
-  systemPrompt = `${systemPrompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`;
+  // Stormbreaker Loop — 이제 무조건 주입이 아니라 명시적 개입 조건에서만 켠다(대시보드 토글 기본 OFF).
+  // 항상 켜지는 경로: division(백그라운드 자동화 인프라), continuousMode(계속 라이브), 명시 프리픽스
+  // (`stormbreaker …` / `hep-network --stormbreaker …` = 컴포저 칩·추천 pipeline 선택).
+  const explicitStormbreakerRequest = /^\s*(?:hep-network\s+--stormbreaker|stormbreaker)\b/i.test(req.userPrompt);
+  const stormbreakerEngaged =
+    chat.kind === "division" ||
+    chat.continuousMode === true ||
+    explicitStormbreakerRequest ||
+    isStormbreakerAutoEnabled();
+  if (stormbreakerEngaged) systemPrompt = `${systemPrompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`;
   // 사용자 채팅에서만 자동화 생성 protocol 주입 (백그라운드 automation 실행 세션은 제외 → 재귀 방지)
   if (chat.kind !== "division") systemPrompt = `${systemPrompt}\n\n${AUTOMATION_PROTOCOL}`;
 
@@ -1209,7 +1219,7 @@ export async function runMcpInvocation(
   // Stormbreaker 슈퍼바이저 — 활성·가용하면 이 실행을 scope→route→gate 로 감독한다(비차단).
   // division(백그라운드 firm 하위) 세션은 제외(재귀/노이즈 방지). 실패/부재 시 null → no-op.
   let stormbreaker: StormbreakerHandle | null = null;
-  if (chat.kind !== "division") {
+  if (chat.kind !== "division" && stormbreakerEngaged) {
     stormbreaker = superviseStormbreaker({
       query: req.userPrompt,
       cwd: resolvedResultFolder,

@@ -167,19 +167,36 @@ const SECRET_ENDPOINT = `https://mcp.opencrab.sh/mcp/${SECRET_TOKEN}`;
       args: ["-e", "process.exit(0)"],
     });
     const cfg = await buildMcpConfigFile({ catalogIds: [installed.id, "opencrab", safeServer.id] });
-    assert.ok(cfg, "non-OpenCrab MCP should still produce a runtime config");
+    assert.ok(cfg, "OpenCrab + non-OpenCrab selection should produce a runtime config");
     const configText = fs.readFileSync(cfg.configPath, "utf8");
-    const allRuntimeMaterial = JSON.stringify({
+    // 파일/argv/allowedTools에는 credential이 절대 없어야 한다. 실제 URL은 stdio
+    // vault secret과 동일하게 runtimeEnv의 불투명 alias로만 이동한다.
+    const fileAndArgvMaterial = JSON.stringify({
       configText,
       codexConfigArgs: cfg.codexConfigArgs,
-      runtimeEnv: cfg.runtimeEnv,
       allowedTools: cfg.allowedTools,
     });
-    assert.doesNotMatch(allRuntimeMaterial, new RegExp(SECRET_TOKEN));
-    assert.doesNotMatch(allRuntimeMaterial, /mcp\.opencrab\.sh/);
-    assert.doesNotMatch(allRuntimeMaterial, /vault:\/\/OPENCRAB_MCP_URL/);
-    assert.equal(JSON.parse(configText).mcpServers.opencrab, undefined, "OpenCrab stays Desktop-internal");
-    assert.ok(!cfg.allowedTools.some((tool) => tool.includes("opencrab")));
+    assert.doesNotMatch(fileAndArgvMaterial, new RegExp(SECRET_TOKEN));
+    assert.doesNotMatch(fileAndArgvMaterial, /mcp\.opencrab\.sh/);
+    assert.doesNotMatch(fileAndArgvMaterial, /vault:\/\/OPENCRAB_MCP_URL/);
+    const openCrabEntry = JSON.parse(configText).mcpServers.opencrab;
+    assert.ok(openCrabEntry, "vault-backed OpenCrab must reach Claude sessions via an alias reference");
+    assert.equal(openCrabEntry.type, "http");
+    assert.match(openCrabEntry.url, /^\$\{AGENTLAS_MCP_SECRET_[A-F0-9]{32}\}$/);
+    assert.equal(openCrabEntry.headers, undefined, "the URL vault key must not leak into headers");
+    const openCrabAlias = openCrabEntry.url.slice(2, -1);
+    assert.equal(
+      cfg.runtimeEnv[openCrabAlias],
+      SECRET_ENDPOINT,
+      "the real URL travels only through the opaque runtime alias",
+    );
+    assert.equal(cfg.runtimeEnv[OPENCRAB_MCP_URL_KEY], undefined, "original vault key name must not be exported");
+    assert.equal(
+      cfg.codexConfigArgs.some((value) => String(value).includes("mcp_servers.opencrab.")),
+      false,
+      "secret-URL servers stay Claude-only; Codex argv would leak the URL",
+    );
+    assert.ok(cfg.allowedTools.includes("mcp__opencrab"), "OpenCrab tools are auto-allowed like other MCPs");
 
     assert.equal(validateOpenCrabMcpUrl(SECRET_ENDPOINT).hostname, "mcp.opencrab.sh");
     const invalidEndpoints = [

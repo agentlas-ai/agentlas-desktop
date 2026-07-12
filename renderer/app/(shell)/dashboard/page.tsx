@@ -9,6 +9,7 @@ import { OrgTree } from "@/components/dashboard/OrgTree";
 import { FleetSummaryStrip } from "@/components/dashboard/FleetSummaryStrip";
 import { HubBorrowRoom } from "@/components/dashboard/HubBorrowRoom";
 import { EngineUsage } from "@/components/EngineUsage";
+import { EngineAutoToggles } from "@/components/dashboard/EngineAutoToggles";
 import { RuntimeControl } from "@/components/dashboard/RuntimeControl";
 import { RuntimeReadiness } from "@/components/dashboard/RuntimeReadiness";
 import { ConfirmRequests } from "@/components/dashboard/ConfirmRequests";
@@ -33,6 +34,8 @@ export default function DashboardPage() {
             <div className="dashboard-panel dashboard-engine-panel" data-tour-id="dashboard.llm">
               <RuntimeControl />
               <EngineUsage />
+              {/* LLM 연결·사용량 바로 아래 — Stormbreaker/hep-network 자동 개입 명시적 on/off */}
+              <EngineAutoToggles />
             </div>
             {/* 퀘스트 보드가 왼쪽 위 — 조직도는 그 아래로 살짝 내려간다. */}
             <div className="dashboard-org-column" data-tour-id="dashboard.org" style={{ display: "grid", gap: 14 }}>

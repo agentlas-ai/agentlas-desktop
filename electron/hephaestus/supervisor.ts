@@ -9,10 +9,19 @@ import { app } from "electron";
 
 interface HephaestusSettings {
   supervisorEnabled: boolean;
+  /** Stormbreaker 자동 개입(일반 채팅에 루프 프로토콜 자동 주입). 기본 OFF —
+   *  2026-07-12 실측: 단순 실작업에서 직접 실행 30s 완료 vs 스톰 라우트 6s 후 실행 0(hub_candidates 데드엔드).
+   *  명시 실행(컴포저 Stormbreaker 칩, `stormbreaker` 프리픽스, continuousMode, division 자동화)은 항상 동작. */
+  stormbreakerAuto: boolean;
+  /** hep-network 자동 개입(자동 Hub 빌림·라우터 에스컬레이션). 기본 OFF —
+   *  명시 경로(@멘션 고용, 추천 시트에서 직접 선택, hep-network 프리픽스, 자동화 hubMode)는 항상 동작. */
+  networkAuto: boolean;
 }
 
 const DEFAULTS: HephaestusSettings = {
   supervisorEnabled: true,
+  stormbreakerAuto: false,
+  networkAuto: false,
 };
 
 let cache: HephaestusSettings | null = null;
@@ -50,4 +59,31 @@ export function isSupervisorEnabled(): boolean {
 export function setSupervisorEnabled(enabled: boolean): { enabled: boolean } {
   persist({ ...load(), supervisorEnabled: enabled });
   return { enabled };
+}
+
+export interface EngineAutoToggles {
+  stormbreakerAuto: boolean;
+  networkAuto: boolean;
+}
+
+/** 엔진 자동 개입 토글(대시보드 LLM 연결·사용량 아래 스위치 2개). 기본 둘 다 OFF. */
+export function getEngineToggles(): EngineAutoToggles {
+  const s = load();
+  return { stormbreakerAuto: s.stormbreakerAuto === true, networkAuto: s.networkAuto === true };
+}
+
+export function isStormbreakerAutoEnabled(): boolean {
+  return load().stormbreakerAuto === true;
+}
+
+export function isNetworkAutoEnabled(): boolean {
+  return load().networkAuto === true;
+}
+
+export function setEngineToggle(id: "stormbreaker" | "network", enabled: boolean): EngineAutoToggles {
+  const s = load();
+  persist(
+    id === "stormbreaker" ? { ...s, stormbreakerAuto: enabled } : { ...s, networkAuto: enabled },
+  );
+  return getEngineToggles();
 }

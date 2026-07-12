@@ -757,6 +757,11 @@ function setupMockAgentlasBridge(options) {
       stormbreaker: async () => ({ ok: true, runId: "storm-run" }),
       getSupervisor: async () => ({ enabled: true }),
       setSupervisor: async () => ({ enabled: true }),
+      getEngineToggles: async () => ({ stormbreakerAuto: false, networkAuto: false }),
+      setEngineToggle: async (payload) => {
+        record("hephaestus.setEngineToggle", payload);
+        return { stormbreakerAuto: false, networkAuto: false };
+      },
       journal: async () => ({ ok: true, entries: [] }),
       startStudio: async () => ({ ok: true }),
       aoGraph: async () => ({ ok: true, json: {} }),
