@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1 — 2026-07-12
+
+### Fixed
+
+- **Grok Imagine is visible again in multimodal settings.** The image and
+  video choices reuse the existing official Grok CLI/OAuth media boundary and
+  remain explicit selections, so the automatic provider order is unchanged.
+- **The catalog regression is release-gated.** OAuth readiness, provider
+  round-tripping, and the built Settings UI now verify both Grok entries.
+
 ## 0.7.46 — 2026-07-12
 
 ### Fixed

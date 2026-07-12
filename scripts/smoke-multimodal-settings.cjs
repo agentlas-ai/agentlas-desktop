@@ -24,6 +24,16 @@ function main() {
     "RUNWAY_API_KEY",
   ]);
 
+  const grokSettings = multimodal.normalizeMultimodalSettings({
+    imageProvider: "grok-cli-image",
+    videoProvider: "grok-cli-video",
+    audioProvider: "openai-audio",
+  });
+  assert.equal(grokSettings.imageProvider, "grok-cli-image");
+  assert.equal(grokSettings.videoProvider, "grok-cli-video");
+  assert.equal(multimodal.getMultimodalProvider("grok-cli-image")?.modality, "image");
+  assert.equal(multimodal.getMultimodalProvider("grok-cli-video")?.modality, "video");
+
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-multimodal-smoke-"));
   try {
     fs.writeFileSync(

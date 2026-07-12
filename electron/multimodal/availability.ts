@@ -33,6 +33,28 @@ const CLI_BINS: Record<string, { name: string; extra: string[] }> = {
       "/usr/local/bin/agy",
     ],
   },
+  "grok-cli-image": {
+    name: "grok",
+    extra: [
+      ...(process.env.AGENTLAS_GROK_BIN?.trim() ? [process.env.AGENTLAS_GROK_BIN.trim()] : []),
+      path.join(os.homedir(), ".grok/bin/grok"),
+      path.join(os.homedir(), ".local/bin/grok"),
+      path.join(os.homedir(), ".bun/bin/grok"),
+      "/opt/homebrew/bin/grok",
+      "/usr/local/bin/grok",
+    ],
+  },
+  "grok-cli-video": {
+    name: "grok",
+    extra: [
+      ...(process.env.AGENTLAS_GROK_BIN?.trim() ? [process.env.AGENTLAS_GROK_BIN.trim()] : []),
+      path.join(os.homedir(), ".grok/bin/grok"),
+      path.join(os.homedir(), ".local/bin/grok"),
+      path.join(os.homedir(), ".bun/bin/grok"),
+      "/opt/homebrew/bin/grok",
+      "/usr/local/bin/grok",
+    ],
+  },
 };
 
 function resolveBin(name: string, extra: string[]): string | null {
@@ -107,6 +129,11 @@ export async function isProviderReady(provider: MultimodalProvider): Promise<boo
   const cli = CLI_BINS[provider.id];
   if (cli) {
     if (!resolveBin(cli.name, cli.extra)) return false;
+    if (provider.id === "grok-cli-image" || provider.id === "grok-cli-video") {
+      // These catalog rows promise subscription-backed execution. An API key
+      // must not silently turn that promise into metered API billing.
+      return (await grokAuthSource()) === "oauth";
+    }
     return true;
   }
   // 나노바나나는 agy 키리스가 우선이지만 GEMINI_API_KEY 폴백도 허용(trex와 동일).

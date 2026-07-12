@@ -10,6 +10,21 @@ const root = path.resolve(__dirname, "..");
 const distDir = path.join(root, "dist", "renderer");
 const outDir = path.join(root, "output", "playwright", "settings-resilience");
 
+function loadMultimodalCatalog() {
+  const ts = require("typescript");
+  const sourcePath = path.join(root, "shared", "multimodal.ts");
+  const source = fs.readFileSync(sourcePath, "utf8");
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+    fileName: "multimodal.ts",
+  });
+  const mod = { exports: {} };
+  new Function("module", "exports", "require", outputText)(mod, mod.exports, require);
+  return mod.exports.MULTIMODAL_PROVIDERS;
+}
+
+const MULTIMODAL_PROVIDERS = loadMultimodalCatalog();
+
 function resolveAsset(rawUrl) {
   let pathname = decodeURIComponent((rawUrl || "/").split("?")[0]);
   const nestedNext = pathname.match(/^\/.+\/(_next\/.+)$/);
@@ -149,7 +164,7 @@ function installSettingsFixture(payload) {
     return backend === "openai";
   };
   window.agentlas.config.getCustomBaseUrl = async () => "https://qa.example/v1";
-  window.agentlas.multimodal.listProviders = async () => [provider];
+  window.agentlas.multimodal.listProviders = async () => [provider, ...payload.catalogProviders];
   window.agentlas.multimodal.getSettings = async () => ({
     imageProvider: provider.id,
     videoProvider: "auto",
@@ -176,6 +191,7 @@ async function main() {
     await context.addInitScript(installSettingsFixture, {
       setupSource: setupMockAgentlasBridge.toString(),
       baseOptions: mockBridgeOptions(),
+      catalogProviders: MULTIMODAL_PROVIDERS,
     });
     const page = await context.newPage();
     page.setDefaultTimeout(10_000);
@@ -191,6 +207,8 @@ async function main() {
     // multimodal.status 실패와 무관하게 다른 도메인의 실제 결과가 화면에 정착해야 한다.
     await page.getByText("Ollama v8.8.8", { exact: false }).waitFor();
     await page.getByText("QA 이미지 프로바이더", { exact: true }).waitFor();
+    await page.getByText("Grok CLI 이미지 (Imagine)", { exact: true }).waitFor();
+    await page.getByText("Grok CLI 영상 (Imagine)", { exact: true }).waitFor();
     await page.getByText("버전 및 업데이트", { exact: true }).waitFor();
     await page.getByText("v9.9.9", { exact: true }).waitFor();
     assert.equal(await page.getByText("저장됨", { exact: true }).count(), 1, "OpenAI key state must survive the multimodal failure");

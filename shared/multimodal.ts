@@ -75,6 +75,20 @@ export const MULTIMODAL_PROVIDERS: MultimodalProvider[] = [
     summaryKo: "로그인된 Antigravity CLI(agy)로 키 없이 Gemini 이미지(나노바나나)를 생성합니다. API 키 불필요.",
   },
   {
+    id: "grok-cli-image",
+    modality: "image",
+    label: "Grok CLI image (Imagine)",
+    labelKo: "Grok CLI 이미지 (Imagine)",
+    mode: "cli-subscription",
+    defaultModel: "grok-imagine-image",
+    envKeys: [],
+    setupUrl: "https://x.ai/cli",
+    docsUrl: "https://x.ai/cli",
+    billing: "subscription",
+    summary: "Grok Imagine image generation through the logged-in official xAI Grok CLI. No API key needed.",
+    summaryKo: "로그인된 공식 xAI Grok CLI로 Grok Imagine 이미지를 생성합니다. API 키가 필요 없습니다.",
+  },
+  {
     id: "openai-image",
     modality: "image",
     label: "OpenAI Images API",
@@ -129,6 +143,20 @@ export const MULTIMODAL_PROVIDERS: MultimodalProvider[] = [
     billing: "provider-billing",
     summary: "Adobe Firefly Services for brand-safe image workflows when credentials are available.",
     summaryKo: "Adobe Firefly Services 자격 증명이 있을 때 브랜드 안전 이미지 워크플로에 사용합니다.",
+  },
+  {
+    id: "grok-cli-video",
+    modality: "video",
+    label: "Grok CLI video (Imagine)",
+    labelKo: "Grok CLI 영상 (Imagine)",
+    mode: "cli-subscription",
+    defaultModel: "grok-imagine-video",
+    envKeys: [],
+    setupUrl: "https://x.ai/cli",
+    docsUrl: "https://x.ai/cli",
+    billing: "subscription",
+    summary: "Grok Imagine video generation through the logged-in official xAI Grok CLI. A supported Grok subscription is required.",
+    summaryKo: "로그인된 공식 xAI Grok CLI로 Grok Imagine 영상을 생성합니다. 지원되는 Grok 구독이 필요합니다.",
   },
   {
     id: "runway-video",
@@ -285,6 +313,8 @@ export const DEFAULT_MULTIMODAL_SETTINGS: MultimodalSettings = {
  * 런타임 가용성(bin/키 존재)은 electron 쪽 resolveActiveProvider가 이 순서대로 검사한다.
  */
 export const PROVIDER_LADDERS: Record<MultimodalModality, string[]> = {
+  // Grok Imagine is shown as an explicit Settings choice. Keep it out of auto
+  // until the account's media entitlement can be proven without generating media.
   image: [
     "codex-cli-image",
     "nanobanana-image",

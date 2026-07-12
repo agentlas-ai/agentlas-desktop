@@ -10,9 +10,17 @@ assert.deepEqual(resolveOberonAnimateProvider("auto", { grok: true }), { provide
 assert.deepEqual(resolveOberonRenderProvider("grok-cli-video"), { ok: false, selected: "grok-cli-video" });
 assert.deepEqual(resolveOberonRenderProvider("google-veo"), { ok: true, provider: "google-enterprise-veo", model: "veo-3.1-lite-generate-001" });
 assert.deepEqual(resolveOberonRenderProvider("runway-video"), { ok: false, selected: "runway-video" });
-assert.equal(getMultimodalProvider("grok-cli-image"), null);
-assert.equal(getMultimodalProvider("grok-cli-video"), null);
-assert.equal(providerLadder("image").some((provider) => provider.id.startsWith("grok-cli")), false);
-assert.equal(providerLadder("video").some((provider) => provider.id.startsWith("grok-cli")), false);
+assert.equal(getMultimodalProvider("grok-cli-image")?.modality, "image");
+assert.equal(getMultimodalProvider("grok-cli-video")?.modality, "video");
+assert.equal(
+  providerLadder("image").some((provider) => provider.id.startsWith("grok-cli")),
+  false,
+  "Grok remains an explicit choice until entitlement can be probed without media generation",
+);
+assert.equal(
+  providerLadder("video").some((provider) => provider.id.startsWith("grok-cli")),
+  false,
+  "Grok remains an explicit choice until entitlement can be probed without media generation",
+);
 
-console.log("Oberon provider routing and Grok media fail-closed contract passed");
+console.log("Oberon provider routing and explicit-only Grok catalog contract passed");
