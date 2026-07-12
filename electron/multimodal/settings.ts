@@ -9,7 +9,7 @@ import {
 } from "../../shared/multimodal";
 import { hasEnvVar } from "../secrets/vault";
 import { getMeta, setMeta } from "../store/meta";
-import { resolveActiveProvider } from "./availability";
+import { isProviderReady, resolveActiveProvider } from "./availability";
 
 const META_KEY = "multimodal_settings";
 
@@ -41,20 +41,23 @@ export function saveMultimodalSettings(input: Partial<MultimodalSettings>): Mult
 export async function getMultimodalStatus(): Promise<MultimodalProviderStatus[]> {
   const settings = getMultimodalSettings();
   const modalities: MultimodalModality[] = ["image", "video", "audio"];
-  const out: MultimodalProviderStatus[] = [];
+  const autoResolved = new Map<MultimodalModality, string>();
   for (const modality of modalities) {
-    // auto면 실제 가용성 기준으로 확정된 엔진을 status로 보여준다("자동 → codex(준비됨)").
     const resolved = await resolveActiveProvider(modality, settings);
-    if (!resolved.provider) continue;
+    if (resolved.via === "auto" && resolved.provider) autoResolved.set(modality, resolved.provider.id);
+  }
+
+  const out: MultimodalProviderStatus[] = [];
+  for (const provider of MULTIMODAL_PROVIDERS) {
     const env = await Promise.all(
-      resolved.provider.envKeys.map(async (key) => ({ key, hasValue: await hasEnvVar(key) })),
+      provider.envKeys.map(async (key) => ({ key, hasValue: await hasEnvVar(key) })),
     );
     out.push({
-      modality,
-      provider: resolved.provider,
+      modality: provider.modality,
+      provider,
       env,
-      ready: resolved.ready,
-      auto: resolved.via === "auto",
+      ready: await isProviderReady(provider),
+      auto: autoResolved.get(provider.modality) === provider.id,
     });
   }
   return out;

@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -94,6 +94,7 @@
     "test:grok-runtime-contract": "npm run build:electron && electron scripts/test-grok-runtime-contract.cjs",
     "test:grok-auth-source": "npm run build:electron && electron scripts/test-grok-auth-source.cjs",
     "test:oberon-provider-routing": "npm run build:electron && node scripts/test-oberon-provider-routing.cjs",
+    "test:multimodal-status": "npm run build:electron && electron scripts/test-multimodal-status-catalog.cjs",
     "test:build-session-resilience": "node scripts/test-build-session-resilience.cjs",
     "test:build-path-authority": "npm run build:electron && electron scripts/test-build-path-authority.cjs",
     "test:build-scan-gate": "node scripts/test-build-scan-gate.cjs",

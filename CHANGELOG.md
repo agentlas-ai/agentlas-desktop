@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.5 — 2026-07-12
+
+### Fixed
+
+- **Oberon shows the real connection state for every image and video engine.**
+  The main-process status API now probes the full provider catalog instead of
+  returning only the three globally selected providers, so an OAuth-ready Grok
+  image/video stack is labeled connected rather than login required.
+
 ## 0.8.4 — 2026-07-12
 
 ### Fixed
