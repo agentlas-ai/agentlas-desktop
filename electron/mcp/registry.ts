@@ -1,6 +1,7 @@
 // 설치된 에이전트 레지스트리 — SQLite-backed. 다국어 + envRequirements 지원.
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
+import { emitDesktopStoreChange } from "../store/change-bus";
 import { getSource as getMarketSource, getCargoSource } from "../marketplace";
 import { agentFolderPath, materializeAgentFiles } from "../agents/files";
 import { getRoute, removeRoute, type AgentRoute, type RuntimeLabel } from "../agents/routes";
@@ -337,7 +338,9 @@ function persistListing(
   // External-tool discovery is intentionally post-commit and best-effort. A
   // catalog registration can neither split nor veto the package transaction.
   autoRegisterAgentTools(listing);
-  return toAgent(expectedRow);
+  const agent = toAgent(expectedRow);
+  emitDesktopStoreChange({ entity: "agent", id });
+  return agent;
 }
 
 function detectCloudRuntimeLabels(paths: string[]): RuntimeLabel[] {
@@ -374,12 +377,16 @@ export function uninstallAgent(id: string): void {
 
   const deleted = db.prepare("DELETE FROM installed_agents WHERE id = ?").run(id).changes > 0;
   // 로컬 임포트 라우팅도 정리 (원본 폴더는 건드리지 않음).
-  if (deleted) removeRoute(id);
+  if (deleted) {
+    removeRoute(id);
+    emitDesktopStoreChange({ entity: "agent", id });
+  }
 }
 
 /** 팀/싱글 종류 자가교정 — 리졸버(LLM)가 재판정한 kind를 영속화. */
 export function setAgentEntityKind(id: string, kind: "agent" | "team"): void {
-  getDb().prepare("UPDATE installed_agents SET entity_kind = ? WHERE id = ?").run(kind, id);
+  const result = getDb().prepare("UPDATE installed_agents SET entity_kind = ? WHERE id = ?").run(kind, id);
+  if (result.changes > 0) emitDesktopStoreChange({ entity: "agent", id });
 }
 
 // chat history는 electron/store/chats.ts로 이동했음 (chat_id FK 기반)

@@ -2598,6 +2598,8 @@ export interface UsageSnapshot {
  *  마지막 메시지가 미답변 질문 fence(<<agentlas-ask>>)인 채팅에서 도출. */
 export interface PendingConfirmation {
   chatId: string;
+  /** Exact current assistant message that owns this question. */
+  sourceMessageId: string;
   chatTitle: string;
   /** 에이전트가 던진 질문 본문 */
   question: string;
@@ -3545,6 +3547,7 @@ export interface AgentlasIpc {
     status: () => Promise<MobileBridgeRuntimeStatus>;
     issuePairing: () => Promise<MobileBridgePairingPayload>;
     listDevices: () => Promise<MobileBridgeDeviceSummary[]>;
+    retry: () => Promise<MobileBridgeRuntimeStatus>;
     revokeDevice: (deviceId: string) => Promise<{ ok: boolean }>;
   };
   /** T-rex 슬라이드 스튜디오 — 키리스 CLI 이미지 생성(codex image_gen / gemini). */

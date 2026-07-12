@@ -30,6 +30,7 @@ const api: AgentlasIpc = {
     status: () => ipcRenderer.invoke("mobileBridge:status"),
     issuePairing: () => ipcRenderer.invoke("mobileBridge:issuePairing"),
     listDevices: () => ipcRenderer.invoke("mobileBridge:listDevices"),
+    retry: () => ipcRenderer.invoke("mobileBridge:retry"),
     revokeDevice: (deviceId: string) => ipcRenderer.invoke("mobileBridge:revokeDevice", deviceId),
   },
   trex: {

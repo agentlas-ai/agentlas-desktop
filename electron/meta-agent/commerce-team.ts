@@ -7,6 +7,7 @@ import path from "node:path";
 import { app } from "electron";
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
+import { emitDesktopStoreChange } from "../store/change-bus";
 import { getChat, getChatWorkingFolder } from "../store/chats";
 import { getProject } from "../store/projects";
 import { setRoute } from "../agents/routes";
@@ -117,6 +118,11 @@ export function createCommerceAgentTeam(input: MetaAgentTeamFactoryRequest): Met
   });
   const org = buildResolvedOrg(agent, rootPath, profile, createdAt, memberAgents);
   saveResolvedOrg(firm.id, org);
+
+  emitDesktopStoreChange({ entity: "agent", id: agent.id });
+  for (const member of memberAgents.values()) {
+    emitDesktopStoreChange({ entity: "agent", id: member.agent.id });
+  }
 
   return { rootPath, agent, firm, org, files, createdAt };
 }

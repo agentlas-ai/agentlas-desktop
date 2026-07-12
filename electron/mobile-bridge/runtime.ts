@@ -15,6 +15,7 @@ import {
   createMobileBridgePairingPayload,
   loadOrCreateMobileBridgeCredential,
   loadOrCreateMobileBridgeHostIdentity,
+  readMobileBridgeEndpointManifest,
   writeMobileBridgeEndpointManifest,
   type MobileBridgeEndpointManifest,
   type MobileBridgePairingChangeReason,
@@ -38,10 +39,18 @@ interface RunningBridge {
 
 let running: RunningBridge | null = null;
 let lastError: string | null = null;
+let runtimeOptions: MobileBridgeRuntimeOptions | null = null;
+let networkWatchTimer: NodeJS.Timeout | null = null;
+let lastObservedAutomaticHost: string | null = null;
+let lifecycleTail: Promise<void> = Promise.resolve();
 export type MobileBridgeStateChangeReason =
   | MobileBridgePairingChangeReason
   | "runtime-started"
-  | "runtime-stopped";
+  | "runtime-stopped"
+  | "runtime-rebinding"
+  | "runtime-retried"
+  | "network-rebound"
+  | "runtime-retry-failed";
 const stateChangeListeners = new Set<(reason: MobileBridgeStateChangeReason) => void>();
 
 function emitMobileBridgeStateChange(reason: MobileBridgeStateChangeReason): void {
@@ -57,9 +66,9 @@ export function onMobileBridgeStateChanged(
   return () => stateChangeListeners.delete(listener);
 }
 
-function configuredPort(): number {
+function configuredPort(fallback?: number): number {
   const raw = process.env.AGENTLAS_MOBILE_BRIDGE_PORT?.trim();
-  if (!raw) return 0;
+  if (!raw) return fallback ?? 0;
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 0 || value > 65535) {
     throw new Error("AGENTLAS_MOBILE_BRIDGE_PORT must be an integer from 0 to 65535");
@@ -67,16 +76,65 @@ function configuredPort(): number {
   return value;
 }
 
-function configuredHost(): string {
-  const host = process.env.AGENTLAS_MOBILE_BRIDGE_HOST?.trim() || preferredMobileBridgeHost();
+function configuredHost(override?: string): string {
+  const host = process.env.AGENTLAS_MOBILE_BRIDGE_HOST?.trim() || override || preferredMobileBridgeHost();
   if (!host || /[/?#@\s]/.test(host) || host === "0.0.0.0" || host === "::") {
     throw new Error("AGENTLAS_MOBILE_BRIDGE_HOST must be a concrete LAN address or hostname");
   }
   return host;
 }
 
-export async function startAgentlasMobileBridge(
+function explicitHostConfigured(): boolean {
+  return Boolean(process.env.AGENTLAS_MOBILE_BRIDGE_HOST?.trim());
+}
+
+function automaticHostOrNull(): string | null {
+  try {
+    return preferredMobileBridgeHost();
+  } catch {
+    return null;
+  }
+}
+
+function serializeLifecycle<T>(work: () => Promise<T>): Promise<T> {
+  const run = lifecycleTail.then(work, work);
+  lifecycleTail = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+function networkWatchIntervalMs(): number {
+  const configured = Number(process.env.AGENTLAS_MOBILE_BRIDGE_NETWORK_WATCH_MS);
+  return Number.isFinite(configured)
+    ? Math.max(1_000, Math.min(60_000, Math.floor(configured)))
+    : 5_000;
+}
+
+function ensureNetworkWatcher(): void {
+  if (networkWatchTimer || explicitHostConfigured()) return;
+  lastObservedAutomaticHost = automaticHostOrNull();
+  networkWatchTimer = setInterval(() => {
+    const selected = automaticHostOrNull();
+    if (selected === lastObservedAutomaticHost) return;
+    lastObservedAutomaticHost = selected;
+    if (!selected) {
+      lastError = "No usable LAN address is currently available for Agentlas Mobile Bridge";
+      emitMobileBridgeStateChange("runtime-retry-failed");
+      return;
+    }
+    if (running?.manifest.bindHost === selected) {
+      lastError = null;
+      return;
+    }
+    void rebindAgentlasMobileBridge("network-rebound", selected).catch((error) => {
+      console.error("[mobile-bridge] automatic network rebind failed", error instanceof Error ? error.message : String(error));
+    });
+  }, networkWatchIntervalMs());
+  networkWatchTimer.unref?.();
+}
+
+async function startBridgeInternal(
   options: MobileBridgeRuntimeOptions,
+  overrides: { host?: string; port?: number } = {},
 ): Promise<MobileBridgeRuntimeStatus> {
   if (running) return mobileBridgeRuntimeStatus();
   lastError = null;
@@ -90,6 +148,7 @@ export async function startAgentlasMobileBridge(
     hostIdentity: identity,
     displayName,
     appVersion: options.appVersion,
+    revokeDevice: (deviceId) => pairing.revokeDevice(deviceId),
     onError: (error) => console.error("[mobile-bridge-authority]", error.message),
   });
   let server: AgentlasMobileBridgeServer | null = null;
@@ -105,8 +164,8 @@ export async function startAgentlasMobileBridge(
       pairing,
       replayStore,
       devBootstrapToken: devBootstrap,
-      host: configuredHost(),
-      port: configuredPort(),
+      host: configuredHost(overrides.host),
+      port: configuredPort(overrides.port),
       tls: tls.serverOptions,
       onError: (error) => console.error("[mobile-bridge]", error.message),
     });
@@ -127,6 +186,7 @@ export async function startAgentlasMobileBridge(
     };
     writeMobileBridgeEndpointManifest(options.userDataPath, manifest);
     running = { authority, pairing, server, manifest };
+    if (!explicitHostConfigured()) lastObservedAutomaticHost = address.host;
     emitMobileBridgeStateChange("runtime-started");
     console.info(`[mobile-bridge] listening on ${address.url}`);
     return mobileBridgeRuntimeStatus();
@@ -137,6 +197,61 @@ export async function startAgentlasMobileBridge(
     authority.dispose();
     throw error;
   }
+}
+
+async function stopRunningBridge(emitStopped: boolean): Promise<void> {
+  const state = running;
+  running = null;
+  if (!state) return;
+  try {
+    await state.server.close();
+  } finally {
+    state.pairing.dispose();
+    state.authority.dispose();
+    if (emitStopped) emitMobileBridgeStateChange("runtime-stopped");
+  }
+}
+
+export async function startAgentlasMobileBridge(
+  options: MobileBridgeRuntimeOptions,
+): Promise<MobileBridgeRuntimeStatus> {
+  runtimeOptions = { ...options };
+  ensureNetworkWatcher();
+  return serializeLifecycle(() => startBridgeInternal(options));
+}
+
+async function rebindAgentlasMobileBridge(
+  reason: "runtime-retried" | "network-rebound",
+  hostOverride?: string,
+): Promise<MobileBridgeRuntimeStatus> {
+  const options = runtimeOptions;
+  if (!options) throw new Error("Agentlas Mobile Bridge has not been configured");
+  return serializeLifecycle(async () => {
+    emitMobileBridgeStateChange("runtime-rebinding");
+    const currentManifest = running?.manifest ?? (() => {
+      try { return readMobileBridgeEndpointManifest(options.userDataPath); } catch { return null; }
+    })();
+    const retainedPort = process.env.AGENTLAS_MOBILE_BRIDGE_PORT?.trim()
+      ? undefined
+      : currentManifest?.port;
+    await stopRunningBridge(false);
+    try {
+      const status = await startBridgeInternal(options, {
+        ...(hostOverride ? { host: hostOverride } : {}),
+        ...(retainedPort ? { port: retainedPort } : {}),
+      });
+      emitMobileBridgeStateChange(reason);
+      return status;
+    } catch (error) {
+      emitMobileBridgeStateChange("runtime-retry-failed");
+      throw error;
+    }
+  });
+}
+
+/** Settings recovery action; preserves host identity, device records, TLS pin, and port. */
+export function retryAgentlasMobileBridge(): Promise<MobileBridgeRuntimeStatus> {
+  return rebindAgentlasMobileBridge("runtime-retried");
 }
 
 export function mobileBridgeRuntimeStatus(): MobileBridgeRuntimeStatus {
@@ -169,14 +284,9 @@ export function revokeMobileBridgeDevice(deviceId: string): { ok: boolean } {
 }
 
 export async function stopAgentlasMobileBridge(): Promise<void> {
-  const state = running;
-  running = null;
-  if (!state) return;
-  try {
-    await state.server.close();
-  } finally {
-    state.pairing.dispose();
-    state.authority.dispose();
-    emitMobileBridgeStateChange("runtime-stopped");
-  }
+  runtimeOptions = null;
+  lastObservedAutomaticHost = null;
+  if (networkWatchTimer) clearInterval(networkWatchTimer);
+  networkWatchTimer = null;
+  await serializeLifecycle(() => stopRunningBridge(true));
 }

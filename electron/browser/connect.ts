@@ -329,6 +329,7 @@ export interface BrowserApprovalLifecycleRequest {
   summary: string;
   target: string | null;
   allowAlways: boolean;
+  createdAt: number;
   expiresAt: number;
 }
 
@@ -348,6 +349,17 @@ export function onBrowserApprovalLifecycle(
 ): () => void {
   approvalLifecycleListeners.add(listener);
   return () => approvalLifecycleListeners.delete(listener);
+}
+
+/**
+ * Reconnect baseline for trusted projections. Returns copies so a consumer
+ * cannot mutate the fail-closed approval queue or its timers.
+ */
+export function listPendingBrowserApprovals(now = Date.now()): BrowserApprovalLifecycleRequest[] {
+  return [...pendingApprovals.values()]
+    .map((pending) => pending.request)
+    .filter((request) => request.expiresAt > now)
+    .map((request) => ({ ...request }));
 }
 
 function emitApprovalLifecycle(event: BrowserApprovalLifecycleEvent): void {
@@ -405,13 +417,15 @@ export async function browserRequestApproval(
   const requestId = randomUUID();
   const timeoutMs = approvalTimeoutMs();
   const decision = await new Promise<BrowserPermissionDecision | "timeout">((resolve) => {
+    const createdAt = Date.now();
     const request: BrowserApprovalLifecycleRequest = {
       requestId,
       site,
       actionType: req.actionType,
       summary: req.summary,
       target: req.target ?? null,
-      expiresAt: Date.now() + timeoutMs,
+      createdAt,
+      expiresAt: createdAt + timeoutMs,
       allowAlways: req.actionType !== "payment" && req.actionType !== "unsafe-code",
     };
     const timer = setTimeout(() => {

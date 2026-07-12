@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { emitDesktopStoreChange } from "./change-bus";
 import { getSource as getMarketSource } from "../marketplace";
 import { listInstalledAgents } from "../mcp/registry";
 import { getResolvedOrg } from "./org-spec";
@@ -239,7 +240,9 @@ export function createAgentGroup(input: AgentGroupCreateInput): AgentGroup {
       now,
       now,
     );
-  return groupById(id) as AgentGroup;
+  const group = groupById(id) as AgentGroup;
+  emitDesktopStoreChange({ entity: "agent-group", id });
+  return group;
 }
 
 export function updateAgentGroup(id: string, patch: AgentGroupUpdateInput): AgentGroup {
@@ -272,11 +275,14 @@ export function updateAgentGroup(id: string, patch: AgentGroupUpdateInput): Agen
       next.updatedAt,
       id,
     );
-  return groupById(id) as AgentGroup;
+  const group = groupById(id) as AgentGroup;
+  emitDesktopStoreChange({ entity: "agent-group", id });
+  return group;
 }
 
 export function removeAgentGroup(id: string): void {
-  getDb().prepare("DELETE FROM agent_groups WHERE id = ?").run(id);
+  const result = getDb().prepare("DELETE FROM agent_groups WHERE id = ?").run(id);
+  if (result.changes > 0) emitDesktopStoreChange({ entity: "agent-group", id });
 }
 
 export function removeAgentGroupMember(groupId: string, memberId: string): AgentGroup {

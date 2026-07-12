@@ -45,6 +45,7 @@ import {
   mobileBridgeRuntimeStatus,
   onMobileBridgeStateChanged,
   revokeMobileBridgeDevice,
+  retryAgentlasMobileBridge,
   startAgentlasMobileBridge,
   stopAgentlasMobileBridge,
 } from "./mobile-bridge/runtime";
@@ -412,6 +413,7 @@ app.whenReady().then(async () => {
   ipcMain.handle("mobileBridge:status", () => mobileBridgeRuntimeStatus());
   ipcMain.handle("mobileBridge:issuePairing", () => issueMobileBridgePairing());
   ipcMain.handle("mobileBridge:listDevices", () => listMobileBridgeDevices());
+  ipcMain.handle("mobileBridge:retry", () => retryAgentlasMobileBridge());
   ipcMain.handle("mobileBridge:revokeDevice", (_event, deviceId: unknown) => {
     if (typeof deviceId !== "string" || !/^device_[a-f0-9]{32}$/.test(deviceId)) {
       return { ok: false };

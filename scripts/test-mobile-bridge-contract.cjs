@@ -3,6 +3,13 @@ const fs = require("node:fs");
 const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
+const { app } = require("electron");
+
+// Contract tests must never enumerate or mutate the developer's real Keychain.
+process.env.AGENTLAS_E2E = "1";
+
+const projectionRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mobile-bridge-projection-"));
+process.env.AGENTLAS_STORE_PATH = path.join(projectionRoot, "agentlas.sqlite");
 
 const {
   MOBILE_BRIDGE_MAX_MESSAGE_BYTES,
@@ -23,10 +30,11 @@ const {
   writeMobileBridgeEndpointManifest,
 } = require("../dist/electron/mobile-bridge/pairing.js");
 const { AgentlasMobileBridgeServer } = require("../dist/electron/mobile-bridge/server.js");
+const mobileBridgeTls = require("../dist/electron/mobile-bridge/tls.js");
 const {
   loadOrCreateMobileBridgeTls,
   selectPreferredMobileBridgeHost,
-} = require("../dist/electron/mobile-bridge/tls.js");
+} = mobileBridgeTls;
 const {
   MobileBridgeRequestReplayStore,
   fingerprintMobileBridgeRequest,
@@ -34,9 +42,11 @@ const {
 } = require("../dist/electron/mobile-bridge/replay.js");
 const {
   MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES,
+  repairMobileBridgeUtf16,
   sanitizeMobileBridgeText,
 } = require("../dist/electron/mobile-bridge/sanitize.js");
 const {
+  projectMobileBridgeAutomation,
   projectMobileBridgeConfirmations,
   projectMobileBridgeHistory,
 } = require("../dist/electron/mobile-bridge/projector.js");
@@ -44,6 +54,35 @@ const {
   createMobileBridgeAuthority,
   projectMobileBridgeInvocationEvent,
 } = require("../dist/electron/mobile-bridge/authority.js");
+const {
+  browserRequestApproval,
+  browserResolveApproval,
+  listPendingBrowserApprovals,
+} = require("../dist/electron/browser/connect.js");
+const { claimPendingConfirmationAnswer } = require("../dist/electron/confirm/index.js");
+const { initStore, getDb } = require("../dist/electron/store/db.js");
+const { createProject } = require("../dist/electron/store/projects.js");
+const { appendChatMessage, createChat } = require("../dist/electron/store/chats.js");
+const { createAgentGroup } = require("../dist/electron/store/agent-groups.js");
+const { upsertLocalTeamFirm } = require("../dist/electron/store/firms.js");
+const {
+  claimAutomationRun,
+  createAutomation,
+  finishGraphRun,
+  getAutomation,
+  markAutomationRun,
+  releaseAutomationRun,
+  startGraphRun,
+} = require("../dist/electron/store/automations.js");
+const { setAgentEntityKind } = require("../dist/electron/mcp/registry.js");
+const { onDesktopStoreChange } = require("../dist/electron/store/change-bus.js");
+const {
+  onMobileBridgeStateChanged,
+  mobileBridgeRuntimeStatus,
+  retryAgentlasMobileBridge,
+  startAgentlasMobileBridge,
+  stopAgentlasMobileBridge,
+} = require("../dist/electron/mobile-bridge/runtime.js");
 const { WebSocket } = require("ws");
 
 function pairRequest(id, code, name = "Mason's iPhone") {
@@ -130,6 +169,21 @@ function testAbsolutePathSanitization() {
   }
 }
 
+function testUtf16Sanitization() {
+  const high = String.fromCharCode(0xd83d);
+  const low = String.fromCharCode(0xde80);
+  const rocket = `${high}${low}`;
+  assert.equal(repairMobileBridgeUtf16(high), "\ufffd");
+  assert.equal(repairMobileBridgeUtf16(low), "\ufffd");
+  assert.equal(repairMobileBridgeUtf16(`a${high}b${low}c`), "a\ufffdb\ufffdc");
+  assert.equal(repairMobileBridgeUtf16(rocket), rocket, "valid surrogate pairs must remain intact");
+  assert.equal(
+    sanitizeMobileBridgeText(`stream:${high}`, 1_024),
+    "stream:\ufffd",
+    "isolated runtime deltas must not cross the Mobile Bridge boundary",
+  );
+}
+
 function expectPairingError(fn, code) {
   assert.throws(fn, (error) => error && error.code === code);
 }
@@ -172,6 +226,7 @@ function makeSnapshot(hostId) {
     chats: [],
     messages: {},
     pendingConfirmations: [],
+    pendingBrowserApprovals: [],
     automations: [],
     usage: [],
     activeChatIds: [],
@@ -228,10 +283,37 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+async function waitUntil(predicate, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = predicate();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Timed out waiting for condition");
+}
+
 async function expectUnauthorized(url) {
   await new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
     socket.once("open", () => reject(new Error("Unauthenticated socket unexpectedly opened")));
+    socket.once("unexpected-response", (_request, response) => {
+      try {
+        assert.equal(response.statusCode, 401);
+        response.resume();
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+    socket.once("error", () => {});
+  });
+}
+
+async function expectCredentialRejected(url, token) {
+  await new Promise((resolve, reject) => {
+    const socket = new WebSocket(url, { headers: { authorization: `Bearer ${token}` } });
+    socket.once("open", () => reject(new Error("Revoked credential unexpectedly opened a socket")));
     socket.once("unexpected-response", (_request, response) => {
       try {
         assert.equal(response.statusCode, 401);
@@ -255,6 +337,22 @@ async function testWireParsers() {
   });
   assert.equal(valid.ok, true);
   assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("automations.runNow"), true);
+  assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("device.revokeSelf"), true);
+  assert.equal(parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "snapshot_read",
+    method: "snapshot.get",
+    params: {},
+  }).ok, true);
+  assert.equal(parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "self_revoke",
+    idempotencyKey: "self-revoke-stable",
+    method: "device.revokeSelf",
+    params: {},
+  }).ok, true);
 
   const idempotentWrite = parseMobileBridgeRequest({
     v: 1,
@@ -322,12 +420,20 @@ async function testWireParsers() {
     type: "request",
     id: "steer_observed_target",
     method: "invoke.steer",
-    params: { chatId: "chat_1", userPrompt: "Change direction", expectedRunId: "run_1" },
+    params: {
+      chatId: "chat_1",
+      userPrompt: "Change direction",
+      expectedRunId: "run_1",
+      expectedQuestionMessageId: "message_question_1",
+    },
   });
   assert.equal(steerWithObservedRun.ok, true);
 
   const validPair = parseMobileBridgePairExchangeRequest(pairRequest("pair_1", "A".repeat(22)));
   assert.equal(validPair.ok, true);
+  const legacyShortCode = parseMobileBridgePairExchangeRequest(pairRequest("pair_short", "123456"));
+  assert.equal(legacyShortCode.ok, false);
+  assert.equal(legacyShortCode.error.error.code, "invalid_pairing_request");
   const malformedPair = parseMobileBridgePairExchangeRequest({
     ...pairRequest("pair_2", "A".repeat(22)),
     device: { name: "Phone", platform: "ios", admin: true },
@@ -431,6 +537,7 @@ function testTranscriptAndConfirmationProjection() {
 
   const confirmations = projectMobileBridgeConfirmations([{
     chatId: "chat_question_1",
+    sourceMessageId: "message_question_1",
     chatTitle: "Design /Users/mason/private",
     question: "Which token=hiddenvalue direction?",
     header: "Direction",
@@ -445,6 +552,7 @@ function testTranscriptAndConfirmationProjection() {
     createdAt: "2026-07-11T00:00:00.000Z",
   }]);
   assert.equal(confirmations[0].options.length, 2);
+  assert.equal(confirmations[0].sourceMessageId, "message_question_1");
   assert.equal(confirmations[0].options[0].label, "Black and white");
   assert.match(confirmations[0].options[0].description, /\[local-path\]/);
   assert.match(confirmations[0].options[1].description, /\[redacted-secret\]/);
@@ -622,9 +730,336 @@ async function testAuthoritySteerGuard() {
       ),
       /no longer pending/,
     );
+    await assert.rejects(
+      authority.request(
+        {
+          v: 1,
+          type: "request",
+          id: "authority_dev_revoke",
+          method: "device.revokeSelf",
+          params: {},
+        },
+        context,
+      ),
+      /Development bootstrap credentials/,
+    );
   } finally {
     authority.dispose();
   }
+
+  let revokedDeviceId = null;
+  const revokingAuthority = createMobileBridgeAuthority({
+    hostIdentity: {
+      version: 1,
+      hostId: "host_1234567890abcdef1234567890abcdef",
+      createdAt: "2026-07-11T00:00:00.000Z",
+    },
+    displayName: "Revoke Test Desktop",
+    appVersion: "0.8.2",
+    revokeDevice: (deviceId) => {
+      revokedDeviceId = deviceId;
+      return true;
+    },
+    onError: () => {},
+  });
+  try {
+    const pairedContext = {
+      ...context,
+      deviceId: "device_1234567890abcdef1234567890abcdef",
+      devicePlatform: "ios",
+      devBootstrap: false,
+    };
+    const result = await revokingAuthority.request({
+      v: 1,
+      type: "request",
+      id: "authority_self_revoke",
+      method: "device.revokeSelf",
+      params: {},
+    }, pairedContext);
+    assert.deepEqual(result, { revoked: true });
+    assert.equal(revokedDeviceId, pairedContext.deviceId);
+  } finally {
+    revokingAuthority.dispose();
+  }
+}
+
+async function testReconnectSnapshotAndDesktopMutationInvalidation() {
+  await app.whenReady();
+  initStore();
+  const db = getDb();
+  const agentId = "agent-mobile-sync-fixture";
+  db.prepare(
+    `INSERT INTO installed_agents
+     (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
+      env_requirements_json, preferred_backend, trust_grade, installed_at, tone, builtin, role,
+      visibility, entity_kind)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    agentId,
+    "mobile-sync-fixture",
+    "Mobile Sync Fixture",
+    "Mobile Sync Fixture",
+    "Desktop projection test",
+    "Desktop projection test",
+    "Private prompt must not cross the bridge.",
+    "[]",
+    "[]",
+    null,
+    "A",
+    "2026-07-11T00:00:00.000Z",
+    "blue",
+    0,
+    null,
+    "visible",
+    "agent",
+  );
+
+  const marketplace = require("../dist/electron/marketplace/index.js");
+  const originalGetSource = marketplace.getSource;
+  marketplace.getSource = () => ({ searchAgents: async () => [] });
+
+  let pendingRequestId = null;
+  const approvalResult = browserRequestApproval({
+    site: "example.com",
+    actionType: "publish",
+    summary: "Publish from /Users/mason/private/draft.txt with token=hiddenvalue",
+    target: "/Users/mason/private/output.txt",
+  });
+  const pending = listPendingBrowserApprovals();
+  assert.equal(pending.length, 1);
+  pendingRequestId = pending[0].requestId;
+
+  const authority = createMobileBridgeAuthority({
+    hostIdentity: {
+      version: 1,
+      hostId: "host_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      createdAt: "2026-07-11T00:00:00.000Z",
+    },
+    displayName: "Mutation Sync Desktop",
+    appVersion: "0.8.2",
+    onError: () => {},
+  });
+  const context = {
+    connectionId: "connection_sync",
+    remoteAddress: "127.0.0.1",
+    connectedAt: "2026-07-11T00:00:00.000Z",
+    deviceId: "device_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    deviceName: "Reconnect Phone",
+    devicePlatform: "ios",
+    devBootstrap: false,
+  };
+  const changes = [];
+  const offChanges = onDesktopStoreChange((change) => changes.push(change));
+  let offAuthority = null;
+  try {
+    const reconnectSnapshot = await authority.snapshot(context);
+    assert.equal(reconnectSnapshot.pendingBrowserApprovals.length, 1);
+    const restored = reconnectSnapshot.pendingBrowserApprovals[0];
+    assert.equal(restored.status, "pending");
+    assert.equal(restored.requestId, pendingRequestId);
+    assert.equal(restored.site, "example.com");
+    assert.equal(restored.allowAlways, true);
+    assert.equal(typeof restored.createdAt, "number");
+    assert.equal(typeof restored.expiresAt, "number");
+    assert.equal(restored.expiresAt > restored.createdAt, true);
+    assert.equal(JSON.stringify(restored).includes("/Users/mason"), false);
+    assert.equal(JSON.stringify(restored).includes("hiddenvalue"), false);
+    assert.match(restored.summary, /\[local-path\]/);
+    assert.equal(restored.target, "[local-path]");
+
+    const canonicalSnapshot = await authority.request({
+      v: 1,
+      type: "request",
+      id: "snapshot_get_reconnect",
+      method: "snapshot.get",
+      params: {},
+    }, context);
+    assert.equal(canonicalSnapshot.host.id, reconnectSnapshot.host.id);
+    assert.equal(canonicalSnapshot.pendingBrowserApprovals[0].requestId, pendingRequestId);
+
+    const questionChat = createChat({ agentId, title: "Question claim chat" });
+    const questionMessage = appendChatMessage(
+      questionChat.id,
+      "assistant",
+      '<<agentlas-ask>>{"question":"Publish now?","options":[{"label":"Yes"},{"label":"No"}]}<</agentlas-ask>>',
+    );
+    await assert.rejects(
+      authority.request({
+        v: 1,
+        type: "request",
+        id: "stale_question_answer",
+        method: "invoke.start",
+        params: {
+          chatId: questionChat.id,
+          userPrompt: "Yes",
+          expectedQuestionMessageId: "message_stale",
+        },
+      }, context),
+      /stale or no longer pending/,
+    );
+    const rollbackQuestionClaim = claimPendingConfirmationAnswer(questionChat.id, questionMessage.id);
+    assert.throws(
+      () => claimPendingConfirmationAnswer(questionChat.id, questionMessage.id),
+      /already accepted/,
+    );
+    rollbackQuestionClaim();
+    assert.doesNotThrow(() => {
+      const rollback = claimPendingConfirmationAnswer(questionChat.id, questionMessage.id);
+      rollback();
+    });
+
+    const snapshotEvent = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Timed out waiting for Desktop mutation snapshot")), 20_000);
+      offAuthority = authority.subscribe((event) => {
+        if (event.event !== "snapshot.updated") return;
+        clearTimeout(timer);
+        resolve(event);
+      });
+    });
+
+    setAgentEntityKind(agentId, "team");
+    const firm = upsertLocalTeamFirm({
+      slug: "firm-mobile-sync",
+      name: "Mobile Sync Team",
+      tagline: "Mutation projection fixture",
+      ceoAgentId: agentId,
+      orgChart: [{ agentSlug: "mobile-sync-fixture", agentId, role: "CEO", reportsTo: null }],
+    });
+    const group = createAgentGroup({
+      name: "Mobile Sync Group",
+      description: "Mutation projection fixture",
+      members: [{
+        id: "member-mobile-sync",
+        source: "installed",
+        agentId,
+        agentSlug: "mobile-sync-fixture",
+        addedAt: "2026-07-11T00:00:00.000Z",
+        snapshot: {
+          name: "Mobile Sync Fixture",
+          nameEn: "Mobile Sync Fixture",
+          tagline: "Desktop projection test",
+          taglineEn: "Desktop projection test",
+          routeLabel: "Installed",
+          trustGrade: "A",
+          entityKind: "agent",
+        },
+      }],
+    });
+    const project = createProject({ name: "Mobile Sync Project", defaultAgentId: agentId });
+    const chat = createChat({ agentId, projectId: project.id, title: "Mobile Sync Chat" });
+    appendChatMessage(chat.id, "user", "Make this chat visible to the recent-chat projection.");
+    const automation = createAutomation({
+      name: "Mobile Sync Automation",
+      scheduleHuman: "daily-09:00",
+      targetType: "agent",
+      targetId: agentId,
+      promptTemplate: "Run the sync fixture",
+    });
+
+    const update = await snapshotEvent;
+    const snapshot = update.payload;
+    const projectedAgent = snapshot.agents.find((agent) => agent.id === agentId);
+    assert.equal(projectedAgent.kind, "team");
+    assert.equal(projectedAgent.visibility, "visible");
+    assert.equal(projectedAgent.requiresSetup, false);
+    assert.equal(snapshot.firms.some((item) => item.id === firm.id), true);
+    assert.equal(snapshot.groups.some((item) => item.id === group.id), true);
+    assert.equal(snapshot.projects.some((item) => item.id === project.id), true);
+    assert.equal(snapshot.chats.some((item) => item.id === chat.id), true);
+    const projectedAutomation = snapshot.automations.find((item) => item.id === automation.id);
+    assert.ok(projectedAutomation);
+    assert.equal(projectedAutomation.runState, "unknown");
+    assert.equal(projectedAutomation.lastError, null);
+    assert.deepEqual(
+      new Set(changes.map((change) => change.entity)),
+      new Set(["agent", "firm", "agent-group", "project", "chat", "automation"]),
+    );
+  } finally {
+    offAuthority?.();
+    offChanges();
+    authority.dispose();
+    marketplace.getSource = originalGetSource;
+    if (pendingRequestId) browserResolveApproval(pendingRequestId, "deny");
+    await approvalResult;
+  }
+}
+
+function testAutomationLiveRunProjection() {
+  initStore();
+  const automation = createAutomation({
+    name: "Mobile live-state fixture",
+    scheduleHuman: "daily-09:00",
+    targetType: "agent",
+    targetId: "agent-mobile-live-state-fixture",
+    promptTemplate: "Keep the runner pending until the contract observes it.",
+  });
+  const owner = `${process.pid}:gui`;
+  let clockMs = Date.now() + 100;
+  const project = () => projectMobileBridgeAutomation(getAutomation(automation.id));
+
+  assert.equal(project().runState, "unknown");
+
+  assert.equal(
+    claimAutomationRun(automation.id, owner, new Date(clockMs)),
+    true,
+  );
+  assert.equal(project().runState, "queued", "an accepted durable lease must project as queued");
+
+  startGraphRun({
+    runId: "mobile-live-state-ok",
+    automationId: automation.id,
+    nodeIds: ["node"],
+    startedAt: new Date(++clockMs).toISOString(),
+  });
+  assert.equal(project().runState, "running", "a fresh durable graph run must project as running");
+
+  finishGraphRun("mobile-live-state-ok", "ok");
+  markAutomationRun(automation.id, new Date(++clockMs), {
+    status: "ok",
+    advanceSchedule: false,
+  });
+  assert.equal(
+    project().runState,
+    "completed",
+    "terminal history must beat the short history-write to lease-release window",
+  );
+  assert.equal(project().lastError, null);
+  assert.equal(releaseAutomationRun(automation.id, owner), true);
+
+  clockMs += 1;
+  assert.equal(claimAutomationRun(automation.id, owner, new Date(clockMs)), true);
+  assert.equal(project().runState, "queued");
+  startGraphRun({
+    runId: "mobile-live-state-error",
+    automationId: automation.id,
+    nodeIds: ["node"],
+    startedAt: new Date(++clockMs).toISOString(),
+  });
+  assert.equal(project().runState, "running");
+  finishGraphRun("mobile-live-state-error", "error");
+  markAutomationRun(automation.id, new Date(++clockMs), {
+    status: "error",
+    error: "Failed at /Users/private/automation-secret.txt",
+    advanceSchedule: false,
+  });
+  const failed = project();
+  assert.equal(failed.runState, "failed");
+  assert.equal(failed.lastError, "automation_failed");
+  assert.equal(JSON.stringify(failed).includes("/Users/private"), false);
+  assert.equal(releaseAutomationRun(automation.id, owner), true);
+
+  clockMs += 1;
+  assert.equal(claimAutomationRun(automation.id, owner, new Date(clockMs)), true);
+  assert.equal(project().runState, "queued");
+  markAutomationRun(automation.id, new Date(++clockMs), {
+    status: "skipped",
+    error: "Waiting for Desktop permission",
+    advanceSchedule: false,
+  });
+  const idle = project();
+  assert.equal(idle.runState, "idle");
+  assert.equal(idle.lastError, null);
+  assert.equal(releaseAutomationRun(automation.id, owner), true);
 }
 
 async function testPairingLifecycle() {
@@ -792,6 +1227,10 @@ async function testServerBoundary() {
           createdAt: "2026-07-11T00:00:00.000Z",
         }];
       }
+      if (request.method === "device.revokeSelf") {
+        pairing.revokeDevice(context.deviceId);
+        return { revoked: true };
+      }
       return { method: request.method, deviceId: context.deviceId };
     },
     subscribe(listener) {
@@ -846,7 +1285,7 @@ async function testServerBoundary() {
     const token = exchange.credential.token;
 
     socket = new WebSocket(address.url, { headers: { authorization: `Bearer ${token}` } });
-    const nextMessage = createMessageInbox(socket);
+    let nextMessage = createMessageInbox(socket);
     await waitForOpen(socket);
     const ready = await nextMessage((message) => message.type === "event" && message.event === "bridge.ready");
     assert.equal(ready.payload.hostId, hostId);
@@ -1042,6 +1481,33 @@ async function testServerBoundary() {
     assert.equal(closed.code, 1009);
     socket = null;
 
+    // The same credential may reconnect after an ordinary transport failure.
+    // Its authenticated self-revocation must persist first, ACK exactly once,
+    // then close every live socket for that device and reject future upgrades.
+    socket = new WebSocket(address.url, { headers: { authorization: `Bearer ${token}` } });
+    nextMessage = createMessageInbox(socket);
+    await waitForOpen(socket);
+    await nextMessage((message) => message.type === "event" && message.event === "bridge.ready");
+    await nextMessage((message) => message.type === "event" && message.event === "snapshot.updated");
+    const selfRevokedClose = waitForClose(socket);
+    socket.send(JSON.stringify({
+      v: 1,
+      type: "request",
+      id: "self_revoke_1",
+      idempotencyKey: "self-revoke-device-1",
+      method: "device.revokeSelf",
+      params: {},
+    }));
+    const selfRevoked = await nextMessage(
+      (message) => message.type === "response" && message.id === "self_revoke_1",
+    );
+    assert.deepEqual(selfRevoked.result, { revoked: true });
+    const selfRevokedClosed = await selfRevokedClose;
+    assert.equal(selfRevokedClosed.code, 1000);
+    assert.equal(pairing.authenticate(token), null);
+    socket = null;
+    await expectCredentialRejected(address.url, token);
+
     const persisted = fs.readFileSync(mobileBridgeDeviceStorePath(root), "utf8");
     assert.equal(persisted.includes(token), false);
     assert.equal(persisted.includes(exchange2.credential.token), false);
@@ -1055,24 +1521,111 @@ async function testServerBoundary() {
   }
 }
 
+async function testRuntimeRetryKeepsStableEndpoint() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mobile-bridge-runtime-retry-"));
+  const previousHost = process.env.AGENTLAS_MOBILE_BRIDGE_HOST;
+  const previousPort = process.env.AGENTLAS_MOBILE_BRIDGE_PORT;
+  process.env.AGENTLAS_MOBILE_BRIDGE_HOST = "127.0.0.1";
+  delete process.env.AGENTLAS_MOBILE_BRIDGE_PORT;
+  const reasons = [];
+  const off = onMobileBridgeStateChanged((reason) => reasons.push(reason));
+  try {
+    const first = await startAgentlasMobileBridge({
+      userDataPath: root,
+      appVersion: "0.8.2",
+      displayName: "Runtime Retry Desktop",
+    });
+    assert.equal(first.running, true);
+    assert.match(first.endpoint, /^wss:\/\/127\.0\.0\.1:\d+\/v1\/mobile$/);
+    const retried = await retryAgentlasMobileBridge();
+    assert.equal(retried.running, true);
+    assert.equal(retried.endpoint, first.endpoint, "manual retry must retain the ephemeral port");
+    assert.equal(retried.hostId, first.hostId, "manual retry must retain Desktop identity");
+    assert.equal(retried.error, null);
+    assert.equal(reasons.includes("runtime-rebinding"), true);
+    assert.equal(reasons.includes("runtime-retried"), true);
+  } finally {
+    off();
+    await stopAgentlasMobileBridge();
+    if (previousHost === undefined) delete process.env.AGENTLAS_MOBILE_BRIDGE_HOST;
+    else process.env.AGENTLAS_MOBILE_BRIDGE_HOST = previousHost;
+    if (previousPort === undefined) delete process.env.AGENTLAS_MOBILE_BRIDGE_PORT;
+    else process.env.AGENTLAS_MOBILE_BRIDGE_PORT = previousPort;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function testAutomaticNetworkRebind() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mobile-bridge-network-rebind-"));
+  const previousHost = process.env.AGENTLAS_MOBILE_BRIDGE_HOST;
+  const previousPort = process.env.AGENTLAS_MOBILE_BRIDGE_PORT;
+  const previousWatch = process.env.AGENTLAS_MOBILE_BRIDGE_NETWORK_WATCH_MS;
+  const originalPreferredHost = mobileBridgeTls.preferredMobileBridgeHost;
+  delete process.env.AGENTLAS_MOBILE_BRIDGE_HOST;
+  delete process.env.AGENTLAS_MOBILE_BRIDGE_PORT;
+  process.env.AGENTLAS_MOBILE_BRIDGE_NETWORK_WATCH_MS = "1000";
+  let selectedHost = "127.0.0.1";
+  mobileBridgeTls.preferredMobileBridgeHost = () => selectedHost;
+  const reasons = [];
+  const off = onMobileBridgeStateChanged((reason) => reasons.push(reason));
+  try {
+    const first = await startAgentlasMobileBridge({
+      userDataPath: root,
+      appVersion: "0.8.2",
+      displayName: "Network Rebind Desktop",
+    });
+    const firstUri = new URL(first.endpoint);
+    selectedHost = "::1";
+    const rebound = await waitUntil(() => {
+      const status = mobileBridgeRuntimeStatus();
+      return status.running && status.endpoint?.includes("[::1]") ? status : null;
+    });
+    const reboundUri = new URL(rebound.endpoint);
+    assert.equal(reboundUri.hostname, "[::1]");
+    assert.equal(reboundUri.port, firstUri.port, "network rebind must retain the listening port");
+    assert.equal(rebound.hostId, first.hostId);
+    assert.equal(reasons.includes("network-rebound"), true);
+  } finally {
+    off();
+    await stopAgentlasMobileBridge();
+    mobileBridgeTls.preferredMobileBridgeHost = originalPreferredHost;
+    if (previousHost === undefined) delete process.env.AGENTLAS_MOBILE_BRIDGE_HOST;
+    else process.env.AGENTLAS_MOBILE_BRIDGE_HOST = previousHost;
+    if (previousPort === undefined) delete process.env.AGENTLAS_MOBILE_BRIDGE_PORT;
+    else process.env.AGENTLAS_MOBILE_BRIDGE_PORT = previousPort;
+    if (previousWatch === undefined) delete process.env.AGENTLAS_MOBILE_BRIDGE_NETWORK_WATCH_MS;
+    else process.env.AGENTLAS_MOBILE_BRIDGE_NETWORK_WATCH_MS = previousWatch;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   await testWireParsers();
   await testTlsIdentity();
   testAbsolutePathSanitization();
+  testUtf16Sanitization();
   testInvocationEventProjection();
   testTranscriptAndConfirmationProjection();
   testLanAddressSelection();
   testDurableReplayLedger();
   await testAuthoritySteerGuard();
+  await testReconnectSnapshotAndDesktopMutationInvalidation();
+  testAutomationLiveRunProjection();
   await testPairingLifecycle();
   await testServerBoundary();
-  console.log("Mobile Bridge contract, pairing, authenticated transport, event ordering, and safe projection tests passed.");
+  await testRuntimeRetryKeepsStableEndpoint();
+  await testAutomaticNetworkRebind();
+  console.log("Mobile Bridge contract, reconnect sync, authenticated revocation, runtime retry, event ordering, and safe projection tests passed.");
 }
 
 main().then(
-  () => process.exit(0),
+  () => {
+    fs.rmSync(projectionRoot, { recursive: true, force: true });
+    process.exit(0);
+  },
   (error) => {
     console.error(error);
+    fs.rmSync(projectionRoot, { recursive: true, force: true });
     process.exit(1);
   },
 );

@@ -846,6 +846,10 @@ function MobileBridgePanel() {
         setPairing(null);
         setQrDataUrl("");
         setMessage(locale === "ko" ? "연결 QR이 만료됐습니다. 새 QR을 만들어 주세요." : "The pairing QR expired. Create a new one.");
+      } else if (reason === "runtime-rebinding" || reason === "runtime-stopped") {
+        setPairing(null);
+        setQrDataUrl("");
+        setMessage(locale === "ko" ? "Desktop 연결 주소를 다시 확인하고 있습니다." : "Refreshing the Desktop connection address.");
       }
       void refresh();
     });
@@ -886,6 +890,30 @@ function MobileBridgePanel() {
       setPairing(null);
       setQrDataUrl("");
       setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retryBridge() {
+    const api = ipc();
+    if (!api || busy) return;
+    setBusy(true);
+    setMessage(locale === "ko" ? "모바일 연결을 다시 여는 중입니다…" : "Restarting the mobile connection…");
+    try {
+      const next = await api.mobileBridge.retry();
+      setStatus(next);
+      setLoadError(next.error ?? "");
+      setMessage(
+        next.running
+          ? (locale === "ko" ? "모바일 연결을 다시 열었습니다." : "The mobile connection is available again.")
+          : (next.error ?? (locale === "ko" ? "모바일 연결을 열지 못했습니다." : "Could not restart the mobile connection.")),
+      );
+      await refresh();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setLoadError(detail);
+      setMessage(detail);
     } finally {
       setBusy(false);
     }
@@ -948,6 +976,23 @@ function MobileBridgePanel() {
             </div>
           </div>
           <button
+            data-testid="mobile-bridge-retry"
+            type="button"
+            disabled={busy}
+            onClick={() => void retryBridge()}
+            style={{
+              border: "1px solid var(--paper-edge)",
+              borderRadius: 999,
+              padding: "9px 14px",
+              background: "var(--paper-2)",
+              color: busy ? "var(--muted-deep)" : "var(--ink)",
+              fontSize: 12,
+              fontWeight: 700,
+            }}
+          >
+            {locale === "ko" ? "연결 다시 열기" : "Restart connection"}
+          </button>
+          <button
             type="button"
             disabled={!status?.running || busy}
             onClick={() => void issuePairing()}
@@ -963,7 +1008,7 @@ function MobileBridgePanel() {
             }}
           >
             {busy
-              ? locale === "ko" ? "QR 만드는 중…" : "Creating QR…"
+              ? locale === "ko" ? "처리 중…" : "Working…"
               : locale === "ko" ? "새 기기 연결" : "Pair a device"}
           </button>
         </div>

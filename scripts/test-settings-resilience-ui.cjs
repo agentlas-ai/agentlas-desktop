@@ -68,7 +68,7 @@ function installSettingsFixture(payload) {
   window.localStorage.setItem("agentlas.locale", "ko");
 
   const calls = { runtime: 0, key: 0, multimodalStatus: 0 };
-  const mobileCalls = { status: 0, list: 0, issue: 0, revoke: 0 };
+  const mobileCalls = { status: 0, list: 0, issue: 0, retry: 0, revoke: 0 };
   let mobileDevices = [];
   let mobilePairingExpiryDelay = 60_000;
   let mobileBridgeChanged = null;
@@ -133,6 +133,17 @@ function installSettingsFixture(payload) {
         expiresAt: new Date(Date.now() + mobilePairingExpiryDelay).toISOString(),
         certificateFingerprint: "a".repeat(64),
         certificateDer: "TUlJQg==",
+      };
+    },
+    retry: async () => {
+      mobileCalls.retry += 1;
+      return {
+        running: true,
+        endpoint: "wss://192.168.1.42:43123/v1/mobile",
+        secure: true,
+        hostId: "host_1234567890abcdef1234567890abcdef",
+        devices: [...mobileDevices],
+        error: null,
       };
     },
     revokeDevice: async () => {
@@ -222,6 +233,13 @@ async function main() {
       "Retry must refresh only the multimodal domain",
     );
     assert.equal(await page.getByText("QA 이미지 프로바이더", { exact: true }).count(), 1);
+    await page.getByTestId("mobile-bridge-retry").click();
+    await page.getByText("모바일 연결을 다시 열었습니다.", { exact: true }).waitFor();
+    assert.equal(
+      await page.evaluate(() => window.__settingsResilienceQa.mobileCalls.retry),
+      1,
+      "Desktop retry must be exposed as a deliberate Settings action",
+    );
     const pairButton = page.getByRole("button", { name: "새 기기 연결" });
     await pairButton.click();
     const pairingCard = page.getByTestId("mobile-bridge-pairing");

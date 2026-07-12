@@ -162,6 +162,7 @@ interface ConnectionState {
   pendingAuthorityEvents: MobileBridgeAuthorityEvent[];
   pendingAuthorityBytes: number;
   revoked: boolean;
+  revocationPending: boolean;
   requestWindowStartedAt: number;
   requestCount: number;
 }
@@ -464,6 +465,7 @@ export class AgentlasMobileBridgeServer {
       pendingAuthorityEvents: [],
       pendingAuthorityBytes: 0,
       revoked: false,
+      revocationPending: false,
       requestWindowStartedAt: Date.now(),
       requestCount: 0,
     };
@@ -638,7 +640,7 @@ export class AgentlasMobileBridgeServer {
   }
 
   private receive(state: ConnectionState, raw: unknown, isBinary: boolean): void {
-    if (state.revoked || !this.clients.has(state)) {
+    if (state.revoked || state.revocationPending || !this.clients.has(state)) {
       state.socket.terminate();
       return;
     }
@@ -696,6 +698,7 @@ export class AgentlasMobileBridgeServer {
 
   private async dispatch(state: ConnectionState, request: MobileBridgeRpcRequest): Promise<void> {
     if (state.revoked || !this.clients.has(state)) return;
+    const selfRevocation = request.method === "device.revokeSelf";
     const writeRequest = MOBILE_BRIDGE_WRITE_METHODS.has(request.method);
     const replayKey = request.idempotencyKey ?? request.id;
     const replayFingerprint = writeRequest ? fingerprintMobileBridgeRequest(request) : null;
@@ -757,6 +760,7 @@ export class AgentlasMobileBridgeServer {
       }
     }
 
+    if (selfRevocation) this.markDeviceRevocationPending(state.context.deviceId);
     const authorityPromise = this.authority.request(request, state.context);
     try {
       const result = await withTimeout(authorityPromise, this.requestTimeoutMs);
@@ -770,11 +774,16 @@ export class AgentlasMobileBridgeServer {
           request.id,
         );
       }
-      if (state.revoked || !this.clients.has(state)) return;
+      if (selfRevocation) {
+        this.sendSelfRevocationAckAndDisconnect(state, response);
+        return;
+      }
+      if (state.revoked || state.revocationPending || !this.clients.has(state)) return;
       this.send(state, response);
     } catch (error) {
       const normalized = errorOf(error);
       this.onError(normalized);
+      if (selfRevocation) this.clearDeviceRevocationPending(state.context.deviceId);
       const timeout = normalized.message === "Mobile Bridge authority request timed out";
       if (timeout && writeRequest && this.replayStore && replayFingerprint) {
         try {
@@ -822,7 +831,7 @@ export class AgentlasMobileBridgeServer {
           request.id,
         );
       }
-      if (state.revoked || !this.clients.has(state)) return;
+      if (state.revoked || state.revocationPending || !this.clients.has(state)) return;
       this.send(state, response);
     }
   }
@@ -885,7 +894,7 @@ export class AgentlasMobileBridgeServer {
     }
     const queuedBytes = Buffer.byteLength(JSON.stringify(event), "utf8");
     for (const state of this.clients) {
-      if (state.revoked) continue;
+      if (state.revoked || state.revocationPending) continue;
       if (!state.initialized) {
         if (
           state.pendingAuthorityEvents.length >= MAX_INITIAL_EVENT_QUEUE ||
@@ -955,6 +964,64 @@ export class AgentlasMobileBridgeServer {
     });
   }
 
+  private markDeviceRevocationPending(deviceId: string): void {
+    for (const state of this.clients) {
+      if (state.context.deviceId === deviceId) state.revocationPending = true;
+    }
+  }
+
+  private clearDeviceRevocationPending(deviceId: string): void {
+    for (const state of this.clients) {
+      if (state.context.deviceId === deviceId && !state.revoked) state.revocationPending = false;
+    }
+  }
+
+  /**
+   * Persisted credential revocation happens in authority first. Then every
+   * socket sharing that device identity is frozen immediately, while the
+   * requesting socket gets exactly one terminal acknowledgement before close.
+   */
+  private sendSelfRevocationAckAndDisconnect(
+    requestingState: ConnectionState,
+    response: MobileBridgeReplayResponse,
+  ): void {
+    let encoded: string;
+    try {
+      encoded = JSON.stringify(response);
+    } catch (error) {
+      this.onError(errorOf(error));
+      encoded = "";
+    }
+    const sendable =
+      encoded.length > 0 &&
+      Buffer.byteLength(encoded, "utf8") <= MOBILE_BRIDGE_MAX_MESSAGE_BYTES &&
+      requestingState.socket.readyState === WS_OPEN;
+
+    for (const state of [...this.clients]) {
+      if (state.context.deviceId !== requestingState.context.deviceId) continue;
+      state.revoked = true;
+      state.revocationPending = false;
+      state.inflight.clear();
+      state.pendingAuthorityEvents.length = 0;
+      state.pendingAuthorityBytes = 0;
+      this.clients.delete(state);
+      if (state !== requestingState) state.socket.terminate();
+    }
+
+    if (!sendable) {
+      requestingState.socket.terminate();
+      return;
+    }
+    requestingState.socket.send(encoded, (error) => {
+      if (error) {
+        this.onError(error);
+        requestingState.socket.terminate();
+        return;
+      }
+      requestingState.socket.close(1000, "device revoked");
+    });
+  }
+
   private checkLiveness(): void {
     for (const state of this.clients) {
       if (state.revoked) {
@@ -1006,6 +1073,7 @@ export class AgentlasMobileBridgeServer {
       // DESKTOP_MOBILE_BRIDGE: Mark first so message/dispatch callbacks that
       // are already queued cannot race one final command or response through.
       state.revoked = true;
+      state.revocationPending = false;
       state.inflight.clear();
       state.pendingAuthorityEvents.length = 0;
       state.pendingAuthorityBytes = 0;

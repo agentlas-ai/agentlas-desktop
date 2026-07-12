@@ -1,6 +1,7 @@
 // Firm CRUD — 설치된 회사 레지스트리. 다국어(name_en, tagline_en) 지원.
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
+import { emitDesktopStoreChange } from "./change-bus";
 import { installAgent, getAgentById } from "../mcp/registry";
 import { getSource as getMarketSource } from "../marketplace";
 import type { FirmOrgNode, InstalledFirm } from "../../shared/types";
@@ -105,7 +106,9 @@ export async function installFirm(slug: string): Promise<InstalledFirm> {
     throw new Error("CEO 에이전트 설치 후 조회 실패 (registry inconsistency)");
   }
 
-  return getFirm(id) as InstalledFirm;
+  const firm = getFirm(id) as InstalledFirm;
+  emitDesktopStoreChange({ entity: "firm", id });
+  return firm;
 }
 
 export function uninstallFirm(id: string): void {
@@ -139,6 +142,9 @@ export function uninstallFirm(id: string): void {
       throw new Error("Firm removal tried to delete an installed agent or conversation; rolled back.");
     }
   })();
+  emitDesktopStoreChange({ entity: "firm", id });
+  // ON DELETE SET NULL changes the projected target of former firm chats.
+  emitDesktopStoreChange({ entity: "chat" });
 }
 
 /**
@@ -173,7 +179,9 @@ export function upsertLocalTeamFirm(input: {
         chartJson,
         existing.id,
       );
-    return getFirm(existing.id) as InstalledFirm;
+    const firm = getFirm(existing.id) as InstalledFirm;
+    emitDesktopStoreChange({ entity: "firm", id: existing.id });
+    return firm;
   }
   const id = randomUUID();
   getDb()
@@ -194,5 +202,7 @@ export function upsertLocalTeamFirm(input: {
       chartJson,
       new Date().toISOString(),
     );
-  return getFirm(id) as InstalledFirm;
+  const firm = getFirm(id) as InstalledFirm;
+  emitDesktopStoreChange({ entity: "firm", id });
+  return firm;
 }

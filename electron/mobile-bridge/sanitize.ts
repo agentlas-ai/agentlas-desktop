@@ -47,12 +47,37 @@ export function truncateMobileBridgeUtf8(value: string, maxBytes: number): strin
 }
 
 /**
+ * JSON permits escaped UTF-16 code units, while Flutter's paragraph builder
+ * rejects isolated surrogates. Runtime streaming can briefly split an emoji
+ * between two deltas, so repair malformed code units before serialization.
+ */
+export function repairMobileBridgeUtf16(value: string): string {
+  let start = 0;
+  let repaired = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        index += 1;
+        continue;
+      }
+    } else if (code < 0xdc00 || code > 0xdfff) {
+      continue;
+    }
+    repaired += `${value.slice(start, index)}\ufffd`;
+    start = index + 1;
+  }
+  return start === 0 ? value : repaired + value.slice(start);
+}
+
+/**
  * Sanitize every free-form string before it crosses the Desktop/Mobile trust
  * boundary. Ordinary transcript text stays readable; credential material,
  * local absolute paths, and in-memory attachment data URLs never cross.
  */
 export function sanitizeMobileBridgeText(value: string, maxBytes: number): string {
-  const safe = value
+  const safe = repairMobileBridgeUtf16(value)
     .replace(DATA_URL_RE, "[redacted-data-url]")
     .replace(SECRET_RE, "[redacted-secret]")
     .replace(POSIX_ABSOLUTE_PATH_RE, "[local-path]")

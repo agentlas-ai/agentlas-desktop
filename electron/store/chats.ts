@@ -3,6 +3,7 @@
 // 프로젝트 페이지는 listByProject로, 회사 페이지는 listByFirm으로 채운다.
 import { createHash, randomUUID } from "node:crypto";
 import { getDb } from "./db";
+import { emitDesktopStoreChange } from "./change-bus";
 import { getAgentGroup } from "./agent-groups";
 import { getFirm } from "./firms";
 import { touchProject } from "./projects";
@@ -190,7 +191,9 @@ export function createChat(input: {
       now,
     );
   if (input.projectId) touchProject(input.projectId);
-  return getChat(id) as Chat;
+  const chat = getChat(id) as Chat;
+  emitDesktopStoreChange({ entity: "chat", id });
+  return chat;
 }
 
 /** 본부(division) 지속 세션을 찾거나 만든다 — 부모 firm 채팅에 종속된 숨김 sub-chat.
@@ -278,7 +281,9 @@ export function getOrCreateAutomationSession(input: {
   if (legacy && legacyMatches) {
     db.prepare("UPDATE chats SET title = ?, updated_at = ? WHERE id = ?")
       .run(marker, new Date().toISOString(), legacy.id);
-    return toChat({ ...legacy, title: marker });
+    const chat = toChat({ ...legacy, title: marker });
+    emitDesktopStoreChange({ entity: "chat", id: legacy.id });
+    return chat;
   }
   return createChat({
     agentId: input.agentId,
@@ -294,7 +299,9 @@ export function renameChat(id: string, title: string): Chat {
   getDb()
     .prepare("UPDATE chats SET title = ?, updated_at = ? WHERE id = ?")
     .run(title.trim(), new Date().toISOString(), id);
-  return getChat(id) as Chat;
+  const chat = getChat(id) as Chat;
+  emitDesktopStoreChange({ entity: "chat", id });
+  return chat;
 }
 
 /** 채팅의 에이전트를 다른 에이전트로 전환. firm 채팅이었으면 firm 해제. */
@@ -304,25 +311,32 @@ export function switchChatAgent(id: string, agentId: string): Chat {
       "UPDATE chats SET agent_id = ?, firm_id = NULL, agent_group_id = NULL, updated_at = ? WHERE id = ?",
     )
     .run(agentId, new Date().toISOString(), id);
-  return getChat(id) as Chat;
+  const chat = getChat(id) as Chat;
+  emitDesktopStoreChange({ entity: "chat", id });
+  return chat;
 }
 
 export function archiveChat(id: string): Chat {
   getDb()
     .prepare("UPDATE chats SET archived_at = ? WHERE id = ?")
     .run(new Date().toISOString(), id);
-  return getChat(id) as Chat;
+  const chat = getChat(id) as Chat;
+  emitDesktopStoreChange({ entity: "chat", id });
+  return chat;
 }
 
 export function unarchiveChat(id: string): Chat {
   getDb()
     .prepare("UPDATE chats SET archived_at = NULL, updated_at = ? WHERE id = ?")
     .run(new Date().toISOString(), id);
-  return getChat(id) as Chat;
+  const chat = getChat(id) as Chat;
+  emitDesktopStoreChange({ entity: "chat", id });
+  return chat;
 }
 
 export function removeChat(id: string): void {
-  getDb().prepare("DELETE FROM chats WHERE id = ?").run(id);
+  const result = getDb().prepare("DELETE FROM chats WHERE id = ?").run(id);
+  if (result.changes > 0) emitDesktopStoreChange({ entity: "chat", id });
 }
 
 /** 자동화 삭제 시 연결된 숨김 실행 세션도 같이 삭제한다.
@@ -332,6 +346,7 @@ export function removeAutomationSessions(automationId: string): void {
   getDb()
     .prepare("DELETE FROM chats WHERE kind = 'division' AND (title = ? OR title LIKE ?)")
     .run(marker, `${marker}::%`);
+  emitDesktopStoreChange({ entity: "chat" });
 }
 
 // ── working folder (워크스페이스 패널) ──────────────────────
@@ -355,6 +370,7 @@ export function setChatContinuousMode(chatId: string, enabled: boolean): void {
   getDb()
     .prepare("UPDATE chats SET continuous_mode = ?, updated_at = ? WHERE id = ?")
     .run(enabled ? 1 : 0, new Date().toISOString(), chatId);
+  emitDesktopStoreChange({ entity: "chat", id: chatId });
 }
 
 /** 스웜 모드 — 켜면 이 채팅이 목표를 작업 그래프로 분해해 여러 워커가 병렬 협업한다(runSwarmInvocation). */
@@ -362,6 +378,7 @@ export function setChatSwarmMode(chatId: string, enabled: boolean): void {
   getDb()
     .prepare("UPDATE chats SET swarm_mode = ?, updated_at = ? WHERE id = ?")
     .run(enabled ? 1 : 0, new Date().toISOString(), chatId);
+  emitDesktopStoreChange({ entity: "chat", id: chatId });
 }
 
 /** 고용(빌림) 카드 저장 — 빈 배열이면 해고(컬럼 비움). 메타데이터 카드만 저장한다. */
@@ -378,6 +395,7 @@ export function setChatHiredAgents(chatId: string, cards: HiredAgentCard[]): Cha
     .run(value, new Date().toISOString(), chatId);
   const chat = getChat(chatId);
   if (!chat) throw new Error(`Chat ${chatId} not found`);
+  emitDesktopStoreChange({ entity: "chat", id: chatId });
   return chat;
 }
 
@@ -403,6 +421,7 @@ export function appendChatMessage(
   db.prepare("UPDATE chats SET updated_at = ?, used_at = COALESCE(used_at, ?) WHERE id = ?").run(now, now, chatId);
   const chat = getChat(chatId);
   if (chat?.projectId) touchProject(chat.projectId);
+  emitDesktopStoreChange({ entity: "chat", id: chatId });
   return { id, role, text, createdAt: now };
 }
 
@@ -449,7 +468,8 @@ export function getLastChatMessage(chatId: string): ChatHistoryEntry | null {
 }
 
 export function clearChatMessages(chatId: string): void {
-  getDb().prepare("DELETE FROM chat_messages WHERE chat_id = ?").run(chatId);
+  const result = getDb().prepare("DELETE FROM chat_messages WHERE chat_id = ?").run(chatId);
+  if (result.changes > 0) emitDesktopStoreChange({ entity: "chat", id: chatId });
 }
 
 /**
@@ -465,6 +485,7 @@ export function clearChatContext(chatId: string): void {
     db.prepare("UPDATE chats SET last_viewed_at = ? WHERE id = ?").run(new Date().toISOString(), targetChatId);
   });
   clear(chatId);
+  emitDesktopStoreChange({ entity: "chat", id: chatId });
 }
 
 export function autoTitleFromFirstMessage(chatId: string, firstMessage: string): void {

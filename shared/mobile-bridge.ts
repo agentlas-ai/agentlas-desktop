@@ -20,6 +20,7 @@ export type MobileBridgeJsonValue =
 export type MobileBridgeJsonObject = { [key: string]: MobileBridgeJsonValue };
 
 export const MOBILE_BRIDGE_METHODS = [
+  "snapshot.get",
   "host.status",
   "team.list",
   "firms.list",
@@ -47,12 +48,14 @@ export const MOBILE_BRIDGE_METHODS = [
   "automations.listRuns",
   "usage.snapshot",
   "runtime.detect",
+  "device.revokeSelf",
 ] as const;
 
 export type MobileBridgeMethod = (typeof MOBILE_BRIDGE_METHODS)[number];
 
 /** State-changing methods require durable replay protection in Desktop main. */
 export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
+  "device.revokeSelf",
   "chats.create",
   "chats.rename",
   "chats.archive",
@@ -73,7 +76,6 @@ export const MOBILE_BRIDGE_EVENT_NAMES = [
   "confirm.updated",
   "browser.approval",
   "automation.updated",
-  "connection.changed",
 ] as const;
 
 export type MobileBridgeEventName = (typeof MOBILE_BRIDGE_EVENT_NAMES)[number];
@@ -99,6 +101,7 @@ export interface MobileBridgeInvokeSteerParams {
   goalMode?: boolean;
   appsGenerateMode?: boolean;
   borrowAgents?: string[];
+  expectedQuestionMessageId?: string;
   expectedRunId: string;
 }
 
@@ -244,7 +247,6 @@ export interface MobileBridgeInvocationToolDto {
 }
 
 export interface MobileBridgeInvocationEventDto {
-  /** usage/reasoning: 데스크탑 ✳ 상태줄 라이브 신호 — 모바일 클라이언트는 미지원 kind를 무시한다. */
   kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface" | "usage" | "reasoning";
   status?: string;
   text?: string;
@@ -257,6 +259,7 @@ export interface MobileBridgeInvocationEventDto {
   agentName?: string;
   role?: string;
   phase?: "plan" | "delegate" | "synthesize";
+  reasoning?: { phase: "start" | "end"; durationMs?: number };
 }
 
 export interface MobileBridgeHostDto {
@@ -383,6 +386,7 @@ export interface MobileBridgeChatMessageDto {
 
 export interface MobileBridgePendingConfirmationDto {
   chatId: string;
+  sourceMessageId: string;
   chatTitle: string;
   question: string;
   header: string | null;
@@ -395,6 +399,19 @@ export interface MobileBridgePendingConfirmationDto {
   agentId: string;
   firmId: string | null;
   createdAt: string;
+}
+
+/** A reconnect-safe, secret-free view of one live irreversible browser action. */
+export interface MobileBridgeBrowserApprovalDto {
+  status: "pending";
+  requestId: string;
+  site: string;
+  actionType: string;
+  summary: string;
+  target: string | null;
+  allowAlways: boolean;
+  createdAt: number;
+  expiresAt: number;
 }
 
 export interface MobileBridgeAutomationDto {
@@ -412,6 +429,9 @@ export interface MobileBridgeAutomationDto {
   triggerType: string;
   toolMode: string;
   hubMode: string;
+  runState: "unknown" | "idle" | "queued" | "running" | "completed" | "failed";
+  /** Stable marker only; raw scheduler errors may contain local paths. */
+  lastError: "automation_failed" | null;
 }
 
 export interface MobileBridgeUsageWindowDto {
@@ -448,6 +468,7 @@ export interface MobileBridgeSnapshot {
   chats: MobileBridgeChatDto[];
   messages: Record<string, MobileBridgeChatMessageDto[]>;
   pendingConfirmations: MobileBridgePendingConfirmationDto[];
+  pendingBrowserApprovals: MobileBridgeBrowserApprovalDto[];
   automations: MobileBridgeAutomationDto[];
   usage: MobileBridgeUsageProviderDto[];
   activeChatIds: string[];
@@ -461,6 +482,7 @@ const METHOD_SET: ReadonlySet<string> = new Set(MOBILE_BRIDGE_METHODS);
 const EVENT_SET: ReadonlySet<string> = new Set(MOBILE_BRIDGE_EVENT_NAMES);
 const BLOCKED_JSON_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
+  "snapshot.get",
   "host.status",
   "team.list",
   "firms.list",
@@ -470,6 +492,7 @@ const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "confirm.listPending",
   "automations.list",
   "runtime.detect",
+  "device.revokeSelf",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -572,6 +595,7 @@ function validateInvokeOptions(params: Record<string, unknown>): string | null {
   return firstError(
     optionalString(params, "runId", 160),
     requiredString(params, "chatId", 256),
+    optionalString(params, "expectedQuestionMessageId", 256),
     requiredText(params, "userPrompt", 200_000),
     validateEnum(params, "locale", ["ko", "en"]),
     validateEnum(params, "permissions", ["read", "write"]),
@@ -622,12 +646,12 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         ? firstError(requiredString(params, "chatId"), optionalInteger(params, "limit", 1, 200))
         : "invoke.history accepts only chatId and limit";
     case "invoke.start":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents", "expectedQuestionMessageId"])) {
         return "invoke.start contains unsupported fields";
       }
       return validateInvokeOptions(params);
     case "invoke.steer":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents", "expectedRunId"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents", "expectedRunId", "expectedQuestionMessageId"])) {
         return "invoke.steer contains unsupported fields";
       }
       return firstError(validateInvokeOptions(params), requiredString(params, "expectedRunId", 160));
@@ -791,10 +815,7 @@ export function parseMobileBridgePairExchangeRequest(
     return { ok: false, error: mobileBridgePairFailure(id, "invalid_pairing_request", "Invalid pairing request") };
   }
   const code = input.code;
-  if (
-    typeof code !== "string" ||
-    (!/^\d{6,8}$/.test(code) && !/^[A-Za-z0-9_-]{22}$/.test(code))
-  ) {
+  if (typeof code !== "string" || !/^[A-Za-z0-9_-]{22}$/.test(code)) {
     return { ok: false, error: mobileBridgePairFailure(id, "invalid_pairing_request", "Invalid pairing code") };
   }
   if (!isRecord(input.device) || !hasOnlyKeys(input.device, ["name", "platform", "appVersion"])) {

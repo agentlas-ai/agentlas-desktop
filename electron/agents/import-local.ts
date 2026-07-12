@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
+import { emitDesktopStoreChange } from "../store/change-bus";
 import { removeRoute, replaceRoute, listRoutes, type RuntimeLabel } from "./routes";
 import { getFirmBySlug, upsertLocalTeamFirm } from "../store/firms";
 import { scanAgentFolder, type FolderScan, type ScanMember } from "./folder-scan";
@@ -674,6 +675,8 @@ async function importLocalFolderOnce(
     kind,
     visibility: "visible",
   };
+  emitDesktopStoreChange({ entity: "agent", id });
+  if (firmId) emitDesktopStoreChange({ entity: "firm", id: firmId });
   return { agent, runtime, labels, kind, path: dir, ...(firmId ? { firmId } : {}) };
 }
 

@@ -173,3 +173,17 @@ fi
 # 반드시 마지막에 — electron-builder와 verify-mac-release 모두 latest-mac.yml을 .dmg로
 # 써버린다. 자동업데이트(Squirrel.Mac)는 .zip만 적용 가능하므로 zip 기준으로 재작성한다.
 node "$project_dir/scripts/fix-mac-latest-zip.mjs"
+
+# The x64 package is built last and electron-builder rewrites local native
+# modules for that target. Restore the developer machine architecture so
+# post-package smoke tests and the next local Desktop launch do not fail with a
+# cross-architecture better-sqlite3/keytar binary.
+case "$(uname -m)" in
+  arm64) host_arch="arm64" ;;
+  x86_64) host_arch="x64" ;;
+  *)
+    echo "Skipping native dependency restore for unsupported host architecture: $(uname -m)" >&2
+    exit 0
+    ;;
+esac
+npx electron-rebuild --force --arch="$host_arch"

@@ -1,11 +1,16 @@
 import { listInstalledAgents } from "../mcp/registry";
 import { detectRuntimes } from "../runtime/detect";
 import { listAgentGroups, listResolvedAgentGroups } from "../store/agent-groups";
-import { listAutomations } from "../store/automations";
+import {
+  getAutomationLiveRunState,
+  listAutomations,
+  listRunHistory,
+} from "../store/automations";
 import { listChatMessages, listRecentChats } from "../store/chats";
 import { listFirms } from "../store/firms";
 import { listProjects } from "../store/projects";
 import { listPendingConfirmations } from "../confirm";
+import { listEnvKeys } from "../secrets/vault";
 import { getUsageSnapshot } from "../usage";
 import type {
   Automation,
@@ -23,6 +28,7 @@ import {
   type MobileBridgeAgentDto,
   type MobileBridgeAgentGroupDto,
   type MobileBridgeAutomationDto,
+  type MobileBridgeBrowserApprovalDto,
   type MobileBridgeChatDto,
   type MobileBridgeChatMessageDto,
   type MobileBridgeFirmDto,
@@ -49,6 +55,7 @@ export interface MobileBridgeProjectionOptions {
   activeChatIds?: readonly string[];
   includeMessagesForChatIds?: readonly string[];
   maxMessagesPerChat?: number;
+  pendingBrowserApprovals?: readonly MobileBridgeBrowserApprovalDto[];
   now?: Date;
 }
 
@@ -93,7 +100,7 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
   };
 }
 
-function agentsDto(): MobileBridgeAgentDto[] {
+function agentsDto(presentEnvKeys: ReadonlySet<string>): MobileBridgeAgentDto[] {
   return listInstalledAgents().map((agent) => ({
     id: agent.id,
     slug: agent.slug,
@@ -110,7 +117,9 @@ function agentsDto(): MobileBridgeAgentDto[] {
     visibility: agent.visibility ?? "visible",
     // DESKTOP_MOBILE_BRIDGE: Only a boolean crosses the bridge. env key names,
     // hints, values, MCP config, prompts, package hashes, and local paths do not.
-    requiresSetup: agent.envRequirements.some((requirement) => requirement.required),
+    requiresSetup: agent.envRequirements.some(
+      (requirement) => requirement.required && !presentEnvKeys.has(requirement.key),
+    ),
   }));
 }
 
@@ -288,6 +297,7 @@ export function projectMobileBridgeConfirmations(
 ): MobileBridgePendingConfirmationDto[] {
   return confirmations.map((confirmation) => ({
     chatId: confirmation.chatId,
+    sourceMessageId: confirmation.sourceMessageId,
     chatTitle: displayText(confirmation.chatTitle, 1_024),
     question: displayText(confirmation.question, 4_096),
     header: optionalDisplayText(confirmation.header, 512),
@@ -307,6 +317,8 @@ export function projectMobileBridgeConfirmations(
 export function projectMobileBridgeAutomation(
   automation: Automation,
 ): MobileBridgeAutomationDto {
+  const latestRun = listRunHistory(automation.id, 1)[0];
+  const liveRunState = getAutomationLiveRunState(automation.id);
   return {
     id: automation.id,
     name: displayText(automation.name, 1_024),
@@ -322,6 +334,16 @@ export function projectMobileBridgeAutomation(
     triggerType: automation.triggerType ?? "schedule",
     toolMode: automation.toolMode ?? "auto",
     hubMode: automation.hubMode ?? "hub-allowed",
+    runState: liveRunState ?? (latestRun == null
+      ? "unknown"
+      : latestRun.status === "error"
+        ? "failed"
+        : latestRun.status === "ok"
+          ? "completed"
+          : "idle"),
+    lastError: liveRunState == null && latestRun?.status === "error"
+      ? "automation_failed"
+      : null,
     // DESKTOP_MOBILE_BRIDGE: promptTemplate, graph, webhook token, fs path,
     // and poll-source configuration remain on the Desktop.
   };
@@ -398,23 +420,25 @@ export async function projectMobileBridgeSnapshot(
   const activeChatIds = [...new Set(options.activeChatIds ?? [])];
   const activeSet = new Set(activeChatIds);
   const maxMessages = Math.max(1, Math.min(200, Math.floor(options.maxMessagesPerChat ?? 200)));
-  const [groups, runtimes, usage] = await Promise.all([
+  const [groups, runtimes, usage, presentEnvKeys] = await Promise.all([
     groupsDto(),
     detectRuntimes(),
     getUsageSnapshot(),
+    listEnvKeys().catch(() => [] as string[]),
   ]);
   const snapshot: MobileBridgeSnapshot = {
     schemaVersion: MOBILE_BRIDGE_PROTOCOL_VERSION,
     generatedAt: (options.now ?? new Date()).toISOString(),
     host: hostDto(options),
     runtimes: projectMobileBridgeRuntimes(runtimes),
-    agents: agentsDto(),
+    agents: agentsDto(new Set(presentEnvKeys)),
     firms: firmsDto(),
     groups,
     projects: projectsDto(),
     chats: chatsDto(activeSet),
     messages: {},
     pendingConfirmations: projectMobileBridgeConfirmations(),
+    pendingBrowserApprovals: [...(options.pendingBrowserApprovals ?? [])],
     automations: automationsDto(),
     usage: projectMobileBridgeUsage(usage),
     activeChatIds,

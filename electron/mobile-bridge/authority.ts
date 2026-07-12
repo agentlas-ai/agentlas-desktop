@@ -1,10 +1,13 @@
 import {
   browserResolveApproval,
+  listPendingBrowserApprovals,
   onBrowserApprovalLifecycle,
   type BrowserApprovalLifecycleEvent,
   type BrowserPermissionDecision,
 } from "../browser/connect";
+import { onDesktopStoreChange } from "../store/change-bus";
 import { invocationService } from "../invocation/service";
+import { claimPendingConfirmationAnswer } from "../confirm";
 import { detectRuntimes } from "../runtime/detect";
 import {
   getAutomation,
@@ -31,6 +34,7 @@ import {
   MOBILE_BRIDGE_PROTOCOL_VERSION,
   isMobileBridgeJsonValue,
   type MobileBridgeInvocationEventDto,
+  type MobileBridgeBrowserApprovalDto,
   type MobileBridgeInvokeSteerParams,
   type MobileBridgeJsonValue,
   type MobileBridgeRpcRequest,
@@ -68,6 +72,8 @@ export interface AgentlasDesktopMobileBridgeAuthorityOptions {
   displayName: string;
   appVersion: string;
   onError?: (error: Error) => void;
+  /** Production injects the pairing authority; tests may omit it unless exercising revocation. */
+  revokeDevice?: (deviceId: string) => boolean;
 }
 
 export type MobileBridgeAuthorityHandle = MobileBridgeAuthority & { dispose(): void };
@@ -258,15 +264,15 @@ function requireChat(id: string): Chat {
 function invocationParams(
   request: MobileBridgeRpcRequest,
   steering: false,
-): { invocation: McpInvocationRequest };
+): { invocation: McpInvocationRequest; expectedQuestionMessageId?: string };
 function invocationParams(
   request: MobileBridgeRpcRequest,
   steering: true,
-): { invocation: McpInvocationRequest; expectedRunId: string };
+): { invocation: McpInvocationRequest; expectedRunId: string; expectedQuestionMessageId?: string };
 function invocationParams(
   request: MobileBridgeRpcRequest,
   steering: boolean,
-): { invocation: McpInvocationRequest; expectedRunId?: string } {
+): { invocation: McpInvocationRequest; expectedRunId?: string; expectedQuestionMessageId?: string } {
   const params = guardedParams(
     request,
     steering
@@ -280,6 +286,7 @@ function invocationParams(
           "goalMode",
           "appsGenerateMode",
           "borrowAgents",
+          "expectedQuestionMessageId",
           "expectedRunId",
         ]
       : [
@@ -292,6 +299,7 @@ function invocationParams(
           "goalMode",
           "appsGenerateMode",
           "borrowAgents",
+          "expectedQuestionMessageId",
         ],
   );
   const invocation: McpInvocationRequest = {
@@ -305,6 +313,7 @@ function invocationParams(
   const goalMode = optionalBoolean(params, "goalMode");
   const appsGenerateMode = optionalBoolean(params, "appsGenerateMode");
   const borrowAgents = optionalBorrowAgents(params);
+  const expectedQuestionMessageId = optionalIdentifier(params, "expectedQuestionMessageId");
   if (runId !== undefined) invocation.runId = runId;
   if (locale !== undefined) invocation.locale = locale;
   if (permissions !== undefined) invocation.permissions = permissions;
@@ -315,7 +324,11 @@ function invocationParams(
   const expectedRunId: MobileBridgeInvokeSteerParams["expectedRunId"] | undefined = steering
     ? requiredIdentifier(params, "expectedRunId", RUN_ID_RE)
     : undefined;
-  return expectedRunId === undefined ? { invocation } : { invocation, expectedRunId };
+  return {
+    invocation,
+    ...(expectedRunId !== undefined ? { expectedRunId } : {}),
+    ...(expectedQuestionMessageId !== undefined ? { expectedQuestionMessageId } : {}),
+  };
 }
 
 function createChatParams(request: MobileBridgeRpcRequest): Parameters<typeof createChat>[0] {
@@ -454,6 +467,14 @@ export function projectMobileBridgeInvocationEvent(
   if (event.phase === "plan" || event.phase === "delegate" || event.phase === "synthesize") {
     projected.phase = event.phase;
   }
+  if (event.reasoning?.phase === "start" || event.reasoning?.phase === "end") {
+    projected.reasoning = {
+      phase: event.reasoning.phase,
+      ...(Number.isFinite(event.reasoning.durationMs) && Number(event.reasoning.durationMs) >= 0
+        ? { durationMs: Math.floor(Number(event.reasoning.durationMs)) }
+        : {}),
+    };
+  }
   if (event.error) {
     projected.error = {
       code: boundedRedactedText(event.error.code, 160),
@@ -525,7 +546,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   /** DESKTOP_MOBILE_BRIDGE: Exact compile-time allowlist; there is no dynamic IPC passthrough. */
   async request(
     request: MobileBridgeRpcRequest,
-    _context: MobileBridgeConnectionContext,
+    context: MobileBridgeConnectionContext,
   ): Promise<MobileBridgeJsonValue> {
     this.assertAvailable();
     if (
@@ -537,6 +558,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     }
 
     switch (request.method) {
+      case "snapshot.get": {
+        noParams(request);
+        return asJsonValue(await this.projectSnapshot(), request.method);
+      }
       case "host.status": {
         noParams(request);
         return asJsonValue((await this.projectSnapshot()).host, request.method);
@@ -625,14 +650,32 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         return projectInvocationHistory(invocationService.history(chatId), limit);
       }
       case "invoke.start": {
-        const { invocation } = invocationParams(request, false);
-        const result = invocationService.start(invocation);
+        const { invocation, expectedQuestionMessageId } = invocationParams(request, false);
+        const rollbackQuestionClaim = expectedQuestionMessageId
+          ? claimPendingConfirmationAnswer(invocation.chatId, expectedQuestionMessageId)
+          : null;
+        let result;
+        try {
+          result = invocationService.start(invocation);
+        } catch (error) {
+          rollbackQuestionClaim?.();
+          throw error;
+        }
         this.scheduleSnapshotUpdated();
         return asJsonValue(result, request.method);
       }
       case "invoke.steer": {
-        const { invocation, expectedRunId } = invocationParams(request, true);
-        const result = invocationService.steer(invocation, expectedRunId);
+        const { invocation, expectedRunId, expectedQuestionMessageId } = invocationParams(request, true);
+        const rollbackQuestionClaim = expectedQuestionMessageId
+          ? claimPendingConfirmationAnswer(invocation.chatId, expectedQuestionMessageId)
+          : null;
+        let result;
+        try {
+          result = invocationService.steer(invocation, expectedRunId);
+        } catch (error) {
+          rollbackQuestionClaim?.();
+          throw error;
+        }
         this.scheduleSnapshotUpdated();
         return asJsonValue(result, request.method);
       }
@@ -759,6 +802,17 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         noParams(request);
         return asJsonValue(projectMobileBridgeRuntimes(await detectRuntimes()), request.method);
       }
+      case "device.revokeSelf": {
+        noParams(request);
+        if (context.devBootstrap || context.devicePlatform === "dev") {
+          throw new Error("Development bootstrap credentials cannot revoke a paired device");
+        }
+        if (!this.options.revokeDevice) throw new Error("Device revocation authority is unavailable");
+        // Desired-state idempotency: another authenticated socket for the same
+        // device may have won the race, but the credential is revoked either way.
+        this.options.revokeDevice(context.deviceId);
+        return { revoked: true };
+      }
       default: {
         const unsupported: never = request.method;
         throw new TypeError(`Unsupported Mobile Bridge method: ${String(unsupported)}`);
@@ -793,12 +847,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
 
   private async projectSnapshot(): Promise<MobileBridgeSnapshot> {
     const activeChatIds = invocationService.activeChatIds();
+    const pendingBrowserApprovals = listPendingBrowserApprovals().map((approval) =>
+      this.projectBrowserApproval(approval));
     return projectMobileBridgeSnapshot({
       hostIdentity: this.options.hostIdentity,
       displayName: this.options.displayName,
       appVersion: this.options.appVersion,
       activeChatIds,
       includeMessagesForChatIds: activeChatIds,
+      pendingBrowserApprovals,
     });
   }
 
@@ -820,6 +877,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         this.scheduleSnapshotUpdated();
       }),
       onBrowserApprovalLifecycle((event) => this.forwardBrowserApproval(event)),
+      onDesktopStoreChange((change) => {
+        this.scheduleSnapshotUpdated(change.entity === "automation" ? change.id : undefined);
+      }),
     ];
   }
 
@@ -838,18 +898,28 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   /** DESKTOP_MOBILE_BRIDGE: approval identity is preserved; free-form copy is sanitized. */
   private forwardBrowserApproval(event: BrowserApprovalLifecycleEvent): void {
     const projected = event.status === "pending"
-      ? {
-          ...event,
-          site: boundedRedactedText(event.site, 1_024),
-          actionType: boundedRedactedText(event.actionType, 512),
-          summary: boundedRedactedText(event.summary, 4_096),
-          target: typeof event.target === "string"
-            ? boundedRedactedText(event.target, 2_048)
-            : null,
-        }
+      ? this.projectBrowserApproval(event)
       : event;
     this.emit({ event: "browser.approval", payload: asJsonValue(projected, "browser.approval") });
     if (event.status !== "pending") this.scheduleSnapshotUpdated();
+  }
+
+  private projectBrowserApproval(
+    approval: Extract<BrowserApprovalLifecycleEvent, { status: "pending" }> | ReturnType<typeof listPendingBrowserApprovals>[number],
+  ): MobileBridgeBrowserApprovalDto {
+    return {
+      status: "pending",
+      requestId: approval.requestId,
+      site: boundedRedactedText(approval.site, 1_024),
+      actionType: boundedRedactedText(approval.actionType, 512),
+      summary: boundedRedactedText(approval.summary, 4_096),
+      target: typeof approval.target === "string"
+        ? boundedRedactedText(approval.target, 2_048)
+        : null,
+      allowAlways: approval.allowAlways,
+      createdAt: approval.createdAt,
+      expiresAt: approval.expiresAt,
+    };
   }
 
   private emit(event: MobileBridgeAuthorityEvent): void {

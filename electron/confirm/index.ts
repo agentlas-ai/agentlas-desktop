@@ -9,6 +9,7 @@ import { getLastChatMessage, listRecentChats } from "../store/chats";
 
 const OPEN = "<<agentlas-ask>>";
 const CLOSE = "<</agentlas-ask>>";
+const claimedQuestionMessages = new Set<string>();
 
 function firstQuestion(
   text: string,
@@ -73,6 +74,7 @@ export function listPendingConfirmations(): PendingConfirmation[] {
     if (!q) continue;
     out.push({
       chatId: c.id,
+      sourceMessageId: last.id,
       chatTitle: c.title,
       question: q.question,
       header: q.header,
@@ -85,5 +87,41 @@ export function listPendingConfirmations(): PendingConfirmation[] {
     });
   }
   out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  const stillPending = new Set(out.map((item) => `${item.chatId}\0${item.sourceMessageId}`));
+  for (const claimed of claimedQuestionMessages) {
+    if (!stillPending.has(claimed)) claimedQuestionMessages.delete(claimed);
+  }
   return out;
+}
+
+/**
+ * Atomically claims the exact latest question before Mobile starts/steers an
+ * answer. The returned rollback is used only when the synchronous invocation
+ * admission itself fails. Accepted answers remain claimed so two phones cannot
+ * submit the same irreversible choice before the user message is persisted.
+ */
+export function claimPendingConfirmationAnswer(
+  chatId: string,
+  sourceMessageId: string,
+): () => void {
+  const key = `${chatId}\0${sourceMessageId}`;
+  if (claimedQuestionMessages.has(key)) {
+    throw new Error("This question answer was already accepted");
+  }
+  const last = getLastChatMessage(chatId);
+  if (
+    !last ||
+    last.id !== sourceMessageId ||
+    last.role !== "assistant" ||
+    !last.text.includes(OPEN) ||
+    !firstQuestion(last.text)
+  ) {
+    throw new Error("Question is stale or no longer pending");
+  }
+  claimedQuestionMessages.add(key);
+  if (claimedQuestionMessages.size > 10_000) {
+    const oldest = claimedQuestionMessages.values().next().value as string | undefined;
+    if (oldest && oldest !== key) claimedQuestionMessages.delete(oldest);
+  }
+  return () => claimedQuestionMessages.delete(key);
 }

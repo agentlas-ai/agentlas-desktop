@@ -6,6 +6,7 @@
 // 반환하며(null=미래 발생 없음 → 종료), markAutomationRun은 misfire coalesce 정책 + run_history
 // 기록 + max_runs/end_at 종료를 적용한다. graph_json/schedule_json/timezone은 additive.
 import { randomUUID } from "node:crypto";
+import { emitDesktopStoreChange } from "./change-bus";
 import { AUTOMATION_RUN_STALE_AFTER_MS, getDb } from "./db";
 import { nextRun, specFromStored, defaultTz } from "./schedule";
 import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
@@ -218,7 +219,9 @@ export function createAutomation(input: {
       }),
       normalizeHubMode(input.hubMode),
     );
-  return getAutomation(id) as Automation;
+  const automation = getAutomation(id) as Automation;
+  emitDesktopStoreChange({ entity: "automation", id });
+  return automation;
 }
 
 /**
@@ -286,7 +289,9 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
     nextRunAt,
     id,
   );
-  return getAutomation(id) as Automation;
+  const automation = getAutomation(id) as Automation;
+  emitDesktopStoreChange({ entity: "automation", id });
+  return automation;
 }
 
 export function toggleAutomation(id: string, enabled: boolean): Automation {
@@ -306,7 +311,9 @@ export function toggleAutomation(id: string, enabled: boolean): Automation {
   getDb()
     .prepare("UPDATE automations SET enabled = ?, next_run_at = ? WHERE id = ?")
     .run(enabled ? 1 : 0, nextRunAt, id);
-  return getAutomation(id) as Automation;
+  const automation = getAutomation(id) as Automation;
+  emitDesktopStoreChange({ entity: "automation", id });
+  return automation;
 }
 
 export function removeAutomation(id: string): void {
@@ -326,6 +333,8 @@ export function removeAutomation(id: string): void {
     db.prepare("DELETE FROM automations WHERE id = ?").run(id);
   });
   remove.immediate();
+  emitDesktopStoreChange({ entity: "automation", id });
+  emitDesktopStoreChange({ entity: "chat" });
 }
 
 /** 저장된 그래프를 갱신(그래프 편집/생성 경로). null이면 그래프 제거(단일 프롬프트로 복귀). */
@@ -357,7 +366,9 @@ export function updateAutomationGraph(id: string, graph: WorkflowGraph | null): 
       updateAutomation(id, { scheduleHuman: token, scheduleJson: null });
     }
   }
-  return getAutomation(id) as Automation;
+  const automation = getAutomation(id) as Automation;
+  emitDesktopStoreChange({ entity: "automation", id });
+  return automation;
 }
 
 // ── automation_runs — 그래프 라이브 실행 per-node 상태(설계 §5 P2) ───────────
@@ -422,6 +433,78 @@ export function hasDurableActiveAutomationExecution(id: string, now: Date = new 
   return now.getTime() - activeAtMs <= AUTOMATION_RUN_STALE_AFTER_MS;
 }
 
+export type AutomationLiveRunState = "queued" | "running" | null;
+
+/**
+ * Durable cross-process state for read-only clients such as Mobile Bridge.
+ *
+ * `claimed_at` is the scheduler lease and therefore the authority for work that
+ * has been accepted but has not created its graph snapshot yet. Once a fresh
+ * `automation_runs` row exists, that row is the authority for `running`.
+ * A terminal history row newer than the last lease heartbeat wins over the
+ * short mark-history -> release-lease window, so clients cannot get stuck on a
+ * false queued state after a very fast completion.
+ */
+export function getAutomationLiveRunState(
+  id: string,
+  now: Date = new Date(),
+): AutomationLiveRunState {
+  const db = getDb();
+  const parent = db.prepare(
+    "SELECT claimed_at, lease_owner FROM automations WHERE id = ?",
+  ).get(id) as { claimed_at: string | null; lease_owner: string | null } | undefined;
+  if (!parent) return null;
+
+  const latestHistory = db.prepare(
+    "SELECT ran_at FROM run_history WHERE automation_id = ? ORDER BY ran_at DESC LIMIT 1",
+  ).get(id) as { ran_at: string | null } | undefined;
+  const terminalAtMs = latestHistory?.ran_at == null ? Number.NaN : Date.parse(latestHistory.ran_at);
+  const activeRun = db.prepare(
+    `SELECT COALESCE(last_activity_at, started_at) AS active_at
+     FROM automation_runs
+     WHERE automation_id = ? AND status = 'running'
+     ORDER BY COALESCE(last_activity_at, started_at) DESC
+     LIMIT 1`,
+  ).get(id) as { active_at: string | null } | undefined;
+  if (activeRun) {
+    if (!activeRun.active_at) return "running";
+    const activeAtMs = Date.parse(activeRun.active_at);
+    const terminalWins = Number.isFinite(activeAtMs) &&
+      Number.isFinite(terminalAtMs) &&
+      terminalAtMs >= activeAtMs;
+    if (
+      !terminalWins &&
+      (!Number.isFinite(activeAtMs) || now.getTime() - activeAtMs <= AUTOMATION_RUN_STALE_AFTER_MS)
+    ) {
+      return "running";
+    }
+  }
+
+  if (parent.claimed_at == null) return null;
+  const claimedAtMs = Date.parse(parent.claimed_at);
+  let leaseIsActive = !Number.isFinite(claimedAtMs);
+  if (Number.isFinite(claimedAtMs)) {
+    const ageMs = now.getTime() - claimedAtMs;
+    leaseIsActive = ageMs <= AUTOMATION_LEASE_TTL_MS;
+    if (!leaseIsActive) {
+      const ownerPid = trustedAutomationLeasePid(parent.lease_owner);
+      leaseIsActive = ownerPid != null &&
+        ageMs <= AUTOMATION_LIVE_OWNER_GUARD_MS &&
+        isProcessAlive(ownerPid);
+    }
+  }
+  if (!leaseIsActive) return null;
+
+  if (
+    Number.isFinite(claimedAtMs) &&
+    Number.isFinite(terminalAtMs) &&
+    terminalAtMs >= claimedAtMs
+  ) {
+    return null;
+  }
+  return "queued";
+}
+
 /** 그래프 실행 시작 시 automation_runs 행 생성(상태 running). node_states는 초기 pending 맵. */
 export function startGraphRun(input: {
   runId: string;
@@ -448,6 +531,7 @@ export function startGraphRun(input: {
       input.automationId,
     );
   if (inserted.changes !== 1) throw new AutomationRunParentMissingError(input.automationId);
+  emitDesktopStoreChange({ entity: "automation", id: input.automationId });
 }
 
 /** 실행 중 노드 상태 갱신(running/done/failed/skipped). 행이 없으면 조용히 무시. */
@@ -659,6 +743,7 @@ export function markAutomationRun(
   } catch (err) {
     console.error("[automation] recordRun failed:", err);
   }
+  emitDesktopStoreChange({ entity: "automation", id });
 }
 
 // enabled이고 next_run_at이 지난(due) 자동화들.
@@ -753,6 +838,7 @@ export function claimAutomationRun(
            AND lease_owner IS ?`,
     )
     .run(now.toISOString(), owner, id, options.allowDisabled ? 1 : 0, row.claimed_at, row.lease_owner);
+  if (result.changes > 0) emitDesktopStoreChange({ entity: "automation", id });
   return result.changes > 0;
 }
 
@@ -790,5 +876,6 @@ export function releaseAutomationRun(id: string, owner: string): boolean {
       "UPDATE automations SET claimed_at = NULL, lease_owner = NULL WHERE id = ? AND lease_owner = ?",
     )
     .run(id, owner);
+  if (result.changes > 0) emitDesktopStoreChange({ entity: "automation", id });
   return result.changes > 0;
 }

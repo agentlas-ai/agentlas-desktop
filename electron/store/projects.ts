@@ -2,6 +2,7 @@
 // 프로젝트는 0개 이상의 chats를 grouping. 기본 에이전트와 컨텍스트 노트를 가질 수 있다.
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
+import { emitDesktopStoreChange } from "./change-bus";
 import type { Project } from "../../shared/types";
 
 interface ProjectRow {
@@ -56,7 +57,9 @@ export function createProject(input: {
        VALUES (?, ?, NULL, ?, ?, ?, ?, ?)`,
     )
     .run(id, input.name.trim() || "새 프로젝트", input.defaultAgentId ?? null, input.contextNote ?? null, input.folderPath ?? null, now, now);
-  return getProject(id) as Project;
+  const project = getProject(id) as Project;
+  emitDesktopStoreChange({ entity: "project", id });
+  return project;
 }
 
 export function updateProject(
@@ -80,15 +83,19 @@ export function updateProject(
     now,
     id,
   );
-  return getProject(id) as Project;
+  const project = getProject(id) as Project;
+  emitDesktopStoreChange({ entity: "project", id });
+  return project;
 }
 
 export function removeProject(id: string): void {
-  getDb().prepare("DELETE FROM projects WHERE id = ?").run(id);
+  const result = getDb().prepare("DELETE FROM projects WHERE id = ?").run(id);
+  if (result.changes > 0) emitDesktopStoreChange({ entity: "project", id });
 }
 
 export function touchProject(id: string): void {
-  getDb()
+  const result = getDb()
     .prepare("UPDATE projects SET updated_at = ? WHERE id = ?")
     .run(new Date().toISOString(), id);
+  if (result.changes > 0) emitDesktopStoreChange({ entity: "project", id });
 }
