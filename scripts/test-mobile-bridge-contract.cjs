@@ -1618,14 +1618,30 @@ async function main() {
   console.log("Mobile Bridge contract, reconnect sync, authenticated revocation, runtime retry, event ordering, and safe projection tests passed.");
 }
 
+function cleanupProjectionRoot() {
+  try {
+    fs.rmSync(projectionRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 100,
+    });
+  } catch (error) {
+    // Windows can retain short-lived file handles after the bridge closes.
+    // Test success must not turn into a hung Electron process because cleanup
+    // could not remove an expendable temporary directory immediately.
+    console.warn(`[mobile-bridge] temporary cleanup skipped: ${error.message}`);
+  }
+}
+
 main().then(
   () => {
-    fs.rmSync(projectionRoot, { recursive: true, force: true });
+    cleanupProjectionRoot();
     process.exit(0);
   },
   (error) => {
     console.error(error);
-    fs.rmSync(projectionRoot, { recursive: true, force: true });
+    cleanupProjectionRoot();
     process.exit(1);
   },
 );
