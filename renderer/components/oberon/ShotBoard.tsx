@@ -49,6 +49,12 @@ export function ShotBoard({
     [production.shots, sceneFilter],
   );
 
+  // 실제 생성된 키프레임 — 있으면 카드 컨택트시트 프레임에 그대로 보여준다 (빈 차콜 금지).
+  const keyframeByShot = useMemo(
+    () => new Map((production.keyframeAssets ?? []).map((asset) => [asset.shotId, asset])),
+    [production.keyframeAssets],
+  );
+
   // 연속성 메모리 스레드 — 씬별로 메모리가 이어지는지 한눈에. (목표 4)
   const continuitySpans = useMemo(() => {
     const chain = threadContinuity({
@@ -153,6 +159,7 @@ export function ShotBoard({
           <ShotCard
             key={shot.shotId}
             shot={shot}
+            keyframe={keyframeByShot.get(shot.shotId)}
             aspect={production.brief.aspect}
             editable={editable}
             onSwapProvider={() => swapProvider(shot.shotId)}
@@ -169,6 +176,7 @@ export function ShotBoard({
 
 function ShotCard({
   shot,
+  keyframe,
   aspect,
   editable,
   onSwapProvider,
@@ -178,6 +186,8 @@ function ShotCard({
   locale,
 }: {
   shot: ShotSpec;
+  /** 실제 생성된 첫 프레임 — 있으면 컨택트시트 프레임에 표시. */
+  keyframe?: OberonKeyframeAsset;
   aspect?: string;
   editable?: boolean;
   onSwapProvider?: () => void;
@@ -197,8 +207,16 @@ function ShotCard({
           aspectRatio: aspectCss(aspect),
           background: CHARCOAL,
           borderBottom: "1px solid var(--ob-edge)",
+          overflow: "hidden",
         }}
       >
+        {keyframe && (
+          <img
+            src={toLocalMediaSrc(keyframe.url)}
+            alt={shot.shotId}
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
+          />
+        )}
         <div style={{ position: "absolute", top: 7, left: 8, display: "flex", gap: 5, alignItems: "center" }}>
           <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", fontWeight: 600, color: "rgba(255,255,255,0.78)", letterSpacing: 0.3 }}>{shot.camera.size}</span>
           {shot.firstFrameAssetId && (

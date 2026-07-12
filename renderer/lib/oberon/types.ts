@@ -201,8 +201,10 @@ export interface ShotSpec {
   durationSec: number;
   shotType: SceneType; // 이 샷이 속한 커버리지 의도
   camera: CameraSpec;
-  /** 화면에서 일어나는 일 (action line). */
+  /** 화면에서 일어나는 일 (action line) — UI 표시용, 로케일 문장. */
   action: string;
+  /** 프롬프트 합성용 영어 action line — 생성 모델은 영어 지시를 더 잘 따른다. */
+  actionEn?: string;
   dialogue?: string;
   /** 이 샷이 참조하는 continuity 자산 id들. */
   continuityRefs: string[];

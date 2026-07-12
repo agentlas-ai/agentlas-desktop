@@ -75,8 +75,20 @@ function pickSetting(text: string): string {
   for (const loc of LOCATION_LEXICON) {
     const idx = text.indexOf(loc);
     if (idx >= 0) {
-      const around = text.slice(Math.max(0, idx - 6), idx + loc.length).replace(/^[^가-힣A-Za-z]+/, "").trim();
-      return around || loc;
+      // 키워드가 속한 절 전체를 이름으로 쓴다 — 고정 폭(6자)으로 자르면
+      // "비 내리는 오후의 작은 카페"가 "후의 작은 카페"처럼 어절 중간에서 깨진다.
+      const boundary = Math.max(...[...".!?。…,，;:\n·"].map((p) => text.lastIndexOf(p, idx)));
+      let phrase = text
+        .slice(boundary + 1, idx + loc.length)
+        .replace(/^[^가-힣A-Za-z0-9]+/, "")
+        .trim();
+      // 절이 지나치게 길면 키워드 쪽 어절부터 살려서 줄인다(어절 경계 유지).
+      if (phrase.length > 40) {
+        const words = phrase.split(/\s+/);
+        while (words.length > 1 && words.join(" ").length > 40) words.shift();
+        phrase = words.join(" ");
+      }
+      return phrase || loc;
     }
   }
   return "";

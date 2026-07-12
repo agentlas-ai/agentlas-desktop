@@ -223,26 +223,31 @@ export function composeReferencePrompt(args: {
   tone: string[];
   visualDirection: string;
 }): string {
-  const { kind, name, description, tone, visualDirection } = args;
+  const { kind, name, tone, visualDirection } = args;
   const mood = moodPhrase(tone);
+  // 설명이 비었거나 이름과 같으면(예: setting을 이름/설명 양쪽에 쓴 location)
+  // "X: X"처럼 중복되지 않게 이름만 쓴다.
+  const description = args.description.trim();
+  const dedup = description && description !== name.trim() ? description : "";
+  const subject = (sep: string) => (dedup ? `${name}${sep}${dedup}` : name);
   if (kind === "character") {
     // 마스터 시트 V2 규격 — 클린 그리드(정면·3/4·측면·전신·표정), 패널 ≤6,
     // 이미지 안 텍스트는 패널 헤더만. 얼굴/의상 일관성이 시트의 존재 이유.
-    return `Photoreal CHARACTER MASTER SHEET for ${name}: ${description}. Clean editorial multi-panel grid on a soft neutral background — 6 panels or fewer: 정면(FRONT) large portrait, 3/4 three-quarter view, 측면(SIDE) profile, 전신(FULL BODY) in the locked main outfit head to shoe, 표정(EXPRESSION) row of 2-3 head close-ups. Identical face, hair, outfit and lighting in EVERY panel. ONLY panel header labels printed (Korean + English in parentheses) — no other in-image text, no hex codes, no long captions. ${mood}. ${visualDirection}. Natural soft light, identity-locked, NO Japanese text, NO watermark, 2K detail.`;
+    return `Photoreal CHARACTER MASTER SHEET for ${subject(": ")}. Clean editorial multi-panel grid on a soft neutral background — 6 panels or fewer: 정면(FRONT) large portrait, 3/4 three-quarter view, 측면(SIDE) profile, 전신(FULL BODY) in the locked main outfit head to shoe, 표정(EXPRESSION) row of 2-3 head close-ups. Identical face, hair, outfit and lighting in EVERY panel. ONLY panel header labels printed (Korean + English in parentheses) — no other in-image text, no hex codes, no long captions. ${mood}. ${visualDirection}. Natural soft light, identity-locked, NO Japanese text, NO watermark, 2K detail.`;
   }
   if (kind === "location") {
-    return `Establishing reference of ${name}: ${description}. Wide empty plate plus key angles, consistent architecture and props, ${mood}. ${visualDirection}. Photorealistic depth, accurate spatial layout.`;
+    return `Establishing reference of ${subject(": ")}. Wide empty plate plus key angles, consistent architecture and props, ${mood}. ${visualDirection}. Photorealistic depth, accurate spatial layout.`;
   }
   if (kind === "wardrobe") {
-    return `Wardrobe reference: ${name} — ${description}. Flat lay and on-figure, consistent color and material. ${visualDirection}.`;
+    return `Wardrobe reference: ${subject(" — ")}. Flat lay and on-figure, consistent color and material. ${visualDirection}.`;
   }
   if (kind === "prop") {
-    return `Prop reference: ${name} — ${description}. Isolated on neutral background, multiple angles, macro detail. ${visualDirection}.`;
+    return `Prop reference: ${subject(" — ")}. Isolated on neutral background, multiple angles, macro detail. ${visualDirection}.`;
   }
   if (kind === "vehicle") {
-    return `Vehicle reference: ${name} — ${description}. 3/4 hero angle and side profile, consistent paint and details. ${visualDirection}.`;
+    return `Vehicle reference: ${subject(" — ")}. 3/4 hero angle and side profile, consistent paint and details. ${visualDirection}.`;
   }
-  return `Style frame: ${name} — ${description}. ${mood}. ${visualDirection}.`;
+  return `Style frame: ${subject(" — ")}. ${mood}. ${visualDirection}.`;
 }
 
 // ── 키프레임(첫/끝 프레임) 프롬프트 ──────────────────────

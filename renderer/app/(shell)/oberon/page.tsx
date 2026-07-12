@@ -37,6 +37,7 @@ import {
   resolveOberonAnimateProvider,
   resolveOberonRenderProvider,
 } from "@shared/oberon-provider-routing";
+import { buildMasterSheetV2Prompt } from "@shared/oberon-sheets";
 import {
   clearOberonBackgroundJobsForProduction,
   failOberonBackgroundJob,
@@ -69,6 +70,7 @@ import type {
   JsonObject,
   OberonKeyframeJob,
   OberonKeyframeRequest,
+  OberonSheetRequest,
   OberonAnimateJob,
   OberonAnimateKeyStatus,
   OberonAnimateProvider,
@@ -106,6 +108,10 @@ export default function OberonPage() {
   const [keyframeJob, setKeyframeJob] = useState<OberonKeyframeJob | null>(null);
   const keyframePoll = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // 03 마스터 시트(정체성 락) 이미지 생성 — 키프레임 잡 인프라 재사용
+  const [sheetGenerating, setSheetGenerating] = useState(false);
+  const sheetPoll = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // 실제 영상 렌더
   const [videoMode, setVideoMode] = useState<"veo" | "motion_ad">("veo");
   const [videoGenerating, setVideoGenerating] = useState(false);
@@ -127,6 +133,7 @@ export default function OberonPage() {
 
   useEffect(() => () => {
     if (keyframePoll.current) clearInterval(keyframePoll.current);
+    if (sheetPoll.current) clearInterval(sheetPoll.current);
     if (renderPoll.current) clearInterval(renderPoll.current);
     if (motionPoll.current) clearInterval(motionPoll.current);
     if (animatePoll.current) clearInterval(animatePoll.current);
@@ -674,6 +681,107 @@ export default function OberonPage() {
       });
   }, [locale, model.imageProvider, pollKeyframeJob, production]);
 
+  // 03 마스터 시트 생성 결과를 production.sheetAssets로 머지 — AssetBible이 reference id로 찾아 그린다.
+  const materializeSheetJob = useCallback((job: OberonKeyframeJob) => {
+    setProduction((p) => {
+      if (!p) return p;
+      const merged = [
+        ...(p.sheetAssets ?? []).filter((asset) => !job.assets.some((next) => next.shotId === asset.shotId)),
+        ...job.assets,
+      ];
+      const next: FilmProduction = { ...p, sheetAssets: merged };
+      saveProduction(next);
+      return next;
+    });
+  }, []);
+
+  const pollSheetJob = useCallback(
+    (jobId: string) => {
+      if (sheetPoll.current) clearInterval(sheetPoll.current);
+      sheetPoll.current = setInterval(() => {
+        // 탭 숨김 시 이 tick만 skip(타이머·주기 유지) — 백그라운드 폴링 폭주 방지.
+        if (typeof document !== "undefined" && document.hidden) return;
+        void (async () => {
+          const bridge = ipc();
+          const job = await bridge?.oberon.getKeyframeJob(jobId);
+          if (!job) return;
+          trackOberonLiveJob("keyframe", job);
+          if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
+            if (sheetPoll.current) clearInterval(sheetPoll.current);
+            sheetPoll.current = null;
+            setSheetGenerating(false);
+            if (job.assets.length > 0) materializeSheetJob(job);
+          }
+        })().catch((error) => {
+          if (sheetPoll.current) clearInterval(sheetPoll.current);
+          sheetPoll.current = null;
+          setSheetGenerating(false);
+          failOberonBackgroundJob("keyframe", jobId, error instanceof Error ? error.message : String(error));
+        });
+      }, 1000);
+    },
+    [materializeSheetJob],
+  );
+
+  // 03 마스터 시트 이미지 생성 — 레퍼런스(인물·배경·소품)별 정체성 시트 한 장씩.
+  const startSheets = useCallback(() => {
+    if (!production) return;
+    const bridge = ipc();
+    if (!bridge?.oberon?.startSheets) {
+      const failedJob = localKeyframeError(
+        production,
+        locale === "ko"
+          ? "Electron Oberon 브리지를 사용할 수 없습니다. 데스크톱 앱에서 다시 실행해야 실제 이미지 생성이 가능합니다."
+          : "The Electron Oberon bridge is unavailable. Relaunch inside the desktop app to generate real images.",
+      );
+      trackOberonLiveJob("keyframe", failedJob);
+      return;
+    }
+    const refs = production.bible.references.filter(
+      (r) => r.kind === "character" || r.kind === "location" || r.kind === "prop",
+    );
+    if (!refs.length) return;
+    const sheetProvider =
+      model.imageProvider === "grok-cli-image"
+        ? "grok-cli-image"
+        : model.imageProvider === "google-image"
+          ? "google-imagen"
+          : "codex-imagegen-cli";
+    const request: OberonSheetRequest = {
+      productionId: production.id,
+      title: production.brief.title,
+      sheets: refs.map((r) => ({
+        id: r.id,
+        kind: "master_sheet_v2" as const,
+        prompt: buildMasterSheetV2Prompt({
+          mode: r.kind === "character" ? "character" : r.kind === "prop" ? "product" : "location",
+          name: r.name,
+          description: [r.notes, ...r.lockedTraits].filter(Boolean).join(", ") || r.name,
+          vibe: production.bible.visualDirection,
+        }),
+      })),
+      provider: sheetProvider,
+      model:
+        sheetProvider === "grok-cli-image"
+          ? "grok-imagine-image"
+          : sheetProvider === "google-imagen"
+            ? "imagen-4.0-generate-001"
+            : "image_gen.imagegen",
+    };
+    setSheetGenerating(true);
+    void bridge.oberon
+      .startSheets(request)
+      .then((job) => {
+        trackOberonLiveJob("keyframe", job);
+        pollSheetJob(job.id);
+      })
+      .catch((error) => {
+        const failedJob = localKeyframeError(production, error instanceof Error ? error.message : String(error));
+        trackOberonLiveJob("keyframe", failedJob);
+        setSheetGenerating(false);
+      });
+  }, [locale, model.imageProvider, pollSheetJob, production]);
+
   // 05 실제 영상 렌더 — Electron main이 선택된 Grok Imagine/Veo 엔진과 파일 저장을 담당한다.
   const startVideo = useCallback(() => {
     if (!production) return;
@@ -1190,7 +1298,16 @@ export default function OberonPage() {
           </StepFrame>
         );
       case "assets":
-        return <AssetBible production={production} model={model} approved={isDone("assets")} onApprove={approveAssets} />;
+        return (
+          <AssetBible
+            production={production}
+            model={model}
+            approved={isDone("assets")}
+            onApprove={approveAssets}
+            sheetGenerating={sheetGenerating}
+            onGenerateSheets={startSheets}
+          />
+        );
       case "keyframe":
         return (
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>

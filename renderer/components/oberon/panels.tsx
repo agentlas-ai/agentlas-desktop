@@ -117,8 +117,8 @@ export function KeyframeLab({ production }: { production: FilmProduction }) {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 14 }}>
           {kfShots.map((shot) => {
             const refs = production.bible.references.filter((r) => shot.continuityRefs.includes(r.id));
-            const first = composeKeyframePrompt({ which: "first", shotAction: shot.action, camera: shot.camera, refs, bible: production.bible, aspect: production.brief.aspect });
-            const last = composeKeyframePrompt({ which: "last", shotAction: shot.action, camera: shot.camera, refs, bible: production.bible, aspect: production.brief.aspect });
+            const first = composeKeyframePrompt({ which: "first", shotAction: shot.actionEn ?? shot.action, camera: shot.camera, refs, bible: production.bible, aspect: production.brief.aspect });
+            const last = composeKeyframePrompt({ which: "last", shotAction: shot.actionEn ?? shot.action, camera: shot.camera, refs, bible: production.bible, aspect: production.brief.aspect });
             return (
               <Card key={shot.shotId} style={{ padding: 12 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 10 }}>

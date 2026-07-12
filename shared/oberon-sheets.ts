@@ -27,7 +27,7 @@ export type OberonSheetKind =
   | "scene_stack_4"
   | "storyboard_sequence";
 
-export type OberonSheetMode = "character" | "product";
+export type OberonSheetMode = "character" | "product" | "location";
 
 // ── 연속성 네거티브 캐논 (영상 렌더 공통) ─────────────────────
 // 카테고리: 콘텐츠 오염 / 얼굴·신체 결함 / 시간·조명 드리프트 / 의상 플리커 / AI 결함.
@@ -105,6 +105,16 @@ export interface OberonMasterSheetSpec {
 }
 
 export function buildMasterSheetV2Prompt(spec: OberonMasterSheetSpec): string {
+  if (spec.mode === "location") {
+    // AssetBible의 배경 번들 슬롯(establishing/코너 디테일/주간 조명/야간 조명)과 1:1 패널.
+    return [
+      "You are a film location scout and cinematographer. Generate ONE photoreal LOCATION MASTER SHEET, clean multi-panel layout on a soft neutral background, landscape orientation.",
+      `[LOCATION] ${spec.name}: ${spec.description}, the SAME place with identical architecture and layout in every panel.${spec.vibe ? ` Vibe: ${spec.vibe}.` : ""}`,
+      "[PANELS — 4, header text only] 1. 설정(ESTABLISHING) — wide master view of the whole space. 2. 디테일(CORNER DETAIL) — close-up of textures and props. 3. 주간(DAY) — daytime lighting. 4. 야간(NIGHT) — night lighting with practicals on.",
+      "[STYLE RULES] Photoreal cinematic location photography, identical geography/furniture/props in EVERY panel; only the light changes between DAY and NIGHT. ONLY panel header labels printed — NO other in-image text, NO hex codes, NO callouts.",
+      SHEET_COMMON_RULES.join(", ") + ".",
+    ].join("\n");
+  }
   if (spec.mode === "product") {
     return [
       "You are a commercial product photographer and packaging art director. Generate ONE photoreal PRODUCT MASTER SHEET, clean studio layout on a cream/neutral background, landscape orientation.",

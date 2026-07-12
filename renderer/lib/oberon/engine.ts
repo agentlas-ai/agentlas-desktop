@@ -298,6 +298,9 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
     emotionEn?: string;
     sceneType: Scene["type"];
     durationSec: number;
+    /** 같은 템플릿 비트의 몇 번째 반복인지 (0-based) — 복붙처럼 보이지 않게 번호·진행을 붙인다. */
+    copyIndex: number;
+    copyCount: number;
   }
   const expanded: ExpandedBeat[] = [];
   for (const tb of template.beats) {
@@ -311,6 +314,8 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
         emotionEn: readEmotionEn(tb),
         sceneType: tb.sceneType,
         durationSec: beatDur,
+        copyIndex: i,
+        copyCount: n,
       });
     }
   }
@@ -374,10 +379,12 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
         const hasDialogue = eb.sceneType === "dialogue" && cov.size !== "ELS" && cov.size !== "LS" && rng() > 0.4;
         const dialogue = hasDialogue ? sampleDialogue(brief, eb.emotion, rng) : undefined;
         const action = buildActionLine(brief, eb, cov, refsForShot, locale);
+        // 생성 모델 프롬프트는 항상 영어 액션 라인으로 — 표시 언어와 분리.
+        const actionEn = locale === "ko" ? buildActionLine(brief, eb, cov, refsForShot, "en") : action;
 
         const camera = { size: cov.size, angle: cov.angle, movement: cov.movement, lens: cov.lens };
         const generationPrompt = composeShotPrompt({
-          action,
+          action: actionEn,
           dialogue,
           camera,
           scene: {
@@ -418,6 +425,7 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
           shotType: eb.sceneType,
           camera,
           action,
+          actionEn,
           dialogue,
           continuityRefs: refsForShot.map((r) => r.id),
           requiresKeyframe: cov.needsKeyframes,
@@ -437,7 +445,9 @@ export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmPr
 
       beatsArr.push({
         id: beatId,
-        name: pickText(eb.tplName, eb.tplNameEn, locale),
+        name:
+          pickText(eb.tplName, eb.tplNameEn, locale) +
+          (eb.copyCount > 1 ? ` ${eb.copyIndex + 1}/${eb.copyCount}` : ""),
         description: buildBeatDescription(brief, eb, locale),
         emotion: pickText(eb.emotion, eb.emotionEn, locale),
         shotIds,
@@ -561,11 +571,11 @@ function enrichShots(args: {
       .filter((r): r is ReferenceEntry => Boolean(r));
     const energy = MOVEMENTS[shot.camera.movement].energy;
 
-    // 1) 초 단위 안무.
+    // 1) 초 단위 안무 — 프롬프트 합성 계열은 영어 액션 라인 사용.
     const chor = composeChoreography({
       durationSec: shot.durationSec,
       camera: shot.camera,
-      action: shot.action,
+      action: shot.actionEn ?? shot.action,
       energy,
       hasDialogue: Boolean(shot.dialogue),
       allowSpeedFx,
@@ -595,7 +605,7 @@ function enrichShots(args: {
 
     // 4) 영화적 프롬프트 재합성 (연속성 + 안무 + 오디오 + 텍스트 금지).
     shot.generationPrompt = composeShotPrompt({
-      action: shot.action,
+      action: shot.actionEn ?? shot.action,
       dialogue: shot.dialogue,
       camera: shot.camera,
       scene: scene ?? {
@@ -777,6 +787,9 @@ function videoRatePerSecond(videoProviderIds: string[] | undefined): {
 
 // ── 내러티브 템플릿 (결정적) ─────────────────────────────
 
+// 액션 라인은 두 벌이다: 표시용(로케일 완결 문장)과 프롬프트용(영어).
+// 한 문장 틀에 양쪽 언어를 끼워 넣으면 "the subject alone — 눈·미세표정, 정화 on the face"
+// 같은 깨진 문장이 나온다 — 절대 섞지 않는다.
 function buildActionLine(
   brief: FilmBrief,
   eb: { tplName: string; tplNameEn: string; sceneType: Scene["type"]; emotion: string; emotionEn?: string },
@@ -784,11 +797,33 @@ function buildActionLine(
   refs: ReferenceEntry[],
   locale: Locale,
 ): string {
-  const who = refs.find((r) => r.kind === "character")?.name || brief.characters[0]?.name || "the subject";
   const product = brief.brandOrProduct;
-  const role = pickText(cov.role, cov.roleEn, locale);
-  const emotion = pickText(eb.emotion, eb.emotionEn, locale);
-  const tplName = pickText(eb.tplName, eb.tplNameEn, locale);
+  if (locale === "ko") {
+    const who = refs.find((r) => r.kind === "character")?.name || brief.characters[0]?.name || "주인공";
+    const role = cov.role;
+    const emotion = eb.emotion;
+    const tplName = eb.tplName;
+    switch (eb.sceneType) {
+      case "product":
+        return `${product || "제품"}의 ${role} — ${emotion} 무드, 형태와 디테일 강조`;
+      case "dialogue":
+        return `${who}의 대화 — ${role}, ${emotion}`;
+      case "action":
+        return `${who}의 움직임 — ${role}, 역동적인 ${emotion}`;
+      case "emotional":
+        return `홀로 있는 ${who} — ${role}, 얼굴에 번지는 ${emotion}`;
+      case "establishing":
+        return `${brief.setting || "공간"}의 ${role} — "${tplName}"의 ${emotion}을 여는 컷`;
+      case "montage":
+        return `${role} — "${tplName}"를 밀고 가는 짧은 ${emotion}의 조각`;
+      default:
+        return `${role} — ${emotion} 브리지`;
+    }
+  }
+  const who = refs.find((r) => r.kind === "character")?.name || brief.characters[0]?.name || "the subject";
+  const role = cov.roleEn || cov.role;
+  const emotion = eb.emotionEn || eb.emotion;
+  const tplName = eb.tplNameEn || eb.tplName;
   switch (eb.sceneType) {
     case "product":
       return `${role} of ${product || "the product"}, ${emotion} mood, emphasizing form and detail`;
@@ -809,12 +844,34 @@ function buildActionLine(
 
 function buildBeatDescription(
   brief: FilmBrief,
-  eb: { tplName: string; tplNameEn: string; emotion: string; emotionEn?: string; sceneType: Scene["type"] },
+  eb: {
+    tplName: string;
+    tplNameEn: string;
+    emotion: string;
+    emotionEn?: string;
+    sceneType: Scene["type"];
+    copyIndex?: number;
+    copyCount?: number;
+  },
   locale: Locale,
 ): string {
   const tplName = pickText(eb.tplName, eb.tplNameEn, locale);
   const emotion = pickText(eb.emotion, eb.emotionEn, locale);
-  return `[${tplName}] ${emotion} — ${brief.logline.slice(0, 80)}${brief.logline.length > 80 ? "…" : ""}`;
+  const phase = beatProgression(eb.copyIndex ?? 0, eb.copyCount ?? 1, locale);
+  return `[${tplName}] ${emotion}${phase ? ` · ${phase}` : ""} — ${brief.logline.slice(0, 80)}${brief.logline.length > 80 ? "…" : ""}`;
+}
+
+/** 같은 템플릿 비트가 여러 번 반복될 때 각 반복에 서사적 진행을 부여한다. */
+function beatProgression(i: number, n: number, locale: Locale): string {
+  if (n <= 1) return "";
+  if (locale === "ko") {
+    if (i === 0) return "비트를 연다";
+    if (i === n - 1) return "다음 국면으로 넘긴다";
+    return "밀도를 한 단계 올린다";
+  }
+  if (i === 0) return "opens the beat";
+  if (i === n - 1) return "hands off to the next movement";
+  return "raises the density";
 }
 
 function buildSceneSummary(
