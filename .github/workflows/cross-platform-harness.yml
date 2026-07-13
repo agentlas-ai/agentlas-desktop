@@ -49,6 +49,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install Linux keychain runtime
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-0
       - name: Install Desktop dependencies
         working-directory: agentlas-desktop
         run: npm ci

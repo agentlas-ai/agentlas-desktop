@@ -549,7 +549,7 @@ async function main() {
     stormbreakerCoreHarnessExact: true,
   }, null, 2));
 
-  fs.rmSync(temp, { recursive: true, force: true });
+  fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }
 
 main()
@@ -557,7 +557,7 @@ main()
   .catch((error) => {
     console.error(error);
     try {
-      fs.rmSync(temp, { recursive: true, force: true });
+      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     } catch {
       // Best-effort fixture cleanup.
     }
