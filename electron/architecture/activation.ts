@@ -34,8 +34,8 @@ async function ensureCoreProject(projectPath: string, projectName?: string): Pro
 }
 
 /**
- * Record a visit to a working folder. Activates the architecture once the visit count
- * crosses the threshold. Idempotent and cheap.
+ * Record the first writable contact with a working folder and ensure the
+ * canonical Core-owned project architecture. Idempotent and merge-only.
  */
 export async function recordFolderVisit(projectPath: string, projectName?: string): Promise<VisitResult> {
   const db = getDb();

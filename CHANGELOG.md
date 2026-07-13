@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.22 — 2026-07-14
+
+### Fixed
+
+- **The release gate now verifies the new first contact contract instead of the
+  retired visit threshold.** The first writable Desktop contact must create the
+  canonical Agentlas OS v1.1.25 project architecture and privacy block
+  immediately; later read-only turns must neither create a project nor record
+  another writable visit.
+- **The live-verified workload boundary remains enforced.** Parent AIs select
+  exact model IDs from runtime inventory without vendor model aliases or
+  tier-to-model mappings, while Desktop validates capabilities, context, cost,
+  and explicit pins.
+
 ## 0.8.21 — 2026-07-14
 
 ### Added
