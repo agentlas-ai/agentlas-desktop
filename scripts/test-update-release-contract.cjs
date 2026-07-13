@@ -55,12 +55,12 @@ assert.equal(compatibility.minimumRuntimeVersion, "1.0.4", "v0.7.0 shipped Hepha
 assert.equal(compatibility.minimumSchemaVersion, 35, "v0.7.0 shipped SQLite schema 35");
 assert.equal(
   compatibility.bundledRuntimeVersion,
-  "1.1.23",
-  "the next Desktop patch must include the current Windows Stormbreaker/native harness fixes",
+  "1.1.25",
+  "the next Desktop patch must include the canonical first-contact bootstrap and model allocation contract",
 );
 assert.equal(runtimeSource.ref, `v${compatibility.bundledRuntimeVersion}`, "runtime source ref must match compatibility");
 assert.match(runtimeSource.commit, /^[0-9a-f]{40}$/, "runtime source must pin an immutable full commit");
-assert.equal(runtimeSource.commit, "d121a703ea0a2ec87f53c9bdcf5bcc12e31bdf4d", "Agentlas OS v1.1.23 commit drift");
+assert.equal(runtimeSource.commit, "9ec417054eb5bfd64f7d8071ba73b5f4a01f3082", "Agentlas OS v1.1.25 commit drift");
 assert.equal(compatibility.bundledRuntimeVersion, manifest.version, "feed runtime must match the bundled Hephaestus manifest");
 assert.equal(
   spawnSync("git", ["-C", path.join(root, "Hephaestus"), "rev-parse", "HEAD^{commit}"], { encoding: "utf8" }).stdout.trim(),
@@ -147,8 +147,8 @@ const changelogReleaseSection = releaseSection(
 );
 assert.match(readme, /macOS 12 Monterey or newer/);
 assert.match(readme, /macOS 11 Big Sur:[\s\S]*?last compatible Agentlas release[\s\S]*?excluded/);
-assert.match(readmeReleaseSection, /Agentlas OS pin[\s\S]*?v1\.1\.23[\s\S]*?__pycache__/, "README current release section must describe the runtime boundary");
-assert.match(changelogReleaseSection, /v1\.1\.23[\s\S]*?Windows[\s\S]*?Stormbreaker/, "CHANGELOG current release section must describe the runtime boundary");
+assert.match(readmeReleaseSection, /Agentlas OS v1\.1\.25[\s\S]*?first contact[\s\S]*?live-verified/, "README current release section must describe the Core bootstrap and allocation boundary");
+assert.match(changelogReleaseSection, /first contact[\s\S]*?Agentlas OS v1\.1\.25[\s\S]*?vendor model aliases/, "CHANGELOG current release section must describe the Core bootstrap and allocation boundary");
 assert.match(publishMacSource, /Requires macOS 12 Monterey or newer/);
 assert.match(publishMacSource, /macOS 11 Big Sur stays on the last compatible release/);
 assert.match(packageMacSource, /smoke-signed-mac-python-cache\.cjs/);

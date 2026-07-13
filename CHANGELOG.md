@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.8.21 — 2026-07-14
+
+### Added
+
+- **Every writable folder gets the canonical Agentlas project architecture on
+  first contact.** Desktop calls Agentlas OS v1.1.25 instead of maintaining a
+  second initializer, so the project soul, memory map, code map, ontology,
+  Career Graph, and privacy-first `.gitignore` are identical to Terminal,
+  Claude Code, Codex, Network, Cloud, and Storm. Existing files remain
+  merge-only and are never overwritten.
+
+### Fixed
+
+- **Workload allocation no longer embeds vendor model aliases or tier-to-model
+  mappings.** The parent AI receives only live-verified model IDs and must pick
+  an exact advertised ID. Desktop validates that choice and explicit pins,
+  then preserves the active model when the choice is missing or stale.
+- **Static picker catalogs are no longer treated as executable allocation
+  inventory.** Claude Code and BYOK advertise only the active verified model;
+  Codex, Grok, and Ollama expose models returned by their live discovery paths.
+
 ## 0.8.20 — 2026-07-14
 
 ### Fixed

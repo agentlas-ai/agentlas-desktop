@@ -205,6 +205,8 @@ export interface RuntimeStatus {
   model?: string | null;
   /** ollama가 로컬에 받아둔 모델 목록 (설정 화면의 모델 선택용). 그 외 LLM은 미설정 */
   availableModels?: string[];
+  /** Models verified by the live host and safe for automatic allocation. UI fallback catalogs stay separate. */
+  allocationModels?: string[];
   /** BYOK 긴 컨텍스트(1M) 토글 상태. beta-header 모델에서만 의미 있음. */
   longContextEnabled?: boolean;
   /** 작업량(reasoning effort) 현재 선택값 — claude-code 전용. 미설정이면 기본. */

@@ -1275,7 +1275,7 @@ export async function runMcpInvocation(
   let activePath: string | null = null;
   if (canWrite && workingFolder) {
     try {
-      const visit = recordFolderVisit(workingFolder);
+      const visit = await recordFolderVisit(workingFolder);
       if (visit.activated) activePath = workingFolder;
     } catch (err) {
       console.error("[architecture] recordFolderVisit failed:", err);

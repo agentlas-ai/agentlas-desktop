@@ -37,6 +37,7 @@ function cloneRuntimeStatuses(list: RuntimeStatus[]): RuntimeStatus[] {
   return list.map((runtime) => ({
     ...runtime,
     availableModels: runtime.availableModels ? [...runtime.availableModels] : runtime.availableModels,
+    allocationModels: runtime.allocationModels ? [...runtime.allocationModels] : runtime.allocationModels,
     efforts: runtime.efforts ? runtime.efforts.map((effort) => ({ ...effort })) : runtime.efforts,
   }));
 }
@@ -231,6 +232,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   const list: RuntimeStatus[] = [];
 
   if (cc) {
+    const selectedClaudeModel = cliModelOf("claude-code", active, undefined, "anthropic");
     list.push({
       kind: "claude-code",
       backend: "anthropic",
@@ -238,8 +240,9 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       version: cc.version,
       active: false,
       // 컨텍스트는 CLI가 자동 관리하지만 모델은 --model로 선택 가능 (opus/sonnet/haiku).
-      model: cliModelOf("claude-code", active, undefined, "anthropic"),
+      model: selectedClaudeModel,
       availableModels: cliModels("claude-code").map((m) => m.id),
+      allocationModels: selectedClaudeModel ? [selectedClaudeModel] : [],
       // 작업량 — 현재 선택값 + 이 CLI가 지원하는 레벨(--help 파싱으로 자동 동기화).
       effort: getStoredEffort(),
       efforts: claudeEfforts,
@@ -259,6 +262,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       // Codex도 선택 모델을 저장·복원해야 --model이 다음 대화까지 유지된다.
       model: cliModelOf("codex", active, codexModels, "openai"),
       availableModels: codexModels,
+      allocationModels: codexDiscoveredModels,
     });
   }
   if (gm) {
@@ -282,6 +286,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: storedGrok ?? grokModels[0],
       availableModels: grokModels,
+      allocationModels: gr.models,
     });
   }
   if (ollama) {
@@ -302,41 +307,48 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: preferred,
       availableModels: ollama.models,
+      allocationModels: ollama.models,
     });
   }
   if (anthropicByok) {
+    const selectedModel = byokModelOf("anthropic", active);
     list.push({
       kind: "byok",
       backend: "anthropic",
       source: "byok:anthropic",
       version: null,
       active: false,
-      model: byokModelOf("anthropic", active),
+      model: selectedModel,
       availableModels: byokModels("anthropic").map((m) => m.id),
+      allocationModels: selectedModel ? [selectedModel] : [],
       longContextEnabled: byokLongOf("anthropic", active),
     });
   }
   if (openaiByok) {
+    const selectedModel = byokModelOf("openai", active);
     list.push({
       kind: "byok",
       backend: "openai",
       source: "byok:openai",
       version: null,
       active: false,
-      model: byokModelOf("openai", active),
+      model: selectedModel,
       availableModels: byokModels("openai").map((m) => m.id),
+      allocationModels: selectedModel ? [selectedModel] : [],
       longContextEnabled: byokLongOf("openai", active),
     });
   }
   if (googleByok) {
+    const selectedModel = byokModelOf("google", active);
     list.push({
       kind: "byok",
       backend: "google",
       source: "byok:google",
       version: null,
       active: false,
-      model: byokModelOf("google", active),
+      model: selectedModel,
       availableModels: byokModels("google").map((m) => m.id),
+      allocationModels: selectedModel ? [selectedModel] : [],
       longContextEnabled: byokLongOf("google", active),
     });
   }
@@ -353,14 +365,16 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   };
   for (const backend of ["glm", "kimi", "deepseek", "upstage", "custom"] as const) {
     if (!compatFlags[backend]) continue;
+    const selectedModel = byokModelOf(backend, active);
     list.push({
       kind: "byok",
       backend,
       source: `byok:${backend}`,
       version: null,
       active: false,
-      model: byokModelOf(backend, active),
+      model: selectedModel,
       availableModels: byokModels(backend).map((m) => m.id),
+      allocationModels: selectedModel ? [selectedModel] : [],
       longContextEnabled: byokLongOf(backend, active),
     });
   }

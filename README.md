@@ -69,6 +69,15 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-14 · v0.8.21 First-contact project architecture** — every writable
+  folder now initializes through Agentlas OS v1.1.25 on first contact, with one
+  merge-only project soul, memory map, code map, ontology, Career Graph, and
+  privacy-first `.gitignore` across Desktop, Terminal, Claude Code, Codex,
+  Network, Cloud, and Storm. Workload allocation also has no vendor alias or
+  tier-to-model table: the parent AI selects an exact ID from live-verified
+  inventory and Desktop preserves the active model if that choice cannot be
+  validated.
+
 - **2026-07-14 · v0.8.20 Runtime integrity patch** — the embedded Agentlas OS pin
   is aligned to v1.1.23 across package compatibility and every release workflow,
   bound to exact commit `d121a703`, and carrying the current Windows

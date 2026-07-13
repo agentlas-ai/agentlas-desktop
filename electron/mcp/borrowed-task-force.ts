@@ -28,6 +28,7 @@ import {
   defaultWorkloadAllocation,
   normalizeWorkloadAllocation,
   resolveWorkloadAllocation,
+  workloadAllocationInventoryPrompt,
   workloadAllocationPromptExample,
   workloadAllocationReceipt,
   type WorkloadAllocation,
@@ -534,6 +535,7 @@ function buildPlannerSystemPrompt(
   orchestrator: InstalledAgent,
   locale: RuntimeLocale,
   permission: RunnerRequest["permission"],
+  runtime: RuntimeStatus,
 ): string {
   const responseGuide = locale === "ko" ? "Visible status may be Korean, but the JSON keys must stay English." : "Use English for visible status and JSON keys.";
   return [
@@ -551,6 +553,7 @@ function buildPlannerSystemPrompt(
     responseGuide,
     "",
     "For every packet, judge complexity, risk, context size, and required precision. Assign provider-neutral capacity independently; do not put every worker on frontier.",
+    workloadAllocationInventoryPrompt(runtime),
     `End with exactly this block:\n${PACKET_HEADING}\n\`\`\`json\n{"packets":[{"agent":"<slug>","inputType":"<research|implementation|review|writing|analysis|planning|other>","inputKind":"<text|codebase|files|image|data|browser|mixed>","brief":"<focused subtask>","context":["<facts/files/constraints to pass>"],"expectedOutput":"<deliverable>","constraints":["<limits>"],"allocation":${workloadAllocationPromptExample("delegate")}}],"synthesis":${workloadAllocationPromptExample("synthesize")}}\n\`\`\``,
   ].join("\n");
 }
@@ -865,7 +868,7 @@ async function runPlanner(
   if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
   const result = await p.picked.runner(
     {
-      systemPrompt: buildPlannerSystemPrompt(p.orchestratorAgent, p.locale, taskForcePermission(p)),
+      systemPrompt: buildPlannerSystemPrompt(p.orchestratorAgent, p.locale, taskForcePermission(p), p.active),
       history,
       userPrompt: buildPlannerPrompt(specs, p.req.userPrompt, p.workingFolder),
       images: p.req.images,

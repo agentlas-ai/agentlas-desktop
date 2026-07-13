@@ -255,7 +255,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   let activePath: string | null = null;
   if ((p.req.permissions === "write" || p.req.permissions === "full") && workingFolder) {
     try {
-      const v = recordFolderVisit(workingFolder);
+      const v = await recordFolderVisit(workingFolder);
       if (v.activated) activePath = workingFolder;
     } catch {
       // ignore
@@ -277,7 +277,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     // ignore memory failures
   }
   if (turn.reports && turn.reports.length > 0) {
-    systemPrompt += `\n\n${buildDelegateProtocol(turn.reports.map((r) => ({ role: r.role, name: r.name })))}`;
+    systemPrompt += `\n\n${buildDelegateProtocol(turn.reports.map((r) => ({ role: r.role, name: r.name })), p.active)}`;
   }
   if (!p.restrictedReadBoundary) {
     systemPrompt += `\n\n${memoryEmitterPromptFor(turn.userPrompt)}`;

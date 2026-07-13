@@ -1,11 +1,8 @@
-// Auto-activation: when a user works REPEATEDLY in the same folder, the Agentlas
-// architecture turns itself on for that folder — it creates .agentlas/ (PM Soul memory +
-// AI Sitemap) and starts injecting/curating project memory. One-off folders stay untouched.
+// Auto-activation: the first meaningful Agentlas contact with a folder asks
+// Agentlas Core to install the canonical local memory/code-map/ontology setup.
 import { getDb } from "../store/db";
 import { ensureProjectMemory } from "../memory/project-files";
-
-// 2nd visit = "repeated work". Low on purpose so continuity kicks in early.
-const ACTIVATE_AT_VISITS = 2;
+import { runHephaestus } from "../hephaestus/engine";
 
 export interface VisitResult {
   visits: number;
@@ -14,11 +11,33 @@ export interface VisitResult {
   justActivated: boolean;
 }
 
+const projectBootstrapRuns = new Map<string, Promise<boolean>>();
+
+async function ensureCoreProject(projectPath: string, projectName?: string): Promise<boolean> {
+  const existing = projectBootstrapRuns.get(projectPath);
+  if (existing) return existing;
+  const pending = (async () => {
+    const result = await runHephaestus<{ status?: string }>(
+      "agentlas_cloud",
+      ["project", "ensure", "--project", projectPath, "--reason", "desktop-first-contact"],
+      { cwd: projectPath, timeoutMs: 120_000 },
+    );
+    if (result.ok && result.json?.status === "active") return true;
+    // Older/missing Core builds retain the merge-only Desktop seed as a safe
+    // continuity fallback; the next contact retries the canonical Core path.
+    projectBootstrapRuns.delete(projectPath);
+    ensureProjectMemory(projectPath, projectName);
+    return false;
+  })();
+  projectBootstrapRuns.set(projectPath, pending);
+  return pending;
+}
+
 /**
  * Record a visit to a working folder. Activates the architecture once the visit count
  * crosses the threshold. Idempotent and cheap.
  */
-export function recordFolderVisit(projectPath: string, projectName?: string): VisitResult {
+export async function recordFolderVisit(projectPath: string, projectName?: string): Promise<VisitResult> {
   const db = getDb();
   const now = new Date().toISOString();
   const row = db
@@ -44,12 +63,13 @@ export function recordFolderVisit(projectPath: string, projectName?: string): Vi
   }
 
   let justActivated = false;
-  if (!activatedAt && visits >= ACTIVATE_AT_VISITS) {
+  if (!activatedAt) {
     db.prepare("UPDATE folder_activity SET activated_at = ? WHERE path = ?").run(now, projectPath);
-    ensureProjectMemory(projectPath, projectName);
     activatedAt = now;
     justActivated = true;
   }
+
+  await ensureCoreProject(projectPath, projectName);
 
   return { visits, activated: Boolean(activatedAt), justActivated };
 }
@@ -62,7 +82,7 @@ export function isFolderActivated(projectPath: string): boolean {
 }
 
 /** Force-activate now (used by explicit UI/CLI actions). */
-export function activateFolder(projectPath: string, projectName?: string): void {
+export async function activateFolder(projectPath: string, projectName?: string): Promise<void> {
   const db = getDb();
   const now = new Date().toISOString();
   const row = db
@@ -79,5 +99,5 @@ export function activateFolder(projectPath: string, projectName?: string): void 
       "INSERT INTO folder_activity (path, visits, activated_at, first_seen, last_seen) VALUES (?, 1, ?, ?, ?)",
     ).run(projectPath, now, now, now);
   }
-  ensureProjectMemory(projectPath, projectName);
+  await ensureCoreProject(projectPath, projectName);
 }

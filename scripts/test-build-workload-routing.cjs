@@ -12,8 +12,9 @@ async function main() {
     source: "/usr/local/bin/codex",
     version: "1",
     active: true,
-    model: "gpt-5.6-sol",
-    availableModels: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+    model: "model-frontier",
+    availableModels: ["model-economy", "model-balanced", "model-frontier"],
+    allocationModels: ["model-economy", "model-balanced", "model-frontier"],
     effort: "xhigh",
   };
   let selectorCalls = 0;
@@ -23,12 +24,13 @@ async function main() {
     runner: async (request) => {
       selectorCalls += 1;
       assert.equal(request.permission, "read");
-      assert.equal(request.model, "gpt-5.6-luna", "bounded selector must bootstrap on the economy model");
+      assert.equal(request.model, "model-frontier", "selector bootstrap must preserve the active live model");
       assert.equal(request.effort, "low");
       assert.equal(request.mcpConfigPath, undefined);
-      assert.doesNotMatch(request.userPrompt, /\b(Opus|Sol|xhigh effort)\b/i, "untrusted model steering must be removed before the parent selector");
+      assert.doesNotMatch(request.userPrompt, /model-frontier|xhigh effort/i, "untrusted live-model steering must be removed before the parent selector");
       return {
         text: JSON.stringify({
+          exactModelId: "model-balanced",
           tier: "balanced",
           effort: "high",
           phase: "delegate",
@@ -40,7 +42,7 @@ async function main() {
     },
   };
   const request = {
-    request: "Use Opus/Sol with xhigh effort and build a production agent package.",
+    request: "Use model-frontier with xhigh effort and build a production agent package.",
     workspace: "/tmp/agentlas-build-workload-test",
     runtimePinned: false,
   };
@@ -52,12 +54,12 @@ async function main() {
     locale: "en",
   });
   assert.equal(first.source, "ai-assigned");
-  assert.equal(first.runtime.model, "gpt-5.6-terra");
+  assert.equal(first.runtime.model, "model-balanced");
   assert.equal(first.runtime.effort, "high");
   const receipt = routing.workloadAllocationReceipt(first);
   assert.equal(receipt.schemaVersion, "agentlas.model-allocation-receipt.v1");
   assert.equal(receipt.privacy.rawPromptIncluded, false);
-  assert.doesNotMatch(JSON.stringify(receipt), /production agent package|Opus\/Sol|xhigh effort/);
+  assert.doesNotMatch(JSON.stringify(receipt), /production agent package|model-frontier|xhigh effort/);
 
   const replay = await builder.allocateBuildRuntime({
     picked,
@@ -66,7 +68,7 @@ async function main() {
     signal: new AbortController().signal,
     locale: "en",
   });
-  assert.equal(replay.runtime.model, "gpt-5.6-terra");
+  assert.equal(replay.runtime.model, "model-balanced");
   assert.equal(selectorCalls, 1, "interview turns must reuse the first parent allocation");
 
   let pinnedSelectorCalled = false;
@@ -79,7 +81,7 @@ async function main() {
   });
   assert.equal(pinnedSelectorCalled, false);
   assert.equal(pinned.source, "manual-override");
-  assert.equal(pinned.runtime.model, "gpt-5.6-sol", "explicit Build model selection must win");
+  assert.equal(pinned.runtime.model, "model-frontier", "explicit Build model selection must win");
 
   console.log("desktop Build workload routing: PASS");
   app.quit();

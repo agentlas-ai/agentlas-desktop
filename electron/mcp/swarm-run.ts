@@ -2,7 +2,7 @@
 //   - 각 작업(task)을 활성 런타임으로 실행하며 이벤트를 task 단위로 태깅 → UI가 스웜을 라이브로 표시
 //   - 에이전트 출력의 `## Spawn` 블록을 파싱해 런타임에 새 작업/핸드오프를 그래프에 추가(emergent)
 //   - 준비/실행 작업이 소진되면 종합 → 최종 답변을 메인 버블에 스트리밍 + 채팅에 저장
-import type { McpInvocationEvent } from "../../shared/types";
+import type { McpInvocationEvent, RuntimeStatus } from "../../shared/types";
 import { appendChatMessage } from "../store/chats";
 import { getAgentConcurrency } from "../store/concurrency";
 import { tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
@@ -13,6 +13,7 @@ import {
   defaultWorkloadAllocation,
   normalizeWorkloadAllocation,
   resolveWorkloadAllocation,
+  workloadAllocationInventoryPrompt,
   workloadAllocationPromptExample,
   workloadAllocationReceipt,
   type WorkloadAllocation,
@@ -44,7 +45,7 @@ function restrictedSwarmText(
 }
 
 /** 스웜 워커에게 주는 규약 — 자기 작업을 하고, 새 하위작업/핸드오프가 필요하면 `## Spawn`으로. */
-function swarmProtocol(goal: string, board: SwarmBoard, task: SwarmTask): string {
+function swarmProtocol(goal: string, board: SwarmBoard, task: SwarmTask, runtime: RuntimeStatus): string {
   const doneList = board.tasks
     .filter((t) => t.status === "done")
     .slice(-8)
@@ -64,7 +65,8 @@ function swarmProtocol(goal: string, board: SwarmBoard, task: SwarmTask): string
     "1. Do your task concretely with available tools/files in the current working folder.",
     "2. If the goal needs MORE work beyond your task, split it into concrete next steps.",
     "   Judge each child's complexity, risk, context size, and precision needs yourself.",
-    "   Assign provider-neutral capacity independently; do not put every worker on frontier.",
+    "   Assign provider-neutral capacity and an exact live model independently; do not put every worker on frontier.",
+    `   ${workloadAllocationInventoryPrompt(runtime)}`,
     "   End with a `## Spawn` JSON block when spawning:",
     "   ## Spawn",
     "   ```json",
@@ -299,7 +301,7 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
             p.orchestratorAgent.id,
             p.orchestratorAgent.systemPrompt,
           ),
-          swarmProtocol(goal, board, task),
+          swarmProtocol(goal, board, task, p.active),
           ontology.prompt,
         ].filter(Boolean).join("\n\n"),
         history: [],

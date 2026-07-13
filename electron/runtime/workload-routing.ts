@@ -1,11 +1,10 @@
 import type { AgentRuntimeOverride, RuntimeStatus } from "../../shared/types";
-import { modelOptionsFor } from "../../shared/models";
 import { createHash } from "node:crypto";
 
 /**
- * A parent LLM assigns provider-neutral capacity. Deterministic host code only
- * validates that decision and translates it to a model that actually exists in
- * the selected runtime. It never infers difficulty from task words.
+ * A parent LLM assigns provider-neutral capacity. Host policy code only
+ * validates the exact selected id against the live runtime inventory. It never
+ * infers difficulty from task words or translates a tier into a provider model.
  */
 export type WorkloadModelTier = "economy" | "balanced" | "frontier";
 export type WorkloadEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -16,6 +15,8 @@ export interface WorkloadAllocation {
   tier: WorkloadModelTier;
   effort: WorkloadEffort;
   phase: WorkloadPhase;
+  /** Exact id selected by the parent AI from the host-advertised live inventory. */
+  exactModelId?: string;
   reasonCodes: string[];
   /** Short observable justification, never hidden reasoning or the task prompt. */
   rationale: string;
@@ -26,14 +27,8 @@ export interface WorkloadResolution {
   runtime: RuntimeStatus;
   source: "ai-assigned" | "manual-override" | "safe-fallback";
   resolutionCodes: string[];
-  requestedAliases: string[];
 }
 
-const TIER_ALIASES: Record<WorkloadModelTier, string[]> = {
-  economy: ["haiku", "luna"],
-  balanced: ["sonnet", "terra", "tera"],
-  frontier: ["opus", "sol"],
-};
 const EFFORTS: WorkloadEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const PHASES: WorkloadPhase[] = ["plan", "delegate", "synthesize"];
 const MAX_REASON_CODES = 8;
@@ -60,9 +55,6 @@ function receiptSafeRationale(value: string): string {
 export function normalizeWorkloadTier(value: unknown): WorkloadModelTier | null {
   const raw = cleanText(value, 40).toLowerCase();
   if (raw === "economy" || raw === "balanced" || raw === "frontier") return raw;
-  for (const [tier, aliases] of Object.entries(TIER_ALIASES) as Array<[WorkloadModelTier, string[]]>) {
-    if (aliases.includes(raw)) return tier;
-  }
   return null;
 }
 
@@ -96,18 +88,19 @@ export function defaultWorkloadAllocation(
     tier: "balanced",
     effort: phase === "synthesize" ? "high" : "medium",
     phase,
+    exactModelId: undefined,
     reasonCodes: [reasonCode],
     rationale: "Safe non-frontier fallback because no valid parent allocation was available.",
   };
 }
 
-/** Accepts tier names and the user-facing model-family aliases (tera included). */
+/** Accepts provider-neutral tiers; model names never imply cost or capability. */
 export function normalizeWorkloadAllocation(
   value: unknown,
   expectedPhase: WorkloadPhase,
 ): WorkloadAllocation {
   const obj = asObject(value);
-  const tier = normalizeWorkloadTier(obj.tier ?? obj.modelTier ?? obj.model_tier ?? obj.modelClass ?? obj.model);
+  const tier = normalizeWorkloadTier(obj.tier ?? obj.modelTier ?? obj.model_tier);
   const effort = normalizeEffort(obj.effort);
   const phase = normalizePhase(obj.phase);
   if (!tier || !effort || !phase || phase !== expectedPhase) {
@@ -119,50 +112,16 @@ export function normalizeWorkloadAllocation(
     tier,
     effort,
     phase: expectedPhase,
+    exactModelId: cleanText(obj.exactModelId ?? obj.exact_model_id ?? obj.modelId, 160) || undefined,
     reasonCodes: reasonCodes.length > 0 ? reasonCodes : ["ai-assigned"],
     rationale: cleanText(obj.rationale, 240) || "Parent AI assigned capacity for this phase.",
   };
 }
 
-function modelTier(model: string): WorkloadModelTier | null {
-  const tokens = model.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-  for (const [tier, aliases] of Object.entries(TIER_ALIASES) as Array<[WorkloadModelTier, string[]]>) {
-    if (aliases.some((alias) => tokens.includes(alias))) return tier;
-  }
-  return null;
-}
-
 function liveModelInventory(runtime: RuntimeStatus): string[] {
-  const detected = (runtime.availableModels ?? []).map((model) => model.trim()).filter(Boolean);
-  const catalog = detected.length > 0
-    ? detected
-    : modelOptionsFor(runtime.kind, runtime.backend, runtime.availableModels).map((model) => model.id);
-  return [...new Set(catalog)];
-}
-
-function preferredAliasOrder(runtime: RuntimeStatus, tier: WorkloadModelTier): string[] {
-  if (runtime.backend === "anthropic" || runtime.kind === "claude-code") {
-    return tier === "economy" ? ["haiku", "luna"] : tier === "balanced" ? ["sonnet", "terra", "tera"] : ["opus", "sol"];
-  }
-  if (runtime.backend === "openai" || runtime.kind === "codex") {
-    return tier === "economy" ? ["luna", "haiku"] : tier === "balanced" ? ["terra", "tera", "sonnet"] : ["sol", "opus"];
-  }
-  return TIER_ALIASES[tier];
-}
-
-function chooseSameTierModel(runtime: RuntimeStatus, tier: WorkloadModelTier): string | null {
-  const inventory = liveModelInventory(runtime);
-  if (runtime.model && inventory.includes(runtime.model) && modelTier(runtime.model) === tier) return runtime.model;
-  const candidates = inventory.filter((model) => modelTier(model) === tier);
-  const aliases = preferredAliasOrder(runtime, tier);
-  candidates.sort((a, b) => {
-    const at = a.toLowerCase().split(/[^a-z0-9]+/);
-    const bt = b.toLowerCase().split(/[^a-z0-9]+/);
-    const ai = aliases.findIndex((alias) => at.includes(alias));
-    const bi = aliases.findIndex((alias) => bt.includes(alias));
-    return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
-  });
-  return candidates[0] ?? null;
+  const detected = (runtime.allocationModels ?? runtime.availableModels ?? []).map((model) => model.trim()).filter(Boolean);
+  if (runtime.model) detected.unshift(runtime.model);
+  return [...new Set(detected)];
 }
 
 function supportedEfforts(runtime: RuntimeStatus): WorkloadEffort[] {
@@ -202,15 +161,18 @@ export function resolveWorkloadAllocation(input: {
       runtime: { ...input.runtime },
       source: "manual-override",
       resolutionCodes: ["manual-runtime-override-preserved"],
-      requestedAliases: TIER_ALIASES[allocation.tier],
     };
   }
 
   const resolutionCodes: string[] = [];
-  const model = chooseSameTierModel(input.runtime, allocation.tier);
-  if (!model) resolutionCodes.push("tier-unavailable-active-preserved");
-  else if (model !== input.runtime.model) resolutionCodes.push("same-tier-model-selected");
-  else resolutionCodes.push("active-model-already-same-tier");
+  const inventory = liveModelInventory(input.runtime);
+  const model = allocation.exactModelId && inventory.includes(allocation.exactModelId)
+    ? allocation.exactModelId
+    : null;
+  if (!allocation.exactModelId) resolutionCodes.push("parent-exact-model-missing-active-preserved");
+  else if (!model) resolutionCodes.push("parent-model-not-in-live-inventory-active-preserved");
+  else if (model !== input.runtime.model) resolutionCodes.push("parent-live-model-selected");
+  else resolutionCodes.push("active-model-parent-selected");
 
   const effort = resolveEffort(input.runtime, allocation.effort);
   if (effort.code) resolutionCodes.push(effort.code);
@@ -224,7 +186,6 @@ export function resolveWorkloadAllocation(input: {
     },
     source: fallback ? "safe-fallback" : "ai-assigned",
     resolutionCodes,
-    requestedAliases: TIER_ALIASES[allocation.tier],
   };
 }
 
@@ -233,6 +194,7 @@ export function workloadAllocationReceipt(resolution: WorkloadResolution): Recor
   const featurePayload = JSON.stringify({
     phase: resolution.allocation.phase,
     tier: resolution.allocation.tier,
+    exactModelId: resolution.allocation.exactModelId ?? null,
     effort: resolution.allocation.effort,
     reasonCodes: resolution.allocation.reasonCodes,
   });
@@ -246,11 +208,11 @@ export function workloadAllocationReceipt(resolution: WorkloadResolution): Recor
     requested: {
       tier: resolution.allocation.tier,
       modelClass: null,
-      modelId: null,
+      modelId: resolution.allocation.exactModelId ?? null,
       effort: resolution.allocation.effort,
     },
     resolved: {
-      tier: modelTier(resolution.runtime.model ?? "") ?? resolution.allocation.tier,
+      tier: resolution.allocation.tier,
       provider: resolution.runtime.backend ?? resolution.runtime.kind,
       modelId: resolution.runtime.model ?? resolution.runtime.kind,
       sessionId: null,
@@ -273,10 +235,18 @@ export function workloadAllocationReceipt(resolution: WorkloadResolution): Recor
 
 export function workloadAllocationPromptExample(phase: WorkloadPhase): string {
   return JSON.stringify({
+    exactModelId: "model-id-from-live-inventory",
     tier: "economy|balanced|frontier",
     effort: "none|minimal|low|medium|high|xhigh|max",
     phase,
     reasonCodes: ["bounded-scope|parallel-throughput|complex-reasoning|large-context|high-risk|cross-result-synthesis"],
     rationale: "short observable reason; no hidden chain-of-thought",
   });
+}
+
+export function workloadAllocationInventoryPrompt(runtime: RuntimeStatus): string {
+  return [
+    "LIVE_MODEL_INVENTORY is authoritative. Choose exactModelId only from it; never infer or invent a model id from a tier.",
+    `LIVE_MODEL_INVENTORY=${JSON.stringify(liveModelInventory(runtime))}`,
+  ].join("\n");
 }
