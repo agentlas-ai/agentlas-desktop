@@ -29,7 +29,7 @@
     "dev:renderer": "cd renderer && next dev -p 3100",
     "dev:electron": "wait-on http://localhost:3100 && tsc -p electron/tsconfig.json && cross-env NODE_ENV=development ELECTRON_START_URL=http://localhost:3100 electron .",
     "build": "npm run build:renderer && npm run build:electron",
-    "build:renderer": "cd renderer && AGENTLAS_NEXT_DIST_DIR=.next-build next build && node -e \"require('fs').cpSync('.next-build','../dist/renderer',{recursive:true})\"",
+    "build:renderer": "cd renderer && cross-env AGENTLAS_NEXT_DIST_DIR=.next-build next build && node -e \"require('fs').cpSync('.next-build','../dist/renderer',{recursive:true})\"",
     "build:electron": "tsc -p electron/tsconfig.json && node -e \"require('fs').copyFileSync('electron/memory/code-map-gen.mjs','dist/electron/memory/code-map-gen.mjs')\"",
     "prebuild:renderer": "node -e \"const fs=require('fs');['dist/renderer','renderer/.next-build','renderer/out'].forEach(d=>fs.rmSync(d,{recursive:true,force:true,maxRetries:5,retryDelay:100}))\"",
     "postinstall": "electron-rebuild --force",
