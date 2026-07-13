@@ -25,6 +25,23 @@ const NESTED_ROOT_FALLBACK = "# Wrong root fallback\n\nNESTED_ROOT_FALLBACK_MUST
 const OWNER_STALE_DB = "STALE_DB_OWNER_PROMPT_MUST_NOT_RUN_41E8";
 const WORKER_STALE_DB = "STALE_DB_WORKER_PROMPT_MUST_NOT_RUN_2B07";
 const NESTED_STALE_DB = "STALE_DB_NESTED_PROMPT_MUST_NOT_RUN_8E19";
+const CORE_STORMBREAKER_PROMPT = [
+  "You are executing inside the Agentlas-owned STORMBREAKER GOAL + ULTRACODE HARNESS.",
+  "GOAL MODE: maintain the goal, constraints, acceptance checks, owners, and unfinished packets until verified completion.",
+  "ULTRACODE MODE: inspect real files/state, plan before mutation, implement the smallest complete change, run relevant tests, repair concrete failures, and preserve unrelated work.",
+  "CORE_HARNESS_FIXTURE_EXACT_3C91",
+].join("\n");
+const CORE_STORMBREAKER_HARNESS = {
+  schema_version: "agentlas.stormbreaker.goal-ultracode-harness.v1",
+  harness_id: "agentlas-core/stormbreaker-goal-ultracode",
+  owner: "Agentlas Core",
+  mode: "stormbreaker-goal-ultracode",
+  system_prompt: CORE_STORMBREAKER_PROMPT,
+  prompt_sha256: createHash("sha256").update(CORE_STORMBREAKER_PROMPT).digest("hex"),
+  host_rule: "fixture",
+  inventory_rule: "fixture",
+  completion_rule: "fixture",
+};
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-owned-runtime-prompts-"));
 const userData = path.join(temp, "user-data");
@@ -32,7 +49,15 @@ const hephaestusRoot = path.join(temp, "hephaestus-runtime");
 fs.mkdirSync(userData, { recursive: true });
 fs.mkdirSync(path.join(hephaestusRoot, "agentlas_cloud"), { recursive: true });
 fs.mkdirSync(path.join(hephaestusRoot, "skills", SKILL_SLUG), { recursive: true });
-fs.writeFileSync(path.join(hephaestusRoot, "agentlas_cloud", "__main__.py"), "", "utf8");
+fs.writeFileSync(
+  path.join(hephaestusRoot, "agentlas_cloud", "__main__.py"),
+  [
+    "import sys",
+    "if sys.argv[1:3] == ['stormbreaker', 'harness']:",
+    `    print(${JSON.stringify(JSON.stringify(CORE_STORMBREAKER_HARNESS))})`,
+  ].join("\n"),
+  "utf8",
+);
 fs.writeFileSync(path.join(hephaestusRoot, "skills", SKILL_SLUG, "SKILL.md"), SKILL_CONTENT, "utf8");
 
 process.env.AGENTLAS_STORE_PATH = path.join(temp, "agentlas.sqlite");
@@ -473,6 +498,23 @@ async function main() {
   });
   assert.match(swarmSynthesis.systemPrompt, /Integrate them into ONE coherent final answer/, "synthesis must retain dynamic synthesis policy");
 
+  const stormChat = chats.createChat({ agentId: owner.id, title: "Stormbreaker prompt capture" });
+  const stormStart = captures.length;
+  await invoke(stormChat.id, "stormbreaker verify the runtime harness and finish the goal");
+  const stormCapture = captures.slice(stormStart).find((capture) =>
+    capture.systemPrompt.includes("CORE_HARNESS_FIXTURE_EXACT_3C91"),
+  );
+  assertOwnedPrompt(stormCapture, {
+    label: "Stormbreaker owned runtime",
+    canonical: OWNER_CANONICAL,
+    staleDb: OWNER_STALE_DB,
+    skillActive: true,
+  });
+  assert.equal(occurrences(stormCapture.systemPrompt, CORE_STORMBREAKER_PROMPT), 1, "Stormbreaker must receive the exact Core harness once");
+  assert.equal(occurrences(stormCapture.systemPrompt, "GOAL MODE:"), 1, "Desktop must not redefine Core Goal mode");
+  assert.equal(occurrences(stormCapture.systemPrompt, "ULTRACODE MODE:"), 1, "Desktop must not redefine Core UltraCode mode");
+  assert.match(stormCapture.systemPrompt, /Agentlas Desktop host extension/, "Desktop may add continuation mechanics only");
+
   const rolledBack = evolution.rollbackAgentEvolutionProposal(ownerSkillCandidate.id);
   assert.equal(rolledBack.status, "rolled_back");
   assert.equal(
@@ -497,12 +539,14 @@ async function main() {
       firm: firmCaptures.length,
       savedAgentGroupTaskForce: groupCaptures.length,
       swarm: swarmCaptures.length,
+      stormbreaker: 1,
     },
     candidateAbsent: true,
     exactSkillActiveAfterApproval: true,
     rollbackRemovedSkill: true,
     canonicalFallbackLeak: false,
     dynamicSwarmProtocolsRetained: true,
+    stormbreakerCoreHarnessExact: true,
   }, null, 2));
 
   fs.rmSync(temp, { recursive: true, force: true });

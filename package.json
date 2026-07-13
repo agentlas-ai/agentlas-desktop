@@ -116,6 +116,7 @@
     "test:codex-model-discovery": "npm run build:electron && node scripts/test-codex-model-discovery.cjs",
     "test:runtime-selection-memory": "npm run build:electron && electron scripts/test-runtime-selection-memory.cjs",
     "test:workload-routing": "npm run build:electron && electron scripts/test-workload-routing.cjs",
+    "test:stormbreaker-core": "npm run build:electron && electron scripts/test-stormbreaker-core-harness.cjs",
     "test:build-workload-routing": "npm run build:electron && electron scripts/test-build-workload-routing.cjs",
     "test:grok-runtime-contract": "npm run build:electron && electron scripts/test-grok-runtime-contract.cjs",
     "test:grok-auth-source": "npm run build:electron && electron scripts/test-grok-auth-source.cjs",

@@ -8,7 +8,7 @@ import { detectRuntimes } from "../runtime/detect";
 // Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
 import { superviseStormbreaker, type StormbreakerHandle } from "../hephaestus/stormbreaker-supervisor";
 import { isNetworkAutoEnabled, isStormbreakerAutoEnabled } from "../hephaestus/supervisor";
-import { careerGraphIngest, hepCall, routeOnly } from "../hephaestus/commands";
+import { careerGraphIngest, hepCall, routeOnly, stormbreakerHarness } from "../hephaestus/commands";
 import { normalizeRecommendation } from "../hephaestus/recommendation";
 import {
   buildStormbreakerLongRunPrompt,
@@ -1275,7 +1275,22 @@ export async function runMcpInvocation(
     chat.continuousMode === true ||
     explicitStormbreakerRequest ||
     isStormbreakerAutoEnabled();
-  if (stormbreakerEngaged) systemPrompt = `${systemPrompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`;
+  if (stormbreakerEngaged) {
+    let coreHarness: Awaited<ReturnType<typeof stormbreakerHarness>>;
+    try {
+      coreHarness = await stormbreakerHarness({ cwd: resolvedResultFolder, signal });
+    } catch (err) {
+      sink({
+        kind: "error",
+        error: {
+          code: "stormbreaker-core-harness-unavailable",
+          message: err instanceof Error ? err.message : String(err),
+        },
+      });
+      return earlyResult();
+    }
+    systemPrompt = `${systemPrompt}\n\n${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`;
+  }
   // 사용자 채팅에서만 자동화 생성 protocol 주입 (백그라운드 automation 실행 세션은 제외 → 재귀 방지)
   if (chat.kind !== "division") systemPrompt = `${systemPrompt}\n\n${AUTOMATION_PROTOCOL}`;
 
