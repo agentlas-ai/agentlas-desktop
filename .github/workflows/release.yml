@@ -43,7 +43,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      HEPHAESTUS_REF: v1.1.21
+      HEPHAESTUS_REF: v1.1.23
+      HEPHAESTUS_COMMIT: d121a703ea0a2ec87f53c9bdcf5bcc12e31bdf4d
 
     steps:
       - uses: actions/checkout@v4
@@ -86,12 +87,17 @@ jobs:
           lockver=$(node -p "require('./package-lock.json').version")
           lockrootver=$(node -p "require('./package-lock.json').packages[''].version")
           runtimever=$(node -p "require('./package.json').agentlasUpdateCompatibility.bundledRuntimeVersion")
+          runtimecommit=$(node -p "require('./package.json').agentlasBundledRuntimeSource.commit")
           if [ "$pkgver" != "$version" ] || [ "$lockver" != "$version" ] || [ "$lockrootver" != "$version" ]; then
             echo "::error::Tag $tag requires package.json/package-lock root version=$version (got package=$pkgver lock=$lockver root=$lockrootver)."
             exit 1
           fi
           if [ "${HEPHAESTUS_REF#v}" != "$runtimever" ]; then
             echo "::error::HEPHAESTUS_REF=$HEPHAESTUS_REF does not match bundledRuntimeVersion=$runtimever."
+            exit 1
+          fi
+          if [ "$HEPHAESTUS_COMMIT" != "$runtimecommit" ]; then
+            echo "::error::HEPHAESTUS_COMMIT does not match package immutable runtime pin."
             exit 1
           fi
           echo "Preflight source verified: $tag ($head_commit), Agentlas OS $HEPHAESTUS_REF"
@@ -125,6 +131,7 @@ jobs:
           echo "Configured Electron SUID sandbox helper: $sandbox_path"
           xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
             npm run test:stormbreaker-core:embedded
+            npm run test:python-cache-boundary
             npm run test:v64-automation-permission-migration
             npm run test:automations-store
             npm run test:automation-scheduler-guards
@@ -153,7 +160,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      HEPHAESTUS_REF: v1.1.21
+      HEPHAESTUS_REF: v1.1.23
+      HEPHAESTUS_COMMIT: d121a703ea0a2ec87f53c9bdcf5bcc12e31bdf4d
 
     steps:
       - uses: actions/checkout@v4
@@ -199,12 +207,17 @@ jobs:
           lockver=$(node -p "require('./package-lock.json').version")
           lockrootver=$(node -p "require('./package-lock.json').packages[''].version")
           runtimever=$(node -p "require('./package.json').agentlasUpdateCompatibility.bundledRuntimeVersion")
+          runtimecommit=$(node -p "require('./package.json').agentlasBundledRuntimeSource.commit")
           if [ "$pkgver" != "$version" ] || [ "$lockver" != "$version" ] || [ "$lockrootver" != "$version" ]; then
             echo "::error::Tag $tag requires package.json/package-lock root version=$version (got package=$pkgver lock=$lockver root=$lockrootver)."
             exit 1
           fi
           if [ "${HEPHAESTUS_REF#v}" != "$runtimever" ]; then
             echo "::error::HEPHAESTUS_REF=$HEPHAESTUS_REF does not match bundledRuntimeVersion=$runtimever."
+            exit 1
+          fi
+          if [ "$HEPHAESTUS_COMMIT" != "$runtimecommit" ]; then
+            echo "::error::HEPHAESTUS_COMMIT does not match package immutable runtime pin."
             exit 1
           fi
           echo "RESOLVED_TAG=$tag" >> "$GITHUB_ENV"
@@ -231,6 +244,7 @@ jobs:
           npm run test:cli-version-parser
           npm run test:after-pack-runtime-contract
           npm run test:stormbreaker-core:embedded
+          npm run test:python-cache-boundary
           npm run test:mobile-bridge-contract
           npm run test:mobile-read-boundary
           npm run test:mobile-execution-boundary
@@ -270,6 +284,7 @@ jobs:
             npm run test:automations-store
             npm run test:cli-version-parser
             npm run test:hephaestus-status-version
+            npm run test:python-cache-boundary
             npm run test:marketplace-cache
             npm run test:after-pack-runtime-contract
             npm run test:stormbreaker-core:embedded
@@ -308,6 +323,11 @@ jobs:
 
       - name: Build renderer + electron
         run: npm run build
+
+      # Tests run after the initial clone. Recheck the immutable commit and the
+      # ignored-file boundary immediately before electron-builder sees Core.
+      - name: Reverify embedded engine release boundary
+        run: npm run ensure:engine
 
       # --publish always uploads installers + the update feed (latest*.yml) to a
       # prerelease staging record. Only the signed macOS workflow may promote it

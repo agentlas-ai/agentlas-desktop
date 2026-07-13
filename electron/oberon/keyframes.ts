@@ -16,6 +16,7 @@ import type {
 import { readEnvVar } from "../secrets/vault";
 import { currentUiLocale } from "../ui-locale";
 import { runGrokImagine } from "../multimodal/grok-imagine";
+import { withPythonCacheBoundary } from "../runtime/python-cache";
 
 const DEFAULT_PROVIDER: OberonKeyframeProvider = "codex-imagegen-cli";
 const DEFAULT_CODEX_MODEL = "image_gen.imagegen";
@@ -418,7 +419,11 @@ async function runImageBatchProcess(
         "0.5",
       ],
       // detached: 자기 프로세스 그룹의 리더가 되어 -pid로 자손(codex)까지 한 번에 거둘 수 있게.
-      { stdio: ["ignore", "ignore", "pipe"], detached: process.platform !== "win32" },
+      {
+        stdio: ["ignore", "ignore", "pipe"],
+        detached: process.platform !== "win32",
+        env: withPythonCacheBoundary(process.env),
+      },
     );
     // 취소(cancelOberonKeyframes)·종료 정리가 이 자식에 도달할 수 있게 job id로 추적.
     runningChildren.set(job.id, child);

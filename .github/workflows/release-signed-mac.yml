@@ -46,7 +46,8 @@ jobs:
       # Publish to the SEPARATE public releases repo (source repo is private).
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
-      HEPHAESTUS_REF: v1.1.21
+      HEPHAESTUS_REF: v1.1.23
+      HEPHAESTUS_COMMIT: d121a703ea0a2ec87f53c9bdcf5bcc12e31bdf4d
 
     steps:
       - uses: actions/checkout@v4
@@ -106,12 +107,17 @@ jobs:
           lockver=$(node -p "require('./package-lock.json').version")
           lockrootver=$(node -p "require('./package-lock.json').packages[''].version")
           runtimever=$(node -p "require('./package.json').agentlasUpdateCompatibility.bundledRuntimeVersion")
+          runtimecommit=$(node -p "require('./package.json').agentlasBundledRuntimeSource.commit")
           if [ "$pkgver" != "$version" ] || [ "$lockver" != "$version" ] || [ "$lockrootver" != "$version" ]; then
             echo "::error::Tag $tag requires package.json/package-lock root version=$version (got package=$pkgver lock=$lockver root=$lockrootver)."
             exit 1
           fi
           if [ "${HEPHAESTUS_REF#v}" != "$runtimever" ]; then
             echo "::error::HEPHAESTUS_REF=$HEPHAESTUS_REF does not match bundledRuntimeVersion=$runtimever."
+            exit 1
+          fi
+          if [ "$HEPHAESTUS_COMMIT" != "$runtimecommit" ]; then
+            echo "::error::HEPHAESTUS_COMMIT does not match package immutable runtime pin."
             exit 1
           fi
           {
@@ -171,6 +177,9 @@ jobs:
 
       - name: Verify embedded Stormbreaker harness
         run: npm run test:stormbreaker-core:embedded
+
+      - name: Verify signed-resource Python cache boundary
+        run: npm run test:python-cache-boundary
 
       # 실제 장애가 난 Browser 소유권/스크롤, 자동화 파이프/watchdog와
       # typecheck만으로 못 잡았던 Hub·Runtime Readiness UI 회귀를 함께 막는다.

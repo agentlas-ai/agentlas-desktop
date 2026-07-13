@@ -127,6 +127,46 @@ notarize_dmg() {
   xcrun stapler validate "$dmg_path"
 }
 
+exercise_signed_app_python_boundary() {
+  local host_arch signed_app candidate_arches
+  case "$(uname -m)" in
+    arm64) host_arch="arm64" ;;
+    x86_64) host_arch="x86_64" ;;
+    *)
+      echo "Unsupported macOS host architecture for signed-app Python smoke: $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+
+  signed_app=""
+  while IFS= read -r -d '' candidate; do
+    candidate_arches="$(lipo -archs "$candidate/Contents/MacOS/Agentlas")"
+    if [[ " $candidate_arches " == *" $host_arch "* ]]; then
+      signed_app="$candidate"
+      break
+    fi
+  done < <(find "$local_release" -type d -name 'Agentlas.app' -print0)
+
+  if [[ -z "$signed_app" ]]; then
+    echo "Could not find a host-architecture signed Agentlas.app under $local_release." >&2
+    return 1
+  fi
+
+  codesign --verify --deep --strict --verbose=2 "$signed_app"
+  # Release signing/notarization credentials exist in this shell. The embedded
+  # Core must never inherit them merely because this smoke exercises Python.
+  env -i \
+    PATH="$PATH" \
+    HOME="$HOME" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    LANG="${LANG:-en_US.UTF-8}" \
+    CI="${CI:-1}" \
+    ./node_modules/.bin/electron scripts/smoke-signed-mac-python-cache.cjs "--app=$signed_app"
+  # The exercise imports the packaged bridge and real embedded Agentlas OS from
+  # this exact signed app. Any new Resources/__pycache__ now invalidates the seal.
+  codesign --verify --deep --strict --verbose=2 "$signed_app"
+}
+
 cleanup_appledouble "$project_dir/dist" "$project_dir/release"
 load_local_signing_defaults
 npm run build
@@ -160,6 +200,7 @@ COPYFILE_DISABLE=1 ditto "$local_release" "$project_dir/release"
 cleanup_appledouble "$project_dir/release"
 
 if [[ "${AGENTLAS_PUBLIC_RELEASE:-0}" == "1" ]]; then
+  exercise_signed_app_python_boundary
   prepare_dmg_signing_identity
   while IFS= read -r dmg_path; do
     sign_dmg "$dmg_path"

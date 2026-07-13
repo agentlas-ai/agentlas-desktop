@@ -31,9 +31,14 @@ function writeRuntime(version) {
   fs.mkdirSync(path.join(seed, "agentlas_cloud"), { recursive: true });
   fs.writeFileSync(path.join(seed, "agentlas_cloud", "__main__.py"), "# fixture\n", "utf8");
   fs.writeFileSync(path.join(seed, "manifest.json"), `${JSON.stringify({ version }, null, 2)}\n`, "utf8");
+  fs.writeFileSync(
+    path.join(seed, ".gitignore"),
+    ".env\n*.pem\n.agentlas/ontology-runtime.sqlite*\noutput/\n__pycache__/\n*.py[cod]\n",
+    "utf8",
+  );
 }
 
-function ensure(dir, ref) {
+function ensure(dir, ref, commit) {
   const env = {
     ...process.env,
     HEPHAESTUS_REPO: remote,
@@ -41,6 +46,8 @@ function ensure(dir, ref) {
   };
   if (ref) env.HEPHAESTUS_REF = ref;
   else delete env.HEPHAESTUS_REF;
+  if (commit) env.HEPHAESTUS_COMMIT = commit;
+  else delete env.HEPHAESTUS_COMMIT;
   return run(process.execPath, [ensureScript], {
     cwd: root,
     env,
@@ -84,6 +91,18 @@ try {
   assert.equal(alreadyPinned.status, 0, alreadyPinned.stderr || alreadyPinned.stdout);
   assert.match(alreadyPinned.stdout, /already pinned/);
 
+  const exactFixtureCommit = git(existing, "rev-parse", "HEAD^{commit}").stdout.trim();
+  const exactCommitPin = ensure(existing, "v1.0.1", exactFixtureCommit);
+  assert.equal(exactCommitPin.status, 0, exactCommitPin.stderr || exactCommitPin.stdout);
+  const wrongCommitPin = ensure(existing, "v1.0.1", "0000000000000000000000000000000000000000");
+  assert.notEqual(wrongCommitPin.status, 0, "a moved tag or mismatched expected commit must fail closed");
+  assert.match(wrongCommitPin.stderr, /does not match expected commit/);
+  assert.equal(
+    git(existing, "rev-parse", "HEAD^{commit}").stdout.trim(),
+    exactFixtureCommit,
+    "a commit-pin mismatch must not move the existing runtime checkout",
+  );
+
   const dirtyManifest = path.join(existing, "manifest.json");
   const dirtyBytes = `${fs.readFileSync(dirtyManifest, "utf8")} `;
   fs.writeFileSync(dirtyManifest, dirtyBytes, "utf8");
@@ -96,6 +115,31 @@ try {
   const cloned = ensure(fresh, "v1.0.0");
   assert.equal(cloned.status, 0, cloned.stderr || cloned.stdout);
   assert.equal(JSON.parse(fs.readFileSync(path.join(fresh, "manifest.json"), "utf8")).version, "1.0.0");
+
+  fs.mkdirSync(path.join(fresh, "output"), { recursive: true });
+  fs.writeFileSync(path.join(fresh, "output", "test-result.json"), "{}\n", "utf8");
+  fs.mkdirSync(path.join(fresh, "agentlas_cloud", "__pycache__"), { recursive: true });
+  fs.writeFileSync(path.join(fresh, "agentlas_cloud", "__pycache__", "fixture.pyc"), "fixture\n", "utf8");
+  const excludedIgnored = ensure(fresh, "v1.0.0");
+  assert.equal(
+    excludedIgnored.status,
+    0,
+    `ignored test output/cache paths excluded by electron-builder must remain safe:\n${excludedIgnored.stderr || excludedIgnored.stdout}`,
+  );
+
+  fs.writeFileSync(path.join(fresh, ".env"), "SECRET=must-not-ship\n", "utf8");
+  fs.writeFileSync(path.join(fresh, "release.pem"), "must-not-ship\n", "utf8");
+  fs.mkdirSync(path.join(fresh, ".agentlas"), { recursive: true });
+  fs.writeFileSync(path.join(fresh, ".agentlas", "ontology-runtime.sqlite"), "must-not-ship\n", "utf8");
+  const ignoredSecrets = ensure(fresh, "v1.0.0");
+  assert.notEqual(ignoredSecrets.status, 0, "ignored secrets must not bypass the immutable source pin");
+  assert.match(ignoredSecrets.stderr, /ignored files eligible for packaging:/);
+  assert.match(ignoredSecrets.stderr, /\.agentlas\/ontology-runtime\.sqlite/);
+  assert.match(ignoredSecrets.stderr, /\.env/);
+  assert.match(ignoredSecrets.stderr, /release\.pem/);
+  fs.rmSync(path.join(fresh, ".env"));
+  fs.rmSync(path.join(fresh, "release.pem"));
+  fs.rmSync(path.join(fresh, ".agentlas"), { recursive: true });
 
   const packageDefault = path.join(temp, "package-default");
   const defaultClone = ensure(packageDefault);
@@ -113,7 +157,7 @@ try {
   assert.notEqual(rejected.status, 0, "a sentinel without Git provenance must fail closed");
   assert.match(rejected.stderr, /not a verifiable Git checkout/);
 
-  console.log("ensure-engine pin and dirty-checkout contract: PASS");
+  console.log("ensure-engine pin, dirty-checkout, and ignored-secret contract: PASS");
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });
 }

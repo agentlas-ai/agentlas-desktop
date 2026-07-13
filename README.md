@@ -69,6 +69,22 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
 
+- **Unreleased · next Desktop patch candidate** — the embedded Agentlas OS pin
+  is aligned to v1.1.23 across package compatibility and every release workflow,
+  bound to exact commit `d121a703`, and carrying the current Windows
+  Stormbreaker/native harness fixes. A moved tag or second-fetch mismatch fails
+  before packaging. Desktop also
+  prevents every production Python launch from writing `__pycache__` into the
+  signed app: bytecode is disabled after caller env merging and the defensive
+  cache prefix stays under per-user Agentlas data. A release gate runs a real
+  synthetic module from a bundle-shaped `Resources/Hephaestus` fixture and
+  requires that signed-resource tree to remain byte-for-byte free of `.pyc`.
+  macOS packaging additionally exercises the packaged bridge against its real
+  embedded runtime and rechecks the exact app with strict deep code-signing
+  verification before publication. Ignored Core credentials, local memory, and
+  signing material are rejected before packaging, excluded by both builder
+  configs, and checked again inside the packaged Resources tree.
+
 - **2026-07-14 · v0.8.19 Mobile security and Memory boundary release** — Mobile can
   start and steer read-only chats, while write/full work must start on Desktop.
   Desktop owns an immutable canonical folder binding, revalidates it across

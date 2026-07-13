@@ -46,6 +46,36 @@ extraResources:
       - "!**/*.pyc"
       - "!**/*.pyo"
       - "!**/.DS_Store"
+      # Ignored local credentials/memory are outside the immutable Core commit.
+      # Exclude them here as defense in depth; afterPack independently rejects
+      # any matching path that reaches the packaged Resources tree.
+      - "!**/.env"
+      - "!**/.env.*"
+      - "!**/*.pem"
+      - "!**/*.key"
+      - "!**/*.p12"
+      - "!**/*.p8"
+      - "!**/*.mobileprovision"
+      - "!**/*.jks"
+      - "!**/*.keystore"
+      - "!**/signing/**"
+      - "!**/credentials/**"
+      - "!**/.memory.local/**"
+      # Preserve tracked .agentlas routing/ontology assets. Only Core's
+      # git-ignored mutable runtime state is forbidden.
+      - "!.agentlas/ontology-runtime.sqlite*"
+      - "!.agentlas/career-graph.sqlite*"
+      - "!.agentlas/experience-relations.jsonl*"
+      - "!.agentlas/.experience-relations.jsonl.*"
+      - "!.agentlas/field-test/**"
+      - "!.agentlas/field-test-report.*"
+      - "!.agentlas/agent-ontology/**"
+      - "!**/.ontology-runtime/**"
+      - "!**/.codex/**"
+      - "!**/.claude/settings.local.json"
+      - "!**/.claude/settings.*.local.json"
+      - "!**/*.log"
+      - "!**/._*"
   # 선택적 standalone Python. 비우면 시스템 python 폴백; `npm run fetch:python` 으로 채우면 동봉.
   - from: build-resources/python-runtime
     to: python-runtime

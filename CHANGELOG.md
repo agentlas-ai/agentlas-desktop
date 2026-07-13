@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — next Desktop patch candidate
+
+### Fixed
+
+- **Running the embedded Agentlas OS can no longer invalidate the signed app.**
+  Every production Python launch now forces bytecode writes off after caller
+  environment merging and points the defensive cache prefix at Agentlas
+  `userData`, outside the signed `Resources` tree. The release gate executes a
+  synthetic Agentlas OS package from a bundle-shaped fixture and fails if any
+  `__pycache__` or `.pyc` appears below `Resources`. The signed macOS pipeline
+  also imports the packaged bridge, runs the real embedded Stormbreaker harness,
+  and repeats `codesign --verify --deep --strict` on that exact `.app` before
+  notarized artifacts can publish.
+- **The embedded Agentlas OS pin is current again.** Desktop compatibility,
+  macOS signing, Windows/Linux packaging, and the embedded-runtime gates now
+  agree on Agentlas OS v1.1.23. This includes the v1.1.22/v1.1.23 Windows
+  Stormbreaker and native harness corrections instead of continuing to package
+  v1.1.21. The mutable tag is also bound to exact commit `d121a703`, so a moved
+  tag or a second-fetch mismatch fails before packaging. Ignored `.env`, key,
+  signing, credential, local-memory, and ontology-runtime files can no longer
+  bypass that Git pin: the source guard rejects them, both builder configs deny
+  them, and `afterPack` fails closed if any reaches the public app Resources.
+
 ## 0.8.19 — 2026-07-14
 
 ### Included

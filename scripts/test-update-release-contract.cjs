@@ -18,6 +18,7 @@ const {
 } = require("../build-resources/update-compatibility.cjs");
 
 const compatibility = pkg.agentlasUpdateCompatibility;
+const runtimeSource = pkg.agentlasBundledRuntimeSource;
 assert.equal(lock.version, pkg.version, "package-lock version must match package.json before tagging");
 assert.equal(lock.packages[""].version, pkg.version, "package-lock root package version must match package.json");
 assert.match(
@@ -52,7 +53,20 @@ assert.deepEqual(parseUpdaterCompatibility(compatibility), compatibility, "runti
 assert.equal(compatibility.minimumSourceAppVersion, "0.7.0", "known embedded-runtime update floor is desktop v0.7.0");
 assert.equal(compatibility.minimumRuntimeVersion, "1.0.4", "v0.7.0 shipped Hephaestus v1.0.4");
 assert.equal(compatibility.minimumSchemaVersion, 35, "v0.7.0 shipped SQLite schema 35");
+assert.equal(
+  compatibility.bundledRuntimeVersion,
+  "1.1.23",
+  "the next Desktop patch must include the current Windows Stormbreaker/native harness fixes",
+);
+assert.equal(runtimeSource.ref, `v${compatibility.bundledRuntimeVersion}`, "runtime source ref must match compatibility");
+assert.match(runtimeSource.commit, /^[0-9a-f]{40}$/, "runtime source must pin an immutable full commit");
+assert.equal(runtimeSource.commit, "d121a703ea0a2ec87f53c9bdcf5bcc12e31bdf4d", "Agentlas OS v1.1.23 commit drift");
 assert.equal(compatibility.bundledRuntimeVersion, manifest.version, "feed runtime must match the bundled Hephaestus manifest");
+assert.equal(
+  spawnSync("git", ["-C", path.join(root, "Hephaestus"), "rev-parse", "HEAD^{commit}"], { encoding: "utf8" }).stdout.trim(),
+  runtimeSource.commit,
+  "the tested embedded checkout must match the immutable package commit",
+);
 
 const dbSource = fs.readFileSync(path.join(root, "electron", "store", "db.ts"), "utf8");
 const schemaMatch = dbSource.match(/const SCHEMA_VERSION = (\d+);/);
@@ -72,15 +86,63 @@ for (const configName of ["electron-builder.yml", "electron-builder.mac-stable.y
     MACOS_MINIMUM_SYSTEM_VERSION,
     `${configName} must encode Electron's macOS 12 runtime floor in Info.plist`,
   );
+  const embeddedRuntime = config.extraResources.find((resource) => resource.from === "Hephaestus");
+  assert.ok(embeddedRuntime, `${configName} must package the embedded Agentlas OS runtime`);
+  for (const deniedPath of [
+    "!**/.env",
+    "!**/.env.*",
+    "!**/*.pem",
+    "!**/*.key",
+    "!**/*.p12",
+    "!**/*.p8",
+    "!**/signing/**",
+    "!**/credentials/**",
+    "!**/.memory.local/**",
+    "!.agentlas/ontology-runtime.sqlite*",
+    "!.agentlas/career-graph.sqlite*",
+    "!.agentlas/experience-relations.jsonl*",
+    "!.agentlas/.experience-relations.jsonl.*",
+    "!.agentlas/field-test/**",
+    "!.agentlas/field-test-report.*",
+    "!.agentlas/agent-ontology/**",
+    "!**/.ontology-runtime/**",
+    "!**/.codex/**",
+    "!**/.claude/settings.*.local.json",
+  ]) {
+    assert.ok(
+      embeddedRuntime.filter.includes(deniedPath),
+      `${configName} must exclude ignored sensitive runtime path ${deniedPath}`,
+    );
+  }
+  assert.equal(
+    embeddedRuntime.filter.includes("!**/.agentlas/**"),
+    false,
+    `${configName} must preserve tracked .agentlas routing, MCP, and ontology assets`,
+  );
 }
 const crossPlatformWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release.yml"), "utf8");
 const signedMacWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release-signed-mac.yml"), "utf8");
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+const changelog = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
 const publishMacSource = fs.readFileSync(path.join(root, "scripts", "publish-mac-release.mjs"), "utf8");
+const packageMacSource = fs.readFileSync(path.join(root, "scripts", "package-mac.sh"), "utf8");
 assert.match(readme, /macOS 12 Monterey or newer/);
 assert.match(readme, /macOS 11 Big Sur:[\s\S]*?last compatible Agentlas release[\s\S]*?excluded/);
+assert.match(readme, /Unreleased[\s\S]*?Agentlas OS pin[\s\S]*?v1\.1\.23[\s\S]*?__pycache__/);
+assert.match(changelog, /Unreleased[\s\S]*?v1\.1\.23[\s\S]*?Windows[\s\S]*?Stormbreaker/);
 assert.match(publishMacSource, /Requires macOS 12 Monterey or newer/);
 assert.match(publishMacSource, /macOS 11 Big Sur stays on the last compatible release/);
+assert.match(packageMacSource, /smoke-signed-mac-python-cache\.cjs/);
+assert.match(
+  packageMacSource,
+  /env -i[\s\S]*\.\/node_modules\/\.bin\/electron scripts\/smoke-signed-mac-python-cache\.cjs/,
+  "the signed-app Python smoke must not inherit signing, notarization, publish, or deployment secrets",
+);
+assert.match(
+  packageMacSource,
+  /codesign --verify --deep --strict[\s\S]*smoke-signed-mac-python-cache\.cjs[\s\S]*codesign --verify --deep --strict/,
+  "the signed macOS app must retain its strict code seal after exercising packaged Agentlas OS Python",
+);
 
 function parsedWorkflow(source, name) {
   const parsed = yaml.load(source);
@@ -109,11 +171,20 @@ const secretEnvNames = new Set([
   "RAILWAY_PROJECT_ID",
 ]);
 for (const [name, workflow] of workflowEntries) {
+  assert.ok(
+    workflowSteps(workflow).some((step) => typeof step.run === "string" && step.run.includes("npm run test:python-cache-boundary")),
+    `${name} must execute the signed-resource Python cache boundary before packaging`,
+  );
   for (const job of Object.values(workflow.jobs)) {
     assert.equal(
       job.env?.HEPHAESTUS_REF,
       `v${compatibility.bundledRuntimeVersion}`,
       `${name} must fetch the runtime version encoded in the update contract`,
+    );
+    assert.equal(
+      job.env?.HEPHAESTUS_COMMIT,
+      runtimeSource.commit,
+      `${name} must fetch the immutable runtime commit encoded in the package source pin`,
     );
   }
   for (const job of Object.values(workflow.jobs)) {
@@ -143,6 +214,15 @@ for (const [name, workflow] of workflowEntries) {
 
 const crossWorkflow = workflowEntries[0][1];
 const signedWorkflow = workflowEntries[1][1];
+const crossReleaseSteps = crossWorkflow.jobs.release.steps;
+const boundaryRecheckIndex = crossReleaseSteps.findIndex((step) => step.name === "Reverify embedded engine release boundary");
+const packageIndex = crossReleaseSteps.findIndex((step) => step.name === "Package and stage prerelease assets");
+assert.ok(boundaryRecheckIndex >= 0, "cross-platform release must recheck ignored Core files after tests");
+assert.equal(crossReleaseSteps[boundaryRecheckIndex].run, "npm run ensure:engine");
+assert.ok(
+  packageIndex === boundaryRecheckIndex + 1,
+  "cross-platform release must recheck Core immediately before electron-builder receives publish credentials",
+);
 const linuxContinuityStep = workflowSteps(crossWorkflow).find(
   (step) => step.name === "Linux migration and updater continuity gates",
 );

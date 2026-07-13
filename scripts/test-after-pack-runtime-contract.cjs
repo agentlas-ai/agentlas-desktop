@@ -21,6 +21,8 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
   fs.writeFileSync(path.join(sourceRoot, "manifest.json"), JSON.stringify({ version: "1.1.14" }));
   fs.writeFileSync(path.join(packagedRoot, "manifest.json"), JSON.stringify({ version: "1.1.14" }));
   fs.writeFileSync(path.join(packagedRoot, "agentlas_cloud", "__main__.py"), "# fixture\n");
+  fs.mkdirSync(path.join(packagedRoot, ".agentlas"), { recursive: true });
+  fs.writeFileSync(path.join(packagedRoot, ".agentlas", "routing-card.json"), "{}\n");
   fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({
     agentlasUpdateCompatibility: { bundledRuntimeVersion: compatibilityVersion },
   }));
@@ -28,6 +30,7 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
     appOutDir,
     electronPlatformName: platform,
     packager: { projectDir, appInfo: { productFilename: "Agentlas" } },
+    packagedRoot,
   };
 }
 
@@ -48,7 +51,17 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
       afterPack(fixture("linux", "bad-ref")),
       /HEPHAESTUS_REF mismatch/,
     );
-    console.log("test-after-pack-runtime-contract: PASS (darwin/windows/linux + feed/ref mismatch fail-closed)");
+
+    process.env.HEPHAESTUS_REF = "v1.1.14";
+    const ignoredSecret = fixture("linux", "ignored-secret");
+    fs.writeFileSync(path.join(ignoredSecret.packagedRoot, ".env"), "SECRET=must-not-ship\n");
+    fs.mkdirSync(path.join(ignoredSecret.packagedRoot, ".agentlas"), { recursive: true });
+    fs.writeFileSync(path.join(ignoredSecret.packagedRoot, ".agentlas", "ontology-runtime.sqlite"), "must-not-ship\n");
+    await assert.rejects(
+      afterPack(ignoredSecret),
+      /forbidden mutable Agentlas OS resources reached the package:.*\.agentlas\/ontology-runtime\.sqlite.*\.env/,
+    );
+    console.log("test-after-pack-runtime-contract: PASS (platform parity + version/ref + ignored-secret fail-closed)");
   } finally {
     if (previousRef === undefined) delete process.env.HEPHAESTUS_REF;
     else process.env.HEPHAESTUS_REF = previousRef;
