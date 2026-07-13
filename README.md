@@ -66,8 +66,8 @@
 
 Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 [Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest) (the public download/auto-update channel).
-This README keeps the latest public deploy note so humans and agents can verify
-the current channel quickly.
+This README keeps the newest source release note. The Releases page remains the
+authority for which version is actually public, stable, and downloadable.
 
 - **2026-07-14 · v0.8.20 Runtime integrity patch** — the embedded Agentlas OS pin
   is aligned to v1.1.23 across package compatibility and every release workflow,

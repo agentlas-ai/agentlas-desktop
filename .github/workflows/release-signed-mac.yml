@@ -1,13 +1,12 @@
 name: Release Signed macOS
 
 # Two ways to trigger:
-#   1. Push a tag matching v*.*.*  -> automatic signed macOS release
+#   1. Push a stable tag matching v*.*.*  -> automatic signed macOS release
 #   2. Manual via GitHub UI / `gh workflow run` with explicit version/tag
 on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-*"
   workflow_dispatch:
     inputs:
       version:
@@ -77,9 +76,9 @@ jobs:
             echo "::error::version/tag could not be resolved (tag=$tag, version=$version)"
             exit 1
           fi
-          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           if [[ ! "$tag" =~ $semver_tag_re ]]; then
-            echo "::error::Release tag must be strict SemVer with a leading v (received: $tag)."
+            echo "::error::Release tag must be stable SemVer with a leading v and no prerelease suffix (received: $tag)."
             exit 1
           fi
           if [ "$version" != "${tag#v}" ]; then

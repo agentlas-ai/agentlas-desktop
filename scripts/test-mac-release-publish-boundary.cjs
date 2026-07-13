@@ -65,6 +65,7 @@ assert.doesNotMatch(
 (async () => {
   const moduleUrl = `${pathToFileURL(path.join(root, "scripts/publish-mac-release.mjs")).href}?boundary-test=${Date.now()}`;
   const {
+    assertStableReleaseIdentity,
     boundedMilliseconds,
     inspectReleaseState,
     requiredReleaseAssetNames,
@@ -72,6 +73,19 @@ assert.doesNotMatch(
   } = await import(moduleUrl);
 
   const version = "9.8.7";
+  assert.doesNotThrow(() => assertStableReleaseIdentity(version, `v${version}`));
+  for (const [badVersion, badTag] of [
+    ["9.8.7-beta.1", "v9.8.7-beta.1"],
+    ["9.8.7", "v9.8.7-rc.1"],
+    ["09.8.7", "v09.8.7"],
+    ["9.8.7", "v9.8.8"],
+  ]) {
+    assert.throws(
+      () => assertStableReleaseIdentity(badVersion, badTag),
+      /Stable publisher requires an exact/,
+      `stable publisher must reject version=${badVersion} tag=${badTag}`,
+    );
+  }
   const required = requiredReleaseAssetNames(version);
   assert.equal(required.length, 18, "stable promotion must require the full 18-file platform contract");
   assert.equal(new Set(required).size, required.length, "required release assets must be unique");

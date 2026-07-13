@@ -32,6 +32,15 @@ export function requiredReleaseAssetNames(version) {
   ];
 }
 
+export function assertStableReleaseIdentity(version, tag) {
+  const stableVersion = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
+  if (!stableVersion.test(version) || tag !== `v${version}`) {
+    throw new Error(
+      `Stable publisher requires an exact vMAJOR.MINOR.PATCH tag with no prerelease suffix (version=${version}, tag=${tag}).`,
+    );
+  }
+}
+
 export function inspectReleaseState(version, release) {
   const assetNames = new Set(
     Array.isArray(release?.assets)
@@ -252,6 +261,7 @@ async function main() {
   const tag = String(args.get("--tag") || process.env.AGENTLAS_DESKTOP_RELEASE_TAG || `v${version}`);
   const releaseDir = resolve(desktopRoot, String(args.get("--release-dir") || "release"));
   const keepDraft = args.has("--draft");
+  assertStableReleaseIdentity(version, tag);
   const waitMs = boundedMilliseconds(
     process.env.AGENTLAS_RELEASE_ASSET_WAIT_MS,
     DEFAULT_ASSET_WAIT_MS,

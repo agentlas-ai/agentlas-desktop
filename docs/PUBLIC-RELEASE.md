@@ -84,6 +84,10 @@ The last command writes the verified release metadata to Railway production so:
 
 There are two release workflows, by design:
 
+Both workflows and the final Mac publisher accept stable `vMAJOR.MINOR.PATCH`
+tags only. Prerelease suffixes are rejected so a beta/RC can never be promoted
+to the public `latest` channel by this pipeline.
+
 1. **`.github/workflows/release.yml` (active, default).** Windows/Linux preview
    release, **unsigned**, uses the dedicated
    `AGENTLAS_DESKTOP_RELEASE_TOKEN` to publish into the separate

@@ -126,13 +126,29 @@ const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 const changelog = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
 const publishMacSource = fs.readFileSync(path.join(root, "scripts", "publish-mac-release.mjs"), "utf8");
 const packageMacSource = fs.readFileSync(path.join(root, "scripts", "package-mac.sh"), "utf8");
-const escapedVersion = pkg.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const readmeReleaseMarker = new RegExp(`(?:Unreleased|v${escapedVersion})[\\s\\S]*?Agentlas OS pin[\\s\\S]*?v1\\.1\\.23[\\s\\S]*?__pycache__`);
-const changelogReleaseMarker = new RegExp(`(?:Unreleased|${escapedVersion})[\\s\\S]*?v1\\.1\\.23[\\s\\S]*?Windows[\\s\\S]*?Stormbreaker`);
+function releaseSection(source, markerCandidates, nextBoundary, label) {
+  const marker = markerCandidates.find((candidate) => source.includes(candidate));
+  assert.ok(marker, `${label} is missing the current release marker`);
+  const start = source.indexOf(marker);
+  const next = source.indexOf(nextBoundary, start + marker.length);
+  return source.slice(start, next >= 0 ? next : source.length);
+}
+const readmeReleaseSection = releaseSection(
+  readme,
+  ["- **Unreleased", `v${pkg.version}`],
+  "\n- **",
+  "README",
+);
+const changelogReleaseSection = releaseSection(
+  changelog,
+  ["## Unreleased", `## ${pkg.version}`],
+  "\n## ",
+  "CHANGELOG",
+);
 assert.match(readme, /macOS 12 Monterey or newer/);
 assert.match(readme, /macOS 11 Big Sur:[\s\S]*?last compatible Agentlas release[\s\S]*?excluded/);
-assert.match(readme, readmeReleaseMarker, "README must describe the current release or next candidate runtime boundary");
-assert.match(changelog, changelogReleaseMarker, "CHANGELOG must describe the current release or next candidate runtime boundary");
+assert.match(readmeReleaseSection, /Agentlas OS pin[\s\S]*?v1\.1\.23[\s\S]*?__pycache__/, "README current release section must describe the runtime boundary");
+assert.match(changelogReleaseSection, /v1\.1\.23[\s\S]*?Windows[\s\S]*?Stormbreaker/, "CHANGELOG current release section must describe the runtime boundary");
 assert.match(publishMacSource, /Requires macOS 12 Monterey or newer/);
 assert.match(publishMacSource, /macOS 11 Big Sur stays on the last compatible release/);
 assert.match(packageMacSource, /smoke-signed-mac-python-cache\.cjs/);
@@ -217,6 +233,18 @@ for (const [name, workflow] of workflowEntries) {
 
 const crossWorkflow = workflowEntries[0][1];
 const signedWorkflow = workflowEntries[1][1];
+assert.equal(
+  crossPlatformWorkflow.includes('default: "v0.0.3"'),
+  false,
+  "manual cross-platform release must require an explicit tag with no stale default",
+);
+for (const [name, source] of [["release.yml", crossPlatformWorkflow], ["release-signed-mac.yml", signedMacWorkflow]]) {
+  assert.equal(
+    source.includes('"v[0-9]+.[0-9]+.[0-9]+-*"'),
+    false,
+    `${name} must not auto-trigger a stable publisher for prerelease tags`,
+  );
+}
 const crossReleaseSteps = crossWorkflow.jobs.release.steps;
 const boundaryRecheckIndex = crossReleaseSteps.findIndex((step) => step.name === "Reverify embedded engine release boundary");
 const packageIndex = crossReleaseSteps.findIndex((step) => step.name === "Package and stage prerelease assets");
@@ -298,13 +326,13 @@ for (const [name, step] of [["release.yml", crossVerifyStep], ["release-signed-m
 
   const regexSource = step.run.match(/semver_tag_re='([^']+)'/)?.[1];
   assert.ok(regexSource, `${name} must expose a testable tag validation expression`);
-  for (const validTag of ["v0.7.34", "v1.2.3-beta.1", "v2.0.0-rc-1"]) {
+  for (const validTag of ["v0.7.34", "v1.2.3", "v2.0.0"]) {
     const result = spawnSync("bash", ["-c", '[[ "$RAW_TAG" =~ $SEMVER_TAG_RE ]]'], {
       env: { ...process.env, RAW_TAG: validTag, SEMVER_TAG_RE: regexSource },
     });
     assert.equal(result.status, 0, `${name} must accept ${validTag}`);
   }
-  for (const invalidTag of ["v01.2.3", "v1.2.3-01", "v1.2.3+build", "v1.2.3$(id)", "refs/heads/main"]) {
+  for (const invalidTag of ["v01.2.3", "v1.2.3-beta.1", "v2.0.0-rc-1", "v1.2.3+build", "v1.2.3$(id)", "refs/heads/main"]) {
     const result = spawnSync("bash", ["-c", '[[ "$RAW_TAG" =~ $SEMVER_TAG_RE ]]'], {
       env: { ...process.env, RAW_TAG: invalidTag, SEMVER_TAG_RE: regexSource },
     });
