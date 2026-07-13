@@ -1,8 +1,0 @@
-# Documentation pointer only. This file is not a GitHub Actions workflow and
-# must not be copied into .github/workflows/.
-#
-# The active, release-gated signed macOS workflow is:
-#   ../.github/workflows/release-signed-mac.yml
-#
-# Keeping one executable workflow prevents release pins, permissions, and
-# verification steps from drifting between a template and production.

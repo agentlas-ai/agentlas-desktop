@@ -79,6 +79,40 @@ output/playwright/
 /output/reference-video-frames/
 /findings/
 
+# Internal working documents are local-only. Public product documentation is
+# explicitly allow-listed below; new plans, PRDs, research, QA receipts, and
+# private screenshots under docs/ must never enter a release commit.
+/docs/**
+!/docs/ARCHITECTURE.md
+!/docs/ARCHITECTURE_PLAYBOOK.md
+!/docs/M0-CHECKLIST.md
+!/docs/PUBLIC-RELEASE.md
+!/docs/AGENT_VISIBILITY_CONTRACT.md
+!/docs/UPDATER_RECOVERY_CONTRACT.md
+!/docs/cloud-agent-framework.md
+!/docs/document-studio.md
+!/docs/generated-app-engine.md
+!/docs/menu-action-contract.md
+!/docs/system-agents-architecture.md
+!/docs/screenshot.png
+
+# Other conventional local-only document roots and root-level PM receipts.
+/internal/
+/.internal/
+/private-docs/
+/plans/
+/research/
+/reports/
+/receipts/
+/notes/
+/qa/
+/*_INTERNAL*.md
+/*_LEDGER*.md
+/*_RECEIPT*.md
+/*_RESEARCH*.md
+/*_PLAN*.md
+/*_NOTES*.md
+
 # ── Embedded engine (separate open-source repo) ──────────────────────────────
 # Hephaestus is its own public repo (github.com/agentlas-ai/Hephaestus). It is
 # embedded into the desktop build at PACKAGE time via electron-builder
