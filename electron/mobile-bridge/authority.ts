@@ -770,7 +770,20 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         );
       }
       case "chats.create": {
-        const chat = createChat(createChatParams(request));
+        const input = createChatParams(request);
+        let canonicalProjectFolder: string | null = null;
+        if (input.projectId) {
+          // A Mobile caller may select only a host-owned project id. Resolve and
+          // bind its folder before the chat row exists so a missing/replaced
+          // project folder cannot silently become a global Mobile chat.
+          const project = getProject(input.projectId);
+          if (!project) throw new Error("The selected Desktop project is unavailable");
+          if (!project.folderPath) throw new Error("The selected project has no working folder");
+          canonicalProjectFolder = captureInvocationWorkspaceBinding(project.folderPath).canonicalPath;
+          if (!canonicalProjectFolder) throw new Error("The selected project has no working folder");
+        }
+        const chat = createChat(input);
+        if (canonicalProjectFolder) setChatWorkingFolder(chat.id, canonicalProjectFolder);
         this.scheduleSnapshotUpdated();
         return asJsonValue(projectMobileBridgeChat(chat, false), request.method);
       }

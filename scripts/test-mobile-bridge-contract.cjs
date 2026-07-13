@@ -63,7 +63,12 @@ const {
 const { claimPendingConfirmationAnswer } = require("../dist/electron/confirm/index.js");
 const { initStore, getDb } = require("../dist/electron/store/db.js");
 const { createProject } = require("../dist/electron/store/projects.js");
-const { appendChatMessage, createChat } = require("../dist/electron/store/chats.js");
+const {
+  appendChatMessage,
+  createChat,
+  getChat,
+  getChatWorkingFolder,
+} = require("../dist/electron/store/chats.js");
 const { createAgentGroup } = require("../dist/electron/store/agent-groups.js");
 const { upsertLocalTeamFirm } = require("../dist/electron/store/firms.js");
 const {
@@ -1115,6 +1120,108 @@ async function testReconnectSnapshotAndDesktopMutationInvalidation() {
       clearedSnapshot.chats.find((item) => item.id === chat.id).workingFolderName,
       null,
     );
+
+    // chats.create accepts only a project id from Mobile. Main must resolve the
+    // host DB folder, canonicalize it once, and persist that exact folder before
+    // the very first invocation captures its main-only workspace capability.
+    const unavailableProject = createProject({
+      name: "Unavailable Mobile Authority Project",
+      defaultAgentId: agentId,
+      folderPath: path.join(projectionRoot, "missing-mobile-authority-project"),
+    });
+    const chatCountBeforeUnavailableProject = db.prepare("SELECT COUNT(*) AS count FROM chats").get().count;
+    await assert.rejects(
+      authority.request({
+        v: 1,
+        type: "request",
+        id: "chat_create_unavailable_project_workspace",
+        method: "chats.create",
+        params: {
+          agentId,
+          projectId: unavailableProject.id,
+          title: "Must not degrade into a global chat",
+        },
+      }, context),
+      /working folder is unavailable/,
+    );
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS count FROM chats").get().count,
+      chatCountBeforeUnavailableProject,
+      "an unavailable project folder must fail before creating a global chat row",
+    );
+    const projectWorkspace = path.join(projectionRoot, "mobile-authority-project-real");
+    const projectWorkspaceLink = path.join(projectionRoot, "mobile-authority-project-link");
+    fs.mkdirSync(projectWorkspace, { recursive: true });
+    if (process.platform !== "win32") fs.symlinkSync(projectWorkspace, projectWorkspaceLink, "dir");
+    const authorityProject = createProject({
+      name: "Mobile Authority Project",
+      defaultAgentId: agentId,
+      folderPath: process.platform === "win32" ? projectWorkspace : projectWorkspaceLink,
+    });
+    const createdFromProject = await authority.request({
+      v: 1,
+      type: "request",
+      id: "chat_create_project_workspace",
+      method: "chats.create",
+      params: {
+        agentId,
+        projectId: authorityProject.id,
+        title: "Project-bound Mobile chat",
+      },
+    }, context);
+    const canonicalProjectWorkspace = fs.realpathSync.native(projectWorkspace);
+    assert.equal(getChatWorkingFolder(createdFromProject.id), canonicalProjectWorkspace);
+    assert.equal(createdFromProject.workingFolderName, path.basename(canonicalProjectWorkspace));
+
+    const { invocationService } = require("../dist/electron/invocation/service.js");
+    const originalInvocationStart = invocationService.start;
+    const capturedStarts = [];
+    invocationService.start = (invocation, workspaceBinding) => {
+      capturedStarts.push({ invocation, workspaceBinding });
+      return { runId: `mobile-authority-run-${capturedStarts.length}` };
+    };
+    try {
+      await authority.request({
+        v: 1,
+        type: "request",
+        id: "invoke_first_project_workspace",
+        method: "invoke.start",
+        params: {
+          chatId: createdFromProject.id,
+          userPrompt: "Inspect the host-approved project",
+        },
+      }, context);
+      assert.equal(capturedStarts[0].workspaceBinding.canonicalPath, canonicalProjectWorkspace);
+      assert.ok(capturedStarts[0].workspaceBinding.directoryIdentity);
+
+      await authority.request({
+        v: 1,
+        type: "request",
+        id: "workspace_clear_project_workspace",
+        method: "workspace.clear",
+        params: { chatId: createdFromProject.id },
+      }, context);
+      assert.equal(getChatWorkingFolder(createdFromProject.id), null);
+      assert.equal(getChat(createdFromProject.id).projectId, authorityProject.id);
+
+      await authority.request({
+        v: 1,
+        type: "request",
+        id: "invoke_after_project_workspace_clear",
+        method: "invoke.start",
+        params: {
+          chatId: createdFromProject.id,
+          userPrompt: "Stay globally unbound after the explicit clear",
+        },
+      }, context);
+      assert.deepEqual(capturedStarts[1].workspaceBinding, {
+        source: "mobile",
+        canonicalPath: null,
+        directoryIdentity: null,
+      });
+    } finally {
+      invocationService.start = originalInvocationStart;
+    }
   } finally {
     offAuthority?.();
     offChanges();
