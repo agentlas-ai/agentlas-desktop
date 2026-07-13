@@ -58,8 +58,8 @@ function setupProviderHealthBridge(payload) {
   setupBase(payload.baseOptions);
 
   const calls = [];
-  window.__providerHealthQA = { calls };
-  window.agentlas.app.getLocale = async () => "ko-KR";
+  window.__providerHealthQA = { calls, usageCalls: 0, failUsageSnapshots: 0 };
+  window.agentlas.app.getLocale = async () => payload.locale || "ko-KR";
   window.agentlas.runtime.detect = async () => [
     {
       kind: "codex",
@@ -84,44 +84,51 @@ function setupProviderHealthBridge(payload) {
       active: false,
     },
   ];
-  window.agentlas.usage.snapshot = async () => ({
-    fetchedAt: Date.now(),
-    providers: [
-      {
-        provider: "codex",
-        backend: "oauth",
-        label: "Codex",
-        status: "ok",
-        windows: [
-          { id: "codex-5h", kind: "5h", label: "5-hour", usedPercent: 12, resetAt: null },
-        ],
-      },
-      {
-        provider: "gemini",
-        backend: "oauth",
-        label: "Gemini",
-        status: "error",
-        error: "unsupported_client",
-        windows: [],
-      },
-      {
-        provider: "grok",
-        backend: "custom",
-        label: "Grok",
-        status: "error",
-        error: "quota_exhausted",
-        windows: [
-          {
-            id: "grok-weekly-exhausted",
-            kind: "7d",
-            label: "Grok Build",
-            usedPercent: 100,
-            resetAt: null,
-          },
-        ],
-      },
-    ],
-  });
+  window.agentlas.usage.snapshot = async () => {
+    window.__providerHealthQA.usageCalls += 1;
+    if (window.__providerHealthQA.failUsageSnapshots > 0) {
+      window.__providerHealthQA.failUsageSnapshots -= 1;
+      throw new Error("fixture usage snapshot IPC failure");
+    }
+    return {
+      fetchedAt: Date.now(),
+      providers: [
+        {
+          provider: "codex",
+          backend: "oauth",
+          label: "Codex",
+          status: "ok",
+          windows: [
+            { id: "codex-5h", kind: "5h", label: "5-hour", usedPercent: 12, resetAt: null },
+          ],
+        },
+        {
+          provider: "gemini",
+          backend: "oauth",
+          label: "Gemini",
+          status: "error",
+          error: "unsupported_client",
+          windows: [],
+        },
+        {
+          provider: "grok",
+          backend: "custom",
+          label: "Grok",
+          status: "error",
+          error: "quota_exhausted",
+          windows: [
+            {
+              id: "grok-weekly-exhausted",
+              kind: "7d",
+              label: "Grok Build",
+              usedPercent: 100,
+              resetAt: null,
+            },
+          ],
+        },
+      ],
+    };
+  };
   window.agentlas.fs.openPath = async (target) => {
     calls.push({ name: "fs.openPath", target });
     return { ok: true };
@@ -238,6 +245,48 @@ async function inspectViewport(page, viewport, screenshotName) {
   return fit;
 }
 
+async function verifyUsageSnapshotRecovery(page, options) {
+  const panel = page.locator('[data-tour-id="dashboard.llm"]');
+  await panel.getByText(options.heading, { exact: true }).waitFor();
+
+  const before = await page.evaluate(() => window.__providerHealthQA.usageCalls);
+  await page.evaluate(() => {
+    window.__providerHealthQA.failUsageSnapshots = 1;
+  });
+  await panel.locator(".dashboard-refresh-button").click();
+
+  const alert = panel.getByRole("alert").filter({ hasText: options.failure });
+  await alert.waitFor();
+  const retry = alert.getByRole("button", { name: options.retry, exact: true });
+  assert.equal(await retry.count(), 1, `${options.locale}: usage failure must expose one accessible retry action`);
+  assert.equal(
+    (await alert.textContent()).replace(/\s+/g, " ").trim(),
+    `${options.failure}·${options.retry}`,
+    `${options.locale}: usage failure copy must remain explicit and compact`,
+  );
+
+  // Snapshot IPC failure must not erase or rewrite the last provider-specific receipts.
+  if (options.locale === "ko") {
+    await panel.getByText("Antigravity 작동 · 사용량 미제공", { exact: true }).waitFor();
+    await panel.getByText("한도 소진(402) · Usage 확인", { exact: true }).waitFor();
+  } else {
+    await panel.getByText("Antigravity active · usage n/a", { exact: true }).waitFor();
+    await panel.getByText("quota exhausted (402) · open usage", { exact: true }).waitFor();
+  }
+
+  if (options.screenshotName) {
+    await panel.locator(".dashboard-engine-usage").first().screenshot({
+      path: path.join(outDir, options.screenshotName),
+    });
+  }
+
+  await retry.click();
+  await alert.waitFor({ state: "detached" });
+  const after = await page.evaluate(() => window.__providerHealthQA.usageCalls);
+  assert.ok(after >= before + 2, `${options.locale}: retry must issue a fresh usage snapshot call`);
+  return { before, after, recovered: true };
+}
+
 async function main() {
   if (!fs.existsSync(path.join(distDir, "dashboard.html"))) {
     throw new Error("dist/renderer/dashboard.html is missing; this QA does not rebuild production assets");
@@ -268,6 +317,13 @@ async function main() {
       { width: 1440, height: 1100 },
       "04-provider-health-desktop-post-fix-1440x1100.png",
     );
+    const koRecovery = await verifyUsageSnapshotRecovery(page, {
+      locale: "ko",
+      heading: "LLM 연결 · 사용량",
+      failure: "사용량 상태를 읽지 못함",
+      retry: "다시 시도",
+      screenshotName: "07-provider-usage-ipc-error-ko-1440x1100.png",
+    });
 
     const panel = page.locator('[data-tour-id="dashboard.llm"]');
     await panel.locator(".dashboard-engine-row").filter({ hasText: "Gemini" })
@@ -293,6 +349,24 @@ async function main() {
       fullPage: true,
     });
 
+    const enContext = await browser.newContext({ viewport: { width: 960, height: 1100 } });
+    await enContext.addInitScript(setupProviderHealthBridge, {
+      setupSource,
+      baseOptions: mockBridgeOptions({ teamRoster: true }),
+      locale: "en-US",
+    });
+    const enPage = await enContext.newPage();
+    enPage.setDefaultTimeout(10_000);
+    watchPage(enPage, errors);
+    await enPage.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
+    const enRecovery = await verifyUsageSnapshotRecovery(enPage, {
+      locale: "en",
+      heading: "LLM connections · usage",
+      failure: "Could not load usage status",
+      retry: "Retry",
+    });
+    await enContext.close();
+
     const issues = [];
     if (desktopFit.clippedStatuses.length > 0) {
       issues.push(`1440px: ${desktopFit.clippedStatuses.length} provider status labels are visually truncated`);
@@ -316,12 +390,17 @@ async function main() {
         gemini: "https://antigravity.google",
         grok: "https://grok.com",
       },
+      snapshotIpcRecovery: {
+        ko: koRecovery,
+        en: enRecovery,
+      },
       errors,
       issues,
       screenshots: [
         "04-provider-health-desktop-post-fix-1440x1100.png",
         "05-provider-health-compact-post-fix-960x1100.png",
         "06-dashboard-compact-full-post-fix-960x1100.png",
+        "07-provider-usage-ipc-error-ko-1440x1100.png",
       ],
     };
     fs.writeFileSync(path.join(outDir, "qa-report-post-fix.json"), `${JSON.stringify(report, null, 2)}\n`);
