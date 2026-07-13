@@ -2,6 +2,7 @@
 // Hub "borrow" is not an installed firm: the local orchestrator plans per-agent
 // input packets, runs each borrowed agent as an isolated BYOM local sub-run, then
 // synthesizes the results into the visible chat answer.
+import { randomUUID } from "node:crypto";
 import type {
   Chat,
   ChatHistoryEntry,
@@ -20,22 +21,34 @@ import {
   listChatMessages,
 } from "../store/chats";
 import { curateReply, stripReplyMemoryEventsReadOnly } from "../memory/curator";
+import { parseMemoryEvents } from "../memory/events";
+import { parseAutomations } from "../automation-emitter";
+import { parseSurfaces } from "../surface-emitter";
 import { getAgentConcurrency } from "../store/concurrency";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import { stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
+import { buildAgentAppRunnerEnv } from "../runtime/env-resolver";
+import {
+  createUntrustedRuntimeFailure,
+  UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
+} from "../runtime/untrusted-error";
+import { SURFACE_INTENT_MARKER } from "../runtime/runner";
 import { tryRecordRunEvent } from "../store/run-events";
 import {
   defaultWorkloadAllocation,
   normalizeWorkloadAllocation,
-  resolveWorkloadAllocation,
+  resolveWorkloadAllocationAcrossRuntimes,
   workloadAllocationInventoryPrompt,
   workloadAllocationPromptExample,
   workloadAllocationReceipt,
   type WorkloadAllocation,
 } from "../runtime/workload-routing";
+import { pickRunner } from "../runtime/selection";
 import { getAgentById } from "./registry";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
 import {
+  isMobileReadRuntimeAllowed,
+  MobileReadRuntimeBoundaryError,
   revalidateInvocationWorkspaceBinding,
   type InvocationWorkspaceBinding,
 } from "../invocation/workspace-binding";
@@ -97,6 +110,8 @@ export interface BorrowedTaskForceParams {
   taskForceKind?: "hub" | "agent-group";
   taskForceSpecs?: BorrowedAgentSpec[];
   active: RuntimeStatus;
+  /** Main-owned detected runtimes; parent allocation sees only the safe live projection. */
+  runtimes?: RuntimeStatus[];
   picked: { runner: Runner; label: string };
   /** Explicit scoped selection wins over parent-AI workload allocation. */
   runtimeOverride?: AgentRuntimeOverride | null;
@@ -106,10 +121,33 @@ export interface BorrowedTaskForceParams {
   mcpConfigPath?: string;
   mcpAllowedTools?: string[];
   mcpCodexConfigArgs?: string[];
+  /** Main-minted opaque MCP aliases for a one-run Agent App grant. */
+  agentAppMcpRuntimeEnv?: NodeJS.ProcessEnv;
   runnerEnv?: NodeJS.ProcessEnv;
   locale: RuntimeLocale;
   sink: EventSink;
   signal?: AbortSignal;
+}
+
+function sameRuntime(left: RuntimeStatus, right: RuntimeStatus): boolean {
+  return left.kind === right.kind && left.backend === right.backend && left.source === right.source;
+}
+
+function taskForceCandidateRuntimes(p: BorrowedTaskForceParams): RuntimeStatus[] {
+  const supplied = p.req.agentAppMode ? [p.active] : [...(p.runtimes ?? [p.active])];
+  if (!supplied.some((runtime) => sameRuntime(runtime, p.active))) supplied.unshift(p.active);
+  const runnable = supplied.filter((runtime, index, list) => (
+    list.findIndex((candidate) => sameRuntime(candidate, runtime)) === index && Boolean(pickRunner(runtime))
+  ));
+  const candidates = p.restrictedReadBoundary
+    ? runnable.filter((runtime) => isMobileReadRuntimeAllowed(runtime.kind))
+    : runnable;
+  if (p.restrictedReadBoundary && candidates.length === 0) {
+    throw new MobileReadRuntimeBoundaryError(
+      "This task-force has no verified restricted read-only runtime. Select BYOK or Ollama on Desktop.",
+    );
+  }
+  return candidates.length > 0 ? candidates : [p.active];
 }
 
 function cleanString(value: unknown): string {
@@ -212,7 +250,7 @@ function modelLabel(active: RuntimeStatus): string {
 }
 
 function taskForcePermission(p: BorrowedTaskForceParams): RunnerRequest["permission"] {
-  return p.req.appsGenerateMode ? "read" : p.req.permissions;
+  return p.req.agentAppMode || p.req.appsGenerateMode ? "read" : p.req.permissions;
 }
 
 function taskForceAllowsTools(p: BorrowedTaskForceParams): boolean {
@@ -235,16 +273,28 @@ function taskForceRunnerBase(p: BorrowedTaskForceParams): Pick<
   | "mcpAllowedTools"
   | "mcpCodexConfigArgs"
   | "env"
+  | "untrustedNoTools"
+  | "untrustedAllowedMcpTools"
 > {
   const permission = taskForcePermission(p);
-  const toolsAllowed = taskForceAllowsTools(p);
+  const agentAppAllowedTools = p.req.agentAppMode && p.mcpConfigPath && p.mcpAllowedTools?.length &&
+    p.mcpAllowedTools.every((tool) => /^mcp__brave-search__(?:brave_web_search|brave_local_search)$/.test(tool))
+    ? p.mcpAllowedTools
+    : undefined;
+  const toolsAllowed = !p.req.agentAppMode && taskForceAllowsTools(p);
   return {
     permission,
     restrictedReadBoundary: p.restrictedReadBoundary,
-    mcpConfigPath: toolsAllowed ? p.mcpConfigPath : undefined,
-    mcpAllowedTools: toolsAllowed ? p.mcpAllowedTools : undefined,
+    mcpConfigPath: agentAppAllowedTools ? p.mcpConfigPath : toolsAllowed ? p.mcpConfigPath : undefined,
+    mcpAllowedTools: agentAppAllowedTools ?? (toolsAllowed ? p.mcpAllowedTools : undefined),
     mcpCodexConfigArgs: toolsAllowed ? p.mcpCodexConfigArgs : undefined,
-    env: toolsAllowed ? p.runnerEnv : undefined,
+    env: p.req.agentAppMode
+      ? buildAgentAppRunnerEnv(p.runnerEnv ?? process.env, p.agentAppMcpRuntimeEnv)
+      : toolsAllowed
+        ? p.runnerEnv
+        : undefined,
+    untrustedNoTools: p.req.agentAppMode === true,
+    untrustedAllowedMcpTools: agentAppAllowedTools,
   };
 }
 
@@ -266,6 +316,12 @@ function restrictedTaskForceText(
   }).cleanedText;
 }
 
+function taskForceSessionId(p: BorrowedTaskForceParams, suffix: string): string {
+  return p.req.agentAppMode
+    ? `site-agent-app:${p.req.runId ?? "run"}:${suffix}:${randomUUID()}`
+    : `${p.chat.id}:${suffix}`;
+}
+
 export function redactSensitiveText(text: string): string {
   return text
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted-private-key]")
@@ -275,6 +331,14 @@ export function redactSensitiveText(text: string): string {
       /\b(api[_-]?key|token|secret|password|passwd|pwd|cookie|session|authorization)\b\s*[:=]\s*['"]?[^\s'"]{8,}/gi,
       "[redacted-secret]",
     );
+}
+
+function cleanAgentAppControlBlocks(text: string): string {
+  const withoutContinuation = stripStormbreakerContinueMarker(text).text;
+  const withoutIntent = withoutContinuation.split(SURFACE_INTENT_MARKER).join("");
+  const withoutSurface = parseSurfaces(withoutIntent).cleanedText;
+  const withoutAutomation = parseAutomations(withoutSurface).cleanedText;
+  return parseMemoryEvents(withoutAutomation).cleanedText.trim();
 }
 
 function redactEventValue(value: string | undefined): string | undefined {
@@ -535,7 +599,7 @@ function buildPlannerSystemPrompt(
   orchestrator: InstalledAgent,
   locale: RuntimeLocale,
   permission: RunnerRequest["permission"],
-  runtime: RuntimeStatus,
+  runtimes: RuntimeStatus[],
 ): string {
   const responseGuide = locale === "ko" ? "Visible status may be Korean, but the JSON keys must stay English." : "Use English for visible status and JSON keys.";
   return [
@@ -553,7 +617,7 @@ function buildPlannerSystemPrompt(
     responseGuide,
     "",
     "For every packet, judge complexity, risk, context size, and required precision. Assign provider-neutral capacity independently; do not put every worker on frontier.",
-    workloadAllocationInventoryPrompt(runtime),
+    workloadAllocationInventoryPrompt(runtimes),
     `End with exactly this block:\n${PACKET_HEADING}\n\`\`\`json\n{"packets":[{"agent":"<slug>","inputType":"<research|implementation|review|writing|analysis|planning|other>","inputKind":"<text|codebase|files|image|data|browser|mixed>","brief":"<focused subtask>","context":["<facts/files/constraints to pass>"],"expectedOutput":"<deliverable>","constraints":["<limits>"],"allocation":${workloadAllocationPromptExample("delegate")}}],"synthesis":${workloadAllocationPromptExample("synthesize")}}\n\`\`\``,
   ].join("\n");
 }
@@ -710,13 +774,21 @@ async function runBorrowedAgentTurn(
     phase: "delegate",
   });
   const runnerBase = taskForceRunnerBase(p);
-  const workloadResolution = resolveWorkloadAllocation({
+  const candidateRuntimes = taskForceCandidateRuntimes(p);
+  const workloadResolution = resolveWorkloadAllocationAcrossRuntimes({
     allocation: packet.allocation,
-    runtime: p.active,
+    runtimes: candidateRuntimes,
+    fallbackRuntime: p.active,
     phase: "delegate",
     manualOverride: p.runtimeOverride,
   });
   const active = workloadResolution.runtime;
+  if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
+    throw new MobileReadRuntimeBoundaryError(
+      "This task-force worker runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
+    );
+  }
+  const picked = sameRuntime(active, p.active) ? p.picked : pickRunner(active) ?? p.picked;
   tryRecordRunEvent({
     runId: p.req.runId ?? `task-force:${p.chat.id}`,
     kind: "workload_allocation",
@@ -725,12 +797,12 @@ async function runBorrowedAgentTurn(
     agentId: spec.slug,
     payload: workloadAllocationReceipt(workloadResolution),
   });
-  if (workloadResolution.resolutionCodes.includes("tier-unavailable-active-preserved")) {
+  if (workloadResolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
     p.sink(tag({
       kind: "tool-use",
       status: p.locale === "ko"
-        ? `${workloadResolution.allocation.tier} 등급 모델이 현재 런타임에 없어 활성 모델을 유지합니다.`
-        : `${workloadResolution.allocation.tier} tier is unavailable; preserving the active model.`,
+        ? "상위 AI가 고른 런타임/모델이 현재 실행 재고에 없어 활성 모델을 유지합니다."
+        : "The parent-selected runtime/model pair is not in live execution inventory; preserving the active model.",
     }));
   }
   p.sink(tag({
@@ -743,7 +815,7 @@ async function runBorrowedAgentTurn(
       (spec.source === "installed" || spec.source === "firm-node") && spec.installedAgentId
         ? getAgentById(spec.installedAgentId)
         : null;
-    const ontology = installedAgent ? await buildAgentRuntimeOntologyContext({
+    const ontology = !p.req.agentAppMode && installedAgent ? await buildAgentRuntimeOntologyContext({
       runSessionId: p.req.runId ?? `task-force:${p.chat.id}`,
       installedAgent,
       projectId: p.chat.projectId,
@@ -753,7 +825,7 @@ async function runBorrowedAgentTurn(
       includeOperational: false,
     }) : null;
     if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
-    const result = await p.picked.runner(
+    const result = await picked.runner(
       {
         systemPrompt: [
           buildBorrowedAgentSystemPrompt(spec, runnerBase.permission),
@@ -761,15 +833,15 @@ async function runBorrowedAgentTurn(
         ].filter(Boolean).join("\n\n"),
         history: [],
         userPrompt: packetToPrompt(packet, p.req.userPrompt),
-        images: p.req.images,
-        backendLabel: p.picked.label,
+        images: p.req.agentAppMode ? undefined : p.req.images,
+        backendLabel: picked.label,
         model: active.model ?? undefined,
         longContext: active.longContextEnabled ?? false,
         effort: active.effort ?? undefined,
         signal: link.signal,
         ...runnerBase,
-        cwd: p.workingFolder ?? undefined,
-        chatId: `${p.chat.id}:borrow:${spec.slug}`,
+        cwd: p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
+        chatId: taskForceSessionId(p, `borrow:${spec.slug}`),
         locale: p.locale,
       },
       {
@@ -799,6 +871,19 @@ async function runBorrowedAgentTurn(
     };
   } catch (err) {
     if (p.signal?.aborted) throw err;
+    if (p.req.agentAppMode) {
+      p.sink(tag({
+        kind: "tool-use",
+        done: true,
+        status: p.locale === "ko" ? `${spec.name} 실패` : `${spec.name} failed`,
+      }));
+      return {
+        spec,
+        packet,
+        text: UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
+        ok: false,
+      };
+    }
     const message = timedOut
       ? p.locale === "ko"
         ? "응답 시간 초과"
@@ -868,18 +953,23 @@ async function runPlanner(
   if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
   const result = await p.picked.runner(
     {
-      systemPrompt: buildPlannerSystemPrompt(p.orchestratorAgent, p.locale, taskForcePermission(p), p.active),
+      systemPrompt: buildPlannerSystemPrompt(
+        p.orchestratorAgent,
+        p.locale,
+        taskForcePermission(p),
+        taskForceCandidateRuntimes(p),
+      ),
       history,
-      userPrompt: buildPlannerPrompt(specs, p.req.userPrompt, p.workingFolder),
-      images: p.req.images,
+      userPrompt: buildPlannerPrompt(specs, p.req.userPrompt, p.req.agentAppMode ? undefined : p.workingFolder),
+      images: p.req.agentAppMode ? undefined : p.req.images,
       backendLabel: p.picked.label,
       model: p.active.model ?? undefined,
       longContext: p.active.longContextEnabled ?? false,
       effort: p.active.effort ?? undefined,
       signal: p.signal,
       ...taskForceRunnerBase(p),
-      cwd: p.workingFolder ?? undefined,
-      chatId: `${p.chat.id}:borrow-orchestrator`,
+      cwd: p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
+      chatId: taskForceSessionId(p, "borrow-orchestrator"),
       locale: p.locale,
     },
     {
@@ -929,16 +1019,28 @@ async function runPlanner(
   };
 }
 
-export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams): Promise<void> {
+async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams): Promise<void> {
   const overrideSpecs = uniqSpecs(p.taskForceSpecs);
+  if (p.req.agentAppMode) {
+    if (overrideSpecs.length === 0) {
+      throw new Error("Agent App groups require pre-resolved installed-agent specifications.");
+    }
+    if (overrideSpecs.some((spec) => (
+      (spec.source !== "installed" && spec.source !== "firm-node") || !spec.installedAgentId
+    ))) {
+      throw new Error("Agent App groups may contain installed local agents only.");
+    }
+  }
   const slugs = overrideSpecs.length > 0 ? overrideSpecs.map((spec) => spec.slug) : uniqSlugs(p.req.borrowAgents);
   if (slugs.length < 1 || (overrideSpecs.length === 0 && slugs.length < 2)) {
     throw new Error("Task force requires runnable agents.");
   }
 
-  const history = listChatMessages(p.chat.id, 80);
-  appendChatMessage(p.chat.id, "user", p.req.userPrompt);
-  if (history.length === 0) autoTitleFromFirstMessage(p.chat.id, p.req.userPrompt);
+  const history = p.req.agentAppMode ? [] : listChatMessages(p.chat.id, 80);
+  if (!p.req.agentAppMode) {
+    appendChatMessage(p.chat.id, "user", p.req.userPrompt);
+    if (history.length === 0) autoTitleFromFirstMessage(p.chat.id, p.req.userPrompt);
+  }
 
   p.sink({
     kind: "tool-use",
@@ -957,13 +1059,21 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
 
   const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
   const orchestratorName = p.orchestratorAgent.nameEn || p.orchestratorAgent.name || "Agentlas Orchestrator";
-  const synthesisResolution = resolveWorkloadAllocation({
+  const synthesisCandidateRuntimes = taskForceCandidateRuntimes(p);
+  const synthesisResolution = resolveWorkloadAllocationAcrossRuntimes({
     allocation: plan.synthesisAllocation,
-    runtime: p.active,
+    runtimes: synthesisCandidateRuntimes,
+    fallbackRuntime: p.active,
     phase: "synthesize",
     manualOverride: p.runtimeOverride,
   });
   const synthesisActive = synthesisResolution.runtime;
+  if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(synthesisActive.kind)) {
+    throw new MobileReadRuntimeBoundaryError(
+      "This task-force synthesis runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
+    );
+  }
+  const synthesisPicked = sameRuntime(synthesisActive, p.active) ? p.picked : pickRunner(synthesisActive) ?? p.picked;
   tryRecordRunEvent({
     runId: p.req.runId ?? `task-force:${p.chat.id}`,
     kind: "workload_allocation",
@@ -972,12 +1082,12 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
     agentId: p.orchestratorAgent.id,
     payload: workloadAllocationReceipt(synthesisResolution),
   });
-  if (synthesisResolution.resolutionCodes.includes("tier-unavailable-active-preserved")) {
+  if (synthesisResolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
     p.sink({
       kind: "tool-use",
       status: p.locale === "ko"
-        ? `${synthesisResolution.allocation.tier} 종합 등급을 사용할 수 없어 활성 모델로 종합합니다.`
-        : `${synthesisResolution.allocation.tier} synthesis tier is unavailable; preserving the active model.`,
+        ? "상위 AI의 종합 런타임/모델이 실행 재고에 없어 활성 모델로 종합합니다."
+        : "The parent-selected synthesis runtime/model is not in live inventory; preserving the active model.",
       agentId: orchestratorId,
       agentName: orchestratorName,
       role: "orchestrator",
@@ -996,22 +1106,24 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
     model: modelLabel(synthesisActive),
   });
 
-  const synthesisOntology = await buildAgentRuntimeOntologyContext({
-    runSessionId: p.req.runId ?? `task-force:${p.chat.id}`,
-    installedAgent: p.orchestratorAgent,
-    projectId: p.chat.projectId,
-    projectPath: p.workingFolder,
-    runtimeKind: synthesisActive.kind,
-    task: p.req.userPrompt,
-    includeOperational: false,
-  });
+  const synthesisOntology = p.req.agentAppMode
+    ? null
+    : await buildAgentRuntimeOntologyContext({
+        runSessionId: p.req.runId ?? `task-force:${p.chat.id}`,
+        installedAgent: p.orchestratorAgent,
+        projectId: p.chat.projectId,
+        projectPath: p.workingFolder,
+        runtimeKind: synthesisActive.kind,
+        task: p.req.userPrompt,
+        includeOperational: false,
+      });
 
   if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
-  const final = await p.picked.runner(
+  const final = await synthesisPicked.runner(
     {
       systemPrompt: [
         buildSynthesisSystemPrompt(p.orchestratorAgent, p.locale, taskForcePermission(p)),
-        synthesisOntology.prompt,
+        synthesisOntology?.prompt,
       ].filter(Boolean).join("\n\n"),
       history,
       userPrompt: buildSynthesisPrompt({
@@ -1020,15 +1132,15 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
         packets: plan.packets,
         results,
       }),
-      images: p.req.images,
-      backendLabel: p.picked.label,
+      images: p.req.agentAppMode ? undefined : p.req.images,
+      backendLabel: synthesisPicked.label,
       model: synthesisActive.model ?? undefined,
       longContext: synthesisActive.longContextEnabled ?? false,
       effort: synthesisActive.effort ?? undefined,
       signal: p.signal,
       ...taskForceRunnerBase(p),
-      cwd: p.workingFolder ?? undefined,
-      chatId: `${p.chat.id}:borrow-synthesis`,
+      cwd: p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
+      chatId: taskForceSessionId(p, "borrow-synthesis"),
       locale: p.locale,
     },
     {
@@ -1042,7 +1154,9 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
         phase: "synthesize",
       }),
       onPartial: (text) => {
-        if (!p.restrictedReadBoundary) p.sink({ kind: "partial", text: redactSensitiveText(text) });
+        if (!p.req.agentAppMode && !p.restrictedReadBoundary) {
+          p.sink({ kind: "partial", text: redactSensitiveText(text) });
+        }
       },
       onTool: (name, args, result, id, isError) =>
         p.sink({
@@ -1058,8 +1172,10 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
   );
 
   const continuation = stripStormbreakerContinueMarker(redactSensitiveText(final.text));
-  let displayText = continuation.text;
-  if (continuation.shouldContinue) {
+  let displayText = p.req.agentAppMode
+    ? cleanAgentAppControlBlocks(continuation.text)
+    : continuation.text;
+  if (!p.req.agentAppMode && continuation.shouldContinue) {
     const boundaryNote = p.locale === "ko"
       ? "안전 경계: 다중 Hub/에이전트 그룹 작업은 로컬 단일 에이전트 자동화로 대체하지 않습니다. 계속하려면 같은 조합으로 다시 실행해 모든 Hub bundle을 재검증해야 합니다."
       : "Safety boundary: a multi-Hub or Agent Group run is never replaced by a local single-agent continuation. Resume with the same roster so every Hub bundle is revalidated.";
@@ -1067,7 +1183,7 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
     p.sink({ kind: "tool-use", status: boundaryNote });
   }
   displayText = restrictedTaskForceText(p, displayText, orchestratorId, p.orchestratorAgent.id);
-  if (!p.restrictedReadBoundary) {
+  if (!p.req.agentAppMode && !p.restrictedReadBoundary) {
     try {
       // A normal Desktop read may retain attributable agent experience in the
       // private DB, but it must not create project-local .agentlas files. A
@@ -1091,7 +1207,7 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
       // Curator failures should not block the user's task-force answer.
     }
   }
-  appendChatMessage(p.chat.id, "assistant", displayText);
+  if (!p.req.agentAppMode) appendChatMessage(p.chat.id, "assistant", displayText);
   p.sink({
     kind: "tool-use",
     done: true,
@@ -1104,4 +1220,15 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
     tokens: final.tokens,
   });
   p.sink({ kind: "final", text: displayText, tokens: final.tokens });
+}
+
+export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams): Promise<void> {
+  try {
+    await runBorrowedTaskForceInvocationInternal(p);
+  } catch (error) {
+    if (!p.req.agentAppMode) throw error;
+    // Planner/synthesis CLI errors can contain stderr, local paths, or runtime
+    // details. Agent Apps receive one fixed failure without preserving `cause`.
+    throw createUntrustedRuntimeFailure();
+  }
 }

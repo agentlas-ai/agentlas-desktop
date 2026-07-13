@@ -2,6 +2,12 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { buildDesignCss } from "../surface-design";
+import {
+  astryxDevCommand,
+  astryxReactProfile,
+  buildAstryxReactFiles,
+  sanitizeAstryxManifestContractDefaults,
+} from "./astryx-react";
 import type {
   AgentlasSurfaceAppRoute,
   AgentlasSurfaceConnectorSpec,
@@ -16,6 +22,10 @@ import type {
 interface ScaffoldOptions {
   baseDir: string;
   now?: string;
+  /** Site-owned artifacts live directly below ~/.agentlas/site/agentapp. */
+  directChild?: boolean;
+  /** A main-owned port override avoids every generated Site app claiming 3000. */
+  localPort?: number;
 }
 
 interface ScaffoldFile {
@@ -31,7 +41,7 @@ export async function scaffoldServiceApp(
   request: AppFactoryScaffoldRequest,
   options: ScaffoldOptions,
 ): Promise<AppFactoryScaffoldResult> {
-  const manifest = request.manifest;
+  const manifest = sanitizeAstryxManifestContractDefaults(request.manifest);
   if (manifest.kind !== "surface" || (manifest.layout !== "service-app" && !manifest.app)) {
     throw new Error("App Factory can only scaffold app-backed surfaces.");
   }
@@ -43,10 +53,13 @@ export async function scaffoldServiceApp(
   const appName = manifest.app?.name?.trim() || manifest.title.trim() || "Agentlas App";
   const slug = slugify(appName);
   const appId = `${slug}-${shortId(request.surfaceId || `${appName}:${now}`)}`;
-  const rootPath = path.join(options.baseDir, "agentlas-apps", appId);
-  const localPort = localWebAppPort(manifest);
+  const rootPath = options.directChild
+    ? path.join(options.baseDir, appId)
+    : path.join(options.baseDir, "agentlas-apps", appId);
+  const localPort = validLocalPort(options.localPort) ?? localWebAppPort(manifest);
   const launchUrl = localLaunchUrl(localPort);
-  const devCommand = localDevCommand(localPort);
+  const astryxProfile = astryxReactProfile(manifest);
+  const devCommand = astryxProfile ? astryxDevCommand(localPort) : localDevCommand(localPort);
   const files = buildServiceAppFiles(manifest, { appId, appName, now, localPort, launchUrl, devCommand });
 
   await fs.mkdir(rootPath, { recursive: true });
@@ -67,7 +80,7 @@ export async function scaffoldServiceApp(
     appId,
     appName,
     rootPath,
-    previewPath: path.join(rootPath, "src", "index.html"),
+    previewPath: path.join(rootPath, astryxProfile ? "astryx-app/index.html" : "src/index.html"),
     setupPath: path.join(rootPath, "SETUP.md"),
     smokePath: path.join(rootPath, "tests", "smoke.mjs"),
     runtimeMode: "external-local-webapp",
@@ -76,14 +89,23 @@ export async function scaffoldServiceApp(
     localPort,
     createdAt: now,
     files: written,
-    summary: `${appName} registered in Apps and scaffolded as an external local web app at ${launchUrl}.`,
+    summary: astryxProfile
+      ? `${appName} registered in Apps with a runnable Astryx React companion at ${launchUrl}.`
+      : `${appName} registered in Apps and scaffolded as an external local web app at ${launchUrl}.`,
   };
+}
+
+function validLocalPort(value: number | undefined): number | null {
+  return Number.isInteger(value) && Number(value) >= 1_024 && Number(value) <= 65_535
+    ? Number(value)
+    : null;
 }
 
 export function buildServiceAppFiles(
   manifest: AgentlasSurfaceManifest,
   ctx: { appId: string; appName: string; now: string; localPort?: number; launchUrl?: string; devCommand?: string },
 ): ScaffoldFile[] {
+  manifest = sanitizeAstryxManifestContractDefaults(manifest);
   const routes = routesOf(manifest);
   const connectors = connectorsOf(manifest);
   const tools = toolsOf(manifest);
@@ -92,6 +114,7 @@ export function buildServiceAppFiles(
   const business = manifest.app?.business ?? objectData(manifest, "business");
   const deployment = manifest.app?.deployment ?? {};
   const operations = buildOperationsState(manifest, { appId: ctx.appId, appName: ctx.appName, now: ctx.now });
+  const astryxProfile = astryxReactProfile(manifest);
   const routeFiles = buildRouteFiles(manifest, routes, operations, ctx);
   const appData = {
     id: ctx.appId,
@@ -129,6 +152,7 @@ export function buildServiceAppFiles(
       kind: "doc",
       content: scaffoldReport(manifest, routes, connectors, artifacts, deployment, ctx),
     },
+    ...(astryxProfile ? buildAstryxReactFiles(astryxProfile, ctx.localPort ?? DEFAULT_LOCAL_WEB_APP_PORT) : []),
   ];
 }
 

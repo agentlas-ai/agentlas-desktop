@@ -2183,11 +2183,27 @@ export function initStore(): void {
       );
       CREATE INDEX IF NOT EXISTS idx_experience_auto_intake_agent_status
         ON experience_auto_intake_receipts(agent_id, status, created_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_run_events_agent_ts
-        ON run_events(agent_id, ts DESC);
-      CREATE INDEX IF NOT EXISTS idx_failure_events_agent_ts
-        ON failure_events(agent_id, ts DESC);
     `);
+
+    // Interrupted/minimal legacy fixtures can legitimately carry a later
+    // user_version while one of the append-only ledgers is absent, and early
+    // v38 previews did not yet have agent_id. Repair only the tables that
+    // exist, then create indexes only when their columns are authoritative.
+    for (const table of ["run_events", "failure_events"] as const) {
+      if (!tableExists(_db, table)) continue;
+      const columns = new Set(schemaColumns(_db, table).map((column) => column.name));
+      if (!columns.has("agent_id")) {
+        _db.exec(`ALTER TABLE ${table} ADD COLUMN agent_id TEXT`);
+        columns.add("agent_id");
+      }
+      if (columns.has("agent_id") && columns.has("ts")) {
+        _db.exec(
+          table === "run_events"
+            ? "CREATE INDEX IF NOT EXISTS idx_run_events_agent_ts ON run_events(agent_id, ts DESC)"
+            : "CREATE INDEX IF NOT EXISTS idx_failure_events_agent_ts ON failure_events(agent_id, ts DESC)",
+        );
+      }
+    }
   }
 
   // v58: content-free per-turn Memory Curator receipts are queried by exact

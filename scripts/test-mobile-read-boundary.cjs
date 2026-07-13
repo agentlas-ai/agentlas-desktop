@@ -215,7 +215,7 @@ async function main() {
     db.prepare("SELECT COUNT(*) AS count FROM folder_activity WHERE path = ?").get(projectPath).count,
     0,
   );
-  assert.equal(fs.existsSync(path.join(projectPath, ".agentlas")), false);
+  assert.equal(fs.existsSync(path.join(projectPath, ".agentlas")), false, "read-only contact must not create local project state");
   assert.equal(mcpSelectionCalls, 0, "read invocations must not select MCPs");
   assert.equal(mcpConfigCalls, 0, "read invocations must not build MCP config");
   for (const request of runnerRequests) {
@@ -253,31 +253,21 @@ async function main() {
     db.prepare("SELECT visits FROM folder_activity WHERE path = ?").get(projectPath).visits,
     1,
   );
-  assert.equal(
-    fs.existsSync(path.join(projectPath, ".agentlas")),
-    true,
-    "the first writable contact must install the canonical project architecture",
-  );
-  assert.equal(
-    fs.readFileSync(path.join(projectPath, ".gitignore"), "utf8").includes(
-      "# >>> agentlas local project state >>>",
-    ),
-    true,
-    "first-contact setup must install the Agentlas privacy block",
+  assert.equal(fs.existsSync(path.join(projectPath, ".agentlas")), true, "first writable contact must seed local continuity");
+  assert.match(
+    fs.readFileSync(path.join(projectPath, ".gitignore"), "utf8"),
+    /(?:^|\n)\/?\.agentlas\//,
+    "local project state must be privacy-ignored before fallback or Core seeding",
   );
 
   await invoke("read", "Read-only after one write.");
   await invoke("read", "Read-only after one write again.");
-  assert.equal(activationCalls, 1, "read retries must not record another writable contact");
+  assert.equal(activationCalls, 1, "read retries must not turn one write visit into activation");
   assert.equal(
     db.prepare("SELECT visits FROM folder_activity WHERE path = ?").get(projectPath).visits,
     1,
   );
-  assert.equal(
-    fs.existsSync(path.join(projectPath, ".agentlas")),
-    true,
-    "read retries must preserve the first-contact project architecture",
-  );
+  assert.equal(fs.existsSync(path.join(projectPath, ".agentlas")), true, "read retries must not remove writable first-contact state");
   assert.equal(mcpSelectionCalls, 1, "read retries after a write must still skip MCP selection");
   assert.equal(mcpConfigCalls, 1, "read retries after a write must still skip MCP config");
   for (const request of runnerRequests.slice(-2)) {

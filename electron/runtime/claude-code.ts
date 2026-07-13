@@ -13,6 +13,7 @@ import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
+import { createUntrustedRuntimeFailure } from "./untrusted-error";
 import {
   clearRuntimeSession,
   getRuntimeSession,
@@ -201,9 +202,11 @@ export const runClaudeCode: Runner = async (
     runReq.userPrompt,
     runReq.forceSurface,
     runReq.restrictedReadBoundary,
+    runReq.untrustedNoTools,
+    runReq.untrustedAllowedMcpTools,
   );
-  const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
-  const savedSession = runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
+  const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq) : null;
+  const savedSession = !runReq.untrustedNoTools && runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
   const storedSessionId =
     savedSession && fingerprint && savedSession.fingerprint === fingerprint
       ? savedSession.sessionId
@@ -211,7 +214,7 @@ export const runClaudeCode: Runner = async (
   if (runReq.chatId && savedSession && fingerprint && savedSession.fingerprint !== fingerprint) {
     clearRuntimeSession(runReq.chatId, KIND);
   }
-  const resumeSessionId = runReq.runtimeSessionId ?? storedSessionId;
+  const resumeSessionId = runReq.untrustedNoTools ? null : (runReq.runtimeSessionId ?? storedSessionId);
   const flatUser = resumeSessionId ? runReq.userPrompt : flattenHistory(runReq);
 
   if (stagedImages.images.length > 0) {
@@ -232,8 +235,9 @@ export const runClaudeCode: Runner = async (
   }
 
   // 권한 칩 → claude 권한 모드. read=기본(헤드리스에서 위험 툴 자동 거부), write=편집 허용, full=전체.
-  const permArgs =
-    req.permission === "full"
+  const permArgs = runReq.untrustedNoTools
+    ? []
+    : req.permission === "full"
       ? ["--permission-mode", "bypassPermissions"]
       : req.permission === "write"
         ? ["--permission-mode", "acceptEdits"]
@@ -246,15 +250,35 @@ export const runClaudeCode: Runner = async (
 
   // MCP 서버 구성 주입 — mcp/client.ts가 설치·활성 서버를 .mcp.json으로 직렬화해 경로를 넘긴다.
   // 이게 있어야 에이전트가 브라우저(Playwright) 등 실제 MCP 툴을 호출한다. (사용자 config와 병합)
-  const mcpArgs = req.mcpConfigPath ? ["--mcp-config", req.mcpConfigPath] : [];
+  const hasExactUntrustedMcpGrant = Boolean(
+    runReq.untrustedNoTools &&
+    req.mcpConfigPath &&
+    req.mcpAllowedTools?.length &&
+    req.mcpAllowedTools.every((tool) => /^mcp__[a-z0-9_-]+__(?:brave_web_search|brave_local_search)$/.test(tool)),
+  );
+  const mcpArgs = req.mcpConfigPath && (!runReq.untrustedNoTools || hasExactUntrustedMcpGrant)
+    ? ["--mcp-config", req.mcpConfigPath]
+    : [];
   // write/full 권한이면 헤드리스에서 권한 프롬프트로 막히지 않도록 MCP 툴을 미리 허용.
   const allowedToolArgs =
     req.mcpConfigPath &&
     req.mcpAllowedTools &&
     req.mcpAllowedTools.length > 0 &&
-    (req.permission === "write" || req.permission === "full")
+    ((!runReq.untrustedNoTools && (req.permission === "write" || req.permission === "full")) ||
+      hasExactUntrustedMcpGrant)
       ? ["--allowedTools", req.mcpAllowedTools.join(",")]
       : [];
+  const noToolsArgs = runReq.untrustedNoTools
+    ? [
+        "--safe-mode",
+        "--disable-slash-commands",
+        "--no-chrome",
+        "--no-session-persistence",
+        "--strict-mcp-config",
+        "--tools",
+        "",
+      ]
+    : [];
 
   // 시스템 프롬프트(Agentlas 헤더+스킬+프로토콜만 ~24KB)는 argv가 아니라 파일로 전달한다.
   // Windows에서 claude는 `.cmd` 심 → cmd.exe로 실행되고 커맨드라인은 ~8191자 한계라,
@@ -270,11 +294,23 @@ export const runClaudeCode: Runner = async (
   };
 
   return new Promise<RunnerResult>((resolve, reject) => {
+    const rejectRuntime = (error: unknown) => {
+      reject(
+        runReq.untrustedNoTools
+          ? createUntrustedRuntimeFailure()
+          : error instanceof Error
+            ? error
+            : new Error(String(error)),
+      );
+    };
     // stream-json + verbose: tool_use / 텍스트 / 토큰(usage) 이벤트를 NDJSON으로 받아
     // Claude Code식 tool-use 블록 + 토큰 표시를 가능하게 한다.
     // --include-partial-messages: 텍스트를 메시지 블록 덩어리가 아니라 토큰 델타로 받아
     // 타자기 스트리밍을 가능하게 한다(미지원 구형 CLI는 close 핸들러에서 자동 폴백).
     const partialFlagArgs = includePartialMessagesSupported ? ["--include-partial-messages"] : [];
+    const systemPromptFileFlag = runReq.untrustedNoTools
+      ? "--system-prompt-file"
+      : "--append-system-prompt-file";
     const args = resumeSessionId
       ? [
           "--resume",
@@ -288,12 +324,13 @@ export const runClaudeCode: Runner = async (
           ...modelArgs,
           ...effortArgs,
           ...permArgs,
+          ...noToolsArgs,
           ...mcpArgs,
           ...allowedToolArgs,
         ]
       : [
           "-p",
-          "--append-system-prompt-file",
+          systemPromptFileFlag,
           sysPromptFile,
           "--output-format",
           "stream-json",
@@ -302,18 +339,26 @@ export const runClaudeCode: Runner = async (
           ...modelArgs,
           ...effortArgs,
           ...permArgs,
+          ...noToolsArgs,
           ...mcpArgs,
           ...allowedToolArgs,
         ];
-    const child = spawnCli(bin, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: req.env ?? process.env,
-      // 사용자가 워킹 폴더(프로젝트)를 지정했으면 거기서 실행 — 빌드/파일 생성이 프로젝트에 일어난다.
-      // 미지정이면 쓰기 가능한 전용 폴더(packaged 앱은 cwd가 비쓰기/루트라 claude가 exit 1).
-      cwd: req.cwd ?? agentRunCwd(),
-      // POSIX 그룹킬 대상 — 취소/앱종료 시 CLI가 띄운 MCP 서버·빌드 손자까지 정리.
-      ...detachedSpawnOpts(),
-    });
+    let child: ReturnType<typeof spawnCli>;
+    try {
+      child = spawnCli(bin, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: req.env ?? process.env,
+        // 사용자가 워킹 폴더(프로젝트)를 지정했으면 거기서 실행 — 빌드/파일 생성이 프로젝트에 일어난다.
+        // 미지정이면 쓰기 가능한 전용 폴더(packaged 앱은 cwd가 비쓰기/루트라 claude가 exit 1).
+        cwd: req.cwd ?? agentRunCwd(),
+        // POSIX 그룹킬 대상 — 취소/앱종료 시 CLI가 띄운 MCP 서버·빌드 손자까지 정리.
+        ...detachedSpawnOpts(),
+      });
+    } catch (error) {
+      cleanupSysFile();
+      rejectRuntime(error);
+      return;
+    }
     trackRunChild(child);
     writeStdin(child, flatUser);
 
@@ -561,7 +606,7 @@ export const runClaudeCode: Runner = async (
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       cleanupSysFile();
-      reject(err);
+      rejectRuntime(err);
     });
     child.on("close", (code) => {
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
@@ -575,7 +620,7 @@ export const runClaudeCode: Runner = async (
         if (req.chatId && fingerprint && sessionId) {
           saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint);
         }
-        reject(new Error(tStatus(req.locale, "aborted")));
+        rejectRuntime(new Error(tStatus(req.locale, "aborted")));
         return;
       }
       if (code === 0) {
@@ -591,6 +636,10 @@ export const runClaudeCode: Runner = async (
         }
         resolve({ text: display.trim(), sessionId, tokens });
       } else {
+        if (runReq.untrustedNoTools) {
+          rejectRuntime(new Error("Agent App runtime process exited unsuccessfully."));
+          return;
+        }
         // 구형 CLI가 --include-partial-messages를 모르면 그 플래그만 빼고 즉시 재시도 —
         // 델타 스트리밍만 포기하고 채팅 자체는 살린다(전역 1회 학습).
         if (includePartialMessagesSupported && /include-partial-messages/i.test(stderr)) {

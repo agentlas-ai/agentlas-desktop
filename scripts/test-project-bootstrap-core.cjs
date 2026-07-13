@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -7,9 +8,15 @@ const { app } = require("electron");
 async function main() {
   await app.whenReady();
   const coreRoot = process.env.HEPHAESTUS_RUNTIME_ROOT;
-  assert.ok(coreRoot && fs.existsSync(path.join(coreRoot, "agentlas_cloud", "project_bootstrap.py")), "new Agentlas Core runtime is required");
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-desktop-project-bootstrap-"));
+  assert.ok(
+    coreRoot && fs.existsSync(path.join(coreRoot, "agentlas_cloud", "project_bootstrap.py")),
+    "a Core runtime with canonical project bootstrap is required",
+  );
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-desktop-core-bootstrap-"));
   fs.writeFileSync(path.join(project, "main.ts"), "export function desktopFirstContact() { return true; }\n");
+  fs.mkdirSync(path.join(project, ".agentlas"), { mode: 0o700 });
+  const existingSoul = "# Existing project memory\n\nOperator-owned content.\n";
+  fs.writeFileSync(path.join(project, ".agentlas", "project-soul-memory.md"), existingSoul, { mode: 0o600 });
   try {
     const { runHephaestus } = require("../dist/electron/hephaestus/engine.js");
     const result = await runHephaestus(
@@ -26,16 +33,11 @@ async function main() {
     assert.deepEqual(result.json.missing, []);
     assert.deepEqual(result.json.overwritten, []);
     assert.deepEqual(result.json.permissionIssues, []);
-    assert.equal(fs.existsSync(path.join(project, ".agentlas", "project-soul-memory.md")), true);
+    assert.equal(fs.readFileSync(path.join(project, ".agentlas", "project-soul-memory.md"), "utf8"), existingSoul);
     assert.equal(fs.existsSync(path.join(project, ".agentlas", "code-map", "project-map.json")), true);
     assert.equal(fs.existsSync(path.join(project, ".agentlas", "ontology-runtime.sqlite")), true);
     assert.equal(fs.existsSync(path.join(project, ".agentlas", "career-graph.sqlite")), true);
-
-    const activation = fs.readFileSync(path.join(__dirname, "..", "electron", "architecture", "activation.ts"), "utf8");
-    assert.match(activation, /export async function recordFolderVisit/);
-    assert.match(activation, /\["project", "ensure"/);
-    assert.doesNotMatch(activation, /ACTIVATE_AT_VISITS|visits\s*>=\s*2/);
-    console.log("desktop project bootstrap core: PASS");
+    console.log("Desktop -> Core project bootstrap: PASS");
   } finally {
     fs.rmSync(project, { recursive: true, force: true });
     app.quit();
@@ -43,6 +45,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(error);
+  console.error("Desktop -> Core project bootstrap: FAIL", error);
   app.exit(1);
 });

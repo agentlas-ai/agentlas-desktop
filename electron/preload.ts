@@ -21,7 +21,14 @@ import type {
   AutomationUpdatePatch,
   ScheduleSpec,
 } from "../shared/types";
-import type { SiteActivityEvent } from "../shared/site-studio";
+import type {
+  SiteActivityEvent,
+  SiteAgentAppPublishBackendRequest,
+  SiteAgentAppTargetRef,
+  SitePublishProvider,
+  SitePublishProviderPage,
+  SiteSurface,
+} from "../shared/site-studio";
 
 const api: AgentlasIpc = {
   app: {
@@ -46,8 +53,26 @@ const api: AgentlasIpc = {
     listProjects: () => ipcRenderer.invoke("site:listProjects"),
     operationStatus: (payload: { projectId: string }) => ipcRenderer.invoke("site:operationStatus", payload),
     listConversation: (payload: { projectId: string }) => ipcRenderer.invoke("site:listConversation", payload),
-    createProject: (payload: { name: string }) => ipcRenderer.invoke("site:createProject", payload),
+    createProject: (payload: { name: string; surface?: SiteSurface; agentAppTarget?: SiteAgentAppTargetRef }) =>
+      ipcRenderer.invoke("site:createProject", payload),
     deleteProject: (payload: { projectId: string }) => ipcRenderer.invoke("site:deleteProject", payload),
+    launchAgentApp: (payload: { projectId: string }) => ipcRenderer.invoke("site:launchAgentApp", payload),
+    stopAgentApp: (payload: { projectId: string }) => ipcRenderer.invoke("site:stopAgentApp", payload),
+    agentAppRuntimeStatus: (payload: { projectId: string }) => ipcRenderer.invoke("site:agentAppRuntimeStatus", payload),
+    agentAppMcpRecommendation: (payload: { projectId: string }) => ipcRenderer.invoke("site:agentAppMcpRecommendation", payload),
+    reviewAgentAppMcp: (payload: { projectId: string }) => ipcRenderer.invoke("site:reviewAgentAppMcp", payload),
+    agentAppThumbnail: (payload: { projectId: string }) => ipcRenderer.invoke("site:agentAppThumbnail", payload),
+    listPublishProviderStatuses: () => ipcRenderer.invoke("site:listPublishProviderStatuses"),
+    savePublishProviderToken: (payload: { provider: SitePublishProvider; token: string }) =>
+      ipcRenderer.invoke("site:savePublishProviderToken", payload),
+    removePublishProviderToken: (payload: { provider: SitePublishProvider }) =>
+      ipcRenderer.invoke("site:removePublishProviderToken", payload),
+    openPublishProviderPage: (payload: { provider: SitePublishProvider; page: SitePublishProviderPage }) =>
+      ipcRenderer.invoke("site:openPublishProviderPage", payload),
+    connectPublishProvider: (payload: { provider: SitePublishProvider }) =>
+      ipcRenderer.invoke("site:connectPublishProvider", payload),
+    publishAgentApp: (payload: SiteAgentAppPublishBackendRequest) =>
+      ipcRenderer.invoke("site:publishAgentApp", payload),
     generateScreen: (payload: { projectId: string; brief: string; variants?: number; styleHint?: string; baseScreenId?: string; locale?: "ko" | "en" }) =>
       ipcRenderer.invoke("site:generateScreen", payload),
     editScreen: (payload: { projectId: string; screenId: string; instruction: string; selectionId?: string; selectionContext?: string; locale?: "ko" | "en" }) =>

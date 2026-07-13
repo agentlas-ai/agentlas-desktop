@@ -1,24 +1,27 @@
 "use client";
-// 사이트 디자인 스튜디오 — 디자인 전용(백엔드/dev server/코드 실행 없음).
-// 화면 = self-contained HTML 1문서. 렌더는 main의 site:prepareRender(태깅+CSP+오버레이 주입)를
-// 거친 sandbox="allow-scripts" iframe(srcDoc)만 사용한다 — allow-same-origin 금지(opaque origin 격리),
-// 통신은 nonce 봉투 postMessage 단일 채널. docs/DESIGN.md: 토큰만, 강조 1개, inline CSSProperties.
+// Site Studio: Web/mobile 화면은 self-contained HTML을 opaque-origin sandbox에서만
+// 미리 본다. Agent App은 renderer가 실행 경로나 secret을 받지 않고, main이 검증한
+// React + Astryx artifact와 capability-scoped runtime/public publish IPC만 사용한다.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { getSnapshot as getBuildSnapshot, prepareBuildHandoff } from "@/lib/build-session";
 import { navigate } from "@/lib/navigation";
+import { SiteLanding } from "@/components/site/SiteLanding";
+import { SitePublishDialog } from "@/components/site/SitePublishDialog";
 import { SITE_MESSAGE_KEY } from "@shared/site-studio";
 import type {
+  SiteAgentAppTargetRef,
   SiteGuestMessage,
   SiteActivityEvent,
   SiteConversationEntry,
   SiteHostMessage,
   SiteProjectOperation,
-  SiteProjectMeta,
+  SiteProjectPublicMeta,
   SiteScreenMeta,
   SiteSelectionPayload,
+  SiteSurface,
 } from "@shared/site-studio";
 
 type DevicePreset = { id: string; label: string; labelEn: string; width: number };
@@ -40,15 +43,13 @@ export default function SiteStudioPage() {
   const ko = locale !== "en";
 
   // ── 데이터 상태 ─────────────────────────────────────────
-  const [projects, setProjects] = useState<SiteProjectMeta[]>([]);
+  const [projects, setProjects] = useState<SiteProjectPublicMeta[]>([]);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [activeScreenId, setActiveScreenId] = useState<string | null>(null);
   const [avail, setAvail] = useState<{ ready: boolean; agent: string } | null>(null);
 
   // ── 홈(브리프) 상태 ─────────────────────────────────────
   const [view, setView] = useState<"home" | "studio">("home");
-  const [brief, setBrief] = useState("");
-  const [variants, setVariants] = useState(1);
   const [generating, setGenerating] = useState(false);
 
   // ── 캔버스/렌더 상태 ────────────────────────────────────
@@ -66,6 +67,7 @@ export default function SiteStudioPage() {
   const [liveActivity, setLiveActivity] = useState<LiveSiteActivity | null>(null);
   const [handingOff, setHandingOff] = useState(false);
   const [remoteOperation, setRemoteOperation] = useState<SiteProjectOperation | null>(null);
+  const [publishProjectId, setPublishProjectId] = useState<string | null>(null);
 
   // ── 새 화면 인라인 폼 ───────────────────────────────────
   const [addOpen, setAddOpen] = useState(false);
@@ -87,6 +89,10 @@ export default function SiteStudioPage() {
   const operationRef = useRef<"generate" | "edit" | "handoff" | null>(null);
 
   const project = useMemo(() => projects.find((p) => p.id === projectId) ?? null, [projects, projectId]);
+  const publishProject = useMemo(
+    () => projects.find((candidate) => candidate.id === publishProjectId) ?? null,
+    [projects, publishProjectId],
+  );
   const screens = project?.screens ?? [];
   const activeScreen = screens.find((s) => s.id === activeScreenId) ?? null;
   const siteBusy = generating || editing || handingOff || remoteOperation !== null;
@@ -97,7 +103,7 @@ export default function SiteStudioPage() {
     toastTimer.current = setTimeout(() => setToast(null), 3500);
   }, []);
 
-  const refreshProjects = useCallback(async (): Promise<SiteProjectMeta[]> => {
+  const refreshProjects = useCallback(async (): Promise<SiteProjectPublicMeta[]> => {
     const list = (await ipc()?.site?.listProjects?.()) ?? [];
     setProjects(list);
     return list;
@@ -113,7 +119,9 @@ export default function SiteStudioPage() {
           ? ko ? "새 화면을 생성하는 중…" : "Generating a new screen…"
           : operation === "edit"
             ? ko ? "화면 수정을 적용하는 중…" : "Applying screen edits…"
-            : ko ? "작업공간 리비전을 만드는 중…" : "Preparing a workspace revision…";
+            : operation === "publish"
+              ? ko ? "Agent App을 공개 배포하는 중…" : "Publishing the Agent App…"
+              : ko ? "작업공간 리비전을 만드는 중…" : "Preparing a workspace revision…";
       setLiveActivity((current) => current ?? { runId: `restored:${pid}`, status, feedback: "" });
     } else {
       setLiveActivity((current) => current?.runId === `restored:${pid}` ? null : current);
@@ -279,7 +287,14 @@ export default function SiteStudioPage() {
 
   // ── 생성/수정 흐름 ──────────────────────────────────────
   const runGenerate = useCallback(
-    async (opts: { pid: string | null; briefText: string; variantCount: number; baseScreenId?: string }) => {
+    async (opts: {
+      pid: string | null;
+      briefText: string;
+      variantCount: number;
+      baseScreenId?: string;
+      surface?: SiteSurface;
+      agentAppTarget?: SiteAgentAppTargetRef;
+    }) => {
       const text = opts.briefText.trim();
       if (!text || siteBusy || operationRef.current) return;
       operationRef.current = "generate";
@@ -287,12 +302,17 @@ export default function SiteStudioPage() {
       try {
         let pid = opts.pid;
         if (!pid) {
-          const created = await ipc()?.site?.createProject?.({ name: text.slice(0, 30) });
+          const created = await ipc()?.site?.createProject?.({
+            name: text.slice(0, 30),
+            surface: opts.surface,
+            agentAppTarget: opts.agentAppTarget,
+          });
           if (!created) {
             showToast(ko ? "Electron 브리지를 사용할 수 없습니다" : "Electron bridge unavailable");
             return;
           }
           pid = created.id;
+          setDevice(created.surface === "mobile" ? DEVICES[0] : DEVICES[2]);
         }
         const res = await ipc()?.site?.generateScreen?.({
           projectId: pid,
@@ -308,6 +328,21 @@ export default function SiteStudioPage() {
         const generatedScreens = res.screens;
         await refreshProjects();
         await openScreen(pid, generatedScreens[0].id, true);
+        if (res.agentAppReason) {
+          showToast(
+            (ko ? "디자인은 완성했지만 Astryx 앱 소스를 만들지 못했습니다: " : "The design is ready, but the Astryx app scaffold failed: ") +
+              res.agentAppReason,
+          );
+          return;
+        }
+        if (res.agentApp) {
+          showToast(
+            ko
+              ? `Agent App과 Astryx React 소스를 만들었습니다 · ${res.agentApp.appName}`
+              : `Agent App and Astryx React source are ready · ${res.agentApp.appName}`,
+          );
+          return;
+        }
         showToast(
           generatedScreens.length > 1
             ? ko
@@ -316,6 +351,11 @@ export default function SiteStudioPage() {
             : ko
               ? `화면 생성 완료 (${res.engine})`
               : `Screen ready (${res.engine})`,
+        );
+      } catch (error) {
+        showToast(
+          (ko ? "생성 실패: " : "Generation failed: ") +
+            (error instanceof Error ? error.message : String(error)),
         );
       } finally {
         if (operationRef.current === "generate") operationRef.current = null;
@@ -347,6 +387,13 @@ export default function SiteStudioPage() {
       await refreshProjects();
       await loadRender(projectId, activeScreenId);
       await loadConversation(projectId);
+      if (res.agentAppReason) {
+        showToast(
+          (ko ? "화면은 수정했지만 Astryx 앱 계약을 다시 만들지 못했습니다: " : "The screen changed, but the Astryx app contract could not be regenerated: ") +
+            res.agentAppReason,
+        );
+        return;
+      }
       showToast(
         res.mode === "patch"
           ? ko
@@ -485,13 +532,19 @@ export default function SiteStudioPage() {
       if ((projectId === pid && siteBusy) || operationRef.current) return;
       if (!window.confirm(ko ? "프로젝트와 모든 화면을 삭제할까요?" : "Delete this project and all screens?")) return;
       try {
-        await ipc()?.site?.deleteProject?.({ projectId: pid });
+        const deleted = await ipc()?.site?.deleteProject?.({ projectId: pid });
+        if (!deleted) throw new Error(ko ? "Electron 삭제 브리지를 사용할 수 없습니다." : "The Electron deletion bridge is unavailable.");
+        if (!deleted.ok) {
+          showToast(deleted.message);
+          return;
+        }
         if (projectId === pid) {
           setProjectId(null);
           setActiveScreenId(null);
           setSrcDoc(null);
         }
         await refreshProjects();
+        showToast(deleted.message);
       } catch (error) {
         showToast((ko ? "프로젝트를 삭제하지 못했습니다: " : "Could not delete the project: ") + (error instanceof Error ? error.message : String(error)));
       }
@@ -505,119 +558,98 @@ export default function SiteStudioPage() {
   if (view === "home") {
     return (
       <div style={shell}>
-        <div style={homeWrap}>
-          <div style={eyebrow}>SITE · DESIGN STUDIO</div>
-          <h1 style={homeTitle}>
-            <span style={{ color: "var(--accent)" }}>{ko ? "사이트" : "Site"}</span>{" "}
-            {ko ? "디자인 스튜디오" : "Design Studio"}
-          </h1>
-          <p style={homeSub}>
-            {ko
-              ? "웹앱디자인마스터에게 화면을 맡기세요. 만들어진 디자인은 우측 캔버스에서 요소를 클릭해 바로 고칠 수 있습니다. 디자인 전용 — 서버도 빌드도 없습니다."
-              : "Brief the design master, then click any element on the canvas to refine it. Design-only — no servers, no builds."}
-          </p>
-
-          <div style={promptBox}>
-            <textarea
-              value={brief}
-              onChange={(e) => setBrief(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                  if (isImeSubmit(e)) return;
-                  e.preventDefault();
-                  void runGenerate({ pid: null, briefText: brief, variantCount: variants });
-                }
-              }}
-              placeholder={
-                ko
-                  ? "예: 1인 창업자를 위한 회계 SaaS 랜딩 페이지 — 신뢰감 있는 딥그린, 요금제 3단"
-                  : "e.g. A landing page for an accounting SaaS — deep green, 3 pricing tiers"
+        <SiteLanding
+          projects={projects}
+          locale={ko ? "ko" : "en"}
+          busy={siteBusy}
+          noEngine={noEngine}
+          generating={generating}
+          onCreate={({ brief: nextBrief, surface, agentAppTarget }) => {
+            void runGenerate({
+              pid: null,
+              briefText: nextBrief,
+              variantCount: 1,
+              surface,
+              agentAppTarget,
+            });
+          }}
+          onOpenProject={(nextProject) => {
+            if (nextProject.surface === "agent-app" && nextProject.agentAppArtifact?.status === "ready") {
+              void ipc()?.site?.launchAgentApp?.({ projectId: nextProject.id }).then((result) => {
+                if (!result?.ok) showToast(result?.reason || (ko ? "Agent App을 실행하지 못했습니다." : "Could not launch the Agent App."));
+              }).catch((error) => {
+                showToast((ko ? "Agent App 실행 실패: " : "Agent App launch failed: ") + (error instanceof Error ? error.message : String(error)));
+              });
+              return;
+            }
+            setDevice(nextProject.surface === "mobile" ? DEVICES[0] : DEVICES[2]);
+            if (nextProject.screens.length) void openScreen(nextProject.id, nextProject.screens[0].id);
+            else {
+              setProjectId(nextProject.id);
+              setView("studio");
+            }
+          }}
+          onDeleteProject={(nextProjectId) => void deleteProject(nextProjectId)}
+          onLoadAgentAppThumbnail={async (nextProjectId) => {
+            const result = await ipc()?.site?.agentAppThumbnail?.({ projectId: nextProjectId });
+            return result?.ok && result.dataUrl
+              ? { ok: true, dataUrl: result.dataUrl }
+              : { ok: false, reason: result?.reason || (ko ? "썸네일을 읽지 못했습니다." : "Could not read the thumbnail.") };
+          }}
+          onReviewAgentAppMcp={(nextProject) => {
+            void ipc()?.site?.reviewAgentAppMcp?.({ projectId: nextProject.id }).then(async (result) => {
+              await refreshProjects();
+              if (result.status === "approved") {
+                const ready = result.rows.filter((row) => row.readiness === "ready").length;
+                showToast(ko
+                  ? `MCP 사용을 허용했습니다 · 현재 연결 가능 ${ready}/${result.rows.length}`
+                  : `MCP access allowed · ${ready}/${result.rows.length} currently ready`);
+              } else if (result.status === "declined") {
+                showToast(ko ? "이 Agent App은 MCP 없이 실행됩니다." : "This Agent App will run without MCP.");
               }
-              rows={3}
-              style={briefInput}
-              disabled={generating}
-            />
-          </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14, flexWrap: "wrap" }}>
-            <span style={metaLabel}>{ko ? "시안" : "Variants"}</span>
-            <div style={{ display: "inline-flex", gap: 4 }}>
-              {[1, 2, 3].map((n) => (
-                <button
-                  key={n}
-                  type="button"
-                  onClick={() => setVariants(n)}
-                  style={{ ...segBtn, ...(variants === n ? segBtnOn : null) }}
-                >
-                  {n}
-                </button>
-              ))}
-            </div>
-            <div style={{ flex: 1 }} />
-            <button
-              type="button"
-              style={{ ...primaryBtn, opacity: siteBusy || !brief.trim() || noEngine ? 0.5 : 1 }}
-              disabled={siteBusy || !brief.trim() || noEngine}
-              onClick={() => void runGenerate({ pid: null, briefText: brief, variantCount: variants })}
-            >
-              {generating ? (ko ? "디자인 중…" : "Designing…") : ko ? "화면 만들기" : "Create screen"}
-            </button>
-          </div>
-
-          {noEngine && (
-            <p style={warnNote}>
-              {ko
-                ? "활성 AI 런타임이 없습니다. 설정에서 런타임(Claude Code/Codex 등)을 연결하세요."
-                : "No active AI runtime. Connect one (Claude Code/Codex …) in Settings."}
-            </p>
-          )}
-          {generating && (
-            <p style={{ ...metaLabel, marginTop: 14 }}>
-              {ko
-                ? "웹앱 디자인 마스터(Hub)를 빌려 화면을 설계하고 있습니다 — 1~4분 정도 걸립니다."
-                : "Borrowing the Web App Design Master (Hub) to compose your screen — 1–4 minutes."}
-            </p>
-          )}
-
-          {projects.length > 0 && (
-            <div style={{ marginTop: 34 }}>
-              <div style={metaLabel}>{ko ? "내 사이트" : "My sites"}</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
-                {projects.map((p) => (
-                  <div key={p.id} style={projectRow}>
-                    <button
-                      type="button"
-                      style={projectRowMain}
-                      disabled={siteBusy}
-                      onClick={() => {
-                        if (p.screens.length) void openScreen(p.id, p.screens[0].id);
-                        else {
-                          setProjectId(p.id);
-                          setView("studio");
-                        }
-                      }}
-                    >
-                      <strong style={{ fontSize: 13, color: "var(--ink)" }}>{p.name}</strong>
-                      <span style={{ fontSize: 11.5, color: "var(--muted-deep)" }}>
-                        {ko ? `화면 ${p.screens.length}개` : `${p.screens.length} screens`} ·{" "}
-                        {new Date(p.updatedAt).toLocaleDateString()}
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      style={ghostIconBtn}
-                      disabled={siteBusy}
-                      title={ko ? "프로젝트 삭제" : "Delete project"}
-                      onClick={() => void deleteProject(p.id)}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+            }).catch((error) => {
+              showToast((ko ? "MCP 검토 실패: " : "MCP review failed: ") + (error instanceof Error ? error.message : String(error)));
+            });
+          }}
+          onPublishProject={(nextProject) => setPublishProjectId(nextProject.id)}
+        />
+        {publishProject && (
+          <SitePublishDialog
+            project={publishProject}
+            locale={ko ? "ko" : "en"}
+            onClose={() => setPublishProjectId(null)}
+            onPublished={async (result) => {
+              await refreshProjects();
+              if (
+                result.provider === "render" &&
+                result.status === "needs-user-action" &&
+                result.userAction?.code === "render-llm-key-required"
+              ) {
+                showToast(ko
+                  ? "Render 서비스가 생성되었습니다. 게시 완료 전 LLM 키 설정이 필요합니다."
+                  : "Render service created. LLM-key setup is required before publishing is complete.");
+              } else if (
+                (result.provider === "vercel" || result.provider === "railway") &&
+                result.status === "needs-user-action" &&
+                result.userAction?.code === "deployment-verification-required"
+              ) {
+                showToast(ko
+                  ? "원격 배포 영수증은 저장했지만 공개 페이지 검증이 필요합니다. 아직 Live가 아닙니다."
+                  : "The remote deployment receipt was saved, but public endpoint verification is still required. It is not Live yet.");
+              } else if (!result.ok && (result.providerProjectId || result.url)) {
+                showToast(ko
+                  ? "Provider 변경 이력을 저장했습니다. 아직 Live가 아니며 dashboard에서 기존 resource와 secret 상태를 확인해야 합니다."
+                  : "The provider mutation receipt was saved. It is not Live; review the existing resource and secret state in the provider dashboard.");
+              } else {
+                showToast(
+                  result.url
+                    ? (ko ? `공개 배포 완료: ${result.url}` : `Published: ${result.url}`)
+                    : (ko ? "공개 배포가 완료되었습니다." : "Public deployment completed."),
+                );
+              }
+            }}
+          />
+        )}
         {toast && <div style={toastStyle}>{toast}</div>}
       </div>
     );
@@ -961,16 +993,6 @@ const ghostIconBtn: CSSProperties = { width: 24, height: 24, border: "none", bor
 const segBtn: CSSProperties = { height: 28, border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", color: "var(--ink-soft)", padding: "0 10px", fontSize: 11.5, fontWeight: 800, cursor: "pointer" };
 const segBtnOn: CSSProperties = { borderColor: "var(--accent)", color: "var(--accent)", background: "var(--fill-1, rgba(0,0,0,.03))" };
 const metaLabel: CSSProperties = { fontSize: 11, fontWeight: 800, letterSpacing: ".14em", color: "var(--muted-deep)", textTransform: "uppercase" };
-
-const homeWrap: CSSProperties = { maxWidth: 640, width: "100%", margin: "0 auto", padding: "72px 24px 48px", overflowY: "auto" };
-const eyebrow: CSSProperties = { fontSize: 11, fontWeight: 800, letterSpacing: ".18em", color: "var(--muted-deep)", marginBottom: 14 };
-const homeTitle: CSSProperties = { margin: 0, fontSize: 26, fontWeight: 800, lineHeight: 1.14, color: "var(--ink)", fontFamily: "var(--font-display, inherit)" };
-const homeSub: CSSProperties = { margin: "10px 0 26px", fontSize: 14, lineHeight: 1.6, color: "var(--muted-deep)" };
-const promptBox: CSSProperties = { width: "100%", display: "flex", alignItems: "flex-start", gap: 10, padding: 6, border: "1px solid var(--paper-edge)", borderRadius: 14, background: "var(--paper)", boxShadow: "var(--rd-shadow-1, 0 4px 16px rgba(0,0,0,.05))" };
-const briefInput: CSSProperties = { width: "100%", border: "none", outline: "none", resize: "none", background: "transparent", color: "var(--ink)", fontSize: 13.5, lineHeight: 1.6, padding: 10, fontFamily: "inherit" };
-const warnNote: CSSProperties = { marginTop: 14, fontSize: 12.5, color: "#96690d", fontWeight: 700 };
-const projectRow: CSSProperties = { display: "flex", alignItems: "center", gap: 6, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)", padding: "4px 8px 4px 4px" };
-const projectRowMain: CSSProperties = { flex: 1, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, background: "none", border: "none", cursor: "pointer", padding: "8px 10px", textAlign: "left" };
 
 const studioBody: CSSProperties = { flex: 1, minHeight: 0, minWidth: 0, display: "flex" };
 const chatPanel: CSSProperties = { width: 336, minWidth: 280, flex: "0 1 336px", borderRight: "1px solid var(--paper-edge)", display: "flex", flexDirection: "column", minHeight: 0, background: "var(--paper)" };

@@ -297,6 +297,11 @@ export function getAgentAppBySurface(
   return row ? toApp(row) : null;
 }
 
+/** Remove one local AppFactory registration; operation rows cascade with it. */
+export function removeAgentApp(id: string): boolean {
+  return getDb().prepare("DELETE FROM agent_apps WHERE id = ?").run(id).changes > 0;
+}
+
 export function listAgentAppOperations(appId: string): AppFactoryOperationRecord[] {
   const rows = getDb()
     .prepare("SELECT * FROM agent_app_operations WHERE app_id = ? ORDER BY created_at DESC")

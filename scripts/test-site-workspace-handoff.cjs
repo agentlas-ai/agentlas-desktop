@@ -49,6 +49,43 @@ try {
   assert.ok(feedback.includes("CTA를 더 선명하게") && feedback.includes(".hero .cta"), "visible conversation and selected context must be carried over");
   assert.ok(fs.readFileSync(path.join(handoffDir, "README.md"), "utf8").includes("시각 기준"), "handoff guide must explain how Build uses the design");
 
+  const agentAppProject = store.createSiteProject({
+    name: "Research Agent App",
+    surface: "agent-app",
+    agentAppTarget: {
+      kind: "agent",
+      id: "agent-123",
+      name: "Research Agent",
+      description: "Creates cited briefs",
+      memberCount: 1,
+    },
+    astryxTemplate: "ai-chat-landing",
+    agentAppContract: {
+      schemaVersion: 1,
+      source: "declared-package",
+      inputs: [{ name: "topic", type: "string", label: "Research topic", description: "Question", required: true, format: "textarea", options: [], defaultValue: null }],
+      outputs: [{ name: "brief", label: "Cited brief", type: "markdown", description: "Findings" }],
+    },
+  });
+  store.saveSiteScreen({
+    projectId: agentAppProject.id,
+    name: "Workspace",
+    html: "<!doctype html><html><body data-astryx-template=\"ai-chat-landing\"><main><h1>Research Agent</h1></main></body></html>",
+  });
+  const agentAppHandoff = handoffSiteProjectToWorkspace({ projectId: agentAppProject.id, workspacePath: workspace, locale: "en" });
+  const agentAppDir = path.join(workspace, ...agentAppHandoff.relativePath.split("/"));
+  const agentManifest = JSON.parse(fs.readFileSync(path.join(agentAppDir, "manifest.json"), "utf8"));
+  assert.equal(agentManifest.surface, "agent-app");
+  assert.equal(agentManifest.astryxTemplate, "ai-chat-landing");
+  assert.deepEqual(agentManifest.agentAppContract.inputs.map((field) => field.name), ["topic"]);
+  assert.deepEqual(agentManifest.agentAppContract.outputs.map((field) => field.name), ["brief"]);
+  assert.equal(agentManifest.agentAppContract.source, "declared-package");
+  assert.equal(agentManifest.agentAppVisual.colorMode, "light");
+  assert.equal(agentManifest.agentAppVisual.accent, "teal");
+  assert.match(agentAppHandoff.buildPrompt, /@astryxdesign\/core@0\.1\.4/);
+  assert.match(fs.readFileSync(path.join(agentAppDir, "README.md"), "utf8"), /launch-scoped Agentlas capability[\s\S]*same-origin server API/);
+  assert.match(fs.readFileSync(path.join(agentAppDir, "THIRD_PARTY_NOTICES.md"), "utf8"), /Meta Platforms, Inc/);
+
   // 이전 리비전을 수정하지 않고 새 리비전을 만든다.
   const second = handoffSiteProjectToWorkspace({ projectId: project.id, workspacePath: workspace, locale: "ko" });
   assert.notEqual(second.relativePath, handoff.relativePath, "each handoff must create an immutable revision");

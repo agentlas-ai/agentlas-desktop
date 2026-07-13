@@ -15,7 +15,7 @@ const before = (text, first, second, label) => {
 };
 
 // Hephaestus: explicit operator override > updater-managed global current > app bundle.
-const engine = read("electron/hephaestus/engine.ts");
+const engine = read("electron/hephaestus/root.ts");
 before(engine, "candidates.push(process.env.HEPHAESTUS_RUNTIME_ROOT)", 'candidates.push(path.join(os.homedir(), ".agentlas", "runtime", "current"))', "Hephaestus override priority");
 before(engine, 'candidates.push(path.join(os.homedir(), ".agentlas", "runtime", "current"))', 'path.join(process.resourcesPath, "Hephaestus")', "Hephaestus global priority");
 

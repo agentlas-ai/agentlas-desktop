@@ -264,6 +264,7 @@ export const CONTEXT_MANAGED_BY: Record<RuntimeKind, "runtime" | "agentlas"> = {
   codex: "runtime",
   gemini: "runtime",
   grok: "runtime",
+  cursor: "runtime",
   byok: "agentlas",
   ollama: "agentlas",
 };
@@ -335,6 +336,15 @@ export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
     { id: "grok-4.3", label: "Grok 4.3" },
     { id: "grok-4.20-non-reasoning", label: "Grok 4.20" },
   ],
+  // Cursor Agent CLI — Auto is the safe default because Cursor's subscription
+  // inventory changes per account. Composer is the dedicated Cursor model.
+  cursor: [
+    { id: "auto", label: "Cursor Auto" },
+    { id: "composer-2.5", label: "Composer 2.5" },
+    { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+    { id: "opus-4.8", label: "Opus 4.8" },
+    { id: "grok-4.5", label: "Grok 4.5" },
+  ],
 };
 
 export function cliModels(kind: string): CliModelOption[] {
@@ -376,6 +386,13 @@ export function modelOptionsFor(
   }
   if (kind === "ollama") {
     return (availableModels ?? []).map((m) => ({ id: m, label: m }));
+  }
+  // Cursor's `agent models` (and future CLI discovery adapters) is the
+  // account-authoritative source. Preserve unknown new IDs instead of hiding
+  // them behind a stale UI catalog.
+  if (availableModels && availableModels.length > 0) {
+    const catalog = cliModels(kind);
+    return availableModels.map((id) => catalog.find((item) => item.id === id) ?? { id, label: id });
   }
   return cliModels(kind);
 }

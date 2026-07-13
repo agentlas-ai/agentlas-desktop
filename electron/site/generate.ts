@@ -7,8 +7,14 @@ import {
   extractSiteHtmlFromReply,
   validateSiteScreenHtml,
 } from "../../shared/site-studio";
+import type { SiteSurface } from "../../shared/site-studio";
 import type { McpInvocationEvent } from "../../shared/types";
 import { tagSiteHtml } from "./html-tagger";
+import {
+  siteAgentAppDesignContext,
+  validateSiteAgentAppPreview,
+} from "./agent-app";
+import type { SiteAgentAppContext } from "./agent-app";
 
 /** 사이트 앱에 붙은 Hub 에이전트 슬러그 (cloud-callable, hep-call로 빌림). */
 export const SITE_DESIGN_AGENT_SLUG = "web-master";
@@ -160,10 +166,18 @@ function buildGeneratePrompt(
   styleHint: string | null,
   baseHtml: string | null,
   retryErrors: string[] | null,
+  surface: SiteSurface,
+  agentAppContext: SiteAgentAppContext | null,
 ): string {
   return [
     "TASK: design ONE production-grade web screen for the brief below, at the level of your best award-grade work.",
     `BRIEF: ${brief}`,
+    surface === "mobile"
+      ? "SURFACE: Mobile. Design mobile-first for a 375px viewport, then add a deliberate responsive desktop state without changing the product's information architecture."
+      : surface === "web"
+        ? "SURFACE: Web. Use the existing responsive Site layout pipeline and make the 1280px state primary while remaining usable at 375px."
+        : "SURFACE: Agent App. The selected agent's capability contract, not a generic dashboard, determines every visible input and output.",
+    agentAppContext ? siteAgentAppDesignContext(agentAppContext) : "",
     styleHint ? `STYLE DIRECTION (from the user): ${styleHint}` : "",
     baseHtml
       ? `EXISTING SCREEN (match its visual language — palette, typography, spacing — so the new screen belongs to the same product):\n\`\`\`html\n${baseHtml}\n\`\`\``
@@ -178,13 +192,23 @@ function buildGeneratePrompt(
     .join("\n\n");
 }
 
-async function generateOnce(projectId: string, prompt: string, locale: SiteLocale, activity?: SiteRunActivity): Promise<SiteGenerateResult> {
+async function generateOnce(
+  projectId: string,
+  prompt: string,
+  locale: SiteLocale,
+  activity?: SiteRunActivity,
+  agentAppContext?: SiteAgentAppContext | null,
+): Promise<SiteGenerateResult> {
   const run = await runSiteAgentPrompt(projectId, prompt, locale, activity);
   if (!run.text) return { ok: false, reason: run.reason ?? "no-final-text", engine: run.engine };
   const html = extractSiteHtmlFromReply(run.text);
   if (!html) return { ok: false, reason: "no-document", engine: run.engine };
   const contract = validateSiteScreenHtml(html);
   if (!contract.ok) return { ok: false, reason: contract.errors.join("; "), engine: run.engine };
+  if (agentAppContext) {
+    const astryxErrors = validateSiteAgentAppPreview(html, agentAppContext);
+    if (astryxErrors.length) return { ok: false, reason: astryxErrors.join("; "), engine: run.engine };
+  }
   return { ok: true, html, feedback: run.feedback, engine: run.engine };
 }
 
@@ -193,6 +217,8 @@ export async function generateSiteScreen(input: {
   brief: string;
   styleHint?: string | null;
   baseHtml?: string | null;
+  surface?: SiteSurface;
+  agentAppContext?: SiteAgentAppContext | null;
   locale?: SiteLocale;
   activity?: SiteRunActivity;
 }): Promise<SiteGenerateResult> {
@@ -201,15 +227,28 @@ export async function generateSiteScreen(input: {
   const locale: SiteLocale = input.locale === "en" ? "en" : "ko";
   const baseHtml = (input.baseHtml || "").slice(0, 60_000) || null;
   const styleHint = (input.styleHint || "").trim().slice(0, 500) || null;
+  const surface: SiteSurface =
+    input.surface === "mobile" || input.surface === "agent-app" ? input.surface : "web";
+  const agentAppContext = surface === "agent-app" ? input.agentAppContext ?? null : null;
+  if (surface === "agent-app" && !agentAppContext) {
+    return { ok: false, reason: "agent-app-target-required" };
+  }
 
-  const first = await generateOnce(input.projectId, buildGeneratePrompt(brief, styleHint, baseHtml, null), locale, input.activity);
+  const first = await generateOnce(
+    input.projectId,
+    buildGeneratePrompt(brief, styleHint, baseHtml, null, surface, agentAppContext),
+    locale,
+    input.activity,
+    agentAppContext,
+  );
   if (first.ok || first.reason === "no-final-text") return first;
   // 계약 위반/문서 누락 — 검증 오류를 피드백으로 1회 재시도.
   const retry = await generateOnce(
     input.projectId,
-    buildGeneratePrompt(brief, styleHint, baseHtml, [first.reason || "contract violation"]),
+    buildGeneratePrompt(brief, styleHint, baseHtml, [first.reason || "contract violation"], surface, agentAppContext),
     locale,
     input.activity,
+    agentAppContext,
   );
   return retry.ok ? retry : { ...retry, reason: retry.reason || first.reason };
 }
@@ -219,6 +258,7 @@ function buildEditPrompt(
   instruction: string,
   selection: { tagName: string; snippet: string } | null,
   retryErrors: string[] | null,
+  agentAppContext: SiteAgentAppContext | null,
 ): string {
   return [
     "TASK: modify the screen below according to the instruction. Preserve the existing art direction and keep everything else pixel-identical — do not re-theme unless the instruction asks for it.",
@@ -229,14 +269,19 @@ function buildEditPrompt(
           "```html",
           selection.snippet,
           "```",
-          `PREFERRED OUTPUT — PARTIAL PATCH: after the required feedback block, if the change can be fully expressed inside the selected element, output only the replacement outer HTML of that single <${selection.tagName}> element in one \`\`\`html fence (it will be spliced in place). If the change requires touching CSS in <head> or other parts of the page, output the FULL corrected document instead.`,
+          agentAppContext
+            ? "OUTPUT THE FULL corrected document. Agent App edits must keep the document-level visual snapshot synchronized even when the user selected one element."
+            : `PREFERRED OUTPUT — PARTIAL PATCH: after the required feedback block, if the change can be fully expressed inside the selected element, output only the replacement outer HTML of that single <${selection.tagName}> element in one \`\`\`html fence (it will be spliced in place). If the change requires touching CSS in <head> or other parts of the page, output the FULL corrected document instead.`,
         ].join("\n")
       : "OUTPUT: after the required feedback block, output the FULL corrected document in one ```html fence.",
     `INSTRUCTION: ${instruction}`,
     retryErrors && retryErrors.length
       ? `YOUR PREVIOUS OUTPUT WAS REJECTED:\n- ${retryErrors.join("\n- ")}\nOutput the corrected result.`
       : "",
-    outputContract({ allowPartial: Boolean(selection) }),
+    agentAppContext
+      ? `${siteAgentAppDesignContext(agentAppContext)}\n- Preserve the exact declared input/output contract during this edit. Visual changes may not add, remove, rename, or reinterpret contract fields.`
+      : "",
+    outputContract({ allowPartial: Boolean(selection) && !agentAppContext }),
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -282,20 +327,28 @@ export function applySiteEditReply(
   selection: SiteEditSelection | null,
   replyText: string,
   engine: string,
+  agentAppContext: SiteAgentAppContext | null = null,
 ): SiteEditResult {
+  const validate = (html: string): string[] => {
+    const contract = validateSiteScreenHtml(html);
+    return [
+      ...contract.errors,
+      ...(agentAppContext ? validateSiteAgentAppPreview(html, agentAppContext) : []),
+    ];
+  };
   if (selection) {
     const block = extractElementBlockFromReply(replyText, selection.tagName);
     if (block) {
       const patched = sourceHtml.slice(0, selection.start) + block + sourceHtml.slice(selection.end);
-      const contract = validateSiteScreenHtml(patched);
-      if (contract.ok) return { ok: true, html: patched, engine, mode: "patch" };
-      return { ok: false, reason: contract.errors.join("; "), engine };
+      const errors = validate(patched);
+      if (!errors.length) return { ok: true, html: patched, engine, mode: "patch" };
+      return { ok: false, reason: errors.join("; "), engine };
     }
   }
   const full = extractSiteHtmlFromReply(replyText);
   if (!full) return { ok: false, reason: "no-document", engine };
-  const contract = validateSiteScreenHtml(full);
-  if (!contract.ok) return { ok: false, reason: contract.errors.join("; "), engine };
+  const errors = validate(full);
+  if (errors.length) return { ok: false, reason: errors.join("; "), engine };
   return { ok: true, html: full, engine, mode: "full" };
 }
 
@@ -308,6 +361,7 @@ export async function editSiteScreen(input: {
   sourceHtml: string;
   instruction: string;
   selectionId?: string | null;
+  agentAppContext?: SiteAgentAppContext | null;
   locale?: SiteLocale;
   activity?: SiteRunActivity;
 }): Promise<SiteEditResult> {
@@ -320,22 +374,23 @@ export async function editSiteScreen(input: {
   const promptSelection = selection ? { tagName: selection.tagName, snippet: selection.snippet } : null;
   const first = await runSiteAgentPrompt(
     input.projectId,
-    buildEditPrompt(sourceHtml, instruction, promptSelection, null),
+    buildEditPrompt(sourceHtml, instruction, promptSelection, null, input.agentAppContext ?? null),
     locale,
     input.activity,
   );
   if (!first.text) return { ok: false, reason: first.reason ?? "no-final-text", engine: first.engine };
-  const applied = applySiteEditReply(sourceHtml, selection, first.text, first.engine);
+  const applicableSelection = input.agentAppContext ? null : selection;
+  const applied = applySiteEditReply(sourceHtml, applicableSelection, first.text, first.engine, input.agentAppContext ?? null);
   if (applied.ok) return { ...applied, feedback: first.feedback };
 
   const retryRun = await runSiteAgentPrompt(
     input.projectId,
-    buildEditPrompt(sourceHtml, instruction, promptSelection, [applied.reason || "contract violation"]),
+    buildEditPrompt(sourceHtml, instruction, promptSelection, [applied.reason || "contract violation"], input.agentAppContext ?? null),
     locale,
     input.activity,
   );
   if (!retryRun.text) return applied;
-  const retried = applySiteEditReply(sourceHtml, selection, retryRun.text, retryRun.engine);
+  const retried = applySiteEditReply(sourceHtml, applicableSelection, retryRun.text, retryRun.engine, input.agentAppContext ?? null);
   return retried.ok ? { ...retried, feedback: retryRun.feedback } : { ...retried, reason: retried.reason || applied.reason };
 }
 

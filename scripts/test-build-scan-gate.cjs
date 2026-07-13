@@ -42,7 +42,8 @@ assert.equal(
 const session = fs.readFileSync(path.join(root, "renderer/lib/build-session.ts"), "utf8");
 const page = fs.readFileSync(path.join(root, "renderer/app/(shell)/build/page.tsx"), "utf8");
 const toast = fs.readFileSync(path.join(root, "renderer/components/BuildDoneToast.tsx"), "utf8");
-assert.match(session, /buildScanDisposition\(r\?\.securityScan \?\? null\) === "passed"/);
+assert.match(session, /buildScanDisposition\(scan\) === "passed"/);
+assert.match(session, /buildScanDisposition\(result\?\.securityScan \?\? null\) === "passed"/);
 assert.match(session, /Skipped auto-registration — security verification has not passed/);
 assert.match(page, /disabled=\{resultDeliveryBlocked\}/);
 assert.match(page, /updateBuildSecurityScan\(next\)/);

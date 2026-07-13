@@ -747,7 +747,6 @@ const Bubble = memo(function Bubble({
             startedAt={message.startedAt}
             done={!message.busy}
             tokens={message.tokens}
-            onOpenWorkflow={onOpenWorkflow}
             onStop={message.busy ? onStop : undefined}
             stopRequested={stopRequested}
           />
@@ -1826,13 +1825,11 @@ function PipelineStepper({ stages, running }: { stages: PipelineStage[]; running
   return (
     <div
       style={{
-        border: "1px solid var(--paper-edge)",
-        background: "var(--fill-1)",
-        padding: "8px 10px",
-        marginBottom: 10,
+        marginBottom: 9,
         display: "flex",
         flexDirection: "column",
-        gap: 6,
+        gap: 5,
+        color: "var(--muted-deep)",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 700, color: "var(--ink-soft)" }}>
@@ -1854,10 +1851,7 @@ function PipelineStepper({ stages, running }: { stages: PipelineStage[]; running
                   gap: 5,
                   fontSize: 12,
                   fontWeight: 600,
-                  border: st === "running" ? "1px solid var(--amber-deep)" : "1px solid var(--paper-edge)",
-                  background: "#fff",
-                  padding: "2px 8px",
-                  borderRadius: 3,
+                  color: st === "running" ? "var(--ink)" : "var(--muted-deep)",
                   opacity: !st || st === "pending" ? 0.72 : 1,
                 }}
                 title={s.agentName ?? undefined}
@@ -1882,7 +1876,6 @@ function WorkingPanel({
   startedAt,
   done,
   tokens,
-  onOpenWorkflow,
   onStop,
   stopRequested = false,
 }: {
@@ -1891,7 +1884,6 @@ function WorkingPanel({
   startedAt?: number;
   done: boolean;
   tokens?: number;
-  onOpenWorkflow?: () => void;
   onStop?: () => void;
   stopRequested?: boolean;
 }) {
@@ -1930,6 +1922,7 @@ function WorkingPanel({
 
   return (
     <div
+      data-testid="thinking-text-stream"
       style={{
         color: "var(--muted-deep)",
         padding: "1px 0 4px",
@@ -1966,14 +1959,14 @@ function WorkingPanel({
 
       {!done && (
         <div
-          style={{ ...liveStateStyle(liveState.tone), width: "min(520px, 100%)", alignItems: "center" }}
+          style={liveStateStyle(liveState.tone)}
           role="status"
         >
           <span aria-hidden style={liveStateDotStyle(liveState.tone)} />
-          <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
-            <span style={{ fontWeight: 760, color: "var(--ink)" }}>{liveState.message}</span>
+          <div style={{ minWidth: 0, flex: 1, lineHeight: 1.5 }}>
+            <span style={{ fontWeight: 650, color: "var(--ink-soft)" }}>{liveState.message}</span>
             {liveState.detail && (
-              <span style={{ color: "var(--muted-deep)" }}>
+              <span style={{ color: "var(--muted-deep)", marginLeft: 5 }}>
                 {stopRequested
                   ? locale === "ko"
                     ? "중지 요청을 보냈습니다. 실행을 정리하는 중입니다."
@@ -2074,7 +2067,6 @@ function WorkingPanel({
                   step={s}
                   current={!done && idx === allRows.length - 1}
                   done={done}
-                  onOpenWorkflow={onOpenWorkflow}
                 />
               ))}
             </div>
@@ -2089,15 +2081,13 @@ function ActivityRow({
   step,
   current,
   done,
-  onOpenWorkflow,
 }: {
   step: StreamStep;
   current?: boolean;
   done: boolean;
-  onOpenWorkflow?: () => void;
 }) {
-  if (step.tool) return <ToolActivityCard step={step} current={current} done={done} onOpenWorkflow={onOpenWorkflow} />;
-  return <AgentActivityCard step={step} current={current} onOpenWorkflow={onOpenWorkflow} />;
+  if (step.tool) return <ToolRow step={step} current={current && !done} />;
+  return <ThinkingRow step={step} current={current && !done} />;
 }
 
 function AgentActivityCard({ step, current, onOpenWorkflow }: { step: StreamStep; current?: boolean; onOpenWorkflow?: () => void }) {
@@ -2282,9 +2272,7 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
     <div
       style={{
         minWidth: 0,
-        borderRadius: 8,
-        padding: "4px 6px",
-        background: current ? "color-mix(in srgb, var(--paper) 70%, var(--accent) 7%)" : "transparent",
+        padding: "2px 0",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
@@ -2313,10 +2301,7 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
             flexShrink: 0,
             fontSize: 11,
             color: tone.accent,
-            background: tone.bg,
-            border: `1px solid ${tone.border}`,
-            borderRadius: 999,
-            padding: "1px 6px",
+            padding: 0,
             fontWeight: current ? 700 : 500,
           }}
         >
@@ -2507,26 +2492,13 @@ function statusBadge(done: boolean): CSSProperties {
 
 function liveStateStyle(tone: LiveStateTone): CSSProperties {
   const color = tone === "stale" ? "#b42318" : tone === "quiet" ? "var(--amber-deep)" : "var(--green-deep)";
-  const bg =
-    tone === "stale"
-      ? "color-mix(in srgb, #fef3f2 76%, var(--paper) 24%)"
-      : tone === "quiet"
-        ? "color-mix(in srgb, #fffbeb 72%, var(--paper) 28%)"
-        : "color-mix(in srgb, #f0fdf4 68%, var(--paper) 32%)";
-  const border = tone === "stale" ? "#fecdca" : tone === "quiet" ? "#fde68a" : "#bbf7d0";
   return {
     display: "flex",
     alignItems: "flex-start",
     gap: 8,
-    width: "min(386px, 100%)",
-    border: `1px solid ${border}`,
-    borderRadius: 8,
-    background: bg,
     color,
-    padding: "8px 10px",
-    fontSize: 11.5,
-    lineHeight: 1.42,
-    overflow: "hidden",
+    padding: "1px 0",
+    fontSize: 12,
   };
 }
 
@@ -2539,16 +2511,14 @@ function liveStateDotStyle(tone: LiveStateTone): CSSProperties {
     borderRadius: "50%",
     flexShrink: 0,
     background: color,
-    boxShadow: `0 0 0 4px color-mix(in srgb, ${color} 14%, transparent)`,
   };
 }
 
 const toolMiniButton: CSSProperties = {
   flexShrink: 0,
-  border: "1px solid var(--paper-edge)",
-  borderRadius: 999,
-  background: "var(--paper)",
-  padding: "2px 7px",
+  border: "none",
+  background: "transparent",
+  padding: "2px 3px",
   fontSize: 11,
   fontWeight: 700,
   cursor: "pointer",

@@ -88,6 +88,65 @@ export function restrictedRunnerEnv(): NodeJS.ProcessEnv {
   return {};
 }
 
+// Browser-originated Agent App input is untrusted. Its model process receives
+// only the host coordinates required to locate the installed CLI and its
+// subscription login. Project/agent dotenv files, Agentlas credential files,
+// vault keys, proxy credentials, preload hooks, and arbitrary process env are
+// deliberately absent.
+const AGENT_APP_RUNNER_ENV_ALLOWLIST = new Set([
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TERM",
+  "COLORTERM",
+  "NO_COLOR",
+  "SYSTEMROOT",
+  "WINDIR",
+  "COMSPEC",
+  "PATHEXT",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_STATE_HOME",
+  "XDG_RUNTIME_DIR",
+  "CODEX_HOME",
+  "CLAUDE_CONFIG_DIR",
+]);
+
+const AGENT_APP_MCP_SECRET_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;
+
+export function buildAgentAppRunnerEnv(
+  source: NodeJS.ProcessEnv = process.env,
+  mainOwnedCapabilityEnv?: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of AGENT_APP_RUNNER_ENV_ALLOWLIST) {
+    const value = source[key];
+    if (typeof value === "string" && value) env[key] = value;
+  }
+  // Only the main-owned MCP config builder can mint these opaque aliases.
+  // Never copy a raw key name/value from process.env or renderer-shaped input.
+  for (const [key, value] of Object.entries(mainOwnedCapabilityEnv ?? {})) {
+    if (AGENT_APP_MCP_SECRET_ALIAS_RE.test(key) && typeof value === "string" && value) env[key] = value;
+  }
+  env.AGENTLAS_UNTRUSTED_NO_TOOLS = "1";
+  env.NO_COLOR = "1";
+  return env;
+}
+
 export async function buildRunnerEnv(
   agent: InstalledAgent | null,
   cwd?: string | null,

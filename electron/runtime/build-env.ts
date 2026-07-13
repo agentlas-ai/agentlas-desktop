@@ -74,6 +74,9 @@ const BUILD_RUNTIME_ENV_KEYS: Record<RuntimeKind, readonly string[]> = {
     "GROK_API_KEY",
     "XAI_API_KEY",
   ],
+  // Cursor Agent CLI owns its authenticated account state under ~/.cursor.
+  // No API secret is copied into build workers.
+  cursor: ["CURSOR_AGENT_HOME", "CURSOR_CONFIG_DIR"],
   ollama: ["OLLAMA_HOST", "OLLAMA_API_KEY"],
   // BYOK runners read their one selected key directly from the Main vault and
   // do not need any host environment credential.
