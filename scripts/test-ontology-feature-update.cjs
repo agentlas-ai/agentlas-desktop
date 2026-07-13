@@ -9,7 +9,7 @@ const { setupMockAgentlasBridge, mockBridgeOptions } = require("./lib/mock-agent
 const root = path.resolve(__dirname, "..");
 const distDir = path.join(root, "dist", "renderer");
 const outDir = path.join(root, "output", "playwright", "ontology-feature-update");
-const ackKey = "agentlas.featureUpdate.ontology-chips-v1.2026-07-13.ack";
+const ackKey = "agentlas.featureUpdate.desktop-v0.8.13-ontology-chips.ack";
 
 function srgbChannel(value) {
   const channel = value / 255;
@@ -33,7 +33,7 @@ function parseRgb(cssColor) {
 }
 
 async function primaryButtonContrast(page) {
-  const colors = await page.getByRole("button", { name: "온톨로지 칩 보기" }).evaluate((button) => {
+  const colors = await page.getByRole("button", { name: "새 기능 살펴보기" }).evaluate((button) => {
     const style = getComputedStyle(button);
     return { foreground: style.color, background: style.backgroundColor };
   });
@@ -91,7 +91,7 @@ async function main() {
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     await context.addInitScript({
       content: `
-        (${setupMockAgentlasBridge.toString()})(${JSON.stringify({ ...mockBridgeOptions(), appVersion: "0.8.10", showFeatureUpdate: true })});
+        (${setupMockAgentlasBridge.toString()})(${JSON.stringify({ ...mockBridgeOptions(), appVersion: "0.8.13", showFeatureUpdate: true })});
         window.localStorage.setItem("agentlas.locale", "ko");
         if (!window.sessionStorage.getItem("agentlas.qa.ontologyFeatureInitialized")) {
           window.localStorage.removeItem(${JSON.stringify(ackKey)});
@@ -107,7 +107,7 @@ async function main() {
     });
 
     await page.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
-    const dialog = page.getByRole("dialog", { name: "에이전트가 경험을 장착합니다" });
+    const dialog = page.getByRole("dialog", { name: "좋은 경험을, 에이전트의 판단으로" });
     try {
       await dialog.waitFor({ timeout: 8_000 });
     } catch (error) {
@@ -124,11 +124,11 @@ async function main() {
       throw error;
     }
     assert.equal(await dialog.getAttribute("aria-modal"), "true");
-    assert.equal(await dialog.getAttribute("data-feature-release"), "ontology-chips-v1.2026-07-13");
-    assert.equal(await dialog.locator('img[src="/feature-updates/ontology-chip-modal-hero-960x428.webp"]').count(), 1);
+    assert.equal(await dialog.getAttribute("data-feature-release"), "desktop-v0.8.13-ontology-chips");
+    assert.equal(await dialog.locator('img[src="/feature-updates/ontology-chip-modal-hero-v2.png"]').count(), 1);
     assert.equal(await page.evaluate(() => document.activeElement?.id), "ontology-chip-feature-title");
     const box = await dialog.boundingBox();
-    assert.ok(box && box.width <= 481 && box.width >= 450, `unexpected dialog width: ${box?.width}`);
+    assert.ok(box && box.width <= 541 && box.width >= 500, `unexpected dialog width: ${box?.width}`);
     const lightPrimaryContrast = await primaryButtonContrast(page);
     assert.ok(lightPrimaryContrast >= 4.5, `light primary contrast ${lightPrimaryContrast.toFixed(2)} is below WCAG AA`);
     await page.screenshot({ path: path.join(outDir, "ontology-chip-update-modal.png"), fullPage: true });
@@ -140,20 +140,20 @@ async function main() {
     await page.evaluate(() => { document.documentElement.dataset.theme = "light"; });
 
     await page.keyboard.press("Shift+Tab");
-    assert.match(await page.evaluate(() => document.activeElement?.textContent || ""), /온톨로지 칩 보기/);
+    assert.match(await page.evaluate(() => document.activeElement?.textContent || ""), /새 기능 살펴보기/);
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "detached" });
     assert.ok(await page.evaluate((key) => window.localStorage.getItem(key), ackKey));
 
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForTimeout(1_200);
-    assert.equal(await page.getByRole("dialog", { name: "에이전트가 경험을 장착합니다" }).count(), 0, "acknowledged release must stay hidden");
+    assert.equal(await page.getByRole("dialog", { name: "좋은 경험을, 에이전트의 판단으로" }).count(), 0, "viewed release must stay hidden");
 
     await page.evaluate((key) => window.localStorage.removeItem(key), ackKey);
     await page.reload({ waitUntil: "domcontentloaded" });
-    const reopened = page.getByRole("dialog", { name: "에이전트가 경험을 장착합니다" });
+    const reopened = page.getByRole("dialog", { name: "좋은 경험을, 에이전트의 판단으로" });
     await reopened.waitFor({ timeout: 8_000 });
-    await reopened.getByRole("button", { name: "온톨로지 칩 보기" }).click();
+    await reopened.getByRole("button", { name: "새 기능 살펴보기" }).click();
     await page.waitForURL(/\/library\/agents(?:\.html)?\?tab=ontology/);
     const ontologyTab = page.getByRole("button", { name: "온톨로지 칩", exact: true });
     await ontologyTab.waitFor({ timeout: 8_000 });
@@ -166,7 +166,7 @@ async function main() {
     const updateContext = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     await updateContext.addInitScript({
       content: `
-        (${setupMockAgentlasBridge.toString()})(${JSON.stringify({ ...mockBridgeOptions(), appVersion: "0.8.10", showFeatureUpdate: true })});
+        (${setupMockAgentlasBridge.toString()})(${JSON.stringify({ ...mockBridgeOptions(), appVersion: "0.8.13", showFeatureUpdate: true })});
         window.localStorage.removeItem(${JSON.stringify(ackKey)});
         window.agentlas.updater.getState = async () => ({ status: "downloaded", version: "0.8.11" });
       `,
@@ -174,25 +174,25 @@ async function main() {
     const updatePage = await updateContext.newPage();
     await updatePage.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
     await updatePage.waitForTimeout(1_500);
-    assert.equal(await updatePage.getByRole("dialog", { name: "에이전트가 경험을 장착합니다" }).count(), 0, "app update must outrank feature news");
+    assert.equal(await updatePage.getByRole("dialog", { name: "좋은 경험을, 에이전트의 판단으로" }).count(), 0, "app update must outrank feature news");
     await updateContext.close();
 
     const approvalContext = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     await approvalContext.addInitScript({
       content: `
-        (${setupMockAgentlasBridge.toString()})(${JSON.stringify({ ...mockBridgeOptions(), appVersion: "0.8.10", pendingConfirmations: 1, showFeatureUpdate: true })});
+        (${setupMockAgentlasBridge.toString()})(${JSON.stringify({ ...mockBridgeOptions(), appVersion: "0.8.13", pendingConfirmations: 1, showFeatureUpdate: true })});
         window.localStorage.removeItem(${JSON.stringify(ackKey)});
       `,
     });
     const approvalPage = await approvalContext.newPage();
     await approvalPage.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
     await approvalPage.waitForTimeout(1_500);
-    assert.equal(await approvalPage.getByRole("dialog", { name: "에이전트가 경험을 장착합니다" }).count(), 0, "pending approval must outrank feature news");
+    assert.equal(await approvalPage.getByRole("dialog", { name: "좋은 경험을, 에이전트의 판단으로" }).count(), 0, "pending approval must outrank feature news");
     await approvalContext.close();
 
     console.log(JSON.stringify({
       ok: true,
-      release: "ontology-chips-v1.2026-07-13",
+      release: "desktop-v0.8.13-ontology-chips",
       acknowledgedOnce: true,
       escapeAndFocusTrap: true,
       ontologyDeepLink: true,

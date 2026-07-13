@@ -180,22 +180,22 @@ export function AgentLearningMetricGrid({
   locale: Locale;
   context: "activity" | "playbook";
 }) {
-  if (loading) return <InsightNotice text={locale === "ko" ? "학습 원장을 확인하는 중…" : "Loading the learning ledger…"} />;
-  if (!summary) return <InsightNotice error text={error || (locale === "ko" ? "학습 원장을 불러오지 못했습니다." : "The learning ledger is unavailable.")} />;
+  if (loading) return <InsightNotice text={locale === "ko" ? "학습 기록을 확인하는 중…" : "Loading learning history…"} />;
+  if (!summary) return <InsightNotice error text={error || (locale === "ko" ? "학습 기록을 불러오지 못했습니다." : "Learning history is unavailable.")} />;
 
   const metrics = context === "activity"
     ? [
-        [locale === "ko" ? "실행 원장" : "Executor ledger", summary.runCount],
-        [locale === "ko" ? "레거시 채팅 연결" : "Legacy chat-linked", summary.legacyChatLinkedRunCount],
-        [locale === "ko" ? "내구 메모리" : "Durable memory", summary.durableMemoryCount],
-        [locale === "ko" ? "실패" : "Failures", summary.failureCount],
-        [locale === "ko" ? "진화 제안" : "Evolution proposals", summary.evolutionProposalCount],
+        [locale === "ko" ? "완료한 작업" : "Completed work", summary.runCount],
+        [locale === "ko" ? "관련 이전 대화" : "Related conversations", summary.legacyChatLinkedRunCount],
+        [locale === "ko" ? "기억한 내용" : "Saved learnings", summary.durableMemoryCount],
+        [locale === "ko" ? "문제 발생" : "Issues", summary.failureCount],
+        [locale === "ko" ? "개선 기록" : "Improvements", summary.evolutionProposalCount],
       ] as const
     : [
-        [locale === "ko" ? "내구 학습" : "Durable learnings", summary.durableMemoryCount],
-        ["memory.md", summary.memoryMarkdownCount],
-        [locale === "ko" ? "로컬 파일" : "Local files", summary.localFileCount],
-        [locale === "ko" ? "거버넌스 영수증" : "Governed receipts", summary.localReceiptCount],
+        [locale === "ko" ? "기억한 내용" : "Saved learnings", summary.durableMemoryCount],
+        [locale === "ko" ? "수동 메모" : "Manual notes", summary.memoryMarkdownCount],
+        [locale === "ko" ? "연결된 파일" : "Connected files", summary.localFileCount],
+        [locale === "ko" ? "변경 기록" : "Change records", summary.localReceiptCount],
       ] as const;
 
   return (
@@ -208,30 +208,43 @@ export function AgentLearningMetricGrid({
           </div>
         ))}
       </div>
-      <div
-        data-testid="agent-memory-curation-ledger"
-        style={{ marginTop: 8, color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.55 }}
-      >
-        {summary.curationTurnCount > 0
-          ? (locale === "ko"
-              ? `학습 검사 ${summary.curationTurnCount}회 · 후보 ${summary.memoryEventCount} · 저장 ${summary.memoryWrittenCount} · 새 기억 없음 ${summary.noNewMemoryTurnCount} · 중복 ${summary.memoryDedupedCount} · 민감정보 차단 ${summary.memoryRedactedCount} · 세션 한정 ${summary.memorySessionOnlyCount} · 폐기 ${summary.memoryDiscardedCount}`
-              : `Curation checks ${summary.curationTurnCount} · candidates ${summary.memoryEventCount} · written ${summary.memoryWrittenCount} · no new memory ${summary.noNewMemoryTurnCount} · deduped ${summary.memoryDedupedCount} · sensitive blocked ${summary.memoryRedactedCount} · session-only ${summary.memorySessionOnlyCount} · discarded ${summary.memoryDiscardedCount}`)
-          : (locale === "ko"
-              ? "세부 학습 영수증은 이 버전부터 기록됩니다. 기존 실행은 내용을 추측해 역산하지 않습니다."
-              : "Detailed curation receipts start with this version; older runs are not guessed or backfilled.")}
+      <div data-testid="agent-memory-curation-ledger" style={{ marginTop: 9, color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.55 }}>
+        {summary.curationTurnCount > 0 ? (
+          <>
+            <div>
+              {locale === "ko"
+                ? `최근 작업 ${summary.curationTurnCount}건을 확인해 기억할 내용 ${summary.memoryEventCount}개를 찾고 ${summary.memoryWrittenCount}개를 저장했습니다.`
+                : `Checked ${summary.curationTurnCount} recent tasks, found ${summary.memoryEventCount} useful items, and saved ${summary.memoryWrittenCount}.`}
+            </div>
+            <details style={{ marginTop: 3 }}>
+              <summary style={{ cursor: "pointer", fontWeight: 650 }}>
+                {locale === "ko" ? "자세한 처리 내역" : "View processing details"}
+              </summary>
+              <div style={{ marginTop: 4 }}>
+                {locale === "ko"
+                  ? `새 내용 없음 ${summary.noNewMemoryTurnCount} · 중복 제외 ${summary.memoryDedupedCount} · 민감정보 제외 ${summary.memoryRedactedCount} · 이번 작업에만 사용 ${summary.memorySessionOnlyCount} · 저장하지 않음 ${summary.memoryDiscardedCount}`
+                  : `No new content ${summary.noNewMemoryTurnCount} · duplicates removed ${summary.memoryDedupedCount} · sensitive content removed ${summary.memoryRedactedCount} · session only ${summary.memorySessionOnlyCount} · not saved ${summary.memoryDiscardedCount}`}
+              </div>
+            </details>
+          </>
+        ) : (
+          locale === "ko"
+            ? "상세 학습 기록은 이번 버전부터 쌓입니다. 이전 기록은 확인할 수 있는 범위만 표시합니다."
+            : "Detailed learning history starts with this version. Older activity is shown only where it can be verified."
+        )}
       </div>
       {context === "activity" && (
         <div style={{ marginTop: 8, color: "var(--muted-deep)", fontSize: 10.5 }}>
-          {locale === "ko" ? "마지막 실행" : "Last run"}: {summary.lastRunAt ? new Date(summary.lastRunAt).toLocaleString(locale === "ko" ? "ko-KR" : "en-US") : (locale === "ko" ? "기록 없음" : "No recorded run")}
+          {locale === "ko" ? "최근 작업" : "Latest work"}: {summary.lastRunAt ? new Date(summary.lastRunAt).toLocaleString(locale === "ko" ? "ko-KR" : "en-US") : (locale === "ko" ? "기록 없음" : "No recorded work")}
           {summary.legacyChatLinkedRunCount > 0
-            ? ` · ${locale === "ko" ? "과거 채팅 연결" : "Legacy chat-linked"} ${summary.legacyChatLinkedRunCount}${summary.legacyChatLinkedFailureCount > 0 ? ` (${locale === "ko" ? "실패 연결" : "failure-linked"} ${summary.legacyChatLinkedFailureCount})` : ""}`
+            ? ` · ${locale === "ko" ? "관련 이전 대화" : "Related earlier conversations"} ${summary.legacyChatLinkedRunCount}${summary.legacyChatLinkedFailureCount > 0 ? ` (${locale === "ko" ? "문제가 있었던 대화" : "with issues"} ${summary.legacyChatLinkedFailureCount})` : ""}`
             : ""}
-          {summary.legacyUnattributedCount > 0 ? ` · ${locale === "ko" ? "귀속 불명 레거시" : "Legacy unattributed"} ${summary.legacyUnattributedCount}` : ""}
+          {summary.legacyUnattributedCount > 0 ? ` · ${locale === "ko" ? "담당 에이전트 미확인" : "Agent not identified"} ${summary.legacyUnattributedCount}` : ""}
           {summary.legacyChatLinkedRunCount > 0 && (
             <span style={{ display: "block", marginTop: 4 }}>
               {locale === "ko"
-                ? "과거 채팅 연결은 chat_id로 확인된 관련 활동이며, 당시 최종 실행자를 소급해 단정하지 않습니다."
-                : "Legacy chat links are related activity proven by chat_id; they do not retroactively claim the final executor."}
+                ? "이전 대화는 이 에이전트와 관련 있지만, 당시 작업을 끝까지 맡았는지는 확인할 수 없습니다."
+                : "These earlier conversations are related to this agent, but do not prove it handled the work from start to finish."}
             </span>
           )}
         </div>
@@ -239,8 +252,8 @@ export function AgentLearningMetricGrid({
       {context === "playbook" && (
         <p style={{ margin: "9px 0 0", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}>
           {locale === "ko"
-            ? "학습은 자동으로 플레이북 파일을 만들지 않습니다. 위 숫자는 실제 DB 학습, 로컬 파일, 승인·롤백 영수증을 각각 보여줍니다."
-            : "Learning never auto-creates a playbook file. These counts separately report durable DB learning, local files, and approve/rollback receipts."}
+            ? "배운 내용은 자동으로 작업 절차에 반영되지 않습니다. 검토하고 승인한 변경만 적용됩니다."
+            : "Learned content is not added to the playbook automatically. Only reviewed and approved changes are applied."}
         </p>
       )}
     </div>

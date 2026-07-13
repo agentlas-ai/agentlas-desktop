@@ -652,7 +652,7 @@ async function runLibrarySurface(browser, baseUrl, evidence) {
   assert.equal(await page.getByRole("button", { name: /프롬프트 편집|Edit prompt|프롬프트 복사|Copy prompt|기본값 재설정|Reset to default/ }).count(), 0, "raw prompt controls must not be rendered");
   assert.deepEqual(
     (await page.getByTestId("agent-detail-tabs").getByRole("button").allTextContents()).map((text) => text.trim()),
-    ["정체성 & 페르소나", "큐레이팅된 메모리", "플레이북 & 워크플로우", "활동 및 자체 진화", "온톨로지 칩"],
+    ["정체성 & 페르소나", "큐레이팅된 메모리", "플레이북 & 워크플로우", "활동과 개선", "온톨로지 칩"],
     "agent tabs must preserve the governed order",
   );
   await page.getByText(/실행 모델 지정|Runtime Model Assignment/).waitFor();
@@ -703,19 +703,19 @@ async function runFirmAgentSurface(browser, baseUrl, evidence) {
   assert.equal(await page.getByRole("button", { name: /프롬프트 편집|Edit prompt|프롬프트 복사|Copy prompt|기본값 재설정|Reset to default/ }).count(), 0, "firm detail must not render raw prompt controls");
   assert.deepEqual(
     (await page.getByTestId("agent-detail-tabs").getByRole("button").allTextContents()).map((text) => text.trim()),
-    ["정체성 & 페르소나", "큐레이팅된 메모리", "플레이북 & 워크플로우", "활동 및 자체 진화", "온톨로지 칩"],
+    ["정체성 & 페르소나", "큐레이팅된 메모리", "플레이북 & 워크플로우", "활동과 개선", "온톨로지 칩"],
     "firm agent tabs must match the library order",
   );
   await page.getByRole("button", { name: /로컬 표시 이름 편집|Edit local display name/ }).waitFor();
 
   await page.getByRole("button", { name: /플레이북 & 워크플로우|Playbook & Workflow/ }).click();
   await page.getByTestId("agent-learning-playbook").waitFor();
-  await page.getByText(/학습은 자동으로 플레이북 파일을 만들지 않습니다|Learning never auto-creates a playbook file/).waitFor();
+  await page.getByText(/배운 내용은 자동으로 작업 절차에 반영되지 않습니다|Learned content is not added to the playbook automatically/).waitFor();
   await page.getByText("AGENT.md", { exact: true }).first().waitFor();
 
-  await page.getByRole("button", { name: /활동 및 자체 진화|Activity & Self-Evolution/ }).click();
+  await page.getByRole("button", { name: /활동과 개선|Activity & Improvements/ }).click();
   await page.getByTestId("agent-learning-activity").waitFor();
-  await page.getByText(/귀속 불명 레거시|Legacy unattributed/).waitFor();
+  await page.getByText(/담당 에이전트 미확인|Agent not identified/).waitFor();
 
   await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
   const ontology = page.getByTestId("experience-ontology-summary");
@@ -1107,12 +1107,23 @@ async function runImportSurface(browser, baseUrl, evidence) {
 }
 
 async function runMemoryEvolutionSurface(browser, baseUrl, evidence) {
-  const { context, page, errors } = await newPage(browser);
+  const { context, page, errors } = await newPage(browser, { technicalMemoryScenario: true });
   page.on("dialog", (dialog) => dialog.accept());
   await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
   await page.getByText(/Builder Agent|빌더 에이전트/).first().click();
   await page.getByRole("button", { name: /큐레이팅된 메모리|Curated Memory/ }).click();
   await page.getByText("Route clearly").waitFor();
+  await page.getByText(/문제 해결 방법을 배웠어요|Learned how to solve a problem/).waitFor();
+  await page.getByText(/작업 중 생긴 문제와 해결 방법|Saved a problem and its solution/).waitFor();
+  assert.equal(await page.getByText("risk", { exact: true }).count(), 0, "raw memory kind must be translated for users");
+  assert.equal(await page.getByText("high", { exact: true }).count(), 0, "raw confidence must be translated for users");
+  assert.equal(await page.getByText(/connectOverCDP/).count(), 0, "technical memory detail must stay collapsed by default");
+  await page.getByRole("button", { name: /기술 기록 보기|View technical record/ }).first().click();
+  await page.getByText(/connectOverCDP/).waitFor();
+  await page.getByRole("button", { name: /기술 기록 숨기기|Hide technical record/ }).first().click();
+  await page.getByTestId("agent-learning-history").screenshot({
+    path: path.join(outDir, "memory-learning-readable-surface.png"),
+  });
 
   const checkboxes = page.locator('input[type="checkbox"]');
   await checkboxes.nth(0).click();
@@ -1140,12 +1151,13 @@ async function runMemoryEvolutionSurface(browser, baseUrl, evidence) {
   );
 
   assert.equal(await page.getByRole("button", { name: /프롬프트 편집|Edit prompt|기본값 재설정|Reset to default/ }).count(), 0, "raw prompt mutation controls must stay absent");
-  await page.getByRole("button", { name: /활동 및 자체 진화|Activity & Self-Evolution/ }).click();
-  await page.getByTestId("agent-memory-curation-ledger").getByText(/학습 검사 7회|Curation checks 7/).waitFor();
-  await page.getByText(/학습 검사 영수증|Curation receipts/).waitFor();
-  await page.getByText(/새 기억 없음 3|3 no-new-memory/).first().waitFor();
-  await page.getByText(/에이전트 자산 진화 제안|Agent Asset Evolution Proposal/).waitFor();
-  await page.getByRole("button", { name: /diff 검토 후보 만들기|Create diff review candidate/ }).click();
+  await page.getByRole("button", { name: /활동과 개선|Activity & Improvements/ }).click();
+  await page.getByTestId("agent-memory-curation-ledger").getByText(/최근 작업 7건을 확인해|Checked 7 recent tasks/).waitFor();
+  await page.getByText(/최근 작업에서 배울 내용을 확인했어요|Checked recent work for useful learnings/).waitFor();
+  await page.getByText(/자세한 처리 내역|View processing details/).click();
+  await page.getByText(/새 내용 없음 3|No new content 3/).first().waitFor();
+  await page.getByText(/에이전트 개선안|Agent improvements/).waitFor();
+  await page.getByRole("button", { name: /개선안 만들기|Create improvement/ }).click();
   await page.waitForFunction(
     () => window.__qa.calls.some((call) => call.name === "agentEvolution.createProposal" && /Learned rules/.test(call.payload.proposedContent)),
   );
@@ -1155,7 +1167,7 @@ async function runMemoryEvolutionSurface(browser, baseUrl, evidence) {
   assert.match(evolutionCall.payload.proposedContent, /Learned rules/);
   assert.match(evolutionCall.payload.proposedContent, /Publish target/);
   const beforeEvolutionApprove = await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "agentEvolution.approveAndApply").length);
-  await page.getByRole("button", { name: /검토 완료 · 승인 및 적용|Review complete · approve & apply/ }).click();
+  await page.getByRole("button", { name: /확인하고 적용|Review and apply/ }).click();
   await page.waitForFunction((before) => window.__qa.calls.filter((call) => call.name === "agentEvolution.approveAndApply").length > before, beforeEvolutionApprove);
   await page.getByText(/APPLY · asset v1→v2 · governed/).waitFor();
 
@@ -1186,12 +1198,25 @@ async function runMemoryEvolutionSurface(browser, baseUrl, evidence) {
   );
   assert.equal(await page.getByText(/스킬 주입 완료|Skill injected/).count(), 0, "completion copy must not appear before approval");
   const beforeSkillApprove = await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "agentEvolution.approveAndApply").length);
-  await page.getByRole("button", { name: /검토 완료 · 승인 및 적용|Review complete · approve & apply/ }).click();
+  await page.getByRole("button", { name: /확인하고 적용|Review and apply/ }).click();
   await page.waitForFunction((before) => window.__qa.calls.filter((call) => call.name === "agentEvolution.approveAndApply").length > before, beforeSkillApprove);
   await page.getByText(/스킬 주입 완료|Skill injected/).waitFor();
   await page.getByRole("button", { name: /이 영수증으로 롤백|Rollback from this receipt/ }).click();
   await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "agentEvolution.rollback"));
   await page.getByText(/스킬 제거 롤백 완료|Skill removal rollback complete/).waitFor();
+
+  await page.evaluate(() => window.localStorage.setItem("agentlas.locale", "en"));
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByText(/Builder Agent|빌더 에이전트/).first().click();
+  await page.getByRole("button", { name: /Curated Memory|큐레이팅된 메모리/ }).click();
+  await page.getByText("Learned how to solve a problem", { exact: true }).waitFor();
+  await page.getByText(/Saved a problem and its solution/).waitFor();
+  await page.getByRole("button", { name: "View technical record", exact: true }).click();
+  await page.getByText(/connectOverCDP/).waitFor();
+  await page.getByRole("button", { name: "Hide technical record", exact: true }).click();
+  await page.getByTestId("agent-learning-history").screenshot({
+    path: path.join(outDir, "memory-learning-readable-surface-en.png"),
+  });
 
   await finishPage(context, page, errors, evidence, "memory-evolution-surface");
 }

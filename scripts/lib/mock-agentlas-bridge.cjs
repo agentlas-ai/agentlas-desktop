@@ -190,7 +190,7 @@ function setupMockAgentlasBridge(options) {
   try {
     window.localStorage.setItem("agentlas.onboarded", "1");
     if (!options?.showFeatureUpdate) {
-      window.localStorage.setItem("agentlas.featureUpdate.ontology-chips-v1.2026-07-13.ack", "qa-suppressed");
+      window.localStorage.setItem("agentlas.featureUpdate.desktop-v0.8.13-ontology-chips.ack", "qa-suppressed");
     }
     window.localStorage.setItem("agentlas.shellTour.dismissed.v1", "1");
     window.localStorage.setItem("agentlas.stormbreakerWarningDismissed", "1");
@@ -1167,8 +1167,21 @@ function setupMockAgentlasBridge(options) {
       },
     },
     agentMemory: {
-      entries: async (agentId) => options?.experienceScenario && agentId === "agent-2"
+      entries: async (agentId) => options?.technicalMemoryScenario && agentId === "agent-2"
         ? [{
+            id: "memory-browser-connection-failure",
+            scope: "agent_repo",
+            kind: "risk",
+            content: "no-slop-seeder 2026-07-06: playwright-core connectOverCDP가 Browser.setDownloadBehavior 설정에서 실패했습니다. curl로 원격 디버깅 주소를 확인하고 Node 네이티브 WebSocket으로 다시 연결해 해결했습니다.",
+            confidence: "high",
+            sensitivity: "internal",
+            evidence: [],
+            chatId: null,
+            projectPath: null,
+            createdAt: now,
+          }]
+        : options?.experienceScenario && agentId === "agent-2"
+          ? [{
             id: "memory-browser-workflow",
             scope: "agent_repo",
             kind: "procedure",
@@ -1180,7 +1193,7 @@ function setupMockAgentlasBridge(options) {
             projectPath: "/tmp/agentlas-qa",
             createdAt: now,
           }]
-        : [],
+          : [],
     },
     agentLearning: {
       summary: async (agentId) => {

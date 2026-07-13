@@ -73,7 +73,7 @@ async function main() {
     await page.waitForFunction(() => Boolean(window.agentlas), null, { timeout: 30_000 });
     await page.evaluate(() => {
       window.localStorage.setItem("agentlas.onboarded", "1");
-      window.localStorage.setItem("agentlas.featureUpdate.ontology-chips-v1.2026-07-13.ack", "existing-user-proof");
+      window.localStorage.setItem("agentlas.featureUpdate.desktop-v0.8.13-ontology-chips.ack", "existing-user-proof");
     });
     const installedIds = await page.evaluate(async () => (await window.agentlas.team.list()).map((agent) => agent.id));
     const agentId = candidateAgentIds.find((id) => installedIds.includes(id));
@@ -112,7 +112,7 @@ async function main() {
     assert.ok(await page.getByLabel(/로컬 표시 이름 편집/).count(), "local alias pencil is missing");
     await summary.screenshot({ path: path.join(output, "01-existing-memory-ontology-summary.png") });
 
-    await page.getByRole("button", { name: "활동 및 자체 진화", exact: true }).click();
+    await page.getByRole("button", { name: "활동과 개선", exact: true }).click();
     const activity = page.getByTestId("agent-learning-activity");
     await activity.waitFor({ timeout: 15_000 });
     await activity.screenshot({ path: path.join(output, "02-existing-learning-activity.png") });

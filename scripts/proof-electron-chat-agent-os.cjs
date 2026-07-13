@@ -228,7 +228,7 @@ async function launchProofElectron(consoleErrors, label) {
 async function createQaChatFromUiBridge(page) {
   return page.evaluate(async ({ proofRoot }) => {
     window.localStorage.setItem("agentlas.onboarded", "1");
-    window.localStorage.setItem("agentlas.featureUpdate.ontology-chips-v1.2026-07-13.ack", "qa-suppressed");
+    window.localStorage.setItem("agentlas.featureUpdate.desktop-v0.8.13-ontology-chips.ack", "qa-suppressed");
     const agents = await window.agentlas.team.list();
     const agent =
       agents.find((item) => item.slug === "agentlas-orchestrator" && item.visibility !== "background") ||
@@ -357,7 +357,7 @@ async function verifyRestartPersistence(input) {
   try {
     await page.evaluate(() => {
       window.localStorage.setItem("agentlas.onboarded", "1");
-      window.localStorage.setItem("agentlas.featureUpdate.ontology-chips-v1.2026-07-13.ack", "qa-suppressed");
+      window.localStorage.setItem("agentlas.featureUpdate.desktop-v0.8.13-ontology-chips.ack", "qa-suppressed");
       window.location.href = "/library/apps";
     });
     await page.waitForFunction(() => location.pathname.includes("/library/apps"), null, { timeout: 30_000 });

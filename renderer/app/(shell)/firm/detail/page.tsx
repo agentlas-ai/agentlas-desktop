@@ -19,6 +19,8 @@ import {
   ExperienceOntologySummaryView,
   agentDisplayName,
 } from "@/components/AgentExperienceInsights";
+import { AgentLearningHistory, type AgentLearningEvent } from "@/components/AgentLearningHistory";
+import { buildMemoryLearningEvent, formatLearningTime } from "@/lib/agent-learning-copy";
 import {
   IconBuilding,
   IconChat,
@@ -37,37 +39,6 @@ import {
   IconPaperclip,
   IconRoute
 } from "@/components/Icon";
-
-// ── 런타임 durable 메모리(큐레이터 DB) 표시 헬퍼 — library/agents/page.tsx 와 동일 규칙(병렬 편집 제약으로 로컬 복제) ──
-// createdAt(ISO) → 타임라인 timestamp 자리의 상대시간. 오래된 항목은 toLocaleString 포맷 폴백.
-function formatMemoryEntryTime(iso: string, locale: Locale): string {
-  const ts = new Date(iso).getTime();
-  if (!Number.isFinite(ts)) return iso;
-  const diffMin = Math.round((Date.now() - ts) / 60000);
-  if (diffMin < 1) return locale === "ko" ? "방금 전" : "just now";
-  if (diffMin < 60) return locale === "ko" ? `${diffMin}분 전` : `${diffMin}m ago`;
-  const diffHour = Math.round(diffMin / 60);
-  if (diffHour < 24) return locale === "ko" ? `${diffHour}시간 전` : `${diffHour}h ago`;
-  const diffDay = Math.round(diffHour / 24);
-  if (diffDay < 7) return locale === "ko" ? `${diffDay}일 전` : `${diffDay}d ago`;
-  return new Date(ts).toLocaleString(locale === "en" ? "en-US" : "ko-KR", { month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" });
-}
-
-// DB kind(raw 문자열) → 기존 타임라인 colorMap 타입 매핑. 미지의 kind 는 sync 색으로 안전 강등.
-function memoryKindToTimelineType(kind: string): "skill" | "sync" | "evolution" | "resolve" {
-  const k = (kind || "").toLowerCase();
-  if (k === "decision") return "resolve";
-  if (k === "gotcha") return "evolution";
-  if (k === "procedure") return "skill";
-  return "sync";
-}
-
-// 신뢰도 배지 색 — high=green, medium=amber, low=muted.
-function memoryConfidenceColor(confidence: "high" | "medium" | "low"): string {
-  if (confidence === "high") return "var(--green-deep)";
-  if (confidence === "medium") return "var(--amber-deep)";
-  return "var(--muted-deep)";
-}
 
 export default function FirmDetailWrapper() {
   return (
@@ -1365,7 +1336,7 @@ function AgentDetailView({
     if (!api || !agent?.id) {
       setLearningSummary(null);
       setLearningSummaryLoading(false);
-      setLearningSummaryError(locale === "ko" ? "설치된 에이전트만 학습 원장을 조회할 수 있습니다." : "Only installed agents have a learning ledger.");
+      setLearningSummaryError(locale === "ko" ? "설치된 에이전트의 학습 기록만 볼 수 있습니다." : "Learning history is available only for installed agents.");
       return;
     }
     let cancelled = false;
@@ -1438,9 +1409,9 @@ function AgentDetailView({
   }, [agent?.id, locale]);
 
   // 메모리 진화 타임라인 관리 상태
-  const [timelineEvents, setTimelineEvents] = useState<Array<{ id: string; timestamp: string; title: string; desc: string; type: "skill" | "sync" | "evolution" | "resolve" }>>([
-    { id: "timeline-1", timestamp: "2026-06-26 10:15", title: locale === "ko" ? "에이전트 계약 마운트" : "Agent contract mounted", desc: locale === "ko" ? "Agentlas Desktop 시스템 로컬 프로파일 정상 적재 완료." : "Agentlas Desktop local profile loaded successfully.", type: "sync" },
-    { id: "timeline-2", timestamp: "2026-06-26 11:20", title: locale === "ko" ? "초기 지식베이스 로드" : "Initial knowledge base loaded", desc: locale === "ko" ? "AGENT.md 및 memory.md 파일 연동 정상 바인딩." : "AGENT.md and memory.md files bound successfully.", type: "sync" }
+  const [timelineEvents, setTimelineEvents] = useState<AgentLearningEvent[]>([
+    { id: "timeline-1", timestamp: "2026-06-26 10:15", title: locale === "ko" ? "에이전트 준비 완료" : "Agent is ready", desc: locale === "ko" ? "이 컴퓨터에서 에이전트를 사용할 준비를 마쳤습니다." : "This agent is ready to use on this computer.", type: "sync" },
+    { id: "timeline-2", timestamp: "2026-06-26 11:20", title: locale === "ko" ? "기억 불러오기 완료" : "Memory is ready", desc: locale === "ko" ? "에이전트의 역할과 기존 기억을 불러왔습니다." : "Loaded the agent's role and existing memory.", type: "sync" }
   ]);
 
   // 카메라 연출 인터랙션 칩 상태
@@ -1471,26 +1442,17 @@ function AgentDetailView({
 
   // 런타임 durable 메모리(큐레이터 DB) → 타임라인 행(최신순) 합류 — memory.md 없이도 실제 학습이 보인다.
   const displayTimelineEvents = useMemo(() => {
-    const dbRows: Array<{ id: string; timestamp: string; title: string; desc: string; type: "skill" | "sync" | "evolution" | "resolve"; kind?: string; confidence?: "high" | "medium" | "low" }> = [...memoryEntries]
+    const dbRows: AgentLearningEvent[] = [...memoryEntries]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .map((entry) => ({
-        id: `db-${entry.id}`,
-        timestamp: formatMemoryEntryTime(entry.createdAt, locale),
-        title: locale === "ko" ? "런타임 학습 수집" : "Runtime learning captured",
-        desc: entry.content,
-        type: memoryKindToTimelineType(entry.kind),
-        kind: entry.kind,
-        confidence: entry.confidence,
-      }));
+      .map((entry) => buildMemoryLearningEvent(entry, locale));
     const proposalRows: typeof dbRows = [...evolutionProposals]
       .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
       .map((proposal) => ({
         id: `proposal-${proposal.id}`,
-        timestamp: formatMemoryEntryTime(proposal.appliedAt || proposal.updatedAt, locale),
-        title: locale === "ko" ? "자가진화 proposal 원장 기록" : "Self-evolution proposal recorded",
-        desc: locale === "ko"
-          ? `${proposal.status} · ${proposal.summary} · ${proposal.targetPath}`
-          : `${proposal.status} · ${proposal.summary} · ${proposal.targetPath}`,
+        timestamp: formatLearningTime(proposal.appliedAt || proposal.updatedAt, locale),
+        title: locale === "ko" ? "에이전트 개선 기록" : "Agent improvement recorded",
+        desc: proposal.summary,
+        detail: `${proposal.status} · ${proposal.targetPath}`,
         type: "evolution",
       }));
     const merged: typeof dbRows = [...timelineEvents, ...proposalRows, ...dbRows];
@@ -1734,7 +1696,7 @@ function AgentDetailView({
               identity: locale === "ko" ? "정체성 & 페르소나" : "Identity & Persona",
               memory: locale === "ko" ? "큐레이팅된 메모리" : "Curated Memory",
               playbook: locale === "ko" ? "플레이북 & 워크플로우" : "Playbook & Workflow",
-              activity: locale === "ko" ? "활동 및 자체 진화" : "Activity & Self-Evolution",
+              activity: locale === "ko" ? "활동과 개선" : "Activity & Improvements",
               ontology: locale === "ko" ? "온톨로지 칩" : "Ontology Chips",
             };
             return (
@@ -1771,8 +1733,8 @@ function AgentDetailView({
                 <h3 style={{ margin: "0 0 7px", fontSize: 14 }}>{locale === "ko" ? "거버넌스된 에이전트 정체성" : "Governed agent identity"}</h3>
                 <p style={{ margin: 0, color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.55 }}>
                   {locale === "ko"
-                    ? "내부 지시 원문은 이 화면에 노출하지 않습니다. 학습에서 생긴 변경은 Activity & Self-Evolution의 diff 검토, 명시적 승인, 적용 영수증, 롤백 절차를 거칩니다."
-                    : "Raw internal instructions are not exposed here. Learning-driven changes go through diff review, explicit approval, an apply receipt, and rollback in Activity & Self-Evolution."}
+                    ? "내부 지시 원문은 이 화면에 노출하지 않습니다. 학습으로 바뀌는 내용은 ‘활동과 개선’에서 비교하고, 직접 승인한 뒤에만 적용됩니다. 적용 후에도 되돌릴 수 있습니다."
+                    : "Raw internal instructions are not shown here. Learning-driven changes are compared under Activity & Improvements and applied only after explicit approval. Applied changes can still be reverted."}
                 </p>
               </div>
 
@@ -2059,78 +2021,18 @@ function AgentDetailView({
               </div>
 
 
-              {/* 메모리 진화 히스토리 타임라인 */}
+              {/* 사용자에게 이해하기 쉬운 학습 기록. 원본 기술 로그는 각 항목 안에서만 펼친다. */}
               <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-                <h4 style={{ margin: "0 0 16px 0", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 6, color: "var(--ink)" }}>
-                  <IconRoute size={14} style={{ color: "var(--accent)" }} />
-                  {locale === "ko" ? "메모리 진화 히스토리 (Evolution Timeline)" : "Memory Evolution Timeline"}
-                </h4>
-                
-                <div style={{ display: "flex", flexDirection: "column", gap: 16, position: "relative", paddingLeft: 16, borderLeft: "2px solid var(--paper-edge)", marginLeft: 6 }}>
-                  {displayTimelineEvents.map((evt) => {
-                    const colorMap = {
-                      skill: "var(--purple-deep)",
-                      sync: "var(--accent)",
-                      evolution: "var(--amber-deep)",
-                      resolve: "var(--green-deep)"
-                    };
-                    // DB 유래 행(kind 有)은 본문을 2줄로 접고 클릭 시 펼친다.
-                    const isDbEntry = Boolean(evt.kind);
-                    const expanded = !!expandedItems[evt.id];
-
-                    return (
-                      <div key={evt.id} style={{ position: "relative" }}>
-                        {/* 타임라인 점 */}
-                        <div style={{
-                          position: "absolute",
-                          left: -23,
-                          top: 4,
-                          width: 12,
-                          height: 12,
-                          borderRadius: 999,
-                          background: "var(--paper)",
-                          border: `3px solid ${colorMap[evt.type]}`,
-                          zIndex: 2
-                        }} />
-
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2, flexWrap: "wrap" }}>
-                          <span style={{ fontSize: 10, fontWeight: 700, color: "var(--muted-deep)", fontFamily: "var(--font-mono)" }}>
-                            {evt.timestamp}
-                          </span>
-                          <span style={{ fontSize: 11.5, fontWeight: 700, color: colorMap[evt.type] }}>
-                            {evt.title}
-                          </span>
-                          {evt.kind && (
-                            <span style={{ fontSize: 9.5, padding: "1px 6px", borderRadius: 999, background: "var(--fill-1)", color: colorMap[evt.type], fontWeight: 700, fontFamily: "var(--font-mono)" }}>
-                              {evt.kind}
-                            </span>
-                          )}
-                          {evt.confidence && (
-                            <span style={{ fontSize: 9.5, padding: "1px 6px", borderRadius: 999, border: "1px solid var(--paper-edge)", color: memoryConfidenceColor(evt.confidence), fontWeight: 700 }}>
-                              {evt.confidence}
-                            </span>
-                          )}
-                        </div>
-                        <p
-                          onClick={isDbEntry ? () => toggleItemExpand(evt.id) : undefined}
-                          title={isDbEntry ? (locale === "ko" ? "클릭하여 펼치기/접기" : "Click to expand/collapse") : undefined}
-                          style={{
-                            margin: 0,
-                            fontSize: 11.5,
-                            color: "var(--ink-soft)",
-                            lineHeight: 1.4,
-                            ...(isDbEntry ? { cursor: "pointer" } : {}),
-                            ...(isDbEntry && !expanded
-                              ? { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" as const, overflow: "hidden" }
-                              : {}),
-                          }}
-                        >
-                          {evt.desc}
-                        </p>
-                      </div>
-                    );
-                  })}
+                <div style={{ marginBottom: 14 }}>
+                  <h4 style={{ margin: 0, fontSize: 13.5, fontWeight: 750, display: "flex", alignItems: "center", gap: 6, color: "var(--ink)" }}>
+                    <IconRoute size={14} style={{ color: "var(--accent)" }} />
+                    {locale === "ko" ? "에이전트가 배운 내용" : "What this agent learned"}
+                  </h4>
+                  <p style={{ margin: "4px 0 0 20px", fontSize: 11.5, color: "var(--muted-deep)", lineHeight: 1.45 }}>
+                    {locale === "ko" ? "다음 작업에 활용할 기억과 개선 내용을 확인하세요." : "Review memories and improvements that can help with future work."}
+                  </p>
                 </div>
+                <AgentLearningHistory events={displayTimelineEvents} locale={locale} />
               </div>
 
             </div>
@@ -2435,7 +2337,7 @@ function AgentDetailView({
             </div>
           )}
 
-          {/* 탭 4: 활동 및 자체 진화 */}
+          {/* 탭 4: 활동과 개선 */}
           {activeTab === "activity" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 840 }}>
               
@@ -2452,26 +2354,26 @@ function AgentDetailView({
                 <div style={{ display: "flex", justifyItems: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
                   <h4 style={{ margin: 0, fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
                     <IconWand size={14} style={{ color: "var(--accent)" }} />
-                    {locale === "ko" ? "에이전트 자산 진화 제안 (Agent Asset Proposal)" : "Agent Asset Evolution Proposal"}
+                    {locale === "ko" ? "에이전트 개선안" : "Agent improvements"}
                   </h4>
                   <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 4, background: "rgba(245,201,122,0.16)", color: "var(--amber-deep)", fontWeight: 700 }}>
                     {pendingProposal
                       ? (locale === "ko" ? "승인 대기" : "Awaiting approval")
                       : recoveryProposal
-                        ? (locale === "ko" ? "수동 비교·복구 필요" : "Manual diff/recovery required")
+                        ? (locale === "ko" ? "확인 필요" : "Needs review")
                       : displayedProposal?.status === "applied" || displayedProposal?.status === "measured"
-                        ? (locale === "ko" ? "적용됨 · 롤백 가능" : "Applied · rollback available")
+                        ? (locale === "ko" ? "적용됨 · 되돌릴 수 있음" : "Applied · can be reverted")
                         : displayedProposal?.status === "rolled_back"
-                          ? (locale === "ko" ? "롤백 완료" : "Rolled back")
-                          : hasPendingEvolution ? (locale === "ko" ? "후보 생성 가능" : "Candidate available") : (locale === "ko" ? "최신 상태" : "Up to date")}
+                          ? (locale === "ko" ? "되돌림 완료" : "Reverted")
+                          : hasPendingEvolution ? (locale === "ko" ? "새 개선안 있음" : "Improvement available") : (locale === "ko" ? "변경 없음" : "No changes")}
                   </span>
                 </div>
 
                 {!hasPendingEvolution && !displayedProposal && (
                   <div style={{ fontSize: 12, color: "var(--muted-deep)", padding: "12px 4px", lineHeight: 1.6 }}>
                     {locale === "ko"
-                      ? "메모리의 활성 규칙이 모두 시스템 프롬프트에 반영되어 있습니다. 메모리 탭에서 새 결정·주의 규칙이 학습되면 여기에 프롬프트 진화 제안이 나타납니다."
-                      : "All active rules in memory are already reflected in the system prompt. When new decision or gotcha rules are learned in the Memory tab, a prompt evolution proposal will appear here."}
+                      ? "현재 기억한 내용이 모두 에이전트에 반영되어 있습니다. 새 기준이나 주의할 점을 배우면 여기에 개선안이 나타납니다."
+                      : "Everything currently remembered is already reflected in the agent. New decisions or cautions will appear here as improvements."}
                   </div>
                 )}
 
@@ -2481,7 +2383,7 @@ function AgentDetailView({
                   {/* 기존 버젼 */}
                   <div style={{ background: "rgba(255,138,138,0.04)" }}>
                     <div style={{ background: "rgba(255,138,138,0.08)", padding: "6px 12px", borderBottom: "1px solid var(--paper-edge)", fontSize: 11.5, fontWeight: 600, color: "var(--red-deep)" }}>
-                      {locale === "ko" ? "기존 버전 (Current)" : "Current version"}
+                      {locale === "ko" ? "현재 설정" : "Current settings"}
                     </div>
                     <pre style={{ margin: 0, padding: 12, fontSize: 10.5, fontFamily: "var(--font-mono)", lineHeight: 1.5, whiteSpace: "pre-wrap", maxHeight: 180, overflowY: "auto" }}>
                       {displayedEvolutionDiff.old}
@@ -2490,7 +2392,7 @@ function AgentDetailView({
                   {/* 제안 버젼 */}
                   <div style={{ background: "rgba(168,217,155,0.04)", borderLeft: "1px solid var(--paper-edge)" }}>
                     <div style={{ background: "rgba(168,217,155,0.08)", padding: "6px 12px", borderBottom: "1px solid var(--paper-edge)", fontSize: 11.5, fontWeight: 600, color: "var(--green-deep)" }}>
-                      {locale === "ko" ? "개선 제안 (Evolved Draft)" : "Evolved draft"}
+                      {locale === "ko" ? "바뀔 설정" : "Proposed settings"}
                     </div>
                     <pre style={{ margin: 0, padding: 12, fontSize: 10.5, fontFamily: "var(--font-mono)", lineHeight: 1.5, whiteSpace: "pre-wrap", maxHeight: 180, overflowY: "auto" }}>
                       {displayedEvolutionDiff.new}
@@ -2515,7 +2417,7 @@ function AgentDetailView({
                         opacity: saving ? 0.6 : 1,
                       }}
                     >
-                      {locale === "ko" ? "diff 검토 후보 만들기" : "Create diff review candidate"}
+                      {locale === "ko" ? "개선안 만들기" : "Create improvement"}
                     </button>
                   </div>
                 )}
@@ -2529,10 +2431,10 @@ function AgentDetailView({
                     </div>
                     <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
                       <button type="button" disabled={saving} onClick={() => void onRejectEvolution(pendingProposal.id)} style={{ padding: "8px 12px", border: "1px solid var(--paper-edge)", borderRadius: 6, background: "var(--paper)", color: "var(--ink-soft)", fontSize: 12, fontWeight: 650 }}>
-                        {locale === "ko" ? "후보 거절" : "Reject candidate"}
+                        {locale === "ko" ? "개선안 삭제" : "Discard improvement"}
                       </button>
                       <button type="button" disabled={saving} onClick={() => void onApproveEvolution(pendingProposal.id)} style={{ padding: "8px 14px", background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 650 }}>
-                        {locale === "ko" ? "검토 완료 · 승인 및 적용" : "Review complete · approve & apply"}
+                        {locale === "ko" ? "확인하고 적용" : "Review and apply"}
                       </button>
                     </div>
                   </div>
