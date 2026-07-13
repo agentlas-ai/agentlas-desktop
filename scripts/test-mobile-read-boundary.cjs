@@ -14,6 +14,8 @@ fs.mkdirSync(projectPath, { recursive: true });
 process.env.AGENTLAS_STORE_PATH = path.join(temp, "agentlas.sqlite");
 process.env.AGENTLAS_RUNTIME_DETECT_CACHE_MS = "0";
 app.setPath("userData", userData);
+let testDb = null;
+let exitCode = 0;
 
 function automationReply(visibleText, entries) {
   return [
@@ -32,6 +34,7 @@ async function main() {
   const store = require("../dist/electron/store/db.js");
   store.initStore();
   const db = store.getDb();
+  testDb = db;
   db.prepare(
     `INSERT INTO installed_agents (
        id, slug, name, name_en, tagline, tagline_en, system_prompt,
@@ -277,10 +280,25 @@ async function main() {
 main()
   .catch((error) => {
     console.error("Mobile read permission boundary: FAIL", error);
-    process.exitCode = 1;
+    exitCode = 1;
   })
   .finally(() => {
-    fs.rmSync(temp, { recursive: true, force: true });
-    fs.rmSync(inferredProjectPath, { recursive: true, force: true });
-    app.quit();
+    // Windows keeps SQLite files locked until the native handle closes. Cleanup
+    // must never throw before Electron receives an explicit exit, otherwise a
+    // passing release gate can wait until the whole job timeout.
+    try {
+      testDb?.close();
+    } catch (error) {
+      console.error("Mobile read permission boundary DB cleanup failed", error);
+      exitCode = 1;
+    }
+    for (const target of [temp, inferredProjectPath]) {
+      try {
+        fs.rmSync(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+      } catch (error) {
+        console.error(`Mobile read permission boundary temp cleanup failed: ${target}`, error);
+        exitCode = 1;
+      }
+    }
+    app.exit(exitCode);
   });

@@ -18,6 +18,8 @@ if (process.platform !== "win32") fs.symlinkSync(workspace, workspaceLink, "dir"
 process.env.AGENTLAS_STORE_PATH = path.join(temp, "agentlas.sqlite");
 process.env.AGENTLAS_RUNTIME_DETECT_CACHE_MS = "0";
 app.setPath("userData", userData);
+let testDb = null;
+let exitCode = 0;
 
 function deferred() {
   let resolve;
@@ -44,6 +46,7 @@ async function main() {
 
   const store = require("../dist/electron/store/db.js");
   store.initStore();
+  testDb = store.getDb();
   store.getDb().prepare(
     `INSERT INTO installed_agents (
        id, slug, name, name_en, tagline, tagline_en, system_prompt,
@@ -576,9 +579,20 @@ async function main() {
 main()
   .catch((error) => {
     console.error("Mobile execution boundary: FAIL", error);
-    app.exitCode = 1;
+    exitCode = 1;
   })
   .finally(() => {
-    fs.rmSync(temp, { recursive: true, force: true });
-    app.exit(app.exitCode || 0);
+    try {
+      testDb?.close();
+    } catch (error) {
+      console.error("Mobile execution boundary DB cleanup failed", error);
+      exitCode = 1;
+    }
+    try {
+      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+    } catch (error) {
+      console.error("Mobile execution boundary temp cleanup failed", error);
+      exitCode = 1;
+    }
+    app.exit(exitCode);
   });

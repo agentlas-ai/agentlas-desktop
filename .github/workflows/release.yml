@@ -226,6 +226,7 @@ jobs:
 
       - name: Windows runtime and mobile contracts
         if: runner.os == 'Windows'
+        timeout-minutes: 15
         run: |
           npm run test:cli-version-parser
           npm run test:after-pack-runtime-contract

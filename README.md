@@ -69,7 +69,7 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
 
-- **2026-07-14 · v0.8.18 Mobile security and Memory boundary release** — Mobile can
+- **2026-07-14 · v0.8.19 Mobile security and Memory boundary release** — Mobile can
   start and steer read-only chats, while write/full work must start on Desktop.
   Desktop owns an immutable canonical folder binding, revalidates it across
   queued steering, and keeps project env, unrelated secrets, MCPs, memory
@@ -88,14 +88,21 @@ the current channel quickly.
   Interactive Desktop firm chats also keep attributable agent learning in read
   mode without gaining permission to write project-local `.agentlas` files.
 
+- **2026-07-14 · v0.8.18 withdrawn Windows CI candidate** — Linux passed and
+  staged as a prerelease, but a new Electron fixture left its SQLite handle open
+  while deleting the Windows temp directory. The assertions passed but the
+  process could not terminate, so the candidate was never promoted to stable.
+  v0.8.19 closes the DB first and gives the Windows gate its own bounded timeout.
+
 - **2026-07-14 · v0.8.17 failed release candidate** — its Experience Ontology
   gate caught the Desktop firm-read learning regression before certificate
   restore, signing, notarization, packaging, or public publication. No 0.8.17
-  public release was created; v0.8.18 is the immutable replacement tag.
+  public release was created; v0.8.18 is its immutable audit replacement tag,
+  and v0.8.19 carries the Windows cleanup correction.
 
 - **2026-07-13 · v0.8.16 withdrawn security candidate** — never entered the
   stable channel. Its Windows/Linux files remain audit evidence, no signed Mac
-  asset was published, and v0.8.18 replaces its read-to-Automation escalation
+  asset was published, and v0.8.19 replaces its read-to-Automation escalation
   path.
 
 - **2026-07-13 · v0.8.15 runtime recovery and release parity** — the packaged

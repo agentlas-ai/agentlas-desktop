@@ -1,6 +1,27 @@
 # Changelog
 
-## 0.8.18 — 2026-07-14
+## 0.8.19 — 2026-07-14
+
+### Included
+
+- **The complete 0.8.18 Memory-boundary repair ships in this replacement
+  release.** The 0.8.18 Linux candidate passed and staged correctly, but the
+  Windows release runner remained alive after its new Mobile security tests.
+  The prerelease was never promoted to stable/latest.
+
+### Fixed
+
+- **Windows Mobile security gates terminate deterministically.** Both new
+  Electron fixtures close their native SQLite handle before deleting the temp
+  store, retry Windows filesystem cleanup, and always call `app.exit` even when
+  cleanup reports an error. This prevents a passing test from waiting until the
+  release job timeout because Windows still owns `agentlas.sqlite`.
+- **A future Windows gate hang now fails fast.** The runtime/Mobile contract
+  step has a 15-minute ceiling inside the existing 45-minute package job, so a
+  single leaked fixture cannot consume the entire release window or leave the
+  signed macOS publisher waiting indefinitely for a missing Windows asset.
+
+## 0.8.18 — 2026-07-14 (withdrawn Windows CI candidate; never stable)
 
 ### Included
 
