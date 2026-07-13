@@ -119,6 +119,8 @@
     "test:stormbreaker-core": "npm run build:electron && electron scripts/test-stormbreaker-core-harness.cjs",
     "test:build-workload-routing": "npm run build:electron && electron scripts/test-build-workload-routing.cjs",
     "test:grok-runtime-contract": "npm run build:electron && electron scripts/test-grok-runtime-contract.cjs",
+    "test:provider-health": "npm run build:electron && node scripts/test-provider-health.cjs",
+    "test:provider-health-ui": "npm run build:renderer && node scripts/qa-provider-health-dashboard.cjs",
     "test:grok-auth-source": "npm run build:electron && electron scripts/test-grok-auth-source.cjs",
     "test:oberon-provider-routing": "npm run build:electron && node scripts/test-oberon-provider-routing.cjs",
     "test:multimodal-status": "npm run build:electron && electron scripts/test-multimodal-status-catalog.cjs",

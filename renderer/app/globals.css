@@ -1766,6 +1766,14 @@ button[data-dashboard-chevron="open"] {
   text-overflow: ellipsis;
 }
 
+.dashboard-engine-copy div:last-child[data-terminal-state="true"] {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
+}
+
 .dashboard-engine-connected,
 .dashboard-engine-default {
   flex-shrink: 0;

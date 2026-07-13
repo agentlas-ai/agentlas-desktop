@@ -10,6 +10,8 @@ import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { readEnvVar } from "../secrets/vault";
+import { clearProviderHealth, recordProviderHealth } from "../usage/provider-health";
+import { invalidateUsage } from "../usage";
 
 const CANDIDATES = [
   // Windows: `.cmd`/`.exe`를 bare `grok`보다 먼저(bare는 PATHEXT 해석 시 `.ps1`을 잡아 막힐 수 있음).
@@ -179,6 +181,14 @@ type GrokEvent = {
   tokens?: number;
 };
 
+export function isGrokQuotaExhausted(value: string): boolean {
+  const text = String(value ?? "");
+  return (
+    /usage balance exhausted|grok build[^\n]{0,120}balance exhausted/i.test(text) ||
+    (/\b402\b/.test(text) && /payment required|usage balance|balance exhausted/i.test(text))
+  );
+}
+
 export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
   const bin = await getBin();
   if (!bin) throw new Error(tStatus(req.locale, "errCliMissingGrok"));
@@ -318,8 +328,32 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
         reject(new Error(tStatus(req.locale, "aborted")));
         return;
       }
+      if (buffer.trim()) {
+        const line = buffer.trim();
+        try {
+          handle(JSON.parse(line) as GrokEvent);
+        } catch {
+          text += (text ? "\n" : "") + line;
+        }
+      }
+      // assistant text는 오류 증거가 아니다. streaming-json `type:error`와 실제 stderr만
+      // handle()이 stderr에 모으므로, 답변이 같은 문구를 인용해도 상태를 오염시키지 않는다.
+      if (code !== 0 && isGrokQuotaExhausted(stderr)) {
+        recordProviderHealth("grok", "grok_quota_exhausted");
+        invalidateUsage("grok");
+        reject(
+          new Error(
+            req.locale === "ko"
+              ? "Grok Build 사용량 잔액이 소진되었습니다(HTTP 402). Grok Settings > Usage에서 리셋 또는 추가 크레딧을 확인해 주세요."
+              : "Grok Build usage balance is exhausted (HTTP 402). Check reset or extra credits in Grok Settings > Usage.",
+          ),
+        );
+        return;
+      }
       // 텍스트를 받았으면 비정상 종료여도 부분 성공으로 처리.
       if (code === 0 || text.trim()) {
+        clearProviderHealth("grok");
+        invalidateUsage("grok");
         resolve({ text: text.trim(), tokens });
         return;
       }
