@@ -14,6 +14,26 @@
   Dashboard window with a link to Grok Settings. Agentlas does not invent a reset time
   or scrape private account pages when the CLI provides neither.
 
+## 0.8.14 — 2026-07-13
+
+### Added
+
+- **Agentlas Mobile can remotely use the complete Desktop chat composer.**
+  Authenticated phones can select runtimes, models and effort, set run
+  permissions, use Plan, Goal and Apps, attach images, switch agents, bind Hub
+  agents, enable continuous or Swarm execution, preview automatic routing, and
+  manage conversation context through the same main-process authority as the
+  Desktop UI.
+- **Existing chats can switch working location from Mobile.** A phone may bind
+  a chat to an existing Desktop project folder or return it to global chat;
+  only the folder basename crosses the bridge and absolute paths remain local.
+
+### Security
+
+- Mobile composer actions remain on the strict RPC allowlist with replay
+  protection, bounded images, callable-Hub validation, active-run guards, and
+  secret-free projections.
+
 ## 0.8.5 — 2026-07-12
 
 ### Fixed

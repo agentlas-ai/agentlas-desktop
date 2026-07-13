@@ -338,11 +338,33 @@ async function testWireParsers() {
   assert.equal(valid.ok, true);
   assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("automations.runNow"), true);
   assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("device.revokeSelf"), true);
+  assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("chats.setSwarmMode"), true);
+  assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("chats.setBorrowedAgents"), true);
+  assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("chats.switchAgent"), true);
+  assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("chats.clearContext"), true);
+  assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("workspace.setProject"), true);
+  assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("workspace.clear"), true);
+  assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("runtime.setActive"), true);
   assert.equal(parseMobileBridgeRequest({
     v: 1,
     type: "request",
     id: "snapshot_read",
     method: "snapshot.get",
+    params: {},
+  }).ok, true);
+  assert.equal(parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "workspace_set",
+    idempotencyKey: "workspace-set-stable",
+    method: "workspace.setProject",
+    params: { chatId: "chat_1", projectId: "project_1" },
+  }).ok, true);
+  assert.equal(parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "engine_toggles",
+    method: "hephaestus.engineToggles",
     params: {},
   }).ok, true);
   assert.equal(parseMobileBridgeRequest({
@@ -428,6 +450,40 @@ async function testWireParsers() {
     },
   });
   assert.equal(steerWithObservedRun.ok, true);
+
+  const invocationWithComposerParity = parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "composer_parity",
+    method: "invoke.start",
+    params: {
+      chatId: "chat_1",
+      userPrompt: "Inspect this image",
+      permissions: "full",
+      planMode: true,
+      goalMode: true,
+      appsGenerateMode: true,
+      borrowAgents: ["verified-hub-agent"],
+      images: [{
+        mediaType: "image/png",
+        name: "proof.png",
+        data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64"),
+      }],
+    },
+  });
+  assert.equal(invocationWithComposerParity.ok, true);
+  const oversizedImage = parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "composer_bad_image",
+    method: "invoke.start",
+    params: {
+      chatId: "chat_1",
+      userPrompt: "Inspect this image",
+      images: [{ mediaType: "image/png", data: "A".repeat(7_000_004) }],
+    },
+  });
+  assert.equal(oversizedImage.ok, false);
 
   const validPair = parseMobileBridgePairExchangeRequest(pairRequest("pair_1", "A".repeat(22)));
   assert.equal(validPair.ok, true);
@@ -945,7 +1001,11 @@ async function testReconnectSnapshotAndDesktopMutationInvalidation() {
         },
       }],
     });
-    const project = createProject({ name: "Mobile Sync Project", defaultAgentId: agentId });
+    const project = createProject({
+      name: "Mobile Sync Project",
+      defaultAgentId: agentId,
+      folderPath: "/tmp/mobile-sync-project",
+    });
     const chat = createChat({ agentId, projectId: project.id, title: "Mobile Sync Chat" });
     appendChatMessage(chat.id, "user", "Make this chat visible to the recent-chat projection.");
     const automation = createAutomation({
@@ -965,6 +1025,7 @@ async function testReconnectSnapshotAndDesktopMutationInvalidation() {
     assert.equal(snapshot.firms.some((item) => item.id === firm.id), true);
     assert.equal(snapshot.groups.some((item) => item.id === group.id), true);
     assert.equal(snapshot.projects.some((item) => item.id === project.id), true);
+    assert.equal(snapshot.projects.find((item) => item.id === project.id).hasWorkingFolder, true);
     assert.equal(snapshot.chats.some((item) => item.id === chat.id), true);
     const projectedAutomation = snapshot.automations.find((item) => item.id === automation.id);
     assert.ok(projectedAutomation);
@@ -973,6 +1034,31 @@ async function testReconnectSnapshotAndDesktopMutationInvalidation() {
     assert.deepEqual(
       new Set(changes.map((change) => change.entity)),
       new Set(["agent", "firm", "agent-group", "project", "chat", "automation"]),
+    );
+
+    const workspaceSet = await authority.request({
+      v: 1,
+      type: "request",
+      id: "workspace_set_live",
+      method: "workspace.setProject",
+      params: { chatId: chat.id, projectId: project.id },
+    }, context);
+    assert.equal(workspaceSet.projectId, project.id);
+    const workspaceSnapshot = await authority.snapshot(context);
+    const workspaceChat = workspaceSnapshot.chats.find((item) => item.id === chat.id);
+    assert.equal(workspaceChat.workingFolderName, "mobile-sync-project");
+    assert.equal(JSON.stringify(workspaceChat).includes("/tmp/"), false);
+    await authority.request({
+      v: 1,
+      type: "request",
+      id: "workspace_clear_live",
+      method: "workspace.clear",
+      params: { chatId: chat.id },
+    }, context);
+    const clearedSnapshot = await authority.snapshot(context);
+    assert.equal(
+      clearedSnapshot.chats.find((item) => item.id === chat.id).workingFolderName,
+      null,
     );
   } finally {
     offAuthority?.();

@@ -8,7 +8,13 @@ import {
 import { onDesktopStoreChange } from "../store/change-bus";
 import { invocationService } from "../invocation/service";
 import { claimPendingConfirmationAnswer } from "../confirm";
-import { detectRuntimes } from "../runtime/detect";
+import { detectRuntimes, setActiveRuntime } from "../runtime/detect";
+import { listRuntimeCommands } from "../runtime/commands";
+import { listInstalledAgents } from "../mcp/registry";
+import { routeOnly } from "../hephaestus/commands";
+import { normalizeRecommendation } from "../hephaestus/recommendation";
+import { getEngineToggles } from "../hephaestus/supervisor";
+import { listHubAgentBookmarks } from "../store/hub-bookmarks";
 import {
   getAutomation,
   listAutomations,
@@ -17,20 +23,31 @@ import {
 } from "../store/automations";
 import {
   archiveChat,
+  clearChatContext,
   createChat,
   getChat,
   listRecentChats,
   renameChat,
+  setChatContinuousMode,
+  setChatHiredAgents,
+  setChatSwarmMode,
+  setChatWorkingFolder,
+  switchChatAgent,
   unarchiveChat,
 } from "../store/chats";
+import { getProject } from "../store/projects";
 import { getUsageSnapshot } from "../usage";
 import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
 import type { TerminalOntologyLoadoutFeedWriter } from "../ontology/terminal-loadout-feed";
 import type {
   Chat,
+  ImageAttachment,
   InvocationRunReceipt,
   McpInvocationEvent,
   McpInvocationRequest,
+  Recommendation,
+  RuntimeBackend,
+  RuntimeKind,
 } from "../../shared/types";
 import {
   MOBILE_BRIDGE_PROTOCOL_VERSION,
@@ -248,6 +265,124 @@ function optionalBorrowAgents(params: Record<string, unknown>): string[] | undef
   return [...value] as string[];
 }
 
+function optionalImages(params: Record<string, unknown>): ImageAttachment[] | undefined {
+  const value = params.images;
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 4) {
+    throw new TypeError("images must contain at most 4 attachments");
+  }
+  return value.map((item, index) => {
+    if (!isRecord(item)) throw new TypeError(`images[${index}] must be an object`);
+    assertOnlyKeys(item, ["mediaType", "name", "data"], `images[${index}]`);
+    const mediaType = requiredEnum(item, "mediaType", [
+      "image/png",
+      "image/jpeg",
+      "image/gif",
+      "image/webp",
+    ] as const);
+    const name = optionalIdentifier(item, "name", 200);
+    const data = requiredBoundedString(item, "data", 7_000_000);
+    if (data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) {
+      throw new TypeError(`images[${index}].data must be canonical base64`);
+    }
+    const bytes = Buffer.from(data, "base64");
+    if (bytes.length < 1 || bytes.length > 5 * 1024 * 1024 || bytes.toString("base64") !== data) {
+      throw new TypeError(`images[${index}] exceeds the 5 MiB Desktop image limit`);
+    }
+    const hasExpectedSignature =
+      (mediaType === "image/png" && bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) ||
+      (mediaType === "image/jpeg" && bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) ||
+      (mediaType === "image/gif" && bytes.length >= 6 && ["GIF87a", "GIF89a"].includes(bytes.subarray(0, 6).toString("ascii"))) ||
+      (mediaType === "image/webp" && bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP");
+    if (!hasExpectedSignature) {
+      throw new TypeError(`images[${index}] content does not match its mediaType`);
+    }
+    return { mediaType, ...(name ? { name } : {}), data };
+  });
+}
+
+function normalizedSlug(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function callableHubBookmarksForMobile() {
+  const bookmarks = listHubAgentBookmarks();
+  const localSlugs = new Set(listInstalledAgents().map((agent) => normalizedSlug(agent.slug)).filter(Boolean));
+  const entityKindsBySlug = new Map<string, Set<string>>();
+  for (const bookmark of bookmarks) {
+    const slug = normalizedSlug(bookmark.slug || bookmark.listing.slug);
+    if (!slug) continue;
+    const kinds = entityKindsBySlug.get(slug) ?? new Set<string>();
+    kinds.add(String(bookmark.listing.entityKind || "agent").toLowerCase());
+    entityKindsBySlug.set(slug, kinds);
+  }
+  const seen = new Set<string>();
+  return bookmarks.filter((bookmark) => {
+    const listing = bookmark.listing;
+    const slug = normalizedSlug(bookmark.slug || listing.slug);
+    if (
+      !slug ||
+      seen.has(slug) ||
+      localSlugs.has(slug) ||
+      (entityKindsBySlug.get(slug)?.size ?? 0) > 1 ||
+      listing.callable !== true ||
+      listing.kind === "install-only" ||
+      listing.entityKind === "plugin" ||
+      listing.source === "hub-plugin" ||
+      listing.routingReady === false
+    ) {
+      return false;
+    }
+    seen.add(slug);
+    return true;
+  });
+}
+
+function projectBorrowableHubAgents() {
+  return callableHubBookmarksForMobile().map((bookmark) => ({
+    slug: normalizedSlug(bookmark.slug || bookmark.listing.slug),
+    name: boundedRedactedText(bookmark.listing.name, 512),
+    nameEn: boundedRedactedText(bookmark.listing.nameEn, 512),
+    entityKind: bookmark.listing.entityKind === "team" ? "team" : "agent",
+    perCallCredits:
+      typeof bookmark.listing.perCallCredits === "number" && Number.isFinite(bookmark.listing.perCallCredits)
+        ? Math.max(0, bookmark.listing.perCallCredits)
+        : null,
+  }));
+}
+
+function projectRouteRecommendation(recommendation: Recommendation) {
+  return {
+    mode: recommendation.mode,
+    agents: recommendation.agents.slice(0, 8).map((agent) => ({
+      id: boundedRedactedText(agent.id, 512),
+      name: boundedRedactedText(agent.name, 512),
+      source: agent.source,
+      estCredits: agent.estCredits,
+      isFirm: agent.isFirm === true,
+    })),
+    stages: (recommendation.stages ?? []).slice(0, 12).map((stage) => ({
+      order: stage.order,
+      kind: boundedRedactedText(stage.kind, 256),
+      agentId: typeof stage.agentId === "string" ? boundedRedactedText(stage.agentId, 512) : null,
+      agentName: typeof stage.agentName === "string" ? boundedRedactedText(stage.agentName, 512) : null,
+      produces: (stage.produces ?? []).slice(0, 20).map((value) => boundedRedactedText(value, 256)),
+      consumes: (stage.consumes ?? []).slice(0, 20).map((value) => boundedRedactedText(value, 256)),
+      estCredits: stage.estCredits ?? null,
+    })),
+    totalEstCredits: recommendation.totalEstCredits,
+    rawAction: boundedRedactedText(recommendation.rawAction, 160),
+    clarifyQuestion:
+      typeof recommendation.clarifyQuestion === "string"
+        ? boundedRedactedText(recommendation.clarifyQuestion, 2_000)
+        : null,
+    buildReason:
+      typeof recommendation.buildReason === "string"
+        ? boundedRedactedText(recommendation.buildReason, 2_000)
+        : null,
+  };
+}
+
 function asJsonValue(value: unknown, label: string): MobileBridgeJsonValue {
   let encoded: string | undefined;
   try {
@@ -296,6 +431,7 @@ function invocationParams(
           "goalMode",
           "appsGenerateMode",
           "borrowAgents",
+          "images",
           "expectedQuestionMessageId",
           "expectedRunId",
         ]
@@ -309,6 +445,7 @@ function invocationParams(
           "goalMode",
           "appsGenerateMode",
           "borrowAgents",
+          "images",
           "expectedQuestionMessageId",
         ],
   );
@@ -318,11 +455,12 @@ function invocationParams(
   };
   const runId = optionalIdentifier(params, "runId", 160);
   const locale = optionalEnum(params, "locale", ["ko", "en"] as const);
-  const permissions = optionalEnum(params, "permissions", ["read", "write"] as const);
+  const permissions = optionalEnum(params, "permissions", ["read", "write", "full"] as const);
   const planMode = optionalBoolean(params, "planMode");
   const goalMode = optionalBoolean(params, "goalMode");
   const appsGenerateMode = optionalBoolean(params, "appsGenerateMode");
   const borrowAgents = optionalBorrowAgents(params);
+  const images = optionalImages(params);
   const expectedQuestionMessageId = optionalIdentifier(params, "expectedQuestionMessageId");
   if (runId !== undefined) invocation.runId = runId;
   if (locale !== undefined) invocation.locale = locale;
@@ -331,6 +469,7 @@ function invocationParams(
   if (goalMode !== undefined) invocation.goalMode = goalMode;
   if (appsGenerateMode !== undefined) invocation.appsGenerateMode = appsGenerateMode;
   if (borrowAgents !== undefined) invocation.borrowAgents = borrowAgents;
+  if (images !== undefined) invocation.images = images;
   const expectedRunId: MobileBridgeInvokeSteerParams["expectedRunId"] | undefined = steering
     ? requiredIdentifier(params, "expectedRunId", RUN_ID_RE)
     : undefined;
@@ -653,6 +792,133 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           request.method,
         );
       }
+      case "chats.setContinuousMode": {
+        const params = guardedParams(request, ["id", "enabled"]);
+        const id = requiredIdentifier(params, "id");
+        requireChat(id);
+        const enabled = requiredBoolean(params, "enabled");
+        setChatContinuousMode(id, enabled);
+        if (enabled) setChatSwarmMode(id, false);
+        const chat = requireChat(id);
+        this.scheduleSnapshotUpdated(id);
+        return asJsonValue(
+          projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
+          request.method,
+        );
+      }
+      case "chats.setSwarmMode": {
+        const params = guardedParams(request, ["id", "enabled"]);
+        const id = requiredIdentifier(params, "id");
+        requireChat(id);
+        const enabled = requiredBoolean(params, "enabled");
+        setChatSwarmMode(id, enabled);
+        if (enabled) setChatContinuousMode(id, false);
+        const chat = requireChat(id);
+        this.scheduleSnapshotUpdated(id);
+        return asJsonValue(
+          projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
+          request.method,
+        );
+      }
+      case "chats.setBorrowedAgents": {
+        const params = guardedParams(request, ["id", "slugs"]);
+        const id = requiredIdentifier(params, "id");
+        requireChat(id);
+        if (!Array.isArray(params.slugs) || params.slugs.length > 8) {
+          throw new TypeError("slugs must contain at most 8 identifiers");
+        }
+        const requestedSlugs = [...new Set(params.slugs.map((slug) => normalizedSlug(slug)).filter(Boolean))];
+        const allowedBySlug = new Map(
+          callableHubBookmarksForMobile().map((bookmark) => [
+            normalizedSlug(bookmark.slug || bookmark.listing.slug),
+            bookmark,
+          ] as const),
+        );
+        const unknown = requestedSlugs.find((slug) => !allowedBySlug.has(slug));
+        if (unknown) throw new Error(`Hub agent is not currently callable: ${unknown}`);
+        const now = new Date().toISOString();
+        const chat = setChatHiredAgents(id, requestedSlugs.map((slug) => {
+          const bookmark = allowedBySlug.get(slug)!;
+          return {
+            slug,
+            name: boundedRedactedText(bookmark.listing.name, 512),
+            source: "hub" as const,
+            hiredAt: now,
+          };
+        }));
+        this.scheduleSnapshotUpdated(id);
+        return asJsonValue(
+          projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
+          request.method,
+        );
+      }
+      case "chats.switchAgent": {
+        const params = guardedParams(request, ["id", "agentId"]);
+        const id = requiredIdentifier(params, "id");
+        const agentId = requiredIdentifier(params, "agentId");
+        requireChat(id);
+        const agent = listInstalledAgents().find((item) => item.id === agentId);
+        if (!agent || (agent.visibility ?? "visible") !== "visible") {
+          throw new Error("The selected agent is unavailable for direct chat");
+        }
+        const chat = switchChatAgent(id, agentId);
+        this.scheduleSnapshotUpdated(id);
+        return asJsonValue(
+          projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
+          request.method,
+        );
+      }
+      case "chats.clearContext": {
+        const params = guardedParams(request, ["id"]);
+        const id = requiredIdentifier(params, "id");
+        requireChat(id);
+        if (invocationService.activeChatIds().includes(id)) {
+          throw new Error("This conversation is still running. Stop it before clearing it.");
+        }
+        clearChatContext(id);
+        const chat = requireChat(id);
+        this.scheduleSnapshotUpdated(id);
+        return asJsonValue(
+          projectMobileBridgeChat(chat, false),
+          request.method,
+        );
+      }
+      case "workspace.setProject": {
+        const params = guardedParams(request, ["chatId", "projectId"]);
+        const chatId = requiredIdentifier(params, "chatId");
+        const projectId = requiredIdentifier(params, "projectId");
+        requireChat(chatId);
+        const project = getProject(projectId);
+        if (!project) throw new Error("The selected Desktop project is unavailable");
+        if (!project.folderPath) throw new Error("The selected project has no working folder");
+        setChatWorkingFolder(chatId, project.folderPath);
+        this.scheduleSnapshotUpdated(chatId);
+        return asJsonValue({
+          projectId: project.id,
+          workingFolderName: boundedRedactedText(project.name, 512),
+        }, request.method);
+      }
+      case "workspace.clear": {
+        const params = guardedParams(request, ["chatId"]);
+        const chatId = requiredIdentifier(params, "chatId");
+        requireChat(chatId);
+        setChatWorkingFolder(chatId, null);
+        this.scheduleSnapshotUpdated(chatId);
+        return asJsonValue({ projectId: null, workingFolderName: null }, request.method);
+      }
+      case "composer.context": {
+        const params = guardedParams(request, ["chatId"]);
+        const chat = requireChat(requiredIdentifier(params, "chatId"));
+        const agent = listInstalledAgents().find((item) => item.id === chat.agentId);
+        return asJsonValue({
+          commands: listRuntimeCommands().slice(0, 200).map((command) => ({
+            name: boundedRedactedText(command.name, 256),
+            description: boundedRedactedText(command.description, 1_000),
+            source: command.source,
+          })),
+          plugins: (agent?.mcpServers ?? []).slice(0, 100).map((plugin) => boundedRedactedText(plugin, 256)),
+        }, request.method);
+      }
 
       // DESKTOP_MOBILE_BRIDGE: Invocation requests call only the shared
       // main-process InvocationService. Mobile never starts a parallel runtime.
@@ -814,6 +1080,70 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "runtime.detect": {
         noParams(request);
         return asJsonValue(projectMobileBridgeRuntimes(await detectRuntimes()), request.method);
+      }
+      case "runtime.setActive": {
+        const params = guardedParams(request, ["kind", "backend", "model", "effort", "longContext"]);
+        const kind = requiredEnum(params, "kind", [
+          "claude-code",
+          "codex",
+          "gemini",
+          "grok",
+          "cursor",
+          "byok",
+          "ollama",
+        ] as const) as RuntimeKind;
+        const backend = optionalIdentifier(params, "backend", 80) as RuntimeBackend | undefined;
+        const candidates = await detectRuntimes();
+        const runtime = candidates.find((candidate) =>
+          candidate.kind === kind && (backend === undefined || candidate.backend === backend));
+        if (!runtime) throw new Error("The selected Desktop runtime is unavailable");
+        const model = optionalIdentifier(params, "model", 200);
+        if (
+          model &&
+          (runtime.availableModels?.length ?? 0) > 0 &&
+          !runtime.availableModels!.includes(model)
+        ) {
+          throw new Error("The selected model is unavailable on this Desktop runtime");
+        }
+        const effort = optionalIdentifier(params, "effort", 80);
+        if (effort && (runtime.efforts?.length ?? 0) > 0 && !runtime.efforts!.some((item) => item.id === effort)) {
+          throw new Error("The selected effort is unavailable on this Desktop runtime");
+        }
+        const longContext = optionalBoolean(params, "longContext");
+        const list = await setActiveRuntime({
+          kind: runtime.kind,
+          backend: runtime.backend,
+          source: runtime.source,
+          ...(model !== undefined ? { model } : runtime.model ? { model: runtime.model } : {}),
+          ...(effort !== undefined ? { effort } : runtime.effort ? { effort: runtime.effort } : {}),
+          ...(longContext !== undefined ? { longContext } : { longContext: runtime.longContextEnabled === true }),
+        });
+        this.scheduleSnapshotUpdated();
+        return asJsonValue(projectMobileBridgeRuntimes(list), request.method);
+      }
+      case "hub.borrowable.list": {
+        noParams(request);
+        return asJsonValue(projectBorrowableHubAgents(), request.method);
+      }
+      case "hephaestus.engineToggles": {
+        noParams(request);
+        return asJsonValue(getEngineToggles(), request.method);
+      }
+      case "hephaestus.routePreview": {
+        const params = guardedParams(request, ["query", "scope", "allowLocal", "offline"]);
+        const query = requiredText(params, "query", 20_000);
+        const scope = optionalEnum(params, "scope", ["network", "cloud"] as const);
+        try {
+          const result = await routeOnly(query, {
+            scope,
+            allowLocal: optionalBoolean(params, "allowLocal") ?? true,
+            noHub: optionalBoolean(params, "offline") ?? false,
+            timeoutMs: 30_000,
+          });
+          return asJsonValue(projectRouteRecommendation(normalizeRecommendation(result.json, query)), request.method);
+        } catch {
+          return asJsonValue(projectRouteRecommendation(normalizeRecommendation(null, query)), request.method);
+        }
       }
       case "ontology.projections.list": {
         noParams(request);
