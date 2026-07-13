@@ -40,7 +40,8 @@ permissions:
 jobs:
   build-notarize-publish:
     runs-on: macos-15
-    timeout-minutes: 60
+    # Includes a bounded wait for the parallel Windows/Linux staging workflow.
+    timeout-minutes: 75
     env:
       # Publish to the SEPARATE public releases repo (source repo is private).
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
@@ -279,12 +280,15 @@ jobs:
           CSC_KEY_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
         run: npm run package:mac
 
-      # Publish notarized .dmg/.zip + latest-mac.yml to the public releases repo
-      # (AGENTLAS_DESKTOP_GITHUB_REPO) — this is the public download + update feed.
-      - name: Publish verified release (public releases repo)
+      # Upload notarized Mac assets into the prerelease staging record. The
+      # publisher then waits for every required Windows/Linux/Mac artifact and
+      # alone promotes stable/latest. Missing assets always fail closed.
+      - name: Complete staged release and promote verified stable
         env:
           GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+          AGENTLAS_RELEASE_ASSET_WAIT_MS: "900000"
+          AGENTLAS_RELEASE_ASSET_POLL_MS: "10000"
         run: |
           args=(--tag="$RESOLVED_TAG" --version="$RESOLVED_VERSION")
           if [ "$RESOLVED_DRAFT" = "true" ]; then args+=(--draft); fi

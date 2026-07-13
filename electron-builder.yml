@@ -160,4 +160,6 @@ publish:
     owner: agentlas-ai
     repo: agentlas-desktop-releases
     private: false
-    releaseType: release
+    # Windows/Linux are staging artifacts. The signed macOS publisher verifies
+    # every required platform asset before it alone promotes stable/latest.
+    releaseType: prerelease

@@ -49,7 +49,7 @@
 
 <p align="center">
   <a href="https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest">
-    <img alt="Latest release" src="https://img.shields.io/github/v/release/agentlas-ai/agentlas-desktop-releases?include_prereleases&label=download&color=blue">
+    <img alt="Latest stable release" src="https://img.shields.io/github/v/release/agentlas-ai/agentlas-desktop-releases?label=download&color=blue">
   </a>
   <a href="LICENSE">
     <img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-green">

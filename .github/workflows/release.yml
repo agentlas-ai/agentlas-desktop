@@ -126,6 +126,8 @@ jobs:
           xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
             npm run test:stormbreaker-core:embedded
             npm run test:v64-automation-permission-migration
+            npm run test:automations-store
+            npm run test:automation-scheduler-guards
             npm run test:mobile-read-boundary
             npm run test:mobile-execution-boundary
             npm run test:opencrab-core
@@ -303,10 +305,10 @@ jobs:
       - name: Build renderer + electron
         run: npm run build
 
-      # --publish always uploads installers + the update feed (latest*.yml) to the
-      # public releases repo (per electron-builder.yml publish config). Retried
-      # because installer creation flakes intermittently on hosted runners.
-      - name: Package and publish
+      # --publish always uploads installers + the update feed (latest*.yml) to a
+      # prerelease staging record. Only the signed macOS workflow may promote it
+      # to stable/latest after every required platform artifact exists.
+      - name: Package and stage prerelease assets
         shell: bash
         env:
           # Publishing to the separate public releases repo requires a cross-repo
