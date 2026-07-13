@@ -21,7 +21,7 @@ async function main() {
   const db = dbModule.getDb();
 
   try {
-    assert.equal(db.pragma("user_version", { simple: true }), 63);
+    assert.equal(db.pragma("user_version", { simple: true }), 64);
     const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
     for (const table of [
       "experience_lineage_events",

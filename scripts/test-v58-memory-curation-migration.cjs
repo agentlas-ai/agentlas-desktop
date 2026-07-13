@@ -56,7 +56,7 @@ seed.close();
     const store = require("../dist/electron/store/db.js");
     store.initStore();
     const db = store.getDb();
-    assert.equal(db.pragma("user_version", { simple: true }), 63);
+    assert.equal(db.pragma("user_version", { simple: true }), 64);
     const index = db.prepare(
       "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_run_events_agent_kind_ts'",
     ).get();

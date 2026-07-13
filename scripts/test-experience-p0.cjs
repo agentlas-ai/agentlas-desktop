@@ -22,7 +22,7 @@ async function main() {
   const db = dbModule.getDb();
 
   try {
-    assert.equal(db.pragma("user_version", { simple: true }), 63);
+    assert.equal(db.pragma("user_version", { simple: true }), 64);
     for (const table of [
       "experience_packs",
       "experience_candidates",

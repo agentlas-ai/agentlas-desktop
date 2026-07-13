@@ -75,6 +75,8 @@ export type {
   AppFactorySmokeResult,
   AuthSession,
   Automation,
+  AutomationCreateInput,
+  AutomationExecutionPermission,
   AutomationHubMode,
   AutomationRunRecord,
   AutomationToolMode,

@@ -65,7 +65,7 @@ const { app } = require("electron");
     const store = require("../dist/electron/store/db.js");
     store.initStore();
     const db = store.getDb();
-    assert.equal(db.pragma("user_version", { simple: true }), 63);
+    assert.equal(db.pragma("user_version", { simple: true }), 64);
     const pack = db.prepare(
       `SELECT id, name, description, mcp_requirements_json,
               environment_profile_json, auto_managed
