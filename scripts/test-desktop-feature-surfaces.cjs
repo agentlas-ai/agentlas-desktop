@@ -819,8 +819,9 @@ async function runExperienceSurface(browser, baseUrl, evidence) {
   await page.getByRole("button", { name: /공개 사본 저장|Save public copy/ }).click();
   await page.getByRole("button", { name: /명시적 확인|Explicit confirm/ }).click();
   await page.getByRole("button", { name: /공개 검증 요청|Request public verification/ }).click();
-  await page.locator('[data-testid="experience-cloud-status"][data-cloud-state="verification-requested"]').waitFor();
-  await page.getByText(/아직 공개 활성 상태는 아닙니다|not public-active yet/).waitFor();
+  const verificationRequestedStatus = page.locator('[data-testid="experience-cloud-status"][data-cloud-state="verification-requested"]');
+  await verificationRequestedStatus.waitFor();
+  await verificationRequestedStatus.getByText(/아직 공개 활성 상태는 아닙니다|not public-active yet/).waitFor();
   await page.getByRole("button", { name: /상태 다시 맞추기|Reconcile status/ }).click();
   await page.locator('[data-testid="experience-cloud-status"][data-cloud-state="verification-pending"]').waitFor();
 
