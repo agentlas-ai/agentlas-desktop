@@ -95,7 +95,7 @@ async function main() {
       "카페 게시물을 작성한 뒤 사용자가 승인한 제목과 본문만 발행하고 화면에서 결과를 다시 확인합니다. 🧭",
     );
     const privacyFixture = JSON.parse(fs.readFileSync(
-      path.resolve(__dirname, "../../Agentlas-OS/tests/fixtures/experience-privacy-v1-cross-surface.json"),
+      path.resolve(__dirname, "fixtures/experience-privacy-v1-cross-surface.json"),
       "utf8",
     ));
     for (const privacyCase of privacyFixture.freeTextCases.filter((entry) => entry.expected.length > 0)) {
