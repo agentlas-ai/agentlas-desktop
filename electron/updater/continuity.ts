@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   CONTINUITY_CORE_TABLES,
+  CONTINUITY_V1_TABLES,
+  isValidContinuitySnapshot,
   type ContinuitySnapshot,
   type ContinuityVerification,
 } from "./controller";
@@ -20,6 +22,10 @@ const CONTINUITY_TABLES = CONTINUITY_CORE_TABLES;
 const V52_AUTOMATION_RECOVERY_STALE_MS = MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS + 2 * 60 * 1000;
 
 type TableColumn = { name: string; pk: number };
+
+function protectedTablesForSnapshot(snapshot: ContinuitySnapshot): readonly string[] {
+  return snapshot.schemaVersion === 1 ? CONTINUITY_V1_TABLES : CONTINUITY_CORE_TABLES;
+}
 
 function quoteIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
@@ -39,7 +45,7 @@ function tableExists(db: Database.Database, table: string): boolean {
   );
 }
 
-function databaseFacts(db: Database.Database): {
+function databaseFacts(db: Database.Database, protectedTables: readonly string[] = CONTINUITY_TABLES): {
   databaseSchemaVersion: number;
   rowCounts: Record<string, number>;
   tableIdentityHashes: Record<string, string>;
@@ -47,7 +53,7 @@ function databaseFacts(db: Database.Database): {
   const databaseSchemaVersion = Number(db.pragma("user_version", { simple: true }) ?? 0);
   const rowCounts: Record<string, number> = {};
   const tableIdentityHashes: Record<string, string> = {};
-  for (const table of CONTINUITY_TABLES) {
+  for (const table of protectedTables) {
     if (!tableExists(db, table)) {
       rowCounts[table] = 0;
       tableIdentityHashes[table] = sha256(`missing:${table}`);
@@ -241,11 +247,12 @@ function verifyProtectedDatabaseRows(
   backup: Database.Database,
   current: Database.Database,
   nowMs: number,
+  protectedTables: readonly string[],
 ): string[] {
   const violations: string[] = [];
   const approvedDeletedChats = migrationApprovedDeletedChats(current);
   const currentSchemaVersion = Number(current.pragma("user_version", { simple: true }) ?? 0);
-  for (const table of CONTINUITY_TABLES) {
+  for (const table of protectedTables) {
     if (!tableExists(backup, table)) continue;
     if (!tableExists(current, table)) {
       const count = Number(
@@ -496,14 +503,14 @@ function resealRecoveryContinuityMetadata(databasePath: string): boolean {
   try {
     const stat = fs.lstatSync(continuityPath);
     if (!stat.isFile() || stat.isSymbolicLink()) return false;
-    const parsed = JSON.parse(fs.readFileSync(continuityPath, "utf8")) as Record<string, unknown>;
-    if (!parsed || parsed.schemaVersion !== 1 || typeof parsed.backupPath !== "string") return false;
+    const parsed = JSON.parse(fs.readFileSync(continuityPath, "utf8"));
+    if (!isValidContinuitySnapshot(parsed)) return false;
     if (fs.realpathSync(parsed.backupPath) !== fs.realpathSync(databasePath)) return false;
 
     const db = new Database(databasePath, { readonly: true, fileMustExist: true });
     let facts: ReturnType<typeof databaseFacts>;
     try {
-      facts = databaseFacts(db);
+      facts = databaseFacts(db, protectedTablesForSnapshot(parsed));
     } finally {
       db.close();
     }
@@ -787,7 +794,7 @@ export async function captureUpdaterContinuity(input: {
     const route = copyRouteFile(input.userDataPath, recoveryDir);
 
     const snapshot: ContinuitySnapshot = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       userDataPath: path.resolve(input.userDataPath),
       databasePath: path.resolve(input.databasePath),
       backupPath: path.resolve(backupPath),
@@ -859,11 +866,12 @@ export function verifyUpdaterRecoveryCopies(input: {
     let recoveryDb: Database.Database | null = null;
     try {
       recoveryDb = new Database(input.snapshot.backupPath, { readonly: true, fileMustExist: true });
-      const facts = databaseFacts(recoveryDb);
+      const protectedTables = protectedTablesForSnapshot(input.snapshot);
+      const facts = databaseFacts(recoveryDb, protectedTables);
       if (facts.databaseSchemaVersion !== input.snapshot.databaseSchemaVersion) {
         violations.push("recovery-schema-mismatch");
       }
-      for (const table of CONTINUITY_TABLES) {
+      for (const table of protectedTables) {
         if (
           facts.rowCounts[table] !== input.snapshot.rowCounts[table] ||
           facts.tableIdentityHashes[table] !== input.snapshot.tableIdentityHashes[table]
@@ -922,7 +930,8 @@ export async function verifyUpdaterContinuity(input: {
   try {
     db = new Database(input.currentDatabasePath, { readonly: true, fileMustExist: true });
     backupDb = new Database(input.snapshot.backupPath, { readonly: true, fileMustExist: true });
-    const current = databaseFacts(db);
+    const protectedTables = protectedTablesForSnapshot(input.snapshot);
+    const current = databaseFacts(db, protectedTables);
     if (current.databaseSchemaVersion < input.snapshot.databaseSchemaVersion) {
       violations.push("database-schema-regressed");
     }
@@ -943,7 +952,12 @@ export async function verifyUpdaterContinuity(input: {
         violations.push(`table-identity-changed:${table}`);
       }
     }
-    violations.push(...verifyProtectedDatabaseRows(backupDb, db, (input.now ?? Date.now)()));
+    violations.push(...verifyProtectedDatabaseRows(
+      backupDb,
+      db,
+      (input.now ?? Date.now)(),
+      protectedTables,
+    ));
   } catch {
     violations.push("database-unavailable");
   } finally {

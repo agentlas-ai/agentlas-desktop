@@ -24,6 +24,8 @@ import {
   unarchiveChat,
 } from "../store/chats";
 import { getUsageSnapshot } from "../usage";
+import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
+import type { TerminalOntologyLoadoutFeedWriter } from "../ontology/terminal-loadout-feed";
 import type {
   Chat,
   InvocationRunReceipt,
@@ -53,6 +55,10 @@ import {
   projectMobileBridgeUsage,
 } from "./projector";
 import { sanitizeMobileBridgeText } from "./sanitize";
+import {
+  OntologyHubClient,
+  parseOntologyAttachResolveInput,
+} from "./ontology-hub-client";
 import type {
   MobileBridgeAuthority,
   MobileBridgeAuthorityEvent,
@@ -74,6 +80,10 @@ export interface AgentlasDesktopMobileBridgeAuthorityOptions {
   onError?: (error: Error) => void;
   /** Production injects the pairing authority; tests may omit it unless exercising revocation. */
   revokeDevice?: (deviceId: string) => boolean;
+  /** Authenticated Hub adapter. Omit to keep the extension unavailable. */
+  ontologyHubClient?: OntologyHubClient;
+  /** Content-free, private projection consumed only after an explicit Terminal flag. */
+  terminalOntologyLoadoutFeedWriter?: TerminalOntologyLoadoutFeedWriter;
 }
 
 export type MobileBridgeAuthorityHandle = MobileBridgeAuthority & { dispose(): void };
@@ -516,6 +526,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private refreshRequested = false;
   private readonly pendingAutomationIds = new Set<string>();
   private lastConfirmationFingerprint: string | null = null;
+  private lastOntologyFingerprint: string | null = null;
+  private ontologyRefreshRequested = false;
   private disposed = false;
 
   constructor(private readonly options: AgentlasDesktopMobileBridgeAuthorityOptions) {
@@ -540,6 +552,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.assertAvailable();
     const snapshot = await this.projectSnapshot();
     this.lastConfirmationFingerprint = this.confirmationFingerprint(snapshot);
+    this.lastOntologyFingerprint = this.ontologyFingerprint(snapshot);
     return snapshot;
   }
 
@@ -802,6 +815,39 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         noParams(request);
         return asJsonValue(projectMobileBridgeRuntimes(await detectRuntimes()), request.method);
       }
+      case "ontology.projections.list": {
+        noParams(request);
+        const projected = await this.projectOntology(true);
+        if (!projected.supported) {
+          throw new Error("Ontology projection is unavailable on the connected Hub.");
+        }
+        return asJsonValue(projected.projections, request.method);
+      }
+      case "ontology.attach.resolve": {
+        if (!this.options.ontologyHubClient) {
+          throw new Error("Ontology attachment is unavailable on the connected Hub.");
+        }
+        const input = parseOntologyAttachResolveInput(guardedParams(request, [
+          "schemaVersion",
+          "approvalId",
+          "recommendationId",
+          "agentDefinitionId",
+          "agentReleaseId",
+          "expectedProjectionRevision",
+          "expectedLoadoutRevision",
+          "decision",
+          "selectedChips",
+        ]));
+        const idempotencyKey = request.idempotencyKey;
+        if (!idempotencyKey) throw new TypeError("ontology.attach.resolve requires idempotencyKey");
+        const receipt = await this.options.ontologyHubClient.resolveAttach(input, idempotencyKey);
+        // The receipt is acknowledgement only. Mobile and Desktop do not
+        // mutate a loadout optimistically; a forced authoritative projection
+        // is emitted after this RPC returns.
+        this.ontologyRefreshRequested = true;
+        this.scheduleSnapshotUpdated();
+        return asJsonValue(receipt, request.method);
+      }
       case "device.revokeSelf": {
         noParams(request);
         if (context.devBootstrap || context.devicePlatform === "dev") {
@@ -849,6 +895,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     const activeChatIds = invocationService.activeChatIds();
     const pendingBrowserApprovals = listPendingBrowserApprovals().map((approval) =>
       this.projectBrowserApproval(approval));
+    const ontology = await this.projectOntology(this.ontologyRefreshRequested);
     return projectMobileBridgeSnapshot({
       hostIdentity: this.options.hostIdentity,
       displayName: this.options.displayName,
@@ -856,7 +903,34 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       activeChatIds,
       includeMessagesForChatIds: activeChatIds,
       pendingBrowserApprovals,
+      ontology,
     });
+  }
+
+  private async projectOntology(force = false): Promise<{
+    supported: boolean;
+    projections: import("../../shared/mobile-bridge").MobileBridgeOntologyProjectionDto[];
+  }> {
+    const client = this.options.ontologyHubClient;
+    if (!client) return { supported: false, projections: [] };
+    const exactBindings = listInstalledAgentHubBindings(64);
+    const bindings = exactBindings.map((binding) => ({
+      agentDefinitionId: binding.agentDefinitionId,
+      agentReleaseId: binding.agentReleaseId,
+    }));
+    if (bindings.length === 0) return { supported: false, projections: [] };
+    const result = await client.query(bindings, force);
+    if (this.options.terminalOntologyLoadoutFeedWriter) {
+      try {
+        this.options.terminalOntologyLoadoutFeedWriter.write({
+          bindings: exactBindings,
+          result,
+        });
+      } catch (error) {
+        this.onError(errorOf(error));
+      }
+    }
+    return { supported: result.supported, projections: result.projections };
   }
 
   private attachDesktopSubscriptions(): void {
@@ -955,14 +1029,28 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const automationIds = [...this.pendingAutomationIds];
         this.pendingAutomationIds.clear();
         const snapshot = await this.projectSnapshot();
+        const ontologyRefreshRequested = this.ontologyRefreshRequested;
+        this.ontologyRefreshRequested = false;
         const previousConfirmations = this.lastConfirmationFingerprint;
         const nextConfirmations = this.confirmationFingerprint(snapshot);
         this.lastConfirmationFingerprint = nextConfirmations;
+        const previousOntology = this.lastOntologyFingerprint;
+        const nextOntology = this.ontologyFingerprint(snapshot);
+        this.lastOntologyFingerprint = nextOntology;
 
         this.emit({
           event: "snapshot.updated",
           payload: asJsonValue(snapshot, "snapshot.updated"),
         });
+        if (ontologyRefreshRequested || previousOntology !== nextOntology) {
+          this.emit({
+            event: "ontology.updated",
+            payload: asJsonValue(
+              { projections: snapshot.ontologyChipProjections ?? [] },
+              "ontology.updated",
+            ),
+          });
+        }
         if (previousConfirmations !== null && previousConfirmations !== nextConfirmations) {
           this.emit({
             event: "confirm.updated",
@@ -989,6 +1077,18 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
 
   private confirmationFingerprint(snapshot: MobileBridgeSnapshot): string {
     return JSON.stringify(snapshot.pendingConfirmations);
+  }
+
+  private ontologyFingerprint(snapshot: MobileBridgeSnapshot): string | null {
+    return snapshot.ontologyChipProjections === undefined
+      ? null
+      : JSON.stringify(snapshot.ontologyChipProjections.map((projection) => ({
+          agentDefinitionId: projection.agentDefinitionId,
+          agentReleaseId: projection.agentReleaseId,
+          revision: projection.revision,
+          state: projection.state,
+          loadoutRevision: projection.loadout.revision,
+        })));
   }
 
   private async resyncAutomationTriggers(): Promise<void> {

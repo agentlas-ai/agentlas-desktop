@@ -9,6 +9,7 @@ import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
+import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
@@ -583,6 +584,17 @@ export const runClaudeCode: Runner = async (
         if (includePartialMessagesSupported && /include-partial-messages/i.test(stderr)) {
           includePartialMessagesSupported = false;
           void runClaudeCode(req, events).then(resolve, reject);
+          return;
+        }
+        // Build continuation recovery is Main-owned and can change the exact
+        // MCP config. Do not replay once here with the same fatal server first.
+        if (
+          resumeSessionId &&
+          !req.chatId &&
+          req.mcpConfigPath &&
+          containsMcpStartupTransportFatal(stderr)
+        ) {
+          reject(new Error(`claude CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));
           return;
         }
         if (resumeSessionId && req.chatId) clearRuntimeSession(req.chatId, KIND);

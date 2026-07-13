@@ -48,6 +48,7 @@ await win.waitForTimeout(2500);
 await win
   .evaluate(() => {
     window.localStorage.setItem("agentlas.onboarded", "1");
+    window.localStorage.setItem("agentlas.featureUpdate.ontology-chips-v1.2026-07-13.ack", "qa-suppressed");
     window.localStorage.setItem("agentlas.shellTour.dismissed.v1", "1");
     window.sessionStorage.setItem("agentlas.import.prompted", "1");
     window.location.href = "/dashboard";

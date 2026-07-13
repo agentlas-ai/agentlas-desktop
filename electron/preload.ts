@@ -133,6 +133,41 @@ const api: AgentlasIpc = {
   agentMemory: {
     entries: (agentId: string, limit?: number) => ipcRenderer.invoke("agentMemory:entries", agentId, limit),
   },
+  agentLearning: {
+    summary: (agentId: string) => ipcRenderer.invoke("agentLearning:summary", agentId),
+  },
+  experience: {
+    createPack: (input) => ipcRenderer.invoke("experience:createPack", input),
+    listPacks: (input) => ipcRenderer.invoke("experience:listPacks", input),
+    ontologySummary: (agentId: string) => ipcRenderer.invoke("experience:ontologySummary", agentId),
+    ontologyGraph: (agentId: string) => ipcRenderer.invoke("experience:ontologyGraph", agentId),
+    hubProjection: (agentId: string, force?: boolean) =>
+      ipcRenderer.invoke("experience:hubProjection", agentId, force === true),
+    captureFromMemory: (input) => ipcRenderer.invoke("experience:captureFromMemory", input),
+    listCandidates: (packId: string) => ipcRenderer.invoke("experience:listCandidates", packId),
+    listOperationalPublicProjections: (packId: string) =>
+      ipcRenderer.invoke("experience:listOperationalPublicProjections", packId),
+    saveOperationalPublicProjection: (input) =>
+      ipcRenderer.invoke("experience:saveOperationalPublicProjection", input),
+    confirmOperationalPublicProjection: (input) =>
+      ipcRenderer.invoke("experience:confirmOperationalPublicProjection", input),
+    listTasteDrafts: (agentId: string) => ipcRenderer.invoke("experience:listTasteDrafts", agentId),
+    listTasteWorkflows: (agentId: string) => ipcRenderer.invoke("experience:listTasteWorkflows", agentId),
+    saveTasteGeneralization: (input) => ipcRenderer.invoke("experience:saveTasteGeneralization", input),
+    confirmTasteGeneralization: (input) => ipcRenderer.invoke("experience:confirmTasteGeneralization", input),
+    pickTastePreviews: () => ipcRenderer.invoke("experience:pickTastePreviews"),
+    prepareTastePreviews: (input) => ipcRenderer.invoke("experience:prepareTastePreviews", input),
+    uploadTasteDraft: (input) => ipcRenderer.invoke("experience:uploadTasteDraft", input),
+    promote: (input) => ipcRenderer.invoke("experience:promote", input),
+    listPromotionReceipts: (packId: string) => ipcRenderer.invoke("experience:listPromotionReceipts", packId),
+    createExportIntent: (input) => ipcRenderer.invoke("experience:createExportIntent", input),
+    listExportIntents: (packId: string) => ipcRenderer.invoke("experience:listExportIntents", packId),
+    cloudSave: (input) => ipcRenderer.invoke("experience:cloudSave", input),
+    cloudList: (packId: string) => ipcRenderer.invoke("experience:cloudList", packId),
+    cloudReconcile: (input) => ipcRenderer.invoke("experience:cloudReconcile", input),
+    cloudExport: (input) => ipcRenderer.invoke("experience:cloudExport", input),
+    cloudWithdraw: (input) => ipcRenderer.invoke("experience:cloudWithdraw", input),
+  },
   memoryDreaming: {
     status: () => ipcRenderer.invoke("memoryDreaming:status"),
     setEnabled: (enabled: boolean) => ipcRenderer.invoke("memoryDreaming:setEnabled", enabled),
@@ -221,6 +256,8 @@ const api: AgentlasIpc = {
     install: (slug: string) => ipcRenderer.invoke("team:install", slug),
     installMine: (id: string) => ipcRenderer.invoke("team:installMine", id),
     uninstall: (id: string) => ipcRenderer.invoke("team:uninstall", id),
+    setLocalDisplayName: (id: string, value: string) =>
+      ipcRenderer.invoke("team:setLocalDisplayName", id, value),
     importLocalFolder: (input) =>
       ipcRenderer.invoke("team:importLocalFolder", input),
     resolveSubAgents: (agentId: string) => ipcRenderer.invoke("team:resolveSubAgents", agentId),
@@ -266,6 +303,7 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("mcpTools:setEnabled", id, enabled),
     test: (id: string) => ipcRenderer.invoke("mcpTools:test", id),
     status: () => ipcRenderer.invoke("mcpTools:status"),
+    recommendForBuild: (input) => ipcRenderer.invoke("mcpTools:recommendForBuild", input),
   },
   openCrab: {
     readiness: () => ipcRenderer.invoke("openCrab:readiness"),

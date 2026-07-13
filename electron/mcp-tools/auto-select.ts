@@ -3,12 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import { MCP_TOOL_CATALOG } from "./catalog";
 import { installFromCatalog, listInstalledServers } from "./registry";
+import { testServerConnection } from "./client";
 import { readEnvVar } from "../secrets/vault";
 import { getSource as getMarketSource } from "../marketplace";
 import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import type {
   AutomationHubMode,
   AutomationToolMode,
+  InstalledMcpServer,
   MarketplaceListing,
   McpToolCatalogEntry,
 } from "../../shared/types";
@@ -19,6 +21,15 @@ export interface AutoSelectedMcpTool {
   reason: string;
   installed: boolean;
   missingEnv: string[];
+  required: boolean;
+  state:
+    | "ready"
+    | "missing-key"
+    | "install-failed"
+    | "probe-failed"
+    | "disabled"
+    | "server-unavailable"
+    | "host-failure";
 }
 
 export interface HubPluginCandidate {
@@ -39,6 +50,23 @@ export interface AutoSelectedMcpContext {
   hubPlugins: HubPluginCandidate[];
   hubPluginError?: string;
 }
+
+export interface AutoSelectMcpDependencies {
+  listInstalledServers: () => InstalledMcpServer[];
+  installFromCatalog: (catalogId: string) => InstalledMcpServer;
+  readEnvVar: (key: string) => Promise<string | null>;
+  testServerConnection: (server: InstalledMcpServer) => Promise<{
+    connected: boolean;
+    missingEnv: string[];
+  }>;
+}
+
+const DEFAULT_AUTO_SELECT_DEPS: AutoSelectMcpDependencies = {
+  listInstalledServers,
+  installFromCatalog,
+  readEnvVar,
+  testServerConnection: (server) => testServerConnection(server, { timeoutMs: 3_000 }),
+};
 
 const KEYWORD_HINTS: Record<string, string[]> = {
   "hephaestus-network": [
@@ -260,11 +288,14 @@ function scoreWithAutomationPolicy(
   return score;
 }
 
-async function missingRequiredEnv(entry: McpToolCatalogEntry): Promise<string[]> {
+async function missingRequiredEnv(
+  entry: McpToolCatalogEntry,
+  readSecret: (key: string) => Promise<string | null>,
+): Promise<string[]> {
   const missing: string[] = [];
   for (const requirement of entry.envRequirements) {
     if (!requirement.required) continue;
-    const value = await readEnvVar(requirement.key);
+    const value = await readSecret(requirement.key);
     if (!value) missing.push(requirement.key);
   }
   return missing;
@@ -392,7 +423,8 @@ export async function autoSelectMcpTools(input: {
   workingFolder?: string | null;
   toolMode?: AutomationToolMode;
   hubMode?: AutomationHubMode;
-}): Promise<AutoSelectedMcpContext> {
+}, injectedDeps: Partial<AutoSelectMcpDependencies> = {}): Promise<AutoSelectedMcpContext> {
+  const deps: AutoSelectMcpDependencies = { ...DEFAULT_AUTO_SELECT_DEPS, ...injectedDeps };
   const haystack = normalize(
     [input.userPrompt, input.systemPrompt, input.agentName, input.workingFolder ?? ""].join("\n"),
   );
@@ -402,8 +434,14 @@ export async function autoSelectMcpTools(input: {
     promptTemplate: input.userPrompt,
     targetLabel: input.workingFolder,
   });
+  let initialInstalledServers: InstalledMcpServer[] = [];
+  try {
+    initialInstalledServers = deps.listInstalledServers();
+  } catch {
+    initialInstalledServers = [];
+  }
   const installed = new Set(
-    listInstalledServers()
+    initialInstalledServers
       .map((server) => server.catalogId)
       .filter((id): id is string => Boolean(id)),
   );
@@ -420,16 +458,11 @@ export async function autoSelectMcpTools(input: {
     .sort((a, b) => b.score - a.score)
     .slice(0, 8);
 
-  const result: AutoSelectedMcpTool[] = [];
-  for (const { entry, score } of picked) {
-    const missingEnv = await missingRequiredEnv(entry);
-    let installedNow = installed.has(entry.id);
-    if (!installedNow && missingEnv.length === 0) {
-      installFromCatalog(entry.id);
-      installed.add(entry.id);
-      installedNow = true;
-    }
-    result.push({
+  const resolved = await Promise.allSettled(picked.map(async ({ entry, score }): Promise<AutoSelectedMcpTool> => {
+    const required = score >= 6 ||
+      effectiveToolMode === "browser" && entry.id === "agentlas-browser" ||
+      effectiveToolMode === "computer-use" && entry.id === "cua-driver";
+    const base = {
       id: entry.id,
       name: entry.nameEn || entry.name,
       reason:
@@ -442,29 +475,89 @@ export async function autoSelectMcpTools(input: {
             : score > 0
               ? `matched request/tool need score ${score}`
               : "always available routing/plugin resolver",
-      installed: installedNow,
-      missingEnv,
-    });
-  }
+      required,
+    };
+    const missingEnv = await missingRequiredEnv(entry, deps.readEnvVar);
+    if (missingEnv.length > 0) return { ...base, installed: false, missingEnv, state: "missing-key" };
+
+    let server = deps.listInstalledServers().find((candidate) =>
+      candidate.catalogId === entry.id || candidate.id === entry.id);
+    if (!server) {
+      try {
+        server = deps.installFromCatalog(entry.id);
+        installed.add(entry.id);
+      } catch {
+        return { ...base, installed: false, missingEnv: [], state: "install-failed" };
+      }
+    }
+    if (!server) return { ...base, installed: false, missingEnv: [], state: "server-unavailable" };
+    if (!server.enabled) return { ...base, installed: false, missingEnv: [], state: "disabled" };
+    try {
+      const status = await deps.testServerConnection(server);
+      if (status.missingEnv.length > 0) {
+        return { ...base, installed: false, missingEnv: [...new Set(status.missingEnv)].sort(), state: "missing-key" };
+      }
+      if (!status.connected) return { ...base, installed: false, missingEnv: [], state: "probe-failed" };
+    } catch {
+      return { ...base, installed: false, missingEnv: [], state: "probe-failed" };
+    }
+    return { ...base, installed: true, missingEnv: [], state: "ready" };
+  }));
+  const result: AutoSelectedMcpTool[] = resolved.map((item, index) => {
+    if (item.status === "fulfilled") return item.value;
+    const { entry, score } = picked[index];
+    return {
+      id: entry.id,
+      name: entry.nameEn || entry.name,
+      reason: `matched request/tool need score ${score}`,
+      installed: false,
+      missingEnv: [],
+      required: score >= 6,
+      state: "host-failure",
+    };
+  });
 
   // 사용자가 손수 등록한 커스텀 MCP(카탈로그에 없는 catalogId=null)는 위 MCP_TOOL_CATALOG
   // 스캔에 잡히지 않아 채팅 런타임(.mcp.json)에서 늘 누락됐다 — 명시적으로 추가한 서버이므로
   // 항상 후보에 포함한다. remote(헤더 없는 URL)는 envKeys가 비어 바로 사용 가능하고,
   // 헤더/키가 필요한 서버는 vault에 값이 있을 때만 installed로 잡힌다.
-  for (const server of listInstalledServers()) {
-    if (!server.enabled || server.catalogId) continue;
+  let latestInstalledServers: InstalledMcpServer[] = [];
+  try {
+    latestInstalledServers = deps.listInstalledServers();
+  } catch {
+    latestInstalledServers = [];
+  }
+  for (const server of latestInstalledServers) {
+    if (server.catalogId) continue;
     if (result.some((tool) => tool.id === server.id)) continue;
     const missingEnv: string[] = [];
     for (const key of server.envKeys) {
-      const value = await readEnvVar(key);
+      const value = await deps.readEnvVar(key);
       if (!value) missingEnv.push(key);
+    }
+    let state: AutoSelectedMcpTool["state"] = missingEnv.length > 0 ? "missing-key" : "ready";
+    if (state === "ready" && !server.enabled) state = "disabled";
+    if (state === "ready") {
+      try {
+        const status = await deps.testServerConnection(server);
+        if (status.missingEnv.length > 0) {
+          missingEnv.push(...status.missingEnv.filter((key) => !missingEnv.includes(key)));
+          state = "missing-key";
+        } else if (!status.connected) {
+          state = "probe-failed";
+        }
+      } catch {
+        state = "probe-failed";
+      }
     }
     result.push({
       id: server.id,
       name: server.nameEn || server.name,
       reason: "user-added custom MCP (always available)",
-      installed: missingEnv.length === 0,
+      installed: state === "ready",
       missingEnv,
+      required: false,
+      state,
     });
   }
 
@@ -484,6 +577,7 @@ export function buildMcpAutoSelectionPrompt(
   if (selected.tools.length === 0 && selected.hubPluginCount === 0) return "";
   const installed = selected.tools.filter((tool) => tool.installed);
   const blocked = selected.tools.filter((tool) => !tool.installed && tool.missingEnv.length > 0);
+  const unavailable = selected.tools.filter((tool) => tool.state !== "ready");
   const modeLine =
     opts?.toolMode === "browser"
       ? "This automation explicitly selected Browser plugin mode; use Playwright/browser tools for web work."
@@ -531,6 +625,11 @@ export function buildMcpAutoSelectionPrompt(
       ? `Tools matched but need credentials before use: ${blocked
           .map((tool) => `${tool.id} missing ${tool.missingEnv.join(", ")}`)
           .join("; ")}. Ask for secure vault setup only if the task truly needs them.`
+      : "",
+    unavailable.length > 0
+      ? `Unavailable MCP state (value-free): ${unavailable
+          .map((tool) => `${tool.id}=${tool.state}${tool.required ? "(required)" : ""}`)
+          .join("; ")}. Healthy MCPs remain available; degrade only the function that depends on an unavailable capability.`
       : "",
   ]
     .filter(Boolean)

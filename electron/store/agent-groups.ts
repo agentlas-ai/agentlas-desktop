@@ -42,6 +42,7 @@ export interface AgentGroupRuntimeMember {
   entityKind?: HubGroupEntityKind;
   routeLabel: string;
   warnings: AgentGroupResolvedMember["warnings"];
+  installedAgentId?: string;
 }
 
 export interface AgentGroupRuntimeResolution {
@@ -554,6 +555,7 @@ export async function resolveAgentGroupForRuntime(id: string): Promise<AgentGrou
       source: member.source,
       routeLabel: label,
       warnings: resolved.warnings,
+      installedAgentId: resolved.agent.id,
     });
   }
 

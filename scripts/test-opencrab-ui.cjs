@@ -203,6 +203,7 @@ async function main() {
     await build.getByRole("button", { name: /생성 폴더 선택|Choose output folder/ }).click();
     await build.locator("textarea").first().fill("OpenCrab 근거 확인형 리서치 에이전트");
     await build.getByRole("button", { name: /딥인터뷰로 빌드 시작|Start build/ }).click();
+    await build.getByRole("button", { name: /MCP 없이 계속|Continue without MCP/ }).click();
     await build.getByText("연결된 OpenCrab에서 이 빌드 요청과 관련된 지식이 있는지 확인할까요?").waitFor();
     await build.locator(".build-interview-card .build-interview-opt", { hasText: "리포트" }).click();
     await build.locator(".build-interview-card .build-interview-opt", { hasText: "비공개" }).click();

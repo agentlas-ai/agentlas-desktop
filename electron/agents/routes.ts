@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { app } from "electron";
+import { computeLocalAgentDefinitionHash } from "./definition-hash";
 
 export type RuntimeLabel = "claude-code" | "codex" | "gemini" | "cursor" | "generic";
 
@@ -25,6 +26,8 @@ export interface AgentRoute {
   source?: "local-import" | "agent-cloud" | "hub";
   /** Agent Cloud에서 복원한 불변 package hash. */
   packageHash?: string;
+  /** Legacy/local-only AgentDefinition fingerprint. Never a Hub release claim. */
+  definitionHash?: string;
 }
 
 function routesFile(): string {
@@ -96,6 +99,37 @@ export function setRoute(route: AgentRoute): void {
   const map = readAll();
   map[route.agentId] = route;
   writeAll(map);
+}
+
+/**
+ * Reconcile exact local AgentDefinition fingerprints for legacy routes.
+ * Only the value-free hash is persisted; paths stay in the existing private
+ * route record and no package, Memory or Experience content is copied.
+ */
+export function reconcileLocalRouteDefinitionHashes(): {
+  scanned: number;
+  updated: number;
+  failed: number;
+} {
+  const map = readAll();
+  let scanned = 0;
+  let updated = 0;
+  let failed = 0;
+  for (const [agentId, route] of Object.entries(map)) {
+    if (route.source === "agent-cloud" || route.source === "hub") continue;
+    scanned += 1;
+    try {
+      const definitionHash = computeLocalAgentDefinitionHash(route.path);
+      if (route.definitionHash !== definitionHash || route.source !== "local-import") {
+        map[agentId] = { ...route, source: "local-import", definitionHash };
+        updated += 1;
+      }
+    } catch {
+      failed += 1;
+    }
+  }
+  if (updated > 0) writeAll(map);
+  return { scanned, updated, failed };
 }
 
 /**

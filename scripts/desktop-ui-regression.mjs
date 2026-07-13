@@ -176,6 +176,7 @@ async function checkChat(page) {
 function mockAgentlasBridge() {
   try {
     window.localStorage.setItem("agentlas.onboarded", "1");
+    window.localStorage.setItem("agentlas.featureUpdate.ontology-chips-v1.2026-07-13.ack", "qa-suppressed");
     window.localStorage.setItem("agentlas.shellTour.dismissed.v1", "1");
     for (const id of ["dashboard", "workspace", "build", "agents", "hub", "automation", "automation-new", "automation-detail", "environment"]) {
       window.localStorage.setItem(`agentlas.pageTour.${id}.dismissed.v2`, "1");

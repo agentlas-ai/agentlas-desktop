@@ -121,6 +121,7 @@ export const CAREER_GRAPH_CONFIG_FILE = "career-graph.json";
 export const CAREER_GRAPH_SOURCE_MANIFEST_FILE = "career-graph-sources.json";
 export const CAREER_GRAPH_INBOX_DIR = "career-graph-inbox";
 export const CAREER_GRAPH_DB_FILE = "career-graph.sqlite";
+export const EXPERIENCE_RELATION_LEDGER_FILE = "experience-relations.jsonl";
 export const SUPER_ONTOLOGY_CONTRACT_FILE = "super-ontology-contract.json";
 export const SUPER_ONTOLOGY_OPEN_WORLD_COVERAGE_FILE = "super-ontology-open-world-coverage.json";
 export const SUPER_ONTOLOGY_CONSENSUS_COORDINATION_FILE = "super-ontology-consensus-coordination.json";

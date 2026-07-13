@@ -14,7 +14,10 @@ const {
   scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls,
   verifyUpdaterRecoveryCopies,
 } = require("../dist/electron/updater/continuity.js");
-const { CONTINUITY_CORE_TABLES } = require("../dist/electron/updater/controller.js");
+const {
+  CONTINUITY_CORE_TABLES,
+  CONTINUITY_V1_TABLES,
+} = require("../dist/electron/updater/controller.js");
 const {
   OPENCRAB_MCP_URL_SENTINEL,
 } = require("../dist/electron/opencrab/constants.js");
@@ -40,13 +43,13 @@ function quoteIdentifier(value) {
   return `"${String(value).replace(/"/g, '""')}"`;
 }
 
-function snapshotFacts(databasePath) {
+function snapshotFacts(databasePath, protectedTables) {
   const db = new Database(databasePath, { readonly: true });
   const databaseSchemaVersion = Number(db.pragma("user_version", { simple: true }) || 0);
   const rowCounts = {};
   const tableIdentityHashes = {};
   try {
-    for (const table of CONTINUITY_CORE_TABLES) {
+    for (const table of protectedTables) {
       const exists = Boolean(
         db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1").get(table),
       );
@@ -80,12 +83,13 @@ function snapshotFacts(databasePath) {
   }
 }
 
-function writeContinuitySnapshot(directory, databasePath) {
+function writeContinuitySnapshot(directory, databasePath, schemaVersion) {
   const agentsBackupPath = path.join(directory, "agents");
   fs.mkdirSync(agentsBackupPath, { recursive: true });
-  const facts = snapshotFacts(databasePath);
+  const protectedTables = schemaVersion === 1 ? CONTINUITY_V1_TABLES : CONTINUITY_CORE_TABLES;
+  const facts = snapshotFacts(databasePath, protectedTables);
   const snapshot = {
-    schemaVersion: 1,
+    schemaVersion,
     userDataPath: path.resolve(userDataPath),
     databasePath: path.resolve(path.join(userDataPath, "agentlas.sqlite")),
     backupPath: path.resolve(databasePath),
@@ -195,13 +199,24 @@ function createRecovery(name, credentialUrl, options = {}) {
   }
   db.close();
   assert.equal(contains(databasePath, credentialUrl), true, "fixture must contain the plaintext credential before scrub");
-  return { directory, databasePath, ...writeContinuitySnapshot(directory, databasePath) };
+  return {
+    directory,
+    databasePath,
+    ...writeContinuitySnapshot(directory, databasePath, options.snapshotSchemaVersion ?? 2),
+  };
 }
 
 let exitCode = 0;
 try {
   const logical = createRecovery("0.7.47-100", urlA, { duplicateLegacy: true });
-  const staleFreelist = createRecovery("0.7.46-90", urlB, { logicalAlreadyScrubbed: true });
+  const staleFreelist = createRecovery("0.7.46-90", urlB, {
+    logicalAlreadyScrubbed: true,
+    snapshotSchemaVersion: 1,
+  });
+  assert.equal(logical.snapshot.schemaVersion, 2);
+  assert.deepEqual(Object.keys(logical.snapshot.rowCounts).sort(), [...CONTINUITY_CORE_TABLES].sort());
+  assert.equal(staleFreelist.snapshot.schemaVersion, 1);
+  assert.deepEqual(Object.keys(staleFreelist.snapshot.rowCounts).sort(), [...CONTINUITY_V1_TABLES].sort());
   const now = Date.now() / 1000;
   fs.utimesSync(logical.directory, now, now);
   fs.utimesSync(staleFreelist.directory, now - 10, now - 10);
@@ -297,6 +312,12 @@ try {
 
   for (const recovery of [logical, staleFreelist]) {
     const resealed = JSON.parse(fs.readFileSync(recovery.continuityPath, "utf8"));
+    assert.equal(resealed.schemaVersion, recovery.snapshot.schemaVersion, "re-seal must preserve the snapshot protection profile");
+    assert.deepEqual(
+      Object.keys(resealed.rowCounts).sort(),
+      Object.keys(recovery.snapshot.rowCounts).sort(),
+      "re-seal must not widen or narrow its fixed schema table set",
+    );
     assert.equal(resealed.sanitizationVersion, "opencrab-url-credential-v1");
     assert.ok(Number.isFinite(Date.parse(resealed.sanitizedAt)));
     const verification = verifyUpdaterRecoveryCopies({

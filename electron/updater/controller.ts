@@ -10,8 +10,59 @@ import type {
 
 const JOURNAL_SCHEMA_VERSION = 1;
 const OFFICIAL_DOWNLOAD_URL = "https://agentlas.cloud/desktop";
+const RECOVERY_SESSION_RETRY_DELAY_MS = 500;
+const RECOVERY_SESSION_RETRY_ATTEMPTS = 4;
 
 export const CONTINUITY_CORE_TABLES = [
+  "installed_agents",
+  "firms",
+  "hub_agent_bookmarks",
+  "agent_groups",
+  "projects",
+  "chats",
+  "chat_messages",
+  "memory_entries",
+  // Per-agent activity and failure ledgers are the evidence behind My Agents
+  // learning/evolution views. Losing them would make a used agent look empty.
+  "run_events",
+  "failure_events",
+  "automations",
+  "automation_runs",
+  "agent_evolution_proposals",
+  "agent_evolution_receipts",
+  "agent_asset_versions",
+  "experience_packs",
+  "experience_candidates",
+  "experience_promotion_receipts",
+  "experience_export_intents",
+  // Canonical value-free lineage is protected. relation_nodes/edges/state are
+  // deliberately omitted because they are disposable rebuildable projections.
+  "experience_lineage_events",
+  // Canonical portable bundles, idempotency keys and Cloud receipts are owned
+  // local recovery state; they must survive an application update.
+  "experience_cloud_uploads",
+  // Privacy-safe automatic intake decisions are the local audit trail. They
+  // contain hashes/reason codes only and must not be silently re-run after an update.
+  "experience_auto_intake_receipts",
+  // Private Taste observations are distinct from operational Experience and
+  // must survive updates without being inferred again from mutable Memory.
+  "taste_draft_candidates",
+  "taste_chip_workflows",
+  // Exact Hub AgentDefinition + release identity cannot be reconstructed from
+  // slug, local id, package hash or latest-release inference after an update.
+  "installed_agent_hub_bindings",
+  "agent_apps",
+  "agent_tools",
+  "agent_surfaces",
+  "mcp_servers",
+  "agent_mcp_servers",
+  "agent_runtime_overrides",
+] as const;
+
+// schemaVersion 1 journals shipped before the Experience/Ontology continuity
+// expansion contain this original table set. Keep accepting those durable
+// journals; newly captured snapshots still include every table above.
+export const CONTINUITY_V1_TABLES = [
   "installed_agents",
   "firms",
   "hub_agent_bookmarks",
@@ -62,7 +113,7 @@ export interface AutoUpdaterLike {
 }
 
 export interface ContinuitySnapshot {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   userDataPath: string;
   databasePath: string;
   backupPath: string;
@@ -132,6 +183,10 @@ export interface UpdaterControllerDependencies {
   schedule?: boolean;
   manualDownloadUrl?: string;
   removePath?: (target: string, options: { recursive?: boolean; force?: boolean }) => void;
+  recoverySessionRetryDelayMs?: number;
+  recoverySessionRetryAttempts?: number;
+  waitForRecoveryRetry?: (delayMs: number) => Promise<void>;
+  refreshSessionForRecovery?: () => Promise<void>;
 }
 
 interface InstallAccessResult {
@@ -258,14 +313,36 @@ export function evaluateInstallAccess(input: {
   }
 }
 
-function isValidContinuitySnapshot(value: unknown): value is ContinuitySnapshot {
+export function isValidContinuitySnapshot(value: unknown): value is ContinuitySnapshot {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const raw = value as Record<string, unknown>;
   const rowCounts = raw.rowCounts as Record<string, unknown> | null;
   const tableIdentityHashes = raw.tableIdentityHashes as Record<string, unknown> | null;
   const agentAssetHashes = raw.agentAssetHashes as Record<string, unknown> | null;
+  const rowCountEntries = rowCounts && typeof rowCounts === "object" && !Array.isArray(rowCounts)
+    ? Object.entries(rowCounts)
+    : [];
+  const identityHashEntries = tableIdentityHashes && typeof tableIdentityHashes === "object" && !Array.isArray(tableIdentityHashes)
+    ? Object.entries(tableIdentityHashes)
+    : [];
+  const rowCountKeys = rowCountEntries.map(([table]) => table).sort();
+  const identityHashKeys = identityHashEntries.map(([table]) => table).sort();
+  const expectedTables = raw.schemaVersion === 1
+    ? [...CONTINUITY_V1_TABLES]
+    : raw.schemaVersion === 2
+      ? [...CONTINUITY_CORE_TABLES]
+      : null;
+  const expectedTableKeys = expectedTables?.sort() ?? [];
+  const validProtectedTableMaps =
+    expectedTables !== null &&
+    rowCountKeys.length === expectedTableKeys.length &&
+    identityHashKeys.length === expectedTableKeys.length &&
+    rowCountKeys.every((table, index) => table === expectedTableKeys[index]) &&
+    identityHashKeys.every((table, index) => table === expectedTableKeys[index]) &&
+    rowCountEntries.every(([, count]) => asNonNegativeInteger(count) !== null) &&
+    identityHashEntries.every(([, hash]) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash));
   return (
-    raw.schemaVersion === 1 &&
+    (raw.schemaVersion === 1 || raw.schemaVersion === 2) &&
     typeof raw.userDataPath === "string" &&
     path.isAbsolute(raw.userDataPath) &&
     typeof raw.databasePath === "string" &&
@@ -276,13 +353,10 @@ function isValidContinuitySnapshot(value: unknown): value is ContinuitySnapshot 
     rowCounts !== null &&
     typeof rowCounts === "object" &&
     !Array.isArray(rowCounts) &&
-    CONTINUITY_CORE_TABLES.every((table) => asNonNegativeInteger(rowCounts[table]) !== null) &&
+    validProtectedTableMaps &&
     tableIdentityHashes !== null &&
     typeof tableIdentityHashes === "object" &&
     !Array.isArray(tableIdentityHashes) &&
-    CONTINUITY_CORE_TABLES.every(
-      (table) => typeof tableIdentityHashes[table] === "string" && /^[a-f0-9]{64}$/.test(tableIdentityHashes[table] as string),
-    ) &&
     Array.isArray(raw.agentDirectoryNames) &&
     raw.agentDirectoryNames.every((entry) => typeof entry === "string") &&
     agentAssetHashes !== null &&
@@ -379,6 +453,7 @@ export class DesktopUpdaterController {
   private timer: NodeJS.Timeout | null = null;
   private initialTimer: NodeJS.Timeout | null = null;
   private checkPromise: Promise<UpdaterState> | null = null;
+  private reconcilePromise: Promise<void> | null = null;
   private downloadPromise: Promise<void> | null = null;
   private availablePromise: Promise<void> | null = null;
   private installPromise: Promise<UpdaterActionResult> | null = null;
@@ -389,6 +464,7 @@ export class DesktopUpdaterController {
   private automaticInstallPaused = false;
   private lastCheckedAt: number | undefined;
   private initialized = false;
+  private initPromise: Promise<void> | null = null;
   private readonly listeners: Array<{ event: UpdaterEvent; listener: (...args: any[]) => void }> = [];
 
   constructor(private readonly deps: UpdaterControllerDependencies) {
@@ -498,13 +574,34 @@ export class DesktopUpdaterController {
     writeJsonAtomic(this.journalPath(), journal);
   }
 
-  private clearJournal(): void {
-    try {
-      fs.rmSync(this.journalPath(), { force: true });
-      fs.rmSync(this.corruptJournalMarkerPath(), { force: true });
-    } catch (error) {
-      this.logger.warn("[updater] failed to clear install journal", error);
+  private clearJournal(): boolean {
+    let cleared = true;
+    // Remove the auxiliary marker first and the authoritative journal last.
+    // A crash between those operations therefore leaves a journal that can be
+    // verified again, rather than a marker-only false recovery hold.
+    for (const file of [this.corruptJournalMarkerPath(), this.journalPath()]) {
+      try {
+        this.removePath(file, { force: true });
+      } catch (error) {
+        cleared = false;
+        this.logger.warn("[updater] failed to clear install journal", error);
+      }
+      if (fs.existsSync(file)) cleared = false;
     }
+    if (cleared) {
+      try {
+        const directoryFd = fs.openSync(path.dirname(this.journalPath()), fs.constants.O_RDONLY);
+        try {
+          fs.fsyncSync(directoryFd);
+        } finally {
+          fs.closeSync(directoryFd);
+        }
+      } catch {
+        // Directory fsync is unavailable on some platforms. The safe deletion
+        // order above still ensures a surviving journal is reverified.
+      }
+    }
+    return cleared;
   }
 
   private clearStaleInstallArtifacts(): boolean {
@@ -624,7 +721,44 @@ export class DesktopUpdaterController {
     return null;
   }
 
-  private async reconcileJournal(): Promise<void> {
+  private async verifyJournalContinuity(snapshot: ContinuitySnapshot): Promise<ContinuityVerification> {
+    const verifyOnce = () => this.deps.verifyContinuity(snapshot).catch((error) => {
+      this.logger.warn("[updater] continuity verification failed", error);
+      return { ok: false, violations: ["verification-failed"] };
+    });
+    const retryDelay = asNonNegativeInteger(this.deps.recoverySessionRetryDelayMs) ?? RECOVERY_SESSION_RETRY_DELAY_MS;
+    const retryAttempts = asNonNegativeInteger(this.deps.recoverySessionRetryAttempts) ?? RECOVERY_SESSION_RETRY_ATTEMPTS;
+    const wait = this.deps.waitForRecoveryRetry ?? ((delayMs: number) => new Promise<void>((resolve) => {
+      setTimeout(resolve, delayMs);
+    }));
+
+    let verification = await verifyOnce();
+    for (let attempt = 0; attempt < retryAttempts; attempt += 1) {
+      const onlyAuthRestoreIsPending =
+        !verification.ok &&
+        verification.violations.length === 1 &&
+        verification.violations[0] === "account-session-not-restored";
+      if (!onlyAuthRestoreIsPending) break;
+      await wait(retryDelay);
+      try {
+        await this.deps.refreshSessionForRecovery?.();
+      } catch (error) {
+        this.logger.warn("[updater] account session recovery refresh failed", error);
+      }
+      verification = await verifyOnce();
+    }
+    return verification;
+  }
+
+  private reconcileJournal(): Promise<void> {
+    if (this.reconcilePromise) return this.reconcilePromise;
+    this.reconcilePromise = this.reconcileJournalOnce().finally(() => {
+      this.reconcilePromise = null;
+    });
+    return this.reconcilePromise;
+  }
+
+  private async reconcileJournalOnce(): Promise<void> {
     const journal = this.readJournal();
     if (!journal) {
       // At process start there is no active check/download yet. Without our durable
@@ -641,10 +775,7 @@ export class DesktopUpdaterController {
     this.recoveryBackupPath = journal.continuity.backupPath;
     const comparison = compareSemVer(this.deps.currentVersion(), journal.targetVersion);
     if (comparison !== null && comparison >= 0) {
-      const verification = await this.deps.verifyContinuity(journal.continuity).catch((error) => {
-        this.logger.warn("[updater] continuity verification failed", error);
-        return { ok: false, violations: ["verification-failed"] };
-      });
+      const verification = await this.verifyJournalContinuity(journal.continuity);
       if (!verification.ok) {
         this.writeJournal({ ...journal, phase: "recovery-required", reasonCode: "continuity-violation" });
         this.publish({
@@ -661,7 +792,20 @@ export class DesktopUpdaterController {
         this.writeJournal({ ...journal, phase: "blocked", reasonCode: "legacy-cleanup-failed" });
         return;
       }
-      this.clearJournal();
+      if (!this.clearJournal()) {
+        this.automaticInstallPaused = true;
+        this.blockedTargetVersion = journal.targetVersion;
+        this.blockedReasonCode = "install-state-corrupt";
+        if (fs.existsSync(this.journalPath())) {
+          try {
+            this.writeJournal({ ...journal, phase: "blocked", reasonCode: "install-state-corrupt" });
+          } catch (error) {
+            this.logger.warn("[updater] failed to preserve the journal cleanup block", error);
+          }
+        }
+        this.publish(this.manualState(journal.targetVersion, "install-state-corrupt"));
+        return;
+      }
       this.blockedTargetVersion = null;
       this.blockedReasonCode = "install-not-applied";
       this.publish({ status: "updated", version: journal.targetVersion });
@@ -677,9 +821,22 @@ export class DesktopUpdaterController {
     this.publish(this.manualState(journal.targetVersion, reasonCode));
   }
 
-  async init(): Promise<void> {
-    if (this.initialized) return;
+  init(): Promise<void> {
+    if (this.initPromise) return this.initPromise;
+    if (this.initialized) return Promise.resolve();
     this.initialized = true;
+    this.initPromise = this.initOnce()
+      .catch((error) => {
+        this.initialized = false;
+        throw error;
+      })
+      .finally(() => {
+        this.initPromise = null;
+      });
+    return this.initPromise;
+  }
+
+  private async initOnce(): Promise<void> {
     this.deps.updater.autoDownload = false;
     this.deps.updater.autoInstallOnAppQuit = false;
 

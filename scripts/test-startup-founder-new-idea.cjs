@@ -67,6 +67,7 @@ fs.writeFileSync(next, JSON.stringify(doc, null, 2));
     await page.waitForFunction(() => Boolean(window.agentlas));
     await page.evaluate(async () => {
       localStorage.setItem("agentlas.onboarded", "1");
+      localStorage.setItem("agentlas.featureUpdate.ontology-chips-v1.2026-07-13.ack", "qa-suppressed");
       localStorage.setItem("agentlas.locale", "ko");
       await window.agentlas.menu.setLocale("ko");
       window.location.href = "/startup-founder-studio";

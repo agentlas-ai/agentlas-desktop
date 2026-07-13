@@ -5,6 +5,7 @@
 import type {
   Chat,
   ChatHistoryEntry,
+  AgentRuntimeOverride,
   InstalledAgent,
   McpInvocationEvent,
   McpInvocationRequest,
@@ -22,6 +23,17 @@ import { curateReply } from "../memory/curator";
 import { getAgentConcurrency } from "../store/concurrency";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import { stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
+import { tryRecordRunEvent } from "../store/run-events";
+import {
+  defaultWorkloadAllocation,
+  normalizeWorkloadAllocation,
+  resolveWorkloadAllocation,
+  workloadAllocationPromptExample,
+  workloadAllocationReceipt,
+  type WorkloadAllocation,
+} from "../runtime/workload-routing";
+import { getAgentById } from "./registry";
+import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -37,6 +49,8 @@ export interface BorrowedAgentSpec {
   source?: "hub" | "installed" | "firm-node";
   routeLabel?: string;
   warnings?: string[];
+  /** Present only after the local Agent Group resolver identifies an exact installed agent. */
+  installedAgentId?: string;
 }
 
 export class BorrowedAgentUnavailableError extends Error {
@@ -67,6 +81,7 @@ export interface BorrowedInputPacket {
   context: string[];
   expectedOutput: string;
   constraints: string[];
+  allocation: WorkloadAllocation;
 }
 
 export interface BorrowedTaskForceParams {
@@ -78,6 +93,8 @@ export interface BorrowedTaskForceParams {
   taskForceSpecs?: BorrowedAgentSpec[];
   active: RuntimeStatus;
   picked: { runner: Runner; label: string };
+  /** Explicit scoped selection wins over parent-AI workload allocation. */
+  runtimeOverride?: AgentRuntimeOverride | null;
   workingFolder?: string | null;
   mcpConfigPath?: string;
   mcpAllowedTools?: string[];
@@ -376,8 +393,12 @@ export function parseBorrowedInputPackets(text: string): BorrowedInputPacket[] {
   if (!rawJson) return [];
   try {
     const parsed = JSON.parse(rawJson);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
+    const rawPackets = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).packets)
+        ? (parsed as Record<string, unknown>).packets as unknown[]
+        : [];
+    return rawPackets
       .map((item): BorrowedInputPacket | null => {
         const obj = asObject(item);
         const agent = cleanString(obj.agent);
@@ -394,11 +415,34 @@ export function parseBorrowedInputPackets(text: string): BorrowedInputPacket[] {
             cleanString(obj.expected_output) ||
             "A specialist result the orchestrator can synthesize.",
           constraints: asArray(obj.constraints).map((v) => cleanString(v)).filter(Boolean),
+          allocation: normalizeWorkloadAllocation(obj.allocation, "delegate"),
         };
       })
       .filter((packet): packet is BorrowedInputPacket => packet !== null);
   } catch {
     return [];
+  }
+}
+
+export function parseBorrowedWorkloadPlan(text: string): {
+  packets: BorrowedInputPacket[];
+  synthesisAllocation: WorkloadAllocation | null;
+} {
+  const packets = parseBorrowedInputPackets(text);
+  const headingIndex = text.lastIndexOf(PACKET_HEADING);
+  const scope = headingIndex >= 0 ? text.slice(headingIndex + PACKET_HEADING.length) : text;
+  const fence = scope.match(/```(?:json)?\s*([\s\S]*?)```/);
+  try {
+    const parsed = JSON.parse(fence?.[1]?.trim() ?? "null");
+    const obj = asObject(parsed);
+    return {
+      packets,
+      synthesisAllocation: obj.synthesis
+        ? normalizeWorkloadAllocation(obj.synthesis, "synthesize")
+        : null,
+    };
+  } catch {
+    return { packets, synthesisAllocation: null };
   }
 }
 
@@ -411,6 +455,7 @@ export function buildFallbackPackets(specs: BorrowedAgentSpec[], userPrompt: str
     context: [`Borrowed Hub agent: ${spec.name} (${spec.slug})`],
     expectedOutput: "Focused specialist analysis with evidence, assumptions, risks, and a concise recommendation.",
     constraints: ["Do not write the final synthesis.", "Stay inside the assigned specialist lane."],
+    allocation: defaultWorkloadAllocation("delegate"),
   }));
 }
 
@@ -475,7 +520,8 @@ function buildPlannerSystemPrompt(
     "Keep briefs specific: a researcher should get evidence questions; a builder should get implementation constraints; a reviewer should get acceptance criteria; a writer should get audience/style/output format.",
     responseGuide,
     "",
-    `End with exactly this block:\n${PACKET_HEADING}\n\`\`\`json\n[{"agent":"<slug>","inputType":"<research|implementation|review|writing|analysis|planning|other>","inputKind":"<text|codebase|files|image|data|browser|mixed>","brief":"<focused subtask>","context":["<facts/files/constraints to pass>"],"expectedOutput":"<deliverable>","constraints":["<limits>"]}]\n\`\`\``,
+    "For every packet, judge complexity, risk, context size, and required precision. Assign provider-neutral capacity independently; do not put every worker on frontier.",
+    `End with exactly this block:\n${PACKET_HEADING}\n\`\`\`json\n{"packets":[{"agent":"<slug>","inputType":"<research|implementation|review|writing|analysis|planning|other>","inputKind":"<text|codebase|files|image|data|browser|mixed>","brief":"<focused subtask>","context":["<facts/files/constraints to pass>"],"expectedOutput":"<deliverable>","constraints":["<limits>"],"allocation":${workloadAllocationPromptExample("delegate")}}],"synthesis":${workloadAllocationPromptExample("synthesize")}}\n\`\`\``,
   ].join("\n");
 }
 
@@ -631,22 +677,61 @@ async function runBorrowedAgentTurn(
     phase: "delegate",
   });
   const runnerBase = taskForceRunnerBase(p);
+  const workloadResolution = resolveWorkloadAllocation({
+    allocation: packet.allocation,
+    runtime: p.active,
+    phase: "delegate",
+    manualOverride: p.runtimeOverride,
+  });
+  const active = workloadResolution.runtime;
+  tryRecordRunEvent({
+    runId: p.req.runId ?? `task-force:${p.chat.id}`,
+    kind: "workload_allocation",
+    chatId: p.chat.id,
+    nodeId: id,
+    agentId: spec.slug,
+    payload: workloadAllocationReceipt(workloadResolution),
+  });
+  if (workloadResolution.resolutionCodes.includes("tier-unavailable-active-preserved")) {
+    p.sink(tag({
+      kind: "tool-use",
+      status: p.locale === "ko"
+        ? `${workloadResolution.allocation.tier} 등급 모델이 현재 런타임에 없어 활성 모델을 유지합니다.`
+        : `${workloadResolution.allocation.tier} tier is unavailable; preserving the active model.`,
+    }));
+  }
   p.sink(tag({
     kind: "thinking",
     status: p.locale === "ko" ? `${spec.name} · 입력 패킷 실행 중` : `${spec.name} · running input packet`,
-    model: modelLabel(p.active),
+    model: modelLabel(active),
   }));
   try {
+    const installedAgent =
+      (spec.source === "installed" || spec.source === "firm-node") && spec.installedAgentId
+        ? getAgentById(spec.installedAgentId)
+        : null;
+    const ontology = installedAgent ? await buildAgentRuntimeOntologyContext({
+      runSessionId: p.req.runId ?? `task-force:${p.chat.id}`,
+      installedAgent,
+      projectId: p.chat.projectId,
+      projectPath: p.workingFolder,
+      runtimeKind: active.kind,
+      task: packet.brief || p.req.userPrompt,
+      includeOperational: false,
+    }) : null;
     const result = await p.picked.runner(
       {
-        systemPrompt: buildBorrowedAgentSystemPrompt(spec, runnerBase.permission),
+        systemPrompt: [
+          buildBorrowedAgentSystemPrompt(spec, runnerBase.permission),
+          ontology?.prompt,
+        ].filter(Boolean).join("\n\n"),
         history: [],
         userPrompt: packetToPrompt(packet, p.req.userPrompt),
         images: p.req.images,
         backendLabel: p.picked.label,
-        model: p.active.model ?? undefined,
-        longContext: p.active.longContextEnabled ?? false,
-        effort: p.active.effort ?? undefined,
+        model: active.model ?? undefined,
+        longContext: active.longContextEnabled ?? false,
+        effort: active.effort ?? undefined,
         signal: link.signal,
         ...runnerBase,
         cwd: p.workingFolder ?? undefined,
@@ -720,7 +805,12 @@ async function runPlanner(
   p: BorrowedTaskForceParams,
   specs: BorrowedAgentSpec[],
   history: ChatHistoryEntry[],
-): Promise<{ text: string; packets: BorrowedInputPacket[]; result?: RunnerResult }> {
+): Promise<{
+  text: string;
+  packets: BorrowedInputPacket[];
+  synthesisAllocation: WorkloadAllocation;
+  result?: RunnerResult;
+}> {
   const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
   const orchestratorName = p.orchestratorAgent.nameEn || p.orchestratorAgent.name || "Agentlas Orchestrator";
   p.sink({
@@ -772,7 +862,8 @@ async function runPlanner(
         }),
     },
   );
-  const packets = normalizePacketsForRoster(parseBorrowedInputPackets(result.text), specs, p.req.userPrompt);
+  const parsedPlan = parseBorrowedWorkloadPlan(result.text);
+  const packets = normalizePacketsForRoster(parsedPlan.packets, specs, p.req.userPrompt);
   p.sink({
     kind: "tool-use",
     status:
@@ -786,7 +877,12 @@ async function runPlanner(
     phase: "delegate",
     delegateTo: packets.map((packet) => agentNodeId(packet.agent)),
   });
-  return { text: result.text, packets, result };
+  return {
+    text: result.text,
+    packets,
+    synthesisAllocation: parsedPlan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
+    result,
+  };
 }
 
 export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams): Promise<void> {
@@ -817,6 +913,34 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
 
   const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
   const orchestratorName = p.orchestratorAgent.nameEn || p.orchestratorAgent.name || "Agentlas Orchestrator";
+  const synthesisResolution = resolveWorkloadAllocation({
+    allocation: plan.synthesisAllocation,
+    runtime: p.active,
+    phase: "synthesize",
+    manualOverride: p.runtimeOverride,
+  });
+  const synthesisActive = synthesisResolution.runtime;
+  tryRecordRunEvent({
+    runId: p.req.runId ?? `task-force:${p.chat.id}`,
+    kind: "workload_allocation",
+    chatId: p.chat.id,
+    nodeId: orchestratorId,
+    agentId: p.orchestratorAgent.id,
+    payload: workloadAllocationReceipt(synthesisResolution),
+  });
+  if (synthesisResolution.resolutionCodes.includes("tier-unavailable-active-preserved")) {
+    p.sink({
+      kind: "tool-use",
+      status: p.locale === "ko"
+        ? `${synthesisResolution.allocation.tier} 종합 등급을 사용할 수 없어 활성 모델로 종합합니다.`
+        : `${synthesisResolution.allocation.tier} synthesis tier is unavailable; preserving the active model.`,
+      agentId: orchestratorId,
+      agentName: orchestratorName,
+      role: "orchestrator",
+      tier: 1,
+      phase: "synthesize",
+    });
+  }
   p.sink({
     kind: "thinking",
     status: taskForceSynthesisStatus(p),
@@ -825,12 +949,25 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
     role: "orchestrator",
     tier: 1,
     phase: "synthesize",
-    model: modelLabel(p.active),
+    model: modelLabel(synthesisActive),
+  });
+
+  const synthesisOntology = await buildAgentRuntimeOntologyContext({
+    runSessionId: p.req.runId ?? `task-force:${p.chat.id}`,
+    installedAgent: p.orchestratorAgent,
+    projectId: p.chat.projectId,
+    projectPath: p.workingFolder,
+    runtimeKind: synthesisActive.kind,
+    task: p.req.userPrompt,
+    includeOperational: false,
   });
 
   const final = await p.picked.runner(
     {
-      systemPrompt: buildSynthesisSystemPrompt(p.orchestratorAgent, p.locale, taskForcePermission(p)),
+      systemPrompt: [
+        buildSynthesisSystemPrompt(p.orchestratorAgent, p.locale, taskForcePermission(p)),
+        synthesisOntology.prompt,
+      ].filter(Boolean).join("\n\n"),
       history,
       userPrompt: buildSynthesisPrompt({
         originalRequest: p.req.userPrompt,
@@ -840,9 +977,9 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
       }),
       images: p.req.images,
       backendLabel: p.picked.label,
-      model: p.active.model ?? undefined,
-      longContext: p.active.longContextEnabled ?? false,
-      effort: p.active.effort ?? undefined,
+      model: synthesisActive.model ?? undefined,
+      longContext: synthesisActive.longContextEnabled ?? false,
+      effort: synthesisActive.effort ?? undefined,
       signal: p.signal,
       ...taskForceRunnerBase(p),
       cwd: p.workingFolder ?? undefined,
@@ -888,6 +1025,8 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
       projectId: p.chat.projectId ?? null,
       agentId: p.chat.agentId,
       chatId: p.chat.id,
+      runId: p.req.runId,
+      nodeId: orchestratorId,
       cwdAtRequest: p.workingFolder ?? null,
       // 종합문은 여러 워커의 혼합 산출물이라 단일 borrowed-agent의 소유 학습으로 볼 수 없다.
       // 결정론 큐레이터가 agent_repo 제안을 project/session으로 강등하고 출처를 기록한다.

@@ -189,6 +189,9 @@ function setupMockAgentlasBridge(options) {
 
   try {
     window.localStorage.setItem("agentlas.onboarded", "1");
+    if (!options?.showFeatureUpdate) {
+      window.localStorage.setItem("agentlas.featureUpdate.ontology-chips-v1.2026-07-13.ack", "qa-suppressed");
+    }
     window.localStorage.setItem("agentlas.shellTour.dismissed.v1", "1");
     window.localStorage.setItem("agentlas.stormbreakerWarningDismissed", "1");
     if (!options.showPageTour) {
@@ -214,22 +217,24 @@ function setupMockAgentlasBridge(options) {
     trustGrade: "A",
     installedAt: now,
   };
+  const neutralOntologyFixture = options?.hubOntologyNeutralFixture === true;
   const builder = {
     id: "agent-2",
-    slug: "builder-agent",
-    name: "빌더 에이전트",
-    nameEn: "Builder Agent",
-    tagline: "빌드 실행 에이전트",
-    taglineEn: "Build execution agent",
+    slug: neutralOntologyFixture ? "research-analyst-agent" : "builder-agent",
+    name: neutralOntologyFixture ? "리서치 분석 에이전트" : "빌더 에이전트",
+    nameEn: neutralOntologyFixture ? "Research Analyst Agent" : "Builder Agent",
+    tagline: neutralOntologyFixture ? "근거 조사와 분석을 수행합니다." : "빌드 실행 에이전트",
+    taglineEn: neutralOntologyFixture ? "Researches and analyzes evidence." : "Build execution agent",
     kind: "agent",
     tone: "green",
     visibility: "local",
-    systemPrompt: "# Builder\n\nBuild Agentlas work clearly.",
+    systemPrompt: neutralOntologyFixture ? "# Research Analyst\n\nAnalyze evidence clearly." : "# Builder\n\nBuild Agentlas work clearly.",
     localPath: "/tmp/agentlas-builder",
     mcpServers: ["github"],
     preferredBackend: "codex",
     trustGrade: "A",
     installedAt: now,
+    ...(options?.experienceScenario ? { packageHash: "a".repeat(64), assetSource: "local-import" } : {}),
   };
   const researcher = {
     id: "agent-3",
@@ -299,7 +304,12 @@ function setupMockAgentlasBridge(options) {
     installedAt: now,
     orgChart: [
       { agentSlug: "agentlas-orchestrator", agentId: "agent-1", role: "CEO", reportsTo: null },
-      { agentSlug: "builder-agent", agentId: "agent-2", role: "Builder", reportsTo: "agentlas-orchestrator" },
+      {
+        agentSlug: neutralOntologyFixture ? "research-analyst-agent" : "builder-agent",
+        agentId: "agent-2",
+        role: neutralOntologyFixture ? "Research Analyst" : "Builder",
+        reportsTo: "agentlas-orchestrator",
+      },
     ],
   };
   const project = {
@@ -330,11 +340,16 @@ function setupMockAgentlasBridge(options) {
     ceo: { id: "ceo", name: "Founder HQ", role: "CEO", agentId: "agent-1" },
     divisions: [
       {
-        id: "builder-division",
-        name: "Build",
-        role: "Build",
+        id: neutralOntologyFixture ? "research-division" : "builder-division",
+        name: neutralOntologyFixture ? "Research" : "Build",
+        role: neutralOntologyFixture ? "Research" : "Build",
         agentId: "agent-1",
-        specialists: [{ id: "builder-node", name: "Builder Agent", role: "Builder", agentId: "agent-2" }],
+        specialists: [{
+          id: neutralOntologyFixture ? "research-node" : "builder-node",
+          name: neutralOntologyFixture ? "Research Analyst Agent" : "Builder Agent",
+          role: neutralOntologyFixture ? "Research Analyst" : "Builder",
+          agentId: "agent-2",
+        }],
       },
     ],
   };
@@ -381,6 +396,13 @@ function setupMockAgentlasBridge(options) {
     return agentFileContents[agentId];
   }
   const evolutionProposals = [];
+  const experiencePacks = [];
+  const experienceCandidates = [];
+  const operationalPublicProjections = [];
+  const tasteWorkflows = [];
+  const experienceReceipts = [];
+  const experienceIntents = [];
+  const experienceCloudUploads = [];
 
   window.__qa = {
     calls,
@@ -459,6 +481,18 @@ function setupMockAgentlasBridge(options) {
     team: {
       list: async () => installedAgents,
       install: async (input) => localized(input),
+      setLocalDisplayName: async (id, value) => {
+        record("team.setLocalDisplayName", { id, value });
+        const index = installedAgents.findIndex((agent) => agent.id === id);
+        if (index < 0) throw new Error("Mock installed agent not found");
+        const normalized = String(value || "").trim();
+        installedAgents[index] = {
+          ...installedAgents[index],
+          ...(normalized ? { localDisplayName: normalized } : {}),
+        };
+        if (!normalized) delete installedAgents[index].localDisplayName;
+        return { ...installedAgents[index] };
+      },
       importLocalFolder: async (input) => {
         record("team.importLocalFolder", input);
         const importDelayMs = Math.max(0, Number(options?.importDelayMs) || 0);
@@ -579,6 +613,53 @@ function setupMockAgentlasBridge(options) {
       remove: async () => {},
       setEnabled: async () => ({}),
       test: async () => ({ ok: true }),
+      recommendForBuild: async (input) => {
+        record("mcpTools.recommendForBuild", input);
+        if (options?.mcpBuildScenario === "recommendation-failure") {
+          throw new Error("mock MCP recommendation subsystem outage");
+        }
+        const candidates = options?.mcpBuildScenario
+          ? [
+              {
+                id: "mcp-browser-primary", catalogId: "agentlas-browser", name: "Agentlas Browser", capability: "browser",
+                reason: "request-match", recommendationReasonCode: "browser-interaction", requiresKey: false,
+                minimumPermission: "full", minimumScopes: ["approved-browser-session"], permissionBasis: "host-inferred",
+                permissionEnforced: false, source: "catalog", installed: false, enabled: true, keyState: "not-required",
+                readiness: "available", defaultSelected: true, fallbackGroup: "browser", priority: 100,
+              },
+              {
+                id: "mcp-browser-fallback", catalogId: "playwright", name: "Playwright", capability: "browser",
+                reason: "installed-match", recommendationReasonCode: "browser-interaction", requiresKey: false,
+                minimumPermission: "full", minimumScopes: ["approved-browser-session"], permissionBasis: "host-inferred",
+                permissionEnforced: false, source: "system-registry", installed: true, enabled: true, keyState: "not-required",
+                readiness: "ready", defaultSelected: true, fallbackGroup: "browser", priority: 80,
+              },
+              {
+                id: "mcp-github", catalogId: "github", name: "GitHub", capability: "github",
+                reason: "installed-match", recommendationReasonCode: "repository-work", requiresKey: true,
+                minimumPermission: "write", minimumScopes: ["selected-repository"], permissionBasis: "host-inferred",
+                permissionEnforced: false, source: "system-registry", installed: true, enabled: true, keyState: "present",
+                readiness: "ready", defaultSelected: true, fallbackGroup: "github", priority: 100,
+              },
+              {
+                id: "mcp-slack", catalogId: "slack", name: "Slack", capability: "slack",
+                reason: "request-match", recommendationReasonCode: "slack-work", requiresKey: true,
+                minimumPermission: "full", minimumScopes: ["selected-workspace-channels"], permissionBasis: "host-inferred",
+                permissionEnforced: false, source: "catalog", installed: false, enabled: true, keyState: "missing",
+                readiness: "missing-key", defaultSelected: false, fallbackGroup: "slack", priority: 100,
+              },
+            ]
+          : [];
+        return {
+          id: "mock-mcp-plan",
+          createdAt: now,
+          expiresAt: new Date(Date.parse(now) + 20 * 60 * 1000).toISOString(),
+          runtimeKind: input?.runtime?.kind ?? "codex",
+          status: "ready",
+          warningCode: null,
+          candidates,
+        };
+      },
     },
     openCrab: {
       readiness: async () =>
@@ -616,7 +697,30 @@ function setupMockAgentlasBridge(options) {
       build: async (payload) => {
         record("hephaestus.build", payload);
         lastRunId += 1;
-        return { runId: `build-run-${lastRunId}` };
+        const receiptItem = (candidateId, catalogId, name, capability, status, reason, fallbackGroup) => ({
+          candidateId, catalogId, name, capability, status, reason, fallbackGroup,
+        });
+        const mixed = options?.mcpBuildScenario === "mixed";
+        const empty = options?.mcpBuildScenario === "empty";
+        const browserFailure = receiptItem("mcp-browser-primary", "agentlas-browser", "Agentlas Browser", "browser", "failed", "connection_failed", "browser");
+        const browserFallback = receiptItem("mcp-browser-fallback", "playwright", "Playwright", "browser", "attached", "attached", "browser");
+        const githubAttached = receiptItem("mcp-github", "github", "GitHub", "github", "attached", "attached", "github");
+        return {
+          runId: `build-run-${lastRunId}`,
+          mcpReceipt: {
+            planId: payload?.mcpConsent?.planId ?? "mock-mcp-plan",
+            resolvedAt: now,
+            attached: mixed ? [browserFallback, githubAttached] : [],
+            skipped: empty ? [receiptItem("mcp-github", "github", "GitHub", "github", "skipped", "not_selected", "github")] : [],
+            missingKey: [],
+            failed: mixed || empty ? [browserFailure, ...(empty ? [receiptItem("mcp-browser-fallback", "playwright", "Playwright", "browser", "failed", "connection_failed", "browser")] : [])] : [],
+            degraded: [],
+            fallback: mixed ? [{ group: "browser", fromCandidateId: "mcp-browser-primary", toCandidateId: "mcp-browser-fallback", reason: "fallback_used" }] : [],
+            emptyMode: !mixed,
+            hostReceiptStored: !mixed,
+            hostReceiptWarning: mixed ? "receipt_storage_failed" : null,
+          },
+        };
       },
       buildEventChannel: (runId) => `build:${runId}`,
       buildReady: async (runId) => {
@@ -757,7 +861,12 @@ function setupMockAgentlasBridge(options) {
       stormbreaker: async () => ({ ok: true, runId: "storm-run" }),
       getSupervisor: async () => ({ enabled: true }),
       setSupervisor: async () => ({ enabled: true }),
-      getEngineToggles: async () => ({ stormbreakerAuto: false, networkAuto: false }),
+      // 추천 UI 스모크는 각 시나리오가 실제 자동 개입 게이트를 통과하도록
+      // 해당 엔진만 켠다. 기본 fixture는 둘 다 OFF라 제품 기본값을 보존한다.
+      getEngineToggles: async () => ({
+        stormbreakerAuto: options?.recommendMode === "pipeline",
+        networkAuto: options?.recommendMode === "network",
+      }),
       setEngineToggle: async (payload) => {
         record("hephaestus.setEngineToggle", payload);
         return { stormbreakerAuto: false, networkAuto: false };
@@ -1058,7 +1167,597 @@ function setupMockAgentlasBridge(options) {
       },
     },
     agentMemory: {
-      entries: async () => [],
+      entries: async (agentId) => options?.experienceScenario && agentId === "agent-2"
+        ? [{
+            id: "memory-browser-workflow",
+            scope: "agent_repo",
+            kind: "procedure",
+            content: "브라우저 게시 전 보이는 계정과 최종 화면을 확인한다.",
+            confidence: "high",
+            sensitivity: "internal",
+            evidence: [],
+            chatId: null,
+            projectPath: "/tmp/agentlas-qa",
+            createdAt: now,
+          }]
+        : [],
+    },
+    agentLearning: {
+      summary: async (agentId) => {
+        record("agentLearning.summary", agentId);
+        const files = Object.keys(filesForAgent(agentId));
+        const proposals = evolutionProposals.filter((proposal) => proposal.agentId === agentId);
+        return {
+          agentId,
+          runCount: agentId === "agent-2" ? 7 : 2,
+          lastRunAt: now,
+          legacyChatLinkedRunCount: agentId === "agent-2" ? 3 : 1,
+          legacyChatLinkedLastRunAt: now,
+          legacyChatLinkedFailureCount: agentId === "agent-2" ? 1 : 0,
+          durableMemoryCount: agentId === "agent-2" ? 4 : 1,
+          curationTurnCount: agentId === "agent-2" ? 7 : 2,
+          noNewMemoryTurnCount: agentId === "agent-2" ? 3 : 1,
+          memoryEventCount: agentId === "agent-2" ? 9 : 2,
+          memoryWrittenCount: agentId === "agent-2" ? 4 : 1,
+          memoryDedupedCount: agentId === "agent-2" ? 2 : 1,
+          memoryRedactedCount: agentId === "agent-2" ? 1 : 0,
+          memorySessionOnlyCount: agentId === "agent-2" ? 1 : 0,
+          memoryDiscardedCount: agentId === "agent-2" ? 1 : 0,
+          memoryMarkdownCount: files.includes("memory.md") ? 3 : 0,
+          failureCount: agentId === "agent-2" ? 1 : 0,
+          evolutionProposalCount: proposals.length,
+          legacyUnattributedCount: 2,
+          localFileCount: files.length,
+          localReceiptCount: proposals.reduce((count, proposal) => count + (proposal.receipts?.length || 0), 0),
+        };
+      },
+    },
+    experience: {
+      ontologySummary: async (agentId) => {
+        record("experience.ontologySummary", agentId);
+        const agentPacks = experiencePacks.filter((pack) => pack.agentId === agentId);
+        const packIds = new Set(agentPacks.map((pack) => pack.id));
+        const agentCandidates = experienceCandidates.filter((candidate) => packIds.has(candidate.packId));
+        const populated = Boolean(options?.experienceScenario);
+        return {
+          packCount: populated ? Math.max(2, agentPacks.length) : agentPacks.length,
+          candidateCount: populated ? Math.max(6, agentCandidates.length) : agentCandidates.length,
+          promotedCount: populated ? Math.max(3, agentCandidates.filter((item) => item.status === "promoted").length) : agentCandidates.filter((item) => item.status === "promoted").length,
+          tasteDraftCount: populated ? 2 : 0,
+          tasteNeedsEvidenceCount: populated ? 2 : 0,
+          tasteUnclassifiedCount: populated ? 1 : 0,
+          taskCount: populated ? 5 : 0,
+          evidenceCount: populated ? 8 : 0,
+          mcpCount: populated ? 2 : 0,
+          lineageCount: populated ? 4 : 0,
+          updateRelationCount: populated ? 3 : 0,
+          localReceiptCount: experienceReceipts.filter((receipt) => packIds.has(receipt.packId)).length + experienceIntents.filter((intent) => packIds.has(intent.packId)).length,
+          autoIntake: populated
+            ? {
+                candidateCreated: 4,
+                blocked: 2,
+                skipped: 1,
+                reasons: [
+                  { code: "privacy_sensitive", count: 2 },
+                  { code: "duplicate_memory", count: 1 },
+                ],
+              }
+            : { candidateCreated: 0, blocked: 0, skipped: 0, reasons: [] },
+        };
+      },
+      ontologyGraph: async (agentId) => {
+        record("experience.ontologyGraph", agentId);
+        const rootId = `ontology-agent:${agentId}`;
+        if (!options?.experienceScenario) {
+          return {
+            schema: "agentlas.ontology-relation-graph.v1",
+            agentId,
+            generatedAt: now,
+            nodes: [{ id: rootId, kind: "agent", ref: agentId, status: "active", source: "synthetic" }],
+            edges: [],
+            totalNodeCount: 1,
+            totalEdgeCount: 0,
+            omittedNodeCount: 0,
+            omittedEdgeCount: 0,
+            truncated: false,
+            limits: { nodes: 400, edges: 800 },
+          };
+        }
+        const node = (id, kind, status, source, extra = {}) => ({ id, kind, status, source, ...extra });
+        const edge = (id, from, to, kind, status = "active") => ({ id, from, to, kind, status });
+        const nodes = [
+          node(rootId, "agent", "active", "synthetic", { ref: agentId }),
+          node("pack:research-ops", "pack", "active", "relation-index", { ref: "research-ops", packId: "research-ops" }),
+          node("release:research-ops:r3", "release", "active", "relation-index", { ref: "research-ops-r3", packId: "research-ops" }),
+          node("release:research-ops:base", "release", "active", "relation-index", { ref: "sha256:8ab31e", packId: "research-ops" }),
+          node("item:source-triangulation", "experience-item", "promoted", "relation-index", { ref: "source-triangulation", packId: "research-ops" }),
+          node("item:claim-ledger", "experience-item", "promoted", "relation-index", { ref: "claim-ledger", packId: "research-ops" }),
+          node("item:failure-recovery", "experience-item", "promoted", "relation-index", { ref: "failure-recovery", packId: "research-ops" }),
+          node("candidate:browser-proof", "experience-item", "candidate", "private-candidate", { ref: "browser-proof", packId: "research-ops" }),
+          node("task:research", "task", "active", "relation-index", { ref: "research", safeLabel: "research", packId: "research-ops" }),
+          node("task:browser-verification", "task", "active", "relation-index", { ref: "browser-verification", safeLabel: "browser verification", packId: "research-ops" }),
+          node("task:source-audit", "task", "active", "relation-index", { ref: "source-audit", safeLabel: "source audit", packId: "research-ops" }),
+          node("mcp:browser", "mcp", "active", "relation-index", { ref: "agentlas-browser", safeLabel: "Agentlas Browser", packId: "research-ops" }),
+          node("mcp:github", "mcp", "active", "relation-index", { ref: "github", safeLabel: "GitHub", packId: "research-ops" }),
+          node("evidence:receipt-1", "evidence", "active", "relation-index", { ref: "receipt-1", packId: "research-ops" }),
+          node("evidence:receipt-2", "evidence", "active", "relation-index", { ref: "receipt-2", packId: "research-ops" }),
+          node("environment:darwin-arm64", "environment", "active", "relation-index", { ref: "darwin:arm64:codex", safeLabel: "macOS · Codex", packId: "research-ops" }),
+          node("pack:editorial-taste", "pack", "active", "relation-index", { ref: "editorial-taste", packId: "editorial-taste" }),
+          node("release:editorial-taste:r2", "release", "historical", "relation-index", { ref: "editorial-taste-r2", packId: "editorial-taste" }),
+          node("taste:density", "taste-draft", "pending-evidence", "taste-draft", { ref: "taste-density", packId: "editorial-taste" }),
+          node("taste:typography", "taste-draft", "pending-evidence", "taste-draft", { ref: "taste-typography", packId: "editorial-taste" }),
+          node("axis:density", "taste-axis", "active", "taste-draft", { ref: "density", safeLabel: "density", packId: "editorial-taste" }),
+          node("axis:typography", "taste-axis", "active", "taste-draft", { ref: "typography", safeLabel: "typography", packId: "editorial-taste" }),
+        ];
+        const edges = [
+          edge("edge:agent:research", rootId, "pack:research-ops", "agent_has_pack"),
+          edge("edge:pack:release", "pack:research-ops", "release:research-ops:r3", "has_release"),
+          edge("edge:release:base", "release:research-ops:r3", "release:research-ops:base", "exact_base_binding"),
+          edge("edge:release:item1", "release:research-ops:r3", "item:source-triangulation", "contains"),
+          edge("edge:release:item2", "release:research-ops:r3", "item:claim-ledger", "contains"),
+          edge("edge:release:item3", "release:research-ops:r3", "item:failure-recovery", "contains"),
+          edge("edge:pack:candidate", "pack:research-ops", "candidate:browser-proof", "contains_candidate", "pending"),
+          edge("edge:item1:research", "item:source-triangulation", "task:research", "applies_to_task"),
+          edge("edge:item1:audit", "item:source-triangulation", "task:source-audit", "applies_to_task"),
+          edge("edge:item2:audit", "item:claim-ledger", "task:source-audit", "applies_to_task"),
+          edge("edge:item3:browser", "item:failure-recovery", "task:browser-verification", "applies_to_task"),
+          edge("edge:release:browser", "release:research-ops:r3", "mcp:browser", "requires_mcp"),
+          edge("edge:browser:github", "mcp:browser", "mcp:github", "alternative_mcp", "pending"),
+          edge("edge:item1:evidence", "item:source-triangulation", "evidence:receipt-1", "supported_by"),
+          edge("edge:item2:evidence", "item:claim-ledger", "evidence:receipt-2", "supported_by"),
+          edge("edge:release:env", "release:research-ops:r3", "environment:darwin-arm64", "applies_in_environment"),
+          edge("edge:agent:taste-pack", rootId, "pack:editorial-taste", "agent_has_pack"),
+          edge("edge:taste-pack:release", "pack:editorial-taste", "release:editorial-taste:r2", "has_release", "historical"),
+          edge("edge:agent:taste1", rootId, "taste:density", "agent_has_taste_draft", "pending"),
+          edge("edge:agent:taste2", rootId, "taste:typography", "agent_has_taste_draft", "pending"),
+          edge("edge:taste1:axis", "taste:density", "axis:density", "classified_as_taste_axis", "pending"),
+          edge("edge:taste2:axis", "taste:typography", "axis:typography", "classified_as_taste_axis", "pending"),
+        ];
+        return {
+          schema: "agentlas.ontology-relation-graph.v1",
+          agentId,
+          generatedAt: now,
+          nodes,
+          edges,
+          totalNodeCount: nodes.length,
+          totalEdgeCount: edges.length,
+          omittedNodeCount: 0,
+          omittedEdgeCount: 0,
+          truncated: false,
+          limits: { nodes: 400, edges: 800 },
+        };
+      },
+      hubProjection: async (agentId, force) => {
+        record("experience.hubProjection", { agentId, force: force === true });
+        const hubOntologyAgentId = options?.hubOntologyAgentId || "agent-2";
+        if (!options?.experienceScenario || agentId !== hubOntologyAgentId) {
+          return {
+            schemaVersion: 1,
+            status: "unbound",
+            supported: false,
+            binding: null,
+            projection: null,
+          };
+        }
+        const agentDefinitionId = `agent-definition-${hubOntologyAgentId}`;
+        const agentReleaseId = `agent-release-${hubOntologyAgentId}-r7`;
+        return {
+          schemaVersion: 1,
+          status: "live",
+          supported: true,
+          binding: { agentDefinitionId, agentReleaseId },
+          projection: {
+            schemaVersion: 1,
+            agentDefinitionId,
+            agentReleaseId,
+            state: "live",
+            generatedAt: now,
+            revision: `rev_${"a".repeat(32)}`,
+            operationalChips: [{
+              chipId: "chip-browser-publish",
+              releaseId: "chip-browser-publish-r3",
+              kind: "operational",
+              displayName: "게시 전 최종 화면 확인",
+              summary: "브라우저 게시 전 보이는 계정과 최종 화면을 확인하는 재현 가능한 절차입니다.",
+              version: "3.0.0",
+              verification: "verified",
+              labels: ["browser", "publish"],
+              evidenceLabel: "재현 성공",
+              evidenceCount: 18,
+            }],
+            tasteChips: [{
+              chipId: "chip-editorial-taste",
+              releaseId: "chip-editorial-taste-r2",
+              kind: "taste",
+              displayName: "절제된 에디토리얼 톤",
+              summary: "사람 A/B 선택에서 과한 장식보다 간결한 정보 밀도를 선호한 Taste 근거입니다.",
+              version: "2.1.0",
+              verification: "requested",
+              labels: ["editorial", "pairwise"],
+              evidenceLabel: "사람 A/B 선택",
+              evidenceCount: 24,
+            }],
+            loadout: {
+              revision: `rev_${"b".repeat(32)}`,
+              state: "ready",
+              entries: [{
+                chipId: "chip-browser-publish",
+                releaseId: "chip-browser-publish-r3",
+                kind: "operational",
+                state: "attached",
+              }],
+              changedAt: now,
+            },
+            scheduledNextSession: {
+              revision: `rev_${"c".repeat(32)}`,
+              state: "pending-next-session",
+              entries: [{
+                chipId: "chip-editorial-taste",
+                releaseId: "chip-editorial-taste-r2",
+                kind: "taste",
+                state: "scheduled-next-session",
+              }],
+              changedAt: now,
+            },
+            recommendations: [{
+              recommendationId: "recommendation-operational-r4",
+              source: "Hephaestus Network",
+              summary: "실패 복구 범위를 보강하는 Operational 칩 업데이트",
+              reasons: ["최근 게시 실패 복구 작업과 일치"],
+              tradeoffs: ["다음 세션부터만 적용"],
+              proposedChips: [{
+                chipId: "chip-browser-publish",
+                releaseId: "chip-browser-publish-r4",
+                kind: "operational",
+                state: "pending-approval",
+              }],
+              requiresApproval: true,
+              createdAt: now,
+              expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+            }],
+            pendingAttachApprovals: [{
+              approvalId: "approval-operational-r4",
+              recommendationId: "recommendation-operational-r4",
+              expectedLoadoutRevision: `rev_${"b".repeat(32)}`,
+              selectedChips: [{
+                chipId: "chip-browser-publish",
+                releaseId: "chip-browser-publish-r4",
+                kind: "operational",
+                state: "pending-approval",
+              }],
+              createdAt: now,
+              expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+            }],
+          },
+        };
+      },
+      createPack: async (input) => {
+        record("experience.createPack", input);
+        const pack = {
+          id: `mock-experience-pack-${experiencePacks.length + 1}`,
+          agentId: input.agentId,
+          projectId: input.projectId ?? null,
+          projectPath: input.projectGrant?.path ?? null,
+          environmentKey: "mock-environment",
+          environmentProfile: {
+            schema: "agentlas.experience-environment-profile.v1",
+            os: "agentlas.env.v1/os/macos",
+            arch: "agentlas.env.v1/arch/arm64",
+            runtime: "agentlas.env.v1/runtime/codex",
+            constraints: ["agentlas.env.v1/os/macos", "agentlas.env.v1/arch/arm64", "agentlas.env.v1/runtime/codex"],
+          },
+          autoManaged: false,
+          name: input.name,
+          description: input.description ?? "",
+          basePackageHash: "a".repeat(64),
+          baseAgentDefinitionId: null,
+          baseAgentReleaseId: null,
+          basePackageHashVersion: null,
+          mcpRequirements: [],
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        };
+        experiencePacks.unshift(pack);
+        return pack;
+      },
+      listPacks: async (input) => experiencePacks.filter((pack) => pack.agentId === input.agentId),
+      captureFromMemory: async (input) => {
+        record("experience.captureFromMemory", input);
+        const pack = experiencePacks.find((item) => item.id === input.packId);
+        if (!pack) throw new Error("No mock Experience Pack");
+        const existing = experienceCandidates.find((item) => item.packId === input.packId && item.sourceMemoryId === input.sourceMemoryId);
+        if (existing) return existing;
+        const candidate = {
+          id: `mock-experience-candidate-${experienceCandidates.length + 1}`,
+          packId: input.packId,
+          agentId: pack.agentId,
+          sourceMemoryId: input.sourceMemoryId,
+          summary: "브라우저 게시 전 보이는 계정과 최종 화면을 확인한다.",
+          sensitivity: "internal",
+          confidence: "high",
+          status: "candidate",
+          outcomeStatus: "unverified",
+          publicSafe: false,
+          taskSignatures: ["agentlas.task.v1/browser-automation"],
+          autoManaged: false,
+          createdAt: now,
+          updatedAt: now,
+          promotedAt: null,
+        };
+        experienceCandidates.unshift(candidate);
+        return candidate;
+      },
+      listCandidates: async (packId) => experienceCandidates.filter((item) => item.packId === packId),
+      listOperationalPublicProjections: async (packId) => operationalPublicProjections.filter((item) => item.packId === packId),
+      saveOperationalPublicProjection: async (input) => {
+        record("experience.saveOperationalPublicProjection", input);
+        const pack = experiencePacks.find((item) => item.id === input.packId);
+        if (!pack) throw new Error("No mock Experience Pack");
+        let projection = operationalPublicProjections.find((item) => item.packId === input.packId);
+        const value = {
+          projectionId: projection?.projectionId || `opx_${"f".repeat(48)}`,
+          packId: input.packId,
+          agentId: pack.agentId,
+          basePackageHash: pack.basePackageHash,
+          baseAgentDefinitionId: pack.baseAgentDefinitionId || `agd_${"a".repeat(48)}`,
+          baseAgentReleaseId: pack.baseAgentReleaseId || `agr_${"b".repeat(48)}`,
+          environmentKey: pack.environmentKey,
+          sourceBindings: input.sourceCandidateIds.map((candidateId) => ({ candidateId, sourceItemHash: `sha256:${"c".repeat(64)}` })),
+          title: input.title,
+          instructions: input.instructions,
+          taskSignatures: input.taskSignatures,
+          environmentConstraints: input.environmentConstraints,
+          sourceSnapshotHash: "d".repeat(64),
+          proposalHash: "e".repeat(64),
+          privacyIssueCodes: [],
+          status: "proposal",
+          confirmationHash: null,
+          confirmedAt: null,
+          createdAt: projection?.createdAt || now,
+          updatedAt: now,
+        };
+        if (projection) Object.assign(projection, value);
+        else {
+          projection = value;
+          operationalPublicProjections.unshift(projection);
+        }
+        return projection;
+      },
+      confirmOperationalPublicProjection: async (input) => {
+        record("experience.confirmOperationalPublicProjection", input);
+        const projection = operationalPublicProjections.find((item) => item.projectionId === input.projectionId);
+        if (!projection) throw new Error("No mock Operational projection");
+        projection.status = "confirmed";
+        projection.confirmationHash = "f".repeat(64);
+        projection.confirmedAt = now;
+        return projection;
+      },
+      listTasteDrafts: async (agentId) => options?.experienceScenario && agentId === (options?.hubOntologyAgentId || "agent-2") ? [
+        {
+          id: "taste-draft-editorial-1",
+          agentId,
+          sourceMemoryId: "memory-taste-editorial-1",
+          statement: "과한 장식보다 비대칭 에디토리얼 레이아웃을 선호합니다.",
+          sensitivity: "internal",
+          confidence: "medium",
+          axisCandidates: ["composition", "density"],
+          taskSignatures: ["agentlas.task.v1/design"],
+          basePackageHash: "a".repeat(64),
+          baseAgentDefinitionId: null,
+          baseAgentReleaseId: null,
+          evidenceState: "pairwise-required",
+          status: "observation",
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: "taste-draft-motion-2",
+          agentId,
+          sourceMemoryId: "memory-taste-motion-2",
+          statement: "전환은 빠르되 시선 이동을 방해하는 튕김 효과는 피합니다.",
+          sensitivity: "internal",
+          confidence: "high",
+          axisCandidates: ["motion", "pacing"],
+          taskSignatures: ["agentlas.task.v1/design"],
+          basePackageHash: "a".repeat(64),
+          baseAgentDefinitionId: `agent-definition-${agentId}`,
+          baseAgentReleaseId: `agent-release-${agentId}-r7`,
+          evidenceState: "pairwise-required",
+          status: "observation",
+          createdAt: now,
+          updatedAt: now,
+        },
+      ] : [],
+      listTasteWorkflows: async (agentId) => tasteWorkflows.filter((item) => item.agentId === agentId),
+      saveTasteGeneralization: async (input) => {
+        record("experience.saveTasteGeneralization", input);
+        const existing = tasteWorkflows.find((item) => item.draftId === input.draftId);
+        const workflow = Object.assign(existing || {}, {
+          workflowId: existing?.workflowId || `twf_${"a".repeat(48)}`,
+          draftId: input.draftId,
+          agentId: input.agentId,
+          basePackageHash: "a".repeat(64),
+          baseAgentDefinitionId: `agent-definition-${input.agentId}`,
+          baseAgentReleaseId: `agent-release-${input.agentId}-r7`,
+          environmentKey: "env:mock",
+          tasteStyleId: `tst_${"b".repeat(48)}`,
+          releaseId: `tsr_${"c".repeat(48)}`,
+          title: input.title,
+          summary: input.summary,
+          ruleStatement: input.ruleStatement,
+          axis: input.axis,
+          taskSignature: input.taskSignature,
+          contexts: input.contexts,
+          generalizationHash: `sha256:${"d".repeat(64)}`,
+          privacyIssueCodes: [],
+          status: "proposal",
+          confirmedAt: null,
+          previewNames: null,
+          previewRights: null,
+          remotePreviewAssetIds: null,
+          remoteRevision: null,
+          remoteErrorCode: null,
+          createdAt: existing?.createdAt || now,
+          updatedAt: now,
+        });
+        if (!existing) tasteWorkflows.unshift(workflow);
+        return workflow;
+      },
+      confirmTasteGeneralization: async (input) => {
+        record("experience.confirmTasteGeneralization", input);
+        const workflow = tasteWorkflows.find((item) => item.workflowId === input.workflowId);
+        if (!workflow) throw new Error("No mock Taste workflow");
+        workflow.status = "confirmed";
+        workflow.confirmedAt = now;
+        return workflow;
+      },
+      pickTastePreviews: async () => null,
+      prepareTastePreviews: async (input) => {
+        record("experience.prepareTastePreviews", input);
+        const workflow = tasteWorkflows.find((item) => item.workflowId === input.workflowId);
+        if (!workflow) throw new Error("No mock Taste workflow");
+        workflow.previewNames = ["left.webp", "right.webp"];
+        workflow.previewRights = input.rightsStatus;
+        return workflow;
+      },
+      uploadTasteDraft: async (input) => {
+        record("experience.uploadTasteDraft", input);
+        const workflow = tasteWorkflows.find((item) => item.workflowId === input.workflowId);
+        if (!workflow) throw new Error("No mock Taste workflow");
+        workflow.status = "moderation-pending";
+        workflow.remotePreviewAssetIds = [`tap_${"1".repeat(48)}`, `tap_${"2".repeat(48)}`];
+        workflow.remoteRevision = `rev_${"e".repeat(32)}`;
+        return workflow;
+      },
+      promote: async (input) => {
+        record("experience.promote", input);
+        const candidate = experienceCandidates.find((item) => item.id === input.candidateId);
+        if (!candidate) throw new Error("No mock Experience candidate");
+        candidate.status = "promoted";
+        candidate.outcomeStatus = "attested";
+        candidate.promotedAt = now;
+        const receipt = {
+          id: `mock-experience-receipt-${experienceReceipts.length + 1}`,
+          packId: candidate.packId,
+          candidateId: candidate.id,
+          agentId: candidate.agentId,
+          action: "promote",
+          explicitConsent: true,
+          verificationStatus: "attested",
+          verificationMethod: "user-attested",
+          evidenceHash: "b".repeat(64),
+          publicSafe: false,
+          createdAt: now,
+        };
+        experienceReceipts.unshift(receipt);
+        return receipt;
+      },
+      listPromotionReceipts: async (packId) => experienceReceipts.filter((item) => item.packId === packId),
+      createExportIntent: async (input) => {
+        record("experience.createExportIntent", input);
+        const pack = experiencePacks.find((item) => item.id === input.packId);
+        if (!pack) throw new Error("No mock Experience Pack");
+        const intent = {
+          id: `mock-experience-intent-${experienceIntents.length + 1}`,
+          packId: pack.id,
+          agentId: pack.agentId,
+          visibility: input.visibility,
+          status: "local_intent",
+          manifestHash: "c".repeat(64),
+          createdAt: now,
+        };
+        experienceIntents.unshift(intent);
+        return intent;
+      },
+      listExportIntents: async (packId) => experienceIntents.filter((item) => item.packId === packId),
+      cloudSave: async (input) => {
+        record("experience.cloudSave", input);
+        const pack = experiencePacks.find((item) => item.id === input.packId);
+        if (!pack) throw new Error("No mock Experience Pack");
+        if (input.requestedVisibility === "private") {
+          pack.baseAgentDefinitionId = pack.baseAgentDefinitionId || `agd_${"a".repeat(48)}`;
+          pack.baseAgentReleaseId = pack.baseAgentReleaseId || `agr_${"b".repeat(48)}`;
+          pack.basePackageHashVersion = "path-sha256-executable-v2";
+        }
+        const existing = experienceCloudUploads.find((item) =>
+          item.packId === input.packId && item.requestedVisibility === input.requestedVisibility);
+        if (existing) return existing;
+        const isPublic = input.requestedVisibility === "public";
+        const hashDigit = isPublic ? "d" : "c";
+        const bundleId = `exb_${hashDigit.repeat(48)}`;
+        const bundleHash = `sha256:${hashDigit.repeat(64)}`;
+        const receipt = {
+          schema: "agentlas.experience-upload-receipt.v1",
+          uploadId: isPublic ? `exu_${"2".repeat(48)}` : `exu_${"1".repeat(48)}`,
+          bundleId,
+          bundleHash,
+          experiencePackId: `exp_${"a".repeat(48)}`,
+          experienceReleaseId: `exr_${"b".repeat(48)}`,
+          ownerWorkspaceRef: "workspace:qa-experience-owner",
+          status: isPublic ? "verification-requested" : "draft-saved",
+          requestedVisibility: input.requestedVisibility,
+          revision: isPublic ? `rev_${"2".repeat(32)}` : `rev_${"1".repeat(32)}`,
+          createdAt: now,
+          updatedAt: now,
+        };
+        const forcedState = options?.experienceCloudState;
+        const upload = {
+          id: isPublic ? "mock-cloud-public" : "mock-cloud-private",
+          packId: pack.id,
+          requestedVisibility: input.requestedVisibility,
+          bundleId,
+          bundleHash,
+          bundle: {
+            schemaVersion: "agentlas.experience-bundle.v1",
+            kind: "agentlas-experience-bundle",
+            bundleId,
+            bundleHash,
+            requestedVisibility: input.requestedVisibility,
+            pack: { experiencePackId: receipt.experiencePackId, releaseId: receipt.experienceReleaseId },
+            items: [], sourceAttestations: [], privacy: {},
+          },
+          idempotencyKey: isPublic ? "mock-public-idempotency" : "mock-private-idempotency",
+          remoteUploadId: receipt.uploadId,
+          remoteRevision: receipt.revision,
+          state: forcedState || (isPublic ? "verification-requested" : "private-saved"),
+          errorCode: forcedState === "conflict" ? "revision_conflict" : forcedState === "offline" ? "offline" : null,
+          errorMessage: forcedState === "conflict" ? "Mock server revision conflict" : forcedState === "offline" ? "Mock network unavailable" : null,
+          receipt,
+          attemptCount: 1,
+          createdAt: now,
+          updatedAt: now,
+        };
+        experienceCloudUploads.unshift(upload);
+        return upload;
+      },
+      cloudList: async (packId) => experienceCloudUploads.filter((item) => item.packId === packId),
+      cloudReconcile: async (input) => {
+        record("experience.cloudReconcile", input);
+        const upload = experienceCloudUploads.find((item) => item.id === input.localUploadId);
+        if (!upload) throw new Error("No mock Experience Cloud upload");
+        if (upload.requestedVisibility === "public" && upload.state === "verification-requested") {
+          upload.state = "verification-pending";
+          upload.receipt.status = "verification-pending";
+          upload.remoteRevision = `rev_${"3".repeat(32)}`;
+          upload.receipt.revision = upload.remoteRevision;
+        }
+        return upload;
+      },
+      cloudExport: async (input) => {
+        record("experience.cloudExport", input);
+        const upload = experienceCloudUploads.find((item) => item.id === input.localUploadId);
+        if (!upload) throw new Error("No mock Experience Cloud upload");
+        return { bundle: upload.bundle, receipt: upload.receipt };
+      },
+      cloudWithdraw: async (input) => {
+        record("experience.cloudWithdraw", input);
+        const upload = experienceCloudUploads.find((item) => item.id === input.localUploadId);
+        if (!upload) throw new Error("No mock Experience Cloud upload");
+        upload.state = "withdrawn";
+        upload.receipt.status = "withdrawn";
+        return upload;
+      },
     },
     agentEvolution: {
       list: async (agentId) => evolutionProposals.filter((proposal) => proposal.agentId === agentId),

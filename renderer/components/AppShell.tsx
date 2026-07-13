@@ -8,7 +8,7 @@ import { useRouter } from "next/navigation";
 import { Sidebar } from "./Sidebar";
 import { MenuBridge } from "./MenuBridge";
 import { ImportAgentsModal } from "./ImportAgentsModal";
-import { ipc } from "@/lib/ipc";
+import { ipc, updaterEvents } from "@/lib/ipc";
 import { SideNav } from "./SideNav";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { usePathname } from "next/navigation";
@@ -18,6 +18,7 @@ import { IconLayers, IconBug, IconCheck } from "./Icon";
 import { PageTour, replayCurrentPageTour } from "./PageTour";
 import { BuildDoneToast } from "./BuildDoneToast";
 import { BrowserActionApprovalSheet } from "./BrowserActionApprovalSheet";
+import { OntologyChipFeatureUpdateModal } from "./OntologyChipFeatureUpdateModal";
 import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import {
   isOberonBackgroundJobActive,
@@ -36,6 +37,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [importOpen, setImportOpen] = useState(false);
   const [pendingConfirmations, setPendingConfirmations] = useState(0);
   const [oberonJobs, setOberonJobs] = useState<OberonBackgroundJob[]>([]);
+  const [appUpdateBusy, setAppUpdateBusy] = useState(true);
   const router = useRouter();
   const pathname = usePathname() ?? "/";
   const { locale } = useT();
@@ -162,7 +164,44 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
+  // A release/update safety surface has higher priority than optional feature
+  // news. Start fail-closed until the current updater state is known, then keep
+  // the flag synchronized with the same main-owned broadcast as UpdateBanner.
+  useEffect(() => {
+    let cancelled = false;
+    const sync = (status: string) => {
+      if (cancelled) return;
+      setAppUpdateBusy([
+        "available",
+        "downloading",
+        "downloaded",
+        "installing",
+        "manual-required",
+        "incompatible",
+        "recovery-required",
+      ].includes(status));
+    };
+    const api = ipc();
+    if (api?.updater?.getState) {
+      void api.updater.getState().then((state) => sync(state.status)).catch(() => sync("idle"));
+    } else {
+      sync("idle");
+    }
+    const off = updaterEvents()?.onState((state) => sync(state.status));
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, []);
+
   const showWorkspaceSidebar = pathname.startsWith("/chat") || pathname.startsWith("/project");
+  const featureUpdatePath = pathname.replace(/\.html$/, "");
+  const featureUpdateEligible =
+    (featureUpdatePath === "/" || featureUpdatePath === "/dashboard" || featureUpdatePath.startsWith("/library")) &&
+    !importOpen &&
+    pendingConfirmations === 0 &&
+    !appUpdateBusy &&
+    !oberonJobs.some(isOberonBackgroundJobActive);
 
   return (
     <div
@@ -199,6 +238,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <PageTour pathname={pathname} />
       <BuildDoneToast />
       <BrowserActionApprovalSheet />
+      <OntologyChipFeatureUpdateModal
+        eligible={featureUpdateEligible}
+        locale={locale}
+        onOpen={() => router.push("/library/agents?tab=ontology")}
+      />
       <BackgroundWorkPill
         jobs={oberonJobs}
         avoidComposer={pathname.startsWith("/chat")}

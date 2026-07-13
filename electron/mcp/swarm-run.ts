@@ -9,6 +9,15 @@ import { tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
 import type { BorrowedTaskForceParams } from "./borrowed-task-force";
 import { runSwarm, type SwarmBoard, type SwarmEvent, type SwarmTask } from "./swarm-engine";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
+import {
+  defaultWorkloadAllocation,
+  normalizeWorkloadAllocation,
+  resolveWorkloadAllocation,
+  workloadAllocationPromptExample,
+  workloadAllocationReceipt,
+  type WorkloadAllocation,
+} from "../runtime/workload-routing";
+import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
 
 // 총 작업 수/라운드 안전 상한 — 무한 스폰·무한루프로부터 컴/지갑을 지키는 최후 방어선(엔진이 강제).
 // 각 작업 = 실 LLM 호출이라 비용이 나가므로 보수적으로. (동시 실행 수는 별개로 슬라이더가 제어)
@@ -34,12 +43,17 @@ function swarmProtocol(goal: string, board: SwarmBoard, task: SwarmTask): string
     "",
     "RULES:",
     "1. Do your task concretely with available tools/files in the current working folder.",
-    "2. If the goal needs MORE work beyond your task — split into concrete next steps — end your",
-    "   message with a `## Spawn` block, one task per line as `role? | brief`:",
+    "2. If the goal needs MORE work beyond your task, split it into concrete next steps.",
+    "   Judge each child's complexity, risk, context size, and precision needs yourself.",
+    "   Assign provider-neutral capacity independently; do not put every worker on frontier.",
+    "   End with a `## Spawn` JSON block when spawning:",
     "   ## Spawn",
-    "   - webmaster | build the landing page structure",
-    "   - | run the tests and report failures",
-    "   (role is optional; omit it for any-worker tasks. Do NOT spawn if the goal is already met.)",
+    "   ```json",
+    `   {"tasks":[{"role":"optional","brief":"concrete child task","allocation":${workloadAllocationPromptExample("delegate")}}]${!task.spawnedBy ? `,"synthesis":${workloadAllocationPromptExample("synthesize")}` : ""}}`,
+    "   ```",
+    !task.spawnedBy
+      ? "   You are the initial seed: always include the synthesis allocation; use tasks:[] if no child is needed."
+      : "   Omit the block if no child is needed. Role is optional.",
     "3. Do NOT restate the whole goal. Do NOT invent work that isn't needed — over-spawning wastes the user's money.",
     "4. Everything above the `## Spawn` block is your result and is shared with peers on the blackboard.",
   ]
@@ -50,14 +64,54 @@ function swarmProtocol(goal: string, board: SwarmBoard, task: SwarmTask): string
 /** 에이전트 출력에서 `## Spawn` 블록을 분리 → { result(본문), spawn[] }. */
 export function parseSwarmOutput(text: string): {
   result: string;
-  spawn: Array<{ title: string; brief: string; role?: string }>;
+  spawn: Array<{ title: string; brief: string; role?: string; allocation: WorkloadAllocation }>;
+  synthesisAllocation: WorkloadAllocation | null;
 } {
   // 앞 개행을 먹지 않도록 수평 공백만([ \t]) 허용 — `\s`는 개행 포함이라 슬라이스가 어긋난다.
   const m = text.match(/^[ \t]*##[ \t]*Spawn[ \t]*$/im);
-  if (!m || m.index === undefined) return { result: text.trim(), spawn: [] };
+  if (!m || m.index === undefined) return { result: text.trim(), spawn: [], synthesisAllocation: null };
   const result = text.slice(0, m.index).trim();
-  const block = text.slice(m.index + m[0].length).split("\n"); // "## Spawn" 줄 다음부터
-  const spawn: Array<{ title: string; brief: string; role?: string }> = [];
+  const afterHeading = text.slice(m.index + m[0].length);
+  const fence = afterHeading.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const spawn: Array<{ title: string; brief: string; role?: string; allocation: WorkloadAllocation }> = [];
+  if (fence) {
+    try {
+      const parsed = JSON.parse(fence[1].trim());
+      const obj = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : {};
+      const rawTasks = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(obj.tasks)
+          ? obj.tasks
+          : [];
+      for (const raw of rawTasks.slice(0, 12)) {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+        const item = raw as Record<string, unknown>;
+        const brief = typeof item.brief === "string" ? item.brief.trim() : "";
+        const title = typeof item.title === "string" ? item.title.trim() : brief.slice(0, 80);
+        const role = typeof item.role === "string" ? item.role.trim() || undefined : undefined;
+        if (brief) {
+          spawn.push({
+            title: title || brief.slice(0, 80),
+            brief,
+            role,
+            allocation: normalizeWorkloadAllocation(item.allocation, "delegate"),
+          });
+        }
+      }
+      return {
+        result,
+        spawn,
+        synthesisAllocation: obj.synthesis
+          ? normalizeWorkloadAllocation(obj.synthesis, "synthesize")
+          : null,
+      };
+    } catch {
+      // Fall through to the legacy line parser below.
+    }
+  }
+  const block = afterHeading.split("\n"); // legacy `role | brief` compatibility
   for (const raw of block) {
     const line = raw.trim();
     if (!line.startsWith("-")) {
@@ -75,10 +129,17 @@ export function parseSwarmOutput(text: string): {
     } else {
       brief = body.trim();
     }
-    if (brief) spawn.push({ title: brief.slice(0, 80), brief, role });
+    if (brief) {
+      spawn.push({
+        title: brief.slice(0, 80),
+        brief,
+        role,
+        allocation: defaultWorkloadAllocation("delegate", "legacy-spawn-format"),
+      });
+    }
     if (spawn.length >= 12) break; // 한 턴 스폰 상한
   }
-  return { result, spawn };
+  return { result, spawn, synthesisAllocation: null };
 }
 
 /** 스웜 실행 엔트리 — runMcpInvocation이 호출. 최종 텍스트를 반환하고 채팅에 저장한다. */
@@ -167,22 +228,66 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
 
   // 한 작업을 활성 런타임으로 실행 → 텍스트 → `## Spawn` 파싱.
   const runOneTask = async (task: SwarmTask, board: SwarmBoard, signal?: AbortSignal) => {
-    emit(task, { kind: "thinking", status: p.locale === "ko" ? `${task.title}` : task.title });
+    const resolution = task.allocation
+      ? resolveWorkloadAllocation({
+          allocation: task.allocation,
+          runtime: p.active,
+          phase: "delegate",
+          manualOverride: p.runtimeOverride,
+        })
+      : null;
+    const active = resolution?.runtime ?? p.active;
+    if (resolution) {
+      tryRecordRunEvent({
+        runId,
+        kind: "workload_allocation",
+        chatId: p.chat.id,
+        nodeId: task.id,
+        agentId: task.id,
+        payload: workloadAllocationReceipt(resolution),
+      });
+      if (resolution.resolutionCodes.includes("tier-unavailable-active-preserved")) {
+        emit(task, {
+          kind: "tool-use",
+          status: p.locale === "ko"
+            ? `${task.allocation?.tier} 등급 모델이 없어 활성 모델을 유지합니다.`
+            : `${task.allocation?.tier} tier unavailable; preserving the active model.`,
+        });
+      }
+    }
+    emit(task, {
+      kind: "thinking",
+      status: p.locale === "ko" ? `${task.title}` : task.title,
+      model: active.model ?? active.kind,
+    });
+    const ontology = await buildAgentRuntimeOntologyContext({
+      runSessionId: runId,
+      installedAgent: p.orchestratorAgent,
+      projectId: p.chat.projectId,
+      projectPath: p.workingFolder,
+      runtimeKind: active.kind,
+      task: task.brief || task.title,
+      includeOperational: false,
+    });
     const result = await p.picked.runner(
       {
         // The canonical package prompt is authoritative, but the per-task
         // swarm protocol is invocation context. Passing both as the fallback
         // silently drops the protocol whenever a canonical prompt file exists.
-        systemPrompt: `${buildEffectiveAgentSystemPrompt(
-          p.orchestratorAgent.id,
-          p.orchestratorAgent.systemPrompt,
-        )}\n\n${swarmProtocol(goal, board, task)}`,
+        systemPrompt: [
+          buildEffectiveAgentSystemPrompt(
+            p.orchestratorAgent.id,
+            p.orchestratorAgent.systemPrompt,
+          ),
+          swarmProtocol(goal, board, task),
+          ontology.prompt,
+        ].filter(Boolean).join("\n\n"),
         history: [],
         userPrompt: task.brief || task.title,
         backendLabel: p.picked.label,
-        model: p.active.model ?? undefined,
-        longContext: p.active.longContextEnabled ?? false,
-        effort: p.active.effort ?? undefined,
+        model: active.model ?? undefined,
+        longContext: active.longContextEnabled ?? false,
+        effort: active.effort ?? undefined,
         signal: signal ?? p.signal,
         permission: p.req.permissions,
         cwd: p.workingFolder ?? undefined,
@@ -200,7 +305,11 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
     );
     emit(task, { kind: "tool-use", done: true, status: p.locale === "ko" ? `${task.title} 완료` : `${task.title} done` });
     const parsed = parseSwarmOutput(result.text);
-    return { result: parsed.result, spawn: parsed.spawn };
+    return {
+      result: parsed.result,
+      spawn: parsed.spawn,
+      synthesisAllocation: parsed.synthesisAllocation ?? undefined,
+    };
   };
 
   // 완료된 블랙보드를 하나로 종합 → 메인 버블에 스트리밍.
@@ -208,8 +317,44 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
     p.sink({ ...ev, agentId: "swarm-synthesizer", agentName: "Swarm Synthesizer", role: "synthesizer", phase: "synthesize" });
   const synthesize = async (board: SwarmBoard, signal?: AbortSignal): Promise<string> => {
     const done = board.tasks.filter((t) => t.status === "done" && t.result);
-    synthEmit({ kind: "thinking", status: p.locale === "ko" ? "스웜 결과 종합 중…" : "Synthesizing swarm results…" });
+    const resolution = resolveWorkloadAllocation({
+      allocation: board.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
+      runtime: p.active,
+      phase: "synthesize",
+      manualOverride: p.runtimeOverride,
+    });
+    const active = resolution.runtime;
+    tryRecordRunEvent({
+      runId,
+      kind: "workload_allocation",
+      chatId: p.chat.id,
+      nodeId: "swarm-synthesizer",
+      agentId: p.orchestratorAgent.id,
+      payload: workloadAllocationReceipt(resolution),
+    });
+    if (resolution.resolutionCodes.includes("tier-unavailable-active-preserved")) {
+      synthEmit({
+        kind: "tool-use",
+        status: p.locale === "ko"
+          ? `${resolution.allocation.tier} 종합 등급을 사용할 수 없어 활성 모델로 종합합니다.`
+          : `${resolution.allocation.tier} synthesis tier unavailable; preserving the active model.`,
+      });
+    }
+    synthEmit({
+      kind: "thinking",
+      status: p.locale === "ko" ? "스웜 결과 종합 중…" : "Synthesizing swarm results…",
+      model: active.model ?? active.kind,
+    });
     const pieces = done.map((t, i) => `### ${i + 1}. ${t.title}\n${t.result}`).join("\n\n");
+    const ontology = await buildAgentRuntimeOntologyContext({
+      runSessionId: runId,
+      installedAgent: p.orchestratorAgent,
+      projectId: p.chat.projectId,
+      projectPath: p.workingFolder,
+      runtimeKind: active.kind,
+      task: goal,
+      includeOperational: false,
+    });
     const result = await p.picked.runner(
       {
         systemPrompt: [
@@ -222,13 +367,14 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
           "Integrate them into ONE coherent final answer for the user. Reconcile overlaps, note anything incomplete.",
           "Do not just concatenate. Do not include a `## Spawn` block.",
           `SHARED GOAL: ${goal}`,
+          ontology.prompt,
         ].join("\n"),
         history: [],
         userPrompt: pieces || "(no completed results)",
         backendLabel: p.picked.label,
-        model: p.active.model ?? undefined,
-        longContext: p.active.longContextEnabled ?? false,
-        effort: p.active.effort ?? undefined,
+        model: active.model ?? undefined,
+        longContext: active.longContextEnabled ?? false,
+        effort: active.effort ?? undefined,
         signal: signal ?? p.signal,
         permission: p.req.permissions,
         cwd: p.workingFolder ?? undefined,

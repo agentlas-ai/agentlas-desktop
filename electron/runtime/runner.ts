@@ -99,6 +99,46 @@ Rules:
 - Skip this when the user's answer wouldn't change what you do, or when a sensible default is obvious — pick it and proceed.
 - After the question block(s), do NOT also answer. The user's selections arrive as their next message.`;
 
+const BUILD_PROMPT_SENTINEL = "<!-- agentlas-build-system-prompt/v1 -->";
+export const MAX_BUILD_SYSTEM_PROMPT_CHARS = 48_000;
+export const BUILD_MCP_DEGRADED_GUARD_RESERVE_CHARS = 768;
+
+/**
+ * Build is a package-authoring surface, not ordinary chat. This wrapper keeps
+ * language, tool authority, and the one-batch question wire contract while
+ * deliberately excluding the general connection skill and surface protocol.
+ */
+export function wrapBuildSystemPrompt(
+  builderPrompt: string,
+  locale: RuntimeLocale,
+): string {
+  const language = locale === "ko"
+    ? "Use Korean for user-visible questions, progress updates, and the final summary unless the user explicitly requests another language. Generated runtime instruction files follow the builder's canonical language authority."
+    : "Use English for user-visible questions, progress updates, and the final summary unless the user explicitly requests another language. Generated runtime instruction files follow the builder's canonical language authority.";
+  const prompt = [
+    BUILD_PROMPT_SENTINEL,
+    tStatus(locale, "sysHeader"),
+    language,
+    "You have full file, shell, research, verification, and approved MCP tools for this Build. Use only the authority explicitly provided by the Build request.",
+    "Do not expose hidden chain-of-thought; report only observable actions and results.",
+    "",
+    ASK_PROTOCOL,
+    "",
+    tStatus(locale, "sysAgentDef"),
+    builderPrompt,
+  ].join("\n");
+  if (prompt.length > MAX_BUILD_SYSTEM_PROMPT_CHARS - BUILD_MCP_DEGRADED_GUARD_RESERVE_CHARS) {
+    throw new Error(
+      `Build system prompt exceeds the ${MAX_BUILD_SYSTEM_PROMPT_CHARS - BUILD_MCP_DEGRADED_GUARD_RESERVE_CHARS}-character base budget (${prompt.length}).`,
+    );
+  }
+  return prompt;
+}
+
+export function measureBuildSystemPrompt(prompt: string): { chars: number; approxTokens: number } {
+  return { chars: prompt.length, approxTokens: Math.ceil(prompt.length / 4) };
+}
+
 /** 모델이 surface가 낫다고 판단했을 때 emit하는 마커. dispatch가 감지해 2차 패스에서 풀 프로토콜을 로드. */
 export const SURFACE_INTENT_MARKER = "<<surface-intent>>";
 
@@ -138,6 +178,10 @@ export function wrapSystemPrompt(
   /** 2차 패스: 모델이 surface-intent 마커를 emit해서 dispatch가 풀 프로토콜을 강제 로드할 때 true. */
   forceSurface?: boolean,
 ): string {
+  // Every runtime calls this function internally. A Main-authored Build prompt
+  // already passed the restricted Build wrapper, so do not wrap it again with
+  // unrelated chat/surface/connection protocols.
+  if (agentSystemPrompt.startsWith(BUILD_PROMPT_SENTINEL)) return agentSystemPrompt;
   // write/full 권한이면 도구 사용 허용 안내(Claude Code식 tool-use). read/기본이면 도구 끔.
   const toolsLine =
     permission === "write" || permission === "full"

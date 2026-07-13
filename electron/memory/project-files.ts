@@ -13,6 +13,7 @@ import {
   CAREER_GRAPH_INBOX_DIR,
   CAREER_GRAPH_SOURCE_MANIFEST_FILE,
   CURATOR_DECISIONS_FILE,
+  EXPERIENCE_RELATION_LEDGER_FILE,
   LOCAL_CREDENTIALS_MAP_FILE,
   MEMORY_LOG_FILE,
   ONTOLOGY_DB_FILE,
@@ -317,6 +318,10 @@ ${PROJECT_SIGNING_DIR}/*
 ${PROJECT_CREDENTIALS_DIR}/*
 !${PROJECT_CREDENTIALS_DIR}/
 !${PROJECT_CREDENTIALS_DIR}/${PROJECT_CREDENTIALS_README_FILE}
+.agentlas/${ONTOLOGY_DB_FILE}*
+.agentlas/${CAREER_GRAPH_DB_FILE}*
+.agentlas/${EXPERIENCE_RELATION_LEDGER_FILE}*
+.agentlas/.${EXPERIENCE_RELATION_LEDGER_FILE}.*
 `;
   let existing = "";
   try {
@@ -325,8 +330,20 @@ ${PROJECT_CREDENTIALS_DIR}/*
     existing = "";
   }
   if (existing.includes(marker)) {
-    if (!/^\._\*$/m.test(existing)) {
-      fs.writeFileSync(gitignorePath, `${existing.trimEnd()}\n._*\n`, "utf8");
+    const requiredLines = [
+      "._*",
+      `.agentlas/${ONTOLOGY_DB_FILE}*`,
+      `.agentlas/${CAREER_GRAPH_DB_FILE}*`,
+      `.agentlas/${EXPERIENCE_RELATION_LEDGER_FILE}*`,
+      `.agentlas/.${EXPERIENCE_RELATION_LEDGER_FILE}.*`,
+    ];
+    let next = existing.trimEnd();
+    for (const line of requiredLines) {
+      if (!next.split(/\r?\n/).includes(line)) next += `\n${line}`;
+    }
+    next += "\n";
+    if (next !== existing) {
+      fs.writeFileSync(gitignorePath, next, "utf8");
     }
     return;
   }

@@ -1,8 +1,9 @@
 // MCP -> 런타임 브리지. 설치·활성화된 MCP 서버를 런타임별 설정으로 직렬화한다.
 // - Claude Code: `--mcp-config` JSON 파일 (vault 값은 `${ENV_ALIAS}` 참조만 기록)
 // - Codex CLI: `-c mcp_servers.<name>...` config overrides (시크릿 값 없는 이름/경로만 전달)
-// 값(시크릿)은 keychain vault에서 읽어 런타임 env의 불투명 alias로만 전달한다. Codex MCP는
-// 작은 wrapper가 alias를 원래 키로 되돌린 뒤 서버를 spawn해, LLM CLI 인증 env와도 충돌하지 않는다.
+// 값(시크릿)은 keychain vault에서 읽어 런타임 env의 불투명 alias로만 전달한다. 모든 stdio MCP는
+// 작은 wrapper가 자기 alias만 원래 키로 되돌린 뒤 최소 env로 서버를 spawn한다. 따라서 LLM 인증,
+// 다른 MCP 자격증명, unrelated host secret을 MCP 자식이 상속하지 않는다.
 //
 // 이게 없으면 카탈로그의 Playwright(브라우저) 서버가 "설치"만 되고 채팅 중 호출되지 않았다.
 // 이제 에이전트가 실제로 브라우저를 띄워 회원가입/로그인/키 발급을 대신 해줄 수 있다.
@@ -86,6 +87,10 @@ export interface McpConfigResult {
   codexConfigArgs: string[];
   /** CLI 부모 환경에만 넣는 불투명 alias -> vault 값. 설정 파일/argv에는 값이 기록되지 않는다. */
   runtimeEnv: Record<string, string>;
+  /** Exact registry rows that survived the final just-in-time key/config checks. */
+  includedServerIds: string[];
+  /** Value-free runtime attribution map used only for one-server startup recovery. */
+  includedServers?: Array<{ serverId: string; catalogId: string | null; configKey: string }>;
 }
 
 export interface McpConfigBuildOptions {
@@ -93,6 +98,12 @@ export interface McpConfigBuildOptions {
   browserProfileKey?: string;
   /** When present, serialize only these selected catalog ids for the current run. */
   catalogIds?: string[];
+  /** Main-authoritative exact server allowlist. Prefer this for consented Build plans. */
+  serverIds?: string[];
+  /** Build plans must never seed defaults as a side effect of config serialization. */
+  skipDefaultSeed?: boolean;
+  /** Per-run file key. Prevents concurrent Build plans from racing on one shared config. */
+  configKey?: string;
 }
 
 function safeProfileKey(value: string): string {
@@ -133,10 +144,21 @@ function resolveVaultRemoteUrl(s: InstalledMcpServer, rawUrl: string): string | 
   }
 }
 
-const CODEX_SECRET_WRAPPER = `"use strict";
+const MCP_CHILD_ENV_WRAPPER = `"use strict";
 const crossSpawn = require(process.argv[2]);
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MCP_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;
+const OPERATIONAL_KEYS = [
+  "PATH", "PATHEXT", "HOME", "USER", "LOGNAME", "USERNAME", "USERPROFILE",
+  "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "WINDIR",
+  "COMSPEC", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "TMPDIR", "TEMP",
+  "TMP", "SHELL", "TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+  "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "NPM_CONFIG_PREFIX",
+  "NPM_CONFIG_CACHE", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+  "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "NO_COLOR"
+];
+const PROXY_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 let mapping;
 try {
   mapping = JSON.parse(process.argv[3] || "{}");
@@ -151,10 +173,27 @@ if (!command || !mapping || typeof mapping !== "object" || Array.isArray(mapping
   process.exit(78);
 }
 
-const env = { ...process.env };
-delete env.ELECTRON_RUN_AS_NODE;
+const env = {};
+for (const key of OPERATIONAL_KEYS) {
+  const actual = Object.keys(process.env).find((candidate) => candidate.toUpperCase() === key);
+  const value = actual ? process.env[actual] : undefined;
+  if (typeof value === "string" && value.length > 0) env[key] = value;
+}
+for (const key of PROXY_KEYS) {
+  const actual = Object.keys(process.env).find((candidate) => candidate.toUpperCase() === key);
+  const value = actual ? process.env[actual] : undefined;
+  if (typeof value !== "string" || value.length === 0) continue;
+  if (key === "NO_PROXY") {
+    env[key] = value.slice(0, 8192);
+    continue;
+  }
+  try {
+    const parsed = new URL(value);
+    if (/^https?:$/.test(parsed.protocol) && !parsed.username && !parsed.password) env[key] = parsed.toString();
+  } catch {}
+}
 for (const [targetKey, alias] of Object.entries(mapping)) {
-  if (!ENV_KEY_RE.test(targetKey) || typeof alias !== "string" || !alias.startsWith("${SECRET_ALIAS_PREFIX}")) {
+  if (!ENV_KEY_RE.test(targetKey) || typeof alias !== "string" || !MCP_ALIAS_RE.test(alias)) {
     process.stderr.write("Agentlas MCP secret wrapper rejected an invalid environment mapping.\\n");
     process.exit(78);
   }
@@ -164,7 +203,6 @@ for (const [targetKey, alias] of Object.entries(mapping)) {
     process.exit(78);
   }
   env[targetKey] = value;
-  delete env[alias];
 }
 
 const child = crossSpawn(command, args, { stdio: "inherit", env });
@@ -257,16 +295,19 @@ export function scrubLegacyOpenCrabMcpConfig(): boolean {
   return removed;
 }
 
-function ensureCodexSecretWrapper(dir: string): string {
-  const wrapperPath = path.join(dir, "codex-mcp-secret-wrapper.cjs");
-  writePrivateFile(wrapperPath, CODEX_SECRET_WRAPPER);
+function ensureMcpChildEnvWrapper(dir: string): string {
+  const wrapperPath = path.join(dir, "mcp-child-env-wrapper.cjs");
+  writePrivateFile(wrapperPath, MCP_CHILD_ENV_WRAPPER);
   return wrapperPath;
 }
 
 function argsWithBrowserProfile(key: string, args: string[], opts?: McpConfigBuildOptions): string[] {
   if (key !== "playwright" || !opts?.browserProfileKey) return args;
   const profileDir = path.join(app.getPath("userData"), "mcp", "browser-profiles", safeProfileKey(opts.browserProfileKey));
-  fs.mkdirSync(profileDir, { recursive: true });
+  // A persistent browser profile contains cookies, login sessions and local
+  // storage. Treat the directory itself as credential material, including when
+  // an older build already created it with the process umask (commonly 0755).
+  ensurePrivateDir(profileDir);
   const next = args.slice();
   const flagIndex = next.findIndex((arg) => arg === "--user-data-dir" || arg.startsWith("--user-data-dir="));
   if (flagIndex < 0) return [...next, "--user-data-dir", profileDir];
@@ -285,17 +326,22 @@ function argsWithBrowserProfile(key: string, args: string[], opts?: McpConfigBui
  * Playwright가 설치돼 있어도 config/allowedTools에 싣지 않아 브라우저 우회를 막는다.
  */
 export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<McpConfigResult | null> {
-  ensureDefaultMcpPluginsInstalled();
+  if (!opts?.skipDefaultSeed) ensureDefaultMcpPluginsInstalled();
   const dir = path.join(app.getPath("userData"), "mcp");
-  const configPath = path.join(dir, "agentlas-mcp.json");
+  const configPath = path.join(
+    dir,
+    opts?.configKey ? `agentlas-mcp-${safeProfileKey(opts.configKey)}.json` : "agentlas-mcp.json",
+  );
   ensurePrivateDir(dir);
   const scopedCatalogIds = opts?.catalogIds ? new Set(opts.catalogIds.filter(Boolean)) : null;
+  const scopedServerIds = opts?.serverIds ? new Set(opts.serverIds.filter(Boolean)) : null;
   const servers = listInstalledServers().filter((s) => {
     if (!s.enabled) return false;
     // 평문 credential URL(레거시 행)은 어떤 런타임 설정에도 싣지 않는다. vault://
     // sentinel 서버는 아래 직렬화에서 실제 URL을 keychain에서 읽어 불투명 alias
     // 참조(`${ALIAS}`)로만 기록하므로 Keychain 경계를 지킨 채 세션에 노출된다.
     if (!isVaultBackedRemoteUrl(s.url) && isOpenCrabCredentialUrl(s.url)) return false;
+    if (scopedServerIds) return scopedServerIds.has(s.id);
     if (!scopedCatalogIds) return true;
     return Boolean((s.catalogId && scopedCatalogIds.has(s.catalogId)) || scopedCatalogIds.has(s.id));
   });
@@ -309,51 +355,70 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const allowedTools: string[] = [];
   const codexConfigArgs: string[] = [];
   const runtimeEnv: Record<string, string> = {};
-  let codexSecretWrapper: string | null = null;
+  const includedServerIds: string[] = [];
+  const includedServers: NonNullable<McpConfigResult["includedServers"]> = [];
+  let mcpChildWrapper: string | null = null;
 
   for (const s of servers) {
+    // Re-check every required value immediately before serialization. A key can
+    // be revoked after consent; that server is omitted instead of poisoning the
+    // whole CLI bootstrap.
+    const resolvedEnv = new Map<string, string>();
+    let missingRequiredValue = false;
+    for (const rawKey of s.envKeys) {
+      const envKey = validateEnvKey(rawKey);
+      const value = await readEnvVar(envKey);
+      if (!value) {
+        missingRequiredValue = true;
+        break;
+      }
+      resolvedEnv.set(envKey, value);
+    }
+    if (missingRequiredValue) continue;
+
     const key = mcpKey(s);
     if (s.transport === "stdio" && s.command) {
       const command = resolveStdioCommand(s);
-      const claudeEnv: Record<string, string> = {};
       const secretAliases: Record<string, string> = {};
       for (const rawKey of s.envKeys) {
         const envKey = validateEnvKey(rawKey);
-        const value = await readEnvVar(envKey);
+        const value = resolvedEnv.get(envKey);
         if (!value) continue;
         const alias = secretAlias(key, envKey);
-        claudeEnv[envKey] = envReference(alias);
         secretAliases[envKey] = alias;
         runtimeEnv[alias] = value;
       }
       const args = argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
-      mcpServers[key] = {
-        command,
-        args,
-        ...(Object.keys(claudeEnv).length ? { env: claudeEnv } : {}),
-      };
+      mcpChildWrapper ??= ensureMcpChildEnvWrapper(dir);
       const aliases = Object.values(secretAliases);
-      if (aliases.length === 0) {
-        pushCodexConfig(codexConfigArgs, key, "command", tomlString(command));
-        pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(args));
-      } else {
-        codexSecretWrapper ??= ensureCodexSecretWrapper(dir);
-        const wrapperArgs = [
-          require.resolve("cross-spawn"),
-          JSON.stringify(secretAliases),
-          command,
-          ...args,
-        ];
-        // Codex는 `${VAR}` 보간을 지원하지 않는다. env_vars로 alias 값만 MCP wrapper에
-        // 전달하고 wrapper가 원래 키로 복원한다. 따라서 vault 값은 `-c` argv에 없다.
-        pushCodexConfig(codexConfigArgs, key, "command", tomlString(process.execPath));
-        pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray([codexSecretWrapper, ...wrapperArgs]));
-        pushCodexConfig(
-          codexConfigArgs,
-          key,
-          "env",
-          tomlInlineStringTable({ ELECTRON_RUN_AS_NODE: "1" }),
-        );
+      const wrapperArgs = [
+        mcpChildWrapper,
+        require.resolve("cross-spawn"),
+        JSON.stringify(secretAliases),
+        command,
+        ...args,
+      ];
+      const wrapperEnv = {
+        ELECTRON_RUN_AS_NODE: "1",
+        ...Object.fromEntries(aliases.map((alias) => [alias, envReference(alias)])),
+      };
+      mcpServers[key] = {
+        command: process.execPath,
+        args: wrapperArgs,
+        env: wrapperEnv,
+      };
+      // Both Claude and Codex launch stdio MCPs through the same least-privilege
+      // wrapper. The original MCP gets OS necessities and only its own mapped
+      // credentials, never LLM auth or another MCP's opaque alias.
+      pushCodexConfig(codexConfigArgs, key, "command", tomlString(process.execPath));
+      pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(wrapperArgs));
+      pushCodexConfig(
+        codexConfigArgs,
+        key,
+        "env",
+        tomlInlineStringTable({ ELECTRON_RUN_AS_NODE: "1" }),
+      );
+      if (aliases.length > 0) {
         pushCodexConfig(codexConfigArgs, key, "env_vars", tomlStringArray(aliases));
       }
     } else if (s.url) {
@@ -367,7 +432,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       const vaultKey = vaultUrlKey(s.url);
       let serializedUrl = s.url;
       if (vaultKey) {
-        const rawUrl = (await readEnvVar(vaultKey))?.trim();
+        const rawUrl = resolvedEnv.get(vaultKey)?.trim();
         const resolvedUrl = rawUrl ? resolveVaultRemoteUrl(s, rawUrl) : null;
         if (!resolvedUrl) continue; // vault 값이 없거나 검증 실패면 서버를 싣지 않는다
         const alias = secretAlias(key, vaultKey);
@@ -381,7 +446,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       let codexRemoteSupported = s.transport === "http" && headerKeys.length === 0;
       for (const rawHeader of headerKeys) {
         const header = validateEnvKey(rawHeader);
-        const value = await readEnvVar(header);
+        const value = resolvedEnv.get(header);
         if (!value) {
           codexRemoteSupported = false;
           continue;
@@ -438,11 +503,13 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     } else {
       continue;
     }
+    includedServerIds.push(s.id);
+    includedServers.push({ serverId: s.id, catalogId: s.catalogId, configKey: key });
     allowedTools.push(`mcp__${key}`, `mcp__${key}__*`);
   }
 
   if (Object.keys(mcpServers).length === 0) return null;
 
   writePrivateFile(configPath, JSON.stringify({ mcpServers }, null, 2));
-  return { configPath, allowedTools, codexConfigArgs, runtimeEnv };
+  return { configPath, allowedTools, codexConfigArgs, runtimeEnv, includedServerIds, includedServers };
 }

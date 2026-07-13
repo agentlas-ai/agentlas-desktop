@@ -7,7 +7,122 @@ import type {
 } from "./multimodal";
 import type { OberonTitleSpec } from "./oberon-titles";
 import type { SiteConversationEntry, SiteProjectMeta, SiteProjectOperation, SiteScreenMeta, SiteWorkspaceHandoff } from "./site-studio";
-import type { MobileBridgePairingPayload } from "./mobile-bridge";
+import type {
+  MobileBridgeOntologyProjectionDto,
+  MobileBridgePairingPayload,
+} from "./mobile-bridge";
+import type {
+  HephaestusBuildStartResult,
+  McpBuildAttachmentReceipt,
+  McpBuildConsent,
+  McpBuildPlan,
+  McpBuildRecommendationInput,
+} from "./mcp-plan";
+import type {
+  ExperienceCandidateCaptureInput,
+  ExperienceCandidateRecord,
+  ExperienceOntologyGraphSnapshot,
+  LocalTasteDraftRecord,
+  ExperienceOntologySummary,
+  ExperienceExportIntentInput,
+  ExperienceExportIntentRecord,
+  ExperiencePackCreateInput,
+  ExperiencePackListInput,
+  ExperiencePackRecord,
+  ExperienceMcpRequirement,
+  ExperiencePromotionInput,
+  ExperiencePromotionReceipt,
+  OperationalPublicProjectionRecord,
+  OperationalPublicProjectionSourceBinding,
+  OperationalPublicProjectionSaveInput,
+  OperationalPublicProjectionConfirmInput,
+  ExperienceBaseReleaseResolution,
+  ExperienceCloudExportResult,
+  ExperienceCloudReconcileInput,
+  ExperienceCloudSaveInput,
+  ExperienceCloudUploadReceipt,
+  ExperienceCloudUploadRecord,
+  ExperienceCloudWithdrawInput,
+  PortableExperienceBundle,
+  TasteChipWorkflowRecord,
+  TasteGeneralizationInput,
+  TasteGeneralizationConfirmInput,
+  TastePreviewPrepareInput,
+  TasteHubUploadInput,
+  TastePreviewGrant,
+} from "./experience";
+export type {
+  HephaestusBuildStartResult,
+  McpBuildAttachmentReceipt,
+  McpBuildCandidate,
+  McpBuildCandidateReadiness,
+  McpBuildCandidateSource,
+  McpBuildPermissionBasis,
+  McpBuildRecommendationReasonCode,
+  McpBuildConsent,
+  McpBuildFallbackReceipt,
+  McpBuildKeyState,
+  McpBuildPlan,
+  McpBuildReceiptItem,
+  McpBuildReceiptItemStatus,
+  McpBuildReceiptReason,
+  McpBuildRecommendationInput,
+} from "./mcp-plan";
+export type {
+  ExperienceCandidateCaptureInput,
+  ExperienceCandidateRecord,
+  ExperienceOntologyGraphEdge,
+  ExperienceOntologyGraphEdgeKind,
+  ExperienceOntologyGraphNode,
+  ExperienceOntologyGraphNodeKind,
+  ExperienceOntologyGraphNodeSource,
+  ExperienceOntologyGraphNodeStatus,
+  ExperienceOntologyGraphSnapshot,
+  LocalTasteDraftRecord,
+  ExperienceOntologySummary,
+  OntologyRelationGraphV1Edge,
+  OntologyRelationGraphV1Node,
+  OntologyRelationGraphV1Snapshot,
+  ExperienceAutoIntakeSummary,
+  CanonicalExperienceEnvironmentProfile,
+  ExperienceContextSelection,
+  ExperienceEnvironment,
+  ExperienceExportIntentInput,
+  ExperienceExportIntentRecord,
+  ExperiencePackCreateInput,
+  ExperiencePackListInput,
+  ExperiencePackRecord,
+  ExperienceMcpRequirement,
+  ExperiencePromotionInput,
+  ExperiencePromotionReceipt,
+  OperationalPublicProjectionRecord,
+  OperationalPublicProjectionSourceBinding,
+  OperationalPublicProjectionSaveInput,
+  OperationalPublicProjectionConfirmInput,
+  ExperienceVerificationMethod,
+  ExperienceBaseReleaseResolution,
+  ExperienceCloudExportResult,
+  ExperienceCloudLocalState,
+  ExperienceCloudReconcileInput,
+  ExperienceCloudSaveInput,
+  ExperienceCloudServerStatus,
+  ExperienceCloudUploadReceipt,
+  ExperienceCloudUploadRecord,
+  TasteChipWorkflowRecord,
+  TasteGeneralizationInput,
+  TasteGeneralizationConfirmInput,
+  TastePreviewPrepareInput,
+  TasteHubUploadInput,
+  TasteAxis,
+  TastePreviewRights,
+  TastePreviewGrant,
+  ExperienceCloudWithdrawInput,
+  PortableExperienceBundle,
+  PortableExperienceItem,
+  PortableExperienceMcpRequirement,
+  PortableExperiencePack,
+  PortableExperienceVisibility,
+} from "./experience";
 export type {
   OberonLowerThird,
   OberonSubtitleCue,
@@ -126,6 +241,8 @@ export interface InstalledAgent {
   name: string;
   /** 영어 표시명. 비어있으면 name fallback */
   nameEn: string;
+  /** Desktop-only alias. Source package names/slugs/hashes remain immutable. */
+  localDisplayName?: string;
   /** 한국어 한 줄 설명 */
   tagline: string;
   /** 영어 한 줄 설명 */
@@ -220,6 +337,9 @@ export interface MarketplaceListing {
   developer?: string;
   detailUrl?: string;
   installCli?: string;
+  /** Exact immutable Hub identity. Both values must be present to enable Ontology projection. */
+  agentDefinitionId?: string;
+  agentReleaseId?: string;
 }
 
 export interface HubAgentBookmark {
@@ -2458,6 +2578,8 @@ export interface McpInvocationEvent {
   // ── 멀티 에이전트 속성 (firm 오케스트레이션) — 없으면 단일 CEO/에이전트 ──
   /** 이 이벤트를 낸 노드의 안정 id (ResolvedNode.id) — 네트워크 패널 per-agent 버킷 키 */
   agentId?: string;
+  /** Durable attribution only: actual installed agent id after auto-route/firm resolution. */
+  runtimeAgentId?: string;
   /** 표시 이름 */
   agentName?: string;
   /** 회사 내 역할 ("CEO" / "마케팅 본부장" / ...) */
@@ -2531,6 +2653,14 @@ export interface FsPathGrant {
   durable: boolean;
   scope: Extract<FsReadScope, { kind: "capability" }>;
 }
+
+/** Renderer-safe Experience creation boundary. A raw projectPath is never authority. */
+export type ExperiencePackCreateIpcInput = Omit<
+  ExperiencePackCreateInput,
+  "projectPath" | "environment"
+> & {
+  projectGrant: FsPathGrant;
+};
 
 /** 로그인 세션 — 백엔드(agentlas.cloud)에서 cookie 기반으로 받아 main에 보관. renderer는 메타만. */
 export interface AuthSession {
@@ -3146,6 +3276,7 @@ export interface HephaestusBuildSupplementalQuestion {
 export interface HephaestusBuildResult {
   workspace: string;
   securityScan: unknown;
+  mcpReceipt: McpBuildAttachmentReceipt;
   supplementalQuestion?: HephaestusBuildSupplementalQuestion;
 }
 /** 빌드 지시문 첨부 — 사용자 디스크의 파일/폴더(기존 에이전트·스킬·이미지·문서 등). */
@@ -3167,6 +3298,10 @@ export interface HephaestusBuildRequest {
   workspaceGrant: FsPathGrant;
   /** 사용할 런타임 선택(미지정 시 활성 런타임). */
   runtime?: RuntimeSelection;
+  /** true only when the user explicitly chose the Build runtime/model in the UI. */
+  runtimePinned?: boolean;
+  /** Main이 발급한 계획 ID에 대한 1회 선택. Renderer가 서버 정의나 연결 결과를 만들 수 없다. */
+  mcpConsent: McpBuildConsent;
   /** 이전 인터뷰 턴에서 받은 CLI 세션 id. 있으면 새 호출 대신 같은 대화를 resume한다. */
   runtimeSessionId?: string;
   /** 대화형 딥인터뷰용 이전 대화(이번 턴 입력 이전까지). 빌더가 인터뷰 맥락을 이어간다. */
@@ -3381,10 +3516,68 @@ export interface AgentMemoryEntryUi {
   kind: string;
   content: string;
   confidence: "high" | "medium" | "low";
+  sensitivity: "public" | "internal" | "private" | "confidential" | "secret";
   evidence: string[];
   chatId: string | null;
   projectPath: string | null;
   createdAt: string;
+}
+
+export interface AgentLearningSummary {
+  agentId: string;
+  /** Runs whose executor was recorded directly on the append-only run ledger. */
+  runCount: number;
+  lastRunAt: string | null;
+  /**
+   * Pre-ledger runs linked through an exact chat -> installed-agent relation.
+   * This is related activity, not proof that the agent was the final executor.
+   */
+  legacyChatLinkedRunCount: number;
+  legacyChatLinkedLastRunAt: string | null;
+  legacyChatLinkedFailureCount: number;
+  durableMemoryCount: number;
+  /** Content-free per-turn curator receipts available from the current ledger version onward. */
+  curationTurnCount: number;
+  noNewMemoryTurnCount: number;
+  memoryEventCount: number;
+  memoryWrittenCount: number;
+  memoryDedupedCount: number;
+  memoryRedactedCount: number;
+  memorySessionOnlyCount: number;
+  memoryDiscardedCount: number;
+  memoryMarkdownCount: number;
+  failureCount: number;
+  evolutionProposalCount: number;
+  /** Global historical terminal/failure records that cannot honestly be assigned to any agent. */
+  legacyUnattributedCount: number;
+  localFileCount: number;
+  localReceiptCount: number;
+}
+
+export type AgentOntologyHubProjectionStatus =
+  | "unbound"
+  | "live"
+  | "offline"
+  | "stale"
+  | "auth-unavailable"
+  | "endpoint-absent"
+  | "projection-missing"
+  | "binding-changed";
+
+/**
+ * Renderer-safe, read-only Hub projection for one installed agent. Main owns
+ * authentication and exact-binding resolution; no local path, prompt, user,
+ * workspace, credential, or MCP process configuration crosses IPC.
+ */
+export interface AgentOntologyHubProjection {
+  schemaVersion: 1;
+  status: AgentOntologyHubProjectionStatus;
+  supported: boolean;
+  binding: {
+    agentDefinitionId: string;
+    agentReleaseId: string;
+  } | null;
+  projection: MobileBridgeOntologyProjectionDto | null;
 }
 
 export interface RunEventUi {
@@ -3712,6 +3905,42 @@ export interface AgentlasIpc {
   agentMemory: {
     entries: (agentId: string, limit?: number) => Promise<AgentMemoryEntryUi[]>;
   };
+  agentLearning: {
+    summary: (agentId: string) => Promise<AgentLearningSummary>;
+  };
+  /** Local Experience ownership and explicit owner-authorized Cloud exchange. */
+  experience: {
+    createPack: (input: ExperiencePackCreateIpcInput) => Promise<ExperiencePackRecord>;
+    listPacks: (input: ExperiencePackListInput) => Promise<ExperiencePackRecord[]>;
+    captureFromMemory: (input: ExperienceCandidateCaptureInput) => Promise<ExperienceCandidateRecord>;
+    listCandidates: (packId: string) => Promise<ExperienceCandidateRecord[]>;
+    listOperationalPublicProjections: (packId: string) => Promise<OperationalPublicProjectionRecord[]>;
+    saveOperationalPublicProjection: (input: OperationalPublicProjectionSaveInput) => Promise<OperationalPublicProjectionRecord>;
+    confirmOperationalPublicProjection: (input: OperationalPublicProjectionConfirmInput) => Promise<OperationalPublicProjectionRecord>;
+    /** Private preference observations only. They are not Hub Taste releases. */
+    listTasteDrafts: (agentId: string) => Promise<LocalTasteDraftRecord[]>;
+    listTasteWorkflows: (agentId: string) => Promise<TasteChipWorkflowRecord[]>;
+    saveTasteGeneralization: (input: TasteGeneralizationInput) => Promise<TasteChipWorkflowRecord>;
+    confirmTasteGeneralization: (input: TasteGeneralizationConfirmInput) => Promise<TasteChipWorkflowRecord>;
+    pickTastePreviews: () => Promise<[TastePreviewGrant, TastePreviewGrant] | null>;
+    prepareTastePreviews: (input: TastePreviewPrepareInput) => Promise<TasteChipWorkflowRecord>;
+    uploadTasteDraft: (input: TasteHubUploadInput) => Promise<TasteChipWorkflowRecord>;
+    promote: (input: ExperiencePromotionInput) => Promise<ExperiencePromotionReceipt>;
+    listPromotionReceipts: (packId: string) => Promise<ExperiencePromotionReceipt[]>;
+    createExportIntent: (input: ExperienceExportIntentInput) => Promise<ExperienceExportIntentRecord>;
+    listExportIntents: (packId: string) => Promise<ExperienceExportIntentRecord[]>;
+    /** Private save and public verification request are separate explicit actions. */
+    cloudSave: (input: ExperienceCloudSaveInput) => Promise<ExperienceCloudUploadRecord>;
+    cloudList: (packId: string) => Promise<ExperienceCloudUploadRecord[]>;
+    cloudReconcile: (input: ExperienceCloudReconcileInput) => Promise<ExperienceCloudUploadRecord>;
+    cloudExport: (input: ExperienceCloudReconcileInput) => Promise<ExperienceCloudExportResult>;
+    cloudWithdraw: (input: ExperienceCloudWithdrawInput) => Promise<ExperienceCloudUploadRecord>;
+    ontologySummary: (agentId: string) => Promise<ExperienceOntologySummary>;
+    /** Value-free, bounded relation graph; never includes source summaries, paths, prompts, or secrets. */
+    ontologyGraph: (agentId: string) => Promise<ExperienceOntologyGraphSnapshot>;
+    /** Exact v59 binding only. This is a read-only Hub projection with no attach or purchase action. */
+    hubProjection: (agentId: string, force?: boolean) => Promise<AgentOntologyHubProjection>;
+  };
   /** 실행/실패 원장 — 긴 원문 없이 runId, 노드, 도구, 오류 메타데이터만 조회한다. */
   runLedger: {
     events: (runId: string, limit?: number) => Promise<RunEventUi[]>;
@@ -3847,6 +4076,8 @@ export interface AgentlasIpc {
     /** 내 에이전트(cargo) 설치 — 로그인 사용자가 agentlas.cloud에서 만든 것 */
     installMine: (id: string) => Promise<InstalledAgent>;
     uninstall: (id: string) => Promise<void>;
+    /** NFC 1-80 code-point local alias; empty text clears it. */
+    setLocalDisplayName: (id: string, value: string) => Promise<InstalledAgent>;
     /** 로컬 폴더(기존 에이전트/팀)를 임포트 — 런타임 감지·라벨링 후 라우팅 저장. */
     importLocalFolder: (input: { path: string; scope: FsReadScope }) => Promise<InstalledAgent>;
     /** 팀 에이전트의 하위 서브에이전트 해석 — 즉시 결정적 + 백그라운드 LLM 정밀판정/자가교정. */
@@ -3896,6 +4127,8 @@ export interface AgentlasIpc {
     test: (id: string) => Promise<McpServerStatus>;
     /** 활성화된 모든 서버 상태 (env 부족분 포함) */
     status: () => Promise<McpServerStatus[]>;
+    /** Build 시작 전 읽기 전용 추천. 설치·연결 테스트·외부 호출을 하지 않는다. */
+    recommendForBuild: (input: McpBuildRecommendationInput) => Promise<McpBuildPlan>;
   };
   /** Optional ontology context. Endpoint and returned context remain in Electron main. */
   openCrab: {
@@ -4228,7 +4461,7 @@ export interface AgentlasIpc {
     /** AO(에이전트 온톨로지) 그래프 — 정보 흐름 맵 백킹 데이터. */
     aoGraph: (input?: { agent?: string; dir?: string }) => Promise<HephaestusCommandResult>;
     /** 빌더(hep-build) 스트리밍 실행 — 데스크탑 런타임 + Hephaestus 빌더 에이전트. */
-    build: (input: HephaestusBuildRequest) => Promise<{ runId: string }>;
+    build: (input: HephaestusBuildRequest) => Promise<HephaestusBuildStartResult>;
     /** 빌더 이벤트 채널명(window.agentlasEvents.on 으로 구독). */
     buildEventChannel: (runId: string) => string;
     /** 채널 구독 완료 신호 — 구독 전 버퍼링된 초기 이벤트를 flush 한다(첫 stage 틱 유실 방지). */

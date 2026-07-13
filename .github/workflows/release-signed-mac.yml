@@ -231,6 +231,31 @@ jobs:
           AGENTLAS_QA_LOCALE=en node scripts/qa-chat-input-routing.cjs
           npm run test:all-routes-ui
 
+      - name: Experience Ontology release gates
+        env:
+          AGENTLAS_E2E: "1"
+        run: |
+          npm run build:electron
+          npx --no-install electron scripts/test-memory-agent-isolation.cjs
+          node scripts/test-memory-context-budget.cjs
+          npx --no-install electron scripts/test-agent-learning-v57.cjs
+          npx --no-install electron scripts/test-legacy-experience-reconciliation.cjs
+          npx --no-install electron scripts/test-v58-memory-curation-migration.cjs
+          npx --no-install electron scripts/test-v59-ontology-binding-migration.cjs
+          node scripts/test-terminal-ontology-loadout-feed.cjs
+          npx --no-install electron scripts/test-experience-p0.cjs
+          npx --no-install electron scripts/test-experience-taxonomy-parity.cjs
+          npx --no-install electron scripts/test-v55-experience-relations-migration.cjs
+          npx --no-install electron scripts/test-experience-relation-index.cjs
+          node scripts/test-portable-experience-hash-golden.cjs
+          npx --no-install electron scripts/test-v56-experience-cloud-migration.cjs
+          npx --no-install electron scripts/test-experience-cloud-exchange.cjs
+          npx --no-install electron scripts/test-mobile-ontology-bridge.cjs
+          npm run build:renderer
+          node scripts/test-desktop-feature-surfaces.cjs --memory-evolution-only
+          node scripts/test-desktop-feature-surfaces.cjs --experience-only
+          node scripts/test-ontology-feature-update.cjs
+
       - name: Restore mac signing certificate
         env:
           MAC_DEVELOPER_ID_CERTIFICATE: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE }}

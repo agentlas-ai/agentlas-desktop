@@ -11,6 +11,7 @@ import { listFirms } from "../store/firms";
 import { listProjects } from "../store/projects";
 import { listPendingConfirmations } from "../confirm";
 import { listEnvKeys } from "../secrets/vault";
+import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
 import { getUsageSnapshot } from "../usage";
 import type {
   Automation,
@@ -34,6 +35,7 @@ import {
   type MobileBridgeFirmDto,
   type MobileBridgeHostDto,
   type MobileBridgePendingConfirmationDto,
+  type MobileBridgeOntologyProjectionDto,
   type MobileBridgeProjectDto,
   type MobileBridgeRuntimeDto,
   type MobileBridgeSnapshot,
@@ -57,6 +59,10 @@ export interface MobileBridgeProjectionOptions {
   maxMessagesPerChat?: number;
   pendingBrowserApprovals?: readonly MobileBridgeBrowserApprovalDto[];
   now?: Date;
+  ontology?: {
+    supported: boolean;
+    projections: readonly MobileBridgeOntologyProjectionDto[];
+  };
 }
 
 function displayText(value: string, maxBytes = MOBILE_BRIDGE_DISPLAY_TEXT_BYTES): string {
@@ -96,31 +102,44 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
       "browser-approvals",
       "automations",
       "usage",
+      ...(options.ontology?.supported ? ["ontology-chips"] : []),
     ],
   };
 }
 
 function agentsDto(presentEnvKeys: ReadonlySet<string>): MobileBridgeAgentDto[] {
-  return listInstalledAgents().map((agent) => ({
-    id: agent.id,
-    slug: agent.slug,
-    name: displayText(agent.name, 512),
-    nameEn: displayText(agent.nameEn, 512),
-    tagline: displayText(agent.tagline, 2_048),
-    taglineEn: displayText(agent.taglineEn, 2_048),
-    trustGrade: agent.trustGrade,
-    installedAt: agent.installedAt,
-    tone: displayText(agent.tone, 256),
-    runtimeLabel: optionalDisplayText(agent.runtimeLabel, 512),
-    assetSource: optionalDisplayText(agent.assetSource, 1_024),
-    kind: agent.kind === "team" ? "team" : "agent",
-    visibility: agent.visibility ?? "visible",
-    // DESKTOP_MOBILE_BRIDGE: Only a boolean crosses the bridge. env key names,
-    // hints, values, MCP config, prompts, package hashes, and local paths do not.
-    requiresSetup: agent.envRequirements.some(
-      (requirement) => requirement.required && !presentEnvKeys.has(requirement.key),
-    ),
-  }));
+  const bindingByAgentId = new Map(
+    listInstalledAgentHubBindings(64).map((binding) => [binding.installedAgentId, binding] as const),
+  );
+  return listInstalledAgents().map((agent) => {
+    const binding = bindingByAgentId.get(agent.id);
+    return {
+      id: agent.id,
+      slug: agent.slug,
+      name: displayText(agent.name, 512),
+      nameEn: displayText(agent.nameEn, 512),
+      tagline: displayText(agent.tagline, 2_048),
+      taglineEn: displayText(agent.taglineEn, 2_048),
+      trustGrade: agent.trustGrade,
+      installedAt: agent.installedAt,
+      tone: displayText(agent.tone, 256),
+      runtimeLabel: optionalDisplayText(agent.runtimeLabel, 512),
+      assetSource: optionalDisplayText(agent.assetSource, 1_024),
+      kind: agent.kind === "team" ? "team" : "agent",
+      visibility: agent.visibility ?? "visible",
+      // DESKTOP_MOBILE_BRIDGE: Only a boolean crosses the bridge. env key names,
+      // hints, values, MCP config, prompts, package hashes, and local paths do not.
+      requiresSetup: agent.envRequirements.some(
+        (requirement) => requirement.required && !presentEnvKeys.has(requirement.key),
+      ),
+      ...(binding
+        ? {
+            agentDefinitionId: binding.agentDefinitionId,
+            agentReleaseId: binding.agentReleaseId,
+          }
+        : {}),
+    };
+  });
 }
 
 function firmsDto(): MobileBridgeFirmDto[] {
@@ -442,6 +461,9 @@ export async function projectMobileBridgeSnapshot(
     automations: automationsDto(),
     usage: projectMobileBridgeUsage(usage),
     activeChatIds,
+    ...(options.ontology?.supported
+      ? { ontologyChipProjections: [...options.ontology.projections] }
+      : {}),
   };
   const baseBytes = mobileBridgeJsonBytes(snapshot);
   if (baseBytes > MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES) {

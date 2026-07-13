@@ -329,6 +329,12 @@ export function getSessionCookieHeader(): string | null {
   return `${COOKIE_NAME}=${_cache.cookieValue}`;
 }
 
+/** Main-only authority for signed Hub mutations. Never expose userId to renderer IPC. */
+export function getAuthenticatedActorIds(): { workspaceId: string; userId: string } | null {
+  if (!getSessionCookieHeader() || !_cache?.workspaceId || !_cache.userId) return null;
+  return { workspaceId: _cache.workspaceId, userId: _cache.userId };
+}
+
 export async function signInWithGoogle(parent: BrowserWindow | null): Promise<AuthSession> {
   const ses = electronSession.fromPartition(AUTH_PARTITION);
   // 로그인 창은 시스템 BrowserWindow — 별도 partition으로 격리해 메인 앱의 쿠키와 섞이지 않음

@@ -1,0 +1,1405 @@
+import { createHash, randomUUID } from "node:crypto";
+import { isIP } from "node:net";
+import path from "node:path";
+import type {
+  ExperienceCandidateCaptureInput,
+  ExperienceCandidateRecord,
+  ExperienceOntologySummary,
+  ExperienceExportIntentInput,
+  ExperienceExportIntentRecord,
+  ExperiencePackCreateInput,
+  ExperiencePackListInput,
+  ExperiencePackRecord,
+  ExperiencePromotionInput,
+  ExperiencePromotionReceipt,
+  LocalTasteDraftRecord,
+} from "../../shared/types";
+import { getAgentById } from "../mcp/registry";
+import { getDb } from "../store/db";
+import {
+  normalizeExperienceMcpRequirements,
+  rankExperienceCandidatesByRelations,
+  rebuildExperienceRelationIndex,
+  recordExperienceLineageEvent,
+  refreshExperienceRelationArtifacts,
+} from "./relation-index";
+import {
+  canonicalEnvironmentProfile,
+  classifyCanonicalTaskIds,
+  isCanonicalTaskId,
+  isRuntimeEligibleExperienceEnvironmentProfile,
+  parseCanonicalEnvironmentProfile,
+} from "./taxonomy";
+
+const SECRET_VALUE_RE = /(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|(?:api[_-]?key|token|secret|password|authorization|cookie|private[_-]?key)\s*[:=]\s*\S+|BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY|Bearer\s+[A-Za-z0-9._~-]{12,})/i;
+const PRIVATE_LOCATION_RE = /(?:file:\/\/|(?:^|[\s"'`()\[\]{}=:,;])(?:\.\.[/\\]|~[/\\]|\\\\[^\\/\s]+[\\/][^\\/\s]+)|(?<![A-Za-z0-9$])\/(?!\/|\s)(?:[^/\s"'`<>]+\/)*[^/\s"'`<>]+|(?<![A-Za-z0-9])[A-Za-z]:[/\\](?=\S))/i;
+const LABELED_IDENTIFIER_RE = /\b(?:tenant|workspace|account|customer|user|client)[ _-]?(?:id|key|number|no|ref|reference)\s*[:=#]?\s*[A-Za-z0-9_-]{4,}\b|(?:테넌트|워크스페이스|계정|고객|사용자|클라이언트)[ _-]?(?:id|아이디|키|번호|참조)\s*[:=#]?\s*[A-Za-z0-9_-]{4,}/i;
+const IP_CANDIDATE_RE = /(?<![A-Za-z0-9])\[?[0-9A-Fa-f:.]{3,}\]?(?![A-Za-z0-9])/g;
+const SAFE_EVIDENCE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/;
+const CAPTURE_UNSAFE_PATTERNS: Array<{ code: string; pattern: RegExp }> = [
+  {
+    code: "role-line",
+    pattern: /(?:^|\n)\s*(?:system|developer|assistant|user|tool|시스템|개발자|어시스턴트|사용자|도구)\s*:\s*\S/i,
+  },
+  {
+    code: "json-role-object",
+    pattern: /(?:^|[{,])\s*["']?role["']?\s*:\s*["'](?:system|developer|assistant|user|tool)["']/i,
+  },
+  {
+    code: "prompt-material",
+    pattern: /\b(?:raw[_ -]?prompt|system[_ -]?prompt|developer[_ -]?prompt|user[_ -]?prompt|prompt[_ -]?dump|conversation[_ -]?dump|raw[_ -]?transcript|chat[_ -]?transcript)\b|(?:시스템|개발자|원시)\s*프롬프트|(?:대화|채팅)\s*원문|<\/?\s*(?:system|developer)\b|\[(?:system|developer)\]/i,
+  },
+  {
+    code: "agent-instruction-material",
+    pattern: /(?:^|[/\\\s`"'])(?:AGENTS|CLAUDE)\.md\b|(?:^|[/\\])\.claude(?:[/\\]|$)/i,
+  },
+  {
+    code: "base-package-material",
+    pattern: /\b(?:base[-_ ]?package|agentlas[-_ ]?package)\s+(?:payload|contents?|manifest|files?|archive|bytes?|source)\b|(?:베이스|Agentlas)\s*패키지\s*(?:페이로드|내용|매니페스트|파일|압축|바이트|원문)/i,
+  },
+  {
+    code: "base64-blob",
+    pattern: /data:[^,;\s]{1,120};base64,[A-Za-z0-9+/]{24,}={0,2}|(?:^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{80,}={0,2}(?=$|[^A-Za-z0-9+/=])/i,
+  },
+];
+const PUBLIC_UNSAFE_PATTERNS: Array<{ code: string; pattern: RegExp }> = [
+  { code: "secret-value", pattern: SECRET_VALUE_RE },
+  { code: "raw-prompt-or-transcript", pattern: /\b(?:raw[_ -]?prompt|system[_ -]?prompt|user[_ -]?prompt|transcript|conversation dump)\b|(?:^|\n)\s*(?:system|assistant|user|tool)\s*:/i },
+  { code: "email", pattern: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i },
+  { code: "phone-or-long-number", pattern: /(?:^|\D)\+?\d[\d ()-]{7,}\d(?:\D|$)/ },
+  { code: "local-path-or-url", pattern: /https?:\/\//i },
+  { code: "local-path-or-url", pattern: PRIVATE_LOCATION_RE },
+  { code: "account-identifier", pattern: /\b(?:account|user|workspace|customer|tenant|organization|org)[ _-]?id\s*[:=]\s*[A-Za-z0-9._:-]+/i },
+  { code: "opaque-identifier", pattern: /\b(?:[a-f0-9]{32,}|[A-Za-z0-9+/]{40,}={0,2}|[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})\b/i },
+];
+
+type PackRow = {
+  id: string;
+  agent_id: string;
+  project_id: string | null;
+  project_path: string | null;
+  project_scope_key: string;
+  environment_key: string;
+  environment_profile_json: string | null;
+  auto_managed: number;
+  name: string;
+  description: string;
+  base_package_hash: string | null;
+  base_agent_definition_id: string | null;
+  base_agent_release_id: string | null;
+  base_package_hash_version: string | null;
+  mcp_requirements_json: string;
+  status: "active" | "archived";
+  created_at: string;
+  updated_at: string;
+};
+
+type CandidateRow = {
+  id: string;
+  pack_id: string;
+  agent_id: string;
+  project_scope_key: string;
+  environment_key: string;
+  source_memory_id: string;
+  summary: string;
+  task_terms_json: string;
+  sensitivity: "public" | "internal" | "private";
+  confidence: "high" | "medium" | "low";
+  status: "candidate" | "promoted" | "rejected";
+  outcome_status: "unverified" | "attested" | "verified" | "failed";
+  public_safe: number;
+  auto_managed: number;
+  created_at: string;
+  updated_at: string;
+  promoted_at: string | null;
+};
+
+type TasteDraftRow = {
+  id: string;
+  agent_id: string;
+  source_memory_id: string;
+  source_memory_hash: string;
+  project_scope_key: string;
+  environment_key: string;
+  base_package_hash: string;
+  base_agent_definition_id: string | null;
+  base_agent_release_id: string | null;
+  memory_content: string;
+  sensitivity: "public" | "internal" | "private";
+  confidence: "high" | "medium" | "low";
+  axis_candidates_json: string;
+  task_signatures_json: string;
+  evidence_state: "pairwise-required";
+  status: "observation" | "rejected";
+  created_at: string;
+  updated_at: string;
+};
+
+type PromotionReceiptRow = {
+  id: string;
+  pack_id: string;
+  candidate_id: string;
+  agent_id: string;
+  action: "promote";
+  explicit_consent: number;
+  verification_status: "attested" | "verified";
+  verification_method: "user-attested" | "local-run-receipt" | "local-test-receipt";
+  evidence_hash: string;
+  public_safe: number;
+  created_at: string;
+};
+
+type ExportIntentRow = {
+  id: string;
+  pack_id: string;
+  agent_id: string;
+  visibility: "private" | "public";
+  status: "local_intent";
+  manifest_hash: string;
+  created_at: string;
+};
+
+type MemoryProjectionRow = {
+  id: string;
+  kind: string;
+  content: string;
+  project_id: string | null;
+  project_path: string | null;
+  agent_id: string | null;
+  confidence: string;
+  sensitivity: string;
+  context_json: string | null;
+  superseded_at: string | null;
+};
+
+function hash(...parts: string[]): string {
+  const digest = createHash("sha256");
+  for (const part of parts) digest.update(part).update("\0");
+  return digest.digest("hex");
+}
+
+/** Unsafe even for private/internal packs; these are source-material classes, not privacy labels. */
+export function experienceCaptureSafetyIssues(text: string): string[] {
+  return CAPTURE_UNSAFE_PATTERNS
+    .filter(({ pattern }) => pattern.test(text))
+    .map(({ code }) => code);
+}
+
+export function publicExperienceSafetyIssues(text: string): string[] {
+  const variants = decodedTextVariants(text);
+  const ipAddress = variants.some((value) => {
+    IP_CANDIDATE_RE.lastIndex = 0;
+    return [...value.matchAll(IP_CANDIDATE_RE)].some((match) =>
+      isIP(match[0].replace(/^\[|\]$/g, "")) !== 0);
+  });
+  return [...new Set([
+    ...variants.flatMap(experienceCaptureSafetyIssues),
+    ...variants.flatMap((value) => PUBLIC_UNSAFE_PATTERNS
+      .filter(({ pattern }) => pattern.test(value))
+      .map(({ code }) => code)),
+    ...(variants.some((value) => LABELED_IDENTIFIER_RE.test(value)) ? ["account-identifier"] : []),
+    ...(ipAddress ? ["ip-address"] : []),
+  ])];
+}
+
+function decodedTextVariants(value: string): string[] {
+  const variants = [value];
+  let current = value;
+  for (let index = 0; index < 3; index += 1) {
+    try {
+      const next = decodeURIComponent(current);
+      if (next === current) break;
+      variants.push(next);
+      current = next;
+    } catch {
+      break;
+    }
+  }
+  return variants;
+}
+
+function assertPublicExperienceText(text: string): void {
+  if (publicExperienceSafetyIssues(text).length > 0) {
+    throw new Error("Public-safe Experience text contains private, local, prompt, transcript, or opaque identifier data.");
+  }
+}
+
+function normalizedProjectPath(value?: string | null): string | null {
+  const clean = typeof value === "string" ? value.trim() : "";
+  if (!clean) return null;
+  const resolved = path.resolve(clean);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+export function experienceProjectScopeKey(input: {
+  projectId?: string | null;
+  projectPath?: string | null;
+}): string {
+  const projectId = String(input.projectId ?? "").trim();
+  const projectPath = normalizedProjectPath(input.projectPath) ?? "";
+  return projectId || projectPath ? hash("experience-project-v1", projectId, projectPath) : "global";
+}
+
+export function experienceEnvironmentKey(input: { platform: string; arch?: string; runtimeKind: string }): string {
+  const platform = String(input.platform ?? "").trim();
+  const arch = String(input.arch ?? "unknown").trim();
+  const runtimeKind = String(input.runtimeKind ?? "").trim();
+  if (!platform || !runtimeKind || platform.length > 40 || arch.length > 40 || runtimeKind.length > 80) {
+    throw new Error("Experience environment requires a platform and runtime kind.");
+  }
+  const profile = canonicalEnvironmentProfile({ platform, arch, runtimeKind });
+  return hash("experience-environment-v3", ...profile.constraints);
+}
+
+function assertExactKeys(value: unknown, allowed: readonly string[], label: string): asserts value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
+  const extras = Object.keys(value as Record<string, unknown>).filter((key) => !allowed.includes(key));
+  if (extras.length > 0) throw new Error(`${label} contains unsupported fields.`);
+}
+
+function cleanText(value: unknown, label: string, max: number, required = true): string {
+  if (typeof value !== "string") {
+    if (!required && value == null) return "";
+    throw new Error(`${label} must be text.`);
+  }
+  const clean = value.trim();
+  if (required && !clean) throw new Error(`${label} is required.`);
+  if (clean.length > max) throw new Error(`${label} is too long.`);
+  if (SECRET_VALUE_RE.test(clean)) throw new Error(`${label} appears to contain a secret value.`);
+  return clean;
+}
+
+function packFromRow(row: PackRow): ExperiencePackRecord {
+  let mcpRequirements: ExperiencePackRecord["mcpRequirements"] = [];
+  try {
+    mcpRequirements = normalizeExperienceMcpRequirements(JSON.parse(row.mcp_requirements_json));
+  } catch {
+    mcpRequirements = [];
+  }
+  let environmentProfile: ExperiencePackRecord["environmentProfile"] = null;
+  try {
+    environmentProfile = parseCanonicalEnvironmentProfile(JSON.parse(row.environment_profile_json || "null"));
+  } catch {
+    environmentProfile = null;
+  }
+  return {
+    id: row.id,
+    agentId: row.agent_id,
+    projectId: row.project_id,
+    projectPath: row.project_path,
+    environmentKey: row.environment_key,
+    environmentProfile,
+    autoManaged: row.auto_managed === 1,
+    name: row.name,
+    description: row.description,
+    basePackageHash: row.base_package_hash,
+    baseAgentDefinitionId: row.base_agent_definition_id,
+    baseAgentReleaseId: row.base_agent_release_id,
+    basePackageHashVersion: row.base_package_hash_version,
+    mcpRequirements,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function candidateFromRow(row: CandidateRow): ExperienceCandidateRecord {
+  return {
+    id: row.id,
+    packId: row.pack_id,
+    agentId: row.agent_id,
+    sourceMemoryId: row.source_memory_id,
+    summary: row.summary,
+    sensitivity: row.sensitivity,
+    confidence: row.confidence,
+    status: row.status,
+    outcomeStatus: row.outcome_status,
+    publicSafe: row.public_safe === 1,
+    taskSignatures: parseStringList(row.task_terms_json).filter(isCanonicalTaskId),
+    autoManaged: row.auto_managed === 1,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    promotedAt: row.promoted_at,
+  };
+}
+
+const TASTE_AXES = [
+  "composition",
+  "color",
+  "typography",
+  "motion",
+  "pacing",
+  "density",
+  "imagery",
+  "editing",
+  "spatial-rhythm",
+] as const;
+type TasteAxis = (typeof TASTE_AXES)[number];
+
+const TASTE_AXIS_HINTS: Record<TasteAxis, RegExp> = {
+  composition: /\b(?:composition|layouts?|alignment|grid|asymmetr\w*|symmetr\w*|framing)\b|구도|레이아웃|정렬|그리드|비대칭|대칭/i,
+  color: /\b(?:colou?r|palette|saturation|contrast|monochrom|hue)\b|색상|컬러|팔레트|채도|대비|명도|흑백/i,
+  typography: /\b(?:typograph|font|typeface|lettering|kerning|leading)\b|타이포|글꼴|폰트|서체|자간|행간/i,
+  motion: /\b(?:motion|animation|transition|easing|kinetic)\b|모션|애니메이션|전환|이징|움직임/i,
+  pacing: /\b(?:pacing|tempo|rhythm|duration|speed|timing)\b|속도감|템포|호흡|타이밍|리듬/i,
+  density: /\b(?:density|spacing|whitespace|minimal|maximal|clutter)\b|밀도|여백|미니멀|맥시멀|복잡|정보량/i,
+  imagery: /\b(?:image|imagery|photo|illustration|render|cinematic|visual)\b|이미지|사진|일러스트|렌더|시네마틱|비주얼/i,
+  editing: /\b(?:editing|edit|cut|montage|sequence)\b|편집|컷|몽타주|시퀀스/i,
+  "spatial-rhythm": /\b(?:spatial|proportion|scale|depth|perspective)\b|공간감|비율|스케일|깊이|원근/i,
+};
+
+function parseStringList(raw: string, allowed?: ReadonlySet<string>): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return [...new Set(parsed.filter((item): item is string =>
+      typeof item === "string" && (!allowed || allowed.has(item))))];
+  } catch {
+    return [];
+  }
+}
+
+function tasteDraftFromRow(row: TasteDraftRow): LocalTasteDraftRecord {
+  return {
+    id: row.id,
+    agentId: row.agent_id,
+    sourceMemoryId: row.source_memory_id,
+    statement: row.memory_content,
+    sensitivity: row.sensitivity,
+    confidence: row.confidence,
+    axisCandidates: parseStringList(row.axis_candidates_json, new Set(TASTE_AXES)) as TasteAxis[],
+    taskSignatures: parseStringList(row.task_signatures_json).filter(isCanonicalTaskId),
+    basePackageHash: row.base_package_hash,
+    baseAgentDefinitionId: row.base_agent_definition_id,
+    baseAgentReleaseId: row.base_agent_release_id,
+    evidenceState: row.evidence_state,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function receiptFromRow(row: PromotionReceiptRow): ExperiencePromotionReceipt {
+  return {
+    id: row.id,
+    packId: row.pack_id,
+    candidateId: row.candidate_id,
+    agentId: row.agent_id,
+    action: row.action,
+    explicitConsent: true,
+    verificationStatus: row.verification_status as ExperiencePromotionReceipt["verificationStatus"],
+    verificationMethod: row.verification_method as ExperiencePromotionReceipt["verificationMethod"],
+    evidenceHash: row.evidence_hash,
+    publicSafe: row.public_safe === 1,
+    createdAt: row.created_at,
+  };
+}
+
+function exportIntentFromRow(row: ExportIntentRow): ExperienceExportIntentRecord {
+  return {
+    id: row.id,
+    packId: row.pack_id,
+    agentId: row.agent_id,
+    visibility: row.visibility,
+    status: row.status,
+    manifestHash: row.manifest_hash,
+    createdAt: row.created_at,
+  };
+}
+
+function getPackRow(id: string): PackRow {
+  const row = getDb().prepare("SELECT * FROM experience_packs WHERE id = ?").get(id) as PackRow | undefined;
+  if (!row) throw new Error("Experience Pack not found.");
+  return row;
+}
+
+function getCandidateRow(id: string): CandidateRow {
+  const row = getDb().prepare("SELECT * FROM experience_candidates WHERE id = ?").get(id) as CandidateRow | undefined;
+  if (!row) throw new Error("Experience candidate not found.");
+  return row;
+}
+
+function assertPackBaseCurrent(pack: PackRow): void {
+  const current = getAgentById(pack.agent_id)?.packageHash ?? null;
+  if (!pack.base_package_hash || !/^[a-f0-9]{64}$/.test(pack.base_package_hash) || current !== pack.base_package_hash) {
+    throw new Error("Experience Pack base package is missing or no longer matches the installed agent.");
+  }
+}
+
+export function createExperiencePack(input: ExperiencePackCreateInput): ExperiencePackRecord {
+  assertExactKeys(input, ["agentId", "name", "description", "projectId", "projectPath", "environment", "mcpRequirements"], "Experience Pack input");
+  const agentId = cleanText(input.agentId, "agentId", 120);
+  const agent = getAgentById(agentId);
+  if (!agent) throw new Error("Experience Pack requires an installed agent.");
+  if (!agent.packageHash || !/^[a-f0-9]{64}$/.test(agent.packageHash)) {
+    throw new Error("Experience Pack requires a verified base package hash.");
+  }
+  const name = cleanText(input.name, "Experience Pack name", 80);
+  const description = cleanText(input.description ?? "", "Experience Pack description", 500, false);
+  assertExactKeys(input.environment, ["platform", "arch", "runtimeKind"], "Experience environment");
+  const projectId = typeof input.projectId === "string" && input.projectId.trim() ? input.projectId.trim().slice(0, 120) : null;
+  const projectPath = normalizedProjectPath(input.projectPath);
+  const mcpRequirements = normalizeExperienceMcpRequirements(input.mcpRequirements, agent.mcpServers ?? []);
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const environmentProfile = canonicalEnvironmentProfile(input.environment);
+  getDb().prepare(
+    `INSERT INTO experience_packs (
+       id, agent_id, project_id, project_path, project_scope_key, environment_key,
+       environment_profile_json, auto_managed, name, description, base_package_hash,
+       mcp_requirements_json, status, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'active', ?, ?)`,
+  ).run(
+    id,
+    agentId,
+    projectId,
+    projectPath,
+    experienceProjectScopeKey({ projectId, projectPath }),
+    experienceEnvironmentKey(input.environment),
+    JSON.stringify(environmentProfile),
+    name,
+    description,
+    agent.packageHash,
+    JSON.stringify(mcpRequirements),
+    now,
+    now,
+  );
+  try {
+    rebuildExperienceRelationIndex();
+  } catch (error) {
+    console.warn(`[experience-relations] initial rebuild deferred: ${error instanceof Error ? error.message : "unknown"}`);
+  }
+  return packFromRow(getPackRow(id));
+}
+
+export function listExperiencePacks(input: ExperiencePackListInput): ExperiencePackRecord[] {
+  assertExactKeys(input, ["agentId", "projectId", "projectPath", "environment"], "Experience Pack list input");
+  const agentId = cleanText(input.agentId, "agentId", 120);
+  const clauses = ["agent_id = ?"];
+  const params: unknown[] = [agentId];
+  if ("projectId" in input || "projectPath" in input) {
+    clauses.push("project_scope_key = ?");
+    params.push(experienceProjectScopeKey(input));
+  }
+  if (input.environment) {
+    assertExactKeys(input.environment, ["platform", "arch", "runtimeKind"], "Experience environment");
+    clauses.push("environment_key = ?");
+    params.push(experienceEnvironmentKey(input.environment));
+  }
+  const rows = getDb().prepare(
+    `SELECT * FROM experience_packs WHERE ${clauses.join(" AND ")} ORDER BY updated_at DESC`,
+  ).all(...params) as PackRow[];
+  return rows.map(packFromRow);
+}
+
+function taskTerms(memory: MemoryProjectionRow): string[] {
+  const text: string[] = [memory.content];
+  try {
+    const context = JSON.parse(memory.context_json || "{}") as Record<string, unknown>;
+    if (typeof context.userIntent === "string") text.push(context.userIntent);
+    if (typeof context.user_intent === "string") text.push(context.user_intent);
+    const triggers = Array.isArray(context.triggerTerms)
+      ? context.triggerTerms
+      : Array.isArray(context.trigger_terms)
+        ? context.trigger_terms
+        : [];
+    text.push(...triggers.filter((item): item is string => typeof item === "string"));
+  } catch {
+    // Curated content remains sufficient when an old context capsule is malformed.
+  }
+  return classifyCanonicalTaskIds(...text);
+}
+
+export function captureExperienceCandidate(input: ExperienceCandidateCaptureInput): ExperienceCandidateRecord {
+  assertExactKeys(input, ["packId", "sourceMemoryId"], "Experience candidate capture input");
+  const pack = getPackRow(cleanText(input.packId, "packId", 120));
+  if (pack.status !== "active") throw new Error("Archived Experience Packs cannot accept candidates.");
+  assertPackBaseCurrent(pack);
+  const memoryId = cleanText(input.sourceMemoryId, "sourceMemoryId", 120);
+  const memory = getDb().prepare(
+    `SELECT id, kind, content, project_id, project_path, agent_id, confidence, sensitivity,
+            context_json, superseded_at
+       FROM memory_entries WHERE id = ?`,
+  ).get(memoryId) as MemoryProjectionRow | undefined;
+  if (!memory || memory.superseded_at) throw new Error("Experience capture requires a live curated Memory entry.");
+  if (!new Set(["procedure", "decision", "risk"]).has(memory.kind)) {
+    throw new Error("Operational Experience accepts procedure, decision, or risk Memory only. Preferences belong to private Taste drafts.");
+  }
+  if (memory.agent_id !== pack.agent_id) throw new Error("Experience memory must belong to the same agent as the Pack.");
+  const memoryScopeKey = experienceProjectScopeKey({ projectId: memory.project_id, projectPath: memory.project_path });
+  if (memoryScopeKey !== pack.project_scope_key) throw new Error("Experience memory must belong to the same project scope as the Pack.");
+  const summary = cleanText(memory.content, "Curated experience summary", 1_200);
+  const captureIssues = publicExperienceSafetyIssues(summary);
+  if (captureIssues.length > 0) {
+    throw new Error(`Experience candidates must be generic and cannot contain private, local, prompt, transcript, account, or source-package material (${captureIssues.join(", ")}).`);
+  }
+  if (memory.sensitivity === "secret" || memory.sensitivity === "confidential") {
+    throw new Error("Secret or confidential Memory cannot become an Experience candidate.");
+  }
+  if (memory.sensitivity !== "public" && memory.sensitivity !== "internal" && memory.sensitivity !== "private") {
+    throw new Error("Unsupported Memory sensitivity for Experience capture.");
+  }
+  const existing = getDb().prepare(
+    "SELECT * FROM experience_candidates WHERE pack_id = ? AND source_memory_id = ?",
+  ).get(pack.id, memory.id) as CandidateRow | undefined;
+  if (existing) return candidateFromRow(existing);
+  const confidence = memory.confidence === "high" || memory.confidence === "low" ? memory.confidence : "medium";
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const canonicalTasks = taskTerms(memory);
+  getDb().prepare(
+    `INSERT INTO experience_candidates (
+       id, pack_id, agent_id, project_scope_key, environment_key, source_memory_id,
+       summary, task_terms_json, sensitivity, confidence, status, outcome_status,
+       public_safe, auto_managed, created_at, updated_at, promoted_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', 'unverified', 0, 0, ?, ?, NULL)`,
+  ).run(
+    id,
+    pack.id,
+    pack.agent_id,
+    pack.project_scope_key,
+    pack.environment_key,
+    memory.id,
+    summary,
+    JSON.stringify(canonicalTasks),
+    memory.sensitivity,
+    confidence,
+    now,
+    now,
+  );
+  return candidateFromRow(getCandidateRow(id));
+}
+
+export function listExperienceCandidates(packId: string): ExperienceCandidateRecord[] {
+  const pack = getPackRow(cleanText(packId, "packId", 120));
+  const rows = getDb().prepare(
+    "SELECT * FROM experience_candidates WHERE pack_id = ? ORDER BY created_at DESC",
+  ).all(pack.id) as CandidateRow[];
+  return rows.map(candidateFromRow);
+}
+
+export function listLocalTasteDrafts(agentIdValue: string): LocalTasteDraftRecord[] {
+  const agentId = cleanText(agentIdValue, "agentId", 120);
+  const rows = getDb().prepare(
+    `SELECT d.*, m.content AS memory_content
+       FROM taste_draft_candidates d
+       JOIN memory_entries m
+         ON m.id = d.source_memory_id AND m.agent_id = d.agent_id
+      WHERE d.agent_id = ? AND m.superseded_at IS NULL
+      ORDER BY d.updated_at DESC, d.id ASC
+      LIMIT 200`,
+  ).all(agentId) as TasteDraftRow[];
+  return rows.map(tasteDraftFromRow);
+}
+
+export interface AutoExperienceIntakeInput {
+  memory: {
+    id: string;
+    kind: string;
+    content: string;
+    confidence: "high" | "medium" | "low";
+    sensitivity: "public" | "internal" | "private" | "confidential" | "secret";
+    requestContext?: {
+      userIntent?: string;
+      triggerTerms?: string[];
+    } | null;
+  };
+  agentId: string;
+  projectId?: string | null;
+  projectPath?: string | null;
+  environment: { platform: string; arch?: string; runtimeKind: string };
+  basePackageHash?: string | null;
+  taskHint?: string | null;
+}
+
+const AUTO_INTAKE_POLICY_VERSION = "experience-auto-intake-operational-v2";
+const TASTE_DRAFT_POLICY_VERSION = "taste-draft-auto-intake-v1";
+
+function autoIntakeSourceMemoryHash(input: AutoExperienceIntakeInput): string {
+  let environmentKey = "environment-unavailable";
+  try {
+    environmentKey = experienceEnvironmentKey(input.environment);
+  } catch {
+    // The receipt stays value-free and retryable under a future valid context.
+  }
+  return hash(
+    AUTO_INTAKE_POLICY_VERSION,
+    input.agentId,
+    input.memory.id,
+    input.basePackageHash ?? "base-unavailable",
+    environmentKey,
+  );
+}
+
+export function tasteDraftSourceMemoryHash(input: {
+  agentId: string;
+  memoryId: string;
+  memoryContent: string;
+  basePackageHash: string;
+  environmentKey: string;
+}): string {
+  return hash(
+    TASTE_DRAFT_POLICY_VERSION,
+    input.agentId,
+    input.memoryId,
+    hash("taste-source-content-v1", input.memoryContent),
+    input.basePackageHash,
+    input.environmentKey,
+  );
+}
+
+function inferTasteAxes(text: string): TasteAxis[] {
+  return TASTE_AXES.filter((axis) => TASTE_AXIS_HINTS[axis].test(text));
+}
+
+/**
+ * Captures only a private observation. It does not create a Hub Taste release,
+ * pairwise receipt, preview, success score, promotion, upload, or loadout.
+ */
+function autoIntakeTasteDraft(input: AutoExperienceIntakeInput): "created" | "existing" | "deferred" {
+  const agent = getAgentById(input.agentId);
+  const basePackageHash = input.basePackageHash ?? null;
+  if (!agent || !basePackageHash || !/^[a-f0-9]{64}$/.test(basePackageHash) || agent.packageHash !== basePackageHash) {
+    return "deferred";
+  }
+  const profile = canonicalEnvironmentProfile(input.environment);
+  if (!isRuntimeEligibleExperienceEnvironmentProfile(profile)) return "deferred";
+  const environmentKey = experienceEnvironmentKey(input.environment);
+  const sourceMemoryHash = tasteDraftSourceMemoryHash({
+    agentId: input.agentId,
+    memoryId: input.memory.id,
+    memoryContent: input.memory.content,
+    basePackageHash,
+    environmentKey,
+  });
+  const existing = getDb().prepare(
+    `SELECT id FROM taste_draft_candidates
+      WHERE agent_id = ? AND source_memory_hash = ? AND base_package_hash = ? LIMIT 1`,
+  ).get(input.agentId, sourceMemoryHash, basePackageHash);
+  if (existing) return "existing";
+
+  const tasks = classifyCanonicalTaskIds(
+    input.taskHint,
+    input.memory.requestContext?.userIntent,
+    ...(input.memory.requestContext?.triggerTerms ?? []),
+  );
+  const binding = agent.assetSource === "hub" || agent.assetSource === "agent-cloud"
+    ? getDb().prepare(
+      `SELECT agent_definition_id, agent_release_id
+         FROM installed_agent_hub_bindings
+        WHERE installed_agent_id = ? LIMIT 1`,
+    ).get(input.agentId) as { agent_definition_id: string; agent_release_id: string } | undefined
+    : undefined;
+  const now = new Date().toISOString();
+  getDb().prepare(
+    `INSERT OR IGNORE INTO taste_draft_candidates (
+       id, agent_id, source_memory_id, source_memory_hash, project_scope_key,
+       environment_key, base_package_hash, base_agent_definition_id,
+       base_agent_release_id, sensitivity, confidence,
+       axis_candidates_json, task_signatures_json, evidence_state, status,
+       created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pairwise-required', 'observation', ?, ?)`,
+  ).run(
+    randomUUID(),
+    input.agentId,
+    input.memory.id,
+    sourceMemoryHash,
+    experienceProjectScopeKey(input),
+    environmentKey,
+    basePackageHash,
+    binding?.agent_definition_id ?? null,
+    binding?.agent_release_id ?? null,
+    input.memory.sensitivity,
+    input.memory.confidence,
+    JSON.stringify(inferTasteAxes(input.memory.content)),
+    JSON.stringify(tasks),
+    now,
+    now,
+  );
+  return "created";
+}
+
+function recordAutoIntakeReceipt(input: {
+  agentId: string;
+  sourceMemoryHash: string;
+  memoryKind: string;
+  status: "candidate-created" | "blocked" | "skipped";
+  reasons: string[];
+  packId?: string | null;
+  candidateId?: string | null;
+}): void {
+  getDb().prepare(
+    `INSERT OR IGNORE INTO experience_auto_intake_receipts (
+       id, agent_id, pack_id, candidate_id, source_memory_hash, status,
+       memory_kind, reason_codes_json, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    randomUUID(),
+    input.agentId,
+    input.packId ?? null,
+    input.candidateId ?? null,
+    input.sourceMemoryHash,
+    input.status,
+    input.memoryKind,
+    JSON.stringify([...new Set(input.reasons)].sort()),
+    new Date().toISOString(),
+  );
+}
+
+function ensureAutoExperiencePack(input: AutoExperienceIntakeInput): PackRow {
+  const environmentKey = experienceEnvironmentKey(input.environment);
+  const scopeKey = experienceProjectScopeKey(input);
+  const existing = getDb().prepare(
+    `SELECT * FROM experience_packs
+      WHERE agent_id = ? AND project_scope_key = ? AND environment_key = ?
+        AND base_package_hash = ? AND auto_managed = 1 AND status = 'active'
+      LIMIT 1`,
+  ).get(input.agentId, scopeKey, environmentKey, input.basePackageHash) as PackRow | undefined;
+  if (existing) return existing;
+
+  const agent = getAgentById(input.agentId);
+  if (!agent) throw new Error("Auto Experience intake requires an installed agent.");
+  const profile = canonicalEnvironmentProfile(input.environment);
+  const now = new Date().toISOString();
+  const id = randomUUID();
+  getDb().prepare(
+    `INSERT INTO experience_packs (
+       id, agent_id, project_id, project_path, project_scope_key, environment_key,
+       environment_profile_json, auto_managed, name, description, base_package_hash,
+       mcp_requirements_json, status, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'active', ?, ?)`,
+  ).run(
+    id,
+    input.agentId,
+    input.projectId ?? null,
+    normalizedProjectPath(input.projectPath),
+    scopeKey,
+    environmentKey,
+    JSON.stringify(profile),
+    "Auto Experience Draft",
+    "Review-only candidates accumulated from privacy-safe curated Memory. Nothing is promoted or uploaded automatically.",
+    input.basePackageHash,
+    JSON.stringify(normalizeExperienceMcpRequirements(undefined, agent.mcpServers ?? [])),
+    now,
+    now,
+  );
+  return getPackRow(id);
+}
+
+/**
+ * Fail-safe runtime intake. It records only a value-free receipt when content
+ * is unsafe or exact taxonomy/base context is unavailable. Safe content stops
+ * at a local candidate; promotion, export, upload and prompt mutation remain
+ * explicit owner actions.
+ */
+export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void {
+  const sourceMemoryHash = autoIntakeSourceMemoryHash(input);
+  const privacyIssues = publicExperienceSafetyIssues(input.memory.content);
+  if (input.memory.sensitivity === "secret" || input.memory.sensitivity === "confidential") {
+    privacyIssues.push("sensitive-memory");
+  } else if (!["public", "internal", "private"].includes(input.memory.sensitivity)) {
+    privacyIssues.push("unsupported-sensitivity");
+  }
+  if (privacyIssues.length > 0) {
+    const duplicate = getDb().prepare(
+      "SELECT 1 FROM experience_auto_intake_receipts WHERE agent_id = ? AND source_memory_hash = ? LIMIT 1",
+    ).get(input.agentId, sourceMemoryHash);
+    if (duplicate) return;
+    recordAutoIntakeReceipt({
+      agentId: input.agentId,
+      sourceMemoryHash,
+      memoryKind: input.memory.kind,
+      status: "blocked",
+      reasons: privacyIssues,
+    });
+    return;
+  }
+
+  // Preference memories take a separate lane. The local row is merely a
+  // private observation and is created before consulting the operational
+  // receipt so legacy "skipped" receipts can be reconciled without rewriting
+  // their append-only decision history.
+  const tasteDraftResult = input.memory.kind === "preference"
+    ? autoIntakeTasteDraft(input)
+    : null;
+  const duplicate = getDb().prepare(
+    "SELECT 1 FROM experience_auto_intake_receipts WHERE agent_id = ? AND source_memory_hash = ? LIMIT 1",
+  ).get(input.agentId, sourceMemoryHash);
+  if (duplicate) return;
+
+  const operationalKinds = new Set(["procedure", "decision", "risk"]);
+  if (!operationalKinds.has(input.memory.kind)) {
+    recordAutoIntakeReceipt({
+      agentId: input.agentId,
+      sourceMemoryHash,
+      memoryKind: input.memory.kind,
+      status: "skipped",
+      reasons: [input.memory.kind === "preference"
+        ? tasteDraftResult === "created" || tasteDraftResult === "existing"
+          ? "preference-captured-as-private-taste-draft"
+          : "preference-requires-taste-evidence"
+        : "non-operational-memory-kind"],
+    });
+    return;
+  }
+
+  const agent = getAgentById(input.agentId);
+  const basePackageHash = input.basePackageHash ?? null;
+  if (!agent || !basePackageHash || !/^[a-f0-9]{64}$/.test(basePackageHash) || agent.packageHash !== basePackageHash) {
+    recordAutoIntakeReceipt({
+      agentId: input.agentId,
+      sourceMemoryHash,
+      memoryKind: input.memory.kind,
+      status: "skipped",
+      reasons: ["exact-base-unavailable"],
+    });
+    return;
+  }
+
+  const profile = canonicalEnvironmentProfile(input.environment);
+  if (!isRuntimeEligibleExperienceEnvironmentProfile(profile)) {
+    recordAutoIntakeReceipt({
+      agentId: input.agentId,
+      sourceMemoryHash,
+      memoryKind: input.memory.kind,
+      status: "skipped",
+      reasons: ["environment-taxonomy-unavailable"],
+    });
+    return;
+  }
+
+  const tasks = classifyCanonicalTaskIds(
+    input.taskHint,
+    input.memory.content,
+    input.memory.requestContext?.userIntent,
+    ...(input.memory.requestContext?.triggerTerms ?? []),
+  );
+  if (tasks.length === 0) {
+    recordAutoIntakeReceipt({
+      agentId: input.agentId,
+      sourceMemoryHash,
+      memoryKind: input.memory.kind,
+      status: "skipped",
+      reasons: ["task-taxonomy-unavailable"],
+    });
+    return;
+  }
+
+  const pack = ensureAutoExperiencePack({ ...input, basePackageHash });
+  const existingCandidate = getDb().prepare(
+    "SELECT * FROM experience_candidates WHERE pack_id = ? AND source_memory_id = ? LIMIT 1",
+  ).get(pack.id, input.memory.id) as CandidateRow | undefined;
+  if (existingCandidate) {
+    recordAutoIntakeReceipt({
+      agentId: input.agentId,
+      sourceMemoryHash,
+      memoryKind: input.memory.kind,
+      status: "candidate-created",
+      reasons: [],
+      packId: pack.id,
+      candidateId: existingCandidate.id,
+    });
+    return;
+  }
+
+  const candidateId = randomUUID();
+  const now = new Date().toISOString();
+  const transaction = getDb().transaction(() => {
+    getDb().prepare(
+      `INSERT INTO experience_candidates (
+         id, pack_id, agent_id, project_scope_key, environment_key, source_memory_id,
+         summary, task_terms_json, sensitivity, confidence, status, outcome_status,
+         public_safe, auto_managed, created_at, updated_at, promoted_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', 'unverified', 0, 1, ?, ?, NULL)`,
+    ).run(
+      candidateId,
+      pack.id,
+      input.agentId,
+      pack.project_scope_key,
+      pack.environment_key,
+      input.memory.id,
+      cleanText(input.memory.content, "Auto Experience candidate", 1_200),
+      JSON.stringify(tasks),
+      input.memory.sensitivity,
+      input.memory.confidence,
+      now,
+      now,
+    );
+    recordAutoIntakeReceipt({
+      agentId: input.agentId,
+      sourceMemoryHash,
+      memoryKind: input.memory.kind,
+      status: "candidate-created",
+      reasons: [],
+      packId: pack.id,
+      candidateId,
+    });
+  });
+  transaction();
+}
+
+function requestContextFromMemory(raw: string | null): AutoExperienceIntakeInput["memory"]["requestContext"] {
+  try {
+    const value = JSON.parse(raw || "{}") as Record<string, unknown>;
+    const userIntent = typeof value.userIntent === "string"
+      ? value.userIntent
+      : typeof value.user_intent === "string"
+        ? value.user_intent
+        : undefined;
+    const sourceTerms = Array.isArray(value.triggerTerms)
+      ? value.triggerTerms
+      : Array.isArray(value.trigger_terms)
+        ? value.trigger_terms
+        : [];
+    const triggerTerms = sourceTerms.filter((item): item is string => typeof item === "string").slice(0, 32);
+    return userIntent || triggerTerms.length > 0 ? { ...(userIntent ? { userIntent } : {}), triggerTerms } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Recover review-only Experience candidates from already-curated legacy Memory.
+ * The operation is idempotent for one exact local definition + environment,
+ * records blocked/skipped reasons without content, and never promotes, uploads,
+ * purchases or attaches a chip.
+ */
+export function reconcileExistingCuratedMemoryCandidates(limitValue = 2_000): {
+  scanned: number;
+  candidateCreated: number;
+  blocked: number;
+  skipped: number;
+  deferred: number;
+} {
+  const limit = Math.max(1, Math.min(10_000, Math.trunc(limitValue)));
+  const rows = getDb().prepare(
+    `SELECT id, kind, content, project_id, project_path, agent_id, confidence,
+            sensitivity, context_json, superseded_at
+       FROM memory_entries
+      WHERE agent_id IS NOT NULL AND superseded_at IS NULL
+      ORDER BY created_at ASC, id ASC
+      LIMIT ?`,
+  ).all(limit) as MemoryProjectionRow[];
+  const result = { scanned: 0, candidateCreated: 0, blocked: 0, skipped: 0, deferred: 0 };
+
+  for (const memory of rows) {
+    if (!memory.agent_id) continue;
+    result.scanned += 1;
+    try {
+      const agent = getAgentById(memory.agent_id);
+      const requestContext = requestContextFromMemory(memory.context_json);
+      const input: AutoExperienceIntakeInput = {
+        memory: {
+          id: memory.id,
+          kind: memory.kind,
+          content: memory.content,
+          confidence: memory.confidence === "high" || memory.confidence === "low" ? memory.confidence : "medium",
+          sensitivity: memory.sensitivity as AutoExperienceIntakeInput["memory"]["sensitivity"],
+          requestContext,
+        },
+        agentId: memory.agent_id,
+        projectId: memory.project_id,
+        projectPath: memory.project_path,
+        environment: { platform: process.platform, arch: process.arch, runtimeKind: "agentlas-desktop" },
+        basePackageHash: agent?.packageHash ?? null,
+        taskHint: requestContext?.userIntent ?? requestContext?.triggerTerms?.join(" ") ?? null,
+      };
+      autoIntakeCuratedMemory(input);
+      const receipt = getDb().prepare(
+        "SELECT status FROM experience_auto_intake_receipts WHERE agent_id = ? AND source_memory_hash = ? LIMIT 1",
+      ).get(memory.agent_id, autoIntakeSourceMemoryHash(input)) as { status?: string } | undefined;
+      if (receipt?.status === "candidate-created") result.candidateCreated += 1;
+      else if (receipt?.status === "blocked") result.blocked += 1;
+      else if (receipt?.status === "skipped") result.skipped += 1;
+      else result.deferred += 1;
+    } catch {
+      result.deferred += 1;
+    }
+  }
+  return result;
+}
+
+function validatedEvidenceRefs(input: ExperiencePromotionInput): string[] {
+  const refs = input.verification?.evidenceRefs;
+  if (!Array.isArray(refs) || refs.length === 0 || refs.length > 16) {
+    throw new Error("Experience verification requires 1-16 value-free evidence IDs.");
+  }
+  const clean = refs.map((value) => typeof value === "string" ? value.trim() : "");
+  if (clean.some((value) => !SAFE_EVIDENCE_REF_RE.test(value))) {
+    throw new Error("Experience evidence must use value-free IDs, not paths, URLs, or raw output.");
+  }
+  return [...new Set(clean)].sort();
+}
+
+export function promoteExperienceCandidate(input: ExperiencePromotionInput): ExperiencePromotionReceipt {
+  assertExactKeys(input, ["candidateId", "explicitConsent", "verification", "publicSafe"], "Experience promotion input");
+  if (input.explicitConsent !== true) throw new Error("Experience promotion requires explicit consent.");
+  assertExactKeys(input.verification, ["status", "method", "evidenceRefs"], "Experience verification");
+  if (input.verification.status !== "attested" || input.verification.method !== "user-attested") {
+    throw new Error("P0 Experience promotion supports user-attested review only; it is not official verification.");
+  }
+  const refs = validatedEvidenceRefs(input);
+  const candidate = getCandidateRow(cleanText(input.candidateId, "candidateId", 120));
+  const pack = getPackRow(candidate.pack_id);
+  assertPackBaseCurrent(pack);
+  const existing = getDb().prepare(
+    "SELECT * FROM experience_promotion_receipts WHERE candidate_id = ? AND action = 'promote'",
+  ).get(candidate.id) as PromotionReceiptRow | undefined;
+  if (existing) {
+    try {
+      recordExperienceLineageEvent(existing.pack_id, "promotion");
+      refreshExperienceRelationArtifacts(existing.pack_id);
+    } catch (error) {
+      console.warn(`[experience-relations] existing promotion sync deferred: ${error instanceof Error ? error.message : "unknown"}`);
+    }
+    return receiptFromRow(existing);
+  }
+  if (candidate.status !== "candidate") throw new Error("Only pending Experience candidates can be promoted.");
+  if (input.publicSafe === true && candidate.sensitivity !== "public") {
+    throw new Error("Only public-sensitivity candidates can be marked public-safe.");
+  }
+  if (input.publicSafe === true) {
+    assertPublicExperienceText(candidate.summary);
+    throw new Error("Public-safe promotion requires an authoritative local verifier, which is not available in P0.");
+  }
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const evidenceHash = hash("experience-evidence-v1", ...refs);
+  const transaction = getDb().transaction(() => {
+    getDb().prepare(
+      `INSERT INTO experience_promotion_receipts (
+         id, pack_id, candidate_id, agent_id, action, explicit_consent,
+         verification_status, verification_method, evidence_hash, public_safe, created_at
+       ) VALUES (?, ?, ?, ?, 'promote', 1, 'attested', 'user-attested', ?, 0, ?)`,
+    ).run(
+      id,
+      candidate.pack_id,
+      candidate.id,
+      candidate.agent_id,
+      evidenceHash,
+      now,
+    );
+    getDb().prepare(
+      `UPDATE experience_candidates
+          SET status = 'promoted', outcome_status = 'attested', public_safe = 0,
+              updated_at = ?, promoted_at = ?
+        WHERE id = ? AND status = 'candidate'`,
+    ).run(now, now, candidate.id);
+    getDb().prepare("UPDATE experience_packs SET updated_at = ? WHERE id = ?")
+      .run(now, candidate.pack_id);
+    recordExperienceLineageEvent(candidate.pack_id, "promotion");
+  });
+  transaction();
+  try {
+    refreshExperienceRelationArtifacts(candidate.pack_id);
+  } catch (error) {
+    console.warn(`[experience-relations] promotion projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
+  }
+  return receiptFromRow(
+    getDb().prepare("SELECT * FROM experience_promotion_receipts WHERE id = ?").get(id) as PromotionReceiptRow,
+  );
+}
+
+export function listExperiencePromotionReceipts(packId: string): ExperiencePromotionReceipt[] {
+  const pack = getPackRow(cleanText(packId, "packId", 120));
+  const rows = getDb().prepare(
+    "SELECT * FROM experience_promotion_receipts WHERE pack_id = ? ORDER BY created_at DESC",
+  ).all(pack.id) as PromotionReceiptRow[];
+  return rows.map(receiptFromRow);
+}
+
+export function createExperienceExportIntent(input: ExperienceExportIntentInput): ExperienceExportIntentRecord {
+  assertExactKeys(input, ["packId", "visibility"], "Experience export intent");
+  if (input.visibility !== "private" && input.visibility !== "public") {
+    throw new Error("Experience export visibility must be private or public.");
+  }
+  const pack = getPackRow(cleanText(input.packId, "packId", 120));
+  if (pack.status !== "active") throw new Error("Archived Experience Packs cannot be exported.");
+  assertPackBaseCurrent(pack);
+  const rows = getDb().prepare(
+    `SELECT c.id, c.source_memory_id, c.summary, c.sensitivity, c.confidence,
+            c.outcome_status, c.public_safe, r.id AS receipt_id,
+            r.verification_status, r.verification_method, r.evidence_hash,
+            r.created_at AS receipt_created_at
+       FROM experience_candidates c
+       JOIN experience_promotion_receipts r ON r.candidate_id = c.id AND r.action = 'promote'
+      WHERE c.pack_id = ? AND c.status = 'promoted'
+        AND c.outcome_status IN ('attested','verified')
+      ORDER BY c.id ASC`,
+  ).all(pack.id) as Array<{
+    id: string;
+    source_memory_id: string;
+    summary: string;
+    sensitivity: string;
+    confidence: string;
+    outcome_status: string;
+    public_safe: number;
+    receipt_id: string;
+    verification_status: string;
+    verification_method: string;
+    evidence_hash: string;
+    receipt_created_at: string;
+  }>;
+  if (rows.length === 0) throw new Error("Experience export requires at least one promoted attested item.");
+  if (input.visibility === "public") {
+    assertPublicExperienceText(pack.name);
+    assertPublicExperienceText(pack.description);
+    for (const row of rows) assertPublicExperienceText(row.summary);
+    if (rows.some((row) => row.public_safe !== 1 || row.verification_status !== "verified")) {
+      throw new Error("Public Experience export requires authoritative verified public-safe receipts; P0 attestation is insufficient.");
+    }
+  }
+  const canonicalManifest = {
+    schemaVersion: "experience-export-intent/1.0",
+    visibility: input.visibility,
+    pack: {
+      id: pack.id,
+      agentId: pack.agent_id,
+      name: pack.name,
+      description: pack.description,
+      basePackageHash: pack.base_package_hash,
+      projectScopeKey: pack.project_scope_key,
+      environmentKey: pack.environment_key,
+      status: pack.status,
+      mcpRequirements: (() => {
+        try {
+          return normalizeExperienceMcpRequirements(JSON.parse(pack.mcp_requirements_json));
+        } catch {
+          return [];
+        }
+      })(),
+    },
+    items: rows.map((row) => ({
+      candidateId: row.id,
+      sourceMemoryId: row.source_memory_id,
+      contentHash: hash("experience-summary-v1", row.summary),
+      sensitivity: row.sensitivity,
+      confidence: row.confidence,
+      outcomeStatus: row.outcome_status,
+      publicSafe: row.public_safe === 1,
+      receipt: {
+        id: row.receipt_id,
+        verificationStatus: row.verification_status,
+        verificationMethod: row.verification_method,
+        evidenceHash: row.evidence_hash,
+        createdAt: row.receipt_created_at,
+      },
+    })),
+  };
+  const manifestHash = hash("experience-export-intent-v1", JSON.stringify(canonicalManifest));
+  const existing = getDb().prepare(
+    `SELECT * FROM experience_export_intents
+      WHERE pack_id = ? AND visibility = ? AND manifest_hash = ?
+      ORDER BY created_at DESC LIMIT 1`,
+  ).get(pack.id, input.visibility, manifestHash) as ExportIntentRow | undefined;
+  if (existing) {
+    try {
+      recordExperienceLineageEvent(pack.id, "export-intent");
+      refreshExperienceRelationArtifacts(pack.id);
+    } catch (error) {
+      console.warn(`[experience-relations] existing export lineage sync deferred: ${error instanceof Error ? error.message : "unknown"}`);
+    }
+    return exportIntentFromRow(existing);
+  }
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const transaction = getDb().transaction(() => {
+    getDb().prepare(
+      `INSERT INTO experience_export_intents (
+         id, pack_id, agent_id, visibility, status, manifest_hash, created_at
+       ) VALUES (?, ?, ?, ?, 'local_intent', ?, ?)`,
+    ).run(id, pack.id, pack.agent_id, input.visibility, manifestHash, now);
+    recordExperienceLineageEvent(pack.id, "export-intent");
+  });
+  transaction();
+  try {
+    refreshExperienceRelationArtifacts(pack.id);
+  } catch (error) {
+    console.warn(`[experience-relations] export projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
+  }
+  return exportIntentFromRow(
+    getDb().prepare("SELECT * FROM experience_export_intents WHERE id = ?").get(id) as ExportIntentRow,
+  );
+}
+
+export function listExperienceExportIntents(packId: string): ExperienceExportIntentRecord[] {
+  const pack = getPackRow(cleanText(packId, "packId", 120));
+  const rows = getDb().prepare(
+    "SELECT * FROM experience_export_intents WHERE pack_id = ? ORDER BY created_at DESC",
+  ).all(pack.id) as ExportIntentRow[];
+  return rows.map(exportIntentFromRow);
+}
+
+export function getExperienceOntologySummary(agentIdValue: string): ExperienceOntologySummary {
+  const agentId = cleanText(agentIdValue, "agentId", 120);
+  const packRows = getDb().prepare(
+    "SELECT id, mcp_requirements_json FROM experience_packs WHERE agent_id = ?",
+  ).all(agentId) as Array<{ id: string; mcp_requirements_json: string }>;
+  const packIds = new Set(packRows.map((row) => row.id));
+  const candidateRows = getDb().prepare(
+    "SELECT status, task_terms_json FROM experience_candidates WHERE agent_id = ?",
+  ).all(agentId) as Array<{ status: string; task_terms_json: string }>;
+  const tasks = new Set<string>();
+  for (const row of candidateRows) {
+    try {
+      const values = JSON.parse(row.task_terms_json) as unknown;
+      if (Array.isArray(values)) values.filter(isCanonicalTaskId).forEach((value) => tasks.add(value));
+    } catch {
+      // Legacy task terms remain stored but do not count as canonical chips.
+    }
+  }
+  const mcp = new Set<string>();
+  for (const row of packRows) {
+    try {
+      for (const requirement of normalizeExperienceMcpRequirements(JSON.parse(row.mcp_requirements_json))) {
+        mcp.add(requirement.catalogId);
+      }
+    } catch {
+      // Damaged local metadata is excluded from the derived index summary.
+    }
+  }
+
+  const scalar = (sql: string, ...params: unknown[]): number => {
+    const row = getDb().prepare(sql).get(...params) as { n?: number } | undefined;
+    return Number(row?.n ?? 0);
+  };
+  const intakeRows = getDb().prepare(
+    "SELECT status, reason_codes_json FROM experience_auto_intake_receipts WHERE agent_id = ?",
+  ).all(agentId) as Array<{ status: "candidate-created" | "blocked" | "skipped"; reason_codes_json: string }>;
+  const reasonCounts = new Map<string, number>();
+  for (const row of intakeRows) {
+    try {
+      const reasons = JSON.parse(row.reason_codes_json) as unknown;
+      if (Array.isArray(reasons)) {
+        for (const reason of reasons) {
+          if (typeof reason === "string") reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
+        }
+      }
+    } catch {
+      reasonCounts.set("invalid-local-receipt", (reasonCounts.get("invalid-local-receipt") ?? 0) + 1);
+    }
+  }
+  const placeholders = packRows.map(() => "?").join(",");
+  const relationParams = [...packIds];
+  const lineageCount = packIds.size
+    ? scalar(`SELECT COUNT(*) AS n FROM experience_lineage_events WHERE pack_id IN (${placeholders})`, ...relationParams)
+    : 0;
+  const updateRelationCount = packIds.size
+    ? scalar(`SELECT COUNT(*) AS n FROM experience_relation_edges WHERE pack_id IN (${placeholders}) AND edge_type = 'supersedes'`, ...relationParams)
+    : 0;
+  const evidenceCount = scalar("SELECT COUNT(*) AS n FROM experience_promotion_receipts WHERE agent_id = ?", agentId);
+  const exportCount = scalar("SELECT COUNT(*) AS n FROM experience_export_intents WHERE agent_id = ?", agentId);
+  const tasteDraftCount = scalar(
+    `SELECT COUNT(*) AS n
+       FROM taste_draft_candidates d
+       JOIN memory_entries m ON m.id = d.source_memory_id AND m.agent_id = d.agent_id
+      WHERE d.agent_id = ? AND d.status = 'observation' AND m.superseded_at IS NULL`,
+    agentId,
+  );
+  const tasteUnclassifiedCount = scalar(
+    `SELECT COUNT(*) AS n
+       FROM taste_draft_candidates d
+       JOIN memory_entries m ON m.id = d.source_memory_id AND m.agent_id = d.agent_id
+      WHERE d.agent_id = ? AND d.status = 'observation' AND d.axis_candidates_json = '[]'
+        AND m.superseded_at IS NULL`,
+    agentId,
+  );
+  const cloudCount = packIds.size
+    ? scalar(`SELECT COUNT(*) AS n FROM experience_cloud_uploads WHERE pack_id IN (${placeholders})`, ...relationParams)
+    : 0;
+  const publicProjectionCount = packIds.size
+    ? scalar(`SELECT COUNT(*) AS n FROM experience_public_projections WHERE pack_id IN (${placeholders})`, ...relationParams)
+    : 0;
+  return {
+    packCount: packRows.length,
+    candidateCount: candidateRows.length,
+    promotedCount: candidateRows.filter((row) => row.status === "promoted").length,
+    tasteDraftCount,
+    tasteNeedsEvidenceCount: tasteDraftCount,
+    tasteUnclassifiedCount,
+    taskCount: tasks.size,
+    evidenceCount,
+    mcpCount: mcp.size,
+    lineageCount,
+    updateRelationCount,
+    localReceiptCount: evidenceCount + exportCount + cloudCount + publicProjectionCount + intakeRows.length,
+    autoIntake: {
+      candidateCreated: intakeRows.filter((row) => row.status === "candidate-created").length,
+      blocked: intakeRows.filter((row) => row.status === "blocked").length,
+      skipped: intakeRows.filter((row) => row.status === "skipped").length,
+      reasons: [...reasonCounts.entries()]
+        .map(([code, count]) => ({ code, count }))
+        .sort((left, right) => right.count - left.count || left.code.localeCompare(right.code)),
+    },
+  };
+}
+
+export interface PromotedExperienceProjection {
+  id: string;
+  summary: string;
+  confidence: "high" | "medium" | "low";
+  taskTerms: string[];
+  updatedAt: string;
+  relationScore: number;
+}
+
+export function listPromotedExperienceProjection(input: {
+  agentId: string;
+  projectId?: string | null;
+  projectPath?: string | null;
+  environmentKey: string;
+  basePackageHash: string;
+  taskTerms?: string[];
+}): PromotedExperienceProjection[] {
+  if (!/^[a-f0-9]{64}$/.test(input.basePackageHash)) return [];
+  const rows = getDb().prepare(
+    `SELECT c.id, c.summary, c.confidence, c.task_terms_json, c.updated_at
+       FROM experience_candidates c
+       JOIN experience_packs p ON p.id = c.pack_id AND p.agent_id = c.agent_id
+      WHERE c.agent_id = ? AND c.project_scope_key = ? AND c.environment_key = ?
+        AND p.project_scope_key = c.project_scope_key
+        AND p.environment_key = c.environment_key
+        AND p.status = 'active' AND p.base_package_hash = ?
+        AND c.status = 'promoted' AND c.outcome_status IN ('attested','verified')
+      ORDER BY c.updated_at DESC LIMIT 200`,
+  ).all(
+    input.agentId,
+    experienceProjectScopeKey(input),
+    input.environmentKey,
+    input.basePackageHash,
+  ) as Array<{
+    id: string;
+    summary: string;
+    confidence: "high" | "medium" | "low";
+    task_terms_json: string;
+    updated_at: string;
+  }>;
+  let relationScores = new Map<string, number>();
+  try {
+    relationScores = rankExperienceCandidatesByRelations({
+      projectScopeKey: experienceProjectScopeKey(input),
+      environmentKey: input.environmentKey,
+      basePackageHash: input.basePackageHash,
+      taskTerms: input.taskTerms ?? [],
+    });
+  } catch (error) {
+    console.warn(`[experience-relations] relation ranking unavailable: ${error instanceof Error ? error.message : "unknown"}`);
+  }
+  return rows.map((row) => {
+    let terms: string[] = [];
+    try {
+      const parsed = JSON.parse(row.task_terms_json) as unknown;
+      if (Array.isArray(parsed)) terms = parsed.filter((item): item is string => typeof item === "string").slice(0, 32);
+    } catch {
+      terms = [];
+    }
+    return {
+      id: row.id,
+      summary: row.summary,
+      confidence: row.confidence,
+      taskTerms: terms,
+      updatedAt: row.updated_at,
+      relationScore: relationScores.get(row.id) ?? 0,
+    };
+  }).sort((left, right) => right.relationScore - left.relationScore || right.updatedAt.localeCompare(left.updatedAt));
+}

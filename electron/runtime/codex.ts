@@ -9,6 +9,7 @@ import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
+import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
@@ -407,6 +408,16 @@ export const runCodex: Runner = async (
         saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint);
       }
       return { text: r.text.trim(), sessionId: r.threadId ?? resumeSessionId, tokens: r.tokens };
+    }
+    // Build continuation recovery is owned by Main, which can remove exactly
+    // one attributed server and preserve approved peers. Replaying here with
+    // the identical broken config would exceed that one-retry bound.
+    if (
+      !runReq.chatId &&
+      mcpArgs.length > 0 &&
+      containsMcpStartupTransportFatal(r.stderr)
+    ) {
+      throw new Error(`codex CLI exit ${r.code}${r.stderr ? `\n${r.stderr.slice(0, 500)}` : ""}`);
     }
     // resume 실패(세션 만료/손상 등) → 세션 버리고 아래 CREATE로 폴백.
     if (runReq.chatId) clearRuntimeSession(runReq.chatId, KIND);

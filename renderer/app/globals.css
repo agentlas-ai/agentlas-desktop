@@ -12,6 +12,193 @@
   src: url("./fonts/pretendard/PretendardVariable.woff2") format("woff2");
 }
 
+/* Ontology map: motion and transparency are optional presentation layers. */
+@media (prefers-reduced-motion: reduce) {
+  [data-testid="agent-ontology-graph"] button {
+    transition: none !important;
+  }
+}
+
+@media (prefers-contrast: more), (forced-colors: active) {
+  [data-testid="agent-ontology-graph"] > div,
+  [data-testid="ontology-node-inspector"] {
+    backdrop-filter: none !important;
+  }
+  [data-testid="agent-ontology-graph"] button {
+    border-width: 2px !important;
+  }
+}
+
+/* ── Feature update: Ontology Chips ─────────────────────────────────────── */
+.feature-update-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 290;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(18, 20, 17, 0.46);
+  backdrop-filter: blur(5px);
+  animation: feature-update-backdrop-in 160ms ease-out both;
+}
+
+.feature-update-dialog {
+  position: relative;
+  width: min(480px, 92vw);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--paper-edge) 82%, #6f7660 18%);
+  border-radius: 16px;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 28px 72px rgba(19, 22, 17, 0.26), 0 3px 12px rgba(19, 22, 17, 0.1);
+  animation: feature-update-dialog-in 210ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
+}
+
+.feature-update-close {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  right: 12px;
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid rgba(36, 40, 31, 0.14);
+  border-radius: 9px;
+  background: rgba(247, 244, 235, 0.88);
+  color: #34392e;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 3px 10px rgba(27, 30, 24, 0.1);
+}
+
+.feature-update-close:hover,
+.feature-update-close:focus-visible {
+  background: #fffdf7;
+  border-color: rgba(36, 40, 31, 0.28);
+}
+
+.feature-update-hero {
+  width: 100%;
+  aspect-ratio: 960 / 428;
+  overflow: hidden;
+  border-radius: 15px 15px 0 0;
+  border-bottom: 1px solid rgba(36, 40, 31, 0.09);
+  background: #f3f0e6;
+}
+
+.feature-update-hero img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.feature-update-body {
+  display: grid;
+  gap: 24px;
+  padding: 30px 32px 38px;
+  text-align: center;
+}
+
+.feature-update-copy {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+}
+
+.feature-update-kicker {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 750;
+  letter-spacing: 0.13em;
+}
+
+.feature-update-copy h2 {
+  margin: 0;
+  outline: none;
+  font-family: var(--font-head);
+  font-size: clamp(22px, 4.8vw, 27px);
+  line-height: 1.18;
+  letter-spacing: -0.035em;
+}
+
+.feature-update-copy p {
+  max-width: 390px;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.65;
+  word-break: keep-all;
+}
+
+.feature-update-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+  gap: 9px;
+}
+
+.feature-update-actions button {
+  min-height: 42px;
+  padding: 0 15px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.feature-update-secondary {
+  border: 1px solid var(--paper-edge);
+  background: var(--paper-2);
+  color: var(--ink-soft);
+}
+
+.feature-update-primary {
+  border: 1px solid var(--feature-update-primary-bg, var(--accent));
+  background: var(--feature-update-primary-bg, var(--accent));
+  color: #fff;
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--feature-update-primary-bg, var(--accent)) 24%, transparent);
+}
+
+.feature-update-actions button:hover {
+  filter: brightness(0.98);
+}
+
+.feature-update-actions button:focus-visible,
+.feature-update-close:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, white);
+  outline-offset: 2px;
+}
+
+@keyframes feature-update-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes feature-update-dialog-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.992); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (max-width: 560px) {
+  .feature-update-backdrop { padding: 14px; }
+  .feature-update-dialog { width: min(480px, calc(100vw - 28px)); }
+  .feature-update-body { padding: 24px 20px 28px; }
+  .feature-update-actions { grid-template-columns: 1fr; }
+  .feature-update-secondary { order: 2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .feature-update-backdrop,
+  .feature-update-dialog {
+    animation: none;
+  }
+}
+
 :root {
   color-scheme: light;
 
@@ -70,6 +257,8 @@
   --muted-deep: #868483;     /* Cheers */
 
   --accent: #6b6e52;         /* Moss */
+  /* White button copy stays above WCAG AA in both themes. */
+  --feature-update-primary-bg: #6b6e52;
   --accent-soft: rgba(107, 110, 82, 0.14);
   --accent-strong: #55583f;
   --fill-1: rgba(107, 110, 82, 0.09);
@@ -167,7 +356,7 @@
 
   /* accent — FILL vs TEXT split. Dark block uses a brighter fill while the light
      theme keeps the quieter moss brand accent. */
-  --rd-accent: #7c7cff;             /* fill behind white text (≈4.8:1) */
+  --rd-accent: #7c7cff;             /* general dark accent; do not use behind small white text */
   --rd-accent-2: #5ad1c0;           /* secondary / live·connected */
   --run-accent: #e08b6a;            /* 실행 상태줄 ✳ 스피너 — 다크에서 한 톤 밝게 */
   --rd-accent-3: #7c7cff;
@@ -191,6 +380,7 @@
   --muted-deep: #a6a6b2;
 
   --accent: #7c7cff;
+  --feature-update-primary-bg: #5858c8;
   --accent-soft: rgba(124, 124, 255, 0.20);
   --accent-strong: #9a98ff;
   --fill-1: rgba(124, 124, 255, 0.12);
@@ -2854,6 +3044,39 @@ button[data-toggle-state="on"] {
   margin-top: 8px;
   font-size: 12px;
   color: var(--rd-ink-2);
+}
+
+/* Build MCP preflight + value-free attachment receipt. */
+.build-mcp-plan-card { border-color: color-mix(in oklch, var(--rd-accent) 38%, var(--rd-hair)); }
+.build-mcp-hint { margin: 0 0 12px; color: var(--rd-ink-3); font-size: 12px; line-height: 1.55; }
+.build-mcp-list { display: grid; gap: 8px; }
+.rd .build-mcp-row {
+  width: 100%; min-width: 0; display: grid; grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--rd-hair);
+  border-radius: 10px; background: var(--rd-surface-2); color: var(--rd-ink); text-align: left;
+}
+.rd .build-mcp-row[data-selected="true"] { border-color: var(--rd-accent); background: color-mix(in oklch, var(--rd-accent) 9%, var(--rd-surface)); }
+.rd .build-mcp-row[data-blocked="true"] { opacity: .64; cursor: default; }
+.build-mcp-check { width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--rd-hair-2); border-radius: 999px; font-size: 12px; }
+.build-mcp-row[data-selected="true"] .build-mcp-check { border-color: var(--rd-accent); background: var(--rd-accent); color: #fff; }
+.build-mcp-copy { min-width: 0; display: grid; gap: 2px; }
+.build-mcp-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.build-mcp-copy small { color: var(--rd-ink-3); font-size: 11px; }
+.build-mcp-badge { padding: 4px 8px; border-radius: 999px; border: 1px solid var(--rd-hair); color: var(--rd-ink-3); font-size: 10.5px; white-space: nowrap; }
+.build-mcp-badge[data-state="missing-key"], .build-mcp-badge[data-state="runtime-incompatible"] { color: #a16207; border-color: color-mix(in oklch, #a16207 35%, var(--rd-hair)); }
+.build-mcp-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.build-mcp-empty { padding: 10px 12px; border: 1px dashed var(--rd-hair); border-radius: 10px; color: var(--rd-ink-3); font-size: 12px; }
+.build-mcp-receipt-grid { display: grid; gap: 7px; }
+.build-mcp-receipt-group { display: grid; grid-template-columns: minmax(110px, auto) minmax(0, 1fr); gap: 10px; padding: 8px 10px; border-radius: 9px; background: var(--rd-surface-2); font-size: 11.5px; }
+.build-mcp-receipt-group strong { color: var(--rd-ink-2); }
+.build-mcp-receipt-group span { min-width: 0; color: var(--rd-ink-3); overflow-wrap: anywhere; }
+.build-mcp-receipt-group[data-state="attached"] { border-left: 3px solid #2f9e71; }
+.build-mcp-receipt-group[data-state="failed"], .build-mcp-receipt-group[data-state="degraded"] { border-left: 3px solid #d97706; }
+
+@media (max-width: 680px) {
+  .rd .build-mcp-row { grid-template-columns: 24px minmax(0, 1fr); }
+  .build-mcp-badge { grid-column: 2; justify-self: start; }
+  .build-mcp-receipt-group { grid-template-columns: 1fr; gap: 3px; }
 }
 
 @media (max-width: 1100px) {
@@ -6411,6 +6634,8 @@ button[data-toggle-state="on"] {
   background: var(--rd-accent, #6b6e52);
   color: #fff;
   cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .agent-run-button:hover {
   filter: brightness(1.05);

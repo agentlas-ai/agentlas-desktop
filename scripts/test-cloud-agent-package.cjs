@@ -198,6 +198,50 @@ function packageHash(files) {
     assert.equal(roundTripBundle.files.find((file) => file.path === "run.sh").executable, true);
     assert.equal(roundTripBundle.files.find((file) => file.path === "AGENTS.md").executable, false);
 
+    const separatedExperienceRoot = path.join(tempDir, "separated-experience-lineage-agent");
+    writeAgent(separatedExperienceRoot);
+    const separatedBaseline = await packageAndReviewCloudAgent({
+      rootPath: separatedExperienceRoot,
+      dryRun: true,
+    });
+    const localLineageMarker = "LOCAL_EXPERIENCE_LINEAGE_NEVER_SHIPS /private/workspace/history";
+    fs.writeFileSync(
+      path.join(separatedExperienceRoot, ".agentlas", "experience-relations.jsonl"),
+      `${JSON.stringify({ kind: "agentlas-experience-relation-lineage", localLineageMarker })}\n`,
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(separatedExperienceRoot, ".agentlas", "experience-relations.jsonl.previous"),
+      localLineageMarker,
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(separatedExperienceRoot, ".agentlas", ".experience-relations.jsonl.123.tmp"),
+      localLineageMarker,
+      "utf8",
+    );
+    const separatedAgain = await packageAndReviewCloudAgent({
+      rootPath: separatedExperienceRoot,
+      dryRun: true,
+    });
+    const separatedBundle = JSON.parse(fs.readFileSync(separatedAgain.bundlePath, "utf8"));
+    assert.equal(separatedAgain.manifest.packageHash, separatedBaseline.manifest.packageHash);
+    assert.equal(
+      separatedBundle.files.some((file) => file.path === ".agentlas/experience-relations.jsonl"),
+      false,
+      "local Experience lineage must be uploaded through the separate Experience asset path, never the base agent bundle",
+    );
+    assert.equal(JSON.stringify(separatedBundle).includes(localLineageMarker), false);
+    assert.equal(
+      separatedBundle.files.some((file) => /experience-relations\.jsonl/.test(file.path)),
+      false,
+      "crash-safe lineage temp and backup siblings must also stay out of the base bundle",
+    );
+    assert.equal(
+      separatedAgain.files.find((file) => file.path === ".agentlas/experience-relations.jsonl")?.reason,
+      "experience-lineage-separate-asset",
+    );
+
     const oversizedRoot = path.join(tempDir, "oversized-agent");
     writeAgent(oversizedRoot);
     fs.writeFileSync(path.join(oversizedRoot, "skills.md"), "");

@@ -15,13 +15,22 @@ const watchdog = setTimeout(() => {
 
 const {
   CONTINUITY_CORE_TABLES,
+  CONTINUITY_V1_TABLES,
   DesktopUpdaterController,
+  inspectInstallJournalFile,
 } = require("../dist/electron/updater/controller.js");
 const {
   captureUpdaterContinuity,
   verifyUpdaterContinuity,
 } = require("../dist/electron/updater/continuity.js");
 const { preflightUpdaterStartup } = require("../dist/electron/updater.js");
+
+for (const requiredOntologyContinuityTable of ["run_events", "failure_events", "installed_agent_hub_bindings", "taste_draft_candidates", "taste_chip_workflows"]) {
+  assert.ok(
+    CONTINUITY_CORE_TABLES.includes(requiredOntologyContinuityTable),
+    `${requiredOntologyContinuityTable} must be protected by updater continuity`,
+  );
+}
 
 const compatibility = {
   minimumSourceAppVersion: "0.7.0",
@@ -96,7 +105,7 @@ function mockContinuity(layout) {
   const tableIdentityHashes = Object.fromEntries(CONTINUITY_CORE_TABLES.map((table) => [table, "a".repeat(64)]));
   return {
     snapshot: () => ({
-      schemaVersion: 1,
+      schemaVersion: 2,
       userDataPath: layout.userDataPath,
       databasePath: path.join(layout.userDataPath, "agentlas.sqlite"),
       backupPath,
@@ -120,6 +129,26 @@ function mockContinuity(layout) {
       fs.writeFileSync(backupPath, "safe-sqlite-backup");
       return mockContinuity(layout).snapshot();
     },
+  };
+}
+
+function snapshotForSchema(snapshot, schemaVersion, tables) {
+  return {
+    ...snapshot,
+    schemaVersion,
+    rowCounts: Object.fromEntries(tables.map((table) => [table, snapshot.rowCounts[table]])),
+    tableIdentityHashes: Object.fromEntries(tables.map((table) => [table, snapshot.tableIdentityHashes[table]])),
+  };
+}
+
+function installJournal(snapshot) {
+  return {
+    schemaVersion: 1,
+    phase: "install-requested",
+    sourceVersion: "0.7.28",
+    targetVersion: "0.7.29",
+    requestedAt: new Date(1_800_000_000_000).toISOString(),
+    continuity: snapshot,
   };
 }
 
@@ -148,6 +177,10 @@ function makeController(layout, updater, options = {}) {
     schedule: false,
     now: options.now || (() => 1_800_000_000_000),
     removePath: options.removePath,
+    recoverySessionRetryDelayMs: options.recoverySessionRetryDelayMs,
+    recoverySessionRetryAttempts: options.recoverySessionRetryAttempts,
+    waitForRecoveryRetry: options.waitForRecoveryRetry,
+    refreshSessionForRecovery: options.refreshSessionForRecovery,
     logger: { log() {}, warn() {}, error() {} },
   });
   return { controller, states, revealed, opened, continuity };
@@ -219,12 +252,58 @@ async function installJournalStopsFailedApplyLoopAndReconcilesSuccess() {
   assert.equal(fs.readFileSync(layout.execPath, "utf8"), "previous-app-binary", "failed apply leaves previous app intact");
   retry.controller.dispose();
 
-  const relaunched = makeController(layout, new FakeUpdater(), { currentVersion: "0.7.29" });
+  const markerPath = path.join(layout.userDataPath, "updater", "install-journal-corrupt.v1.json");
+  fs.writeFileSync(markerPath, "stale-marker");
+  const journalClearOrder = [];
+  const relaunched = makeController(layout, new FakeUpdater(), {
+    currentVersion: "0.7.29",
+    removePath: (target, options) => {
+      if (target === markerPath || target === journalPath) journalClearOrder.push(target);
+      fs.rmSync(target, options);
+    },
+  });
   await relaunched.controller.init();
   assert.equal(relaunched.controller.getState().status, "updated");
+  assert.deepEqual(
+    journalClearOrder,
+    [markerPath, journalPath],
+    "the marker must clear before the authoritative journal so a crash leaves re-verifiable truth",
+  );
   assert.equal(fs.existsSync(journalPath), false, "verified relaunch clears the install intent");
   assert.equal(fs.existsSync(backupPath), true, "verified recovery copy remains available after success");
   relaunched.controller.dispose();
+  fs.rmSync(layout.root, { recursive: true, force: true });
+}
+
+async function verifiedContinuityFailsClosedWhenJournalCannotBeDeleted() {
+  const layout = makeLayout();
+  const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
+  const first = makeController(layout, new FakeUpdater({ updateInfo }));
+  await first.controller.init();
+  await first.controller.check();
+  await first.controller.install();
+  first.controller.dispose();
+
+  const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
+  const updater = new FakeUpdater();
+  const failedCleanup = makeController(layout, updater, {
+    currentVersion: "0.7.29",
+    removePath: (target, options) => {
+      if (target === journalPath) {
+        const error = new Error("simulated EACCES");
+        error.code = "EACCES";
+        throw error;
+      }
+      fs.rmSync(target, options);
+    },
+  });
+  await failedCleanup.controller.init();
+  assert.equal(failedCleanup.controller.getState().status, "manual-required");
+  assert.equal(failedCleanup.controller.getState().code, "install-state-corrupt");
+  assert.equal(fs.existsSync(journalPath), true, "failed unlink must preserve the journal for the next safe startup");
+  assert.equal((await failedCleanup.controller.check()).code, "install-state-corrupt");
+  assert.equal(updater.checkCount, 0, "journal cleanup failure must pause every automatic update check");
+  failedCleanup.controller.dispose();
   fs.rmSync(layout.root, { recursive: true, force: true });
 }
 
@@ -383,6 +462,208 @@ async function semanticallyDamagedJournalFailsClosed() {
   assert.equal(controller.getState().code, "install-state-corrupt");
   assert.equal(updater.checkCount, 0);
   controller.dispose();
+  fs.rmSync(layout.root, { recursive: true, force: true });
+}
+
+async function snapshotSchemaTableSetsAreExactAndBackwardCompatible() {
+  const layout = makeLayout();
+  const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
+  fs.mkdirSync(path.dirname(journalPath), { recursive: true });
+  const currentSnapshot = mockContinuity(layout).snapshot();
+  const legacySnapshot = snapshotForSchema(currentSnapshot, 1, CONTINUITY_V1_TABLES);
+
+  fs.writeFileSync(journalPath, JSON.stringify(installJournal(legacySnapshot)));
+  assert.equal(
+    inspectInstallJournalFile(journalPath).status,
+    "valid",
+    "a shipped v1 journal with the exact legacy table set must remain readable after table expansion",
+  );
+
+  const missingLegacyTable = structuredClone(legacySnapshot);
+  delete missingLegacyTable.rowCounts.installed_agents;
+  delete missingLegacyTable.tableIdentityHashes.installed_agents;
+  fs.writeFileSync(journalPath, JSON.stringify(installJournal(missingLegacyTable)));
+  assert.equal(
+    inspectInstallJournalFile(journalPath).status,
+    "corrupt",
+    "v1 must not accept an arbitrary subset of its fixed protection set",
+  );
+
+  const expandedButDowngraded = structuredClone(legacySnapshot);
+  expandedButDowngraded.rowCounts.run_events = currentSnapshot.rowCounts.run_events;
+  expandedButDowngraded.tableIdentityHashes.run_events = currentSnapshot.tableIdentityHashes.run_events;
+  fs.writeFileSync(journalPath, JSON.stringify(installJournal(expandedButDowngraded)));
+  assert.equal(
+    inspectInstallJournalFile(journalPath).status,
+    "corrupt",
+    "a v2 protection map must not masquerade as schemaVersion 1",
+  );
+
+  const incompleteCurrentSnapshot = structuredClone(currentSnapshot);
+  delete incompleteCurrentSnapshot.rowCounts.run_events;
+  delete incompleteCurrentSnapshot.tableIdentityHashes.run_events;
+  fs.writeFileSync(journalPath, JSON.stringify(installJournal(incompleteCurrentSnapshot)));
+  assert.equal(
+    inspectInstallJournalFile(journalPath).status,
+    "corrupt",
+    "v2 must fail closed when any current protected table is missing",
+  );
+
+  fs.rmSync(layout.root, { recursive: true, force: true });
+}
+
+async function transientAccountRestoreReconcilesOnceAndClearsOnlyAfterFullSuccess() {
+  const layout = makeLayout();
+  const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
+  const first = makeController(layout, new FakeUpdater({ updateInfo }));
+  await first.controller.init();
+  await first.controller.check();
+  await first.controller.install();
+  first.controller.dispose();
+
+  const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
+  let accountRestored = false;
+  let verificationCalls = 0;
+  let retryWaitCalls = 0;
+  let refreshCalls = 0;
+  let releaseRetryWait;
+  let markRetryWaitStarted;
+  const retryWaitGate = new Promise((resolve) => { releaseRetryWait = resolve; });
+  const retryWaitStarted = new Promise((resolve) => { markRetryWaitStarted = resolve; });
+  const updater = new FakeUpdater();
+  const relaunched = makeController(layout, updater, {
+    currentVersion: "0.7.29",
+    verifyContinuity: async () => {
+      verificationCalls += 1;
+      return accountRestored
+        ? { ok: true, violations: [] }
+        : { ok: false, violations: ["account-session-not-restored"] };
+    },
+    waitForRecoveryRetry: async () => {
+      retryWaitCalls += 1;
+      markRetryWaitStarted();
+      await retryWaitGate;
+    },
+    refreshSessionForRecovery: async () => {
+      refreshCalls += 1;
+      accountRestored = true;
+    },
+  });
+  const firstInit = relaunched.controller.init();
+  const duplicateInit = relaunched.controller.init();
+  assert.equal(firstInit, duplicateInit, "concurrent init callers must share the same continuity safety gate");
+  let duplicateInitSettled = false;
+  void duplicateInit.then(() => { duplicateInitSettled = true; });
+  await retryWaitStarted;
+  await Promise.resolve();
+  assert.equal(duplicateInitSettled, false, "no init caller may resolve before startup reconciliation finishes");
+  assert.equal(verificationCalls, 1);
+  assert.equal(retryWaitCalls, 1, "concurrent initialization must not start duplicate reconciliation waits");
+  assert.equal(fs.existsSync(journalPath), true, "an in-flight verification must not clear durable recovery truth");
+  releaseRetryWait();
+
+  await Promise.all([firstInit, duplicateInit]);
+  assert.equal(duplicateInitSettled, true);
+  assert.equal(relaunched.controller.getState().status, "updated");
+  assert.equal(verificationCalls, 2, "the bounded auth-settle path must run exactly one full retry before success");
+  assert.equal(refreshCalls, 1, "the retry must re-read the durable auth session before full verification");
+  assert.equal(fs.existsSync(journalPath), false, "the journal clears only after every continuity check succeeds");
+  assert.equal(updater.checkCount, 0, "startup reconciliation must not contact the update feed");
+  relaunched.controller.dispose();
+  fs.rmSync(layout.root, { recursive: true, force: true });
+}
+
+async function realViolationSurvivesAccountRestoreAndEveryRetry() {
+  const layout = makeLayout();
+  const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
+  const first = makeController(layout, new FakeUpdater({ updateInfo }));
+  await first.controller.init();
+  await first.controller.check();
+  await first.controller.install();
+  first.controller.dispose();
+
+  const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
+  let verificationCalls = 0;
+  let retryWaitCalls = 0;
+  const updater = new FakeUpdater();
+  const relaunched = makeController(layout, updater, {
+    currentVersion: "0.7.29",
+    verifyContinuity: async () => {
+      verificationCalls += 1;
+      return {
+        ok: false,
+        violations: ["account-session-not-restored", "row-count-regressed:installed_agents"],
+      };
+    },
+    waitForRecoveryRetry: async () => { retryWaitCalls += 1; },
+  });
+  await relaunched.controller.init();
+  assert.equal(relaunched.controller.getState().status, "recovery-required");
+  assert.equal(fs.existsSync(journalPath), true);
+  const retried = await relaunched.controller.check();
+  assert.equal(retried.status, "recovery-required", "runtime checks must not unlock a partially bootstrapped app");
+  assert.equal(verificationCalls, 1, "a real violation alongside auth delay must bypass the transient retry path");
+  assert.equal(retryWaitCalls, 0);
+  assert.equal(fs.existsSync(journalPath), true, "a real continuity violation must never delete the journal");
+  assert.equal(JSON.parse(fs.readFileSync(journalPath, "utf8")).phase, "recovery-required");
+  assert.equal(updater.checkCount, 0);
+  relaunched.controller.dispose();
+  fs.rmSync(layout.root, { recursive: true, force: true });
+
+  const emergedLayout = makeLayout();
+  const emergedFirst = makeController(emergedLayout, new FakeUpdater({ updateInfo }));
+  await emergedFirst.controller.init();
+  await emergedFirst.controller.check();
+  await emergedFirst.controller.install();
+  emergedFirst.controller.dispose();
+  const emergedJournalPath = path.join(emergedLayout.userDataPath, "updater", "install-journal.v1.json");
+  let emergedCalls = 0;
+  const emergedViolation = makeController(emergedLayout, new FakeUpdater(), {
+    currentVersion: "0.7.29",
+    verifyContinuity: async () => {
+      emergedCalls += 1;
+      return emergedCalls === 1
+        ? { ok: false, violations: ["account-session-not-restored"] }
+        : { ok: false, violations: ["row-count-regressed:installed_agents"] };
+    },
+    waitForRecoveryRetry: async () => {},
+  });
+  await emergedViolation.controller.init();
+  assert.equal(emergedCalls, 2, "the auth retry must re-run the complete continuity verifier");
+  assert.equal(emergedViolation.controller.getState().status, "recovery-required");
+  assert.equal(fs.existsSync(emergedJournalPath), true, "a real violation discovered on retry must preserve the journal");
+  emergedViolation.controller.dispose();
+  fs.rmSync(emergedLayout.root, { recursive: true, force: true });
+}
+
+async function accountRestoreRetryIsStrictlyBounded() {
+  const layout = makeLayout();
+  const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
+  const first = makeController(layout, new FakeUpdater({ updateInfo }));
+  await first.controller.init();
+  await first.controller.check();
+  await first.controller.install();
+  first.controller.dispose();
+
+  let verificationCalls = 0;
+  let refreshCalls = 0;
+  const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
+  const unresolved = makeController(layout, new FakeUpdater(), {
+    currentVersion: "0.7.29",
+    verifyContinuity: async () => {
+      verificationCalls += 1;
+      return { ok: false, violations: ["account-session-not-restored"] };
+    },
+    recoverySessionRetryAttempts: 2,
+    waitForRecoveryRetry: async () => {},
+    refreshSessionForRecovery: async () => { refreshCalls += 1; },
+  });
+  await unresolved.controller.init();
+  assert.equal(verificationCalls, 3, "two bounded retries mean one initial verification plus exactly two retries");
+  assert.equal(refreshCalls, 2);
+  assert.equal(unresolved.controller.getState().status, "recovery-required");
+  assert.equal(fs.existsSync(journalPath), true, "an exhausted auth retry must retain the durable journal");
+  unresolved.controller.dispose();
   fs.rmSync(layout.root, { recursive: true, force: true });
 }
 
@@ -545,6 +826,23 @@ async function realSqliteContinuityBackupIsVerifiedAndSecretSafe() {
     CREATE TABLE chats (id TEXT PRIMARY KEY);
     CREATE TABLE chat_messages (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, text TEXT NOT NULL);
     CREATE TABLE memory_entries (id TEXT PRIMARY KEY, content TEXT NOT NULL);
+    CREATE TABLE run_events (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, kind TEXT NOT NULL);
+    CREATE TABLE failure_events (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, error_code TEXT NOT NULL);
+    CREATE TABLE installed_agent_hub_bindings (
+      installed_agent_id TEXT PRIMARY KEY,
+      agent_definition_id TEXT NOT NULL,
+      agent_release_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      bound_at TEXT NOT NULL
+    );
+    CREATE TABLE taste_draft_candidates (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      source_memory_id TEXT NOT NULL,
+      source_memory_hash TEXT NOT NULL,
+      base_package_hash TEXT NOT NULL,
+      status TEXT NOT NULL
+    );
     CREATE TABLE automations (id TEXT PRIMARY KEY, name TEXT NOT NULL);
     CREATE TABLE automation_runs (
       id TEXT PRIMARY KEY,
@@ -560,6 +858,14 @@ async function realSqliteContinuityBackupIsVerifiedAndSecretSafe() {
   db.prepare("INSERT INTO hub_agent_bookmarks (slug) VALUES (?)").run("hub-alpha");
   db.prepare("INSERT INTO chat_messages (id, chat_id, text) VALUES (?, ?, ?)").run("m1", "c1", "keep this message");
   db.prepare("INSERT INTO memory_entries (id, content) VALUES (?, ?)").run("mem1", "keep this memory");
+  db.prepare("INSERT INTO run_events (id, run_id, kind) VALUES (?, ?, ?)").run("run-event-1", "run-1", "invoke_completed");
+  db.prepare("INSERT INTO failure_events (id, run_id, error_code) VALUES (?, ?, ?)").run("failure-event-1", "run-1", "runtime_failed");
+  db.prepare(
+    "INSERT INTO installed_agent_hub_bindings (installed_agent_id, agent_definition_id, agent_release_id, source, bound_at) VALUES (?, ?, ?, ?, ?)",
+  ).run("a1", "agd_exact_1", "agr_exact_1", "hub-install", "2026-07-01T00:00:00.000Z");
+  db.prepare(
+    "INSERT INTO taste_draft_candidates (id, agent_id, source_memory_id, source_memory_hash, base_package_hash, status) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run("taste-draft-1", "a1", "mem1", "a".repeat(64), "b".repeat(64), "observation");
   db.prepare("INSERT INTO automations (id, name) VALUES (?, ?)").run("auto1", "keep this automation");
   const insertAutomationRun = db.prepare(
     "INSERT INTO automation_runs (id, automation_id, started_at, status, node_states_json) VALUES (?, ?, ?, ?, ?)",
@@ -608,10 +914,15 @@ async function realSqliteContinuityBackupIsVerifiedAndSecretSafe() {
     accountExpiresAt: 1_900_000_000_000,
     now: () => 1_800_000_000_000,
   });
+  assert.equal(snapshot.schemaVersion, 2, "new recovery captures must use the complete v2 protection profile");
   assert.equal(snapshot.databaseSchemaVersion, 51);
   assert.equal(snapshot.rowCounts.installed_agents, 1);
   assert.equal(snapshot.rowCounts.chat_messages, 1);
   assert.equal(snapshot.rowCounts.memory_entries, 1);
+  assert.equal(snapshot.rowCounts.run_events, 1);
+  assert.equal(snapshot.rowCounts.failure_events, 1);
+  assert.equal(snapshot.rowCounts.installed_agent_hub_bindings, 1);
+  assert.equal(snapshot.rowCounts.taste_draft_candidates, 1);
   assert.equal(snapshot.rowCounts.automations, 1);
   assert.equal(snapshot.rowCounts.automation_runs, 4);
   assert.equal(snapshot.authCookiePresent, true);
@@ -631,6 +942,19 @@ async function realSqliteContinuityBackupIsVerifiedAndSecretSafe() {
       now: () => 1_800_000_000_001,
     })).ok,
     true,
+  );
+  const legacySnapshot = snapshotForSchema(snapshot, 1, CONTINUITY_V1_TABLES);
+  const legacyVerification = await verifyUpdaterContinuity({
+    snapshot: legacySnapshot,
+    currentUserDataPath: layout.userDataPath,
+    currentDatabasePath: databasePath,
+    currentAccountSignedIn: true,
+    now: () => 1_800_000_000_001,
+  });
+  assert.equal(
+    legacyVerification.ok,
+    true,
+    `the fixed v1 protection profile must remain verifiable: ${legacyVerification.violations.join(", ")}`,
   );
   const accountNotRestored = await verifyUpdaterContinuity({
     snapshot,
@@ -791,6 +1115,65 @@ async function realSqliteContinuityBackupIsVerifiedAndSecretSafe() {
   const contentRestore = new Database(databasePath);
   contentRestore.prepare("UPDATE chat_messages SET text = ? WHERE id = ?").run("keep this message", "m1");
   contentRestore.close();
+
+  const lostOntologyIdentity = new Database(databasePath);
+  lostOntologyIdentity.prepare("DELETE FROM installed_agent_hub_bindings WHERE installed_agent_id = ?").run("a1");
+  lostOntologyIdentity.close();
+  const ontologyIdentityViolation = await verifyUpdaterContinuity({
+    snapshot,
+    currentUserDataPath: layout.userDataPath,
+    currentDatabasePath: databasePath,
+    currentAccountSignedIn: true,
+    now: () => 1_800_000_000_001,
+  });
+  assert.ok(
+    ontologyIdentityViolation.violations.some((entry) => entry.startsWith("row-count-regressed:installed_agent_hub_bindings")),
+    "an update must fail continuity when an exact Hub ontology binding disappears",
+  );
+  const restoreOntologyIdentity = new Database(databasePath);
+  restoreOntologyIdentity.prepare(
+    "INSERT INTO installed_agent_hub_bindings (installed_agent_id, agent_definition_id, agent_release_id, source, bound_at) VALUES (?, ?, ?, ?, ?)",
+  ).run("a1", "agd_exact_1", "agr_exact_1", "hub-install", "2026-07-01T00:00:00.000Z");
+  restoreOntologyIdentity.close();
+
+  const lostTasteDraft = new Database(databasePath);
+  lostTasteDraft.prepare("DELETE FROM taste_draft_candidates WHERE id = ?").run("taste-draft-1");
+  lostTasteDraft.close();
+  const tasteDraftViolation = await verifyUpdaterContinuity({
+    snapshot,
+    currentUserDataPath: layout.userDataPath,
+    currentDatabasePath: databasePath,
+    currentAccountSignedIn: true,
+    now: () => 1_800_000_000_001,
+  });
+  assert.ok(
+    tasteDraftViolation.violations.some((entry) => entry.startsWith("row-count-regressed:taste_draft_candidates")),
+    "an update must fail continuity when a private per-agent Taste draft disappears",
+  );
+  const restoreTasteDraft = new Database(databasePath);
+  restoreTasteDraft.prepare(
+    "INSERT INTO taste_draft_candidates (id, agent_id, source_memory_id, source_memory_hash, base_package_hash, status) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run("taste-draft-1", "a1", "mem1", "a".repeat(64), "b".repeat(64), "observation");
+  restoreTasteDraft.close();
+
+  const lostLearningLedger = new Database(databasePath);
+  lostLearningLedger.prepare("DELETE FROM run_events WHERE id = ?").run("run-event-1");
+  lostLearningLedger.close();
+  const learningLedgerViolation = await verifyUpdaterContinuity({
+    snapshot,
+    currentUserDataPath: layout.userDataPath,
+    currentDatabasePath: databasePath,
+    currentAccountSignedIn: true,
+    now: () => 1_800_000_000_001,
+  });
+  assert.ok(
+    learningLedgerViolation.violations.some((entry) => entry.startsWith("row-count-regressed:run_events")),
+    "an update must fail continuity when the per-agent activity ledger disappears",
+  );
+  const restoreLearningLedger = new Database(databasePath);
+  restoreLearningLedger.prepare("INSERT INTO run_events (id, run_id, kind) VALUES (?, ?, ?)")
+    .run("run-event-1", "run-1", "invoke_completed");
+  restoreLearningLedger.close();
 
   fs.writeFileSync(path.join(layout.userDataPath, "agents", "alpha", "AGENT.md"), "changed-agent-asset");
   const assetChanged = await verifyUpdaterContinuity({
@@ -979,8 +1362,13 @@ async function v53HubBookmarkKeyMigrationIsNarrowlyApproved() {
   await undeletableLegacyStatePausesAutomaticUpdates();
   await corruptInstallJournalFailsClosedAcrossRelaunch();
   await semanticallyDamagedJournalFailsClosed();
+  await snapshotSchemaTableSetsAreExactAndBackwardCompatible();
   await installJournalStopsFailedApplyLoopAndReconcilesSuccess();
+  await verifiedContinuityFailsClosedWhenJournalCannotBeDeleted();
   await installQuiescesWritersBeforeContinuityCapture();
+  await transientAccountRestoreReconcilesOnceAndClearsOnlyAfterFullSuccess();
+  await realViolationSurvivesAccountRestoreAndEveryRetry();
+  await accountRestoreRetryIsStrictlyBounded();
   await continuityViolationSurfacesRecovery();
   await compatibilityBoundariesFailBeforeDownload();
   await continuityBackupFailureRemainsVisibleAndRetryable();

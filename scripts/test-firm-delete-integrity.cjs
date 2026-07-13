@@ -117,6 +117,28 @@ function seedV48Store() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    -- These append-only ledgers already existed in a real v48 database. The
+    -- migration fixture keeps only the columns consumed by later additive
+    -- indexes so it remains representative as the canonical schema advances.
+    CREATE TABLE run_events (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      ts TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      agent_id TEXT,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      UNIQUE(run_id, seq)
+    );
+    CREATE TABLE failure_events (
+      id TEXT PRIMARY KEY,
+      ts TEXT NOT NULL,
+      source TEXT NOT NULL,
+      agent_id TEXT,
+      error_message TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}'
+    );
   `);
 
   const insertAgent = db.prepare(`
@@ -198,7 +220,7 @@ async function main() {
     store.initStore();
     const db = store.getDb();
 
-    assert.equal(db.pragma("user_version", { simple: true }), 53, "v48 store must migrate through canonical schema v53");
+    assert.equal(db.pragma("user_version", { simple: true }), 63, "v48 store must migrate through the current canonical schema v63");
     const ceoFk = db
       .prepare("PRAGMA foreign_key_list(firms)")
       .all()

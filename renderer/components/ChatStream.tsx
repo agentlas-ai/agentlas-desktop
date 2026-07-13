@@ -1439,7 +1439,17 @@ function RunStatusLine({
   const elapsed = busy ? liveElapsed : doneElapsed;
   if (elapsed == null || (!busy && message.startedAt == null)) return null;
   const tokens = busy ? (message.liveTokens ?? message.tokens) : (message.tokens ?? message.liveTokens);
-  const phrase = busy ? runStatusPhrase(message.thinking, thinkTick, t) : "";
+  // 구조화 reasoning 이벤트가 없는 런타임도 thinking/tool-use 상태 문자열은 보낸다.
+  // 그 값을 숨기면 사용자는 실행 중에 스피너와 `0s`만 보게 되므로, 가장 최근의
+  // 비어 있지 않은 활동 문구를 상태줄 폴백으로 노출한다. reasoning 문구가 있으면
+  // 그것을 우선해 동일 화면에 서로 다른 두 상태가 경쟁하지 않게 한다.
+  const latestActivity = [...(message.steps ?? [])]
+    .reverse()
+    .find((step) => step.text.trim())
+    ?.text.trim();
+  const phrase = busy
+    ? runStatusPhrase(message.thinking, thinkTick, t) || message.status?.trim() || latestActivity || ""
+    : "";
   const parts = [formatElapsedShort(elapsed)];
   if (tokens != null && tokens > 0) parts.push(`${formatTokens(tokens)} ${t("chatstream.tokens_unit")}`);
   if (phrase) parts.push(phrase);

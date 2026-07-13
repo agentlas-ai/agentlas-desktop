@@ -4,6 +4,7 @@
 //
 // 스키마 버전 관리: user_version pragma로 마이그레이션. M0 → projects/chats 도입 시 chat_messages 재구성.
 import Database from "better-sqlite3";
+import fs from "node:fs";
 import path from "node:path";
 import { app } from "electron";
 import { publicAgentVisibility } from "../agents/policy";
@@ -11,7 +12,37 @@ import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 53;
+const SCHEMA_VERSION = 63;
+
+function hardenStoreFile(file: string): void {
+  if (process.platform === "win32" || !fs.existsSync(file)) return;
+  const stat = fs.lstatSync(file);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error(`Agentlas store path must be a regular private file: ${path.basename(file)}`);
+  }
+  fs.chmodSync(file, 0o600);
+  if ((fs.statSync(file).mode & 0o077) !== 0) {
+    throw new Error(`Agentlas could not make ${path.basename(file)} private.`);
+  }
+}
+
+function preparePrivateStorePath(dbPath: string): void {
+  if (process.platform === "win32" || dbPath === ":memory:" || dbPath.startsWith("file:")) return;
+  const parent = path.dirname(dbPath);
+  fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+  if (!fs.existsSync(dbPath)) {
+    const descriptor = fs.openSync(dbPath, "wx", 0o600);
+    fs.closeSync(descriptor);
+  }
+  hardenStoreFile(dbPath);
+}
+
+function hardenStoreSidecars(dbPath: string): void {
+  if (dbPath === ":memory:" || dbPath.startsWith("file:")) return;
+  hardenStoreFile(dbPath);
+  hardenStoreFile(`${dbPath}-wal`);
+  hardenStoreFile(`${dbPath}-shm`);
+}
 
 // The scheduler checks an active tool every 30s and then gives a cancelled
 // runner 10s to settle. Two extra minutes keep recovery safely outside both
@@ -385,8 +416,10 @@ function repairOrphanChatsV50(db: Database.Database): void {
 export function initStore(): void {
   if (_db) return;
   const dbPath = process.env.AGENTLAS_STORE_PATH || path.join(app.getPath("userData"), "agentlas.sqlite");
+  preparePrivateStorePath(dbPath);
   _db = new Database(dbPath);
   _db.pragma("journal_mode = WAL");
+  hardenStoreSidecars(dbPath);
   _db.pragma("foreign_keys = ON");
 
   const userVersion = (_db.pragma("user_version", { simple: true }) as number) ?? 0;
@@ -1849,6 +1882,484 @@ export function initStore(): void {
       `);
     });
     migrateHubBookmarks();
+  }
+
+  // v54: host-local Experience assets. An Experience Pack references a base
+  // agent/package hash but never copies or mutates package bytes. Candidates
+  // can only be projected from curated Memory rows; promotion and export intent
+  // are explicit, append-only local receipts. At v54 no Cloud exchange existed;
+  // v56 adds it as a separate asset transaction without mutating these rows.
+  if (userVersion < 54) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS experience_packs (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        project_id TEXT,
+        project_path TEXT,
+        project_scope_key TEXT NOT NULL,
+        environment_key TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        base_package_hash TEXT,
+        status TEXT NOT NULL DEFAULT 'active'
+          CHECK(status IN ('active','archived')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(agent_id) REFERENCES installed_agents(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_experience_packs_agent_scope
+        ON experience_packs(agent_id, project_scope_key, environment_key, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS experience_candidates (
+        id TEXT PRIMARY KEY,
+        pack_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        project_scope_key TEXT NOT NULL,
+        environment_key TEXT NOT NULL,
+        source_memory_id TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        task_terms_json TEXT NOT NULL DEFAULT '[]',
+        sensitivity TEXT NOT NULL
+          CHECK(sensitivity IN ('public','internal','private')),
+        confidence TEXT NOT NULL
+          CHECK(confidence IN ('high','medium','low')),
+        status TEXT NOT NULL DEFAULT 'candidate'
+          CHECK(status IN ('candidate','promoted','rejected')),
+        outcome_status TEXT NOT NULL DEFAULT 'unverified'
+          CHECK(outcome_status IN ('unverified','attested','verified','failed')),
+        public_safe INTEGER NOT NULL DEFAULT 0 CHECK(public_safe IN (0,1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        promoted_at TEXT,
+        FOREIGN KEY(pack_id) REFERENCES experience_packs(id) ON DELETE CASCADE,
+        FOREIGN KEY(agent_id) REFERENCES installed_agents(id) ON DELETE CASCADE,
+        UNIQUE(pack_id, source_memory_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_experience_candidates_retrieval
+        ON experience_candidates(agent_id, project_scope_key, environment_key, status, outcome_status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_experience_candidates_pack
+        ON experience_candidates(pack_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS experience_promotion_receipts (
+        id TEXT PRIMARY KEY,
+        pack_id TEXT NOT NULL,
+        candidate_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK(action = 'promote'),
+        explicit_consent INTEGER NOT NULL CHECK(explicit_consent = 1),
+        verification_status TEXT NOT NULL CHECK(verification_status IN ('attested','verified')),
+        verification_method TEXT NOT NULL
+          CHECK(verification_method IN ('user-attested','local-run-receipt','local-test-receipt')),
+        evidence_hash TEXT NOT NULL,
+        public_safe INTEGER NOT NULL CHECK(public_safe IN (0,1)),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(pack_id) REFERENCES experience_packs(id) ON DELETE CASCADE,
+        FOREIGN KEY(candidate_id) REFERENCES experience_candidates(id) ON DELETE CASCADE,
+        FOREIGN KEY(agent_id) REFERENCES installed_agents(id) ON DELETE CASCADE,
+        UNIQUE(candidate_id, action)
+      );
+      CREATE INDEX IF NOT EXISTS idx_experience_receipts_pack
+        ON experience_promotion_receipts(pack_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS experience_export_intents (
+        id TEXT PRIMARY KEY,
+        pack_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        visibility TEXT NOT NULL CHECK(visibility IN ('private','public')),
+        status TEXT NOT NULL DEFAULT 'local_intent' CHECK(status = 'local_intent'),
+        manifest_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(pack_id) REFERENCES experience_packs(id) ON DELETE CASCADE,
+        FOREIGN KEY(agent_id) REFERENCES installed_agents(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_experience_export_intents_pack
+        ON experience_export_intents(pack_id, created_at DESC);
+    `);
+  }
+
+  // v55: Experience relation lineage + derived relation index. The lineage
+  // table is a value-free, append-only source projection. Nodes/edges/state are
+  // disposable and rebuilt in the shared Desktop SQLite database; there is no
+  // per-agent graph database.
+  if (userVersion < 55) {
+    const packCols = _db
+      .prepare("PRAGMA table_info(experience_packs)")
+      .all() as Array<{ name: string }>;
+    if (!packCols.some((column) => column.name === "mcp_requirements_json")) {
+      _db.exec(
+        "ALTER TABLE experience_packs ADD COLUMN mcp_requirements_json TEXT NOT NULL DEFAULT '[]'",
+      );
+    }
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS experience_lineage_events (
+        id TEXT PRIMARY KEY,
+        pack_id TEXT NOT NULL,
+        release_id TEXT NOT NULL,
+        event_type TEXT NOT NULL CHECK(event_type IN ('promotion','export-intent')),
+        base_package_hash TEXT NOT NULL,
+        project_scope_key TEXT NOT NULL,
+        environment_key TEXT NOT NULL,
+        item_ids_json TEXT NOT NULL DEFAULT '[]',
+        task_bindings_json TEXT NOT NULL DEFAULT '[]',
+        mcp_requirements_json TEXT NOT NULL DEFAULT '[]',
+        evidence_bindings_json TEXT NOT NULL DEFAULT '[]',
+        supersedes_release_id TEXT,
+        source_fingerprint TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(pack_id) REFERENCES experience_packs(id) ON DELETE CASCADE,
+        UNIQUE(pack_id, release_id, event_type)
+      );
+      CREATE INDEX IF NOT EXISTS idx_experience_lineage_pack_created
+        ON experience_lineage_events(pack_id, created_at ASC, id ASC);
+
+      CREATE TABLE IF NOT EXISTS experience_relation_nodes (
+        node_id TEXT PRIMARY KEY,
+        pack_id TEXT NOT NULL,
+        node_type TEXT NOT NULL
+          CHECK(node_type IN ('Pack','Release','Item','TaskTag','Environment','MCPRequirement','EvidenceReceipt')),
+        entity_ref TEXT NOT NULL,
+        project_scope_key TEXT NOT NULL,
+        environment_key TEXT NOT NULL,
+        base_package_hash TEXT NOT NULL,
+        normalized_value TEXT,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        source_fingerprint TEXT NOT NULL,
+        rebuilt_at TEXT NOT NULL,
+        FOREIGN KEY(pack_id) REFERENCES experience_packs(id) ON DELETE CASCADE,
+        UNIQUE(pack_id, node_type, entity_ref)
+      );
+      CREATE INDEX IF NOT EXISTS idx_experience_relation_nodes_scope
+        ON experience_relation_nodes(project_scope_key, environment_key, base_package_hash, node_type);
+      CREATE INDEX IF NOT EXISTS idx_experience_relation_nodes_pack_type
+        ON experience_relation_nodes(pack_id, node_type, normalized_value);
+
+      CREATE TABLE IF NOT EXISTS experience_relation_edges (
+        edge_id TEXT PRIMARY KEY,
+        pack_id TEXT NOT NULL,
+        from_node TEXT NOT NULL,
+        to_node TEXT NOT NULL,
+        edge_type TEXT NOT NULL
+          CHECK(edge_type IN (
+            'has_release','exact_base_binding','contains','applies_to_task',
+            'applies_in_environment','requires_mcp','supports_mcp',
+            'alternative_mcp','supported_by','supersedes','similar_by_tag'
+          )),
+        project_scope_key TEXT NOT NULL,
+        environment_key TEXT NOT NULL,
+        base_package_hash TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        source_fingerprint TEXT NOT NULL,
+        rebuilt_at TEXT NOT NULL,
+        FOREIGN KEY(pack_id) REFERENCES experience_packs(id) ON DELETE CASCADE,
+        FOREIGN KEY(from_node) REFERENCES experience_relation_nodes(node_id) ON DELETE CASCADE,
+        FOREIGN KEY(to_node) REFERENCES experience_relation_nodes(node_id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_experience_relation_edges_scope
+        ON experience_relation_edges(project_scope_key, environment_key, base_package_hash, edge_type);
+      CREATE INDEX IF NOT EXISTS idx_experience_relation_edges_from
+        ON experience_relation_edges(pack_id, from_node, edge_type);
+      CREATE INDEX IF NOT EXISTS idx_experience_relation_edges_to
+        ON experience_relation_edges(pack_id, to_node, edge_type);
+
+      CREATE TABLE IF NOT EXISTS experience_relation_index_state (
+        scope_key TEXT PRIMARY KEY CHECK(scope_key = 'shared'),
+        source_fingerprint TEXT NOT NULL,
+        rebuilt_at TEXT NOT NULL,
+        node_count INTEGER NOT NULL,
+        edge_count INTEGER NOT NULL
+      );
+    `);
+  }
+
+  // v56: portable Experience Cloud exchange. Exact server-authoritative base
+  // ids live on the local Pack, while each content/visibility upload gets its
+  // own durable idempotency, canonical bundle, optimistic revision and receipt.
+  // Local Memory source ids, project paths and raw evidence never enter this
+  // table. Existing v54/v55 rows remain valid with unresolved nullable base ids.
+  if (userVersion < 56) {
+    const packCols = _db
+      .prepare("PRAGMA table_info(experience_packs)")
+      .all() as Array<{ name: string }>;
+    const packColumnNames = new Set(packCols.map((column) => column.name));
+    if (!packColumnNames.has("base_agent_definition_id")) {
+      _db.exec("ALTER TABLE experience_packs ADD COLUMN base_agent_definition_id TEXT");
+    }
+    if (!packColumnNames.has("base_agent_release_id")) {
+      _db.exec("ALTER TABLE experience_packs ADD COLUMN base_agent_release_id TEXT");
+    }
+    if (!packColumnNames.has("base_package_hash_version")) {
+      _db.exec("ALTER TABLE experience_packs ADD COLUMN base_package_hash_version TEXT");
+    }
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS experience_cloud_uploads (
+        id TEXT PRIMARY KEY,
+        pack_id TEXT NOT NULL,
+        requested_visibility TEXT NOT NULL
+          CHECK(requested_visibility IN ('private','public')),
+        bundle_id TEXT NOT NULL,
+        bundle_hash TEXT NOT NULL,
+        canonical_bundle_json TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        remote_upload_id TEXT,
+        remote_revision TEXT,
+        remote_status TEXT NOT NULL
+          CHECK(remote_status IN (
+            'local-ready','saving-private','private-saved','requesting-verification',
+            'verification-requested','verification-pending','verified-private',
+            'public-active','conflict','offline','error','withdrawn','rejected'
+          )),
+        remote_error_code TEXT,
+        remote_error_message TEXT,
+        remote_receipt_json TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(pack_id) REFERENCES experience_packs(id) ON DELETE CASCADE,
+        UNIQUE(pack_id, bundle_hash, requested_visibility)
+      );
+      CREATE INDEX IF NOT EXISTS idx_experience_cloud_uploads_pack
+        ON experience_cloud_uploads(pack_id, updated_at DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_experience_cloud_uploads_remote
+        ON experience_cloud_uploads(remote_upload_id)
+        WHERE remote_upload_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_experience_cloud_uploads_recovery
+        ON experience_cloud_uploads(remote_status, updated_at ASC);
+    `);
+  }
+
+  // v57: Desktop-owned agent aliases, canonical Experience environment
+  // profiles, auto-intake receipts, and agent-attributed activity indexes.
+  // Existing v56 rows are intentionally not inferred or rewritten: a null
+  // environment profile remains legacy/non-canonical until the owner creates a
+  // new pack, and historical run rows without agent_id stay unattributed.
+  if (userVersion < 57) {
+    const agentCols = new Set(
+      (_db.prepare("PRAGMA table_info(installed_agents)").all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    if (!agentCols.has("local_display_name")) {
+      _db.exec("ALTER TABLE installed_agents ADD COLUMN local_display_name TEXT");
+    }
+
+    const packCols = new Set(
+      (_db.prepare("PRAGMA table_info(experience_packs)").all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    if (!packCols.has("environment_profile_json")) {
+      _db.exec("ALTER TABLE experience_packs ADD COLUMN environment_profile_json TEXT");
+    }
+    if (!packCols.has("auto_managed")) {
+      _db.exec("ALTER TABLE experience_packs ADD COLUMN auto_managed INTEGER NOT NULL DEFAULT 0 CHECK(auto_managed IN (0,1))");
+    }
+
+    const candidateCols = new Set(
+      (_db.prepare("PRAGMA table_info(experience_candidates)").all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    if (!candidateCols.has("auto_managed")) {
+      _db.exec("ALTER TABLE experience_candidates ADD COLUMN auto_managed INTEGER NOT NULL DEFAULT 0 CHECK(auto_managed IN (0,1))");
+    }
+
+    _db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_experience_auto_pack_exact
+        ON experience_packs(agent_id, project_scope_key, environment_key, base_package_hash)
+        WHERE auto_managed = 1 AND status = 'active';
+
+      CREATE TABLE IF NOT EXISTS experience_auto_intake_receipts (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        pack_id TEXT,
+        candidate_id TEXT,
+        source_memory_hash TEXT NOT NULL,
+        status TEXT NOT NULL
+          CHECK(status IN ('candidate-created','blocked','skipped')),
+        memory_kind TEXT NOT NULL,
+        reason_codes_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(agent_id) REFERENCES installed_agents(id) ON DELETE CASCADE,
+        FOREIGN KEY(pack_id) REFERENCES experience_packs(id) ON DELETE SET NULL,
+        FOREIGN KEY(candidate_id) REFERENCES experience_candidates(id) ON DELETE SET NULL,
+        UNIQUE(agent_id, source_memory_hash)
+      );
+      CREATE INDEX IF NOT EXISTS idx_experience_auto_intake_agent_status
+        ON experience_auto_intake_receipts(agent_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_run_events_agent_ts
+        ON run_events(agent_id, ts DESC);
+      CREATE INDEX IF NOT EXISTS idx_failure_events_agent_ts
+        ON failure_events(agent_id, ts DESC);
+    `);
+  }
+
+  // v58: content-free per-turn Memory Curator receipts are queried by exact
+  // installed agent and event kind. The index keeps My Agents summaries
+  // bounded as the shared run ledger grows; no historical content is inferred
+  // or rewritten.
+  if (userVersion < 58) {
+    const runEventColumns = new Set(schemaColumns(_db, "run_events").map((column) => column.name));
+    if (["agent_id", "kind", "ts"].every((column) => runEventColumns.has(column))) {
+      _db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_run_events_agent_kind_ts
+          ON run_events(agent_id, kind, ts DESC);
+      `);
+    }
+  }
+
+  // v59: explicit immutable Hub agent-release bindings for Ontology projection.
+  // There is deliberately no legacy backfill: local ids, slugs, package hashes,
+  // and "latest" are not equivalent to a server-issued definition + release.
+  // A partial-crash rerun is safe because the table and index are idempotent.
+  if (userVersion < 59) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS installed_agent_hub_bindings (
+        installed_agent_id TEXT PRIMARY KEY,
+        agent_definition_id TEXT NOT NULL,
+        agent_release_id TEXT NOT NULL,
+        source TEXT NOT NULL CHECK(source IN ('hub-install','agent-cloud-restore')),
+        bound_at TEXT NOT NULL,
+        FOREIGN KEY(installed_agent_id) REFERENCES installed_agents(id) ON DELETE CASCADE,
+        UNIQUE(agent_definition_id, agent_release_id, installed_agent_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_installed_agent_hub_binding_exact
+        ON installed_agent_hub_bindings(agent_definition_id, agent_release_id);
+    `);
+  }
+
+  // v60: private per-agent Taste observations. These rows are intentionally
+  // separate from operational Experience candidates: a preference is not an
+  // execution success and cannot be promoted/exported by the Experience flow.
+  // A row remains a local review draft until Hub creates a distinct
+  // Taste/Style release from randomized explicit human pairwise evidence.
+  if (userVersion < 60) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS taste_draft_candidates (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        source_memory_id TEXT NOT NULL,
+        source_memory_hash TEXT NOT NULL,
+        project_scope_key TEXT NOT NULL,
+        environment_key TEXT NOT NULL,
+        base_package_hash TEXT NOT NULL
+          CHECK(length(base_package_hash) = 64 AND base_package_hash NOT GLOB '*[^0-9a-f]*'),
+        base_agent_definition_id TEXT,
+        base_agent_release_id TEXT,
+        sensitivity TEXT NOT NULL
+          CHECK(sensitivity IN ('public','internal','private')),
+        confidence TEXT NOT NULL
+          CHECK(confidence IN ('high','medium','low')),
+        axis_candidates_json TEXT NOT NULL DEFAULT '[]',
+        task_signatures_json TEXT NOT NULL DEFAULT '[]',
+        evidence_state TEXT NOT NULL DEFAULT 'pairwise-required'
+          CHECK(evidence_state = 'pairwise-required'),
+        status TEXT NOT NULL DEFAULT 'observation'
+          CHECK(status IN ('observation','rejected')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(agent_id) REFERENCES installed_agents(id) ON DELETE CASCADE,
+        UNIQUE(agent_id, source_memory_hash, base_package_hash)
+      );
+      CREATE INDEX IF NOT EXISTS idx_taste_drafts_agent_status
+        ON taste_draft_candidates(agent_id, status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_taste_drafts_exact_base
+        ON taste_draft_candidates(agent_id, base_package_hash, project_scope_key, environment_key);
+    `);
+  }
+
+  // v61: owner-reviewed Taste generalizations. Raw observations remain in
+  // taste_draft_candidates; this table stores only the user-edited portable
+  // proposal, local preview capabilities, and redacted Hub identifiers.
+  if (userVersion < 61) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS taste_chip_workflows (
+        workflow_id TEXT PRIMARY KEY,
+        draft_id TEXT NOT NULL UNIQUE,
+        agent_id TEXT NOT NULL,
+        base_package_hash TEXT NOT NULL,
+        base_agent_definition_id TEXT NOT NULL,
+        base_agent_release_id TEXT NOT NULL,
+        environment_key TEXT NOT NULL,
+        taste_style_id TEXT NOT NULL,
+        release_id TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        rule_statement TEXT NOT NULL,
+        axis TEXT NOT NULL,
+        task_signature TEXT NOT NULL,
+        contexts_json TEXT NOT NULL,
+        generalization_hash TEXT NOT NULL,
+        privacy_issue_codes_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL CHECK(status IN ('proposal','confirmed','moderation-pending','ab-ready','error')),
+        confirmed_at TEXT,
+        preview_grants_json TEXT,
+        preview_names_json TEXT,
+        preview_digests_json TEXT,
+        preview_rights TEXT,
+        remote_preview_asset_ids_json TEXT,
+        remote_revision TEXT,
+        remote_error_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(draft_id) REFERENCES taste_draft_candidates(id) ON DELETE CASCADE,
+        FOREIGN KEY(agent_id) REFERENCES installed_agents(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_taste_chip_workflows_agent_status
+        ON taste_chip_workflows(agent_id, status, updated_at DESC);
+    `);
+  }
+
+  // v62: owner-reviewed public projections for Operational Experience. The
+  // immutable private candidate and its Memory source stay in the existing
+  // tables. This table stores only generalized portable text plus content
+  // hashes that bind it to exact promoted sources and one exact base release.
+  if (userVersion < 62) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS experience_public_projections (
+        projection_id TEXT PRIMARY KEY,
+        pack_id TEXT NOT NULL UNIQUE,
+        agent_id TEXT NOT NULL,
+        base_package_hash TEXT NOT NULL
+          CHECK(length(base_package_hash) = 64 AND base_package_hash NOT GLOB '*[^0-9a-f]*'),
+        base_agent_definition_id TEXT NOT NULL,
+        base_agent_release_id TEXT NOT NULL,
+        environment_key TEXT NOT NULL,
+        source_bindings_json TEXT NOT NULL,
+        source_snapshot_hash TEXT NOT NULL
+          CHECK(length(source_snapshot_hash) = 64 AND source_snapshot_hash NOT GLOB '*[^0-9a-f]*'),
+        title TEXT NOT NULL,
+        instructions_json TEXT NOT NULL,
+        task_signatures_json TEXT NOT NULL,
+        environment_constraints_json TEXT NOT NULL,
+        proposal_hash TEXT NOT NULL
+          CHECK(length(proposal_hash) = 64 AND proposal_hash NOT GLOB '*[^0-9a-f]*'),
+        privacy_issue_codes_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL CHECK(status IN ('proposal','confirmed')),
+        confirmation_hash TEXT,
+        confirmed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(pack_id) REFERENCES experience_packs(id) ON DELETE CASCADE,
+        FOREIGN KEY(agent_id) REFERENCES installed_agents(id) ON DELETE CASCADE,
+        CHECK(
+          (status = 'proposal' AND confirmation_hash IS NULL AND confirmed_at IS NULL) OR
+          (status = 'confirmed' AND length(confirmation_hash) = 64
+            AND confirmation_hash NOT GLOB '*[^0-9a-f]*' AND confirmed_at IS NOT NULL)
+        )
+      );
+      CREATE INDEX IF NOT EXISTS idx_experience_public_projection_agent_status
+        ON experience_public_projections(agent_id, status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_experience_public_projection_exact_base
+        ON experience_public_projections(
+          base_agent_definition_id, base_agent_release_id, base_package_hash, environment_key
+        );
+    `);
+  }
+
+  // v63: hashed chip-on/control generation provenance. This contains no raw
+  // prompt, output bytes, provider credential, or local path.
+  if (userVersion < 63) {
+    const columns = _db.prepare("PRAGMA table_info(taste_chip_workflows)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "preview_provenance_json")) {
+      _db.exec("ALTER TABLE taste_chip_workflows ADD COLUMN preview_provenance_json TEXT");
+    }
   }
 
   // Run on every boot as well as the v52 upgrade. A hard process exit can

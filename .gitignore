@@ -10,6 +10,7 @@ dist/
 /build/
 .next/
 renderer/.next/
+renderer/.next-build/
 renderer/out/
 *.tsbuildinfo
 
@@ -74,6 +75,9 @@ artifacts/
 evidence/
 # generated Playwright QA screenshots/reports
 output/playwright/
+# Local visual research can contain browser chrome or account-identifying text.
+/output/reference-video-frames/
+/findings/
 
 # ── Embedded engine (separate open-source repo) ──────────────────────────────
 # Hephaestus is its own public repo (github.com/agentlas-ai/Hephaestus). It is

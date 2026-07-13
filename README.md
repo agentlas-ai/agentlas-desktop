@@ -217,6 +217,11 @@ A complete tour of what ships today.
   sources, and the SQLite knowledge store inside that project. It runs as
   background infrastructure for agents rather than a standalone project panel,
   and does not scan your home folder or sibling projects.
+- **Independent Terminal loadout receipt** projects only the fresh, currently
+  approved exact agent/chip release IDs into a private `terminal-bridge` file.
+  Agentlas Terminal must opt in for each run and re-check the local immutable
+  Hub binding; recommendations, pending/next-session changes, paths, prompts,
+  memory, credentials, and MCP process data never enter this receipt.
 - **Chats** support rename, archive/unarchive, switching the bound agent, and full
   message history — all in **local SQLite**, nothing on a server.
 - **Image attachments** are sent as multimodal input on BYOK backends.

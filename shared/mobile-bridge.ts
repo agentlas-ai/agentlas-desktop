@@ -48,6 +48,8 @@ export const MOBILE_BRIDGE_METHODS = [
   "automations.listRuns",
   "usage.snapshot",
   "runtime.detect",
+  "ontology.projections.list",
+  "ontology.attach.resolve",
   "device.revokeSelf",
 ] as const;
 
@@ -66,6 +68,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "browser.resolveApproval",
   "automations.toggle",
   "automations.runNow",
+  "ontology.attach.resolve",
 ]);
 
 export const MOBILE_BRIDGE_EVENT_NAMES = [
@@ -76,6 +79,7 @@ export const MOBILE_BRIDGE_EVENT_NAMES = [
   "confirm.updated",
   "browser.approval",
   "automation.updated",
+  "ontology.updated",
 ] as const;
 
 export type MobileBridgeEventName = (typeof MOBILE_BRIDGE_EVENT_NAMES)[number];
@@ -296,6 +300,177 @@ export interface MobileBridgeAgentDto {
   kind: "agent" | "team";
   visibility: "visible" | "background" | "private";
   requiresSetup: boolean;
+  /**
+   * Immutable Hub identity. Both fields are emitted together or both omitted.
+   * A slug, package hash, or latest release is never used as a substitute.
+   */
+  agentDefinitionId?: string;
+  agentReleaseId?: string;
+}
+
+export type MobileBridgeOntologyChipKind = "operational" | "taste";
+export type MobileBridgeOntologyProjectionState =
+  | "live"
+  | "offline"
+  | "stale"
+  | "conflict"
+  | "revoked";
+export type MobileBridgeOntologyVerification =
+  | "verified"
+  | "requested"
+  | "unverified"
+  | "rejected";
+export type MobileBridgeOntologyLoadoutState =
+  | "empty"
+  | "ready"
+  | "pending-approval"
+  | "applying"
+  | "offline"
+  | "stale"
+  | "conflict"
+  | "revoked";
+export type MobileBridgeOntologyAttachmentState =
+  | "attached"
+  | "update-available"
+  | "pending-approval"
+  | "scheduled-next-session"
+  | "applying"
+  | "conflict"
+  | "revoked";
+
+export type MobileBridgeTasteAxis =
+  | "composition"
+  | "color"
+  | "typography"
+  | "motion"
+  | "pacing"
+  | "density"
+  | "imagery"
+  | "editing"
+  | "spatial-rhythm";
+
+/** Server-compiled, prompt-injection-scanned Taste material for one exact base. */
+export interface MobileBridgeTasteRuntimeOverlayDto {
+  schemaVersion: 2;
+  chipId: string;
+  releaseId: string;
+  sourceContentHash: string;
+  baseAgentDefinitionId: string;
+  baseAgentReleaseId: string;
+  taskSignatures: Array<
+    | "agentlas.task.v1/design"
+    | "agentlas.task.v1/image-generation"
+    | "agentlas.task.v1/video-production"
+    | "agentlas.task.v1/presentation"
+  >;
+  rules: Array<{
+    ruleId: string;
+    axis: MobileBridgeTasteAxis;
+    polarity: "prefer" | "avoid";
+    attribute: "structure" | "saturation" | "hierarchy" | "intensity" | "tempo" | "information" | "treatment" | "rhythm" | "spacing";
+    value: string;
+    strength: 1 | 2 | 3;
+  }>;
+  estimatedTokens: number;
+  budgetTokens: 240;
+}
+
+export interface MobileBridgeOntologyChipDto {
+  chipId: string;
+  releaseId: string;
+  kind: MobileBridgeOntologyChipKind;
+  displayName: string;
+  summary: string;
+  version: string;
+  verification: MobileBridgeOntologyVerification;
+  labels: string[];
+  /** Reproduced outcome or human pairwise-preference evidence; never a universal score. */
+  evidenceLabel: string;
+  evidenceCount: number;
+  /** Present only for verified Taste chips; never derived from display summary text. */
+  runtimeOverlay?: MobileBridgeTasteRuntimeOverlayDto;
+}
+
+export interface MobileBridgeOntologyLoadoutEntryDto {
+  chipId: string;
+  releaseId: string;
+  kind: MobileBridgeOntologyChipKind;
+  state: MobileBridgeOntologyAttachmentState;
+  availableReleaseId?: string;
+}
+
+export interface MobileBridgeOntologyLoadoutDto {
+  revision: string;
+  state: MobileBridgeOntologyLoadoutState;
+  entries: MobileBridgeOntologyLoadoutEntryDto[];
+  changedAt?: string;
+}
+
+/**
+ * A Hub-authoritative loadout that has already been approved but will only
+ * become active when the agent starts its next session. It is deliberately
+ * separate from the current loadout and from pre-decision approvals.
+ */
+export interface MobileBridgeOntologyScheduledLoadoutDto {
+  revision: string;
+  state: "pending-next-session";
+  entries: MobileBridgeOntologyLoadoutEntryDto[];
+  changedAt?: string;
+}
+
+export interface MobileBridgeOntologyRecommendationDto {
+  recommendationId: string;
+  source: string;
+  summary: string;
+  reasons: string[];
+  tradeoffs: string[];
+  proposedChips: MobileBridgeOntologyLoadoutEntryDto[];
+  requiresApproval: true;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface MobileBridgeOntologyPendingAttachDto {
+  approvalId: string;
+  recommendationId: string;
+  expectedLoadoutRevision: string;
+  selectedChips: MobileBridgeOntologyLoadoutEntryDto[];
+  createdAt: string;
+  expiresAt: string;
+}
+
+/** Secret-free Hub projection bound to one exact immutable agent release. */
+export interface MobileBridgeOntologyProjectionDto {
+  schemaVersion: 1;
+  agentDefinitionId: string;
+  agentReleaseId: string;
+  state: MobileBridgeOntologyProjectionState;
+  generatedAt: string;
+  revision: string;
+  operationalChips: MobileBridgeOntologyChipDto[];
+  tasteChips: MobileBridgeOntologyChipDto[];
+  loadout: MobileBridgeOntologyLoadoutDto;
+  scheduledNextSession?: MobileBridgeOntologyScheduledLoadoutDto;
+  recommendations: MobileBridgeOntologyRecommendationDto[];
+  pendingAttachApprovals: MobileBridgeOntologyPendingAttachDto[];
+}
+
+export interface MobileBridgeOntologyAttachReceiptDto {
+  schemaVersion: 1;
+  approvalId: string;
+  outcome:
+    | "accepted"
+    | "denied"
+    | "already-resolved"
+    | "offline"
+    | "stale"
+    | "conflict"
+    | "revoked"
+    | "outcome-unknown";
+  loadoutState: MobileBridgeOntologyLoadoutState;
+  loadoutRevision?: string;
+  acknowledgedAt: string;
+  message: string;
 }
 
 export interface MobileBridgeFirmNodeDto {
@@ -472,6 +647,8 @@ export interface MobileBridgeSnapshot {
   automations: MobileBridgeAutomationDto[];
   usage: MobileBridgeUsageProviderDto[];
   activeChatIds: string[];
+  /** Absent when the authenticated Web producer is not shipped or not proven available. */
+  ontologyChipProjections?: MobileBridgeOntologyProjectionDto[];
 }
 
 export type MobileBridgeRequestParseResult =
@@ -492,6 +669,7 @@ const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "confirm.listPending",
   "automations.list",
   "runtime.detect",
+  "ontology.projections.list",
   "device.revokeSelf",
 ]);
 
@@ -605,6 +783,89 @@ function validateInvokeOptions(params: Record<string, unknown>): string | null {
   );
 }
 
+const ONTOLOGY_SAFE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/+\-]{0,159}$/;
+
+function ontologyRef(value: unknown, field: string): string | null {
+  return typeof value === "string" && ONTOLOGY_SAFE_REF_RE.test(value)
+    ? null
+    : `${field} must be a portable identifier of at most 160 characters`;
+}
+
+function validateOntologyLoadoutEntries(value: unknown): string | null {
+  if (!Array.isArray(value) || value.length > 2) {
+    return "selectedChips must be an array of at most 2 exact releases";
+  }
+  const chipIds = new Set<string>();
+  const kinds = new Set<string>();
+  for (const item of value) {
+    if (!isRecord(item) || !hasOnlyKeys(item, ["chipId", "releaseId", "kind", "state", "availableReleaseId"])) {
+      return "selectedChips contains an unsupported entry";
+    }
+    const error = firstError(
+      ontologyRef(item.chipId, "chipId"),
+      ontologyRef(item.releaseId, "releaseId"),
+      validateEnum(item, "kind", ["operational", "taste"], false),
+      validateEnum(
+        item,
+        "state",
+        ["pending-approval"],
+        false,
+      ),
+      item.availableReleaseId === undefined
+        ? null
+        : ontologyRef(item.availableReleaseId, "availableReleaseId"),
+    );
+    if (error) return error;
+    if (chipIds.has(item.chipId as string) || kinds.has(item.kind as string)) {
+      return "selectedChips may contain at most one operational and one taste chip";
+    }
+    chipIds.add(item.chipId as string);
+    kinds.add(item.kind as string);
+  }
+  return null;
+}
+
+function validateOntologyAttach(params: Record<string, unknown>): string | null {
+  if (!hasOnlyKeys(params, [
+    "schemaVersion",
+    "approvalId",
+    "recommendationId",
+    "agentDefinitionId",
+    "agentReleaseId",
+    "expectedProjectionRevision",
+    "expectedLoadoutRevision",
+    "decision",
+    "selectedChips",
+  ])) {
+    return "ontology.attach.resolve contains unsupported fields";
+  }
+  if (params.schemaVersion !== 1) return "ontology.attach.resolve requires schemaVersion 1";
+  const error = firstError(
+    ontologyRef(params.approvalId, "approvalId"),
+    ontologyRef(params.recommendationId, "recommendationId"),
+    ontologyRef(params.agentDefinitionId, "agentDefinitionId"),
+    ontologyRef(params.agentReleaseId, "agentReleaseId"),
+    ontologyRevision(params.expectedProjectionRevision, "expectedProjectionRevision"),
+    ontologyRevision(params.expectedLoadoutRevision, "expectedLoadoutRevision"),
+    validateEnum(params, "decision", ["approve", "deny"], false),
+    validateOntologyLoadoutEntries(params.selectedChips),
+  );
+  if (error) return error;
+  if (params.decision === "approve" && (params.selectedChips as unknown[]).length === 0) {
+    return "approve requires at least one exact chip release";
+  }
+  if (params.decision === "deny" && (params.selectedChips as unknown[]).length !== 0) {
+    return "deny must not include selected chips";
+  }
+  return null;
+}
+
+function ontologyRevision(value: unknown, field: string): string | null {
+  return typeof value === "string" && /^rev_[a-f0-9]{32}$/.test(value)
+    ? null
+    : `${field} must be a canonical revision`;
+}
+
 function validateParams(method: MobileBridgeMethod, params: Record<string, unknown>): string | null {
   if (!isMobileBridgeJsonValue(params)) return "params must contain only bounded JSON values";
   if (EMPTY_METHODS.has(method)) {
@@ -682,6 +943,8 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["force"])
         ? optionalBoolean(params, "force")
         : "usage.snapshot accepts only force";
+    case "ontology.attach.resolve":
+      return validateOntologyAttach(params);
     // Empty-parameter methods returned above. Keep this fail-closed fallback so
     // a future method cannot become callable before it receives a validator.
     default:

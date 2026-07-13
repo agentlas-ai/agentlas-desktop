@@ -18,6 +18,8 @@ import { grantForDroppedFile, ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
 import { KeyStatusBanner } from "@/components/KeyStatusBanner";
+import { McpBuildPlanCard } from "@/components/build/McpBuildPlanCard";
+import { McpAttachmentReceiptCard } from "@/components/build/McpAttachmentReceiptCard";
 import type { DirListing, FsReadScope, HephaestusStatus, RuntimeSelection, RuntimeStatus } from "@/lib/types";
 import {
   subscribe as buildSubscribe,
@@ -27,6 +29,8 @@ import {
   setWorkspace as setBuildWorkspace,
   setRuntime as setBuildRuntime,
   startBuild,
+  approveBuildMcpPlan,
+  setBuildMcpSelection,
   answerBuild,
   cancelBuild,
   resetBuild,
@@ -59,6 +63,7 @@ const STARTERS: { ko: string; en: string; prompt: string }[] = [
 // 패키지 생성 → 검증 → 배포)을 시각화한다.
 const STAGES: { key: string; label: string; labelEn: string; sub: string; subEn: string; icon: typeof IconRoute; color: string }[] = [
   { key: "classify", label: "모드 분류", labelEn: "Classify", sub: "단일 · 팀 · 패키지 판정", subEn: "single · team · package", icon: IconRoute, color: "#4DABF7" },
+  { key: "mcp", label: "MCP 연결 계획", labelEn: "MCP plan", sub: "전역 MCP 추천 · 키 확인 · 한 번 승인", subEn: "system registry · key presence · one approval", icon: IconRoute, color: "#22B8CF" },
   { key: "research", label: "인터뷰 & 리서치", labelEn: "Interview & research", sub: "요구사항 인터뷰 · 공식 소스 조사", subEn: "requirements interview · source research", icon: IconSearch, color: "#9775FA" },
   { key: "generate", label: "패키지 생성", labelEn: "Generate package", sub: "설치할 수 있는 패키지 파일을 만들어요", subEn: "Creates the installable package files", icon: IconWand, color: "#F783AC" },
   { key: "verify", label: "검증", labelEn: "Verify", sub: "보안·무결성 자동 검사", subEn: "automatic security & integrity checks", icon: IconShield, color: "#4DD4AC" },
@@ -140,7 +145,7 @@ export default function BuildPage() {
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
-  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, result, registered, pendingQuestions, awaitingReply, turn, attachments } = s;
+  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, result, registered, pendingQuestions, awaitingReply, turn, attachments, mcpPlan, mcpSelectedCandidateIds, mcpReceipt } = s;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // 드롭/파일 인풋 → 실제 디스크 경로(webUtils) → 스토어 첨부. 경로를 못 얻으면(브라우저 등) 스킵.
@@ -292,7 +297,7 @@ export default function BuildPage() {
   const engineMissing = status ? !status.available : false;
   const running = phase === "running";
   // 대화형 빌드가 진행 중(엔진 실행 중이거나 인터뷰 답변 대기 중)이면 컴포저 입력을 잠근다.
-  const busy = phase === "running" || phase === "interview";
+  const busy = phase === "running" || phase === "mcp-review" || phase === "interview";
   const startBlocker = !request.trim()
     ? (ko ? "요청을 먼저 입력하세요." : "Enter a request first.")
     : !workspace
@@ -484,13 +489,18 @@ export default function BuildPage() {
                 </button>
                 {running ? (
                   <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "중지" : "Stop"}</button>
+                ) : phase === "mcp-review" ? (
+                  <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "MCP 검토 취소" : "Cancel MCP review"}</button>
                 ) : phase === "interview" ? (
                   <button onClick={resetBuild} className="build-secondary-button titlebar-nodrag">{ko ? "인터뷰 취소" : "Cancel interview"}</button>
                 ) : phase === "done" || phase === "error" ? (
                   <button onClick={resetBuild} className="build-secondary-button titlebar-nodrag">{ko ? "새 빌드" : "New build"}</button>
                 ) : (
                   <button
-                    onClick={() => void startBuild()}
+                    onClick={() => {
+                      const active = runtimes.find((item) => item.active) ?? runtimes[0];
+                      void startBuild(active ? { kind: active.kind, backend: active.backend, source: active.source, model: active.model ?? undefined, longContext: active.longContextEnabled, effort: active.effort ?? undefined } : undefined);
+                    }}
                     disabled={Boolean(startBlocker)}
                     className="build-primary-button titlebar-nodrag"
                   >
@@ -536,6 +546,22 @@ export default function BuildPage() {
               </div>
             )}
           </section>
+
+          {phase === "mcp-review" && mcpPlan && (
+            <McpBuildPlanCard
+              plan={mcpPlan}
+              selectedIds={mcpSelectedCandidateIds}
+              ko={ko}
+              onChange={setBuildMcpSelection}
+              onApprove={() => void approveBuildMcpPlan(mcpSelectedCandidateIds)}
+              onContinueWithout={() => void approveBuildMcpPlan([])}
+              onCancel={cancelBuild}
+            />
+          )}
+
+          {mcpReceipt && phase !== "mcp-review" && (
+            <McpAttachmentReceiptCard receipt={mcpReceipt} ko={ko} />
+          )}
 
           {awaitingReply && pendingQuestions.length > 0 && (
             <section className="build-card build-interview-card">

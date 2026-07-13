@@ -115,6 +115,7 @@ async function main() {
     await page.evaluate((locale) => {
       try {
         window.localStorage.setItem("agentlas.onboarded", "1");
+        window.localStorage.setItem("agentlas.featureUpdate.ontology-chips-v1.2026-07-13.ack", "qa-suppressed");
         window.localStorage.setItem("agentlas.locale", locale);
       } catch {
         // Some transient Electron documents deny storage; the visible onboarding
@@ -132,6 +133,7 @@ async function main() {
       await page.evaluate((locale) => {
         try {
           window.localStorage.setItem("agentlas.onboarded", "1");
+          window.localStorage.setItem("agentlas.featureUpdate.ontology-chips-v1.2026-07-13.ack", "qa-suppressed");
           window.localStorage.setItem("agentlas.locale", locale);
         } catch {
           // Continue; the skip action already persisted onboarding state.
@@ -207,6 +209,7 @@ async function main() {
 
     const setup = await page.evaluate(async ({ grants, qaLocale }) => {
       window.localStorage.setItem("agentlas.onboarded", "1");
+      window.localStorage.setItem("agentlas.featureUpdate.ontology-chips-v1.2026-07-13.ack", "qa-suppressed");
       window.localStorage.setItem("agentlas.locale", qaLocale);
       await window.agentlas.menu.setLocale(qaLocale).catch(() => undefined);
       await window.agentlas.team.importLocalFolder({ path: grants.qaAgentA.path, scope: grants.qaAgentA.scope }).catch(() => undefined);

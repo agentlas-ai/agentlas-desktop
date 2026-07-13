@@ -42,6 +42,8 @@ export interface CloudRegistryAgentRow {
   role: string | null;
   visibility: AgentVisibility;
   entity_kind: "agent" | "team" | null;
+  /** Desktop-only metadata; older transaction journals legitimately omit it. */
+  local_display_name?: string | null;
 }
 
 interface CloudRegistryJournal {
@@ -436,7 +438,8 @@ function writeRow(row: CloudRegistryAgentRow): void {
       `UPDATE installed_agents
        SET slug = ?, name = ?, name_en = ?, tagline = ?, tagline_en = ?, system_prompt = ?,
            mcp_servers_json = ?, env_requirements_json = ?, preferred_backend = ?, trust_grade = ?,
-           installed_at = ?, tone = ?, builtin = ?, role = ?, visibility = ?, entity_kind = ?
+           installed_at = ?, tone = ?, builtin = ?, role = ?, visibility = ?, entity_kind = ?,
+           local_display_name = ?
        WHERE id = ?`,
     ).run(...values.slice(1), row.id);
     return;
@@ -445,8 +448,8 @@ function writeRow(row: CloudRegistryAgentRow): void {
     `INSERT INTO installed_agents
      (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
       env_requirements_json, preferred_backend, trust_grade, installed_at, tone, builtin, role,
-      visibility, entity_kind)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      visibility, entity_kind, local_display_name)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(...values);
 }
 
@@ -469,6 +472,7 @@ function rowValues(row: CloudRegistryAgentRow): unknown[] {
     row.role,
     row.visibility,
     row.entity_kind,
+    row.local_display_name ?? null,
   ];
 }
 

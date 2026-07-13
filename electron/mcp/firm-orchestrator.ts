@@ -24,12 +24,21 @@ import {
 } from "../store/chats";
 import { recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
+import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
 import { curateReply } from "../memory/curator";
-import { MEMORY_EMITTER_BLOCK } from "../architecture/manifest";
+import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { buildDelegateProtocol, parseDelegations, type Delegation } from "./delegate";
 import { selectRuntimeForTargets } from "../runtime/selection";
 import { getAgentConcurrency } from "../store/concurrency";
+import { tryRecordRunEvent } from "../store/run-events";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
+import { getAgentById } from "./registry";
+import {
+  defaultWorkloadAllocation,
+  resolveWorkloadAllocation,
+  workloadAllocationReceipt,
+  type WorkloadAllocation,
+} from "../runtime/workload-routing";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -95,7 +104,12 @@ function linkAbort(parent?: AbortSignal) {
 async function runNodeTurnSafe(
   p: FirmRunParams,
   turn: NodeTurn,
-): Promise<{ text: string; delegations: Delegation[]; ok: boolean }> {
+): Promise<{
+  text: string;
+  delegations: Delegation[];
+  synthesisAllocation: WorkloadAllocation | null;
+  ok: boolean;
+}> {
   const link = linkAbort(p.signal);
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -124,6 +138,7 @@ async function runNodeTurnSafe(
             ? `(${turn.node.name} 응답 실패: ${Math.round(NODE_TIMEOUT_MS / 1000)}초 동안 응답이 없어 자동 중단했습니다.)`
             : `(${turn.node.name} failed: no response for ${Math.round(NODE_TIMEOUT_MS / 1000)}s, auto-aborted.)`,
         delegations: [],
+        synthesisAllocation: null,
         ok: false,
       };
     }
@@ -131,6 +146,7 @@ async function runNodeTurnSafe(
     return {
       text: p.locale === "ko" ? `(${turn.node.name} 응답 실패: ${msg})` : `(${turn.node.name} failed: ${msg})`,
       delegations: [],
+      synthesisAllocation: null,
       ok: false,
     };
   } finally {
@@ -143,9 +159,9 @@ async function runNodeTurnSafe(
 function matchTargets(
   delegations: Delegation[],
   candidates: ResolvedNode[],
-): Array<{ node: ResolvedNode; brief: string }> {
+): Array<{ node: ResolvedNode; brief: string; allocation: WorkloadAllocation }> {
   const norm = (s: string) => s.trim().toLowerCase();
-  const picked: Array<{ node: ResolvedNode; brief: string }> = [];
+  const picked: Array<{ node: ResolvedNode; brief: string; allocation: WorkloadAllocation }> = [];
   const used = new Set<string>();
   for (const d of delegations) {
     const t = norm(d.target);
@@ -156,7 +172,7 @@ function matchTargets(
     );
     if (node) {
       used.add(node.id);
-      picked.push({ node, brief: d.brief || "" });
+      picked.push({ node, brief: d.brief || "", allocation: d.allocation });
     }
   }
   return picked;
@@ -179,15 +195,24 @@ interface NodeTurn {
   signal?: AbortSignal;
   /** The division branch this node belongs to, used for division-wide runtime defaults. */
   divisionId?: string;
+  /** Present only when a higher-level AI assigned this child/synthesis turn. */
+  allocation?: WorkloadAllocation | null;
 }
 
 /** 노드 1턴 실행 — 프롬프트 조립(노드 프롬프트 + per-agent 메모리 + 위임/메모리 프로토콜),
  *  러너 실행(속성 태깅 스트림), delegation 파싱 + 메모리 큐레이션. */
-async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: string; delegations: Delegation[] }> {
+async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
+  text: string;
+  delegations: Delegation[];
+  synthesisAllocation: WorkloadAllocation | null;
+}> {
   const { node, tier, phase } = turn;
+  const memoryOwnerId = node.agentId ?? node.id;
   const tag = (ev: McpInvocationEvent): McpInvocationEvent => ({
     ...ev,
     agentId: node.id,
+    runtimeAgentId: memoryOwnerId,
+    nodeId: node.id,
     agentName: node.name,
     role: node.role,
     tier,
@@ -207,7 +232,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
     }
   }
 
-  // 시스템 프롬프트 = 노드 프롬프트 + per-agent 메모리(node.id) + (리더면 위임) + 메모리 emitter
+  // 시스템 프롬프트 = 노드 프롬프트 + canonical owner memory + (리더면 위임) + 메모리 emitter
   const firmRolePrompt = node.prompt?.trim() || `You are ${node.name}, the ${node.role} of this firm.`;
   let systemPrompt = node.agentId
     ? buildEffectiveAgentSystemPrompt(node.agentId, firmRolePrompt)
@@ -216,7 +241,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
     systemPrompt += `\n\n## Firm role context\n${node.prompt.trim()}`;
   }
   try {
-    const mem = buildMemoryContext(activePath, node.id);
+    const mem = buildMemoryContext(activePath, memoryOwnerId);
     if (mem) systemPrompt += `\n\n${mem}`;
   } catch {
     // ignore memory failures
@@ -224,15 +249,58 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
   if (turn.reports && turn.reports.length > 0) {
     systemPrompt += `\n\n${buildDelegateProtocol(turn.reports.map((r) => ({ role: r.role, name: r.name })))}`;
   }
-  systemPrompt += `\n\n${MEMORY_EMITTER_BLOCK}`;
+  systemPrompt += `\n\n${memoryEmitterPromptFor(turn.userPrompt)}`;
 
   const runtimeChoice = selectRuntimeForTargets(p.runtimes, [
     { scope: "agent", targetId: node.agentId },
     { scope: "division", targetId: turn.divisionId && p.chat.firmId ? `${p.chat.firmId}:${turn.divisionId}` : null },
     { scope: "firm", targetId: p.chat.firmId },
   ]);
-  const active = runtimeChoice?.picked ? runtimeChoice.active : p.active;
+  const baseActive = runtimeChoice?.picked ? runtimeChoice.active : p.active;
   const picked = runtimeChoice?.picked ?? p.picked;
+  const workloadResolution = turn.allocation
+    ? resolveWorkloadAllocation({
+        allocation: turn.allocation,
+        runtime: baseActive,
+        phase: turn.allocation.phase,
+        manualOverride: runtimeChoice?.override ?? null,
+      })
+    : null;
+  const active = workloadResolution?.runtime ?? baseActive;
+  if (workloadResolution) {
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `firm:${p.chat.id}`,
+      kind: "workload_allocation",
+      chatId: p.chat.id,
+      nodeId: node.id,
+      agentId: memoryOwnerId,
+      payload: workloadAllocationReceipt(workloadResolution),
+    });
+    if (workloadResolution.resolutionCodes.includes("tier-unavailable-active-preserved")) {
+      emit({
+        kind: "tool-use",
+        status: p.locale === "ko"
+          ? `${workloadResolution.allocation.tier} 등급 모델이 현재 런타임에 없어 활성 모델을 유지합니다.`
+          : `${workloadResolution.allocation.tier} tier is unavailable in this runtime; preserving the active model.`,
+      });
+    }
+  }
+  if (node.agentId) {
+    try {
+      const installedAgent = getAgentById(node.agentId);
+      const ontology = installedAgent ? await buildAgentRuntimeOntologyContext({
+        runSessionId: p.req.runId ?? p.chat.id,
+        installedAgent,
+        projectId: p.chat.projectId,
+        projectPath: workingFolder,
+        runtimeKind: active.kind,
+        task: turn.userPrompt,
+      }) : null;
+      if (ontology?.prompt) systemPrompt += `\n\n${ontology.prompt}`;
+    } catch {
+      // Operational/Taste overlays are optional and never block a firm node.
+    }
+  }
   // 이 노드가 어떤 모델/런타임으로 도는지 — 오케스트레이션 트리에 "모델 사용 중" 표시용.
   const modelLabel =
     active.model ||
@@ -287,15 +355,28 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
   );
 
   // delegation 블록 분리 → 메모리 큐레이션(노드 agentId로) → 정리된 텍스트
-  const { delegations, cleanedText } = parseDelegations(result.text);
+  const { delegations, synthesisAllocation, cleanedText } = parseDelegations(result.text);
   let display = cleanedText;
   try {
     const { cleanedText: c2 } = curateReply(display, {
       projectPath: activePath,
       projectId: p.chat.projectId ?? null,
-      agentId: node.id,
+      agentId: memoryOwnerId,
       chatId: turn.chatId,
+      runId: p.req.runId,
+      nodeId: node.id,
       cwdAtRequest: workingFolder,
+      ...(node.agentId
+        ? {
+            experienceIntake: {
+              platform: process.platform,
+              arch: process.arch,
+              runtimeKind: active.kind,
+              basePackageHash: getAgentById(node.agentId)?.packageHash ?? null,
+              taskHint: turn.userPrompt,
+            },
+          }
+        : {}),
     });
     display = c2 || display;
   } catch {
@@ -305,7 +386,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{ text: st
   // 단, plan 턴은 곧 delegate/synthesize가 이어지므로 완료로 보지 않는다 — orchestrator/본부 행이
   // 위임 단계 내내 ▶(실행)으로 유지되어 "끝난 듯 보였다 되돌아오는" 플리커를 막는다.
   if (phase !== "plan") emit({ kind: "tool-use", done: true });
-  return { text: display, delegations };
+  return { text: display, delegations, synthesisAllocation };
 }
 
 function phaseStatus(locale: RuntimeLocale, phase: NodeTurn["phase"], name: string): string {
@@ -320,6 +401,7 @@ async function runDivision(
   p: FirmRunParams,
   division: ResolvedDivision,
   brief: string,
+  allocation: WorkloadAllocation,
 ): Promise<{ node: ResolvedNode; result: string }> {
   const fkAgentId = division.agentId || p.ceoAgent.id; // FK-safe (실 agent 없으면 CEO id)
   const divChat = getOrCreateDivisionSession(p.chat.id, division.id, fkAgentId);
@@ -336,6 +418,7 @@ async function runDivision(
     reports: specialists.length > 0 ? specialists : undefined,
     chatId: divChat.id,
     divisionId: division.id,
+    allocation,
   });
 
   let result = plan.text;
@@ -360,6 +443,7 @@ async function runDivision(
         history: [],
         chatId: null, // ephemeral — 메모리는 node.id로 저장됨
         divisionId: division.id,
+        allocation: m.allocation,
       });
       return { name: m.node.name, role: m.node.role, text: r.text };
     });
@@ -374,6 +458,7 @@ async function runDivision(
       history: listChatMessages(divChat.id, 80),
       chatId: divChat.id,
       divisionId: division.id,
+      allocation: plan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
     });
     result = synth.text;
   }
@@ -497,13 +582,14 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
         history: [],
         chatId: null,
         divisionId: divisions[0]?.id,
+        allocation: m.allocation,
       });
       return { node: m.node, result: r.text };
     });
   } else {
     // 본부들 — 지속 세션 병렬, 각자 전문가에게 재위임
     teamResults = await parallelCap(matched, getAgentConcurrency(), async (m) =>
-      runDivision(p, m.node as ResolvedDivision, m.brief),
+      runDivision(p, m.node as ResolvedDivision, m.brief, m.allocation),
     );
   }
 
@@ -520,6 +606,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
     history,
     chatId: chat.id,
     toMainBubble: true,
+    allocation: plan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
   });
   if (!finalTurn.ok) {
     sink({ kind: "error", error: { code: "ceo-failed", message: finalTurn.text } });

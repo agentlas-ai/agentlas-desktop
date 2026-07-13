@@ -50,6 +50,8 @@ interface OwnerPackageRestorePayload {
   taglineEn: string;
   registration: CloudAgentRevisionIdentity;
   cloudPackage: CloudAgentPackageDownload;
+  agentDefinitionId?: string;
+  agentReleaseId?: string;
 }
 
 interface McpSourceOptions {
@@ -224,6 +226,12 @@ function normalizeOwnerRestorePayload(raw: unknown, expectedSlug: string): Owner
     tagline: cleanString(root.tagline, "Owned Agent Cloud asset"),
     taglineEn: cleanString(root.taglineEn, cleanString(root.tagline, "Owned Agent Cloud asset")),
     registration,
+    ...(typeof root.agentDefinitionId === "string" && typeof root.agentReleaseId === "string"
+      ? {
+          agentDefinitionId: root.agentDefinitionId,
+          agentReleaseId: root.agentReleaseId,
+        }
+      : {}),
     cloudPackage: {
       packageHash,
       ...(packageHashVersion ? { packageHashVersion } : {}),
@@ -307,6 +315,12 @@ function restorePayloadToListing(
     entityKind: restored.cloudPackage.agentKind === "team" ? "team" : "agent",
     cloudPackage: restored.cloudPackage,
     cloudRegistration: restored.registration,
+    ...(restored.agentDefinitionId && restored.agentReleaseId
+      ? {
+          agentDefinitionId: restored.agentDefinitionId,
+          agentReleaseId: restored.agentReleaseId,
+        }
+      : {}),
   };
 }
 

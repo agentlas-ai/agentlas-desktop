@@ -45,6 +45,33 @@ const legacyPluginListing = {
 
 const seed = new Database(storePath);
 seed.exec(`
+  -- A real v52 store contains the base agent table and the v38 execution
+  -- ledgers. Keep the fixture minimal while preserving those migration
+  -- prerequisites for later schema versions.
+  CREATE TABLE installed_agents (
+    id TEXT PRIMARY KEY,
+    slug TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    installed_at TEXT NOT NULL
+  );
+  CREATE TABLE run_events (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    ts TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    agent_id TEXT,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(run_id, seq)
+  );
+  CREATE TABLE failure_events (
+    id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    source TEXT NOT NULL,
+    agent_id TEXT,
+    error_message TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}'
+  );
   CREATE TABLE hub_agent_bookmarks (
     slug TEXT PRIMARY KEY,
     entity_kind TEXT NOT NULL DEFAULT 'agent',
@@ -325,7 +352,7 @@ async function main() {
     storeModule.initStore();
     let db = storeModule.getDb();
 
-    assert.equal(db.pragma("user_version", { simple: true }), 53);
+    assert.equal(db.pragma("user_version", { simple: true }), 63);
     const columns = db.prepare("PRAGMA table_info(hub_agent_bookmarks)").all();
     assert.deepEqual(
       columns.filter((column) => column.pk > 0).sort((a, b) => a.pk - b.pk).map((column) => column.name),
@@ -342,7 +369,7 @@ async function main() {
     storeModule = require(dbModulePath);
     storeModule.initStore();
     db = storeModule.getDb();
-    assert.equal(db.pragma("user_version", { simple: true }), 53, "idempotent reopen must restore v53 marker");
+    assert.equal(db.pragma("user_version", { simple: true }), 63, "idempotent reopen must restore the current v63 marker");
     assert.deepEqual(
       db.prepare("SELECT * FROM hub_agent_bookmarks ORDER BY workspace_id, entity_kind, slug").all(),
       firstPassRows,
@@ -355,6 +382,30 @@ async function main() {
     const partialPath = path.join(tempDir, "partial-v53-wrong-pk.sqlite");
     const partial = new Database(partialPath);
     partial.exec(`
+      CREATE TABLE installed_agents (
+        id TEXT PRIMARY KEY,
+        slug TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        installed_at TEXT NOT NULL
+      );
+      CREATE TABLE run_events (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        ts TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        agent_id TEXT,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        UNIQUE(run_id, seq)
+      );
+      CREATE TABLE failure_events (
+        id TEXT PRIMARY KEY,
+        ts TEXT NOT NULL,
+        source TEXT NOT NULL,
+        agent_id TEXT,
+        error_message TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}'
+      );
       CREATE TABLE hub_agent_bookmarks (
         workspace_id TEXT NOT NULL,
         slug TEXT NOT NULL,

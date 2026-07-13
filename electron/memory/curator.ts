@@ -8,8 +8,10 @@ import {
   appendSoulMemory,
 } from "./project-files";
 import { hasEquivalentMemory, insertMemoryEntry, type RequestContext } from "./store";
+import { autoIntakeCuratedMemory } from "../experience/store";
 import { parseMemoryEvents, type RawMemoryEvent } from "./events";
 import type { MemoryKind, MemoryScope } from "../architecture/manifest";
+import { tryRecordRunEvent } from "../store/run-events";
 
 // Secret/credential patterns — events matching these are dropped, never stored.
 const SECRET_PATTERNS: RegExp[] = [
@@ -34,6 +36,10 @@ export interface CurationContext {
   projectId: string | null;
   agentId: string | null;
   chatId: string | null;
+  /** Durable invocation identity for a content-free curation receipt. */
+  runId?: string | null;
+  /** Firm/task-force node identity. Never used as the installed-agent memory owner. */
+  nodeId?: string | null;
   cwdAtRequest?: string | null;
   /** 이 실행에 관여한 빌린(고용한) 허브 에이전트 슬러그. agent_repo 스코프 배움을
    *  이 에이전트들의 전역 기억 둥지에도 미러링해, 다음 대여 때(다른 프로젝트여도) 실려온다. */
@@ -43,6 +49,14 @@ export interface CurationContext {
    * 어느 참여 에이전트의 agent_repo에도 귀속할 수 없다.
    */
   sourceProvenance?: "task-force-synthesis";
+  /** Exact runtime/base context supplied only by real installed-agent runs. */
+  experienceIntake?: {
+    platform: string;
+    arch: string;
+    runtimeKind: string;
+    basePackageHash: string | null;
+    taskHint?: string | null;
+  };
 }
 
 export interface CurationReport {
@@ -51,6 +65,29 @@ export interface CurationReport {
   redacted: number;
   sessionOnly: number;
   discarded: number;
+}
+
+function recordCurationReceipt(ctx: CurationContext, report: CurationReport): void {
+  const runId = String(ctx.runId ?? "").trim();
+  if (!runId) return;
+  const memoryEventCount =
+    report.written + report.deduped + report.redacted + report.sessionOnly + report.discarded;
+  // Counts only: prompt, reply, memory content, paths, and evidence never enter the run ledger.
+  tryRecordRunEvent({
+    runId,
+    kind: "memory_curation",
+    chatId: ctx.chatId,
+    nodeId: ctx.nodeId,
+    agentId: ctx.agentId,
+    payload: {
+      memoryEventCount,
+      written: report.written,
+      deduped: report.deduped,
+      redacted: report.redacted,
+      sessionOnly: report.sessionOnly,
+      discarded: report.discarded,
+    },
+  });
 }
 
 const SOUL_KINDS: ReadonlySet<MemoryKind> = new Set<MemoryKind>([
@@ -214,7 +251,7 @@ export function curateEvents(
       continue;
     }
 
-    insertMemoryEntry({
+    const entry = insertMemoryEntry({
       scope,
       kind: ev.memory_kind,
       content: ev.content,
@@ -228,6 +265,25 @@ export function curateEvents(
       requestContext,
     });
     report.written += 1;
+    if (ctx.agentId && ctx.experienceIntake) {
+      try {
+        autoIntakeCuratedMemory({
+          memory: entry,
+          agentId: ctx.agentId,
+          projectId: ctx.projectId,
+          projectPath: ctx.projectPath,
+          environment: {
+            platform: ctx.experienceIntake.platform,
+            arch: ctx.experienceIntake.arch,
+            runtimeKind: ctx.experienceIntake.runtimeKind,
+          },
+          basePackageHash: ctx.experienceIntake.basePackageHash,
+          taskHint: ctx.experienceIntake.taskHint,
+        });
+      } catch (error) {
+        console.warn(`[experience] automatic intake deferred: ${error instanceof Error ? error.message : "unknown"}`);
+      }
+    }
 
     if (ctx.projectPath) {
       appendMemoryLog(ctx.projectPath, {
@@ -281,5 +337,6 @@ export function curateReply(
     events.length > 0
       ? curateEvents(events, ctx)
       : { written: 0, deduped: 0, redacted: 0, sessionOnly: 0, discarded: 0 };
+  recordCurationReceipt(ctx, report);
   return { cleanedText, report };
 }

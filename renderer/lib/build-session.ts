@@ -19,11 +19,13 @@ import type {
   HephaestusBuildEvent,
   HephaestusBuildResult,
   HephaestusBuildSupplementalQuestion,
+  McpBuildAttachmentReceipt,
+  McpBuildPlan,
   RuntimeSelection,
 } from "@/lib/types";
 
 export type Mode = "single" | "team" | "package";
-export type Phase = "idle" | "running" | "interview" | "done" | "error";
+export type Phase = "idle" | "running" | "mcp-review" | "interview" | "done" | "error";
 
 export interface LogLine {
   kind: HephaestusBuildEvent["kind"];
@@ -36,6 +38,7 @@ export interface BuildResult {
   workspace: string;
   securityScan: unknown;
   readScope: FsReadScope;
+  mcpReceipt: McpBuildAttachmentReceipt | null;
 }
 
 interface ChatMsg {
@@ -77,10 +80,14 @@ export interface BuildState {
   awaitingReply: boolean;
   /** 진행된 인터뷰 턴 수(헤더 표시용). */
   turn: number;
+  /** Main-authored, value-free preflight plan and its one-pass selection. */
+  mcpPlan: McpBuildPlan | null;
+  mcpSelectedCandidateIds: string[];
+  mcpReceipt: McpBuildAttachmentReceipt | null;
 }
 
 // 빌드 파이프라인 단계 수 — 화면의 STAGES 배열과 일치(모드분류·인터뷰/리서치·생성·검증·배포).
-export const STAGE_COUNT = 5;
+export const STAGE_COUNT = 6;
 
 const WS_KEY = "agentlas.build.workspace";
 const OPENCRAB_QUESTION_ID = "opencrab-ontology";
@@ -153,6 +160,9 @@ const state: BuildState = {
   pendingQuestions: [],
   awaitingReply: false,
   turn: 0,
+  mcpPlan: null,
+  mcpSelectedCandidateIds: [],
+  mcpReceipt: null,
 };
 
 let snapshot: BuildState = { ...state };
@@ -164,6 +174,8 @@ let lastAcc = "";
 // 대화 history(이번 턴 입력 이전까지).
 let history: ChatMsg[] = [];
 let runtimeSessionId: string | null = null;
+let resolvedBuildRuntime: RuntimeSelection | null = null;
+let resolvedBuildRuntimePinned = false;
 // 런타임이 sessionId를 반환하지 않는 BYOK/Ollama도 첨부는 한 빌드에서 정확히 한 번만 보낸다.
 let attachmentsSentForBuild = false;
 // Per-build, explicit OpenCrab consent. It is set only from the conditional
@@ -234,8 +246,8 @@ export function setWorkspace(v: FsPathGrant | null) {
 export function prepareBuildHandoff(input: {
   workspace: FsPathGrant;
   request: string;
-}): { ok: true } | { ok: false; phase: "running" | "interview" } {
-  if (state.phase === "running" || state.phase === "interview") {
+}): { ok: true } | { ok: false; phase: "running" | "mcp-review" | "interview" } {
+  if (state.phase === "running" || state.phase === "interview" || state.phase === "mcp-review") {
     return { ok: false, phase: state.phase };
   }
 
@@ -255,6 +267,13 @@ export function prepareBuildHandoff(input: {
 }
 export function setRuntime(v: RuntimeSelection | null) {
   state.runtime = v;
+  commit();
+}
+
+export function setBuildMcpSelection(ids: string[]): void {
+  if (state.phase !== "mcp-review" || !state.mcpPlan) return;
+  const allowed = new Set(state.mcpPlan.candidates.map((candidate) => candidate.id));
+  state.mcpSelectedCandidateIds = [...new Set(ids)].filter((id) => allowed.has(id));
   commit();
 }
 
@@ -284,12 +303,12 @@ function cleanLastPartial(cleanText: string) {
 const WRITE_SIGNALS = /write|edit|create|touch|mkdir|apply_patch|str_replace|\.md|agentlas\.json|\.agentlas|파일|생성|scaffold/i;
 function stageFromEvent(ev: HephaestusBuildEvent, current: number): number {
   if (ev.kind === "stage") {
-    if (ev.stage === "security") return Math.max(current, 3);
-    if (ev.stage === "build") return Math.max(current, 1);
-    if (WRITE_SIGNALS.test(`${ev.stage ?? ""} ${ev.text ?? ""}`)) return Math.max(current, 2);
-    return Math.max(current, 1);
+    if (ev.stage === "security") return Math.max(current, 4);
+    if (ev.stage === "build") return Math.max(current, 2);
+    if (WRITE_SIGNALS.test(`${ev.stage ?? ""} ${ev.text ?? ""}`)) return Math.max(current, 3);
+    return Math.max(current, 2);
   }
-  if (ev.kind === "partial" || ev.kind === "log") return Math.max(current, 1);
+  if (ev.kind === "partial" || ev.kind === "log") return Math.max(current, 2);
   return current;
 }
 
@@ -383,7 +402,7 @@ async function findPackageRoot(workspace: string, readScope: FsReadScope, genera
 function finalizeBuild(pkgRoot: string, scan: unknown, readScope: FsReadScope, note: string | null, generation: number): void {
   const ko = currentLocale() === "ko";
   state.reached = STAGE_COUNT;
-  state.result = { workspace: pkgRoot, securityScan: scan, readScope };
+  state.result = { workspace: pkgRoot, securityScan: scan, readScope, mcpReceipt: state.mcpReceipt };
   state.awaitingReply = false;
   state.pendingQuestions = [];
   if (note) pushLog("log", note);
@@ -454,7 +473,7 @@ async function resolveTurnWithoutSignal(
 async function runTurn(input: string, generation = buildGeneration): Promise<void> {
   const api = ipc();
   const ev = ipcEvents();
-  if (!api || !ev || !state.workspace || !state.workspaceGrant || !isCurrentBuild(generation)) return;
+  if (!api || !ev || !state.workspace || !state.workspaceGrant || !state.mcpPlan || !isCurrentBuild(generation)) return;
   const ko = currentLocale() === "ko";
 
   detach();
@@ -463,6 +482,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
   state.errored = false;
   state.awaitingReply = false;
   state.pendingQuestions = [];
+  state.reached = Math.max(state.reached, 2);
   const workspace = state.workspace;
   const readScope = state.workspaceGrant.scope;
   commit();
@@ -474,7 +494,15 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
       request: input,
       mode: state.mode || undefined,
       workspaceGrant: state.workspaceGrant,
-      runtime: state.runtime || undefined,
+      runtime: resolvedBuildRuntime || undefined,
+      runtimePinned: resolvedBuildRuntimePinned,
+      mcpConsent: {
+        planId: state.mcpPlan.id,
+        selectedCandidateIds: [...state.mcpSelectedCandidateIds],
+        ...(state.mcpPlan.status === "unavailable"
+          ? { fallbackReason: "recommendation_unavailable" as const }
+          : {}),
+      },
       runtimeSessionId: runtimeSessionId || undefined,
       // 첨부는 런타임 sessionId 유무와 무관하게 한 빌드에서 정확히 한 번만 스테이징한다.
       attachments: attachmentsSentForBuild
@@ -486,6 +514,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
     });
     if (!isCurrentBuild(generation)) return;
     if (!started?.runId) throw new Error(ko ? "빌드 실행 ID를 받지 못했습니다." : "Build did not return a run ID.");
+    state.mcpReceipt = started.mcpReceipt;
     if (state.attachments.length > 0) attachmentsSentForBuild = true;
     if (openCrabOntologyChoice === openCrabOntologyForTurn) {
       openCrabOntologyChoice = undefined;
@@ -536,6 +565,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
     } else if (e.kind === "done") {
       const assistantText = e.text ?? "";
       const result = e.result as HephaestusBuildResult | undefined;
+      state.mcpReceipt = result?.mcpReceipt ?? state.mcpReceipt;
       const supplementalQuestion = state.turn === 0
         ? mainOwnedOpenCrabQuestion(result?.supplementalQuestion)
         : null;
@@ -551,7 +581,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
         // BUILD_COMPLETE target. Never reinterpret that path in the renderer.
         const packageRoot = result?.workspace ?? workspace;
         const registerPath = JUNK_WS.test(wsBasename(packageRoot)) ? null : packageRoot;
-        state.result = { workspace: packageRoot, securityScan: result?.securityScan ?? null, readScope };
+        state.result = { workspace: packageRoot, securityScan: result?.securityScan ?? null, readScope, mcpReceipt: state.mcpReceipt };
         pushLog("done", ko ? "빌드 완료 — 패키지 생성됨" : "Build complete — package created");
         state.phase = "done";
         commit();
@@ -619,11 +649,13 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
   });
 }
 
-export async function startBuild(): Promise<void> {
+export async function startBuild(activeRuntime?: RuntimeSelection): Promise<void> {
   if (!state.request.trim() || !state.workspace || !state.workspaceGrant || state.phase === "running") return;
   // 새 빌드 — 대화/로그/단계 초기화.
   history = [];
   runtimeSessionId = null;
+  resolvedBuildRuntime = state.runtime ?? activeRuntime ?? null;
+  resolvedBuildRuntimePinned = state.runtime !== null;
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
   autoContinues = 0;
@@ -633,16 +665,69 @@ export async function startBuild(): Promise<void> {
   state.result = null;
   state.registered = false;
   state.log = [];
+  state.mcpPlan = null;
+  state.mcpSelectedCandidateIds = [];
+  state.mcpReceipt = null;
   const ko = currentLocale() === "ko";
   const reqLen = state.request.trim().length;
   const mode = state.mode || (ko ? "자동 분류" : "auto-classify");
-  pushLog("stage", ko ? "딥인터뷰 시작 — Hephaestus 빌더 에이전트 가동" : "Deep interview started — Hephaestus builder agent engaged");
+  state.phase = "running";
+  pushLog("stage", ko ? "MCP 연결 계획 확인 중" : "Checking the MCP attachment plan");
   pushLog("log", ko ? `요청 길이 ${reqLen}자 · 모드 ${mode}` : `Request length ${reqLen} chars · mode ${mode}`);
   pushLog("log", ko ? `생성 폴더 ${state.workspace}` : `Output folder ${state.workspace}`);
   if (state.attachments.length > 0) pushLog("log", ko ? `첨부 ${state.attachments.length}개: ${state.attachments.map((a) => a.name).join(", ").slice(0, 200)}` : `Attachments ${state.attachments.length}: ${state.attachments.map((a) => a.name).join(", ").slice(0, 200)}`);
-  if (state.runtime) pushLog("log", `${ko ? "엔진" : "Engine"} ${state.runtime.kind}${state.runtime.model ? ` · ${state.runtime.model}` : ""}`);
+  if (resolvedBuildRuntime) pushLog("log", `${ko ? "엔진" : "Engine"} ${resolvedBuildRuntime.kind}${resolvedBuildRuntime.model ? ` · ${resolvedBuildRuntime.model}` : ""}`);
   commit();
-  await runTurn(state.request.trim(), generation);
+  try {
+    const bridge = ipc();
+    if (!bridge) throw new Error("Desktop bridge unavailable");
+    const plan = await bridge.mcpTools.recommendForBuild({
+      request: state.request.trim(),
+      mode: state.mode || undefined,
+      runtime: resolvedBuildRuntime || undefined,
+    });
+    if (!plan) throw new Error("MCP recommendation returned no plan");
+    if (!isCurrentBuild(generation)) return;
+    state.mcpPlan = plan;
+    state.mcpSelectedCandidateIds = plan.candidates.filter((candidate) => candidate.defaultSelected).map((candidate) => candidate.id);
+    state.phase = "mcp-review";
+    state.reached = 1;
+    pushLog("log", ko ? "MCP 추천을 준비했습니다. 한 번 확인하면 딥인터뷰를 시작합니다." : "MCP recommendations are ready. One confirmation starts the deep interview.");
+    commit();
+  } catch (error) {
+    if (!isCurrentBuild(generation)) return;
+    const createdAt = new Date();
+    const random = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    state.mcpPlan = {
+      id: `renderer-mcp-unavailable-${random}`,
+      createdAt: createdAt.toISOString(),
+      expiresAt: new Date(createdAt.getTime() + 20 * 60 * 1000).toISOString(),
+      runtimeKind: resolvedBuildRuntime?.kind ?? null,
+      status: "unavailable",
+      warningCode: "recommendation_unavailable",
+      candidates: [],
+    };
+    state.mcpSelectedCandidateIds = [];
+    state.phase = "mcp-review";
+    state.reached = 1;
+    state.errored = false;
+    pushLog(
+      "error",
+      ko
+        ? "MCP 추천 서비스를 사용할 수 없습니다. 한 번 확인한 뒤 MCP 없이 빌드를 계속할 수 있습니다."
+        : "MCP recommendations are unavailable. Confirm once to continue the Build without MCP.",
+    );
+    commit();
+  }
+}
+
+export async function approveBuildMcpPlan(selectedCandidateIds: string[]): Promise<void> {
+  if (state.phase !== "mcp-review" || !state.mcpPlan) return;
+  const allowed = new Set(state.mcpPlan.candidates.map((candidate) => candidate.id));
+  state.mcpSelectedCandidateIds = [...new Set(selectedCandidateIds)].filter((id) => allowed.has(id));
+  pushLog("stage", currentLocale() === "ko" ? "MCP 선택 승인 — 딥인터뷰 시작" : "MCP selection approved — starting deep interview");
+  commit();
+  await runTurn(state.request.trim(), buildGeneration);
 }
 
 /** 인터뷰 답변 제출 — 다음 턴 실행. */
@@ -668,9 +753,14 @@ export function cancelBuild() {
   state.pendingQuestions = [];
   state.runId = null;
   runtimeSessionId = null;
+  resolvedBuildRuntime = null;
+  resolvedBuildRuntimePinned = false;
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
   autoContinues = 0;
+  state.mcpPlan = null;
+  state.mcpSelectedCandidateIds = [];
+  state.mcpReceipt = null;
   detach();
   commit();
 }
@@ -689,9 +779,14 @@ export function resetBuild() {
   state.turn = 0;
   history = [];
   runtimeSessionId = null;
+  resolvedBuildRuntime = null;
+  resolvedBuildRuntimePinned = false;
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
   autoContinues = 0;
+  state.mcpPlan = null;
+  state.mcpSelectedCandidateIds = [];
+  state.mcpReceipt = null;
   commit();
 }
 

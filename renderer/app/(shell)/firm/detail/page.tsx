@@ -1,4 +1,4 @@
-// 회사 상세 — 접고 펴기 가능한 왼쪽 사이드바 조직도 + 오른쪽 에이전트 상세 통제 센터 (메모리 큐레이션, 프롬프트 에디터, 스킬 주입, 클라우드 싱크)
+// 회사 상세 — 조직도, 큐레이팅 메모리, 승인형 자산 진화, Experience/Ontology 관리.
 "use client";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -10,8 +10,15 @@ import { navigate } from "@/lib/navigation";
 import { AgentMemorySaveQueue, parseMemoryMarkdown, type ParsedMemory } from "@/lib/agent-memory";
 import { classifyAgent } from "@/lib/ownership";
 import type { Chat, InstalledAgent, InstalledFirm, ResolvedOrg, ResolvedNode, WorkspaceNode } from "@/lib/types";
-import type { AgentEvolutionProposalUi, AgentMemoryEntryUi } from "@shared/types";
+import type { AgentEvolutionProposalUi, AgentLearningSummary, AgentMemoryEntryUi, ExperienceOntologyGraphSnapshot, ExperienceOntologySummary } from "@shared/types";
 import { AgentAvatar } from "@/components/AgentAvatar";
+import {
+  AgentLearningMetricGrid,
+  AgentNameEditor,
+  AgentOntologyGraphView,
+  ExperienceOntologySummaryView,
+  agentDisplayName,
+} from "@/components/AgentExperienceInsights";
 import {
   IconBuilding,
   IconChat,
@@ -89,7 +96,7 @@ function FirmDetailPage() {
 
   // 선택된 에이전트 노드 (null 이면 회사 오버뷰 노출)
   const [selectedNode, setSelectedNode] = useState<ResolvedNode | null>(null);
-  const [activeTab, setActiveTab] = useState<"identity" | "memory" | "playbook" | "activity">("identity");
+  const [activeTab, setActiveTab] = useState<"identity" | "memory" | "playbook" | "activity" | "ontology">("identity");
 
   // 파일 핸들링 및 상태
   const [agentFiles, setAgentFiles] = useState<WorkspaceNode[]>([]);
@@ -103,8 +110,6 @@ function FirmDetailPage() {
 
   const [promptContent, setPromptContent] = useState("");
   const [promptSourcePath, setPromptSourcePath] = useState("");
-  const [editingPrompt, setEditingPrompt] = useState(false);
-  const [promptDraft, setPromptDraft] = useState("");
   const [savingFiles, setSavingFiles] = useState(false);
 
   // 스킬 주입 서랍 (Skill Evolution Drawer)
@@ -219,8 +224,6 @@ function FirmDetailPage() {
       setMemoryParsed({ decisions: [], gotchas: [], openQuestions: [] });
       setPromptContent("");
       setPromptSourcePath("");
-      setPromptDraft("");
-      setEditingPrompt(false);
       return;
     }
     selectedMemoryAgentRef.current = selectedNode.agentId;
@@ -232,7 +235,6 @@ function FirmDetailPage() {
       const curAgent = agents.find((a) => a.id === selectedNode.agentId);
       if (curAgent?.systemPrompt?.trim()) {
         setPromptContent(curAgent.systemPrompt);
-        setPromptDraft(curAgent.systemPrompt);
       }
       try {
         const listing = await api.agentFiles.list(selectedNode.agentId);
@@ -262,7 +264,6 @@ function FirmDetailPage() {
         setPromptSourcePath(promptSource?.relativePath ?? "");
         if (promptSource) {
           setPromptContent(promptSource.content);
-          setPromptDraft(promptSource.content);
         }
       } catch (e) {
         // 파일 로드 실패 시에도 위에서 설정한 메타데이터 프롬프트가 남아있다.
@@ -350,12 +351,15 @@ function FirmDetailPage() {
     navigate("/marketplace?tab=firms", "replace");
   }
 
-  // 프롬프트 수정 반영
-  async function savePrompt() {
-    const proposal = await createEvolutionProposal(promptDraft, { changeOrigin: "manual_prompt_editor" });
-    if (!proposal) return;
-    setEditingPrompt(false);
-    setActiveTab("activity");
+  async function saveLocalDisplayName(agent: InstalledAgent, value: string) {
+    const api = ipc();
+    if (!api) throw new Error(locale === "ko" ? "Desktop 브리지를 사용할 수 없습니다." : "Desktop bridge is unavailable.");
+    const updated = await api.team.setLocalDisplayName(agent.id, value);
+    setAgents((previous) => previous.map((item) => item.id === updated.id ? updated : item));
+    setSelectedNode((current) => current?.agentId === updated.id
+      ? { ...current, name: agentDisplayName(updated, locale) }
+      : current);
+    showToast(locale === "ko" ? "이 Mac의 표시 이름을 저장했습니다." : "Saved the display name for this Mac.");
   }
 
   async function createEvolutionProposal(
@@ -437,7 +441,6 @@ function FirmDetailPage() {
       setEvolutionProposals((prev) => [proposal, ...prev.filter((item) => item.id !== proposal.id)]);
       if (proposal.proposalType === "rule") {
         setPromptContent(proposal.afterContent);
-        setPromptDraft(proposal.afterContent);
       } else if (proposal.proposalType === "skill" && selectedNode?.agentId) {
         const listing = await api.agentFiles.list(selectedNode.agentId);
         setAgentFiles(listing.entries.filter((entry) => entry.kind === "file"));
@@ -455,7 +458,6 @@ function FirmDetailPage() {
     if (!api) return;
     const proposal = await api.agentEvolution.reject(proposalId, locale === "ko" ? "사용자가 검토 후 거절했습니다." : "User rejected after review.");
     setEvolutionProposals((prev) => [proposal, ...prev.filter((item) => item.id !== proposal.id)]);
-    setPromptDraft(proposal.beforeContent);
   }
 
   async function rollbackEvolutionProposal(proposalId: string) {
@@ -467,7 +469,6 @@ function FirmDetailPage() {
       setEvolutionProposals((prev) => [proposal, ...prev.filter((item) => item.id !== proposal.id)]);
       if (proposal.proposalType === "rule") {
         setPromptContent(proposal.beforeContent);
-        setPromptDraft(proposal.beforeContent);
       } else if (proposal.proposalType === "skill" && selectedNode?.agentId) {
         const listing = await api.agentFiles.list(selectedNode.agentId);
         setAgentFiles(listing.entries.filter((entry) => entry.kind === "file"));
@@ -605,12 +606,12 @@ function FirmDetailPage() {
             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
               {resolvedOrg ? (
                 <>
-                  <MiniNodeAvatar node={resolvedOrg.ceo} active={selectedNode?.id === resolvedOrg.ceo.id} onClick={() => { setSelectedNode(resolvedOrg.ceo); setActiveTab("identity"); }} />
+                  <MiniNodeAvatar node={withAgentDisplayName(resolvedOrg.ceo, agentMap, locale)} active={selectedNode?.id === resolvedOrg.ceo.id} onClick={() => { setSelectedNode(withAgentDisplayName(resolvedOrg.ceo, agentMap, locale)); setActiveTab("identity"); }} />
                   {resolvedOrg.divisions.map((d) => (
                     <div key={d.id} style={{ display: "flex", flexDirection: "column", gap: 8, borderTop: "1px solid var(--paper-edge)", paddingTop: 8 }}>
-                      <MiniNodeAvatar node={d} active={selectedNode?.id === d.id} onClick={() => { setSelectedNode(d); setActiveTab("identity"); }} />
+                      <MiniNodeAvatar node={withAgentDisplayName(d, agentMap, locale)} active={selectedNode?.id === d.id} onClick={() => { setSelectedNode(withAgentDisplayName(d, agentMap, locale)); setActiveTab("identity"); }} />
                       {d.specialists.map((s) => (
-                        <MiniNodeAvatar key={s.id} node={s} active={selectedNode?.id === s.id} onClick={() => { setSelectedNode(s); setActiveTab("identity"); }} />
+                        <MiniNodeAvatar key={s.id} node={withAgentDisplayName(s, agentMap, locale)} active={selectedNode?.id === s.id} onClick={() => { setSelectedNode(withAgentDisplayName(s, agentMap, locale)); setActiveTab("identity"); }} />
                       ))}
                     </div>
                   ))}
@@ -621,10 +622,10 @@ function FirmDetailPage() {
                   return (
                     <MiniNodeAvatar
                       key={n.agentSlug}
-                      node={{ name: agent ? pickLocalized(agent, locale).name : n.role, role: n.role }}
+                      node={{ name: agent ? agentDisplayName(agent, locale) : n.role, role: n.role }}
                       active={selectedNode?.id === n.agentSlug}
                       onClick={() => {
-                        const resolved: ResolvedNode = { id: n.agentSlug, name: agent ? pickLocalized(agent, locale).name : n.role, role: n.role, agentId: n.agentId };
+                        const resolved: ResolvedNode = { id: n.agentSlug, name: agent ? agentDisplayName(agent, locale) : n.role, role: n.role, agentId: n.agentId };
                         setSelectedNode(resolved);
                         setActiveTab("identity");
                       }}
@@ -634,7 +635,7 @@ function FirmDetailPage() {
               )}
             </div>
           ) : resolvedOrg ? (
-            <ResolvedOrgChart org={resolvedOrg} selectedId={selectedNode?.id ?? null} onSelect={(node) => { setSelectedNode(node); setActiveTab("identity"); }} />
+            <ResolvedOrgChart org={resolvedOrg} agentMap={agentMap} locale={locale} selectedId={selectedNode?.id ?? null} onSelect={(node) => { setSelectedNode(node); setActiveTab("identity"); }} />
           ) : (
             <OrgChart firm={firm} agentMap={agentMap} locale={locale} selectedId={selectedNode?.id ?? null} onSelect={(node) => { setSelectedNode(node); setActiveTab("identity"); }} />
           )}
@@ -785,11 +786,6 @@ function FirmDetailPage() {
             evolutionProposals={evolutionProposals}
             onSaveMemory={saveMemory}
             promptContent={promptContent}
-            promptDraft={promptDraft}
-            onPromptDraftChange={setPromptDraft}
-            editingPrompt={editingPrompt}
-            onSetEditingPrompt={setEditingPrompt}
-            onSavePrompt={savePrompt}
             onCreateEvolution={createEvolutionProposal}
             onCreateSkillEvolution={createSkillEvolutionProposal}
             onApproveEvolution={approveEvolutionProposal}
@@ -802,6 +798,10 @@ function FirmDetailPage() {
             ontologyInbox={ontologyInbox}
             onSetOntologyInbox={setOntologyInbox}
             showToast={showToast}
+            onSaveAlias={(value) => {
+              const current = agents.find((item) => item.id === selectedNode.agentId);
+              return current ? saveLocalDisplayName(current, value) : Promise.resolve();
+            }}
           />
         )}
       </main>
@@ -848,7 +848,7 @@ function MiniNodeAvatar({ node, active, onClick }: { node: { name: string; role?
 }
 
 // ── 정규화된 3-tier 조직 렌더 (사이드바 내부) ──────────
-function ResolvedOrgChart({ org, selectedId, onSelect }: { org: ResolvedOrg; selectedId: string | null; onSelect: (node: ResolvedNode) => void }) {
+function ResolvedOrgChart({ org, agentMap, locale, selectedId, onSelect }: { org: ResolvedOrg; agentMap: Map<string, InstalledAgent>; locale: Locale; selectedId: string | null; onSelect: (node: ResolvedNode) => void }) {
   const divisions = org.divisions.filter(
     (division) =>
       isUserFacingAgentText(division.name, division.role) ||
@@ -857,14 +857,14 @@ function ResolvedOrgChart({ org, selectedId, onSelect }: { org: ResolvedOrg; sel
   const showCeo = isUserFacingAgentText(org.ceo.name, org.ceo.role);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {showCeo && <OrgNodeCard node={org.ceo} tier={1} active={selectedId === org.ceo.id} onClick={() => onSelect(org.ceo)} />}
+      {showCeo && <OrgNodeCard node={withAgentDisplayName(org.ceo, agentMap, locale)} tier={1} active={selectedId === org.ceo.id} onClick={() => onSelect(withAgentDisplayName(org.ceo, agentMap, locale))} />}
       {divisions.map((d) => {
         const specialists = d.specialists.filter((specialist) => isUserFacingAgentText(specialist.name, specialist.role));
         const showDivision = isUserFacingAgentText(d.name, d.role);
         return (
           <div key={d.id}>
             {showDivision ? (
-              <OrgNodeCard node={d} tier={2} active={selectedId === d.id} onClick={() => onSelect(d)} />
+              <OrgNodeCard node={withAgentDisplayName(d, agentMap, locale)} tier={2} active={selectedId === d.id} onClick={() => onSelect(withAgentDisplayName(d, agentMap, locale))} />
             ) : (
               <OrgGroupLabel node={d} />
             )}
@@ -881,7 +881,7 @@ function ResolvedOrgChart({ org, selectedId, onSelect }: { org: ResolvedOrg; sel
               }}
             >
               {specialists.map((s) => (
-                <OrgNodeCard key={s.id} node={s} tier={3} active={selectedId === s.id} onClick={() => onSelect(s)} />
+                <OrgNodeCard key={s.id} node={withAgentDisplayName(s, agentMap, locale)} tier={3} active={selectedId === s.id} onClick={() => onSelect(withAgentDisplayName(s, agentMap, locale))} />
               ))}
             </div>
             )}
@@ -952,6 +952,11 @@ function OrgNodeCard({ node, tier, active, onClick }: { node: ResolvedNode; tier
   );
 }
 
+function withAgentDisplayName(node: ResolvedNode, agentMap: Map<string, InstalledAgent>, locale: Locale): ResolvedNode {
+  const agent = node.agentId ? agentMap.get(node.agentId) : null;
+  return agent ? { ...node, name: agentDisplayName(agent, locale) } : node;
+}
+
 // ── 일반 트리 재귀 렌더 (사이드바 내부) ─────────────────
 function OrgChart({
   firm,
@@ -979,7 +984,7 @@ function OrgChart({
     const kids = children(node.agentSlug);
     const isCeo = node.reportsTo === null;
     const active = selectedId === node.agentSlug;
-    const displayName = agentLoc?.name ?? node.role;
+    const displayName = agent ? agentDisplayName(agent, locale) : agentLoc?.name ?? node.role;
 
     const resolved: ResolvedNode = {
       id: node.agentSlug,
@@ -1058,17 +1063,12 @@ function OrgChart({
 interface AgentDetailViewProps {
   node: ResolvedNode;
   agent: InstalledAgent | null;
-  activeTab: "identity" | "memory" | "playbook" | "activity";
-  onTabChange: (tab: "identity" | "memory" | "playbook" | "activity") => void;
+  activeTab: "identity" | "memory" | "playbook" | "activity" | "ontology";
+  onTabChange: (tab: "identity" | "memory" | "playbook" | "activity" | "ontology") => void;
   onBackToOverview: () => void;
   memoryParsed: ParsedMemory;
   onSaveMemory: (updater: (previous: ParsedMemory) => ParsedMemory) => Promise<void>;
   promptContent: string;
-  promptDraft: string;
-  onPromptDraftChange: (v: string) => void;
-  editingPrompt: boolean;
-  onSetEditingPrompt: (v: boolean) => void;
-  onSavePrompt: () => Promise<void>;
   onCreateEvolution: (newPrompt: string, source?: Record<string, unknown>) => Promise<AgentEvolutionProposalUi | undefined>;
   onCreateSkillEvolution: (skill: { slug?: string; name: string; description: string }) => Promise<boolean>;
   onApproveEvolution: (proposalId: string) => Promise<void>;
@@ -1081,6 +1081,7 @@ interface AgentDetailViewProps {
   ontologyInbox: { id: string; type: "gotcha" | "decision"; title: string; content: string; source: "local" | "cloud" }[];
   onSetOntologyInbox: (v: any) => void;
   showToast: (msg: string) => void;
+  onSaveAlias: (value: string) => Promise<void>;
 }
 
 // ── 3.5 정보 흐름 연결 맵 (Information Flow Mapper) ──
@@ -1291,17 +1292,12 @@ function InformationFlowMapper({ node }: { node: ResolvedNode }) {
 interface AgentDetailViewProps {
   node: ResolvedNode;
   agent: InstalledAgent | null;
-  activeTab: "identity" | "memory" | "playbook" | "activity";
-  onTabChange: (tab: "identity" | "memory" | "playbook" | "activity") => void;
+  activeTab: "identity" | "memory" | "playbook" | "activity" | "ontology";
+  onTabChange: (tab: "identity" | "memory" | "playbook" | "activity" | "ontology") => void;
   onBackToOverview: () => void;
   memoryParsed: ParsedMemory;
   onSaveMemory: (updater: (previous: ParsedMemory) => ParsedMemory) => Promise<void>;
   promptContent: string;
-  promptDraft: string;
-  onPromptDraftChange: (v: string) => void;
-  editingPrompt: boolean;
-  onSetEditingPrompt: (v: boolean) => void;
-  onSavePrompt: () => Promise<void>;
   onCreateEvolution: (newPrompt: string, source?: Record<string, unknown>) => Promise<AgentEvolutionProposalUi | undefined>;
   onCreateSkillEvolution: (skill: { slug?: string; name: string; description: string }) => Promise<boolean>;
   onApproveEvolution: (proposalId: string) => Promise<void>;
@@ -1314,6 +1310,7 @@ interface AgentDetailViewProps {
   ontologyInbox: { id: string; type: "gotcha" | "decision"; title: string; content: string; source: "local" | "cloud" }[];
   onSetOntologyInbox: (v: any) => void;
   showToast: (msg: string) => void;
+  onSaveAlias: (value: string) => Promise<void>;
   agentFiles: WorkspaceNode[];
   /** 런타임 durable 메모리(큐레이터 DB) — memory.md 없이도 진화 타임라인을 채우는 실측 소스. */
   memoryEntries: AgentMemoryEntryUi[];
@@ -1331,11 +1328,6 @@ function AgentDetailView({
   evolutionProposals,
   onSaveMemory,
   promptContent,
-  promptDraft,
-  onPromptDraftChange,
-  editingPrompt,
-  onSetEditingPrompt,
-  onSavePrompt,
   onCreateEvolution,
   onCreateSkillEvolution,
   onApproveEvolution,
@@ -1348,6 +1340,7 @@ function AgentDetailView({
   ontologyInbox,
   onSetOntologyInbox,
   showToast,
+  onSaveAlias,
   agentFiles
 }: AgentDetailViewProps) {
   const { locale } = useT();
@@ -1357,6 +1350,92 @@ function AgentDetailView({
   
   // 헤바이스토스 네트워크 전체 싱크 모드 토글
   const [globalHubSync, setGlobalHubSync] = useState(true);
+  const [learningSummary, setLearningSummary] = useState<AgentLearningSummary | null>(null);
+  const [learningSummaryLoading, setLearningSummaryLoading] = useState(false);
+  const [learningSummaryError, setLearningSummaryError] = useState("");
+  const [ontologySummary, setOntologySummary] = useState<ExperienceOntologySummary | null>(null);
+  const [ontologySummaryLoading, setOntologySummaryLoading] = useState(false);
+  const [ontologySummaryError, setOntologySummaryError] = useState("");
+  const [ontologyGraph, setOntologyGraph] = useState<ExperienceOntologyGraphSnapshot | null>(null);
+  const [ontologyGraphLoading, setOntologyGraphLoading] = useState(false);
+  const [ontologyGraphError, setOntologyGraphError] = useState(false);
+
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !agent?.id) {
+      setLearningSummary(null);
+      setLearningSummaryLoading(false);
+      setLearningSummaryError(locale === "ko" ? "설치된 에이전트만 학습 원장을 조회할 수 있습니다." : "Only installed agents have a learning ledger.");
+      return;
+    }
+    let cancelled = false;
+    setLearningSummaryLoading(true);
+    setLearningSummaryError("");
+    void api.agentLearning.summary(agent.id)
+      .then((summary) => { if (!cancelled) setLearningSummary(summary); })
+      .catch((reason) => {
+        if (!cancelled) {
+          setLearningSummary(null);
+          setLearningSummaryError(reason instanceof Error ? reason.message : String(reason));
+        }
+      })
+      .finally(() => { if (!cancelled) setLearningSummaryLoading(false); });
+    return () => { cancelled = true; };
+  }, [agent?.id, locale]);
+
+  useEffect(() => {
+    if (activeTab !== "ontology") return;
+    const api = ipc();
+    if (!api || !agent?.id) {
+      setOntologyGraph(null);
+      setOntologyGraphLoading(false);
+      setOntologyGraphError(true);
+      return;
+    }
+    let cancelled = false;
+    setOntologyGraph(null);
+    setOntologyGraphLoading(true);
+    setOntologyGraphError(false);
+    void api.experience.ontologyGraph(agent.id)
+      .then((snapshot) => {
+        if (!cancelled) {
+          setOntologyGraph(snapshot);
+          setOntologyGraphError(false);
+        }
+      })
+      .catch((reason) => {
+        console.warn("[ontology-atlas] relation graph unavailable", reason);
+        if (!cancelled) {
+          setOntologyGraph(null);
+          setOntologyGraphError(true);
+        }
+      })
+      .finally(() => { if (!cancelled) setOntologyGraphLoading(false); });
+    return () => { cancelled = true; };
+  }, [activeTab, agent?.id]);
+
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !agent?.id) {
+      setOntologySummary(null);
+      setOntologySummaryLoading(false);
+      setOntologySummaryError(locale === "ko" ? "설치된 에이전트만 온톨로지를 조회할 수 있습니다." : "Only installed agents have an ontology summary.");
+      return;
+    }
+    let cancelled = false;
+    setOntologySummaryLoading(true);
+    setOntologySummaryError("");
+    void api.experience.ontologySummary(agent.id)
+      .then((summary) => { if (!cancelled) setOntologySummary(summary); })
+      .catch((reason) => {
+        if (!cancelled) {
+          setOntologySummary(null);
+          setOntologySummaryError(reason instanceof Error ? reason.message : String(reason));
+        }
+      })
+      .finally(() => { if (!cancelled) setOntologySummaryLoading(false); });
+    return () => { cancelled = true; };
+  }, [agent?.id, locale]);
 
   // 메모리 진화 타임라인 관리 상태
   const [timelineEvents, setTimelineEvents] = useState<Array<{ id: string; timestamp: string; title: string; desc: string; type: "skill" | "sync" | "evolution" | "resolve" }>>([
@@ -1417,24 +1496,6 @@ function AgentDetailView({
     const merged: typeof dbRows = [...timelineEvents, ...proposalRows, ...dbRows];
     return merged;
   }, [evolutionProposals, memoryEntries, timelineEvents, locale]);
-
-  // 프롬프트 복사 핸들러
-  const handleCopyPrompt = () => {
-    navigator.clipboard.writeText(promptContent);
-    showToast(locale === "ko" ? "시스템 프롬프트가 클립보드에 복사되었습니다." : "System prompt copied to clipboard.");
-  };
-
-  // 프롬프트 기본값 재설정 핸들러
-  const handleResetPrompt = async () => {
-    if (!confirm(locale === "ko" ? "시스템 프롬프트를 에이전트 기본 룰셋 정의서 프로필로 재설정하시겠습니까?" : "Reset the system prompt to the agent's default ruleset profile?")) return;
-    const defaultVal = agent?.systemPrompt ?? "# Default Prompt\nNo default instruction available.";
-    onPromptDraftChange(defaultVal);
-    
-    const proposal = await onCreateEvolution(defaultVal, { changeOrigin: "reset_to_default" });
-    if (!proposal) return;
-    onTabChange("activity");
-    showToast(locale === "ko" ? "초기화 diff 후보를 만들었습니다. 승인 전에는 원본이 유지됩니다." : "Reset diff candidate created. The original remains until approval.");
-  };
 
   const toggleItemExpand = (id: string) => {
     setExpandedItems(prev => ({ ...prev, [id]: !prev[id] }));
@@ -1585,7 +1646,8 @@ function AgentDetailView({
 
 
   // 아바타 그라데이션 모노그램
-  const letters = node.name.slice(0, 2).toUpperCase();
+  const detailDisplayName = agent ? agentDisplayName(agent, locale) : node.name;
+  const letters = detailDisplayName.slice(0, 2).toUpperCase();
   const getGradient = (tone?: string) => {
     switch (tone) {
       case "blue": return "linear-gradient(135deg, #5a56dc, #8a86e8)";
@@ -1649,28 +1711,31 @@ function AgentDetailView({
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
-              <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 20, fontWeight: 700, color: "var(--ink)" }}>
-                {node.name}
-              </h1>
+              {agent ? (
+                <AgentNameEditor agent={agent} locale={locale} onSave={onSaveAlias} />
+              ) : (
+                <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 20, fontWeight: 700, color: "var(--ink)" }}>{detailDisplayName}</h1>
+              )}
               <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 999, background: "var(--fill-1)", color: "var(--accent)", fontWeight: 700 }}>
                 {node.role}
               </span>
             </div>
             <p style={{ margin: 0, fontSize: 12, color: "var(--muted-deep)" }}>
-              {agent?.tagline || (locale === "ko" ? `${node.name}의 규칙 지식베이스 및 계약 런타임` : `${node.name}'s rule knowledge base and contract runtime`)}
+              {agent?.tagline || (locale === "ko" ? `${detailDisplayName}의 규칙 지식베이스 및 계약 런타임` : `${detailDisplayName}'s rule knowledge base and contract runtime`)}
             </p>
           </div>
         </header>
 
         {/* 탭 네비게이션 */}
-        <nav style={{ display: "flex", gap: 4, padding: "8px 24px", background: "var(--paper)", borderBottom: "var(--hairline)" }}>
-          {(["identity", "memory", "playbook", "activity"] as const).map((tab) => {
+        <nav data-testid="agent-detail-tabs" style={{ display: "flex", gap: 4, padding: "8px 24px", background: "var(--paper)", borderBottom: "var(--hairline)", overflowX: "auto", flexShrink: 0 }}>
+          {(["identity", "memory", "playbook", "activity", "ontology"] as const).map((tab) => {
             const active = activeTab === tab;
             const labels = {
               identity: locale === "ko" ? "정체성 & 페르소나" : "Identity & Persona",
               memory: locale === "ko" ? "큐레이팅된 메모리" : "Curated Memory",
               playbook: locale === "ko" ? "플레이북 & 워크플로우" : "Playbook & Workflow",
-              activity: locale === "ko" ? "활동 및 자체 진화" : "Activity & Self-evolution"
+              activity: locale === "ko" ? "활동 및 자체 진화" : "Activity & Self-Evolution",
+              ontology: locale === "ko" ? "온톨로지 칩" : "Ontology Chips",
             };
             return (
               <button
@@ -1685,7 +1750,8 @@ function AgentDetailView({
                   color: active ? "var(--accent)" : "var(--ink-soft)",
                   border: "none",
                   cursor: "pointer",
-                  transition: "all 0.15s ease"
+                  transition: "all 0.15s ease",
+                  whiteSpace: "nowrap",
                 }}
               >
                 {labels[tab]}
@@ -1700,193 +1766,14 @@ function AgentDetailView({
           {/* 탭 1: 정체성 & 페르소나 */}
           {activeTab === "identity" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 840 }}>
-              <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-                <h3 style={{ margin: "0 0 12px 0", fontSize: 14, fontWeight: 700 }}>{locale === "ko" ? "시스템 프롬프트 (System Prompt)" : "System Prompt"}</h3>
-                
-                {editingPrompt ? (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    <textarea
-                      value={promptDraft}
-                      onChange={(e) => onPromptDraftChange(e.target.value)}
-                      style={{
-                        width: "100%",
-                        height: 280,
-                        fontFamily: "var(--font-mono)",
-                        fontSize: 12,
-                        lineHeight: 1.6,
-                        padding: 12,
-                        borderRadius: "var(--radius-sm)",
-                        background: "var(--paper-2)",
-                        border: "1px solid var(--accent)",
-                        color: "var(--ink)"
-                      }}
-                    />
-                    <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                      <button
-                        onClick={() => onSetEditingPrompt(false)}
-                        style={{ padding: "6px 12px", border: "1px solid var(--paper-edge)", background: "none", borderRadius: 6, cursor: "pointer", fontSize: 12 }}
-                      >
-                        {locale === "ko" ? "취소" : "Cancel"}
-                      </button>
-                      <button
-                        onClick={() => void onSavePrompt()}
-                        disabled={saving}
-                        style={{ padding: "6px 12px", background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 600 }}
-                      >
-                        {saving ? (locale === "ko" ? "저장 중..." : "Saving...") : (locale === "ko" ? "반영하기" : "Apply")}
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    {(() => {
-                      const promptSections = parsePromptSections(promptContent);
-                      return (
-                        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                          {/* 프롬프트 세부 분석 카드 3열 뷰 */}
-                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-                            
-                            {/* Directives */}
-                            <div style={{ background: "rgba(90, 86, 220, 0.03)", border: "1px solid rgba(90, 86, 220, 0.15)", borderRadius: 8, padding: 12 }}>
-                              <h4 style={{ margin: "0 0 8px 0", fontSize: 12, fontWeight: 700, color: "var(--accent)", display: "flex", alignItems: "center", gap: 4 }}>
-                                <IconWand size={12} />
-                                {locale === "ko" ? "지시사항 (Directives)" : "Directives"}
-                              </h4>
-                              {promptSections.directives.length === 0 ? (
-                                <span style={{ fontSize: 11, color: "var(--muted)" }}>{locale === "ko" ? "감지된 지시사항이 없습니다." : "No directives detected."}</span>
-                              ) : (
-                                <ul style={{ paddingLeft: 14, margin: 0, fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.5 }}>
-                                  {promptSections.directives.slice(0, 5).map((d, idx) => (
-                                    <li key={idx} style={{ marginBottom: 4 }}>{d}</li>
-                                  ))}
-                                </ul>
-                              )}
-                            </div>
 
-                            {/* Constraints */}
-                            <div style={{ background: "rgba(194, 74, 40, 0.03)", border: "1px solid rgba(194, 74, 40, 0.15)", borderRadius: 8, padding: 12 }}>
-                              <h4 style={{ margin: "0 0 8px 0", fontSize: 12, fontWeight: 700, color: "var(--peach-ink)", display: "flex", alignItems: "center", gap: 4 }}>
-                                <IconShield size={12} />
-                                {locale === "ko" ? "제약조건 (Constraints)" : "Constraints"}
-                              </h4>
-                              {promptSections.constraints.length === 0 ? (
-                                <span style={{ fontSize: 11, color: "var(--muted)" }}>{locale === "ko" ? "감지된 제약사항이 없습니다." : "No constraints detected."}</span>
-                              ) : (
-                                <ul style={{ paddingLeft: 14, margin: 0, fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.5 }}>
-                                  {promptSections.constraints.slice(0, 5).map((c, idx) => (
-                                    <li key={idx} style={{ marginBottom: 4 }}>{c}</li>
-                                  ))}
-                                </ul>
-                              )}
-                            </div>
-
-                            {/* Output Formats */}
-                            <div style={{ background: "rgba(86, 161, 74, 0.03)", border: "1px solid rgba(86, 161, 74, 0.15)", borderRadius: 8, padding: 12 }}>
-                              <h4 style={{ margin: "0 0 8px 0", fontSize: 12, fontWeight: 700, color: "var(--green-deep)", display: "flex", alignItems: "center", gap: 4 }}>
-                                <IconLayers size={12} />
-                                {locale === "ko" ? "입출력 형태 (Formats)" : "I/O Formats"}
-                              </h4>
-                              {promptSections.formats.length === 0 ? (
-                                <span style={{ fontSize: 11, color: "var(--muted)" }}>{locale === "ko" ? "감지된 규격정보가 없습니다." : "No format specs detected."}</span>
-                              ) : (
-                                <ul style={{ paddingLeft: 14, margin: 0, fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.5 }}>
-                                  {promptSections.formats.slice(0, 5).map((f, idx) => (
-                                    <li key={idx} style={{ marginBottom: 4 }}>{f}</li>
-                                  ))}
-                                </ul>
-                              )}
-                            </div>
-
-                          </div>
-
-                          {/* 전체 원문 아코디언 */}
-                          <details style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)" }}>
-                            <summary style={{ padding: "8px 12px", fontSize: 12, fontWeight: 600, color: "var(--ink-soft)", cursor: "pointer", outline: "none" }}>
-                              {locale === "ko" ? "시스템 프롬프트 전체 원문(Source) 보기" : "View full system prompt source"}
-                            </summary>
-                            <pre
-                              style={{
-                                margin: 0,
-                                padding: 12,
-                                borderTop: "1px solid var(--paper-edge)",
-                                fontSize: 11,
-                                fontFamily: "var(--font-mono)",
-                                lineHeight: 1.6,
-                                whiteSpace: "pre-wrap",
-                                overflowX: "auto",
-                                color: "var(--ink-soft)",
-                                maxHeight: 200,
-                                overflowY: "auto"
-                              }}
-                            >
-                              {promptContent || (locale === "ko" ? "로드된 프롬프트 내용이 없습니다." : "No prompt content loaded.")}
-                            </pre>
-                          </details>
-
-                          {/* 컨트롤 액션 바 */}
-                          <div style={{ display: "flex", justifyItems: "space-between", alignItems: "center", marginTop: 4 }}>
-                            <div style={{ display: "flex", gap: 6 }}>
-                              <button
-                                onClick={handleCopyPrompt}
-                                style={{
-                                  padding: "6px 12px",
-                                  background: "var(--paper)",
-                                  border: "1px solid var(--paper-edge)",
-                                  borderRadius: 6,
-                                  fontSize: 12,
-                                  fontWeight: 600,
-                                  cursor: "pointer",
-                                  boxShadow: "var(--shadow-1)",
-                                  color: "var(--ink-soft)"
-                                }}
-                              >
-                                {locale === "ko" ? "프롬프트 복사" : "Copy prompt"}
-                              </button>
-                              <button
-                                onClick={handleResetPrompt}
-                                style={{
-                                  padding: "6px 12px",
-                                  background: "var(--paper)",
-                                  border: "1px solid var(--paper-edge)",
-                                  borderRadius: 6,
-                                  fontSize: 12,
-                                  fontWeight: 600,
-                                  cursor: "pointer",
-                                  boxShadow: "var(--shadow-1)",
-                                  color: "var(--peach-ink)"
-                                }}
-                              >
-                                {locale === "ko" ? "기본값 재설정" : "Reset to default"}
-                              </button>
-                            </div>
-                            {agent?.localPath && (
-                              <button
-                                onClick={() => { onPromptDraftChange(promptContent); onSetEditingPrompt(true); }}
-                                style={{
-                                  display: "inline-flex",
-                                  alignItems: "center",
-                                  gap: 4,
-                                  padding: "6px 12px",
-                                  background: "var(--paper)",
-                                  border: "1px solid var(--paper-edge)",
-                                  borderRadius: 6,
-                                  fontSize: 12,
-                                  fontWeight: 600,
-                                  cursor: "pointer",
-                                  boxShadow: "var(--shadow-1)",
-                                  color: "var(--accent)"
-                                }}
-                              >
-                                <IconEdit size={12} />
-                                {locale === "ko" ? "프롬프트 편집" : "Edit prompt"}
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })()}
-                  </div>
-                )}
+              <div data-testid="governed-agent-identity" style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
+                <h3 style={{ margin: "0 0 7px", fontSize: 14 }}>{locale === "ko" ? "거버넌스된 에이전트 정체성" : "Governed agent identity"}</h3>
+                <p style={{ margin: 0, color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.55 }}>
+                  {locale === "ko"
+                    ? "내부 지시 원문은 이 화면에 노출하지 않습니다. 학습에서 생긴 변경은 Activity & Self-Evolution의 diff 검토, 명시적 승인, 적용 영수증, 롤백 절차를 거칩니다."
+                    : "Raw internal instructions are not exposed here. Learning-driven changes go through diff review, explicit approval, an apply receipt, and rollback in Activity & Self-Evolution."}
+                </p>
               </div>
 
               {/* 매핑 메타 데이터 */}
@@ -2252,6 +2139,26 @@ function AgentDetailView({
           {/* 탭 3: 플레이북 & 워크플로우 */}
           {activeTab === "playbook" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 840 }}>
+              <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
+                <h4 style={{ margin: "0 0 12px", fontSize: 13.5 }}>{locale === "ko" ? "실제 학습·파일·영수증" : "Actual learning, files & receipts"}</h4>
+                <AgentLearningMetricGrid
+                  summary={learningSummary}
+                  loading={learningSummaryLoading}
+                  error={learningSummaryError}
+                  locale={locale}
+                  context="playbook"
+                />
+                {agentFiles.length > 0 && (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 7, marginTop: 12 }}>
+                    {agentFiles.slice(0, 10).map((file) => (
+                      <div key={file.path} style={{ minWidth: 0, padding: "8px 9px", border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)" }}>
+                        <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11.5, fontWeight: 700 }}>{file.name}</div>
+                        <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--muted-deep)", fontSize: 10 }}>{file.path}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
               
               {/* 수평 파이프라인 단계 표시기 */}
               <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, overflowX: "auto" }}>
@@ -2532,25 +2439,13 @@ function AgentDetailView({
           {activeTab === "activity" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 840 }}>
               
-              {/* 실 지표 — 이 에이전트의 실제 메모리·타임라인에서 도출 */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
-                <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>{locale === "ko" ? "활성 규칙 (Active rules)" : "Active rules"}</div>
-                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--green-deep)" }}>
-                    {[...memoryParsed.decisions, ...memoryParsed.gotchas].filter((r) => r.enabled !== false).length}
-                  </div>
-                </div>
-                <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>{locale === "ko" ? "메모리 항목 (Memory items)" : "Memory items"}</div>
-                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--accent)" }}>
-                    {memoryParsed.decisions.length + memoryParsed.gotchas.length + memoryParsed.openQuestions.length}
-                  </div>
-                </div>
-                <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>{locale === "ko" ? "진화·활동 이력 (Events)" : "Evolution & activity log (Events)"}</div>
-                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--peach-ink)" }}>{displayTimelineEvents.length}</div>
-                </div>
-              </div>
+              <AgentLearningMetricGrid
+                summary={learningSummary}
+                loading={learningSummaryLoading}
+                error={learningSummaryError}
+                locale={locale}
+                context="activity"
+              />
 
               {/* 자체 진화 프롬프트 디프 제안 */}
               <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
@@ -2674,70 +2569,29 @@ function AgentDetailView({
             </div>
           )}
 
+          {activeTab === "ontology" && (
+            <div style={{ maxWidth: 1180, display: "flex", flexDirection: "column", gap: 14 }}>
+              <AgentOntologyGraphView
+                summary={ontologySummary}
+                graphSnapshot={ontologyGraph}
+                hub={null}
+                agentName={agent ? agentDisplayName(agent, locale) : (locale === "ko" ? "에이전트" : "Agent")}
+                locale={locale}
+                graphLoading={ontologyGraphLoading}
+                graphError={ontologyGraphError}
+              />
+              <ExperienceOntologySummaryView
+                summary={ontologySummary}
+                loading={ontologySummaryLoading}
+                error={ontologySummaryError}
+                locale={locale}
+              />
+            </div>
+          )}
+
         </div>
       </div>
 
     </div>
   );
-}
-
-
-// ── 시스템 프롬프트 세부 지시 구조화 파서 ──
-function parsePromptSections(content: string) {
-  const sections = {
-    directives: [] as string[],
-    constraints: [] as string[],
-    formats: [] as string[],
-    general: [] as string[],
-  };
-  
-  if (!content) return sections;
-
-  const lines = content.split("\n");
-  let currentSec: "directives" | "constraints" | "formats" | "general" = "general";
-  
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    
-    if (trimmed.startsWith("#")) {
-      const lower = trimmed.toLowerCase();
-      if (lower.includes("directive") || lower.includes("instruction") || lower.includes("지시") || lower.includes("역할") || lower.includes("role")) {
-        currentSec = "directives";
-      } else if (lower.includes("constraint") || lower.includes("limit") || lower.includes("제약") || lower.includes("금지") || lower.includes("gotcha") || lower.includes("주의")) {
-        currentSec = "constraints";
-      } else if (lower.includes("output") || lower.includes("format") || lower.includes("포맷") || lower.includes("형태") || lower.includes("결과")) {
-        currentSec = "formats";
-      } else {
-        currentSec = "general";
-      }
-      continue;
-    }
-    
-    // 리스트 마커 및 강조 볼드 제거
-    const cleanLine = trimmed
-      .replace(/^-\s*\*\*[^*]+\*\*:\s*/, "")
-      .replace(/^-\s*\*\*[^*]+\*\*\s*/, "")
-      .replace(/^-\s*/, "")
-      .replace(/^\*\s*/, "");
-      
-    if (!cleanLine) continue;
-    sections[currentSec].push(cleanLine);
-  }
-  
-  if (sections.directives.length === 0 && sections.constraints.length === 0 && sections.formats.length === 0) {
-    sections.general.forEach(line => {
-      if (line.includes("해야") || line.includes("하라") || line.includes("must") || line.includes("should") || line.includes("요구")) {
-        sections.directives.push(line);
-      } else if (line.includes("하지") || line.includes("금지") || line.includes("avoid") || line.includes("never") || line.includes("않는다") || line.includes("제한")) {
-        sections.constraints.push(line);
-      } else if (line.includes("포맷") || line.includes("json") || line.includes("형식") || line.includes("output") || line.includes("xml") || line.includes("구조")) {
-        sections.formats.push(line);
-      } else {
-        sections.directives.push(line);
-      }
-    });
-  }
-  
-  return sections;
 }

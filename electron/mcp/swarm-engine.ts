@@ -9,6 +9,8 @@
 // 이 파일은 electron/DB/LLM에 의존하지 않는다. 실제 에이전트 실행(runTask)·종합(synthesize)·
 // id 생성(nextId)은 훅으로 주입한다 → 가짜 훅으로 루프 로직을 결정적으로 유닛테스트할 수 있다.
 
+import type { WorkloadAllocation } from "../runtime/workload-routing";
+
 export type SwarmTaskStatus = "pending" | "running" | "done" | "failed";
 
 export interface SwarmTask {
@@ -24,6 +26,8 @@ export interface SwarmTask {
   result?: string;
   /** 이 작업을 스폰한 부모 task id (시드는 undefined). */
   spawnedBy?: string;
+  /** Parent worker's provider-neutral assignment for this child task. */
+  allocation?: WorkloadAllocation;
 }
 
 export interface SwarmBoard {
@@ -31,12 +35,15 @@ export interface SwarmBoard {
   tasks: SwarmTask[];
   /** 스케줄 라운드 수(무한루프 백스톱용). */
   round: number;
+  /** Parent-AI-authored assignment for the final synthesis turn. */
+  synthesisAllocation?: WorkloadAllocation;
 }
 
 /** 워커가 한 작업을 실행하고 돌려주는 결과 — 산출물 + 새로 스폰할 작업들 + 완료/실패 신호. */
 export interface SwarmTurnResult {
   result: string;
-  spawn?: Array<{ title: string; brief: string; deps?: string[]; role?: string }>;
+  spawn?: Array<{ title: string; brief: string; deps?: string[]; role?: string; allocation?: WorkloadAllocation }>;
+  synthesisAllocation?: WorkloadAllocation;
   failed?: boolean;
 }
 
@@ -74,6 +81,7 @@ export interface SwarmSeed {
   brief: string;
   role?: string;
   deps?: string[];
+  allocation?: WorkloadAllocation;
 }
 
 function depsSatisfied(task: SwarmTask, byId: Map<string, SwarmTask>): boolean {
@@ -124,6 +132,7 @@ export async function runSwarm(
       brief: s.brief,
       deps: s.deps ?? [],
       role: s.role,
+      allocation: s.allocation,
       status: "pending" as const,
     })),
   };
@@ -143,6 +152,9 @@ export async function runSwarm(
         } else {
           task.status = "done";
           hooks.onEvent?.({ kind: "task-done", task });
+          if (r.synthesisAllocation && !board.synthesisAllocation) {
+            board.synthesisAllocation = r.synthesisAllocation;
+          }
           // 스폰/핸드오프 = 런타임 그래프 성장. **성공한 작업만** 스폰(실패 작업의 스폰은 무시).
           // maxTasks 상한을 넘으면 무시(capped).
           if (r.spawn && r.spawn.length > 0) {
@@ -158,6 +170,7 @@ export async function runSwarm(
                 brief: s.brief,
                 deps: s.deps ?? [],
                 role: s.role,
+                allocation: s.allocation,
                 status: "pending",
                 spawnedBy: task.id,
               };

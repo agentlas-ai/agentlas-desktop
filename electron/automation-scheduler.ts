@@ -269,6 +269,7 @@ function handleAutomationFailure(a: Automation, error: string): void {
       });
       const runId = `doctor-${a.id}-${Date.now()}`;
       const req = {
+        runId,
         chatId: chat.id,
         userPrompt: prompt,
         permissions: "write" as const,
@@ -531,6 +532,7 @@ async function runOne(
       try {
         let runnerError: string | null = null;
         const req = {
+          runId,
           chatId: chat.id,
           userPrompt: a.promptTemplate,
           permissions: "write" as const,

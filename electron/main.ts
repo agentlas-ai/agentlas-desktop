@@ -32,6 +32,8 @@ import {
 } from "./hub-bookmark-sync";
 import { materializeAllAgents } from "./agents/files";
 import { backfillEntityKinds } from "./mcp/registry";
+import { reconcileLocalRouteDefinitionHashes } from "./agents/routes";
+import { reconcileExistingCuratedMemoryCandidates } from "./experience/store";
 import { seedBuiltinAgents } from "./architecture/seed";
 import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
 import { scrubLegacyOpenCrabMcpConfig } from "./mcp-tools/mcp-config";
@@ -466,7 +468,26 @@ app.whenReady().then(async () => {
     console.error("[architecture] backfillEntityKinds failed:", err);
   }
   // 설치된 에이전트 폴더의 파일을 보장 — 라이브러리 우측 패널이 즉시 보여줄 수 있게.
-  materializeAllAgents();
+  if (process.env.AGENTLAS_QA_SKIP_AGENT_MATERIALIZATION !== "1") {
+    materializeAllAgents();
+  }
+  try {
+    const definitions = reconcileLocalRouteDefinitionHashes();
+    const experience = reconcileExistingCuratedMemoryCandidates();
+    if (definitions.updated > 0 || experience.candidateCreated > 0 || experience.blocked > 0) {
+      console.log("[experience] reconciled legacy local learning", {
+        definitionHashesUpdated: definitions.updated,
+        definitionHashFailures: definitions.failed,
+        memoriesScanned: experience.scanned,
+        candidatesCreated: experience.candidateCreated,
+        privacyBlocked: experience.blocked,
+        skipped: experience.skipped,
+        deferred: experience.deferred,
+      });
+    }
+  } catch (err) {
+    console.error("[experience] legacy learning reconciliation failed:", err);
+  }
   ensureDefaultMcpPluginsInstalled();
   // Start only after update continuity and store bootstrap have passed. A
   // bridge failure must not make Desktop unusable; Settings exposes the exact

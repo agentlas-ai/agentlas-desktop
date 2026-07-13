@@ -3,6 +3,7 @@
 // chatId 기반 — chat에서 agent + project 컨텍스트 lookup.
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
 // Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
 import { superviseStormbreaker, type StormbreakerHandle } from "../hephaestus/stormbreaker-supervisor";
@@ -55,10 +56,13 @@ import { runSwarmInvocation } from "./swarm-run";
 import { resolveAgentGroupForRuntime } from "../store/agent-groups";
 import { recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
+import { buildExperienceContext } from "../experience/context";
+import { resolveDesktopTasteRuntimeSession } from "../ontology/taste-runtime-session";
+import { tasteRuntimeOverlayMatchesTask } from "../ontology/taste-runtime-contract";
 import { curateReply } from "../memory/curator";
 import { harvestCompactionSummaries } from "../memory/compaction-harvest";
-import { MEMORY_EMITTER_BLOCK } from "../architecture/manifest";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
+import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
 import { parseSurfaces } from "../surface-emitter";
 import { createAutomation, listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
@@ -392,6 +396,7 @@ async function buildAgentGroupTaskForceSpecs(input: {
       source: member.source,
       routeLabel: member.routeLabel,
       warnings: member.warnings,
+      installedAgentId: member.installedAgentId,
     };
   });
   if (specs.length === 0) {
@@ -604,14 +609,19 @@ export async function runMcpInvocation(
   // 구독한 뒤에야 sink가 발화하도록 보장한다. 이게 없으면 동기 early-return(no-chat/no-agent)
   // 에러가 구독 전에 발화돼 렌더러가 종료 이벤트를 놓치고 busy(정지 버튼)가 영구 고착된다.
   await Promise.resolve();
+  // IPC runs already carry the renderer/main-owned id. Direct integrations (Telegram,
+  // site generation, legacy scripts) still receive one internal identity so their
+  // content-free memory curation receipts are not silently lost.
+  if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
   const callerSink = sink;
+  let runtimeAgentId: string | undefined;
   let finalTextFromSink = "";
   let resolvedResultFolder: string | undefined;
   sink = (ev: McpInvocationEvent) => {
     if (ev.kind === "final" && ev.text?.trim()) {
       finalTextFromSink = ev.text.trim();
     }
-    callerSink(ev);
+    callerSink(runtimeAgentId && !ev.runtimeAgentId ? { ...ev, runtimeAgentId } : ev);
   };
   const earlyResult = () => ({
     finalText: finalTextFromSink || undefined,
@@ -629,6 +639,7 @@ export async function runMcpInvocation(
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
     return earlyResult();
   }
+  runtimeAgentId = agent.id;
   const targetApp = req.targetAppId ? getAgentApp(req.targetAppId) : null;
   const isTargetAppEdit = Boolean(targetApp && req.targetAppAction === "edit");
   if (req.targetAppId && !targetApp) {
@@ -711,8 +722,9 @@ export async function runMcpInvocation(
         })
       : null;
   if (autoRoute) {
-    sink({ kind: "tool-use", status: autoRouteStatus(autoRoute, locale) });
     agent = autoRoute.agent;
+    runtimeAgentId = agent.id;
+    sink({ kind: "tool-use", status: autoRouteStatus(autoRoute, locale) });
   }
 
   // 사용자가 프롬프트 안에 "project folder: /abs/path"처럼 명시하면, 채팅 워킹 폴더로
@@ -909,12 +921,26 @@ export async function runMcpInvocation(
       }
       const selectedTools = selectedContext.tools;
       const installedTools = selectedTools.filter((tool) => tool.installed);
+      const degradedTools = selectedTools.filter((tool) => tool.state !== "ready");
       if (installedTools.length > 0) {
         sink({
           kind: "tool-use",
           tool: {
             name: "Agentlas Plugins · auto-select",
             result: installedTools.map((tool) => `${tool.id}: ${tool.reason}`).join("\n"),
+          },
+        });
+      }
+      if (degradedTools.length > 0) {
+        sink({
+          kind: "tool-use",
+          tool: {
+            name: "Agentlas Plugins · degraded capabilities",
+            // Value-free state receipt: never include an MCP error body because
+            // remote servers may reflect a credential or private URL in it.
+            result: degradedTools
+              .map((tool) => `${tool.id}: ${tool.state}${tool.required ? " (required function only)" : ""}`)
+              .join("\n"),
           },
         });
       }
@@ -963,6 +989,7 @@ export async function runMcpInvocation(
         taskForceSpecs: groupRun.specs,
         active,
         picked,
+        runtimeOverride: runtimeChoice.override,
         workingFolder,
         mcpConfigPath,
         mcpAllowedTools,
@@ -993,6 +1020,7 @@ export async function runMcpInvocation(
         orchestratorAgent: agent,
         active,
         picked,
+        runtimeOverride: runtimeChoice.override,
         workingFolder,
         mcpConfigPath,
         mcpAllowedTools,
@@ -1021,6 +1049,7 @@ export async function runMcpInvocation(
         orchestratorAgent: agent,
         active,
         picked,
+        runtimeOverride: runtimeChoice.override,
         workingFolder,
         mcpConfigPath,
         mcpAllowedTools,
@@ -1169,13 +1198,58 @@ export async function runMcpInvocation(
   }
   if (activePath) refreshCareerGraphInBackground(activePath, sink, locale);
   try {
-    const memoryContext = buildMemoryContext(activePath);
+    // `agent` may have changed through auto-routing above. Scope memory to the
+    // actual executing agent so another agent's agent_repo never leaks in.
+    const memoryContext = buildMemoryContext(activePath, agent.id);
     if (memoryContext) systemPrompt = `${systemPrompt}\n\n${memoryContext}`;
   } catch (err) {
     console.error("[architecture] buildMemoryContext failed:", err);
   }
-  // 모든 대화에 메모리 이벤트 emitter를 동봉 → 큐레이터가 전역적으로 기억을 관리.
-  systemPrompt = `${systemPrompt}\n\n${MEMORY_EMITTER_BLOCK}`;
+  let tasteSnapshot: Awaited<ReturnType<typeof resolveDesktopTasteRuntimeSession>> = null;
+  try {
+    tasteSnapshot = await resolveDesktopTasteRuntimeSession({
+      sessionId: chat.id,
+      installedAgentId: agent.id,
+    });
+  } catch (err) {
+    // A missing/offline/revoked/malformed Taste projection degrades to the
+    // exact base agent and cannot block the invocation.
+    console.error("[architecture] Taste runtime overlay skipped:", err);
+  }
+  const applicableTasteSnapshot = tasteSnapshot && tasteRuntimeOverlayMatchesTask(tasteSnapshot.overlay, effectiveUserPrompt)
+    ? tasteSnapshot
+    : null;
+  try {
+    const experienceContext = buildExperienceContext({
+      agentId: agent.id,
+      projectId: chat.projectId,
+      projectPath: workingFolder,
+      environment: { platform: process.platform, arch: process.arch, runtimeKind: active.kind },
+      basePackageHash: agent.packageHash ?? null,
+      task: effectiveUserPrompt,
+      reservedApproxTokens: applicableTasteSnapshot?.overlay.estimatedTokens ?? 0,
+    });
+    if (experienceContext.prompt) systemPrompt = `${systemPrompt}\n\n${experienceContext.prompt}`;
+  } catch (err) {
+    // Experience is an optional host-local projection. A damaged/missing
+    // projection can never block the base agent or Memory architecture.
+    console.error("[architecture] buildExperienceContext failed:", err);
+  }
+  if (applicableTasteSnapshot) {
+    // Taste stays a separate, lower-authority aesthetic overlay. The exact
+    // verified snapshot is frozen for this chat and can change only when a
+    // new runtime session starts.
+    systemPrompt = `${systemPrompt}\n\n${applicableTasteSnapshot.directive}`;
+    sink({
+      kind: "tool-use",
+      status: locale === "ko"
+        ? `Taste 온톨로지 적용 · ${applicableTasteSnapshot.overlay.releaseId} · 다음 세션까지 고정`
+        : `Taste ontology applied · ${applicableTasteSnapshot.overlay.releaseId} · fixed for this session`,
+    });
+  }
+  // Compact core is always on; the full schema is loaded only for explicit
+  // memory tasks. This keeps the recurring contract under ~150 tokens.
+  systemPrompt = `${systemPrompt}\n\n${memoryEmitterPromptFor(effectiveUserPrompt)}`;
   if (mcpAutoSelectionPrompt) systemPrompt = `${systemPrompt}\n\n${mcpAutoSelectionPrompt}`;
   if (chat.kind === "division" && (req.toolMode || req.hubMode)) {
     const supervisor = assembleSystemPrompt(
@@ -1521,9 +1595,17 @@ export async function runMcpInvocation(
       const { cleanedText } = curateReply(displayText, {
         projectPath: activePath,
         projectId: chat.projectId ?? null,
-        agentId: chat.agentId,
+        agentId: agent.id,
         chatId: chat.id,
+        runId: req.runId,
         cwdAtRequest: workingFolder,
+        experienceIntake: {
+          platform: process.platform,
+          arch: process.arch,
+          runtimeKind: active.kind,
+          basePackageHash: agent.packageHash ?? null,
+          taskHint: effectiveUserPrompt,
+        },
         // 단일 borrow 실행 — 빌린 에이전트의 agent_repo 배움을 그 전역 둥지로 미러링.
         borrowedAgentSlugs,
       });
@@ -1543,9 +1625,16 @@ export async function runMcpInvocation(
           ctx: {
             projectPath: activePath,
             projectId: chat.projectId ?? null,
-            agentId: chat.agentId,
+            agentId: agent.id,
             chatId: chat.id,
             cwdAtRequest: workingFolder,
+            experienceIntake: {
+              platform: process.platform,
+              arch: process.arch,
+              runtimeKind: active.kind,
+              basePackageHash: agent.packageHash ?? null,
+              taskHint: effectiveUserPrompt,
+            },
           },
         });
       }

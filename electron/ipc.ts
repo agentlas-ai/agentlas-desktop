@@ -64,6 +64,7 @@ import {
   installAgent,
   installMyAgent,
   listInstalledAgents,
+  setAgentLocalDisplayName,
   uninstallAgent,
 } from "./mcp/registry";
 import { MCP_TOOL_CATALOG, getCatalogEntry } from "./mcp-tools/catalog";
@@ -75,6 +76,7 @@ import {
   setServerEnabled,
 } from "./mcp-tools/registry";
 import { statusAllServers, testServerById } from "./mcp-tools/client";
+import { recommendMcpBuildPlan } from "./mcp-tools/build-plan";
 import { getOpenCrabReadiness } from "./opencrab/ontology";
 import {
   getSource as getMarketSource,
@@ -121,7 +123,7 @@ import { normalizeRecommendation } from "./hephaestus/recommendation";
 import { confirmUpload, PathGuardError, resolveFolderArg } from "./hephaestus/path-guard";
 import { getEngineToggles, isSupervisorEnabled, setEngineToggle, setSupervisorEnabled } from "./hephaestus/supervisor";
 import { runHephaestusBuild } from "./hephaestus/builder";
-import { resolveHephaestusBuildRequest } from "./hephaestus/build-access";
+import { resolveHephaestusBuildRequestForRun } from "./hephaestus/build-access";
 import { pickLocale } from "./runtime/status-i18n";
 import { currentUiLocale } from "./ui-locale";
 import { buildChatRecap, markChatRecapViewed } from "./chat/recap";
@@ -132,10 +134,15 @@ import type {
   HephaestusBuildEvent,
   HephaestusBuildRequest,
   CreateAgentEvolutionProposalInput,
+  ExperiencePackCreateIpcInput,
+  ExperienceCloudReconcileInput,
+  ExperienceCloudSaveInput,
+  ExperienceCloudWithdrawInput,
   FsPathGrant,
   FsReadScope,
   HiredAgentCard,
 } from "../shared/types";
+import { resolveExperiencePackCreateIpcInput } from "./experience/access";
 import {
   checkSafely as updaterCheck,
   getUpdaterState,
@@ -144,7 +151,7 @@ import {
   revealRecoveryBackup as updaterRevealRecoveryBackup,
 } from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
-import { grantDroppedPath, pathFromGrant, resolveFsReadPath } from "./fs/access";
+import { grantDroppedPath, grantPath, pathFromGrant, resolveFsReadPath } from "./fs/access";
 import { getAuthSession, signInWithBrowser, signInWithGoogle, signOut } from "./auth";
 import { getBillingCredits, transferEarnings } from "./billing";
 import {
@@ -169,6 +176,39 @@ import {
 } from "./hub-bookmark-sync";
 import { claimQuest, listQuests } from "./quests";
 import { listMemoryEntriesForAgentUi } from "./memory/store";
+import {
+  captureExperienceCandidate,
+  createExperienceExportIntent,
+  createExperiencePack,
+  getExperienceOntologySummary,
+  listExperienceCandidates,
+  listExperienceExportIntents,
+  listExperiencePacks,
+  listExperiencePromotionReceipts,
+  listLocalTasteDrafts,
+  promoteExperienceCandidate,
+} from "./experience/store";
+import { getExperienceOntologyGraphSnapshot } from "./experience/relation-index";
+import {
+  confirmTasteGeneralization,
+  listTasteChipWorkflows,
+  prepareTastePreviews,
+  saveTasteGeneralization,
+  uploadTasteDraft,
+} from "./experience/taste-workflow";
+import {
+  confirmOperationalPublicProjection,
+  listOperationalPublicProjections,
+  saveOperationalPublicProjection,
+} from "./experience/operational-generalization";
+import { getAgentLearningSummary } from "./agents/learning-summary";
+import {
+  exportExperienceFromCloud,
+  listExperienceCloudUploads,
+  reconcileExperienceCloudUpload,
+  saveExperienceToCloud,
+  withdrawExperienceFromCloud,
+} from "./experience/cloud";
 import { getDreamingStatus, setDreamingEnabled } from "./memory/dreaming";
 import {
   getInvocationRunReceipt,
@@ -184,6 +224,7 @@ import {
 import { getUsageSnapshot, invalidateUsage } from "./usage";
 import { listPendingConfirmations } from "./confirm";
 import { addProjectOntologySource, getProjectOntologyStatus } from "./ontology/project-runtime";
+import { getAgentOntologyHubProjection } from "./ontology/agent-hub-projection";
 import {
   createProject,
   getProject,
@@ -1243,6 +1284,72 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("agentMemory:entries", (_e, agentId: string, limit?: number) =>
     listMemoryEntriesForAgentUi(agentId, Math.min(Math.max(Number(limit) || 100, 1), 300)),
   );
+  ipcMain.handle("agentLearning:summary", (_e, agentId: string) => getAgentLearningSummary(agentId));
+
+  // ── Experience assets — local ownership + explicit, separate Cloud exchange ─
+  // Pack creation still resolves project roots only through FsPathGrant. Cloud
+  // calls attach the main-owned session cookie; no credential or raw path is
+  // accepted from or returned to the renderer.
+  ipcMain.handle("experience:createPack", async (_e, input: ExperiencePackCreateIpcInput) => {
+    const runtimes = await detectRuntimes();
+    const activeRuntime = runtimes.find((runtime) => runtime.active) ?? runtimes[0];
+    if (!activeRuntime) throw new Error("Experience Pack requires an active runtime.");
+    return createExperiencePack(resolveExperiencePackCreateIpcInput(input, {
+      platform: process.platform,
+      arch: process.arch,
+      runtimeKind: activeRuntime.kind,
+    }));
+  });
+  ipcMain.handle("experience:listPacks", (_e, input) => listExperiencePacks(input));
+  ipcMain.handle("experience:ontologySummary", (_e, agentId: string) => getExperienceOntologySummary(agentId));
+  ipcMain.handle("experience:ontologyGraph", (_e, agentId: string) =>
+    getExperienceOntologyGraphSnapshot(agentId));
+  ipcMain.handle("experience:hubProjection", (_e, agentId: string, force?: boolean) =>
+    getAgentOntologyHubProjection(agentId, { force: force === true }));
+  ipcMain.handle("experience:captureFromMemory", (_e, input) => captureExperienceCandidate(input));
+  ipcMain.handle("experience:listCandidates", (_e, packId: string) => listExperienceCandidates(packId));
+  ipcMain.handle("experience:listOperationalPublicProjections", (_e, packId: string) =>
+    listOperationalPublicProjections(packId));
+  ipcMain.handle("experience:saveOperationalPublicProjection", (_e, input) =>
+    saveOperationalPublicProjection(input));
+  ipcMain.handle("experience:confirmOperationalPublicProjection", (_e, input) =>
+    confirmOperationalPublicProjection(input));
+  ipcMain.handle("experience:listTasteDrafts", (_e, agentId: string) => listLocalTasteDrafts(agentId));
+  ipcMain.handle("experience:listTasteWorkflows", (_e, agentId: string) => listTasteChipWorkflows(agentId));
+  ipcMain.handle("experience:saveTasteGeneralization", (_e, input) => saveTasteGeneralization(input));
+  ipcMain.handle("experience:confirmTasteGeneralization", (_e, input) => confirmTasteGeneralization(input));
+  ipcMain.handle("experience:pickTastePreviews", async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const chipOn = await dialog.showOpenDialog(win ?? undefined!, {
+      title: "Choose CHIP-ON preview (Taste applied)",
+      properties: ["openFile"],
+      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp"] }],
+    });
+    if (chipOn.canceled || chipOn.filePaths.length !== 1) return null;
+    const control = await dialog.showOpenDialog(win ?? undefined!, {
+      title: "Choose CONTROL preview (same input, no Taste overlay)",
+      properties: ["openFile"],
+      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp"] }],
+    });
+    if (control.canceled || control.filePaths.length !== 1) return null;
+    return [chipOn.filePaths[0], control.filePaths[0]].map((file) => grantPath(file, { durable: true, exactFile: true }));
+  });
+  ipcMain.handle("experience:prepareTastePreviews", (_e, input) => prepareTastePreviews(input));
+  ipcMain.handle("experience:uploadTasteDraft", (_e, input) => uploadTasteDraft(input));
+  ipcMain.handle("experience:promote", (_e, input) => promoteExperienceCandidate(input));
+  ipcMain.handle("experience:listPromotionReceipts", (_e, packId: string) =>
+    listExperiencePromotionReceipts(packId),
+  );
+  ipcMain.handle("experience:createExportIntent", (_e, input) => createExperienceExportIntent(input));
+  ipcMain.handle("experience:listExportIntents", (_e, packId: string) => listExperienceExportIntents(packId));
+  ipcMain.handle("experience:cloudSave", (_e, input: ExperienceCloudSaveInput) => saveExperienceToCloud(input));
+  ipcMain.handle("experience:cloudList", (_e, packId: string) => listExperienceCloudUploads(packId));
+  ipcMain.handle("experience:cloudReconcile", (_e, input: ExperienceCloudReconcileInput) =>
+    reconcileExperienceCloudUpload(input.localUploadId));
+  ipcMain.handle("experience:cloudExport", (_e, input: ExperienceCloudReconcileInput) =>
+    exportExperienceFromCloud(input.localUploadId));
+  ipcMain.handle("experience:cloudWithdraw", (_e, input: ExperienceCloudWithdrawInput) =>
+    withdrawExperienceFromCloud(input));
 
   // ── 유휴 드리밍 큐레이션 — 옵트인 설정(기본 OFF) + 상태 ─────────────────────
   ipcMain.handle("memoryDreaming:status", () => getDreamingStatus());
@@ -1460,6 +1567,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("team:install", (_e, slug: string) => installAgent(slug));
   ipcMain.handle("team:installMine", (_e, id: string) => installMyAgent(id));
   ipcMain.handle("team:uninstall", (_e, id: string) => uninstallAgent(id));
+  ipcMain.handle("team:setLocalDisplayName", (_e, id: string, value: string) =>
+    setAgentLocalDisplayName(id, value),
+  );
   // 로컬 폴더 임포트 — 런타임 감지 + 라우팅 저장 후 설치된 에이전트로 반환
   ipcMain.handle(
     "team:importLocalFolder",
@@ -1538,6 +1648,7 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle("mcpTools:test", (_e, id: string) => testServerById(id));
   ipcMain.handle("mcpTools:status", () => statusAllServers());
+  ipcMain.handle("mcpTools:recommendForBuild", (_e, input) => recommendMcpBuildPlan(input));
   ipcMain.handle("openCrab:readiness", async () => {
     const readiness = await getOpenCrabReadiness();
     switch (readiness.reason) {
@@ -2405,10 +2516,10 @@ export function registerIpcHandlers(): void {
   });
 
   // 빌더(hep-build) — 활성 런타임으로 Hephaestus 빌더 에이전트를 구동, 이벤트 스트리밍.
-  ipcMain.handle("hephaestus:build", (event, req: HephaestusBuildRequest) => {
+  ipcMain.handle("hephaestus:build", async (event, req: HephaestusBuildRequest) => {
     // Renderer가 보낸 절대경로는 권한이 아니다. Native picker / trusted drop이
     // 발급한 capability를 main에서 다시 검증하고 그 경로만 builder에 전달한다.
-    const resolvedRequest = resolveHephaestusBuildRequest(req);
+    const resolvedRequest = await resolveHephaestusBuildRequestForRun(req);
     const runId = randomUUID();
     const channel = `hephaestus:build:${runId}`;
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -2454,7 +2565,7 @@ export function registerIpcHandlers(): void {
         readyExpiry.unref?.();
       }
     });
-    return { runId };
+    return { runId, mcpReceipt: resolvedRequest.mcpAttachment!.receipt };
   });
   ipcMain.handle("hephaestus:buildReady", (_e, runId: string) => {
     buildReadySignals.get(runId)?.();

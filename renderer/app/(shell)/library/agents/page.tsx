@@ -1,4 +1,4 @@
-// 회사 상세 — 접고 펴기 가능한 왼쪽 사이드바 조직도 + 오른쪽 에이전트 상세 통제 센터 (메모리 큐레이션, 프롬프트 에디터, 스킬 주입, 클라우드 싱크)
+// 에이전트 라이브러리 — 로스터, 큐레이팅 메모리, 승인형 자산 진화, Experience/Ontology 관리.
 "use client";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
@@ -15,12 +15,30 @@ import { navigate } from "@/lib/navigation";
 import { AgentMemorySaveQueue, parseMemoryMarkdown, type ParsedMemory } from "@/lib/agent-memory";
 import { classifyAgent } from "@/lib/ownership";
 import { cliModelTagLabel } from "@shared/models";
-import type { AgentEvolutionProposalUi, AgentMemoryEntryUi } from "@shared/types";
+import type {
+  AgentEvolutionProposalUi,
+  AgentLearningSummary,
+  AgentMemoryEntryUi,
+  AgentOntologyHubProjection,
+  ExperienceOntologyGraphSnapshot,
+  ExperienceOntologySummary,
+  LocalTasteDraftRecord,
+  OperationalPublicProjectionRecord,
+  TasteChipWorkflowRecord,
+  TasteAxis,
+  TastePreviewRights,
+} from "@shared/types";
 import type {
   AgentRuntimeOverride,
   AgentRuntimeOverrideScope,
   AgentGroupResolved,
   Chat,
+  ExperienceCandidateRecord,
+  ExperienceCloudUploadRecord,
+  ExperienceExportIntentRecord,
+  ExperiencePackRecord,
+  ExperiencePromotionReceipt,
+  FsPathGrant,
   InstalledAgent,
   InstalledFirm,
   MarketplaceListing,
@@ -31,6 +49,14 @@ import type {
   WorkspaceNode,
 } from "@/lib/types";
 import { AgentAvatar } from "@/components/AgentAvatar";
+import {
+  AgentLearningMetricGrid,
+  AgentNameEditor,
+  AgentHubOntologyProjectionView,
+  AgentOntologyGraphView,
+  ExperienceOntologySummaryView,
+  agentDisplayName,
+} from "@/components/AgentExperienceInsights";
 import {
   IconBuilding,
   IconChat,
@@ -140,7 +166,8 @@ function LibraryAgentsView() {
 
   // 선택된 에이전트 노드 (null 이면 회사 오버뷰 노출)
   const [selectedNode, setSelectedNode] = useState<ResolvedNode | null>(null);
-  const [activeTab, setActiveTab] = useState<"identity" | "memory" | "playbook" | "activity">("identity");
+  const [activeTab, setActiveTab] = useState<"identity" | "memory" | "playbook" | "activity" | "ontology">("identity");
+  const targetDetailTab = searchParams.get("tab") === "ontology" ? "ontology" as const : null;
   const targetAgentId = searchParams.get("agentId") ?? "";
   const targetNodeId = searchParams.get("nodeId") ?? "";
   const targetFirmId = searchParams.get("firmId") ?? "";
@@ -162,8 +189,6 @@ function LibraryAgentsView() {
 
   const [promptContent, setPromptContent] = useState("");
   const [promptSourcePath, setPromptSourcePath] = useState("");
-  const [editingPrompt, setEditingPrompt] = useState(false);
-  const [promptDraft, setPromptDraft] = useState("");
   const [savingFiles, setSavingFiles] = useState(false);
 
   // 스킬 주입 서랍 (Skill Evolution Drawer)
@@ -186,14 +211,20 @@ function LibraryAgentsView() {
   const [toastMsg, setToastMsg] = useState("");
 
   useEffect(() => {
+    const compactRoster = window.matchMedia("(max-width: 1100px)");
     try {
       const w = parseInt(window.localStorage.getItem("agentlas.firm.orgWidth") ?? "", 10);
       if (Number.isFinite(w) && w >= 200 && w <= 500) setOrgWidth(w);
       const c = window.localStorage.getItem("agentlas.firm.sidebarCollapsed") === "true";
-      setSidebarCollapsed(c);
+      setSidebarCollapsed(c || compactRoster.matches);
     } catch {
-      // ignore
+      setSidebarCollapsed(compactRoster.matches);
     }
+    const collapseOnCompact = (event: MediaQueryListEvent) => {
+      if (event.matches) setSidebarCollapsed(true);
+    };
+    compactRoster.addEventListener?.("change", collapseOnCompact);
+    return () => compactRoster.removeEventListener?.("change", collapseOnCompact);
   }, []);
 
   const toggleSidebar = () => {
@@ -332,7 +363,7 @@ function LibraryAgentsView() {
       const loc = pickLocalized(installed, locale);
       setSelectedNode({
         id: installed.id,
-        name: loc.name,
+        name: agentDisplayName(installed, locale),
         role: loc.tagline || installed.slug,
         agentId: installed.id,
       });
@@ -349,11 +380,22 @@ function LibraryAgentsView() {
     const loc = pickLocalized(agent, locale);
     setSelectedNode({
       id: agent.id,
-      name: loc.name,
+      name: agentDisplayName(agent, locale),
       role: loc.tagline || agent.slug,
       agentId: agent.id,
     });
-    setActiveTab("identity");
+    setActiveTab(targetDetailTab ?? "identity");
+  }
+
+  async function saveLocalDisplayName(agent: InstalledAgent, value: string) {
+    const api = ipc();
+    if (!api) throw new Error(locale === "ko" ? "Desktop 브리지를 사용할 수 없습니다." : "Desktop bridge is unavailable.");
+    const updated = await api.team.setLocalDisplayName(agent.id, value);
+    setAgents((previous) => previous.map((item) => item.id === updated.id ? updated : item));
+    setSelectedNode((current) => current?.agentId === updated.id
+      ? { ...current, name: agentDisplayName(updated, locale) }
+      : current);
+    showToast(locale === "ko" ? "이 Mac의 표시 이름을 저장했습니다." : "Saved the display name for this Mac.");
   }
 
   useEffect(() => {
@@ -372,11 +414,28 @@ function LibraryAgentsView() {
       if (current?.id === target.id && current.agentId === target.agentId) return current;
       return target;
     });
-    setActiveTab("identity");
+    setActiveTab(targetDetailTab ?? "identity");
     if (targetFirmId) {
       setFirmCollapsed((prev) => ({ ...prev, [targetFirmId]: false }));
     }
-  }, [agents, firms, locale, resolvedOrgs, targetAgentId, targetFirmId, targetNodeId]);
+  }, [agents, firms, locale, resolvedOrgs, targetAgentId, targetDetailTab, targetFirmId, targetNodeId]);
+
+  // Feature-update and external deep links may open the per-agent Ontology tab
+  // without already knowing a local installed id. Select the first visible
+  // installed agent deterministically; never guess a Hub release binding here.
+  useEffect(() => {
+    if (targetDetailTab !== "ontology" || targetAgentId || targetNodeId || selectedNode || agents.length === 0) return;
+    const first = agents[0];
+    const loc = pickLocalized(first, locale);
+    setRosterTab((first.kind ?? "agent") === "team" ? "multi" : "single");
+    setSelectedNode({
+      id: first.id,
+      name: agentDisplayName(first, locale),
+      role: loc.tagline || first.slug,
+      agentId: first.id,
+    });
+    setActiveTab("ontology");
+  }, [agents, locale, selectedNode, targetAgentId, targetDetailTab, targetNodeId]);
 
   // 에이전트 선택 변경 시 파일 로드
   useEffect(() => {
@@ -388,8 +447,6 @@ function LibraryAgentsView() {
       setMemoryParsed({ decisions: [], gotchas: [], openQuestions: [] });
       setPromptContent("");
       setPromptSourcePath("");
-      setPromptDraft("");
-      setEditingPrompt(false);
       return;
     }
     selectedMemoryAgentRef.current = selectedNode.agentId;
@@ -401,7 +458,6 @@ function LibraryAgentsView() {
       const curAgent = agents.find((a) => a.id === selectedNode.agentId);
       if (curAgent?.systemPrompt?.trim()) {
         setPromptContent(curAgent.systemPrompt);
-        setPromptDraft(curAgent.systemPrompt);
       }
       try {
         const listing = await api.agentFiles.list(selectedNode.agentId);
@@ -431,7 +487,6 @@ function LibraryAgentsView() {
         setPromptSourcePath(promptSource?.relativePath ?? "");
         if (promptSource) {
           setPromptContent(promptSource.content);
-          setPromptDraft(promptSource.content);
         }
       } catch (e) {
         // 파일 로드 실패 시에도 위에서 설정한 메타데이터 프롬프트가 남아있다.
@@ -487,16 +542,6 @@ function LibraryAgentsView() {
     };
   }, [selectedNode]);
 
-
-  // 프롬프트 수정 반영
-  async function savePrompt() {
-    const proposal = await createEvolutionProposal(promptDraft, {
-      changeOrigin: "manual_prompt_editor",
-    });
-    if (!proposal) return;
-    setEditingPrompt(false);
-    setActiveTab("activity");
-  }
 
   // 후보 생성은 파일을 쓰지 않는다. 승인/적용은 아래 별도 사용자 액션에서만 수행한다.
   async function createEvolutionProposal(
@@ -581,7 +626,6 @@ function LibraryAgentsView() {
       setEvolutionProposals((prev) => [proposal, ...prev.filter((item) => item.id !== proposal.id)]);
       if (proposal.proposalType === "rule") {
         setPromptContent(proposal.afterContent);
-        setPromptDraft(proposal.afterContent);
       } else if (proposal.proposalType === "skill" && selectedNode?.agentId) {
         const listing = await api.agentFiles.list(selectedNode.agentId);
         setAgentFiles(listing.entries.filter((entry) => entry.kind === "file"));
@@ -609,7 +653,6 @@ function LibraryAgentsView() {
         locale === "ko" ? "사용자가 검토 후 거절했습니다." : "User rejected after review.",
       );
       setEvolutionProposals((prev) => [proposal, ...prev.filter((item) => item.id !== proposal.id)]);
-      setPromptDraft(proposal.beforeContent);
       showToast(locale === "ko" ? "후보를 거절했습니다. 파일은 변경되지 않았습니다." : "Candidate rejected. No file was changed.");
     } catch (e) {
       showToast((locale === "ko" ? "후보 거절 실패: " : "Failed to reject candidate: ") + String(e));
@@ -627,7 +670,6 @@ function LibraryAgentsView() {
       setEvolutionProposals((prev) => [proposal, ...prev.filter((item) => item.id !== proposal.id)]);
       if (proposal.proposalType === "rule") {
         setPromptContent(proposal.beforeContent);
-        setPromptDraft(proposal.beforeContent);
       } else if (proposal.proposalType === "skill" && selectedNode?.agentId) {
         const listing = await api.agentFiles.list(selectedNode.agentId);
         setAgentFiles(listing.entries.filter((entry) => entry.kind === "file"));
@@ -695,7 +737,7 @@ function LibraryAgentsView() {
       const loc = pickLocalized(imported, locale);
       setSelectedNode({
         id: imported.id,
-        name: loc.name,
+        name: agentDisplayName(imported, locale),
         role: loc.tagline || imported.slug,
         agentId: imported.id,
       });
@@ -711,8 +753,8 @@ function LibraryAgentsView() {
   async function removeInstalledAgent(agent: InstalledAgent | null) {
     const api = ipc();
     if (!api || !agent) return;
-    const loc = pickLocalized(agent, locale);
-    if (!window.confirm(locale === "ko" ? `'${loc.name}' 에이전트를 설치 목록에서 제거할까요? 원본 폴더는 삭제하지 않습니다.` : `Remove '${loc.name}' from installed agents? The source folder will not be deleted.`)) return;
+    const displayName = agentDisplayName(agent, locale);
+    if (!window.confirm(locale === "ko" ? `'${displayName}' 에이전트를 설치 목록에서 제거할까요? 원본 폴더는 삭제하지 않습니다.` : `Remove '${displayName}' from installed agents? The source folder will not be deleted.`)) return;
     try {
       await api.team.uninstall(agent.id);
       setSelectedNode(null);
@@ -984,17 +1026,17 @@ function LibraryAgentsView() {
                         {rOrg ? (
                           <>
                             {isVisibleResolvedNode(rOrg.ceo, agentMap) && (
-                              <MiniNodeAvatar node={rOrg.ceo} active={selectedNode?.id === rOrg.ceo.id} onClick={() => { setSelectedNode(rOrg.ceo); setActiveTab("identity"); }} />
+                              <MiniNodeAvatar node={withAgentDisplayName(rOrg.ceo, agentMap, locale)} active={selectedNode?.id === rOrg.ceo.id} onClick={() => { setSelectedNode(withAgentDisplayName(rOrg.ceo, agentMap, locale)); setActiveTab("identity"); }} />
                             )}
                             {rOrg.divisions
                               .filter((d) => isVisibleResolvedNode(d, agentMap) || d.specialists.some((s) => isVisibleResolvedNode(s, agentMap)))
                               .map((d) => (
                               <div key={d.id} style={{ display: "flex", flexDirection: "column", gap: 8, borderTop: "1px solid var(--paper-edge)", paddingTop: 8 }}>
                                 {isVisibleResolvedNode(d, agentMap) && (
-                                  <MiniNodeAvatar node={d} active={selectedNode?.id === d.id} onClick={() => { setSelectedNode(d); setActiveTab("identity"); }} />
+                                  <MiniNodeAvatar node={withAgentDisplayName(d, agentMap, locale)} active={selectedNode?.id === d.id} onClick={() => { setSelectedNode(withAgentDisplayName(d, agentMap, locale)); setActiveTab("identity"); }} />
                                 )}
                                 {d.specialists.filter((s) => isVisibleResolvedNode(s, agentMap)).map((s) => (
-                                  <MiniNodeAvatar key={s.id} node={s} active={selectedNode?.id === s.id} onClick={() => { setSelectedNode(s); setActiveTab("identity"); }} />
+                                  <MiniNodeAvatar key={s.id} node={withAgentDisplayName(s, agentMap, locale)} active={selectedNode?.id === s.id} onClick={() => { setSelectedNode(withAgentDisplayName(s, agentMap, locale)); setActiveTab("identity"); }} />
                                 ))}
                               </div>
                             ))}
@@ -1005,10 +1047,10 @@ function LibraryAgentsView() {
                             return (
                               <MiniNodeAvatar
                                 key={n.agentSlug}
-                                node={{ name: agent ? pickLocalized(agent, locale).name : n.role, role: n.role }}
+                                node={{ name: agent ? agentDisplayName(agent, locale) : n.role, role: n.role }}
                                 active={selectedNode?.id === n.agentSlug}
                                 onClick={() => {
-                                  const resolved: ResolvedNode = { id: n.agentSlug, name: agent ? pickLocalized(agent, locale).name : n.role, role: n.role, agentId: n.agentId };
+                                  const resolved: ResolvedNode = { id: n.agentSlug, name: agent ? agentDisplayName(agent, locale) : n.role, role: n.role, agentId: n.agentId };
                                   setSelectedNode(resolved);
                                   setActiveTab("identity");
                                 }}
@@ -1019,7 +1061,7 @@ function LibraryAgentsView() {
                       </div>
                     ) : rOrg ? (
                       <div style={{ paddingLeft: 12 }}>
-                        <ResolvedOrgChart org={rOrg} agentMap={agentMap} selectedId={selectedNode?.id ?? null} onSelect={(node) => { setSelectedNode(node); setActiveTab("identity"); }} />
+                        <ResolvedOrgChart org={rOrg} agentMap={agentMap} locale={locale} selectedId={selectedNode?.id ?? null} onSelect={(node) => { setSelectedNode(node); setActiveTab("identity"); }} />
                       </div>
                     ) : (
                       <div style={{ paddingLeft: 12 }}>
@@ -1041,10 +1083,11 @@ function LibraryAgentsView() {
                 <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingLeft: sidebarCollapsed ? 0 : 12, alignItems: sidebarCollapsed ? "center" : "stretch" }}>
                   {roster.standaloneMultiAgents.map((a) => {
                     const loc = pickLocalized(a, locale);
+                    const displayName = agentDisplayName(a, locale);
                     const isAct = selectedNode?.agentId === a.id;
                     if (sidebarCollapsed) {
-                      return <MiniNodeAvatar key={a.id} node={{ name: loc.name, role: loc.tagline }} active={isAct} onClick={() => {
-                        setSelectedNode({ id: a.id, name: loc.name, role: loc.tagline, agentId: a.id });
+                      return <MiniNodeAvatar key={a.id} node={{ name: displayName, role: loc.tagline }} active={isAct} onClick={() => {
+                        setSelectedNode({ id: a.id, name: displayName, role: loc.tagline, agentId: a.id });
                         setActiveTab("identity");
                       }} />;
                     }
@@ -1069,14 +1112,14 @@ function LibraryAgentsView() {
                           </button>
                           <div
                             onClick={() => {
-                              setSelectedNode({ id: a.id, name: loc.name, role: loc.tagline, agentId: a.id });
+                              setSelectedNode({ id: a.id, name: displayName, role: loc.tagline, agentId: a.id });
                               setActiveTab("identity");
                             }}
                             style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 10 }}
                           >
-                            <AgentAvatar name={loc.name} tone={a.tone} size={28} />
+                            <AgentAvatar name={displayName} tone={a.tone} size={28} />
                             <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                              <span style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</span>
+                              <span style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{displayName}</span>
                               <span style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.tagline}</span>
                             </div>
                           </div>
@@ -1128,10 +1171,11 @@ function LibraryAgentsView() {
               <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingLeft: sidebarCollapsed ? 0 : 12, alignItems: sidebarCollapsed ? "center" : "stretch" }}>
                 {roster.singleModeAgents.map(a => {
                   const loc = pickLocalized(a, locale);
+                  const displayName = agentDisplayName(a, locale);
                   const isAct = selectedNode?.agentId === a.id;
                   if (sidebarCollapsed) {
-                    return <MiniNodeAvatar key={a.id} node={{ name: loc.name, role: loc.tagline }} active={isAct} onClick={() => {
-                      setSelectedNode({ id: a.id, name: loc.name, role: loc.tagline, agentId: a.id });
+                    return <MiniNodeAvatar key={a.id} node={{ name: displayName, role: loc.tagline }} active={isAct} onClick={() => {
+                      setSelectedNode({ id: a.id, name: displayName, role: loc.tagline, agentId: a.id });
                       setActiveTab("identity");
                     }} />;
                   }
@@ -1139,7 +1183,7 @@ function LibraryAgentsView() {
                     <div
                       key={a.id}
                       onClick={() => {
-                        setSelectedNode({ id: a.id, name: loc.name, role: loc.tagline, agentId: a.id });
+                        setSelectedNode({ id: a.id, name: displayName, role: loc.tagline, agentId: a.id });
                         setActiveTab("identity");
                       }}
                       style={{
@@ -1148,9 +1192,9 @@ function LibraryAgentsView() {
                         border: isAct ? "1px solid var(--accent)" : "1px solid transparent"
                       }}
                     >
-                      <AgentAvatar name={loc.name} tone={a.tone} size={28} />
+                      <AgentAvatar name={displayName} tone={a.tone} size={28} />
                       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                        <span style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</span>
+                        <span style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{displayName}</span>
                         <span style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.tagline}</span>
                       </div>
                     </div>
@@ -1340,11 +1384,6 @@ function LibraryAgentsView() {
             evolutionProposals={evolutionProposals}
             onSaveMemory={saveMemory}
             promptContent={promptContent}
-            promptDraft={promptDraft}
-            onPromptDraftChange={setPromptDraft}
-            editingPrompt={editingPrompt}
-            onSetEditingPrompt={setEditingPrompt}
-            onSavePrompt={savePrompt}
             onCreateEvolution={createEvolutionProposal}
             onCreateSkillEvolution={createSkillEvolutionProposal}
             onApproveEvolution={approveEvolutionProposal}
@@ -1361,6 +1400,10 @@ function LibraryAgentsView() {
             runtimeOverrides={runtimeOverrides}
             nodeContext={selectedContext}
             onRuntimeOverridesChange={setRuntimeOverrides}
+            onSaveAlias={(value) => {
+              const current = agents.find((item) => item.id === selectedNode.agentId);
+              return current ? saveLocalDisplayName(current, value) : Promise.resolve();
+            }}
             onRemoveAgent={() => void removeInstalledAgent(agents.find((a) => a.id === selectedNode.agentId) ?? null)}
           />
         )}
@@ -1545,11 +1588,13 @@ function MiniNodeAvatar({ node, active, onClick }: { node: { name: string; role?
 function ResolvedOrgChart({
   org,
   agentMap,
+  locale,
   selectedId,
   onSelect,
 }: {
   org: ResolvedOrg;
   agentMap: Map<string, InstalledAgent>;
+  locale: Locale;
   selectedId: string | null;
   onSelect: (node: ResolvedNode) => void;
 }) {
@@ -1561,14 +1606,14 @@ function ResolvedOrgChart({
   const showCeo = isVisibleResolvedNode(org.ceo, agentMap);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {showCeo && <OrgNodeCard node={org.ceo} tier={1} active={selectedId === org.ceo.id} onClick={() => onSelect(org.ceo)} />}
+      {showCeo && <OrgNodeCard node={withAgentDisplayName(org.ceo, agentMap, locale)} tier={1} active={selectedId === org.ceo.id} onClick={() => onSelect(withAgentDisplayName(org.ceo, agentMap, locale))} />}
       {visibleDivisions.map((d) => {
         const visibleSpecialists = d.specialists.filter((specialist) => isVisibleResolvedNode(specialist, agentMap));
         const showDivision = isVisibleResolvedNode(d, agentMap);
         return (
         <div key={d.id}>
           {showDivision ? (
-            <OrgNodeCard node={d} tier={2} active={selectedId === d.id} onClick={() => onSelect(d)} />
+            <OrgNodeCard node={withAgentDisplayName(d, agentMap, locale)} tier={2} active={selectedId === d.id} onClick={() => onSelect(withAgentDisplayName(d, agentMap, locale))} />
           ) : (
             <OrgGroupLabel node={d} />
           )}
@@ -1585,7 +1630,7 @@ function ResolvedOrgChart({
               }}
             >
               {visibleSpecialists.map((s) => (
-                <OrgNodeCard key={s.id} node={s} tier={3} active={selectedId === s.id} onClick={() => onSelect(s)} />
+                <OrgNodeCard key={s.id} node={withAgentDisplayName(s, agentMap, locale)} tier={3} active={selectedId === s.id} onClick={() => onSelect(withAgentDisplayName(s, agentMap, locale))} />
               ))}
             </div>
           )}
@@ -1665,6 +1710,11 @@ function isVisibleResolvedNode(node: ResolvedNode, agentMap: Map<string, Install
   return Boolean(agent && isRosterVisibleAgent(agent));
 }
 
+function withAgentDisplayName(node: ResolvedNode, agentMap: Map<string, InstalledAgent>, locale: Locale): ResolvedNode {
+  const agent = node.agentId ? agentMap.get(node.agentId) : null;
+  return agent ? { ...node, name: agentDisplayName(agent, locale) } : node;
+}
+
 function isVisibleFirmOrgNode(
   node: InstalledFirm["orgChart"][number],
   agentMap: Map<string, InstalledAgent>,
@@ -1701,7 +1751,7 @@ function OrgChart({
     const kids = children(node.agentSlug);
     const isCeo = node.reportsTo === null;
     const active = selectedId === node.agentSlug;
-    const displayName = agentLoc?.name ?? node.role;
+    const displayName = agent ? agentDisplayName(agent, locale) : agentLoc?.name ?? node.role;
     const roleLabel = readableRoleLabel(node.role, displayName, agent?.slug ?? node.agentSlug);
 
     const resolved: ResolvedNode = {
@@ -1823,7 +1873,7 @@ function findAgentRouteNode({
     const resolved = resolvedOrgs[firm.id];
     if (resolved) {
       const node = findResolvedNode(resolved, matches);
-      if (node) return node;
+      if (node) return withAgentDisplayName(node, agentMap, locale);
     }
 
     const raw = firm.orgChart.find(
@@ -1836,7 +1886,7 @@ function findAgentRouteNode({
       const localized = agent ? pickLocalized(agent, locale) : null;
       return {
         id: raw.agentSlug,
-        name: localized?.name ?? raw.role,
+        name: agent ? agentDisplayName(agent, locale) : localized?.name ?? raw.role,
         role: raw.role,
         agentId: raw.agentId,
       };
@@ -1849,7 +1899,7 @@ function findAgentRouteNode({
       const localized = pickLocalized(agent, locale);
       return {
         id: agent.id,
-        name: localized.name,
+        name: agentDisplayName(agent, locale),
         role: localized.tagline,
         agentId: agent.id,
       };
@@ -2430,12 +2480,825 @@ const runtimeButtonStyle: React.CSSProperties = {
   cursor: "pointer",
 };
 
+const tasteInputStyle: React.CSSProperties = {
+  width: "100%",
+  minWidth: 0,
+  padding: "8px 9px",
+  borderRadius: 9,
+  border: "1px solid var(--paper-edge)",
+  background: "color-mix(in srgb, var(--paper-2) 88%, transparent)",
+  color: "var(--ink)",
+  fontSize: 11.5,
+};
+
+function ExperiencePanel({
+  agent,
+  memoryEntries,
+  runtimeStatuses,
+  locale,
+  showToast,
+  onChanged,
+}: {
+  agent: InstalledAgent | null;
+  memoryEntries: AgentMemoryEntryUi[];
+  runtimeStatuses: RuntimeStatus[];
+  locale: Locale;
+  showToast: (message: string) => void;
+  onChanged: () => void;
+}) {
+  const ko = locale === "ko";
+  const [packs, setPacks] = useState<ExperiencePackRecord[]>([]);
+  const [selectedPackId, setSelectedPackId] = useState("");
+  const [candidates, setCandidates] = useState<ExperienceCandidateRecord[]>([]);
+  const [receipts, setReceipts] = useState<ExperiencePromotionReceipt[]>([]);
+  const [intents, setIntents] = useState<ExperienceExportIntentRecord[]>([]);
+  const [cloudUploads, setCloudUploads] = useState<ExperienceCloudUploadRecord[]>([]);
+  const [tasteDrafts, setTasteDrafts] = useState<LocalTasteDraftRecord[]>([]);
+  const [tasteWorkflows, setTasteWorkflows] = useState<TasteChipWorkflowRecord[]>([]);
+  const [operationalPublicProjections, setOperationalPublicProjections] = useState<OperationalPublicProjectionRecord[]>([]);
+  const [operationalSourceIds, setOperationalSourceIds] = useState<string[]>([]);
+  const [operationalTitle, setOperationalTitle] = useState("");
+  const [operationalInstructions, setOperationalInstructions] = useState("");
+  const [operationalTask, setOperationalTask] = useState("");
+  const [editingTasteDraftId, setEditingTasteDraftId] = useState("");
+  const [tasteTitle, setTasteTitle] = useState("");
+  const [tasteSummary, setTasteSummary] = useState("");
+  const [tasteRule, setTasteRule] = useState("");
+  const [tasteAxis, setTasteAxis] = useState<TasteAxis>("composition");
+  const [tasteTask, setTasteTask] = useState("");
+  const [tasteContext, setTasteContext] = useState("visual-design");
+  const [tastePreviewRights, setTastePreviewRights] = useState<TastePreviewRights | "">("");
+  const [tasteTaskInputHash, setTasteTaskInputHash] = useState("");
+  const [tasteGenerationCohort, setTasteGenerationCohort] = useState("");
+  const [tasteGenerationAttested, setTasteGenerationAttested] = useState(false);
+  const [experienceOwner, setExperienceOwner] = useState(ko ? "현재 로그인 계정 (저장 시 서버가 확정)" : "Current signed-in account (confirmed by server on save)");
+  const [packName, setPackName] = useState("");
+  const [projectGrant, setProjectGrant] = useState<FsPathGrant | null>(null);
+  const projectPath = projectGrant?.path ?? "";
+  const [memoryId, setMemoryId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const selectedPack = packs.find((pack) => pack.id === selectedPackId) ?? null;
+  const activeRuntime = runtimeStatuses.find((runtime) => runtime.active) ?? runtimeStatuses[0] ?? null;
+  const requireBridge = () => {
+    const bridge = ipc();
+    if (!bridge) throw new Error(ko ? "Desktop 브리지를 사용할 수 없습니다." : "Desktop bridge is unavailable.");
+    return bridge;
+  };
+
+  const loadPacks = useCallback(async () => {
+    if (!agent) return;
+    const [next, nextTasteDrafts, nextTasteWorkflows] = await Promise.all([
+      requireBridge().experience.listPacks({ agentId: agent.id }),
+      requireBridge().experience.listTasteDrafts(agent.id),
+      requireBridge().experience.listTasteWorkflows(agent.id),
+    ]);
+    setPacks(next);
+    setTasteDrafts(nextTasteDrafts);
+    setTasteWorkflows(nextTasteWorkflows);
+    setSelectedPackId((current) => current && next.some((pack) => pack.id === current) ? current : next[0]?.id ?? "");
+  }, [agent]);
+
+  const loadPackDetails = useCallback(async (packId: string) => {
+    if (!packId) {
+      setCandidates([]);
+      setReceipts([]);
+      setIntents([]);
+      setCloudUploads([]);
+      setOperationalPublicProjections([]);
+      return;
+    }
+    const api = requireBridge().experience;
+    const [nextCandidates, nextReceipts, nextIntents, nextCloudUploads, nextPublicProjections] = await Promise.all([
+      api.listCandidates(packId),
+      api.listPromotionReceipts(packId),
+      api.listExportIntents(packId),
+      api.cloudList(packId),
+      api.listOperationalPublicProjections(packId),
+    ]);
+    setCandidates(nextCandidates);
+    setReceipts(nextReceipts);
+    setIntents(nextIntents);
+    setCloudUploads(nextCloudUploads);
+    setOperationalPublicProjections(nextPublicProjections);
+    const projection = nextPublicProjections[0];
+    if (projection) {
+      setOperationalSourceIds(projection.sourceBindings.map((binding) => binding.candidateId));
+      setOperationalTitle(projection.title);
+      setOperationalInstructions(projection.instructions.join("\n"));
+      setOperationalTask(projection.taskSignatures[0] ?? "");
+    } else {
+      setOperationalSourceIds([]);
+      setOperationalTitle("");
+      setOperationalInstructions("");
+      setOperationalTask("");
+    }
+  }, []);
+
+  useEffect(() => {
+    void requireBridge().auth.getSession().then((session) => {
+      const legacy = session as typeof session & { account?: { email?: string; name?: string } };
+      const label = session.email || session.name || legacy.account?.email || legacy.account?.name;
+      if (label) setExperienceOwner(label);
+    }).catch(() => {});
+  }, [ko]);
+
+  useEffect(() => {
+    setError("");
+    void loadPacks().catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+  }, [loadPacks]);
+
+  useEffect(() => {
+    setMemoryId("");
+    void loadPackDetails(selectedPackId).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+  }, [loadPackDetails, selectedPackId]);
+
+  const eligibleMemory = memoryEntries.filter((entry) =>
+    entry.projectPath === selectedPack?.projectPath &&
+    ["procedure", "decision", "risk"].includes(entry.kind) &&
+    !candidates.some((candidate) => candidate.sourceMemoryId === entry.id) &&
+    entry.sensitivity !== "secret" && entry.sensitivity !== "confidential",
+  );
+
+  const chooseProject = async () => {
+    const grant = await requireBridge().fs.pickDirectory();
+    if (grant) setProjectGrant(grant);
+  };
+
+  const createPack = async () => {
+    if (!agent || !packName.trim() || !projectGrant || !activeRuntime) return;
+    setBusy(true);
+    setError("");
+    try {
+      const created = await requireBridge().experience.createPack({
+        agentId: agent.id,
+        name: packName.trim(),
+        projectGrant,
+      });
+      setPackName("");
+      await loadPacks();
+      setSelectedPackId(created.id);
+      onChanged();
+      showToast(ko ? "로컬 경험 칩 묶음을 만들었습니다." : "Created a local Experience Chips collection.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const captureCandidate = async () => {
+    if (!selectedPack || !memoryId) return;
+    setBusy(true);
+    setError("");
+    try {
+      await requireBridge().experience.captureFromMemory({ packId: selectedPack.id, sourceMemoryId: memoryId });
+      await loadPackDetails(selectedPack.id);
+      onChanged();
+      setMemoryId("");
+      showToast(ko ? "검수할 경험 후보를 만들었습니다." : "Created an Experience candidate for review.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const promoteCandidate = async (candidate: ExperienceCandidateRecord) => {
+    const confirmed = window.confirm(ko
+      ? "이 항목을 직접 검수했으며 로컬 경험으로 승격할까요? 이는 공식 검증(verified)이 아니라 사용자 확인(attested)입니다."
+      : "Promote this reviewed item as a local Experience? This is user-attested, not officially verified.");
+    if (!confirmed) return;
+    setBusy(true);
+    setError("");
+    try {
+      await requireBridge().experience.promote({
+        candidateId: candidate.id,
+        explicitConsent: true,
+        verification: {
+          status: "attested",
+          method: "user-attested",
+          evidenceRefs: [`ui-attestation:${candidate.id}`],
+        },
+        publicSafe: false,
+      });
+      if (selectedPack) await loadPackDetails(selectedPack.id);
+      onChanged();
+      showToast(ko ? "로컬 경험으로 승격했습니다(attested)." : "Promoted as a local attested Experience.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createExportIntent = async () => {
+    if (!selectedPack) return;
+    setBusy(true);
+    setError("");
+    try {
+      await requireBridge().experience.createExportIntent({ packId: selectedPack.id, visibility: "private" });
+      await loadPackDetails(selectedPack.id);
+      onChanged();
+      showToast(ko ? "로컬 내보내기 의도를 기록했습니다. Hub에는 업로드하지 않았습니다." : "Recorded a local export intent. Nothing was uploaded to Hub.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const savePrivateCloud = async () => {
+    if (!selectedPack) return;
+    setBusy(true);
+    setError("");
+    try {
+      const saved = await requireBridge().experience.cloudSave({ packId: selectedPack.id, requestedVisibility: "private" });
+      await loadPacks();
+      await loadPackDetails(selectedPack.id);
+      onChanged();
+      showToast(saved.state === "offline"
+        ? (ko ? "오프라인입니다. 같은 업로드를 나중에 이어갈 수 있습니다." : "Offline. The same upload can be resumed later.")
+        : (ko ? "경험만 비공개 Cloud에 저장했습니다. 원본 Agent 업로드와는 별개입니다." : "Saved only the Experience to private Cloud, separately from the base Agent upload."));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const requestPublicVerification = async () => {
+    if (!selectedPack) return;
+    const confirmed = window.confirm(ko
+      ? "이 경험의 공개 검증을 요청할까요? 요청만 접수되며, 평가기가 통과시키기 전에는 공개 활성화나 자동 대여가 되지 않습니다."
+      : "Request public verification for this Experience? This only submits a request; it cannot become public or rentable until a server evaluator approves it.");
+    if (!confirmed) return;
+    setBusy(true);
+    setError("");
+    try {
+      const requested = await requireBridge().experience.cloudSave({ packId: selectedPack.id, requestedVisibility: "public" });
+      await loadPackDetails(selectedPack.id);
+      onChanged();
+      showToast(requested.state === "verification-requested" || requested.state === "verification-pending"
+        ? (ko ? "공개 검증 요청이 접수됐습니다. 아직 공개 활성 상태는 아닙니다." : "Public verification was requested. It is not public-active yet.")
+        : (ko ? "비공개 초안은 저장됐지만 공개 검증 접수는 아직 확인되지 않았습니다." : "The private draft was saved, but public verification is not confirmed yet."));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleOperationalSource = (candidateId: string) => {
+    setOperationalSourceIds((current) => current.includes(candidateId)
+      ? current.filter((id) => id !== candidateId)
+      : [...current, candidateId].sort());
+  };
+
+  const saveOperationalPublicProjection = async () => {
+    if (!selectedPack || !operationalTask) return;
+    setBusy(true);
+    setError("");
+    try {
+      const saved = await requireBridge().experience.saveOperationalPublicProjection({
+        packId: selectedPack.id,
+        sourceCandidateIds: operationalSourceIds,
+        title: operationalTitle,
+        instructions: operationalInstructionLines,
+        taskSignatures: [operationalTask],
+        environmentConstraints: selectedPack.environmentProfile?.constraints ?? [],
+      });
+      setOperationalPublicProjections([saved]);
+      setOperationalSourceIds(saved.sourceBindings.map((binding) => binding.candidateId));
+      setOperationalTitle(saved.title);
+      setOperationalInstructions(saved.instructions.join("\n"));
+      setOperationalTask(saved.taskSignatures[0] ?? "");
+      onChanged();
+      showToast(saved.privacyIssueCodes.length > 0
+        ? (ko ? "초안은 저장됐지만 공개 안전 검사를 통과하지 못했습니다." : "Draft saved, but it did not pass the public-safety scan.")
+        : (ko ? "일반화된 공개 사본을 로컬에 저장했습니다." : "Saved the generalized public copy locally."));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmOperationalPublicProjection = async () => {
+    const projection = operationalPublicProjections[0];
+    if (!projection || !window.confirm(ko
+      ? "선택한 비공개 원문이 아니라, 이 일반화된 사본만 공개 검증에 사용할까요?"
+      : "Use only this generalized copy—not the selected private sources—for public verification?")) return;
+    setBusy(true);
+    setError("");
+    try {
+      const confirmed = await requireBridge().experience.confirmOperationalPublicProjection({
+        projectionId: projection.projectionId,
+        proposalHash: projection.proposalHash,
+        explicitConsent: true,
+      });
+      setOperationalPublicProjections([confirmed]);
+      onChanged();
+      showToast(ko ? "공개 안전 사본을 명시적으로 확인했습니다." : "Explicitly confirmed the public-safe copy.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reconcileCloud = async (upload: ExperienceCloudUploadRecord) => {
+    if (!selectedPack) return;
+    setBusy(true);
+    setError("");
+    try {
+      await requireBridge().experience.cloudReconcile({ localUploadId: upload.id });
+      await loadPackDetails(selectedPack.id);
+      onChanged();
+      showToast(ko ? "서버 영수증과 상태를 다시 맞췄습니다." : "Reconciled the local state with the server receipt.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cloudStateLabel = (state: ExperienceCloudUploadRecord["state"]): string => ({
+    "local-ready": ko ? "로컬 준비" : "Local ready",
+    "saving-private": ko ? "비공개 저장 중" : "Saving private",
+    "private-saved": ko ? "비공개 Cloud 저장" : "Private Cloud saved",
+    "requesting-verification": ko ? "검증 요청 전송 중" : "Requesting verification",
+    "verification-requested": ko ? "검증 요청됨" : "Verification requested",
+    "verification-pending": ko ? "검증 대기 중" : "Verification pending",
+    "verified-private": ko ? "검증됨 · 비공개" : "Verified · private",
+    "public-active": ko ? "공개 활성 · 서버 검증" : "Public active · server verified",
+    conflict: ko ? "충돌 · 다시 맞추기" : "Conflict · reconcile",
+    offline: ko ? "오프라인 · 재개 가능" : "Offline · resumable",
+    error: ko ? "오류 · 다시 맞추기" : "Error · reconcile",
+    withdrawn: ko ? "대여 중단됨" : "Withdrawn",
+    rejected: ko ? "검증 거절됨" : "Rejected",
+  })[state];
+
+  const latestCloud = cloudUploads[0] ?? null;
+  const authoritativeOwner = latestCloud?.receipt?.ownerWorkspaceRef ?? experienceOwner;
+  const operationalProjection = operationalPublicProjections[0] ?? null;
+  const operationalInstructionLines = operationalInstructions.split("\n").map((line) => line.trim()).filter(Boolean);
+  const operationalTasks = [...new Set(candidates
+    .filter((candidate) => operationalSourceIds.includes(candidate.id))
+    .flatMap((candidate) => candidate.taskSignatures))].sort();
+  const operationalProjectionDirty = Boolean(operationalProjection) && (
+    JSON.stringify([...operationalSourceIds].sort()) !== JSON.stringify(operationalProjection!.sourceBindings.map((binding) => binding.candidateId).sort()) ||
+    operationalTitle.trim() !== operationalProjection!.title ||
+    JSON.stringify(operationalInstructionLines) !== JSON.stringify(operationalProjection!.instructions) ||
+    operationalTask !== (operationalProjection!.taskSignatures[0] ?? "")
+  );
+  const operationalPublicReady = operationalProjection?.status === "confirmed" &&
+    operationalProjection.privacyIssueCodes.length === 0 && !operationalProjectionDirty;
+  const editingTasteDraft = tasteDrafts.find((draft) => draft.id === editingTasteDraftId) ?? null;
+  const editingTasteWorkflow = tasteWorkflows.find((workflow) => workflow.draftId === editingTasteDraftId) ?? null;
+
+  const beginTasteReview = (draft: LocalTasteDraftRecord) => {
+    const workflow = tasteWorkflows.find((item) => item.draftId === draft.id);
+    setEditingTasteDraftId(draft.id);
+    setTasteTitle(workflow?.title ?? "");
+    setTasteSummary(workflow?.summary ?? "");
+    setTasteRule(workflow?.ruleStatement ?? "");
+    setTasteAxis(workflow?.axis ?? draft.axisCandidates[0] ?? "composition");
+    setTasteTask(workflow?.taskSignature ?? draft.taskSignatures[0] ?? "");
+    setTasteContext(workflow?.contexts.join(", ") ?? "visual-design");
+    setTastePreviewRights(workflow?.previewRights ?? "");
+    setTasteTaskInputHash(workflow?.previewTreatments?.[0]?.canonicalTaskInputHash ?? "");
+    setTasteGenerationCohort(workflow?.previewTreatments?.[0]?.generationCohortHash ?? "");
+    setTasteGenerationAttested(Boolean(workflow?.previewTreatments));
+  };
+
+  const reloadTaste = async () => {
+    if (!agent) return;
+    setTasteWorkflows(await requireBridge().experience.listTasteWorkflows(agent.id));
+  };
+
+  const saveTasteProposal = async () => {
+    if (!agent || !editingTasteDraft) return;
+    setBusy(true);
+    setError("");
+    try {
+      await requireBridge().experience.saveTasteGeneralization({
+        draftId: editingTasteDraft.id,
+        agentId: agent.id,
+        title: tasteTitle,
+        summary: tasteSummary,
+        ruleStatement: tasteRule,
+        axis: tasteAxis,
+        taskSignature: tasteTask,
+        contexts: tasteContext.split(",").map((item) => item.trim()).filter(Boolean),
+      });
+      await reloadTaste();
+      onChanged();
+      showToast(ko ? "일반화 초안을 로컬에 저장했습니다." : "Saved the generalized draft locally.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmTasteProposal = async () => {
+    if (!editingTasteWorkflow || !window.confirm(ko ? "원문이 아니라 이 일반화된 규칙만 Hub 준비에 사용합니다. 확인할까요?" : "Only this generalized rule—not the raw memory—will be prepared for Hub. Confirm?")) return;
+    setBusy(true);
+    setError("");
+    try {
+      await requireBridge().experience.confirmTasteGeneralization({
+        workflowId: editingTasteWorkflow.workflowId,
+        generalizationHash: editingTasteWorkflow.generalizationHash,
+        explicitConsent: true,
+      });
+      await reloadTaste();
+      showToast(ko ? "프라이버시 재검사를 통과해 확인했습니다." : "Confirmed after a fresh privacy scan.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const chooseTastePreviews = async () => {
+    if (!editingTasteWorkflow || !tastePreviewRights || !/^sha256:[a-f0-9]{64}$/.test(tasteTaskInputHash) || !tasteGenerationCohort.trim() || !tasteGenerationAttested) return;
+    const rightsLabel = tastePreviewRights === "owner-authorized"
+      ? (ko ? "내가 소유하거나 공개 미리보기를 허가받은 이미지" : "images I own or am authorized to preview publicly")
+      : tastePreviewRights === "licensed-for-public-preview"
+        ? (ko ? "공개 미리보기 라이선스가 있는 이미지" : "images licensed for public preview")
+        : (ko ? "퍼블릭 도메인 이미지" : "public-domain images");
+    if (!window.confirm(ko ? `${rightsLabel}이며, 첫 파일은 Taste 적용, 두 번째는 동일 조건의 Taste 미적용 컨트롤임을 확인합니다.` : `I confirm the first file is chip-on and the second is a no-Taste control generated under the same conditions, and both are ${rightsLabel}.`)) return;
+    setBusy(true);
+    setError("");
+    try {
+      const previews = await requireBridge().experience.pickTastePreviews();
+      if (!previews) return;
+      await requireBridge().experience.prepareTastePreviews({
+        workflowId: editingTasteWorkflow.workflowId,
+        previews,
+        rightsStatus: tastePreviewRights,
+        rightsAttested: true,
+        canonicalTaskInputHash: tasteTaskInputHash,
+        generationCohortRef: tasteGenerationCohort,
+        externalGenerationAttested: true,
+      });
+      await reloadTaste();
+      showToast(ko ? "칩 적용·컨트롤 쌍을 소유자 증명으로 준비했습니다." : "Prepared the chip-on/control pair with owner-attested provenance.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const uploadTasteProposal = async () => {
+    if (!editingTasteWorkflow || !window.confirm(ko ? "일반화 규칙과 미리보기 2개만 Hub 비공개 초안으로 올릴까요? 원문·로컬 경로는 전송하지 않습니다." : "Upload only the generalized rule and two previews as a private Hub draft? Raw memory and local paths are not sent.")) return;
+    setBusy(true);
+    setError("");
+    try {
+      const uploaded = await requireBridge().experience.uploadTasteDraft({
+        workflowId: editingTasteWorkflow.workflowId,
+        generalizationHash: editingTasteWorkflow.generalizationHash,
+        explicitUpload: true,
+      });
+      await reloadTaste();
+      onChanged();
+      showToast(uploaded.status === "ab-ready"
+        ? (ko ? "블라인드 A/B 준비가 끝났습니다." : "Blinded A/B is ready.")
+        : (ko ? "업로드됐고 미리보기 안전 검사를 기다립니다." : "Uploaded; preview moderation is pending."));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!agent) return <div>{ko ? "설치된 에이전트 정보가 필요합니다." : "Installed agent metadata is required."}</div>;
+
+  return (
+    <div data-testid="experience-panel" style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 900 }}>
+      <section data-testid="local-taste-drafts" style={{ background: "color-mix(in srgb, var(--paper) 92%, var(--accent-soft))", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, boxShadow: "0 10px 28px color-mix(in srgb, var(--ink) 7%, transparent)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span aria-hidden="true" style={{ width: 30, height: 30, borderRadius: 10, display: "grid", placeItems: "center", background: "var(--paper-2)", boxShadow: "inset 1px 1px 0 color-mix(in srgb, white 70%, transparent), 0 5px 12px color-mix(in srgb, var(--ink) 10%, transparent)", color: "var(--accent)", fontSize: 12, fontWeight: 850 }}>T</span>
+            <div>
+              <h3 style={{ margin: 0, fontSize: 14 }}>{ko ? "Taste 후보" : "Taste drafts"}</h3>
+              <span style={{ fontSize: 10.5, color: "var(--muted-deep)" }}>{ko ? "비공개 · 사람 근거 대기" : "Private · awaiting human evidence"}</span>
+            </div>
+          </div>
+          <span data-testid="taste-draft-count" style={{ minWidth: 32, height: 28, padding: "0 9px", borderRadius: 999, display: "grid", placeItems: "center", background: "var(--paper-2)", border: "1px solid var(--paper-edge)", fontSize: 12, fontWeight: 800 }}>{tasteDrafts.length}</span>
+        </div>
+        {tasteDrafts.length === 0 ? (
+          <div style={{ height: 96, marginTop: 12, borderRadius: 12, border: "1px dashed var(--paper-edge)", display: "grid", placeItems: "center", color: "var(--muted-deep)", fontSize: 11.5 }}>
+            {ko ? "취향 메모리가 생기면 이 에이전트의 비공개 후보로 쌓입니다." : "Preference Memory will appear here as this agent's private draft."}
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 9, marginTop: 12 }}>
+            {tasteDrafts.map((draft) => (
+              <article key={draft.id} style={{ minWidth: 0, border: "1px solid var(--paper-edge)", borderRadius: 12, padding: 11, background: "color-mix(in srgb, var(--paper-2) 86%, transparent)", boxShadow: "inset 0 1px 0 color-mix(in srgb, white 55%, transparent)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                  <span style={{ fontSize: 10, color: "var(--amber-deep)", fontWeight: 800 }}>{ko ? "근거 대기" : "EVIDENCE NEEDED"}</span>
+                  <span aria-label={ko ? "로컬 전용, 공개 불가" : "Local only, not publishable"} title={ko ? "로컬 전용 · 공개 불가" : "Local only · not publishable"} style={{ width: 8, height: 8, borderRadius: 999, background: "var(--amber-deep)", boxShadow: "0 0 0 4px var(--amber-soft)" }} />
+                </div>
+                <p style={{ margin: "9px 0", fontSize: 12, lineHeight: 1.45, color: "var(--ink)", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{draft.statement}</p>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                  {(draft.axisCandidates.length ? draft.axisCandidates : [ko ? "축 검토 필요" : "axis review"]).map((axis) => (
+                    <span key={axis} style={{ padding: "3px 6px", borderRadius: 999, border: "1px solid var(--paper-edge)", color: "var(--muted-deep)", fontSize: 9.5 }}>{axis}</span>
+                  ))}
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 10, color: "var(--muted-deep)", fontSize: 9.5, fontFamily: "var(--font-mono)" }}>
+                  <span>{draft.basePackageHash.slice(0, 10)}</span>
+                  <span>{draft.baseAgentReleaseId ? (ko ? "Hub 기준 고정" : "Hub base pinned") : (ko ? "로컬 기준" : "Local base")}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => beginTasteReview(draft)}
+                  disabled={!draft.baseAgentDefinitionId || !draft.baseAgentReleaseId}
+                  aria-label={ko ? "Taste 일반화 검토" : "Review Taste generalization"}
+                  title={draft.baseAgentReleaseId ? (ko ? "일반화 검토" : "Review generalization") : (ko ? "정확한 Hub 릴리스 연결 필요" : "Exact Hub release binding required")}
+                  style={{ ...runtimeButtonStyle, width: "100%", marginTop: 10, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, opacity: draft.baseAgentReleaseId ? 1 : 0.45 }}
+                >
+                  <IconEdit size={13} />
+                  {ko ? "검토" : "Review"}
+                </button>
+              </article>
+            ))}
+          </div>
+        )}
+        {editingTasteDraft && (
+          <div data-testid="taste-generalization-workflow" style={{ marginTop: 12, padding: 12, borderRadius: 14, border: "1px solid var(--paper-edge)", background: "color-mix(in srgb, var(--paper) 82%, transparent)", boxShadow: "inset 0 1px 0 color-mix(in srgb, white 65%, transparent), 0 10px 24px color-mix(in srgb, var(--ink) 6%, transparent)" }}>
+            <div aria-label={ko ? "Taste 준비 단계" : "Taste preparation steps"} style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 7, marginBottom: 11 }}>
+              {[
+                { icon: <IconEdit size={13} />, label: ko ? "일반화" : "Generalize", done: Boolean(editingTasteWorkflow) },
+                { icon: <IconShield size={13} />, label: ko ? "확인" : "Confirm", done: Boolean(editingTasteWorkflow?.confirmedAt) },
+                { icon: <IconLayers size={13} />, label: "A/B", done: Boolean(editingTasteWorkflow?.previewNames) },
+                { icon: <IconFileUp size={13} />, label: "Hub", done: editingTasteWorkflow?.status === "moderation-pending" || editingTasteWorkflow?.status === "ab-ready" },
+              ].map((step) => (
+                <div key={step.label} title={step.label} style={{ minHeight: 34, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, border: "1px solid var(--paper-edge)", background: step.done ? "color-mix(in srgb, var(--green-deep) 10%, var(--paper))" : "var(--paper-2)", color: step.done ? "var(--green-deep)" : "var(--muted-deep)", fontSize: 10, fontWeight: 800 }}>
+                  {step.icon}<span>{step.label}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(150px, .8fr) minmax(180px, 1.2fr)", gap: 8 }}>
+              <input aria-label={ko ? "Taste 제목" : "Taste title"} value={tasteTitle} onChange={(event) => setTasteTitle(event.target.value)} placeholder={ko ? "범용 제목" : "Portable title"} style={tasteInputStyle} />
+              <input aria-label={ko ? "Taste 요약" : "Taste summary"} value={tasteSummary} onChange={(event) => setTasteSummary(event.target.value)} placeholder={ko ? "개인 정보 없는 한 줄 요약" : "One safe portable summary"} style={tasteInputStyle} />
+              <select aria-label={ko ? "Taste 축" : "Taste axis"} value={tasteAxis} onChange={(event) => setTasteAxis(event.target.value as TasteAxis)} style={tasteInputStyle}>
+                {["composition", "color", "typography", "motion", "pacing", "density", "imagery", "editing", "spatial-rhythm"].map((axis) => <option key={axis} value={axis}>{axis}</option>)}
+              </select>
+              <select aria-label={ko ? "작업 유형" : "Task signature"} value={tasteTask} onChange={(event) => setTasteTask(event.target.value)} style={tasteInputStyle}>
+                {editingTasteDraft.taskSignatures.map((task) => <option key={task} value={task}>{task}</option>)}
+              </select>
+              <input aria-label={ko ? "범용 맥락" : "Portable contexts"} value={tasteContext} onChange={(event) => setTasteContext(event.target.value)} placeholder="visual-design, editorial" style={tasteInputStyle} />
+              <input aria-label={ko ? "일반화된 선호 규칙" : "Generalized preference rule"} value={tasteRule} onChange={(event) => setTasteRule(event.target.value)} placeholder={ko ? "예: 정보 계층이 분명한 절제된 구성을 선호" : "e.g. Prefer restrained layouts with clear hierarchy"} style={tasteInputStyle} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(220px, 1fr) minmax(180px, .8fr) auto", gap: 8, marginTop: 8, alignItems: "center" }}>
+              <input aria-label={ko ? "동일 작업 입력 SHA-256" : "Shared task input SHA-256"} value={tasteTaskInputHash} onChange={(event) => setTasteTaskInputHash(event.target.value.trim())} placeholder="sha256: canonical task input" style={tasteInputStyle} />
+              <input aria-label={ko ? "동일 생성 코호트" : "Shared generation cohort"} value={tasteGenerationCohort} onChange={(event) => setTasteGenerationCohort(event.target.value.trim())} placeholder={ko ? "생성 코호트 참조 또는 sha256" : "generation cohort ref or sha256"} style={tasteInputStyle} />
+              <label style={{ display: "inline-flex", gap: 6, alignItems: "center", color: "var(--muted-deep)", fontSize: 10.5 }}>
+                <input type="checkbox" checked={tasteGenerationAttested} onChange={(event) => setTasteGenerationAttested(event.target.checked)} />
+                {ko ? "동일 조건 생성 확인" : "Same generation conditions"}
+              </label>
+            </div>
+            <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginTop: 10 }}>
+              <button type="button" disabled={busy || !tasteTask} onClick={() => void saveTasteProposal()} style={runtimeButtonStyle}><IconEdit size={13} /> {ko ? "초안 저장" : "Save"}</button>
+              <button type="button" disabled={busy || !editingTasteWorkflow || Boolean(editingTasteWorkflow.confirmedAt)} onClick={() => void confirmTasteProposal()} style={runtimeButtonStyle}><IconShield size={13} /> {ko ? "확인" : "Confirm"}</button>
+              <select aria-label={ko ? "미리보기 권리" : "Preview rights"} value={tastePreviewRights} onChange={(event) => setTastePreviewRights(event.target.value as TastePreviewRights | "")} style={{ ...tasteInputStyle, width: "auto", minWidth: 152 }}>
+                <option value="">{ko ? "권리 선택" : "Select rights"}</option>
+                <option value="owner-authorized">{ko ? "소유·허가" : "Owned / authorized"}</option>
+                <option value="licensed-for-public-preview">{ko ? "공개 라이선스" : "Public-preview license"}</option>
+                <option value="public-domain">{ko ? "퍼블릭 도메인" : "Public domain"}</option>
+              </select>
+              <button type="button" disabled={busy || !editingTasteWorkflow?.confirmedAt || !tastePreviewRights || !/^sha256:[a-f0-9]{64}$/.test(tasteTaskInputHash) || !tasteGenerationCohort.trim() || !tasteGenerationAttested} onClick={() => void chooseTastePreviews()} style={runtimeButtonStyle}><IconLayers size={13} /> {ko ? "칩 적용 + 컨트롤" : "Chip-on + control"}</button>
+              <button type="button" disabled={busy || !editingTasteWorkflow?.confirmedAt || !editingTasteWorkflow.previewNames} onClick={() => void uploadTasteProposal()} style={{ ...runtimeButtonStyle, color: "white", background: "var(--accent)" }}><IconFileUp size={13} /> {editingTasteWorkflow?.status === "moderation-pending" ? (ko ? "안전검사 확인" : "Check moderation") : (ko ? "Hub 초안" : "Hub draft")}</button>
+              <button type="button" onClick={() => setEditingTasteDraftId("")} aria-label={ko ? "Taste 검토 닫기" : "Close Taste review"} style={{ ...runtimeButtonStyle, marginLeft: "auto" }}><IconClose size={13} /></button>
+            </div>
+            {editingTasteWorkflow?.previewNames && <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, marginTop: 8, color: "var(--muted-deep)", fontSize: 10.5 }}><span><strong>CHIP ON</strong> · {editingTasteWorkflow.previewNames[0]}</span><span><strong>CONTROL</strong> · {editingTasteWorkflow.previewNames[1]}</span></div>}
+            {editingTasteWorkflow?.previewTreatments?.[0]?.evidenceLevel === "owner-attested-external" && <small style={{ display: "block", marginTop: 7, color: "var(--amber-deep)" }}>{ko ? "외부 생성 소유자 증명 · Hub 신뢰 평가자 영수증 전에는 공개 봉인 불가" : "Owner-attested external generation · public sealing stays blocked until Hub evaluator receipts exist"}</small>}
+          </div>
+        )}
+      </section>
+
+      <section style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
+          <h3 style={{ margin: 0, fontSize: 15 }}>{ko ? "경험 칩" : "Experience Chips"}</h3>
+          <span style={{ padding: "4px 9px", borderRadius: 999, background: "var(--accent-soft)", color: "var(--accent)", fontSize: 11, fontWeight: 700 }}>
+            {ko ? "로컬 원본 · Agent와 별도 자산" : "Local source · separate asset from Agent"}
+          </span>
+        </div>
+        <p style={{ margin: "0 0 14px", color: "var(--ink-soft)", fontSize: 12.5, lineHeight: 1.55 }}>
+          {ko
+            ? "Memory에서 검수된 항목을 별도 경험 자산으로 승격합니다. 원본 에이전트 패키지와 합치거나 복사하지 않으며, 같은 에이전트·프로젝트·런타임·패키지 버전에서만 사용됩니다."
+            : "Promote reviewed Memory items into a separate Experience asset. It never copies or merges the base agent package and is used only for the exact agent, project, runtime, and package version."}
+        </p>
+        {!agent.packageHash && (
+          <div style={{ padding: 10, borderRadius: 8, background: "var(--amber-soft)", color: "var(--amber-deep)", fontSize: 12 }}>
+            {ko ? "검증된 base package hash가 없어 경험 칩을 만들 수 없습니다." : "A verified base package hash is required before creating Experience Chips."}
+          </div>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1fr) auto auto", gap: 8, marginTop: 12 }}>
+          <input value={packName} onChange={(event) => setPackName(event.target.value)} placeholder={ko ? "경험 칩 묶음 이름" : "Experience Chips name"} style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, padding: "9px 10px", background: "var(--paper-2)", color: "var(--ink)" }} />
+          <button type="button" onClick={() => void chooseProject()} style={runtimeButtonStyle}>
+            {projectPath ? projectPath.split(/[\\/]/).filter(Boolean).at(-1) : (ko ? "프로젝트 폴더 선택" : "Choose project folder")}
+          </button>
+          <button type="button" disabled={busy || !agent.packageHash || !packName.trim() || !projectPath || !activeRuntime} onClick={() => void createPack()} style={{ ...runtimeButtonStyle, color: "white", background: "var(--accent)", opacity: busy || !agent.packageHash || !packName.trim() || !projectPath || !activeRuntime ? 0.45 : 1 }}>
+            {ko ? "경험 칩 만들기" : "Create Experience Chips"}
+          </button>
+        </div>
+        <small style={{ display: "block", marginTop: 8, color: "var(--muted-deep)" }}>
+          {ko ? `환경: ${activeRuntime?.kind ?? "런타임 없음"}` : `Environment: ${activeRuntime?.kind ?? "no runtime"}`}
+        </small>
+        {error && <div role="alert" style={{ marginTop: 10, color: "var(--red-deep)", fontSize: 12 }}>{error}</div>}
+      </section>
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(210px, 0.7fr) minmax(0, 1.8fr)", gap: 14 }}>
+        <section style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 12 }}>
+          <strong style={{ fontSize: 12.5 }}>{ko ? `내 경험 칩 묶음 ${packs.length}개` : `${packs.length} Experience Chips collections`}</strong>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
+            {packs.length === 0 && <span style={{ color: "var(--muted-deep)", fontSize: 12 }}>{ko ? "아직 경험 칩이 없습니다." : "No Experience Chips yet."}</span>}
+            {packs.map((pack) => (
+              <button key={pack.id} type="button" onClick={() => setSelectedPackId(pack.id)} data-active={pack.id === selectedPackId ? "true" : "false"} style={{ ...runtimeButtonStyle, textAlign: "left", background: pack.id === selectedPackId ? "var(--accent-soft)" : "var(--paper-2)", color: pack.id === selectedPackId ? "var(--accent)" : "var(--ink-soft)" }}>
+                <strong style={{ display: "block" }}>{pack.name}</strong>
+                <small>{pack.projectPath?.split(/[\\/]/).filter(Boolean).at(-1) ?? "global"} · {pack.basePackageHash?.slice(0, 10)}</small>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 14 }}>
+          {!selectedPack ? (
+            <span style={{ color: "var(--muted-deep)", fontSize: 12 }}>{ko ? "경험 칩 묶음을 선택하세요." : "Select an Experience Chips collection."}</span>
+          ) : (
+            <>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginBottom: 12 }}>
+                <div><strong>{selectedPack.name}</strong><small style={{ display: "block", marginTop: 3, color: "var(--muted-deep)" }}>{ko ? "원본과 분리된 로컬 오버레이" : "Local overlay, separate from its base"}</small></div>
+                <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>{candidates.length} candidates · {receipts.length} attested · {intents.length} intents</span>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 8, marginBottom: 12 }}>
+                <select value={memoryId} onChange={(event) => setMemoryId(event.target.value)} style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, padding: 8, background: "var(--paper-2)", color: "var(--ink)" }}>
+                  <option value="">{ko ? "같은 프로젝트의 큐레이팅된 Memory 선택" : "Choose curated Memory from this project"}</option>
+                  {eligibleMemory.map((entry) => <option key={entry.id} value={entry.id}>{entry.content.slice(0, 90)}</option>)}
+                </select>
+                <button type="button" disabled={busy || !memoryId} onClick={() => void captureCandidate()} style={runtimeButtonStyle}>{ko ? "후보 만들기" : "Create candidate"}</button>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {candidates.length === 0 && <span style={{ color: "var(--muted-deep)", fontSize: 12 }}>{ko ? "검수 대기 후보가 없습니다." : "No Experience candidates yet."}</span>}
+                {candidates.map((candidate) => (
+                  <div key={candidate.id} style={{ border: "1px solid var(--paper-edge)", borderRadius: 9, padding: 10, background: "var(--paper-2)" }}>
+                    <div style={{ display: "flex", gap: 8, justifyContent: "space-between", alignItems: "flex-start" }}>
+                      <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.45 }}>{candidate.summary}</p>
+                      <span style={{ flexShrink: 0, fontSize: 10.5, fontWeight: 700, color: candidate.status === "promoted" ? "var(--green-deep)" : "var(--amber-deep)" }}>{candidate.status === "promoted" ? "ATTESTED" : candidate.status.toUpperCase()}</span>
+                    </div>
+                    {candidate.status === "candidate" && <button type="button" disabled={busy} onClick={() => void promoteCandidate(candidate)} style={{ ...runtimeButtonStyle, marginTop: 8 }}>{ko ? "검수 후 승격 (attested)" : "Review & promote (attested)"}</button>}
+                    {candidate.status === "promoted" && (
+                      <button
+                        type="button"
+                        aria-pressed={operationalSourceIds.includes(candidate.id)}
+                        onClick={() => toggleOperationalSource(candidate.id)}
+                        style={{
+                          ...runtimeButtonStyle,
+                          marginTop: 8,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 6,
+                          color: operationalSourceIds.includes(candidate.id) ? "var(--green-deep)" : "var(--muted-deep)",
+                          background: operationalSourceIds.includes(candidate.id) ? "var(--green-soft)" : "var(--paper)",
+                        }}
+                      >
+                        {operationalSourceIds.includes(candidate.id) ? <IconCheck size={13} /> : <IconPlus size={13} />}
+                        {ko ? "공개 사본 소스" : "Public-copy source"}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              <div data-testid="operational-public-projection" style={{ marginTop: 14, padding: 12, borderRadius: 14, border: "1px solid var(--paper-edge)", background: "color-mix(in srgb, var(--paper) 88%, transparent)", boxShadow: "inset 0 1px 0 color-mix(in srgb, white 60%, transparent)" }}>
+                <div aria-label={ko ? "Operational 공개 사본 단계" : "Operational public-copy steps"} style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 7 }}>
+                  {[
+                    { icon: <IconCheck size={13} />, label: ko ? "선택" : "Select", done: operationalSourceIds.length > 0 },
+                    { icon: <IconEdit size={13} />, label: ko ? "일반화" : "Generalize", done: Boolean(operationalProjection) },
+                    { icon: <IconShield size={13} />, label: ko ? "확인" : "Confirm", done: operationalPublicReady },
+                    { icon: <IconFileUp size={13} />, label: ko ? "검증" : "Verify", done: latestCloud?.requestedVisibility === "public" },
+                  ].map((step) => (
+                    <div key={step.label} title={step.label} style={{ minHeight: 36, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, border: "1px solid var(--paper-edge)", background: step.done ? "color-mix(in srgb, var(--green-deep) 10%, var(--paper))" : "var(--paper-2)", color: step.done ? "var(--green-deep)" : "var(--muted-deep)", fontSize: 10, fontWeight: 800 }}>
+                      {step.icon}<span>{step.label}</span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "minmax(170px, .8fr) minmax(230px, 1.2fr)", gap: 8, marginTop: 10 }}>
+                  <input aria-label={ko ? "Operational 공개 제목" : "Operational public title"} value={operationalTitle} onChange={(event) => setOperationalTitle(event.target.value)} placeholder={ko ? "범용 제목" : "Portable title"} style={tasteInputStyle} />
+                  <textarea aria-label={ko ? "Operational 공개 절차" : "Operational public instructions"} value={operationalInstructions} onChange={(event) => setOperationalInstructions(event.target.value)} placeholder={ko ? "개인·회사·경로 정보 없이, 단계마다 한 줄" : "One generalized step per line; no person, company, or local path"} rows={3} style={{ ...tasteInputStyle, resize: "vertical" }} />
+                  <select aria-label={ko ? "Operational 작업 유형" : "Operational task signature"} value={operationalTask} onChange={(event) => setOperationalTask(event.target.value)} style={tasteInputStyle}>
+                    <option value="">{ko ? "작업 유형 선택" : "Select task"}</option>
+                    {operationalTasks.map((task) => <option key={task} value={task}>{task.replace("agentlas.task.v1/", "")}</option>)}
+                  </select>
+                  <div aria-label={ko ? "고정된 실행 환경" : "Pinned execution environment"} style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", minHeight: 36, padding: "6px 8px", border: "1px solid var(--paper-edge)", borderRadius: 9, background: "var(--paper-2)" }}>
+                    <IconRoute size={13} style={{ color: "var(--accent)" }} />
+                    {(selectedPack.environmentProfile?.constraints ?? []).map((constraint) => <span key={constraint} title={constraint} style={{ padding: "2px 6px", borderRadius: 999, background: "var(--fill-1)", color: "var(--muted-deep)", fontSize: 9.5 }}>{constraint.split("/").at(-1)}</span>)}
+                  </div>
+                </div>
+                {operationalProjection?.privacyIssueCodes.length ? (
+                  <div role="alert" style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 8 }}>
+                    {operationalProjection.privacyIssueCodes.map((code) => <span key={code} style={{ padding: "3px 6px", borderRadius: 999, background: "var(--amber-soft)", color: "var(--amber-deep)", fontSize: 9.5, fontWeight: 700 }}>{code}</span>)}
+                  </div>
+                ) : null}
+                <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center", marginTop: 10 }}>
+                  <button type="button" disabled={busy || operationalSourceIds.length === 0 || !operationalTitle.trim() || !operationalInstructions.trim() || !operationalTask || !selectedPack.baseAgentReleaseId} onClick={() => void saveOperationalPublicProjection()} style={runtimeButtonStyle}><IconEdit size={13} /> {ko ? "공개 사본 저장" : "Save public copy"}</button>
+                  <button type="button" disabled={busy || !operationalProjection || operationalProjectionDirty || operationalProjection.privacyIssueCodes.length > 0 || operationalPublicReady} onClick={() => void confirmOperationalPublicProjection()} style={runtimeButtonStyle}><IconShield size={13} /> {ko ? "명시적 확인" : "Explicit confirm"}</button>
+                  <span title={ko ? "원본 Memory와 후보는 계속 비공개입니다." : "Original Memory and candidates remain private."} style={{ marginLeft: "auto", width: 9, height: 9, borderRadius: 999, background: operationalPublicReady ? "var(--green-deep)" : "var(--amber-deep)", boxShadow: `0 0 0 4px ${operationalPublicReady ? "var(--green-soft)" : "var(--amber-soft)"}` }} />
+                </div>
+                {!selectedPack.baseAgentReleaseId && <small style={{ display: "block", marginTop: 8, color: "var(--muted-deep)" }}>{ko ? "먼저 비공개 Cloud 저장으로 정확한 Agent 릴리스를 확인하세요." : "First save privately so Agent Cloud can resolve the exact Agent release."}</small>}
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--paper-edge)" }}>
+                <div><strong style={{ fontSize: 12 }}>{ko ? "로컬 내보내기 의도" : "Local export intent"}</strong><small style={{ display: "block", marginTop: 3, color: "var(--muted-deep)" }}>{ko ? "호환용 로컬 영수증 · Cloud 저장은 아래에서 별도 실행" : "Compatibility-only local receipt · Cloud actions are separate below"}</small></div>
+                <button type="button" disabled={busy || receipts.length === 0} onClick={() => void createExportIntent()} style={runtimeButtonStyle}>{ko ? "비공개 로컬 의도 기록" : "Record private local intent"}</button>
+              </div>
+              <small style={{ display: "block", marginTop: 8, color: "var(--muted-deep)" }}>{ko ? "로컬 의도는 비공개 호환 영수증입니다. 공개·비공개 링크 검증은 확인된 일반화 사본만 Cloud로 보냅니다." : "Local intent is a private compatibility receipt. Public or unlisted verification sends only a confirmed generalized copy to Cloud."}</small>
+
+              <div data-testid="experience-cloud-exchange" style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--paper-edge)" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 9 }}>
+                  <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 10, padding: 11, background: "var(--paper-2)" }}>
+                    <small style={{ color: "var(--muted-deep)", fontWeight: 700 }}>{ko ? "1. 원본 Agent 업로드" : "1. Base Agent upload"}</small>
+                    <strong style={{ display: "block", marginTop: 5 }}>{agent.name}</strong>
+                    <span style={{ display: "block", marginTop: 3, fontSize: 11, color: "var(--muted-deep)" }}>{ko ? "Agent 소유/릴리스 노드" : "Agent ownership/release node"} · {selectedPack.basePackageHash?.slice(0, 12)}</span>
+                    <Link href="/cloud" style={{ display: "inline-block", marginTop: 8, color: "var(--accent)", fontSize: 11.5, fontWeight: 700 }}>
+                      {ko ? "Agent 업로드 화면 열기 →" : "Open Agent upload →"}
+                    </Link>
+                  </div>
+                  <div style={{ border: "1px solid var(--accent)", borderRadius: 10, padding: 11, background: "var(--accent-soft)" }}>
+                    <small style={{ color: "var(--accent)", fontWeight: 700 }}>{ko ? "2. Experience 업로드" : "2. Experience upload"}</small>
+                    <strong style={{ display: "block", marginTop: 5 }}>{selectedPack.name}</strong>
+                    <span style={{ display: "block", marginTop: 3, fontSize: 11, color: "var(--ink-soft)" }}>{ko ? "경험 소유자" : "Experience owner"}: {authoritativeOwner}</span>
+                    <span style={{ display: "block", marginTop: 2, fontSize: 10.5, color: "var(--muted-deep)" }}>{ko ? "Agent 제작자와 달라도 됩니다. Agent 파일은 포함하지 않습니다." : "May differ from the Agent author. No Agent files are included."}</span>
+                  </div>
+                </div>
+
+                <div aria-label={ko ? "Experience Cloud 상태 흐름" : "Experience Cloud status flow"} style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 10 }}>
+                  {[
+                    ko ? "로컬 Experience" : "Local Experience",
+                    ko ? "비공개 Cloud 저장" : "Private Cloud save",
+                    ko ? "검증 요청" : "Verification requested",
+                    ko ? "검증 대기" : "Verification pending",
+                    ko ? "공개 활성 (서버만)" : "Public active (server only)",
+                    ko ? "충돌 시 다시 맞춤·재시도" : "Conflict → reconcile & retry",
+                  ].map((label, index) => (
+                    <span key={label} style={{ padding: "4px 7px", borderRadius: 999, border: "1px solid var(--paper-edge)", background: index === 0 || latestCloud ? "var(--paper-2)" : "transparent", color: "var(--ink-soft)", fontSize: 10.5 }}>
+                      {index > 0 ? "→ " : ""}{label}
+                    </span>
+                  ))}
+                </div>
+
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 10 }}>
+                  <button type="button" disabled={busy || receipts.length === 0} onClick={() => void savePrivateCloud()} style={{ ...runtimeButtonStyle, background: "var(--paper-2)" }}>
+                    {ko ? "Experience만 비공개 저장" : "Save Experience privately"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || receipts.length === 0 || !operationalPublicReady}
+                    title={!operationalPublicReady ? (ko ? "확인된 공개 안전 사본이 필요합니다." : "A confirmed public-safe copy is required.") : undefined}
+                    onClick={() => void requestPublicVerification()}
+                    style={{ ...runtimeButtonStyle, color: "white", background: "var(--accent)", opacity: operationalPublicReady ? 1 : 0.45 }}
+                  >
+                    {ko ? "공개 검증 요청" : "Request public verification"}
+                  </button>
+                  {latestCloud && ["offline", "conflict", "error", "verification-requested", "verification-pending"].includes(latestCloud.state) && (
+                    <button type="button" disabled={busy} onClick={() => void reconcileCloud(latestCloud)} style={runtimeButtonStyle}>
+                      {ko ? "상태 다시 맞추기" : "Reconcile status"}
+                    </button>
+                  )}
+                </div>
+
+                {latestCloud ? (
+                  <div data-testid="experience-cloud-status" data-cloud-state={latestCloud.state} style={{ marginTop: 10, borderRadius: 8, padding: "9px 10px", background: latestCloud.state === "public-active" ? "var(--green-soft)" : latestCloud.state === "conflict" || latestCloud.state === "error" ? "var(--amber-soft)" : "var(--paper-2)", fontSize: 11.5 }}>
+                    <strong>{cloudStateLabel(latestCloud.state)}</strong>
+                    <span style={{ display: "block", marginTop: 3, color: "var(--muted-deep)" }}>
+                      {latestCloud.state === "public-active"
+                        ? (ko ? "서버 평가 영수증으로만 도달할 수 있는 상태입니다." : "Only a server evaluator receipt can reach this state.")
+                        : latestCloud.state === "conflict"
+                          ? (ko ? "로컬 자료는 그대로입니다. 서버 revision을 다시 읽은 뒤 재시도하세요." : "Local material is intact. Re-read the server revision before retrying.")
+                          : latestCloud.errorMessage || `${latestCloud.bundleId.slice(0, 18)} · rev ${latestCloud.remoteRevision?.slice(0, 14) ?? "—"}`}
+                    </span>
+                  </div>
+                ) : (
+                  <small style={{ display: "block", marginTop: 9, color: "var(--muted-deep)" }}>{ko ? "아직 Cloud로 보낸 경험이 없습니다. 로컬 경험은 그대로 실행에 쓸 수 있습니다." : "No Experience has been sent to Cloud. The local Experience remains usable."}</small>
+                )}
+              </div>
+            </>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
 // ── 3. 에이전트 상세 컨트롤 타워 뷰 컴포넌트 ──────────
 interface AgentDetailViewProps {
   node: ResolvedNode;
   agent: InstalledAgent | null;
-  activeTab: "identity" | "memory" | "playbook" | "activity";
-  onTabChange: (tab: "identity" | "memory" | "playbook" | "activity") => void;
+  activeTab: "identity" | "memory" | "playbook" | "activity" | "ontology";
+  onTabChange: (tab: "identity" | "memory" | "playbook" | "activity" | "ontology") => void;
   onBackToOverview: () => void;
   memoryParsed: {
     decisions: { id: string; title: string; content: string; synced?: boolean; enabled?: boolean }[];
@@ -2447,11 +3310,6 @@ interface AgentDetailViewProps {
   evolutionProposals: AgentEvolutionProposalUi[];
   onSaveMemory: (updater: (prev: any) => any) => Promise<void>;
   promptContent: string;
-  promptDraft: string;
-  onPromptDraftChange: (v: string) => void;
-  editingPrompt: boolean;
-  onSetEditingPrompt: (v: boolean) => void;
-  onSavePrompt: () => Promise<void>;
   onCreateEvolution: (newPrompt: string, source?: Record<string, unknown>) => Promise<AgentEvolutionProposalUi | undefined>;
   onCreateSkillEvolution: (skill: { slug?: string; name: string; description: string }) => Promise<boolean>;
   onApproveEvolution: (proposalId: string) => Promise<void>;
@@ -2469,6 +3327,7 @@ interface AgentDetailViewProps {
   runtimeOverrides: AgentRuntimeOverride[];
   nodeContext: SelectedNodeContext | null;
   onRuntimeOverridesChange: (items: AgentRuntimeOverride[]) => void;
+  onSaveAlias: (value: string) => Promise<void>;
   onRemoveAgent: () => void;
 }
 
@@ -2483,11 +3342,6 @@ function AgentDetailView({
   evolutionProposals,
   onSaveMemory,
   promptContent,
-  promptDraft,
-  onPromptDraftChange,
-  editingPrompt,
-  onSetEditingPrompt,
-  onSavePrompt,
   onCreateEvolution,
   onCreateSkillEvolution,
   onApproveEvolution,
@@ -2505,6 +3359,7 @@ function AgentDetailView({
   runtimeOverrides,
   nodeContext,
   onRuntimeOverridesChange,
+  onSaveAlias,
   onRemoveAgent,
 }: AgentDetailViewProps) {
   const { locale } = useT();
@@ -2514,6 +3369,136 @@ function AgentDetailView({
   
   // Hub 공유 상태 메타데이터 기본값 토글. 실제 원격 업로드는 Hub/Cloud publish 흐름에서 수행한다.
   const [globalHubSync, setGlobalHubSync] = useState(true);
+  const [learningSummary, setLearningSummary] = useState<AgentLearningSummary | null>(null);
+  const [learningSummaryLoading, setLearningSummaryLoading] = useState(false);
+  const [learningSummaryError, setLearningSummaryError] = useState("");
+  const [ontologySummary, setOntologySummary] = useState<ExperienceOntologySummary | null>(null);
+  const [ontologySummaryLoading, setOntologySummaryLoading] = useState(false);
+  const [ontologySummaryError, setOntologySummaryError] = useState("");
+  const [ontologyGraph, setOntologyGraph] = useState<ExperienceOntologyGraphSnapshot | null>(null);
+  const [ontologyGraphLoading, setOntologyGraphLoading] = useState(false);
+  const [ontologyGraphError, setOntologyGraphError] = useState(false);
+  const [ontologyRevision, setOntologyRevision] = useState(0);
+  const [hubOntology, setHubOntology] = useState<AgentOntologyHubProjection | null>(null);
+  const [hubOntologyLoading, setHubOntologyLoading] = useState(false);
+  const [hubOntologyError, setHubOntologyError] = useState("");
+  const [hubOntologyRefresh, setHubOntologyRefresh] = useState(0);
+
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !agent?.id) {
+      setLearningSummary(null);
+      setLearningSummaryLoading(false);
+      setLearningSummaryError(locale === "ko" ? "설치된 에이전트만 학습 원장을 조회할 수 있습니다." : "Only installed agents have a learning ledger.");
+      return;
+    }
+    let cancelled = false;
+    setLearningSummaryLoading(true);
+    setLearningSummaryError("");
+    void api.agentLearning.summary(agent.id)
+      .then((summary) => {
+        if (!cancelled) setLearningSummary(summary);
+      })
+      .catch((reason) => {
+        if (!cancelled) {
+          setLearningSummary(null);
+          setLearningSummaryError(reason instanceof Error ? reason.message : String(reason));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLearningSummaryLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [agent?.id, locale]);
+
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !agent?.id) {
+      setOntologySummary(null);
+      setOntologySummaryLoading(false);
+      setOntologySummaryError(locale === "ko" ? "설치된 에이전트만 온톨로지를 조회할 수 있습니다." : "Only installed agents have an ontology summary.");
+      return;
+    }
+    let cancelled = false;
+    setOntologySummaryLoading(true);
+    setOntologySummaryError("");
+    void api.experience.ontologySummary(agent.id)
+      .then((summary) => {
+        if (!cancelled) setOntologySummary(summary);
+      })
+      .catch((reason) => {
+        if (!cancelled) {
+          setOntologySummary(null);
+          setOntologySummaryError(reason instanceof Error ? reason.message : String(reason));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setOntologySummaryLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [agent?.id, locale, ontologyRevision]);
+
+  useEffect(() => {
+    if (activeTab !== "ontology") return;
+    const api = ipc();
+    if (!api || !agent?.id) {
+      setOntologyGraph(null);
+      setOntologyGraphLoading(false);
+      setOntologyGraphError(true);
+      return;
+    }
+    let cancelled = false;
+    setOntologyGraph(null);
+    setOntologyGraphLoading(true);
+    setOntologyGraphError(false);
+    void api.experience.ontologyGraph(agent.id)
+      .then((snapshot) => {
+        if (!cancelled) {
+          setOntologyGraph(snapshot);
+          setOntologyGraphError(false);
+        }
+      })
+      .catch((reason) => {
+        console.warn("[ontology-atlas] relation graph unavailable", reason);
+        if (!cancelled) {
+          setOntologyGraph(null);
+          setOntologyGraphError(true);
+        }
+      })
+      .finally(() => { if (!cancelled) setOntologyGraphLoading(false); });
+    return () => { cancelled = true; };
+  }, [activeTab, agent?.id, ontologyRevision]);
+
+  useEffect(() => {
+    if (activeTab !== "ontology") return;
+    const api = ipc();
+    if (!api || !agent?.id) {
+      setHubOntology(null);
+      setHubOntologyLoading(false);
+      setHubOntologyError(locale === "ko" ? "설치된 에이전트만 Hub 장착 상태를 조회할 수 있습니다." : "Only installed agents have a Hub loadout.");
+      return;
+    }
+    let cancelled = false;
+    setHubOntology(null);
+    setHubOntologyLoading(true);
+    setHubOntologyError("");
+    void api.experience.hubProjection(agent.id, hubOntologyRefresh > 0)
+      .then((projection) => {
+        if (!cancelled) setHubOntology(projection);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHubOntology(null);
+          // Never surface a raw Main/network error: it may include a host path
+          // or endpoint detail outside the renderer-safe projection contract.
+          setHubOntologyError(locale === "ko" ? "Hub 장착 상태를 안전하게 확인하지 못했습니다." : "The Hub loadout could not be verified safely.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setHubOntologyLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [activeTab, agent?.id, hubOntologyRefresh, locale]);
   const effectiveRuntimeOverride = useMemo(() => {
     const orderedTargets: Array<{ scope: AgentRuntimeOverrideScope; targetId?: string | null }> = [
       { scope: "agent", targetId: node.agentId },
@@ -2642,6 +3627,31 @@ function AgentDetailView({
         type: "sync",
       });
     }
+    if (learningSummary && (learningSummary.runCount > 0 || learningSummary.legacyChatLinkedRunCount > 0)) {
+      derived.push({
+        id: "observed-curation-ledger",
+        timestamp: learningSummary.lastRunAt
+          ? formatMemoryEntryTime(learningSummary.lastRunAt, locale)
+          : "ledger",
+        title: learningSummary.curationTurnCount > 0
+          ? (locale === "ko" ? "학습 검사 영수증" : "Curation receipts")
+          : learningSummary.runCount > 0
+            ? (locale === "ko" ? "실행 원장" : "Executor ledger")
+            : (locale === "ko" ? "레거시 채팅 연결" : "Legacy chat-linked activity"),
+        desc: learningSummary.curationTurnCount > 0
+          ? (locale === "ko"
+              ? `${learningSummary.curationTurnCount}회 검사 · 저장 ${learningSummary.memoryWrittenCount} · 새 기억 없음 ${learningSummary.noNewMemoryTurnCount} · 중복 ${learningSummary.memoryDedupedCount} · 민감정보 차단 ${learningSummary.memoryRedactedCount}`
+              : `${learningSummary.curationTurnCount} checks · ${learningSummary.memoryWrittenCount} written · ${learningSummary.noNewMemoryTurnCount} no-new-memory · ${learningSummary.memoryDedupedCount} deduped · ${learningSummary.memoryRedactedCount} sensitive blocked`)
+          : learningSummary.runCount > 0
+            ? (locale === "ko"
+                ? `${learningSummary.runCount}회 실행자 원장은 확인되지만 이 버전 이전 학습 결과를 추측해 채우지 않습니다.`
+                : `${learningSummary.runCount} executor-ledger run(s) are recorded, but pre-ledger learning outcomes are not guessed or backfilled.`)
+            : (locale === "ko"
+                ? `${learningSummary.legacyChatLinkedRunCount}회 과거 채팅이 이 에이전트와 정확히 연결됩니다. 최종 실행자였다고 소급 표기하지는 않습니다.`
+                : `${learningSummary.legacyChatLinkedRunCount} legacy chat run(s) link exactly to this agent without retroactively claiming it was the final executor.`),
+        type: "sync",
+      });
+    }
     // 런타임 durable 메모리(큐레이터 DB) → 실제 학습 타임라인 행(최신순). 파일 파생 이벤트와 나란히 합류.
     const dbRows = [...memoryEntries]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
@@ -2665,38 +3675,11 @@ function AgentDetailView({
           : `${proposal.status} · ${proposal.summary} · ${proposal.targetPath}`,
         type: "evolution" as const,
       }));
-    const merged: typeof derived = [...timelineEvents, ...proposalRows, ...dbRows, ...derived];
+    const curationRows = derived.filter((row) => row.id === "observed-curation-ledger");
+    const staticRows = derived.filter((row) => row.id !== "observed-curation-ledger");
+    const merged: typeof derived = [...timelineEvents, ...curationRows, ...proposalRows, ...dbRows, ...staticRows];
     return merged;
-  }, [agentFiles.length, evolutionProposals, memoryEntries, memoryParsed.decisions.length, memoryParsed.gotchas.length, memoryParsed.openQuestions.length, promptContent, timelineEvents, locale]);
-
-  // 프롬프트 복사 핸들러
-  const handleCopyPrompt = () => {
-    navigator.clipboard.writeText(promptContent);
-    showToast(locale === "ko" ? "시스템 프롬프트가 클립보드에 복사되었습니다." : "System prompt copied to clipboard.");
-  };
-
-  // 프롬프트 기본값 재설정 핸들러
-  const handleResetPrompt = async () => {
-    if (!confirm(locale === "ko" ? "시스템 프롬프트를 에이전트 기본 룰셋 정의서 프로필로 재설정하시겠습니까?" : "Reset the system prompt to the agent's default ruleset profile?")) return;
-    const defaultVal = agent?.systemPrompt ?? "# Default Prompt\nNo default instruction available.";
-    onPromptDraftChange(defaultVal);
-    
-    const proposal = await onCreateEvolution(defaultVal, { changeOrigin: "reset_to_default" });
-    if (!proposal) return;
-    onTabChange("activity");
-    setTimelineEvents(prev => [
-      {
-        id: `timeline-${Date.now()}`,
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        title: locale === "ko" ? "초기화 검토 후보 생성" : "Reset review candidate created",
-        desc: locale === "ko"
-          ? "기본 프로필과 현재 프롬프트의 diff를 검토한 뒤 승인할 수 있습니다. 원본은 아직 유지됩니다."
-          : "Review the default-profile diff before approval. The original remains intact.",
-        type: "evolution"
-      },
-      ...prev
-    ]);
-  };
+  }, [agentFiles.length, evolutionProposals, learningSummary, memoryEntries, memoryParsed.decisions.length, memoryParsed.gotchas.length, memoryParsed.openQuestions.length, promptContent, timelineEvents, locale]);
 
   const toggleItemExpand = (id: string) => {
     setExpandedItems(prev => ({ ...prev, [id]: !prev[id] }));
@@ -2851,7 +3834,8 @@ function AgentDetailView({
 
 
   // 아바타 그라데이션 모노그램
-  const letters = node.name.slice(0, 2).toUpperCase();
+  const detailDisplayName = agent ? agentDisplayName(agent, locale) : node.name;
+  const letters = detailDisplayName.slice(0, 2).toUpperCase();
   const getGradient = (tone?: string) => {
     switch (tone) {
       case "blue": return "linear-gradient(135deg, #5a56dc, #8a86e8)";
@@ -2870,7 +3854,7 @@ function AgentDetailView({
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, height: "100%", overflow: "hidden" }}>
         
         {/* 상단 액션 바 */}
-        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 24px", borderBottom: "var(--hairline)", background: "var(--paper)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 24px", borderBottom: "var(--hairline)", background: "var(--paper)", minWidth: 0 }}>
           <button
             onClick={onBackToOverview}
             style={{
@@ -2883,13 +3867,15 @@ function AgentDetailView({
               background: "var(--paper-2)",
               border: "1px solid var(--paper-edge)",
               color: "var(--ink-soft)",
-              cursor: "pointer"
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+              flexShrink: 0,
             }}
           >
             {locale === "ko" ? "← 회사 개요" : "← Company overview"}
           </button>
           <div style={{ height: 12, width: 1, background: "var(--paper-edge)" }} />
-          <div style={{ fontSize: 13, color: "var(--muted-deep)" }}>
+          <div style={{ flex: "1 1 120px", minWidth: 0, fontSize: 13, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {agent?.kind === "team" ? (locale === "ko" ? "팀 에이전트" : "Team agent") : (locale === "ko" ? "개별 전문가 에이전트" : "Individual specialist agent")}
           </div>
           {node.agentId && (
@@ -2930,6 +3916,8 @@ function AgentDetailView({
                 fontSize: 12,
                 fontWeight: 700,
                 cursor: "pointer",
+                whiteSpace: "nowrap",
+                flexShrink: 0,
               }}
             >
               <IconTrash size={13} />
@@ -2959,33 +3947,37 @@ function AgentDetailView({
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
-              <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 20, fontWeight: 700, color: "var(--ink)" }}>
-                {node.name}
-              </h1>
+              {agent ? (
+                <AgentNameEditor agent={agent} locale={locale} onSave={onSaveAlias} />
+              ) : (
+                <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 20, fontWeight: 700, color: "var(--ink)" }}>{detailDisplayName}</h1>
+              )}
               <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 999, background: "var(--fill-1)", color: "var(--accent)", fontWeight: 700 }}>
                 {node.role}
               </span>
             </div>
             <p style={{ margin: 0, fontSize: 12, color: "var(--muted-deep)" }}>
-              {agent?.tagline || (locale === "ko" ? `${node.name}의 규칙 지식베이스 및 계약 런타임` : `${node.name}'s rule knowledge base and contract runtime`)}
+              {agent?.tagline || (locale === "ko" ? `${detailDisplayName}의 규칙 지식베이스 및 계약 런타임` : `${detailDisplayName}'s rule knowledge base and contract runtime`)}
             </p>
           </div>
         </header>
 
         {/* 탭 네비게이션 */}
-        <nav style={{ display: "flex", gap: 4, padding: "8px 24px", background: "var(--paper)", borderBottom: "var(--hairline)" }}>
-          {(["identity", "memory", "playbook", "activity"] as const).map((tab) => {
+        <nav data-testid="agent-detail-tabs" style={{ display: "flex", gap: 4, padding: "8px 24px", background: "var(--paper)", borderBottom: "var(--hairline)", overflowX: "auto", flexShrink: 0 }}>
+          {(["identity", "memory", "playbook", "activity", "ontology"] as const).map((tab) => {
             const active = activeTab === tab;
             const labels = {
               identity: locale === "ko" ? "정체성 & 페르소나" : "Identity & Persona",
               memory: locale === "ko" ? "큐레이팅된 메모리" : "Curated Memory",
               playbook: locale === "ko" ? "플레이북 & 워크플로우" : "Playbook & Workflow",
-              activity: locale === "ko" ? "활동 및 자체 진화" : "Activity & Self-Evolution"
+              activity: locale === "ko" ? "활동 및 자체 진화" : "Activity & Self-Evolution",
+              ontology: locale === "ko" ? "온톨로지 칩" : "Ontology Chips",
             };
             return (
               <button
                 key={tab}
                 onClick={() => onTabChange(tab)}
+                aria-current={active ? "page" : undefined}
                 style={{
                   padding: "8px 16px",
                   borderRadius: "var(--radius-sm)",
@@ -2995,7 +3987,8 @@ function AgentDetailView({
                   color: active ? "var(--accent)" : "var(--ink-soft)",
                   border: "none",
                   cursor: "pointer",
-                  transition: "all 0.15s ease"
+                  transition: "all 0.15s ease",
+                  whiteSpace: "nowrap",
                 }}
               >
                 {labels[tab]}
@@ -3010,193 +4003,14 @@ function AgentDetailView({
           {/* 탭 1: 정체성 & 페르소나 */}
           {activeTab === "identity" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 840 }}>
-              <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-                <h3 style={{ margin: "0 0 12px 0", fontSize: 14, fontWeight: 700 }}>{locale === "ko" ? "시스템 프롬프트 (System Prompt)" : "System Prompt"}</h3>
-                
-                {editingPrompt ? (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    <textarea
-                      value={promptDraft}
-                      onChange={(e) => onPromptDraftChange(e.target.value)}
-                      style={{
-                        width: "100%",
-                        height: 280,
-                        fontFamily: "var(--font-mono)",
-                        fontSize: 12,
-                        lineHeight: 1.6,
-                        padding: 12,
-                        borderRadius: "var(--radius-sm)",
-                        background: "var(--paper-2)",
-                        border: "1px solid var(--accent)",
-                        color: "var(--ink)"
-                      }}
-                    />
-                    <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                      <button
-                        onClick={() => onSetEditingPrompt(false)}
-                        style={{ padding: "6px 12px", border: "1px solid var(--paper-edge)", background: "none", borderRadius: 6, cursor: "pointer", fontSize: 12 }}
-                      >
-                        {locale === "ko" ? "취소" : "Cancel"}
-                      </button>
-                      <button
-                        onClick={() => void onSavePrompt()}
-                        disabled={saving}
-                        style={{ padding: "6px 12px", background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 600 }}
-                      >
-                        {saving ? (locale === "ko" ? "저장 중..." : "Saving...") : (locale === "ko" ? "반영하기" : "Apply")}
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    {(() => {
-                      const promptSections = parsePromptSections(promptContent);
-                      return (
-                        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                          {/* 프롬프트 세부 분석 카드 3열 뷰 */}
-                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-                            
-                            {/* Directives */}
-                            <div style={{ background: "rgba(90, 86, 220, 0.03)", border: "1px solid rgba(90, 86, 220, 0.15)", borderRadius: 8, padding: 12 }}>
-                              <h4 style={{ margin: "0 0 8px 0", fontSize: 12, fontWeight: 700, color: "var(--accent)", display: "flex", alignItems: "center", gap: 4 }}>
-                                <IconWand size={12} />
-                                {locale === "ko" ? "지시사항 (Directives)" : "Directives"}
-                              </h4>
-                              {promptSections.directives.length === 0 ? (
-                                <span style={{ fontSize: 11, color: "var(--muted)" }}>{locale === "ko" ? "감지된 지시사항이 없습니다." : "No directives detected."}</span>
-                              ) : (
-                                <ul style={{ paddingLeft: 14, margin: 0, fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.5 }}>
-                                  {promptSections.directives.slice(0, 5).map((d, idx) => (
-                                    <li key={idx} style={{ marginBottom: 4 }}>{d}</li>
-                                  ))}
-                                </ul>
-                              )}
-                            </div>
 
-                            {/* Constraints */}
-                            <div style={{ background: "rgba(194, 74, 40, 0.03)", border: "1px solid rgba(194, 74, 40, 0.15)", borderRadius: 8, padding: 12 }}>
-                              <h4 style={{ margin: "0 0 8px 0", fontSize: 12, fontWeight: 700, color: "var(--peach-ink)", display: "flex", alignItems: "center", gap: 4 }}>
-                                <IconShield size={12} />
-                                {locale === "ko" ? "제약조건 (Constraints)" : "Constraints"}
-                              </h4>
-                              {promptSections.constraints.length === 0 ? (
-                                <span style={{ fontSize: 11, color: "var(--muted)" }}>{locale === "ko" ? "감지된 제약사항이 없습니다." : "No constraints detected."}</span>
-                              ) : (
-                                <ul style={{ paddingLeft: 14, margin: 0, fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.5 }}>
-                                  {promptSections.constraints.slice(0, 5).map((c, idx) => (
-                                    <li key={idx} style={{ marginBottom: 4 }}>{c}</li>
-                                  ))}
-                                </ul>
-                              )}
-                            </div>
-
-                            {/* Output Formats */}
-                            <div style={{ background: "rgba(86, 161, 74, 0.03)", border: "1px solid rgba(86, 161, 74, 0.15)", borderRadius: 8, padding: 12 }}>
-                              <h4 style={{ margin: "0 0 8px 0", fontSize: 12, fontWeight: 700, color: "var(--green-deep)", display: "flex", alignItems: "center", gap: 4 }}>
-                                <IconLayers size={12} />
-                                {locale === "ko" ? "입출력 형태 (Formats)" : "I/O Formats"}
-                              </h4>
-                              {promptSections.formats.length === 0 ? (
-                                <span style={{ fontSize: 11, color: "var(--muted)" }}>{locale === "ko" ? "감지된 규격정보가 없습니다." : "No format info detected."}</span>
-                              ) : (
-                                <ul style={{ paddingLeft: 14, margin: 0, fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.5 }}>
-                                  {promptSections.formats.slice(0, 5).map((f, idx) => (
-                                    <li key={idx} style={{ marginBottom: 4 }}>{f}</li>
-                                  ))}
-                                </ul>
-                              )}
-                            </div>
-
-                          </div>
-
-                          {/* 전체 원문 아코디언 */}
-                          <details style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)" }}>
-                            <summary style={{ padding: "8px 12px", fontSize: 12, fontWeight: 600, color: "var(--ink-soft)", cursor: "pointer", outline: "none" }}>
-                              {locale === "ko" ? "시스템 프롬프트 전체 원문(Source) 보기" : "View full system prompt source"}
-                            </summary>
-                            <pre
-                              style={{
-                                margin: 0,
-                                padding: 12,
-                                borderTop: "1px solid var(--paper-edge)",
-                                fontSize: 11,
-                                fontFamily: "var(--font-mono)",
-                                lineHeight: 1.6,
-                                whiteSpace: "pre-wrap",
-                                overflowX: "auto",
-                                color: "var(--ink-soft)",
-                                maxHeight: 200,
-                                overflowY: "auto"
-                              }}
-                            >
-                              {promptContent || (locale === "ko" ? "로드된 프롬프트 내용이 없습니다." : "No prompt content loaded.")}
-                            </pre>
-                          </details>
-
-                          {/* 컨트롤 액션 바 */}
-                          <div style={{ display: "flex", justifyItems: "space-between", alignItems: "center", marginTop: 4 }}>
-                            <div style={{ display: "flex", gap: 6 }}>
-                              <button
-                                onClick={handleCopyPrompt}
-                                style={{
-                                  padding: "6px 12px",
-                                  background: "var(--paper)",
-                                  border: "1px solid var(--paper-edge)",
-                                  borderRadius: 6,
-                                  fontSize: 12,
-                                  fontWeight: 600,
-                                  cursor: "pointer",
-                                  boxShadow: "var(--shadow-1)",
-                                  color: "var(--ink-soft)"
-                                }}
-                              >
-                                {locale === "ko" ? "프롬프트 복사" : "Copy prompt"}
-                              </button>
-                              <button
-                                onClick={handleResetPrompt}
-                                style={{
-                                  padding: "6px 12px",
-                                  background: "var(--paper)",
-                                  border: "1px solid var(--paper-edge)",
-                                  borderRadius: 6,
-                                  fontSize: 12,
-                                  fontWeight: 600,
-                                  cursor: "pointer",
-                                  boxShadow: "var(--shadow-1)",
-                                  color: "var(--peach-ink)"
-                                }}
-                              >
-                                {locale === "ko" ? "기본값 재설정" : "Reset to default"}
-                              </button>
-                            </div>
-                            {agent?.localPath && (
-                              <button
-                                onClick={() => { onPromptDraftChange(promptContent); onSetEditingPrompt(true); }}
-                                style={{
-                                  display: "inline-flex",
-                                  alignItems: "center",
-                                  gap: 4,
-                                  padding: "6px 12px",
-                                  background: "var(--paper)",
-                                  border: "1px solid var(--paper-edge)",
-                                  borderRadius: 6,
-                                  fontSize: 12,
-                                  fontWeight: 600,
-                                  cursor: "pointer",
-                                  boxShadow: "var(--shadow-1)",
-                                  color: "var(--accent)"
-                                }}
-                              >
-                                <IconEdit size={12} />
-                                {locale === "ko" ? "프롬프트 편집" : "Edit prompt"}
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })()}
-                  </div>
-                )}
+              <div data-testid="governed-agent-identity" style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
+                <h3 style={{ margin: "0 0 7px", fontSize: 14 }}>{locale === "ko" ? "거버넌스된 에이전트 정체성" : "Governed agent identity"}</h3>
+                <p style={{ margin: 0, color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.55 }}>
+                  {locale === "ko"
+                    ? "내부 지시 원문은 이 화면에 노출하지 않습니다. 학습에서 생긴 변경은 Activity & Self-Evolution의 diff 검토, 명시적 승인, 적용 영수증, 롤백 절차를 거칩니다."
+                    : "Raw internal instructions are not exposed here. Learning-driven changes go through diff review, explicit approval, an apply receipt, and rollback in Activity & Self-Evolution."}
+                </p>
               </div>
 
               <RuntimeAssignmentPanel
@@ -3604,6 +4418,68 @@ function AgentDetailView({
             </div>
           )}
 
+          {/* 목록 우선 온톨로지 요약 + Memory와 분리된 Experience Chips 관리 표면. */}
+          {activeTab === "ontology" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 1180 }}>
+              <AgentOntologyGraphView
+                summary={ontologySummary}
+                graphSnapshot={ontologyGraph}
+                hub={hubOntology}
+                agentName={agent ? agentDisplayName(agent, locale) : (locale === "ko" ? "에이전트" : "Agent")}
+                locale={locale}
+                graphLoading={ontologyGraphLoading}
+                graphError={ontologyGraphError}
+              />
+              <AgentHubOntologyProjectionView
+                result={hubOntology}
+                loading={hubOntologyLoading}
+                error={hubOntologyError}
+                locale={locale}
+                onRefresh={() => setHubOntologyRefresh((current) => current + 1)}
+              />
+              <section data-testid="agent-local-experience" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <details data-testid="ontology-local-about" style={{ border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper-2)", overflow: "hidden" }}>
+                  <summary style={{ listStyle: "none", cursor: "pointer", minHeight: 52, padding: "9px 12px", display: "flex", alignItems: "center", gap: 9 }}>
+                    <span aria-hidden="true" style={{ width: 30, height: 30, borderRadius: 10, display: "grid", placeItems: "center", background: "var(--paper)", color: "var(--green-deep)" }}><IconRoute size={14} /></span>
+                    <h3 style={{ margin: 0, fontSize: 13 }}>{locale === "ko" ? "이 Mac에서 쌓인 경험" : "Experience accumulated on this Mac"}</h3>
+                    <span title={locale === "ko" ? "경험 항목" : "Experience items"} style={{ marginLeft: "auto", padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, background: "var(--paper)", color: "var(--muted-deep)", fontSize: 10, fontWeight: 750 }}>{ontologySummary?.candidateCount ?? 0}</span>
+                    <span aria-hidden="true" style={{ width: 7, height: 7, borderRight: "1.5px solid currentColor", borderBottom: "1.5px solid currentColor", transform: "rotate(45deg) translateY(-2px)", color: "var(--muted-deep)" }} />
+                  </summary>
+                  <p style={{ margin: 0, padding: "10px 12px 12px", borderTop: "1px solid var(--paper-edge)", color: "var(--ink-soft)", fontSize: 11.5, lineHeight: 1.55 }}>
+                    {locale === "ko"
+                      ? "로컬 메모리에서 안전하게 선별된 비공개 후보와 검수 영수증입니다. 위 Hub 장착 상태와 별도이며 자동 업로드·구매·장착되지 않습니다."
+                      : "Private candidates and review receipts safely selected from local Memory. This is separate from the Hub loadout above and is never uploaded, purchased, or attached automatically."}
+                  </p>
+                </details>
+                <ExperienceOntologySummaryView
+                  summary={ontologySummary}
+                  loading={ontologySummaryLoading}
+                  error={ontologySummaryError}
+                  locale={locale}
+                />
+                <details data-testid="ontology-chip-management" style={{ border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)", overflow: "hidden" }}>
+                  <summary style={{ listStyle: "none", cursor: "pointer", minHeight: 56, padding: "10px 12px", display: "flex", alignItems: "center", gap: 9 }}>
+                    <span aria-hidden="true" style={{ width: 32, height: 32, borderRadius: 11, display: "grid", placeItems: "center", background: "var(--accent-soft)", color: "var(--accent)", boxShadow: "inset 0 1px 0 color-mix(in srgb, white 55%, transparent)" }}><IconLayers size={15} /></span>
+                    <strong style={{ fontSize: 13 }}>{locale === "ko" ? "온톨로지 칩 관리" : "Manage Ontology Chips"}</strong>
+                    <span title={locale === "ko" ? "경험 칩" : "Experience chips"} style={{ padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, color: "var(--green-deep)", background: "var(--green-soft)", fontSize: 10, fontWeight: 750 }}>O {ontologySummary?.packCount ?? 0}</span>
+                    <span title={locale === "ko" ? "취향 후보" : "Taste drafts"} style={{ padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, color: "var(--amber-deep)", background: "var(--amber-soft)", fontSize: 10, fontWeight: 750 }}>T {ontologySummary?.tasteDraftCount ?? 0}</span>
+                    <span aria-hidden="true" style={{ marginLeft: "auto", width: 7, height: 7, borderRight: "1.5px solid currentColor", borderBottom: "1.5px solid currentColor", transform: "rotate(45deg) translateY(-2px)", color: "var(--muted-deep)" }} />
+                  </summary>
+                  <div style={{ padding: "4px 12px 12px", borderTop: "1px solid var(--paper-edge)" }}>
+                    <ExperiencePanel
+                      agent={agent}
+                      memoryEntries={memoryEntries}
+                      runtimeStatuses={runtimeStatuses}
+                      locale={locale}
+                      showToast={showToast}
+                      onChanged={() => setOntologyRevision((current) => current + 1)}
+                    />
+                  </div>
+                </details>
+              </section>
+            </div>
+          )}
+
           {/* 탭 3: 플레이북 & 워크플로우 */}
           {activeTab === "playbook" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 840 }}>
@@ -3614,7 +4490,7 @@ function AgentDetailView({
                     { label: "Route", desc: locale === "ko" ? "Chat 또는 Hub 호출에서 이 에이전트가 후보가 됩니다." : "This agent becomes a candidate on Chat or Hub invocations.", icon: IconRoute },
                     { label: "Context", desc: locale === "ko" ? "프로젝트, Env, 메모리 규칙이 invocation에 주입됩니다." : "Project, env, and memory rules are injected into the invocation.", icon: IconBrain },
                     { label: "Tools", desc: locale === "ko" ? "필요한 MCP 서버와 로컬 권한을 확인합니다." : "Checks the required MCP servers and local permissions.", icon: IconLayers },
-                    { label: "Persist", desc: locale === "ko" ? "결정, 주의사항, 진화 로그를 로컬 파일에 남깁니다." : "Records decisions, gotchas, and evolution logs to local files.", icon: IconPaperclip },
+                    { label: "Persist", desc: locale === "ko" ? "학습은 durable DB에, 승인·롤백은 영수증에 남습니다. 플레이북 파일은 승인 없이 생기지 않습니다." : "Learning is stored in the durable DB and approve/rollback actions in receipts. No playbook file is created without approval.", icon: IconPaperclip },
                   ].map((item) => {
                     const Icon = item.icon;
                     return (
@@ -3628,6 +4504,17 @@ function AgentDetailView({
                     );
                   })}
                 </div>
+              </div>
+
+              <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
+                <h4 style={{ margin: "0 0 12px", fontSize: 13.5 }}>{locale === "ko" ? "실제 학습·파일·영수증" : "Actual learning, files & receipts"}</h4>
+                <AgentLearningMetricGrid
+                  summary={learningSummary}
+                  loading={learningSummaryLoading}
+                  error={learningSummaryError}
+                  locale={locale}
+                  context="playbook"
+                />
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
@@ -3713,25 +4600,14 @@ function AgentDetailView({
           {activeTab === "activity" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 840 }}>
               
-              {/* 실 지표 — 이 에이전트의 실제 메모리·타임라인에서 도출 */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
-                <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>{locale === "ko" ? "활성 규칙 (Active rules)" : "Active rules"}</div>
-                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--green-deep)" }}>
-                    {[...memoryParsed.decisions, ...memoryParsed.gotchas].filter((r) => r.enabled !== false).length}
-                  </div>
-                </div>
-                <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>{locale === "ko" ? "메모리 항목 (Memory items)" : "Memory items"}</div>
-                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--accent)" }}>
-                    {memoryParsed.decisions.length + memoryParsed.gotchas.length + memoryParsed.openQuestions.length}
-                  </div>
-                </div>
-                <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, textAlign: "center" }}>
-                  <div style={{ fontSize: 12, color: "var(--muted-deep)", marginBottom: 4 }}>{locale === "ko" ? "진화·활동 이력 (Events)" : "Evolution & activity log (Events)"}</div>
-                  <div style={{ fontSize: 24, fontWeight: 700, color: "var(--peach-ink)" }}>{observedTimelineEvents.length}</div>
-                </div>
-              </div>
+              {/* Main-owned per-agent 원장만 사용. 파일 파싱 수치를 실행/실패 수치로 오인하지 않는다. */}
+              <AgentLearningMetricGrid
+                summary={learningSummary}
+                loading={learningSummaryLoading}
+                error={learningSummaryError}
+                locale={locale}
+                context="activity"
+              />
 
               {/* 자체 진화 프롬프트 디프 제안 */}
               <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
@@ -3758,9 +4634,13 @@ function AgentDetailView({
                 {!hasPendingEvolution && !displayedProposal && runtimeEvolutionCandidates.length === 0 && (
                   <div style={{ fontSize: 12, color: "var(--muted-deep)", padding: "12px 4px", lineHeight: 1.6 }}>
                     {memoryEntries.length === 0 && memoryParsed.decisions.length + memoryParsed.gotchas.length === 0
-                      ? (locale === "ko"
-                          ? "아직 축적된 학습이 없습니다 — 에이전트가 작업을 수행하면 여기에 쌓입니다."
-                          : "No learnings accumulated yet — they will build up here as the agent performs work.")
+                      ? (learningSummary && (learningSummary.runCount > 0 || learningSummary.legacyChatLinkedRunCount > 0)
+                          ? (locale === "ko"
+                              ? `실행자 원장 ${learningSummary.runCount}회·과거 채팅 연결 ${learningSummary.legacyChatLinkedRunCount}회가 있지만 승인 가능한 내구 학습은 아직 없습니다. 위 학습 영수증에서 새 기억 없음·중복·차단 수치를 확인할 수 있습니다.`
+                              : `This agent has ${learningSummary.runCount} executor-ledger run(s) and ${learningSummary.legacyChatLinkedRunCount} legacy chat-linked run(s), but no approvable durable learning yet. The curation receipt above shows no-new-memory, dedupe, and blocked counts.`)
+                          : (locale === "ko"
+                              ? "아직 기록된 실행이나 내구 학습이 없습니다. 첫 실행부터 학습 검사 영수증이 남습니다."
+                              : "No recorded runs or durable learning yet. A curation receipt will be recorded from the first run."))
                       : (locale === "ko"
                           ? "메모리의 활성 규칙이 모두 시스템 프롬프트에 반영되어 있습니다. 메모리 탭에서 새 결정·주의 규칙이 학습되면 여기에 프롬프트 진화 제안이 나타납니다."
                           : "All active memory rules are already reflected in the system prompt. When new decision or gotcha rules are learned in the Memory tab, a prompt evolution proposal will appear here.")}
@@ -4025,65 +4905,4 @@ function AgentDetailView({
 
     </div>
   );
-}
-
-
-// ── 시스템 프롬프트 세부 지시 구조화 파서 ──
-function parsePromptSections(content: string) {
-  const sections = {
-    directives: [] as string[],
-    constraints: [] as string[],
-    formats: [] as string[],
-    general: [] as string[],
-  };
-  
-  if (!content) return sections;
-
-  const lines = content.split("\n");
-  let currentSec: "directives" | "constraints" | "formats" | "general" = "general";
-  
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    
-    if (trimmed.startsWith("#")) {
-      const lower = trimmed.toLowerCase();
-      if (lower.includes("directive") || lower.includes("instruction") || lower.includes("지시") || lower.includes("역할") || lower.includes("role")) {
-        currentSec = "directives";
-      } else if (lower.includes("constraint") || lower.includes("limit") || lower.includes("제약") || lower.includes("금지") || lower.includes("gotcha") || lower.includes("주의")) {
-        currentSec = "constraints";
-      } else if (lower.includes("output") || lower.includes("format") || lower.includes("포맷") || lower.includes("형태") || lower.includes("결과")) {
-        currentSec = "formats";
-      } else {
-        currentSec = "general";
-      }
-      continue;
-    }
-    
-    // 리스트 마커 및 강조 볼드 제거
-    const cleanLine = trimmed
-      .replace(/^-\s*\*\*[^*]+\*\*:\s*/, "")
-      .replace(/^-\s*\*\*[^*]+\*\*\s*/, "")
-      .replace(/^-\s*/, "")
-      .replace(/^\*\s*/, "");
-      
-    if (!cleanLine) continue;
-    sections[currentSec].push(cleanLine);
-  }
-  
-  if (sections.directives.length === 0 && sections.constraints.length === 0 && sections.formats.length === 0) {
-    sections.general.forEach(line => {
-      if (line.includes("해야") || line.includes("하라") || line.includes("must") || line.includes("should") || line.includes("요구")) {
-        sections.directives.push(line);
-      } else if (line.includes("하지") || line.includes("금지") || line.includes("avoid") || line.includes("never") || line.includes("않는다") || line.includes("제한")) {
-        sections.constraints.push(line);
-      } else if (line.includes("포맷") || line.includes("json") || line.includes("형식") || line.includes("output") || line.includes("xml") || line.includes("구조")) {
-        sections.formats.push(line);
-      } else {
-        sections.directives.push(line);
-      }
-    });
-  }
-  
-  return sections;
 }

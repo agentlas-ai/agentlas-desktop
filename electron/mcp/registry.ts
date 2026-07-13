@@ -15,6 +15,7 @@ import {
 } from "../cloud-agents/registry-transaction";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { installFromCatalog } from "../mcp-tools/registry";
+import { replaceInstalledAgentHubBinding } from "../ontology/hub-bindings";
 import type { SeedListingFull } from "../marketplace/source";
 import type {
   AgentEnvRequirement,
@@ -46,6 +47,7 @@ function toAgent(row: AgentRow): InstalledAgent {
     slug: row.slug,
     name: row.name,
     nameEn: row.name_en || row.name,
+    ...(row.local_display_name ? { localDisplayName: row.local_display_name } : {}),
     tagline: row.tagline,
     taglineEn: row.tagline_en || row.tagline,
     systemPrompt: row.system_prompt,
@@ -85,11 +87,13 @@ function routeAssetState(route: AgentRoute | null): {
     };
   }
   if (route.source === "local-import") {
-    return { source: "local-import", ...(route.packageHash ? { packageHash: route.packageHash } : {}) };
+    const localHash = route.definitionHash || route.packageHash;
+    return { source: "local-import", ...(localHash ? { packageHash: localHash } : {}) };
   }
   // Old route records predate source. A valid cloud marker is checked above;
   // everything else was created by the local-folder import flow.
-  return { source: "local-import" };
+  const legacyLocalHash = route.definitionHash || route.packageHash;
+  return { source: "local-import", ...(legacyLocalHash ? { packageHash: legacyLocalHash } : {}) };
 }
 
 /** 마켓 리스팅의 entityKind/agentCount로 single/team을 결정. */
@@ -139,6 +143,24 @@ export function getAgentById(id: string): InstalledAgent | null {
     .get(id) as AgentRow | undefined;
   if (!row || isPrivateWebOnlyAgent(row)) return null;
   return toAgent(row);
+}
+
+export function setAgentLocalDisplayName(idValue: string, value: string): InstalledAgent {
+  const id = String(idValue ?? "").trim();
+  if (!id || id.length > 256) throw new Error("Agent id is invalid.");
+  if (typeof value !== "string") throw new Error("Local display name must be text.");
+  const normalized = value.normalize("NFC").trim();
+  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(normalized)) {
+    throw new Error("Local display name cannot contain control or hidden-direction characters.");
+  }
+  const length = Array.from(normalized).length;
+  if (length > 80) throw new Error("Local display name must be 80 characters or fewer.");
+  const current = getAgentById(id);
+  if (!current) throw new Error("Installed agent not found.");
+  getDb().prepare("UPDATE installed_agents SET local_display_name = ? WHERE id = ?")
+    .run(length === 0 ? null : normalized, id);
+  emitDesktopStoreChange({ entity: "agent", id });
+  return getAgentById(id)!;
 }
 
 export async function installAgent(slug: string): Promise<InstalledAgent> {
@@ -236,6 +258,7 @@ function persistListing(
       role: existing.role ?? null,
       visibility,
       entity_kind: entityKind,
+      local_display_name: existing.local_display_name ?? null,
     }
     : {
         id,
@@ -255,7 +278,17 @@ function persistListing(
         role: null,
         visibility,
         entity_kind: entityKind,
+        local_display_name: null,
       };
+
+  // Clear before any package/registry transition. If the process dies between
+  // installing a new immutable package and receiving/persisting its new exact
+  // binding, Ontology projection disappears instead of reusing the old release.
+  // A retry may restore the binding; local execution remains usable meanwhile.
+  replaceInstalledAgentHubBinding({
+    installedAgentId: id,
+    source: packageSource === "hub" ? "hub-install" : "agent-cloud-restore",
+  });
 
   const mutateDb = () => {
     if (existing) {
@@ -331,13 +364,20 @@ function persistListing(
       mutateDb,
     });
   } else {
-    mutateDb();
+    db.transaction(mutateDb)();
     materializeAgentFiles(id);
   }
 
   // External-tool discovery is intentionally post-commit and best-effort. A
   // catalog registration can neither split nor veto the package transaction.
   autoRegisterAgentTools(listing);
+  replaceInstalledAgentHubBinding({
+    installedAgentId: id,
+    agentDefinitionId: listing.agentDefinitionId,
+    agentReleaseId: listing.agentReleaseId,
+    source: packageSource === "hub" ? "hub-install" : "agent-cloud-restore",
+    boundAt: now,
+  });
   const agent = toAgent(expectedRow);
   emitDesktopStoreChange({ entity: "agent", id });
   return agent;

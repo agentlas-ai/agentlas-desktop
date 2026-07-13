@@ -1,5 +1,6 @@
 import type { HephaestusBuildRequest } from "../../shared/types";
 import { FsAccessDeniedError, pathFromGrant } from "../fs/access";
+import { applyMcpBuildConsent } from "../mcp-tools/build-plan";
 import type { ResolvedHephaestusBuildRequest } from "./builder";
 
 /**
@@ -22,10 +23,33 @@ export function resolveHephaestusBuildRequest(
     mode: request.mode,
     workspace,
     runtime: request.runtime,
+    runtimePinned: request.runtimePinned === true,
     runtimeSessionId: request.runtimeSessionId,
     attachments,
     history: request.history,
     openCrabOntology: request.openCrabOntology === "use" ? "use" : request.openCrabOntology === "skip" ? "skip" : undefined,
     locale: request.locale,
+  };
+}
+
+/**
+ * Full run boundary: paths and MCP consent are both re-resolved in Main.
+ * The original Build request, not a later interview answer, is bound to the plan.
+ */
+export async function resolveHephaestusBuildRequestForRun(
+  request: HephaestusBuildRequest,
+): Promise<ResolvedHephaestusBuildRequest> {
+  const resolved = resolveHephaestusBuildRequest(request);
+  const originalRequest = request.history?.find((entry) => entry.role === "user")?.text ?? request.request;
+  const applied = await applyMcpBuildConsent({
+    request: originalRequest,
+    mode: request.mode,
+    runtime: request.runtime,
+    consent: request.mcpConsent,
+  });
+  return {
+    ...resolved,
+    runtime: applied.runtime ?? request.runtime,
+    mcpAttachment: applied.attachment,
   };
 }

@@ -27,8 +27,16 @@ const MANIFEST_VERSION = "0.1" as const;
 const PACKAGE_HASH_VERSION = "path-sha256-executable-v2" as const;
 const ROUTING_CARD_PATH = ".agentlas/routing-card.json";
 const DESKTOP_RESTORE_MARKER_PATH = ".agentlas-cloud-package.json";
+const LOCAL_EXPERIENCE_LINEAGE_PATH = ".agentlas/experience-relations.jsonl";
 const ROUTING_CARD_CAPABILITY_RE = /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/;
 const ROUTING_CARD_STATUSES = new Set(["draft", "searchable", "candidate", "routing_ready", "trusted"]);
+
+function isLocalExperienceLineagePath(value: string): boolean {
+  const normalized = value.replace(/\\/g, "/").toLowerCase();
+  return normalized === LOCAL_EXPERIENCE_LINEAGE_PATH
+    || normalized.startsWith(`${LOCAL_EXPERIENCE_LINEAGE_PATH}.`)
+    || normalized.startsWith(".agentlas/.experience-relations.jsonl.");
+}
 
 const TEXT_EXTENSIONS = new Set([
   ".cjs",
@@ -471,6 +479,17 @@ function scanAgentFolder(rootPath: string, restoredExecutablePaths: ReadonlySet<
           kind: "text",
           included: false,
           reason: "desktop-restore-marker-excluded",
+        });
+        continue;
+      }
+      if (isLocalExperienceLineagePath(rel)) {
+        files.push({
+          path: rel,
+          bytes: st.size,
+          sha256: "",
+          kind: "text",
+          included: false,
+          reason: "experience-lineage-separate-asset",
         });
         continue;
       }

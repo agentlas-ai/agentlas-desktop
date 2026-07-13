@@ -10,6 +10,10 @@ const isProd = process.env.NODE_ENV === "production";
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Keep production/export builds isolated from a concurrently running
+  // `next dev` process. Both processes using `.next` can delete each other's
+  // manifests and make an otherwise valid renderer build fail intermittently.
+  distDir: process.env.AGENTLAS_NEXT_DIST_DIR || ".next",
   output: isProd ? "export" : undefined,
   images: { unoptimized: true },
   trailingSlash: false,

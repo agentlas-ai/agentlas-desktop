@@ -89,6 +89,11 @@ server.listen(0, "127.0.0.1", async () => {
     const { buildMcpConfigFile } = require("../dist/electron/mcp-tools/mcp-config.js");
 
     initStore();
+    const healthyProbe = {
+      // Catalog/routing behavior is the subject of this smoke. Runtime probe
+      // failure isolation has a separate deterministic test.
+      testServerConnection: async () => ({ connected: true, missingEnv: [] }),
+    };
 
     const selected = await autoSelectMcpTools({
       userPrompt: "Search Reddit, log in if needed, and post helpful comments",
@@ -96,7 +101,7 @@ server.listen(0, "127.0.0.1", async () => {
       agentName: "No Slop Seeder",
       toolMode: "auto",
       hubMode: "hub-allowed",
-    });
+    }, healthyProbe);
 
     assert.ok(selected.localPluginCount >= 13, "local MCP/plugin inventory should include catalog entries");
     assert.equal(selected.hubPluginCount, 4, "Hub plugin catalog should be counted");
@@ -122,7 +127,7 @@ server.listen(0, "127.0.0.1", async () => {
       agentName: "Browser QA",
       toolMode: "browser",
       hubMode: "hub-allowed",
-    });
+    }, healthyProbe);
     const browserCatalogIds = browserSelected.tools.filter((tool) => tool.installed).map((tool) => tool.id);
     const browserCfg = await buildMcpConfigFile({ catalogIds: browserCatalogIds });
     assert.ok(browserCfg, "browser mode should produce a scoped config");

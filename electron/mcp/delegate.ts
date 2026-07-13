@@ -2,6 +2,12 @@
 // memory/events.ts의 파싱 방식을 그대로 따른다(heading + JSON fence, 관용적).
 // 오케스트레이터가 reply에서 이 블록을 파싱해 하위 세션을 선택적으로 spawn한다.
 
+import {
+  normalizeWorkloadAllocation,
+  workloadAllocationPromptExample,
+  type WorkloadAllocation,
+} from "../runtime/workload-routing";
+
 export const DELEGATE_HEADING = "## Delegate";
 
 export interface Delegation {
@@ -9,10 +15,13 @@ export interface Delegation {
   target: string;
   /** 그 하위에게 줄 집중 브리프(서브태스크) */
   brief: string;
+  /** Parent-AI-authored capacity assignment; host code only validates/translates it. */
+  allocation: WorkloadAllocation;
 }
 
 export interface ParsedDelegation {
   delegations: Delegation[];
+  synthesisAllocation: WorkloadAllocation | null;
   /** Delegate 블록을 제거한 reply (사용자에게 보일 텍스트) */
   cleanedText: string;
 }
@@ -33,11 +42,13 @@ export function buildDelegateProtocol(reports: Array<{ role: string; name?: stri
     "Your direct reports:",
     list,
     "",
+    "Judge each child task's complexity, risk, context size, and synthesis burden yourself.",
+    "Assign provider-neutral capacity; never copy one flagship model to every child.",
     "To delegate, end your reply with exactly this block (omit entirely if delegating to none):",
     "",
     DELEGATE_HEADING,
     "```json",
-    '[ { "target": "<report role or name above>", "brief": "<what they should do>" } ]',
+    `{ "delegations": [ { "target": "<report role or name above>", "brief": "<what they should do>", "allocation": ${workloadAllocationPromptExample("delegate")} } ], "synthesis": ${workloadAllocationPromptExample("synthesize")} }`,
     "```",
     "",
     "After delegating, STOP — their results come back to you to synthesize. Don't do their work yourself.",
@@ -47,22 +58,34 @@ export function buildDelegateProtocol(reports: Array<{ role: string; name?: stri
 /** reply에서 Delegate 블록을 파싱하고, 그 블록을 제거한 텍스트를 함께 반환. */
 export function parseDelegations(text: string): ParsedDelegation {
   const idx = text.lastIndexOf(DELEGATE_HEADING);
-  if (idx < 0) return { delegations: [], cleanedText: text.trim() };
+  if (idx < 0) return { delegations: [], synthesisAllocation: null, cleanedText: text.trim() };
 
   const after = text.slice(idx + DELEGATE_HEADING.length);
   const fence = after.match(/```(?:json)?\s*([\s\S]*?)```/);
   let delegations: Delegation[] = [];
+  let synthesisAllocation: WorkloadAllocation | null = null;
   if (fence) {
     try {
       const data = JSON.parse(fence[1].trim());
-      if (Array.isArray(data)) {
-        delegations = data
+      const rawDelegations = Array.isArray(data)
+        ? data
+        : data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).delegations)
+          ? (data as Record<string, unknown>).delegations as unknown[]
+          : [];
+      if (!Array.isArray(data) && data && typeof data === "object") {
+        const synthesis = (data as Record<string, unknown>).synthesis;
+        if (synthesis) synthesisAllocation = normalizeWorkloadAllocation(synthesis, "synthesize");
+      }
+      if (rawDelegations.length > 0) {
+        delegations = rawDelegations
           .map((d): Delegation | null => {
             if (!d || typeof d !== "object") return null;
             const o = d as Record<string, unknown>;
             const target = typeof o.target === "string" ? o.target.trim() : "";
             const brief = typeof o.brief === "string" ? o.brief.trim() : "";
-            return target ? { target, brief } : null;
+            return target
+              ? { target, brief, allocation: normalizeWorkloadAllocation(o.allocation, "delegate") }
+              : null;
           })
           .filter((d): d is Delegation => d !== null);
       }
@@ -78,5 +101,5 @@ export function parseDelegations(text: string): ParsedDelegation {
     cut = idx; // 펜스 없으면 dangling heading도 제거
   }
   const cleaned = (text.slice(0, idx) + text.slice(cut)).trim();
-  return { delegations, cleanedText: cleaned };
+  return { delegations, synthesisAllocation, cleanedText: cleaned };
 }

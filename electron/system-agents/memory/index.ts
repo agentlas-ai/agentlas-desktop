@@ -11,10 +11,18 @@ import { MEMORY_EMITTER_BLOCK } from "../../architecture/manifest";
 /** 항상-켜진 최소 코어 — 모델이 매 턴 "기억할 게 있으면 남겨라"를 알게 한다(안전 규칙 포함). */
 export const MEMORY_CORE = [
   "## Memory",
-  "If — and only if — this turn produced something durable (a decision, stable fact, user preference, risk, or reusable procedure), end your reply with a `## Memory Events` JSON block; emit nothing otherwise.",
-  "Each event: memory_kind (fact|decision|preference|risk|procedure|hypothesis|evidence|deprecation|conflict), content (1–2 sentences), suggested_scope (user_identity|team_memory|project|agent_repo|session|discard).",
-  "Never record secrets, credentials, API keys, raw logs, or full transcripts. One event per durable item. Suggest a scope; the Memory Curator decides the final destination.",
+  "Only when this turn produced a durable decision, fact, preference, risk, or reusable procedure, end with `## Memory Events` and a fenced `json` array; otherwise emit nothing.",
+  "Each item: memory_kind, content (1-2 sentences), suggested_scope. Scopes: user_identity, team_memory, agent_repo, agent_team, project, session, discard. Never record secrets, credentials, raw logs, prompts, or transcripts. A curator validates it.",
 ].join("\n");
+
+export const MEMORY_CORE_MAX_APPROX_TOKENS = 150;
+
+const MEMORY_DETAIL_RE = /\b(?:remember|memory|save this|record this|memory event)\b|기억|메모리|저장해|기록해|남겨/i;
+
+/** Full schema is loaded only when the current task is explicitly about memory. */
+export function memoryEmitterPromptFor(request: string): string {
+  return MEMORY_DETAIL_RE.test(request) ? MEMORY_EMITTER_BLOCK : MEMORY_CORE;
+}
 
 /** 온디맨드 — 전체 스키마(kinds/scopes enum, request_context 필드, JSON 포맷 예시). emit 시점에만 필요. */
 export const MEMORY_SCHEMA_MODULE: OnDemandModule = {

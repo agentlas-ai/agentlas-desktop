@@ -55,6 +55,7 @@ interface RunRecord {
   events: McpInvocationEvent[];
   partialText: string;
   resultFolder?: string;
+  actualAgentId?: string;
 }
 
 type InvocationEventListener = (envelope: InvocationEventEnvelope) => void;
@@ -147,6 +148,8 @@ class InvocationService {
                     : "\n\n[Output truncated — runaway output memory guard]"),
               }
             : rawEvent;
+        const attributedAgentId = event.runtimeAgentId ?? event.agentId;
+        if (attributedAgentId) record.actualAgentId = attributedAgentId;
 
         let wireEvent = event;
         if (event.kind === "partial" && !event.agentId && typeof event.text === "string") {
@@ -209,6 +212,7 @@ class InvocationService {
             runId,
             kind: terminalKind,
             chatId: runReq.chatId,
+            agentId: attributedAgentId ?? record.actualAgentId,
             payload: {
               resultFolder: record.resultFolder,
               errorCode: event.error?.code,
@@ -226,6 +230,7 @@ class InvocationService {
           runId,
           kind: "invoke_result",
           chatId: runReq.chatId,
+          agentId: record.actualAgentId,
           payload: {
             resultFolder: record.resultFolder,
             tokens: result.tokens,
@@ -239,12 +244,14 @@ class InvocationService {
           runId,
           kind: "invoke_threw",
           chatId: runReq.chatId,
+          agentId: record.actualAgentId,
           payload: { errorMessage: message },
         });
         tryRecordFailureEvent({
           runId,
           source: "invoke",
           chatId: runReq.chatId,
+          agentId: record.actualAgentId,
           errorCode: "invoke_threw",
           errorMessage: message,
         });
@@ -259,6 +266,7 @@ class InvocationService {
           }
           const event: McpInvocationEvent = {
             kind: "error",
+            runtimeAgentId: record.actualAgentId,
             error: {
               code: controller.signal.aborted ? "cancelled" : "invoke-threw",
               message,
@@ -271,6 +279,7 @@ class InvocationService {
             runId,
             kind: controller.signal.aborted ? "invoke_cancelled" : "invoke_failed",
             chatId: runReq.chatId,
+            agentId: record.actualAgentId,
             payload: { resultFolder: record.resultFolder, errorMessage: message },
           });
         }
@@ -281,6 +290,7 @@ class InvocationService {
             runId,
             kind: controller.signal.aborted ? "invoke_cancelled" : "invoke_failed",
             chatId: runReq.chatId,
+            agentId: record.actualAgentId,
             payload: {
               resultFolder: record.resultFolder,
               errorMessage: "Runtime settled without a terminal event",

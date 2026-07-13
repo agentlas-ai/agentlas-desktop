@@ -23,6 +23,12 @@ import {
 import { MobileBridgeRequestReplayStore } from "./replay";
 import { AgentlasMobileBridgeServer } from "./server";
 import { loadOrCreateMobileBridgeTls, preferredMobileBridgeHost } from "./tls";
+import { getDefaultOntologyHubClient } from "./ontology-hub-client";
+import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
+import {
+  TerminalOntologyLoadoutFeedWriter,
+  terminalOntologyLoadoutFeedPath,
+} from "../ontology/terminal-loadout-feed";
 
 interface MobileBridgeRuntimeOptions {
   userDataPath: string;
@@ -35,6 +41,7 @@ interface RunningBridge {
   pairing: MobileBridgePairingManager;
   server: AgentlasMobileBridgeServer;
   manifest: MobileBridgeEndpointManifest;
+  terminalLoadoutFeedWriter: TerminalOntologyLoadoutFeedWriter;
 }
 
 let running: RunningBridge | null = null;
@@ -144,11 +151,16 @@ async function startBridgeInternal(
   });
   const replayStore = new MobileBridgeRequestReplayStore(options.userDataPath);
   const displayName = (options.displayName?.trim() || os.hostname() || "Agentlas Desktop").slice(0, 160);
+  const ontologyHubClient = getDefaultOntologyHubClient(options.userDataPath);
+  const terminalLoadoutFeedFile = terminalOntologyLoadoutFeedPath(options.userDataPath);
+  const terminalLoadoutFeedWriter = new TerminalOntologyLoadoutFeedWriter(terminalLoadoutFeedFile);
   const authority = createMobileBridgeAuthority({
     hostIdentity: identity,
     displayName,
     appVersion: options.appVersion,
     revokeDevice: (deviceId) => pairing.revokeDevice(deviceId),
+    ontologyHubClient,
+    terminalOntologyLoadoutFeedWriter: terminalLoadoutFeedWriter,
     onError: (error) => console.error("[mobile-bridge-authority]", error.message),
   });
   let server: AgentlasMobileBridgeServer | null = null;
@@ -185,7 +197,33 @@ async function startBridgeInternal(
       updatedAt: new Date().toISOString(),
     };
     writeMobileBridgeEndpointManifest(options.userDataPath, manifest);
-    running = { authority, pairing, server, manifest };
+    running = { authority, pairing, server, manifest, terminalLoadoutFeedWriter };
+    // Refresh once at Desktop startup even when no phone is connected. This is
+    // a read-only Hub query; the independent Terminal still has to opt in with
+    // an explicit CLI flag and revalidates the exact local DB binding.
+    const exactBindings = listInstalledAgentHubBindings(64);
+    if (exactBindings.length > 0) {
+      void ontologyHubClient.query(exactBindings.map((binding) => ({
+        agentDefinitionId: binding.agentDefinitionId,
+        agentReleaseId: binding.agentReleaseId,
+      })), true).then((result) => {
+        terminalLoadoutFeedWriter.write({
+          bindings: exactBindings,
+          result,
+        });
+      }).catch((error) => {
+        try {
+          terminalLoadoutFeedWriter.write({
+            bindings: exactBindings,
+            result: { supported: false, status: "endpoint-absent", projections: [] },
+          });
+        } catch {}
+        console.error(
+          "[terminal-loadout] startup projection failed",
+          error instanceof Error ? error.message : String(error),
+        );
+      });
+    }
     if (!explicitHostConfigured()) lastObservedAutomaticHost = address.host;
     emitMobileBridgeStateChange("runtime-started");
     console.info(`[mobile-bridge] listening on ${address.url}`);
@@ -193,6 +231,7 @@ async function startBridgeInternal(
   } catch (error) {
     lastError = error instanceof Error ? error.message : String(error);
     if (server) await server.close().catch(() => {});
+    terminalLoadoutFeedWriter.dispose();
     pairing.dispose();
     authority.dispose();
     throw error;
@@ -206,6 +245,7 @@ async function stopRunningBridge(emitStopped: boolean): Promise<void> {
   try {
     await state.server.close();
   } finally {
+    state.terminalLoadoutFeedWriter.dispose();
     state.pairing.dispose();
     state.authority.dispose();
     if (emitStopped) emitMobileBridgeStateChange("runtime-stopped");

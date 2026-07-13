@@ -7,7 +7,7 @@ import { app, BrowserWindow, dialog, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import type { UpdaterActionResult, UpdaterState } from "../shared/types";
-import { getAuthSession } from "./auth";
+import { bootAuthFromKeychain, getAuthSession } from "./auth";
 import { quiesceAutomationSchedulerForUpdate } from "./automation-scheduler";
 import { quiesceHubBookmarkSyncForUpdate } from "./hub-bookmark-sync";
 import {
@@ -176,7 +176,10 @@ export async function initAutoUpdater(): Promise<void> {
   }
   const hasUpdateConfig = hasBundledUpdateConfig();
   if (!hasUpdateConfig) console.warn(`[updater] app-update.yml missing — automatic checks are disabled (${updateConfigPath()})`);
-  if (controller) return;
+  if (controller) {
+    await controller.init();
+    return;
+  }
 
   const userDataPath = app.getPath("userData");
   const dbPath = databasePath();
@@ -232,6 +235,7 @@ export async function initAutoUpdater(): Promise<void> {
         currentDatabasePath: dbPath,
         currentAccountSignedIn: getAuthSession().signedIn,
       }),
+    refreshSessionForRecovery: bootAuthFromKeychain,
     broadcast,
     openExternal: (url) => shell.openExternal(url),
     revealPath: (filePath) => shell.showItemInFolder(filePath),

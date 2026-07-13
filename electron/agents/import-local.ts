@@ -18,6 +18,7 @@ import type { FirmOrgNode, InstalledAgent, InstalledFirm, ResolvedOrg } from "..
 import { currentUiLocale } from "../ui-locale";
 import { readCanonicalPromptFromDirectory } from "./prompt-authority";
 import { detectRuntimeLabels } from "./runtime-labels";
+import { computeLocalAgentDefinitionHash } from "./definition-hash";
 
 export { detectRuntimeLabels } from "./runtime-labels";
 
@@ -586,7 +587,17 @@ async function importLocalFolderOnce(
   }
   let firmId: string | undefined;
   const db = getDb();
-  const nextRoute = { agentId: id, path: dir, runtime, labels, kind, importedAt: now } as const;
+  const definitionHash = computeLocalAgentDefinitionHash(dir);
+  const nextRoute = {
+    agentId: id,
+    path: dir,
+    runtime,
+    labels,
+    kind,
+    importedAt: now,
+    source: "local-import",
+    definitionHash,
+  } as const;
   const staleRouteIds = existing && existing.agentId !== id ? [existing.agentId] : [];
   // routes.json uses atomic replacement. Persist it before the synchronous DB
   // transaction so a route-write failure cannot leave a newly visible agent
@@ -672,6 +683,8 @@ async function importLocalFolderOnce(
     tone,
     runtimeLabel: runtime,
     localPath: dir,
+    assetSource: "local-import",
+    packageHash: definitionHash,
     kind,
     visibility: "visible",
   };
