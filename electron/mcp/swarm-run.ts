@@ -19,11 +19,29 @@ import {
 } from "../runtime/workload-routing";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
 import { revalidateInvocationWorkspaceBinding } from "../invocation/workspace-binding";
+import { stripReplyMemoryEventsReadOnly } from "../memory/curator";
 
 // 총 작업 수/라운드 안전 상한 — 무한 스폰·무한루프로부터 컴/지갑을 지키는 최후 방어선(엔진이 강제).
 // 각 작업 = 실 LLM 호출이라 비용이 나가므로 보수적으로. (동시 실행 수는 별개로 슬라이더가 제어)
 const SWARM_MAX_TASKS = 24;
 const SWARM_MAX_ROUNDS = 100_000;
+
+function restrictedSwarmText(
+  p: BorrowedTaskForceParams,
+  text: string,
+  nodeId: string,
+): string {
+  if (!p.restrictedReadBoundary) return text;
+  return stripReplyMemoryEventsReadOnly(text, {
+    projectPath: p.workingFolder ?? null,
+    projectId: p.chat.projectId ?? null,
+    agentId: p.chat.agentId,
+    chatId: p.chat.id,
+    runId: p.req.runId,
+    nodeId,
+    cwdAtRequest: p.workingFolder ?? null,
+  }).cleanedText;
+}
 
 /** 스웜 워커에게 주는 규약 — 자기 작업을 하고, 새 하위작업/핸드오프가 필요하면 `## Spawn`으로. */
 function swarmProtocol(goal: string, board: SwarmBoard, task: SwarmTask): string {
@@ -292,6 +310,7 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
         effort: active.effort ?? undefined,
         signal: signal ?? p.signal,
         permission: p.req.permissions,
+        restrictedReadBoundary: p.restrictedReadBoundary,
         cwd: p.workingFolder ?? undefined,
         mcpConfigPath: p.mcpConfigPath,
         mcpAllowedTools: p.mcpAllowedTools,
@@ -301,12 +320,14 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
       },
       {
         onStatus: (status) => emit(task, { kind: "tool-use", status }),
-        onPartial: (text) => emit(task, { kind: "partial", text }),
+        onPartial: (text) => {
+          if (!p.restrictedReadBoundary) emit(task, { kind: "partial", text });
+        },
         onTool: (name, args, r, id, isError) => emit(task, { kind: "tool-use", tool: { name, args, result: r, id, isError } }),
       },
     );
     emit(task, { kind: "tool-use", done: true, status: p.locale === "ko" ? `${task.title} 완료` : `${task.title} done` });
-    const parsed = parseSwarmOutput(result.text);
+    const parsed = parseSwarmOutput(restrictedSwarmText(p, result.text, task.id));
     return {
       result: parsed.result,
       spawn: parsed.spawn,
@@ -380,17 +401,20 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
         effort: active.effort ?? undefined,
         signal: signal ?? p.signal,
         permission: p.req.permissions,
+        restrictedReadBoundary: p.restrictedReadBoundary,
         cwd: p.workingFolder ?? undefined,
         env: p.runnerEnv,
         locale: p.locale,
       },
       {
         onStatus: (status) => synthEmit({ kind: "tool-use", status }),
-        onPartial: (text) => synthEmit({ kind: "partial", text }),
+        onPartial: (text) => {
+          if (!p.restrictedReadBoundary) synthEmit({ kind: "partial", text });
+        },
         onTool: (name, args, r, id, isError) => synthEmit({ kind: "tool-use", tool: { name, args, result: r, id, isError } }),
       },
     );
-    return result.text.trim();
+    return restrictedSwarmText(p, result.text, "swarm-synthesizer").trim();
   };
 
   let idCounter = 0;
@@ -425,11 +449,12 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
   }
   const { board, final, aborted, doneCount } = swarmResult;
 
-  const finalText = aborted
+  const rawFinalText = aborted
     ? p.locale === "ko"
       ? `스웜을 멈췄어요. (완료 ${doneCount}개)`
       : `Swarm stopped. (${doneCount} tasks done)`
     : final || (p.locale === "ko" ? "스웜이 완료할 작업을 찾지 못했습니다." : "The swarm found no work to complete.");
+  const finalText = restrictedSwarmText(p, rawFinalText, "swarm-final");
   tryRecordRunEvent({
     runId,
     kind: "swarm_finished",

@@ -315,6 +315,8 @@ function handleAutomationFailure(a: Automation, error: string): void {
           req,
           (ev) => recordMcpInvocationEvent(runId, req, ev),
           optimizerController.signal,
+          undefined,
+          { source: "automation" },
         ),
       );
       void Promise.race([optimizerRun, abortGate])
@@ -578,6 +580,8 @@ async function runOne(
                 recordMcpInvocationEvent(runId, req, ev);
               },
               controller.signal,
+              undefined,
+              { source: "automation" },
             ),
           );
           result = await awaitAutomationRunnerWithAbortGrace(invocationRun, controller.signal);

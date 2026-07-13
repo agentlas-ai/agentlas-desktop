@@ -34,6 +34,7 @@ const EXT_BY_MEDIA_TYPE: Record<string, string> = {
   "image/gif": ".gif",
   "image/webp": ".webp",
 };
+const TEMP_ATTACHMENT_ROOT = path.join(os.tmpdir(), "agentlas-chat-attachments");
 
 function safeBasename(name: string | undefined, fallback: string, ext: string): string {
   const raw = path.basename((name ?? "").trim() || fallback);
@@ -49,14 +50,14 @@ function runSlug(req: StageRequest): string {
 }
 
 async function writeImages(dir: string, images: ImageAttachment[]): Promise<StagedCliImage[]> {
-  await fs.mkdir(dir, { recursive: true });
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const staged: StagedCliImage[] = [];
   for (const [index, image] of images.entries()) {
     const mediaType = image.mediaType || "application/octet-stream";
     const ext = EXT_BY_MEDIA_TYPE[mediaType.toLowerCase()] ?? ".img";
     const name = safeBasename(image.name, `image-${index + 1}${ext}`, ext);
     const filePath = path.join(dir, `${String(index + 1).padStart(2, "0")}-${name}`);
-    await fs.writeFile(filePath, Buffer.from(image.data, "base64"));
+    await fs.writeFile(filePath, Buffer.from(image.data, "base64"), { mode: 0o600 });
     staged.push({ path: filePath, mediaType, originalName: image.name });
   }
   return staged;
@@ -64,6 +65,7 @@ async function writeImages(dir: string, images: ImageAttachment[]): Promise<Stag
 
 async function stageImages(req: StageRequest, images: ImageAttachment[]): Promise<StageCliImageResult> {
   const slug = runSlug(req);
+  const fallbackDir = path.join(TEMP_ATTACHMENT_ROOT, slug);
   const cwd = req.cwd ?? agentRunCwd();
   const preferredDir = path.join(cwd, ".agentlas", "chat-attachments", slug);
   const guideLocale = attachmentGuideLocale(req.userPrompt, req.locale);
@@ -71,7 +73,6 @@ async function stageImages(req: StageRequest, images: ImageAttachment[]): Promis
     const staged = await writeImages(preferredDir, images);
     return { userPrompt: appendAttachmentGuide(req.userPrompt, staged, guideLocale), images: staged, directory: preferredDir };
   } catch (primaryError) {
-    const fallbackDir = path.join(os.tmpdir(), "agentlas-chat-attachments", slug);
     try {
       const staged = await writeImages(fallbackDir, images);
       return { userPrompt: appendAttachmentGuide(req.userPrompt, staged, guideLocale), images: staged, directory: fallbackDir };

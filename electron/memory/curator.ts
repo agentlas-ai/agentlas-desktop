@@ -9,7 +9,11 @@ import {
 } from "./project-files";
 import { hasEquivalentMemory, insertMemoryEntry, type RequestContext } from "./store";
 import { autoIntakeCuratedMemory } from "../experience/store";
-import { parseMemoryEvents, type RawMemoryEvent } from "./events";
+import {
+  parseMemoryEvents,
+  stripAllMemoryEventBlocks,
+  type RawMemoryEvent,
+} from "./events";
 import type { MemoryKind, MemoryScope } from "../architecture/manifest";
 import { tryRecordRunEvent } from "../store/run-events";
 
@@ -337,6 +341,29 @@ export function curateReply(
     events.length > 0
       ? curateEvents(events, ctx)
       : { written: 0, deduped: 0, redacted: 0, sessionOnly: 0, discarded: 0 };
+  recordCurationReceipt(ctx, report);
+  return { cleanedText, report };
+}
+
+/**
+ * Read-boundary counterpart: remove model-emitted memory control blocks but
+ * never persist, dedupe, intake Experience, or touch agent/project memory.
+ * The run ledger receives counts only so operators can audit attempted events
+ * without storing their content.
+ */
+export function stripReplyMemoryEventsReadOnly(
+  replyText: string,
+  ctx: CurationContext,
+  previouslyDiscarded = 0,
+): { cleanedText: string; report: CurationReport } {
+  const { events, cleanedText } = stripAllMemoryEventBlocks(replyText);
+  const report: CurationReport = {
+    written: 0,
+    deduped: 0,
+    redacted: 0,
+    sessionOnly: 0,
+    discarded: Math.max(0, previouslyDiscarded) + events.length,
+  };
   recordCurationReceipt(ctx, report);
   return { cleanedText, report };
 }

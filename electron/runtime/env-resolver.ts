@@ -77,10 +77,25 @@ export interface RunnerEnvResolution {
   injectedKeys: string[];
 }
 
+export interface RunnerEnvOptions {
+  /** Main-authored Mobile/unattended read boundary. Never hydrate dotenv/vault secrets. */
+  restrictedReadBoundary?: boolean;
+}
+
+// Restricted runs are BYOK/Ollama protocol calls, not local CLI processes.
+// Their runner implementations ignore `env`, so inherit nothing at all.
+export function restrictedRunnerEnv(): NodeJS.ProcessEnv {
+  return {};
+}
+
 export async function buildRunnerEnv(
   agent: InstalledAgent | null,
   cwd?: string | null,
+  options: RunnerEnvOptions = {},
 ): Promise<RunnerEnvResolution> {
+  if (options.restrictedReadBoundary) {
+    return { env: restrictedRunnerEnv(), injectedKeys: [] };
+  }
   const env: NodeJS.ProcessEnv = { ...process.env };
   const injected = new Set<string>();
   const apply = (values: Record<string, string>, overwrite: boolean) => {

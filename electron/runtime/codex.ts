@@ -79,7 +79,14 @@ async function getBin(): Promise<string | null> {
 }
 
 function buildPrompt(req: RunnerRequest): string {
-  const sys = wrapSystemPrompt(req.systemPrompt, req.locale, req.permission, req.userPrompt, req.forceSurface);
+  const sys = wrapSystemPrompt(
+    req.systemPrompt,
+    req.locale,
+    req.permission,
+    req.userPrompt,
+    req.forceSurface,
+    req.restrictedReadBoundary,
+  );
   const user = tStatus(req.locale, "speakerUser");
   const assistant = tStatus(req.locale, "speakerAssistant");
   const parts: string[] = [`[SYSTEM]\n${sys}`, ""];
@@ -339,6 +346,11 @@ export const runCodex: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  if (req.restrictedReadBoundary) {
+    throw new Error(
+      "Codex is not enabled for remote or unattended read-only execution because its host filesystem boundary is not release-verified.",
+    );
+  }
   const bin = await getBin();
   if (!bin) {
     throw new Error(tStatus(req.locale, "errCliMissingCodex"));

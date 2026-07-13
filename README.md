@@ -72,11 +72,19 @@ the current channel quickly.
 - **2026-07-14 · v0.8.17 Mobile read-only security replacement** — Mobile can
   start and steer read-only chats, while write/full work must start on Desktop.
   Desktop owns an immutable canonical folder binding, revalidates it across
-  queued steering, disables MCP attachment for Mobile reads, and permits only
-  Codex read sandbox, text-only BYOK, or Ollama. Schema 64 also preserves each
-  Automation's exact read/write authority through scheduler and workflow runs.
-  A total usage-IPC failure now shows a retryable Dashboard error instead of a
-  silently empty panel.
+  queued steering, and keeps project env, unrelated secrets, MCPs, memory
+  writes, and local tool authority out of restricted runs. The selected BYOK
+  key is used only as a Main-owned transport credential, never as model context.
+  BYOK and Ollama remain available;
+  Codex, Claude Code, Gemini/Antigravity, and Grok fail closed until their local
+  CLI host-file boundary is proven by a cross-platform release gate. Restricted
+  mode answers from supplied text, curated context, and images; it does not
+  claim to inspect arbitrary local files that were not attached or pasted.
+  Schema 64 preserves each Automation's exact read/write authority through
+  scheduler and workflow runs. Gemini automatically uses Antigravity when the
+  retired official client is rejected, Grok shows its real 402 balance state,
+  and retry-safe Dashboard errors replace empty or invented usage. Cross-platform
+  assets remain prerelease until the complete signed set can be promoted atomically.
 
 - **2026-07-13 · v0.8.16 withdrawn security candidate** — never entered the
   stable channel. Its Windows/Linux files remain audit evidence, no signed Mac

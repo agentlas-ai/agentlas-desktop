@@ -131,8 +131,29 @@ export function parseMemoryEvents(text: string): ParsedMemory {
   if (fence && fence.index != null) {
     cut = headingIdx + MEMORY_EVENTS_HEADING.length + fence.index + fence[0].length;
   } else {
-    cut = headingIdx; // no fence found — drop the dangling heading too
+    cut = text.length; // no fence found — drop the dangling heading and tail too
   }
   const cleaned = (text.slice(0, headingIdx) + text.slice(cut)).trim();
   return { events, cleanedText: cleaned };
+}
+
+/**
+ * Restricted-boundary sanitizer. Models can emit more than one control block;
+ * remove every occurrence, including dangling headings, before text crosses a
+ * pass, wire, or persistence boundary. The bounded fallback drops everything
+ * after the first remaining heading instead of failing open on adversarial spam.
+ */
+export function stripAllMemoryEventBlocks(text: string): ParsedMemory {
+  let cleanedText = text.trim();
+  const events: RawMemoryEvent[] = [];
+  for (let index = 0; index < 32 && cleanedText.includes(MEMORY_EVENTS_HEADING); index += 1) {
+    const previous = cleanedText;
+    const parsed = parseMemoryEvents(previous);
+    events.push(...parsed.events);
+    cleanedText = parsed.cleanedText;
+    if (cleanedText === previous) break;
+  }
+  const remaining = cleanedText.indexOf(MEMORY_EVENTS_HEADING);
+  if (remaining >= 0) cleanedText = cleanedText.slice(0, remaining).trim();
+  return { events, cleanedText };
 }

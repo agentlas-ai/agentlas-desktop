@@ -106,8 +106,35 @@ process.stdin.on("end", () => {
     userPrompt: "Explicit full boundary",
   }, events);
 
+  await assert.rejects(
+    runCodex({
+      ...base,
+      cwd: workspace,
+      permission: "read",
+      restrictedReadBoundary: true,
+      userPrompt: "Restricted remote read must fail closed",
+    }, events),
+    /not enabled for remote or unattended read-only execution/,
+  );
+  for (const [name, runner] of [
+    ["Claude Code", require("../dist/electron/runtime/claude-code.js").runClaudeCode],
+    ["Gemini", require("../dist/electron/runtime/gemini.js").runGemini],
+    ["Grok", require("../dist/electron/runtime/grok.js").runGrok],
+  ]) {
+    await assert.rejects(
+      runner({
+        ...base,
+        chatId: undefined,
+        permission: "read",
+        restrictedReadBoundary: true,
+        userPrompt: `Restricted ${name} read must fail closed`,
+      }, events),
+      /not enabled for restricted read-only execution/,
+    );
+  }
+
   const invocations = fs.readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.equal(invocations.length, 5);
+  assert.equal(invocations.length, 5, "restricted CLI calls must not spawn a provider process");
   assert.ok(invocations[0].args.includes("gpt-contract-one"), "create must keep the selected model");
   assert.deepEqual(
     invocations[0].args.slice(invocations[0].args.indexOf("--sandbox"), invocations[0].args.indexOf("--sandbox") + 2),
@@ -138,7 +165,7 @@ process.stdin.on("end", () => {
 
   console.log(JSON.stringify({
     ok: true,
-    checks: 23,
+    checks: 27,
     modelPreservedOnResume: true,
     modelChangeInvalidatesSession: true,
     attachmentReachedHostAsFile: true,

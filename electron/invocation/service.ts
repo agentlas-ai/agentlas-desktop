@@ -174,6 +174,9 @@ export class InvocationService {
     void runMcpInvocation(
       runReq,
       (rawEvent) => {
+        // Mobile restricted runs are final-only. Ignore a stray partial here as
+        // defense in depth so cancel/error recovery cannot persist raw controls.
+        if (runWorkspaceBinding && rawEvent.kind === "partial") return;
         const event: McpInvocationEvent =
           rawEvent.kind === "partial" &&
           typeof rawEvent.text === "string" &&
@@ -233,7 +236,12 @@ export class InvocationService {
         this.publishEvent({ runId, chatId: runReq.chatId, event: wireEvent });
 
         if (event.kind === "final" || event.kind === "error") {
-          if (event.kind === "error" && controller.signal.aborted && record.partialText.trim()) {
+          if (
+            !runWorkspaceBinding &&
+            event.kind === "error" &&
+            controller.signal.aborted &&
+            record.partialText.trim()
+          ) {
             try {
               appendChatMessage(runReq.chatId, "assistant", record.partialText);
             } catch {
@@ -297,7 +305,7 @@ export class InvocationService {
         });
         if (!terminalObserved) {
           terminalObserved = true;
-          if (controller.signal.aborted && record.partialText.trim()) {
+          if (!runWorkspaceBinding && controller.signal.aborted && record.partialText.trim()) {
             try {
               appendChatMessage(runReq.chatId, "assistant", record.partialText);
             } catch {

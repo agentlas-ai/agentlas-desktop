@@ -59,7 +59,8 @@ import { buildMemoryContext } from "../memory/context";
 import { buildExperienceContext } from "../experience/context";
 import { resolveDesktopTasteRuntimeSession } from "../ontology/taste-runtime-session";
 import { tasteRuntimeOverlayMatchesTask } from "../ontology/taste-runtime-contract";
-import { curateReply } from "../memory/curator";
+import { curateReply, stripReplyMemoryEventsReadOnly } from "../memory/curator";
+import { stripAllMemoryEventBlocks } from "../memory/events";
 import { harvestCompactionSummaries } from "../memory/compaction-harvest";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
@@ -606,6 +607,11 @@ export async function pickActiveRunner(): Promise<
   return { runner: picked.runner, label: picked.label, active };
 }
 
+/** Main-process-only invocation provenance. Never deserialize this from IPC/wire input. */
+export interface InvocationExecutionContext {
+  source: "automation";
+}
+
 /**
  * Renderer → main IPC 진입점. chatId 기반.
  * 1) chat → agent + project lookup → system prompt 조립
@@ -617,6 +623,7 @@ export async function runMcpInvocation(
   sink: EventSink,
   signal?: AbortSignal,
   workspaceBinding?: InvocationWorkspaceBinding,
+  executionContext?: InvocationExecutionContext,
 ): Promise<{ finalText?: string; tokens?: number; stormbreakerContinueRequested: boolean; resultFolder?: string }> {
   // 한 마이크로태스크 양보 — ipc:run 핸들러가 { runId }를 반환하고 렌더러가 이벤트 채널을
   // 구독한 뒤에야 sink가 발화하도록 보장한다. 이게 없으면 동기 early-return(no-chat/no-agent)
@@ -662,6 +669,11 @@ export async function runMcpInvocation(
     sink({ kind: "error", error: { code: "no-chat", message: tStatus(locale, "errChatNotFound") } });
     return earlyResult();
   }
+  // Mobile runs and unattended read automations cross a stronger boundary than
+  // an interactive Desktop read. Only Main derives this bit; it is never taken
+  // from the renderer request.
+  const restrictedReadBoundary =
+    Boolean(workspaceBinding) || (executionContext?.source === "automation" && !canWrite);
   let agent = getAgentById(chat.agentId);
   if (!agent) {
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
@@ -896,15 +908,23 @@ export async function runMcpInvocation(
 
   const active = runtimeChoice.active;
   const picked = runtimeChoice.picked;
-  if (workspaceBinding && !isMobileReadRuntimeAllowed(active.kind)) {
+  if (restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
+    const restrictedSource = workspaceBinding ? "mobile" : "automation";
     sink({
       kind: "error",
       error: {
-        code: "mobile-runtime-not-read-sandboxed",
+        code:
+          restrictedSource === "mobile"
+            ? "mobile-runtime-not-read-sandboxed"
+            : "automation-runtime-not-read-sandboxed",
         message:
-          locale === "ko"
-            ? "이 런타임은 모바일 읽기 전용 샌드박스가 검증되지 않았습니다. Desktop에서 Codex, BYOK 또는 Ollama를 선택하세요."
-            : "This runtime has no verified Mobile read-only sandbox. Select Codex, BYOK, or Ollama on Desktop.",
+          restrictedSource === "mobile"
+            ? locale === "ko"
+              ? "이 런타임은 모바일 읽기 전용 경계가 검증되지 않았습니다. Desktop에서 BYOK 또는 Ollama를 선택하세요."
+              : "This runtime has no verified Mobile read-only boundary. Select BYOK or Ollama on Desktop."
+            : locale === "ko"
+              ? "이 런타임은 무인 읽기 자동화의 격리 경계가 검증되지 않았습니다. BYOK 또는 Ollama를 선택하세요."
+              : "This runtime has no verified boundary for unattended read automation. Select BYOK or Ollama.",
       },
     });
     return earlyResult();
@@ -1010,7 +1030,9 @@ export async function runMcpInvocation(
     }
   }
 
-  const runnerEnv = await buildRunnerEnv(agent, workingFolder ?? undefined);
+  const runnerEnv = await buildRunnerEnv(agent, workingFolder ?? undefined, {
+    restrictedReadBoundary,
+  });
   throwIfInvocationAborted(signal, locale);
   if (mcpRuntimeEnv) Object.assign(runnerEnv.env, mcpRuntimeEnv);
   // Runtime detection/routing can take time. Check the capability again at the
@@ -1047,6 +1069,7 @@ export async function runMcpInvocation(
         runtimeOverride: runtimeChoice.override,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
+        ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
         mcpConfigPath,
         mcpAllowedTools,
         mcpCodexConfigArgs,
@@ -1079,6 +1102,7 @@ export async function runMcpInvocation(
         runtimeOverride: runtimeChoice.override,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
+        ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
         mcpConfigPath,
         mcpAllowedTools,
         mcpCodexConfigArgs,
@@ -1109,6 +1133,7 @@ export async function runMcpInvocation(
         runtimeOverride: runtimeChoice.override,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
+        ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
         mcpConfigPath,
         mcpAllowedTools,
         mcpCodexConfigArgs,
@@ -1146,6 +1171,7 @@ export async function runMcpInvocation(
             picked,
             workingFolder,
             ...(workspaceBinding ? { workspaceBinding } : {}),
+            ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
             mcpConfigPath,
             mcpAllowedTools,
             mcpCodexConfigArgs,
@@ -1308,7 +1334,9 @@ export async function runMcpInvocation(
   }
   // Compact core is always on; the full schema is loaded only for explicit
   // memory tasks. This keeps the recurring contract under ~150 tokens.
-  systemPrompt = `${systemPrompt}\n\n${memoryEmitterPromptFor(effectiveUserPrompt)}`;
+  if (!restrictedReadBoundary) {
+    systemPrompt = `${systemPrompt}\n\n${memoryEmitterPromptFor(effectiveUserPrompt)}`;
+  }
   if (mcpAutoSelectionPrompt) systemPrompt = `${systemPrompt}\n\n${mcpAutoSelectionPrompt}`;
   if (chat.kind === "division" && (req.toolMode || req.hubMode)) {
     const supervisor = assembleSystemPrompt(
@@ -1330,10 +1358,11 @@ export async function runMcpInvocation(
   // (`stormbreaker …` / `hep-network --stormbreaker …` = 컴포저 칩·추천 pipeline 선택).
   const explicitStormbreakerRequest = /^\s*(?:hep-network\s+--stormbreaker|stormbreaker)\b/i.test(req.userPrompt);
   const stormbreakerEngaged =
-    chat.kind === "division" ||
-    chat.continuousMode === true ||
-    explicitStormbreakerRequest ||
-    isStormbreakerAutoEnabled();
+    !restrictedReadBoundary &&
+    (chat.kind === "division" ||
+      chat.continuousMode === true ||
+      explicitStormbreakerRequest ||
+      isStormbreakerAutoEnabled());
   if (stormbreakerEngaged) {
     let coreHarness: Awaited<ReturnType<typeof stormbreakerHarness>>;
     try {
@@ -1391,6 +1420,7 @@ export async function runMcpInvocation(
       effort: active.effort ?? undefined,
       signal,
       permission: req.permissions,
+      ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
       // 세션 resume 키 — CLI 러너가 (chatId, kind)별 세션을 재사용해
       // 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
       chatId: chat.id,
@@ -1415,8 +1445,13 @@ export async function runMcpInvocation(
     let partialFloor = "";
     const runnerEvents = {
       onStatus: (status: string) => sink({ kind: "tool-use", status }),
-      onPartial: (text: string) =>
-        sink({ kind: "partial", text: partialFloor ? `${partialFloor}\n${text}` : text }),
+      // A partial JSON fence cannot be safely sanitized. Restricted runs are
+      // final-only so cancel/error can never persist an unfinished Memory block.
+      onPartial: (text: string) => {
+        if (!restrictedReadBoundary) {
+          sink({ kind: "partial", text: partialFloor ? `${partialFloor}\n${text}` : text });
+        }
+      },
       // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
       onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean) =>
         sink({ kind: "tool-use", tool: { name, args, result, id, isError } }),
@@ -1434,10 +1469,19 @@ export async function runMcpInvocation(
     };
     // "계속 라이브로" 모드: 채팅에 켜져 있으면 짧은 상한(3턴)에서 멈춰 30분 간격 백그라운드로
     // 넘기지 않고, 같은 채팅에서 라이브 스트리밍을 계속 이어간다(사실상 무제한, 안전 상한만).
-    const continuousMode = chat.kind !== "division" && chat.continuousMode === true;
+    const continuousMode =
+      !restrictedReadBoundary && chat.kind !== "division" && chat.continuousMode === true;
     const maxPasses = continuousMode ? CONTINUOUS_MODE_MAX_PASSES : STORMBREAKER_MAX_EXECUTION_PASSES;
+    let restrictedDiscardedMemoryEvents = 0;
+    const sanitizeRestrictedPass = (passResult: Awaited<ReturnType<Runner>>) => {
+      if (!restrictedReadBoundary) return passResult;
+      const parsed = stripAllMemoryEventBlocks(passResult.text);
+      restrictedDiscardedMemoryEvents += parsed.events.length;
+      return { ...passResult, text: parsed.cleanedText };
+    };
     let activeRunnerReq = runnerReq;
     let result = await picked.runner(activeRunnerReq, runnerEvents);
+    result = sanitizeRestrictedPass(result);
     advanceUsageFloor();
     for (let pass = 2; pass <= maxPasses; pass += 1) {
       const continuation = stripStormbreakerContinueMarker(result.text);
@@ -1477,6 +1521,7 @@ export async function runMcpInvocation(
         images: undefined,
       };
       result = await picked.runner(activeRunnerReq, runnerEvents);
+      result = sanitizeRestrictedPass(result);
       advanceUsageFloor();
     }
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
@@ -1680,7 +1725,7 @@ export async function runMcpInvocation(
       console.error("[surface] parseSurfaces failed:", err);
     }
     try {
-      const { cleanedText } = curateReply(displayText, {
+      const curationContext = {
         projectPath: activePath,
         projectId: chat.projectId ?? null,
         agentId: agent.id,
@@ -1696,8 +1741,17 @@ export async function runMcpInvocation(
         },
         // 단일 borrow 실행 — 빌린 에이전트의 agent_repo 배움을 그 전역 둥지로 미러링.
         borrowedAgentSlugs,
-      });
-      displayText = cleanedText || displayText;
+      };
+      const { cleanedText } = restrictedReadBoundary
+        ? stripReplyMemoryEventsReadOnly(
+            displayText,
+            curationContext,
+            restrictedDiscardedMemoryEvents,
+          )
+        : curateReply(displayText, curationContext);
+      // Restricted cleanup may intentionally remove the entire response. Never
+      // restore the raw control block through the ordinary empty-text fallback.
+      displayText = restrictedReadBoundary ? cleanedText : cleanedText || displayText;
     } catch (err) {
       console.error("[architecture] curateReply failed:", err);
     }
@@ -1706,7 +1760,7 @@ export async function runMcpInvocation(
     // 큐레이터 인테이크(session/hypothesis) 티어로만 흘려보낸다. 심사·승격은 Curator 에이전트 몫.
     // 실패-무해: 트랜스크립트가 없거나(다른 런타임) 요약이 없으면 조용히 0건.
     try {
-      if (result.sessionId) {
+      if (!restrictedReadBoundary && result.sessionId) {
         harvestCompactionSummaries({
           sessionId: result.sessionId,
           cwd: workingFolder,

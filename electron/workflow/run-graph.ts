@@ -423,6 +423,8 @@ export async function runGraph(
               sink({ ...ev, agentId: ev.agentId ?? node.id, nodeId: node.id });
             },
             runSignal,
+            undefined,
+            { source: "automation" },
           );
           const text = result.finalText ?? "";
           if (runnerError) throw new Error(runnerError);

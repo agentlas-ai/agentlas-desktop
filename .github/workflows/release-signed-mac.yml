@@ -194,6 +194,9 @@ jobs:
           npm run test:mobile-bridge-contract
           npm run test:mobile-read-boundary
           npm run test:mobile-execution-boundary
+          npm run test:runtime-resume-contract
+          npm run test:cli-image-attachments
+          npm run test:owned-agent-runtime-prompts
           npm run test:borrowed-task-force
           npm run test:mcp-auto-select
           npm run test:mcp-secret-isolation

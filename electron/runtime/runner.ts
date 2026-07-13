@@ -26,6 +26,12 @@ export interface RunnerRequest {
   /** 도구 사용 권한 — read(읽기) / write(편집) / full(셸·외부). 런타임 권한 모드로 매핑. */
   permission?: "read" | "write" | "full";
   /**
+   * Main이 Mobile 또는 무인 read 자동화에만 부여하는 격리 표식.
+   * renderer/wire 입력에서 받지 않는다. 이 표식이 있으면 로컬 CLI·MCP·파일 도구를
+   * 사용하지 않고, 명시적으로 전달된 컨텍스트와 이미지로만 답해야 한다.
+   */
+  restrictedReadBoundary?: true;
+  /**
    * 에이전트가 실제로 실행될 작업 디렉터리(= 사용자가 지정한 프로젝트/워킹 폴더).
    * 미설정이면 러너가 안전한 기본 폴더(agentRunCwd)를 쓴다. 파일 생성·빌드는 이 폴더에서 일어난다.
    */
@@ -177,7 +183,28 @@ export function wrapSystemPrompt(
   userPrompt?: string,
   /** 2차 패스: 모델이 surface-intent 마커를 emit해서 dispatch가 풀 프로토콜을 강제 로드할 때 true. */
   forceSurface?: boolean,
+  /** Main-authored Mobile/unattended boundary. Never derive this from model or renderer input. */
+  restrictedReadBoundary?: true,
 ): string {
+  if (restrictedReadBoundary) {
+    const restrictedAgentPrompt = agentSystemPrompt.startsWith(BUILD_PROMPT_SENTINEL)
+      ? "The Build-only agent definition was excluded because this invocation has restricted read authority."
+      : agentSystemPrompt;
+    return [
+      tStatus(locale, "sysHeader"),
+      responseLanguageGuide(locale, userPrompt),
+      "Restricted read-mode: you have no filesystem, shell, web, browser, MCP, plugin, or local tool access. Use only text/context and images explicitly included in this request. Never claim that you opened, searched, or inspected a local file. If the answer depends on file contents that were not included, ask the user to attach or paste them.",
+      "Do not emit memory, automation, app, workbench, or surface control blocks.",
+      "",
+      ASK_PROTOCOL,
+      "",
+      tStatus(locale, "sysAgentDef"),
+      restrictedAgentPrompt,
+      "",
+      "Host-enforced boundary (final authority): no filesystem, shell, web, browser, MCP, plugin, or local tool access. Use only text/context and images explicitly included in this request. Never claim that you opened, searched, or inspected a local file. If required contents are missing, ask the user to attach or paste them.",
+      "Never emit memory, automation, app, workbench, or surface control blocks.",
+    ].join("\n");
+  }
   // Every runtime calls this function internally. A Main-authored Build prompt
   // already passed the restricted Build wrapper, so do not wrap it again with
   // unrelated chat/surface/connection protocols.

@@ -279,11 +279,11 @@ assert.deepEqual(
   ["RAILWAY_PROJECT_ID", "RAILWAY_TOKEN"],
 );
 assert.deepEqual(
-  Object.keys(stepNamed("Publish verified release (public releases repo)").env).sort(),
-  ["GH_TOKEN", "GITHUB_TOKEN"],
+  Object.keys(stepNamed("Complete staged release and promote verified stable").env).sort(),
+  ["AGENTLAS_RELEASE_ASSET_POLL_MS", "AGENTLAS_RELEASE_ASSET_WAIT_MS", "GH_TOKEN", "GITHUB_TOKEN"],
 );
 assert.equal(
-  stepNamed("Publish verified release (public releases repo)").env.GH_TOKEN,
+  stepNamed("Complete staged release and promote verified stable").env.GH_TOKEN,
   "${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}",
   "cross-repo publish must use the dedicated PAT without a source-repo GITHUB_TOKEN fallback",
 );
@@ -305,6 +305,10 @@ for (const requiredGate of [
   "npm run test:marketplace-cache",
   "npm run test:after-pack-runtime-contract",
   "npm run test:mobile-bridge-contract",
+  "npm run test:mobile-execution-boundary",
+  "npm run test:runtime-resume-contract",
+  "npm run test:cli-image-attachments",
+  "npm run test:owned-agent-runtime-prompts",
   "npm run test:independent-terminal-boundary",
   "npm run test:grok-runtime-contract",
   "npm run test:grok-auth-source",
@@ -339,8 +343,10 @@ for (const configName of ["electron-builder.yml", "electron-builder.mac-stable.y
   );
 }
 
-const publishStep = crossPlatformWorkflow.slice(crossPlatformWorkflow.indexOf("- name: Package and publish"));
-const builderIndex = publishStep.indexOf("electron-builder ${{ matrix.builder_args }} --publish always");
+const publishStep = crossPlatformWorkflow.slice(
+  crossPlatformWorkflow.indexOf("- name: Package and stage prerelease assets"),
+);
+const builderIndex = publishStep.indexOf("npx electron-builder ${{ matrix.builder_args }} --publish always");
 const stampIndex = publishStep.indexOf("node scripts/stamp-update-feeds.mjs --release-dir=release --require");
 const uploadIndex = publishStep.indexOf('gh release upload "$RESOLVED_TAG"');
 assert.ok(builderIndex >= 0 && stampIndex > builderIndex && uploadIndex > stampIndex, "cross-platform feeds must be stamped and clobber-uploaded after electron-builder writes them");

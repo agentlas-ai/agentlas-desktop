@@ -19,7 +19,7 @@ import {
   autoTitleFromFirstMessage,
   listChatMessages,
 } from "../store/chats";
-import { curateReply } from "../memory/curator";
+import { curateReply, stripReplyMemoryEventsReadOnly } from "../memory/curator";
 import { getAgentConcurrency } from "../store/concurrency";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import { stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
@@ -101,6 +101,7 @@ export interface BorrowedTaskForceParams {
   runtimeOverride?: AgentRuntimeOverride | null;
   workingFolder?: string | null;
   workspaceBinding?: InvocationWorkspaceBinding;
+  restrictedReadBoundary?: true;
   mcpConfigPath?: string;
   mcpAllowedTools?: string[];
   mcpCodexConfigArgs?: string[];
@@ -227,17 +228,41 @@ function taskForcePermissionLabel(permission: RunnerRequest["permission"]): stri
 
 function taskForceRunnerBase(p: BorrowedTaskForceParams): Pick<
   RunnerRequest,
-  "permission" | "mcpConfigPath" | "mcpAllowedTools" | "mcpCodexConfigArgs" | "env"
+  | "permission"
+  | "restrictedReadBoundary"
+  | "mcpConfigPath"
+  | "mcpAllowedTools"
+  | "mcpCodexConfigArgs"
+  | "env"
 > {
   const permission = taskForcePermission(p);
   const toolsAllowed = taskForceAllowsTools(p);
   return {
     permission,
+    restrictedReadBoundary: p.restrictedReadBoundary,
     mcpConfigPath: toolsAllowed ? p.mcpConfigPath : undefined,
     mcpAllowedTools: toolsAllowed ? p.mcpAllowedTools : undefined,
     mcpCodexConfigArgs: toolsAllowed ? p.mcpCodexConfigArgs : undefined,
     env: toolsAllowed ? p.runnerEnv : undefined,
   };
+}
+
+function restrictedTaskForceText(
+  p: BorrowedTaskForceParams,
+  text: string,
+  nodeId: string,
+  agentId: string | null = p.chat.agentId,
+): string {
+  if (!p.restrictedReadBoundary) return text;
+  return stripReplyMemoryEventsReadOnly(text, {
+    projectPath: p.workingFolder ?? null,
+    projectId: p.chat.projectId ?? null,
+    agentId,
+    chatId: p.chat.id,
+    runId: p.req.runId,
+    nodeId,
+    cwdAtRequest: p.workingFolder ?? null,
+  }).cleanedText;
 }
 
 export function redactSensitiveText(text: string): string {
@@ -760,7 +785,15 @@ async function runBorrowedAgentTurn(
       status: p.locale === "ko" ? `${spec.name} 완료` : `${spec.name} completed`,
       tokens: result.tokens,
     }));
-    return { spec, packet, text: redactSensitiveText(result.text), ok: true, tokens: result.tokens };
+    return {
+      spec,
+      packet,
+      text: redactSensitiveText(
+        restrictedTaskForceText(p, result.text, id, spec.installedAgentId ?? spec.slug),
+      ),
+      ok: true,
+      tokens: result.tokens,
+    };
   } catch (err) {
     if (p.signal?.aborted) throw err;
     const message = timedOut
@@ -869,7 +902,8 @@ async function runPlanner(
         }),
     },
   );
-  const parsedPlan = parseBorrowedWorkloadPlan(result.text);
+  const plannerText = restrictedTaskForceText(p, result.text, orchestratorId, p.orchestratorAgent.id);
+  const parsedPlan = parseBorrowedWorkloadPlan(plannerText);
   const packets = normalizePacketsForRoster(parsedPlan.packets, specs, p.req.userPrompt);
   p.sink({
     kind: "tool-use",
@@ -885,7 +919,7 @@ async function runPlanner(
     delegateTo: packets.map((packet) => agentNodeId(packet.agent)),
   });
   return {
-    text: result.text,
+    text: plannerText,
     packets,
     synthesisAllocation: parsedPlan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
     result,
@@ -1004,7 +1038,9 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
         tier: 1,
         phase: "synthesize",
       }),
-      onPartial: (text) => p.sink({ kind: "partial", text: redactSensitiveText(text) }),
+      onPartial: (text) => {
+        if (!p.restrictedReadBoundary) p.sink({ kind: "partial", text: redactSensitiveText(text) });
+      },
       onTool: (name, args, result, id, isError) =>
         p.sink({
           kind: "tool-use",
@@ -1027,6 +1063,7 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
     displayText = [displayText, boundaryNote].filter(Boolean).join("\n\n");
     p.sink({ kind: "tool-use", status: boundaryNote });
   }
+  displayText = restrictedTaskForceText(p, displayText, orchestratorId, p.orchestratorAgent.id);
   if (p.req.permissions === "write" || p.req.permissions === "full") {
     try {
       const curated = curateReply(displayText, {

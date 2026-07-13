@@ -25,7 +25,7 @@ import {
 import { recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
-import { curateReply } from "../memory/curator";
+import { curateReply, stripReplyMemoryEventsReadOnly } from "../memory/curator";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { buildDelegateProtocol, parseDelegations, type Delegation } from "./delegate";
 import { selectRuntimeForTargets } from "../runtime/selection";
@@ -63,6 +63,7 @@ export interface FirmRunParams {
   picked: { runner: Runner; label: string };
   workingFolder?: string | null;
   workspaceBinding?: InvocationWorkspaceBinding;
+  restrictedReadBoundary?: true;
   mcpConfigPath?: string;
   mcpAllowedTools?: string[];
   mcpCodexConfigArgs?: string[];
@@ -70,6 +71,25 @@ export interface FirmRunParams {
   locale: RuntimeLocale;
   sink: EventSink;
   signal?: AbortSignal;
+}
+
+function restrictedFirmText(
+  p: FirmRunParams,
+  text: string,
+  nodeId: string,
+  agentId: string | null,
+  chatId: string | null | undefined,
+): string {
+  if (!p.restrictedReadBoundary) return text;
+  return stripReplyMemoryEventsReadOnly(text, {
+    projectPath: p.workingFolder ?? null,
+    projectId: p.chat.projectId ?? null,
+    agentId,
+    chatId: chatId ?? p.chat.id,
+    runId: p.req.runId,
+    nodeId,
+    cwdAtRequest: p.workingFolder ?? null,
+  }).cleanedText;
 }
 
 /** 간단한 동시성 풀 — items를 cap개씩 병렬 실행. */
@@ -259,7 +279,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   if (turn.reports && turn.reports.length > 0) {
     systemPrompt += `\n\n${buildDelegateProtocol(turn.reports.map((r) => ({ role: r.role, name: r.name })))}`;
   }
-  systemPrompt += `\n\n${memoryEmitterPromptFor(turn.userPrompt)}`;
+  if (!p.restrictedReadBoundary) {
+    systemPrompt += `\n\n${memoryEmitterPromptFor(turn.userPrompt)}`;
+  }
 
   const runtimeChoice = selectRuntimeForTargets(p.runtimes, [
     { scope: "agent", targetId: node.agentId },
@@ -277,9 +299,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       })
     : null;
   const active = workloadResolution?.runtime ?? baseActive;
-  if (p.workspaceBinding && !isMobileReadRuntimeAllowed(active.kind)) {
+  if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
     throw new MobileReadRuntimeBoundaryError(
-      "This firm node runtime has no verified Mobile read-only sandbox. Select Codex, BYOK, or Ollama on Desktop.",
+      "This firm node runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
     );
   }
   if (workloadResolution) {
@@ -345,6 +367,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       effort: active.effort ?? undefined,
       signal: turn.signal ?? p.signal,
       permission: p.req.permissions,
+      restrictedReadBoundary: p.restrictedReadBoundary,
       cwd: workingFolder ?? undefined,
       chatId: turn.chatId ?? undefined,
       mcpConfigPath: p.mcpConfigPath,
@@ -359,8 +382,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         if (turn.toMainBubble) p.sink({ kind: "tool-use", status });
       },
       onPartial: (text) => {
-        emit({ kind: "partial", text });
-        if (turn.toMainBubble) p.sink({ kind: "partial", text });
+        if (!p.restrictedReadBoundary) {
+          emit({ kind: "partial", text });
+          if (turn.toMainBubble) p.sink({ kind: "partial", text });
+        }
       },
       onTool: (name, args, result, id, isError) => {
         const tool = { name, args, result, id, isError };
@@ -371,7 +396,14 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   );
 
   // delegation 블록 분리 → 메모리 큐레이션(노드 agentId로) → 정리된 텍스트
-  const { delegations, synthesisAllocation, cleanedText } = parseDelegations(result.text);
+  const safeResultText = restrictedFirmText(
+    p,
+    result.text,
+    node.id,
+    memoryOwnerId,
+    turn.chatId,
+  );
+  const { delegations, synthesisAllocation, cleanedText } = parseDelegations(safeResultText);
   let display = cleanedText;
   if (p.req.permissions === "write" || p.req.permissions === "full") {
     try {

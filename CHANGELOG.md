@@ -13,10 +13,22 @@
   and revalidates it before every runner. Folder clearing, replacement, prompt
   path injection, and mutable chat/project races fail closed.
 - **Mobile read runs use only runtimes with a proven non-mutating boundary.**
-  Codex read sandbox, text-only BYOK, and Ollama are allowed. Claude Code,
-  Gemini/Antigravity, and Grok must be started on Desktop until their local CLI
-  read sandboxes are enforceable. Mobile read does not attach MCPs, activate a
-  project folder, or create an Automation.
+  BYOK and Ollama receive text/images over their model protocols and remain
+  available. Codex, Claude Code, Gemini/Antigravity, and Grok fail closed for
+  Mobile and unattended reads on every platform until a release-gated host-file
+  denial proof exists for those local CLI runtimes.
+- **Restricted read-mode is explicit about its current limit.** BYOK/Ollama can
+  answer from the text, curated context, and images Agentlas sends, but cannot
+  open arbitrary local project files. The system prompt forbids invented file
+  inspection and asks for the needed content to be pasted or attached.
+- **Restricted reads do not inherit local power.** User/project dotenv values,
+  unrelated vault secrets, local CLI config, rules, skills, plugins, MCPs,
+  CLI-owned memory, and browser/computer-use features are not injected into the
+  runner or model context. A selected BYOK provider key is used only by Main as
+  the HTTP transport credential and is never prompt content. Agentlas may supply
+  its curated read context, but model-emitted memory blocks are stripped and no
+  Memory, Experience, or Ontology mutation occurs; only content-free audit
+  counts remain.
 - **Automation authority is durable.** Schema 64 stores each Automation as
   `read` or `write`; the scheduler, workflow graph, and failure optimizer retain
   that exact permission. Legacy and normal Desktop-created Automations remain
@@ -30,9 +42,26 @@
   of silently leaving the LLM usage panel looking empty. Provider-specific
   contracts remain honest: Antigravity exposes no counter, and Grok exposes
   only a confirmed 402 exhaustion state rather than an invented percentage.
+- **Gemini and Grok provider state no longer goes stale or races.** Gemini's
+  retired official client switches once to the installed Antigravity CLI;
+  Grok's real 402 balance exhaustion remains a provider error, not a fake usage
+  window. Provider retry is allowlisted, single-flight, cooldown-bound, and
+  guarded against out-of-order snapshots. A stale receipt cannot hide a newly
+  installed CLI, and raw provider errors never cross into the renderer.
+- **Creating a Mobile chat binds its selected project before the first run.**
+  Desktop resolves and verifies the host-owned project folder immediately;
+  unavailable or replaced folders fail before a chat row is created, while an
+  explicitly global chat stays unbound.
+- **Interactive agent-group chats keep the user's selected runtime.** The
+  stronger restricted-read profile is derived only for Mobile and unattended
+  read Automations, not from the chat's `division` shape alone.
 - **Codex write mode now stays inside its workspace sandbox.** New and resumed
   Codex runs map `write` to `workspace-write` and reassert the sandbox on resume.
   Only an explicitly approved Desktop `full` run may bypass the sandbox.
+- **A partial cross-platform upload can no longer become `latest`.** Windows and
+  Linux assets stage as a prerelease; stable/latest promotion occurs only after
+  the signed and notarized macOS publisher verifies the complete required asset
+  set. Missing assets or timeout leave the release non-stable.
 
 ## 0.8.16 — 2026-07-13 (withdrawn security candidate; never stable)
 

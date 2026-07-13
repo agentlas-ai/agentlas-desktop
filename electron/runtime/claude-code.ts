@@ -181,6 +181,11 @@ export const runClaudeCode: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  if (req.restrictedReadBoundary) {
+    throw new Error(
+      "Claude Code is not enabled for restricted read-only execution because its host filesystem boundary is not release-verified.",
+    );
+  }
   const bin = await getBin();
   if (!bin) {
     throw new Error(tStatus(req.locale, "errCliMissingClaude"));
@@ -189,7 +194,14 @@ export const runClaudeCode: Runner = async (
   const stagedImages = await stageCliImageAttachments(req);
   const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
 
-  const systemPrompt = wrapSystemPrompt(runReq.systemPrompt, runReq.locale, runReq.permission, runReq.userPrompt, runReq.forceSurface);
+  const systemPrompt = wrapSystemPrompt(
+    runReq.systemPrompt,
+    runReq.locale,
+    runReq.permission,
+    runReq.userPrompt,
+    runReq.forceSurface,
+    runReq.restrictedReadBoundary,
+  );
   const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
   const savedSession = runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
   const storedSessionId =

@@ -143,7 +143,10 @@ export function enforceMobileReadOnlyPermission(permission: unknown): "read" {
 }
 
 export function isMobileReadRuntimeAllowed(kind: string): boolean {
-  return kind === "codex" || kind === "byok" || kind === "ollama";
+  // BYOK and Ollama receive text/images over their API protocols and do not
+  // inherit a local CLI's filesystem/config/plugin authority. CLI runtimes stay
+  // blocked until a release-gated host denial probe proves the same boundary.
+  return kind === "byok" || kind === "ollama";
 }
 
 export class MobileReadRuntimeBoundaryError extends Error {

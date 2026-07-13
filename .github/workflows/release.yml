@@ -130,6 +130,9 @@ jobs:
             npm run test:automation-scheduler-guards
             npm run test:mobile-read-boundary
             npm run test:mobile-execution-boundary
+            npm run test:runtime-resume-contract
+            npm run test:cli-image-attachments
+            npm run test:owned-agent-runtime-prompts
             npm run test:opencrab-core
             npm run test:opencrab-product
             npm run test:opencrab-recovery-scrub
