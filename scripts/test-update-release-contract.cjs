@@ -126,10 +126,13 @@ const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 const changelog = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
 const publishMacSource = fs.readFileSync(path.join(root, "scripts", "publish-mac-release.mjs"), "utf8");
 const packageMacSource = fs.readFileSync(path.join(root, "scripts", "package-mac.sh"), "utf8");
+const escapedVersion = pkg.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const readmeReleaseMarker = new RegExp(`(?:Unreleased|v${escapedVersion})[\\s\\S]*?Agentlas OS pin[\\s\\S]*?v1\\.1\\.23[\\s\\S]*?__pycache__`);
+const changelogReleaseMarker = new RegExp(`(?:Unreleased|${escapedVersion})[\\s\\S]*?v1\\.1\\.23[\\s\\S]*?Windows[\\s\\S]*?Stormbreaker`);
 assert.match(readme, /macOS 12 Monterey or newer/);
 assert.match(readme, /macOS 11 Big Sur:[\s\S]*?last compatible Agentlas release[\s\S]*?excluded/);
-assert.match(readme, /Unreleased[\s\S]*?Agentlas OS pin[\s\S]*?v1\.1\.23[\s\S]*?__pycache__/);
-assert.match(changelog, /Unreleased[\s\S]*?v1\.1\.23[\s\S]*?Windows[\s\S]*?Stormbreaker/);
+assert.match(readme, readmeReleaseMarker, "README must describe the current release or next candidate runtime boundary");
+assert.match(changelog, changelogReleaseMarker, "CHANGELOG must describe the current release or next candidate runtime boundary");
 assert.match(publishMacSource, /Requires macOS 12 Monterey or newer/);
 assert.match(publishMacSource, /macOS 11 Big Sur stays on the last compatible release/);
 assert.match(packageMacSource, /smoke-signed-mac-python-cache\.cjs/);
@@ -367,7 +370,7 @@ assert.equal(
   "${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}",
   "cross-repo publish must use the dedicated PAT without a source-repo GITHUB_TOKEN fallback",
 );
-assert.equal(signedWorkflow.permissions.contents, "read", "the private source workflow must not request contents:write");
+assert.equal(signedWorkflow.permissions.contents, "read", "the public source workflow must not request source-repository contents:write");
 assert.deepEqual(
   Object.keys(stepNamed("Build, sign, notarize, and verify DMGs").env).sort(),
   ["APPLE_APP_SPECIFIC_PASSWORD", "APPLE_ID", "APPLE_TEAM_ID", "CSC_KEY_PASSWORD"],

@@ -69,7 +69,7 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
 
-- **Unreleased · next Desktop patch candidate** — the embedded Agentlas OS pin
+- **2026-07-14 · v0.8.20 Runtime integrity patch** — the embedded Agentlas OS pin
   is aligned to v1.1.23 across package compatibility and every release workflow,
   bound to exact commit `d121a703`, and carrying the current Windows
   Stormbreaker/native harness fixes. A moved tag or second-fetch mismatch fails

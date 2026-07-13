@@ -27,8 +27,9 @@ asarUnpack:
 # ── Embedded Hephaestus engine ───────────────────────────────────────────────
 # Hephaestus is a separate open-source repo (git-ignored here). It is copied into
 # the packaged app from the on-disk folder — independent of git tracking — so the
-# private desktop repo never holds engine source while the shipped .app still
-# embeds it. Lands at <app>/Contents/Resources/Hephaestus (process.resourcesPath),
+# Desktop source does not vendor engine source in its Git history while the
+# shipped app still embeds the exact pinned checkout. Lands at
+# <app>/Contents/Resources/Hephaestus (process.resourcesPath),
 # OUTSIDE the asar so bin/hephaestus + the Python tree stay executable.
 # Heavy, non-runtime dirs (render output, tests, vendored caches, git) excluded.
 extraResources:

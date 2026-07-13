@@ -1,8 +1,7 @@
 # Cross-platform release — builds Windows / Linux installers and publishes them to
-# the SEPARATE PUBLIC releases repo (agentlas-ai/agentlas-desktop) via the
-# electron-builder GitHub publisher. The desktop SOURCE repo is private, so only the
-# compiled binaries + latest*.yml (the update feed electron-updater polls) are made
-# public — no source is exposed.
+# the SEPARATE PUBLIC releases repo (agentlas-ai/agentlas-desktop-releases) via
+# the electron-builder GitHub publisher. The source repository is also public;
+# the separate repository is the canonical binary download and auto-update channel.
 #
 # The embedded Hephaestus engine is git-ignored, so a fresh checkout has no
 # engine — `npm run ensure:engine` clones the public engine repo before build.
@@ -13,8 +12,8 @@
 # users can get a "newer" DMG that cannot safely auto-update.
 # For the signed + notarized macOS pipeline, see docs/PUBLIC-RELEASE.md.
 #
-# Requires the AGENTLAS_DESKTOP_RELEASE_TOKEN secret (a PAT with `repo` scope that
-# can write to the releases repo) — already present in repo secrets.
+# Requires AGENTLAS_DESKTOP_RELEASE_TOKEN. Prefer a fine-grained PAT limited to
+# Contents write on agentlas-desktop-releases instead of a broad classic token.
 #
 # Trigger:
 #   git tag v0.0.3 && git push origin v0.0.3      # version comes from the tag
@@ -33,7 +32,8 @@ on:
         required: true
         default: "v0.0.3"
 
-# Distribution is to the CDN, not GitHub Releases — read-only checkout suffices.
+# Distribution writes to the separate GitHub Releases repository with the
+# dedicated PAT; this source workflow itself needs only read access.
 permissions:
   contents: read
 

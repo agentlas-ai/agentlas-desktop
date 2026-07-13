@@ -43,7 +43,7 @@ jobs:
     # Includes a bounded wait for the parallel Windows/Linux staging workflow.
     timeout-minutes: 75
     env:
-      # Publish to the SEPARATE public releases repo (source repo is private).
+      # Publish installers to the SEPARATE public releases repository.
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
       HEPHAESTUS_REF: v1.1.23

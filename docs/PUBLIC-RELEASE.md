@@ -85,7 +85,10 @@ The last command writes the verified release metadata to Railway production so:
 There are two release workflows, by design:
 
 1. **`.github/workflows/release.yml` (active, default).** Windows/Linux preview
-   release, **unsigned**, uses only the built-in `GITHUB_TOKEN`. macOS is
+   release, **unsigned**, uses the dedicated
+   `AGENTLAS_DESKTOP_RELEASE_TOKEN` to publish into the separate
+   `agentlas-desktop-releases` repository. The source repository's built-in
+   `GITHUB_TOKEN` is deliberately not used for cross-repository publication. macOS is
    intentionally excluded from this workflow so an unsigned DMG cannot replace
    the signed/notarized public Mac channel. Trigger it by pushing a tag:
 
@@ -106,14 +109,21 @@ There are two release workflows, by design:
    `AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac`, followed by
    `npm run release:mac:publish`.
 
-Required GitHub secrets for the **signed macOS** workflow on `agentlas-ai/agentlas-desktop`:
+Required for **both** release workflows on `agentlas-ai/agentlas-desktop`:
+
+- `AGENTLAS_DESKTOP_RELEASE_TOKEN` — preferably a fine-grained token limited to
+  Contents write on `agentlas-ai/agentlas-desktop-releases`
+
+Additional secrets required for the **signed macOS** workflow:
 
 - `APPLE_ID`
 - `APPLE_APP_SPECIFIC_PASSWORD`
 - `APPLE_TEAM_ID`
 - `MAC_DEVELOPER_ID_CERTIFICATE`
 - `MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD`
-- `AGENTLAS_DESKTOP_RELEASE_TOKEN`
+
+Optional secrets for applying verified release metadata to Web production:
+
 - `RAILWAY_TOKEN`
 - `RAILWAY_PROJECT_ID`
 

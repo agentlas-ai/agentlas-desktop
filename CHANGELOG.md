@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — next Desktop patch candidate
+## 0.8.20 — 2026-07-14
 
 ### Fixed
 
