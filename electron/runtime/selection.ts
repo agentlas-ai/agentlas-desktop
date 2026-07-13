@@ -14,6 +14,7 @@ import { runClaudeCode } from "./claude-code";
 import { runCodex } from "./codex";
 import { isAgyBinaryPath, runGemini } from "./gemini";
 import { runGrok } from "./grok";
+import { runCursor } from "./cursor";
 import { runOllama } from "./ollama";
 import { acquireRunSlot } from "./run-slots";
 import type { Runner } from "./runner";
@@ -46,12 +47,14 @@ const runClaudeCodeSlotted = withRunSlot(runClaudeCode);
 const runCodexSlotted = withRunSlot(runCodex);
 const runGeminiSlotted = withRunSlot(runGemini);
 const runGrokSlotted = withRunSlot(runGrok);
+const runCursorSlotted = withRunSlot(runCursor);
 
 const RUNNER_LABEL: Record<string, string> = {
   "claude-code": "Claude Code CLI",
   codex: "Codex CLI",
   gemini: "Gemini CLI",
   grok: "Grok CLI",
+  cursor: "Cursor Agent CLI",
   "byok:anthropic": "Anthropic API",
   "byok:openai": "OpenAI API",
   "byok:google": "Google API",
@@ -69,6 +72,13 @@ export interface RuntimeChoice {
   unavailableOverride: AgentRuntimeOverride | null;
 }
 
+export interface AgentAppRuntimeChoice extends RuntimeChoice {
+  /** Brave MCP is allowed only when the target's selected runtime is Claude Code. */
+  capabilityRuntimeEligible: boolean;
+  /** Unsafe CLI selection replaced by a stateless-safe no-tool runner. */
+  fallbackFromKind: RuntimeStatus["kind"] | null;
+}
+
 export function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | null {
   if (active.kind === "claude-code") return { runner: runClaudeCodeSlotted, label: RUNNER_LABEL["claude-code"] };
   if (active.kind === "codex") return { runner: runCodexSlotted, label: RUNNER_LABEL.codex };
@@ -80,6 +90,8 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
   }
   if (active.kind === "grok")
     return { runner: runGrokSlotted, label: `Grok CLI${active.model ? ` · ${active.model}` : ""}` };
+  if (active.kind === "cursor")
+    return { runner: runCursorSlotted, label: `Cursor Agent${active.model && active.model !== "auto" ? ` · ${active.model}` : " · Auto"}` };
   if (active.kind === "ollama")
     return { runner: runOllama, label: `Ollama${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "byok") {
@@ -157,5 +169,43 @@ export function selectRuntimeForTargets(
     picked: pickRunner(active),
     override: null,
     unavailableOverride: override ?? null,
+  };
+}
+
+function agentAppStatelessSafe(runtime: RuntimeStatus): boolean {
+  return runtime.kind === "claude-code" || runtime.kind === "byok" || runtime.kind === "ollama";
+}
+
+/**
+ * Runtimes that cannot prove the Agent App zero-builtins contract are replaced
+ * by a detected stateless-safe runner. Capability eligibility remains tied to
+ * the target's original runtime so fallback never widens MCP authority.
+ */
+export function selectAgentAppRuntimeForTargets(
+  runtimes: RuntimeStatus[],
+  targets: RuntimeOverrideTarget[],
+): AgentAppRuntimeChoice | null {
+  const preferred = selectRuntimeForTargets(runtimes, targets);
+  if (!preferred) return null;
+  const capabilityRuntimeEligible = preferred.active.kind === "claude-code";
+  if (preferred.picked && agentAppStatelessSafe(preferred.active)) {
+    return { ...preferred, capabilityRuntimeEligible, fallbackFromKind: null };
+  }
+  const fallback = [...runtimes]
+    .filter(agentAppStatelessSafe)
+    .sort((left, right) => {
+      const rank = (runtime: RuntimeStatus) => runtime.kind === "claude-code" ? 0 : runtime.kind === "byok" ? 1 : 2;
+      return rank(left) - rank(right);
+    })
+    .find((runtime) => Boolean(pickRunner(runtime)));
+  if (!fallback) return null;
+  const active = { ...fallback, active: true };
+  return {
+    active,
+    picked: pickRunner(active),
+    override: null,
+    unavailableOverride: preferred.unavailableOverride,
+    capabilityRuntimeEligible: false,
+    fallbackFromKind: preferred.active.kind,
   };
 }

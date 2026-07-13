@@ -85,6 +85,60 @@ const evilReply = "```html\n<button class=\"cta\"><img src=\"https://cdn.x/a.png
 const evil = applySiteEditReply(SOURCE, selection, evilReply, "agy");
 assert.equal(evil.ok, false, "patch that injects external resources must be rejected");
 
+// ── Agent App 편집은 Astryx + main-owned I/O marker를 보존 ─────────────
+const agentAppContext = {
+  template: "form-two-column",
+  contract: {
+    schemaVersion: 1,
+    source: "declared-package",
+    inputs: [
+      { name: "topic", type: "string", label: "Topic", description: "", required: true, format: "textarea", options: [], defaultValue: null },
+      { name: "sources", type: "string", label: "Sources", description: "", required: false, format: "textarea", options: [], defaultValue: null },
+    ],
+    outputs: [
+      { name: "brief", label: "Brief", type: "markdown", description: "" },
+      { name: "citations", label: "Citations", type: "array", description: "" },
+    ],
+  },
+  manifest: {
+    app: {
+      tools: [{
+        parameters: [{ name: "topic" }, { name: "sources" }],
+        outputs: [{ name: "brief" }, { name: "citations" }],
+      }],
+    },
+  },
+};
+const VISUAL_META = [
+  '<meta name="agentlas-visual-color-mode" content="light">',
+  '<meta name="agentlas-visual-accent" content="teal">',
+  '<meta name="agentlas-visual-density" content="comfortable">',
+  '<meta name="agentlas-visual-radius" content="soft">',
+  '<meta name="agentlas-visual-headline" content="Research with confidence">',
+  '<meta name="agentlas-visual-description" content="Turn a question into a cited brief.">',
+  '<meta name="agentlas-visual-input-heading" content="Research inputs">',
+  '<meta name="agentlas-visual-output-heading" content="Evidence outputs">',
+  '<meta name="agentlas-visual-run-label" content="Start research">',
+  '<meta name="agentlas-visual-empty-output" content="Results will appear here after the runtime call.">',
+].join("");
+const ASTRYX_SOURCE = `<!doctype html><html><head><meta name="agentlas-design-system" content="@astryxdesign/core@0.1.4">${VISUAL_META}</head><body data-astryx-template="form-two-column" data-agentlas-agent-app="true" data-agentlas-inputs="topic,sources" data-agentlas-outputs="brief,citations"><main>Agent app</main></body></html>`;
+const lostContract = applySiteEditReply(
+  ASTRYX_SOURCE,
+  null,
+  "```html\n<!doctype html><html><head></head><body><main>Re-themed</main></body></html>\n```",
+  "web-master",
+  agentAppContext,
+);
+assert.equal(lostContract.ok, false, "Agent App edits must reject removal of Astryx or I/O contract markers");
+const keptContract = applySiteEditReply(
+  ASTRYX_SOURCE,
+  null,
+  `\`\`\`html\n${ASTRYX_SOURCE.replace("Agent app", "Polished Agent app")}\n\`\`\``,
+  "web-master",
+  agentAppContext,
+);
+assert.equal(keptContract.ok, true, `Agent App edits may change the design while preserving the contract: ${keptContract.reason ?? ""}`);
+
 // 잘못된 태그 블록(선택은 button인데 div 반환) → 부분 patch 불성립.
 assert.equal(extractElementBlockFromReply("```html\n<div>x</div>\n```", "button"), null, "wrong-tag block must not match");
 // 닫히지 않은 블록도 불성립.
@@ -93,5 +147,6 @@ assert.equal(extractElementBlockFromReply("```html\n<button>x\n```", "button"), 
 const generatorSource = fs.readFileSync(path.join(__dirname, "..", "electron/site/generate.ts"), "utf8");
 assert.doesNotMatch(generatorSource, /Now output the single fenced HTML document\./, "final generation instruction must not contradict the required feedback block");
 assert.match(generatorSource, /required feedback block followed by the single fenced HTML document/, "generation prompt must keep feedback and HTML in one consistent contract");
+assert.match(generatorSource, /Agent App edits must keep the document-level visual snapshot synchronized/, "selected Agent App edits must request a full document");
 
 console.log("site studio select-to-edit contract ok");

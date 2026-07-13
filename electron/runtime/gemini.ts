@@ -138,6 +138,7 @@ function buildPrompt(req: RunnerRequest): string {
     req.userPrompt,
     req.forceSurface,
     req.restrictedReadBoundary,
+    req.untrustedNoTools,
   );
   const user = tStatus(req.locale, "speakerUser");
   const assistant = tStatus(req.locale, "speakerAssistant");
@@ -423,6 +424,13 @@ export const runGemini: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  if (req.untrustedNoTools) {
+    throw new Error(
+      req.locale === "ko"
+        ? "Gemini CLI는 현재 Agent App의 검증된 무도구 격리 모드를 지원하지 않습니다. Claude Code, Ollama 또는 API 런타임을 선택하세요."
+        : "Gemini CLI does not currently support Agent App's verified tool-less isolation. Select Claude Code, Ollama, or an API runtime.",
+    );
+  }
   if (req.restrictedReadBoundary) {
     throw new Error(
       "Gemini is not enabled for restricted read-only execution because its host filesystem boundary is not release-verified.",

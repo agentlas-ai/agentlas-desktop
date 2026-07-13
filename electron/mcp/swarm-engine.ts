@@ -28,6 +28,15 @@ export interface SwarmTask {
   spawnedBy?: string;
   /** Parent worker's provider-neutral assignment for this child task. */
   allocation?: WorkloadAllocation;
+  /** Host-validated runtime/model/effort actually used; synthesis receives this as evidence. */
+  resolvedAllocation?: {
+    runtimeId: string | null;
+    runtimeKind: string | null;
+    model: string | null;
+    effort: string | null;
+    source: string;
+    resolutionCodes: string[];
+  };
 }
 
 export interface SwarmBoard {

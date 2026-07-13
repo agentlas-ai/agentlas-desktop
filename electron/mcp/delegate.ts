@@ -32,7 +32,7 @@ export interface ParsedDelegation {
  *  reports는 동적이므로 함수로 생성한다. */
 export function buildDelegateProtocol(
   reports: Array<{ role: string; name?: string }>,
-  runtime?: RuntimeStatus,
+  runtimes: RuntimeStatus[],
 ): string {
   const list = reports
     .map((r) => `  - ${r.role}${r.name && r.name !== r.role ? ` (${r.name})` : ""}`)
@@ -48,8 +48,8 @@ export function buildDelegateProtocol(
     list,
     "",
     "Judge each child task's complexity, risk, context size, and synthesis burden yourself.",
-    "Assign provider-neutral capacity and an exact live model; never copy one flagship model to every child.",
-    runtime ? workloadAllocationInventoryPrompt(runtime) : "If no live inventory is present, omit exactModelId and preserve the active model.",
+    "Assign provider-neutral capacity plus one exact live runtime/model pair; never copy one flagship model to every child.",
+    workloadAllocationInventoryPrompt(runtimes),
     "To delegate, end your reply with exactly this block (omit entirely if delegating to none):",
     "",
     DELEGATE_HEADING,

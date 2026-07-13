@@ -112,6 +112,7 @@ export const runOllama: Runner = async (
       req.userPrompt,
       req.forceSurface,
       req.restrictedReadBoundary,
+      req.untrustedNoTools,
     ),
   }];
   for (const m of recent) {

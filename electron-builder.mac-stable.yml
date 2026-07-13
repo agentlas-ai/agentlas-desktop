@@ -14,6 +14,12 @@ afterPack: build-resources/after-pack-clean.cjs
 
 files:
   - dist/electron/**/*
+  # Keep the main-process Astryx lock snapshot despite electron-builder's
+  # global package-lock.json exclusion. It is required at app startup.
+  - from: dist/electron/app-factory/astryx-lock
+    to: dist/electron/app-factory/astryx-lock
+    filter:
+      - package-lock.json
   # dist/shared/** holds runtime values (shared/models.ts). MUST be packaged or the app crashes.
   - dist/shared/**/*
   - dist/renderer/**/*

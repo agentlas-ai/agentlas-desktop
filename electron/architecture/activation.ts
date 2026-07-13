@@ -1,43 +1,39 @@
-// Auto-activation: the first meaningful Agentlas contact with a folder asks
-// Agentlas Core to install the canonical local memory/code-map/ontology setup.
+// First writable Desktop contact delegates the canonical project architecture
+// to Agentlas Core. Restricted read and Site Agent App runs never enter here.
 import { getDb } from "../store/db";
-import { ensureProjectMemory } from "../memory/project-files";
-import { runHephaestus } from "../hephaestus/engine";
+import {
+  ensureDesktopProjectBootstrap,
+  projectBootstrapAccessAllowed,
+  type ProjectBootstrapAccess,
+  type ProjectBootstrapResult,
+} from "./project-bootstrap";
 
 export interface VisitResult {
   visits: number;
   activated: boolean;
   /** True only on the turn activation first happened (for UI/log surfacing). */
   justActivated: boolean;
-}
-
-const projectBootstrapRuns = new Map<string, Promise<boolean>>();
-
-async function ensureCoreProject(projectPath: string, projectName?: string): Promise<boolean> {
-  const existing = projectBootstrapRuns.get(projectPath);
-  if (existing) return existing;
-  const pending = (async () => {
-    const result = await runHephaestus<{ status?: string }>(
-      "agentlas_cloud",
-      ["project", "ensure", "--project", projectPath, "--reason", "desktop-first-contact"],
-      { cwd: projectPath, timeoutMs: 120_000 },
-    );
-    if (result.ok && result.json?.status === "active") return true;
-    // Older/missing Core builds retain the merge-only Desktop seed as a safe
-    // continuity fallback; the next contact retries the canonical Core path.
-    projectBootstrapRuns.delete(projectPath);
-    ensureProjectMemory(projectPath, projectName);
-    return false;
-  })();
-  projectBootstrapRuns.set(projectPath, pending);
-  return pending;
+  bootstrapMode: ProjectBootstrapResult["mode"];
 }
 
 /**
- * Record the first writable contact with a working folder and ensure the
- * canonical Core-owned project architecture. Idempotent and merge-only.
+ * Record the first authorized writable contact, await canonical setup, and then
+ * mark the folder active. Later calls reuse the process-local bootstrap result.
  */
-export async function recordFolderVisit(projectPath: string, projectName?: string): Promise<VisitResult> {
+export async function recordFolderVisit(
+  projectPath: string,
+  projectName: string | undefined,
+  access: ProjectBootstrapAccess,
+): Promise<VisitResult> {
+  if (!projectBootstrapAccessAllowed(access)) {
+    throw new Error("Project activation is unavailable outside an interactive writable Desktop run.");
+  }
+  const bootstrap = await ensureDesktopProjectBootstrap({
+    projectPath,
+    projectName,
+    access,
+    reason: "desktop-first-contact",
+  });
   const db = getDb();
   const now = new Date().toISOString();
   const row = db
@@ -63,15 +59,20 @@ export async function recordFolderVisit(projectPath: string, projectName?: strin
   }
 
   let justActivated = false;
-  if (!activatedAt) {
+  // The tiny Desktop fallback is intentionally not promoted to active memory:
+  // doing so would let legacy curator code expand it beyond the safe seed.
+  if (bootstrap.mode === "core" && !activatedAt) {
     db.prepare("UPDATE folder_activity SET activated_at = ? WHERE path = ?").run(now, projectPath);
     activatedAt = now;
     justActivated = true;
   }
 
-  await ensureCoreProject(projectPath, projectName);
-
-  return { visits, activated: Boolean(activatedAt), justActivated };
+  return {
+    visits,
+    activated: bootstrap.mode === "core" && Boolean(activatedAt),
+    justActivated,
+    bootstrapMode: bootstrap.mode,
+  };
 }
 
 export function isFolderActivated(projectPath: string): boolean {
@@ -82,7 +83,21 @@ export function isFolderActivated(projectPath: string): boolean {
 }
 
 /** Force-activate now (used by explicit UI/CLI actions). */
-export async function activateFolder(projectPath: string, projectName?: string): Promise<void> {
+export async function activateFolder(
+  projectPath: string,
+  projectName: string | undefined,
+  access: ProjectBootstrapAccess,
+): Promise<ProjectBootstrapResult["mode"]> {
+  if (!projectBootstrapAccessAllowed(access)) {
+    throw new Error("Project activation is unavailable outside an interactive writable Desktop run.");
+  }
+  const bootstrap = await ensureDesktopProjectBootstrap({
+    projectPath,
+    projectName,
+    access,
+    reason: "desktop-explicit-activation",
+  });
+  if (bootstrap.mode !== "core") return bootstrap.mode;
   const db = getDb();
   const now = new Date().toISOString();
   const row = db
@@ -99,5 +114,5 @@ export async function activateFolder(projectPath: string, projectName?: string):
       "INSERT INTO folder_activity (path, visits, activated_at, first_seen, last_seen) VALUES (?, 1, ?, ?, ?)",
     ).run(projectPath, now, now, now);
   }
-  await ensureCoreProject(projectPath, projectName);
+  return bootstrap.mode;
 }

@@ -8,10 +8,12 @@
 //
 // 두 namespace 모두 같은 SERVICE 안에 있지만 prefix로 구분.
 import keytar from "keytar";
+import { createHash, randomUUID } from "node:crypto";
 import type { RuntimeBackend } from "../../shared/types";
 
 const SERVICE = "com.agentlas.desktop";
 const BYOK_PREFIX = "byok:";
+const BYOK_META_PREFIX = "byok-meta:";
 const ENV_PREFIX = "env:";
 const SECRET_PREFIX = "secret:";
 const USE_MEMORY_VAULT = process.env.AGENTLAS_E2E === "1" && process.env.AGENTLAS_E2E_KEYCHAIN !== "1";
@@ -50,13 +52,41 @@ function byokAccount(backend: RuntimeBackend): string {
   return `${BYOK_PREFIX}${backend}`;
 }
 
+function byokMetaAccount(backend: RuntimeBackend): string {
+  return `${BYOK_META_PREFIX}${backend}`;
+}
+
+export type ApiKeyDescriptor = {
+  backend: RuntimeBackend;
+  version: string;
+  fingerprint: string;
+  updatedAt: string;
+};
+
+function apiKeyFingerprint(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+async function writeApiKeyDescriptor(backend: RuntimeBackend, key: string): Promise<ApiKeyDescriptor> {
+  const descriptor: ApiKeyDescriptor = {
+    backend,
+    version: randomUUID(),
+    fingerprint: apiKeyFingerprint(key),
+    updatedAt: new Date().toISOString(),
+  };
+  await setPassword(byokMetaAccount(backend), JSON.stringify(descriptor));
+  return descriptor;
+}
+
 export async function saveApiKey(backend: RuntimeBackend, key: string): Promise<void> {
   const trimmed = key.trim();
   if (!trimmed) {
     await deletePassword(byokAccount(backend));
+    await deletePassword(byokMetaAccount(backend));
     return;
   }
   await setPassword(byokAccount(backend), trimmed);
+  await writeApiKeyDescriptor(backend, trimmed);
 }
 
 export async function hasApiKey(backend: RuntimeBackend): Promise<boolean> {
@@ -66,11 +96,48 @@ export async function hasApiKey(backend: RuntimeBackend): Promise<boolean> {
 
 export async function deleteApiKey(backend: RuntimeBackend): Promise<void> {
   await deletePassword(byokAccount(backend));
+  await deletePassword(byokMetaAccount(backend));
 }
 
 /** main 내부 사용 — MCP 호출 시 자식 env에 주입. renderer 노출 X */
 export async function readApiKey(backend: RuntimeBackend): Promise<string | null> {
   return getPassword(byokAccount(backend));
+}
+
+/** Value-free key identity for native approval UI. Never returns the secret. */
+export async function describeApiKey(backend: RuntimeBackend): Promise<ApiKeyDescriptor | null> {
+  const raw = await getPassword(byokMetaAccount(backend));
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as Partial<ApiKeyDescriptor>;
+    if (
+      value.backend !== backend ||
+      typeof value.version !== "string" ||
+      !/^[a-f0-9-]{16,80}$/i.test(value.version) ||
+      typeof value.fingerprint !== "string" ||
+      !/^[a-f0-9]{64}$/.test(value.fingerprint) ||
+      typeof value.updatedAt !== "string" ||
+      !Number.isFinite(Date.parse(value.updatedAt))
+    ) return null;
+    return {
+      backend,
+      version: value.version,
+      fingerprint: value.fingerprint,
+      updatedAt: value.updatedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Backfill value-free metadata only after native approval allowed reading the key. */
+export async function ensureApiKeyDescriptor(
+  backend: RuntimeBackend,
+  key: string,
+): Promise<ApiKeyDescriptor> {
+  const current = await describeApiKey(backend);
+  if (current?.fingerprint === apiKeyFingerprint(key)) return current;
+  return writeApiKeyDescriptor(backend, key);
 }
 
 // ── 글로벌 env (외부 통합 API 키) ───────────────────────────

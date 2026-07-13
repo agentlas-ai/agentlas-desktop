@@ -1442,6 +1442,7 @@ function labelOfRuntime(s: RuntimeStatus): string {
     codex: "Codex",
     gemini: "Antigravity",
     grok: "Grok",
+    cursor: "Cursor",
     byok: "API",
     ollama: "Ollama",
   }[s.kind];
@@ -1455,6 +1456,7 @@ function labelOfRuntime(s: RuntimeStatus): string {
     glm: "GLM",
     kimi: "Kimi",
     deepseek: "DeepSeek",
+    cursor: "Cursor",
   }[s.backend ?? ""];
   return `${kind} · ${backend}`;
 }

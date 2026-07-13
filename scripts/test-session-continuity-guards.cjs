@@ -15,8 +15,8 @@ assert.match(
 );
 assert.match(
   clientTs,
-  /const hasPriorContext = hasPriorConversationContext\(chat\.id\);/,
-  "main invocation must evaluate prior chat context before routing",
+  /const hasPriorContext = req\.agentAppMode \? false : hasPriorConversationContext\(chat\.id\);/,
+  "main invocation must evaluate prior chat context before routing while keeping stateless Agent App requests isolated",
 );
 assert.match(
   clientTs,
@@ -47,8 +47,8 @@ for (const arg of routeOnlyCalls) {
 
 assert.match(
   chatInputTsx,
-  /chatId: string \| null;/,
-  "recommendation sheet state must carry the owning chat id",
+  /setGateSheet\(null\);[\s\S]*setHepToggles\(new Set\(\)\);/,
+  "a chat switch must discard the previous recommendation gate and execution intent",
 );
 assert.match(
   chatInputTsx,
@@ -57,13 +57,13 @@ assert.match(
 );
 assert.match(
   chatInputTsx,
-  /cur\.text === text && cur\.chatId === sheetChatId && activeChatIdRef\.current === sheetChatId/,
-  "recommendation preview responses must not hydrate a different chat",
+  /const chatIdAtStart = activeChatIdRef\.current;/,
+  "recommendation preview must capture the owning chat before awaiting",
 );
 assert.match(
   chatInputTsx,
-  /if \(activeChatIdRef\.current !== cur\.chatId\)/,
-  "recommendation picks must be ignored after a chat switch",
+  /if \(activeChatIdRef\.current !== chatIdAtStart\) return;/,
+  "recommendation preview and billing responses must be ignored after a chat switch",
 );
 
 console.log("test-session-continuity-guards: PASS");

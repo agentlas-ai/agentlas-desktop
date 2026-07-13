@@ -98,34 +98,23 @@ function startProductServer() {
       (event) => events.push(event),
     );
 
-    assert.equal(events.some((event) => event.kind === "error"), false);
-    assert.equal(events.some((event) => event.kind === "surface" && event.surface?.domain === "creative"), true);
-    assert.equal(events.some((event) => event.kind === "final" && /local meta-agent/i.test(event.text || "")), true);
+    assert.equal(events.some((event) => event.kind === "error" && event.error?.code === "no-runtime"), true);
+    assert.equal(events.some((event) => event.kind === "surface" && event.surface?.domain === "creative"), false);
+    assert.equal(events.some((event) => event.kind === "final" && /local meta-agent/i.test(event.text || "")), false);
 
     const surfaces = listAgentSurfaces(chat.id);
-    assert.equal(surfaces.length, 1);
-    assert.equal(surfaces[0].domain, "creative");
-    assert.equal(surfaces[0].layout, "creative-studio");
-    assert.ok(surfaces[0].manifest.jobs.some((job) => job.id === "job_generate_video_variants"));
+    assert.equal(surfaces.length, 0, "ordinary chat must not silently route product media into Creative Studio");
 
     const packs = listSurfaceAssetPacks(chat.id);
-    assert.equal(packs.length, 1);
-    assert.equal(packs[0].status, "materialized");
-    assert.ok(fs.existsSync(packs[0].indexPath));
+    assert.equal(packs.length, 0);
 
     const apps = listAgentApps(chat.id);
-    assert.equal(apps.length, 1);
-    assert.equal(apps[0].status, "tool-published");
-    assert.ok(fs.existsSync(apps[0].previewPath));
-    const operations = JSON.parse(fs.readFileSync(path.join(apps[0].rootPath, "data", "operations.json"), "utf8"));
-    assert.ok(operations.providerRuntime.providerRecipes.some((recipe) => /Adobe Firefly/.test(recipe.connectorName)));
-    assert.ok(operations.providerRuntime.providerRecipes.some((recipe) => /Higgsfield/.test(recipe.connectorName)));
-    assert.ok(operations.reuse.mcpPath.endsWith("server.mjs"));
+    assert.equal(apps.length, 0);
 
     const messages = listChatMessages(chat.id);
-    assert.equal(messages.some((message) => message.role === "system" && /Asset pack:/.test(message.text)), true);
+    assert.equal(messages.some((message) => message.role === "system" && /Asset pack:/.test(message.text)), false);
 
-    console.log("chat-local-creative-os smoke passed");
+    console.log("chat creative prompt no-auto-routing smoke passed");
   } finally {
     await new Promise((resolve) => productServer.close(resolve));
     fs.rmSync(baseDir, { recursive: true, force: true });

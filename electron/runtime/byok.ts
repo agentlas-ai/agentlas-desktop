@@ -53,6 +53,7 @@ function prepareContext(
       req.userPrompt,
       req.forceSurface,
       req.restrictedReadBoundary,
+      req.untrustedNoTools,
     ),
   };
 }
