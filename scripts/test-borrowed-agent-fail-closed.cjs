@@ -143,6 +143,7 @@ async function main() {
     firmId,
     kind = "user",
     swarmMode = false,
+    permission = "read",
     runnerTexts = [],
     beforeRun,
   }) {
@@ -159,7 +160,7 @@ async function main() {
         chatId: chat.id,
         userPrompt: "hello",
         locale: "en",
-        permissions: "read",
+        permissions: permission,
         ...(borrowAgents ? { borrowAgents } : {}),
       },
       (event) => events.push(event),
@@ -586,6 +587,10 @@ async function main() {
 
   const continuedSingle = await invoke({
     title: "Single Hub authority survives immediate and hidden continuation",
+    // Hidden durable continuations mutate the automation store. Keep this
+    // legacy-retargeting contract on an explicitly approved Desktop write run;
+    // read-only runs are covered separately and must never create or retarget it.
+    permission: "write",
     borrowAgents: ["continuation-hub-agent"],
     hubResult: result({
       schema: "hephaestus.call.v1",
