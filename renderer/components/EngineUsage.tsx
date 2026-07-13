@@ -115,17 +115,25 @@ export function EngineUsage() {
   const [envKeys, setEnvKeys] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>(null);
   const [busyStage, setBusyStage] = useState<"install" | "login" | null>(null);
+  const [usageLoadError, setUsageLoadError] = useState(false);
   const [notice, setNotice] = useState<{ id: string; text: string; command?: string } | null>(null);
   const [keyFor, setKeyFor] = useState<string | null>(null);
   const [keyVal, setKeyVal] = useState("");
 
   const loadUsage = useCallback(async (force = false) => {
     const api = ipc();
-    if (!api) return;
+    if (!api) {
+      setUsageLoadError(true);
+      return;
+    }
     try {
-      setSnap(await api.usage.snapshot(force ? { force: true } : undefined));
+      const next = await api.usage.snapshot(force ? { force: true } : undefined);
+      setSnap(next);
+      setUsageLoadError(false);
     } catch {
-      // 다음 폴링 재시도
+      // 공급자별 오류는 snapshot 안에 정규화된다. 여기까지 throw면 IPC 자체가 실패한 것이라
+      // 조용히 빈 카드로 남기지 않고, 사용자가 즉시 다시 시도할 수 있게 한다.
+      setUsageLoadError(true);
     }
   }, []);
 
@@ -175,6 +183,7 @@ export function EngineUsage() {
           const s = await api.usage.snapshot({ force: true });
           if (pollGen.current !== gen) return;
           setSnap(s);
+          setUsageLoadError(false);
           const p = s.providers.find((x) => x.provider === providerId);
           // 429(일시 제한)는 '아직 로그인 안 됨'이 아니다 — 계속 폴링하면 제한만 길어지니 멈춘다.
           if (p && (p.status !== "error" || /HTTP 429/.test(p.error ?? ""))) {
@@ -363,13 +372,32 @@ export function EngineUsage() {
         <button onClick={() => void loadUsage(true)} className="titlebar-nodrag dashboard-refresh-button" title={ko ? "새로고침" : "Refresh"}>↻</button>
       </div>
 
-      {ENGINES.map((e) => {
+      {usageLoadError && (
+        <div className="dashboard-usage-load-error" role="alert">
+          <span>{ko ? "사용량 상태를 읽지 못함" : "Could not load usage status"}</span>
+          <span aria-hidden="true">·</span>
+          <button
+            type="button"
+            className="titlebar-nodrag"
+            onClick={() => void loadUsage(true)}
+          >
+            {ko ? "다시 시도" : "Retry"}
+          </button>
+        </div>
+      )}
+
+      {ENGINES.map((e, index) => {
           const u = usageFor(e.id);
           const connected = isConnected(e);
           const rt = runtimeFor(e);
           const hasBars = connected && (u?.windows.length ?? 0) > 0;
           return (
-            <div key={e.id} className="dashboard-engine-row" data-connected={connected ? "true" : "false"}>
+            <div
+              key={e.id}
+              className="dashboard-engine-row"
+              data-column={index % 2 === 0 ? "left" : "right"}
+              data-connected={connected ? "true" : "false"}
+            >
               <div className="dashboard-engine-topline">
                 <span className="dashboard-engine-logo" aria-hidden="true">
                   <img src={e.logoSrc} alt="" />
