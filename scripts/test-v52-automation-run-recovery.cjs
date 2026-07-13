@@ -18,6 +18,15 @@ const minutesAgo = (minutes) => new Date(now.getTime() - minutes * 60 * 1000).to
 function seedV51Fixture() {
   const db = new Database(storePath);
   db.exec(`
+    -- A real v51 database already owns the base agent table and agent-attributed
+    -- event columns. Keep this focused fixture minimal, but preserve those
+    -- contracts so later schema migrations can run after the v52 repair.
+    CREATE TABLE installed_agents (
+      id TEXT PRIMARY KEY,
+      slug TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      installed_at TEXT NOT NULL
+    );
     CREATE TABLE automations (id TEXT PRIMARY KEY);
     CREATE TABLE automation_runs (
       id TEXT PRIMARY KEY,
@@ -39,12 +48,21 @@ function seedV51Fixture() {
     CREATE TABLE run_events (
       id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL,
-      ts TEXT NOT NULL
+      seq INTEGER NOT NULL,
+      ts TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      agent_id TEXT,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      UNIQUE(run_id, seq)
     );
     CREATE TABLE failure_events (
       id TEXT PRIMARY KEY,
       run_id TEXT,
-      ts TEXT NOT NULL
+      ts TEXT NOT NULL,
+      source TEXT NOT NULL,
+      agent_id TEXT,
+      error_message TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}'
     );
   `);
 
@@ -74,12 +92,12 @@ function seedV51Fixture() {
   insertRun.run("run-orphan-running", "deleted-parent", hoursAgo(8), "running", runningNodes);
   insertRun.run("run-orphan-ok", "deleted-parent", hoursAgo(8), "ok", JSON.stringify({ worker: "done" }));
 
-  db.prepare("INSERT INTO run_events VALUES (?, ?, ?)")
-    .run("event-old", "run-stale-old-event", hoursAgo(7));
-  db.prepare("INSERT INTO run_events VALUES (?, ?, ?)")
-    .run("event-peer", "run-peer-recent-event", minutesAgo(1));
-  db.prepare("INSERT INTO failure_events VALUES (?, ?, ?)")
-    .run("failure-peer", "run-peer-recent-failure", minutesAgo(1));
+  db.prepare("INSERT INTO run_events (id, run_id, seq, ts, kind) VALUES (?, ?, ?, ?, ?)")
+    .run("event-old", "run-stale-old-event", 1, hoursAgo(7), "progress");
+  db.prepare("INSERT INTO run_events (id, run_id, seq, ts, kind) VALUES (?, ?, ?, ?, ?)")
+    .run("event-peer", "run-peer-recent-event", 1, minutesAgo(1), "progress");
+  db.prepare("INSERT INTO failure_events (id, run_id, ts, source, error_message) VALUES (?, ?, ?, ?, ?)")
+    .run("failure-peer", "run-peer-recent-failure", minutesAgo(1), "test", "peer failure");
 
   const insertHistory = db.prepare(
     `INSERT INTO run_history
