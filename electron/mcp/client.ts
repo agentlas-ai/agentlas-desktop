@@ -71,6 +71,12 @@ import { autoSelectMcpTools, buildMcpAutoSelectionPrompt } from "../mcp-tools/au
 import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
 import { buildRunnerEnv } from "../runtime/env-resolver";
 import { agentRunCwd } from "../runtime/exec";
+import {
+  enforceMobileReadOnlyPermission,
+  isMobileReadRuntimeAllowed,
+  revalidateInvocationWorkspaceBinding,
+  type InvocationWorkspaceBinding,
+} from "../invocation/workspace-binding";
 import { type Runner, SURFACE_INTENT_MARKER } from "../runtime/runner";
 import { pickActive, pickRunner, selectRuntimeForTargets } from "../runtime/selection";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
@@ -610,6 +616,7 @@ export async function runMcpInvocation(
   req: McpInvocationRequest,
   sink: EventSink,
   signal?: AbortSignal,
+  workspaceBinding?: InvocationWorkspaceBinding,
 ): Promise<{ finalText?: string; tokens?: number; stormbreakerContinueRequested: boolean; resultFolder?: string }> {
   // 한 마이크로태스크 양보 — ipc:run 핸들러가 { runId }를 반환하고 렌더러가 이벤트 채널을
   // 구독한 뒤에야 sink가 발화하도록 보장한다. 이게 없으면 동기 early-return(no-chat/no-agent)
@@ -621,11 +628,19 @@ export async function runMcpInvocation(
   if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
   // Every caller, including legacy/direct integrations, crosses the same
   // fail-closed boundary. Unknown or omitted permission is read-only.
-  const normalizedPermission = req.permissions === "write" || req.permissions === "full"
-    ? req.permissions
-    : "read";
+  const normalizedPermission = workspaceBinding
+    ? enforceMobileReadOnlyPermission(req.permissions)
+    : req.permissions === "write" || req.permissions === "full"
+      ? req.permissions
+      : "read";
   if (req.permissions !== normalizedPermission) req = { ...req, permissions: normalizedPermission };
   const canWrite = normalizedPermission === "write" || normalizedPermission === "full";
+  // A Mobile run consumes only the main-owned snapshot captured at the Bridge
+  // boundary. Revalidate after the async handoff and never consult the mutable
+  // chat/project folder fields again for this run.
+  const boundMobileWorkingFolder: string | null = workspaceBinding
+    ? revalidateInvocationWorkspaceBinding(workspaceBinding)
+    : null;
   const callerSink = sink;
   let runtimeAgentId: string | undefined;
   let finalTextFromSink = "";
@@ -698,7 +713,7 @@ export async function runMcpInvocation(
       explicitBorrowUserPreamble = await buildBorrowUserPreamble(
         borrowedAgentSlugs,
         effectiveUserPrompt,
-        getChatWorkingFolder(chat.id),
+        workspaceBinding ? boundMobileWorkingFolder : getChatWorkingFolder(chat.id),
         locale,
         signal,
       );
@@ -742,15 +757,23 @@ export async function runMcpInvocation(
 
   // 사용자가 프롬프트 안에 "project folder: /abs/path"처럼 명시하면, 채팅 워킹 폴더로
   // 자동 고정한다. firm 경로도 단일 에이전트 경로와 같은 cwd/MCP 구성을 받아야 한다.
-  const existingWorkingFolder = getChatWorkingFolder(chat.id);
-  const projectWorkingFolder = chat.projectId ? getProject(chat.projectId)?.folderPath ?? null : null;
+  const existingWorkingFolder = workspaceBinding
+    ? boundMobileWorkingFolder
+    : getChatWorkingFolder(chat.id);
+  const projectWorkingFolder = workspaceBinding
+    ? null
+    : chat.projectId
+      ? getProject(chat.projectId)?.folderPath ?? null
+      : null;
   const inferredWorkingFolder =
-    !canWrite || existingWorkingFolder || projectWorkingFolder
+    workspaceBinding || !canWrite || existingWorkingFolder || projectWorkingFolder
       ? null
       : inferWorkingFolderFromPrompt(req.userPrompt);
   if (inferredWorkingFolder) setChatWorkingFolder(chat.id, inferredWorkingFolder);
-  const targetAppWorkingFolder = targetApp ? path.resolve(targetApp.rootPath) : null;
-  const workingFolder = targetAppWorkingFolder ?? existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
+  const targetAppWorkingFolder = !workspaceBinding && targetApp ? path.resolve(targetApp.rootPath) : null;
+  const workingFolder: string | null = workspaceBinding
+    ? boundMobileWorkingFolder
+    : targetAppWorkingFolder ?? existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
   // Even a global chat executes in a concrete local folder. Persist it in the
   // run receipt so generated files do not become undiscoverable after reload.
   resolvedResultFolder = workingFolder ?? agentRunCwd();
@@ -873,6 +896,19 @@ export async function runMcpInvocation(
 
   const active = runtimeChoice.active;
   const picked = runtimeChoice.picked;
+  if (workspaceBinding && !isMobileReadRuntimeAllowed(active.kind)) {
+    sink({
+      kind: "error",
+      error: {
+        code: "mobile-runtime-not-read-sandboxed",
+        message:
+          locale === "ko"
+            ? "이 런타임은 모바일 읽기 전용 샌드박스가 검증되지 않았습니다. Desktop에서 Codex, BYOK 또는 Ollama를 선택하세요."
+            : "This runtime has no verified Mobile read-only sandbox. Select Codex, BYOK, or Ollama on Desktop.",
+      },
+    });
+    return earlyResult();
+  }
   if (!picked) {
     sink({
       kind: "error",
@@ -977,6 +1013,10 @@ export async function runMcpInvocation(
   const runnerEnv = await buildRunnerEnv(agent, workingFolder ?? undefined);
   throwIfInvocationAborted(signal, locale);
   if (mcpRuntimeEnv) Object.assign(runnerEnv.env, mcpRuntimeEnv);
+  // Runtime detection/routing can take time. Check the capability again at the
+  // last shared point before any direct, group, firm, swarm, or borrowed runner
+  // can start. A deleted/replaced directory cannot inherit the earlier check.
+  if (workspaceBinding) revalidateInvocationWorkspaceBinding(workspaceBinding);
 
   // ── Agent Group 오케스트레이션 ───────────────────────────
   // 저장된 그룹은 firm/division보다 상위의 라우팅 묶음이다. 실행 직전에
@@ -1006,6 +1046,7 @@ export async function runMcpInvocation(
         picked,
         runtimeOverride: runtimeChoice.override,
         workingFolder,
+        ...(workspaceBinding ? { workspaceBinding } : {}),
         mcpConfigPath,
         mcpAllowedTools,
         mcpCodexConfigArgs,
@@ -1037,6 +1078,7 @@ export async function runMcpInvocation(
         picked,
         runtimeOverride: runtimeChoice.override,
         workingFolder,
+        ...(workspaceBinding ? { workspaceBinding } : {}),
         mcpConfigPath,
         mcpAllowedTools,
         mcpCodexConfigArgs,
@@ -1066,6 +1108,7 @@ export async function runMcpInvocation(
         picked,
         runtimeOverride: runtimeChoice.override,
         workingFolder,
+        ...(workspaceBinding ? { workspaceBinding } : {}),
         mcpConfigPath,
         mcpAllowedTools,
         mcpCodexConfigArgs,
@@ -1102,6 +1145,7 @@ export async function runMcpInvocation(
             runtimes,
             picked,
             workingFolder,
+            ...(workspaceBinding ? { workspaceBinding } : {}),
             mcpConfigPath,
             mcpAllowedTools,
             mcpCodexConfigArgs,

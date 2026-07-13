@@ -18,6 +18,7 @@ import {
   type WorkloadAllocation,
 } from "../runtime/workload-routing";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
+import { revalidateInvocationWorkspaceBinding } from "../invocation/workspace-binding";
 
 // 총 작업 수/라운드 안전 상한 — 무한 스폰·무한루프로부터 컴/지갑을 지키는 최후 방어선(엔진이 강제).
 // 각 작업 = 실 LLM 호출이라 비용이 나가므로 보수적으로. (동시 실행 수는 별개로 슬라이더가 제어)
@@ -269,6 +270,7 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
       task: task.brief || task.title,
       includeOperational: false,
     });
+    if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
     const result = await p.picked.runner(
       {
         // The canonical package prompt is authoritative, but the per-task
@@ -355,6 +357,7 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
       task: goal,
       includeOperational: false,
     });
+    if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
     const result = await p.picked.runner(
       {
         systemPrompt: [

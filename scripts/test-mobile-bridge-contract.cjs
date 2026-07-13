@@ -502,21 +502,17 @@ async function testWireParsers() {
 function testMobileInvocationPermissionBoundary() {
   const base = { chatId: "chat_1", userPrompt: "Inspect safely" };
   assert.equal(
-    enforceMobileInvocationPermissionBoundary(base, null).permissions,
+    enforceMobileInvocationPermissionBoundary(base).permissions,
     "read",
     "omitted Mobile permission must fail closed to read-only",
   );
   assert.throws(
-    () => enforceMobileInvocationPermissionBoundary({ ...base, permissions: "write" }, null),
-    /working folder/,
-  );
-  assert.equal(
-    enforceMobileInvocationPermissionBoundary({ ...base, permissions: "write" }, "/workspace").permissions,
-    "write",
+    () => enforceMobileInvocationPermissionBoundary({ ...base, permissions: "write" }),
+    /read-only chats.*Desktop/,
   );
   assert.throws(
-    () => enforceMobileInvocationPermissionBoundary({ ...base, permissions: "full" }, "/workspace"),
-    /approved and started on Desktop/,
+    () => enforceMobileInvocationPermissionBoundary({ ...base, permissions: "full" }),
+    /read-only chats.*Desktop/,
   );
 }
 
@@ -769,6 +765,43 @@ async function testAuthoritySteerGuard() {
     devBootstrap: true,
   };
   try {
+    for (const permissions of ["write", "full"]) {
+      await assert.rejects(
+        authority.request(
+          {
+            v: 1,
+            type: "request",
+            id: `authority_start_${permissions}_rejected`,
+            method: "invoke.start",
+            params: {
+              chatId: "chat_1",
+              userPrompt: "Attempt a remote mutation",
+              permissions,
+            },
+          },
+          context,
+        ),
+        /read-only chats.*Desktop/,
+      );
+    }
+    await assert.rejects(
+      authority.request(
+        {
+          v: 1,
+          type: "request",
+          id: "authority_steer_write_rejected",
+          method: "invoke.steer",
+          params: {
+            chatId: "chat_1",
+            userPrompt: "Attempt a remote steering mutation",
+            permissions: "write",
+            expectedRunId: "run_1",
+          },
+        },
+        context,
+      ),
+      /read-only chats.*Desktop/,
+    );
     await assert.rejects(
       authority.request(
         {

@@ -34,6 +34,10 @@ import {
 } from "../runtime/workload-routing";
 import { getAgentById } from "./registry";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
+import {
+  revalidateInvocationWorkspaceBinding,
+  type InvocationWorkspaceBinding,
+} from "../invocation/workspace-binding";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -96,6 +100,7 @@ export interface BorrowedTaskForceParams {
   /** Explicit scoped selection wins over parent-AI workload allocation. */
   runtimeOverride?: AgentRuntimeOverride | null;
   workingFolder?: string | null;
+  workspaceBinding?: InvocationWorkspaceBinding;
   mcpConfigPath?: string;
   mcpAllowedTools?: string[];
   mcpCodexConfigArgs?: string[];
@@ -719,6 +724,7 @@ async function runBorrowedAgentTurn(
       task: packet.brief || p.req.userPrompt,
       includeOperational: false,
     }) : null;
+    if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
     const result = await p.picked.runner(
       {
         systemPrompt: [
@@ -823,6 +829,7 @@ async function runPlanner(
     phase: "plan",
     model: modelLabel(p.active),
   });
+  if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
   const result = await p.picked.runner(
     {
       systemPrompt: buildPlannerSystemPrompt(p.orchestratorAgent, p.locale, taskForcePermission(p)),
@@ -962,6 +969,7 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
     includeOperational: false,
   });
 
+  if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
   const final = await p.picked.runner(
     {
       systemPrompt: [
@@ -1019,22 +1027,24 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
     displayText = [displayText, boundaryNote].filter(Boolean).join("\n\n");
     p.sink({ kind: "tool-use", status: boundaryNote });
   }
-  try {
-    const curated = curateReply(displayText, {
-      projectPath: p.workingFolder ?? null,
-      projectId: p.chat.projectId ?? null,
-      agentId: p.chat.agentId,
-      chatId: p.chat.id,
-      runId: p.req.runId,
-      nodeId: orchestratorId,
-      cwdAtRequest: p.workingFolder ?? null,
-      // 종합문은 여러 워커의 혼합 산출물이라 단일 borrowed-agent의 소유 학습으로 볼 수 없다.
-      // 결정론 큐레이터가 agent_repo 제안을 project/session으로 강등하고 출처를 기록한다.
-      sourceProvenance: "task-force-synthesis",
-    });
-    displayText = redactSensitiveText(curated.cleanedText || displayText);
-  } catch {
-    // Curator failures should not block the user's task-force answer.
+  if (p.req.permissions === "write" || p.req.permissions === "full") {
+    try {
+      const curated = curateReply(displayText, {
+        projectPath: p.workingFolder ?? null,
+        projectId: p.chat.projectId ?? null,
+        agentId: p.chat.agentId,
+        chatId: p.chat.id,
+        runId: p.req.runId,
+        nodeId: orchestratorId,
+        cwdAtRequest: p.workingFolder ?? null,
+        // 종합문은 여러 워커의 혼합 산출물이라 단일 borrowed-agent의 소유 학습으로 볼 수 없다.
+        // 결정론 큐레이터가 agent_repo 제안을 project/session으로 강등하고 출처를 기록한다.
+        sourceProvenance: "task-force-synthesis",
+      });
+      displayText = redactSensitiveText(curated.cleanedText || displayText);
+    } catch {
+      // Curator failures should not block the user's task-force answer.
+    }
   }
   appendChatMessage(p.chat.id, "assistant", displayText);
   p.sink({

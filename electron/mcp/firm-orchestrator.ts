@@ -39,6 +39,12 @@ import {
   workloadAllocationReceipt,
   type WorkloadAllocation,
 } from "../runtime/workload-routing";
+import {
+  isMobileReadRuntimeAllowed,
+  MobileReadRuntimeBoundaryError,
+  revalidateInvocationWorkspaceBinding,
+  type InvocationWorkspaceBinding,
+} from "../invocation/workspace-binding";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -56,6 +62,7 @@ export interface FirmRunParams {
   runtimes: RuntimeStatus[];
   picked: { runner: Runner; label: string };
   workingFolder?: string | null;
+  workspaceBinding?: InvocationWorkspaceBinding;
   mcpConfigPath?: string;
   mcpAllowedTools?: string[];
   mcpCodexConfigArgs?: string[];
@@ -121,6 +128,7 @@ async function runNodeTurnSafe(
     return { ...r, ok: true };
   } catch (err) {
     if (p.signal?.aborted) throw err; // 사용자 취소는 전파
+    if (err instanceof MobileReadRuntimeBoundaryError) throw err;
     // 실패/타임아웃 노드도 per-node 완료 신호 → UI에서 ▶ 가 멈추고 정리된다(스턱 방지).
     p.sink({
       kind: "tool-use",
@@ -221,9 +229,11 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   const emit = (ev: McpInvocationEvent) => p.sink(tag(ev));
 
   // 워킹 폴더(활성 시 프로젝트 메모리)
-  const workingFolder = p.workingFolder ?? getChatWorkingFolder(p.chat.id);
+  const workingFolder = p.workspaceBinding
+    ? revalidateInvocationWorkspaceBinding(p.workspaceBinding)
+    : p.workingFolder ?? getChatWorkingFolder(p.chat.id);
   let activePath: string | null = null;
-  if (workingFolder) {
+  if ((p.req.permissions === "write" || p.req.permissions === "full") && workingFolder) {
     try {
       const v = recordFolderVisit(workingFolder);
       if (v.activated) activePath = workingFolder;
@@ -267,6 +277,11 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       })
     : null;
   const active = workloadResolution?.runtime ?? baseActive;
+  if (p.workspaceBinding && !isMobileReadRuntimeAllowed(active.kind)) {
+    throw new MobileReadRuntimeBoundaryError(
+      "This firm node runtime has no verified Mobile read-only sandbox. Select Codex, BYOK, or Ollama on Desktop.",
+    );
+  }
   if (workloadResolution) {
     tryRecordRunEvent({
       runId: p.req.runId ?? `firm:${p.chat.id}`,
@@ -317,6 +332,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     });
   }
 
+  if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
   const result = await picked.runner(
     {
       systemPrompt,
@@ -357,30 +373,32 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   // delegation 블록 분리 → 메모리 큐레이션(노드 agentId로) → 정리된 텍스트
   const { delegations, synthesisAllocation, cleanedText } = parseDelegations(result.text);
   let display = cleanedText;
-  try {
-    const { cleanedText: c2 } = curateReply(display, {
-      projectPath: activePath,
-      projectId: p.chat.projectId ?? null,
-      agentId: memoryOwnerId,
-      chatId: turn.chatId,
-      runId: p.req.runId,
-      nodeId: node.id,
-      cwdAtRequest: workingFolder,
-      ...(node.agentId
-        ? {
-            experienceIntake: {
-              platform: process.platform,
-              arch: process.arch,
-              runtimeKind: active.kind,
-              basePackageHash: getAgentById(node.agentId)?.packageHash ?? null,
-              taskHint: turn.userPrompt,
-            },
-          }
-        : {}),
-    });
-    display = c2 || display;
-  } catch {
-    // ignore curation failures
+  if (p.req.permissions === "write" || p.req.permissions === "full") {
+    try {
+      const { cleanedText: c2 } = curateReply(display, {
+        projectPath: activePath,
+        projectId: p.chat.projectId ?? null,
+        agentId: memoryOwnerId,
+        chatId: turn.chatId,
+        runId: p.req.runId,
+        nodeId: node.id,
+        cwdAtRequest: workingFolder,
+        ...(node.agentId
+          ? {
+              experienceIntake: {
+                platform: process.platform,
+                arch: process.arch,
+                runtimeKind: active.kind,
+                basePackageHash: getAgentById(node.agentId)?.packageHash ?? null,
+                taskHint: turn.userPrompt,
+              },
+            }
+          : {}),
+      });
+      display = c2 || display;
+    } catch {
+      // ignore curation failures
+    }
   }
   // per-node 완료 신호 — 이 노드의 한 턴이 끝났다. UI(오케스트레이션 트리)가 이 노드만 ▶→✓ 로 정리한다.
   // 단, plan 턴은 곧 delegate/synthesize가 이어지므로 완료로 보지 않는다 — orchestrator/본부 행이

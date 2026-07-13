@@ -5,6 +5,11 @@ import {
   registerDurableInvocationStart,
 } from "../runtime/invocation-lifecycle";
 import { runMcpInvocation } from "../mcp/client";
+import {
+  enforceMobileReadOnlyPermission,
+  invocationWorkspaceBindingsEqual,
+  type InvocationWorkspaceBinding,
+} from "./workspace-binding";
 import { pickLocale } from "../runtime/status-i18n";
 import {
   getInvocationRunReceipt,
@@ -56,6 +61,12 @@ interface RunRecord {
   partialText: string;
   resultFolder?: string;
   actualAgentId?: string;
+  workspaceBinding?: InvocationWorkspaceBinding;
+}
+
+interface QueuedSteer {
+  request: McpInvocationRequest;
+  workspaceBinding?: InvocationWorkspaceBinding;
 }
 
 type InvocationEventListener = (envelope: InvocationEventEnvelope) => void;
@@ -65,11 +76,23 @@ const MAX_BUFFERED_EVENTS = 4_000;
 const MAX_PARTIAL_CHARS = 2 * 1024 * 1024;
 const MAX_STEER_QUEUE_DEPTH = 8;
 
-class InvocationService {
+function immutableWorkspaceBinding(
+  binding: InvocationWorkspaceBinding,
+): InvocationWorkspaceBinding {
+  return Object.freeze({
+    source: binding.source,
+    canonicalPath: binding.canonicalPath,
+    directoryIdentity: binding.directoryIdentity
+      ? Object.freeze({ ...binding.directoryIdentity })
+      : null,
+  });
+}
+
+export class InvocationService {
   private readonly activeRuns = new InvocationLifecycleRegistry<RunRecord>();
   private readonly eventListeners = new Set<InvocationEventListener>();
   private readonly activeChatsListeners = new Set<ActiveChatsListener>();
-  private readonly steerQueues = new Map<string, McpInvocationRequest[]>();
+  private readonly steerQueues = new Map<string, QueuedSteer[]>();
 
   onEvent(listener: InvocationEventListener): () => void {
     this.eventListeners.add(listener);
@@ -85,7 +108,13 @@ class InvocationService {
     return this.activeRuns.activeChatIds();
   }
 
-  start(req: McpInvocationRequest): InvocationStartResult {
+  start(
+    req: McpInvocationRequest,
+    workspaceBinding?: InvocationWorkspaceBinding,
+  ): InvocationStartResult {
+    const invocationRequest = workspaceBinding
+      ? { ...req, permissions: enforceMobileReadOnlyPermission(req.permissions) }
+      : req;
     if (typeof req.runId === "string" && hasInvocationRunReceipt(req.runId)) {
       throw new Error("Invocation runId already has a durable receipt; use a new runId");
     }
@@ -93,12 +122,19 @@ class InvocationService {
       req.runId,
       (candidate) => this.activeRuns.hasSeen(candidate) || hasInvocationRunReceipt(candidate),
     );
-    const runReq: McpInvocationRequest = { ...req, runId };
+    const runReq: McpInvocationRequest = { ...invocationRequest, runId };
+    const runWorkspaceBinding = workspaceBinding
+      ? immutableWorkspaceBinding(workspaceBinding)
+      : undefined;
     const controller = new AbortController();
     const startedAt = new Date().toISOString();
     const chat = getChat(req.chatId);
     if (!chat) throw new Error("Chat not found");
-    const projectFolder = chat.projectId ? getProject(chat.projectId)?.folderPath ?? null : null;
+    const projectFolder = runWorkspaceBinding
+      ? null
+      : chat.projectId
+        ? getProject(chat.projectId)?.folderPath ?? null
+        : null;
     const record: RunRecord = {
       controller,
       chatId: req.chatId,
@@ -106,7 +142,10 @@ class InvocationService {
       cancelRequestedAt: null,
       events: [],
       partialText: "",
-      resultFolder: getChatWorkingFolder(req.chatId) ?? projectFolder ?? agentRunCwd(),
+      resultFolder: runWorkspaceBinding
+        ? runWorkspaceBinding.canonicalPath ?? agentRunCwd()
+        : getChatWorkingFolder(req.chatId) ?? projectFolder ?? agentRunCwd(),
+      ...(runWorkspaceBinding ? { workspaceBinding: runWorkspaceBinding } : {}),
     };
 
     registerDurableInvocationStart({
@@ -223,6 +262,7 @@ class InvocationService {
         }
       },
       controller.signal,
+      runWorkspaceBinding,
     )
       .then((result) => {
         record.resultFolder = result.resultFolder ?? record.resultFolder;
@@ -319,19 +359,40 @@ class InvocationService {
   }
 
   /** DESKTOP_MOBILE_BRIDGE: main owns steering so every client gets identical resume semantics. */
-  steer(req: McpInvocationRequest, expectedRunId?: string): InvocationSteerResult {
+  steer(
+    req: McpInvocationRequest,
+    expectedRunId?: string,
+    workspaceBinding?: InvocationWorkspaceBinding,
+  ): InvocationSteerResult {
+    const steerRequest = workspaceBinding
+      ? { ...req, permissions: enforceMobileReadOnlyPermission(req.permissions) }
+      : req;
     const active = [...this.activeRuns.entries()].find(([, record]) => record.chatId === req.chatId);
     if (expectedRunId && active?.[0] !== expectedRunId) {
       throw new Error("Steering target is stale; attach to the current Desktop run and retry");
     }
     if (!active) {
-      return { accepted: true, queued: false, runId: this.start({ ...req, runId: undefined }).runId };
+      return {
+        accepted: true,
+        queued: false,
+        runId: this.start({ ...steerRequest, runId: undefined }, workspaceBinding).runId,
+      };
+    }
+    if (!invocationWorkspaceBindingsEqual(active[1].workspaceBinding, workspaceBinding)) {
+      throw new Error(
+        "The Desktop working folder changed while this run was active. Attach to the current run or start a new Mobile chat.",
+      );
     }
     const queue = this.steerQueues.get(req.chatId) ?? [];
     if (queue.length >= MAX_STEER_QUEUE_DEPTH) {
       throw new Error("Steering queue is full; wait for the current Desktop run to settle");
     }
-    queue.push({ ...req, runId: undefined });
+    queue.push({
+      request: { ...steerRequest, runId: undefined },
+      ...(workspaceBinding
+        ? { workspaceBinding: immutableWorkspaceBinding(workspaceBinding) }
+        : {}),
+    });
     this.steerQueues.set(req.chatId, queue);
     this.cancel(active[0]);
     return {
@@ -411,7 +472,7 @@ class InvocationService {
     if (!next) return;
     queueMicrotask(() => {
       try {
-        this.start(next);
+        this.start(next.request, next.workspaceBinding);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.publishEvent({

@@ -7,6 +7,10 @@ import {
 } from "../browser/connect";
 import { onDesktopStoreChange } from "../store/change-bus";
 import { invocationService } from "../invocation/service";
+import {
+  captureInvocationWorkspaceBinding,
+  enforceMobileReadOnlyPermission,
+} from "../invocation/workspace-binding";
 import { claimPendingConfirmationAnswer } from "../confirm";
 import { detectRuntimes, setActiveRuntime } from "../runtime/detect";
 import { listRuntimeCommands } from "../runtime/commands";
@@ -476,10 +480,7 @@ function invocationParams(
     ? requiredIdentifier(params, "expectedRunId", RUN_ID_RE)
     : undefined;
   return {
-    invocation: enforceMobileInvocationPermissionBoundary(
-      invocation,
-      getChatWorkingFolder(chatId),
-    ),
+    invocation: enforceMobileInvocationPermissionBoundary(invocation),
     ...(expectedRunId !== undefined ? { expectedRunId } : {}),
     ...(expectedQuestionMessageId !== undefined ? { expectedQuestionMessageId } : {}),
   };
@@ -487,16 +488,11 @@ function invocationParams(
 
 export function enforceMobileInvocationPermissionBoundary(
   invocation: McpInvocationRequest,
-  workingFolder: string | null,
 ): McpInvocationRequest {
-  const permissions = invocation.permissions ?? "read";
-  if (permissions === "full") {
-    throw new Error("Full access must be approved and started on Desktop");
-  }
-  if (permissions === "write" && !workingFolder) {
-    throw new Error("Select a Desktop project working folder before allowing Mobile edits");
-  }
-  return { ...invocation, permissions };
+  return {
+    ...invocation,
+    permissions: enforceMobileReadOnlyPermission(invocation.permissions),
+  };
 }
 
 function createChatParams(request: MobileBridgeRpcRequest): Parameters<typeof createChat>[0] {
@@ -949,12 +945,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "invoke.start": {
         const { invocation, expectedQuestionMessageId } = invocationParams(request, false);
+        const workspaceBinding = captureInvocationWorkspaceBinding(
+          getChatWorkingFolder(invocation.chatId),
+        );
         const rollbackQuestionClaim = expectedQuestionMessageId
           ? claimPendingConfirmationAnswer(invocation.chatId, expectedQuestionMessageId)
           : null;
         let result;
         try {
-          result = invocationService.start(invocation);
+          result = invocationService.start(invocation, workspaceBinding);
         } catch (error) {
           rollbackQuestionClaim?.();
           throw error;
@@ -964,12 +963,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "invoke.steer": {
         const { invocation, expectedRunId, expectedQuestionMessageId } = invocationParams(request, true);
+        const workspaceBinding = captureInvocationWorkspaceBinding(
+          getChatWorkingFolder(invocation.chatId),
+        );
         const rollbackQuestionClaim = expectedQuestionMessageId
           ? claimPendingConfirmationAnswer(invocation.chatId, expectedQuestionMessageId)
           : null;
         let result;
         try {
-          result = invocationService.steer(invocation, expectedRunId);
+          result = invocationService.steer(invocation, expectedRunId, workspaceBinding);
         } catch (error) {
           rollbackQuestionClaim?.();
           throw error;
