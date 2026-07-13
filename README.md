@@ -55,7 +55,7 @@
     <img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-green">
   </a>
   <img alt="Platforms" src="https://img.shields.io/badge/macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-lightgrey">
-  <img alt="Runtime" src="https://img.shields.io/badge/runtime-Claude%20Code%20%7C%20Codex%20%7C%20Gemini%20%7C%20BYOK-black">
+  <img alt="Runtime" src="https://img.shields.io/badge/runtime-Claude%20Code%20%7C%20Codex%20%7C%20Gemini%20%7C%20Grok%20%7C%20Ollama%20%7C%20BYOK-black">
 </p>
 
 <p align="center">
@@ -68,6 +68,20 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 [Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest) (the public download/auto-update channel).
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
+
+- **2026-07-13 · v0.8.15 runtime recovery and release parity** — the packaged
+  app now bundles Agentlas OS v1.1.21 and must execute its real embedded
+  Stormbreaker Goal + UltraCode harness before any platform can publish.
+  Gemini chat repairs a recoverable local OAuth file and switches once to an
+  installed Antigravity runtime when Google rejects the retired official CLI
+  client. Grok HTTP 402 is shown as an exhausted quota, while unavailable
+  subscription counters stay explicitly unavailable instead of being guessed.
+
+- **2026-07-13 · v0.8.13 Experience and Ontology Chips** — each installed agent
+  has a separate Experience/Taste loadout, privacy-filtered candidate history,
+  and a 3D relation view. Base agents and chips keep independent ownership and
+  release identities; purchase never auto-attaches, and private prompts,
+  transcripts, credentials, and local paths are excluded from portable assets.
 
 - **2026-07-11 · v0.7.34 cloud-local stabilization** — Web bookmarks now sync
   into an account-scoped Desktop cache and appear immediately across Dashboard,
@@ -137,11 +151,12 @@ the current channel quickly.
 
 | | |
 |---|---|
-| **4 runtimes** | Claude Code · Codex · Gemini CLI · any API key (BYOK) — auto-detected |
-| **3 cloud providers** | Anthropic · OpenAI · Google, using *your* key |
+| **Local + BYOK runtimes** | Claude Code · Codex · Gemini/Antigravity · Grok · Ollama · API keys — auto-detected |
+| **BYOK providers** | Anthropic · OpenAI · Google · Upstage · GLM · Kimi · DeepSeek · compatible custom endpoints |
 | **+$0 to your model bill** | Agentlas runs no model and never proxies a call |
 | **100% local** | keys in the OS keychain, chats & agents in local SQLite |
 | **Agent Trust assets** | owner scope · source · version · package hash · private/public boundary · restore receipt |
+| **Experience/Taste chips** | separately owned releases · explicit loadout · privacy-filtered evidence · no automatic attachment |
 | **Agent Cloud, optional** | explicitly save and restore private agent packages; it is not the LLM execution server |
 | **Agent teams, visible** | every firm renders as an org chart, not a black box |
 | **Stormbreaker loop** | big jobs get automatic scope, goals, work packets, plugin selection, continuation, repair, and final-gate evidence |
@@ -154,8 +169,8 @@ apps or whole agent teams from one local window — with the UI, org chart, and 
 behind every run in plain view. Your keys and your chat history stay on your
 machine, never on someone else's agent platform.
 
-- **Bring your own models.** Claude Code, Codex, and Gemini CLI, or
-  OpenAI / Anthropic / Google API keys directly. Agentlas never proxies the model call.
+- **Bring your own models.** Claude Code, Codex, Gemini/Antigravity, Grok, and
+  Ollama, or supported BYOK API keys directly. Agentlas never proxies the model call.
 - **Install Apps over MCP.** Drop in an App, an agent, or a whole team — for example
   a package you built on [agentlas.cloud](https://agentlas.cloud) — and run it.
 - **Prepare Cloud-ready agents locally.** `agentlas cloud wizard` creates or
@@ -175,7 +190,7 @@ machine, never on someone else's agent platform.
 
 ## Who it's for
 
-- **Power users** who already pay for Claude, ChatGPT, or Gemini and want to run
+- **Power users** who already pay for Claude, ChatGPT, Gemini, or Grok and want to run
   agents on that subscription instead of paying a second AI bill to an agent SaaS.
 - **Builders** who package Apps or agents on [agentlas.cloud](https://agentlas.cloud) and
   want to run them locally over MCP.
@@ -190,8 +205,12 @@ A complete tour of what ships today.
 ### Bring your own everything (BYOC)
 
 - **Local CLI runtimes, auto-detected.** Agentlas finds your installed
-  `claude-code`, `codex`, and `gemini` CLIs and runs through them — using the
-  subscription/login you already have. No re-auth, no copy-pasting keys.
+  `claude-code`, `codex`, `gemini`, and `grok` CLIs plus a local Ollama server and
+  runs through them using the connection you already have.
+- **Honest provider health.** If the official Gemini CLI is rejected as a
+  retired client, one installed Antigravity fallback is attempted. Grok quota
+  exhaustion is shown as HTTP 402; usage or reset values that a provider does
+  not expose are never invented.
 - **BYOK cloud keys.** No CLI? Paste an Anthropic, OpenAI, or Google API key and
   go. Keys are stored in the OS keychain, never a file.
 - **Mix and switch freely.** Have Claude Code *and* a Gemini key? Both show up; pick
@@ -316,6 +335,9 @@ A complete tour of what ships today.
 - API keys and tokens live in the **macOS/Windows/Linux keychain** via the main
 process — never a plaintext file, never readable by the renderer/UI.
 - Chats, projects, firms, and installed agents live in **local SQLite**.
+- Agent memories and Experience candidates remain local until the owner
+  explicitly saves or publishes a privacy-filtered asset. Hub/Cloud status and
+  receipts are separate from local execution state.
 - Ontology sources are project-local by default: add files to the project's
   `.agentlas/ontology-inbox/` or register an explicit source with
   `/ontology company ./docs` inside the Agentlas terminal.
@@ -338,17 +360,18 @@ Three common ways to run AI agents today — and where Agentlas lands.
 | Where keys & history live | **Your keychain + local SQLite** | Their cloud | Local (varies) | Local |
 | Multi-agent firms + org chart | **Yes** | Sometimes | No | No (manual) |
 | Install 3rd-party Apps over MCP | **Yes, Apps Store** | Varies | No | Manual |
-| Use local CLIs (Claude Code / Codex / Gemini) | **Yes** | Rarely | No | One at a time |
+| Use local runtimes (Claude Code / Codex / Gemini / Grok / Ollama) | **Yes** | Rarely | No | One at a time |
 | Mix CLIs **and** cloud keys in one window | **Yes** | No | No | No |
 | Open source (Apache-2.0) | **Yes** | Usually no | Varies | Varies |
 | Desktop GUI on mac / win / linux | **Yes** | Web only | Often | No (terminal) |
 
 **Why people pick Agentlas**
 
-- **It runs on the AI you already pay for.** No second subscription to an agent
-  platform — your Claude/ChatGPT/Gemini plan does the work.
-- **Your data never leaves your machine.** Keys in the OS keychain, chats in local
-  SQLite, model calls direct to the provider. Nothing to trust us with.
+- **It runs on the AI you already pay for.** No second model subscription to an
+  agent platform — your Claude/ChatGPT/Gemini/Grok plan does the work.
+- **The local boundary is explicit.** Keys stay in the OS keychain and chats in
+  local SQLite. Model inputs go directly to the provider you chose; packages or
+  Experience assets reach Agent Cloud/Hub only after an explicit save or publish.
 - **Teams of agents, visible.** Firms with a real org chart beat a single opaque
   chatbot when work needs more than one role.
 - **Open and portable.** Apache-2.0, importable from OpenClaw/Hermes, forkable — no
@@ -362,6 +385,7 @@ Three common ways to run AI agents today — and where Agentlas lands.
 | **Chat** | One-on-one conversation with an agent or a firm's CEO. Supports image attachments on BYOK backends. |
 | **Archived chats** | Chats you've archived — hidden from the sidebar, restorable anytime. |
 | **Projects** | Create and open projects; each carries a default agent and a shared context note. |
+| **My Agents · Ontology Chips** | Inspect one agent's curated memory, Experience candidates, privacy blocks, exact chip loadout, and 3D relation map. |
 | **Firm detail** | The agent company's org chart — CEO → department heads → workers, plus the firm persona. |
 | **Automations** | List, create, and toggle scheduled runs targeting an agent or a firm. |
 | **Apps · Installed** | Installed Apps launcher. Includes Document Studio and App Builder generated Apps. |
@@ -381,10 +405,13 @@ from your machine to the provider; Agentlas never sits in the middle.
 |----------|-----------------|-------|
 | **Claude Code** | Local CLI (`claude-code`) | Auto-detected. Uses your existing Claude subscription/login. |
 | **Codex** | Local CLI (`codex`) | Auto-detected. Uses your existing ChatGPT/OpenAI login. |
-| **Gemini** | Local CLI (`gemini`) | Auto-detected. Uses your existing Google login. |
+| **Gemini** | Local CLI (`gemini`) | Auto-detected. Uses your existing Google login; an installed Antigravity runtime is a one-time fallback for `UNSUPPORTED_CLIENT`. |
+| **Grok** | Local CLI (`grok`) | Auto-detected. Uses the CLI login. HTTP 402 is reported as exhausted quota, not a healthy connection. |
+| **Ollama** | Local server | Auto-detected from the local Ollama endpoint; models and context stay under the local host configuration. |
 | **Anthropic** | BYOK API key | `console.anthropic.com → API Keys`. Stored in the OS keychain. |
 | **OpenAI** | BYOK API key | `platform.openai.com/api-keys`. Stored in the OS keychain. |
 | **Google (Gemini)** | BYOK API key | `aistudio.google.com/app/apikey`. Stored in the OS keychain. |
+| **Other BYOK** | Upstage, GLM, Kimi, DeepSeek, or compatible custom endpoint | Key stored in the OS keychain; provider inventory and pricing remain provider-owned. |
 
 You need **one** of these to start — a single detected CLI or a single API key.
 Add more later in **Settings**.
@@ -618,7 +645,7 @@ need any of that.
 ```text
 Agentlas Desktop
 ├─ electron/          privileged main process
-│  ├─ runtime/        Claude Code, Codex, Gemini, BYOK adapters
+│  ├─ runtime/        Claude Code, Codex, Gemini/Antigravity, Grok, Ollama, BYOK adapters
 │  ├─ mcp/            MCP client and installer
 │  ├─ marketplace/    agentlas.cloud Apps Store source
 │  ├─ migrate/        OpenClaw / Hermes importer

@@ -97,12 +97,14 @@ There are two release workflows, by design:
    Artifacts uploaded to the release: Windows installers/portable executable,
    Linux AppImage/deb, plus the Windows/Linux auto-update feeds.
 
-2. **Signed + notarized macOS.** Use the local `signing/` folder with
-   `AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac`, then
-   `npm run release:mac:publish`. For CI, install `docs/release.workflow.yml` as
-   `.github/workflows/release-signed-mac.yml` only from an account or token with
-   GitHub `workflow` permission, once the Apple certificate secrets below are
-   configured.
+2. **`.github/workflows/release-signed-mac.yml` (active).** This workflow builds,
+   signs, notarizes, staples, verifies, and publishes macOS arm64/x64 artifacts,
+   then optionally applies the verified release metadata to Railway. Manual
+   runs require an explicit version and tag; there is no reusable stale default.
+   `docs/release.workflow.yml` is only a pointer to this active file and must not
+   be copied over it. The local equivalent uses the `signing/` folder with
+   `AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac`, followed by
+   `npm run release:mac:publish`.
 
 Required GitHub secrets for the **signed macOS** workflow on `agentlas-ai/agentlas-desktop`:
 

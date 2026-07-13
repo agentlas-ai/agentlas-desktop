@@ -2,6 +2,13 @@
 
 ## 0.8.15 — 2026-07-13
 
+### Included
+
+- **The Mobile composer parity work from the unpublished 0.8.14 release
+  candidate ships here.** The public 0.8.15 artifacts include its authenticated
+  Desktop composer bridge, while keeping secrets and absolute paths inside the
+  Desktop main-process boundary.
+
 ### Fixed
 
 - **Packaged Stormbreaker now uses the same Agentlas OS contract as source and CI.**
@@ -38,6 +45,28 @@
 - Mobile composer actions remain on the strict RPC allowlist with replay
   protection, bounded images, callable-Hub validation, active-run guards, and
   secret-free projections.
+
+## 0.8.13 — 2026-07-13
+
+### Added
+
+- **Experience and Taste are agent-scoped assets instead of hidden chat
+  history.** My Agents shows curated memory, candidate collection, privacy
+  blocks, exact Experience/Taste releases, loadout state, and a 3D relation map
+  for each installed agent.
+- **Ontology Chips keep an independent ownership and attachment lifecycle.** A
+  base agent and a chip retain separate release IDs and entitlements; purchase
+  never auto-attaches, and an exact compatible release requires an explicit
+  next-session decision.
+- **Desktop, Terminal, Web/Hub, and Mobile share privacy-safe contracts.** Raw
+  prompts, transcripts, credentials, local paths, private media, and base-agent
+  package bytes are excluded from portable chip assets and Mobile projections.
+
+### Changed
+
+- Existing local memory and historical chat-linked activity are surfaced
+  without retroactively claiming they were verified Experience or final-agent
+  execution evidence.
 
 ## 0.8.5 — 2026-07-12
 
