@@ -11,7 +11,7 @@ process.env.AGENTLAS_E2E = "1";
 
 const golden = JSON.parse(
   fs.readFileSync(
-    path.join(__dirname, "../../mobile/contracts/ontology-chip-projection-v1.golden.json"),
+    path.join(__dirname, "fixtures/ontology-chip-projection-v1.golden.json"),
     "utf8",
   ),
 );

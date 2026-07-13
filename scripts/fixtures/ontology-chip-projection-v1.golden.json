@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "agentDefinitionId": "agd_cccccccccccccccccccccccccccccccccccccccccccccccc",
+  "agentReleaseId": "agr_dddddddddddddddddddddddddddddddddddddddddddddddd",
+  "state": "live",
+  "generatedAt": "2026-07-13T00:00:00.000Z",
+  "revision": "rev_11111111111111111111111111111111",
+  "operationalChips": [
+    {
+      "chipId": "chip.render-recovery",
+      "releaseId": "chip-release.op.2",
+      "kind": "operational",
+      "displayName": "Render Recovery",
+      "summary": "Recovers a failed render with a verified portable sequence.",
+      "version": "2.0.0",
+      "verification": "verified",
+      "labels": ["video", "failure-recovery"],
+      "evidenceLabel": "3 reproduced outcome receipts",
+      "evidenceCount": 3
+    }
+  ],
+  "tasteChips": [
+    {
+      "chipId": "chip.editorial-motion",
+      "releaseId": "chip-release.taste.5",
+      "kind": "taste",
+      "displayName": "Editorial Motion",
+      "summary": "Prefers restrained type motion and deliberate pacing.",
+      "version": "5.0.0",
+      "verification": "verified",
+      "labels": ["typography", "motion", "pacing"],
+      "evidenceLabel": "24 human pairwise preferences; disagreement visible",
+      "evidenceCount": 24
+    }
+  ],
+  "loadout": {
+    "revision": "rev_22222222222222222222222222222222",
+    "state": "ready",
+    "entries": [
+      {
+        "chipId": "chip.render-recovery",
+        "releaseId": "chip-release.op.1",
+        "kind": "operational",
+        "state": "update-available",
+        "availableReleaseId": "chip-release.op.2"
+      }
+    ],
+    "changedAt": "2026-07-12T23:00:00.000Z"
+  },
+  "scheduledNextSession": {
+    "revision": "rev_33333333333333333333333333333333",
+    "state": "pending-next-session",
+    "entries": [
+      {
+        "chipId": "chip.render-recovery",
+        "releaseId": "chip-release.op.2",
+        "kind": "operational",
+        "state": "scheduled-next-session"
+      },
+      {
+        "chipId": "chip.editorial-motion",
+        "releaseId": "chip-release.taste.5",
+        "kind": "taste",
+        "state": "scheduled-next-session"
+      }
+    ],
+    "changedAt": "2026-07-13T00:05:00.000Z"
+  },
+  "recommendations": [
+    {
+      "recommendationId": "recommendation.1",
+      "source": "hephaestus-network",
+      "summary": "Attach one recovery chip and one taste chip for this exact release.",
+      "reasons": [
+        "The operational chip matches the video task family.",
+        "The taste chip reflects pairwise preferences, not a universal score."
+      ],
+      "tradeoffs": [
+        "Taste evidence may not match every viewer.",
+        "The loadout consumes two of eight dynamic item slots."
+      ],
+      "proposedChips": [
+        {
+          "chipId": "chip.render-recovery",
+          "releaseId": "chip-release.op.2",
+          "kind": "operational",
+          "state": "pending-approval"
+        },
+        {
+          "chipId": "chip.editorial-motion",
+          "releaseId": "chip-release.taste.5",
+          "kind": "taste",
+          "state": "pending-approval"
+        }
+      ],
+      "requiresApproval": true,
+      "createdAt": "2026-07-13T00:00:00.000Z",
+      "expiresAt": "2099-07-13T01:00:00.000Z"
+    }
+  ],
+  "pendingAttachApprovals": [
+    {
+      "approvalId": "approval.attach.1",
+      "recommendationId": "recommendation.1",
+      "expectedLoadoutRevision": "rev_22222222222222222222222222222222",
+      "selectedChips": [
+        {
+          "chipId": "chip.render-recovery",
+          "releaseId": "chip-release.op.2",
+          "kind": "operational",
+          "state": "pending-approval"
+        },
+        {
+          "chipId": "chip.editorial-motion",
+          "releaseId": "chip-release.taste.5",
+          "kind": "taste",
+          "state": "pending-approval"
+        }
+      ],
+      "createdAt": "2026-07-13T00:00:00.000Z",
+      "expiresAt": "2099-07-13T01:00:00.000Z"
+    }
+  ]
+}
