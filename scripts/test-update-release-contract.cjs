@@ -171,6 +171,16 @@ for (const requiredGate of [
     `Linux release must run ${requiredGate} before publishing`,
   );
 }
+assert.match(
+  linuxContinuityStep.run,
+  /npx --no-install electron scripts\/test-terminal-ontology-loadout-feed\.cjs/,
+  "Linux must run the terminal ontology DB contract with Electron's native ABI",
+);
+assert.doesNotMatch(
+  linuxContinuityStep.run,
+  /(?:^|\n)\s*node scripts\/test-terminal-ontology-loadout-feed\.cjs/,
+  "Linux must not load Electron-rebuilt better-sqlite3 from plain Node",
+);
 const windowsParserStep = workflowSteps(crossWorkflow).find(
   (step) => step.name === "Windows runtime and mobile contracts",
 );
@@ -212,6 +222,18 @@ assert.match(signedResolveStep.run, /version.*!=.*\$\{tag#v\}/s, "manual version
 
 const signedSteps = workflowSteps(signedWorkflow);
 const stepNamed = (name) => signedSteps.find((step) => step.name === name);
+const ontologyReleaseStep = stepNamed("Experience Ontology release gates");
+assert.ok(ontologyReleaseStep, "signed release must retain the Experience Ontology release gates");
+assert.match(
+  ontologyReleaseStep.run,
+  /npx --no-install electron scripts\/test-terminal-ontology-loadout-feed\.cjs/,
+  "signed macOS must run the terminal ontology DB contract with Electron's native ABI",
+);
+assert.doesNotMatch(
+  ontologyReleaseStep.run,
+  /(?:^|\n)\s*node scripts\/test-terminal-ontology-loadout-feed\.cjs/,
+  "signed macOS must not load Electron-rebuilt better-sqlite3 from plain Node",
+);
 for (const [name, workflow] of workflowEntries) {
   const auditStep = workflowSteps(workflow).find((step) => step.name === "Dependency security audit");
   assert.ok(auditStep, `${name} must block high-severity dependency vulnerabilities before packaging`);
