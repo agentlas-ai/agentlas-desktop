@@ -1,16 +1,48 @@
 # Changelog
 
-## 0.8.16 — 2026-07-13
+## 0.8.17 — 2026-07-14
 
 ### Security
 
-- **Mobile chat now starts with read-only authority.** A phone can still steer
-  an active Desktop run and use the full composer, but an omitted permission no
-  longer becomes write access. Write mode requires an existing Desktop-bound
-  project folder; full host access must be approved and started on Desktop.
+- **Mobile remote execution is read-only in this replacement release.** A phone
+  can start and steer chats, but `write` and `full` are rejected before a run is
+  created. Write-capable work must be approved and started on Desktop.
+- **The working folder is a main-process capability, not a Mobile parameter.**
+  Desktop captures the existing chat folder's canonical path and filesystem
+  identity, carries that immutable binding through start and queued steering,
+  and revalidates it before every runner. Folder clearing, replacement, prompt
+  path injection, and mutable chat/project races fail closed.
+- **Mobile read runs use only runtimes with a proven non-mutating boundary.**
+  Codex read sandbox, text-only BYOK, and Ollama are allowed. Claude Code,
+  Gemini/Antigravity, and Grok must be started on Desktop until their local CLI
+  read sandboxes are enforceable. Mobile read does not attach MCPs, activate a
+  project folder, or create an Automation.
+- **Automation authority is durable.** Schema 64 stores each Automation as
+  `read` or `write`; the scheduler, workflow graph, and failure optimizer retain
+  that exact permission. Legacy and normal Desktop-created Automations remain
+  explicit `write`, while malformed or forbidden `full` values fail closed to
+  `read`.
+
+### Fixed
+
+- **A complete usage-snapshot IPC failure is visible and recoverable.** The
+  Dashboard shows a concise load error with an accessible retry action instead
+  of silently leaving the LLM usage panel looking empty. Provider-specific
+  contracts remain honest: Antigravity exposes no counter, and Grok exposes
+  only a confirmed 402 exhaustion state rather than an invented percentage.
 - **Codex write mode now stays inside its workspace sandbox.** New and resumed
   Codex runs map `write` to `workspace-write` and reassert the sandbox on resume.
   Only an explicitly approved Desktop `full` run may bypass the sandbox.
+
+## 0.8.16 — 2026-07-13 (withdrawn security candidate; never stable)
+
+- Windows and Linux candidate assets are retained only as audit evidence. The
+  signed macOS workflow was cancelled before certificate restore, signing,
+  notarization, packaging, or publication; no 0.8.16 Mac asset exists.
+- The candidate was withdrawn after review found that a read chat could emit an
+  Automation block which was persisted as an enabled write-capable scheduled
+  run. 0.8.17 replaces the candidate with a read-only Mobile boundary and a
+  durable per-Automation execution permission.
 
 ## 0.8.15 — 2026-07-13
 

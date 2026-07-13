@@ -69,10 +69,19 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
 
-- **2026-07-13 · v0.8.16 Mobile permission hotfix** — Mobile chat now defaults
-  to read-only, write mode requires a Desktop-bound project folder, and full
-  host access can only be approved and started on Desktop. Codex write runs use
-  the workspace sandbox on both new and resumed sessions.
+- **2026-07-14 · v0.8.17 Mobile read-only security replacement** — Mobile can
+  start and steer read-only chats, while write/full work must start on Desktop.
+  Desktop owns an immutable canonical folder binding, revalidates it across
+  queued steering, disables MCP attachment for Mobile reads, and permits only
+  Codex read sandbox, text-only BYOK, or Ollama. Schema 64 also preserves each
+  Automation's exact read/write authority through scheduler and workflow runs.
+  A total usage-IPC failure now shows a retryable Dashboard error instead of a
+  silently empty panel.
+
+- **2026-07-13 · v0.8.16 withdrawn security candidate** — never entered the
+  stable channel. Its Windows/Linux files remain audit evidence, no signed Mac
+  asset was published, and v0.8.17 replaces its read-to-Automation escalation
+  path.
 
 - **2026-07-13 · v0.8.15 runtime recovery and release parity** — the packaged
   app now bundles Agentlas OS v1.1.21 and must execute its real embedded

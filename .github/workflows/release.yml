@@ -125,6 +125,9 @@ jobs:
           echo "Configured Electron SUID sandbox helper: $sandbox_path"
           xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
             npm run test:stormbreaker-core:embedded
+            npm run test:v64-automation-permission-migration
+            npm run test:mobile-read-boundary
+            npm run test:mobile-execution-boundary
             npm run test:opencrab-core
             npm run test:opencrab-product
             npm run test:opencrab-recovery-scrub
@@ -223,6 +226,9 @@ jobs:
           npm run test:after-pack-runtime-contract
           npm run test:stormbreaker-core:embedded
           npm run test:mobile-bridge-contract
+          npm run test:mobile-read-boundary
+          npm run test:mobile-execution-boundary
+          npm run test:v64-automation-permission-migration
           npm run test:provider-health
 
       - name: Linux migration and updater continuity gates
@@ -251,6 +257,7 @@ jobs:
           # "Unknown or unsupported transport 'disabled'". One session for all gates.
           xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
             npm run test:v52-automation-run-recovery
+            npm run test:v64-automation-permission-migration
             npm run test:automation-trigger-safety
             npm run test:v53-hub-bookmark-sync
             npm run test:updater-production
@@ -262,6 +269,8 @@ jobs:
             npm run test:stormbreaker-core:embedded
             npm run test:provider-health
             npm run test:mobile-bridge-contract
+            npm run test:mobile-read-boundary
+            npm run test:mobile-execution-boundary
             npm run test:borrowed-task-force
             npm run test:mcp-auto-select
             npm run test:mcp-secret-isolation

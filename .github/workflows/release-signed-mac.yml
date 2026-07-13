@@ -181,6 +181,7 @@ jobs:
           npm run test:automation-scheduler-guards
           npm run test:automation-trigger-safety
           npm run test:v52-automation-run-recovery
+          npm run test:v64-automation-permission-migration
           npm run test:v53-hub-bookmark-sync
           npm run test:updater-production
           npm run test:automations-store
@@ -190,6 +191,8 @@ jobs:
           npm run test:marketplace-cache
           npm run test:after-pack-runtime-contract
           npm run test:mobile-bridge-contract
+          npm run test:mobile-read-boundary
+          npm run test:mobile-execution-boundary
           npm run test:borrowed-task-force
           npm run test:mcp-auto-select
           npm run test:mcp-secret-isolation
