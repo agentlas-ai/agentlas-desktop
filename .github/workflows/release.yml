@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      HEPHAESTUS_REF: v1.1.19
+      HEPHAESTUS_REF: v1.1.21
 
     steps:
       - uses: actions/checkout@v4
@@ -124,6 +124,7 @@ jobs:
           sudo chmod 4755 "$sandbox_path"
           echo "Configured Electron SUID sandbox helper: $sandbox_path"
           xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
+            npm run test:stormbreaker-core:embedded
             npm run test:opencrab-core
             npm run test:opencrab-product
             npm run test:opencrab-recovery-scrub
@@ -144,7 +145,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      HEPHAESTUS_REF: v1.1.19
+      HEPHAESTUS_REF: v1.1.21
 
     steps:
       - uses: actions/checkout@v4
@@ -220,6 +221,7 @@ jobs:
         run: |
           npm run test:cli-version-parser
           npm run test:after-pack-runtime-contract
+          npm run test:stormbreaker-core:embedded
           npm run test:mobile-bridge-contract
           npm run test:provider-health
 
@@ -257,6 +259,7 @@ jobs:
             npm run test:hephaestus-status-version
             npm run test:marketplace-cache
             npm run test:after-pack-runtime-contract
+            npm run test:stormbreaker-core:embedded
             npm run test:provider-health
             npm run test:mobile-bridge-contract
             npm run test:borrowed-task-force

@@ -1,8 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.8.15 — 2026-07-13
 
 ### Fixed
+
+- **Packaged Stormbreaker now uses the same Agentlas OS contract as source and CI.**
+  Desktop bundles Agentlas OS v1.1.21, derives the local engine default from the
+  package compatibility contract, and executes the real embedded Goal + UltraCode
+  harness before any release can package or publish.
 
 - **Gemini chat recovers instead of dying on a retired client or a damaged OAuth file.**
   Agentlas safely backs up and repairs recoverable trailing bytes in Gemini credentials,
@@ -14,7 +19,7 @@
   Dashboard window with a link to Grok Settings. Agentlas does not invent a reset time
   or scrape private account pages when the CLI provides neither.
 
-## 0.8.14 — 2026-07-13
+## 0.8.14 — 2026-07-13 (release candidate only; not published)
 
 ### Added
 

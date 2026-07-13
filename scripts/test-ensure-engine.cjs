@@ -7,6 +7,8 @@ const { spawnSync } = require("node:child_process");
 
 const root = path.resolve(__dirname, "..");
 const ensureScript = path.join(root, "scripts", "ensure-engine.mjs");
+const bundledRuntimeVersion = require(path.join(root, "package.json"))
+  .agentlasUpdateCompatibility.bundledRuntimeVersion;
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-ensure-engine-"));
 const seed = path.join(temp, "seed");
 const remote = path.join(temp, "Agentlas-OS.git");
@@ -32,14 +34,16 @@ function writeRuntime(version) {
 }
 
 function ensure(dir, ref) {
+  const env = {
+    ...process.env,
+    HEPHAESTUS_REPO: remote,
+    HEPHAESTUS_DIR: dir,
+  };
+  if (ref) env.HEPHAESTUS_REF = ref;
+  else delete env.HEPHAESTUS_REF;
   return run(process.execPath, [ensureScript], {
     cwd: root,
-    env: {
-      ...process.env,
-      HEPHAESTUS_REPO: remote,
-      HEPHAESTUS_REF: ref,
-      HEPHAESTUS_DIR: dir,
-    },
+    env,
   });
 }
 
@@ -56,6 +60,12 @@ try {
   git(seed, "add", ".");
   git(seed, "commit", "-q", "-m", "runtime v1.0.1");
   git(seed, "tag", "v1.0.1");
+  if (!["1.0.0", "1.0.1"].includes(bundledRuntimeVersion)) {
+    writeRuntime(bundledRuntimeVersion);
+    git(seed, "add", ".");
+    git(seed, "commit", "-q", "-m", `runtime v${bundledRuntimeVersion}`);
+    git(seed, "tag", `v${bundledRuntimeVersion}`);
+  }
   must("git", ["init", "-q", "--bare", remote]);
   git(seed, "remote", "add", "origin", remote);
   git(seed, "push", "-q", "origin", "main", "--tags");
@@ -86,6 +96,15 @@ try {
   const cloned = ensure(fresh, "v1.0.0");
   assert.equal(cloned.status, 0, cloned.stderr || cloned.stdout);
   assert.equal(JSON.parse(fs.readFileSync(path.join(fresh, "manifest.json"), "utf8")).version, "1.0.0");
+
+  const packageDefault = path.join(temp, "package-default");
+  const defaultClone = ensure(packageDefault);
+  assert.equal(defaultClone.status, 0, defaultClone.stderr || defaultClone.stdout);
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(packageDefault, "manifest.json"), "utf8")).version,
+    bundledRuntimeVersion,
+    "ensure-engine default must follow package.json bundledRuntimeVersion",
+  );
 
   const unverifiable = path.join(temp, "unverifiable");
   fs.mkdirSync(path.join(unverifiable, "agentlas_cloud"), { recursive: true });

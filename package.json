@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.8.14",
+  "version": "0.8.15",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -22,7 +22,7 @@
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
     "targetSchemaVersion": 63,
-    "bundledRuntimeVersion": "1.1.19"
+    "bundledRuntimeVersion": "1.1.21"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
@@ -117,6 +117,7 @@
     "test:runtime-selection-memory": "npm run build:electron && electron scripts/test-runtime-selection-memory.cjs",
     "test:workload-routing": "npm run build:electron && electron scripts/test-workload-routing.cjs",
     "test:stormbreaker-core": "npm run build:electron && electron scripts/test-stormbreaker-core-harness.cjs",
+    "test:stormbreaker-core:embedded": "npm run build:electron && cross-env HEPHAESTUS_RUNTIME_ROOT=Hephaestus electron scripts/test-stormbreaker-core-harness.cjs --installed",
     "test:build-workload-routing": "npm run build:electron && electron scripts/test-build-workload-routing.cjs",
     "test:grok-runtime-contract": "npm run build:electron && electron scripts/test-grok-runtime-contract.cjs",
     "test:provider-health": "npm run build:electron && node scripts/test-provider-health.cjs",

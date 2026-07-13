@@ -47,7 +47,7 @@ jobs:
       # Publish to the SEPARATE public releases repo (source repo is private).
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
-      HEPHAESTUS_REF: v1.1.19
+      HEPHAESTUS_REF: v1.1.21
 
     steps:
       - uses: actions/checkout@v4
@@ -169,6 +169,9 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Verify embedded Stormbreaker harness
+        run: npm run test:stormbreaker-core:embedded
 
       # 실제 장애가 난 Browser 소유권/스크롤, 자동화 파이프/watchdog와
       # typecheck만으로 못 잡았던 Hub·Runtime Readiness UI 회귀를 함께 막는다.

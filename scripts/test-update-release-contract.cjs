@@ -25,6 +25,11 @@ assert.match(
   /^npm run build:electron && electron scripts\/test-terminal-ontology-loadout-feed\.cjs$/,
   "terminal ontology release gate must keep its Electron native-module ABI",
 );
+assert.match(
+  pkg.scripts["test:stormbreaker-core:embedded"] ?? "",
+  /HEPHAESTUS_RUNTIME_ROOT=Hephaestus[\s\S]*test-stormbreaker-core-harness\.cjs --installed/,
+  "Stormbreaker release gate must execute against the embedded Agentlas OS checkout",
+);
 
 function versionTuple(spec) {
   const match = String(spec || "").match(/(\d+)\.(\d+)\.(\d+)/);
@@ -168,6 +173,7 @@ for (const requiredGate of [
   "npm run test:hephaestus-status-version",
   "npm run test:marketplace-cache",
   "npm run test:after-pack-runtime-contract",
+  "npm run test:stormbreaker-core:embedded",
   "npm run test:mobile-bridge-contract",
 ]) {
   assert.match(
@@ -193,6 +199,7 @@ assert.ok(windowsParserStep, "Windows release must retain runtime and mobile con
 assert.equal(windowsParserStep.if, "runner.os == 'Windows'");
 assert.match(windowsParserStep.run, /npm run test:cli-version-parser/);
 assert.match(windowsParserStep.run, /npm run test:after-pack-runtime-contract/);
+assert.match(windowsParserStep.run, /npm run test:stormbreaker-core:embedded/);
 assert.match(windowsParserStep.run, /npm run test:mobile-bridge-contract/);
 const crossVerifyStep = workflowSteps(crossWorkflow).find((step) => step.name === "Verify tag matches package.json version");
 const signedResolveStep = workflowSteps(signedWorkflow).find((step) => step.name === "Resolve release inputs");
@@ -238,6 +245,13 @@ assert.doesNotMatch(
   ontologyReleaseStep.run,
   /(?:^|\n)\s*node scripts\/test-terminal-ontology-loadout-feed\.cjs/,
   "signed macOS must not load Electron-rebuilt better-sqlite3 from plain Node",
+);
+const embeddedStormbreakerStep = stepNamed("Verify embedded Stormbreaker harness");
+assert.ok(embeddedStormbreakerStep, "signed macOS release must verify the embedded Stormbreaker command before packaging");
+assert.equal(embeddedStormbreakerStep.run, "npm run test:stormbreaker-core:embedded");
+assert.ok(
+  signedSteps.indexOf(embeddedStormbreakerStep) < signedSteps.indexOf(stepNamed("Restore mac signing certificate")),
+  "the embedded runtime gate must pass before signing credentials are restored",
 );
 for (const [name, workflow] of workflowEntries) {
   const auditStep = workflowSteps(workflow).find((step) => step.name === "Dependency security audit");
