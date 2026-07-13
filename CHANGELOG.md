@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.16 — 2026-07-13
+
+### Security
+
+- **Mobile chat now starts with read-only authority.** A phone can still steer
+  an active Desktop run and use the full composer, but an omitted permission no
+  longer becomes write access. Write mode requires an existing Desktop-bound
+  project folder; full host access must be approved and started on Desktop.
+- **Codex write mode now stays inside its workspace sandbox.** New and resumed
+  Codex runs map `write` to `workspace-write` and reassert the sandbox on resume.
+  Only an explicitly approved Desktop `full` run may bypass the sandbox.
+
 ## 0.8.15 — 2026-07-13
 
 ### Included

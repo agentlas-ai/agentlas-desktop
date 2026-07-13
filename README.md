@@ -69,6 +69,11 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the latest public deploy note so humans and agents can verify
 the current channel quickly.
 
+- **2026-07-13 · v0.8.16 Mobile permission hotfix** — Mobile chat now defaults
+  to read-only, write mode requires a Desktop-bound project folder, and full
+  host access can only be approved and started on Desktop. Codex write runs use
+  the workspace sandbox on both new and resumed sessions.
+
 - **2026-07-13 · v0.8.15 runtime recovery and release parity** — the packaged
   app now bundles Agentlas OS v1.1.21 and must execute its real embedded
   Stormbreaker Goal + UltraCode harness before any platform can publish.
