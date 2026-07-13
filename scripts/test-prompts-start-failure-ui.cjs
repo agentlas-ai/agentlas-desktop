@@ -72,11 +72,8 @@ function installPromptFixtures(withInputs) {
   };
   const createChat = window.agentlas.chats.create;
   let failuresRemaining = 1;
-  const priorAttempts = Number(localStorage.getItem("agentlas.qa.promptStartAttempts") || "0");
-  window.__promptStartQa = { attempts: priorAttempts, body };
   window.agentlas.chats.create = async (input) => {
-    window.__promptStartQa.attempts += 1;
-    localStorage.setItem("agentlas.qa.promptStartAttempts", String(window.__promptStartQa.attempts));
+    await window.__recordPromptStartAttempt();
     if (failuresRemaining > 0) {
       failuresRemaining -= 1;
       throw new Error("mock chat creation failure");
@@ -88,6 +85,10 @@ function installPromptFixtures(withInputs) {
 async function runScenario(browser, baseUrl, withInputs) {
   const { setupMockAgentlasBridge, mockBridgeOptions } = require("./lib/mock-agentlas-bridge.cjs");
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  let attempts = 0;
+  await context.exposeBinding("__recordPromptStartAttempt", () => {
+    attempts += 1;
+  });
   const init = `(${setupMockAgentlasBridge.toString()})(${JSON.stringify(mockBridgeOptions({}))});(${installPromptFixtures.toString()})(${JSON.stringify(withInputs)});`;
   await context.addInitScript({ content: init });
   const page = await context.newPage();
@@ -112,13 +113,13 @@ async function runScenario(browser, baseUrl, withInputs) {
     await inputDialog.getByTestId("prompt-start-error").waitFor();
     await inputDialog.getByText(/분석할 PDF|A PDF to analyze/).waitFor();
     assert.equal(await page.getByText(bodyText, { exact: true }).count(), 1, "prompt body must remain mounted behind the input notice");
-    assert.equal(await page.evaluate(() => window.__promptStartQa.attempts), 1);
+    assert.equal(attempts, 1);
     await inputDialog.getByRole("button", { name: /다시 시도|Retry/ }).click();
   } else {
     const detail = page.getByRole("dialog", { name: /일반 프롬프트|Simple Prompt/ });
     await detail.getByTestId("prompt-start-error").waitFor();
     await detail.getByText(bodyText, { exact: true }).waitFor();
-    assert.equal(await page.evaluate(() => window.__promptStartQa.attempts), 1);
+    assert.equal(attempts, 1);
     await detail.getByRole("button", { name: /다시 시도|Retry/ }).click();
   }
 
@@ -126,11 +127,10 @@ async function runScenario(browser, baseUrl, withInputs) {
     timeout: 10000,
     waitUntil: "domcontentloaded",
   });
-  // waitForURL can observe the new URL while the previous execution context is
-  // still being destroyed. Read the cross-document counter only after the new
-  // init script has restored it from localStorage.
-  await page.waitForFunction(() => window.__promptStartQa?.attempts === 2, null, { timeout: 10000 });
-  assert.equal(await page.evaluate(() => window.__promptStartQa.attempts), 2, "retry must reuse the retained prompt and create exactly one new chat");
+  // The static-export test can perform a soft URL transition followed by a
+  // document reload. Keep the attempt counter in Playwright's Node context so
+  // the assertion cannot race a renderer execution-context replacement.
+  assert.equal(attempts, 2, "retry must reuse the retained prompt and create exactly one new chat");
   assert.deepEqual(errors, [], `renderer errors: ${errors.join("\n")}`);
   await context.close();
 }
