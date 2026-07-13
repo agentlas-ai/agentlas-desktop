@@ -173,8 +173,8 @@ for (const requiredGate of [
 }
 assert.match(
   linuxContinuityStep.run,
-  /npx --no-install electron scripts\/test-terminal-ontology-loadout-feed\.cjs/,
-  "Linux must run the terminal ontology DB contract with Electron's native ABI",
+  /npm run test:terminal-ontology-loadout-feed/,
+  "Linux must run the terminal ontology DB contract through its Electron-backed package script",
 );
 assert.doesNotMatch(
   linuxContinuityStep.run,
@@ -226,8 +226,8 @@ const ontologyReleaseStep = stepNamed("Experience Ontology release gates");
 assert.ok(ontologyReleaseStep, "signed release must retain the Experience Ontology release gates");
 assert.match(
   ontologyReleaseStep.run,
-  /npx --no-install electron scripts\/test-terminal-ontology-loadout-feed\.cjs/,
-  "signed macOS must run the terminal ontology DB contract with Electron's native ABI",
+  /npm run test:terminal-ontology-loadout-feed/,
+  "signed macOS must run the terminal ontology DB contract through its Electron-backed package script",
 );
 assert.doesNotMatch(
   ontologyReleaseStep.run,

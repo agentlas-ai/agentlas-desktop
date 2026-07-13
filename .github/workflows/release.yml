@@ -270,7 +270,7 @@ jobs:
             npx --no-install electron scripts/test-legacy-experience-reconciliation.cjs
             npx --no-install electron scripts/test-v58-memory-curation-migration.cjs
             npx --no-install electron scripts/test-v59-ontology-binding-migration.cjs
-            npx --no-install electron scripts/test-terminal-ontology-loadout-feed.cjs
+            npm run test:terminal-ontology-loadout-feed
             npx --no-install electron scripts/test-experience-p0.cjs
             npx --no-install electron scripts/test-experience-taxonomy-parity.cjs
             npx --no-install electron scripts/test-v55-experience-relations-migration.cjs
