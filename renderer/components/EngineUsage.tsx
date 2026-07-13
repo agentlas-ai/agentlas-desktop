@@ -1,6 +1,7 @@
 // 대시보드 "엔진 사용량" 카드 — 모든 엔진을 카탈로그로 보여준다.
 //   · 구독형(Claude·Codex·Gemini): 연결 시 usage.snapshot()의 5시간/주간/일일 바.
-//   · API키형(DeepSeek·Grok·GLM·Pi): 연결 시 "키 과금", 미연결 시 키 입력 팝업.
+//   · API키형(DeepSeek·GLM·Pi): 연결 시 "키 과금", 미연결 시 키 입력 팝업.
+//   · Grok CLI: 실제 402가 확인되면 소진 상태와 공식 Usage 이동 버튼.
 //   · 로컬(Ollama): "무제한".
 // 미연결 엔진은 [연결] 버튼 — CLI는 자동설치+로그인창, API키는 인라인 입력 후 저장.
 // 연결 액션은 대시보드에서 항상 보여야 한다. 사용자가 예전에 접은 상태 때문에
@@ -145,6 +146,13 @@ export function EngineUsage() {
     void loadUsage();
     void loadConnections();
   }, [loadUsage, loadConnections]);
+  // 채팅 실행이 Gemini UNSUPPORTED_CLIENT를 확인하면 main은 즉시 agy로 런타임을 바꾼다.
+  // 사용량 snapshot이 그 영수증을 본 순간 runtime source도 다시 읽어 오래된 공식 CLI 표기를 없앤다.
+  useEffect(() => {
+    if (snap?.providers.some((provider) => provider.provider === "gemini" && provider.error === "unsupported_client")) {
+      void loadConnections();
+    }
+  }, [snap?.fetchedAt, loadConnections]);
   useVisibleInterval(() => void loadUsage(), POLL_MS);
 
   // 재로그인은 터미널에서 끝난다 — 완료 시점을 앱이 폴링으로 감지해 자동 반영(5초 × 36 = 3분).
@@ -286,16 +294,46 @@ export function EngineUsage() {
     return u?.status === "error" && /HTTP 429/.test(u.error ?? "");
   }
 
+  function isTerminalProviderError(u: ProviderUsage | undefined): boolean {
+    return u?.status === "error" && ["quota_exhausted", "unsupported_client"].includes(u.error ?? "");
+  }
+
+  function isAgyRuntime(e: EngineDef): boolean {
+    const source = runtimeFor(e)?.source ?? "";
+    return /(^|[/\\])agy(?:\.(?:exe|cmd))?$/i.test(source);
+  }
+
+  function openProviderHelp(e: EngineDef): void {
+    const url = e.id === "grok" ? "https://grok.com" : "https://antigravity.google";
+    void ipc()?.fs.openPath(url).catch(() => undefined);
+  }
+
   function statusText(e: EngineDef, u: ProviderUsage | undefined): string {
     if (e.auth === "apikey") return ko ? "키 과금" : "key-billed";
     if (e.auth === "local") return ko ? "로컬 · 무제한" : "local · unlimited";
-    // gemini 슬롯이 Antigravity(agy)로만 연결된 경우: agy는 ~/.gemini/oauth_creds.json을 만들지 않아
+    // gemini 슬롯이 실제 Antigravity(agy)로 연결된 경우: agy는 ~/.gemini/oauth_creds.json을 만들지 않아
     // usage 어댑터가 구조적으로 조회할 수 없다 — "연결됨"과 구분되는 정직한 라벨로 알린다.
     // (스냅샷 로딩 전 깜빡임 방지를 위해 snap 수신 후에만.)
-    if (e.id === "gemini" && snap && !u) {
+    if (e.id === "gemini" && snap && !u && isAgyRuntime(e)) {
       return ko ? "연결됨 · 사용량 미제공(Antigravity)" : "connected · usage n/a (Antigravity)";
     }
     if (u?.status === "error") {
+      if (u.error === "quota_exhausted") {
+        return ko ? "한도 소진(402) · Usage 확인" : "quota exhausted (402) · open usage";
+      }
+      if (u.error === "unsupported_client") {
+        if (isAgyRuntime(e)) {
+          return ko
+            ? "Antigravity 작동 · 사용량 미제공"
+            : "Antigravity active · usage n/a";
+        }
+        return ko
+          ? "Gemini CLI 지원 종료 · Antigravity 필요"
+          : "Gemini CLI unsupported · Antigravity required";
+      }
+      if (u.error === "credentials_corrupt") {
+        return ko ? "로그인 파일 손상 · 재로그인 필요" : "login file corrupt · re-login required";
+      }
       if (u.error === "keychain_blocked") {
         // macOS 키체인 접근이 거부/차단됨 — 로그인 문제가 아니라 앱→키체인 권한 문제.
         return ko ? "키체인 접근 차단 — 허용 필요" : "keychain access blocked — allow access";
@@ -312,6 +350,9 @@ export function EngineUsage() {
     if (u?.status === "no_quota") return ko ? "연결됨 · 사용량 곧" : "connected · usage soon";
     // 서버 리밋 조회가 잠시 막혀 로컬 로그로 표시 중(status=ok, error 마커) — 정직하게 알린다.
     if (u?.error === "local_estimate") return ko ? "연결됨 · 로컬 추정" : "connected · local estimate";
+    if (e.id === "grok" && snap && !u) {
+      return ko ? "연결됨 · 사용량은 Grok Settings에서 확인" : "connected · usage in Grok Settings";
+    }
     return ko ? "연결됨" : "connected";
   }
 
@@ -338,12 +379,25 @@ export function EngineUsage() {
                   <div>{e.label}</div>
                   <div
                     style={connected && u?.status === "error" ? { color: "var(--red-deep, #c0392b)" } : undefined}
+                    data-terminal-state={isTerminalProviderError(u) ? "true" : undefined}
                     title={u?.status === "error" ? u.error ?? undefined : undefined}
                   >
                     {connected ? statusText(e, u) : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected") : e.auth === "apikey" ? (ko ? "API 키 · 미연결" : "API key · not connected") : ko ? "미설치" : "not installed"}
                   </div>
                 </div>
-                {connected && u?.status === "error" && !isRateLimited(u) ? (
+                {connected && isTerminalProviderError(u) ? (
+                  <button
+                    onClick={() => openProviderHelp(e)}
+                    className="titlebar-nodrag"
+                    title={
+                      e.id === "grok"
+                        ? ko ? "Grok Settings에서 사용량 확인" : "Open Grok usage settings"
+                        : ko ? "Antigravity 안내 열기" : "Open Antigravity"
+                    }
+                  >
+                    {e.id === "grok" ? (ko ? "Usage 열기" : "Open usage") : (ko ? "Antigravity" : "Antigravity")}
+                  </button>
+                ) : connected && u?.status === "error" && !isRateLimited(u) ? (
                   // 조회 실패 — 막다른 골목 금지: 재시도 + (CLI) 재로그인 액션을 준다.
                   // (429는 제외 — 로그인 문제가 아니고, 누를수록 제한이 길어진다. 백오프가 자동 재시도.)
                   <span style={{ display: "inline-flex", gap: 6, flexShrink: 0 }}>

@@ -221,6 +221,7 @@ jobs:
           npm run test:cli-version-parser
           npm run test:after-pack-runtime-contract
           npm run test:mobile-bridge-contract
+          npm run test:provider-health
 
       - name: Linux migration and updater continuity gates
         if: runner.os == 'Linux'
@@ -256,6 +257,7 @@ jobs:
             npm run test:hephaestus-status-version
             npm run test:marketplace-cache
             npm run test:after-pack-runtime-contract
+            npm run test:provider-health
             npm run test:mobile-bridge-contract
             npm run test:borrowed-task-force
             npm run test:mcp-auto-select

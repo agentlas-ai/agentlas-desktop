@@ -210,12 +210,14 @@ jobs:
           npm run test:browser-password-boundary
           npm run test:browser-ui
           npm run smoke:renderer-ui
+          node scripts/qa-provider-health-dashboard.cjs
           node scripts/test-desktop-feature-surfaces.cjs --build-roster-sync-only
           npm run test:hub-bookmark-ux
           node scripts/test-hub-bookmark-ui.cjs
           node scripts/test-runtime-readiness-ui.cjs
           npm run test:independent-terminal-boundary
           npm run test:grok-runtime-contract
+          npm run test:provider-health
           npm run test:grok-auth-source
           npm run test:oberon-provider-routing
           npm run test:telegram-connect-atomicity

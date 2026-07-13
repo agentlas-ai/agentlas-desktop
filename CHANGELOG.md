@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Gemini chat recovers instead of dying on a retired client or a damaged OAuth file.**
+  Agentlas safely backs up and repairs recoverable trailing bytes in Gemini credentials,
+  recognizes Google's `UNSUPPORTED_CLIENT` response, and switches once to an installed
+  Antigravity runtime using its real headless prompt contract. The Dashboard states
+  plainly that Antigravity works while subscription usage is not exposed.
+- **Grok balance exhaustion is no longer mislabeled as a healthy connection.** Actual
+  HTTP 402 inference failures become a concise chat error and a red 100% exhausted
+  Dashboard window with a link to Grok Settings. Agentlas does not invent a reset time
+  or scrape private account pages when the CLI provides neither.
+
 ## 0.8.5 — 2026-07-12
 
 ### Fixed
