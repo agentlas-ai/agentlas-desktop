@@ -96,15 +96,25 @@ function buildPrompt(req: RunnerRequest): string {
 }
 
 function permissionArgs(permission?: RunnerRequest["permission"]): string[] {
-  if (permission === "write" || permission === "full") {
-    // Agentlas runs Codex as a local, user-owned automation runtime. For browser
-    // setup flows, confirmation prompts break the "do it for me" contract.
+  if (permission === "full") {
     return ["--dangerously-bypass-approvals-and-sandbox"];
   }
+  if (permission === "write") return ["--sandbox", "workspace-write"];
   // `codex exec`는 비대화형이라 approval loop가 없다 — 승인 플래그를 받지 않는다.
   // (`--ask-for-approval`은 대화형 `codex` 전용. exec에 넘기면 0.133+에서
   //  `unexpected argument` 로 exit 2.) read 권한은 read-only 샌드박스로 충분.
   return ["--sandbox", "read-only"];
+}
+
+function resumePermissionArgs(permission?: RunnerRequest["permission"]): string[] {
+  if (permission === "full") {
+    return ["--dangerously-bypass-approvals-and-sandbox"];
+  }
+  // `codex exec resume` has no `--sandbox` flag, but accepts the same validated
+  // config override. Reassert the boundary instead of inheriting a broader
+  // user default when a provider session is resumed.
+  const sandboxMode = permission === "write" ? "workspace-write" : "read-only";
+  return ["-c", `sandbox_mode="${sandboxMode}"`];
 }
 
 /**
@@ -380,12 +390,9 @@ export const runCodex: Runner = async (
   const canResume = !!resumeSessionId;
 
   // RESUME: 새 user 턴만 stdin으로 — 시스템 프롬프트/히스토리는 세션이 이미 갖고 있다.
-  // (`--sandbox`는 resume 서브명령에 없으므로 생략. write/full만 bypass 플래그.)
+  // Resume reasserts the same permission boundary as the first turn.
   if (canResume) {
-    const resumePerm =
-      runReq.permission === "write" || runReq.permission === "full"
-        ? ["--dangerously-bypass-approvals-and-sandbox"]
-        : [];
+    const resumePerm = resumePermissionArgs(runReq.permission);
     const args = [
       "exec",
       "resume",

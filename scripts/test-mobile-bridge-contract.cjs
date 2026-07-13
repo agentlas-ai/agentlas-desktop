@@ -52,6 +52,7 @@ const {
 } = require("../dist/electron/mobile-bridge/projector.js");
 const {
   createMobileBridgeAuthority,
+  enforceMobileInvocationPermissionBoundary,
   projectMobileBridgeInvocationEvent,
 } = require("../dist/electron/mobile-bridge/authority.js");
 const {
@@ -496,6 +497,27 @@ async function testWireParsers() {
   });
   assert.equal(malformedPair.ok, false);
   assert.equal(malformedPair.error.error.code, "invalid_pairing_request");
+}
+
+function testMobileInvocationPermissionBoundary() {
+  const base = { chatId: "chat_1", userPrompt: "Inspect safely" };
+  assert.equal(
+    enforceMobileInvocationPermissionBoundary(base, null).permissions,
+    "read",
+    "omitted Mobile permission must fail closed to read-only",
+  );
+  assert.throws(
+    () => enforceMobileInvocationPermissionBoundary({ ...base, permissions: "write" }, null),
+    /working folder/,
+  );
+  assert.equal(
+    enforceMobileInvocationPermissionBoundary({ ...base, permissions: "write" }, "/workspace").permissions,
+    "write",
+  );
+  assert.throws(
+    () => enforceMobileInvocationPermissionBoundary({ ...base, permissions: "full" }, "/workspace"),
+    /approved and started on Desktop/,
+  );
 }
 
 function testInvocationEventProjection() {
@@ -1687,6 +1709,7 @@ async function testAutomaticNetworkRebind() {
 
 async function main() {
   await testWireParsers();
+  testMobileInvocationPermissionBoundary();
   await testTlsIdentity();
   testAbsolutePathSanitization();
   testUtf16Sanitization();

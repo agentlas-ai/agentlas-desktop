@@ -26,6 +26,7 @@ import {
   clearChatContext,
   createChat,
   getChat,
+  getChatWorkingFolder,
   listRecentChats,
   renameChat,
   setChatContinuousMode,
@@ -449,8 +450,9 @@ function invocationParams(
           "expectedQuestionMessageId",
         ],
   );
+  const chatId = requiredIdentifier(params, "chatId");
   const invocation: McpInvocationRequest = {
-    chatId: requiredIdentifier(params, "chatId"),
+    chatId,
     userPrompt: requiredText(params, "userPrompt", 200_000),
   };
   const runId = optionalIdentifier(params, "runId", 160);
@@ -474,10 +476,27 @@ function invocationParams(
     ? requiredIdentifier(params, "expectedRunId", RUN_ID_RE)
     : undefined;
   return {
-    invocation,
+    invocation: enforceMobileInvocationPermissionBoundary(
+      invocation,
+      getChatWorkingFolder(chatId),
+    ),
     ...(expectedRunId !== undefined ? { expectedRunId } : {}),
     ...(expectedQuestionMessageId !== undefined ? { expectedQuestionMessageId } : {}),
   };
+}
+
+export function enforceMobileInvocationPermissionBoundary(
+  invocation: McpInvocationRequest,
+  workingFolder: string | null,
+): McpInvocationRequest {
+  const permissions = invocation.permissions ?? "read";
+  if (permissions === "full") {
+    throw new Error("Full access must be approved and started on Desktop");
+  }
+  if (permissions === "write" && !workingFolder) {
+    throw new Error("Select a Desktop project working folder before allowing Mobile edits");
+  }
+  return { ...invocation, permissions };
 }
 
 function createChatParams(request: MobileBridgeRpcRequest): Parameters<typeof createChat>[0] {

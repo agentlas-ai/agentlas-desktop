@@ -93,9 +93,28 @@ process.stdin.on("end", () => {
   }, events);
   assert.equal(third.sessionId, "thread-qa");
 
+  await runCodex({
+    ...base,
+    chatId: undefined,
+    permission: "read",
+    userPrompt: "Read-only boundary",
+  }, events);
+  await runCodex({
+    ...base,
+    chatId: undefined,
+    permission: "full",
+    userPrompt: "Explicit full boundary",
+  }, events);
+
   const invocations = fs.readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.equal(invocations.length, 3);
+  assert.equal(invocations.length, 5);
   assert.ok(invocations[0].args.includes("gpt-contract-one"), "create must keep the selected model");
+  assert.deepEqual(
+    invocations[0].args.slice(invocations[0].args.indexOf("--sandbox"), invocations[0].args.indexOf("--sandbox") + 2),
+    ["--sandbox", "workspace-write"],
+    "write must stay inside the Codex workspace sandbox",
+  );
+  assert.equal(invocations[0].args.includes("--dangerously-bypass-approvals-and-sandbox"), false);
   assert.match(invocations[0].stdin, /borrowed-agent-alpha/);
   assert.match(invocations[0].stdin, /resume-proof\.png/);
   assert.match(invocations[0].stdin, /\.agentlas\/chat-attachments/);
@@ -103,15 +122,23 @@ process.stdin.on("end", () => {
   assert.ok(invocations[1].args.includes("resume"), "same fingerprint must resume the provider session");
   assert.ok(invocations[1].args.includes("thread-qa"));
   assert.ok(invocations[1].args.includes("gpt-contract-one"), "resume must preserve the selected model");
+  assert.ok(invocations[1].args.includes('sandbox_mode="workspace-write"'));
+  assert.equal(invocations[1].args.includes("--dangerously-bypass-approvals-and-sandbox"), false);
   assert.match(invocations[1].stdin, /borrowed-agent-beta/);
   assert.doesNotMatch(invocations[1].stdin, /\[SYSTEM\]/, "resume sends only the new turn payload");
 
   assert.equal(invocations[2].args.includes("resume"), false, "model change must invalidate the old provider session");
   assert.ok(invocations[2].args.includes("gpt-contract-two"));
+  assert.deepEqual(
+    invocations[3].args.slice(invocations[3].args.indexOf("--sandbox"), invocations[3].args.indexOf("--sandbox") + 2),
+    ["--sandbox", "read-only"],
+  );
+  assert.equal(invocations[3].args.includes("--dangerously-bypass-approvals-and-sandbox"), false);
+  assert.equal(invocations[4].args.includes("--dangerously-bypass-approvals-and-sandbox"), true);
 
   console.log(JSON.stringify({
     ok: true,
-    checks: 15,
+    checks: 23,
     modelPreservedOnResume: true,
     modelChangeInvalidatesSession: true,
     attachmentReachedHostAsFile: true,
