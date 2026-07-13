@@ -226,6 +226,47 @@ async function main() {
     );
     assert.ok(db.prepare("SELECT COUNT(*) AS n FROM memory_entries WHERE agent_id = 'agent-worker'").get().n >= 4);
 
+    const memoryAfterInteractiveFirmRead = db.prepare(
+      "SELECT COUNT(*) AS n FROM memory_entries WHERE agent_id = 'agent-worker'",
+    ).get().n;
+    const restrictedFirmChat = chats.createChat({
+      agentId: "agent-worker",
+      title: "Restricted firm attribution",
+    });
+    const restrictedFirmEvents = [];
+    await firm.runFirmInvocation({
+      req: {
+        runId: "restricted-firm-learning-v57",
+        chatId: restrictedFirmChat.id,
+        userPrompt: "Inspect without learning from this unattended read",
+        locale: "en",
+        permissions: "read",
+      },
+      chat: { id: restrictedFirmChat.id, projectId: null, firmId: null },
+      org: {
+        source: "resolver",
+        ceo: { id: "restricted-org-node", agentId: "agent-worker", name: "Restricted Node", role: "CEO" },
+        divisions: [],
+      },
+      ceoAgent: worker,
+      active,
+      runtimes: [active],
+      picked,
+      locale: "en",
+      restrictedReadBoundary: true,
+      sink: (event) => restrictedFirmEvents.push(event),
+    });
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS n FROM memory_entries WHERE agent_id = 'agent-worker'").get().n,
+      memoryAfterInteractiveFirmRead,
+      "restricted firm reads must remain ephemeral",
+    );
+    assert.equal(
+      restrictedFirmEvents.some((event) => /## Memory Events/.test(event.text ?? "")),
+      false,
+      "restricted firm replies must strip memory controls before reaching the UI",
+    );
+
     curator.curateReply("Completed without a durable learning event.", {
       ...intakeContext,
       runId: "no-memory-learning-v57",
@@ -262,18 +303,18 @@ async function main() {
     assert.equal(summary.legacyChatLinkedFailureCount, 1);
     assert.equal(summary.legacyUnattributedCount, 1, "only the no-chat legacy run remains globally unattributed");
     assert.ok(summary.durableMemoryCount >= 4);
-    assert.equal(summary.curationTurnCount, 3);
-    assert.equal(summary.noNewMemoryTurnCount, 1);
-    assert.equal(summary.memoryEventCount, 2);
+    assert.equal(summary.curationTurnCount, 4);
+    assert.equal(summary.noNewMemoryTurnCount, 2);
+    assert.equal(summary.memoryEventCount, 3);
     assert.equal(summary.memoryWrittenCount, 2);
     assert.equal(summary.memoryDedupedCount, 0);
     assert.equal(summary.memoryRedactedCount, 0);
     assert.equal(summary.memorySessionOnlyCount, 0);
-    assert.equal(summary.memoryDiscardedCount, 0);
+    assert.equal(summary.memoryDiscardedCount, 1);
     const curationReceipts = db.prepare(
       "SELECT payload_json FROM run_events WHERE agent_id = ? AND kind = 'memory_curation' ORDER BY ts",
     ).all("agent-worker");
-    assert.equal(curationReceipts.length, 3);
+    assert.equal(curationReceipts.length, 4);
     assert.doesNotMatch(JSON.stringify(curationReceipts), /Debug firm|bounded retry|\/Users\//);
     const curationPlan = db.prepare(
       "EXPLAIN QUERY PLAN SELECT payload_json FROM run_events WHERE agent_id = ? AND kind = 'memory_curation' ORDER BY ts DESC",

@@ -405,7 +405,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   );
   const { delegations, synthesisAllocation, cleanedText } = parseDelegations(safeResultText);
   let display = cleanedText;
-  if (p.req.permissions === "write" || p.req.permissions === "full") {
+  if (!p.restrictedReadBoundary) {
     try {
       const { cleanedText: c2 } = curateReply(display, {
         projectPath: activePath,

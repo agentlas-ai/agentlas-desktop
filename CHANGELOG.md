@@ -1,6 +1,34 @@
 # Changelog
 
-## 0.8.17 — 2026-07-14
+## 0.8.18 — 2026-07-14
+
+### Included
+
+- **The complete 0.8.17 security and provider-health changes ship in this
+  replacement release.** The 0.8.17 source tag failed its Experience Ontology
+  release gate before signing, notarization, packaging, or public publication,
+  so the public stable channel remained on 0.8.15.
+
+### Fixed
+
+- **Interactive Desktop firm chats learn again in `read` mode.** The Mobile
+  security work accidentally treated every firm `read` as an unattended
+  restricted run and skipped the agent's private Memory/Experience curation.
+  Desktop read chats now retain attributable agent experience in the private
+  database, while project-local `.agentlas` files still require `write` or
+  `full` permission.
+- **Restricted and borrowed runs retain the intended privacy boundary.** Mobile
+  and unattended read runs strip model-emitted Memory controls and write only
+  content-free audit counts. Borrowed synthesis uses its effective runtime
+  permission; read-only synthesis cannot create project memory files or claim
+  a participant's experience, while write-capable project work keeps its
+  existing scoped curation behavior.
+- **The release gate now tests both sides of the boundary.** It requires normal
+  Desktop firm reads to create attributable durable learning and restricted
+  firm reads to remain ephemeral with Memory control blocks removed from UI
+  output.
+
+## 0.8.17 — 2026-07-14 (failed release candidate; never published)
 
 ### Security
 
