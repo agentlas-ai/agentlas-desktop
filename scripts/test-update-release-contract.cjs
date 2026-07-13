@@ -20,6 +20,11 @@ const {
 const compatibility = pkg.agentlasUpdateCompatibility;
 assert.equal(lock.version, pkg.version, "package-lock version must match package.json before tagging");
 assert.equal(lock.packages[""].version, pkg.version, "package-lock root package version must match package.json");
+assert.match(
+  pkg.scripts["test:terminal-ontology-loadout-feed"] ?? "",
+  /^npm run build:electron && electron scripts\/test-terminal-ontology-loadout-feed\.cjs$/,
+  "terminal ontology release gate must keep its Electron native-module ABI",
+);
 
 function versionTuple(spec) {
   const match = String(spec || "").match(/(\d+)\.(\d+)\.(\d+)/);
