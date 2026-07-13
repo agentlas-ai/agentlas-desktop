@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { ProviderUsage, UsageWindow } from "../../shared/types";
-import { getJson, toPercent, toResetMs } from "./util";
+import { getJson, normalizeUsageError, toPercent, toResetMs } from "./util";
 
 const CODEX_USAGE_URLS = [
   "https://chatgpt.com/backend-api/codex/usage",
@@ -80,5 +80,12 @@ export async function getCodexUsage(): Promise<ProviderUsage | null> {
       lastErr = err instanceof Error ? err.message : String(err);
     }
   }
-  return { ...base, status: "error", windows: [], error: lastErr };
+  const normalized = normalizeUsageError(lastErr);
+  return {
+    ...base,
+    status: "error",
+    windows: [],
+    error: normalized.code,
+    ...(normalized.retryAfterSeconds ? { retryAfterSeconds: normalized.retryAfterSeconds } : {}),
+  };
 }

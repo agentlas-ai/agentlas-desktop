@@ -15,6 +15,7 @@ import type {
   EnvVarMeta,
   ProviderUsage,
   RuntimeStatus,
+  UsageRetryProviderId,
   UsageSnapshot,
   UsageWindow,
 } from "@/lib/types";
@@ -29,17 +30,18 @@ interface EngineDef {
   label: string;
   auth: EngineAuth;
   cliKind?: "claude-code" | "codex" | "gemini" | "grok";
+  retryProviderId?: UsageRetryProviderId;
   keyEnv?: string;
   logoSrc: string;
   logoAlt: string;
 }
 
 const ENGINES: EngineDef[] = [
-  { id: "claude-code", label: "Claude Code", auth: "cli", cliKind: "claude-code", logoSrc: "/brand/llm/claude.svg", logoAlt: "Claude" },
-  { id: "codex", label: "Codex", auth: "cli", cliKind: "codex", logoSrc: "/brand/llm/openai.svg", logoAlt: "OpenAI" },
-  { id: "gemini", label: "Gemini", auth: "cli", cliKind: "gemini", logoSrc: "/brand/llm/googlegemini.svg", logoAlt: "Google Gemini" },
+  { id: "claude-code", label: "Claude Code", auth: "cli", cliKind: "claude-code", retryProviderId: "claude-code", logoSrc: "/brand/llm/claude.svg", logoAlt: "Claude" },
+  { id: "codex", label: "Codex", auth: "cli", cliKind: "codex", retryProviderId: "codex", logoSrc: "/brand/llm/openai.svg", logoAlt: "OpenAI" },
+  { id: "gemini", label: "Gemini", auth: "cli", cliKind: "gemini", retryProviderId: "gemini", logoSrc: "/brand/llm/googlegemini.svg", logoAlt: "Google Gemini" },
   { id: "deepseek", label: "DeepSeek", auth: "apikey", keyEnv: "DEEPSEEK_API_KEY", logoSrc: "/brand/llm/deepseek.svg", logoAlt: "DeepSeek" },
-  { id: "grok", label: "Grok", auth: "cli", cliKind: "grok", keyEnv: "XAI_API_KEY", logoSrc: "/brand/llm/x.svg", logoAlt: "xAI" },
+  { id: "grok", label: "Grok", auth: "cli", cliKind: "grok", retryProviderId: "grok", keyEnv: "XAI_API_KEY", logoSrc: "/brand/llm/x.svg", logoAlt: "xAI" },
   { id: "glm", label: "GLM", auth: "apikey", keyEnv: "ZHIPU_API_KEY", logoSrc: "/brand/llm/zhipu.png", logoAlt: "Zhipu GLM" },
   { id: "pi", label: "Pi", auth: "apikey", keyEnv: "PI_API_KEY", logoSrc: "/brand/llm/pi.png", logoAlt: "Pi" },
   { id: "ollama", label: "Ollama", auth: "local", logoSrc: "/brand/llm/ollama.svg", logoAlt: "Ollama" },
@@ -119,21 +121,24 @@ export function EngineUsage() {
   const [notice, setNotice] = useState<{ id: string; text: string; command?: string } | null>(null);
   const [keyFor, setKeyFor] = useState<string | null>(null);
   const [keyVal, setKeyVal] = useState("");
+  const usageRequestGen = useRef(0);
 
   const loadUsage = useCallback(async (force = false) => {
+    const requestId = ++usageRequestGen.current;
     const api = ipc();
     if (!api) {
-      setUsageLoadError(true);
+      if (usageRequestGen.current === requestId) setUsageLoadError(true);
       return;
     }
     try {
       const next = await api.usage.snapshot(force ? { force: true } : undefined);
+      if (usageRequestGen.current !== requestId) return;
       setSnap(next);
       setUsageLoadError(false);
     } catch {
       // 공급자별 오류는 snapshot 안에 정규화된다. 여기까지 throw면 IPC 자체가 실패한 것이라
       // 조용히 빈 카드로 남기지 않고, 사용자가 즉시 다시 시도할 수 있게 한다.
-      setUsageLoadError(true);
+      if (usageRequestGen.current === requestId) setUsageLoadError(true);
     }
   }, []);
 
@@ -149,6 +154,24 @@ export function EngineUsage() {
     }
   }, []);
 
+  const retryProviderUsage = useCallback(async (providerId: UsageRetryProviderId) => {
+    const requestId = ++usageRequestGen.current;
+    const api = ipc();
+    if (!api) {
+      if (usageRequestGen.current === requestId) setUsageLoadError(true);
+      return;
+    }
+    try {
+      const result = await api.usage.retry(providerId);
+      if (usageRequestGen.current !== requestId) return;
+      setSnap(result.snapshot);
+      setUsageLoadError(false);
+      void loadConnections();
+    } catch {
+      if (usageRequestGen.current === requestId) setUsageLoadError(true);
+    }
+  }, [loadConnections]);
+
   // 초기 1회 load(usage+connections)는 유지, 주기 폴링(60s)은 loadUsage만 탭 보일 때 — useVisibleInterval이 hidden 시 정지.
   useEffect(() => {
     void loadUsage();
@@ -163,10 +186,11 @@ export function EngineUsage() {
   }, [snap?.fetchedAt, loadConnections]);
   useVisibleInterval(() => void loadUsage(), POLL_MS);
 
-  // 재로그인은 터미널에서 끝난다 — 완료 시점을 앱이 폴링으로 감지해 자동 반영(5초 × 36 = 3분).
+  // 재로그인은 터미널에서 끝난다 — 완료 시점을 앱이 폴링으로 감지해 자동 반영(15초 × 12 = 3분).
   const pollGen = useRef(0);
   useEffect(() => () => {
     pollGen.current++; // 언마운트 시 진행 중 폴링 중단
+    usageRequestGen.current++; // 늦게 끝난 snapshot이 unmount 뒤 상태를 덮지 않게 한다.
   }, []);
   const watchRecovery = useCallback(
     async (providerId: string) => {
@@ -180,13 +204,15 @@ export function EngineUsage() {
         await new Promise((r) => setTimeout(r, 15_000));
         if (pollGen.current !== gen) return;
         try {
+          const requestId = ++usageRequestGen.current;
           const s = await api.usage.snapshot({ force: true });
           if (pollGen.current !== gen) return;
+          if (usageRequestGen.current !== requestId) continue;
           setSnap(s);
           setUsageLoadError(false);
           const p = s.providers.find((x) => x.provider === providerId);
           // 429(일시 제한)는 '아직 로그인 안 됨'이 아니다 — 계속 폴링하면 제한만 길어지니 멈춘다.
-          if (p && (p.status !== "error" || /HTTP 429/.test(p.error ?? ""))) {
+          if (p && (p.status !== "error" || p.error === "rate_limited")) {
             void loadConnections();
             return;
           }
@@ -202,7 +228,8 @@ export function EngineUsage() {
     return snap?.providers.find((p) => p.provider === id);
   }
   function isConnected(e: EngineDef): boolean {
-    if (e.auth === "cli") return !!usageFor(e.id) || runtimes.some((r) => r.kind === e.cliKind);
+    // 사용량/오류 영수증은 runtime 설치 증거가 아니다. 오래된 receipt가 Connect를 숨기면 안 된다.
+    if (e.auth === "cli") return runtimes.some((r) => r.kind === e.cliKind);
     if (e.auth === "local") return runtimes.some((r) => r.kind === "ollama");
     return !!e.keyEnv && envKeys.has(e.keyEnv);
   }
@@ -300,7 +327,7 @@ export function EngineUsage() {
   }
 
   function isRateLimited(u: ProviderUsage | undefined): boolean {
-    return u?.status === "error" && /HTTP 429/.test(u.error ?? "");
+    return u?.status === "error" && u.error === "rate_limited";
   }
 
   function isTerminalProviderError(u: ProviderUsage | undefined): boolean {
@@ -347,7 +374,7 @@ export function EngineUsage() {
         // macOS 키체인 접근이 거부/차단됨 — 로그인 문제가 아니라 앱→키체인 권한 문제.
         return ko ? "키체인 접근 차단 — 허용 필요" : "keychain access blocked — allow access";
       }
-      if (/auth_expired|HTTP 40[13]/i.test(u.error ?? "")) {
+      if (u.error === "auth_expired") {
         return ko ? "로그인 만료 — 재로그인 필요" : "login expired — re-login";
       }
       if (isRateLimited(u)) {
@@ -407,8 +434,7 @@ export function EngineUsage() {
                   <div>{e.label}</div>
                   <div
                     style={connected && u?.status === "error" ? { color: "var(--red-deep, #c0392b)" } : undefined}
-                    data-terminal-state={isTerminalProviderError(u) ? "true" : undefined}
-                    title={u?.status === "error" ? u.error ?? undefined : undefined}
+                    data-terminal-state={connected && isTerminalProviderError(u) ? "true" : undefined}
                   >
                     {connected ? statusText(e, u) : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected") : e.auth === "apikey" ? (ko ? "API 키 · 미연결" : "API key · not connected") : ko ? "미설치" : "not installed"}
                   </div>
@@ -431,10 +457,7 @@ export function EngineUsage() {
                   <span style={{ display: "inline-flex", gap: 6, flexShrink: 0 }}>
                     <button
                       onClick={() => {
-                        // 명시 무효화 후 조회 — 낡은 lastResult/백오프가 재시도를 가리지 않게.
-                        void ipc()?.usage.invalidate?.(e.id)?.catch(() => undefined);
-                        void loadConnections();
-                        void loadUsage(true);
+                        if (e.retryProviderId) void retryProviderUsage(e.retryProviderId);
                       }}
                       disabled={busy === e.id}
                       className="titlebar-nodrag"

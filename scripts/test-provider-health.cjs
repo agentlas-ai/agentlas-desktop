@@ -13,10 +13,14 @@ process.env.AGENTLAS_PROVIDER_HEALTH_FILE = healthFile;
 
 const health = require("../dist/electron/usage/provider-health.js");
 const credentials = require("../dist/electron/usage/gemini-credentials.js");
+const claudeUsage = require("../dist/electron/usage/claude.js");
+const codexUsage = require("../dist/electron/usage/codex.js");
 const geminiUsage = require("../dist/electron/usage/gemini.js");
 const geminiRuntime = require("../dist/electron/runtime/gemini.js");
 const grokUsage = require("../dist/electron/usage/grok.js");
 const grokRuntime = require("../dist/electron/runtime/grok.js");
+const usageUtil = require("../dist/electron/usage/util.js");
+const retryPolicy = require("../dist/electron/usage/retry-policy.js");
 
 const DAY_MS = 24 * 60 * 60_000;
 const startedAt = 1_900_000_000_000;
@@ -54,7 +58,7 @@ async function verifyProviderHealthPersistenceAndTtl() {
     updatedAt: startedAt,
   });
 
-  // Grok's weekly state uses the documented eight-day safety ceiling, then self-prunes.
+  // Grok's status receipt uses an eight-day safety ceiling, then self-prunes without creating a quota window.
   assert.equal(reloaded.readProviderHealth("grok", startedAt + 8 * DAY_MS + 1), null);
   assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(healthFile, "utf8")), "grok"), false);
 
@@ -168,6 +172,77 @@ function verifyGeminiUnsupportedTierDetection() {
   );
 }
 
+function verifyRendererSafeUsageErrorsAndRetryPolicy() {
+  const privateDetail = `/Users/private-user/.corp/proxy-${process.pid}`;
+  const network = usageUtil.normalizeUsageError(`fetch failed (ENOTFOUND ${privateDetail})`);
+  assert.deepEqual(network, { code: "network_error" });
+  assertNoFixtureSecret(network, [privateDetail], "normalized usage error");
+
+  assert.deepEqual(
+    usageUtil.normalizeUsageError("HTTP 429 retry-after=73"),
+    { code: "rate_limited", retryAfterSeconds: 73 },
+  );
+  assert.deepEqual(
+    usageUtil.normalizeUsageError(`HTTP 418 unexpected body at ${privateDetail}`),
+    { code: "provider_error" },
+  );
+
+  assert.equal(retryPolicy.isUsageRetryProviderId("grok"), true);
+  assert.equal(retryPolicy.isUsageRetryProviderId("ollama"), false, "retry must reject providers outside the allowlist");
+  assert.equal(retryPolicy.isUsageRetryProviderId(""), false);
+
+  const gate = new retryPolicy.UsageRetryGate(10_000);
+  assert.deepEqual(gate.claim("grok", startedAt), { allowed: true, retryAfterMs: 10_000 });
+  // Cache invalidation has no reference to this gate; repeated claims remain closed until the deadline.
+  assert.deepEqual(gate.claim("grok", startedAt + 1), { allowed: false, retryAfterMs: 9_999 });
+  assert.deepEqual(gate.claim("gemini", startedAt + 1), { allowed: true, retryAfterMs: 10_000 });
+  assert.deepEqual(gate.claim("grok", startedAt + 10_000), { allowed: true, retryAfterMs: 10_000 });
+}
+
+async function verifyAtomicRetryIntegration() {
+  const originals = {
+    claude: claudeUsage.getClaudeUsage,
+    codex: codexUsage.getCodexUsage,
+    gemini: geminiUsage.getGeminiUsage,
+    grok: grokUsage.getGrokUsage,
+  };
+  const calls = { claude: 0, codex: 0, gemini: 0, grok: 0 };
+  const fixture = (provider, label) => ({
+    provider,
+    label,
+    status: "no_quota",
+    windows: [],
+    fetchedAt: Date.now(),
+  });
+  claudeUsage.getClaudeUsage = async () => { calls.claude += 1; return fixture("claude-code", "Claude Code"); };
+  codexUsage.getCodexUsage = async () => { calls.codex += 1; return fixture("codex", "Codex"); };
+  geminiUsage.getGeminiUsage = async () => { calls.gemini += 1; return fixture("gemini", "Gemini"); };
+  grokUsage.getGrokUsage = async () => { calls.grok += 1; return fixture("grok", "Grok"); };
+
+  const usageIndexPath = require.resolve("../dist/electron/usage/index.js");
+  delete require.cache[usageIndexPath];
+  const usageIndex = require(usageIndexPath);
+  try {
+    await usageIndex.getUsageSnapshot({ force: true });
+    for (const key of Object.keys(calls)) calls[key] = 0;
+
+    const first = await usageIndex.retryUsageProvider("grok");
+    assert.equal(first.attempted, true);
+    assert.deepEqual(calls, { claude: 0, codex: 0, gemini: 0, grok: 1 }, "retry must fetch only its target provider");
+
+    const second = await usageIndex.retryUsageProvider("grok");
+    assert.equal(second.attempted, false, "retry inside the main-owned cooldown must be coalesced");
+    assert.ok(second.retryAfterMs > 0 && second.retryAfterMs <= 10_000);
+    assert.deepEqual(calls, { claude: 0, codex: 0, gemini: 0, grok: 1 }, "cooldown retry must not call any adapter");
+  } finally {
+    claudeUsage.getClaudeUsage = originals.claude;
+    codexUsage.getCodexUsage = originals.codex;
+    geminiUsage.getGeminiUsage = originals.gemini;
+    grokUsage.getGrokUsage = originals.grok;
+    delete require.cache[usageIndexPath];
+  }
+}
+
 async function verifyRuntimeHealthOverridesGeminiQuotaGuess() {
   health.recordProviderHealth("gemini", "gemini_unsupported_client", Date.now());
   const usage = await geminiUsage.getGeminiUsage();
@@ -249,11 +324,7 @@ async function verifyGrok402ClassificationAndUsageProjection() {
   assert.equal(usage?.provider, "grok");
   assert.equal(usage?.status, "error");
   assert.equal(usage?.error, "quota_exhausted");
-  assert.deepEqual(usage?.windows.map((window) => ({
-    id: window.id,
-    kind: window.kind,
-    usedPercent: window.usedPercent,
-  })), [{ id: "grok-weekly-exhausted", kind: "7d", usedPercent: 100 }]);
+  assert.deepEqual(usage?.windows, [], "HTTP 402 must not invent a percentage, quota window, or reset time");
 
   health.clearProviderHealth("grok");
   assert.equal(await grokUsage.getGrokUsage(), null, "Grok usage must not invent a percentage without a 402 receipt");
@@ -264,6 +335,8 @@ async function verifyGrok402ClassificationAndUsageProjection() {
     await verifyProviderHealthPersistenceAndTtl();
     await verifyCredentialRecoveryIsAtomicAndContentSafe();
     verifyGeminiUnsupportedTierDetection();
+    verifyRendererSafeUsageErrorsAndRetryPolicy();
+    await verifyAtomicRetryIntegration();
     await verifyRuntimeHealthOverridesGeminiQuotaGuess();
     verifyGeminiAndAgySpawnContracts();
     await verifyGrok402ClassificationAndUsageProjection();
@@ -273,6 +346,9 @@ async function verifyGrok402ClassificationAndUsageProjection() {
         "credential-recovery",
         "provider-health-persistence-ttl",
         "gemini-unsupported-tier",
+        "renderer-safe-usage-errors",
+        "usage-retry-allowlist-cooldown",
+        "usage-retry-targeted-singleflight",
         "gemini-agy-spawn-contract",
         "grok-402-usage-projection",
       ],

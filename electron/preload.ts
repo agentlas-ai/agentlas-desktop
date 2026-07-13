@@ -15,6 +15,7 @@ import type {
   Project,
   RuntimeBackend,
   RuntimeSelection,
+  UsageRetryProviderId,
   UpdaterState,
   WorkflowGraph,
   AutomationUpdatePatch,
@@ -111,7 +112,7 @@ const api: AgentlasIpc = {
   },
   usage: {
     snapshot: (opts?: { force?: boolean }) => ipcRenderer.invoke("usage:snapshot", opts),
-    invalidate: (providerId?: string) => ipcRenderer.invoke("usage:invalidate", providerId),
+    retry: (providerId: UsageRetryProviderId) => ipcRenderer.invoke("usage:retry", providerId),
   },
   billing: {
     getCredits: () => ipcRenderer.invoke("billing:getCredits"),

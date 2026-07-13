@@ -9,6 +9,8 @@ const distDir = path.join(root, "dist", "renderer");
 const outDir = process.env.AGENTLAS_PROVIDER_HEALTH_QA_OUT
   ? path.resolve(process.env.AGENTLAS_PROVIDER_HEALTH_QA_OUT)
   : path.join(root, "output", "playwright", "provider-health");
+const distRoot = path.resolve(distDir);
+const notFoundAsset = path.join(distRoot, "404.html");
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -24,17 +26,42 @@ const MIME = {
 };
 
 function resolveAsset(urlPath) {
-  let pathname = decodeURIComponent((urlPath || "/").split("?")[0]);
+  let pathname;
+  try {
+    pathname = decodeURIComponent((urlPath || "/").split("?")[0]);
+  } catch {
+    return notFoundAsset;
+  }
   const nestedNext = pathname.match(/^\/.+\/(_next\/.+)$/);
   if (nestedNext) pathname = `/${nestedNext[1]}`;
   if (pathname === "/") pathname = "/index.html";
-  const direct = path.join(distDir, pathname);
-  if (fs.existsSync(direct) && fs.statSync(direct).isFile()) return direct;
+  const withinDist = (candidate) => candidate.startsWith(`${distRoot}${path.sep}`);
+  const safeExistingFile = (candidate) => {
+    if (!withinDist(candidate) || !fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) return null;
+    try {
+      const realRoot = fs.realpathSync(distRoot);
+      const realCandidate = fs.realpathSync(candidate);
+      if (realCandidate !== realRoot && !realCandidate.startsWith(`${realRoot}${path.sep}`)) return null;
+    } catch {
+      return null;
+    }
+    return candidate;
+  };
+  const direct = path.resolve(distRoot, pathname.replace(/^[/\\]+/, ""));
+  const directFile = safeExistingFile(direct);
+  if (directFile) return directFile;
   if (!path.extname(pathname)) {
-    const html = path.join(distDir, `${pathname}.html`);
-    if (fs.existsSync(html)) return html;
+    const html = path.resolve(distRoot, `${pathname.replace(/^[/\\]+/, "")}.html`);
+    const htmlFile = safeExistingFile(html);
+    if (htmlFile) return htmlFile;
   }
-  return path.join(distDir, "404.html");
+  return notFoundAsset;
+}
+
+function verifyStaticServerBoundary() {
+  const traversal = `/${Array.from({ length: 12 }, () => "%2e%2e").join("/")}/etc/passwd`;
+  assert.equal(resolveAsset(traversal), notFoundAsset, "encoded traversal must never escape dist/renderer");
+  assert.equal(resolveAsset("/%E0%A4%A"), notFoundAsset, "malformed URL encoding must fail closed");
 }
 
 function startServer() {
@@ -58,9 +85,7 @@ function setupProviderHealthBridge(payload) {
   setupBase(payload.baseOptions);
 
   const calls = [];
-  window.__providerHealthQA = { calls, usageCalls: 0, failUsageSnapshots: 0 };
-  window.agentlas.app.getLocale = async () => payload.locale || "ko-KR";
-  window.agentlas.runtime.detect = async () => [
+  const runtimes = [
     {
       kind: "codex",
       backend: "openai",
@@ -83,9 +108,22 @@ function setupProviderHealthBridge(payload) {
       version: "0.2.93",
       active: false,
     },
-  ];
+  ].filter((runtime) => !(payload.excludeRuntimeKinds || []).includes(runtime.kind));
+  window.__providerHealthQA = {
+    calls,
+    usageCalls: 0,
+    failUsageSnapshots: 0,
+    snapshotPlans: [],
+    runtimes,
+    codexError: payload.codexError === true,
+  };
+  window.agentlas.app.getLocale = async () => payload.locale || "ko-KR";
+  window.agentlas.runtime.detect = async () => window.__providerHealthQA.runtimes.map((runtime) => ({ ...runtime }));
   window.agentlas.usage.snapshot = async () => {
     window.__providerHealthQA.usageCalls += 1;
+    const plan = window.__providerHealthQA.snapshotPlans.shift() || {};
+    if (plan.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, plan.delayMs));
+    if (plan.fail) throw new Error("fixture planned usage snapshot IPC failure");
     if (window.__providerHealthQA.failUsageSnapshots > 0) {
       window.__providerHealthQA.failUsageSnapshots -= 1;
       throw new Error("fixture usage snapshot IPC failure");
@@ -93,15 +131,24 @@ function setupProviderHealthBridge(payload) {
     return {
       fetchedAt: Date.now(),
       providers: [
-        {
-          provider: "codex",
-          backend: "oauth",
-          label: "Codex",
-          status: "ok",
-          windows: [
-            { id: "codex-5h", kind: "5h", label: "5-hour", usedPercent: 12, resetAt: null },
-          ],
-        },
+        window.__providerHealthQA.codexError
+          ? {
+              provider: "codex",
+              backend: "oauth",
+              label: "Codex",
+              status: "error",
+              error: "provider_error",
+              windows: [],
+            }
+          : {
+              provider: "codex",
+              backend: "oauth",
+              label: "Codex",
+              status: "ok",
+              windows: [
+                { id: "codex-5h", kind: "5h", label: "5-hour", usedPercent: plan.codexUsedPercent ?? 12, resetAt: null },
+              ],
+            },
         {
           provider: "gemini",
           backend: "oauth",
@@ -116,17 +163,18 @@ function setupProviderHealthBridge(payload) {
           label: "Grok",
           status: "error",
           error: "quota_exhausted",
-          windows: [
-            {
-              id: "grok-weekly-exhausted",
-              kind: "7d",
-              label: "Grok Build",
-              usedPercent: 100,
-              resetAt: null,
-            },
-          ],
+          windows: [],
         },
       ],
+    };
+  };
+  window.agentlas.usage.retry = async (providerId) => {
+    calls.push({ name: "usage.retry", providerId });
+    if (providerId === "codex") window.__providerHealthQA.codexError = false;
+    return {
+      snapshot: await window.agentlas.usage.snapshot(),
+      attempted: true,
+      retryAfterMs: 10_000,
     };
   };
   window.agentlas.fs.openPath = async (target) => {
@@ -176,18 +224,10 @@ async function inspectViewport(page, viewport, screenshotName) {
     "Grok exhausted row must not show generic retry/re-login",
   );
 
-  const grokBar = grokRow.locator(".dashboard-usage-bar");
-  await grokBar.getByText("100%", { exact: true }).waitFor();
-  assert.equal(await grokBar.getByText("주간(7일)", { exact: true }).count(), 1);
   assert.equal(
-    await grokBar.locator('span[data-warn="true"]').textContent(),
-    "100%",
-    "Grok exhausted bar must use warning state",
-  );
-  assert.equal(
-    await grokBar.locator(":scope > div > div").evaluate((node) => node.style.width),
-    "100%",
-    "Grok exhausted bar fill must be exactly 100%",
+    await grokRow.locator(".dashboard-usage-bar").count(),
+    0,
+    "Grok 402 receipt must remain status-only without an invented percentage/window",
   );
 
   const fit = await page.evaluate(() => {
@@ -287,10 +327,80 @@ async function verifyUsageSnapshotRecovery(page, options) {
   return { before, after, recovered: true };
 }
 
+async function verifyUsageSnapshotOrdering(page) {
+  const panel = page.locator('[data-tour-id="dashboard.llm"]');
+  const refresh = panel.locator(".dashboard-refresh-button");
+
+  // A stale failure that finishes after a newer success must not resurrect the global error banner.
+  await page.evaluate(() => {
+    window.__providerHealthQA.snapshotPlans.push(
+      { delayMs: 140, fail: true },
+      { delayMs: 5, codexUsedPercent: 17 },
+    );
+  });
+  await refresh.click();
+  await refresh.click();
+  await page.waitForTimeout(190);
+  assert.equal(await panel.getByRole("alert").count(), 0, "stale snapshot failure must not replace a newer success");
+  await panel.locator(".dashboard-engine-row").filter({ hasText: "Codex" })
+    .getByText("17%", { exact: true }).waitFor();
+
+  // A stale success must not overwrite the newest usage values either.
+  await page.evaluate(() => {
+    window.__providerHealthQA.snapshotPlans.push(
+      { delayMs: 140, codexUsedPercent: 88 },
+      { delayMs: 5, codexUsedPercent: 23 },
+    );
+  });
+  await refresh.click();
+  await refresh.click();
+  await page.waitForTimeout(190);
+  const codexRow = panel.locator(".dashboard-engine-row").filter({ hasText: "Codex" });
+  await codexRow.getByText("23%", { exact: true }).waitFor();
+  assert.equal(await codexRow.getByText("88%", { exact: true }).count(), 0, "stale snapshot success must be ignored");
+
+  return { staleFailureIgnored: true, staleSuccessIgnored: true };
+}
+
+async function verifyStaleReceiptDoesNotImplyRuntime(page) {
+  const panel = page.locator('[data-tour-id="dashboard.llm"]');
+  await panel.getByText("LLM 연결 · 사용량", { exact: true }).waitFor();
+  for (const label of ["Gemini", "Grok"]) {
+    const row = panel.locator(".dashboard-engine-row").filter({ hasText: label });
+    await row.getByRole("button", { name: "연결", exact: true }).waitFor();
+    assert.equal(
+      await row.getByRole("button", { name: /Antigravity|Usage 열기/ }).count(),
+      0,
+      `${label}: a stale receipt must not hide the runtime Connect action`,
+    );
+  }
+  return { geminiConnectVisible: true, grokConnectVisible: true };
+}
+
+async function verifyAtomicProviderRetry(page) {
+  const panel = page.locator('[data-tour-id="dashboard.llm"]');
+  const codexRow = panel.locator(".dashboard-engine-row").filter({ hasText: "Codex" });
+  await codexRow.getByText("조회 실패", { exact: true }).waitFor();
+  assert.equal(
+    await page.evaluate(() => typeof window.agentlas.usage.invalidate),
+    "undefined",
+    "renderer bridge must not expose raw usage invalidation",
+  );
+  await codexRow.getByRole("button", { name: "다시 시도", exact: true }).click();
+  await codexRow.getByText("12%", { exact: true }).waitFor();
+  assert.deepEqual(
+    await page.evaluate(() => window.__providerHealthQA.calls.filter((call) => call.name.startsWith("usage."))),
+    [{ name: "usage.retry", providerId: "codex" }],
+    "Dashboard retry must use the single atomic provider retry method",
+  );
+  return { rawInvalidateAbsent: true, retryProvider: "codex" };
+}
+
 async function main() {
   if (!fs.existsSync(path.join(distDir, "dashboard.html"))) {
     throw new Error("dist/renderer/dashboard.html is missing; this QA does not rebuild production assets");
   }
+  verifyStaticServerBoundary();
 
   const { chromium } = require("playwright");
   const { setupMockAgentlasBridge, mockBridgeOptions } = require("./lib/mock-agentlas-bridge.cjs");
@@ -324,6 +434,7 @@ async function main() {
       retry: "다시 시도",
       screenshotName: "07-provider-usage-ipc-error-ko-1440x1100.png",
     });
+    const ordering = await verifyUsageSnapshotOrdering(page);
 
     const panel = page.locator('[data-tour-id="dashboard.llm"]');
     await panel.locator(".dashboard-engine-row").filter({ hasText: "Gemini" })
@@ -367,6 +478,34 @@ async function main() {
     });
     await enContext.close();
 
+    const missingRuntimeContext = await browser.newContext({ viewport: { width: 960, height: 1100 } });
+    await missingRuntimeContext.addInitScript(setupProviderHealthBridge, {
+      setupSource,
+      baseOptions: mockBridgeOptions({ teamRoster: true }),
+      locale: "ko-KR",
+      excludeRuntimeKinds: ["gemini", "grok"],
+    });
+    const missingRuntimePage = await missingRuntimeContext.newPage();
+    missingRuntimePage.setDefaultTimeout(10_000);
+    watchPage(missingRuntimePage, errors);
+    await missingRuntimePage.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
+    const staleReceiptIsolation = await verifyStaleReceiptDoesNotImplyRuntime(missingRuntimePage);
+    await missingRuntimeContext.close();
+
+    const retryContext = await browser.newContext({ viewport: { width: 960, height: 1100 } });
+    await retryContext.addInitScript(setupProviderHealthBridge, {
+      setupSource,
+      baseOptions: mockBridgeOptions({ teamRoster: true }),
+      locale: "ko-KR",
+      codexError: true,
+    });
+    const retryPage = await retryContext.newPage();
+    retryPage.setDefaultTimeout(10_000);
+    watchPage(retryPage, errors);
+    await retryPage.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
+    const atomicProviderRetry = await verifyAtomicProviderRetry(retryPage);
+    await retryContext.close();
+
     const issues = [];
     if (desktopFit.clippedStatuses.length > 0) {
       issues.push(`1440px: ${desktopFit.clippedStatuses.length} provider status labels are visually truncated`);
@@ -394,6 +533,10 @@ async function main() {
         ko: koRecovery,
         en: enRecovery,
       },
+      snapshotOrdering: ordering,
+      staleReceiptIsolation,
+      atomicProviderRetry,
+      staticServerTraversalBlocked: true,
       errors,
       issues,
       screenshots: [

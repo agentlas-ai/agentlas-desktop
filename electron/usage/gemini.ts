@@ -11,7 +11,7 @@ import {
   type GeminiCredentialFile,
 } from "./gemini-credentials";
 import { clearProviderHealth, readProviderHealth, recordProviderHealth } from "./provider-health";
-import { postForm, postJson, toResetMs } from "./util";
+import { normalizeUsageError, postForm, postJson, toResetMs } from "./util";
 
 const CODE_ASSIST = "https://cloudcode-pa.googleapis.com/v1internal";
 // gemini-cli가 배포하는 공개 installed-app OAuth 클라이언트 상수.
@@ -119,16 +119,24 @@ export async function getGeminiUsage(): Promise<ProviderUsage | null> {
         try {
           return await fetchQuota(retryToken, base);
         } catch (err2) {
-          const msg2 = err2 instanceof Error ? err2.message : String(err2);
-          return { ...base, status: "error", windows: [], error: /HTTP 40[13]/.test(msg2) ? "auth_expired" : msg2 };
+          const normalized = normalizeUsageError(err2);
+          return {
+            ...base,
+            status: "error",
+            windows: [],
+            error: normalized.code,
+            ...(normalized.retryAfterSeconds ? { retryAfterSeconds: normalized.retryAfterSeconds } : {}),
+          };
         }
       }
     }
+    const normalized = normalizeUsageError(msg);
     return {
       ...base,
       status: "error",
       windows: [],
-      error: /HTTP 40[13]/.test(msg) ? "auth_expired" : msg,
+      error: normalized.code,
+      ...(normalized.retryAfterSeconds ? { retryAfterSeconds: normalized.retryAfterSeconds } : {}),
     };
   }
 }

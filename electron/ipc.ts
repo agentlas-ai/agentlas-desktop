@@ -221,7 +221,8 @@ import {
   tryRecordFailureEvent,
   tryRecordRunEvent,
 } from "./store/run-events";
-import { getUsageSnapshot, invalidateUsage } from "./usage";
+import { getUsageSnapshot, invalidateUsage, retryUsageProvider } from "./usage";
+import { isUsageRetryProviderId } from "./usage/retry-policy";
 import { listPendingConfirmations } from "./confirm";
 import { addProjectOntologySource, getProjectOntologyStatus } from "./ontology/project-runtime";
 import { getAgentOntologyHubProjection } from "./ontology/agent-hub-projection";
@@ -1256,11 +1257,17 @@ export function registerIpcHandlers(): void {
   });
 
   // ── usage (LLM 엔진 사용량 — 프로바이더 OAuth usage) ─────
-  ipcMain.handle("usage:snapshot", (_e, opts?: { force?: boolean }) => getUsageSnapshot(opts));
-  // 재로그인/재시도 시 렌더러가 명시 무효화 — 낡은 lastResult·429 백오프가 새 토큰 조회를 가리지 않게.
-  ipcMain.handle("usage:invalidate", (_e, providerId?: string) => {
-    invalidateUsage(typeof providerId === "string" && providerId ? providerId : undefined);
-    clearDetectCache();
+  ipcMain.handle("usage:snapshot", (_e, opts?: unknown) => {
+    const force = !!opts && typeof opts === "object" && !Array.isArray(opts)
+      && (opts as { force?: unknown }).force === true;
+    return getUsageSnapshot(force ? { force: true } : undefined);
+  });
+  // Renderer는 임의 invalidate를 할 수 없다. allowlist+main cooldown 아래 대상 Provider만 원자적으로 재시도한다.
+  ipcMain.handle("usage:retry", async (_e, providerId?: unknown) => {
+    if (!isUsageRetryProviderId(providerId)) throw new Error("invalid usage retry provider");
+    const result = await retryUsageProvider(providerId);
+    if (result.attempted) clearDetectCache();
+    return result;
   });
 
   // ── billing (Agentlas Hub 크레딧 — 구독/렌트수익 2계좌 + 일방 전송) ─────

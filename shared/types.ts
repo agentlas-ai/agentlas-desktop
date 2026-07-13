@@ -2720,6 +2720,21 @@ export type UsageProviderStatus =
   | "no_quota" // 연결됐으나 한도 메타 없음
   | "error"; // 조회 실패
 
+/** Renderer/Mobile까지 전달해도 안전한 정규화 오류 코드. Provider 원문 오류는 IPC 경계를 넘지 않는다. */
+export type UsageProviderErrorCode =
+  | "auth_expired"
+  | "credentials_corrupt"
+  | "keychain_blocked"
+  | "quota_exhausted"
+  | "unsupported_client"
+  | "rate_limited"
+  | "network_error"
+  | "provider_error"
+  | "local_estimate";
+
+/** 사용량을 기계 판독할 수 있고 명시 재시도를 지원하는 Provider allowlist. */
+export type UsageRetryProviderId = "claude-code" | "codex" | "gemini" | "grok";
+
 /** 한 LLM 프로바이더의 사용량 스냅샷. */
 export interface ProviderUsage {
   /** "claude-code" | "codex" | "gemini" | "deepseek" | "glm" | "grok" | "pi" | "ollama" */
@@ -2730,14 +2745,23 @@ export interface ProviderUsage {
   windows: UsageWindow[];
   /** 조회 시각(epoch ms). */
   fetchedAt: number;
-  /** status=error일 때 사유(민감정보 없음). */
-  error?: string;
+  /** 정규화된 안전 오류 코드. Provider 응답 원문·URL·로컬 경로는 포함하지 않는다. */
+  error?: UsageProviderErrorCode;
+  /** rate_limited일 때 Provider가 제시한 재시도 대기(초). Renderer는 표시하지 않아도 된다. */
+  retryAfterSeconds?: number;
 }
 
 /** 전체 엔진 사용량 스냅샷 — 대시보드 "엔진 연결·사용량" 모듈이 소비. */
 export interface UsageSnapshot {
   providers: ProviderUsage[];
   fetchedAt: number;
+}
+
+/** Renderer의 단일 Provider 재시도 결과. attempted=false면 main cooldown 안에서 기존 snapshot을 반환했다. */
+export interface UsageRetryResult {
+  snapshot: UsageSnapshot;
+  attempted: boolean;
+  retryAfterMs: number;
 }
 
 /** 확인 요청 — 에이전트가 챗에서 사용자 결정을 기다리는 항목.
@@ -3891,9 +3915,8 @@ export interface AgentlasIpc {
    *  5시간·주간(7일)·모델별·월 크레딧 조회. main에서 60초 캐시; force로 강제 갱신. */
   usage: {
     snapshot: (opts?: { force?: boolean }) => Promise<UsageSnapshot>;
-    /** 재로그인/재시도 직후 캐시(lastResult·429 백오프·감지 캐시) 명시 무효화 — 새 토큰 즉시 반영.
-     *  (구 preload 호환을 위해 optional.) */
-    invalidate?: (providerId?: string) => Promise<void>;
+    /** Provider allowlist와 main-owned cooldown 아래 캐시 무효화+재조회를 원자적으로 수행한다. */
+    retry: (providerId: UsageRetryProviderId) => Promise<UsageRetryResult>;
   };
   /** Agentlas Hub 크레딧 — 구독(사용 가능) 잔액과 렌트수익(이동 가능) 잔액을 함께 조회하고,
    *  렌트수익 → 구독 일방 전송을 수행한다. 세션 쿠키로 Hub HTTP API를 main에서 호출. */
