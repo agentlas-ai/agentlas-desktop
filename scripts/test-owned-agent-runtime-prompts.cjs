@@ -549,7 +549,14 @@ async function main() {
     stormbreakerCoreHarnessExact: true,
   }, null, 2));
 
-  fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  try {
+    fs.rmSync(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+  } catch (error) {
+    // Windows can keep transient Electron/SQLite handles alive until app.exit.
+    // The fixture lives under the runner temp directory and the behavioral
+    // assertions above already passed, so cleanup contention is non-fatal.
+    console.warn(`[owned-runtime-prompts] fixture cleanup deferred to OS temp cleanup: ${error?.code ?? error}`);
+  }
 }
 
 main()
@@ -557,7 +564,7 @@ main()
   .catch((error) => {
     console.error(error);
     try {
-      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     } catch {
       // Best-effort fixture cleanup.
     }
