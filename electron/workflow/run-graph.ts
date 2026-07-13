@@ -193,8 +193,8 @@ function applyTransform(node: WorkflowNode, vars: Record<string, unknown>): void
 }
 
 /**
- * 그래프를 실행한다. 백그라운드 division 챗 + permissions:"write" 패턴을 재사용한다
- * (automation-scheduler.ts와 동일). agent 노드마다 runMcpInvocation을 호출하고, produces를
+ * 그래프를 실행한다. 백그라운드 division 챗 + 자동화에 저장된 read/write 권한을 재사용한다
+ * (automation-scheduler.ts와 동일, full 승격 금지). agent 노드마다 runMcpInvocation을 호출하고, produces를
  * 변수 백에 기록, condition/transform은 인러너로 처리한다.
  *
  * 분기(condition)는 엣지 단위로 처리한다: condition이 drop한 핸들의 엣지를 "blocked"로 표시하고,
@@ -410,7 +410,7 @@ export async function runGraph(
             {
               chatId: nodeChat.id,
               userPrompt: prompt,
-              permissions: "write",
+              permissions: automation.executionPermission === "read" ? "read" : "write",
               borrowAgents: hubBorrowForNode(node),
               mcpBrowserProfileKey: `automation-${automation.id}`,
               toolMode: automation.toolMode ?? "auto",

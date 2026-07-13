@@ -6,6 +6,7 @@ import type {
   BrowserApprovalRequestEvent,
   BugReportInput,
   Automation,
+  AutomationCreateInput,
   FsPathGrant,
   FsReadScope,
   McpInvocationEvent,
@@ -424,7 +425,7 @@ const api: AgentlasIpc = {
   automations: {
     list: () => ipcRenderer.invoke("automations:list"),
     get: (id: string) => ipcRenderer.invoke("automations:get", id),
-    create: (input: Omit<Automation, "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy">) =>
+    create: (input: AutomationCreateInput) =>
       ipcRenderer.invoke("automations:create", input),
     toggle: (id: string, enabled: boolean) =>
       ipcRenderer.invoke("automations:toggle", id, enabled),

@@ -402,6 +402,7 @@ import type {
   AgentRuntimeOverrideScope,
   AgentRuntimeOverrideSetInput,
   Automation,
+  AutomationCreateInput,
   CloudAgentHubPublishRequest,
   CloudAgentPrivateSaveRequest,
   CloudAgentPublishRequest,
@@ -1894,7 +1895,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("automations:list", () => listAutomations());
   ipcMain.handle(
     "automations:create",
-    async (_e, input: Omit<Automation, "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy">) => {
+    async (_e, input: AutomationCreateInput) => {
       const created = createAutomation(input);
       await resyncTriggers();
       return created;

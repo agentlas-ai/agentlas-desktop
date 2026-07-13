@@ -212,6 +212,11 @@ function automationSessionInput(a: Automation): {
   };
 }
 
+/** Scheduler authority is capped at read/write even for malformed legacy objects. */
+function schedulerExecutionPermission(a: Automation): "read" | "write" {
+  return a.executionPermission === "read" ? "read" : "write";
+}
+
 /** 실패 원인을 챗에 표출하고, 아는 원인은 수리하고, 반복 실패는 멈춘다. best-effort. */
 function handleAutomationFailure(a: Automation, error: string): void {
   let doctor: DoctorReport | null = null;
@@ -272,7 +277,7 @@ function handleAutomationFailure(a: Automation, error: string): void {
         runId,
         chatId: chat.id,
         userPrompt: prompt,
-        permissions: "write" as const,
+        permissions: schedulerExecutionPermission(a),
         toolMode: "auto" as const,
         hubMode: a.hubMode ?? "hub-allowed",
       };
@@ -535,7 +540,7 @@ async function runOne(
           runId,
           chatId: chat.id,
           userPrompt: a.promptTemplate,
-          permissions: "write" as const,
+          permissions: schedulerExecutionPermission(a),
           borrowAgents: a.targetType === "hub" ? [a.targetId] : undefined,
           mcpBrowserProfileKey: `automation-${a.id}`,
           toolMode: a.toolMode ?? "auto",

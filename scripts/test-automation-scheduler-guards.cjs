@@ -250,11 +250,19 @@ async function main() {
   ) {
     primaryMode = "failure";
     const triggerOptimizer = async (name) => {
-      const automation = automations.createAutomation(automationInput(name));
+      const automation = automations.createAutomation({
+        ...automationInput(name),
+        executionPermission: "read",
+      });
       const expectedOptimizerIndex = optimizerRuns.length + 1;
       await scheduler.runAutomationNow(automation.id);
       await scheduler.runAutomationNow(automation.id);
       await waitFor(() => optimizerRuns.length >= expectedOptimizerIndex);
+      assert.equal(
+        optimizerRuns[expectedOptimizerIndex - 1].request.permissions,
+        "read",
+        "failure triage must not promote a stored read automation to write",
+      );
       return automation;
     };
 

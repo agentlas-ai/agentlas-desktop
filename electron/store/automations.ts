@@ -13,6 +13,7 @@ import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 import type {
   Automation,
+  AutomationExecutionPermission,
   AutomationHubMode,
   AutomationTargetType,
   WorkflowGraph,
@@ -32,6 +33,7 @@ interface AutomationRow {
   target_type: AutomationTargetType;
   target_id: string;
   prompt_template: string;
+  execution_permission: string | null;
   tool_mode: string | null;
   hub_mode: string | null;
   enabled: number;
@@ -93,6 +95,15 @@ function normalizeHubMode(value: string | null | undefined): AutomationHubMode {
   return value === "hub-first" || value === "local-only" || value === "hub-allowed" ? value : "hub-allowed";
 }
 
+/**
+ * Missing is the deliberate legacy/UI default. Any present-but-invalid value
+ * fails closed to read so malformed IPC or a damaged row cannot gain writes.
+ */
+function normalizeExecutionPermission(value: unknown): AutomationExecutionPermission {
+  if (value === "read" || value === "write") return value;
+  return value == null ? "write" : "read";
+}
+
 function toAutomation(row: AutomationRow): Automation {
   const tz = row.timezone || defaultTz();
   const spec = specFromStored(row.schedule_json ?? row.schedule, tz);
@@ -104,6 +115,7 @@ function toAutomation(row: AutomationRow): Automation {
     targetType: row.target_type,
     targetId: row.target_id,
     promptTemplate: row.prompt_template,
+    executionPermission: normalizeExecutionPermission(row.execution_permission),
     toolMode: normalizeToolMode(row.tool_mode),
     hubMode: normalizeHubMode(row.hub_mode),
     enabled: !!row.enabled,
@@ -167,6 +179,7 @@ export function createAutomation(input: {
   trigger?: Trigger | null;
   toolMode?: AutomationToolMode;
   hubMode?: AutomationHubMode;
+  executionPermission?: AutomationExecutionPermission;
 }): Automation {
   const id = randomUUID();
   const now = new Date();
@@ -191,8 +204,8 @@ export function createAutomation(input: {
       `INSERT INTO automations
          (id, name, schedule, target_type, target_id, prompt_template, enabled, created_by,
           last_run_at, next_run_at, created_at, graph_json, schedule_json, timezone, end_at, max_runs, run_count,
-          trigger_type, trigger_json, tool_mode, hub_mode)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+          trigger_type, trigger_json, tool_mode, hub_mode, execution_permission)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -218,6 +231,7 @@ export function createAutomation(input: {
         targetLabel: input.targetType,
       }),
       normalizeHubMode(input.hubMode),
+      normalizeExecutionPermission(input.executionPermission),
     );
   const automation = getAutomation(id) as Automation;
   emitDesktopStoreChange({ entity: "automation", id });
@@ -246,6 +260,10 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
     targetLabel: targetType,
   });
   const hubMode = normalizeHubMode(patch.hubMode ?? row.hub_mode);
+  const executionPermission =
+    patch.executionPermission === undefined
+      ? normalizeExecutionPermission(row.execution_permission)
+      : normalizeExecutionPermission(patch.executionPermission);
   const timezone = patch.timezone !== undefined ? patch.timezone : row.timezone;
   const tz = timezone || defaultTz();
   const scheduleJson =
@@ -268,7 +286,7 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
   db.prepare(
     `UPDATE automations SET
        name = ?, schedule = ?, target_type = ?, target_id = ?, prompt_template = ?,
-       tool_mode = ?, hub_mode = ?,
+       tool_mode = ?, hub_mode = ?, execution_permission = ?,
        schedule_json = ?, timezone = ?, end_at = ?, max_runs = ?, trigger_type = ?, trigger_json = ?,
        next_run_at = ?
      WHERE id = ?`,
@@ -280,6 +298,7 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
     promptTemplate,
     toolMode,
     hubMode,
+    executionPermission,
     scheduleJson,
     tz,
     endAt,

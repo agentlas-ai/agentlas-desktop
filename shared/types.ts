@@ -931,6 +931,8 @@ export interface AutomationRunRecord {
 
 export type AutomationToolMode = "auto" | "browser" | "computer-use";
 export type AutomationHubMode = "hub-allowed" | "hub-first" | "local-only";
+/** Scheduler authority is intentionally capped below interactive `full` access. */
+export type AutomationExecutionPermission = "read" | "write";
 export type AutomationTargetType = "agent" | "firm" | "hub";
 
 // ── Browser 기능 (자격증명 볼트 · 전용 프로필 · 승인 게이트 · 로그) ──
@@ -999,6 +1001,8 @@ export interface Automation {
   toolMode?: AutomationToolMode;
   /** 로컬 도구만 쓸지, Agentlas Hub 후보까지 빌려 쓸지. */
   hubMode?: AutomationHubMode;
+  /** 예약 실행 권한. 스케줄러는 read/write만 허용하며 full로 승격하지 않는다. */
+  executionPermission: AutomationExecutionPermission;
   enabled: boolean;
   /** 'user'(폼에서 사람이 생성) | 'agent'(채팅에서 에이전트가 `## Automation` 블록으로 생성) */
   createdBy: "user" | "agent";
@@ -1018,6 +1022,17 @@ export interface Automation {
   trigger?: Trigger | null;
 }
 
+/**
+ * 신규/기존 UI는 권한 필드를 보내지 않아도 기존 동작(write)을 유지한다.
+ * 저장 후 반환되는 Automation에는 정규화된 executionPermission이 항상 존재한다.
+ */
+export type AutomationCreateInput = Omit<
+  Automation,
+  "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy" | "executionPermission"
+> & {
+  executionPermission?: AutomationExecutionPermission;
+};
+
 /** 기존 자동화 편집 패치(설계 한계 #7 — 삭제-재생성 대신 in-place 수정). */
 export interface AutomationUpdatePatch {
   name?: string;
@@ -1027,6 +1042,7 @@ export interface AutomationUpdatePatch {
   promptTemplate?: string;
   toolMode?: AutomationToolMode;
   hubMode?: AutomationHubMode;
+  executionPermission?: AutomationExecutionPermission;
   scheduleJson?: string | null;
   timezone?: string | null;
   endAt?: string | null;
@@ -4272,7 +4288,7 @@ export interface AgentlasIpc {
   automations: {
     list: () => Promise<Automation[]>;
     get: (id: string) => Promise<Automation | null>;
-    create: (input: Omit<Automation, "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy">) => Promise<Automation>;
+    create: (input: AutomationCreateInput) => Promise<Automation>;
     toggle: (id: string, enabled: boolean) => Promise<Automation>;
     remove: (id: string) => Promise<void>;
     /** 기존 자동화의 이름/스케줄/타깃/프롬프트/트리거를 갱신(삭제-재생성 회피, 설계 한계 #7). */
