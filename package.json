@@ -166,6 +166,7 @@
     "test:prompts-start-failure-ui": "npm run build:renderer && node scripts/test-prompts-start-failure-ui.cjs",
     "test:settings-resilience-ui": "npm run build:renderer && node scripts/test-settings-resilience-ui.cjs",
     "test:mobile-bridge-contract": "npm run build:electron && electron scripts/test-mobile-bridge-contract.cjs",
+    "test:mobile-read-boundary": "npm run build:electron && electron scripts/test-mobile-read-boundary.cjs",
     "test:mobile-ontology-bridge": "npm run build:electron && electron scripts/test-mobile-ontology-bridge.cjs",
     "test:generated-app-chat-routing": "node scripts/test-generated-app-chat-routing.cjs",
     "test:borrowed-task-force": "npm run build:electron && electron scripts/test-borrowed-task-force.cjs && electron scripts/test-borrowed-agent-fail-closed.cjs",

@@ -558,6 +558,12 @@ function automationFinalSummary(items: AutomationRegistrationResult[], locale: "
     : [`Set up ${items.length} automation${items.length === 1 ? "" : "s"}.`, ...lines, "You can review it in Automations."].join("\n");
 }
 
+function automationPermissionRequiredText(locale: "ko" | "en"): string {
+  return locale === "ko"
+    ? "자동화는 저장하지 않았습니다. 쓰기 권한으로 다시 실행하세요."
+    : "Automation was not saved. Run again with write permission.";
+}
+
 function appendAutomationSummary(text: string, summary: string): string {
   const trimmed = text.trim();
   if (!summary.trim()) return trimmed;
@@ -613,6 +619,13 @@ export async function runMcpInvocation(
   // site generation, legacy scripts) still receive one internal identity so their
   // content-free memory curation receipts are not silently lost.
   if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
+  // Every caller, including legacy/direct integrations, crosses the same
+  // fail-closed boundary. Unknown or omitted permission is read-only.
+  const normalizedPermission = req.permissions === "write" || req.permissions === "full"
+    ? req.permissions
+    : "read";
+  if (req.permissions !== normalizedPermission) req = { ...req, permissions: normalizedPermission };
+  const canWrite = normalizedPermission === "write" || normalizedPermission === "full";
   const callerSink = sink;
   let runtimeAgentId: string | undefined;
   let finalTextFromSink = "";
@@ -732,7 +745,9 @@ export async function runMcpInvocation(
   const existingWorkingFolder = getChatWorkingFolder(chat.id);
   const projectWorkingFolder = chat.projectId ? getProject(chat.projectId)?.folderPath ?? null : null;
   const inferredWorkingFolder =
-    existingWorkingFolder || projectWorkingFolder ? null : inferWorkingFolderFromPrompt(req.userPrompt);
+    !canWrite || existingWorkingFolder || projectWorkingFolder
+      ? null
+      : inferWorkingFolderFromPrompt(req.userPrompt);
   if (inferredWorkingFolder) setChatWorkingFolder(chat.id, inferredWorkingFolder);
   const targetAppWorkingFolder = targetApp ? path.resolve(targetApp.rootPath) : null;
   const workingFolder = targetAppWorkingFolder ?? existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
@@ -881,7 +896,7 @@ export async function runMcpInvocation(
   let mcpRuntimeEnv: Record<string, string> | undefined;
   let mcpAutoSelectionPrompt = "";
   const runtimeCanUseMcp = active.kind === "claude-code" || active.kind === "codex";
-  if (runtimeCanUseMcp) {
+  if (runtimeCanUseMcp && canWrite) {
     try {
       const selectedContext = await autoSelectMcpTools({
         userPrompt: effectiveUserPrompt,
@@ -1188,7 +1203,7 @@ export async function runMcpInvocation(
   // 시스템 프롬프트에 주입한다. 폴더가 없거나 아직 활성 전이면 전역 메모리를 주입.
   // 채팅별 폴더가 없으면 프로젝트의 작업 폴더(folderPath)를 기본 cwd로 사용한다.
   let activePath: string | null = null;
-  if (workingFolder) {
+  if (canWrite && workingFolder) {
     try {
       const visit = recordFolderVisit(workingFolder);
       if (visit.activated) activePath = workingFolder;
@@ -1292,7 +1307,7 @@ export async function runMcpInvocation(
     systemPrompt = `${systemPrompt}\n\n${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`;
   }
   // 사용자 채팅에서만 자동화 생성 protocol 주입 (백그라운드 automation 실행 세션은 제외 → 재귀 방지)
-  if (chat.kind !== "division") systemPrompt = `${systemPrompt}\n\n${AUTOMATION_PROTOCOL}`;
+  if (chat.kind !== "division" && canWrite) systemPrompt = `${systemPrompt}\n\n${AUTOMATION_PROTOCOL}`;
 
   const history = listChatMessages(chat.id, 80);
 
@@ -1301,7 +1316,7 @@ export async function runMcpInvocation(
   if (history.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
 
   sink({ kind: "thinking", status: tStatus(locale, "thinking", { agent: agent.name }) });
-  if (chat.kind !== "division" && isAutomationSetupRequest(req.userPrompt)) {
+  if (chat.kind !== "division" && canWrite && isAutomationSetupRequest(req.userPrompt)) {
     sink({ kind: "partial", text: automationLivePrelude(locale) });
   }
 
@@ -1426,7 +1441,7 @@ export async function runMcpInvocation(
     // continuousMode는 안전 상한(20,000턴)이 사실상 안 걸리므로 정상적으론 이 분기에 안 들어온다.
     // 혹시라도 상한에 닿았는데 아직 할 일이 있다고 하면(진짜 폭주 등) 작업을 잃지 않도록 기존
     // 백그라운드 30분 자동화로 안전하게 이어받는다.
-    if (stormbreakerContinueRequested && chat.kind !== "division") {
+    if (stormbreakerContinueRequested && chat.kind !== "division" && canWrite) {
       const marker = `Source chat: ${chat.id}`;
       const existingContinuation = listAutomations().find(
         (automation) => automation.enabled && automation.promptTemplate.includes(marker),
@@ -1481,6 +1496,7 @@ export async function runMcpInvocation(
     // 에이전트가 "## Automation" 블록을 넣었으면 → 현재 chat의 타깃(firm/agent)으로 자동화 등록 + 블록 제거.
     // (백그라운드 automation 실행 세션은 제외 → 자동화가 자동화를 만드는 재귀 방지)
     const automationRegistrations: AutomationRegistrationResult[] = [];
+    let automationPermissionRequired = false;
     if (chat.kind !== "division") {
       try {
         const { automations: autos, cleanedText, errors } = parseAutomations(displayText);
@@ -1488,7 +1504,17 @@ export async function runMcpInvocation(
           // 조용히 드롭하지 않고 표면화(설계 §2.5) — 로그로 남겨 진단 가능하게.
           console.warn("[automation] parse warnings:", errors.join("; "));
         }
-        if (autos.length > 0) {
+        if (autos.length > 0 && !canWrite) {
+          automationPermissionRequired = true;
+          sink({
+            kind: "tool-use",
+            tool: {
+              name: "automation.permission-required",
+              args: JSON.stringify({ requested: autos.length, requiredPermission: "write" }),
+              result: automationPermissionRequiredText(locale),
+            },
+          });
+        } else if (autos.length > 0) {
           sink({
             kind: "tool-use",
             status:
@@ -1497,7 +1523,7 @@ export async function runMcpInvocation(
                 : `Setting up ${autos.length} automation${autos.length === 1 ? "" : "s"}`,
           });
         }
-        for (const a of autos) {
+        for (const a of canWrite ? autos : []) {
           // 모델이 "agent" 필드로 실행 주체를 지정하면 설치 에이전트로 해석(id → slug → 표시명).
           // 미지정/미해석이면 기존처럼 현재 챗 타깃 — 오케스트레이터 챗에서 만든 자동화가 항상
           // 오케스트레이터에 묶여 매 실행 라우팅 홉을 타던 문제의 수정.
@@ -1593,6 +1619,9 @@ export async function runMcpInvocation(
     }
     if (automationRegistrations.length > 0) {
       displayText = appendAutomationSummary(displayText, automationFinalSummary(automationRegistrations, locale));
+    }
+    if (automationPermissionRequired) {
+      displayText = appendAutomationSummary(displayText, automationPermissionRequiredText(locale));
     }
     try {
       let surfaceParse = parseSurfaces(displayText);
