@@ -111,11 +111,12 @@ function writeFile(filePath, body) {
 
     const beforeJunkFirmCount = listFirms().length;
     const junkRoot = path.join(tempDir, "trash");
+    writeFile(path.join(junkRoot, "AGENT.md"), "# Trash Agent\n\nA valid root definition for the loose-agent guard.\n");
     writeFile(path.join(junkRoot, "alpha", "AGENT.md"), "# Alpha\n\nFirst loose agent.\n");
     writeFile(path.join(junkRoot, "beta", "AGENT.md"), "# Beta\n\nSecond loose agent.\n");
     const junk = await importLocalFolder(junkRoot);
     assert.equal(junk.kind, "agent", "junk container folders must not become teams without explicit team markers");
-    assert.equal(junk.agent.name, "Unnamed (trash)");
+    assert.equal(junk.agent.name, "Trash Agent");
     assert.equal(listFirms().length, beforeJunkFirmCount, "junk container import must not create a firm");
 
     console.log(

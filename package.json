@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.8.12",
+  "version": "0.8.13",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -171,7 +171,7 @@
     "test:telegram-api-timeout": "npm run build:electron && electron scripts/test-telegram-api-timeout.cjs",
     "test:telegram-automation-report-fanout": "npm run build:electron && electron scripts/test-telegram-automation-report-fanout.cjs",
     "test:startup-founder-new-idea": "npm run build && node scripts/test-startup-founder-new-idea.cjs",
-    "test:site-studio": "npm run build:electron && node scripts/test-site-studio-tagging.cjs && node scripts/test-site-studio-edit.cjs && node scripts/test-site-studio-overlay.cjs && electron scripts/test-site-studio-store.cjs && electron scripts/test-site-workspace-handoff.cjs",
+    "test:site-studio": "npm run build:electron && node scripts/test-site-studio-tagging.cjs && node scripts/test-site-studio-edit.cjs && node scripts/test-site-studio-overlay.cjs && node scripts/test-site-agent-app-astryx.cjs && electron scripts/test-site-studio-store.cjs && electron scripts/test-site-workspace-handoff.cjs",
     "test:automations-store": "npm run build:electron && electron scripts/test-automations-store.cjs",
     "test:automation-trigger-safety": "npm run build:electron && electron scripts/test-automation-trigger-safety.cjs",
     "test:automation-scheduler-guards": "npm run build:electron && electron scripts/test-automation-scheduler-guards.cjs",
