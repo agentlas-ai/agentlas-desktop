@@ -57,6 +57,10 @@ function uid(): string {
   return Math.random().toString(36).slice(2);
 }
 
+function isInternalLoopStatus(value: string): boolean {
+  return /stormbreaker\s+loop|루프\s*stormbreaker|scope-lock|verifier-first|agentlas\s*오케스트레이터/i.test(value);
+}
+
 function normalizeHiredAgentCards(cards: HiredAgentCard[]): HiredAgentCard[] {
   const bySlug = new Map<string, HiredAgentCard>();
   for (const card of cards) {
@@ -1132,6 +1136,13 @@ function ChatPage() {
         const status = ev.status?.trim();
         if (!status || status === lastStatusRef.text) return;
         lastStatusRef.text = status;
+        // Stormbreaker supervisor receipts belong in the engine journal, not
+        // in an ordinary user's chat transcript. Keep the run visibly active
+        // without exposing scope-lock/route plumbing as assistant content.
+        if (isInternalLoopStatus(status)) {
+          markWorkflowActive(locale === "ko" ? "처리 중" : "Working");
+          return;
+        }
         pushWorkflow("status", status);
         setMessages((m) =>
           m.map((msg) =>
