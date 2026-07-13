@@ -63,8 +63,8 @@ jobs:
           HEPHAESTUS_PYTHON: python
           AGENTLAS_HARNESS_PROOF_PATH: ${{ runner.temp }}/desktop-harness-proof.json
         run: |
-          xvfb-run -a npx electron scripts/test-stormbreaker-core-harness.cjs --installed
-          xvfb-run -a npx electron scripts/test-owned-agent-runtime-prompts.cjs
+          xvfb-run -a npx electron --no-sandbox scripts/test-stormbreaker-core-harness.cjs --installed
+          xvfb-run -a npx electron --no-sandbox scripts/test-owned-agent-runtime-prompts.cjs
       - name: Verify installed Core on macOS and Windows
         if: runner.os != 'Linux'
         working-directory: agentlas-desktop
