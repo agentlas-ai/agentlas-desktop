@@ -884,6 +884,7 @@ export class OntologyHubClient {
           accept: "application/json",
           "content-type": "application/json",
           cookie,
+          origin: new URL(this.baseUrl).origin,
           ...extraHeaders,
         },
         body: JSON.stringify(body),

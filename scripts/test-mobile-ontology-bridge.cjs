@@ -303,6 +303,7 @@ function response(status, payload) {
       bindings: [bindingA, bindingB],
     });
     assert.equal(lastRequest.init.headers.cookie, "agentlas_session=abcdefghijklmnop");
+    assert.equal(lastRequest.init.headers.origin, "http://127.0.0.1");
     const liveJson = JSON.stringify(live);
     for (const forbidden of [
       "workspaceId", "userId", "localPath", "systemPrompt", "mcpCommand",
