@@ -169,6 +169,7 @@ assert.match(
 for (const stepName of [
   "Verify installed Core on macOS and Windows",
   "Verify Agent App MCP boundary on Linux",
+  "Verify Agent App MCP boundary on macOS and Windows",
   "Build and verify packaged Agent App MCP boundary",
 ]) {
   const escaped = stepName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -187,6 +188,16 @@ assert.doesNotMatch(
   crossPlatformHarness,
   /name: Verify Agent App MCP boundary on Linux[\s\S]{0,250}npm run test:agent-app-runtime:prepared/,
   "the Linux Agent App gate must not hide Electron flags behind the generic prepared script",
+);
+assert.match(
+  crossPlatformHarness,
+  /name: Verify Agent App MCP boundary on macOS and Windows[\s\S]{0,1500}npx --no-install electron scripts\/test-site-agent-app-runtime\.cjs/,
+  "the macOS/Windows Agent App gate must invoke every Electron contract directly through Git Bash",
+);
+assert.doesNotMatch(
+  crossPlatformHarness,
+  /name: Verify Agent App MCP boundary on macOS and Windows[\s\S]{0,250}npm run test:agent-app-runtime:prepared/,
+  "the macOS/Windows Agent App gate must not leave Electron under the PowerShell/npm wrapper",
 );
 assert.match(
   crossPlatformHarness,

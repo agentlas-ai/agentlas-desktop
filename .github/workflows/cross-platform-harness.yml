@@ -169,7 +169,16 @@ jobs:
       - name: Verify Agent App MCP boundary on macOS and Windows
         if: runner.os != 'Linux'
         working-directory: agentlas-desktop
-        run: npm run test:agent-app-runtime:prepared
+        shell: bash
+        run: |
+          node scripts/test-site-agent-app-isolation.cjs
+          npx --no-install electron scripts/test-site-agent-app-capabilities.cjs
+          npx --no-install electron scripts/test-site-agent-app-mcp-consent.cjs
+          npx --no-install electron scripts/test-site-agent-app-prebuild-mcp.cjs
+          npx --no-install electron scripts/test-site-agent-app-claude-runtime-isolation.cjs
+          npx --no-install electron scripts/test-site-agent-app-firm-isolation.cjs
+          npx --no-install electron scripts/test-site-agent-app-group-isolation.cjs
+          npx --no-install electron scripts/test-site-agent-app-runtime.cjs
       - name: Build and verify packaged Agent App MCP boundary
         working-directory: agentlas-desktop
         shell: bash
