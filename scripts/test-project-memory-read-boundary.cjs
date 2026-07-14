@@ -11,6 +11,37 @@ app.setPath("userData", path.join(tmp, "user-data"));
 app.setPath("home", path.join(tmp, "home"));
 process.env.AGENTLAS_STORE_PATH = path.join(tmp, "agentlas.sqlite");
 
+function closeFixtureStore() {
+  try {
+    require("../dist/electron/store/db.js").getDb().close();
+  } catch {
+    // The store may not have opened when an earlier assertion failed.
+  }
+}
+
+function cleanupFixture() {
+  closeFixtureStore();
+  try {
+    fs.rmSync(tmp, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === "win32" ? 8 : 2,
+      retryDelay: 125,
+    });
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error
+      ? String(error.code)
+      : "";
+    if (process.platform === "win32" && ["EBUSY", "EPERM"].includes(code)) {
+      // Electron can retain an OS-owned userData handle until app.exit(). The
+      // fixture already closed SQLite; Windows temp cleanup can finish it.
+      console.warn(`[project-memory-read] fixture cleanup deferred to Windows temp cleanup: ${code}`);
+      return;
+    }
+    throw error;
+  }
+}
+
 function snapshotTree(root) {
   const rows = [];
   const visit = (current) => {
@@ -358,12 +389,12 @@ async function main() {
     "folder identity needs a Windows-safe replacement signal when inode is unavailable");
 
   console.log("activated project memory read-only boundary ok");
-  fs.rmSync(tmp, { recursive: true, force: true });
+  cleanupFixture();
   app.quit();
 }
 
 main().catch((error) => {
   console.error(error);
-  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+  try { cleanupFixture(); } catch { /* best effort */ }
   app.exit(1);
 });

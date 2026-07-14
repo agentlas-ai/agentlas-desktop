@@ -168,6 +168,7 @@ assert.match(
 );
 for (const stepName of [
   "Verify installed Core on macOS and Windows",
+  "Verify Agent App MCP boundary on Linux",
   "Build and verify packaged Agent App MCP boundary",
 ]) {
   const escaped = stepName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -177,6 +178,16 @@ for (const stepName of [
     `${stepName} must fail fast under Git Bash on Windows`,
   );
 }
+assert.match(
+  crossPlatformHarness,
+  /name: Verify Agent App MCP boundary on Linux[\s\S]{0,1500}npx --no-install electron --no-sandbox scripts\/test-site-agent-app-runtime\.cjs/,
+  "the Linux Agent App gate must execute every Electron contract without the unavailable SUID sandbox",
+);
+assert.doesNotMatch(
+  crossPlatformHarness,
+  /name: Verify Agent App MCP boundary on Linux[\s\S]{0,250}npm run test:agent-app-runtime:prepared/,
+  "the Linux Agent App gate must not hide Electron flags behind the generic prepared script",
+);
 assert.match(
   crossPlatformHarness,
   /if: runner\.os == 'macOS'[\s\S]{0,500}npx --no-install electron-builder --dir --publish never --config electron-builder\.mac-stable\.yml[\s\S]{0,500}npm run test:packaged-agent-app-mcp/,
