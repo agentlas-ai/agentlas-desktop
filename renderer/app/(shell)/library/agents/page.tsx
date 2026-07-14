@@ -3316,6 +3316,11 @@ function ExperiencePanel({
                             : (ko ? "로컬 자료는 그대로입니다. Hub 상태를 다시 확인한 뒤 재시도하세요." : "Local material is intact. Refresh the Hub status before retrying.")
                           : latestCloud.errorMessage || (ko ? "Hub에 안전하게 저장되었습니다." : "Saved safely to Hub.")}
                     </span>
+                    {latestCloud.state === "conflict" && latestCloud.errorCode === "private_base_visibility_mismatch" ? (
+                      <Link href="/cloud" style={{ display: "inline-flex", marginTop: 8, color: "var(--accent)", fontSize: 11.5, fontWeight: 800 }}>
+                        {ko ? "원본 에이전트 공개 등록하기 →" : "Publish the base agent →"}
+                      </Link>
+                    ) : null}
                   </div>
                 ) : (
                   <small style={{ display: "block", marginTop: 9, color: "var(--muted-deep)" }}>{ko ? "아직 Cloud로 보낸 경험이 없습니다. 로컬 경험은 그대로 실행에 쓸 수 있습니다." : "No Experience has been sent to Cloud. The local Experience remains usable."}</small>

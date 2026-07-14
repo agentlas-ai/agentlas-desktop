@@ -133,6 +133,9 @@ async function main() {
     await cloudStatus.waitFor({ timeout: 15_000 });
     assert.equal(await cloudStatus.getAttribute("data-cloud-state"), "conflict");
     await cloudStatus.getByText("이 경험을 판매하려면 먼저 원본 에이전트를 Hub에 공개 등록해야 합니다.", { exact: false }).waitFor();
+    const publishBaseLink = cloudStatus.getByRole("link", { name: "원본 에이전트 공개 등록하기 →", exact: true });
+    await publishBaseLink.waitFor();
+    assert.equal(await publishBaseLink.getAttribute("href"), "/cloud");
 
     await publicCopy.screenshot({ path: path.join(output, "01-approved-buyer-copy.png") });
     await cloudStatus.screenshot({ path: path.join(output, "02-private-base-listing-guard.png") });
