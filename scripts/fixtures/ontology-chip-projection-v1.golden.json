@@ -12,7 +12,7 @@
       "kind": "operational",
       "displayName": "Render Recovery",
       "summary": "Recovers a failed render with a verified portable sequence.",
-      "version": "2.0.0",
+      "version": "1.0.659880108",
       "verification": "verified",
       "labels": ["video", "failure-recovery"],
       "evidenceLabel": "3 reproduced outcome receipts",

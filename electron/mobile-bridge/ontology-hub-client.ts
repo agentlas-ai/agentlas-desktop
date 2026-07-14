@@ -134,6 +134,13 @@ function revision(value: unknown, label: string): string {
   return value;
 }
 
+function portableVersion(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._+\-]{0,39}$/.test(value)) {
+    throw new ContractError("version must be a portable release label.");
+  }
+  return value;
+}
+
 function safeText(value: unknown, label: string, max = 600): string {
   if (typeof value !== "string" || value.length < 1 || value.length > max) {
     throw new ContractError(`${label} must be 1-${max} characters.`);
@@ -266,7 +273,7 @@ function decodeChip(value: unknown, expectedKind: MobileBridgeOntologyChipKind):
     kind,
     displayName: safeText(row.displayName, "displayName", 120),
     summary: safeText(row.summary, "summary", 600),
-    version: safeText(row.version, "version", 40),
+    version: portableVersion(row.version),
     verification,
     labels: textArray(row.labels, "labels", 16),
     evidenceLabel: safeText(row.evidenceLabel, "evidenceLabel", 160),
