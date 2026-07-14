@@ -443,6 +443,7 @@ export async function signInWithGoogle(parent: BrowserWindow | null): Promise<Au
 export async function signInWithBrowser(): Promise<AuthSession> {
   return new Promise<AuthSession>((resolve) => {
     let settled = false;
+    let acceptingCallback = true;
     const finish = (session: AuthSession, server?: http.Server) => {
       if (settled) return;
       settled = true;
@@ -467,6 +468,12 @@ export async function signInWithBrowser(): Promise<AuthSession> {
         return;
       }
       const value = url.searchParams.get("session") ?? url.searchParams.get("token") ?? "";
+      if (value && !acceptingCallback) {
+        res.writeHead(409, { "content-type": "text/plain; charset=utf-8" });
+        res.end("sign-in callback already accepted");
+        return;
+      }
+      if (value) acceptingCallback = false;
       res.writeHead(value ? 200 : 400, { "content-type": "text/html; charset=utf-8" });
       res.end(callbackHtml(!!value));
       if (!value) return;

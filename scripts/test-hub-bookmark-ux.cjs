@@ -56,6 +56,11 @@ assert.match(authMain, /onAuthSessionInvalidated/, "silent auth loss needs a mai
 assert.match(authMain, /invalidateCachedSession\("server-invalid"\)/, "server rejection must emit the auth boundary");
 assert.match(authMain, /invalidateCachedSession\("expired"\)/, "TTL expiry must emit the auth boundary");
 assert.match(
+  authMain,
+  /if \(value && !acceptingCallback\)[\s\S]{0,260}if \(value\) acceptingCallback = false/,
+  "browser login must accept exactly one loopback token before asynchronous persistence can race",
+);
+assert.match(
   electronMain,
   /onAuthSessionInvalidated\([\s\S]{0,260}failCloseActiveHubBookmarks\(\);[\s\S]{0,180}broadcastHubBookmarkSnapshot\(\);[\s\S]{0,180}broadcastSignedOutSession\(\)/,
   "silent auth loss must fail-close and replace the mounted account slice immediately",
