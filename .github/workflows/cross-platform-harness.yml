@@ -128,14 +128,14 @@ jobs:
           HEPHAESTUS_PYTHON: python
           AGENTLAS_HARNESS_PROOF_PATH: ${{ runner.temp }}/desktop-harness-proof.json
         run: |
-          xvfb-run -a npx electron --no-sandbox scripts/test-stormbreaker-core-harness.cjs --installed
-          xvfb-run -a npx electron --no-sandbox scripts/test-owned-agent-runtime-prompts.cjs
-          xvfb-run -a npx electron --no-sandbox scripts/test-project-bootstrap-desktop.cjs
-          xvfb-run -a npx electron --no-sandbox scripts/test-project-bootstrap-core.cjs
-          xvfb-run -a npx electron --no-sandbox scripts/test-project-memory-read-boundary.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-stormbreaker-core-harness.cjs --installed
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-owned-agent-runtime-prompts.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-project-bootstrap-desktop.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-project-bootstrap-core.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-project-memory-read-boundary.cjs
           node scripts/test-codex-model-discovery.cjs
-          xvfb-run -a npx electron --no-sandbox scripts/test-workload-routing.cjs
-          xvfb-run -a npx electron --no-sandbox scripts/test-build-workload-routing.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-workload-routing.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-build-workload-routing.cjs
       - name: Verify installed Core on macOS and Windows
         if: runner.os != 'Linux'
         working-directory: agentlas-desktop
@@ -145,14 +145,14 @@ jobs:
           HEPHAESTUS_PYTHON: python
           AGENTLAS_HARNESS_PROOF_PATH: ${{ runner.temp }}/desktop-harness-proof.json
         run: |
-          npx electron scripts/test-stormbreaker-core-harness.cjs --installed
-          npx electron scripts/test-owned-agent-runtime-prompts.cjs
-          npx electron scripts/test-project-bootstrap-desktop.cjs
-          npx electron scripts/test-project-bootstrap-core.cjs
-          npx electron scripts/test-project-memory-read-boundary.cjs
+          npx --no-install electron scripts/test-stormbreaker-core-harness.cjs --installed
+          npx --no-install electron scripts/test-owned-agent-runtime-prompts.cjs
+          npx --no-install electron scripts/test-project-bootstrap-desktop.cjs
+          npx --no-install electron scripts/test-project-bootstrap-core.cjs
+          npx --no-install electron scripts/test-project-memory-read-boundary.cjs
           node scripts/test-codex-model-discovery.cjs
-          npx electron scripts/test-workload-routing.cjs
-          npx electron scripts/test-build-workload-routing.cjs
+          npx --no-install electron scripts/test-workload-routing.cjs
+          npx --no-install electron scripts/test-build-workload-routing.cjs
       - name: Verify Agent App MCP boundary on Linux
         if: runner.os == 'Linux'
         working-directory: agentlas-desktop

@@ -141,6 +141,11 @@ const crossPlatformHarness = fs.readFileSync(
   path.join(root, ".github", "workflows", "cross-platform-harness.yml"),
   "utf8",
 );
+assert.doesNotMatch(
+  crossPlatformHarness,
+  /\bnpx (?:electron|electron-builder)\b/,
+  "the 3OS harness must not fetch missing Electron executables from the registry",
+);
 for (const guardedPath of [
   "electron/runtime/claude-code.ts",
   "electron/runtime/env-resolver.ts",
