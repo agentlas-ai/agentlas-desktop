@@ -4,38 +4,20 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const http = require("node:http");
+const { gzipSync } = require("node:zlib");
+const crossSpawn = require("cross-spawn");
 const { app } = require("electron");
 
 const root = path.join(__dirname, "..");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-site-prebuild-mcp-"));
-const globalRoot = path.join(tmp, "desktop-global-mcp");
 process.env.AGENTLAS_E2E = "1";
-process.env.AGENTLAS_E2E_SYSTEM_TIME_ROOT = globalRoot;
 process.env.AGENTLAS_STORE_PATH = path.join(tmp, "agentlas.sqlite");
 app.setPath("userData", path.join(tmp, "user-data"));
 
-function runMaterializerChild(modulePath, targetRoot) {
+function runOversizedRequest(serverArgs) {
   return new Promise((resolve, reject) => {
-    const script = [
-      `process.env.AGENTLAS_E2E="1"`,
-      `process.env.AGENTLAS_E2E_SYSTEM_TIME_ROOT=${JSON.stringify(targetRoot)}`,
-      `require(${JSON.stringify(modulePath)}).materializeSystemTimeMcpServer()`,
-    ].join(";");
-    const child = spawn(process.execPath, ["-e", script], {
-      cwd: root,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-    child.once("error", reject);
-    child.once("close", (code) => code === 0 ? resolve() : reject(new Error(stderr || `materializer exited ${code}`)));
-  });
-}
-
-function runOversizedRequest(serverPath) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [serverPath], {
+    const child = spawn(process.execPath, serverArgs, {
       cwd: root,
       env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
       stdio: ["pipe", "ignore", "pipe"],
@@ -46,9 +28,9 @@ function runOversizedRequest(serverPath) {
   });
 }
 
-function runManySmallRequests(serverPath) {
+function runManySmallRequests(serverArgs) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [serverPath], {
+    const child = spawn(process.execPath, serverArgs, {
       cwd: root,
       env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
       stdio: ["pipe", "ignore", "pipe"],
@@ -62,6 +44,92 @@ function runManySmallRequests(serverPath) {
   });
 }
 
+function runInlineServer(serverArgs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, serverArgs, {
+      cwd: root,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    child.once("error", reject);
+    child.once("close", (code) => resolve(code));
+  });
+}
+
+async function verifyDefaultMcpFailureIsolation(registry) {
+  const registryPath = require.resolve("../dist/electron/mcp-tools/registry.js");
+  const browserPath = require.resolve("../dist/electron/mcp-tools/browser-cdp-launcher.js");
+  const defaultsPath = require.resolve("../dist/electron/mcp-tools/defaults.js");
+  const registryExports = require(registryPath);
+  const browserExports = require(browserPath);
+  const original = {
+    listInstalledServers: registryExports.listInstalledServers,
+    installFromCatalog: registryExports.installFromCatalog,
+    materializeBrowserCdpLauncher: browserExports.materializeBrowserCdpLauncher,
+    consoleError: console.error,
+  };
+  const attempted = [];
+  try {
+    registryExports.listInstalledServers = () => [];
+    registryExports.installFromCatalog = (catalogId) => {
+      attempted.push(catalogId);
+      if (catalogId === "hephaestus-network") throw new Error("fixture first plugin failure");
+      return { catalogId };
+    };
+    browserExports.materializeBrowserCdpLauncher = () => { throw new Error("fixture browser launcher failure"); };
+    console.error = () => {};
+    delete require.cache[defaultsPath];
+    const defaults = require(defaultsPath);
+    defaults.ensureDefaultMcpPluginsInstalled();
+    assert.deepEqual(attempted, [...defaults.DEFAULT_MCP_CATALOG_IDS],
+      "one launcher/plugin failure must not starve later global MCP defaults");
+    assert.ok(attempted.includes("agentlas-time"), "System Time must still seed after earlier failures");
+  } finally {
+    registryExports.listInstalledServers = original.listInstalledServers;
+    registryExports.installFromCatalog = original.installFromCatalog;
+    browserExports.materializeBrowserCdpLauncher = original.materializeBrowserCdpLauncher;
+    console.error = original.consoleError;
+    delete require.cache[defaultsPath];
+  }
+  assert.equal(registryExports, registry, "failure-isolation test must patch the live registry module only");
+}
+
+function verifyWindowsCmdInlineConfigRoundTrip(inlineConfig) {
+  const conservativeEscapedChars = inlineConfig.length * 2 + 1_024;
+  assert.ok(conservativeEscapedChars < 8_191,
+    "inline config must leave a conservative Windows cmd.exe argument budget");
+  if (process.platform !== "win32") return Promise.resolve();
+  const shimDir = path.join(tmp, "windows-cmd-roundtrip");
+  const output = path.join(shimDir, "args.json");
+  fs.mkdirSync(shimDir, { recursive: true });
+  fs.writeFileSync(path.join(shimDir, "capture.cjs"),
+    'require("node:fs").writeFileSync(process.argv[2],JSON.stringify(process.argv.slice(3)));\n');
+  const shim = path.join(shimDir, "claude-fixture.cmd");
+  fs.writeFileSync(shim, '@echo off\r\nnode "%~dp0capture.cjs" "%~dp0args.json" %*\r\n');
+  return new Promise((resolve, reject) => {
+    const child = crossSpawn(shim, [
+      "--setting-sources", "",
+      "--mcp-config", inlineConfig,
+      "--allowedTools", "mcp__agentlas-time__get_current_time",
+    ], {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code !== 0) return reject(new Error(stderr || `cmd shim exited ${code}`));
+      assert.deepEqual(JSON.parse(fs.readFileSync(output, "utf8")), [
+        "--setting-sources", "",
+        "--mcp-config", inlineConfig,
+        "--allowedTools", "mcp__agentlas-time__get_current_time",
+      ], "cross-spawn must preserve the empty setting source and compact JSON as exact Windows .cmd arguments");
+      resolve();
+    });
+  });
+}
+
 async function main() {
   await app.whenReady();
   const store = require("../dist/electron/store/db.js");
@@ -72,32 +140,129 @@ async function main() {
   const { testServerConnection } = require("../dist/electron/mcp-tools/client.js");
   const { readStableRegularFile } = require("../dist/electron/site/agent-app-mcp-config-policy.js");
 
-  const serverPath = systemTime.materializeSystemTimeMcpServer();
-  const installed = registry.installFromCatalog("agentlas-time");
+  const expectedArgs = systemTime.systemTimeMcpLaunchArgs();
+  assert.equal(systemTime.systemTimeMcpSourceDigest(),
+    "11f73b8c137b1e52a806667739c89ae1e330ea7f7e9f9d7201ab42f2a042b712",
+    "the audited built-in source digest must change only with an explicit review update");
+  assert.equal(systemTime.systemTimeMcpLaunchWithinBudget(), true);
+  assert.equal(expectedArgs[0], "-e");
+  assert.ok(expectedArgs.length === 3 && expectedArgs[2].length > 0,
+    "the audited source must be a bounded compressed in-memory payload");
+  const inlineConfig = JSON.stringify({
+    mcpServers: {
+      "agentlas-time": {
+        command: process.execPath,
+        args: expectedArgs,
+        env: { ELECTRON_RUN_AS_NODE: "1" },
+      },
+    },
+  });
+  assert.equal(/[\r\n\0]/.test(inlineConfig), false);
+  assert.ok(Buffer.byteLength(inlineConfig) <= 4_096);
+  await verifyWindowsCmdInlineConfigRoundTrip(inlineConfig);
+  const wrongSourcePayload = gzipSync(Buffer.from('process.stdout.write("UNREVIEWED_SOURCE_EXECUTED");', "utf8"), {
+    level: 9,
+  }).toString("base64");
+  assert.equal(await runInlineServer([expectedArgs[0], expectedArgs[1], wrongSourcePayload]), 78,
+    "the child bootstrap must reject a valid compressed payload with the wrong source digest");
+  let installed = registry.installFromCatalog("agentlas-time");
   assert.equal(installed.catalogId, "agentlas-time");
   assert.equal(installed.command, process.execPath,
     "the global catalog row must use the packaged Electron binary, not a package manager or arbitrary command");
-  assert.deepEqual(installed.args, [serverPath]);
+  assert.deepEqual(installed.args, expectedArgs);
   assert.equal(installed.url, null, "the safe keyless server must never use a remote URL transport");
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM agent_mcp_servers WHERE server_id = ?").get(installed.id).count, 0,
     "the system MCP is globally installed and is not owned by or permanently attached to an agent bundle");
 
-  const auditedSource = fs.readFileSync(serverPath);
-  fs.writeFileSync(serverPath, "stale-system-time-source", { mode: 0o600 });
-  const windowsReplacement = `${serverPath}.windows-replacement`;
-  fs.writeFileSync(windowsReplacement, auditedSource, { mode: 0o600 });
-  systemTime.replaceSystemTimeMcpFileAtomically(windowsReplacement, serverPath, "win32");
-  assert.equal(systemTime.isAuthenticSystemTimeMcpSource(serverPath), true,
-    "the Windows-safe backup swap must replace an existing regular destination");
+  const stableId = installed.id;
+  const stableInstalledAt = installed.installedAt;
+  const boundAgent = { id: "site-prebuild-mcp-bound-agent" };
+  db.prepare(
+    `INSERT INTO installed_agents (
+       id, slug, name, name_en, tagline, tagline_en, system_prompt,
+       mcp_servers_json, env_requirements_json, preferred_backend,
+       trust_grade, installed_at, tone, builtin, role, visibility, entity_kind
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '[]', NULL, 'A', ?, 'blue', 0, NULL, 'visible', 'agent')`,
+  ).run(
+    boundAgent.id,
+    boundAgent.id,
+    "MCP migration fixture",
+    "MCP migration fixture",
+    "Test fixture",
+    "Test fixture",
+    "Test fixture",
+    new Date().toISOString(),
+  );
+  db.prepare("INSERT INTO agent_mcp_servers (agent_id, server_id) VALUES (?, ?)")
+    .run(boundAgent.id, installed.id);
+  db.prepare(
+    `UPDATE mcp_servers
+     SET name = 'Legacy Time', name_en = 'Legacy Time', transport = 'http', command = NULL,
+         args_json = ?, url = 'http://127.0.0.1:9/legacy', env_keys_json = '["LEGACY_SECRET"]', enabled = 0
+     WHERE id = ?`,
+  ).run(JSON.stringify([path.join(tmp, "legacy-mutable-time.cjs")]), installed.id);
+  installed = registry.refreshInstalledCatalogServer("agentlas-time");
+  const timeCatalog = require("../dist/electron/mcp-tools/catalog.js").getCatalogEntry("agentlas-time");
+  assert.ok(timeCatalog);
+  assert.equal(installed.id, stableId, "startup migration must preserve the system-global item id");
+  assert.equal(installed.installedAt, stableInstalledAt, "startup migration must preserve install history");
+  assert.equal(installed.enabled, false, "startup migration must preserve the user's enabled choice");
+  assert.equal(installed.name, timeCatalog.name);
+  assert.equal(installed.nameEn, timeCatalog.nameEn);
+  assert.equal(installed.transport, "stdio");
+  assert.equal(installed.command, process.execPath);
+  assert.deepEqual(installed.args, expectedArgs, "legacy mutable paths must migrate to exact inline argv");
+  assert.equal(installed.url, null);
+  assert.deepEqual(installed.envKeys, []);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM agent_mcp_servers WHERE agent_id = ? AND server_id = ?")
+    .get(boundAgent.id, stableId).count, 1, "in-place migration must preserve existing agent bindings");
+  assert.deepEqual(db.pragma("foreign_key_check"), [], "migration must preserve registry referential integrity");
+  const beforeRefreshChanges = db.prepare("SELECT total_changes() AS count").get().count;
+  registry.refreshInstalledCatalogServer("agentlas-time");
+  const afterRefreshChanges = db.prepare("SELECT total_changes() AS count").get().count;
+  assert.equal(afterRefreshChanges, beforeRefreshChanges, "an exact startup refresh must not rewrite SQLite/WAL");
+  db.prepare("UPDATE mcp_servers SET enabled = 1 WHERE id = ?").run(installed.id);
+  installed = registry.getServer(installed.id);
 
   const live = await testServerConnection(installed, { timeoutMs: 5_000 });
   assert.equal(live.connected, true,
     `process.execPath + ELECTRON_RUN_AS_NODE must complete a real packaged-style MCP handshake: ${JSON.stringify(live)}`);
   assert.deepEqual(live.tools.map((tool) => tool.name), ["get_current_time", "convert_time"]);
-  assert.equal(await runOversizedRequest(serverPath), 78,
+  assert.equal(await runOversizedRequest(installed.args), 78,
     "a request without a newline must be bounded instead of growing memory indefinitely");
-  assert.equal(await runManySmallRequests(serverPath), 0,
+  assert.equal(await runManySmallRequests(installed.args), 0,
     "a large chunk of individually bounded MCP requests must not be rejected as one oversized line");
+
+  const spawnSentinel = path.join(tmp, "tampered-command-spawned");
+  let loopbackRequests = 0;
+  const loopback = http.createServer((_request, response) => {
+    loopbackRequests += 1;
+    response.writeHead(500).end();
+  });
+  await new Promise((resolve, reject) => {
+    loopback.once("error", reject);
+    loopback.listen(0, "127.0.0.1", resolve);
+  });
+  const loopbackAddress = loopback.address();
+  assert.ok(loopbackAddress && typeof loopbackAddress !== "string");
+  const loopbackUrl = `http://127.0.0.1:${loopbackAddress.port}/mcp`;
+  const tamperedRows = [
+    { ...installed, args: [...installed.args.slice(0, -1), `${installed.args.at(-1)}A`] },
+    { ...installed, command: process.execPath, args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(spawnSentinel)},"spawned")`] },
+    { ...installed, args: [installed.args[0], `${installed.args[1]} `, installed.args[2]] },
+    { ...installed, args: [...installed.args, "--unexpected"] },
+    { ...installed, url: loopbackUrl },
+    { ...installed, configurationValid: false },
+    { ...installed, envKeys: ["UNEXPECTED_SECRET"] },
+    { ...installed, transport: "http", command: null, args: [], url: loopbackUrl },
+  ];
+  for (const candidate of tamperedRows) {
+    const status = await testServerConnection(candidate, { timeoutMs: 250 });
+    assert.equal(status.connected, false, "a tampered official catalog row must fail closed before transport execution");
+  }
+  await new Promise((resolve) => loopback.close(resolve));
+  assert.equal(loopbackRequests, 0, "a tampered official row must make zero network requests");
+  assert.equal(fs.existsSync(spawnSentinel), false, "a tampered official row must spawn zero child commands");
 
   const raceFile = path.join(tmp, "config-race.json");
   const raceA = JSON.stringify({ version: "A", pad: "a".repeat(4_096) });
@@ -124,51 +289,7 @@ async function main() {
   }
   await swapperDone;
   assert.ok(stableRaceReads > 0, "stable fd race regression did not observe any complete version");
-
-  const modulePath = path.join(root, "dist/electron/mcp-tools/system-time-server.js");
-  const concurrentRoot = path.join(tmp, "concurrent-global-mcp");
-  await Promise.all(Array.from({ length: 4 }, () => runMaterializerChild(modulePath, concurrentRoot)));
-  process.env.AGENTLAS_E2E_SYSTEM_TIME_ROOT = concurrentRoot;
-  const concurrentPath = systemTime.systemTimeMcpServerPath();
-  assert.equal(systemTime.isAuthenticSystemTimeMcpSource(concurrentPath), true,
-    "concurrent materialization must converge on one exact audited source");
-
-  const symlinkRoot = path.join(tmp, "symlink-global-mcp");
-  const symlinkTarget = path.join(tmp, "symlink-target");
-  fs.mkdirSync(symlinkTarget, { recursive: true });
-  let symlinkSupported = true;
-  try {
-    fs.symlinkSync(symlinkTarget, symlinkRoot, process.platform === "win32" ? "junction" : "dir");
-  } catch {
-    symlinkSupported = false;
-  }
-  if (symlinkSupported) {
-    process.env.AGENTLAS_E2E_SYSTEM_TIME_ROOT = symlinkRoot;
-    assert.throws(() => systemTime.materializeSystemTimeMcpServer(), /directory is unsafe/,
-      "a symlink at the controlled global MCP parent must fail closed");
-  }
-
-  const oversizedRoot = path.join(tmp, "oversized-global-mcp");
-  process.env.AGENTLAS_E2E_SYSTEM_TIME_ROOT = oversizedRoot;
-  const oversizedPath = systemTime.systemTimeMcpServerPath();
-  fs.mkdirSync(path.dirname(oversizedPath), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(oversizedPath, "x".repeat(80 * 1024), { mode: 0o600 });
-  systemTime.materializeSystemTimeMcpServer();
-  assert.equal(systemTime.isAuthenticSystemTimeMcpSource(oversizedPath), true,
-    "an oversized existing regular file must be replaced without an unbounded read");
-
-  const leafSymlinkRoot = path.join(tmp, "leaf-symlink-global-mcp");
-  process.env.AGENTLAS_E2E_SYSTEM_TIME_ROOT = leafSymlinkRoot;
-  const leafPath = systemTime.systemTimeMcpServerPath();
-  fs.mkdirSync(path.dirname(leafPath), { recursive: true, mode: 0o700 });
-  const leafTarget = path.join(tmp, "leaf-target.cjs");
-  fs.writeFileSync(leafTarget, "target", { mode: 0o600 });
-  let leafSymlinkSupported = true;
-  try { fs.symlinkSync(leafTarget, leafPath, "file"); } catch { leafSymlinkSupported = false; }
-  if (leafSymlinkSupported) {
-    assert.throws(() => systemTime.materializeSystemTimeMcpServer(), /file is unsafe/,
-      "a destination leaf symlink must fail closed without chmod-following its target");
-  }
+  await verifyDefaultMcpFailureIsolation(registry);
 
   const pageSource = fs.readFileSync(path.join(root, "renderer/app/(shell)/site/page.tsx"), "utf8");
   const ipcSource = fs.readFileSync(path.join(root, "electron/ipc.ts"), "utf8");
@@ -187,9 +308,9 @@ async function main() {
     "only an explicit card review may force a durable consent decision to reopen");
   assert.doesNotMatch(ipcSource, /상태 SHA-256|State SHA-256/,
     "the internal TOCTOU digest must not become user-facing technical copy");
-  assert.match(clientSource, /isAuthenticSystemTimeMcpSource\(server\.args\[0\]\)/,
-    "the global test transport must revalidate exact built-in source before enabling Electron's Node mode");
-  assert.match(configSource, /command === process\.execPath/);
+  assert.match(clientSource, /isCanonicalSystemTimeMcpServer\(server\)/,
+    "the global test transport must reject every non-canonical built-in row before transport selection");
+  assert.match(configSource, /Bypass the mutable per-run wrapper/);
   assert.match(pageSource, /MCP 없이 계속 만듭니다|keep building without MCP/,
     "recommendation failure must not starve app creation");
 

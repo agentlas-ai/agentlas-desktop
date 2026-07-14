@@ -48,16 +48,22 @@ async function main() {
   const orchestratorAgent = require("../dist/electron/mcp/registry.js").getAgentById("site-group-fixture-agent");
   assert.ok(orchestratorAgent);
 
-  const safeConfigPath = path.join(tmp, "sentinel-private-agent-app.mcp.json");
-  fs.writeFileSync(safeConfigPath, JSON.stringify({
-    mcpServers: { "agentlas-time": { command: "/fixture/pinned/agentlas-time", args: [] } },
-  }));
+  const { systemTimeMcpLaunchArgs } = require("../dist/electron/mcp-tools/system-time-server.js");
+  const safeInlineConfig = JSON.stringify({
+    mcpServers: {
+      "agentlas-time": {
+        command: process.execPath,
+        args: systemTimeMcpLaunchArgs(),
+        env: { ELECTRON_RUN_AS_NODE: "1" },
+      },
+    },
+  });
   const opaqueAlias = "AGENTLAS_MCP_SECRET_ABCDEF0123456789ABCDEF0123456789";
   const exactReadOnlyTools = [
     "mcp__agentlas-time__get_current_time",
     "mcp__agentlas-time__convert_time",
   ];
-  const failureText = [...SENTINELS, safeConfigPath, "stderr=permission denied"].join(" | ");
+  const failureText = [...SENTINELS, safeInlineConfig, "stderr=permission denied"].join(" | ");
   const runnerRequests = [];
   const picked = {
     label: "Deterministic group failure stub",
@@ -103,7 +109,7 @@ async function main() {
       active,
       picked,
       workingFolder: SENTINELS[1],
-      mcpConfigPath: safeConfigPath,
+      mcpConfigPath: safeInlineConfig,
       mcpAllowedTools: exactReadOnlyTools,
       mcpCodexConfigArgs: ["-c", "mcp_servers.untrusted.enabled=true"],
       agentAppMcpRuntimeEnv: { [opaqueAlias]: "GROUP_OPAQUE_SECRET" },
@@ -120,7 +126,7 @@ async function main() {
       assert.equal(error.code, "agent-app-runtime-failed");
       assert.equal(error.message, "Agent App runtime failed.");
       const projected = `${error.name} ${error.code} ${error.message}`;
-      for (const sentinel of [...SENTINELS, safeConfigPath, failureText]) {
+      for (const sentinel of [...SENTINELS, safeInlineConfig, failureText]) {
         assert.equal(projected.includes(sentinel), false);
       }
       return true;
@@ -134,7 +140,7 @@ async function main() {
   assert.equal(request.untrustedNoTools, true);
   assert.equal(request.cwd, undefined);
   assert.equal(request.images, undefined);
-  assert.equal(request.mcpConfigPath, safeConfigPath);
+  assert.equal(request.mcpConfigPath, safeInlineConfig);
   assert.deepEqual(request.mcpAllowedTools, exactReadOnlyTools);
   assert.equal(request.mcpCodexConfigArgs, undefined);
   assert.deepEqual(request.env, {
@@ -142,13 +148,15 @@ async function main() {
     HOME: "/fixture/home",
     [opaqueAlias]: "GROUP_OPAQUE_SECRET",
     AGENTLAS_UNTRUSTED_NO_TOOLS: "1",
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+    ENABLE_CLAUDEAI_MCP_SERVERS: "false",
     NO_COLOR: "1",
   });
   assert.equal(request.env.OPENAI_API_KEY, undefined);
   assert.equal(request.env.NODE_OPTIONS, undefined);
   assert.match(request.chatId, /^site-agent-app:site-group-isolation-run:borrow-orchestrator:[0-9a-f-]{36}$/);
   const eventProjection = JSON.stringify(events);
-  for (const sentinel of [...SENTINELS, safeConfigPath, failureText]) {
+  for (const sentinel of [...SENTINELS, safeInlineConfig, failureText]) {
     assert.equal(eventProjection.includes(sentinel), false, `group events must not expose ${sentinel}`);
   }
   assert.deepEqual(

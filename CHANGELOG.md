@@ -26,6 +26,22 @@
   no-tool mode. Unpinned Brave Search remains visible as blocked and cannot
   receive a key or execute until installer provenance is cryptographically
   bound.
+- **The built-in System Time MCP no longer executes a mutable file from the
+  user profile.** Desktop launches a bounded gzip payload from exact audited
+  argv, verifies its source digest before evaluation, and passes Agent Apps a
+  compact canonical in-memory config. Legacy global rows migrate in place while
+  preserving their id, enabled choice, install time, and bindings. Tampered
+  command, payload, transport, URL, environment, wrapper, or config rows fail
+  closed to the same no-tool path instead of opening a fallback transport.
+- **Packaged Electron code now uses an explicit fuse contract.** Run-as-Node
+  remains globally enabled for required workers, whose internal call sites
+  exact-gate command and argv; the fuse itself is not path-scoped. Node option
+  and inspector injection are disabled. The app entry is restricted to ASAR on all targets;
+  Electron's embedded ASAR integrity validation additionally covers supported
+  macOS and Windows packages. This does not change the existing signing boundary:
+  macOS is signed and notarized; Windows and Linux artifacts remain unsigned.
+  Moving every worker to a dedicated bundled Node or utility process is still
+  required before Run-as-Node can be disabled completely.
 - **MCP cards now reflect fresh Main-process state.** A check mark requires both
   durable consent and current readiness; blocked, changed, revoked, and offline
   states remain distinct. Launch respects an existing approval or decline and

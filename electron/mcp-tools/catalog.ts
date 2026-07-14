@@ -11,7 +11,7 @@ import {
   OPENCRAB_MCP_URL_KEY,
   OPENCRAB_MCP_URL_SENTINEL,
 } from "../opencrab/constants";
-import { systemTimeMcpServerPath } from "./system-time-server";
+import { systemTimeMcpLaunchArgs } from "./system-time-server";
 
 export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
   // ── 선택형 지식 그래프 ─────────────────────────────────────
@@ -392,10 +392,11 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     descriptionEn: "Agentlas built-in read-only MCP for current time and IANA timezone conversion only.",
     category: "data",
     transport: "stdio",
-    // defaults.ts materializes the exact audited source before this global row
-    // is seeded. Agent Apps reject any other command, path, URL, or tool list.
+    // The exact audited server is compressed into argv; no mutable executable
+    // file is opened after validation. Agent Apps reject any other command,
+    // payload, URL, environment, or tool list.
     command: process.execPath,
-    args: [systemTimeMcpServerPath()],
+    args: systemTimeMcpLaunchArgs(),
     trust: "official",
     brandColor: "#2563EB",
     mark: "T",

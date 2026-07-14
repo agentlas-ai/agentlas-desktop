@@ -12,7 +12,6 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-site-capabilities-")
 app.setPath("userData", path.join(tmp, "user-data"));
 process.env.AGENTLAS_STORE_PATH = path.join(tmp, "agentlas.sqlite");
 process.env.AGENTLAS_E2E = "1";
-process.env.AGENTLAS_E2E_SYSTEM_TIME_ROOT = path.join(tmp, "system-global-mcp");
 
 async function main() {
   await app.whenReady();
@@ -60,17 +59,17 @@ async function main() {
   assert.ok(declared.contract.capabilities.unavailable.some((issue) => issue.id === "filesystem"));
 
   const {
-    materializeSystemTimeMcpServer,
-    isAuthenticSystemTimeMcpSource,
+    systemTimeMcpLaunchArgs,
+    isAuthenticSystemTimeMcpLaunch,
   } = require("../dist/electron/mcp-tools/system-time-server.js");
-  const timeServerPath = materializeSystemTimeMcpServer();
-  assert.equal(isAuthenticSystemTimeMcpSource(timeServerPath), true);
+  const timeServerArgs = systemTimeMcpLaunchArgs();
+  assert.equal(isAuthenticSystemTimeMcpLaunch(process.execPath, timeServerArgs), true);
   const now = new Date().toISOString();
   db.prepare(
     `INSERT INTO mcp_servers
        (id, catalog_id, name, name_en, transport, command, args_json, url, env_keys_json, enabled, installed_at)
      VALUES (?, 'agentlas-time', 'System Time', 'System Time', 'stdio', ?, ?, NULL, '[]', 1, ?)`,
-  ).run("site-capability-time", process.execPath, JSON.stringify([timeServerPath]), now);
+  ).run("site-capability-time", process.execPath, JSON.stringify(timeServerArgs), now);
 
   const projectId = randomUUID();
   const { createSiteAgentAppMcpConsentReceipt } = require("../dist/electron/site/agent-app-mcp-consent.js");
@@ -131,9 +130,42 @@ async function main() {
   const configBytes = fs.readFileSync(prepared.grant.mcpConfigPath);
   assert.equal(prepared.grant.mcpConfigSha256, createHash("sha256").update(configBytes).digest("hex"));
   assert.equal(configBytes.includes(Buffer.from("UNRELATED_SECRET_CANARY")), false);
+  const inlineConfig = JSON.parse(configBytes.toString("utf8"));
+  assert.deepEqual(inlineConfig.mcpServers["agentlas-time"], {
+    command: process.execPath,
+    args: timeServerArgs,
+    env: { ELECTRON_RUN_AS_NODE: "1" },
+  }, "the keyless built-in must bypass the mutable child wrapper");
+  assert.equal(fs.existsSync(path.join(path.dirname(prepared.grant.mcpConfigPath), "mcp-child-env-wrapper.cjs")), false);
+  assert.ok(configBytes.length <= 4_096, "the inline Agent App config must stay inside the cross-platform argv budget");
+  assert.ok(configBytes.length * 2 + 1_024 < 8_191,
+    "a conservative Windows .cmd escaping budget must leave room for Claude's fixed arguments");
+  const { resolveSiteAgentAppInlineMcpConfigForDispatch } =
+    require("../dist/electron/site/agent-app-mcp-config-policy.js");
+  const { listInstalledServers } = require("../dist/electron/mcp-tools/registry.js");
+  const expectedInlineConfig = JSON.stringify(inlineConfig);
+  assert.equal(
+    resolveSiteAgentAppInlineMcpConfigForDispatch(prepared.grant, listInstalledServers()),
+    expectedInlineConfig,
+    "Main's final dispatch gate must convert the stable preflight file to canonical inline JSON",
+  );
+  const configPath = prepared.grant.mcpConfigPath;
+  fs.writeFileSync(configPath, '{"mcpServers":{}}');
+  assert.equal(resolveSiteAgentAppInlineMcpConfigForDispatch(prepared.grant, listInstalledServers()), null,
+    "a config changed after preflight must downgrade before dispatch");
+  fs.writeFileSync(configPath, configBytes);
+  db.prepare("UPDATE mcp_servers SET args_json = ? WHERE id = ?")
+    .run(JSON.stringify([...timeServerArgs, "--tampered-after-preflight"]), "site-capability-time");
+  assert.equal(resolveSiteAgentAppInlineMcpConfigForDispatch(prepared.grant, listInstalledServers()), null,
+    "a registry row changed after preflight must downgrade before dispatch");
+  db.prepare("UPDATE mcp_servers SET args_json = ? WHERE id = ?")
+    .run(JSON.stringify(timeServerArgs), "site-capability-time");
+  fs.rmSync(configPath);
+  assert.equal(resolveSiteAgentAppInlineMcpConfigForDispatch(prepared.grant, listInstalledServers()), null,
+    "a deleted preflight config must downgrade before dispatch");
+  fs.writeFileSync(configPath, configBytes);
   prepared.grant.runtimeStatus = "runtime-unavailable";
   assert.deepEqual(prepared.finalDisclosure().available, []);
-  const configPath = prepared.grant.mcpConfigPath;
   prepared.cleanup();
   assert.equal(fs.existsSync(configPath), false);
 
@@ -152,7 +184,7 @@ async function main() {
   assert.equal(canaryVerifications, 0, "unexpected env names must be rejected before process execution");
   db.prepare("UPDATE mcp_servers SET env_keys_json = '[]' WHERE id = ?").run("site-capability-time");
 
-  for (const malformedArgs of ["[1]", JSON.stringify([timeServerPath, {}])]) {
+  for (const malformedArgs of ["[1]", JSON.stringify([...timeServerArgs, {}])]) {
     db.prepare("UPDATE mcp_servers SET args_json = ? WHERE id = ?").run(malformedArgs, "site-capability-time");
     let malformedVerifications = 0;
     const malformed = await prepareSiteAgentAppCapabilities(declared.contract.capabilities, "malformed-args", {
@@ -164,7 +196,7 @@ async function main() {
     assert.equal(malformedVerifications, 0);
   }
   db.prepare("UPDATE mcp_servers SET args_json = ? WHERE id = ?")
-    .run(JSON.stringify([timeServerPath]), "site-capability-time");
+    .run(JSON.stringify(timeServerArgs), "site-capability-time");
   db.prepare("UPDATE mcp_servers SET env_keys_json = '[1]' WHERE id = ?").run("site-capability-time");
   let malformedEnvVerifications = 0;
   const malformedEnv = await prepareSiteAgentAppCapabilities(declared.contract.capabilities, "malformed-env", {

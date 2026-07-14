@@ -20,9 +20,38 @@ import {
   saveRuntimeSession,
 } from "../store/runtime-sessions";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
+import { isAuthenticSystemTimeMcpLaunch } from "../mcp-tools/system-time-server";
 
 const KIND = "claude-code";
 const AGENT_APP_MCP_SECRET_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;
+
+function isCanonicalAgentAppInlineMcpConfig(value: string | undefined): boolean {
+  if (!value || !value.startsWith('{"mcpServers":') || /[\r\n\0]/.test(value) ||
+      Buffer.byteLength(value, "utf8") > 4_096) return false;
+  try {
+    const parsed = JSON.parse(value) as { mcpServers?: Record<string, unknown> };
+    if (JSON.stringify(parsed) !== value || !parsed || typeof parsed !== "object" || Array.isArray(parsed) ||
+        JSON.stringify(Object.keys(parsed)) !== JSON.stringify(["mcpServers"]) ||
+        !parsed.mcpServers || typeof parsed.mcpServers !== "object" || Array.isArray(parsed.mcpServers) ||
+        JSON.stringify(Object.keys(parsed.mcpServers)) !== JSON.stringify(["agentlas-time"])) return false;
+    const entry = parsed.mcpServers["agentlas-time"] as {
+      command?: unknown;
+      args?: unknown;
+      env?: unknown;
+    };
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) ||
+        JSON.stringify(Object.keys(entry).sort()) !== JSON.stringify(["args", "command", "env"]) ||
+        typeof entry.command !== "string" || !Array.isArray(entry.args) ||
+        entry.args.some((arg) => typeof arg !== "string") ||
+        !entry.env || typeof entry.env !== "object" || Array.isArray(entry.env)) return false;
+    const env = entry.env as Record<string, unknown>;
+    return isAuthenticSystemTimeMcpLaunch(entry.command, entry.args as string[]) &&
+      JSON.stringify(Object.keys(env)) === JSON.stringify(["ELECTRON_RUN_AS_NODE"]) &&
+      env.ELECTRON_RUN_AS_NODE === "1";
+  } catch {
+    return false;
+  }
+}
 
 function stripAgentAppMcpSecretAliases(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv | undefined {
   if (!env) return env;
@@ -204,6 +233,22 @@ export const runClaudeCode: Runner = async (
   const stagedImages = await stageCliImageAttachments(req);
   const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
 
+  // Establish the exact one-run MCP authority before writing the system
+  // prompt. A malformed config must not leave the model believing a tool is
+  // available after the argv gate has already removed it.
+  const hasExactUntrustedMcpGrant = Boolean(
+    runReq.untrustedNoTools &&
+    isCanonicalAgentAppInlineMcpConfig(runReq.mcpConfigPath) &&
+    runReq.mcpAllowedTools?.length &&
+    runReq.untrustedAllowedMcpTools?.length &&
+    validSiteAgentAppMcpGrantTools(runReq.mcpAllowedTools) &&
+    validSiteAgentAppMcpGrantTools(runReq.untrustedAllowedMcpTools) &&
+    JSON.stringify(runReq.mcpAllowedTools) === JSON.stringify(runReq.untrustedAllowedMcpTools),
+  );
+  if (runReq.untrustedNoTools && runReq.mcpConfigPath && !hasExactUntrustedMcpGrant) {
+    try { runReq.onAgentAppMcpRuntimeUnavailable?.(); } catch { /* receipt reconciliation is best effort */ }
+  }
+
   const systemPrompt = wrapSystemPrompt(
     runReq.systemPrompt,
     runReq.locale,
@@ -212,7 +257,9 @@ export const runClaudeCode: Runner = async (
     runReq.forceSurface,
     runReq.restrictedReadBoundary,
     runReq.untrustedNoTools,
-    runReq.untrustedAllowedMcpTools,
+    runReq.untrustedNoTools
+      ? (hasExactUntrustedMcpGrant ? runReq.untrustedAllowedMcpTools : undefined)
+      : runReq.untrustedAllowedMcpTools,
   );
   const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq) : null;
   const savedSession = !runReq.untrustedNoTools && runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
@@ -259,12 +306,6 @@ export const runClaudeCode: Runner = async (
 
   // MCP 서버 구성 주입 — mcp/client.ts가 설치·활성 서버를 .mcp.json으로 직렬화해 경로를 넘긴다.
   // 이게 있어야 에이전트가 브라우저(Playwright) 등 실제 MCP 툴을 호출한다. (사용자 config와 병합)
-  const hasExactUntrustedMcpGrant = Boolean(
-    runReq.untrustedNoTools &&
-    runReq.mcpConfigPath &&
-    runReq.mcpAllowedTools?.length &&
-    validSiteAgentAppMcpGrantTools(runReq.mcpAllowedTools),
-  );
   const mcpArgs = runReq.mcpConfigPath && (!runReq.untrustedNoTools || hasExactUntrustedMcpGrant)
     ? ["--mcp-config", runReq.mcpConfigPath]
     : [];
@@ -279,7 +320,11 @@ export const runClaudeCode: Runner = async (
       : [];
   const noToolsArgs = runReq.untrustedNoTools
     ? [
-        "--safe-mode",
+        // Claude's safe-mode disables even an explicit --mcp-config. Keep it
+        // for the absolute no-tool path, but omit it for the exact System Time
+        // grant; --tools "" still removes every built-in and --allowedTools
+        // admits only the two audited read-only MCP tools.
+        ...(hasExactUntrustedMcpGrant ? ["--setting-sources", ""] : ["--safe-mode"]),
         "--disable-slash-commands",
         "--no-chrome",
         "--no-session-persistence",
@@ -295,7 +340,7 @@ export const runClaudeCode: Runner = async (
   // 경로만 넘기므로 안전. 사용자 프롬프트(+히스토리)는 stdin으로 보낸다(`-p`는 stdin을 읽음).
   const sysPromptFile = path.join(
     os.tmpdir(),
-    `agentlas-claude-sys-${process.pid}-${Date.now()}.txt`,
+    `agentlas-claude-sys-${process.pid}-${crypto.randomUUID()}.txt`,
   );
   await fs.writeFile(sysPromptFile, systemPrompt, "utf8");
   const cleanupSysFile = () => {
@@ -442,6 +487,14 @@ export const runClaudeCode: Runner = async (
     };
 
     const toolNameById = new Map<string, string>();
+    let agentAppMcpInitFailed = false;
+    let agentAppMcpInitConnected = false;
+    let agentAppMcpUnavailableNotified = false;
+    const markAgentAppMcpUnavailable = () => {
+      if (agentAppMcpUnavailableNotified) return;
+      agentAppMcpUnavailableNotified = true;
+      try { runReq.onAgentAppMcpRuntimeUnavailable?.(); } catch { /* receipt reconciliation is best effort */ }
+    };
 
     const truncateUi = (s: string, max = 12000): string =>
       s.length > max ? `${s.slice(0, max)}…` : s;
@@ -470,7 +523,10 @@ export const runClaudeCode: Runner = async (
 
     function handleEvent(ev: {
       type?: string;
+      subtype?: string;
       session_id?: string;
+      mcp_servers?: Array<{ name?: string; status?: string }>;
+      tools?: string[];
       message?: {
         content?: Array<{
           type?: string;
@@ -493,8 +549,48 @@ export const runClaudeCode: Runner = async (
         usage?: { output_tokens?: number };
       };
     }): void {
+      if (agentAppMcpInitFailed) return;
+      const isAgentAppMcpInit = ev.type === "system" && ev.subtype === "init";
+      if (
+        hasExactUntrustedMcpGrant &&
+        !runReq.agentAppMcpFallbackAttempted &&
+        !agentAppMcpInitConnected &&
+        !isAgentAppMcpInit
+      ) {
+        // No model/tool/result event is trusted before Claude proves the exact
+        // MCP inventory in system/init. Otherwise an init-less success could
+        // leak a first answer before the no-tool replay starts.
+        agentAppMcpInitFailed = true;
+        markAgentAppMcpUnavailable();
+        killCliTree(child, 250);
+        return;
+      }
       if (typeof ev.session_id === "string" && ev.session_id) {
         sessionId = ev.session_id;
+      }
+      if (isAgentAppMcpInit && hasExactUntrustedMcpGrant &&
+          !runReq.agentAppMcpFallbackAttempted) {
+        const expectedTools = [...(runReq.mcpAllowedTools ?? [])].sort();
+        const reportedTools = Array.isArray(ev.tools) && ev.tools.every((tool) => typeof tool === "string")
+          ? [...ev.tools].sort()
+          : [];
+        agentAppMcpInitConnected = Boolean(
+          Array.isArray(ev.mcp_servers) &&
+          ev.mcp_servers.length === 1 &&
+          ev.mcp_servers[0]?.name === "agentlas-time" &&
+          ev.mcp_servers[0]?.status === "connected" &&
+          new Set(reportedTools).size === reportedTools.length &&
+          JSON.stringify(reportedTools) === JSON.stringify(expectedTools)
+        );
+        if (!agentAppMcpInitConnected) {
+          // Claude can omit, duplicate, or report a failed MCP bootstrap in
+          // system/init and still exit 0. Stop before it answers under stale
+          // tool authority, then replay once with the no-tool boundary.
+          agentAppMcpInitFailed = true;
+          markAgentAppMcpUnavailable();
+          killCliTree(child, 250);
+          return;
+        }
       }
       // --include-partial-messages: 토큰 델타를 즉시 이어붙여 글자 단위 스트리밍을 만든다.
       // 본문은 text_delta만. thinking 블록은 본문에 싣지 않되 시작/종료 신호와 문자 수(토큰
@@ -632,6 +728,22 @@ export const runClaudeCode: Runner = async (
         rejectRuntime(new Error(tStatus(req.locale, "aborted")));
         return;
       }
+      if (
+        hasExactUntrustedMcpGrant &&
+        !runReq.agentAppMcpFallbackAttempted &&
+        !agentAppMcpInitConnected
+      ) {
+        markAgentAppMcpUnavailable();
+        void runClaudeCode({
+          ...runReq,
+          mcpConfigPath: undefined,
+          mcpAllowedTools: undefined,
+          untrustedAllowedMcpTools: undefined,
+          env: stripAgentAppMcpSecretAliases(runReq.env),
+          agentAppMcpFallbackAttempted: true,
+        }, events).then(resolve, reject);
+        return;
+      }
       if (code === 0) {
         // 표시 본문은 스트리밍 전사본(모든 assistant 메시지 \n-join) 우선 — result 이벤트의
         // finalText는 '마지막 메시지'만 담아, 이걸 우선하면 도구 사이 중간 해설이 완료 순간
@@ -646,26 +758,9 @@ export const runClaudeCode: Runner = async (
         resolve({ text: display.trim(), sessionId, tokens });
       } else {
         if (runReq.untrustedNoTools) {
-          if (
-            hasExactUntrustedMcpGrant &&
-            !runReq.agentAppMcpFallbackAttempted &&
-            containsMcpStartupTransportFatal(stderr)
-          ) {
-            // A verified server can still disappear between preflight and CLI
-            // startup. Retry this exact browser request once with every MCP
-            // argument and opaque secret alias removed; no arbitrary CLI
-            // failure is eligible for this downgrade.
-            try { runReq.onAgentAppMcpRuntimeUnavailable?.(); } catch { /* receipt reconciliation is best effort */ }
-            void runClaudeCode({
-              ...runReq,
-              mcpConfigPath: undefined,
-              mcpAllowedTools: undefined,
-              untrustedAllowedMcpTools: undefined,
-              env: stripAgentAppMcpSecretAliases(runReq.env),
-              agentAppMcpFallbackAttempted: true,
-            }, events).then(resolve, reject);
-            return;
-          }
+          // Pre-init failures already replay once through the exact init gate.
+          // After a connected receipt, never issue a second model request: it
+          // could duplicate output/cost after a later provider/runtime error.
           rejectRuntime(new Error("Agent App runtime process exited unsuccessfully."));
           return;
         }

@@ -35,6 +35,11 @@ assert.match(
   /HEPHAESTUS_RUNTIME_ROOT=Hephaestus[\s\S]*test-stormbreaker-core-harness\.cjs --installed/,
   "Stormbreaker release gate must execute against the embedded Agentlas OS checkout",
 );
+assert.equal(
+  pkg.scripts["test:packaged-agent-app-mcp"],
+  "node scripts/test-packaged-agent-app-mcp.cjs",
+  "the packaged fuse and System Time handshake must remain directly executable",
+);
 
 function versionTuple(spec) {
   const match = String(spec || "").match(/(\d+)\.(\d+)\.(\d+)/);
@@ -85,6 +90,14 @@ for (const configName of ["electron-builder.yml", "electron-builder.mac-stable.y
     `${configName} must not rely on afterAllArtifactBuild because latest*.yml is written later`,
   );
   const config = yaml.load(configSource);
+  assert.deepEqual(config.electronFuses, {
+    resetAdHocDarwinSignature: true,
+    runAsNode: true,
+    enableNodeOptionsEnvironmentVariable: false,
+    enableNodeCliInspectArguments: false,
+    enableEmbeddedAsarIntegrityValidation: true,
+    onlyLoadAppFromAsar: true,
+  }, `${configName} must keep the signed/packaged Electron execution boundary identical`);
   assert.equal(
     config.mac.minimumSystemVersion,
     MACOS_MINIMUM_SYSTEM_VERSION,
@@ -124,6 +137,27 @@ for (const configName of ["electron-builder.yml", "electron-builder.mac-stable.y
     `${configName} must preserve tracked .agentlas routing, MCP, and ontology assets`,
   );
 }
+const crossPlatformHarness = fs.readFileSync(
+  path.join(root, ".github", "workflows", "cross-platform-harness.yml"),
+  "utf8",
+);
+for (const guardedPath of [
+  "electron/runtime/claude-code.ts",
+  "electron-builder.yml",
+  "electron-builder.mac-stable.yml",
+  "scripts/test-packaged-agent-app-mcp.cjs",
+]) {
+  assert.equal(
+    crossPlatformHarness.split(`- \"${guardedPath}\"`).length - 1,
+    2,
+    `${guardedPath} changes must trigger both pull-request and main 3OS gates`,
+  );
+}
+assert.match(
+  crossPlatformHarness,
+  /npx electron-builder --dir --publish never[\s\S]{0,500}npm run test:packaged-agent-app-mcp/,
+  "the 3OS harness must verify the final packaged fuse wire and System Time child handshake",
+);
 const crossPlatformWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release.yml"), "utf8");
 const signedMacWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release-signed-mac.yml"), "utf8");
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");

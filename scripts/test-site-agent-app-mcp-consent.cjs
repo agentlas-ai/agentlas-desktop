@@ -10,7 +10,6 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-site-mcp-consent-"))
 app.setPath("userData", path.join(tmp, "user-data"));
 app.setPath("home", path.join(tmp, "home"));
 process.env.AGENTLAS_STORE_PATH = path.join(tmp, "agentlas.sqlite");
-process.env.AGENTLAS_E2E_SYSTEM_TIME_ROOT = path.join(tmp, "system-global-mcp");
 
 async function main() {
   await app.whenReady();
@@ -71,13 +70,13 @@ async function main() {
     },
   });
   const now = new Date().toISOString();
-  const { materializeSystemTimeMcpServer } = require("../dist/electron/mcp-tools/system-time-server.js");
-  const timeServerPath = materializeSystemTimeMcpServer();
+  const { systemTimeMcpLaunchArgs } = require("../dist/electron/mcp-tools/system-time-server.js");
+  const timeServerArgs = systemTimeMcpLaunchArgs();
   db.prepare(
     `INSERT INTO mcp_servers
        (id, catalog_id, name, name_en, transport, command, args_json, url, env_keys_json, enabled, installed_at)
      VALUES (?, 'agentlas-time', 'System Time', 'System Time', 'stdio', ?, ?, NULL, '[]', 0, ?)`,
-  ).run("fixture-time", process.execPath, JSON.stringify([timeServerPath]), now);
+  ).run("fixture-time", process.execPath, JSON.stringify(timeServerArgs), now);
 
   const before = await recommendSiteAgentAppMcpForProject(getSiteProject(project.id));
   assert.equal(before.status, "review-required");

@@ -1,7 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
-import fs from "node:fs";
-import os from "node:os";
+import { createHash } from "node:crypto";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 
 export const AGENTLAS_SYSTEM_TIME_CATALOG_ID = "agentlas-time";
 export const AGENTLAS_SYSTEM_TIME_TOOL_NAMES = ["get_current_time", "convert_time"] as const;
@@ -174,196 +173,55 @@ process.stdin.on("data", (chunk) => {
 });
 `;
 
-export function systemTimeMcpServerPath(): string {
-  const testRoot = process.env.AGENTLAS_E2E === "1" && path.isAbsolute(process.env.AGENTLAS_E2E_SYSTEM_TIME_ROOT ?? "")
-    ? path.resolve(process.env.AGENTLAS_E2E_SYSTEM_TIME_ROOT!)
-    : null;
-  return path.join(testRoot ?? path.join(os.homedir(), ".agentlas"), "mcp", "agentlas-system-time.cjs");
+// Keep the audited server in the signed Main bundle and launch it from an
+// in-memory compressed payload. A pathname under ~/.agentlas (or even a
+// packaged resource) can be replaced after validation but before the child
+// process opens it. Exact argv removes that validate-then-open window across
+// macOS, Windows portable/installers, and Linux packages.
+const SYSTEM_TIME_SOURCE_SHA256 = createHash("sha256").update(SYSTEM_TIME_SERVER_SOURCE).digest("hex");
+const SYSTEM_TIME_INLINE_BOOTSTRAP =
+  `const z=require("node:zlib"),c=require("node:crypto"),v=require("node:vm"),b=z.gunzipSync(Buffer.from(process.argv[1],"base64"),{maxOutputLength:65536});` +
+  `if(b.length>65536||c.createHash("sha256").update(b).digest("hex")!==${JSON.stringify(SYSTEM_TIME_SOURCE_SHA256)})process.exit(78);` +
+  `v.runInThisContext(b.toString("utf8"),{filename:"agentlas-system-time.cjs"});`;
+const SYSTEM_TIME_INLINE_PAYLOAD = gzipSync(Buffer.from(SYSTEM_TIME_SERVER_SOURCE, "utf8"), {
+  level: 9,
+}).toString("base64");
+
+/** Conservative guard for Claude's Windows .cmd command-line boundary. */
+export const AGENTLAS_SYSTEM_TIME_INLINE_ARGS_MAX_JSON_CHARS = 4_096;
+
+export function systemTimeMcpLaunchArgs(): string[] {
+  return ["-e", SYSTEM_TIME_INLINE_BOOTSTRAP, SYSTEM_TIME_INLINE_PAYLOAD];
+}
+
+export function systemTimeMcpLaunchWithinBudget(): boolean {
+  return JSON.stringify(systemTimeMcpLaunchArgs()).length <= AGENTLAS_SYSTEM_TIME_INLINE_ARGS_MAX_JSON_CHARS;
 }
 
 export function systemTimeMcpSourceDigest(): string {
-  return createHash("sha256").update(SYSTEM_TIME_SERVER_SOURCE).digest("hex");
+  return SYSTEM_TIME_SOURCE_SHA256;
 }
 
-function sameStableSystemTimeStat(a: fs.BigIntStats, b: fs.BigIntStats): boolean {
-  return a.dev === b.dev && a.ino === b.ino && a.mode === b.mode && a.nlink === b.nlink &&
-    a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs &&
-    a.birthtimeNs === b.birthtimeNs;
+export function isAuthenticSystemTimeMcpLaunch(command: string | null, args: readonly string[]): boolean {
+  if (!command || path.resolve(command) !== path.resolve(process.execPath)) return false;
+  const expected = systemTimeMcpLaunchArgs();
+  return systemTimeMcpLaunchWithinBudget() &&
+    args.length === expected.length && args.every((arg, index) => arg === expected[index]);
 }
 
-function sameSystemTimePathAndFdIdentity(pathStat: fs.BigIntStats, fdStat: fs.BigIntStats): boolean {
-  if (pathStat.dev !== fdStat.dev || pathStat.mode !== fdStat.mode || pathStat.size !== fdStat.size) return false;
-  if (pathStat.ino !== 0n || fdStat.ino !== 0n) return pathStat.ino === fdStat.ino;
-  return pathStat.birthtimeNs === fdStat.birthtimeNs && pathStat.mtimeNs === fdStat.mtimeNs &&
-    pathStat.ctimeNs === fdStat.ctimeNs;
-}
-
-/** Leaf-symlink-safe, bounded single-descriptor read used by materialization,
- * integrity checks, and the final MCP transport preflight. */
-export function readStableSystemTimeMcpSource(file: string, enforcePrivateMode = false): Buffer | null {
-  if (!path.isAbsolute(file)) return null;
-  let fd: number | null = null;
-  try {
-    const noFollow = process.platform === "win32" ? 0 : (fs.constants.O_NOFOLLOW ?? 0);
-    fd = fs.openSync(file, fs.constants.O_RDONLY | noFollow);
-    const initial = fs.fstatSync(fd, { bigint: true });
-    if (!initial.isFile() || initial.size < 1n || initial.size > 64n * 1024n) return null;
-    const initialPath = fs.lstatSync(file, { bigint: true });
-    if (initialPath.isSymbolicLink() || !initialPath.isFile() ||
-        !sameSystemTimePathAndFdIdentity(initialPath, initial)) return null;
-    if (enforcePrivateMode && process.platform !== "win32") fs.fchmodSync(fd, 0o600);
-
-    const before = fs.fstatSync(fd, { bigint: true });
-    const pathBefore = fs.lstatSync(file, { bigint: true });
-    const canonicalBefore = fs.realpathSync.native(file);
-    if (pathBefore.isSymbolicLink() || !pathBefore.isFile() ||
-        !sameSystemTimePathAndFdIdentity(pathBefore, before)) return null;
-    const bytes = Buffer.alloc(Number(before.size));
-    let offset = 0;
-    while (offset < bytes.length) {
-      const count = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
-      if (count === 0) return null;
-      offset += count;
-    }
-    const extra = Buffer.allocUnsafe(1);
-    if (fs.readSync(fd, extra, 0, 1, offset) !== 0) return null;
-    const after = fs.fstatSync(fd, { bigint: true });
-    const pathAfter = fs.lstatSync(file, { bigint: true });
-    const canonicalAfter = fs.realpathSync.native(file);
-    if (!sameStableSystemTimeStat(before, after) || pathAfter.isSymbolicLink() || !pathAfter.isFile() ||
-        !sameSystemTimePathAndFdIdentity(pathAfter, after) || canonicalAfter !== canonicalBefore) return null;
-    return bytes;
-  } catch {
-    return null;
-  } finally {
-    if (fd !== null) {
-      try { fs.closeSync(fd); } catch { /* best effort */ }
-    }
-  }
-}
-
-export function materializeSystemTimeMcpServer(): string {
-  const destination = systemTimeMcpServerPath();
-  const root = path.dirname(path.dirname(destination));
-  const directory = path.dirname(destination);
-  const ensurePrivateDirectory = (candidate: string): { dev: number; ino: number } => {
-    if (!fs.existsSync(candidate)) {
-      try {
-        fs.mkdirSync(candidate, { mode: 0o700 });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      }
-    }
-    const stat = fs.lstatSync(candidate);
-    // lstat rejects a symlink at the controlled directory itself. Do not
-    // reject macOS's normal /var -> /private/var ancestor mapping.
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      throw new Error("Agentlas System Time MCP directory is unsafe.");
-    }
-    if (process.platform !== "win32") fs.chmodSync(candidate, 0o700);
-    return { dev: stat.dev, ino: stat.ino };
-  };
-  const rootIdentity = ensurePrivateDirectory(root);
-  const directoryIdentity = ensurePrivateDirectory(directory);
-  const assertDirectoryIdentity = (candidate: string, expected: { dev: number; ino: number }) => {
-    const stat = fs.lstatSync(candidate);
-    if (
-      !stat.isDirectory() ||
-      stat.isSymbolicLink() ||
-      stat.dev !== expected.dev ||
-      (expected.ino !== 0 && stat.ino !== expected.ino)
-    ) throw new Error("Agentlas System Time MCP directory changed during materialization.");
-  };
-  let current: string | null = null;
-  if (fs.existsSync(destination)) {
-    const stat = fs.lstatSync(destination);
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Agentlas System Time MCP file is unsafe.");
-    current = readStableSystemTimeMcpSource(destination)?.toString("utf8") ?? null;
-  }
-  if (current !== SYSTEM_TIME_SERVER_SOURCE) {
-    const temp = `${destination}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      fs.writeFileSync(temp, SYSTEM_TIME_SERVER_SOURCE, { encoding: "utf8", mode: 0o600, flag: "wx" });
-      assertDirectoryIdentity(root, rootIdentity);
-      assertDirectoryIdentity(directory, directoryIdentity);
-      replaceSystemTimeMcpFileAtomically(temp, destination);
-    } finally {
-      fs.rmSync(temp, { force: true });
-    }
-  }
-  assertDirectoryIdentity(root, rootIdentity);
-  assertDirectoryIdentity(directory, directoryIdentity);
-  // Another Desktop process may atomically install the same audited bytes
-  // between our pathname checks. Retry only the stable read/identity proof;
-  // never accept a mismatched digest and never rewrite based on a failed read.
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const installed = readStableSystemTimeMcpSource(destination, true);
-    if (installed && createHash("sha256").update(installed).digest("hex") === systemTimeMcpSourceDigest()) {
-      return destination;
-    }
-    if (attempt < 7) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
-  }
-  throw new Error("Agentlas System Time MCP integrity verification failed.");
-}
-
-/** Windows cannot rename over an existing destination. Keep an old regular
- * file as a same-directory rollback until the new audited source is in place. */
-export function replaceSystemTimeMcpFileAtomically(
-  temp: string,
-  destination: string,
-  platform: NodeJS.Platform = process.platform,
-): void {
-  if (platform !== "win32" || !fs.existsSync(destination)) {
-    fs.renameSync(temp, destination);
-    return;
-  }
-  const existing = fs.lstatSync(destination);
-  if (!existing.isFile() || existing.isSymbolicLink()) {
-    throw new Error("Agentlas System Time MCP file is unsafe.");
-  }
-  const backup = `${destination}.${process.pid}.${randomUUID()}.bak`;
-  let backedUp = false;
-  let installed = false;
-  let preserveBackup = false;
-  try {
-    try {
-      fs.renameSync(destination, backup);
-      backedUp = true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    try {
-      fs.renameSync(temp, destination);
-      installed = true;
-    } catch (error) {
-      // A concurrent materializer may already have installed the same audited
-      // source. Never overwrite an unknown winner or restore over it.
-      if (isAuthenticSystemTimeMcpSource(destination)) {
-        installed = true;
-        return;
-      }
-      if (backedUp && !fs.existsSync(destination)) {
-        try {
-          fs.renameSync(backup, destination);
-          backedUp = false;
-        } catch (restoreError) {
-          preserveBackup = true;
-          throw new AggregateError(
-            [error as Error, restoreError as Error],
-            `Agentlas System Time MCP replacement failed; the previous source remains at ${backup}`,
-          );
-        }
-      }
-      if (backedUp) preserveBackup = true;
-      throw error;
-    }
-  } finally {
-    if (backedUp && installed && !preserveBackup) fs.rmSync(backup, { force: true });
-  }
-}
-
-export function isAuthenticSystemTimeMcpSource(file: string): boolean {
-  if (path.resolve(file) !== path.resolve(systemTimeMcpServerPath())) return false;
-  const source = readStableSystemTimeMcpSource(file);
-  return Boolean(source && createHash("sha256").update(source).digest("hex") === systemTimeMcpSourceDigest());
+export function isCanonicalSystemTimeMcpServer(server: {
+  catalogId: string | null;
+  configurationValid?: boolean;
+  transport: string;
+  command: string | null;
+  args: readonly string[];
+  url: string | null;
+  envKeys: readonly string[];
+}): boolean {
+  return server.catalogId === AGENTLAS_SYSTEM_TIME_CATALOG_ID &&
+    server.configurationValid !== false &&
+    server.transport === "stdio" &&
+    server.url === null &&
+    server.envKeys.length === 0 &&
+    isAuthenticSystemTimeMcpLaunch(server.command, server.args);
 }

@@ -61,7 +61,7 @@ matches(client, /validSiteAgentAppMcpGrantTools\(/, "Agent App exact MCP tool va
 matches(client, /agentAppToolGrant && !agentAppCapabilityRuntimeEligible[\s\S]{0,420}markAgentAppMcpRuntimeUnavailable\(\)/, "Agent App incompatible-runtime downgrade");
 matches(client, /!exactConfig[\s\S]{0,500}markAgentAppMcpRuntimeUnavailable\(\)/, "Agent App JIT grant invalidation downgrade");
 assert.doesNotMatch(client, /Agent App read-only capability grant failed main-process validation/, "JIT grant invalidation must not fail the whole Agent App");
-assertBefore(client, "markAgentAppMcpRuntimeUnavailable();", "mcpConfigPath = agentAppToolGrant.mcpConfigPath", "Agent App grant runtime gate order");
+assertBefore(client, "markAgentAppMcpRuntimeUnavailable();", "mcpConfigPath = acceptedAgentAppInlineMcpConfig", "Agent App grant runtime gate order");
 matches(client, /selectAgentAppRuntimeForTargets\(runtimes, runtimeTargets\)/, "Agent App stateless-safe runtime selection");
 matches(client, /let routerAgent = req\.agentAppMode \? undefined/, "Agent App router disable");
 matches(client, /const history = req\.agentAppMode \? \[\] : listChatMessages/, "Agent App empty history");
@@ -182,6 +182,8 @@ for (const forbidden of [
 }
 matches(envResolver, /const env: NodeJS\.ProcessEnv = \{\};/, "Agent App empty environment base");
 matches(envResolver, /env\.AGENTLAS_UNTRUSTED_NO_TOOLS = "1"/, "Agent App untrusted environment sentinel");
+matches(envResolver, /env\.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1"/, "Agent App host auto-memory isolation");
+matches(envResolver, /env\.ENABLE_CLAUDEAI_MCP_SERVERS = "false"/, "Agent App subscription connector isolation");
 assert.doesNotMatch(
   between(envResolver, "export function buildAgentAppRunnerEnv", "export async function buildRunnerEnv", "Agent App environment builder"),
   /\.\.\.process\.env|readDotEnv|readEnvVar|credentials\.env|vault/i,
@@ -197,7 +199,7 @@ matches(ipc, /invocationService\.start\(rendererInvocationRequest\(req\)\)/, "Re
 // A DB catalog row is insufficient: Agent Apps reject package-manager download
 // commands before verification and expose only exact, currently verified tools.
 matches(mcpConfigPolicy, /function hasPinnedSiteAgentAppExecutable/, "Pinned local MCP executable gate");
-matches(mcpConfigPolicy, /server\.catalogId !== AGENTLAS_SYSTEM_TIME_CATALOG_ID\) return false/, "time-only executable provenance gate");
+matches(mcpConfigPolicy, /isCanonicalSystemTimeMcpServer\(server\)/, "time-only executable provenance gate");
 matches(capabilities, /validSiteAgentAppMcpConsentDecision/, "Main-owned MCP consent receipt gate");
 matches(capabilities, /reason: "consent-required"/, "Missing consent no-tool disclosure");
 matches(capabilities, /reason: "key-missing"/, "Missing key no-tool disclosure");
@@ -233,11 +235,12 @@ assertBefore(runnerBody(grok, "runGrok"), "if (req.untrustedNoTools)", "readEnvV
 assertBefore(runnerBody(grok, "runGrok"), "if (req.untrustedNoTools)", "fs.writeFile(", "Grok prompt-file isolation");
 assertBefore(runnerBody(gemini, "runGemini"), "if (req.untrustedNoTools)", "stageCliImageAttachments(", "Gemini attachment isolation");
 // Claude Code is the one CLI with a verified zero-builtins + exact-MCP contract.
-for (const flag of ["--safe-mode", "--disable-slash-commands", "--no-chrome", "--no-session-persistence", "--strict-mcp-config"]) {
+for (const flag of ["--safe-mode", "--setting-sources", "--disable-slash-commands", "--no-chrome", "--no-session-persistence", "--strict-mcp-config"]) {
   assert.ok(claude.includes(`"${flag}"`), `Claude must enforce ${flag}`);
 }
 matches(claude, /"--tools",\s*""/, "Claude empty tool set");
-matches(claude, /wrapSystemPrompt\([\s\S]{0,320}?runReq\.untrustedNoTools,\s*runReq\.untrustedAllowedMcpTools,\s*\)/, "Claude isolated capability prompt wrapper");
+matches(claude, /runReq\.untrustedNoTools\s*\? \(hasExactUntrustedMcpGrant \? runReq\.untrustedAllowedMcpTools : undefined\)/, "Claude prompt receives MCP authority only after exact config validation");
+matches(claude, /hasExactUntrustedMcpGrant \? \["--setting-sources", ""\] : \["--safe-mode"\]/, "Claude subscription-safe filesystem settings isolation");
 matches(claude, /const fingerprint = !runReq\.untrustedNoTools &&/, "Claude fingerprint persistence block");
 matches(claude, /const savedSession = !runReq\.untrustedNoTools &&/, "Claude saved-session read block");
 matches(claude, /const resumeSessionId = runReq\.untrustedNoTools \? null/, "Claude resume disable");
@@ -248,9 +251,13 @@ matches(
 );
 assert.doesNotMatch(claude, /exclude-dynamic/i, "Claude must not move dynamic host context into the user message");
 matches(claude, /const hasExactUntrustedMcpGrant = Boolean\(/, "Claude exact untrusted MCP gate");
+matches(claude, /isCanonicalAgentAppInlineMcpConfig\(runReq\.mcpConfigPath\)/, "Claude compact inline config gate");
+matches(claude, /Object\.keys\(parsed\.mcpServers\)[\s\S]{0,180}agentlas-time/, "Claude single built-in config gate");
+matches(claude, /onAgentAppMcpRuntimeUnavailable/, "Claude invalid inline grant disclosure downgrade");
 matches(claude, /validSiteAgentAppMcpGrantTools\(/, "Claude exact MCP tool validation");
 matches(claude, /runReq\.mcpConfigPath && \(!runReq\.untrustedNoTools \|\| hasExactUntrustedMcpGrant\)/, "Claude MCP config fail-closed gate");
-matches(claude, /containsMcpStartupTransportFatal\(stderr\)[\s\S]{0,900}agentAppMcpFallbackAttempted: true/, "Claude exact MCP startup fallback");
+matches(claude, /hasExactUntrustedMcpGrant[\s\S]{0,260}!agentAppMcpInitConnected[\s\S]{0,700}agentAppMcpFallbackAttempted: true/, "Claude exact MCP pre-init fallback");
+matches(claude, /ev\.mcp_servers\.length === 1[\s\S]{0,320}JSON\.stringify\(reportedTools\) === JSON\.stringify\(expectedTools\)/, "Claude exact MCP init receipt gate");
 matches(claude, /mcpConfigPath: undefined,[\s\S]{0,180}mcpAllowedTools: undefined,[\s\S]{0,180}untrustedAllowedMcpTools: undefined/, "Claude fallback MCP authority removal");
 matches(claude, /stripAgentAppMcpSecretAliases\(runReq\.env\)/, "Claude fallback opaque secret removal");
 

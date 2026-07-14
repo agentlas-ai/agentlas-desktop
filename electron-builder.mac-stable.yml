@@ -31,6 +31,14 @@ asarUnpack:
   - "**/node_modules/better-sqlite3/**/*"
   - "**/node_modules/keytar/**/*"
 
+electronFuses:
+  resetAdHocDarwinSignature: true
+  runAsNode: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+
 # ── Embedded Hephaestus engine + optional Python runtime ─────────────────────
 # Keep the from/to/filter rules in sync with electron-builder.yml's extraResources.
 # This file is a standalone (non-`extends`) duplicate, so without this block the

@@ -76,13 +76,20 @@ authority for which version is actually public, stable, and downloadable.
   consent; missing keys, decline, stale readiness, malformed legacy rows, and
   connection failure all continue safely without tools. Only the audited
   keyless System Time MCP can currently attach; unpinned Brave Search remains
-  visible but blocked. Active Desktop agents can read bounded project memory
+  visible but blocked. System Time runs from a checksum-verified compressed
+  in-memory payload rather than a mutable user-profile script. Packaged app
+  code is restricted to ASAR on every target, with embedded ASAR integrity
+  validation on supported macOS and Windows packages. Run-as-Node remains a
+  global fuse for required workers (internally exact-gated), not a path-scoped
+  sandbox; removing it requires migrating those workers to dedicated runtimes.
+  Active Desktop agents can
+  read bounded project memory
   through canonical, replacement-safe identities, while Site/Agent App/Mobile
   restricted surfaces remain project-memory-free. Agentlas OS v1.1.28 still
   completes the canonical first-contact privacy contract
   before agent work starts. Codex allocation uses exact live-verified
-  context, capability, and reasoning-effort metadata and records the effort actually applied without
-  storing prompts or secrets. This entry is a
+  context, capability, and reasoning-effort metadata and records the effort
+  actually applied without storing prompts or secrets. This entry is a
   local integration candidate until cross-platform CI and the release owner
   promote it; v0.8.24 remains the current source release.
 

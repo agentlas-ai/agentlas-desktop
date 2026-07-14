@@ -104,6 +104,50 @@ export function installFromCatalog(catalogId: string): InstalledMcpServer {
   return getServer(id)!;
 }
 
+/**
+ * Reconcile an already installed catalog row with the trusted catalog bundled
+ * in this Desktop build. The stable global id, enabled choice, install time,
+ * and any agent references stay intact. Used for built-ins whose audited launch
+ * payload changes across Desktop updates.
+ */
+export function refreshInstalledCatalogServer(catalogId: string): InstalledMcpServer | null {
+  const entry = getCatalogEntry(catalogId);
+  if (!entry) throw new Error(`Unknown MCP catalog id: ${catalogId}`);
+  const db = getDb();
+  const existing = db
+    .prepare("SELECT * FROM mcp_servers WHERE catalog_id = ?")
+    .get(catalogId) as ServerRow | undefined;
+  if (!existing) return null;
+  const command = entry.command ?? null;
+  const argsJson = JSON.stringify(entry.args ?? []);
+  const url = entry.url ?? null;
+  const envKeysJson = JSON.stringify(entry.envRequirements.map((requirement) => requirement.key));
+  if (
+    existing.name === entry.name &&
+    existing.name_en === entry.nameEn &&
+    existing.transport === entry.transport &&
+    existing.command === command &&
+    existing.args_json === argsJson &&
+    existing.url === url &&
+    existing.env_keys_json === envKeysJson
+  ) return toServer(existing);
+  db.prepare(
+    `UPDATE mcp_servers
+     SET name = ?, name_en = ?, transport = ?, command = ?, args_json = ?, url = ?, env_keys_json = ?
+     WHERE id = ?`,
+  ).run(
+    entry.name,
+    entry.nameEn,
+    entry.transport,
+    command,
+    argsJson,
+    url,
+    envKeysJson,
+    existing.id,
+  );
+  return getServer(existing.id);
+}
+
 export function installCustomServer(def: {
   name: string;
   transport: McpTransport;

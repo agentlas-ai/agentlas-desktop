@@ -22,7 +22,7 @@ import {
   vaultUrlKey,
 } from "../opencrab/constants";
 import type { InstalledMcpServer, McpServerStatus } from "../../shared/types";
-import { isAuthenticSystemTimeMcpSource } from "./system-time-server";
+import { isCanonicalSystemTimeMcpServer } from "./system-time-server";
 
 /** npx 첫 다운로드까지 고려한 넉넉한 연결 타임아웃. */
 const CONNECT_TIMEOUT_MS = 45_000;
@@ -147,6 +147,9 @@ function redactResolvedSecrets(message: string, resolved: Record<string, string>
  * Streamable HTTP 전용 서버 연결이 깨졌다).
  */
 function createTransport(server: InstalledMcpServer, resolved: Record<string, string>): unknown {
+  if (server.catalogId === "agentlas-time" && !isCanonicalSystemTimeMcpServer(server)) {
+    throw new Error("Agentlas System Time MCP launch contract is invalid");
+  }
   if (server.transport === "stdio") {
     if (!server.command) throw new Error("stdio server has no command");
     const baseEnv = withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" });
@@ -154,12 +157,7 @@ function createTransport(server: InstalledMcpServer, resolved: Record<string, st
       Object.entries(baseEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
     );
     if (
-      server.catalogId === "agentlas-time" &&
-      server.url === null &&
-      server.envKeys.length === 0 &&
-      path.resolve(server.command) === path.resolve(process.execPath) &&
-      server.args.length === 1 &&
-      isAuthenticSystemTimeMcpSource(server.args[0])
+      isCanonicalSystemTimeMcpServer(server)
     ) {
       stdioEnv.ELECTRON_RUN_AS_NODE = "1";
     }

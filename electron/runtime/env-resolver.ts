@@ -143,6 +143,11 @@ export function buildAgentAppRunnerEnv(
     if (AGENT_APP_MCP_SECRET_ALIAS_RE.test(key) && typeof value === "string" && value) env[key] = value;
   }
   env.AGENTLAS_UNTRUSTED_NO_TOOLS = "1";
+  // Empty Claude setting sources exclude user/project/local instructions,
+  // skills, plugins, and hooks. These two host-level sources sit outside that
+  // switch, so disable them explicitly for browser-originated Agent Apps.
+  env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
+  env.ENABLE_CLAUDEAI_MCP_SERVERS = "false";
   env.NO_COLOR = "1";
   return env;
 }

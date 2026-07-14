@@ -31,6 +31,19 @@ asarUnpack:
   - "**/node_modules/better-sqlite3/**/*"
   - "**/node_modules/keytar/**/*"
 
+# Required workers still need the globally enabled ELECTRON_RUN_AS_NODE fuse;
+# their internal call sites exact-gate command/argv. The fuse itself is not
+# path-scoped. Generic Node option/inspector injection remains disabled. App
+# code must come from app.asar; Electron validates its embedded integrity on
+# supported macOS and Windows packages. Linux remains unsigned and ASAR-only.
+electronFuses:
+  resetAdHocDarwinSignature: true
+  runAsNode: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+
 # ── Embedded Hephaestus engine ───────────────────────────────────────────────
 # Hephaestus is a separate open-source repo (git-ignored here). It is copied into
 # the packaged app from the on-disk folder — independent of git tracking — so the

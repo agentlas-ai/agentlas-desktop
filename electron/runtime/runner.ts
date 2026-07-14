@@ -38,7 +38,8 @@ export interface RunnerRequest {
    */
   cwd?: string;
   /**
-   * MCP 서버 구성 파일 경로(.mcp.json). 설정되면 Claude Code 러너가 `--mcp-config`로 전달한다.
+   * MCP config path, or a Main-validated inline JSON object for restricted
+   * Agent Apps. Claude Code accepts both forms through `--mcp-config`.
    */
   mcpConfigPath?: string;
   /** 위 구성의 MCP 툴 이름 prefix 목록(예: "mcp__playwright"). write/full 권한에서 자동 승인용. */

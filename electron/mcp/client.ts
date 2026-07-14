@@ -70,9 +70,7 @@ import { parseSurfaces } from "../surface-emitter";
 import { createAutomation, listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import {
-  readStableRegularFile,
-  SITE_AGENT_APP_MCP_CONFIG_MAX_BYTES,
-  validateSiteAgentAppMcpConfigBytes,
+  resolveSiteAgentAppInlineMcpConfigForDispatch,
 } from "../site/agent-app-mcp-config-policy";
 import { listInstalledServers as listInstalledMcpServers } from "../mcp-tools/registry";
 import { getAgentApp } from "../store/agent-apps";
@@ -1056,6 +1054,7 @@ export async function runMcpInvocation(
   let mcpAutoSelectionPrompt = "";
   const runtimeCanUseMcp = active.kind === "claude-code" || active.kind === "codex";
   const agentAppToolGrant = req.agentAppMode ? req.agentAppRuntimeToolGrant : undefined;
+  let acceptedAgentAppInlineMcpConfig: string | undefined;
   const markAgentAppMcpRuntimeUnavailable = () => {
     if (agentAppToolGrant) agentAppToolGrant.runtimeStatus = "runtime-unavailable";
   };
@@ -1081,31 +1080,11 @@ export async function runMcpInvocation(
     const exactEnvAliases = runtimeEnvKeys.length === 0;
     let exactConfig = false;
     try {
-      const bindings = agentAppToolGrant.mcpServerBindings;
-      const bindingCatalogIds = Array.isArray(bindings) ? bindings.map((item) => item.catalogId).sort() : [];
-      const rows = new Map(listInstalledMcpServers().map((server) => [server.id, server]));
-      const latest = Array.isArray(bindings)
-        ? bindings.map((binding) => rows.get(binding.serverId)).filter((row): row is NonNullable<typeof row> => Boolean(row))
-        : [];
-      const configBytes = readStableRegularFile(
-        agentAppToolGrant.mcpConfigPath,
-        SITE_AGENT_APP_MCP_CONFIG_MAX_BYTES,
-      );
-      const validated = configBytes && Array.isArray(bindings)
-        ? validateSiteAgentAppMcpConfigBytes({
-            bytes: configBytes,
-            configPath: agentAppToolGrant.mcpConfigPath,
-            bindings,
-            servers: latest,
-          })
-        : null;
-      exactConfig = Boolean(
-        validated &&
-        /^[a-f0-9]{64}$/.test(agentAppToolGrant.mcpConfigSha256) &&
-        validated.sha256 === agentAppToolGrant.mcpConfigSha256 &&
-        JSON.stringify(bindingCatalogIds) === JSON.stringify([...agentAppToolGrant.availableCatalogIds].sort()) &&
-        JSON.stringify(Object.keys(agentAppToolGrant.mcpRuntimeEnv).sort()) === JSON.stringify(validated.runtimeAliases),
-      );
+      acceptedAgentAppInlineMcpConfig = resolveSiteAgentAppInlineMcpConfigForDispatch(
+        agentAppToolGrant,
+        listInstalledMcpServers(),
+      ) ?? undefined;
+      exactConfig = Boolean(acceptedAgentAppInlineMcpConfig);
     } catch {
       exactConfig = false;
     }
@@ -1123,7 +1102,11 @@ export async function runMcpInvocation(
       markAgentAppMcpRuntimeUnavailable();
     } else {
       agentAppToolGrant.runtimeStatus = "accepted";
-      mcpConfigPath = agentAppToolGrant.mcpConfigPath;
+      // Claude accepts either a path or an inline JSON object for
+      // --mcp-config. Pass the compact canonical serialization derived from
+      // the exact bytes just revalidated above so delayed firm/group execution
+      // never re-opens a mutable config/wrapper pathname.
+      mcpConfigPath = acceptedAgentAppInlineMcpConfig;
       mcpAllowedTools = [...agentAppToolGrant.mcpAllowedTools];
       mcpRuntimeEnv = { ...agentAppToolGrant.mcpRuntimeEnv };
     }

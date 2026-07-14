@@ -16,6 +16,7 @@ on:
       - "electron/site/store.ts"
       - "electron/runtime/codex-models.ts"
       - "electron/runtime/codex.ts"
+      - "electron/runtime/claude-code.ts"
       - "electron/runtime/detect.ts"
       - "electron/runtime/runner.ts"
       - "electron/runtime/workload-routing.ts"
@@ -28,8 +29,11 @@ on:
       - "scripts/test-stormbreaker-core-harness.cjs"
       - "scripts/test-owned-agent-runtime-prompts.cjs"
       - "scripts/test-site-agent-app-*.cjs"
+      - "scripts/test-packaged-agent-app-mcp.cjs"
       - "shared/site-studio.ts"
       - "shared/types.ts"
+      - "electron-builder.yml"
+      - "electron-builder.mac-stable.yml"
       - "package.json"
       - ".github/workflows/cross-platform-harness.yml"
   push:
@@ -47,6 +51,7 @@ on:
       - "electron/site/store.ts"
       - "electron/runtime/codex-models.ts"
       - "electron/runtime/codex.ts"
+      - "electron/runtime/claude-code.ts"
       - "electron/runtime/detect.ts"
       - "electron/runtime/runner.ts"
       - "electron/runtime/workload-routing.ts"
@@ -59,8 +64,11 @@ on:
       - "scripts/test-stormbreaker-core-harness.cjs"
       - "scripts/test-owned-agent-runtime-prompts.cjs"
       - "scripts/test-site-agent-app-*.cjs"
+      - "scripts/test-packaged-agent-app-mcp.cjs"
       - "shared/site-studio.ts"
       - "shared/types.ts"
+      - "electron-builder.yml"
+      - "electron-builder.mac-stable.yml"
       - "package.json"
       - ".github/workflows/cross-platform-harness.yml"
 
@@ -83,15 +91,15 @@ jobs:
         with:
           repository: agentlas-ai/Agentlas-OS
           ref: d741da796289678c38fac1059f0473f271d0f7e9
-          path: Agentlas-OS
+          path: agentlas-desktop/Hephaestus
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22.12.0"
           cache: npm
           cache-dependency-path: agentlas-desktop/package-lock.json
       - name: Verify Core source pin
-        working-directory: Agentlas-OS
+        working-directory: agentlas-desktop/Hephaestus
         shell: bash
         run: test "$(git rev-parse HEAD)" = "d741da796289678c38fac1059f0473f271d0f7e9"
       - uses: actions/setup-python@v5
@@ -110,7 +118,7 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: agentlas-desktop
         env:
-          HEPHAESTUS_RUNTIME_ROOT: ${{ github.workspace }}/Agentlas-OS
+          HEPHAESTUS_RUNTIME_ROOT: ${{ github.workspace }}/agentlas-desktop/Hephaestus
           HEPHAESTUS_PYTHON: python
           AGENTLAS_HARNESS_PROOF_PATH: ${{ runner.temp }}/desktop-harness-proof.json
         run: |
@@ -126,7 +134,7 @@ jobs:
         if: runner.os != 'Linux'
         working-directory: agentlas-desktop
         env:
-          HEPHAESTUS_RUNTIME_ROOT: ${{ github.workspace }}/Agentlas-OS
+          HEPHAESTUS_RUNTIME_ROOT: ${{ github.workspace }}/agentlas-desktop/Hephaestus
           HEPHAESTUS_PYTHON: python
           AGENTLAS_HARNESS_PROOF_PATH: ${{ runner.temp }}/desktop-harness-proof.json
         run: |
@@ -146,6 +154,14 @@ jobs:
         if: runner.os != 'Linux'
         working-directory: agentlas-desktop
         run: npm run test:agent-app-runtime:prepared
+      - name: Build and verify packaged Agent App MCP boundary
+        working-directory: agentlas-desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          npm run build
+          npx electron-builder --dir --publish never --config.directories.output="${{ runner.temp }}/agentlas-package-smoke" -c.mac.identity=null -c.mac.notarize=false
+          npm run test:packaged-agent-app-mcp -- "${{ runner.temp }}/agentlas-package-smoke"
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-harness-proof-${{ runner.os }}
