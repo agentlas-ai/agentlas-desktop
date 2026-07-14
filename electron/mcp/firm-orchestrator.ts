@@ -23,7 +23,7 @@ import {
   getChatWorkingFolder,
   listChatMessages,
 } from "../store/chats";
-import { recordFolderVisit } from "../architecture/activation";
+import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
 import { curateReply, stripReplyMemoryEventsReadOnly } from "../memory/curator";
@@ -33,6 +33,7 @@ import { parseAutomations } from "../automation-emitter";
 import { parseSurfaces } from "../surface-emitter";
 import { stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
 import { buildDelegateProtocol, parseDelegations, type Delegation } from "./delegate";
+import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { pickRunner, selectRuntimeForTargets } from "../runtime/selection";
 import { getAgentConcurrency } from "../store/concurrency";
 import { tryRecordRunEvent } from "../store/run-events";
@@ -46,6 +47,7 @@ import {
 import { SURFACE_INTENT_MARKER } from "../runtime/runner";
 import {
   defaultWorkloadAllocation,
+  reconcileWorkloadRunnerResult,
   resolveWorkloadAllocationAcrossRuntimes,
   workloadAllocationReceipt,
   type WorkloadAllocation,
@@ -123,6 +125,8 @@ export interface FirmRunParams {
   mcpCodexConfigArgs?: string[];
   /** Main-minted opaque MCP aliases for a one-run Agent App grant. */
   agentAppMcpRuntimeEnv?: NodeJS.ProcessEnv;
+  /** Marks the main-owned one-run grant unavailable after a runtime MCP fatal. */
+  onAgentAppMcpRuntimeUnavailable?: () => void;
   runnerEnv?: NodeJS.ProcessEnv;
   locale: RuntimeLocale;
   sink: EventSink;
@@ -333,6 +337,16 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       }
     }
   }
+  const memoryReadPath = workingFolder && (
+    activePath === workingFolder ||
+    canReadActivatedFolderMemory(workingFolder, {
+      permission: p.req.permissions,
+      restrictedReadBoundary: p.restrictedReadBoundary,
+      agentAppMode: p.req.agentAppMode,
+    })
+  )
+    ? workingFolder
+    : null;
 
   // 시스템 프롬프트 = 노드 프롬프트 + canonical owner memory + (리더면 위임) + 메모리 emitter
   const firmRolePrompt = node.prompt?.trim() || `You are ${node.name}, the ${node.role} of this firm.`;
@@ -344,7 +358,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   }
   if (!p.req.agentAppMode) {
     try {
-      const mem = buildMemoryContext(activePath, memoryOwnerId);
+      const mem = buildMemoryContext(memoryReadPath, memoryOwnerId, {
+        materializeCodeMap: Boolean(activePath),
+      });
       if (mem) systemPrompt += `\n\n${mem}`;
     } catch {
       // ignore memory failures
@@ -385,14 +401,6 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     );
   }
   if (workloadResolution) {
-    tryRecordRunEvent({
-      runId: p.req.runId ?? `firm:${p.chat.id}`,
-      kind: "workload_allocation",
-      chatId: p.chat.id,
-      nodeId: node.id,
-      agentId: memoryOwnerId,
-      payload: workloadAllocationReceipt(workloadResolution),
-    });
     if (workloadResolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
       emit({
         kind: "tool-use",
@@ -436,7 +444,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
 
   if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
   const agentAppAllowedTools = p.req.agentAppMode && p.mcpConfigPath && p.mcpAllowedTools?.length &&
-    p.mcpAllowedTools.every((tool) => /^mcp__brave-search__(?:brave_web_search|brave_local_search)$/.test(tool))
+    validSiteAgentAppMcpGrantTools(p.mcpAllowedTools)
     ? p.mcpAllowedTools
     : undefined;
   const result = await picked.runner(
@@ -464,6 +472,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         : p.runnerEnv,
       untrustedNoTools: p.req.agentAppMode === true,
       untrustedAllowedMcpTools: agentAppAllowedTools,
+      onAgentAppMcpRuntimeUnavailable: p.req.agentAppMode
+        ? p.onAgentAppMcpRuntimeUnavailable
+        : undefined,
       locale: p.locale,
     },
     {
@@ -484,6 +495,17 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       },
     },
   );
+  if (workloadResolution) {
+    const executedResolution = reconcileWorkloadRunnerResult(workloadResolution, result);
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `firm:${p.chat.id}`,
+      kind: "workload_allocation",
+      chatId: p.chat.id,
+      nodeId: node.id,
+      agentId: memoryOwnerId,
+      payload: workloadAllocationReceipt(executedResolution),
+    });
+  }
 
   // delegation 블록 분리 → 메모리 큐레이션(노드 agentId로) → 정리된 텍스트
   const safeResultText = restrictedFirmText(

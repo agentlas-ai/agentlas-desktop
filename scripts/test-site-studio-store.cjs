@@ -248,12 +248,20 @@ try {
   assert.doesNotThrow(() => assertSiteProjectIdle(project.id));
 
   const sitePageSource = fs.readFileSync(path.join(__dirname, "..", "renderer/app/(shell)/site/page.tsx"), "utf8");
+  const siteGenerateSource = fs.readFileSync(path.join(__dirname, "..", "electron/site/generate.ts"), "utf8");
+  const invocationSource = fs.readFileSync(path.join(__dirname, "..", "electron/mcp/client.ts"), "utf8");
   const preloadSource = fs.readFileSync(path.join(__dirname, "..", "electron/preload.ts"), "utf8");
   assert.match(preloadSource, /operationStatus:[\s\S]{0,100}site:operationStatus/, "preload must expose the main-owned Site mutex state");
   assert.match(sitePageSource, /site\?\.operationStatus/, "Site remount must query the main-owned project operation");
   assert.match(sitePageSource, /remoteOperation !== null/, "restored main activity must keep destructive controls disabled");
   assert.match(sitePageSource, /화면을 삭제하지 못했습니다|Could not delete the screen/, "main busy rejection must be visible instead of unhandled");
   assert.match(sitePageSource, /프로젝트를 삭제하지 못했습니다|Could not delete the project/, "project busy rejection must be visible instead of unhandled");
+  assert.match(siteGenerateSource, /\{ source: "site-studio" \}/,
+    "Site Studio must enter a main-owned no-project-memory execution context");
+  assert.match(invocationSource, /const suppressProjectBinding = executionContext\?\.source === "site-studio"[\s\S]{0,500}const invocationProjectId = suppressProjectBinding \? null : chat\.projectId/,
+    "Site Studio must freeze both folder and project-id authority in Main");
+  assert.match(invocationSource, /buildExperienceContext\(\{[\s\S]{0,180}projectId: invocationProjectId,[\s\S]{0,100}projectPath: workingFolder/,
+    "Site Studio's no-project binding must reach Experience selection as well as memory recall");
 
   // 경로 탈출 방어 — id는 [a-zA-Z0-9-]만.
   assert.throws(() => store.readSiteScreenHtml(project.id, "../secret"), /잘못된 id/, "path traversal must throw");

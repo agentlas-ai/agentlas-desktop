@@ -20,6 +20,11 @@ const claude = {
   model: "opus",
   availableModels: ["opus", "sonnet", "haiku"],
   allocationModels: ["opus", "sonnet", "haiku"],
+  allocationModelProfiles: {
+    opus: { costTier: "frontier", contextWindow: 200000, capabilities: ["tools"], supportsTools: true },
+    sonnet: { costTier: "balanced", contextWindow: 200000, capabilities: ["tools"], supportsTools: true },
+    haiku: { costTier: "economy", contextWindow: 200000, capabilities: ["tools"], supportsTools: true },
+  },
   effort: "high",
   efforts: ["low", "medium", "high", "xhigh", "max"].map((id) => ({ id, label: id })),
 };
@@ -32,6 +37,11 @@ const codex = {
   model: "gpt-5.6-sol",
   availableModels: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
   allocationModels: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+  allocationModelProfiles: {
+    "gpt-5.6-sol": { costTier: "frontier", contextWindow: 200000, capabilities: ["tools"], supportsTools: true, efforts: ["low", "medium", "high", "xhigh", "max"] },
+    "gpt-5.6-terra": { costTier: "balanced", contextWindow: 200000, capabilities: ["tools"], supportsTools: true, efforts: ["low", "medium", "high", "xhigh", "max"] },
+    "gpt-5.6-luna": { costTier: "economy", contextWindow: 200000, capabilities: ["tools"], supportsTools: true, efforts: ["low", "medium"] },
+  },
 };
 const grok = {
   kind: "grok",
@@ -42,6 +52,9 @@ const grok = {
   model: "grok-4.5",
   availableModels: ["grok-4.5"],
   allocationModels: ["grok-4.5"],
+  allocationModelProfiles: {
+    "grok-4.5": { costTier: "frontier", contextWindow: 100000, capabilities: [] },
+  },
   efforts: ["low", "medium", "high"].map((id) => ({ id, label: id })),
 };
 const cursor = {
@@ -54,6 +67,9 @@ const cursor = {
   // Auto is the only account-safe autonomous Cursor selection.
   availableModels: ["auto"],
   allocationModels: ["auto"],
+  allocationModelProfiles: {
+    auto: { costTier: "balanced", contextWindow: 100000, capabilities: ["tools"], supportsTools: true },
+  },
 };
 
 function allocation(tier, effort = "medium", phase = "delegate", modelId, runtimeId) {
@@ -63,6 +79,7 @@ function allocation(tier, effort = "medium", phase = "delegate", modelId, runtim
     tier,
     effort,
     phase,
+    requirements: { inputTokens: 0, expectedOutputTokens: 0, toolRequired: false, multimodalRequired: false },
     reasonCodes: ["bounded-scope"],
     rationale: "Small isolated child with bounded output.",
   }, phase);
@@ -95,8 +112,50 @@ const codexBalanced = routing.resolveWorkloadAllocation({
   phase: "delegate",
 });
 assert.equal(codexBalanced.runtime.model, "gpt-5.6-terra", "parent exact live model must be selected");
-assert.equal(codexBalanced.runtime.effort, "xhigh", "Codex max must transparently clamp to its supported xhigh");
-assert.ok(codexBalanced.resolutionCodes.includes("effort-clamped-to-capability"));
+assert.equal(codexBalanced.runtime.effort, "max", "host-verified per-model max effort must be preserved");
+assert.equal(codexBalanced.resolutionCodes.includes("effort-clamped-to-capability"), false);
+
+const codexLunaLimited = routing.resolveWorkloadAllocation({
+  allocation: allocation("economy", "high", "delegate", "gpt-5.6-luna"),
+  runtime: codex,
+  phase: "delegate",
+});
+assert.equal(codexLunaLimited.runtime.effort, "medium", "effort must clamp to the selected model profile, not the runtime-wide union");
+assert.ok(codexLunaLimited.resolutionCodes.includes("effort-clamped-to-capability"));
+
+const codexInvalidEffortProfile = {
+  ...codex,
+  effort: "low",
+  allocationModelProfiles: {
+    ...codex.allocationModelProfiles,
+    "gpt-5.6-sol": { ...codex.allocationModelProfiles["gpt-5.6-sol"], efforts: [] },
+  },
+};
+const codexInvalidEffortChoice = routing.resolveWorkloadAllocation({
+  allocation: allocation("frontier", "max", "delegate", "gpt-5.6-sol"),
+  runtime: codexInvalidEffortProfile,
+  phase: "delegate",
+});
+assert.equal(codexInvalidEffortChoice.runtime.effort, null);
+assert.ok(codexInvalidEffortChoice.resolutionCodes.includes("effort-capability-unavailable"));
+
+const maxOnlyCodex = {
+  ...codex,
+  effort: "max",
+  allocationModelProfiles: {
+    ...codex.allocationModelProfiles,
+    "gpt-5.6-sol": { ...codex.allocationModelProfiles["gpt-5.6-sol"], efforts: ["max"] },
+  },
+};
+const maxOnlyUnderHighPolicy = routing.resolveWorkloadAllocation({
+  allocation: allocation("frontier", "max", "delegate", "gpt-5.6-sol"),
+  runtime: maxOnlyCodex,
+  phase: "delegate",
+  hostPolicy: { maxEffort: "high" },
+});
+assert.equal(maxOnlyUnderHighPolicy.runtime.effort, null, "host maxEffort must never escalate back to the model minimum");
+assert.ok(maxOnlyUnderHighPolicy.resolutionCodes.includes("effort-clamped-to-host-policy"));
+assert.ok(maxOnlyUnderHighPolicy.resolutionCodes.includes("effort-below-capability-unavailable"));
 
 const unavailable = routing.resolveWorkloadAllocation({
   allocation: allocation("frontier", "high", "delegate", "gpt-5.6-sol"),
@@ -109,6 +168,7 @@ const unavailable = routing.resolveWorkloadAllocation({
   phase: "delegate",
 });
 assert.equal(unavailable.runtime.model, "gpt-5.6-terra", "missing tier must preserve active model");
+assert.equal(unavailable.runtime.effort, codex.effort, "invalid exact model must preserve active effort atomically");
 assert.ok(unavailable.resolutionCodes.includes("parent-model-not-in-live-inventory-active-preserved"));
 
 const manualOverride = {
@@ -130,7 +190,14 @@ const receipt = routing.workloadAllocationReceipt({
   ...claudeEconomy,
   allocation: {
     ...claudeEconomy.allocation,
-    rationale: "Inspect /Users/private/customer/project and mail owner@example.com with sk-abcdefghijklmnop",
+    rationale: [
+      "고객명=김온리리시트-7Q9X",
+      "의료정보=희귀질환-오로라-9284 진단 이력",
+      "법률정보=비공개가사사건-델타-5519 합의 내용",
+      "비표준비밀=ZETA_PRIVATE_CREDENTIAL_4F8A1C",
+      "한국어민감문장=당사자만 알아야 하는 회생 신청 내역",
+      "Inspect /Users/private/customer/project and mail owner@example.com with sk-abcdefghijklmnop",
+    ].join("; "),
   },
 });
 const receiptJson = JSON.stringify(receipt);
@@ -141,13 +208,46 @@ assert.deepEqual(Object.keys(receipt).sort(), [
   "reasonCodes", "requested", "resolved", "schemaVersion", "selectorVersion", "status", "validationIssues",
 ].sort(), "Desktop allocation receipt must match the Core public top-level contract exactly");
 assert.doesNotMatch(receiptJson, /\/Users\/private|owner@example\.com|sk-abcdefghijklmnop/);
+for (const privateValue of [
+  "김온리리시트-7Q9X",
+  "희귀질환-오로라-9284",
+  "비공개가사사건-델타-5519",
+  "ZETA_PRIVATE_CREDENTIAL_4F8A1C",
+  "당사자만 알아야 하는 회생 신청 내역",
+]) {
+  assert.equal(receiptJson.includes(privateValue), false, `receipt leaked rationale value: ${privateValue}`);
+}
 assert.doesNotMatch(receiptJson, /userPrompt|brief|history|systemPrompt|tool/i, "receipt must contain allocation metadata, not prompts/tools");
+assert.deepEqual(
+  receipt.reasonCodes,
+  ["bounded-scope", "parent-live-model-selected"],
+  "receipt must persist only normalized allocation/resolution codes, never rationale-derived text",
+);
+const alternateRationaleReceipt = routing.workloadAllocationReceipt({
+  ...claudeEconomy,
+  allocation: { ...claudeEconomy.allocation, rationale: "완전히 다른 비공개 설명 OMEGA-7721" },
+});
+assert.equal(
+  alternateRationaleReceipt.inputFeatureHash,
+  receipt.inputFeatureHash,
+  "rationale must not influence the persisted receipt hash",
+);
+assert.deepEqual(alternateRationaleReceipt.reasonCodes, receipt.reasonCodes);
+
+const runnerRevalidated = routing.reconcileWorkloadRunnerResult(codexBalanced, { appliedEffort: "xhigh" });
+assert.equal(runnerRevalidated.runtime.effort, "xhigh");
+assert.ok(runnerRevalidated.resolutionCodes.includes("runner-effort-revalidated"));
+assert.equal(
+  routing.workloadAllocationReceipt(runnerRevalidated).resolved.effort,
+  "xhigh",
+  "persisted receipt must use the runner-applied effort, not the provisional allocation",
+);
 
 const parsedDelegation = delegation.parseDelegations(`Plan\n\n## Delegate\n\`\`\`json
 {"delegations":[
-  {"target":"Researcher","brief":"Check facts","allocation":{"runtimeId":"runtime-1","modelId":"haiku","tier":"economy","effort":"low","phase":"delegate","reasonCodes":["bounded-scope"],"rationale":"bounded lookup"}},
-  {"target":"Architect","brief":"Resolve design","allocation":{"runtimeId":"runtime-1","modelId":"opus","tier":"frontier","effort":"xhigh","phase":"delegate","reasonCodes":["high-risk"],"rationale":"cross-system decision"}}
-],"synthesis":{"runtimeId":"runtime-1","modelId":"sonnet","tier":"balanced","effort":"high","phase":"synthesize","reasonCodes":["cross-result-synthesis"],"rationale":"merge two results"}}
+  {"target":"Researcher","brief":"Check facts","allocation":{"runtimeId":"runtime-1","modelId":"haiku","tier":"economy","effort":"low","phase":"delegate","requirements":{"inputTokens":1000,"expectedOutputTokens":500,"toolRequired":false,"multimodalRequired":false},"reasonCodes":["bounded-scope"],"rationale":"bounded lookup"}},
+  {"target":"Architect","brief":"Resolve design","allocation":{"runtimeId":"runtime-1","modelId":"opus","tier":"frontier","effort":"xhigh","phase":"delegate","requirements":{"inputTokens":2000,"expectedOutputTokens":1000,"toolRequired":false,"multimodalRequired":false},"reasonCodes":["high-risk"],"rationale":"cross-system decision"}}
+],"synthesis":{"runtimeId":"runtime-1","modelId":"sonnet","tier":"balanced","effort":"high","phase":"synthesize","requirements":{"inputTokens":3000,"expectedOutputTokens":1000,"toolRequired":false,"multimodalRequired":false},"reasonCodes":["cross-result-synthesis"],"rationale":"merge two results"}}
 \`\`\``);
 assert.deepEqual(parsedDelegation.delegations.map((item) => item.allocation.tier), ["economy", "frontier"]);
 assert.equal(parsedDelegation.synthesisAllocation.tier, "balanced");
@@ -195,12 +295,19 @@ const crossRuntimeGrok = routing.resolveWorkloadAllocationAcrossRuntimes({
 assert.equal(crossRuntimeGrok.runtime.kind, "codex", "Grok family aliases must not manufacture a cross-runtime choice");
 
 const liveInventory = routing.workloadRuntimeInventory([codex, claude, grok, cursor]);
+assert.deepEqual(liveInventory[0].efforts, ["low", "medium", "high", "xhigh", "max"]);
+assert.deepEqual(liveInventory[0].modelProfiles["gpt-5.6-luna"].efforts, ["low", "medium"]);
 assert.deepEqual(liveInventory[1], {
   runtimeId: "runtime-2",
   kind: "claude-code",
   backend: "anthropic",
   models: ["opus", "sonnet", "haiku"],
   efforts: ["low", "medium", "high", "xhigh", "max"],
+  modelProfiles: {
+    opus: { costTier: "frontier", contextWindow: 200000, capabilities: ["tools"], supportsTools: true, supportsMultimodal: null, efforts: null },
+    sonnet: { costTier: "balanced", contextWindow: 200000, capabilities: ["tools"], supportsTools: true, supportsMultimodal: null, efforts: null },
+    haiku: { costTier: "economy", contextWindow: 200000, capabilities: ["tools"], supportsTools: true, supportsMultimodal: null, efforts: null },
+  },
 });
 const displayOnlyRuntime = {
   ...codex,
@@ -216,6 +323,7 @@ assert.deepEqual(
 const exactParentChoice = routing.resolveWorkloadAllocationAcrossRuntimes({
   allocation: routing.normalizeWorkloadAllocation({
     runtimeId: "runtime-2", modelId: "sonnet", tier: "balanced", effort: "high", phase: "delegate",
+    requirements: { inputTokens: 0, expectedOutputTokens: 0, toolRequired: false, multimodalRequired: false },
     reasonCodes: ["parent-live-inventory-choice"], rationale: "parent selected the exact live session/model pair",
   }, "delegate"),
   runtimes: [codex, claude, grok, cursor],
@@ -227,24 +335,163 @@ assert.equal(exactParentChoice.runtime.model, "sonnet");
 assert.equal(exactParentChoice.runtime.effort, "high");
 assert.ok(exactParentChoice.resolutionCodes.includes("parent-selected-live-runtime-model"));
 
+const unknownProfileRuntime = { ...claude, allocationModelProfiles: undefined };
+const unknownProfileChoice = routing.resolveWorkloadAllocationAcrossRuntimes({
+  allocation: routing.normalizeWorkloadAllocation({
+    runtimeId: "runtime-1", modelId: "haiku", tier: "economy", effort: "low", phase: "delegate",
+    requirements: { inputTokens: 500, expectedOutputTokens: 200, toolRequired: false, multimodalRequired: false },
+    reasonCodes: ["unknown-profile"], rationale: "runtime discovery did not provide a profile",
+  }, "delegate"),
+  runtimes: [unknownProfileRuntime],
+  fallbackRuntime: unknownProfileRuntime,
+  phase: "delegate",
+});
+assert.equal(unknownProfileChoice.runtime.model, "opus", "unknown context profile must not switch exact models");
+assert.ok(unknownProfileChoice.resolutionCodes.includes("requested-exact-model-context-incompatible-active-preserved"));
+
+const missingRequirementsChoice = routing.resolveWorkloadAllocationAcrossRuntimes({
+  allocation: routing.normalizeWorkloadAllocation({
+    runtimeId: "runtime-1", modelId: "haiku", tier: "economy", effort: "low", phase: "delegate",
+    reasonCodes: ["legacy-parent"], rationale: "requirements omitted",
+  }, "delegate"),
+  runtimes: [claude],
+  fallbackRuntime: claude,
+  phase: "delegate",
+});
+assert.equal(missingRequirementsChoice.runtime.model, "opus");
+assert.ok(missingRequirementsChoice.resolutionCodes.includes("parent-requirements-invalid-active-preserved"));
+
 const invalidFallback = routing.resolveWorkloadAllocation({
   allocation: routing.normalizeWorkloadAllocation(null, "delegate"),
   runtime: claude,
   phase: "delegate",
 });
 assert.equal(invalidFallback.runtime.model, "opus", "invalid planner output must preserve the active model");
+assert.equal(invalidFallback.runtime.effort, "high", "invalid planner output must preserve active effort");
+
+const invalidPairWithMaxEffort = routing.resolveWorkloadAllocationAcrossRuntimes({
+  allocation: routing.normalizeWorkloadAllocation({
+    runtimeId: "runtime-99", modelId: "invented-frontier", tier: "frontier", effort: "max", phase: "delegate",
+    reasonCodes: ["invalid-pair-test"], rationale: "must preserve the active fallback",
+  }, "delegate"),
+  runtimes: [claude, codex],
+  fallbackRuntime: claude,
+  phase: "delegate",
+});
+assert.equal(invalidPairWithMaxEffort.runtime.model, "opus");
+assert.equal(invalidPairWithMaxEffort.runtime.effort, "high", "invalid pair must not upgrade effort to max");
+const invalidPairReceipt = routing.workloadAllocationReceipt(invalidPairWithMaxEffort);
+assert.equal(invalidPairReceipt.requested.sessionId, "runtime-99");
+assert.equal(invalidPairReceipt.resolved.sessionId, "runtime-1");
+assert.equal(invalidPairReceipt.resolved.modelId, "opus");
+assert.equal(invalidPairReceipt.resolved.tier, "frontier");
+
+const constrainedClaude = {
+  ...claude,
+  allocationModelProfiles: {
+    opus: {
+      costTier: "frontier",
+      contextWindow: 200_000,
+      capabilities: ["tools", "multimodal"],
+      supportsTools: true,
+      supportsMultimodal: true,
+    },
+    sonnet: {
+      costTier: "balanced",
+      contextWindow: 32_000,
+      capabilities: [],
+      supportsTools: false,
+      supportsMultimodal: false,
+    },
+  },
+};
+const costRejected = routing.resolveWorkloadAllocationAcrossRuntimes({
+  allocation: routing.normalizeWorkloadAllocation({
+    runtimeId: "runtime-1", modelId: "opus", tier: "frontier", effort: "max", phase: "delegate",
+    requirements: { inputTokens: 1000, expectedOutputTokens: 500, toolRequired: false, multimodalRequired: false },
+    reasonCodes: ["parent-choice"], rationale: "frontier requested",
+  }, "delegate"),
+  runtimes: [constrainedClaude],
+  fallbackRuntime: codex,
+  phase: "delegate",
+  hostPolicy: { maxTier: "balanced" },
+});
+assert.equal(costRejected.runtime.model, codex.model);
+assert.equal(costRejected.runtime.effort, codex.effort);
+assert.ok(costRejected.resolutionCodes.includes("parent-tier-exceeds-host-cost-policy-active-preserved"));
+
+const contextRejected = routing.resolveWorkloadAllocationAcrossRuntimes({
+  allocation: routing.normalizeWorkloadAllocation({
+    runtimeId: "runtime-1", modelId: "sonnet", tier: "balanced", effort: "high", phase: "delegate",
+    requirements: { inputTokens: 40_000, expectedOutputTokens: 8_000, toolRequired: false, multimodalRequired: false },
+    reasonCodes: ["large-context"], rationale: "large context",
+  }, "delegate"),
+  runtimes: [constrainedClaude],
+  fallbackRuntime: codex,
+  phase: "delegate",
+});
+assert.equal(contextRejected.runtime.model, codex.model);
+assert.ok(contextRejected.resolutionCodes.includes("requested-exact-model-context-incompatible-active-preserved"));
+
+const capabilityRejected = routing.resolveWorkloadAllocationAcrossRuntimes({
+  allocation: routing.normalizeWorkloadAllocation({
+    runtimeId: "runtime-1", modelId: "sonnet", tier: "balanced", effort: "high", phase: "delegate",
+    requirements: { inputTokens: 1_000, expectedOutputTokens: 1_000, toolRequired: true, multimodalRequired: false },
+    reasonCodes: ["tool-required"], rationale: "tool use required",
+  }, "delegate"),
+  runtimes: [constrainedClaude],
+  fallbackRuntime: codex,
+  phase: "delegate",
+});
+assert.equal(capabilityRejected.runtime.model, codex.model);
+assert.ok(capabilityRejected.resolutionCodes.includes("requested-exact-model-tools-incompatible-active-preserved"));
+
+const validConstrained = routing.resolveWorkloadAllocationAcrossRuntimes({
+  allocation: routing.normalizeWorkloadAllocation({
+    runtimeId: "runtime-1", modelId: "opus", tier: "frontier", effort: "max", phase: "delegate",
+    requirements: { inputTokens: 10_000, expectedOutputTokens: 2_000, toolRequired: true, multimodalRequired: true },
+    reasonCodes: ["verified-profile"], rationale: "host profile is compatible",
+  }, "delegate"),
+  runtimes: [constrainedClaude],
+  fallbackRuntime: codex,
+  phase: "delegate",
+  hostPolicy: { maxTier: "frontier", maxEffort: "high", requiredCapabilities: ["tools"] },
+});
+assert.equal(validConstrained.runtime.model, "opus");
+assert.equal(validConstrained.runtime.effort, "high");
+assert.ok(validConstrained.resolutionCodes.includes("effort-clamped-to-host-policy"));
+
+const typoPolicy = routing.resolveWorkloadAllocationAcrossRuntimes({
+  allocation: allocation("balanced", "high", "delegate", "sonnet", "runtime-1"),
+  runtimes: [constrainedClaude],
+  fallbackRuntime: codex,
+  phase: "delegate",
+  hostPolicy: { max_tier: "balanced" },
+});
+assert.equal(typoPolicy.runtime.model, codex.model);
+assert.ok(typoPolicy.resolutionCodes.includes("host-allocation-policy-invalid-active-preserved"));
+
+const oversizedCapabilitiesPolicy = routing.resolveWorkloadAllocationAcrossRuntimes({
+  allocation: allocation("balanced", "high", "delegate", "sonnet", "runtime-1"),
+  runtimes: [constrainedClaude],
+  fallbackRuntime: codex,
+  phase: "delegate",
+  hostPolicy: { requiredCapabilities: Array.from({ length: 33 }, (_, index) => `cap-${index}`) },
+});
+assert.equal(oversizedCapabilitiesPolicy.runtime.model, codex.model);
+assert.ok(oversizedCapabilitiesPolicy.resolutionCodes.includes("host-allocation-policy-invalid-active-preserved"));
 
 const borrowedPlan = borrowed.parseBorrowedWorkloadPlan(`## Agent Input Packets\n\`\`\`json
-{"packets":[{"agent":"a","brief":"one","allocation":{"runtimeId":"runtime-1","modelId":"haiku","tier":"luna","effort":"low","phase":"delegate","reasonCodes":["bounded-scope"],"rationale":"small"}}],"synthesis":{"runtimeId":"runtime-2","modelId":"gpt-5.6-sol","tier":"sol","effort":"xhigh","phase":"synthesize","reasonCodes":["high-risk"],"rationale":"final"}}
+{"packets":[{"agent":"a","brief":"one","allocation":{"runtimeId":"runtime-1","modelId":"haiku","tier":"luna","effort":"low","phase":"delegate","requirements":{"inputTokens":100,"expectedOutputTokens":100,"toolRequired":false,"multimodalRequired":false},"reasonCodes":["bounded-scope"],"rationale":"small"}}],"synthesis":{"runtimeId":"runtime-2","modelId":"gpt-5.6-sol","tier":"sol","effort":"xhigh","phase":"synthesize","requirements":{"inputTokens":200,"expectedOutputTokens":100,"toolRequired":false,"multimodalRequired":false},"reasonCodes":["high-risk"],"rationale":"final"}}
 \`\`\``);
 assert.equal(borrowedPlan.packets[0].allocation.tier, "economy");
 assert.equal(borrowedPlan.synthesisAllocation.tier, "frontier");
 
 const swarmPlan = swarm.parseSwarmOutput(`root result\n## Spawn\n\`\`\`json
 {"tasks":[
-  {"role":"worker","brief":"cheap child","allocation":{"runtimeId":"runtime-2","modelId":"haiku","tier":"haiku","effort":"low","phase":"delegate","reasonCodes":["parallel-throughput"],"rationale":"small"}},
-  {"role":"reviewer","brief":"critical child","allocation":{"runtimeId":"runtime-2","modelId":"opus","tier":"opus","effort":"xhigh","phase":"delegate","reasonCodes":["high-risk"],"rationale":"critical"}}
-],"synthesis":{"runtimeId":"runtime-2","modelId":"sonnet","tier":"sonnet","effort":"high","phase":"synthesize","reasonCodes":["cross-result-synthesis"],"rationale":"merge"}}
+  {"role":"worker","brief":"cheap child","allocation":{"runtimeId":"runtime-2","modelId":"haiku","tier":"haiku","effort":"low","phase":"delegate","requirements":{"inputTokens":100,"expectedOutputTokens":100,"toolRequired":false,"multimodalRequired":false},"reasonCodes":["parallel-throughput"],"rationale":"small"}},
+  {"role":"reviewer","brief":"critical child","allocation":{"runtimeId":"runtime-2","modelId":"opus","tier":"opus","effort":"xhigh","phase":"delegate","requirements":{"inputTokens":200,"expectedOutputTokens":100,"toolRequired":false,"multimodalRequired":false},"reasonCodes":["high-risk"],"rationale":"critical"}}
+],"synthesis":{"runtimeId":"runtime-2","modelId":"sonnet","tier":"sonnet","effort":"high","phase":"synthesize","requirements":{"inputTokens":300,"expectedOutputTokens":100,"toolRequired":false,"multimodalRequired":false},"reasonCodes":["cross-result-synthesis"],"rationale":"merge"}}
 \`\`\``);
 assert.deepEqual(swarmPlan.spawn.map((item) => item.allocation.tier), ["economy", "frontier"]);
 assert.equal(swarmPlan.synthesisAllocation.tier, "balanced");
@@ -308,6 +555,23 @@ for (const relative of [
 ]) {
   const plannerSource = fs.readFileSync(path.join(__dirname, "..", ...relative), "utf8");
   assert.match(plannerSource, /workloadAllocationInventoryPrompt/, `${relative.join("/")} must receive value-safe live inventory`);
+}
+
+for (const [relative, expectedReceipts] of [
+  [["electron", "hephaestus", "builder.ts"], 1],
+  [["electron", "mcp", "borrowed-task-force.ts"], 2],
+  [["electron", "mcp", "firm-orchestrator.ts"], 1],
+  [["electron", "mcp", "swarm-run.ts"], 2],
+]) {
+  const executionSource = fs.readFileSync(path.join(__dirname, "..", ...relative), "utf8");
+  const receiptArgs = [...executionSource.matchAll(/workloadAllocationReceipt\(([^)]+)\)/g)]
+    .map((match) => match[1].trim());
+  assert.equal(receiptArgs.length, expectedReceipts, `${relative.join("/")} receipt count changed`);
+  assert.ok(
+    receiptArgs.every((argument) => argument.startsWith("executed")),
+    `${relative.join("/")} must not persist a provisional pre-run allocation receipt`,
+  );
+  assert.match(executionSource, /reconcileWorkloadRunnerResult\(/);
 }
 
 console.log("workload routing contract ok");

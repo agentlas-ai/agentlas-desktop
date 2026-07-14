@@ -13,9 +13,19 @@ import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { hasEnvVar } from "../secrets/vault";
 import {
+  approvedSiteAgentAppMcpCatalogIds,
   SITE_AGENT_APP_READONLY_MCP_ALLOWLIST,
   validSiteAgentAppMcpConsentDecision,
 } from "./agent-app-mcp-consent";
+import { validSiteAgentAppExposedToolNames } from "./agent-app-tool-policy";
+import {
+  hasExactSiteAgentAppCatalogEnv,
+  hasPinnedSiteAgentAppExecutable,
+  readStableRegularFile,
+  SITE_AGENT_APP_MCP_CONFIG_MAX_BYTES,
+  validateSiteAgentAppMcpConfigBytes,
+  type SiteAgentAppMcpServerBinding,
+} from "./agent-app-mcp-config-policy";
 
 /**
  * Agent Apps accept untrusted browser input. Only catalog capabilities whose
@@ -24,7 +34,6 @@ import {
  */
 const SECRET_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;
 const SAFE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,79}$/;
-const BRAVE_TOOL_ALLOWLIST = new Set(["brave_web_search", "brave_local_search"]);
 
 export type SiteAgentAppCapabilityDisclosure = {
   available: string[];
@@ -187,41 +196,10 @@ function preparedCapabilities(
   };
 }
 
-function regularNonSymlinkFile(file: string, executable = false): boolean {
-  if (!path.isAbsolute(file)) return false;
-  try {
-    const link = fs.lstatSync(file);
-    if (link.isSymbolicLink() || !link.isFile()) return false;
-    if (path.resolve(fs.realpathSync(file)) !== path.resolve(file)) return false;
-    if (executable) fs.accessSync(file, fs.constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Never let Agent App verification itself turn an `npx -y <package>` catalog
- * row into a download. A completed installation must point at a local pinned
- * executable (or a local script executed by an absolute Node binary).
- */
-export function hasPinnedSiteAgentAppExecutable(server: InstalledMcpServer): boolean {
-  if (server.transport !== "stdio" || !server.command || !regularNonSymlinkFile(server.command, true)) return false;
-  const args = server.args ?? [];
-  if (args.some((arg) => /^(?:https?:|git\+|npm:)/i.test(arg) || /^(?:-y|--yes|--package|-p|--eval|-e)$/.test(arg))) return false;
-  const executableName = path.basename(server.command).toLowerCase();
-  if (executableName === "npx" || executableName === "npm" || executableName === "pnpm" || executableName === "yarn" || executableName === "bunx") return false;
-  if (/^(?:node|node\.exe|electron|electron\.exe)$/.test(executableName)) {
-    return Boolean(args[0] && regularNonSymlinkFile(args[0]));
-  }
-  return true;
-}
-
-function verifiedBraveTools(status: McpServerStatus): string[] | null {
+function verifiedPolicyTools(server: InstalledMcpServer, status: McpServerStatus): string[] | null {
   if (!status.connected || status.missingEnv.length > 0 || status.error) return null;
   const names = [...new Set(status.tools.map((tool) => tool.name))];
-  if (!names.includes("brave_web_search") || names.some((name) => !BRAVE_TOOL_ALLOWLIST.has(name))) return null;
-  return names;
+  return server.catalogId && validSiteAgentAppExposedToolNames(server.catalogId, names) ? names : null;
 }
 
 /**
@@ -235,23 +213,32 @@ export async function prepareSiteAgentAppCapabilities(
   deps: SiteAgentAppCapabilityPreparationDeps = {},
 ): Promise<PreparedSiteAgentAppCapabilities> {
   const normalized = normalizeSiteAgentAppCapabilityProfile(profile, profile?.source ?? "none");
-  const requested = normalized.readonlyMcpCatalogIds;
+  const declared = normalized.readonlyMcpCatalogIds;
   const unavailable = [...normalized.unavailable];
   const noTools = () => preparedCapabilities(
     null,
     { available: [], unavailable: uniqueIssues(unavailable) },
     () => {},
   );
-  if (!requested.length) {
+  if (!declared.length) {
     return noTools();
   }
   if (
     !deps.projectId ||
     validSiteAgentAppMcpConsentDecision(normalized, deps.projectId, deps.consentReceipt) !== "approved"
   ) {
-    for (const id of requested) unavailable.push({ id, reason: "consent-required" });
+    for (const id of declared) unavailable.push({ id, reason: "consent-required" });
     return noTools();
   }
+  const requested = approvedSiteAgentAppMcpCatalogIds(
+    normalized,
+    deps.projectId,
+    deps.consentReceipt,
+  );
+  for (const id of declared) {
+    if (!requested.includes(id)) unavailable.push({ id, reason: "consent-required" });
+  }
+  if (!requested.length) return noTools();
   if (deps.runtimeEligible === false) {
     for (const id of requested) unavailable.push({ id, reason: "runtime-unavailable" });
     return noTools();
@@ -265,8 +252,11 @@ export async function prepareSiteAgentAppCapabilities(
     return noTools();
   }
   const requestedRows = allRows.filter((server) => server.catalogId && requested.includes(server.catalogId));
-  const installedRows = requestedRows.filter((server) => server.enabled);
-  const installed = installedRows.filter(hasPinnedSiteAgentAppExecutable);
+  const installed: InstalledMcpServer[] = [];
+  for (const id of requested) {
+    const enabledRows = requestedRows.filter((server) => server.catalogId === id && server.enabled);
+    if (enabledRows.length === 1 && hasPinnedSiteAgentAppExecutable(enabledRows[0])) installed.push(enabledRows[0]);
+  }
   const installedCatalogIds = new Set(installed.map((server) => server.catalogId!));
   for (const id of requested) {
     if (!installedCatalogIds.has(id)) unavailable.push({
@@ -277,11 +267,6 @@ export async function prepareSiteAgentAppCapabilities(
   if (!installed.length) {
     return noTools();
   }
-  if (installed.length !== 1) {
-    unavailable.push({ id: "brave-search", reason: "not-configured" });
-    return noTools();
-  }
-
   const hasCredential = deps.hasCredential ?? hasEnvVar;
   const credentialReady: InstalledMcpServer[] = [];
   for (const server of installed) {
@@ -289,7 +274,7 @@ export async function prepareSiteAgentAppCapabilities(
     const requiredKeys = entry?.envRequirements
       .filter((requirement) => requirement.required)
       .map((requirement) => requirement.key) ?? [];
-    if (requiredKeys.some((key) => !server.envKeys.includes(key))) {
+    if (!hasExactSiteAgentAppCatalogEnv(server)) {
       unavailable.push({ id: server.catalogId!, reason: "not-configured" });
       continue;
     }
@@ -312,7 +297,7 @@ export async function prepareSiteAgentAppCapabilities(
   for (const server of credentialReady) {
     try {
       const status = await verifyServer(server);
-      const tools = verifiedBraveTools(status);
+      const tools = verifiedPolicyTools(server, status);
       if (tools) verified.push({ server, tools });
       else unavailable.push({
         id: server.catalogId!,
@@ -343,24 +328,33 @@ export async function prepareSiteAgentAppCapabilities(
 
   const included = config.includedServers ?? [];
   const includedCatalogIds = [...new Set(included.map((server) => server.catalogId).filter((id): id is string => Boolean(id)))];
-  let serializedConfigSafe = false;
+  const bindings: SiteAgentAppMcpServerBinding[] = included.flatMap((server) => server.catalogId ? [{
+    serverId: server.serverId,
+    catalogId: server.catalogId,
+    configKey: server.configKey,
+  }] : []);
+  const resolvedConfigPath = path.resolve(config.configPath);
+  const cleanup = () => {
+    try { fs.rmSync(resolvedConfigPath, { force: true }); } catch { /* one-run cleanup is best effort */ }
+  };
+  let validatedConfig: ReturnType<typeof validateSiteAgentAppMcpConfigBytes> = null;
   try {
-    const link = fs.lstatSync(config.configPath);
-    const text = fs.readFileSync(config.configPath, "utf8");
-    const parsed = JSON.parse(text) as { mcpServers?: unknown };
-    const serverKeys = parsed.mcpServers && typeof parsed.mcpServers === "object" && !Array.isArray(parsed.mcpServers)
-      ? Object.keys(parsed.mcpServers)
-      : [];
     const latestRows = new Map((deps.listInstalled ?? listInstalledServers)().map((server) => [server.id, server]));
-    serializedConfigSafe = link.isFile() && !link.isSymbolicLink() &&
-      serverKeys.length === 1 && serverKeys[0] === "brave-search" &&
-      !/\bnpx\b|(?:^|["\s])-y(?:["\s,]|$)|@modelcontextprotocol\/server-brave-search/i.test(text) &&
-      included.every((server) => {
-        const latest = latestRows.get(server.serverId);
-        return Boolean(latest?.enabled && latest.catalogId === "brave-search" && hasPinnedSiteAgentAppExecutable(latest));
-      });
+    const latest = bindings.map((binding) => latestRows.get(binding.serverId)).filter((row): row is InstalledMcpServer => Boolean(row));
+    const bytes = readStableRegularFile(resolvedConfigPath, SITE_AGENT_APP_MCP_CONFIG_MAX_BYTES);
+    validatedConfig = bytes ? validateSiteAgentAppMcpConfigBytes({
+      bytes,
+      configPath: resolvedConfigPath,
+      bindings,
+      servers: latest,
+    }) : null;
+    if (validatedConfig) {
+      const runtimeKeys = Object.keys(config.runtimeEnv).sort();
+      if (JSON.stringify(runtimeKeys) !== JSON.stringify(validatedConfig.runtimeAliases) ||
+          runtimeKeys.some((key) => !SECRET_ALIAS_RE.test(key) || !config.runtimeEnv[key])) validatedConfig = null;
+    }
   } catch {
-    serializedConfigSafe = false;
+    validatedConfig = null;
   }
   const unexpected = included.some((server) =>
     !server.catalogId || !requested.includes(server.catalogId) || !SITE_AGENT_APP_READONLY_MCP_ALLOWLIST.has(server.catalogId));
@@ -369,10 +363,12 @@ export async function prepareSiteAgentAppCapabilities(
     const entry = verifiedByServerId.get(server.serverId);
     return (entry?.tools ?? []).map((tool) => `mcp__${server.configKey}__${tool}`);
   });
-  const exactTools = exactAllowedTools.length > 0 && exactAllowedTools.every((tool) =>
-    /^mcp__[a-z0-9_-]+__(?:brave_web_search|brave_local_search)$/.test(tool));
-  if (unexpected || !serializedConfigSafe || !exactTools || includedCatalogIds.length === 0) {
-    try { fs.rmSync(config.configPath, { force: true }); } catch { /* best effort */ }
+  const exactTools = included.every((server) => {
+    const entry = verifiedByServerId.get(server.serverId);
+    return Boolean(server.catalogId && entry && validSiteAgentAppExposedToolNames(server.catalogId, entry.tools));
+  });
+  if (unexpected || !validatedConfig || !exactTools || includedCatalogIds.length === 0 || bindings.length !== included.length) {
+    cleanup();
     for (const id of installedCatalogIds) unavailable.push({ id, reason: "not-configured" });
     return noTools();
   }
@@ -380,16 +376,14 @@ export async function prepareSiteAgentAppCapabilities(
     if (!includedCatalogIds.includes(id)) unavailable.push({ id, reason: "not-configured" });
   }
 
-  const resolvedConfigPath = path.resolve(config.configPath);
-  const cleanup = () => {
-    try { fs.rmSync(resolvedConfigPath, { force: true }); } catch { /* one-run cleanup is best effort */ }
-  };
   const grant: NonNullable<McpInvocationRequest["agentAppRuntimeToolGrant"]> = {
       schemaVersion: 1,
       mcpConfigPath: resolvedConfigPath,
+      mcpConfigSha256: validatedConfig.sha256,
       mcpAllowedTools: exactAllowedTools,
       mcpRuntimeEnv: safeRuntimeEnv(config.runtimeEnv),
       availableCatalogIds: includedCatalogIds,
+      mcpServerBindings: bindings,
       runtimeStatus: "prepared",
   };
   return preparedCapabilities(

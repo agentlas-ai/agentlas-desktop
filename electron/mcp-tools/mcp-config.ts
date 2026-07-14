@@ -119,7 +119,7 @@ function validateEnvKey(value: string): string {
   return key;
 }
 
-function secretAlias(serverKey: string, envKey: string): string {
+export function mcpRuntimeSecretAlias(serverKey: string, envKey: string): string {
   const digest = createHash("sha256").update(serverKey).update("\0").update(envKey).digest("hex");
   return `${SECRET_ALIAS_PREFIX}${digest.slice(0, 32).toUpperCase()}`;
 }
@@ -192,6 +192,9 @@ for (const key of PROXY_KEYS) {
     if (/^https?:$/.test(parsed.protocol) && !parsed.username && !parsed.password) env[key] = parsed.toString();
   } catch {}
 }
+// A built-in MCP may use the signed Electron binary as its bundled Node
+// runtime. Do not forward this switch to unrelated external executables.
+if (command === process.execPath) env.ELECTRON_RUN_AS_NODE = "1";
 for (const [targetKey, alias] of Object.entries(mapping)) {
   if (!ENV_KEY_RE.test(targetKey) || typeof alias !== "string" || !MCP_ALIAS_RE.test(alias)) {
     process.stderr.write("Agentlas MCP secret wrapper rejected an invalid environment mapping.\\n");
@@ -217,6 +220,11 @@ child.once("error", (error) => {
 });
 child.once("exit", (code) => process.exit(typeof code === "number" ? code : 1));
 `;
+
+/** Value-free integrity pin used by the Agent App execution boundary. */
+export const MCP_CHILD_ENV_WRAPPER_SHA256 = createHash("sha256")
+  .update(MCP_CHILD_ENV_WRAPPER)
+  .digest("hex");
 
 function ensurePrivateDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -384,7 +392,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         const envKey = validateEnvKey(rawKey);
         const value = resolvedEnv.get(envKey);
         if (!value) continue;
-        const alias = secretAlias(key, envKey);
+        const alias = mcpRuntimeSecretAlias(key, envKey);
         secretAliases[envKey] = alias;
         runtimeEnv[alias] = value;
       }
@@ -435,7 +443,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         const rawUrl = resolvedEnv.get(vaultKey)?.trim();
         const resolvedUrl = rawUrl ? resolveVaultRemoteUrl(s, rawUrl) : null;
         if (!resolvedUrl) continue; // vault 값이 없거나 검증 실패면 서버를 싣지 않는다
-        const alias = secretAlias(key, vaultKey);
+        const alias = mcpRuntimeSecretAlias(key, vaultKey);
         runtimeEnv[alias] = resolvedUrl;
         serializedUrl = envReference(alias);
       }
@@ -451,7 +459,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           codexRemoteSupported = false;
           continue;
         }
-        const alias = secretAlias(key, header);
+        const alias = mcpRuntimeSecretAlias(key, header);
         const bearer = header.toLowerCase() === "authorization"
           ? value.match(/^Bearer\s+(.+)$/i)
           : null;

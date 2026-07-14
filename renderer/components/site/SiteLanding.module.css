@@ -178,8 +178,11 @@
 .cardActions { display: flex; align-items: center; gap: 3px; flex: 0 0 auto; }
 .mcpButton { display: inline-flex; align-items: center; gap: 4px; padding: 5px 7px; border: 1px solid #dce8e3; border-radius: 999px; background: #f8fbfa; color: #61706a; cursor: pointer; font-size: 9px; font-weight: 670; }
 .mcpButton:hover { border-color: #b9d8cc; background: #eef8f4; color: var(--teal); }
-.mcpButton[data-status="approved"] { border-color: #c5e1d7; background: #edf8f4; color: #17745d; }
-.mcpButton[data-status="declined"] { border-color: #e5e8e7; background: #f4f5f5; color: #8a9490; }
+.mcpButton[data-status="ready"] { border-color: #c5e1d7; background: #edf8f4; color: #17745d; }
+.mcpButton[data-status="review"] { border-color: #ead9b8; background: #fff9ee; color: #886224; }
+.mcpButton[data-status="offline"] { border-color: #e5e8e7; background: #f5f6f6; color: #7b8682; }
+.mcpButton[data-status="off"] { border-color: #e5e8e7; background: #f4f5f5; color: #8a9490; }
+.mcpButton[data-status="blocked"] { border-color: #ebc9c5; background: #fff4f2; color: #a54a3f; }
 .openButton { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; padding: 6px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--teal); cursor: pointer; font-size: 10px; font-weight: 670; }
 .openButton:hover { background: #eef8f4; }
 .cardFooter { min-height: 35px; display: flex; align-items: center; gap: 8px; padding: 0 15px 10px; color: #929c98; font-size: 9px; }

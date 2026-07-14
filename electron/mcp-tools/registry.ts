@@ -28,6 +28,8 @@ interface ServerRow {
 }
 
 function toServer(row: ServerRow): InstalledMcpServer {
+  const args = safeJsonArray(row.args_json);
+  const envKeys = safeJsonArray(row.env_keys_json);
   return {
     id: row.id,
     catalogId: row.catalog_id,
@@ -35,20 +37,23 @@ function toServer(row: ServerRow): InstalledMcpServer {
     nameEn: row.name_en || row.name,
     transport: row.transport,
     command: row.command,
-    args: safeJsonArray(row.args_json),
+    args: args.values,
     url: row.url,
-    envKeys: safeJsonArray(row.env_keys_json),
+    envKeys: envKeys.values,
+    configurationValid: args.valid && envKeys.valid,
     enabled: row.enabled === 1,
     installedAt: row.installed_at,
   };
 }
 
-function safeJsonArray(json: string): string[] {
+function safeJsonArray(json: string): { values: string[]; valid: boolean } {
   try {
     const v = JSON.parse(json);
-    return Array.isArray(v) ? (v as string[]) : [];
+    return Array.isArray(v) && v.every((item) => typeof item === "string")
+      ? { values: v, valid: true }
+      : { values: [], valid: false };
   } catch {
-    return [];
+    return { values: [], valid: false };
   }
 }
 

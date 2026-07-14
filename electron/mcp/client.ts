@@ -54,7 +54,7 @@ import {
 } from "./borrowed-task-force";
 import { runSwarmInvocation } from "./swarm-run";
 import { getAgentGroup, resolveAgentGroupForRuntime } from "../store/agent-groups";
-import { recordFolderVisit } from "../architecture/activation";
+import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
 import { buildExperienceContext } from "../experience/context";
 import { resolveDesktopTasteRuntimeSession } from "../ontology/taste-runtime-session";
@@ -68,6 +68,13 @@ import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
 import { parseSurfaces } from "../surface-emitter";
 import { createAutomation, listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
+import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
+import {
+  readStableRegularFile,
+  SITE_AGENT_APP_MCP_CONFIG_MAX_BYTES,
+  validateSiteAgentAppMcpConfigBytes,
+} from "../site/agent-app-mcp-config-policy";
+import { listInstalledServers as listInstalledMcpServers } from "../mcp-tools/registry";
 import { getAgentApp } from "../store/agent-apps";
 import { autoSelectMcpTools, buildMcpAutoSelectionPrompt } from "../mcp-tools/auto-select";
 import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
@@ -633,7 +640,7 @@ export async function pickActiveRunner(): Promise<
 
 /** Main-process-only invocation provenance. Never deserialize this from IPC/wire input. */
 export interface InvocationExecutionContext {
-  source: "automation";
+  source: "automation" | "site-studio";
 }
 
 /**
@@ -718,6 +725,12 @@ export async function runMcpInvocation(
   // from the renderer request.
   const restrictedReadBoundary =
     Boolean(workspaceBinding) || (executionContext?.source === "automation" && !canWrite);
+  const suppressProjectBinding = executionContext?.source === "site-studio";
+  // Site Studio owns a project-scoped hidden conversation, but that identity is
+  // not authority to consume an arbitrary Desktop Project. Freeze the effective
+  // project id once in Main so a stale/tampered chat row cannot re-enter through
+  // context notes, Experience selection, firm delegation, or curation.
+  const invocationProjectId = suppressProjectBinding ? null : chat.projectId;
   let agent = getAgentById(chat.agentId);
   if (!agent) {
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
@@ -769,7 +782,11 @@ export async function runMcpInvocation(
       explicitBorrowUserPreamble = await buildBorrowUserPreamble(
         borrowedAgentSlugs,
         effectiveUserPrompt,
-        workspaceBinding ? boundMobileWorkingFolder : getChatWorkingFolder(chat.id),
+        workspaceBinding
+          ? boundMobileWorkingFolder
+          : suppressProjectBinding
+            ? null
+            : getChatWorkingFolder(chat.id),
         locale,
         signal,
       );
@@ -819,21 +836,27 @@ export async function runMcpInvocation(
   // 자동 고정한다. firm 경로도 단일 에이전트 경로와 같은 cwd/MCP 구성을 받아야 한다.
   const existingWorkingFolder = workspaceBinding
     ? boundMobileWorkingFolder
-    : getChatWorkingFolder(chat.id);
+    : suppressProjectBinding
+      ? null
+      : getChatWorkingFolder(chat.id);
   const projectWorkingFolder = workspaceBinding
     ? null
-    : chat.projectId
-      ? getProject(chat.projectId)?.folderPath ?? null
+    : invocationProjectId
+      ? getProject(invocationProjectId)?.folderPath ?? null
       : null;
   const inferredWorkingFolder =
     workspaceBinding || !canWrite || existingWorkingFolder || projectWorkingFolder
       ? null
       : inferWorkingFolderFromPrompt(req.userPrompt);
   if (inferredWorkingFolder) setChatWorkingFolder(chat.id, inferredWorkingFolder);
-  const targetAppWorkingFolder = !workspaceBinding && targetApp ? path.resolve(targetApp.rootPath) : null;
-  const workingFolder: string | null = workspaceBinding
-    ? boundMobileWorkingFolder
-    : targetAppWorkingFolder ?? existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
+  const targetAppWorkingFolder = !workspaceBinding && !suppressProjectBinding && targetApp
+    ? path.resolve(targetApp.rootPath)
+    : null;
+  const workingFolder: string | null = suppressProjectBinding
+    ? null
+    : workspaceBinding
+      ? boundMobileWorkingFolder
+      : targetAppWorkingFolder ?? existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
   // Even a global chat executes in a concrete local folder. Persist it in the
   // run receipt so generated files do not become undiscoverable after reload.
   resolvedResultFolder = workingFolder ?? agentRunCwd();
@@ -1033,6 +1056,9 @@ export async function runMcpInvocation(
   let mcpAutoSelectionPrompt = "";
   const runtimeCanUseMcp = active.kind === "claude-code" || active.kind === "codex";
   const agentAppToolGrant = req.agentAppMode ? req.agentAppRuntimeToolGrant : undefined;
+  const markAgentAppMcpRuntimeUnavailable = () => {
+    if (agentAppToolGrant) agentAppToolGrant.runtimeStatus = "runtime-unavailable";
+  };
   const agentAppCapabilityRuntimeEligible =
     req.agentAppMode &&
     "capabilityRuntimeEligible" in runtimeChoice &&
@@ -1041,39 +1067,45 @@ export async function runMcpInvocation(
     // Runtime selection can change between Site's JIT preflight and dispatch.
     // Degrade to the stateless no-tool path rather than passing the grant to a
     // runtime that cannot prove the exact capability boundary.
-    agentAppToolGrant.runtimeStatus = "runtime-unavailable";
+    markAgentAppMcpRuntimeUnavailable();
   } else if (agentAppToolGrant) {
     const toolSet = new Set(agentAppToolGrant.mcpAllowedTools);
     const exactTools =
       toolSet.size === agentAppToolGrant.mcpAllowedTools.length &&
-      toolSet.has("mcp__brave-search__brave_web_search") &&
-      [...toolSet].every((tool) =>
-        /^mcp__brave-search__(?:brave_web_search|brave_local_search)$/.test(tool),
+      validSiteAgentAppMcpGrantTools(
+        agentAppToolGrant.mcpAllowedTools,
+        agentAppToolGrant.availableCatalogIds,
       );
-    const exactCatalog =
-      agentAppToolGrant.availableCatalogIds.length === 1 &&
-      agentAppToolGrant.availableCatalogIds[0] === "brave-search";
-    const exactEnvAliases = Object.keys(agentAppToolGrant.mcpRuntimeEnv).every((key) =>
-      /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/.test(key),
-    );
+    const exactCatalog = new Set(agentAppToolGrant.availableCatalogIds).size === agentAppToolGrant.availableCatalogIds.length;
+    const runtimeEnvKeys = Object.keys(agentAppToolGrant.mcpRuntimeEnv);
+    const exactEnvAliases = runtimeEnvKeys.length === 0;
     let exactConfig = false;
     try {
-      const stat = fs.lstatSync(agentAppToolGrant.mcpConfigPath);
-      const configText = fs.readFileSync(agentAppToolGrant.mcpConfigPath, "utf8");
-      const parsed = JSON.parse(configText) as { mcpServers?: unknown };
-      const serverKeys =
-        parsed.mcpServers && typeof parsed.mcpServers === "object" && !Array.isArray(parsed.mcpServers)
-          ? Object.keys(parsed.mcpServers)
-          : [];
-      exactConfig =
-        path.isAbsolute(agentAppToolGrant.mcpConfigPath) &&
-        stat.isFile() &&
-        !stat.isSymbolicLink() &&
-        serverKeys.length === 1 &&
-        serverKeys[0] === "brave-search";
-      if (/\bnpx\b|(?:^|["\s])-y(?:["\s,]|$)|@modelcontextprotocol\/server-brave-search/i.test(configText)) {
-        exactConfig = false;
-      }
+      const bindings = agentAppToolGrant.mcpServerBindings;
+      const bindingCatalogIds = Array.isArray(bindings) ? bindings.map((item) => item.catalogId).sort() : [];
+      const rows = new Map(listInstalledMcpServers().map((server) => [server.id, server]));
+      const latest = Array.isArray(bindings)
+        ? bindings.map((binding) => rows.get(binding.serverId)).filter((row): row is NonNullable<typeof row> => Boolean(row))
+        : [];
+      const configBytes = readStableRegularFile(
+        agentAppToolGrant.mcpConfigPath,
+        SITE_AGENT_APP_MCP_CONFIG_MAX_BYTES,
+      );
+      const validated = configBytes && Array.isArray(bindings)
+        ? validateSiteAgentAppMcpConfigBytes({
+            bytes: configBytes,
+            configPath: agentAppToolGrant.mcpConfigPath,
+            bindings,
+            servers: latest,
+          })
+        : null;
+      exactConfig = Boolean(
+        validated &&
+        /^[a-f0-9]{64}$/.test(agentAppToolGrant.mcpConfigSha256) &&
+        validated.sha256 === agentAppToolGrant.mcpConfigSha256 &&
+        JSON.stringify(bindingCatalogIds) === JSON.stringify([...agentAppToolGrant.availableCatalogIds].sort()) &&
+        JSON.stringify(Object.keys(agentAppToolGrant.mcpRuntimeEnv).sort()) === JSON.stringify(validated.runtimeAliases),
+      );
     } catch {
       exactConfig = false;
     }
@@ -1085,12 +1117,16 @@ export async function runMcpInvocation(
       !exactEnvAliases ||
       !exactConfig
     ) {
-      throw new Error("Agent App read-only capability grant failed main-process validation.");
+      // The MCP row/config may be removed or replaced after Site's JIT
+      // preflight. Keep the Agent App itself available in stateless no-tool
+      // mode and let finalDisclosure report the exact degraded capability.
+      markAgentAppMcpRuntimeUnavailable();
+    } else {
+      agentAppToolGrant.runtimeStatus = "accepted";
+      mcpConfigPath = agentAppToolGrant.mcpConfigPath;
+      mcpAllowedTools = [...agentAppToolGrant.mcpAllowedTools];
+      mcpRuntimeEnv = { ...agentAppToolGrant.mcpRuntimeEnv };
     }
-    agentAppToolGrant.runtimeStatus = "accepted";
-    mcpConfigPath = agentAppToolGrant.mcpConfigPath;
-    mcpAllowedTools = [...agentAppToolGrant.mcpAllowedTools];
-    mcpRuntimeEnv = { ...agentAppToolGrant.mcpRuntimeEnv };
   }
   if (runtimeCanUseMcp && !req.agentAppMode && canWrite) {
     try {
@@ -1226,6 +1262,7 @@ export async function runMcpInvocation(
         mcpAllowedTools,
         mcpCodexConfigArgs,
         agentAppMcpRuntimeEnv: mcpRuntimeEnv,
+        onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
         runnerEnv: runnerEnv.env,
         locale,
         sink,
@@ -1259,6 +1296,8 @@ export async function runMcpInvocation(
         mcpConfigPath,
         mcpAllowedTools,
         mcpCodexConfigArgs,
+        agentAppMcpRuntimeEnv: mcpRuntimeEnv,
+        onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
         runnerEnv: runnerEnv.env,
         locale,
         sink,
@@ -1335,7 +1374,7 @@ export async function runMcpInvocation(
             : effectiveUserPrompt;
           await runFirmInvocation({
             req: { ...req, userPrompt: firmUserPrompt },
-            chat: { id: chat.id, projectId: chat.projectId, firmId: chat.firmId },
+            chat: { id: chat.id, projectId: invocationProjectId, firmId: chat.firmId },
             org,
             ceoAgent: agent,
             active,
@@ -1348,6 +1387,7 @@ export async function runMcpInvocation(
             mcpAllowedTools,
             mcpCodexConfigArgs,
             agentAppMcpRuntimeEnv: mcpRuntimeEnv,
+            onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
             runnerEnv: runnerEnv.env,
             locale,
             sink,
@@ -1412,8 +1452,8 @@ export async function runMcpInvocation(
       `record what is still open as explicit assumptions instead. 'decide later' is a valid answer (record as deferred). ` +
       `Never use this gate for greetings, pure questions, or already-specific instructions.\n\n${systemPrompt}`;
   }
-  if (chat.projectId) {
-    const project = getProject(chat.projectId);
+  if (invocationProjectId) {
+    const project = getProject(invocationProjectId);
     if (project?.contextNote) {
       systemPrompt = `${systemPrompt}\n\n${tStatus(locale, "projectContext", {
         name: project.name,
@@ -1458,12 +1498,24 @@ export async function runMcpInvocation(
       console.error("[architecture] recordFolderVisit failed:", err);
     }
   }
+  const memoryReadPath = workingFolder && (
+    activePath === workingFolder ||
+    canReadActivatedFolderMemory(workingFolder, {
+      permission: normalizedPermission,
+      restrictedReadBoundary,
+      agentAppMode: req.agentAppMode,
+    })
+  )
+    ? workingFolder
+    : null;
   if (!req.agentAppMode) {
     if (activePath) refreshCareerGraphInBackground(activePath, sink, locale);
     try {
       // `agent` may have changed through auto-routing above. Scope memory to the
       // actual executing agent so another agent's agent_repo never leaks in.
-      const memoryContext = buildMemoryContext(activePath, agent.id);
+      const memoryContext = buildMemoryContext(memoryReadPath, agent.id, {
+        materializeCodeMap: Boolean(activePath && canWrite),
+      });
       if (memoryContext) systemPrompt = `${systemPrompt}\n\n${memoryContext}`;
     } catch (err) {
       console.error("[architecture] buildMemoryContext failed:", err);
@@ -1489,7 +1541,7 @@ export async function runMcpInvocation(
     try {
       const experienceContext = buildExperienceContext({
         agentId: agent.id,
-        projectId: chat.projectId,
+        projectId: invocationProjectId,
         projectPath: workingFolder,
         environment: { platform: process.platform, arch: process.arch, runtimeKind: active.kind },
         basePackageHash: agent.packageHash ?? null,
@@ -1608,6 +1660,9 @@ export async function runMcpInvocation(
       env: runnerEnv.env,
       untrustedNoTools: req.agentAppMode === true,
       untrustedAllowedMcpTools: req.agentAppMode ? mcpAllowedTools : undefined,
+      onAgentAppMcpRuntimeUnavailable: req.agentAppMode
+        ? markAgentAppMcpRuntimeUnavailable
+        : undefined,
       // 사용자가 지정한 워킹 폴더(프로젝트)에서 에이전트를 실행 — 빌드/파일 생성이 거기서 일어난다.
       // 활성화(2회 방문) 게이팅과 무관하게, 폴더가 지정돼 있으면 즉시 cwd로 사용한다.
       cwd: req.agentAppMode ? undefined : workingFolder ?? undefined,
@@ -1920,7 +1975,7 @@ export async function runMcpInvocation(
       try {
         const curationContext = {
           projectPath: activePath,
-          projectId: chat.projectId ?? null,
+          projectId: invocationProjectId,
           agentId: agent.id,
           chatId: chat.id,
           runId: req.runId,
@@ -1960,7 +2015,7 @@ export async function runMcpInvocation(
           cwd: workingFolder,
           ctx: {
             projectPath: activePath,
-            projectId: chat.projectId ?? null,
+            projectId: invocationProjectId,
             agentId: agent.id,
             chatId: chat.id,
             cwdAtRequest: workingFolder,

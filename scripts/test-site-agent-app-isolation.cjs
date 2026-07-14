@@ -21,6 +21,8 @@ const untrustedError = read("electron/runtime/untrusted-error.ts");
 const groups = read("electron/store/agent-groups.ts");
 const ipc = read("electron/ipc.ts");
 const capabilities = read("electron/site/agent-app-capabilities.ts");
+const mcpConfigPolicy = read("electron/site/agent-app-mcp-config-policy.ts");
+const mcpToolPolicy = read("electron/site/agent-app-tool-policy.ts");
 const mcpConsent = read("electron/site/agent-app-mcp-consent.ts");
 const mcpPlan = read("electron/site/agent-app-mcp-plan.ts");
 const siteRuntime = read("electron/site/agent-app-runtime.ts");
@@ -55,9 +57,11 @@ const runnerBody = (source, exportName) => {
 // learning, or continuation loop; each call gets a fresh isolated identity.
 matches(client, /runtimeCanUseMcp\s*&&\s*!req\.agentAppMode/, "Agent App MCP disable");
 matches(client, /const agentAppToolGrant = req\.agentAppMode \? req\.agentAppRuntimeToolGrant : undefined/, "Agent App main grant selection");
-matches(client, /\^mcp__brave-search__\(\?:brave_web_search\|brave_local_search\)\$/, "Agent App exact MCP tool validation");
-matches(client, /agentAppToolGrant && !agentAppCapabilityRuntimeEligible[\s\S]{0,420}agentAppToolGrant\.runtimeStatus = "runtime-unavailable"/, "Agent App incompatible-runtime downgrade");
-assertBefore(client, 'agentAppToolGrant.runtimeStatus = "runtime-unavailable"', "mcpConfigPath = agentAppToolGrant.mcpConfigPath", "Agent App grant runtime gate order");
+matches(client, /validSiteAgentAppMcpGrantTools\(/, "Agent App exact MCP tool validation");
+matches(client, /agentAppToolGrant && !agentAppCapabilityRuntimeEligible[\s\S]{0,420}markAgentAppMcpRuntimeUnavailable\(\)/, "Agent App incompatible-runtime downgrade");
+matches(client, /!exactConfig[\s\S]{0,500}markAgentAppMcpRuntimeUnavailable\(\)/, "Agent App JIT grant invalidation downgrade");
+assert.doesNotMatch(client, /Agent App read-only capability grant failed main-process validation/, "JIT grant invalidation must not fail the whole Agent App");
+assertBefore(client, "markAgentAppMcpRuntimeUnavailable();", "mcpConfigPath = agentAppToolGrant.mcpConfigPath", "Agent App grant runtime gate order");
 matches(client, /selectAgentAppRuntimeForTargets\(runtimes, runtimeTargets\)/, "Agent App stateless-safe runtime selection");
 matches(client, /let routerAgent = req\.agentAppMode \? undefined/, "Agent App router disable");
 matches(client, /const history = req\.agentAppMode \? \[\] : listChatMessages/, "Agent App empty history");
@@ -192,15 +196,17 @@ matches(ipc, /invocationService\.start\(rendererInvocationRequest\(req\)\)/, "Re
 
 // A DB catalog row is insufficient: Agent Apps reject package-manager download
 // commands before verification and expose only exact, currently verified tools.
-matches(capabilities, /function hasPinnedSiteAgentAppExecutable/, "Pinned local MCP executable gate");
-matches(capabilities, /executableName === "npx"/, "npx rejection");
+matches(mcpConfigPolicy, /function hasPinnedSiteAgentAppExecutable/, "Pinned local MCP executable gate");
+matches(mcpConfigPolicy, /server\.catalogId !== AGENTLAS_SYSTEM_TIME_CATALOG_ID\) return false/, "time-only executable provenance gate");
 matches(capabilities, /validSiteAgentAppMcpConsentDecision/, "Main-owned MCP consent receipt gate");
 matches(capabilities, /reason: "consent-required"/, "Missing consent no-tool disclosure");
 matches(capabilities, /reason: "key-missing"/, "Missing key no-tool disclosure");
 matches(mcpConsent, /recommendationDigest: siteAgentAppMcpRecommendationDigest/, "Consent declaration binding");
 matches(mcpPlan, /siteAgentAppMcpCredentialMode/, "Key-required versus keyless recommendation rows");
 matches(capabilities, /testServerConnection\(server, \{ timeoutMs: 12_000 \}\)/, "JIT MCP status verification");
-matches(capabilities, /new Set\(\["brave_web_search", "brave_local_search"\]\)/, "Brave tool name allowlist");
+matches(capabilities, /validSiteAgentAppExposedToolNames/, "Exact exposed MCP tool validation");
+assert.equal(mcpToolPolicy.includes("brave_web_search"), false, "Unpinned Brave must not be in the Agent App execution policy");
+matches(mcpToolPolicy, /"get_current_time", "convert_time"/, "System Time tool name allowlist");
 matches(capabilities, /mcp__\$\{server\.configKey\}__\$\{tool\}/, "Exact MCP tool grant construction");
 matches(capabilities, /deps\.runtimeEligible === false/, "Capability runtime preflight gate");
 matches(capabilities, /reason: "runtime-unavailable"/, "Capability runtime-unavailable disclosure");
@@ -242,8 +248,11 @@ matches(
 );
 assert.doesNotMatch(claude, /exclude-dynamic/i, "Claude must not move dynamic host context into the user message");
 matches(claude, /const hasExactUntrustedMcpGrant = Boolean\(/, "Claude exact untrusted MCP gate");
-matches(claude, /\^mcp__\[a-z0-9_-\]\+__\(\?:brave_web_search\|brave_local_search\)\$/, "Claude exact Brave tool validation");
-matches(claude, /req\.mcpConfigPath && \(!runReq\.untrustedNoTools \|\| hasExactUntrustedMcpGrant\)/, "Claude MCP config fail-closed gate");
+matches(claude, /validSiteAgentAppMcpGrantTools\(/, "Claude exact MCP tool validation");
+matches(claude, /runReq\.mcpConfigPath && \(!runReq\.untrustedNoTools \|\| hasExactUntrustedMcpGrant\)/, "Claude MCP config fail-closed gate");
+matches(claude, /containsMcpStartupTransportFatal\(stderr\)[\s\S]{0,900}agentAppMcpFallbackAttempted: true/, "Claude exact MCP startup fallback");
+matches(claude, /mcpConfigPath: undefined,[\s\S]{0,180}mcpAllowedTools: undefined,[\s\S]{0,180}untrustedAllowedMcpTools: undefined/, "Claude fallback MCP authority removal");
+matches(claude, /stripAgentAppMcpSecretAliases\(runReq\.env\)/, "Claude fallback opaque secret removal");
 
 const untrustedWrapper = between(
   runner,

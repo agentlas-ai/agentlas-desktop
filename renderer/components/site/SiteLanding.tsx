@@ -6,6 +6,7 @@ import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
 import type { AgentGroupResolved, InstalledAgent, InstalledFirm } from "@shared/types";
 import type {
+  SiteAgentAppMcpRecommendation,
   SiteAgentAppTargetRef,
   SiteProjectPublicMeta,
   SiteSurface,
@@ -27,12 +28,23 @@ export type SiteAgentAppThumbnailResult =
   | { ok: true; dataUrl: string }
   | { ok: false; reason: string };
 
+/**
+ * Card truth is deliberately separate from the persisted consent receipt.
+ * `offline` includes an absent bridge, a failed lookup, and an unverified
+ * initial render; none of those states may inherit an old approval checkmark.
+ */
+export type SiteAgentAppMcpLiveState =
+  | { kind: "resolved"; recommendation: SiteAgentAppMcpRecommendation }
+  | { kind: "offline" };
+
 type SiteLandingProps = {
   projects: SiteProjectPublicMeta[];
   locale: "ko" | "en";
   busy: boolean;
   noEngine: boolean;
   generating: boolean;
+  /** Fresh main-owned readiness. Missing entries fail closed as offline. */
+  agentAppMcpLiveStates?: Record<string, SiteAgentAppMcpLiveState>;
   onCreate: (input: {
     brief: string;
     surface: SiteSurface;
@@ -135,6 +147,55 @@ function targetKindLabel(project: SiteProjectPublicMeta, ko: boolean): string {
   return ko ? "내 에이전트" : "My agent";
 }
 
+function mcpCardPresentation(
+  liveState: SiteAgentAppMcpLiveState | undefined,
+  ko: boolean,
+): { status: "ready" | "review" | "offline" | "off" | "blocked"; label: string; title: string } {
+  if (!liveState || liveState.kind === "offline") {
+    return {
+      status: "offline",
+      label: "MCP offline",
+      title: ko ? "MCP 상태를 확인할 수 없습니다. 다시 검토하세요." : "MCP status could not be verified. Review it again.",
+    };
+  }
+  const { recommendation } = liveState;
+  if (recommendation.rows.length === 0 && recommendation.blocked.length > 0) {
+    return {
+      status: "blocked",
+      label: ko ? "MCP 차단" : "MCP blocked",
+      title: ko
+        ? "앱이 선언한 MCP가 Agent App 안전 정책에서 제외됐습니다. 눌러서 차단 항목을 확인하세요."
+        : "The app-declared MCP was excluded by Agent App safety policy. Open to review the blocked declaration.",
+    };
+  }
+  if (recommendation.status === "declined" || recommendation.status === "not-required") {
+    return {
+      status: "off",
+      label: ko ? "MCP 끔" : "MCP off",
+      title: ko ? "이 Agent App은 MCP 없이 실행됩니다." : "This Agent App runs without MCP.",
+    };
+  }
+  const total = recommendation.rows.length;
+  const ready = recommendation.rows.filter((row) => row.readiness === "ready").length;
+  const liveApprovalReady = recommendation.status === "approved" && total > 0 && ready === total;
+  if (liveApprovalReady) {
+    return {
+      status: "ready",
+      label: ko ? `MCP ${ready}/${total} 설정됨` : `MCP ${ready}/${total} configured`,
+      title: ko
+        ? "승인과 설치·키 설정이 확인됐습니다. 실제 연결은 실행 직전에 다시 검증합니다."
+        : "Consent, installation, and key setup are confirmed. Connection is verified again immediately before each run.",
+    };
+  }
+  return {
+    status: "review",
+    label: ko ? "MCP 검토" : "MCP review",
+    title: ko
+      ? "승인 또는 현재 연결 상태가 달라졌습니다. 다시 검토하세요."
+      : "Consent or live readiness changed. Review it again.",
+  };
+}
+
 function ThumbnailPlaceholder({
   project,
   thumbnail,
@@ -173,6 +234,7 @@ export function SiteLanding({
   busy,
   noEngine,
   generating,
+  agentAppMcpLiveStates,
   onCreate,
   onOpenProject,
   onDeleteProject,
@@ -500,8 +562,10 @@ export function SiteLanding({
               const selected = selectedAgentAppId === project.id;
               const title = project.agentAppTarget?.name || project.name;
               const publish = project.agentAppArtifact?.publish;
-              const mcpCount = project.agentAppContract?.capabilities?.readonlyMcpCatalogIds?.length ?? 0;
-              const mcpDecision = project.agentAppMcpConsent?.decision ?? null;
+              const capabilities = project.agentAppContract?.capabilities;
+              const mcpCount = (capabilities?.readonlyMcpCatalogIds?.length ?? 0) +
+                (capabilities?.unavailable?.length ?? 0);
+              const mcpPresentation = mcpCardPresentation(agentAppMcpLiveStates?.[project.id], ko);
               return (
                 <article className={styles.agentAppCard} data-selected={selected ? "true" : "false"} key={project.id}>
                   <button
@@ -526,17 +590,13 @@ export function SiteLanding({
                         <button
                           type="button"
                           className={styles.mcpButton}
-                          data-status={mcpDecision ?? "review-required"}
+                          data-status={mcpPresentation.status}
                           disabled={busy}
                           onClick={() => onReviewAgentAppMcp(project)}
-                          title={ko ? "MCP 추천과 연결 조건 검토" : "Review MCP recommendations and connection requirements"}
+                          title={mcpPresentation.title}
                         >
                           <McpIcon />
-                          {mcpDecision === "approved"
-                            ? `MCP ${mcpCount} ✓`
-                            : mcpDecision === "declined"
-                              ? (ko ? "MCP 끔" : "MCP off")
-                              : (ko ? `MCP ${mcpCount} 검토` : `Review MCP ${mcpCount}`)}
+                          {mcpPresentation.label}
                         </button>
                       )}
                       <button type="button" className={styles.openButton} disabled={busy || project.agentAppArtifact?.status !== "ready"} onClick={() => onOpenProject(project)}>

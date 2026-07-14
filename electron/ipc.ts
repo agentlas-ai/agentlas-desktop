@@ -683,7 +683,6 @@ async function confirmNativeSiteAgentAppMcp(
   recommendation: SiteAgentAppMcpRecommendation,
 ): Promise<"approved" | "declined"> {
   const ko = currentUiLocale().toLowerCase().startsWith("ko");
-  if (recommendation.rows.length === 0) return "declined";
   const lines = recommendation.rows.map((row) => {
     const credential = row.credentialMode === "keyless"
       ? (ko ? "키 불필요" : "no key required")
@@ -701,34 +700,104 @@ async function confirmNativeSiteAgentAppMcp(
           : (ko ? "설정 미완료 · 연결하지 않음" : "not configured · will not attach");
     return `• ${row.name} (${row.catalogId}) · ${credential} · ${readiness}`;
   });
+  const blockedLines = recommendation.blocked.map((issue) =>
+    `• ${issue.id} · ${ko ? "Agent App 안전 정책에서 차단" : "blocked by Agent App safety policy"}`,
+  );
   const detail = ko
     ? [
         ...lines,
+        ...blockedLines,
         "",
+        "연결 후보는 Desktop 시스템 전역 MCP에서 확인했습니다.",
+        "차단 항목은 에이전트 번들의 앱 선언에서 안전 정책에 따라 제외했습니다.",
         "허용해도 설치·키 생성·로그인은 자동으로 하지 않습니다.",
+        "키가 없거나 준비되지 않은 MCP는 붙이지 않고, 이번 앱 생성과 실행은 MCP 없이 계속합니다.",
         "실행 직전에 설치/키/연결/런타임을 다시 확인하고, 하나라도 실패하면 해당 MCP만 빼고 에이전트는 stateless/no-tool로 계속 실행합니다.",
         "비밀값, 키 이름, 로컬 경로, 서버 오류 원문은 앱 화면으로 전달하지 않습니다.",
       ].join("\n")
     : [
         ...lines,
+        ...blockedLines,
         "",
+        "Connection candidates were resolved from Desktop's system-wide MCP registry.",
+        "Blocked items came from the agent bundle's app declaration and were excluded by safety policy.",
         "Allowing this does not install a server, create a key, or sign in automatically.",
+        "A missing key or unready MCP is left unattached; this app still builds and runs without MCP.",
         "Agentlas rechecks installation, key, connection, and runtime eligibility before every run. Any failure removes only that MCP and continues stateless/no-tool.",
         "Secret values, key names, local paths, and raw server errors never reach the app UI.",
       ].join("\n");
   const result = await dialog.showMessageBox(win, {
     type: "question",
-    buttons: ko ? ["MCP 없이 실행", "사용 가능한 MCP 허용"] : ["Run without MCP", "Allow available MCP"],
+    buttons: recommendation.rows.length > 0
+      ? ko ? ["MCP 없이 계속", "준비된 MCP 연결"] : ["Continue without MCP", "Attach ready MCP"]
+      : [ko ? "확인" : "OK"],
     defaultId: 0,
     cancelId: 0,
     noLink: true,
     title: ko ? "Agent App MCP 연결 검토" : "Review Agent App MCP access",
     message: ko
-      ? `${recommendation.targetName} 앱에 아래 읽기 전용 MCP를 허용할까요?`
-      : `Allow the read-only MCP connections below for ${recommendation.targetName}?`,
+      ? recommendation.rows.length > 0
+        ? `${recommendation.targetName} 앱을 만들기 전에 시스템 전역 MCP를 연결할까요?`
+        : `${recommendation.targetName} 앱에서 차단된 MCP 선언을 확인하세요.`
+      : recommendation.rows.length > 0
+        ? `Attach system-wide MCPs before building ${recommendation.targetName}?`
+        : `Review the MCP declarations blocked for ${recommendation.targetName}.`,
     detail,
   });
-  return result.response === 1 ? "approved" : "declined";
+  return recommendation.rows.length > 0 && result.response === 1 ? "approved" : "declined";
+}
+
+/**
+ * Main-owned review loop. The post-click recorder compares the exact digest
+ * displayed above with a fresh registry/Keychain snapshot. One mismatch opens
+ * the updated review once more; repeated churn fails closed to no-tool without
+ * starving Agent App creation or launch.
+ */
+const siteAgentAppMcpReviewLocks = new Map<string, Promise<SiteAgentAppMcpRecommendation>>();
+
+async function reviewNativeSiteAgentAppMcpUnlocked(
+  win: BrowserWindow,
+  projectId: string,
+  mode: "launch" | "prebuild" | "force",
+): Promise<SiteAgentAppMcpRecommendation> {
+  const {
+    getSiteAgentAppMcpRecommendation,
+    recordSiteAgentAppMcpDecision,
+  } = await import("./site/agent-app-mcp-plan");
+  let recommendation = await getSiteAgentAppMcpRecommendation(projectId);
+  if (mode === "launch" && recommendation.status !== "review-required") return recommendation;
+  if (mode === "prebuild" && (recommendation.status === "approved" || recommendation.status === "declined")) {
+    return recommendation;
+  }
+  if (recommendation.status === "not-required" && recommendation.blocked.length === 0) return recommendation;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const decision = await confirmNativeSiteAgentAppMcp(win, recommendation);
+    if (recommendation.rows.length === 0) return recommendation;
+    const decided = await recordSiteAgentAppMcpDecision(
+      projectId,
+      decision,
+      recommendation.readinessDigest,
+    );
+    if (decision === "declined" || decided.status !== "review-required") return decided;
+    recommendation = decided;
+  }
+  return recommendation;
+}
+
+function reviewNativeSiteAgentAppMcp(
+  win: BrowserWindow,
+  projectId: string,
+  mode: "launch" | "prebuild" | "force",
+): Promise<SiteAgentAppMcpRecommendation> {
+  const existing = siteAgentAppMcpReviewLocks.get(projectId);
+  const pending = (existing ?? Promise.resolve(null))
+    .catch(() => null)
+    .then(() => reviewNativeSiteAgentAppMcpUnlocked(win, projectId, mode));
+  siteAgentAppMcpReviewLocks.set(projectId, pending);
+  void pending.finally(() => {
+    if (siteAgentAppMcpReviewLocks.get(projectId) === pending) siteAgentAppMcpReviewLocks.delete(projectId);
+  }).catch(() => {});
+  return pending;
 }
 
 async function confirmNativeSitePublish(
@@ -1031,15 +1100,7 @@ export function registerIpcHandlers(): void {
     const { assertSiteProjectIdle } = await import("./site/operation-lock");
     assertSiteProjectIdle(projectId);
     try {
-      const {
-        getSiteAgentAppMcpRecommendation,
-        recordSiteAgentAppMcpDecision,
-      } = await import("./site/agent-app-mcp-plan");
-      const recommendation = await getSiteAgentAppMcpRecommendation(projectId);
-      if (recommendation.status === "review-required") {
-        const decision = await confirmNativeSiteAgentAppMcp(win, recommendation);
-        await recordSiteAgentAppMcpDecision(projectId, decision);
-      }
+      await reviewNativeSiteAgentAppMcp(win, projectId, "launch");
     } catch {
       // Recommendation/Keychain/registry/dialog failures cannot starve the app.
       // Without a valid main-owned receipt the runtime deterministically uses
@@ -1063,14 +1124,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("site:reviewAgentAppMcp", async (event, payload: { projectId?: string }) => {
     const win = assertTrustedSitePublishIpcSender(event);
     const projectId = String(payload?.projectId ?? "");
-    const {
-      getSiteAgentAppMcpRecommendation,
-      recordSiteAgentAppMcpDecision,
-    } = await import("./site/agent-app-mcp-plan");
-    const recommendation = await getSiteAgentAppMcpRecommendation(projectId);
-    if (recommendation.status === "not-required") return recommendation;
-    const decision = await confirmNativeSiteAgentAppMcp(win, recommendation);
-    return recordSiteAgentAppMcpDecision(projectId, decision);
+    return reviewNativeSiteAgentAppMcp(win, projectId, "force");
+  });
+  ipcMain.handle("site:prebuildReviewAgentAppMcp", async (event, payload: { projectId?: string }) => {
+    const win = assertTrustedSitePublishIpcSender(event);
+    return reviewNativeSiteAgentAppMcp(win, String(payload?.projectId ?? ""), "prebuild");
   });
   ipcMain.handle("site:agentAppThumbnail", async (_e, payload: { projectId?: string }) => {
     const { readSiteAgentAppThumbnail } = await import("./site/agent-app-thumbnail");

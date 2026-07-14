@@ -15,6 +15,11 @@ async function main() {
     model: "gpt-5.6-sol",
     availableModels: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
     allocationModels: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+    allocationModelProfiles: {
+      "gpt-5.6-luna": { costTier: "economy", contextWindow: 200000, capabilities: ["tools"], supportsTools: true },
+      "gpt-5.6-terra": { costTier: "balanced", contextWindow: 200000, capabilities: ["tools"], supportsTools: true },
+      "gpt-5.6-sol": { costTier: "frontier", contextWindow: 200000, capabilities: ["tools"], supportsTools: true },
+    },
     effort: "xhigh",
   };
   let selectorCalls = 0;
@@ -37,6 +42,7 @@ async function main() {
           tier: "balanced",
           effort: "high",
           phase: "delegate",
+          requirements: { inputTokens: 8000, expectedOutputTokens: 2000, toolRequired: true, multimodalRequired: false },
           reasonCodes: ["complex-reasoning", "multi-step-tools"],
           rationale: "Coordinated package creation and verification.",
         }),

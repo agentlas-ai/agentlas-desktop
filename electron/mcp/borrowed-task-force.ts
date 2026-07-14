@@ -33,10 +33,12 @@ import {
   UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
 } from "../runtime/untrusted-error";
 import { SURFACE_INTENT_MARKER } from "../runtime/runner";
+import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { tryRecordRunEvent } from "../store/run-events";
 import {
   defaultWorkloadAllocation,
   normalizeWorkloadAllocation,
+  reconcileWorkloadRunnerResult,
   resolveWorkloadAllocationAcrossRuntimes,
   workloadAllocationInventoryPrompt,
   workloadAllocationPromptExample,
@@ -123,6 +125,8 @@ export interface BorrowedTaskForceParams {
   mcpCodexConfigArgs?: string[];
   /** Main-minted opaque MCP aliases for a one-run Agent App grant. */
   agentAppMcpRuntimeEnv?: NodeJS.ProcessEnv;
+  /** Marks the main-owned one-run grant unavailable after a runtime MCP fatal. */
+  onAgentAppMcpRuntimeUnavailable?: () => void;
   runnerEnv?: NodeJS.ProcessEnv;
   locale: RuntimeLocale;
   sink: EventSink;
@@ -275,10 +279,11 @@ function taskForceRunnerBase(p: BorrowedTaskForceParams): Pick<
   | "env"
   | "untrustedNoTools"
   | "untrustedAllowedMcpTools"
+  | "onAgentAppMcpRuntimeUnavailable"
 > {
   const permission = taskForcePermission(p);
   const agentAppAllowedTools = p.req.agentAppMode && p.mcpConfigPath && p.mcpAllowedTools?.length &&
-    p.mcpAllowedTools.every((tool) => /^mcp__brave-search__(?:brave_web_search|brave_local_search)$/.test(tool))
+    validSiteAgentAppMcpGrantTools(p.mcpAllowedTools)
     ? p.mcpAllowedTools
     : undefined;
   const toolsAllowed = !p.req.agentAppMode && taskForceAllowsTools(p);
@@ -295,6 +300,9 @@ function taskForceRunnerBase(p: BorrowedTaskForceParams): Pick<
         : undefined,
     untrustedNoTools: p.req.agentAppMode === true,
     untrustedAllowedMcpTools: agentAppAllowedTools,
+    onAgentAppMcpRuntimeUnavailable: p.req.agentAppMode
+      ? p.onAgentAppMcpRuntimeUnavailable
+      : undefined,
   };
 }
 
@@ -789,14 +797,6 @@ async function runBorrowedAgentTurn(
     );
   }
   const picked = sameRuntime(active, p.active) ? p.picked : pickRunner(active) ?? p.picked;
-  tryRecordRunEvent({
-    runId: p.req.runId ?? `task-force:${p.chat.id}`,
-    kind: "workload_allocation",
-    chatId: p.chat.id,
-    nodeId: id,
-    agentId: spec.slug,
-    payload: workloadAllocationReceipt(workloadResolution),
-  });
   if (workloadResolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
     p.sink(tag({
       kind: "tool-use",
@@ -854,6 +854,15 @@ async function runBorrowedAgentTurn(
           })),
       },
     );
+    const executedResolution = reconcileWorkloadRunnerResult(workloadResolution, result);
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `task-force:${p.chat.id}`,
+      kind: "workload_allocation",
+      chatId: p.chat.id,
+      nodeId: id,
+      agentId: spec.slug,
+      payload: workloadAllocationReceipt(executedResolution),
+    });
     p.sink(tag({
       kind: "tool-use",
       done: true,
@@ -1074,14 +1083,6 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     );
   }
   const synthesisPicked = sameRuntime(synthesisActive, p.active) ? p.picked : pickRunner(synthesisActive) ?? p.picked;
-  tryRecordRunEvent({
-    runId: p.req.runId ?? `task-force:${p.chat.id}`,
-    kind: "workload_allocation",
-    chatId: p.chat.id,
-    nodeId: orchestratorId,
-    agentId: p.orchestratorAgent.id,
-    payload: workloadAllocationReceipt(synthesisResolution),
-  });
   if (synthesisResolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
     p.sink({
       kind: "tool-use",
@@ -1170,6 +1171,15 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         }),
     },
   );
+  const executedSynthesisResolution = reconcileWorkloadRunnerResult(synthesisResolution, final);
+  tryRecordRunEvent({
+    runId: p.req.runId ?? `task-force:${p.chat.id}`,
+    kind: "workload_allocation",
+    chatId: p.chat.id,
+    nodeId: orchestratorId,
+    agentId: p.orchestratorAgent.id,
+    payload: workloadAllocationReceipt(executedSynthesisResolution),
+  });
 
   const continuation = stripStormbreakerContinueMarker(redactSensitiveText(final.text));
   let displayText = p.req.agentAppMode

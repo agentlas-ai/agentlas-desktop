@@ -15,16 +15,38 @@ async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-runtime-resume-"));
   const userData = path.join(temp, "user-data");
   const binDir = path.join(temp, "bin");
+  const codexHome = path.join(temp, "codex-home");
   const workspace = path.join(temp, "workspace");
   const logPath = path.join(temp, "codex-invocations.jsonl");
   fs.mkdirSync(userData, { recursive: true });
   fs.mkdirSync(binDir, { recursive: true });
+  fs.mkdirSync(codexHome, { recursive: true });
   fs.mkdirSync(workspace, { recursive: true });
   app.setPath("userData", userData);
   process.env.AGENTLAS_STORE_PATH = path.join(userData, "test.sqlite");
   process.env.AGENTLAS_QA_CODEX_LOG = logPath;
   process.env.AGENTLAS_RUNTIME_PROBE_CACHE_MS = "0";
+  process.env.CODEX_HOME = codexHome;
   process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH || ""}`;
+  fs.writeFileSync(path.join(codexHome, "models_cache.json"), JSON.stringify({
+    models: [
+      {
+        slug: "gpt-contract-max",
+        visibility: "list",
+        supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max"].map((effort) => ({ effort })),
+      },
+      {
+        slug: "gpt-contract-xhigh",
+        visibility: "list",
+        supported_reasoning_levels: ["low", "medium", "high", "xhigh"].map((effort) => ({ effort })),
+      },
+      {
+        slug: "gpt-contract-max-only",
+        visibility: "list",
+        supported_reasoning_levels: [{ effort: "max" }],
+      },
+    ],
+  }));
 
   const fakeCodex = path.join(binDir, "codex");
   const fakeSource = `#!/usr/bin/env node
@@ -105,6 +127,27 @@ process.stdin.on("end", () => {
     permission: "full",
     userPrompt: "Explicit full boundary",
   }, events);
+  const maxEffortRun = await runCodex({
+    ...base,
+    chatId: undefined,
+    model: "gpt-contract-max",
+    effort: "max",
+    userPrompt: "Host-verified max effort",
+  }, events);
+  const clampedEffortRun = await runCodex({
+    ...base,
+    chatId: undefined,
+    model: "gpt-contract-xhigh",
+    effort: "max",
+    userPrompt: "Model profile clamps max effort",
+  }, events);
+  const noEscalationRun = await runCodex({
+    ...base,
+    chatId: undefined,
+    model: "gpt-contract-max-only",
+    effort: "high",
+    userPrompt: "Do not exceed the requested effort",
+  }, events);
 
   await assert.rejects(
     runCodex({
@@ -134,7 +177,7 @@ process.stdin.on("end", () => {
   }
 
   const invocations = fs.readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.equal(invocations.length, 5, "restricted CLI calls must not spawn a provider process");
+  assert.equal(invocations.length, 8, "restricted CLI calls must not spawn a provider process");
   assert.ok(invocations[0].args.includes("gpt-contract-one"), "create must keep the selected model");
   assert.deepEqual(
     invocations[0].args.slice(invocations[0].args.indexOf("--sandbox"), invocations[0].args.indexOf("--sandbox") + 2),
@@ -162,10 +205,57 @@ process.stdin.on("end", () => {
   );
   assert.equal(invocations[3].args.includes("--dangerously-bypass-approvals-and-sandbox"), false);
   assert.equal(invocations[4].args.includes("--dangerously-bypass-approvals-and-sandbox"), true);
+  assert.ok(
+    invocations[5].args.includes("model_reasoning_effort=max"),
+    "runner must preserve max when the exact host model profile supports it",
+  );
+  assert.ok(
+    invocations[6].args.includes("model_reasoning_effort=xhigh"),
+    "runner must clamp max when the exact host model profile stops at xhigh",
+  );
+  assert.equal(maxEffortRun.appliedEffort, "max");
+  assert.equal(clampedEffortRun.appliedEffort, "xhigh");
+  assert.equal(
+    invocations[7].args.some((arg) => arg.startsWith("model_reasoning_effort=")),
+    false,
+    "runner must omit effort instead of escalating above the requested/host-bounded level",
+  );
+  assert.equal(noEscalationRun.appliedEffort, null);
+  const routing = require("../dist/electron/runtime/workload-routing.js");
+  const provisional = {
+    allocation: routing.normalizeWorkloadAllocation({
+      runtimeId: "runtime-1",
+      modelId: "gpt-contract-xhigh",
+      tier: "balanced",
+      effort: "max",
+      phase: "delegate",
+      requirements: { inputTokens: 0, expectedOutputTokens: 0, toolRequired: false, multimodalRequired: false },
+      reasonCodes: ["runtime-contract"],
+      rationale: "must not persist",
+    }, "delegate"),
+    runtime: {
+      kind: "codex",
+      backend: "openai",
+      source: fakeCodex,
+      version: "9.9.9",
+      active: true,
+      model: "gpt-contract-xhigh",
+      effort: "max",
+    },
+    resolvedRuntimeId: "runtime-1",
+    resolvedTier: null,
+    source: "ai-assigned",
+    resolutionCodes: ["parent-selected-live-runtime-model"],
+  };
+  const executed = routing.reconcileWorkloadRunnerResult(provisional, clampedEffortRun);
+  const executedReceipt = routing.workloadAllocationReceipt(executed);
+  assert.equal(executedReceipt.requested.effort, "max");
+  assert.equal(executedReceipt.resolved.effort, "xhigh", "receipt must record the actual spawned CLI effort");
+  assert.ok(executedReceipt.reasonCodes.includes("runner-effort-revalidated"));
 
   console.log(JSON.stringify({
     ok: true,
-    checks: 27,
+    checks: 39,
     modelPreservedOnResume: true,
     modelChangeInvalidatesSession: true,
     attachmentReachedHostAsFile: true,

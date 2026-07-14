@@ -130,6 +130,7 @@ jobs:
           xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
             npm run test:stormbreaker-core:embedded
             npm run test:python-cache-boundary
+            npm run test:release-agent-foundation-gate
             npm run test:v64-automation-permission-migration
             npm run test:automations-store
             npm run test:automation-scheduler-guards
@@ -243,6 +244,8 @@ jobs:
           npm run test:after-pack-runtime-contract
           npm run test:stormbreaker-core:embedded
           npm run test:python-cache-boundary
+          npm run test:release-agent-foundation-gate
+          npm run test:runtime-resume-contract
           npm run test:mobile-bridge-contract
           npm run test:mobile-read-boundary
           npm run test:mobile-execution-boundary
@@ -283,6 +286,8 @@ jobs:
             npm run test:cli-version-parser
             npm run test:hephaestus-status-version
             npm run test:python-cache-boundary
+            npm run test:release-agent-foundation-gate
+            npm run test:runtime-resume-contract
             npm run test:marketplace-cache
             npm run test:after-pack-runtime-contract
             npm run test:stormbreaker-core:embedded

@@ -11,9 +11,14 @@ import type { InstalledMcpServer, McpToolCatalogEntry } from "../../shared/types
 import { getCatalogEntry } from "../mcp-tools/catalog";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { hasEnvVar } from "../secrets/vault";
-import { hasPinnedSiteAgentAppExecutable } from "./agent-app-capabilities";
 import {
+  hasExactSiteAgentAppCatalogEnv,
+  hasPinnedSiteAgentAppExecutable,
+} from "./agent-app-mcp-config-policy";
+import {
+  approvedSiteAgentAppMcpCatalogIds,
   createSiteAgentAppMcpConsentReceipt,
+  siteAgentAppMcpReadinessDigest,
   validSiteAgentAppMcpConsentDecision,
 } from "./agent-app-mcp-consent";
 import {
@@ -64,7 +69,7 @@ async function rowForEntry(
 
   const exactlyConfigured = enabledRows.length === 1 &&
     hasPinnedSiteAgentAppExecutable(enabledRows[0]) &&
-    requiredKeys.every((key) => enabledRows[0].envKeys.includes(key));
+    hasExactSiteAgentAppCatalogEnv(enabledRows[0]);
   let readiness: SiteAgentAppMcpReadiness;
   if (!registryAvailable) readiness = "not-configured";
   else if (!rows.length) readiness = "not-installed";
@@ -110,14 +115,31 @@ export async function recommendSiteAgentAppMcpForProject(
     rows.push(await rowForEntry(entry, installed, registryAvailable, hasCredential));
   }
 
+  const readinessDigest = siteAgentAppMcpReadinessDigest(rows);
+  const blocked = (project.agentAppContract?.capabilities.unavailable ?? []).map((issue) => ({ ...issue }));
+
   const decision = validSiteAgentAppMcpConsentDecision(
     project.agentAppContract?.capabilities,
     project.id,
     project.agentAppMcpConsent,
   );
+  const exactReadinessDecision = validSiteAgentAppMcpConsentDecision(
+    project.agentAppContract?.capabilities,
+    project.id,
+    project.agentAppMcpConsent,
+    readinessDigest,
+  );
+  const approvedCatalogIds = approvedSiteAgentAppMcpCatalogIds(
+    project.agentAppContract?.capabilities,
+    project.id,
+    project.agentAppMcpConsent,
+  );
+  const newlyReadyIds = rows
+    .filter((row) => row.readiness === "ready" && !approvedCatalogIds.includes(row.catalogId))
+    .map((row) => row.catalogId);
   const status: SiteAgentAppMcpRecommendation["status"] = rows.length === 0
     ? "not-required"
-    : decision === "approved"
+    : exactReadinessDecision === "approved" && newlyReadyIds.length === 0
       ? "approved"
       : decision === "declined"
         ? "declined"
@@ -129,6 +151,8 @@ export async function recommendSiteAgentAppMcpForProject(
     targetName: safeDisplay(project.agentAppTarget?.name, "Agent App", 160),
     status,
     rows,
+    blocked,
+    readinessDigest,
     receiptId: receipt?.receiptId ?? null,
     decidedAt: receipt?.decidedAt ?? null,
   };
@@ -143,19 +167,35 @@ export async function getSiteAgentAppMcpRecommendation(
 export async function recordSiteAgentAppMcpDecision(
   projectId: string,
   decision: SiteAgentAppMcpConsentReceipt["decision"],
+  expectedReadinessDigest: string,
+  deps: SiteAgentAppMcpRecommendationDeps = {},
 ): Promise<SiteAgentAppMcpRecommendation> {
   const project = getSiteProject(projectId);
   if (project.surface !== "agent-app" || !project.agentAppContract) {
     throw new Error("Agent App MCP recommendation is unavailable.");
   }
   if (project.agentAppContract.capabilities.readonlyMcpCatalogIds.length === 0) {
-    return recommendSiteAgentAppMcpForProject(project);
+    return recommendSiteAgentAppMcpForProject(project, deps);
+  }
+  const recommendation = await recommendSiteAgentAppMcpForProject(project, deps);
+  if (decision === "approved" && recommendation.readinessDigest !== expectedReadinessDigest) {
+    const cleared = updateSiteAgentAppMcpConsent(project.id, null);
+    return recommendSiteAgentAppMcpForProject(cleared, deps);
   }
   const receipt = createSiteAgentAppMcpConsentReceipt({
     projectId: project.id,
     profile: project.agentAppContract.capabilities,
     decision,
+    readinessDigest: recommendation.readinessDigest,
+    approvedCatalogIds: decision === "approved"
+      ? recommendation.rows
+        .filter((row) => row.readiness === "ready")
+        .map((row) => row.catalogId)
+      : [],
   });
   const updated = updateSiteAgentAppMcpConsent(project.id, receipt);
-  return recommendSiteAgentAppMcpForProject(updated);
+  const decided = await recommendSiteAgentAppMcpForProject(updated, deps);
+  if (decision === "declined" || decided.readinessDigest === expectedReadinessDigest) return decided;
+  const cleared = updateSiteAgentAppMcpConsent(project.id, null);
+  return recommendSiteAgentAppMcpForProject(cleared, deps);
 }

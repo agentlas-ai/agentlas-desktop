@@ -16,6 +16,8 @@ import { measureBuildSystemPrompt, wrapBuildSystemPrompt } from "../runtime/runn
 import { buildIsolatedBuildRunnerEnv } from "../runtime/build-env";
 import {
   normalizeWorkloadAllocation,
+  reconcileWorkloadRunnerResult,
+  resolveHostControlPlaneRuntime,
   resolveWorkloadAllocation,
   resolveWorkloadAllocationAcrossRuntimes,
   workloadAllocationInventoryPrompt,
@@ -120,17 +122,7 @@ export async function allocateBuildRuntime(input: {
       rationale: "The operator explicitly pinned the Build runtime.",
     }, phase);
   } else {
-    const bootstrap = resolveWorkloadAllocation({
-      allocation: normalizeWorkloadAllocation({
-        tier: "economy",
-        effort: "low",
-        phase: "plan",
-        reasonCodes: ["bounded-control-plane"],
-        rationale: "A small control-plane call only selects capacity.",
-      }, "plan"),
-      runtime: input.picked.active,
-      phase: "plan",
-    });
+    const bootstrapRuntime = resolveHostControlPlaneRuntime(input.picked.active, "low");
     try {
       const selector = await input.picked.runner(
         {
@@ -149,9 +141,9 @@ export async function allocateBuildRuntime(input: {
             task: sanitizeBuildAllocationTask(input.originalRequest),
           }),
           backendLabel: input.picked.label,
-          model: bootstrap.runtime.model ?? undefined,
+          model: bootstrapRuntime.model ?? undefined,
           longContext: false,
-          effort: bootstrap.runtime.effort ?? "low",
+          effort: bootstrapRuntime.effort ?? "low",
           permission: "read",
           cwd: input.request.workspace,
           env: buildIsolatedBuildRunnerEnv(input.picked.active.kind, {}),
@@ -544,13 +536,6 @@ export async function runHephaestusBuild(
     buildActive.backend === picked.active.backend &&
     buildActive.source === picked.active.source
   ) ? picked : pickRunner(buildActive) ?? picked;
-  tryRecordRunEvent({
-    runId,
-    kind: "workload_allocation",
-    nodeId: "hephaestus-builder",
-    agentId: "system:hephaestus-builder",
-    payload: workloadAllocationReceipt(workload),
-  });
   sink({
     runId,
     kind: "log",
@@ -716,6 +701,14 @@ export async function runHephaestusBuild(
     });
     const result = runnerOutcome.result;
     const finalMcpAttachment = runnerOutcome.attachment;
+    const executedWorkload = reconcileWorkloadRunnerResult(workload, result);
+    tryRecordRunEvent({
+      runId,
+      kind: "workload_allocation",
+      nodeId: "hephaestus-builder",
+      agentId: "system:hephaestus-builder",
+      payload: workloadAllocationReceipt(executedWorkload),
+    });
 
     // 인터뷰 turn은 질문만 반환하고 파일을 만들지 않는다. 완료 신호가 있는 실제 생성 턴에만
     // security stage를 방출해야 UI가 답변 전에 3단계 완료로 뛰거나 무의미한 스캔을 하지 않는다.

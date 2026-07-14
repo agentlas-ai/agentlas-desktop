@@ -6,6 +6,7 @@ import { GLOBAL_CONNECTION_SKILL } from "./global-skill";
 import { SURFACE_PROTOCOL } from "../surface-emitter";
 import { selectModules } from "../system-agents";
 import { SURFACE_MODULE } from "../system-agents/desktop-chat/modules";
+import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 
 export interface RunnerRequest {
   systemPrompt: string;
@@ -54,6 +55,10 @@ export interface RunnerRequest {
   untrustedNoTools?: boolean;
   /** Exact main-minted read-only MCP tools allowed despite the zero-builtins boundary. */
   untrustedAllowedMcpTools?: string[];
+  /** Internal one-shot marker preventing recursive Agent App MCP fallback. */
+  agentAppMcpFallbackAttempted?: true;
+  /** Main-only callback used to reconcile the browser-safe capability receipt. */
+  onAgentAppMcpRuntimeUnavailable?: () => void;
   /**
    * 현재 chat 식별자 — 세션 resume를 지원하는 러너가 (chatId, kind)별 CLI 세션을
    * 재사용해 시스템 프롬프트/히스토리를 매 턴 재전송하지 않도록 한다. 미설정이면 매번 full-context.
@@ -89,6 +94,8 @@ export interface RunnerResult {
   sessionId?: string;
   /** 생성 토큰 수 (가능한 런타임만) */
   tokens?: number;
+  /** Exact effort explicitly applied by the runner; null means no explicit effort was sent. */
+  appliedEffort?: string | null;
 }
 
 export type Runner = (
@@ -199,8 +206,8 @@ export function wrapSystemPrompt(
   untrustedAllowedMcpTools?: string[],
 ): string {
   if (untrustedNoTools) {
-    const allowed = (untrustedAllowedMcpTools ?? []).filter((tool) =>
-      /^mcp__[a-z0-9_-]+__(?:brave_web_search|brave_local_search)$/.test(tool));
+    const requested = untrustedAllowedMcpTools ?? [];
+    const allowed = validSiteAgentAppMcpGrantTools(requested) ? requested : [];
     return [
       tStatus(locale, "sysHeader"),
       responseLanguageGuide(locale, userPrompt),

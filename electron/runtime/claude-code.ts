@@ -19,8 +19,17 @@ import {
   getRuntimeSession,
   saveRuntimeSession,
 } from "../store/runtime-sessions";
+import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 
 const KIND = "claude-code";
+const AGENT_APP_MCP_SECRET_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;
+
+function stripAgentAppMcpSecretAliases(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv | undefined {
+  if (!env) return env;
+  return Object.fromEntries(
+    Object.entries(env).filter(([key]) => !AGENT_APP_MCP_SECRET_ALIAS_RE.test(key)),
+  );
+}
 
 // 구형 claude CLI가 --include-partial-messages를 거부하면 false로 전환해(프로세스 수명 동안
 // 1회 학습) 이후 실행은 플래그 없이 — 메시지 덩어리 스트리밍으로 — 동작한다.
@@ -252,21 +261,21 @@ export const runClaudeCode: Runner = async (
   // 이게 있어야 에이전트가 브라우저(Playwright) 등 실제 MCP 툴을 호출한다. (사용자 config와 병합)
   const hasExactUntrustedMcpGrant = Boolean(
     runReq.untrustedNoTools &&
-    req.mcpConfigPath &&
-    req.mcpAllowedTools?.length &&
-    req.mcpAllowedTools.every((tool) => /^mcp__[a-z0-9_-]+__(?:brave_web_search|brave_local_search)$/.test(tool)),
+    runReq.mcpConfigPath &&
+    runReq.mcpAllowedTools?.length &&
+    validSiteAgentAppMcpGrantTools(runReq.mcpAllowedTools),
   );
-  const mcpArgs = req.mcpConfigPath && (!runReq.untrustedNoTools || hasExactUntrustedMcpGrant)
-    ? ["--mcp-config", req.mcpConfigPath]
+  const mcpArgs = runReq.mcpConfigPath && (!runReq.untrustedNoTools || hasExactUntrustedMcpGrant)
+    ? ["--mcp-config", runReq.mcpConfigPath]
     : [];
   // write/full 권한이면 헤드리스에서 권한 프롬프트로 막히지 않도록 MCP 툴을 미리 허용.
   const allowedToolArgs =
-    req.mcpConfigPath &&
-    req.mcpAllowedTools &&
-    req.mcpAllowedTools.length > 0 &&
+    runReq.mcpConfigPath &&
+    runReq.mcpAllowedTools &&
+    runReq.mcpAllowedTools.length > 0 &&
     ((!runReq.untrustedNoTools && (req.permission === "write" || req.permission === "full")) ||
       hasExactUntrustedMcpGrant)
-      ? ["--allowedTools", req.mcpAllowedTools.join(",")]
+      ? ["--allowedTools", runReq.mcpAllowedTools.join(",")]
       : [];
   const noToolsArgs = runReq.untrustedNoTools
     ? [
@@ -637,6 +646,26 @@ export const runClaudeCode: Runner = async (
         resolve({ text: display.trim(), sessionId, tokens });
       } else {
         if (runReq.untrustedNoTools) {
+          if (
+            hasExactUntrustedMcpGrant &&
+            !runReq.agentAppMcpFallbackAttempted &&
+            containsMcpStartupTransportFatal(stderr)
+          ) {
+            // A verified server can still disappear between preflight and CLI
+            // startup. Retry this exact browser request once with every MCP
+            // argument and opaque secret alias removed; no arbitrary CLI
+            // failure is eligible for this downgrade.
+            try { runReq.onAgentAppMcpRuntimeUnavailable?.(); } catch { /* receipt reconciliation is best effort */ }
+            void runClaudeCode({
+              ...runReq,
+              mcpConfigPath: undefined,
+              mcpAllowedTools: undefined,
+              untrustedAllowedMcpTools: undefined,
+              env: stripAgentAppMcpSecretAliases(runReq.env),
+              agentAppMcpFallbackAttempted: true,
+            }, events).then(resolve, reject);
+            return;
+          }
           rejectRuntime(new Error("Agent App runtime process exited unsuccessfully."));
           return;
         }

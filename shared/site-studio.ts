@@ -394,8 +394,10 @@ export type SiteAgentAppMcpConsentReceipt = {
   projectId: string;
   /** SHA-256 of the policy version plus the sorted catalog-id declaration. */
   recommendationDigest: string;
+  /** SHA-256 of the exact value-free readiness rows displayed for approval. */
+  readinessDigest: string;
   decision: "approved" | "declined";
-  /** Empty for a decline; otherwise the exact policy-approved declaration. */
+  /** Empty for a decline; otherwise only ids that were ready at approval time. */
   approvedCatalogIds: string[];
   decidedAt: string;
 };
@@ -423,6 +425,10 @@ export type SiteAgentAppMcpRecommendation = {
   targetName: string;
   status: "not-required" | "review-required" | "approved" | "declined";
   rows: SiteAgentAppMcpRecommendationRow[];
+  /** Unsupported declaration ids stay visible but can never become grants. */
+  blocked: SiteAgentAppCapabilityIssue[];
+  /** Stable digest over the exact displayed rows, including ready/key/install state. */
+  readinessDigest: string;
   receiptId: string | null;
   decidedAt: string | null;
 };

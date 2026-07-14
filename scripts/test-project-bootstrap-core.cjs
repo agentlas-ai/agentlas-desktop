@@ -26,13 +26,16 @@ async function main() {
     );
     assert.equal(result.ok, true, result.error || result.stderr);
     assert.equal(result.json.schemaVersion, "agentlas.project-bootstrap.v1");
-    assert.equal(["active", "privacy_warning"].includes(result.json.status), true);
+    assert.ok(["active", "privacy_warning"].includes(result.json.status));
     assert.equal(result.json.mergeOnly, true);
     assert.equal(result.json.privacyBlockInstalled, true);
     assert.equal(result.json.privateModeCompliant, true);
     assert.deepEqual(result.json.missing, []);
     assert.deepEqual(result.json.overwritten, []);
     assert.deepEqual(result.json.permissionIssues, []);
+    assert.deepEqual(result.json.trackedSensitivePaths, []);
+    assert.equal(typeof result.json.trackedSensitiveScanComplete, "boolean");
+    assert.ok(Array.isArray(result.json.privacyWarnings));
     assert.equal(fs.readFileSync(path.join(project, ".agentlas", "project-soul-memory.md"), "utf8"), existingSoul);
     assert.equal(fs.existsSync(path.join(project, ".agentlas", "code-map", "project-map.json")), true);
     assert.equal(fs.existsSync(path.join(project, ".agentlas", "ontology-runtime.sqlite")), true);

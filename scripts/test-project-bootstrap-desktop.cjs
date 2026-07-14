@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 const { app } = require("electron");
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-desktop-bootstrap-contract-"));
@@ -37,6 +38,13 @@ async function main() {
           status: "active",
           mergeOnly: true,
           privacyBlockInstalled: true,
+          privateModeCompliant: true,
+          missing: [],
+          overwritten: [],
+          permissionIssues: [],
+          trackedSensitivePaths: [],
+          trackedSensitiveScanComplete: true,
+          privacyWarnings: [],
         },
         stdout: "",
         stderr: "",
@@ -58,10 +66,11 @@ async function main() {
     access: { permission: "write" },
     runCore: async () => ({
       ok: false,
-      exitCode: 2,
+      exitCode: null,
       json: null,
       stdout: "",
-      stderr: "old core",
+      stderr: "",
+      error: "Could not find the Hephaestus engine (bundle missing).",
     }),
   });
   assert.equal(fallback.mode, "desktop-fallback");
@@ -77,6 +86,193 @@ async function main() {
   if (process.platform !== "win32") {
     assert.equal(fs.statSync(path.join(fallbackProject, ".agentlas", "sitemap.json")).mode & 0o777, 0o600);
   }
+
+  const broadNegationProject = project("broad-negation");
+  execFileSync("git", ["-C", broadNegationProject, "init", "--quiet"]);
+  fs.writeFileSync(path.join(broadNegationProject, ".gitignore"), ".agentlas/\n!*/\n!*\n", "utf8");
+  const broadNegation = await bootstrap.ensureDesktopProjectBootstrap({
+    projectPath: broadNegationProject,
+    access: { permission: "write" },
+    runCore: async () => ({
+      ok: false,
+      exitCode: null,
+      json: null,
+      stdout: "",
+      stderr: "",
+      error: "Could not find the Hephaestus engine (bundle missing).",
+    }),
+  });
+  assert.equal(broadNegation.mode, "desktop-fallback");
+  execFileSync("git", ["-C", broadNegationProject, "check-ignore", "--quiet", ".agentlas/sitemap.json"]);
+  const broadIgnore = fs.readFileSync(path.join(broadNegationProject, ".gitignore"), "utf8");
+  assert.ok(broadIgnore.lastIndexOf(".agentlas/") > broadIgnore.lastIndexOf("!*"));
+
+  const concurrentEditProject = project("concurrent-gitignore-edit");
+  const concurrentIgnorePath = path.join(concurrentEditProject, ".gitignore");
+  fs.writeFileSync(concurrentIgnorePath, "initial-rule/\n", "utf8");
+  let concurrentEditInjected = false;
+  await bootstrap.ensureDesktopProjectBootstrap({
+    projectPath: concurrentEditProject,
+    access: { permission: "write" },
+    testHooks: {
+      beforeFallbackIgnoreAppend: () => {
+        if (concurrentEditInjected) return;
+        concurrentEditInjected = true;
+        fs.appendFileSync(concurrentIgnorePath, "concurrent-user-rule/\n", "utf8");
+      },
+    },
+    runCore: async () => ({
+      ok: false,
+      exitCode: null,
+      json: null,
+      stdout: "",
+      stderr: "",
+      error: "Could not find the Hephaestus engine (bundle missing).",
+    }),
+  });
+  assert.equal(concurrentEditInjected, true);
+  const concurrentIgnore = fs.readFileSync(concurrentIgnorePath, "utf8");
+  assert.match(concurrentIgnore, /^initial-rule\/$/m);
+  assert.match(concurrentIgnore, /^concurrent-user-rule\/$/m, "concurrent user edits must never be overwritten");
+  assert.match(concurrentIgnore, /^\.agentlas\/$/m);
+
+  const privacyWarningProject = project("core-privacy-warning");
+  const privacyWarning = await bootstrap.ensureDesktopProjectBootstrap({
+    projectPath: privacyWarningProject,
+    access: { permission: "full" },
+    runCore: async () => ({
+      ok: true,
+      exitCode: 0,
+      json: {
+        schemaVersion: "agentlas.project-bootstrap.v1",
+        status: "privacy_warning",
+        mergeOnly: true,
+        privacyBlockInstalled: true,
+        privateModeCompliant: true,
+        missing: [],
+        overwritten: [],
+        permissionIssues: [],
+        trackedSensitivePaths: [".agentlas/project-soul-memory.md"],
+        trackedSensitiveScanComplete: true,
+        privacyWarnings: [],
+      },
+      stdout: "",
+      stderr: "",
+    }),
+  });
+  assert.equal(privacyWarning.mode, "core-privacy-warning");
+
+  const nonGitProject = project("non-git-core-warning");
+  const nonGitResult = await bootstrap.ensureDesktopProjectBootstrap({
+    projectPath: nonGitProject,
+    access: { permission: "full" },
+    runCore: async () => ({
+      ok: true,
+      exitCode: 0,
+      json: {
+        schemaVersion: "agentlas.project-bootstrap.v1",
+        status: "privacy_warning",
+        mergeOnly: true,
+        privacyBlockInstalled: true,
+        privateModeCompliant: true,
+        missing: [],
+        overwritten: [],
+        permissionIssues: [],
+        trackedSensitivePaths: [],
+        trackedSensitiveScanComplete: false,
+        privacyWarnings: ["tracked_sensitive_scan_incomplete"],
+      },
+      stdout: "",
+      stderr: "",
+    }),
+  });
+  assert.equal(nonGitResult.mode, "core", "non-Git folders must not remain permanently unactivated");
+
+  const malformedCoreProject = project("malformed-core-success");
+  await assert.rejects(
+    bootstrap.ensureDesktopProjectBootstrap({
+      projectPath: malformedCoreProject,
+      access: { permission: "full" },
+      runCore: async () => ({
+        ok: true,
+        exitCode: 0,
+        json: {
+          schemaVersion: "agentlas.project-bootstrap.v1",
+          status: "active",
+          mergeOnly: true,
+          privacyBlockInstalled: true,
+        },
+        stdout: "",
+        stderr: "",
+      }),
+    }),
+    /incomplete project bootstrap contract/,
+  );
+  assert.equal(fs.existsSync(path.join(malformedCoreProject, ".agentlas")), false);
+  assert.equal(fs.existsSync(path.join(malformedCoreProject, ".gitignore")), false);
+
+  const oversizedIgnoreProject = project("oversized-ignore");
+  const oversizedIgnorePath = path.join(oversizedIgnoreProject, ".gitignore");
+  fs.writeFileSync(oversizedIgnorePath, Buffer.alloc(1024 * 1024 + 1, 0x61));
+  await assert.rejects(
+    bootstrap.ensureDesktopProjectBootstrap({
+      projectPath: oversizedIgnoreProject,
+      access: { permission: "write" },
+      runCore: async () => ({
+        ok: false,
+        exitCode: null,
+        json: null,
+        stdout: "",
+        stderr: "",
+        error: "Could not find the Hephaestus engine (bundle missing).",
+      }),
+    }),
+    /safe bootstrap limit/,
+  );
+  assert.equal(fs.statSync(oversizedIgnorePath).size, 1024 * 1024 + 1);
+  assert.equal(fs.existsSync(path.join(oversizedIgnoreProject, ".agentlas")), false);
+
+  if (process.platform !== "win32") {
+    const symlinkIgnoreProject = project("symlink-ignore");
+    const externalIgnore = path.join(temp, "external.gitignore");
+    fs.writeFileSync(externalIgnore, "external-only\n", "utf8");
+    fs.symlinkSync(externalIgnore, path.join(symlinkIgnoreProject, ".gitignore"));
+    await assert.rejects(
+      bootstrap.ensureDesktopProjectBootstrap({
+        projectPath: symlinkIgnoreProject,
+        access: { permission: "write" },
+        runCore: async () => ({
+          ok: false,
+          exitCode: null,
+          json: null,
+          stdout: "",
+          stderr: "",
+          error: "Could not find the Hephaestus engine (bundle missing).",
+        }),
+      }),
+      /regular non-symbolic-link file/,
+    );
+    assert.equal(fs.readFileSync(externalIgnore, "utf8"), "external-only\n");
+    assert.equal(fs.existsSync(path.join(symlinkIgnoreProject, ".agentlas")), false);
+  }
+
+  const lockTimeoutProject = project("core-lock-timeout");
+  await assert.rejects(
+    bootstrap.ensureDesktopProjectBootstrap({
+      projectPath: lockTimeoutProject,
+      access: { permission: "write" },
+      runCore: async () => ({
+        ok: false,
+        exitCode: 1,
+        json: { error: "project_bootstrap_lock_timeout" },
+        stdout: '{"error":"project_bootstrap_lock_timeout"}\n',
+        stderr: "",
+      }),
+    }),
+    /failed before its write state could be verified/,
+  );
+  assert.equal(fs.existsSync(path.join(lockTimeoutProject, ".gitignore")), false);
+  assert.equal(fs.existsSync(path.join(lockTimeoutProject, ".agentlas")), false);
 
   for (const [name, access] of [
     ["site-agent-app", { permission: "full", agentAppMode: true }],
