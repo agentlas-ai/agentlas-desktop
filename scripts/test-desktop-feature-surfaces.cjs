@@ -131,10 +131,16 @@ async function main() {
     }
     if (process.argv.includes("--hub-ontology-only")) {
       await runHubOntologyProjectionSurface(browser, baseUrl, evidence);
+      await runActualExperienceAttachmentSurface(browser, baseUrl, evidence);
       await runOntologyWebglFallbackSurface(browser, baseUrl, evidence);
       await runOntologyScaleSurface(browser, baseUrl);
       await runOntologyErrorSurface(browser, baseUrl);
       console.log("desktop exact Hub Ontology projection, WebGL fallback, scale, and error-state surfaces passed");
+      return;
+    }
+    if (process.argv.includes("--actual-experience-only")) {
+      await runActualExperienceAttachmentSurface(browser, baseUrl, evidence);
+      console.log("desktop actual Experience Chip attachment surface passed");
       return;
     }
     if (process.argv.includes("--hub-live-only")) {
@@ -941,6 +947,35 @@ async function runHubOntologyProjectionSurface(browser, baseUrl, evidence) {
   await captureOntologyEvidence(page, graph, lightEvidencePath, "light");
   assert.deepEqual(errors, [], "library Hub ontology surface should not emit page errors");
   evidence.push({ name: "library-hub-ontology-projection-surface", status: "pass", url: page.url() });
+  await context.close();
+}
+
+async function runActualExperienceAttachmentSurface(browser, baseUrl, evidence) {
+  const chipTitle = "브라우저 자동화 막힘 해결";
+  const chipSummary = "브라우저 자동화가 막히면 권한과 실행 경로를 먼저 확인하고, 로그인 세션과 사용할 수 있는 도구를 확인한 뒤 안전한 대체 경로를 제안합니다.";
+  const { context, page, errors } = await newPage(browser, {
+    experienceScenario: true,
+    hubOntologyAgentId: "agent-2",
+    hubOntologyNeutralFixture: true,
+    hubOperationalChipTitle: chipTitle,
+    hubOperationalChipSummary: chipSummary,
+    locale: "ko",
+    viewportHeight: 1120,
+  });
+  await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
+  await page.getByText(/리서치 분석 에이전트|Research Analyst Agent/).first().click();
+  await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
+  const hub = page.getByTestId("agent-hub-ontology-projection");
+  await hub.getByText(/현재 1개 사용 중|1 in use now/).waitFor();
+  await page.getByTestId("ontology-hub-details").locator("summary").click();
+  await page.getByTestId("ontology-operational-chips").getByText(chipTitle, { exact: true }).waitFor();
+  await page.getByTestId("ontology-operational-chips").getByText(chipSummary, { exact: true }).waitFor();
+  await page.getByTestId("ontology-active-loadout").getByText(chipTitle, { exact: true }).waitFor();
+  assert.doesNotMatch(await hub.innerText(), /release[_ -]?id|definition[_ -]?id|agent-definition-|agent-release-|\/Users\/|ghp_|sk-(?:proj-)?/i, "actual attached Experience must not expose internal IDs, paths, or credentials");
+  const screenshot = path.join(outDir, "library-actual-experience-attached-surface.png");
+  await page.screenshot({ path: screenshot, fullPage: true, animations: "disabled" });
+  assert.deepEqual(errors, [], "actual Experience attachment surface should not emit page errors");
+  evidence.push({ name: "library-actual-experience-attached-surface", status: "pass", url: page.url() });
   await context.close();
 }
 
