@@ -166,19 +166,46 @@ jobs:
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-site-agent-app-firm-isolation.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-site-agent-app-group-isolation.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-site-agent-app-runtime.cjs
-      - name: Verify Agent App MCP boundary on macOS and Windows
+      - name: Verify Agent App exact capability on macOS and Windows
         if: runner.os != 'Linux'
         working-directory: agentlas-desktop
         shell: bash
-        run: |
-          node scripts/test-site-agent-app-isolation.cjs
-          npx --no-install electron scripts/test-site-agent-app-capabilities.cjs
-          npx --no-install electron scripts/test-site-agent-app-mcp-consent.cjs
-          npx --no-install electron scripts/test-site-agent-app-prebuild-mcp.cjs
-          npx --no-install electron scripts/test-site-agent-app-claude-runtime-isolation.cjs
-          npx --no-install electron scripts/test-site-agent-app-firm-isolation.cjs
-          npx --no-install electron scripts/test-site-agent-app-group-isolation.cjs
-          npx --no-install electron scripts/test-site-agent-app-runtime.cjs
+        run: node scripts/test-site-agent-app-isolation.cjs
+      - name: Verify Agent App declared capabilities on macOS and Windows
+        if: runner.os != 'Linux'
+        working-directory: agentlas-desktop
+        shell: bash
+        run: npx --no-install electron scripts/test-site-agent-app-capabilities.cjs
+      - name: Verify Agent App MCP consent on macOS and Windows
+        if: runner.os != 'Linux'
+        working-directory: agentlas-desktop
+        shell: bash
+        run: npx --no-install electron scripts/test-site-agent-app-mcp-consent.cjs
+      - name: Verify Agent App prebuild MCP on macOS and Windows
+        if: runner.os != 'Linux'
+        working-directory: agentlas-desktop
+        shell: bash
+        run: npx --no-install electron scripts/test-site-agent-app-prebuild-mcp.cjs
+      - name: Verify Agent App Claude isolation on macOS and Windows
+        if: runner.os != 'Linux'
+        working-directory: agentlas-desktop
+        shell: bash
+        run: npx --no-install electron scripts/test-site-agent-app-claude-runtime-isolation.cjs
+      - name: Verify Agent App firm isolation on macOS and Windows
+        if: runner.os != 'Linux'
+        working-directory: agentlas-desktop
+        shell: bash
+        run: npx --no-install electron scripts/test-site-agent-app-firm-isolation.cjs
+      - name: Verify Agent App group isolation on macOS and Windows
+        if: runner.os != 'Linux'
+        working-directory: agentlas-desktop
+        shell: bash
+        run: npx --no-install electron scripts/test-site-agent-app-group-isolation.cjs
+      - name: Verify Agent App runtime on macOS and Windows
+        if: runner.os != 'Linux'
+        working-directory: agentlas-desktop
+        shell: bash
+        run: npx --no-install electron scripts/test-site-agent-app-runtime.cjs
       - name: Build and verify packaged Agent App MCP boundary
         working-directory: agentlas-desktop
         shell: bash

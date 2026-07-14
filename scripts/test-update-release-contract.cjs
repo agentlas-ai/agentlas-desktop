@@ -169,7 +169,6 @@ assert.match(
 for (const stepName of [
   "Verify installed Core on macOS and Windows",
   "Verify Agent App MCP boundary on Linux",
-  "Verify Agent App MCP boundary on macOS and Windows",
   "Build and verify packaged Agent App MCP boundary",
 ]) {
   const escaped = stepName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -189,15 +188,28 @@ assert.doesNotMatch(
   /name: Verify Agent App MCP boundary on Linux[\s\S]{0,250}npm run test:agent-app-runtime:prepared/,
   "the Linux Agent App gate must not hide Electron flags behind the generic prepared script",
 );
-assert.match(
-  crossPlatformHarness,
-  /name: Verify Agent App MCP boundary on macOS and Windows[\s\S]{0,1500}npx --no-install electron scripts\/test-site-agent-app-runtime\.cjs/,
-  "the macOS/Windows Agent App gate must invoke every Electron contract directly through Git Bash",
-);
+for (const [stepName, command] of [
+  ["Verify Agent App exact capability on macOS and Windows", "node scripts/test-site-agent-app-isolation.cjs"],
+  ["Verify Agent App declared capabilities on macOS and Windows", "npx --no-install electron scripts/test-site-agent-app-capabilities.cjs"],
+  ["Verify Agent App MCP consent on macOS and Windows", "npx --no-install electron scripts/test-site-agent-app-mcp-consent.cjs"],
+  ["Verify Agent App prebuild MCP on macOS and Windows", "npx --no-install electron scripts/test-site-agent-app-prebuild-mcp.cjs"],
+  ["Verify Agent App Claude isolation on macOS and Windows", "npx --no-install electron scripts/test-site-agent-app-claude-runtime-isolation.cjs"],
+  ["Verify Agent App firm isolation on macOS and Windows", "npx --no-install electron scripts/test-site-agent-app-firm-isolation.cjs"],
+  ["Verify Agent App group isolation on macOS and Windows", "npx --no-install electron scripts/test-site-agent-app-group-isolation.cjs"],
+  ["Verify Agent App runtime on macOS and Windows", "npx --no-install electron scripts/test-site-agent-app-runtime.cjs"],
+]) {
+  const escapedName = stepName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedCommand = command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(
+    crossPlatformHarness,
+    new RegExp(`name: ${escapedName}[\\s\\S]{0,220}shell: bash[\\s\\S]{0,120}run: ${escapedCommand}`),
+    `${stepName} must remain an individually visible Git Bash gate`,
+  );
+}
 assert.doesNotMatch(
   crossPlatformHarness,
-  /name: Verify Agent App MCP boundary on macOS and Windows[\s\S]{0,250}npm run test:agent-app-runtime:prepared/,
-  "the macOS/Windows Agent App gate must not leave Electron under the PowerShell/npm wrapper",
+  /runner\.os != 'Linux'[\s\S]{0,250}npm run test:agent-app-runtime:prepared/,
+  "the macOS/Windows Agent App gates must not leave Electron under the PowerShell/npm wrapper",
 );
 assert.match(
   crossPlatformHarness,
