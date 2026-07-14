@@ -4400,10 +4400,44 @@ function AgentDetailView({
           {activeTab === "ontology" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 1180 }}>
               <section data-testid="agent-local-experience" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                <details open data-testid="ontology-chip-management" style={{ border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)", overflow: "hidden" }}>
+                <div data-testid="ontology-human-guide" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 9 }}>
+                  <div style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
+                    <strong style={{ display: "block", fontSize: 12.5 }}>{locale === "ko" ? "구매한 경험칩 쓰기" : "Use a purchased chip"}</strong>
+                    <span style={{ display: "block", marginTop: 4, color: "var(--ink-soft)", fontSize: 11, lineHeight: 1.5 }}>
+                      {locale === "ko" ? "아래에서 이 에이전트에 장착된 칩과 새 대화 적용 상태를 확인합니다." : "See what is attached to this agent and what will apply to new conversations below."}
+                    </span>
+                    <Link href="/marketplace?view=experience" className="btn sm" style={{ display: "inline-flex", marginTop: 9 }}>
+                      {locale === "ko" ? "Hub에서 경험칩 찾기" : "Find chips on Hub"}
+                    </Link>
+                  </div>
+                  <div style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
+                    <strong style={{ display: "block", fontSize: 12.5 }}>{locale === "ko" ? "내 경험칩 만들고 팔기" : "Create and sell my chip"}</strong>
+                    <span style={{ display: "block", marginTop: 4, color: "var(--ink-soft)", fontSize: 11, lineHeight: 1.5 }}>
+                      {locale === "ko" ? "실제 작업에서 배운 해결법을 고르고, 개인정보를 뺀 소개와 가격을 정합니다." : "Choose a method learned from real work, then set privacy-safe buyer copy and a price."}
+                    </span>
+                  </div>
+                </div>
+                <AgentHubOntologyProjectionView
+                  result={hubOntology}
+                  loading={hubOntologyLoading}
+                  error={hubOntologyError}
+                  locale={locale}
+                  onRefresh={() => setHubOntologyRefresh((current) => current + 1)}
+                  onResolveApproval={async (approvalId, decision) => {
+                    const api = ipc();
+                    if (!api || !agent?.id) throw new Error("Agentlas Desktop is unavailable.");
+                    const resolved = await api.experience.hubResolveAttach(agent.id, approvalId, decision);
+                    setHubOntology(resolved.projection);
+                    return resolved;
+                  }}
+                />
+                <details data-testid="ontology-chip-management" style={{ border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)", overflow: "hidden" }}>
                   <summary style={{ listStyle: "none", cursor: "pointer", minHeight: 56, padding: "10px 12px", display: "flex", alignItems: "center", gap: 9 }}>
                     <span aria-hidden="true" style={{ width: 32, height: 32, borderRadius: 11, display: "grid", placeItems: "center", background: "var(--accent-soft)", color: "var(--accent)", boxShadow: "inset 0 1px 0 color-mix(in srgb, white 55%, transparent)" }}><IconLayers size={15} /></span>
-                    <strong style={{ fontSize: 13 }}>{locale === "ko" ? "경험칩 관리" : "Manage Experience Chips"}</strong>
+                    <div>
+                      <strong style={{ display: "block", fontSize: 13 }}>{locale === "ko" ? "내 경험칩 만들기·판매" : "Create and sell my Experience Chips"}</strong>
+                      <span style={{ display: "block", marginTop: 2, color: "var(--muted-deep)", fontSize: 10.5 }}>{locale === "ko" ? "필요할 때만 열어 판매할 경험과 공개 상태를 관리합니다." : "Open only when you want to manage saleable experience and publishing."}</span>
+                    </div>
                     <span title={locale === "ko" ? "저장된 경험칩" : "Saved Experience Chips"} style={{ padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, color: "var(--green-deep)", background: "var(--green-soft)", fontSize: 10, fontWeight: 750 }}>{locale === "ko" ? "경험" : "Experience"} {ontologySummary?.packCount ?? 0}</span>
                     <span title={locale === "ko" ? "아직 검토할 취향" : "Taste drafts to review"} style={{ padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, color: "var(--amber-deep)", background: "var(--amber-soft)", fontSize: 10, fontWeight: 750 }}>{locale === "ko" ? "취향" : "Taste"} {ontologySummary?.tasteDraftCount ?? 0}</span>
                     <span aria-hidden="true" style={{ marginLeft: "auto", width: 7, height: 7, borderRight: "1.5px solid currentColor", borderBottom: "1.5px solid currentColor", transform: "rotate(45deg) translateY(-2px)", color: "var(--muted-deep)" }} />
@@ -4419,20 +4453,6 @@ function AgentDetailView({
                     />
                   </div>
                 </details>
-                <AgentHubOntologyProjectionView
-                  result={hubOntology}
-                  loading={hubOntologyLoading}
-                  error={hubOntologyError}
-                  locale={locale}
-                  onRefresh={() => setHubOntologyRefresh((current) => current + 1)}
-                  onResolveApproval={async (approvalId, decision) => {
-                    const api = ipc();
-                    if (!api || !agent?.id) throw new Error("Agentlas Desktop is unavailable.");
-                    const resolved = await api.experience.hubResolveAttach(agent.id, approvalId, decision);
-                    setHubOntology(resolved.projection);
-                    return resolved;
-                  }}
-                />
                 <ExperienceOntologySummaryView
                   summary={ontologySummary}
                   loading={ontologySummaryLoading}

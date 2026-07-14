@@ -147,6 +147,26 @@ function hubListing(pkg) {
   };
 }
 
+function callOnlyHubListing() {
+  return {
+    slug: "public-call-only-agent",
+    name: "Public Call-only Agent",
+    nameEn: "Public Call-only Agent",
+    tagline: "Borrow from Hub without source download",
+    taglineEn: "Borrow from Hub without source download",
+    trustGrade: "A",
+    installCount: 1,
+    manifestUrl: "mock-call-only",
+    mcpServers: [],
+    tone: "blue",
+    kind: "cloud-callable",
+    callable: true,
+    routingReady: true,
+    entityKind: "agent",
+    // Source instructions and cloudPackage are intentionally withheld.
+  };
+}
+
 function sendJson(res, payload, status = 200) {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(payload));
@@ -238,7 +258,8 @@ const server = http.createServer((req, res) => {
     if (method.startsWith("cargo.")) cargoCookies.push(req.headers.cookie || "");
 
     if (method === "marketplace.get_manifest") {
-      sendJson(res, { result: hubListing(publicHubPackage) });
+      const slug = request.params?.arguments?.slug;
+      sendJson(res, { result: slug === "public-call-only-agent" ? callOnlyHubListing() : hubListing(publicHubPackage) });
       return;
     }
     if (method === "cargo.get_manifest") {
@@ -350,6 +371,17 @@ server.listen(0, "127.0.0.1", async () => {
         "registry transaction must preserve the portable v2 executable contract",
       );
     }
+
+    await assert.rejects(
+      installAgent("public-call-only-agent"),
+      /call-only and cannot be installed locally/,
+      "a source-protected callable Hub card must fail with a human product boundary instead of a SQLite error",
+    );
+    assert.equal(
+      getDb().prepare("SELECT COUNT(*) AS count FROM installed_agents WHERE slug = ?").get("public-call-only-agent").count,
+      0,
+      "a rejected call-only card must not leave a partial local registry row",
+    );
 
     const installedV1 = await installMyAgent(cloudList[0].slug);
     const ownerDir = path.join(app.getPath("userData"), "agents", "owned-registry-agent");

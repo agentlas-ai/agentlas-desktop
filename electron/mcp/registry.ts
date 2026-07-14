@@ -173,6 +173,19 @@ export async function installAgent(slug: string): Promise<InstalledAgent> {
     throw new Error("This web-only agent is not available in Agentlas Desktop.");
   }
 
+  // Public call-only Hub cards deliberately omit source instructions. They are
+  // borrowed through /hep-call and must never fall through to the local
+  // registry, where an absent prompt used to surface as a SQLite NOT NULL
+  // error. Owner package restore remains available through installMyAgent().
+  if (typeof listing.systemPrompt !== "string" || !listing.systemPrompt.trim()) {
+    if (listing.callable === true || listing.kind === "cloud-callable") {
+      throw new Error(
+        "This Hub agent is call-only and cannot be installed locally. Bookmark it or use /hep-call; owners can restore their Agent Cloud package from My Agents.",
+      );
+    }
+    throw new Error("This Hub package is missing the instructions required for a safe local install.");
+  }
+
   if (listing.trustGrade !== "A" && listing.trustGrade !== "B") {
     throw new Error(
       `Trust grade ${listing.trustGrade} blocked. Sideloading requires explicit approval (V1+).`,

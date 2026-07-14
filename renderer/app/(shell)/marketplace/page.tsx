@@ -353,6 +353,23 @@ function MarketplacePage() {
     }
   }
 
+  async function copyHubCall(listing: MarketplaceListing) {
+    try {
+      await navigator.clipboard.writeText(`/hep-call ${listing.slug}`);
+      setImportNotice({
+        tone: "ok",
+        text: ko
+          ? "채팅 호출어를 복사했습니다. 작업 공간의 채팅에 붙여넣으면 됩니다."
+          : "Copied the chat call. Paste it into a Workspace conversation.",
+      });
+    } catch {
+      setImportNotice({
+        tone: "error",
+        text: ko ? "채팅 호출어를 복사하지 못했습니다." : "Could not copy the chat call.",
+      });
+    }
+  }
+
   const normalizedQuery = q.trim().toLowerCase();
   const hubPartial = Boolean(sourceStatus?.online && !sourceStatus.usingFallback && sourceStatus.lastError);
   const hubLive = sourceStatus ? sourceStatus.online && !sourceStatus.usingFallback && !sourceStatus.lastError : false;
@@ -661,10 +678,11 @@ function MarketplacePage() {
                       key={hubListingIdentityKey(listing)}
                       listing={listing}
                       locale={locale}
-                      installed={installedAgentSlugs.has(listing.slug)}
+                      sameSlugInstalled={installedAgentSlugs.has(listing.slug)}
                       bookmarked={bookmarkedIdentities.has(hubListingIdentityKey(listing))}
                       bookmarking={bookmarking === hubListingIdentityKey(listing)}
                       onBookmark={() => void bookmarkOne(listing)}
+                      onCopyCall={() => void copyHubCall(listing)}
                     />
                   ))}
                 </div>
@@ -947,17 +965,19 @@ function RdTag({
 function AgentCard({
   listing,
   locale,
-  installed,
+  sameSlugInstalled,
   bookmarked,
   bookmarking,
   onBookmark,
+  onCopyCall,
 }: {
   listing: MarketplaceListing;
   locale: Locale;
-  installed: boolean;
+  sameSlugInstalled: boolean;
   bookmarked: boolean;
   bookmarking: boolean;
   onBookmark: () => void;
+  onCopyCall: () => void;
 }) {
   const loc = pickLocalized(listing, locale);
   const ko = locale === "ko";
@@ -993,7 +1013,7 @@ function AgentCard({
           {plugin
             ? (ko ? "도구" : "Tool")
             : callable
-              ? (ko ? `크레딧 ${perCallCredits}` : `${perCallCredits} credits`)
+              ? (ko ? `24시간 사용 · ${perCallCredits} 크레딧` : `24-hour use · ${perCallCredits} credits`)
               : (ko ? "설치 전용" : "Install only")}
         </RdTag>
       </div>
@@ -1004,10 +1024,21 @@ function AgentCard({
           <RdTag dashed>{ko ? `로컬 파일 ${listing.cloudPackage.fileCount}개` : `${listing.cloudPackage.fileCount} local files`}</RdTag>
         )}
         <RdTag dashed bg={plugin ? C.peach : entityKind === "multi" ? C.purple : C.green}>{plugin ? (listing.category || cardLabel) : cardLabel}</RdTag>
-        {installed && !plugin ? <RdTag dashed>{ko ? "보유" : "Owned"}</RdTag> : null}
+        {sameSlugInstalled && !plugin ? (
+          <RdTag
+            dashed
+            title={callable
+              ? (ko ? "Hub 사용권을 보유했다는 뜻이 아니라, 이 Mac에 같은 이름으로 가져온 로컬 에이전트가 있다는 뜻입니다." : "A same-name local agent exists on this Mac; this does not prove Hub access.")
+              : undefined}
+          >
+            {callable
+              ? (ko ? "같은 이름의 로컬 에이전트 있음" : "Same-name local agent")
+              : (ko ? "이 Mac에 설치됨" : "Installed on this Mac")}
+          </RdTag>
+        ) : null}
         {listing.totalBorrows ? <RdTag dashed>{ko ? `전체 호출 ${listing.totalBorrows}회` : `${listing.totalBorrows} total calls`}</RdTag> : null}
         {verificationFacts.map((fact) => <RdTag key={fact} dashed>{fact}</RdTag>)}
-        {command ? <RdTag className="hub-command-chip" dashed>{command}</RdTag> : null}
+        {plugin && command ? <RdTag className="hub-command-chip" dashed>{command}</RdTag> : null}
         {!plugin && !callable ? <RdTag dashed>{ko ? "Hub 호출 불가" : "Hub call unavailable"}</RdTag> : null}
       </div>
       <div className="hub-card-actions">
@@ -1025,6 +1056,16 @@ function AgentCard({
                 ? (ko ? "북마크됨" : "Bookmarked")
                 : (ko ? "북마크" : "Bookmark")}
         </button>
+        {callable ? (
+          <button
+            type="button"
+            className="btn sm"
+            onClick={onCopyCall}
+            title={ko ? "복사한 호출어를 작업 공간의 채팅에 붙여넣으세요." : "Paste the copied call into a Workspace conversation."}
+          >
+            {ko ? "채팅에 붙여넣기" : "Paste into chat"}
+          </button>
+        ) : null}
       </div>
     </div>
   );

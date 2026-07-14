@@ -767,7 +767,8 @@ async function runCompactAgentSurface(browser, baseUrl, evidence) {
   assert.equal(await tabs.evaluate((nav) => getComputedStyle(nav).overflowX === "auto"), true, "compact agent tabs should scroll horizontally instead of clipping");
   await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
   await page.getByTestId("experience-ontology-summary").waitFor();
-  assert.notEqual(await page.getByTestId("ontology-chip-management").getAttribute("open"), null, "compact ontology management must be visible by default");
+  assert.equal(await page.getByTestId("ontology-chip-management").getAttribute("open"), null, "compact ontology creation controls must stay collapsed until requested");
+  await page.getByTestId("ontology-human-guide").getByText(/구매한 경험칩 쓰기|Use a purchased chip/).waitFor();
   assert.equal(await page.getByTestId("ontology-advanced-relations").getAttribute("open"), null, "advanced relations must stay collapsed by default");
   assert.equal(await page.getByTestId("agent-ontology-graph").count(), 0, "the relation graph must not load before the user opens advanced relations");
   await page.getByTestId("ontology-advanced-relations").locator("summary").click();
@@ -797,12 +798,17 @@ async function runExperienceSurface(browser, baseUrl, evidence) {
   await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
   const management = page.getByTestId("ontology-chip-management");
   await management.waitFor();
-  assert.notEqual(await management.getAttribute("open"), null, "Experience management must be visible by default");
+  assert.equal(await management.getAttribute("open"), null, "creation and selling controls must stay collapsed behind the primary attachment status");
+  await page.getByTestId("ontology-human-guide").getByText(/구매한 경험칩 쓰기|Use a purchased chip/).waitFor();
   assert.equal(await page.getByTestId("ontology-advanced-relations").getAttribute("open"), null, "advanced relations must be closed by default");
   assert.equal(await page.getByTestId("agent-ontology-graph").count(), 0, "the relation graph must not load on the default Experience screen");
   const ontologySummary = page.getByTestId("experience-ontology-summary");
   await ontologySummary.waitFor();
   assert.equal(await page.getByText(/privacy_sensitive/).isVisible().catch(() => false), false, "internal privacy codes must stay hidden on the default screen");
+  const simpleDefaultScreenshot = path.join(outDir, "library-experience-default-simple.png");
+  await page.screenshot({ path: simpleDefaultScreenshot, fullPage: true, animations: "disabled" });
+  evidence.push(simpleDefaultScreenshot);
+  await management.locator("summary").first().click();
   await page.getByText(/새 경험 묶음 만들기|Create a new experience collection/).click();
   await page.getByText(/^경험 칩$|^Experience Chips$/).first().waitFor();
 
@@ -905,6 +911,7 @@ async function runHubOntologyProjectionSurface(browser, baseUrl, evidence) {
   await page.getByTestId("ontology-pending-approvals").getByText(/적용할지 직접 확인해 주세요|Choose whether to apply this change/).waitFor();
   await page.getByTestId("ontology-recommendations").getByText(/실패 복구 방법 업데이트/).waitFor();
   const management = page.getByTestId("ontology-chip-management");
+  await management.locator("summary").first().click();
   await management.getByText(/취향 경험 후보|Taste candidates/).click();
   await page.getByTestId("local-taste-drafts").waitFor();
   assert.equal(await page.getByTestId("taste-draft-count").innerText(), "2");
@@ -1127,6 +1134,7 @@ async function runExperienceCloudStateSurface(browser, baseUrl, evidence, state)
   await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
   await page.getByText(/Builder Agent|빌더 에이전트/).first().click();
   await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
+  await page.getByTestId("ontology-chip-management").locator("summary").first().click();
   await page.getByText(/새 경험 묶음 만들기|Create a new experience collection/).click();
   await page.getByPlaceholder(/경험 칩 묶음 이름|Experience Chips name/).fill(`state-${state}`);
   await page.getByRole("button", { name: /프로젝트 폴더 선택|Choose project folder/ }).click();

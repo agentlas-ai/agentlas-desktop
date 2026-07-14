@@ -111,6 +111,10 @@ assert.match(market, /hubSuggestions\.length/, "Hub page autocomplete must deriv
 assert.match(hubVerification, /static security scan result, not a creator reputation or user rating/, "security grade must not masquerade as creator reputation");
 assert.match(hubVerification, /listing\.callable === true[\s\S]*listing\.kind === "cloud-callable"/, "Hub command chips must fail closed on explicit callability");
 assert.match(market, /hubVerificationFacts\(listing, locale\)/, "Hub cards must render measured invocation facts");
+assert.match(market, /24시간 사용 · \$\{perCallCredits\} 크레딧/, "Hub cards must explain the paid 24-hour usage term, not show an unexplained credit number");
+assert.match(market, /같은 이름의 로컬 에이전트 있음/, "a same-name local agent must not masquerade as owned Hub access");
+assert.doesNotMatch(market, /\{ko \? "보유" : "Owned"\}/, "Hub cards must not label a same-slug local agent as owned Hub access");
+assert.match(market, /채팅에 붙여넣기/, "callable Hub cards need a human action instead of exposing only an internal call command");
 assert.doesNotMatch(market, />Trust \{/, "Hub cards must not present the package scan grade as generic Trust reputation");
 assert.match(room, /hubSecurityGradeLabel\(r, locale\)/, "Dashboard Hub cards must name the security scan honestly");
 assert.match(room, /data-callable=\{callable \? "true" : "false"\}/, "Dashboard Hub cards must expose callable versus install-only state");
