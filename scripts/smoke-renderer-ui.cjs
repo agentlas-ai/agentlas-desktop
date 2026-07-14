@@ -274,7 +274,7 @@ async function runUiChecks() {
     await sidebar.waitFor();
     try {
       await sidebar.getByText("팀 채팅 스모크").waitFor({ timeout: 10000 });
-      await sidebar.getByText("런치크루팀").waitFor({ timeout: 10000 });
+      await sidebar.getByText(/런치크루팀|LaunchCrewTeam/).waitFor({ timeout: 10000 });
     } catch (err) {
       await page.screenshot({ path: path.join(outDir, "sidebar-team-missing.png"), fullPage: true }).catch(() => {});
       const sidebarText = await sidebar.innerText().catch(() => "");
@@ -297,7 +297,8 @@ async function runUiChecks() {
 
     const optionCount = await listbox.getByRole("option").count();
     assert.ok(optionCount > 0, "agent picker listbox must not be empty");
-    await listbox.getByRole("option", { name: /런치크루팀|LaunchCrewTeam/ }).waitFor();
+    const teamOption = listbox.getByRole("option", { name: /런치크루팀|LaunchCrewTeam/ });
+    await teamOption.waitFor();
     assert.equal(
       await listbox.getByRole("option", { name: /백그라운드 도우미|Background Helper/ }).count(),
       0,
@@ -310,11 +311,13 @@ async function runUiChecks() {
     );
 
     // 검색 경로: 0.7.20 실사고가 "팀 검색 0건·선택 불가"였다.
-    await page.getByPlaceholder(/에이전트 검색|Search agents/).fill("런치크루");
-    await listbox.getByRole("option", { name: /런치크루팀/ }).waitFor();
+    const renderedTeamName = await teamOption.innerText();
+    const teamSearchTerm = renderedTeamName.includes(seedTeam.nameEn) ? "LaunchCrew" : "런치크루";
+    await page.getByPlaceholder(/에이전트 검색|Search agents/).fill(teamSearchTerm);
+    await teamOption.waitFor();
 
     // 팀 선택이 실제로 switchAgent까지 이어지는지.
-    await listbox.getByRole("option", { name: /런치크루팀/ }).click();
+    await teamOption.click();
     await page.waitForFunction(() =>
       window.__qa.calls.some((call) => call.name === "chats.switchAgent" && call.payload.agentId === "agent-team-1"),
     );
@@ -347,7 +350,7 @@ async function runUiChecks() {
       console.error(JSON.stringify({ hiredBadgeMissing: true, errors: hiredErrors }, null, 2));
       throw err;
     }
-    await badge.getByText(/인스타 업로더/).waitFor();
+    await badge.getByText(/인스타 업로더|Instagram Uploader/).waitFor();
 
     // 자동 재주입: 추천 없이 그냥 보내도 고용 카드가 borrowAgents로 붙는다.
     await hiredPage.locator("textarea").first().fill("고용 재주입 검증");
@@ -363,9 +366,9 @@ async function runUiChecks() {
     // 사이드바 "고용 중" 로스터: 활성 리스(무료 재호출) + 만료(기억 보관) 카드.
     const hiredSidebar = hiredPage.locator("[data-tour-id='workspace.sidebar']");
     await hiredSidebar.getByText(/고용 중|Hired agents/).waitFor();
-    await hiredSidebar.getByText("인스타 업로더").waitFor();
+    await hiredSidebar.getByText(/인스타 업로더|Instagram Uploader/).waitFor();
     await hiredSidebar.getByText(/무료 재호출|free calls/).waitFor();
-    await hiredSidebar.getByText("레딧 시더").waitFor();
+    await hiredSidebar.getByText(/레딧 시더|Reddit Seeder/).waitFor();
     await hiredSidebar.getByText(/기억 그대로|resumes its memory/).waitFor();
 
     // 해고: × 클릭 → 빈 배열로 저장 → 배지 사라짐.

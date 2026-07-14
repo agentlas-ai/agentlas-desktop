@@ -1579,6 +1579,10 @@ async function testServerBoundary() {
     host: "127.0.0.1",
     port: 0,
     pingIntervalMs: 5_000,
+    relayPairingInfo: () => ({
+      endpoint: "wss://agentlas.cloud/v1/mobile/relay",
+      secret: "R".repeat(43),
+    }),
     onError: (error) => errors.push(error.message),
   });
   let socket = null;
@@ -1610,6 +1614,10 @@ async function testServerBoundary() {
     assert.equal(exchangeResponse.headers.get("cache-control"), "no-store");
     const exchange = await exchangeResponse.json();
     assert.equal(exchange.ok, true);
+    assert.deepEqual(exchange.relay, {
+      endpoint: "wss://agentlas.cloud/v1/mobile/relay",
+      secret: "R".repeat(43),
+    });
     const token = exchange.credential.token;
 
     socket = new WebSocket(address.url, { headers: { authorization: `Bearer ${token}` } });

@@ -217,6 +217,7 @@ jobs:
           npm run test:mock-bridge-parity
           npm run test:opencrab-ui
           npm run test:build-session-contracts
+          npm run test:build-cloud-save-choice
           npm run test:hephaestus-sync
           npm run test:local-import
           npm run test:site-studio

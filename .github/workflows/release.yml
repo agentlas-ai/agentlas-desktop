@@ -236,6 +236,9 @@ jobs:
         if: runner.os == 'Linux'
         run: npm run typecheck
 
+      - name: Build Cloud save choice contract
+        run: npm run test:build-cloud-save-choice
+
       - name: Windows runtime and mobile contracts
         if: runner.os == 'Windows'
         timeout-minutes: 15

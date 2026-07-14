@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.26 — 2026-07-15
+
+### Fixed
+
+- **Release UI checks now follow the language actually rendered by Desktop.**
+  Team search, team selection, and hired-agent assertions cover both English
+  and Korean instead of assuming a Korean first-run locale.
+- **Mobile relay pairing metadata is covered by the release contract.** The
+  authenticated exchange must return the advertised relay endpoint and secret
+  without weakening the existing local pairing boundary.
+- **The Build Cloud consent contract is now a required release gate.** Signed
+  macOS and cross-platform packaging verify that Cloud upload remains explicit,
+  private, single-flight, and safely local-only when dismissed.
+
 ## 0.8.25 — 2026-07-15
 
 ### Added
