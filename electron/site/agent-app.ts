@@ -326,7 +326,7 @@ function resolveTargetAndSummary(ref: SiteAgentAppTargetRef): {
 
   if (ref.kind === "agent" || ref.kind === "team") {
     const agent = getAgentById(ref.id);
-    if (!agent || !visibleAgent(agent)) throw new Error("선택한 에이전트를 찾을 수 없습니다.");
+    if (!agent || !visibleAgent(agent)) throw new Error("The selected agent was not found.");
     const actualKind = (agent.kind ?? "agent") === "team" ? "team" : "agent";
     if (actualKind !== ref.kind) throw new Error("선택한 에이전트 유형이 변경되었습니다. 다시 선택해 주세요.");
     target = {

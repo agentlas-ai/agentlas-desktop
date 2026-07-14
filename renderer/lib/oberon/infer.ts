@@ -94,7 +94,7 @@ function pickSetting(text: string): string {
   return "";
 }
 
-function extractCharacters(text: string, locale: Locale = "ko"): FilmBrief["characters"] {
+function extractCharacters(text: string, locale: Locale = "en"): FilmBrief["characters"] {
   const stop = new Set(["AI", "CF", "MV", "OK", "TV", "API", "CEO", "SF", "UI", "UX"]);
   const caps = Array.from(new Set((text.match(/\b[A-Z][A-Z]{1,}\b/g) || []).filter((w) => !stop.has(w))));
   const leadRole = locale === "ko" ? "주연" : "Lead";
@@ -111,7 +111,7 @@ export function inferBriefFromPrompt(input: {
   /** 생성되는 라벨 텍스트 및 기본 대사 언어의 로케일 (기본 "ko" — 기존 호출부 호환). */
   locale?: Locale;
 }): FilmBrief {
-  const locale = input.locale ?? "ko";
+  const locale = input.locale ?? "en";
   const prompt = input.prompt.trim();
   const text = `${input.title}\n${prompt}`;
   const format = input.format || pickFormat(text);

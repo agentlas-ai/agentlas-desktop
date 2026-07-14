@@ -17,7 +17,7 @@ export class PathGuardError extends Error {}
 type Locale = "ko" | "en";
 
 /** 존재하는 디렉터리인지 검증하고 realpath(심볼릭 해소) 절대경로를 반환. 아니면 throw. */
-export function resolveFolderArg(folder: unknown, locale: Locale = "ko"): string {
+export function resolveFolderArg(folder: unknown, locale: Locale = "en"): string {
   const ko = locale === "ko";
   if (typeof folder !== "string" || !folder.trim()) {
     throw new PathGuardError(ko ? "폴더 경로가 비어 있습니다." : "The folder path is empty.");
@@ -70,7 +70,7 @@ export async function confirmUpload(
   resolvedFolder: string,
   destination: "private-link" | "marketplace",
   win: BrowserWindow | null,
-  locale: Locale = "ko",
+  locale: Locale = "en",
 ): Promise<boolean> {
   const ko = locale === "ko";
   const destLabel = ko

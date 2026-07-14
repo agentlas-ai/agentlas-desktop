@@ -460,7 +460,7 @@ export interface TypographyInput {
 }
 
 export function pickTypography(input: TypographyInput): TypographyKit {
-  const locale = input.locale ?? "ko";
+  const locale = input.locale ?? "en";
   const base = { ...GENRE_PAIRINGS[input.genre] };
   const override = FORMAT_TONE[input.format];
   if (override?.display) base.display = override.display;

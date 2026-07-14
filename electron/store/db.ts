@@ -478,7 +478,7 @@ export function initStore(): void {
         id TEXT PRIMARY KEY,
         project_id TEXT,
         agent_id TEXT NOT NULL,
-        title TEXT NOT NULL DEFAULT '새 채팅',
+        title TEXT NOT NULL DEFAULT 'New chat',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL,

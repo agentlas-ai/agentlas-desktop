@@ -454,7 +454,7 @@ export function readHephaestusVersion(root: string | null): string | null {
 }
 
 /** 엔진 가용성(번들 존재 + python) 확인. UI 게이트/설정 표시에 사용. */
-export async function hephaestusAvailable(locale: "ko" | "en" = "ko"): Promise<HephaestusAvailability> {
+export async function hephaestusAvailable(locale: "ko" | "en" = "en"): Promise<HephaestusAvailability> {
   const ko = locale === "ko";
   const root = hephaestusRoot();
   if (!root) {

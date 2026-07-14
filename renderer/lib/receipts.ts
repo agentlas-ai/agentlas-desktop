@@ -12,12 +12,12 @@ export const AGENTLAS_MARGIN_KRW = 0;
 export const MARGIN_LINE_KO = "Agentlas 마진: ₩0";
 export const MARGIN_LINE_EN = "Agentlas margin: $0";
 
-export function marginLine(locale: "ko" | "en" = "ko"): string {
+export function marginLine(locale: "ko" | "en" = "en"): string {
   return locale === "ko" ? MARGIN_LINE_KO : MARGIN_LINE_EN;
 }
 
 /** 토큰 수를 사람이 읽는 짧은 형태로. 실측값만 — 모르면 빈 문자열. */
-export function formatTokens(tokens?: number, locale: "ko" | "en" = "ko"): string {
+export function formatTokens(tokens?: number, locale: "ko" | "en" = "en"): string {
   if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens <= 0) return "";
   const suffix = locale === "ko" ? "토큰" : "tokens";
   if (tokens >= 1000) return `${(tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1)}k ${suffix}`;
@@ -25,7 +25,7 @@ export function formatTokens(tokens?: number, locale: "ko" | "en" = "ko"): strin
 }
 
 /** 비용 출처 한 줄 — "당신의 {provider} 구독에서 차감 · Agentlas 마진 ₩0". */
-export function costSourceLine(provider?: string, locale: "ko" | "en" = "ko"): string {
+export function costSourceLine(provider?: string, locale: "ko" | "en" = "en"): string {
   const who = provider && provider.trim() ? provider.trim() : locale === "ko" ? "당신의 구독" : "your subscription";
   if (locale === "ko") return `${who} 에서 차감 · ${MARGIN_LINE_KO}`;
   return `billed to ${who} · ${MARGIN_LINE_EN}`;

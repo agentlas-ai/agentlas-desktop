@@ -67,7 +67,7 @@ export function exportPromptPack(prod: FilmProduction): string {
 }
 
 /** Continuity Bible — Markdown. 제작팀 공유용 do-not-change 문서. */
-export function exportBibleMarkdown(prod: FilmProduction, locale: Locale = "ko"): string {
+export function exportBibleMarkdown(prod: FilmProduction, locale: Locale = "en"): string {
   const b = prod.bible;
   const lines: string[] = [];
   lines.push(`# ${prod.brief.title} — Continuity Bible`);
@@ -106,7 +106,7 @@ export function exportProductionJson(prod: FilmProduction): string {
 }
 
 /** 프로바이더 라우팅 매트릭스 요약 (제작 비용 리포트). */
-export function exportRoutingMatrix(prod: FilmProduction, locale: Locale = "ko"): string {
+export function exportRoutingMatrix(prod: FilmProduction, locale: Locale = "en"): string {
   const counts = new Map<string, { shots: number; cost: number }>();
   for (const s of prod.shots) {
     const cur = counts.get(s.providerId) ?? { shots: 0, cost: 0 };
@@ -133,7 +133,7 @@ export function exportSubtitlesVtt(prod: FilmProduction): string {
 }
 
 /** 타이포그래피 키트 — 타이틀/자막/로어서드 폰트 스펙 문서. */
-export function exportTypographyKit(prod: FilmProduction, locale: Locale = "ko"): string {
+export function exportTypographyKit(prod: FilmProduction, locale: Locale = "en"): string {
   const kit = prod.typography;
   const lines: string[] = [`# ${prod.brief.title} — Typography Kit`];
   if (!kit) {
@@ -168,7 +168,7 @@ export interface ExportFile {
   mime: string;
 }
 
-export function buildAllExports(prod: FilmProduction, locale: Locale = "ko"): ExportFile[] {
+export function buildAllExports(prod: FilmProduction, locale: Locale = "en"): ExportFile[] {
   const slug = prod.brief.title.replace(/[^\w가-힣]+/g, "_").slice(0, 40) || "oberon";
   const files: ExportFile[] = [
     { name: `${slug}_shotlist.csv`, content: exportShotListCsv(prod), mime: "text/csv" },

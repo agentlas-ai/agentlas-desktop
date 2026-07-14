@@ -161,7 +161,7 @@ export interface ThreadInput {
 
 export function threadContinuity(input: ThreadInput): Map<string, ShotContinuity> {
   const { shots, scenes, beats } = input;
-  const locale: Locale = input.locale ?? "ko";
+  const locale: Locale = input.locale ?? "en";
   const sceneById = new Map(scenes.map((s) => [s.id, s]));
   const beatById = new Map(beats.map((b) => [b.id, b]));
   const ruleByKey = new Map(CONTINUITY_RULES.map((r) => [r.key, r]));
@@ -257,7 +257,7 @@ function sameSubjects(a: string[], b: string[]): boolean {
   return a.some((x) => b.includes(x));
 }
 
-function fallbackScene(shot: ShotSpec, locale: Locale = "ko"): Scene {
+function fallbackScene(shot: ShotSpec, locale: Locale = "en"): Scene {
   return {
     id: shot.sceneId,
     index: 0,

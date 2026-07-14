@@ -134,7 +134,7 @@ function pickPalette(tone: string[]): { palette: PaletteSwatch[]; stock: string;
 
 // ── Continuity Bible 빌드 ────────────────────────────────
 
-function buildBible(brief: FilmBrief, locale: Locale = "ko"): ContinuityBible {
+function buildBible(brief: FilmBrief, locale: Locale = "en"): ContinuityBible {
   const { palette, stock, lighting } = pickPalette([...brief.tone, brief.setting, brief.genre]);
   const visualDirection =
     `${brief.tone.join(", ") || "cinematic"} ${brief.genre} look — ${brief.logline}` +
@@ -270,7 +270,7 @@ export interface PlanOptions {
 
 export function planProduction(brief: FilmBrief, opts: PlanOptions = {}): FilmProduction {
   const premium = opts.premium ?? true;
-  const locale: Locale = opts.locale ?? "ko";
+  const locale: Locale = opts.locale ?? "en";
   const rng = mulberry32(hashSeed(`${brief.title}|${brief.logline}|${brief.format}`));
   const template = GENRE_TEMPLATES[brief.format];
   const duration = brief.durationSec || FORMAT_DEFAULT_DURATION[brief.format];
@@ -960,7 +960,7 @@ export function makeTakesForShot(shot: ShotSpec, count = 3): Take[] {
 }
 
 /** 합성 QA — 실제로는 Vision QA 에이전트가 채점. */
-export function scoreTake(take: Take, shot: ShotSpec, locale: Locale = "ko"): QAResult {
+export function scoreTake(take: Take, shot: ShotSpec, locale: Locale = "en"): QAResult {
   const rng = mulberry32(hashSeed(take.id + shot.shotId));
   const base = 0.7 + rng() * 0.28;
   const findings: QAFinding[] = [];

@@ -227,7 +227,7 @@ export async function generateDeckContent(
   count: number,
   mode?: string,
   sources?: string,
-  locale: "ko" | "en" = "ko",
+  locale: "ko" | "en" = "en",
   useOpenCrab = false,
 ): Promise<TrexContentResult> {
   const clean = (topic || "").trim().slice(0, 500);

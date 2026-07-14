@@ -22,6 +22,7 @@ import {
 } from "./pairing";
 import { MobileBridgeRequestReplayStore } from "./replay";
 import { AgentlasMobileBridgeServer } from "./server";
+import { MobileBridgeCloudRelay } from "./relay";
 import { loadOrCreateMobileBridgeTls, preferredMobileBridgeHost } from "./tls";
 import { getDefaultOntologyHubClient } from "./ontology-hub-client";
 import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
@@ -40,6 +41,7 @@ interface RunningBridge {
   authority: MobileBridgeAuthorityHandle;
   pairing: MobileBridgePairingManager;
   server: AgentlasMobileBridgeServer;
+  relay: MobileBridgeCloudRelay;
   manifest: MobileBridgeEndpointManifest;
   terminalLoadoutFeedWriter: TerminalOntologyLoadoutFeedWriter;
 }
@@ -81,6 +83,27 @@ function configuredPort(fallback?: number): number {
     throw new Error("AGENTLAS_MOBILE_BRIDGE_PORT must be an integer from 0 to 65535");
   }
   return value;
+}
+
+function retainedEndpointPort(options: MobileBridgeRuntimeOptions): number | undefined {
+  if (process.env.AGENTLAS_MOBILE_BRIDGE_PORT?.trim()) return undefined;
+  try {
+    const port = readMobileBridgeEndpointManifest(options.userDataPath)?.port;
+    return typeof port === "number" && Number.isInteger(port) && port > 0 && port <= 65535
+      ? port
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function addressAlreadyInUse(error: unknown): boolean {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    return (error as { code?: unknown }).code === "EADDRINUSE";
+  }
+  return /EADDRINUSE|address already in use/i.test(
+    error instanceof Error ? error.message : String(error),
+  );
 }
 
 function configuredHost(override?: string): string {
@@ -164,6 +187,7 @@ async function startBridgeInternal(
     onError: (error) => console.error("[mobile-bridge-authority]", error.message),
   });
   let server: AgentlasMobileBridgeServer | null = null;
+  let relay: MobileBridgeCloudRelay | null = null;
   try {
     const tls = await loadOrCreateMobileBridgeTls(options.userDataPath);
     const devBootstrap =
@@ -179,6 +203,7 @@ async function startBridgeInternal(
       host: configuredHost(overrides.host),
       port: configuredPort(overrides.port),
       tls: tls.serverOptions,
+      relayPairingInfo: () => relay?.pairingInfo() ?? null,
       onError: (error) => console.error("[mobile-bridge]", error.message),
     });
     const address = await server.start();
@@ -197,7 +222,15 @@ async function startBridgeInternal(
       updatedAt: new Date().toISOString(),
     };
     writeMobileBridgeEndpointManifest(options.userDataPath, manifest);
-    running = { authority, pairing, server, manifest, terminalLoadoutFeedWriter };
+    relay = new MobileBridgeCloudRelay({
+      userDataPath: options.userDataPath,
+      hostId: identity.hostId,
+      localEndpoint: manifest.url,
+      certificateDer: tls.certificateDer,
+      onStatusChanged: () => emitMobileBridgeStateChange("runtime-started"),
+    });
+    running = { authority, pairing, server, relay, manifest, terminalLoadoutFeedWriter };
+    relay.start();
     // Refresh once at Desktop startup even when no phone is connected. This is
     // a read-only Hub query; the independent Terminal still has to opt in with
     // an explicit CLI flag and revalidates the exact local DB binding.
@@ -230,6 +263,7 @@ async function startBridgeInternal(
     return mobileBridgeRuntimeStatus();
   } catch (error) {
     lastError = error instanceof Error ? error.message : String(error);
+    relay?.stop();
     if (server) await server.close().catch(() => {});
     terminalLoadoutFeedWriter.dispose();
     pairing.dispose();
@@ -243,6 +277,7 @@ async function stopRunningBridge(emitStopped: boolean): Promise<void> {
   running = null;
   if (!state) return;
   try {
+    state.relay.stop();
     await state.server.close();
   } finally {
     state.terminalLoadoutFeedWriter.dispose();
@@ -257,7 +292,22 @@ export async function startAgentlasMobileBridge(
 ): Promise<MobileBridgeRuntimeStatus> {
   runtimeOptions = { ...options };
   ensureNetworkWatcher();
-  return serializeLifecycle(() => startBridgeInternal(options));
+  return serializeLifecycle(async () => {
+    // A paired phone stores this endpoint. Reusing the last port means closing
+    // and reopening Desktop restores the same secure WebSocket automatically.
+    const retainedPort = retainedEndpointPort(options);
+    try {
+      return await startBridgeInternal(options, {
+        ...(retainedPort ? { port: retainedPort } : {}),
+      });
+    } catch (error) {
+      // Another process may have claimed the old port while Desktop was off.
+      // Keep Desktop usable with a new port; the user can repair that exceptional
+      // case by pairing again instead of losing the entire mobile bridge.
+      if (!retainedPort || !addressAlreadyInUse(error)) throw error;
+      return startBridgeInternal(options, { port: 0 });
+    }
+  });
 }
 
 async function rebindAgentlasMobileBridge(

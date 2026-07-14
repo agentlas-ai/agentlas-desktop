@@ -489,7 +489,7 @@ export async function runHephaestusBuild(
   req: ResolvedHephaestusBuildRequest,
   sink: BuildSink,
   signal: AbortSignal,
-  locale: RuntimeLocale = "ko",
+  locale: RuntimeLocale = "en",
 ): Promise<void> {
   const ko = locale === "ko";
   // Local-only configured check: before consent, Build never contacts OpenCrab.

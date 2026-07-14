@@ -141,6 +141,7 @@ export interface AgentlasMobileBridgeServerOptions {
   tls?: https.ServerOptions;
   pingIntervalMs?: number;
   requestTimeoutMs?: number;
+  relayPairingInfo?: () => { endpoint: string; secret: string } | null;
   onError?: (error: Error) => void;
 }
 
@@ -273,6 +274,7 @@ export class AgentlasMobileBridgeServer {
   private readonly tls?: https.ServerOptions;
   private readonly pingIntervalMs: number;
   private readonly requestTimeoutMs: number;
+  private readonly relayPairingInfo?: () => { endpoint: string; secret: string } | null;
   private readonly onError: (error: Error) => void;
   private readonly clients = new Set<ConnectionState>();
   private readonly upgradeIdentities = new WeakMap<http.IncomingMessage, UpgradeIdentity>();
@@ -314,6 +316,7 @@ export class AgentlasMobileBridgeServer {
     this.tls = options.tls;
     this.pingIntervalMs = Math.max(5_000, options.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS);
     this.requestTimeoutMs = Math.max(1_000, options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+    this.relayPairingInfo = options.relayPairingInfo;
     this.onError = options.onError ?? ((error) => console.error("[mobile-bridge]", error.message));
     this.webSocketServer = new WebSocketServer({
       noServer: true,
@@ -532,12 +535,14 @@ export class AgentlasMobileBridgeServer {
     }
     try {
       const credential = this.pairing.exchange(parsed.value);
+      const relay = this.relayPairingInfo?.() ?? null;
       this.sendPairResponse(response, 200, {
         v: MOBILE_BRIDGE_PROTOCOL_VERSION,
         type: "pair.exchange.response",
         id: parsed.value.id,
         ok: true,
         credential,
+        ...(relay ? { relay } : {}),
       });
     } catch (error) {
       // DESKTOP_MOBILE_BRIDGE: Never log the raw request/code or returned token.

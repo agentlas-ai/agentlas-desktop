@@ -511,7 +511,7 @@ export function createSiteProject(
   }
   const meta: SiteProjectMeta = {
     id: randomUUID(),
-    name: name.trim() || "새 사이트",
+    name: name.trim() || "New site",
     surface,
     agentAppTarget,
     astryxTemplate,
@@ -722,7 +722,7 @@ export function saveSiteScreen(input: SaveScreenInput): SiteScreenMeta {
   const screen: SiteScreenMeta = {
     id: randomUUID(),
     projectId: meta.id,
-    name: input.name.trim() || `화면 ${meta.screens.length + 1}`,
+    name: input.name.trim() || `Screen ${meta.screens.length + 1}`,
     fileName: "",
     createdAt: now,
     updatedAt: now,

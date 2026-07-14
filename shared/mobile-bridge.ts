@@ -28,6 +28,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "team.list",
   "firms.list",
   "agentGroups.listResolved",
+  "groups.create",
   "projects.list",
   "chats.listRecent",
   "chats.get",
@@ -73,6 +74,7 @@ export type MobileBridgeMethod = (typeof MOBILE_BRIDGE_METHODS)[number];
 /** State-changing methods require durable replay protection in Desktop main. */
 export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "device.revokeSelf",
+  "groups.create",
   "chats.create",
   "chats.rename",
   "chats.archive",
@@ -184,6 +186,11 @@ export interface MobileBridgePairExchangeSuccess {
     deviceId: string;
     token: string;
     issuedAt: string;
+  };
+  /** Optional zero-storage cloud route. Issued only after local one-time pairing. */
+  relay?: {
+    endpoint: string;
+    secret: string;
   };
 }
 
@@ -569,6 +576,9 @@ export interface MobileBridgeAgentGroupMemberDto {
   name: string;
   nameEn: string;
   routeLabel: string;
+  /** Exact immutable Hub identity when this installed member has one. */
+  agentDefinitionId?: string;
+  agentReleaseId?: string;
   status: "ok" | "moved" | "missing";
   warnings: string[];
 }
@@ -796,6 +806,23 @@ function optionalString(
   return null;
 }
 
+function optionalText(
+  value: Record<string, unknown>,
+  key: string,
+  maxLength: number,
+): string | null {
+  const item = value[key];
+  if (item === undefined || item === null) return null;
+  if (
+    typeof item !== "string" ||
+    item.length > maxLength ||
+    /[\u0000\u000b\u000c\u000e-\u001f]/.test(item)
+  ) {
+    return `${key} must be text of at most ${maxLength} characters`;
+  }
+  return null;
+}
+
 function optionalBoolean(value: Record<string, unknown>, key: string): string | null {
   return value[key] === undefined || typeof value[key] === "boolean" ? null : `${key} must be a boolean`;
 }
@@ -976,6 +1003,31 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["limit"])
         ? optionalInteger(params, "limit", 1, 100)
         : "chats.listRecent accepts only limit";
+    case "groups.create": {
+      if (!hasOnlyKeys(params, ["name", "description", "orchestratorName", "memberAgentIds"])) {
+        return "groups.create contains unsupported fields";
+      }
+      const memberAgentIds = params.memberAgentIds;
+      if (
+        !Array.isArray(memberAgentIds) ||
+        memberAgentIds.length < 1 ||
+        memberAgentIds.length > 32 ||
+        memberAgentIds.some(
+          (item) =>
+            typeof item !== "string" ||
+            item.length < 1 ||
+            item.length > 256 ||
+            /[\u0000-\u001f]/.test(item),
+        )
+      ) {
+        return "memberAgentIds must contain 1 to 32 bounded installed-agent ids";
+      }
+      return firstError(
+        requiredString(params, "name", 120),
+        optionalText(params, "description", 1_000),
+        optionalString(params, "orchestratorName", 120),
+      );
+    }
     case "chats.get":
     case "chats.archive":
     case "chats.unarchive":
@@ -988,7 +1040,7 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       const targetCount = [params.agentId, params.firmId, params.agentGroupId].filter(
         (item) => typeof item === "string" && item.length > 0,
       ).length;
-      if (targetCount !== 1) return "chats.create requires exactly one of agentId, firmId, or agentGroupId";
+      if (targetCount > 1) return "chats.create accepts at most one of agentId, firmId, or agentGroupId";
       return firstError(
         optionalString(params, "agentId"),
         optionalString(params, "firmId"),

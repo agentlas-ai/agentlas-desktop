@@ -283,8 +283,8 @@ function sOrg2(labels?: string[]): string {
 interface ComparePanel { title: string; rows: { k: string; t: string }[]; }
 function dCompare(left?: ComparePanel, right?: ComparePanel): string {
   const W = 304, H = 200, pw = 132, gap = W - pw * 2, y0 = 12, ph = H - y0 - 8, id = uid("sh");
-  const L = left ?? { title: "기존 방식", rows: [{ k: "속도", t: "수기 취합 · 느림" }, { k: "범위", t: "인적 네트워크" }, { k: "검증", t: "사후 인지" }] };
-  const R = right ?? { title: "데이터 방식", rows: [{ k: "속도", t: "실시간 자동 수집" }, { k: "범위", t: "전수 스크리닝" }, { k: "검증", t: "선제적 시그널" }] };
+  const L = left ?? { title: "Traditional approach", rows: [{ k: "Speed", t: "Manual and slow" }, { k: "Scope", t: "Human network" }, { k: "Verification", t: "After-the-fact" }] };
+  const R = right ?? { title: "Data approach", rows: [{ k: "Speed", t: "Real-time collection" }, { k: "Scope", t: "Full screening" }, { k: "Verification", t: "Early signals" }] };
   function panel(x: number, p: ComparePanel, dark: boolean): string {
     const hd = dark ? A : mix(INK, SURF, 0.5), bg = dark ? BAND : SURF, tc = dark ? "#fff" : INK, kc = dark ? mix(A, SURF, 0.35) : MU;
     let s = `<rect x="${x}" y="${y0}" width="${pw}" height="${ph}" rx="12" fill="${bg}" filter="url(#${id})"/>`;
@@ -446,7 +446,7 @@ function dVenn(items: string[]): string {
   let s = `<circle cx="${cx1}" cy="${cy}" r="${r}" fill="${rgba(A, 0.5)}" filter="url(#${id})"/><circle cx="${cx2}" cy="${cy}" r="${r}" fill="${rgba(A2, 0.5)}"/>`;
   s += txt(cx1 - 22, cy + 3, items[0] ?? "A", { a: "middle", s: 10, w: 800, f: "#fff" });
   s += txt(cx2 + 22, cy + 3, items[1] ?? "B", { a: "middle", s: 10, w: 800, f: "#fff" });
-  s += txt((cx1 + cx2) / 2, cy + 3, items[2] ?? "공통", { a: "middle", s: 8.5, w: 800, f: INK });
+  s += txt((cx1 + cx2) / 2, cy + 3, items[2] ?? "Common", { a: "middle", s: 8.5, w: 800, f: INK });
   return el(s, W, H, shDef(id));
 }
 function dQuadrant(items: string[]): string {

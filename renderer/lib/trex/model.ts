@@ -231,7 +231,7 @@ function bid(): string {
   return `b${_seq.toString(36)}${(_seq * 2654435761) % 99991}`;
 }
 
-function cleanTitle(prompt: string, locale: Locale = "ko"): string {
+function cleanTitle(prompt: string, locale: Locale = "en"): string {
   const t = prompt.trim().replace(/\s+/g, " ");
   if (t.length > 46) return `${t.slice(0, 44)}…`;
   return t || (locale === "ko" ? "제목 없는 덱" : "Untitled Deck");
@@ -256,7 +256,7 @@ function fitTitleSize(text: string, base: number): number {
 }
 
 /** 프롬프트에서 짧은 포인트들을 뽑는다(콤마/구분자 기반의 가벼운 분해). */
-function derivePoints(prompt: string, want: number, locale: Locale = "ko"): string[] {
+function derivePoints(prompt: string, want: number, locale: Locale = "en"): string[] {
   const parts = prompt
     .split(/[,，·•\n]|그리고|및|->|→/)
     .map((s) => s.trim())
@@ -410,7 +410,7 @@ export interface DeckContent {
 
 // ── 슬라이드 타입별 빌더 (방향 인지 · 콘텐츠 구동) ──────────────────────
 
-function coverSlide(theme: ModeTheme, total: number, o: Orient, title: string, subtitle?: string, locale: Locale = "ko", opts?: BuildOpts, deckTitle?: string, coverImg?: string): TrexSlide {
+function coverSlide(theme: ModeTheme, total: number, o: Orient, title: string, subtitle?: string, locale: Locale = "en", opts?: BuildOpts, deckTitle?: string, coverImg?: string): TrexSlide {
   const dna = opts?.dna;
   const port = o === "portrait";
   const sq = o === "square";
@@ -542,7 +542,7 @@ function headerBlocks(theme: ModeTheme, idx: number, total: number, no: string, 
   ];
 }
 
-function kpiSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "ko", opts?: BuildOpts): TrexSlide {
+function kpiSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "en", opts?: BuildOpts): TrexSlide {
   const port = o === "portrait";
   const ts = scaleOf(opts, o);
   // 개수 적응형(2~4). 3열 고정이면 2개는 왼쪽 쏠림·4개는 유실 → 열을 개수에 맞춰 분배.
@@ -607,7 +607,7 @@ function kpiSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent,
   };
 }
 
-function barSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "ko", opts?: BuildOpts): TrexSlide {
+function barSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "en", opts?: BuildOpts): TrexSlide {
   const ts = scaleOf(opts, o);
   const defaults =
     locale === "ko"
@@ -647,7 +647,7 @@ function barSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent,
   };
 }
 
-function cardsSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "ko", opts?: BuildOpts): TrexSlide {
+function cardsSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "en", opts?: BuildOpts): TrexSlide {
   const port = o === "portrait";
   const ts = scaleOf(opts, o);
   // 개수 적응형(2~4). 고정 3열이면 2개 쏠림·4개 유실 → 열 분배. 좌측 정렬선 x=6 통일(정렬의 법칙).
@@ -796,7 +796,7 @@ function cardsSlide(theme: ModeTheme, idx: number, total: number, c: SlideConten
   };
 }
 
-function calloutSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "ko", opts?: BuildOpts): TrexSlide {
+function calloutSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "en", opts?: BuildOpts): TrexSlide {
   const port = o === "portrait";
   const ts = scaleOf(opts, o);
   const headline = locale === "ko" ? "이 한 가지가 결정한다" : "The One Thing That Matters";
@@ -836,7 +836,7 @@ function calloutSlide(theme: ModeTheme, idx: number, total: number, c: SlideCont
 
 // ── 목차 / 과정 / 핵심메시지 레이아웃 (연구: 6대 표준 레이아웃) ──────────
 
-function agendaSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "ko", opts?: BuildOpts): TrexSlide {
+function agendaSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "en", opts?: BuildOpts): TrexSlide {
   const port = o === "portrait";
   const ts = scaleOf(opts, o);
   const defaultItems = locale === "ko" ? ["항목 1", "항목 2", "항목 3"] : ["Item 1", "Item 2", "Item 3"];
@@ -873,7 +873,7 @@ function agendaSlide(theme: ModeTheme, idx: number, total: number, c: SlideConte
   return { id: bid(), bg: theme.bodyBg, ink: theme.ink, scene: "none", blocks: [...head, ...rows] };
 }
 
-function processSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "ko", opts?: BuildOpts): TrexSlide {
+function processSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "en", opts?: BuildOpts): TrexSlide {
   const port = o === "portrait";
   const ts = scaleOf(opts, o);
   const stepText = (i: number) => (locale === "ko" ? `단계 ${i + 1}` : `Step ${i + 1}`);
@@ -958,7 +958,7 @@ function processSlide(theme: ModeTheme, idx: number, total: number, c: SlideCont
 }
 
 /** 핵심 메시지 — 한 슬라이드 한 아이디어(연구: one idea per slide). 다크 전환 슬라이드. */
-function statementSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "ko", opts?: BuildOpts): TrexSlide {
+function statementSlide(theme: ModeTheme, idx: number, total: number, c: SlideContent, o: Orient, locale: Locale = "en", opts?: BuildOpts): TrexSlide {
   const dna = opts?.dna;
   const port = o === "portrait";
   // closeBg가 어두운 모드(editorial)만 흰 글자로 뒤집는다. diagrammatic의 closeBg는
@@ -1261,7 +1261,7 @@ function pickRoles(total: number): SlideRole[] {
 }
 
 /** 역할별 스캐폴드 콘텐츠(프롬프트 파생 · LLM 미사용 시 폴백). */
-function scaffoldContent(role: SlideRole, i: number, pts: string[], locale: Locale = "ko"): SlideContent {
+function scaffoldContent(role: SlideRole, i: number, pts: string[], locale: Locale = "en"): SlideContent {
   const p3 = pts.slice(i, i + 3).length >= 3 ? pts.slice(i, i + 3) : pts.slice(0, 3);
   const ko = locale === "ko";
   const noteOf = (t: string) =>
@@ -1319,7 +1319,7 @@ function hardClampBlocks(blocks: TrexBlock[], aspect: number): void {
 }
 
 /** 콘텐츠(LLM 또는 스캐폴드) → 위치 기반 블록 덱. 커버·클로징 자동 추가, footer 번호 동기화. */
-export function buildDeckFromContent(content: DeckContent, formatArg?: string, locale: Locale = "ko", styleArg?: string | null, imagesArg = true): TrexDeck {
+export function buildDeckFromContent(content: DeckContent, formatArg?: string, locale: Locale = "en", styleArg?: string | null, imagesArg = true): TrexDeck {
   const mode: ArtMode = content.mode && MODE_THEMES[content.mode] ? content.mode : "editorial";
   // styleArg: string=명시 스타일, null=명시적 "기본 룩"(LLM styleId도 무시), undefined=콘텐츠에 위임.
   const dna = styleArg === null ? null : styleById(styleArg ?? content.styleId);
@@ -1437,7 +1437,7 @@ export function parseDeckContent(raw: string): DeckContent | null {
  * 결정적 생성기 — 프롬프트 파생 스캐폴드 콘텐츠로 덱을 만든다(LLM 미사용/폴백).
  * 역할 기반 아크 + 방향 인지. LLM 경로는 buildDeckFromContent로 동일 레이아웃을 쓴다.
  */
-export function generateDeck(prompt: string, modeArg?: ArtMode, countArg?: number, formatArg?: string, locale: Locale = "ko", styleArg?: string | null, imagesArg = true, genreArg?: DeckGenre): TrexDeck {
+export function generateDeck(prompt: string, modeArg?: ArtMode, countArg?: number, formatArg?: string, locale: Locale = "en", styleArg?: string | null, imagesArg = true, genreArg?: DeckGenre): TrexDeck {
   const mode = modeArg ?? routeMode(prompt);
   const total = clampCount(countArg ?? 5);
   const pts = derivePoints(prompt, Math.max(6, total), locale);
@@ -1456,7 +1456,7 @@ export function generateDeck(prompt: string, modeArg?: ArtMode, countArg?: numbe
 }
 
 /** 빈 블록 1개 — 편집기 "블록 추가" 팔레트용. 매번 살짝 어긋나게 스폰해 겹침을 피한다. */
-export function newBlock(kind: BlockKind, locale: Locale = "ko"): TrexBlock {
+export function newBlock(kind: BlockKind, locale: Locale = "en"): TrexBlock {
   const id = bid();
   const j = _seq % 6;
   const ko = locale === "ko";

@@ -47,6 +47,7 @@ import {
   MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES,
   mobileBridgeJsonBytes,
   sanitizeMobileBridgeText,
+  stripMobileBridgeControlFences,
 } from "./sanitize";
 
 export interface MobileBridgeProjectionOptions {
@@ -192,6 +193,9 @@ async function groupsDto(): Promise<MobileBridgeAgentGroupDto[]> {
       })),
     }));
   }
+  const bindingByAgentId = new Map(
+    listInstalledAgentHubBindings(64).map((binding) => [binding.installedAgentId, binding] as const),
+  );
   return groups.map((group) => ({
     id: group.id,
     name: displayText(group.name, 512),
@@ -202,6 +206,7 @@ async function groupsDto(): Promise<MobileBridgeAgentGroupDto[]> {
     updatedAt: group.updatedAt,
     members: group.members.map((member) => {
       const display = member.current ?? member.snapshot;
+      const binding = member.agentId ? bindingByAgentId.get(member.agentId) : undefined;
       return {
         id: member.id,
         source: member.source,
@@ -214,6 +219,12 @@ async function groupsDto(): Promise<MobileBridgeAgentGroupDto[]> {
         name: displayText(display.name, 512),
         nameEn: displayText(display.nameEn, 512),
         routeLabel: displayText(display.routeLabel, 1_024),
+        ...(binding
+          ? {
+              agentDefinitionId: binding.agentDefinitionId,
+              agentReleaseId: binding.agentReleaseId,
+            }
+          : {}),
         status: member.status,
         warnings: [...member.warnings],
       };
@@ -291,7 +302,7 @@ export function projectMobileBridgeHistory(
     const candidate: MobileBridgeChatMessageDto = {
       ...shell,
       text: sanitizeMobileBridgeText(
-        message.text,
+        stripMobileBridgeControlFences(message.text),
         Math.min(MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES, remaining),
       ),
     };

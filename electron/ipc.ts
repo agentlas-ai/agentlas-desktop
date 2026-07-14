@@ -898,8 +898,8 @@ async function confirmNativeSitePublish(
         `호스팅: ${approval.provider}`,
         `검증된 계정: ${approval.providerAccountLabel}`,
         `연결 방식: ${approval.providerConnectionMethod}`,
-        `Scope / Workspace: ${approval.providerAccountScope ?? "개인 기본 계정"}`,
-        `CLI: ${approval.providerCliVersion ?? "version 확인 불가"}`,
+        `Scope / Workspace: ${approval.providerAccountScope ?? "personal default account"}`,
+        `CLI: ${approval.providerCliVersion ?? "version unavailable"}`,
         "",
         `LLM: ${approval.llmProvider}`,
         `LLM Keychain 항목:\n${keyIdentity}`,
@@ -1025,7 +1025,7 @@ export function registerIpcHandlers(): void {
       Number(payload?.count ?? 7),
       payload?.mode,
       payload?.sources,
-      payload?.locale ?? "ko",
+      payload?.locale ?? "en",
       payload?.useOpenCrab === true,
     );
   });
@@ -1269,7 +1269,7 @@ export function registerIpcHandlers(): void {
           return { ok: false, reason };
         }
         status(locale === "ko" ? "생성 결과를 검증하고 버전 탭에 저장하는 중…" : "Validating the result and saving it to the version tabs…");
-        const baseName = brief.replace(/\s+/g, " ").trim().slice(0, 24) || "화면";
+        const baseName = brief.replace(/\s+/g, " ").trim().slice(0, 24) || "screen";
         const screens = okRuns.map((r, i) =>
           saveSiteScreen({
             projectId,
@@ -2975,7 +2975,7 @@ export function registerIpcHandlers(): void {
       event,
       input: { folder: string; scope: FsReadScope; visibility: "private-link" | "marketplace"; dryRun?: boolean; locale?: "ko" | "en" },
     ) => {
-      const locale = input.locale ?? "ko";
+      const locale = input.locale ?? "en";
       let folder: string;
       try {
         folder = resolveFsReadPath(input.folder, input.scope);
@@ -3003,7 +3003,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     "hephaestus:package",
     async (event, input: { folder: string; scope: FsReadScope; visibility?: "private-link" | "marketplace"; locale?: "ko" | "en" }) => {
-      const locale = input.locale ?? "ko";
+      const locale = input.locale ?? "en";
       let folder: string;
       try {
         folder = resolveFsReadPath(input.folder, input.scope);
@@ -3040,7 +3040,7 @@ export function registerIpcHandlers(): void {
     let dir: string | undefined;
     if (inp.dir != null && String(inp.dir).trim()) {
       try {
-        dir = resolveFolderArg(inp.dir, inp.locale ?? "ko");
+        dir = resolveFolderArg(inp.dir, inp.locale ?? "en");
       } catch (e) {
         return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as PathGuardError).message };
       }

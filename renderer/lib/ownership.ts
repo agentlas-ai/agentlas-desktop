@@ -22,7 +22,7 @@ export interface OwnershipInfo {
 /** 설치된 에이전트의 소유 클래스. Agent Cloud 복원본은 검증된 로컬 실행 사본을 함께 표시한다. */
 export function classifyAgent(
   a: Pick<InstalledAgent, "localPath" | "slug" | "assetSource" | "packageHash">,
-  locale: "ko" | "en" = "ko",
+  locale: "ko" | "en" = "en",
 ): OwnershipInfo {
   const ko = locale === "ko";
   if (a.assetSource === "agent-cloud") {
@@ -65,7 +65,7 @@ export function classifyAgent(
 /** 허브에서 빌려쓰는(호출형) 게스트. 로컬에 파일이 없고 게시자 가용성에 종속된다. */
 export function borrowedInfo(
   input: { publisher?: string; available?: boolean },
-  locale: "ko" | "en" = "ko",
+  locale: "ko" | "en" = "en",
 ): OwnershipInfo {
   const ko = locale === "ko";
   const available = input.available !== false;

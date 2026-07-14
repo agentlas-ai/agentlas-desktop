@@ -44,7 +44,7 @@ function injectImages(deck: TrexDeck, images: (string | undefined)[]): TrexDeck 
     }),
   };
 }
-function Deck({ label, content, deck: prebuilt, mode, formatId, styleId, only, locale = "ko", images }: { label: string; content?: DeckContent; deck?: TrexDeck; mode?: ArtMode; formatId?: string; styleId?: string; only?: number[]; locale?: "ko" | "en"; images?: (string | undefined)[] }) {
+function Deck({ label, content, deck: prebuilt, mode, formatId, styleId, only, locale = "en", images }: { label: string; content?: DeckContent; deck?: TrexDeck; mode?: ArtMode; formatId?: string; styleId?: string; only?: number[]; locale?: "ko" | "en"; images?: (string | undefined)[] }) {
   const built = prebuilt ?? buildDeckFromContent({ ...(content as DeckContent), mode: mode ?? content?.mode }, formatId, locale, styleId);
   const deck = images ? injectImages(built, images) : built;
   const fmt = formatById(prebuilt ? prebuilt.formatId : formatId);

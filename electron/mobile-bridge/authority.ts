@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   browserResolveApproval,
   listPendingBrowserApprovals,
@@ -41,6 +42,7 @@ import {
   unarchiveChat,
 } from "../store/chats";
 import { getProject } from "../store/projects";
+import { createAgentGroup } from "../store/agent-groups";
 import { getUsageSnapshot } from "../usage";
 import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
 import type { TerminalOntologyLoadoutFeedWriter } from "../ontology/terminal-loadout-feed";
@@ -76,7 +78,7 @@ import {
   projectMobileBridgeSnapshot,
   projectMobileBridgeUsage,
 } from "./projector";
-import { sanitizeMobileBridgeText } from "./sanitize";
+import { sanitizeMobileBridgeText, stripMobileBridgeControlFences } from "./sanitize";
 import {
   OntologyHubClient,
   parseOntologyAttachResolveInput,
@@ -197,6 +199,23 @@ function requiredText(params: Record<string, unknown>, key: string, maxLength: n
     /[\u0000\u000b\u000c\u000e-\u001f]/.test(value)
   ) {
     throw new TypeError(`${key} must be bounded non-empty text`);
+  }
+  return value;
+}
+
+function optionalText(
+  params: Record<string, unknown>,
+  key: string,
+  maxLength: number,
+): string | undefined {
+  const value = params[key];
+  if (value === undefined || value === null) return undefined;
+  if (
+    typeof value !== "string" ||
+    value.length > maxLength ||
+    /[\u0000\u000b\u000c\u000e-\u001f]/.test(value)
+  ) {
+    throw new TypeError(`${key} must be text of at most ${maxLength} characters`);
   }
   return value;
 }
@@ -507,8 +526,8 @@ function createChatParams(request: MobileBridgeRpcRequest): Parameters<typeof cr
   const agentId = optionalIdentifier(params, "agentId");
   const firmId = optionalIdentifier(params, "firmId");
   const agentGroupId = optionalIdentifier(params, "agentGroupId");
-  if ([agentId, firmId, agentGroupId].filter(Boolean).length !== 1) {
-    throw new TypeError("chats.create requires exactly one agentId, firmId, or agentGroupId");
+  if ([agentId, firmId, agentGroupId].filter(Boolean).length > 1) {
+    throw new TypeError("chats.create accepts at most one agentId, firmId, or agentGroupId");
   }
   const projectId = optionalIdentifier(params, "projectId");
   const title = optionalIdentifier(params, "title", 200);
@@ -601,7 +620,10 @@ export function projectMobileBridgeInvocationEvent(
     projected.status = boundedRedactedText(event.status, 1_000);
   }
   if (typeof event.text === "string") {
-    const text = boundedRedactedText(event.text, EVENT_TEXT_MAX_BYTES);
+    const text = boundedRedactedText(
+      stripMobileBridgeControlFences(event.text),
+      EVENT_TEXT_MAX_BYTES,
+    );
     projected.text = text;
     projected.textLen = text.length;
   } else if (typeof event.delta === "string") {
@@ -744,6 +766,61 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "agentGroups.listResolved": {
         noParams(request);
         return asJsonValue((await this.projectSnapshot()).groups, request.method);
+      }
+      case "groups.create": {
+        const params = guardedParams(request, [
+          "name",
+          "description",
+          "orchestratorName",
+          "memberAgentIds",
+        ]);
+        const name = requiredBoundedString(params, "name", 120).trim();
+        const description = optionalText(params, "description", 1_000)?.trim() ?? "";
+        const orchestratorName = optionalIdentifier(params, "orchestratorName", 120)?.trim();
+        const memberAgentIds = params.memberAgentIds;
+        if (!Array.isArray(memberAgentIds)) {
+          throw new TypeError("memberAgentIds must be an array");
+        }
+        const installedById = new Map(listInstalledAgents().map((agent) => [agent.id, agent] as const));
+        const bindingByAgentId = new Map(
+          listInstalledAgentHubBindings(64).map(
+            (binding) => [binding.installedAgentId, binding] as const,
+          ),
+        );
+        const members = [...new Set(memberAgentIds)].map((rawId) => {
+          if (typeof rawId !== "string") throw new TypeError("memberAgentIds must contain strings");
+          const agent = installedById.get(rawId);
+          if (!agent) throw new TypeError(`Installed agent not found: ${rawId}`);
+          if (!bindingByAgentId.has(rawId)) {
+            throw new TypeError(`Agent is not bound to an immutable Hub release: ${rawId}`);
+          }
+          return {
+            id: randomUUID(),
+            source: "installed" as const,
+            agentId: agent.id,
+            agentSlug: agent.slug,
+            snapshot: {
+              name: agent.name,
+              nameEn: agent.nameEn,
+              tagline: agent.tagline,
+              taglineEn: agent.taglineEn,
+              routeLabel: agent.slug,
+              trustGrade: agent.trustGrade,
+              runtimeLabel: agent.runtimeLabel,
+              entityKind: agent.kind ?? "agent",
+            },
+            addedAt: new Date().toISOString(),
+          };
+        });
+        const created = createAgentGroup({
+          name,
+          description,
+          ...(orchestratorName ? { orchestratorName } : {}),
+          members,
+        });
+        const projected = (await this.projectSnapshot()).groups.find((group) => group.id === created.id);
+        if (!projected) throw new Error("Created Agent Group projection is unavailable");
+        return asJsonValue(projected, request.method);
       }
       case "projects.list": {
         noParams(request);

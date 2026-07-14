@@ -143,7 +143,7 @@ export function handoffSiteProjectToWorkspace(input: {
 
   const workspaceRoot = fs.realpathSync.native(input.workspacePath);
   const rootStat = fs.lstatSync(workspaceRoot);
-  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error("선택한 작업공간이 유효한 폴더가 아닙니다.");
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error("The selected workspace is not a valid directory.");
 
   const ko = input.locale !== "en";
   const revision = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;

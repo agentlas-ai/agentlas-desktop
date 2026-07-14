@@ -2514,8 +2514,8 @@ const I18nContext = createContext<I18nValue | null>(null);
 // ── 비-훅 locale 스냅샷 ──────────────────────────────────
 // 모듈 스토어·이벤트 핸들러 등 React 컴포넌트 밖에서 현재 표시 언어를 읽기 위한 접근자.
 // I18nProvider가 locale이 바뀔 때마다 갱신한다(단일 출처). 앱은 항상 Provider 아래에서
-// 상호작용하므로, 사용자 트리거 시점엔 이미 확정된 값이 들어 있다. SSR 기본과 동일한 "ko"로 시작.
-let _localeSnapshot: Locale = "ko";
+// 상호작용하므로, 사용자 트리거 시점엔 이미 확정된 값이 들어 있다. SSR 기본과 동일한 "en"으로 시작.
+let _localeSnapshot: Locale = "en";
 /** 컴포넌트 밖에서 현재 표시 언어를 읽는다(useT 훅을 못 쓰는 스토어/핸들러용). */
 export function currentLocale(): Locale {
   return _localeSnapshot;
@@ -2532,14 +2532,14 @@ function interpolate(text: string, vars?: Record<string, string | number>): stri
 }
 
 export function I18nProvider({ children }: { children: ReactNode }) {
-  const [pref, setPrefState] = useState<LocalePref>("system");
-  const [locale, setLocaleState] = useState<Locale>("ko"); // SSR 기본값 ko (paw 모티프 한국 우선)
+  const [pref, setPrefState] = useState<LocalePref>("en");
+  const [locale, setLocaleState] = useState<Locale>("en"); // English is the product default; Korean remains an explicit choice.
   const [_ready, setReady] = useState(false);
 
   // 초기 부팅: 사용자 override 또는 OS locale
   useEffect(() => {
     void (async () => {
-      let stored: LocalePref = "system";
+      let stored: LocalePref = "en";
       try {
         const raw = window.localStorage.getItem(STORAGE_KEY);
         if (raw === "ko" || raw === "en") stored = raw;

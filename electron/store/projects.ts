@@ -56,7 +56,7 @@ export function createProject(input: {
       `INSERT INTO projects (id, name, description, default_agent_id, context_note, folder_path, created_at, updated_at)
        VALUES (?, ?, NULL, ?, ?, ?, ?, ?)`,
     )
-    .run(id, input.name.trim() || "새 프로젝트", input.defaultAgentId ?? null, input.contextNote ?? null, input.folderPath ?? null, now, now);
+    .run(id, input.name.trim() || "New project", input.defaultAgentId ?? null, input.contextNote ?? null, input.folderPath ?? null, now, now);
   const project = getProject(id) as Project;
   emitDesktopStoreChange({ entity: "project", id });
   return project;

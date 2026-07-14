@@ -135,7 +135,7 @@ export const BRIEF_PRESETS: BriefPreset[] = [
   },
 ];
 
-export function emptyBrief(locale: Locale = "ko"): FilmBrief {
+export function emptyBrief(locale: Locale = "en"): FilmBrief {
   return {
     title: "",
     format: "commercial_30",
@@ -288,6 +288,6 @@ export const BRIEF_PRESETS_EN: BriefPreset[] = [
 ];
 
 /** 로케일에 맞는 브리프 프리셋 목록을 돌려준다 (기본 "ko" — 기존 호출부 호환). */
-export function getBriefPresets(locale: Locale = "ko"): BriefPreset[] {
+export function getBriefPresets(locale: Locale = "en"): BriefPreset[] {
   return locale === "ko" ? BRIEF_PRESETS : BRIEF_PRESETS_EN;
 }

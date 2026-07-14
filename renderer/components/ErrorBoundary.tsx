@@ -5,7 +5,7 @@
 import { Component, type ReactNode } from "react";
 
 // 클래스 컴포넌트라 useT() 훅을 쓸 수 없어, i18n과 동일한 override 키를 직접 읽는다.
-// (lib/i18n.tsx: STORAGE_KEY "agentlas.locale", SSR 기본값 ko)
+// (lib/i18n.tsx: STORAGE_KEY "agentlas.locale", SSR 기본값 en)
 function readLocale(): "ko" | "en" {
   try {
     const raw = window.localStorage.getItem("agentlas.locale");
@@ -13,7 +13,7 @@ function readLocale(): "ko" | "en" {
   } catch {
     // ignore
   }
-  return "ko";
+  return "en";
 }
 
 type Props = {

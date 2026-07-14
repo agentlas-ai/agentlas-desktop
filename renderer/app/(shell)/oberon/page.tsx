@@ -1392,7 +1392,7 @@ export default function OberonPage() {
 function VideoModeSwitch({
   value,
   onChange,
-  locale = "ko",
+  locale = "en",
 }: {
   value: "veo" | "motion_ad";
   onChange: (value: "veo" | "motion_ad") => void;
@@ -1712,7 +1712,7 @@ const GENRES = new Set<FilmBrief["genre"]>([
 ]);
 const ASPECTS = new Set<FilmBrief["aspect"]>(["16:9", "9:16", "1:1", "2.39:1", "4:5"]);
 
-function mergeBriefWithPlan(brief: FilmBrief, patch?: JsonObject, locale: Locale = "ko"): FilmBrief {
+function mergeBriefWithPlan(brief: FilmBrief, patch?: JsonObject, locale: Locale = "en"): FilmBrief {
   if (!patch) return brief;
   const next: FilmBrief = {
     ...brief,

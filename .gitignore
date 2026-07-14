@@ -77,6 +77,8 @@ evidence/
 output/playwright/
 # Local visual research can contain browser chrome or account-identifying text.
 /output/reference-video-frames/
+/output/actual-live-ontology/
+/output/experience-chip-management-ko.png
 /findings/
 
 # Internal working documents are local-only. Public product documentation is

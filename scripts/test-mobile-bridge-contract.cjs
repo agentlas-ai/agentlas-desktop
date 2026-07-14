@@ -44,6 +44,7 @@ const {
   MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES,
   repairMobileBridgeUtf16,
   sanitizeMobileBridgeText,
+  stripMobileBridgeControlFences,
 } = require("../dist/electron/mobile-bridge/sanitize.js");
 const {
   projectMobileBridgeAutomation,
@@ -81,6 +82,9 @@ const {
   startGraphRun,
 } = require("../dist/electron/store/automations.js");
 const { setAgentEntityKind } = require("../dist/electron/mcp/registry.js");
+const {
+  replaceInstalledAgentHubBinding,
+} = require("../dist/electron/ontology/hub-bindings.js");
 const { onDesktopStoreChange } = require("../dist/electron/store/change-bus.js");
 const {
   onMobileBridgeStateChanged,
@@ -173,6 +177,25 @@ function testAbsolutePathSanitization() {
       "known credential forms must not cross the Mobile Bridge boundary",
     );
   }
+}
+
+function testControlFenceProjection() {
+  const fence = '<<agentlas-ask>>{"question":"Publish now?","options":[{"label":"Yes"},{"label":"No"}]}<</agentlas-ask>>';
+  assert.equal(stripMobileBridgeControlFences(fence), "");
+  assert.equal(
+    stripMobileBridgeControlFences(`I checked the draft.\n\n${fence}`),
+    "I checked the draft.",
+  );
+  assert.equal(
+    stripMobileBridgeControlFences("Visible answer\n<<agentlas-ask>>{\"question\":"),
+    "Visible answer",
+    "a streaming partial must never expose a dangling control fence",
+  );
+  assert.equal(
+    stripMobileBridgeControlFences("Visible answer\n<<agentlas-ask"),
+    "Visible answer",
+    "a split opening marker must never flash as assistant copy",
+  );
 }
 
 function testUtf16Sanitization() {
@@ -351,6 +374,7 @@ async function testWireParsers() {
   assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("workspace.setProject"), true);
   assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("workspace.clear"), true);
   assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("runtime.setActive"), true);
+  assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("groups.create"), true);
   assert.equal(parseMobileBridgeRequest({
     v: 1,
     type: "request",
@@ -358,6 +382,40 @@ async function testWireParsers() {
     method: "snapshot.get",
     params: {},
   }).ok, true);
+  assert.equal(parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "group_create",
+    idempotencyKey: "group-create-stable",
+    method: "groups.create",
+    params: {
+      name: "Social publishing",
+      description: "Research\nWrite\nPublish",
+      memberAgentIds: ["agent_1", "agent_2"],
+    },
+  }).ok, true);
+  assert.equal(parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "group_create_empty",
+    idempotencyKey: "group-create-empty",
+    method: "groups.create",
+    params: { name: "Empty", memberAgentIds: [] },
+  }).ok, false);
+  assert.equal(parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "global_chat_create",
+    method: "chats.create",
+    params: { title: "Global Desktop chat" },
+  }).ok, true);
+  assert.equal(parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "ambiguous_chat_create",
+    method: "chats.create",
+    params: { agentId: "agent_1", agentGroupId: "group_1" },
+  }).ok, false);
   assert.equal(parseMobileBridgeRequest({
     v: 1,
     type: "request",
@@ -929,6 +987,13 @@ async function testReconnectSnapshotAndDesktopMutationInvalidation() {
     "visible",
     "agent",
   );
+  replaceInstalledAgentHubBinding({
+    installedAgentId: agentId,
+    agentDefinitionId: "definition-mobile-sync",
+    agentReleaseId: "release-mobile-sync-v1",
+    source: "hub-install",
+    boundAt: "2026-07-11T00:00:00.000Z",
+  });
 
   const marketplace = require("../dist/electron/marketplace/index.js");
   const originalGetSource = marketplace.getSource;
@@ -992,6 +1057,21 @@ async function testReconnectSnapshotAndDesktopMutationInvalidation() {
     }, context);
     assert.equal(canonicalSnapshot.host.id, reconnectSnapshot.host.id);
     assert.equal(canonicalSnapshot.pendingBrowserApprovals[0].requestId, pendingRequestId);
+    const mobileCreatedGroup = await authority.request({
+      v: 1,
+      type: "request",
+      id: "group_create_mobile",
+      method: "groups.create",
+      params: {
+        name: "Mobile cloud combination",
+        description: "One cloud identity across this Desktop",
+        memberAgentIds: [agentId],
+      },
+    }, context);
+    assert.equal(mobileCreatedGroup.name, "Mobile cloud combination");
+    assert.equal(mobileCreatedGroup.members.length, 1);
+    assert.equal(mobileCreatedGroup.members[0].agentDefinitionId, "definition-mobile-sync");
+    assert.equal(mobileCreatedGroup.members[0].agentReleaseId, "release-mobile-sync-v1");
 
     const questionChat = createChat({ agentId, title: "Question claim chat" });
     const questionMessage = appendChatMessage(
@@ -1792,6 +1872,18 @@ async function testRuntimeRetryKeepsStableEndpoint() {
     assert.equal(retried.error, null);
     assert.equal(reasons.includes("runtime-rebinding"), true);
     assert.equal(reasons.includes("runtime-retried"), true);
+    await stopAgentlasMobileBridge();
+    const restarted = await startAgentlasMobileBridge({
+      userDataPath: root,
+      appVersion: "0.8.2",
+      displayName: "Runtime Retry Desktop",
+    });
+    assert.equal(
+      restarted.endpoint,
+      first.endpoint,
+      "a fresh Desktop restart must retain the paired phone endpoint",
+    );
+    assert.equal(restarted.hostId, first.hostId);
   } finally {
     off();
     await stopAgentlasMobileBridge();
@@ -1852,6 +1944,7 @@ async function main() {
   testMobileInvocationPermissionBoundary();
   await testTlsIdentity();
   testAbsolutePathSanitization();
+  testControlFenceProjection();
   testUtf16Sanitization();
   testInvocationEventProjection();
   testTranscriptAndConfirmationProjection();

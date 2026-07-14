@@ -16,6 +16,9 @@ const WINDOWS_ABSOLUTE_PATH_RE = /\b[A-Za-z]:\\(?:[^\\,\r\n"'`<>|}\]]+\\)*[^\s\\
 const WINDOWS_UNC_PATH_RE = /\\\\[^\\\s,\r\n"'`<>|}\]]+\\(?:[^\\,\r\n"'`<>|}\]]+\\)*[^\s\\,\r\n"'`<>|}\]]+/g;
 const DATA_URL_RE = /\bdata:[^,\s]{1,256},[^\s"'`<>]+/gi;
 const TRUNCATION_SUFFIX = "…[truncated]";
+const ASK_OPEN = "<<agentlas-ask>>";
+const ASK_CLOSE = "<</agentlas-ask>>";
+const MULTIMODAL_MARKER = "<<agentlas-multimodal-setup>>";
 
 /** Keep enough headroom for the response/event envelope and UTF-8 expansion. */
 export const MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES = MOBILE_BRIDGE_MAX_MESSAGE_BYTES - 64 * 1024;
@@ -69,6 +72,29 @@ export function repairMobileBridgeUtf16(value: string): string {
     start = index + 1;
   }
   return start === 0 ? value : repaired + value.slice(start);
+}
+
+/**
+ * Desktop renders these protocol sentinels as controls. Mobile receives the
+ * corresponding confirmation as structured data, so raw fence JSON must not
+ * appear as assistant copy. A dangling opening fence is also hidden while a
+ * streamed response is still being assembled.
+ */
+export function stripMobileBridgeControlFences(value: string): string {
+  let visible = value.replaceAll(MULTIMODAL_MARKER, "");
+  while (true) {
+    const start = visible.indexOf("<<agentlas-ask");
+    if (start < 0) break;
+    if (!visible.startsWith(ASK_OPEN, start)) {
+      visible = visible.slice(0, start);
+      break;
+    }
+    const end = visible.indexOf(ASK_CLOSE, start + ASK_OPEN.length);
+    visible = end < 0
+      ? visible.slice(0, start)
+      : `${visible.slice(0, start)}${visible.slice(end + ASK_CLOSE.length)}`;
+  }
+  return visible.replaceAll(ASK_CLOSE, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /**
