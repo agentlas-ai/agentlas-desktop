@@ -3287,7 +3287,11 @@ function ExperiencePanel({
                         : latestCloud.state === "verification-requested" || latestCloud.state === "verification-pending"
                           ? (ko ? "아직 공개 활성 상태는 아닙니다." : "It is not public-active yet.")
                         : latestCloud.state === "conflict"
-                          ? (ko ? "로컬 자료는 그대로입니다. 서버 revision을 다시 읽은 뒤 재시도하세요." : "Local material is intact. Re-read the server revision before retrying.")
+                          ? latestCloud.errorCode === "private_base_visibility_mismatch"
+                            ? (ko
+                              ? "이 경험을 판매하려면 먼저 원본 에이전트를 Hub에 공개 등록해야 합니다. 비공개 저장은 이미 완료됐습니다."
+                              : "Publish the base agent to Hub before selling this experience. Its private save is already complete.")
+                            : (ko ? "로컬 자료는 그대로입니다. Hub 상태를 다시 확인한 뒤 재시도하세요." : "Local material is intact. Refresh the Hub status before retrying.")
                           : latestCloud.errorMessage || (ko ? "Hub에 안전하게 저장되었습니다." : "Saved safely to Hub.")}
                     </span>
                   </div>
