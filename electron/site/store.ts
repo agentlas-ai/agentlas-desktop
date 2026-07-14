@@ -548,10 +548,16 @@ export function updateSiteAgentAppArtifact(
 
 export function updateSiteAgentAppMcpConsent(
   projectId: string,
-  receipt: SiteAgentAppMcpConsentReceipt,
+  receipt: SiteAgentAppMcpConsentReceipt | null,
 ): SiteProjectMeta {
   const meta = getSiteProject(projectId);
   if (meta.surface !== "agent-app") throw new Error("Agent App 프로젝트만 MCP 동의를 저장할 수 있습니다.");
+  if (receipt === null) {
+    meta.agentAppMcpConsent = null;
+    meta.updatedAt = new Date().toISOString();
+    writeProjectMeta(meta);
+    return meta;
+  }
   const normalized = normalizeSiteAgentAppMcpConsentReceipt(receipt);
   if (!normalized || normalized.projectId !== meta.id) {
     throw new Error("Agent App MCP 동의 영수증이 올바르지 않습니다.");

@@ -50,12 +50,12 @@ async function main() {
 
   const safeConfigPath = path.join(tmp, "sentinel-private-agent-app.mcp.json");
   fs.writeFileSync(safeConfigPath, JSON.stringify({
-    mcpServers: { "brave-search": { command: "/fixture/pinned/brave-search", args: [] } },
+    mcpServers: { "agentlas-time": { command: "/fixture/pinned/agentlas-time", args: [] } },
   }));
   const opaqueAlias = "AGENTLAS_MCP_SECRET_ABCDEF0123456789ABCDEF0123456789";
   const exactReadOnlyTools = [
-    "mcp__brave-search__brave_web_search",
-    "mcp__brave-search__brave_local_search",
+    "mcp__agentlas-time__get_current_time",
+    "mcp__agentlas-time__convert_time",
   ];
   const failureText = [...SENTINELS, safeConfigPath, "stderr=permission denied"].join(" | ");
   const runnerRequests = [];

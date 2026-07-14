@@ -129,6 +129,8 @@ async function runSiteAgentPrompt(
         }
       },
       controller.signal,
+      undefined,
+      { source: "site-studio" },
     );
     const text = (result?.finalText || finalText || "").trim();
     if (text) return { text, feedback: extractSiteFeedbackFromReply(text) || streamedFeedback || undefined, engine: SITE_DESIGN_AGENT_SLUG };

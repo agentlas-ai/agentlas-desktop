@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { TextDecoder } from "node:util";
 import { runHephaestus } from "../hephaestus/engine";
+import type { HephaestusResult } from "../hephaestus/engine";
 
 export interface ProjectBootstrapAccess {
   permission: string | null | undefined;
@@ -10,18 +12,43 @@ export interface ProjectBootstrapAccess {
 }
 
 export interface ProjectBootstrapResult {
-  mode: "core" | "desktop-fallback";
+  mode: "core" | "core-privacy-warning" | "desktop-fallback";
   created: string[];
   privacyIgnoreInstalled: boolean;
 }
 
 type CoreProjectBootstrapRunner = typeof runHephaestus;
 
+interface CoreProjectBootstrapPayload {
+  schemaVersion?: string;
+  status?: string;
+  mergeOnly?: boolean;
+  privacyBlockInstalled?: boolean;
+  privateModeCompliant?: boolean;
+  missing?: unknown[];
+  overwritten?: unknown[];
+  permissionIssues?: unknown[];
+  trackedSensitivePaths?: unknown[];
+  trackedSensitiveScanComplete?: boolean;
+  privacyWarnings?: unknown[];
+}
+
 const inFlight = new Map<string, Promise<ProjectBootstrapResult>>();
 const settled = new Map<string, ProjectBootstrapResult>();
 const FALLBACK_IGNORE_START = "# >>> agentlas desktop fallback private state >>>";
 const FALLBACK_IGNORE_END = "# <<< agentlas desktop fallback private state <<<";
-const MAX_GITIGNORE_READ_BYTES = 4 * 1024 * 1024;
+const MAX_GITIGNORE_READ_BYTES = 1024 * 1024;
+
+interface RegularFileSnapshot {
+  exists: boolean;
+  content: string;
+  mode: number;
+  stat: fs.Stats | null;
+}
+
+interface ProjectBootstrapTestHooks {
+  beforeFallbackIgnoreAppend?: (ignorePath: string) => void;
+}
 
 export function projectBootstrapAccessAllowed(access: ProjectBootstrapAccess): boolean {
   return (
@@ -44,6 +71,27 @@ function writableProjectRoot(projectPath: string, access: ProjectBootstrapAccess
   }
   fs.accessSync(normalized, fs.constants.R_OK | fs.constants.W_OK);
   return normalized;
+}
+
+function hasGitMarkerInAncestors(root: string): boolean {
+  if (process.env.GIT_DIR || process.env.GIT_WORK_TREE) return true;
+  let current = path.resolve(root);
+  while (true) {
+    try {
+      fs.lstatSync(path.join(current, ".git"));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return true;
+    }
+    if (
+      current === path.resolve(root) &&
+      fs.existsSync(path.join(current, "HEAD")) &&
+      fs.existsSync(path.join(current, "objects"))
+    ) return true;
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
 }
 
 function cleanProjectName(projectName: string | undefined, root: string): string {
@@ -69,34 +117,117 @@ function ensurePrivateAgentlasDir(root: string): string {
   return dir;
 }
 
-function hasEffectiveWholeAgentlasIgnore(content: string): boolean {
-  let ignored = false;
-  for (const raw of content.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    if (/^\/?\.agentlas\/?$/.test(line)) ignored = true;
-    if (/^!\/?\.agentlas(?:\/|$)/.test(line)) ignored = false;
+function readRegularUtf8FileNoFollow(filePath: string): RegularFileSnapshot {
+  let before: fs.Stats;
+  try {
+    before = fs.lstatSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { exists: false, content: "", mode: 0o644, stat: null };
+    }
+    throw error;
   }
-  return ignored;
+  if (before.isSymbolicLink() || !before.isFile()) {
+    throw new Error(".gitignore must be a regular non-symbolic-link file.");
+  }
+  if (before.size > MAX_GITIGNORE_READ_BYTES) {
+    throw new Error(`.gitignore exceeds the ${MAX_GITIGNORE_READ_BYTES}-byte safe bootstrap limit.`);
+  }
+
+  const noFollow = (fs.constants as Record<string, number>).O_NOFOLLOW ?? 0;
+  let fd: number;
+  try {
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (process.platform !== "win32" || !noFollow || !["EINVAL", "ENOTSUP"].includes(code ?? "")) throw error;
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY);
+  }
+  try {
+    const opened = fs.fstatSync(fd);
+    if (!opened.isFile()) throw new Error(".gitignore changed type during bootstrap.");
+    if (opened.size > MAX_GITIGNORE_READ_BYTES) {
+      throw new Error(`.gitignore exceeds the ${MAX_GITIGNORE_READ_BYTES}-byte safe bootstrap limit.`);
+    }
+    if (before.dev !== opened.dev || before.ino !== opened.ino) {
+      throw new Error(".gitignore changed during bootstrap.");
+    }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    while (total <= MAX_GITIGNORE_READ_BYTES) {
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, MAX_GITIGNORE_READ_BYTES + 1 - total));
+      const count = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (!count) break;
+      chunks.push(buffer.subarray(0, count));
+      total += count;
+    }
+    if (total > MAX_GITIGNORE_READ_BYTES) {
+      throw new Error(`.gitignore exceeds the ${MAX_GITIGNORE_READ_BYTES}-byte safe bootstrap limit.`);
+    }
+    const after = fs.fstatSync(fd);
+    if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs) {
+      throw new Error(".gitignore changed while it was being read.");
+    }
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total));
+    } catch {
+      throw new Error(".gitignore must contain valid UTF-8 text.");
+    }
+    return { exists: true, content, mode: before.mode & 0o777, stat: before };
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
-function installWholeAgentlasIgnore(root: string): boolean {
+function installWholeAgentlasIgnore(root: string, testHooks?: ProjectBootstrapTestHooks): boolean {
   const ignorePath = path.join(root, ".gitignore");
-  let existing = "";
-  try {
-    const stat = fs.lstatSync(ignorePath);
-    if (stat.isSymbolicLink() || !stat.isFile()) {
-      throw new Error("Refusing to modify a non-file or symlinked .gitignore.");
-    }
-    if (stat.size <= MAX_GITIGNORE_READ_BYTES) existing = fs.readFileSync(ignorePath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  if (hasEffectiveWholeAgentlasIgnore(existing)) return false;
   const block = [FALLBACK_IGNORE_START, ".agentlas/", FALLBACK_IGNORE_END, ""].join("\n");
-  const prefix = existing && !existing.endsWith("\n") ? "\n\n" : existing ? "\n" : "";
-  fs.appendFileSync(ignorePath, `${prefix}${block}`, { encoding: "utf8", mode: 0o644, flag: "a" });
-  return true;
+  const noFollow = (fs.constants as Record<string, number>).O_NOFOLLOW ?? 0;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const snapshot = readRegularUtf8FileNoFollow(ignorePath);
+    if (snapshot.content.endsWith(block)) return attempt > 0;
+    const prefix = snapshot.content.length === 0 ? "" : snapshot.content.endsWith("\n") ? "\n" : "\n\n";
+    const addition = Buffer.from(`${prefix}${block}`, "utf8");
+    if ((snapshot.stat?.size ?? 0) + addition.length > MAX_GITIGNORE_READ_BYTES) {
+      throw new Error(`.gitignore exceeds the ${MAX_GITIGNORE_READ_BYTES}-byte safe bootstrap limit.`);
+    }
+    const createFlags = snapshot.exists ? 0 : fs.constants.O_CREAT | fs.constants.O_EXCL;
+    testHooks?.beforeFallbackIgnoreAppend?.(ignorePath);
+    let fd: number;
+    try {
+      fd = fs.openSync(ignorePath, fs.constants.O_WRONLY | fs.constants.O_APPEND | noFollow | createFlags, 0o644);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!snapshot.exists && code === "EEXIST") continue;
+      if (process.platform !== "win32" || !noFollow || !["EINVAL", "ENOTSUP"].includes(code ?? "")) throw error;
+      fd = fs.openSync(ignorePath, fs.constants.O_WRONLY | fs.constants.O_APPEND | createFlags, 0o644);
+    }
+    let retry = false;
+    try {
+      const opened = fs.fstatSync(fd);
+      if (!opened.isFile()) throw new Error(".gitignore changed type during bootstrap.");
+      if (snapshot.exists) {
+        const original = snapshot.stat;
+        if (
+          !original || opened.dev !== original.dev || opened.ino !== original.ino ||
+          opened.size !== original.size || opened.mtimeMs !== original.mtimeMs
+        ) retry = true;
+      } else if (opened.size !== 0) {
+        retry = true;
+      }
+      if (!retry) {
+        fs.writeSync(fd, addition, 0, addition.length);
+        fs.fsyncSync(fd);
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    if (retry) continue;
+    const finalSnapshot = readRegularUtf8FileNoFollow(ignorePath);
+    if (finalSnapshot.content.endsWith(block)) return true;
+  }
+  throw new Error(".gitignore changed repeatedly during bootstrap.");
 }
 
 function writeMissingPrivateFile(filePath: string, content: string): boolean {
@@ -113,8 +244,12 @@ function writeMissingPrivateFile(filePath: string, content: string): boolean {
   }
 }
 
-function installMergeOnlyFallback(root: string, projectName?: string): ProjectBootstrapResult {
-  installWholeAgentlasIgnore(root);
+function installMergeOnlyFallback(
+  root: string,
+  projectName?: string,
+  testHooks?: ProjectBootstrapTestHooks,
+): ProjectBootstrapResult {
+  installWholeAgentlasIgnore(root, testHooks);
   const dir = ensurePrivateAgentlasDir(root);
   const name = cleanProjectName(projectName, root);
   const projectId = name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "project";
@@ -161,32 +296,65 @@ async function bootstrapOnce(input: {
   projectName?: string;
   reason: string;
   runCore: CoreProjectBootstrapRunner;
+  testHooks?: ProjectBootstrapTestHooks;
 }): Promise<ProjectBootstrapResult> {
+  let result: HephaestusResult<CoreProjectBootstrapPayload>;
   try {
-    const result = await input.runCore<{
-      schemaVersion?: string;
-      status?: string;
-      mergeOnly?: boolean;
-      privacyBlockInstalled?: boolean;
-    }>(
+    result = await input.runCore<CoreProjectBootstrapPayload>(
       "agentlas_cloud",
       ["project", "ensure", "--project", input.root, "--reason", input.reason],
       { cwd: input.root, timeoutMs: 120_000 },
     );
-    if (
-      result.ok &&
-      result.json?.schemaVersion === "agentlas.project-bootstrap.v1" &&
-      result.json.status === "active" &&
-      result.json.mergeOnly === true &&
-      result.json.privacyBlockInstalled === true
-    ) {
+  } catch {
+    throw new Error("Agentlas Core project bootstrap failed before its write state could be verified.");
+  }
+  if (!result.ok) {
+    const safePreflightFailure =
+      result.exitCode === null && result.json === null && result.stdout === "" && result.stderr === "" &&
+      [
+        "Could not find the Hephaestus engine (bundle missing).",
+        "Hephaestus 엔진을 찾을 수 없습니다(번들 누락).",
+        "Could not find Python 3.9+. Install it from python.org or Homebrew (python3) and try again.",
+        "Python 3.9+ 를 찾을 수 없습니다. python.org 또는 Homebrew(python3)로 설치 후 다시 시도하세요.",
+      ].includes(result.error ?? "");
+    if (safePreflightFailure) return installMergeOnlyFallback(input.root, input.projectName, input.testHooks);
+    throw new Error("Agentlas Core project bootstrap failed before its write state could be verified.");
+  }
+  const payload = result.json;
+  const trackedSensitivePaths = Array.isArray(payload?.trackedSensitivePaths) ? payload.trackedSensitivePaths : null;
+  const privacyWarnings = Array.isArray(payload?.privacyWarnings) ? payload.privacyWarnings : null;
+  const commonContractValid =
+    payload?.schemaVersion === "agentlas.project-bootstrap.v1" &&
+    payload.mergeOnly === true &&
+    payload.privacyBlockInstalled === true &&
+    payload.privateModeCompliant === true &&
+    Array.isArray(payload.missing) && payload.missing.length === 0 &&
+    Array.isArray(payload.overwritten) && payload.overwritten.length === 0 &&
+    Array.isArray(payload.permissionIssues) && payload.permissionIssues.length === 0 &&
+    trackedSensitivePaths !== null &&
+    typeof payload.trackedSensitiveScanComplete === "boolean" &&
+    privacyWarnings !== null;
+  if (
+    commonContractValid && payload.status === "active" &&
+    trackedSensitivePaths.length === 0 &&
+    payload.trackedSensitiveScanComplete === true &&
+    privacyWarnings.length === 0
+  ) {
+    return { mode: "core", created: [], privacyIgnoreInstalled: true };
+  }
+  if (commonContractValid && payload.status === "privacy_warning") {
+    const nonGitTrackedScanWarningOnly =
+      trackedSensitivePaths.length === 0 &&
+      payload.trackedSensitiveScanComplete === false &&
+      privacyWarnings.length === 1 &&
+      privacyWarnings[0] === "tracked_sensitive_scan_incomplete" &&
+      !hasGitMarkerInAncestors(input.root);
+    if (nonGitTrackedScanWarningOnly) {
       return { mode: "core", created: [], privacyIgnoreInstalled: true };
     }
-  } catch {
-    // Missing/older Core is a supported degraded state. The fallback below is
-    // deliberately tiny and never expands into Desktop's legacy full seed.
+    return { mode: "core-privacy-warning", created: [], privacyIgnoreInstalled: true };
   }
-  return installMergeOnlyFallback(input.root, input.projectName);
+  throw new Error("Agentlas Core returned an incomplete project bootstrap contract.");
 }
 
 /**
@@ -201,6 +369,8 @@ export async function ensureDesktopProjectBootstrap(input: {
   access: ProjectBootstrapAccess;
   /** Test seam only. Production callers use the bundled Core bridge. */
   runCore?: CoreProjectBootstrapRunner;
+  /** Test seam only. Production callers never inject fallback filesystem races. */
+  testHooks?: ProjectBootstrapTestHooks;
 }): Promise<ProjectBootstrapResult> {
   const root = writableProjectRoot(input.projectPath, input.access);
   const prior = settled.get(root);
@@ -212,6 +382,7 @@ export async function ensureDesktopProjectBootstrap(input: {
     projectName: input.projectName,
     reason: input.reason ?? "desktop-first-contact",
     runCore: input.runCore ?? runHephaestus,
+    testHooks: input.testHooks,
   });
   inFlight.set(root, run);
   try {

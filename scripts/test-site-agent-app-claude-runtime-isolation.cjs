@@ -45,12 +45,20 @@ async function main() {
   const originalSpawnCli = exec.spawnCli;
   const calls = [];
   let childMode = "success";
+  let mcpFatalRemaining = 0;
   try {
     exec.probeCliVersion = async () => "9.9.9";
     exec.spawnCli = (command, args, options) => {
       const child = new FakeChild();
       calls.push({ command, args: [...args], options: { ...options } });
       queueMicrotask(() => {
+        if (childMode === "mcp-fatal" && mcpFatalRemaining > 0) {
+          mcpFatalRemaining -= 1;
+          child.stderr.write("MCP agentlas-time startup failed: transport error");
+          child.stderr.end();
+          child.emit("close", 17);
+          return;
+        }
         if (childMode === "failure") {
           child.stderr.write(`${SENTINELS.join(" | ")} | config=${args.join(" ")}`);
           child.stderr.end();
@@ -107,6 +115,34 @@ async function main() {
     assert.ok(trustedArgs.includes("--append-system-prompt-file"), "trusted first run must retain append behavior");
     assert.equal(trustedArgs.includes("--system-prompt-file"), false, "trusted run must not replace Claude's normal prompt");
 
+    childMode = "mcp-fatal";
+    mcpFatalRemaining = 1;
+    let runtimeDowngrades = 0;
+    const secretAlias = "AGENTLAS_MCP_SECRET_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const recovered = await runClaudeCode({
+      ...base,
+      untrustedNoTools: true,
+      mcpConfigPath: SENTINELS[2],
+      mcpAllowedTools: ["mcp__agentlas-time__get_current_time", "mcp__agentlas-time__convert_time"],
+      untrustedAllowedMcpTools: ["mcp__agentlas-time__get_current_time", "mcp__agentlas-time__convert_time"],
+      env: {
+        ...base.env,
+        [secretAlias]: "opaque-secret-value",
+      },
+      onAgentAppMcpRuntimeUnavailable: () => { runtimeDowngrades += 1; },
+    }, events);
+    assert.equal(recovered.text, "SAFE_RESULT", "an MCP startup fatal must recover in stateless no-tool mode");
+    assert.equal(runtimeDowngrades, 1);
+    const mcpAttempt = calls[2];
+    const noToolRetry = calls[3];
+    assert.ok(mcpAttempt.args.includes("--mcp-config"));
+    assert.ok(mcpAttempt.args.includes(SENTINELS[2]));
+    assert.equal(noToolRetry.args.includes("--mcp-config"), false);
+    assert.equal(noToolRetry.args.includes("--allowedTools"), false);
+    assert.equal(secretAlias in noToolRetry.options.env, false,
+      "the no-tool retry must remove every opaque MCP secret alias");
+    assert.equal(noToolRetry.options.env.AGENTLAS_UNTRUSTED_NO_TOOLS, "1");
+
     childMode = "failure";
     await assert.rejects(
       () => runClaudeCode({
@@ -124,9 +160,50 @@ async function main() {
         return true;
       },
     );
-    const failureArgs = calls[2].args;
+    const failureArgs = calls[4].args;
     assert.ok(failureArgs.includes("--system-prompt-file"));
     assert.equal(failureArgs.includes("--append-system-prompt-file"), false);
+
+    childMode = "success";
+    const timeTools = [
+      "mcp__agentlas-time__get_current_time",
+      "mcp__agentlas-time__convert_time",
+    ];
+    await runClaudeCode({
+      ...base,
+      untrustedNoTools: true,
+      mcpConfigPath: "/fixture/time-only.json",
+      mcpAllowedTools: timeTools,
+      untrustedAllowedMcpTools: timeTools,
+    }, events);
+    const timeArgs = calls[5].args;
+    assert.ok(timeArgs.includes("--mcp-config"), "time-only must retain the exact MCP config");
+    const timeAllowed = timeArgs[timeArgs.indexOf("--allowedTools") + 1].split(",");
+    assert.deepEqual(timeAllowed, timeTools, "time-only runner args must preserve the exact tool set");
+
+    const combinedTools = ["mcp__brave-search__brave_web_search", ...timeTools];
+    await runClaudeCode({
+      ...base,
+      untrustedNoTools: true,
+      mcpConfigPath: "/fixture/brave-plus-time.json",
+      mcpAllowedTools: combinedTools,
+      untrustedAllowedMcpTools: combinedTools,
+    }, events);
+    const combinedArgs = calls[6].args;
+    assert.equal(combinedArgs.includes("--mcp-config"), false,
+      "unprovenance Brave mixed with time must drop the entire MCP grant");
+    assert.equal(combinedArgs.includes("--allowedTools"), false);
+
+    const unsafeTools = [...timeTools, "mcp__agentlas-time__write_file"];
+    await runClaudeCode({
+      ...base,
+      untrustedNoTools: true,
+      mcpConfigPath: "/fixture/unsafe.json",
+      mcpAllowedTools: unsafeTools,
+      untrustedAllowedMcpTools: unsafeTools,
+    }, events);
+    assert.equal(calls[7].args.includes("--mcp-config"), false, "one unsafe tool must drop all MCP authority");
+    assert.equal(calls[7].args.includes("--allowedTools"), false);
 
     console.log("site agent app Claude runtime isolation behavior ok");
   } finally {

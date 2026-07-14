@@ -229,6 +229,16 @@ export interface RuntimeStatus {
   availableModels?: string[];
   /** Host-verified execution inventory for automatic allocation. Never filled from UI fallback catalogs. */
   allocationModels?: string[];
+  /** Optional host-authored facts for exact automatic allocation. Model IDs remain opaque. */
+  allocationModelProfiles?: Record<string, {
+    costTier?: "economy" | "balanced" | "frontier";
+    contextWindow?: number;
+    capabilities?: string[];
+    supportsTools?: boolean;
+    supportsMultimodal?: boolean;
+    /** Per-model reasoning levels reported by the host runtime. */
+    efforts?: string[];
+  }>;
   /** BYOK 긴 컨텍스트(1M) 토글 상태. beta-header 모델에서만 의미 있음. */
   longContextEnabled?: boolean;
   /** 작업량(reasoning effort) 현재 선택값 — claude-code 전용. 미설정이면 기본. */
@@ -454,6 +464,8 @@ export interface InstalledMcpServer {
   url: string | null;
   /** 이 서버가 쓰는 글로벌 env 키 목록 (값은 keychain) */
   envKeys: string[];
+  /** False when legacy/corrupt JSON arrays contained non-string members. */
+  configurationValid?: boolean;
   enabled: boolean;
   installedAt: string;
 }
@@ -2547,9 +2559,17 @@ export interface McpInvocationRequest {
   agentAppRuntimeToolGrant?: {
     schemaVersion: 1;
     mcpConfigPath: string;
+    /** SHA-256 of the exact main-generated config accepted during JIT preflight. */
+    mcpConfigSha256: string;
     mcpAllowedTools: string[];
     mcpRuntimeEnv: Record<string, string>;
     availableCatalogIds: string[];
+    /** Value-free registry/config binding revalidated immediately before dispatch. */
+    mcpServerBindings: Array<{
+      serverId: string;
+      catalogId: string;
+      configKey: string;
+    }>;
     /** In-process handoff receipt; a runtime mismatch downgrades the final disclosure. */
     runtimeStatus: "prepared" | "accepted" | "runtime-unavailable";
   };
@@ -3858,6 +3878,8 @@ export interface AgentlasIpc {
     agentAppMcpRecommendation: (payload: { projectId: string }) => Promise<SiteAgentAppMcpRecommendation>;
     /** Opens a main-owned native review and returns the resulting safe status. */
     reviewAgentAppMcp: (payload: { projectId: string }) => Promise<SiteAgentAppMcpRecommendation>;
+    /** Runs before the first design/Astryx generation; cancel/skip still permits a no-tool build. */
+    prebuildReviewAgentAppMcp: (payload: { projectId: string }) => Promise<SiteAgentAppMcpRecommendation>;
     /** Read only the validated 1280x720 PNG tied to this Site project. */
     agentAppThumbnail: (payload: { projectId: string }) => Promise<SiteAgentAppThumbnailResult>;
     /** Provider readiness only; credentials never cross into the renderer. */

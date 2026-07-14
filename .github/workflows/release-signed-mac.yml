@@ -180,6 +180,9 @@ jobs:
       - name: Verify signed-resource Python cache boundary
         run: npm run test:python-cache-boundary
 
+      - name: Verify Project Foundation write and privacy boundary
+        run: npm run test:release-agent-foundation-gate
+
       # 실제 장애가 난 Browser 소유권/스크롤, 자동화 파이프/watchdog와
       # typecheck만으로 못 잡았던 Hub·Runtime Readiness UI 회귀를 함께 막는다.
       - name: Runtime, browser, and renderer UI regression gates

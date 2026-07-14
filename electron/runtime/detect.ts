@@ -2,7 +2,7 @@
 // PRD 3.1 FRE 6단계 — 사용자가 입력 안 해도 한 번 클릭으로 연결되도록.
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { probeCodex } from "./codex";
-import { readCodexModelIds } from "./codex-models";
+import { readCodexModelInventory } from "./codex-models";
 import { probeGemini } from "./gemini";
 import { probeGrok } from "./grok";
 import { probeCursor } from "./cursor";
@@ -39,6 +39,16 @@ function cloneRuntimeStatuses(list: RuntimeStatus[]): RuntimeStatus[] {
     ...runtime,
     availableModels: runtime.availableModels ? [...runtime.availableModels] : runtime.availableModels,
     allocationModels: runtime.allocationModels ? [...runtime.allocationModels] : runtime.allocationModels,
+    allocationModelProfiles: runtime.allocationModelProfiles
+      ? Object.fromEntries(Object.entries(runtime.allocationModelProfiles).map(([modelId, profile]) => [
+        modelId,
+        {
+          ...profile,
+          capabilities: profile.capabilities ? [...profile.capabilities] : profile.capabilities,
+          efforts: profile.efforts ? [...profile.efforts] : profile.efforts,
+        },
+      ]))
+      : runtime.allocationModelProfiles,
     efforts: runtime.efforts ? runtime.efforts.map((effort) => ({ ...effort })) : runtime.efforts,
   }));
 }
@@ -199,7 +209,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   const [
     cc,
     cx,
-    codexDiscoveredModels,
+    codexModelInventory,
     gm,
     gr,
     cursor,
@@ -216,7 +226,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   ] = await Promise.all([
     probeClaudeCode(),
     probeCodex(),
-    readCodexModelIds(),
+    readCodexModelInventory(),
     probeGemini(),
     probeGrok(),
     probeCursor(),
@@ -233,6 +243,20 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   ]);
 
   const list: RuntimeStatus[] = [];
+  const codexDiscoveredModels = codexModelInventory.map((model) => model.id);
+  const codexModelProfiles: NonNullable<RuntimeStatus["allocationModelProfiles"]> =
+    Object.fromEntries(codexModelInventory.map((model) => [
+      model.id,
+      {
+        ...(model.contextWindow !== null ? { contextWindow: model.contextWindow } : {}),
+        capabilities: [...model.capabilities],
+        ...(model.supportsTools !== null ? { supportsTools: model.supportsTools } : {}),
+        ...(model.supportsMultimodal !== null
+          ? { supportsMultimodal: model.supportsMultimodal }
+          : {}),
+        ...(model.efforts !== null ? { efforts: [...model.efforts] } : {}),
+      },
+    ]));
 
   if (cc) {
     const selectedClaudeModel = cliModelOf("claude-code", active, undefined, "anthropic");
@@ -266,6 +290,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       model: cliModelOf("codex", active, codexModels, "openai"),
       availableModels: codexModels,
       allocationModels: codexDiscoveredModels,
+      allocationModelProfiles: codexModelProfiles,
     });
   }
   if (gm) {

@@ -124,6 +124,7 @@ async function main() {
   };
 
   const chats = require("../dist/electron/store/chats.js");
+  const projects = require("../dist/electron/store/projects.js");
   const automations = require("../dist/electron/store/automations.js");
   const existing = automations.createAutomation({
     name: "Existing boundary job",
@@ -139,6 +140,32 @@ async function main() {
   });
   chats.setChatWorkingFolder(chat.id, projectPath);
 
+  const projectContextSentinel = "SITE_STUDIO_PROJECT_CONTEXT_MUST_NOT_BE_INJECTED";
+  const projectExperienceSentinel = "SITE_STUDIO_PROJECT_EXPERIENCE_MUST_NOT_BE_INJECTED";
+  const attachedProject = projects.createProject({
+    name: "Tampered Site hidden-chat project",
+    contextNote: projectContextSentinel,
+    folderPath: projectPath,
+  });
+  // Simulate an old or locally tampered Site hidden chat. Main must treat
+  // source=site-studio as the authority boundary, not this mutable DB row.
+  db.prepare("UPDATE chats SET project_id = ? WHERE id = ?").run(attachedProject.id, chat.id);
+
+  const experienceContext = require("../dist/electron/experience/context.js");
+  const originalBuildExperienceContext = experienceContext.buildExperienceContext;
+  const experienceContextInputs = [];
+  experienceContext.buildExperienceContext = (input) => {
+    experienceContextInputs.push({ ...input });
+    if (input.projectId || input.projectPath) {
+      return {
+        prompt: `## Experience\n- ${projectExperienceSentinel}`,
+        selectedCandidateIds: ["project-scoped-sentinel"],
+        approximateTokens: 12,
+      };
+    }
+    return originalBuildExperienceContext(input);
+  };
+
   const client = require("../dist/electron/mcp/client.js");
   async function invoke(permission, reply, prompt = "Inspect the current state") {
     runnerReplies.push(...(Array.isArray(reply) ? reply : [reply]));
@@ -149,6 +176,40 @@ async function main() {
     assert.equal(events.some((event) => event.kind === "error"), false);
     return { response, events, runnerRequest: runnerRequests.at(-1) };
   }
+
+  const inactiveMemoryProject = path.join(temp, "inactive-memory-project");
+  const inactiveMemoryDir = path.join(inactiveMemoryProject, ".agentlas");
+  const inactiveMemoryFile = path.join(inactiveMemoryDir, "project-soul-memory.md");
+  const inactiveSentinel = "INACTIVE_PROJECT_MEMORY_MUST_NOT_BE_INJECTED";
+  fs.mkdirSync(inactiveMemoryDir, { recursive: true });
+  fs.writeFileSync(inactiveMemoryFile, `# Inactive memory\n\n- ${inactiveSentinel}\n`, "utf8");
+  const inactiveBefore = {
+    content: fs.readFileSync(inactiveMemoryFile, "utf8"),
+    mtimeMs: fs.statSync(inactiveMemoryFile).mtimeMs,
+  };
+  const inactiveChat = chats.createChat({
+    agentId: "mobile-read-boundary-agent",
+    title: "Inactive local memory must remain detached",
+  });
+  chats.setChatWorkingFolder(inactiveChat.id, inactiveMemoryProject);
+  runnerReplies.push("Inactive project read result.");
+  const inactiveEvents = [];
+  await client.runMcpInvocation(
+    { chatId: inactiveChat.id, userPrompt: "Inspect without activation", locale: "en", permissions: "read" },
+    (event) => inactiveEvents.push(event),
+  );
+  assert.equal(inactiveEvents.some((event) => event.kind === "error"), false);
+  assert.doesNotMatch(runnerRequests.at(-1).systemPrompt, new RegExp(inactiveSentinel));
+  assert.equal(
+    db.prepare("SELECT COUNT(*) AS count FROM folder_activity WHERE path = ?").get(inactiveMemoryProject).count,
+    0,
+    "a pre-existing .agentlas folder is not proof of activation",
+  );
+  assert.deepEqual({
+    content: fs.readFileSync(inactiveMemoryFile, "utf8"),
+    mtimeMs: fs.statSync(inactiveMemoryFile).mtimeMs,
+  }, inactiveBefore);
+  assert.equal(fs.existsSync(path.join(inactiveMemoryDir, "code-map")), false);
 
   const unboundChat = chats.createChat({
     agentId: "mobile-read-boundary-agent",
@@ -256,9 +317,22 @@ async function main() {
   assert.equal(fs.existsSync(path.join(projectPath, ".agentlas")), true, "first writable contact must seed local continuity");
   assert.match(
     fs.readFileSync(path.join(projectPath, ".gitignore"), "utf8"),
-    /(?:^|\n)\/?\.agentlas\//,
-    "local project state must be privacy-ignored before fallback or Core seeding",
+    /# >>> agentlas local project state >>>/,
+    "release Core must install the canonical managed privacy block before seeding",
   );
+
+  const activatedMemorySentinel = "ACTIVATED_READ_MEMORY_SENTINEL";
+  fs.appendFileSync(
+    path.join(projectPath, ".agentlas", "project-soul-memory.md"),
+    `\n## Read boundary fixture\n- ${activatedMemorySentinel}\n`,
+    "utf8",
+  );
+  const activatedMemoryFile = path.join(projectPath, ".agentlas", "project-soul-memory.md");
+  const activatedBefore = {
+    content: fs.readFileSync(activatedMemoryFile, "utf8"),
+    mtimeMs: fs.statSync(activatedMemoryFile).mtimeMs,
+    activity: db.prepare("SELECT visits, last_seen FROM folder_activity WHERE path = ?").get(projectPath),
+  };
 
   await invoke("read", "Read-only after one write.");
   await invoke("read", "Read-only after one write again.");
@@ -277,7 +351,62 @@ async function main() {
     assert.equal(request.env.MCP_RUNTIME_ENV_CANARY, undefined);
     assert.doesNotMatch(request.systemPrompt, /MCP_AUTO_SELECTION_PROMPT_CANARY/);
     assert.doesNotMatch(request.systemPrompt, /## Setting up automations/);
+    assert.match(request.systemPrompt, new RegExp(activatedMemorySentinel),
+      "an ordinary Desktop read must recall an already activated project's memory");
+    assert.match(request.systemPrompt, new RegExp(projectContextSentinel),
+      "an ordinary Desktop project chat must retain its explicit context note");
+    assert.match(request.systemPrompt, new RegExp(projectExperienceSentinel),
+      "an ordinary Desktop project chat must retain project-scoped Experience selection");
   }
+  assert.deepEqual({
+    content: fs.readFileSync(activatedMemoryFile, "utf8"),
+    mtimeMs: fs.statSync(activatedMemoryFile).mtimeMs,
+    activity: db.prepare("SELECT visits, last_seen FROM folder_activity WHERE path = ?").get(projectPath),
+  }, activatedBefore, "activated read recall must not rewrite files or folder activity");
+
+  runnerReplies.push("Site Studio isolated result.");
+  const siteStudioEvents = [];
+  await client.runMcpInvocation(
+    { chatId: chat.id, userPrompt: "Render a Site preview", locale: "en", permissions: "read" },
+    (event) => siteStudioEvents.push(event),
+    undefined,
+    undefined,
+    { source: "site-studio" },
+  );
+  assert.equal(siteStudioEvents.some((event) => event.kind === "error"), false);
+  const siteStudioRequest = runnerRequests.at(-1);
+  assert.doesNotMatch(siteStudioRequest.systemPrompt, new RegExp(activatedMemorySentinel));
+  assert.doesNotMatch(siteStudioRequest.systemPrompt, new RegExp(projectContextSentinel),
+    "Site Studio must ignore a stale/tampered hidden-chat project context note");
+  assert.doesNotMatch(siteStudioRequest.systemPrompt, new RegExp(projectExperienceSentinel),
+    "Site Studio must ignore project-scoped Experience even when the hidden chat row is tampered");
+  assert.deepEqual(
+    {
+      projectId: experienceContextInputs.at(-1)?.projectId ?? null,
+      projectPath: experienceContextInputs.at(-1)?.projectPath ?? null,
+    },
+    { projectId: null, projectPath: null },
+    "Site Studio must call Experience selection only with the explicit global scope",
+  );
+  assert.equal(siteStudioRequest.cwd, undefined,
+    "Site Studio must ignore a stale hidden-chat working folder as well as its project memory");
+
+  // The same chat/folder under an unattended restricted-read provenance must
+  // not consume mutable project-local memory.
+  active.kind = "byok";
+  runnerReplies.push("Restricted read result.");
+  const restrictedEvents = [];
+  await client.runMcpInvocation(
+    { chatId: chat.id, userPrompt: "Restricted inspection", locale: "en", permissions: "read" },
+    (event) => restrictedEvents.push(event),
+    undefined,
+    undefined,
+    { source: "automation" },
+  );
+  assert.equal(restrictedEvents.some((event) => event.kind === "error"), false);
+  assert.doesNotMatch(runnerRequests.at(-1).systemPrompt, new RegExp(activatedMemorySentinel),
+    "Mobile/automation restricted reads must not receive mutable local project memory");
+  active.kind = "codex";
 
   console.log("Mobile read permission boundary: PASS");
 }

@@ -52,7 +52,7 @@ const CONTRACT = {
   capabilities: {
     schemaVersion: 1,
     source: "declared-package",
-    readonlyMcpCatalogIds: ["brave-search"],
+    readonlyMcpCatalogIds: ["agentlas-time"],
     unavailable: [],
   },
 };
@@ -204,14 +204,14 @@ app.whenReady().then(async () => {
     assert.equal(payload.outputs.brief, "Bridge result");
     assert.deepEqual(payload.capabilities, {
       available: [],
-      unavailable: [{ id: "brave-search", reason: "consent-required" }],
+      unavailable: [{ id: "agentlas-time", reason: "consent-required" }],
     }, "missing consent must keep the app successful while disclosing stateless/no-tool mode");
     assert.equal(capturedRequest.chatId, chat.id);
     assert.equal(capturedRequest.permissions, "read");
     assert.equal(capturedRequest.hubMode, "local-only");
     assert.equal(capturedRequest.agentAppMode, true);
     assert.equal(capturedRequest.agentAppRuntimeToolGrant, undefined);
-    assert.match(capturedRequest.userPrompt, /brave-search \(consent-required\)/);
+    assert.match(capturedRequest.userPrompt, /agentlas-time \(consent-required\)/);
     assert.deepEqual(capturedRequest.borrowAgents, []);
     assert.equal(capturedRequest.planMode, false);
     assert.equal(capturedRequest.goalMode, false);

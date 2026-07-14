@@ -22,7 +22,7 @@ async function main() {
     assert.doesNotMatch(alpha, /beta-only-memory/);
     assert.match(alpha, /shared-team-memory/);
     const clientSource = fs.readFileSync(path.join(__dirname, "../electron/mcp/client.ts"), "utf8");
-    assert.match(clientSource, /buildMemoryContext\(activePath, agent\.id\)/);
+    assert.match(clientSource, /buildMemoryContext\(memoryReadPath, agent\.id/);
     console.log(JSON.stringify({ ok: true, checks: 4 }, null, 2));
   } finally {
     store.getDb().close();

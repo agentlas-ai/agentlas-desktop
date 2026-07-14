@@ -12,6 +12,7 @@ import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import {
   defaultWorkloadAllocation,
   normalizeWorkloadAllocation,
+  reconcileWorkloadRunnerResult,
   resolveWorkloadAllocationAcrossRuntimes,
   workloadAllocationPromptExample,
   workloadAllocationReceipt,
@@ -374,13 +375,8 @@ export async function runSwarmInvocation(
     const active = resolution?.runtime ?? p.active;
     const taskRunner = sameRuntime(active, p.active) ? p.picked : pickRunner(active) ?? p.picked;
     if (resolution) {
-      const runtimeIndex = candidateRuntimes.findIndex((candidate) =>
-        candidate.kind === active.kind &&
-        candidate.backend === active.backend &&
-        candidate.source === active.source,
-      );
       task.resolvedAllocation = {
-        runtimeId: resolution.allocation.runtimeId ?? (runtimeIndex >= 0 ? `runtime-${runtimeIndex + 1}` : null),
+        runtimeId: resolution.resolvedRuntimeId,
         runtimeKind: active.kind ?? active.backend ?? null,
         model: active.model ?? null,
         effort: active.effort ?? null,
@@ -394,14 +390,6 @@ export async function runSwarmInvocation(
           : `Stormbreaker · assigned ${taskLabel(task)} to ${runtimeLabel(active.kind)} · ${active.model ?? active.kind} · effort ${effort}.`,
         "delegate",
       );
-      tryRecordRunEvent({
-        runId,
-        kind: "workload_allocation",
-        chatId: p.chat.id,
-        nodeId: task.id,
-        agentId: task.id,
-        payload: workloadAllocationReceipt(resolution),
-      });
       if (resolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
         emit(task, {
           kind: "tool-use",
@@ -478,6 +466,25 @@ export async function runSwarmInvocation(
         onTool: (name, args, r, id, isError) => emit(task, { kind: "tool-use", tool: { name, args, result: r, id, isError } }),
       },
     );
+    if (resolution) {
+      const executedResolution = reconcileWorkloadRunnerResult(resolution, result);
+      task.resolvedAllocation = {
+        runtimeId: executedResolution.resolvedRuntimeId,
+        runtimeKind: executedResolution.runtime.kind ?? executedResolution.runtime.backend ?? null,
+        model: executedResolution.runtime.model ?? null,
+        effort: executedResolution.runtime.effort ?? null,
+        source: executedResolution.source,
+        resolutionCodes: [...executedResolution.resolutionCodes],
+      };
+      tryRecordRunEvent({
+        runId,
+        kind: "workload_allocation",
+        chatId: p.chat.id,
+        nodeId: task.id,
+        agentId: task.id,
+        payload: workloadAllocationReceipt(executedResolution),
+      });
+    }
     emit(task, { kind: "tool-use", done: true, status: p.locale === "ko" ? `${task.title} 완료` : `${task.title} done` });
     const parsed = parseSwarmOutput(restrictedSwarmText(p, result.text, task.id));
     return {
@@ -501,14 +508,6 @@ export async function runSwarmInvocation(
     });
     const active = resolution.runtime;
     const synthesisRunner = sameRuntime(active, p.active) ? p.picked : pickRunner(active) ?? p.picked;
-    tryRecordRunEvent({
-      runId,
-      kind: "workload_allocation",
-      chatId: p.chat.id,
-      nodeId: "swarm-synthesizer",
-      agentId: p.orchestratorAgent.id,
-      payload: workloadAllocationReceipt(resolution),
-    });
     if (resolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
       synthEmit({
         kind: "tool-use",
@@ -578,6 +577,15 @@ export async function runSwarmInvocation(
         onTool: (name, args, r, id, isError) => synthEmit({ kind: "tool-use", tool: { name, args, result: r, id, isError } }),
       },
     );
+    const executedResolution = reconcileWorkloadRunnerResult(resolution, result);
+    tryRecordRunEvent({
+      runId,
+      kind: "workload_allocation",
+      chatId: p.chat.id,
+      nodeId: "swarm-synthesizer",
+      agentId: p.orchestratorAgent.id,
+      payload: workloadAllocationReceipt(executedResolution),
+    });
     stormStatus(
       p.locale === "ko"
         ? "Stormbreaker · 최종 게이트 판정과 결과 종합을 마쳤습니다."

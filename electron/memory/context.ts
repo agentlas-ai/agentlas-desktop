@@ -10,7 +10,22 @@ import {
   listMemoryByPathForAgent,
   type MemoryEntry,
 } from "./store";
-import { readProjectSoul, readSitemap } from "./project-files";
+import { verifyActivatedFolderIdentity } from "../architecture/activation";
+import {
+  CAREER_GRAPH_CONFIG_FILE,
+  CAREER_GRAPH_DB_FILE,
+  CAREER_GRAPH_SOURCE_MANIFEST_FILE,
+  CURATOR_DECISIONS_FILE,
+  MEMORY_LOG_FILE,
+  PROJECT_SOUL_FILE,
+  SITEMAP_FILE,
+} from "../architecture/manifest";
+import {
+  activatedProjectMemoryFileExists,
+  PROJECT_CODE_MAP_MAX_BYTES,
+  readActivatedProjectMemoryJson,
+  readActivatedProjectMemoryText,
+} from "./safe-project-read";
 
 const SOUL_MAX_CHARS = 1800;
 const MAX_ENTRIES = 12;
@@ -62,15 +77,14 @@ function ensureCodeMap(projectPath: string): void {
 
 function summarizeCodeMap(projectPath: string): string | null {
   try {
-    const mapFile = path.join(projectPath, ".agentlas", "code-map", "project-map.json");
-    if (!fs.existsSync(mapFile)) return null;
-    const m = JSON.parse(fs.readFileSync(mapFile, "utf8")) as {
+    const m = readActivatedProjectMemoryJson<{
       project?: string;
       stats?: { codeFiles?: number; symbols?: number };
       modules?: { id: string; role: string }[];
       entryPoints?: { path: string }[];
       topSymbols?: { name: string; defAt: string }[];
-    };
+    }>(projectPath, "code-map/project-map.json", PROJECT_CODE_MAP_MAX_BYTES);
+    if (!m) return null;
     const mods = (m.modules ?? [])
       .slice(0, CODEMAP_MODULES)
       .map((x) => `${x.id}(${x.role})`)
@@ -97,9 +111,9 @@ function summarizeCodeMap(projectPath: string): string | null {
 }
 
 function summarizeSitemap(projectPath: string): string | null {
-  const sm = readSitemap(projectPath);
+  const sm = readActivatedProjectMemoryJson<{ nodes?: unknown[] }>(projectPath, SITEMAP_FILE);
   if (!sm || typeof sm !== "object") return null;
-  const nodes = (sm as { nodes?: unknown[] }).nodes;
+  const nodes = sm.nodes;
   if (!Array.isArray(nodes) || nodes.length === 0) return null;
   const byStatus: Record<string, number> = {};
   for (const n of nodes) {
@@ -112,37 +126,30 @@ function summarizeSitemap(projectPath: string): string | null {
 
 function summarizeCareerGraph(projectPath: string): string | null {
   try {
-    const dir = path.join(projectPath, ".agentlas");
-    const configFile = path.join(dir, "career-graph.json");
-    const sourceManifestFile = path.join(dir, "career-graph-sources.json");
-    if (!fs.existsSync(configFile)) return null;
-    const config = JSON.parse(fs.readFileSync(configFile, "utf8")) as {
-      dbPath?: string;
-      sourceManifest?: string;
+    const config = readActivatedProjectMemoryJson<{
       canonicalSourcePolicy?: { fallbackWhenStale?: string; sourceOfTruth?: string };
-    };
-    const dbPath = config.dbPath || path.join(dir, "career-graph.sqlite");
-    const dbExists = fs.existsSync(dbPath);
+    }>(projectPath, CAREER_GRAPH_CONFIG_FILE);
+    if (!config) return null;
+    const dbExists = activatedProjectMemoryFileExists(projectPath, CAREER_GRAPH_DB_FILE);
     const canonical = [
-      "project-soul-memory.md",
-      "memory-log.jsonl",
-      "curator-decisions.jsonl",
-      "sitemap.json",
+      PROJECT_SOUL_FILE,
+      MEMORY_LOG_FILE,
+      CURATOR_DECISIONS_FILE,
+      SITEMAP_FILE,
       "code-map/project-map.json",
       "ledgers/routing-decisions.jsonl",
       "ledgers/executions.jsonl",
       "ledgers/agent-evolution-proposals.jsonl",
     ]
       .map((rel) => `.agentlas/${rel}`)
-      .filter((rel) => fs.existsSync(path.join(projectPath, rel)))
+      .filter((rel) => activatedProjectMemoryFileExists(projectPath, rel.slice(".agentlas/".length)))
       .slice(0, CAREER_GRAPH_SOURCES);
-    const manifestPath = config.sourceManifest || sourceManifestFile;
-    const registered =
-      fs.existsSync(manifestPath)
-        ? (JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { sources?: unknown[] }).sources
-        : [];
+    const registered = readActivatedProjectMemoryJson<{ sources?: unknown[] }>(
+      projectPath,
+      CAREER_GRAPH_SOURCE_MANIFEST_FILE,
+    )?.sources ?? [];
     const lines = [
-      `Career Graph: ${dbExists ? "indexed" : "configured, index pending"} (${path.relative(projectPath, dbPath) || dbPath}).`,
+      `Career Graph: ${dbExists ? "indexed" : "configured, index pending"} (.agentlas/${CAREER_GRAPH_DB_FILE}).`,
       "Use it as a source-routing layer: prefer the listed canonical files before broad repo scans.",
     ];
     if (canonical.length) lines.push(`Canonical source refs: ${canonical.join(", ")}`);
@@ -174,6 +181,23 @@ function entryLines(entries: MemoryEntry[]): string {
     .join("\n");
 }
 
+function globalMemorySections(perAgent: boolean, agentId?: string | null): string[] {
+  const entries = perAgent
+    ? listGlobalMemoryForAgent(agentId ?? null, MAX_ENTRIES)
+    : listGlobalMemory(MAX_ENTRIES);
+  return entries.length > 0
+    ? [`### Curated memory (global)\n${entryLines(entries)}`]
+    : [];
+}
+
+function formatMemorySections(sections: string[]): string {
+  if (sections.length === 0) return "";
+  return [
+    "## Agentlas memory (read before answering; five-scope + request_context recall)",
+    ...sections,
+  ].join("\n\n");
+}
+
 /**
  * Returns a memory context block (or empty string). When `projectPath` is set, prefers
  * the folder's curated memory + soul + sitemap; otherwise falls back to global memory.
@@ -181,6 +205,7 @@ function entryLines(entries: MemoryEntry[]): string {
 export function buildMemoryContext(
   projectPath: string | null,
   agentId?: string | null,
+  options: { materializeCodeMap?: boolean } = {},
 ): string {
   const sections: string[] = [];
   // agentId가 주어지면 per-agent 스코프(공유 + 본인 agent_repo만)로 읽어, 각 본부/전문가
@@ -188,7 +213,13 @@ export function buildMemoryContext(
   const perAgent = agentId !== undefined;
 
   if (projectPath) {
-    const soul = readProjectSoul(projectPath);
+    // The caller's boolean authorization is not a durable capability. Verify
+    // the stored folder identity again immediately before touching any project
+    // memory, and once more before returning the assembled prompt.
+    if (!verifyActivatedFolderIdentity(projectPath)) {
+      return formatMemorySections(globalMemorySections(perAgent, agentId));
+    }
+    const soul = readActivatedProjectMemoryText(projectPath, PROJECT_SOUL_FILE);
     if (soul && soul.trim()) {
       const trimmed =
         soul.length > SOUL_MAX_CHARS ? soul.slice(0, SOUL_MAX_CHARS) + "\n…(truncated)" : soul;
@@ -198,8 +229,9 @@ export function buildMemoryContext(
     if (sitemap) sections.push(sitemap);
     const careerGraph = summarizeCareerGraph(projectPath);
     if (careerGraph) sections.push(careerGraph);
-    // Code map: generate in background if missing, inject its seed if present.
-    ensureCodeMap(projectPath);
+    // Read-only Desktop turns may consume an existing map but must not spawn a
+    // generator or create project-local state merely by asking a question.
+    if (options.materializeCodeMap !== false) ensureCodeMap(projectPath);
     const codeMap = summarizeCodeMap(projectPath);
     if (codeMap) sections.push(codeMap);
     const entries = (
@@ -210,18 +242,12 @@ export function buildMemoryContext(
     if (entries.length > 0) {
       sections.push(`### Recent curated memory\n${entryLines(entries)}`);
     }
-  } else {
-    const entries = perAgent
-      ? listGlobalMemoryForAgent(agentId ?? null, MAX_ENTRIES)
-      : listGlobalMemory(MAX_ENTRIES);
-    if (entries.length > 0) {
-      sections.push(`### Curated memory (global)\n${entryLines(entries)}`);
+    if (!verifyActivatedFolderIdentity(projectPath)) {
+      return formatMemorySections(globalMemorySections(perAgent, agentId));
     }
+  } else {
+    sections.push(...globalMemorySections(perAgent, agentId));
   }
 
-  if (sections.length === 0) return "";
-  return [
-    "## Agentlas memory (read before answering; five-scope + request_context recall)",
-    ...sections,
-  ].join("\n\n");
+  return formatMemorySections(sections);
 }

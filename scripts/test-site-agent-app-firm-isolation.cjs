@@ -103,12 +103,12 @@ async function main() {
   };
   const safeConfigPath = path.join(tmp, "agentlas-mcp-site-agent-app-safe.json");
   fs.writeFileSync(safeConfigPath, JSON.stringify({
-    mcpServers: { "brave-search": { command: "/fixture/pinned/brave-search", args: [] } },
+    mcpServers: { "agentlas-time": { command: "/fixture/pinned/agentlas-time", args: [] } },
   }));
   const opaqueAlias = "AGENTLAS_MCP_SECRET_0123456789ABCDEF0123456789ABCDEF";
   const exactReadOnlyTools = [
-    "mcp__brave-search__brave_web_search",
-    "mcp__brave-search__brave_local_search",
+    "mcp__agentlas-time__get_current_time",
+    "mcp__agentlas-time__convert_time",
   ];
   const finals = [];
   for (const run of [1, 2]) {
@@ -155,7 +155,7 @@ async function main() {
     assert.equal(request.cwd, undefined, "firm runner must not receive a host working folder");
     assert.equal(request.images, undefined, "firm runner must not receive browser-provided images");
     assert.equal(request.mcpConfigPath, safeConfigPath, "firm runner must receive only the main-verified one-run MCP config");
-    assert.deepEqual(request.mcpAllowedTools, exactReadOnlyTools, "firm runner must receive only exact Brave read-only tools");
+    assert.deepEqual(request.mcpAllowedTools, exactReadOnlyTools, "firm runner must preserve exact system-time read-only tools");
     assert.equal(request.mcpCodexConfigArgs, undefined, "firm runner must not receive Codex MCP args");
     assert.deepEqual(request.untrustedAllowedMcpTools, exactReadOnlyTools);
     assert.deepEqual(request.env, {

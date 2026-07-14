@@ -61,6 +61,7 @@ const api: AgentlasIpc = {
     agentAppRuntimeStatus: (payload: { projectId: string }) => ipcRenderer.invoke("site:agentAppRuntimeStatus", payload),
     agentAppMcpRecommendation: (payload: { projectId: string }) => ipcRenderer.invoke("site:agentAppMcpRecommendation", payload),
     reviewAgentAppMcp: (payload: { projectId: string }) => ipcRenderer.invoke("site:reviewAgentAppMcp", payload),
+    prebuildReviewAgentAppMcp: (payload: { projectId: string }) => ipcRenderer.invoke("site:prebuildReviewAgentAppMcp", payload),
     agentAppThumbnail: (payload: { projectId: string }) => ipcRenderer.invoke("site:agentAppThumbnail", payload),
     listPublishProviderStatuses: () => ipcRenderer.invoke("site:listPublishProviderStatuses"),
     savePublishProviderToken: (payload: { provider: SitePublishProvider; token: string }) =>

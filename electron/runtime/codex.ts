@@ -13,6 +13,7 @@ import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
+import { readCodexModelInventory, resolveCodexModelEffort } from "./codex-models";
 import {
   clearRuntimeSession,
   getRuntimeSession,
@@ -389,16 +390,18 @@ export const runCodex: Runner = async (
   // 앱이 모델을 갖고 있으면 그 모델이 반드시 이긴다. 없으면 기기 설정을 따른다(BYOM 존중).
   // `--model`/`-c`는 `exec`와 `exec resume` 둘 다 지원 확인됨(0.133+).
   const modelArgs: string[] = [];
+  let appliedEffort: string | null = null;
   if (runReq.model) modelArgs.push("--model", runReq.model);
-  // codex는 none/minimal/low/medium/high/xhigh만 안다 — "max"(Claude/Opus 전용 tier)를
-  // 그대로 넘기면 codex가 models cache 파싱에서 `unknown variant max`로 exit 1 하며
-  // 자동화가 전멸한다(2026-07-12 사고: per-agent override에 남은 claude의 max가 codex
-  // 런에 새어들었다). codex 상한 xhigh로 clamp하고, 그 외 미지값은 아예 안 넘겨
-  // 기기의 ~/.codex 설정을 따른다(BYOM 존중).
+  // 모델 캐시의 exact profile을 실행 시점에도 다시 검증한다. 최신 Codex 모델은 max를
+  // 지원하지만, 프로필이 없거나 손상된 경우에는 2026-07-12 사고 방지용 max->xhigh
+  // legacy guard를 유지한다. 그 외 미지값은 넘기지 않아 기기 설정을 따른다.
   if (runReq.effort) {
-    const CODEX_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
-    const effort = runReq.effort === "max" ? "xhigh" : runReq.effort;
-    if (CODEX_EFFORTS.has(effort)) modelArgs.push("-c", `model_reasoning_effort=${effort}`);
+    const inventory = await readCodexModelInventory();
+    const effort = resolveCodexModelEffort(inventory, runReq.model, runReq.effort);
+    if (effort) {
+      appliedEffort = effort;
+      modelArgs.push("-c", `model_reasoning_effort=${effort}`);
+    }
   }
 
   // 세션 resume 가능 여부 — chatId 저장 세션 또는 Build 같은 호출자가 직접 넘긴 세션 id.
@@ -436,7 +439,7 @@ export const runCodex: Runner = async (
       if (runReq.chatId && fingerprint && r.threadId) {
         saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint);
       }
-      return { text: r.text.trim(), sessionId: r.threadId ?? resumeSessionId, tokens: r.tokens };
+      return { text: r.text.trim(), sessionId: r.threadId ?? resumeSessionId, tokens: r.tokens, appliedEffort };
     }
     // Build continuation recovery is owned by Main, which can remove exactly
     // one attributed server and preserve approved peers. Replaying here with
@@ -471,7 +474,7 @@ export const runCodex: Runner = async (
     if (runReq.chatId && fingerprint && created.threadId) {
       saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint);
     }
-    return { text: created.text.trim(), sessionId: created.threadId ?? undefined, tokens: created.tokens };
+    return { text: created.text.trim(), sessionId: created.threadId ?? undefined, tokens: created.tokens, appliedEffort };
   }
   throw new Error(
     `codex CLI exit ${created.code}${created.stderr ? `\n${created.stderr.slice(0, 500)}` : ""}`,
