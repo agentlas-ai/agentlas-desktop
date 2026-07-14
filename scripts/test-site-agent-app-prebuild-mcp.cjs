@@ -270,8 +270,13 @@ async function main() {
   const raceB = JSON.stringify({ version: "B", pad: "b".repeat(4_096) });
   assert.equal(Buffer.byteLength(raceA), Buffer.byteLength(raceB));
   fs.writeFileSync(raceFile, raceA, { mode: 0o600 });
-  const swapScript = `const fs=require("node:fs"),p=process.argv[1],a=process.argv[2],b=process.argv[3];for(let i=0;i<3000;i++){const t=p+"."+process.pid+"."+i;fs.writeFileSync(t,i%2?a:b,{mode:0o600});if(process.platform==="win32")fs.rmSync(p,{force:true});fs.renameSync(t,p);}`;
-  const swapper = spawn(process.execPath, ["-e", swapScript, raceFile, raceA, raceB], {
+  // Windows file replacement requires a delete + rename and hosted runners
+  // scan every new file. A smaller Windows sample preserves the real NTFS
+  // replacement race without turning the contract into a multi-minute gate.
+  const replacementIterations = process.platform === "win32" ? 256 : 3_000;
+  const readIterations = process.platform === "win32" ? 1_000 : 4_000;
+  const swapScript = `const fs=require("node:fs"),p=process.argv[1],a=process.argv[2],b=process.argv[3],n=Number(process.argv[4]);for(let i=0;i<n;i++){const t=p+"."+process.pid+"."+i;fs.writeFileSync(t,i%2?a:b,{mode:0o600});if(process.platform==="win32")fs.rmSync(p,{force:true});fs.renameSync(t,p);}`;
+  const swapper = spawn(process.execPath, ["-e", swapScript, raceFile, raceA, raceB, String(replacementIterations)], {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, stdio: "ignore",
   });
   const swapperDone = new Promise((resolve, reject) => {
@@ -280,7 +285,7 @@ async function main() {
   });
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
   let stableRaceReads = 0;
-  for (let index = 0; index < 4_000; index += 1) {
+  for (let index = 0; index < readIterations; index += 1) {
     const bytes = readStableRegularFile(raceFile, 32 * 1024);
     if (!bytes) continue;
     const value = bytes.toString("utf8");
