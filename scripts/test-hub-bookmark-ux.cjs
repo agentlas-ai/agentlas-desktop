@@ -25,6 +25,7 @@ const accountChip = read("renderer/components/AccountChip.tsx");
 const agentGroupsPage = read("renderer/app/(shell)/library/agent-groups/page.tsx");
 const agentGroupsStore = read("electron/store/agent-groups.ts");
 const marketplaceSource = read("electron/marketplace/mcp-source.ts");
+const agentsPage = read("renderer/app/(shell)/library/agents/page.tsx");
 
 assert.match(events, /agentlas:hub-bookmarks-changed/, "bookmark changes need one renderer event contract");
 assert.match(events, /listing\.callable === true/, "Hub call candidates must fail closed unless explicitly callable");
@@ -116,6 +117,12 @@ assert.match(market, /같은 이름의 로컬 에이전트 있음/, "a same-name
 assert.doesNotMatch(market, /\{ko \? "보유" : "Owned"\}/, "Hub cards must not label a same-slug local agent as owned Hub access");
 assert.match(market, /채팅에 붙여넣기/, "callable Hub cards need a human action instead of exposing only an internal call command");
 assert.doesNotMatch(market, />Trust \{/, "Hub cards must not present the package scan grade as generic Trust reputation");
+assert.match(agentsPage, /Cloud에서 복원/, "published agents already present locally need a visible owner Cloud restore action");
+assert.match(
+  agentsPage,
+  /onClick=\{\(\) => onInstall\(item\.slug\)\}[\s\S]{0,900}Cloud에서 복원/,
+  "the visible Cloud restore action must execute the owner package restore path instead of merely opening stale local files",
+);
 assert.match(room, /hubSecurityGradeLabel\(r, locale\)/, "Dashboard Hub cards must name the security scan honestly");
 assert.match(room, /data-callable=\{callable \? "true" : "false"\}/, "Dashboard Hub cards must expose callable versus install-only state");
 assert.match(agentGroupsPage, /hubEntityKind,/, "Agent Group drafts must persist the selected Hub entity namespace");

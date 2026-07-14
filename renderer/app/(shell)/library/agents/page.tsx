@@ -1508,7 +1508,7 @@ function PublishedAgentsRoster({
             </div>
             <button
               type="button"
-              onClick={() => installed ? onOpen(installed) : onInstall(item.slug)}
+              onClick={() => onInstall(item.slug)}
               disabled={busy}
               style={{
                 minHeight: 28,
@@ -1523,7 +1523,9 @@ function PublishedAgentsRoster({
                 flexShrink: 0,
               }}
             >
-              {busy ? (ko ? "설치 중" : "Installing") : isInstalled ? (ko ? "열기" : "Open") : (ko ? "설치" : "Install")}
+              {busy
+                ? isInstalled ? (ko ? "복원 중" : "Restoring") : (ko ? "설치 중" : "Installing")
+                : isInstalled ? (ko ? "Cloud에서 복원" : "Restore from Cloud") : (ko ? "설치" : "Install")}
             </button>
           </div>
         );
