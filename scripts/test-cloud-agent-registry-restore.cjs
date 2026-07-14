@@ -219,6 +219,7 @@ let ownerVersion = "v1";
 let ownerPackage = ownerV1;
 let ownerScope = "owner-private";
 let ownerRestoreError = null;
+let delayNextOwnerRestore = false;
 const cargoCookies = [];
 const methodHits = new Map();
 
@@ -303,6 +304,11 @@ const server = http.createServer((req, res) => {
         });
         return;
       }
+      if (delayNextOwnerRestore) {
+        delayNextOwnerRestore = false;
+        setTimeout(() => sendJson(res, { result: ownerRestorePayload(ownerVersion, ownerPackage) }), 75);
+        return;
+      }
       sendJson(res, { result: ownerRestorePayload(ownerVersion, ownerPackage) });
       return;
     }
@@ -321,6 +327,19 @@ server.listen(0, "127.0.0.1", async () => {
     const baseUrl = `http://127.0.0.1:${port}`;
     process.env.AGENTLAS_MCP_BASE_URL = `${baseUrl}/api/mcp/v1`;
     process.env.AGENTLAS_WEB_BASE_URL = baseUrl;
+
+    // Owner restore has a larger bounded timeout than ordinary catalog calls.
+    // Prove a response that exceeds a deliberately tiny base timeout still
+    // completes through the dedicated restore budget.
+    delayNextOwnerRestore = true;
+    const { McpSource } = require("../dist/electron/marketplace/mcp-source.js");
+    const slowRestoreSource = new McpSource({
+      baseUrl: `${baseUrl}/api/mcp/v1`,
+      timeoutMs: 25,
+      cookieProvider: () => expectedCookie,
+    });
+    const slowRestored = await slowRestoreSource.restoreMyAgentPackage("owned-registry-agent");
+    assert.equal(slowRestored.slug, "owned-registry-agent");
 
     // registry re-exports the chat store, whose locale helper normally imports
     // the full app entrypoint. Stub only that helper so this remains headless.

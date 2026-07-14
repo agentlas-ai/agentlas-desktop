@@ -590,10 +590,10 @@ export class McpSource implements MarketplaceSource {
 
   constructor(private opts: McpSourceOptions) {}
 
-  private async call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+  private async call<T>(method: string, params?: Record<string, unknown>, timeoutMs = this.opts.timeoutMs ?? 15_000): Promise<T> {
     const url = `${this.opts.baseUrl}/tools/call`;
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), this.opts.timeoutMs ?? 15000);
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (this.opts.bearer) headers.authorization = `Bearer ${this.opts.bearer}`;
@@ -831,7 +831,10 @@ export class McpSource implements MarketplaceSource {
     if (!slug) throw new OwnerPackageRestoreError("missing_slug");
     // Restore authority first. owner_only/no_cloud_package must never be hidden
     // by a best-effort draft metadata lookup.
-    const raw = await this.call<unknown>("cargo.restore_package", { slug });
+    // Owner packages can be materially larger than catalog/search responses and
+    // production integrity verification may cross the normal 15s catalog budget.
+    // Keep the request bounded, but do not strand a valid restore mid-response.
+    const raw = await this.call<unknown>("cargo.restore_package", { slug }, 45_000);
     const restored = normalizeOwnerRestorePayload(raw, slug);
 
     let metadata: (SeedListingFull & MarketplaceListing) | null = null;
