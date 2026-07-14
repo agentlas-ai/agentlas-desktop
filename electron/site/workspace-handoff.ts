@@ -66,6 +66,28 @@ function markdownConversation(entries: SiteConversationEntry[], ko: boolean): st
 }
 
 function handoffGuide(meta: SiteProjectMeta, relativePath: string, ko: boolean): string {
+  const astryxKo = meta.surface === "agent-app"
+    ? `
+## Agent App 구현 계약
+
+- 선택 대상: **${meta.agentAppTarget?.name ?? "Agent App"}** (${meta.agentAppTarget?.kind ?? "agent"})
+- UI는 반드시 \`@astryxdesign/core@0.1.4\` + \`@astryxdesign/theme-neutral@0.1.4\`를 실제 React 19 코드에서 사용합니다.
+- 공식 템플릿 프로필: \`${meta.astryxTemplate ?? "ai-chat-landing"}\`
+- \`@stylexjs/stylex@0.18.3\`, \`@heroicons/react@2.2.0\`를 고정하고 Astryx MIT 고지를 보존합니다.
+- 시스템 프롬프트, 메모리, 토큰, 자격 증명은 브라우저 번들에 넣지 않습니다. 로컬 호출은 launch-scoped Agentlas capability로, 공개 배포는 같은 origin의 서버 API와 호스팅 환경변수로만 연결합니다.
+`
+    : "";
+  const astryxEn = meta.surface === "agent-app"
+    ? `
+## Agent App implementation contract
+
+- Selected target: **${meta.agentAppTarget?.name ?? "Agent App"}** (${meta.agentAppTarget?.kind ?? "agent"})
+- The React 19 implementation must actually use \`@astryxdesign/core@0.1.4\` and \`@astryxdesign/theme-neutral@0.1.4\`.
+- Official template profile: \`${meta.astryxTemplate ?? "ai-chat-landing"}\`
+- Pin \`@stylexjs/stylex@0.18.3\` and \`@heroicons/react@2.2.0\`, and preserve the Astryx MIT notice.
+- Never put system prompts, memory, tokens, or credentials in the browser bundle. Use a launch-scoped Agentlas capability locally and a same-origin server API with hosting environment secrets for public deployments.
+`
+    : "";
   if (ko) {
     return `# ${meta.name} — Site Studio 디자인 핸드오프
 
@@ -77,6 +99,7 @@ function handoffGuide(meta: SiteProjectMeta, relativePath: string, ko: boolean):
 2. \`feedback.md\`의 사용자 결정과 선택 요소 피드백을 우선합니다.
 3. 현재 작업공간의 기존 코드와 구조를 먼저 확인한 뒤, 실제로 동작하는 제품을 구현합니다.
 4. 참조 HTML의 스크립트나 외부 리소스를 신뢰 경계 밖에서 실행하지 않습니다.
+${astryxKo}
 
 이 리비전의 작업공간 경로: \`${relativePath}\`
 `;
@@ -91,16 +114,22 @@ This folder is an **immutable design reference revision** from Agentlas Site Stu
 2. Prioritize user decisions in \`feedback.md\`.
 3. Inspect the current workspace before implementing a functioning product.
 4. Do not execute scripts or trust external resources from the reference HTML outside the intended boundary.
+${astryxEn}
 
 Workspace-relative path: \`${relativePath}\`
 `;
 }
 
-function buildPrompt(relativePath: string, ko: boolean): string {
+function buildPrompt(meta: SiteProjectMeta, relativePath: string, ko: boolean): string {
+  const agentAppContract = meta.surface === "agent-app"
+    ? ko
+      ? ` 선택한 ${meta.agentAppTarget?.name ?? "에이전트"}의 입력·출력 계약에 맞추고, 실제 UI는 @astryxdesign/core@0.1.4 및 neutral theme, 공식 ${meta.astryxTemplate ?? "ai-chat-landing"} 템플릿 프로필로 구현해. 브라우저 번들에는 시스템 프롬프트/메모리/비밀값을 넣지 말고, 로컬은 launch-scoped capability, 공개 배포는 같은 origin 서버 API와 호스팅 환경변수로만 연결해.`
+      : ` Match the selected ${meta.agentAppTarget?.name ?? "agent"} input/output contract and implement the real UI with @astryxdesign/core@0.1.4, the neutral theme, and the official ${meta.astryxTemplate ?? "ai-chat-landing"} template profile. Keep system prompts, memory, and secrets out of the browser bundle; use a launch-scoped capability locally and a same-origin server API with hosting environment secrets publicly.`
+    : "";
   if (ko) {
-    return `현재 작업공간의 ${relativePath}를 먼저 읽고, screens/ HTML을 시각적 기준으로 사용해 이 디자인을 실제로 동작하는 제품으로 바이브코딩해줘. feedback.md의 사용자 결정을 반영하고, 기존 파일과 구조를 먼저 살핀 뒤 필요한 구현만 추가해.`;
+    return `현재 작업공간의 ${relativePath}를 먼저 읽고, screens/ HTML을 시각적 기준으로 사용해 이 디자인을 실제로 동작하는 제품으로 바이브코딩해줘. feedback.md의 사용자 결정을 반영하고, 기존 파일과 구조를 먼저 살핀 뒤 필요한 구현만 추가해.${agentAppContract}`;
   }
-  return `First read ${relativePath} in this workspace. Use the HTML in screens/ as the visual source of truth and vibe-code this design into a working product. Follow the user decisions in feedback.md, inspect the existing files and structure first, and add only the implementation that is needed.`;
+  return `First read ${relativePath} in this workspace. Use the HTML in screens/ as the visual source of truth and vibe-code this design into a working product. Follow the user decisions in feedback.md, inspect the existing files and structure first, and add only the implementation that is needed.${agentAppContract}`;
 }
 
 /** 선택한 워크스페이스에 디자인 스냅샷을 보관하고 Build가 읽을 프롬프트를 만든다. */
@@ -132,6 +161,11 @@ export function handoffSiteProjectToWorkspace(input: {
     exportedAt: new Date().toISOString(),
     revision,
     conversationEntries: conversation.length,
+    surface: meta.surface,
+    agentAppTarget: meta.agentAppTarget,
+    astryxTemplate: meta.astryxTemplate,
+    agentAppContract: meta.agentAppContract,
+    agentAppVisual: meta.agentAppVisual,
     screens: meta.screens.map((screen, index) => ({
       id: screen.id,
       name: screen.name,
@@ -157,6 +191,13 @@ export function handoffSiteProjectToWorkspace(input: {
     writeNewFile(stagingDir, "manifest.json", `${JSON.stringify(manifest, null, 2)}\n`);
     writeNewFile(stagingDir, "feedback.md", markdownConversation(conversation, ko));
     writeNewFile(stagingDir, "README.md", handoffGuide(meta, relativePath, ko));
+    if (meta.surface === "agent-app") {
+      writeNewFile(
+        stagingDir,
+        "THIRD_PARTY_NOTICES.md",
+        "# Third-party notices\n\nAstryx is Copyright (c) Meta Platforms, Inc. and affiliates and is used under the MIT License. Preserve the copyright and permission notice when distributing copies or substantial portions. Source: https://github.com/facebook/astryx\n",
+      );
+    }
     fs.renameSync(stagingDir, finalDir);
     committed = true;
   } finally {
@@ -168,6 +209,6 @@ export function handoffSiteProjectToWorkspace(input: {
     revision,
     relativePath,
     screenCount: meta.screens.length,
-    buildPrompt: buildPrompt(relativePath, ko),
+    buildPrompt: buildPrompt(meta, relativePath, ko),
   };
 }

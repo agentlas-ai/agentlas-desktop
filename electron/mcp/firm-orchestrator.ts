@@ -3,6 +3,7 @@
 //   본부(division)는 지속 세션(숨김 sub-chat, 히스토리·메모리 유지), 전문가는 1회성 worker.
 //   본부 1개면 CEO=본부로 보고 tier-2 skip. 각 노드는 자기 agentId로 메모리를 쓰고 읽는다.
 //   모든 이벤트는 agentId/role/tier/phase로 태깅 → 렌더러 네트워크 패널 실시간 텔레메트리.
+import { randomUUID } from "node:crypto";
 import type {
   ChatHistoryEntry,
   InstalledAgent,
@@ -26,13 +27,23 @@ import { recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
 import { curateReply } from "../memory/curator";
+import { parseMemoryEvents } from "../memory/events";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
+import { parseAutomations } from "../automation-emitter";
+import { parseSurfaces } from "../surface-emitter";
+import { stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
 import { buildDelegateProtocol, parseDelegations, type Delegation } from "./delegate";
 import { selectRuntimeForTargets } from "../runtime/selection";
 import { getAgentConcurrency } from "../store/concurrency";
 import { tryRecordRunEvent } from "../store/run-events";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import { getAgentById } from "./registry";
+import { buildAgentAppRunnerEnv } from "../runtime/env-resolver";
+import {
+  UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
+  untrustedRuntimeFailurePayload,
+} from "../runtime/untrusted-error";
+import { SURFACE_INTENT_MARKER } from "../runtime/runner";
 import {
   defaultWorkloadAllocation,
   resolveWorkloadAllocation,
@@ -41,6 +52,24 @@ import {
 } from "../runtime/workload-routing";
 
 type EventSink = (ev: McpInvocationEvent) => void;
+
+function firmFailure(
+  agentAppMode: boolean | undefined,
+  fallbackCode: string,
+  fallbackMessage: string,
+): { code: string; message: string } {
+  return agentAppMode
+    ? untrustedRuntimeFailurePayload()
+    : { code: fallbackCode, message: fallbackMessage };
+}
+
+function cleanAgentAppControlBlocks(text: string): string {
+  const withoutContinuation = stripStormbreakerContinueMarker(text).text;
+  const withoutIntent = withoutContinuation.split(SURFACE_INTENT_MARKER).join("");
+  const withoutSurface = parseSurfaces(withoutIntent).cleanedText;
+  const withoutAutomation = parseAutomations(withoutSurface).cleanedText;
+  return parseMemoryEvents(withoutAutomation).cleanedText.trim();
+}
 
 /** 동시성 캡 — 팀이 많아도 한 번에 이만큼만 연다. 하드코딩이 아니라 사양 기반 추천 + 사용자
  *  슬라이더 설정값(getAgentConcurrency). 저사양은 낮게, 강한 머신은 크게 = 스웜 크기 조절. */
@@ -59,6 +88,8 @@ export interface FirmRunParams {
   mcpConfigPath?: string;
   mcpAllowedTools?: string[];
   mcpCodexConfigArgs?: string[];
+  /** Main-minted opaque MCP aliases for a one-run Agent App grant. */
+  agentAppMcpRuntimeEnv?: NodeJS.ProcessEnv;
   runnerEnv?: NodeJS.ProcessEnv;
   locale: RuntimeLocale;
   sink: EventSink;
@@ -131,6 +162,14 @@ async function runNodeTurnSafe(
       role: turn.node.role,
       tier: turn.tier,
     });
+    if (p.req.agentAppMode) {
+      return {
+        text: UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
+        delegations: [],
+        synthesisAllocation: null,
+        ok: false,
+      };
+    }
     if (timedOut) {
       return {
         text:
@@ -221,9 +260,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   const emit = (ev: McpInvocationEvent) => p.sink(tag(ev));
 
   // 워킹 폴더(활성 시 프로젝트 메모리)
-  const workingFolder = p.workingFolder ?? getChatWorkingFolder(p.chat.id);
+  const workingFolder = p.req.agentAppMode ? null : (p.workingFolder ?? getChatWorkingFolder(p.chat.id));
   let activePath: string | null = null;
-  if (workingFolder) {
+  if (!p.req.agentAppMode && workingFolder) {
     try {
       const v = recordFolderVisit(workingFolder);
       if (v.activated) activePath = workingFolder;
@@ -240,18 +279,20 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   if (node.agentId && node.prompt?.trim() && !systemPrompt.includes(node.prompt.trim())) {
     systemPrompt += `\n\n## Firm role context\n${node.prompt.trim()}`;
   }
-  try {
-    const mem = buildMemoryContext(activePath, memoryOwnerId);
-    if (mem) systemPrompt += `\n\n${mem}`;
-  } catch {
-    // ignore memory failures
+  if (!p.req.agentAppMode) {
+    try {
+      const mem = buildMemoryContext(activePath, memoryOwnerId);
+      if (mem) systemPrompt += `\n\n${mem}`;
+    } catch {
+      // ignore memory failures
+    }
   }
   if (turn.reports && turn.reports.length > 0) {
     systemPrompt += `\n\n${buildDelegateProtocol(turn.reports.map((r) => ({ role: r.role, name: r.name })))}`;
   }
-  systemPrompt += `\n\n${memoryEmitterPromptFor(turn.userPrompt)}`;
+  if (!p.req.agentAppMode) systemPrompt += `\n\n${memoryEmitterPromptFor(turn.userPrompt)}`;
 
-  const runtimeChoice = selectRuntimeForTargets(p.runtimes, [
+  const runtimeChoice = p.req.agentAppMode ? null : selectRuntimeForTargets(p.runtimes, [
     { scope: "agent", targetId: node.agentId },
     { scope: "division", targetId: turn.divisionId && p.chat.firmId ? `${p.chat.firmId}:${turn.divisionId}` : null },
     { scope: "firm", targetId: p.chat.firmId },
@@ -285,7 +326,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       });
     }
   }
-  if (node.agentId) {
+  if (!p.req.agentAppMode && node.agentId) {
     try {
       const installedAgent = getAgentById(node.agentId);
       const ontology = installedAgent ? await buildAgentRuntimeOntologyContext({
@@ -317,24 +358,34 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     });
   }
 
+  const agentAppAllowedTools = p.req.agentAppMode && p.mcpConfigPath && p.mcpAllowedTools?.length &&
+    p.mcpAllowedTools.every((tool) => /^mcp__brave-search__(?:brave_web_search|brave_local_search)$/.test(tool))
+    ? p.mcpAllowedTools
+    : undefined;
   const result = await picked.runner(
     {
       systemPrompt,
-      history: turn.history,
+      history: p.req.agentAppMode ? [] : turn.history,
       userPrompt: turn.userPrompt,
-      images: turn.withImages ? p.req.images : undefined,
+      images: p.req.agentAppMode ? undefined : turn.withImages ? p.req.images : undefined,
       backendLabel: picked.label,
       model: active.model ?? undefined,
       longContext: active.longContextEnabled ?? false,
       effort: active.effort ?? undefined,
       signal: turn.signal ?? p.signal,
-      permission: p.req.permissions,
-      cwd: workingFolder ?? undefined,
-      chatId: turn.chatId ?? undefined,
-      mcpConfigPath: p.mcpConfigPath,
-      mcpAllowedTools: p.mcpAllowedTools,
-      mcpCodexConfigArgs: p.mcpCodexConfigArgs,
-      env: p.runnerEnv,
+      permission: p.req.agentAppMode ? "read" : p.req.permissions,
+      cwd: p.req.agentAppMode ? undefined : workingFolder ?? undefined,
+      chatId: p.req.agentAppMode
+        ? `site-agent-app:${p.req.runId ?? "run"}:${node.id}:${phase}:${randomUUID()}`
+        : turn.chatId ?? undefined,
+      mcpConfigPath: p.req.agentAppMode ? (agentAppAllowedTools ? p.mcpConfigPath : undefined) : p.mcpConfigPath,
+      mcpAllowedTools: p.req.agentAppMode ? agentAppAllowedTools : p.mcpAllowedTools,
+      mcpCodexConfigArgs: p.req.agentAppMode ? undefined : p.mcpCodexConfigArgs,
+      env: p.req.agentAppMode
+        ? buildAgentAppRunnerEnv(p.runnerEnv ?? process.env, p.agentAppMcpRuntimeEnv)
+        : p.runnerEnv,
+      untrustedNoTools: p.req.agentAppMode === true,
+      untrustedAllowedMcpTools: agentAppAllowedTools,
       locale: p.locale,
     },
     {
@@ -356,31 +407,33 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
 
   // delegation 블록 분리 → 메모리 큐레이션(노드 agentId로) → 정리된 텍스트
   const { delegations, synthesisAllocation, cleanedText } = parseDelegations(result.text);
-  let display = cleanedText;
-  try {
-    const { cleanedText: c2 } = curateReply(display, {
-      projectPath: activePath,
-      projectId: p.chat.projectId ?? null,
-      agentId: memoryOwnerId,
-      chatId: turn.chatId,
-      runId: p.req.runId,
-      nodeId: node.id,
-      cwdAtRequest: workingFolder,
-      ...(node.agentId
-        ? {
-            experienceIntake: {
-              platform: process.platform,
-              arch: process.arch,
-              runtimeKind: active.kind,
-              basePackageHash: getAgentById(node.agentId)?.packageHash ?? null,
-              taskHint: turn.userPrompt,
-            },
-          }
-        : {}),
-    });
-    display = c2 || display;
-  } catch {
-    // ignore curation failures
+  let display = p.req.agentAppMode ? cleanAgentAppControlBlocks(cleanedText) : cleanedText;
+  if (!p.req.agentAppMode) {
+    try {
+      const { cleanedText: c2 } = curateReply(display, {
+        projectPath: activePath,
+        projectId: p.chat.projectId ?? null,
+        agentId: memoryOwnerId,
+        chatId: turn.chatId,
+        runId: p.req.runId,
+        nodeId: node.id,
+        cwdAtRequest: workingFolder,
+        ...(node.agentId
+          ? {
+              experienceIntake: {
+                platform: process.platform,
+                arch: process.arch,
+                runtimeKind: active.kind,
+                basePackageHash: getAgentById(node.agentId)?.packageHash ?? null,
+                taskHint: turn.userPrompt,
+              },
+            }
+          : {}),
+      });
+      display = c2 || display;
+    } catch {
+      // ignore curation failures
+    }
   }
   // per-node 완료 신호 — 이 노드의 한 턴이 끝났다. UI(오케스트레이션 트리)가 이 노드만 ▶→✓ 로 정리한다.
   // 단, plan 턴은 곧 delegate/synthesize가 이어지므로 완료로 보지 않는다 — orchestrator/본부 행이
@@ -404,9 +457,11 @@ async function runDivision(
   allocation: WorkloadAllocation,
 ): Promise<{ node: ResolvedNode; result: string }> {
   const fkAgentId = division.agentId || p.ceoAgent.id; // FK-safe (실 agent 없으면 CEO id)
-  const divChat = getOrCreateDivisionSession(p.chat.id, division.id, fkAgentId);
-  const history = listChatMessages(divChat.id, 80);
-  appendChatMessage(divChat.id, "user", brief);
+  const divChatId = p.req.agentAppMode
+    ? `site-agent-app:${p.req.runId ?? "run"}:division:${division.id}`
+    : getOrCreateDivisionSession(p.chat.id, division.id, fkAgentId).id;
+  const history = p.req.agentAppMode ? [] : listChatMessages(divChatId, 80);
+  if (!p.req.agentAppMode) appendChatMessage(divChatId, "user", brief);
 
   const specialists = division.specialists;
   const plan = await runNodeTurnSafe(p, {
@@ -416,7 +471,7 @@ async function runDivision(
     userPrompt: brief,
     history,
     reports: specialists.length > 0 ? specialists : undefined,
-    chatId: divChat.id,
+    chatId: divChatId,
     divisionId: division.id,
     allocation,
   });
@@ -455,15 +510,15 @@ async function runDivision(
       tier: 2,
       phase: "synthesize",
       userPrompt: synthPrompt,
-      history: listChatMessages(divChat.id, 80),
-      chatId: divChat.id,
+      history: p.req.agentAppMode ? [] : listChatMessages(divChatId, 80),
+      chatId: divChatId,
       divisionId: division.id,
       allocation: plan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
     });
     result = synth.text;
   }
 
-  appendChatMessage(divChat.id, "assistant", result);
+  if (!p.req.agentAppMode) appendChatMessage(divChatId, "assistant", result);
   return { node: division, result };
 }
 
@@ -475,9 +530,11 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
   const mainStatus = (text: string) => sink({ kind: "tool-use", status: text });
 
   // 메인 히스토리 캡처 후 사용자 메시지 영구화 (단일 경로와 동일)
-  const history = listChatMessages(chat.id, 80);
-  appendChatMessage(chat.id, "user", req.userPrompt);
-  if (history.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
+  const history = req.agentAppMode ? [] : listChatMessages(chat.id, 80);
+  if (!req.agentAppMode) {
+    appendChatMessage(chat.id, "user", req.userPrompt);
+    if (history.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
+  }
 
   const divisions = org.divisions;
   const singleDivision = divisions.length === 1;
@@ -497,10 +554,10 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
       withImages: true,
     });
     if (!solo.ok) {
-      sink({ kind: "error", error: { code: "ceo-failed", message: solo.text } });
+      sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", solo.text) });
       return;
     }
-    appendChatMessage(chat.id, "assistant", solo.text);
+    if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", solo.text);
     sink({ kind: "final", text: solo.text });
     return;
   }
@@ -534,11 +591,11 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
       withImages: true,
     });
     if (!solo.ok) {
-      appendChatMessage(chat.id, "assistant", solo.text);
-      sink({ kind: "error", error: { code: "ceo-failed", message: solo.text } });
+      if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", solo.text);
+      sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", solo.text) });
       return;
     }
-    appendChatMessage(chat.id, "assistant", solo.text);
+    if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", solo.text);
     sink({ kind: "final", text: solo.text });
     return;
   }
@@ -546,7 +603,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
   const matched = matchTargets(plan.delegations, ceoReports);
   if (matched.length === 0) {
     // CEO가 위임 안 함 → plan.text가 곧 최종 답
-    appendChatMessage(chat.id, "assistant", plan.text);
+    if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", plan.text);
     sink({ kind: "final", text: plan.text });
     return;
   }
@@ -609,10 +666,10 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
     allocation: plan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
   });
   if (!finalTurn.ok) {
-    sink({ kind: "error", error: { code: "ceo-failed", message: finalTurn.text } });
+    sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", finalTurn.text) });
     return;
   }
 
-  appendChatMessage(chat.id, "assistant", finalTurn.text);
+  if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", finalTurn.text);
   sink({ kind: "final", text: finalTurn.text });
 }

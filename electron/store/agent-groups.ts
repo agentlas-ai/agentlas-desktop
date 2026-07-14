@@ -480,16 +480,21 @@ function resolveRuntimeAgent(
   return { agent: null, routeLabel: "", warnings: ["route_missing"] };
 }
 
-export async function resolveAgentGroupForRuntime(id: string): Promise<AgentGroupRuntimeResolution | null> {
+export async function resolveAgentGroupForRuntime(
+  id: string,
+  options: { allowHub?: boolean } = {},
+): Promise<AgentGroupRuntimeResolution | null> {
   const group = getAgentGroup(id);
   if (!group) return null;
   const agents = listInstalledAgents();
   const firms = listFirms();
   let hubAgents: MarketplaceListing[] = [];
-  try {
-    hubAgents = await getMarketSource().searchAgents("");
-  } catch {
-    hubAgents = [];
+  if (options.allowHub !== false && group.members.some((member) => member.source === "hub")) {
+    try {
+      hubAgents = await getMarketSource().searchAgents("");
+    } catch {
+      hubAgents = [];
+    }
   }
   const members: AgentGroupRuntimeMember[] = [];
   const skipped: AgentGroupRuntimeResolution["skipped"] = [];

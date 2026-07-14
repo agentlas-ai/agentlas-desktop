@@ -5,6 +5,7 @@ import { probeCodex } from "./codex";
 import { readCodexModelIds } from "./codex-models";
 import { probeGemini } from "./gemini";
 import { probeGrok } from "./grok";
+import { probeCursor } from "./cursor";
 import { probeOllama } from "./ollama";
 import { hasApiKey } from "../secrets/vault";
 import { getDb } from "../store/db";
@@ -200,6 +201,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     codexDiscoveredModels,
     gm,
     gr,
+    cursor,
     ollama,
     anthropicByok,
     openaiByok,
@@ -216,6 +218,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     readCodexModelIds(),
     probeGemini(),
     probeGrok(),
+    probeCursor(),
     probeOllama(),
     hasApiKey("anthropic"),
     hasApiKey("openai"),
@@ -282,6 +285,28 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: storedGrok ?? grokModels[0],
       availableModels: grokModels,
+    });
+  }
+  if (cursor) {
+    // Current Cursor CLI exposes `agent models`; retain Auto as a safe fallback
+    // and preserve an operator selection, but never fabricate entitlement from
+    // the display catalog when live discovery returned nothing.
+    const rememberedCursor =
+      (active?.kind === "cursor" && active.backend === "cursor" ? active.model : undefined) ??
+      recallRuntimeSelection("cursor", "cursor")?.model;
+    const cursorModels = [
+      "auto",
+      ...(cursor.models ?? []),
+      ...(rememberedCursor && rememberedCursor !== "auto" ? [rememberedCursor] : []),
+    ].filter((model, index, list) => Boolean(model) && list.indexOf(model) === index);
+    list.push({
+      kind: "cursor",
+      backend: "cursor",
+      source: cursor.path,
+      version: cursor.version,
+      active: false,
+      model: cliModelOf("cursor", active, cursorModels, "cursor") ?? "auto",
+      availableModels: cursorModels,
     });
   }
   if (ollama) {

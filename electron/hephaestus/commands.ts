@@ -5,6 +5,7 @@
 // 데스크탑 런타임 + 빌더 에이전트 프롬프트로 별도 구동한다 — builder.ts 참조).
 import { runHephaestus, type HephaestusResult, type HephaestusRunOptions } from "./engine";
 import { currentUiLocale } from "../ui-locale";
+import { createHash } from "node:crypto";
 
 export type UploadVisibility = "private-link" | "marketplace";
 
@@ -19,6 +20,56 @@ const POSITIONAL_LABEL: Record<PositionalKind, { ko: string; en: string }> = {
   context: { ko: "컨텍스트", en: "context" },
   directory: { ko: "디렉터리", en: "directory" },
 };
+
+export interface CoreStormbreakerHarness {
+  schema_version: "agentlas.stormbreaker.goal-ultracode-harness.v1";
+  harness_id: "agentlas-core/stormbreaker-goal-ultracode";
+  owner: string;
+  mode: "stormbreaker-goal-ultracode";
+  system_prompt: string;
+  prompt_sha256: string;
+  host_rule: string;
+  inventory_rule: string;
+  completion_rule: string;
+}
+
+function validateCoreStormbreakerHarness(value: unknown): CoreStormbreakerHarness {
+  const harness = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+  if (
+    !harness ||
+    harness.schema_version !== "agentlas.stormbreaker.goal-ultracode-harness.v1" ||
+    harness.harness_id !== "agentlas-core/stormbreaker-goal-ultracode" ||
+    harness.mode !== "stormbreaker-goal-ultracode" ||
+    typeof harness.system_prompt !== "string" ||
+    !harness.system_prompt.trim() ||
+    typeof harness.prompt_sha256 !== "string"
+  ) {
+    throw new Error("Installed Agentlas Core returned an invalid Stormbreaker harness contract.");
+  }
+  const digest = createHash("sha256").update(harness.system_prompt, "utf8").digest("hex");
+  if (digest !== harness.prompt_sha256) {
+    throw new Error("Installed Agentlas Core Stormbreaker harness failed its SHA-256 integrity check.");
+  }
+  return harness as unknown as CoreStormbreakerHarness;
+}
+
+/** Load the one canonical Goal + UltraCode prompt from the installed Agentlas Core. */
+export async function stormbreakerHarness(
+  opts: HephaestusRunOptions = {},
+): Promise<CoreStormbreakerHarness> {
+  const result = await runHephaestus("agentlas_cloud", ["stormbreaker", "harness"], {
+    timeoutMs: 30_000,
+    ...opts,
+  });
+  if (!result.ok || !result.json) {
+    throw new Error(
+      result.error || result.stderr.trim() || "Installed Agentlas Core Stormbreaker harness is unavailable.",
+    );
+  }
+  return validateCoreStormbreakerHarness(result.json);
+}
 
 /** 엔진 argparse 가 '-' 로 시작하는 위치 인자를 플래그로 오해석하는 것을 막는다(인자 인젝션 방어).
  *  cross-spawn 은 shell 을 안 쓰므로 OS 메타문자 인젝션은 불가하나, 엔진 CLI 플래그 변조는 가능하다. */

@@ -79,7 +79,14 @@ async function getBin(): Promise<string | null> {
 }
 
 function buildPrompt(req: RunnerRequest): string {
-  const sys = wrapSystemPrompt(req.systemPrompt, req.locale, req.permission, req.userPrompt, req.forceSurface);
+  const sys = wrapSystemPrompt(
+    req.systemPrompt,
+    req.locale,
+    req.permission,
+    req.userPrompt,
+    req.forceSurface,
+    req.untrustedNoTools,
+  );
   const user = tStatus(req.locale, "speakerUser");
   const assistant = tStatus(req.locale, "speakerAssistant");
   const parts: string[] = [`[SYSTEM]\n${sys}`, ""];
@@ -329,6 +336,13 @@ export const runCodex: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  if (req.untrustedNoTools) {
+    throw new Error(
+      req.locale === "ko"
+        ? "Codex CLI는 읽기 도구를 완전히 제거할 수 없어 Agent App의 무도구 격리 모드에서 사용할 수 없습니다. Claude Code, Ollama 또는 API 런타임을 선택하세요."
+        : "Codex CLI cannot fully remove read tools, so it cannot be used for Agent App's tool-less isolation. Select Claude Code, Ollama, or an API runtime.",
+    );
+  }
   const bin = await getBin();
   if (!bin) {
     throw new Error(tStatus(req.locale, "errCliMissingCodex"));
@@ -350,7 +364,9 @@ export const runCodex: Runner = async (
 
   const permArgs = permissionArgs(runReq.permission);
   const mcpArgs =
-    runReq.mcpCodexConfigArgs && runReq.mcpCodexConfigArgs.length > 0 ? runReq.mcpCodexConfigArgs : [];
+    !runReq.untrustedNoTools && runReq.mcpCodexConfigArgs && runReq.mcpCodexConfigArgs.length > 0
+      ? runReq.mcpCodexConfigArgs
+      : [];
   // 모델/effort를 CLI에 명시 전달 — 예전엔 세션 지문에만 쓰고 인자로는 안 넘겨서, 앱이
   // 뭘 선택했든 기기의 ~/.codex/config.toml(또는 codex 업데이트가 바꾼 내장 기본값)이
   // 이겼다(2026-07-08: 다른 기기에서 지정한 적 없는 Spark 모델로 조용히 실행된 사고).
@@ -370,13 +386,13 @@ export const runCodex: Runner = async (
   }
 
   // 세션 resume 가능 여부 — chatId 저장 세션 또는 Build 같은 호출자가 직접 넘긴 세션 id.
-  const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
-  const existing = runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
+  const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq) : null;
+  const existing = !runReq.untrustedNoTools && runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
   const storedSessionId =
     existing && fingerprint && existing.fingerprint === fingerprint
       ? existing.sessionId
       : null;
-  const resumeSessionId = runReq.runtimeSessionId ?? storedSessionId;
+  const resumeSessionId = runReq.untrustedNoTools ? null : (runReq.runtimeSessionId ?? storedSessionId);
   const canResume = !!resumeSessionId;
 
   // RESUME: 새 user 턴만 stdin으로 — 시스템 프롬프트/히스토리는 세션이 이미 갖고 있다.
@@ -424,7 +440,15 @@ export const runCodex: Runner = async (
   }
 
   // CREATE: 시스템 프롬프트 + 히스토리 + user를 stdin으로 보내 새 세션을 시드한다.
-  const createArgs = ["exec", "--json", "--skip-git-repo-check", ...permArgs, ...mcpArgs, ...modelArgs, "-"];
+  const createArgs = [
+    "exec",
+    "--json",
+    "--skip-git-repo-check",
+    ...permArgs,
+    ...mcpArgs,
+    ...modelArgs,
+    "-",
+  ];
   const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events);
   if (runReq.signal?.aborted) {
     if (runReq.chatId && fingerprint && created.threadId) saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint);

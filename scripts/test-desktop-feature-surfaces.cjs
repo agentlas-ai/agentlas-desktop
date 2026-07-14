@@ -1266,8 +1266,19 @@ async function runChatSurface(browser, baseUrl, evidence) {
   // thinking/tool status, but never treat the invoke.run IPC call alone as UI
   // evidence that progress is visible.
   await page.getByText(
-    /실행 중|전송 중|running|sending|Agentlas orchestrator started|Hub 에이전트 빌리는 중/i,
+    /실행 중|전송 중|running|sending|Agentlas orchestrator started|Hub 에이전트 빌리는 중|Stormbreaker · 목표와 완료 조건/i,
   ).first().waitFor({ timeout: 5000 });
+  await page.getByText(/Stormbreaker · 목표와 완료 조건을 잠그고/).first().waitFor({ timeout: 5000 });
+  await page.getByText(/Codex · gpt-5\.6-luna · effort high/).first().waitFor({ timeout: 5000 });
+  await page.getByText(/Claude Code · claude-sonnet-4-6 · effort medium/).first().waitFor({ timeout: 5000 });
+  await page.getByText(/최종 완료 게이트를 판정/).first().waitFor({ timeout: 5000 });
+  await page.getByTestId("thinking-text-stream").waitFor({ timeout: 5000 });
+  assert.equal(
+    await page.locator(".agentlas-chat-turn .agentlas-activity-card").count(),
+    0,
+    "Thinking log must be a plain text stream, not one card per Stormbreaker event",
+  );
+  await page.screenshot({ path: path.join(outDir, "chat-stormbreaker-thinking-surface.png"), fullPage: true });
   await page.getByRole("button", { name: /워크스페이스 패널|Workspace panel/ }).click();
   await page.getByRole("button", { name: /폴더 열기|Open folder/ }).click();
   await page.locator(".chat-right-panel").getByRole("treeitem", { name: "README.md" }).click();

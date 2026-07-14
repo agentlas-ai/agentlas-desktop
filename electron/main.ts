@@ -24,6 +24,7 @@ import {
 } from "./updater";
 import { scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls } from "./updater/continuity";
 import { disposeAppFactoryLaunches } from "./app-factory/operations";
+import { disposeSiteAgentAppRuntimes } from "./site/agent-app-runtime";
 import { bootAuthFromKeychain, onAuthSessionInvalidated } from "./auth";
 import {
   broadcastHubBookmarkSnapshot,
@@ -312,6 +313,7 @@ app.on("before-quit", () => {
   }).catch(() => {});
   try { disposeAutoUpdater(); } catch {}
   try { disposeAppFactoryLaunches(); } catch {}
+  try { disposeSiteAgentAppRuntimes(); } catch {}
   try { disposeAuthSessionInvalidation?.(); } catch {}
   disposeAuthSessionInvalidation = null;
   try { disposeMobileBridgeStateChange?.(); } catch {}

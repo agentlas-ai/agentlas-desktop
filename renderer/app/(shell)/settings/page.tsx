@@ -52,6 +52,7 @@ const BACKEND_LABEL_KO: Record<RuntimeBackend, string> = {
   glm: "GLM (Z.ai)",
   kimi: "Kimi (Moonshot)",
   deepseek: "DeepSeek",
+  cursor: "Cursor",
 };
 
 const BACKEND_LABEL_EN: Record<RuntimeBackend, string> = {
@@ -64,6 +65,7 @@ const BACKEND_LABEL_EN: Record<RuntimeBackend, string> = {
   glm: "GLM (Z.ai)",
   kimi: "Kimi (Moonshot)",
   deepseek: "DeepSeek",
+  cursor: "Cursor",
 };
 
 function backendLabel(b: RuntimeBackend, locale: string): string {

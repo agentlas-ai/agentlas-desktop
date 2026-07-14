@@ -17,6 +17,24 @@ const { activeSiteProjectOperation, assertSiteProjectIdle, tryAcquireSiteProject
 
 const DOC_A = "<!doctype html><html><head><title>a</title></head><body><h1>랜딩</h1></body></html>";
 const DOC_B = "<!doctype html><html><head><title>b</title></head><body><h1>로그인</h1></body></html>";
+const STORE_DEFAULT_SENTINEL = "sk-live-store-default-must-not-persist";
+const RESEARCH_CONTRACT = {
+  schemaVersion: 1,
+  source: "declared-package",
+  inputs: [{
+    name: "topic",
+    type: "string",
+    label: "Research topic",
+    description: "Question to investigate",
+    required: true,
+    format: "textarea",
+    options: [],
+    defaultValue: STORE_DEFAULT_SENTINEL,
+    systemPrompt: "must be discarded",
+  }],
+  outputs: [{ name: "brief", label: "Cited brief", type: "markdown", description: "Findings and sources" }],
+  systemPrompt: "must be discarded",
+};
 
 let exitCode = 0;
 try {
@@ -24,6 +42,61 @@ try {
   assert.deepEqual(store.listSiteProjects(), [], "fresh userData → no projects");
   const project = store.createSiteProject("테스트 사이트");
   assert.equal(store.listSiteProjects().length, 1);
+  assert.equal(project.surface, "web", "legacy string create must default to the existing web lane");
+  assert.equal(project.agentAppTarget, null);
+  assert.equal(project.agentAppContract, null);
+
+  const agentAppProject = store.createSiteProject({
+    name: "리서치 에이전트 앱",
+    surface: "agent-app",
+    agentAppTarget: {
+      kind: "agent",
+      id: "agent-123",
+      name: "Research Agent",
+      description: "Creates cited briefs",
+      memberCount: 1,
+    },
+    astryxTemplate: "ai-chat-landing",
+    agentAppContract: RESEARCH_CONTRACT,
+  });
+  const restoredAgentApp = store.getSiteProject(agentAppProject.id);
+  assert.equal(restoredAgentApp.surface, "agent-app");
+  assert.equal(restoredAgentApp.agentAppTarget.id, "agent-123");
+  assert.equal(restoredAgentApp.astryxTemplate, "ai-chat-landing");
+  assert.equal(restoredAgentApp.agentAppContract.source, "declared-package");
+  assert.equal(restoredAgentApp.agentAppVisual.headline, "Where should we start with Research Agent?");
+  assert.deepEqual(restoredAgentApp.agentAppContract.inputs.map((field) => field.name), ["topic"]);
+  assert.equal(restoredAgentApp.agentAppContract.inputs[0].defaultValue, null, "external defaults must be stripped before project persistence");
+  assert.deepEqual(restoredAgentApp.agentAppContract.outputs.map((field) => field.name), ["brief"]);
+  assert.equal(JSON.stringify(restoredAgentApp).includes(STORE_DEFAULT_SENTINEL), false, "restored project metadata must never contain an external default secret");
+  assert.equal(JSON.stringify(restoredAgentApp.agentAppContract).includes("must be discarded"), false, "contract persistence must drop arbitrary secret-bearing fields");
+  store.updateSiteAgentAppVisual(agentAppProject.id, {
+    schemaVersion: 1,
+    colorMode: "dark",
+    accent: "teal",
+    density: "compact",
+    radius: "round",
+    headline: "Focused research workspace",
+    description: "Collect evidence and return a cited brief.",
+    inputHeading: "Evidence request",
+    outputHeading: "Research result",
+    runLabel: "Run research",
+    emptyOutput: "The cited result will appear here.",
+  });
+  const visuallyUpdatedAgentApp = store.getSiteProject(agentAppProject.id);
+  assert.equal(visuallyUpdatedAgentApp.agentAppVisual.headline, "Focused research workspace");
+  assert.equal(visuallyUpdatedAgentApp.agentAppVisual.accent, "teal");
+  assert.throws(
+    () => store.createSiteProject({
+      name: "Broken Agent App",
+      surface: "agent-app",
+      agentAppTarget: agentAppProject.agentAppTarget,
+      astryxTemplate: "ai-chat-landing",
+      agentAppContract: { ...RESEARCH_CONTRACT, inputs: [{ ...RESEARCH_CONTRACT.inputs[0], type: "function" }] },
+    }),
+    /입출력 계약 스냅샷/,
+    "invalid contract types must fail closed",
+  );
 
   const s1 = store.saveSiteScreen({ projectId: project.id, name: "랜딩", html: DOC_A });
   const s2 = store.saveSiteScreen({ projectId: project.id, name: "로그인 A", html: DOC_B, variantGroup: "g1", variantLabel: "A" });
@@ -31,6 +104,68 @@ try {
   assert.equal(meta.screens.length, 2, "screens must persist in project.json");
   assert.equal(meta.screens[1].variantLabel, "A", "variant metadata must persist");
   assert.equal(store.readSiteScreenHtml(project.id, s1.id), DOC_A, "screen html must round-trip");
+
+  // project.json carries the append-only remote deployment ledger. Its commit
+  // point must be an atomic same-directory rename, never target truncation.
+  const projectFile = path.join(app.getPath("userData"), "site-projects", project.id, "project.json");
+  const projectDirectory = path.dirname(projectFile);
+  const projectStoreSource = fs.readFileSync(path.join(__dirname, "..", "electron", "site", "store.ts"), "utf8");
+  assert.doesNotMatch(projectStoreSource, /writeFileSync\(projectMetaPath\(/,
+    "project metadata must not directly truncate project.json");
+  assert.match(projectStoreSource, /fsyncSync\(fd\)[\s\S]{0,300}renameSync\(temp, target\)/,
+    "project metadata must fsync its staging file before atomic rename");
+  assert.equal(fs.statSync(projectFile).mode & 0o777, 0o600,
+    "project metadata must be private to the current OS user");
+
+  const durableProjectBeforeFsyncFailure = fs.readFileSync(projectFile, "utf8");
+  const originalFsyncSync = fs.fsyncSync;
+  let injectedProjectFsyncFailure = false;
+  fs.fsyncSync = (fd) => {
+    if (!injectedProjectFsyncFailure) {
+      injectedProjectFsyncFailure = true;
+      throw new Error("injected project staging fsync failure");
+    }
+    return originalFsyncSync(fd);
+  };
+  try {
+    assert.throws(
+      () => store.renameSiteScreen(project.id, s1.id, "must not survive fsync failure"),
+      /injected project staging fsync failure/,
+    );
+  } finally {
+    fs.fsyncSync = originalFsyncSync;
+  }
+  assert.equal(fs.readFileSync(projectFile, "utf8"), durableProjectBeforeFsyncFailure,
+    "pre-rename fsync failure must preserve the previous complete project.json byte-for-byte");
+  assert.equal(store.getSiteProject(project.id).screens[0].name, "랜딩");
+  assert.equal(
+    fs.readdirSync(projectDirectory).filter((name) => /^\.project\.json\..+\.tmp$/.test(name)).length,
+    0,
+    "failed project fsync must clean its same-directory staging file",
+  );
+
+  const durableProjectBeforeRenameFailure = fs.readFileSync(projectFile, "utf8");
+  const originalProjectRenameSync = fs.renameSync;
+  fs.renameSync = (from, to) => {
+    if (to === projectFile) throw new Error("injected project atomic rename failure");
+    return originalProjectRenameSync(from, to);
+  };
+  try {
+    assert.throws(
+      () => store.renameSiteScreen(project.id, s1.id, "must not survive rename failure"),
+      /injected project atomic rename failure/,
+    );
+  } finally {
+    fs.renameSync = originalProjectRenameSync;
+  }
+  assert.equal(fs.readFileSync(projectFile, "utf8"), durableProjectBeforeRenameFailure,
+    "failed atomic replace must preserve the previous complete project.json byte-for-byte");
+  assert.equal(store.getSiteProject(project.id).screens[0].name, "랜딩");
+  assert.equal(
+    fs.readdirSync(projectDirectory).filter((name) => /^\.project\.json\..+\.tmp$/.test(name)).length,
+    0,
+    "failed project rename must clean its same-directory staging file",
+  );
 
   // ── 사람이 읽는 Site Copilot 대화 영속 ────────────────────
   assert.deepEqual(store.listSiteConversation(project.id), [], "new project must start with an empty visible conversation");
@@ -98,11 +233,17 @@ try {
   assert.throws(() => assertSiteProjectIdle(project.id), /site-project-busy/, "destructive Site mutations must reject an active project");
   assert.equal(tryAcquireSiteProjectOperation(project.id, "edit"), null, "parallel edit must fail closed while generate owns the project");
   assert.equal(tryAcquireSiteProjectOperation(project.id, "handoff"), null, "parallel handoff must fail closed while generate owns the project");
+  assert.equal(tryAcquireSiteProjectOperation(project.id, "publish"), null, "parallel publish must fail closed while generate owns the project");
+  assert.equal(tryAcquireSiteProjectOperation(project.id, "delete"), null, "parallel delete must fail closed while generate owns the project");
   releaseGenerate();
   releaseGenerate(); // idempotent cleanup
   const releaseEdit = tryAcquireSiteProjectOperation(project.id, "edit");
   assert.equal(typeof releaseEdit, "function", "project lease must be reusable after terminal cleanup");
   releaseEdit();
+  const releasePublish = tryAcquireSiteProjectOperation(project.id, "publish");
+  assert.equal(typeof releasePublish, "function", "publish must hold the same project lease as source mutations");
+  assert.equal(tryAcquireSiteProjectOperation(project.id, "generate"), null, "generation must not rewrite an artifact during publish");
+  releasePublish();
   assert.equal(activeSiteProjectOperation(project.id), null);
   assert.doesNotThrow(() => assertSiteProjectIdle(project.id));
 
@@ -152,6 +293,7 @@ try {
   store.deleteSiteScreen(project.id, s2.id);
   assert.equal(store.getSiteProject(project.id).screens.length, 1, "screen delete must persist");
   store.deleteSiteProject(project.id);
+  store.deleteSiteProject(agentAppProject.id);
   assert.deepEqual(store.listSiteProjects(), [], "project delete must remove everything");
 
   console.log("site studio store + zip contract ok");

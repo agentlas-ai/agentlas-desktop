@@ -6,7 +6,26 @@ import type {
   MultimodalSettings,
 } from "./multimodal";
 import type { OberonTitleSpec } from "./oberon-titles";
-import type { SiteConversationEntry, SiteProjectMeta, SiteProjectOperation, SiteScreenMeta, SiteWorkspaceHandoff } from "./site-studio";
+import type {
+  SiteAgentAppPublishBackendRequest,
+  SiteAgentAppPublishBackendResult,
+  SiteAgentAppPublishConnectResult,
+  SiteAgentAppPublishProviderStatus,
+  SiteAgentAppPublishTokenResult,
+  SiteAgentAppLaunchResult,
+  SiteAgentAppRuntimeStatus,
+  SiteAgentAppTargetRef,
+  SiteAgentAppThumbnailResult,
+  SiteConversationEntry,
+  SiteDeleteProjectResult,
+  SiteProjectMeta,
+  SiteProjectOperation,
+  SitePublishProvider,
+  SitePublishProviderPage,
+  SiteScreenMeta,
+  SiteSurface,
+  SiteWorkspaceHandoff,
+} from "./site-studio";
 import type {
   MobileBridgeOntologyProjectionDto,
   MobileBridgePairingPayload,
@@ -138,7 +157,7 @@ export type {
   MultimodalSettings,
 } from "./multimodal";
 
-export type RuntimeKind = "claude-code" | "codex" | "gemini" | "grok" | "byok" | "ollama";
+export type RuntimeKind = "claude-code" | "codex" | "gemini" | "grok" | "cursor" | "byok" | "ollama";
 
 /** LLM 제공자. "ollama"는 로컬 머신에서 도는 오픈 모델(gemma/deepseek 등). */
 export type RuntimeBackend =
@@ -151,7 +170,8 @@ export type RuntimeBackend =
   // Anthropic Messages API 호환 서드파티(구독/종량제 코딩 플랜)
   | "glm"
   | "kimi"
-  | "deepseek";
+  | "deepseek"
+  | "cursor";
 
 export interface RuntimeSelection {
   kind: RuntimeKind;
@@ -2496,6 +2516,23 @@ export interface McpInvocationRequest {
   /** 새 모델: chatId 기반. 에이전트는 chat에서 lookup */
   chatId: string;
   userPrompt: string;
+  /** Main-only Site Agent App invocation. Pins the selected chat target and disables router/automation expansion. */
+  agentAppMode?: boolean;
+  /**
+   * Main-only, per-run capability grant prepared from a persisted Agent App
+   * declaration. Renderer IPC always removes this field. It contains opaque
+   * MCP secret aliases only; raw key names/values and arbitrary servers are
+   * forbidden by the Site capability builder.
+   */
+  agentAppRuntimeToolGrant?: {
+    schemaVersion: 1;
+    mcpConfigPath: string;
+    mcpAllowedTools: string[];
+    mcpRuntimeEnv: Record<string, string>;
+    availableCatalogIds: string[];
+    /** In-process handoff receipt; a runtime mismatch downgrades the final disclosure. */
+    runtimeStatus: "prepared" | "accepted" | "runtime-unavailable";
+  };
   /** 첨부 이미지 — BYOK/Ollama는 멀티모달로, CLI는 읽을 수 있는 로컬 파일로 스테이징해 전송. */
   images?: ImageAttachment[];
   /** UI 사용자 locale — main이 emit하는 상태/오류 메시지가 이 언어로 나옴.
@@ -3753,9 +3790,8 @@ export interface AgentlasIpc {
     refineText: (payload: { current: string; instruction: string; context?: string }) => Promise<{ ok: boolean; text?: string; reason?: string }>;
   };
   /**
-   * 사이트 디자인 스튜디오 — 디자인 전용(백엔드/실행 없음).
-   * 화면당 self-contained HTML 1문서, sandbox iframe 렌더 + select-to-edit.
-   * 디자인 두뇌 = Hub 에이전트 "웹앱 디자인 마스터"(web-master)를 hep-call(borrow)로 호출.
+   * Site Studio: Web/mobile는 sandbox 디자인 프리뷰, Agent App은 별도 Astryx
+   * 패키지 + main-owned 로컬 런타임/명시적 공개 배포 경로를 사용한다.
    */
   site: {
     listProjects: () => Promise<SiteProjectMeta[]>;
@@ -3763,8 +3799,31 @@ export interface AgentlasIpc {
     operationStatus: (payload: { projectId: string }) => Promise<SiteProjectOperation | null>;
     /** 사람이 읽는 Site Copilot 기록 — 내부 모델 프롬프트와 분리된 프로젝트별 영속 로그. */
     listConversation: (payload: { projectId: string }) => Promise<SiteConversationEntry[]>;
-    createProject: (payload: { name: string }) => Promise<SiteProjectMeta>;
-    deleteProject: (payload: { projectId: string }) => Promise<{ ok: boolean }>;
+    createProject: (payload: {
+      name: string;
+      surface?: SiteSurface;
+      /** Required for Agent App; Electron main resolves and persists display/capability data. */
+      agentAppTarget?: SiteAgentAppTargetRef;
+    }) => Promise<SiteProjectMeta>;
+    deleteProject: (payload: { projectId: string }) => Promise<SiteDeleteProjectResult>;
+    /** Start the capability-scoped loopback runtime and open the built Astryx app. */
+    launchAgentApp: (payload: { projectId: string }) => Promise<SiteAgentAppLaunchResult>;
+    stopAgentApp: (payload: { projectId: string }) => Promise<SiteAgentAppRuntimeStatus>;
+    agentAppRuntimeStatus: (payload: { projectId: string }) => Promise<SiteAgentAppRuntimeStatus>;
+    /** Read only the validated 1280x720 PNG tied to this Site project. */
+    agentAppThumbnail: (payload: { projectId: string }) => Promise<SiteAgentAppThumbnailResult>;
+    /** Provider readiness only; credentials never cross into the renderer. */
+    listPublishProviderStatuses: () => Promise<SiteAgentAppPublishProviderStatus[]>;
+    savePublishProviderToken: (payload: { provider: SitePublishProvider; token: string }) => Promise<SiteAgentAppPublishTokenResult>;
+    removePublishProviderToken: (payload: { provider: SitePublishProvider }) => Promise<SiteAgentAppPublishTokenResult>;
+    openPublishProviderPage: (payload: {
+      provider: SitePublishProvider;
+      page: SitePublishProviderPage;
+    }) => Promise<{ opened: boolean; provider: SitePublishProvider; page: SitePublishProviderPage }>;
+    /** Starts a provider-owned browser login. Account creation and terms stay user-owned. */
+    connectPublishProvider: (payload: { provider: SitePublishProvider }) => Promise<SiteAgentAppPublishConnectResult>;
+    /** Validate the immutable Astryx package, then perform one explicitly approved public deploy. */
+    publishAgentApp: (payload: SiteAgentAppPublishBackendRequest) => Promise<SiteAgentAppPublishBackendResult>;
     /** 화면 생성 — variants(1~3)만큼 시안을 만든다(순차 — 프로젝트 세션 공유). */
     generateScreen: (payload: {
       projectId: string;
@@ -3774,7 +3833,16 @@ export interface AgentlasIpc {
       /** 스타일 참조 화면 — 같은 제품처럼 보이게 팔레트/타이포를 따라간다. */
       baseScreenId?: string;
       locale?: "ko" | "en";
-    }) => Promise<{ ok: boolean; screens?: SiteScreenMeta[]; engine?: string; feedback?: string; reason?: string }>;
+    }) => Promise<{
+      ok: boolean;
+      screens?: SiteScreenMeta[];
+      engine?: string;
+      feedback?: string;
+      /** Agent App only: real React 19 + Astryx companion registered in Apps. */
+      agentApp?: AppFactoryScaffoldResult;
+      agentAppReason?: string;
+      reason?: string;
+    }>;
     /** 선택 요소 부분 patch 우선 수정. selectionId = data-agentlas-id. */
     editScreen: (payload: {
       projectId: string;
@@ -3784,7 +3852,17 @@ export interface AgentlasIpc {
       /** 사용자에게 보이는 선택 대상 식별자 — 내부 HTML 프롬프트와 분리해 대화 로그에만 저장. */
       selectionContext?: string;
       locale?: "ko" | "en";
-    }) => Promise<{ ok: boolean; screen?: SiteScreenMeta; engine?: string; mode?: "patch" | "full"; feedback?: string; reason?: string }>;
+    }) => Promise<{
+      ok: boolean;
+      screen?: SiteScreenMeta;
+      engine?: string;
+      mode?: "patch" | "full";
+      feedback?: string;
+      /** Agent App only: regenerated from the preserved main-owned I/O contract after an edit. */
+      agentApp?: AppFactoryScaffoldResult;
+      agentAppReason?: string;
+      reason?: string;
+    }>;
     readScreen: (payload: { projectId: string; screenId: string }) => Promise<{ ok: boolean; html?: string; reason?: string }>;
     /** 렌더 직전 태깅+오버레이/CSP 주입 — iframe srcDoc으로 쓸 HTML과 nonce 반환. */
     prepareRender: (payload: { projectId: string; screenId: string }) => Promise<{ ok: boolean; renderHtml?: string; nonce?: string; reason?: string }>;

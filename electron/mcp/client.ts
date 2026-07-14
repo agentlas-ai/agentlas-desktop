@@ -8,7 +8,7 @@ import { detectRuntimes } from "../runtime/detect";
 // Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
 import { superviseStormbreaker, type StormbreakerHandle } from "../hephaestus/stormbreaker-supervisor";
 import { isNetworkAutoEnabled, isStormbreakerAutoEnabled } from "../hephaestus/supervisor";
-import { careerGraphIngest, hepCall, routeOnly } from "../hephaestus/commands";
+import { careerGraphIngest, hepCall, routeOnly, stormbreakerHarness } from "../hephaestus/commands";
 import { normalizeRecommendation } from "../hephaestus/recommendation";
 import {
   buildStormbreakerLongRunPrompt,
@@ -53,7 +53,7 @@ import {
   type BorrowedAgentSpec,
 } from "./borrowed-task-force";
 import { runSwarmInvocation } from "./swarm-run";
-import { resolveAgentGroupForRuntime } from "../store/agent-groups";
+import { getAgentGroup, resolveAgentGroupForRuntime } from "../store/agent-groups";
 import { recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
 import { buildExperienceContext } from "../experience/context";
@@ -61,6 +61,7 @@ import { resolveDesktopTasteRuntimeSession } from "../ontology/taste-runtime-ses
 import { tasteRuntimeOverlayMatchesTask } from "../ontology/taste-runtime-contract";
 import { curateReply } from "../memory/curator";
 import { harvestCompactionSummaries } from "../memory/compaction-harvest";
+import { parseMemoryEvents } from "../memory/events";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
@@ -69,11 +70,12 @@ import { createAutomation, listAutomations, updateAutomation, updateAutomationGr
 import { getAgentApp } from "../store/agent-apps";
 import { autoSelectMcpTools, buildMcpAutoSelectionPrompt } from "../mcp-tools/auto-select";
 import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
-import { buildRunnerEnv } from "../runtime/env-resolver";
+import { buildAgentAppRunnerEnv, buildRunnerEnv } from "../runtime/env-resolver";
 import { agentRunCwd } from "../runtime/exec";
 import { type Runner, SURFACE_INTENT_MARKER } from "../runtime/runner";
-import { pickActive, pickRunner, selectRuntimeForTargets } from "../runtime/selection";
+import { pickActive, pickRunner, selectAgentAppRuntimeForTargets, selectRuntimeForTargets } from "../runtime/selection";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
+import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
 import type {
   Chat,
   AppFactoryAppRecord,
@@ -87,6 +89,18 @@ import type {
 
 type EventSink = (ev: McpInvocationEvent) => void;
 const careerGraphRefreshTriggered = new Set<string>();
+
+function invocationFailure(
+  req: McpInvocationRequest,
+  fallbackCode: string,
+  error: unknown,
+): { code: string; message: string } {
+  if (req.agentAppMode) return untrustedRuntimeFailurePayload();
+  return {
+    code: fallbackCode,
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
 
 function throwIfInvocationAborted(signal: AbortSignal | undefined, locale: "ko" | "en"): void {
   if (signal?.aborted) throw new Error(tStatus(locale, "aborted"));
@@ -334,8 +348,17 @@ async function buildAgentGroupTaskForceSpecs(input: {
   locale: "ko" | "en";
   sink: EventSink;
   signal?: AbortSignal;
+  localOnly?: boolean;
 }): Promise<{ groupName: string; orchestratorName: string; specs: BorrowedAgentSpec[] }> {
-  const resolved = await resolveAgentGroupForRuntime(input.groupId);
+  const savedGroup = getAgentGroup(input.groupId);
+  if (input.localOnly && savedGroup?.members.some((member) => member.source === "hub")) {
+    throw new Error(
+      input.locale === "ko"
+        ? "Agent App의 로컬 실행은 브라우저 입력을 Hub로 전송하지 않습니다. Hub 멤버가 없는 로컬 에이전트 조합을 선택하세요."
+        : "Local Agent App runs never send browser input to Hub. Choose an agent group with local members only.",
+    );
+  }
+  const resolved = await resolveAgentGroupForRuntime(input.groupId, { allowHub: !input.localOnly });
   if (!resolved) {
     throw new Error(
       input.locale === "ko"
@@ -613,6 +636,26 @@ export async function runMcpInvocation(
   // site generation, legacy scripts) still receive one internal identity so their
   // content-free memory curation receipts are not silently lost.
   if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
+  if (req.agentAppMode) {
+    // Renderer flags and browser-shaped content can never widen the fixed Site
+    // runtime authority. Normalize before any goal/pipeline/Hub/App branching.
+    req = {
+      ...req,
+      permissions: "read",
+      toolMode: "auto",
+      hubMode: "local-only",
+      borrowAgents: [],
+      pipelineStages: undefined,
+      routerAgent: undefined,
+      mcpBrowserProfileKey: undefined,
+      planMode: false,
+      goalMode: false,
+      appsGenerateMode: false,
+      targetAppId: undefined,
+      targetAppAction: undefined,
+      images: undefined,
+    };
+  }
   const callerSink = sink;
   let runtimeAgentId: string | undefined;
   let finalTextFromSink = "";
@@ -704,11 +747,15 @@ export async function runMcpInvocation(
   }
 
   const installedAgents = listInstalledAgents();
-  const hasPriorContext = hasPriorConversationContext(chat.id);
+  // Site Agent Apps are request/response surfaces, not chat continuations. Do
+  // not let an earlier browser request influence routing for a later caller.
+  const hasPriorContext = req.agentAppMode ? false : hasPriorConversationContext(chat.id);
   // plain 대화(인사/맞장구)는 라우팅 전체를 건너뛰고 기본 LLM이 즉답 — 전문 에이전트로
   // 잘못 위임되거나 아래 Hephaestus 에스컬레이션 선지연을 무는 엣지케이스를 없앤다.
   const plainConversation = !isTargetAppEdit && isPlainConversationalPrompt(req.userPrompt);
-  const autoRoute = isTargetAppEdit
+  const autoRoute = req.agentAppMode
+    ? null
+    : isTargetAppEdit
     ? selectAppBuilderForExistingAppEdit(installedAgents, locale)
     : req.appsGenerateMode
       ? selectAppBuilderForAppsGenerate(installedAgents, locale)
@@ -731,9 +778,12 @@ export async function runMcpInvocation(
   // 자동 고정한다. firm 경로도 단일 에이전트 경로와 같은 cwd/MCP 구성을 받아야 한다.
   const existingWorkingFolder = getChatWorkingFolder(chat.id);
   const projectWorkingFolder = chat.projectId ? getProject(chat.projectId)?.folderPath ?? null : null;
-  const inferredWorkingFolder =
-    existingWorkingFolder || projectWorkingFolder ? null : inferWorkingFolderFromPrompt(req.userPrompt);
-  if (inferredWorkingFolder) setChatWorkingFolder(chat.id, inferredWorkingFolder);
+  const inferredWorkingFolder = req.agentAppMode
+    ? null
+    : existingWorkingFolder || projectWorkingFolder
+      ? null
+      : inferWorkingFolderFromPrompt(req.userPrompt);
+  if (!req.agentAppMode && inferredWorkingFolder) setChatWorkingFolder(chat.id, inferredWorkingFolder);
   const targetAppWorkingFolder = targetApp ? path.resolve(targetApp.rootPath) : null;
   const workingFolder = targetAppWorkingFolder ?? existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
   // Even a global chat executes in a concrete local folder. Persist it in the
@@ -744,6 +794,7 @@ export async function runMcpInvocation(
   // 실행 전에 Hephaestus Network 라우터로 Hub 후보를 찾아 BYOM bundle 지시를 프롬프트에 붙인다.
   // local-only는 명시적으로 이 경로를 막는다.
   if (
+    !req.agentAppMode &&
     req.hubMode &&
     req.hubMode !== "local-only" &&
     borrowedAgentSlugs.length === 0 &&
@@ -805,8 +856,9 @@ export async function runMcpInvocation(
   // 이전에는 기본 채팅(글로벌 오케스트레이터)의 모든 메시지가 이 동기 호출을 최대 15초까지
   // 기다렸다 — 짧은 단일 작업까지 선지연을 물던 주범. 멀티도메인/파이프라인 신호가 있는
   // 복합 요청에만 에스컬레이션하고 타임아웃도 4초로 줄인다(실패/타임아웃 시 조용히 진행).
-  let routerAgent = req.routerAgent;
+  let routerAgent = req.agentAppMode ? undefined : req.routerAgent;
   if (
+    !req.agentAppMode &&
     !routerAgent &&
     isNetworkAutoEnabled() && // hep-network 자동 개입 — 대시보드 토글(기본 OFF)일 때만 자동 에스컬레이션
     isGlobalOrchestrator(agent) &&
@@ -834,10 +886,13 @@ export async function runMcpInvocation(
 
   const runtimes = await detectRuntimes();
   throwIfInvocationAborted(signal, locale);
-  const runtimeChoice = selectRuntimeForTargets(runtimes, [
-    { scope: "agent", targetId: agent.id },
-    { scope: "firm", targetId: chat.firmId },
-  ]);
+  const runtimeTargets = [
+    { scope: "agent" as const, targetId: agent.id },
+    { scope: "firm" as const, targetId: chat.firmId },
+  ];
+  const runtimeChoice = req.agentAppMode
+    ? selectAgentAppRuntimeForTargets(runtimes, runtimeTargets)
+    : selectRuntimeForTargets(runtimes, runtimeTargets);
   if (!runtimeChoice) {
     sink({
       kind: "error",
@@ -853,6 +908,14 @@ export async function runMcpInvocation(
         locale === "ko"
           ? `지정된 런타임(${runtimeChoice.unavailableOverride.selection.kind})을 찾지 못해 전역 활성 런타임으로 실행합니다.`
           : `The assigned runtime (${runtimeChoice.unavailableOverride.selection.kind}) is unavailable, so Agentlas is using the global active runtime.`,
+    });
+  }
+  if (req.agentAppMode && "fallbackFromKind" in runtimeChoice && runtimeChoice.fallbackFromKind) {
+    sink({
+      kind: "tool-use",
+      status: locale === "ko"
+        ? `${runtimeChoice.fallbackFromKind} 런타임은 Agent App 격리를 증명할 수 없어 안전한 무도구 런타임으로 실행합니다.`
+        : `${runtimeChoice.fallbackFromKind} cannot prove Agent App isolation; using a safe stateless no-tool runtime.`,
     });
   }
 
@@ -872,6 +935,23 @@ export async function runMcpInvocation(
     return earlyResult();
   }
 
+  // Stormbreaker is an executable Goal/UltraCode mode, not only a system-prompt
+  // suffix. Non-trivial explicit/auto requests enter bounded decomposition,
+  // parallel workers and final synthesis; a normal short chat stays single-run.
+  const explicitStormbreakerRequest = /^\s*(?:hep-network\s+--stormbreaker|stormbreaker)\b/i.test(req.userPrompt);
+  const stormbreakerEngaged = !req.agentAppMode && (
+    chat.kind === "division" ||
+    chat.continuousMode === true ||
+    explicitStormbreakerRequest ||
+    isStormbreakerAutoEnabled()
+  );
+  const stormbreakerSwarm =
+    !req.agentAppMode &&
+    chat.kind !== "division" &&
+    !chat.continuousMode &&
+    (explicitStormbreakerRequest || isStormbreakerAutoEnabled()) &&
+    !isTrivialPrompt(req.userPrompt);
+
   // ── MCP 툴 브리지 ──────────────────────────────────────────
   // Claude Code/Codex 러너에는 요청/에이전트 문맥으로 필요한 MCP 플러그인을 자동 선택한 뒤
   // 런타임별 설정으로 직렬화해 넘긴다. env가 필요한 플러그인은 vault 값이 있을 때만 자동 설치한다.
@@ -881,7 +961,54 @@ export async function runMcpInvocation(
   let mcpRuntimeEnv: Record<string, string> | undefined;
   let mcpAutoSelectionPrompt = "";
   const runtimeCanUseMcp = active.kind === "claude-code" || active.kind === "codex";
-  if (runtimeCanUseMcp) {
+  const agentAppToolGrant = req.agentAppMode ? req.agentAppRuntimeToolGrant : undefined;
+  const agentAppCapabilityRuntimeEligible = req.agentAppMode &&
+    "capabilityRuntimeEligible" in runtimeChoice &&
+    runtimeChoice.capabilityRuntimeEligible === true;
+  if (agentAppToolGrant && !agentAppCapabilityRuntimeEligible) {
+    // Runtime selection can change between Site's JIT preflight and dispatch.
+    // Degrade to the existing stateless/no-tool path; never pass this grant to
+    // Codex, BYOK, Ollama, or another runtime that cannot prove the boundary.
+    agentAppToolGrant.runtimeStatus = "runtime-unavailable";
+  } else if (agentAppToolGrant) {
+    const toolSet = new Set(agentAppToolGrant.mcpAllowedTools);
+    const exactTools = toolSet.size === agentAppToolGrant.mcpAllowedTools.length &&
+      toolSet.has("mcp__brave-search__brave_web_search") &&
+      [...toolSet].every((tool) => /^mcp__brave-search__(?:brave_web_search|brave_local_search)$/.test(tool));
+    const exactCatalog = agentAppToolGrant.availableCatalogIds.length === 1 &&
+      agentAppToolGrant.availableCatalogIds[0] === "brave-search";
+    const exactEnvAliases = Object.keys(agentAppToolGrant.mcpRuntimeEnv).every((key) =>
+      /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/.test(key));
+    let exactConfig = false;
+    try {
+      const stat = fs.lstatSync(agentAppToolGrant.mcpConfigPath);
+      const configText = fs.readFileSync(agentAppToolGrant.mcpConfigPath, "utf8");
+      const parsed = JSON.parse(configText) as { mcpServers?: unknown };
+      const serverKeys = parsed.mcpServers && typeof parsed.mcpServers === "object" && !Array.isArray(parsed.mcpServers)
+        ? Object.keys(parsed.mcpServers)
+        : [];
+      exactConfig = path.isAbsolute(agentAppToolGrant.mcpConfigPath) &&
+        stat.isFile() && !stat.isSymbolicLink() && serverKeys.length === 1 && serverKeys[0] === "brave-search";
+      if (/\bnpx\b|(?:^|["\s])-y(?:["\s,]|$)|@modelcontextprotocol\/server-brave-search/i.test(configText)) exactConfig = false;
+    } catch {
+      exactConfig = false;
+    }
+    if (
+      agentAppToolGrant.schemaVersion !== 1 ||
+      agentAppToolGrant.runtimeStatus !== "prepared" ||
+      !exactTools ||
+      !exactCatalog ||
+      !exactEnvAliases ||
+      !exactConfig
+    ) {
+      throw new Error("Agent App read-only capability grant failed main-process validation.");
+    }
+    agentAppToolGrant.runtimeStatus = "accepted";
+    mcpConfigPath = agentAppToolGrant.mcpConfigPath;
+    mcpAllowedTools = [...agentAppToolGrant.mcpAllowedTools];
+    mcpRuntimeEnv = { ...agentAppToolGrant.mcpRuntimeEnv };
+  }
+  if (runtimeCanUseMcp && !req.agentAppMode) {
     try {
       const selectedContext = await autoSelectMcpTools({
         userPrompt: effectiveUserPrompt,
@@ -959,9 +1086,19 @@ export async function runMcpInvocation(
     }
   }
 
-  const runnerEnv = await buildRunnerEnv(agent, workingFolder ?? undefined);
+  const runnerEnv = req.agentAppMode
+    ? { env: buildAgentAppRunnerEnv(process.env, mcpRuntimeEnv), injectedKeys: [] }
+    : await buildRunnerEnv(agent, workingFolder ?? undefined);
   throwIfInvocationAborted(signal, locale);
-  if (mcpRuntimeEnv) Object.assign(runnerEnv.env, mcpRuntimeEnv);
+  if (mcpRuntimeEnv && !req.agentAppMode) Object.assign(runnerEnv.env, mcpRuntimeEnv);
+  let coreStormbreakerHarnessPromise: ReturnType<typeof stormbreakerHarness> | null = null;
+  const loadCoreStormbreakerHarness = () => {
+    coreStormbreakerHarnessPromise ??= stormbreakerHarness({
+      cwd: resolvedResultFolder,
+      signal,
+    });
+    return coreStormbreakerHarnessPromise;
+  };
 
   // ── Agent Group 오케스트레이션 ───────────────────────────
   // 저장된 그룹은 firm/division보다 상위의 라우팅 묶음이다. 실행 직전에
@@ -975,6 +1112,7 @@ export async function runMcpInvocation(
         locale,
         sink,
         signal,
+        localOnly: req.agentAppMode || req.hubMode === "local-only",
       });
       await runBorrowedTaskForceInvocation({
         req: { ...req, userPrompt: effectiveUserPrompt },
@@ -994,14 +1132,14 @@ export async function runMcpInvocation(
         mcpConfigPath,
         mcpAllowedTools,
         mcpCodexConfigArgs,
+        agentAppMcpRuntimeEnv: mcpRuntimeEnv,
         runnerEnv: runnerEnv.env,
         locale,
         sink,
         signal,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      sink({ kind: "error", error: { code: "agent-group-failed", message: msg } });
+      sink({ kind: "error", error: invocationFailure(req, "agent-group-failed", err) });
     }
     return earlyResult();
   }
@@ -1041,13 +1179,30 @@ export async function runMcpInvocation(
   // 켜져 있으면 목표를 작업 그래프로 분해해 여러 워커가 병렬 협업(emergent A2A). 동시성=사용자 슬라이더.
   // Explicit single borrow also bypasses swarm: its verified Hub user preamble
   // must reach the selected primary runtime unchanged instead of being discarded.
-  if (chat.swarmMode && borrowedAgentSlugs.length === 0 && chat.kind !== "division") {
+  if (
+    !req.agentAppMode &&
+    (chat.swarmMode || stormbreakerSwarm) &&
+    borrowedAgentSlugs.length === 0 &&
+    chat.kind !== "division"
+  ) {
     try {
+      const coreHarness = stormbreakerSwarm
+        ? await loadCoreStormbreakerHarness()
+        : undefined;
+      if (stormbreakerSwarm && !chat.swarmMode) {
+        sink({
+          kind: "tool-use",
+          status: locale === "ko"
+            ? "Stormbreaker · Goal/UltraCode 병렬 작업 분해와 런타임 자동 배정을 시작합니다."
+            : "Stormbreaker · starting Goal/UltraCode parallel decomposition with automatic runtime allocation.",
+        });
+      }
       await runSwarmInvocation({
         req,
         chat,
         orchestratorAgent: agent,
         active,
+        runtimes,
         picked,
         runtimeOverride: runtimeChoice.override,
         workingFolder,
@@ -1058,6 +1213,8 @@ export async function runMcpInvocation(
         locale,
         sink,
         signal,
+        stormbreakerMode: stormbreakerSwarm,
+        stormbreakerHarness: coreHarness,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1090,6 +1247,7 @@ export async function runMcpInvocation(
             mcpConfigPath,
             mcpAllowedTools,
             mcpCodexConfigArgs,
+            agentAppMcpRuntimeEnv: mcpRuntimeEnv,
             runnerEnv: runnerEnv.env,
             locale,
             sink,
@@ -1097,11 +1255,26 @@ export async function runMcpInvocation(
           });
         } catch (err) {
           // 오케스트레이션 실패 → 무한 스피너 방지: 에러 이벤트 emit
-          const msg = err instanceof Error ? err.message : String(err);
-          sink({ kind: "error", error: { code: "firm-failed", message: msg } });
+          sink({ kind: "error", error: invocationFailure(req, "firm-failed", err) });
         }
         return earlyResult();
       }
+    }
+  }
+
+  let coreHarness: Awaited<ReturnType<typeof stormbreakerHarness>> | null = null;
+  if (stormbreakerEngaged) {
+    try {
+      coreHarness = await loadCoreStormbreakerHarness();
+    } catch (err) {
+      sink({
+        kind: "error",
+        error: {
+          code: "stormbreaker-core-harness-unavailable",
+          message: err instanceof Error ? err.message : String(err),
+        },
+      });
+      return earlyResult();
     }
   }
 
@@ -1140,6 +1313,7 @@ export async function runMcpInvocation(
   // 인라인으로 수행(추가 LLM 콜/지연 0). trivial 프롬프트는 주입 자체를 건너뛴다(하드 어서션:
   // 사소한 요청에 질문 0개). 기본 모드는 build-only라 챗에는 꺼져 있다.
   if (
+    !req.agentAppMode &&
     getInterviewMode() === "smart" &&
     chat.kind !== "division" &&
     !isTrivialPrompt(req.userPrompt)
@@ -1188,7 +1362,7 @@ export async function runMcpInvocation(
   // 시스템 프롬프트에 주입한다. 폴더가 없거나 아직 활성 전이면 전역 메모리를 주입.
   // 채팅별 폴더가 없으면 프로젝트의 작업 폴더(folderPath)를 기본 cwd로 사용한다.
   let activePath: string | null = null;
-  if (workingFolder) {
+  if (!req.agentAppMode && workingFolder) {
     try {
       const visit = recordFolderVisit(workingFolder);
       if (visit.activated) activePath = workingFolder;
@@ -1196,46 +1370,52 @@ export async function runMcpInvocation(
       console.error("[architecture] recordFolderVisit failed:", err);
     }
   }
-  if (activePath) refreshCareerGraphInBackground(activePath, sink, locale);
-  try {
-    // `agent` may have changed through auto-routing above. Scope memory to the
-    // actual executing agent so another agent's agent_repo never leaks in.
-    const memoryContext = buildMemoryContext(activePath, agent.id);
-    if (memoryContext) systemPrompt = `${systemPrompt}\n\n${memoryContext}`;
-  } catch (err) {
-    console.error("[architecture] buildMemoryContext failed:", err);
+  if (!req.agentAppMode) {
+    if (activePath) refreshCareerGraphInBackground(activePath, sink, locale);
+    try {
+      // `agent` may have changed through auto-routing above. Scope memory to the
+      // actual executing agent so another agent's agent_repo never leaks in.
+      const memoryContext = buildMemoryContext(activePath, agent.id);
+      if (memoryContext) systemPrompt = `${systemPrompt}\n\n${memoryContext}`;
+    } catch (err) {
+      console.error("[architecture] buildMemoryContext failed:", err);
+    }
   }
   let tasteSnapshot: Awaited<ReturnType<typeof resolveDesktopTasteRuntimeSession>> = null;
-  try {
-    tasteSnapshot = await resolveDesktopTasteRuntimeSession({
-      sessionId: chat.id,
-      installedAgentId: agent.id,
-    });
-  } catch (err) {
-    // A missing/offline/revoked/malformed Taste projection degrades to the
-    // exact base agent and cannot block the invocation.
-    console.error("[architecture] Taste runtime overlay skipped:", err);
+  if (!req.agentAppMode) {
+    try {
+      tasteSnapshot = await resolveDesktopTasteRuntimeSession({
+        sessionId: chat.id,
+        installedAgentId: agent.id,
+      });
+    } catch (err) {
+      // A missing/offline/revoked/malformed Taste projection degrades to the
+      // exact base agent and cannot block the invocation.
+      console.error("[architecture] Taste runtime overlay skipped:", err);
+    }
   }
   const applicableTasteSnapshot = tasteSnapshot && tasteRuntimeOverlayMatchesTask(tasteSnapshot.overlay, effectiveUserPrompt)
     ? tasteSnapshot
     : null;
-  try {
-    const experienceContext = buildExperienceContext({
-      agentId: agent.id,
-      projectId: chat.projectId,
-      projectPath: workingFolder,
-      environment: { platform: process.platform, arch: process.arch, runtimeKind: active.kind },
-      basePackageHash: agent.packageHash ?? null,
-      task: effectiveUserPrompt,
-      reservedApproxTokens: applicableTasteSnapshot?.overlay.estimatedTokens ?? 0,
-    });
-    if (experienceContext.prompt) systemPrompt = `${systemPrompt}\n\n${experienceContext.prompt}`;
-  } catch (err) {
-    // Experience is an optional host-local projection. A damaged/missing
-    // projection can never block the base agent or Memory architecture.
-    console.error("[architecture] buildExperienceContext failed:", err);
+  if (!req.agentAppMode) {
+    try {
+      const experienceContext = buildExperienceContext({
+        agentId: agent.id,
+        projectId: chat.projectId,
+        projectPath: workingFolder,
+        environment: { platform: process.platform, arch: process.arch, runtimeKind: active.kind },
+        basePackageHash: agent.packageHash ?? null,
+        task: effectiveUserPrompt,
+        reservedApproxTokens: applicableTasteSnapshot?.overlay.estimatedTokens ?? 0,
+      });
+      if (experienceContext.prompt) systemPrompt = `${systemPrompt}\n\n${experienceContext.prompt}`;
+    } catch (err) {
+      // Experience is an optional host-local projection. A damaged/missing
+      // projection can never block the base agent or Memory architecture.
+      console.error("[architecture] buildExperienceContext failed:", err);
+    }
   }
-  if (applicableTasteSnapshot) {
+  if (!req.agentAppMode && applicableTasteSnapshot) {
     // Taste stays a separate, lower-authority aesthetic overlay. The exact
     // verified snapshot is frozen for this chat and can change only when a
     // new runtime session starts.
@@ -1249,9 +1429,9 @@ export async function runMcpInvocation(
   }
   // Compact core is always on; the full schema is loaded only for explicit
   // memory tasks. This keeps the recurring contract under ~150 tokens.
-  systemPrompt = `${systemPrompt}\n\n${memoryEmitterPromptFor(effectiveUserPrompt)}`;
+  if (!req.agentAppMode) systemPrompt = `${systemPrompt}\n\n${memoryEmitterPromptFor(effectiveUserPrompt)}`;
   if (mcpAutoSelectionPrompt) systemPrompt = `${systemPrompt}\n\n${mcpAutoSelectionPrompt}`;
-  if (chat.kind === "division" && (req.toolMode || req.hubMode)) {
+  if (!req.agentAppMode && chat.kind === "division" && (req.toolMode || req.hubMode)) {
     const supervisor = assembleSystemPrompt(
       AUTOMATION_SUPERVISOR_SYSTEM_AGENT,
       [effectiveUserPrompt, req.toolMode ?? "", req.hubMode ?? ""].join("\n"),
@@ -1269,24 +1449,22 @@ export async function runMcpInvocation(
   // Stormbreaker Loop — 이제 무조건 주입이 아니라 명시적 개입 조건에서만 켠다(대시보드 토글 기본 OFF).
   // 항상 켜지는 경로: division(백그라운드 자동화 인프라), continuousMode(계속 라이브), 명시 프리픽스
   // (`stormbreaker …` / `hep-network --stormbreaker …` = 컴포저 칩·추천 pipeline 선택).
-  const explicitStormbreakerRequest = /^\s*(?:hep-network\s+--stormbreaker|stormbreaker)\b/i.test(req.userPrompt);
-  const stormbreakerEngaged =
-    chat.kind === "division" ||
-    chat.continuousMode === true ||
-    explicitStormbreakerRequest ||
-    isStormbreakerAutoEnabled();
-  if (stormbreakerEngaged) systemPrompt = `${systemPrompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`;
+  if (stormbreakerEngaged && coreHarness) {
+    systemPrompt = `${systemPrompt}\n\n${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`;
+  }
   // 사용자 채팅에서만 자동화 생성 protocol 주입 (백그라운드 automation 실행 세션은 제외 → 재귀 방지)
-  if (chat.kind !== "division") systemPrompt = `${systemPrompt}\n\n${AUTOMATION_PROTOCOL}`;
+  if (!req.agentAppMode && chat.kind !== "division") systemPrompt = `${systemPrompt}\n\n${AUTOMATION_PROTOCOL}`;
 
-  const history = listChatMessages(chat.id, 80);
+  const history = req.agentAppMode ? [] : listChatMessages(chat.id, 80);
 
   // 사용자 메시지 영구화 + 첫 메시지면 제목 자동 생성
-  appendChatMessage(chat.id, "user", req.userPrompt);
-  if (history.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
+  if (!req.agentAppMode) {
+    appendChatMessage(chat.id, "user", req.userPrompt);
+    if (history.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
+  }
 
   sink({ kind: "thinking", status: tStatus(locale, "thinking", { agent: agent.name }) });
-  if (chat.kind !== "division" && isAutomationSetupRequest(req.userPrompt)) {
+  if (!req.agentAppMode && chat.kind !== "division" && isAutomationSetupRequest(req.userPrompt)) {
     sink({ kind: "partial", text: automationLivePrelude(locale) });
   }
 
@@ -1319,14 +1497,16 @@ export async function runMcpInvocation(
       permission: req.permissions,
       // 세션 resume 키 — CLI 러너가 (chatId, kind)별 세션을 재사용해
       // 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
-      chatId: chat.id,
+      chatId: req.agentAppMode ? `site-agent-app:${req.runId ?? randomUUID()}` : chat.id,
       mcpConfigPath,
       mcpAllowedTools,
       mcpCodexConfigArgs,
       env: runnerEnv.env,
+      untrustedNoTools: req.agentAppMode === true,
+      untrustedAllowedMcpTools: req.agentAppMode ? mcpAllowedTools : undefined,
       // 사용자가 지정한 워킹 폴더(프로젝트)에서 에이전트를 실행 — 빌드/파일 생성이 거기서 일어난다.
       // 활성화(2회 방문) 게이팅과 무관하게, 폴더가 지정돼 있으면 즉시 cwd로 사용한다.
-      cwd: workingFolder ?? undefined,
+      cwd: req.agentAppMode ? undefined : workingFolder ?? undefined,
       locale,
       forceSurface: undefined,
     };
@@ -1360,8 +1540,12 @@ export async function runMcpInvocation(
     };
     // "계속 라이브로" 모드: 채팅에 켜져 있으면 짧은 상한(3턴)에서 멈춰 30분 간격 백그라운드로
     // 넘기지 않고, 같은 채팅에서 라이브 스트리밍을 계속 이어간다(사실상 무제한, 안전 상한만).
-    const continuousMode = chat.kind !== "division" && chat.continuousMode === true;
-    const maxPasses = continuousMode ? CONTINUOUS_MODE_MAX_PASSES : STORMBREAKER_MAX_EXECUTION_PASSES;
+    const continuousMode = !req.agentAppMode && chat.kind !== "division" && chat.continuousMode === true;
+    const maxPasses = req.agentAppMode
+      ? 1
+      : continuousMode
+        ? CONTINUOUS_MODE_MAX_PASSES
+        : STORMBREAKER_MAX_EXECUTION_PASSES;
     let activeRunnerReq = runnerReq;
     let result = await picked.runner(activeRunnerReq, runnerEvents);
     advanceUsageFloor();
@@ -1406,12 +1590,12 @@ export async function runMcpInvocation(
       advanceUsageFloor();
     }
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
-    const stormbreakerContinueRequested = finalContinuation.shouldContinue;
+    const stormbreakerContinueRequested = !req.agentAppMode && finalContinuation.shouldContinue;
     result = { ...result, text: finalContinuation.text };
     // continuousMode는 안전 상한(20,000턴)이 사실상 안 걸리므로 정상적으론 이 분기에 안 들어온다.
     // 혹시라도 상한에 닿았는데 아직 할 일이 있다고 하면(진짜 폭주 등) 작업을 잃지 않도록 기존
     // 백그라운드 30분 자동화로 안전하게 이어받는다.
-    if (stormbreakerContinueRequested && chat.kind !== "division") {
+    if (!req.agentAppMode && stormbreakerContinueRequested && chat.kind !== "division") {
       const marker = `Source chat: ${chat.id}`;
       const existingContinuation = listAutomations().find(
         (automation) => automation.enabled && automation.promptTemplate.includes(marker),
@@ -1466,7 +1650,16 @@ export async function runMcpInvocation(
     // 에이전트가 "## Automation" 블록을 넣었으면 → 현재 chat의 타깃(firm/agent)으로 자동화 등록 + 블록 제거.
     // (백그라운드 automation 실행 세션은 제외 → 자동화가 자동화를 만드는 재귀 방지)
     const automationRegistrations: AutomationRegistrationResult[] = [];
-    if (chat.kind !== "division") {
+    if (req.agentAppMode) {
+      // Treat automation-shaped browser output as untrusted display text. The
+      // parser is side-effect free; only its cleaned text is retained.
+      try {
+        displayText = parseAutomations(displayText).cleanedText;
+      } catch {
+        // Malformed blocks remain ordinary text and never reach registration.
+      }
+      displayText = parseMemoryEvents(displayText).cleanedText;
+    } else if (chat.kind !== "division") {
       try {
         const { automations: autos, cleanedText, errors } = parseAutomations(displayText);
         if (errors.length > 0) {
@@ -1591,55 +1784,59 @@ export async function runMcpInvocation(
     } catch (err) {
       console.error("[surface] parseSurfaces failed:", err);
     }
-    try {
-      const { cleanedText } = curateReply(displayText, {
-        projectPath: activePath,
-        projectId: chat.projectId ?? null,
-        agentId: agent.id,
-        chatId: chat.id,
-        runId: req.runId,
-        cwdAtRequest: workingFolder,
-        experienceIntake: {
-          platform: process.platform,
-          arch: process.arch,
-          runtimeKind: active.kind,
-          basePackageHash: agent.packageHash ?? null,
-          taskHint: effectiveUserPrompt,
-        },
-        // 단일 borrow 실행 — 빌린 에이전트의 agent_repo 배움을 그 전역 둥지로 미러링.
-        borrowedAgentSlugs,
-      });
-      displayText = cleanedText || displayText;
-    } catch (err) {
-      console.error("[architecture] curateReply failed:", err);
+    if (!req.agentAppMode) {
+      try {
+        const { cleanedText } = curateReply(displayText, {
+          projectPath: activePath,
+          projectId: chat.projectId ?? null,
+          agentId: agent.id,
+          chatId: chat.id,
+          runId: req.runId,
+          cwdAtRequest: workingFolder,
+          experienceIntake: {
+            platform: process.platform,
+            arch: process.arch,
+            runtimeKind: active.kind,
+            basePackageHash: agent.packageHash ?? null,
+            taskHint: effectiveUserPrompt,
+          },
+          // 단일 borrow 실행 — 빌린 에이전트의 agent_repo 배움을 그 전역 둥지로 미러링.
+          borrowedAgentSlugs,
+        });
+        displayText = cleanedText || displayText;
+      } catch (err) {
+        console.error("[architecture] curateReply failed:", err);
+      }
     }
 
     // 컴팩션 요약 수집 — Claude Code가 이번 세션에서 컨텍스트를 자동 압축했다면 그 요약을
     // 큐레이터 인테이크(session/hypothesis) 티어로만 흘려보낸다. 심사·승격은 Curator 에이전트 몫.
     // 실패-무해: 트랜스크립트가 없거나(다른 런타임) 요약이 없으면 조용히 0건.
-    try {
-      if (result.sessionId) {
-        harvestCompactionSummaries({
-          sessionId: result.sessionId,
-          cwd: workingFolder,
-          ctx: {
-            projectPath: activePath,
-            projectId: chat.projectId ?? null,
-            agentId: agent.id,
-            chatId: chat.id,
-            cwdAtRequest: workingFolder,
-            experienceIntake: {
-              platform: process.platform,
-              arch: process.arch,
-              runtimeKind: active.kind,
-              basePackageHash: agent.packageHash ?? null,
-              taskHint: effectiveUserPrompt,
+    if (!req.agentAppMode) {
+      try {
+        if (result.sessionId) {
+          harvestCompactionSummaries({
+            sessionId: result.sessionId,
+            cwd: workingFolder,
+            ctx: {
+              projectPath: activePath,
+              projectId: chat.projectId ?? null,
+              agentId: agent.id,
+              chatId: chat.id,
+              cwdAtRequest: workingFolder,
+              experienceIntake: {
+                platform: process.platform,
+                arch: process.arch,
+                runtimeKind: active.kind,
+                basePackageHash: agent.packageHash ?? null,
+                taskHint: effectiveUserPrompt,
+              },
             },
-          },
-        });
+          });
+        }
+      } catch (err) {
+        console.error("[architecture] harvestCompactionSummaries failed:", err);
       }
-    } catch (err) {
-      console.error("[architecture] harvestCompactionSummaries failed:", err);
     }
 
     // App generation from chat is disabled: do not append Apps CTAs or route
@@ -1653,7 +1850,7 @@ export async function runMcpInvocation(
     // 다중 패스(비-continuousMode)면 이전 패스 전문을 접두 — 라이브에서 보이던 본문/도구
     // 앵커 좌표계가 final에서도 유지된다. 단일 패스는 floor가 비어 그대로.
     const displayWithFloor = partialFloor ? `${partialFloor}\n${displayText}` : displayText;
-    appendChatMessage(chat.id, "assistant", displayWithFloor);
+    if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", displayWithFloor);
     // 연속 패스에서 result.tokens는 마지막 패스만 반영 — 라이브 누적 최고치와 큰 쪽을 확정치로.
     sink({ kind: "final", text: displayWithFloor, tokens: Math.max(result.tokens ?? 0, liveUsageHigh) || undefined });
     return {
@@ -1663,8 +1860,7 @@ export async function runMcpInvocation(
       resultFolder: resolvedResultFolder,
     };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    sink({ kind: "error", error: { code: "runner-failed", message: msg } });
+    sink({ kind: "error", error: invocationFailure(req, "runner-failed", err) });
     return earlyResult();
   }
 }

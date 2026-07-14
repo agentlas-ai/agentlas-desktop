@@ -1,11 +1,22 @@
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from "electron";
+import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { SiteActivityEvent } from "../shared/site-studio";
+import type {
+  SiteActivityEvent,
+  SiteAgentAppNativePublishApproval,
+  SiteAgentAppPublishBackendRequest,
+  SiteAgentAppTargetRef,
+  SiteRemoteDeploymentRetention,
+  SiteLlmProvider,
+  SitePublishProvider,
+  SitePublishProviderPage,
+  SiteSurface,
+} from "../shared/site-studio";
 import { clearDetectCache, detectRuntimes, setActiveRuntime } from "./runtime/detect";
 import { agentRunCwd } from "./runtime/exec";
 import { listRuntimeModels } from "./runtime/providers";
@@ -639,6 +650,230 @@ function normalizeLaunchTarget(value: string): Pick<AppFactoryLaunchTargetResult
   }
 }
 
+function isTrustedSiteRendererUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.protocol === "agentlas:" && url.hostname === "app") return true;
+    const developmentUrl = process.env.ELECTRON_START_URL?.trim();
+    if (!developmentUrl) return false;
+    const allowed = new URL(developmentUrl);
+    return (allowed.protocol === "http:" || allowed.protocol === "https:") && url.origin === allowed.origin;
+  } catch {
+    return false;
+  }
+}
+
+/** Fail closed unless publish came from the app window's trusted top frame. */
+export function assertTrustedSitePublishIpcSender(event: IpcMainInvokeEvent): BrowserWindow {
+  const frame = event.senderFrame;
+  if (!frame || frame !== event.sender.mainFrame || !isTrustedSiteRendererUrl(frame.url)) {
+    throw new Error("untrusted-site-publish-ipc-sender");
+  }
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed() || win.webContents !== event.sender) {
+    throw new Error("untrusted-site-publish-ipc-window");
+  }
+  return win;
+}
+
+async function confirmNativeSitePublish(
+  win: BrowserWindow,
+  approval: SiteAgentAppNativePublishApproval,
+): Promise<boolean> {
+  const ko = currentUiLocale().toLowerCase().startsWith("ko");
+  const fullSha256 = /^[a-f0-9]{64}$/;
+  if (
+    !fullSha256.test(approval.artifactDigest) ||
+    !fullSha256.test(approval.intentDigest) ||
+    !approval.providerAccountLabel.trim()
+  ) throw new Error("native-publish-approval-contract-invalid");
+  if (approval.provider === "render") {
+    if (
+      !approval.renderIntent ||
+      approval.providerApiKeyIdentity !== "OS credential vault / secret:site-publish:render:api-key" ||
+      !approval.providerApiKeyFingerprint ||
+      !fullSha256.test(approval.providerApiKeyFingerprint)
+    ) {
+      throw new Error("render-native-approval-contract-missing");
+    }
+    const intent = approval.renderIntent;
+    const detail = ko
+      ? [
+          `프로젝트: ${approval.projectName} (${approval.projectId})`,
+          `앱: ${approval.appName}`,
+          `Artifact SHA-256: ${approval.artifactDigest}`,
+          `배포 intent SHA-256: ${approval.intentDigest}`,
+          "",
+          `호스팅: Render`,
+          `검증된 계정: ${approval.providerAccountLabel}`,
+          `Owner ID: ${intent.ownerId}`,
+          `Provider API key: ${approval.providerApiKeyIdentity}`,
+          `Provider API key fingerprint: sha256:${approval.providerApiKeyFingerprint}`,
+          "",
+          `Repository: ${intent.repositoryUrl}`,
+          `Branch: ${intent.branch}`,
+          `Root directory: ${intent.rootDir ?? "repository root"}`,
+          `Service name: ${intent.serviceName}`,
+          `LLM selector: ${approval.llmProvider}`,
+          "",
+          approval.planWarning,
+          "",
+          "계속하면 위 계정과 repository intent로 공개 Render service만 생성합니다.",
+          "LLM 키와 AGENTLAS_APP_ACCESS_KEY는 읽거나 전송하지 않으며, 생성 뒤 Render에서 직접 설정해야 합니다.",
+        ].join("\n")
+      : [
+          `Project: ${approval.projectName} (${approval.projectId})`,
+          `App: ${approval.appName}`,
+          `Artifact SHA-256: ${approval.artifactDigest}`,
+          `Deployment intent SHA-256: ${approval.intentDigest}`,
+          "",
+          `Hosting: Render`,
+          `Verified account: ${approval.providerAccountLabel}`,
+          `Owner ID: ${intent.ownerId}`,
+          `Provider API key: ${approval.providerApiKeyIdentity}`,
+          `Provider API key fingerprint: sha256:${approval.providerApiKeyFingerprint}`,
+          "",
+          `Repository: ${intent.repositoryUrl}`,
+          `Branch: ${intent.branch}`,
+          `Root directory: ${intent.rootDir ?? "repository root"}`,
+          `Service name: ${intent.serviceName}`,
+          `LLM selector: ${approval.llmProvider}`,
+          "",
+          approval.planWarning,
+          "",
+          "Continuing creates only the public Render service for the exact account and repository intent above.",
+          "Agentlas does not read or transfer the LLM key or AGENTLAS_APP_ACCESS_KEY; configure both manually in Render afterward.",
+        ].join("\n");
+    const result = await dialog.showMessageBox(win, {
+      type: "warning",
+      buttons: ko ? ["취소", "Render service 생성"] : ["Cancel", "Create Render service"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: ko ? "Render service 생성 최종 확인" : "Final Render service creation confirmation",
+      message: ko
+        ? `${approval.providerAccountLabel} 계정에 ${intent.serviceName} service를 생성하시겠습니까?`
+        : `Create ${intent.serviceName} in account ${approval.providerAccountLabel}?`,
+      detail,
+    });
+    return result.response === 1;
+  }
+  if (!approval.appAccessKeyFingerprint || !fullSha256.test(approval.appAccessKeyFingerprint)) {
+    throw new Error("native-publish-app-access-fingerprint-invalid");
+  }
+  const keyIdentity = approval.llmKeyVersion && approval.llmKeyFingerprint
+    ? `${approval.llmKeyIdentity}\n  version: ${approval.llmKeyVersion}\n  fingerprint: sha256:${approval.llmKeyFingerprint}`
+    : `${approval.llmKeyIdentity}\n  version/fingerprint: ${ko ? "기존 키 metadata 없음" : "unavailable for this legacy key"}`;
+  const detail = ko
+    ? [
+        `프로젝트: ${approval.projectName} (${approval.projectId})`,
+        `앱: ${approval.appName}`,
+        `Artifact SHA-256: ${approval.artifactDigest}`,
+        "",
+        `호스팅: ${approval.provider}`,
+        `검증된 계정: ${approval.providerAccountLabel}`,
+        `연결 방식: ${approval.providerConnectionMethod}`,
+        `Scope / Workspace: ${approval.providerAccountScope ?? "개인 기본 계정"}`,
+        `CLI: ${approval.providerCliVersion ?? "version 확인 불가"}`,
+        "",
+        `LLM: ${approval.llmProvider}`,
+        `LLM Keychain 항목:\n${keyIdentity}`,
+        `앱 access passcode fingerprint: sha256:${approval.appAccessKeyFingerprint ?? "확인 불가"}`,
+        `배포 intent SHA-256: ${approval.intentDigest}`,
+        "",
+        approval.planWarning,
+        "",
+        "계속하면 두 secret을 위 계정의 서버 환경변수로 전송하고 공개 URL에 앱을 배포합니다. 추론 API는 별도 app passcode로 보호되며, 실제 secret 값은 이 창이나 renderer에 표시되지 않습니다.",
+      ].join("\n")
+    : [
+        `Project: ${approval.projectName} (${approval.projectId})`,
+        `App: ${approval.appName}`,
+        `Artifact SHA-256: ${approval.artifactDigest}`,
+        "",
+        `Hosting: ${approval.provider}`,
+        `Verified account: ${approval.providerAccountLabel}`,
+        `Connection: ${approval.providerConnectionMethod}`,
+        `Scope / workspace: ${approval.providerAccountScope ?? "personal default"}`,
+        `CLI: ${approval.providerCliVersion ?? "version unavailable"}`,
+        "",
+        `LLM: ${approval.llmProvider}`,
+        `LLM Keychain item:\n${keyIdentity}`,
+        `App access passcode fingerprint: sha256:${approval.appAccessKeyFingerprint ?? "unavailable"}`,
+        `Deployment intent SHA-256: ${approval.intentDigest}`,
+        "",
+        approval.planWarning,
+        "",
+        "Continuing transfers both secrets to the server environment of the account above and deploys the app at a public URL. Its inference API is protected by the separate app passcode. Secret values are not shown here or to the renderer.",
+      ].join("\n");
+  const result = await dialog.showMessageBox(win, {
+    type: "warning",
+    buttons: ko ? ["취소", "Secret 전송 및 배포"] : ["Cancel", "Transfer secrets and deploy"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    title: ko ? "Agent App 공개 배포 최종 확인" : "Final Agent App publish confirmation",
+    message: ko
+      ? `${approval.provider}의 ${approval.providerAccountLabel} 계정으로 배포하시겠습니까?`
+      : `Deploy to ${approval.provider} account ${approval.providerAccountLabel}?`,
+    detail,
+  });
+  return result.response === 1;
+}
+
+async function confirmNativeSiteProjectDeletion(
+  win: BrowserWindow,
+  remotes: SiteRemoteDeploymentRetention[],
+): Promise<boolean> {
+  const ko = currentUiLocale().toLowerCase().startsWith("ko");
+  if (remotes.length === 0) return true;
+  const remoteLines = remotes.flatMap((remote, index) => [
+    `[${index + 1}] ${remote.provider} · ${remote.status}`,
+    `  Remote ID: ${remote.providerProjectId ?? "unavailable"}`,
+    `  Service ID/name: ${remote.providerServiceId ?? "unavailable"} / ${remote.providerServiceName ?? "unavailable"}`,
+    `  Remote URL: ${remote.url ?? "unavailable"}`,
+    `  Provider-side secrets: ${remote.transferredSecrets.length ? remote.transferredSecrets.join(", ") : "none recorded"}`,
+    `  Dashboard: ${remote.dashboardUrl}`,
+  ]);
+  const detail = ko
+    ? [
+        ...remoteLines,
+        "",
+        "이 작업은 로컬 Site 프로젝트, 생성 artifact, AppFactory 등록, 전용 hidden session만 삭제합니다.",
+        "원격 서비스와 secret은 삭제하지 않습니다. Provider dashboard에서 직접 확인하고 삭제해야 합니다.",
+      ].join("\n")
+    : [
+        ...remoteLines,
+        "",
+        "This removes only the local Site project, generated artifact, AppFactory registration, and dedicated hidden sessions.",
+        "It does not delete the remote service or its secrets. Review and delete those manually in the provider dashboard.",
+      ].join("\n");
+  const result = await dialog.showMessageBox(win, {
+    type: "warning",
+    buttons: ko ? ["취소", "원격 유지 · 로컬만 삭제"] : ["Cancel", "Keep remote · delete local only"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    title: ko ? "원격 배포는 삭제되지 않습니다" : "Remote deployment will not be deleted",
+    message: ko
+      ? `${remotes.length}개의 원격 resource를 남기고 로컬 프로젝트만 삭제하시겠습니까?`
+      : `Delete the local project while retaining ${remotes.length} remote resource(s)?`,
+    detail,
+  });
+  return result.response === 1;
+}
+
+function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequest {
+  // Site Agent App authority is minted only by the loopback server in Electron
+  // main. A compromised renderer cannot opt into that mode or inject an MCP
+  // config/opaque-secret alias grant.
+  const {
+    agentAppMode: _agentAppMode,
+    agentAppRuntimeToolGrant: _agentAppRuntimeToolGrant,
+    ...rendererFields
+  } = req;
+  return rendererFields;
+}
+
 export function registerIpcHandlers(): void {
   // ── app ─────────────────────────────────────────────────
   // macOS "시스템 설정 > 언어 및 지역"의 1순위 언어. Electron이 BCP47 형태로 반환.
@@ -679,10 +914,10 @@ export function registerIpcHandlers(): void {
     return refineTrexText(String(payload?.current ?? ""), String(payload?.instruction ?? ""), payload?.context);
   });
 
-  // ── 사이트 디자인 스튜디오 — 디자인 전용(백엔드/실행 없음) ──────────
-  // 화면 = self-contained HTML 1문서. 렌더는 항상 prepareRender(태깅+CSP+오버레이 주입)를
-  // 거쳐 sandbox iframe(srcDoc)으로만 — surface-emitter의 선언형 정책과 별개 트랙이며,
-  // 스크립트 실행은 opaque-origin 격리 샌드박스 내 디자인 프리뷰로 한정된다.
+  // ── Site Studio ───────────────────────────────────────────────
+  // Web/mobile 프리뷰는 prepareRender + opaque-origin iframe에 한정한다.
+  // Agent App 실행/게시만 별도 main-owned Astryx artifact와 capability/consent
+  // 검증을 통과하며, preview HTML이나 renderer 지정 경로를 실행하지 않는다.
   ipcMain.handle("site:listProjects", async () => {
     const { listSiteProjects } = await import("./site/store");
     return listSiteProjects();
@@ -695,17 +930,105 @@ export function registerIpcHandlers(): void {
     const { listSiteConversation } = await import("./site/store");
     return listSiteConversation(String(payload?.projectId ?? ""));
   });
-  ipcMain.handle("site:createProject", async (_e, payload: { name?: string }) => {
+  ipcMain.handle("site:createProject", async (_e, payload: {
+    name?: string;
+    surface?: SiteSurface;
+    agentAppTarget?: SiteAgentAppTargetRef;
+  }) => {
     const { createSiteProject } = await import("./site/store");
-    return createSiteProject(String(payload?.name ?? ""));
+    const surface: SiteSurface =
+      payload?.surface === "mobile" || payload?.surface === "agent-app" ? payload.surface : "web";
+    if (surface === "agent-app") {
+      if (!payload?.agentAppTarget) throw new Error("Agent App에는 에이전트 또는 멀티에이전트 선택이 필요합니다.");
+      const { resolveSiteAgentAppContext } = await import("./site/agent-app");
+      const context = resolveSiteAgentAppContext(payload.agentAppTarget);
+      return createSiteProject({
+        name: String(payload?.name ?? ""),
+        surface,
+        agentAppTarget: context.target,
+        astryxTemplate: context.template,
+        agentAppContract: context.contract,
+        agentAppVisual: context.visual,
+      });
+    }
+    return createSiteProject({ name: String(payload?.name ?? ""), surface });
   });
-  ipcMain.handle("site:deleteProject", async (_e, payload: { projectId?: string }) => {
+  ipcMain.handle("site:deleteProject", async (event, payload: { projectId?: string }) => {
+    const win = assertTrustedSitePublishIpcSender(event);
+    const projectId = String(payload?.projectId ?? "");
+    const { tryAcquireSiteProjectOperation } = await import("./site/operation-lock");
+    const release = tryAcquireSiteProjectOperation(projectId, "delete");
+    if (!release) throw new Error("site-project-busy");
+    try {
+      const { deleteSiteProjectWithAssets } = await import("./site/delete-project");
+      const first = await deleteSiteProjectWithAssets(projectId);
+      if (first.ok || first.remoteDeploymentsRetained.length === 0) return first;
+      const acknowledged = await confirmNativeSiteProjectDeletion(win, first.remoteDeploymentsRetained);
+      if (!acknowledged) return first;
+      return deleteSiteProjectWithAssets(projectId, { acknowledgeRemoteRetained: true });
+    } finally {
+      release();
+    }
+  });
+  ipcMain.handle("site:launchAgentApp", async (_e, payload: { projectId?: string }) => {
     const projectId = String(payload?.projectId ?? "");
     const { assertSiteProjectIdle } = await import("./site/operation-lock");
     assertSiteProjectIdle(projectId);
-    const { deleteSiteProject } = await import("./site/store");
-    deleteSiteProject(projectId);
-    return { ok: true };
+    const { launchSiteAgentApp } = await import("./site/agent-app-runtime");
+    return launchSiteAgentApp(projectId);
+  });
+  ipcMain.handle("site:stopAgentApp", async (_e, payload: { projectId?: string }) => {
+    const { stopSiteAgentApp } = await import("./site/agent-app-runtime");
+    return stopSiteAgentApp(String(payload?.projectId ?? ""));
+  });
+  ipcMain.handle("site:agentAppRuntimeStatus", async (_e, payload: { projectId?: string }) => {
+    const { siteAgentAppRuntimeStatus } = await import("./site/agent-app-runtime");
+    return siteAgentAppRuntimeStatus(String(payload?.projectId ?? ""));
+  });
+  ipcMain.handle("site:agentAppThumbnail", async (_e, payload: { projectId?: string }) => {
+    const { readSiteAgentAppThumbnail } = await import("./site/agent-app-thumbnail");
+    return readSiteAgentAppThumbnail(String(payload?.projectId ?? ""));
+  });
+  ipcMain.handle("site:listPublishProviderStatuses", async () => {
+    const { listSitePublishProviderStatuses } = await import("./site/agent-app-publish");
+    return listSitePublishProviderStatuses();
+  });
+  ipcMain.handle("site:savePublishProviderToken", async (_e, payload: { provider?: SitePublishProvider; token?: string }) => {
+    const { saveSitePublishProviderToken } = await import("./site/agent-app-publish");
+    return saveSitePublishProviderToken(payload?.provider as SitePublishProvider, String(payload?.token ?? ""));
+  });
+  ipcMain.handle("site:removePublishProviderToken", async (_e, payload: { provider?: SitePublishProvider }) => {
+    const { removeSitePublishProviderToken } = await import("./site/agent-app-publish");
+    return removeSitePublishProviderToken(payload?.provider as SitePublishProvider);
+  });
+  ipcMain.handle("site:openPublishProviderPage", async (_e, payload: {
+    provider?: SitePublishProvider;
+    page?: SitePublishProviderPage;
+  }) => {
+    const { openSitePublishProviderPage } = await import("./site/agent-app-publish");
+    return openSitePublishProviderPage(
+      payload?.provider as SitePublishProvider,
+      payload?.page as SitePublishProviderPage,
+    );
+  });
+  ipcMain.handle("site:connectPublishProvider", async (_e, payload: { provider?: SitePublishProvider }) => {
+    const { connectSiteAgentAppPublishProvider } = await import("./site/agent-app-publish");
+    return connectSiteAgentAppPublishProvider(payload?.provider as SitePublishProvider);
+  });
+  ipcMain.handle("site:publishAgentApp", async (event, payload: SiteAgentAppPublishBackendRequest) => {
+    const win = assertTrustedSitePublishIpcSender(event);
+    const projectId = String(payload?.projectId ?? "");
+    const { tryAcquireSiteProjectOperation } = await import("./site/operation-lock");
+    const release = tryAcquireSiteProjectOperation(projectId, "publish");
+    if (!release) throw new Error("site-project-busy");
+    try {
+      const { publishSiteAgentApp } = await import("./site/agent-app-publish");
+      return await publishSiteAgentApp(payload, {
+        confirmNativeApproval: (approval) => confirmNativeSitePublish(win, approval),
+      });
+    } finally {
+      release();
+    }
   });
   ipcMain.handle(
     "site:generateScreen",
@@ -731,7 +1054,13 @@ export function registerIpcHandlers(): void {
         const brief = String(payload?.brief ?? "");
         const locale = payload?.locale === "en" ? ("en" as const) : ("ko" as const);
         const variants = Math.max(1, Math.min(3, Number(payload?.variants ?? 1)));
-        getSiteProject(projectId); // 존재 검증
+        const project = getSiteProject(projectId); // 존재 검증 + main-owned surface/target
+        let agentAppContext = null;
+        if (project.surface === "agent-app") {
+          if (!project.agentAppTarget) throw new Error("Agent App target is missing. Choose the agent again.");
+          const { siteAgentAppContextFromProject } = await import("./site/agent-app");
+          agentAppContext = siteAgentAppContextFromProject(project);
+        }
         const userEntry = appendSiteConversation({
           projectId,
           role: "user",
@@ -767,6 +1096,8 @@ export function registerIpcHandlers(): void {
               projectId,
               brief,
               baseHtml,
+              surface: project.surface,
+              agentAppContext,
               locale,
               styleHint:
                 [payload?.styleHint, variants > 1 ? `Variant ${labels[i]}: take a distinctly different visual direction from the other variants.` : null]
@@ -811,7 +1142,18 @@ export function registerIpcHandlers(): void {
           .join("\n\n");
         const assistantEntry = appendSiteConversation({ projectId, role: "assistant", text: feedback });
         emit({ type: "message", projectId, runId, entry: assistantEntry });
-        return { ok: true, screens, engine: okRuns[0].engine, feedback };
+        let agentApp;
+        let agentAppReason: string | undefined;
+        if (project.surface === "agent-app") {
+          status(locale === "ko" ? "실행 가능한 Astryx React 앱을 만드는 중…" : "Scaffolding the runnable Astryx React app…");
+          try {
+            const { scaffoldSiteAgentApp } = await import("./site/agent-app-scaffold");
+            agentApp = await scaffoldSiteAgentApp(projectId, screens[0].id);
+          } catch (error) {
+            agentAppReason = error instanceof Error ? error.message : String(error);
+          }
+        }
+        return { ok: true, screens, engine: okRuns[0].engine, feedback, agentApp, agentAppReason };
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         try {
@@ -852,10 +1194,17 @@ export function registerIpcHandlers(): void {
           };
         }
         const { editSiteScreen } = await import("./site/generate");
-        const { appendSiteConversation, readSiteScreenHtml, updateSiteScreenHtml } = await import("./site/store");
+        const { appendSiteConversation, getSiteProject, readSiteScreenHtml, updateSiteScreenHtml } = await import("./site/store");
         const screenId = String(payload?.screenId ?? "");
         const locale = payload?.locale === "en" ? "en" : "ko";
         const instruction = String(payload?.instruction ?? "");
+        const project = getSiteProject(projectId);
+        let agentAppContext = null;
+        if (project.surface === "agent-app") {
+          if (!project.agentAppTarget) throw new Error("Agent App 대상이 없습니다. 다시 선택해 주세요.");
+          const { siteAgentAppContextFromProject } = await import("./site/agent-app");
+          agentAppContext = siteAgentAppContextFromProject(project);
+        }
         const sourceHtml = readSiteScreenHtml(projectId, screenId);
         const userEntry = appendSiteConversation({
           projectId,
@@ -878,6 +1227,7 @@ export function registerIpcHandlers(): void {
           sourceHtml,
           instruction,
           selectionId: payload?.selectionId ? String(payload.selectionId) : null,
+          agentAppContext,
           locale,
           activity: {
             onStatus: status,
@@ -908,7 +1258,18 @@ export function registerIpcHandlers(): void {
               : "I applied the request across the current screen and rechecked the render contract.");
         const assistantEntry = appendSiteConversation({ projectId, role: "assistant", text: feedback });
         emit({ type: "message", projectId, runId, entry: assistantEntry });
-        return { ok: true, screen, engine: result.engine, mode: result.mode, feedback };
+        let agentApp;
+        let agentAppReason: string | undefined;
+        if (project.surface === "agent-app") {
+          status(locale === "ko" ? "Astryx React 앱 계약을 다시 동기화하는 중…" : "Synchronizing the Astryx React app contract…");
+          try {
+            const { scaffoldSiteAgentApp } = await import("./site/agent-app-scaffold");
+            agentApp = await scaffoldSiteAgentApp(projectId, screen.id);
+          } catch (error) {
+            agentAppReason = error instanceof Error ? error.message : String(error);
+          }
+        }
+        return { ok: true, screen, engine: result.engine, mode: result.mode, feedback, agentApp, agentAppReason };
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         try {
@@ -1403,13 +1764,23 @@ export function registerIpcHandlers(): void {
   );
 
   // ── secrets (macOS Keychain) ────────────────────────────
-  ipcMain.handle("secrets:saveApiKey", (_e, backend: RuntimeBackend, key: string) =>
-    saveApiKey(backend, key),
-  );
+  ipcMain.handle("secrets:saveApiKey", async (_e, backend: RuntimeBackend, key: string) => {
+    const { isSitePublishLlmCredentialLocked } = await import("./site/agent-app-publish");
+    if (
+      (backend === "openai" || backend === "anthropic" || backend === "google") &&
+      isSitePublishLlmCredentialLocked(backend as SiteLlmProvider)
+    ) throw new Error("이 LLM credential은 native 게시 승인 또는 배포 중에는 변경할 수 없습니다.");
+    return saveApiKey(backend, key);
+  });
   ipcMain.handle("secrets:hasApiKey", (_e, backend: RuntimeBackend) => hasApiKey(backend));
-  ipcMain.handle("secrets:deleteApiKey", (_e, backend: RuntimeBackend) =>
-    deleteApiKey(backend),
-  );
+  ipcMain.handle("secrets:deleteApiKey", async (_e, backend: RuntimeBackend) => {
+    const { isSitePublishLlmCredentialLocked } = await import("./site/agent-app-publish");
+    if (
+      (backend === "openai" || backend === "anthropic" || backend === "google") &&
+      isSitePublishLlmCredentialLocked(backend as SiteLlmProvider)
+    ) throw new Error("이 LLM credential은 native 게시 승인 또는 배포 중에는 변경할 수 없습니다.");
+    return deleteApiKey(backend);
+  });
   
   // ── custom backend config ───────────────────────────────
   ipcMain.handle("config:getCustomBaseUrl", () => {
@@ -2361,8 +2732,8 @@ export function registerIpcHandlers(): void {
       }
     }
   });
-  ipcMain.handle("invoke:run", (_event, req: McpInvocationRequest) => invocationService.start(req));
-  ipcMain.handle("invoke:steer", (_event, req: McpInvocationRequest) => invocationService.steer(req));
+  ipcMain.handle("invoke:run", (_event, req: McpInvocationRequest) => invocationService.start(rendererInvocationRequest(req)));
+  ipcMain.handle("invoke:steer", (_event, req: McpInvocationRequest) => invocationService.steer(rendererInvocationRequest(req)));
   ipcMain.handle("invoke:cancel", (_event, runId: string) => invocationService.cancel(runId));
   ipcMain.handle("invoke:activeChats", () => invocationService.activeChatIds());
   ipcMain.handle("invoke:attach", (_event, chatId: string) => invocationService.attach(chatId));

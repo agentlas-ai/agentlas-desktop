@@ -43,7 +43,18 @@ function prepareContext(
   });
   if (digest) events.onStatus(tStatus(req.locale, "compacted", { n: droppedCount }));
   const baseSystem = digest ? `${req.systemPrompt}\n\n${digest}` : req.systemPrompt;
-  return { model, recent, system: wrapSystemPrompt(baseSystem, req.locale, req.permission, req.userPrompt, req.forceSurface) };
+  return {
+    model,
+    recent,
+    system: wrapSystemPrompt(
+      baseSystem,
+      req.locale,
+      req.permission,
+      req.userPrompt,
+      req.forceSurface,
+      req.untrustedNoTools,
+    ),
+  };
 }
 
 // ── SSE 라인 파서 (3개 API 공통) ──────────────────────────

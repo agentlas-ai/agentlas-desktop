@@ -2,6 +2,7 @@
 // 사용자의 Claude Pro/Max 구독으로 돌아간다 (PRD §3.1 6-A).
 //
 // 호출 형식: claude -p "<user prompt>" --append-system-prompt-file <system>
+// Agent App 첫 턴은 --system-prompt-file로 Claude의 호스트 동적 프롬프트를 완전 대체한다.
 // 첫 턴은 full-context로 시작하고, 이후 턴은 Claude Code session_id로 resume한다.
 import path from "node:path";
 import os from "node:os";
@@ -13,6 +14,7 @@ import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
+import { createUntrustedRuntimeFailure } from "./untrusted-error";
 import {
   clearRuntimeSession,
   getRuntimeSession,
@@ -177,7 +179,7 @@ function systemFingerprint(req: RunnerRequest): string {
     .digest("hex");
 }
 
-export const runClaudeCode: Runner = async (
+const runClaudeCodeInternal: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
@@ -189,9 +191,17 @@ export const runClaudeCode: Runner = async (
   const stagedImages = await stageCliImageAttachments(req);
   const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
 
-  const systemPrompt = wrapSystemPrompt(runReq.systemPrompt, runReq.locale, runReq.permission, runReq.userPrompt, runReq.forceSurface);
-  const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
-  const savedSession = runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
+  const systemPrompt = wrapSystemPrompt(
+    runReq.systemPrompt,
+    runReq.locale,
+    runReq.permission,
+    runReq.userPrompt,
+    runReq.forceSurface,
+    runReq.untrustedNoTools,
+    runReq.untrustedAllowedMcpTools,
+  );
+  const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq) : null;
+  const savedSession = !runReq.untrustedNoTools && runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
   const storedSessionId =
     savedSession && fingerprint && savedSession.fingerprint === fingerprint
       ? savedSession.sessionId
@@ -199,7 +209,7 @@ export const runClaudeCode: Runner = async (
   if (runReq.chatId && savedSession && fingerprint && savedSession.fingerprint !== fingerprint) {
     clearRuntimeSession(runReq.chatId, KIND);
   }
-  const resumeSessionId = runReq.runtimeSessionId ?? storedSessionId;
+  const resumeSessionId = runReq.untrustedNoTools ? null : (runReq.runtimeSessionId ?? storedSessionId);
   const flatUser = resumeSessionId ? runReq.userPrompt : flattenHistory(runReq);
 
   if (stagedImages.images.length > 0) {
@@ -234,15 +244,49 @@ export const runClaudeCode: Runner = async (
 
   // MCP 서버 구성 주입 — mcp/client.ts가 설치·활성 서버를 .mcp.json으로 직렬화해 경로를 넘긴다.
   // 이게 있어야 에이전트가 브라우저(Playwright) 등 실제 MCP 툴을 호출한다. (사용자 config와 병합)
-  const mcpArgs = req.mcpConfigPath ? ["--mcp-config", req.mcpConfigPath] : [];
+  const untrustedMcpTools = runReq.untrustedNoTools
+    ? (req.untrustedAllowedMcpTools ?? []).filter((tool) =>
+        /^mcp__[a-z0-9_-]+__(?:brave_web_search|brave_local_search)$/.test(tool))
+    : [];
+  const hasExactUntrustedMcpGrant = Boolean(
+    runReq.untrustedNoTools &&
+    req.mcpConfigPath &&
+    untrustedMcpTools.length > 0 &&
+    req.mcpAllowedTools?.length === untrustedMcpTools.length &&
+    req.mcpAllowedTools.every((tool) => untrustedMcpTools.includes(tool)),
+  );
+  const mcpArgs = req.mcpConfigPath && (!runReq.untrustedNoTools || hasExactUntrustedMcpGrant)
+    ? ["--mcp-config", req.mcpConfigPath]
+    : [];
   // write/full 권한이면 헤드리스에서 권한 프롬프트로 막히지 않도록 MCP 툴을 미리 허용.
   const allowedToolArgs =
     req.mcpConfigPath &&
-    req.mcpAllowedTools &&
-    req.mcpAllowedTools.length > 0 &&
-    (req.permission === "write" || req.permission === "full")
-      ? ["--allowedTools", req.mcpAllowedTools.join(",")]
+    ((hasExactUntrustedMcpGrant) || (
+      !runReq.untrustedNoTools &&
+      req.mcpAllowedTools &&
+      req.mcpAllowedTools.length > 0 &&
+      (req.permission === "write" || req.permission === "full")
+    ))
+      ? ["--allowedTools", (hasExactUntrustedMcpGrant ? untrustedMcpTools : req.mcpAllowedTools!).join(",")]
       : [];
+  const noToolsArgs = runReq.untrustedNoTools
+    ? [
+        "--safe-mode",
+        "--disable-slash-commands",
+        "--no-chrome",
+        "--no-session-persistence",
+        "--strict-mcp-config",
+        "--tools",
+        "",
+      ]
+    : [];
+  // Claude's default first-turn prompt contains dynamic machine context such
+  // as cwd, environment metadata, memory locations, and git state. Appending
+  // cannot remove it, so browser-originated runs replace it outright. Trusted
+  // Desktop runs retain the existing append behavior.
+  const systemPromptFileFlag = runReq.untrustedNoTools
+    ? "--system-prompt-file"
+    : "--append-system-prompt-file";
 
   // 시스템 프롬프트(Agentlas 헤더+스킬+프로토콜만 ~24KB)는 argv가 아니라 파일로 전달한다.
   // Windows에서 claude는 `.cmd` 심 → cmd.exe로 실행되고 커맨드라인은 ~8191자 한계라,
@@ -276,12 +320,13 @@ export const runClaudeCode: Runner = async (
           ...modelArgs,
           ...effortArgs,
           ...permArgs,
+          ...noToolsArgs,
           ...mcpArgs,
           ...allowedToolArgs,
         ]
       : [
           "-p",
-          "--append-system-prompt-file",
+          systemPromptFileFlag,
           sysPromptFile,
           "--output-format",
           "stream-json",
@@ -290,6 +335,7 @@ export const runClaudeCode: Runner = async (
           ...modelArgs,
           ...effortArgs,
           ...permArgs,
+          ...noToolsArgs,
           ...mcpArgs,
           ...allowedToolArgs,
         ];
@@ -583,7 +629,7 @@ export const runClaudeCode: Runner = async (
         // 델타 스트리밍만 포기하고 채팅 자체는 살린다(전역 1회 학습).
         if (includePartialMessagesSupported && /include-partial-messages/i.test(stderr)) {
           includePartialMessagesSupported = false;
-          void runClaudeCode(req, events).then(resolve, reject);
+          void runClaudeCodeInternal(req, events).then(resolve, reject);
           return;
         }
         // Build continuation recovery is Main-owned and can change the exact
@@ -601,11 +647,22 @@ export const runClaudeCode: Runner = async (
         if (resumeSessionId) {
           // 저장된 CLI 세션이 만료/손상되면 같은 턴을 full-context로 즉시 복구한다.
           // Build는 req.history를 갖고 있고, Chat은 DB history를 갖고 있으므로 문맥은 유지된다.
-          void runClaudeCode({ ...req, runtimeSessionId: undefined }, events).then(resolve, reject);
+          void runClaudeCodeInternal({ ...req, runtimeSessionId: undefined }, events).then(resolve, reject);
           return;
         }
         reject(new Error(`claude CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));
       }
     });
   });
+};
+
+export const runClaudeCode: Runner = async (req, events) => {
+  try {
+    return await runClaudeCodeInternal(req, events);
+  } catch (error) {
+    if (!req.untrustedNoTools) throw error;
+    // Never propagate the raw CLI error. It may contain stderr plus the
+    // temporary system-prompt/MCP config path, cwd, or secret-bearing env data.
+    throw createUntrustedRuntimeFailure();
+  }
 };

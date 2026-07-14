@@ -1003,8 +1003,27 @@ function setupMockAgentlasBridge(options) {
           window.setTimeout(() => finish(`QA final ${n}`), 48);
         } else if (!options || !options.slowInvoke) {
           const finalDelay = options?.visibleProgressInvoke ? 1400 : 180;
-          window.setTimeout(() => emit(`invoke:${runId}`, { kind: "thinking", status: "Agentlas orchestrator started" }), 20);
-          window.setTimeout(() => emit(`invoke:${runId}`, { kind: "tool-use", status: "Hub 에이전트 빌리는 중: qa-agent" }), 70);
+          const stormbreaker = /^stormbreaker\b/i.test(String(payload?.userPrompt || "").trim());
+          if (stormbreaker) {
+            const storm = (status, phase, done = false) => emit(`invoke:${runId}`, {
+              kind: "thinking",
+              status,
+              agentId: "stormbreaker-supervisor",
+              agentName: "Stormbreaker",
+              role: "Goal · UltraCode",
+              phase,
+              done,
+            });
+            window.setTimeout(() => storm("Stormbreaker · 목표와 완료 조건을 잠그고 실행 범위를 정리합니다.", "plan"), 20);
+            window.setTimeout(() => storm("Stormbreaker · 부모 플래너가 목표를 독립 작업으로 나누고 런타임·모델·effort를 선택합니다.", "plan"), 90);
+            window.setTimeout(() => storm("Stormbreaker · 코드 검증에 Codex · gpt-5.6-luna · effort high를 배정했습니다.", "delegate"), 170);
+            window.setTimeout(() => storm("Stormbreaker · UX 검증에 Claude Code · claude-sonnet-4-6 · effort medium을 배정했습니다.", "delegate"), 250);
+            window.setTimeout(() => storm("Stormbreaker · 작업 증거를 서로 대조하고 최종 완료 게이트를 판정합니다.", "synthesize"), 430);
+            window.setTimeout(() => storm("Stormbreaker · 최종 게이트 판정과 결과 종합을 마쳤습니다.", "synthesize", true), 900);
+          } else {
+            window.setTimeout(() => emit(`invoke:${runId}`, { kind: "thinking", status: "Agentlas orchestrator started" }), 20);
+            window.setTimeout(() => emit(`invoke:${runId}`, { kind: "tool-use", status: "Hub 에이전트 빌리는 중: qa-agent" }), 70);
+          }
           window.setTimeout(() => finish("QA final"), finalDelay);
         }
         return { runId };

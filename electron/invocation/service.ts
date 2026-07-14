@@ -6,6 +6,7 @@ import {
 } from "../runtime/invocation-lifecycle";
 import { runMcpInvocation } from "../mcp/client";
 import { pickLocale } from "../runtime/status-i18n";
+import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
 import {
   getInvocationRunReceipt,
   getLatestInvocationRunReceipt,
@@ -135,7 +136,7 @@ class InvocationService {
     void runMcpInvocation(
       runReq,
       (rawEvent) => {
-        const event: McpInvocationEvent =
+        const boundedEvent: McpInvocationEvent =
           rawEvent.kind === "partial" &&
           typeof rawEvent.text === "string" &&
           rawEvent.text.length > MAX_PARTIAL_CHARS
@@ -148,6 +149,14 @@ class InvocationService {
                     : "\n\n[Output truncated — runaway output memory guard]"),
               }
             : rawEvent;
+        // This service is the last Main-process boundary before Desktop and
+        // the Site loopback runtime observe invocation events. Never publish or
+        // durably record an Agent App error supplied by a CLI/orchestrator: it
+        // can contain stderr, cwd, executable/config paths, or env material.
+        const event: McpInvocationEvent =
+          runReq.agentAppMode && boundedEvent.kind === "error"
+            ? { ...boundedEvent, error: untrustedRuntimeFailurePayload() }
+            : boundedEvent;
         const attributedAgentId = event.runtimeAgentId ?? event.agentId;
         if (attributedAgentId) record.actualAgentId = attributedAgentId;
 
@@ -194,7 +203,12 @@ class InvocationService {
         this.publishEvent({ runId, chatId: runReq.chatId, event: wireEvent });
 
         if (event.kind === "final" || event.kind === "error") {
-          if (event.kind === "error" && controller.signal.aborted && record.partialText.trim()) {
+          if (
+            !runReq.agentAppMode &&
+            event.kind === "error" &&
+            controller.signal.aborted &&
+            record.partialText.trim()
+          ) {
             try {
               appendChatMessage(runReq.chatId, "assistant", record.partialText);
             } catch {
@@ -239,7 +253,11 @@ class InvocationService {
         });
       })
       .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
+        const rawMessage = error instanceof Error ? error.message : String(error);
+        const safeFailure = runReq.agentAppMode
+          ? untrustedRuntimeFailurePayload()
+          : { code: controller.signal.aborted ? "cancelled" : "invoke-threw", message: rawMessage };
+        const message = safeFailure.message;
         tryRecordRunEvent({
           runId,
           kind: "invoke_threw",
@@ -257,7 +275,7 @@ class InvocationService {
         });
         if (!terminalObserved) {
           terminalObserved = true;
-          if (controller.signal.aborted && record.partialText.trim()) {
+          if (!runReq.agentAppMode && controller.signal.aborted && record.partialText.trim()) {
             try {
               appendChatMessage(runReq.chatId, "assistant", record.partialText);
             } catch {
@@ -267,10 +285,7 @@ class InvocationService {
           const event: McpInvocationEvent = {
             kind: "error",
             runtimeAgentId: record.actualAgentId,
-            error: {
-              code: controller.signal.aborted ? "cancelled" : "invoke-threw",
-              message,
-            },
+            error: safeFailure,
           };
           record.events.push(event);
           recordMcpInvocationEvent(runId, runReq, event);

@@ -25,10 +25,12 @@ async function main() {
   assert.match(source, /redactEventValue/);
   assert.equal((source.match(/\.\.\.taskForceRunnerBase\(p\)/g) ?? []).length, 2);
   assert.equal((source.match(/\.\.\.runnerBase/g) ?? []).length, 1);
-  assert.match(source, /mcpConfigPath: toolsAllowed \? p\.mcpConfigPath : undefined/);
-  assert.match(source, /mcpAllowedTools: toolsAllowed \? p\.mcpAllowedTools : undefined/);
+  assert.match(source, /mcpConfigPath: agentAppAllowedTools \? p\.mcpConfigPath : toolsAllowed \? p\.mcpConfigPath : undefined/);
+  assert.match(source, /mcpAllowedTools: agentAppAllowedTools \?\? \(toolsAllowed \? p\.mcpAllowedTools : undefined\)/);
   assert.match(source, /mcpCodexConfigArgs: toolsAllowed \? p\.mcpCodexConfigArgs : undefined/);
-  assert.match(source, /env: toolsAllowed \? p\.runnerEnv : undefined/);
+  assert.match(source, /env: p\.req\.agentAppMode[\s\S]*buildAgentAppRunnerEnv\(p\.runnerEnv \?\? process\.env, p\.agentAppMcpRuntimeEnv\)[\s\S]*toolsAllowed[\s\S]*p\.runnerEnv/);
+  assert.match(source, /untrustedNoTools: p\.req\.agentAppMode === true/);
+  assert.match(source, /untrustedAllowedMcpTools: agentAppAllowedTools/);
 
   const redacted = mod.redactSensitiveText([
     "api_key=sk-test_123456789012345678901234",

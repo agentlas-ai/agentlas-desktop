@@ -135,7 +135,14 @@ async function getBin(): Promise<string | null> {
 }
 
 function buildPrompt(req: RunnerRequest): string {
-  const sys = wrapSystemPrompt(req.systemPrompt, req.locale, req.permission, req.userPrompt, req.forceSurface);
+  const sys = wrapSystemPrompt(
+    req.systemPrompt,
+    req.locale,
+    req.permission,
+    req.userPrompt,
+    req.forceSurface,
+    req.untrustedNoTools,
+  );
   const user = tStatus(req.locale, "speakerUser");
   const assistant = tStatus(req.locale, "speakerAssistant");
   const parts: string[] = [`[SYSTEM]\n${sys}`, ""];
@@ -180,6 +187,13 @@ type GrokEvent = {
 };
 
 export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
+  if (req.untrustedNoTools) {
+    throw new Error(
+      req.locale === "ko"
+        ? "Grok CLI는 대화 기록을 로컬에 자동 저장하므로 Agent App의 무상태 격리 모드에서 사용할 수 없습니다. Claude Code, Ollama 또는 API 런타임을 선택하세요."
+        : "Grok CLI automatically persists conversation history, so it cannot be used for Agent App's stateless isolation. Select Claude Code, Ollama, or an API runtime.",
+    );
+  }
   const bin = await getBin();
   if (!bin) throw new Error(tStatus(req.locale, "errCliMissingGrok"));
 
@@ -200,8 +214,8 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
   const args = ["--prompt-file", promptFile, "--cwd", cwd, "--output-format", "streaming-json", "--no-subagents"];
   if (req.model) args.push("-m", req.model); // grok --help 확인: -m, --model <model>
   if (req.effort) args.push("--effort", req.effort);
-  if (req.permission === "full") args.push("--permission-mode", "bypassPermissions");
-  else if (req.permission === "write") args.push("--permission-mode", "acceptEdits");
+  if (!req.untrustedNoTools && req.permission === "full") args.push("--permission-mode", "bypassPermissions");
+  else if (!req.untrustedNoTools && req.permission === "write") args.push("--permission-mode", "acceptEdits");
 
   const truncate = (s: string, max = 12000): string => (s.length > max ? `${s.slice(0, max)}…` : s);
   const stringify = (v: unknown): string => {

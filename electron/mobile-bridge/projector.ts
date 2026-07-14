@@ -6,7 +6,7 @@ import {
   listAutomations,
   listRunHistory,
 } from "../store/automations";
-import { listChatMessages, listRecentChats } from "../store/chats";
+import { getChatWorkingFolder, listChatMessages, listRecentChats } from "../store/chats";
 import { listFirms } from "../store/firms";
 import { listProjects } from "../store/projects";
 import { listPendingConfirmations } from "../confirm";
@@ -76,6 +76,14 @@ function optionalDisplayText(
   return typeof value === "string" ? displayText(value, maxBytes) : null;
 }
 
+function workingFolderName(chatId: string): string | null {
+  const folder = getChatWorkingFolder(chatId);
+  if (!folder) return null;
+  const parts = folder.split(/[\\/]+/).filter(Boolean);
+  const name = parts.at(-1);
+  return name ? displayText(name, 512) : null;
+}
+
 function platform(): MobileBridgeHostDto["platform"] {
   if (process.platform === "darwin") return "macos";
   if (process.platform === "win32") return "windows";
@@ -98,6 +106,11 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
       "chats",
       "chat-stream",
       "steering",
+      "composer-modes",
+      "attachments",
+      "chat-runtime-selection",
+      "hub-borrow",
+      "route-preview",
       "confirmations",
       "browser-approvals",
       "automations",
@@ -214,6 +227,7 @@ function projectsDto(): MobileBridgeProjectDto[] {
     name: displayText(project.name, 512),
     description: optionalDisplayText(project.description, 2_048),
     defaultAgentId: project.defaultAgentId,
+    hasWorkingFolder: Boolean(project.folderPath),
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
     // DESKTOP_MOBILE_BRIDGE: contextNote and folderPath intentionally omitted.
@@ -228,6 +242,7 @@ export function projectMobileBridgeChat(
   return {
     id: chat.id,
     projectId: chat.projectId,
+    workingFolderName: workingFolderName(chat.id),
     firmId: chat.firmId,
     agentGroupId: chat.agentGroupId,
     agentId: chat.agentId,
@@ -383,6 +398,15 @@ export function projectMobileBridgeRuntimes(
     active: runtime.active,
     model: runtime.model ?? null,
     effort: runtime.effort ?? null,
+    efforts: (runtime.efforts ?? []).slice(0, 20).map((effort) => ({
+      id: displayText(effort.id, 160),
+      label: displayText(effort.label, 256),
+    })),
+    availableModels: (runtime.availableModels ?? [])
+      .filter((model): model is string => typeof model === "string")
+      .slice(0, 100)
+      .map((model) => displayText(model, 512)),
+    longContextEnabled: runtime.longContextEnabled === true,
     // DESKTOP_MOBILE_BRIDGE: source may be an absolute CLI path or provider
     // locator and is intentionally omitted.
   }));

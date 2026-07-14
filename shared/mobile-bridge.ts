@@ -9,7 +9,10 @@
  */
 
 export const MOBILE_BRIDGE_PROTOCOL_VERSION = 1 as const;
-export const MOBILE_BRIDGE_MAX_MESSAGE_BYTES = 1024 * 1024;
+// Authenticated local-network frames may carry up to four Desktop-compatible
+// image attachments (5 MiB each, base64 encoded). Metadata snapshots remain
+// separately capped by the projector's much smaller safe-payload budget.
+export const MOBILE_BRIDGE_MAX_MESSAGE_BYTES = 30 * 1024 * 1024;
 export const MOBILE_BRIDGE_PAIR_EXCHANGE_PATH = "/v1/mobile/pair/exchange";
 
 export type MobileBridgeJsonPrimitive = string | number | boolean | null;
@@ -32,6 +35,14 @@ export const MOBILE_BRIDGE_METHODS = [
   "chats.rename",
   "chats.archive",
   "chats.unarchive",
+  "chats.setContinuousMode",
+  "chats.setSwarmMode",
+  "chats.setBorrowedAgents",
+  "chats.switchAgent",
+  "chats.clearContext",
+  "workspace.setProject",
+  "workspace.clear",
+  "composer.context",
   "invoke.history",
   "invoke.start",
   "invoke.steer",
@@ -48,6 +59,10 @@ export const MOBILE_BRIDGE_METHODS = [
   "automations.listRuns",
   "usage.snapshot",
   "runtime.detect",
+  "runtime.setActive",
+  "hub.borrowable.list",
+  "hephaestus.engineToggles",
+  "hephaestus.routePreview",
   "ontology.projections.list",
   "ontology.attach.resolve",
   "device.revokeSelf",
@@ -62,12 +77,20 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "chats.rename",
   "chats.archive",
   "chats.unarchive",
+  "chats.setContinuousMode",
+  "chats.setSwarmMode",
+  "chats.setBorrowedAgents",
+  "chats.switchAgent",
+  "chats.clearContext",
+  "workspace.setProject",
+  "workspace.clear",
   "invoke.start",
   "invoke.steer",
   "invoke.cancel",
   "browser.resolveApproval",
   "automations.toggle",
   "automations.runNow",
+  "runtime.setActive",
   "ontology.attach.resolve",
 ]);
 
@@ -100,13 +123,21 @@ export interface MobileBridgeInvokeSteerParams {
   chatId: string;
   userPrompt: string;
   locale?: "ko" | "en";
-  permissions?: "read" | "write";
+  permissions?: "read" | "write" | "full";
   planMode?: boolean;
   goalMode?: boolean;
   appsGenerateMode?: boolean;
   borrowAgents?: string[];
+  images?: MobileBridgeImageAttachmentDto[];
   expectedQuestionMessageId?: string;
   expectedRunId: string;
+}
+
+export interface MobileBridgeImageAttachmentDto {
+  mediaType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+  name?: string;
+  /** Pure base64, never a data URL. Desktop decodes and enforces 5 MiB. */
+  data: string;
 }
 
 /**
@@ -283,6 +314,9 @@ export interface MobileBridgeRuntimeDto {
   active: boolean;
   model: string | null;
   effort: string | null;
+  efforts: Array<{ id: string; label: string }>;
+  availableModels: string[];
+  longContextEnabled: boolean;
 }
 
 export interface MobileBridgeAgentDto {
@@ -524,6 +558,7 @@ export interface MobileBridgeProjectDto {
   name: string;
   description: string | null;
   defaultAgentId: string | null;
+  hasWorkingFolder: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -539,6 +574,8 @@ export interface MobileBridgeHiredAgentDto {
 export interface MobileBridgeChatDto {
   id: string;
   projectId: string | null;
+  /** Basename only. Absolute Desktop paths never cross the bridge. */
+  workingFolderName: string | null;
   firmId: string | null;
   agentGroupId: string | null;
   agentId: string;
@@ -669,6 +706,8 @@ const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "confirm.listPending",
   "automations.list",
   "runtime.detect",
+  "hub.borrowable.list",
+  "hephaestus.engineToggles",
   "ontology.projections.list",
   "device.revokeSelf",
 ]);
@@ -770,13 +809,42 @@ function validateInvokeOptions(params: Record<string, unknown>): string | null {
   ) {
     return "borrowAgents must be an array of at most 8 non-empty strings";
   }
+  const images = params.images;
+  if (images !== undefined) {
+    if (!Array.isArray(images) || images.length > 4) {
+      return "images must be an array of at most 4 attachments";
+    }
+    for (const image of images) {
+      if (!isRecord(image) || !hasOnlyKeys(image, ["mediaType", "name", "data"])) {
+        return "images contains an unsupported attachment";
+      }
+      const mediaTypeError = validateEnum(
+        image,
+        "mediaType",
+        ["image/png", "image/jpeg", "image/gif", "image/webp"],
+        false,
+      );
+      if (mediaTypeError) return mediaTypeError;
+      const nameError = optionalString(image, "name", 200);
+      if (nameError) return nameError;
+      if (
+        typeof image.data !== "string" ||
+        image.data.length < 4 ||
+        image.data.length > 7_000_000 ||
+        image.data.length % 4 !== 0 ||
+        !/^[A-Za-z0-9+/]+={0,2}$/.test(image.data)
+      ) {
+        return "image data must be bounded canonical base64";
+      }
+    }
+  }
   return firstError(
     optionalString(params, "runId", 160),
     requiredString(params, "chatId", 256),
     optionalString(params, "expectedQuestionMessageId", 256),
     requiredText(params, "userPrompt", 200_000),
     validateEnum(params, "locale", ["ko", "en"]),
-    validateEnum(params, "permissions", ["read", "write"]),
+    validateEnum(params, "permissions", ["read", "write", "full"]),
     optionalBoolean(params, "planMode"),
     optionalBoolean(params, "goalMode"),
     optionalBoolean(params, "appsGenerateMode"),
@@ -880,6 +948,7 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
     case "chats.get":
     case "chats.archive":
     case "chats.unarchive":
+    case "chats.clearContext":
       return hasOnlyKeys(params, ["id"]) ? requiredString(params, "id") : `${method} accepts only id`;
     case "chats.create": {
       if (!hasOnlyKeys(params, ["agentId", "firmId", "agentGroupId", "projectId", "title", "continueFromChatId"])) {
@@ -902,17 +971,48 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["id", "title"])
         ? firstError(requiredString(params, "id"), requiredString(params, "title", 200))
         : "chats.rename accepts only id and title";
+    case "chats.setContinuousMode":
+    case "chats.setSwarmMode":
+      return hasOnlyKeys(params, ["id", "enabled"])
+        ? firstError(requiredString(params, "id"), optionalBoolean(params, "enabled"),
+            typeof params.enabled === "boolean" ? null : "enabled must be a boolean")
+        : `${method} accepts only id and enabled`;
+    case "chats.setBorrowedAgents": {
+      if (!hasOnlyKeys(params, ["id", "slugs"])) return "chats.setBorrowedAgents accepts only id and slugs";
+      const slugs = params.slugs;
+      if (!Array.isArray(slugs) || slugs.length > 8 || slugs.some((item) =>
+        typeof item !== "string" || item.length < 1 || item.length > 160 || /[\u0000-\u001f]/.test(item))) {
+        return "slugs must be an array of at most 8 bounded identifiers";
+      }
+      return requiredString(params, "id");
+    }
+    case "chats.switchAgent":
+      return hasOnlyKeys(params, ["id", "agentId"])
+        ? firstError(requiredString(params, "id"), requiredString(params, "agentId"))
+        : "chats.switchAgent accepts only id and agentId";
+    case "workspace.setProject":
+      return hasOnlyKeys(params, ["chatId", "projectId"])
+        ? firstError(requiredString(params, "chatId"), requiredString(params, "projectId"))
+        : "workspace.setProject accepts only chatId and projectId";
+    case "workspace.clear":
+      return hasOnlyKeys(params, ["chatId"])
+        ? requiredString(params, "chatId")
+        : "workspace.clear accepts only chatId";
     case "invoke.history":
       return hasOnlyKeys(params, ["chatId", "limit"])
         ? firstError(requiredString(params, "chatId"), optionalInteger(params, "limit", 1, 200))
         : "invoke.history accepts only chatId and limit";
+    case "composer.context":
+      return hasOnlyKeys(params, ["chatId"])
+        ? requiredString(params, "chatId")
+        : "composer.context accepts only chatId";
     case "invoke.start":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents", "expectedQuestionMessageId"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents", "images", "expectedQuestionMessageId"])) {
         return "invoke.start contains unsupported fields";
       }
       return validateInvokeOptions(params);
     case "invoke.steer":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents", "expectedRunId", "expectedQuestionMessageId"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents", "images", "expectedRunId", "expectedQuestionMessageId"])) {
         return "invoke.steer contains unsupported fields";
       }
       return firstError(validateInvokeOptions(params), requiredString(params, "expectedRunId", 160));
@@ -943,6 +1043,25 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["force"])
         ? optionalBoolean(params, "force")
         : "usage.snapshot accepts only force";
+    case "runtime.setActive":
+      return hasOnlyKeys(params, ["kind", "backend", "model", "effort", "longContext"])
+        ? firstError(
+            requiredString(params, "kind", 80),
+            optionalString(params, "backend", 80),
+            optionalString(params, "model", 200),
+            optionalString(params, "effort", 80),
+            optionalBoolean(params, "longContext"),
+          )
+        : "runtime.setActive contains unsupported fields";
+    case "hephaestus.routePreview":
+      return hasOnlyKeys(params, ["query", "scope", "allowLocal", "offline"])
+        ? firstError(
+            requiredText(params, "query", 20_000),
+            validateEnum(params, "scope", ["network", "cloud"]),
+            optionalBoolean(params, "allowLocal"),
+            optionalBoolean(params, "offline"),
+          )
+        : "hephaestus.routePreview contains unsupported fields";
     case "ontology.attach.resolve":
       return validateOntologyAttach(params);
     // Empty-parameter methods returned above. Keep this fail-closed fallback so

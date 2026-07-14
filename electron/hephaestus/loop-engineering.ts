@@ -18,16 +18,9 @@ export const STORMBREAKER_LONG_RUN_SCHEDULE = "every-30m";
 export const CONTINUOUS_MODE_MAX_PASSES = 20_000;
 
 export const STORMBREAKER_LOOP_PROTOCOL = [
-  "Stormbreaker Loop is always on as a baseline in Agentlas Desktop chat. The chat input also exposes a Stormbreaker toggle: turning it on requests an explicit, force-robust run (verify/repair loop carried to completion), which the host surfaces as a one-time cost/time warning.",
-  "Use it automatically for non-trivial work: app, game, site, agent, automation, trading/ops, deployment, debugging, data/report generation, multi-step research, or any task with files, tools, tests, screenshots, or external verification.",
-  "Simple questions can be answered directly. Loop-worthy work must follow: briefing interview (only when ambiguous) -> scope-lock -> goal decomposition -> sub-agent/work-packet architecture -> plan-lock -> act -> verify -> bounded repair/retry when the host reports a concrete validation error -> final-gate.",
-  "Briefing interview before scope-lock: if the goal, constraints or success criteria are too ambiguous to decompose safely, ask ONE batch of 3-5 `<<agentlas-ask>>` questions first (what NOT to do / smallest version / done signal / dependencies), wait for the combined answer, then restate the goal as one sentence and proceed. If the request is already specific, ask NOTHING. Never exceed two batches (8 questions total); record unanswered topics as explicit assumptions in the goal ledger instead of asking more. The confirmed goal/constraints/acceptance become the goal ledger's initial entries, exit conditions become loop stop criteria.",
-  "For large goals, create a visible goal ledger with work packets, owners, verification gates, and resume state. Execute the next safe packet instead of stopping at a plan.",
+  "Agentlas Desktop host extension. The canonical Goal + UltraCode execution protocol is loaded separately and verbatim from Agentlas Core; this extension only defines Desktop continuation behavior.",
   `If more safe work remains and you are not blocked by auth, payment, policy, missing secrets, or user approval, end the assistant output with ${STORMBREAKER_CONTINUE_MARKER} on its own line. Agentlas Desktop will strip this marker and immediately run the next continuation pass.`,
-  "Do not claim autonomous completion unless the host or tool output verifies it. When a tool, credential, browser session, connector, or external service is missing, report the run as blocked or unverified with the exact next step.",
   "For recurring automations, write the prompt so each run resumes from the latest durable evidence, verifies the current state where tools allow it, acts conservatively, and records what changed. A scheduled prompt is not proof that an external account action succeeded.",
-  "Keep visible progress concise: show what was attempted, what was verified, and exactly where to resume if blocked.",
-  "Never expose hidden chain-of-thought; show progress, evidence, decisions, and final status only.",
 ].join("\n");
 
 export function stripStormbreakerContinueMarker(text: string): { text: string; shouldContinue: boolean } {

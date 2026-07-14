@@ -12,12 +12,16 @@ import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import {
   defaultWorkloadAllocation,
   normalizeWorkloadAllocation,
-  resolveWorkloadAllocation,
+  resolveWorkloadAllocationAcrossRuntimes,
   workloadAllocationPromptExample,
   workloadAllocationReceipt,
+  workloadRuntimeInventory,
   type WorkloadAllocation,
 } from "../runtime/workload-routing";
+import { pickRunner } from "../runtime/selection";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
+import { STORMBREAKER_LOOP_PROTOCOL } from "../hephaestus/loop-engineering";
+import type { CoreStormbreakerHarness } from "../hephaestus/commands";
 
 // 총 작업 수/라운드 안전 상한 — 무한 스폰·무한루프로부터 컴/지갑을 지키는 최후 방어선(엔진이 강제).
 // 각 작업 = 실 LLM 호출이라 비용이 나가므로 보수적으로. (동시 실행 수는 별개로 슬라이더가 제어)
@@ -25,11 +29,21 @@ const SWARM_MAX_TASKS = 24;
 const SWARM_MAX_ROUNDS = 100_000;
 
 /** 스웜 워커에게 주는 규약 — 자기 작업을 하고, 새 하위작업/핸드오프가 필요하면 `## Spawn`으로. */
-function swarmProtocol(goal: string, board: SwarmBoard, task: SwarmTask): string {
+function swarmProtocol(
+  goal: string,
+  board: SwarmBoard,
+  task: SwarmTask,
+  runtimeInventory: ReturnType<typeof workloadRuntimeInventory>,
+): string {
   const doneList = board.tasks
     .filter((t) => t.status === "done")
     .slice(-8)
     .map((t) => `- ${t.title}`)
+    .join("\n");
+  const assignedList = board.tasks
+    .filter((t) => t.id !== task.id && t.status !== "failed")
+    .slice(0, 24)
+    .map((t) => `- [${t.status}] ${t.title}${t.brief ? ` — ${t.brief}` : ""}`)
     .join("\n");
   return [
     "You are one worker in an EMERGENT AGENT SWARM collaborating on a shared goal.",
@@ -40,12 +54,17 @@ function swarmProtocol(goal: string, board: SwarmBoard, task: SwarmTask): string
     task.brief ? `- Details: ${task.brief}` : "",
     "",
     doneList ? `Already completed by peers (recent):\n${doneList}` : "No peer results yet — you may be first.",
+    assignedList ? `WORK ALREADY ASSIGNED TO PEERS (never duplicate these packets):\n${assignedList}` : "",
+    "",
+    "LIVE_RUNTIME_INVENTORY (the only allowed worker targets; copy runtimeId/modelId exactly):",
+    JSON.stringify(runtimeInventory),
     "",
     "RULES:",
     "1. Do your task concretely with available tools/files in the current working folder.",
     "2. If the goal needs MORE work beyond your task, split it into concrete next steps.",
     "   Judge each child's complexity, risk, context size, and precision needs yourself.",
-    "   Assign provider-neutral capacity independently; do not put every worker on frontier.",
+    "   As the parent model, choose runtimeId, modelId, and effort from LIVE_RUNTIME_INVENTORY for each child.",
+    "   Do not infer IDs from model names and do not put every worker on frontier. Use the smallest sufficient live model.",
     "   End with a `## Spawn` JSON block when spawning:",
     "   ## Spawn",
     "   ```json",
@@ -54,6 +73,7 @@ function swarmProtocol(goal: string, board: SwarmBoard, task: SwarmTask): string
     !task.spawnedBy
       ? "   You are the initial seed: always include the synthesis allocation; use tasks:[] if no child is needed."
       : "   Omit the block if no child is needed. Role is optional.",
+    "   Never spawn work that another pending, running, or completed peer packet already owns.",
     "3. Do NOT restate the whole goal. Do NOT invent work that isn't needed — over-spawning wastes the user's money.",
     "4. Everything above the `## Spawn` block is your result and is shared with peers on the blackboard.",
   ]
@@ -143,9 +163,35 @@ export function parseSwarmOutput(text: string): {
 }
 
 /** 스웜 실행 엔트리 — runMcpInvocation이 호출. 최종 텍스트를 반환하고 채팅에 저장한다. */
-export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ finalText: string }> {
+export async function runSwarmInvocation(
+  p: BorrowedTaskForceParams & { stormbreakerHarness?: CoreStormbreakerHarness },
+): Promise<{ finalText: string }> {
   const goal = p.req.userPrompt;
+  if (p.stormbreakerMode && !p.stormbreakerHarness) {
+    throw new Error("Stormbreaker requires the canonical Goal + UltraCode harness from Agentlas Core.");
+  }
+  const coreHarnessPrompt = p.stormbreakerMode ? p.stormbreakerHarness?.system_prompt : undefined;
+  const runtimeInventory = workloadRuntimeInventory(p.runtimes ?? [p.active]);
   const runId = p.req.runId ?? `swarm-${Date.now()}`;
+  const stormStatus = (
+    status: string,
+    phase: "plan" | "delegate" | "synthesize" = "plan",
+    done = false,
+  ): void => {
+    if (!p.stormbreakerMode) return;
+    p.sink({
+      kind: "thinking",
+      status,
+      agentId: "stormbreaker-supervisor",
+      agentName: "Stormbreaker",
+      role: "Goal · UltraCode",
+      phase,
+      done,
+    });
+  };
+  const taskLabel = (task: SwarmTask): string => `“${task.title.replace(/\s+/g, " ").slice(0, 72)}”`;
+  const runtimeLabel = (kind: string): string =>
+    kind === "claude-code" ? "Claude Code" : kind === "codex" ? "Codex" : kind === "gemini" ? "Gemini" : kind;
   const emit = (task: SwarmTask, ev: McpInvocationEvent): void =>
     p.sink({ ...ev, agentId: task.id, agentName: task.title, role: task.role ?? "worker" });
   const recordSwarmEvent = (ev: SwarmEvent): void => {
@@ -165,6 +211,14 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
             spawnedBy: ev.task.spawnedBy,
           },
         });
+        if (ev.kind === "task-done") {
+          stormStatus(
+            p.locale === "ko"
+              ? `Stormbreaker · ${taskLabel(ev.task)} 결과를 회수해 증거에 반영했습니다.`
+              : `Stormbreaker · collected ${taskLabel(ev.task)} and added it to the evidence set.`,
+            "delegate",
+          );
+        }
         break;
       case "task-failed":
         tryRecordRunEvent({
@@ -185,6 +239,12 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
           errorMessage: ev.reason ? `Swarm task failed: ${ev.reason}` : "Swarm task failed",
           payload: { title: ev.task.title, role: ev.task.role, spawnedBy: ev.task.spawnedBy },
         });
+        stormStatus(
+          p.locale === "ko"
+            ? `Stormbreaker · ${taskLabel(ev.task)} 실패를 기록하고 안전하게 계속할 수 있는 작업을 확인합니다.`
+            : `Stormbreaker · recorded the failure in ${taskLabel(ev.task)} and is checking safe remaining work.`,
+          "delegate",
+        );
         break;
       case "spawn":
         tryRecordRunEvent({
@@ -194,6 +254,12 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
           nodeId: ev.parent,
           payload: { spawnedTaskIds: ev.tasks.map((task) => task.id), count: ev.tasks.length },
         });
+        stormStatus(
+          p.locale === "ko"
+            ? `Stormbreaker · 부모 플래너가 ${ev.tasks.length}개 작업 패킷을 추가로 분해했습니다.`
+            : `Stormbreaker · the parent planner decomposed ${ev.tasks.length} additional work packet${ev.tasks.length === 1 ? "" : "s"}.`,
+          "plan",
+        );
         break;
       case "capped":
         tryRecordRunEvent({
@@ -214,6 +280,12 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
         break;
       case "synthesize":
         tryRecordRunEvent({ runId, kind: "swarm_synthesize", chatId: p.chat.id });
+        stormStatus(
+          p.locale === "ko"
+            ? "Stormbreaker · 작업 증거를 서로 대조하고 최종 완료 게이트를 판정합니다."
+            : "Stormbreaker · cross-checking worker evidence and evaluating the final completion gate.",
+          "synthesize",
+        );
         break;
       case "round":
         break;
@@ -225,19 +297,54 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
     chatId: p.chat.id,
     payload: { maxTasks: SWARM_MAX_TASKS, maxRounds: SWARM_MAX_ROUNDS, concurrency: getAgentConcurrency() },
   });
+  stormStatus(
+    p.locale === "ko"
+      ? "Stormbreaker · 목표와 완료 조건을 잠그고 실행 범위를 정리합니다."
+      : "Stormbreaker · locking the goal, completion checks, and execution scope.",
+    "plan",
+  );
+  stormStatus(
+    p.locale === "ko"
+      ? `Stormbreaker · 연결된 ${runtimeInventory.length}개 런타임에서 작업별 모델·effort 후보를 확인했습니다.`
+      : `Stormbreaker · inspected model and effort choices across ${runtimeInventory.length} connected runtime${runtimeInventory.length === 1 ? "" : "s"}.`,
+    "plan",
+  );
 
-  // 한 작업을 활성 런타임으로 실행 → 텍스트 → `## Spawn` 파싱.
+  // Parent allocation may select a different installed CLI per worker. The
+  // host validates only its live inventory before invoking that CLI.
   const runOneTask = async (task: SwarmTask, board: SwarmBoard, signal?: AbortSignal) => {
     const resolution = task.allocation
-      ? resolveWorkloadAllocation({
+      ? resolveWorkloadAllocationAcrossRuntimes({
           allocation: task.allocation,
-          runtime: p.active,
+          runtimes: p.runtimes ?? [p.active],
+          fallbackRuntime: p.active,
           phase: "delegate",
           manualOverride: p.runtimeOverride,
         })
       : null;
     const active = resolution?.runtime ?? p.active;
+    const taskRunner = pickRunner(active) ?? p.picked;
     if (resolution) {
+      const runtimeIndex = (p.runtimes ?? [p.active]).findIndex((candidate) =>
+        candidate.kind === active.kind &&
+        candidate.backend === active.backend &&
+        candidate.source === active.source,
+      );
+      task.resolvedAllocation = {
+        runtimeId: resolution.allocation.runtimeId ?? (runtimeIndex >= 0 ? `runtime-${runtimeIndex + 1}` : null),
+        runtimeKind: active.kind ?? active.backend ?? null,
+        model: active.model ?? null,
+        effort: active.effort ?? null,
+        source: resolution.source,
+        resolutionCodes: [...resolution.resolutionCodes],
+      };
+      const effort = active.effort || resolution.allocation.effort || (p.locale === "ko" ? "기본" : "default");
+      stormStatus(
+        p.locale === "ko"
+          ? `Stormbreaker · ${taskLabel(task)}에 ${runtimeLabel(active.kind)} · ${active.model ?? active.kind} · effort ${effort}를 배정했습니다.`
+          : `Stormbreaker · assigned ${taskLabel(task)} to ${runtimeLabel(active.kind)} · ${active.model ?? active.kind} · effort ${effort}.`,
+        "delegate",
+      );
       tryRecordRunEvent({
         runId,
         kind: "workload_allocation",
@@ -255,6 +362,14 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
         });
       }
     }
+    if (!resolution && !task.spawnedBy) {
+      stormStatus(
+        p.locale === "ko"
+          ? "Stormbreaker · 부모 플래너가 목표를 독립 작업으로 나누고 런타임·모델·effort를 선택합니다."
+          : "Stormbreaker · the parent planner is splitting the goal and selecting runtime, model, and effort per task.",
+        "plan",
+      );
+    }
     emit(task, {
       kind: "thinking",
       status: p.locale === "ko" ? `${task.title}` : task.title,
@@ -269,7 +384,7 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
       task: task.brief || task.title,
       includeOperational: false,
     });
-    const result = await p.picked.runner(
+    const result = await taskRunner.runner(
       {
         // The canonical package prompt is authoritative, but the per-task
         // swarm protocol is invocation context. Passing both as the fallback
@@ -279,12 +394,14 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
             p.orchestratorAgent.id,
             p.orchestratorAgent.systemPrompt,
           ),
-          swarmProtocol(goal, board, task),
+          coreHarnessPrompt,
+          swarmProtocol(goal, board, task, runtimeInventory),
+          p.stormbreakerMode ? STORMBREAKER_LOOP_PROTOCOL : "",
           ontology.prompt,
         ].filter(Boolean).join("\n\n"),
         history: [],
         userPrompt: task.brief || task.title,
-        backendLabel: p.picked.label,
+        backendLabel: taskRunner.label,
         model: active.model ?? undefined,
         longContext: active.longContextEnabled ?? false,
         effort: active.effort ?? undefined,
@@ -317,13 +434,15 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
     p.sink({ ...ev, agentId: "swarm-synthesizer", agentName: "Swarm Synthesizer", role: "synthesizer", phase: "synthesize" });
   const synthesize = async (board: SwarmBoard, signal?: AbortSignal): Promise<string> => {
     const done = board.tasks.filter((t) => t.status === "done" && t.result);
-    const resolution = resolveWorkloadAllocation({
+    const resolution = resolveWorkloadAllocationAcrossRuntimes({
       allocation: board.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
-      runtime: p.active,
+      runtimes: p.runtimes ?? [p.active],
+      fallbackRuntime: p.active,
       phase: "synthesize",
       manualOverride: p.runtimeOverride,
     });
     const active = resolution.runtime;
+    const synthesisRunner = pickRunner(active) ?? p.picked;
     tryRecordRunEvent({
       runId,
       kind: "workload_allocation",
@@ -345,7 +464,11 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
       status: p.locale === "ko" ? "스웜 결과 종합 중…" : "Synthesizing swarm results…",
       model: active.model ?? active.kind,
     });
-    const pieces = done.map((t, i) => `### ${i + 1}. ${t.title}\n${t.result}`).join("\n\n");
+    const pieces = done.map((t, i) => [
+      `### ${i + 1}. ${t.title}`,
+      `HOST-VERIFIED ALLOCATION: ${JSON.stringify(t.resolvedAllocation ?? null)}`,
+      t.result,
+    ].join("\n")).join("\n\n");
     const ontology = await buildAgentRuntimeOntologyContext({
       runSessionId: runId,
       installedAgent: p.orchestratorAgent,
@@ -355,14 +478,15 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
       task: goal,
       includeOperational: false,
     });
-    const result = await p.picked.runner(
+    const result = await synthesisRunner.runner(
       {
         systemPrompt: [
           buildEffectiveAgentSystemPrompt(
             p.orchestratorAgent.id,
             p.orchestratorAgent.systemPrompt,
           ),
-          "",
+          coreHarnessPrompt,
+          p.stormbreakerMode ? STORMBREAKER_LOOP_PROTOCOL : "",
           "You are the synthesizer of an agent swarm. Below are the results your peers produced for the shared goal.",
           "Integrate them into ONE coherent final answer for the user. Reconcile overlaps, note anything incomplete.",
           "Do not just concatenate. Do not include a `## Spawn` block.",
@@ -371,7 +495,7 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
         ].join("\n"),
         history: [],
         userPrompt: pieces || "(no completed results)",
-        backendLabel: p.picked.label,
+        backendLabel: synthesisRunner.label,
         model: active.model ?? undefined,
         longContext: active.longContextEnabled ?? false,
         effort: active.effort ?? undefined,
@@ -386,6 +510,13 @@ export async function runSwarmInvocation(p: BorrowedTaskForceParams): Promise<{ 
         onPartial: (text) => synthEmit({ kind: "partial", text }),
         onTool: (name, args, r, id, isError) => synthEmit({ kind: "tool-use", tool: { name, args, result: r, id, isError } }),
       },
+    );
+    stormStatus(
+      p.locale === "ko"
+        ? "Stormbreaker · 최종 게이트 판정과 결과 종합을 마쳤습니다."
+        : "Stormbreaker · completed the final-gate decision and result synthesis.",
+      "synthesize",
+      true,
     );
     return result.text.trim();
   };

@@ -12,6 +12,13 @@ afterPack: build-resources/after-pack-clean.cjs
 
 files:
   - dist/electron/**/*
+  # electron-builder globally excludes files named package-lock.json. This
+  # lock snapshot is a runtime dependency used to materialize the pinned
+  # Astryx app, so add it through a separate file-set matcher.
+  - from: dist/electron/app-factory/astryx-lock
+    to: dist/electron/app-factory/astryx-lock
+    filter:
+      - package-lock.json
   # dist/shared/** holds runtime values (shared/models.ts: BYOK_MODELS, context policy).
   # detect.ts/byok.ts value-import it, so it MUST be packaged or the app crashes at launch.
   - dist/shared/**/*

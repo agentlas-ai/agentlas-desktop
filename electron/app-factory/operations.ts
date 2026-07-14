@@ -54,6 +54,7 @@ import { getServer, installCustomServer, removeServer } from "../mcp-tools/regis
 import { readEnvVar } from "../secrets/vault";
 import { AGENTLAS_OS_FALLBACK_LADDER } from "../../shared/surface-delegation";
 import { refreshServiceAppViews } from "./scaffold";
+import { astryxReactProfile } from "./astryx-react";
 
 interface AppPackage {
   id: string;
@@ -1410,7 +1411,11 @@ export async function preparePreviewDeploy(
   const pkg = await readAppPackage(rootPath);
   const appData = await readAppData(rootPath);
   const now = new Date().toISOString();
-  const sourceDir = path.join(rootPath, "src");
+  const manifest = isObject(appData.manifest)
+    ? appData.manifest as unknown as AgentlasSurfaceManifest
+    : pkg.manifest;
+  const astryxProfile = astryxReactProfile(manifest);
+  const sourceDir = path.join(rootPath, astryxProfile ? "astryx-app/dist" : "src");
   const previewSource = path.join(sourceDir, "index.html");
   const deployDir = path.join(rootPath, "dist");
   const previewPath = path.join(deployDir, "index.html");
@@ -1419,7 +1424,14 @@ export async function preparePreviewDeploy(
   assertInside(rootPath, previewSource);
   assertInside(rootPath, previewPath);
   assertInside(rootPath, manifestPath);
-  await fs.access(previewSource);
+  try {
+    await fs.access(previewSource);
+  } catch (error) {
+    if (astryxProfile) {
+      throw new Error("Build the Astryx app first with `npm --prefix astryx-app install && npm --prefix astryx-app run build`.", { cause: error });
+    }
+    throw error;
+  }
   await fs.rm(deployDir, { recursive: true, force: true });
   await fs.mkdir(deployDir, { recursive: true });
   await fs.cp(sourceDir, deployDir, { recursive: true });
@@ -1456,7 +1468,7 @@ export async function preparePreviewDeploy(
     deployPath: deployDir,
     manifestPath,
     fileUrl: pathToFileURL(previewPath).href,
-    serveCommand: "node scripts/serve.mjs",
+    serveCommand: astryxProfile ? `npm --prefix astryx-app run preview` : "node scripts/serve.mjs",
     launchUrl: stringValue(appData.launchUrl) || undefined,
     devCommand: stringValue(appData.devCommand) || "node scripts/serve.mjs",
     createdAt: now,

@@ -25,6 +25,23 @@ const NESTED_ROOT_FALLBACK = "# Wrong root fallback\n\nNESTED_ROOT_FALLBACK_MUST
 const OWNER_STALE_DB = "STALE_DB_OWNER_PROMPT_MUST_NOT_RUN_41E8";
 const WORKER_STALE_DB = "STALE_DB_WORKER_PROMPT_MUST_NOT_RUN_2B07";
 const NESTED_STALE_DB = "STALE_DB_NESTED_PROMPT_MUST_NOT_RUN_8E19";
+const CORE_STORMBREAKER_PROMPT = [
+  "You are executing inside the Agentlas-owned STORMBREAKER GOAL + ULTRACODE HARNESS.",
+  "GOAL MODE: maintain the goal, constraints, acceptance checks, owners, and unfinished packets until verified completion.",
+  "ULTRACODE MODE: inspect real files/state, plan before mutation, implement the smallest complete change, run relevant tests, repair concrete failures, and preserve unrelated work.",
+  "CORE_HARNESS_FIXTURE_EXACT_3C91",
+].join("\n");
+const CORE_STORMBREAKER_HARNESS = {
+  schema_version: "agentlas.stormbreaker.goal-ultracode-harness.v1",
+  harness_id: "agentlas-core/stormbreaker-goal-ultracode",
+  owner: "Agentlas Core",
+  mode: "stormbreaker-goal-ultracode",
+  system_prompt: CORE_STORMBREAKER_PROMPT,
+  prompt_sha256: createHash("sha256").update(CORE_STORMBREAKER_PROMPT).digest("hex"),
+  host_rule: "fixture",
+  inventory_rule: "fixture",
+  completion_rule: "fixture",
+};
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-owned-runtime-prompts-"));
 const userData = path.join(temp, "user-data");
@@ -32,7 +49,15 @@ const hephaestusRoot = path.join(temp, "hephaestus-runtime");
 fs.mkdirSync(userData, { recursive: true });
 fs.mkdirSync(path.join(hephaestusRoot, "agentlas_cloud"), { recursive: true });
 fs.mkdirSync(path.join(hephaestusRoot, "skills", SKILL_SLUG), { recursive: true });
-fs.writeFileSync(path.join(hephaestusRoot, "agentlas_cloud", "__main__.py"), "", "utf8");
+fs.writeFileSync(
+  path.join(hephaestusRoot, "agentlas_cloud", "__main__.py"),
+  [
+    "import sys",
+    "if sys.argv[1:3] == ['stormbreaker', 'harness']:",
+    `    print(${JSON.stringify(JSON.stringify(CORE_STORMBREAKER_HARNESS))})`,
+  ].join("\n"),
+  "utf8",
+);
 fs.writeFileSync(path.join(hephaestusRoot, "skills", SKILL_SLUG, "SKILL.md"), SKILL_CONTENT, "utf8");
 
 process.env.AGENTLAS_STORE_PATH = path.join(temp, "agentlas.sqlite");
@@ -276,6 +301,7 @@ async function main() {
     override: null,
     unavailableOverride: null,
   });
+  selection.pickRunner = () => picked;
   envResolver.buildRunnerEnv = async () => ({ env: {}, injectedKeys: [] });
   stormbreaker.superviseStormbreaker = () => null;
 
@@ -293,7 +319,7 @@ async function main() {
     const errors = events.filter((event) => event.kind === "error");
     assert.deepEqual(errors, [], `invocation ${userPrompt} must not emit an error`);
     assert.ok(events.some((event) => event.kind === "final"), `invocation ${userPrompt} must finish`);
-    return result;
+    return { result, events };
   };
 
   const catalogAsset = skillCatalog.readSkillCatalogAsset(SKILL_SLUG);
@@ -473,6 +499,42 @@ async function main() {
   });
   assert.match(swarmSynthesis.systemPrompt, /Integrate them into ONE coherent final answer/, "synthesis must retain dynamic synthesis policy");
 
+  const stormChat = chats.createChat({ agentId: owner.id, title: "Stormbreaker prompt capture" });
+  const stormStart = captures.length;
+  const stormInvocation = await invoke(stormChat.id, "stormbreaker verify the runtime harness and finish the goal");
+  const stormCaptures = captures.slice(stormStart);
+  const stormWorker = stormCaptures.find((capture) => capture.systemPrompt.includes("Agentlas-owned STORMBREAKER GOAL + ULTRACODE HARNESS"));
+  const stormSynthesis = stormCaptures.find((capture) =>
+    capture.systemPrompt.includes("You are the synthesizer of an agent swarm") &&
+    capture.systemPrompt.includes("CORE_HARNESS_FIXTURE_EXACT_3C91"),
+  );
+  assertOwnedPrompt(stormWorker, {
+    label: "Stormbreaker owned worker",
+    canonical: OWNER_CANONICAL,
+    staleDb: OWNER_STALE_DB,
+    skillActive: true,
+  });
+  assert.equal(occurrences(stormWorker.systemPrompt, CORE_STORMBREAKER_PROMPT), 1, "Stormbreaker worker must receive the exact Core harness once");
+  assert.equal(occurrences(stormWorker.systemPrompt, "GOAL MODE:"), 1, "Desktop must not redefine Core Goal mode");
+  assert.equal(occurrences(stormWorker.systemPrompt, "ULTRACODE MODE:"), 1, "Desktop must not redefine Core UltraCode mode");
+  assert.match(stormWorker.systemPrompt, /Agentlas Desktop host extension/, "Stormbreaker worker must retain only the Desktop continuation extension");
+  assertOwnedPrompt(stormSynthesis, {
+    label: "Stormbreaker synthesis",
+    canonical: OWNER_CANONICAL,
+    staleDb: OWNER_STALE_DB,
+    skillActive: true,
+  });
+  assert.equal(occurrences(stormSynthesis.systemPrompt, CORE_STORMBREAKER_PROMPT), 1, "Stormbreaker synthesis must receive the exact Core harness once");
+  const visibleStormStatuses = stormInvocation.events
+    .filter((event) => event.kind === "thinking" && event.agentName === "Stormbreaker")
+    .map((event) => event.status || "");
+  assert.ok(visibleStormStatuses.length >= 5, "Stormbreaker must expose a concise visible execution narrative");
+  assert.ok(visibleStormStatuses.some((status) => /goal|목표/i.test(status)));
+  assert.ok(visibleStormStatuses.some((status) => /runtime|런타임/i.test(status)));
+  assert.ok(visibleStormStatuses.some((status) => /model|모델/i.test(status)));
+  assert.ok(visibleStormStatuses.some((status) => /final-gate|최종 게이트/i.test(status)));
+  assert.equal(stormInvocation.events.some((event) => event.agentName === "Stormbreaker" && event.done === true), true);
+
   const rolledBack = evolution.rollbackAgentEvolutionProposal(ownerSkillCandidate.id);
   assert.equal(rolledBack.status, "rolled_back");
   assert.equal(
@@ -497,12 +559,15 @@ async function main() {
       firm: firmCaptures.length,
       savedAgentGroupTaskForce: groupCaptures.length,
       swarm: swarmCaptures.length,
+      stormbreaker: stormCaptures.length,
     },
     candidateAbsent: true,
     exactSkillActiveAfterApproval: true,
     rollbackRemovedSkill: true,
     canonicalFallbackLeak: false,
     dynamicSwarmProtocolsRetained: true,
+    stormbreakerGoalUltraCodeHarnessRetained: true,
+    stormbreakerVisibleThinkingNarrative: true,
   }, null, 2));
 
   fs.rmSync(temp, { recursive: true, force: true });

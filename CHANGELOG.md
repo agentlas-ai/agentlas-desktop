@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.8.13 — 2026-07-13
+
+### Changed
+
+- **Stormbreaker is now a real parent-directed parallel execution contract.**
+  The parent LLM receives a privacy-safe live inventory of executable local
+  runtimes and their models, then selects the exact `runtimeId`, `modelId`, and
+  reasoning effort for every decomposed worker and synthesis task. With both
+  Claude Code and Codex connected, workers can execute across both runtimes;
+  a plugin host exposes only its own connected runtime inventory.
+- **Model renames no longer require a fixed routing table to keep working.**
+  The host validates exact choices against the current inventory, preserves
+  explicit user pins and policy ceilings, emits a visible fallback receipt when
+  a selection disappears, and no longer silently derives a replacement model
+  from a task tier. Cursor Agent model discovery uses the current `agent models`
+  command when available.
+- **Stormbreaker’s execution core is documented and enforced as:** goal →
+  parent-led decomposition → parallel agents → runtime/model/effort selection
+  → token-aware execution → non-breaking journal/recovery. This applies to the
+  desktop swarm path and `/hep-storm`, not just to a prompt-level loop.
+
 ## 0.8.5 — 2026-07-12
 
 ### Fixed

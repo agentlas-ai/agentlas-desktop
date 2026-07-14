@@ -2,6 +2,7 @@
 // Hub "borrow" is not an installed firm: the local orchestrator plans per-agent
 // input packets, runs each borrowed agent as an isolated BYOM local sub-run, then
 // synthesizes the results into the visible chat answer.
+import { randomUUID } from "node:crypto";
 import type {
   Chat,
   ChatHistoryEntry,
@@ -20,9 +21,18 @@ import {
   listChatMessages,
 } from "../store/chats";
 import { curateReply } from "../memory/curator";
+import { parseMemoryEvents } from "../memory/events";
+import { parseAutomations } from "../automation-emitter";
+import { parseSurfaces } from "../surface-emitter";
 import { getAgentConcurrency } from "../store/concurrency";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import { stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
+import { buildAgentAppRunnerEnv } from "../runtime/env-resolver";
+import {
+  createUntrustedRuntimeFailure,
+  UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
+} from "../runtime/untrusted-error";
+import { SURFACE_INTENT_MARKER } from "../runtime/runner";
 import { tryRecordRunEvent } from "../store/run-events";
 import {
   defaultWorkloadAllocation,
@@ -92,6 +102,8 @@ export interface BorrowedTaskForceParams {
   taskForceKind?: "hub" | "agent-group";
   taskForceSpecs?: BorrowedAgentSpec[];
   active: RuntimeStatus;
+  /** Every currently usable runtime; swarm workers may receive different ones. */
+  runtimes?: RuntimeStatus[];
   picked: { runner: Runner; label: string };
   /** Explicit scoped selection wins over parent-AI workload allocation. */
   runtimeOverride?: AgentRuntimeOverride | null;
@@ -99,10 +111,14 @@ export interface BorrowedTaskForceParams {
   mcpConfigPath?: string;
   mcpAllowedTools?: string[];
   mcpCodexConfigArgs?: string[];
+  /** Main-minted opaque MCP aliases for a one-run Agent App grant. */
+  agentAppMcpRuntimeEnv?: NodeJS.ProcessEnv;
   runnerEnv?: NodeJS.ProcessEnv;
   locale: RuntimeLocale;
   sink: EventSink;
   signal?: AbortSignal;
+  /** Agentlas-owned Goal + UltraCode harness; never a user-managed CLI toggle. */
+  stormbreakerMode?: boolean;
 }
 
 function cleanString(value: unknown): string {
@@ -205,7 +221,7 @@ function modelLabel(active: RuntimeStatus): string {
 }
 
 function taskForcePermission(p: BorrowedTaskForceParams): RunnerRequest["permission"] {
-  return p.req.appsGenerateMode ? "read" : p.req.permissions;
+  return p.req.agentAppMode || p.req.appsGenerateMode ? "read" : p.req.permissions;
 }
 
 function taskForceAllowsTools(p: BorrowedTaskForceParams): boolean {
@@ -222,17 +238,33 @@ function taskForcePermissionLabel(permission: RunnerRequest["permission"]): stri
 
 function taskForceRunnerBase(p: BorrowedTaskForceParams): Pick<
   RunnerRequest,
-  "permission" | "mcpConfigPath" | "mcpAllowedTools" | "mcpCodexConfigArgs" | "env"
+  "permission" | "mcpConfigPath" | "mcpAllowedTools" | "mcpCodexConfigArgs" | "env" | "untrustedNoTools" | "untrustedAllowedMcpTools"
 > {
   const permission = taskForcePermission(p);
-  const toolsAllowed = taskForceAllowsTools(p);
+  const agentAppAllowedTools = p.req.agentAppMode && p.mcpConfigPath && p.mcpAllowedTools?.length &&
+    p.mcpAllowedTools.every((tool) => /^mcp__brave-search__(?:brave_web_search|brave_local_search)$/.test(tool))
+    ? p.mcpAllowedTools
+    : undefined;
+  const toolsAllowed = !p.req.agentAppMode && taskForceAllowsTools(p);
   return {
     permission,
-    mcpConfigPath: toolsAllowed ? p.mcpConfigPath : undefined,
-    mcpAllowedTools: toolsAllowed ? p.mcpAllowedTools : undefined,
+    mcpConfigPath: agentAppAllowedTools ? p.mcpConfigPath : toolsAllowed ? p.mcpConfigPath : undefined,
+    mcpAllowedTools: agentAppAllowedTools ?? (toolsAllowed ? p.mcpAllowedTools : undefined),
     mcpCodexConfigArgs: toolsAllowed ? p.mcpCodexConfigArgs : undefined,
-    env: toolsAllowed ? p.runnerEnv : undefined,
+    env: p.req.agentAppMode
+      ? buildAgentAppRunnerEnv(p.runnerEnv ?? process.env, p.agentAppMcpRuntimeEnv)
+      : toolsAllowed
+        ? p.runnerEnv
+        : undefined,
+    untrustedNoTools: p.req.agentAppMode === true,
+    untrustedAllowedMcpTools: agentAppAllowedTools,
   };
+}
+
+function taskForceSessionId(p: BorrowedTaskForceParams, suffix: string): string {
+  return p.req.agentAppMode
+    ? `site-agent-app:${p.req.runId ?? "run"}:${suffix}:${randomUUID()}`
+    : `${p.chat.id}:${suffix}`;
 }
 
 export function redactSensitiveText(text: string): string {
@@ -244,6 +276,14 @@ export function redactSensitiveText(text: string): string {
       /\b(api[_-]?key|token|secret|password|passwd|pwd|cookie|session|authorization)\b\s*[:=]\s*['"]?[^\s'"]{8,}/gi,
       "[redacted-secret]",
     );
+}
+
+function cleanAgentAppControlBlocks(text: string): string {
+  const withoutContinuation = stripStormbreakerContinueMarker(text).text;
+  const withoutIntent = withoutContinuation.split(SURFACE_INTENT_MARKER).join("");
+  const withoutSurface = parseSurfaces(withoutIntent).cleanedText;
+  const withoutAutomation = parseAutomations(withoutSurface).cleanedText;
+  return parseMemoryEvents(withoutAutomation).cleanedText.trim();
 }
 
 function redactEventValue(value: string | undefined): string | undefined {
@@ -710,7 +750,7 @@ async function runBorrowedAgentTurn(
       (spec.source === "installed" || spec.source === "firm-node") && spec.installedAgentId
         ? getAgentById(spec.installedAgentId)
         : null;
-    const ontology = installedAgent ? await buildAgentRuntimeOntologyContext({
+    const ontology = !p.req.agentAppMode && installedAgent ? await buildAgentRuntimeOntologyContext({
       runSessionId: p.req.runId ?? `task-force:${p.chat.id}`,
       installedAgent,
       projectId: p.chat.projectId,
@@ -727,15 +767,15 @@ async function runBorrowedAgentTurn(
         ].filter(Boolean).join("\n\n"),
         history: [],
         userPrompt: packetToPrompt(packet, p.req.userPrompt),
-        images: p.req.images,
+        images: p.req.agentAppMode ? undefined : p.req.images,
         backendLabel: p.picked.label,
         model: active.model ?? undefined,
         longContext: active.longContextEnabled ?? false,
         effort: active.effort ?? undefined,
         signal: link.signal,
         ...runnerBase,
-        cwd: p.workingFolder ?? undefined,
-        chatId: `${p.chat.id}:borrow:${spec.slug}`,
+        cwd: p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
+        chatId: taskForceSessionId(p, `borrow:${spec.slug}`),
         locale: p.locale,
       },
       {
@@ -754,9 +794,29 @@ async function runBorrowedAgentTurn(
       status: p.locale === "ko" ? `${spec.name} 완료` : `${spec.name} completed`,
       tokens: result.tokens,
     }));
-    return { spec, packet, text: redactSensitiveText(result.text), ok: true, tokens: result.tokens };
+    const redactedText = redactSensitiveText(result.text);
+    return {
+      spec,
+      packet,
+      text: p.req.agentAppMode ? cleanAgentAppControlBlocks(redactedText) : redactedText,
+      ok: true,
+      tokens: result.tokens,
+    };
   } catch (err) {
     if (p.signal?.aborted) throw err;
+    if (p.req.agentAppMode) {
+      p.sink(tag({
+        kind: "tool-use",
+        done: true,
+        status: p.locale === "ko" ? `${spec.name} 실패` : `${spec.name} failed`,
+      }));
+      return {
+        spec,
+        packet,
+        text: UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
+        ok: false,
+      };
+    }
     const message = timedOut
       ? p.locale === "ko"
         ? "응답 시간 초과"
@@ -827,16 +887,16 @@ async function runPlanner(
     {
       systemPrompt: buildPlannerSystemPrompt(p.orchestratorAgent, p.locale, taskForcePermission(p)),
       history,
-      userPrompt: buildPlannerPrompt(specs, p.req.userPrompt, p.workingFolder),
-      images: p.req.images,
+      userPrompt: buildPlannerPrompt(specs, p.req.userPrompt, p.req.agentAppMode ? undefined : p.workingFolder),
+      images: p.req.agentAppMode ? undefined : p.req.images,
       backendLabel: p.picked.label,
       model: p.active.model ?? undefined,
       longContext: p.active.longContextEnabled ?? false,
       effort: p.active.effort ?? undefined,
       signal: p.signal,
       ...taskForceRunnerBase(p),
-      cwd: p.workingFolder ?? undefined,
-      chatId: `${p.chat.id}:borrow-orchestrator`,
+      cwd: p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
+      chatId: taskForceSessionId(p, "borrow-orchestrator"),
       locale: p.locale,
     },
     {
@@ -885,16 +945,28 @@ async function runPlanner(
   };
 }
 
-export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams): Promise<void> {
+async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams): Promise<void> {
   const overrideSpecs = uniqSpecs(p.taskForceSpecs);
+  if (p.req.agentAppMode) {
+    if (overrideSpecs.length === 0) {
+      throw new Error("Agent App groups require pre-resolved installed-agent specifications.");
+    }
+    if (overrideSpecs.some((spec) => (
+      (spec.source !== "installed" && spec.source !== "firm-node") || !spec.installedAgentId
+    ))) {
+      throw new Error("Agent App groups may contain installed local agents only.");
+    }
+  }
   const slugs = overrideSpecs.length > 0 ? overrideSpecs.map((spec) => spec.slug) : uniqSlugs(p.req.borrowAgents);
   if (slugs.length < 1 || (overrideSpecs.length === 0 && slugs.length < 2)) {
     throw new Error("Task force requires runnable agents.");
   }
 
-  const history = listChatMessages(p.chat.id, 80);
-  appendChatMessage(p.chat.id, "user", p.req.userPrompt);
-  if (history.length === 0) autoTitleFromFirstMessage(p.chat.id, p.req.userPrompt);
+  const history = p.req.agentAppMode ? [] : listChatMessages(p.chat.id, 80);
+  if (!p.req.agentAppMode) {
+    appendChatMessage(p.chat.id, "user", p.req.userPrompt);
+    if (history.length === 0) autoTitleFromFirstMessage(p.chat.id, p.req.userPrompt);
+  }
 
   p.sink({
     kind: "tool-use",
@@ -952,21 +1024,23 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
     model: modelLabel(synthesisActive),
   });
 
-  const synthesisOntology = await buildAgentRuntimeOntologyContext({
-    runSessionId: p.req.runId ?? `task-force:${p.chat.id}`,
-    installedAgent: p.orchestratorAgent,
-    projectId: p.chat.projectId,
-    projectPath: p.workingFolder,
-    runtimeKind: synthesisActive.kind,
-    task: p.req.userPrompt,
-    includeOperational: false,
-  });
+  const synthesisOntology = p.req.agentAppMode
+    ? null
+    : await buildAgentRuntimeOntologyContext({
+        runSessionId: p.req.runId ?? `task-force:${p.chat.id}`,
+        installedAgent: p.orchestratorAgent,
+        projectId: p.chat.projectId,
+        projectPath: p.workingFolder,
+        runtimeKind: synthesisActive.kind,
+        task: p.req.userPrompt,
+        includeOperational: false,
+      });
 
   const final = await p.picked.runner(
     {
       systemPrompt: [
         buildSynthesisSystemPrompt(p.orchestratorAgent, p.locale, taskForcePermission(p)),
-        synthesisOntology.prompt,
+        synthesisOntology?.prompt,
       ].filter(Boolean).join("\n\n"),
       history,
       userPrompt: buildSynthesisPrompt({
@@ -975,15 +1049,15 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
         packets: plan.packets,
         results,
       }),
-      images: p.req.images,
+      images: p.req.agentAppMode ? undefined : p.req.images,
       backendLabel: p.picked.label,
       model: synthesisActive.model ?? undefined,
       longContext: synthesisActive.longContextEnabled ?? false,
       effort: synthesisActive.effort ?? undefined,
       signal: p.signal,
       ...taskForceRunnerBase(p),
-      cwd: p.workingFolder ?? undefined,
-      chatId: `${p.chat.id}:borrow-synthesis`,
+      cwd: p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
+      chatId: taskForceSessionId(p, "borrow-synthesis"),
       locale: p.locale,
     },
     {
@@ -1011,32 +1085,36 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
   );
 
   const continuation = stripStormbreakerContinueMarker(redactSensitiveText(final.text));
-  let displayText = continuation.text;
-  if (continuation.shouldContinue) {
+  let displayText = p.req.agentAppMode
+    ? cleanAgentAppControlBlocks(continuation.text)
+    : continuation.text;
+  if (!p.req.agentAppMode && continuation.shouldContinue) {
     const boundaryNote = p.locale === "ko"
       ? "안전 경계: 다중 Hub/에이전트 그룹 작업은 로컬 단일 에이전트 자동화로 대체하지 않습니다. 계속하려면 같은 조합으로 다시 실행해 모든 Hub bundle을 재검증해야 합니다."
       : "Safety boundary: a multi-Hub or Agent Group run is never replaced by a local single-agent continuation. Resume with the same roster so every Hub bundle is revalidated.";
     displayText = [displayText, boundaryNote].filter(Boolean).join("\n\n");
     p.sink({ kind: "tool-use", status: boundaryNote });
   }
-  try {
-    const curated = curateReply(displayText, {
-      projectPath: p.workingFolder ?? null,
-      projectId: p.chat.projectId ?? null,
-      agentId: p.chat.agentId,
-      chatId: p.chat.id,
-      runId: p.req.runId,
-      nodeId: orchestratorId,
-      cwdAtRequest: p.workingFolder ?? null,
-      // 종합문은 여러 워커의 혼합 산출물이라 단일 borrowed-agent의 소유 학습으로 볼 수 없다.
-      // 결정론 큐레이터가 agent_repo 제안을 project/session으로 강등하고 출처를 기록한다.
-      sourceProvenance: "task-force-synthesis",
-    });
-    displayText = redactSensitiveText(curated.cleanedText || displayText);
-  } catch {
-    // Curator failures should not block the user's task-force answer.
+  if (!p.req.agentAppMode) {
+    try {
+      const curated = curateReply(displayText, {
+        projectPath: p.workingFolder ?? null,
+        projectId: p.chat.projectId ?? null,
+        agentId: p.chat.agentId,
+        chatId: p.chat.id,
+        runId: p.req.runId,
+        nodeId: orchestratorId,
+        cwdAtRequest: p.workingFolder ?? null,
+        // 종합문은 여러 워커의 혼합 산출물이라 단일 borrowed-agent의 소유 학습으로 볼 수 없다.
+        // 결정론 큐레이터가 agent_repo 제안을 project/session으로 강등하고 출처를 기록한다.
+        sourceProvenance: "task-force-synthesis",
+      });
+      displayText = redactSensitiveText(curated.cleanedText || displayText);
+    } catch {
+      // Curator failures should not block the user's task-force answer.
+    }
   }
-  appendChatMessage(p.chat.id, "assistant", displayText);
+  if (!p.req.agentAppMode) appendChatMessage(p.chat.id, "assistant", displayText);
   p.sink({
     kind: "tool-use",
     done: true,
@@ -1049,4 +1127,15 @@ export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams)
     tokens: final.tokens,
   });
   p.sink({ kind: "final", text: displayText, tokens: final.tokens });
+}
+
+export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams): Promise<void> {
+  try {
+    await runBorrowedTaskForceInvocationInternal(p);
+  } catch (error) {
+    if (!p.req.agentAppMode) throw error;
+    // Planner/synthesis CLI errors can include host stderr and paths. The
+    // Agent App caller receives one fixed failure without preserving `cause`.
+    throw createUntrustedRuntimeFailure();
+  }
 }
