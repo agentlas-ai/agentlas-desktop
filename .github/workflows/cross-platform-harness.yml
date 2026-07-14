@@ -82,7 +82,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: agentlas-ai/Agentlas-OS
-          ref: e024b68821b28aa40c7a22c94ac3832fed4155dd
+          ref: d741da796289678c38fac1059f0473f271d0f7e9
           path: Agentlas-OS
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -93,7 +93,7 @@ jobs:
       - name: Verify Core source pin
         working-directory: Agentlas-OS
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "e024b68821b28aa40c7a22c94ac3832fed4155dd"
+        run: test "$(git rev-parse HEAD)" = "d741da796289678c38fac1059f0473f271d0f7e9"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

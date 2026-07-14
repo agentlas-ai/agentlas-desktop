@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.8.25 — 2026-07-14 (local integration candidate; not released)
+
+### Added
+
+- **Agentlas Site can turn an owned agent, team, firm, or saved group into an
+  isolated Agent App.** Astryx scaffolding, local preview, verified publishing,
+  thumbnails, and local-project deletion now share one Main-owned contract.
+  Deleting the local project never implies that a remote deployment was
+  deleted; Desktop shows the retained deployment and requires acknowledgement.
+- **Agent App creation now reviews system-wide MCPs before scaffolding.** The
+  native review makes keyless/key-required state, readiness, and blocked
+  declarations visible. Consent belongs to the exact app project and readiness
+  snapshot; it is never inferred from an agent package or a stale card.
+- **A minimal keyless System Time MCP proves the safe attachment path.** It is a
+  Desktop-global MCP, not agent-owned state, and exposes only current-time and
+  timezone-conversion tools. Its command, source digest, environment, tool set,
+  generated config, and one-run binding are revalidated before dispatch.
+
+### Fixed
+
+- **One broken MCP can no longer starve an Agent App.** Decline, missing keys,
+  malformed legacy registry rows, connection/config/runtime failure, or
+  readiness races remove the affected MCP and continue the app in stateless
+  no-tool mode. Unpinned Brave Search remains visible as blocked and cannot
+  receive a key or execute until installer provenance is cryptographically
+  bound.
+- **MCP cards now reflect fresh Main-process state.** A check mark requires both
+  durable consent and current readiness; blocked, changed, revoked, and offline
+  states remain distinct. Launch respects an existing approval or decline and
+  prompts again only after a relevant state change or explicit user review.
+- **Active Desktop agents can read existing project memory without mutating it.**
+  Canonical root and `.agentlas` identities are bound at activation, and stable
+  descriptor reads reject symlinks, non-regular files, oversize inputs, and
+  mid-read replacement. A project-identity failure drops only project memory;
+  the agent's own global memory remains available. Site, Agent App, and Mobile
+  restricted runs still receive no project memory.
+- **Model allocation uses exact host evidence instead of guessed capacity.**
+  Codex inventory parsing now binds per-model effective context, tool/image
+  support, and supported reasoning levels; unsupported `max` requests clamp to
+  the highest real level. Builder, task-force, firm, and swarm receipts are
+  reconciled with the effort actually sent by Codex and contain no prompt,
+  hidden rationale, path, account, or secret data.
+- **Project Foundation promotion is fail-closed.** Agentlas OS v1.1.28
+  first-contact must return the complete merge-only/privacy receipt before
+  Desktop marks a folder active. This does not introduce a vendor model alias or
+  deterministic model table. The fallback is limited to a genuinely
+  absent Core/Python runtime; lock contention, partial receipts, and unsafe
+  `.gitignore` state are not treated as success.
+
+### Boundaries and edge cases
+
+- Existing activated folders without the new filesystem identity stay safe but
+  omit project-local memory until the next authorized writable contact or an
+  explicit activation refreshes the binding.
+- Agent App MCP execution is intentionally limited to the audited System Time
+  server in this candidate. Other declarations remain visible but blocked.
+- Internal plans, QA receipts, and private screenshots are now ignored; the
+  public documentation allowlist remains tracked.
+
 ## 0.8.24 — 2026-07-14
 
 ### Fixed

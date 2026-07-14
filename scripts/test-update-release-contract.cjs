@@ -9,7 +9,11 @@ const yaml = require("js-yaml");
 const root = path.resolve(__dirname, "..");
 const pkg = require(path.join(root, "package.json"));
 const lock = require(path.join(root, "package-lock.json"));
-const manifest = require(path.join(root, "Hephaestus", "manifest.json"));
+const embeddedRuntimeRoot = path.resolve(
+  root,
+  process.env.HEPHAESTUS_RUNTIME_ROOT || "Hephaestus",
+);
+const manifest = require(path.join(embeddedRuntimeRoot, "manifest.json"));
 const { parseUpdaterCompatibility } = require("../dist/electron/updater/controller.js");
 const {
   MACOS_MINIMUM_SYSTEM_VERSION,
@@ -63,7 +67,7 @@ assert.match(runtimeSource.commit, /^[0-9a-f]{40}$/, "runtime source must pin an
 assert.equal(runtimeSource.commit, "d741da796289678c38fac1059f0473f271d0f7e9", "Agentlas OS v1.1.28 commit drift");
 assert.equal(compatibility.bundledRuntimeVersion, manifest.version, "feed runtime must match the bundled Hephaestus manifest");
 assert.equal(
-  spawnSync("git", ["-C", path.join(root, "Hephaestus"), "rev-parse", "HEAD^{commit}"], { encoding: "utf8" }).stdout.trim(),
+  spawnSync("git", ["-C", embeddedRuntimeRoot, "rev-parse", "HEAD^{commit}"], { encoding: "utf8" }).stdout.trim(),
   runtimeSource.commit,
   "the tested embedded checkout must match the immutable package commit",
 );

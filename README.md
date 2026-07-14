@@ -69,6 +69,23 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-14 · v0.8.25 local candidate — Agent Apps, safe MCP consent, and
+  evidence-based model allocation** — Agentlas Site can scaffold an isolated
+  Astryx app around an owned agent, team, firm, or saved group. Before the first
+  build, Desktop shows the exact system-wide MCP recommendation and asks for
+  consent; missing keys, decline, stale readiness, malformed legacy rows, and
+  connection failure all continue safely without tools. Only the audited
+  keyless System Time MCP can currently attach; unpinned Brave Search remains
+  visible but blocked. Active Desktop agents can read bounded project memory
+  through canonical, replacement-safe identities, while Site/Agent App/Mobile
+  restricted surfaces remain project-memory-free. Agentlas OS v1.1.28 still
+  completes the canonical first-contact privacy contract
+  before agent work starts. Codex allocation uses exact live-verified
+  context, capability, and reasoning-effort metadata and records the effort actually applied without
+  storing prompts or secrets. This entry is a
+  local integration candidate until cross-platform CI and the release owner
+  promote it; v0.8.24 remains the current source release.
+
 - **2026-07-14 · v0.8.24 Unified plugin first contact** — Desktop embeds
   Agentlas OS v1.1.28, so Codex, Claude Code, MCP, Network, owner Cloud, Storm,
   Terminal, and Desktop all install the same merge-only project soul, memory
