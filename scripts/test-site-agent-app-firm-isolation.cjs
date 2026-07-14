@@ -244,7 +244,7 @@ async function main() {
 
   cleanupElectronFixture(tmp, "site-firm-isolation");
   console.log("site agent app firm isolation behavior ok");
-  app.quit();
+  app.exit(0);
 }
 
 main().catch((error) => {

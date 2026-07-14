@@ -411,7 +411,7 @@ async function main() {
     exec.probeCliVersion = originalProbeCliVersion;
     exec.spawnCli = originalSpawnCli;
     cleanupElectronFixture(tmp, "site-claude-isolation");
-    app.quit();
+    app.exit(0);
   }
 }
 

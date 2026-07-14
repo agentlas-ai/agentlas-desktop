@@ -317,7 +317,7 @@ async function main() {
 
   console.log("site Agent App prebuild MCP prompt + system-global keyless contract ok");
   cleanupElectronFixture(tmp, "site-prebuild-mcp");
-  app.quit();
+  app.exit(0);
 }
 
 main().catch((error) => {

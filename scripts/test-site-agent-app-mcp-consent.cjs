@@ -190,7 +190,7 @@ async function main() {
 
   console.log("site agent app MCP recommendation and consent receipt ok");
   cleanupElectronFixture(tmp, "site-mcp-consent");
-  app.quit();
+  app.exit(0);
 }
 
 main().catch((error) => {

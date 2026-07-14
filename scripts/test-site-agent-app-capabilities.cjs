@@ -262,7 +262,7 @@ async function main() {
 
   cleanupElectronFixture(tmp, "site-capabilities");
   console.log("site agent app declared capability behavior ok");
-  app.quit();
+  app.exit(0);
 }
 
 main().catch((error) => {

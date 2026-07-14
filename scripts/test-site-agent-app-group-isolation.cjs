@@ -168,7 +168,7 @@ async function main() {
 
   cleanupElectronFixture(tmp, "site-group-isolation");
   console.log("site agent app group isolation behavior ok");
-  app.quit();
+  app.exit(0);
 }
 
 main().catch((error) => {
