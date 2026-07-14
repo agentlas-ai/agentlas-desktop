@@ -248,7 +248,11 @@ app.whenReady().then(async () => {
     slowRequest.on("error", slowReject);
     slowRequest.flushHeaders();
     slowRequest.write('{"inputs":{"topic":"slow');
-    for (let attempt = 0; attempt < 50 && !siteAgentAppRuntimeStatus(project.id).activeRun; attempt += 1) {
+    // Hosted macOS runners occasionally take longer than 500 ms to dispatch a
+    // freshly flushed loopback request. Wait for the server-side reservation,
+    // not for an arbitrary fast-machine deadline; the assertion still proves
+    // the slot is held while the request body remains incomplete.
+    for (let attempt = 0; attempt < 500 && !siteAgentAppRuntimeStatus(project.id).activeRun; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.equal(siteAgentAppRuntimeStatus(project.id).activeRun, true, "an incomplete authenticated body must reserve the run slot");

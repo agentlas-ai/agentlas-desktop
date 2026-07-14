@@ -284,7 +284,7 @@ async function main() {
   // replacement race without turning the contract into a multi-minute gate.
   const replacementIterations = process.platform === "win32" ? 256 : 3_000;
   const readIterations = process.platform === "win32" ? 1_000 : 4_000;
-  const swapScript = `const fs=require("node:fs"),p=process.argv[1],a=process.argv[2],b=process.argv[3],n=Number(process.argv[4]);for(let i=0;i<n;i++){const t=p+"."+process.pid+"."+i;fs.writeFileSync(t,i%2?a:b,{mode:0o600});if(process.platform==="win32")fs.rmSync(p,{force:true});fs.renameSync(t,p);}`;
+  const swapScript = `const fs=require("node:fs"),p=process.argv[1],a=process.argv[2],b=process.argv[3],n=Number(process.argv[4]),wait=()=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,2),retry=(fn)=>{for(let j=0;j<500;j++){try{return fn()}catch(e){if(!["EBUSY","EACCES","EPERM"].includes(e.code)||j===499)throw e;wait()}}};for(let i=0;i<n;i++){const t=p+"."+process.pid+"."+i;fs.writeFileSync(t,i%2?a:b,{mode:0o600});if(process.platform==="win32")retry(()=>fs.rmSync(p,{force:true}));retry(()=>fs.renameSync(t,p));}`;
   const swapper = spawn(process.execPath, ["-e", swapScript, raceFile, raceA, raceB, String(replacementIterations)], {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, stdio: "ignore",
   });
