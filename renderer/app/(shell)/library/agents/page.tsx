@@ -2483,6 +2483,18 @@ function ExperiencePanel({
   onChanged: () => void;
 }) {
   const ko = locale === "ko";
+  const taskLabel = (task: string) => {
+    const short = task.replace("agentlas.task.v1/", "");
+    if (!ko) return short.replaceAll("-", " ");
+    const labels: Record<string, string> = {
+      "browser-automation": "브라우저 자동화",
+      "visual-design": "시각 디자인",
+      research: "리서치",
+      writing: "글쓰기",
+      coding: "개발",
+    };
+    return labels[short] ?? short.replaceAll("-", " ");
+  };
   const [packs, setPacks] = useState<ExperiencePackRecord[]>([]);
   const [selectedPackId, setSelectedPackId] = useState("");
   const [candidates, setCandidates] = useState<ExperienceCandidateRecord[]>([]);
@@ -2507,7 +2519,6 @@ function ExperiencePanel({
   const [tasteTaskInputHash, setTasteTaskInputHash] = useState("");
   const [tasteGenerationCohort, setTasteGenerationCohort] = useState("");
   const [tasteGenerationAttested, setTasteGenerationAttested] = useState(false);
-  const [experienceOwner, setExperienceOwner] = useState(ko ? "현재 로그인 계정 (저장 시 서버가 확정)" : "Current signed-in account (confirmed by server on save)");
   const [packName, setPackName] = useState("");
   const [projectGrant, setProjectGrant] = useState<FsPathGrant | null>(null);
   const projectPath = projectGrant?.path ?? "";
@@ -2572,14 +2583,6 @@ function ExperiencePanel({
   }, []);
 
   useEffect(() => {
-    void requireBridge().auth.getSession().then((session) => {
-      const legacy = session as typeof session & { account?: { email?: string; name?: string } };
-      const label = session.email || session.name || legacy.account?.email || legacy.account?.name;
-      if (label) setExperienceOwner(label);
-    }).catch(() => {});
-  }, [ko]);
-
-  useEffect(() => {
     setError("");
     void loadPacks().catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
   }, [loadPacks]);
@@ -2642,8 +2645,8 @@ function ExperiencePanel({
 
   const promoteCandidate = async (candidate: ExperienceCandidateRecord) => {
     const confirmed = window.confirm(ko
-      ? "이 항목을 직접 검수했으며 로컬 경험으로 승격할까요? 이는 공식 검증(verified)이 아니라 사용자 확인(attested)입니다."
-      : "Promote this reviewed item as a local Experience? This is user-attested, not officially verified.");
+      ? "이 내용을 직접 확인했나요? 확인하면 이 에이전트가 다음 작업에서 참고할 경험으로 저장합니다."
+      : "Have you reviewed this content? Confirm to save it as experience this agent can use in future work.");
     if (!confirmed) return;
     setBusy(true);
     setError("");
@@ -2660,7 +2663,7 @@ function ExperiencePanel({
       });
       if (selectedPack) await loadPackDetails(selectedPack.id);
       onChanged();
-      showToast(ko ? "로컬 경험으로 승격했습니다(attested)." : "Promoted as a local attested Experience.");
+      showToast(ko ? "검토한 경험으로 저장했습니다." : "Saved as reviewed experience.");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -2706,8 +2709,8 @@ function ExperiencePanel({
   const requestPublicVerification = async () => {
     if (!selectedPack) return;
     const confirmed = window.confirm(ko
-      ? "이 경험의 공개 검증을 요청할까요? 요청만 접수되며, 평가기가 통과시키기 전에는 공개 활성화나 자동 대여가 되지 않습니다."
-      : "Request public verification for this Experience? This only submits a request; it cannot become public or rentable until a server evaluator approves it.");
+      ? "구매자에게 보일 칩 이름과 좋아지는 점을 Hub에 등록할까요? 원본 기억은 전송하지 않습니다."
+      : "Submit the buyer-facing chip name and benefits to Hub? Original memory is not sent.");
     if (!confirmed) return;
     setBusy(true);
     setError("");
@@ -2716,8 +2719,8 @@ function ExperiencePanel({
       await loadPackDetails(selectedPack.id);
       onChanged();
       showToast(requested.state === "verification-requested" || requested.state === "verification-pending"
-        ? (ko ? "공개 검증 요청이 접수됐습니다. 아직 공개 활성 상태는 아닙니다." : "Public verification was requested. It is not public-active yet.")
-        : (ko ? "비공개 초안은 저장됐지만 공개 검증 접수는 아직 확인되지 않았습니다." : "The private draft was saved, but public verification is not confirmed yet."));
+        ? (ko ? "Hub 등록 요청을 보냈습니다. 안전 확인이 끝나면 공개됩니다." : "Submitted to Hub. It becomes public after the safety review.")
+        : (ko ? "비공개로 저장했습니다. Hub 등록은 아직 요청되지 않았습니다." : "Saved privately. Hub listing has not been requested yet."));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -2729,6 +2732,19 @@ function ExperiencePanel({
     setOperationalSourceIds((current) => current.includes(candidateId)
       ? current.filter((id) => id !== candidateId)
       : [...current, candidateId].sort());
+  };
+
+  const fillBuyerCopyDraft = () => {
+    if (!selectedPack) return;
+    const selected = candidates.filter((candidate) => operationalSourceIds.includes(candidate.id));
+    if (!selected.length) return;
+    if (!operationalTitle.trim()) setOperationalTitle(selectedPack.name);
+    if (!operationalInstructions.trim()) {
+      setOperationalInstructions(selected.map((candidate) => candidate.summary.trim()).filter(Boolean).join("\n"));
+    }
+    showToast(ko
+      ? "선택한 경험에서 구매자용 소개 초안을 채웠습니다. 개인정보가 없는 표현으로 다듬어 주세요."
+      : "Filled buyer-facing copy from the selected experience. Review it for clear, non-personal wording.");
   };
 
   const saveOperationalPublicProjection = async () => {
@@ -2752,7 +2768,7 @@ function ExperiencePanel({
       onChanged();
       showToast(saved.privacyIssueCodes.length > 0
         ? (ko ? "초안은 저장됐지만 공개 안전 검사를 통과하지 못했습니다." : "Draft saved, but it did not pass the public-safety scan.")
-        : (ko ? "일반화된 공개 사본을 로컬에 저장했습니다." : "Saved the generalized public copy locally."));
+        : (ko ? "구매자에게 보일 소개를 저장했습니다." : "Saved the buyer-facing copy."));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -2763,8 +2779,8 @@ function ExperiencePanel({
   const confirmOperationalPublicProjection = async () => {
     const projection = operationalPublicProjections[0];
     if (!projection || !window.confirm(ko
-      ? "선택한 비공개 원문이 아니라, 이 일반화된 사본만 공개 검증에 사용할까요?"
-      : "Use only this generalized copy—not the selected private sources—for public verification?")) return;
+      ? "화면에 보이는 칩 이름과 좋아지는 점만 Hub 등록에 사용할까요? 원본 기억은 계속 비공개입니다."
+      : "Use only the visible chip name and benefits for the Hub listing? Original memory stays private.")) return;
     setBusy(true);
     setError("");
     try {
@@ -2775,7 +2791,7 @@ function ExperiencePanel({
       });
       setOperationalPublicProjections([confirmed]);
       onChanged();
-      showToast(ko ? "공개 안전 사본을 명시적으로 확인했습니다." : "Explicitly confirmed the public-safe copy.");
+      showToast(ko ? "개인정보가 없는 구매자용 소개임을 확인했습니다." : "Confirmed that the buyer-facing copy contains no personal information.");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -2816,7 +2832,6 @@ function ExperiencePanel({
   })[state];
 
   const latestCloud = cloudUploads[0] ?? null;
-  const authoritativeOwner = latestCloud?.receipt?.ownerWorkspaceRef ?? experienceOwner;
   const operationalProjection = operationalPublicProjections[0] ?? null;
   const operationalInstructionLines = operationalInstructions.split("\n").map((line) => line.trim()).filter(Boolean);
   const operationalTasks = [...new Set(candidates
@@ -2954,6 +2969,34 @@ function ExperiencePanel({
 
   return (
     <div data-testid="experience-panel" style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 900 }}>
+      <section style={{ padding: "16px 0 14px", borderBottom: "1px solid var(--paper-edge)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <div>
+            <span style={{ color: "var(--muted-deep)", fontSize: 11, fontWeight: 750 }}>{ko ? "이 에이전트가 배운 것" : "WHAT THIS AGENT LEARNED"}</span>
+            <h3 style={{ margin: "5px 0 0", fontSize: 20 }}>{ko ? "경험 관리" : "Experience"}</h3>
+          </div>
+          <span style={{ padding: "5px 9px", borderRadius: 999, background: latestCloud?.state === "public-active" ? "var(--green-soft)" : "var(--paper-2)", color: latestCloud?.state === "public-active" ? "var(--green-deep)" : "var(--ink-soft)", fontSize: 11, fontWeight: 750 }}>
+            {latestCloud ? cloudStateLabel(latestCloud.state) : (ko ? "내 컴퓨터에만 저장" : "Saved on this Mac")}
+          </span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", marginTop: 14, borderTop: "1px solid var(--paper-edge)", borderBottom: "1px solid var(--paper-edge)" }}>
+          {[
+            [ko ? "경험 묶음" : "Collections", packs.length],
+            [ko ? "검토한 경험" : "Reviewed", receipts.length],
+            [ko ? "공개 준비" : "Public-ready", operationalPublicReady ? (ko ? "완료" : "Ready") : (ko ? "필요" : "Needed")],
+          ].map(([label, value], index) => (
+            <div key={String(label)} style={{ padding: "10px 12px", borderLeft: index ? "1px solid var(--paper-edge)" : undefined }}>
+              <span style={{ display: "block", color: "var(--muted-deep)", fontSize: 10.5 }}>{label}</span>
+              <strong style={{ display: "block", marginTop: 3, fontSize: 14 }}>{value}</strong>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <details style={{ borderBottom: "1px solid var(--paper-edge)", paddingBottom: 12 }}>
+        <summary style={{ minHeight: 42, display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontSize: 12.5, fontWeight: 750 }}>
+          <span>{ko ? "취향 경험 후보" : "Taste candidates"}</span><span>{tasteDrafts.length}</span>
+        </summary>
       <section data-testid="local-taste-drafts" style={{ background: "color-mix(in srgb, var(--paper) 92%, var(--accent-soft))", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, boxShadow: "0 10px 28px color-mix(in srgb, var(--ink) 7%, transparent)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -3054,22 +3097,27 @@ function ExperiencePanel({
           </div>
         )}
       </section>
+      </details>
 
+      <details style={{ borderBottom: "1px solid var(--paper-edge)", paddingBottom: 12 }}>
+        <summary style={{ minHeight: 42, display: "flex", alignItems: "center", cursor: "pointer", fontSize: 12.5, fontWeight: 750 }}>
+          {ko ? "새 경험 묶음 만들기" : "Create a new experience collection"}
+        </summary>
       <section style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
           <h3 style={{ margin: 0, fontSize: 15 }}>{ko ? "경험 칩" : "Experience Chips"}</h3>
           <span style={{ padding: "4px 9px", borderRadius: 999, background: "var(--accent-soft)", color: "var(--accent)", fontSize: 11, fontWeight: 700 }}>
-            {ko ? "로컬 원본 · Agent와 별도 자산" : "Local source · separate asset from Agent"}
+            {ko ? "내 컴퓨터에만 저장" : "Saved only on this computer"}
           </span>
         </div>
         <p style={{ margin: "0 0 14px", color: "var(--ink-soft)", fontSize: 12.5, lineHeight: 1.55 }}>
           {ko
-            ? "Memory에서 검수된 항목을 별도 경험 자산으로 승격합니다. 원본 에이전트 패키지와 합치거나 복사하지 않으며, 같은 에이전트·프로젝트·런타임·패키지 버전에서만 사용됩니다."
-            : "Promote reviewed Memory items into a separate Experience asset. It never copies or merges the base agent package and is used only for the exact agent, project, runtime, and package version."}
+            ? "이 에이전트가 잘 해결한 방법을 골라 경험칩으로 저장합니다. 원본 기억은 이 컴퓨터에 남고, 공개하기 전에는 반드시 내용을 확인합니다."
+            : "Save reviewed ways this agent solved work as experience chips. Original memory stays on this computer and is reviewed before publishing."}
         </p>
         {!agent.packageHash && (
           <div style={{ padding: 10, borderRadius: 8, background: "var(--amber-soft)", color: "var(--amber-deep)", fontSize: 12 }}>
-            {ko ? "검증된 base package hash가 없어 경험 칩을 만들 수 없습니다." : "A verified base package hash is required before creating Experience Chips."}
+            {ko ? "먼저 이 에이전트를 Hub와 연결해야 경험칩을 만들 수 있습니다." : "Connect this agent to Hub before creating Experience Chips."}
           </div>
         )}
         <div style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1fr) auto auto", gap: 8, marginTop: 12 }}>
@@ -3082,10 +3130,11 @@ function ExperiencePanel({
           </button>
         </div>
         <small style={{ display: "block", marginTop: 8, color: "var(--muted-deep)" }}>
-          {ko ? `환경: ${activeRuntime?.kind ?? "런타임 없음"}` : `Environment: ${activeRuntime?.kind ?? "no runtime"}`}
+          {activeRuntime ? (ko ? "현재 Mac에서 사용할 수 있습니다." : "Ready to use on this Mac.") : (ko ? "사용 가능한 실행 환경이 필요합니다." : "An available runtime is required.")}
         </small>
         {error && <div role="alert" style={{ marginTop: 10, color: "var(--red-deep)", fontSize: 12 }}>{error}</div>}
       </section>
+      </details>
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(210px, 0.7fr) minmax(0, 1.8fr)", gap: 14 }}>
         <section style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 12 }}>
@@ -3095,7 +3144,7 @@ function ExperiencePanel({
             {packs.map((pack) => (
               <button key={pack.id} type="button" onClick={() => setSelectedPackId(pack.id)} data-active={pack.id === selectedPackId ? "true" : "false"} style={{ ...runtimeButtonStyle, textAlign: "left", background: pack.id === selectedPackId ? "var(--accent-soft)" : "var(--paper-2)", color: pack.id === selectedPackId ? "var(--accent)" : "var(--ink-soft)" }}>
                 <strong style={{ display: "block" }}>{pack.name}</strong>
-                <small>{pack.projectPath?.split(/[\\/]/).filter(Boolean).at(-1) ?? "global"} · {pack.basePackageHash?.slice(0, 10)}</small>
+                <small>{pack.projectPath?.split(/[\\/]/).filter(Boolean).at(-1) ?? (ko ? "전체 프로젝트" : "All projects")}</small>
               </button>
             ))}
           </div>
@@ -3107,8 +3156,8 @@ function ExperiencePanel({
           ) : (
             <>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginBottom: 12 }}>
-                <div><strong>{selectedPack.name}</strong><small style={{ display: "block", marginTop: 3, color: "var(--muted-deep)" }}>{ko ? "원본과 분리된 로컬 오버레이" : "Local overlay, separate from its base"}</small></div>
-                <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>{candidates.length} candidates · {receipts.length} attested · {intents.length} intents</span>
+                <div><strong>{selectedPack.name}</strong><small style={{ display: "block", marginTop: 3, color: "var(--muted-deep)" }}>{ko ? "이 Mac에 저장된 경험" : "Experience saved on this Mac"}</small></div>
+                <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>{ko ? `저장 ${candidates.length} · 검토 완료 ${receipts.length}` : `${candidates.length} saved · ${receipts.length} reviewed`}</span>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 8, marginBottom: 12 }}>
                 <select value={memoryId} onChange={(event) => setMemoryId(event.target.value)} style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, padding: 8, background: "var(--paper-2)", color: "var(--ink)" }}>
@@ -3123,9 +3172,9 @@ function ExperiencePanel({
                   <div key={candidate.id} style={{ border: "1px solid var(--paper-edge)", borderRadius: 9, padding: 10, background: "var(--paper-2)" }}>
                     <div style={{ display: "flex", gap: 8, justifyContent: "space-between", alignItems: "flex-start" }}>
                       <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.45 }}>{candidate.summary}</p>
-                      <span style={{ flexShrink: 0, fontSize: 10.5, fontWeight: 700, color: candidate.status === "promoted" ? "var(--green-deep)" : "var(--amber-deep)" }}>{candidate.status === "promoted" ? "ATTESTED" : candidate.status.toUpperCase()}</span>
+                      <span style={{ flexShrink: 0, fontSize: 10.5, fontWeight: 700, color: candidate.status === "promoted" ? "var(--green-deep)" : "var(--amber-deep)" }}>{candidate.status === "promoted" ? (ko ? "검토 완료" : "Reviewed") : (ko ? "검토 필요" : "Needs review")}</span>
                     </div>
-                    {candidate.status === "candidate" && <button type="button" disabled={busy} onClick={() => void promoteCandidate(candidate)} style={{ ...runtimeButtonStyle, marginTop: 8 }}>{ko ? "검수 후 승격 (attested)" : "Review & promote (attested)"}</button>}
+                    {candidate.status === "candidate" && <button type="button" disabled={busy} onClick={() => void promoteCandidate(candidate)} style={{ ...runtimeButtonStyle, marginTop: 8 }}>{ko ? "내용 확인하기" : "Review content"}</button>}
                     {candidate.status === "promoted" && (
                       <button
                         type="button"
@@ -3142,7 +3191,7 @@ function ExperiencePanel({
                         }}
                       >
                         {operationalSourceIds.includes(candidate.id) ? <IconCheck size={13} /> : <IconPlus size={13} />}
-                        {ko ? "공개 사본 소스" : "Public-copy source"}
+                        {ko ? "공개용으로 사용" : "Use in public copy"}
                       </button>
                     )}
                   </div>
@@ -3150,12 +3199,12 @@ function ExperiencePanel({
               </div>
 
               <div data-testid="operational-public-projection" style={{ marginTop: 14, padding: 12, borderRadius: 14, border: "1px solid var(--paper-edge)", background: "color-mix(in srgb, var(--paper) 88%, transparent)", boxShadow: "inset 0 1px 0 color-mix(in srgb, white 60%, transparent)" }}>
-                <div aria-label={ko ? "Operational 공개 사본 단계" : "Operational public-copy steps"} style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 7 }}>
+                <div aria-label={ko ? "구매자용 소개 준비 단계" : "Buyer-copy preparation steps"} style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 7 }}>
                   {[
                     { icon: <IconCheck size={13} />, label: ko ? "선택" : "Select", done: operationalSourceIds.length > 0 },
-                    { icon: <IconEdit size={13} />, label: ko ? "일반화" : "Generalize", done: Boolean(operationalProjection) },
-                    { icon: <IconShield size={13} />, label: ko ? "확인" : "Confirm", done: operationalPublicReady },
-                    { icon: <IconFileUp size={13} />, label: ko ? "검증" : "Verify", done: latestCloud?.requestedVisibility === "public" },
+                    { icon: <IconEdit size={13} />, label: ko ? "소개 작성" : "Write copy", done: Boolean(operationalProjection) },
+                    { icon: <IconShield size={13} />, label: ko ? "개인정보 확인" : "Privacy check", done: operationalPublicReady },
+                    { icon: <IconFileUp size={13} />, label: ko ? "Hub 등록" : "Hub listing", done: latestCloud?.requestedVisibility === "public" },
                   ].map((step) => (
                     <div key={step.label} title={step.label} style={{ minHeight: 36, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, border: "1px solid var(--paper-edge)", background: step.done ? "color-mix(in srgb, var(--green-deep) 10%, var(--paper))" : "var(--paper-2)", color: step.done ? "var(--green-deep)" : "var(--muted-deep)", fontSize: 10, fontWeight: 800 }}>
                       {step.icon}<span>{step.label}</span>
@@ -3163,15 +3212,15 @@ function ExperiencePanel({
                   ))}
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "minmax(170px, .8fr) minmax(230px, 1.2fr)", gap: 8, marginTop: 10 }}>
-                  <input aria-label={ko ? "Operational 공개 제목" : "Operational public title"} value={operationalTitle} onChange={(event) => setOperationalTitle(event.target.value)} placeholder={ko ? "범용 제목" : "Portable title"} style={tasteInputStyle} />
-                  <textarea aria-label={ko ? "Operational 공개 절차" : "Operational public instructions"} value={operationalInstructions} onChange={(event) => setOperationalInstructions(event.target.value)} placeholder={ko ? "개인·회사·경로 정보 없이, 단계마다 한 줄" : "One generalized step per line; no person, company, or local path"} rows={3} style={{ ...tasteInputStyle, resize: "vertical" }} />
-                  <select aria-label={ko ? "Operational 작업 유형" : "Operational task signature"} value={operationalTask} onChange={(event) => setOperationalTask(event.target.value)} style={tasteInputStyle}>
+                  <input aria-label={ko ? "구매자에게 보일 칩 이름" : "Buyer-facing chip name"} value={operationalTitle} onChange={(event) => setOperationalTitle(event.target.value)} placeholder={ko ? "예: 로그인 막힘을 빠르게 해결하는 경험" : "Example: Resolve sign-in blockers faster"} style={tasteInputStyle} />
+                  <textarea aria-label={ko ? "장착하면 좋아지는 점" : "What gets better after attaching"} value={operationalInstructions} onChange={(event) => setOperationalInstructions(event.target.value)} placeholder={ko ? "장착하면 더 잘하게 되는 일을 한 줄에 하나씩 적어주세요\n예: 로그인 세션이 남아 있는 브라우저를 먼저 찾아 재작업을 줄입니다" : "One buyer benefit per line\nExample: Reuses an active browser session to reduce repeated work"} rows={4} style={{ ...tasteInputStyle, resize: "vertical" }} />
+                  <select aria-label={ko ? "이 칩이 도움 되는 일" : "Work this chip helps with"} value={operationalTask} onChange={(event) => setOperationalTask(event.target.value)} style={tasteInputStyle}>
                     <option value="">{ko ? "작업 유형 선택" : "Select task"}</option>
-                    {operationalTasks.map((task) => <option key={task} value={task}>{task.replace("agentlas.task.v1/", "")}</option>)}
+                    {operationalTasks.map((task) => <option key={task} value={task}>{taskLabel(task)}</option>)}
                   </select>
-                  <div aria-label={ko ? "고정된 실행 환경" : "Pinned execution environment"} style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", minHeight: 36, padding: "6px 8px", border: "1px solid var(--paper-edge)", borderRadius: 9, background: "var(--paper-2)" }}>
+                  <div aria-label={ko ? "사용 환경" : "Supported environment"} style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", minHeight: 36, padding: "6px 8px", border: "1px solid var(--paper-edge)", borderRadius: 9, background: "var(--paper-2)", color: "var(--muted-deep)", fontSize: 10.5 }}>
                     <IconRoute size={13} style={{ color: "var(--accent)" }} />
-                    {(selectedPack.environmentProfile?.constraints ?? []).map((constraint) => <span key={constraint} title={constraint} style={{ padding: "2px 6px", borderRadius: 999, background: "var(--fill-1)", color: "var(--muted-deep)", fontSize: 9.5 }}>{constraint.split("/").at(-1)}</span>)}
+                    {ko ? "현재 Mac 환경과 호환" : "Compatible with this Mac"}
                   </div>
                 </div>
                 {operationalProjection?.privacyIssueCodes.length ? (
@@ -3180,55 +3229,38 @@ function ExperiencePanel({
                   </div>
                 ) : null}
                 <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center", marginTop: 10 }}>
-                  <button type="button" disabled={busy || operationalSourceIds.length === 0 || !operationalTitle.trim() || !operationalInstructions.trim() || !operationalTask || !selectedPack.baseAgentReleaseId} onClick={() => void saveOperationalPublicProjection()} style={runtimeButtonStyle}><IconEdit size={13} /> {ko ? "공개 사본 저장" : "Save public copy"}</button>
-                  <button type="button" disabled={busy || !operationalProjection || operationalProjectionDirty || operationalProjection.privacyIssueCodes.length > 0 || operationalPublicReady} onClick={() => void confirmOperationalPublicProjection()} style={runtimeButtonStyle}><IconShield size={13} /> {ko ? "명시적 확인" : "Explicit confirm"}</button>
+                  <button type="button" disabled={busy || operationalSourceIds.length === 0} onClick={fillBuyerCopyDraft} style={runtimeButtonStyle}><IconWand size={13} /> {ko ? "선택한 경험으로 소개 초안 만들기" : "Draft buyer copy from selection"}</button>
+                  <button type="button" disabled={busy || operationalSourceIds.length === 0 || !operationalTitle.trim() || !operationalInstructions.trim() || !operationalTask || !selectedPack.baseAgentReleaseId} onClick={() => void saveOperationalPublicProjection()} style={runtimeButtonStyle}><IconEdit size={13} /> {ko ? "소개 저장" : "Save introduction"}</button>
+                  <button type="button" disabled={busy || !operationalProjection || operationalProjectionDirty || operationalProjection.privacyIssueCodes.length > 0 || operationalPublicReady} onClick={() => void confirmOperationalPublicProjection()} style={runtimeButtonStyle}><IconShield size={13} /> {ko ? "개인정보 확인 완료" : "Privacy check complete"}</button>
                   <span title={ko ? "원본 Memory와 후보는 계속 비공개입니다." : "Original Memory and candidates remain private."} style={{ marginLeft: "auto", width: 9, height: 9, borderRadius: 999, background: operationalPublicReady ? "var(--green-deep)" : "var(--amber-deep)", boxShadow: `0 0 0 4px ${operationalPublicReady ? "var(--green-soft)" : "var(--amber-soft)"}` }} />
                 </div>
-                {!selectedPack.baseAgentReleaseId && <small style={{ display: "block", marginTop: 8, color: "var(--muted-deep)" }}>{ko ? "먼저 비공개 Cloud 저장으로 정확한 Agent 릴리스를 확인하세요." : "First save privately so Agent Cloud can resolve the exact Agent release."}</small>}
+                {!selectedPack.baseAgentReleaseId && <small style={{ display: "block", marginTop: 8, color: "var(--muted-deep)" }}>{ko ? "먼저 에이전트를 비공개로 연결하세요." : "Connect the agent privately first."}</small>}
               </div>
-
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--paper-edge)" }}>
-                <div><strong style={{ fontSize: 12 }}>{ko ? "로컬 내보내기 의도" : "Local export intent"}</strong><small style={{ display: "block", marginTop: 3, color: "var(--muted-deep)" }}>{ko ? "호환용 로컬 영수증 · Cloud 저장은 아래에서 별도 실행" : "Compatibility-only local receipt · Cloud actions are separate below"}</small></div>
-                <button type="button" disabled={busy || receipts.length === 0} onClick={() => void createExportIntent()} style={runtimeButtonStyle}>{ko ? "비공개 로컬 의도 기록" : "Record private local intent"}</button>
-              </div>
-              <small style={{ display: "block", marginTop: 8, color: "var(--muted-deep)" }}>{ko ? "로컬 의도는 비공개 호환 영수증입니다. 공개·비공개 링크 검증은 확인된 일반화 사본만 Cloud로 보냅니다." : "Local intent is a private compatibility receipt. Public or unlisted verification sends only a confirmed generalized copy to Cloud."}</small>
 
               <div data-testid="experience-cloud-exchange" style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--paper-edge)" }}>
-                <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 9 }}>
-                  <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 10, padding: 11, background: "var(--paper-2)" }}>
-                    <small style={{ color: "var(--muted-deep)", fontWeight: 700 }}>{ko ? "1. 원본 Agent 업로드" : "1. Base Agent upload"}</small>
-                    <strong style={{ display: "block", marginTop: 5 }}>{agent.name}</strong>
-                    <span style={{ display: "block", marginTop: 3, fontSize: 11, color: "var(--muted-deep)" }}>{ko ? "Agent 소유/릴리스 노드" : "Agent ownership/release node"} · {selectedPack.basePackageHash?.slice(0, 12)}</span>
-                    <Link href="/cloud" style={{ display: "inline-block", marginTop: 8, color: "var(--accent)", fontSize: 11.5, fontWeight: 700 }}>
-                      {ko ? "Agent 업로드 화면 열기 →" : "Open Agent upload →"}
-                    </Link>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+                  <div>
+                    <strong style={{ display: "block", fontSize: 13 }}>{ko ? "Hub에 올리기" : "Publish to Hub"}</strong>
+                    <span style={{ display: "block", marginTop: 4, color: "var(--muted-deep)", fontSize: 11.5 }}>{ko ? "원본 기억은 보내지 않고, 확인한 공개용 문장만 전송합니다." : "Only the public copy you reviewed is sent; raw memory stays local."}</span>
                   </div>
-                  <div style={{ border: "1px solid var(--accent)", borderRadius: 10, padding: 11, background: "var(--accent-soft)" }}>
-                    <small style={{ color: "var(--accent)", fontWeight: 700 }}>{ko ? "2. Experience 업로드" : "2. Experience upload"}</small>
-                    <strong style={{ display: "block", marginTop: 5 }}>{selectedPack.name}</strong>
-                    <span style={{ display: "block", marginTop: 3, fontSize: 11, color: "var(--ink-soft)" }}>{ko ? "경험 소유자" : "Experience owner"}: {authoritativeOwner}</span>
-                    <span style={{ display: "block", marginTop: 2, fontSize: 10.5, color: "var(--muted-deep)" }}>{ko ? "Agent 제작자와 달라도 됩니다. Agent 파일은 포함하지 않습니다." : "May differ from the Agent author. No Agent files are included."}</span>
-                  </div>
+                  {!selectedPack.baseAgentReleaseId && <Link href="/cloud" style={{ color: "var(--accent)", fontSize: 11.5, fontWeight: 700 }}>{ko ? "먼저 에이전트 연결하기 →" : "Connect the agent first →"}</Link>}
                 </div>
 
-                <div aria-label={ko ? "Experience Cloud 상태 흐름" : "Experience Cloud status flow"} style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 10 }}>
+                <div aria-label={ko ? "경험 공개 준비 상태" : "Experience publishing readiness"} style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", marginTop: 12, borderTop: "1px solid var(--paper-edge)", borderBottom: "1px solid var(--paper-edge)" }}>
                   {[
-                    ko ? "로컬 Experience" : "Local Experience",
-                    ko ? "비공개 Cloud 저장" : "Private Cloud save",
-                    ko ? "검증 요청" : "Verification requested",
-                    ko ? "검증 대기" : "Verification pending",
-                    ko ? "공개 활성 (서버만)" : "Public active (server only)",
-                    ko ? "충돌 시 다시 맞춤·재시도" : "Conflict → reconcile & retry",
-                  ].map((label, index) => (
-                    <span key={label} style={{ padding: "4px 7px", borderRadius: 999, border: "1px solid var(--paper-edge)", background: index === 0 || latestCloud ? "var(--paper-2)" : "transparent", color: "var(--ink-soft)", fontSize: 10.5 }}>
-                      {index > 0 ? "→ " : ""}{label}
-                    </span>
+                    [ko ? "경험 검토" : "Review", receipts.length > 0],
+                    [ko ? "개인정보 확인" : "Privacy check", operationalPublicReady],
+                    [ko ? "Hub 등록" : "Hub listing", latestCloud?.state === "public-active"],
+                  ].map(([label, done], index) => (
+                    <div key={String(label)} style={{ padding: "10px", borderLeft: index ? "1px solid var(--paper-edge)" : undefined, color: done ? "var(--green-deep)" : "var(--muted-deep)", fontSize: 11, fontWeight: 700 }}>
+                      {done ? <IconCheck size={12} /> : <span aria-hidden="true">○</span>} {label}
+                    </div>
                   ))}
                 </div>
 
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 10 }}>
                   <button type="button" disabled={busy || receipts.length === 0} onClick={() => void savePrivateCloud()} style={{ ...runtimeButtonStyle, background: "var(--paper-2)" }}>
-                    {ko ? "Experience만 비공개 저장" : "Save Experience privately"}
+                    {ko ? "내 Hub에 비공개 저장" : "Save privately to my Hub"}
                   </button>
                   <button
                     type="button"
@@ -3237,7 +3269,7 @@ function ExperiencePanel({
                     onClick={() => void requestPublicVerification()}
                     style={{ ...runtimeButtonStyle, color: "white", background: "var(--accent)", opacity: operationalPublicReady ? 1 : 0.45 }}
                   >
-                    {ko ? "공개 검증 요청" : "Request public verification"}
+                    {ko ? "공개 등록 요청" : "Request public listing"}
                   </button>
                   {latestCloud && ["offline", "conflict", "error", "verification-requested", "verification-pending"].includes(latestCloud.state) && (
                     <button type="button" disabled={busy} onClick={() => void reconcileCloud(latestCloud)} style={runtimeButtonStyle}>
@@ -3256,7 +3288,7 @@ function ExperiencePanel({
                           ? (ko ? "아직 공개 활성 상태는 아닙니다." : "It is not public-active yet.")
                         : latestCloud.state === "conflict"
                           ? (ko ? "로컬 자료는 그대로입니다. 서버 revision을 다시 읽은 뒤 재시도하세요." : "Local material is intact. Re-read the server revision before retrying.")
-                          : latestCloud.errorMessage || `${latestCloud.bundleId.slice(0, 18)} · rev ${latestCloud.remoteRevision?.slice(0, 14) ?? "—"}`}
+                          : latestCloud.errorMessage || (ko ? "Hub에 안전하게 저장되었습니다." : "Saved safely to Hub.")}
                     </span>
                   </div>
                 ) : (
@@ -4367,7 +4399,7 @@ function AgentDetailView({
                 <details data-testid="ontology-chip-management" style={{ border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)", overflow: "hidden" }}>
                   <summary style={{ listStyle: "none", cursor: "pointer", minHeight: 56, padding: "10px 12px", display: "flex", alignItems: "center", gap: 9 }}>
                     <span aria-hidden="true" style={{ width: 32, height: 32, borderRadius: 11, display: "grid", placeItems: "center", background: "var(--accent-soft)", color: "var(--accent)", boxShadow: "inset 0 1px 0 color-mix(in srgb, white 55%, transparent)" }}><IconLayers size={15} /></span>
-                    <strong style={{ fontSize: 13 }}>{locale === "ko" ? "온톨로지 칩 관리" : "Manage Ontology Chips"}</strong>
+                    <strong style={{ fontSize: 13 }}>{locale === "ko" ? "경험칩 관리" : "Manage Experience Chips"}</strong>
                     <span title={locale === "ko" ? "경험 칩" : "Experience chips"} style={{ padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, color: "var(--green-deep)", background: "var(--green-soft)", fontSize: 10, fontWeight: 750 }}>O {ontologySummary?.packCount ?? 0}</span>
                     <span title={locale === "ko" ? "취향 후보" : "Taste drafts"} style={{ padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, color: "var(--amber-deep)", background: "var(--amber-soft)", fontSize: 10, fontWeight: 750 }}>T {ontologySummary?.tasteDraftCount ?? 0}</span>
                     <span aria-hidden="true" style={{ marginLeft: "auto", width: 7, height: 7, borderRight: "1.5px solid currentColor", borderBottom: "1.5px solid currentColor", transform: "rotate(45deg) translateY(-2px)", color: "var(--muted-deep)" }} />

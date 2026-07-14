@@ -32,6 +32,7 @@ async function main() {
   const portable = require("../dist/electron/experience/portable.js");
   const operationalGeneralization = require("../dist/electron/experience/operational-generalization.js");
   const cloud = require("../dist/electron/experience/cloud.js");
+  const cloudRestore = require("../dist/electron/cloud-agents/restore.js");
   const routes = require("../dist/electron/agents/routes.js");
   dbModule.initStore();
   const db = dbModule.getDb();
@@ -58,6 +59,24 @@ async function main() {
       importedAt: now,
       source: "local-import",
       packageHash: baseHash,
+    });
+    cloudRestore.writeCloudAgentRegistrationMarker({
+      rootPath: agentRoot,
+      slug: "agent-a-cloud",
+      packageHash: baseHash,
+      packageHashVersion: "path-sha256-executable-v2",
+      fileCount: 0,
+      totalBytes: 0,
+      executablePaths: [],
+      savedAt: now,
+      registration: {
+        cloudId: "cloud_private_test123",
+        slug: "agent-a-cloud",
+        scope: "owner-private",
+        packageHash: baseHash,
+        packageHashVersion: "path-sha256-executable-v2",
+        revision: `rev_${"a".repeat(32)}`,
+      },
     });
 
     const createPromotedPack = (label, content) => {
@@ -150,7 +169,8 @@ async function main() {
 
       if (url.pathname.endsWith("/base-releases/resolve") && method === "POST") {
         const body = JSON.parse(init.body);
-        assert.equal(body.slug, "agent-a");
+        assert.equal(body.slug, "agent-a-cloud", "Cloud registration slug must override the legacy local install slug");
+        assert.equal(body.cloudId, "cloud_private_test123");
         assert.equal(body.packageHash, baseHash);
         return response({
           schema: "agentlas.experience-base-resolution.v1",
@@ -158,8 +178,8 @@ async function main() {
           agentReleaseId: `agr_${"d".repeat(48)}`,
           packageHash: baseHash,
           packageHashVersion: "path-sha256-executable-v2",
-          cloudId: "cloud:base-agent-a",
-          slug: "agent-a",
+          cloudId: "cloud_private_test123",
+          slug: "agent-a-cloud",
         });
       }
 
@@ -535,8 +555,8 @@ async function main() {
           agentReleaseId: `agr_${"f".repeat(48)}`,
           packageHash: baseHash,
           packageHashVersion: "path-sha256-executable-v2",
-          cloudId: "cloud:base-agent-a",
-          slug: "agent-a",
+          cloudId: "cloud_private_test123",
+          slug: "agent-a-cloud",
         });
       }
       if (url.pathname.endsWith("/uploads") && method === "GET") {

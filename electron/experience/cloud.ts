@@ -490,8 +490,14 @@ function packageIdentity(pack: CloudPackRow): {
   }
   const marker = agent.localPath ? readCloudAgentRestoreMarker(agent.localPath) : null;
   const registration = marker?.registrations?.["owner-private"] ?? marker?.registrations?.["hub-public"];
+  // A legacy local import can keep an install-only slug (for example a
+  // collision suffix) after the exact package is registered in Agent Cloud.
+  // Once a signed Cloud registration exists, its slug and cloudId are the
+  // authoritative pair. Mixing the old local slug with the new cloudId makes
+  // the server correctly reject Experience binding as a reference mismatch.
+  const registeredSlug = registration?.slug?.trim();
   return {
-    slug: agent.slug,
+    slug: registeredSlug || agent.slug,
     ...(registration?.cloudId ? { cloudId: registration.cloudId } : {}),
     packageHash: pack.base_package_hash,
     packageHashVersion: pack.base_package_hash_version ?? marker?.packageHashVersion ?? "path-sha256-executable-v2",
