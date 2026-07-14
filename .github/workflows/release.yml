@@ -41,8 +41,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      HEPHAESTUS_REF: v1.1.27
-      HEPHAESTUS_COMMIT: e024b68821b28aa40c7a22c94ac3832fed4155dd
+      HEPHAESTUS_REF: v1.1.28
+      HEPHAESTUS_COMMIT: d741da796289678c38fac1059f0473f271d0f7e9
 
     steps:
       - uses: actions/checkout@v4
@@ -158,8 +158,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      HEPHAESTUS_REF: v1.1.27
-      HEPHAESTUS_COMMIT: e024b68821b28aa40c7a22c94ac3832fed4155dd
+      HEPHAESTUS_REF: v1.1.28
+      HEPHAESTUS_COMMIT: d741da796289678c38fac1059f0473f271d0f7e9
 
     steps:
       - uses: actions/checkout@v4

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.24 — 2026-07-14
+
+### Fixed
+
+- **Desktop now embeds the same Agentlas OS v1.1.28 first-contact contract as
+  Terminal and every plugin surface.** Codex, Claude Code, MCP, Network, owner
+  Cloud, and Storm contacts synchronously install the Core-owned project soul,
+  memory map, code map, ontology, Career Graph, and complete `.agentlas/`
+  privacy block before agent work starts.
+- **Existing project contracts remain merge-only.** Desktop never rewrites Git
+  index state or removes intentionally tracked public `.agentlas` contracts;
+  it reports those paths while keeping newly generated local memory ignored.
+- **Workload allocation remains host-driven and non-deterministic.** No vendor
+  model alias or tier-to-model mapping was added; the parent AI selects an exact
+  live-advertised model ID and Desktop only validates the choice.
+
 ## 0.8.23 — 2026-07-14
 
 ### Fixed
