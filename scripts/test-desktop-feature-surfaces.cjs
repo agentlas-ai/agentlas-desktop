@@ -300,14 +300,15 @@ function quaternionAngle(left, right) {
 
 async function assertOntologyOrbit(page, graph) {
   const scene = await waitForOntologyCameraSettled(page, graph);
-  const engine = graph.locator('[role="img"]');
+  const engine = graph.locator('canvas[data-ontology-webgl="true"]');
+  await engine.scrollIntoViewIfNeeded();
   const bounds = await engine.boundingBox();
   assert.ok(bounds, "ontology orbit surface must have bounds");
   const beforeQuaternion = (await scene.getAttribute("data-camera-quaternion")).split(",").map(Number);
   const beforeDistance = Number(await scene.getAttribute("data-camera-distance"));
-  await page.mouse.move(bounds.x + bounds.width * 0.24, bounds.y + bounds.height * 0.34);
+  await page.mouse.move(bounds.x + bounds.width * 0.52, bounds.y + bounds.height * 0.56);
   await page.mouse.down();
-  await page.mouse.move(bounds.x + bounds.width * 0.52, bounds.y + bounds.height * 0.42, { steps: 8 });
+  await page.mouse.move(bounds.x + bounds.width * 0.74, bounds.y + bounds.height * 0.64, { steps: 8 });
   await page.mouse.up();
   await page.waitForTimeout(220);
   const afterQuaternion = (await scene.getAttribute("data-camera-quaternion")).split(",").map(Number);
@@ -725,6 +726,7 @@ async function runFirmAgentSurface(browser, baseUrl, evidence) {
   await ontology.waitFor();
   await ontology.locator("summary").click();
   await ontology.getByText(/privacy_sensitive/).waitFor();
+  await page.getByTestId("ontology-advanced-relations").locator("summary").click();
   const graph = page.getByTestId("agent-ontology-graph");
   await graph.waitFor();
   await graph.locator('[data-engine-state="ready"]').waitFor();
@@ -847,13 +849,18 @@ async function runHubOntologyProjectionSurface(browser, baseUrl, evidence) {
 
   const hub = page.getByTestId("agent-hub-ontology-projection");
   await hub.waitFor();
+  await hub.getByText(/현재 1개 사용 중|1 in use now/).waitFor();
+  assert.equal(await page.getByTestId("ontology-advanced-relations").getAttribute("open"), null, "advanced relations must be closed until explicitly opened");
+  assert.equal(await page.getByTestId("agent-ontology-graph").count(), 0, "the Hub status card must not eagerly load the relation graph");
+  await page.getByTestId("ontology-advanced-relations").locator("summary").click();
   const graph = page.getByTestId("agent-ontology-graph");
   await graph.waitFor();
   await graph.locator('[data-engine-state="ready"]').waitFor();
-  await graph.getByText(/ONTOLOGY ATLAS|온톨로지 아틀라스/).waitFor();
+  await graph.getByText(/Ontology Atlas|온톨로지 아틀라스/).waitFor();
   await graph.getByText(/THREE · 3D/).waitFor();
   await graph.getByLabel(/관계선 범례|Relation legend/).waitFor();
   await assertOntologyGraphPaint(graph, "initial");
+  await page.waitForTimeout(350);
   await assertOntologyOrbit(page, graph);
   await graph.getByRole("button", { name: /전체 맞춤|Fit graph/ }).click();
   await waitForOntologyCameraSettled(page, graph);
@@ -871,36 +878,27 @@ async function runHubOntologyProjectionSurface(browser, baseUrl, evidence) {
   assert.equal(await graph.locator('[data-scope="hub"]').count(), 1, "Hub scope must be an actual graph filter");
   await nodePicker.selectOption({ label: "절제된 에디토리얼 톤" });
   await graph.getByTestId("ontology-node-inspector").getByText("절제된 에디토리얼 톤", { exact: true }).waitFor();
-  await graph.getByRole("button", { name: "전체", exact: true }).click();
+  await graph.getByRole("button", { name: /전체|All/, exact: true }).click();
   assert.equal(await graph.getByText(/안전 차단|Safety/).count(), 0, "safety status must not be fabricated as an entity node");
   const localExperience = page.getByTestId("agent-local-experience");
-  await localExperience.getByRole("heading", { name: /이 Mac에서 쌓인 경험|Experience accumulated on this Mac/ }).waitFor();
-  assert.equal(
-    await page.evaluate(() => {
-      const hubNode = document.querySelector('[data-testid="agent-hub-ontology-projection"]');
-      const localNode = document.querySelector('[data-testid="agent-local-experience"]');
-      return Boolean(hubNode && localNode && (hubNode.compareDocumentPosition(localNode) & Node.DOCUMENT_POSITION_FOLLOWING));
-    }),
-    true,
-    "exact Hub loadout must appear before the separate local Experience area",
-  );
+  await localExperience.getByTestId("ontology-local-about").waitFor();
   assert.equal(await hub.getAttribute("data-projection-status"), "live");
-  await hub.getByText(/읽기 전용|Read only/).waitFor();
+  await hub.getByText(/Hub와 연결됨|Connected to Hub/).waitFor();
   await page.getByTestId("ontology-hub-details").locator("summary").click();
-  await hub.getByText("agent-definition-agent-2", { exact: true }).waitFor();
-  await hub.getByText("agent-release-agent-2-r7", { exact: true }).waitFor();
+  assert.equal(await hub.getByText("agent-definition-agent-2", { exact: true }).count(), 0, "internal definition IDs must not be shown to people");
+  assert.equal(await hub.getByText("agent-release-agent-2-r7", { exact: true }).count(), 0, "internal release IDs must not be shown to people");
   await page.getByTestId("ontology-operational-chips").getByText("게시 전 최종 화면 확인", { exact: true }).waitFor();
   await page.getByTestId("ontology-taste-chips").getByText("절제된 에디토리얼 톤", { exact: true }).waitFor();
-  await page.getByTestId("ontology-active-loadout").getByText(/현재 세션에 장착됨|Active this session/).waitFor();
-  await page.getByTestId("ontology-next-session").getByText(/다음 세션 예약|Scheduled next session/).waitFor();
-  await page.getByTestId("ontology-pending-approvals").getByText(/명시적 승인 필요|Explicit approval required/).waitFor();
+  await page.getByTestId("ontology-active-loadout").getByText(/현재 대화에서 사용 중|In use in the current conversation/).waitFor();
+  await page.getByTestId("ontology-next-session").getByText(/새로 시작하는 대화부터 적용|Applies to newly started conversations/).waitFor();
+  await page.getByTestId("ontology-pending-approvals").getByText(/적용할지 직접 확인해 주세요|Choose whether to apply this change/).waitFor();
   await page.getByTestId("ontology-recommendations").getByText(/Operational 칩 업데이트/).waitFor();
   const management = page.getByTestId("ontology-chip-management");
-  await management.locator("summary").click();
+  await management.getByText(/취향 경험 후보|Taste candidates/).click();
   await page.getByTestId("local-taste-drafts").waitFor();
   assert.equal(await page.getByTestId("taste-draft-count").innerText(), "2");
   await page.getByText(/과한 장식보다 비대칭 에디토리얼/).waitFor();
-  await management.locator("summary").click();
+  await management.getByText(/취향 경험 후보|Taste candidates/).click();
 
   assert.equal(
     await hub.getByRole("button", { name: /승인|Approve|장착|Attach|구매|Purchase|대여|Lease/ }).count(),
@@ -915,8 +913,8 @@ async function runHubOntologyProjectionSurface(browser, baseUrl, evidence) {
   assert.equal(calls.some((call) => /attach|purchase|lease/i.test(call.name)), false, "refresh must not attach, purchase, or lease");
   assert.equal(calls.some((call) => call.name === "experience.cloudSave"), false, "Hub projection must not upload local Experience");
   await page.getByTestId("ontology-hub-details").locator("summary").click();
-  await nodePicker.selectOption({ label: "리서치 분석 에이전트" });
-  await graph.getByTestId("ontology-node-inspector").getByText("리서치 분석 에이전트", { exact: true }).waitFor();
+  await nodePicker.selectOption({ label: "Agentlas Browser" });
+  await graph.getByTestId("ontology-node-inspector").getByText("Agentlas Browser", { exact: true }).waitFor();
   await graph.getByRole("button", { name: /전체 맞춤|Fit graph/ }).click();
   await page.waitForTimeout(350);
   await page.evaluate(() => {
@@ -951,6 +949,7 @@ async function runOntologyWebglFallbackSurface(browser, baseUrl, evidence) {
   await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
   await page.getByText(/Research Analyst Agent|리서치 분석 에이전트/).first().click();
   await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
+  await page.getByTestId("ontology-advanced-relations").locator("summary").click();
   const graph = page.getByTestId("agent-ontology-graph");
   await graph.locator('[data-engine-state="ready"]').waitFor();
   await graph.evaluate((root) => {
@@ -1022,8 +1021,9 @@ async function runOntologyScaleSurface(browser, baseUrl) {
     };
   });
   await page.getByText(/Builder Agent|빌더 에이전트/).first().click();
-  const startedAt = Date.now();
   await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
+  const startedAt = Date.now();
+  await page.getByTestId("ontology-advanced-relations").locator("summary").click();
   const graph = page.getByTestId("agent-ontology-graph");
   await graph.locator('[data-engine-state="ready"]').waitFor({ timeout: 5000 });
   assert(Date.now() - startedAt < 5000, "capped scale graph must become interactive within five seconds");
@@ -1055,6 +1055,7 @@ async function runOntologyErrorSurface(browser, baseUrl) {
   });
   await page.getByText(/Builder Agent|빌더 에이전트/).first().click();
   await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
+  await page.getByTestId("ontology-advanced-relations").locator("summary").click();
   const graph = page.getByTestId("agent-ontology-graph");
   await graph.locator('[data-data-state="error"]').waitFor();
   await graph.getByText(/관계지도를 불러오지 못했습니다|relation map could not be loaded/).waitFor();

@@ -271,8 +271,8 @@ export function ExperienceOntologySummaryView({
   error: string;
   locale: Locale;
 }) {
-  if (loading) return <InsightNotice text={locale === "ko" ? "온톨로지 칩을 집계하는 중…" : "Loading ontology chips…"} />;
-  if (!summary) return <InsightNotice error text={error || (locale === "ko" ? "온톨로지 요약을 불러오지 못했습니다." : "Ontology summary is unavailable.")} />;
+  if (loading) return <InsightNotice text={locale === "ko" ? "저장된 경험을 확인하는 중…" : "Checking saved experience…"} />;
+  if (!summary) return <InsightNotice error text={error || (locale === "ko" ? "저장된 경험을 불러오지 못했습니다." : "Saved experience is unavailable.")} />;
 
   const counts = [
     [locale === "ko" ? "경험 묶음" : "Collections", summary.packCount],
@@ -288,13 +288,15 @@ export function ExperienceOntologySummaryView({
         <span aria-hidden="true" style={{ width: 30, height: 30, borderRadius: 10, display: "grid", placeItems: "center", background: "var(--paper-2)", color: "var(--accent)", boxShadow: "inset 0 1px 0 color-mix(in srgb, white 58%, transparent)" }}>
           <IconLayers size={14} />
         </span>
-        <strong style={{ fontSize: 12.5 }}>{locale === "ko" ? "내 경험 상태" : "My experience status"}</strong>
-        <span aria-label={`${locale === "ko" ? "경험 항목" : "Items"} ${summary.candidateCount}`} title={locale === "ko" ? "경험 항목" : "Items"} style={ontologyCompactMetricStyle}>
-          <IconRoute size={12} /> {summary.candidateCount}
+        <strong style={{ fontSize: 12.5 }}>{locale === "ko" ? "내가 만든 경험" : "Experience I created"}</strong>
+        <span aria-label={`${locale === "ko" ? "저장한 경험" : "Saved experience"} ${summary.candidateCount}`} style={ontologyCompactMetricStyle}>
+          {locale === "ko" ? "저장" : "Saved"} {summary.candidateCount}
         </span>
-        <span aria-label={`${locale === "ko" ? "개인정보 차단" : "Privacy blocked"} ${summary.autoIntake.blocked}`} title={locale === "ko" ? "개인정보 차단" : "Privacy blocked"} style={{ ...ontologyCompactMetricStyle, color: summary.autoIntake.blocked > 0 ? "var(--red-deep)" : "var(--muted-deep)" }}>
-          <IconShield size={12} /> {summary.autoIntake.blocked}
-        </span>
+        {summary.autoIntake.blocked > 0 && (
+          <span aria-label={`${locale === "ko" ? "개인정보 보호로 제외" : "Excluded for privacy"} ${summary.autoIntake.blocked}`} style={{ ...ontologyCompactMetricStyle, color: "var(--red-deep)" }}>
+            {locale === "ko" ? "개인정보 보호로 제외" : "Excluded for privacy"} {summary.autoIntake.blocked}
+          </span>
+        )}
         <span aria-hidden="true" style={{ marginLeft: "auto", width: 7, height: 7, borderRight: "1.5px solid currentColor", borderBottom: "1.5px solid currentColor", transform: "rotate(45deg) translateY(-2px)", color: "var(--muted-deep)" }} />
       </summary>
       <div style={{ padding: "0 12px 12px" }}>
@@ -332,8 +334,8 @@ export function ExperienceOntologySummaryView({
         )}
         {(summary.autoIntake.blocked > 0 || summary.tasteNeedsEvidenceCount > 0) && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 9, color: "var(--muted-deep)", fontSize: 10.5 }}>
-            {summary.autoIntake.blocked > 0 && <span>{locale === "ko" ? "차단 = 원문 미복사" : "Blocked = source not copied"}</span>}
-            {summary.tasteNeedsEvidenceCount > 0 && <span>{locale === "ko" ? "Taste = 성공 점수 아님" : "Taste ≠ success score"}</span>}
+            {summary.autoIntake.blocked > 0 && <span>{locale === "ko" ? "개인정보가 감지된 원문은 저장하지 않았습니다." : "Source text containing personal information was not saved."}</span>}
+            {summary.tasteNeedsEvidenceCount > 0 && <span>{locale === "ko" ? "취향 후보는 효과 점수가 아니라 선택 기록입니다." : "Taste candidates are preference records, not effectiveness scores."}</span>}
           </div>
         )}
       </div>
@@ -782,6 +784,14 @@ export function AgentHubOntologyProjectionView({
   const state = projection?.state ?? result.status;
   const status = ontologyProjectionStatus(state, ko);
   const hubStatus = ontologyProjectionStatus(result.status, ko);
+  const activeCount = projection?.loadout.entries.length ?? 0;
+  const scheduledCount = projection?.scheduledNextSession?.entries.length ?? 0;
+  const approvalCount = projection?.pendingAttachApprovals.length ?? 0;
+  const attachmentSummary = projection
+    ? (ko
+      ? `현재 ${activeCount}개 사용 중${scheduledCount > 0 ? ` · 새로 시작하는 대화부터 ${scheduledCount}개 적용 예정` : ""}${approvalCount > 0 ? ` · 내 확인 필요 ${approvalCount}개` : ""}`
+      : `${activeCount} in use now${scheduledCount > 0 ? ` · ${scheduledCount} set for new conversations` : ""}${approvalCount > 0 ? ` · ${approvalCount} awaiting your review` : ""}`)
+    : (ko ? "아직 이 에이전트에 연결된 경험칩이 없습니다." : "No Experience Chips are connected to this agent yet.");
 
   return (
     <section
@@ -799,13 +809,11 @@ export function AgentHubOntologyProjectionView({
             </span>
             {result.status !== state && (
               <span style={{ padding: "3px 7px", borderRadius: 999, background: hubStatus.background, color: hubStatus.color, fontSize: 10.5, fontWeight: 700 }}>
-                Hub · {hubStatus.label}
+                {hubStatus.label}
               </span>
             )}
-            <span style={{ padding: "3px 7px", borderRadius: 999, background: "var(--fill-1)", color: "var(--muted-deep)", fontSize: 10.5, fontWeight: 700 }}>
-              {ko ? "읽기 전용" : "Read only"}
-            </span>
           </div>
+          <p style={{ margin: "6px 0 0", color: "var(--ink-soft)", fontSize: 11.5, lineHeight: 1.5 }}>{attachmentSummary}</p>
         </div>
         <button
           type="button"
@@ -824,17 +832,16 @@ export function AgentHubOntologyProjectionView({
       <details data-testid="ontology-hub-details" style={{ marginTop: 12 }}>
         <summary style={{ listStyle: "none", cursor: "pointer", minHeight: 44, padding: "7px 9px", border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper-2)", display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", fontSize: 10.5, color: "var(--ink-soft)" }}>
           <span aria-hidden="true" style={{ width: 27, height: 27, display: "grid", placeItems: "center", borderRadius: 9, background: "var(--paper)", color: "var(--accent)" }}><IconLayers size={13} /></span>
-          <strong style={{ color: "var(--ink)" }}>{ko ? "장착 상세" : "Loadout details"}</strong>
-          <span aria-label={`${ko ? "실행 칩" : "Operational chips"} ${projection?.operationalChips.length ?? 0}`} title={ko ? "실행 칩" : "Operational chips"} style={ontologyCompactMetricStyle}><IconRoute size={11} /> {projection?.operationalChips.length ?? 0}</span>
-          <span aria-label={`${ko ? "취향 칩" : "Taste chips"} ${projection?.tasteChips.length ?? 0}`} title={ko ? "취향 칩" : "Taste chips"} style={ontologyCompactMetricStyle}><IconSparkles size={11} /> {projection?.tasteChips.length ?? 0}</span>
-          <span aria-label={`${ko ? "장착" : "Active"} ${projection?.loadout.entries.length ?? 0}`} title={ko ? "현재 장착" : "Active loadout"} style={ontologyCompactMetricStyle}><IconCheck size={11} /> {projection?.loadout.entries.length ?? 0}</span>
-          <span aria-label={`${ko ? "결정 대기" : "Pending"} ${projection?.pendingAttachApprovals.length ?? 0}`} title={ko ? "결정 대기" : "Pending"} style={ontologyCompactMetricStyle}><IconShield size={11} /> {projection?.pendingAttachApprovals.length ?? 0}</span>
+          <strong style={{ color: "var(--ink)" }}>{ko ? "자세히 보기" : "View details"}</strong>
+          <span style={ontologyCompactMetricStyle}>{ko ? `현재 사용 중 ${activeCount}` : `In use ${activeCount}`}</span>
+          {scheduledCount > 0 && <span style={ontologyCompactMetricStyle}>{ko ? `새 대화부터 ${scheduledCount}` : `New conversations ${scheduledCount}`}</span>}
+          {approvalCount > 0 && <span style={ontologyCompactMetricStyle}>{ko ? `내 확인 필요 ${approvalCount}` : `Needs review ${approvalCount}`}</span>}
           <span aria-hidden="true" style={{ marginLeft: "auto", width: 7, height: 7, borderRight: "1.5px solid currentColor", borderBottom: "1.5px solid currentColor", transform: "rotate(45deg) translateY(-2px)" }} />
         </summary>
         <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 10 }}>
           {result.binding ? (
             <div data-testid="ontology-exact-binding" role="status" style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 9, color: "var(--green-deep)", background: "var(--green-soft)", fontSize: 11.5, lineHeight: 1.55 }}>
-              {ko ? "이 에이전트와 연결된 Hub 경험을 확인했습니다." : "Hub experience connected to this agent has been verified."}
+              {ko ? "이 에이전트에서 사용할 수 있는 경험칩입니다." : "These Experience Chips can be used with this agent."}
             </div>
           ) : (
             <div role="status" style={{ padding: 12, border: "1px dashed var(--paper-edge)", borderRadius: 9, color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.55 }}>
@@ -849,15 +856,15 @@ export function AgentHubOntologyProjectionView({
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
             <OntologyChipList
               testId="ontology-operational-chips"
-              title={ko ? "Operational 칩" : "Operational chips"}
-              description={ko ? "재현 가능한 실행 결과와 복구 절차" : "Reproducible outcomes and recovery procedures"}
+              title={ko ? "문제 해결 경험" : "Problem-solving experience"}
+              description={ko ? "이 에이전트가 잘 해결했던 방법과 복구 순서" : "Methods and recovery steps this agent handled well"}
               chips={projection.operationalChips}
               locale={locale}
             />
             <OntologyChipList
               testId="ontology-taste-chips"
-              title={ko ? "Taste / Style 칩" : "Taste / Style chips"}
-              description={ko ? "사람의 A/B 선호와 의견 불일치 근거" : "Human A/B preferences with visible disagreement"}
+              title={ko ? "취향·스타일" : "Taste and style"}
+              description={ko ? "내가 선택한 결과에서 확인된 공통 취향" : "Preferences confirmed from the results I chose"}
               chips={projection.tasteChips}
               locale={locale}
             />
@@ -866,7 +873,7 @@ export function AgentHubOntologyProjectionView({
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
             <LoadoutCard
               testId="ontology-active-loadout"
-              title={ko ? "현재 세션에 장착됨" : "Active this session"}
+              title={ko ? "현재 대화에서 사용 중" : "In use in the current conversation"}
               state={projection.loadout.state}
               entries={projection.loadout.entries}
               chips={chips}
@@ -875,33 +882,33 @@ export function AgentHubOntologyProjectionView({
             />
             <LoadoutCard
               testId="ontology-next-session"
-              title={ko ? "다음 세션 예약" : "Scheduled next session"}
+              title={ko ? "새로 시작하는 대화부터 적용" : "Applies to newly started conversations"}
               state={projection.scheduledNextSession?.state ?? "none"}
               entries={projection.scheduledNextSession?.entries ?? []}
               chips={chips}
-              empty={ko ? "다음 세션에 예약된 변경이 없습니다." : "No next-session change is scheduled."}
+              empty={ko ? "새 대화에 적용할 변경이 없습니다." : "No change is set for new conversations."}
               locale={locale}
             />
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
             <section data-testid="ontology-pending-approvals" style={ontologySubsectionStyle}>
-              <h4 style={ontologyHeadingStyle}>{ko ? "결정 대기" : "Pending approvals"} · {projection.pendingAttachApprovals.length}</h4>
+              <h4 style={ontologyHeadingStyle}>{ko ? "내 확인이 필요한 변경" : "Changes awaiting my review"} · {projection.pendingAttachApprovals.length}</h4>
               {projection.pendingAttachApprovals.length > 0 ? projection.pendingAttachApprovals.map((approval) => (
                 <div key={approval.approvalId} style={ontologyRowStyle}>
-                  <strong style={{ fontSize: 11.5 }}>{ko ? "명시적 승인 필요" : "Explicit approval required"}</strong>
-                  <span style={ontologyMetaStyle}>{ko ? "만료" : "Expires"} {formatOntologyTime(approval.expiresAt, locale)}</span>
+                  <strong style={{ fontSize: 11.5 }}>{ko ? "적용할지 직접 확인해 주세요" : "Choose whether to apply this change"}</strong>
+                  <span style={ontologyMetaStyle}>{ko ? "확인 가능 기한" : "Review by"} {formatOntologyTime(approval.expiresAt, locale)}</span>
                   <LoadoutEntries entries={approval.selectedChips} chips={chips} locale={locale} />
                 </div>
               )) : <EmptyOntologyText text={ko ? "대기 중인 승인 요청이 없습니다." : "No approval is pending."} />}
             </section>
 
             <section data-testid="ontology-recommendations" style={ontologySubsectionStyle}>
-              <h4 style={ontologyHeadingStyle}>{ko ? "Hephaestus 추천" : "Hephaestus recommendations"} · {projection.recommendations.length}</h4>
+              <h4 style={ontologyHeadingStyle}>{ko ? "추천 경험칩" : "Recommended Experience Chips"} · {projection.recommendations.length}</h4>
               {projection.recommendations.length > 0 ? projection.recommendations.map((recommendation) => (
                 <div key={recommendation.recommendationId} style={ontologyRowStyle}>
                   <strong style={{ fontSize: 11.5 }}>{recommendation.summary}</strong>
-                  <span style={ontologyMetaStyle}>{recommendation.source} · {ko ? "만료" : "Expires"} {formatOntologyTime(recommendation.expiresAt, locale)}</span>
+                  <span style={ontologyMetaStyle}>{ko ? "추천 확인 가능 기한" : "Recommendation available until"} {formatOntologyTime(recommendation.expiresAt, locale)}</span>
                   {recommendation.reasons.length > 0 && <SmallOntologyList title={ko ? "추천 이유" : "Why"} items={recommendation.reasons} />}
                   {recommendation.tradeoffs.length > 0 && <SmallOntologyList title={ko ? "고려사항" : "Trade-offs"} items={recommendation.tradeoffs} />}
                   <LoadoutEntries entries={recommendation.proposedChips} chips={chips} locale={locale} />
@@ -912,8 +919,8 @@ export function AgentHubOntologyProjectionView({
 
           <p style={{ margin: 0, color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.5 }}>
             {ko
-              ? `마지막 확인 ${formatOntologyTime(projection.generatedAt, locale)} · 추천만으로 구매·대여·장착되지는 않습니다.`
-              : `Last checked ${formatOntologyTime(projection.generatedAt, locale)} · Recommendations never purchase, lease, or attach automatically.`}
+              ? `마지막 확인 ${formatOntologyTime(projection.generatedAt, locale)} · 추천은 내가 확인하기 전에는 적용되지 않습니다.`
+              : `Last checked ${formatOntologyTime(projection.generatedAt, locale)} · Recommendations do not apply until I review them.`}
           </p>
           </>
       ) : result.binding ? (
@@ -963,11 +970,8 @@ function LoadoutCard({ testId, title, state, entries, chips, empty, locale }: {
   locale: Locale;
 }) {
   return (
-    <section data-testid={testId} style={ontologySubsectionStyle}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <h4 style={ontologyHeadingStyle}>{title}</h4>
-        <span style={ontologyTagStyle}>{state}</span>
-      </div>
+    <section data-testid={testId} data-loadout-state={state} style={ontologySubsectionStyle}>
+      <h4 style={ontologyHeadingStyle}>{title}</h4>
       {entries.length > 0 ? <LoadoutEntries entries={entries} chips={chips} locale={locale} /> : <EmptyOntologyText text={empty} />}
     </section>
   );
@@ -1001,35 +1005,35 @@ function EmptyOntologyText({ text }: { text: string }) {
 }
 
 function ontologyProjectionStatus(state: string, ko: boolean): { label: string; color: string; background: string } {
-  if (state === "live") return { label: ko ? "실시간" : "Live", color: "var(--green-deep)", background: "rgba(12,166,120,0.1)" };
-  if (state === "unbound") return { label: ko ? "Hub 바인딩 없음" : "Not Hub-bound", color: "var(--muted-deep)", background: "var(--fill-1)" };
-  if (state === "revoked") return { label: ko ? "회수됨" : "Revoked", color: "var(--red-deep)", background: "rgba(194,74,40,0.1)" };
-  if (state === "conflict" || state === "binding-changed") return { label: ko ? "충돌" : "Conflict", color: "var(--red-deep)", background: "rgba(194,74,40,0.1)" };
+  if (state === "live") return { label: ko ? "Hub와 연결됨" : "Connected to Hub", color: "var(--green-deep)", background: "rgba(12,166,120,0.1)" };
+  if (state === "unbound") return { label: ko ? "아직 연결 안 됨" : "Not connected yet", color: "var(--muted-deep)", background: "var(--fill-1)" };
+  if (state === "revoked") return { label: ko ? "더 이상 사용 불가" : "No longer available", color: "var(--red-deep)", background: "rgba(194,74,40,0.1)" };
+  if (state === "conflict" || state === "binding-changed") return { label: ko ? "다시 확인 필요" : "Needs another check", color: "var(--red-deep)", background: "rgba(194,74,40,0.1)" };
   if (state === "auth-unavailable") return { label: ko ? "Hub 로그인 필요" : "Hub sign-in required", color: "var(--peach-ink)", background: "rgba(217,119,6,0.1)" };
   if (state === "endpoint-absent") return { label: ko ? "Hub 기능 미지원" : "Hub unsupported", color: "var(--muted-deep)", background: "var(--fill-1)" };
-  return { label: state === "stale" ? (ko ? "오래된 상태" : "Stale") : (ko ? "오프라인" : "Offline"), color: "var(--peach-ink)", background: "rgba(217,119,6,0.1)" };
+  return { label: state === "stale" ? (ko ? "최신 상태 확인 필요" : "Needs a current check") : (ko ? "오프라인" : "Offline"), color: "var(--peach-ink)", background: "rgba(217,119,6,0.1)" };
 }
 
 function ontologyProjectionEmptyMessage(status: AgentOntologyHubProjection["status"], ko: boolean): string {
   const messages: Record<AgentOntologyHubProjection["status"], [string, string]> = {
-    unbound: ["정확한 Hub 바인딩이 없습니다.", "No exact Hub binding is available."],
-    live: ["Hub가 이 정확한 릴리스의 projection을 반환하지 않았습니다.", "Hub did not return a projection for this exact release."],
-    offline: ["Hub에 연결할 수 없습니다. 이전 상태를 현재 상태처럼 추정하지 않습니다.", "Hub is offline; prior state is not inferred as current."],
-    stale: ["검증된 최신 projection을 받을 수 없습니다.", "A verified current projection is unavailable."],
+    unbound: ["아직 이 에이전트가 Hub와 연결되지 않았습니다.", "This agent is not connected to Hub yet."],
+    live: ["장착 정보를 불러오지 못했습니다. 잠시 뒤 다시 확인해 주세요.", "Attachment information is unavailable. Try again shortly."],
+    offline: ["Hub에 연결할 수 없습니다. 인터넷 연결 후 다시 확인해 주세요.", "Hub is offline. Check again after reconnecting to the internet."],
+    stale: ["최신 장착 상태를 확인할 수 없습니다.", "The current attachment status cannot be confirmed."],
     "auth-unavailable": ["Agentlas Hub 로그인이 필요합니다.", "Agentlas Hub sign-in is required."],
-    "endpoint-absent": ["현재 Hub 버전은 온톨로지 projection을 지원하지 않습니다.", "This Hub version does not support Ontology projections."],
-    "projection-missing": ["정확한 릴리스의 projection이 응답에서 누락되었습니다.", "The exact release projection was missing from the response."],
-    "binding-changed": ["조회 중 Hub 바인딩이 변경되었습니다.", "The Hub binding changed during refresh."],
+    "endpoint-absent": ["현재 Hub에서는 경험칩 장착 상태를 지원하지 않습니다.", "This Hub version does not support Experience Chip attachments."],
+    "projection-missing": ["장착 정보가 응답에서 누락되었습니다. 다시 확인해 주세요.", "Attachment information was missing. Please refresh."],
+    "binding-changed": ["확인하는 동안 에이전트 연결이 바뀌었습니다. 다시 확인해 주세요.", "The agent connection changed during refresh. Please check again."],
   };
   return messages[status][ko ? 0 : 1];
 }
 
 function verificationLabel(value: MobileBridgeOntologyChipDto["verification"], locale: Locale): string {
   const labels: Record<MobileBridgeOntologyChipDto["verification"], [string, string]> = {
-    verified: ["검증됨", "Verified"],
-    requested: ["검증 요청됨", "Verification requested"],
-    unverified: ["미검증", "Unverified"],
-    rejected: ["검증 거절", "Rejected"],
+    verified: ["안전 확인 완료", "Safety checked"],
+    requested: ["안전 확인 중", "Safety check in progress"],
+    unverified: ["안전 확인 필요", "Safety check needed"],
+    rejected: ["공개 불가", "Not publishable"],
   };
   return labels[value][locale === "ko" ? 0 : 1];
 }
