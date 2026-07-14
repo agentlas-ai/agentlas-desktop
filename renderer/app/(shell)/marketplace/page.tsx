@@ -35,6 +35,7 @@ const C = {
 };
 
 type HubCategory = "all" | "agent" | "team" | "plugin";
+type HubView = "agents" | "experience";
 
 function isLiveHubListing(listing: MarketplaceListing): boolean {
   return listing.source === "hub-index" || listing.source === "hub-profile" || listing.source === "hub-plugin" || listing.kind === "cloud-callable" || listing.callable === true;
@@ -136,6 +137,7 @@ function MarketplacePage() {
 
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 12;
+  const [hubView, setHubView] = useState<HubView>(() => searchParams.get("view") === "experience" ? "experience" : "agents");
 
   const [importNotice, setImportNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [listings, setListings] = useState<MarketplaceListing[]>([]);
@@ -358,6 +360,24 @@ function MarketplacePage() {
     ? ko ? "계정 로그인됨" : "Account signed in"
     : ko ? "로그인 필요" : "Signed out";
 
+  async function openHubPage(pathname: string) {
+    const api = ipc();
+    if (!api?.fs?.openPath) return;
+    let origin = "https://agentlas.cloud";
+    try {
+      if (sourceStatus?.baseUrl?.startsWith("http")) origin = new URL(sourceStatus.baseUrl).origin;
+    } catch {
+      // Keep the public Hub origin when a diagnostic base URL is malformed.
+    }
+    const result = await api.fs.openPath(`${origin}${pathname}`);
+    if (!result.ok) {
+      setImportNotice({
+        tone: "error",
+        text: result.message || (ko ? "Hub 페이지를 열지 못했습니다." : "Could not open the Hub page."),
+      });
+    }
+  }
+
   return (
     <div className="rd hub-desktop-root">
       <div className="titlebar-nodrag hub-desktop-scroll">
@@ -383,8 +403,40 @@ function MarketplacePage() {
                 </span>
               </div>
             </div>
+            <div
+              role="tablist"
+              aria-label={ko ? "Hub에서 찾을 것" : "What to find on Hub"}
+              style={{ display: "flex", gap: 8, padding: "10px 18px 0", borderBottom: "1px solid var(--rd-hair)" }}
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={hubView === "agents"}
+                className={"btn sm" + (hubView === "agents" ? " primary" : "")}
+                onClick={() => setHubView("agents")}
+              >
+                {ko ? "일할 에이전트 찾기" : "Find agents"}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={hubView === "experience"}
+                className={"btn sm" + (hubView === "experience" ? " primary" : "")}
+                onClick={() => setHubView("experience")}
+              >
+                {ko ? "더 잘하게 만드는 경험칩" : "Experience Chips"}
+              </button>
+            </div>
             <main className="rd-page hub-web-content">
               <div className="hub-page-root">
+          {hubView === "experience" ? (
+            <ExperienceChipHubIntro
+              ko={ko}
+              onBrowse={() => void openHubPage("/marketplace?category=ontology")}
+              onSell={() => void openHubPage("/experience")}
+            />
+          ) : (
+          <>
           <div
             className="card portal-search-panel rd-card-cream"
             data-tour-id="hub.search"
@@ -661,12 +713,86 @@ function MarketplacePage() {
               <button type="button" className="hub-pager-btn" disabled={safePage >= totalPages} onClick={() => setPage(Math.min(totalPages, safePage + 1))}>{ko ? "다음" : "Next"}</button>
             </nav>
           )}
+          </>
+          )}
               </div>
             </main>
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+function ExperienceChipHubIntro({
+  ko,
+  onBrowse,
+  onSell,
+}: {
+  ko: boolean;
+  onBrowse: () => void;
+  onSell: () => void;
+}) {
+  const benefits = ko
+    ? [
+        ["막혔던 일을 더 빨리 해결", "실제로 해결했던 순서와 확인 방법을 다음 작업에 다시 씁니다."],
+        ["결과물의 취향을 일정하게 유지", "내가 고른 문체·구성·디자인 방향을 새 작업에도 이어갑니다."],
+        ["구매 전에 효과와 가격 확인", "어떤 업무에서 무엇이 좋아지는지, 얼마인지 먼저 보고 결정합니다."],
+      ]
+    : [
+        ["Solve familiar blockers faster", "Reuse steps and checks that already worked in real tasks."],
+        ["Keep output style consistent", "Carry your preferred tone, structure, and visual direction into new work."],
+        ["See the value and price first", "Review what improves, where it helps, and what it costs before buying."],
+      ];
+  return (
+    <section data-testid="experience-chip-hub-entry" style={{ display: "grid", gap: 16 }}>
+      <div className="card rd-card-cream" style={{ padding: 22, display: "grid", gap: 10 }}>
+        <div className="portal-eyebrow">EXPERIENCE CHIP</div>
+        <h1 style={{ margin: 0, fontFamily: "var(--rd-f-display)", fontSize: 30, fontWeight: 500 }}>
+          {ko ? "에이전트에게, 이미 잘된 방법을 더하세요" : "Give your agent a method that already worked"}
+        </h1>
+        <p style={{ margin: 0, maxWidth: 760, color: "var(--rd-ink-2)", fontSize: 14, lineHeight: 1.65 }}>
+          {ko
+            ? "경험칩은 새로운 에이전트가 아닙니다. 내가 쓰는 에이전트에 문제 해결법이나 취향을 더해, 비슷한 일을 더 빠르고 일관되게 하도록 돕습니다."
+            : "An Experience Chip is not another agent. It adds a proven method or preference to an agent you already use, helping it handle similar work faster and more consistently."}
+        </p>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12 }}>
+        {benefits.map(([title, body]) => (
+          <article key={title} className="card" style={{ padding: 16, display: "grid", gap: 7 }}>
+            <strong style={{ color: "var(--rd-ink)", fontSize: 14 }}>{title}</strong>
+            <span style={{ color: "var(--rd-ink-3)", fontSize: 12.5, lineHeight: 1.55 }}>{body}</span>
+          </article>
+        ))}
+      </div>
+
+      <div className="card" style={{ padding: 18, display: "grid", gap: 12 }}>
+        <div>
+          <strong style={{ display: "block", fontSize: 15 }}>
+            {ko ? "구매해도 바로 바뀌지 않습니다" : "Buying does not change anything immediately"}
+          </strong>
+          <span style={{ display: "block", marginTop: 5, color: "var(--rd-ink-3)", fontSize: 12.5, lineHeight: 1.55 }}>
+            {ko
+              ? "가격을 확인하고 구매한 뒤, 적용할 에이전트를 직접 고릅니다. 지금 열려 있는 대화는 그대로이고, 새로 시작하는 대화부터 사용됩니다."
+              : "After reviewing the price and buying, you choose the agent to apply it to. The current conversation stays unchanged; the chip starts with a new conversation."}
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button type="button" className="btn sm primary" onClick={onBrowse}>
+            {ko ? "경험칩과 가격 보기" : "Browse chips and prices"}
+          </button>
+          <button type="button" className="btn sm" onClick={onSell}>
+            {ko ? "내 경험칩 소개·가격 정하기" : "Describe and price my chip"}
+          </button>
+        </div>
+        <small style={{ color: "var(--rd-ink-3)", lineHeight: 1.5 }}>
+          {ko
+            ? "로그인과 결제 확인은 안전한 Hub 브라우저 화면에서 진행하며, 장착 상태는 Desktop의 내 에이전트에서 확인합니다."
+            : "Sign-in and payment confirmation happen in the secure Hub browser page. Attachment status appears in My Agents on Desktop."}
+        </small>
+      </div>
+    </section>
   );
 }
 

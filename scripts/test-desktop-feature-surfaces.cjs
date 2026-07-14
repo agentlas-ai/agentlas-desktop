@@ -137,6 +137,11 @@ async function main() {
       console.log("desktop exact Hub Ontology projection, WebGL fallback, scale, and error-state surfaces passed");
       return;
     }
+    if (process.argv.includes("--hub-live-only")) {
+      await runHubLiveSurface(browser, baseUrl, evidence);
+      console.log("desktop live Hub and Experience Chip entry surface passed");
+      return;
+    }
     if (process.argv.includes("--agent-governance-only")) {
       await runLibrarySurface(browser, baseUrl, evidence);
       await runFirmAgentSurface(browser, baseUrl, evidence);
@@ -1730,12 +1735,28 @@ async function runAutomationDefaultAndDetailSurface(browser, baseUrl, evidence) 
 }
 
 async function runHubLiveSurface(browser, baseUrl, evidence) {
-  const { context, page, errors } = await newPage(browser, { hubOffline: false });
+  const { context, page, errors } = await newPage(browser, { hubOffline: false, locale: "ko" });
   await page.goto(`${baseUrl}/marketplace.html`, { waitUntil: "domcontentloaded" });
-  await page.getByText(/Hub 실시간|Hub live/).waitFor();
+  await page.getByText(/Hub 실시간|Hub live/, { exact: true }).waitFor();
   assert.equal(await page.getByText(/실제 Hub에 연결되지 않았습니다|not connected to the real Hub/).count(), 0);
   assert.equal(await page.getByText(/라이브 Hub 항목|live Hub items/).count(), 0);
   assert.equal(await page.locator(".hub-cat-chip").count(), 0, "Hub top category chips should stay removed");
+  await page.getByRole("tab", { name: /더 잘하게 만드는 경험칩|Experience Chips/ }).click();
+  const experienceEntry = page.getByTestId("experience-chip-hub-entry");
+  await experienceEntry.getByText(/에이전트에게, 이미 잘된 방법을 더하세요|Give your agent a method that already worked/).waitFor();
+  await experienceEntry.getByText(/막혔던 일을 더 빨리 해결|Solve familiar blockers faster/).waitFor();
+  await experienceEntry.getByText(/구매해도 바로 바뀌지 않습니다|Buying does not change anything immediately/).waitFor();
+  assert.doesNotMatch(await experienceEntry.innerText(), /release[_ -]?id|definition[_ -]?id|다른 세션|검증된 실행/i, "Experience Chip entry must stay human-readable");
+  await experienceEntry.getByRole("button", { name: /경험칩과 가격 보기|Browse chips and prices/ }).click();
+  await experienceEntry.getByRole("button", { name: /내 경험칩 소개·가격 정하기|Describe and price my chip/ }).click();
+  const openedHubPages = await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "fs.openPath").map((call) => call.payload));
+  assert.deepEqual(openedHubPages.slice(-2), [
+    "https://agentlas.cloud/marketplace?category=ontology",
+    "https://agentlas.cloud/experience",
+  ]);
+  await page.screenshot({ path: path.join(outDir, "hub-experience-chip-entry-surface.png"), fullPage: true });
+  evidence.push({ name: "hub-experience-chip-entry-surface", status: "pass", url: page.url() });
+  await page.getByRole("tab", { name: /일할 에이전트 찾기|Find agents/ }).click();
   await page.getByText(/총 267개|267 total/).waitFor();
   await page.locator(".portal-input").fill("FDA");
   await page.getByRole("option", { name: /FDA SaMD 510\(k\)|Pre-market Notification/ }).waitFor();
