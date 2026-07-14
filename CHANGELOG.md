@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.23 — 2026-07-14
+
+### Fixed
+
+- **The canonical first contact path now completes on Windows through
+  Agentlas OS v1.1.27.** Windows ACLs no longer surface as false POSIX permission
+  failures, so Desktop keeps the same Core-owned project soul, memory, code
+  map, ontology, Career Graph, and privacy-first `.gitignore` contract on all
+  three desktop operating systems.
+- **The live-verified workload boundary still contains no vendor model aliases
+  or tier-to-model mappings.** The parent AI supplies an exact advertised ID;
+  Desktop validates inventory, capability, context, cost, and explicit pins.
+
 ## 0.8.22 — 2026-07-14
 
 ### Fixed

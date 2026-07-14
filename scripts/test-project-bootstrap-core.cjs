@@ -18,7 +18,14 @@ async function main() {
       { cwd: project, timeoutMs: 120_000, locale: "en" },
     );
     assert.equal(result.ok, true, result.error || result.stderr);
-    assert.equal(result.json.status, "active");
+    assert.equal(result.json.schemaVersion, "agentlas.project-bootstrap.v1");
+    assert.equal(["active", "privacy_warning"].includes(result.json.status), true);
+    assert.equal(result.json.mergeOnly, true);
+    assert.equal(result.json.privacyBlockInstalled, true);
+    assert.equal(result.json.privateModeCompliant, true);
+    assert.deepEqual(result.json.missing, []);
+    assert.deepEqual(result.json.overwritten, []);
+    assert.deepEqual(result.json.permissionIssues, []);
     assert.equal(fs.existsSync(path.join(project, ".agentlas", "project-soul-memory.md")), true);
     assert.equal(fs.existsSync(path.join(project, ".agentlas", "code-map", "project-map.json")), true);
     assert.equal(fs.existsSync(path.join(project, ".agentlas", "ontology-runtime.sqlite")), true);

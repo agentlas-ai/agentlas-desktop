@@ -17,12 +17,36 @@ async function ensureCoreProject(projectPath: string, projectName?: string): Pro
   const existing = projectBootstrapRuns.get(projectPath);
   if (existing) return existing;
   const pending = (async () => {
-    const result = await runHephaestus<{ status?: string }>(
+    const result = await runHephaestus<{
+      schemaVersion?: string;
+      status?: string;
+      missing?: unknown[];
+      mergeOnly?: boolean;
+      overwritten?: unknown[];
+      privacyBlockInstalled?: boolean;
+      privateModeCompliant?: boolean;
+      permissionIssues?: unknown[];
+    }>(
       "agentlas_cloud",
       ["project", "ensure", "--project", projectPath, "--reason", "desktop-first-contact"],
       { cwd: projectPath, timeoutMs: 120_000 },
     );
-    if (result.ok && result.json?.status === "active") return true;
+    const receipt = result.json;
+    const canonical = Boolean(
+      result.ok
+      && receipt?.schemaVersion === "agentlas.project-bootstrap.v1"
+      && ["active", "privacy_warning"].includes(receipt.status ?? "")
+      && receipt.mergeOnly === true
+      && receipt.privacyBlockInstalled === true
+      && receipt.privateModeCompliant === true
+      && Array.isArray(receipt.missing)
+      && receipt.missing.length === 0
+      && Array.isArray(receipt.overwritten)
+      && receipt.overwritten.length === 0
+      && Array.isArray(receipt.permissionIssues)
+      && receipt.permissionIssues.length === 0
+    );
+    if (canonical) return true;
     // Older/missing Core builds retain the merge-only Desktop seed as a safe
     // continuity fallback; the next contact retries the canonical Core path.
     projectBootstrapRuns.delete(projectPath);

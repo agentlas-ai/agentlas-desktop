@@ -69,8 +69,9 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
-- **2026-07-14 · v0.8.22 First-contact release gate** — every writable folder
-  initializes through Agentlas OS v1.1.25 on first contact, with one merge-only
+- **2026-07-14 · v0.8.23 Cross-platform first-contact foundation** — every
+  writable folder initializes through Agentlas OS v1.1.27 on first contact,
+  including the Windows ACL/POSIX mode correction, with one merge-only
   project soul, memory map, code map, ontology, Career Graph, and privacy-first
   `.gitignore` across Desktop, Terminal, Claude Code, Codex, Network, Cloud, and
   Storm. The release gate now verifies that immediate setup contract. Workload
