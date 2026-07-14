@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.26 — 2026-07-15
+## 0.8.27 — 2026-07-15
 
 ### Fixed
 
@@ -13,6 +13,9 @@
 - **The Build Cloud consent contract is now a required release gate.** Signed
   macOS and cross-platform packaging verify that Cloud upload remains explicit,
   private, single-flight, and safely local-only when dismissed.
+- **The embedded runtime boundary remains Agentlas OS v1.1.28.** Canonical
+  first-contact still completes before agent work starts, and workload routing
+  still introduces no vendor model alias or guessed model table.
 
 ## 0.8.25 — 2026-07-15
 
