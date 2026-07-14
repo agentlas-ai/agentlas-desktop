@@ -29,6 +29,7 @@ import type {
   SiteWorkspaceHandoff,
 } from "./site-studio";
 import type {
+  MobileBridgeOntologyAttachReceiptDto,
   MobileBridgeOntologyProjectionDto,
   MobileBridgePairingPayload,
 } from "./mobile-bridge";
@@ -3681,6 +3682,21 @@ export interface AgentOntologyHubProjection {
   projection: MobileBridgeOntologyProjectionDto | null;
 }
 
+export type AgentOntologyAttachDecision = "approve" | "deny";
+
+/**
+ * Main-verified result of one explicit Desktop attachment decision. The
+ * renderer receives the outcome and refreshed public projection, never a
+ * session cookie, idempotency key, or caller-supplied release identity.
+ */
+export interface AgentOntologyAttachDecisionResult {
+  schemaVersion: 1;
+  outcome: MobileBridgeOntologyAttachReceiptDto["outcome"];
+  loadoutState: MobileBridgeOntologyAttachReceiptDto["loadoutState"];
+  acknowledgedAt: string;
+  projection: AgentOntologyHubProjection;
+}
+
 export interface RunEventUi {
   id: string;
   runId: string;
@@ -4112,8 +4128,14 @@ export interface AgentlasIpc {
     ontologySummary: (agentId: string) => Promise<ExperienceOntologySummary>;
     /** Value-free, bounded relation graph; never includes source summaries, paths, prompts, or secrets. */
     ontologyGraph: (agentId: string) => Promise<ExperienceOntologyGraphSnapshot>;
-    /** Exact v59 binding only. This is a read-only Hub projection with no attach or purchase action. */
+    /** Exact v59 binding only. Reads Hub state; any attachment decision uses hubResolveAttach. */
     hubProjection: (agentId: string, force?: boolean) => Promise<AgentOntologyHubProjection>;
+    /** Resolve only a Hub-issued pending approval for this exact installed agent. Never purchases a chip. */
+    hubResolveAttach: (
+      agentId: string,
+      approvalId: string,
+      decision: AgentOntologyAttachDecision,
+    ) => Promise<AgentOntologyAttachDecisionResult>;
   };
   /** 실행/실패 원장 — 긴 원문 없이 runId, 노드, 도구, 오류 메타데이터만 조회한다. */
   runLedger: {

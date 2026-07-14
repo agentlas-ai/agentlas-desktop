@@ -237,7 +237,7 @@ import { getUsageSnapshot, invalidateUsage, retryUsageProvider } from "./usage";
 import { isUsageRetryProviderId } from "./usage/retry-policy";
 import { listPendingConfirmations } from "./confirm";
 import { addProjectOntologySource, getProjectOntologyStatus } from "./ontology/project-runtime";
-import { getAgentOntologyHubProjection } from "./ontology/agent-hub-projection";
+import { getAgentOntologyHubProjection, resolveAgentOntologyHubAttach } from "./ontology/agent-hub-projection";
 import {
   createProject,
   getProject,
@@ -1837,6 +1837,8 @@ export function registerIpcHandlers(): void {
     getExperienceOntologyGraphSnapshot(agentId));
   ipcMain.handle("experience:hubProjection", (_e, agentId: string, force?: boolean) =>
     getAgentOntologyHubProjection(agentId, { force: force === true }));
+  ipcMain.handle("experience:hubResolveAttach", (_e, agentId: string, approvalId: string, decision: "approve" | "deny") =>
+    resolveAgentOntologyHubAttach(agentId, approvalId, decision));
   ipcMain.handle("experience:captureFromMemory", (_e, input) => captureExperienceCandidate(input));
   ipcMain.handle("experience:listCandidates", (_e, packId: string) => listExperienceCandidates(packId));
   ipcMain.handle("experience:listOperationalPublicProjections", (_e, packId: string) =>

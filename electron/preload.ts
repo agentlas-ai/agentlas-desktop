@@ -172,6 +172,8 @@ const api: AgentlasIpc = {
     ontologyGraph: (agentId: string) => ipcRenderer.invoke("experience:ontologyGraph", agentId),
     hubProjection: (agentId: string, force?: boolean) =>
       ipcRenderer.invoke("experience:hubProjection", agentId, force === true),
+    hubResolveAttach: (agentId, approvalId, decision) =>
+      ipcRenderer.invoke("experience:hubResolveAttach", agentId, approvalId, decision),
     captureFromMemory: (input) => ipcRenderer.invoke("experience:captureFromMemory", input),
     listCandidates: (packId: string) => ipcRenderer.invoke("experience:listCandidates", packId),
     listOperationalPublicProjections: (packId: string) =>

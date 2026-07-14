@@ -1,9 +1,12 @@
 import type { InstalledAgent } from "../../shared/types";
+import type { DesktopOntologyRuntimeSessionDto } from "../../shared/mobile-bridge";
 import {
   buildExperienceContext,
   EXPERIENCE_SELECTED_MAX_APPROX_TOKENS,
 } from "../experience/context";
 import type { OntologyHubProjectionResult } from "../mobile-bridge/ontology-hub-client";
+import { resolveDesktopOperationalRuntimeSession } from "./operational-runtime-session";
+import { operationalRuntimeOverlayMatchesTask } from "./operational-runtime-contract";
 import { resolveDesktopTasteRuntimeSession } from "./taste-runtime-session";
 import { tasteRuntimeOverlayMatchesTask } from "./taste-runtime-contract";
 
@@ -12,6 +15,11 @@ interface ProjectionClient {
     bindings: ReadonlyArray<{ agentDefinitionId: string; agentReleaseId: string }>,
     force?: boolean,
   ): Promise<OntologyHubProjectionResult>;
+  resolveRuntimeSession?: (input: {
+    agentDefinitionId: string;
+    agentReleaseId: string;
+    sessionRef: string;
+  }) => Promise<DesktopOntologyRuntimeSessionDto>;
 }
 
 export interface AgentRuntimeOntologyContext {
@@ -39,6 +47,18 @@ export async function buildAgentRuntimeOntologyContext(input: {
   /** False on surfaces that did not previously consume host-local Operational Experience. */
   includeOperational?: boolean;
 }): Promise<AgentRuntimeOntologyContext> {
+  let remoteOperational: Awaited<ReturnType<typeof resolveDesktopOperationalRuntimeSession>> = null;
+  try {
+    // This call is also the next-session activation boundary for Taste-only
+    // loadouts. It never sends the local task or raw chat id to Hub.
+    remoteOperational = await resolveDesktopOperationalRuntimeSession({
+      sessionId: input.runSessionId,
+      installedAgentId: input.installedAgent.id,
+      client: input.client,
+    });
+  } catch {
+    remoteOperational = null;
+  }
   let tasteDirective = "";
   let tasteApproxTokens = 0;
   let tasteReleaseId: string | null = null;
@@ -60,24 +80,29 @@ export async function buildAgentRuntimeOntologyContext(input: {
   let operationalPrompt = "";
   let operationalApproxTokens = 0;
   if (input.includeOperational !== false) {
-    try {
-      const experience = buildExperienceContext({
-        agentId: input.installedAgent.id,
-        projectId: input.projectId,
-        projectPath: input.projectPath,
-        environment: {
-          platform: process.platform,
-          arch: process.arch,
-          runtimeKind: input.runtimeKind,
-        },
-        basePackageHash: input.installedAgent.packageHash ?? null,
-        task: input.task,
-        reservedApproxTokens: tasteApproxTokens,
-      });
-      operationalPrompt = experience.prompt;
-      operationalApproxTokens = experience.approximateTokens;
-    } catch {
-      // Operational Experience is independent and optional.
+    if (remoteOperational && operationalRuntimeOverlayMatchesTask(remoteOperational.overlay, input.task)) {
+      operationalPrompt = remoteOperational.directive;
+      operationalApproxTokens = remoteOperational.overlay.estimatedTokens;
+    } else {
+      try {
+        const experience = buildExperienceContext({
+          agentId: input.installedAgent.id,
+          projectId: input.projectId,
+          projectPath: input.projectPath,
+          environment: {
+            platform: process.platform,
+            arch: process.arch,
+            runtimeKind: input.runtimeKind,
+          },
+          basePackageHash: input.installedAgent.packageHash ?? null,
+          task: input.task,
+          reservedApproxTokens: tasteApproxTokens,
+        });
+        operationalPrompt = experience.prompt;
+        operationalApproxTokens = experience.approximateTokens;
+      } catch {
+        // Operational Experience is independent and optional.
+      }
     }
   }
 

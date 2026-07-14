@@ -73,6 +73,60 @@ function projection(binding = exact) {
   };
 }
 
+function pendingProjection(resolved = false, binding = exact) {
+  const current = projection(binding);
+  current.loadout = {
+    revision: `rev_${"4".repeat(32)}`,
+    state: "empty",
+    entries: [],
+  };
+  current.recommendations = resolved ? [] : [{
+    recommendationId: "recommendation-safe-recovery",
+    source: "Hephaestus Network",
+    summary: "Add a safe recovery sequence",
+    reasons: ["Matches this agent's work"],
+    tradeoffs: ["Starts with new conversations"],
+    proposedChips: [{
+      chipId: "chip-operational-safe",
+      releaseId: "chip-operational-safe-r1",
+      kind: "operational",
+      state: "pending-approval",
+    }],
+    requiresApproval: true,
+    createdAt: now,
+    expiresAt: "2026-07-14T08:00:00.000Z",
+  }];
+  current.pendingAttachApprovals = resolved ? [] : [{
+    approvalId: "approval-safe-recovery",
+    recommendationId: "recommendation-safe-recovery",
+    expectedLoadoutRevision: current.loadout.revision,
+    selectedChips: [{
+      chipId: "chip-operational-safe",
+      releaseId: "chip-operational-safe-r1",
+      kind: "operational",
+      state: "pending-approval",
+    }],
+    createdAt: now,
+    expiresAt: "2026-07-14T08:00:00.000Z",
+  }];
+  if (resolved) {
+    current.scheduledNextSession = {
+      revision: `rev_${"5".repeat(32)}`,
+      state: "pending-next-session",
+      entries: [{
+        chipId: "chip-operational-safe",
+        releaseId: "chip-operational-safe-r1",
+        kind: "operational",
+        state: "scheduled-next-session",
+      }],
+      changedAt: now,
+    };
+  } else {
+    delete current.scheduledNextSession;
+  }
+  return current;
+}
+
 function assertRendererSafe(value) {
   const forbiddenKey = /(?:path|prompt|transcript|credential|cookie|secret|workspace|userId|mcpCommand|mcpArgs|mcpEnv)/i;
   const visit = (node) => {
@@ -98,7 +152,7 @@ function assertRendererSafe(value) {
     store.initStore();
     const db = store.getDb();
     const bindings = require("../dist/electron/ontology/hub-bindings.js");
-    const { getAgentOntologyHubProjection } = require("../dist/electron/ontology/agent-hub-projection.js");
+    const { getAgentOntologyHubProjection, resolveAgentOntologyHubAttach } = require("../dist/electron/ontology/agent-hub-projection.js");
     const { getDefaultOntologyHubClient } = require("../dist/electron/mobile-bridge/ontology-hub-client.js");
     assert.strictEqual(
       getDefaultOntologyHubClient(temp),
@@ -185,8 +239,107 @@ function assertRendererSafe(value) {
     assert.equal(raced.binding, null);
     assert.equal(raced.projection, null, "an in-flight old-release result must be discarded");
 
+    bindings.replaceInstalledAgentHubBinding({
+      installedAgentId: "agent-bound",
+      ...exact,
+      source: "hub-install",
+      boundAt: "2026-07-13T08:02:00.000Z",
+    });
+    let resolved = false;
+    const resolveCalls = [];
+    const attachmentClient = {
+      query: async (requested, force) => {
+        resolveCalls.push({ kind: "query", requested: structuredClone(requested), force });
+        return { supported: true, status: "live", projections: [pendingProjection(resolved)] };
+      },
+      resolveAttach: async (input, idempotencyKey) => {
+        resolveCalls.push({ kind: "resolve", input: structuredClone(input), idempotencyKey });
+        resolved = true;
+        return {
+          schemaVersion: 1,
+          approvalId: input.approvalId,
+          outcome: "accepted",
+          loadoutState: "applying",
+          loadoutRevision: `rev_${"5".repeat(32)}`,
+          acknowledgedAt: now,
+          message: "Scheduled for the next session.",
+        };
+      },
+    };
+    const attached = await resolveAgentOntologyHubAttach(
+      "agent-bound",
+      "approval-safe-recovery",
+      "approve",
+      { client: attachmentClient },
+    );
+    assert.equal(attached.outcome, "accepted");
+    assert.equal(attached.loadoutState, "applying");
+    assert.equal(attached.projection.status, "live");
+    assert.equal(attached.projection.projection.pendingAttachApprovals.length, 0);
+    assert.equal(attached.projection.projection.scheduledNextSession.entries.length, 1);
+    const resolveCall = resolveCalls.find((call) => call.kind === "resolve");
+    assert.deepEqual(resolveCall.input, {
+      schemaVersion: 1,
+      approvalId: "approval-safe-recovery",
+      recommendationId: "recommendation-safe-recovery",
+      agentDefinitionId: exact.agentDefinitionId,
+      agentReleaseId: exact.agentReleaseId,
+      expectedProjectionRevision: `rev_${"1".repeat(32)}`,
+      expectedLoadoutRevision: `rev_${"4".repeat(32)}`,
+      decision: "approve",
+      selectedChips: [{
+        chipId: "chip-operational-safe",
+        releaseId: "chip-operational-safe-r1",
+        kind: "operational",
+        state: "pending-approval",
+      }],
+    }, "Main must derive the exact release and revisions from the fresh Hub projection");
+    assert.match(resolveCall.idempotencyKey, /^desktop-ontology-attach-[0-9a-f]{48}$/);
+    assert.equal(resolveCalls.filter((call) => call.kind === "query").length, 2, "Desktop must refresh before and after the attachment decision");
+    assertRendererSafe(attached);
+
+    let denied = false;
+    let deniedInput = null;
+    const deniedResult = await resolveAgentOntologyHubAttach(
+      "agent-bound",
+      "approval-safe-recovery",
+      "deny",
+      {
+        client: {
+          query: async () => ({ supported: true, status: "live", projections: [denied ? projection() : pendingProjection(false)] }),
+          resolveAttach: async (input) => {
+            deniedInput = structuredClone(input);
+            denied = true;
+            return {
+              schemaVersion: 1,
+              approvalId: input.approvalId,
+              outcome: "denied",
+              loadoutState: "empty",
+              acknowledgedAt: now,
+              message: "No loadout mutation was applied.",
+            };
+          },
+        },
+      },
+    );
+    assert.equal(deniedResult.outcome, "denied");
+    assert.equal(deniedInput.decision, "deny");
+    assert.deepEqual(deniedInput.selectedChips, [], "denial must not send any selected release for attachment");
+
+    let unauthorizedResolveCalled = false;
+    await assert.rejects(
+      () => resolveAgentOntologyHubAttach("agent-bound", "approval-not-issued", "approve", {
+        client: {
+          query: async () => ({ supported: true, status: "live", projections: [pendingProjection(false)] }),
+          resolveAttach: async () => { unauthorizedResolveCalled = true; throw new Error("must not run"); },
+        },
+      }),
+      /no longer pending/,
+    );
+    assert.equal(unauthorizedResolveCalled, false, "a renderer-invented approval must never reach Hub");
+
     db.close();
-    console.log("Desktop My Agents exact Hub Ontology read projection: PASS");
+    console.log("Desktop My Agents exact Hub Ontology projection and attachment approval: PASS");
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
     app.quit();

@@ -57,6 +57,8 @@ import { getAgentGroup, resolveAgentGroupForRuntime } from "../store/agent-group
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
 import { buildExperienceContext } from "../experience/context";
+import { resolveDesktopOperationalRuntimeSession } from "../ontology/operational-runtime-session";
+import { operationalRuntimeOverlayMatchesTask } from "../ontology/operational-runtime-contract";
 import { resolveDesktopTasteRuntimeSession } from "../ontology/taste-runtime-session";
 import { tasteRuntimeOverlayMatchesTask } from "../ontology/taste-runtime-contract";
 import { curateReply, stripReplyMemoryEventsReadOnly } from "../memory/curator";
@@ -1504,6 +1506,19 @@ export async function runMcpInvocation(
       console.error("[architecture] buildMemoryContext failed:", err);
     }
   }
+  let remoteOperationalSnapshot: Awaited<ReturnType<typeof resolveDesktopOperationalRuntimeSession>> = null;
+  if (!req.agentAppMode) {
+    try {
+      // Runs before Taste so a previously approved next-session loadout is
+      // activated once for this new chat. The local task and chat id stay local.
+      remoteOperationalSnapshot = await resolveDesktopOperationalRuntimeSession({
+        sessionId: chat.id,
+        installedAgentId: agent.id,
+      });
+    } catch (err) {
+      console.error("[architecture] Hub Operational runtime overlay skipped:", err);
+    }
+  }
   let tasteSnapshot: Awaited<ReturnType<typeof resolveDesktopTasteRuntimeSession>> = null;
   if (!req.agentAppMode) {
     try {
@@ -1521,21 +1536,35 @@ export async function runMcpInvocation(
     ? tasteSnapshot
     : null;
   if (!req.agentAppMode) {
-    try {
-      const experienceContext = buildExperienceContext({
-        agentId: agent.id,
-        projectId: invocationProjectId,
-        projectPath: workingFolder,
-        environment: { platform: process.platform, arch: process.arch, runtimeKind: active.kind },
-        basePackageHash: agent.packageHash ?? null,
-        task: effectiveUserPrompt,
-        reservedApproxTokens: applicableTasteSnapshot?.overlay.estimatedTokens ?? 0,
+    const applicableRemoteOperational = remoteOperationalSnapshot && operationalRuntimeOverlayMatchesTask(
+      remoteOperationalSnapshot.overlay,
+      effectiveUserPrompt,
+    ) ? remoteOperationalSnapshot : null;
+    if (applicableRemoteOperational) {
+      systemPrompt = `${systemPrompt}\n\n${applicableRemoteOperational.directive}`;
+      sink({
+        kind: "tool-use",
+        status: locale === "ko"
+          ? "문제 해결 경험 적용 · 이 대화에 고정"
+          : "Problem-solving experience applied · fixed for this conversation",
       });
-      if (experienceContext.prompt) systemPrompt = `${systemPrompt}\n\n${experienceContext.prompt}`;
-    } catch (err) {
-      // Experience is an optional host-local projection. A damaged/missing
-      // projection can never block the base agent or Memory architecture.
-      console.error("[architecture] buildExperienceContext failed:", err);
+    } else {
+      try {
+        const experienceContext = buildExperienceContext({
+          agentId: agent.id,
+          projectId: invocationProjectId,
+          projectPath: workingFolder,
+          environment: { platform: process.platform, arch: process.arch, runtimeKind: active.kind },
+          basePackageHash: agent.packageHash ?? null,
+          task: effectiveUserPrompt,
+          reservedApproxTokens: applicableTasteSnapshot?.overlay.estimatedTokens ?? 0,
+        });
+        if (experienceContext.prompt) systemPrompt = `${systemPrompt}\n\n${experienceContext.prompt}`;
+      } catch (err) {
+        // Experience is an optional host-local projection. A damaged/missing
+        // projection can never block the base agent or Memory architecture.
+        console.error("[architecture] buildExperienceContext failed:", err);
+      }
     }
   }
   if (!req.agentAppMode && applicableTasteSnapshot) {
@@ -1546,8 +1575,8 @@ export async function runMcpInvocation(
     sink({
       kind: "tool-use",
       status: locale === "ko"
-        ? `Taste 온톨로지 적용 · ${applicableTasteSnapshot.overlay.releaseId} · 다음 세션까지 고정`
-        : `Taste ontology applied · ${applicableTasteSnapshot.overlay.releaseId} · fixed for this session`,
+        ? "취향 경험 적용 · 이 대화에 고정"
+        : "Taste preference applied · fixed for this conversation",
     });
   }
   // Compact core is always on; the full schema is loaded only for explicit

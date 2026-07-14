@@ -89,6 +89,7 @@ function setupMockAgentlasBridge(options) {
   }
 
   const now = new Date().toISOString();
+  let hubAttachmentDecision = null;
   const calls = [];
   const missingBridgeCalls = [];
   const eventHandlers = {};
@@ -218,6 +219,7 @@ function setupMockAgentlasBridge(options) {
     installedAt: now,
   };
   const neutralOntologyFixture = options?.hubOntologyNeutralFixture === true;
+  const purchasedPendingOnly = options?.hubOntologyPurchasedPendingOnly === true;
   const builder = {
     id: "agent-2",
     slug: neutralOntologyFixture ? "research-analyst-agent" : "builder-agent",
@@ -1439,30 +1441,39 @@ function setupMockAgentlasBridge(options) {
             }],
             loadout: {
               revision: `rev_${"b".repeat(32)}`,
-              state: "ready",
-              entries: [{
-                chipId: "chip-browser-publish",
-                releaseId: "chip-browser-publish-r3",
-                kind: "operational",
-                state: "attached",
-              }],
+              state: purchasedPendingOnly ? "empty" : "ready",
+              entries: purchasedPendingOnly ? [] : [{
+                  chipId: "chip-browser-publish",
+                  releaseId: "chip-browser-publish-r3",
+                  kind: "operational",
+                  state: "attached",
+                }],
               changedAt: now,
             },
-            scheduledNextSession: {
-              revision: `rev_${"c".repeat(32)}`,
-              state: "pending-next-session",
-              entries: [{
-                chipId: "chip-editorial-taste",
-                releaseId: "chip-editorial-taste-r2",
-                kind: "taste",
-                state: "scheduled-next-session",
-              }],
-              changedAt: now,
+            ...purchasedPendingOnly && hubAttachmentDecision !== "approve" ? {} : {
+              scheduledNextSession: {
+                revision: `rev_${"c".repeat(32)}`,
+                state: "pending-next-session",
+                entries: hubAttachmentDecision === "approve"
+                  ? [{
+                      chipId: "chip-browser-publish",
+                      releaseId: "chip-browser-publish-r4",
+                      kind: "operational",
+                      state: "scheduled-next-session",
+                    }]
+                  : [{
+                      chipId: "chip-editorial-taste",
+                      releaseId: "chip-editorial-taste-r2",
+                      kind: "taste",
+                      state: "scheduled-next-session",
+                    }],
+                changedAt: now,
+              },
             },
-            recommendations: [{
+            recommendations: hubAttachmentDecision ? [] : [{
               recommendationId: "recommendation-operational-r4",
               source: "Hephaestus Network",
-              summary: "실패 복구 범위를 보강하는 Operational 칩 업데이트",
+              summary: "실패 복구 방법 업데이트",
               reasons: ["최근 게시 실패 복구 작업과 일치"],
               tradeoffs: ["다음 세션부터만 적용"],
               proposedChips: [{
@@ -1475,7 +1486,7 @@ function setupMockAgentlasBridge(options) {
               createdAt: now,
               expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
             }],
-            pendingAttachApprovals: [{
+            pendingAttachApprovals: hubAttachmentDecision ? [] : [{
               approvalId: "approval-operational-r4",
               recommendationId: "recommendation-operational-r4",
               expectedLoadoutRevision: `rev_${"b".repeat(32)}`,
@@ -1489,6 +1500,21 @@ function setupMockAgentlasBridge(options) {
               expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
             }],
           },
+        };
+      },
+      hubResolveAttach: async (agentId, approvalId, decision) => {
+        record("experience.hubResolveAttach", { agentId, approvalId, decision });
+        if (approvalId !== "approval-operational-r4" || (decision !== "approve" && decision !== "deny")) {
+          throw new Error("Attachment approval changed");
+        }
+        hubAttachmentDecision = decision;
+        const projection = await window.agentlas.experience.hubProjection(agentId, true);
+        return {
+          schemaVersion: 1,
+          outcome: decision === "approve" ? "accepted" : "denied",
+          loadoutState: decision === "approve" ? "applying" : "ready",
+          acknowledgedAt: now,
+          projection,
         };
       },
       createPack: async (input) => {

@@ -20,6 +20,7 @@ import {
 } from "@/components/Icon";
 import type {
   AgentLearningSummary,
+  AgentOntologyAttachDecisionResult,
   AgentOntologyHubProjection,
   ExperienceOntologyGraphSnapshot,
   ExperienceOntologySummary,
@@ -761,14 +762,44 @@ export function AgentHubOntologyProjectionView({
   error,
   locale,
   onRefresh,
+  onResolveApproval,
 }: {
   result: AgentOntologyHubProjection | null;
   loading: boolean;
   error: string;
   locale: Locale;
   onRefresh: () => void;
+  onResolveApproval: (approvalId: string, decision: "approve" | "deny") => Promise<AgentOntologyAttachDecisionResult>;
 }) {
   const ko = locale === "ko";
+  const [resolvingApprovalId, setResolvingApprovalId] = useState<string | null>(null);
+  const [attachmentNotice, setAttachmentNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+
+  useEffect(() => {
+    setResolvingApprovalId(null);
+    setAttachmentNotice(null);
+  }, [result?.binding?.agentDefinitionId, result?.binding?.agentReleaseId]);
+
+  async function resolveApproval(approvalId: string, decision: "approve" | "deny") {
+    if (resolvingApprovalId) return;
+    setResolvingApprovalId(approvalId);
+    setAttachmentNotice(null);
+    try {
+      const resolved = await onResolveApproval(approvalId, decision);
+      const successful = resolved.outcome === "accepted" || resolved.outcome === "denied" || resolved.outcome === "already-resolved";
+      setAttachmentNotice({
+        tone: successful ? "ok" : "error",
+        text: ontologyAttachOutcomeMessage(resolved.outcome, ko),
+      });
+    } catch {
+      setAttachmentNotice({
+        tone: "error",
+        text: ko ? "장착 상태가 바뀌었습니다. 새로고침한 뒤 다시 확인해 주세요." : "The attachment state changed. Refresh and review it again.",
+      });
+    } finally {
+      setResolvingApprovalId(null);
+    }
+  }
   if (!result && loading) {
     return <InsightNotice text={ko ? "Hub 장착 상태를 확인하는 중…" : "Loading the Hub loadout…"} />;
   }
@@ -803,7 +834,7 @@ export function AgentHubOntologyProjectionView({
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
-            <h3 style={{ margin: 0, fontSize: 15 }}>{ko ? "장착된 경험칩" : "Attached experience chips"}</h3>
+            <h3 style={{ margin: 0, fontSize: 15 }}>{ko ? "이 에이전트의 경험칩" : "This agent's Experience Chips"}</h3>
             <span style={{ padding: "3px 7px", borderRadius: 999, background: status.background, color: status.color, fontSize: 10.5, fontWeight: 700 }}>
               {status.label}
             </span>
@@ -894,11 +925,43 @@ export function AgentHubOntologyProjectionView({
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
             <section data-testid="ontology-pending-approvals" style={ontologySubsectionStyle}>
               <h4 style={ontologyHeadingStyle}>{ko ? "내 확인이 필요한 변경" : "Changes awaiting my review"} · {projection.pendingAttachApprovals.length}</h4>
+              {attachmentNotice && (
+                <div
+                  data-testid="ontology-attach-notice"
+                  role={attachmentNotice.tone === "error" ? "alert" : "status"}
+                  style={{ marginBottom: 8, padding: "8px 9px", borderRadius: 8, color: attachmentNotice.tone === "error" ? "var(--red-deep)" : "var(--green-deep)", background: attachmentNotice.tone === "error" ? "rgba(194,74,40,0.08)" : "var(--green-soft)", fontSize: 10.5, lineHeight: 1.5 }}
+                >
+                  {attachmentNotice.text}
+                </div>
+              )}
               {projection.pendingAttachApprovals.length > 0 ? projection.pendingAttachApprovals.map((approval) => (
                 <div key={approval.approvalId} style={ontologyRowStyle}>
                   <strong style={{ fontSize: 11.5 }}>{ko ? "적용할지 직접 확인해 주세요" : "Choose whether to apply this change"}</strong>
+                  <span style={{ color: "var(--ink-soft)", fontSize: 10.5, lineHeight: 1.45 }}>
+                    {ko ? "적용해도 지금 대화는 바뀌지 않고, 새로 시작하는 대화부터 사용됩니다." : "Your current conversation stays unchanged; the chip starts with newly created conversations."}
+                  </span>
                   <span style={ontologyMetaStyle}>{ko ? "확인 가능 기한" : "Review by"} {formatOntologyTime(approval.expiresAt, locale)}</span>
                   <LoadoutEntries entries={approval.selectedChips} chips={chips} locale={locale} />
+                  <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginTop: 5 }}>
+                    <button
+                      type="button"
+                      disabled={Boolean(resolvingApprovalId)}
+                      onClick={() => void resolveApproval(approval.approvalId, "approve")}
+                      style={{ ...ontologyPrimaryButtonStyle, opacity: resolvingApprovalId ? 0.55 : 1, cursor: resolvingApprovalId ? "wait" : "pointer" }}
+                    >
+                      {resolvingApprovalId === approval.approvalId
+                        ? (ko ? "확인 중…" : "Applying…")
+                        : (ko ? "새 대화부터 적용" : "Apply to new conversations")}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={Boolean(resolvingApprovalId)}
+                      onClick={() => void resolveApproval(approval.approvalId, "deny")}
+                      style={{ ...ontologySecondaryButtonStyle, opacity: resolvingApprovalId ? 0.55 : 1, cursor: resolvingApprovalId ? "wait" : "pointer" }}
+                    >
+                      {ko ? "이번엔 적용 안 함" : "Not this time"}
+                    </button>
+                  </div>
                 </div>
               )) : <EmptyOntologyText text={ko ? "대기 중인 승인 요청이 없습니다." : "No approval is pending."} />}
             </section>
@@ -934,6 +997,20 @@ export function AgentHubOntologyProjectionView({
   );
 }
 
+function ontologyAttachOutcomeMessage(outcome: AgentOntologyAttachDecisionResult["outcome"], ko: boolean): string {
+  const messages: Record<AgentOntologyAttachDecisionResult["outcome"], [string, string]> = {
+    accepted: ["장착했습니다. 새로 시작하는 대화부터 사용됩니다.", "Attached. It will be used in newly created conversations."],
+    denied: ["이번에는 적용하지 않았습니다.", "This change was not applied."],
+    "already-resolved": ["이미 처리된 요청입니다. 최신 상태로 다시 확인했습니다.", "This request was already resolved. The latest state is shown."],
+    offline: ["Hub에 연결되지 않아 적용하지 못했습니다.", "The change was not applied because Hub is offline."],
+    stale: ["장착 정보가 오래되어 적용하지 않았습니다. 다시 확인해 주세요.", "The attachment state was stale, so nothing changed. Please review it again."],
+    conflict: ["장착 상태가 바뀌어 적용하지 않았습니다. 다시 확인해 주세요.", "The loadout changed, so nothing was applied. Please review it again."],
+    revoked: ["더 이상 사용할 수 없는 경험칩이라 적용하지 않았습니다.", "This Experience Chip is no longer available and was not applied."],
+    "outcome-unknown": ["처리 결과를 확인하지 못했습니다. 중복 적용하지 말고 먼저 새로고침해 주세요.", "The outcome is unknown. Refresh before trying again to avoid a duplicate action."],
+  };
+  return messages[outcome][ko ? 0 : 1];
+}
+
 function OntologyChipList({ testId, title, description, chips, locale }: {
   testId: string;
   title: string;
@@ -952,8 +1029,7 @@ function OntologyChipList({ testId, title, description, chips, locale }: {
             <span style={{ ...ontologyMetaStyle, flexShrink: 0 }}>{verificationLabel(chip.verification, locale)}</span>
           </div>
           <span style={{ color: "var(--ink-soft)", fontSize: 11, lineHeight: 1.45 }}>{chip.summary}</span>
-          <span style={ontologyMetaStyle}>{locale === "ko" ? "확인 자료" : "Supporting checks"} {chip.evidenceCount}</span>
-          {chip.labels.length > 0 && <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>{chip.labels.map((label) => <span key={label} style={ontologyTagStyle}>{label}</span>)}</div>}
+          <span style={ontologyMetaStyle}>{locale === "ko" ? `효과 확인 기록 ${chip.evidenceCount}개` : `${chip.evidenceCount} outcome checks`}</span>
         </div>
       )) : <EmptyOntologyText text={locale === "ko" ? "표시할 칩이 없습니다." : "No chips to show."} />}
     </section>
@@ -1054,8 +1130,8 @@ const ontologySubsectionStyle = {
 const ontologyHeadingStyle = { margin: "0 0 8px", color: "var(--ink)", fontSize: 12.5 };
 const ontologyRowStyle = { display: "flex", flexDirection: "column" as const, gap: 5, padding: 9, borderRadius: 8, border: "1px solid var(--paper-edge)", background: "var(--paper)", marginTop: 6 };
 const ontologyMetaStyle = { color: "var(--muted-deep)", fontSize: 9.5, lineHeight: 1.4 };
-const ontologyTagStyle = { padding: "2px 6px", borderRadius: 999, background: "var(--fill-1)", color: "var(--muted-deep)", fontSize: 9.5, lineHeight: 1.4 };
 const ontologySecondaryButtonStyle = { padding: "7px 10px", borderRadius: 7, border: "1px solid var(--paper-edge)", background: "var(--paper-2)", color: "var(--ink-soft)", fontSize: 11, fontWeight: 700, cursor: "pointer" };
+const ontologyPrimaryButtonStyle = { padding: "8px 11px", borderRadius: 7, border: "1px solid var(--green-deep)", background: "var(--green-deep)", color: "white", fontSize: 11, fontWeight: 750, cursor: "pointer" };
 const ontologyCompactMetricStyle = { display: "inline-flex", alignItems: "center", gap: 4, minHeight: 24, padding: "2px 7px", borderRadius: 999, background: "var(--paper)", border: "1px solid var(--paper-edge)", color: "var(--muted-deep)", fontSize: 9.5, fontWeight: 750 };
 const ontologyGraphToolButtonStyle = { width: 28, height: 28, padding: 0, border: 0, background: "transparent", color: "var(--ink-soft)", display: "grid", placeItems: "center", cursor: "pointer" };
 const visuallyHiddenStyle: React.CSSProperties = { position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clip: "rect(0, 0, 0, 0)", whiteSpace: "nowrap", border: 0 };

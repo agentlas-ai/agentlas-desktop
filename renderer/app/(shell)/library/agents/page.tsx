@@ -4408,6 +4408,13 @@ function AgentDetailView({
                   error={hubOntologyError}
                   locale={locale}
                   onRefresh={() => setHubOntologyRefresh((current) => current + 1)}
+                  onResolveApproval={async (approvalId, decision) => {
+                    const api = ipc();
+                    if (!api || !agent?.id) throw new Error("Agentlas Desktop is unavailable.");
+                    const resolved = await api.experience.hubResolveAttach(agent.id, approvalId, decision);
+                    setHubOntology(resolved.projection);
+                    return resolved;
+                  }}
                 />
                 <ExperienceOntologySummaryView
                   summary={ontologySummary}

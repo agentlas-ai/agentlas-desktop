@@ -4,9 +4,14 @@ import { randomUUID } from "node:crypto";
 
 import { getSessionCookieHeader } from "../auth";
 import {
+  operationalRuntimeOverlayIsRuntimeSafe,
+} from "../ontology/operational-runtime-contract";
+import {
   tasteRuntimeTokenEvidenceIsValid,
 } from "../ontology/taste-runtime-contract";
 import type {
+  DesktopOntologyRuntimeSessionDto,
+  DesktopOperationalRuntimeOverlayDto,
   MobileBridgeOntologyAttachReceiptDto,
   MobileBridgeOntologyAttachmentState,
   MobileBridgeOntologyChipDto,
@@ -23,6 +28,7 @@ import type {
 
 const PROJECTION_QUERY_PATH = "/api/ontology/v1/mobile/projections/query";
 const ATTACH_RESOLVE_PATH = "/api/ontology/v1/mobile/attachments/resolve";
+const DESKTOP_RUNTIME_SESSION_PATH = "/api/ontology/v1/desktop/runtime/session";
 const MAX_BINDINGS = 64;
 const MAX_RESPONSE_BYTES = 512 * 1024;
 const MAX_CACHE_ENTRIES = 256;
@@ -340,6 +346,82 @@ function decodeTasteRuntimeOverlay(
   return overlay;
 }
 
+function decodeDesktopOperationalRuntimeOverlay(value: unknown): DesktopOperationalRuntimeOverlayDto {
+  const row = record(value, "Desktop Operational runtime overlay");
+  onlyKeys(row, [
+    "schemaVersion", "chipId", "releaseId", "sourceContentHash",
+    "baseAgentDefinitionId", "baseAgentReleaseId", "taskSignatures",
+    "instructions", "estimatedTokens", "budgetTokens",
+  ], "Desktop Operational runtime overlay");
+  if (row.schemaVersion !== 1 || row.budgetTokens !== 560) {
+    throw new ContractError("Desktop Operational runtime overlay contract is unsupported.");
+  }
+  if (typeof row.sourceContentHash !== "string" || !SHA256_RE.test(row.sourceContentHash)) {
+    throw new ContractError("Desktop Operational runtime content hash is invalid.");
+  }
+  const taskSignatures = array(row.taskSignatures, "Desktop Operational task signatures", 16)
+    .map((item, index) => safeRef(item, `Desktop Operational taskSignatures[${index}]`));
+  const instructions = array(row.instructions, "Desktop Operational instructions", 8)
+    .map((item, index) => safeText(item, `Desktop Operational instructions[${index}]`, 600));
+  if (
+    taskSignatures.length === 0 || new Set(taskSignatures).size !== taskSignatures.length ||
+    instructions.length === 0 || new Set(instructions).size !== instructions.length
+  ) throw new ContractError("Desktop Operational runtime content is missing or duplicated.");
+  const overlay: DesktopOperationalRuntimeOverlayDto = {
+    schemaVersion: 1,
+    chipId: safeRef(row.chipId, "Desktop Operational chipId"),
+    releaseId: safeRef(row.releaseId, "Desktop Operational releaseId"),
+    sourceContentHash: row.sourceContentHash,
+    baseAgentDefinitionId: safeRef(row.baseAgentDefinitionId, "Desktop Operational baseAgentDefinitionId"),
+    baseAgentReleaseId: safeRef(row.baseAgentReleaseId, "Desktop Operational baseAgentReleaseId"),
+    taskSignatures,
+    instructions,
+    estimatedTokens: integer(row.estimatedTokens, "Desktop Operational estimatedTokens", 560),
+    budgetTokens: 560,
+  };
+  if (!operationalRuntimeOverlayIsRuntimeSafe(overlay)) {
+    throw new ContractError("Desktop Operational runtime overlay is not safe to execute.");
+  }
+  return overlay;
+}
+
+function decodeDesktopOntologyRuntimeSession(value: unknown): DesktopOntologyRuntimeSessionDto {
+  const row = record(value, "Desktop ontology runtime session");
+  onlyKeys(row, [
+    "schemaVersion", "agentDefinitionId", "agentReleaseId", "state",
+    "projectionRevision", "loadoutRevision", "operational", "taste", "generatedAt",
+  ], "Desktop ontology runtime session");
+  if (row.schemaVersion !== 1) throw new ContractError("Desktop ontology runtime session schema is unsupported.");
+  const agentDefinitionId = safeRef(row.agentDefinitionId, "Desktop runtime agentDefinitionId");
+  const agentReleaseId = safeRef(row.agentReleaseId, "Desktop runtime agentReleaseId");
+  const operational = row.operational === null ? null : decodeDesktopOperationalRuntimeOverlay(row.operational);
+  const taste = row.taste === null
+    ? null
+    : decodeTasteRuntimeOverlay(row.taste, {
+        chipId: safeRef(record(row.taste, "Desktop Taste runtime").chipId, "Desktop Taste chipId"),
+        releaseId: safeRef(record(row.taste, "Desktop Taste runtime").releaseId, "Desktop Taste releaseId"),
+      });
+  const state = enumValue(row.state, ["ready", "empty", "revoked"] as const, "Desktop runtime state");
+  if (
+    (state === "ready" && !operational && !taste) ||
+    (state !== "ready" && Boolean(operational || taste)) ||
+    [operational, taste].some((overlay) => overlay && (
+      overlay.baseAgentDefinitionId !== agentDefinitionId || overlay.baseAgentReleaseId !== agentReleaseId
+    ))
+  ) throw new ContractError("Desktop runtime state or exact base binding is inconsistent.");
+  return {
+    schemaVersion: 1,
+    agentDefinitionId,
+    agentReleaseId,
+    state,
+    projectionRevision: revision(row.projectionRevision, "Desktop runtime projectionRevision"),
+    loadoutRevision: revision(row.loadoutRevision, "Desktop runtime loadoutRevision"),
+    operational,
+    taste,
+    generatedAt: iso(row.generatedAt, "Desktop runtime generatedAt"),
+  };
+}
+
 function decodeRecommendation(value: unknown): MobileBridgeOntologyRecommendationDto {
   const row = record(value, "recommendation");
   onlyKeys(
@@ -654,6 +736,34 @@ export class OntologyHubClient {
     } catch {
       return fallbackReceipt(input, "outcome-unknown", "conflict", "Hub acknowledgement could not be verified.", now);
     }
+  }
+
+  async resolveRuntimeSession(input: {
+    agentDefinitionId: string;
+    agentReleaseId: string;
+    sessionRef: string;
+  }): Promise<DesktopOntologyRuntimeSessionDto> {
+    const binding = normalizeBindings([input])[0];
+    if (!binding || !/^desktop-session-[a-f0-9]{48}$/.test(input.sessionRef)) {
+      throw new ContractError("Desktop runtime session request is invalid.");
+    }
+    const cookie = this.cookieProvider();
+    if (!cookie || !/^agentlas_session=[^;\r\n]{8,}$/.test(cookie)) {
+      throw new ContractError("Agentlas Hub sign-in is unavailable.");
+    }
+    const response = await this.post(DESKTOP_RUNTIME_SESSION_PATH, {
+      schemaVersion: 1,
+      ...binding,
+      sessionRef: input.sessionRef,
+    }, cookie);
+    if (!response.ok) throw new ContractError("Desktop runtime session is unavailable.");
+    const decoded = decodeDesktopOntologyRuntimeSession(await responseJson(response));
+    if (decoded.agentDefinitionId !== binding.agentDefinitionId || decoded.agentReleaseId !== binding.agentReleaseId) {
+      throw new ContractError("Desktop runtime session exact binding changed.");
+    }
+    this.availabilityValue = "available";
+    this.lastQueryAt = 0;
+    return decoded;
   }
 
   private async performQuery(bindings: ExactAgentReleaseBinding[]): Promise<OntologyHubProjectionResult> {

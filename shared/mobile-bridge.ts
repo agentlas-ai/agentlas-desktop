@@ -409,6 +409,37 @@ export interface MobileBridgeTasteRuntimeOverlayDto {
   budgetTokens: 240;
 }
 
+/** Entitlement-checked, public-safe Operational material for one Desktop session. */
+export interface DesktopOperationalRuntimeOverlayDto {
+  schemaVersion: 1;
+  chipId: string;
+  releaseId: string;
+  sourceContentHash: string;
+  baseAgentDefinitionId: string;
+  baseAgentReleaseId: string;
+  taskSignatures: string[];
+  instructions: string[];
+  estimatedTokens: number;
+  budgetTokens: 560;
+}
+
+/**
+ * Hub-authoritative runtime snapshot. A new Desktop chat may activate an
+ * already-approved next-session loadout; no prompt, chat id, or credential is
+ * sent to Hub.
+ */
+export interface DesktopOntologyRuntimeSessionDto {
+  schemaVersion: 1;
+  agentDefinitionId: string;
+  agentReleaseId: string;
+  state: "ready" | "empty" | "revoked";
+  projectionRevision: string;
+  loadoutRevision: string;
+  operational: DesktopOperationalRuntimeOverlayDto | null;
+  taste: MobileBridgeTasteRuntimeOverlayDto | null;
+  generatedAt: string;
+}
+
 export interface MobileBridgeOntologyChipDto {
   chipId: string;
   releaseId: string;

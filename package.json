@@ -113,6 +113,7 @@
     "test:agent-hub-ontology-projection": "npm run build:electron && electron scripts/test-agent-hub-ontology-projection.cjs",
     "test:terminal-ontology-loadout-feed": "npm run build:electron && electron scripts/test-terminal-ontology-loadout-feed.cjs",
     "test:taste-runtime-application": "npm run build:electron && electron scripts/test-taste-runtime-application.cjs",
+    "test:operational-runtime-application": "npm run build:electron && electron scripts/test-operational-runtime-application.cjs",
     "test:system-agent-taste-runtime": "npm run build:electron && electron scripts/test-system-agent-taste-runtime.cjs",
     "test:experience-p0": "npm run build:electron && electron scripts/test-experience-p0.cjs",
     "test:experience-taxonomy": "npm run build:electron && electron scripts/test-experience-taxonomy-parity.cjs",

@@ -903,7 +903,7 @@ async function runHubOntologyProjectionSurface(browser, baseUrl, evidence) {
   await page.getByTestId("ontology-active-loadout").getByText(/현재 대화에서 사용 중|In use in the current conversation/).waitFor();
   await page.getByTestId("ontology-next-session").getByText(/새로 시작하는 대화부터 적용|Applies to newly started conversations/).waitFor();
   await page.getByTestId("ontology-pending-approvals").getByText(/적용할지 직접 확인해 주세요|Choose whether to apply this change/).waitFor();
-  await page.getByTestId("ontology-recommendations").getByText(/Operational 칩 업데이트/).waitFor();
+  await page.getByTestId("ontology-recommendations").getByText(/실패 복구 방법 업데이트/).waitFor();
   const management = page.getByTestId("ontology-chip-management");
   await management.getByText(/취향 경험 후보|Taste candidates/).click();
   await page.getByTestId("local-taste-drafts").waitFor();
@@ -911,18 +911,26 @@ async function runHubOntologyProjectionSurface(browser, baseUrl, evidence) {
   await page.getByText(/과한 장식보다 비대칭 에디토리얼/).waitFor();
   await management.getByText(/취향 경험 후보|Taste candidates/).click();
 
-  assert.equal(
-    await hub.getByRole("button", { name: /승인|Approve|장착|Attach|구매|Purchase|대여|Lease/ }).count(),
-    0,
-    "My Agents Hub projection must remain read-only",
-  );
+  await hub.getByRole("button", { name: /새 대화부터 적용|Apply to new conversations/ }).waitFor();
+  await hub.getByRole("button", { name: /이번엔 적용 안 함|Not this time/ }).waitFor();
   assert.doesNotMatch(await hub.innerText(), /\/Users\/|[A-Za-z]:\\|ghp_|sk-(?:proj-)?/i, "Hub card must not render host paths or credentials");
   await hub.getByRole("button", { name: /Hub 상태 새로고침|Refresh Hub status/ }).click();
   await page.waitForFunction(() => window.__qa.calls.some((call) =>
     call.name === "experience.hubProjection" && call.payload.agentId === "agent-2" && call.payload.force === true));
-  const calls = await page.evaluate(() => window.__qa.calls);
-  assert.equal(calls.some((call) => /attach|purchase|lease/i.test(call.name)), false, "refresh must not attach, purchase, or lease");
+  let calls = await page.evaluate(() => window.__qa.calls);
+  assert.equal(calls.some((call) => call.name === "experience.hubResolveAttach"), false, "refresh must not attach a chip");
+  assert.equal(calls.some((call) => /purchase|lease/i.test(call.name)), false, "refresh must not purchase or lease");
   assert.equal(calls.some((call) => call.name === "experience.cloudSave"), false, "Hub projection must not upload local Experience");
+  await hub.getByRole("button", { name: /새 대화부터 적용|Apply to new conversations/ }).click();
+  await hub.getByTestId("ontology-attach-notice").getByText(/장착했습니다. 새로 시작하는 대화부터 사용됩니다.|Attached. It will be used in newly created conversations./).waitFor();
+  await page.getByTestId("ontology-pending-approvals").getByText(/내 확인이 필요한 변경 · 0|Changes awaiting my review · 0/).waitFor();
+  calls = await page.evaluate(() => window.__qa.calls);
+  const attachCalls = calls.filter((call) => call.name === "experience.hubResolveAttach");
+  assert.deepEqual(attachCalls, [{
+    name: "experience.hubResolveAttach",
+    payload: { agentId: "agent-2", approvalId: "approval-operational-r4", decision: "approve" },
+  }]);
+  assert.equal(calls.some((call) => /purchase|lease/i.test(call.name)), false, "Desktop attachment approval must never create a purchase or lease");
   await page.getByTestId("ontology-hub-details").locator("summary").click();
   await nodePicker.selectOption({ label: "Agentlas Browser" });
   await graph.getByTestId("ontology-node-inspector").getByText("Agentlas Browser", { exact: true }).waitFor();
@@ -957,6 +965,7 @@ async function runActualExperienceAttachmentSurface(browser, baseUrl, evidence) 
     experienceScenario: true,
     hubOntologyAgentId: "agent-2",
     hubOntologyNeutralFixture: true,
+    hubOntologyPurchasedPendingOnly: true,
     hubOperationalChipTitle: chipTitle,
     hubOperationalChipSummary: chipSummary,
     locale: "ko",
@@ -966,15 +975,23 @@ async function runActualExperienceAttachmentSurface(browser, baseUrl, evidence) 
   await page.getByText(/리서치 분석 에이전트|Research Analyst Agent/).first().click();
   await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
   const hub = page.getByTestId("agent-hub-ontology-projection");
-  await hub.getByText(/현재 1개 사용 중|1 in use now/).waitFor();
+  await hub.getByText(/현재 0개 사용 중 · 내 확인 필요 1개|0 in use now · 1 awaiting your review/).waitFor();
   await page.getByTestId("ontology-hub-details").locator("summary").click();
   await page.getByTestId("ontology-operational-chips").getByText(chipTitle, { exact: true }).waitFor();
   await page.getByTestId("ontology-operational-chips").getByText(chipSummary, { exact: true }).waitFor();
-  await page.getByTestId("ontology-active-loadout").getByText(chipTitle, { exact: true }).waitFor();
+  await page.getByTestId("ontology-pending-approvals").getByText(chipTitle, { exact: true }).waitFor();
+  await page.getByTestId("ontology-pending-approvals").getByText(/지금 대화는 바뀌지 않고, 새로 시작하는 대화부터 사용됩니다./).waitFor();
   assert.doesNotMatch(await hub.innerText(), /release[_ -]?id|definition[_ -]?id|agent-definition-|agent-release-|\/Users\/|ghp_|sk-(?:proj-)?/i, "actual attached Experience must not expose internal IDs, paths, or credentials");
+  const reviewScreenshot = path.join(outDir, "library-actual-experience-attachment-review.png");
+  await hub.screenshot({ path: reviewScreenshot, animations: "disabled" });
+  await page.getByTestId("ontology-pending-approvals").getByRole("button", { name: "새 대화부터 적용", exact: true }).click();
+  await page.getByTestId("ontology-attach-notice").getByText("장착했습니다. 새로 시작하는 대화부터 사용됩니다.", { exact: true }).waitFor();
+  await page.getByTestId("ontology-next-session").getByText(chipTitle, { exact: true }).waitFor();
+  await hub.getByText(/현재 0개 사용 중 · 새로 시작하는 대화부터 1개 적용 예정/).waitFor();
   const screenshot = path.join(outDir, "library-actual-experience-attached-surface.png");
-  await page.screenshot({ path: screenshot, fullPage: true, animations: "disabled" });
+  await hub.screenshot({ path: screenshot, animations: "disabled" });
   assert.deepEqual(errors, [], "actual Experience attachment surface should not emit page errors");
+  evidence.push(reviewScreenshot);
   evidence.push({ name: "library-actual-experience-attached-surface", status: "pass", url: page.url() });
   await context.close();
 }
