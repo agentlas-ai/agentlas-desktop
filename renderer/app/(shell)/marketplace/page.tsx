@@ -1,6 +1,6 @@
 "use client";
 import { Suspense, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { classifyHubEntity, entityClassLabel } from "@/lib/agent-entity-kind";
@@ -134,6 +134,7 @@ export default function MarketplacePageWrapper() {
 function MarketplacePage() {
   const { t, locale } = useT();
   const ko = locale === "ko";
+  const router = useRouter();
   const searchParams = useSearchParams();
 
   const [page, setPage] = useState(1);
@@ -450,7 +451,7 @@ function MarketplacePage() {
                 className={"btn sm" + (hubView === "experience" ? " primary" : "")}
                 onClick={() => setHubView("experience")}
               >
-                {ko ? "더 잘하게 만드는 경험칩" : "Experience Chips"}
+                {ko ? "경험칩 사고팔기" : "Buy & sell Experience Chips"}
               </button>
             </div>
             <main className="rd-page hub-web-content">
@@ -467,6 +468,7 @@ function MarketplacePage() {
               onOpenChip={(detailPath) => void openHubPage(detailPath)}
               onBrowse={() => void openHubPage("/marketplace?category=ontology")}
               onSell={() => void openHubPage("/experience")}
+              onManage={() => router.push("/library/agents?tab=ontology")}
             />
           ) : (
           <>
@@ -765,6 +767,7 @@ function ExperienceChipHubIntro({
   onOpenChip,
   onBrowse,
   onSell,
+  onManage,
 }: {
   ko: boolean;
   catalog: ExperienceHubCatalogResult | null;
@@ -773,6 +776,7 @@ function ExperienceChipHubIntro({
   onOpenChip: (detailPath: string) => void;
   onBrowse: () => void;
   onSell: () => void;
+  onManage: () => void;
 }) {
   const benefits = ko
     ? [
@@ -860,17 +864,32 @@ function ExperienceChipHubIntro({
         )}
       </div>
 
-      <div className="card" style={{ padding: 18, display: "grid", gap: 12 }}>
+      <div className="card" data-testid="experience-purchase-flow" style={{ padding: 18, display: "grid", gap: 14 }}>
         <div>
           <strong style={{ display: "block", fontSize: 15 }}>
-            {ko ? "구매해도 바로 바뀌지 않습니다" : "Buying does not change anything immediately"}
+            {ko ? "구매 후, 적용할 에이전트를 고릅니다" : "After buying, choose the agent that should use it"}
           </strong>
           <span style={{ display: "block", marginTop: 5, color: "var(--rd-ink-3)", fontSize: 12.5, lineHeight: 1.55 }}>
             {ko
-              ? "가격을 확인하고 구매한 뒤, 적용할 에이전트를 직접 고릅니다. 지금 열려 있는 대화는 그대로이고, 새로 시작하는 대화부터 사용됩니다."
-              : "After reviewing the price and buying, you choose the agent to apply it to. The current conversation stays unchanged; the chip starts with a new conversation."}
+              ? "결제만으로 자동 장착되지는 않습니다. Desktop의 내 에이전트에서 직접 확인한 뒤 새 대화부터 적용합니다."
+              : "Payment never attaches a chip automatically. Confirm it in My Agents on Desktop, then apply it to new conversations."}
           </span>
         </div>
+        <ol style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 8 }}>
+          {(
+            ko
+              ? [["1", "Hub에서 가격 선택", "7일·30일·90일·영구 사용 중 선택"], ["2", "내 에이전트에서 장착", "내 에이전트 › 온톨로지 칩 › 새 대화부터 적용"], ["3", "새 대화 시작", "지금 대화는 그대로 두고 다음 대화부터 사용"]]
+              : [["1", "Choose a price on Hub", "Pick 7, 30, 90 days, or keep it"], ["2", "Attach in My Agents", "My Agents › Ontology Chips › Apply to new conversations"], ["3", "Start a new conversation", "The current chat stays unchanged"]]
+          ).map(([number, title, body]) => (
+            <li key={number} style={{ padding: 12, border: "1px solid var(--rd-hair)", borderRadius: 10, background: "var(--rd-surface-2)", display: "grid", gridTemplateColumns: "24px 1fr", columnGap: 8, alignItems: "start" }}>
+              <span aria-hidden="true" style={{ width: 24, height: 24, borderRadius: 999, background: "var(--rd-ink)", color: "var(--rd-surface)", display: "grid", placeItems: "center", fontSize: 11, fontWeight: 800 }}>{number}</span>
+              <span>
+                <strong style={{ display: "block", color: "var(--rd-ink)", fontSize: 12.5 }}>{title}</strong>
+                <span style={{ display: "block", marginTop: 3, color: "var(--rd-ink-3)", fontSize: 11.5, lineHeight: 1.45 }}>{body}</span>
+              </span>
+            </li>
+          ))}
+        </ol>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button type="button" className="btn sm primary" onClick={onBrowse}>
             {ko ? "경험칩과 가격 보기" : "Browse chips and prices"}
@@ -878,11 +897,14 @@ function ExperienceChipHubIntro({
           <button type="button" className="btn sm" onClick={onSell}>
             {ko ? "내 경험칩 소개·가격 정하기" : "Describe and price my chip"}
           </button>
+          <button type="button" className="btn sm" onClick={onManage}>
+            {ko ? "구매한 칩 장착하기" : "Attach a purchased chip"}
+          </button>
         </div>
         <small style={{ color: "var(--rd-ink-3)", lineHeight: 1.5 }}>
           {ko
-            ? "로그인과 결제 확인은 안전한 Hub 브라우저 화면에서 진행하며, 장착 상태는 Desktop의 내 에이전트에서 확인합니다."
-            : "Sign-in and payment confirmation happen in the secure Hub browser page. Attachment status appears in My Agents on Desktop."}
+            ? "로그인과 결제 확인은 안전한 Hub 브라우저 화면에서 진행합니다. 판매도 ‘내 경험칩 소개·가격 정하기’에서 시작합니다."
+            : "Sign-in and payment confirmation happen in the secure Hub browser page. Selling starts with ‘Describe and price my chip’."}
         </small>
       </div>
     </section>

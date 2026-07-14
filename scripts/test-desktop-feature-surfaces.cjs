@@ -1793,11 +1793,15 @@ async function runHubLiveSurface(browser, baseUrl, evidence) {
   assert.equal(await page.getByText(/실제 Hub에 연결되지 않았습니다|not connected to the real Hub/).count(), 0);
   assert.equal(await page.getByText(/라이브 Hub 항목|live Hub items/).count(), 0);
   assert.equal(await page.locator(".hub-cat-chip").count(), 0, "Hub top category chips should stay removed");
-  await page.getByRole("tab", { name: /더 잘하게 만드는 경험칩|Experience Chips/ }).click();
+  await page.getByRole("tab", { name: /경험칩 사고팔기|Buy & sell Experience Chips/ }).click();
   const experienceEntry = page.getByTestId("experience-chip-hub-entry");
   await experienceEntry.getByText(/에이전트에게, 이미 잘된 방법을 더하세요|Give your agent a method that already worked/).waitFor();
   await experienceEntry.getByText(/막혔던 일을 더 빨리 해결|Solve familiar blockers faster/).waitFor();
-  await experienceEntry.getByText(/구매해도 바로 바뀌지 않습니다|Buying does not change anything immediately/).waitFor();
+  const purchaseFlow = page.getByTestId("experience-purchase-flow");
+  await purchaseFlow.getByText(/구매 후, 적용할 에이전트를 고릅니다|After buying, choose the agent that should use it/).waitFor();
+  await purchaseFlow.getByText(/Hub에서 가격 선택|Choose a price on Hub/).waitFor();
+  await purchaseFlow.getByText(/내 에이전트에서 장착|Attach in My Agents/).waitFor();
+  await purchaseFlow.getByText(/새 대화 시작|Start a new conversation/).waitFor();
   const catalog = page.getByTestId("experience-hub-catalog");
   await catalog.getByText("브라우저 자동화 막힘 해결", { exact: true }).waitFor();
   await catalog.getByText("계속 사용 · 25 크레딧", { exact: true }).waitFor();
@@ -1824,7 +1828,13 @@ async function runHubLiveSurface(browser, baseUrl, evidence) {
   assert.equal(await page.getByText(/Shop Product Writer|상품설명 작가/).count(), 0);
   await page.locator(".portal-input").fill("");
   await page.getByText(/총 267개|267 total/).waitFor();
-  await finishPage(context, page, errors, evidence, "hub-live-surface");
+  await page.getByRole("tab", { name: /경험칩 사고팔기|Buy & sell Experience Chips/ }).click();
+  await page.getByRole("button", { name: /구매한 칩 장착하기|Attach a purchased chip/ }).click();
+  await page.waitForURL(/\/library\/agents(?:\.html)?\?tab=ontology/);
+  await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).first().waitFor();
+  assert.deepEqual(errors, [], "Hub Experience Chip flow should not emit page errors");
+  evidence.push({ name: "hub-live-surface", status: "pass", url: page.url() });
+  await context.close();
 }
 
 // setupMockAgentlasBridge는 scripts/lib/mock-agentlas-bridge.cjs로 이동 (smoke-renderer-ui와 공유).
