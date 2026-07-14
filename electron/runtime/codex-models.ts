@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { constants, type Stats } from "node:fs";
+import { constants, type BigIntStats } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -40,35 +40,40 @@ type CodexModelCache = {
   }>;
 };
 
-function sameFile(left: Stats, right: Stats): boolean {
-  return left.dev === right.dev &&
-    left.ino === right.ino &&
-    left.mode === right.mode &&
-    left.size === right.size &&
-    left.mtimeMs === right.mtimeMs &&
-    left.ctimeMs === right.ctimeMs;
+function sameFile(left: BigIntStats, right: BigIntStats): boolean {
+  if (!left.isFile() || !right.isFile()) return false;
+  if (left.dev > 0n && right.dev > 0n && left.dev !== right.dev) return false;
+  if (left.ino > 0n && right.ino > 0n && left.ino !== right.ino) return false;
+  if (left.birthtimeNs > 0n && right.birthtimeNs > 0n && left.birthtimeNs !== right.birthtimeNs) {
+    return false;
+  }
+  return left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs;
 }
 
 async function readStableCache(cachePath: string): Promise<string | null> {
   let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
   try {
-    const pathBefore = await fs.lstat(cachePath);
+    const pathBefore = await fs.lstat(cachePath, { bigint: true });
     if (
       pathBefore.isSymbolicLink() ||
       !pathBefore.isFile() ||
-      pathBefore.size <= 0 ||
-      pathBefore.size > MAX_MODEL_CACHE_BYTES
+      pathBefore.size <= 0n ||
+      pathBefore.size > BigInt(MAX_MODEL_CACHE_BYTES)
     ) {
       return null;
     }
 
     const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
-    const nonBlock = typeof constants.O_NONBLOCK === "number" ? constants.O_NONBLOCK : 0;
-    handle = await fs.open(cachePath, constants.O_RDONLY | noFollow | nonBlock);
-    const before = await handle.stat();
+    // O_NONBLOCK is not a portable regular-file flag on Windows. The cache is
+    // bounded before opening, so a blocking descriptor read is both safe and
+    // cross-platform.
+    handle = await fs.open(cachePath, constants.O_RDONLY | noFollow);
+    const before = await handle.stat({ bigint: true });
     if (!before.isFile() || !sameFile(pathBefore, before)) return null;
 
-    const bytes = Buffer.allocUnsafe(before.size);
+    const bytes = Buffer.allocUnsafe(Number(before.size));
     let offset = 0;
     while (offset < bytes.byteLength) {
       const result = await handle.read(bytes, offset, bytes.byteLength - offset, offset);
@@ -78,8 +83,8 @@ async function readStableCache(cachePath: string): Promise<string | null> {
     const overflow = Buffer.allocUnsafe(1);
     if ((await handle.read(overflow, 0, 1, offset)).bytesRead !== 0) return null;
 
-    const after = await handle.stat();
-    const pathAfter = await fs.lstat(cachePath);
+    const after = await handle.stat({ bigint: true });
+    const pathAfter = await fs.lstat(cachePath, { bigint: true });
     if (pathAfter.isSymbolicLink() || !sameFile(before, after) || !sameFile(after, pathAfter)) {
       return null;
     }
