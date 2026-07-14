@@ -896,6 +896,39 @@ a:hover {
   background: var(--rd-surface);
 }
 
+.rd .hub-view-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--rd-hair);
+}
+
+.rd .hub-view-tab {
+  min-height: 34px;
+  padding: 7px 13px;
+  border: 1px solid var(--rd-hair);
+  border-radius: 999px;
+  background: var(--rd-surface);
+  color: var(--rd-ink-2);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.rd .hub-view-tab:hover {
+  border-color: var(--rd-hair-2);
+  background: var(--rd-surface-2);
+  color: var(--rd-ink);
+}
+
+.rd .hub-view-tab[data-active="true"] {
+  border-color: var(--rd-ink);
+  background: var(--rd-ink);
+  color: var(--rd-bg);
+}
+
 .rd .hub-web-content {
   width: min(1120px, 100%);
   padding: 0 0 48px;
@@ -904,6 +937,17 @@ a:hover {
 .rd .hub-page-root {
   display: grid;
   gap: 2px;
+}
+
+.rd .portal-panel.hub-results-panel {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.rd .portal-panel.hub-results-panel .market-card-grid {
+  margin-top: 12px;
 }
 
 .rd .hub-local-action {

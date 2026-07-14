@@ -450,13 +450,14 @@ function MarketplacePage() {
             <div
               role="tablist"
               aria-label={ko ? "Hub에서 찾을 것" : "What to find on Hub"}
-              style={{ display: "flex", gap: 8, padding: "10px 18px 0", borderBottom: "1px solid var(--rd-hair)" }}
+              className="hub-view-tabs"
             >
               <button
                 type="button"
                 role="tab"
                 aria-selected={hubView === "agents"}
-                className={"btn sm" + (hubView === "agents" ? " primary" : "")}
+                className="hub-view-tab"
+                data-active={hubView === "agents"}
                 onClick={() => setHubView("agents")}
               >
                 {ko ? "일할 에이전트 찾기" : "Find agents"}
@@ -465,7 +466,8 @@ function MarketplacePage() {
                 type="button"
                 role="tab"
                 aria-selected={hubView === "experience"}
-                className={"btn sm" + (hubView === "experience" ? " primary" : "")}
+                className="hub-view-tab"
+                data-active={hubView === "experience"}
                 onClick={() => setHubView("experience")}
               >
                 {ko ? "경험칩 사고팔기" : "Buy & sell Experience Chips"}
@@ -670,7 +672,7 @@ function MarketplacePage() {
             </div>
           )}
 
-            <section className="portal-panel" id="hub-agent" data-tour-id="hub.results">
+            <section className="portal-panel hub-results-panel" id="hub-agent" data-tour-id="hub.results">
               {pagedListings.length > 0 ? (
                 <div className="market-card-grid">
                   {pagedListings.map((listing) => (

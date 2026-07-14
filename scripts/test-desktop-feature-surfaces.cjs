@@ -1827,10 +1827,21 @@ async function runHubLiveSurface(browser, baseUrl, evidence) {
   await page.screenshot({ path: path.join(outDir, "hub-experience-chip-entry-surface.png"), fullPage: true });
   evidence.push({ name: "hub-experience-chip-entry-surface", status: "pass", url: page.url() });
   await page.getByRole("tab", { name: /일할 에이전트 찾기|Find agents/ }).click();
+  await page.getByRole("tab", { name: /일할 에이전트 찾기|Find agents/ }).waitFor();
+  assert.equal(await page.getByRole("tab", { name: /일할 에이전트 찾기|Find agents/ }).getAttribute("data-active"), "true");
+  assert.equal(await page.getByRole("tab", { name: /경험칩 사고팔기|Buy & sell Experience Chips/ }).getAttribute("data-active"), "false");
+  // A fresh agent-list paint keeps the screenshot evidence independent from
+  // Chromium's transient cross-tab compositor layers while preserving the
+  // interaction assertions above.
+  await page.goto(`${baseUrl}/marketplace.html`, { waitUntil: "domcontentloaded" });
+  await page.getByText(/Hub 실시간|Hub live/, { exact: true }).waitFor();
+  assert.equal(await page.getByRole("tab", { name: /일할 에이전트 찾기|Find agents/ }).getAttribute("data-active"), "true");
   await page.getByText(/총 267개|267 total/).waitFor();
   await page.locator(".portal-input").fill("FDA");
   await page.getByRole("option", { name: /FDA SaMD 510\(k\)|Pre-market Notification/ }).waitFor();
   await page.locator(".portal-card-title", { hasText: /FDA SaMD 510\(k\)|Pre-market Notification/ }).waitFor();
+  await page.waitForTimeout(250);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await page.screenshot({ path: path.join(outDir, "hub-live-autocomplete-surface.png"), fullPage: true });
   evidence.push({ name: "hub-live-autocomplete-surface", status: "pass", url: page.url() });
   assert.equal(await page.getByText(/Shop Product Writer|상품설명 작가/).count(), 0);
