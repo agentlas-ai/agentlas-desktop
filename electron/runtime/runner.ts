@@ -39,7 +39,8 @@ export interface RunnerRequest {
   cwd?: string;
   /**
    * MCP config path, or a Main-validated inline JSON object for restricted
-   * Agent Apps. Claude Code accepts both forms through `--mcp-config`.
+   * Agent Apps. The Claude runner snapshots that JSON to a private per-run
+   * file only for Windows `.cmd` shims, whose argv ceiling cannot carry it.
    */
   mcpConfigPath?: string;
   /** 위 구성의 MCP 툴 이름 prefix 목록(예: "mcp__playwright"). write/full 권한에서 자동 승인용. */

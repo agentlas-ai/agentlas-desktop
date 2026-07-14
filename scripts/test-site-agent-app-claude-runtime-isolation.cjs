@@ -63,11 +63,17 @@ async function main() {
         ? "--system-prompt-file"
         : "--append-system-prompt-file";
       const systemPromptIndex = args.indexOf(systemPromptFlag);
+      const mcpConfigIndex = args.indexOf("--mcp-config");
+      const mcpConfigArg = mcpConfigIndex >= 0 ? args[mcpConfigIndex + 1] : null;
       calls.push({
         command,
         args: [...args],
         options: { ...options },
         systemPrompt: systemPromptIndex >= 0 ? fs.readFileSync(args[systemPromptIndex + 1], "utf8") : "",
+        mcpConfigArg,
+        mcpConfigText: mcpConfigArg
+          ? (mcpConfigArg.startsWith('{') ? mcpConfigArg : fs.readFileSync(mcpConfigArg, "utf8"))
+          : null,
       });
       queueMicrotask(() => {
         if (childMode === "mcp-pre-init-nonzero" && args.includes("--mcp-config")) {
@@ -250,7 +256,14 @@ async function main() {
     const mcpAttempt = calls[2];
     const noToolRetry = calls[3];
     assert.ok(mcpAttempt.args.includes("--mcp-config"));
-    assert.ok(mcpAttempt.args.includes(canonicalTimeConfig));
+    assert.equal(mcpAttempt.mcpConfigText, canonicalTimeConfig);
+    if (process.platform === "win32") {
+      assert.ok(path.isAbsolute(mcpAttempt.mcpConfigArg),
+        "Windows .cmd must receive a private config snapshot path instead of inline JSON");
+      assert.notEqual(mcpAttempt.mcpConfigArg, canonicalTimeConfig);
+    } else {
+      assert.equal(mcpAttempt.mcpConfigArg, canonicalTimeConfig);
+    }
     assert.equal(mcpAttempt.args.includes("--safe-mode"), false,
       "safe-mode would silently disable the exact explicit MCP config");
     assert.equal(mcpAttempt.args[mcpAttempt.args.indexOf("--setting-sources") + 1], "",
@@ -298,6 +311,7 @@ async function main() {
     }, events);
     const timeArgs = calls[5].args;
     assert.ok(timeArgs.includes("--mcp-config"), "time-only must retain the exact MCP config");
+    assert.equal(calls[5].mcpConfigText, canonicalTimeConfig);
     assert.equal(timeArgs.includes("--safe-mode"), false);
     const timeAllowed = timeArgs[timeArgs.indexOf("--allowedTools") + 1].split(",");
     assert.deepEqual(timeAllowed, timeTools, "time-only runner args must preserve the exact tool set");

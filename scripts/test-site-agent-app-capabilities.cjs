@@ -139,8 +139,8 @@ async function main() {
   }, "the keyless built-in must bypass the mutable child wrapper");
   assert.equal(fs.existsSync(path.join(path.dirname(prepared.grant.mcpConfigPath), "mcp-child-env-wrapper.cjs")), false);
   assert.ok(configBytes.length <= 4_096, "the inline Agent App config must stay inside the cross-platform argv budget");
-  assert.ok(configBytes.length * 2 + 1_024 < 8_191,
-    "a conservative Windows .cmd escaping budget must leave room for Claude's fixed arguments");
+  assert.ok(configBytes.length <= 4_096,
+    "the runner's validated Windows snapshot input must stay inside the Agent App config budget");
   const { resolveSiteAgentAppInlineMcpConfigForDispatch } =
     require("../dist/electron/site/agent-app-mcp-config-policy.js");
   const { listInstalledServers } = require("../dist/electron/mcp-tools/registry.js");

@@ -60,6 +60,51 @@ function stripAgentAppMcpSecretAliases(env: NodeJS.ProcessEnv | undefined): Node
   );
 }
 
+async function materializeWindowsAgentAppMcpConfig(
+  bin: string,
+  inlineConfig: string,
+): Promise<{ arg: string; cleanup: () => void }> {
+  if (process.platform !== "win32" || !/\.cmd$/i.test(bin)) {
+    return { arg: inlineConfig, cleanup: () => {} };
+  }
+  // cmd.exe has an 8,191-character command-line ceiling. JSON quoting can
+  // exceed it even while the canonical config itself remains under 4 KiB.
+  // Snapshot the already validated in-memory bytes into a new private folder;
+  // never pass the mutable preflight path that Main originally re-opened.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agentlas-claude-mcp-"));
+  const file = path.join(dir, "mcp.json");
+  let removed = false;
+  const cleanup = () => {
+    if (removed) return;
+    // The init receipt and process close can both request cleanup. Let each
+    // call retry independently so a transient Windows reader lock at init
+    // cannot strand the snapshot after the CLI exits.
+    void fs.rm(dir, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === "win32" ? 8 : 2,
+      retryDelay: 125,
+    }).then(() => { removed = true; }).catch(() => {});
+  };
+  try {
+    await fs.chmod(dir, 0o700).catch(() => {});
+    const handle = await fs.open(file, "wx", 0o600);
+    try {
+      await handle.writeFile(inlineConfig, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    if (await fs.readFile(file, "utf8") !== inlineConfig) {
+      throw new Error("Agent App MCP dispatch snapshot mismatch.");
+    }
+    return { arg: file, cleanup };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
 // 구형 claude CLI가 --include-partial-messages를 거부하면 false로 전환해(프로세스 수명 동안
 // 1회 학습) 이후 실행은 플래그 없이 — 메시지 덩어리 스트리밍으로 — 동작한다.
 let includePartialMessagesSupported = true;
@@ -306,8 +351,20 @@ export const runClaudeCode: Runner = async (
 
   // MCP 서버 구성 주입 — mcp/client.ts가 설치·활성 서버를 .mcp.json으로 직렬화해 경로를 넘긴다.
   // 이게 있어야 에이전트가 브라우저(Playwright) 등 실제 MCP 툴을 호출한다. (사용자 config와 병합)
-  const mcpArgs = runReq.mcpConfigPath && (!runReq.untrustedNoTools || hasExactUntrustedMcpGrant)
-    ? ["--mcp-config", runReq.mcpConfigPath]
+  let agentAppMcpConfigArg = runReq.mcpConfigPath;
+  let cleanupAgentAppMcpConfig = () => {};
+  if (hasExactUntrustedMcpGrant && runReq.mcpConfigPath) {
+    try {
+      const materialized = await materializeWindowsAgentAppMcpConfig(bin, runReq.mcpConfigPath);
+      agentAppMcpConfigArg = materialized.arg;
+      cleanupAgentAppMcpConfig = materialized.cleanup;
+    } catch (error) {
+      try { runReq.onAgentAppMcpRuntimeUnavailable?.(); } catch { /* receipt reconciliation is best effort */ }
+      throw createUntrustedRuntimeFailure();
+    }
+  }
+  const mcpArgs = agentAppMcpConfigArg && (!runReq.untrustedNoTools || hasExactUntrustedMcpGrant)
+    ? ["--mcp-config", agentAppMcpConfigArg]
     : [];
   // write/full 권한이면 헤드리스에서 권한 프롬프트로 막히지 않도록 MCP 툴을 미리 허용.
   const allowedToolArgs =
@@ -342,7 +399,12 @@ export const runClaudeCode: Runner = async (
     os.tmpdir(),
     `agentlas-claude-sys-${process.pid}-${crypto.randomUUID()}.txt`,
   );
-  await fs.writeFile(sysPromptFile, systemPrompt, "utf8");
+  try {
+    await fs.writeFile(sysPromptFile, systemPrompt, "utf8");
+  } catch (error) {
+    cleanupAgentAppMcpConfig();
+    throw error;
+  }
   const cleanupSysFile = () => {
     void fs.unlink(sysPromptFile).catch(() => {});
   };
@@ -410,6 +472,7 @@ export const runClaudeCode: Runner = async (
       });
     } catch (error) {
       cleanupSysFile();
+      cleanupAgentAppMcpConfig();
       rejectRuntime(error);
       return;
     }
@@ -570,6 +633,9 @@ export const runClaudeCode: Runner = async (
       }
       if (isAgentAppMcpInit && hasExactUntrustedMcpGrant &&
           !runReq.agentAppMcpFallbackAttempted) {
+        // Claude has consumed the config and started the exact MCP inventory;
+        // close the Windows pathname race before any model output is trusted.
+        cleanupAgentAppMcpConfig();
         const expectedTools = [...(runReq.mcpAllowedTools ?? [])].sort();
         const reportedTools = Array.isArray(ev.tools) && ev.tools.every((tool) => typeof tool === "string")
           ? [...ev.tools].sort()
@@ -711,6 +777,7 @@ export const runClaudeCode: Runner = async (
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       cleanupSysFile();
+      cleanupAgentAppMcpConfig();
       rejectRuntime(err);
     });
     child.on("close", (code) => {
@@ -718,6 +785,7 @@ export const runClaudeCode: Runner = async (
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       cleanupSysFile();
+      cleanupAgentAppMcpConfig();
       req.signal?.removeEventListener("abort", onAbort);
       if (req.signal?.aborted) {
         // 취소여도 CLI가 이미 세션을 디스크에 남겼으면 저장한다 → 사용자가 이어서 보내는

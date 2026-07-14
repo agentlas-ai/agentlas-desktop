@@ -107,21 +107,20 @@ async function verifyDefaultMcpFailureIsolation(registry) {
   assert.equal(registryExports, registry, "failure-isolation test must patch the live registry module only");
 }
 
-function verifyWindowsCmdInlineConfigRoundTrip(inlineConfig) {
-  const conservativeEscapedChars = inlineConfig.length * 2 + 1_024;
-  assert.ok(conservativeEscapedChars < 8_191,
-    "inline config must leave a conservative Windows cmd.exe argument budget");
+function verifyWindowsCmdConfigPathRoundTrip(inlineConfig) {
   if (process.platform !== "win32") return Promise.resolve();
   const shimDir = path.join(tmp, "windows-cmd-roundtrip");
   const output = path.join(shimDir, "args.json");
+  const configSnapshot = path.join(shimDir, "mcp.json");
   fs.mkdirSync(shimDir, { recursive: true });
+  fs.writeFileSync(configSnapshot, inlineConfig, { mode: 0o600 });
   fs.writeFileSync(path.join(shimDir, "capture.cjs"),
     'require("node:fs").writeFileSync(process.argv[2],JSON.stringify(process.argv.slice(3)));\n');
   const shim = path.join(shimDir, "claude-fixture.cmd");
   fs.writeFileSync(shim, '@echo off\r\nnode "%~dp0capture.cjs" "%~dp0args.json" %*\r\n');
   const child = crossSpawn(shim, [
     "--setting-sources", "",
-    "--mcp-config", inlineConfig,
+    "--mcp-config", configSnapshot,
     "--allowedTools", "mcp__agentlas-time__get_current_time",
   ], {
     windowsHide: true,
@@ -133,9 +132,11 @@ function verifyWindowsCmdInlineConfigRoundTrip(inlineConfig) {
     if (code !== 0) throw new Error(stderr || `cmd shim exited ${code}`);
     assert.deepEqual(JSON.parse(fs.readFileSync(output, "utf8")), [
       "--setting-sources", "",
-      "--mcp-config", inlineConfig,
+      "--mcp-config", configSnapshot,
       "--allowedTools", "mcp__agentlas-time__get_current_time",
-    ], "cross-spawn must preserve the empty setting source and compact JSON as exact Windows .cmd arguments");
+    ], "cross-spawn must preserve the empty setting source, config path, and following Windows .cmd arguments");
+    assert.equal(fs.readFileSync(configSnapshot, "utf8"), inlineConfig,
+      "the Windows dispatch snapshot must contain the exact canonical config bytes");
   });
 }
 
@@ -168,7 +169,7 @@ async function main() {
   });
   assert.equal(/[\r\n\0]/.test(inlineConfig), false);
   assert.ok(Buffer.byteLength(inlineConfig) <= 4_096);
-  await verifyWindowsCmdInlineConfigRoundTrip(inlineConfig);
+  await verifyWindowsCmdConfigPathRoundTrip(inlineConfig);
   const wrongSourcePayload = gzipSync(Buffer.from('process.stdout.write("UNREVIEWED_SOURCE_EXECUTED");', "utf8"), {
     level: 9,
   }).toString("base64");

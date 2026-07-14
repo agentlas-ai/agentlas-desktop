@@ -176,7 +176,7 @@ function exactSerializedServer(
 export type ValidatedSiteAgentAppMcpConfig = {
   sha256: string;
   runtimeAliases: string[];
-  /** Compact, newline-free JSON passed directly to Claude --mcp-config. */
+  /** Compact, newline-free JSON handed to the runner's final dispatch gate. */
   inlineConfig: string;
 };
 
@@ -232,6 +232,8 @@ export function validateSiteAgentAppMcpConfigBytes(input: {
  * Revalidate the complete JIT grant immediately before Main dispatch and
  * return only the canonical in-memory config. No runner receives the mutable
  * preflight pathname, even if that file or its registry row changes later.
+ * A Windows `.cmd` runner may create a private per-run snapshot of these exact
+ * bytes because cmd.exe cannot safely carry the JSON inline.
  */
 export function resolveSiteAgentAppInlineMcpConfigForDispatch(
   grant: NonNullable<McpInvocationRequest["agentAppRuntimeToolGrant"]>,

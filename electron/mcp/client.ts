@@ -1102,10 +1102,10 @@ export async function runMcpInvocation(
       markAgentAppMcpRuntimeUnavailable();
     } else {
       agentAppToolGrant.runtimeStatus = "accepted";
-      // Claude accepts either a path or an inline JSON object for
-      // --mcp-config. Pass the compact canonical serialization derived from
-      // the exact bytes just revalidated above so delayed firm/group execution
-      // never re-opens a mutable config/wrapper pathname.
+      // Pass the compact canonical serialization derived from the exact bytes
+      // just revalidated above so delayed firm/group execution never re-opens
+      // a mutable preflight pathname. The Claude runner alone may snapshot
+      // these exact bytes for a Windows `.cmd` invocation's argv ceiling.
       mcpConfigPath = acceptedAgentAppInlineMcpConfig;
       mcpAllowedTools = [...agentAppToolGrant.mcpAllowedTools];
       mcpRuntimeEnv = { ...agentAppToolGrant.mcpRuntimeEnv };

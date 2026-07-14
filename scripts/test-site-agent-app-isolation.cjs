@@ -255,7 +255,9 @@ matches(claude, /isCanonicalAgentAppInlineMcpConfig\(runReq\.mcpConfigPath\)/, "
 matches(claude, /Object\.keys\(parsed\.mcpServers\)[\s\S]{0,180}agentlas-time/, "Claude single built-in config gate");
 matches(claude, /onAgentAppMcpRuntimeUnavailable/, "Claude invalid inline grant disclosure downgrade");
 matches(claude, /validSiteAgentAppMcpGrantTools\(/, "Claude exact MCP tool validation");
-matches(claude, /runReq\.mcpConfigPath && \(!runReq\.untrustedNoTools \|\| hasExactUntrustedMcpGrant\)/, "Claude MCP config fail-closed gate");
+matches(claude, /const mcpArgs = agentAppMcpConfigArg && \(!runReq\.untrustedNoTools \|\| hasExactUntrustedMcpGrant\)/, "Claude MCP config fail-closed gate");
+matches(claude, /materializeWindowsAgentAppMcpConfig\(bin, runReq\.mcpConfigPath\)/, "Claude Windows cmd config snapshot gate");
+matches(claude, /isAgentAppMcpInit[\s\S]{0,600}cleanupAgentAppMcpConfig\(\)/, "Claude Windows config cleanup after init proof");
 matches(claude, /hasExactUntrustedMcpGrant[\s\S]{0,260}!agentAppMcpInitConnected[\s\S]{0,700}agentAppMcpFallbackAttempted: true/, "Claude exact MCP pre-init fallback");
 matches(claude, /ev\.mcp_servers\.length === 1[\s\S]{0,320}JSON\.stringify\(reportedTools\) === JSON\.stringify\(expectedTools\)/, "Claude exact MCP init receipt gate");
 matches(claude, /mcpConfigPath: undefined,[\s\S]{0,180}mcpAllowedTools: undefined,[\s\S]{0,180}untrustedAllowedMcpTools: undefined/, "Claude fallback MCP authority removal");
