@@ -8,6 +8,7 @@ const http = require("node:http");
 const { gzipSync } = require("node:zlib");
 const crossSpawn = require("cross-spawn");
 const { app } = require("electron");
+const { cleanupElectronFixture } = require("./lib/electron-fixture-cleanup.cjs");
 
 const root = path.join(__dirname, "..");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-site-prebuild-mcp-"));
@@ -315,12 +316,12 @@ async function main() {
     "recommendation failure must not starve app creation");
 
   console.log("site Agent App prebuild MCP prompt + system-global keyless contract ok");
-  fs.rmSync(tmp, { recursive: true, force: true });
+  cleanupElectronFixture(tmp, "site-prebuild-mcp");
   app.quit();
 }
 
 main().catch((error) => {
   console.error(error);
-  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+  try { cleanupElectronFixture(tmp, "site-prebuild-mcp"); } catch { /* best effort */ }
   app.exit(1);
 });

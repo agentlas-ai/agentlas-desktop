@@ -7,6 +7,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { app, shell } = require("electron");
+const { cleanupElectronFixture } = require("./lib/electron-fixture-cleanup.cjs");
 
 process.env.AGENTLAS_E2E = "1";
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-site-runtime-"));
@@ -317,11 +318,11 @@ app.whenReady().then(async () => {
     invocationService.onEvent = originalOnEvent;
     invocationService.cancel = originalCancel;
     disposeSiteAgentAppRuntimes();
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    cleanupElectronFixture(tempDir, "site-runtime");
     app.exit(exitCode);
   }
 }).catch((error) => {
   console.error(error);
-  fs.rmSync(tempDir, { recursive: true, force: true });
+  try { cleanupElectronFixture(tempDir, "site-runtime"); } catch { /* best effort */ }
   app.exit(1);
 });

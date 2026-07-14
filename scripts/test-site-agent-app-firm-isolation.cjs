@@ -7,6 +7,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { app } = require("electron");
+const { cleanupElectronFixture } = require("./lib/electron-fixture-cleanup.cjs");
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-site-firm-isolation-"));
 app.setPath("userData", path.join(tmp, "user-data"));
@@ -241,13 +242,13 @@ async function main() {
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM memory_entries").get().n, 0, "control output must not write memory");
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM chat_runtime_sessions").get().n, 0, "firm runs must not persist runtime sessions");
 
-  fs.rmSync(tmp, { recursive: true, force: true });
+  cleanupElectronFixture(tmp, "site-firm-isolation");
   console.log("site agent app firm isolation behavior ok");
   app.quit();
 }
 
 main().catch((error) => {
   console.error(error);
-  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+  try { cleanupElectronFixture(tmp, "site-firm-isolation"); } catch { /* best effort */ }
   app.exit(1);
 });

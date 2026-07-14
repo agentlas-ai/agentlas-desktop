@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { app } = require("electron");
+const { cleanupElectronFixture } = require("./lib/electron-fixture-cleanup.cjs");
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-site-group-isolation-"));
 app.setPath("userData", path.join(tmp, "user-data"));
@@ -165,13 +166,13 @@ async function main() {
     "failed Agent App group runs must not persist browser input or runtime errors",
   );
 
-  fs.rmSync(tmp, { recursive: true, force: true });
+  cleanupElectronFixture(tmp, "site-group-isolation");
   console.log("site agent app group isolation behavior ok");
   app.quit();
 }
 
 main().catch((error) => {
   console.error(error);
-  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+  try { cleanupElectronFixture(tmp, "site-group-isolation"); } catch { /* best effort */ }
   app.exit(1);
 });

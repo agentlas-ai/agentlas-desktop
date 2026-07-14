@@ -7,6 +7,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { app } = require("electron");
+const { cleanupElectronFixture } = require("./lib/electron-fixture-cleanup.cjs");
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-site-capabilities-"));
 app.setPath("userData", path.join(tmp, "user-data"));
@@ -259,13 +260,13 @@ async function main() {
   assert.equal(braveCalls, 0, "unprovenance Brave rows must never reach verification or receive the key");
   assert.equal(brave.grant, null);
 
-  fs.rmSync(tmp, { recursive: true, force: true });
+  cleanupElectronFixture(tmp, "site-capabilities");
   console.log("site agent app declared capability behavior ok");
   app.quit();
 }
 
 main().catch((error) => {
   console.error(error);
-  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+  try { cleanupElectronFixture(tmp, "site-capabilities"); } catch { /* best effort */ }
   app.exit(1);
 });

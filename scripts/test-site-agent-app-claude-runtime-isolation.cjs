@@ -9,6 +9,7 @@ const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const { PassThrough } = require("node:stream");
 const { app } = require("electron");
+const { cleanupElectronFixture } = require("./lib/electron-fixture-cleanup.cjs");
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-site-claude-isolation-"));
 const home = path.join(tmp, "home");
@@ -409,13 +410,13 @@ async function main() {
   } finally {
     exec.probeCliVersion = originalProbeCliVersion;
     exec.spawnCli = originalSpawnCli;
-    fs.rmSync(tmp, { recursive: true, force: true });
+    cleanupElectronFixture(tmp, "site-claude-isolation");
     app.quit();
   }
 }
 
 main().catch((error) => {
   console.error(error);
-  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+  try { cleanupElectronFixture(tmp, "site-claude-isolation"); } catch { /* best effort */ }
   app.exit(1);
 });

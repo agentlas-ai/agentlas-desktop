@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { app } = require("electron");
+const { cleanupElectronFixture } = require("./lib/electron-fixture-cleanup.cjs");
 
 process.env.AGENTLAS_E2E = "1";
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-site-mcp-consent-"));
@@ -188,12 +189,12 @@ async function main() {
   assert.equal(publicJson.includes(privateThumbnail), false);
 
   console.log("site agent app MCP recommendation and consent receipt ok");
-  fs.rmSync(tmp, { recursive: true, force: true });
+  cleanupElectronFixture(tmp, "site-mcp-consent");
   app.quit();
 }
 
 main().catch((error) => {
   console.error(error);
-  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+  try { cleanupElectronFixture(tmp, "site-mcp-consent"); } catch { /* best effort */ }
   app.exit(1);
 });
